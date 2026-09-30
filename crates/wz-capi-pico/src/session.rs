@@ -324,7 +324,10 @@ pub unsafe extern "C" fn z_open(
                 // `listen` config is a peer whatever `Z_CONFIG_MODE_KEY` says.
                 // Set once, right after the open, as the other ABI's shared
                 // memory state is.
-                let _ = state.set_abi_extension(crate::write_filter::PicoSessionMode(session_mode));
+                let _ = state.set_abi_extension(crate::write_filter::PicoSessionMode::new(
+                    session_mode,
+                    &state.zid(),
+                ));
                 *zs = z_owned_session_t {
                     _val: Box::into_raw(Box::new(state)) as *mut c_void,
                     _cnt: std::ptr::null_mut(),

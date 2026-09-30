@@ -49,6 +49,7 @@ use std::sync::Arc;
 
 use wz_capi_core::drive::SessionState;
 use wz_capi_core::faces::{FilterId, FilterPlane, SharedSession};
+use wz_runtime_tokio::node_clock::{NodeHlc, TimestampingEnabled};
 use wz_runtime_tokio::session::InterestForm;
 use wz_runtime_tokio::session_glue::WhatAmI;
 
@@ -60,7 +61,29 @@ use crate::keyexpr::DeclaredKeyexpr;
 /// the role is decided by the C config (`Z_CONFIG_MODE_KEY`, and a `listen`
 /// config forces peer) and nothing downstream of the open can recover it: a
 /// face records the PEER's role, not ours.
-pub(crate) struct PicoSessionMode(pub(crate) WhatAmI);
+///
+/// It carries the session's clock beside the role, for the same reason: the
+/// clock belongs to the session, is built once at the open, and nothing
+/// downstream of the open can recover it.
+pub(crate) struct PicoSessionMode(pub(crate) WhatAmI, pub(crate) NodeHlc);
+
+impl PicoSessionMode {
+    /// A session of role `mode` and identity `zid`.
+    ///
+    /// The clock STAMPS whatever the role, which is pico's: its timestamps come
+    /// from the session's own clock and zid unconditionally
+    /// (`vendor/zenoh-pico/src/net/session.c` @ `_z_timestamp_t z_timestamp_new`
+    /// calls no configuration), where zenoh's node clock exists only for a
+    /// router by default. An advanced publisher that stamps timestamps — a cache
+    /// without miss detection — is refused on a clock that does not exist, so
+    /// the clock a pico session has is the one it must be given.
+    pub(crate) fn new(mode: WhatAmI, zid: &[u8]) -> Self {
+        Self(
+            mode,
+            NodeHlc::for_node(zid, mode, TimestampingEnabled::all(true)),
+        )
+    }
+}
 
 /// This session's own role, [`WhatAmI::Client`] when none was recorded (a
 /// session this ABI did not open, which no C entry point can hand it).
@@ -69,6 +92,39 @@ pub(crate) fn session_mode(state: &SessionState) -> WhatAmI {
         .abi_extension::<PicoSessionMode>()
         .map(|m| m.0)
         .unwrap_or(WhatAmI::Client)
+}
+
+/// What an entity needs of the session it is declared on, OWNED: the key table
+/// and the role.
+///
+/// A declaring entry point borrows a [`SessionState`] out of the C handle for
+/// the length of its call, and that is all it needs. A composite that declares
+/// more entities later — an advanced publisher beaconing from a task, say — has
+/// to keep what it declares them with, and the borrowed state cannot be kept. So
+/// the two facts every declaration reads are lifted out: the registry the key
+/// declarations and the entities live in, and the role the write filter and the
+/// retractions follow.
+#[derive(Clone)]
+pub(crate) struct PicoSession {
+    pub(crate) shared: Arc<SharedSession>,
+    pub(crate) mode: WhatAmI,
+    /// The session's clock — `NodeHlc::disabled()` for a session this ABI did
+    /// not open, which no C entry point can hand it.
+    pub(crate) hlc: NodeHlc,
+}
+
+impl PicoSession {
+    /// The session behind a borrowed state.
+    pub(crate) fn of(state: &SessionState) -> Self {
+        Self {
+            shared: state.shared.clone(),
+            mode: session_mode(state),
+            hlc: state
+                .abi_extension::<PicoSessionMode>()
+                .map(|m| m.1.clone())
+                .unwrap_or_default(),
+        }
+    }
 }
 
 /// A publisher's or querier's write filter. Dropping it retracts the filter,
@@ -84,9 +140,13 @@ pub(crate) struct WriteFilter {
 
 impl WriteFilter {
     /// Create the filter for an entity whose own key is `key`.
-    pub(crate) fn declare(state: &SessionState, plane: FilterPlane, key: &DeclaredKeyexpr) -> Self {
-        let shared = state.shared.clone();
-        let ask = interest_form(&shared, session_mode(state), key);
+    pub(crate) fn declare(
+        session: &PicoSession,
+        plane: FilterPlane,
+        key: &DeclaredKeyexpr,
+    ) -> Self {
+        let shared = session.shared.clone();
+        let ask = interest_form(&shared, session.mode, key);
         let id = shared.declare_write_filter(plane, key.literal().to_owned(), ask);
         Self { shared, id }
     }

@@ -1159,25 +1159,11 @@ unsafe fn declare_queryable_inner(
     } else {
         (*options).complete
     };
-    // R311y554 — `Locality::Remote`: `Z_FEATURE_LOCAL_QUERYABLE` defaults to 0
-    // (`vendor/zenoh-pico/CMakeLists.txt:353`), so a default pico build has no
-    // local queryable at all and its `z_queryable_options_t` carries no
-    // `allowed_origin` field — which is why this crate's mirror carries none.
-    // R2959 — pico declares the queryable's NON-WILD PREFIX and announces the
-    // queryable ON that declaration, the wild tail as suffix
-    // (`vendor/zenoh-pico/src/net/primitives.c` @
-    // `_z_wireexpr_t wire_expr = _z_declared_keyexpr_alias_to_wire(&q._key, _Z_RC_IN_VAL(zn));`)
-    // — unlike the subscriber, which announces on the caller's key. Measured:
-    // `DeclKexpr = demo/kd/qbl` then `DeclQueryable on K + "/*/x"`.
-    let key = DeclaredKeyexpr::declare_non_wild_prefix(&state.shared, &ke, declared_of(keyexpr))?;
-    let id = state.shared.declare_queryable_on_wire(
+    let (id, key) = declare_queryable_on(
+        &crate::write_filter::PicoSession::of(state),
         ke,
-        key.wire(&state.shared),
+        declared_of(keyexpr),
         complete,
-        wz_runtime_tokio::locality::Locality::Remote,
-        // A peer or router-hat session retracts the queryable naming its key
-        // (`_z_undeclare_queryable`) — the announced one, for a queryable.
-        key.retraction_naming(state),
         {
             // R311y498 — see the pubsub/liveliness twins: the shim mints, the
             // registry calls the factory per face, the C drop(context) is unmoved.
@@ -1186,8 +1172,82 @@ unsafe fn declare_queryable_inner(
                 Box::new(make_queryable_callback(closure.clone(), session.clone())) as Box<_>
             })
         },
-    );
+    )?;
     Ok((state.shared.clone(), id, key))
+}
+
+/// Declare a queryable the way pico's `z_declare_queryable` does, for whatever
+/// answers it: the key's declaration, then the queryable announced on it.
+///
+/// R311y554 — `Locality::Remote`: `Z_FEATURE_LOCAL_QUERYABLE` defaults to 0
+/// (`vendor/zenoh-pico/CMakeLists.txt:353`), so a default pico build has no
+/// local queryable at all and its `z_queryable_options_t` carries no
+/// `allowed_origin` field — which is why this crate's mirror carries none.
+/// R2959 — pico declares the queryable's NON-WILD PREFIX and announces the
+/// queryable ON that declaration, the wild tail as suffix
+/// (`vendor/zenoh-pico/src/net/primitives.c` @
+/// `_z_wireexpr_t wire_expr = _z_declared_keyexpr_alias_to_wire(&q._key, _Z_RC_IN_VAL(zn));`)
+/// — unlike the subscriber, which announces on the caller's key. Measured:
+/// `DeclKexpr = demo/kd/qbl` then `DeclQueryable on K + "/*/x"`.
+///
+/// Shared by the C entry points, whose answerer is a C closure, and by a
+/// composite whose answerer is its own (an advanced publisher's cache): what
+/// reaches a peer is decided here once, and the sink is the only thing that
+/// differs.
+pub(crate) fn declare_queryable_on(
+    session: &crate::write_filter::PicoSession,
+    keyexpr: String,
+    existing: Option<&DeclaredKeyexpr>,
+    complete: bool,
+    sink: wz_capi_core::faces::QueryableSink,
+) -> Result<(QblId, DeclaredKeyexpr), ZResult> {
+    let key = DeclaredKeyexpr::declare_non_wild_prefix(&session.shared, &keyexpr, existing)?;
+    let id = session.shared.declare_queryable_on_wire(
+        keyexpr,
+        key.wire(&session.shared),
+        complete,
+        wz_runtime_tokio::locality::Locality::Remote,
+        // A peer or router-hat session retracts the queryable naming its key
+        // (`_z_undeclare_queryable`) — the announced one, for a queryable.
+        key.retraction_naming(session),
+        sink,
+    );
+    Ok((id, key))
+}
+
+/// A pico queryable with no C handle around it, retracted when dropped: the
+/// declaration and its key, for a composite that answers with something other
+/// than a C closure.
+pub(crate) struct PlainQueryable {
+    shared: Arc<SharedSession>,
+    id: QblId,
+    /// Dropped after the queryable, so the retraction follows.
+    _key: DeclaredKeyexpr,
+}
+
+impl PlainQueryable {
+    /// Declare a queryable on `keyexpr` answered by `sink`.
+    pub(crate) fn declare(
+        session: &crate::write_filter::PicoSession,
+        keyexpr: &str,
+        existing: Option<&DeclaredKeyexpr>,
+        complete: bool,
+        sink: wz_capi_core::faces::QueryableSink,
+    ) -> Result<Self, ZResult> {
+        let (id, key) =
+            declare_queryable_on(session, keyexpr.to_owned(), existing, complete, sink)?;
+        Ok(Self {
+            shared: session.shared.clone(),
+            id,
+            _key: key,
+        })
+    }
+}
+
+impl Drop for PlainQueryable {
+    fn drop(&mut self) {
+        self.shared.undeclare_queryable(self.id);
+    }
 }
 
 /// Declare a queryable (pico `z_declare_queryable`). Consumes the moved

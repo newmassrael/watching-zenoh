@@ -45,7 +45,7 @@ use crate::ffi::{guarded, CClosure as FfiClosure};
 use crate::keyexpr::{declared_of, keyexpr_str, wire_key_of, DeclaredKeyexpr};
 use crate::result::{ZResult, Z_ERR_GENERIC, Z_ERR_INVALID, Z_ERR_NULL, Z_OK};
 use crate::session::{session_state, z_loaned_session_t};
-use crate::write_filter::WriteFilter;
+use crate::write_filter::{PicoSession, WriteFilter};
 use wz_capi_core::faces::{FilterPlane, MatchId, SharedSession, SubId, WireKey};
 
 // --- opaque loaned sample --------------------------------------------------
@@ -704,9 +704,18 @@ pub unsafe extern "C" fn z_publisher_put_options_default(options: *mut z_publish
 
 // --- publisher -------------------------------------------------------------
 
-/// Behind a `z_owned_publisher_t` handle: a keyexpr bound to the session's
-/// face registry, so a put fans out to every connected peer.
-pub(crate) struct PublisherState {
+/// A pico publisher with no C handle around it: a key, the declaration made for
+/// it, the write filter and the entity id.
+///
+/// The part of `z_declare_publisher` that is the PUBLISHER, separated from the
+/// part that is a handle handed to C (`PublisherState`). The split is what lets
+/// a composite declare its publishers the way pico does — an advanced publisher
+/// is a `z_declare_publisher` and another one for its beacon
+/// (`vendor/zenoh-pico/src/api/advanced_publisher.c` @
+/// `_Z_RETURN_IF_ERR(z_declare_publisher(zs, &pub->_val._publisher, keyexpr, &opt.publisher_options));`)
+/// — without building a C handle it never hands out, and lets it keep them on a
+/// task, which a value holding raw pointers into its own storage cannot do.
+pub(crate) struct PlainPublisher {
     shared: Arc<SharedSession>,
     /// R2962 — pico's write filter for this publisher: the Interest it asks its
     /// peers, and the state that decides whether a put or delete is SENT.
@@ -727,23 +736,30 @@ pub(crate) struct PublisherState {
     /// `SharedSession::next_entity_id` for why it is allocated rather than
     /// derived.
     eid: u64,
-    /// R311y559 — cached loan of `key`, so `z_publisher_keyexpr` hands back a
-    /// borrow of stable storage rather than of a temporary. Bound by
-    /// [`PublisherState::bind`] once the state sits at its final address — the
-    /// same discipline `QueryableState` and `SampleMarshal` use, and for the
-    /// same reason. R2959 — it carries the declaration, as pico's loan of
-    /// `&pub->_key` does, so a put on it aliases.
-    loaned_keyexpr: z_loaned_keyexpr_t,
-    /// Every matching listener declared THROUGH this publisher, retracted when
-    /// it goes away. See [`PublisherState::record_matching_listener`].
-    matches: StdMutex<Vec<MatchId>>,
 }
 
-impl PublisherState {
-    /// Point the cached view at this state's own keyexpr. MUST run only once
-    /// the state sits at its FINAL address (i.e. after `Box::new`).
-    pub(crate) fn bind(&mut self) {
-        self.loaned_keyexpr = self.key.loaned();
+impl PlainPublisher {
+    /// Declare a publisher on `keyexpr`: its key's declaration, then the write
+    /// filter that names it — pico's order in `z_declare_publisher`.
+    ///
+    /// `existing` is the caller's own key when it is already a declaration
+    /// (`declared_of`), which is shared rather than declared again.
+    pub(crate) fn declare(
+        session: &PicoSession,
+        keyexpr: &str,
+        existing: Option<&DeclaredKeyexpr>,
+    ) -> Result<Self, ZResult> {
+        let key = DeclaredKeyexpr::declare(&session.shared, keyexpr, existing)?;
+        // R2962 — the filter is created AFTER the key, because its Interest names
+        // the key's declaration (pico's order: `_z_declared_keyexpr_declare`, then
+        // `_z_write_filter_create`, in `z_declare_publisher`).
+        let filter = WriteFilter::declare(session, FilterPlane::Subscribers, &key);
+        Ok(Self {
+            eid: session.shared.next_entity_id(),
+            shared: session.shared.clone(),
+            filter,
+            key,
+        })
     }
 
     /// Publish on this publisher's key, in its declared wire form — unless its
@@ -751,7 +767,7 @@ impl PublisherState {
     /// call still answers `Z_OK`, as `z_publisher_put` / `z_publisher_delete`
     /// do upstream (`vendor/zenoh-pico/src/api/api.c` @
     /// `!_z_write_filter_active(&pub->_filter)`).
-    fn publish(&self, payload: &[u8], opts: &PublishOptions) -> ZResult {
+    pub(crate) fn publish(&self, payload: &[u8], opts: &PublishOptions) -> ZResult {
         if self.filter.active() {
             return Z_OK;
         }
@@ -770,9 +786,48 @@ impl PublisherState {
         self.eid
     }
 
+    /// The publisher's key with its declaration.
+    pub(crate) fn key(&self) -> &DeclaredKeyexpr {
+        &self.key
+    }
+}
+
+/// Behind a `z_owned_publisher_t` handle: a keyexpr bound to the session's
+/// face registry, so a put fans out to every connected peer.
+pub(crate) struct PublisherState {
+    core: PlainPublisher,
+    /// R311y559 — cached loan of `key`, so `z_publisher_keyexpr` hands back a
+    /// borrow of stable storage rather than of a temporary. Bound by
+    /// [`PublisherState::bind`] once the state sits at its final address — the
+    /// same discipline `QueryableState` and `SampleMarshal` use, and for the
+    /// same reason. R2959 — it carries the declaration, as pico's loan of
+    /// `&pub->_key` does, so a put on it aliases.
+    loaned_keyexpr: z_loaned_keyexpr_t,
+    /// Every matching listener declared THROUGH this publisher, retracted when
+    /// it goes away. See [`PublisherState::record_matching_listener`].
+    matches: StdMutex<Vec<MatchId>>,
+}
+
+impl PublisherState {
+    /// Point the cached view at this state's own keyexpr. MUST run only once
+    /// the state sits at its FINAL address (i.e. after `Box::new`).
+    pub(crate) fn bind(&mut self) {
+        self.loaned_keyexpr = self.core.key.loaned();
+    }
+
+    /// Publish on this publisher's key — [`PlainPublisher::publish`].
+    fn publish(&self, payload: &[u8], opts: &PublishOptions) -> ZResult {
+        self.core.publish(payload, opts)
+    }
+
+    /// The `eid` half of the global id `z_publisher_id` reports.
+    pub(crate) fn entity_id(&self) -> u64 {
+        self.core.eid
+    }
+
     /// The SESSION's zid — the other half of that global id.
     pub(crate) fn shared_zid(&self) -> [u8; 16] {
-        self.shared.zid()
+        self.core.shared.zid()
     }
 
     /// The cached borrow `z_publisher_keyexpr` hands back.
@@ -782,7 +837,7 @@ impl PublisherState {
 
     /// The declared keyexpr — what the MATCHING plane watches.
     pub(crate) fn keyexpr(&self) -> &str {
-        self.key.literal()
+        self.core.key.literal()
     }
 
     /// The session registry this publisher publishes through. Cloned rather
@@ -790,7 +845,7 @@ impl PublisherState {
     /// handle must reach `undeclare_matching_listener` after the publisher's
     /// `handle_ref` borrow has ended.
     pub(crate) fn shared_session(&self) -> Arc<SharedSession> {
-        self.shared.clone()
+        self.core.shared.clone()
     }
 
     /// Remember that `id` was declared through this publisher, so dropping the
@@ -835,7 +890,7 @@ impl Drop for PublisherState {
                 .unwrap_or_else(|poisoned| poisoned.into_inner()),
         );
         for id in ids {
-            self.shared.undeclare_matching_listener(id);
+            self.core.shared.undeclare_matching_listener(id);
         }
     }
 }
@@ -1536,19 +1591,13 @@ pub unsafe extern "C" fn z_declare_publisher(
         let Some(ke) = keyexpr_str(keyexpr) else {
             return Z_ERR_INVALID;
         };
-        let key = match DeclaredKeyexpr::declare(&state.shared, ke, declared_of(keyexpr)) {
-            Ok(key) => key,
+        let core = match PlainPublisher::declare(&PicoSession::of(state), ke, declared_of(keyexpr))
+        {
+            Ok(core) => core,
             Err(rc) => return rc,
         };
-        // R2962 — the filter is created AFTER the key, because its Interest names
-        // the key's declaration (pico's order: `_z_declared_keyexpr_declare`, then
-        // `_z_write_filter_create`, in `z_declare_publisher`).
-        let filter = WriteFilter::declare(state, FilterPlane::Subscribers, &key);
         let mut boxed = Box::new(PublisherState {
-            eid: state.shared.next_entity_id(),
-            shared: state.shared.clone(),
-            filter,
-            key,
+            core,
             loaned_keyexpr: z_loaned_keyexpr_t::borrowed(std::ptr::null(), 0),
             matches: StdMutex::new(Vec::new()),
         });
@@ -1800,7 +1849,7 @@ pub unsafe extern "C" fn z_declare_subscriber(
         // A peer or router-hat session retracts the subscription naming ITS key
         // (`_z_undeclare_subscriber`), which is the prefix declaration above and
         // not the caller's key the announce went out on.
-        let retraction = key.retraction_naming(state);
+        let retraction = key.retraction_naming(&PicoSession::of(state));
         let id = state
             .shared
             .declare_subscriber_on_wire(ke, wire, Locality::Remote, retraction, {
@@ -1882,7 +1931,7 @@ pub unsafe extern "C" fn z_declare_background_subscriber(
         // Named before the key is dropped: the entry keeps it alive through
         // `wire`'s anchor (see `subscriber_wire`), so the id it names stays
         // declared for as long as the entry can retract.
-        let retraction = key.retraction_naming(state);
+        let retraction = key.retraction_naming(&PicoSession::of(state));
         drop(key);
         let _ = state
             .shared

@@ -232,7 +232,307 @@ int main(int argc, char **argv) {
 }
 "#;
 
-/// Compile `DRIVER_SRC` against upstream's headers, linked to `lib`. Only the
+/// One key held by several entities, in the order that shows the resource
+/// table's rules: a publisher on a whole key and a keyexpr the program declared
+/// itself on the same key, then two subscribers under one non-wild prefix,
+/// released so that each key goes with its LAST holder.
+///
+/// pico keeps its declared keys in a table keyed by the key with a reference
+/// count (`vendor/zenoh-pico/src/session/resource.c` @
+/// `// declaration of already declared resource`): a key declared again returns
+/// the SAME id and bumps the count, yet the declaration goes on the wire again
+/// every time (`vendor/zenoh-pico/src/net/primitives.c` @
+/// `z_result_t _z_declare_resource(_z_session_t *zn, const _z_string_t *key, uint16_t *out_id) {`
+/// sends after registering, duplicate or not), and the key is retracted only
+/// when the last holder lets go (`vendor/zenoh-pico/src/session/resource.c` @
+/// `_z_resource_slist_value(res_ptr)->_refcount--;`). The advanced publisher and
+/// subscriber lean on it: each of their components re-declares the same joined
+/// key.
+const SHARED_KEYS_DRIVER_SRC: &str = r#"
+#include <stdio.h>
+#include <string.h>
+#include <zenoh-pico.h>
+
+static void on_sample(z_loaned_sample_t *sample, void *ctx) { (void)sample; (void)ctx; }
+
+static int view(z_view_keyexpr_t *ke, const char *s) {
+    if (z_view_keyexpr_from_str(ke, s) < 0) {
+        printf("driver: bad keyexpr %s\n", s);
+        return -1;
+    }
+    return 0;
+}
+
+int main(int argc, char **argv) {
+    (void)argc;
+    const char *endpoint = argv[1];
+
+    z_owned_config_t config;
+    z_config_default(&config);
+    zp_config_insert(z_loan_mut(config), Z_CONFIG_MODE_KEY, "@MODE@");
+    zp_config_insert(z_loan_mut(config), Z_CONFIG_CONNECT_KEY, endpoint);
+
+    z_owned_session_t s;
+    if (z_open(&s, z_move(config), NULL) < 0) {
+        printf("driver: unable to open session\n");
+        return -1;
+    }
+    z_sleep_ms(300);
+
+    z_view_keyexpr_t whole_ke, prefix_ke;
+    if (view(&whole_ke, "demo/kd/shared") < 0 || view(&prefix_ke, "demo/kd/prefix/**") < 0) {
+        return -1;
+    }
+
+    z_owned_publisher_t pub1;
+    if (z_declare_publisher(z_loan(s), &pub1, z_loan(whole_ke), NULL) < 0) {
+        printf("driver: publisher failed\n");
+        return -1;
+    }
+    z_sleep_ms(200);
+    z_owned_keyexpr_t declared;
+    if (z_declare_keyexpr(z_loan(s), &declared, z_loan(whole_ke)) < 0) {
+        printf("driver: declare keyexpr failed\n");
+        return -1;
+    }
+    z_sleep_ms(200);
+
+    z_owned_closure_sample_t cb1, cb2;
+    z_closure(&cb1, on_sample, NULL, NULL);
+    z_closure(&cb2, on_sample, NULL, NULL);
+    z_owned_subscriber_t sub1, sub2;
+    if (z_declare_subscriber(z_loan(s), &sub1, z_loan(prefix_ke), z_move(cb1), NULL) < 0 ||
+        z_declare_subscriber(z_loan(s), &sub2, z_loan(prefix_ke), z_move(cb2), NULL) < 0) {
+        printf("driver: subscriber failed\n");
+        return -1;
+    }
+    z_sleep_ms(200);
+
+    /* The declared keyexpr goes first and the publisher second, so the key is
+       retracted by its LAST holder (the publisher) and not by the one the
+       program named: the declared keyexpr's release must put nothing on the
+       wire while the publisher still holds the key. */
+    z_undeclare_keyexpr(z_loan(s), z_move(declared));
+    z_sleep_ms(150);
+    z_drop(z_move(sub1));
+    z_sleep_ms(150);
+    z_drop(z_move(pub1));
+    z_sleep_ms(150);
+    z_drop(z_move(sub2));
+    z_sleep_ms(300);
+
+    z_drop(z_move(s));
+    return 0;
+}
+"#;
+
+/// The advanced PUBLISHER in its three shapes, each with every option that makes
+/// pico declare something.
+///
+/// pico builds an advanced publisher out of its own primitives
+/// (`vendor/zenoh-pico/src/api/advanced_publisher.c` @
+/// `_Z_RETURN_IF_ERR(z_declare_publisher(zs, &pub->_val._publisher, keyexpr, &opt.publisher_options));`
+/// and the cache queryable, liveliness token and beacon publisher that follow),
+/// so what it puts on the wire is what those primitives put there. The shapes
+/// are the three sequencing modes: miss detection with a heartbeat, publisher
+/// detection and a cache (sequence numbers); a cache alone (timestamps); and
+/// none of them (a wrapped plain publisher). The heartbeat period is long enough
+/// that no beacon goes out inside the leg: it is the DECLARATIONS that are
+/// compared, and a beacon's count would only be timing.
+///
+/// The first publisher puts with an encoding and an attachment, so the put
+/// options are read off the wire as well, and the wrapped plain one deletes.
+///
+/// ⚠ THE DELETE IS ON THE PUBLISHER WITH NO CACHE, and that is upstream's doing,
+/// not a choice: zenoh-pico 1.10.1 crashes inside `ze_advanced_publisher_delete`
+/// when the publisher has a cache — `_z_publisher_delete_impl` copies the Del
+/// into the cache through `_z_sample_copy_data`, which copies an encoding the
+/// delete path never set (a NULL dereference in `_z_encoding_copy`, measured
+/// under gdb against the pinned library). A program that does it segfaults on
+/// the reference, so the reference cannot be the oracle for it, and wz does not
+/// copy a crash. A cached delete's replay is held by the runtime's own tests.
+const ADVANCED_PUBLISHER_DRIVER_SRC: &str = r#"
+#include <stdio.h>
+#include <string.h>
+#include <zenoh-pico.h>
+
+static int view(z_view_keyexpr_t *ke, const char *s) {
+    if (z_view_keyexpr_from_str(ke, s) < 0) {
+        printf("driver: bad keyexpr %s\n", s);
+        return -1;
+    }
+    return 0;
+}
+
+static int put_plain(const ze_loaned_advanced_publisher_t *pub, const char *text) {
+    z_owned_bytes_t payload;
+    z_bytes_copy_from_str(&payload, text);
+    if (ze_advanced_publisher_put(pub, z_move(payload), NULL) < 0) {
+        printf("driver: advanced put %s failed\n", text);
+        return -1;
+    }
+    return 0;
+}
+
+int main(int argc, char **argv) {
+    (void)argc;
+    const char *endpoint = argv[1];
+
+    z_owned_config_t config;
+    z_config_default(&config);
+    zp_config_insert(z_loan_mut(config), Z_CONFIG_MODE_KEY, "@MODE@");
+    zp_config_insert(z_loan_mut(config), Z_CONFIG_CONNECT_KEY, endpoint);
+
+    z_owned_session_t s;
+    if (z_open(&s, z_move(config), NULL) < 0) {
+        printf("driver: unable to open session\n");
+        return -1;
+    }
+    z_sleep_ms(300);
+
+    z_view_keyexpr_t full_ke, plain_ke, cache_ke;
+    if (view(&full_ke, "demo/kd/apub") < 0 || view(&plain_ke, "demo/kd/apub_plain") < 0 ||
+        view(&cache_ke, "demo/kd/apub_cache") < 0) {
+        return -1;
+    }
+
+    ze_advanced_publisher_options_t full_opt;
+    ze_advanced_publisher_options_default(&full_opt);
+    full_opt.cache.is_enabled = true;
+    full_opt.cache.max_samples = 2;
+    full_opt.sample_miss_detection.is_enabled = true;
+    full_opt.sample_miss_detection.heartbeat_mode = ZE_ADVANCED_PUBLISHER_HEARTBEAT_MODE_PERIODIC;
+    full_opt.sample_miss_detection.heartbeat_period_ms = 600000;
+    full_opt.publisher_detection = true;
+    ze_owned_advanced_publisher_t full;
+    if (ze_declare_advanced_publisher(z_loan(s), &full, z_loan(full_ke), &full_opt) < 0) {
+        printf("driver: full advanced publisher failed\n");
+        return -1;
+    }
+    z_sleep_ms(300);
+
+    if (put_plain(ze_advanced_publisher_loan(&full), "adv-value") < 0) {
+        return -1;
+    }
+    z_sleep_ms(200);
+
+    ze_advanced_publisher_put_options_t put_opt;
+    ze_advanced_publisher_put_options_default(&put_opt);
+    z_owned_encoding_t encoding;
+    z_encoding_from_str(&encoding, "text/plain");
+    z_owned_bytes_t attachment;
+    z_bytes_copy_from_str(&attachment, "meta");
+    put_opt.put_options.encoding = z_move(encoding);
+    put_opt.put_options.attachment = z_move(attachment);
+    z_owned_bytes_t second;
+    z_bytes_copy_from_str(&second, "adv-value-2");
+    if (ze_advanced_publisher_put(ze_advanced_publisher_loan(&full), z_move(second), &put_opt) < 0) {
+        printf("driver: advanced put with options failed\n");
+        return -1;
+    }
+    z_sleep_ms(200);
+
+    /* No cache, no miss detection, no detection: a wrapped plain publisher. */
+    ze_advanced_publisher_options_t plain_opt;
+    ze_advanced_publisher_options_default(&plain_opt);
+    ze_owned_advanced_publisher_t plain;
+    if (ze_declare_advanced_publisher(z_loan(s), &plain, z_loan(plain_ke), &plain_opt) < 0) {
+        printf("driver: plain advanced publisher failed\n");
+        return -1;
+    }
+    z_sleep_ms(200);
+    if (put_plain(ze_advanced_publisher_loan(&plain), "plain-value") < 0) {
+        return -1;
+    }
+    z_sleep_ms(200);
+    if (ze_advanced_publisher_delete(ze_advanced_publisher_loan(&plain), NULL) < 0) {
+        printf("driver: advanced delete failed\n");
+        return -1;
+    }
+    z_sleep_ms(200);
+
+    /* A cache and nothing else: samples carry timestamps and no sequence. */
+    ze_advanced_publisher_options_t cache_opt;
+    ze_advanced_publisher_options_default(&cache_opt);
+    ze_advanced_publisher_cache_options_default(&cache_opt.cache);
+    cache_opt.cache.max_samples = 1;
+    ze_owned_advanced_publisher_t cached;
+    if (ze_declare_advanced_publisher(z_loan(s), &cached, z_loan(cache_ke), &cache_opt) < 0) {
+        printf("driver: cached advanced publisher failed\n");
+        return -1;
+    }
+    z_sleep_ms(200);
+    if (put_plain(ze_advanced_publisher_loan(&cached), "cache-value") < 0) {
+        return -1;
+    }
+    z_sleep_ms(200);
+
+    /* In the reverse of the order they were made, so a key shared between the
+       entities of one publisher is retracted by the last of them. */
+    ze_undeclare_advanced_publisher(ze_advanced_publisher_move(&cached));
+    z_sleep_ms(200);
+    ze_undeclare_advanced_publisher(ze_advanced_publisher_move(&plain));
+    z_sleep_ms(200);
+    ze_undeclare_advanced_publisher(ze_advanced_publisher_move(&full));
+    z_sleep_ms(300);
+
+    z_drop(z_move(s));
+    return 0;
+}
+"#;
+
+/// Which C program a leg compiles against both libraries.
+#[derive(Clone, Copy, Debug)]
+enum Program {
+    /// The plain entities: publisher, subscriber, queryable, queriers, token,
+    /// liveliness subscriber and a declared keyexpr ([`DRIVER_SRC`]).
+    Entities,
+    /// One key held by several entities ([`SHARED_KEYS_DRIVER_SRC`]).
+    SharedKeys,
+    /// The advanced publisher in its three shapes
+    /// ([`ADVANCED_PUBLISHER_DRIVER_SRC`]).
+    AdvancedPublisher,
+}
+
+impl Program {
+    fn name(self) -> &'static str {
+        match self {
+            Program::Entities => "entities",
+            Program::SharedKeys => "shared_keys",
+            Program::AdvancedPublisher => "advanced_publisher",
+        }
+    }
+
+    fn source(self) -> &'static str {
+        match self {
+            Program::Entities => DRIVER_SRC,
+            Program::SharedKeys => SHARED_KEYS_DRIVER_SRC,
+            Program::AdvancedPublisher => ADVANCED_PUBLISHER_DRIVER_SRC,
+        }
+    }
+
+    /// How much of a data message the rendering carries. The plain entities
+    /// publish nothing whose content is in question, and their legs have always
+    /// compared the KEY a message names; the advanced publisher's samples carry
+    /// the options it sequences and retains, and those are what it is for.
+    fn push_detail(self) -> PushDetail {
+        match self {
+            Program::AdvancedPublisher => PushDetail::Whole,
+            Program::Entities | Program::SharedKeys => PushDetail::Key,
+        }
+    }
+}
+
+/// How much of a Push the rendering carries — see [`Program::push_detail`].
+#[derive(Clone, Copy, Debug)]
+enum PushDetail {
+    /// The key it names.
+    Key,
+    /// The key, the kind, the envelope, and what the body carries.
+    Whole,
+}
+
+/// Compile the program against upstream's headers, linked to `lib`. Only the
 /// library differs between the arms, which is the whole point.
 fn compile_driver(
     out_dir: &Path,
@@ -240,11 +540,15 @@ fn compile_driver(
     libname: &str,
     arm: &str,
     topology: Topology,
+    program: Program,
 ) -> PathBuf {
-    let tag = format!("{arm}_{}", topology.name());
+    let tag = format!("{arm}_{}_{}", topology.name(), program.name());
     let src = out_dir.join(format!("driver_{tag}.c"));
-    std::fs::write(&src, DRIVER_SRC.replace("@MODE@", topology.session_mode()))
-        .expect("write driver source");
+    std::fs::write(
+        &src,
+        program.source().replace("@MODE@", topology.session_mode()),
+    )
+    .expect("write driver source");
     let exe = out_dir.join(format!("driver_{tag}"));
 
     let cc = std::env::var("CC").unwrap_or_else(|_| "cc".to_string());
@@ -481,6 +785,39 @@ impl Names {
     }
 }
 
+/// The `@adv` detection keys carry the declaring session's zid and the entity's
+/// id: `<key>/@adv/pub/<zid>/<eid>/_`. Both values are each library's own
+/// counters (a random zid per session, an entity id from its own allocator), so
+/// their VALUES cannot agree between the arms while their SHAPE can — the zid is
+/// hex (`ZenohId`'s display drops one leading zero, so 31 or 32 digits) and the
+/// entity id is a number — and the shape is what is compared. A segment that
+/// does not have the shape is left as it is, so a key spelled wrongly still
+/// shows.
+fn normalize_adv_key(key: &str) -> String {
+    let mut out = key.to_owned();
+    for marker in ["/@adv/pub/", "/@adv/sub/"] {
+        let Some(at) = out.find(marker) else {
+            continue;
+        };
+        let head = out[..at + marker.len()].to_owned();
+        let tail = out[at + marker.len()..].to_owned();
+        let mut parts: Vec<String> = tail.split('/').map(str::to_owned).collect();
+        if parts.first().is_some_and(|z| {
+            (31..=32).contains(&z.len()) && z.chars().all(|c| c.is_ascii_hexdigit())
+        }) {
+            parts[0] = String::from("<zid>");
+        }
+        if parts
+            .get(1)
+            .is_some_and(|e| !e.is_empty() && e.chars().all(|c| c.is_ascii_digit()))
+        {
+            parts[1] = String::from("<eid>");
+        }
+        out = format!("{head}{}", parts.join("/"));
+    }
+    out
+}
+
 /// A wire expression as `<id>+"suffix"`, the id named in the keyexpr space.
 fn wire(names: &mut Names, expr: &WireexprOwned) -> String {
     let (id, suffix) = match &expr.body {
@@ -494,7 +831,10 @@ fn wire(names: &mut Names, expr: &WireexprOwned) -> String {
     } else {
         names.name("K", id)
     };
-    format!("{scope}+{:?}", suffix.unwrap_or_default())
+    format!(
+        "{scope}+{:?}",
+        normalize_adv_key(&suffix.unwrap_or_default())
+    )
 }
 
 /// An extension chain as the header of each entry, plus a zbuf's LENGTH.
@@ -524,9 +864,71 @@ fn extensions(chain: Option<&[wz_codecs::ext_entry::ExtEntryOwned]>) -> String {
     }
 }
 
+/// The extensions a Put or a Del carries inside its body, by identity.
+///
+/// The source info names the publisher by its session's zid and its entity id,
+/// neither of which can agree between two libraries' sessions, so it is rendered
+/// as present and no more; the attachment is the caller's own bytes, and every
+/// other extension is named by its header.
+fn body_extensions(chain: Option<&[wz_codecs::ext_entry::ExtEntryOwned]>) -> String {
+    use wz_codecs::ext_entry::ExtEntryOwnedVariant;
+    const SOURCE_INFO: u8 = 0x01;
+    let Some(chain) = chain else {
+        return String::from(" ext()");
+    };
+    let parts: Vec<String> = chain
+        .iter()
+        .map(|e| match &e.body {
+            ExtEntryOwnedVariant::CodecZenohExtZbuf(z) if e.header & 0x1f == SOURCE_INFO => {
+                let _ = z;
+                format!("{:#04x}:source-info", e.header)
+            }
+            ExtEntryOwnedVariant::CodecZenohExtZbuf(z) => format!(
+                "{:#04x}:{:?}",
+                e.header,
+                String::from_utf8_lossy(z.value.as_slice())
+            ),
+            _ => format!("{:#04x}", e.header),
+        })
+        .collect();
+    format!(" ext({})", parts.join(","))
+}
+
+/// A data message whole: its envelope, its kind, whether it carries a timestamp
+/// (its VALUE is each session's own clock and zid), its encoding, what its body
+/// carries, and its payload.
+fn push_whole(p: &wz_codecs::push::PushOwned) -> String {
+    use wz_codecs::push::PushOwnedVariant;
+    let envelope = extensions(p.extensions.as_deref());
+    let body = match &p.body {
+        PushOwnedVariant::CodecZenohMsgPut(put) => format!(
+            " put ts={} enc={} body{} payload={:?}",
+            put.timestamp.is_some(),
+            put.encoding.as_ref().map_or_else(
+                || String::from("none"),
+                |e| format!(
+                    "{}+{:?}",
+                    e.packed_id,
+                    e.schema.as_ref().map(|s| s.to_string())
+                )
+            ),
+            body_extensions(put.extensions.as_deref()),
+            String::from_utf8_lossy(put.payload.as_slice()),
+        ),
+        PushOwnedVariant::CodecZenohMsgDel(del) => format!(
+            " del ts={} body{}",
+            del.timestamp.is_some(),
+            body_extensions(del.extensions.as_deref())
+        ),
+        PushOwnedVariant::Default { tag, .. } => format!(" unknown-body {tag:#04x}"),
+    };
+    format!("{envelope}{body}")
+}
+
 /// One line per declaration and per data message the dialer sent, in order.
 fn render(
     segments: &[(wz_integration_tests::wire_tap::Side, Vec<u8>)],
+    detail: PushDetail,
 ) -> (Vec<String>, Vec<(u8, u8)>) {
     let pcap = synthesise_pcap(segments, DIALER_PORT, LISTENER_PORT);
     let dissection = Dissection::from_pcap(&pcap).expect("the synthesised pcap parses");
@@ -601,7 +1003,11 @@ fn render(
                     lines.push(line);
                 }
                 NetworkMessage::Push(p) => {
-                    lines.push(format!("Push on {}", wire(&mut names, &p.keyexpr)))
+                    let key = wire(&mut names, &p.keyexpr);
+                    lines.push(match detail {
+                        PushDetail::Key => format!("Push on {key}"),
+                        PushDetail::Whole => format!("Push on {key}{}", push_whole(p)),
+                    });
                 }
                 NetworkMessage::Request(r) => {
                     lines.push(format!("Request on {}", wire(&mut names, &r.keyexpr)))
@@ -674,7 +1080,7 @@ struct Arms {
 
 /// Compile the driver once per library, run each through its own tap to a
 /// fresh wz node of `topology`'s kind, and render what each dialer sent.
-fn record_both_arms(topology: Topology) -> Arms {
+fn record_both_arms(topology: Topology, program: Program) -> Arms {
     let dir = tempfile::tempdir().expect("tempdir");
     let cdylib = wz_capi_pico_cdylib();
     let wz_libdir = cdylib
@@ -682,18 +1088,27 @@ fn record_both_arms(topology: Topology) -> Arms {
         .expect("cdylib has a parent directory")
         .to_path_buf();
 
-    let wz_driver = compile_driver(dir.path(), &wz_libdir, "wz_capi_pico", "wz", topology);
+    let wz_driver = compile_driver(
+        dir.path(),
+        &wz_libdir,
+        "wz_capi_pico",
+        "wz",
+        topology,
+        program,
+    );
     let ref_driver = compile_driver(
         dir.path(),
         &zenoh_pico_library_dir(),
         "zenohpico",
         "reference",
         topology,
+        program,
     );
 
+    let detail = program.push_detail();
     let (reference, reference_interest_headers) =
-        render(&record_arm(&ref_driver, "reference", topology));
-    let (wz, wz_interest_headers) = render(&record_arm(&wz_driver, "wz", topology));
+        render(&record_arm(&ref_driver, "reference", topology), detail);
+    let (wz, wz_interest_headers) = render(&record_arm(&wz_driver, "wz", topology), detail);
     Arms {
         wz,
         wz_interest_headers,
@@ -714,7 +1129,7 @@ fn a_declaring_program_puts_the_same_declarations_on_the_wire_as_the_real_pico()
         wz_interest_headers,
         reference,
         reference_interest_headers,
-    } = record_both_arms(Topology::Client);
+    } = record_both_arms(Topology::Client, Program::Entities);
 
     // ANTI-VACUITY: the reference arm must carry the explicit declaration, the
     // put through it, and one declaration per entity the driver made. Two
@@ -871,7 +1286,7 @@ fn entity_interests(lines: &[String]) -> Vec<(String, u8)> {
 ///    session closes. wz retracts them. Only a router is asked, so the
 ///    divergence is measured only where one exists.
 fn assert_a_peer_puts_the_same_wire_as_the_real_pico(topology: Topology) {
-    let Arms { wz, reference, .. } = record_both_arms(topology);
+    let Arms { wz, reference, .. } = record_both_arms(topology, Program::Entities);
     let show = || {
         format!(
             "--- wz ---\n{}\n--- reference ---\n{}",
@@ -1022,4 +1437,239 @@ fn a_pico_peer_beside_a_peer_puts_the_same_wire_as_the_real_pico() {
             Layer E5"]
 fn wz_router_hears_a_pico_peer_the_same_on_wz_and_on_the_real_pico() {
     assert_a_peer_puts_the_same_wire_as_the_real_pico(Topology::PeerToRouter);
+}
+
+/// A key several entities hold is ONE declaration with a count: declared again it
+/// is the same id, announced again, and retracted when the last holder lets go.
+///
+/// The program holds one key through a publisher and a keyexpr it declared
+/// itself, and one prefix through two subscribers, and releases them so that the
+/// holder that the program NAMED last is not the one that retracts. The advanced
+/// publisher and subscriber are made of entities that re-declare one joined key,
+/// so this is the rule they stand on, measured without them.
+// wz-proves: api-compat-pico wz->pico partial
+#[test]
+#[ignore = "cc-compiles a driver against both libraries and runs each through a \
+            tap to a wz-ap-demo node; run by run-ci Layer E"]
+fn a_key_declared_twice_is_one_id_with_two_holders_on_the_wire_as_in_the_real_pico() {
+    let Arms { wz, reference, .. } = record_both_arms(Topology::Client, Program::SharedKeys);
+
+    let count =
+        |lines: &[String], prefix: &str| lines.iter().filter(|l| l.starts_with(prefix)).count();
+    // ANTI-VACUITY, in the REFERENCE arm so equality cannot be two arms that both
+    // skipped the rule: the shared key is announced twice under ONE id and
+    // retracted ONCE, and the prefix the two subscribers share likewise.
+    assert_eq!(
+        count(&reference, "DeclKexpr K1 ="),
+        2,
+        "the real pico should announce the shared key twice under one id:\n{}",
+        reference.join("\n")
+    );
+    assert_eq!(
+        count(&reference, "UndeclKexpr K1"),
+        1,
+        "the real pico should retract the shared key once, with its last holder:\n{}",
+        reference.join("\n")
+    );
+    assert_eq!(
+        count(&reference, "DeclKexpr K2 ="),
+        2,
+        "the real pico should announce the subscribers' shared prefix twice:\n{}",
+        reference.join("\n")
+    );
+    assert_eq!(
+        count(&reference, "UndeclKexpr K2"),
+        1,
+        "the real pico should retract the shared prefix once:\n{}",
+        reference.join("\n")
+    );
+    // The program's own release of the declared keyexpr comes BEFORE the
+    // publisher's drop and must put nothing on the wire: the only retraction of
+    // the shared key follows the publisher's Interest being let go.
+    let final_interest = reference
+        .iter()
+        .position(|l| l.starts_with("Interest (final)"))
+        .expect("the publisher's interest is retracted");
+    let retraction = reference
+        .iter()
+        .position(|l| l == "UndeclKexpr K1")
+        .expect("the shared key is retracted");
+    assert!(
+        final_interest < retraction,
+        "the shared key must outlive the program's own release of it, and go with \
+         the publisher:\n{}",
+        reference.join("\n")
+    );
+
+    assert_eq!(
+        wz,
+        reference,
+        "wz's key table differs from the real zenoh-pico's for the same program.\n\
+         --- wz ---\n{}\n--- reference ---\n{}",
+        wz.join("\n"),
+        reference.join("\n")
+    );
+}
+
+/// The advanced publisher against the real pico in one topology. `asks` is the
+/// body an Interest of the plain publishers carries in it — `None` for a session
+/// that asks nothing.
+fn assert_an_advanced_publisher_puts_the_same_wire_as_the_real_pico(
+    topology: Topology,
+    asks: Option<&str>,
+) {
+    let Arms { wz, reference, .. } = record_both_arms(topology, Program::AdvancedPublisher);
+
+    let count =
+        |lines: &[String], needle: &str| lines.iter().filter(|l| l.contains(needle)).count();
+    // ANTI-VACUITY: the REFERENCE arm carries every component the program asked
+    // for, so equality below cannot be two renderings that both left one out.
+    for needle in [
+        "DeclQueryable",
+        "DeclToken",
+        "UndeclToken",
+        "UndeclQueryable",
+        "UndeclKexpr",
+    ] {
+        assert!(
+            reference.iter().any(|l| l.contains(needle)),
+            "the REFERENCE arm carries no `{needle}` line, so this leg is measuring \
+             the harness rather than wz:\n{}",
+            reference.join("\n")
+        );
+    }
+    // A write filter per plain publisher the program made: the full publisher's
+    // own and its beacon's, the plain one's, and the cache-only one's — for a
+    // session that asks, and none at all for one that does not.
+    match asks {
+        Some(body) => assert_eq!(
+            count(&reference, &format!("Interest hdr=0x79 body={body}")),
+            4,
+            "the real pico should ask once per plain publisher, four in all:\n{}",
+            reference.join("\n")
+        ),
+        None => assert_eq!(
+            count(&reference, "Interest"),
+            0,
+            "the real pico should ask nothing here:\n{}",
+            reference.join("\n")
+        ),
+    }
+    // The samples: a put carrying a sequence number, a put carrying an encoding
+    // and an attachment, a delete, one carrying a timestamp and no sequence
+    // number (the cache-only publisher's), and a plain publisher's put with
+    // neither.
+    // (`enc=8+` is `text/plain`: the wire carries the encoding's id, not its name.)
+    for needle in [
+        "source-info",
+        "enc=8+",
+        "\"meta\"",
+        " del ",
+        "payload=\"cache-value\"",
+        "payload=\"plain-value\"",
+    ] {
+        assert!(
+            reference
+                .iter()
+                .any(|l| l.starts_with("Push") && l.contains(needle)),
+            "the REFERENCE arm carries no Push with `{needle}`, so the sample half of this \
+             leg is vacuous:\n{}",
+            reference.join("\n")
+        );
+    }
+    assert!(
+        reference.iter().any(|l| l.starts_with("Push")
+            && l.contains("payload=\"cache-value\"")
+            && l.contains("ts=true")
+            && !l.contains("source-info")),
+        "the cache-only publisher should stamp a timestamp and no sequence number:\n{}",
+        reference.join("\n")
+    );
+
+    // ⚠ ONE PINNED DIVERGENCE, in the topology where it exists and only there: a
+    // pico peer that asked a router never retracts its interests
+    // (`vendor/zenoh-pico/src/net/primitives.c` @ `// Build the declare message to
+    // send on the wire (only needed in client mode or multicast transport)` in
+    // `_z_remove_interest`), so the router keeps them until the session closes,
+    // where wz retracts them. The entity legs above pin it the same way and for
+    // the same reason: a leak no program can see, and one not worth copying. The
+    // count is what is pinned — one retraction per Interest asked — so a
+    // retraction that goes missing, or one too many, is still a finding.
+    let observed: Vec<String> = match topology {
+        Topology::PeerToRouter => {
+            assert_eq!(
+                reference
+                    .iter()
+                    .filter(|l| l.starts_with("Interest (final)"))
+                    .count(),
+                0,
+                "the real pico peer should retract no interest it asked a router for:\n{}",
+                reference.join("\n")
+            );
+            let retracted = wz
+                .iter()
+                .filter(|l| l.starts_with("Interest (final)"))
+                .count();
+            assert_eq!(
+                retracted,
+                4,
+                "wz should retract exactly the four interests the publishers asked:\n{}",
+                wz.join("\n")
+            );
+            wz.iter()
+                .filter(|l| !l.starts_with("Interest (final)"))
+                .cloned()
+                .collect()
+        }
+        Topology::Client | Topology::PeerToPeer => wz,
+    };
+    assert_eq!(
+        observed,
+        reference,
+        "wz's advanced publisher differs from the real zenoh-pico's for the same \
+         program.\n--- wz ---\n{}\n--- reference ---\n{}",
+        observed.join("\n"),
+        reference.join("\n")
+    );
+}
+
+/// An advanced publisher is what the real pico builds it from: a plain
+/// publisher, a cache queryable, a liveliness token and a beacon publisher, each
+/// declared on a declared key, and its puts and its delete carry the sequence
+/// number, the timestamp, the encoding and the attachment the caller gave.
+// wz-proves: api-compat-pico wz->pico partial
+#[test]
+#[ignore = "cc-compiles a driver against both libraries and runs each through a \
+            tap to a wz-ap-demo node; run by run-ci Layer E"]
+fn an_advanced_publisher_puts_the_same_wire_as_the_real_pico() {
+    assert_an_advanced_publisher_puts_the_same_wire_as_the_real_pico(
+        Topology::Client,
+        Some("0xd3"),
+    );
+}
+
+/// The same program from a pico PEER with no router among its peers: nothing is
+/// asked, and the retractions name their keys.
+// wz-proves: api-compat-pico wz->pico partial
+#[test]
+#[ignore = "cc-compiles a driver against both libraries and runs each through a \
+            tap to a wz-ap-demo peer; run by run-ci Layer E"]
+fn an_advanced_publisher_beside_a_peer_puts_the_same_wire_as_the_real_pico() {
+    assert_an_advanced_publisher_puts_the_same_wire_as_the_real_pico(Topology::PeerToPeer, None);
+}
+
+/// The same program from a pico PEER beside a ROUTER: asked without the
+/// aggregate bit. The `wz_router_` prefix keeps Layer E's `--skip wz_router` from
+/// running it against the default-feature demo; Layer E5 builds the routing demo
+/// and runs it by name.
+// wz-proves: api-compat-pico wz->pico partial
+#[test]
+#[ignore = "cc-compiles a driver against both libraries and runs each through a \
+            tap to a wz-ap-demo router with a provider behind it; run by run-ci \
+            Layer E5"]
+fn wz_router_hears_a_pico_peer_advanced_publisher_the_same_on_wz_and_on_the_real_pico() {
+    assert_an_advanced_publisher_puts_the_same_wire_as_the_real_pico(
+        Topology::PeerToRouter,
+        Some("0x53"),
+    );
 }

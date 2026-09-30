@@ -7498,7 +7498,12 @@ layer_c1aq_cargo_test_ext_pubsub_advanced() {
     # R2619 — 21 -> 22 with the publisher-detection-metadata witness, whose
     # second arm is the refusal: a caller chunk that breaks the derived `@adv`
     # expression is `InvalidAdvKeyexpr` rather than wire traffic.
-    _runci_guarded_test "C1aq advanced_" 22 \
+    # R2980 — 22 -> 25: the three witnesses of the publisher's plane, all
+    # ungated — the order its entities are declared and retracted in, timestamp
+    # sequencing following the plane's answer, and a cached sample keeping what
+    # it retains until the ring lets it go (that last one lives in
+    # `advanced_cache`, which this filter also reaches).
+    _runci_guarded_test "C1aq advanced_" 25 \
         cargo test -p wz-runtime-tokio --features ext-pubsub-advanced-publisher,query-get,pubsub-allow-loop \
         --lib advanced_ --quiet || return 1
     (cd crates \
@@ -7742,7 +7747,11 @@ layer_c1au_cargo_test_ext_pubsub_sample_miss_detection() {
     # R2619 — 15 -> 16, the publisher-surface witness; ungated like R2618's, so
     # it lands in this lane as well as C1aq.
     # R2619 — 16 -> 17 with the metadata witness, ungated like its siblings.
-    _runci_guarded_test "C1au advanced_publisher" 17 \
+    # R2980 — 17 -> 20: the plane's order witness and its timestamp witness,
+    # both ungated (see C1aq), and the beacon publisher's own, which needs this
+    # lane's feature and so is counted here alone. The cache's retention witness
+    # is in `advanced_cache` and this filter does not reach it.
+    _runci_guarded_test "C1au advanced_publisher" 20 \
         cargo test -p wz-runtime-tokio --features ext-pubsub-sample-miss-detection,ext-pubsub-advanced-recovery,pubsub-allow-loop \
         --lib advanced_publisher --quiet || return 1
     (cd crates \
@@ -17901,13 +17910,16 @@ layer_e5_router_forward() {
     # missing. The cdylib is built with the SAME feature set Layer E builds
     # (`transport-link-tls`), because two lanes writing one artifact path at
     # different feature sets is the shape this file already records as a
-    # misdiagnosis. Count-guarded at 1: a filter that matches nothing exits 0.
+    # misdiagnosis. Count-guarded: a filter that matches nothing exits 0.
+    # R2980 — 1 -> 2, the advanced publisher's router leg
+    # (`wz_router_hears_a_pico_peer_advanced_publisher_...`), named so this one
+    # filter reaches it.
     if [[ ! -f target/zenoh-pico-build/lib/libzenohpico.so ]]; then
         _pico_cli_unavailable "Layer E5 (pico peer beside a router, libzenohpico oracle)" || return 1
         return 0
     fi
     (cd crates && cargo build -p wz-capi-pico --features transport-link-tls --quiet) || return 1
-    _runci_guarded_test "E5 pico peer beside a router" 1 \
+    _runci_guarded_test "E5 pico peer beside a router" 2 \
         cargo test -p wz-integration-tests \
         --test pico_keyexpr_declaration_twice_and_diff -- --ignored \
         wz_router_hears_a_pico_peer --test-threads=1 --quiet || return 1

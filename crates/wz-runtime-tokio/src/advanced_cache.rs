@@ -121,6 +121,38 @@ pub struct CachedSample {
     /// routing metadata in the attachment lost all of it on every recovered
     /// sample.
     pub attachment: Option<Vec<u8>>,
+    /// Whatever the sample keeps alive for as long as the ring holds it — see
+    /// [`Retained`].
+    pub retained: Option<Retained>,
+}
+
+/// What a cached sample keeps alive, dropped when the sample leaves the ring.
+///
+/// zenoh-pico's cached sample holds a reference to the key it was published on
+/// (`vendor/zenoh-pico/src/net/sample.c` @
+/// `_Z_RETURN_IF_ERR(_z_declared_keyexpr_copy(&dst->keyexpr, key));`), so a key
+/// the publisher declared stays declared until its last cached sample is
+/// evicted or the cache is freed, and that is observable: the peer is told the
+/// key is gone only then. The ring is runtime-neutral and knows nothing of a
+/// declaration, so it holds the reference as an opaque owner and a host that has
+/// something to keep passes it in through [`CachedSample::keeping`].
+#[derive(Clone)]
+pub struct Retained {
+    /// Held for its drop alone, which is why it is never read.
+    _owner: Arc<dyn Send + Sync>,
+}
+
+impl Retained {
+    /// Keep `owner` alive.
+    pub fn new(owner: Arc<dyn Send + Sync>) -> Self {
+        Self { _owner: owner }
+    }
+}
+
+impl std::fmt::Debug for Retained {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Retained")
+    }
 }
 
 impl CachedSample {
@@ -147,7 +179,15 @@ impl CachedSample {
             kind,
             encoding: None,
             attachment: None,
+            retained: None,
         }
+    }
+
+    /// Keep `owner` alive for as long as the ring holds this sample — see
+    /// [`Retained`].
+    pub fn keeping(mut self, owner: Option<Retained>) -> Self {
+        self.retained = owner;
+        self
     }
 
     /// Retain the sample's value encoding, replayed on recovery.
@@ -236,12 +276,103 @@ impl Default for CacheConfig {
 /// feeds and the cache queryable answers from.
 type CacheRing = Arc<Mutex<VecDeque<CachedSample>>>;
 
+/// The retained samples and the answer a cache queryable gives out of them —
+/// everything an advanced cache is except the queryable that carries the answer
+/// to a peer.
+///
+/// Split out of [`AdvancedCache`] because the queryable is the one part of a
+/// cache whose declaration depends on WHERE the publisher lives: on a runtime
+/// session it is a plain queryable, and on a C session it is declared on the
+/// session's own key table and announced per peer. The ring and its answer are
+/// the same on both, so they are one type and the host brings only the
+/// declaration ([`crate::advanced_publisher::AdvancedPublisherPlane::declare_cache_queryable`]).
+///
+/// Cloning shares the ring: the publisher feeds it and the queryable's handler
+/// reads it, and both hold one of these.
+#[derive(Clone)]
+pub struct CacheStore {
+    ring: CacheRing,
+    max_samples: usize,
+    /// R2596 — copied into the answering handler beside the ring: the reply QoS
+    /// is a property of the CACHE, so it is fixed at construction exactly as
+    /// `max_samples` is, not read per query.
+    replies_config: RepliesConfig,
+}
+
+impl CacheStore {
+    /// An empty ring of `config`'s depth.
+    pub fn new(config: CacheConfig) -> Self {
+        Self {
+            ring: Arc::new(Mutex::new(VecDeque::new())),
+            max_samples: config.max_samples,
+            replies_config: config.replies_config,
+        }
+    }
+
+    /// The handler a cache queryable answers with: each inbound `get` is
+    /// filtered on the `_sn` range + `_max` cap parsed from its selector and
+    /// replied with the matching samples, timestamp-stamped, oldest-first.
+    pub fn query_handler(&self) -> impl FnMut(&dyn QueryView, &mut dyn ReplyOut) + Send + 'static {
+        let ring = Arc::clone(&self.ring);
+        let replies_config = self.replies_config;
+        move |view: &dyn QueryView, out: &mut dyn ReplyOut| {
+            let guard = ring.lock().expect("advanced cache ring mutex poisoned");
+            // "now" for the `_time` age filter, read at query time from the
+            // same NTP64 wall-clock base the publisher stamps samples with.
+            let now = crate::timestamp_source::wall_clock_ntp64();
+            answer_from_ring(&guard, view, out, now, replies_config);
+        }
+    }
+
+    /// Push a freshly published sample into the ring, evicting the oldest
+    /// when the depth bound is reached (zenoh advanced_cache.rs:368-377).
+    ///
+    /// Uses `if` (evict at most one) rather than `while` (evict until under
+    /// budget): each push adds exactly one, so for any `max_samples >= 1` the
+    /// two are equivalent — but `while` infinite-loops on the degenerate
+    /// `max_samples == 0` (`0 >= 0` stays true while `pop_front()` on the empty
+    /// ring never reduces `len`), hanging the thread WITH the ring mutex held.
+    /// `if` matches zenoh and bounds a 0-depth cache at one retained sample.
+    ///
+    /// The evicted sample is dropped AFTER the ring's lock is released: what it
+    /// [retains](Retained) may re-enter the session as it goes (a key's
+    /// retraction does), and this mutex is not reentrant.
+    pub fn cache_sample(&self, sample: CachedSample) {
+        let evicted = {
+            let mut ring = self
+                .ring
+                .lock()
+                .expect("advanced cache ring mutex poisoned");
+            let evicted = if ring.len() >= self.max_samples {
+                ring.pop_front()
+            } else {
+                None
+            };
+            ring.push_back(sample);
+            evicted
+        };
+        drop(evicted);
+    }
+
+    /// Number of samples currently retained (test / introspection seam).
+    pub fn len(&self) -> usize {
+        self.ring
+            .lock()
+            .expect("advanced cache ring mutex poisoned")
+            .len()
+    }
+
+    /// True when the ring holds no samples.
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+}
+
 /// A live advanced cache bound to a [`Session`]: owns the sample ring +
 /// the answering [`Queryable`]. Dropping it undeclares the queryable
 /// (RAII).
 pub struct AdvancedCache<R: SessionRuntime, T: TimeSource> {
-    ring: CacheRing,
-    max_samples: usize,
+    store: CacheStore,
     _queryable: Queryable<R, T>,
 }
 
@@ -253,21 +384,14 @@ where
     SessionLinkActions<R, T>: Send + Sync + 'static,
 {
     /// Declare the cache queryable on `queryable_keyexpr` (the publisher's
-    /// `<key_expr>/@adv/pub/...` suffix). The queryable answers each inbound
-    /// `get` by filtering the ring on the `_sn` range + `_max` cap parsed
-    /// from the query selector and replying the matching samples
-    /// timestamp-stamped, oldest-first.
+    /// `<key_expr>/@adv/pub/...` suffix), answering out of a fresh
+    /// [`CacheStore`].
     pub fn declare(
         session: &Session<R, T, Unicast>,
         queryable_keyexpr: impl Into<String>,
         config: CacheConfig,
     ) -> Result<Self, QueryableError> {
-        let ring: CacheRing = Arc::new(Mutex::new(VecDeque::new()));
-        let query_ring = Arc::clone(&ring);
-        // R2596 — copied into the answering closure beside the ring: the reply
-        // QoS is a property of the CACHE, so it is fixed at declare time
-        // exactly as `max_samples` is, not read per query.
-        let replies_config = config.replies_config;
+        let store = CacheStore::new(config);
         // R2556 — INCOMPLETE, which is upstream's default and, more to the
         // point, the only honest answer this queryable can give.
         //
@@ -289,54 +413,32 @@ where
         let queryable = session.declare_queryable(
             queryable_keyexpr,
             QueryableOptions::default(),
-            move |view: &dyn QueryView, out: &mut dyn ReplyOut| {
-                let guard = query_ring
-                    .lock()
-                    .expect("advanced cache ring mutex poisoned");
-                // "now" for the `_time` age filter, read at query time from the
-                // same NTP64 wall-clock base the publisher stamps samples with.
-                let now = crate::timestamp_source::wall_clock_ntp64();
-                answer_from_ring(&guard, view, out, now, replies_config);
-            },
+            store.query_handler(),
         )?;
         Ok(Self {
-            ring,
-            max_samples: config.max_samples,
+            store,
             _queryable: queryable,
         })
     }
 
-    /// Push a freshly published sample into the ring, evicting the oldest
-    /// when the depth bound is reached (zenoh advanced_cache.rs:368-377).
-    ///
-    /// Uses `if` (evict at most one) rather than `while` (evict until under
-    /// budget): each push adds exactly one, so for any `max_samples >= 1` the
-    /// two are equivalent — but `while` infinite-loops on the degenerate
-    /// `max_samples == 0` (`0 >= 0` stays true while `pop_front()` on the empty
-    /// ring never reduces `len`), hanging the thread WITH the ring mutex held.
-    /// `if` matches zenoh and bounds a 0-depth cache at one retained sample.
+    /// The ring this cache answers from and is fed into.
+    pub fn store(&self) -> &CacheStore {
+        &self.store
+    }
+
+    /// Push a freshly published sample into the ring — [`CacheStore::cache_sample`].
     pub fn cache_sample(&self, sample: CachedSample) {
-        let mut ring = self
-            .ring
-            .lock()
-            .expect("advanced cache ring mutex poisoned");
-        if ring.len() >= self.max_samples {
-            ring.pop_front();
-        }
-        ring.push_back(sample);
+        self.store.cache_sample(sample);
     }
 
     /// Number of samples currently retained (test / introspection seam).
     pub fn len(&self) -> usize {
-        self.ring
-            .lock()
-            .expect("advanced cache ring mutex poisoned")
-            .len()
+        self.store.len()
     }
 
     /// True when the ring holds no samples.
     pub fn is_empty(&self) -> bool {
-        self.len() == 0
+        self.store.is_empty()
     }
 }
 
@@ -1348,5 +1450,55 @@ mod tests {
             };
             assert_eq!(*qos, custom.qos(), "a configured QoS reaches every reply");
         }
+    }
+
+    /// A sample keeps what it retains until the ring lets the sample go — by
+    /// eviction, which is when the reference library releases the key a cached
+    /// sample held, and not before.
+    #[test]
+    fn a_sample_keeps_what_it_retains_until_the_ring_lets_it_go() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        struct Held(Arc<AtomicUsize>);
+        impl Drop for Held {
+            fn drop(&mut self) {
+                self.0.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+
+        let released = Arc::new(AtomicUsize::new(0));
+        let store = CacheStore::new(CacheConfig {
+            max_samples: 1,
+            ..CacheConfig::default()
+        });
+        let sample = |released: &Arc<AtomicUsize>| {
+            CachedSample::new(
+                "demo/k",
+                vec![1],
+                None,
+                TimestampHint::default(),
+                SampleKind::Put,
+            )
+            .keeping(Some(Retained::new(Arc::new(Held(Arc::clone(released))))))
+        };
+
+        store.cache_sample(sample(&released));
+        assert_eq!(
+            released.load(Ordering::SeqCst),
+            0,
+            "a sample in the ring holds what it retains"
+        );
+        store.cache_sample(sample(&released));
+        assert_eq!(
+            released.load(Ordering::SeqCst),
+            1,
+            "the evicted sample lets go of what it retained, and only that one"
+        );
+        drop(store);
+        assert_eq!(
+            released.load(Ordering::SeqCst),
+            2,
+            "dropping the store releases the sample still in it"
+        );
     }
 }

@@ -45,6 +45,7 @@ use crate::pubsub::{
 };
 use crate::result::{ZResult, Z_ERR_GENERIC, Z_ERR_INVALID, Z_ERR_NULL, Z_OK};
 use crate::session::{session_state, z_loaned_session_t};
+use crate::write_filter::PicoSession;
 use wz_capi_core::faces::{SharedSession, TokenId};
 
 /// pico `z_liveliness_token_options_t` — a single `uint8_t __dummy`
@@ -111,6 +112,39 @@ pub(crate) struct TokenState {
     _key: DeclaredKeyexpr,
 }
 
+impl TokenState {
+    /// Declare a token on `keyexpr`: the whole key's declaration, then the token
+    /// announced on it and retracted naming the key.
+    ///
+    /// R2959 — pico declares the whole key, announces the token on that
+    /// declaration, and names it again in the retraction
+    /// (`vendor/zenoh-pico/src/net/liveliness.c` @
+    /// `_Z_RETURN_IF_ERR(_z_declared_keyexpr_declare(zn, &ke, keyexpr));` and
+    /// `_z_declaration_t declaration = _z_make_undecl_token(id, &wireexpr);`).
+    ///
+    /// `existing` is the caller's own key when it is already a declaration,
+    /// which is shared rather than declared again.
+    pub(crate) fn declare(
+        session: &PicoSession,
+        keyexpr: &str,
+        existing: Option<&DeclaredKeyexpr>,
+    ) -> Result<Self, ZResult> {
+        let key = DeclaredKeyexpr::declare(&session.shared, keyexpr, existing)?;
+        let Some(id) = session.shared.declare_liveliness_token_on_wire(
+            keyexpr.to_owned(),
+            key.wire(&session.shared),
+            LivelinessOptions::new().with_retraction_naming_the_key(true),
+        ) else {
+            return Err(Z_ERR_GENERIC);
+        };
+        Ok(Self {
+            shared: session.shared.clone(),
+            id,
+            _key: key,
+        })
+    }
+}
+
 impl Drop for TokenState {
     fn drop(&mut self) {
         self.shared.undeclare_liveliness_token(self.id);
@@ -169,27 +203,10 @@ pub unsafe extern "C" fn z_liveliness_declare_token(
         let Some(ke) = keyexpr_str(keyexpr) else {
             return Z_ERR_INVALID;
         };
-        // R2959 — pico declares the whole key, announces the token on that
-        // declaration, and names it again in the retraction
-        // (`vendor/zenoh-pico/src/net/liveliness.c` @
-        // `_Z_RETURN_IF_ERR(_z_declared_keyexpr_declare(zn, &ke, keyexpr));` and
-        // `_z_declaration_t declaration = _z_make_undecl_token(id, &wireexpr);`).
-        let key = match DeclaredKeyexpr::declare(&state.shared, ke, declared_of(keyexpr)) {
-            Ok(key) => key,
+        let boxed = match TokenState::declare(&PicoSession::of(state), ke, declared_of(keyexpr)) {
+            Ok(token) => Box::new(token),
             Err(rc) => return rc,
         };
-        let Some(id) = state.shared.declare_liveliness_token_on_wire(
-            ke.to_owned(),
-            key.wire(&state.shared),
-            LivelinessOptions::new().with_retraction_naming_the_key(true),
-        ) else {
-            return Z_ERR_GENERIC;
-        };
-        let boxed = Box::new(TokenState {
-            shared: state.shared.clone(),
-            id,
-            _key: key,
-        });
         *token = z_owned_liveliness_token_t {
             handle: Box::into_raw(boxed) as *mut c_void,
             _pad: [std::ptr::null_mut(); 2],

@@ -62,7 +62,7 @@ use crate::query::{
 };
 use crate::result::{ZResult, Z_ERR_INVALID, Z_ERR_NULL, Z_OK};
 use crate::session::{session_state, z_loaned_session_t};
-use crate::write_filter::WriteFilter;
+use crate::write_filter::{PicoSession, WriteFilter};
 
 // --- options ---------------------------------------------------------------
 
@@ -374,7 +374,7 @@ pub unsafe extern "C" fn z_declare_querier(
         // (`vendor/zenoh-pico/src/api/api.c` @
         // `querier->_val._target == Z_QUERY_TARGET_ALL_COMPLETE`).
         let filter = WriteFilter::declare(
-            state,
+            &PicoSession::of(state),
             FilterPlane::Queryables {
                 complete_required: target == crate::get::Z_QUERY_TARGET_ALL_COMPLETE,
             },

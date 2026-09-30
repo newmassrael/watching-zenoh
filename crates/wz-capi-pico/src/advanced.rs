@@ -50,7 +50,8 @@ use std::time::Duration;
 
 use wz_runtime_tokio::advanced_cache::{CacheConfig, RepliesConfig};
 use wz_runtime_tokio::advanced_publisher::{
-    AdvancedPublisherOptions, MissDetectionConfig, Sequencing,
+    AdvancedPublisherError, AdvancedPublisherOn, AdvancedPublisherOptions, AdvancedPutOptions,
+    MissDetectionConfig, Sequencing,
 };
 use wz_runtime_tokio::advanced_subscriber::{
     AdvancedSubscriberOptions, HistoryConfig, Miss, RecoveryConfig, SubscriberDetection,
@@ -59,6 +60,7 @@ use wz_runtime_tokio::sample::Sample;
 use wz_runtime_tokio::sink::SampleView;
 
 use crate::abi::{handle_ref, z_loaned_keyexpr_t, z_moved_bytes_t};
+use crate::advanced_plane::PicoPlane;
 use crate::ffi::{guard_val, guarded, CClosure as FfiClosure};
 use crate::keyexpr::keyexpr_str;
 use crate::pubsub::{
@@ -67,8 +69,9 @@ use crate::pubsub::{
 };
 use crate::result::{ZResult, Z_ERR_GENERIC, Z_ERR_INVALID, Z_ERR_NULL, Z_OK};
 use crate::session::{session_state, z_loaned_session_t};
+use crate::write_filter::PicoSession;
 use crate::zid::z_id_t;
-use wz_capi_core::faces::{AdvPubId, AdvSubId, SharedSession};
+use wz_capi_core::faces::{AdvSubId, SharedSession};
 use wz_capi_core::listeners::ListenerSet;
 
 // ---------------------------------------------------------------------------
@@ -331,12 +334,19 @@ pub struct ze_advanced_publisher_options_t {
 
 /// pico `ze_advanced_publisher_put_options_t`, 32 B measured (one embedded
 /// `z_publisher_put_options_t`).
+///
+/// The embedded type is the plain publisher's own, not a second spelling of its
+/// four fields. This struct used to list them itself, and in the wrong order:
+/// `attachment` ahead of `timestamp`, where the header has `encoding`,
+/// `timestamp`, `attachment`, `source_info`. A program that set the attachment
+/// wrote it into the slot this side read as the timestamp, so the attachment was
+/// never taken, and a program that set a timestamp had it read as an attachment.
+/// Nothing saw it because nothing set either (upstream's example passes the
+/// defaults), and the size assertion below holds for both orders. Embedding the
+/// type is what makes the two layouts one.
 #[repr(C)]
 pub struct ze_advanced_publisher_put_options_t {
-    pub encoding: *mut c_void,
-    pub attachment: *mut z_moved_bytes_t,
-    pub timestamp: *mut c_void,
-    pub source_info: *mut c_void,
+    pub put_options: crate::pubsub::z_publisher_put_options_t,
 }
 
 /// pico `ze_advanced_publisher_delete_options_t`, 16 B measured.
@@ -420,10 +430,7 @@ pub unsafe extern "C" fn ze_advanced_publisher_put_options_default(
     if options.is_null() {
         return;
     }
-    (*options).encoding = std::ptr::null_mut();
-    (*options).attachment = std::ptr::null_mut();
-    (*options).timestamp = std::ptr::null_mut();
-    (*options).source_info = std::ptr::null_mut();
+    crate::pubsub::z_publisher_put_options_default(&mut (*options).put_options);
 }
 
 /// Fill default advanced-publisher delete options.
@@ -469,30 +476,27 @@ impl ze_owned_advanced_publisher_t {
     }
 }
 
-/// Behind a `ze_owned_advanced_publisher_t` handle: the registry entry to
-/// retract. Dropping it undeclares on every face, so an implicit `z_drop` and
-/// an explicit `ze_undeclare_advanced_publisher` take the identical path.
+/// Behind a `ze_owned_advanced_publisher_t` handle: the composite, on this
+/// session's plane. Dropping it retracts its entities in pico's order, so an
+/// implicit `z_drop` and an explicit `ze_undeclare_advanced_publisher` take the
+/// identical path.
 pub(crate) struct AdvPubState {
     shared: Arc<SharedSession>,
-    id: AdvPubId,
-    /// R311y559 — the keyexpr, kept so `ze_advanced_publisher_keyexpr` has
-    /// stable storage to borrow, plus its cached `{ start, len }` view. Bound
+    publisher: AdvancedPublisherOn<PicoPlane>,
+    /// R311y559 — the cached `{ start, len }` view of the publisher's key, so
+    /// `ze_advanced_publisher_keyexpr` has stable storage to borrow. Bound
     /// after boxing, as everywhere else in this crate.
-    keyexpr: String,
+    ///
+    /// It is the WRAPPED PUBLISHER'S own key, declaration and all, as pico's
+    /// `z_publisher_keyexpr(&pub->_publisher)` is: a put made on the loan
+    /// aliases.
     loaned_keyexpr: crate::abi::z_loaned_keyexpr_t,
 }
 
 impl AdvPubState {
-    /// Point the cached view at this state's own keyexpr, after boxing.
+    /// Point the cached view at the wrapped publisher's own key, after boxing.
     fn bind(&mut self) {
-        self.loaned_keyexpr =
-            crate::abi::z_loaned_keyexpr_t::borrowed(self.keyexpr.as_ptr(), self.keyexpr.len());
-    }
-}
-
-impl Drop for AdvPubState {
-    fn drop(&mut self) {
-        self.shared.undeclare_advanced_publisher(self.id);
+        self.loaned_keyexpr = self.publisher.publisher().key().loaned();
     }
 }
 
@@ -587,9 +591,9 @@ pub unsafe extern "C" fn ze_declare_advanced_publisher(
             Some(k) => k.to_owned(),
             None => return Z_ERR_INVALID,
         };
-        // The same outbound canon gate every declare in this crate hoists: the
-        // per-face declare is best-effort, so a per-face reject would be
-        // swallowed and the call would report `Z_OK` for a dead SSOT entry.
+        // The same outbound canon gate every declare in this crate hoists, so a
+        // key no peer could take is refused with the code a plain publisher
+        // gives it before anything is declared.
         if wz_runtime_tokio::keyexpr_canon::check_outbound_keyexpr_pico_safe(&ke).is_err() {
             return Z_ERR_INVALID;
         }
@@ -604,15 +608,25 @@ pub unsafe extern "C" fn ze_declare_advanced_publisher(
         {
             return Z_ERR_INVALID;
         }
-        // R311y559 — kept for `ze_advanced_publisher_keyexpr`; `ke` is moved.
-        let adv_keyexpr = ke.clone();
-        let id = state
-            .shared
-            .declare_advanced_publisher(ke, advanced_publisher_options(options));
+        let session = PicoSession::of(state);
+        // The publisher's source identity is the session's own zid, the one its
+        // peers see in the handshake.
+        let zid = session.shared.zid().to_vec();
+        let publisher = match AdvancedPublisherOn::declare_on(
+            Arc::new(PicoPlane::new(session)),
+            ke,
+            advanced_publisher_options(options),
+            zid,
+        ) {
+            Ok(publisher) => publisher,
+            // A derived `@adv` key no peer could take is the caller's key and
+            // not a failure of the session.
+            Err(AdvancedPublisherError::InvalidAdvKeyexpr(_)) => return Z_ERR_INVALID,
+            Err(_) => return Z_ERR_GENERIC,
+        };
         let mut boxed = Box::new(AdvPubState {
             shared: state.shared.clone(),
-            id,
-            keyexpr: adv_keyexpr,
+            publisher,
             loaned_keyexpr: crate::abi::z_loaned_keyexpr_t::borrowed(std::ptr::null(), 0),
         });
         boxed.bind();
@@ -711,11 +725,23 @@ pub unsafe extern "C" fn ze_advanced_publisher_put(
     options: *mut ze_advanced_publisher_put_options_t,
 ) -> ZResult {
     guarded(|| {
-        // Consume the moved payload and attachment FIRST, so every early return
-        // below still honours the C side's ownership transfer.
+        // Consume the moved payload, attachment and encoding FIRST, so every
+        // early return below still honours the C side's ownership transfer.
         let buf = crate::pubsub::take_moved_bytes(payload);
+        let mut put_options = AdvancedPutOptions::default();
         if !options.is_null() {
-            drop(crate::pubsub::take_moved_bytes((*options).attachment));
+            let embedded = &(*options).put_options;
+            if let Some(attachment) = crate::pubsub::take_moved_bytes(embedded.attachment) {
+                put_options = put_options.with_attachment(attachment.to_vec());
+            }
+            if let Some(encoding) = crate::encoding::take_moved_encoding(embedded.encoding) {
+                put_options = put_options.with_encoding(encoding);
+            }
+            // The timestamp and the source info are NOT read: pico overwrites
+            // both with the publisher's own sequencing before it sends
+            // (`vendor/zenoh-pico/src/api/advanced_publisher.c` @
+            // `opt.put_options.timestamp = &timestamp;`), so a caller's value
+            // never reaches the wire there and must not here.
         }
         let Some(buf) = buf else {
             return Z_ERR_NULL;
@@ -723,8 +749,12 @@ pub unsafe extern "C" fn ze_advanced_publisher_put(
         let Some(state) = handle_ref::<ze_loaned_advanced_publisher_t, AdvPubState>(pub_) else {
             return Z_ERR_NULL;
         };
-        state.shared.advanced_publisher_put(state.id, &buf);
-        Z_OK
+        // Z_OK when the write filter held the sample back as well as when it
+        // went out: the publisher answers for the put, not for a recipient.
+        match state.publisher.put_with(&buf, put_options) {
+            Ok(_) => Z_OK,
+            Err(_) => Z_ERR_GENERIC,
+        }
     })
 }
 
@@ -1441,19 +1471,15 @@ pub unsafe extern "C" fn ze_advanced_publisher_delete(
         else {
             return Z_ERR_NULL;
         };
-        // BEST-EFFORT, and `Z_OK` even when no face carried it — because the
-        // sibling `ze_advanced_publisher_put` is, for the reason
-        // `SharedSession::advanced_publisher_put` states: the fan-out is
-        // per-face and a C caller has no per-face handle to retry with.
-        //
-        // Upstream returns the underlying impl's result from BOTH
-        // (`src/api/advanced_publisher.c:407,423` — one `_z_publisher_*_impl`
-        // call each), so wz diverges here. That divergence is ONE named thing
-        // covering both entry points rather than two behaviours: a publisher
-        // declared before its first peer must not answer `Z_OK` to a put and an
-        // error to a delete.
-        let _delivered = state.shared.advanced_publisher_delete(state.id);
-        Z_OK
+        // The underlying send's result, as upstream returns it from BOTH entry
+        // points (`src/api/advanced_publisher.c:407,423` — one
+        // `_z_publisher_*_impl` call each). A delete with no peer to hear it is
+        // `Z_OK`, as a put with none is: the write filter holds it back and the
+        // send that follows is not an error.
+        match state.publisher.delete() {
+            Ok(_) => Z_OK,
+            Err(_) => Z_ERR_GENERIC,
+        }
     })
 }
 
@@ -1530,7 +1556,7 @@ unsafe fn advanced_publisher_match_target(
     pub_: *const ze_loaned_advanced_publisher_t,
 ) -> Option<(Arc<SharedSession>, String)> {
     crate::abi::handle_ref::<ze_loaned_advanced_publisher_t, AdvPubState>(pub_)
-        .map(|state| (state.shared.clone(), state.keyexpr.clone()))
+        .map(|state| (state.shared.clone(), state.publisher.keyexpr().to_owned()))
 }
 
 /// Declare a miss listener that lives as long as its subscriber (pico
@@ -1580,8 +1606,10 @@ pub unsafe extern "C" fn ze_advanced_subscriber_declare_background_sample_miss_l
 pub(crate) unsafe fn advanced_publisher_identity(
     pub_: *const ze_loaned_advanced_publisher_t,
 ) -> Option<([u8; 16], u64)> {
+    // The wrapped publisher's entity id, as pico's `ze_advanced_publisher_id` is
+    // `z_publisher_id` of the publisher it wraps.
     crate::abi::handle_ref::<ze_loaned_advanced_publisher_t, AdvPubState>(pub_)
-        .map(|state| (state.shared.zid(), state.id))
+        .map(|state| (state.shared.zid(), u64::from(state.publisher.eid())))
 }
 
 /// The cached keyexpr borrow behind a loaned advanced publisher.

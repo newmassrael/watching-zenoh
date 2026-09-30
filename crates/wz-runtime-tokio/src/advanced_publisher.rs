@@ -3,7 +3,7 @@
 
 //! R311y69 — `ext-pubsub-advanced-publisher` (§5.25): a publisher that
 //! stamps a per-sample `SourceInfo` sequence number, retains its samples
-//! in an [`AdvancedCache`] for recovery, and announces its existence with
+//! in a [`CacheStore`] for recovery, and announces its existence with
 //! an `@adv` liveliness token.
 //!
 //! The wz mirror of zenoh-ext `advanced_publisher.rs`. On each
@@ -33,7 +33,7 @@ use wz_session_core::zid_hex::zid_to_zenoh_hex;
 #[cfg(feature = "ext-pubsub-sample-miss-detection")]
 use wz_session_core::serde_codec::z_serialize;
 
-use crate::advanced_cache::{AdvancedCache, CacheConfig, CachedSample};
+use crate::advanced_cache::{CacheConfig, CacheStore, CachedSample, Retained};
 // R2618 — the five wire knobs, imported from the same modules
 // `session::publish_common` reads them from, so this file and the publish path
 // cannot come to mean different things by the same name.
@@ -41,7 +41,7 @@ use crate::locality::Locality;
 use crate::sample::Reliability;
 use crate::session::{
     LivelinessAliasError, LivelinessOptions, LivelinessToken, PublishError, PublishOptions,
-    Publisher, QueryableError, Session, Unicast,
+    Publisher, Queryable, QueryableError, Session, Unicast,
 };
 use crate::session_glue::SessionLinkActions;
 use crate::timestamp_source::FallbackStamp;
@@ -361,6 +361,10 @@ pub enum AdvancedPublisherError {
     /// [`Session::publish`] answers `Ok` on an ill-formed keyexpr, so the beacon
     /// put a non-expression on the wire and no caller could learn it.
     InvalidAdvKeyexpr(crate::keyexpr_canon::OutboundKeyexprError),
+    /// The plane the publisher was declared on could not declare one of its
+    /// entities, for a reason of its own — a key table out of ids, say. The
+    /// plane names the reason; a runtime session never raises this.
+    Plane(String),
 }
 
 impl From<QueryableError> for AdvancedPublisherError {
@@ -374,31 +378,172 @@ impl From<LivelinessAliasError> for AdvancedPublisherError {
     }
 }
 
-/// A live advanced publisher bound to a [`Session`]. Owns the (optional)
-/// cache + liveliness token (RAII: dropping it tears them down) and the
-/// per-publisher sequence counter.
-pub struct AdvancedPublisher<R: SessionRuntime, T: TimeSource> {
-    session: Session<R, T, Unicast>,
-    keyexpr: String,
-    zid: Vec<u8>,
-    eid: u32,
-    seqnum: Option<Arc<AtomicU32>>,
-    stamp: FallbackStamp,
-    /// R2618 — the publisher's wire knobs, applied to every Put and Del it
-    /// makes. See [`WireQos`] for why this is one value rather than a chain at
-    /// each site.
-    qos: WireQos,
+/// A plain publisher a plane declared for an advanced one, with the entity id it
+/// reports.
+pub struct DeclaredPublisher<H> {
+    /// The plane's handle: dropping it retracts the publisher.
+    pub handle: H,
+    /// The publisher's entity id — the `eid` half of its `(zid, eid)` global id,
+    /// stamped into every sample's `SourceInfo` and rendered into the `@adv`
+    /// key.
+    pub eid: u32,
+}
+
+/// WHERE an advanced publisher lives: what declares its entities and what
+/// carries its samples.
+///
+/// An advanced publisher is a composition — a plain publisher, a cache queryable,
+/// a liveliness token and a beacon publisher — and each of those four is
+/// declared differently by the host that owns the session. On a runtime
+/// [`Session`] they are the plain declarations ([`SessionPlane`]); on a C
+/// session they are the planes of one shared key table, each announced under a
+/// declared key id and retracted in the order the reference library retracts
+/// them. The composition itself — what is validated, in what order the four are
+/// declared, what each put stamps and retains, what a beacon says — is the same
+/// on both, so it is written once, in [`AdvancedPublisherOn`], and a host
+/// supplies only the four declarations and the sends.
+///
+/// Every handle a plane returns retracts its entity when dropped. The composite
+/// fixes the ORDER those drops run in ([`AdvancedPublisherOn`]'s field order), so
+/// a plane does not have to.
+pub trait AdvancedPublisherPlane: Send + Sync + 'static {
+    /// The clock the beacon's period is slept on.
+    type Time: TimeSource + Send + Sync + 'static;
+    /// The plain publisher the advanced one wraps.
+    type Publisher: Send + 'static;
+    /// The cache queryable.
+    type Queryable: Send + 'static;
+    /// The `@adv` liveliness token.
+    type Token: Send + 'static;
+    /// The publisher the heartbeat beacon is sent on.
+    type Beacon: Send + Sync + 'static;
+
+    /// The node's HLC, which stamps every sample.
+    fn node_hlc(&self) -> &crate::node_clock::NodeHlc;
+
+    /// The clock a beacon's period is slept on.
+    fn clock(&self) -> &Arc<Self::Time>;
+
+    /// Whether this host has a clock to stamp timestamps from — the
+    /// precondition of timestamp sequencing (R2485). A runtime session has one
+    /// when its node's HLC exists, which is zenoh's own rule; a host whose
+    /// timestamps never depended on that says so.
+    fn stamps(&self) -> bool {
+        self.node_hlc().is_stamping()
+    }
+
+    /// Whether the beacon task can be spawned from the calling thread. A refusal
+    /// is reported BEFORE anything is declared, so it never leaves a
+    /// half-declared publisher to roll back.
+    fn check_can_spawn(&self) -> Result<(), AdvancedPublisherError> {
+        Ok(())
+    }
+
+    /// Declare the plain publisher on `keyexpr`. The wire knobs in `options` are
+    /// the advanced publisher's own, folded the way its puts carry them.
+    fn declare_publisher(
+        &self,
+        keyexpr: &str,
+        options: PublishOptions,
+    ) -> Result<DeclaredPublisher<Self::Publisher>, AdvancedPublisherError>;
+
+    /// Declare the cache queryable on the `@adv` key, answering out of `store`.
+    ///
+    /// The plane asks the store for as many handlers as it has peers to answer
+    /// ([`CacheStore::query_handler`]): each is a fresh closure over the same
+    /// ring.
+    fn declare_cache_queryable(
+        &self,
+        keyexpr: &str,
+        store: &CacheStore,
+    ) -> Result<Self::Queryable, AdvancedPublisherError>;
+
+    /// Declare the `@adv` liveliness token.
+    fn declare_token(&self, keyexpr: &str) -> Result<Self::Token, AdvancedPublisherError>;
+
+    /// Declare the publisher the heartbeat beacon is sent on, `sporadic` saying
+    /// which arm it belongs to.
+    fn declare_beacon(
+        &self,
+        keyexpr: &str,
+        sporadic: bool,
+    ) -> Result<Self::Beacon, AdvancedPublisherError>;
+
+    /// Send one sample on the publisher's key. The byte count is what the
+    /// session reports; a plane that held the sample back (a closed write
+    /// filter) answers `Ok(0)`, which is a put with no recipient and not an
+    /// error.
+    fn publish(
+        &self,
+        publisher: &Self::Publisher,
+        keyexpr: &str,
+        payload: &[u8],
+        options: PublishOptions,
+    ) -> Result<usize, PublishError>;
+
+    /// Send one heartbeat beacon, on `beacon` when the publisher declared one
+    /// and on the key itself when it did not (an on-demand beacon from a
+    /// publisher with no heartbeat configured). A failure is non-fatal: the next
+    /// tick re-sends.
+    fn publish_beacon(
+        &self,
+        beacon: Option<&Self::Beacon>,
+        keyexpr: &str,
+        payload: &[u8],
+        sporadic: bool,
+    );
+
+    /// What a cached sample keeps alive so the publisher's key stays declared
+    /// while the ring holds it — [`Retained`]. `None` for a plane whose key is
+    /// not a declaration.
+    fn retained_key(&self, publisher: &Self::Publisher) -> Option<Retained>;
+}
+
+/// The cache queryable and the ring it answers from.
+///
+/// The queryable is listed first so it retracts first, and the ring — whose
+/// samples may still keep the publisher's key declared — goes after it.
+struct DeclaredCache<P: AdvancedPublisherPlane> {
+    _queryable: P::Queryable,
+    store: CacheStore,
+}
+
+/// The heartbeat beacon: the task is listed first so it is stopped before the
+/// publisher it sends on is retracted.
+#[cfg(feature = "ext-pubsub-sample-miss-detection")]
+struct DeclaredBeacon<P: AdvancedPublisherPlane> {
+    _task: HeartbeatTask,
+    _publisher: Arc<P::Beacon>,
+}
+
+/// A live advanced publisher on a [`AdvancedPublisherPlane`]. Owns the wrapped
+/// publisher, the (optional) cache, liveliness token and beacon (RAII: dropping
+/// it tears them down) and the per-publisher sequence counter.
+///
+/// [`AdvancedPublisher`] is this on a runtime [`Session`].
+pub struct AdvancedPublisherOn<P: AdvancedPublisherPlane> {
+    // ⚠ THE FIELD ORDER IS THE TEARDOWN ORDER, and it is the reference
+    // library's: zenoh-pico retracts the publisher, then the token, then the
+    // beacon's publisher, then the cache
+    // (`vendor/zenoh-pico/src/api/advanced_publisher.c` @
+    // `z_result_t _ze_undeclare_advanced_publisher_clear(_ze_advanced_publisher_t *pub) {`),
+    // and rust drops fields in the order they are declared. A host that declares
+    // key ids makes the order visible to a peer, because each entity's key goes
+    // when its last holder does.
     /// R2619 — THE PLAIN PUBLISHER THIS ONE WRAPS, and the reason it is a field
     /// rather than a set of re-implemented methods: upstream's advanced
     /// publisher IS a wrapper, `zenoh-ext/src/advanced_publisher.rs` @ `pub struct AdvancedPublisher<'a> {`
     /// holding a `Publisher`, and every surface this round adds delegates to it
     /// there — `zenoh-ext/src/advanced_publisher.rs` @ `self.publisher.matching_status()`.
     ///
+    /// Declared FIRST, as upstream declares it: the `@adv` entities and the
+    /// identity the sequence numbers carry are all derived from it.
+    ///
     /// IT IS NOT PUBLISHED THROUGH, and that difference is stated rather than
     /// hidden: wz's `Publisher::put` carries the publisher's FIXED options,
     /// while an advanced put varies timestamp / source_info / encoding /
-    /// attachment per sample, so the sends still go through `session.publish`.
-    /// What holding it buys is the state the matching surface READS —
+    /// attachment per sample, so the sends still go through the plane's
+    /// `publish`. What holding it buys is the state the matching surface READS —
     /// declaring it is what registers this session's SUBSCRIBERS Interest for
     /// the keyexpr (R2577), so before this round an advanced publisher's
     /// matching status would have consulted a registry nobody had asked the
@@ -408,17 +553,27 @@ pub struct AdvancedPublisher<R: SessionRuntime, T: TimeSource> {
     /// Built with THIS publisher's folded wire options on purpose: the matching
     /// poll gates on the publisher's own `locality`, so a delegate carrying
     /// different options would answer about a publisher that does not exist.
-    publisher: Publisher<R, T>,
-    cache: Option<AdvancedCache<R, T>>,
-    _token: Option<LivelinessToken<R, T>>,
+    publisher: P::Publisher,
+    _token: Option<P::Token>,
+    /// R311y85 — the heartbeat beacon (RAII abort-on-drop task plus the publisher
+    /// it sends on), `Some` only when `MissDetectionConfig` set a
+    /// `state_publisher` + sequencing is on.
+    #[cfg(feature = "ext-pubsub-sample-miss-detection")]
+    beacon: Option<DeclaredBeacon<P>>,
+    cache: Option<DeclaredCache<P>>,
+    keyexpr: String,
+    zid: Vec<u8>,
+    eid: u32,
+    seqnum: Option<Arc<AtomicU32>>,
+    stamp: FallbackStamp,
+    /// R2618 — the publisher's wire knobs, applied to every Put and Del it
+    /// makes. See [`WireQos`] for why this is one value rather than a chain at
+    /// each site.
+    qos: WireQos,
     /// R311y85 — the publisher's `@adv` KE, retained so the heartbeat-beacon
     /// emit (the background task + the `emit_heartbeat_once` seam) can publish on it.
     #[cfg(feature = "ext-pubsub-sample-miss-detection")]
     adv_keyexpr: String,
-    /// R311y85 — the heartbeat beacon task (RAII abort-on-drop), `Some` only
-    /// when `MissDetectionConfig` set a `state_publisher` + sequencing is on.
-    #[cfg(feature = "ext-pubsub-sample-miss-detection")]
-    _heartbeat_task: Option<HeartbeatTask>,
     /// R2558 — which beacon ARM this publisher is, retained because
     /// [`Self::emit_heartbeat_once`] must publish with the SAME options the
     /// timer does. The sporadic arm blocks under congestion and the periodic
@@ -426,24 +581,155 @@ pub struct AdvancedPublisher<R: SessionRuntime, T: TimeSource> {
     /// that ignored the arm would be a second opinion about the same publisher.
     #[cfg(feature = "ext-pubsub-sample-miss-detection")]
     heartbeat_sporadic: bool,
+    plane: Arc<P>,
 }
 
-impl<R, T> AdvancedPublisher<R, T>
+/// An advanced publisher on a runtime [`Session`] — the plain declarations, with
+/// every entity on its literal key.
+pub type AdvancedPublisher<R, T> = AdvancedPublisherOn<SessionPlane<R, T>>;
+
+/// [`AdvancedPublisherPlane`] for a runtime [`Session`]: each entity is the
+/// session's own plain declaration, announced on its literal key.
+pub struct SessionPlane<R: SessionRuntime, T: TimeSource> {
+    session: Session<R, T, Unicast>,
+}
+
+impl<R: SessionRuntime, T: TimeSource> SessionPlane<R, T> {
+    /// The plane of `session`.
+    pub fn new(session: &Session<R, T, Unicast>) -> Self {
+        Self {
+            session: session.clone(),
+        }
+    }
+}
+
+impl<R, T> AdvancedPublisherPlane for SessionPlane<R, T>
 where
     R: SessionRuntime + 'static,
     T: TimeSource + Send + Sync + 'static,
     <R as SessionRuntime>::LinkSink: Send + Sync,
     SessionLinkActions<R, T>: Send + Sync + 'static,
-    Session<R, T, Unicast>: Send + 'static,
+    Session<R, T, Unicast>: Send + Sync + 'static,
 {
-    /// Declare an advanced publisher on `keyexpr`. `local_zid` (1..=16
-    /// bytes) is this publisher's source identity, stamped into every
-    /// sample's `SourceInfo` and rendered into the `@adv` KE. Allocates the
-    /// publisher entity id from the session counter, then (per `options`)
-    /// declares the cache queryable + the liveliness token on
-    /// `<keyexpr>/@adv/pub/<zid>/<eid|uhlc>/_`.
-    pub fn declare(
-        session: &Session<R, T, Unicast>,
+    type Time = T;
+    type Publisher = Publisher<R, T>;
+    type Queryable = Queryable<R, T>;
+    type Token = LivelinessToken<R, T>;
+    type Beacon = ();
+
+    fn node_hlc(&self) -> &crate::node_clock::NodeHlc {
+        self.session.node_hlc()
+    }
+
+    fn clock(&self) -> &Arc<T> {
+        self.session.clock()
+    }
+
+    /// The runtime check this constructor has always made: the beacon task is
+    /// spawned from the calling context.
+    fn check_can_spawn(&self) -> Result<(), AdvancedPublisherError> {
+        #[cfg(feature = "ext-pubsub-sample-miss-detection")]
+        {
+            tokio::runtime::Handle::try_current().map_err(|_| AdvancedPublisherError::NoRuntime)?;
+        }
+        Ok(())
+    }
+
+    fn declare_publisher(
+        &self,
+        keyexpr: &str,
+        options: PublishOptions,
+    ) -> Result<DeclaredPublisher<Publisher<R, T>>, AdvancedPublisherError> {
+        // Allocate the publisher entity id from the session's dedicated
+        // entity-id SSOT (the `SourceInfo.eid` id-space). zenoh-pico draws
+        // every entity id from one `_z_get_entity_id`; wz keeps per-purpose
+        // id counters, so the publisher eid has its own (R311y72: it was
+        // minted from the token-id counter — a conflated namespace + a
+        // truncating `as u32`; now a real u32 entity counter).
+        let eid = self.session.actions().alloc_next_entity_id();
+        Ok(DeclaredPublisher {
+            handle: self.session.declare_publisher(keyexpr.to_owned(), options),
+            eid,
+        })
+    }
+
+    fn declare_cache_queryable(
+        &self,
+        keyexpr: &str,
+        store: &CacheStore,
+    ) -> Result<Queryable<R, T>, AdvancedPublisherError> {
+        // R2556 — INCOMPLETE, which is upstream's default: see
+        // [`crate::advanced_cache::AdvancedCache::declare`], whose declaration this is.
+        Ok(self.session.declare_queryable(
+            keyexpr.to_owned(),
+            crate::session::QueryableOptions::default(),
+            store.query_handler(),
+        )?)
+    }
+
+    fn declare_token(
+        &self,
+        keyexpr: &str,
+    ) -> Result<LivelinessToken<R, T>, AdvancedPublisherError> {
+        Ok(self
+            .session
+            .declare_token(keyexpr.to_owned(), LivelinessOptions::default())?)
+    }
+
+    /// A runtime session sends the beacon on its literal key with no publisher
+    /// of its own; there is nothing to declare.
+    fn declare_beacon(
+        &self,
+        _keyexpr: &str,
+        _sporadic: bool,
+    ) -> Result<(), AdvancedPublisherError> {
+        Ok(())
+    }
+
+    fn publish(
+        &self,
+        _publisher: &Publisher<R, T>,
+        keyexpr: &str,
+        payload: &[u8],
+        options: PublishOptions,
+    ) -> Result<usize, PublishError> {
+        self.session.publish(keyexpr, payload, options)
+    }
+
+    #[cfg(feature = "ext-pubsub-sample-miss-detection")]
+    fn publish_beacon(&self, _beacon: Option<&()>, keyexpr: &str, payload: &[u8], sporadic: bool) {
+        let _ = self
+            .session
+            .publish(keyexpr, payload, heartbeat_publish_options(sporadic));
+    }
+
+    #[cfg(not(feature = "ext-pubsub-sample-miss-detection"))]
+    fn publish_beacon(
+        &self,
+        _beacon: Option<&()>,
+        _keyexpr: &str,
+        _payload: &[u8],
+        _sporadic: bool,
+    ) {
+    }
+
+    fn retained_key(&self, _publisher: &Publisher<R, T>) -> Option<Retained> {
+        None
+    }
+}
+
+impl<P: AdvancedPublisherPlane> AdvancedPublisherOn<P> {
+    /// Declare an advanced publisher on `plane`.
+    ///
+    /// The order is the reference library's
+    /// (`vendor/zenoh-pico/src/api/advanced_publisher.c` @
+    /// `z_result_t ze_declare_advanced_publisher(const z_loaned_session_t *zs, ze_owned_advanced_publisher_t *pub,`):
+    /// the plain publisher first, then the cache queryable, the liveliness token
+    /// and the beacon's publisher. Everything that can be refused without a
+    /// declaration is refused BEFORE the first one, so a refusal does not put a
+    /// publisher on the wire only to retract it.
+    pub fn declare_on(
+        plane: Arc<P>,
         keyexpr: impl Into<String>,
         options: AdvancedPublisherOptions,
         local_zid: Vec<u8>,
@@ -494,27 +780,22 @@ where
         // token declarations, so a refusal never leaves a half-declared
         // publisher to roll back. See [`AdvancedPublisherError::TimestampingDisabled`]
         // for why degrading to the wall clock is worse than refusing.
-        if options.sequencing == Sequencing::Timestamp && !session.node_hlc().is_stamping() {
+        if options.sequencing == Sequencing::Timestamp && !plane.stamps() {
             return Err(AdvancedPublisherError::TimestampingDisabled);
         }
 
         // R311y90 (review C5) — fail fast & clear if off-runtime: the heartbeat
-        // beacon (below) is a tokio::spawn task, which PANICS without a runtime.
-        // Check the spawn precondition BEFORE declaring the cache / token so no
+        // beacon (below) is a spawned task, which PANICS without a runtime.
+        // Check the spawn precondition BEFORE declaring anything so no
         // half-declared publisher needs rollback. `heartbeat_spawn_params` is the
         // SSOT for "will spawn the beacon" — the spawn arm below gates on the same.
+        // Whether the calling context CAN spawn is the plane's to say: a runtime
+        // session spawns from the thread it is called on, a C session does not.
         #[cfg(feature = "ext-pubsub-sample-miss-detection")]
         if heartbeat_spawn_params(&options).is_some() {
-            tokio::runtime::Handle::try_current().map_err(|_| AdvancedPublisherError::NoRuntime)?;
+            plane.check_can_spawn()?;
         }
         let keyexpr = keyexpr.into();
-        // Allocate the publisher entity id from the session's dedicated
-        // entity-id SSOT (the `SourceInfo.eid` id-space). zenoh-pico draws
-        // every entity id from one `_z_get_entity_id`; wz keeps per-purpose
-        // id counters, so the publisher eid has its own (R311y72: it was
-        // minted from the token-id counter — a conflated namespace + a
-        // truncating `as u32`; now a real u32 entity counter).
-        let eid = session.actions().alloc_next_entity_id();
 
         // `@adv/pub/<zid>/<eid|uhlc>/_` — the detection + recovery suffix
         // (zenoh advanced_publisher.rs:317-329). The `<eid>` discriminator
@@ -524,16 +805,26 @@ where
         // than from a literal here: the subscriber must read the same chunk
         // this writes, and two independent literals are how one wire
         // vocabulary drifts into two.
-        let discriminator = match options.sequencing {
-            Sequencing::SequenceNumber => eid.to_string(),
-            Sequencing::Timestamp | Sequencing::None => crate::advanced_ke::KE_ADV_UHLC.to_string(),
+        //
+        // A function of the entity id rather than a value, because the id is
+        // the wrapped publisher's and does not exist until that is declared —
+        // while the check below has to run before anything is. The id is the
+        // `<eid>` chunk's digits and cannot change whether the expression parses,
+        // so the check reads it with id 0 and the declarations read the real one.
+        let adv_keyexpr_for = |eid: u32| {
+            let discriminator = match options.sequencing {
+                Sequencing::SequenceNumber => eid.to_string(),
+                Sequencing::Timestamp | Sequencing::None => {
+                    crate::advanced_ke::KE_ADV_UHLC.to_string()
+                }
+            };
+            crate::advanced_ke::publisher_adv_ke(
+                &keyexpr,
+                &zid_to_zenoh_hex(&local_zid),
+                &discriminator,
+                options.publisher_detection_metadata.as_deref(),
+            )
         };
-        let adv_keyexpr = crate::advanced_ke::publisher_adv_ke(
-            &keyexpr,
-            &zid_to_zenoh_hex(&local_zid),
-            &discriminator,
-            options.publisher_detection_metadata.as_deref(),
-        );
 
         // R2559 — THE DERIVED `@adv` EXPRESSION HAS TO PARSE AS A KEY
         // EXPRESSION, and this is the one place that can say so for every
@@ -593,27 +884,37 @@ where
         // would silently rewrite a keyexpr the caller and the subscriber both
         // spell the other way.
         //
-        // Placed after the eid allocation because the expression needs the
-        // discriminator, and before the cache / token declarations so a refusal
-        // never leaves a half-declared publisher to roll back — the same
-        // ordering rule the `TimestampingDisabled` and `NoRuntime` preconditions
-        // above are placed by. The burnt entity id is the one residue, and it is
-        // the residue upstream accepts too: it declares its main publisher
-        // before it can fail on the suffix.
-        crate::keyexpr_canon::check_outbound_keyexpr_pico_safe(&adv_keyexpr)
+        // Placed before the FIRST declaration, the wrapped publisher's included,
+        // so a refusal never leaves a half-declared publisher to roll back — the
+        // same ordering rule the `TimestampingDisabled` and `NoRuntime`
+        // preconditions above are placed by. That costs nothing the old order
+        // bought: it burnt an entity id on a refusal, and this burns none.
+        crate::keyexpr_canon::check_outbound_keyexpr_pico_safe(&adv_keyexpr_for(0))
             .map_err(AdvancedPublisherError::InvalidAdvKeyexpr)?;
 
+        // R2619 — the wrapped publisher, FIRST, with the same folded options the
+        // sends carry. Its entity id is this publisher's identity.
+        let qos = WireQos::from_options(&options);
+        let DeclaredPublisher {
+            handle: publisher,
+            eid,
+        } = plane.declare_publisher(&keyexpr, qos.apply(PublishOptions::put()))?;
+        let adv_keyexpr = adv_keyexpr_for(eid);
+
         let cache = match options.cache {
-            Some(config) => Some(AdvancedCache::declare(
-                session,
-                adv_keyexpr.clone(),
-                config,
-            )?),
+            Some(config) => {
+                let store = CacheStore::new(config);
+                let queryable = plane.declare_cache_queryable(&adv_keyexpr, &store)?;
+                Some(DeclaredCache {
+                    _queryable: queryable,
+                    store,
+                })
+            }
             None => None,
         };
 
         let token = if options.publisher_detection {
-            Some(session.declare_token(adv_keyexpr.clone(), LivelinessOptions::default())?)
+            Some(plane.declare_token(&adv_keyexpr)?)
         } else {
             None
         };
@@ -631,80 +932,97 @@ where
         // advanced. Spawned here (the caller is in a tokio runtime), aborted on
         // drop; the loop is thin glue over the deterministic `emit_heartbeat`.
         #[cfg(feature = "ext-pubsub-sample-miss-detection")]
-        let heartbeat_task = heartbeat_spawn_params(&options)
+        let beacon = match heartbeat_spawn_params(&options).zip(seqnum.as_ref()) {
             // `zip(seqnum.as_ref())`: `heartbeat_spawn_params` already requires
             // `SequenceNumber`, so `seqnum` is `Some` whenever it returns `Some` —
             // the zip never drops a configured beacon, it just pairs the params with
             // the counter without an unwrap.
-            .zip(seqnum.as_ref())
-            .map(|((period, sporadic), seqnum)| {
-                let hb_session = session.clone();
+            Some(((period, sporadic), seqnum)) => {
+                // The beacon's own publisher is declared AFTER the token, as the
+                // reference library declares it; the task that drives it is
+                // spawned only once it stands.
+                let publisher = Arc::new(plane.declare_beacon(&adv_keyexpr, sporadic)?);
+                // Weakly, so the task never holds the publisher past its own
+                // teardown: the publisher's retraction is a peer-visible event
+                // and runs when the handle drops, not when a stopped task's
+                // future is next polled.
+                let hb_publisher = Arc::downgrade(&publisher);
+                let hb_plane = Arc::clone(&plane);
                 let hb_keyexpr = adv_keyexpr.clone();
                 let hb_seqnum = Arc::clone(seqnum);
-                let clock = Arc::clone(session.clock());
+                let clock = Arc::clone(plane.clock());
                 // R311y87 (review C4) — clamp to >=1ms: a sub-ms Duration
                 // truncates to 0, turning the beacon loop into a busy spin.
                 let period_ms = (period.as_millis() as u64).max(1);
-                HeartbeatTask {
-                    // The NET subsystem, which is where upstream puts this exact
-                    // beacon: both arms of zenoh's advanced-publisher heartbeat
-                    // are `TerminatableTask::spawn_abortable(ZRuntime::Net, ..)`
-                    // (`zenoh-ext/src/advanced_publisher.rs`
-                    // @ `TerminatableTask::spawn_abortable(`, both the
-                    // sporadic-off and sporadic-on arm). A beacon is upkeep the application
-                    // never waits on, so it belongs beside gossip rather than
-                    // beside the API surface.
-                    handle: crate::runtime_pool::WzRuntime::Net.spawn(async move {
-                        let mut last_emitted = 0u32;
-                        loop {
-                            clock.sleep(period_ms).await;
-                            let sn = hb_seqnum.load(Ordering::Relaxed);
-                            // Non-sporadic emits every tick (emit_heartbeat skips
-                            // sn==0); sporadic only when the sn advanced.
-                            if should_emit_heartbeat(sporadic, sn, last_emitted)
-                                && emit_heartbeat(&hb_session, &hb_keyexpr, sn, sporadic)
-                            {
-                                last_emitted = sn;
+                Some(DeclaredBeacon::<P> {
+                    _task: HeartbeatTask {
+                        // The NET subsystem, which is where upstream puts this exact
+                        // beacon: both arms of zenoh's advanced-publisher heartbeat
+                        // are `TerminatableTask::spawn_abortable(ZRuntime::Net, ..)`
+                        // (`zenoh-ext/src/advanced_publisher.rs`
+                        // @ `TerminatableTask::spawn_abortable(`, both the
+                        // sporadic-off and sporadic-on arm). A beacon is upkeep the application
+                        // never waits on, so it belongs beside gossip rather than
+                        // beside the API surface.
+                        handle: crate::runtime_pool::WzRuntime::Net.spawn(async move {
+                            let mut last_emitted = 0u32;
+                            loop {
+                                clock.sleep(period_ms).await;
+                                let Some(publisher) = hb_publisher.upgrade() else {
+                                    return;
+                                };
+                                let sn = hb_seqnum.load(Ordering::Relaxed);
+                                // Non-sporadic emits every tick (emit_heartbeat skips
+                                // sn==0); sporadic only when the sn advanced.
+                                if should_emit_heartbeat(sporadic, sn, last_emitted)
+                                    && emit_heartbeat(
+                                        &*hb_plane,
+                                        Some(&*publisher),
+                                        &hb_keyexpr,
+                                        sn,
+                                        sporadic,
+                                    )
+                                {
+                                    last_emitted = sn;
+                                }
                             }
-                        }
-                    }),
-                }
-            });
+                        }),
+                    },
+                    _publisher: publisher,
+                })
+            }
+            None => None,
+        };
 
-        // adv_keyexpr is consumed by the cache / token clones + (feature-on) the
-        // struct; explicitly drop it on the feature-off path so the cache-None +
-        // detection-false combination does not warn unused.
+        // adv_keyexpr is consumed by the cache / token declarations + (feature-on)
+        // the struct; explicitly drop it on the feature-off path so the
+        // cache-None + detection-false combination does not warn unused.
         #[cfg(not(feature = "ext-pubsub-sample-miss-detection"))]
         let _ = adv_keyexpr;
 
-        // R2619 — the delegate is built BEFORE the literal because `keyexpr` is
-        // moved into it, and with the same folded options the sends carry.
-        let qos = WireQos::from_options(&options);
-        let publisher =
-            session.declare_publisher(keyexpr.clone(), qos.apply(PublishOptions::put()));
         Ok(Self {
-            session: session.clone(),
+            publisher,
+            _token: token,
+            #[cfg(feature = "ext-pubsub-sample-miss-detection")]
+            beacon,
+            cache,
             keyexpr,
-            zid: local_zid.clone(),
             eid,
             seqnum,
             // R311y450 — the §5.18 clock is BORROWED from the session (an Arc
             // bump), not constructed here. Building one from `local_zid` is what
             // made this site and `storage_service`'s the two same-`uhlc::ID`
             // clocks the round removed.
-            stamp: FallbackStamp::new(local_zid, session.node_hlc().clone()),
+            stamp: FallbackStamp::new(local_zid.clone(), plane.node_hlc().clone()),
+            zid: local_zid,
             qos,
-            publisher,
-            cache,
-            _token: token,
             #[cfg(feature = "ext-pubsub-sample-miss-detection")]
             adv_keyexpr,
-            #[cfg(feature = "ext-pubsub-sample-miss-detection")]
-            _heartbeat_task: heartbeat_task,
             #[cfg(feature = "ext-pubsub-sample-miss-detection")]
             heartbeat_sporadic: heartbeat_spawn_params(&options)
                 .map(|(_, sporadic)| sporadic)
                 .unwrap_or(false),
+            plane,
         })
     }
 
@@ -782,10 +1100,12 @@ where
         if let Some(att) = &options.attachment {
             opts = opts.with_attachment(att.clone());
         }
-        let written = self.session.publish(&self.keyexpr, payload, opts)?;
+        let written = self
+            .plane
+            .publish(&self.publisher, &self.keyexpr, payload, opts)?;
 
         if let Some(cache) = &self.cache {
-            cache.cache_sample(
+            cache.store.cache_sample(
                 CachedSample::new(
                     self.keyexpr.clone(),
                     payload.to_vec(),
@@ -794,7 +1114,8 @@ where
                     crate::sample::SampleKind::Put,
                 )
                 .with_encoding(options.encoding)
-                .with_attachment(options.attachment),
+                .with_attachment(options.attachment)
+                .keeping(self.plane.retained_key(&self.publisher)),
             );
         }
         Ok(written)
@@ -835,7 +1156,9 @@ where
         if let Some(si) = &source_info {
             opts = opts.with_source_info(si.clone());
         }
-        let written = self.session.publish(&self.keyexpr, &[], opts)?;
+        let written = self
+            .plane
+            .publish(&self.publisher, &self.keyexpr, &[], opts)?;
 
         if let Some(cache) = &self.cache {
             // No `with_encoding` / `with_attachment` chain: a Del body carries
@@ -844,13 +1167,16 @@ where
             // `message.c:263,269-276`), and upstream's
             // `ze_advanced_publisher_delete_options_t` has no slot for either.
             // The absence is structural, not an omission.
-            cache.cache_sample(CachedSample::new(
-                self.keyexpr.clone(),
-                Vec::new(),
-                source_info,
-                timestamp,
-                crate::sample::SampleKind::Del,
-            ));
+            cache.store.cache_sample(
+                CachedSample::new(
+                    self.keyexpr.clone(),
+                    Vec::new(),
+                    source_info,
+                    timestamp,
+                    crate::sample::SampleKind::Del,
+                )
+                .keeping(self.plane.retained_key(&self.publisher)),
+            );
         }
         Ok(written)
     }
@@ -860,9 +1186,16 @@ where
         self.eid
     }
 
-    /// Borrow the cache, if one was declared (test / recovery seam).
-    pub fn cache(&self) -> Option<&AdvancedCache<R, T>> {
-        self.cache.as_ref()
+    /// The wrapped plain publisher, as the plane declared it. A host that hands
+    /// the publisher's key out (a C program's `ze_advanced_publisher_keyexpr`)
+    /// reads it from here.
+    pub fn publisher(&self) -> &P::Publisher {
+        &self.publisher
+    }
+
+    /// Borrow the cache's ring, if one was declared (test / recovery seam).
+    pub fn cache(&self) -> Option<&CacheStore> {
+        self.cache.as_ref().map(|cache| &cache.store)
     }
 
     /// R2619 — this publisher's key expression, upstream's
@@ -873,7 +1206,7 @@ where
     /// is about the surface EXISTING, and inventing a second spelling for the
     /// same concept inside one crate would be the worse divergence.
     pub fn keyexpr(&self) -> &str {
-        self.publisher.keyexpr()
+        &self.keyexpr
     }
 
     /// R2619 — this publisher's global identity, `(zid, eid)`, upstream's
@@ -888,32 +1221,6 @@ where
     /// publisher who it is now get the same answer by construction.
     pub fn id(&self) -> (&[u8], u32) {
         (&self.zid, self.eid)
-    }
-
-    /// R2619 — the matching status of this publisher, upstream's
-    /// `zenoh-ext/src/advanced_publisher.rs` @ `pub fn matching_status(&self) -> impl Resolve<ZResult<zenoh::matching::MatchingStatus>> + '_ {`,
-    /// which delegates exactly as this does.
-    ///
-    /// The delegation is the whole point rather than a shortcut: the answer is
-    /// only meaningful because declaring the wrapped publisher ASKED the
-    /// neighbour for the matching subscriber declarations (R2577). A method
-    /// re-implemented here would have read the same registry without anyone
-    /// having filled it.
-    #[cfg(feature = "session-matching")]
-    pub fn get_matching_status(&self) -> crate::session::MatchingStatus {
-        self.publisher.get_matching_status()
-    }
-
-    /// R2619 — the listener sibling of [`Self::get_matching_status`], upstream's
-    /// `zenoh-ext/src/advanced_publisher.rs` @ `pub fn matching_listener(`,
-    /// whose body is `self.publisher.matching_listener()` — the same delegation
-    /// this one is.
-    #[cfg(feature = "session-matching")]
-    pub fn declare_matching_listener(
-        &self,
-        callback: impl FnMut(crate::session::MatchingStatus) + Send + 'static,
-    ) -> Result<crate::session::MatchingListener<R, T>, crate::session::MatchingListenerError> {
-        self.publisher.declare_matching_listener(callback)
     }
 
     /// R2619 — undeclare this publisher, upstream's
@@ -937,15 +1244,75 @@ where
     }
 }
 
-#[cfg(feature = "ext-pubsub-sample-miss-detection")]
+/// What only a publisher on a runtime [`Session`] can do: ask its wrapped
+/// publisher about matching, which is the plain publisher's own state.
+#[cfg(feature = "session-matching")]
 impl<R, T> AdvancedPublisher<R, T>
 where
     R: SessionRuntime + 'static,
     T: TimeSource + Send + Sync + 'static,
     <R as SessionRuntime>::LinkSink: Send + Sync,
     SessionLinkActions<R, T>: Send + Sync + 'static,
-    Session<R, T, Unicast>: Send + 'static,
+    Session<R, T, Unicast>: Send + Sync + 'static,
 {
+    /// R2619 — the matching status of this publisher, upstream's
+    /// `zenoh-ext/src/advanced_publisher.rs` @ `pub fn matching_status(&self) -> impl Resolve<ZResult<zenoh::matching::MatchingStatus>> + '_ {`,
+    /// which delegates exactly as this does.
+    ///
+    /// The delegation is the whole point rather than a shortcut: the answer is
+    /// only meaningful because declaring the wrapped publisher ASKED the
+    /// neighbour for the matching subscriber declarations (R2577). A method
+    /// re-implemented here would have read the same registry without anyone
+    /// having filled it.
+    pub fn get_matching_status(&self) -> crate::session::MatchingStatus {
+        self.publisher.get_matching_status()
+    }
+
+    /// R2619 — the listener sibling of [`Self::get_matching_status`], upstream's
+    /// `zenoh-ext/src/advanced_publisher.rs` @ `pub fn matching_listener(`,
+    /// whose body is `self.publisher.matching_listener()` — the same delegation
+    /// this one is.
+    pub fn declare_matching_listener(
+        &self,
+        callback: impl FnMut(crate::session::MatchingStatus) + Send + 'static,
+    ) -> Result<crate::session::MatchingListener<R, T>, crate::session::MatchingListenerError> {
+        self.publisher.declare_matching_listener(callback)
+    }
+}
+
+/// What only a publisher on a runtime [`Session`] does: declare itself from the
+/// session handle.
+impl<R, T> AdvancedPublisher<R, T>
+where
+    R: SessionRuntime + 'static,
+    T: TimeSource + Send + Sync + 'static,
+    <R as SessionRuntime>::LinkSink: Send + Sync,
+    SessionLinkActions<R, T>: Send + Sync + 'static,
+    Session<R, T, Unicast>: Send + Sync + 'static,
+{
+    /// Declare an advanced publisher on `keyexpr`. `local_zid` (1..=16
+    /// bytes) is this publisher's source identity, stamped into every
+    /// sample's `SourceInfo` and rendered into the `@adv` KE. Allocates the
+    /// publisher entity id from the session counter, then (per `options`)
+    /// declares the cache queryable + the liveliness token on
+    /// `<keyexpr>/@adv/pub/<zid>/<eid|uhlc>/_`.
+    pub fn declare(
+        session: &Session<R, T, Unicast>,
+        keyexpr: impl Into<String>,
+        options: AdvancedPublisherOptions,
+        local_zid: Vec<u8>,
+    ) -> Result<Self, AdvancedPublisherError> {
+        Self::declare_on(
+            Arc::new(SessionPlane::new(session)),
+            keyexpr,
+            options,
+            local_zid,
+        )
+    }
+}
+
+#[cfg(feature = "ext-pubsub-sample-miss-detection")]
+impl<P: AdvancedPublisherPlane> AdvancedPublisherOn<P> {
     /// Emit ONE heartbeat beacon now — the publisher's last published sn on its
     /// `@adv` KE — the deterministic core the background task loops. Returns
     /// whether a beacon was emitted (`false` if nothing has been published yet,
@@ -955,7 +1322,8 @@ where
     pub fn emit_heartbeat_once(&self) -> bool {
         match self.seqnum.as_ref() {
             Some(seqnum) => emit_heartbeat(
-                &self.session,
+                &*self.plane,
+                self.beacon.as_ref().map(|beacon| &*beacon._publisher),
                 &self.adv_keyexpr,
                 seqnum.load(Ordering::Relaxed),
                 self.heartbeat_sporadic,
@@ -1001,23 +1369,18 @@ fn should_emit_heartbeat(sporadic: bool, sn: u32, last_emitted: u32) -> bool {
 /// (`seqnum_now == 0`). A publish error (e.g. a torn-down link) is non-fatal —
 /// the next tick re-emits (zenoh advanced_publisher.rs:392-394).
 #[cfg(feature = "ext-pubsub-sample-miss-detection")]
-fn emit_heartbeat<R, T>(
-    session: &Session<R, T, Unicast>,
+fn emit_heartbeat<P: AdvancedPublisherPlane>(
+    plane: &P,
+    beacon: Option<&P::Beacon>,
     adv_keyexpr: &str,
     seqnum_now: u32,
     sporadic: bool,
-) -> bool
-where
-    R: SessionRuntime,
-    T: TimeSource + 'static,
-    <R as SessionRuntime>::LinkSink: Send + Sync,
-    SessionLinkActions<R, T>: Send + Sync + 'static,
-{
+) -> bool {
     if seqnum_now == 0 {
         return false;
     }
     let payload = z_serialize::<u32>(&(seqnum_now - 1));
-    let _ = session.publish(adv_keyexpr, &payload, heartbeat_publish_options(sporadic));
+    plane.publish_beacon(beacon, adv_keyexpr, &payload, sporadic);
     true
 }
 
@@ -2335,6 +2698,256 @@ mod tests {
         assert!(
             AdvancedPublisher::declare(&peer, "demo/none", opts(Sequencing::None), vec![1]).is_ok(),
             "Sequencing::None needs no clock and must stay declarable"
+        );
+    }
+
+    /// A plane that records, in order, what the composite asks of it and what
+    /// it lets go of — so the ORDER the composite declares its entities in and
+    /// retracts them in is read off a witness and not off the code.
+    struct RecordingPlane {
+        events: Arc<std::sync::Mutex<Vec<String>>>,
+        time: Arc<crate::runtime_impl::TokioTime>,
+        /// `stamps` as the plane answers it, so a test can refuse timestamps
+        /// without a node clock.
+        stamps: bool,
+    }
+
+    /// A handle that writes its own name when it is dropped.
+    struct Named {
+        events: Arc<std::sync::Mutex<Vec<String>>>,
+        name: &'static str,
+    }
+
+    impl Drop for Named {
+        fn drop(&mut self) {
+            self.events
+                .lock()
+                .unwrap()
+                .push(format!("drop {}", self.name));
+        }
+    }
+
+    impl RecordingPlane {
+        fn new(stamps: bool) -> Self {
+            Self {
+                events: Arc::new(std::sync::Mutex::new(Vec::new())),
+                time: Arc::new(crate::runtime_impl::TokioTime::new()),
+                stamps,
+            }
+        }
+
+        fn handle(&self, name: &'static str) -> Named {
+            self.events.lock().unwrap().push(format!("declare {name}"));
+            Named {
+                events: Arc::clone(&self.events),
+                name,
+            }
+        }
+
+        fn events(&self) -> Vec<String> {
+            self.events.lock().unwrap().clone()
+        }
+    }
+
+    impl AdvancedPublisherPlane for RecordingPlane {
+        type Time = crate::runtime_impl::TokioTime;
+        type Publisher = Named;
+        type Queryable = Named;
+        type Token = Named;
+        type Beacon = Named;
+
+        fn node_hlc(&self) -> &crate::node_clock::NodeHlc {
+            // A fresh clock per call would be the duplicate-`ID` defect the node
+            // clock exists to remove; one static disabled clock is the honest
+            // "this plane has none".
+            static DISABLED: std::sync::OnceLock<crate::node_clock::NodeHlc> =
+                std::sync::OnceLock::new();
+            DISABLED.get_or_init(crate::node_clock::NodeHlc::disabled)
+        }
+
+        fn clock(&self) -> &Arc<crate::runtime_impl::TokioTime> {
+            &self.time
+        }
+
+        fn stamps(&self) -> bool {
+            self.stamps
+        }
+
+        fn declare_publisher(
+            &self,
+            _keyexpr: &str,
+            _options: PublishOptions,
+        ) -> Result<DeclaredPublisher<Named>, AdvancedPublisherError> {
+            Ok(DeclaredPublisher {
+                handle: self.handle("publisher"),
+                eid: 7,
+            })
+        }
+
+        fn declare_cache_queryable(
+            &self,
+            keyexpr: &str,
+            _store: &CacheStore,
+        ) -> Result<Named, AdvancedPublisherError> {
+            self.events.lock().unwrap().push(format!("on {keyexpr}"));
+            Ok(self.handle("cache"))
+        }
+
+        fn declare_token(&self, keyexpr: &str) -> Result<Named, AdvancedPublisherError> {
+            self.events.lock().unwrap().push(format!("on {keyexpr}"));
+            Ok(self.handle("token"))
+        }
+
+        fn declare_beacon(
+            &self,
+            _keyexpr: &str,
+            _sporadic: bool,
+        ) -> Result<Named, AdvancedPublisherError> {
+            Ok(self.handle("beacon"))
+        }
+
+        fn publish(
+            &self,
+            _publisher: &Named,
+            _keyexpr: &str,
+            payload: &[u8],
+            _options: PublishOptions,
+        ) -> Result<usize, PublishError> {
+            self.events.lock().unwrap().push(String::from("publish"));
+            Ok(payload.len())
+        }
+
+        fn publish_beacon(
+            &self,
+            _beacon: Option<&Named>,
+            _keyexpr: &str,
+            _payload: &[u8],
+            _sporadic: bool,
+        ) {
+        }
+
+        fn retained_key(&self, _publisher: &Named) -> Option<Retained> {
+            Some(Retained::new(Arc::new(Named {
+                events: Arc::clone(&self.events),
+                name: "retained key",
+            })))
+        }
+    }
+
+    /// The composition is the reference library's, in both directions: the plain
+    /// publisher first and then the cache, the token; retracted in the order the
+    /// reference retracts them (`_ze_undeclare_advanced_publisher_clear`) — the
+    /// publisher, the token, and the cache LAST, after which the ring lets go of
+    /// the samples whose key it kept. A host that declares key ids shows the
+    /// order to a peer, so it is asserted here and not left to the field order
+    /// of a struct.
+    #[test]
+    fn a_plane_sees_the_entities_declared_and_retracted_in_the_reference_order() {
+        let plane = Arc::new(RecordingPlane::new(true));
+        let options = AdvancedPublisherOptions {
+            cache: Some(CacheConfig::default()),
+            publisher_detection: true,
+            ..AdvancedPublisherOptions::default()
+        };
+        let publisher =
+            AdvancedPublisherOn::declare_on(Arc::clone(&plane), "demo/order", options, vec![0x01])
+                .expect("the declaration is accepted");
+        publisher.put(b"x").expect("a put is accepted");
+        drop(publisher);
+
+        let adv = format!("on demo/order/@adv/pub/{}/7/_", zid_to_zenoh_hex(&[0x01]));
+        assert_eq!(
+            plane.events(),
+            [
+                "declare publisher".to_string(),
+                adv.clone(),
+                "declare cache".to_string(),
+                adv,
+                "declare token".to_string(),
+                "publish".to_string(),
+                "drop publisher".to_string(),
+                "drop token".to_string(),
+                "drop cache".to_string(),
+                // The ring goes with the cache, and the sample in it keeps the
+                // publisher's key until it does.
+                "drop retained key".to_string(),
+            ],
+            "the plane was not asked in the reference library's order"
+        );
+    }
+
+    /// The beacon's publisher is declared AFTER the token and retracted between
+    /// the token and the cache, and the task that drives it is stopped before it
+    /// is retracted.
+    #[cfg(feature = "ext-pubsub-sample-miss-detection")]
+    #[test]
+    fn a_plane_sees_the_beacon_publisher_declared_after_the_token_and_retracted_before_the_cache() {
+        let plane = Arc::new(RecordingPlane::new(true));
+        let options = AdvancedPublisherOptions {
+            cache: Some(CacheConfig::default()),
+            publisher_detection: true,
+            sample_miss_detection: MissDetectionConfig::default()
+                .heartbeat(Duration::from_secs(3600)),
+            ..AdvancedPublisherOptions::default()
+        };
+        let publisher =
+            AdvancedPublisherOn::declare_on(Arc::clone(&plane), "demo/order", options, vec![0x01])
+                .expect("the declaration is accepted");
+        drop(publisher);
+
+        let declared: Vec<String> = plane
+            .events()
+            .into_iter()
+            .filter(|e| !e.starts_with("on "))
+            .collect();
+        assert_eq!(
+            declared,
+            [
+                "declare publisher",
+                "declare cache",
+                "declare token",
+                "declare beacon",
+                "drop publisher",
+                "drop token",
+                "drop beacon",
+                "drop cache",
+            ],
+            "the beacon's publisher was not declared and retracted where the reference does"
+        );
+    }
+
+    /// A plane that cannot stamp refuses timestamp sequencing and one that can
+    /// accepts it, whatever the node clock says: the precondition is the
+    /// PLANE's, which is what lets a host with its own clock answer for itself.
+    #[test]
+    fn timestamp_sequencing_follows_the_planes_answer_and_not_the_node_clock() {
+        let options = AdvancedPublisherOptions {
+            sequencing: Sequencing::Timestamp,
+            cache: None,
+            publisher_detection: false,
+            ..AdvancedPublisherOptions::default()
+        };
+        assert!(
+            matches!(
+                AdvancedPublisherOn::declare_on(
+                    Arc::new(RecordingPlane::new(false)),
+                    "demo/ts",
+                    options.clone(),
+                    vec![0x01],
+                ),
+                Err(AdvancedPublisherError::TimestampingDisabled)
+            ),
+            "a plane that cannot stamp must refuse timestamp sequencing"
+        );
+        assert!(
+            AdvancedPublisherOn::declare_on(
+                Arc::new(RecordingPlane::new(true)),
+                "demo/ts",
+                options,
+                vec![0x01],
+            )
+            .is_ok(),
+            "a plane that stamps must accept it with no node clock at all"
         );
     }
 }
