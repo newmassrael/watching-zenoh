@@ -553,6 +553,12 @@ unsafe fn advanced_publisher_options(
         out.sequencing = Sequencing::Timestamp;
     }
     out.publisher_detection = (*options).publisher_detection;
+    // The metadata pico appends to the detection token's key in place of the `_`
+    // chunk (`vendor/zenoh-pico/src/api/advanced_publisher.c` @
+    // `// suffix = KE_ADV_PREFIX / KE_PUB / ZID / [ EID | KE_UHLC ] / [ meta | KE_EMPTY]`).
+    // A NULL key is none, which `keyexpr_str` reports as `None`.
+    out.publisher_detection_metadata =
+        keyexpr_str((*options).publisher_detection_metadata).map(str::to_owned);
     out
 }
 

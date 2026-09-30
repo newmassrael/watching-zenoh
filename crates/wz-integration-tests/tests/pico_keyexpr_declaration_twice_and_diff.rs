@@ -528,6 +528,26 @@ int main(int argc, char **argv) {
     z_sleep_ms(200);
     if (adv_put(ze_advanced_publisher_loan(&seq), "seq-plain", NULL) < 0) return -1;
 
+    /* Publisher detection with application metadata: the metadata replaces the
+       placeholder chunk at the end of the detection token's key. */
+    ze_advanced_publisher_options_t det_opt;
+    ze_advanced_publisher_options_default(&det_opt);
+    det_opt.publisher_detection = true;
+    z_view_keyexpr_t meta_ke;
+    if (view(&meta_ke, "meta/data") < 0) return -1;
+    det_opt.publisher_detection_metadata = z_loan(meta_ke);
+    z_view_keyexpr_t det_ke;
+    if (view(&det_ke, "demo/po/detect") < 0) return -1;
+    ze_owned_advanced_publisher_t det;
+    if (ze_declare_advanced_publisher(zs, &det, z_loan(det_ke), &det_opt) < 0) {
+        printf("driver: detecting advanced publisher failed\n");
+        return -1;
+    }
+    z_sleep_ms(200);
+    if (adv_put(ze_advanced_publisher_loan(&det), "detect-plain", NULL) < 0) return -1;
+
+    ze_undeclare_advanced_publisher(ze_advanced_publisher_move(&det));
+    z_sleep_ms(150);
     ze_undeclare_advanced_publisher(ze_advanced_publisher_move(&seq));
     z_sleep_ms(150);
     ze_undeclare_advanced_publisher(ze_advanced_publisher_move(&adv));
@@ -2171,6 +2191,7 @@ fn assert_declared_publisher_options_are_sent_as_the_real_pico_sends_them(topolo
         "adv-plain",
         "adv-own",
         "seq-plain",
+        "detect-plain",
     ] {
         assert!(
             push_of(&reference, payload).is_some(),
@@ -2179,6 +2200,16 @@ fn assert_declared_publisher_options_are_sent_as_the_real_pico_sends_them(topolo
             reference.join("\n")
         );
     }
+    // The detection token's key ends in the metadata the program embedded, in
+    // place of the placeholder chunk: the option no other line shows.
+    assert!(
+        reference
+            .iter()
+            .any(|l| l.starts_with("DeclToken") && l.contains("/meta/data")),
+        "the REFERENCE arm declares no detection token ending in the embedded \
+         metadata, so the metadata half of this leg is vacuous:\n{}",
+        reference.join("\n")
+    );
     let deletes = reference
         .iter()
         .filter(|l| l.starts_with("Push") && l.contains(" del "))
