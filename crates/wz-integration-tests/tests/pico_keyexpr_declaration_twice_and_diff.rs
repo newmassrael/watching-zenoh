@@ -481,6 +481,122 @@ int main(int argc, char **argv) {
 }
 "#;
 
+/// The advanced SUBSCRIBER in three shapes, each with every option that makes
+/// pico declare something.
+///
+/// pico builds an advanced subscriber out of its own primitives
+/// (`vendor/zenoh-pico/src/api/advanced_subscriber.c` @
+/// `_Z_CLEAN_RETURN_IF_ERR(z_declare_subscriber(zs, &sub->_val._subscriber, keyexpr,`
+/// and the history query, late-publisher liveliness subscriber, heartbeat
+/// subscriber and detection token that follow), so what it puts on the wire is
+/// what those primitives put there, in THAT order — the heartbeat subscription
+/// comes after the history query and the late-publisher subscription, not before.
+///
+/// The shapes are everything at once on a key that ends in a wildcard (so the
+/// declared prefix is shorter than the key); the live subscription alone, on a
+/// key with no wildcard; and history plus detection with a wildcard in the MIDDLE
+/// of the key and a metadata suffix on the detection token. Nothing publishes: it
+/// is the DECLARATIONS that are compared.
+const ADVANCED_SUBSCRIBER_DRIVER_SRC: &str = r#"
+#include <stdio.h>
+#include <string.h>
+#include <zenoh-pico.h>
+
+static void on_sample(z_loaned_sample_t *sample, void *ctx) { (void)sample; (void)ctx; }
+
+static int view(z_view_keyexpr_t *ke, const char *s) {
+    if (z_view_keyexpr_from_str(ke, s) < 0) {
+        printf("driver: bad keyexpr %s\n", s);
+        return -1;
+    }
+    return 0;
+}
+
+int main(int argc, char **argv) {
+    (void)argc;
+    const char *endpoint = argv[1];
+
+    z_owned_config_t config;
+    z_config_default(&config);
+    zp_config_insert(z_loan_mut(config), Z_CONFIG_MODE_KEY, "@MODE@");
+    zp_config_insert(z_loan_mut(config), Z_CONFIG_CONNECT_KEY, endpoint);
+
+    z_owned_session_t s;
+    if (z_open(&s, z_move(config), NULL) < 0) {
+        printf("driver: unable to open session\n");
+        return -1;
+    }
+    z_sleep_ms(300);
+
+    z_view_keyexpr_t full_ke, plain_ke, middle_ke, meta_ke;
+    if (view(&full_ke, "demo/kd/asub/**") < 0 || view(&plain_ke, "demo/kd/asub_plain") < 0 ||
+        view(&middle_ke, "demo/kd/*/asub_middle") < 0 || view(&meta_ke, "info") < 0) {
+        return -1;
+    }
+
+    /* Everything: live, history, late publishers, heartbeat recovery, detection. */
+    ze_advanced_subscriber_options_t full_opt;
+    ze_advanced_subscriber_options_default(&full_opt);
+    full_opt.history.is_enabled = true;
+    full_opt.history.detect_late_publishers = true;
+    full_opt.history.max_samples = 2;
+    full_opt.recovery.is_enabled = true;
+    full_opt.recovery.last_sample_miss_detection.is_enabled = true;
+    full_opt.recovery.last_sample_miss_detection.periodic_queries_period_ms = 0;
+    full_opt.subscriber_detection = true;
+    z_owned_closure_sample_t full_cb;
+    z_closure(&full_cb, on_sample, NULL, NULL);
+    ze_owned_advanced_subscriber_t full;
+    if (ze_declare_advanced_subscriber(z_loan(s), &full, z_loan(full_ke), z_move(full_cb),
+                                       &full_opt) < 0) {
+        printf("driver: full advanced subscriber failed\n");
+        return -1;
+    }
+    z_sleep_ms(300);
+
+    /* Nothing but the live subscription: a wrapped plain subscriber. */
+    ze_advanced_subscriber_options_t plain_opt;
+    ze_advanced_subscriber_options_default(&plain_opt);
+    z_owned_closure_sample_t plain_cb;
+    z_closure(&plain_cb, on_sample, NULL, NULL);
+    ze_owned_advanced_subscriber_t plain;
+    if (ze_declare_advanced_subscriber(z_loan(s), &plain, z_loan(plain_ke), z_move(plain_cb),
+                                       &plain_opt) < 0) {
+        printf("driver: plain advanced subscriber failed\n");
+        return -1;
+    }
+    z_sleep_ms(200);
+
+    /* History and detection, no recovery; a wildcard in the middle of the key. */
+    ze_advanced_subscriber_options_t middle_opt;
+    ze_advanced_subscriber_options_default(&middle_opt);
+    middle_opt.history.is_enabled = true;
+    middle_opt.subscriber_detection = true;
+    middle_opt.subscriber_detection_metadata = z_loan(meta_ke);
+    z_owned_closure_sample_t middle_cb;
+    z_closure(&middle_cb, on_sample, NULL, NULL);
+    ze_owned_advanced_subscriber_t middle;
+    if (ze_declare_advanced_subscriber(z_loan(s), &middle, z_loan(middle_ke), z_move(middle_cb),
+                                       &middle_opt) < 0) {
+        printf("driver: middle advanced subscriber failed\n");
+        return -1;
+    }
+    z_sleep_ms(300);
+
+    /* In the reverse of the order they were made, so a key shared between the
+       entities of one subscriber is retracted by the last of them. */
+    ze_undeclare_advanced_subscriber(ze_advanced_subscriber_move(&middle));
+    z_sleep_ms(200);
+    ze_undeclare_advanced_subscriber(ze_advanced_subscriber_move(&plain));
+    z_sleep_ms(200);
+    ze_undeclare_advanced_subscriber(ze_advanced_subscriber_move(&full));
+    z_sleep_ms(300);
+
+    z_drop(z_move(s));
+    return 0;
+}
+"#;
+
 /// Which C program a leg compiles against both libraries.
 #[derive(Clone, Copy, Debug)]
 enum Program {
@@ -492,6 +608,9 @@ enum Program {
     /// The advanced publisher in its three shapes
     /// ([`ADVANCED_PUBLISHER_DRIVER_SRC`]).
     AdvancedPublisher,
+    /// The advanced subscriber in its three shapes
+    /// ([`ADVANCED_SUBSCRIBER_DRIVER_SRC`]).
+    AdvancedSubscriber,
 }
 
 impl Program {
@@ -500,6 +619,7 @@ impl Program {
             Program::Entities => "entities",
             Program::SharedKeys => "shared_keys",
             Program::AdvancedPublisher => "advanced_publisher",
+            Program::AdvancedSubscriber => "advanced_subscriber",
         }
     }
 
@@ -508,6 +628,7 @@ impl Program {
             Program::Entities => DRIVER_SRC,
             Program::SharedKeys => SHARED_KEYS_DRIVER_SRC,
             Program::AdvancedPublisher => ADVANCED_PUBLISHER_DRIVER_SRC,
+            Program::AdvancedSubscriber => ADVANCED_SUBSCRIBER_DRIVER_SRC,
         }
     }
 
@@ -518,7 +639,9 @@ impl Program {
     fn push_detail(self) -> PushDetail {
         match self {
             Program::AdvancedPublisher => PushDetail::Whole,
-            Program::Entities | Program::SharedKeys => PushDetail::Key,
+            Program::Entities | Program::SharedKeys | Program::AdvancedSubscriber => {
+                PushDetail::Key
+            }
         }
     }
 }
@@ -1672,4 +1795,69 @@ fn wz_router_hears_a_pico_peer_advanced_publisher_the_same_on_wz_and_on_the_real
         Topology::PeerToRouter,
         Some("0x53"),
     );
+}
+
+/// The advanced subscriber against the real pico in one topology.
+fn assert_an_advanced_subscriber_declares_the_same_wire_as_the_real_pico(topology: Topology) {
+    let Arms { wz, reference, .. } = record_both_arms(topology, Program::AdvancedSubscriber);
+
+    // ANTI-VACUITY: the REFERENCE arm carries every component the program asked
+    // for, so equality below cannot be two renderings that both left one out.
+    for needle in [
+        "DeclKexpr",
+        "DeclSubscriber",
+        "UndeclSubscriber",
+        "DeclToken",
+        "UndeclToken",
+        "UndeclKexpr",
+        "Request on",
+    ] {
+        assert!(
+            reference.iter().any(|l| l.contains(needle)),
+            "the REFERENCE arm carries no `{needle}` line, so this leg is measuring \
+             the harness rather than wz:\n{}",
+            reference.join("\n")
+        );
+    }
+    assert_eq!(
+        wz,
+        reference,
+        "wz's advanced subscriber differs from the real zenoh-pico's for the same \
+         program.\n--- wz ---\n{}\n--- reference ---\n{}",
+        wz.join("\n"),
+        reference.join("\n")
+    );
+}
+
+/// An advanced subscriber is what the real pico builds it from: a plain
+/// subscriber, a history query, a liveliness subscriber, a heartbeat subscriber
+/// and a liveliness token, each declared and named as its own entry point does,
+/// in that order.
+// wz-proves: api-compat-pico wz->pico partial
+#[test]
+#[ignore = "cc-compiles a driver against both libraries and runs each through a \
+            tap to a wz-ap-demo node; run by run-ci Layer E"]
+fn an_advanced_subscriber_declares_the_same_wire_as_the_real_pico() {
+    assert_an_advanced_subscriber_declares_the_same_wire_as_the_real_pico(Topology::Client);
+}
+
+/// The same program from a pico PEER with no router among its peers.
+// wz-proves: api-compat-pico wz->pico partial
+#[test]
+#[ignore = "cc-compiles a driver against both libraries and runs each through a \
+            tap to a wz-ap-demo peer; run by run-ci Layer E"]
+fn an_advanced_subscriber_beside_a_peer_declares_the_same_wire_as_the_real_pico() {
+    assert_an_advanced_subscriber_declares_the_same_wire_as_the_real_pico(Topology::PeerToPeer);
+}
+
+/// The same program from a pico PEER beside a ROUTER. The `wz_router_` prefix
+/// keeps Layer E's `--skip wz_router` from running it against the default-feature
+/// demo; Layer E5 builds the routing demo and runs it by name.
+// wz-proves: api-compat-pico wz->pico partial
+#[test]
+#[ignore = "cc-compiles a driver against both libraries and runs each through a \
+            tap to a wz-ap-demo router with a provider behind it; run by run-ci \
+            Layer E5"]
+fn wz_router_hears_a_pico_peer_advanced_subscriber_the_same_on_wz_and_on_the_real_pico() {
+    assert_an_advanced_subscriber_declares_the_same_wire_as_the_real_pico(Topology::PeerToRouter);
 }

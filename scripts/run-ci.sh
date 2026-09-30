@@ -7856,7 +7856,14 @@ layer_c1av_cargo_test_ext_pubsub_advanced_history() {
     # R2819 — 52 -> 55: the two ungated witnesses (see C1ar) and
     # a_buffered_advanced_subscriber_queues_its_recovered_history, gated on
     # history and the cache, both of which this command compiles.
-    _runci_guarded_test "C1av advanced_subscriber" 55 \
+    # R2983 — 55 -> 58: the declaration-forms trio
+    # (the_forms_are_asked_in_pico_order_and_the_hosts_identity_names_the_token,
+    # each_entity_lets_go_of_its_name_right_after_itself_in_pico_order and
+    # a_backgrounded_subscriber_hands_its_names_to_the_host). All three declare
+    # the late-publisher subscription, so they are history-gated and only this
+    # lane moves: C1ar, C1at and C1au do not compile them. Measured: this
+    # command printed 58.
+    _runci_guarded_test "C1av advanced_subscriber" 58 \
         cargo test -p wz-runtime-tokio --features ext-pubsub-advanced-history,ext-pubsub-advanced-publisher,pubsub-allow-loop \
         --lib advanced_subscriber --quiet || return 1
     (cd crates \
@@ -17921,12 +17928,14 @@ layer_e5_router_forward() {
     # R2980 — 1 -> 2, the advanced publisher's router leg
     # (`wz_router_hears_a_pico_peer_advanced_publisher_...`), named so this one
     # filter reaches it.
+    # R2983 — 2 -> 3, the advanced subscriber's
+    # (`wz_router_hears_a_pico_peer_advanced_subscriber_...`).
     if [[ ! -f target/zenoh-pico-build/lib/libzenohpico.so ]]; then
         _pico_cli_unavailable "Layer E5 (pico peer beside a router, libzenohpico oracle)" || return 1
         return 0
     fi
     (cd crates && cargo build -p wz-capi-pico --features transport-link-tls --quiet) || return 1
-    _runci_guarded_test "E5 pico peer beside a router" 2 \
+    _runci_guarded_test "E5 pico peer beside a router" 3 \
         cargo test -p wz-integration-tests \
         --test pico_keyexpr_declaration_twice_and_diff -- --ignored \
         wz_router_hears_a_pico_peer --test-threads=1 --quiet || return 1

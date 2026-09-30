@@ -789,7 +789,23 @@ HOST_GATED_CI_TARGETS: dict[str, str] = {
 # (`api-compat-c`, what a session's links offer from its config — QoS,
 # lowlatency, compression and the qos+lowlatency refusal — against libzenohc).
 # 954 + 1 = 955, measured by the same script at this round's tree.
-FOREIGN_ADJUDICATOR_LINKS = 955
+# +4 R2980 `c64188e4`, pushed without this constant moving (the R2790 class a
+# fifth time): `a_key_declared_twice_is_one_id_with_two_holders_on_the_wire_as_in_the_real_pico`,
+# `an_advanced_publisher_puts_the_same_wire_as_the_real_pico`,
+# `an_advanced_publisher_beside_a_peer_puts_the_same_wire_as_the_real_pico` and
+# `wz_router_hears_a_pico_peer_advanced_publisher_the_same_on_wz_and_on_the_real_pico`
+# (1 test x `api-compat-pico` each; the key table's holder count and the advanced
+# publisher in a client, beside a peer and beside a router, against
+# libzenohpico). 955 + 4 = 959, the value `run-ci.sh --layer A4` measured at
+# `origin/main` 8edbe013, and what another session found red there.
+# +3 R2983, `an_advanced_subscriber_declares_the_same_wire_as_the_real_pico`,
+# `an_advanced_subscriber_beside_a_peer_declares_the_same_wire_as_the_real_pico` and
+# `wz_router_hears_a_pico_peer_advanced_subscriber_the_same_on_wz_and_on_the_real_pico`
+# (1 test x `api-compat-pico` each; the advanced subscriber in the same three
+# topologies). 959 + 3 = 962, measured by `WZ_A4_REQUIRE=1 run-ci.sh --layer A4`
+# at this round's working tree. A4 is a run-ci layer that pre-push defers to
+# hosted CI, so it is run by hand with the round-fed gates from now on.
+FOREIGN_ADJUDICATOR_LINKS = 962
 
 # ── Execution disclosure ────────────────────────────────────────────────────────
 #
