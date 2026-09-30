@@ -298,7 +298,10 @@ async fn read_close_from(peer: &mut OpenedSession) -> Vec<u8> {
         match event {
             LinkEvent::Rx(frame) => {
                 if frame.bytes.first().map(|h| h & 0x1F) == Some(wire_const::T_MID_CLOSE) {
-                    return frame.bytes;
+                    // `RxFrame::bytes` is an `RxBytes` since R2971, owned or a
+                    // range of lent storage; this returns the batch's bytes as
+                    // an owned `Vec`, which is what the caller decodes.
+                    return frame.bytes.into_vec();
                 }
             }
             LinkEvent::Lost { .. } => panic!("peer link dropped before a Close frame arrived"),
