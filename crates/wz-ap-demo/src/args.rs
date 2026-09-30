@@ -5957,7 +5957,8 @@ mod stock_config_tests {
 
         // Every other run: nothing. A `--listen` acceptor never dials at all,
         // so the flag would be a difference the file did not ask for.
-        for mode in [vec!["--config", "z.json5", "--listen", "tcp/127.0.0.1:0"]] {
+        {
+            let mode = vec!["--config", "z.json5", "--listen", "tcp/127.0.0.1:0"];
             let out = expand(&mode, file).unwrap();
             assert!(
                 !out.added.iter().any(|a| a == "--connect-retry"),

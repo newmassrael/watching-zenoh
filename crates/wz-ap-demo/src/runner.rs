@@ -1143,7 +1143,7 @@ pub(crate) async fn spawn_scouting_responder(
                 )
             })?;
     // R2956 — zenoh's zid form, as every zid this binary prints.
-    let zid_hex = wz::runtime_tokio::zid_hex::zid_to_zenoh_hex(&zid);
+    let zid_hex = wz::runtime_tokio::zid_hex::zid_to_zenoh_hex(zid);
     // The socket ACTUALLY joined and the identity ACTUALLY answered with — the
     // y845 discipline. An operator reads this line to find out why nothing is
     // discovering them, and a banner naming the compiled-in default would be the
