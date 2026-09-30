@@ -33,7 +33,7 @@
 //! sees that order in its output. The face registry hands each watcher the same
 //! event in the order they were registered, so one watcher per LISTENER would
 //! make the order the order they were declared in, and the departure would
-//! reach the transport listener first. One watcher per SESSION ([`Connectivity`],
+//! reach the transport listener first. One watcher per SESSION (`Connectivity`,
 //! registered once at the open) dispatches in pico's order.
 //!
 //! ## What a link reports is what PICO's link of that kind reports
@@ -42,7 +42,7 @@
 //! link object in pico, which fixes them per link TYPE and not per connection
 //! (`vendor/zenoh-pico/src/link/unicast/tcp.c` @ `zl->_cap._flow = Z_LINK_CAP_FLOW_STREAM;`).
 //! The registry reports a negotiated batch size instead, which for a pico peer
-//! is 2048 and for a TCP link is not what pico says its MTU is. [`pico_link_properties`]
+//! is 2048 and for a TCP link is not what pico says its MTU is. `pico_link_properties`
 //! carries pico's five links; a link kind pico does not have (QUIC, unixpipe,
 //! vsock, unix-domain sockets, reliable UDP) keeps the registry's answers,
 //! since there is no reference to follow.
