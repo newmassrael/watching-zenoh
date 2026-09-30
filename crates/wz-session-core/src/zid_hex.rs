@@ -32,6 +32,20 @@ pub(crate) fn zid_to_le_array(zid: &[u8]) -> [u8; 16] {
     zid16
 }
 
+/// The canonical, length-trimmed form of a zid: the little-endian bytes with the
+/// trailing zero high bytes dropped, which is how zenoh sends one and how
+/// [`zenoh_hex_to_zid`] returns one.
+///
+/// ZA-3687 — the ONE place that rule is written. Two spellings of one zid are
+/// the same zid to zenoh: [`zid_to_zenoh_hex`] zero-pads to 16 bytes and so
+/// prints `[0x01]` and `[0x01, 0x00]` as the same `1`. A comparison of raw bytes
+/// would call them two nodes, so a caller matching a zid it READ against a zid
+/// it PARSED compares both through this.
+pub fn canonical_zid(zid: &[u8]) -> &[u8] {
+    let end = zid.iter().rposition(|&b| b != 0).map_or(0, |i| i + 1);
+    &zid[..end]
+}
+
 /// Render a length-trimmed wire `zid` as the string zenoh prints for it.
 ///
 /// zenoh fills its keyexprs via `keformat`'s `set<S: Display>` (key_expr
@@ -86,9 +100,7 @@ pub fn zenoh_hex_to_zid(hex: &str) -> Option<Vec<u8>> {
         return None;
     }
     let id = u128::from_str_radix(hex, 16).ok()?;
-    let bytes = id.to_le_bytes();
-    let trimmed_len = bytes.iter().rposition(|&b| b != 0).map_or(0, |i| i + 1);
-    Some(bytes[..trimmed_len].to_vec())
+    Some(canonical_zid(&id.to_le_bytes()).to_vec())
 }
 
 #[cfg(test)]
@@ -160,5 +172,57 @@ mod tests {
     #[test]
     fn a_plus_prefix_parses_because_upstream_takes_it() {
         assert_eq!(zenoh_hex_to_zid("+1").as_deref(), Some(&[0x01][..]));
+    }
+
+    /// ZA-3687 — the canonical form drops trailing ZERO bytes and only those.
+    ///
+    /// Judged against the printed spelling, which is what makes two spellings of
+    /// a zid "the same": `[0x01]` and `[0x01, 0x00, 0x00]` render as one string,
+    /// so they must canonicalise to one slice. A zero in the MIDDLE is a digit
+    /// and stays, and a leading zero byte is not trailing.
+    #[test]
+    fn the_canonical_zid_drops_trailing_zero_bytes_and_nothing_else() {
+        assert_eq!(canonical_zid(&[0x01, 0x00, 0x00]), &[0x01][..]);
+        assert_eq!(
+            canonical_zid(&[0x01, 0x00, 0x02, 0x00]),
+            &[0x01, 0x00, 0x02][..]
+        );
+        assert_eq!(canonical_zid(&[0x00, 0x05]), &[0x00, 0x05][..]);
+        assert_eq!(canonical_zid(&[0x07]), &[0x07][..]);
+        assert_eq!(canonical_zid(&[]), &[] as &[u8]);
+        assert_eq!(canonical_zid(&[0x00, 0x00]), &[] as &[u8]);
+        for zid in [
+            &[0x01u8][..],
+            &[0x01, 0x00, 0x00][..],
+            &[0x01, 0x00, 0x02, 0x00][..],
+            &[0x00, 0x05][..],
+        ] {
+            assert_eq!(
+                zid_to_zenoh_hex(zid),
+                zid_to_zenoh_hex(canonical_zid(zid)),
+                "a spelling and its canonical form must print alike: {zid:?}"
+            );
+        }
+    }
+
+    /// ZA-3687 — a zid whose wire bytes are NOT a palindrome, so the per-byte
+    /// wire spelling and zenoh's spelling differ.
+    ///
+    /// The fixtures a downstream consumer used (`0a0a0a0a`, `0b0b0b0b`) read the
+    /// same forwards and reversed, so a renderer that got the order wrong passed
+    /// every test written with them. This one cannot: `01 02 03 04` is `4030201`
+    /// in zenoh's spelling and `01020304` per byte, and the parse must take the
+    /// former to the wire bytes and refuse the latter's leading zero.
+    #[test]
+    fn a_zid_that_is_not_a_palindrome_prints_reversed_and_parses_back() {
+        let wire = [0x01u8, 0x02, 0x03, 0x04];
+        assert_eq!(zid_to_zenoh_hex(&wire), "4030201");
+        assert_ne!(
+            zid_to_zenoh_hex(&wire),
+            "01020304",
+            "not the per-byte wire order"
+        );
+        assert_eq!(zenoh_hex_to_zid("4030201").as_deref(), Some(&wire[..]));
+        assert_eq!(zenoh_hex_to_zid("01020304"), None, "a leading 0 is refused");
     }
 }
