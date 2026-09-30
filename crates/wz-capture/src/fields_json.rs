@@ -151,8 +151,10 @@ pub fn fields_json_where(
         max_messages_shown_per_flow,
         declarations,
         &grouping,
-        verdicts.as_ref(),
-        None,
+        RowAttachments {
+            verdicts: verdicts.as_ref(),
+            ..RowAttachments::default()
+        },
     )
 }
 
@@ -205,9 +207,167 @@ pub fn fields_json_where_coordinated(
         max_messages_shown_per_flow,
         declarations,
         &grouping,
-        verdicts.as_ref(),
-        Some(coordinates),
+        RowAttachments {
+            verdicts: verdicts.as_ref(),
+            coordinates: Some(coordinates),
+            since: None,
+        },
     )
+}
+
+/// The field document's rows AFTER a cursor, and only those.
+///
+/// # What a consumer was paying for
+///
+/// The document of a live handle grows with the capture: measured by the
+/// consumer at about 2.3 KB a row, so a list model that asked for the whole
+/// document at every step received, and parsed, every row it already held.
+/// This renders the rows whose sequence number is greater than `after_seq` and
+/// nothing else, so the cost of an answer follows what is NEW.
+///
+/// # The rest of the document is the same document
+///
+/// One function under both doors, for the reason R2765 gives about the selected
+/// and unselected documents: this is `fields_json_where_coordinated` with the
+/// rows before the cursor left out, not a second renderer. The keyexpr table and
+/// the session grouping are built from the whole capture before any row is
+/// written, so which rows are written cannot change them. The one thing a row
+/// loop carries from a row to the next is the chain fold: a completing row is
+/// numbered by the identity its begun row opened, so a row the cursor passes over
+/// still advances it and only its WRITING is skipped. A row written here is
+/// therefore byte for byte the row the whole-document door writes for it at the
+/// same handle state.
+///
+/// # What is different, and named
+///
+/// * `window` says which rows were asked for: `after_seq` is the cursor given
+///   and `through_seq` the highest sequence number the handle had issued when
+///   the document was made — the value to pass next. It is NOT the highest row
+///   written: a datagram row whose second read was declined is listed under
+///   `disagreements` and has no row now or later, and the cursor passes it.
+/// * No selector and no row cap. A selector's verdict is a walk over the whole
+///   capture and would put back the cost this door exists to remove; the
+///   verdict-only door is the one for narrowing. A cap counts rows in list
+///   order from the front, which a cursor turns into a different question.
+/// * Every flow object is written, with `messages` empty when the flow has no
+///   new row, so the flow's `context` is refreshed on every call. That header
+///   is NOT covered by the promise about rows; see [`REVISABLE_ROW_CELLS`].
+/// * The document-level tallies that rows feed — `disagreements`,
+///   `payload_mapping_counts` and `payload_refusals` — count the rows written
+///   here, and `payload_mapping_counts_exact` is false whenever the cursor
+///   passed a row over, which is what the flag means.
+pub fn fields_json_since_coordinated(
+    d: &crate::Dissection,
+    capture: &[u8],
+    declarations: Option<&Declarations<'_>>,
+    coordinates: &dyn RowCoordinates,
+    since: Since,
+) -> String {
+    let grouping = crate::node::session_grouping(d);
+    fields_json_selected(
+        d,
+        capture,
+        None,
+        declarations,
+        &grouping,
+        RowAttachments {
+            verdicts: None,
+            coordinates: Some(coordinates),
+            since: Some(since),
+        },
+    )
+}
+
+/// The cursor a since-document is made against.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Since {
+    /// Rows with a sequence number at or below this are not written.
+    pub after_seq: u64,
+    /// The highest sequence number the handle had issued when the document was
+    /// made. Carried into `window.through_seq`.
+    pub through_seq: u64,
+}
+
+/// The cells of a row that a LATER document may write differently from the one
+/// that first wrote the row, while the row is still held. Every cell of a row
+/// that is in neither this list nor [`RETIRABLE_ROW_CELLS`] is the value the row
+/// was written with, at every later state.
+///
+/// A path is the row object's own keys joined by `/`, with `[]` for any element
+/// of an array and a trailing `/**` for everything beneath. The list is DERIVED
+/// from what a row's writer reads, not collected from runs: a row is written from
+/// the frame it stands for (fixed once it is decoded), the message bytes and the
+/// packet map behind them (see [`RETIRABLE_ROW_CELLS`]), the keyexpr table, the
+/// chain fold and the caller's declarations. Only the last three can differ
+/// between two renderings of a row that is still held, and each names its cells:
+///
+/// * **The keyexpr table** is folded over every list in capture order, and a
+///   declaration is stamped with the packet it went past at. A declaration that
+///   is DECODED later than a packet that arrived after it — a TCP segment that
+///   arrived ahead of the one before it is held until the gap fills — still
+///   carries the earlier packet, so a reference written unresolved before it was
+///   decoded is written resolved after. The cells that read the table are the
+///   `keyexpr` and `keyexpr_cause` of each `carried` entry, the same two of each
+///   `above_transport.carried` entry (a reference inside a completed chain, read
+///   from the joined buffer), and everything under `payload_decode`, whose
+///   verdict starts from the resolved key.
+/// * **The chain fold** numbers chains from the first message the list still
+///   holds. A front trim that takes the first message of a chain renumbers every
+///   chain after it, so `chain.chain_id` names a chain WITHIN one document and is
+///   not a value to keep across two.
+/// * **The caller's declarations** are an input of every document: a row written
+///   under one declaration text and read under another differs under
+///   `payload_decode` for that reason, which is the same subtree.
+///
+/// What is NOT here, and was measured to hold: `direction`, `offset_space`,
+/// `message_at`, `packet`, the four coordinates and `seq`, `sn`, and the rest of
+/// `chain` (`outcome`, `reason`) are read off the decoded frame. A chain result
+/// arrives as a NEW row, the one that completed it, and not as a change to an
+/// earlier fragment's. Giving up on a reassembly gap (a handle's `end` call)
+/// releases held messages as new rows and changes none that was already written.
+///
+/// The flow object around the rows — `context`, `shown`, `omitted`,
+/// `disagreements` — is not a row and is not covered.
+pub const REVISABLE_ROW_CELLS: &[&str] = &[
+    "/above_transport/carried[]/keyexpr",
+    "/above_transport/carried[]/keyexpr_cause",
+    "/carried[]/keyexpr",
+    "/carried[]/keyexpr_cause",
+    "/chain/chain_id",
+    "/payload_decode/**",
+];
+
+/// The cells that read differently when the row's BYTES are gone.
+///
+/// A stream row is walked from the reassembled bytes of its message, and the
+/// per-direction byte ceiling discards them from the front. A row written before
+/// that reads as walked; the same row written after it is written as declined —
+/// `message_bytes` answers `Retired`, so the writer takes the other branch and
+/// writes `declined` in place of the walk, and the packet map that names the
+/// message's first byte goes with the bytes. These are the cells of that swap.
+///
+/// A consumer that already holds the row keeps a true row: the bytes were the
+/// message's when it was written. What it must not do is re-request the row and
+/// treat a `declined` where it holds a walk as a correction. A datagram row is
+/// re-read from the capture container the caller holds and is not subject to it.
+pub const RETIRABLE_ROW_CELLS: &[&str] = &[
+    "/above_transport",
+    "/carried",
+    "/declined",
+    "/fields",
+    "/first_byte",
+    "/l2",
+    "/name",
+];
+
+/// Does `pattern` — a path in the syntax [`REVISABLE_ROW_CELLS`] states — name
+/// `path`? One function, so a consumer applying the list and the test that holds
+/// it to the measurement are not two readings of the same syntax.
+pub fn names_row_cell(pattern: &str, path: &str) -> bool {
+    match pattern.strip_suffix("/**") {
+        Some(subtree) => path == subtree || path.starts_with(&alloc::format!("{subtree}/")),
+        None => pattern == path,
+    }
 }
 
 /// ZA-3214 ① — the numbering a record door gave the lists of one dissection.
@@ -222,6 +382,28 @@ pub trait RowCoordinates {
     fn list_id(&self, list: usize) -> Option<u64>;
     /// The id for `flow`'s SCOUTING list, which is not in that enumeration.
     fn scouting_list_id(&self, flow: &crate::link::FlowKey) -> Option<u64>;
+    /// The ROW SEQUENCE NUMBER of the message at produced-index
+    /// `produced` of the list at `list`, or `None` when the caller numbers no
+    /// rows.
+    ///
+    /// A sequence number is the handle's own count of rows it has issued, in the
+    /// order it first issued them: unique, increasing, and untouched by a front
+    /// trim or by a list being replaced. The produced-index is the list's own
+    /// absolute counter (`MessageList::produced` minus what is still held, plus
+    /// the position), which is what makes the answer independent of how many
+    /// messages a ceiling has already discarded.
+    ///
+    /// A default of `None`, and that is the true answer for a numbering that
+    /// issues none: the two implementations that pre-date this method number
+    /// LISTS and say nothing about rows, and a row with no sequence number is
+    /// written without the key rather than with an invented one.
+    fn row_seq(&self, _list: usize, _produced: u64) -> Option<u64> {
+        None
+    }
+    /// [`Self::row_seq`] for a message of `flow`'s SCOUTING list.
+    fn scouting_row_seq(&self, _flow: &crate::link::FlowKey, _produced: u64) -> Option<u64> {
+        None
+    }
 }
 
 /// R2458 (open-debt item 703) — the same document, against a grouping the
@@ -248,9 +430,24 @@ pub fn fields_json_grouped(
         max_messages_shown_per_flow,
         declarations,
         grouping,
-        None,
-        None,
+        RowAttachments::default(),
     )
+}
+
+/// What a caller attaches to the ROWS of the field document beyond the walk:
+/// the selector's verdicts, the record coordinates and row numbers of a live
+/// handle, and a cursor.
+///
+/// One value for the reason [`RowTags`] is one: `fields_json_selected` was at
+/// clippy's bound of seven arguments, and each of these is the same kind of
+/// input — something that joins a row to, or picks it out by, a fact outside
+/// this document. All three default to absent, which is the document a capture
+/// door writes.
+#[derive(Default)]
+struct RowAttachments<'a> {
+    verdicts: Option<&'a crate::payload::PayloadCensus>,
+    coordinates: Option<&'a dyn RowCoordinates>,
+    since: Option<Since>,
 }
 
 /// R2765 (open debt 788) — ONE implementation under both doors.
@@ -265,9 +462,13 @@ fn fields_json_selected(
     max_messages_shown_per_flow: Option<usize>,
     declarations: Option<&Declarations<'_>>,
     grouping: &crate::node::SessionGrouping,
-    verdicts: Option<&crate::payload::PayloadCensus>,
-    coordinates: Option<&dyn RowCoordinates>,
+    attach: RowAttachments<'_>,
 ) -> String {
+    let RowAttachments {
+        verdicts,
+        coordinates,
+        since,
+    } = attach;
     // A map with no rules answers `NoRules` for every message, so it renders
     // nothing either way -- folded here so the row renderers ask one question
     // rather than two.
@@ -288,6 +489,19 @@ fn fields_json_selected(
     // `doc_revision`; the census document opens the same way.
     let mut out = String::from("{");
     crate::doc_revision::envelope_into(crate::doc_revision::FIELDS, &mut out);
+    // Which rows were asked for, written by the since-door ALONE, on the
+    // precedent `list_id` set: a key only one door writes is still in the key
+    // set, and the revision says so.
+    if let Some(Since {
+        after_seq,
+        through_seq,
+    }) = since
+    {
+        let _ = write!(
+            out,
+            ",\"window\":{{\"after_seq\":{after_seq},\"through_seq\":{through_seq}}}"
+        );
+    }
     out.push_str(",\"stream_flows\":[");
     // ZA-3215 — re-read ONCE, ahead of both flow tables: a stream row now
     // names the packet holding its first byte and that packet's link
@@ -321,6 +535,11 @@ fn fields_json_selected(
                 // reason: the index is what names this list unambiguously.
                 list_id: coordinates.and_then(|c| c.list_id(*lists.stream.get(i)?)),
                 scouting_list_id: None,
+                numbering: coordinates.map(|coordinates| RowNumbering {
+                    coordinates,
+                    list: lists.stream.get(i).copied(),
+                }),
+                after_seq: since.map(|s| s.after_seq),
             },
             &mut out,
         );
@@ -351,6 +570,11 @@ fn fields_json_selected(
                 selection: RowSelection::of(verdicts, lists.datagram.get(i).copied()),
                 list_id: coordinates.and_then(|c| c.list_id(*lists.datagram.get(i)?)),
                 scouting_list_id: coordinates.and_then(|c| c.scouting_list_id(&flow.flow)),
+                numbering: coordinates.map(|coordinates| RowNumbering {
+                    coordinates,
+                    list: lists.datagram.get(i).copied(),
+                }),
+                after_seq: since.map(|s| s.after_seq),
             },
             &mut out,
         );
@@ -551,13 +775,28 @@ fn push_stream_flow(
     // is the half a renderer could not have by walking, because its rows have to
     // come out grouped by flow.
     let mut last_packet = 0usize;
-    for frame in &flow.frames {
+    // The produced-index of the OLDEST message still held, so a row's
+    // sequence number is looked up by an index a front trim does not move.
+    let first_produced = flow.frames.produced() - flow.frames.len() as u64;
+    for (position, frame) in flow.frames.iter().enumerate() {
         last_packet = flow
             .packet_for(frame.direction, frame.stream_offset)
             .unwrap_or(last_packet);
         spaces.at_packet(last_packet);
         // ZA-3215 — folded ahead of the cap, for the reason `ChainIds` gives.
         let session_row = chains.observe(frame);
+        // AFTER the chain fold and BEFORE anything is written: a row the cursor
+        // passes over still has to advance the fold, or a completing row behind
+        // it is numbered as if its chain had never begun. The keyexpr table
+        // needs no such care -- it is filled up front from every list, and the
+        // packet a row resolves AT is set per row. Only the WRITING is skipped.
+        let seq = tags.frame_seq(first_produced + position as u64);
+        if tags.passed_by_cursor(seq) {
+            if let Some(d) = declarations {
+                d.note_unwalked();
+            }
+            continue;
+        }
         if cap.is_some_and(|c| shown >= c) {
             omitted += 1;
             // Round 2029 (item 298) — TELL THE RULE RUN. The misbinding verdict
@@ -593,6 +832,7 @@ fn push_stream_flow(
             tags.list_id,
             frame.stream_offset as u64,
             frame.batch_index as u64,
+            seq,
             out,
         );
         push_selected(tags.selection, frame, out);
@@ -650,7 +890,9 @@ fn push_datagram_flow(
     // every reason this loop has for skipping one. R2513 (open-debt item 713) —
     // the absorb moved to the capture-ordered pre-pass, exactly as in the stream
     // half; see `absorb_every_declaration`.
-    for frame in &flow.frames {
+    // The stream half's index, for the stream half's reason.
+    let first_produced = flow.frames.produced() - flow.frames.len() as u64;
+    for (position, frame) in flow.frames.iter().enumerate() {
         // `stream_offset` names the PACKET here: a datagram link has no stream
         // for an offset to be into, so the field carries the only anchor there
         // is.
@@ -660,6 +902,16 @@ fn push_datagram_flow(
         // a datagram the second read disagrees about still advances the chain
         // fold exactly as the router was advanced by it.
         let session_row = chains.observe(frame);
+        // After the folds, and BEFORE the second read: a row the
+        // cursor passes over is not re-read from the container, which is most of
+        // what a datagram row costs.
+        let seq = tags.frame_seq(first_produced + position as u64);
+        if tags.passed_by_cursor(seq) {
+            if let Some(d) = declarations {
+                d.note_unwalked();
+            }
+            continue;
+        }
         let Some(file) = reread else {
             continue;
         };
@@ -703,7 +955,13 @@ fn push_datagram_flow(
             dir_name(frame.direction),
             crate::anchor_space_of(frame).name()
         );
-        push_coordinates(tags.list_id, index as u64, frame.batch_index as u64, out);
+        push_coordinates(
+            tags.list_id,
+            index as u64,
+            frame.batch_index as u64,
+            seq,
+            out,
+        );
         push_selected(tags.selection, frame, out);
         push_walk(
             RowWalk {
@@ -743,8 +1001,15 @@ fn push_datagram_flow(
     // consumer merges on. NOT stamped into the id spaces: a scouting message
     // references no keyexpr, and its packet may precede the last frame's, which
     // would move a cursor that only moves forward.
-    for datagram in &flow.scouting {
+    // The scouting list's own produced-index base: `ScoutingList` is
+    // trimmed from the front by the same ceiling and counts what it ever held.
+    let scouting_first = flow.scouting.produced() - flow.scouting.len() as u64;
+    for (position, datagram) in flow.scouting.iter().enumerate() {
         let index = datagram.packet_index;
+        let seq = tags.scouting_seq(&flow.flow, scouting_first + position as u64);
+        if tags.passed_by_cursor(seq) {
+            continue;
+        }
         let Some(file) = reread else {
             continue;
         };
@@ -782,7 +1047,7 @@ fn push_datagram_flow(
         // ZA-3214 ① — the scouting list's own id: this row joins a record the
         // record door drains with ORIGIN_SCOUTING, whose batch index is 0
         // because a scouting message is never batched.
-        push_coordinates(tags.scouting_list_id, index as u64, 0, out);
+        push_coordinates(tags.scouting_list_id, index as u64, 0, seq, out);
         if tags.selection.is_some() {
             RowVerdict::Unjudged.push(out);
         }
@@ -2144,6 +2409,47 @@ struct RowTags<'a> {
     selection: Option<RowSelection<'a>>,
     list_id: Option<u64>,
     scouting_list_id: Option<u64>,
+    /// The caller's row numbering and the position of THIS flow's list
+    /// in it, so a row can ask what sequence number the handle gave it. `None`
+    /// for a document whose caller numbers no rows.
+    numbering: Option<RowNumbering<'a>>,
+    /// The cursor: a row whose sequence number is at or below it is
+    /// passed over, and every other row is written. `None` writes them all.
+    after_seq: Option<u64>,
+}
+
+/// How a row producer asks for a row's sequence number.
+#[derive(Clone, Copy)]
+struct RowNumbering<'a> {
+    coordinates: &'a dyn RowCoordinates,
+    /// This flow's position in `Dissection::message_lists_with_origin`, or
+    /// `None` for a flow that enumeration does not name, whose rows are then
+    /// left unnumbered rather than numbered from a guess.
+    list: Option<usize>,
+}
+
+impl RowTags<'_> {
+    /// The sequence number of the message at produced-index `produced` of this
+    /// flow's cleartext list.
+    fn frame_seq(&self, produced: u64) -> Option<u64> {
+        let n = self.numbering?;
+        n.coordinates.row_seq(n.list?, produced)
+    }
+
+    /// The sequence number of the message at produced-index `produced` of
+    /// `flow`'s scouting list.
+    fn scouting_seq(&self, flow: &crate::link::FlowKey, produced: u64) -> Option<u64> {
+        self.numbering?.coordinates.scouting_row_seq(flow, produced)
+    }
+
+    /// Is this row at or below the cursor, and so already handed over?
+    ///
+    /// A row with NO sequence number is never passed over: with a cursor set it
+    /// cannot be compared, and writing a row twice is a recoverable answer where
+    /// dropping one is not.
+    fn passed_by_cursor(&self, seq: Option<u64>) -> bool {
+        matches!((self.after_seq, seq), (Some(after), Some(s)) if s <= after)
+    }
 }
 
 /// ZA-3214 ① — `"list_id":L,"anchor":A,"batch_index":B,` for a row whose list
@@ -2154,12 +2460,26 @@ struct RowTags<'a> {
 /// written even where the row already carries `message_at` or `packet`: it is
 /// the record's coordinate, which for a stream is the framing unit's LENGTH
 /// PREFIX and not the message's first byte, so it is not the same number.
-fn push_coordinates(list_id: Option<u64>, anchor: u64, batch_index: u64, out: &mut String) {
+///
+/// And `"seq":S,` after them when the caller also numbers rows. It is
+/// written LAST so the text up to `batch_index` is what it has been since
+/// revision 15, and it is a SEPARATE key from the three because it is not part
+/// of the join: a row and its record still meet on the same four values.
+fn push_coordinates(
+    list_id: Option<u64>,
+    anchor: u64,
+    batch_index: u64,
+    seq: Option<u64>,
+    out: &mut String,
+) {
     if let Some(list_id) = list_id {
         let _ = write!(
             out,
             "\"list_id\":{list_id},\"anchor\":{anchor},\"batch_index\":{batch_index},"
         );
+        if let Some(seq) = seq {
+            let _ = write!(out, "\"seq\":{seq},");
+        }
     }
 }
 
@@ -4381,6 +4701,16 @@ mod tests {
         fn scouting_list_id(&self, _flow: &crate::link::FlowKey) -> Option<u64> {
             Some(u64::MAX)
         }
+
+        /// A row's number is its produced-index plus one: at least 1, so a
+        /// cursor of 0 passes over nothing, and distinct within a list.
+        fn row_seq(&self, _list: usize, produced: u64) -> Option<u64> {
+            Some(produced + 1)
+        }
+
+        fn scouting_row_seq(&self, _flow: &crate::link::FlowKey, produced: u64) -> Option<u64> {
+            Some(produced + 1)
+        }
     }
 
     /// R2175 (open-debt item 552) — THE PAYLOAD PLANE OF THIS DOCUMENT,
@@ -4443,6 +4773,19 @@ mod tests {
             Some(&run),
             &selector,
             &EveryListNumbered,
+        ));
+        // And through the since door, the only one that writes `window` and its
+        // two members, and which carries `seq` on every row it writes. Without
+        // it the keys revision 19 added would be declared and pinned by nothing.
+        rendered.push(fields_json_since_coordinated(
+            &d,
+            &file,
+            Some(&run),
+            &EveryListNumbered,
+            Since {
+                after_seq: 0,
+                through_seq: 1,
+            },
         ));
         let states = PayloadDecoding::all();
         assert_eq!(

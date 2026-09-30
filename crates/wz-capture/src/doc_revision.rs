@@ -1117,6 +1117,39 @@ pub const DOCUMENT_HISTORY: &[DocumentShape] = &[
         planes: &[],
         carries: FIELDS_R17_CARRIES,
     },
+    // A ROW SEQUENCE NUMBER, and the window a since-document was made for.
+    //
+    // FOUR KEYS ARE ADDED and none retires, so this is a revision the key set
+    // itself announces. Every row a LIVE door writes gains `seq`: the handle's
+    // count of rows it has issued, in the order it first issued them, unique and
+    // increasing and untouched by a ceiling trimming a list or a flow being
+    // replaced. A document from the since-door alone gains a top-level `window`
+    // with two members, `after_seq` (the cursor it was asked at) and
+    // `through_seq` (the highest number the handle had issued, which is the
+    // cursor to ask next).
+    //
+    // No family or plane moves: `seq` and the window numbers are counts, not
+    // words drawn from a set. The CARRIES axis does move, for one word and one
+    // key: `offset_space` decides which keys arrive beside it, and `seq` arrives
+    // exactly when `list_id` does, so the five shapes that carry `list_id` gain
+    // `seq` and the four that do not are unchanged. A document from a capture
+    // door carries neither `seq` nor `window`, exactly as it carries no
+    // `list_id`, and the key set names them all the same, on the precedent
+    // revision 15 set.
+    //
+    // A consumer pinned to 18 loses nothing: the new keys are additions that a
+    // reader ignoring unknown keys does not see, and a consumer that read a
+    // row's shape off `offset_space` finds one more key in the shapes it already
+    // knew to carry coordinates.
+    DocumentShape {
+        document: FIELDS,
+        revision: 19,
+        keys: FIELDS_R19_KEYS,
+        retiring: &[],
+        families: FIELDS_R17_FAMILIES,
+        planes: &[],
+        carries: FIELDS_R19_CARRIES,
+    },
     DocumentShape {
         document: SUMMARY,
         revision: 1,
@@ -3947,6 +3980,114 @@ pub const FIELDS_R15_KEYS: &[&str] = &[
     "wrong",
 ];
 
+/// The field document's key set at revision 19 — revision 15's PLUS `seq`,
+/// `window`, `after_seq` and `through_seq`, and SORTED for the same reason.
+///
+/// `seq` is a row's sequence number; `window` is the since-document's own
+/// question, and `after_seq` and `through_seq` are its two members. Written out
+/// rather than derived from revision 15's, for the reason
+/// [`CENSUS_R13_KEYS`] gives for aliasing the other way: this set is NOT the
+/// earlier one, so an alias would be a claim that it is.
+pub const FIELDS_R19_KEYS: &[&str] = &[
+    "abandoned_at_end",
+    "abandoned_on_eviction",
+    "above_transport",
+    "addr",
+    "after_seq",
+    "anchor",
+    "batch_index",
+    "batch_size",
+    "caps",
+    "capture_reread",
+    "carried",
+    "carried_state",
+    "chain",
+    "chain_id",
+    "compression",
+    "conduit",
+    "context",
+    "datagram_flows",
+    "declaration_checked",
+    "declared",
+    "descriptor_bytes",
+    "despite_encoding",
+    "direction",
+    "document",
+    "dropped_by_limits",
+    "dst",
+    "end",
+    "example",
+    "expired_chains",
+    "fields",
+    "first_byte",
+    "flow",
+    "flows",
+    "format",
+    "frame_offset",
+    "frames",
+    "frames_per_flow",
+    "high",
+    "keyexpr",
+    "keyexpr_cause",
+    "kind",
+    "l2",
+    "link",
+    "list_id",
+    "low",
+    "lowlatency",
+    "max_flows_per_table",
+    "max_scout_askers",
+    "message",
+    "message_at",
+    "messages",
+    "missing",
+    "name",
+    "negotiated",
+    "note",
+    "offset_space",
+    "omitted",
+    "outcome",
+    "packet",
+    "patch",
+    "path",
+    "payload_decode",
+    "payload_mapping",
+    "payload_mapping_counts_exact",
+    "payload_offset",
+    "payload_refusals",
+    "phase",
+    "port",
+    "priority",
+    "qos",
+    "reason",
+    "reassembly",
+    "reliable",
+    "revision",
+    "samples",
+    "scout_askers",
+    "scouting",
+    "selected",
+    "seq",
+    "shown",
+    "skipped",
+    "skipped_packets",
+    "sn",
+    "sn_mask",
+    "src",
+    "start",
+    "state",
+    "stream_bytes",
+    "stream_bytes_per_direction",
+    "stream_flows",
+    "through_seq",
+    "under",
+    "value",
+    "verdict",
+    "why",
+    "window",
+    "wrong",
+];
+
 /// The value families the field document declares at revision 13 — revision
 /// 12's PLUS `selected`.
 pub const FIELDS_R13_FAMILIES: &[ValueFamily] = &[
@@ -5121,6 +5262,306 @@ pub const FIELD_OFFSET_SPACE_CARRIES_R16: &[WordCarries] = &[
                 "sn",
             ],
         ],
+    },
+];
+
+/// Every shape each `offset_space` word's row takes at revision 19 — revision
+/// 16's, with `seq` beside `list_id` in every shape that has one.
+///
+/// A row a LIVE door writes carries the handle's row sequence number after its
+/// record coordinates, so the five shapes that carry `list_id` carry `seq` too,
+/// and the four that do not (a capture door's rows) are unchanged: the word
+/// decides which keys come with it, and `seq` comes exactly when `list_id` does.
+/// Generated from the revision-16 table, not typed.
+pub const FIELD_OFFSET_SPACE_CARRIES_R19: &[WordCarries] = &[
+    WordCarries {
+        word: "packet",
+        shapes: &[
+            &[
+                "above_transport",
+                "anchor",
+                "batch_index",
+                "carried",
+                "chain",
+                "direction",
+                "fields",
+                "first_byte",
+                "l2",
+                "list_id",
+                "name",
+                "packet",
+                "payload_decode",
+                "selected",
+                "seq",
+                "sn",
+            ],
+            &[
+                "above_transport",
+                "anchor",
+                "batch_index",
+                "carried",
+                "chain",
+                "direction",
+                "fields",
+                "first_byte",
+                "l2",
+                "list_id",
+                "name",
+                "packet",
+                "selected",
+                "seq",
+                "sn",
+            ],
+            &[
+                "above_transport",
+                "anchor",
+                "batch_index",
+                "chain",
+                "declined",
+                "direction",
+                "first_byte",
+                "l2",
+                "list_id",
+                "packet",
+                "selected",
+                "seq",
+                "sn",
+            ],
+            &[
+                "above_transport",
+                "carried",
+                "chain",
+                "direction",
+                "fields",
+                "first_byte",
+                "l2",
+                "name",
+                "packet",
+                "payload_decode",
+                "selected",
+                "sn",
+            ],
+            &[
+                "above_transport",
+                "carried",
+                "chain",
+                "direction",
+                "fields",
+                "first_byte",
+                "l2",
+                "name",
+                "packet",
+                "payload_decode",
+                "sn",
+            ],
+            &[
+                "above_transport",
+                "carried",
+                "chain",
+                "direction",
+                "fields",
+                "first_byte",
+                "l2",
+                "name",
+                "packet",
+                "selected",
+                "sn",
+            ],
+            &[
+                "above_transport",
+                "carried",
+                "chain",
+                "direction",
+                "fields",
+                "first_byte",
+                "l2",
+                "name",
+                "packet",
+                "sn",
+            ],
+            &[
+                "above_transport",
+                "chain",
+                "declined",
+                "direction",
+                "first_byte",
+                "l2",
+                "packet",
+                "selected",
+                "sn",
+            ],
+            &[
+                "above_transport",
+                "chain",
+                "declined",
+                "direction",
+                "first_byte",
+                "l2",
+                "packet",
+                "sn",
+            ],
+        ],
+    },
+    WordCarries {
+        word: "stream_byte",
+        shapes: &[
+            &[
+                "above_transport",
+                "anchor",
+                "batch_index",
+                "carried",
+                "chain",
+                "direction",
+                "fields",
+                "first_byte",
+                "l2",
+                "list_id",
+                "message_at",
+                "name",
+                "payload_decode",
+                "selected",
+                "seq",
+                "sn",
+            ],
+            &[
+                "above_transport",
+                "anchor",
+                "batch_index",
+                "carried",
+                "chain",
+                "direction",
+                "fields",
+                "first_byte",
+                "l2",
+                "list_id",
+                "message_at",
+                "name",
+                "selected",
+                "seq",
+                "sn",
+            ],
+            &[
+                "above_transport",
+                "carried",
+                "chain",
+                "direction",
+                "fields",
+                "first_byte",
+                "l2",
+                "message_at",
+                "name",
+                "payload_decode",
+                "selected",
+                "sn",
+            ],
+            &[
+                "above_transport",
+                "carried",
+                "chain",
+                "direction",
+                "fields",
+                "first_byte",
+                "l2",
+                "message_at",
+                "name",
+                "payload_decode",
+                "sn",
+            ],
+            &[
+                "above_transport",
+                "carried",
+                "chain",
+                "direction",
+                "fields",
+                "first_byte",
+                "l2",
+                "message_at",
+                "name",
+                "selected",
+                "sn",
+            ],
+            &[
+                "above_transport",
+                "carried",
+                "chain",
+                "direction",
+                "fields",
+                "first_byte",
+                "l2",
+                "message_at",
+                "name",
+                "sn",
+            ],
+        ],
+    },
+];
+
+/// What each field-document family's WORD decides at revision 19 — revision 17's,
+/// with `offset_space` read from [`FIELD_OFFSET_SPACE_CARRIES_R19`].
+pub const FIELDS_R19_CARRIES: &[KeyCarries] = &[
+    KeyCarries {
+        key: "carried_state",
+        shape: CarriesShape::Discriminant(CARRIED_STATE_CARRIES_R12),
+    },
+    KeyCarries {
+        key: "direction",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "keyexpr_cause",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "kind",
+        shape: CarriesShape::Discriminant(FIELD_VALUE_KIND_CARRIES_R17),
+    },
+    KeyCarries {
+        key: "link",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "message",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "offset_space",
+        shape: CarriesShape::Discriminant(FIELD_OFFSET_SPACE_CARRIES_R19),
+    },
+    KeyCarries {
+        key: "outcome",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "phase",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "priority",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "reason",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "selected",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "state",
+        shape: CarriesShape::Discriminant(PAYLOAD_STATE_CARRIES_R4),
+    },
+    KeyCarries {
+        key: "under",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "verdict",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "wrong",
+        shape: CarriesShape::Passenger,
     },
 ];
 
@@ -7952,7 +8393,9 @@ mod tests {
             // ZA-3695 — to 18 when an IPv6 `addr` changed spelling under its
             // stationary key, in the field document as in the census. No axis
             // moves; this entry is the notice.
-            (FIELDS, 18),
+            // To 19 when a live row gained `seq` and a since-document gained
+            // `window`: four keys, no word and no removal.
+            (FIELDS, 19),
             // R2121 (open-debt item 460) — the summary moved to 2 when it
             // gained `inert_counters`; R2122 (item 238) to 3 when its
             // `framing` group stopped disagreeing with the capture report's.

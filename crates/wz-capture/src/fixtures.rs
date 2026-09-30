@@ -275,6 +275,252 @@ pub fn multilink_declaring_after_the_reference() -> (crate::Dissection, Vec<u8>)
     capture(&rows)
 }
 
+/// An Ethernet/IPv4/TCP frame carrying `payload` at sequence number `seq`.
+///
+/// The IPv4 header checksum is real and the TCP one is left zero, so a reader
+/// counts these segments in its transport-checksum tallies and decodes them
+/// anyway; no fixture here reads that verdict. Padded to the 60-byte minimum.
+fn tcp_segment(
+    src: [u8; 4],
+    sport: u16,
+    dst: [u8; 4],
+    dport: u16,
+    seq: u32,
+    payload: &[u8],
+) -> Vec<u8> {
+    let mut tcp = Vec::new();
+    tcp.extend_from_slice(&sport.to_be_bytes());
+    tcp.extend_from_slice(&dport.to_be_bytes());
+    tcp.extend_from_slice(&seq.to_be_bytes());
+    tcp.extend_from_slice(&0u32.to_be_bytes());
+    tcp.push(5 << 4);
+    tcp.push(0x10); // ACK
+    tcp.extend_from_slice(&64u16.to_be_bytes());
+    tcp.extend_from_slice(&0u16.to_be_bytes());
+    tcp.extend_from_slice(&0u16.to_be_bytes());
+    tcp.extend_from_slice(payload);
+
+    let mut ip = alloc::vec![0x45u8, 0];
+    ip.extend_from_slice(&((20 + tcp.len()) as u16).to_be_bytes());
+    ip.extend_from_slice(&[0, 0, 0, 0, 64, 6, 0, 0]);
+    ip.extend_from_slice(&src);
+    ip.extend_from_slice(&dst);
+    let checksum = ones_complement(&[&ip]);
+    ip[10..12].copy_from_slice(&checksum.to_be_bytes());
+    ip.extend_from_slice(&tcp);
+
+    let mut eth = alloc::vec![0u8; 12];
+    eth.extend_from_slice(&[0x08, 0x00]);
+    eth.extend_from_slice(&ip);
+    while eth.len() < 60 {
+        eth.push(0);
+    }
+    eth
+}
+
+/// One message of a TCP stream: the two-byte little-endian length zenoh puts in
+/// front of every transport message on a stream link, then the message.
+fn stream_unit(wire: &[u8]) -> Vec<u8> {
+    let mut out = (wire.len() as u16).to_le_bytes().to_vec();
+    out.extend_from_slice(wire);
+    out
+}
+
+/// [`chain_sequence_capture`]'s twin over a TCP STREAM link: one session that
+/// carries `chains` completed fragment chains, one after the other, as the pcap
+/// FILE.
+///
+/// A stream flow and a datagram flow are written by two different row loops, and
+/// each carries its own chain fold, so a property of one is not a property of the
+/// other. This is the capture that reaches the stream loop's.
+pub fn stream_chain_sequence_capture(chains: usize) -> Vec<u8> {
+    const ISN: u32 = 1000;
+    const PORT: u16 = 43210;
+    let record = push(sender_space(0, Some("chain/joined")), &[7u8; 8]);
+    let split = record.len() / 2;
+    let mut units = full_handshake()
+        .into_iter()
+        .map(|(from_low, wire)| (from_low, stream_unit(&wire)))
+        .collect::<Vec<_>>();
+    for chain in 0..chains {
+        let sn = (2 * chain) as u8;
+        units.push((
+            true,
+            stream_unit(&fragment_wire(sn, true, &record[..split])),
+        ));
+        units.push((
+            true,
+            stream_unit(&fragment_wire(sn + 1, false, &record[split..])),
+        ));
+    }
+    // Each direction's sequence number advances by what that direction sent.
+    let (mut low, mut high) = (ISN, ISN);
+    let packets: Vec<Vec<u8>> = units
+        .iter()
+        .map(|(from_low, unit)| {
+            let next = if *from_low { &mut low } else { &mut high };
+            let seq = *next;
+            *next += unit.len() as u32;
+            if *from_low {
+                tcp_segment(LOW, PORT, HIGH, 7447, seq, unit)
+            } else {
+                tcp_segment(HIGH, 7447, LOW, PORT, seq, unit)
+            }
+        })
+        .collect();
+    let refs: Vec<(u32, u32, &[u8])> = packets
+        .iter()
+        .enumerate()
+        .map(|(i, p)| (0u32, (i as u32) * 1_000, p.as_slice()))
+        .collect();
+    crate::pcap::write(crate::link::LINKTYPE_ETHERNET, &refs)
+}
+
+/// When the segment that fills a gap arrives, in
+/// [`multilink_declaration_behind_a_gap`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GapFill {
+    /// After the reference: the declaration is decoded LATER than a reference that
+    /// followed it on the wire.
+    AfterTheReference,
+    /// Before the reference: the declaration is decoded first, as in order.
+    BeforeTheReference,
+    /// Never: the declaration is held until the reader gives up on the gap.
+    Never,
+}
+
+/// ONE session over TWO TCP links whose declaration reaches the reader AFTER the
+/// reference it names, although it was SENT before it.
+///
+/// # The two orders, again, and what this pulls apart
+///
+/// [`multilink_declaring_on_the_later_link`] separates the order a capture is
+/// WALKED in from the order it was sent in. This separates the order it was sent
+/// in from the order it was DECODED in, which UDP cannot: a datagram decodes the
+/// moment it arrives. A TCP segment that arrives ahead of the one before it is
+/// held until the gap fills, so the messages it carries are decoded LATER than
+/// packets that arrived after it.
+///
+/// The declaration is the segment that arrives early. On the wire it is packet 4
+/// and the reference on the other link is packet 5, so a reader honouring "a
+/// declaration names what follows it" must resolve the reference — but the
+/// declaration is not DECODED until packet 6 fills the gap, so a document taken
+/// after packet 5 has to leave the reference unresolved and one taken after
+/// packet 6 resolves it. That is the shape in which a row that was written once
+/// reads differently later, and it is built here so a consumer can be graded on
+/// it.
+///
+/// [`GapFill`] says when the packet that fills the gap arrives: after the
+/// reference (the shape above), before it (the declaration is then decoded ahead
+/// of the reference, as it is on every in-order capture, which is what a test of
+/// a cursor that passes a declaration and writes the reference behind it needs),
+/// or never, so the declaration stays held for as long as the reader waits and
+/// only giving up on the gap (a feed being declared over) releases it.
+///
+/// `reference_in_a_chain` sends the reference as a completed FRAGMENT chain on
+/// link 1 instead of as one `Frame`, so it reaches a reader as the row that
+/// completed the chain and is read out of the JOINED buffer. That is a second
+/// place a row consults the keyexpr table, and it has to be reachable to be
+/// graded. Link 1 then opens with the whole four-message handshake, because a
+/// chain is tracked only once an INIT-ACK has fixed the SN resolution.
+///
+/// # The packets, with `reference_in_a_chain == false`
+///
+/// 0. link 1, A to B: INIT (names A) 1. link 1, B to A: INIT (names B)
+/// 2. link 2, A to B: INIT, which fixes the direction's first sequence number
+///    3. link 2, B to A: INIT
+/// 4. link 2, A to B: the DECLARATION, ahead of a KeepAlive that is not yet here
+/// 5. link 1, A to B: the REFERENCE 6. link 2, A to B: that KeepAlive
+///
+/// With `reference_in_a_chain`, packets 0 and 1 are the whole handshake (four
+/// packets) and the reference is two fragments. The KeepAlive is last under
+/// [`GapFill::AfterTheReference`], directly after the declaration under
+/// [`GapFill::BeforeTheReference`], and absent under [`GapFill::Never`].
+pub fn multilink_declaration_behind_a_gap(fill: GapFill, reference_in_a_chain: bool) -> Vec<u8> {
+    const ISN: u32 = 1000;
+    const L1: u16 = 43210;
+    const L2: u16 = 43211;
+    // The next sequence number of each direction of each link, so the one
+    // segment that is sent out of order is the only place a number is spelled.
+    let mut next: Vec<((u16, bool), u32)> = Vec::new();
+    let mut at = |port: u16, from_low: bool, len: usize| -> u32 {
+        match next.iter_mut().find(|(key, _)| *key == (port, from_low)) {
+            Some(slot) => {
+                let seq = slot.1;
+                slot.1 += len as u32;
+                seq
+            }
+            None => {
+                next.push(((port, from_low), ISN + len as u32));
+                ISN
+            }
+        }
+    };
+    let segment = |port: u16, from_low: bool, seq: u32, unit: &[u8]| -> Vec<u8> {
+        if from_low {
+            tcp_segment(LOW, port, HIGH, 7447, seq, unit)
+        } else {
+            tcp_segment(HIGH, 7447, LOW, port, seq, unit)
+        }
+    };
+
+    let init_a = stream_unit(&init_wire(ZID_A));
+    let init_b = stream_unit(&init_wire(ZID_B));
+    let keepalive = stream_unit(&[wz_session_core::wire_const::T_MID_KEEP_ALIVE]);
+    let declaration = stream_unit(&frame_carrying(&declare_kexpr(ALIAS_ID, ALIAS_LITERAL)));
+    let reference = push(sender_space(ALIAS_ID, None), &[0u8; 11]);
+
+    let mut packets: Vec<Vec<u8>> = Vec::new();
+    // Link 1's opening. A chain needs the whole handshake; a lone frame needs
+    // only the two INITs that make the link a link.
+    if reference_in_a_chain {
+        for (from_low, wire) in full_handshake() {
+            let unit = stream_unit(&wire);
+            packets.push(segment(L1, from_low, at(L1, from_low, unit.len()), &unit));
+        }
+    } else {
+        packets.push(segment(L1, true, at(L1, true, init_a.len()), &init_a));
+        packets.push(segment(L1, false, at(L1, false, init_b.len()), &init_b));
+    }
+    // Link 2: both INITs, then the declaration one segment AHEAD of where the
+    // stream has got to.
+    packets.push(segment(L2, true, at(L2, true, init_a.len()), &init_a));
+    packets.push(segment(L2, false, at(L2, false, init_b.len()), &init_b));
+    let gap_at = at(L2, true, keepalive.len());
+    packets.push(segment(
+        L2,
+        true,
+        gap_at + keepalive.len() as u32,
+        &declaration,
+    ));
+    if fill == GapFill::BeforeTheReference {
+        packets.push(segment(L2, true, gap_at, &keepalive));
+    }
+    // The reference, on link 1.
+    if reference_in_a_chain {
+        let split = reference.len() / 2;
+        for (sn, more, piece) in [
+            (0u8, true, &reference[..split]),
+            (1, false, &reference[split..]),
+        ] {
+            let unit = stream_unit(&fragment_wire(sn, more, piece));
+            packets.push(segment(L1, true, at(L1, true, unit.len()), &unit));
+        }
+    } else {
+        let unit = stream_unit(&frame_carrying(&reference));
+        packets.push(segment(L1, true, at(L1, true, unit.len()), &unit));
+    }
+    if fill == GapFill::AfterTheReference {
+        packets.push(segment(L2, true, gap_at, &keepalive));
+    }
+    let refs: Vec<(u32, u32, &[u8])> = packets
+        .iter()
+        .enumerate()
+        .map(|(i, p)| (0u32, (i as u32) * 1_000, p.as_slice()))
+        .collect();
+    crate::pcap::write(crate::link::LINKTYPE_ETHERNET, &refs)
+}
+
 /// ZA-3215 ⑤ — ONE unicast session over UDP whose only record arrives as a
 /// COMPLETED fragment chain, as the pcap FILE, with the record it carries.
 ///
@@ -287,6 +533,16 @@ pub fn multilink_declaring_after_the_reference() -> (crate::Dissection, Vec<u8>)
 /// has fixed the SN resolution, and without one every fragment reads
 /// `fragment_without_resolution` and nothing is ever joined.
 pub fn completed_chain_capture() -> (Vec<u8>, Vec<u8>) {
+    let record = push(sender_space(0, Some("chain/joined")), &[7u8; 8]);
+    (chain_sequence_capture(1), record)
+}
+
+/// The four-message handshake half `chain_sequence_capture` and
+/// `completed_chain_capture` open with: INIT, INIT-ACK, OPEN, OPEN-ACK.
+///
+/// Whole messages and not `handshake`'s two INITs, because a fragment chain is
+/// tracked only once an INIT-ACK has fixed the SN resolution.
+fn full_handshake() -> Vec<(bool, Vec<u8>)> {
     let init = |is_ack: bool| {
         let flags = if is_ack {
             wz_codecs::wire_const::FLAG_T_INIT_A
@@ -324,30 +580,47 @@ pub fn completed_chain_capture() -> (Vec<u8>, Vec<u8>) {
         );
         wire
     };
-    let fragment = |sn: u8, more: bool, piece: &[u8]| {
-        let mut wire = alloc::vec![
-            wz_session_core::wire_const::T_MID_FRAGMENT
-                | wz_codecs::wire_const::FLAG_T_FRAGMENT_R
-                | if more {
-                    wz_codecs::wire_const::FLAG_T_FRAGMENT_M
-                } else {
-                    0
-                },
-            sn,
-        ];
-        wire.extend_from_slice(piece);
-        wire
-    };
-    let record = push(sender_space(0, Some("chain/joined")), &[7u8; 8]);
-    let split = record.len() / 2;
-    let rows = [
+    alloc::vec![
         (true, init(false)),
         (false, init(true)),
         (true, open(false)),
         (false, open(true)),
-        (true, fragment(0, true, &record[..split])),
-        (true, fragment(1, false, &record[split..])),
+    ]
+}
+
+/// One reliable-channel FRAGMENT with sequence number `sn`, carrying `piece`.
+fn fragment_wire(sn: u8, more: bool, piece: &[u8]) -> Vec<u8> {
+    let mut wire = alloc::vec![
+        wz_session_core::wire_const::T_MID_FRAGMENT
+            | wz_codecs::wire_const::FLAG_T_FRAGMENT_R
+            | if more {
+                wz_codecs::wire_const::FLAG_T_FRAGMENT_M
+            } else {
+                0
+            },
+        sn,
     ];
+    wire.extend_from_slice(piece);
+    wire
+}
+
+/// ONE unicast session over UDP that carries `chains` fragment chains, one after
+/// the other, each completed, as the pcap FILE.
+///
+/// For a consumer that grades what a chain identity does over a run of chains: a
+/// single chain cannot tell an identity counted from the start of the capture
+/// from one counted from the first message still held, because both are 0. Each
+/// chain is two fragments (`begun`, then `reassembled`) with the next chain's
+/// sequence numbers continuing the reliable channel's.
+pub fn chain_sequence_capture(chains: usize) -> Vec<u8> {
+    let record = push(sender_space(0, Some("chain/joined")), &[7u8; 8]);
+    let split = record.len() / 2;
+    let mut rows = full_handshake();
+    for chain in 0..chains {
+        let sn = (2 * chain) as u8;
+        rows.push((true, fragment_wire(sn, true, &record[..split])));
+        rows.push((true, fragment_wire(sn + 1, false, &record[split..])));
+    }
     let packets: Vec<Vec<u8>> = rows
         .iter()
         .map(|(from_low, wire)| {
@@ -359,10 +632,7 @@ pub fn completed_chain_capture() -> (Vec<u8>, Vec<u8>) {
         })
         .collect();
     let refs: Vec<(u32, u32, &[u8])> = packets.iter().map(|p| (0u32, 0u32, p.as_slice())).collect();
-    (
-        crate::pcap::write(crate::link::LINKTYPE_ETHERNET, &refs),
-        record,
-    )
+    crate::pcap::write(crate::link::LINKTYPE_ETHERNET, &refs)
 }
 
 /// The SHAPE both fixtures above claim, asserted rather than assumed.
