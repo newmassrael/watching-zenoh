@@ -2294,12 +2294,52 @@ fn assert_declared_publisher_options_are_sent_as_the_real_pico_sends_them(topolo
         "a put's own encoding does not change the QoS the publisher sends with"
     );
 
+    // ⚠ ONE PINNED DIVERGENCE, in the topology where it exists and only there, the
+    // same one the advanced publisher's leg pins: a pico peer that asked a router
+    // never retracts its interests (`vendor/zenoh-pico/src/net/primitives.c` @ `//
+    // Build the declare message to send on the wire (only needed in client mode or
+    // multicast transport)` in `_z_remove_interest`), where wz retracts them. The
+    // count is what is pinned, one retraction per Interest asked, so a retraction
+    // that goes missing or one too many is still a finding.
+    let observed: Vec<String> = match topology {
+        Topology::PeerToRouter => {
+            assert_eq!(
+                reference
+                    .iter()
+                    .filter(|l| l.starts_with("Interest (final)"))
+                    .count(),
+                0,
+                "the real pico peer should retract no interest it asked a router for:\n{}",
+                reference.join("\n")
+            );
+            let asked = reference
+                .iter()
+                .filter(|l| l.starts_with("Interest hdr="))
+                .count();
+            assert!(asked > 0, "the reference asked the router for nothing");
+            let retracted = wz
+                .iter()
+                .filter(|l| l.starts_with("Interest (final)"))
+                .count();
+            assert_eq!(
+                retracted,
+                asked,
+                "wz should retract exactly the interests the publishers asked:\n{}",
+                wz.join("\n")
+            );
+            wz.iter()
+                .filter(|l| !l.starts_with("Interest (final)"))
+                .cloned()
+                .collect()
+        }
+        Topology::Client | Topology::PeerToPeer => wz,
+    };
     assert_eq!(
-        wz,
+        observed,
         reference,
         "wz sends a declared publisher's samples differently from the real zenoh-pico \
          for the same program.\n--- wz ---\n{}\n--- reference ---\n{}",
-        wz.join("\n"),
+        observed.join("\n"),
         reference.join("\n")
     );
 }
@@ -2324,4 +2364,16 @@ fn a_publisher_declared_with_options_sends_the_same_qos_as_the_real_pico() {
             tap to a wz-ap-demo peer; run by run-ci Layer E"]
 fn a_publisher_declared_with_options_beside_a_peer_sends_the_same_qos_as_the_real_pico() {
     assert_declared_publisher_options_are_sent_as_the_real_pico_sends_them(Topology::PeerToPeer);
+}
+
+/// The same program from a pico PEER beside a ROUTER. The `wz_router_` prefix
+/// keeps Layer E's `--skip wz_router` from running it against the default-feature
+/// demo; Layer E5 builds the routing demo and runs it by name.
+// wz-proves: api-compat-pico wz->pico partial
+#[test]
+#[ignore = "cc-compiles a driver against both libraries and runs each through a \
+            tap to a wz-ap-demo router with a provider behind it; run by run-ci \
+            Layer E5"]
+fn wz_router_hears_a_pico_peer_publisher_with_options_the_same_on_wz_and_on_the_real_pico() {
+    assert_declared_publisher_options_are_sent_as_the_real_pico_sends_them(Topology::PeerToRouter);
 }

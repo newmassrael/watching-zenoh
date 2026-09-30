@@ -17930,12 +17930,14 @@ layer_e5_router_forward() {
     # filter reaches it.
     # R2983 — 2 -> 3, the advanced subscriber's
     # (`wz_router_hears_a_pico_peer_advanced_subscriber_...`).
+    # R2990 — 3 -> 4, the declared publisher options'
+    # (`wz_router_hears_a_pico_peer_publisher_with_options_...`).
     if [[ ! -f target/zenoh-pico-build/lib/libzenohpico.so ]]; then
         _pico_cli_unavailable "Layer E5 (pico peer beside a router, libzenohpico oracle)" || return 1
         return 0
     fi
     (cd crates && cargo build -p wz-capi-pico --features transport-link-tls --quiet) || return 1
-    _runci_guarded_test "E5 pico peer beside a router" 3 \
+    _runci_guarded_test "E5 pico peer beside a router" 4 \
         cargo test -p wz-integration-tests \
         --test pico_keyexpr_declaration_twice_and_diff -- --ignored \
         wz_router_hears_a_pico_peer --test-threads=1 --quiet || return 1
