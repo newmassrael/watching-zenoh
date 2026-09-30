@@ -827,7 +827,18 @@ HOST_GATED_CI_TARGETS: dict[str, str] = {
 # `scripts/audit-crossimpl-proof.sh` at this round's tree. (The +1 of R2985
 # above is the connectivity plane, whose ledger row was filed as Round 2986 when
 # main's R2985 landed first.)
-FOREIGN_ADJUDICATOR_LINKS = 968
+# +6 R2992, `a_listening_session_opened_without_its_read_task_holds_traffic_until_it_is_started`,
+# `a_session_opened_with_its_read_task_delivers_at_once_and_stops_when_told`,
+# `a_dialled_session_opened_without_its_read_task_holds_traffic_until_it_is_started`,
+# `a_dialled_session_whose_first_traffic_arrives_with_its_open_reads_none_of_it_until_started`,
+# `stopping_the_read_task_waits_for_the_callback_in_flight_and_holds_the_rest`
+# and `a_callback_cannot_stop_or_start_the_read_task_it_runs_on` (1 test x
+# `api-compat-pico` each; the session's read task held, running, dialled and
+# dialled behind a coalescing proxy, and the stop's two promises to the thread
+# that calls it, against libzenohpico). They are the only new `wz-proves`
+# markers in the range, counted from the diff and not assumed. 968 + 6 = 974,
+# measured by `scripts/audit-crossimpl-proof.sh` at this round's tree.
+FOREIGN_ADJUDICATOR_LINKS = 974
 
 # ── Execution disclosure ────────────────────────────────────────────────────────
 #

@@ -1184,7 +1184,13 @@ CITATION = re.compile(r"\b((?:[A-Za-z0-9_.-]+/)*[A-Za-z0-9_.-]+\.(?:rs|c|h))(?::
 # running this census at each commit and its parent: 6 -> 5 across R2939 and
 # 5 -> 4 across R2945, UNREACHED and NO_SYMBOL holding at 0 and 2 throughout.
 # The reds sat at HEAD because pre-push defers this gate to hosted CI.
-PIN_REACHED = 4
+# R2992 -- REACHED 4 -> 3. `api-compat-pico` leaves PARTIAL for COMPLETE: the
+# session's read task, the last residual its reason named, is built and measured
+# against the real libzenohpico. It was a reached PARTIAL atom (its crate tests
+# and six differential files name its symbols), so it leaves the census with its
+# grade. UNREACHED and NO_SYMBOL hold at 0 and 2. READ off the census's own FAIL
+# line, `reached: 3 against a pin of 4`.
+PIN_REACHED = 3
 PIN_UNREACHED = 0
 PIN_NO_SYMBOL = 2
 # R2534 — 346 -> 347. The atom is `adminspace-metrics` and the citation is the
@@ -2333,7 +2339,15 @@ PIN_NO_SYMBOL = 2
 # reply's two ends, the defaults differential and the publisher wire leg), and
 # the atom is still PARTIAL. READ off the census's own FAIL line, `wz citations:
 # 51 against a pin of 40`; `reached` and `ambiguous` hold at 4 and 8.
-PIN_WZ_CITATIONS = 51
+#
+# R2992 -- 51 -> 15, one atom, and the count FELL. `api-compat-pico` leaves
+# PARTIAL for COMPLETE, so the 36 wz anchors its reason carried (51 less the 15
+# below; the eight that R2992's own CORRECTION adds never enter) are no longer
+# read by this census, which counts PARTIAL atoms only; the 15 that remain belong
+# to the five atoms still PARTIAL. READ off the census's own FAIL line, `wz
+# citations: 15 against a pin of 51`; `reached` moves 4 -> 3 and `ambiguous`
+# 8 -> 2.
+PIN_WZ_CITATIONS = 15
 # R2626 — 44 -> 42, and this one is worth a sentence because it HELD through
 # every earlier retirement in this run (R2612, R2622). `time-hlc`'s reason is the
 # first retiree carrying AMBIGUOUS citations of its own: its oldest clauses cite
@@ -2403,7 +2417,11 @@ PIN_WZ_CITATIONS = 51
 # reds sat at HEAD because pre-push defers this gate to hosted CI. ATTRIBUTED by
 # running this census at R2939's commit and its parent: `9 ambiguous` before,
 # `8 ambiguous` after, and no commit since moved it.
-PIN_AMBIGUOUS = 8
+# R2992 -- 8 -> 2. `api-compat-pico` departs (COMPLETE) carrying SIX ambiguous
+# citations -- its older clauses cite `get.rs`, `session.rs`, `query.rs` and
+# `lib.rs` by bare name. READ off the census's own FAIL line, `ambiguous
+# citations: 2 against a pin of 8`.
+PIN_AMBIGUOUS = 2
 
 
 class Fatal(Exception):
