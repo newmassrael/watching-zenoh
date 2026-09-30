@@ -531,6 +531,13 @@ struct QblEntry {
 struct KexprEntry {
     id: u64,
     keyexpr: String,
+    /// How many holders the declaration has: `1` for one made through
+    /// [`SharedSession::declare_keyexpr`], and one more for each
+    /// [`SharedSession::acquire_keyexpr`] that found it. The key is retracted
+    /// when [`SharedSession::release_keyexpr`] takes the count to zero, which is
+    /// zenoh-pico's resource table (`_refcount` in
+    /// `vendor/zenoh-pico/src/session/resource.c`).
+    holders: usize,
 }
 
 /// A C-declared liveliness TOKEN — the fourth SSOT. Replayed onto every face
@@ -2062,8 +2069,68 @@ impl SharedSession {
         // [`Self::publish_aliased_all`]'s local leg resolves against. Without
         // it an aliased put would deliver on the wire and to nobody in-process.
         let _ = self.local.actions().send_declare_keyexpr(id, &keyexpr);
-        guard.kexprs.push(KexprEntry { id, keyexpr });
+        guard.kexprs.push(KexprEntry {
+            id,
+            keyexpr,
+            holders: 1,
+        });
         Some(id)
+    }
+
+    /// Declare a keyexpr the way zenoh-pico's resource table does: a key the
+    /// session already holds is answered with the SAME id and one more holder,
+    /// and the declaration is announced again all the same.
+    ///
+    /// pico looks the key up before it allocates
+    /// (`vendor/zenoh-pico/src/session/resource.c` @
+    /// `// declaration of already declared resource`) and then sends the
+    /// declaration whether or not the key was new
+    /// (`vendor/zenoh-pico/src/net/primitives.c` @
+    /// `z_result_t _z_declare_resource(_z_session_t *zn, const _z_string_t *key, uint16_t *out_id) {`).
+    /// Every entity that declares a key — a publisher, a subscriber's prefix, a
+    /// token, and the components an advanced publisher or subscriber is made of —
+    /// goes through it, so the ids and the messages depend on it.
+    ///
+    /// [`Self::declare_keyexpr`] is unchanged and is what the other ABI uses:
+    /// each call there is its own declaration with its own id.
+    ///
+    /// `None` when the id space is exhausted, as for [`Self::declare_keyexpr`].
+    pub fn acquire_keyexpr(&self, keyexpr: String) -> Option<u64> {
+        {
+            let mut guard = self.lock();
+            if let Some(entry) = guard.kexprs.iter_mut().find(|e| e.keyexpr == keyexpr) {
+                entry.holders += 1;
+                let id = entry.id;
+                for face in guard.faces.values() {
+                    let _ = face.session.actions().resend_declare_keyexpr(id, &keyexpr);
+                }
+                let _ = self.local.actions().resend_declare_keyexpr(id, &keyexpr);
+                return Some(id);
+            }
+        }
+        self.declare_keyexpr(keyexpr)
+    }
+
+    /// Let go of one holder of a keyexpr [`Self::acquire_keyexpr`] (or
+    /// [`Self::declare_keyexpr`]) returned, retracting the key when it was the
+    /// last. Nothing goes on the wire while another holder remains: pico sends
+    /// its undeclaration only when the count reaches zero
+    /// (`vendor/zenoh-pico/src/session/resource.c` @
+    /// `_z_resource_slist_value(res_ptr)->_refcount--;`).
+    ///
+    /// The count and the retraction are one step under one lock: releasing the
+    /// lock between them would let an [`Self::acquire_keyexpr`] find the entry at
+    /// zero, take a holder, and then have its key retracted from under it.
+    pub fn release_keyexpr(&self, mapping_id: u64) {
+        let mut guard = self.lock();
+        let Some(entry) = guard.kexprs.iter_mut().find(|e| e.id == mapping_id) else {
+            return;
+        };
+        entry.holders = entry.holders.saturating_sub(1);
+        if entry.holders > 0 {
+            return;
+        }
+        self.retract_keyexpr_locked(&mut guard, mapping_id);
     }
 
     /// The keyexpr declarations this session currently holds, `(id, keyexpr)`
@@ -2084,6 +2151,13 @@ impl SharedSession {
     /// so releasing it cannot run C code.
     pub fn undeclare_keyexpr(&self, mapping_id: u64) {
         let mut guard = self.lock();
+        self.retract_keyexpr_locked(&mut guard, mapping_id);
+    }
+
+    /// The retraction itself, for a caller that already holds the registry lock
+    /// — [`Self::undeclare_keyexpr`] and [`Self::release_keyexpr`], which must
+    /// not let it go between deciding and doing.
+    fn retract_keyexpr_locked(&self, guard: &mut Inner, mapping_id: u64) {
         if let Some(pos) = guard.kexprs.iter().position(|e| e.id == mapping_id) {
             guard.kexprs.remove(pos);
         }
@@ -3578,6 +3652,86 @@ mod matching_aggregate_tests {
         assert_eq!(delivered, 0, "the retracted id resolves on neither leg");
         assert_eq!(shared.drain_local_plane(), 0);
         assert_eq!(*hits.lock().expect("test mutex"), 0);
+    }
+
+    /// A key acquired twice is ONE declaration with two holders, and it stays
+    /// declared until the second holder lets go.
+    ///
+    /// Read off the local plane's alias table, because that is where a
+    /// retraction shows: while the key is held the alias resolves and an aliased
+    /// put reaches the subscriber, and once the LAST holder has released it the
+    /// same put reaches nobody. The first release is the arm that matters — a
+    /// count that retracted on it would leave the second holder naming an id the
+    /// peer no longer has.
+    #[test]
+    fn a_key_acquired_twice_is_retracted_by_its_last_holder() {
+        let shared = SharedSession::new(TokioTime::new(), test_zid()).expect("test host entropy");
+        let hits = Arc::new(StdMutex::new(0usize));
+        let sink_hits = hits.clone();
+        let sink: SubscriberSink = Arc::new(move || {
+            let hits = sink_hits.clone();
+            Box::new(move |_sample: &dyn SampleView| {
+                *hits.lock().expect("test mutex") += 1;
+            })
+        });
+        shared.declare_subscriber("wz/res/shared".to_owned(), Locality::Any, sink);
+        let first = shared
+            .acquire_keyexpr("wz/res/shared".to_owned())
+            .expect("the first id is not exhausted");
+        let second = shared
+            .acquire_keyexpr("wz/res/shared".to_owned())
+            .expect("a held key answers with its id");
+        assert_eq!(first, second, "the same key is the same id");
+        assert_eq!(
+            shared.keyexpr_declarations().len(),
+            1,
+            "and one declaration, not two"
+        );
+
+        let put = |shared: &SharedSession| {
+            let delivered = shared
+                .publish_aliased_all(
+                    first,
+                    None,
+                    b"x",
+                    &PublishOptions::put().with_locality(Locality::Any),
+                )
+                .expect("an aliased publish is not a fanout error");
+            (delivered, shared.drain_local_plane())
+        };
+
+        shared.release_keyexpr(first);
+        assert_eq!(
+            put(&shared),
+            (1, 1),
+            "one holder is left, so the alias still resolves"
+        );
+        assert_eq!(shared.keyexpr_declarations().len(), 1);
+
+        shared.release_keyexpr(second);
+        assert_eq!(
+            put(&shared),
+            (0, 0),
+            "the last holder has let go, so the alias resolves on neither leg"
+        );
+        assert!(shared.keyexpr_declarations().is_empty());
+        assert_eq!(*hits.lock().expect("test mutex"), 1);
+    }
+
+    /// `declare_keyexpr` is not `acquire_keyexpr`: each call is its own
+    /// declaration with its own id, which is what the other ABI relies on and
+    /// what this change must leave alone.
+    #[test]
+    fn declare_keyexpr_still_gives_every_call_its_own_id() {
+        let shared = SharedSession::new(TokioTime::new(), test_zid()).expect("test host entropy");
+        let first = shared
+            .declare_keyexpr("wz/res/own".to_owned())
+            .expect("the first id is not exhausted");
+        let second = shared
+            .declare_keyexpr("wz/res/own".to_owned())
+            .expect("the second id is not exhausted");
+        assert_ne!(first, second);
+        assert_eq!(shared.keyexpr_declarations().len(), 2);
     }
 
     /// R311y557 — `z_delete`'s local leg end to end through the registry, which

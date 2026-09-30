@@ -100,9 +100,13 @@ pub(crate) struct WireDeclaration {
 }
 
 impl Drop for WireDeclaration {
+    /// Let go of this declaration's hold on the key. The key itself goes only
+    /// when no other declaration of the same key holds it: pico's resource table
+    /// counts its holders, and a second declaration of a key it already has is
+    /// the same id with one more (see [`SharedSession::acquire_keyexpr`]).
     fn drop(&mut self) {
         if let Some(session) = self.session.upgrade() {
-            session.undeclare_keyexpr(self.id);
+            session.release_keyexpr(self.id);
         }
     }
 }
@@ -277,7 +281,7 @@ impl DeclaredKeyexpr {
         if prefix_len == 0 {
             return Ok(Self::literal_only(literal.to_owned()));
         }
-        let Some(id) = shared.declare_keyexpr(literal[..prefix_len].to_owned()) else {
+        let Some(id) = shared.acquire_keyexpr(literal[..prefix_len].to_owned()) else {
             return Err(Z_ERR_GENERIC);
         };
         Ok(Self {

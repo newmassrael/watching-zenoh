@@ -7570,37 +7570,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     ) -> Result<(), SendDeclareError> {
         #[cfg(feature = "declare-keyexpr")]
         {
-            // R300 — pre-emit gate. Both checks run BEFORE any wire
-            // bytes leave or any mapping-table side effect; on Err
-            // the session-link state is unchanged.
-            if mapping_id == 0 {
-                return Err(SendDeclareError::ReservedMappingIdZero);
-            }
-            // R311y342 — the id space's OTHER end. The lower bound has been
-            // gated since R300; the upper bound never was, so wz could emit an
-            // alias id that neither upstream can hold: zenoh types
-            // `DeclareKeyExpr.id` as `ExprId = u16` and zenoh-pico's
-            // `_z_decl_kexpr_t` holds `uint16_t _id`, while our codec carries a
-            // VLE u64 (deliberate — the shared wireexpr shape). Measured, not
-            // argued: before this gate, `send_declare_keyexpr(65_536, ..)`
-            // returned Ok and put the frame on the wire.
-            if mapping_id > u64::from(u16::MAX) {
-                return Err(SendDeclareError::MappingIdTooWideForWire(mapping_id));
-            }
-            check_outbound_keyexpr_pico_safe(suffix)?;
-            let declare = build_declare_kexpr(mapping_id, suffix)?;
-            // §5.21 routing-namespace — bake the namespace into the wire alias
-            // DEFINITION (this is a direct `dispatch_declare`, below the egress
-            // arm). The peer registers `id -> <ns>/<suffix>`, so a later aliased
-            // Push/Request (which the decorator passes through unchanged, id != 0)
-            // resolves UNDER the namespace at the peer instead of leaking to the
-            // bare keyexpr; the local `outbound_mappings` below keeps the BARE
-            // suffix for loopback resolution (transparent namespace, the zenoh
-            // model). The reconnect replay re-applies the same via `replay_one`.
-            #[cfg(feature = "routing-namespace")]
-            let declare = self.namespace_egress_declare(declare)?;
-            self.dispatch_declare(declare, /*reliable=*/ true)
-                .map_err(SendDeclareError::from)?;
+            self.emit_declare_keyexpr(mapping_id, suffix)?;
             // R234 — record the (mapping_id, suffix) pair in the
             // outbound table so later `publish_aliased_auto` calls
             // can resolve the literal without caller assertion.
@@ -7625,6 +7595,79 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             let _ = (mapping_id, suffix);
             Err(SendDeclareError::FeatureDisabled)
         }
+    }
+
+    /// Put a keyexpr declaration on the wire AGAIN, changing nothing else.
+    ///
+    /// zenoh-pico sends a declaration every time a key is declared, including a
+    /// key its resource table already holds, and answers with the SAME id
+    /// (`vendor/zenoh-pico/src/net/primitives.c` @
+    /// `z_result_t _z_declare_resource(_z_session_t *zn, const _z_string_t *key, uint16_t *out_id) {`
+    /// registers, which finds the existing entry, and sends anyway). A drop-in
+    /// for it has to send it too, and this is that send: the same gates and the
+    /// same frame as [`Self::send_declare_keyexpr`], without the two side
+    /// effects that call has.
+    ///
+    /// The outbound mapping table already holds the pair, so writing it again
+    /// would be a no-op; the reconnect cache is the one that matters. It holds
+    /// one entry per declaration and an undeclare prunes ONE
+    /// ([`Self::prune_declaration`]'s first-match rule), so a second entry for
+    /// an id that is retracted once would be replayed after a reconnect as a key
+    /// nobody holds any more. The declaration is already cached, so this does
+    /// not add another.
+    pub fn resend_declare_keyexpr(
+        &self,
+        mapping_id: u64,
+        suffix: &str,
+    ) -> Result<(), SendDeclareError> {
+        #[cfg(feature = "declare-keyexpr")]
+        {
+            self.emit_declare_keyexpr(mapping_id, suffix)
+        }
+        #[cfg(not(feature = "declare-keyexpr"))]
+        {
+            let _ = (mapping_id, suffix);
+            Err(SendDeclareError::FeatureDisabled)
+        }
+    }
+
+    /// The frame of a keyexpr declaration, gated and dispatched — the part
+    /// [`Self::send_declare_keyexpr`] and [`Self::resend_declare_keyexpr`]
+    /// share, so a declaration the second sends is byte for byte what the first
+    /// did.
+    #[cfg(feature = "declare-keyexpr")]
+    fn emit_declare_keyexpr(&self, mapping_id: u64, suffix: &str) -> Result<(), SendDeclareError> {
+        // R300 — pre-emit gate. Both checks run BEFORE any wire
+        // bytes leave or any mapping-table side effect; on Err
+        // the session-link state is unchanged.
+        if mapping_id == 0 {
+            return Err(SendDeclareError::ReservedMappingIdZero);
+        }
+        // R311y342 — the id space's OTHER end. The lower bound has been
+        // gated since R300; the upper bound never was, so wz could emit an
+        // alias id that neither upstream can hold: zenoh types
+        // `DeclareKeyExpr.id` as `ExprId = u16` and zenoh-pico's
+        // `_z_decl_kexpr_t` holds `uint16_t _id`, while our codec carries a
+        // VLE u64 (deliberate — the shared wireexpr shape). Measured, not
+        // argued: before this gate, `send_declare_keyexpr(65_536, ..)`
+        // returned Ok and put the frame on the wire.
+        if mapping_id > u64::from(u16::MAX) {
+            return Err(SendDeclareError::MappingIdTooWideForWire(mapping_id));
+        }
+        check_outbound_keyexpr_pico_safe(suffix)?;
+        let declare = build_declare_kexpr(mapping_id, suffix)?;
+        // §5.21 routing-namespace — bake the namespace into the wire alias
+        // DEFINITION (this is a direct `dispatch_declare`, below the egress
+        // arm). The peer registers `id -> <ns>/<suffix>`, so a later aliased
+        // Push/Request (which the decorator passes through unchanged, id != 0)
+        // resolves UNDER the namespace at the peer instead of leaking to the
+        // bare keyexpr; the local `outbound_mappings` in the send keeps the BARE
+        // suffix for loopback resolution (transparent namespace, the zenoh
+        // model). The reconnect replay re-applies the same via `replay_one`.
+        #[cfg(feature = "routing-namespace")]
+        let declare = self.namespace_egress_declare(declare)?;
+        self.dispatch_declare(declare, /*reliable=*/ true)
+            .map_err(SendDeclareError::from)
     }
 
     /// R121g — encode + dispatch a DECLARE-aliased `Push` (id != 0).
