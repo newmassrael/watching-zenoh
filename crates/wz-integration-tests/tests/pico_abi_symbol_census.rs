@@ -44,9 +44,7 @@
 use std::collections::BTreeSet;
 use std::path::Path;
 
-use wz_integration_tests::common::{
-    wz_capi_pico_cdylib, zenoh_pico_census_shared_library, zenoh_pico_shared_library,
-};
+use wz_integration_tests::common::{wz_capi_pico_cdylib, zenoh_pico_shared_library};
 
 /// `SHT_DYNSYM`.
 const SHT_DYNSYM: u32 = 11;
@@ -150,20 +148,25 @@ fn is_public_api(name: &str) -> bool {
 
 /// Public API symbols the REAL library defines and wz's cdylib does not.
 ///
-/// The reference is the CENSUS DENOMINATOR arm, not the behavioural oracle, and
-/// the difference is the whole point (R2565). This side of the census asks "does
-/// a C program naming this symbol LINK against wz", so its denominator has to be
-/// the surface wz claims to be a drop-in for. The behavioural oracle is built
-/// with every feature compiled in so that witness binaries can exercise them,
-/// and pointing this at it makes any flag flipped for a witness silently re-scope
-/// a headline parity claim — which is exactly what happened in R2562, at a cost
-/// of 115 symbols.
+/// The reference is THE oracle build, with every feature it compiles in.
+///
+/// Between R2565 and R2984 this read a second library, the same build with
+/// `Z_FEATURE_CONNECTIVITY` switched off, because wz defined none of pico's
+/// connectivity plane and the census then reported 115 symbols missing for as
+/// long as the plane was unbuilt — a denominator that EXCLUDED part of the
+/// reference so that the axis could stay green. wz defines the plane now, so the
+/// census and the behavioural oracle are one artifact and there is nothing left
+/// to exclude.
+///
+/// ⚠ One artifact means a flag flipped in `scripts/build-zenoh-pico-cli.sh`'s
+/// primary arm re-scopes this census. Its read-back names every feature it
+/// asserts, so such a flip is an edit to that list, in a diff.
 fn missing_public_symbols() -> BTreeSet<String> {
     let wz: BTreeSet<String> = defined_dynamic_symbols(&wz_capi_pico_cdylib())
         .into_iter()
         .filter(|n| is_public_api(n))
         .collect();
-    let reference: BTreeSet<String> = defined_dynamic_symbols(&zenoh_pico_census_shared_library())
+    let reference: BTreeSet<String> = defined_dynamic_symbols(&zenoh_pico_shared_library())
         .into_iter()
         .filter(|n| is_public_api(n))
         .collect();
@@ -277,11 +280,10 @@ fn upstream_declared_functions() -> BTreeSet<String> {
 
 /// Public API symbols wz's cdylib defines and the REAL library does not.
 ///
-/// This one keeps the BEHAVIOURAL oracle deliberately (R2565). Its question is
-/// "did wz invent a name upstream does not have", and a symbol pico exports in
-/// ANY configuration is not invented. Narrowing this to the census denominator
-/// would report every connectivity symbol wz later implements as an invention —
-/// the opposite of what this asks.
+/// Its question is "did wz invent a name upstream does not have", and a symbol
+/// pico exports in ANY configuration is not invented. It reads the same oracle
+/// as [`missing_public_symbols`] now; it used to read a wider one than the
+/// census denominator (R2565), and that difference is gone with the second arm.
 fn extra_public_symbols() -> BTreeSet<String> {
     let wz: BTreeSet<String> = defined_dynamic_symbols(&wz_capi_pico_cdylib())
         .into_iter()
@@ -438,14 +440,14 @@ fn the_header_scan_discriminates_a_real_name_from_an_invented_one() {
 #[test]
 #[ignore = "reads the CMake-built libzenohpico.so oracle; run by run-ci Layer E"]
 fn the_census_reads_both_libraries_rather_than_nothing() {
-    // R2565 — reads the DENOMINATOR arm, following the gate it controls. A
-    // positive control that parsed a different artifact from the gate would be
-    // asserting that some other library is non-empty, which is not a control.
+    // Reads the artifact the gate it controls reads. A positive control that
+    // parsed a different artifact from the gate would be asserting that some
+    // other library is non-empty, which is not a control.
     let wz: BTreeSet<String> = defined_dynamic_symbols(&wz_capi_pico_cdylib())
         .into_iter()
         .filter(|n| is_public_api(n))
         .collect();
-    let reference: BTreeSet<String> = defined_dynamic_symbols(&zenoh_pico_census_shared_library())
+    let reference: BTreeSet<String> = defined_dynamic_symbols(&zenoh_pico_shared_library())
         .into_iter()
         .filter(|n| is_public_api(n))
         .collect();

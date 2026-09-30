@@ -116,6 +116,46 @@ const PINNED: &[(&str, &[&str])] = &[
     ("z_queryable_options_t", &[]),
     ("z_query_reply_err_options_t", &[]),
     ("z_query_consolidation_t", &[]),
+    // The CONNECTIVITY plane. These are VALUE types, so unlike the opaque blobs
+    // above their fields are the layout: a callback is handed a pointer to one
+    // built on wz's stack, and a C program stack-allocates the owned forms, so a
+    // displaced field or a short struct is memory the program reads or overruns.
+    // The loaned forms are pico's `_z_info_*_t` and carry the offsets; the owned
+    // forms and the listeners and closures are size-only. The reference is the
+    // primary build, which compiles `Z_FEATURE_CONNECTIVITY` in.
+    ("z_owned_transport_t", &[]),
+    (
+        "z_loaned_transport_t",
+        &["_zid", "_whatami", "_is_qos", "_is_multicast", "_is_shm"],
+    ),
+    ("z_owned_link_t", &[]),
+    (
+        "z_loaned_link_t",
+        &[
+            "_zid",
+            "_src",
+            "_dst",
+            "_mtu",
+            "_is_streamed",
+            "_is_reliable",
+        ],
+    ),
+    ("z_owned_transport_event_t", &[]),
+    ("z_loaned_transport_event_t", &["kind", "transport"]),
+    ("z_owned_link_event_t", &[]),
+    ("z_loaned_link_event_t", &["kind", "link"]),
+    ("z_owned_transport_events_listener_t", &[]),
+    ("z_owned_link_events_listener_t", &[]),
+    ("z_owned_closure_transport_t", &[]),
+    ("z_owned_closure_link_t", &[]),
+    ("z_owned_closure_transport_event_t", &[]),
+    ("z_owned_closure_link_event_t", &[]),
+    ("z_transport_events_listener_options_t", &["history"]),
+    (
+        "z_link_events_listener_options_t",
+        &["history", "transport"],
+    ),
+    ("z_info_links_options_t", &["transport"]),
 ];
 
 /// The reference build's generated config directory — the one whose `config.h`
@@ -332,6 +372,89 @@ fn wz_layout(ty: &str) -> Layout {
                 ),
             ],
         },
+        "z_loaned_transport_t" => {
+            use wz_capi_pico::connectivity::z_loaned_transport_t;
+            Layout {
+                size: size_of::<z_loaned_transport_t>(),
+                offsets: vec![
+                    ("_zid".into(), offset_of!(z_loaned_transport_t, zid)),
+                    ("_whatami".into(), offset_of!(z_loaned_transport_t, whatami)),
+                    ("_is_qos".into(), offset_of!(z_loaned_transport_t, is_qos)),
+                    (
+                        "_is_multicast".into(),
+                        offset_of!(z_loaned_transport_t, is_multicast),
+                    ),
+                    ("_is_shm".into(), offset_of!(z_loaned_transport_t, is_shm)),
+                ],
+            }
+        }
+        "z_loaned_link_t" => {
+            use wz_capi_pico::connectivity::z_loaned_link_t;
+            Layout {
+                size: size_of::<z_loaned_link_t>(),
+                offsets: vec![
+                    ("_zid".into(), offset_of!(z_loaned_link_t, zid)),
+                    ("_src".into(), offset_of!(z_loaned_link_t, src)),
+                    ("_dst".into(), offset_of!(z_loaned_link_t, dst)),
+                    ("_mtu".into(), offset_of!(z_loaned_link_t, mtu)),
+                    (
+                        "_is_streamed".into(),
+                        offset_of!(z_loaned_link_t, is_streamed),
+                    ),
+                    (
+                        "_is_reliable".into(),
+                        offset_of!(z_loaned_link_t, is_reliable),
+                    ),
+                ],
+            }
+        }
+        "z_loaned_transport_event_t" => {
+            use wz_capi_pico::connectivity::z_loaned_transport_event_t;
+            Layout {
+                size: size_of::<z_loaned_transport_event_t>(),
+                offsets: vec![
+                    ("kind".into(), offset_of!(z_loaned_transport_event_t, kind)),
+                    (
+                        "transport".into(),
+                        offset_of!(z_loaned_transport_event_t, transport),
+                    ),
+                ],
+            }
+        }
+        "z_loaned_link_event_t" => {
+            use wz_capi_pico::connectivity::z_loaned_link_event_t;
+            Layout {
+                size: size_of::<z_loaned_link_event_t>(),
+                offsets: vec![
+                    ("kind".into(), offset_of!(z_loaned_link_event_t, kind)),
+                    ("link".into(), offset_of!(z_loaned_link_event_t, link)),
+                ],
+            }
+        }
+        "z_transport_events_listener_options_t" => {
+            use wz_capi_pico::connectivity::z_transport_events_listener_options_t as T;
+            Layout {
+                size: size_of::<T>(),
+                offsets: vec![("history".into(), offset_of!(T, history))],
+            }
+        }
+        "z_link_events_listener_options_t" => {
+            use wz_capi_pico::connectivity::z_link_events_listener_options_t as T;
+            Layout {
+                size: size_of::<T>(),
+                offsets: vec![
+                    ("history".into(), offset_of!(T, history)),
+                    ("transport".into(), offset_of!(T, transport)),
+                ],
+            }
+        }
+        "z_info_links_options_t" => {
+            use wz_capi_pico::connectivity::z_info_links_options_t as T;
+            Layout {
+                size: size_of::<T>(),
+                offsets: vec![("transport".into(), offset_of!(T, transport))],
+            }
+        }
         // The size-only half. A macro rather than fourteen hand-written
         // `Layout { size: size_of::<..>(), offsets: vec![] }` literals, so a new
         // entry is one line and cannot get its own `offsets` wrong.
@@ -365,6 +488,34 @@ fn wz_layout(ty: &str) -> Layout {
                     size_only!(wz_capi_pico::query::z_query_reply_err_options_t)
                 }
                 "z_query_consolidation_t" => size_only!(wz_capi_pico::get::z_query_consolidation_t),
+                "z_owned_transport_t" => {
+                    size_only!(wz_capi_pico::connectivity::z_owned_transport_t)
+                }
+                "z_owned_link_t" => size_only!(wz_capi_pico::connectivity::z_owned_link_t),
+                "z_owned_transport_event_t" => {
+                    size_only!(wz_capi_pico::connectivity::z_owned_transport_event_t)
+                }
+                "z_owned_link_event_t" => {
+                    size_only!(wz_capi_pico::connectivity::z_owned_link_event_t)
+                }
+                "z_owned_transport_events_listener_t" => {
+                    size_only!(wz_capi_pico::connectivity::z_owned_transport_events_listener_t)
+                }
+                "z_owned_link_events_listener_t" => {
+                    size_only!(wz_capi_pico::connectivity::z_owned_link_events_listener_t)
+                }
+                "z_owned_closure_transport_t" => {
+                    size_only!(wz_capi_pico::connectivity::z_owned_closure_transport_t)
+                }
+                "z_owned_closure_link_t" => {
+                    size_only!(wz_capi_pico::connectivity::z_owned_closure_link_t)
+                }
+                "z_owned_closure_transport_event_t" => {
+                    size_only!(wz_capi_pico::connectivity::z_owned_closure_transport_event_t)
+                }
+                "z_owned_closure_link_event_t" => {
+                    size_only!(wz_capi_pico::connectivity::z_owned_closure_link_event_t)
+                }
                 other => panic!("no wz layout wired for {other}"),
             }
         }
