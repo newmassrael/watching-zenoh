@@ -588,6 +588,21 @@ ONLY_CAPI = {
         "tree each time.",
         (),
     ),
+    # The field document's rows after a cursor, over an open handle. Filed in
+    # the round that added the symbol.
+    "the rows of an OPEN handle's field document AFTER a cursor": (
+        "wz_dissect_live_fields_since",
+        "DELIBERATE, for the reasons the two rows above give and one more. It "
+        "is the field document with the rows a caller already holds left out, "
+        "and a terminal run holds no such caller: `wz-analyze` reads a capture "
+        "once and prints the whole listing, so there is no earlier answer for a "
+        "later one to be relative to. The cursor is a sequence number the HANDLE "
+        "issues, and the command line has no handle whose issuing order could be "
+        "asked about. What has no counterpart is the REPEATED question -- a list "
+        "that refreshes once per feed step and would otherwise be handed, and "
+        "would parse, every row it already has.",
+        (),
+    ),
     "declaring a live feed OVER": (
         "wz_dissect_live_end",
         "DELIBERATE. A terminal run cannot NOT end its feed: every flag "

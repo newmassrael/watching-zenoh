@@ -57,7 +57,7 @@
 //! standing rule: a bound that takes something away and does not say so reports
 //! a floor as a total.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 use wz_capture::link::FlowKey;
 use wz_capture::{
@@ -213,7 +213,7 @@ fn flow_table(origin: MessageListOrigin) -> u8 {
 }
 
 /// What this consumer has taken from one list, and what it last saw there.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 struct Mark {
     /// The produced-index up to which records have been handed out. Everything
     /// below this has been delivered or accounted as lost.
@@ -229,6 +229,56 @@ struct Mark {
     /// different list, and the round that resets the watermark is exactly the
     /// round that must hand out a new coordinate space.
     list_id: u64,
+    /// The produced-index up to which this handle has given messages a row
+    /// sequence number. A different watermark from `drained`, and it has to be:
+    /// a drain into a small buffer leaves `drained` behind while the rows of
+    /// those messages are already being issued by the field document.
+    numbered: u64,
+    /// The sequence numbers given to the messages still held, as runs. See
+    /// [`SeqRun`].
+    runs: VecDeque<SeqRun>,
+}
+
+/// A stretch of one list's messages that were given CONSECUTIVE row sequence
+/// numbers, because one walk saw them all for the first time.
+///
+/// # Why runs and not one offset per list
+///
+/// Sequence numbers are handed out in the order the handle first sees rows, and
+/// two lists grow in interleaved order: a message of list A, then two of list B,
+/// then another of A. A list's numbers are therefore NOT `produced + constant`,
+/// and a single offset would give the second message of A the number of the
+/// first message of B. One run per walk that found something new keeps the map
+/// exact, and adjacent runs that continue each other are joined, so a handle
+/// with one busy list holds one run.
+///
+/// A run is dropped, or cut from the front, as its messages are trimmed away, so
+/// the map is never larger than the number of messages still held.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct SeqRun {
+    /// Produced-index of the run's first message.
+    first_produced: u64,
+    /// The sequence number of that message; the run's others follow by one.
+    first_seq: u64,
+    /// How many messages.
+    len: u64,
+}
+
+impl SeqRun {
+    /// The sequence number of the message at `produced`, if the run holds it.
+    fn seq_of(&self, produced: u64) -> Option<u64> {
+        let offset = produced.checked_sub(self.first_produced)?;
+        (offset < self.len).then(|| self.first_seq + offset)
+    }
+}
+
+/// The sequence number of the message at `produced`, among `runs`.
+///
+/// `runs` is in produced order and disjoint, so a binary search on the run whose
+/// first index is at or below `produced` finds the only candidate.
+fn seq_in_runs(runs: &[SeqRun], produced: u64) -> Option<u64> {
+    let after = runs.partition_point(|run| run.first_produced <= produced);
+    runs.get(after.checked_sub(1)?)?.seq_of(produced)
 }
 
 /// ZA-3215 ⑤ — what [`LiveDissection::reassembled_bytes`] answers.
@@ -267,6 +317,12 @@ pub struct LiveDissection {
     /// read the wrong field would get a plausible answer for a while — which is
     /// the failure mode worth spending a few integers to remove.
     next_id: u64,
+    /// The next row sequence number to hand out, starting at 1 so that a cursor
+    /// of 0 means "before the first row" and needs no second spelling. Its own
+    /// counter and NOT `next_id`: list and flow ids are coordinate spaces a
+    /// consumer must not confuse with each other, and a row number is a count of
+    /// rows issued, which no other id is.
+    next_seq: u64,
     lost: u64,
     /// R2373 (open-debt item 661) — how far into a capture CONTAINER this
     /// handle has read, for [`Self::follow`].
@@ -394,6 +450,7 @@ impl LiveDissection {
             scouting_marks: BTreeMap::new(),
             flow_ids: BTreeMap::new(),
             next_id: 0,
+            next_seq: 1,
             lost: 0,
             cursor: CaptureCursor::new(),
         }
@@ -466,6 +523,7 @@ impl LiveDissection {
             scouting_marks,
             flow_ids,
             next_id,
+            next_seq,
             lost,
             ..
         } = self;
@@ -479,7 +537,7 @@ impl LiveDissection {
 
             let produced = list.produced();
             let mark = marks.entry(key).or_insert_with(|| fresh_mark(next_id));
-            let first_held = advance(mark, produced, list.len() as u64, next_id, lost);
+            let first_held = advance(mark, produced, list.len() as u64, next_id, next_seq, lost);
 
             let list_id = mark.list_id;
             let flow_id = *flow_ids
@@ -531,7 +589,7 @@ impl LiveDissection {
             let mark = scouting_marks
                 .entry(flow.flow)
                 .or_insert_with(|| fresh_mark(next_id));
-            let first_held = advance(mark, produced, list.len() as u64, next_id, lost);
+            let first_held = advance(mark, produced, list.len() as u64, next_id, next_seq, lost);
             let list_id = mark.list_id;
             // The datagram table's flow id: a scouting list is one more list
             // of the same UDP conversation, as the QUIC lists are.
@@ -774,6 +832,59 @@ impl LiveDissection {
         )
     }
 
+    /// THE FIELD DOCUMENT'S ROWS AFTER A CURSOR, and only those: the rows whose
+    /// sequence number is greater than `after_seq`.
+    ///
+    /// # What it is for
+    ///
+    /// A consumer that holds the rows it has already been given should not be
+    /// handed them again. Every row carries a `seq` (see [`Self::fields_where`],
+    /// which writes it too), so a caller keeps the `window.through_seq` of the
+    /// last answer and passes it back; what comes out is the rows that were
+    /// issued since. `0` asks for every row.
+    ///
+    /// # Nothing is decided differently
+    ///
+    /// The ids and the row numbers are settled first by the reconciliation a
+    /// drain performs, into an empty buffer, exactly as the whole-document door
+    /// does, so the next [`Self::drain`] returns what it would have and the
+    /// coordinates a row carries are the ones its record carries. The document
+    /// is `wz_capture::fields_json::fields_json_since_coordinated`'s, and it is
+    /// the whole-document renderer with the rows before the cursor not written;
+    /// see that function for the two things it does not take (a selector, a row
+    /// cap) and why.
+    ///
+    /// # Take it at the state the drain was taken at
+    ///
+    /// [`Self::end`] releases the messages a reassembly gap was holding, so a
+    /// document taken before it and records drained after it disagree by
+    /// exactly those messages. The rows themselves are not changed by `end`; the
+    /// join fails only because the document and the records are two states.
+    /// Call this and [`Self::drain`] on the same side of it.
+    pub fn fields_since(
+        &mut self,
+        capture: &[u8],
+        declarations: Option<&wz_capture::payload_decode::Declarations<'_>>,
+        after_seq: u64,
+    ) -> String {
+        self.drain(&mut []);
+        let ids = HandleIds::of(self);
+        // The highest number the handle has issued, and NOT the highest row that
+        // was written: a datagram row whose second read was declined has a
+        // number and no row, and the cursor has to pass it.
+        let through_seq = self.next_seq - 1;
+        wz_capture::fields_json::fields_json_since_coordinated(
+            &self.dissection,
+            capture,
+            declarations,
+            &ids,
+            wz_capture::fields_json::Since {
+                after_seq,
+                through_seq,
+            },
+        )
+    }
+
     /// ZA-3509 — THE SELECTOR'S VERDICT OVER THE ROWS OF THE FIELD DOCUMENT, and
     /// nothing beside it: each row's four coordinates and the word the selector
     /// said, with the ceilings that made the list short.
@@ -913,15 +1024,32 @@ fn record_of(
     }
 }
 
-/// ZA-3214 ① — this handle's list ids, in the shape the field renderer asks
-/// for them.
+/// This handle's list ids, in the shape the field renderer asks for them.
 ///
 /// A snapshot taken after the ids were settled, keyed the way the renderer
 /// keys lists: by position in `Dissection::message_lists_with_origin`, which is
 /// the enumeration the marks were minted from, and by flow for a scouting list.
+///
+/// The row sequence numbers ride in the same snapshot, so the id a row is joined
+/// on and the sequence number it carries are read from ONE state of the handle.
 struct HandleIds {
-    lists: Vec<Option<u64>>,
-    scouting: BTreeMap<FlowKey, u64>,
+    lists: Vec<Option<ListNumbers>>,
+    scouting: BTreeMap<FlowKey, ListNumbers>,
+}
+
+/// One list's id and the row sequence numbers of the messages it still holds.
+struct ListNumbers {
+    list_id: u64,
+    runs: Vec<SeqRun>,
+}
+
+impl ListNumbers {
+    fn of(mark: &Mark) -> Self {
+        Self {
+            list_id: mark.list_id,
+            runs: mark.runs.iter().copied().collect(),
+        }
+    }
 }
 
 impl HandleIds {
@@ -930,12 +1058,12 @@ impl HandleIds {
             lists: handle
                 .dissection
                 .message_lists_with_origin()
-                .map(|(flow, origin, _)| handle.marks.get(&(flow, origin)).map(|m| m.list_id))
+                .map(|(flow, origin, _)| handle.marks.get(&(flow, origin)).map(ListNumbers::of))
                 .collect(),
             scouting: handle
                 .scouting_marks
                 .iter()
-                .map(|(flow, mark)| (*flow, mark.list_id))
+                .map(|(flow, mark)| (*flow, ListNumbers::of(mark)))
                 .collect(),
         }
     }
@@ -943,11 +1071,19 @@ impl HandleIds {
 
 impl wz_capture::fields_json::RowCoordinates for HandleIds {
     fn list_id(&self, list: usize) -> Option<u64> {
-        self.lists.get(list).copied().flatten()
+        self.lists.get(list)?.as_ref().map(|n| n.list_id)
     }
 
     fn scouting_list_id(&self, flow: &FlowKey) -> Option<u64> {
-        self.scouting.get(flow).copied()
+        self.scouting.get(flow).map(|n| n.list_id)
+    }
+
+    fn row_seq(&self, list: usize, produced: u64) -> Option<u64> {
+        seq_in_runs(&self.lists.get(list)?.as_ref()?.runs, produced)
+    }
+
+    fn scouting_row_seq(&self, flow: &FlowKey, produced: u64) -> Option<u64> {
+        seq_in_runs(&self.scouting.get(flow)?.runs, produced)
     }
 }
 
@@ -960,7 +1096,62 @@ fn fresh_mark(next_id: &mut u64) -> Mark {
         drained: 0,
         seen: 0,
         list_id: id,
+        numbered: 0,
+        runs: VecDeque::new(),
     }
+}
+
+/// Give the messages of one list that this handle has not numbered yet their row
+/// sequence numbers, and forget the numbers of messages that are gone.
+///
+/// Called from [`advance`], so every walk that settles a list's ids settles its
+/// row numbers with the same call: the field document, the selection document
+/// and a drain all reconcile first, and none of them can render a row this
+/// handle has not numbered.
+///
+/// A message trimmed away BEFORE it was ever numbered is skipped and takes no
+/// number: it was never issued, and it is already counted as lost. That leaves a
+/// gap in the numbers, which a cursor passes without harm — the numbers are
+/// unique and increasing, not dense.
+fn number_new_rows(mark: &mut Mark, produced: u64, first_held: u64, next_seq: &mut u64) {
+    // Forget what a front trim took, cutting a run that straddles the edge.
+    while let Some(front) = mark.runs.front_mut() {
+        let end = front.first_produced + front.len;
+        if end <= first_held {
+            mark.runs.pop_front();
+        } else {
+            if front.first_produced < first_held {
+                let cut = first_held - front.first_produced;
+                front.first_produced += cut;
+                front.first_seq += cut;
+                front.len -= cut;
+            }
+            break;
+        }
+    }
+
+    let from = mark.numbered.max(first_held);
+    if produced > from {
+        let len = produced - from;
+        let first_seq = *next_seq;
+        *next_seq += len;
+        match mark.runs.back_mut() {
+            // The new stretch continues the last run in BOTH spaces, so it is the
+            // same run and not one more.
+            Some(back)
+                if back.first_produced + back.len == from
+                    && back.first_seq + back.len == first_seq =>
+            {
+                back.len += len;
+            }
+            _ => mark.runs.push_back(SeqRun {
+                first_produced: from,
+                first_seq,
+                len,
+            }),
+        }
+    }
+    mark.numbered = mark.numbered.max(produced);
 }
 
 /// Bring one list's watermark up to what the list now holds, and return the
@@ -969,7 +1160,14 @@ fn fresh_mark(next_id: &mut u64) -> Mark {
 /// ZA-3214 ② — ONE function for both kinds of list. It was the body of the
 /// message-list loop in [`LiveDissection::drain`]; the scouting lists need the
 /// same three rules, and a second copy of them is the copy that drifts.
-fn advance(mark: &mut Mark, produced: u64, held: u64, next_id: &mut u64, lost: &mut u64) -> u64 {
+fn advance(
+    mark: &mut Mark,
+    produced: u64,
+    held: u64,
+    next_id: &mut u64,
+    next_seq: &mut u64,
+    lost: &mut u64,
+) -> u64 {
     // Everything below this produced-index has been trimmed away.
     let first_held = produced - held;
 
@@ -988,6 +1186,12 @@ fn advance(mark: &mut Mark, produced: u64, held: u64, next_id: &mut u64, lost: &
         mark.seen = 0;
         mark.list_id = *next_id;
         *next_id += 1;
+        // The successor's messages are new rows: the predecessor's numbers name
+        // messages that are gone, and its produced-indices mean nothing in the
+        // successor's counter. The NUMBERS already issued are not reused —
+        // `next_seq` only ever moves forward.
+        mark.numbered = 0;
+        mark.runs.clear();
     }
 
     // Messages a ceiling discarded before this consumer reached them. Counted,
@@ -999,6 +1203,7 @@ fn advance(mark: &mut Mark, produced: u64, held: u64, next_id: &mut u64, lost: &
         mark.drained = first_held;
     }
     mark.seen = produced;
+    number_new_rows(mark, produced, first_held, next_seq);
     first_held
 }
 
@@ -1034,5 +1239,155 @@ fn record_of_scouting(datagram: &ScoutingDatagram, flow_id: u64, list_id: u64) -
             Err(_) => KIND_UNDECODABLE,
         },
         flags: 0,
+    }
+}
+
+/// The row sequence numbering, graded on its own bookkeeping.
+///
+/// These take `number_new_rows` and `advance` directly, with no capture, because
+/// the properties are arithmetic on two counters and a fixture that reached them
+/// through a dissection would only add the ways a dissection can be wrong.
+#[cfg(test)]
+mod numbering_tests {
+    use super::*;
+
+    fn a_mark() -> Mark {
+        fresh_mark(&mut 0)
+    }
+
+    fn runs_of(mark: &Mark) -> Vec<SeqRun> {
+        mark.runs.iter().copied().collect()
+    }
+
+    /// The number of each produced-index in `range`, as a consumer's row lookup
+    /// would ask for them.
+    fn numbers(mark: &Mark, range: core::ops::Range<u64>) -> Vec<Option<u64>> {
+        let runs = runs_of(mark);
+        range.map(|p| seq_in_runs(&runs, p)).collect()
+    }
+
+    #[test]
+    fn a_first_walk_numbers_from_the_counter_as_one_run() {
+        let mut mark = a_mark();
+        let mut next = 1;
+        number_new_rows(&mut mark, 3, 0, &mut next);
+        assert_eq!(
+            runs_of(&mark),
+            vec![SeqRun {
+                first_produced: 0,
+                first_seq: 1,
+                len: 3
+            }]
+        );
+        assert_eq!(next, 4, "the counter moved by exactly the rows numbered");
+        assert_eq!(numbers(&mark, 0..4), vec![Some(1), Some(2), Some(3), None]);
+    }
+
+    /// Two lists share one counter, so a list's numbers are NOT its produced-index
+    /// plus a constant. A single offset per list would give the fourth message of
+    /// A the number of the first message of B.
+    #[test]
+    fn interleaved_lists_each_keep_their_own_exact_numbers() {
+        let (mut a, mut b) = (a_mark(), a_mark());
+        let mut next = 1;
+        number_new_rows(&mut a, 3, 0, &mut next); // A: 1,2,3
+        number_new_rows(&mut b, 2, 0, &mut next); // B: 4,5
+        number_new_rows(&mut a, 5, 0, &mut next); // A: 6,7
+        assert_eq!(
+            numbers(&a, 0..5),
+            vec![Some(1), Some(2), Some(3), Some(6), Some(7)]
+        );
+        assert_eq!(numbers(&b, 0..2), vec![Some(4), Some(5)]);
+        assert_eq!(
+            runs_of(&a).len(),
+            2,
+            "a stretch that does not continue the last run in the NUMBERS is a run of its own"
+        );
+        // A stretch that does continue it joins it, so one busy list is one run.
+        number_new_rows(&mut a, 6, 0, &mut next); // A: 8
+        assert_eq!(
+            runs_of(&a).len(),
+            2,
+            "8 continues 6 and 7: still two runs, not three"
+        );
+        assert_eq!(numbers(&a, 3..6), vec![Some(6), Some(7), Some(8)]);
+    }
+
+    #[test]
+    fn walking_twice_numbers_nothing_twice() {
+        let mut mark = a_mark();
+        let mut next = 1;
+        number_new_rows(&mut mark, 4, 0, &mut next);
+        let before = (runs_of(&mark), next);
+        number_new_rows(&mut mark, 4, 0, &mut next);
+        assert_eq!((runs_of(&mark), next), before);
+    }
+
+    #[test]
+    fn a_front_trim_cuts_the_run_and_keeps_the_numbers_of_what_is_left() {
+        let mut mark = a_mark();
+        let mut next = 1;
+        number_new_rows(&mut mark, 5, 0, &mut next); // 1..=5
+        number_new_rows(&mut mark, 5, 2, &mut next); // the two oldest are trimmed
+        assert_eq!(
+            numbers(&mark, 0..5),
+            vec![None, None, Some(3), Some(4), Some(5)],
+            "what is left keeps the number it was issued under"
+        );
+        number_new_rows(&mut mark, 5, 5, &mut next);
+        assert!(
+            runs_of(&mark).is_empty(),
+            "nothing held, nothing remembered"
+        );
+        assert_eq!(next, 6, "and a trim issues no number");
+    }
+
+    /// A message the ceiling took before this handle ever looked was never issued,
+    /// so it takes no number: the numbers are unique and increasing, not dense.
+    #[test]
+    fn a_message_trimmed_before_it_was_numbered_takes_no_number() {
+        let mut mark = a_mark();
+        let mut next = 1;
+        number_new_rows(&mut mark, 5, 3, &mut next);
+        assert_eq!(
+            numbers(&mark, 0..5),
+            vec![None, None, None, Some(1), Some(2)]
+        );
+        assert_eq!(next, 3);
+    }
+
+    /// A list replaced under the same key restarts its produced counter, and its
+    /// messages are new rows. The numbers already issued are not reused.
+    #[test]
+    fn a_replaced_list_is_numbered_afresh_and_no_number_is_reused() {
+        let (mut next_id, mut next_seq, mut lost) = (0, 1, 0);
+        let mut mark = fresh_mark(&mut next_id);
+        advance(&mut mark, 5, 5, &mut next_id, &mut next_seq, &mut lost);
+        let first_id = mark.list_id;
+        assert_eq!(numbers(&mark, 0..5), (1..=5).map(Some).collect::<Vec<_>>());
+
+        // The counter went BACKWARDS: another list opened under the same key.
+        advance(&mut mark, 2, 2, &mut next_id, &mut next_seq, &mut lost);
+        assert_ne!(mark.list_id, first_id, "a new coordinate space");
+        assert_eq!(
+            numbers(&mark, 0..2),
+            vec![Some(6), Some(7)],
+            "the successor's rows continue the counter; 1 and 2 are not handed out again"
+        );
+        assert_eq!(numbers(&mark, 2..5), vec![None, None, None]);
+        // And the predecessor's runs are GONE, not shadowed. A lookup asks only
+        // the last run that starts at or below an index, so a stale run left
+        // behind answers every question correctly by accident while it holds
+        // memory for messages that no longer exist and breaks the ordering the
+        // lookup relies on; the list of runs is what has to be asserted.
+        assert_eq!(
+            runs_of(&mark),
+            vec![SeqRun {
+                first_produced: 0,
+                first_seq: 6,
+                len: 2
+            }],
+            "only the successor's run remains"
+        );
     }
 }

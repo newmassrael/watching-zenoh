@@ -408,6 +408,41 @@ static int check_live_door(void) {
     CHECK(records[0].list_id != datagram_list,
           "the stream list took the datagram list's id (%llu)",
           (unsigned long long)datagram_list);
+
+    /* THE ROWS AFTER A CURSOR, from the C side. The handle above holds two
+     * messages of two lists. Asking from 0 must hand back rows that carry a
+     * sequence number and a window that names the cursor to ask next; asking
+     * from that number must hand back no row. Parsed by hand, because this file
+     * takes no JSON library and the property is the two keys and the count. */
+    {
+        char *doc = NULL;
+        const char *at;
+        unsigned long long through = 0;
+        rc = wz_dissect_live_fields_since(h, NULL, 0, "", 0, &doc);
+        CHECK(rc == WZ_DISSECT_OK, "fields_since rc=%d", rc);
+        CHECK(doc != NULL && strstr(doc, "\"seq\":") != NULL,
+              "a live row must carry its sequence number");
+        at = doc == NULL ? NULL : strstr(doc, "\"through_seq\":");
+        CHECK(at != NULL, "a since document says where to ask next");
+        if (at != NULL) {
+            at += strlen("\"through_seq\":");
+            while (*at >= '0' && *at <= '9') {
+                through = through * 10 + (unsigned long long)(*at - '0');
+                at++;
+            }
+        }
+        CHECK(through > 0, "through_seq=%llu after rows were issued", through);
+        wz_dissect_string_free(doc);
+        doc = NULL;
+        rc = wz_dissect_live_fields_since(h, NULL, 0, "", through, &doc);
+        CHECK(rc == WZ_DISSECT_OK, "fields_since past the last row rc=%d", rc);
+        CHECK(doc != NULL && strstr(doc, "\"seq\":") == NULL,
+              "nothing is left to number after through_seq");
+        wz_dissect_string_free(doc);
+        doc = NULL;
+        rc = wz_dissect_live_fields_since(NULL, NULL, 0, "", 0, &doc);
+        CHECK(rc == WZ_DISSECT_ERR_INVALID_ARG, "null handle since rc=%d", rc);
+    }
     wz_dissect_live_close(h);
 
     /* A CEILING THAT BITES IS COUNTED, through the shipped preset rather than a
@@ -1699,8 +1734,11 @@ int main(void) {
      * ZA-3695 -- 18: an IPv6 `addr` on a flow object changes SPELLING under
      * its stationary key, as in the census: RFC 5952's text (`::1`) where it
      * was eight hex groups with no `::`. No key, family or word moves; the
-     * number is the whole notice. */
-    revisioned[2].revision = 18;
+     * number is the whole notice.
+     * 19: every row a live door writes gains `seq`, and the since door's
+     * document gains a top-level `window` with `after_seq` and `through_seq`.
+     * Four keys, no word and no removal; a capture door writes none of them. */
+    revisioned[2].revision = 19;
     revisioned[2].doc = NULL;
     rc = wz_dissect_pcap_fields(pcap, sizeof pcap, 0, &revisioned[2].doc);
     CHECK(rc == WZ_DISSECT_OK, "fields rc=%d", rc);

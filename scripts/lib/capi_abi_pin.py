@@ -50,7 +50,7 @@ import subprocess
 import sys
 
 # The pinned pair. Edit BOTH halves deliberately -- see the module doc.
-EXPECTED_VERSION = 21
+EXPECTED_VERSION = 22
 
 # R2108 (open-debt item 525) -- THE RECORD'S LAYOUT, pinned HERE and read from
 # the artifact through `wz_dissect_record_layout`.
@@ -157,6 +157,14 @@ EXPECTED_SYMBOLS = {
     # a `char*` released by `wz_dissect_string_free`, and the container bytes
     # are read from a buffer the CALLER holds.
     "wz_dissect_live_fields_where",
+    # (ABI 22) — the same document's rows AFTER A CURSOR: the rows whose `seq`
+    # is above the number the caller passes, so a list that refreshes once per
+    # feed step is handed what is new and not every row again. The memory rule
+    # does not move: a `char*` released by `wz_dissect_string_free`, from the
+    # handle `wz_dissect_live_open` made, over a container the CALLER holds. It
+    # is its own symbol and not an argument of the one above, which would have
+    # given one name two shapes and one of them a document with a `window`.
+    "wz_dissect_live_fields_since",
     # ZA-3509 (ABI 20) — the selector's VERDICT over that document's rows, and
     # nothing beside it: four coordinates and a word per row, where the field
     # document renders every row's whole tree (a consumer measured 58 MB and

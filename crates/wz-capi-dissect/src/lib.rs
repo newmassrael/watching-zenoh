@@ -330,6 +330,7 @@ pub extern "C" fn wz_dissect_abi_version() -> c_int {
     // ZA-3215 — 19, for `wz_dissect_live_reassembled_bytes`.
     // ZA-3509 — 20, for `wz_dissect_live_selection`.
     // ZA-3601 — 21, for `wz_dissect_pcap_frame_bytes`.
+    // 22, for `wz_dissect_live_fields_since`.
     WZ_DISSECT_ABI_REVISION
 }
 
@@ -347,7 +348,7 @@ pub extern "C" fn wz_dissect_abi_version() -> c_int {
 /// It lives AFTER the function rather than above it on purpose: an item placed
 /// between a doc comment and the item it documents takes that doc, which is
 /// the doc-ownership defect the C1bz budget records.
-pub const WZ_DISSECT_ABI_REVISION: c_int = 21;
+pub const WZ_DISSECT_ABI_REVISION: c_int = 22;
 
 /// R2108 (open-debt item 525) — THE RECORD'S LAYOUT, reported by the artifact.
 ///
@@ -2336,6 +2337,99 @@ pub unsafe extern "C" fn wz_dissect_live_fields_where(
     let declared = wz_capture::payload_decode::Declarations::new(&map);
     // SAFETY: caller contract above.
     let doc = unsafe { (*handle).fields_where(capture, cap, Some(&declared), &filter) };
+    write_string(doc, out)
+}
+
+/// (ABI 22) — THE ROWS OF A LIVE HANDLE'S FIELD DOCUMENT AFTER A CURSOR, and
+/// only those.
+///
+/// # What a list that grows was paying for
+///
+/// [`wz_dissect_live_fields_where`] renders every row of the handle every time
+/// it is asked, at about 2.3 KB a row, so a consumer refreshing a message list
+/// once per feed step received and parsed each row again at every step. This
+/// door writes the rows whose `seq` is greater than `after_seq` and nothing else;
+/// the cost of the answer follows what is new.
+///
+/// # The cursor
+///
+/// Every row of a live document carries `seq` (field-document revision 19): the
+/// handle's count of rows it has issued, in the order it first issued them.
+/// Unique and increasing, and untouched by a ceiling trimming a list or by a
+/// flow being replaced, which is what the position of a row in the document is
+/// NOT — rows come out grouped by flow, so a row's place moves when another flow
+/// grows. `0` asks for every row. The document's `window` says the cursor it was
+/// asked at (`after_seq`) and the one to ask next (`through_seq`).
+///
+/// `through_seq` is the highest number the handle has issued, not the highest
+/// row written. A datagram row whose second read was declined has a number and no
+/// row, now or later, and the cursor passes it; the document names it under
+/// `disagreements`.
+///
+/// # What it takes, against the whole-document door
+///
+/// `bytes` / `len` and `declarations` are that door's. There is NO selector and NO
+/// row cap: a selector's verdict is a walk over the whole capture and would put
+/// back the cost this door removes ([`wz_dissect_live_selection`] is the door for
+/// narrowing), and a cap counts rows from the front of a list, which a cursor
+/// turns into a different question.
+///
+/// # A row that was issued does not change, except the cells it names
+///
+/// The rows are the whole-document door's rows, written by the same function, so
+/// a row here is byte for byte the row that door writes for it at the same handle
+/// state. Across STATES a few cells can differ, and the header lists exactly
+/// which; every cell it does not list is the value it was written with.
+///
+/// # Take it at the state the drain was taken at
+///
+/// [`wz_dissect_live_end`] releases what a reassembly gap was holding, so a
+/// document taken before it and records drained after it disagree by exactly
+/// those messages. Call this door and [`wz_dissect_live_drain`] on the same side
+/// of it.
+///
+/// # `handle` is not `const`
+///
+/// For the reason [`wz_dissect_live_fields_where`] gives: ids and row numbers are
+/// settled first by the reconciliation a drain performs, handing out no record.
+///
+/// # Safety
+/// `handle` must be a handle from [`wz_dissect_live_open`] or
+/// [`wz_dissect_pcap_replay`] that has not been closed. `bytes` must point to at
+/// least `len` readable bytes, or be null with `len` zero. `declarations` must be
+/// a NUL-terminated C string and `out` a writable pointer to a `*mut c_char`;
+/// neither may be null.
+#[no_mangle]
+pub unsafe extern "C" fn wz_dissect_live_fields_since(
+    handle: *mut live::LiveDissection,
+    bytes: *const u8,
+    len: usize,
+    declarations: *const c_char,
+    after_seq: u64,
+    out: *mut *mut c_char,
+) -> c_int {
+    if handle.is_null() || (bytes.is_null() && len != 0) || declarations.is_null() || out.is_null()
+    {
+        return WZ_DISSECT_ERR_INVALID_ARG;
+    }
+    // SAFETY: caller contract above.
+    let text = match unsafe { std::ffi::CStr::from_ptr(declarations) }.to_str() {
+        Ok(s) => s,
+        Err(_) => return WZ_DISSECT_ERR_INVALID_ARG,
+    };
+    let mut map = wz_capture::payload::formats::FormatMap::new();
+    if map.declare_all(text).is_err() {
+        return WZ_DISSECT_ERR_DECLARATION;
+    }
+    let capture: &[u8] = if len == 0 {
+        &[]
+    } else {
+        // SAFETY: caller contract above; non-null whenever `len` is non-zero.
+        unsafe { core::slice::from_raw_parts(bytes, len) }
+    };
+    let declared = wz_capture::payload_decode::Declarations::new(&map);
+    // SAFETY: caller contract above.
+    let doc = unsafe { (*handle).fields_since(capture, Some(&declared), after_seq) };
     write_string(doc, out)
 }
 
@@ -5742,7 +5836,10 @@ mod tests {
         // copied out into a buffer the caller sized, read from a container the
         // caller holds. One symbol and one status code; the memory rule and the
         // record layout stay put.
-        assert_eq!(wz_dissect_abi_version(), 21);
+        // 22, for `wz_dissect_live_fields_since`: the field document's rows
+        // after a cursor, from a live handle. One symbol; the memory rule and
+        // the record layout stay put.
+        assert_eq!(wz_dissect_abi_version(), 22);
     }
 
     /// R311y913 (unregistered item 435) — THE LINKED SURFACE CAN SAY WHAT IT
@@ -7798,6 +7895,1114 @@ mod tests {
             "and say what a ceiling cost: {doc}"
         );
         unsafe { wz_dissect_live_close(handle) };
+    }
+
+    // ── the rows after a cursor ─────────────────────────────────────────────────
+
+    /// `wz_dissect_live_fields_where` with an empty selector and `declarations`.
+    fn live_fields_declaring(
+        handle: *mut live::LiveDissection,
+        capture: &[u8],
+        declarations: &str,
+    ) -> String {
+        let selector = std::ffi::CString::new("").expect("no NUL");
+        let declarations = std::ffi::CString::new(declarations).expect("no NUL");
+        let mut out: *mut c_char = core::ptr::null_mut();
+        let rc = unsafe {
+            wz_dissect_live_fields_where(
+                handle,
+                capture.as_ptr(),
+                capture.len(),
+                0,
+                selector.as_ptr(),
+                declarations.as_ptr(),
+                &mut out,
+            )
+        };
+        assert_eq!(rc, WZ_DISSECT_OK, "live fields rc");
+        let doc = unsafe { std::ffi::CStr::from_ptr(out) }
+            .to_str()
+            .expect("utf8")
+            .to_string();
+        unsafe { wz_dissect_string_free(out) };
+        doc
+    }
+
+    /// `wz_dissect_live_fields_since` with no declarations.
+    fn live_fields_since(handle: *mut live::LiveDissection, capture: &[u8], after: u64) -> String {
+        live_fields_since_declaring(handle, capture, after, "")
+    }
+
+    /// `wz_dissect_live_fields_since` under `declarations`.
+    fn live_fields_since_declaring(
+        handle: *mut live::LiveDissection,
+        capture: &[u8],
+        after: u64,
+        declarations: &str,
+    ) -> String {
+        let declarations = std::ffi::CString::new(declarations).expect("no NUL");
+        let mut out: *mut c_char = core::ptr::null_mut();
+        let (bytes, len) = if capture.is_empty() {
+            (core::ptr::null(), 0)
+        } else {
+            (capture.as_ptr(), capture.len())
+        };
+        let rc = unsafe {
+            wz_dissect_live_fields_since(handle, bytes, len, declarations.as_ptr(), after, &mut out)
+        };
+        assert_eq!(rc, WZ_DISSECT_OK, "live fields since rc");
+        let doc = unsafe { std::ffi::CStr::from_ptr(out) }
+            .to_str()
+            .expect("utf-8")
+            .to_owned();
+        unsafe { wz_dissect_string_free(out) };
+        doc
+    }
+
+    fn parsed(doc: &str) -> wz_session_core::json5::Json5Value {
+        wz_session_core::json5::parse(doc).unwrap_or_else(|e| panic!("not JSON ({e:?}): {doc}"))
+    }
+
+    fn member<'a>(
+        v: &'a wz_session_core::json5::Json5Value,
+        key: &str,
+    ) -> Option<&'a wz_session_core::json5::Json5Value> {
+        match v {
+            wz_session_core::json5::Json5Value::Object(entries) => {
+                entries.iter().find(|(k, _)| k == key).map(|(_, v)| v)
+            }
+            _ => None,
+        }
+    }
+
+    fn items(v: &wz_session_core::json5::Json5Value) -> &[wz_session_core::json5::Json5Value] {
+        match v {
+            wz_session_core::json5::Json5Value::Array(items) => items,
+            _ => &[],
+        }
+    }
+
+    fn number(v: Option<&wz_session_core::json5::Json5Value>) -> Option<u64> {
+        match v? {
+            wz_session_core::json5::Json5Value::Number(text) => text.parse().ok(),
+            _ => None,
+        }
+    }
+
+    /// Every flow object of the document, stream flows first, and the rows of each.
+    fn flows_of(
+        doc: &wz_session_core::json5::Json5Value,
+    ) -> Vec<&wz_session_core::json5::Json5Value> {
+        ["stream_flows", "datagram_flows"]
+            .iter()
+            .flat_map(|k| member(doc, k).map(items).unwrap_or(&[]).iter())
+            .collect()
+    }
+
+    fn rows_of(
+        doc: &wz_session_core::json5::Json5Value,
+    ) -> Vec<&wz_session_core::json5::Json5Value> {
+        flows_of(doc)
+            .into_iter()
+            .flat_map(|f| member(f, "messages").map(items).unwrap_or(&[]).iter())
+            .collect()
+    }
+
+    fn seq_of(row: &wz_session_core::json5::Json5Value) -> u64 {
+        number(member(row, "seq")).expect("a live row carries `seq`")
+    }
+
+    /// The four values a row and a record meet on.
+    fn join_key(row: &wz_session_core::json5::Json5Value) -> (u64, u64, u64, u64) {
+        let direction = match member(row, "direction") {
+            Some(wz_session_core::json5::Json5Value::String(s)) if s == "a" => 0,
+            Some(wz_session_core::json5::Json5Value::String(s)) if s == "b" => 1,
+            other => panic!("a row names a direction: {other:?}"),
+        };
+        (
+            number(member(row, "list_id")).expect("list_id"),
+            direction,
+            number(member(row, "anchor")).expect("anchor"),
+            number(member(row, "batch_index")).expect("batch_index"),
+        )
+    }
+
+    /// A capture that grows over four rounds, with TWO stream flows and a scouting
+    /// datagram flow interleaved, so rows come out grouped by flow while they are
+    /// ISSUED in arrival order. A single flow cannot tell a row's position in the
+    /// document from its sequence number, because the two coincide.
+    fn interleaved_packets() -> Vec<Vec<u8>> {
+        let keepalive = [1u8, 0, 0x04];
+        let (init_a, init_b, init_c) = (
+            framed_init(&[1, 2, 3, 4]),
+            framed_init(&[5, 6, 7, 8]),
+            framed_init(&[9, 10, 11, 12]),
+        );
+        let (mut a, mut b, mut c) = (1000u32, 2000u32, 3000u32);
+        let mut p = Vec::new();
+        p.push(tcp_packet(a, &init_a));
+        a += init_a.len() as u32;
+        p.push(tcp_packet_reverse(b, &init_b));
+        b += init_b.len() as u32;
+        let mut second = tcp_packet(c, &init_c);
+        wz_packet_fixtures::set_tcp_source_port(&mut second, 1112);
+        p.push(second);
+        c += init_c.len() as u32;
+        for _ in 0..4 {
+            p.push(tcp_packet(a, &keepalive));
+            a += keepalive.len() as u32;
+            let mut on_second = tcp_packet(c, &keepalive);
+            wz_packet_fixtures::set_tcp_source_port(&mut on_second, 1112);
+            p.push(on_second);
+            c += keepalive.len() as u32;
+            p.push(scout_to_group([192, 168, 1, 5], 43210));
+            p.push(tcp_packet_reverse(b, &keepalive));
+            b += keepalive.len() as u32;
+        }
+        p
+    }
+
+    /// The classic pcap of the first `n` packets, which is a prefix of the file
+    /// of all of them.
+    fn pcap_prefix(packets: &[Vec<u8>], n: usize) -> Vec<u8> {
+        let rows: Vec<(u32, u32, &[u8])> = packets[..n]
+            .iter()
+            .enumerate()
+            .map(|(i, p)| (0u32, (i as u32) * 1_000, p.as_slice()))
+            .collect();
+        wz_capture::pcap::write(1, &rows)
+    }
+
+    /// THE ROWS AFTER A CURSOR ARE THE WHOLE DOCUMENT'S ROWS AFTER THAT CURSOR,
+    /// and the rest of the document is the same document.
+    ///
+    /// At every step of a growing capture the whole-document door and the
+    /// since-door are asked at ONE handle state. The since-door's rows must equal
+    /// the whole door's rows with a `seq` above the cursor — compared as parsed
+    /// values, so a key the two disagree about is a failure and not a formatting
+    /// difference — and each flow object must agree on everything but the rows.
+    ///
+    /// ANTI-VACUITY: the run has to produce rows the cursor passes over AND rows
+    /// it does not, in flows of both kinds, or the equality below is between two
+    /// empty lists.
+    #[test]
+    fn the_rows_after_a_cursor_are_the_whole_documents_rows_after_it() {
+        let packets = interleaved_packets();
+        let handle = open_live(WZ_DISSECT_LIMITS_NONE).expect("opens");
+        let (mut cursor, mut passed, mut written, mut both_kinds) = (0u64, 0usize, 0usize, false);
+        for n in 1..=packets.len() {
+            let file = pcap_prefix(&packets, n);
+            unsafe { (*handle).follow(&file).expect("follows") };
+
+            let whole = parsed(&live_fields(handle, &file));
+            let since = parsed(&live_fields_since(handle, &file, cursor));
+            let expected: Vec<_> = rows_of(&whole)
+                .into_iter()
+                .filter(|r| seq_of(r) > cursor)
+                .collect();
+            let got = rows_of(&since);
+            assert_eq!(
+                got, expected,
+                "step {n}: the since-door's rows are the whole door's rows above {cursor}"
+            );
+            passed += rows_of(&whole).len() - expected.len();
+            written += got.len();
+            both_kinds |= !member(&since, "stream_flows")
+                .map(items)
+                .unwrap_or(&[])
+                .is_empty()
+                && !member(&since, "datagram_flows")
+                    .map(items)
+                    .unwrap_or(&[])
+                    .is_empty();
+
+            // The rest of every flow object is the whole door's, key for key.
+            let (w, s) = (flows_of(&whole), flows_of(&since));
+            assert_eq!(w.len(), s.len(), "step {n}: every flow is still written");
+            for (w, s) in w.iter().zip(&s) {
+                for key in ["flow", "context"] {
+                    assert!(
+                        member(w, key).is_some(),
+                        "step {n}: a flow object has `{key}`"
+                    );
+                    assert_eq!(member(w, key), member(s, key), "step {n}: flow `{key}`");
+                }
+            }
+            for key in ["capture_reread", "dropped_by_limits", "reassembly"] {
+                assert_eq!(
+                    member(&whole, key),
+                    member(&since, key),
+                    "step {n}: `{key}`"
+                );
+            }
+
+            let window = member(&since, "window").expect("a since document says its window");
+            assert_eq!(number(member(window, "after_seq")), Some(cursor));
+            assert!(
+                member(&whole, "window").is_none(),
+                "and only the since-door writes one"
+            );
+            cursor = number(member(window, "through_seq")).expect("through_seq");
+        }
+        assert!(
+            passed > 0 && written > 0,
+            "{passed} passed over, {written} written"
+        );
+        assert!(both_kinds, "the run must reach stream AND datagram flows");
+        unsafe { wz_dissect_live_close(handle) };
+    }
+
+    /// A ROW KEEPS ITS NUMBER, AND NO TWO ROWS SHARE ONE, across every state of a
+    /// capture read under a ceiling that trims the front of every list.
+    ///
+    /// The number is the cursor a consumer holds, so it has to name a row the same
+    /// way at every call: the same coordinates always carry the same number, and a
+    /// number never names two coordinates. Numbers issued to rows that appear later
+    /// are larger than every number issued before — the property a cursor is.
+    #[test]
+    fn a_row_keeps_its_number_under_a_trimming_ceiling() {
+        let packets = interleaved_packets();
+        let limits = wz_capture::DissectionLimits {
+            frames_per_flow: Some(3),
+            ..wz_capture::DissectionLimits::default()
+        };
+        let handle = Box::into_raw(Box::new(live::LiveDissection::new(limits)));
+        let mut by_key = std::collections::BTreeMap::new();
+        let mut by_seq = std::collections::BTreeMap::new();
+        let (mut highest, mut trimmed_after_issue) = (0u64, false);
+        for n in 1..=packets.len() {
+            let file = pcap_prefix(&packets, n);
+            unsafe { (*handle).follow(&file).expect("follows") };
+            let doc = parsed(&live_fields(handle, &file));
+            let rows = rows_of(&doc);
+            let now: std::collections::BTreeSet<_> = rows.iter().map(|r| seq_of(r)).collect();
+            trimmed_after_issue |= by_seq.keys().any(|s| !now.contains(s));
+            let mut fresh: Vec<u64> = Vec::new();
+            for row in rows {
+                let (seq, key) = (seq_of(row), join_key(row));
+                assert_eq!(
+                    *by_key.entry(key).or_insert(seq),
+                    seq,
+                    "step {n}: {key:?} changed number"
+                );
+                assert_eq!(
+                    *by_seq.entry(seq).or_insert(key),
+                    key,
+                    "step {n}: {seq} names two rows"
+                );
+                if seq > highest {
+                    fresh.push(seq);
+                }
+            }
+            assert!(
+                fresh.iter().all(|s| *s > highest),
+                "step {n}: a row issued now is numbered above every earlier one"
+            );
+            highest = highest.max(fresh.iter().copied().max().unwrap_or(0));
+        }
+        assert!(
+            trimmed_after_issue,
+            "the ceiling must have taken rows that had been issued, or nothing was trimmed"
+        );
+        assert!(
+            by_seq.len() > 3,
+            "and there must be more rows than the ceiling holds"
+        );
+        unsafe { wz_dissect_live_close(handle) };
+    }
+
+    /// A ROW OF THE SINCE-DOCUMENT JOINS A DRAINED RECORD ON THE FOUR VALUES IT
+    /// ALWAYS DID, and a record has a row if and only if it is new.
+    ///
+    /// The consumer's list stands on records and attaches detail from rows, so what
+    /// the since-door must not do is hand out a row whose record was drained
+    /// earlier, or leave a new record with no row.
+    #[test]
+    fn a_since_row_joins_a_drained_record_on_the_same_four_keys() {
+        let packets = interleaved_packets();
+        let handle = open_live(WZ_DISSECT_LIMITS_NONE).expect("opens");
+        let (mut cursor, mut joined) = (0u64, 0usize);
+        for n in 1..=packets.len() {
+            let file = pcap_prefix(&packets, n);
+            unsafe { (*handle).follow(&file).expect("follows") };
+            let since = parsed(&live_fields_since(handle, &file, cursor));
+            let records = drain_live(handle, 256);
+            let row_keys: std::collections::BTreeSet<_> =
+                rows_of(&since).into_iter().map(join_key).collect();
+            let record_keys: std::collections::BTreeSet<_> = records
+                .iter()
+                .map(|r| {
+                    (
+                        r.list_id,
+                        u64::from(r.direction),
+                        r.anchor,
+                        u64::from(r.batch_index),
+                    )
+                })
+                .collect();
+            assert_eq!(
+                row_keys, record_keys,
+                "step {n}: the rows after the cursor and the records drained since are one set"
+            );
+            joined += record_keys.len();
+            cursor = number(member(
+                member(&since, "window").expect("window"),
+                "through_seq",
+            ))
+            .expect("through_seq");
+        }
+        assert!(
+            joined > 8,
+            "{joined} record(s) joined; too few to mean anything"
+        );
+        unsafe { wz_dissect_live_close(handle) };
+    }
+
+    /// `through_seq` COUNTS A NUMBER THAT WAS ISSUED TO A ROW NEVER WRITTEN.
+    ///
+    /// A handle fed by `push` holds no capture container, so a datagram row cannot
+    /// be re-read and is not written — but the message was decoded, it has a
+    /// record, and the handle numbered it. The cursor a consumer is told to ask
+    /// next must pass that number: if it were the highest row WRITTEN, a consumer
+    /// that had been handed nothing would be told to ask from zero again, forever,
+    /// and a later document could not say which numbers it had already covered.
+    ///
+    /// The two values are equal on every capture with a container, which is why the
+    /// edge test above cannot tell them apart and this one exists.
+    #[test]
+    fn through_seq_counts_a_row_that_is_never_written() {
+        let handle = open_live(WZ_DISSECT_LIMITS_NONE).expect("opens");
+        let scout = scout_to_group([192, 168, 1, 5], 43210);
+        for i in 0..3u64 {
+            unsafe { (*handle).push(LINKTYPE_ETHERNET, i * 1_000_000, &scout) };
+        }
+        let through_of = |doc: &wz_session_core::json5::Json5Value| {
+            number(member(
+                member(doc, "window").expect("a since document has a window"),
+                "through_seq",
+            ))
+            .expect("through_seq")
+        };
+
+        let first = parsed(&live_fields_since(handle, &[], 0));
+        assert_eq!(
+            member(&first, "capture_reread"),
+            Some(&wz_session_core::json5::Json5Value::Bool(false)),
+            "the handle has no container, and says so"
+        );
+        assert!(
+            rows_of(&first).is_empty(),
+            "so no datagram row is written: {first:?}"
+        );
+        let through = through_of(&first);
+        assert_eq!(through, 3, "and yet three messages were numbered");
+        assert_eq!(
+            drain_live(handle, 16).len(),
+            3,
+            "three records exist for the rows that were never written"
+        );
+
+        unsafe { (*handle).push(LINKTYPE_ETHERNET, 4_000_000, &scout) };
+        let second = parsed(&live_fields_since(handle, &[], through));
+        assert_eq!(
+            through_of(&second),
+            4,
+            "the next message is numbered above the ones the cursor already passed"
+        );
+        unsafe { wz_dissect_live_close(handle) };
+    }
+
+    /// THE CURSOR'S EDGES: zero is everything, the last number is nothing, a
+    /// number from the future is nothing and is not an error.
+    #[test]
+    fn the_cursors_edges_are_everything_nothing_and_nothing() {
+        let packets = interleaved_packets();
+        let file = pcap_prefix(&packets, packets.len());
+        let handle = open_live(WZ_DISSECT_LIMITS_NONE).expect("opens");
+        unsafe { (*handle).follow(&file).expect("follows") };
+
+        let whole = parsed(&live_fields(handle, &file));
+        let every = parsed(&live_fields_since(handle, &file, 0));
+        assert_eq!(rows_of(&every), rows_of(&whole), "0 asks for every row");
+        assert!(rows_of(&every).len() > 8, "and there are rows to ask for");
+        let through = number(member(
+            member(&every, "window").expect("window"),
+            "through_seq",
+        ))
+        .expect("through");
+        assert_eq!(
+            through,
+            rows_of(&every)
+                .iter()
+                .map(|r| seq_of(r))
+                .max()
+                .expect("rows"),
+            "with nothing declined, through_seq is the highest row written"
+        );
+
+        for after in [through, through + 1000] {
+            let none = parsed(&live_fields_since(handle, &file, after));
+            assert!(rows_of(&none).is_empty(), "after {after}: no row");
+            assert_eq!(
+                flows_of(&none).len(),
+                flows_of(&whole).len(),
+                "after {after}: every flow is still written, so its context refreshes"
+            );
+            let window = member(&none, "window").expect("window");
+            assert_eq!(number(member(window, "after_seq")), Some(after));
+            assert_eq!(number(member(window, "through_seq")), Some(through));
+        }
+        unsafe { wz_dissect_live_close(handle) };
+    }
+
+    /// A CURSOR NEVER CHANGES WHAT A LATER ROW RESOLVES TO.
+    ///
+    /// The scenario above has no declaration in it, so it cannot say whether
+    /// leaving a row out of the document changes what a row behind it resolves to.
+    /// A reference resolves against the declarations that went past before it, so
+    /// a cursor that passes over the declaration row and writes the reference row
+    /// after it is the case to take. Here EVERY cursor from 0 to the last number
+    /// is taken over a capture that carries one, and the rows written must be the
+    /// whole document's rows above it, compared as parsed values.
+    ///
+    /// Both places a row reads the keyexpr table are covered: a reference in a
+    /// `Frame` (`carried[]`) and one inside a completed chain
+    /// (`above_transport.carried[]`).
+    ///
+    /// WHAT THIS DOES NOT GUARD, found by a mutation that passed every test here:
+    /// the keyexpr table is filled up front from every list, so it does not depend
+    /// on which rows the loop writes, and the packet a row is resolved AT is set
+    /// per row. The state a row loop carries from one row to the next is the chain
+    /// fold, and `a_cursor_never_changes_a_chain_identity` is the test for that.
+    ///
+    /// ANTI-VACUITY, per capture: some cursor must pass over the declaration AND
+    /// write a reference row that carries the key the declaration bound. Without
+    /// that the loop is an equality between two documents that never had the case.
+    #[test]
+    fn a_cursor_never_changes_what_a_later_row_resolves_to() {
+        use wz_session_core::json5::Json5Value as V;
+        let message_is =
+            |entry: &V, word: &str| member(entry, "message") == Some(&V::String(word.into()));
+        // The `Push` entry of a row, from `carried[]` or from `above_transport`.
+        let push_key = |row: &V| -> Option<V> {
+            let carried = member(row, "carried").map(items).unwrap_or(&[]);
+            let above = member(row, "above_transport")
+                .and_then(|a| member(a, "carried"))
+                .map(items)
+                .unwrap_or(&[]);
+            carried
+                .iter()
+                .chain(above)
+                .find(|e| message_is(e, "Push"))
+                .and_then(|e| member(e, "keyexpr").cloned())
+        };
+        let declares = |row: &V| {
+            member(row, "carried")
+                .map(items)
+                .unwrap_or(&[])
+                .iter()
+                .any(|e| message_is(e, "Declare"))
+        };
+        for (name, in_a_chain) in [
+            ("a reference in a frame", false),
+            ("a reference in a chain", true),
+        ] {
+            let file = wz_capture::fixtures::multilink_declaration_behind_a_gap(
+                wz_capture::fixtures::GapFill::BeforeTheReference,
+                in_a_chain,
+            );
+            let handle = open_live(WZ_DISSECT_LIMITS_NONE).expect("opens");
+            // Fed and asked PACKET BY PACKET, as a live consumer does. The numbers
+            // are the order the handle first saw the rows, and rows first seen by
+            // one call are numbered in the order their lists are held, so a single
+            // `follow` of the whole file would number link 1's reference before
+            // link 2's declaration whatever the capture's order was.
+            for end in pcap_record_ends(&file) {
+                unsafe { (*handle).follow(&file[..end]).expect("follows") };
+                let _ = live_fields(handle, &file[..end]);
+            }
+            let whole = parsed(&live_fields(handle, &file));
+            let highest = rows_of(&whole)
+                .iter()
+                .map(|r| seq_of(r))
+                .max()
+                .expect("rows");
+            let mut proved = false;
+            for cursor in 0..=highest {
+                let since = parsed(&live_fields_since(handle, &file, cursor));
+                let expected: Vec<_> = rows_of(&whole)
+                    .into_iter()
+                    .filter(|r| seq_of(r) > cursor)
+                    .collect();
+                assert_eq!(rows_of(&since), expected, "{name}: cursor {cursor}");
+                let passed_the_declaration = rows_of(&whole)
+                    .iter()
+                    .any(|r| seq_of(r) <= cursor && declares(r));
+                let wrote_a_resolved_reference = rows_of(&since)
+                    .iter()
+                    .any(|r| push_key(r) == Some(V::String("demo/temp".into())));
+                proved |= passed_the_declaration && wrote_a_resolved_reference;
+            }
+            assert!(
+                proved,
+                "{name}: no cursor passed the declaration and still wrote a resolved reference"
+            );
+            unsafe { wz_dissect_live_close(handle) };
+        }
+    }
+
+    /// A SINCE-DOCUMENT THAT PASSED A ROW SAYS ITS PAYLOAD COUNTS ARE A FLOOR.
+    ///
+    /// The tallies a payload declaration feeds — `payload_mapping`,
+    /// `payload_refusals` — are reached while rows are walked, so a document that
+    /// did not walk the rows before the cursor counts only the rows it wrote.
+    /// `payload_mapping_counts_exact` is the flag that says whether those numbers
+    /// are the whole answer, and it must be false the moment the cursor passed a
+    /// row over. Rendered without a declaration the flag is always true (there are
+    /// no counts to be short), so this runs under one.
+    ///
+    /// Held both ways, or a flag that was always false would satisfy it: the
+    /// whole-document door and the since-door at cursor 0 walk every row and must
+    /// say true.
+    #[test]
+    fn a_since_document_that_passed_a_row_says_its_payload_counts_are_a_floor() {
+        use wz_session_core::json5::Json5Value as V;
+        let rules = "demo/**=protobuf";
+        let exact = |doc: &str| -> V {
+            member(&parsed(doc), "payload_mapping_counts_exact")
+                .cloned()
+                .expect("the flag is structural")
+        };
+        // Both flow kinds: the two row loops each carry this rule.
+        for (name, file) in [
+            (
+                "a stream flow",
+                wz_capture::fixtures::multilink_declaration_behind_a_gap(
+                    wz_capture::fixtures::GapFill::BeforeTheReference,
+                    false,
+                ),
+            ),
+            (
+                "a datagram flow",
+                wz_capture::fixtures::chain_sequence_capture(2),
+            ),
+        ] {
+            let handle = open_live(WZ_DISSECT_LIMITS_NONE).expect("opens");
+            for end in pcap_record_ends(&file) {
+                unsafe { (*handle).follow(&file[..end]).expect("follows") };
+                let _ = live_fields(handle, &file[..end]);
+            }
+            let whole = live_fields_declaring(handle, &file, rules);
+            let highest = rows_of(&parsed(&whole))
+                .iter()
+                .map(|r| seq_of(r))
+                .max()
+                .expect("rows");
+            assert_eq!(exact(&whole), V::Bool(true), "{name}: every row walked");
+            assert_eq!(
+                exact(&live_fields_since_declaring(handle, &file, 0, rules)),
+                V::Bool(true),
+                "{name}: a cursor of 0 passes over nothing"
+            );
+            for cursor in [1, highest] {
+                assert_eq!(
+                    exact(&live_fields_since_declaring(handle, &file, cursor, rules)),
+                    V::Bool(false),
+                    "{name}: a cursor of {cursor} passed a row over, so its counts are a floor"
+                );
+            }
+            unsafe { wz_dissect_live_close(handle) };
+        }
+    }
+
+    /// A CURSOR NEVER CHANGES A CHAIN'S IDENTITY.
+    ///
+    /// `chain.chain_id` is numbered by a fold over the rows of a list in order: a
+    /// begun chain opens an identity and the row that completes it takes that
+    /// identity back. A row the cursor passes over must still advance that fold,
+    /// or a completing row behind it is numbered as if its chain had never begun.
+    /// Every cursor from 0 to the last number is taken over three chains, and the
+    /// rows written must be the whole document's rows above it, identities
+    /// included, compared as parsed values.
+    ///
+    /// Over BOTH flow kinds, because a datagram flow and a stream flow are written
+    /// by two different row loops and each carries its own fold: a property of one
+    /// is not a property of the other.
+    ///
+    /// ANTI-VACUITY, per capture: some cursor must split a chain — pass its begun
+    /// row and write its completing row — or the equality is over rows whose
+    /// identity could not have gone wrong.
+    #[test]
+    fn a_cursor_never_changes_a_chain_identity() {
+        use wz_session_core::json5::Json5Value as V;
+        let chain_of = |row: &V| -> Option<(u64, String)> {
+            let chain = member(row, "chain")?;
+            let id = number(member(chain, "chain_id"))?;
+            match member(chain, "outcome") {
+                Some(V::String(outcome)) => Some((id, outcome.clone())),
+                _ => None,
+            }
+        };
+        for (name, file) in [
+            (
+                "a datagram flow",
+                wz_capture::fixtures::chain_sequence_capture(3),
+            ),
+            (
+                "a stream flow",
+                wz_capture::fixtures::stream_chain_sequence_capture(3),
+            ),
+        ] {
+            let handle = open_live(WZ_DISSECT_LIMITS_NONE).expect("opens");
+            for end in pcap_record_ends(&file) {
+                unsafe { (*handle).follow(&file[..end]).expect("follows") };
+                let _ = live_fields(handle, &file[..end]);
+            }
+            let whole = parsed(&live_fields(handle, &file));
+            let highest = rows_of(&whole)
+                .iter()
+                .map(|r| seq_of(r))
+                .max()
+                .expect("rows");
+            let mut split_a_chain = false;
+            for cursor in 0..=highest {
+                let since = parsed(&live_fields_since(handle, &file, cursor));
+                let expected: Vec<_> = rows_of(&whole)
+                    .into_iter()
+                    .filter(|r| seq_of(r) > cursor)
+                    .collect();
+                assert_eq!(rows_of(&since), expected, "{name}: cursor {cursor}");
+                // A written row that completes a chain whose begun row was passed.
+                let passed_begun: Vec<u64> = rows_of(&whole)
+                    .iter()
+                    .filter(|r| seq_of(r) <= cursor)
+                    .filter_map(|r| chain_of(r))
+                    .filter(|(_, outcome)| outcome == "begun")
+                    .map(|(id, _)| id)
+                    .collect();
+                split_a_chain |= rows_of(&since)
+                    .iter()
+                    .filter_map(|r| chain_of(r))
+                    .any(|(id, outcome)| outcome == "reassembled" && passed_begun.contains(&id));
+            }
+            assert!(
+                split_a_chain,
+                "{name}: no cursor passed a begun row and wrote the row that completed it"
+            );
+            unsafe { wz_dissect_live_close(handle) };
+        }
+    }
+
+    // ── which cells of an issued row can differ at a later state ────────────────
+
+    /// Where each record of a `pcap::write` file ends, so a prefix can be cut on
+    /// a packet boundary. The writer's layout is fixed: a 24-byte header, then a
+    /// 16-byte record header whose third word is the captured length.
+    fn pcap_record_ends(file: &[u8]) -> Vec<usize> {
+        let mut ends = Vec::new();
+        let mut at = 24usize;
+        while at + 16 <= file.len() {
+            let captured =
+                u32::from_le_bytes(file[at + 8..at + 12].try_into().expect("4")) as usize;
+            at += 16 + captured;
+            assert!(at <= file.len(), "a whole record");
+            ends.push(at);
+        }
+        ends
+    }
+
+    /// Every path at which `after` differs from `before`, with array positions
+    /// collapsed to `[]` so the answer names a CELL and not an index.
+    fn changed_paths(
+        path: &str,
+        before: &wz_session_core::json5::Json5Value,
+        after: &wz_session_core::json5::Json5Value,
+        out: &mut std::collections::BTreeSet<String>,
+    ) {
+        use wz_session_core::json5::Json5Value as V;
+        match (before, after) {
+            (V::Object(a), V::Object(b)) => {
+                let mut keys: Vec<&String> = a.iter().map(|(k, _)| k).collect();
+                keys.extend(b.iter().map(|(k, _)| k));
+                keys.sort();
+                keys.dedup();
+                for key in keys {
+                    let here = format!("{path}/{key}");
+                    match (member(before, key), member(after, key)) {
+                        (Some(x), Some(y)) => changed_paths(&here, x, y, out),
+                        _ => {
+                            out.insert(here);
+                        }
+                    }
+                }
+            }
+            (V::Array(a), V::Array(b)) if a.len() == b.len() => {
+                for (x, y) in a.iter().zip(b) {
+                    changed_paths(&format!("{path}[]"), x, y, out);
+                }
+            }
+            (a, b) if a == b => {}
+            _ => {
+                out.insert(path.to_owned());
+            }
+        }
+    }
+
+    /// What one scenario showed: the cells that read differently in a row that
+    /// two successive documents both held, and how many such pairs were compared.
+    struct RowChanges {
+        cells: std::collections::BTreeSet<String>,
+        pairs: usize,
+    }
+
+    /// Read `file` into a handle one packet at a time and, after every packet
+    /// (and after `end()` when `then_end`), take the whole field document. Rows
+    /// are matched between one document and the next by `seq`, and every cell
+    /// that differs is recorded.
+    fn observe_row_changes(
+        file: &[u8],
+        limits: wz_capture::DissectionLimits,
+        declarations: &str,
+        then_end: bool,
+    ) -> RowChanges {
+        let handle = Box::into_raw(Box::new(live::LiveDissection::new(limits)));
+        let mut held: std::collections::BTreeMap<u64, wz_session_core::json5::Json5Value> =
+            std::collections::BTreeMap::new();
+        let mut seen = RowChanges {
+            cells: std::collections::BTreeSet::new(),
+            pairs: 0,
+        };
+        let states: Vec<usize> = pcap_record_ends(file);
+        let last = *states.last().expect("a capture with packets");
+        let mut take = |prefix: &[u8], seen: &mut RowChanges| {
+            let doc = parsed(&live_fields_declaring(handle, prefix, declarations));
+            let now: std::collections::BTreeMap<u64, _> = rows_of(&doc)
+                .into_iter()
+                .map(|r| (seq_of(r), r.clone()))
+                .collect();
+            for (seq, row) in &now {
+                if let Some(earlier) = held.get(seq) {
+                    seen.pairs += 1;
+                    changed_paths("", earlier, row, &mut seen.cells);
+                }
+            }
+            held = now;
+        };
+        for end in states {
+            unsafe { (*handle).follow(&file[..end]).expect("follows") };
+            take(&file[..end], &mut seen);
+        }
+        if then_end {
+            unsafe { (*handle).end() };
+            take(&file[..last], &mut seen);
+        }
+        unsafe { wz_dissect_live_close(handle) };
+        seen
+    }
+
+    /// A ROW THAT WAS ISSUED CHANGES ONLY IN THE CELLS THE HEADER NAMES.
+    ///
+    /// Each scenario reads a capture into a handle one packet at a time, takes the
+    /// whole field document after every packet (and once more after the feed is
+    /// declared over), and compares every row two successive documents both held,
+    /// matched by `seq`, cell by cell. What differs is the scenario's answer, and
+    /// it is PINNED as a set: a cell that starts changing, or stops, fails here by
+    /// name.
+    ///
+    /// The scenarios are the states that move something a row is written from —
+    /// growth, a trim of the frames, a trim of the bytes, a run of chains under a
+    /// trim, a declaration decoded after a reference that followed it, the same
+    /// under a payload declaration and inside a completed chain, and a declaration
+    /// released by giving up on a gap. The first two and the last are the
+    /// CONTROLS: the same measurement finds nothing, which is what makes a cell it
+    /// does find a finding.
+    ///
+    /// Held to the header BOTH ways. Every cell observed must be named by
+    /// `REVISABLE_ROW_CELLS` or `RETIRABLE_ROW_CELLS`, and every name in them must
+    /// have moved in some scenario — a list entry no run reaches is a claim nobody
+    /// has seen come true. What this cannot say is that no OTHER state moves a
+    /// cell; the list is derived from what a row's writer reads, and this is the
+    /// measurement that tests the derivation over the states above.
+    #[test]
+    fn an_issued_row_changes_only_in_the_cells_the_header_names() {
+        use wz_capture::fields_json::{names_row_cell, RETIRABLE_ROW_CELLS, REVISABLE_ROW_CELLS};
+        let cells = |names: &[&str]| -> std::collections::BTreeSet<String> {
+            names.iter().map(|n| (*n).to_owned()).collect()
+        };
+        let packets = interleaved_packets();
+        let interleaved = pcap_prefix(&packets, packets.len());
+        let protobuf = "demo/**=protobuf";
+        #[allow(clippy::type_complexity)]
+        let scenarios: Vec<(
+            &str,
+            Vec<u8>,
+            wz_capture::DissectionLimits,
+            &str,
+            std::collections::BTreeSet<String>,
+        )> = vec![
+            (
+                "plain growth",
+                interleaved.clone(),
+                Default::default(),
+                "",
+                cells(&[]),
+            ),
+            (
+                "a trim of the frames",
+                interleaved.clone(),
+                wz_capture::DissectionLimits {
+                    frames_per_flow: Some(3),
+                    ..Default::default()
+                },
+                "",
+                cells(&[]),
+            ),
+            (
+                "a trim of the bytes",
+                interleaved,
+                wz_capture::DissectionLimits {
+                    stream_bytes_per_direction: Some(9),
+                    ..Default::default()
+                },
+                "",
+                cells(RETIRABLE_ROW_CELLS),
+            ),
+            (
+                "chains under a trim",
+                wz_capture::fixtures::chain_sequence_capture(3),
+                wz_capture::DissectionLimits {
+                    frames_per_flow: Some(4),
+                    ..Default::default()
+                },
+                "",
+                cells(&["/chain/chain_id"]),
+            ),
+            (
+                "a declaration decoded after its reference",
+                wz_capture::fixtures::multilink_declaration_behind_a_gap(
+                    wz_capture::fixtures::GapFill::AfterTheReference,
+                    false,
+                ),
+                Default::default(),
+                "",
+                cells(&["/carried[]/keyexpr", "/carried[]/keyexpr_cause"]),
+            ),
+            (
+                "the same under a payload declaration",
+                wz_capture::fixtures::multilink_declaration_behind_a_gap(
+                    wz_capture::fixtures::GapFill::AfterTheReference,
+                    false,
+                ),
+                Default::default(),
+                protobuf,
+                cells(&[
+                    "/carried[]/keyexpr",
+                    "/carried[]/keyexpr_cause",
+                    "/payload_decode/format",
+                    "/payload_decode/keyexpr",
+                    "/payload_decode/state",
+                    "/payload_decode/why",
+                ]),
+            ),
+            (
+                "the same for a reference inside a completed chain",
+                wz_capture::fixtures::multilink_declaration_behind_a_gap(
+                    wz_capture::fixtures::GapFill::AfterTheReference,
+                    true,
+                ),
+                Default::default(),
+                "",
+                cells(&[
+                    "/above_transport/carried[]/keyexpr",
+                    "/above_transport/carried[]/keyexpr_cause",
+                ]),
+            ),
+            (
+                "a declaration released by giving up on its gap",
+                wz_capture::fixtures::multilink_declaration_behind_a_gap(
+                    wz_capture::fixtures::GapFill::Never,
+                    false,
+                ),
+                Default::default(),
+                protobuf,
+                cells(&[]),
+            ),
+        ];
+        let named: Vec<&str> = REVISABLE_ROW_CELLS
+            .iter()
+            .chain(RETIRABLE_ROW_CELLS)
+            .copied()
+            .collect();
+        let mut observed = std::collections::BTreeSet::new();
+        for (name, file, limits, declarations, expected) in scenarios {
+            let seen = observe_row_changes(&file, limits, declarations, true);
+            assert!(
+                seen.pairs > 4,
+                "{name}: only {} row pair(s) compared, so an empty answer would mean nothing",
+                seen.pairs
+            );
+            assert_eq!(seen.cells, expected, "{name}: the cells that changed");
+            for cell in &seen.cells {
+                assert!(
+                    named.iter().any(|pattern| names_row_cell(pattern, cell)),
+                    "{name}: `{cell}` changed and the header does not name it"
+                );
+            }
+            observed.extend(seen.cells);
+        }
+        for pattern in named {
+            assert!(
+                observed.iter().any(|cell| names_row_cell(pattern, cell)),
+                "the header names `{pattern}` and no scenario moved it"
+            );
+        }
+    }
+
+    /// THE CELL THAT CHANGES IS THE RESOLUTION, and it changes in the direction
+    /// the mechanism says.
+    ///
+    /// The scenario test above finds WHICH cells differ. This reads the values, so
+    /// "keyexpr differs" cannot be two different wrong answers: before the
+    /// declaration is decoded the reference is written with no key and a cause,
+    /// after it the same row is written with the key the declaration bound.
+    #[test]
+    fn a_declaration_decoded_late_resolves_a_reference_written_before_it() {
+        let file = wz_capture::fixtures::multilink_declaration_behind_a_gap(
+            wz_capture::fixtures::GapFill::AfterTheReference,
+            false,
+        );
+        let ends = pcap_record_ends(&file);
+        let handle = open_live(WZ_DISSECT_LIMITS_NONE).expect("opens");
+        let push_key_of = |handle: *mut live::LiveDissection, prefix: &[u8]| {
+            let doc = parsed(&live_fields(handle, prefix));
+            let row = rows_of(&doc)
+                .into_iter()
+                .find(|r| {
+                    member(r, "carried").map(items).is_some_and(|c| {
+                        c.iter().any(|e| {
+                            member(e, "message")
+                                == Some(&wz_session_core::json5::Json5Value::String("Push".into()))
+                        })
+                    })
+                })
+                .map(|r| (seq_of(r), r.clone()));
+            row.map(|(seq, row)| {
+                let entry = member(&row, "carried")
+                    .map(items)
+                    .and_then(|c| {
+                        c.iter().find(|e| {
+                            member(e, "message")
+                                == Some(&wz_session_core::json5::Json5Value::String("Push".into()))
+                        })
+                    })
+                    .cloned()
+                    .expect("the Push entry");
+                (
+                    seq,
+                    member(&entry, "keyexpr").cloned(),
+                    member(&entry, "keyexpr_cause").cloned(),
+                )
+            })
+        };
+        // The reference is packet 5 (index 5); the packet that fills the gap and
+        // lets the declaration decode is the last one.
+        let (mut before, mut after) = (None, None);
+        for (i, end) in ends.iter().enumerate() {
+            unsafe { (*handle).follow(&file[..*end]).expect("follows") };
+            let now = push_key_of(handle, &file[..*end]);
+            if i + 2 == ends.len() {
+                before = now;
+            } else if i + 1 == ends.len() {
+                after = now;
+            }
+        }
+        let (before, after) = (
+            before.expect("the reference is a row"),
+            after.expect("still"),
+        );
+        assert_eq!(before.0, after.0, "the same row, under the same number");
+        use wz_session_core::json5::Json5Value as V;
+        assert_eq!(before.1, Some(V::Null), "written before: no key");
+        assert!(
+            matches!(&before.2, Some(V::String(cause)) if !cause.is_empty()),
+            "and it says why: {:?}",
+            before.2
+        );
+        assert_eq!(
+            after.1,
+            Some(V::String("demo/temp".into())),
+            "written after: the key the declaration bound"
+        );
+        assert_eq!(after.2, Some(V::Null), "and nothing left to explain");
+        unsafe { wz_dissect_live_close(handle) };
+    }
+
+    /// The door's argument checks are the whole-document door's.
+    #[test]
+    fn the_since_door_refuses_what_the_whole_door_refuses() {
+        let handle = open_live(WZ_DISSECT_LIMITS_NONE).expect("opens");
+        let good = std::ffi::CString::new("").expect("no NUL");
+        let bad = std::ffi::CString::new("not a declaration").expect("no NUL");
+        let mut out: *mut c_char = core::ptr::null_mut();
+        unsafe {
+            assert_eq!(
+                wz_dissect_live_fields_since(
+                    core::ptr::null_mut(),
+                    core::ptr::null(),
+                    0,
+                    good.as_ptr(),
+                    0,
+                    &mut out
+                ),
+                WZ_DISSECT_ERR_INVALID_ARG
+            );
+            assert_eq!(
+                wz_dissect_live_fields_since(
+                    handle,
+                    core::ptr::null(),
+                    4,
+                    good.as_ptr(),
+                    0,
+                    &mut out
+                ),
+                WZ_DISSECT_ERR_INVALID_ARG,
+                "bytes null with a length"
+            );
+            assert_eq!(
+                wz_dissect_live_fields_since(
+                    handle,
+                    core::ptr::null(),
+                    0,
+                    core::ptr::null(),
+                    0,
+                    &mut out
+                ),
+                WZ_DISSECT_ERR_INVALID_ARG
+            );
+            assert_eq!(
+                wz_dissect_live_fields_since(
+                    handle,
+                    core::ptr::null(),
+                    0,
+                    good.as_ptr(),
+                    0,
+                    core::ptr::null_mut()
+                ),
+                WZ_DISSECT_ERR_INVALID_ARG
+            );
+            assert_eq!(
+                wz_dissect_live_fields_since(
+                    handle,
+                    core::ptr::null(),
+                    0,
+                    bad.as_ptr(),
+                    0,
+                    &mut out
+                ),
+                WZ_DISSECT_ERR_DECLARATION
+            );
+            wz_dissect_live_close(handle);
+        }
     }
 
     /// ZA-3214 ② — THE WATERMARK SURVIVES A TRIM, which is the reason the

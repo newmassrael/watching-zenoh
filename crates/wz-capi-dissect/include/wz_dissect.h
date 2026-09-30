@@ -578,7 +578,7 @@
  *
  * Every family in `value_families` now carries a `carries` axis:
  *
- *     {"name":"fields","revision":18,"key":"kind","values":[...],
+ *     {"name":"fields","revision":19,"key":"kind","values":[...],
  *      "carries":[{"word":"bits","shapes":[["end","name","start","value"]]},
  *                 {"word":"opaque","shapes":[["end","name","start"]]}, ...]}
  *
@@ -929,7 +929,7 @@ extern "C" {
  * calls the function, and refuses when the two disagree.
  *
  * @unknown ABI not-an-enumeration */
-#define WZ_DISSECT_ABI_REVISION 21
+#define WZ_DISSECT_ABI_REVISION 22
 
 /* Symbol/memory-contract revision. Not a JSON-shape revision. This is the
  * revision the LOADED library reports; the block above says why it exists
@@ -1499,7 +1499,7 @@ int wz_dissect_declarations_diagnose(const char *declarations, char **out);
  *
  * R2175 -- the document is at REVISION 3, and the fourth key is `value_families`:
  *
- *     "value_families":[{"name":"fields","revision":18,"key":"state",
+ *     "value_families":[{"name":"fields","revision":19,"key":"state",
  *                        "values":["decoded","encoding_mismatch",…]}, …]
  *
  * every key in every document whose VALUE this build draws from a closed set,
@@ -2185,6 +2185,9 @@ void wz_dissect_live_end(wz_dissect_live *h);
  * Nothing decoded changes; wz_dissect_live_end is still the only act that
  * would.
  *
+ * Since field-document revision 19 each row also carries `"seq":N`, the number
+ * wz_dissect_live_fields_since takes as its cursor; see there.
+ *
  * @bound max_messages_shown_per_flow trims-output -- the DOCUMENT is
  * shortened after the walk; `shown`/`omitted` report it. */
 int wz_dissect_live_fields_where(wz_dissect_live *h,
@@ -2192,6 +2195,99 @@ int wz_dissect_live_fields_where(wz_dissect_live *h,
                                  size_t max_messages_shown_per_flow,
                                  const char *selector,
                                  const char *declarations, char **out);
+
+/* (ABI 22) -- THE ROWS OF THAT DOCUMENT AFTER A CURSOR, and only those.
+ *
+ * wz_dissect_live_fields_where renders every row the handle holds, every time,
+ * at about 2.3 KB a row. A list that refreshed once per feed step therefore
+ * received and parsed each row again at every step. This door writes the rows
+ * whose `seq` is greater than `after_seq`; the cost of an answer follows what is
+ * new.
+ *
+ * THE CURSOR. Since field-document revision 19 every row a live door writes
+ * carries `"seq":N`: the handle's count of rows it has issued, in the order it
+ * first issued them. It is unique and increasing, and a ceiling trimming a list
+ * or a flow being replaced does not change it -- which the position of a row in
+ * the document does not promise, because rows come out grouped by flow and a
+ * row's place moves when another flow grows. It is NOT part of the join: a row
+ * and a drained record still meet on (list_id, direction, anchor, batch_index).
+ * Numbers are not dense; a message a ceiling took before the handle looked was
+ * never issued and takes none. 0 asks for every row. Rows the handle sees for
+ * the first time in ONE call are numbered in the order it holds its lists, not
+ * in capture order; a caller that feeds and asks in steps gets them in the order
+ * they arrived, which is the order a live consumer runs in.
+ *
+ * The document is the one above with the rows before the cursor left out, and
+ * gains a top-level
+ *
+ *     "window":{"after_seq":A,"through_seq":T}
+ *
+ * `after_seq` is the cursor you gave. `through_seq` is the highest number the
+ * handle had issued when the document was made, and is the cursor to give next.
+ * It is not the highest row written: a datagram row whose second read was
+ * declined has a number and no row, now or later, and is listed under
+ * `disagreements`; the cursor passes it. A cursor above `through_seq` is not an
+ * error and gets no rows.
+ *
+ * WHAT IT DOES NOT TAKE. No `selector` and no `max_messages_shown_per_flow`. A
+ * selector's verdict is a walk over the whole capture and would put back the
+ * cost this door removes -- wz_dissect_live_selection is the door for narrowing.
+ * A cap counts rows from the front of a list, which a cursor turns into a
+ * different question. `bytes`/`len` and `declarations` are that door's, refused
+ * the same way.
+ *
+ * WHAT ELSE DIFFERS. Every flow object is written, with `messages` empty when
+ * the flow has nothing new, so the flow's `context` is refreshed on every call.
+ * The tallies rows feed -- `disagreements`, `payload_mapping_counts` and
+ * `payload_refusals` -- count the rows written in THIS document, and
+ * `payload_mapping_counts_exact` is false whenever the cursor passed a row over,
+ * which is what that flag means.
+ *
+ * A ROW THAT WAS WRITTEN DOES NOT CHANGE, EXCEPT THESE CELLS. Rows here are the
+ * whole-document door's rows, written by the same function, so a row is byte for
+ * byte the row that door writes at the same handle state. Between STATES, a row
+ * still held can read differently in exactly these cells, and in no others; a
+ * path is the row's keys joined by a slash, "[]" is any element of an array, and
+ * a cell named as a whole subtree means every cell beneath it:
+ *
+ *     /carried[]/keyexpr                       a declaration is stamped with the
+ *     /carried[]/keyexpr_cause                 packet it went past at, and one
+ *     /above_transport/carried[]/keyexpr       that is DECODED later than a packet
+ *     /above_transport/carried[]/keyexpr_cause that followed it -- a TCP segment
+ *     /payload_decode (its whole subtree)      that arrived ahead of its
+ *                                              predecessor is held until the gap
+ *                                              fills -- resolves a reference that
+ *                                              was written unresolved. Do not
+ *                                              keep these across calls as final.
+ *     /chain/chain_id                          chains are numbered from the first
+ *                                              message the list still holds, so
+ *                                              a front trim renumbers them. It
+ *                                              names a chain within ONE document.
+ *
+ * A row whose message bytes the per-direction byte ceiling has since discarded
+ * reads, if it is asked for again, as `declined` in place of its walk: /name,
+ * /fields, /carried, /above_transport, /first_byte, /l2 and /declined swap. The
+ * row you hold stays true -- the bytes were the message's when it was written --
+ * so do not treat that `declined` as a correction. `seq`, the four coordinates,
+ * `direction`, `offset_space`, `message_at`, `packet`, `sn` and the rest of
+ * `chain` do not change. A chain result arrives as a NEW row, the one that
+ * completed the chain, and never as a change to an earlier fragment's row.
+ * wz_dissect_live_end releases held messages as new rows and changes no row
+ * already written. The flow object around the rows is not covered.
+ *
+ * TAKE IT AT THE STATE THE DRAIN WAS TAKEN AT. wz_dissect_live_end releases what
+ * a reassembly gap was holding, so a document taken before it and records
+ * drained after it disagree by exactly those messages -- the join fails because
+ * they are two states, not because a row changed. Call this door and
+ * wz_dissect_live_drain on the same side of it.
+ *
+ * `h` is not const, for the reason wz_dissect_live_fields_where gives: ids and
+ * row numbers are settled first by the reconciliation a drain performs, handing
+ * out no record. */
+int wz_dissect_live_fields_since(wz_dissect_live *h,
+                                 const unsigned char *bytes, size_t len,
+                                 const char *declarations,
+                                 uint64_t after_seq, char **out);
 
 /* ZA-3509 (ABI 20) -- THE VERDICT OF A SELECTOR OVER THE ROWS OF THAT
  * DOCUMENT, and nothing beside it.
