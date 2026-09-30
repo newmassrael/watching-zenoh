@@ -2201,12 +2201,13 @@ fn assert_declared_publisher_options_are_sent_as_the_real_pico_sends_them(topolo
         );
     }
     // The detection token's key ends in the metadata the program embedded, in
-    // place of the placeholder chunk: the option no other line shows.
+    // place of the placeholder chunk: the option no other line shows. (The token
+    // names its key by a declaration, so the key is on the `DeclKexpr` line.)
     assert!(
-        reference
-            .iter()
-            .any(|l| l.starts_with("DeclToken") && l.contains("/meta/data")),
-        "the REFERENCE arm declares no detection token ending in the embedded \
+        reference.iter().any(|l| l.starts_with("DeclKexpr")
+            && l.contains("/@adv/pub/")
+            && l.ends_with("/meta/data\"")),
+        "the REFERENCE arm declares no detection key ending in the embedded \
          metadata, so the metadata half of this leg is vacuous:\n{}",
         reference.join("\n")
     );
