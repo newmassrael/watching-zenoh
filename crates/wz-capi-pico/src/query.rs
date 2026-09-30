@@ -1973,4 +1973,70 @@ mod tests {
             "the express bit is the options', over the query's priority and congestion control"
         );
     }
+
+    /// The C entry points READ `is_express`: the same three replies, made through
+    /// `z_query_reply` and `z_query_reply_del` with real options structs (and one
+    /// with none), reach the responder with the QoS pico gives them. The test
+    /// above holds the flush; this one holds the two functions that feed it.
+    #[test]
+    fn the_reply_entry_points_read_is_express_from_their_options() {
+        let view = FakeQuery {
+            keyexpr: "demo/q".to_owned(),
+            payload: Vec::new(),
+            attachment: Vec::new(),
+        };
+        let mut marshal = QueryMarshal::new(&view);
+        marshal.bind();
+        let query = &marshal as *const QueryMarshal as *const z_loaned_query_t;
+        unsafe {
+            let mut ke: crate::abi::z_view_keyexpr_t = std::mem::zeroed();
+            assert_eq!(
+                crate::keyexpr::z_view_keyexpr_from_str(&mut ke, c"demo/q".as_ptr()),
+                Z_OK
+            );
+            let ke = crate::keyexpr::z_view_keyexpr_loan(&ke);
+            let mut payload = std::mem::zeroed();
+            assert_eq!(
+                crate::bytes::z_bytes_copy_from_str(&mut payload, c"p".as_ptr()),
+                Z_OK
+            );
+            let mut put: z_query_reply_options_t = std::mem::zeroed();
+            z_query_reply_options_default(&mut put);
+            put.is_express = true;
+            assert_eq!(
+                z_query_reply(query, ke, crate::bytes::z_bytes_move(&mut payload), &put),
+                Z_OK
+            );
+            let mut del: z_query_reply_del_options_t = std::mem::zeroed();
+            z_query_reply_del_options_default(&mut del);
+            del.is_express = true;
+            assert_eq!(z_query_reply_del(query, ke, &del), Z_OK);
+            // And one made with NO options at all.
+            assert_eq!(
+                crate::bytes::z_bytes_copy_from_str(&mut payload, c"q".as_ptr()),
+                Z_OK
+            );
+            assert_eq!(
+                z_query_reply(
+                    query,
+                    ke,
+                    crate::bytes::z_bytes_move(&mut payload),
+                    std::ptr::null()
+                ),
+                Z_OK
+            );
+        }
+        let mut tap = QosTap::default();
+        marshal.flush(&mut tap);
+        let plain = wz_runtime_tokio::sample::QosLevel::DEFAULT;
+        assert_eq!(
+            tap.seen,
+            vec![
+                Some(plain.with_express(true)),
+                Some(plain.with_express(true)),
+                Some(plain)
+            ],
+            "a reply made with is_express set is express, and one made with no options is not"
+        );
+    }
 }
