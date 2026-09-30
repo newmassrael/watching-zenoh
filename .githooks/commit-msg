@@ -163,7 +163,7 @@ fi
 # one that refuses on an absent list, and a fresh clone must still be able to
 # commit.
 if [[ -r scripts/lib/nda-scan.sh ]]; then
-    # shellcheck source=../scripts/lib/nda-scan.sh
+    # shellcheck disable=SC1091  # constant path, resolved at run time
     source scripts/lib/nda-scan.sh
     if wz_nda_terms_readable && ! nda_out=$(wz_nda_scan_message "$msg_file" 2>&1); then
         errors+=("Protected vocabulary in the message (scripts/lib/nda-scan.sh):")
