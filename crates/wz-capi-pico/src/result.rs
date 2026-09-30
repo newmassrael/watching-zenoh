@@ -68,3 +68,20 @@ pub const Z_ERR_KEYEXPR_DECLARED_ON_ANOTHER_SESSION: ZResult = -70;
 /// without sending a Query, so a C program that hands over a spent token must
 /// see this rather than a generic failure or a success.
 pub const Z_ERR_CANCELLED: ZResult = -69;
+
+/// The session this call names is closed, or is not a session at all. Matches
+/// pico `_Z_ERR_SESSION_CLOSED` (`utils/result.h`) EXACTLY: a caller declaring a
+/// listener branches on it to learn the declaration was refused for want of a
+/// live session, which [`Z_ERR_INVALID`]'s collapsed `-1` cannot say.
+pub const Z_ERR_SESSION_CLOSED: ZResult = -73;
+
+/// An argument was handed over in a state the call cannot use — a moved
+/// transport that holds no transport, for one. Matches pico `_Z_ERR_INVALID` /
+/// `Z_EINVAL` (`utils/result.h`) EXACTLY, where [`Z_ERR_INVALID`] is the
+/// collapsed `-1` every older export here answers with. The connectivity plane
+/// uses this one because its refusals are the ones a program branches on.
+pub const Z_EINVAL: ZResult = -75;
+
+/// An allocation failed. Matches pico `_Z_ERR_SYSTEM_OUT_OF_MEMORY`
+/// (`utils/result.h`).
+pub const Z_ERR_SYSTEM_OUT_OF_MEMORY: ZResult = -78;

@@ -44,7 +44,7 @@ use crate::write_filter::PicoSession;
 pub(crate) struct PicoPlane {
     session: PicoSession,
     /// The session's own clock: the plane's stamps come from it, as pico's do
-    /// from the session's ([`crate::write_filter::PicoSessionMode::new`]).
+    /// from the session's ([`crate::session_ext::PicoSessionExt::new`]).
     hlc: NodeHlc,
     /// What a beacon's period is slept on. Any clock would do — the period is a
     /// duration — and the session's is the one the rest of the session reads.
