@@ -317,6 +317,17 @@ ALLOWED = [
         "on that answer, as the type doc says. The obligation is the caller's, "
         "and that site is inside this gate's window and carries the token",
     ),
+    (
+        "wz-capi-dissect/live.rs",
+        "mark.runs.pop_front();",
+        "a run of ROW SEQUENCE NUMBERS leaving a list's watermark because every "
+        "message it numbered has been trimmed away. A run maps a produced-index "
+        "to the number a row was issued under and holds nothing captured; the "
+        "messages it named were counted as lost when the ceiling took them "
+        "(`*lost +=` in `advance`, whose `first_held` is what this compares "
+        "against), so the only thing removed here is the bookkeeping for rows "
+        "that no longer exist",
+    ),
 ]
 
 
