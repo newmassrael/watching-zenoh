@@ -7101,7 +7101,10 @@ layer_c1am_cargo_test_adminspace() {
     # makes, needed because the router link-weight rows name neighbours by the
     # hex zid an operator types. Number PRINTED by the guard, not counted off
     # the diff.
-    _runci_guarded_test "C1AM zid_hex 5" 5 \
+    # R2978 -- 5 -> 7: ZA-3687 added two tests here, the canonical form and a
+    # non-palindromic round trip. PRINTED by the guard running the command,
+    # not counted off the diff.
+    _runci_guarded_test "C1AM zid_hex 7" 7 \
         cargo test -p wz-session-core --features adminspace-core --lib zid_hex --quiet || return 1
     _runci_guarded_test "C1AM zid_to_zenoh_hex 1" 1 \
         cargo test -p wz-session-core --features storage-replication --lib zid_to_zenoh_hex --quiet || return 1
