@@ -6121,68 +6121,51 @@ impl Dissection {
             });
         }
         let before = cursor.packets_produced();
-        match cursor.decide(bytes) {
-            None => return Ok(0),
-            Some(Container::Pcapng) => {
-                let ng = cursor.pcapng_mut();
-                // R311y607 — a pcapng that reports no drops reports ZERO, not
-                // "unstated"; `from_pcapng_declaring_bounded` folds an empty
-                // list to `Some(0)` and this is the same claim, made as soon as
-                // the format is known rather than after the last block.
-                if self.capture_reported_drops.is_none() {
-                    self.capture_reported_drops = Some(0);
-                }
-                let dissection = &mut *self;
-                let halt = ng
-                    .advance(bytes, |y| match y {
-                        pcapng::PcapngYield::Packet(p) => {
-                            // R311y720 — the INTERFACE travels with the packet.
-                            dissection.push_packet_on(
-                                p.link_type,
-                                p.index,
-                                p.interface_id,
-                                p.ts_millis,
-                                &p.data,
-                            );
-                        }
-                        pcapng::PcapngYield::Secrets(s) => {
-                            dissection.decryption_secrets.push(s);
-                        }
-                        pcapng::PcapngYield::Stats(s) => {
-                            dissection.add_reported_drops(s.dropped);
-                        }
-                        pcapng::PcapngYield::PacketBlockDrops { dropped, .. } => {
-                            dissection.add_reported_drops(Some(dropped));
-                        }
-                    })
-                    .map_err(|e| FollowError::Capture(CaptureError::Pcapng(e)))?;
-                // A container that is still being written HAS a partial tail
-                // most of the time. That is the ordinary case here and not an
-                // error; the cursor kept its place and the next call reads it.
-                let _ = halt;
-            }
-            Some(Container::Pcap) => {
-                let classic = cursor.pcap_mut();
-                let dissection = &mut *self;
-                // A classic pcap declares ONE link type for the whole file and
-                // carries no interface, no statistics and no secrets, so this
-                // arm is the whole of what `from_pcap_declaring_bounded` does
-                // per packet. `capture_reported_drops` stays UNSTATED here,
-                // exactly as it does for a file read whole: the format has
-                // nowhere to state it.
-                let halt = classic
-                    .advance(bytes, |link_type, unit, p| {
-                        dissection.push_packet_at(
-                            link_type,
-                            p.index,
-                            Some(p.ts_millis(unit)),
-                            &p.data,
-                        );
-                    })
-                    .map_err(|e| FollowError::Capture(CaptureError::Pcap(e)))?;
-                let _ = halt;
-            }
+        // R311y607 — a pcapng that reports no drops reports ZERO, not
+        // "unstated"; `from_pcapng_declaring_bounded` folds an empty list to
+        // `Some(0)` and this is the same claim, made as soon as the format is
+        // known rather than after the last block. A classic pcap states nothing
+        // here and `capture_reported_drops` stays UNSTATED for it, exactly as it
+        // does for a file read whole: the format has nowhere to state it.
+        if cursor.decide(bytes) == Some(Container::Pcapng) && self.capture_reported_drops.is_none()
+        {
+            self.capture_reported_drops = Some(0);
         }
+        let dissection = &mut *self;
+        // ZA-3601 — the walk is `CaptureCursor::walk`, the same function
+        // `captured_frame` runs to hand a packet out by number, so the number a
+        // message is anchored to here and the number a caller asks for there
+        // cannot come from two walks. What each format's events mean was in
+        // this function until then; it is now in the walk's mapping, one place.
+        //
+        // A container that is still being written HAS a partial tail most of the
+        // time. That is the ordinary case here and not an error; the cursor kept
+        // its place and the next call reads it, so what the walk reports about
+        // why it stopped is not needed. A container with fewer than four bytes
+        // has not named its format yet and the walk reads nothing, which is a
+        // wait and not a failure.
+        cursor
+            .walk(bytes, |event| {
+                match event {
+                    CaptureEvent::Frame(f) => {
+                        // R311y720 — the INTERFACE travels with the packet. A
+                        // classic pcap has one, numbered 0, which is also what
+                        // `push_packet_at` passes.
+                        dissection.push_packet_on(
+                            f.link_type,
+                            f.index,
+                            f.interface_id,
+                            f.ts_millis,
+                            f.data,
+                        );
+                    }
+                    CaptureEvent::Secrets(s) => dissection.decryption_secrets.push(s),
+                    CaptureEvent::Stats(s) => dissection.add_reported_drops(s.dropped),
+                    CaptureEvent::Drops(dropped) => dissection.add_reported_drops(Some(dropped)),
+                }
+                core::ops::ControlFlow::Continue(())
+            })
+            .map_err(FollowError::Capture)?;
         Ok(cursor.packets_produced() - before)
     }
 
@@ -6290,6 +6273,506 @@ impl CaptureCursor {
             CaptureCursorInner::Classic(c) => c,
             _ => unreachable!("decide() reported classic pcap"),
         }
+    }
+
+    /// ZA-3601 — THE walk over a capture container of either format, handing
+    /// `on` each event with the packet's bytes BORROWED from `bytes`, and
+    /// letting it stop.
+    ///
+    /// `bytes` is the container from offset zero. Everything that assigns a
+    /// packet number, decides where a record ends, or names a partial tail is
+    /// in the two cursors this dispatches to; this only maps their events onto
+    /// one type. Both [`Dissection::follow_container`] (which feeds a
+    /// dissection) and [`captured_frame`] (which hands one packet out) run THIS
+    /// function, so the number a dissection anchors a message to and the number
+    /// a caller asks for are the same number by construction rather than by two
+    /// walks agreeing.
+    ///
+    /// Returns what stopped the walk; a container that is malformed is an error
+    /// and a container that is merely not all there yet is
+    /// [`CaptureWalk::Halted`] with `partial` set.
+    pub fn walk<'b, F>(&mut self, bytes: &'b [u8], mut on: F) -> Result<CaptureWalk, CaptureError>
+    where
+        F: FnMut(CaptureEvent<'b>) -> core::ops::ControlFlow<()>,
+    {
+        match self.decide(bytes) {
+            None => Ok(CaptureWalk::Undecided),
+            Some(Container::Pcapng) => {
+                let walk = self
+                    .pcapng_mut()
+                    .advance_with(bytes, |y| match y {
+                        pcapng::PcapngYieldRef::Packet(p) => {
+                            on(CaptureEvent::Frame(CapturedFrame {
+                                index: p.index,
+                                interface_id: p.interface_id,
+                                link_type: p.link_type,
+                                ts_millis: p.ts_millis,
+                                data: p.data,
+                                orig_len: p.orig_len,
+                            }))
+                        }
+                        pcapng::PcapngYieldRef::Secrets(s) => on(CaptureEvent::Secrets(s)),
+                        pcapng::PcapngYieldRef::Stats(s) => on(CaptureEvent::Stats(s)),
+                        pcapng::PcapngYieldRef::PacketBlockDrops { dropped, .. } => {
+                            on(CaptureEvent::Drops(dropped))
+                        }
+                    })
+                    .map_err(CaptureError::Pcapng)?;
+                Ok(match walk {
+                    pcapng::Walk::Stopped => CaptureWalk::Stopped,
+                    pcapng::Walk::Halted(pcapng::Halt::Complete) => {
+                        CaptureWalk::Halted { partial: false }
+                    }
+                    pcapng::Walk::Halted(pcapng::Halt::Partial(_)) => {
+                        CaptureWalk::Halted { partial: true }
+                    }
+                })
+            }
+            Some(Container::Pcap) => {
+                // A classic pcap declares ONE link type for the whole file and
+                // carries no interface, no statistics and no secrets, so its
+                // events are frames and only frames, on interface 0.
+                let walk = self
+                    .pcap_mut()
+                    .advance_with(bytes, |link_type, unit, p| {
+                        on(CaptureEvent::Frame(CapturedFrame {
+                            index: p.index,
+                            interface_id: 0,
+                            link_type,
+                            ts_millis: Some(p.ts_millis(unit)),
+                            data: p.data,
+                            orig_len: p.orig_len,
+                        }))
+                    })
+                    .map_err(CaptureError::Pcap)?;
+                Ok(match walk {
+                    pcap::Walk::Stopped => CaptureWalk::Stopped,
+                    pcap::Walk::Halted(pcap::Halt::Complete) => {
+                        CaptureWalk::Halted { partial: false }
+                    }
+                    pcap::Walk::Halted(pcap::Halt::Partial(_)) => {
+                        CaptureWalk::Halted { partial: true }
+                    }
+                })
+            }
+        }
+    }
+}
+
+/// ZA-3601 — one captured packet out of a capture container of either format,
+/// its bytes BORROWED from the container.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CapturedFrame<'a> {
+    /// The packet's number in the container: the coordinate a dissection
+    /// anchors its messages to, and the `first_byte.packet` a field row names.
+    pub index: usize,
+    /// The interface the packet arrived on. Always `0` for a classic pcap,
+    /// which has one.
+    pub interface_id: u32,
+    /// The `LINKTYPE_*` of the interface, which says what the first bytes of
+    /// `data` are.
+    pub link_type: u32,
+    /// The capture time in epoch milliseconds, or `None` for a pcapng block
+    /// that carried no time.
+    pub ts_millis: Option<u64>,
+    /// The bytes the capture stored, LINK HEADER INCLUDED — the coordinate
+    /// space a field row's `frame_offset` indexes. Shorter than `orig_len` when
+    /// the capture ran with a snaplen.
+    pub data: &'a [u8],
+    /// The length the packet had on the wire.
+    pub orig_len: u32,
+}
+
+/// ZA-3601 — what [`CaptureCursor::walk`] hands its sink.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CaptureEvent<'a> {
+    /// A captured packet.
+    Frame(CapturedFrame<'a>),
+    /// A Decryption Secrets Block's payload (pcapng only).
+    Secrets(pcapng::DecryptionSecrets),
+    /// An Interface Statistics Block's counters (pcapng only).
+    Stats(pcapng::InterfaceStats),
+    /// A drop count taken from an obsolete Packet Block — an INCREMENT, not a
+    /// total (pcapng only).
+    Drops(u64),
+}
+
+/// ZA-3601 — why [`CaptureCursor::walk`] stopped.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CaptureWalk {
+    /// Fewer than four bytes have been seen, so the format is not yet known and
+    /// nothing was read.
+    Undecided,
+    /// The walk ran to where `bytes` ends. `partial` is `true` when a record or
+    /// block is cut off there — a container still being written, or one that
+    /// was truncated; the bytes cannot say which — and `false` when the walk
+    /// ended on a boundary.
+    Halted {
+        /// A record or block was cut off at the end of `bytes`.
+        partial: bool,
+    },
+    /// The sink asked to stop. The cursor stands past the whole record that
+    /// held the event it answered.
+    Stopped,
+}
+
+/// ZA-3601 — why a packet could not be handed out of a container.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FrameLookupError {
+    /// The container did not read, in whichever format it is, before the walk
+    /// reached the packet asked for.
+    Capture(CaptureError),
+    /// `bytes` holds no packet with that number: it ran out first.
+    ///
+    /// The number is the caller's to judge, not a fact about the container —
+    /// a longer prefix of a growing capture may hold it. `partial` says whether
+    /// a record was cut off at the end of `bytes` (a longer prefix may complete
+    /// it) or the prefix ended on a boundary.
+    NotInPrefix {
+        /// How many packets `bytes` did hold.
+        packets: usize,
+        /// A record or block was cut off at the end of `bytes`.
+        partial: bool,
+    },
+}
+
+/// ZA-3601 — packet number `packet` of a capture container, as the capture
+/// stored it: link header included, in the coordinate space a field row's
+/// `frame_offset` indexes.
+///
+/// The bytes are a BORROW of `bytes`; a caller that needs them beyond the
+/// container copies them out.
+///
+/// # The same reader, not a second one
+///
+/// This runs [`CaptureCursor::walk`], the walk [`Dissection::follow_container`]
+/// runs to number the packets a dissection anchors its messages to. It does not
+/// parse a record header of its own, so the packet a row's `first_byte.packet`
+/// names and the packet this returns for that number cannot be two different
+/// records. A consumer that decoded the container itself to reach a packet
+/// would be the second decoder of the capture framing.
+///
+/// # Growth
+///
+/// A packet number is a position in the file, and a file only grows, so a
+/// number a longer prefix once resolved resolves to the same bytes in every
+/// longer one. A SHORTER prefix that no longer holds the record answers
+/// [`FrameLookupError::NotInPrefix`], which is the honest answer and not a
+/// corruption.
+///
+/// # Cost
+///
+/// The walk stops at the packet, so a lookup reads the header of every record
+/// before it and copies none of them. That is linear in the packet's number,
+/// which is the price of asking a container, rather than an index built by
+/// somebody who read it first, for a packet by number.
+pub fn captured_frame(bytes: &[u8], packet: usize) -> Result<CapturedFrame<'_>, FrameLookupError> {
+    let mut cursor = CaptureCursor::new();
+    let mut found: Option<CapturedFrame<'_>> = None;
+    let walk = cursor
+        .walk(bytes, |event| match event {
+            CaptureEvent::Frame(f) if f.index == packet => {
+                found = Some(f);
+                core::ops::ControlFlow::Break(())
+            }
+            _ => core::ops::ControlFlow::Continue(()),
+        })
+        .map_err(FrameLookupError::Capture)?;
+    match (found, walk) {
+        (Some(frame), _) => Ok(frame),
+        (None, CaptureWalk::Halted { partial }) => Err(FrameLookupError::NotInPrefix {
+            packets: cursor.packets_produced(),
+            partial,
+        }),
+        (None, CaptureWalk::Undecided) => Err(FrameLookupError::NotInPrefix {
+            packets: 0,
+            partial: true,
+        }),
+        // A walk stops only when the sink above breaks, and it breaks only
+        // after storing the frame.
+        (None, CaptureWalk::Stopped) => unreachable!("the sink stops only on a frame it kept"),
+    }
+}
+
+// ── ZA-3601 — a packet out of a container, by number ──
+#[cfg(test)]
+mod captured_frame_tests {
+    use super::*;
+    use alloc::vec::Vec;
+
+    type ClassicPacket<'a> = (u32, u32, &'a [u8]);
+    type NgPacket<'a> = (u32, u64, &'a [u8]);
+
+    /// Where each record of a `pcap::write` file ENDS, from the writer's layout
+    /// (a 24-byte header, then a 16-byte record header and the bytes) — not read
+    /// back through the reader under test, which would be the reader grading
+    /// itself. Returns `(block boundaries, packet ends)`.
+    fn classic_layout(packets: &[ClassicPacket<'_>]) -> (Vec<usize>, Vec<usize>) {
+        let mut at = 24;
+        let mut boundaries = alloc::vec![at];
+        let mut ends = Vec::new();
+        for (_, _, data) in packets {
+            at += 16 + data.len();
+            boundaries.push(at);
+            ends.push(at);
+        }
+        (boundaries, ends)
+    }
+
+    /// The same for a `pcapng::write` file: a 28-byte Section Header, 32 bytes
+    /// per Interface Description, then per packet 32 bytes and the data padded
+    /// to four.
+    fn ng_layout(interfaces: usize, packets: &[NgPacket<'_>]) -> (Vec<usize>, Vec<usize>) {
+        let mut at = 28;
+        let mut boundaries = alloc::vec![at];
+        for _ in 0..interfaces {
+            at += 32;
+            boundaries.push(at);
+        }
+        let mut ends = Vec::new();
+        for (_, _, data) in packets {
+            at += 32 + data.len() + (4 - data.len() % 4) % 4;
+            boundaries.push(at);
+            ends.push(at);
+        }
+        (boundaries, ends)
+    }
+
+    /// The claim ZA-3601 rests on, over EVERY prefix of a container: a packet
+    /// number resolves against a prefix exactly when the prefix holds that
+    /// record whole, to the bytes the whole container holds; and a prefix that
+    /// does not answers `NotInPrefix` naming how many packets it did hold and
+    /// whether a record was cut off at its end.
+    ///
+    /// The consumer follows a file that only grows and hands out a number the
+    /// first time a record is complete, so "a number a prefix resolved resolves
+    /// the same in every longer one" is what its bytes column stands on.
+    fn every_prefix_resolves_as_the_whole_does(
+        file: &[u8],
+        boundaries: &[usize],
+        packet_ends: &[usize],
+    ) {
+        assert!(packet_ends.len() >= 3, "the population must not be empty");
+        let whole: Vec<CapturedFrame<'_>> = (0..packet_ends.len())
+            .map(|i| captured_frame(file, i).expect("the whole container holds every packet"))
+            .collect();
+        let mut cut_mid_record = 0usize;
+
+        for len in 0..=file.len() {
+            let prefix = &file[..len];
+            let complete = packet_ends.iter().filter(|&&end| end <= len).count();
+            let on_a_boundary = boundaries.contains(&len);
+            if !on_a_boundary {
+                cut_mid_record += 1;
+            }
+            // One number past the last, which no prefix may resolve.
+            for i in 0..=packet_ends.len() {
+                match captured_frame(prefix, i) {
+                    Ok(frame) => {
+                        assert!(
+                            i < complete,
+                            "prefix of {len} bytes resolved packet {i}, which it holds only \
+                             {complete} of"
+                        );
+                        assert_eq!(
+                            Some(&frame),
+                            whole.get(i),
+                            "packet {i} read differently from a prefix of {len} bytes than \
+                             from the whole container"
+                        );
+                    }
+                    Err(FrameLookupError::NotInPrefix { packets, partial }) => {
+                        assert!(
+                            i >= complete,
+                            "prefix of {len} bytes holds packet {i} whole and refused it"
+                        );
+                        assert_eq!(packets, complete, "prefix of {len} bytes, asked for {i}");
+                        assert_eq!(
+                            partial, !on_a_boundary,
+                            "prefix of {len} bytes: a cut record must say so, and a clean \
+                             boundary must not"
+                        );
+                    }
+                    Err(other) => panic!("prefix of {len} bytes, asked for {i}: {other:?}"),
+                }
+            }
+        }
+        assert!(
+            cut_mid_record > 0,
+            "no prefix of this fixture landed inside a record, so growth was never exercised"
+        );
+    }
+
+    #[test]
+    fn a_classic_pcaps_packet_resolves_the_same_from_every_prefix_that_holds_it() {
+        let packets: [ClassicPacket<'_>; 4] = [
+            (1, 500_000, &[1, 2, 3]),
+            (2, 250_000, &[4, 5]),
+            (3, 0, &[]),
+            (4, 999_999, &[6, 7, 8, 9, 10]),
+        ];
+        let file = pcap::write(1, &packets);
+        let (boundaries, ends) = classic_layout(&packets);
+        assert_eq!(
+            *ends.last().unwrap(),
+            file.len(),
+            "the layout matches the writer"
+        );
+        every_prefix_resolves_as_the_whole_does(&file, &boundaries, &ends);
+    }
+
+    #[test]
+    fn a_pcapngs_packet_resolves_the_same_from_every_prefix_that_holds_it() {
+        let packets: [NgPacket<'_>; 4] = [
+            (0, 1_000, &[1, 2, 3]),
+            (1, 2_000, &[4, 5, 6, 7, 8]),
+            (0, 3_000, &[]),
+            (1, 4_000, &[9]),
+        ];
+        let file = pcapng::write(&[(1, 6), (101, 9)], &packets);
+        let (boundaries, ends) = ng_layout(2, &packets);
+        assert_eq!(
+            *ends.last().unwrap(),
+            file.len(),
+            "the layout matches the writer"
+        );
+        every_prefix_resolves_as_the_whole_does(&file, &boundaries, &ends);
+    }
+
+    /// What the door hands out is what the whole-file parsers hold, field for
+    /// field — link header included, the link type of the interface that
+    /// recorded it, and the time already put through that interface's
+    /// resolution.
+    #[test]
+    fn a_classic_pcaps_frames_are_the_ones_parse_holds() {
+        let file = pcap::write(
+            105,
+            &[
+                (10, 500_000, &[1, 2, 3][..]),
+                (11, 250_000, &[4, 5][..]),
+                (12, 0, &[6][..]),
+            ],
+        );
+        let parsed = pcap::parse(&file).expect("the fixture reads");
+        for (i, packet) in parsed.packets.iter().enumerate() {
+            let frame = captured_frame(&file, i).expect("every packet resolves");
+            assert_eq!(frame.index, i);
+            assert_eq!(frame.data, packet.data.as_slice());
+            assert_eq!(frame.orig_len, packet.orig_len);
+            assert_eq!(frame.link_type, parsed.link_type);
+            assert_eq!(frame.interface_id, 0, "a classic pcap has one interface");
+            assert_eq!(
+                frame.ts_millis,
+                Some(packet.ts_millis(parsed.timestamp_unit))
+            );
+        }
+    }
+
+    /// The same for pcapng, across TWO sections on different link types: the
+    /// number keeps counting past a section boundary and each packet keeps the
+    /// link type of ITS section's interface, which is what the walk that
+    /// numbers a dissection's packets does.
+    #[test]
+    fn a_pcapngs_frames_are_the_ones_parse_holds_across_sections() {
+        let mut file = pcapng::write(
+            &[(1, 6), (101, 9)],
+            &[(0, 1_000, &[1, 2, 3]), (1, 2_000, &[4, 5, 6, 7, 8])],
+        );
+        file.extend_from_slice(&pcapng::write(&[(113, 6)], &[(0, 3_000, &[9])]));
+        let parsed = pcapng::parse(&file).expect("the fixture reads");
+        assert_eq!(
+            parsed.sections, 2,
+            "the fixture must cross a section boundary"
+        );
+        assert_eq!(parsed.packets.len(), 3);
+        for (i, packet) in parsed.packets.iter().enumerate() {
+            let frame = captured_frame(&file, i).expect("every packet resolves");
+            assert_eq!(frame.index, packet.index);
+            assert_eq!(frame.data, packet.data.as_slice());
+            assert_eq!(frame.orig_len, packet.orig_len);
+            assert_eq!(frame.link_type, packet.link_type);
+            assert_eq!(frame.interface_id, packet.interface_id);
+            assert_eq!(frame.ts_millis, packet.ts_millis);
+        }
+        assert_eq!(captured_frame(&file, 2).unwrap().link_type, 113);
+    }
+
+    /// A container that does not read is refused by name and not answered as
+    /// "no such packet", which would send a caller looking for a number when the
+    /// file is what is wrong.
+    #[test]
+    fn a_container_that_is_not_a_capture_is_an_error_and_not_a_missing_packet() {
+        // A whole classic file header long (24 bytes): a SHORTER input is
+        // reported as a header not yet fully there, because the walk judges the
+        // header as a whole before it judges the magic in it.
+        let mut garbage = alloc::vec![0u8; 32];
+        garbage[..4].copy_from_slice(&[0xde, 0xad, 0xbe, 0xef]);
+        assert!(matches!(
+            captured_frame(&garbage, 0),
+            Err(FrameLookupError::Capture(CaptureError::Pcap(
+                pcap::PcapError::BadMagic(_)
+            )))
+        ));
+    }
+
+    /// A damaged block AFTER a packet does not hide it, and a number the walk
+    /// would only reach through the damage is the damage's error. The walk
+    /// stops at the packet asked for, so it never reads what follows.
+    #[test]
+    fn damage_after_a_packet_does_not_hide_it() {
+        let mut file = pcapng::write(&[(1, 6)], &[(0, 0, &[0xAA, 0xBB])]);
+        // An unknown block whose trailing length disagrees with its leading one.
+        file.extend_from_slice(&0x0000_0BADu32.to_le_bytes());
+        file.extend_from_slice(&16u32.to_le_bytes());
+        file.extend_from_slice(&[0, 0, 0, 0]);
+        file.extend_from_slice(&20u32.to_le_bytes());
+
+        let frame = captured_frame(&file, 0).expect("the packet before the damage resolves");
+        assert_eq!(frame.data, &[0xAA, 0xBB]);
+        assert!(matches!(
+            captured_frame(&file, 1),
+            Err(FrameLookupError::Capture(CaptureError::Pcapng(
+                pcapng::PcapngError::LengthMismatch { .. }
+            )))
+        ));
+    }
+
+    /// The door and the reader that feeds a dissection are ONE walk, so the
+    /// number a dissection counts is the number the door takes. Following the
+    /// container in two windows must count the packets the door can resolve, and
+    /// no more.
+    #[test]
+    fn the_door_takes_the_numbers_a_followed_container_counts() {
+        let packets: [NgPacket<'_>; 3] = [
+            (0, 1_000, &[1, 2, 3]),
+            (1, 2_000, &[4, 5, 6, 7, 8]),
+            (0, 3_000, &[9]),
+        ];
+        let file = pcapng::write(&[(1, 6), (101, 9)], &packets);
+        let (_, ends) = ng_layout(2, &packets);
+        let mut cursor = CaptureCursor::new();
+        let mut d = Dissection::new();
+        // The first window ends inside the third packet.
+        let first = d
+            .follow_container(&mut cursor, &file[..ends[2] - 1])
+            .expect("the first window follows");
+        assert_eq!(first, 2);
+        let second = d
+            .follow_container(&mut cursor, &file)
+            .expect("the second window follows");
+        assert_eq!(second, 1);
+        assert_eq!(cursor.packets_produced(), 3);
+        assert_eq!(d.next_packet_index(), 3);
+        for i in 0..3 {
+            assert_eq!(captured_frame(&file, i).expect("resolves").index, i);
+        }
+        assert!(matches!(
+            captured_frame(&file, 3),
+            Err(FrameLookupError::NotInPrefix {
+                packets: 3,
+                partial: false
+            })
+        ));
     }
 }
 

@@ -4260,6 +4260,72 @@ mod tests {
         );
     }
 
+    /// ZA-3601 — THE JOIN: the packet number a row names is a number the door
+    /// hands a frame out for, and `frame_offset` is the message's first byte IN
+    /// THAT FRAME.
+    ///
+    /// The two halves each have a test of their own (a row's coordinates against
+    /// the capture file above, the door against the whole-file parsers in
+    /// `captured_frame_tests`); this is the seam between them, and it is the
+    /// only claim the consumer's bytes column stands on: it draws the frame the
+    /// door returns and highlights at the offset the row gave. A door that
+    /// numbered packets one way and a row that anchored another would pass both
+    /// halves and fail here.
+    ///
+    /// Every stream row is checked, and every packet of the capture is handed
+    /// out and compared with what `pcap::parse` holds for it, link header
+    /// included.
+    #[cfg(feature = "network-codecs")]
+    #[test]
+    fn a_rows_packet_number_names_the_frame_the_door_hands_out() {
+        let (d, file) =
+            crate::census_json::fed_tests::every_plane_capture_with_file("demo/temp", None, false);
+        let doc = fields_json(&d, &file, None, None);
+        let pcap = crate::pcap::parse(&file).expect("the fixture writes a readable capture");
+        let rows = scoped(
+            &doc,
+            "payload_offset",
+            &["packet", "payload_offset", "frame_offset"],
+        );
+        let frames: Vec<(&crate::FlowDissection, &PassiveFrame)> = d
+            .flows()
+            .iter()
+            .flat_map(|flow| flow.frames.iter().map(move |frame| (flow, frame)))
+            .collect();
+        assert!(
+            frames.len() >= 2 && rows.len() >= frames.len(),
+            "the stream rows lead the document, one first_byte each: {doc}"
+        );
+
+        for (i, packet) in pcap.packets.iter().enumerate() {
+            let handed = crate::captured_frame(&file, i).expect("every packet of the capture");
+            assert_eq!(handed.index, i);
+            assert_eq!(
+                handed.data,
+                packet.data.as_slice(),
+                "packet {i}: the door hands out other bytes than the capture holds"
+            );
+        }
+
+        for ((flow, frame), row) in frames.iter().zip(&rows) {
+            let message = flow
+                .message_bytes(frame)
+                .expect("every fixture message is sliceable");
+            let packet: usize = row[0].parse().expect("a packet index");
+            let frame_offset: usize = row[2]
+                .parse()
+                .expect("an Ethernet/IPv4/TCP frame is locatable");
+            let handed = crate::captured_frame(&file, packet)
+                .expect("the number a row names resolves against the container that made it");
+            assert_eq!(
+                handed.data.get(frame_offset),
+                message.first(),
+                "row {row:?}: the byte at frame_offset in the frame the door hands \
+                 out is not the message's first byte"
+            );
+        }
+    }
+
     #[test]
     fn the_field_documents_key_set_is_pinned() {
         use crate::payload::formats::FormatMap;

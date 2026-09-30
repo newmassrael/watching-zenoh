@@ -47,6 +47,7 @@
 //! exponent is in hand.
 
 use alloc::vec::Vec;
+use core::ops::ControlFlow;
 
 /// Section Header Block — starts every section.
 const BT_SHB: u32 = 0x0A0D_0D0A;
@@ -244,32 +245,6 @@ pub struct Packet {
 }
 
 impl Packet {
-    /// One packet, with its capture time resolved against `iface` HERE, where
-    /// the interface that recorded it is still in hand.
-    ///
-    /// The one constructor the walk uses, so the three block types that carry a
-    /// packet cannot resolve it three ways.
-    fn resolved(
-        index: usize,
-        interface_id: u32,
-        iface: &Interface,
-        ts_ticks: Option<u64>,
-        data: Vec<u8>,
-        orig_len: u32,
-    ) -> Self {
-        let mut packet = Self {
-            index,
-            interface_id,
-            link_type: iface.link_type,
-            ts_ticks,
-            ts_millis: None,
-            data,
-            orig_len,
-        };
-        packet.ts_millis = packet.resolve_ts_millis(iface);
-        packet
-    }
-
     /// `true` when the capture stored fewer bytes than the wire carried.
     pub fn is_truncated(&self) -> bool {
         (self.data.len() as u32) < self.orig_len
@@ -288,15 +263,94 @@ impl Packet {
     /// `ts_secs` to expose — the split is a property of the old format rather
     /// than of the data.
     pub fn resolve_ts_millis(&self, iface: &Interface) -> Option<u64> {
-        let ticks = self.ts_ticks?;
-        let per_sec = iface.ticks_per_second();
-        Some(if per_sec >= 1_000 {
-            // Finer than a millisecond (the usual case: micro or nano).
-            ticks / (per_sec / 1_000)
-        } else {
-            // Coarser: milliseconds per tick, so multiply.
-            ticks * (1_000 / per_sec.max(1))
-        })
+        ticks_to_millis(self.ts_ticks, iface)
+    }
+}
+
+/// The one conversion from a block's raw tick count to epoch milliseconds,
+/// shared by the owned [`Packet`] and the borrowed [`PacketRef`] so the two
+/// cannot resolve `if_tsresol` two ways.
+fn ticks_to_millis(ts_ticks: Option<u64>, iface: &Interface) -> Option<u64> {
+    let ticks = ts_ticks?;
+    let per_sec = iface.ticks_per_second();
+    Some(if per_sec >= 1_000 {
+        // Finer than a millisecond (the usual case: micro or nano).
+        ticks / (per_sec / 1_000)
+    } else {
+        // Coarser: milliseconds per tick, so multiply.
+        ticks * (1_000 / per_sec.max(1))
+    })
+}
+
+/// ZA-3601 — one captured packet whose bytes are BORROWED from the container.
+///
+/// What [`PcapngCursor::advance_with`] hands its sink, where [`Packet`] is what
+/// [`PcapngCursor::advance`] hands its own. The walk is the same walk; only the
+/// ownership of the block's bytes differs. See [`crate::pcap::PacketRef`] for
+/// why a borrow is the right shape for a sink that reads a packet and drops it.
+///
+/// The lifetime is the CONTAINER's: `data` is a window of the `bytes` the walk
+/// was given.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PacketRef<'a> {
+    /// Zero-based index in the file.
+    pub index: usize,
+    /// The interface this arrived on, as an index into the section's interface
+    /// list.
+    pub interface_id: u32,
+    /// The interface's link type, copied here so a consumer never has to hold
+    /// both lists to decapsulate one packet.
+    pub link_type: u32,
+    /// The raw 64-bit tick count, or `None` for a block that carried no time.
+    pub ts_ticks: Option<u64>,
+    /// [`Self::ts_ticks`] already put through the recording interface's
+    /// `if_tsresol`, at the moment the block was read.
+    pub ts_millis: Option<u64>,
+    /// Bytes actually stored, link header included.
+    pub data: &'a [u8],
+    /// Length the packet had on the wire.
+    pub orig_len: u32,
+}
+
+impl<'a> PacketRef<'a> {
+    /// One packet, with its capture time resolved against `iface` HERE, where
+    /// the interface that recorded it is still in hand.
+    ///
+    /// The one constructor the walk uses, so the three block types that carry a
+    /// packet cannot resolve it three ways.
+    fn resolved(
+        index: usize,
+        interface_id: u32,
+        iface: &Interface,
+        ts_ticks: Option<u64>,
+        data: &'a [u8],
+        orig_len: u32,
+    ) -> Self {
+        Self {
+            index,
+            interface_id,
+            link_type: iface.link_type,
+            ts_ticks,
+            ts_millis: ticks_to_millis(ts_ticks, iface),
+            data,
+            orig_len,
+        }
+    }
+
+    /// The same packet with its bytes copied out of the container.
+    ///
+    /// Not named `to_owned`: the type is `Copy`, so that name would resolve to
+    /// the blanket trait method and hand back another borrow.
+    pub fn into_packet(self) -> Packet {
+        Packet {
+            index: self.index,
+            interface_id: self.interface_id,
+            link_type: self.link_type,
+            ts_ticks: self.ts_ticks,
+            ts_millis: self.ts_millis,
+            data: self.data.to_vec(),
+            orig_len: self.orig_len,
+        }
     }
 }
 
@@ -575,6 +629,50 @@ pub enum Halt {
     Partial(PcapngError),
 }
 
+/// ZA-3601 — how a walk that a sink may cut short ended.
+///
+/// A separate type from [`Halt`], which is the walk's own account of the
+/// container and stays two-valued for every caller that never stops early. A
+/// sink that answers [`ControlFlow::Break`] has asked for something the
+/// container did not say, and folding that into [`Halt`] would make every
+/// existing `match` on it name a case only one caller can produce.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Walk {
+    /// The walk ran to where the container ends, and this is why it stopped.
+    Halted(Halt),
+    /// The sink asked to stop, and the walk stopped after the WHOLE block that
+    /// held the yield it answered. Every other yield of that block was still
+    /// delivered and the cursor stands on the NEXT block's start, exactly as it
+    /// would had the walk continued, so a later call resumes without a gap or a
+    /// repeat.
+    Stopped,
+}
+
+/// ZA-3601 — [`PcapngYield`] with the packet's bytes BORROWED from the
+/// container, for [`PcapngCursor::advance_with`].
+///
+/// The three non-packet yields are the owned values [`PcapngYield`] carries:
+/// they are small, they are the walk's own accounting, and a sink that wants
+/// only packets ignores them.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PcapngYieldRef<'a> {
+    /// A packet block, with its capture time already resolved. See
+    /// [`PacketRef::ts_millis`].
+    Packet(PacketRef<'a>),
+    /// A Decryption Secrets Block's payload.
+    Secrets(DecryptionSecrets),
+    /// An Interface Statistics Block's counters.
+    Stats(InterfaceStats),
+    /// The obsolete Packet Block's per-block drop count, an INCREMENT, yielded
+    /// only when non-zero.
+    PacketBlockDrops {
+        /// Which interface lost them.
+        interface_id: u32,
+        /// How many, since the previous packet on that interface.
+        dropped: u64,
+    },
+}
+
 /// R2373 (open-debt item 661) — a RESUMABLE walk over a pcapng container.
 ///
 /// # Why this exists rather than a second parser
@@ -689,16 +787,63 @@ impl PcapngCursor {
     /// [`Halt::Partial`]. Only the caller can tell a shrink from a slow writer,
     /// so only the caller can name it; [`crate::FollowError::Shrank`] is where
     /// that is done.
+    ///
+    /// ZA-3601 — a thin owner of [`Self::advance_with`]: each packet's bytes are
+    /// copied out of the container before the sink sees them, which is what
+    /// [`parse`] wants (it keeps every packet) and what a sink that only reads
+    /// and drops does not. There is ONE walk; this and `advance_with` differ in
+    /// who owns the bytes.
     pub fn advance<F>(&mut self, bytes: &[u8], mut on: F) -> Result<Halt, PcapngError>
     where
         F: FnMut(PcapngYield),
+    {
+        match self.advance_with(bytes, |y| {
+            on(match y {
+                PcapngYieldRef::Packet(p) => PcapngYield::Packet(p.into_packet()),
+                PcapngYieldRef::Secrets(s) => PcapngYield::Secrets(s),
+                PcapngYieldRef::Stats(s) => PcapngYield::Stats(s),
+                PcapngYieldRef::PacketBlockDrops {
+                    interface_id,
+                    dropped,
+                } => PcapngYield::PacketBlockDrops {
+                    interface_id,
+                    dropped,
+                },
+            });
+            ControlFlow::Continue(())
+        })? {
+            Walk::Halted(halt) => Ok(halt),
+            // The sink above answers `Continue` to every yield, so the walk
+            // cannot have been cut short.
+            Walk::Stopped => unreachable!("advance never asks its walk to stop"),
+        }
+    }
+
+    /// ZA-3601 — [`Self::advance`], handing the sink each packet's bytes as a
+    /// BORROW of `bytes` and letting it stop the walk.
+    ///
+    /// The sink answers [`ControlFlow::Break`] to end the walk. The walk then
+    /// finishes the block it is in — every yield of that block is delivered, so
+    /// a Packet Block's drop count is never separated from its packet — and
+    /// reports [`Walk::Stopped`] with the cursor on the next block, so it is
+    /// resumable. A packet the sink never asks to keep costs nothing but reading
+    /// its block header.
+    ///
+    /// Everything else — what a partial tail is, what a malformed block is,
+    /// where the cursor stands after either — is [`Self::advance`]'s, because
+    /// this is the function that body lives in.
+    pub fn advance_with<'b, F>(&mut self, bytes: &'b [u8], mut on: F) -> Result<Walk, PcapngError>
+    where
+        F: FnMut(PcapngYieldRef<'b>) -> ControlFlow<()>,
     {
         if self.consumed == 0 {
             // The magic, before any length in the file is trusted. Fewer than
             // four bytes is not yet WRONG on a container still being written,
             // so it waits rather than failing.
             if bytes.len() < 4 {
-                return Ok(Halt::Partial(PcapngError::Truncated { offset: 0 }));
+                return Ok(Walk::Halted(Halt::Partial(PcapngError::Truncated {
+                    offset: 0,
+                })));
             }
             let first = u32::from_be_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
             if first != BT_SHB {
@@ -706,16 +851,18 @@ impl PcapngCursor {
             }
         }
         if bytes.len() < self.consumed {
-            return Ok(Halt::Partial(PcapngError::Truncated {
+            return Ok(Walk::Halted(Halt::Partial(PcapngError::Truncated {
                 offset: bytes.len(),
-            }));
+            })));
         }
 
         let mut off = self.consumed;
         while off < bytes.len() {
             if off + MIN_BLOCK_LEN > bytes.len() {
                 self.consumed = off;
-                return Ok(Halt::Partial(PcapngError::Truncated { offset: off }));
+                return Ok(Walk::Halted(Halt::Partial(PcapngError::Truncated {
+                    offset: off,
+                })));
             }
             // A block type is read in the section's order, EXCEPT an SHB, whose
             // order is not yet known. `BT_SHB` is `0x0A0D0D0A` — deliberately
@@ -759,7 +906,9 @@ impl PcapngCursor {
                 // exists for, and the one place a growing capture differs from
                 // a damaged one.
                 self.consumed = off;
-                return Ok(Halt::Partial(PcapngError::Truncated { offset: off }));
+                return Ok(Walk::Halted(Halt::Partial(PcapngError::Truncated {
+                    offset: off,
+                })));
             }
             let trailing = u32_at(bytes, off + total - 4, swapped);
             if trailing != total_len {
@@ -772,6 +921,11 @@ impl PcapngCursor {
             }
             // The body sits between the leading length and the trailing one.
             let body = &bytes[off + 8..off + total - 4];
+            // A sink's `Break` is remembered and acted on once the block is
+            // done, not at the yield: a block that yields twice (a Packet
+            // Block's drop count, then its packet) must not be cut between the
+            // two, and the cursor must not stop mid-block.
+            let mut stop = false;
 
             // From here the block is COMPLETE, so every remaining failure is a
             // malformed block rather than a short container. `self.consumed` is
@@ -831,7 +985,7 @@ impl PcapngCursor {
                             interface_id,
                         });
                     };
-                    on(PcapngYield::Packet(Packet::resolved(
+                    stop |= on(PcapngYieldRef::Packet(PacketRef::resolved(
                         self.index,
                         interface_id,
                         &iface,
@@ -839,9 +993,10 @@ impl PcapngCursor {
                         // first. Reading them as a seconds/fraction pair — which
                         // the classic layout invites — is wrong by construction.
                         Some((ts_high << 32) | ts_low),
-                        body[20..20 + captured as usize].to_vec(),
+                        &body[20..20 + captured as usize],
                         orig_len,
-                    )));
+                    )))
+                    .is_break();
                     self.index += 1;
                 }
                 BT_SPB => {
@@ -862,16 +1017,17 @@ impl PcapngCursor {
                     };
                     let orig_len = u32_at(body, 0, swapped);
                     let stored = core::cmp::min(orig_len as usize, body.len() - 4);
-                    on(PcapngYield::Packet(Packet::resolved(
+                    stop |= on(PcapngYieldRef::Packet(PacketRef::resolved(
                         self.index,
                         0,
                         &iface,
                         // An SPB carries no timestamp at all, and the ABSENCE is
                         // what travels rather than a plausible zero (R311y625).
                         None,
-                        body[4..4 + stored].to_vec(),
+                        &body[4..4 + stored],
                         orig_len,
-                    )));
+                    )))
+                    .is_break();
                     self.index += 1;
                 }
                 BT_PB => {
@@ -916,19 +1072,21 @@ impl PcapngCursor {
                     // count is what was lost leading UP to this block, so a
                     // consumer that stops on the packet has already been told.
                     if block_drops > 0 {
-                        on(PcapngYield::PacketBlockDrops {
+                        stop |= on(PcapngYieldRef::PacketBlockDrops {
                             interface_id,
                             dropped: block_drops,
-                        });
+                        })
+                        .is_break();
                     }
-                    on(PcapngYield::Packet(Packet::resolved(
+                    stop |= on(PcapngYieldRef::Packet(PacketRef::resolved(
                         self.index,
                         interface_id,
                         &iface,
                         Some((ts_high << 32) | ts_low),
-                        body[20..20 + captured as usize].to_vec(),
+                        &body[20..20 + captured as usize],
                         orig_len,
-                    )));
+                    )))
+                    .is_break();
                     self.index += 1;
                 }
                 BT_ISB => {
@@ -941,11 +1099,12 @@ impl PcapngCursor {
                     }
                     let interface_id = u32_at(body, 0, swapped);
                     let opts = &body[12..];
-                    on(PcapngYield::Stats(InterfaceStats {
+                    stop |= on(PcapngYieldRef::Stats(InterfaceStats {
                         interface_id,
                         received: scan_u64_option(opts, swapped, OPT_ISB_IFRECV),
                         dropped: scan_u64_option(opts, swapped, OPT_ISB_IFDROP),
-                    }));
+                    }))
+                    .is_break();
                 }
                 // R311y625 (§1.4d) — skipped by length, which is what the format's
                 // self-describing block structure is FOR, and now COUNTED, which is
@@ -979,11 +1138,12 @@ impl PcapngCursor {
                         // retain a multiple of the cap.
                         let keep = (MAX_DECRYPTION_SECRETS_BYTES - self.dsb_bytes).min(end - 8);
                         self.dsb_bytes += keep;
-                        on(PcapngYield::Secrets(DecryptionSecrets {
+                        stop |= on(PcapngYieldRef::Secrets(DecryptionSecrets {
                             secrets_type,
                             secrets: body[8..8 + keep].to_vec(),
                             truncated: 8 + keep < end,
-                        }));
+                        }))
+                        .is_break();
                     }
                     self.count_skipped(BT_DSB);
                 }
@@ -991,8 +1151,11 @@ impl PcapngCursor {
             }
             off += total;
             self.consumed = off;
+            if stop {
+                return Ok(Walk::Stopped);
+            }
         }
-        Ok(Halt::Complete)
+        Ok(Walk::Halted(Halt::Complete))
     }
 
     /// Record one more block of `block_type` stepped over.
@@ -1989,6 +2152,179 @@ mod tests {
             mid_block > 0,
             "no cut of this fixture landed inside a block, so resumption was \
              never exercised"
+        );
+    }
+
+    /// One obsolete Packet Block, laid out per the pcapng spec (§ Obsolete
+    /// Packet Block): block type, total length, interface id u16, drops u16,
+    /// timestamp halves, captured and original length, the data padded to 4,
+    /// the trailing length. Hand-laid because [`write`] emits only Enhanced
+    /// Packet Blocks.
+    fn pb(interface_id: u16, drops: u16, data: &[u8]) -> Vec<u8> {
+        let pad = (4 - (data.len() % 4)) % 4;
+        let total = 32 + data.len() + pad;
+        let mut out = Vec::new();
+        out.extend_from_slice(&BT_PB.to_le_bytes());
+        out.extend_from_slice(&(total as u32).to_le_bytes());
+        out.extend_from_slice(&interface_id.to_le_bytes());
+        out.extend_from_slice(&drops.to_le_bytes());
+        out.extend_from_slice(&0u32.to_le_bytes());
+        out.extend_from_slice(&1_000u32.to_le_bytes());
+        out.extend_from_slice(&(data.len() as u32).to_le_bytes());
+        out.extend_from_slice(&(data.len() as u32).to_le_bytes());
+        out.extend_from_slice(data);
+        out.extend_from_slice(&alloc::vec![0u8; pad]);
+        out.extend_from_slice(&(total as u32).to_le_bytes());
+        out
+    }
+
+    /// ZA-3601 — the borrowing walk and the owning one are ONE walk.
+    ///
+    /// `advance` became a thin owner of `advance_with`, and the claim that they
+    /// differ only in who owns a packet's bytes is worth nothing as a comment.
+    /// The fixture carries every kind of yield the walk produces — packets on
+    /// two interfaces, a second section on another link type, an Interface
+    /// Statistics Block, and an obsolete Packet Block with a drop count — and
+    /// the two sequences must be equal, in order.
+    #[test]
+    fn the_borrowing_walk_yields_what_the_owning_walk_yields() {
+        let mut file = write(
+            &[(1, 6), (101, 9)],
+            &[(0, 1_000, &[1, 2, 3]), (1, 2_000, &[4, 5, 6, 7, 8])],
+        );
+        file.extend_from_slice(&isb(0, Some(10), Some(2)));
+        file.extend_from_slice(&pb(0, 2, &[0xAA, 0xBB]));
+        file.extend_from_slice(&write(&[(113, 6)], &[(0, 3_000, &[9])]));
+
+        let mut owned: Vec<PcapngYield> = Vec::new();
+        let halt = PcapngCursor::new()
+            .advance(&file, |y| owned.push(y))
+            .expect("the fixture reads");
+        assert_eq!(halt, Halt::Complete);
+
+        let mut borrowed: Vec<PcapngYield> = Vec::new();
+        let walk = PcapngCursor::new()
+            .advance_with(&file, |y| {
+                borrowed.push(match y {
+                    PcapngYieldRef::Packet(p) => PcapngYield::Packet(p.into_packet()),
+                    PcapngYieldRef::Secrets(s) => PcapngYield::Secrets(s),
+                    PcapngYieldRef::Stats(s) => PcapngYield::Stats(s),
+                    PcapngYieldRef::PacketBlockDrops {
+                        interface_id,
+                        dropped,
+                    } => PcapngYield::PacketBlockDrops {
+                        interface_id,
+                        dropped,
+                    },
+                });
+                ControlFlow::Continue(())
+            })
+            .expect("the fixture reads");
+        assert_eq!(walk, Walk::Halted(Halt::Complete));
+
+        assert_eq!(owned, borrowed, "the two walks yielded different things");
+        let kinds = |pred: fn(&PcapngYield) -> bool| owned.iter().filter(|y| pred(y)).count();
+        assert!(
+            kinds(|y| matches!(y, PcapngYield::Packet(_))) >= 4
+                && kinds(|y| matches!(y, PcapngYield::Stats(_))) == 1
+                && kinds(|y| matches!(y, PcapngYield::PacketBlockDrops { .. })) == 1,
+            "the fixture must exercise every yield the walk produces: {owned:?}"
+        );
+    }
+
+    /// ZA-3601 — a walk the sink stops resumes where it stopped.
+    ///
+    /// For every packet in turn: stop after it, and the cursor must have
+    /// counted it and nothing after it; a second call over the same container
+    /// must then yield exactly the packets `parse` holds beyond it. A stop that
+    /// left the cursor on the packet it just delivered would repeat it, and one
+    /// that stopped short would lose it.
+    #[test]
+    fn a_walk_stopped_by_its_sink_resumes_where_it_stopped() {
+        let file = write(
+            &[(1, 6), (101, 9)],
+            &[
+                (0, 1_000, &[1, 2, 3]),
+                (1, 2_000, &[4, 5, 6, 7, 8]),
+                (0, 3_000, &[9]),
+            ],
+        );
+        let whole = parse(&file).expect("the fixture reads");
+        assert!(whole.packets.len() >= 3, "the population must not be empty");
+
+        for stop_at in 0..whole.packets.len() {
+            let mut cursor = PcapngCursor::new();
+            let mut seen: Vec<usize> = Vec::new();
+            let walk = cursor
+                .advance_with(&file, |y| {
+                    if let PcapngYieldRef::Packet(p) = y {
+                        seen.push(p.index);
+                        if p.index == stop_at {
+                            return ControlFlow::Break(());
+                        }
+                    }
+                    ControlFlow::Continue(())
+                })
+                .expect("the fixture reads");
+            assert_eq!(walk, Walk::Stopped, "stopping at packet {stop_at}");
+            assert_eq!(
+                seen,
+                (0..=stop_at).collect::<Vec<_>>(),
+                "the walk delivered a packet after the one it was told to stop at"
+            );
+            assert_eq!(cursor.packets_produced(), stop_at + 1);
+
+            let mut rest: Vec<Packet> = Vec::new();
+            let resumed = cursor
+                .advance(&file, |y| {
+                    if let PcapngYield::Packet(p) = y {
+                        rest.push(p);
+                    }
+                })
+                .expect("the container reads on");
+            assert_eq!(resumed, Halt::Complete);
+            assert_eq!(
+                rest,
+                whole.packets[stop_at + 1..].to_vec(),
+                "resuming after a stop at packet {stop_at} repeated or lost a packet"
+            );
+        }
+    }
+
+    /// ZA-3601 — a stop is honoured at the end of the BLOCK, never inside it.
+    ///
+    /// An obsolete Packet Block yields its drop count and then its packet. A
+    /// sink that breaks on the first must still be handed the second, because
+    /// the walk has already counted that packet and a cursor that stood on the
+    /// next block with the packet undelivered would have lost it.
+    #[test]
+    fn a_stop_does_not_split_a_packet_block_from_its_drop_count() {
+        let mut file = write(&[(1, 6)], &[]);
+        file.extend_from_slice(&pb(0, 3, &[0xAA, 0xBB]));
+
+        let mut cursor = PcapngCursor::new();
+        let mut order: Vec<&'static str> = Vec::new();
+        let walk = cursor
+            .advance_with(&file, |y| {
+                order.push(match y {
+                    PcapngYieldRef::PacketBlockDrops { .. } => "drops",
+                    PcapngYieldRef::Packet(_) => "packet",
+                    _ => "other",
+                });
+                ControlFlow::Break(())
+            })
+            .expect("the fixture reads");
+        assert_eq!(walk, Walk::Stopped);
+        assert_eq!(
+            order,
+            ["drops", "packet"],
+            "the block's second yield was withheld after the first said stop"
+        );
+        assert_eq!(cursor.packets_produced(), 1);
+        assert_eq!(
+            cursor.consumed(),
+            file.len(),
+            "the cursor must stand past the whole block"
         );
     }
 }

@@ -28,6 +28,7 @@
 //! between the two on the magic.
 
 use alloc::vec::Vec;
+use core::ops::ControlFlow;
 
 /// Classic pcap file-header length.
 const FILE_HEADER_LEN: usize = 24;
@@ -116,11 +117,65 @@ impl Packet {
     /// `u64` holds the Unix epoch in milliseconds until well past year 500
     /// million.
     pub fn ts_millis(&self, unit: TimestampUnit) -> u64 {
-        let sub_ms = match unit {
-            TimestampUnit::Microseconds => u64::from(self.ts_frac) / 1_000,
-            TimestampUnit::Nanoseconds => u64::from(self.ts_frac) / 1_000_000,
-        };
-        u64::from(self.ts_secs) * 1_000 + sub_ms
+        millis_of(self.ts_secs, self.ts_frac, unit)
+    }
+}
+
+/// The one conversion from a record's `(seconds, fraction)` pair to epoch
+/// milliseconds, shared by the owned [`Packet`] and the borrowed
+/// [`PacketRef`] so the two cannot scale the fraction two ways.
+fn millis_of(ts_secs: u32, ts_frac: u32, unit: TimestampUnit) -> u64 {
+    let sub_ms = match unit {
+        TimestampUnit::Microseconds => u64::from(ts_frac) / 1_000,
+        TimestampUnit::Nanoseconds => u64::from(ts_frac) / 1_000_000,
+    };
+    u64::from(ts_secs) * 1_000 + sub_ms
+}
+
+/// ZA-3601 — one captured packet whose bytes are BORROWED from the container.
+///
+/// What [`PcapCursor::advance_with`] hands its sink, where [`Packet`] is what
+/// [`PcapCursor::advance`] hands its own. The walk is the same walk; only the
+/// ownership of the record's bytes differs. A consumer that reads a packet and
+/// drops it (a follower pushing into a dissection, a lookup by index) has no
+/// use for a copy of every record the walk passes, and the copy is the whole
+/// cost of walking a large container to reach one packet.
+///
+/// The lifetime is the CONTAINER's, not the call's: `data` is a window of the
+/// `bytes` the walk was given, so a sink may keep it for as long as the caller
+/// keeps those bytes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PacketRef<'a> {
+    /// Zero-based index in the file — the number a dissection anchors to.
+    pub index: usize,
+    /// Seconds since the Unix epoch.
+    pub ts_secs: u32,
+    /// Sub-second part, raw, in the unit the file header declared.
+    pub ts_frac: u32,
+    /// Bytes actually stored, link header included.
+    pub data: &'a [u8],
+    /// Length the packet had on the wire.
+    pub orig_len: u32,
+}
+
+impl PacketRef<'_> {
+    /// This packet's capture time in milliseconds, as [`Packet::ts_millis`].
+    pub fn ts_millis(&self, unit: TimestampUnit) -> u64 {
+        millis_of(self.ts_secs, self.ts_frac, unit)
+    }
+
+    /// The same packet with its bytes copied out of the container.
+    ///
+    /// Not named `to_owned`: the type is `Copy`, so that name would resolve to
+    /// the blanket trait method and hand back another borrow.
+    pub fn into_packet(self) -> Packet {
+        Packet {
+            index: self.index,
+            ts_secs: self.ts_secs,
+            ts_frac: self.ts_frac,
+            data: self.data.to_vec(),
+            orig_len: self.orig_len,
+        }
     }
 }
 
@@ -152,6 +207,23 @@ pub enum Halt {
     /// is the one a FINAL container would have raised, carried rather than
     /// raised so the caller decides.
     Partial(PcapError),
+}
+
+/// ZA-3601 — how a walk that a sink may cut short ended.
+///
+/// A separate type from [`Halt`], which is the walk's own account of the
+/// container and stays two-valued for every caller that never stops early. A
+/// sink that answers [`ControlFlow::Break`] has asked for something the
+/// container did not say, and folding that into [`Halt`] would make every
+/// existing `match` on it name a case only one caller can produce.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Walk {
+    /// The walk ran to where the container ends, and this is why it stopped.
+    Halted(Halt),
+    /// The sink asked to stop after the record it had just been handed. The
+    /// cursor stands on the NEXT record's start, exactly as it would had the
+    /// walk continued, so a later call resumes without a gap or a repeat.
+    Stopped,
 }
 
 /// R2373 (open-debt item 661) — a RESUMABLE walk over a classic pcap
@@ -229,9 +301,41 @@ impl PcapCursor {
     /// afterwards. A streaming consumer has no afterwards, and the two facts
     /// are per-FILE in this format and per-packet in the other one — so the
     /// sink that serves both takes them the same way.
+    ///
+    /// ZA-3601 — a thin owner of [`Self::advance_with`]: each packet's bytes
+    /// are copied out of the container before the sink sees them, which is what
+    /// [`parse`] wants (it keeps every packet) and what a sink that only reads
+    /// and drops does not. There is ONE walk; this and `advance_with` differ in
+    /// who owns the bytes.
     pub fn advance<F>(&mut self, bytes: &[u8], mut on: F) -> Result<Halt, PcapError>
     where
         F: FnMut(u32, TimestampUnit, Packet),
+    {
+        match self.advance_with(bytes, |link_type, unit, p| {
+            on(link_type, unit, p.into_packet());
+            ControlFlow::Continue(())
+        })? {
+            Walk::Halted(halt) => Ok(halt),
+            // The sink above answers `Continue` to every packet, so the walk
+            // cannot have been cut short.
+            Walk::Stopped => unreachable!("advance never asks its walk to stop"),
+        }
+    }
+
+    /// ZA-3601 — [`Self::advance`], handing the sink each packet's bytes as a
+    /// BORROW of `bytes` and letting it stop the walk.
+    ///
+    /// The sink answers [`ControlFlow::Break`] to end the walk after the packet
+    /// it was just given; the walk then reports [`Walk::Stopped`] with the
+    /// cursor already past that packet, so it is resumable. A packet the sink
+    /// never asks to keep costs nothing but reading its 16-byte header.
+    ///
+    /// Everything else — what a partial tail is, what a bad magic is, where the
+    /// cursor stands after either — is [`Self::advance`]'s, because this is the
+    /// function that body lives in.
+    pub fn advance_with<'b, F>(&mut self, bytes: &'b [u8], mut on: F) -> Result<Walk, PcapError>
+    where
+        F: FnMut(u32, TimestampUnit, PacketRef<'b>) -> ControlFlow<()>,
     {
         let header = match self.header {
             Some(h) => h,
@@ -240,7 +344,7 @@ impl PcapCursor {
                 // format, and four bytes settle it. Below four, a container
                 // still being written has said nothing yet.
                 if bytes.len() < 4 {
-                    return Ok(Halt::Partial(PcapError::TruncatedFileHeader));
+                    return Ok(Walk::Halted(Halt::Partial(PcapError::TruncatedFileHeader)));
                 }
                 let be_magic = u32::from_be_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
                 if be_magic == PCAPNG_SHB {
@@ -252,7 +356,7 @@ impl PcapCursor {
                 // all of. A follower loses nothing by it — the same bad magic
                 // is refused as soon as the twenty-fourth byte lands.
                 if bytes.len() < FILE_HEADER_LEN {
-                    return Ok(Halt::Partial(PcapError::TruncatedFileHeader));
+                    return Ok(Walk::Halted(Halt::Partial(PcapError::TruncatedFileHeader)));
                 }
                 let le_magic = u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
                 let (swapped, timestamp_unit) = match le_magic {
@@ -279,9 +383,9 @@ impl PcapCursor {
             }
         };
         if bytes.len() < self.consumed {
-            return Ok(Halt::Partial(PcapError::TruncatedRecordHeader {
-                index: self.index,
-            }));
+            return Ok(Walk::Halted(Halt::Partial(
+                PcapError::TruncatedRecordHeader { index: self.index },
+            )));
         }
         let u32_at = |b: &[u8], off: usize| -> u32 {
             let raw = [b[off], b[off + 1], b[off + 2], b[off + 3]];
@@ -296,9 +400,9 @@ impl PcapCursor {
         while off < bytes.len() {
             if off + RECORD_HEADER_LEN > bytes.len() {
                 self.consumed = off;
-                return Ok(Halt::Partial(PcapError::TruncatedRecordHeader {
-                    index: self.index,
-                }));
+                return Ok(Walk::Halted(Halt::Partial(
+                    PcapError::TruncatedRecordHeader { index: self.index },
+                )));
             }
             let ts_secs = u32_at(bytes, off);
             let ts_frac = u32_at(bytes, off + 4);
@@ -312,28 +416,34 @@ impl PcapCursor {
                 // at the record's START so the next, longer prefix reads it
                 // whole rather than resuming inside it.
                 self.consumed = off;
-                return Ok(Halt::Partial(PcapError::TruncatedRecord {
+                return Ok(Walk::Halted(Halt::Partial(PcapError::TruncatedRecord {
                     index: self.index,
                     claimed: incl_len,
                     available,
-                }));
+                })));
             }
-            on(
+            let flow = on(
                 header.link_type,
                 header.timestamp_unit,
-                Packet {
+                PacketRef {
                     index: self.index,
                     ts_secs,
                     ts_frac,
-                    data: bytes[body..body + incl_len].to_vec(),
+                    data: &bytes[body..body + incl_len],
                     orig_len,
                 },
             );
+            // The cursor moves past the record BEFORE the sink's answer is
+            // acted on, so a walk that stops here and one that ran on leave the
+            // cursor in the same place after this record.
             off = body + incl_len;
             self.consumed = off;
             self.index += 1;
+            if flow.is_break() {
+                return Ok(Walk::Stopped);
+            }
         }
-        Ok(Halt::Complete)
+        Ok(Walk::Halted(Halt::Complete))
     }
 }
 
@@ -598,5 +708,100 @@ mod tests {
             "no cut of this fixture landed inside a record, so resumption was \
              never exercised"
         );
+    }
+
+    /// ZA-3601 — the borrowing walk and the owning one are ONE walk, and the
+    /// borrow is a window of the container.
+    ///
+    /// `advance` became a thin owner of `advance_with`. The two must yield the
+    /// same packets in the same order with the same link type and unit, and a
+    /// borrowed packet's bytes must be the SAME bytes the container holds, at
+    /// the address the container holds them: a copy would satisfy equality and
+    /// defeat the reason the borrow exists.
+    #[test]
+    fn the_borrowing_walk_yields_what_the_owning_walk_yields() {
+        let file = write(
+            1,
+            &[
+                (1, 500_000, &[1, 2, 3][..]),
+                (2, 250_000, &[4, 5][..]),
+                (3, 0, &[6, 7, 8, 9][..]),
+            ],
+        );
+        let mut owned: Vec<(u32, TimestampUnit, Packet)> = Vec::new();
+        let halt = PcapCursor::new()
+            .advance(&file, |l, u, p| owned.push((l, u, p)))
+            .expect("the fixture reads");
+        assert_eq!(halt, Halt::Complete);
+        assert_eq!(owned.len(), 3, "the population must not be empty");
+
+        let mut borrowed: Vec<(u32, TimestampUnit, Packet)> = Vec::new();
+        let range = file.as_ptr_range();
+        let walk = PcapCursor::new()
+            .advance_with(&file, |l, u, p| {
+                assert!(
+                    range.contains(&p.data.as_ptr()),
+                    "a borrowed packet's bytes are not inside the container"
+                );
+                borrowed.push((l, u, p.into_packet()));
+                ControlFlow::Continue(())
+            })
+            .expect("the fixture reads");
+        assert_eq!(walk, Walk::Halted(Halt::Complete));
+        assert_eq!(owned, borrowed);
+    }
+
+    /// ZA-3601 — a walk the sink stops resumes where it stopped.
+    ///
+    /// For every packet in turn: stop after it, and the cursor must have
+    /// counted it and nothing after it; a second call over the same container
+    /// must then yield exactly the packets `parse` holds beyond it. A stop that
+    /// left the cursor on the packet it just delivered would repeat it, and one
+    /// that stopped short would lose it.
+    #[test]
+    fn a_walk_stopped_by_its_sink_resumes_where_it_stopped() {
+        let file = write(
+            1,
+            &[
+                (1, 500_000, &[1, 2, 3][..]),
+                (2, 250_000, &[4, 5][..]),
+                (3, 0, &[6, 7, 8, 9][..]),
+            ],
+        );
+        let whole = parse(&file).expect("the fixture reads");
+        assert!(whole.packets.len() >= 3, "the population must not be empty");
+
+        for stop_at in 0..whole.packets.len() {
+            let mut cursor = PcapCursor::new();
+            let mut seen: Vec<usize> = Vec::new();
+            let walk = cursor
+                .advance_with(&file, |_, _, p| {
+                    seen.push(p.index);
+                    if p.index == stop_at {
+                        ControlFlow::Break(())
+                    } else {
+                        ControlFlow::Continue(())
+                    }
+                })
+                .expect("the fixture reads");
+            assert_eq!(walk, Walk::Stopped, "stopping at packet {stop_at}");
+            assert_eq!(
+                seen,
+                (0..=stop_at).collect::<Vec<_>>(),
+                "the walk delivered a packet after the one it was told to stop at"
+            );
+            assert_eq!(cursor.packets_produced(), stop_at + 1);
+
+            let mut rest: Vec<Packet> = Vec::new();
+            let resumed = cursor
+                .advance(&file, |_, _, p| rest.push(p))
+                .expect("the container reads on");
+            assert_eq!(resumed, Halt::Complete);
+            assert_eq!(
+                rest,
+                whole.packets[stop_at + 1..].to_vec(),
+                "resuming after a stop at packet {stop_at} repeated or lost a packet"
+            );
+        }
     }
 }
