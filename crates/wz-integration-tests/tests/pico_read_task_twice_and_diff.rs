@@ -358,11 +358,32 @@ fn relay_held_then_coalesced(mut server: TcpStream, mut client: TcpStream, hold:
 /// port the dialler is to use.
 fn spawn_coalescing_proxy(upstream_port: u16, hold: Duration) -> u16 {
     let listener = TcpListener::bind("127.0.0.1:0").expect("bind the proxy");
+    listener
+        .set_nonblocking(true)
+        .expect("a proxy listener that can be polled");
     let port = listener.local_addr().expect("proxy address").port();
     std::thread::spawn(move || {
-        let Ok((client, _)) = listener.accept() else {
-            return;
+        // A driver that never dials -- it died, or was built without the option
+        // under test -- must not park this thread for the life of the process.
+        let deadline = Instant::now() + Duration::from_secs(60);
+        let client = loop {
+            match listener.accept() {
+                Ok((client, _)) => break client,
+                Err(e)
+                    if e.kind() == std::io::ErrorKind::WouldBlock && Instant::now() < deadline =>
+                {
+                    std::thread::sleep(Duration::from_millis(20));
+                }
+                Err(e) => {
+                    eprintln!("coalescing proxy: the driver never dialled it ({e})");
+                    return;
+                }
+            }
         };
+        // The accepted socket is read and written blockingly by the relay.
+        if client.set_nonblocking(false).is_err() {
+            return;
+        }
         let Ok(server) = TcpStream::connect(("127.0.0.1", upstream_port)) else {
             return;
         };
