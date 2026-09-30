@@ -964,6 +964,15 @@ impl<R: SessionRuntime, T: TimeSource, Tp: TransportState<R, T>> Session<R, T, T
         WeakSession(Arc::downgrade(&self.0))
     }
 
+    /// Whether `other` is a handle on THIS session — not merely an equal one.
+    ///
+    /// For a host that files work under a key it may later find reused: a
+    /// declaration made on one session must not be filed under another that took
+    /// the same key.
+    pub fn is_same_session(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.0, &other.0)
+    }
+
     /// How many handles share this session. Test-facing: it is how a leak is
     /// PROVEN rather than argued -- a handle that should not keep a session
     /// alive must not move this number.

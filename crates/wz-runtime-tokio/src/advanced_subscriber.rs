@@ -99,7 +99,9 @@ use wz_session_core::link::SessionRuntime;
 use wz_session_core::sample::{EntityGlobalId, Sample};
 use wz_session_core::sink::SampleView;
 
-use crate::session::{Session, SubscribeError, SubscribeOptions, Subscriber, Unicast};
+use crate::session::{
+    Session, SubscribeAliasError, SubscribeError, SubscribeOptions, Subscriber, Unicast,
+};
 use crate::session_glue::SessionLinkActions;
 
 #[cfg(feature = "ext-pubsub-advanced-recovery")]
@@ -480,6 +482,10 @@ struct TimestampedState {
 pub enum AdvancedSubscribeError {
     /// The base / recovery / heartbeat subscriber declaration was rejected.
     Subscribe(SubscribeError),
+    /// A subscription declared in a host's own wire form
+    /// ([`EntityForm`]) was rejected: the declaration it names is not held, or
+    /// the key it resolves to is not one the wire takes.
+    Alias(SubscribeAliasError),
     /// R2815 — the session's own zid is not 1..=16 bytes, so this subscriber
     /// has no global identity to report through [`AdvancedSubscriber::id`] or
     /// to name its detection token with. `SessionInitParams::zid` documents
@@ -549,6 +555,12 @@ pub enum AdvancedSubscribeError {
 impl From<SubscribeError> for AdvancedSubscribeError {
     fn from(e: SubscribeError) -> Self {
         AdvancedSubscribeError::Subscribe(e)
+    }
+}
+
+impl From<SubscribeAliasError> for AdvancedSubscribeError {
+    fn from(e: SubscribeAliasError) -> Self {
+        AdvancedSubscribeError::Alias(e)
     }
 }
 
@@ -814,6 +826,10 @@ pub struct AdvancedSubscriberOptions {
     /// reference consumes it either — `KE_SUB` is `pub use`d for third parties
     /// and read nowhere inside zenoh or pico.
     pub subscriber_detection: Option<SubscriberDetection>,
+    /// How a host that declares keys names each entity on the wire. `None`
+    /// (default) declares every entity on its literal key, which is what a
+    /// runtime session does; see [`DeclarationForms`].
+    pub forms: Option<FormsHandle>,
 }
 
 /// Detection configuration ([`AdvancedSubscriberOptions::with_subscriber_detection`]).
@@ -850,6 +866,164 @@ impl SubscriberDetection {
     }
 }
 
+/// How ONE entity of an advanced subscriber is named on the wire, and what keeps
+/// that name valid for as long as the entity stands.
+///
+/// An advanced subscriber is four plain entities — the subscription, a
+/// heartbeat subscription, a late-publisher liveliness subscription and a
+/// detection token — and a host that declares KEYS (a C session's resource
+/// table) names each of them differently from the literal this crate would
+/// announce: a declared id and the rest of the key, a retraction that names the
+/// key, and a declaration that has to outlive the entity and go right after it.
+/// The runtime cannot know any of that, so it asks ([`DeclarationForms`]) and
+/// declares the entity the way it is told.
+///
+/// [`Self::literal`] is what the runtime does on its own.
+#[derive(Clone, Default)]
+pub struct EntityForm {
+    /// The declaration the wire names, `0` for the literal key.
+    mapping_id: u64,
+    /// What follows the declared prefix; `None` when it covers the whole key.
+    suffix: Option<String>,
+    /// The key a subscriber's retraction names beside its id, when it names one.
+    retraction: Option<crate::session::RetractionKey>,
+    /// Whether a TOKEN's retraction names its key beside its id.
+    names_key_on_retraction: bool,
+    /// What keeps the declaration alive; let go of AFTER the entity is.
+    keeps: Option<Arc<dyn Send + Sync>>,
+}
+
+impl EntityForm {
+    /// The key itself, announced literally, retracted by id alone.
+    pub fn literal() -> Self {
+        Self::default()
+    }
+
+    /// Declaration `mapping_id` followed by `suffix`.
+    pub fn aliased(mapping_id: u64, suffix: Option<String>) -> Self {
+        Self {
+            mapping_id,
+            suffix,
+            ..Self::default()
+        }
+    }
+
+    /// Make a subscriber's retraction name `key` beside its id.
+    pub fn with_retraction_naming(mut self, key: Option<crate::session::RetractionKey>) -> Self {
+        self.retraction = key;
+        self
+    }
+
+    /// Make a token's retraction name its own key beside its id.
+    pub fn with_token_retraction_naming_the_key(mut self, on: bool) -> Self {
+        self.names_key_on_retraction = on;
+        self
+    }
+
+    /// Hold `anchor` for as long as the entity declared in this form stands.
+    pub fn keeping(mut self, anchor: Arc<dyn Send + Sync>) -> Self {
+        self.keeps = Some(anchor);
+        self
+    }
+
+    /// Whether the entity is announced on the literal key.
+    fn is_literal(&self) -> bool {
+        self.mapping_id == 0
+    }
+}
+
+impl std::fmt::Debug for EntityForm {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("EntityForm")
+            .field("mapping_id", &self.mapping_id)
+            .field("suffix", &self.suffix)
+            .field("retraction", &self.retraction)
+            .field("names_key_on_retraction", &self.names_key_on_retraction)
+            .field("keeps", &self.keeps.is_some())
+            .finish()
+    }
+}
+
+/// What a host that declares keys tells an advanced subscriber about how each of
+/// its entities is named — see [`EntityForm`].
+///
+/// Each method is called ONCE PER DECLARATION OF THAT ENTITY, in the order the
+/// subscriber declares them, and is the moment the host declares the key the
+/// entity will be named by. An advanced subscriber declared on a session with
+/// several faces is declared once per face, so a host is expected to answer the
+/// same question the same way: the first answer declares, the later ones reuse.
+///
+/// Every default is the literal form, so a host overrides only what it names.
+pub trait DeclarationForms: Send + Sync {
+    /// The identity the subscriber reports and names its detection token with,
+    /// when it is not the plain subscription's own. A host with ONE identity for
+    /// a subscriber that is declared on many faces supplies it here; `None`
+    /// keeps the per-declaration id.
+    fn entity_id(&self) -> Option<u32> {
+        None
+    }
+
+    /// The live subscription on `keyexpr`.
+    fn subscriber(&self, _keyexpr: &str) -> EntityForm {
+        EntityForm::literal()
+    }
+
+    /// The late-publisher liveliness subscription on `keyexpr`.
+    fn late_publishers(&self, _keyexpr: &str) -> EntityForm {
+        EntityForm::literal()
+    }
+
+    /// The heartbeat subscription on `keyexpr`.
+    fn heartbeat(&self, _keyexpr: &str) -> EntityForm {
+        EntityForm::literal()
+    }
+
+    /// The detection token on `keyexpr`.
+    fn token(&self, _keyexpr: &str) -> EntityForm {
+        EntityForm::literal()
+    }
+
+    /// Take over an entity's declaration when the subscriber runs in the
+    /// background: its handle is gone and nothing is left to let go of the
+    /// declaration after the entity, so the host keeps it until its own end.
+    fn retain(&self, _anchor: Arc<dyn Send + Sync>) {}
+}
+
+/// A host's [`DeclarationForms`], shareable and printable, for
+/// [`AdvancedSubscriberOptions::forms`].
+#[derive(Clone)]
+pub struct FormsHandle(Arc<dyn DeclarationForms>);
+
+impl FormsHandle {
+    /// Wrap `forms`.
+    pub fn new(forms: Arc<dyn DeclarationForms>) -> Self {
+        Self(forms)
+    }
+}
+
+impl std::fmt::Debug for FormsHandle {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("FormsHandle")
+    }
+}
+
+/// An entity and what keeps its wire name valid. The entity is the FIRST field,
+/// so it is retracted first and the name goes right after it — which is the
+/// order a host that declares keys shows a peer.
+struct Held<E> {
+    entity: E,
+    _keeps: Option<Arc<dyn Send + Sync>>,
+}
+
+impl<E> Held<E> {
+    fn new(entity: E, form: &EntityForm) -> Self {
+        Self {
+            entity,
+            _keeps: form.keeps.clone(),
+        }
+    }
+}
+
 impl Default for AdvancedSubscriberOptions {
     fn default() -> Self {
         Self {
@@ -863,6 +1037,7 @@ impl Default for AdvancedSubscriberOptions {
             #[cfg(feature = "ext-pubsub-advanced-recovery")]
             query_timeout: Duration::from_secs(10),
             subscriber_detection: None,
+            forms: None,
         }
     }
 }
@@ -880,6 +1055,12 @@ impl AdvancedSubscriberOptions {
     /// `<key_expr>/@adv/sub/<zid>/<eid>/[meta|_]`.
     pub fn with_subscriber_detection(mut self, detection: SubscriberDetection) -> Self {
         self.subscriber_detection = Some(detection);
+        self
+    }
+
+    /// Name each entity the way `forms` says — see [`DeclarationForms`].
+    pub fn with_declaration_forms(mut self, forms: Arc<dyn DeclarationForms>) -> Self {
+        self.forms = Some(FormsHandle::new(forms));
         self
     }
 
@@ -2986,7 +3167,16 @@ pub struct AdvancedSubscriber<
     R: SessionRuntime = crate::runtime_impl::TokioRuntime,
     T: TimeSource = crate::runtime_impl::TokioTime,
 > {
-    _subscriber: Subscriber<R>,
+    // ⚠ THE FIELD ORDER IS THE RETRACTION ORDER, and for the entities it is
+    // zenoh-pico's: the subscription, then the late-publisher subscription, then
+    // the heartbeat subscription, then the detection token
+    // (`vendor/zenoh-pico/src/api/advanced_subscriber.c` @
+    // `z_result_t _ze_advanced_subscriber_undeclare(_ze_advanced_subscriber_t *sub) {`
+    // undeclares the first three, and the token goes with the state it lives in).
+    // Rust drops fields in the order they are declared. Each entity is [`Held`]
+    // with the declaration that names it, so a host that declares keys retracts
+    // each key right after its entity, which is where a peer sees it.
+    _subscriber: Held<Subscriber<R>>,
     /// R2816 — the session this subscriber was declared on; see the type doc.
     session: Session<R, T, Unicast>,
     /// R2815 — the global identity [`Self::id`] reports; see [`global_id_of`].
@@ -3016,15 +3206,15 @@ pub struct AdvancedSubscriber<
     /// a GET already on the wire outlives the timer that started it.
     #[cfg(feature = "ext-pubsub-advanced-recovery")]
     _recovery_cancel: Option<RecoveryCancel<R, T>>,
-    /// R311y84 — the heartbeat subscriber on `<ke>/@adv/pub/**` (RAII
-    /// undeclare-on-drop), `Some` only when `RecoveryConfig::heartbeat` was set.
-    #[cfg(feature = "ext-pubsub-advanced-recovery")]
-    _heartbeat_sub: Option<Subscriber<R>>,
     /// R311y100 — the late-publisher-detection LIVELINESS subscriber on
     /// `<ke>/@adv/pub/**` (RAII undeclare-on-drop), `Some` only when
     /// `HistoryConfig::detect_late_publishers` was set.
     #[cfg(feature = "ext-pubsub-advanced-history")]
-    _liveliness_sub: Option<crate::session::LivelinessSubscriber<R, T>>,
+    _liveliness_sub: Option<Held<crate::session::LivelinessSubscriber<R, T>>>,
+    /// R311y84 — the heartbeat subscriber on `<ke>/@adv/pub/**` (RAII
+    /// undeclare-on-drop), `Some` only when `RecoveryConfig::heartbeat` was set.
+    #[cfg(feature = "ext-pubsub-advanced-recovery")]
+    _heartbeat_sub: Option<Held<Subscriber<R>>>,
     /// R311y826 — the `@adv/sub` DETECTION liveliness token (RAII
     /// undeclare-on-drop), `Some` only when
     /// [`AdvancedSubscriberOptions::subscriber_detection`] was set.
@@ -3035,7 +3225,11 @@ pub struct AdvancedSubscriber<
     ///
     /// R2816 — the token itself rather than R311y826's `DetectionTokenGuard`,
     /// a `Box<dyn Send>` that existed only because this struct had no `T`.
-    _detection_token: Option<crate::session::LivelinessToken<R, T>>,
+    _detection_token: Option<Held<crate::session::LivelinessToken<R, T>>>,
+    /// The host's naming of the entities, kept for [`Self::background`]: a
+    /// backgrounded subscriber has no handle left to let go of the declarations
+    /// that name its entities, so it hands them back to the host that made them.
+    forms: Option<FormsHandle>,
 }
 
 #[cfg(feature = "ext-pubsub-advanced-recovery")]
@@ -3115,6 +3309,63 @@ fn global_id_of<R: SessionRuntime>(
     EntityGlobalId::new(zid, eid).ok_or(AdvancedSubscribeError::SessionZid { len: zid.len() })
 }
 
+/// The identity a subscriber reports: its host's, when the host has one
+/// ([`DeclarationForms::entity_id`]), else the plain subscription's own
+/// ([`global_id_of`]).
+///
+/// A host that declares this subscriber once per connection has one identity
+/// for it and as many plain subscription ids as it has connections, and the
+/// identity is what the detection token is named with.
+fn identity_of<R: SessionRuntime>(
+    zid: &[u8],
+    subscriber: &Subscriber<R>,
+    forms: Option<&FormsHandle>,
+) -> Result<EntityGlobalId, AdvancedSubscribeError> {
+    match forms.and_then(|f| f.0.entity_id()) {
+        Some(eid) => EntityGlobalId::new(zid, eid)
+            .ok_or(AdvancedSubscribeError::SessionZid { len: zid.len() }),
+        None => global_id_of(zid, subscriber),
+    }
+}
+
+/// What `forms` says about one entity, the literal form when it says nothing.
+fn form_of(
+    forms: Option<&FormsHandle>,
+    ask: impl FnOnce(&dyn DeclarationForms) -> EntityForm,
+) -> EntityForm {
+    forms.map(|f| ask(&*f.0)).unwrap_or_default()
+}
+
+/// Declare a plain subscription on `keyexpr` in `form`: announced literally or
+/// on a declared key, retracted the way the form says, and held together with
+/// what names it.
+fn declare_subscription<R, T>(
+    session: &Session<R, T, Unicast>,
+    keyexpr: &str,
+    form: &EntityForm,
+    options: SubscribeOptions,
+    callback: impl FnMut(&dyn SampleView) + Send + 'static,
+) -> Result<Held<Subscriber<R>>, AdvancedSubscribeError>
+where
+    R: SessionRuntime,
+    T: TimeSource + 'static,
+    <R as SessionRuntime>::LinkSink: Send + Sync,
+    SessionLinkActions<R, T>: Send + Sync + 'static,
+{
+    let options = options.with_retraction_naming(form.retraction.clone());
+    let subscriber = if form.is_literal() {
+        session.declare_subscriber(keyexpr.to_owned(), options, callback)?
+    } else {
+        session.declare_subscriber_aliased(
+            form.mapping_id,
+            form.suffix.as_deref(),
+            options,
+            callback,
+        )?
+    };
+    Ok(Held::new(subscriber, form))
+}
+
 /// R2814 — the surface every build has, whatever the recovery feature says:
 /// the handle's own accessors and the miss-listener declarations.
 impl<R: SessionRuntime, T: TimeSource> AdvancedSubscriber<R, T> {
@@ -3134,7 +3385,7 @@ impl<R: SessionRuntime, T: TimeSource> AdvancedSubscriber<R, T> {
     /// `AdvancedPublisher::keyexpr` (R2619): one concept, one spelling in this
     /// crate.
     pub fn keyexpr(&self) -> &str {
-        self._subscriber.keyexpr()
+        self._subscriber.entity.keyexpr()
     }
 
     /// R2815 — undeclare this subscriber, upstream's
@@ -3187,8 +3438,26 @@ impl<R: SessionRuntime, T: TimeSource> AdvancedSubscriber<R, T> {
             #[cfg(feature = "ext-pubsub-advanced-history")]
             _liveliness_sub,
             _detection_token,
+            forms,
         } = self;
-        _subscriber.background();
+        // What names an entity is handed to the host that made it, since nothing
+        // is left to let it go after the entity: the entity stays declared for
+        // the session's life, and so must its name.
+        let retain = |keeps: Option<Arc<dyn Send + Sync>>| {
+            if let (Some(forms), Some(keeps)) = (forms.as_ref(), keeps) {
+                forms.0.retain(keeps);
+            }
+        };
+        // In the order the entities retract, which is the order the host will
+        // let their names go in.
+        let Held { entity, _keeps } = _subscriber;
+        entity.background();
+        retain(_keeps);
+        #[cfg(feature = "ext-pubsub-advanced-history")]
+        if let Some(Held { entity, _keeps }) = _liveliness_sub {
+            entity.background();
+            retain(_keeps);
+        }
         #[cfg(feature = "ext-pubsub-advanced-recovery")]
         {
             for task in [_periodic, _retention].into_iter().flatten() {
@@ -3197,16 +3466,14 @@ impl<R: SessionRuntime, T: TimeSource> AdvancedSubscriber<R, T> {
             if let Some(cancel) = _recovery_cancel {
                 cancel.disarm();
             }
-            if let Some(heartbeat) = _heartbeat_sub {
-                heartbeat.background();
+            if let Some(Held { entity, _keeps }) = _heartbeat_sub {
+                entity.background();
+                retain(_keeps);
             }
         }
-        #[cfg(feature = "ext-pubsub-advanced-history")]
-        if let Some(late_publishers) = _liveliness_sub {
-            late_publishers.background();
-        }
-        if let Some(token) = _detection_token {
-            token.background();
+        if let Some(Held { entity, _keeps }) = _detection_token {
+            entity.background();
+            retain(_keeps);
         }
     }
 
@@ -3407,7 +3674,7 @@ impl<R: SessionRuntime, T: TimeSource> AdvancedSubscriber<R, T> {
         SessionLinkActions<R, T>: Send + Sync + 'static,
         OnSample: FnMut(Sample) + Send + 'static,
     {
-        Self::declare_ordering(session, keyexpr, Locality::Any, on_sample)
+        Self::declare_ordering(session, keyexpr, Locality::Any, None, on_sample)
     }
 
     /// R2819 — declare an advanced subscriber from [`AdvancedSubscriberOptions`]
@@ -3433,8 +3700,13 @@ impl<R: SessionRuntime, T: TimeSource> AdvancedSubscriber<R, T> {
         Session<R, T, Unicast>: Send + 'static,
         OnSample: FnMut(Sample) + Send + 'static,
     {
-        let mut declared =
-            Self::declare_ordering(session, keyexpr, options.allowed_origin, on_sample)?;
+        let mut declared = Self::declare_ordering(
+            session,
+            keyexpr,
+            options.allowed_origin,
+            options.forms.clone(),
+            on_sample,
+        )?;
         // Declared last, as the recovery build declares it: a token that
         // outraces its own subscription tells an observer something untrue.
         // A refusal drops `declared`, which retracts the subscription.
@@ -3448,6 +3720,7 @@ impl<R: SessionRuntime, T: TimeSource> AdvancedSubscriber<R, T> {
         session: &Session<R, T, Unicast>,
         keyexpr: impl Into<String>,
         allowed_origin: Locality,
+        forms: Option<FormsHandle>,
         on_sample: OnSample,
     ) -> Result<Self, AdvancedSubscribeError>
     where
@@ -3464,8 +3737,12 @@ impl<R: SessionRuntime, T: TimeSource> AdvancedSubscriber<R, T> {
             miss_handlers: MissHandlers::default(),
         }));
         let cb_state = Arc::clone(&state);
-        let subscriber = session.declare_subscriber(
-            keyexpr,
+        let keyexpr: String = keyexpr.into();
+        let form = form_of(forms.as_ref(), |f| f.subscriber(&keyexpr));
+        let subscriber = declare_subscription(
+            session,
+            &keyexpr,
+            &form,
             SubscribeOptions::default().with_allowed_origin(allowed_origin),
             move |view: &dyn SampleView| {
                 cb_state
@@ -3474,7 +3751,7 @@ impl<R: SessionRuntime, T: TimeSource> AdvancedSubscriber<R, T> {
                     .handle(view);
             },
         )?;
-        let id = global_id_of(session.zid(), &subscriber)?;
+        let id = identity_of(session.zid(), &subscriber.entity, forms.as_ref())?;
         Ok(Self {
             _subscriber: subscriber,
             session: session.clone(),
@@ -3482,6 +3759,7 @@ impl<R: SessionRuntime, T: TimeSource> AdvancedSubscriber<R, T> {
             statesref: state,
             // The option-free `declare()` cannot ask for detection.
             _detection_token: None,
+            forms,
         })
     }
 }
@@ -3539,7 +3817,8 @@ impl<R: SessionRuntime, T: TimeSource> AdvancedSubscriber<R, T> {
         )?;
         let id = global_id_of(session.zid(), &subscriber)?;
         Ok(Self {
-            _subscriber: subscriber,
+            // The option-free form has no host to name anything: literal.
+            _subscriber: Held::new(subscriber, &EntityForm::literal()),
             session: session.clone(),
             id,
             statesref: state,
@@ -3556,6 +3835,7 @@ impl<R: SessionRuntime, T: TimeSource> AdvancedSubscriber<R, T> {
             _liveliness_sub: None,
             // The option-free `declare()` cannot ask for detection.
             _detection_token: None,
+            forms: None,
         })
     }
 
@@ -3731,8 +4011,15 @@ impl<R: SessionRuntime, T: TimeSource> AdvancedSubscriber<R, T> {
         // kept alive forever once `background` leaves them registered.
         let q_session = session.downgrade();
         let q_base = base_keyexpr.clone();
-        let subscriber = session.declare_subscriber(
-            base_keyexpr.clone(),
+        // How the host names each entity on the wire (see [`DeclarationForms`]):
+        // asked entity by entity, at the moment each is declared, in the order
+        // they are declared.
+        let forms = options.forms.clone();
+        let subscriber_form = form_of(forms.as_ref(), |f| f.subscriber(&base_keyexpr));
+        let subscriber = declare_subscription(
+            session,
+            &base_keyexpr,
+            &subscriber_form,
             // R311y96 (review-arbiter MED) — the live subscription honors its OWN
             // origin knob (`options.allowed_origin`), independent of the GET
             // locality (zenoh's `conf.origin`, faithful; default `Any`).
@@ -3764,8 +4051,9 @@ impl<R: SessionRuntime, T: TimeSource> AdvancedSubscriber<R, T> {
             },
         )?;
         // R2815 — read off the plain subscription just declared; the detection
-        // token below is named with the same pair.
-        let id = global_id_of(session.zid(), &subscriber)?;
+        // token below is named with the same pair. A host with ONE identity for
+        // a subscriber it declares on every connection supplies it instead.
+        let id = identity_of(session.zid(), &subscriber.entity, forms.as_ref())?;
 
         // R311y83 — the periodic recovery trigger: a background loop that
         // re-asks every known source `_sn=last+1..` every `period`. Spawned
@@ -3867,73 +4155,89 @@ impl<R: SessionRuntime, T: TimeSource> AdvancedSubscriber<R, T> {
         // the window — but it is no longer SILENT. It warns, and
         // `heartbeat_channel_is_live` reports the outcome so a caller can tell a
         // live channel from an amputated one.
-        let heartbeat_sub = if heartbeat
-            && crate::advanced_ke::adv_ke_is_outbound_safe(
-                &crate::advanced_ke::publisher_detection_ke(&base_keyexpr),
-            ) {
-            let hb_state = Arc::clone(&state);
-            let hb_pending = Arc::clone(&pending);
-            let hb_session = session.downgrade();
-            let hb_base = base_keyexpr.clone();
-            let hb_keyexpr = crate::advanced_ke::publisher_detection_ke(&base_keyexpr);
-            Some(session.declare_subscriber(
-                hb_keyexpr,
-                // R311y96 — the heartbeat sub shares the live sub's origin knob.
-                SubscribeOptions::default().with_allowed_origin(sub_origin),
-                move |hb_view: &dyn SampleView| {
-                    if hb_view.kind() != SampleKind::Put {
-                        return;
-                    }
-                    // R2552 — SEQUENCED ONLY, and here that is INHERENT rather
-                    // than deferred: a heartbeat's payload IS a sequence number
-                    // (`z_deserialize::<u32>` below) and a timestamped
-                    // publisher has none to send, so a `uhlc` token on this
-                    // path would be a beacon with nothing to beacon.
-                    let Some(AdvPublisherSource::Sequenced { zid, eid }) =
-                        parse_heartbeat_source(hb_view.keyexpr())
-                    else {
-                        return;
-                    };
-                    let Ok(hb_sn) = z_deserialize::<u32>(hb_view.payload()) else {
-                        return;
-                    };
-                    let request = hb_state
-                        .lock()
-                        .expect("advanced subscriber state mutex poisoned")
-                        .handle_heartbeat(zid, eid, hb_sn);
-                    if let Some(request) = request {
-                        if let Some(hb_session) = hb_session.upgrade() {
-                            issue_recovery_query(
-                                &hb_session,
-                                &hb_state,
-                                &hb_pending,
-                                &hb_base,
-                                request,
-                                dest,
-                                timeout_ms,
-                            );
-                        }
-                    }
-                },
-            )?)
-        } else {
-            // R311y544 — and it SAYS SO. A degradation nobody can observe is
-            // indistinguishable from a working channel: the demo's declare log
-            // reports the argv flag, so `recovery_heartbeat=true` printed
-            // happily through the whole window in which no heartbeat subscriber
-            // was ever declared. See [`Self::heartbeat_channel_is_live`].
-            if heartbeat {
-                log::warn!(
-                    "advanced subscriber on '{base_keyexpr}': heartbeat recovery was \
+        //
+        // ⚠ DEFINED HERE AND RUN LATER, after the history query and the
+        // late-publisher subscription. zenoh-pico declares the heartbeat
+        // subscription after both (`vendor/zenoh-pico/src/api/advanced_subscriber.c` @
+        // `// Heartbeat subscriber`), and a host that declares keys shows the
+        // order on the wire. Nothing here depends on it: a beacon waits a whole
+        // period, and the GET in flight is gated by its own pending state.
+        let declare_heartbeat =
+            || -> Result<Option<Held<Subscriber<R>>>, AdvancedSubscribeError> {
+                Ok(
+                    if heartbeat
+                        && crate::advanced_ke::adv_ke_is_outbound_safe(
+                            &crate::advanced_ke::publisher_detection_ke(&base_keyexpr),
+                        )
+                    {
+                        let hb_state = Arc::clone(&state);
+                        let hb_pending = Arc::clone(&pending);
+                        let hb_session = session.downgrade();
+                        let hb_base = base_keyexpr.clone();
+                        let hb_keyexpr = crate::advanced_ke::publisher_detection_ke(&base_keyexpr);
+                        let hb_form = form_of(forms.as_ref(), |f| f.heartbeat(&hb_keyexpr));
+                        Some(declare_subscription(
+                            session,
+                            &hb_keyexpr,
+                            &hb_form,
+                            // R311y96 — the heartbeat sub shares the live sub's origin knob.
+                            SubscribeOptions::default().with_allowed_origin(sub_origin),
+                            move |hb_view: &dyn SampleView| {
+                                if hb_view.kind() != SampleKind::Put {
+                                    return;
+                                }
+                                // R2552 — SEQUENCED ONLY, and here that is INHERENT rather
+                                // than deferred: a heartbeat's payload IS a sequence number
+                                // (`z_deserialize::<u32>` below) and a timestamped
+                                // publisher has none to send, so a `uhlc` token on this
+                                // path would be a beacon with nothing to beacon.
+                                let Some(AdvPublisherSource::Sequenced { zid, eid }) =
+                                    parse_heartbeat_source(hb_view.keyexpr())
+                                else {
+                                    return;
+                                };
+                                let Ok(hb_sn) = z_deserialize::<u32>(hb_view.payload()) else {
+                                    return;
+                                };
+                                let request = hb_state
+                                    .lock()
+                                    .expect("advanced subscriber state mutex poisoned")
+                                    .handle_heartbeat(zid, eid, hb_sn);
+                                if let Some(request) = request {
+                                    if let Some(hb_session) = hb_session.upgrade() {
+                                        issue_recovery_query(
+                                            &hb_session,
+                                            &hb_state,
+                                            &hb_pending,
+                                            &hb_base,
+                                            request,
+                                            dest,
+                                            timeout_ms,
+                                        );
+                                    }
+                                }
+                            },
+                        )?)
+                    } else {
+                        // R311y544 — and it SAYS SO. A degradation nobody can observe is
+                        // indistinguishable from a working channel: the demo's declare log
+                        // reports the argv flag, so `recovery_heartbeat=true` printed
+                        // happily through the whole window in which no heartbeat subscriber
+                        // was ever declared. See [`Self::heartbeat_channel_is_live`].
+                        if heartbeat {
+                            log::warn!(
+                                "advanced subscriber on '{base_keyexpr}': heartbeat recovery was \
                      REQUESTED but its derived keyexpr '{}' is refused by the outbound \
                      pico-safety gate, so the channel is DEGRADED — the live \
                      subscription is unaffected, heartbeat-driven retransmission is not \
                      available",
-                    crate::advanced_ke::publisher_detection_ke(&base_keyexpr),
-                );
-            }
-            None
-        };
+                                crate::advanced_ke::publisher_detection_ke(&base_keyexpr),
+                            );
+                        }
+                        None
+                    },
+                )
+            };
 
         // R311y86 — the startup history GET: fire it AFTER the live subscriber is
         // declared (so a live sample arriving during the GET is gated by
@@ -3972,7 +4276,7 @@ impl<R: SessionRuntime, T: TimeSource> AdvancedSubscriber<R, T> {
         // closure is thin glue over [`on_late_publisher_detected`]. `HistoryConfig`
         // is `Copy`, so `history` is readable after the `if let`.
         #[cfg(feature = "ext-pubsub-advanced-history")]
-        let liveliness_sub: Option<crate::session::LivelinessSubscriber<R, T>> =
+        let liveliness_sub: Option<Held<crate::session::LivelinessSubscriber<R, T>>> =
             if history.is_some_and(|h| h.detect_late_publishers) {
                 let lp_state = Arc::clone(&state);
                 let lp_pending = Arc::clone(&pending);
@@ -3982,8 +4286,11 @@ impl<R: SessionRuntime, T: TimeSource> AdvancedSubscriber<R, T> {
                 let (lp_depth, lp_age) = history
                     .map(|h| (h.sample_depth, h.max_age))
                     .unwrap_or((None, None));
-                let sub = session.declare_liveliness_subscriber(
-                    lp_keyexpr,
+                let lp_form = form_of(forms.as_ref(), |f| f.late_publishers(&lp_keyexpr));
+                let sub = declare_late_publisher_subscription(
+                    session,
+                    &lp_keyexpr,
+                    &lp_form,
                     LivelinessSubscriberOptions::new().with_history(true),
                     move |sample: LivelinessSample<'_>| {
                         let Some(lp_session) = lp_session.upgrade() else {
@@ -4007,6 +4314,10 @@ impl<R: SessionRuntime, T: TimeSource> AdvancedSubscriber<R, T> {
             } else {
                 None
             };
+
+        // The heartbeat subscription, in the place pico declares it (see
+        // `declare_heartbeat`'s definition).
+        let heartbeat_sub = declare_heartbeat()?;
 
         // R311y592 — the teardown that stops the subscriber ANSWERING.
         let recovery_cancel = Some(RecoveryCancel {
@@ -4035,6 +4346,7 @@ impl<R: SessionRuntime, T: TimeSource> AdvancedSubscriber<R, T> {
             #[cfg(feature = "ext-pubsub-advanced-history")]
             _liveliness_sub: liveliness_sub,
             _detection_token: detection_token,
+            forms,
         })
     }
 }
@@ -4052,7 +4364,7 @@ fn declare_detection_token<R, T>(
     keyexpr: &str,
     options: &AdvancedSubscriberOptions,
     id: EntityGlobalId,
-) -> Result<Option<crate::session::LivelinessToken<R, T>>, AdvancedSubscribeError>
+) -> Result<Option<Held<crate::session::LivelinessToken<R, T>>>, AdvancedSubscribeError>
 where
     R: SessionRuntime + 'static,
     T: TimeSource + 'static,
@@ -4075,8 +4387,46 @@ where
         id.eid(),
         detection.metadata.as_deref(),
     );
-    let token = session.declare_token(ke, crate::session::LivelinessOptions::default())?;
-    Ok(Some(token))
+    // The host names the token's key where it declares keys; asked only now,
+    // because this is the moment the token is declared.
+    let form = form_of(options.forms.as_ref(), |f| f.token(&ke));
+    let token_options = crate::session::LivelinessOptions::default()
+        .with_retraction_naming_the_key(form.names_key_on_retraction);
+    let token = if form.is_literal() {
+        session.declare_token(ke, token_options)?
+    } else {
+        session.declare_token_aliased(form.mapping_id, form.suffix.as_deref(), token_options)?
+    };
+    Ok(Some(Held::new(token, &form)))
+}
+
+/// Declare the late-publisher liveliness subscription on `keyexpr` in `form`,
+/// held together with what names it.
+#[cfg(feature = "ext-pubsub-advanced-history")]
+fn declare_late_publisher_subscription<R, T>(
+    session: &Session<R, T, Unicast>,
+    keyexpr: &str,
+    form: &EntityForm,
+    options: LivelinessSubscriberOptions,
+    sink: impl FnMut(LivelinessSample<'_>) + Send + 'static,
+) -> Result<Held<crate::session::LivelinessSubscriber<R, T>>, AdvancedSubscribeError>
+where
+    R: SessionRuntime,
+    T: TimeSource + 'static,
+    <R as SessionRuntime>::LinkSink: Send + Sync,
+    SessionLinkActions<R, T>: Send + Sync + 'static,
+{
+    let subscription = if form.is_literal() {
+        session.declare_liveliness_subscriber(keyexpr.to_owned(), options, sink)?
+    } else {
+        session.declare_liveliness_subscriber_aliased(
+            form.mapping_id,
+            form.suffix.as_deref(),
+            options,
+            sink,
+        )?
+    };
+    Ok(Held::new(subscription, form))
 }
 
 #[cfg(test)]
@@ -7808,6 +8158,249 @@ mod tests {
             *delivered.lock().unwrap(),
             vec![0, 1],
             "the backgrounded subscriber still delivers"
+        );
+    }
+
+    /// What a host's answer keeps alive, recording the moment it is let go of:
+    /// its label and how many frames the session had sent by then.
+    #[cfg(feature = "ext-pubsub-advanced-history")]
+    struct Witness {
+        label: &'static str,
+        log: Arc<Mutex<Vec<(&'static str, usize)>>>,
+        driver: Arc<crate::test_fixtures::RecordingLinkDriver>,
+    }
+
+    #[cfg(feature = "ext-pubsub-advanced-history")]
+    impl Drop for Witness {
+        fn drop(&mut self) {
+            self.log
+                .lock()
+                .unwrap()
+                .push((self.label, self.driver.frame_count()));
+        }
+    }
+
+    /// A host that names nothing — every answer is the literal form — but
+    /// records what it is asked, in order, and what its answers keep alive.
+    #[cfg(feature = "ext-pubsub-advanced-history")]
+    struct RecordingForms {
+        identity: Option<u32>,
+        asked: Mutex<Vec<String>>,
+        released: Arc<Mutex<Vec<(&'static str, usize)>>>,
+        driver: Arc<crate::test_fixtures::RecordingLinkDriver>,
+        retained: Mutex<Vec<Arc<dyn Send + Sync>>>,
+    }
+
+    #[cfg(feature = "ext-pubsub-advanced-history")]
+    impl RecordingForms {
+        fn new(
+            identity: Option<u32>,
+            driver: &Arc<crate::test_fixtures::RecordingLinkDriver>,
+        ) -> Arc<Self> {
+            Arc::new(Self {
+                identity,
+                asked: Mutex::new(Vec::new()),
+                released: Arc::new(Mutex::new(Vec::new())),
+                driver: Arc::clone(driver),
+                retained: Mutex::new(Vec::new()),
+            })
+        }
+
+        fn answer(&self, label: &'static str, keyexpr: &str) -> EntityForm {
+            self.asked
+                .lock()
+                .unwrap()
+                .push(format!("{label} {keyexpr}"));
+            EntityForm::literal().keeping(Arc::new(Witness {
+                label,
+                log: Arc::clone(&self.released),
+                driver: Arc::clone(&self.driver),
+            }))
+        }
+    }
+
+    #[cfg(feature = "ext-pubsub-advanced-history")]
+    impl DeclarationForms for RecordingForms {
+        fn entity_id(&self) -> Option<u32> {
+            self.identity
+        }
+        fn subscriber(&self, keyexpr: &str) -> EntityForm {
+            self.answer("subscriber", keyexpr)
+        }
+        fn late_publishers(&self, keyexpr: &str) -> EntityForm {
+            self.answer("late_publishers", keyexpr)
+        }
+        fn heartbeat(&self, keyexpr: &str) -> EntityForm {
+            self.answer("heartbeat", keyexpr)
+        }
+        fn token(&self, keyexpr: &str) -> EntityForm {
+            self.answer("token", keyexpr)
+        }
+        fn retain(&self, anchor: Arc<dyn Send + Sync>) {
+            self.retained.lock().unwrap().push(anchor);
+        }
+    }
+
+    /// A subscriber with every entity that makes a host declare a key — the live
+    /// subscription, the late-publisher subscription, the heartbeat subscription
+    /// and the detection token — declared with `forms`.
+    ///
+    /// The subscriber holds its session, so returning it keeps the session alive.
+    #[cfg(feature = "ext-pubsub-advanced-history")]
+    fn declare_with_forms(
+        identity: Option<u32>,
+    ) -> (
+        Arc<crate::test_fixtures::RecordingLinkDriver>,
+        Arc<RecordingForms>,
+        AdvancedSubscriber,
+    ) {
+        let (actions, driver) = crate::test_fixtures::recording_actions();
+        let forms = RecordingForms::new(identity, &driver);
+        let observer = Arc::new(Mutex::new(ApplicationLayerObserver::new()));
+        let clock = Arc::new(TokioTime::new());
+        let session = TokioSession::new(actions, observer, clock);
+        let sub = AdvancedSubscriber::declare_with_options(
+            &session,
+            "demo/data",
+            AdvancedSubscriberOptions::new()
+                .with_recovery(RecoveryConfig::new().with_heartbeat())
+                .with_history(HistoryConfig::new().detect_late_publishers())
+                .with_subscriber_detection(SubscriberDetection::new())
+                .with_get_locality(Locality::SessionLocal)
+                .with_declaration_forms(forms.clone()),
+            |_s: Sample| {},
+        )
+        .expect("a fully configured advanced subscriber declares");
+        (driver, forms, sub)
+    }
+
+    /// The forms are asked about each entity at the moment it is declared and in
+    /// zenoh-pico's order — the subscription, the late-publisher subscription,
+    /// the heartbeat subscription, the detection token — and the token is named
+    /// with the identity the host gives, which is also the one the handle
+    /// reports.
+    ///
+    /// The order is what a host that declares keys shows a peer: its keys go out
+    /// as it is asked. The heartbeat subscription comes AFTER the late-publisher
+    /// one because pico declares it after the history query and that
+    /// subscription (`vendor/zenoh-pico/src/api/advanced_subscriber.c` @
+    /// `// Heartbeat subscriber`).
+    ///
+    /// # Controls
+    ///
+    /// Declaring the heartbeat subscription before the late-publisher one reds
+    /// the order; ignoring [`DeclarationForms::entity_id`] reds the identity,
+    /// which then names the plain subscription's own id.
+    #[cfg(feature = "ext-pubsub-advanced-history")]
+    #[test]
+    fn the_forms_are_asked_in_pico_order_and_the_hosts_identity_names_the_token() {
+        let (driver, forms, sub) = declare_with_forms(Some(77));
+
+        assert_eq!(sub.id().eid(), 77, "the handle reports the host's identity");
+        let zid = zid_to_zenoh_hex(sub.id().zid());
+        assert_eq!(
+            *forms.asked.lock().unwrap(),
+            vec![
+                String::from("subscriber demo/data"),
+                String::from("late_publishers demo/data/@adv/pub/**"),
+                String::from("heartbeat demo/data/@adv/pub/**"),
+                format!("token demo/data/@adv/sub/{zid}/77/_"),
+            ],
+            "the host is asked about each entity as it is declared, in pico's order, and \
+             the token is named with the host's identity"
+        );
+        assert_eq!(
+            frames_carrying(&driver, &format!("demo/data/@adv/sub/{zid}/77/_")),
+            1,
+            "CONTROL: the token reached the wire under that name"
+        );
+    }
+
+    /// Each entity lets go of what names it right after itself, in pico's
+    /// retraction order: the subscription, the late-publisher subscription, the
+    /// heartbeat subscription, then the token.
+    ///
+    /// Read from the frame count at the moment each answer is released: every
+    /// entity's own retraction is one frame, so an answer released right after
+    /// its entity sees exactly one more frame than the one before it.
+    ///
+    /// # Control
+    ///
+    /// Declaring the answer BEFORE the entity in [`Held`] — so a key goes before
+    /// the entity that named it — reds the first count, because the answer is
+    /// then released ahead of its entity's frame.
+    #[cfg(feature = "ext-pubsub-advanced-history")]
+    #[test]
+    fn each_entity_lets_go_of_its_name_right_after_itself_in_pico_order() {
+        let (driver, forms, sub) = declare_with_forms(None);
+        assert!(
+            forms.released.lock().unwrap().is_empty(),
+            "CONTROL: nothing is released while the subscriber stands"
+        );
+
+        let before = driver.frame_count();
+        drop(sub);
+        let released = forms.released.lock().unwrap().clone();
+        assert_eq!(
+            released.iter().map(|(label, _)| *label).collect::<Vec<_>>(),
+            vec!["subscriber", "late_publishers", "heartbeat", "token"],
+            "the answers are released entity by entity in pico's retraction order"
+        );
+        // The first three entities' retractions are frames the session has sent
+        // by the time their answer goes. The token's is queued in the same order
+        // but recorded a moment later, so its answer is held only to the count
+        // before it.
+        assert_eq!(
+            released[..3],
+            [
+                ("subscriber", before + 1),
+                ("late_publishers", before + 2),
+                ("heartbeat", before + 3),
+            ],
+            "each answer is released right AFTER its entity's own retraction"
+        );
+        assert!(
+            released[3].1 > before + 2,
+            "the token's answer is released after the three before it: {released:?}"
+        );
+    }
+
+    /// A backgrounded subscriber hands what names its entities to the host, which
+    /// keeps them until its own end; nothing is released at the call.
+    ///
+    /// # Control
+    ///
+    /// Dropping the answers in `background()` instead of handing them over
+    /// releases all four at the call, which reds the first assertion.
+    #[cfg(feature = "ext-pubsub-advanced-history")]
+    #[test]
+    fn a_backgrounded_subscriber_hands_its_names_to_the_host() {
+        let (_driver, forms, sub) = declare_with_forms(None);
+
+        sub.background();
+        assert!(
+            forms.released.lock().unwrap().is_empty(),
+            "a backgrounded subscriber's names must outlive the call: released {:?}",
+            forms.released.lock().unwrap()
+        );
+        assert_eq!(
+            forms.retained.lock().unwrap().len(),
+            4,
+            "the host was handed one answer per entity"
+        );
+
+        forms.retained.lock().unwrap().clear();
+        let released: Vec<&str> = forms
+            .released
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|(label, _)| *label)
+            .collect();
+        assert_eq!(
+            released,
+            vec!["subscriber", "late_publishers", "heartbeat", "token"],
+            "the host lets them go when it chooses"
         );
     }
 }
