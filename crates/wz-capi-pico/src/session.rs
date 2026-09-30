@@ -62,7 +62,7 @@ use crate::config::{
     Z_CONFIG_TLS_ROOT_CA_CERTIFICATE_KEY, Z_CONFIG_TLS_VERIFY_NAME_ON_CONNECT_KEY,
 };
 use crate::ffi::{guard_val, guarded};
-use crate::result::{ZResult, Z_ERR_GENERIC, Z_ERR_NULL, Z_OK};
+use crate::result::{ZResult, Z_EINVAL, Z_ERR_GENERIC, Z_ERR_NULL, Z_OK};
 use wz_capi_core::drive::{
     open_blocking, CapiTlsConfig, DialPhase, OpenError, OpenStance, SessionState,
 };
@@ -462,17 +462,19 @@ pub unsafe extern "C" fn z_session_drop(obj: *mut z_moved_session_t) {
 // delivered it to nobody.
 
 /// Start the session's read task (pico `zp_start_read_task`). Idempotent, as
-/// pico's is.
+/// pico's is. From inside one of the session's own callbacks it answers
+/// `_Z_ERR_INVALID` and changes nothing, as pico's does from its executor's
+/// thread.
 #[no_mangle]
 pub unsafe extern "C" fn zp_start_read_task(
     zs: *mut z_loaned_session_t,
     _options: *const c_void,
 ) -> ZResult {
     match session_state(zs) {
-        Some(state) => {
-            state.start_read_task();
-            Z_OK
-        }
+        Some(state) => match state.start_read_task() {
+            Ok(()) => Z_OK,
+            Err(_) => Z_EINVAL,
+        },
         None => Z_ERR_NULL,
     }
 }
@@ -480,13 +482,16 @@ pub unsafe extern "C" fn zp_start_read_task(
 /// Stop the session's read task (pico `zp_stop_read_task`). Idempotent, as
 /// pico's is. The session reads nothing and sends no keep-alive until it is
 /// started again; a put still writes, on the caller's thread as pico's does.
+/// It returns once no callback is running, as pico's does after joining its
+/// executor's thread, and from inside one of the session's own callbacks it
+/// answers `_Z_ERR_INVALID` and stops nothing.
 #[no_mangle]
 pub unsafe extern "C" fn zp_stop_read_task(zs: *mut z_loaned_session_t) -> ZResult {
     match session_state(zs) {
-        Some(state) => {
-            state.stop_read_task();
-            Z_OK
-        }
+        Some(state) => match state.stop_read_task() {
+            Ok(()) => Z_OK,
+            Err(_) => Z_EINVAL,
+        },
         None => Z_ERR_NULL,
     }
 }

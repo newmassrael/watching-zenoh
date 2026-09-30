@@ -16,12 +16,13 @@
 
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc;
-use std::sync::Arc;
 use std::sync::Mutex as StdMutex;
+use std::sync::{Arc, Condvar, OnceLock};
 use std::task::{Context, Poll, Waker};
-use std::thread::JoinHandle;
+use std::thread::{JoinHandle, ThreadId};
+use std::time::Duration;
 
 use tokio::sync::Notify;
 
@@ -172,6 +173,17 @@ pub enum OpenError {
 /// inside `z_open`, before its executor could run, and the gate passes until the
 /// role has announced that the open is done (`mark_opened`). Closing
 /// always passes, or the drive thread could never end.
+///
+/// A stop is SYNCHRONOUS, as pico's is: pico suspends its executor and joins the
+/// executor's thread (`vendor/zenoh-pico/src/runtime/background_executor.c` @
+/// `_Z_SET_IF_OK(ret, _z_task_join(&task_to_join));`), so when `zp_stop_read_task`
+/// returns no callback is running and none will run. [`ReadGate::stop`] wakes the
+/// drive thread and waits until it has parked, which is after whatever callback
+/// it was inside has returned. A stop or a start made ON the drive thread, which
+/// is where every callback runs, is REFUSED and changes nothing, as pico refuses
+/// both from its executor's thread (`vendor/zenoh-pico/src/runtime/background_executor.c`
+/// @ `return _Z_ERR_INVALID;  // suspend cannot be called from executor thread`);
+/// waiting there would be waiting for itself.
 pub struct ReadGate {
     /// pico's `_started`.
     running: AtomicBool,
@@ -179,9 +191,28 @@ pub struct ReadGate {
     opened: AtomicBool,
     /// Set by [`SessionState::close`].
     closing: AtomicBool,
+    /// Set when the top-level future is dropped: nobody is left to park.
+    ended: AtomicBool,
     /// Whoever is parked on this gate.
     wakers: StdMutex<Vec<Waker>>,
+    /// The thread the top-level future is polled on, which is the thread every
+    /// callback of the session runs on. Set by its first poll.
+    drive_thread: OnceLock<ThreadId>,
+    /// The top-level future's own waker, refreshed on each poll, so that a stop
+    /// can make the drive thread look at the gate even when it is idle.
+    outer: StdMutex<Option<Waker>>,
+    /// How many stops have been asked for.
+    stop_epoch: AtomicU64,
+    /// The newest stop the drive thread has parked for.
+    parked_for: StdMutex<u64>,
+    /// Signalled when `parked_for` moves, and when the wait must end.
+    parked: Condvar,
 }
+
+/// A start or a stop was made from inside the session's own callbacks. pico
+/// answers `_Z_ERR_INVALID` and does nothing, and so does this ABI.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CalledFromReadTask;
 
 impl ReadGate {
     /// A gate whose task runs from the start when `running`, and that otherwise
@@ -191,8 +222,21 @@ impl ReadGate {
             running: AtomicBool::new(running),
             opened: AtomicBool::new(false),
             closing: AtomicBool::new(false),
+            ended: AtomicBool::new(false),
             wakers: StdMutex::new(Vec::new()),
+            drive_thread: OnceLock::new(),
+            outer: StdMutex::new(None),
+            stop_epoch: AtomicU64::new(0),
+            parked_for: StdMutex::new(0),
+            parked: Condvar::new(),
         }
+    }
+
+    /// Whether the calling thread is the one the session's callbacks run on.
+    fn on_drive_thread(&self) -> bool {
+        self.drive_thread
+            .get()
+            .is_some_and(|drive| *drive == std::thread::current().id())
     }
 
     /// The role has reached its ready point: from here a stopped task holds the
@@ -208,23 +252,99 @@ impl ReadGate {
         self.running.load(Ordering::SeqCst) && !self.closing.load(Ordering::SeqCst)
     }
 
-    /// Start the task (`zp_start_read_task`); idempotent, as pico's is.
-    pub fn start(&self) {
+    /// Start the task (`zp_start_read_task`); idempotent, as pico's is. Refused
+    /// on the drive thread, where a callback running means the task already does.
+    pub fn start(&self) -> Result<(), CalledFromReadTask> {
+        if self.on_drive_thread() {
+            return Err(CalledFromReadTask);
+        }
         self.running.store(true, Ordering::SeqCst);
         self.wake_all();
+        Ok(())
     }
 
-    /// Stop the task (`zp_stop_read_task`); idempotent, as pico's is. Returns at
-    /// once: the drive thread stops at its next poll, which is what a pico stop
-    /// that is called from one of the session's own callbacks does too.
-    pub fn stop(&self) {
+    /// Stop the task (`zp_stop_read_task`); idempotent, as pico's is. Returns when
+    /// the drive thread has parked, so no callback is running and none will until
+    /// the task is started (see the type's documentation). Refused on the drive
+    /// thread, which would be waiting for itself.
+    pub fn stop(&self) -> Result<(), CalledFromReadTask> {
+        if self.on_drive_thread() {
+            return Err(CalledFromReadTask);
+        }
+        // The epoch first, then the flag: a drive thread that sees the flag sees an
+        // epoch at least this one, which is what it acknowledges.
+        let epoch = self.stop_epoch.fetch_add(1, Ordering::SeqCst) + 1;
         self.running.store(false, Ordering::SeqCst);
+        self.wake_drive();
+        self.wait_until_parked(epoch);
+        Ok(())
+    }
+
+    /// Make the drive thread look at the gate, even when it is idle.
+    fn wake_drive(&self) {
+        let outer = self.outer.lock().ok().and_then(|w| w.clone());
+        if let Some(waker) = outer {
+            waker.wake();
+        }
+    }
+
+    /// Wait until the drive thread has parked for stop number `epoch`, or no
+    /// longer can (the session is closing or its drive is gone), or someone has
+    /// started the task again meanwhile. A gate whose drive has never been polled
+    /// has nothing to wait for.
+    fn wait_until_parked(&self, epoch: u64) {
+        if self.drive_thread.get().is_none() {
+            return;
+        }
+        let Ok(mut parked) = self.parked_for.lock() else {
+            return;
+        };
+        while *parked < epoch
+            && !self.closing.load(Ordering::SeqCst)
+            && !self.ended.load(Ordering::SeqCst)
+            && !self.running.load(Ordering::SeqCst)
+        {
+            // Timed, so that a wake-up that raced the checks above is noticed.
+            parked = match self.parked.wait_timeout(parked, Duration::from_millis(50)) {
+                Ok((parked, _)) => parked,
+                Err(_) => return,
+            };
+        }
+    }
+
+    /// The drive thread is about to park because the task is stopped: say so, for
+    /// the newest stop asked for.
+    fn acknowledge_park(&self) {
+        let epoch = self.stop_epoch.load(Ordering::SeqCst);
+        if let Ok(mut parked) = self.parked_for.lock() {
+            if *parked < epoch {
+                *parked = epoch;
+            }
+        }
+        self.parked.notify_all();
+    }
+
+    /// Note which thread drives the session, and keep its waker for a stop.
+    fn note_poll(&self, waker: &Waker) {
+        let _ = self.drive_thread.set(std::thread::current().id());
+        if let Ok(mut outer) = self.outer.lock() {
+            if !outer.as_ref().is_some_and(|known| known.will_wake(waker)) {
+                *outer = Some(waker.clone());
+            }
+        }
+    }
+
+    /// The top-level future is gone: a stop has nobody left to wait for.
+    fn drive_ended(&self) {
+        self.ended.store(true, Ordering::SeqCst);
+        self.parked.notify_all();
     }
 
     /// The session is closing: everything passes, so the drive can unwind.
     fn close(&self) {
         self.closing.store(true, Ordering::SeqCst);
         self.wake_all();
+        self.parked.notify_all();
     }
 
     /// Whether a face, or the accept loop, may read.
@@ -299,13 +419,23 @@ impl<F: Future<Output = ()>> Future for Pausable<F> {
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<()> {
         let this = self.get_mut();
+        this.gate.note_poll(cx.waker());
         if !this.gate.drive_may_run() {
             this.gate.park(cx.waker());
             if !this.gate.drive_may_run() {
+                // Parked: the inner future is not polled again until a start, so
+                // no callback of the session is running. A stop waits for this.
+                this.gate.acknowledge_park();
                 return Poll::Pending;
             }
         }
         this.inner.as_mut().poll(cx)
+    }
+}
+
+impl<F> Drop for Pausable<F> {
+    fn drop(&mut self) {
+        self.gate.drive_ended();
     }
 }
 
@@ -341,16 +471,18 @@ pub struct SessionState {
 }
 
 impl SessionState {
-    /// Start the read task (pico `zp_start_read_task`); idempotent.
-    pub fn start_read_task(&self) {
-        self.read_gate.start();
+    /// Start the read task (pico `zp_start_read_task`); idempotent. Refused from
+    /// inside one of the session's own callbacks.
+    pub fn start_read_task(&self) -> Result<(), CalledFromReadTask> {
+        self.read_gate.start()
     }
 
-    /// Stop the read task (pico `zp_stop_read_task`); idempotent. While it is
-    /// stopped the session reads nothing and sends no keep-alive, and what
-    /// arrives waits in the socket.
-    pub fn stop_read_task(&self) {
-        self.read_gate.stop();
+    /// Stop the read task (pico `zp_stop_read_task`); idempotent, and it returns
+    /// only once no callback is running. While it is stopped the session reads
+    /// nothing and sends no keep-alive, and what arrives waits in the socket.
+    /// Refused from inside one of the session's own callbacks.
+    pub fn stop_read_task(&self) -> Result<(), CalledFromReadTask> {
+        self.read_gate.stop()
     }
 
     /// Whether the read task is running (pico `zp_read_task_is_running`).
@@ -1742,11 +1874,11 @@ mod tests {
     fn the_read_task_flag_follows_start_stop_and_close() {
         let gate = ReadGate::new(true);
         assert!(gate.is_running(), "auto_start_read_task true starts it");
-        gate.stop();
-        gate.stop();
+        gate.stop().expect("a stop off the drive thread");
+        gate.stop().expect("a stop off the drive thread");
         assert!(!gate.is_running(), "a stop is idempotent");
-        gate.start();
-        gate.start();
+        gate.start().expect("a start off the drive thread");
+        gate.start().expect("a start off the drive thread");
         assert!(gate.is_running(), "a start is idempotent");
         assert!(!ReadGate::new(false).is_running(), "false opens it stopped");
         gate.close();
@@ -1786,13 +1918,13 @@ mod tests {
     fn a_stopped_read_task_is_not_polled_until_it_is_started() {
         let gate = Arc::new(ReadGate::new(true));
         gate.mark_opened();
-        gate.stop();
+        gate.stop().expect("a stop off the drive thread");
         let running_when_polled = Arc::new(AtomicBool::new(false));
         let seen = running_when_polled.clone();
         let inner_gate = gate.clone();
         let starter = later(150, {
             let gate = gate.clone();
-            move || gate.start()
+            move || gate.start().expect("a start off the drive thread")
         });
         runtime().block_on(async {
             tokio::time::timeout(
@@ -1821,7 +1953,7 @@ mod tests {
     fn a_close_wakes_a_stopped_read_task() {
         let gate = Arc::new(ReadGate::new(true));
         gate.mark_opened();
-        gate.stop();
+        gate.stop().expect("a stop off the drive thread");
         let closer = later(150, {
             let gate = gate.clone();
             move || gate.close()
@@ -1853,7 +1985,7 @@ mod tests {
 
         let starter = later(100, {
             let gate = gate.clone();
-            move || gate.start()
+            move || gate.start().expect("a start off the drive thread")
         });
         rt.block_on(async {
             tokio::time::timeout(std::time::Duration::from_secs(10), gate.wait_running()).await
@@ -1861,7 +1993,7 @@ mod tests {
         .expect("a start must release the face");
         starter.join().expect("the starter");
 
-        gate.stop();
+        gate.stop().expect("a stop off the drive thread");
         let closer = later(100, {
             let gate = gate.clone();
             move || gate.close()
@@ -1871,5 +2003,149 @@ mod tests {
         })
         .expect("a close must release the face");
         closer.join().expect("the closer");
+    }
+
+    /// Spin until `cond` holds, or fail after ten seconds.
+    fn wait_until(what: &str, mut cond: impl FnMut() -> bool) {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while !cond() {
+            assert!(std::time::Instant::now() < deadline, "never saw: {what}");
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+    }
+
+    /// A stop is synchronous. The drive thread runs a future whose every step
+    /// blocks for a while, as a callback does; the stop is made while one is
+    /// running and must return only when it is over, after which nothing runs
+    /// until a start. A stop that returned at once would leave `in_flight` set.
+    #[test]
+    fn a_stop_returns_only_when_no_callback_is_running() {
+        let gate = Arc::new(ReadGate::new(true));
+        gate.mark_opened();
+        let polls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let in_flight = Arc::new(AtomicBool::new(false));
+        let done = Arc::new(AtomicBool::new(false));
+        let drive = {
+            let (gate, polls, in_flight, done) =
+                (gate.clone(), polls.clone(), in_flight.clone(), done.clone());
+            std::thread::spawn(move || {
+                runtime().block_on(Pausable {
+                    gate,
+                    inner: Box::pin(async move {
+                        while !done.load(Ordering::SeqCst) {
+                            in_flight.store(true, Ordering::SeqCst);
+                            std::thread::sleep(std::time::Duration::from_millis(40));
+                            polls.fetch_add(1, Ordering::SeqCst);
+                            in_flight.store(false, Ordering::SeqCst);
+                            tokio::task::yield_now().await;
+                        }
+                    }),
+                });
+            })
+        };
+
+        wait_until("a step in flight", || in_flight.load(Ordering::SeqCst));
+        gate.stop().expect("a stop off the drive thread");
+        assert!(
+            !in_flight.load(Ordering::SeqCst),
+            "the stop returned while a step was still running"
+        );
+        let frozen = polls.load(Ordering::SeqCst);
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        assert_eq!(
+            polls.load(Ordering::SeqCst),
+            frozen,
+            "the drive ran after the stop returned"
+        );
+
+        gate.start().expect("a start off the drive thread");
+        wait_until("the drive to resume", || {
+            polls.load(Ordering::SeqCst) > frozen
+        });
+        done.store(true, Ordering::SeqCst);
+        drive.join().expect("the drive thread");
+    }
+
+    /// Every callback runs on the drive thread, so a stop or a start made there
+    /// would wait for itself: both are refused and change nothing.
+    #[test]
+    fn a_stop_or_a_start_on_the_drive_thread_is_refused_and_changes_nothing() {
+        let gate = Arc::new(ReadGate::new(true));
+        gate.mark_opened();
+        let seen = Arc::new(StdMutex::new(None));
+        let (seen_in, gate_in) = (seen.clone(), gate.clone());
+        runtime().block_on(Pausable {
+            gate: gate.clone(),
+            inner: Box::pin(async move {
+                let stop = gate_in.stop();
+                let start = gate_in.start();
+                *seen_in.lock().expect("the record") = Some((stop, start, gate_in.is_running()));
+            }),
+        });
+        assert_eq!(
+            *seen.lock().expect("the record"),
+            Some((Err(CalledFromReadTask), Err(CalledFromReadTask), true)),
+            "a stop and a start on the drive thread must be refused, leaving the task running"
+        );
+    }
+
+    /// A drive thread that is idle -- nothing to read, no timer due, which is where
+    /// a session spends nearly all its time -- is woken by the stop and parks, so
+    /// the stop returns. A gate that only set the flag would leave it asleep.
+    #[test]
+    fn a_stop_reaches_a_drive_that_is_idle() {
+        let gate = Arc::new(ReadGate::new(true));
+        gate.mark_opened();
+        let polled = Arc::new(AtomicBool::new(false));
+        let polled_in = polled.clone();
+        let release = Arc::new(Notify::new());
+        let release_in = release.clone();
+        let drive = {
+            let gate = gate.clone();
+            std::thread::spawn(move || {
+                runtime().block_on(Pausable {
+                    gate,
+                    inner: Box::pin(async move {
+                        polled_in.store(true, Ordering::SeqCst);
+                        release_in.notified().await;
+                    }),
+                });
+            })
+        };
+        wait_until("the drive's first poll", || polled.load(Ordering::SeqCst));
+
+        let (tx, rx) = mpsc::channel();
+        let stopper = gate.clone();
+        std::thread::spawn(move || {
+            stopper.stop().expect("a stop off the drive thread");
+            let _ = tx.send(());
+        });
+        rx.recv_timeout(std::time::Duration::from_secs(5))
+            .expect("a stop never reached an idle drive thread");
+
+        // Let the drive end, so its thread can be joined.
+        gate.start().expect("a start off the drive thread");
+        release.notify_one();
+        drive.join().expect("the drive thread");
+    }
+
+    /// A drive that has ended has nobody left to park, so a stop made afterwards
+    /// must not wait for it.
+    #[test]
+    fn a_stop_does_not_wait_for_a_drive_that_is_gone() {
+        let gate = Arc::new(ReadGate::new(true));
+        gate.mark_opened();
+        runtime().block_on(Pausable {
+            gate: gate.clone(),
+            inner: Box::pin(async {}),
+        });
+        let (tx, rx) = mpsc::channel();
+        let stopper = gate.clone();
+        std::thread::spawn(move || {
+            stopper.stop().expect("a stop off the drive thread");
+            let _ = tx.send(());
+        });
+        rx.recv_timeout(std::time::Duration::from_secs(5))
+            .expect("a stop waited for a drive that is gone");
     }
 }

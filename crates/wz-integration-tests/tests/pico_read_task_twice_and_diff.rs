@@ -219,11 +219,134 @@ int main(int argc, char **argv) {
 }
 "#;
 
-/// Compile the driver against upstream's headers, linked to `lib`. Only the
+/// The second driver: what `zp_stop_read_task` and `zp_start_read_task` promise
+/// to the thread that calls them. `argv[1]` is the endpoint to listen on and
+/// `argv[2]` the mode.
+///
+/// - `sync`: the subscriber's callback takes 300 ms, and the program stops the
+///   task while one is running. pico's stop suspends its executor and joins the
+///   executor's thread (`vendor/zenoh-pico/src/runtime/background_executor.c` @
+///   `_z_task_join(&task_to_join)`), so when it returns no callback is running and
+///   none will: the two invariants are printed, and the samples still held are
+///   delivered once the task is started again.
+/// - `inside`: the first callback stops and starts the task it is running on.
+///   pico refuses both (`vendor/zenoh-pico/src/runtime/background_executor.c` @
+///   `return _Z_ERR_INVALID;  // suspend cannot be called from executor thread`)
+///   and changes nothing, so the stop must not leave the session stopped.
+const STOP_DRIVER_SRC: &str = r#"
+#include <stdio.h>
+#include <string.h>
+#include <zenoh-pico.h>
+
+static z_owned_session_t s;
+static volatile int delivered = 0;
+static volatile int in_flight = 0;
+static volatile int fired = 0;
+
+static void on_slow(z_loaned_sample_t *sample, void *ctx) {
+    (void)sample;
+    (void)ctx;
+    __atomic_add_fetch(&in_flight, 1, __ATOMIC_SEQ_CST);
+    z_sleep_ms(300);
+    __atomic_add_fetch(&delivered, 1, __ATOMIC_SEQ_CST);
+    __atomic_sub_fetch(&in_flight, 1, __ATOMIC_SEQ_CST);
+}
+
+static void on_inside(z_loaned_sample_t *sample, void *ctx) {
+    (void)sample;
+    (void)ctx;
+    if (__atomic_exchange_n(&fired, 1, __ATOMIC_SEQ_CST) == 0) {
+        z_result_t rc_stop = zp_stop_read_task(z_loan_mut(s));
+        int run_stop = (int)zp_read_task_is_running(z_loan(s));
+        z_result_t rc_start = zp_start_read_task(z_loan_mut(s), NULL);
+        int run_start = (int)zp_read_task_is_running(z_loan(s));
+        printf("callback-stop rc=%d running=%d\n", (int)rc_stop, run_stop);
+        printf("callback-start rc=%d running=%d\n", (int)rc_start, run_start);
+    }
+    __atomic_add_fetch(&delivered, 1, __ATOMIC_SEQ_CST);
+}
+
+/* Wait for a counter to reach `want`, at most ~12 s, and return what it holds. */
+static int wait_for(volatile int *counter, int want) {
+    for (int i = 0; i < 240; i++) {
+        if (__atomic_load_n(counter, __ATOMIC_SEQ_CST) >= want) {
+            break;
+        }
+        z_sleep_ms(50);
+    }
+    return __atomic_load_n(counter, __ATOMIC_SEQ_CST);
+}
+
+int main(int argc, char **argv) {
+    setvbuf(stdout, NULL, _IONBF, 0);
+    if (argc < 3) {
+        printf("driver: usage: driver <endpoint> <sync|inside>\n");
+        return 2;
+    }
+    int inside = strcmp(argv[2], "inside") == 0;
+
+    z_owned_config_t config;
+    z_config_default(&config);
+    zp_config_insert(z_loan_mut(config), Z_CONFIG_LISTEN_KEY, argv[1]);
+    if (z_open(&s, z_move(config), NULL) < 0) {
+        printf("driver: unable to open session\n");
+        return 1;
+    }
+
+    z_view_keyexpr_t ke;
+    z_view_keyexpr_from_str(&ke, "demo/rt/**");
+    z_owned_closure_sample_t cb;
+    z_closure(&cb, inside ? on_inside : on_slow, NULL, NULL);
+    z_owned_subscriber_t sub;
+    if (z_declare_subscriber(z_loan(s), &sub, z_loan(ke), z_move(cb), NULL) < 0) {
+        printf("driver: unable to declare the subscriber\n");
+        return 1;
+    }
+    printf("READY\n");
+
+    if (inside) {
+        printf("delivered samples=%d\n", wait_for(&delivered, 5));
+        printf("still-running running=%d\n", (int)zp_read_task_is_running(z_loan(s)));
+    } else {
+        /* A callback is in flight: the demo's first Put is being handled. */
+        wait_for(&in_flight, 1);
+        z_sleep_ms(50);
+        printf("callback-in-flight=%d\n", __atomic_load_n(&in_flight, __ATOMIC_SEQ_CST));
+
+        z_result_t rc = zp_stop_read_task(z_loan_mut(s));
+        int running = (int)zp_read_task_is_running(z_loan(s));
+        int quiet = __atomic_load_n(&in_flight, __ATOMIC_SEQ_CST) == 0;
+        int seen = __atomic_load_n(&delivered, __ATOMIC_SEQ_CST);
+        printf("stop rc=%d running=%d\n", (int)rc, running);
+        printf("no-callback-running-after-stop=%d\n", quiet);
+
+        z_sleep_ms(800);
+        printf("nothing-delivered-after-stop=%d\n",
+               __atomic_load_n(&delivered, __ATOMIC_SEQ_CST) == seen);
+
+        rc = zp_start_read_task(z_loan_mut(s), NULL);
+        printf("restart rc=%d running=%d\n", (int)rc, (int)zp_read_task_is_running(z_loan(s)));
+        printf("all-delivered-after-restart samples=%d\n", wait_for(&delivered, 5));
+    }
+
+    z_close(z_loan_mut(s), NULL);
+    z_drop(z_move(s));
+    printf("DONE\n");
+    return 0;
+}
+"#;
+
+/// Compile `source` against upstream's headers, linked to `lib`. Only the
 /// library differs between the arms, which is the whole point.
-fn compile_driver(out_dir: &Path, libdir: &Path, libname: &str, arm: &str) -> PathBuf {
+fn compile_driver(
+    out_dir: &Path,
+    source: &str,
+    libdir: &Path,
+    libname: &str,
+    arm: &str,
+) -> PathBuf {
     let src = out_dir.join(format!("driver_{arm}.c"));
-    std::fs::write(&src, DRIVER_SRC).expect("write driver source");
+    std::fs::write(&src, source).expect("write driver source");
     let exe = out_dir.join(format!("driver_{arm}"));
     let cc = std::env::var("CC").unwrap_or_else(|_| "cc".to_string());
     let mut cmd = Command::new(&cc);
@@ -473,15 +596,19 @@ fn run_arm(driver: &Path, arm: &str, mode: &str) -> String {
             stderr,
             arm,
         ));
-        wait_for_marker(&mut capture, "STOPPED", Duration::from_secs(30), arm);
-        let second = tempfile::tempfile().expect("the second demo's stderr");
-        demos.push(spawn_demo(
-            &demo,
-            &["--connect", &endpoint],
-            "b-second",
-            second,
-            arm,
-        ));
+        // `held` and `default` dial a second demo into the stopped session; the
+        // stop-semantics modes have one demo and one burst.
+        if matches!(mode, "held" | "default") {
+            wait_for_marker(&mut capture, "STOPPED", Duration::from_secs(30), arm);
+            let second = tempfile::tempfile().expect("the second demo's stderr");
+            demos.push(spawn_demo(
+                &demo,
+                &["--connect", &endpoint],
+                "b-second",
+                second,
+                arm,
+            ));
+        }
         wait_for_marker(&mut capture, "DONE", Duration::from_secs(40), arm);
     }
 
@@ -514,13 +641,19 @@ fn both_arms(mode: &str) -> (String, String) {
         .parent()
         .expect("cdylib has a parent directory")
         .to_path_buf();
+    let source = if matches!(mode, "sync" | "inside") {
+        STOP_DRIVER_SRC
+    } else {
+        DRIVER_SRC
+    };
     let ref_driver = compile_driver(
         dir.path(),
+        source,
         &zenoh_pico_library_dir(),
         "zenohpico",
         "reference",
     );
-    let wz_driver = compile_driver(dir.path(), &wz_libdir, "wz_capi_pico", "wz");
+    let wz_driver = compile_driver(dir.path(), source, &wz_libdir, "wz_capi_pico", "wz");
     let reference = run_arm(&ref_driver, "reference", mode);
     let wz = run_arm(&wz_driver, "wz", mode);
     (wz, reference)
@@ -601,6 +734,49 @@ fn a_session_opened_with_its_read_task_delivers_at_once_and_stops_when_told() {
             "second-burst samples=5",
             "closed running=0",
             "demo-received-from-driver=1",
+        ],
+    );
+    assert_arms_agree(&wz, &reference);
+}
+
+/// Stopping the task is synchronous: a stop called while a callback is running
+/// returns only when it has finished, and nothing runs after it returns. The
+/// samples not yet delivered are held and arrive once the task is started.
+// wz-proves: api-compat-pico wz->pico partial
+#[test]
+#[ignore = "cc-compiles a driver against both libraries and runs each against a \
+            wz-ap-demo peer that dials in; run by run-ci Layer E"]
+fn stopping_the_read_task_waits_for_the_callback_in_flight_and_holds_the_rest() {
+    let (wz, reference) = both_arms("sync");
+    assert_reference_holds(
+        &reference,
+        &[
+            "callback-in-flight=1",
+            "stop rc=0 running=0",
+            "no-callback-running-after-stop=1",
+            "nothing-delivered-after-stop=1",
+            "restart rc=0 running=1",
+            "all-delivered-after-restart samples=5",
+        ],
+    );
+    assert_arms_agree(&wz, &reference);
+}
+
+/// A callback that stops or starts the task it runs on is refused and changes
+/// nothing, so the session keeps delivering.
+// wz-proves: api-compat-pico wz->pico partial
+#[test]
+#[ignore = "cc-compiles a driver against both libraries and runs each against a \
+            wz-ap-demo peer that dials in; run by run-ci Layer E"]
+fn a_callback_cannot_stop_or_start_the_read_task_it_runs_on() {
+    let (wz, reference) = both_arms("inside");
+    assert_reference_holds(
+        &reference,
+        &[
+            "callback-stop rc=-75 running=1",
+            "callback-start rc=-75 running=1",
+            "delivered samples=5",
+            "still-running running=1",
         ],
     );
     assert_arms_agree(&wz, &reference);
