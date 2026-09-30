@@ -1200,6 +1200,38 @@ pub const DOCUMENT_HISTORY: &[DocumentShape] = &[
         planes: &[],
         carries: FIELDS_R20_CARRIES,
     },
+    // WHERE THE ETHERNET HEADER SITS IN THE FRAME.
+    //
+    // ONE KEY IS ADDED and nothing retires. A row's `l2` object, which named
+    // the Ethernet II header's two addresses, gains `frame_offset` and `length`:
+    // where the header begins in the captured frame (the start) and how many
+    // bytes it spans (fourteen). `frame_offset` is a name the document already
+    // used on `first_byte`, with the same meaning, so only `length` is new to the
+    // key set. No family or carries axis moves: both are numbers.
+    //
+    // WHAT `length` HOLDS is decided here and stated once: the header proper,
+    // destination, source and the EtherType field. A VLAN or QinQ tag is four
+    // bytes that follow it, the EtherType field then reads the tag's protocol id,
+    // and the tags are not placed by this object. `l2` is still `null` on a link
+    // that is not Ethernet II, so the object is present exactly when it was.
+    //
+    // WHY IT IS WRITTEN AND NOT LEFT TO BE COUNTED: a reader that draws the
+    // header in the frame's bytes and counts the link header itself reads the
+    // capture's framing a second time, and that count is wrong the day a tag
+    // appears. The library already knows the extent, as the constant the strip
+    // requires of a frame.
+    //
+    // A consumer pinned to 20 loses nothing: the new keys are additions inside
+    // an object it already reads by name.
+    DocumentShape {
+        document: FIELDS,
+        revision: 21,
+        keys: FIELDS_R21_KEYS,
+        retiring: &[],
+        families: FIELDS_R20_FAMILIES,
+        planes: &[],
+        carries: FIELDS_R20_CARRIES,
+    },
     DocumentShape {
         document: SUMMARY,
         revision: 1,
@@ -6150,6 +6182,121 @@ pub const FIELDS_R20_CARRIES: &[KeyCarries] = &[
     },
 ];
 
+/// The field document's key set at revision 21.
+///
+/// Revision 20 PLUS `length`, inside the row's `l2` object. `frame_offset`,
+/// the other new member of that object, is a key this document already carried
+/// on `first_byte`, so it is in revision 20's set and adds nothing here: this
+/// set names each key once wherever it occurs. An ADDITION, so revision 20 has
+/// nothing to retire.
+///
+/// Written out rather than aliased, on the rule revision 7 set for a key that
+/// arrives.
+///
+/// MEASURED: `the_field_documents_key_set_is_pinned` prints what the document
+/// emits and this is that printout.
+pub const FIELDS_R21_KEYS: &[&str] = &[
+    "abandoned_at_end",
+    "abandoned_on_eviction",
+    "above_transport",
+    "addr",
+    "after_seq",
+    "anchor",
+    "batch_index",
+    "batch_size",
+    "caps",
+    "capture_reread",
+    "carried",
+    "carried_state",
+    "chain",
+    "chain_id",
+    "compression",
+    "conduit",
+    "context",
+    "datagram_flows",
+    "declaration_checked",
+    "declared",
+    "descriptor_bytes",
+    "despite_encoding",
+    "direction",
+    "document",
+    "dropped_by_limits",
+    "dst",
+    "end",
+    "example",
+    "expired_chains",
+    "family",
+    "fields",
+    "first_byte",
+    "flow",
+    "flows",
+    "format",
+    "frame_offset",
+    "frames",
+    "frames_per_flow",
+    "high",
+    "keyexpr",
+    "keyexpr_cause",
+    "kind",
+    "l2",
+    "length",
+    "link",
+    "list_id",
+    "low",
+    "lowlatency",
+    "max_flows_per_table",
+    "max_scout_askers",
+    "message",
+    "message_at",
+    "messages",
+    "missing",
+    "name",
+    "negotiated",
+    "note",
+    "offset_space",
+    "omitted",
+    "outcome",
+    "packet",
+    "patch",
+    "path",
+    "payload_decode",
+    "payload_mapping",
+    "payload_mapping_counts_exact",
+    "payload_offset",
+    "payload_refusals",
+    "phase",
+    "port",
+    "priority",
+    "qos",
+    "reason",
+    "reassembly",
+    "reliable",
+    "revision",
+    "samples",
+    "scout_askers",
+    "scouting",
+    "selected",
+    "seq",
+    "shown",
+    "skipped",
+    "skipped_packets",
+    "sn",
+    "sn_mask",
+    "src",
+    "start",
+    "state",
+    "stream_bytes",
+    "stream_bytes_per_direction",
+    "stream_flows",
+    "through_seq",
+    "under",
+    "value",
+    "verdict",
+    "why",
+    "window",
+    "wrong",
+];
+
 /// What each field-document family's WORD decides at revision 16 — revision
 /// 15's, with `offset_space` read from [`FIELD_OFFSET_SPACE_CARRIES_R16`].
 pub const FIELDS_R16_CARRIES: &[KeyCarries] = &[
@@ -8984,7 +9131,9 @@ mod tests {
             // `window`: four keys, no word and no removal.
             // To 20 when every endpoint gained `family`, the census row's twin:
             // one key, one word set and a passenger.
-            (FIELDS, 20),
+            // To 21 when a row's `l2` object gained its place in the frame:
+            // `frame_offset` (already a key) and `length` (the one new one).
+            (FIELDS, 21),
             // R2121 (open-debt item 460) — the summary moved to 2 when it
             // gained `inert_counters`; R2122 (item 238) to 3 when its
             // `framing` group stopped disagreeing with the capture report's.

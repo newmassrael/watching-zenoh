@@ -1542,16 +1542,48 @@ pub fn transport_payload_at(link_type: u32, packet_index: usize, bytes: &[u8]) -
     }
 }
 
-/// The two Ethernet II addresses of a captured frame, as
-/// `(source, destination)`.
+/// The Ethernet II header proper: destination address, source address and the
+/// two-byte EtherType field, six plus six plus two.
+///
+/// One constant for every reader of the header, so that the length the strip
+/// requires of a frame, the length [`ethernet_header`] reports and the offset
+/// the EtherType is read from cannot be three numbers that agree by luck.
+pub const ETHERNET_HEADER_LEN: usize = 14;
+
+/// The Ethernet II header of a captured frame: its two addresses and where the
+/// header sits inside the frame.
+///
+/// `frame_offset` and `length` are the header's own extent, so a reader that
+/// wants to point at it in the frame's bytes never counts a link header itself.
+/// A header is the fixed [`ETHERNET_HEADER_LEN`] bytes and begins the frame; both
+/// are carried as values rather than left to be assumed, because a consumer that
+/// assumed them would be a second reader of this capture's framing.
+///
+/// ⚠ WHAT `length` DOES NOT HOLD: a VLAN or QinQ tag. Each tag is four bytes that
+/// FOLLOW the header, the EtherType field then reads `0x8100` or `0x88A8`, and
+/// the tags are a layer of their own that this object does not place.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct EthernetHeader {
+    /// The source address.
+    pub src: [u8; 6],
+    /// The destination address.
+    pub dst: [u8; 6],
+    /// Where the header begins inside the captured frame: always the start.
+    pub frame_offset: usize,
+    /// How many bytes the header spans: [`ETHERNET_HEADER_LEN`].
+    pub length: usize,
+}
+
+/// The Ethernet II header of a captured frame.
 ///
 /// `None` for every link type that is not Ethernet — a cooked (SLL) capture
 /// records one address and a raw-IP capture none — and for an IEEE 802.3
 /// frame whose type field is a LENGTH (below `0x0600`), which is not Ethernet
 /// II and not a frame this reader decapsulates. A VLAN tag does not change
-/// the answer: the addresses precede it.
-pub fn ethernet_endpoints(link_type: u32, bytes: &[u8]) -> Option<([u8; 6], [u8; 6])> {
-    if link_type != LINKTYPE_ETHERNET || bytes.len() < 14 {
+/// the answer: the addresses precede it, and the tag is not part of the header
+/// (see [`EthernetHeader`]).
+pub fn ethernet_header(link_type: u32, bytes: &[u8]) -> Option<EthernetHeader> {
+    if link_type != LINKTYPE_ETHERNET || bytes.len() < ETHERNET_HEADER_LEN {
         return None;
     }
     if u16::from_be_bytes([bytes[12], bytes[13]]) < 0x0600 {
@@ -1561,7 +1593,12 @@ pub fn ethernet_endpoints(link_type: u32, bytes: &[u8]) -> Option<([u8; 6], [u8;
     let mut src = [0u8; 6];
     dst.copy_from_slice(&bytes[0..6]);
     src.copy_from_slice(&bytes[6..12]);
-    Some((src, dst))
+    Some(EthernetHeader {
+        src,
+        dst,
+        frame_offset: 0,
+        length: ETHERNET_HEADER_LEN,
+    })
 }
 
 /// Where `inner` starts within `outer`, when it is a sub-slice of it.
@@ -2238,10 +2275,11 @@ fn strip_raweth(bytes: &[u8], packet_index: usize) -> Option<Datagram> {
 fn strip_link(link_type: u32, bytes: &[u8]) -> Result<(&[u8], bool), SkipReason> {
     match link_type {
         LINKTYPE_ETHERNET => {
-            if bytes.len() < 14 {
+            if bytes.len() < ETHERNET_HEADER_LEN {
                 return Err(SkipReason::Truncated);
             }
-            let mut off = 12;
+            // The EtherType field is the header's last two bytes.
+            let mut off = ETHERNET_HEADER_LEN - 2;
             let mut ethertype = u16::from_be_bytes([bytes[off], bytes[off + 1]]);
             // Walk any number of VLAN / QinQ tags: each is 4 bytes, the last
             // two of which are the next ethertype.
@@ -2866,6 +2904,69 @@ mod tests {
         assert!(
             !raweth_sixteen.contains('[') && !raweth_sixteen.contains(']'),
             "a raweth endpoint of sixteen bytes is not an IPv6 literal: {raweth_sixteen}"
+        );
+    }
+
+    /// The Ethernet II header is PLACED, and its extent stops before any VLAN tag.
+    ///
+    /// The extent is the header the standard defines (destination, source and
+    /// the two-byte EtherType field: fourteen bytes), and a consumer draws it as
+    /// that. A tag is four bytes that FOLLOW it, so one tag and two must leave
+    /// the answer where it was; a `length` that grew with the tags would be
+    /// counting a layer this object does not describe. The fourteen is written
+    /// here as a literal on purpose, so the test is not the constant grading
+    /// itself.
+    ///
+    /// The `None` arms are what keep the object from being invented: another
+    /// link type has no Ethernet header at this place, a frame too short to hold
+    /// one has none, and an IEEE 802.3 length field is not an EtherType.
+    #[test]
+    fn the_ethernet_header_is_placed_and_stops_before_any_vlan_tag() {
+        let dst = [1u8, 2, 3, 4, 5, 6];
+        let src = [7u8, 8, 9, 10, 11, 12];
+        let frame = |tags: &[u16]| {
+            let mut f = Vec::new();
+            f.extend_from_slice(&dst);
+            f.extend_from_slice(&src);
+            for t in tags {
+                f.extend_from_slice(&t.to_be_bytes());
+                f.extend_from_slice(&[0x00, 0x64]);
+            }
+            f.extend_from_slice(&0x0800u16.to_be_bytes());
+            f.extend_from_slice(&[0u8; 20]);
+            f
+        };
+
+        for tags in [
+            vec![],
+            vec![ETHERTYPE_VLAN],
+            vec![ETHERTYPE_QINQ, ETHERTYPE_VLAN],
+        ] {
+            let h = ethernet_header(LINKTYPE_ETHERNET, &frame(&tags))
+                .unwrap_or_else(|| panic!("{} tag(s): an Ethernet II frame", tags.len()));
+            assert_eq!(
+                (h.frame_offset, h.length),
+                (0, 14),
+                "{} tag(s): the header is the fourteen bytes at the start, whatever follows",
+                tags.len()
+            );
+            assert_eq!((h.dst, h.src), (dst, src), "{} tag(s)", tags.len());
+        }
+
+        let plain = frame(&[]);
+        assert_eq!(ethernet_header(LINKTYPE_LINUX_SLL, &plain), None);
+        assert_eq!(ethernet_header(LINKTYPE_RAW, &plain), None);
+        assert_eq!(
+            ethernet_header(LINKTYPE_ETHERNET, &plain[..13]),
+            None,
+            "thirteen bytes cannot hold the header"
+        );
+        let mut dot3 = plain.clone();
+        dot3[12..14].copy_from_slice(&0x05dcu16.to_be_bytes());
+        assert_eq!(
+            ethernet_header(LINKTYPE_ETHERNET, &dot3),
+            None,
+            "an IEEE 802.3 length field is not an EtherType"
         );
     }
 

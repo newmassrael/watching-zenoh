@@ -1743,8 +1743,11 @@ int main(void) {
      * Four keys, no word and no removal; a capture door writes none of them.
      * 20: every endpoint of every flow object gains `family`, as in the
      * census: `ipv4` or `ipv6` on a TCP or UDP link and `null` off one. One
-     * key and one word set, a passenger; nothing retires. */
-    revisioned[2].revision = 20;
+     * key and one word set, a passenger; nothing retires.
+     * 21: a row's `l2` object gains its place in the frame, `frame_offset`
+     * and `length` (the Ethernet II header proper, no VLAN tag). One new key
+     * name, `length`; no word moves; nothing retires. */
+    revisioned[2].revision = 21;
     revisioned[2].doc = NULL;
     rc = wz_dissect_pcap_fields(pcap, sizeof pcap, 0, &revisioned[2].doc);
     CHECK(rc == WZ_DISSECT_OK, "fields rc=%d", rc);

@@ -475,7 +475,7 @@
  * @values fields reason
  *
  *   "first_byte":{"packet":N,"payload_offset":N,"frame_offset":N|null}
- *   "l2":{"src":"aa:bb:cc:dd:ee:ff","dst":".."}|null
+ *   "l2":{"src":"aa:bb:cc:dd:ee:ff","dst":"..","frame_offset":0,"length":14}|null
  *
  *     The capture packet holding the row's first byte, where that byte sits
  *     in the packet's transport payload, and where it sits in the CAPTURED
@@ -484,8 +484,18 @@
  *     bytes cannot place it (a payload rebuilt from IP fragments, a vsock
  *     record). `first_byte` is `null` on a WebSocket flow: the row's
  *     coordinate names the ws frame header, and the message sits past it,
- *     masked. `l2` is the Ethernet II addresses of that packet, `null` on any
+ *     masked. `l2` is the Ethernet II header of that packet, `null` on any
  *     other link.
+ *
+ *     Since field-document revision 21 `l2` also PLACES the header: its
+ *     `frame_offset` (where it begins in the captured frame, the start) and
+ *     its `length` (how many bytes it spans, fourteen), so a packet view that
+ *     draws the header in the frame's bytes counts no link header of its own.
+ *     `frame_offset` here means what it means on `first_byte`: an offset from
+ *     the frame's first byte. The span is the header proper -- destination,
+ *     source and the two-byte EtherType field -- and holds NO VLAN or QinQ tag.
+ *     Each tag is four bytes that follow the span, the EtherType field then
+ *     reads the tag's protocol id, and this object does not place the tags.
  *
  * Per FLOW, beside `flow`:
  *
@@ -599,7 +609,7 @@
  *
  * Every family in `value_families` now carries a `carries` axis:
  *
- *     {"name":"fields","revision":20,"key":"kind","values":[...],
+ *     {"name":"fields","revision":21,"key":"kind","values":[...],
  *      "carries":[{"word":"bits","shapes":[["end","name","start","value"]]},
  *                 {"word":"opaque","shapes":[["end","name","start"]]}, ...]}
  *
@@ -1522,7 +1532,7 @@ int wz_dissect_declarations_diagnose(const char *declarations, char **out);
  *
  * R2175 -- the document is at REVISION 3, and the fourth key is `value_families`:
  *
- *     "value_families":[{"name":"fields","revision":20,"key":"state",
+ *     "value_families":[{"name":"fields","revision":21,"key":"state",
  *                        "values":["decoded","encoding_mismatch",…]}, …]
  *
  * every key in every document whose VALUE this build draws from a closed set,

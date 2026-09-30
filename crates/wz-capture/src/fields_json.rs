@@ -2152,9 +2152,12 @@ fn push_session_row(row: &SessionRow, out: &mut String) {
 ///   payload in one packet's bytes. A reader highlighting the byte in a packet
 ///   view reads this and parses no header.
 ///
-/// `l2` is the packet's Ethernet II source and destination, `null` on any
-/// other link — including a cooked capture, which records one address, and
-/// every packet this document could not re-read.
+/// `l2` is the packet's Ethernet II header: its source and destination and
+/// where the header sits inside the captured frame (`frame_offset` and
+/// `length`, which is `link::EthernetHeader`'s own extent and not a number
+/// counted here). It is `null` on any other link — including a cooked capture,
+/// which records one address, and every packet this document could not re-read.
+/// The length is the header proper and holds no VLAN or QinQ tag.
 struct FirstByte {
     packet: usize,
     payload_offset: usize,
@@ -2188,22 +2191,31 @@ fn push_first_byte(at: Option<FirstByte>, reread: Option<&Reread>, out: &mut Str
     push_l2(
         packet
             .as_ref()
-            .and_then(|p| crate::link::ethernet_endpoints(p.link_type, p.data)),
+            .and_then(|p| crate::link::ethernet_header(p.link_type, p.data)),
         out,
     );
 }
 
-/// The row's `l2` key: `(source, destination)` or `null`.
-fn push_l2(endpoints: Option<([u8; 6], [u8; 6])>, out: &mut String) {
+/// The row's `l2` key: the Ethernet II header's source, destination and place
+/// in the frame, or `null`.
+///
+/// `frame_offset` is the same word `first_byte` uses for where a byte sits in
+/// the captured frame, and means the same thing here: an offset from the
+/// frame's first byte. `length` is how many bytes the header spans.
+fn push_l2(header: Option<crate::link::EthernetHeader>, out: &mut String) {
     out.push_str(",\"l2\":");
-    match endpoints {
+    match header {
         None => out.push_str("null"),
-        Some((src, dst)) => {
+        Some(h) => {
             out.push_str("{\"src\":\"");
-            push_mac(&src, out);
+            push_mac(&h.src, out);
             out.push_str("\",\"dst\":\"");
-            push_mac(&dst, out);
-            out.push_str("\"}");
+            push_mac(&h.dst, out);
+            let _ = write!(
+                out,
+                "\",\"frame_offset\":{},\"length\":{}}}",
+                h.frame_offset, h.length
+            );
         }
     }
 }
@@ -4324,7 +4336,15 @@ mod tests {
             None,
             &mut out,
         );
-        push_l2(Some(([2, 0, 0, 0, 0, 1], [2, 0, 0, 0, 0, 2])), &mut out);
+        push_l2(
+            Some(crate::link::EthernetHeader {
+                src: [2, 0, 0, 0, 0, 1],
+                dst: [2, 0, 0, 0, 0, 2],
+                frame_offset: 0,
+                length: crate::link::ETHERNET_HEADER_LEN,
+            }),
+            &mut out,
+        );
         arms.push(out);
         arms
     }
@@ -4577,6 +4597,109 @@ mod tests {
             l2.len(),
             rows.len(),
             "every row read off Ethernet names both: {doc}"
+        );
+    }
+
+    /// `l2` PLACES THE ETHERNET HEADER in the frame, and the place is what the
+    /// capture file holds there.
+    ///
+    /// Judged against the FILE, on the rule the sibling above sets for
+    /// `frame_offset`: the span is only worth publishing if a reader that draws
+    /// bytes `frame_offset .. frame_offset + length` finds exactly the header
+    /// there, with no arithmetic of its own. So the span is read back out of the
+    /// packet's bytes and required to hold, in order, the destination, the source
+    /// and the EtherType field, the addresses named by the row's own `src` and
+    /// `dst`.
+    ///
+    /// # Two frames, one tagged
+    ///
+    /// The second frame carries an 802.1Q tag between the addresses and the
+    /// EtherType. The span must still be fourteen bytes and must END on the tag's
+    /// protocol id (`0x8100`, which is what the header's EtherType field reads
+    /// when a tag follows), and the tag itself is asserted to lie OUTSIDE it. A
+    /// `length` of eighteen would have been the header plus a layer this object
+    /// does not describe; the fourteen is written as a literal so the constant
+    /// does not grade itself.
+    #[cfg(feature = "network-codecs")]
+    #[test]
+    fn l2_places_the_ethernet_header_and_holds_no_vlan_tag() {
+        use crate::datagram_tests::{init_message, udp_packet};
+
+        let dst = [0xd0u8, 0xd1, 0xd2, 0xd3, 0xd4, 0xd5];
+        let src = [0x5au8, 0x5b, 0x5c, 0x5d, 0x5e, 0x5f];
+        let mut plain = udp_packet([10, 0, 0, 1], 40001, [10, 0, 0, 2], 7447, &init_message());
+        plain[0..6].copy_from_slice(&dst);
+        plain[6..12].copy_from_slice(&src);
+        let mut base = udp_packet([10, 0, 0, 3], 40002, [10, 0, 0, 4], 7447, &init_message());
+        base[0..6].copy_from_slice(&dst);
+        base[6..12].copy_from_slice(&src);
+        let mut tagged = base[..12].to_vec();
+        tagged.extend_from_slice(&[0x81, 0x00, 0x00, 0x64]);
+        tagged.extend_from_slice(&base[12..]);
+
+        let mut d = Dissection::new();
+        d.push_packet_at(LINKTYPE_ETHERNET, 0, Some(0), &plain);
+        d.push_packet_at(LINKTYPE_ETHERNET, 1, Some(1), &tagged);
+        d.finish();
+        assert_eq!(
+            d.datagram_flows().len(),
+            2,
+            "the untagged and the tagged datagram must each be a flow, or the \
+             half below that reads them grades nothing"
+        );
+        let file = crate::pcap::write(
+            LINKTYPE_ETHERNET,
+            &[(0, 0, plain.as_slice()), (1, 0, tagged.as_slice())],
+        );
+        let pcap = crate::pcap::parse(&file).expect("the fixture writes a readable capture");
+        let doc = fields_json(&d, &file, None, None);
+
+        let l2 = scoped(&doc, "src", &["src", "dst", "frame_offset", "length"]);
+        assert_eq!(l2.len(), 2, "one l2 object per row, two rows: {doc}");
+        let mac = |b: &[u8]| {
+            b.iter()
+                .map(|x| alloc::format!("{x:02x}"))
+                .collect::<Vec<_>>()
+                .join(":")
+        };
+        for (i, object) in l2.iter().enumerate() {
+            let frame = &pcap.packets[i].data;
+            let at: usize = object[2].parse().expect("a frame offset");
+            let length: usize = object[3].parse().expect("a length");
+            assert_eq!(
+                (at, length),
+                (0, 14),
+                "packet {i}: the header is the fourteen bytes at the start of the \
+                 frame: {object:?}"
+            );
+            let span = &frame[at..at + length];
+            assert_eq!(
+                &span[0..6],
+                &dst,
+                "packet {i}: the span opens with the destination"
+            );
+            assert_eq!(&span[6..12], &src, "packet {i}: then the source");
+            assert_eq!(
+                object[0],
+                mac(&src),
+                "packet {i}: the row names that source"
+            );
+            assert_eq!(object[1], mac(&dst), "packet {i}: and that destination");
+        }
+
+        // The EtherType field is the span's last two bytes: IPv4's on the plain
+        // frame, and the tag's protocol id on the tagged one — which is how the
+        // tag is shown to lie OUTSIDE the span rather than inside it.
+        assert_eq!(&pcap.packets[0].data[12..14], &[0x08, 0x00]);
+        assert_eq!(
+            &pcap.packets[1].data[12..14],
+            &[0x81, 0x00],
+            "the tagged frame's header ends on the tag's protocol id"
+        );
+        assert_eq!(
+            &pcap.packets[1].data[14..18],
+            &[0x00, 0x64, 0x08, 0x00],
+            "and the tag is the four bytes after the span, not part of it"
         );
     }
 
