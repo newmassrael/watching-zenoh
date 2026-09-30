@@ -77,7 +77,7 @@ pub struct z_querier_options_t {
     /// Moved default encoding, or NULL: the encoding of the value of every get
     /// through the querier that names none of its own. Read (and consumed) at
     /// declare. Typed as an opaque pointer because the moved wrapper is only read
-    /// through [`crate::encoding::take_moved_encoding`]; the SLOT must be 8 B or
+    /// through `crate::encoding::take_moved_encoding`; the SLOT must be 8 B or
     /// everything after it lands wrong.
     pub encoding: *mut c_void,
     pub target: z_query_target_t,

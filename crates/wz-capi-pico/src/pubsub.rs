@@ -1627,7 +1627,7 @@ pub unsafe extern "C" fn z_publisher_delete(
 /// in this module's tests.
 ///
 /// `z_declare_publisher` READS these fields and the publisher then sends every
-/// put and delete with them ([`PublisherQos`]), as pico's does. The struct is
+/// put and delete with them (`PublisherQos`), as pico's does. The struct is
 /// also what an advanced publisher's options embed
 /// ([`crate::advanced::ze_advanced_publisher_options_t`]), so the two are one
 /// layout.
@@ -1635,7 +1635,7 @@ pub unsafe extern "C" fn z_publisher_delete(
 pub struct z_publisher_options_t {
     /// Moved default encoding, or NULL. Typed as an opaque pointer here because
     /// the moved wrapper is only ever read through
-    /// [`crate::encoding::take_moved_encoding`]; the SLOT must exist and be 8 B
+    /// `crate::encoding::take_moved_encoding`; the SLOT must exist and be 8 B
     /// wide or every field after it lands at the wrong offset.
     pub encoding: *mut c_void,
     pub congestion_control: c_int,
