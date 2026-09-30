@@ -667,14 +667,16 @@ impl<'a> SpanCursor<'a> {
         })
     }
 
-    /// Read a ZenohId of `n` wire bytes, as a field named `zid`.
+    /// Read a ZenohId of `n` wire bytes, as a field called `name`.
     ///
     /// ZA-3687 — the one constructor of a [`FieldValue::Zid`], so the seven
     /// places a codec names a `zid` cannot each choose whether it is an identity
     /// or opaque bytes. The bytes and the span are exactly what
-    /// [`Self::bytes`] returns; only the variant differs.
-    pub fn zid(&mut self, n: usize) -> Result<Field, CodecError> {
-        let field = self.bytes("zid", n)?;
+    /// [`Self::bytes`] returns; only the variant differs. The name is a
+    /// parameter, like every other `Cursor` reader's, so the field-name census
+    /// reads the literal at each call site instead of a name buried here.
+    pub fn zid(&mut self, name: &'static str, n: usize) -> Result<Field, CodecError> {
+        let field = self.bytes(name, n)?;
         let FieldValue::Bytes(raw) = field.value else {
             unreachable!("bytes() builds a Bytes value")
         };
@@ -1898,7 +1900,7 @@ fn walk_zid_prefixed(c: &mut SpanCursor<'_>) -> Result<Vec<Field>, CodecError> {
     let carrier = hdr.span;
     let len_m1 = ((byte >> 4) & 0x0F) as u64;
     let mut out = alloc::vec![hdr, bits("zid_len_m1", carrier, len_m1)];
-    out.push(c.zid(len_m1 as usize + 1)?);
+    out.push(c.zid("zid", len_m1 as usize + 1)?);
     Ok(out)
 }
 
@@ -2029,7 +2031,7 @@ fn walk_ext_chain_fill(
 pub fn walk_timestamp(c: &mut SpanCursor<'_>) -> Result<Vec<Field>, CodecError> {
     let (_, time) = c.vle_u64("time")?;
     let (n, zid_len) = c.vle_u64("zid_len")?;
-    let zid = c.zid(n as usize)?;
+    let zid = c.zid("zid", n as usize)?;
     Ok(alloc::vec![time, zid_len, zid])
 }
 
@@ -2716,7 +2718,7 @@ pub fn walk_scout(c: &mut SpanCursor<'_>) -> Result<Vec<Field>, CodecError> {
     ];
     // I-gated, and the LENGTH rides the same carrier: `(cbyte >> 4) + 1`.
     if (cbyte & 0x08) != 0 {
-        out.push(c.zid((((cbyte >> 4) & 0x0F) as usize) + 1)?);
+        out.push(c.zid("zid", (((cbyte >> 4) & 0x0F) as usize) + 1)?);
     }
     Ok(out)
 }
@@ -2737,7 +2739,7 @@ pub fn walk_hello(c: &mut SpanCursor<'_>, l: bool) -> Result<Vec<Field>, CodecEr
         bits("whatami", carrier, (cbyte & 0x03) as u64),
         bits("zid_len_m1", carrier, ((cbyte >> 4) & 0x0F) as u64),
     ];
-    out.push(c.zid((((cbyte >> 4) & 0x0F) as usize) + 1)?);
+    out.push(c.zid("zid", (((cbyte >> 4) & 0x0F) as usize) + 1)?);
     if l {
         let (n, count) = c.vle_u64("num_locators")?;
         out.push(count);
@@ -2792,7 +2794,7 @@ fn walk_linkstate_entry(c: &mut SpanCursor<'_>) -> Result<Field, CodecError> {
     if (options & 0x01) != 0 {
         let (n, len) = c.vle_u64("zid_len")?;
         fields.push(len);
-        fields.push(c.zid(n as usize)?);
+        fields.push(c.zid("zid", n as usize)?);
     }
     if (options & 0x02) != 0 {
         let (_, w) = c.u8("whatami")?;
@@ -3442,7 +3444,7 @@ pub fn dissect_transport_message(bytes: &[u8], base: usize) -> Result<Field, Cod
             out.push(cbyte_field);
             out.push(bits("whatami", cb_span, (cbyte & 0x03) as u64));
             out.push(bits("zid_len", cb_span, (((cbyte >> 4) & 0xF) + 1) as u64));
-            out.push(c.zid(((cbyte >> 4) & 0xF) as usize + 1)?);
+            out.push(c.zid("zid", ((cbyte >> 4) & 0xF) as usize + 1)?);
             if (header & 0x40) != 0 {
                 out.extend(sn_res_and_batch(&mut c)?);
             }
@@ -3492,7 +3494,7 @@ pub fn dissect_transport_message(bytes: &[u8], base: usize) -> Result<Field, Cod
             out.push(cbyte_field);
             out.push(bits("whatami", cb_span, (cbyte & 0x03) as u64));
             out.push(bits("zid_len", cb_span, (((cbyte >> 4) & 0xF) + 1) as u64));
-            out.push(c.zid(((cbyte >> 4) & 0xF) as usize + 1)?);
+            out.push(c.zid("zid", ((cbyte >> 4) & 0xF) as usize + 1)?);
             if (header & 0x40) != 0 {
                 out.extend(sn_res_and_batch(&mut c)?);
             }
