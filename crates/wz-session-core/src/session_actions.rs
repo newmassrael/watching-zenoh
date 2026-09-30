@@ -85,6 +85,13 @@ use crate::reconnect::{CachedDeclaration, ReplayDeclarationsError};
 // longer holds), OR the keepalive emitter (`transport-keepalive`,
 // R311kx). `send_wire` itself carries the same cfg union; the two move
 // together.
+//
+// It is ALSO the type of a link's declared reliability class, which is a
+// `transport-multilink` field and accessor that emit nothing: they are gated on
+// that feature alone, so the union below carries it too. Without it the lib
+// does not compile under `--no-default-features --features transport-multilink`
+// (Layer C1ba's standalone clippy leg), because the use sits under one gate and
+// the import under another.
 #[cfg(feature = "routing-namespace")]
 use crate::keyexpr_prefix::OwnedNonWildKeyExpr;
 #[cfg(feature = "routing-namespace")]
@@ -110,6 +117,7 @@ use crate::namespace::NamespaceIngress;
     feature = "liveliness-token",
     feature = "transport-batching",
     feature = "transport-keepalive",
+    feature = "transport-multilink",
 ))]
 use crate::reliability::Reliability;
 use crate::response_sink::{DeclareReplySink, LivelinessGetPrune, ResponseSink};
@@ -1689,7 +1697,31 @@ impl<R: SessionRuntime> LinkState<R> {
     /// an undeclared link over it is `None`: it matches neither class and is
     /// only ever the any-tier fallback, which is fail-closed rather than a
     /// guess.
-    #[cfg(feature = "transport-multilink")]
+    ///
+    /// Gated on the EXACT union of its sole caller, [`SessionCore::select_link`],
+    /// and not on `transport-multilink` alone. The field it reads and the setter
+    /// that writes it need only that feature, but this reader has one caller, and
+    /// a `transport-multilink`-only build with no data-send codec omits that
+    /// caller (see its own doc), which left this method dead under `-D warnings`
+    /// and reddened Layer C1ba's standalone clippy leg. The two move together.
+    #[cfg(all(
+        feature = "transport-multilink",
+        any(
+            feature = "codec-init-body",
+            feature = "codec-open-body",
+            feature = "codec-push",
+            feature = "codec-request",
+            feature = "codec-response",
+            feature = "codec-response-final",
+            feature = "declare-interest",
+            feature = "declare-keyexpr",
+            feature = "declare-subscriber",
+            feature = "declare-queryable",
+            feature = "declare-token",
+            feature = "liveliness-token",
+            feature = "transport-batching",
+        )
+    ))]
     fn reliability(&self) -> Option<Reliability> {
         R::with_mutex_mut(&self.declared_reliability, |d| *d).or_else(|| {
             self.link_driver()
