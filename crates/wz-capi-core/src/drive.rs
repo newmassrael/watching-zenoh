@@ -305,7 +305,7 @@ fn session_zids(configured: Option<ConfiguredZid>) -> Option<([u8; ZID_LENGTH], 
 ///
 /// A value of this type cannot be built from text zenoh refuses, so a caller that
 /// holds one has nothing left to validate and [`open_blocking`] has no invalid
-/// length to report. The reading of the text is [`zid_hex::zenoh_hex_to_zid`]
+/// length to report. The reading of the text is `zid_hex::zenoh_hex_to_zid`
 /// and nothing here restates it: a lowercase hex `u128`, the id's little-endian
 /// bytes with the trailing zeros trimmed, no leading `0`, at most sixteen bytes.
 /// That rule was measured against the pinned zenohd and is the one the command
@@ -1257,7 +1257,7 @@ async fn drive_listen(endpoint: String, tls: CapiTlsConfig, ctx: DriveContext) {
 /// What the calling ABI, and the config it read, decide about the session being
 /// opened — as distinct from where it connects.
 ///
-/// Grouped rather than passed one by one, on the rule [`DriveContext`] states:
+/// Grouped rather than passed one by one, on the rule `DriveContext` states:
 /// these three travel together by construction, each is a fact the two ABIs
 /// answer differently, and a fourth parameter beside them was the one that took
 /// [`open_blocking`] past clippy's limit. The alternative, an `#[allow]` on the
