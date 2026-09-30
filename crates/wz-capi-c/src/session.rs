@@ -267,6 +267,9 @@ pub unsafe extern "C" fn z_open(
                 tx_queue: TxQueueConf::default(),
                 offer,
                 zid,
+                // zenoh-c has no switch for a session's read task: its runtime
+                // drives the session from the open.
+                start_read_task: true,
             },
         ) {
             Ok(state) => {

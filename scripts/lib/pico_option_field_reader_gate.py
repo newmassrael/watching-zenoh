@@ -89,10 +89,6 @@ MIN_FUNCTIONS = 400
 
 # Every unread field and WHY nothing reads it. Checked both ways.
 UNREAD_WITH_REASON = {
-    "z_open_options_t.auto_start_read_task": (
-        "THE LIVE RESIDUAL of api-compat-pico: pico starts its executor in z_open only "
-        "if this is set, and wz ignores it. Remove this line when the read task is built."
-    ),
     "z_open_options_t.auto_start_lease_task": (
         "pico's z_open never reads it either (api.c z_open reads only auto_start_read_task "
         "and auto_start_admin_space); its DEFAULT is compared by the options-default leg"

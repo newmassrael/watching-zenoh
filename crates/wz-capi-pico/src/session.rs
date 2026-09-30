@@ -228,18 +228,27 @@ pub unsafe fn session_state<'a>(zs: *const z_loaned_session_t) -> Option<&'a Ses
 
 /// Open a session, consuming the moved config (pico `z_open`). A `connect`
 /// config blocks until Established; a `listen` config returns as soon as the
-/// bind succeeds. The `options` pointer is accepted for ABI compatibility and
-/// ignored.
+/// bind succeeds.
+///
+/// `options->auto_start_read_task` decides whether the session's read task runs
+/// from the open, as pico starts its executor only if it is set (default true);
+/// without it the session is connected or bound and reads nothing until
+/// `zp_start_read_task`. The rest of the options have no effect here: the lease
+/// flag is never read by pico either, and the admin-space flag and the thread
+/// attributes have nothing to apply to.
 #[no_mangle]
 pub unsafe extern "C" fn z_open(
     zs: *mut z_owned_session_t,
     config: *mut z_moved_config_t,
-    _options: *const c_void,
+    options: *const z_open_options_t,
 ) -> ZResult {
     guarded(|| {
         if zs.is_null() || config.is_null() {
             return Z_ERR_NULL;
         }
+        // pico reads the options only when they are given and otherwise takes
+        // `z_open_options_default`, whose read task starts.
+        let start_read_task = options.is_null() || (*options).auto_start_read_task;
         // Always-initialize the out-param (pico contract) before any fallible
         // work, so a caller reading `*zs` on an error path sees a null session.
         *zs = z_owned_session_t::null_value();
@@ -323,6 +332,7 @@ pub unsafe extern "C" fn z_open(
                 // so a pico session mints its own. The zenoh-c ABI reads its `id`
                 // key.
                 zid: None,
+                start_read_task,
             },
         ) {
             Ok(state) => {
@@ -435,34 +445,54 @@ pub unsafe extern "C" fn z_session_drop(obj: *mut z_moved_session_t) {
     });
 }
 
-// --- zp_*_task shims -------------------------------------------------------
+// --- zp_*_task: the session's background executor --------------------------
 //
-// wz's drive loop already performs the read + lease/keepalive work these pico
-// tasks start, so the exports are Z_OK shims. They are REQUIRED: a real pico
-// program calls them after `z_open`, and a missing symbol would fail to link.
-// This also matches pico 1.9.0, where the background executor is started inside
-// `z_open` by default and these are legacy: `zp_start_read_task` re-starts the
-// already-running executor and `zp_start_lease_task` is itself a literal no-op
-// (`~/zenoh-pico/src/api/api.c:2491-2509`; the options are documented
-// "Deprecated ... started automatically when session is created",
-// `include/zenoh-pico/api/types.h:179-184`).
+// pico 1.10.1 has ONE executor, and it runs the keep-alive, lease, read and
+// accept tasks together. `zp_start_read_task` and `zp_stop_read_task` start and
+// stop it (`vendor/zenoh-pico/src/api/api.c` @
+// `z_result_t zp_stop_read_task(z_loaned_session_t *zs) {`), and while it is
+// stopped the session reads nothing and sends no keep-alive; the lease pair is a
+// literal no-op (`zp_start_lease_task` returns `_Z_RES_OK` and touches nothing).
+// The same gate answers all of it: see `wz_capi_core::drive::ReadGate`.
+//
+// These used to be Z_OK shims on the ground that wz's session drives itself, and
+// that held for every program that never stopped the task. A program that opens
+// without it (`auto_start_read_task` false), declares its subscribers and then
+// starts it found pico holding the traffic until the start and wz having
+// delivered it to nobody.
 
-/// pico `zp_start_read_task` — no-op (the drive loop already reads).
+/// Start the session's read task (pico `zp_start_read_task`). Idempotent, as
+/// pico's is.
 #[no_mangle]
 pub unsafe extern "C" fn zp_start_read_task(
-    _zs: *mut z_loaned_session_t,
+    zs: *mut z_loaned_session_t,
     _options: *const c_void,
 ) -> ZResult {
-    Z_OK
+    match session_state(zs) {
+        Some(state) => {
+            state.start_read_task();
+            Z_OK
+        }
+        None => Z_ERR_NULL,
+    }
 }
 
-/// pico `zp_stop_read_task` — no-op.
+/// Stop the session's read task (pico `zp_stop_read_task`). Idempotent, as
+/// pico's is. The session reads nothing and sends no keep-alive until it is
+/// started again; a put still writes, on the caller's thread as pico's does.
 #[no_mangle]
-pub unsafe extern "C" fn zp_stop_read_task(_zs: *mut z_loaned_session_t) -> ZResult {
-    Z_OK
+pub unsafe extern "C" fn zp_stop_read_task(zs: *mut z_loaned_session_t) -> ZResult {
+    match session_state(zs) {
+        Some(state) => {
+            state.stop_read_task();
+            Z_OK
+        }
+        None => Z_ERR_NULL,
+    }
 }
 
-/// pico `zp_start_lease_task` — no-op (the drive loop already leases).
+/// pico `zp_start_lease_task` — a no-op in pico 1.10.1 too: the lease is checked
+/// by the executor `zp_start_read_task` starts.
 #[no_mangle]
 pub unsafe extern "C" fn zp_start_lease_task(
     _zs: *mut z_loaned_session_t,
@@ -471,7 +501,7 @@ pub unsafe extern "C" fn zp_start_lease_task(
     Z_OK
 }
 
-/// pico `zp_stop_lease_task` — no-op.
+/// pico `zp_stop_lease_task` — a no-op in pico 1.10.1 too.
 #[no_mangle]
 pub unsafe extern "C" fn zp_stop_lease_task(_zs: *mut z_loaned_session_t) -> ZResult {
     Z_OK
@@ -862,18 +892,17 @@ pub struct z_subscriber_options_t {
 /// pico `z_open_options_t`, 16 B measured:
 /// `{ bool auto_start_read_task; bool auto_start_lease_task; z_task_attr_t* }`.
 ///
-/// Both booleans are DEPRECATED upstream — with multi-threading enabled the
-/// tasks start automatically — and wz's session starts its own drive thread in
-/// `z_open`, so they are accepted and have no effect here.
+/// `auto_start_read_task` is READ: pico starts its executor in `z_open` only
+/// `if (opts.auto_start_read_task)`
+/// (`vendor/zenoh-pico/src/api/api.c` @ `if (opts.auto_start_read_task) {`), and
+/// so does `z_open` here; a session opened with it off is connected or bound and
+/// reads nothing until `zp_start_read_task`.
 ///
-/// That is NOT the whole of upstream's state, and the difference is named rather
-/// than passed over. pico 1.10.1's `z_open` never reads `auto_start_lease_task`,
-/// but it starts its executor only `if (opts.auto_start_read_task)`
-/// (`vendor/zenoh-pico/src/api/api.c` @ `if (opts.auto_start_read_task) {`), so
-/// a program that opens with it OFF holds a session pico leaves idle until it
-/// calls `zp_start_read_task`, and wz's is live at once. The default value is
-/// what is compared (`z_open_options_default`); the deferred start is not
-/// built, because no program that leaves the default is affected.
+/// `auto_start_lease_task` is not read by pico 1.10.1's `z_open` either (its
+/// header calls both flags deprecated and the lease task is a no-op), so its only
+/// observable part is the DEFAULT `z_open_options_default` writes, which the
+/// options-default leg compares. `executor_task_attributes` are the attributes of
+/// pico's executor thread, which this session has no such thread to apply to.
 #[repr(C)]
 pub struct z_open_options_t {
     pub auto_start_read_task: bool,
@@ -970,20 +999,20 @@ pub unsafe extern "C" fn zp_task_lease_options_default(options: *mut zp_task_lea
     }
 }
 
-/// Whether the session's READ task is running (pico `zp_read_task_is_running`).
+/// Whether the session's READ task is running (pico `zp_read_task_is_running`):
+/// whether its executor is started, which `auto_start_read_task` and
+/// `zp_start_read_task` / `zp_stop_read_task` decide, and which a closed session
+/// is not.
 ///
-/// wz runs ONE drive thread serving both roles rather than pico's separate read
-/// and lease tasks, so this and [`zp_lease_task_is_running`] answer the same
-/// question — "is the session still driving?" — and both are the negation of
-/// [`z_session_is_closed`]. Stated rather than left to be inferred from two
-/// identical bodies: a program polling one to decide whether the other is up
-/// gets a consistent answer here, which is the property that matters.
+/// pico answers the lease task's question from the same flag
+/// (`vendor/zenoh-pico/src/api/api.c` @ `bool zp_lease_task_is_running(`), so
+/// [`zp_lease_task_is_running`] is this function: its executor runs both.
 ///
 /// # Safety
 /// `zs` must be null or a live loaned session.
 #[no_mangle]
 pub unsafe extern "C" fn zp_read_task_is_running(zs: *const z_loaned_session_t) -> bool {
-    !z_session_is_closed(zs)
+    session_state(zs).is_some_and(SessionState::read_task_is_running)
 }
 
 /// Whether the session's LEASE task is running (pico
@@ -993,7 +1022,7 @@ pub unsafe extern "C" fn zp_read_task_is_running(zs: *const z_loaned_session_t) 
 /// `zs` must be null or a live loaned session.
 #[no_mangle]
 pub unsafe extern "C" fn zp_lease_task_is_running(zs: *const z_loaned_session_t) -> bool {
-    !z_session_is_closed(zs)
+    zp_read_task_is_running(zs)
 }
 
 /// pico's default priority (pico `z_priority_default`) — `Z_PRIORITY_DATA`.
