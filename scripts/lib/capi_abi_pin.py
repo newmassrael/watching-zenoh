@@ -50,7 +50,7 @@ import subprocess
 import sys
 
 # The pinned pair. Edit BOTH halves deliberately -- see the module doc.
-EXPECTED_VERSION = 20
+EXPECTED_VERSION = 21
 
 # R2108 (open-debt item 525) -- THE RECORD'S LAYOUT, pinned HERE and read from
 # the artifact through `wz_dissect_record_layout`.
@@ -120,6 +120,15 @@ EXPECTED_SYMBOLS = {
     # move; it is its own symbol because it answers a different buffer of the
     # same message, and folding the two would make one record mean two ranges.
     "wz_dissect_live_reassembled_bytes",
+    # ZA-3601 (ABI 21) — the CAPTURED FRAME of a packet, by the number a field
+    # row's `first_byte.packet` names. Copied into a buffer the CALLER sized,
+    # exactly like the two doors above, so the memory rule does not move. It
+    # takes a CONTAINER and not a handle, and that is the design and not an
+    # omission: a handle keeps no captured frame, and giving it one would have
+    # meant a retention policy for every packet or a `RETIRED` answer for most
+    # of them. It runs the walk `wz_dissect_live_follow` runs, so the number is
+    # the same number by construction.
+    "wz_dissect_pcap_frame_bytes",
     # R2453 (open-debt item 700) — the ANALYSIS PLANES over a live handle, and
     # the call that declares its feed over. Two symbols and ONE revision,
     # because they are one capability: measured, the census of a capture that

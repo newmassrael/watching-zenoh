@@ -491,6 +491,21 @@ ONLY_CAPI = {
         "and only the ABI has a boundary to cross.",
         (),
     ),
+    # ZA-3601 — the CAPTURED FRAME of a packet by number. Filed in the round
+    # that added the symbol.
+    "the captured frame of one packet, by the number a field row names": (
+        "wz_dissect_pcap_frame_bytes",
+        "DELIBERATE, on the two rows above's reasoning: the terminal holds the "
+        "capture file in its own process and its `--fields` already prints each "
+        "row's `first_byte`, so the packet is one it can open beside the "
+        "walk; a flag that printed a packet's raw bytes would be a hex dump, "
+        "which is a picture and not a capability. What this symbol adds is the "
+        "frame CROSSING the boundary, in the coordinate space `frame_offset` "
+        "indexes, so a consumer can highlight the byte a row names without "
+        "decoding the capture framing itself, and only the ABI has a boundary "
+        "to cross.",
+        (),
+    ),
     "a FROZEN capture read into binary records": (
         "wz_dissect_pcap_replay",
         "DELIBERATE, and it rides `decoded messages as BINARY records` above. "

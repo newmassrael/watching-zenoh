@@ -140,6 +140,19 @@ pub const WZ_DISSECT_ERR_CONTAINER_SHRANK: c_int = -8;
 /// which is retry-later positional: asking again for this record will never
 /// succeed.
 pub const WZ_DISSECT_ERR_NOT_REASSEMBLED: c_int = -9;
+/// ZA-3601 — the container bytes handed to [`wz_dissect_pcap_frame_bytes`] hold
+/// no packet with that number.
+///
+/// Its own code and not [`WZ_DISSECT_ERR_BAD_CAPTURE`], because nothing is wrong
+/// with the container: it reads as far as it goes, and the number is simply not
+/// among the packets it holds — a number past the last one, a prefix cut inside
+/// the record that would hold it, or a prefix shorter than the one the number
+/// was issued against. The distinction a caller acts on is which way to look: a
+/// bad capture sends it to the file, and this sends it to the length it
+/// passed. A LONGER prefix of a growing capture may hold the packet, which is
+/// what makes it a different answer from [`WZ_DISSECT_ERR_BYTES_RETIRED`]'s
+/// "gone from this reader".
+pub const WZ_DISSECT_ERR_NO_SUCH_PACKET: c_int = -10;
 
 /// R311y887 — read with no ceilings at all, which is what a FILE deserves: it
 /// ends, so keeping every byte of it is already bounded.
@@ -316,6 +329,7 @@ pub extern "C" fn wz_dissect_abi_version() -> c_int {
     // ZA-3214 — 18, for `wz_dissect_live_fields_where`.
     // ZA-3215 — 19, for `wz_dissect_live_reassembled_bytes`.
     // ZA-3509 — 20, for `wz_dissect_live_selection`.
+    // ZA-3601 — 21, for `wz_dissect_pcap_frame_bytes`.
     WZ_DISSECT_ABI_REVISION
 }
 
@@ -333,7 +347,7 @@ pub extern "C" fn wz_dissect_abi_version() -> c_int {
 /// It lives AFTER the function rather than above it on purpose: an item placed
 /// between a doc comment and the item it documents takes that doc, which is
 /// the doc-ownership defect the C1bz budget records.
-pub const WZ_DISSECT_ABI_REVISION: c_int = 20;
+pub const WZ_DISSECT_ABI_REVISION: c_int = 21;
 
 /// R2108 (open-debt item 525) — THE RECORD'S LAYOUT, reported by the artifact.
 ///
@@ -553,6 +567,16 @@ enum Door {
     /// would have meant either a silent hole in `doors` or a name chosen to
     /// dodge the check.
     Replay,
+    /// ZA-3601 — the one pcap door that hands back a captured FRAME's bytes
+    /// rather than a document or a handle: the frame a field row's
+    /// `first_byte.packet` names, in the coordinate space `frame_offset`
+    /// indexes.
+    ///
+    /// It is in this walk for `Replay`'s reason: the population is derived from
+    /// the header, and a door that emits no document is still a door a consumer
+    /// picks between. It joins nothing, because nothing else answers the same
+    /// question.
+    FrameBytes,
 }
 
 impl Door {
@@ -573,6 +597,7 @@ impl Door {
             Door::FieldsLimited => "wz_dissect_pcap_fields_limited",
             Door::FieldsWhereLimited => "wz_dissect_pcap_fields_where_limited",
             Door::Replay => "wz_dissect_pcap_replay",
+            Door::FrameBytes => "wz_dissect_pcap_frame_bytes",
         }
     }
 
@@ -612,7 +637,9 @@ impl Door {
             | Door::SummaryBounded
             | Door::CensusWhereLimited
             | Door::FieldsWhereLimited
-            | Door::Replay => None,
+            | Door::Replay
+            // ZA-3601 — like `Replay`, it emits no document and joins nothing.
+            | Door::FrameBytes => None,
         }
     }
 
@@ -629,7 +656,8 @@ impl Door {
             Door::FieldsWithPayloads => Some(Door::FieldsLimited),
             Door::FieldsLimited => Some(Door::FieldsWhereLimited),
             Door::FieldsWhereLimited => Some(Door::Replay),
-            Door::Replay => None,
+            Door::Replay => Some(Door::FrameBytes),
+            Door::FrameBytes => None,
         }
     }
 }
@@ -2020,6 +2048,123 @@ pub unsafe extern "C" fn wz_dissect_live_reassembled_bytes(
     // SAFETY: `out` is writable for `cap >= bytes.len()` bytes by the caller
     // contract, and `bytes` is inside the dissection this library owns.
     unsafe { core::ptr::copy_nonoverlapping(bytes.as_ptr(), out, bytes.len()) };
+    WZ_DISSECT_OK
+}
+
+/// ZA-3601 — THE CAPTURED FRAME of a packet, by the number a field row names,
+/// copied into a buffer the caller owns.
+///
+/// # What it is for
+///
+/// A field row's `first_byte` names `packet`, the captured packet holding the
+/// row's first byte, and `frame_offset`, where that byte sits in the CAPTURED
+/// FRAME with its link header. This door hands out that frame, so a consumer
+/// can draw the offset on the bytes it indexes. No other door did:
+/// [`wz_dissect_live_message_bytes`] answers the message's own bytes and
+/// [`wz_dissect_live_reassembled_bytes`] the buffer a fragment chain was joined
+/// in, and neither is the frame the capture stored.
+///
+/// # Addressed by the CONTAINER, and not by a handle
+///
+/// `bytes` and `len` are the capture container itself: the same prefix a
+/// consumer feeds [`wz_dissect_live_follow`], or a longer one. A handle was
+/// refused for the same reason [`wz_dissect_live_message_bytes`] copies out
+/// rather than lending: this library keeps no captured frame. A handle holds the
+/// decapsulated payloads its messages were read from and trims them under its
+/// ceilings, so a door keyed by it would have to start retaining every packet,
+/// or answer `RETIRED` for the old ones — which for a large capture is most of
+/// them. A consumer that follows a container holds the container, so this reads
+/// what it already has and adds no retention policy to the handle.
+///
+/// # The same reader that numbers the packets
+///
+/// The walk is the one [`wz_dissect_live_follow`] runs to number the packets a
+/// message is anchored to, so `packet` is the same number by construction, and
+/// no record header is parsed a second time here. A consumer that decoded the
+/// container itself to reach a packet would be the second decoder of the
+/// capture framing that this header forbids by name.
+///
+/// # Growth
+///
+/// A packet number is a position in a file, and a file only grows: a number
+/// that one prefix resolves resolves to the same bytes in every longer one. A
+/// prefix that does NOT hold the record whole answers
+/// [`WZ_DISSECT_ERR_NO_SUCH_PACKET`], which is the honest answer and not a
+/// corruption.
+///
+/// # What it costs, said plainly
+///
+/// The walk stops at the packet, so a call reads the header of every record
+/// before it and copies none of them: linear in the packet's number. That is the
+/// price of asking a container, rather than an index built by somebody who read
+/// it first, for a packet by number. A caller that asks for many packets of one
+/// large container should keep the frames it has already been handed.
+///
+/// # Ownership: copied out, and never truncated
+///
+/// Exactly [`wz_dissect_live_message_bytes`]'s rule. `needed` always receives
+/// the frame's full length; when `cap` is at least that, `out` holds it; when it
+/// is less NOTHING is written and the caller sizes and calls again. `out` may be
+/// null with `cap` zero, to ask for the length alone.
+///
+/// # Answers
+///
+/// [`WZ_DISSECT_OK`] with the length; [`WZ_DISSECT_ERR_NO_SUCH_PACKET`] when
+/// `bytes` holds no packet with that number; [`WZ_DISSECT_ERR_BAD_CAPTURE`] when
+/// the container does not read before the walk reaches the packet;
+/// [`WZ_DISSECT_ERR_INVALID_ARG`] for a null pointer. `needed` is zero on every
+/// failure.
+///
+/// # Safety
+/// `bytes` must point to at least `len` readable bytes, `needed` must be a
+/// writable `size_t`, and `out` must point to at least `cap` writable bytes or
+/// be null with `cap` zero. `out` must not overlap `bytes`.
+#[no_mangle]
+pub unsafe extern "C" fn wz_dissect_pcap_frame_bytes(
+    bytes: *const u8,
+    len: usize,
+    packet: u64,
+    out: *mut u8,
+    cap: usize,
+    needed: *mut usize,
+) -> c_int {
+    if bytes.is_null() || needed.is_null() || (out.is_null() && cap != 0) {
+        return WZ_DISSECT_ERR_INVALID_ARG;
+    }
+    // SAFETY: caller contract above.
+    let input = unsafe { core::slice::from_raw_parts(bytes, len) };
+    // A number that does not fit a `usize` names no packet a container this
+    // size could hold, and is the same answer as one past the last.
+    let found = usize::try_from(packet)
+        .ok()
+        .map(|number| wz_capture::captured_frame(input, number));
+    let frame = match found {
+        Some(Ok(frame)) => frame,
+        Some(Err(wz_capture::FrameLookupError::Capture(_))) => {
+            // SAFETY: null-checked above. Zero rather than a stale length: a
+            // non-zero `needed` beside a failure would read as "call again with
+            // a bigger buffer".
+            unsafe { *needed = 0 };
+            return WZ_DISSECT_ERR_BAD_CAPTURE;
+        }
+        Some(Err(wz_capture::FrameLookupError::NotInPrefix { .. })) | None => {
+            // SAFETY: null-checked above.
+            unsafe { *needed = 0 };
+            return WZ_DISSECT_ERR_NO_SUCH_PACKET;
+        }
+    };
+    // SAFETY: null-checked above.
+    unsafe { *needed = frame.data.len() };
+    if cap < frame.data.len() {
+        // Nothing written, and still WZ_DISSECT_OK with the length: the caller
+        // knows its own `cap`, so `cap >= *needed` IS the "it wrote" answer.
+        return WZ_DISSECT_OK;
+    }
+    // SAFETY: `out` is writable for `cap >= frame.data.len()` bytes by the
+    // caller contract. `copy` and not `copy_nonoverlapping`: `frame.data` is a
+    // window of the caller's own `bytes`, so an `out` that overlapped it would
+    // be the caller's mistake, and a memmove costs nothing to survive it.
+    unsafe { core::ptr::copy(frame.data.as_ptr(), out, frame.data.len()) };
     WZ_DISSECT_OK
 }
 
@@ -5410,7 +5555,11 @@ mod tests {
         // over the field document's rows. One symbol, a `char*` released by
         // `wz_dissect_string_free`; the memory rule and the record layout stay
         // put.
-        assert_eq!(wz_dissect_abi_version(), 20);
+        // ZA-3601 — 21, for `wz_dissect_pcap_frame_bytes`: a captured frame
+        // copied out into a buffer the caller sized, read from a container the
+        // caller holds. One symbol and one status code; the memory rule and the
+        // record layout stay put.
+        assert_eq!(wz_dissect_abi_version(), 21);
     }
 
     /// R311y913 (unregistered item 435) — THE LINKED SURFACE CAN SAY WHAT IT
@@ -8740,5 +8889,267 @@ mod tests {
             WZ_DISSECT_ERR_INVALID_ARG
         );
         unsafe { wz_dissect_live_close(h) };
+    }
+
+    /// `wz_dissect_pcap_frame_bytes` the way C calls it. The buffer is filled
+    /// with `0xEE` first, so a byte the door did not write is visible, and
+    /// `needed` starts at a value no answer produces, so a length it did not
+    /// write is too.
+    fn frame_bytes(container: &[u8], packet: u64, cap: usize) -> (c_int, usize, Vec<u8>) {
+        let mut buf = vec![0xEEu8; cap];
+        let mut needed = usize::MAX;
+        let out = if cap == 0 {
+            core::ptr::null_mut()
+        } else {
+            buf.as_mut_ptr()
+        };
+        let rc = unsafe {
+            wz_dissect_pcap_frame_bytes(
+                container.as_ptr(),
+                container.len(),
+                packet,
+                out,
+                cap,
+                &mut needed,
+            )
+        };
+        (rc, needed, buf)
+    }
+
+    /// `(packet, frame_offset)` of every row of a field document whose first
+    /// byte a single captured frame can place. A row whose `frame_offset` is
+    /// `null` does not parse as a number and is left out, which is the
+    /// document's own word for "not locatable".
+    fn located_first_bytes(doc: &str) -> Vec<(u64, usize)> {
+        wz_capture::doc_revision::object_scopes(doc)
+            .into_iter()
+            .filter(|scope| scope.iter().any(|(key, _)| *key == "payload_offset"))
+            .filter_map(|scope| {
+                let get = |name: &str| {
+                    scope
+                        .iter()
+                        .find(|(key, _)| *key == name)
+                        .map(|(_, value)| String::from(*value))
+                };
+                Some((
+                    get("packet")?.parse().ok()?,
+                    get("frame_offset")?.parse().ok()?,
+                ))
+            })
+            .collect()
+    }
+
+    /// ZA-3601 — the door asks the size, and then fills, by the rule
+    /// `wz_dissect_live_message_bytes` set.
+    ///
+    /// Four cases of one packet: the length alone (null buffer, zero capacity),
+    /// a buffer ONE BYTE SHORT (the length, and not a byte written), exactly
+    /// enough, and more than enough (written, and the rest untouched). A door
+    /// that truncated into a short buffer would satisfy the third and fail the
+    /// second, which is the case a caller acting on `needed` depends on.
+    #[test]
+    fn the_frame_door_asks_the_size_and_then_fills() {
+        let capture = verdict_capture();
+        let parsed = wz_capture::pcap::parse(&capture).expect("the fixture reads");
+        let want = &parsed.packets[0].data;
+        assert!(
+            want.len() > 1,
+            "the frame must be long enough to be one short"
+        );
+
+        let (rc, needed, _) = frame_bytes(&capture, 0, 0);
+        assert_eq!(
+            (rc, needed),
+            (WZ_DISSECT_OK, want.len()),
+            "the length alone"
+        );
+
+        let (rc, needed, buf) = frame_bytes(&capture, 0, want.len() - 1);
+        assert_eq!((rc, needed), (WZ_DISSECT_OK, want.len()), "one byte short");
+        assert!(
+            buf.iter().all(|&b| b == 0xEE),
+            "a buffer too small for the frame was written into"
+        );
+
+        let (rc, needed, buf) = frame_bytes(&capture, 0, want.len());
+        assert_eq!((rc, needed), (WZ_DISSECT_OK, want.len()), "exactly enough");
+        assert_eq!(&buf, want);
+
+        let (rc, needed, buf) = frame_bytes(&capture, 0, want.len() + 5);
+        assert_eq!(
+            (rc, needed),
+            (WZ_DISSECT_OK, want.len()),
+            "more than enough"
+        );
+        assert_eq!(&buf[..want.len()], want.as_slice());
+        assert!(buf[want.len()..].iter().all(|&b| b == 0xEE));
+    }
+
+    /// ZA-3601 — every packet of a capture crosses the boundary as the capture
+    /// holds it: link header included, byte for byte.
+    #[test]
+    fn every_packet_of_a_capture_crosses_the_boundary_as_the_capture_holds_it() {
+        let capture = verdict_capture();
+        let parsed = wz_capture::pcap::parse(&capture).expect("the fixture reads");
+        assert!(
+            parsed.packets.len() >= 4,
+            "the population must not be empty"
+        );
+        for (i, packet) in parsed.packets.iter().enumerate() {
+            let (rc, needed, buf) = frame_bytes(&capture, i as u64, packet.data.len());
+            assert_eq!(
+                (rc, needed),
+                (WZ_DISSECT_OK, packet.data.len()),
+                "packet {i}"
+            );
+            assert_eq!(buf, packet.data, "packet {i} came back as other bytes");
+        }
+    }
+
+    /// ZA-3601 — THE JOIN AT THE ABI: a row's `first_byte.packet` names a frame
+    /// this door hands out, and `frame_offset` is the message's first byte IN
+    /// THAT FRAME.
+    ///
+    /// The field document and the door are each right on their own tests and
+    /// this is the seam between them, the claim a consumer's bytes column
+    /// stands on: it draws what the door returns and highlights where the row
+    /// says. The fixture's messages have known first bytes — the stream's two
+    /// messages both begin `0x04` after their length prefix, and the datagrams
+    /// carry a keepalive — so the byte at `frame_offset` is checked against a
+    /// constant this test wrote and not against the walk's own arithmetic.
+    #[test]
+    fn a_rows_packet_number_names_the_frame_the_door_hands_out() {
+        let capture = verdict_capture();
+        let handle = replay(&capture, WZ_DISSECT_LIMITS_NONE).expect("the replay opens");
+        let doc = live_fields(handle, &capture);
+        unsafe { wz_dissect_live_close(handle) };
+
+        let located = located_first_bytes(&doc);
+        assert!(
+            located.len() >= 4,
+            "the stream's two rows, the datagram rows and the scout are locatable: {doc}"
+        );
+        let mut checked = std::collections::BTreeSet::new();
+        for (packet, frame_offset) in &located {
+            let (rc, needed, _) = frame_bytes(&capture, *packet, 0);
+            assert_eq!(
+                rc, WZ_DISSECT_OK,
+                "a row names packet {packet}, which the door must hand out"
+            );
+            let (_, _, frame) = frame_bytes(&capture, *packet, needed);
+            assert!(
+                *frame_offset < frame.len(),
+                "packet {packet}: frame_offset {frame_offset} is outside its {} byte frame",
+                frame.len()
+            );
+            let expected = match packet {
+                0 => Some(0x04),
+                1 | 2 => Some(KEEPALIVE[0]),
+                _ => None,
+            };
+            if let Some(expected) = expected {
+                assert_eq!(
+                    frame[*frame_offset], expected,
+                    "packet {packet}: the byte at frame_offset {frame_offset} in the frame \
+                     the door hands out is not the message's first byte"
+                );
+                checked.insert(*packet);
+            }
+        }
+        assert_eq!(
+            checked,
+            [0u64, 1, 2].into_iter().collect(),
+            "a packet whose first byte is known was never located: {doc}"
+        );
+    }
+
+    /// ZA-3601 — a number the container does not hold is `NO_SUCH_PACKET`, with
+    /// `needed` written as zero, and a prefix that cuts the record short of it
+    /// says the same while still resolving the packets before it.
+    #[test]
+    fn the_frame_door_refuses_a_packet_the_container_does_not_hold() {
+        let capture = verdict_capture();
+        let n = wz_capture::pcap::parse(&capture)
+            .expect("the fixture reads")
+            .packets
+            .len() as u64;
+        assert!(n >= 4, "the population must not be empty");
+        for packet in [n, n + 7, u64::MAX] {
+            let (rc, needed, buf) = frame_bytes(&capture, packet, 16);
+            assert_eq!(
+                (rc, needed),
+                (WZ_DISSECT_ERR_NO_SUCH_PACKET, 0),
+                "packet {packet}"
+            );
+            assert!(buf.iter().all(|&b| b == 0xEE), "a refusal wrote bytes");
+        }
+        let cut = &capture[..capture.len() - 1];
+        assert_eq!(
+            frame_bytes(cut, n - 1, 16).0,
+            WZ_DISSECT_ERR_NO_SUCH_PACKET,
+            "a prefix cut inside the last record does not hold it"
+        );
+        assert_eq!(
+            frame_bytes(cut, n - 2, 0).0,
+            WZ_DISSECT_OK,
+            "and still holds the packet before it"
+        );
+    }
+
+    /// ZA-3601 — a container that does not read is `BAD_CAPTURE` and not a
+    /// missing packet, and a null argument is refused before anything else.
+    #[test]
+    fn the_frame_door_names_a_bad_container_and_refuses_null_arguments() {
+        // A whole classic file header long: a shorter input is reported as a
+        // header not yet fully there, and that is a missing packet.
+        let mut garbage = vec![0u8; 32];
+        garbage[..4].copy_from_slice(&[0xde, 0xad, 0xbe, 0xef]);
+        let (rc, needed, _) = frame_bytes(&garbage, 0, 0);
+        assert_eq!((rc, needed), (WZ_DISSECT_ERR_BAD_CAPTURE, 0));
+
+        let capture = verdict_capture();
+        let mut needed = 0usize;
+        assert_eq!(
+            unsafe {
+                wz_dissect_pcap_frame_bytes(
+                    core::ptr::null(),
+                    0,
+                    0,
+                    core::ptr::null_mut(),
+                    0,
+                    &mut needed,
+                )
+            },
+            WZ_DISSECT_ERR_INVALID_ARG,
+            "no container"
+        );
+        assert_eq!(
+            unsafe {
+                wz_dissect_pcap_frame_bytes(
+                    capture.as_ptr(),
+                    capture.len(),
+                    0,
+                    core::ptr::null_mut(),
+                    0,
+                    core::ptr::null_mut(),
+                )
+            },
+            WZ_DISSECT_ERR_INVALID_ARG,
+            "nowhere to write the length"
+        );
+        assert_eq!(
+            unsafe {
+                wz_dissect_pcap_frame_bytes(
+                    capture.as_ptr(),
+                    capture.len(),
+                    0,
+                    core::ptr::null_mut(),
+                    8,
+                    &mut needed,
+                )
+            },
+            WZ_DISSECT_ERR_INVALID_ARG,
+            "a capacity with no buffer behind it"
+        );
     }
 }

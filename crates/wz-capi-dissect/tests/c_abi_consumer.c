@@ -1124,6 +1124,78 @@ int main(void) {
     rc = wz_dissect_pcap_summary_bounded(NULL, 0, &bounded);
     CHECK(rc == WZ_DISSECT_ERR_INVALID_ARG, "bounded null bytes rc=%d", rc);
 
+    /* ZA-3601 (ABI 21) -- THE CAPTURED-FRAME DOOR, reachable from C at all and
+     * on the answers a C caller branches on. The Rust side owns the claims that
+     * need a real capture (every packet, every prefix, the join against a field
+     * row); this file owns the symbol surviving into the cdylib and the contract
+     * at the boundary.
+     *
+     * The same hand-laid pcap: ONE packet, the four bytes after its record
+     * header. */
+    unsigned char fbuf[8];
+    size_t fneeded = 999;
+
+    /* SIZE FIRST: a null `out` with a zero `cap` asks for the length alone. */
+    rc = wz_dissect_pcap_frame_bytes(pcap, sizeof pcap, 0, NULL, 0, &fneeded);
+    CHECK(rc == WZ_DISSECT_OK, "frame sizing rc=%d", rc);
+    CHECK(fneeded == 4, "the packet is four bytes, got %zu", fneeded);
+
+    /* A SHORT BUFFER WRITES NOTHING, and still says how much there is. */
+    memset(fbuf, 0xAB, sizeof fbuf);
+    fneeded = 999;
+    rc = wz_dissect_pcap_frame_bytes(pcap, sizeof pcap, 0, fbuf, 3, &fneeded);
+    CHECK(rc == WZ_DISSECT_OK, "short frame buffer rc=%d", rc);
+    CHECK(fneeded == 4, "the length is reported whatever the cap, got %zu", fneeded);
+    CHECK(fbuf[0] == 0xAB, "a cap below the length must write NOTHING");
+
+    /* AND THEN THE BYTES, into an array this translation unit owns. */
+    fneeded = 999;
+    rc = wz_dissect_pcap_frame_bytes(pcap, sizeof pcap, 0, fbuf, sizeof fbuf,
+                                     &fneeded);
+    CHECK(rc == WZ_DISSECT_OK, "frame call rc=%d", rc);
+    CHECK(fneeded == 4, "needed=%zu", fneeded);
+    CHECK(fbuf[0] == 0 && fbuf[3] == 0 && fbuf[4] == 0xAB,
+          "the four packet bytes and nothing past them");
+
+    /* A NUMBER THE CONTAINER DOES NOT HOLD, and a prefix cut inside the record
+     * that would hold it. Both are the length you passed and not a bad file,
+     * with a `needed` of zero: there is nothing to size for. */
+    fneeded = 999;
+    rc = wz_dissect_pcap_frame_bytes(pcap, sizeof pcap, 1, fbuf, sizeof fbuf,
+                                     &fneeded);
+    CHECK(rc == WZ_DISSECT_ERR_NO_SUCH_PACKET,
+          "one past the last packet, rc=%d", rc);
+    CHECK(fneeded == 0, "a refusal reports no length, got %zu", fneeded);
+    fneeded = 999;
+    rc = wz_dissect_pcap_frame_bytes(pcap, sizeof pcap - 1, 0, fbuf,
+                                     sizeof fbuf, &fneeded);
+    CHECK(rc == WZ_DISSECT_ERR_NO_SUCH_PACKET,
+          "a prefix cut inside the record, rc=%d", rc);
+
+    /* A CONTAINER THAT DOES NOT READ is BAD_CAPTURE: a pcapng magic and a block
+     * whose length word is impossible. */
+    unsigned char impossible[12] = {0x0A, 0x0D, 0x0D, 0x0A, 3,    0,
+                                    0,    0,    0x4D, 0x3C, 0x2B, 0x1A};
+    fneeded = 999;
+    rc = wz_dissect_pcap_frame_bytes(impossible, sizeof impossible, 0, fbuf,
+                                     sizeof fbuf, &fneeded);
+    CHECK(rc == WZ_DISSECT_ERR_BAD_CAPTURE, "an unreadable container, rc=%d", rc);
+    CHECK(fneeded == 0, "a failure reports no length, got %zu", fneeded);
+    CHECK(WZ_DISSECT_ERR_NO_SUCH_PACKET != WZ_DISSECT_ERR_BAD_CAPTURE &&
+              WZ_DISSECT_ERR_NO_SUCH_PACKET != WZ_DISSECT_ERR_BYTES_RETIRED,
+          "a missing packet, a bad file and a retired message are three codes");
+
+    /* Nulls are refused before anything is dereferenced. */
+    rc = wz_dissect_pcap_frame_bytes(NULL, 0, 0, fbuf, sizeof fbuf, &fneeded);
+    CHECK(rc == WZ_DISSECT_ERR_INVALID_ARG, "null container rc=%d", rc);
+    rc = wz_dissect_pcap_frame_bytes(pcap, sizeof pcap, 0, fbuf, sizeof fbuf,
+                                     NULL);
+    CHECK(rc == WZ_DISSECT_ERR_INVALID_ARG, "null needed rc=%d", rc);
+    rc = wz_dissect_pcap_frame_bytes(pcap, sizeof pcap, 0, NULL, sizeof fbuf,
+                                     &fneeded);
+    CHECK(rc == WZ_DISSECT_ERR_INVALID_ARG,
+          "a null buffer with a non-zero cap is a caller bug, rc=%d", rc);
+
     /* R311y851 -- and the CENSUS door is reachable from C at all, with the
      * four plane keys a consumer indexes.
      *

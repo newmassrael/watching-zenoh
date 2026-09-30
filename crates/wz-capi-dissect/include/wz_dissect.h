@@ -847,6 +847,15 @@ extern "C" {
  * unlike NO_BYTE_SOURCE, which refuses a whole list: another record of the
  * same list may answer. Unlike BYTES_RETIRED, asking again never will. */
 #define WZ_DISSECT_ERR_NOT_REASSEMBLED (-9)
+/* ZA-3601 -- the container bytes handed to wz_dissect_pcap_frame_bytes hold NO
+ * packet with that number. Its own code and not BAD_CAPTURE, because nothing is
+ * wrong with the container: it reads as far as it goes, and the number is not
+ * among the packets it holds -- one past the last, a prefix cut inside the
+ * record that would hold it, or a prefix shorter than the one the number was
+ * issued against. A bad capture sends you to the file; this sends you to the
+ * length you passed. A LONGER prefix of a growing capture may hold the packet,
+ * which is what separates it from BYTES_RETIRED's "gone from this reader". */
+#define WZ_DISSECT_ERR_NO_SUCH_PACKET (-10)
 
 /* R311y887 -- LIMIT PRESETS, for the doors that take one as an argument.
  *
@@ -896,7 +905,7 @@ extern "C" {
  * calls the function, and refuses when the two disagree.
  *
  * @unknown ABI not-an-enumeration */
-#define WZ_DISSECT_ABI_REVISION 20
+#define WZ_DISSECT_ABI_REVISION 21
 
 /* Symbol/memory-contract revision. Not a JSON-shape revision. This is the
  * revision the LOADED library reports; the block above says why it exists
@@ -1985,6 +1994,67 @@ int wz_dissect_live_reassembled_bytes(const wz_dissect_live *h,
                                       const wz_dissect_record *record,
                                       unsigned char *out, size_t cap,
                                       size_t *needed);
+
+/* ── ZA-3601 (ABI 21) — THE CAPTURED FRAME OF A PACKET ──────────────────
+ *
+ * A field row's `first_byte` names `packet` -- the captured packet holding the
+ * row's first byte -- and `frame_offset`, where that byte sits in the CAPTURED
+ * FRAME with its link header. This door hands out that frame, so the offset
+ * can be drawn on the bytes it indexes. No other door did:
+ * wz_dissect_live_message_bytes answers the message's own bytes and
+ * wz_dissect_live_reassembled_bytes the buffer a fragment chain was joined in,
+ * and neither is the frame the capture stored.
+ *
+ * WHICH CONTAINER: `bytes` and `len` are the capture container itself -- the
+ * same prefix you feed wz_dissect_live_follow, or a longer one. Not a handle:
+ * this library keeps no captured frame. A handle holds the decapsulated
+ * payloads its messages were read from and trims them under its ceilings, so a
+ * door keyed by one would have to start retaining every packet, or answer
+ * BYTES_RETIRED for the old ones, which for a large capture is most of them.
+ * You hold the container; this reads what you already have.
+ *
+ * THE SAME READER THAT NUMBERS THE PACKETS. The walk is the one
+ * wz_dissect_live_follow runs, so `packet` is the same number by construction
+ * and no record header is parsed a second time. Decoding the container
+ * yourself to reach a packet would be the second decoder of the capture
+ * framing that this header forbids by name.
+ *
+ * GROWTH. A packet number is a position in a file and a file only grows: a
+ * number that one prefix resolves resolves to the same bytes in every longer
+ * one. A prefix that does NOT hold the record whole answers NO_SUCH_PACKET --
+ * the honest answer, and not a corruption.
+ *
+ * COST, said plainly. The walk stops at the packet, so a call reads the header
+ * of every record before it and copies none of them: linear in the packet's
+ * number. That is the price of asking a container, rather than an index built
+ * by somebody who read it first, for a packet by number. Keep the frames you
+ * have already been handed if you ask for many packets of one large container.
+ *
+ * OWNERSHIP, and it is the rule of wz_dissect_live_message_bytes, unchanged.
+ * The frame is COPIED into memory you own and sized; `needed` always receives
+ * its full length, and below it NOTHING is written -- size and call again.
+ *
+ *     size_t n;
+ *     if (wz_dissect_pcap_frame_bytes(file, file_len, pkt, NULL, 0, &n)
+ *             == WZ_DISSECT_OK) {
+ *         unsigned char *buf = malloc(n);
+ *         wz_dissect_pcap_frame_bytes(file, file_len, pkt, buf, n, &n);
+ *         ...           // highlight buf[frame_offset], link header included
+ *         free(buf);
+ *     }
+ *
+ * ANSWERS. WZ_DISSECT_OK with the length; WZ_DISSECT_ERR_NO_SUCH_PACKET when
+ * `bytes` holds no packet with that number; WZ_DISSECT_ERR_BAD_CAPTURE when
+ * the container does not read before the walk reaches the packet;
+ * WZ_DISSECT_ERR_INVALID_ARG for a null pointer. `needed` is zero on every
+ * failure. `out` must not overlap `bytes`.
+ *
+ * @bound cap buffer-capacity -- the size of YOUR array. This library imposes
+ * nothing by it and discards nothing for it: below the length it writes
+ * nothing at all, and `needed` says how much there is. */
+int wz_dissect_pcap_frame_bytes(const unsigned char *bytes, size_t len,
+                                uint64_t packet, unsigned char *out,
+                                size_t cap, size_t *needed);
 
 /* ── R2453 (ABI 16) — THE ANALYSIS PLANES OVER A LIVE HANDLE ─────────────
  *
