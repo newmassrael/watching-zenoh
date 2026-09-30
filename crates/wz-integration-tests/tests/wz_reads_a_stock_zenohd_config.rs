@@ -3601,10 +3601,10 @@ fn a_wz_node_configured_only_by_a_stock_zenoh_config_reaches_a_real_zenohd() {
   // is about the ones wz claims to apply.
   //
   // ZA-3362 (ZA-3659) — the `id` is NOT the router file's (`a1b2c3d4`). A node
-  // that dials a zenohd carrying its own zid is refused: zenohd logs "Attempt to
-  // establish transport to itself" and closes the link with `CONNECTION_TO_SELF`
-  // (zenoh-transport `unicast/manager.rs`), so the demo reports the link lost
-  // right after connecting. This leg passed only because the demo decoded the
+  // that dials a zenohd carrying its own zid is refused: zenohd logs the attempt
+  // (`io/zenoh-transport/src/unicast/manager.rs` @ `Attempt to establish transport to itself`)
+  // and closes the link with `CONNECTION_TO_SELF`, so the demo reports the link
+  // lost right after connecting. This leg passed only because the demo decoded the
   // text per byte, which gave the two nodes DIFFERENT wire zids for the SAME
   // text; once the demo read the text as zenoh does, the shared string became a
   // shared identity. It is also not `b1b2c3d4`, the destination the weight below
