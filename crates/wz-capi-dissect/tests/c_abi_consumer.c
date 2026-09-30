@@ -1597,8 +1597,13 @@ int main(void) {
      * `nodes[].zid` and `interests[].declarer_zid` were each wire byte in turn
      * and are zenoh's spelling now, the little-endian id read as a u128 (the
      * bytes reversed, a leading zero nibble dropped), which is what zenohd
-     * logs. No key moves; the number is the whole notice. */
-    revisioned[0].revision = 13;
+     * logs. No key moves; the number is the whole notice.
+     * ZA-3695 -- 14: an IPv6 `addr` changes SPELLING under its stationary key.
+     * Sixteen bytes were eight hex groups with no `::` (the loopback read
+     * `0:0:0:0:0:0:0:1`) and are RFC 5952's text now (`::1`), which is what
+     * zenohd logs. IPv4, MAC and vsock endpoints are as they were. No key
+     * moves; the number is the whole notice. */
+    revisioned[0].revision = 14;
     revisioned[0].doc = NULL;
     rc = wz_dissect_pcap_census(pcap, sizeof pcap, &revisioned[0].doc);
     CHECK(rc == WZ_DISSECT_OK, "census rc=%d", rc);
@@ -1690,8 +1695,12 @@ int main(void) {
      * is an identity: `value` is zenoh's spelling of it (the bytes reversed, a
      * leading zero nibble dropped) and the span still names the raw wire bytes.
      * A switch on `kind` written against the eight earlier words is no longer
-     * exhaustive. */
-    revisioned[2].revision = 17;
+     * exhaustive.
+     * ZA-3695 -- 18: an IPv6 `addr` on a flow object changes SPELLING under
+     * its stationary key, as in the census: RFC 5952's text (`::1`) where it
+     * was eight hex groups with no `::`. No key, family or word moves; the
+     * number is the whole notice. */
+    revisioned[2].revision = 18;
     revisioned[2].doc = NULL;
     rc = wz_dissect_pcap_fields(pcap, sizeof pcap, 0, &revisioned[2].doc);
     CHECK(rc == WZ_DISSECT_OK, "fields rc=%d", rc);

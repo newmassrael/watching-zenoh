@@ -8232,6 +8232,98 @@ mod tests {
         );
     }
 
+    /// ZA-3695 — the text report names an IPv6 flow's endpoints in RFC 5952
+    /// text.
+    ///
+    /// `flow_text` reaches the address through `Endpoint::addr_text`, so the
+    /// page moved when `ip_text` did and nothing in this file changed. A witness
+    /// in only the crate's link module would be a claim about a helper rather
+    /// than about the page, which is the argument the analyzer's twin of this
+    /// test makes one crate over.
+    ///
+    /// ⚠ WHAT THIS DOES NOT GRADE, on purpose: the SURROUNDING form. This page
+    /// writes an endpoint as `addr:port` with no brackets, so a compressed
+    /// address followed by a port (`fe80::1:7447`) can no longer be split by
+    /// counting groups the way eight of them could. RFC 5952 §6 recommends
+    /// brackets there and the analyzer's `--flows` already writes them. It is
+    /// not changed here because `Endpoint::addr_text` reserves the surrounding
+    /// form to each surface and because bracketing this one means deciding the
+    /// MAC and vsock lines too; it is a named residual of ZA-3695. The
+    /// assertions below therefore look for the ADDRESS text and not for the
+    /// line around it, so a later bracketing does not read as a regression of
+    /// the spelling.
+    ///
+    /// The IPv4 flow beside it is the negative arm, and its whole line is
+    /// asserted: the dotted quad is the arm a repair that spelled every address
+    /// through `Ipv6Addr` would break.
+    #[cfg(feature = "network-codecs")]
+    #[test]
+    fn the_text_report_names_an_ipv6_flow_in_rfc_5952_text() {
+        let mut d = crate::Dissection::new();
+        // `2001:db8:0:0:1:0:0:1` is a TIE between two runs of two, so the FIRST
+        // compresses; `fe80::1` has a single run. The declaration is a LITERAL
+        // keyexpr for the reason item 268's leg gives.
+        let v6_a = [
+            0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0x01, 0, 0, 0, 0, 0, 0x01,
+        ];
+        let v6_b = [0xfe, 0x80, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x01];
+        d.push_packet(
+            crate::link::LINKTYPE_ETHERNET,
+            0,
+            &crate::datagram_tests::udp_packet_v6(
+                v6_a,
+                50000,
+                v6_b,
+                7447,
+                &framed_declare(1, "robot/arm"),
+            ),
+        );
+        d.push_packet(
+            crate::link::LINKTYPE_ETHERNET,
+            1,
+            &crate::datagram_tests::udp_packet(
+                [10, 0, 0, 3],
+                50001,
+                [10, 0, 0, 4],
+                7447,
+                &framed_declare(1, "robot/arm"),
+            ),
+        );
+        d.finish();
+
+        // THE POPULATION, before anything is asked of the page: an IPv6 flow
+        // and an IPv4 one, and a declaration on each. A capture that produced
+        // one of either would leave a `contains` below reading a page that
+        // never had the row.
+        let census = crate::interest::interests(&d);
+        assert_eq!(d.datagram_flows().len(), 2, "two flows");
+        assert_eq!(census.interests().len(), 2, "and two declarations");
+
+        let table = crate::agg::aggregate(&d);
+        let coverage = census.coverage(&table);
+        let text = CaptureReport::of(&d)
+            .with_interests(&census, &coverage, None)
+            .to_text();
+
+        for addr in ["2001:db8::1:0:0:1", "fe80::1"] {
+            assert!(
+                text.contains(addr),
+                "the IPv6 flow is named in RFC 5952 text ({addr}):\n{text}"
+            );
+        }
+        for old in ["2001:db8:0:0:1:0:0:1", "fe80:0:0:0:0:0:0:1"] {
+            assert!(
+                !text.contains(old),
+                "and the eight-group reading ({old}) is GONE, not merely joined \
+                 by a second one:\n{text}"
+            );
+        }
+        assert!(
+            text.contains("[10.0.0.3:50001 <-> 10.0.0.4:7447]"),
+            "while the IPv4 flow keeps its dotted quads:\n{text}"
+        );
+    }
+
     /// R311y864 — zenoh inside a GRE tunnel is READ, at every optional-field
     /// combination.
     ///

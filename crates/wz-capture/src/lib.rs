@@ -6884,6 +6884,44 @@ mod datagram_tests {
         eth
     }
 
+    /// Ethernet + IPv6 + UDP carrying `payload`, padded to the 60-byte minimum.
+    ///
+    /// ZA-3695 — the IPv6 twin of [`udp_packet`], so a document test can put an
+    /// IPv6 flow through the SAME entry point every other flow arrives by. The
+    /// UDP checksum is left at zero, which over IPv6 is present-and-wrong
+    /// (RFC 8200 §8.1 makes it mandatory); no test that uses this builder reads
+    /// a checksum verdict, and computing one would need the pseudo-header this
+    /// corpus keeps in `wz_packet_fixtures` for the tests that do.
+    pub(crate) fn udp_packet_v6(
+        src: [u8; 16],
+        sport: u16,
+        dst: [u8; 16],
+        dport: u16,
+        payload: &[u8],
+    ) -> Vec<u8> {
+        let mut udp = Vec::new();
+        udp.extend_from_slice(&sport.to_be_bytes());
+        udp.extend_from_slice(&dport.to_be_bytes());
+        udp.extend_from_slice(&((8 + payload.len()) as u16).to_be_bytes());
+        udp.extend_from_slice(&0u16.to_be_bytes());
+        udp.extend_from_slice(payload);
+
+        let mut ip = alloc::vec![0x60u8, 0, 0, 0];
+        ip.extend_from_slice(&(udp.len() as u16).to_be_bytes());
+        ip.extend_from_slice(&[17, 64]);
+        ip.extend_from_slice(&src);
+        ip.extend_from_slice(&dst);
+        ip.extend_from_slice(&udp);
+
+        let mut eth = alloc::vec![0u8; 12];
+        eth.extend_from_slice(&[0x86, 0xDD]);
+        eth.extend_from_slice(&ip);
+        while eth.len() < 60 {
+            eth.push(0);
+        }
+        eth
+    }
+
     /// Ethernet + IPv4 + TCP carrying `payload` at `seq`, from low to high.
     pub(crate) fn tcp_packet(seq: u32, payload: &[u8]) -> Vec<u8> {
         tcp_packet_on(1111, seq, payload)

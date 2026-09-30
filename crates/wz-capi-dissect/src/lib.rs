@@ -5549,6 +5549,114 @@ mod tests {
         eth
     }
 
+    /// Ethernet + IPv6 + UDP from `src` to `dst`, padded to the 60-byte minimum.
+    ///
+    /// ZA-3695 — the IPv6 twin of [`udp_packet`], hand-laid here for the same
+    /// reason `framed_init` is: a fixture shared with `wz-capture` would prove
+    /// that the reader and the writer hold one belief between them. The UDP
+    /// checksum is zero, which over IPv6 is present-and-wrong; the test that
+    /// uses this reads no checksum verdict.
+    fn udp_packet_v6(
+        src: [u8; 16],
+        sport: u16,
+        dst: [u8; 16],
+        dport: u16,
+        payload: &[u8],
+    ) -> Vec<u8> {
+        let mut udp = Vec::new();
+        udp.extend_from_slice(&sport.to_be_bytes());
+        udp.extend_from_slice(&dport.to_be_bytes());
+        udp.extend_from_slice(&((8 + payload.len()) as u16).to_be_bytes());
+        udp.extend_from_slice(&0u16.to_be_bytes());
+        udp.extend_from_slice(payload);
+
+        let mut ip = vec![0x60u8, 0, 0, 0];
+        ip.extend_from_slice(&(udp.len() as u16).to_be_bytes());
+        ip.extend_from_slice(&[17, 64]);
+        ip.extend_from_slice(&src);
+        ip.extend_from_slice(&dst);
+        ip.extend_from_slice(&udp);
+
+        let mut eth = vec![0u8; 12];
+        eth.extend_from_slice(&[0x86, 0xDD]);
+        eth.extend_from_slice(&ip);
+        while eth.len() < 60 {
+            eth.push(0);
+        }
+        eth
+    }
+
+    /// ZA-3695 — AN IPV6 ADDRESS CROSSES THIS BOUNDARY IN THE TEXT ZENOHD LOGS,
+    /// in the census and in the field document, under the revisions that say so.
+    ///
+    /// The seam a consumer reads through, which no test in the crate below can
+    /// stand in for: `wz-capture` proves what its emitters write, this proves
+    /// what a C caller receives from the two doors that carry a flow's `addr` —
+    /// `wz_dissect_pcap_census` and `wz_dissect_pcap_fields` — for ONE capture.
+    ///
+    /// The two IPv6 endpoints are the two rules a renderer that only dropped
+    /// leading zeros gets wrong: `fe80::1` needs a run compressed, and
+    /// `2001:db8:0:0:1:0:0:1` is a TIE between two runs where the FIRST
+    /// compresses. The expected texts are literals from an independent
+    /// implementation (Python's `ipaddress`), not read back from the function
+    /// under test. The IPv4 datagram beside them is the negative arm.
+    ///
+    /// The revision is the ONLY notice a value moved under a stationary key, so
+    /// each document must announce one at or above the revision this spelling
+    /// arrived at. It is read from the table and compared with a floor, so the
+    /// table stays the one place the number is written.
+    #[test]
+    fn an_ipv6_address_crosses_the_boundary_in_the_text_zenohd_logs() {
+        let a = [0xfe, 0x80, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x01];
+        let b = [
+            0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0x01, 0, 0, 0, 0, 0, 0x01,
+        ];
+        // A raw INIT, which is `framed_init` without its stream length prefix.
+        let init = framed_init(&[0x01, 0x02, 0x03, 0x04])[2..].to_vec();
+        let v6 = udp_packet_v6(a, 43210, b, 7447, &init);
+        let v4 = udp_packet([192, 168, 1, 5], 43210, [192, 168, 1, 9], 7447, &init);
+        let file = wz_capture::pcap::write(1, &[(0, 0, v6.as_slice()), (0, 9_000, v4.as_slice())]);
+
+        let census = call_census(&file).expect("the capture reads");
+        let fields = call_fields(&file, 0).expect("the capture reads");
+
+        for (door, doc, table, floor) in [
+            ("census", &census, wz_capture::doc_revision::CENSUS, 14u32),
+            ("fields", &fields, wz_capture::doc_revision::FIELDS, 18u32),
+        ] {
+            for addr in [
+                "\"addr\":\"fe80::1\"",
+                "\"addr\":\"2001:db8::1:0:0:1\"",
+                "\"addr\":\"192.168.1.5\"",
+            ] {
+                assert!(
+                    doc.contains(addr),
+                    "the {door} door must carry {addr}: {doc}"
+                );
+            }
+            for old in ["fe80:0:0:0:0:0:0:1", "2001:db8:0:0:1:0:0:1"] {
+                assert!(
+                    !doc.contains(old),
+                    "the {door} door must not carry the eight-group reading \
+                     ({old}): {doc}"
+                );
+            }
+            let declared = wz_capture::doc_revision::newest(table)
+                .expect("the document has a revision")
+                .revision;
+            assert!(
+                doc.contains(&format!("\"revision\":{declared}")),
+                "the {door} document announces revision {declared}: {doc}"
+            );
+            assert!(
+                declared >= floor,
+                "the {door} document is at least {floor} -- the revision this \
+                 spelling arrived at; a value that moved under a stationary key \
+                 has no other notice"
+            );
+        }
+    }
+
     /// The version is a SYMBOL contract, not a JSON one: it exists so a
     /// consumer can refuse a library whose memory rules changed, and it must
     /// NOT move when a walker adds fields.

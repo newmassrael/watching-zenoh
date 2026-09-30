@@ -6498,6 +6498,78 @@ mod tests {
         }
     }
 
+    /// ZA-3695 — an IPv6 flow's `addr` in the field document is RFC 5952 text.
+    ///
+    /// The sibling above grades the LINK-dependent spelling, and this one grades
+    /// what the IP arm itself writes for sixteen bytes. The two endpoints are
+    /// chosen for the two rules a renderer that merely dropped leading zeros
+    /// gets wrong: `fe80::1` needs a run compressed, and `2001:db8:0:0:1:0:0:1`
+    /// is a TIE between two runs of two, where the FIRST is the one that
+    /// compresses. The old reading of them was eight groups each, with no `::`.
+    ///
+    /// The fixture MIXES an IPv4 datagram in, as its siblings do, because a
+    /// repair that spelled every four-byte address through `Ipv6Addr` would
+    /// satisfy the IPv6 half of this test and still be wrong.
+    #[test]
+    fn an_ipv6_flow_reaches_the_field_document_in_rfc_5952_text() {
+        use crate::datagram_tests::{init_message, udp_packet, udp_packet_v6};
+
+        let a = [0xfe, 0x80, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x01];
+        let b = [
+            0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0x01, 0, 0, 0, 0, 0, 0x01,
+        ];
+        let v6 = udp_packet_v6(a, 43210, b, 7447, &init_message());
+        let v4 = udp_packet(
+            [192, 168, 1, 5],
+            43210,
+            [192, 168, 1, 9],
+            7447,
+            &init_message(),
+        );
+
+        let mut d = Dissection::new();
+        d.push_packet_at(LINKTYPE_ETHERNET, 0, Some(0), &v6);
+        d.push_packet_at(LINKTYPE_ETHERNET, 1, Some(1), &v4);
+        d.finish();
+        assert_eq!(
+            d.datagram_flows().len(),
+            2,
+            "the IPv6 and the IPv4 datagram must each be a flow, or the half \
+             below that reads them grades nothing"
+        );
+
+        let file = crate::pcap::write(
+            LINKTYPE_ETHERNET,
+            &[(0, 0, v6.as_slice()), (1, 0, v4.as_slice())],
+        );
+        let out = fields_json(&d, &file, None, None);
+
+        for ip in [
+            "\"addr\":\"fe80::1\",\"port\":43210",
+            "\"addr\":\"2001:db8::1:0:0:1\",\"port\":7447",
+        ] {
+            assert!(
+                out.contains(ip),
+                "an IPv6 endpoint is spelled the way RFC 5952 spells it ({ip}): \
+                 {out}"
+            );
+        }
+        for old in ["fe80:0:0:0:0:0:0:1", "2001:db8:0:0:1:0:0:1"] {
+            assert!(
+                !out.contains(old),
+                "and the eight-group reading ({old}) is GONE, not merely joined \
+                 by a second one: {out}"
+            );
+        }
+        for ip in ["\"addr\":\"192.168.1.5\"", "\"addr\":\"192.168.1.9\""] {
+            assert!(
+                out.contains(ip),
+                "the IPv4 datagram keeps its dotted quads ({ip}) -- the arm a \
+                 repair that spelled every address as IPv6 would break: {out}"
+            );
+        }
+    }
+
     /// R2454 (open-debt item 698) — the sibling above, one family over: a
     /// VSOCK endpoint's `addr` is the context id the operator's locator names,
     /// not four hex groups of its little-endian bytes.

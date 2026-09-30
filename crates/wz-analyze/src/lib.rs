@@ -5243,7 +5243,8 @@ fn message_name(frame: &wz_session_core::passive::PassiveFrame) -> String {
     }
 }
 
-/// An endpoint as `addr:port`, IPv4 dotted or IPv6 hex-grouped.
+/// An endpoint as `addr:port`, IPv4 dotted or IPv6 as RFC 5952 text in
+/// brackets (ZA-3695).
 fn endpoint(e: &wz_capture::link::Endpoint, link: wz_capture::link::LinkKind) -> String {
     // Round 2447 (open-debt item 696) — the ADDRESS comes from
     // `Endpoint::addr_text`, which spells it as the recorded link kind spells
@@ -7439,6 +7440,86 @@ mod tests {
             eth.push(0);
         }
         eth
+    }
+
+    /// One Ethernet/IPv6/UDP packet carrying the same SCOUT as [`scout_packet`],
+    /// hand-laid for the same reason and from `src` to `dst`.
+    ///
+    /// ZA-3695. The addresses are parameters so a test can pick the shapes the
+    /// RFC 5952 rules turn on.
+    fn scout_packet_v6(src: [u8; 16], dst: [u8; 16]) -> Vec<u8> {
+        let scout = [0x01u8, 0x09, (3 << 4) | 0x08 | 0x03, 0x11, 0x22, 0x33, 0x44];
+
+        let mut udp = Vec::new();
+        udp.extend_from_slice(&43210u16.to_be_bytes());
+        udp.extend_from_slice(&7446u16.to_be_bytes());
+        udp.extend_from_slice(&((8 + scout.len()) as u16).to_be_bytes());
+        udp.extend_from_slice(&0u16.to_be_bytes());
+        udp.extend_from_slice(&scout);
+
+        let mut ip = vec![0x60u8, 0, 0, 0];
+        ip.extend_from_slice(&(udp.len() as u16).to_be_bytes());
+        ip.extend_from_slice(&[17, 64]);
+        ip.extend_from_slice(&src);
+        ip.extend_from_slice(&dst);
+        ip.extend_from_slice(&udp);
+
+        let mut eth = vec![0u8; 12];
+        eth.extend_from_slice(&[0x86, 0xDD]);
+        eth.extend_from_slice(&ip);
+        while eth.len() < 60 {
+            eth.push(0);
+        }
+        eth
+    }
+
+    /// ZA-3695 — THE SECOND RENDERER SPELLS AN IPV6 ADDRESS TOO, and this crate
+    /// is where "the second renderer" is the whole point.
+    ///
+    /// `--flows` writes an endpoint as `addr:port` and puts brackets round
+    /// anything that is not a dotted quad. The address inside comes from
+    /// `Endpoint::addr_text`, so it moved when `ip_text` did, with no change in
+    /// this crate — and a witness in only the crate that owns the function
+    /// would be a claim about a helper rather than about what `--flows` prints.
+    ///
+    /// The BRACKETS are what makes the compressed form safe here: `::1:7447`
+    /// cannot be split back into an address and a port, and `[::1]:7447` can.
+    /// So the test asserts the brackets AND the compressed text inside them.
+    ///
+    /// The two addresses are the two rules a renderer that only dropped leading
+    /// zeros gets wrong: `2001:db8:0:0:1:0:0:1` is a TIE between two runs of two
+    /// where the FIRST compresses, and `ff02:0:0:0:0:0:0:224` has a run in the
+    /// middle. The IPv4 scout beside them is the negative arm, for R2443's
+    /// reason.
+    #[test]
+    fn an_ipv6_flow_is_listed_as_rfc_5952_text_inside_its_brackets() {
+        let src = [
+            0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0x01, 0, 0, 0, 0, 0, 0x01,
+        ];
+        let dst = [0xff, 0x02, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x02, 0x24];
+        let file = wz_capture::pcapng::write(
+            &[(wz_capture::link::LINKTYPE_ETHERNET, 6)],
+            &[
+                (0, 1_000_000, &scout_packet()),
+                (0, 2_000_000, &scout_packet_v6(src, dst)),
+            ],
+        );
+
+        let (json, _) = analyze_with(&file, None, Format::Json, true, false).expect("parses");
+        assert!(
+            json.contains("[2001:db8::1:0:0:1]:43210") && json.contains("[ff02::224]:7446"),
+            "an IPv6 endpoint is bracketed RFC 5952 text: {json}"
+        );
+        assert!(
+            !json.contains("2001:db8:0:0:1:0:0:1") && !json.contains("ff02:0:0:0:0:0:0:224"),
+            "and the eight-group reading is GONE, not merely joined by a second \
+             one: {json}"
+        );
+        assert!(
+            json.contains("192.168.1.5:43210"),
+            "while the IPv4 scout keeps its dotted quad -- the arm a repair that \
+             spelled every address through IPv6 would break: {json}"
+        );
     }
 
     /// R311y668 (§1.2a) — a DATAGRAM flow gets a row, and its scouting messages

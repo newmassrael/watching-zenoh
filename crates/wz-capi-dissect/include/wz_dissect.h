@@ -171,8 +171,8 @@
  * ⚠ READ `addr` THROUGH IT. The spelling depends on the link, and there is one
  * rule per kind rather than one rule with exceptions:
  *
- *     `tcp` / `udp`  an IP address -- dotted quad for four bytes,
- *                    colon-separated hex groups for sixteen.
+ *     `tcp` / `udp`  an IP address -- dotted quad for four bytes, RFC 5952
+ *                    text for sixteen (`fe80::1`, `2001:db8::1:0:0:1`).
  *     `raweth`       six colon-separated MAC octets, lower case.
  *     `vsock`        the AF_VSOCK context id in DECIMAL, so `addr` and `port`
  *                    reassemble into the `vsock/<CID>:<PORT>` locator the
@@ -195,6 +195,20 @@
  * parsed the old form has nothing in the key set to notice the change by, which
  * is exactly what the revision number is for: pin it, and refuse a document
  * whose revision you have not read this paragraph for.
+ *
+ * ⚠ AND AN IPv6 `addr` MOVED AT CENSUS REVISION 14 / FIELD-DOCUMENT REVISION
+ * 18, with no key changing. Sixteen bytes were written as eight hex groups
+ * with no `::`, so the loopback read `"addr":"0:0:0:0:0:0:0:1"`. They are RFC
+ * 5952's text now -- lower case, no leading zeros, the longest run of two or
+ * more zero groups written `::` (the first of two that tie), a single zero
+ * group written `0` -- which is what zenohd logs: `"addr":"::1"`,
+ * `"fe80::1"`, `"2001:db8::1:0:0:1"`. A consumer that JOINS an `addr` to an
+ * address it took from a router's own text by string finds the match now; one
+ * that STORED the old text holds a spelling no other surface prints. An IPv4
+ * endpoint, a MAC and a vsock context id read as before, and an IPv4-mapped
+ * address is written in the mixed form (`::ffff:192.0.2.1`), which RFC 5952
+ * leaves alone. Nothing in the key set changed, so the revision number is the
+ * whole notice.
  *
  * @values census link
  * @values fields link
@@ -518,7 +532,7 @@
  *
  * SO THE DOCUMENT CARRIES THE LIST. Its envelope reads
  *
- *     {"document":{"name":"census","revision":13,
+ *     {"document":{"name":"census","revision":14,
  *                  "planes":["exchanges","interests","keyexprs","nodes",
  *                            "payloads"]}, ...}
  *
@@ -564,11 +578,11 @@
  *
  * Every family in `value_families` now carries a `carries` axis:
  *
- *     {"name":"fields","revision":17,"key":"kind","values":[...],
+ *     {"name":"fields","revision":18,"key":"kind","values":[...],
  *      "carries":[{"word":"bits","shapes":[["end","name","start","value"]]},
  *                 {"word":"opaque","shapes":[["end","name","start"]]}, ...]}
  *
- *     {"name":"census","revision":13,"key":"mode","values":[...],
+ *     {"name":"census","revision":14,"key":"mode","values":[...],
  *      "carries":null}
  *
  * `null` is a VALUE here and not an absence: it says the word is a PASSENGER --
@@ -1485,7 +1499,7 @@ int wz_dissect_declarations_diagnose(const char *declarations, char **out);
  *
  * R2175 -- the document is at REVISION 3, and the fourth key is `value_families`:
  *
- *     "value_families":[{"name":"fields","revision":17,"key":"state",
+ *     "value_families":[{"name":"fields","revision":18,"key":"state",
  *                        "values":["decoded","encoding_mismatch",…]}, …]
  *
  * every key in every document whose VALUE this build draws from a closed set,

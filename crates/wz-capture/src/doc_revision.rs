@@ -694,6 +694,30 @@ pub const DOCUMENT_HISTORY: &[DocumentShape] = &[
         planes: CENSUS_R6_PLANES,
         carries: CENSUS_R11_CARRIES,
     },
+    // ZA-3695 — AN IPV6 ADDRESS CHANGED SPELLING UNDER A STATIONARY KEY.
+    //
+    // No key moves, nothing retires, and no family, plane or carries axis has
+    // anything to say: `addr` is on every endpoint of every flow object in this
+    // document since revision 1. What moved is the TEXT under it, and only for
+    // an IPv6 endpoint. Sixteen bytes used to be written as eight hex groups
+    // with no `::`, so the loopback read `0:0:0:0:0:0:0:1`; they are now
+    // written the way RFC 5952 spells them, which is the way zenohd logs them,
+    // `::1`. An IPv4 endpoint, a MAC and a vsock context id read as before.
+    //
+    // ⚠ SO THE REVISION NUMBER IS THE WHOLE NOTICE, on the rule revisions 9, 10
+    // and 13 set for a value that moves under a stationary key. A consumer that
+    // JOINED an `addr` to an address it obtained elsewhere by text found no
+    // match before and will find one now; a consumer that STORED the old text
+    // is holding a spelling no other surface prints.
+    DocumentShape {
+        document: CENSUS,
+        revision: 14,
+        keys: CENSUS_R14_KEYS,
+        retiring: &[],
+        families: CENSUS_R11_FAMILIES,
+        planes: CENSUS_R6_PLANES,
+        carries: CENSUS_R11_CARRIES,
+    },
     DocumentShape {
         document: FIELDS,
         revision: 1,
@@ -1064,6 +1088,29 @@ pub const DOCUMENT_HISTORY: &[DocumentShape] = &[
     DocumentShape {
         document: FIELDS,
         revision: 17,
+        keys: FIELDS_R15_KEYS,
+        retiring: &[],
+        families: FIELDS_R17_FAMILIES,
+        planes: &[],
+        carries: FIELDS_R17_CARRIES,
+    },
+    // ZA-3695 — AN IPV6 ADDRESS CHANGED SPELLING UNDER A STATIONARY KEY, in the
+    // field document as in the census.
+    //
+    // No key, family, plane or carries axis moves, so this row reads revision
+    // 17's tables unchanged. `addr` on the endpoints of a flow object is the
+    // text that moved, and only for an IPv6 endpoint: eight hex groups with no
+    // `::` until this revision, RFC 5952's text since — the loopback was
+    // `0:0:0:0:0:0:0:1` and is `::1`. IPv4, MAC and vsock endpoints are as they
+    // were.
+    //
+    // ⚠ THE REVISION IS THE WHOLE NOTICE, as it was for census 14: a consumer
+    // that joined an `addr` to a router's text by string finds the match now,
+    // and one that stored the old text holds a spelling no other surface
+    // prints.
+    DocumentShape {
+        document: FIELDS,
+        revision: 18,
         keys: FIELDS_R15_KEYS,
         retiring: &[],
         families: FIELDS_R17_FAMILIES,
@@ -2286,6 +2333,15 @@ pub const CENSUS_R12_KEYS: &[&str] = &[
 /// it is written down here and on the [`DocumentShape`] row rather than left to
 /// a commit message.
 pub const CENSUS_R13_KEYS: &[&str] = CENSUS_R12_KEYS;
+
+/// The census document's key set at revision 14 (ZA-3695).
+///
+/// IDENTICAL to revision 13, aliased on [`CENSUS_R13_KEYS`]' rule. `addr` is
+/// in this set since revision 1 and is the key whose IPv6 text moved: eight hex
+/// groups with no `::` until this revision, RFC 5952's spelling since. No axis
+/// can see a value move under a stationary key, so the revision number is the
+/// whole notice, written down here and on the [`DocumentShape`] row.
+pub const CENSUS_R14_KEYS: &[&str] = CENSUS_R13_KEYS;
 
 /// WHY a keyexpr reference did not resolve, at census revision 11.
 ///
@@ -7832,7 +7888,10 @@ mod tests {
             // `interests[].declarer_zid`) changed SPELLING under stationary
             // keys: the bytes reversed, zenoh's own. No axis here can see a
             // value move, so this entry is the notice, as for 9 and 10.
-            (CENSUS, 13u32),
+            // ZA-3695 — to 14 when an IPv6 `addr` changed spelling under its
+            // stationary key: eight hex groups with no `::`, now RFC 5952's
+            // text. Again no axis can see it; this entry is the notice.
+            (CENSUS, 14u32),
             // R2175 (open-debt item 552) — the field document moved to 2 when
             // its PAYLOAD PLANE joined the pin (fifteen keys revision 1 had
             // never covered) and its first three value families were declared.
@@ -7890,7 +7949,10 @@ mod tests {
             // ZA-3687 — to 17 when the tree gained the `kind` word `zid`, a
             // field named `zid` being an identity whose `value` is zenoh's
             // spelling. The family widens by one word and no key moves.
-            (FIELDS, 17),
+            // ZA-3695 — to 18 when an IPv6 `addr` changed spelling under its
+            // stationary key, in the field document as in the census. No axis
+            // moves; this entry is the notice.
+            (FIELDS, 18),
             // R2121 (open-debt item 460) — the summary moved to 2 when it
             // gained `inert_counters`; R2122 (item 238) to 3 when its
             // `framing` group stopped disagreeing with the capture report's.

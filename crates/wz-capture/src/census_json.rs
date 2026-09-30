@@ -1222,6 +1222,92 @@ mod tests {
         );
     }
 
+    /// ZA-3695 — an IPv6 flow reaches the census document in RFC 5952 text.
+    ///
+    /// `addr` is a value a consumer JOINS on, and until this item the census
+    /// wrote sixteen bytes as eight hex groups with no `::` — `fe80::1` was
+    /// `fe80:0:0:0:0:0:0:1` — so a join against a router's own text, which
+    /// carries the compressed form, found no match for one host. The two
+    /// endpoints are the two rules a renderer that only dropped leading zeros
+    /// gets wrong: a run to compress, and a TIE between two runs where the first
+    /// one compresses.
+    ///
+    /// The IPv4 datagram beside it is the negative arm, for the reason its
+    /// siblings give.
+    ///
+    /// THE REVISION IS THE ONLY NOTICE this value change has — no key moved —
+    /// so the document must carry a revision that says so. It is read from the
+    /// table and compared with a floor rather than written down again, which is
+    /// what the vsock test above does for revision 9.
+    #[test]
+    fn the_census_document_spells_an_ipv6_flow_the_way_rfc_5952_does() {
+        use crate::datagram_tests::{init_message, udp_packet, udp_packet_v6};
+
+        let a = [0xfe, 0x80, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x01];
+        let b = [
+            0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0x01, 0, 0, 0, 0, 0, 0x01,
+        ];
+        let v6 = udp_packet_v6(a, 43210, b, 7447, &init_message());
+        let v4 = udp_packet(
+            [192, 168, 1, 5],
+            43210,
+            [192, 168, 1, 9],
+            7447,
+            &init_message(),
+        );
+
+        let mut d = Dissection::new();
+        d.push_packet_at(LINKTYPE_ETHERNET, 0, Some(0), &v6);
+        d.push_packet_at(LINKTYPE_ETHERNET, 1, Some(1), &v4);
+        d.finish();
+        assert_eq!(
+            d.datagram_flows().len(),
+            2,
+            "the fixture must carry BOTH families as flows, or one of the arms \
+             below grades a string that is not in the document"
+        );
+
+        let doc = census_json(&d);
+
+        // Each endpoint on its own: which of the two is `low` is the flow
+        // key's decision and not this test's claim.
+        for ep in [
+            "{\"addr\":\"fe80::1\",\"port\":43210}",
+            "{\"addr\":\"2001:db8::1:0:0:1\",\"port\":7447}",
+        ] {
+            assert!(
+                doc.contains(ep),
+                "an IPv6 endpoint is spelled the way RFC 5952 spells it ({ep}): \
+                 {doc}"
+            );
+        }
+        for old in ["fe80:0:0:0:0:0:0:1", "2001:db8:0:0:1:0:0:1"] {
+            assert!(
+                !doc.contains(old),
+                "and the eight-group reading ({old}) is GONE from the document, \
+                 not merely joined by a second one: {doc}"
+            );
+        }
+        assert!(
+            doc.contains("{\"addr\":\"192.168.1.5\",\"port\":43210}"),
+            "the IPv4 datagram keeps its dotted quad -- the arm a repair that \
+             spelled every address through IPv6 would break: {doc}"
+        );
+
+        let declared = crate::doc_revision::newest(crate::doc_revision::CENSUS)
+            .expect("the census document has a revision")
+            .revision;
+        assert!(
+            doc.contains(&alloc::format!("\"revision\":{declared}")),
+            "the document announces revision {declared}: {doc}"
+        );
+        assert!(
+            declared >= 14,
+            "and it is at least 14 -- the revision this spelling arrived at. A \
+             value that moved under a stationary key has no other notice"
+        );
+    }
+
     /// R311y851 — the document reports a plane it cannot FEED by answering
     /// `null`, and it reports EVERY such plane that way.
     ///

@@ -422,8 +422,8 @@ impl Endpoint {
         s
     }
 
-    /// This endpoint's address spelled as an IP ADDRESS — dotted quad when it
-    /// is four bytes long, colon-separated hex groups otherwise.
+    /// This endpoint's address spelled as an IP ADDRESS — a dotted quad for four
+    /// bytes, RFC 5952 text for sixteen.
     ///
     /// Separate from [`Self::addr_text`] and public, because a TUNNEL HOP
     /// ([`TunnelHop::src`]) is an endpoint with no flow and therefore no
@@ -436,12 +436,59 @@ impl Endpoint {
     /// wanting it: a carrier header has none — [`TunnelHop`] carries zero there
     /// and says so — and printing `10.0.0.1:0` beside a real `:7447` is how a
     /// reader concludes a tunnel terminates on port zero.
+    ///
+    /// # Sixteen bytes are RFC 5952 text
+    ///
+    /// ZA-3695. Until then sixteen bytes were written as eight hex groups with
+    /// no `::` at all, so the loopback read `0:0:0:0:0:0:0:1`. That is a valid
+    /// spelling and it is not the one zenohd logs or RFC 5952 prescribes, which
+    /// is the same complaint ZA-3687 made about a zid: a consumer that joins a
+    /// census `addr` to a router's own text by string finds no match for a node
+    /// that is the same node.
+    ///
+    /// The rules of RFC 5952 §4, all of which the text now follows: lower-case
+    /// hex, no leading zero inside a group, the LONGEST run of two or more zero
+    /// groups written `::` (the FIRST of two runs that tie), and a single zero
+    /// group written `0` and never shortened. So `2001:db8:0:0:1:0:0:1` is
+    /// `2001:db8::1:0:0:1` and `2001:db8:0:1:1:1:1:1` keeps its `0`.
+    ///
+    /// It is `core::net::Ipv6Addr`'s `Display` and not a formatter of this
+    /// crate's, because that is the printer zenohd's own logs and locators go
+    /// through, so a join by string needs no second normaliser. What keeps that
+    /// choice honest is that the rules above are graded against an independent
+    /// implementation (`an_ipv6_endpoint_spells_the_way_rfc_5952_does`) and a
+    /// sweep of every zero-run shape against the specification's own rule
+    /// (`every_zero_run_shape_is_spelled_as_the_specification_orders`), so a
+    /// change in the standard library fails here instead of moving a document.
+    ///
+    /// ⚠ AN IPV4-MAPPED ADDRESS IS WRITTEN IN THE MIXED FORM, `::ffff:192.0.2.1`,
+    /// which is the standard library's choice and one RFC 5952 §5 leaves alone
+    /// ("this document does not modify those representations"). It is pinned
+    /// rather than assumed (`an_ipv4_mapped_address_is_written_in_the_mixed_form`)
+    /// because it is the one shape where implementations differ: Python 3.12
+    /// writes the same address `::ffff:c000:201`. No capture carries one — a
+    /// mapped address never appears on the wire.
+    ///
+    /// # What is NOT changed: any other length
+    ///
+    /// A slice that is neither four nor sixteen bytes is still read as hex
+    /// groups in the old way — `aaaa:aaaa:aaaa` for six bytes. No link produces
+    /// one (a TCP or UDP endpoint is four or sixteen by construction, and a GRE
+    /// hop is read out of an IP header), and
+    /// `every_link_kind_spells_its_own_addresses` uses exactly that reading as
+    /// its anti-vacuity leg: it is what keeps the two arms that answer with the
+    /// empty string from passing on a renderer that spells nothing. It is the
+    /// "not four bytes, therefore IPv6" inference this method's neighbours were
+    /// repaired of, left in place here because this item is about sixteen bytes
+    /// and because removing it means redesigning that test.
     pub fn ip_text(&self) -> alloc::string::String {
         use core::fmt::Write as _;
         let a = self.addr();
         let mut s = alloc::string::String::new();
         if self.is_ipv4() {
             let _ = write!(s, "{}.{}.{}.{}", a[0], a[1], a[2], a[3]);
+        } else if let Ok(v6) = <[u8; 16]>::try_from(a) {
+            let _ = write!(s, "{}", core::net::Ipv6Addr::from(v6));
         } else {
             for (i, c) in a.chunks(2).enumerate() {
                 if i > 0 {
@@ -2592,6 +2639,178 @@ mod tests {
         // `wz_session_core::locator`'s `0xFFFF_FFFF`.
         let any = Endpoint::new(&0xFFFF_FFFFu64.to_le_bytes(), 0);
         assert_eq!(any.addr_text(LinkKind::Vsock), "4294967295");
+    }
+
+    /// The sixteen wire bytes of an IPv6 address given as its eight groups.
+    fn v6_bytes(groups: [u16; 8]) -> [u8; 16] {
+        let mut b = [0u8; 16];
+        for (i, g) in groups.iter().enumerate() {
+            b[2 * i..2 * i + 2].copy_from_slice(&g.to_be_bytes());
+        }
+        b
+    }
+
+    /// ZA-3695 — an IPv6 endpoint is spelled the way RFC 5952 spells it, and
+    /// the census reaches that text through `addr_text` for both IP families.
+    ///
+    /// EVERY EXPECTED STRING WAS PRODUCED BY PYTHON'S `ipaddress`, an
+    /// implementation this crate shares no code with, and not by this crate's
+    /// own printer. The printer under test is the standard library's, so a
+    /// table written by hand from what that printer was expected to say would
+    /// grade it against its own reading of the rules.
+    ///
+    /// The rows are the shapes the rules turn on, and the ticket's own five
+    /// come first: the loopback, a link-local address, the TIE that must
+    /// compress its FIRST run, an address with no zero group, and the all-zero
+    /// address. Then the ones a renderer gets wrong by being simple — a single
+    /// zero group that must NOT be shortened (`2001:db8:0:1:1:1:1:1`), a run at
+    /// either end, a later run that is longer than an earlier one, and leading
+    /// zeros inside a group.
+    #[test]
+    fn an_ipv6_endpoint_spells_the_way_rfc_5952_does() {
+        let cases: [([u16; 8], &str); 16] = [
+            ([0, 0, 0, 0, 0, 0, 0, 0], "::"),
+            ([0, 0, 0, 0, 0, 0, 0, 1], "::1"),
+            ([0xfe80, 0, 0, 0, 0, 0, 0, 1], "fe80::1"),
+            ([0x2001, 0xdb8, 0, 0, 1, 0, 0, 1], "2001:db8::1:0:0:1"),
+            ([0x2001, 0xdb8, 0, 1, 1, 1, 1, 1], "2001:db8:0:1:1:1:1:1"),
+            ([0x2001, 0xdb8, 1, 2, 3, 4, 5, 6], "2001:db8:1:2:3:4:5:6"),
+            ([1, 0, 0, 0, 0, 0, 0, 0], "1::"),
+            ([0, 0, 0, 0, 0, 0, 1, 2], "::1:2"),
+            ([1, 0, 0, 2, 0, 0, 0, 3], "1:0:0:2::3"),
+            (
+                [
+                    0xabcd, 0xef01, 0x2345, 0x6789, 0xabcd, 0xef01, 0x2345, 0x6789,
+                ],
+                "abcd:ef01:2345:6789:abcd:ef01:2345:6789",
+            ),
+            ([0x2001, 0xdb8, 0, 0, 0, 0, 2, 1], "2001:db8::2:1"),
+            ([0xff02, 0, 0, 0, 0, 0, 0, 1], "ff02::1"),
+            ([0x2001, 0xdb8, 0, 0, 0, 0, 0, 0xa], "2001:db8::a"),
+            ([1, 0, 0, 0, 2, 0, 3, 4], "1::2:0:3:4"),
+            ([1, 0, 2, 0, 3, 4, 5, 6], "1:0:2:0:3:4:5:6"),
+            ([1, 2, 3, 4, 5, 6, 7, 0], "1:2:3:4:5:6:7:0"),
+        ];
+        for (groups, want) in cases {
+            let e = Endpoint::new(&v6_bytes(groups), 7447);
+            assert_eq!(e.ip_text(), want, "groups {groups:x?}");
+            // The two IP families reach the same text through `addr_text`,
+            // which is the call the census, the field document and the report
+            // make. `ip_text` alone would leave the document path ungraded.
+            for kind in [LinkKind::Tcp, LinkKind::Udp] {
+                assert_eq!(e.addr_text(kind), want, "{kind:?} groups {groups:x?}");
+            }
+        }
+    }
+
+    /// ZA-3695 — EVERY shape a run of zero groups can take, against the rule
+    /// written out from the specification.
+    ///
+    /// The table above is sixteen chosen addresses. This is all 256 patterns of
+    /// "which of the eight groups are zero", each filled with distinct non-zero
+    /// values elsewhere, so a shape nobody thought to write a row for is still
+    /// asked. The oracle is `rfc5952` below, written from RFC 5952 §4.2 and not
+    /// from the standard library's source: the longest run of TWO OR MORE zero
+    /// groups, the first when runs tie, nothing for a lone zero group.
+    ///
+    /// The fill values are `0x0?0a`, never `0xffff`, so no pattern here is an
+    /// IPv4-mapped address — that is the one shape the standard library writes
+    /// differently on purpose, and it has its own test.
+    ///
+    /// ANTI-VACUITY: both outcomes must be populated. A sweep in which no
+    /// pattern compressed, or in which every one did, grades one arm of the
+    /// rule and reports the other as passing.
+    #[test]
+    fn every_zero_run_shape_is_spelled_as_the_specification_orders() {
+        fn rfc5952(g: &[u16; 8]) -> alloc::string::String {
+            // Strictly greater, so of two runs of equal length the FIRST stays.
+            let (mut best_start, mut best_len) = (0usize, 0usize);
+            let mut i = 0;
+            while i < 8 {
+                if g[i] == 0 {
+                    let start = i;
+                    while i < 8 && g[i] == 0 {
+                        i += 1;
+                    }
+                    if i - start > best_len {
+                        best_start = start;
+                        best_len = i - start;
+                    }
+                } else {
+                    i += 1;
+                }
+            }
+            let hex = |part: &[u16]| {
+                part.iter()
+                    .map(|v| alloc::format!("{v:x}"))
+                    .collect::<alloc::vec::Vec<_>>()
+                    .join(":")
+            };
+            if best_len < 2 {
+                hex(g)
+            } else {
+                alloc::format!(
+                    "{}::{}",
+                    hex(&g[..best_start]),
+                    hex(&g[best_start + best_len..])
+                )
+            }
+        }
+
+        let (mut compressed, mut plain) = (0usize, 0usize);
+        for mask in 0u32..256 {
+            // Bit i set means group i is ZERO.
+            let mut g = [0u16; 8];
+            for (i, slot) in g.iter_mut().enumerate() {
+                *slot = if mask & (1 << i) != 0 {
+                    0
+                } else {
+                    0x0100 * (i as u16 + 1) + 0x0a
+                };
+            }
+            let want = rfc5952(&g);
+            let got = Endpoint::new(&v6_bytes(g), 0).ip_text();
+            assert_eq!(got, want, "zero mask {mask:08b}, groups {g:x?}");
+            if want.contains("::") {
+                compressed += 1;
+            } else {
+                plain += 1;
+            }
+        }
+        assert_eq!(compressed + plain, 256, "the sweep covers every pattern");
+        assert!(
+            compressed > 0 && plain > 0,
+            "both arms of the rule must be populated: {compressed} compressed, \
+             {plain} plain"
+        );
+    }
+
+    /// ZA-3695 — an IPv4-MAPPED address is written in the mixed form, and this
+    /// pins that as a decision rather than leaving it as a side effect.
+    ///
+    /// RFC 5952 §5 says of the addresses with an IPv4 address in the low 32
+    /// bits that it "does not modify those representations", so both
+    /// `::ffff:192.0.2.1` and `::ffff:c000:201` conform. The standard library
+    /// writes the first, and so does zenohd; Python 3.12's `ipaddress` writes
+    /// the second, which is why this row is NOT in the table above — a table
+    /// produced by that implementation would have contradicted it.
+    ///
+    /// No capture carries one: a mapped address is a socket-API construct and
+    /// never appears in an IP header.
+    #[test]
+    fn an_ipv4_mapped_address_is_written_in_the_mixed_form() {
+        let e = Endpoint::new(&v6_bytes([0, 0, 0, 0, 0, 0xffff, 0xc000, 0x0201]), 0);
+        assert_eq!(e.ip_text(), "::ffff:192.0.2.1");
+    }
+
+    /// ZA-3695 — the four-byte arm is untouched, which is the negative leg of
+    /// the IPv6 tests above: a repair that spelled every address through
+    /// `Ipv6Addr` would turn `192.168.1.5` into an IPv6-mapped form.
+    #[test]
+    fn an_ipv4_endpoint_is_still_a_dotted_quad() {
+        let e = Endpoint::new(&[192, 168, 1, 5], 80);
+        assert_eq!(e.ip_text(), "192.168.1.5");
+        assert_eq!(e.addr_text(LinkKind::Tcp), "192.168.1.5");
     }
 
     /// The declared readable set IS the set the dispatch reads — both ways.
