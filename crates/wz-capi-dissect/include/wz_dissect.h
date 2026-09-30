@@ -2212,6 +2212,15 @@ void wz_dissect_live_end(wz_dissect_live *h);
  * A handle fed by wz_dissect_live_push has none: pass NULL, 0 and the document
  * renders no datagram rows and says so with "capture_reread":false.
  *
+ * `bytes` may END ANYWHERE. Since field-document revision 21 a prefix cut
+ * inside a record is read up to its last whole record, by the walk
+ * wz_dissect_pcap_frame_bytes answers a packet by number with, so every packet
+ * the handle has decoded is there and a row carries the same `frame_offset` and
+ * `l2` it carries once the record is whole: the document over such a prefix is
+ * the document over the boundary before it. "capture_reread":false therefore
+ * means the bytes are not a capture container -- shorter than its file header,
+ * or malformed -- and no longer means a record was cut off.
+ *
  * `h` is not const. A list not drained yet has no id, so the ids are settled
  * first by the reconciliation a drain performs, handing out no record: the next
  * wz_dissect_live_drain returns exactly what it would have, under the same ids.

@@ -1223,6 +1223,18 @@ pub const DOCUMENT_HISTORY: &[DocumentShape] = &[
     //
     // A consumer pinned to 20 loses nothing: the new keys are additions inside
     // an object it already reads by name.
+    //
+    // ⚠ TWO CHANGES UNDER ONE NUMBER, and only the first is expressible as an
+    // axis, on the precedent revision 9 set. The second moves VALUES under
+    // stationary keys: the second read of the capture used to refuse a container
+    // cut inside a record, so a document over such a prefix wrote every row
+    // without `frame_offset` and `l2` and said `capture_reread: false`, cells the
+    // same rows carry once the record is whole. It now reads the container up to
+    // its last whole record, as the frame door does, so those cells arrive at
+    // the step the row is issued. A consumer that stored a row written without
+    // them at a mid-record step held a cell that is now present, and
+    // `capture_reread: false` now means the bytes are not a capture container
+    // and no longer that a record was cut off.
     DocumentShape {
         document: FIELDS,
         revision: 21,

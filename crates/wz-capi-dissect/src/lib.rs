@@ -8655,7 +8655,24 @@ mod tests {
         pairs: usize,
     }
 
-    /// Read `file` into a handle one packet at a time and, after every packet
+    /// Where a scenario ends each step of the feed.
+    ///
+    /// The eight scenarios that move something a row is written FROM all stop on
+    /// a record boundary, and that was a population with one axis missing: a
+    /// consumer that follows a growing file takes a document at whatever byte a
+    /// read landed on, which is inside a record at most of its steps. A row that
+    /// read one way at such a step and another once the record was whole was not
+    /// in any scenario, so nothing here could name the cell.
+    #[derive(Clone, Copy)]
+    enum Feed {
+        /// After every whole record.
+        Records,
+        /// After every `n` bytes, so that most steps end INSIDE a record, the
+        /// first few inside the file header itself.
+        Bytes(usize),
+    }
+
+    /// Read `file` into a handle in the steps `feed` names and, after every step
     /// (and after `end()` when `then_end`), take the whole field document. Rows
     /// are matched between one document and the next by `seq`, and every cell
     /// that differs is recorded.
@@ -8664,6 +8681,7 @@ mod tests {
         limits: wz_capture::DissectionLimits,
         declarations: &str,
         then_end: bool,
+        feed: Feed,
     ) -> RowChanges {
         let handle = Box::into_raw(Box::new(live::LiveDissection::new(limits)));
         let mut held: std::collections::BTreeMap<u64, wz_session_core::json5::Json5Value> =
@@ -8672,7 +8690,14 @@ mod tests {
             cells: std::collections::BTreeSet::new(),
             pairs: 0,
         };
-        let states: Vec<usize> = pcap_record_ends(file);
+        let states: Vec<usize> = match feed {
+            Feed::Records => pcap_record_ends(file),
+            Feed::Bytes(n) => (1..)
+                .map(|i| i * n)
+                .take_while(|end| *end < file.len())
+                .chain([file.len()])
+                .collect(),
+        };
         let last = *states.last().expect("a capture with packets");
         let mut take = |prefix: &[u8], seen: &mut RowChanges| {
             let doc = parsed(&live_fields_declaring(handle, prefix, declarations));
@@ -8835,7 +8860,7 @@ mod tests {
             .collect();
         let mut observed = std::collections::BTreeSet::new();
         for (name, file, limits, declarations, expected) in scenarios {
-            let seen = observe_row_changes(&file, limits, declarations, true);
+            let seen = observe_row_changes(&file, limits, declarations, true, Feed::Records);
             assert!(
                 seen.pairs > 4,
                 "{name}: only {} row pair(s) compared, so an empty answer would mean nothing",
@@ -8854,6 +8879,44 @@ mod tests {
             assert!(
                 observed.iter().any(|cell| names_row_cell(pattern, cell)),
                 "the header names `{pattern}` and no scenario moved it"
+            );
+        }
+
+        // THE STEPS THAT END INSIDE A RECORD, and they are CONTROLS: a document
+        // taken seven bytes at a time reads a row exactly as the one taken when
+        // the record is whole does, so nothing may change. A stream capture and a
+        // datagram one, because the two flow kinds write a row's first byte and
+        // its link header from different rows and either could have held the
+        // defect. Seven is not a divisor of a record, so the steps land in the
+        // file header, in a record header, and in the data of a record.
+        //
+        // What this measured before the second read walked the container the way
+        // the frame door does: a step ending inside a record made the whole read
+        // refuse, every row of that step was written without `frame_offset` and
+        // `l2`, and both cells then read differently in the next document. The
+        // header's list named neither, so the promise it made was false, and the
+        // eight scenarios above could not see it because each of them stops on a
+        // record boundary.
+        for (name, file) in [
+            (
+                "a stream capture fed seven bytes at a time",
+                pcap_prefix(&packets, packets.len()),
+            ),
+            (
+                "datagram chains fed seven bytes at a time",
+                wz_capture::fixtures::chain_sequence_capture(3),
+            ),
+        ] {
+            let seen = observe_row_changes(&file, Default::default(), "", true, Feed::Bytes(7));
+            assert!(
+                seen.pairs > 4,
+                "{name}: only {} row pair(s) compared, so an empty answer would mean nothing",
+                seen.pairs
+            );
+            assert_eq!(
+                seen.cells,
+                cells(&[]),
+                "{name}: a row issued at a step inside a record must not read differently later"
             );
         }
     }

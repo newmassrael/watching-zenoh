@@ -2719,14 +2719,35 @@ fn walk_agrees(walked: &str, framed: &str) -> bool {
         || walked == framed
 }
 
-/// The capture, parsed a second time, in EITHER format.
+/// The capture's packets, read a second time, in EITHER format.
 ///
-/// Both, and that is not a convenience: reading only pcapng would tell a
+/// Both formats, and that is not a convenience: reading only pcapng would tell a
 /// classic `.pcap` holding datagram traffic that its packets could not be
 /// re-read — a notice true about the code and false about the file.
-enum Reread {
-    Ng(crate::pcapng::PcapngFile),
-    Classic(crate::pcap::PcapFile),
+///
+/// # The same walk the frame door runs, and why that is the repair
+///
+/// This used to parse the whole file and answer `None` at the first record cut
+/// short. A capture that is still being written, or a prefix a consumer hands
+/// over at whatever byte a read landed on, ends inside a record at most of the
+/// steps it is asked about, and the document then wrote every row without
+/// `frame_offset` and `l2` and said `capture_reread: false` — cells the same
+/// rows carry a moment later, once the record is whole. The dissection the rows
+/// come from had never seen the cut record, so the rows were right and only the
+/// second read was over-strict.
+///
+/// It now walks the container with [`crate::CaptureCursor`], which is the walk
+/// [`crate::captured_frame`] answers a packet by number with and the walk that
+/// numbers the packets a dissection anchors its messages to. A record cut off at
+/// the end of the bytes is not held and is not an error: the packets before it
+/// are all here, numbered as the whole file numbers them. A container that is
+/// MALFORMED is still refused, as before — a file that is not there yet and a
+/// file that is broken are different facts, and the cursor is what tells them
+/// apart.
+struct Reread<'a> {
+    /// Every whole packet, in the order the container holds them, which is
+    /// ascending in `index`.
+    frames: Vec<crate::CapturedFrame<'a>>,
 }
 
 struct RereadPacket<'a> {
@@ -2735,30 +2756,49 @@ struct RereadPacket<'a> {
     data: &'a [u8],
 }
 
-impl Reread {
-    fn of(capture: &[u8]) -> Option<Self> {
-        if crate::pcapng::looks_like_pcapng(capture) {
-            crate::pcapng::parse(capture).ok().map(Self::Ng)
-        } else {
-            crate::pcap::parse(capture).ok().map(Self::Classic)
+impl<'a> Reread<'a> {
+    fn of(capture: &'a [u8]) -> Option<Self> {
+        let mut cursor = crate::CaptureCursor::new();
+        let mut frames = Vec::new();
+        let walk = cursor.walk(capture, |event| {
+            if let crate::CaptureEvent::Frame(frame) = event {
+                frames.push(frame);
+            }
+            core::ops::ControlFlow::Continue(())
+        });
+        match walk {
+            // To where the bytes end, on a boundary or inside a record — but
+            // only once the FILE HEADER is whole. The cursor judges the header
+            // before it judges the magic and calls a short one "not all there
+            // yet", so eighteen bytes of text halt it exactly as a capture whose
+            // writer has not finished its header does. It has consumed nothing
+            // in both cases, and that is what tells a container that has begun
+            // from bytes that have not become one: the second is not a capture
+            // this could be said to have re-read, which is what the whole-file
+            // parse always answered.
+            Ok(crate::CaptureWalk::Halted { .. }) if cursor.consumed() > 0 => Some(Self { frames }),
+            Ok(crate::CaptureWalk::Halted { .. }) => None,
+            // Fewer than four bytes: the format is not known and nothing was
+            // read, which is the empty slice's answer as it always was.
+            Ok(crate::CaptureWalk::Undecided) => None,
+            // The sink above never asks to stop.
+            Ok(crate::CaptureWalk::Stopped) => None,
+            // A container that is malformed.
+            Err(_) => None,
         }
     }
 
     fn packet(&self, index: usize) -> Option<RereadPacket<'_>> {
-        match self {
-            Self::Ng(file) => file.packets.get(index).map(|p| RereadPacket {
-                link_type: p.link_type,
-                index: p.index,
-                data: &p.data,
-            }),
-            Self::Classic(file) => file.packets.get(index).map(|p| RereadPacket {
-                // One link type for the whole file, which is what a classic
-                // pcap's header says and the reason it is not on the packet.
-                link_type: file.link_type,
-                index: p.index,
-                data: &p.data,
-            }),
-        }
+        // By the packet's own number and not by position: the number is the
+        // coordinate a row names, and the two agree only while nothing in the
+        // container is skipped.
+        let at = self.frames.binary_search_by_key(&index, |f| f.index).ok()?;
+        let frame = &self.frames[at];
+        Some(RereadPacket {
+            link_type: frame.link_type,
+            index: frame.index,
+            data: frame.data,
+        })
     }
 }
 
@@ -4701,6 +4741,155 @@ mod tests {
             &[0x00, 0x64, 0x08, 0x00],
             "and the tag is the four bytes after the span, not part of it"
         );
+    }
+
+    /// A CONTAINER CUT INSIDE A RECORD READS AS ITS WHOLE RECORDS DO.
+    ///
+    /// The bug this grades: the second read of the capture parsed the WHOLE
+    /// file and gave up on the first cut record, so a prefix ending a few bytes
+    /// into the next record reported `capture_reread: false` and wrote every
+    /// row without `frame_offset` and `l2`, which the same rows carry a moment
+    /// later once the record completes. A consumer that follows a growing file
+    /// meets exactly that prefix at every step that lands mid-record.
+    ///
+    /// # The oracle is the boundary document
+    ///
+    /// The dissection is built from the prefix that ends ON a record boundary,
+    /// and the document rendered over it is the answer. Every cut inside the
+    /// NEXT record, at every length from its first byte to one short of its
+    /// last, must render the SAME document over the same dissection: the extra
+    /// bytes are a record the dissection has not decoded and the document must
+    /// not react to them. Equality of whole documents is deliberate and the
+    /// strongest form: a repair that restored `frame_offset` and lost some other
+    /// cell would still fail.
+    ///
+    /// # Boundaries come from the writers' layout, not from the reader
+    ///
+    /// A classic pcap is a 24-byte header and then 16 bytes and the data per
+    /// record; a pcapng file is a 28-byte section header, 32 bytes per interface
+    /// and 32 bytes plus the data padded to four per packet. The reader under
+    /// test is never asked where a record ends.
+    ///
+    /// # Anti-vacuity, both ways
+    ///
+    /// The boundary document must actually carry `capture_reread: true` and an
+    /// `l2` object, or equality would hold between two empty documents. And each
+    /// cut prefix is asserted to be one the whole-file parser REFUSES, which is
+    /// the precondition that makes this a test of the failure and not of a
+    /// prefix that never had one.
+    #[cfg(feature = "network-codecs")]
+    #[test]
+    fn a_container_cut_inside_a_record_reads_as_its_whole_records_do() {
+        use crate::datagram_tests::{init_message, udp_packet};
+
+        let packets: Vec<Vec<u8>> = (0u8..4)
+            .map(|i| {
+                udp_packet(
+                    [10, 0, 0, 1 + i],
+                    43210 + u16::from(i),
+                    [10, 0, 1, 1 + i],
+                    7447,
+                    &init_message(),
+                )
+            })
+            .collect();
+
+        let classic_refs: Vec<(u32, u32, &[u8])> =
+            packets.iter().map(|p| (0u32, 0u32, p.as_slice())).collect();
+        let classic = crate::pcap::write(LINKTYPE_ETHERNET, &classic_refs);
+        let mut at = 24usize;
+        let mut classic_bounds = vec![at];
+        for p in &packets {
+            at += 16 + p.len();
+            classic_bounds.push(at);
+        }
+
+        let ng_refs: Vec<(u32, u64, &[u8])> = packets
+            .iter()
+            .enumerate()
+            .map(|(i, p)| (0u32, 1_000_000 + i as u64 * 100, p.as_slice()))
+            .collect();
+        let ng = crate::pcapng::write(&[(LINKTYPE_ETHERNET, 6)], &ng_refs);
+        let mut at = 28usize + 32;
+        let mut ng_bounds = vec![at];
+        for p in &packets {
+            at += 32 + p.len() + (4 - p.len() % 4) % 4;
+            ng_bounds.push(at);
+        }
+
+        for (name, file, bounds) in [
+            ("classic pcap", &classic, &classic_bounds),
+            ("pcapng", &ng, &ng_bounds),
+        ] {
+            assert_eq!(*bounds.last().expect("boundaries"), file.len(), "{name}");
+            let mut cuts_checked = 0usize;
+            // Packet-holding boundaries only: the first is the header with no
+            // record, which has no row to compare.
+            for window in bounds.windows(2).skip(1) {
+                let (whole, next_end) = (window[0], window[1]);
+                let d = Dissection::from_capture(&file[..whole]).expect("the prefix reads");
+                let expected = fields_json(&d, &file[..whole], None, None);
+                assert!(
+                    expected.contains("\"capture_reread\":true") && expected.contains("\"l2\":{"),
+                    "{name}, boundary {whole}: the boundary document must hold an l2 \
+                     object, or the equality below compares two documents with nothing \
+                     in them: {expected}"
+                );
+                for cut in whole + 1..next_end {
+                    let prefix = &file[..cut];
+                    let refused = if name == "pcapng" {
+                        crate::pcapng::parse(prefix).is_err()
+                    } else {
+                        crate::pcap::parse(prefix).is_err()
+                    };
+                    assert!(
+                        refused,
+                        "{name}, cut {cut}: the whole-file parser must refuse this prefix, \
+                         or this is not the case the test is for"
+                    );
+                    let got = fields_json(&d, prefix, None, None);
+                    assert_eq!(
+                        got,
+                        expected,
+                        "{name}: a prefix of {cut} bytes ends {} byte(s) into a record the \
+                         dissection has not decoded, and must render what the {whole}-byte \
+                         boundary renders",
+                        cut - whole
+                    );
+                    cuts_checked += 1;
+                }
+            }
+            // The count the walk MUST have made, from the layout: every length
+            // strictly between two boundaries, for each packet-holding one. A
+            // loop that stopped early, or a boundary list that lost a record,
+            // shows here and not as a smaller number that still looks large.
+            let expected_cuts: usize = bounds.windows(2).skip(1).map(|w| w[1] - w[0] - 1).sum();
+            assert_eq!(
+                cuts_checked, expected_cuts,
+                "{name}: every cut inside a record after the first must be checked"
+            );
+            assert!(
+                cuts_checked > 3 * 40,
+                "{name}: {cuts_checked} cuts is too few to have reached both the record \
+                 header and the data of each record"
+            );
+        }
+
+        // WHERE THE REPAIR STOPS. A prefix that ends before the classic file
+        // header is whole is not yet a container, and says so: a document over
+        // it reads `capture_reread: false`, as a file that is not a capture at
+        // all does. The cursor judges a short header as "not all there yet" and
+        // the guard on the second read is what keeps eighteen bytes of text from
+        // being reported as a capture that was read and held no packets.
+        let d = Dissection::from_capture(&classic[..classic_bounds[1]]).expect("the prefix reads");
+        for cut in 4..24 {
+            let got = fields_json(&d, &classic[..cut], None, None);
+            assert!(
+                got.contains("\"capture_reread\":false"),
+                "a prefix of {cut} bytes is inside the file header and is not yet a \
+                 capture: {got}"
+            );
+        }
     }
 
     /// THE JOIN: the packet number a row names is a number the door
