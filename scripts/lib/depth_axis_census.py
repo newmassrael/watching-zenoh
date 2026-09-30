@@ -2354,7 +2354,14 @@ PIN_NO_SYMBOL = 2
 # four varints where zenoh lays it out sliced), and the atom is still PARTIAL.
 # READ off the census's own FAIL line, `wz citations: 16 against a pin of 15`;
 # `reached` and `ambiguous` hold at 3 and 2.
-PIN_WZ_CITATIONS = 16
+#
+# R2994 -- 16 -> 20, one atom. `platform-macos`'s reason gains the CORRECTION
+# that item 851 (unixpipe on macOS) is built, which cites wz anchors in the
+# unixpipe module (the std open, the read end, the lock), the runtime's module
+# gate and the matrix gate's now-empty gap table, and the atom is still PARTIAL.
+# READ off the census's own FAIL line, `wz citations: 20 against a pin of 16`;
+# `reached` and `ambiguous` hold at 3 and 2.
+PIN_WZ_CITATIONS = 20
 # R2626 — 44 -> 42, and this one is worth a sentence because it HELD through
 # every earlier retirement in this run (R2612, R2622). `time-hlc`'s reason is the
 # first retiree carrying AMBIGUOUS citations of its own: its oldest clauses cite
