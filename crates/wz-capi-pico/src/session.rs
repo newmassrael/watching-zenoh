@@ -864,8 +864,16 @@ pub struct z_subscriber_options_t {
 ///
 /// Both booleans are DEPRECATED upstream — with multi-threading enabled the
 /// tasks start automatically — and wz's session starts its own drive thread in
-/// `z_open`, so they are accepted and have no effect here either. That is not a
-/// wz divergence: it is upstream's own documented state for this build.
+/// `z_open`, so they are accepted and have no effect here.
+///
+/// That is NOT the whole of upstream's state, and the difference is named rather
+/// than passed over. pico 1.10.1's `z_open` never reads `auto_start_lease_task`,
+/// but it starts its executor only `if (opts.auto_start_read_task)`
+/// (`vendor/zenoh-pico/src/api/api.c` @ `if (opts.auto_start_read_task) {`), so
+/// a program that opens with it OFF holds a session pico leaves idle until it
+/// calls `zp_start_read_task`, and wz's is live at once. The default value is
+/// what is compared (`z_open_options_default`); the deferred start is not
+/// built, because no program that leaves the default is affected.
 #[repr(C)]
 pub struct z_open_options_t {
     pub auto_start_read_task: bool,
@@ -910,7 +918,11 @@ pub unsafe extern "C" fn z_subscriber_options_default(options: *mut z_subscriber
     }
 }
 
-/// Fill default open options (pico `z_open_options_default`).
+/// Fill default open options (pico `z_open_options_default`): the read task
+/// starts and the lease task does not (`vendor/zenoh-pico/src/api/api.c` @
+/// `options->auto_start_lease_task = false;`). The lease flag was written TRUE
+/// here, which nothing observed while `z_open` ignored the options and a
+/// byte-for-byte comparison with the real library found.
 ///
 /// # Safety
 /// `options` must be null or valid and writable.
@@ -919,7 +931,7 @@ pub unsafe extern "C" fn z_open_options_default(options: *mut z_open_options_t) 
     if !options.is_null() {
         *options = z_open_options_t {
             auto_start_read_task: true,
-            auto_start_lease_task: true,
+            auto_start_lease_task: false,
             executor_task_attributes: std::ptr::null_mut(),
         };
     }
