@@ -389,9 +389,9 @@ pub trait RowCoordinates {
     /// A sequence number is the handle's own count of rows it has issued, in the
     /// order it first issued them: unique, increasing, and untouched by a front
     /// trim or by a list being replaced. The produced-index is the list's own
-    /// absolute counter (`MessageList::produced` minus what is still held, plus
-    /// the position), which is what makes the answer independent of how many
-    /// messages a ceiling has already discarded.
+    /// absolute counter (how many messages it has ever produced, minus how many
+    /// it still holds, plus the position), which is what makes the answer
+    /// independent of how many messages a ceiling has already discarded.
     ///
     /// A default of `None`, and that is the true answer for a numbering that
     /// issues none: the two implementations that pre-date this method number
