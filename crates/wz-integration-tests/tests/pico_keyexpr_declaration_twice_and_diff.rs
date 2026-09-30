@@ -2241,22 +2241,24 @@ fn assert_declared_publisher_options_are_sent_as_the_real_pico_sends_them(topolo
             .expect("split yields one part")
             .to_owned()
     };
-    let distinct: std::collections::BTreeSet<String> = [
+    let declared_differently = [
         "all-plain",
         "none-plain",
         "prio-plain",
         "express-plain",
         "unreliable-plain",
         "block-plain",
-    ]
-    .into_iter()
-    .map(qos_of)
-    .collect();
+    ];
+    let distinct: std::collections::BTreeSet<String> =
+        declared_differently.into_iter().map(qos_of).collect();
+    // Every input gets its OWN rendering: the set is compared to the list it was
+    // built from, so a publisher added to the list that sends what another sends
+    // reds here, and so does one whose option the library ignores.
     assert_eq!(
         distinct.len(),
-        6,
-        "six publishers declared six different ways must send six different \
-         envelope-and-channel renderings; got {distinct:#?}"
+        declared_differently.len(),
+        "publishers declared different ways must send different envelope-and-channel \
+         renderings; got {distinct:#?}"
     );
     // The two the program declares alone on the CHANNEL: reliability is the frame's
     // reliable flag and nothing else, and only best-effort publishers clear it.
