@@ -809,7 +809,14 @@ HOST_GATED_CI_TARGETS: dict[str, str] = {
 # (`api-compat-pico`, the connectivity plane: what a session lists and what its
 # transport and link listeners are told, against libzenohpico). 962 + 1 = 963,
 # measured by `WZ_A4_REQUIRE=1 run-ci.sh --layer A4` at this round's tree.
-FOREIGN_ADJUDICATOR_LINKS = 963
+# +1 R2987, `an_open_stands_on_its_configured_id_identically_on_wz_and_libzenohc`
+# (`api-compat-c`, wz->zenoh-c: the session's own zid is the config's `id`, and
+# the insert and document doors refuse what the real config refuses, against
+# libzenohc). It is the only new `wz-proves` marker in the range, counted from
+# the diff and not assumed. 963 + 1 = 964, measured by
+# `WZ_A4_REQUIRE=1 run-ci.sh --layer A4` at this round's tree, and the value
+# gate 2b measured when this push was refused for the constant not moving.
+FOREIGN_ADJUDICATOR_LINKS = 964
 
 # ── Execution disclosure ────────────────────────────────────────────────────────
 #
