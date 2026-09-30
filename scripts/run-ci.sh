@@ -3627,6 +3627,14 @@ layer_c0_test_discipline() {
     # job, which is the only place those hosts exist.
     python3 scripts/lib/platform_surface_matrix.py --selftest || return 1
     python3 scripts/lib/platform_surface_matrix.py --check || return 1
+    # R2990 — a field of a pico options struct that NO function reads. The pico
+    # ABI mirrors zenoh-pico's options field for field, and mirroring the layout
+    # is not reading the fields: a program's request that nothing reads links,
+    # runs and does nothing. Five rounds found one struct each by reading it; this
+    # derives the population from the crate's source, so the next one is found by
+    # the commit that adds the field. Both halves run here: it needs no checkout.
+    python3 scripts/lib/pico_option_field_reader_gate.py --selftest || return 1
+    python3 scripts/lib/pico_option_field_reader_gate.py --check || return 1
     # R2564 — the token-plane diff `routing-token-tables` rests on, re-derived
     # from upstream's own `HatTokenTrait` rather than asserted in prose. The
     # atom's residual was an UNDONE AUDIT, and the sentence naming it had already

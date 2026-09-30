@@ -706,6 +706,9 @@ round_fed_gates=(
     # link module gates in wz-runtime-tokio's lib.rs. MEASURED: 2.3s, a text read
     # plus one `cargo metadata --no-deps`, no build.
     "platform_surface_matrix.py --check"
+    # R2990 -- a field of a pico options struct that no function reads. Round-fed
+    # by what it reads: the pico ABI crate's own source. A text parse, no build.
+    "pico_option_field_reader_gate.py --check"
     "upstream_reads_the_surface.py"
     "apt_package_census.py"
     "armed_skip_guard.py --check"
