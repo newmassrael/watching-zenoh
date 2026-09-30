@@ -114,13 +114,13 @@ EXPECTED_SYMBOLS = {
     # CALLER sized add nothing to release and run no callback, so the revision
     # moves for the symbol alone.
     "wz_dissect_live_message_bytes",
-    # ZA-3215 (ABI 19) — the JOINED buffer of a record that completed a fragment
+    # (ABI 19) — the JOINED buffer of a record that completed a fragment
     # chain, the bytes `above_transport.fields` indexes. Copied into a buffer
     # the CALLER sized, exactly like the door above, so the memory rule does not
     # move; it is its own symbol because it answers a different buffer of the
     # same message, and folding the two would make one record mean two ranges.
     "wz_dissect_live_reassembled_bytes",
-    # ZA-3601 (ABI 21) — the CAPTURED FRAME of a packet, by the number a field
+    # (ABI 21) — the CAPTURED FRAME of a packet, by the number a field
     # row's `first_byte.packet` names. Copied into a buffer the CALLER sized,
     # exactly like the two doors above, so the memory rule does not move. It
     # takes a CONTAINER and not a handle, and that is the design and not an
@@ -151,7 +151,7 @@ EXPECTED_SYMBOLS = {
     # combinations the container family needs four names for.
     "wz_dissect_live_census",
     "wz_dissect_live_end",
-    # ZA-3214 (ABI 18) — the FIELD DOCUMENT over a live handle, each row
+    # (ABI 18) — the FIELD DOCUMENT over a live handle, each row
     # carrying the handle's record coordinates, so rows and drained records
     # describe one dissection. The memory rule does not move: the document is
     # a `char*` released by `wz_dissect_string_free`, and the container bytes
@@ -165,7 +165,7 @@ EXPECTED_SYMBOLS = {
     # is its own symbol and not an argument of the one above, which would have
     # given one name two shapes and one of them a document with a `window`.
     "wz_dissect_live_fields_since",
-    # ZA-3509 (ABI 20) — the selector's VERDICT over that document's rows, and
+    # (ABI 20) — the selector's VERDICT over that document's rows, and
     # nothing beside it: four coordinates and a word per row, where the field
     # document renders every row's whole tree (a consumer measured 58 MB and
     # 1.5 s to read it, per chip toggle, on 25,360 rows). The memory rule does

@@ -1397,7 +1397,7 @@ fn every_key_proven_on_the_wire_is_in_the_frame_a_zenohd_would_receive() {
             "transport: { link: { tx: { batch_size: 8192 } } }",
             "8192",
         ),
-        // ZA-3362 (ZA-3659) — the second id had a LEADING zero (`0f1e2d3c`), and
+        // The second id had a LEADING zero (`0f1e2d3c`), and
         // zenohd refuses one in an `id` ("Leading 0s are not valid"), so does the
         // demo since it reads the text as zenoh does, and the run exited before
         // any frame was written. The pair keeps its point — two ids that differ
@@ -2954,7 +2954,7 @@ fn handshake_field_from_a_config(
         // gap rather than reporting the key as missing. That is the arm doing
         // its job: an unreadable field is not an absent one.
         Some(FieldValue::Bits(v)) => v.to_string(),
-        // ZA-3362 (ZA-3659) — the zid, spelled as ZENOH prints it and not in the
+        // The zid, spelled as ZENOH prints it and not in the
         // wire's byte order. The frame carries the id as its little-endian bytes;
         // zenoh prints those read as a `u128` in hex, so the text is the bytes
         // REVERSED. This arm rendered them per byte in wire order until the demo
@@ -2969,7 +2969,7 @@ fn handshake_field_from_a_config(
         // and the adminspace interop legs), so the wire text here is compared
         // in the one spelling both implementations print.
         //
-        // ZA-3687 — the tree types a zid as `Zid` since revision 17 of the field
+        // The tree types a zid as `Zid` since revision 17 of the field
         // document, so that is the variant this arm reads; it used to be a
         // `Bytes` field, and the recipe above is now also the one the tree's own
         // `value` uses. Only the zid is a reading of this kind: a bytes-valued
@@ -3603,7 +3603,7 @@ fn a_wz_node_configured_only_by_a_stock_zenoh_config_reaches_a_real_zenohd() {
   // The unhonoured keys stay out on purpose: they are reported, and this leg
   // is about the ones wz claims to apply.
   //
-  // ZA-3362 (ZA-3659) — the `id` is NOT the router file's (`a1b2c3d4`). A node
+  // The `id` is NOT the router file's (`a1b2c3d4`). A node
   // that dials a zenohd carrying its own zid is refused: zenohd logs the attempt
   // (`io/zenoh-transport/src/unicast/manager.rs` @ `Attempt to establish transport to itself`)
   // and closes the link with `CONNECTION_TO_SELF`, so the demo reports the link

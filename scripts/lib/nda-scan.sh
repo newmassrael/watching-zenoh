@@ -42,12 +42,30 @@
 #
 # Added lines of the pushed range AND the commit messages in it. The message is
 # not a lesser vector: the incident this exists for put the material in a commit
-# body. Matching is word-boundary and fixed-string — a substring sweep over a
-# repo this size is all false positives, and the same word-boundary rule is what
-# the manual scrubs used.
+# body. Only ADDED lines: a diff that deletes the vocabulary is a scrub, and
+# blocking it would block the fix. Records that are frozen by design — the
+# ledger, the acknowledgement rows — are therefore never asked to change.
+#
+# TWO KINDS OF TERM
+#
+# A plain line is a WORD: fixed-string, word-bounded, case-insensitive. A
+# substring sweep over a repo this size is all false positives, and the same
+# word-boundary rule is what the manual scrubs used.
+#
+# A line beginning `re:` is a SHAPE: an extended regular expression,
+# case-sensitive, matched anywhere in the line, so it carries its own boundaries
+# (`\b`). A word cannot say "this prefix followed by any digits": `grep -w` needs
+# the character after the match to be a non-word character, and a digit is one.
+# Vocabulary of that kind — a tracker's ticket ids, minted without end — is not a
+# finite list. A pattern that does not compile matches nothing and would green
+# every push, so it is REFUSED, not skipped; so is an empty one, which matches
+# every line.
+#
+# `wz_nda_scan_message` is the same match applied to one commit message, so the
+# refusal can come at commit time. Waiting for the push leaves the commits
+# already made stranded behind a gate that will not open until they are reworded.
 
-# Print every configured term, one per line, on stdout. Sentinel and comments
-# are filtered out; the caller distinguishes the two empty cases.
+# Print the path of the term list on stdout.
 _wz_nda_terms_file() {
     if [[ -n "${WZ_NDA_TERMS:-}" ]]; then
         printf '%s\n' "$WZ_NDA_TERMS"
@@ -60,11 +78,19 @@ _wz_nda_terms_file() {
     printf '%s/wz-nda-terms.txt\n' "$(git rev-parse --git-common-dir)"
 }
 
-# wz_nda_scan <range>  e.g. wz_nda_scan "origin/main..HEAD"
-# 0 = clean, 1 = blocked.
-wz_nda_scan() {
-    local range="$1"
-    local terms_file
+# wz_nda_terms_readable — 0 when a term list exists to be read. The commit-msg
+# hook asks first: at commit time an absent list must not block every commit of
+# a fresh clone. The push gate is the one that refuses on absence.
+wz_nda_terms_readable() {
+    [[ -r "$(_wz_nda_terms_file)" ]]
+}
+
+# _wz_nda_prepare <dir> — split the list into <dir>/fixed (words) and
+# <dir>/patterns (shapes, `re:` stripped) and set WZ_NDA_TERM_COUNT.
+#   0 = ready to scan     1 = refuse (unreadable, empty undeclared, bad pattern)
+#   3 = declared empty: nothing to match, the caller passes
+_wz_nda_prepare() {
+    local dir="$1" terms_file live sentinel=0 rc=0
     terms_file="$(_wz_nda_terms_file)"
 
     if [[ ! -r "$terms_file" ]]; then
@@ -74,7 +100,8 @@ wz_nda_scan() {
         echo "  report green on an input it could not read." >&2
         echo "" >&2
         echo "  Create it (it lives in .git/ so it can never be pushed):" >&2
-        echo "    one protected term per line; '#' comments; blank lines ignored" >&2
+        echo "    one protected term per line; '#' comments; blank lines ignored;" >&2
+        echo "    a line 're:<pattern>' is an extended regular expression" >&2
         echo "  Or, if there is genuinely nothing to protect, declare that:" >&2
         echo "    echo '!acknowledged-empty' > $terms_file" >&2
         return 1
@@ -82,19 +109,20 @@ wz_nda_scan() {
 
     # Strip comments and blanks once; the sentinel is looked for in the same
     # pass so a file holding ONLY comments cannot pass as "declared empty".
-    local live sentinel=0 count
     live="$(grep -v '^[[:space:]]*#' "$terms_file" | grep -v '^[[:space:]]*$' || true)"
     if grep -qx '!acknowledged-empty' <<<"$live"; then
         sentinel=1
         live="$(grep -vx '!acknowledged-empty' <<<"$live" || true)"
     fi
-    count="$(grep -c . <<<"$live" || true)"
-    [[ -z "$live" ]] && count=0
 
-    if [[ "$count" -eq 0 ]]; then
+    WZ_NDA_TERM_COUNT=0
+    if [[ -n "$live" ]]; then
+        WZ_NDA_TERM_COUNT="$(grep -c . <<<"$live" || true)"
+    fi
+
+    if [[ "$WZ_NDA_TERM_COUNT" -eq 0 ]]; then
         if [[ $sentinel -eq 1 ]]; then
-            echo "nda-scan: term list DECLARED EMPTY by $terms_file — nothing to match."
-            return 0
+            return 3
         fi
         echo "nda-scan: $terms_file holds no terms and no '!acknowledged-empty'" >&2
         echo "  An empty word list matches nothing and greens every push, which is" >&2
@@ -102,23 +130,75 @@ wz_nda_scan() {
         return 1
     fi
 
-    local tmp_terms hits=0
-    tmp_terms="$(mktemp)"
-    printf '%s\n' "$live" > "$tmp_terms"
+    : > "$dir/fixed"
+    : > "$dir/patterns"
+    grep -v '^re:' <<<"$live" > "$dir/fixed" || true
+    { grep '^re:' <<<"$live" || true; } | sed 's/^re://' > "$dir/patterns"
+
+    if [[ -s "$dir/patterns" ]]; then
+        # An empty pattern matches every line; one that does not compile makes
+        # grep exit 2 and the caller's `|| true` would read that as "no match".
+        if grep -q '^$' "$dir/patterns"; then
+            echo "nda-scan: a 're:' term in $terms_file is empty; it would match every line" >&2
+            return 1
+        fi
+        grep -E -f "$dir/patterns" </dev/null >/dev/null 2>&1 || rc=$?
+        if [[ $rc -ge 2 ]]; then
+            echo "nda-scan: a 're:' term in $terms_file is not a valid extended regular expression" >&2
+            echo "  A pattern that cannot compile matches nothing, which would green every push." >&2
+            return 1
+        fi
+    fi
+    return 0
+}
+
+# _wz_nda_report_terms <matches> — the matched terms, one per line, on stderr.
+_wz_nda_report_terms() {
+    printf '%s\n' "$1" | sed 's/^/  term: /' >&2
+}
+
+# _wz_nda_matches <dir> — text on stdin; prints each distinct term it matched,
+# one per line, and nothing when it matched none.
+_wz_nda_matches() {
+    local dir="$1" text
+    text="$(cat)"
+    {
+        grep -oiwF -f "$dir/fixed" <<<"$text" || true
+        grep -oE -f "$dir/patterns" <<<"$text" || true
+    } | sort -u
+}
+
+# wz_nda_scan <range>  e.g. wz_nda_scan "origin/main..HEAD"
+# 0 = clean, 1 = blocked.
+wz_nda_scan() {
+    local range="$1" dir rc=0 hits=0 file="" line found
+    dir="$(mktemp -d)"
+    _wz_nda_prepare "$dir" || rc=$?
+    case $rc in
+        0) ;;
+        3)
+            rm -rf "$dir"
+            echo "nda-scan: term list DECLARED EMPTY by $(_wz_nda_terms_file) — nothing to match."
+            return 0
+            ;;
+        *)
+            rm -rf "$dir"
+            return 1
+            ;;
+    esac
 
     # Added lines only: a diff that DELETES protected text is a scrub, and
     # blocking it would block the fix. `git diff -U0` keeps the file/line
     # context lines this walk attributes hits to.
-    local file="" line
     while IFS= read -r line; do
         case "$line" in
             '+++ b/'*) file="${line#+++ b/}" ;;
             '@@'*)     : ;;
             '+'*)
-                if grep -qiwF -f "$tmp_terms" <<<"${line:1}"; then
+                found="$(_wz_nda_matches "$dir" <<<"${line:1}")"
+                if [[ -n "$found" ]]; then
                     echo "nda-scan: BLOCKED — protected vocabulary in ${file:-<unknown>}" >&2
-                    grep -oiwF -f "$tmp_terms" <<<"${line:1}" \
-                        | sort -u | sed 's/^/  term: /' >&2
+                    _wz_nda_report_terms "$found"
                     hits=1
                 fi
                 ;;
@@ -126,14 +206,14 @@ wz_nda_scan() {
     done < <(git diff -U0 "$range" 2>/dev/null || true)
 
     # The commit MESSAGES in the range, which is where the known incident put it.
-    if git log --format=%B "$range" 2>/dev/null | grep -qiwF -f "$tmp_terms"; then
+    found="$(git log --format=%B "$range" 2>/dev/null | _wz_nda_matches "$dir" || true)"
+    if [[ -n "$found" ]]; then
         echo "nda-scan: BLOCKED — protected vocabulary in a commit message" >&2
-        git log --format=%B "$range" 2>/dev/null \
-            | grep -oiwF -f "$tmp_terms" | sort -u | sed 's/^/  term: /' >&2
+        _wz_nda_report_terms "$found"
         hits=1
     fi
 
-    rm -f "$tmp_terms"
+    rm -rf "$dir"
 
     if [[ $hits -ne 0 ]]; then
         echo "" >&2
@@ -143,6 +223,36 @@ wz_nda_scan() {
         return 1
     fi
 
-    echo "nda-scan: clean ($count term(s) checked over $range)"
+    echo "nda-scan: clean ($WZ_NDA_TERM_COUNT term(s) checked over $range)"
+    return 0
+}
+
+# wz_nda_scan_message <file> — the same match over one commit message.
+# 0 = clean (or declared empty), 1 = blocked or the list could not be used.
+wz_nda_scan_message() {
+    local msg_file="$1" dir rc=0 found
+    dir="$(mktemp -d)"
+    _wz_nda_prepare "$dir" || rc=$?
+    case $rc in
+        0) ;;
+        3)
+            rm -rf "$dir"
+            return 0
+            ;;
+        *)
+            rm -rf "$dir"
+            return 1
+            ;;
+    esac
+
+    found="$(_wz_nda_matches "$dir" < "$msg_file")"
+    rm -rf "$dir"
+    if [[ -n "$found" ]]; then
+        echo "nda-scan: BLOCKED — protected vocabulary in this commit message" >&2
+        _wz_nda_report_terms "$found"
+        echo "  Say what the change REQUIRES in this repo's own words, not what the" >&2
+        echo "  request was called elsewhere." >&2
+        return 1
+    fi
     return 0
 }

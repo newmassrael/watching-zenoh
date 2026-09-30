@@ -164,7 +164,7 @@ fn main() -> ExitCode {
     // the mode. The expansion is owned by `args::expand_stock_zenoh_config`;
     // this is only where it is applied and reported.
     //
-    // ZA-3343 — whether this node is DESCRIBED by a document, read before the
+    // Whether this node is DESCRIBED by a document, read before the
     // expansion rebinds `rest`. See the no-action refusal below for what it
     // decides.
     let from_document = rest.iter().any(|a| a == "--config");
@@ -330,7 +330,7 @@ fn main() -> ExitCode {
     // still PARSES them, because this file's rule is that a flag's refusal does
     // not depend on the build, so the values are discarded HERE rather than the
     // parse being compiled away.
-    // ZA-3308 — `connect_timeout` is the fifth, and the one-shot client's
+    // `connect_timeout` is the fifth, and the one-shot client's
     // startup connect phase reads it in every build.
     #[cfg(not(any(feature = "routing-peer", feature = "router-hat-router")))]
     let _ = (connect_exit, listen_timeout, listen_exit, listen_retry);
@@ -1924,7 +1924,7 @@ fn main() -> ExitCode {
         },
         None => 100,
     };
-    // ZA-3343 — the refusal guards a TYPED command line against mis-wiring: an
+    // The refusal guards a TYPED command line against mis-wiring: an
     // argv that names a role and no work is more likely a dropped flag than an
     // intent. A node DESCRIBED by a `--config` document is not that: a document
     // with a `mode` and endpoints and nothing else is a whole node, and zenohd
@@ -2598,11 +2598,11 @@ fn mesh_dial_offer(
 /// Decode a `--zid <hex>` value (or a config `id`, which expands to it) into the
 /// wire zid bytes, the way zenoh reads the same text.
 ///
-/// ZA-3362 — the text is a `ZenohId` as zenoh PRINTS it: the 16-byte
+/// The text is a `ZenohId` as zenoh PRINTS it: the 16-byte
 /// little-endian id read as a `u128` in hex. So `c11e47c11e49` is the wire bytes
 /// `[0x49, 0x1e, 0xc1, 0x47, 0x1e, 0xc1]`, and the node reports itself as
 /// `c11e47c11e49` again — as a zenohd started on the same document does. This
-/// decoded the text PER BYTE, in written order, until ZA-3362, which is the
+/// decoded the text PER BYTE, in written order, until it was fixed, which is the
 /// reverse; the display side (`zid_to_zenoh_hex`) was already zenoh's, so a
 /// node's own `id` came back reversed. The parse is now that function's inverse,
 /// `zid_hex::zenoh_hex_to_zid`, and so carries zenoh's refusals with it: empty,
@@ -2814,7 +2814,7 @@ mod zid_flag_tests {
     use super::parse_zid_hex;
     use wz::runtime_tokio::zid_hex::zid_to_zenoh_hex;
 
-    /// ZA-3362 — the consumer's measured case: a node given `c11e47c11e49` must
+    /// The consumer's measured case: a node given `c11e47c11e49` must
     /// report `c11e47c11e49`, as zenohd does, not the reversed `491ec1471ec1`.
     #[test]
     fn an_authored_zid_comes_back_as_written() {

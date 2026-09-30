@@ -245,7 +245,7 @@ impl std::fmt::Display for Refusal {
 /// consumer bisecting a config document by hand; the first draft of this
 /// function did drop it, and the compiler caught it as a field nobody read.
 ///
-/// ZA-3469 — the refusal keeps its TYPE now and is rendered by whichever door
+/// The refusal keeps its TYPE now and is rendered by whichever door
 /// asked. The string doors write its `Display`, exactly as before; the row
 /// doors read the key path out of it as a column instead of leaving the caller
 /// to find it in the sentence.

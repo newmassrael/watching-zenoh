@@ -169,7 +169,7 @@ fn interest_scope_words(r: &crate::interest::InterestRequest) -> String {
 
 /// R311y714 — a zid as the text a reader can match against a config file.
 ///
-/// ZA-3687 — THROUGH THE ONE RECIPE, [`zid_to_zenoh_hex`]. This used to claim
+/// THROUGH THE ONE RECIPE, [`zid_to_zenoh_hex`]. This used to claim
 /// "zenoh prints zids as lowercase hex with no separators and so does this",
 /// which was true of the alphabet and false of the ORDER: it wrote each wire
 /// byte in turn, and zenoh prints the little-endian id read as a `u128`, i.e.
@@ -3399,7 +3399,7 @@ fn skips_text(sk: &crate::SkipCensus, s: &mut String) {
 /// The zenoh fragment chains this dissection gave up on WITHOUT a fragment in
 /// hand, one count per cause.
 ///
-/// ZA-3215 — lifted out of the capture report so the field document can carry
+/// Lifted out of the capture report so the field document can carry
 /// the same group: that document now names each fragment's chain, and a chain
 /// with no closing row is one of these. One emitter for both, on the rule
 /// R2122 set for `framing`.
@@ -4512,7 +4512,7 @@ mod tests {
         // guard that widened would pass under them; this is the sentence that
         // says what is NOT in the verdict.
         //
-        // ZA-3215 ⑤ — AND THE UNIT'S OWN BYTES, which is the change the
+        // AND THE UNIT'S OWN BYTES, which is the change the
         // corrected fixture makes rather than a widened guard. The batch is now
         // lz4 behind a header, as upstream sends it, so no message inside it
         // can even be located: the one record stands for the whole unit and
@@ -8022,7 +8022,7 @@ mod tests {
         assert!(bare_json.contains("\"declarer_zid\":null"), "{bare_json}");
     }
 
-    /// ZA-3687 — THE REPORT NAMES A NODE THE WAY ZENOHD LOGS IT, in the node
+    /// THE REPORT NAMES A NODE THE WAY ZENOHD LOGS IT, in the node
     /// plane, the link list and the declarer prefix, in text and in JSON.
     ///
     /// `hex_zid` (now `zid_text`) wrote each wire byte in turn; zenoh prints the
@@ -8232,7 +8232,7 @@ mod tests {
         );
     }
 
-    /// ZA-3695 — the text report names an IPv6 flow's endpoints in RFC 5952
+    /// The text report names an IPv6 flow's endpoints in RFC 5952
     /// text.
     ///
     /// `flow_text` reaches the address through `Endpoint::addr_text`, so the
@@ -8248,7 +8248,7 @@ mod tests {
     /// brackets there and the analyzer's `--flows` already writes them. It is
     /// not changed here because `Endpoint::addr_text` reserves the surrounding
     /// form to each surface and because bracketing this one means deciding the
-    /// MAC and vsock lines too; it is a named residual of ZA-3695. The
+    /// MAC and vsock lines too; it is a named residual of the RFC 5952 spelling. The
     /// assertions below therefore look for the ADDRESS text and not for the
     /// line around it, so a later bracketing does not read as a regression of
     /// the spelling.

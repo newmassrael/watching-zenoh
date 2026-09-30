@@ -47,7 +47,7 @@ use crate::faces::{CApiForwarder, SharedSession, DIAL_FACE_ID};
 /// `connect/retry` schedule that paces it ([`RetryPolicy`]), already resolved
 /// for the role the session dials as.
 ///
-/// ZA-3298. The two halves are the runtime's own types and the loop that runs
+/// The two halves are the runtime's own types and the loop that runs
 /// them is [`drive_connect_phase`], the runtime's transcription of upstream's
 /// `connect_peers` fork (`zenoh/src/net/runtime/orchestrator.rs` @
 /// `async fn connect_peers_single_link(&self, peers: &[EndPoints]) -> ZResult<()> {`).
@@ -77,7 +77,7 @@ pub struct DialPhase {
 
 impl DialPhase {
     /// One attempt, and a failure fails the open: upstream's client column,
-    /// and what every open here did before ZA-3298.
+    /// and what every open here did before the connect keys were read.
     pub const ONCE: Self = Self {
         policy: PhasePolicy::CONNECT_CLIENT_DEFAULT,
         schedule: RetryPolicy::ZENOH_DEFAULT,
@@ -346,8 +346,7 @@ async fn shutdown_future(shutdown: Arc<Notify>, stop: Arc<AtomicBool>) {
 /// The `connect` role: dial, run the outbound handshake, land the one peer in
 /// the registry, then pump it until `z_close`. `tx` unblocks `z_open` once the
 /// handshake has settled — pico's blocking client open — unless `phase` says
-/// the open does not wait for its peer, in which case it unblocks first (see
-/// the ZA-3298 note in the body).
+/// the open does not wait for its peer, in which case it unblocks first.
 async fn drive_dial(
     endpoints: Vec<String>,
     whatami: WhatAmI,

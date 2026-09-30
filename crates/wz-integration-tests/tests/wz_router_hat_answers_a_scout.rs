@@ -229,10 +229,10 @@ fn hello_zid_hex(datagram: &[u8]) -> Option<String> {
     if walked.name != "Hello" {
         return None;
     }
-    // ZA-3362 — rendered as zenoh prints a `ZenohId`, which is the form `--zid`
+    // Rendered as zenoh prints a `ZenohId`, which is the form `--zid`
     // and the config `id` are now read in. A per-byte hex of the wire bytes is
     // the reverse of that.
-    // ZA-3687 — the tree types a `zid` as `Zid` now, so this reads the raw wire
+    // The tree types a `zid` as `Zid` now, so this reads the raw wire
     // bytes off that variant and renders them itself, with the same function the
     // document's `value` uses.
     match walked.find("zid").map(|f| &f.value) {
@@ -550,7 +550,7 @@ fn a_wz_router_hat_answers_a_scout_with_a_hello_that_says_router() {
                 arm.name
             ),
         };
-        // ZA-3362 — zenoh's rendering, the form the arm's zid was written in.
+        // Zenoh's rendering, the form the arm's zid was written in.
         let zid_hex = wz_session_core::zid_hex::zid_to_zenoh_hex(&zid);
         assert!(
             zid_hex.starts_with(arm.zid_prefix),

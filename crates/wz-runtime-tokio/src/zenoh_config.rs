@@ -203,7 +203,7 @@ pub fn link_scheme_feature(scheme: &str) -> Option<&'static str> {
 
 /// Which of a node's two endpoint lists an endpoint was read from.
 ///
-/// ZA-3469 — an endpoint defect used to carry the endpoint STRING and nothing
+/// An endpoint defect used to carry the endpoint STRING and nothing
 /// about where it sat, so a reader told `"nonsense"` is malformed could not
 /// tell whether to look under `listen/endpoints` or `connect/endpoints`. The
 /// list is known at the moment the defect is raised and is what names the key,
@@ -683,7 +683,7 @@ pub fn validate_topology_with_external(
 
 /// One node of a topology verdict, with the name its CALLER calls it by.
 ///
-/// ZA-3469 — a verdict names its nodes, and until this type the only names
+/// A verdict names its nodes, and until this type the only names
 /// available were the config's own `id` (a zid, hex, which is a machine
 /// identity rather than a label anybody chose) or the slice position. A caller
 /// that holds its nodes under names of its own — an inspector listing them, a

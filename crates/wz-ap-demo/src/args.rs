@@ -1435,7 +1435,7 @@ pub(crate) fn expand_stock_zenoh_config_for_build(
     // refused member on this schedule — and R2158 adds the third, which is not
     // a mode but a LIFECYCLE: a `--connect` client re-dials only under
     // `--reconnect`, whose supervisor R2158 wired to this same key (open-debt
-    // item 230). ZA-3308 adds the one-shot `--connect` client too: it was left
+    // item 230). The one-shot `--connect` client is covered too: it was left
     // out as a node that "dials once and never again", which is true only of
     // the client DEFAULT. Upstream's client runs a startup connect phase
     // (`start_client` -> `connect_peers`), and once `connect/timeout_ms` is
@@ -1502,7 +1502,7 @@ pub(crate) fn expand_stock_zenoh_config_for_build(
     // `exit_on_failure` at all, so for a client that key is withheld as a flag
     // that would change nothing.
     //
-    // ZA-3308 — `connect/timeout_ms` is NOT narrowed that way any more. A
+    // `connect/timeout_ms` is NOT narrowed that way any more. A
     // one-shot `--connect` client runs upstream's client startup phase, and the
     // budget is what decides whether that phase re-dials: `0`, the client
     // default, is one attempt; `-1` or a positive bound keeps dialing.
@@ -3542,7 +3542,7 @@ pub(crate) fn config_keys_the_demo_drops() -> Vec<&'static str> {
     // carrying NEITHER feature compiles no startup-phase host at all and both
     // flags exit(2) naming the build — the R311y844 rule. A build with either
     // one has a sink, which is why this is a disjunction and not two rows.
-    // ZA-3308 — `connect/timeout_ms` left this list: the one-shot `--connect`
+    // `connect/timeout_ms` left this list: the one-shot `--connect`
     // client runs a startup connect phase in every build, so no build lacks
     // its sink.
     // R2950 — the peer's start window: its only sink is the `--peer` run.
@@ -4310,7 +4310,7 @@ mod stock_config_tests {
             // which types both roles and covers the drop-in case for each.
             //
             // `--reconnect` rides along because it is the lifecycle R2158 wired.
-            // Since ZA-3308 the one-shot client is a sink too (its startup
+            // Now the one-shot client is a sink too (its startup
             // connect phase), so the row would reach without it; it stays so the
             // row keeps naming the arm it was written for.
             "connect/retry" => &[
@@ -4320,12 +4320,12 @@ mod stock_config_tests {
                 "tcp/r:7447",
                 "--reconnect",
             ],
-            // ZA-3308 — `connect/timeout_ms` reaches a one-shot client in
+            // `connect/timeout_ms` reaches a one-shot client in
             // every build, so its row names that run rather than `--peer`,
             // which a build without the mesh features cannot reach.
             "connect/timeout_ms" => &["--config", "z.json5", "--connect", "tcp/127.0.0.1:7447"],
             // R2159 (open-debt item 229) — the LIFECYCLE keys (five until
-            // ZA-3308 moved `connect/timeout_ms` above), whose
+            // `connect/timeout_ms` moved above), whose
             // precondition is a run-mode with a startup PHASE to bound, which is
             // `--peer` or `--router-hat`. `--peer` is named for the reason the
             // rows above name it: these builds compile it, and a row pointed at
@@ -5905,7 +5905,7 @@ mod stock_config_tests {
     ///
     /// R2158 (open-debt item 230) — THE CLIENT HALF, in both directions, and it
     /// is why the `cfg` came off this test. A `--connect --reconnect` run has
-    /// a re-dial supervisor and therefore a sink. ZA-3308 — so does a bare
+    /// a re-dial supervisor and therefore a sink. So does a bare
     /// `--connect` run now: its startup connect phase re-dials on this
     /// schedule when `connect/timeout_ms` permits, as upstream's client does.
     #[test]
@@ -5932,7 +5932,7 @@ mod stock_config_tests {
                 "tcp/r:7447",
                 "--reconnect",
             ],
-            // ZA-3308 — the one-shot client: its startup connect phase re-dials
+            // The one-shot client: its startup connect phase re-dials
             // on this schedule once `connect/timeout_ms` permits it.
             vec!["--config", "z.json5", "--connect", "tcp/r:7447"],
         ] {
@@ -5995,7 +5995,7 @@ mod stock_config_tests {
         assert_eq!(client_drop_in.added[at + 1], "250,9000,1.5");
 
         // And the SAME document without the lifecycle flag: a one-shot client.
-        // ZA-3308 — it gets the schedule too, for its startup connect phase.
+        // It gets the schedule too, for its startup connect phase.
         // This was the control asserting the opposite ("a one-shot client
         // never re-dials"), which held only of the client DEFAULT budget.
         let one_shot = expand(&["--config", "z.json5"], client_file).unwrap();

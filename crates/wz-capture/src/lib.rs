@@ -138,7 +138,7 @@ pub mod interest;
 /// links where both ends named themselves. The one plane whose unit is not a
 /// flow.
 pub mod node;
-/// ZA-3509 — a selector's VERDICT over the rows of [`fields_json`], and nothing
+/// A selector's VERDICT over the rows of [`fields_json`], and nothing
 /// beside it: five values per row and the ceilings, where the field document
 /// renders every row's whole tree.
 ///
@@ -1131,18 +1131,18 @@ pub struct ScoutingDatagram {
     pub packet_index: usize,
     /// What the bytes decoded to, or why they did not.
     pub frame: Result<ScoutingFrame, InboundParseError>,
-    /// ZA-3214 ② — the observation instant, off the SAME clock a transport
+    /// The observation instant, off the SAME clock a transport
     /// frame of this flow is stamped from (`PassiveSession::observed_at`), so a
     /// consumer merging the two lists on time compares one clock with itself.
     /// `None` for a source with no clock, exactly as for a frame.
     pub observed_at_ms: Option<u64>,
-    /// ZA-3214 ② — the datagram payload's length in bytes. A scouting message
+    /// The datagram payload's length in bytes. A scouting message
     /// is never batched, so the payload IS its framing unit; the record door
     /// reports it as the unit length, as it does for a transport datagram.
     pub unit_len: usize,
 }
 
-/// ZA-3214 ② — a flow's scouting messages, with the count EVER produced.
+/// A flow's scouting messages, with the count EVER produced.
 ///
 /// # Why a type and not the `Vec` it was
 ///
@@ -1858,7 +1858,7 @@ impl FlowDissection {
     /// survived, and a batch coordinate past the end of its own unit. A caller
     /// renders it; nothing branches on it.
     ///
-    /// # ZA-3215 ⑤ — a message that came out of an lz4 batch
+    /// # A message that came out of an lz4 batch
     ///
     /// Is not in the stream at all: its batch was compressed on the wire and
     /// its bytes exist only as [`PassiveFrame::decompressed`]. Those are what
@@ -1930,7 +1930,7 @@ impl FlowDissection {
         self.assembler(direction).packet_for_offset(stream_offset)
     }
 
-    /// ZA-3215 — the packet that carried the byte at `stream_offset`, and where
+    /// The packet that carried the byte at `stream_offset`, and where
     /// inside that packet's TCP payload it sat.
     ///
     /// `None` on a WebSocket flow, and not because the lookup fails there: it
@@ -4398,7 +4398,7 @@ impl Dissection {
             // The cleartext datagram list and the recovered RFC 9221 one both
             // anchor to a packet INDEX, and that index is the caller's own push
             // ordinal. See [`NoByteSource::CallerHoldsThePacket`].
-            // ZA-3215 ⑤ — EXCEPT a message decompressed out of an lz4 batch:
+            // EXCEPT a message decompressed out of an lz4 batch:
             // the packet the caller holds carries lz4, and the message's bytes
             // exist only as `PassiveFrame::decompressed`.
             MessageListOrigin::Datagram => {
@@ -6132,7 +6132,7 @@ impl Dissection {
             self.capture_reported_drops = Some(0);
         }
         let dissection = &mut *self;
-        // ZA-3601 — the walk is `CaptureCursor::walk`, the same function
+        // The walk is `CaptureCursor::walk`, the same function
         // `captured_frame` runs to hand a packet out by number, so the number a
         // message is anchored to here and the number a caller asks for there
         // cannot come from two walks. What each format's events mean was in
@@ -6275,7 +6275,7 @@ impl CaptureCursor {
         }
     }
 
-    /// ZA-3601 — THE walk over a capture container of either format, handing
+    /// THE walk over a capture container of either format, handing
     /// `on` each event with the packet's bytes BORROWED from `bytes`, and
     /// letting it stop.
     ///
@@ -6359,7 +6359,7 @@ impl CaptureCursor {
     }
 }
 
-/// ZA-3601 — one captured packet out of a capture container of either format,
+/// One captured packet out of a capture container of either format,
 /// its bytes BORROWED from the container.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CapturedFrame<'a> {
@@ -6383,7 +6383,7 @@ pub struct CapturedFrame<'a> {
     pub orig_len: u32,
 }
 
-/// ZA-3601 — what [`CaptureCursor::walk`] hands its sink.
+/// What [`CaptureCursor::walk`] hands its sink.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CaptureEvent<'a> {
     /// A captured packet.
@@ -6397,7 +6397,7 @@ pub enum CaptureEvent<'a> {
     Drops(u64),
 }
 
-/// ZA-3601 — why [`CaptureCursor::walk`] stopped.
+/// Why [`CaptureCursor::walk`] stopped.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CaptureWalk {
     /// Fewer than four bytes have been seen, so the format is not yet known and
@@ -6416,7 +6416,7 @@ pub enum CaptureWalk {
     Stopped,
 }
 
-/// ZA-3601 — why a packet could not be handed out of a container.
+/// Why a packet could not be handed out of a container.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FrameLookupError {
     /// The container did not read, in whichever format it is, before the walk
@@ -6436,7 +6436,7 @@ pub enum FrameLookupError {
     },
 }
 
-/// ZA-3601 — packet number `packet` of a capture container, as the capture
+/// Packet number `packet` of a capture container, as the capture
 /// stored it: link header included, in the coordinate space a field row's
 /// `frame_offset` indexes.
 ///
@@ -6494,7 +6494,7 @@ pub fn captured_frame(bytes: &[u8], packet: usize) -> Result<CapturedFrame<'_>, 
     }
 }
 
-// ── ZA-3601 — a packet out of a container, by number ──
+// ── A packet out of a container, by number ──
 #[cfg(test)]
 mod captured_frame_tests {
     use super::*;
@@ -6538,7 +6538,7 @@ mod captured_frame_tests {
         (boundaries, ends)
     }
 
-    /// The claim ZA-3601 rests on, over EVERY prefix of a container: a packet
+    /// The claim the by-number lookup rests on, over EVERY prefix of a container: a packet
     /// number resolves against a prefix exactly when the prefix holds that
     /// record whole, to the bytes the whole container holds; and a prefix that
     /// does not answers `NotInPrefix` naming how many packets it did hold and
@@ -6886,7 +6886,7 @@ mod datagram_tests {
 
     /// Ethernet + IPv6 + UDP carrying `payload`, padded to the 60-byte minimum.
     ///
-    /// ZA-3695 — the IPv6 twin of [`udp_packet`], so a document test can put an
+    /// The IPv6 twin of [`udp_packet`], so a document test can put an
     /// IPv6 flow through the SAME entry point every other flow arrives by. The
     /// UDP checksum is left at zero, which over IPv6 is present-and-wrong
     /// (RFC 8200 §8.1 makes it mandatory); no test that uses this builder reads
@@ -7323,7 +7323,7 @@ mod datagram_tests {
 
     /// One `T_MID_FRAME` datagram carrying `body` as its batch, at sn 0.
     ///
-    /// Gated on its callers' condition: since ZA-3215 ⑤ the compressed-session
+    /// Gated on its callers' condition: now the compressed-session
     /// fixture spells its unit itself, and the field document's tests are the
     /// ones left building a `Frame` this way.
     #[cfg(all(feature = "dissect", feature = "network-codecs"))]
@@ -7362,7 +7362,7 @@ mod datagram_tests {
     /// compressed body could not produce such a capture at all; this tree has
     /// had one since R311y621 and the document had never been rendered over it.
     pub(crate) fn compressed_session_dissection_with_file() -> (Dissection, Vec<u8>) {
-        // ZA-3215 ⑤ — in the shape upstream puts on the wire: a BatchHeader
+        // In the shape upstream puts on the wire: a BatchHeader
         // with the COMPRESSION bit set, then a body that is not a valid lz4
         // block (a literal-run token claiming more literals than follow). It
         // was a `Frame` whose PAYLOAD was the marker, which is not where
@@ -7370,7 +7370,7 @@ mod datagram_tests {
         compressed_session_with_unit(alloc::vec![0x01, 0xDE, 0xAD, 0xBE, 0xEF])
     }
 
-    /// ZA-3215 ⑤ — the compressed session, ending in ONE post-handshake
+    /// The compressed session, ending in ONE post-handshake
     /// datagram whose bytes are `unit` exactly as the sender put them on the
     /// wire.
     ///

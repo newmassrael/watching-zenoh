@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later OR LicenseRef-watching-zenoh-Commercial
 // SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
 
-//! ZA-3509 — the VERDICT of a selector over the rows of the field document, and
+//! The VERDICT of a selector over the rows of the field document, and
 //! nothing else.
 //!
 //! # What was missing, in the consumer's numbers

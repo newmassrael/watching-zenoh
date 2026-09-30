@@ -46,7 +46,7 @@ pub enum InboundParseError {
     /// lz4-decompressed (empty wire, a corrupt lz4 block, or a blob that would
     /// expand past the negotiated mtu bound — the decompression-bomb guard).
     /// The session tears down (framing error) rather than trusting the peer.
-    // ZA-3215 ⑤ — ungated: the passive observer reports an lz4 batch it could
+    // Ungated: the passive observer reports an lz4 batch it could
     // not open in EVERY build, including one with no lz4 at all.
     CompressionFailed,
     /// R2437 — an establishment ext chain carried an extension wz does not

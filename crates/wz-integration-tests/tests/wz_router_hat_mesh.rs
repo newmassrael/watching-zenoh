@@ -549,7 +549,7 @@ fn wz_router_hat_routes_a_client_query_to_a_client_queryable() {
     // data-forward E2E above). A queryable CLIENT and a query-issuer CLIENT each
     // dial ONLY the router R, with DISTINCT `--zid`s so they do not collide in R's
     // mesh graph (the P4 §5.21 query-plane blocker the run-mode flip exposed;
-    // ZA-3362 — b0b0b0b0 / a0a0a0a0, was 0b0b0b0b / 0a0a0a0a: no leading 0). R
+    // b0b0b0b0 / a0a0a0a0, was 0b0b0b0b / 0a0a0a0a: no leading 0). R
     // routes the issuer's `Request(Query)` to the queryable's `client_qabls` entry
     // and returns the `Reply` + `ResponseFinal` back down the querier's face. The
     // query ROUTE was UNIT-proven (route_request / forward_response, incl 2-router
@@ -982,7 +982,7 @@ fn wz_router_hat_non_master_defers_a_client_double_delivery() {
     // FIXED zids (honoured by --router-hat, R311 fix): the carrier is the LARGEST
     // gateway, so R2 (30303030) must be larger than R1 (20202020) for R1 to defer.
     // Unpinned zids are random (R2883) and would flip the order per run.
-    // ZA-3362 — these were 03030303 / 02020202; zenoh refuses a leading 0 in a
+    // These were 03030303 / 02020202; zenoh refuses a leading 0 in a
     // zid, which `--zid` now does too. Each value repeats one byte, so the
     // order holds whichever way the bytes are read.
     let (mut r2_guard, mut r2_reader, p_r2) = spawn_router_hat(

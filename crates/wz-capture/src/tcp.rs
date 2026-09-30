@@ -40,7 +40,7 @@ pub struct OffsetRun {
     pub len: usize,
     /// Index of the capture packet that carried it.
     pub packet_index: usize,
-    /// ZA-3215 — where the run's first byte sits within that packet's
+    /// Where the run's first byte sits within that packet's
     /// transport PAYLOAD (the segment body, header excluded).
     ///
     /// Zero for an ordinary segment; the number of bytes skipped for one that
@@ -350,7 +350,7 @@ impl StreamAssembler {
             .map(|(packet, _)| packet)
     }
 
-    /// ZA-3215 — which capture packet carried the byte at `stream_offset`, and
+    /// Which capture packet carried the byte at `stream_offset`, and
     /// where inside that packet's transport payload it sat.
     ///
     /// One lookup for both halves, so the packet and the position can never

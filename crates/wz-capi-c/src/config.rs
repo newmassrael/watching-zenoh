@@ -248,7 +248,7 @@ impl ConfigState {
 
     /// A copy of this config that states `mode`, as `mode` when it states none.
     ///
-    /// ZA-3298. The open path picks its role from `mode` and dials as a client
+    /// The open path picks its role from `mode` and dials as a client
     /// when the key is absent, while wz's reader resolves an absent `mode` to
     /// upstream's default. A mode-dependent value such as
     /// `connect/timeout_ms: { client: 0, peer: -1 }` read through that reader

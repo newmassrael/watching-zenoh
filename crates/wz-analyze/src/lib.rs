@@ -5244,7 +5244,7 @@ fn message_name(frame: &wz_session_core::passive::PassiveFrame) -> String {
 }
 
 /// An endpoint as `addr:port`, IPv4 dotted or IPv6 as RFC 5952 text in
-/// brackets (ZA-3695).
+/// brackets.
 fn endpoint(e: &wz_capture::link::Endpoint, link: wz_capture::link::LinkKind) -> String {
     // Round 2447 (open-debt item 696) — the ADDRESS comes from
     // `Endpoint::addr_text`, which spells it as the recorded link kind spells
@@ -7445,7 +7445,7 @@ mod tests {
     /// One Ethernet/IPv6/UDP packet carrying the same SCOUT as [`scout_packet`],
     /// hand-laid for the same reason and from `src` to `dst`.
     ///
-    /// ZA-3695. The addresses are parameters so a test can pick the shapes the
+    /// The addresses are parameters so a test can pick the shapes the
     /// RFC 5952 rules turn on.
     fn scout_packet_v6(src: [u8; 16], dst: [u8; 16]) -> Vec<u8> {
         let scout = [0x01u8, 0x09, (3 << 4) | 0x08 | 0x03, 0x11, 0x22, 0x33, 0x44];
@@ -7473,7 +7473,7 @@ mod tests {
         eth
     }
 
-    /// ZA-3695 — THE SECOND RENDERER SPELLS AN IPV6 ADDRESS TOO, and this crate
+    /// THE SECOND RENDERER SPELLS AN IPV6 ADDRESS TOO, and this crate
     /// is where "the second renderer" is the whole point.
     ///
     /// `--flows` writes an endpoint as `addr:port` and puts brackets round
@@ -7669,7 +7669,7 @@ mod tests {
     /// # Why this test exists in a crate whose code did not change
     ///
     /// It did not, and that is the claim. Item 696 measured that a flow key is
-    /// rendered by eight emitters in TWO crates, and that the ZA-1039 reporter
+    /// rendered by eight emitters in TWO crates, and that the reporter
     /// could see only the C ABI's door — so a repair applied at the door it
     /// reported would have left this surface saying `[3003:c837:25a1]:0` for a
     /// MAC. The repair for both is one function, `Endpoint::addr_text`, and a
@@ -10486,7 +10486,7 @@ mod quic_pass_tests {
         );
         // THE PLANE: the zid the Init carried, reached through the QUIC stream.
         //
-        // ZA-3687 — in ZENOH'S spelling: the Init carries `51 52 53 54` and
+        // In ZENOH'S spelling: the Init carries `51 52 53 54` and
         // zenoh prints the little-endian id read as a `u128`, so the node is
         // `54535251`. The per-byte wire order `51525354` is what this used to
         // expect, and it is asserted ABSENT: this fixture's zid is not a
@@ -10644,7 +10644,7 @@ mod quic_pass_tests {
         );
         // And it reached a plane, by the identity only that message carries.
         //
-        // ZA-3687 — in ZENOH'S spelling: the datagram's Init carries
+        // In ZENOH'S spelling: the datagram's Init carries
         // `61 62 63 64`, printed by zenoh as the little-endian id read as a
         // `u128`, `64636261`. The per-byte order `61626364` is asserted absent.
         assert!(

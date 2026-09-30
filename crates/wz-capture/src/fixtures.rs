@@ -521,7 +521,7 @@ pub fn multilink_declaration_behind_a_gap(fill: GapFill, reference_in_a_chain: b
     crate::pcap::write(crate::link::LINKTYPE_ETHERNET, &refs)
 }
 
-/// ZA-3215 ⑤ — ONE unicast session over UDP whose only record arrives as a
+/// ONE unicast session over UDP whose only record arrives as a
 /// COMPLETED fragment chain, as the pcap FILE, with the record it carries.
 ///
 /// For a consumer of this crate that grades a door over the joined buffer: the

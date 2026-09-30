@@ -253,7 +253,7 @@ impl FlowContext {
             && self.open_seen[usize::from(direction == Direction::B)]
     }
 
-    /// ZA-3215 ⑤ — every batch `direction` sends from here on begins with a
+    /// Every batch `direction` sends from here on begins with a
     /// one-byte `BatchHeader`, whose bit 0 says whether the rest of the batch
     /// is lz4.
     ///
@@ -287,7 +287,7 @@ impl FlowContext {
     /// # The session-wide answer it replaced
     ///
     /// R2972 removed `compression_active`, a session-wide "negotiated and
-    /// established" that ZA-3215 had already stopped the decoder from using.
+    /// established" that the batch header had already stopped the decoder from using.
     /// It answered `true` on a lowlatency link, where no batch carries a
     /// header, and it could not say which direction had switched — the two
     /// questions whose wrong answers were that defect. Its inputs stay on the
@@ -654,7 +654,7 @@ pub struct PassiveFrame {
     /// verdict, and the capture layer's `is_complete` deliberately does not
     /// consult it.
     pub undefined_mandatory_ext: Option<u8>,
-    /// ZA-3215 ⑤ — this message's OWN bytes, when the batch it came out of was
+    /// This message's OWN bytes, when the batch it came out of was
     /// lz4 on the wire; `None` for every message read straight off the wire.
     ///
     /// # Why the message carries them
@@ -799,7 +799,7 @@ pub enum Carried {
     /// batch: the bytes were there and are unreadable, which is a different
     /// fact from a frame that carried nothing.
     ///
-    /// ZA-3215 ⑤ — carried by ONE record standing for the whole unit, whose
+    /// Carried by ONE record standing for the whole unit, whose
     /// [`PassiveFrame::frame`] is `InboundParseError::CompressionFailed`:
     /// with the batch unopened no message inside it can even be located.
     /// Until that round this was a verdict on one `Frame`'s payload, which is
@@ -1130,7 +1130,7 @@ pub struct PassiveSession {
     resync_depth: usize,
 }
 
-/// ZA-3215 ⑤ — bit 0 of the `BatchHeader`: the batch behind it is lz4.
+/// Bit 0 of the `BatchHeader`: the batch behind it is lz4.
 ///
 /// Spelled here as well as in [`crate::compression`], because the observer has
 /// to FIND the header in every build and that module exists only with
@@ -1140,7 +1140,7 @@ const BATCH_HEADER_COMPRESSION: u8 = 0x01;
 #[cfg(feature = "transport-compression")]
 const _: () = assert!(BATCH_HEADER_COMPRESSION == crate::compression::BATCH_HEADER_COMPRESSION);
 
-/// ZA-3215 ⑤ — open one headed batch whose COMPRESSION bit is set: `wire` is
+/// Open one headed batch whose COMPRESSION bit is set: `wire` is
 /// the unit, header byte included.
 ///
 /// Through the participant's own [`crate::compression::decompress_batch`], so
@@ -1502,7 +1502,7 @@ impl PassiveSession {
         // the same reason: both are facts about the LINK, and the borrow below
         // is of one direction's buffer.
         let lean = self.context.lowlatency_active(direction);
-        // ZA-3215 ⑤ — and whether the unit opens with a batch header rather
+        // And whether the unit opens with a batch header rather
         // than with a message.
         let headed = self.context.batch_header_active(direction);
         let depth = self.resync_depth;
@@ -1543,7 +1543,7 @@ impl PassiveSession {
         // transport-only question refuses every data frame on one. Measured: a
         // real capture desynchronised on its first Declare (`header 0x9e`) and
         // abandoned 20 KiB behind it, with the handshake before it read clean.
-        // ZA-3215 ⑤ — on a headed unit the first byte is the BatchHeader, whose
+        // On a headed unit the first byte is the BatchHeader, whose
         // one defined bit is compression; a byte with any other bit set is not
         // a boundary this sender could have written. What follows a set bit is
         // lz4 and has no header to judge.
@@ -1652,7 +1652,7 @@ impl PassiveSession {
         // The ceiling is on what the WIRE carried, so it is judged on these
         // bytes and not on anything decompressed out of them.
         let exceeds_negotiated_batch = self.exceeds_batch(bytes.len());
-        // ZA-3215 ⑤ — THE BATCH HEADER, where this direction has one. See
+        // THE BATCH HEADER, where this direction has one. See
         // `FlowContext::batch_header_active` for where upstream puts it. A
         // multicast link has no handshake to have negotiated it on.
         let headed = handshake == LinkHandshake::Present
@@ -2223,7 +2223,7 @@ impl PassiveSession {
 
     /// Walk a `Frame`'s (or a joined chain's) batch of network messages.
     ///
-    /// ZA-3215 ⑤ — no decompression HERE any more. This used to lz4-decode a
+    /// No decompression HERE any more. This used to lz4-decode a
     /// `Frame`'s payload on a compressed session, which is not where upstream
     /// compresses: the whole BATCH is wrapped, header byte first, and it is
     /// unwrapped before any transport message is read — see

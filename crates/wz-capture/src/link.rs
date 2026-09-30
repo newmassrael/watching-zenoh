@@ -329,7 +329,7 @@ impl Endpoint {
     /// `report::addr_text` for the summary's tunnel lines, and `wz-analyze`'s
     /// own `endpoint` — and all three asked [`Self::is_ipv4`] and treated
     /// everything else as IPv6. A 6-byte MAC therefore printed as
-    /// `3003:c837:25a1`, which is the ZA-1039 consumer report's second finding
+    /// `3003:c837:25a1`, which is the consumer report's second finding
     /// and is a confidently wrong answer rather than a missing one. The link
     /// kind is a RECORDED fact ([`FlowKey::link`]), so the spelling now comes
     /// from what the strip saw rather than from a byte count downstream.
@@ -439,10 +439,10 @@ impl Endpoint {
     ///
     /// # Sixteen bytes are RFC 5952 text
     ///
-    /// ZA-3695. Until then sixteen bytes were written as eight hex groups with
+    /// Until this was repaired, sixteen bytes were written as eight hex groups with
     /// no `::` at all, so the loopback read `0:0:0:0:0:0:0:1`. That is a valid
     /// spelling and it is not the one zenohd logs or RFC 5952 prescribes, which
-    /// is the same complaint ZA-3687 made about a zid: a consumer that joins a
+    /// is the same complaint made about a zid: a consumer that joins a
     /// census `addr` to a router's own text by string finds no match for a node
     /// that is the same node.
     ///
@@ -567,7 +567,7 @@ impl Endpoint {
 /// 6-byte MAC, [`Endpoint::is_ipv4`] answers `false` for it, and the "not four,
 /// therefore IPv6" branch printed pico's `30:03:c8:37:25:a1` as the three-group
 /// address `3003:c837:25a1`. A consumer reading that key had no way to tell it
-/// from a truncated IPv6 address — which is the second claim of the ZA-1039
+/// from a truncated IPv6 address — which is the second claim of the
 /// consumer report, and the report asked in its own words for the answer NOT to
 /// be inferred from the endpoint shape.
 ///
@@ -1392,7 +1392,7 @@ pub fn decapsulate(
     )
 }
 
-/// ZA-3215 — where the transport payload [`decapsulate`] would hand back
+/// Where the transport payload [`decapsulate`] would hand back
 /// begins, as an offset into the captured packet `bytes`.
 ///
 /// # Why a second walk and not a field on [`Segment`] / [`Datagram`]
@@ -1447,7 +1447,7 @@ pub fn transport_payload_at(link_type: u32, packet_index: usize, bytes: &[u8]) -
     }
 }
 
-/// ZA-3215 — the two Ethernet II addresses of a captured frame, as
+/// The two Ethernet II addresses of a captured frame, as
 /// `(source, destination)`.
 ///
 /// `None` for every link type that is not Ethernet — a cooked (SLL) capture
@@ -2650,7 +2650,7 @@ mod tests {
         b
     }
 
-    /// ZA-3695 — an IPv6 endpoint is spelled the way RFC 5952 spells it, and
+    /// An IPv6 endpoint is spelled the way RFC 5952 spells it, and
     /// the census reaches that text through `addr_text` for both IP families.
     ///
     /// EVERY EXPECTED STRING WAS PRODUCED BY PYTHON'S `ipaddress`, an
@@ -2703,7 +2703,7 @@ mod tests {
         }
     }
 
-    /// ZA-3695 — EVERY shape a run of zero groups can take, against the rule
+    /// EVERY shape a run of zero groups can take, against the rule
     /// written out from the specification.
     ///
     /// The table above is sixteen chosen addresses. This is all 256 patterns of
@@ -2785,7 +2785,7 @@ mod tests {
         );
     }
 
-    /// ZA-3695 — an IPv4-MAPPED address is written in the mixed form, and this
+    /// An IPv4-MAPPED address is written in the mixed form, and this
     /// pins that as a decision rather than leaving it as a side effect.
     ///
     /// RFC 5952 §5 says of the addresses with an IPv4 address in the low 32
@@ -2803,7 +2803,7 @@ mod tests {
         assert_eq!(e.ip_text(), "::ffff:192.0.2.1");
     }
 
-    /// ZA-3695 — the four-byte arm is untouched, which is the negative leg of
+    /// The four-byte arm is untouched, which is the negative leg of
     /// the IPv6 tests above: a repair that spelled every address through
     /// `Ipv6Addr` would turn `192.168.1.5` into an IPv6-mapped form.
     #[test]

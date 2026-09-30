@@ -285,7 +285,7 @@ pub unsafe extern "C" fn z_open(
             return crate::result::Z_ERR_INVALID;
         }
 
-        // ZA-3298 left this ABI on one attempt: the retry it added reads
+        // This ABI stays on one attempt: the retry the zenoh-c open gained reads
         // zenoh's `connect/retry` and `connect/timeout_ms`, which are zenoh-c
         // config keys, and this shim resolves pico's numeric keys instead.
         // pico's transmit model, not zenoh's: a pico put writes on the

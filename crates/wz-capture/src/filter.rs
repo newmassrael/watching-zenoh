@@ -483,7 +483,7 @@ impl Term {
             // negation rides inside rather than wrapping the answer. Negating
             // an unknown gives an unknown: a record whose sender we cannot name
             // cannot be shown to be someone else either.
-            // ZA-3687 — compared in CANONICAL form. `want` came out of
+            // Compared in CANONICAL form. `want` came out of
             // `zenoh_hex_to_zid` and is length-trimmed; a wire zid from a peer
             // that padded it with trailing zero bytes prints as the same text
             // (`zid_to_zenoh_hex` zero-pads to 16), so it must select the same
@@ -580,7 +580,7 @@ use crate::agg::dir_index;
 ///
 /// Bare hex in ZENOH'S spelling, no prefix and no separators, either case.
 ///
-/// ZA-3687 — THE NOTATION IS THE ONE EVERY OTHER SURFACE PRINTS. It used to be
+/// THE NOTATION IS THE ONE EVERY OTHER SURFACE PRINTS. It used to be
 /// the wire order, byte by byte: `0a0b0c0d` meant the bytes `0a 0b 0c 0d`, an
 /// even number of digits was required, and it matched what the field document
 /// then printed, so a reader could lift a zid off a row into a selector. That
@@ -865,7 +865,7 @@ impl fmt::Display for FilterError {
 
 /// One lexical token plus the byte span it covers.
 ///
-/// ZA-3214 ③ — `end` joined `at` so the span a token covers is the lexer's
+/// `end` joined `at` so the span a token covers is the lexer's
 /// answer rather than a consumer's re-derivation; see [`tokens`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct Token {
@@ -874,7 +874,7 @@ struct Token {
     kind: TokenKind,
 }
 
-/// ZA-3214 ③ — WHAT A LEXED TOKEN IS, as the closed set a consumer colours by.
+/// WHAT A LEXED TOKEN IS, as the closed set a consumer colours by.
 ///
 /// The words are the lexer's own distinctions and no finer: `word` covers a
 /// field name and an unquoted value alike, because telling those apart is the
@@ -950,7 +950,7 @@ impl TokenClass {
     }
 }
 
-/// ZA-3214 ③ — one token as a consumer sees it: a BYTE span and a class.
+/// One token as a consumer sees it: a BYTE span and a class.
 ///
 /// `start..end` are byte offsets into the selector, the same unit as
 /// [`FilterError::at`], so a caret and a colour run are placed by one rule.
@@ -967,7 +967,7 @@ pub struct LexedToken {
 /// The selector verdict `wz_dissect_selector_diagnose` hands back, rendered
 /// HERE rather than in the ABI crate.
 ///
-/// ZA-3214 ③ — moved beside the revision that declares it. The document's
+/// Moved beside the revision that declares it. The document's
 /// value family (`kind`) is declared in [`crate::doc_revision`], and the gate
 /// that derives each family's carries verdict renders every document that
 /// declares one. An emitter in another crate is one that gate cannot render,
@@ -1010,7 +1010,7 @@ pub fn diagnose_json(expr: &str) -> String {
     out
 }
 
-/// ZA-3214 ③ — THE LEXER'S TOKENS, for a consumer that colours a selector.
+/// THE LEXER'S TOKENS, for a consumer that colours a selector.
 ///
 /// The same walk [`Filter::parse`] runs, so a colouring and a verdict cannot
 /// disagree about where a token begins. On a LEXICAL failure it returns every
@@ -1384,7 +1384,7 @@ impl<'a> Parser<'a> {
             // re-typing it. A `0x` prefix or a colon-separated form would have
             // made the two surfaces disagree about one value.
             //
-            // ZA-3687 — "these characters" is ZENOH'S spelling now, and was the
+            // "these characters" is ZENOH'S spelling now, and was the
             // wire order until a consumer found the census and the zenohd log
             // naming one node two ways. See `parse_zid` for what changed.
             "zid" => {
@@ -1724,7 +1724,7 @@ mod tests {
     /// the message says which term was wrong rather than only that something
     /// was.
     ///
-    /// ZA-3687 — the list is zenoh's refusals now. An ODD digit count LEFT it
+    /// The list is zenoh's refusals now. An ODD digit count LEFT it
     /// (it is how zenoh prints a zid whose top nibble is zero, so `a1a1a1a` is a
     /// zid), and three spellings ARRIVED: a leading `0` (`01020304`, the old
     /// per-byte spelling of `1 2 3 4`, which zenohd refuses in an `id` and which
@@ -1767,7 +1767,7 @@ mod tests {
         );
     }
 
-    /// ZA-3687 — THE SELECTOR TAKES THE SPELLING ZENOH PRINTS, not the wire
+    /// THE SELECTOR TAKES THE SPELLING ZENOH PRINTS, not the wire
     /// order, judged on a zid that is NOT a palindrome.
     ///
     /// The record's zid is the wire bytes `01 02 03 04`. Zenoh prints that as
@@ -1810,7 +1810,7 @@ mod tests {
         );
     }
 
-    /// ZA-3687 — a wire zid a peer PADDED with trailing zero bytes is the node
+    /// A wire zid a peer PADDED with trailing zero bytes is the node
     /// its printed text names.
     ///
     /// `zid_to_zenoh_hex` zero-pads to 16 bytes, so `01 02 03 04` and
@@ -2449,7 +2449,7 @@ mod tests {
         );
     }
 
-    /// ZA-3214 ③ — every class, every spelling, and the span each covers,
+    /// Every class, every spelling, and the span each covers,
     /// written as the TEXT the span slices out so a wrong offset reads as the
     /// wrong substring rather than as a number.
     #[test]
@@ -2497,7 +2497,7 @@ mod tests {
         assert_eq!(reached, declared);
     }
 
-    /// ZA-3214 ③ — a LEXICAL failure keeps what came before it. The verdict's
+    /// A LEXICAL failure keeps what came before it. The verdict's
     /// `at` says where lexing stopped; the tokens are the part a colouring can
     /// still use, and they end before that offset.
     #[test]

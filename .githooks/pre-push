@@ -726,6 +726,7 @@ round_fed_gates=(
     "zenoh_c_census_arm_reach.py --check"
     "zenoh_c_oracle_arms.py --check"
     "discard_site_lint.py"
+    "nda_scan_selftest.py"
     "capi_c_config_verdict_population.py"
     "dissect_name_census.py"
     "layer_e_oracle_scope_gate.py"

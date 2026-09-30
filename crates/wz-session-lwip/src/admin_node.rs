@@ -198,7 +198,7 @@ where
         self.status.set_endpoints(self.endpoint_statuses(now_ms));
     }
 
-    /// R2846 (ZA-2929) — every written endpoint and where it stands, for the
+    /// R2846 — every written endpoint and where it stands, for the
     /// `status/connect` leg. `states()` and `sessions()` both walk the slots
     /// in list order and `sessions()` yields exactly the live ones, so the two
     /// are read side by side to say whether each live session is established.

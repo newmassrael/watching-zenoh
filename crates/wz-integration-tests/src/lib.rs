@@ -8000,7 +8000,7 @@ pub mod ext_bodies {
                 FieldValue::Label(v) => Some(Reading::Label(v.to_string())),
                 FieldValue::Flag(v) => Some(Reading::Flag(*v)),
                 FieldValue::Bits(v) | FieldValue::Uint(v) => Some(Reading::Number(*v)),
-                // ZA-3687 — a `Zid` owns the same raw wire bytes a `Bytes` does,
+                // A `Zid` owns the same raw wire bytes a `Bytes` does,
                 // and a witness comparing readings wants THOSE: the identity's
                 // text is a property of the document's `value`, which a caller
                 // that needs it takes from the tree, and folding it into a

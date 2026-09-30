@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later OR LicenseRef-watching-zenoh-Commercial
 // SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
 
-//! ZA-3469 — a config verdict as FIELDS, for a reader that does not parse prose.
+//! A config verdict as FIELDS, for a reader that does not parse prose.
 //!
 //! The three reasons a config can be turned away are three enums in
 //! `zenoh_config`: `ConfigDefect` (this node cannot work), `TopologyDefect`

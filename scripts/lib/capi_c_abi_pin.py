@@ -204,7 +204,7 @@ EXPECTED_SYMBOLS = {
     "wz_capi_c_group_drop",
     "wz_capi_c_internal_group_null",
     "wz_capi_c_internal_group_check",
-    # ZA-3469 — the config verdict as ROWS (revision 4): a table of
+    # The config verdict as ROWS (revision 4): a table of
     # (variant, node, key path, endpoint) read a column at a time from an owned
     # handle, for a caller that attaches each reason to the field it is about.
     # The three doors, then the handle's own set, then one accessor per column.

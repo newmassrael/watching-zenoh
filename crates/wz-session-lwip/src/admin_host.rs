@@ -47,7 +47,7 @@ struct State {
     live: ConnectEndpoints,
     generation: u32,
     last: Option<ConnectWriteOutcome>,
-    /// R2851 (ZA-2939) — how many writes this control has RECEIVED, applied
+    /// R2851 — how many writes this control has RECEIVED, applied
     /// or refused. `generation` moves only on an applied one; this moves on
     /// every one, which is what lets a host tell its own verdict from an
     /// earlier one that reads the same.
@@ -159,7 +159,7 @@ impl crate::admin_status::ConfigView for ConnectControl {
     }
 }
 
-/// R2846 (ZA-2929) — the control is also what `status/connect` reads: the
+/// R2846 — the control is also what `status/connect` reads: the
 /// write permit, and the verdict on the last write, so a refused write is
 /// reported in the node's own words instead of only leaving the list as it
 /// was. Each verdict is its variant's name; a malformed value adds where the
@@ -170,7 +170,7 @@ impl crate::admin_status::ConnectStatusSource for ConnectControl {
         critical_section::with(|cs| self.state.borrow(cs).borrow().permit_write)
     }
 
-    /// R2851 (ZA-2939) — every verdict carries `seq`, the number of writes
+    /// R2851 — every verdict carries `seq`, the number of writes
     /// this node has received counting this one, so a host that reads `seq`
     /// before it writes (`null` reads as 0) knows a verdict with a HIGHER
     /// `seq` answers a write made after that read. Verdict and number are read
@@ -377,7 +377,7 @@ mod tests {
         ));
     }
 
-    /// R2846 (ZA-2929) — the verdict on the last write, as `status/connect`
+    /// R2846 — the verdict on the last write, as `status/connect`
     /// reports it: `null` before the first, each refusal by its own name, a
     /// malformed value with where it stopped and what it expected.
     #[cfg(feature = "adminspace-core")]
@@ -400,7 +400,7 @@ mod tests {
         deliver(&mut observer, put(KEY, br#"["tcp/10.0.0.9:7447"]"#));
         std::assert_eq!(last(), r#"{"seq":1,"verdict":"denied"}"#);
         std::assert!(!CONTROL.write_permit());
-        // R2851 (ZA-2939) — the SAME refusal again reads differently: its seq
+        // R2851 — the SAME refusal again reads differently: its seq
         // moved, so a host that read seq 1 before writing knows seq 2 is its.
         deliver(&mut observer, put(KEY, br#"["tcp/10.0.0.9:7447"]"#));
         std::assert_eq!(last(), r#"{"seq":2,"verdict":"denied"}"#);

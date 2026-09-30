@@ -224,7 +224,7 @@
  *                     not walk into it, which is not the same as there being
  *                     nothing there.
  *
- * ZA-3687 -- `zid`, at field-document revision 17: a field named `zid` is an
+ * `zid`, at field-document revision 17: a field named `zid` is an
  * IDENTITY and no longer opaque `bytes`. Its `value` is zenoh's spelling of the
  * id -- the little-endian id read as a `u128`, so the wire bytes REVERSED, with
  * a leading zero nibble dropped -- which is what zenohd logs, what a config
@@ -381,7 +381,7 @@
  *     fails, reporting a MID word indistinguishable from one this build's
  *     wire vintage does not know; this word is what separates them.
  *
- *     ZA-3215 -- MOVED FROM A FRAME TO A BATCH. Compression wraps the whole
+ *     MOVED FROM A FRAME TO A BATCH. Compression wraps the whole
  *     batch behind a one-byte header, once each side has sent its Open; it
  *     never wraps one Frame's payload, which is where this reader used to look.
  *     A batch whose header says lz4 is now opened before any message is read
@@ -404,7 +404,7 @@
  *
  * @values fields carried_state
  *
- * ZA-3215 -- AND THE SESSION'S PER-FRAME VERDICTS, at field-document
+ * AND THE SESSION'S PER-FRAME VERDICTS, at field-document
  * revision 14. Every key below is emitted on every row (or flow) it can occur
  * on, and is `null` where it does not apply -- never absent.
  *
@@ -866,12 +866,12 @@ extern "C" {
  * file, a truncated one, a length taken from the wrong place. Folded into the
  * capture error it would send you to inspect a capture that is fine. */
 #define WZ_DISSECT_ERR_CONTAINER_SHRANK (-8)
-/* ZA-3215 -- this RECORD did not complete a fragment chain, so
+/* This RECORD did not complete a fragment chain, so
  * wz_dissect_live_reassembled_bytes has no joined buffer for it. Per record,
  * unlike NO_BYTE_SOURCE, which refuses a whole list: another record of the
  * same list may answer. Unlike BYTES_RETIRED, asking again never will. */
 #define WZ_DISSECT_ERR_NOT_REASSEMBLED (-9)
-/* ZA-3601 -- the container bytes handed to wz_dissect_pcap_frame_bytes hold NO
+/* The container bytes handed to wz_dissect_pcap_frame_bytes hold NO
  * packet with that number. Its own code and not BAD_CAPTURE, because nothing is
  * wrong with the container: it reads as far as it goes, and the number is not
  * among the packets it holds -- one past the last, a prefix cut inside the
@@ -1113,7 +1113,7 @@ int wz_dissect_pcap_census_where_limited(const unsigned char *bytes, size_t len,
  * and long before a caller would want to pay four walks of a file to find
  * out.
  *
- * ZA-3214 -- from verdict revision 2, BOTH branches close with the lexer's
+ * From verdict revision 2, BOTH branches close with the lexer's
  * own tokens:
  *
  *     ...,"tokens":[{"start":0,"end":3,"kind":"word"},
@@ -1435,13 +1435,13 @@ int wz_dissect_pcap_fields_limited(const unsigned char *bytes, size_t len,
  * and limits, byte for byte, and no row carries a "selected" key -- a verdict
  * answers a question and none was asked. Absence of the key is the fourth
  * answer, and it is not the same as "unjudged". Whitespace is the same
- * selector as nothing. (ZA-3517: until then an empty selector wrote "yes" and
+ * selector as nothing. (An empty selector once wrote "yes" and
  * "unjudged" on every row, against this paragraph. A test now holds every
  * door this header marks SUBSUMED to the same bytes as its successor.)
  *
  * @values fields selected
  *
- * ZA-3214: the key and its four words are declared from field-document
+ * The key and its four words are declared from field-document
  * revision 13. Until then they were written and declared nowhere, so a
  * consumer switching on them had no revision to pin -- a closed vocabulary
  * this header had not marked, which R2175's contract forbids.
@@ -1600,7 +1600,7 @@ typedef struct wz_dissect_live wz_dissect_live;
 #define WZ_DISSECT_KIND_OAM 8
 /* Bare network envelope on a negotiated lowlatency link; no Frame or SN. */
 #define WZ_DISSECT_KIND_NETWORK 9
-/* ZA-3214 -- the SCOUTING namespace's two messages, on records whose origin
+/* The SCOUTING namespace's two messages, on records whose origin
  * is WZ_DISSECT_ORIGIN_SCOUTING. They share this one kind space rather than
  * starting their own at 1, because a consumer switches on `kind` alone and a
  * Scout numbered 1 would land on its Init case: the wire bytes are 0x01 in
@@ -1629,7 +1629,7 @@ typedef struct wz_dissect_live wz_dissect_live;
 #define WZ_DISSECT_ORIGIN_QUIC_STREAM 3
 #define WZ_DISSECT_ORIGIN_QUIC_DATAGRAM 4
 #define WZ_DISSECT_ORIGIN_SERIAL 5
-/* ZA-3214 -- a datagram flow's SCOUTING list: Scout and Hello, the messages
+/* A datagram flow's SCOUTING list: Scout and Hello, the messages
  * sent BEFORE any session. wz_dissect_live_drain hands them out after every
  * other list, under the same watermark rule, on the datagram flow's flow_id
  * and a list_id of their own. `anchor` is the packet index
@@ -1946,7 +1946,7 @@ uint64_t wz_dissect_live_lost(const wz_dissect_live *h);
  * names coordinates in another handle's spaces and is answered
  * WZ_DISSECT_ERR_BYTES_RETIRED -- a miss, never another message's bytes.
  *
- * ZA-3215 -- A MESSAGE READ OUT OF AN LZ4 BATCH. On a session that negotiated
+ * A MESSAGE READ OUT OF AN LZ4 BATCH. On a session that negotiated
  * compression the batch is lz4 on the wire and its messages exist only once
  * this reader has opened it. For such a message this door answers the
  * MESSAGE's own bytes, exactly -- not the rest of a unit, which was never on
@@ -1961,7 +1961,7 @@ int wz_dissect_live_message_bytes(const wz_dissect_live *h,
                                   unsigned char *out, size_t cap,
                                   size_t *needed);
 
-/* ── ZA-3215 (ABI 19) — THE JOINED BUFFER OF A COMPLETED FRAGMENT CHAIN ──
+/* ── (ABI 19) — THE JOINED BUFFER OF A COMPLETED FRAGMENT CHAIN ──
  *
  * A field row whose above_transport.carried_state is `reassembled` carries
  * above_transport.fields and above_transport.carried, and their start/end
@@ -2019,7 +2019,7 @@ int wz_dissect_live_reassembled_bytes(const wz_dissect_live *h,
                                       unsigned char *out, size_t cap,
                                       size_t *needed);
 
-/* ── ZA-3601 (ABI 21) — THE CAPTURED FRAME OF A PACKET ──────────────────
+/* ── (ABI 21) — THE CAPTURED FRAME OF A PACKET ──────────────────
  *
  * A field row's `first_byte` names `packet` -- the captured packet holding the
  * row's first byte -- and `frame_offset`, where that byte sits in the CAPTURED
@@ -2147,7 +2147,7 @@ int wz_dissect_live_census(const wz_dissect_live *h, const char *selector,
  * handle is still wz_dissect_live_close's job. */
 void wz_dissect_live_end(wz_dissect_live *h);
 
-/* ZA-3214 (ABI 18) -- THE FIELD DOCUMENT OVER A LIVE HANDLE, each row
+/* (ABI 18) -- THE FIELD DOCUMENT OVER A LIVE HANDLE, each row
  * carrying the record coordinates of that handle.
  *
  * R2453 gave the census a live door so its planes and the drained records
@@ -2289,7 +2289,7 @@ int wz_dissect_live_fields_since(wz_dissect_live *h,
                                  const char *declarations,
                                  uint64_t after_seq, char **out);
 
-/* ZA-3509 (ABI 20) -- THE VERDICT OF A SELECTOR OVER THE ROWS OF THAT
+/* (ABI 20) -- THE VERDICT OF A SELECTOR OVER THE ROWS OF THAT
  * DOCUMENT, and nothing beside it.
  *
  * wz_dissect_live_fields_where says which rows a selector picked inside a

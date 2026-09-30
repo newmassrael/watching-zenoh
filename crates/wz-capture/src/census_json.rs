@@ -481,7 +481,7 @@ pub fn keyexprs_json(t: &ThroughputTable) -> String {
 
 /// A zid as this document writes it: a JSON string holding zenoh's spelling.
 ///
-/// ZA-3687 — the ONE place the census names a node by text, called by the node
+/// The ONE place the census names a node by text, called by the node
 /// plane's `zid` and the interest plane's `declarer_zid`. Both used to write
 /// each wire byte in turn, so this document printed `584f1edb…` for a node
 /// zenohd logs as `af0b5b89…` (the same bytes reversed), and a consumer joining
@@ -929,7 +929,7 @@ pub(crate) fn push_flow(flow: &crate::link::FlowKey, out: &mut String) {
     push_endpoint(&flow.high, flow.link(), out);
     // Round 2447 (open-debt item 696) — WHICH LINK, on the flow object itself.
     //
-    // The ZA-1039 consumer report asked for exactly this and said in its own
+    // The consumer report asked for exactly this and said in its own
     // words that it must not be inferred from the endpoint shape: it had a
     // raweth flow whose `addr` read `3003:c837:25a1` and no key that would let
     // it tell a MAC from a truncated IPv6 address. The answer is now a recorded
@@ -1222,7 +1222,7 @@ mod tests {
         );
     }
 
-    /// ZA-3695 — an IPv6 flow reaches the census document in RFC 5952 text.
+    /// An IPv6 flow reaches the census document in RFC 5952 text.
     ///
     /// `addr` is a value a consumer JOINS on, and until this item the census
     /// wrote sixteen bytes as eight hex groups with no `::` — `fe80::1` was
@@ -1632,7 +1632,7 @@ pub(crate) mod fed_tests {
     }
 
     /// [`every_plane_capture_with_file`] with the two zids the handshakes carry
-    /// named by the caller (ZA-3687: see [`four_plane_streams_for`]).
+    /// named by the caller (see [`four_plane_streams_for`]).
     pub(crate) fn every_plane_capture_with_zids(
         keyexpr: &'static str,
         locator: Option<&str>,
@@ -1936,7 +1936,7 @@ pub(crate) mod fed_tests {
     /// The two directions of the every-plane capture, with the two ZIDs the
     /// handshakes carry named by the caller.
     ///
-    /// ZA-3687 — the callers pass [`ZID_A`] and [`ZID_B`], which are `[0xA1; 4]`
+    /// The callers pass [`ZID_A`] and [`ZID_B`], which are `[0xA1; 4]`
     /// and `[0xB2; 4]`: they read the same forwards and backwards, so nothing
     /// built on them could tell a zid printed in wire order from one printed in
     /// zenoh's order, and that is how a consumer's fixtures hid a spelling
@@ -2725,7 +2725,7 @@ pub(crate) mod fed_tests {
         }
     }
 
-    /// ZA-3687 — THE CENSUS NAMES A NODE THE WAY ZENOHD LOGS IT: `zid` on the
+    /// THE CENSUS NAMES A NODE THE WAY ZENOHD LOGS IT: `zid` on the
     /// node plane and `declarer_zid` on the interest plane are zenoh's spelling,
     /// not the wire bytes in the order they arrived.
     ///

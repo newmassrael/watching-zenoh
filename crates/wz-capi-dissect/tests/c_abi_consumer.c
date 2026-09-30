@@ -598,7 +598,7 @@ static int check_message_bytes_door(void) {
     CHECK(rc == WZ_DISSECT_ERR_INVALID_ARG,
           "a null buffer with a non-zero cap is a caller bug, rc=%d", rc);
 
-    /* ZA-3215 (ABI 19) -- THE JOINED-BUFFER DOOR, on the refusals a C caller
+    /* (ABI 19) -- THE JOINED-BUFFER DOOR, on the refusals a C caller
      * branches on. A KeepAlive completed no fragment chain, so it has no joined
      * buffer: refused PER RECORD, with nothing to size for. The positive arm --
      * a completing Fragment answering the record that was split -- is driven in
@@ -1159,7 +1159,7 @@ int main(void) {
     rc = wz_dissect_pcap_summary_bounded(NULL, 0, &bounded);
     CHECK(rc == WZ_DISSECT_ERR_INVALID_ARG, "bounded null bytes rc=%d", rc);
 
-    /* ZA-3601 (ABI 21) -- THE CAPTURED-FRAME DOOR, reachable from C at all and
+    /* (ABI 21) -- THE CAPTURED-FRAME DOOR, reachable from C at all and
      * on the answers a C caller branches on. The Rust side owns the claims that
      * need a real capture (every packet, every prefix, the join against a field
      * row); this file owns the symbol surviving into the cdylib and the contract
@@ -1422,7 +1422,7 @@ int main(void) {
     verdict = NULL;
     rc = wz_dissect_selector_diagnose("key == demo/**", &verdict);
     CHECK(rc == WZ_DISSECT_OK, "diagnose rc=%d", rc);
-    /* ZA-3214 -- revision 2 closes with the lexer's tokens, byte spans into
+    /* Revision 2 closes with the lexer's tokens, byte spans into
      * the selector above, so a consumer colours the selector off this walk.
      * (Not quoted here: its double star followed by a slash would open a
      * nested comment, which -Werror=comment refuses.) */
@@ -1628,12 +1628,12 @@ int main(void) {
      * rather than only the first, and runs in pre-push in about a second.
      * R2630 (item 745) -- 12: `dropped_by_limits` gains `scouting`, the SCOUT
      * and HELLO datagrams a `frames_per_flow` ceiling evicted.
-     * ZA-3687 -- 13: the ZID values change SPELLING under stationary keys.
+     * 13: the ZID values change SPELLING under stationary keys.
      * `nodes[].zid` and `interests[].declarer_zid` were each wire byte in turn
      * and are zenoh's spelling now, the little-endian id read as a u128 (the
      * bytes reversed, a leading zero nibble dropped), which is what zenohd
      * logs. No key moves; the number is the whole notice.
-     * ZA-3695 -- 14: an IPv6 `addr` changes SPELLING under its stationary key.
+     * 14: an IPv6 `addr` changes SPELLING under its stationary key.
      * Sixteen bytes were eight hex groups with no `::` (the loopback read
      * `0:0:0:0:0:0:0:1`) and are RFC 5952's text now (`::1`), which is what
      * zenohd logs. IPv4, MAC and vsock endpoints are as they were. No key
@@ -1716,22 +1716,22 @@ int main(void) {
      * ⚠ The spans under `above_transport.carried` when the word is
      * `reassembled` index the reader's own joined buffer and are NOT capture
      * offsets.
-     * ZA-3214 -- 13: `selected` and its four words are DECLARED. The selector
+     * 13: `selected` and its four words are DECLARED. The selector
      * door wrote them from R2766 on; no revision named the key and no family
      * held the words, so a switch over them had nothing to pin.
-     * ZA-3215 -- 14: rows gain `sn`, `chain`, `first_byte` and `l2`, flows
+     * 14: rows gain `sn`, `chain`, `first_byte` and `l2`, flows
      * gain `context`, and the document gains `reassembly` -- verdicts the
      * session reached per frame and this document had never handed over.
-     * ZA-3214 -- 15: a row can carry a record's `list_id`, `anchor` and
+     * 15: a row can carry a record's `list_id`, `anchor` and
      * `batch_index`, written by wz_dissect_live_fields_where alone.
-     * ZA-3215 -- 16: a `packet` row can be a DECLINED one, over an lz4 batch
+     * 16: a `packet` row can be a DECLINED one, over an lz4 batch
      * this build cannot open.
-     * ZA-3687 -- 17: the tree gains the `kind` word `zid`. A field named `zid`
+     * 17: the tree gains the `kind` word `zid`. A field named `zid`
      * is an identity: `value` is zenoh's spelling of it (the bytes reversed, a
      * leading zero nibble dropped) and the span still names the raw wire bytes.
      * A switch on `kind` written against the eight earlier words is no longer
      * exhaustive.
-     * ZA-3695 -- 18: an IPv6 `addr` on a flow object changes SPELLING under
+     * 18: an IPv6 `addr` on a flow object changes SPELLING under
      * its stationary key, as in the census: RFC 5952's text (`::1`) where it
      * was eight hex groups with no `::`. No key, family or word moves; the
      * number is the whole notice.
@@ -1880,7 +1880,7 @@ int main(void) {
         CHECK(verdict != NULL, "OK came back with no verdict");
         CHECK(strstr(verdict, "\"ok\":true") != NULL,
               "an unquoted non-ASCII word is a word: %s", verdict);
-        /* ZA-3214 -- and its token span counts BYTES: 7 + six UTF-8 bytes. */
+        /* And its token span counts BYTES: 7 + six UTF-8 bytes. */
         CHECK(strstr(verdict, "{\"start\":7,\"end\":13,\"kind\":\"word\"}") != NULL,
               "a multi-byte word's span is a byte span: %s", verdict);
         wz_dissect_string_free(verdict);

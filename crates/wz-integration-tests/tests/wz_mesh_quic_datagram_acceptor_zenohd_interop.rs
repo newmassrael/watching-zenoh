@@ -918,7 +918,7 @@ fn wz_peer_reliable_quic_dialer_never_joins_the_datagram_mesh() {
 /// nodes and skipped the `(2 node(s))` witness entirely (the 6th).
 ///
 /// `--zid 837270` pins the identity: the value whose 4-byte form `70 72 83 00`
-/// ended in the zero byte. ZA-3362 changed what this pin can reach. The flag was
+/// ended in the zero byte. The `--zid` change altered what this pin can reach. The flag was
 /// `70728300` and was decoded per byte into exactly that untrimmed 4-byte slice,
 /// so the leg was RED against a `Zid::from_slice` that keeps the caller's length
 /// (phantom node present, `peak 3 node(s)`, pico receives NOTHING) and GREEN once
@@ -937,7 +937,7 @@ fn wz_peer_with_a_trailing_zero_zid_still_routes_data_out() {
     let z_sub = zenoh_pico_cli_binary("z_sub");
     let (cert_path, key_path, _cleanup) = write_wz_cert("z0");
 
-    // ZA-3362 — was `70728300`; the same identity, now in zenoh's spelling. It
+    // Was `70728300`; the same identity, now in zenoh's spelling. It
     // no longer reaches `Zid::from_slice` untrimmed; see the leg's doc.
     let (mut wz_guard, mut wz_reader, udp_port) = spawn_wz_peer_quic_datagram(
         &demo,

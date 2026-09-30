@@ -58,7 +58,7 @@ fn dial_whatami(cfg: &ConfigState) -> WhatAmI {
 }
 
 /// How the dial keeps trying, read from the config the way a zenoh node reads
-/// it (ZA-3298).
+/// it.
 ///
 /// `connect/timeout_ms` and `connect/exit_on_failure` are mode-dependent
 /// upstream, and so are their defaults: a client makes ONE attempt, a peer or

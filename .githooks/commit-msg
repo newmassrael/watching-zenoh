@@ -15,6 +15,9 @@
 #      typographic whitelist §, –, —, •, …, →); no `Co-Authored-By`;
 #      no `Generated with Claude Code`; no emoji (Unicode pictograph
 #      ranges U+1F300-U+1FAFF and U+1F1E6-U+1F1FF).
+#   5. No protected vocabulary: the term list the push gate reads
+#      (scripts/lib/nda-scan.sh), applied here so the refusal comes while
+#      the message can still be reworded.
 #
 # Install via `git config core.hooksPath .githooks` (one-time per clone).
 set -euo pipefail
@@ -149,6 +152,24 @@ if non_english_lines=$(grep -nP '[^\x{0009}\x{000A}\x{000D}\x{0020}-\x{007E}\x{0
         while IFS= read -r offender; do
             errors+=("  $offender")
         done <<< "$(printf '%s\n' "$non_english_lines" | head -n 5)"
+    fi
+fi
+
+# --- Rule 5: Protected vocabulary (whole message) ---
+# The push gate refuses the same words, but only once the commits exist: a
+# refusal there strands every commit already made behind a gate that will not
+# open until they are reworded. Asking here costs one reword of one message.
+# A clone with no term list is NOT blocked at commit time — the push gate is the
+# one that refuses on an absent list, and a fresh clone must still be able to
+# commit.
+if [[ -r scripts/lib/nda-scan.sh ]]; then
+    # shellcheck source=../scripts/lib/nda-scan.sh
+    source scripts/lib/nda-scan.sh
+    if wz_nda_terms_readable && ! nda_out=$(wz_nda_scan_message "$msg_file" 2>&1); then
+        errors+=("Protected vocabulary in the message (scripts/lib/nda-scan.sh):")
+        while IFS= read -r nda_line; do
+            errors+=("$nda_line")
+        done <<< "$nda_out"
     fi
 fi
 

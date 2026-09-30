@@ -142,7 +142,7 @@ fn wz_peer_forwards_a_put_between_two_unixpipe_clients() {
 
     // ── consumer: declare a routed subscriber over its own unixpipe link (--zid
     //    a0000001, distinct from the producer so the peer holds two faces;
-    //    ZA-3362: no leading 0, which zenoh refuses in a zid). ──
+    //    no leading 0, which zenoh refuses in a zid). ──
     let consumer_stderr = tempfile::tempfile().expect("tempfile for consumer stderr");
     let consumer_writer = consumer_stderr
         .try_clone()

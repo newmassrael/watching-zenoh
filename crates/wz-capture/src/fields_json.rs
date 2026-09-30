@@ -128,7 +128,7 @@ pub fn fields_json(
 ///
 /// # An EMPTY selector is the identity, and asks nothing
 ///
-/// ZA-3517. It selects everything, so it is the document [`fields_json`]
+/// It selects everything, so it is the document [`fields_json`]
 /// makes, byte for byte: no walk to judge the rows and no `selected` key on
 /// any of them, because a verdict is an answer to a question and none was
 /// asked. It used to render `yes` on every judged row and `unjudged` on the
@@ -158,7 +158,7 @@ pub fn fields_json_where(
     )
 }
 
-/// ZA-3517 — the walk that judges the rows, or nothing when no question was
+/// The walk that judges the rows, or nothing when no question was
 /// asked.
 ///
 /// One function for both renderers that take a selector, so the rule that an
@@ -172,7 +172,7 @@ fn judged_by(
     (!filter.is_any()).then(|| crate::payload::payloads_grouped(d, filter, grouping))
 }
 
-/// ZA-3214 ① — the selector's document, with each row carrying the
+/// The selector's document, with each row carrying the
 /// COORDINATES of a record door that shares this dissection.
 ///
 /// # The join this makes possible
@@ -370,7 +370,7 @@ pub fn names_row_cell(pattern: &str, path: &str) -> bool {
     }
 }
 
-/// ZA-3214 ① — the numbering a record door gave the lists of one dissection.
+/// The numbering a record door gave the lists of one dissection.
 ///
 /// A trait rather than a map handed in, because the numbering is the CALLER's:
 /// this crate renders rows and has no business minting the ids a handle in
@@ -503,7 +503,7 @@ fn fields_json_selected(
         );
     }
     out.push_str(",\"stream_flows\":[");
-    // ZA-3215 — re-read ONCE, ahead of both flow tables: a stream row now
+    // Re-read ONCE, ahead of both flow tables: a stream row now
     // names the packet holding its first byte and that packet's link
     // addresses, which only the capture's own bytes can say.
     let reread = Reread::of(capture);
@@ -531,7 +531,7 @@ fn fields_json_selected(
             // one list's verdicts onto the other's rows.
             RowTags {
                 selection: RowSelection::of(verdicts, lists.stream.get(i).copied()),
-                // ZA-3214 ① — keyed by the SAME list index, for the same
+                // Keyed by the SAME list index, for the same
                 // reason: the index is what names this list unambiguously.
                 list_id: coordinates.and_then(|c| c.list_id(*lists.stream.get(i)?)),
                 scouting_list_id: None,
@@ -609,7 +609,7 @@ fn fields_json_selected(
     // "no caps" from "caps that did not bite".
     out.push_str("\"dropped_by_limits\":");
     out.push_str(&crate::report::dropped_by_limits_json(d));
-    // ZA-3215 — THE CHAINS NO ROW ENDED, beside the rows that begin them.
+    // THE CHAINS NO ROW ENDED, beside the rows that begin them.
     //
     // A reader indexing `chain.chain_id` finds some chains with a `begun` row
     // and no closing one, and the rows cannot say why: the router gave those up
@@ -672,7 +672,7 @@ fn fields_json_selected(
 /// from this document's ROWS, which is a rendering question, and this type only
 /// records which indices the rows it does render stand at.
 ///
-/// ZA-3509 — crate-visible, because the verdict-only document renders exactly
+/// Crate-visible, because the verdict-only document renders exactly
 /// these lists and a second copy of "which lists are rows" is the enumeration
 /// this type exists to keep single. It reads `stream` and `datagram` and folds
 /// nothing, so `sub` stays this document's own.
@@ -783,7 +783,7 @@ fn push_stream_flow(
             .packet_for(frame.direction, frame.stream_offset)
             .unwrap_or(last_packet);
         spaces.at_packet(last_packet);
-        // ZA-3215 — folded ahead of the cap, for the reason `ChainIds` gives.
+        // Folded ahead of the cap, for the reason `ChainIds` gives.
         let session_row = chains.observe(frame);
         // AFTER the chain fold and BEFORE anything is written: a row the cursor
         // passes over still has to advance the fold, or a completing row behind
@@ -898,7 +898,7 @@ fn push_datagram_flow(
         // is.
         let index = frame.stream_offset;
         spaces.at_packet(index);
-        // ZA-3215 — ahead of every reason this loop has for skipping a row, so
+        // Ahead of every reason this loop has for skipping a row, so
         // a datagram the second read disagrees about still advances the chain
         // fold exactly as the router was advanced by it.
         let session_row = chains.observe(frame);
@@ -922,7 +922,7 @@ fn push_datagram_flow(
                 continue;
             }
         };
-        // ZA-3215 ⑤ — a message decompressed out of an lz4 batch is not in the
+        // A message decompressed out of an lz4 batch is not in the
         // packet; its own bytes travel with it.
         let message = match &frame.decompressed {
             Some(own) => Some(own.as_slice()),
@@ -1044,7 +1044,7 @@ fn push_datagram_flow(
         // the map and answer `unjudged` by accident. Writing the word is the
         // same answer with its reason attached, and it cannot become wrong if
         // the map's keying changes.
-        // ZA-3214 ① — the scouting list's own id: this row joins a record the
+        // The scouting list's own id: this row joins a record the
         // record door drains with ORIGIN_SCOUTING, whose batch index is 0
         // because a scouting message is never batched.
         push_coordinates(tags.scouting_list_id, index as u64, 0, seq, out);
@@ -1066,7 +1066,7 @@ fn push_datagram_flow(
             },
             out,
         );
-        // ZA-3215 — no SN and no chain on a scouting message, said as `null`
+        // No SN and no chain on a scouting message, said as `null`
         // like `above_transport` above; the datagram IS the message, so its
         // first byte is the payload's first.
         push_session_row(
@@ -1689,7 +1689,7 @@ fn push_above_transport(
     out.push('}');
 }
 
-/// ZA-3215 — what the session decided about ONE row that this document had
+/// What the session decided about ONE row that this document had
 /// never said: the SN verdict with the conduit it was judged on, and the chain
 /// router's outcome with the identity of the chain it touched.
 ///
@@ -1733,7 +1733,7 @@ struct ChainRow {
     chain_id: Option<u64>,
 }
 
-/// ZA-3215 — the one word per `SnVerdict` variant this document writes under
+/// The one word per `SnVerdict` variant this document writes under
 /// `sn.verdict`.
 ///
 /// A type rather than a `&'static str`, on [`CarriedState`]'s rule: a word a
@@ -1800,7 +1800,7 @@ impl SnVerdictWord {
     }
 }
 
-/// ZA-3215 — the chain router's outcome for one fragment, as the word
+/// The chain router's outcome for one fragment, as the word
 /// `chain.outcome` carries.
 ///
 /// A joined payload is never decompressed on its own (compression wraps the
@@ -1852,7 +1852,7 @@ impl ChainOutcome {
     }
 }
 
-/// ZA-3215 — why the router aborted or refused, as the word `chain.reason`
+/// Why the router aborted or refused, as the word `chain.reason`
 /// carries. One vocabulary over the router's two reason enums, because a
 /// consumer reads it beside `outcome`, which already says which of the two it
 /// is.
@@ -1932,7 +1932,7 @@ impl ChainReason {
     }
 }
 
-/// ZA-3215 — chain IDENTITY, one per flow, assigned in frame order.
+/// Chain IDENTITY, one per flow, assigned in frame order.
 ///
 /// # What the identity is, and what it is not
 ///
@@ -2140,7 +2140,7 @@ fn push_session_row(row: &SessionRow, out: &mut String) {
     }
 }
 
-/// ZA-3215 — the captured packet holding a row's FIRST BYTE, and the link
+/// The captured packet holding a row's FIRST BYTE, and the link
 /// addresses it travelled between.
 ///
 /// * `packet` — the capture's packet index.
@@ -2217,7 +2217,7 @@ fn push_mac(mac: &[u8; 6], out: &mut String) {
     }
 }
 
-/// ZA-3215 — the flow's observation CONTEXT: what the handshake it watched
+/// The flow's observation CONTEXT: what the handshake it watched
 /// negotiated, as of the end of the flow.
 ///
 /// A consumer re-read the `InitAck` tree for these, which is a second decode
@@ -2396,7 +2396,7 @@ impl<'a> RowSelection<'a> {
     }
 }
 
-/// ZA-3214 ① — everything a row producer writes about a row BESIDES its walk:
+/// Everything a row producer writes about a row BESIDES its walk:
 /// the selector's verdict and the record coordinates.
 ///
 /// One value, for the reason [`RowSelection`] is one value: a producer's
@@ -2452,7 +2452,7 @@ impl RowTags<'_> {
     }
 }
 
-/// ZA-3214 ① — `"list_id":L,"anchor":A,"batch_index":B,` for a row whose list
+/// `"list_id":L,"anchor":A,"batch_index":B,` for a row whose list
 /// the caller numbered, and nothing for one it did not.
 ///
 /// The three fields are the record's (`list_id`, `anchor`, `batch_index`) with
@@ -2512,7 +2512,7 @@ fn push_selected(selection: Option<RowSelection<'_>>, frame: &PassiveFrame, out:
     row_verdict_of(census, list, frame).push(out);
 }
 
-/// ZA-3509 — the verdict for ONE row, asked of the walk that judged it.
+/// The verdict for ONE row, asked of the walk that judged it.
 ///
 /// Hoisted out of `push_selected` when the verdict-only document arrived, and
 /// for the reason that document exists at all: two renderers reading the same
@@ -2536,7 +2536,7 @@ pub(crate) fn row_verdict_of(
     }
 }
 
-/// ZA-3214 ④ — the four words a row's `selected` key carries, as ONE type.
+/// The four words a row's `selected` key carries, as ONE type.
 ///
 /// R2766 wrote them as literals in two places — the arm above and the scouting
 /// arm, which writes `unjudged` directly — and declared neither the key nor
@@ -3066,7 +3066,7 @@ mod tests {
         out
     }
 
-    /// ZA-3517 — THE EMPTY SELECTOR IS THE IDENTITY, for the field document as
+    /// THE EMPTY SELECTOR IS THE IDENTITY, for the field document as
     /// it is for every census plane: it asks no question, so it writes no answer.
     ///
     /// # What this holds, and where it was false
@@ -3121,7 +3121,7 @@ mod tests {
         );
     }
 
-    /// ZA-3517 — the same identity through the door that also carries the
+    /// The same identity through the door that also carries the
     /// record coordinates, which is the one a live handle calls and the one a
     /// consumer passes an empty selector to when it is not narrowing.
     ///
@@ -3220,7 +3220,7 @@ mod tests {
         out
     }
 
-    /// ZA-3509 — THE VERDICT DOCUMENT IS THE FIELD DOCUMENT'S ROWS AND THE SAME
+    /// THE VERDICT DOCUMENT IS THE FIELD DOCUMENT'S ROWS AND THE SAME
     /// WORD ON EACH, without the trees.
     ///
     /// # The claim, and why it is the whole of the contract
@@ -3311,7 +3311,7 @@ mod tests {
         );
     }
 
-    /// ZA-3509 — AND IT NEEDS NO CAPTURE CONTAINER, which is what lets a handle
+    /// AND IT NEEDS NO CAPTURE CONTAINER, which is what lets a handle
     /// fed by `push` have datagram verdicts at all.
     ///
     /// The field document re-reads each datagram from the container to walk its
@@ -3362,7 +3362,7 @@ mod tests {
         );
     }
 
-    /// ZA-3509 — AN EMPTY SELECTOR IS THE IDENTITY HERE TOO: the rows and their
+    /// AN EMPTY SELECTOR IS THE IDENTITY HERE TOO: the rows and their
     /// coordinates, and no verdict on any of them.
     ///
     /// The verdict document is the one place an empty selector could have been
@@ -3407,7 +3407,7 @@ mod tests {
         );
     }
 
-    /// ZA-3509 — a list the caller does not number gets no coordinate keys and
+    /// A list the caller does not number gets no coordinate keys and
     /// no invented ones, on the field document's own rule, and the verdict still
     /// arrives: a consumer that cannot join a row can still count it.
     #[cfg(feature = "network-codecs")]
@@ -4051,7 +4051,7 @@ mod tests {
         // compressed bytes and reports whatever records fall out of them" would
         // be worse than silence.
         //
-        // ZA-3215 ⑤ — the batch is now in upstream's shape, header byte first,
+        // The batch is now in upstream's shape, header byte first,
         // and the session stands ONE record for the whole unopened batch. The
         // second walk over those wire bytes must DECLINE rather than name a
         // tree: they are a header and lz4, not a message.
@@ -4110,7 +4110,7 @@ mod tests {
         out
     }
 
-    /// ZA-3215 ⑤ — A COMPRESSION-NEGOTIATED LINK PUTS A BATCH HEADER IN FRONT
+    /// A COMPRESSION-NEGOTIATED LINK PUTS A BATCH HEADER IN FRONT
     /// OF EVERY BATCH, and the reader must strip it before it reads a message.
     ///
     /// Upstream: once a side has sent its `Open`, every batch it sends on a
@@ -4143,7 +4143,7 @@ mod tests {
         );
     }
 
-    /// ZA-3215 ⑤ — AND THE BIT-SET ARM: the whole batch is lz4, and a build
+    /// AND THE BIT-SET ARM: the whole batch is lz4, and a build
     /// with `compression` reads the records inside it, while a build without
     /// says `undecompressible` and invents nothing.
     ///
@@ -4207,7 +4207,7 @@ mod tests {
         );
     }
 
-    /// ZA-3215 — the row and flow objects revision 14 added, RENDERED FROM
+    /// The row and flow objects revision 14 added, RENDERED FROM
     /// THEIR OWN TYPES, one per word.
     ///
     /// The rule `the_field_documents_payload_plane_is_pinned_over_every_arm`
@@ -4351,7 +4351,7 @@ mod tests {
             .collect()
     }
 
-    /// ZA-3215 ① — EVERY FRAGMENT ROW NAMES WHAT THE ROUTER DID WITH IT, and
+    /// EVERY FRAGMENT ROW NAMES WHAT THE ROUTER DID WITH IT, and
     /// the rows of one chain share one identity.
     ///
     /// The sequence is chosen so each outcome the router reaches on a live
@@ -4418,7 +4418,7 @@ mod tests {
         );
     }
 
-    /// ZA-3215 ① — AND A COMPLETED CHAIN CLOSES UNDER THE IDENTITY IT BEGAN
+    /// AND A COMPLETED CHAIN CLOSES UNDER THE IDENTITY IT BEGAN
     /// WITH, while a chain the capture stopped inside is counted by the
     /// top-level `reassembly` group, which is the only place a chain with no
     /// closing row can be accounted for.
@@ -4461,7 +4461,7 @@ mod tests {
         );
     }
 
-    /// ZA-3215 ③ — THE FLOW SAYS WHAT ITS HANDSHAKE NEGOTIATED, and a flow
+    /// THE FLOW SAYS WHAT ITS HANDSHAKE NEGOTIATED, and a flow
     /// whose handshake this capture never saw says THAT rather than reporting
     /// the `&=` fold's starting `true` as an agreement.
     #[cfg(feature = "reassembly")]
@@ -4509,7 +4509,7 @@ mod tests {
         }
     }
 
-    /// ZA-3215 ④ — A STREAM ROW NAMES THE PACKET HOLDING ITS FIRST BYTE, and
+    /// A STREAM ROW NAMES THE PACKET HOLDING ITS FIRST BYTE, and
     /// the offset it gives is the byte, read back out of the capture file.
     ///
     /// Judged against the FILE and not against this module's own arithmetic:
@@ -4580,7 +4580,7 @@ mod tests {
         );
     }
 
-    /// ZA-3601 — THE JOIN: the packet number a row names is a number the door
+    /// THE JOIN: the packet number a row names is a number the door
     /// hands a frame out for, and `frame_offset` is the message's first byte IN
     /// THAT FRAME.
     ///
@@ -4689,7 +4689,7 @@ mod tests {
         );
     }
 
-    /// ZA-3214 ① — a numbering that numbers every list, standing in for a live
+    /// A numbering that numbers every list, standing in for a live
     /// handle's in a test that only needs the coordinate keys to appear.
     struct EveryListNumbered;
 
@@ -4757,13 +4757,13 @@ mod tests {
         let run = Declarations::new(&map);
 
         let mut rendered = alloc::vec![fields_json(&d, &file, None, Some(&run))];
-        // ZA-3215 — AND THE SAME CAPTURE THROUGH THE SELECTOR DOOR. Revision 13
+        // AND THE SAME CAPTURE THROUGH THE SELECTOR DOOR. Revision 13
         // declared `selected` and this population never rendered a row that
         // carries it, so the equality below failed from the round that
         // declared it; a selector is the only input that emits the key.
         let selector = crate::filter::Filter::parse("bytes > 6").expect("a selector");
         rendered.push(fields_json_where(&d, &file, None, Some(&run), &selector));
-        // ZA-3214 ① — and through the live door's coordinated rendering, the
+        // And through the live door's coordinated rendering, the
         // only one that writes `list_id`, `anchor` and `batch_index` (revision
         // 15). Without it those keys would be declared and pinned by nothing.
         rendered.push(fields_json_where_coordinated(
@@ -4873,7 +4873,7 @@ mod tests {
             "a RefusedUnder arm was added"
         );
         assert_eq!(Misbound::names().len(), 2, "a Misbound arm was added");
-        // ZA-3215 — the row and flow objects revision 14 added.
+        // The row and flow objects revision 14 added.
         rendered.extend(session_arms());
 
         let mut seen: Vec<&str> = Vec::new();
@@ -4959,7 +4959,7 @@ mod tests {
         // consumer could read.
         let mut failures: Vec<String> = Vec::new();
         let live: [(&str, &str, Vec<&'static str>); 24] = [
-            // ZA-3215 — the session's per-frame verdicts, each held to the
+            // The session's per-frame verdicts, each held to the
             // walk its emitter's exhaustive match is bound to.
             (rev::FIELDS, "verdict", SnVerdictWord::names()),
             (rev::FIELDS, "outcome", ChainOutcome::names()),
@@ -5024,7 +5024,7 @@ mod tests {
             (rev::FIELDS, "under", RefusedUnder::names()),
             (rev::FIELDS, "wrong", Misbound::names()),
             (rev::FIELDS, "offset_space", crate::AnchorSpace::names()),
-            // ZA-3214 ④ — the selector door's per-row verdict. It wrote these
+            // The selector door's per-row verdict. It wrote these
             // four words from R2766 on with no family declaring them, so a
             // consumer's switch had no revision to pin and nothing here to
             // break when a fifth word arrived.
@@ -5041,7 +5041,7 @@ mod tests {
             (rev::CENSUS, "kind", crate::interest::InterestKind::names()),
             (rev::CENSUS, "mode", crate::interest::InterestMode::names()),
             (rev::CENSUS, "offset_space", crate::AnchorSpace::names()),
-            // ZA-3214 ③ — the lexer's token classes, the first family on the
+            // The lexer's token classes, the first family on the
             // selector verdict. Its walk is `TokenClass::names`, held to the
             // lexer by the exhaustive `TokenClass::of`.
             (
@@ -5049,7 +5049,7 @@ mod tests {
                 "kind",
                 crate::filter::TokenClass::names(),
             ),
-            // ZA-3509 — the verdict document's two families, each held to the
+            // The verdict document's two families, each held to the
             // SAME walk the field document's is. Two declarations of one
             // vocabulary at their own documents' revisions, and one walk behind
             // both: that is what keeps the verdict document from drifting into a
@@ -5283,7 +5283,7 @@ mod tests {
              `doc_revision::DOCUMENT_HISTORY` carrying the widened set, which is \
              the notice a consumer's switch needs"
         );
-        // ZA-3687 — EIGHT now. The fixture's two Init frames each carry a `zid`,
+        // EIGHT now. The fixture's two Init frames each carry a `zid`,
         // and that field is `kind: "zid"` since revision 17, so the word joined
         // the ones this capture reaches without the capture changing. It
         // reached seven when the family was written; the extra word is a
@@ -5393,7 +5393,7 @@ mod tests {
         dg.finish();
         let dgfile = crate::pcap::write(1, &[(0, 0, dgram_packet.as_slice())]);
         let dgram = fields_json(&dg, &dgfile, None, None);
-        // ZA-3214 ④ — the selector's document, so `selected` is measured and
+        // The selector's document, so `selected` is measured and
         // not only declared: a selector that matches the capture's key and one
         // that does not, which between them reach `yes`, `no` and `unjudged`.
         let hit = crate::filter::Filter::parse("key == demo/temp").expect("parses");
@@ -5512,7 +5512,7 @@ mod tests {
         let (compressed_d, compressed_file) =
             crate::datagram_tests::compressed_session_dissection_with_file();
         let compressed_fields = fields_json(&compressed_d, &compressed_file, None, None);
-        // ZA-3215 — the five families revision 14 added, each word rendered
+        // The five families revision 14 added, each word rendered
         // from its own type; see `session_arms`.
         arms.extend(session_arms());
 
@@ -5526,14 +5526,14 @@ mod tests {
             &where_hit,
             &where_miss
         ];
-        // ZA-3214 ① — EVERY capture above through the two other doors as well:
+        // EVERY capture above through the two other doors as well:
         // the selector's (rows gain `selected`) and the live door's (rows gain
         // `selected` and the record coordinates). The optional keys compose
         // with a word's own shapes independently, so the population has to be
         // the same product the declaration states — a door rendered over only
         // some captures would leave some products unmeasured and declared.
         //
-        // ZA-3517 — A NON-EMPTY selector, and that is the point of the line. This
+        // A NON-EMPTY selector, and that is the point of the line. This
         // used to be the empty one, which judged every row and so put a `selected`
         // word on each; the empty selector now asks nothing and writes none, so
         // the population that measures the verdict's products has to ask a
@@ -5565,7 +5565,7 @@ mod tests {
             ));
         }
         fields_docs.extend(widened.iter());
-        // ZA-3509 — THE VERDICT DOCUMENT, over every capture the field document
+        // THE VERDICT DOCUMENT, over every capture the field document
         // is rendered over and under the selectors that between them reach the
         // words: one that keeps every row, one that matches this capture's key
         // and one that does not. Plus the empty selector, which is the shape the
@@ -5583,7 +5583,7 @@ mod tests {
                 ));
             }
         }
-        // ZA-3214 ③ — the selector verdict, over selectors that between them
+        // The selector verdict, over selectors that between them
         // reach every token class, on both branches.
         let diagnoses: Vec<String> = [
             "(key == 'a b') && not size >= 3",
@@ -6741,7 +6741,7 @@ mod tests {
     /// Round 2447 (open-debt item 696) — A FLOW ROW SAYS WHICH LINK IT WAS READ
     /// OFF, AND ITS ENDPOINTS ARE SPELLED THE WAY THAT LINK SPELLS ADDRESSES.
     ///
-    /// # The defect, which is the ZA-1039 report's second claim
+    /// # The defect, which is the consumer report's second claim
     ///
     /// The reader knew the answer and threw it away. `DatagramLink::RawEth` is
     /// chosen in `Dissection::push_packet_at`, whose own comment calls that the
@@ -6841,7 +6841,7 @@ mod tests {
         }
     }
 
-    /// ZA-3695 — an IPv6 flow's `addr` in the field document is RFC 5952 text.
+    /// An IPv6 flow's `addr` in the field document is RFC 5952 text.
     ///
     /// The sibling above grades the LINK-dependent spelling, and this one grades
     /// what the IP arm itself writes for sixteen bytes. The two endpoints are

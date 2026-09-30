@@ -130,7 +130,7 @@ pub const WZ_DISSECT_ERR_NO_BYTE_SOURCE: c_int = -7;
 /// error it would send a consumer to inspect a capture that is fine, which is
 /// the longest kind of wrong turn this ABI can hand out.
 pub const WZ_DISSECT_ERR_CONTAINER_SHRANK: c_int = -8;
-/// ZA-3215 ⑤ — this record did not COMPLETE a fragment chain, so it has no
+/// This record did not COMPLETE a fragment chain, so it has no
 /// joined buffer for [`wz_dissect_live_reassembled_bytes`] to hand back.
 ///
 /// Its own code and not [`WZ_DISSECT_ERR_NO_BYTE_SOURCE`], which is about a
@@ -140,7 +140,7 @@ pub const WZ_DISSECT_ERR_CONTAINER_SHRANK: c_int = -8;
 /// which is retry-later positional: asking again for this record will never
 /// succeed.
 pub const WZ_DISSECT_ERR_NOT_REASSEMBLED: c_int = -9;
-/// ZA-3601 — the container bytes handed to [`wz_dissect_pcap_frame_bytes`] hold
+/// The container bytes handed to [`wz_dissect_pcap_frame_bytes`] hold
 /// no packet with that number.
 ///
 /// Its own code and not [`WZ_DISSECT_ERR_BAD_CAPTURE`], because nothing is wrong
@@ -326,10 +326,10 @@ pub extern "C" fn wz_dissect_abi_version() -> c_int {
     // The header's own rule is that this moves when a SYMBOL changes, and a
     // consumer pinned to 16 meeting 17 learns exactly that there is a door it
     // does not know about.
-    // ZA-3214 — 18, for `wz_dissect_live_fields_where`.
-    // ZA-3215 — 19, for `wz_dissect_live_reassembled_bytes`.
-    // ZA-3509 — 20, for `wz_dissect_live_selection`.
-    // ZA-3601 — 21, for `wz_dissect_pcap_frame_bytes`.
+    // 18, for `wz_dissect_live_fields_where`.
+    // 19, for `wz_dissect_live_reassembled_bytes`.
+    // 20, for `wz_dissect_live_selection`.
+    // 21, for `wz_dissect_pcap_frame_bytes`.
     // 22, for `wz_dissect_live_fields_since`.
     WZ_DISSECT_ABI_REVISION
 }
@@ -568,7 +568,7 @@ enum Door {
     /// would have meant either a silent hole in `doors` or a name chosen to
     /// dodge the check.
     Replay,
-    /// ZA-3601 — the one pcap door that hands back a captured FRAME's bytes
+    /// The one pcap door that hands back a captured FRAME's bytes
     /// rather than a document or a handle: the frame a field row's
     /// `first_byte.packet` names, in the coordinate space `frame_offset`
     /// indexes.
@@ -639,7 +639,7 @@ impl Door {
             | Door::CensusWhereLimited
             | Door::FieldsWhereLimited
             | Door::Replay
-            // ZA-3601 — like `Replay`, it emits no document and joins nothing.
+            // Like `Replay`, it emits no document and joins nothing.
             | Door::FrameBytes => None,
         }
     }
@@ -1571,7 +1571,7 @@ pub unsafe extern "C" fn wz_dissect_selector_diagnose(
     // R2100 (open-debt item 509) — the envelope opens BOTH branches, so the
     // revision is readable off a verdict whichever way it went.
     //
-    // ZA-3214 ③ — rendered by `wz_capture::filter::diagnose_json`, beside the
+    // Rendered by `wz_capture::filter::diagnose_json`, beside the
     // revision that declares the verdict's `kind` family, so the gate that
     // derives every family's carries verdict can render this document too.
     // The lexer's tokens close both branches; see that function.
@@ -1960,7 +1960,7 @@ pub unsafe extern "C" fn wz_dissect_live_message_bytes(
     WZ_DISSECT_OK
 }
 
-/// ZA-3215 ⑤ — THE JOINED BUFFER of a record that completed a fragment chain,
+/// THE JOINED BUFFER of a record that completed a fragment chain,
 /// copied into a buffer the caller owns.
 ///
 /// # What it is for
@@ -2052,7 +2052,7 @@ pub unsafe extern "C" fn wz_dissect_live_reassembled_bytes(
     WZ_DISSECT_OK
 }
 
-/// ZA-3601 — THE CAPTURED FRAME of a packet, by the number a field row names,
+/// THE CAPTURED FRAME of a packet, by the number a field row names,
 /// copied into a buffer the caller owns.
 ///
 /// # What it is for
@@ -2243,7 +2243,7 @@ pub unsafe extern "C" fn wz_dissect_live_census(
     write_string(unsafe { (*handle).census(&filter) }, out)
 }
 
-/// ZA-3214 ① (ABI 18) — THE FIELD DOCUMENT OVER A LIVE HANDLE, each row
+/// (ABI 18) — THE FIELD DOCUMENT OVER A LIVE HANDLE, each row
 /// carrying the record coordinates of that handle.
 ///
 /// # The gap this closes
@@ -2433,7 +2433,7 @@ pub unsafe extern "C" fn wz_dissect_live_fields_since(
     write_string(doc, out)
 }
 
-/// ZA-3509 (ABI 20) — THE VERDICT OF A SELECTOR OVER THE ROWS OF A LIVE
+/// (ABI 20) — THE VERDICT OF A SELECTOR OVER THE ROWS OF A LIVE
 /// HANDLE'S FIELD DOCUMENT, and nothing beside it.
 ///
 /// # What a narrowing consumer was paying for
@@ -4333,7 +4333,7 @@ mod tests {
         wz_capture::pcap::write(1, &[(0, 0, a.as_slice()), (0, 9_000, b.as_slice())])
     }
 
-    /// ZA-3687 — A NODE CROSSES THIS BOUNDARY UNDER ONE NAME, in the census and
+    /// A NODE CROSSES THIS BOUNDARY UNDER ONE NAME, in the census and
     /// in the field tree, and the name is the one zenohd logs.
     ///
     /// The seam a consumer reads through, and the one no test in the crates
@@ -5112,7 +5112,7 @@ mod tests {
         );
     }
 
-    /// ZA-3517 — THE SELECTOR DOOR, ASKED NOTHING, IS THE DOOR IT SUBSUMES.
+    /// THE SELECTOR DOOR, ASKED NOTHING, IS THE DOOR IT SUBSUMES.
     ///
     /// R2766 made `wz_dissect_pcap_fields_where_limited` the current shape of
     /// the field family and marked the three older doors SUBSUMED by it, and the
@@ -5147,7 +5147,7 @@ mod tests {
         }
     }
 
-    /// ZA-3517 — and what a selector adds is the verdict and nothing else.
+    /// And what a selector adds is the verdict and nothing else.
     ///
     /// The other half of the identity above, and the arm that keeps it honest: a
     /// door that never wrote `selected` would satisfy the equality trivially.
@@ -5176,7 +5176,7 @@ mod tests {
         assert_eq!(stripped, plain, "nothing but the verdict differs");
     }
 
-    /// ZA-3517 — EVERY SUBSUMED DOOR HAS A WITNESS THAT ITS SUCCESSOR ANSWERS
+    /// EVERY SUBSUMED DOOR HAS A WITNESS THAT ITS SUCCESSOR ANSWERS
     /// THE SAME BYTES, and the population of doors is the library's own.
     ///
     /// # The gap this closes
@@ -5437,7 +5437,7 @@ mod tests {
         unsafe { wz_dissect_string_free(out) };
         // R2100 (open-debt item 509) — the verdict now OPENS with its own
         // revision, so a consumer can tell this shape from the next one.
-        // ZA-3214 ③ — revision 2 closes with the lexer's tokens, byte spans
+        // Revision 2 closes with the lexer's tokens, byte spans
         // into `key == demo/**`.
         assert_eq!(
             verdict,
@@ -5645,7 +5645,7 @@ mod tests {
 
     /// Ethernet + IPv6 + UDP from `src` to `dst`, padded to the 60-byte minimum.
     ///
-    /// ZA-3695 — the IPv6 twin of [`udp_packet`], hand-laid here for the same
+    /// The IPv6 twin of [`udp_packet`], hand-laid here for the same
     /// reason `framed_init` is: a fixture shared with `wz-capture` would prove
     /// that the reader and the writer hold one belief between them. The UDP
     /// checksum is zero, which over IPv6 is present-and-wrong; the test that
@@ -5680,7 +5680,7 @@ mod tests {
         eth
     }
 
-    /// ZA-3695 — AN IPV6 ADDRESS CROSSES THIS BOUNDARY IN THE TEXT ZENOHD LOGS,
+    /// AN IPV6 ADDRESS CROSSES THIS BOUNDARY IN THE TEXT ZENOHD LOGS,
     /// in the census and in the field document, under the revisions that say so.
     ///
     /// The seam a consumer reads through, which no test in the crate below can
@@ -5822,17 +5822,17 @@ mod tests {
         // the feed is declared over and 94 after, because the bytes BEHIND a
         // hole decode only once the hole is given up on.
         // R2766 (open debt 788) — 17, for `wz_dissect_pcap_fields_where_limited`.
-        // ZA-3214 — 18, for `wz_dissect_live_fields_where`: the field document
+        // 18, for `wz_dissect_live_fields_where`: the field document
         // over a live handle. One symbol, and the memory rule and the record
         // layout both stay put.
-        // ZA-3215 — 19, for `wz_dissect_live_reassembled_bytes`: a joined
+        // 19, for `wz_dissect_live_reassembled_bytes`: a joined
         // chain's buffer copied out into a buffer the caller sized. One
         // symbol; the memory rule and the record layout stay put.
-        // ZA-3509 — 20, for `wz_dissect_live_selection`: the selector's verdict
+        // 20, for `wz_dissect_live_selection`: the selector's verdict
         // over the field document's rows. One symbol, a `char*` released by
         // `wz_dissect_string_free`; the memory rule and the record layout stay
         // put.
-        // ZA-3601 — 21, for `wz_dissect_pcap_frame_bytes`: a captured frame
+        // 21, for `wz_dissect_pcap_frame_bytes`: a captured frame
         // copied out into a buffer the caller sized, read from a container the
         // caller holds. One symbol and one status code; the memory rule and the
         // record layout stay put.
@@ -6394,7 +6394,7 @@ mod tests {
             (rev::READABLE_SURFACES, vec![call_readable_surfaces()]),
             (rev::SELECTOR_DIAGNOSE, vec![selector_ok, selector_bad]),
             (rev::DECLARATIONS_DIAGNOSE, vec![decl_ok, decl_bad]),
-            // ZA-3509 — built by a door that takes a handle, so it comes from one.
+            // Built by a door that takes a handle, so it comes from one.
             (rev::SELECTION, selection_documents()),
         ];
 
@@ -6523,7 +6523,7 @@ mod tests {
             (rev::READABLE_SURFACES, call_readable_surfaces()),
             (rev::SELECTOR_DIAGNOSE, call_selector_diagnose("")),
             (rev::DECLARATIONS_DIAGNOSE, call_declarations_diagnose("")),
-            // ZA-3509 — declares no plane, so it contributes no `@planes` marker,
+            // Declares no plane, so it contributes no `@planes` marker,
             // and being in this table is what makes that a checked fact.
             (
                 rev::SELECTION,
@@ -6645,7 +6645,7 @@ mod tests {
                     call_declarations_diagnose("not a declaration"),
                 ],
             ),
-            // ZA-3509 — both shapes, for the reason `selection_documents` gives.
+            // Both shapes, for the reason `selection_documents` gives.
             (rev::SELECTION, selection_documents()),
             (
                 rev::CENSUS,
@@ -7168,7 +7168,7 @@ mod tests {
         Ok(buffer)
     }
 
-    /// ZA-3215 ⑤ — one record's JOINED buffer, through the published door,
+    /// One record's JOINED buffer, through the published door,
     /// sized first and read second, with the same never-truncate sentinel the
     /// message-bytes helper above holds.
     fn live_reassembled(
@@ -7220,7 +7220,7 @@ mod tests {
         Ok(buffer)
     }
 
-    /// ZA-3215 ⑤ — THE JOINED BUFFER COMES BACK FOR THE ROW THAT COMPLETED THE
+    /// THE JOINED BUFFER COMES BACK FOR THE ROW THAT COMPLETED THE
     /// CHAIN, AND FOR NO OTHER.
     ///
     /// The capture splits one `Push` across two fragments. Of every record the
@@ -7420,7 +7420,7 @@ mod tests {
             .unwrap_or_else(|_| panic!("{name} is not a small integer"))
     }
 
-    /// ZA-3214 ② — A DISCOVERY EXCHANGE DRAINS AS RECORDS.
+    /// A DISCOVERY EXCHANGE DRAINS AS RECORDS.
     ///
     /// Before this the scouting list was walked by the field document alone
     /// (R2629), so a consumer whose message list stands on these records drew
@@ -7528,7 +7528,7 @@ mod tests {
         doc
     }
 
-    /// ZA-3214 ① — EVERY DRAINED RECORD JOINS EXACTLY ONE ROW, on a capture
+    /// EVERY DRAINED RECORD JOINS EXACTLY ONE ROW, on a capture
     /// the order-based join could not line up.
     ///
     /// Four lists: a TCP stream carrying two framed messages (so a record's
@@ -7598,7 +7598,7 @@ mod tests {
         unsafe { wz_dissect_live_close(handle) };
     }
 
-    /// ZA-3214 ① — a handle with no container renders no datagram row and
+    /// A handle with no container renders no datagram row and
     /// SAYS so, rather than reading as a quiet link.
     #[test]
     fn a_pushed_handle_with_no_container_says_it_could_not_reread() {
@@ -7655,7 +7655,7 @@ mod tests {
         wz_capture::pcap::write(1, &rows)
     }
 
-    /// ZA-3509 — the verdict document as it CROSSES THE ABI, for the gates that
+    /// The verdict document as it CROSSES THE ABI, for the gates that
     /// hold every document this library emits to a table.
     ///
     /// Two of them, because its key set is a union over two shapes: asked under
@@ -7698,7 +7698,7 @@ mod tests {
             .collect()
     }
 
-    /// ZA-3509 — EVERY DRAINED RECORD JOINS EXACTLY ONE ROW OF THE VERDICT
+    /// EVERY DRAINED RECORD JOINS EXACTLY ONE ROW OF THE VERDICT
     /// DOCUMENT, and the door asks for no capture container.
     ///
     /// The same population the field document's join test holds — a stream with
@@ -7741,7 +7741,7 @@ mod tests {
         unsafe { wz_dissect_live_close(handle) };
     }
 
-    /// ZA-3509 — THE TWO LIVE DOCUMENTS AGREE ROW FOR ROW: the same coordinates,
+    /// THE TWO LIVE DOCUMENTS AGREE ROW FOR ROW: the same coordinates,
     /// the same order, the same word, under a selector that divides the rows.
     ///
     /// The contract that makes the light document safe to narrow with while the
@@ -7777,7 +7777,7 @@ mod tests {
         unsafe { wz_dissect_live_close(handle) };
     }
 
-    /// ZA-3509 — A HANDLE FED BY `push`, WHICH HAS NO CONTAINER, STILL GETS ITS
+    /// A HANDLE FED BY `push`, WHICH HAS NO CONTAINER, STILL GETS ITS
     /// DATAGRAM VERDICTS.
     ///
     /// `a_pushed_handle_with_no_container_says_it_could_not_reread` holds the
@@ -7803,7 +7803,7 @@ mod tests {
         unsafe { wz_dissect_live_close(handle) };
     }
 
-    /// ZA-3509 — AN EMPTY SELECTOR ASKS NOTHING, at the door, and what a
+    /// AN EMPTY SELECTOR ASKS NOTHING, at the door, and what a
     /// selector adds is the verdict and nothing else.
     ///
     /// Whitespace is the same selector as nothing. The arm after it is the one
@@ -7840,7 +7840,7 @@ mod tests {
         unsafe { wz_dissect_live_close(handle) };
     }
 
-    /// ZA-3509 — THE DOOR'S REFUSALS, each with its own code, and no string on
+    /// THE DOOR'S REFUSALS, each with its own code, and no string on
     /// any of them.
     ///
     /// A selector that does not parse is `WZ_DISSECT_ERR_SELECTOR` and not a
@@ -9005,7 +9005,7 @@ mod tests {
         }
     }
 
-    /// ZA-3214 ② — THE WATERMARK SURVIVES A TRIM, which is the reason the
+    /// THE WATERMARK SURVIVES A TRIM, which is the reason the
     /// scouting list gained a produced counter before it could be drained.
     ///
     /// Three scouts under a ceiling of two: the oldest is discarded before the
@@ -10327,7 +10327,7 @@ mod tests {
             .collect()
     }
 
-    /// ZA-3601 — the door asks the size, and then fills, by the rule
+    /// The door asks the size, and then fills, by the rule
     /// `wz_dissect_live_message_bytes` set.
     ///
     /// Four cases of one packet: the length alone (null buffer, zero capacity),
@@ -10373,7 +10373,7 @@ mod tests {
         assert!(buf[want.len()..].iter().all(|&b| b == 0xEE));
     }
 
-    /// ZA-3601 — every packet of a capture crosses the boundary as the capture
+    /// Every packet of a capture crosses the boundary as the capture
     /// holds it: link header included, byte for byte.
     #[test]
     fn every_packet_of_a_capture_crosses_the_boundary_as_the_capture_holds_it() {
@@ -10394,7 +10394,7 @@ mod tests {
         }
     }
 
-    /// ZA-3601 — THE JOIN AT THE ABI: a row's `first_byte.packet` names a frame
+    /// THE JOIN AT THE ABI: a row's `first_byte.packet` names a frame
     /// this door hands out, and `frame_offset` is the message's first byte IN
     /// THAT FRAME.
     ///
@@ -10451,7 +10451,7 @@ mod tests {
         );
     }
 
-    /// ZA-3601 — a number the container does not hold is `NO_SUCH_PACKET`, with
+    /// A number the container does not hold is `NO_SUCH_PACKET`, with
     /// `needed` written as zero, and a prefix that cuts the record short of it
     /// says the same while still resolving the packets before it.
     #[test]
@@ -10484,7 +10484,7 @@ mod tests {
         );
     }
 
-    /// ZA-3601 — a container that does not read is `BAD_CAPTURE` and not a
+    /// A container that does not read is `BAD_CAPTURE` and not a
     /// missing packet, and a null argument is refused before anything else.
     #[test]
     fn the_frame_door_names_a_bad_container_and_refuses_null_arguments() {

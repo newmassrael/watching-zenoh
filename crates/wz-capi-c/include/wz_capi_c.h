@@ -293,7 +293,7 @@ z_result_t wz_capi_c_config_validate_topology_with_external(
     z_owned_string_t *out_defects);
 
 /* ------------------------------------------------------------------ *
- * The config verdict as ROWS (ZA-3469). Revision 4.
+ * The config verdict as ROWS. Revision 4.
  *
  * The verdict doors above answer in lines, `<VariantName>: <message>`,
  * and a line is for a person. A caller that attaches each reason to the

@@ -112,7 +112,7 @@ use wz::runtime_tokio::session_open::{bind_endpoint_with_config, BoundListener};
 // consumer set has: the two MESH run-modes are the wz hosts that own a bind
 // phase and a dial phase, and `PeerOpts` / `RouterHatOpts` ride the same gate.
 // The demo's rule is cfg on the set of consumers, not on the feature that
-// happens to be nearest. ZA-3308 put the one-shot client's connect phase in
+// happens to be nearest. The one-shot client's connect phase is in
 // that set, and the client is in every build, so what it uses is ungated;
 // `PhaseArm` and `drive_phase` are still read by the mesh arms alone (R2948
 // moved the client onto `drive_connect_phase`).
@@ -2666,7 +2666,7 @@ async fn open_initiator_with_offer(
         .await
 }
 
-/// ZA-3308 — a one-shot client's dial and open, run as upstream's client
+/// A one-shot client's dial and open, run as upstream's client
 /// startup connect phase.
 ///
 /// One attempt is the dial AND the handshake, because that is upstream's unit:
@@ -3023,7 +3023,7 @@ pub(crate) async fn run_demo(
     // for the mirrored reason -- their parity target is zenoh's
     // `peer_connector_retry`.
     connect_retry: Option<wz::runtime_tokio::retry_period::RetryPolicy>,
-    // ZA-3308 — `--connect-timeout` / the file's `connect/timeout_ms`, for a
+    // `--connect-timeout` / the file's `connect/timeout_ms`, for a
     // one-shot `--connect` client's startup connect phase. `None` is the
     // client default, one attempt.
     connect_timeout: Option<PhaseBudget>,
@@ -3246,7 +3246,7 @@ pub(crate) async fn run_demo(
                             .map_err(io::Error::other)?,
                         _ => SessionOffer::universal(),
                     };
-                    // ZA-3308 — the client's startup connect phase: upstream's
+                    // The client's startup connect phase: upstream's
                     // client column unless the invocation states a budget, paced
                     // by `connect/retry` or zenoh's own 1s / 2s / 4s.
                     let phase = PhasePolicy {

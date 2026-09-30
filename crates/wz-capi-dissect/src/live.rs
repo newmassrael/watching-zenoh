@@ -66,7 +66,7 @@ use wz_capture::{
 };
 use wz_session_core::passive::{Direction, PassiveFrame};
 
-/// ZA-3214 ② — the `origin` a SCOUTING record carries.
+/// The `origin` a SCOUTING record carries.
 ///
 /// Not a `MessageListOrigin` code, because the scouting list is not one of that
 /// enumeration's lists: it is a flow's pre-session list, walked by nothing that
@@ -281,7 +281,7 @@ fn seq_in_runs(runs: &[SeqRun], produced: u64) -> Option<u64> {
     runs.get(after.checked_sub(1)?)?.seq_of(produced)
 }
 
-/// ZA-3215 ⑤ — what [`LiveDissection::reassembled_bytes`] answers.
+/// What [`LiveDissection::reassembled_bytes`] answers.
 ///
 /// Three answers and not [`wz_capture::MessageBytes`]'s three, because the
 /// question is narrower: the record either completed a chain or it did not, and
@@ -305,7 +305,7 @@ pub enum ReassembledBytes<'a> {
 pub struct LiveDissection {
     dissection: Dissection,
     marks: BTreeMap<(FlowKey, MessageListOrigin), Mark>,
-    /// ZA-3214 ② — the same watermarks, for each datagram flow's SCOUTING
+    /// The same watermarks, for each datagram flow's SCOUTING
     /// list. A map of its own because that list is not in the enumeration the
     /// map above is keyed by (see [`ORIGIN_SCOUTING`]); the bookkeeping is the
     /// same function, [`advance`].
@@ -567,7 +567,7 @@ impl LiveDissection {
             false
         });
 
-        // ZA-3214 ② — THE SCOUTING LISTS, after every message list, under the
+        // THE SCOUTING LISTS, after every message list, under the
         // same watermark rule. Before this a discovery capture drained to
         // nothing: R2629 put Scout and Hello on the field document's rows, and
         // a consumer whose message list stands on these records had no row to
@@ -621,7 +621,7 @@ impl LiveDissection {
     /// R2205 (open-debt item 560) — THE BYTES one drained record was decoded
     /// from, found by the coordinates that record already carries.
     ///
-    /// ZA-3215 ⑤ — the walk from record to frame moved to `Self::resolve`,
+    /// The walk from record to frame moved to `Self::resolve`,
     /// which [`Self::reassembled_bytes`] shares.
     ///
     /// # Why the RECORD is the key and not a span
@@ -659,7 +659,7 @@ impl LiveDissection {
         }
     }
 
-    /// ZA-3215 ⑤ — THE JOINED BUFFER of the record that completed a fragment
+    /// THE JOINED BUFFER of the record that completed a fragment
     /// chain: the bytes `above_transport.fields` and `above_transport.carried`
     /// index, for exactly the row whose `carried_state` is `reassembled`.
     ///
@@ -713,7 +713,7 @@ impl LiveDissection {
                 )))
             }
         };
-        // ZA-3214 ② — a SCOUTING record's bytes are a whole datagram the
+        // A SCOUTING record's bytes are a whole datagram the
         // caller pushed, which is exactly the answer a transport datagram's
         // record gets: this reader keeps no copy of a pushed packet. Said as
         // that, rather than as "no list carries this id", which would read as
@@ -785,7 +785,7 @@ impl LiveDissection {
         wz_capture::census_json::census_json_where(&self.dissection, filter)
     }
 
-    /// ZA-3214 ① — THE FIELD DOCUMENT OF WHAT THIS HANDLE HAS SEEN, each row
+    /// THE FIELD DOCUMENT OF WHAT THIS HANDLE HAS SEEN, each row
     /// carrying the coordinates its record carries.
     ///
     /// # Why this is the join and a second dissection is not
@@ -885,7 +885,7 @@ impl LiveDissection {
         )
     }
 
-    /// ZA-3509 — THE SELECTOR'S VERDICT OVER THE ROWS OF THE FIELD DOCUMENT, and
+    /// THE SELECTOR'S VERDICT OVER THE ROWS OF THE FIELD DOCUMENT, and
     /// nothing beside it: each row's four coordinates and the word the selector
     /// said, with the ceilings that made the list short.
     ///
@@ -1157,7 +1157,7 @@ fn number_new_rows(mark: &mut Mark, produced: u64, first_held: u64, next_seq: &m
 /// Bring one list's watermark up to what the list now holds, and return the
 /// produced-index of the OLDEST message still in it.
 ///
-/// ZA-3214 ② — ONE function for both kinds of list. It was the body of the
+/// ONE function for both kinds of list. It was the body of the
 /// message-list loop in [`LiveDissection::drain`]; the scouting lists need the
 /// same three rules, and a second copy of them is the copy that drifts.
 fn advance(
@@ -1207,7 +1207,7 @@ fn advance(
     first_held
 }
 
-/// ZA-3214 ② — one scouting message, projected into the SAME record.
+/// One scouting message, projected into the SAME record.
 ///
 /// Every field keeps the meaning it has for a transport datagram, because a
 /// consumer reads them by one rule: the anchor is the packet index

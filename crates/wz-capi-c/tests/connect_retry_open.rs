@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later OR LicenseRef-watching-zenoh-Commercial
 // SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
 //
-//! ZA-3298 — `z_open` follows `connect/timeout_ms`, `connect/exit_on_failure`
+//! `z_open` follows `connect/timeout_ms`, `connect/exit_on_failure`
 //! and `connect/retry` the way a zenoh node does, driven through the exported
 //! `z_*` symbols as a C program would.
 //!

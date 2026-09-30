@@ -282,7 +282,7 @@ fn ticks_to_millis(ts_ticks: Option<u64>, iface: &Interface) -> Option<u64> {
     })
 }
 
-/// ZA-3601 — one captured packet whose bytes are BORROWED from the container.
+/// One captured packet whose bytes are BORROWED from the container.
 ///
 /// What [`PcapngCursor::advance_with`] hands its sink, where [`Packet`] is what
 /// [`PcapngCursor::advance`] hands its own. The walk is the same walk; only the
@@ -629,7 +629,7 @@ pub enum Halt {
     Partial(PcapngError),
 }
 
-/// ZA-3601 — how a walk that a sink may cut short ended.
+/// How a walk that a sink may cut short ended.
 ///
 /// A separate type from [`Halt`], which is the walk's own account of the
 /// container and stays two-valued for every caller that never stops early. A
@@ -648,7 +648,7 @@ pub enum Walk {
     Stopped,
 }
 
-/// ZA-3601 — [`PcapngYield`] with the packet's bytes BORROWED from the
+/// [`PcapngYield`] with the packet's bytes BORROWED from the
 /// container, for [`PcapngCursor::advance_with`].
 ///
 /// The three non-packet yields are the owned values [`PcapngYield`] carries:
@@ -788,7 +788,7 @@ impl PcapngCursor {
     /// so only the caller can name it; [`crate::FollowError::Shrank`] is where
     /// that is done.
     ///
-    /// ZA-3601 — a thin owner of [`Self::advance_with`]: each packet's bytes are
+    /// A thin owner of [`Self::advance_with`]: each packet's bytes are
     /// copied out of the container before the sink sees them, which is what
     /// [`parse`] wants (it keeps every packet) and what a sink that only reads
     /// and drops does not. There is ONE walk; this and `advance_with` differ in
@@ -819,7 +819,7 @@ impl PcapngCursor {
         }
     }
 
-    /// ZA-3601 — [`Self::advance`], handing the sink each packet's bytes as a
+    /// [`Self::advance`], handing the sink each packet's bytes as a
     /// BORROW of `bytes` and letting it stop the walk.
     ///
     /// The sink answers [`ControlFlow::Break`] to end the walk. The walk then
@@ -2178,7 +2178,7 @@ mod tests {
         out
     }
 
-    /// ZA-3601 — the borrowing walk and the owning one are ONE walk.
+    /// The borrowing walk and the owning one are ONE walk.
     ///
     /// `advance` became a thin owner of `advance_with`, and the claim that they
     /// differ only in who owns a packet's bytes is worth nothing as a comment.
@@ -2232,7 +2232,7 @@ mod tests {
         );
     }
 
-    /// ZA-3601 — a walk the sink stops resumes where it stopped.
+    /// A walk the sink stops resumes where it stopped.
     ///
     /// For every packet in turn: stop after it, and the cursor must have
     /// counted it and nothing after it; a second call over the same container
@@ -2291,7 +2291,7 @@ mod tests {
         }
     }
 
-    /// ZA-3601 — a stop is honoured at the end of the BLOCK, never inside it.
+    /// A stop is honoured at the end of the BLOCK, never inside it.
     ///
     /// An obsolete Packet Block yields its drop count and then its packet. A
     /// sink that breaks on the first must still be handed the second, because

@@ -480,7 +480,7 @@ ONLY_CAPI = {
         "`--csv` two rows up, where the reasoning runs the other way.",
         (4, 5),
     ),
-    # ZA-3215 — the JOINED buffer of a completed fragment chain. Filed in the
+    # The JOINED buffer of a completed fragment chain. Filed in the
     # round that added the symbol.
     "the buffer a completed fragment chain was joined in": (
         "wz_dissect_live_reassembled_bytes",
@@ -491,7 +491,7 @@ ONLY_CAPI = {
         "and only the ABI has a boundary to cross.",
         (),
     ),
-    # ZA-3601 — the CAPTURED FRAME of a packet by number. Filed in the round
+    # The CAPTURED FRAME of a packet by number. Filed in the round
     # that added the symbol.
     "the captured frame of one packet, by the number a field row names": (
         "wz_dissect_pcap_frame_bytes",
@@ -561,7 +561,7 @@ ONLY_CAPI = {
         "above, and it is not double-counted here.",
         (),
     ),
-    # ZA-3214 — the field document over an open handle, rows carrying the
+    # The field document over an open handle, rows carrying the
     # handle's record coordinates. Filed in the round that added the symbol.
     "the field document of an OPEN handle, joined to its records": (
         "wz_dissect_live_fields_where",
@@ -574,7 +574,7 @@ ONLY_CAPI = {
         "question only a record consumer has.",
         (),
     ),
-    # ZA-3509 — the selector's verdict over those rows, without the trees. Filed
+    # The selector's verdict over those rows, without the trees. Filed
     # in the round that added the symbol.
     "the selector's verdict over the rows of an OPEN handle": (
         "wz_dissect_live_selection",

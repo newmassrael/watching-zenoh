@@ -2706,7 +2706,7 @@ fn a_datagram_capture_has_its_fields_walked() {
         text.contains("[1..2] version = Uint(9)"),
         "the version byte is named and located: {text}"
     );
-    // ZA-3687 -- the tree names a zid as an IDENTITY (`Zid`), not as opaque
+    // The tree names a zid as an IDENTITY (`Zid`), not as opaque
     // `Bytes`. The span and the raw bytes are what they were: this line still
     // says the zid is the four bytes after the flag byte.
     assert!(
@@ -3256,7 +3256,7 @@ fn a_classic_pcap_datagram_capture_is_walked_like_a_pcapng_one() {
     );
     // The FIELDS, to the byte, on the classic side too -- same packet, same
     // answer, and not merely "some row appeared".
-    // ZA-3687 -- `Zid`, as on the pcapng side above; the raw bytes are unchanged.
+    // `Zid`, as on the pcapng side above; the raw bytes are unchanged.
     assert!(
         from_classic.contains("[3..7] zid = Zid([17, 34, 51, 68])"),
         "the walked fields must be the same ones: {from_classic}"
@@ -5675,7 +5675,7 @@ fn the_node_plane_reaches_both_renderings() {
         text.contains("nodes: 1"),
         "the scout named its asker: {text}"
     );
-    // ZA-3687 -- the zid `11 22 33 44` is spelled the way zenoh spells it, the
+    // The zid `11 22 33 44` is spelled the way zenoh spells it, the
     // little-endian id read as a u128, which IS the hex a config file's `id`
     // carries and the text zenohd logs. The wire order is asserted ABSENT: the
     // new spelling must have replaced the old one and not joined it.
@@ -5700,7 +5700,7 @@ fn the_node_plane_reaches_both_renderings() {
             .stdout,
     )
     .into_owned();
-    // ZA-3687 -- the export carries zenoh's spelling too, so the two
+    // The export carries zenoh's spelling too, so the two
     // renderings name one node one way; the wire order is asserted absent.
     assert!(
         json.contains("\"zid\":\"44332211\"") && !json.contains("\"zid\":\"11223344\""),
@@ -5914,7 +5914,7 @@ fn a_declared_serial_capture_is_read_and_its_direction_is_measured() {
          link -- which also proves the two wires were attributed to one flow \
          key rather than to two: {nodes}"
     );
-    // ZA-3687 -- `11 22 33 44` and `55 66 77 88` read `44332211` and `88776655`,
+    // `11 22 33 44` and `55 66 77 88` read `44332211` and `88776655`,
     // zenoh's spelling; the wire order is asserted ABSENT so the new text has
     // replaced the old and not joined it.
     assert!(

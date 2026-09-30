@@ -1025,7 +1025,7 @@ adminspace-read = ["wz-runtime-tokio?/adminspace-read"]
 # [[feedback-facade-forward-separate-edit]] dead-stub trap). The config-write HOST
 # wiring lives in wz-ap-demo run_peer; the GATE selection it calls is in the lib.
 # R2829 — weak-forwards to wz-session-lwip too, where an MCU node hosts
-# upstream's `connect/endpoints` write (`admin_host`); ZA-2898's surface.
+# upstream's `connect/endpoints` write (`admin_host`).
 adminspace-write = [
     "wz-runtime-tokio?/adminspace-write",
     "wz-session-lwip?/adminspace-write",

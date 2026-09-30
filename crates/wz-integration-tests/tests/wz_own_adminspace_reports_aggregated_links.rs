@@ -66,7 +66,7 @@ const WZ_AGGREGATED_NEEDLE: &str = "link AGGREGATED to zid";
 
 /// Distinct pinned zids for the two back-to-back admin queriers. See
 /// [`query_wz_admin`] for why sharing the demo's stock zid does not work here.
-/// ZA-3362 — no leading 0: `--zid` reads a zid as zenoh prints one, and zenoh
+/// No leading 0: `--zid` reads a zid as zenoh prints one, and zenoh
 /// refuses a leading 0 (they were `0ad10001` / `0ad10002`).
 const ROOT_QUERIER_ZID: &str = "ad100001";
 const CONFIG_QUERIER_ZID: &str = "ad100002";

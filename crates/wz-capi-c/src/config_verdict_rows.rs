@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later OR LicenseRef-watching-zenoh-Commercial
 // SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
 
-//! ZA-3469 — the config verdict as ROWS, for a caller that does not parse prose.
+//! The config verdict as ROWS, for a caller that does not parse prose.
 //!
 //! `config_verdict` answers in lines, `<VariantName>: <message>`, and says so:
 //! the name is the stable half, the message is prose. That was enough for a
@@ -828,7 +828,7 @@ mod tests {
         }
     }
 
-    /// ZA-3469, ask 1 — the key path is its own column, and for a defect found
+    /// Ask 1 — the key path is its own column, and for a defect found
     /// in a config it sits next to the endpoint it is about.
     #[test]
     fn a_defect_in_one_config_names_the_key_it_is_about() {
@@ -909,7 +909,7 @@ mod tests {
         assert_agrees_with_lines(&build, &text);
     }
 
-    /// ZA-3469, ask 1, verbatim: a refusal is `Z_EPARSE` AND a row whose key is
+    /// Ask 1, verbatim: a refusal is `Z_EPARSE` AND a row whose key is
     /// its own column, so an inspector can put the reason under the field.
     #[test]
     fn a_refused_config_answers_with_the_key_at_fault_beside_the_reason() {
@@ -988,7 +988,7 @@ mod tests {
         }
     }
 
-    /// ZA-3469, ask 2 — the nodes are named by the caller, and every defect
+    /// Ask 2 — the nodes are named by the caller, and every defect
     /// spells the node the way it was named.
     #[test]
     fn a_topology_verdict_names_its_nodes_the_way_the_caller_did() {

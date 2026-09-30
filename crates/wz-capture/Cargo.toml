@@ -67,7 +67,7 @@ fixtures = ["network-codecs"]
 # C1bo builds `wz-capi-dissect`, whose dependency line turns it on.
 dissect = ["wz-session-core/dissect"]
 
-# ZA-3215 ⑤ — lz4, so a session that negotiated compression is READ rather than
+# Lz4, so a session that negotiated compression is READ rather than
 # reported undecompressible.
 #
 # The observer that unwraps the batch is `wz-session-core::passive`, and its

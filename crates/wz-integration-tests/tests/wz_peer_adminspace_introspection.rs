@@ -199,8 +199,8 @@ const CLIENT_B_ZID_ARG: &str = "70730003";
 
 /// The same zid AS THE ADMIN REPLY RENDERS IT.
 ///
-/// ZA-3362 — the same string. `--zid` now reads its text as zenoh prints a
-/// `ZenohId`, so the reply names B by the text it was given. Until ZA-3362 the
+/// The same string. `--zid` now reads its text as zenoh prints a
+/// `ZenohId`, so the reply names B by the text it was given. Before that change the
 /// flag decoded the text per byte and the reply showed it reversed
 /// (`3007370`). The value is not a palindrome, so a render that reversed the
 /// bytes would still red; the rule is `wz_multilink_aggregation_zenohd_interop`'s.

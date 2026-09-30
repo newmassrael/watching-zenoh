@@ -205,7 +205,7 @@ impl ScoutingFrame {
         }
     }
 
-    /// ZA-3214 ② — the number a record's `kind` carries for this message,
+    /// The number a record's `kind` carries for this message,
     /// in the ONE kind space `InboundFrame::kind_code` publishes.
     ///
     /// One space and not a second one starting at 1: a consumer switches on

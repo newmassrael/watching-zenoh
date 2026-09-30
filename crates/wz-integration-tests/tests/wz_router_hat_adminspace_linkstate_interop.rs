@@ -207,7 +207,7 @@ fn wz_router_hat_federates_admin_linkstate_across_two_routers() {
             "--on-query-reply-log",
             "--on-query-final-log",
             "--zid",
-            // ZA-3362 — no leading 0: zenoh refuses one in a zid.
+            // No leading 0: zenoh refuses one in a zid.
             "a0a0a0a0",
         ],
     );
@@ -385,9 +385,9 @@ fn wz_router_hat_reports_declaration_sources_per_tier_across_two_routers() {
         });
     }
 
-    // The CLIENT-bucket source: a subscriber client of R2. ZA-3362 — `--zid`
+    // The CLIENT-bucket source: a subscriber client of R2. `--zid`
     // reads the text as zenoh prints a `ZenohId`, so the admin body names the
-    // client by the SAME string it was given. Until ZA-3362 the flag decoded
+    // client by the SAME string it was given. Before that change the flag decoded
     // the text per byte and this fixture needed two spellings (wire `0b0b0b1b`,
     // printed `1b0b0b0b`); the one below is now both. It is not a palindrome,
     // so a render that reversed the bytes would still red.
@@ -449,7 +449,7 @@ fn wz_router_hat_reports_declaration_sources_per_tier_across_two_routers() {
             "--on-query-reply-log",
             "--on-query-final-log",
             "--zid",
-            // ZA-3362 — no leading 0: zenoh refuses one in a zid.
+            // No leading 0: zenoh refuses one in a zid.
             "a0a0a0a0",
         ],
     );

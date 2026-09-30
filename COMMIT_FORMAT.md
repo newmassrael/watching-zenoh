@@ -65,6 +65,12 @@
   U+1F1E6-U+1F1FF are rejected; the typographic symbols above are allowed)
 - **No "Generated with Claude Code"**
 - **No "Co-Authored-By" tags**
+- **No protected vocabulary** — the words and patterns in the local term list
+  (`.git/wz-nda-terms.txt`, never tracked) are refused by the commit-msg hook
+  and again by the push gate. The list includes a pattern for a consumer's
+  ticket ids: say what the change requires in this repository's own words,
+  not what the request was called elsewhere. A clone without the list is not
+  blocked at commit time; the push gate refuses on an absent list.
 - Professional and technical tone
 - Focus on "what" and "why", not "how"
 - Quantify progress when possible (e.g., "entries 9 → 11", "T3 warn 843 → 851")

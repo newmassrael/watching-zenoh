@@ -8,7 +8,7 @@
 //! peers it holds a session with
 //! (`zenoh/src/net/runtime/adminspace.rs` @ `transports.push(transport_unicast_to_json(&transport));`,
 //! each entry of the array the reply carries as `sessions`).
-//! For ZA-2898 that is how a host reads back the
+//! That is how a host reads back the
 //! effect of a `connect/endpoints` write, and how it tells a node that is
 //! alive and refused from one that did not answer at all.
 //!
@@ -57,7 +57,7 @@ pub struct NodeIdentity {
     pub locators: Vec<String>,
 }
 
-/// R2846 (ZA-2929) — where one written endpoint stands, as the node reports
+/// R2846 — where one written endpoint stands, as the node reports
 /// it at `@/<zid>/<whatami>/status/connect`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DialStatus {

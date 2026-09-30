@@ -924,7 +924,7 @@ pub mod startup_phase;
 #[cfg(feature = "zenoh-config")]
 pub mod zenoh_config;
 
-/// ZA-3469 — the verdicts of [`zenoh_config`] as FIELDS (a variant name, a
+/// The verdicts of [`zenoh_config`] as FIELDS (a variant name, a
 /// message, an endpoint, and the node and config key each defect points at)
 /// for a reader that attaches a reason to the field it is about and so cannot
 /// take it as a sentence.

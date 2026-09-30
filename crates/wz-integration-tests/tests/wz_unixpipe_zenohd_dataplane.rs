@@ -487,7 +487,7 @@ fn wz_two_clients_route_a_put_via_one_zenohd_unixpipe_listener() {
     let publish_key = "demo/unixpipe/mc-put";
     let publish_value = "hello-multi-client-over-unixpipe";
     // Distinct from wz-ap-demo's hardwired 0x01020304 so zenohd holds BOTH sessions.
-    // ZA-3362 — no leading 0 (it was `0a0b0c0d`): `--zid` reads a zid as zenoh
+    // No leading 0 (it was `0a0b0c0d`): `--zid` reads a zid as zenoh
     // prints one, and zenoh refuses a leading 0.
     let publisher_zid = "a0b0c0d";
 

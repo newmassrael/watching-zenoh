@@ -38,7 +38,7 @@ wz-cdylib-build = { path = "../wz-cdylib-build" }
 # it on this line is what makes `wz_capture::fields_json` exist for the ABI
 # without either consumer owning a second copy of the emit.
 #
-# ZA-3215 ⑤ — and `compression`, which is lz4: without it every batch of a
+# And `compression`, which is lz4: without it every batch of a
 # session that negotiated compression reads `undecompressible` through this
 # library. Selected through `wz-capture` rather than on the `wz-session-core`
 # line below, because `wz-capture` is the crate whose reader it switches on and
@@ -93,7 +93,7 @@ features = [
 # `ip_checksum_invalid: 1025` and `transport_checksum_invalid: 1025` and the
 # whole corpus sat in the corruption bucket. Only the arithmetic is shared; the
 # layouts stay hand-laid, for the reason their own doc gives.
-# ZA-3215 ⑤ — the shared captures, for the joined-buffer door's test: it needs a
+# The shared captures, for the joined-buffer door's test: it needs a
 # session whose record arrives as a COMPLETED fragment chain, and that capture
 # is defined once in `wz-capture::fixtures` rather than re-laid here. A
 # dev-dependency, so the shipped library does not carry the feature.

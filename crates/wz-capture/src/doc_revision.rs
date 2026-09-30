@@ -541,7 +541,7 @@ pub const DOCUMENT_HISTORY: &[DocumentShape] = &[
     // was read off, and a raweth endpoint's `addr` stops being spelled as an
     // IPv6 address.
     //
-    // The ZA-1039 consumer report asked for the key and said in its own words
+    // The consumer report asked for the key and said in its own words
     // that it must not be inferred from the endpoint shape. It is not: the
     // answer is `crate::link::LinkKind`, recorded by the strip that built the
     // key, so it reaches all four of this document's flow-rendering planes
@@ -667,7 +667,7 @@ pub const DOCUMENT_HISTORY: &[DocumentShape] = &[
         planes: CENSUS_R6_PLANES,
         carries: CENSUS_R11_CARRIES,
     },
-    // ZA-3687 — THE ZID VALUES CHANGED SPELLING UNDER STATIONARY KEYS.
+    // THE ZID VALUES CHANGED SPELLING UNDER STATIONARY KEYS.
     //
     // No key moves, nothing retires, and no family, plane or carries axis has
     // anything to say: `nodes[].zid` and `interests[].declarer_zid` are the two
@@ -694,7 +694,7 @@ pub const DOCUMENT_HISTORY: &[DocumentShape] = &[
         planes: CENSUS_R6_PLANES,
         carries: CENSUS_R11_CARRIES,
     },
-    // ZA-3695 — AN IPV6 ADDRESS CHANGED SPELLING UNDER A STATIONARY KEY.
+    // AN IPV6 ADDRESS CHANGED SPELLING UNDER A STATIONARY KEY.
     //
     // No key moves, nothing retires, and no family, plane or carries axis has
     // anything to say: `addr` is on every endpoint of every flow object in this
@@ -845,7 +845,7 @@ pub const DOCUMENT_HISTORY: &[DocumentShape] = &[
         carries: FIELDS_R6_CARRIES,
     },
     // Round 2447 (open-debt item 696) — the census row's twin, on the document
-    // the ZA-1039 report was actually reading. Both of this document's flow
+    // the consumer report was actually reading. Both of this document's flow
     // objects gain `link`, because both render one shared flow key.
     //
     // An ADDITION. What a consumer pinned to revision 6 gains by moving is the
@@ -863,7 +863,7 @@ pub const DOCUMENT_HISTORY: &[DocumentShape] = &[
         carries: FIELDS_R7_CARRIES,
     },
     // R2454 (open-debt item 698) — the census row's twin again, on the document
-    // the ZA-1039 report was reading. Both flow objects render one shared key,
+    // the consumer report was reading. Both flow objects render one shared key,
     // so both carry the repaired vsock spelling for the same reason they both
     // carried `link`.
     //
@@ -980,7 +980,7 @@ pub const DOCUMENT_HISTORY: &[DocumentShape] = &[
         planes: &[],
         carries: FIELDS_R12_CARRIES,
     },
-    // ZA-3214 ④ — `selected` DECLARED, key and words, a defect repaid.
+    // `selected` DECLARED, key and words, a defect repaid.
     //
     // R2766 put `selected` on every row of the selector door with a closed set
     // of four words, and no revision named either: the key is in no key set
@@ -998,7 +998,7 @@ pub const DOCUMENT_HISTORY: &[DocumentShape] = &[
         planes: &[],
         carries: FIELDS_R13_CARRIES,
     },
-    // ZA-3215 — THE VERDICTS THE SESSION REACHED PER FRAME, ON THE ROW.
+    // THE VERDICTS THE SESSION REACHED PER FRAME, ON THE ROW.
     //
     // Thirty keys arrive and none retires. A consuming viewer rebuilt four
     // indexes of its own out of this document because wz computed each fact
@@ -1030,7 +1030,7 @@ pub const DOCUMENT_HISTORY: &[DocumentShape] = &[
         planes: &[],
         carries: FIELDS_R14_CARRIES,
     },
-    // ZA-3214 ① — a row can carry a RECORD's coordinates.
+    // A row can carry a RECORD's coordinates.
     //
     // `list_id`, `anchor` and `batch_index`, with the meanings the record door
     // gives them, written only by the live door (`wz_dissect_live_fields_where`)
@@ -1049,7 +1049,7 @@ pub const DOCUMENT_HISTORY: &[DocumentShape] = &[
         planes: &[],
         carries: FIELDS_R15_CARRIES,
     },
-    // ZA-3215 ⑤ — a row over an lz4 batch this build cannot open.
+    // A row over an lz4 batch this build cannot open.
     //
     // The carries axis moves: `offset_space = packet` now also arrives as a
     // declined row, because the batch stands as one record and the second
@@ -1064,7 +1064,7 @@ pub const DOCUMENT_HISTORY: &[DocumentShape] = &[
         planes: &[],
         carries: FIELDS_R16_CARRIES,
     },
-    // ZA-3687 — a tree field named `zid` is an IDENTITY, and gets a `kind` word
+    // A tree field named `zid` is an IDENTITY, and gets a `kind` word
     // of its own.
     //
     // ONE NEW WORD, no key added and none retired: `kind` gains `zid`, and a
@@ -1094,7 +1094,7 @@ pub const DOCUMENT_HISTORY: &[DocumentShape] = &[
         planes: &[],
         carries: FIELDS_R17_CARRIES,
     },
-    // ZA-3695 — AN IPV6 ADDRESS CHANGED SPELLING UNDER A STATIONARY KEY, in the
+    // AN IPV6 ADDRESS CHANGED SPELLING UNDER A STATIONARY KEY, in the
     // field document as in the census.
     //
     // No key, family, plane or carries axis moves, so this row reads revision
@@ -1280,7 +1280,7 @@ pub const DOCUMENT_HISTORY: &[DocumentShape] = &[
         planes: &[],
         carries: &[],
     },
-    // ZA-3214 ③ — the verdict carries the LEXER'S TOKENS, on both branches.
+    // The verdict carries the LEXER'S TOKENS, on both branches.
     //
     // A consumer colouring a selector as it is typed had to keep a lexer of
     // its own beside this one, and two lexers over one language disagree
@@ -1306,7 +1306,7 @@ pub const DOCUMENT_HISTORY: &[DocumentShape] = &[
         planes: &[],
         carries: &[],
     },
-    // ZA-3509 — the selector's verdict over the field document's rows, with none
+    // The selector's verdict over the field document's rows, with none
     // of what the field document renders beside it.
     //
     // A consumer narrowing a list needs, per row, the four coordinates that join
@@ -1348,7 +1348,7 @@ pub const SELECTOR_DIAGNOSE: &str = "selector_diagnose";
 /// A declaration block's verdict (`wz_dissect_declarations_diagnose`).
 pub const DECLARATIONS_DIAGNOSE: &str = "declarations_diagnose";
 /// A selector's verdict over the field document's rows, and nothing else
-/// (`wz_dissect_live_selection`). ZA-3509.
+/// (`wz_dissect_live_selection`).
 pub const SELECTION: &str = "selection";
 
 /// The census document's key set at revision 1.
@@ -2347,7 +2347,7 @@ pub const CENSUS_R12_KEYS: &[&str] = &[
     "zid",
 ];
 
-/// The census document's key set at revision 13 (ZA-3687).
+/// The census document's key set at revision 13.
 ///
 /// IDENTICAL to revision 12, and aliased for [`CENSUS_R2_KEYS`]' reason: a
 /// second hand-written copy of this list would be a claim that they are the
@@ -2367,7 +2367,7 @@ pub const CENSUS_R12_KEYS: &[&str] = &[
 /// a commit message.
 pub const CENSUS_R13_KEYS: &[&str] = CENSUS_R12_KEYS;
 
-/// The census document's key set at revision 14 (ZA-3695).
+/// The census document's key set at revision 14.
 ///
 /// IDENTICAL to revision 13, aliased on [`CENSUS_R13_KEYS`]' rule. `addr` is
 /// in this set since revision 1 and is the key whose IPv6 text moved: eight hex
@@ -3215,7 +3215,7 @@ pub const FIELD_VALUE_KIND_R3: &[&str] = &[
 /// `fields[].kind` at field-document revision 17 — revision 3's PLUS `zid`, and
 /// SORTED for the same reason.
 ///
-/// ZA-3687. A field named `zid` is an identity, not opaque bytes, and the tree
+/// A field named `zid` is an identity, not opaque bytes, and the tree
 /// now says so: `kind` is `zid` and its `value` is zenoh's spelling of the
 /// identity, while the span still names the raw wire bytes. The word is NEW, so
 /// a consumer whose switch on `kind` was written against revision 3's eight is
@@ -3512,7 +3512,7 @@ pub const FIELDS_R6_CARRIES: &[KeyCarries] = FIELDS_R5_CARRIES;
 ///
 /// An ADDITION, so revision 6 has nothing to retire.
 ///
-/// ⚠ This is the document the ZA-1039 report was reading. Its second claim was
+/// ⚠ This is the document the consumer report was reading. Its second claim was
 /// that the row said `"addr":"3003:c837:25a1","port":0` for a raweth flow with
 /// nothing beside it saying the flow was raweth. Both halves move here: the key
 /// arrives, and `addr` on such an endpoint now spells the six MAC octets. See
@@ -3812,7 +3812,7 @@ pub const FIELDS_R12_KEYS: &[&str] = &[
 /// resolves only in a build that turns `dissect` on and breaks the default
 /// documentation build (`accessor_reach_census.py` reads it, and it failed).
 ///
-/// ZA-3214 ④. See that type for what each word means and why `undecided` and
+/// See that type for what each word means and why `undecided` and
 /// `unjudged` are two.
 pub const SELECTED_R13: &[&str] = &["no", "undecided", "unjudged", "yes"];
 
@@ -3882,7 +3882,7 @@ pub const FIELDS_R13_KEYS: &[&str] = &[
 ];
 
 /// The keys the field document carries at revision 15 — revision 14's PLUS the
-/// record coordinates `anchor`, `batch_index` and `list_id`. ZA-3214 ①.
+/// record coordinates `anchor`, `batch_index` and `list_id`.
 /// Generated from revision 14's set, not typed.
 pub const FIELDS_R15_KEYS: &[&str] = &[
     "abandoned_at_end",
@@ -4622,7 +4622,7 @@ pub const FIELD_VALUE_KIND_CARRIES_R4: &[WordCarries] = &[
 /// Every shape each `fields[].kind` word's object takes, at field-document
 /// revision 17 — revision 4's PLUS `zid`.
 ///
-/// ZA-3687. `zid` arrives with `name`, `start`, `end` and `value` like the
+/// `zid` arrives with `name`, `start`, `end` and `value` like the
 /// other scalar words: the identity's text rides in `value`, and the span keeps
 /// naming the raw wire bytes. One shape, because the object is still written by
 /// the single `match` whose arm the word IS.
@@ -4837,7 +4837,7 @@ pub const FIELD_OFFSET_SPACE_CARRIES_R12: &[WordCarries] = &[
 /// 14's, each ALSO with `selected`, and each also with `selected` and the
 /// three record coordinates.
 ///
-/// ZA-3214 ①, and a correction it measured. `selected` has joined every row of
+/// A correction it measured: `selected` has joined every row of
 /// the selector door since R2766, and no revision from 12 to 14 lists a shape
 /// carrying it: the gate that derives these shapes rendered no selector
 /// document, so the shape was never observed and never declared. Revision 13
@@ -5038,7 +5038,7 @@ pub const FIELD_OFFSET_SPACE_CARRIES_R15: &[WordCarries] = &[
 /// Every shape each `offset_space` word's row takes at revision 16 — revision
 /// 15's, with `packet` also arriving as a DECLINED row.
 ///
-/// ZA-3215 ⑤. An lz4 batch this build cannot open stands as one record, and the
+/// An lz4 batch this build cannot open stands as one record, and the
 /// second walk over its wire bytes declines rather than name a tree: they are a
 /// batch header and lz4, not a message. So the row has `declined` where a
 /// walked row has `name`, `fields` and `carried`, and keeps everything the
@@ -5635,7 +5635,7 @@ pub const FIELDS_R16_CARRIES: &[KeyCarries] = &[
 ];
 
 /// What each field-document family's WORD decides at revision 17 — revision
-/// 16's, with `kind` read from [`FIELD_VALUE_KIND_CARRIES_R17`] (ZA-3687: the
+/// 16's, with `kind` read from [`FIELD_VALUE_KIND_CARRIES_R17`] (the
 /// tree gains the word `zid`).
 pub const FIELDS_R17_CARRIES: &[KeyCarries] = &[
     KeyCarries {
@@ -5860,7 +5860,7 @@ pub const FIELDS_R12_CARRIES: &[KeyCarries] = &[
 
 /// The field document's keys at revision 14 — revision 13's PLUS thirty.
 ///
-/// ZA-3215. Four groups, each a verdict the session had already reached and
+/// Four groups, each a verdict the session had already reached and
 /// this document had never carried:
 ///
 /// * per row, `sn` (`verdict`, `missing`, `conduit` → `direction`,
@@ -5973,7 +5973,7 @@ pub const FIELDS_R14_KEYS: &[&str] = &[
 /// What `chain.outcome` says at revision 14 — the reassembly router's
 /// `IngestOutcome`, one word per variant.
 ///
-/// ZA-3215. Derived in `fields_json` by an exhaustive match, so a new outcome
+/// Derived in `fields_json` by an exhaustive match, so a new outcome
 /// fails to compile there rather than arriving under a word this table never
 /// declared.
 pub const CHAIN_OUTCOME_R14: &[&str] = &["aborted", "begun", "continued", "reassembled", "refused"];
@@ -5981,7 +5981,7 @@ pub const CHAIN_OUTCOME_R14: &[&str] = &["aborted", "begun", "continued", "reass
 /// What `chain.reason` says at revision 14 — the router's `AbortReason` and
 /// `RefuseReason` together, since `outcome` beside it says which.
 ///
-/// ZA-3215. ⚠ `superseded` is declared although no row carries it today: the
+/// ⚠ `superseded` is declared although no row carries it today: the
 /// router reports a `First` restart as `begun` for the new chain, and the
 /// stranded one ends without a row. The word is the router's own.
 pub const CHAIN_REASON_R14: &[&str] = &[
@@ -6018,7 +6018,7 @@ pub const PRIORITY_R14: &[&str] = &[
 
 /// What `sn.verdict` says at revision 14 — the session's `SnVerdict`.
 ///
-/// ZA-3215. `gap` is the one word that fills `sn.missing`; every other word
+/// `gap` is the one word that fills `sn.missing`; every other word
 /// carries it as `null`, which is why the key is a passenger here rather than
 /// a discriminant.
 pub const SN_VERDICT_R14: &[&str] = &[
@@ -6103,7 +6103,7 @@ pub const FIELDS_R14_FAMILIES: &[ValueFamily] = &[
 /// 14's (which revisions 15 and 16 kept), with `kind` read from
 /// [`FIELD_VALUE_KIND_R17`]: the tree gains the word `zid`.
 ///
-/// ZA-3687. Written out rather than derived from revision 14's table, for the
+/// Written out rather than derived from revision 14's table, for the
 /// reason [`ValueFamily::values`] gives: a list that read the earlier one would
 /// widen with it, and then the revision would never have to move.
 pub const FIELDS_R17_FAMILIES: &[ValueFamily] = &[
@@ -6177,7 +6177,7 @@ pub const FIELDS_R17_FAMILIES: &[ValueFamily] = &[
 /// 12's (which revision 13 kept), each PLUS `chain`, `first_byte`, `l2` and
 /// `sn`.
 ///
-/// ZA-3215. The four keys are on EVERY row, `null` where they do not apply, so
+/// The four keys are on EVERY row, `null` where they do not apply, so
 /// they join every shape and split none — the same uniform addition
 /// `above_transport` was at revision 12.
 pub const FIELD_OFFSET_SPACE_CARRIES_R14: &[WordCarries] = &[
@@ -6871,7 +6871,7 @@ pub const SELECTOR_DIAGNOSE_R1_KEYS: &[&str] =
     &["at", "document", "message", "name", "ok", "revision"];
 
 /// The selector verdict's key set at revision 2 — revision 1's PLUS `tokens`
-/// and the three keys each token object carries. ZA-3214 ③.
+/// and the three keys each token object carries.
 pub const SELECTOR_DIAGNOSE_R2_KEYS: &[&str] = &[
     "at", "document", "end", "kind", "message", "name", "ok", "revision", "start", "tokens",
 ];
@@ -6908,7 +6908,7 @@ pub const DECLARATIONS_DIAGNOSE_R1_KEYS: &[&str] = &[
 
 /// The selection document's key set at revision 1, over EVERY shape a row and
 /// the document take — the coordinates present or absent, `selected` present or
-/// absent. ZA-3509.
+/// absent.
 ///
 /// The five row keys are the field document's own, with the record's meanings;
 /// the rest is the envelope and the ceilings group, whose inner keys are the
@@ -8325,11 +8325,11 @@ mod tests {
             // R2630 (item 745) — to 12 when the shared `dropped_by_limits`
             // group gained `scouting`. One key, and the count it names was
             // already measured; only this document's rendering was missing it.
-            // ZA-3687 — to 13 when the two zid values (`nodes[].zid`,
+            // To 13 when the two zid values (`nodes[].zid`,
             // `interests[].declarer_zid`) changed SPELLING under stationary
             // keys: the bytes reversed, zenoh's own. No axis here can see a
             // value move, so this entry is the notice, as for 9 and 10.
-            // ZA-3695 — to 14 when an IPv6 `addr` changed spelling under its
+            // To 14 when an IPv6 `addr` changed spelling under its
             // stationary key: eight hex groups with no `::`, now RFC 5952's
             // text. Again no axis can see it; this entry is the notice.
             (CENSUS, 14u32),
@@ -8356,7 +8356,7 @@ mod tests {
             // entry. This assertion is the notice, and item 692 is the axis
             // that could not give one.
             // Round 2447 (item 696) — to 7 when both flow objects gained
-            // `link`, the census row's twin. This is the document the ZA-1039
+            // `link`, the census row's twin. This is the document the
             // consumer report was reading when it found a raweth flow whose
             // `addr` said `3003:c837:25a1` and whose row said nothing at all
             // about the link.
@@ -8379,18 +8379,18 @@ mod tests {
             // session's own verdict on what the frame carried, which is the
             // only route to a record whose bytes were never contiguous and the
             // only word that tells a compressed body from an unknown MID.
-            // ZA-3214 ④ — to 13 when `selected` and its four words were
+            // To 13 when `selected` and its four words were
             // declared; the selector door had written them since R2766.
-            // ZA-3215 — to 14 when rows gained `sn`, `chain`, `first_byte` and
+            // To 14 when rows gained `sn`, `chain`, `first_byte` and
             // `l2`, flows gained `context`, and the document gained
             // `reassembly`: verdicts the session reached per frame and had
             // never handed over.
-            // ZA-3214 ① — to 15 when a row could carry a record's coordinates.
-            // ZA-3215 ⑤ — to 16 when a packet row could be a declined one.
-            // ZA-3687 — to 17 when the tree gained the `kind` word `zid`, a
+            // To 15 when a row could carry a record's coordinates.
+            // To 16 when a packet row could be a declined one.
+            // To 17 when the tree gained the `kind` word `zid`, a
             // field named `zid` being an identity whose `value` is zenoh's
             // spelling. The family widens by one word and no key moves.
-            // ZA-3695 — to 18 when an IPv6 `addr` changed spelling under its
+            // To 18 when an IPv6 `addr` changed spelling under its
             // stationary key, in the field document as in the census. No axis
             // moves; this entry is the notice.
             // To 19 when a live row gained `seq` and a since-document gained
@@ -8409,10 +8409,10 @@ mod tests {
             // `carries` and the `word` / `keys` under it, which is where the
             // third axis reaches a consumer at runtime.
             (READABLE_SURFACES, 4),
-            // ZA-3214 ③ — to 2 when the verdict gained the lexer's `tokens`.
+            // To 2 when the verdict gained the lexer's `tokens`.
             (SELECTOR_DIAGNOSE, 2),
             (DECLARATIONS_DIAGNOSE, 1),
-            // ZA-3509 — the selector's verdict over the field document's rows.
+            // The selector's verdict over the field document's rows.
             (SELECTION, 1),
         ] {
             named.push(name);

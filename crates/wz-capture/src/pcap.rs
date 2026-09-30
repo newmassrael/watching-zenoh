@@ -132,7 +132,7 @@ fn millis_of(ts_secs: u32, ts_frac: u32, unit: TimestampUnit) -> u64 {
     u64::from(ts_secs) * 1_000 + sub_ms
 }
 
-/// ZA-3601 — one captured packet whose bytes are BORROWED from the container.
+/// One captured packet whose bytes are BORROWED from the container.
 ///
 /// What [`PcapCursor::advance_with`] hands its sink, where [`Packet`] is what
 /// [`PcapCursor::advance`] hands its own. The walk is the same walk; only the
@@ -209,7 +209,7 @@ pub enum Halt {
     Partial(PcapError),
 }
 
-/// ZA-3601 — how a walk that a sink may cut short ended.
+/// How a walk that a sink may cut short ended.
 ///
 /// A separate type from [`Halt`], which is the walk's own account of the
 /// container and stays two-valued for every caller that never stops early. A
@@ -302,7 +302,7 @@ impl PcapCursor {
     /// are per-FILE in this format and per-packet in the other one — so the
     /// sink that serves both takes them the same way.
     ///
-    /// ZA-3601 — a thin owner of [`Self::advance_with`]: each packet's bytes
+    /// A thin owner of [`Self::advance_with`]: each packet's bytes
     /// are copied out of the container before the sink sees them, which is what
     /// [`parse`] wants (it keeps every packet) and what a sink that only reads
     /// and drops does not. There is ONE walk; this and `advance_with` differ in
@@ -322,7 +322,7 @@ impl PcapCursor {
         }
     }
 
-    /// ZA-3601 — [`Self::advance`], handing the sink each packet's bytes as a
+    /// [`Self::advance`], handing the sink each packet's bytes as a
     /// BORROW of `bytes` and letting it stop the walk.
     ///
     /// The sink answers [`ControlFlow::Break`] to end the walk after the packet
@@ -710,7 +710,7 @@ mod tests {
         );
     }
 
-    /// ZA-3601 — the borrowing walk and the owning one are ONE walk, and the
+    /// The borrowing walk and the owning one are ONE walk, and the
     /// borrow is a window of the container.
     ///
     /// `advance` became a thin owner of `advance_with`. The two must yield the
@@ -751,7 +751,7 @@ mod tests {
         assert_eq!(owned, borrowed);
     }
 
-    /// ZA-3601 — a walk the sink stops resumes where it stopped.
+    /// A walk the sink stops resumes where it stopped.
     ///
     /// For every packet in turn: stop after it, and the cursor must have
     /// counted it and nothing after it; a second call over the same container

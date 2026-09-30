@@ -36,7 +36,7 @@ pub(crate) fn zid_to_le_array(zid: &[u8]) -> [u8; 16] {
 /// trailing zero high bytes dropped, which is how zenoh sends one and how
 /// [`zenoh_hex_to_zid`] returns one.
 ///
-/// ZA-3687 — the ONE place that rule is written. Two spellings of one zid are
+/// The ONE place that rule is written. Two spellings of one zid are
 /// the same zid to zenoh: [`zid_to_zenoh_hex`] zero-pads to 16 bytes and so
 /// prints `[0x01]` and `[0x01, 0x00]` as the same `1`. A comparison of raw bytes
 /// would call them two nodes, so a caller matching a zid it READ against a zid
@@ -174,7 +174,7 @@ mod tests {
         assert_eq!(zenoh_hex_to_zid("+1").as_deref(), Some(&[0x01][..]));
     }
 
-    /// ZA-3687 — the canonical form drops trailing ZERO bytes and only those.
+    /// The canonical form drops trailing ZERO bytes and only those.
     ///
     /// Judged against the printed spelling, which is what makes two spellings of
     /// a zid "the same": `[0x01]` and `[0x01, 0x00, 0x00]` render as one string,
@@ -205,7 +205,7 @@ mod tests {
         }
     }
 
-    /// ZA-3687 — a zid whose wire bytes are NOT a palindrome, so the per-byte
+    /// A zid whose wire bytes are NOT a palindrome, so the per-byte
     /// wire spelling and zenoh's spelling differ.
     ///
     /// The fixtures a downstream consumer used (`0a0a0a0a`, `0b0b0b0b`) read the

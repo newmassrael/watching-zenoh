@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later OR LicenseRef-watching-zenoh-Commercial
 // SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
 
-//! ZA-3308 — a one-shot `--connect` client runs upstream's client startup
+//! A one-shot `--connect` client runs upstream's client startup
 //! connect phase: `connect/timeout_ms` decides whether it re-dials, and
 //! `connect/retry` paces it.
 //!
@@ -166,7 +166,7 @@ fn a_client_without_a_connect_budget_dials_once() {
     );
 }
 
-/// ZA-3343 — a client DOCUMENT that asks for no application work is a whole
+/// A client DOCUMENT that asks for no application work is a whole
 /// node, as zenohd runs it: it connects and holds its session. Spawned WITHOUT
 /// [`argv`], whose `--key` is exactly what hid this — every other leg here
 /// names an action, so the demo's no-action refusal was never reached.

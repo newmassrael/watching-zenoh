@@ -1975,6 +1975,13 @@ layer_c0_test_discipline() {
     # crate-qualified because widening it put three `lib.rs` in the population.
     # MEASURED: a fresh unaccounted `drain` planted in `wz-analyze` reds.
     python3 scripts/lib/discard_site_lint.py || return 1
+    # The confidential-vocabulary scan matches a SHAPE as well as a word: a
+    # tracker's ticket ids have no finite list, and `grep -w` cannot say "this
+    # prefix and any digits". Driven against throwaway repositories both ways --
+    # it blocks what it exists to block, and a diff that only DELETES the
+    # vocabulary is a scrub that must pass. MEASURED: disabling the pattern
+    # compile check, and the empty-pattern check, each reds by name.
+    python3 scripts/lib/nda_scan_selftest.py || return 1
     # R311y639 (§4.30) — the PAYLOAD-MEASUREMENT gate. Two rounds in a row a
     # carrier arm of `agg::classify` wrote a byte total with a bare assignment
     # and so had no way to say "unknown": R311y637's query carries its value in
@@ -7101,7 +7108,7 @@ layer_c1am_cargo_test_adminspace() {
     # makes, needed because the router link-weight rows name neighbours by the
     # hex zid an operator types. Number PRINTED by the guard, not counted off
     # the diff.
-    # R2978 -- 5 -> 7: ZA-3687 added two tests here, the canonical form and a
+    # R2978 -- 5 -> 7: two tests were added here, the canonical form and a
     # non-palindromic round trip. PRINTED by the guard running the command,
     # not counted off the diff.
     _runci_guarded_test "C1AM zid_hex 7" 7 \
@@ -10294,7 +10301,7 @@ layer_c1m_session_lwip() {
     # the write surface too: + `app_layer`'s test (the write feature pulls
     # pubsub-put) + `admin_host`'s two, one of which reads the control back
     # as the `config` leg's view = 6. Both numbers PRINTED by the command.
-    # R2846 3 -> 4: the `status/connect` document test (ZA-2929).
+    # R2846 3 -> 4: the `status/connect` document test.
     _runci_guarded_test "C1m adminspace-core" 5 \
         cargo test -p wz-session-lwip --features adminspace-core --quiet || return 1
     # R2830 6 -> 9: the same three `connect_manager` tests.
@@ -10302,7 +10309,7 @@ layer_c1m_session_lwip() {
     # R2837 12 -> 13: `admin_node`'s end-to-end test, which needs both.
     # R2841 13 -> 14: the same group test.
     # R2846 14 -> 16: the `status/connect` document test and the last-write
-    # verdict test (ZA-2929).
+    # verdict test.
     _runci_guarded_test "C1m adminspace read+write" 17 \
         cargo test -p wz-session-lwip --features adminspace-core,adminspace-write --quiet || return 1
     # R2390 (transport-multicast) — each `transport-multicast` leg moved by TWO:
@@ -20033,7 +20040,7 @@ layer_e17_stats_registry_writes_upstreams_document() {
 
 # ─── Layer Qa — a stock zenohd reconfigures a wz MCU under QEMU ───
 #
-# R2839 (§5.23, ZA-2898). The one lane where the canonical implementation
+# R2839 (§5.23). The one lane where the canonical implementation
 # changes a wz MCU node's connections at runtime and reads them back:
 #
 #   1. build deploy/mcu-admin-node for mps2-an385 and boot it under QEMU with
@@ -20169,7 +20176,7 @@ print("ok" if not bad and accepted == "udp/10.0.2.15:7447" else f"bad={bad} acce
             echo "  Qa.4 link src/dst FAIL: $links" >&2
             fail=1
         fi
-        # R2846 (ZA-2929) — the node's own account of the write, at the wz key
+        # R2846 — the node's own account of the write, at the wz key
         # `status/connect`: the verdict, and each endpoint's dial state.
         # _qa_status <python expression over `doc`>: prints "ok" or the doc.
         _qa_status() {
@@ -20182,7 +20189,7 @@ except (ValueError, IndexError, KeyError):
 print("ok" if doc is not None and ('"$1"') else doc)' 2>&1
         }
         local st
-        # R2851 (ZA-2939) — `seq` 1: Qa.2's PUT is the first write the node got.
+        # R2851 — `seq` 1: Qa.2's PUT is the first write the node got.
         st="$(_qa_status 'doc["last_write"] == {"seq": 1, "verdict": "replace"} and doc["endpoints"] == [{"endpoint": "udp/10.0.2.2:'"$b_port"'", "state": "live", "established": True}]')"
         if [[ "$st" == "ok" ]]; then
             echo "  Qa.5 status/connect: the write was replaced, B is live and established — OK"

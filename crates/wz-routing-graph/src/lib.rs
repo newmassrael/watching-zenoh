@@ -338,7 +338,7 @@ impl core::fmt::Display for Zid {
     /// no analogue of. Both halves had stopped being true: wz's adminspace keys
     /// carry zenoh's form (`zid_hex::zid_to_zenoh_hex`), and zenoh prints this
     /// form everywhere a zid is shown, so wz's logs named a node by a string
-    /// found nowhere else — the reversed id ZA-3362 met from the other side. The
+    /// found nowhere else — the reversed id the `--zid` parse met from the other side. The
     /// recipe is `zid_to_zenoh_hex`'s; this crate cannot depend on the crate
     /// that holds it, so it is rendered here from the same `le16` input, and a
     /// test in `wz-runtime-tokio` pins the two equal.

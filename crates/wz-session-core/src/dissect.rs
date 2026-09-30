@@ -122,7 +122,7 @@ pub enum FieldValue {
     /// A ZenohId: the raw wire bytes of a `zid` field, carried owned like
     /// [`Bytes`](FieldValue::Bytes) and OWNING their span the same way.
     ///
-    /// ZA-3687 — a zid is an identity with a canonical text, not opaque bytes,
+    /// A zid is an identity with a canonical text, not opaque bytes,
     /// and the two were one variant until a consumer found the text wrong. A
     /// `Bytes` field is written as the hex of its span, per byte in wire order,
     /// and that is right for a payload and wrong for a zid: zenoh prints a zid
@@ -669,7 +669,7 @@ impl<'a> SpanCursor<'a> {
 
     /// Read a ZenohId of `n` wire bytes, as a field called `name`.
     ///
-    /// ZA-3687 — the one constructor of a [`FieldValue::Zid`], so the seven
+    /// The one constructor of a [`FieldValue::Zid`], so the seven
     /// places a codec names a `zid` cannot each choose whether it is an identity
     /// or opaque bytes. The bytes and the span are exactly what
     /// [`Self::bytes`] returns; only the variant differs. The name is a
@@ -3635,7 +3635,7 @@ fn push_json(field: &Field, out: &mut String) {
             }
             out.push('"');
         }
-        // ZA-3687 — a zid's `value` is the identity text, zenoh's spelling, and
+        // A zid's `value` is the identity text, zenoh's spelling, and
         // not the hex of its span: the span still names the raw wire bytes, and
         // a consumer that wants THOSE reads them from the capture at
         // `start..end`. Written through the one recipe, so this document and
@@ -4467,7 +4467,7 @@ mod tests {
     #[track_caller]
     fn raw(root: &Field, name: &str) -> Vec<u8> {
         match root.find(name).map(|f| &f.value) {
-            // ZA-3687 — THE NAME DECIDES THE VARIANT, both ways. A field named
+            // THE NAME DECIDES THE VARIANT, both ways. A field named
             // `zid` must be a `Zid` and any other name must be `Bytes`, so every
             // test here that reads a `zid` through this helper is also a check
             // that the walker under test emits an identity and not opaque bytes.
@@ -6532,7 +6532,7 @@ mod tests {
         assert!(ts.find("value").is_none());
     }
 
-    /// ZA-3687 — A ZID FIELD IS AN IDENTITY: `kind` is `zid`, `value` is zenoh's
+    /// A ZID FIELD IS AN IDENTITY: `kind` is `zid`, `value` is zenoh's
     /// spelling, and the span still names the raw wire bytes.
     ///
     /// The zid is `01 02 03 04` on purpose. A palindrome (`0a0a0a0a`) reads the
