@@ -264,8 +264,13 @@ enum PendingReply {
         keyexpr: String,
         meta: ReplyMetaOwned,
     },
-    /// `z_query_reply_err` — an Err-form reply.
-    Err { payload: crate::bytes::ByteBuf },
+    /// `z_query_reply_err` — an Err-form reply, with the encoding the options
+    /// carried: pico sends it with the error (`vendor/zenoh-pico/src/api/api.c` @
+    /// `_z_encoding_from_moved(opts.encoding));`).
+    Err {
+        payload: crate::bytes::ByteBuf,
+        encoding: Option<wz_runtime_tokio::sample::EncodingHint>,
+    },
 }
 
 /// Emit one reply of an ESCAPED query NOW, on the query's own route.
@@ -315,7 +320,18 @@ fn flush_one(out: &mut &mut dyn ReplyOut, reply: PendingReply) {
         PendingReply::Del { keyexpr, meta } => {
             admitted_at_the_abi(out.reply_keyed_del_meta(&keyexpr, meta.view(None)))
         }
-        PendingReply::Err { payload } => out.reply_err(None, None, &payload),
+        PendingReply::Err { payload, encoding } => {
+            // UNPACKED. `EncodingHint::packed_id` is the wire word
+            // `(id << 1) | has_schema`, while `ReplyOut::reply_err` documents its
+            // `encoding_id` as the content-type prefix and packs it itself, so the
+            // packed word would be shifted twice and put a different content type
+            // on the wire. The zenoh-c ABI's Err arm does the same projection.
+            let (id, schema) = match encoding.as_ref() {
+                Some(hint) => (Some(hint.packed_id >> 1), hint.schema.as_deref()),
+                None => (None, None),
+            };
+            out.reply_err(id, schema, &payload)
+        }
     }
 }
 
@@ -1593,24 +1609,33 @@ pub unsafe extern "C" fn z_query_reply_del(
 }
 
 /// Reply to a query with an error (pico `z_query_reply_err`). Consumes the
-/// moved payload.
+/// moved payload and the options' moved encoding, which goes out with the error.
 #[no_mangle]
 pub unsafe extern "C" fn z_query_reply_err(
     query: *const z_loaned_query_t,
     payload: *mut z_moved_bytes_t,
-    _options: *const z_query_reply_err_options_t,
+    options: *const z_query_reply_err_options_t,
 ) -> ZResult {
     guarded(|| {
-        // Consume the moved payload FIRST (pico consume-on-all-paths contract).
-        let buf = match crate::pubsub::take_moved_bytes(payload) {
-            Some(b) => b,
-            None => return Z_ERR_NULL,
+        // Consume the moved payload and encoding FIRST (pico consume-on-all-paths
+        // contract), before any early return can skip them.
+        let buf = crate::pubsub::take_moved_bytes(payload);
+        let encoding = if options.is_null() {
+            None
+        } else {
+            crate::encoding::take_moved_encoding((*options).encoding)
+        };
+        let Some(buf) = buf else {
+            return Z_ERR_NULL;
         };
         let marshal = match query_marshal(query) {
             Some(m) => m,
             None => return Z_ERR_INVALID,
         };
-        marshal.push_reply(PendingReply::Err { payload: buf });
+        marshal.push_reply(PendingReply::Err {
+            payload: buf,
+            encoding,
+        });
         Z_OK
     })
 }
