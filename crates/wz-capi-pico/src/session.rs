@@ -316,6 +316,9 @@ pub unsafe extern "C" fn z_open(
             // (`vendor/zenoh-pico/src/protocol/codec/transport.c` @
             // `z_result_t _z_init_encode(`), so a drop-in for it offers none.
             wz_runtime_tokio::session_open::SessionOffer::universal(),
+            // pico's `Z_CONFIG_SESSION_ZID_KEY` is not read by this open yet, so a
+            // pico session mints its own. The zenoh-c ABI reads its `id` key.
+            None,
         ) {
             Ok(state) => {
                 // R2962 — this session's own role, for the write filters its

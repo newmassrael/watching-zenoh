@@ -10,7 +10,9 @@
 
 use std::ffi::c_void;
 
-use wz_capi_core::drive::{open_blocking, CapiTlsConfig, DialPhase, OpenError, SessionState};
+use wz_capi_core::drive::{
+    open_blocking, CapiTlsConfig, ConfiguredZid, DialPhase, OpenError, SessionState,
+};
 use wz_runtime_tokio::retry_period::RetryPolicy;
 use wz_runtime_tokio::session_glue::{TxQueueConf, WhatAmI};
 use wz_runtime_tokio::session_open::{SessionOffer, TransportMode};
@@ -202,6 +204,25 @@ pub unsafe extern "C" fn z_open(
         drop(unsafe { Box::from_raw(handle as *mut ConfigState) });
         unsafe { (*config)._this = crate::abi::z_owned_config_t::null_value() };
 
+        // The id this config STATES for its session, if it states one. Read off
+        // the node the reader already parsed, so a config's `id` is one value
+        // whether it arrived by an insert, by a document or from a file, and the
+        // session stands on it: `z_info_zid` reports it and the INIT carries it,
+        // which is what upstream's runtime does with the same key.
+        //
+        // The insert doors refuse text zenoh refuses, as upstream's do, so an
+        // unparsable `id` cannot be in a config those built. It is refused here
+        // as well, rather than met with a fresh random id, because a config that
+        // named an identity and got another would be the silent fallback this
+        // crate refuses everywhere else.
+        let zid = match node.as_ref().and_then(|node| node.id.as_deref()) {
+            None => None,
+            Some(text) => match ConfiguredZid::from_zenoh_text(text) {
+                Some(zid) => Some(zid),
+                None => return Z_EINVAL,
+            },
+        };
+
         // Decided before anything else about the open, as upstream decides it
         // when the transport manager is built — before a single endpoint is
         // looked at. A config the reader refused has no offer to derive; the
@@ -244,6 +265,7 @@ pub unsafe extern "C" fn z_open(
             phase,
             TxQueueConf::default(),
             offer,
+            zid,
         ) {
             Ok(state) => {
                 // R2957 — the session's own shared-memory provider, as its

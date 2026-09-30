@@ -33,6 +33,7 @@ use std::ffi::{c_char, CStr};
 use crate::abi::{z_loaned_config_t, z_moved_config_t, z_owned_config_t, Handle};
 use crate::ffi::guarded;
 use crate::result::{ZResult, Z_EGENERIC, Z_EIO, Z_ENULL, Z_EPARSE, Z_OK};
+use wz_capi_core::drive::ConfiguredZid;
 use wz_runtime_tokio::json5::Json5Value;
 
 /// zenoh-c's `mode` key (`Z_CONFIG_MODE_KEY`, `zenoh_constants.h:23`).
@@ -142,6 +143,41 @@ impl ConfigState {
             }
         } else {
             self.entries.insert(key.to_owned(), value);
+        }
+    }
+
+    /// Whether storing `value` at `key` would put a value into a key whose own
+    /// type refuses it, so that the insert must be refused and nothing stored.
+    ///
+    /// Upstream's config is TYPED: a value is deserialised into the field it is
+    /// for at the moment it is inserted, so a value the field cannot hold never
+    /// reaches a session. Measured on `libzenohc.so` 1.10.0 for the session `id`,
+    /// which is the one key checked here: it is a `ZenohId`, and the insert
+    /// refuses an empty string, `0`, a leading `0`, uppercase, a non-hex digit,
+    /// more than sixteen bytes and a value that is not a string, while accepting
+    /// an odd number of digits and a leading `+`. What is refused is exactly what
+    /// [`ConfiguredZid::from_zenoh_text`] refuses, so the two are one rule.
+    ///
+    /// The question is asked of the LEAVES the insert would write, by
+    /// [`Self::insert_value`]'s own decomposition, so `insert("id", "\"01\"")` and
+    /// an object with an `id` in it are refused alike. It is a free-standing
+    /// question and not a change to `insert_value`, which the reader's defaults
+    /// and this module's tests call with values of their own.
+    fn refuses(key: &str, value: &Json5Value) -> bool {
+        let names_an_id_zenoh_refuses = |path: &str, leaf: &Json5Value| {
+            path == SESSION_ZID_KEY
+                && !matches!(
+                    leaf,
+                    Json5Value::String(text) if ConfiguredZid::from_zenoh_text(text).is_some()
+                )
+        };
+        if matches!(value, Json5Value::Object(entries) if !entries.is_empty()) {
+            value
+                .leaf_entries()
+                .iter()
+                .any(|(path, leaf)| names_an_id_zenoh_refuses(&format!("{key}/{path}"), leaf))
+        } else {
+            names_an_id_zenoh_refuses(key, value)
         }
     }
 
@@ -554,6 +590,13 @@ pub unsafe extern "C" fn zc_config_insert_json5(
         let Some(parsed) = parse_json5_value(value) else {
             return Z_EPARSE;
         };
+        // Refused BEFORE anything is stored, with the code upstream answers
+        // (`Z_EGENERIC`, measured): a config that took the value and refused it
+        // later, at the open, would be the two-step failure upstream's typed
+        // insert does not have.
+        if ConfigState::refuses(key, &parsed) {
+            return Z_EGENERIC;
+        }
         state.insert_value(key, parsed);
         Z_OK
     })
@@ -790,6 +833,15 @@ unsafe fn install_parsed(this_: *mut z_owned_config_t, text: &str) -> ZResult {
     }
     let mut state = ConfigState::default();
     for (path, leaf) in document.leaf_entries() {
+        // The same typed refusal the insert doors make, and a DOCUMENT's own
+        // code for it: measured on `libzenohc.so` 1.10.0, `zc_config_from_str`
+        // answers `Z_EPARSE` for an `id` the insert door answers `Z_EGENERIC`
+        // for, because here it is one field of a document that failed to read
+        // rather than one value handed to a key. Nothing is installed, so the
+        // owned config stays the gravestone the caller passed in.
+        if ConfigState::refuses(&path, leaf) {
+            return Z_EPARSE;
+        }
         state.insert_value(&path, leaf.clone());
     }
     install(this_, state);
@@ -929,6 +981,10 @@ pub unsafe extern "C" fn zc_config_insert_json5_from_substr(
         let Some(parsed) = parse_json5_value(value) else {
             return Z_EPARSE;
         };
+        // The counted form is the same door: the same refusal, the same code.
+        if ConfigState::refuses(key, &parsed) {
+            return Z_EGENERIC;
+        }
         state.insert_value(key, parsed);
         Z_OK
     })
@@ -1426,6 +1482,101 @@ mod tests {
         (rc, unsafe { take_text(&mut out) })
     }
 
+    /// The session `id` is refused where upstream refuses it, and with the code
+    /// each door answers.
+    ///
+    /// The lists are what `libzenohc.so` 1.10.0 answered to the same values, taken
+    /// by `zenoh_c_open_zid_twice_and_diff` (which asks the real library and diffs
+    /// it against this one); this test is the same expectation held where no
+    /// oracle is installed. Two doors, two codes, and that is upstream's:
+    /// `zc_config_insert_json5` answers `Z_EGENERIC`, and a DOCUMENT holding the
+    /// same id answers `Z_EPARSE` because there it is one field of a document
+    /// that did not read. The counted insert is the insert door's twin.
+    ///
+    /// REFUSED means nothing was stored: the key reads back exactly as it did
+    /// before the attempt, so a config that took the value and refused it later,
+    /// at the open, is not what this asserts. The accepted list is the half that
+    /// keeps a refuse-everything door from passing: an odd number of digits and a
+    /// leading `+` look wrong and are taken.
+    #[test]
+    fn an_id_zenoh_refuses_is_refused_at_each_door_with_that_doors_code() {
+        let refused = [
+            "\"\"",
+            "\"0\"",
+            "\"01\"",
+            "\"0a0b\"",
+            "\"ABC\"",
+            "\"zz\"",
+            "\"1ffffffffffffffffffffffffffffffff\"",
+            "123",
+        ];
+        let accepted = [
+            "\"1\"",
+            "\"c11e47c11e49\"",
+            "\"abc\"",
+            "\"ffffffffffffffffffffffffffffffff\"",
+            "\"+1\"",
+        ];
+        let key = std::ffi::CString::new(SESSION_ZID_KEY).expect("no NUL");
+        for value in refused {
+            let v = std::ffi::CString::new(value).expect("no NUL");
+            // SAFETY: a config built through the C doors, and NUL-terminated strings.
+            let mut cfg = unsafe { config_of(&[]) };
+            let before = unsafe { get_text(&cfg, SESSION_ZID_KEY) };
+
+            let rc = unsafe {
+                zc_config_insert_json5(z_config_loan_mut(&mut cfg), key.as_ptr(), v.as_ptr())
+            };
+            assert_eq!(rc, Z_EGENERIC, "insert `{value}`");
+            assert_eq!(
+                unsafe { get_text(&cfg, SESSION_ZID_KEY) },
+                before,
+                "insert `{value}` was refused and must have stored nothing"
+            );
+
+            let rc = unsafe {
+                zc_config_insert_json5_from_substr(
+                    z_config_loan_mut(&mut cfg),
+                    key.as_ptr().cast(),
+                    SESSION_ZID_KEY.len(),
+                    v.as_ptr().cast(),
+                    value.len(),
+                )
+            };
+            assert_eq!(rc, Z_EGENERIC, "counted insert `{value}`");
+            assert_eq!(
+                unsafe { get_text(&cfg, SESSION_ZID_KEY) },
+                before,
+                "counted insert `{value}` was refused and must have stored nothing"
+            );
+
+            let document = std::ffi::CString::new(format!("{{\"id\":{value}}}")).expect("no NUL");
+            let mut owned: z_owned_config_t = unsafe { std::mem::zeroed() };
+            let rc = unsafe { zc_config_from_str(&mut owned, document.as_ptr()) };
+            assert_eq!(rc, Z_EPARSE, "document holding `{value}`");
+        }
+        for value in accepted {
+            let v = std::ffi::CString::new(value).expect("no NUL");
+            let mut cfg = unsafe { config_of(&[]) };
+            let rc = unsafe {
+                zc_config_insert_json5(z_config_loan_mut(&mut cfg), key.as_ptr(), v.as_ptr())
+            };
+            assert_eq!(rc, Z_OK, "insert `{value}`");
+            assert_eq!(
+                unsafe { get_text(&cfg, SESSION_ZID_KEY) }.1,
+                value,
+                "insert `{value}` must read back as it was written"
+            );
+            let document = std::ffi::CString::new(format!("{{\"id\":{value}}}")).expect("no NUL");
+            let mut owned: z_owned_config_t = unsafe { std::mem::zeroed() };
+            assert_eq!(
+                unsafe { zc_config_from_str(&mut owned, document.as_ptr()) },
+                Z_OK,
+                "document holding `{value}`"
+            );
+        }
+    }
+
     /// The keys THIS MODULE declares as upstream's `Z_CONFIG_*`, paired with a
     /// value each. The population is the constant list itself, so a key added
     /// beside them is covered here without an edit; the cross-implementation
@@ -1438,7 +1589,10 @@ mod tests {
             (LISTEN_KEY, "[\"tcp/127.0.0.1:17448\"]"),
             (MULTICAST_LOCATOR_KEY, "\"224.0.0.224:7446\""),
             (SCOUTING_TIMEOUT_KEY, "1234"),
-            (SESSION_ZID_KEY, "\"0102030405\""),
+            // No leading `0`: zenoh refuses one at the insert, so a fixture that
+            // wrote `0102030405` was inserting a value the real config would not
+            // take and this round trip was grading a config no upstream holds.
+            (SESSION_ZID_KEY, "\"102030405\""),
         ]
     }
 

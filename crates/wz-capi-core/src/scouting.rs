@@ -68,20 +68,6 @@ pub fn parse_multicast_locator(locator: &str) -> Option<(Ipv4Addr, u16)> {
     Some((addr.parse().ok()?, port.parse().ok()?))
 }
 
-/// Parse a hex zid, most-significant-first, up to 16 bytes.
-pub fn parse_hex_zid(text: &str) -> Option<Vec<u8>> {
-    let text = text.trim();
-    if text.is_empty() || text.len() % 2 != 0 || text.len() > 32 {
-        return None;
-    }
-    let mut out = Vec::with_capacity(text.len() / 2);
-    for pair in text.as_bytes().chunks(2) {
-        let hex = std::str::from_utf8(pair).ok()?;
-        out.push(u8::from_str_radix(hex, 16).ok()?);
-    }
-    Some(out)
-}
-
 /// A fresh random zid for a scout that has none configured.
 ///
 /// Random rather than all-zeros: a peer may read an all-zero zid as "unset" and
@@ -225,15 +211,12 @@ mod tests {
         assert!(parse_multicast_locator("").is_none());
     }
 
-    /// A zid is hex, EVEN-length and at most 16 bytes; anything else is `None`
-    /// so the caller falls back to a fresh one rather than scouting as a
-    /// truncated identity.
+    /// A scout with no configured id announces a fresh sixteen-byte one. Reading
+    /// a configured id is [`crate::drive::ConfiguredZid`]'s, and the reading
+    /// that used to sit here (per byte, in written order, even length only) was
+    /// the reverse of zenoh's and refused text zenoh accepts.
     #[test]
-    fn a_zid_parses_only_as_even_length_hex_within_sixteen_bytes() {
-        assert_eq!(parse_hex_zid("0a0b"), Some(vec![0x0a, 0x0b]));
-        assert!(parse_hex_zid("0a0").is_none());
-        assert!(parse_hex_zid("zz").is_none());
-        assert!(parse_hex_zid(&"ab".repeat(17)).is_none());
+    fn a_fresh_scout_zid_is_sixteen_bytes() {
         assert_eq!(fresh_scout_zid().len(), 16);
     }
 

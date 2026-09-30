@@ -19482,6 +19482,20 @@ layer_c1cc_api_compat_c() {
         --test zenoh_c_source_info_twice_and_diff -- --ignored --quiet --test-threads=1 \
         --exact a_patched_upstream_put_carries_source_info_identically_on_wz_and_libzenohc \
         || return 1
+    # The session's own zid is the config's `id` — compiled once and linked twice,
+    # like the leg above, because no shipped example sets `id` and reads
+    # `z_info_zid` back. `z_open` minted a fresh random zid and never read the key,
+    # while the insert doors accepted any text where upstream's typed config
+    # refuses what a `ZenohId` refuses, at the insert with one code and in a
+    # document with another. One probe asks the real library both questions and
+    # diffs the answers; the expected bytes are ALSO derived in the test, so two
+    # arms that agreed on the wrong zid could not pass.
+    _runci_guarded_test \
+        "C1cc an_open_stands_on_its_configured_id_identically_on_wz_and_libzenohc" 1 \
+        cargo test -p wz-integration-tests \
+        --test zenoh_c_open_zid_twice_and_diff -- --ignored --quiet --test-threads=1 \
+        --exact an_open_stands_on_its_configured_id_identically_on_wz_and_libzenohc \
+        || return 1
     # R2579 — §5.4 `session-matching`'s SESSION-LOCAL half, by the same
     # compile-once-link-twice route and for the same reason: no shipped example
     # on either side holds a queryable and a querier on ONE session, so the

@@ -18,8 +18,9 @@
 
 use std::ffi::{c_int, c_void};
 
+use wz_capi_core::drive::ConfiguredZid;
 use wz_capi_core::scouting::{
-    fresh_scout_zid, parse_hex_zid, parse_multicast_locator, run_scout, MULTICAST_LOCATOR_DEFAULT,
+    fresh_scout_zid, parse_multicast_locator, run_scout, MULTICAST_LOCATOR_DEFAULT,
     SCOUTING_TIMEOUT_DEFAULT_MS, SCOUTING_WHAT_DEFAULT,
 };
 
@@ -33,6 +34,21 @@ use crate::ffi::{guard_val, guarded};
 use crate::result::{ZResult, Z_EINVAL, Z_ENULL, Z_OK};
 use crate::string::{owned_string_from, view_string_over};
 use crate::zid::z_id_t;
+
+/// The zid a scout announces: the id the config states, in the form zenoh puts
+/// on the wire, or a fresh one when it states none.
+///
+/// It reads the text the way [`ConfiguredZid`] does, which is the way `z_open`
+/// reads it, so the scouter a responder logs is the node a later open stands on.
+/// This used to read it PER BYTE in the order written, which is the reverse of
+/// zenoh's reading (`c11e47c11e49` is the bytes `49 1e c1 47 1e c1`), and it
+/// refused an odd number of digits that zenoh accepts.
+fn announced_zid(configured: Option<&str>) -> Vec<u8> {
+    configured
+        .and_then(ConfiguredZid::from_zenoh_text)
+        .map(|zid| zid.wire().to_vec())
+        .unwrap_or_else(fresh_scout_zid)
+}
 
 /// `Z_WHATAMI_ROUTER` = 1.
 pub const Z_WHATAMI_ROUTER: c_int = 1;
@@ -837,9 +853,7 @@ pub unsafe extern "C" fn z_scout(
         // The Scout announces the identity this node would open a session with,
         // so a responder that logs the scouter names the same zid a later
         // InitSyn would carry.
-        let zid = cfg_get(crate::config::SESSION_ZID_KEY)
-            .and_then(|s| parse_hex_zid(&s))
-            .unwrap_or_else(fresh_scout_zid);
+        let zid = announced_zid(cfg_get(crate::config::SESSION_ZID_KEY).as_deref());
         drop(cfg);
 
         let Some((group, port)) = parse_multicast_locator(&locator) else {
@@ -876,6 +890,44 @@ pub unsafe extern "C" fn z_scout(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A scout announces the id its config states in zenoh's reading of it.
+    ///
+    /// The expected bytes are derived here from the documented reading and not
+    /// from [`ConfiguredZid`]: the text is a `u128` in big-endian hex and the wire
+    /// carries the id's little-endian bytes with the trailing zeros trimmed, so a
+    /// renderer or a parser that read the text per byte in written order would
+    /// pass the reversed bytes and fail on the first assertion. The odd-digit id
+    /// is the second: zenoh accepts `abc`, and the per-byte reader refused it.
+    #[test]
+    fn a_scout_announces_the_id_its_config_states_as_zenoh_reads_it() {
+        let read = |text: &str| -> Vec<u8> {
+            let id = u128::from_str_radix(text, 16).expect("hex");
+            let mut bytes = id.to_le_bytes().to_vec();
+            while bytes.last() == Some(&0) {
+                bytes.pop();
+            }
+            bytes
+        };
+        for text in [
+            "c11e47c11e49",
+            "abc",
+            "1",
+            "ffffffffffffffffffffffffffffffff",
+        ] {
+            assert_eq!(
+                announced_zid(Some(text)),
+                read(text),
+                "the announced zid for `{text}`"
+            );
+        }
+        assert_eq!(announced_zid(Some("c11e47c11e49")).len(), 6);
+
+        // No id stated: a fresh sixteen-byte one, and two calls differ.
+        let (a, b) = (announced_zid(None), announced_zid(None));
+        assert_eq!((a.len(), b.len()), (16, 16));
+        assert_ne!(a, b, "a scout with no configured id must not reuse one");
+    }
 
     /// The whatami map is an INDEXED BITMASK: 3 is "router|peer", not a third
     /// role. A table indexed by role ordinal would print "client" here, and a

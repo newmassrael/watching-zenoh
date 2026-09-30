@@ -259,8 +259,10 @@ const ZID_LENGTH: usize = 16;
 /// multi-peer gate test passes either way. This is a fidelity fix that also
 /// closes that latent hazard, not a repair of a reproduced failure.
 ///
-/// Honouring the `Z_CONFIG_SESSION_ZID_KEY` override is follow-up surface; this
-/// is pico's default path.
+/// The override is [`ConfiguredZid`]: a caller whose config states an id opens on
+/// that one and this is what it does NOT call. The zenoh-c ABI reads its `id`
+/// key; the zenoh-pico ABI's `Z_CONFIG_SESSION_ZID_KEY` still is follow-up
+/// surface, so pico's default path is this.
 ///
 /// `None` on OS-entropy failure, which fails the open — the choice the session
 /// makes for every per-handshake value it draws: a source that fails leaves no
@@ -274,6 +276,77 @@ fn fresh_zid() -> Option<[u8; ZID_LENGTH]> {
     let mut zid = [0u8; ZID_LENGTH];
     getrandom::getrandom(&mut zid).ok()?;
     Some(zid)
+}
+
+/// The two forms of the id a session stands on, from ONE choice: what
+/// `z_info_zid` reports (sixteen bytes) and what the INIT carries.
+///
+/// On the default path they are the same sixteen bytes. On a configured id they
+/// are the zero-padded and the trimmed form of it, and it is the trimmed one that
+/// goes on the wire: zenoh writes an id as the bytes up to its last non-zero one,
+/// so `c11e47c11e49` is six on the wire and a peer that logs the session's id
+/// reads it as such. `None` only when the entropy source fails on the default
+/// path, which fails the open.
+///
+/// A free function and not a block in [`open_blocking`] so that the choice can be
+/// held by a test that has no peer to look at the INIT.
+fn session_zids(configured: Option<ConfiguredZid>) -> Option<([u8; ZID_LENGTH], Vec<u8>)> {
+    match configured {
+        Some(configured) => Some((configured.padded(), configured.wire().to_vec())),
+        None => {
+            let minted = fresh_zid()?;
+            Some((minted, minted.to_vec()))
+        }
+    }
+}
+
+/// The zid a config STATES for its session, checked and in the form zenoh puts
+/// on the wire.
+///
+/// A value of this type cannot be built from text zenoh refuses, so a caller that
+/// holds one has nothing left to validate and [`open_blocking`] has no invalid
+/// length to report. The reading of the text is [`zid_hex::zenoh_hex_to_zid`]
+/// and nothing here restates it: a lowercase hex `u128`, the id's little-endian
+/// bytes with the trailing zeros trimmed, no leading `0`, at most sixteen bytes.
+/// That rule was measured against the pinned zenohd and is the one the command
+/// line and the `--zid` parse already use, so a config's `id` and a flag's value
+/// name the same node.
+///
+/// # Two forms of one id
+///
+/// The WIRE form is what an INIT carries: one to sixteen bytes, trailing zeros
+/// trimmed, so `c11e47c11e49` is six bytes. The STATE form is what `z_info_zid`
+/// reports: sixteen bytes, the same id zero-padded. Both come from this one
+/// value, so the session cannot say one identity on the wire and another to its
+/// own caller, which is the property the random path gets from minting once.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConfiguredZid {
+    wire: Vec<u8>,
+}
+
+impl ConfiguredZid {
+    /// The id a config's text names, or `None` for text zenoh refuses.
+    pub fn from_zenoh_text(text: &str) -> Option<Self> {
+        let wire = wz_runtime_tokio::zid_hex::zenoh_hex_to_zid(text)?;
+        // `zenoh_hex_to_zid` answers one to sixteen bytes for every text it
+        // accepts, and the constructor is the one place that is relied on.
+        if wire.is_empty() || wire.len() > ZID_LENGTH {
+            return None;
+        }
+        Some(Self { wire })
+    }
+
+    /// The form an INIT carries.
+    pub fn wire(&self) -> &[u8] {
+        &self.wire
+    }
+
+    /// The form `z_info_zid` reports: sixteen bytes, zero-padded.
+    fn padded(&self) -> [u8; ZID_LENGTH] {
+        let mut zid = [0u8; ZID_LENGTH];
+        zid[..self.wire.len()].copy_from_slice(&self.wire);
+        zid
+    }
 }
 
 /// Fixed session-init parameters (mirrors the wz-ap-demo defaults), with a
@@ -315,9 +388,11 @@ pub(crate) fn init_params(
 /// the argument-order hazard six same-shaped `Arc`s otherwise carry. The
 /// pre-existing allow on `drive_listen` came off with it.
 struct DriveContext {
-    /// This session's own zid, minted on the calling thread so
-    /// [`SessionState::zid`] and the INIT cannot disagree.
-    zid: [u8; ZID_LENGTH],
+    /// This session's own zid in the form the INIT carries: fixed on the calling
+    /// thread, from the same value as [`SessionState::zid`], so the two cannot
+    /// disagree. Sixteen random bytes on the default path; the trimmed bytes of a
+    /// [`ConfiguredZid`] when the config stated one.
+    zid: Vec<u8>,
     shared: Arc<SharedSession>,
     /// Unblocks `z_open`: `true` once the role has reached its ready point
     /// (handshake settled for dial, bind complete for listen), `false` on any
@@ -1202,6 +1277,11 @@ async fn drive_listen(endpoint: String, tls: CapiTlsConfig, ctx: DriveContext) {
 /// `z_result_t _z_init_encode(`) and passes [`SessionOffer::universal`].
 /// It is a parameter rather than a value this crate derives because the two
 /// ABIs read their configs through different keys.
+///
+/// `zid` is the id the config STATES, or `None` for a session that states none.
+/// It is a parameter for the same reason as `offer`: zenoh-c reads its `id` key
+/// and zenoh-pico its numeric one, each with its own refusals, and what reaches
+/// here is already a [`ConfiguredZid`], so this crate restates neither.
 pub fn open_blocking(
     connect: Vec<String>,
     listen: Option<String>,
@@ -1210,15 +1290,16 @@ pub fn open_blocking(
     dial_phase: DialPhase,
     tx_queue: TxQueueConf,
     offer: SessionOffer,
+    zid: Option<ConfiguredZid>,
 ) -> Result<SessionState, OpenError> {
     let clock = TokioTime::new();
-    // Minted here, on the CALLING thread, so `SessionState` can hand it to
+    // Fixed here, on the CALLING thread, so `SessionState` can hand it to
     // `z_info_zid` and the INIT cannot disagree with it — see the field doc.
-    let zid = fresh_zid().ok_or(OpenError::DriveFailed)?;
-    // R311y820 — one line below `fresh_zid`, and fallible for the same reason:
+    let (zid, wire_zid) = session_zids(zid).ok_or(OpenError::DriveFailed)?;
+    // R311y820 — one line below the mint, and fallible for the same reason:
     // both need OS entropy and neither has an honest constant to fall back to.
     let shared =
-        Arc::new(SharedSession::new(clock, zid.to_vec()).map_err(|_| OpenError::DriveFailed)?);
+        Arc::new(SharedSession::new(clock, wire_zid.clone()).map_err(|_| OpenError::DriveFailed)?);
     let shutdown = Arc::new(Notify::new());
     let stop = Arc::new(AtomicBool::new(false));
     let (tx, rx) = mpsc::channel::<bool>();
@@ -1251,7 +1332,7 @@ pub fn open_blocking(
                 }
             };
             let ctx = DriveContext {
-                zid,
+                zid: wire_zid,
                 shared: drive_shared,
                 tx,
                 shutdown: drive_shutdown,
@@ -1292,5 +1373,96 @@ pub fn open_blocking(
             let _ = handle.join();
             Err(OpenError::DriveFailed)
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A configured id is read the way zenoh reads it, in both forms it takes.
+    ///
+    /// The expected bytes come from the documented reading and from nothing in
+    /// this crate: the text is a `u128` in big-endian hex, the id's little-endian
+    /// bytes are what `z_id_t` holds, and the INIT carries them with the trailing
+    /// zeros trimmed. A parser that read the text per byte in written order
+    /// would give `c1 1e 47 c1 1e 49` for the first case and fail here.
+    ///
+    /// The refused list is the one `libzenohc.so` 1.10.0 refused when the same
+    /// text was inserted as the config's `id`, and the accepted list includes the
+    /// two that look wrong and are taken (an odd number of digits, a leading `+`).
+    #[test]
+    fn a_configured_id_is_read_as_zenoh_reads_it() {
+        let expected = |text: &str| -> ([u8; ZID_LENGTH], Vec<u8>) {
+            let bytes = u128::from_str_radix(text, 16).expect("hex").to_le_bytes();
+            let mut trimmed = bytes.to_vec();
+            while trimmed.last() == Some(&0) {
+                trimmed.pop();
+            }
+            (bytes, trimmed)
+        };
+        for text in [
+            "1",
+            "c11e47c11e49",
+            "abc",
+            "ffffffffffffffffffffffffffffffff",
+            "+1",
+        ] {
+            let configured = ConfiguredZid::from_zenoh_text(text)
+                .unwrap_or_else(|| panic!("zenoh accepts `{text}`"));
+            let (padded, wire) = expected(text);
+            assert_eq!(configured.padded(), padded, "state form of `{text}`");
+            assert_eq!(configured.wire(), wire.as_slice(), "wire form of `{text}`");
+        }
+        // The two forms of the id the probe configures.
+        let six = ConfiguredZid::from_zenoh_text("c11e47c11e49").expect("accepted");
+        assert_eq!(six.wire(), &[0x49, 0x1e, 0xc1, 0x47, 0x1e, 0xc1]);
+        assert_eq!(
+            &six.padded()[6..],
+            &[0u8; 10],
+            "zero padding is part of the state form"
+        );
+
+        for text in [
+            "",
+            "0",
+            "01",
+            "0a0b",
+            "ABC",
+            "zz",
+            "1ffffffffffffffffffffffffffffffff",
+        ] {
+            assert!(
+                ConfiguredZid::from_zenoh_text(text).is_none(),
+                "zenoh refuses `{text}`, so no configured id can be built from it"
+            );
+        }
+    }
+
+    /// The form that goes on the wire is the TRIMMED one, and the form
+    /// `z_info_zid` reports is the padded one, both from one choice.
+    ///
+    /// Nothing else holds this: the differential against the real library reads
+    /// `z_info_zid`, which is padded whichever form the INIT carries, so a session
+    /// that put sixteen bytes with ten zeros on the wire would pass it. This is
+    /// the choice itself, asked with no peer.
+    #[test]
+    fn a_configured_id_goes_on_the_wire_trimmed_and_reads_back_padded() {
+        let configured = ConfiguredZid::from_zenoh_text("c11e47c11e49").expect("accepted");
+        let (state, wire) = session_zids(Some(configured)).expect("no entropy needed");
+        assert_eq!(
+            wire,
+            vec![0x49, 0x1e, 0xc1, 0x47, 0x1e, 0xc1],
+            "the INIT's bytes"
+        );
+        assert_eq!(&state[..6], wire.as_slice(), "the same id");
+        assert_eq!(&state[6..], &[0u8; 10], "padded for z_info_zid");
+
+        // No id: the same sixteen bytes in both forms, and a new one each time.
+        let (state_a, wire_a) = session_zids(None).expect("entropy");
+        let (state_b, _) = session_zids(None).expect("entropy");
+        assert_eq!(wire_a.as_slice(), &state_a[..], "one choice, two views");
+        assert_eq!(wire_a.len(), ZID_LENGTH);
+        assert_ne!(state_a, state_b, "a session with no id mints its own");
     }
 }

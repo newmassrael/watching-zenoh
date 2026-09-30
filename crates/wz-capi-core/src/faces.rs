@@ -1353,7 +1353,8 @@ impl SharedSession {
     /// registry — not the `SessionState` where the zid was minted. Recorded
     /// here rather than threaded through each handle so the two readers cannot
     /// disagree: `SessionState::zid` and this are the SAME bytes, both taken
-    /// from the one `fresh_zid()` call `open_blocking` makes.
+    /// from the one choice `open_blocking` makes — a fresh sixteen bytes, or a
+    /// configured id zero-padded to sixteen (`drive::ConfiguredZid`).
     pub fn zid(&self) -> [u8; 16] {
         self.zid
     }
