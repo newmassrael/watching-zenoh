@@ -718,6 +718,36 @@ pub const DOCUMENT_HISTORY: &[DocumentShape] = &[
         planes: CENSUS_R6_PLANES,
         carries: CENSUS_R11_CARRIES,
     },
+    // THE ADDRESS FAMILY ON AN ENDPOINT.
+    //
+    // ONE KEY IS ADDED and nothing retires, so this is a revision the key set
+    // announces. Every endpoint of every flow object gains `family`: `ipv4` or
+    // `ipv6` on a TCP or UDP link, and `null` on a link that does not address by
+    // IP (a MAC, a context id, a serial line), which have no family to name.
+    // `link` is the key beside it and is unchanged.
+    //
+    // The word is a FAMILY, a closed set a consumer may switch on, so the
+    // families axis gains it; it decides no shape, so the carries axis gains it
+    // as a passenger, on the precedent `link` set at revision 8.
+    //
+    // WHY IT IS ON THE ENDPOINT: `addr` and `port` are separate keys and joining
+    // them is the consumer's, and once an IPv6 address is compressed the join is
+    // ambiguous (`fe80::1` and 7447 written together read as the address
+    // `fe80::1:7447`). The family was always known here, as the address length;
+    // without the word a consumer recovers it from the colons, which is a second
+    // decoder of a fact this library holds.
+    //
+    // A consumer pinned to 14 loses nothing: the new key is an addition that a
+    // reader ignoring unknown keys does not see.
+    DocumentShape {
+        document: CENSUS,
+        revision: 15,
+        keys: CENSUS_R15_KEYS,
+        retiring: &[],
+        families: CENSUS_R15_FAMILIES,
+        planes: CENSUS_R6_PLANES,
+        carries: CENSUS_R15_CARRIES,
+    },
     DocumentShape {
         document: FIELDS,
         revision: 1,
@@ -1149,6 +1179,26 @@ pub const DOCUMENT_HISTORY: &[DocumentShape] = &[
         families: FIELDS_R17_FAMILIES,
         planes: &[],
         carries: FIELDS_R19_CARRIES,
+    },
+    // THE ADDRESS FAMILY ON AN ENDPOINT, in the field document as in the census.
+    //
+    // ONE KEY IS ADDED and nothing retires. Every endpoint of every flow object,
+    // on the stream half and on the datagram half, gains `family`: `ipv4` or
+    // `ipv6` on a TCP or UDP link and `null` on a link that does not address by
+    // IP. The families axis gains the word and the carries axis gains it as a
+    // passenger, exactly as at census 15, whose row gives the reason it is on the
+    // endpoint and not on the flow.
+    //
+    // A consumer pinned to 19 loses nothing: the new key is an addition, and a
+    // row's shape is still read off `offset_space` as before.
+    DocumentShape {
+        document: FIELDS,
+        revision: 20,
+        keys: FIELDS_R20_KEYS,
+        retiring: &[],
+        families: FIELDS_R20_FAMILIES,
+        planes: &[],
+        carries: FIELDS_R20_CARRIES,
     },
     DocumentShape {
         document: SUMMARY,
@@ -2375,6 +2425,280 @@ pub const CENSUS_R13_KEYS: &[&str] = CENSUS_R12_KEYS;
 /// can see a value move under a stationary key, so the revision number is the
 /// whole notice, written down here and on the [`DocumentShape`] row.
 pub const CENSUS_R14_KEYS: &[&str] = CENSUS_R13_KEYS;
+
+/// The census document's key set at revision 15.
+///
+/// Revision 14 PLUS `family`, on both endpoints of every flow object. An
+/// ADDITION, so revision 14 has nothing to retire.
+///
+/// Written out rather than aliased: revisions 13 and 14 could alias revision 12
+/// because the set did not move, and this one does. `family` is the address
+/// family of an IP endpoint (`ipv4` or `ipv6`) and `null` on a link that does not
+/// address by IP; see [`ADDR_FAMILY_R15`].
+///
+/// MEASURED: `the_census_documents_key_set_is_pinned` prints what the document
+/// emits and this is that printout, not a transcription of revision 14 with a
+/// word added.
+pub const CENSUS_R15_KEYS: &[&str] = &[
+    "a",
+    "a_to_b",
+    "aborted_capacity_overflow",
+    "aborted_out_of_order",
+    "aborted_sender_dropped",
+    "aborted_superseded",
+    "addr",
+    "admissible",
+    "aggregate",
+    "anchor_intervals",
+    "anchors_exact",
+    "answers",
+    "answers_in_scope",
+    "asked_at",
+    "asker",
+    "asks",
+    "at",
+    "at_most_bytes",
+    "attributed_bytes",
+    "b",
+    "b_to_a",
+    "begun",
+    "by_kind",
+    "bytes",
+    "cancelled_at",
+    "caps",
+    "cause",
+    "children",
+    "closed_at",
+    "completed",
+    "completion",
+    "consistent",
+    "continued",
+    "contradictions",
+    "count",
+    "declaration",
+    "declarations",
+    "declared",
+    "declared_at",
+    "declarer",
+    "declarer_zid",
+    "dels",
+    "descriptors",
+    "document",
+    "dropped_by_limits",
+    "elsewhere",
+    "errs",
+    "evidence",
+    "exchanges",
+    "family",
+    "first",
+    "first_anchor",
+    "first_reply",
+    "flow",
+    "flows",
+    "fragment_chains",
+    "frames",
+    "frames_per_flow",
+    "gaps",
+    "halted_batches",
+    "hello",
+    "high",
+    "id",
+    "inadmissible",
+    "init",
+    "interests",
+    "join",
+    "judged",
+    "keyexpr",
+    "keyexprs",
+    "keys",
+    "kind",
+    "last",
+    "last_anchor",
+    "link",
+    "links",
+    "liveliness_token",
+    "locators",
+    "low",
+    "matched",
+    "max_flows_per_table",
+    "max_ms",
+    "max_scout_askers",
+    "mean_ms",
+    "messages",
+    "min_ms",
+    "mismatched",
+    "mode",
+    "name",
+    "narrowed_by_selector",
+    "nodes",
+    "non_monotonic",
+    "not_as_declared",
+    "offset_space",
+    "orphan_answers",
+    "orphan_responses",
+    "orphan_withdrawals",
+    "payload_bytes",
+    "payload_bytes_ceiling",
+    "payloads",
+    "planes",
+    "port",
+    "prefix",
+    "puts",
+    "queries",
+    "queryable",
+    "queryables",
+    "reason",
+    "records",
+    "references",
+    "refused_missing_start_marker",
+    "refused_peer_quota",
+    "refused_pool_exhausted",
+    "rejected",
+    "replies",
+    "requests",
+    "restricted",
+    "revision",
+    "rows",
+    "scout",
+    "scout_askers",
+    "scouting",
+    "selection",
+    "share_bp",
+    "silent",
+    "skipped",
+    "skipped_packets",
+    "solicited_by",
+    "source_ahead_of_observer",
+    "space",
+    "stream_bytes",
+    "stream_bytes_per_direction",
+    "subscriber",
+    "subscribers",
+    "subtrees",
+    "tokens",
+    "total_ms",
+    "total_payload_bytes",
+    "totals",
+    "unanswered",
+    "unattributed_bytes",
+    "unattributed_records",
+    "unattributed_requests",
+    "unclaimed",
+    "unclaimed_exact",
+    "unclosed",
+    "undecidable",
+    "undecided",
+    "undeclarations",
+    "undecompressible_batches",
+    "unjudged_answers",
+    "unknown_ids",
+    "unlocatable_records",
+    "unmeasured_payloads",
+    "unparsed_bytes",
+    "unread",
+    "unresolvable_fragments",
+    "unresolved",
+    "unresolved_declarations",
+    "unresolved_records",
+    "unsized_payloads",
+    "unstamped",
+    "walked_records",
+    "whatami",
+    "why",
+    "wire_bytes",
+    "withdrawn_at",
+    "zid",
+];
+
+/// The address family of an IP endpoint, at census revision 15 and field
+/// revision 20 — the words `crate::link::AddrFamily::name` returns.
+///
+/// One constant for both documents, the way [`LINK_KIND_R7`] is, because both
+/// write endpoints through the same function and cannot disagree about the
+/// vocabulary. SORTED, and joined to `AddrFamily::names` by
+/// `the_declared_value_families_match_the_librarys_own_vocabularies`, so a
+/// family added to the enum cannot ship until a revision declares it.
+///
+/// `null` is a value the key can also hold, on a link that does not address by
+/// IP; it is not a word of this family, for the reason `Option` is not a
+/// variant of what it wraps.
+pub const ADDR_FAMILY_R15: &[&str] = &["ipv4", "ipv6"];
+
+/// The census document's value families at revision 15 — revision 11's PLUS
+/// `family`.
+pub const CENSUS_R15_FAMILIES: &[ValueFamily] = &[
+    ValueFamily {
+        key: "asker",
+        values: DIRECTION_R4,
+    },
+    ValueFamily {
+        key: "cause",
+        values: UNRESOLVED_CAUSE_R11,
+    },
+    ValueFamily {
+        key: "declarer",
+        values: DIRECTION_R4,
+    },
+    ValueFamily {
+        key: "family",
+        values: ADDR_FAMILY_R15,
+    },
+    ValueFamily {
+        key: "kind",
+        values: INTEREST_KIND_R4,
+    },
+    ValueFamily {
+        key: "link",
+        values: LINK_KIND_R7,
+    },
+    ValueFamily {
+        key: "mode",
+        values: INTEREST_MODE_R4,
+    },
+    ValueFamily {
+        key: "offset_space",
+        values: ANCHOR_SPACE_R4,
+    },
+];
+
+/// What each census family's WORD decides about the keys beside it, at revision
+/// 15 — revision 11's PLUS `family`, a PASSENGER for the reason
+/// [`CENSUS_R8_CARRIES`] gives `link`: an endpoint is `addr` / `port` / `family`
+/// for every kind of link, and the word decides no shape.
+pub const CENSUS_R15_CARRIES: &[KeyCarries] = &[
+    KeyCarries {
+        key: "asker",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "cause",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "declarer",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "family",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "kind",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "link",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "mode",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "offset_space",
+        shape: CarriesShape::Passenger,
+    },
+];
 
 /// WHY a keyexpr reference did not resolve, at census revision 11.
 ///
@@ -5565,6 +5889,267 @@ pub const FIELDS_R19_CARRIES: &[KeyCarries] = &[
     },
 ];
 
+/// The field document's key set at revision 20.
+///
+/// Revision 19 PLUS `family`, on both endpoints of the flow objects of both
+/// halves: the stream half and the datagram half render one shared flow key, so
+/// neither can gain the key without the other. An ADDITION, so revision 19 has
+/// nothing to retire.
+///
+/// Written out rather than aliased, on the rule revision 7 set for a key that
+/// arrives. See [`ADDR_FAMILY_R15`] for the word set and what `null` means.
+///
+/// MEASURED: `the_field_documents_key_set_is_pinned` prints what the document
+/// emits and this is that printout.
+pub const FIELDS_R20_KEYS: &[&str] = &[
+    "abandoned_at_end",
+    "abandoned_on_eviction",
+    "above_transport",
+    "addr",
+    "after_seq",
+    "anchor",
+    "batch_index",
+    "batch_size",
+    "caps",
+    "capture_reread",
+    "carried",
+    "carried_state",
+    "chain",
+    "chain_id",
+    "compression",
+    "conduit",
+    "context",
+    "datagram_flows",
+    "declaration_checked",
+    "declared",
+    "descriptor_bytes",
+    "despite_encoding",
+    "direction",
+    "document",
+    "dropped_by_limits",
+    "dst",
+    "end",
+    "example",
+    "expired_chains",
+    "family",
+    "fields",
+    "first_byte",
+    "flow",
+    "flows",
+    "format",
+    "frame_offset",
+    "frames",
+    "frames_per_flow",
+    "high",
+    "keyexpr",
+    "keyexpr_cause",
+    "kind",
+    "l2",
+    "link",
+    "list_id",
+    "low",
+    "lowlatency",
+    "max_flows_per_table",
+    "max_scout_askers",
+    "message",
+    "message_at",
+    "messages",
+    "missing",
+    "name",
+    "negotiated",
+    "note",
+    "offset_space",
+    "omitted",
+    "outcome",
+    "packet",
+    "patch",
+    "path",
+    "payload_decode",
+    "payload_mapping",
+    "payload_mapping_counts_exact",
+    "payload_offset",
+    "payload_refusals",
+    "phase",
+    "port",
+    "priority",
+    "qos",
+    "reason",
+    "reassembly",
+    "reliable",
+    "revision",
+    "samples",
+    "scout_askers",
+    "scouting",
+    "selected",
+    "seq",
+    "shown",
+    "skipped",
+    "skipped_packets",
+    "sn",
+    "sn_mask",
+    "src",
+    "start",
+    "state",
+    "stream_bytes",
+    "stream_bytes_per_direction",
+    "stream_flows",
+    "through_seq",
+    "under",
+    "value",
+    "verdict",
+    "why",
+    "window",
+    "wrong",
+];
+
+/// The field document's value families at revision 20 — revision 17's PLUS
+/// `family`.
+pub const FIELDS_R20_FAMILIES: &[ValueFamily] = &[
+    ValueFamily {
+        key: "carried_state",
+        values: CARRIED_STATE_R12,
+    },
+    ValueFamily {
+        key: "direction",
+        values: DIRECTION_FIELDS_R2,
+    },
+    ValueFamily {
+        key: "family",
+        values: ADDR_FAMILY_R15,
+    },
+    ValueFamily {
+        key: "keyexpr_cause",
+        values: UNRESOLVED_CAUSE_R11,
+    },
+    ValueFamily {
+        key: "kind",
+        values: FIELD_VALUE_KIND_R17,
+    },
+    ValueFamily {
+        key: "link",
+        values: LINK_KIND_R7,
+    },
+    ValueFamily {
+        key: "message",
+        values: MESSAGE_R10,
+    },
+    ValueFamily {
+        key: "offset_space",
+        values: ANCHOR_SPACE_FIELDS_R2,
+    },
+    ValueFamily {
+        key: "outcome",
+        values: CHAIN_OUTCOME_R14,
+    },
+    ValueFamily {
+        key: "phase",
+        values: SESSION_PHASE_R14,
+    },
+    ValueFamily {
+        key: "priority",
+        values: PRIORITY_R14,
+    },
+    ValueFamily {
+        key: "reason",
+        values: CHAIN_REASON_R14,
+    },
+    ValueFamily {
+        key: "selected",
+        values: SELECTED_R13,
+    },
+    ValueFamily {
+        key: "state",
+        values: PAYLOAD_STATE_R2,
+    },
+    ValueFamily {
+        key: "under",
+        values: REFUSED_UNDER_R2,
+    },
+    ValueFamily {
+        key: "verdict",
+        values: SN_VERDICT_R14,
+    },
+    ValueFamily {
+        key: "wrong",
+        values: MISBOUND_R2,
+    },
+];
+
+/// What each field-document family's WORD decides at revision 20 — revision 19's
+/// PLUS `family`, a PASSENGER for the reason [`FIELDS_R7_CARRIES`] gives `link`:
+/// an endpoint is `addr` / `port` / `family` for every kind of link, and the word
+/// decides no shape.
+pub const FIELDS_R20_CARRIES: &[KeyCarries] = &[
+    KeyCarries {
+        key: "carried_state",
+        shape: CarriesShape::Discriminant(CARRIED_STATE_CARRIES_R12),
+    },
+    KeyCarries {
+        key: "direction",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "family",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "keyexpr_cause",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "kind",
+        shape: CarriesShape::Discriminant(FIELD_VALUE_KIND_CARRIES_R17),
+    },
+    KeyCarries {
+        key: "link",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "message",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "offset_space",
+        shape: CarriesShape::Discriminant(FIELD_OFFSET_SPACE_CARRIES_R19),
+    },
+    KeyCarries {
+        key: "outcome",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "phase",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "priority",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "reason",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "selected",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "state",
+        shape: CarriesShape::Discriminant(PAYLOAD_STATE_CARRIES_R4),
+    },
+    KeyCarries {
+        key: "under",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "verdict",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "wrong",
+        shape: CarriesShape::Passenger,
+    },
+];
+
 /// What each field-document family's WORD decides at revision 16 — revision
 /// 15's, with `offset_space` read from [`FIELD_OFFSET_SPACE_CARRIES_R16`].
 pub const FIELDS_R16_CARRIES: &[KeyCarries] = &[
@@ -8332,7 +8917,9 @@ mod tests {
             // To 14 when an IPv6 `addr` changed spelling under its
             // stationary key: eight hex groups with no `::`, now RFC 5952's
             // text. Again no axis can see it; this entry is the notice.
-            (CENSUS, 14u32),
+            // To 15 when every endpoint gained `family`: one key, one word set
+            // (`ipv4`, `ipv6`, and `null` off an IP link) and a passenger.
+            (CENSUS, 15u32),
             // R2175 (open-debt item 552) — the field document moved to 2 when
             // its PAYLOAD PLANE joined the pin (fifteen keys revision 1 had
             // never covered) and its first three value families were declared.
@@ -8395,7 +8982,9 @@ mod tests {
             // moves; this entry is the notice.
             // To 19 when a live row gained `seq` and a since-document gained
             // `window`: four keys, no word and no removal.
-            (FIELDS, 19),
+            // To 20 when every endpoint gained `family`, the census row's twin:
+            // one key, one word set and a passenger.
+            (FIELDS, 20),
             // R2121 (open-debt item 460) — the summary moved to 2 when it
             // gained `inert_counters`; R2122 (item 238) to 3 when its
             // `framing` group stopped disagreeing with the capture report's.

@@ -950,7 +950,25 @@ fn push_endpoint(e: &crate::link::Endpoint, link: crate::link::LinkKind, out: &m
     // too and all three had the same defect. See that method for what each kind
     // spells and for the residue this leaves named.
     out.push_str(&e.addr_text(link));
-    let _ = write!(out, "\",\"port\":{}}}", e.port);
+    let _ = write!(out, "\",\"port\":{}", e.port);
+    // The ADDRESS FAMILY, on the endpoint, so a reader that formats an endpoint
+    // never has to recover it from the address text. `addr` is the address alone
+    // and the port is beside it, so the pair is one join away from ambiguous once
+    // the address is compressed: `fe80::1` and 7447 written together read as the
+    // longer address `fe80::1:7447`. A consumer that decides that from the colons
+    // has a second decoder of a fact this library holds as the address length.
+    //
+    // STRUCTURAL, on every endpoint of every flow object of every plane, like
+    // `link` beside it: a key a consumer has to test for cannot be switched on.
+    // The VALUE is a word for an IP link and `null` for one that does not address
+    // by IP (a MAC, a context id, no address), which is `Endpoint::family`'s own
+    // answer and not a placeholder: those endpoints have no family to name.
+    match e.family(link) {
+        Some(family) => {
+            let _ = write!(out, ",\"family\":\"{}\"}}", family.name());
+        }
+        None => out.push_str(",\"family\":null}"),
+    }
 }
 
 pub(crate) fn dir_name(d: Direction) -> &'static str {
@@ -1120,9 +1138,10 @@ mod tests {
              nothing: {doc}"
         );
         assert!(
-            doc.contains("{\"addr\":\"2\",\"port\":7447}")
-                && doc.contains("{\"addr\":\"3\",\"port\":40000}"),
-            "both vsock endpoints spell their decimal context ids: {doc}"
+            doc.contains("{\"addr\":\"2\",\"port\":7447,\"family\":null}")
+                && doc.contains("{\"addr\":\"3\",\"port\":40000,\"family\":null}"),
+            "both vsock endpoints spell their decimal context ids, and a context \
+             id has no address family: {doc}"
         );
         assert!(
             !doc.contains("200:0:0:0") && !doc.contains("300:0:0:0"),
@@ -1130,7 +1149,7 @@ mod tests {
              from this document too: {doc}"
         );
         assert!(
-            doc.contains("{\"addr\":\"192.168.1.5\",\"port\":43210}"),
+            doc.contains("{\"addr\":\"192.168.1.5\",\"port\":43210,\"family\":\"ipv4\"}"),
             "while the UDP flow keeps its dotted quad -- the arm a repair that \
              numbered every address would break: {doc}"
         );
@@ -1185,14 +1204,14 @@ mod tests {
         // the source it lays.
         assert!(
             doc.contains(
-                "{\"low\":{\"addr\":\"30:03:c8:37:25:a1\",\"port\":0},\
-                 \"high\":{\"addr\":\"aa:bb:cc:dd:ee:ff\",\"port\":0},\
+                "{\"low\":{\"addr\":\"30:03:c8:37:25:a1\",\"port\":0,\"family\":null},\
+                 \"high\":{\"addr\":\"aa:bb:cc:dd:ee:ff\",\"port\":0,\"family\":null},\
                  \"link\":\"raweth\"}"
             ),
             "the raweth flow must reach the document as a named link with two \
-             MACs; the defect this closes rendered its source MAC as the \
-             three-group address `3003:c837:25a1` with no key saying what it \
-             was: {doc}"
+             MACs, and a MAC has no address family; the defect this closes \
+             rendered its source MAC as the three-group address \
+             `3003:c837:25a1` with no key saying what it was: {doc}"
         );
         assert!(
             !doc.contains("3003:c837:25a1"),
@@ -1205,11 +1224,12 @@ mod tests {
         // would satisfy the assertion above.
         assert!(
             doc.contains(
-                "{\"low\":{\"addr\":\"192.168.1.5\",\"port\":43210},\
-                 \"high\":{\"addr\":\"192.168.1.9\",\"port\":7447},\
+                "{\"low\":{\"addr\":\"192.168.1.5\",\"port\":43210,\"family\":\"ipv4\"},\
+                 \"high\":{\"addr\":\"192.168.1.9\",\"port\":7447,\"family\":\"ipv4\"},\
                  \"link\":\"udp\"}"
             ),
-            "a UDP flow must still be named udp and read as dotted quads: {doc}"
+            "a UDP flow must still be named udp, read as dotted quads and be \
+             IPv4: {doc}"
         );
 
         // THE STREAM ARM, through the emitter, for the reason this test's own
@@ -1219,6 +1239,11 @@ mod tests {
         assert!(
             stream.contains("\"link\":\"tcp\""),
             "a stream flow must be named tcp: {stream}"
+        );
+        assert_eq!(
+            stream.matches("\"family\":\"ipv4\"").count(),
+            2,
+            "and both of its endpoints are IPv4: {stream}"
         );
     }
 
@@ -1272,13 +1297,13 @@ mod tests {
         // Each endpoint on its own: which of the two is `low` is the flow
         // key's decision and not this test's claim.
         for ep in [
-            "{\"addr\":\"fe80::1\",\"port\":43210}",
-            "{\"addr\":\"2001:db8::1:0:0:1\",\"port\":7447}",
+            "{\"addr\":\"fe80::1\",\"port\":43210,\"family\":\"ipv6\"}",
+            "{\"addr\":\"2001:db8::1:0:0:1\",\"port\":7447,\"family\":\"ipv6\"}",
         ] {
             assert!(
                 doc.contains(ep),
-                "an IPv6 endpoint is spelled the way RFC 5952 spells it ({ep}): \
-                 {doc}"
+                "an IPv6 endpoint is spelled the way RFC 5952 spells it and says \
+                 it is IPv6 ({ep}): {doc}"
             );
         }
         for old in ["fe80:0:0:0:0:0:0:1", "2001:db8:0:0:1:0:0:1"] {
@@ -1289,9 +1314,9 @@ mod tests {
             );
         }
         assert!(
-            doc.contains("{\"addr\":\"192.168.1.5\",\"port\":43210}"),
-            "the IPv4 datagram keeps its dotted quad -- the arm a repair that \
-             spelled every address through IPv6 would break: {doc}"
+            doc.contains("{\"addr\":\"192.168.1.5\",\"port\":43210,\"family\":\"ipv4\"}"),
+            "the IPv4 datagram keeps its dotted quad and stays IPv4 -- the arm a \
+             repair that spelled every address through IPv6 would break: {doc}"
         );
 
         let declared = crate::doc_revision::newest(crate::doc_revision::CENSUS)
@@ -1305,6 +1330,12 @@ mod tests {
             declared >= 14,
             "and it is at least 14 -- the revision this spelling arrived at. A \
              value that moved under a stationary key has no other notice"
+        );
+        assert!(
+            declared >= 15,
+            "and at least 15, the revision `family` arrived at: a document that \
+             names the family on every endpoint and announces an older revision \
+             tells a pinned consumer nothing moved"
         );
     }
 

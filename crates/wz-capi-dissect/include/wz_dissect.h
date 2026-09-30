@@ -157,8 +157,8 @@
  * fields 8; see the second warning). Every flow object in both documents
  * carries
  *
- *     "flow":{"low":{"addr":"30:03:c8:37:25:a1","port":0},
- *             "high":{"addr":"aa:bb:cc:dd:ee:ff","port":0},
+ *     "flow":{"low":{"addr":"30:03:c8:37:25:a1","port":0,"family":null},
+ *             "high":{"addr":"aa:bb:cc:dd:ee:ff","port":0,"family":null},
  *             "link":"raweth"}
  *
  *     `link`         which kind of link the two endpoints were read off:
@@ -210,8 +210,29 @@
  * leaves alone. Nothing in the key set changed, so the revision number is the
  * whole notice.
  *
+ * AND `family` ARRIVED AT CENSUS REVISION 15 / FIELD-DOCUMENT REVISION 20: one
+ * key on each endpoint, beside `addr` and `port`.
+ *
+ *     "low":{"addr":"fe80::1","port":43210,"family":"ipv6"}
+ *
+ *     `family`       `ipv4` or `ipv6` for an endpoint read off a `tcp` or a
+ *                    `udp` link, and `null` for one that was not (`raweth`,
+ *                    `vsock`, `serial`), which have no address family to name.
+ *
+ * Why it is on the endpoint: `addr` and `port` are separate keys and joining
+ * them is the consumer's, and once an IPv6 address is compressed the join is
+ * ambiguous -- `fe80::1` and 7447 written together read as the address
+ * `fe80::1:7447`. Both ends of a flow are always the same family, and the word
+ * is written on each anyway, so a reader formatting one endpoint does not need
+ * the flow around it. READ it rather than inferring it from the colons in
+ * `addr`: that would be a second decoder of a fact the library already holds,
+ * and a MAC has colons too and is not IPv6. The key is an addition, so a
+ * consumer pinned to an earlier revision loses nothing.
+ *
  * @values census link
  * @values fields link
+ * @values census family
+ * @values fields family
  *
  * R2182 -- AND THE FIELD TREE'S OWN DISCRIMINANT, at field-document revision 3:
  *
@@ -532,7 +553,7 @@
  *
  * SO THE DOCUMENT CARRIES THE LIST. Its envelope reads
  *
- *     {"document":{"name":"census","revision":14,
+ *     {"document":{"name":"census","revision":15,
  *                  "planes":["exchanges","interests","keyexprs","nodes",
  *                            "payloads"]}, ...}
  *
@@ -578,11 +599,11 @@
  *
  * Every family in `value_families` now carries a `carries` axis:
  *
- *     {"name":"fields","revision":19,"key":"kind","values":[...],
+ *     {"name":"fields","revision":20,"key":"kind","values":[...],
  *      "carries":[{"word":"bits","shapes":[["end","name","start","value"]]},
  *                 {"word":"opaque","shapes":[["end","name","start"]]}, ...]}
  *
- *     {"name":"census","revision":14,"key":"mode","values":[...],
+ *     {"name":"census","revision":15,"key":"mode","values":[...],
  *      "carries":null}
  *
  * `null` is a VALUE here and not an absence: it says the word is a PASSENGER --
@@ -602,12 +623,14 @@
  * @carries census asker passenger
  * @carries census cause passenger
  * @carries census declarer passenger
+ * @carries census family passenger
  * @carries census kind passenger
  * @carries census link passenger
  * @carries census mode passenger
  * @carries census offset_space passenger
  * @carries fields carried_state discriminant
  * @carries fields direction passenger
+ * @carries fields family passenger
  * @carries fields keyexpr_cause passenger
  * @carries fields kind discriminant
  * @carries fields link passenger
@@ -1499,7 +1522,7 @@ int wz_dissect_declarations_diagnose(const char *declarations, char **out);
  *
  * R2175 -- the document is at REVISION 3, and the fourth key is `value_families`:
  *
- *     "value_families":[{"name":"fields","revision":19,"key":"state",
+ *     "value_families":[{"name":"fields","revision":20,"key":"state",
  *                        "values":["decoded","encoding_mismatch",…]}, …]
  *
  * every key in every document whose VALUE this build draws from a closed set,

@@ -267,12 +267,14 @@ fn flow_text(flow: &crate::link::FlowKey) -> String {
     // tell two byte-identical findings apart, which a pair of endpoints
     // rendered in the wrong family does less well than one rendered in the
     // right one.
+    //
+    // Each end is `Endpoint::hostport_text`, which brackets an IPv6 address: the
+    // suffix used to write `addr:port` bare, so a compressed address followed by
+    // its port (`fe80::1` and 7447) read as the one longer address `fe80::1:7447`.
     alloc::format!(
-        "  [{}:{} <-> {}:{}]",
-        flow.low.addr_text(flow.link()),
-        flow.low.port,
-        flow.high.addr_text(flow.link()),
-        flow.high.port
+        "  [{} <-> {}]",
+        flow.low.hostport_text(flow.link()),
+        flow.high.hostport_text(flow.link()),
     )
 }
 
@@ -3273,17 +3275,18 @@ fn push_carrier_line(
     // spelling they always had and the honest one: a carrier hop is an outer IP
     // address and has no link kind of its own.
     //
-    // ⚠ The `{}:{}` port suffix is UNCHANGED for every kind, raweth included.
+    // ⚠ The port suffix is UNCHANGED for every kind, raweth included.
     // A raweth endpoint's port is zero because pico's L2 link has none, and a
     // row that dropped the suffix for one kind would put a second shape in one
     // column — which is what a reader scanning it resolves against. The hop
     // chain above is where a port must NOT be printed, and it never was.
+    //
+    // Each end is `Endpoint::hostport_text`: an IPv6 flow is written
+    // `[addr]:port` and every other kind is written as it always was.
     out.push(format!(
-        "    {kind} {}:{} <-> {}:{} via {chains}{also}\n",
-        flow.low.addr_text(flow.link()),
-        flow.low.port,
-        flow.high.addr_text(flow.link()),
-        flow.high.port,
+        "    {kind} {} <-> {} via {chains}{also}\n",
+        flow.low.hostport_text(flow.link()),
+        flow.high.hostport_text(flow.link()),
     ));
 }
 
@@ -8241,21 +8244,19 @@ mod tests {
     /// than about the page, which is the argument the analyzer's twin of this
     /// test makes one crate over.
     ///
-    /// ⚠ WHAT THIS DOES NOT GRADE, on purpose: the SURROUNDING form. This page
-    /// writes an endpoint as `addr:port` with no brackets, so a compressed
-    /// address followed by a port (`fe80::1:7447`) can no longer be split by
-    /// counting groups the way eight of them could. RFC 5952 §6 recommends
-    /// brackets there and the analyzer's `--flows` already writes them. It is
-    /// not changed here because `Endpoint::addr_text` reserves the surrounding
-    /// form to each surface and because bracketing this one means deciding the
-    /// MAC and vsock lines too; it is a named residual of the RFC 5952 spelling. The
-    /// assertions below therefore look for the ADDRESS text and not for the
-    /// line around it, so a later bracketing does not read as a regression of
-    /// the spelling.
+    /// The SURROUNDING form is graded too, because it is what keeps the
+    /// spelling readable. RFC 5952 section 6 recommends brackets around an IPv6
+    /// address that is followed by a port: a compressed address and its port
+    /// written bare (`fe80::1:7447`) is a valid address of its own, one group
+    /// longer, so a reader cannot split it. This page used to write `addr:port`
+    /// bare and named that a residual of the spelling; each end is now
+    /// `Endpoint::hostport_text`, so the whole line is asserted, brackets
+    /// included, and the bare form is asserted absent.
     ///
     /// The IPv4 flow beside it is the negative arm, and its whole line is
     /// asserted: the dotted quad is the arm a repair that spelled every address
-    /// through `Ipv6Addr` would break.
+    /// through `Ipv6Addr` would break, and the arm that would pick up brackets
+    /// if they were written for every kind instead of for IPv6.
     #[cfg(feature = "network-codecs")]
     #[test]
     fn the_text_report_names_an_ipv6_flow_in_rfc_5952_text() {
@@ -8318,6 +8319,15 @@ mod tests {
                  by a second one:\n{text}"
             );
         }
+        assert!(
+            text.contains("[[2001:db8::1:0:0:1]:50000 <-> [fe80::1]:7447]"),
+            "the IPv6 flow is written with each address in brackets before its \
+             port, so the line can be split back:\n{text}"
+        );
+        assert!(
+            !text.contains("fe80::1:7447"),
+            "and the bare form, which reads as one longer address, is gone:\n{text}"
+        );
         assert!(
             text.contains("[10.0.0.3:50001 <-> 10.0.0.4:7447]"),
             "while the IPv4 flow keeps its dotted quads:\n{text}"

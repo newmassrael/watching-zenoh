@@ -4958,7 +4958,7 @@ mod tests {
         // against a rename and against each other and against NOTHING a
         // consumer could read.
         let mut failures: Vec<String> = Vec::new();
-        let live: [(&str, &str, Vec<&'static str>); 24] = [
+        let live: [(&str, &str, Vec<&'static str>); 26] = [
             // The session's per-frame verdicts, each held to the
             // walk its emitter's exhaustive match is bound to.
             (rev::FIELDS, "verdict", SnVerdictWord::names()),
@@ -5004,6 +5004,11 @@ mod tests {
             // enum.
             (rev::FIELDS, "link", crate::link::LinkKind::names()),
             (rev::CENSUS, "link", crate::link::LinkKind::names()),
+            // `family` on BOTH documents for the same reason: the endpoint
+            // writer is shared, the declarations are separate, and each is held
+            // to the one enum walk.
+            (rev::FIELDS, "family", crate::link::AddrFamily::names()),
+            (rev::CENSUS, "family", crate::link::AddrFamily::names()),
             // R2223 (open-debt item 573) — the message vocabulary, and the row
             // whose walk is held to something outside itself. The others here
             // are successor chains checked against a derive or against each
@@ -5393,6 +5398,31 @@ mod tests {
         dg.finish();
         let dgfile = crate::pcap::write(1, &[(0, 0, dgram_packet.as_slice())]);
         let dgram = fields_json(&dg, &dgfile, None, None);
+        // The capture that renders the SECOND word of `family`. Every capture
+        // above is IPv4, so the family would be judged over a population of one
+        // word, which is the verdict this axis refuses: with `ipv4` alone no
+        // observation could contradict either a passenger or a discriminant.
+        // This one is an IPv6 datagram, so `ipv6` arrives beside the same `addr`
+        // and `port` and the two words are seen in ONE shape.
+        let v6_packet = crate::datagram_tests::udp_packet_v6(
+            [0xfe, 0x80, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x01],
+            43210,
+            [
+                0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0x01, 0, 0, 0, 0, 0, 0x01,
+            ],
+            7447,
+            // An INIT and not a keep-alive: the census document holds only the
+            // flows that reach one of its planes, and a keep-alive reaches none,
+            // so the IPv6 endpoints would be in the field document and absent
+            // from this one.
+            &crate::datagram_tests::init_message(),
+        );
+        let mut v6d = Dissection::new();
+        v6d.push_packet(LINKTYPE_ETHERNET, 0, &v6_packet);
+        v6d.finish();
+        let v6file = crate::pcap::write(1, &[(0, 0, v6_packet.as_slice())]);
+        let v6_fields = fields_json(&v6d, &v6file, None, None);
+        let v6_census = crate::census_json::census_json(&v6d);
         // The selector's document, so `selected` is measured and
         // not only declared: a selector that matches the capture's key and one
         // that does not, which between them reach `yes`, `no` and `unjudged`.
@@ -5521,6 +5551,7 @@ mod tests {
             &without,
             &withl,
             &dgram,
+            &v6_fields,
             &multilink_fields,
             &compressed_fields,
             &where_hit,
@@ -5602,7 +5633,7 @@ mod tests {
             (rev::FIELDS, fields_docs),
             (
                 rev::CENSUS,
-                alloc::vec![&census, &censusl, &censusdg, &interests, &multilink],
+                alloc::vec![&census, &censusl, &censusdg, &v6_census, &interests, &multilink],
             ),
             (rev::SELECTOR_DIAGNOSE, diagnoses.iter().collect()),
             (rev::SELECTION, verdict_docs.iter().collect()),
@@ -6817,13 +6848,13 @@ mod tests {
         // THE SPELLING, both families. The MACs are `raweth_packet`'s own:
         // pico's default destination mapping and the source it lays.
         for mac in [
-            "\"addr\":\"30:03:c8:37:25:a1\"",
-            "\"addr\":\"aa:bb:cc:dd:ee:ff\"",
+            "\"addr\":\"30:03:c8:37:25:a1\",\"port\":0,\"family\":null",
+            "\"addr\":\"aa:bb:cc:dd:ee:ff\",\"port\":0,\"family\":null",
         ] {
             assert!(
                 out.contains(mac),
-                "a raweth endpoint is a MAC and must be spelled as one ({mac}): \
-                 {out}"
+                "a raweth endpoint is a MAC, must be spelled as one, and has no \
+                 address family ({mac}): {out}"
             );
         }
         assert!(
@@ -6831,7 +6862,10 @@ mod tests {
             "and the three-group reading the consumer reported must be gone, \
              not merely joined by a second one: {out}"
         );
-        for ip in ["\"addr\":\"192.168.1.5\"", "\"addr\":\"192.168.1.9\""] {
+        for ip in [
+            "\"addr\":\"192.168.1.5\",\"port\":43210,\"family\":\"ipv4\"",
+            "\"addr\":\"192.168.1.9\",\"port\":7447,\"family\":\"ipv4\"",
+        ] {
             assert!(
                 out.contains(ip),
                 "the UDP flow's endpoints are IPv4 and must still read as \
@@ -6888,13 +6922,13 @@ mod tests {
         let out = fields_json(&d, &file, None, None);
 
         for ip in [
-            "\"addr\":\"fe80::1\",\"port\":43210",
-            "\"addr\":\"2001:db8::1:0:0:1\",\"port\":7447",
+            "\"addr\":\"fe80::1\",\"port\":43210,\"family\":\"ipv6\"",
+            "\"addr\":\"2001:db8::1:0:0:1\",\"port\":7447,\"family\":\"ipv6\"",
         ] {
             assert!(
                 out.contains(ip),
-                "an IPv6 endpoint is spelled the way RFC 5952 spells it ({ip}): \
-                 {out}"
+                "an IPv6 endpoint is spelled the way RFC 5952 spells it and says \
+                 it is IPv6 ({ip}): {out}"
             );
         }
         for old in ["fe80:0:0:0:0:0:0:1", "2001:db8:0:0:1:0:0:1"] {
@@ -6904,11 +6938,15 @@ mod tests {
                  by a second one: {out}"
             );
         }
-        for ip in ["\"addr\":\"192.168.1.5\"", "\"addr\":\"192.168.1.9\""] {
+        for ip in [
+            "\"addr\":\"192.168.1.5\",\"port\":43210,\"family\":\"ipv4\"",
+            "\"addr\":\"192.168.1.9\",\"port\":7447,\"family\":\"ipv4\"",
+        ] {
             assert!(
                 out.contains(ip),
-                "the IPv4 datagram keeps its dotted quads ({ip}) -- the arm a \
-                 repair that spelled every address as IPv6 would break: {out}"
+                "the IPv4 datagram keeps its dotted quads ({ip}) and is IPv4 -- \
+                 the arm a repair that spelled every address as IPv6 would \
+                 break: {out}"
             );
         }
     }
@@ -7011,10 +7049,11 @@ mod tests {
         let out = fields_json(&d, &file, None, None);
 
         assert!(
-            out.contains("\"addr\":\"2\",\"port\":7447")
-                && out.contains("\"addr\":\"3\",\"port\":40000"),
+            out.contains("\"addr\":\"2\",\"port\":7447,\"family\":null")
+                && out.contains("\"addr\":\"3\",\"port\":40000,\"family\":null"),
             "both vsock endpoints must read as their decimal context ids, \
-             paired with the 32-bit vsock port: {out}"
+             paired with the 32-bit vsock port, and a context id has no \
+             address family: {out}"
         );
         assert!(
             !out.contains("200:0:0:0") && !out.contains("300:0:0:0"),

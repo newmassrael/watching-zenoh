@@ -422,6 +422,49 @@ impl Endpoint {
         s
     }
 
+    /// This endpoint's address family, or `None` when the link it was read off
+    /// does not address by IP.
+    ///
+    /// Asked of the LINK KIND for the reason [`Self::addr_text`] is: the same
+    /// sixteen bytes are not an IPv6 address on a link that does not carry IP,
+    /// and the family of a raweth MAC must not be read off its length. `Tcp` and
+    /// `Udp` are the two kinds whose addresses are IP; on them four bytes are
+    /// IPv4 and sixteen are IPv6, and any other length answers `None` rather
+    /// than the nearer family — an address this method cannot classify must not
+    /// be classified as another's, which is the rule `addr_text` states for
+    /// spelling.
+    pub fn family(&self, link: LinkKind) -> Option<AddrFamily> {
+        match link {
+            LinkKind::Tcp | LinkKind::Udp => match self.addr_len {
+                4 => Some(AddrFamily::Ipv4),
+                16 => Some(AddrFamily::Ipv6),
+                _ => None,
+            },
+            LinkKind::RawEth | LinkKind::Serial | LinkKind::Vsock => None,
+        }
+    }
+
+    /// This endpoint as `address:port`, with an IPv6 address in brackets.
+    ///
+    /// RFC 5952 section 6 recommends the brackets and RFC 3986 defines them for
+    /// an IP literal in an authority: a compressed address followed by a port
+    /// (`fe80::1:7447`) cannot be split back into the two by counting groups the
+    /// way eight uncompressed groups could, and it reads as one longer address.
+    /// The brackets are written for [`AddrFamily::Ipv6`] only. A MAC is six
+    /// fixed-width groups and a vsock context id is a decimal, so neither is
+    /// ambiguous and neither has a bracketed form to borrow.
+    ///
+    /// The ADDRESS half is [`Self::addr_text`] unchanged, so the spelling stays
+    /// one function's. Every text page that writes an endpoint with its port
+    /// goes through here so they cannot disagree about the brackets.
+    pub fn hostport_text(&self, link: LinkKind) -> alloc::string::String {
+        let addr = self.addr_text(link);
+        match self.family(link) {
+            Some(AddrFamily::Ipv6) => alloc::format!("[{addr}]:{}", self.port),
+            _ => alloc::format!("{addr}:{}", self.port),
+        }
+    }
+
     /// This endpoint's address spelled as an IP ADDRESS — a dotted quad for four
     /// bytes, RFC 5952 text for sixteen.
     ///
@@ -651,6 +694,58 @@ impl LinkKind {
     /// applies to every other family in these documents.
     pub fn names() -> alloc::vec::Vec<&'static str> {
         let mut out: alloc::vec::Vec<&'static str> = Self::all().iter().map(|k| k.name()).collect();
+        out.sort_unstable();
+        out
+    }
+}
+
+/// The address family of an IP endpoint.
+///
+/// A property of the ENDPOINT and only of an IP one: a raweth endpoint is a MAC,
+/// a vsock endpoint is a context id and a serial line has no address, and none
+/// of those has a family in this sense. [`Endpoint::family`] answers `None` for
+/// them rather than naming a family they do not have.
+///
+/// It exists because the length of the address is the only place the family
+/// lives, and a consumer that has the TEXT (`fe80::1`) cannot recover it without
+/// re-reading the address grammar, which is a second decoder of a fact this
+/// library already holds. Both endpoints of one flow are always the same family,
+/// but the word is written on each endpoint anyway: an endpoint is the object
+/// that has an address, and a reader formatting one should not need the flow
+/// around it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum AddrFamily {
+    /// A four-byte address, spelled as a dotted quad.
+    Ipv4,
+    /// A sixteen-byte address, spelled as RFC 5952 text.
+    Ipv6,
+}
+
+impl AddrFamily {
+    /// The word this family is emitted as.
+    pub fn name(self) -> &'static str {
+        match self {
+            AddrFamily::Ipv4 => "ipv4",
+            AddrFamily::Ipv6 => "ipv6",
+        }
+    }
+
+    /// Every family, from an exhaustive match so the array cannot fall behind.
+    ///
+    /// The same mechanism as [`LinkKind::all`]: a variant added later fails to
+    /// compile HERE, so the vocabulary a document declares is a walk of the
+    /// enum rather than a list beside it.
+    pub fn all() -> [AddrFamily; 2] {
+        let one = |f: AddrFamily| match f {
+            AddrFamily::Ipv4 => AddrFamily::Ipv4,
+            AddrFamily::Ipv6 => AddrFamily::Ipv6,
+        };
+        [one(AddrFamily::Ipv4), one(AddrFamily::Ipv6)]
+    }
+
+    /// Every word [`Self::name`] can return, sorted, taken from [`Self::all`].
+    pub fn names() -> alloc::vec::Vec<&'static str> {
+        let mut out: alloc::vec::Vec<&'static str> = Self::all().iter().map(|f| f.name()).collect();
         out.sort_unstable();
         out
     }
@@ -2613,6 +2708,174 @@ mod tests {
             "the walk must cover the enum, or an unspelled family passes by \
              never being asked"
         );
+    }
+
+    /// The family an endpoint reports is the family of the ADDRESS TEXT it
+    /// spells, over every link kind and every address length any of them writes.
+    ///
+    /// # The oracle is the standard library's address grammar
+    ///
+    /// Not the rule under test. On an IP link `family` decides from the length;
+    /// this asks `core::net` whether the text `addr_text` produced is an IPv4
+    /// address, an IPv6 address or neither, and requires the two to agree. A
+    /// restatement of `(Tcp | Udp, 4) => Ipv4` here would pass on a rule that was
+    /// wrong in the same way.
+    ///
+    /// # Off an IP link the answer is `None`, and the text cannot say so
+    ///
+    /// This walk found it out. Eight bytes on a raweth link spell
+    /// `11:11:11:11:11:11:11:11`, which the standard library parses as a VALID
+    /// IPv6 address, so an oracle that read the text alone called a MAC an IPv6
+    /// endpoint and the first version of this test failed on it. That is the
+    /// reason `family` is asked of the LINK KIND and not read off how an address
+    /// happens to look: the text of a link that is not IP can be a well-formed
+    /// address of a family it does not have. The non-IP arms are therefore
+    /// asserted `None` as their own fact, with that case named.
+    ///
+    /// # The population is a walk
+    ///
+    /// [`LinkKind::all`] crossed with every length a constructor writes (a
+    /// serial line's none, four, a MAC's six, a context id's eight, sixteen), so
+    /// the arm nobody thought about is the arm asked.
+    #[test]
+    fn family_is_the_family_of_the_text_the_link_spells() {
+        let mut ipv4 = 0usize;
+        let mut ipv6 = 0usize;
+        let mut none = 0usize;
+        let mut looks_ip_but_is_not = 0usize;
+        for kind in LinkKind::all() {
+            for len in [0usize, 4, 6, 8, 16] {
+                let bytes = vec![0x11u8; len];
+                let e = Endpoint::new(&bytes, 7447);
+                let text = e.addr_text(kind);
+                let parses = text.parse::<core::net::Ipv4Addr>().is_ok()
+                    || text.parse::<core::net::Ipv6Addr>().is_ok();
+                let want = match kind {
+                    LinkKind::Tcp | LinkKind::Udp => {
+                        if text.parse::<core::net::Ipv4Addr>().is_ok() {
+                            Some(AddrFamily::Ipv4)
+                        } else if text.parse::<core::net::Ipv6Addr>().is_ok() {
+                            Some(AddrFamily::Ipv6)
+                        } else {
+                            None
+                        }
+                    }
+                    LinkKind::RawEth | LinkKind::Serial | LinkKind::Vsock => {
+                        if parses {
+                            looks_ip_but_is_not += 1;
+                        }
+                        None
+                    }
+                };
+                assert_eq!(
+                    e.family(kind),
+                    want,
+                    "{kind:?} with {len} bytes spells {text:?}"
+                );
+                match want {
+                    Some(AddrFamily::Ipv4) => ipv4 += 1,
+                    Some(AddrFamily::Ipv6) => ipv6 += 1,
+                    None => none += 1,
+                }
+            }
+        }
+        // Anti-vacuity: each answer was actually given, so a `family` that
+        // always said `None` (or always one family) cannot pass this walk.
+        assert_eq!((ipv4, ipv6), (2, 2), "Tcp and Udp, four and sixteen bytes");
+        assert_eq!(none, LinkKind::all().len() * 5 - 4);
+        // And the trap this test exists for was really in the population: a
+        // non-IP endpoint whose text is a valid IP address. Without it the
+        // non-IP arms would pass on a rule that never had to refuse one.
+        assert!(
+            looks_ip_but_is_not >= 1,
+            "the walk must contain a non-IP endpoint that spells a valid IP address"
+        );
+    }
+
+    /// The brackets are what makes an IPv6 endpoint splittable, and they are
+    /// written for IPv6 alone.
+    ///
+    /// # The control is the bare form
+    ///
+    /// `fe80::1:7447` is a VALID IPv6 address, one group longer than the address
+    /// it was built from, so a reader holding only that text has no way to tell
+    /// an address from an address and a port. That is asserted here, not
+    /// assumed: without it the bracketed arm below could be satisfied by a page
+    /// that never had the problem. The bracketed form is then parsed back by the
+    /// standard library as a socket address and must give the endpoint's own
+    /// address and port.
+    ///
+    /// # What has no brackets
+    ///
+    /// IPv4, a MAC and a vsock context id. None is ambiguous with a port, and a
+    /// MAC or a context id has no bracketed form to borrow.
+    #[test]
+    fn only_an_ipv6_endpoint_is_written_in_brackets() {
+        let addr = [0xfe, 0x80, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1];
+        let v6 = Endpoint::new(&addr, 7447);
+
+        let bare = alloc::format!("{}:{}", v6.addr_text(LinkKind::Tcp), v6.port);
+        assert_eq!(bare, "fe80::1:7447");
+        let as_one: core::net::Ipv6Addr = bare.parse().expect("the bare form is a valid address");
+        assert_ne!(
+            as_one,
+            core::net::Ipv6Addr::new(0xfe80, 0, 0, 0, 0, 0, 0, 1),
+            "the bare form reads as a DIFFERENT address, which is the whole problem"
+        );
+
+        for kind in [LinkKind::Tcp, LinkKind::Udp] {
+            let got = v6.hostport_text(kind);
+            assert_eq!(got, "[fe80::1]:7447", "{kind:?}");
+            let sock: core::net::SocketAddr =
+                got.parse().expect("brackets make it a socket address");
+            assert_eq!(
+                sock,
+                core::net::SocketAddr::new(
+                    core::net::IpAddr::V6(core::net::Ipv6Addr::new(0xfe80, 0, 0, 0, 0, 0, 0, 1)),
+                    7447
+                ),
+                "{kind:?} splits back into this endpoint's own address and port"
+            );
+        }
+
+        // Loopback, the shortest compressed address there is.
+        let mut lo = [0u8; 16];
+        lo[15] = 1;
+        assert_eq!(
+            Endpoint::new(&lo, 53956).hostport_text(LinkKind::Tcp),
+            "[::1]:53956"
+        );
+
+        // No brackets anywhere else.
+        assert_eq!(
+            Endpoint::new(&[192, 168, 1, 5], 43210).hostport_text(LinkKind::Tcp),
+            "192.168.1.5:43210"
+        );
+        assert_eq!(
+            Endpoint::new(&[0x30, 0x03, 0xc8, 0x37, 0x25, 0xa1], 0).hostport_text(LinkKind::RawEth),
+            "30:03:c8:37:25:a1:0"
+        );
+        assert_eq!(
+            Endpoint::new(&2u64.to_le_bytes(), 7447).hostport_text(LinkKind::Vsock),
+            "2:7447"
+        );
+
+        // The family walk's other half: sixteen bytes on a link that is not IP
+        // are never bracketed, whatever they look like.
+        let raweth_sixteen = Endpoint::new(&addr, 9).hostport_text(LinkKind::RawEth);
+        assert!(
+            !raweth_sixteen.contains('[') && !raweth_sixteen.contains(']'),
+            "a raweth endpoint of sixteen bytes is not an IPv6 literal: {raweth_sixteen}"
+        );
+    }
+
+    /// The vocabulary a document declares is the library's own.
+    #[test]
+    fn the_family_vocabulary_is_walked_from_the_enum() {
+        assert_eq!(AddrFamily::names(), vec!["ipv4", "ipv6"]);
+        for f in AddrFamily::all() {
+            assert!(AddrFamily::names().contains(&f.name()));
+        }
     }
 
     /// R2454 (open-debt item 698) — and a REAL context id spells as the

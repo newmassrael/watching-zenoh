@@ -1637,8 +1637,11 @@ int main(void) {
      * Sixteen bytes were eight hex groups with no `::` (the loopback read
      * `0:0:0:0:0:0:0:1`) and are RFC 5952's text now (`::1`), which is what
      * zenohd logs. IPv4, MAC and vsock endpoints are as they were. No key
-     * moves; the number is the whole notice. */
-    revisioned[0].revision = 14;
+     * moves; the number is the whole notice.
+     * 15: every endpoint of every flow object gains `family`, `ipv4` or
+     * `ipv6` on a TCP or UDP link and `null` on a link that does not address
+     * by IP. One key and one word set, a passenger; nothing retires. */
+    revisioned[0].revision = 15;
     revisioned[0].doc = NULL;
     rc = wz_dissect_pcap_census(pcap, sizeof pcap, &revisioned[0].doc);
     CHECK(rc == WZ_DISSECT_OK, "census rc=%d", rc);
@@ -1737,8 +1740,11 @@ int main(void) {
      * number is the whole notice.
      * 19: every row a live door writes gains `seq`, and the since door's
      * document gains a top-level `window` with `after_seq` and `through_seq`.
-     * Four keys, no word and no removal; a capture door writes none of them. */
-    revisioned[2].revision = 19;
+     * Four keys, no word and no removal; a capture door writes none of them.
+     * 20: every endpoint of every flow object gains `family`, as in the
+     * census: `ipv4` or `ipv6` on a TCP or UDP link and `null` off one. One
+     * key and one word set, a passenger; nothing retires. */
+    revisioned[2].revision = 20;
     revisioned[2].doc = NULL;
     rc = wz_dissect_pcap_fields(pcap, sizeof pcap, 0, &revisioned[2].doc);
     CHECK(rc == WZ_DISSECT_OK, "fields rc=%d", rc);
