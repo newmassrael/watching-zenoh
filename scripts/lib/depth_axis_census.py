@@ -2347,7 +2347,14 @@ PIN_NO_SYMBOL = 2
 # to the five atoms still PARTIAL. READ off the census's own FAIL line, `wz
 # citations: 15 against a pin of 51`; `reached` moves 4 -> 3 and `ambiguous`
 # 8 -> 2.
-PIN_WZ_CITATIONS = 15
+#
+# R2993 -- 15 -> 16, one atom. `transport-shm`'s reason gains the CORRECTION for
+# the payload interop measured against upstream's SHM examples, which cites one
+# wz anchor (the Put builder that writes the descriptor as a plain length and
+# four varints where zenoh lays it out sliced), and the atom is still PARTIAL.
+# READ off the census's own FAIL line, `wz citations: 16 against a pin of 15`;
+# `reached` and `ambiguous` hold at 3 and 2.
+PIN_WZ_CITATIONS = 16
 # R2626 — 44 -> 42, and this one is worth a sentence because it HELD through
 # every earlier retirement in this run (R2612, R2622). `time-hlc`'s reason is the
 # first retiree carrying AMBIGUOUS citations of its own: its oldest clauses cite
