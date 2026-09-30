@@ -1254,44 +1254,58 @@ async fn drive_listen(endpoint: String, tls: CapiTlsConfig, ctx: DriveContext) {
     }
 }
 
+/// What the calling ABI, and the config it read, decide about the session being
+/// opened — as distinct from where it connects.
+///
+/// Grouped rather than passed one by one, on the rule [`DriveContext`] states:
+/// these three travel together by construction, each is a fact the two ABIs
+/// answer differently, and a fourth parameter beside them was the one that took
+/// [`open_blocking`] past clippy's limit. The alternative, an `#[allow]` on the
+/// function, would be an escape hatch disabling the lint at the site it fired on.
+pub struct OpenStance {
+    /// The transmit model of the ABI calling this. The two ABIs this core serves
+    /// transmit differently: a zenoh-c session puts onto zenoh's bounded queue
+    /// and drops a droppable message after `wait_before_drop`
+    /// ([`TxQueueConf::default`]), while pico writes on the caller's thread and
+    /// never drops for a full socket ([`TxQueueConf::pico`]).
+    pub tx_queue: TxQueueConf,
+    /// What the session's links offer at their handshake, every dialled link and
+    /// every accepted one alike: the other half of the same fact. A zenoh-c
+    /// session offers what its config enables — QoS, and shared memory on the
+    /// shared-memory build, are on by default upstream — while zenoh-pico
+    /// negotiates none of them on unicast (its InitSyn carries the patch ext and
+    /// nothing else, `vendor/zenoh-pico/src/protocol/codec/transport.c` @
+    /// `z_result_t _z_init_encode(`) and passes [`SessionOffer::universal`]. It
+    /// is a value the caller supplies rather than one this crate derives because
+    /// the two ABIs read their configs through different keys.
+    pub offer: SessionOffer,
+    /// The id the config STATES, or `None` for a session that states none. Given
+    /// for the same reason as `offer`: zenoh-c reads its `id` key and zenoh-pico
+    /// its numeric one, each with its own refusals, and what reaches here is
+    /// already a [`ConfiguredZid`], so this crate restates neither.
+    pub zid: Option<ConfiguredZid>,
+}
+
 /// Open a session: spawn the drive thread and wait for the role's open
 /// outcome. For `connect` that is the settled handshake; for `listen` it is
 /// only the bind.
 ///
 /// `dial_phase` decides how long the `connect` role keeps trying before it
-/// reports the failure; the `listen` role does not read it.
-///
-/// `tx_queue` is the transmit model of the ABI calling this, and it is a
-/// parameter because the two ABIs this core serves transmit differently: a
-/// zenoh-c session puts onto zenoh's bounded queue and drops a droppable
-/// message after `wait_before_drop` ([`TxQueueConf::default`]), while pico
-/// writes on the caller's thread and never drops for a full socket
-/// ([`TxQueueConf::pico`]).
-///
-/// `offer` is the other half of the same fact: what the session's links offer
-/// at their handshake, every dialled link and every accepted one alike. A
-/// zenoh-c session offers what its config enables — QoS, and shared memory on
-/// the shared-memory build, are on by default upstream — while zenoh-pico
-/// negotiates none of them on unicast (its InitSyn carries the patch ext and
-/// nothing else, `vendor/zenoh-pico/src/protocol/codec/transport.c` @
-/// `z_result_t _z_init_encode(`) and passes [`SessionOffer::universal`].
-/// It is a parameter rather than a value this crate derives because the two
-/// ABIs read their configs through different keys.
-///
-/// `zid` is the id the config STATES, or `None` for a session that states none.
-/// It is a parameter for the same reason as `offer`: zenoh-c reads its `id` key
-/// and zenoh-pico its numeric one, each with its own refusals, and what reaches
-/// here is already a [`ConfiguredZid`], so this crate restates neither.
+/// reports the failure; the `listen` role does not read it. `stance` is what the
+/// calling ABI decides about the session itself: see [`OpenStance`].
 pub fn open_blocking(
     connect: Vec<String>,
     listen: Option<String>,
     tls: CapiTlsConfig,
     dial_whatami: WhatAmI,
     dial_phase: DialPhase,
-    tx_queue: TxQueueConf,
-    offer: SessionOffer,
-    zid: Option<ConfiguredZid>,
+    stance: OpenStance,
 ) -> Result<SessionState, OpenError> {
+    let OpenStance {
+        tx_queue,
+        offer,
+        zid,
+    } = stance;
     let clock = TokioTime::new();
     // Fixed here, on the CALLING thread, so `SessionState` can hand it to
     // `z_info_zid` and the INIT cannot disagree with it — see the field doc.

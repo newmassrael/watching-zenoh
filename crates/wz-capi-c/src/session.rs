@@ -11,7 +11,7 @@
 use std::ffi::c_void;
 
 use wz_capi_core::drive::{
-    open_blocking, CapiTlsConfig, ConfiguredZid, DialPhase, OpenError, SessionState,
+    open_blocking, CapiTlsConfig, ConfiguredZid, DialPhase, OpenError, OpenStance, SessionState,
 };
 use wz_runtime_tokio::retry_period::RetryPolicy;
 use wz_runtime_tokio::session_glue::{TxQueueConf, WhatAmI};
@@ -263,9 +263,11 @@ pub unsafe extern "C" fn z_open(
             CapiTlsConfig::default(),
             whatami,
             phase,
-            TxQueueConf::default(),
-            offer,
-            zid,
+            OpenStance {
+                tx_queue: TxQueueConf::default(),
+                offer,
+                zid,
+            },
         ) {
             Ok(state) => {
                 // R2957 — the session's own shared-memory provider, as its

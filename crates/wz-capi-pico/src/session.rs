@@ -63,7 +63,9 @@ use crate::config::{
 };
 use crate::ffi::{guard_val, guarded};
 use crate::result::{ZResult, Z_ERR_GENERIC, Z_ERR_NULL, Z_OK};
-use wz_capi_core::drive::{open_blocking, CapiTlsConfig, DialPhase, OpenError, SessionState};
+use wz_capi_core::drive::{
+    open_blocking, CapiTlsConfig, DialPhase, OpenError, OpenStance, SessionState,
+};
 use wz_runtime_tokio::session_glue::{TxQueueConf, WhatAmI};
 
 /// Resolve one certificate value from its PATH key or its `*_BASE64` inline key.
@@ -310,15 +312,18 @@ pub unsafe extern "C" fn z_open(
                 redial: Some(wz_runtime_tokio::retry_period::RetryPolicy::constant(1000)),
                 ..DialPhase::ONCE
             },
-            TxQueueConf::pico(),
-            // pico negotiates no transport capability on unicast: its InitSyn
-            // carries the patch ext and nothing else
-            // (`vendor/zenoh-pico/src/protocol/codec/transport.c` @
-            // `z_result_t _z_init_encode(`), so a drop-in for it offers none.
-            wz_runtime_tokio::session_open::SessionOffer::universal(),
-            // pico's `Z_CONFIG_SESSION_ZID_KEY` is not read by this open yet, so a
-            // pico session mints its own. The zenoh-c ABI reads its `id` key.
-            None,
+            OpenStance {
+                tx_queue: TxQueueConf::pico(),
+                // pico negotiates no transport capability on unicast: its InitSyn
+                // carries the patch ext and nothing else
+                // (`vendor/zenoh-pico/src/protocol/codec/transport.c` @
+                // `z_result_t _z_init_encode(`), so a drop-in for it offers none.
+                offer: wz_runtime_tokio::session_open::SessionOffer::universal(),
+                // pico's `Z_CONFIG_SESSION_ZID_KEY` is not read by this open yet,
+                // so a pico session mints its own. The zenoh-c ABI reads its `id`
+                // key.
+                zid: None,
+            },
         ) {
             Ok(state) => {
                 // R2962 — this session's own role, for the write filters its
