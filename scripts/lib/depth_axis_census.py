@@ -2303,7 +2303,14 @@ PIN_NO_SYMBOL = 2
 # PARTIAL. READ off the census's own FAIL line, `wz citations: 25 against a pin
 # of 22`; `reached` and `ambiguous` still read 4 and 8 as they did before this
 # round, and are still not attributed here.
-PIN_WZ_CITATIONS = 25
+#
+# R2980 — 25 -> 28, one atom. `api-compat-pico`'s reason gains the CORRECTION
+# for the advanced publisher, which cites three wz files (the runtime's
+# advanced publisher, the pico plane that builds it, and the differential that
+# measures it), and the atom is still PARTIAL. READ off the census's own FAIL
+# line, `wz citations: 28 against a pin of 25`; `reached` and `ambiguous` hold
+# at 4 and 8.
+PIN_WZ_CITATIONS = 28
 # R2626 — 44 -> 42, and this one is worth a sentence because it HELD through
 # every earlier retirement in this run (R2612, R2622). `time-hlc`'s reason is the
 # first retiree carrying AMBIGUOUS citations of its own: its oldest clauses cite
