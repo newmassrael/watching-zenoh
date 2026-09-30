@@ -1244,6 +1244,55 @@ pub const DOCUMENT_HISTORY: &[DocumentShape] = &[
         planes: &[],
         carries: FIELDS_R20_CARRIES,
     },
+    // THE PROTOCOL VERSION IN THE FLOW'S CONTEXT, AND A DECODED PAYLOAD FOR EACH
+    // RECORD OF A COMPLETED CHAIN.
+    //
+    // ONE KEY NAME IS ADDED and nothing retires. `context` gains `version`: the
+    // protocol version the handshake announced, which was in the `Init` row's
+    // tree and nowhere a row of any other message could read it. It is the
+    // acceptor's when an InitAck was observed and the initiator's until then,
+    // and `null` when no Init was, which is a different fact from a version of
+    // zero. `context` is the flow's value at the END of the document and not a
+    // row, so the promise about issued rows does not reach it.
+    //
+    // The second change adds a POSITION and no name. Each entry of an
+    // `above_transport.carried` array, the records of a chain this reader joined,
+    // gains the `payload_decode` a row's own message has carried since revision
+    // 4, under the same rule: present whenever a format was declared, in
+    // whichever state the decode lands, and absent for a reader who declared
+    // nothing unless the record's payload never crossed the wire (an SHM
+    // descriptor). It is decided per RECORD, from the record's own subtree, so a
+    // chain that joined two messages decodes each under its own key. The spans
+    // inside a decoded payload index the JOINED buffer, in the same space as the
+    // entry's `start` and `end`, and are not capture offsets for the reason
+    // those are not.
+    //
+    // ⚠ AND A VALUE MOVES under keys that do not: the document's own
+    // `payload_mapping` and `payload_refusals`, which are fed by the decodes the
+    // document performs, now count the chain records' decodes too. A capture
+    // whose only misbound or refused samples were reassembled wrote both arrays
+    // empty, and said `payload_mapping_counts_exact: true` over them; it now
+    // reports what it decoded.
+    //
+    // WHY A NUMBER FOR A POSITION: a consumer reading a decoded payload off the
+    // records of a chain cannot otherwise tell a library that does not carry it
+    // from a record that has none, and every state `payload_decode` can land in
+    // reads as an absence to a reader that has not been told to look here.
+    //
+    // A consumer pinned to 21 loses nothing: both are additions, one a key in an
+    // object it reads by name and one a key in an object it already reads. What
+    // it may not do is treat the new `payload_decode` cells as fixed once it has
+    // stored a record: they start from the resolved key, so they are among the
+    // cells a live handle may rewrite (`REVISABLE_ROW_CELLS`).
+    DocumentShape {
+        document: FIELDS,
+        revision: 22,
+        keys: FIELDS_R22_KEYS,
+        retiring: &[],
+        families: FIELDS_R20_FAMILIES,
+        planes: &[],
+        carries: FIELDS_R20_CARRIES,
+    },
     DocumentShape {
         document: SUMMARY,
         revision: 1,
@@ -6328,6 +6377,122 @@ pub const FIELDS_R21_KEYS: &[&str] = &[
     "wrong",
 ];
 
+/// The field document's key set at revision 22.
+///
+/// Revision 21 PLUS `version`, in the flow's `context`. The other change at this
+/// revision, a `payload_decode` inside each `above_transport.carried` entry,
+/// adds no key NAME: `payload_decode` and everything under it are already in
+/// revision 21's set, which names each key once wherever it occurs. An
+/// ADDITION, so revision 21 has nothing to retire.
+///
+/// Written out rather than aliased, on the rule revision 7 set for a key that
+/// arrives.
+///
+/// MEASURED: `the_field_documents_key_set_is_pinned` prints what the document
+/// emits and this is that printout.
+pub const FIELDS_R22_KEYS: &[&str] = &[
+    "abandoned_at_end",
+    "abandoned_on_eviction",
+    "above_transport",
+    "addr",
+    "after_seq",
+    "anchor",
+    "batch_index",
+    "batch_size",
+    "caps",
+    "capture_reread",
+    "carried",
+    "carried_state",
+    "chain",
+    "chain_id",
+    "compression",
+    "conduit",
+    "context",
+    "datagram_flows",
+    "declaration_checked",
+    "declared",
+    "descriptor_bytes",
+    "despite_encoding",
+    "direction",
+    "document",
+    "dropped_by_limits",
+    "dst",
+    "end",
+    "example",
+    "expired_chains",
+    "family",
+    "fields",
+    "first_byte",
+    "flow",
+    "flows",
+    "format",
+    "frame_offset",
+    "frames",
+    "frames_per_flow",
+    "high",
+    "keyexpr",
+    "keyexpr_cause",
+    "kind",
+    "l2",
+    "length",
+    "link",
+    "list_id",
+    "low",
+    "lowlatency",
+    "max_flows_per_table",
+    "max_scout_askers",
+    "message",
+    "message_at",
+    "messages",
+    "missing",
+    "name",
+    "negotiated",
+    "note",
+    "offset_space",
+    "omitted",
+    "outcome",
+    "packet",
+    "patch",
+    "path",
+    "payload_decode",
+    "payload_mapping",
+    "payload_mapping_counts_exact",
+    "payload_offset",
+    "payload_refusals",
+    "phase",
+    "port",
+    "priority",
+    "qos",
+    "reason",
+    "reassembly",
+    "reliable",
+    "revision",
+    "samples",
+    "scout_askers",
+    "scouting",
+    "selected",
+    "seq",
+    "shown",
+    "skipped",
+    "skipped_packets",
+    "sn",
+    "sn_mask",
+    "src",
+    "start",
+    "state",
+    "stream_bytes",
+    "stream_bytes_per_direction",
+    "stream_flows",
+    "through_seq",
+    "under",
+    "value",
+    "verdict",
+    "version",
+    "why",
+    "window",
+    "wrong",
+];
+
 /// What each field-document family's WORD decides at revision 16 — revision
 /// 15's, with `offset_space` read from [`FIELD_OFFSET_SPACE_CARRIES_R16`].
 pub const FIELDS_R16_CARRIES: &[KeyCarries] = &[
@@ -9200,7 +9365,7 @@ mod tests {
             // one key, one word set and a passenger.
             // To 21 when a row's `l2` object gained its place in the frame:
             // `frame_offset` (already a key) and `length` (the one new one).
-            (FIELDS, 21),
+            (FIELDS, 22),
             // R2121 (open-debt item 460) — the summary moved to 2 when it
             // gained `inert_counters`; R2122 (item 238) to 3 when its
             // `framing` group stopped disagreeing with the capture report's.

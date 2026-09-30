@@ -9123,6 +9123,23 @@ mod tests {
                 ]),
             ),
             (
+                "the same inside a completed chain, under a payload declaration",
+                wz_capture::fixtures::multilink_declaration_behind_a_gap(
+                    wz_capture::fixtures::GapFill::AfterTheReference,
+                    true,
+                ),
+                Default::default(),
+                protobuf,
+                cells(&[
+                    "/above_transport/carried[]/keyexpr",
+                    "/above_transport/carried[]/keyexpr_cause",
+                    "/above_transport/carried[]/payload_decode/format",
+                    "/above_transport/carried[]/payload_decode/keyexpr",
+                    "/above_transport/carried[]/payload_decode/state",
+                    "/above_transport/carried[]/payload_decode/why",
+                ]),
+            ),
+            (
                 "a declaration released by giving up on its gap",
                 wz_capture::fixtures::multilink_declaration_behind_a_gap(
                     wz_capture::fixtures::GapFill::Never,

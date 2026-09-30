@@ -309,8 +309,9 @@ pub struct Since {
 ///   decoded is written resolved after. The cells that read the table are the
 ///   `keyexpr` and `keyexpr_cause` of each `carried` entry, the same two of each
 ///   `above_transport.carried` entry (a reference inside a completed chain, read
-///   from the joined buffer), and everything under `payload_decode`, whose
-///   verdict starts from the resolved key.
+///   from the joined buffer), and everything under `payload_decode` — the row's
+///   own and each `above_transport.carried` entry's — whose verdict starts from
+///   the resolved key.
 /// * **The chain fold** numbers chains from the first message the list still
 ///   holds. A front trim that takes the first message of a chain renumbers every
 ///   chain after it, so `chain.chain_id` names a chain WITHIN one document and is
@@ -331,6 +332,7 @@ pub struct Since {
 pub const REVISABLE_ROW_CELLS: &[&str] = &[
     "/above_transport/carried[]/keyexpr",
     "/above_transport/carried[]/keyexpr_cause",
+    "/above_transport/carried[]/payload_decode/**",
     "/carried[]/keyexpr",
     "/carried[]/keyexpr_cause",
     "/chain/chain_id",
@@ -1253,34 +1255,7 @@ fn push_walk(row: RowWalk<'_>, out: &mut String) {
                 out.push_str(",\"fields\":");
                 out.push_str(&to_json(&field));
                 push_carried(bytes, &field, space, at, out);
-                if let Some(declarations) = declarations {
-                    out.push_str(",\"payload_decode\":");
-                    push_decoding(&decode_payload(&field, declarations, at), out);
-                } else if let Some(decoding) = crate::payload_decode::shm_decoding(&field) {
-                    // R2209 (open-debt item 563) — THE ONE STATE A READER WHO
-                    // DECLARED NOTHING IS STILL TOLD.
-                    //
-                    // Every other `payload_decode` state answers a question
-                    // about the reader's own declarations, and the rule above
-                    // is right for those: somebody who asked about no formats
-                    // is not lectured about payloads. `not_on_the_wire` is not
-                    // one of them. It says the data this record names never
-                    // crossed the wire being read -- a fact about the CAPTURE,
-                    // true whether or not anybody declared a format, and the
-                    // reason `Verdict::NotOnTheWire` was built as a NAMED
-                    // ABSENCE rather than left as a silent `no_payload`.
-                    //
-                    // R2170 made that argument inside `decode_payload` and the
-                    // emitter did not inherit it, so the fact stayed behind the
-                    // declarations one level up: a consuming surface counting
-                    // `payloads.descriptors` could see HOW MANY records were
-                    // SHM and could not say WHICH. That is item 563, and the
-                    // consuming surface's own sufficient condition is exactly
-                    // this marker -- it does not ask for the descriptor bytes,
-                    // which were never on the wire either.
-                    out.push_str(",\"payload_decode\":");
-                    push_decoding(&decoding, out);
-                }
+                push_payload_block(&field, declarations, at, out);
             } else {
                 let mut why = String::from("the session read these bytes as ");
                 why.push_str(framed);
@@ -1299,12 +1274,62 @@ fn push_walk(row: RowWalk<'_>, out: &mut String) {
     // matters most: the reader is being told these bytes could not be walked
     // here, and `above_transport` is the only thing on the row that can say
     // whether the session nonetheless read what they carried.
-    push_above_transport(carried, KeyexprAt::new(direction, spaces), out);
+    push_above_transport(
+        carried,
+        KeyexprAt::new(direction, spaces),
+        declarations,
+        out,
+    );
 }
 
 fn push_declined(why: &str, out: &mut String) {
     out.push_str("\"declined\":");
     escape_into(why, out);
+}
+
+/// The `payload_decode` key of ONE walked message, or nothing.
+///
+/// Written once because two places write it: a row's own message
+/// ([`push_walk`]) and each record of a chain a row completed
+/// ([`push_above_transport`]). The second was absent until fields revision 22,
+/// and what it lacked was not a decode but this rule: a reader who declared a
+/// format could read a message's payload off every row except the ones whose
+/// message was only ever whole in a buffer this reader joined.
+///
+/// A reader that declared a format is always told, in whatever state the
+/// decode lands. One that declared nothing is told nothing, with the one
+/// exception below.
+///
+/// R2209 (open-debt item 563) — THE ONE STATE A READER WHO DECLARED NOTHING IS
+/// STILL TOLD.
+///
+/// Every other `payload_decode` state answers a question about the reader's own
+/// declarations, and the rule above is right for those: somebody who asked
+/// about no formats is not lectured about payloads. `not_on_the_wire` is not
+/// one of them. It says the data this record names never crossed the wire being
+/// read -- a fact about the CAPTURE, true whether or not anybody declared a
+/// format, and the reason `Verdict::NotOnTheWire` was built as a NAMED ABSENCE
+/// rather than left as a silent `no_payload`.
+///
+/// R2170 made that argument inside `decode_payload` and the emitter did not
+/// inherit it, so the fact stayed behind the declarations one level up: a
+/// consuming surface counting `payloads.descriptors` could see HOW MANY records
+/// were SHM and could not say WHICH. That is item 563, and the consuming
+/// surface's own sufficient condition is exactly this marker -- it does not ask
+/// for the descriptor bytes, which were never on the wire either.
+fn push_payload_block(
+    field: &wz_session_core::dissect::Field,
+    declarations: Option<&Declarations<'_>>,
+    at: KeyexprAt<'_>,
+    out: &mut String,
+) {
+    if let Some(declarations) = declarations {
+        out.push_str(",\"payload_decode\":");
+        push_decoding(&decode_payload(field, declarations, at), out);
+    } else if let Some(decoding) = crate::payload_decode::shm_decoding(field) {
+        out.push_str(",\"payload_decode\":");
+        push_decoding(&decoding, out);
+    }
 }
 
 /// R2223 (open-debt item 573) — WHICH MESSAGES THIS ROW CARRIES, by name and by
@@ -1632,12 +1657,19 @@ impl CarriedState {
 /// key through the same `subtree_keyexpr_outcome` [`push_carried`] uses. Two
 /// walkers over one shape, or two keyexpr rules, is the drift this document has
 /// paid for elsewhere; there is one of each.
-// `at` resolves the keys of a reassembled batch's records, which exist only
-// with `reassembly`.
+///
+/// Each record of a completed chain also carries its `payload_decode`, under the
+/// rule [`push_payload_block`] states and from the record's OWN subtree, so a
+/// chain holding two messages decodes each under its own key. The spans inside
+/// a decoded payload index the JOINED buffer, in the same space as the entry's
+/// `start` and `end` and for the same reason: they are not capture offsets.
+// `at` resolves the keys of a reassembled batch's records, and `declarations`
+// decodes their payloads; both exist only with `reassembly`.
 #[cfg_attr(not(feature = "reassembly"), allow(unused_variables))]
 fn push_above_transport(
     carried: Option<&wz_session_core::passive::Carried>,
     at: KeyexprAt<'_>,
+    declarations: Option<&Declarations<'_>>,
     out: &mut String,
 ) {
     out.push_str(",\"above_transport\":");
@@ -1682,6 +1714,7 @@ fn push_above_transport(
                 Some(Err(cause)) => escape_into(cause.name(), out),
                 _ => out.push_str("null"),
             }
+            push_payload_block(record, declarations, at, out);
             out.push('}');
         }
         out.push(']');
@@ -2243,6 +2276,13 @@ fn push_mac(mac: &[u8; 6], out: &mut String) {
 /// until an `InitAck` (or `Join`) was observed — and `null` is then why every
 /// `sn.verdict` on the flow is `without_resolution`. ⚠ It can reach
 /// `2^63 - 1`, past what an IEEE double holds exactly: read it as an integer.
+///
+/// `version` is the protocol version the handshake announced, the acceptor's
+/// when an `InitAck` was observed and the initiator's until then, `null` when
+/// no Init was. It was in the `Init` row's tree and nowhere a row of any other
+/// message could read it, so a header drawn from the flow's context had to go
+/// back to that row. See [`wz_session_core::passive::FlowContext::version`] for
+/// why the acceptor's word is preferred.
 fn push_context(context: &wz_session_core::passive::FlowContext, out: &mut String) {
     let negotiated = context.negotiated();
     let agreed = |v: bool| {
@@ -2283,6 +2323,13 @@ fn push_context(context: &wz_session_core::passive::FlowContext, out: &mut Strin
     match context.batch_size() {
         Some(b) => {
             let _ = write!(out, "{b}");
+        }
+        None => out.push_str("null"),
+    }
+    out.push_str(",\"version\":");
+    match context.version {
+        Some(v) => {
+            let _ = write!(out, "{v}");
         }
         None => out.push_str("null"),
     }
@@ -4537,6 +4584,7 @@ mod tests {
             "compression",
             "qos",
             "sn_mask",
+            "version",
         ];
         let context = scoped(&doc, "phase", &fields);
         assert_eq!(context.len(), 1, "one flow, one context: {doc}");
@@ -4548,6 +4596,13 @@ mod tests {
         assert_eq!(context[0][0], "established", "{doc}");
         assert_eq!(context[0][1], "true", "{doc}");
         assert_eq!(context[0][5], alloc::format!("{mask}"), "{doc}");
+        // The byte the fixture's two Inits were BUILT with (`init_datagram`
+        // writes `0x09`), which is the one number here the library did not
+        // produce.
+        assert_eq!(
+            context[0][6], "9",
+            "the version the handshake announced: {doc}"
+        );
         for capability in &context[0][2..5] {
             assert!(
                 *capability == "true" || *capability == "false",
@@ -4563,8 +4618,9 @@ mod tests {
         for flow in &context {
             assert_eq!(
                 flow,
-                &alloc::vec!["unseen", "false", "null", "null", "null", "null"],
-                "no Init was seen, so nothing was agreed: {unseen_doc}"
+                &alloc::vec!["unseen", "false", "null", "null", "null", "null", "null"],
+                "no Init was seen, so nothing was agreed and no version was announced: \
+                 {unseen_doc}"
             );
         }
     }
@@ -6809,6 +6865,224 @@ mod tests {
             declarations.unused().is_empty(),
             "both declarations applied: {:?}",
             declarations.unused()
+        );
+    }
+
+    /// The raw values of every object of `doc` that holds `marker`, read by the
+    /// library's own scope walker so a test never reads a nested group as its
+    /// parent.
+    #[cfg(all(feature = "reassembly", feature = "network-codecs"))]
+    fn objects_holding<'a>(doc: &'a str, marker: &str) -> Vec<Vec<(&'a str, &'a str)>> {
+        crate::doc_revision::object_scopes(doc)
+            .into_iter()
+            .filter(|scope| scope.iter().any(|(key, _)| *key == marker))
+            .collect()
+    }
+
+    #[cfg(all(feature = "reassembly", feature = "network-codecs"))]
+    fn raw<'a>(scope: &[(&'a str, &'a str)], key: &str) -> &'a str {
+        scope
+            .iter()
+            .find(|(k, _)| *k == key)
+            .map(|(_, v)| *v)
+            .unwrap_or_else(|| panic!("no `{key}` in {scope:?}"))
+    }
+
+    /// A record the chain joined is decoded as the SAME record is when it rides
+    /// whole in one frame.
+    ///
+    /// The twin is the control the fixture pair was built to be: one session,
+    /// one record, and the only difference is whether its bytes were ever
+    /// contiguous on the wire. Everything a reader switches on agrees between
+    /// the two; what differs is the coordinate space of the spans, which here
+    /// index the joined buffer and so run from the record's own first byte.
+    #[cfg(all(feature = "reassembly", feature = "network-codecs"))]
+    #[test]
+    fn a_chains_record_decodes_its_payload_as_its_contiguous_twin_does() {
+        use crate::payload::formats::FormatMap;
+        use crate::payload_decode::Declarations;
+
+        // `{ 1: 150 }`: one varint field spanning the payload's three bytes.
+        let payload = [0x08u8, 0x96, 0x01];
+        let record = crate::payload::tests_support::push_declaring("demo/sensor", 0, &payload);
+        let (chain_d, chain_file) =
+            crate::datagram_tests::reassembled_record_dissection_with_file(&record);
+        let (twin_d, twin_file) =
+            crate::datagram_tests::contiguous_record_dissection_with_file(&record);
+        let mut map = FormatMap::new();
+        map.declare("demo/sensor=protobuf").expect("a rule");
+        map.declare("demo/sensor:1=temperature").expect("a name");
+        let chain = fields_json(&chain_d, &chain_file, None, Some(&Declarations::new(&map)));
+        let twin = fields_json(&twin_d, &twin_file, None, Some(&Declarations::new(&map)));
+
+        let chain_blocks = objects_holding(&chain, "despite_encoding");
+        let twin_blocks = objects_holding(&twin, "despite_encoding");
+        assert_eq!(
+            chain_blocks.len(),
+            1,
+            "one decoded record in the chain: {chain}"
+        );
+        assert_eq!(twin_blocks.len(), 1, "and one in its twin: {twin}");
+        for key in ["state", "keyexpr", "despite_encoding", "format"] {
+            assert_eq!(
+                raw(&chain_blocks[0], key),
+                raw(&twin_blocks[0], key),
+                "`{key}` must be the word the whole record gets"
+            );
+        }
+        assert_eq!(raw(&chain_blocks[0], "state"), "\"decoded\"");
+
+        let chain_fields = objects_holding(&chain, "path");
+        let twin_fields = objects_holding(&twin, "path");
+        assert_eq!(chain_fields.len(), 1, "one decoded field: {chain}");
+        for key in ["path", "name", "value"] {
+            assert_eq!(
+                raw(&chain_fields[0], key),
+                raw(&twin_fields[0], key),
+                "the decoded field's `{key}`"
+            );
+        }
+        assert_eq!(raw(&chain_fields[0], "name"), "\"temperature\"");
+        // The payload is the LAST three bytes of the record, and the joined
+        // buffer is the record itself.
+        let start = (record.len() - payload.len()).to_string();
+        let end = record.len().to_string();
+        assert_eq!(
+            (raw(&chain_fields[0], "start"), raw(&chain_fields[0], "end")),
+            (start.as_str(), end.as_str()),
+            "spans in the joined buffer's coordinates"
+        );
+        // Placed beside the entry's own key, which is where a reader that
+        // walks `above_transport.carried` looks.
+        assert!(
+            chain.contains(
+                "\"keyexpr_cause\":null,\"payload_decode\":{\"state\":\"decoded\",\
+                 \"keyexpr\":\"demo/sensor\""
+            ),
+            "under the carried entry: {chain}"
+        );
+    }
+
+    /// A reader that declared nothing is told nothing about a chain's payloads,
+    /// as for a row's own message.
+    #[cfg(all(feature = "reassembly", feature = "network-codecs"))]
+    #[test]
+    fn a_chains_record_says_nothing_of_payloads_to_a_reader_who_declared_none() {
+        let record =
+            crate::payload::tests_support::push_declaring("demo/sensor", 0, &[0x08, 0x96, 0x01]);
+        let (d, file) = crate::datagram_tests::reassembled_record_dissection_with_file(&record);
+        let doc = fields_json(&d, &file, None, None);
+        assert!(
+            doc.contains("\"carried_state\":\"reassembled\"") && doc.contains("\"keyexpr\":"),
+            "the fixture must complete a chain and name its record: {doc}"
+        );
+        assert!(!doc.contains("payload_decode"), "{doc}");
+    }
+
+    /// A chain that joined two messages decodes each under its own key, and the
+    /// row's own block, which names the first message that has a key and a
+    /// payload, does not speak for the second.
+    #[cfg(all(feature = "reassembly", feature = "network-codecs"))]
+    #[test]
+    fn each_record_of_a_chain_is_decoded_under_its_own_key() {
+        use crate::payload::formats::FormatMap;
+        use crate::payload_decode::Declarations;
+
+        let payload = [0x08u8, 0x96, 0x01];
+        let mut batch = crate::payload::tests_support::push_declaring("demo/a", 0, &payload);
+        batch.extend_from_slice(&crate::payload::tests_support::push_declaring(
+            "demo/b", 0, &payload,
+        ));
+        let (chain_d, chain_file) =
+            crate::datagram_tests::reassembled_record_dissection_with_file(&batch);
+        let (twin_d, twin_file) =
+            crate::datagram_tests::contiguous_record_dissection_with_file(&batch);
+        // A rule for the first topic and none for the second.
+        let mut map = FormatMap::new();
+        map.declare("demo/a=protobuf").expect("a rule");
+        let chain = fields_json(&chain_d, &chain_file, None, Some(&Declarations::new(&map)));
+        let twin = fields_json(&twin_d, &twin_file, None, Some(&Declarations::new(&map)));
+
+        assert!(
+            chain.contains("\"payload_decode\":{\"state\":\"decoded\",\"keyexpr\":\"demo/a\"")
+                && chain
+                    .contains("\"payload_decode\":{\"state\":\"no_rule\",\"keyexpr\":\"demo/b\"}"),
+            "each record, in its own state: {chain}"
+        );
+        // The frame's own block is one block for the whole frame, the first
+        // record's. (The handshake rows beside it each carry a block too, saying
+        // `no_payload`, which is why the count is not the claim.)
+        assert!(
+            twin.contains("\"payload_decode\":{\"state\":\"decoded\",\"keyexpr\":\"demo/a\""),
+            "the first record's decode: {twin}"
+        );
+        assert!(
+            !twin.contains("\"keyexpr\":\"demo/b\",\"despite_encoding\"")
+                && !twin.contains("\"state\":\"no_rule\",\"keyexpr\":\"demo/b\""),
+            "and nothing in the row speaks for the second: {twin}"
+        );
+    }
+
+    /// A chain record's decode is tallied where a row's own is: a rule the
+    /// record's bytes refuse reaches the document's `payload_refusals`.
+    ///
+    /// The tally is fed by the decodes a document performs, so giving chain
+    /// records a decode also gives the tally their refusals. Before revision 22
+    /// a capture whose only refused samples were reassembled wrote an empty
+    /// array and said `payload_mapping_counts_exact: true`.
+    #[cfg(all(feature = "reassembly", feature = "network-codecs"))]
+    #[test]
+    fn a_chains_refused_decode_reaches_the_documents_refusal_tally() {
+        use crate::payload::formats::FormatMap;
+        use crate::payload_decode::Declarations;
+
+        // Plain text, which a JSON rule refuses.
+        let record =
+            crate::payload::tests_support::push_declaring("demo/sensor", 0, b"not json at all");
+        let (d, file) = crate::datagram_tests::reassembled_record_dissection_with_file(&record);
+        let mut map = FormatMap::new();
+        map.declare("demo/sensor=json").expect("a rule");
+        let declarations = Declarations::new(&map);
+        let doc = fields_json(&d, &file, None, Some(&declarations));
+
+        assert!(
+            doc.contains("\"payload_decode\":{\"state\":\"refused\",\"keyexpr\":\"demo/sensor\""),
+            "the entry says its bytes were refused: {doc}"
+        );
+        let tally = declarations.refusals();
+        assert_eq!(tally.len(), 1, "one rule refused one topic: {tally:?}");
+        assert_eq!(tally[0].samples, 1, "once: {tally:?}");
+        assert!(
+            doc.contains("\"payload_refusals\":[{\"keyexpr\":\"demo/sensor\""),
+            "and the document says so: {doc}"
+        );
+    }
+
+    /// A record whose key is an id nobody declared says so, which is the state
+    /// that changes when a declaration is decoded late.
+    #[cfg(all(feature = "reassembly", feature = "network-codecs"))]
+    #[test]
+    fn a_chains_record_under_an_undeclared_id_is_unresolved() {
+        use crate::payload::formats::FormatMap;
+        use crate::payload_decode::Declarations;
+
+        let record =
+            crate::payload::tests_support::push_declaring_aliased(7, 0, &[0x08, 0x96, 0x01]);
+        let (d, file) = crate::datagram_tests::reassembled_record_dissection_with_file(&record);
+        let mut map = FormatMap::new();
+        map.declare("demo/**=protobuf").expect("a rule");
+        let doc = fields_json(&d, &file, None, Some(&Declarations::new(&map)));
+        // Beside the entry's own `keyexpr` and the cause it has none, which is
+        // where a reader of `above_transport.carried` finds it. The placement is
+        // the claim: the fragment rows' OWN blocks say `keyexpr_unresolved` too,
+        // because a Fragment's raw body is the only payload their walk finds, so
+        // the bare word appears in rows that are not this record.
+        assert!(
+            doc.contains(
+                "\"keyexpr\":null,\"keyexpr_cause\":\"no_session\",\
+                 \"payload_decode\":{\"state\":\"keyexpr_unresolved\"}"
+            ),
+            "{doc}"
         );
     }
 

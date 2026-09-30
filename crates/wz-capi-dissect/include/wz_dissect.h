@@ -423,6 +423,24 @@
  * row's own `offset_space` is untouched -- it still says where the FRAGMENT
  * stands, which stays measured. Do not add the two.
  *
+ * Since field-document revision 22 each entry of `above_transport.carried`
+ * also carries the `payload_decode` a row's own message carries, under the
+ * same rule: present whenever a format was declared, in whichever state the
+ * decode lands, and absent for a reader who declared nothing unless the
+ * record's payload never crossed the wire (an SHM descriptor). It is decided
+ * per RECORD, from that record's own subtree, so a chain that joined two
+ * messages decodes each under its own key. A row's OWN `payload_decode` names
+ * the first message of that row that has both a key and a payload, so on a row
+ * carrying several it does not speak for the rest; the entries here are
+ * per record. The spans inside a decoded payload index the joined buffer, in
+ * the space of the entry's `start` and `end`, and are not capture offsets
+ * either. Like the entry's `keyexpr`, the block starts from the resolved key,
+ * so a live handle may write it differently once a declaration is decoded
+ * late; see the list of cells a later document may rewrite. The document's own
+ * `payload_mapping` and `payload_refusals` are fed by the decodes it performs,
+ * so from revision 22 they count these records too: a capture whose only
+ * refused samples were reassembled used to write both arrays empty.
+ *
  * @values fields carried_state
  *
  * AND THE SESSION'S PER-FRAME VERDICTS, at field-document
@@ -501,7 +519,7 @@
  *
  *   "context":{"phase":..,"negotiated":bool,"lowlatency":bool|null,
  *              "compression":bool|null,"qos":bool|null,"patch":N|null,
- *              "sn_mask":N|null,"batch_size":N|null}
+ *              "sn_mask":N|null,"batch_size":N|null,"version":N|null}
  *
  *     What the handshake this flow carried negotiated, as of its end. The
  *     three capabilities are `null` until BOTH Inits were seen, rather than
@@ -509,6 +527,17 @@
  *     every `sn.verdict` on the flow was judged at; `null` there is why they
  *     all say `without_resolution`. It can reach 2^63-1: read it as a 64-bit
  *     integer, not a double.
+ *
+ *     Since field-document revision 22 the flow also says its protocol
+ *     `version`, which used to be readable only from the `Init` row's tree.
+ *     It is the version of the InitAck when one was observed and of the
+ *     InitSyn until then, and `null` when no Init was -- a different fact from
+ *     a version of 0. The two agree on any session that comes up, because the
+ *     acceptor refuses an InitSyn whose version is not its own and answers
+ *     with its own; the choice decides only what a refused session, or one
+ *     joined mid-handshake, reports. `context` is the flow's value at the END
+ *     of the document and is not a row, so the promise about issued rows does
+ *     not cover it.
  *
  *     `phase` is one of `unseen`, `half_init`, `init_complete`,
  *     `established`, `closed`.
@@ -609,7 +638,7 @@
  *
  * Every family in `value_families` now carries a `carries` axis:
  *
- *     {"name":"fields","revision":21,"key":"kind","values":[...],
+ *     {"name":"fields","revision":22,"key":"kind","values":[...],
  *      "carries":[{"word":"bits","shapes":[["end","name","start","value"]]},
  *                 {"word":"opaque","shapes":[["end","name","start"]]}, ...]}
  *
@@ -1532,7 +1561,7 @@ int wz_dissect_declarations_diagnose(const char *declarations, char **out);
  *
  * R2175 -- the document is at REVISION 3, and the fourth key is `value_families`:
  *
- *     "value_families":[{"name":"fields","revision":21,"key":"state",
+ *     "value_families":[{"name":"fields","revision":22,"key":"state",
  *                        "values":["decoded","encoding_mismatch",…]}, …]
  *
  * every key in every document whose VALUE this build draws from a closed set,
@@ -2305,6 +2334,11 @@ int wz_dissect_live_fields_where(wz_dissect_live *h,
  *                                              message the list still holds, so
  *                                              a front trim renumbers them. It
  *                                              names a chain within ONE document.
+ *
+ * Since field-document revision 22 the list also names
+ * /above_transport/carried[]/payload_decode, its whole subtree, which starts
+ * from the same resolved key as the entry's /keyexpr beside it and so moves in
+ * the same states.
  *
  * A row whose message bytes the per-direction byte ceiling has since discarded
  * reads, if it is asked for again, as `declined` in place of its walk: /name,

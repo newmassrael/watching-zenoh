@@ -193,6 +193,25 @@ pub struct FlowContext {
     /// defaults are non-obvious, so a second decoder would be a second place
     /// to get it wrong.
     pub caps: Option<PeerInitCaps>,
+    /// The protocol version the handshake announced, `None` until an Init has
+    /// been observed. `Some(0)` and `None` are different, as for [`Self::patch`]:
+    /// the first says a peer announced version zero, the second that no Init was
+    /// seen.
+    ///
+    /// # Which Init speaks for the flow
+    ///
+    /// The InitAck's, when one was observed, and otherwise the InitSyn's. The
+    /// two agree on every session that comes up, because the acceptor refuses an
+    /// InitSyn whose version is not its own and answers with its own:
+    ///
+    /// `io/zenoh-transport/src/unicast/establishment/accept.rs` @ `if init_syn.version != input.mine_version {`
+    /// `io/zenoh-transport/src/unicast/establishment/accept.rs` @ `version: input.mine_version,`
+    ///
+    /// So the choice only decides what a capture of a REFUSED session, or one
+    /// joined mid-handshake, reports. It takes the acceptor's word when it has
+    /// one, for the reason [`Self::caps`] does, and falls back to the claim the
+    /// refusal was about rather than to nothing.
+    pub version: Option<u8>,
 }
 
 impl Default for FlowContext {
@@ -215,6 +234,7 @@ impl Default for FlowContext {
             shm_offered: false,
             multilink_offered: false,
             caps: None,
+            version: None,
         }
     }
 }
@@ -336,6 +356,14 @@ impl FlowContext {
     pub fn fragmentation_markers(&self) -> bool {
         self.patch
             .is_some_and(crate::extpatch::has_fragmentation_markers)
+    }
+
+    /// Record one Init's `version`: the acceptor's always, the initiator's only
+    /// while nothing has been recorded. See [`Self::version`] for why.
+    fn fold_version(&mut self, is_ack: bool, announced: u8) {
+        if is_ack || self.version.is_none() {
+            self.version = Some(announced);
+        }
     }
 
     /// Fold ONE side's Init ext chain in. Idempotent per direction is the
@@ -2254,6 +2282,7 @@ impl PassiveSession {
                 }
                 self.init_seen[idx] = true;
                 self.context.fold_init(extensions);
+                self.context.fold_version(*is_ack, body.version);
                 // R311y583 (A5) — the ACK's size parameters ARE the session's.
                 // See `FlowContext::caps` for why this is an assignment and
                 // not a fold.
@@ -2544,6 +2573,13 @@ mod tests {
     /// then the ext chain the caller supplies. Built through the production
     /// encoders so the fixture cannot drift from what wz emits.
     fn init_wire(is_ack: bool, exts: Vec<ExtEntryOwned>) -> Vec<u8> {
+        init_wire_versioned(is_ack, 0x09, exts)
+    }
+
+    /// [`init_wire`], announcing `version`: the one byte that differs between
+    /// an InitSyn and an InitAck in the tests that ask which of them the
+    /// context reports.
+    fn init_wire_versioned(is_ack: bool, version: u8, exts: Vec<ExtEntryOwned>) -> Vec<u8> {
         let mut flags = 0u8;
         if is_ack {
             flags |= wz_codecs::wire_const::FLAG_T_INIT_A;
@@ -2553,7 +2589,7 @@ mod tests {
         }
         let mut wire = vec![flags | wz_codecs::wire_const::T_MID_INIT];
         let body = wz_codecs::init_body::InitBody {
-            version: 0x09,
+            version,
             // `cbyte` = `whatami.to_wire() | ((zid_len - 1) << 4)`
             // (`handshake_encode::init_cbyte`): Peer (0x01) with a 4-byte
             // zid is `0x01 | (3 << 4)` = `0x31`. Getting this wrong makes
@@ -3416,6 +3452,62 @@ mod tests {
         assert_eq!(caps.seq_num_res, 2);
         assert_eq!(caps.batch_size, 65535);
         assert_eq!(s.context().sn_mask(), Some(crate::sn::mask_from_res(2)));
+    }
+
+    /// The flow's protocol version is the initiator's claim until the acceptor
+    /// answers, and the acceptor's word from then on; before any Init it is
+    /// `None`, which is a different fact from a version of zero.
+    #[test]
+    fn the_context_reports_the_version_the_handshake_announced() {
+        let mut s = PassiveSession::new();
+        assert_eq!(s.context().version, None, "no Init has been seen");
+        s.push(
+            Direction::A,
+            &framed(&init_wire_versioned(false, 0x08, vec![]), 2),
+        );
+        s.next_frame(Direction::A).expect("syn");
+        assert_eq!(
+            s.context().version,
+            Some(0x08),
+            "the claim stands until the acceptor has answered"
+        );
+        s.push(
+            Direction::B,
+            &framed(&init_wire_versioned(true, 0x09, vec![]), 2),
+        );
+        s.next_frame(Direction::B).expect("ack");
+        assert_eq!(
+            s.context().version,
+            Some(0x09),
+            "the acceptor's word replaces the claim"
+        );
+
+        let mut zero = PassiveSession::new();
+        zero.push(
+            Direction::A,
+            &framed(&init_wire_versioned(false, 0, vec![]), 2),
+        );
+        zero.next_frame(Direction::A).expect("syn");
+        assert_eq!(zero.context().version, Some(0), "zero is a version");
+    }
+
+    /// An acceptor's answer seen FIRST is not replaced by a claim seen after
+    /// it: a capture can begin on the acceptor's side, and which Init arrived
+    /// first must not decide which word the flow reports.
+    #[test]
+    fn a_claim_seen_after_the_acceptors_word_does_not_replace_it() {
+        let mut s = PassiveSession::new();
+        s.push(
+            Direction::B,
+            &framed(&init_wire_versioned(true, 0x09, vec![]), 2),
+        );
+        s.next_frame(Direction::B).expect("ack");
+        s.push(
+            Direction::A,
+            &framed(&init_wire_versioned(false, 0x08, vec![]), 2),
+        );
+        s.next_frame(Direction::A).expect("syn");
+        assert_eq!(s.context().version, Some(0x09));
     }
 
     /// R311y585 (A4) — the tables are FOLDED by the observer, not merely

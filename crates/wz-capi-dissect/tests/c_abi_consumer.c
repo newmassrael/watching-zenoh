@@ -1775,8 +1775,13 @@ int main(void) {
      * key and one word set, a passenger; nothing retires.
      * 21: a row's `l2` object gains its place in the frame, `frame_offset`
      * and `length` (the Ethernet II header proper, no VLAN tag). One new key
-     * name, `length`; no word moves; nothing retires. */
-    revisioned[2].revision = 21;
+     * name, `length`; no word moves; nothing retires.
+     * 22: a flow's `context` gains `version`, the protocol version the
+     * handshake announced (`null` before any Init), and each record of a
+     * completed chain under `above_transport.carried` gains the
+     * `payload_decode` a row's own message carries. One new key name; no word
+     * moves; nothing retires. */
+    revisioned[2].revision = 22;
     revisioned[2].doc = NULL;
     rc = wz_dissect_pcap_fields(pcap, sizeof pcap, 0, &revisioned[2].doc);
     CHECK(rc == WZ_DISSECT_OK, "fields rc=%d", rc);
