@@ -1638,12 +1638,12 @@ pub mod vsock_pipeline;
 /// stream), needing only a one-call `libc::mkfifo` — no `unix_named_pipe` crate,
 /// no `advisory-lock`, no `AsyncFd` dance. Gated `transport-link-unixpipe`
 /// (forwards `transport-link-tcp` for the shared `stream_link` SSOT) AND
-/// `target_os = "linux"` (the `read_write` open-rendezvous knob that liquidates
-/// the FIFO `ENXIO` open-ordering race is Linux-only in tokio — the same
-/// platform-gate shape as vsock). The `unixpipe/...` locator PARSE is
-/// platform-independent + ungated in `wz-session-core`; only this dial/accept
-/// backend is gated.
-#[cfg(all(feature = "transport-link-unixpipe", target_os = "linux"))]
+/// `unix`, the host family upstream serves the link on (item 851: this gate was
+/// `target_os = "linux"` while tokio's `read_write` knob was the only reason, and
+/// the `O_RDWR` open the knob makes is now made through `std`). The
+/// `unixpipe/...` locator PARSE is platform-independent + ungated in
+/// `wz-session-core`; only this dial/accept backend is gated.
+#[cfg(all(feature = "transport-link-unixpipe", unix))]
 pub mod unixpipe_pipeline;
 
 /// R311xk — TLS-1.3 + ALPN-`hq-29` rustls config builders for the QUIC link.

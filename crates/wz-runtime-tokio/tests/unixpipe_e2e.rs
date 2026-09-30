@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
 #![cfg(all(
     feature = "transport-link-unixpipe",
-    target_os = "linux",
+    unix,
     feature = "transport-unicast"
 ))]
 
@@ -23,8 +23,9 @@
 //!
 //! A FIFO pair under the temp dir needs no special privilege; the kernel pipe
 //! buffer makes the open order race-free (a frame written before the peer opens
-//! its receiver is buffered, not dropped). Linux-only (the backend's
-//! `target_os = "linux"` gate; the tokio `read_write` open-rendezvous knob).
+//! its receiver is buffered, not dropped). It runs on every Unix (the backend's
+//! `unix` gate; item 851): the `portability` job's macOS leg runs it, and on
+//! macOS it is what shows the FIFO rendezvous working without the advisory lock.
 
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;

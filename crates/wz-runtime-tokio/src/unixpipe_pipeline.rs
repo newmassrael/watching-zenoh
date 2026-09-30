@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
 
 //! R311y10 / R311y392 — Unix named-pipe (FIFO) session-open transport pipeline
-//! (Linux), the MULTI-CLIENT, zenoh-wire-compatible acceptor.
+//! (every Unix), the MULTI-CLIENT, zenoh-wire-compatible acceptor.
 //!
 //! The FIFO sibling of [`crate::unixsock_pipeline`] (AF_UNIX stream). zenoh's
 //! `zenoh-link-unixpipe` carries a zenoh batch over a PAIR of named FIFOs (one
@@ -58,16 +58,24 @@
 //! `P_uplink` is unlinked when the [`UnixpipeAcceptor`] drops. The listener never
 //! creates `P_downlink` (only the dedicated `P_downlink{suffix}`), matching zenoh.
 //!
-//! ## Linux-only (the `read_write` rendezvous)
+//! ## Every Unix, as upstream serves it
 //!
-//! tokio's `read_write(true)` (open a FIFO end O_RDWR so a sender never `ENXIO`s
-//! on a not-yet-present reader, and a base reader never EOFs across client churn)
-//! is `target_os = "linux"`-gated in tokio. So this backend is Linux-only (the
-//! `transport-link-unixpipe` mod is gated `all(feature, target_os = "linux")`),
-//! consistent with [`crate::vsock_pipeline`] and the LAYER-1 = Linux-host scope.
+//! Upstream declares this link's implementation under `unix`, not under Linux
+//! (`io/zenoh-links/zenoh-link-unixpipe/src/lib.rs` @ `mod unix;`), so macOS is a
+//! host it runs on. This module used to be Linux-only because it asked tokio's
+//! `read_write(true)` for the `O_RDWR` open that keeps a sender from `ENXIO`ing on
+//! a not-yet-present reader and a base reader from reading EOF across client
+//! churn, and tokio compiles that knob on Linux only (item 851). It now makes
+//! the same open the way upstream does, through `std` with `O_NONBLOCK`
+//! (`open_rdwr_nonblock`), and the `transport-link-unixpipe` mod is gated
+//! `all(feature, unix)`. Two things differ off Linux, both upstream's own
+//! behaviour there: a dedicated read end is opened `O_RDWR` (`open_read_end`),
+//! and on macOS the advisory lock is not taken (`lock_read_end`).
 
 use std::ffi::CString;
+use std::fs::File;
 use std::io;
+use std::os::unix::fs::OpenOptionsExt;
 use std::os::unix::io::{AsRawFd, RawFd};
 use std::pin::Pin;
 use std::sync::Arc;
@@ -230,6 +238,7 @@ fn unlink_node(path: &str) {
 /// holds it. Raw [`libc::flock`], the same OFD-based BSD lock zenoh's
 /// `advisory_lock` crate uses (cross-compatible). The lock releases only when the
 /// fd closes, so callers keep the owning [`Receiver`]/[`Sender`] alive to hold it.
+#[cfg(not(target_os = "macos"))]
 fn try_flock_ex(fd: RawFd) -> io::Result<()> {
     // SAFETY: `fd` is a valid open fd owned by a live pipe end for the call.
     let rc = unsafe { libc::flock(fd, libc::LOCK_EX | libc::LOCK_NB) };
@@ -237,6 +246,42 @@ fn try_flock_ex(fd: RawFd) -> io::Result<()> {
         return Err(io::Error::last_os_error());
     }
     Ok(())
+}
+
+/// Take the advisory lock a FIFO READ end holds for its whole life. On macOS there
+/// is none to take: upstream compiles every lock out there
+/// (`io/zenoh-links/zenoh-link-unixpipe/src/unix/unicast.rs` @
+/// `#[cfg(not(target_os = "macos"))]`), so a read end is simply open, and what the
+/// lock carried is carried by the open itself -- a writer's non-blocking open
+/// finds no reader (`ENXIO`) once the listener is gone, and a second listener on
+/// one path is not refused by a lock it cannot see.
+fn lock_read_end(fd: RawFd) -> io::Result<()> {
+    #[cfg(not(target_os = "macos"))]
+    {
+        try_flock_ex(fd)
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let _ = fd;
+        Ok(())
+    }
+}
+
+/// Whether a live listener holds the lock on the base request channel `fd` was
+/// just opened for WRITE, which is how a dialer tells a listener from a stale
+/// node (upstream's `PipeW::open_unique_pipe_for_write`: a lock that can be taken
+/// means nobody holds it, so `no listener`). On macOS the probe does not exist,
+/// as upstream's does not, and the dialer proceeds on the strength of the open.
+fn listener_holds_lock(fd: RawFd) -> bool {
+    #[cfg(not(target_os = "macos"))]
+    {
+        try_flock_ex(fd).is_err()
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let _ = fd;
+        true
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -286,12 +331,51 @@ async fn expect_invitation<R: AsyncRead + Unpin>(r: &mut R, expected: u32) -> io
     Ok(())
 }
 
+/// Open the FIFO at `path` `O_RDWR | O_NONBLOCK`. That is what tokio's
+/// `read_write(true)` does, and tokio compiles that knob on Linux only; upstream
+/// does not use the knob at all but opens every FIFO end it keeps this way on
+/// EVERY Unix, `std::fs::OpenOptions` with `custom_flags(libc::O_NONBLOCK)`
+/// (`io/zenoh-links/zenoh-link-unixpipe/src/unix/unicast.rs` @
+/// `.custom_flags(libc::O_NONBLOCK)`). The resulting file is wrapped with the
+/// portable `from_file` constructors, which take `O_RDWR` for either end.
+fn open_rdwr_nonblock(path: &str) -> io::Result<File> {
+    std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .custom_flags(libc::O_NONBLOCK)
+        .open(path)
+}
+
 /// Open the outbound FIFO `path` as a [`Sender`] in read-write mode so the open
-/// never blocks / `ENXIO`s on a not-yet-present reader (the Linux `read_write`
+/// never blocks / `ENXIO`s on a not-yet-present reader (the `O_RDWR`
 /// rendezvous). Used for the dedicated write ends AFTER the handshake ordering has
 /// guaranteed the peer's reader is present.
 fn open_sender_rw(path: &str) -> io::Result<Sender> {
-    OpenOptions::new().read_write(true).open_sender(path)
+    Sender::from_file(open_rdwr_nonblock(path)?)
+}
+
+/// Open the BASE request channel's reader: `O_RDWR`, so it is its own writer and
+/// never reads EOF across client churn.
+fn open_base_reader(path: &str) -> io::Result<Receiver> {
+    Receiver::from_file(open_rdwr_nonblock(path)?)
+}
+
+/// Open a DEDICATED FIFO read end. Linux opens it read-only, which is what the
+/// Linux tests measure and what lets the end read EOF when its peer closes. Every
+/// other Unix opens it `O_RDWR` as upstream does on all of them
+/// (`io/zenoh-links/zenoh-link-unixpipe/src/unix/unicast.rs` @
+/// `fn open_unique_pipe_for_read(path: &str) -> ZResult<File> {`), so the end is
+/// its own writer and a FIFO nobody has written to yet cannot read as EOF; a peer
+/// that closes is then found by the lease, as it is upstream.
+fn open_read_end(path: &str) -> io::Result<Receiver> {
+    #[cfg(target_os = "linux")]
+    {
+        OpenOptions::new().open_receiver(path)
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        open_base_reader(path)
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -363,7 +447,11 @@ pub type UnixpipeReadDriver = StreamReadDriver<FifoReadEnd>;
 /// unixpipe link answers `Ok` the same way, from `self.get_r_mut().pipe`
 /// (`io/zenoh-links/zenoh-link-unixpipe/src/unix/unicast.rs` @ `fn get_fd`).
 impl crate::link_ring_fd::RingReadable for FifoReadEnd {
-    #[cfg(all(feature = "runtime-tokio-uring", feature = "transport-link-tcp"))]
+    #[cfg(all(
+        feature = "runtime-tokio-uring",
+        feature = "transport-link-tcp",
+        target_os = "linux"
+    ))]
     fn ring_fd(&self) -> Option<std::os::fd::RawFd> {
         use std::os::fd::AsRawFd;
         let fd = self.receiver.as_raw_fd();
@@ -412,14 +500,14 @@ fn dedicate(base: &str, mode: libc::mode_t) -> io::Result<(u32, FifoReadEnd)> {
         if create_fifo_tolerant(&downlink, mode).is_err() {
             continue;
         }
-        let dl = match OpenOptions::new().open_receiver(&downlink) {
+        let dl = match open_read_end(&downlink) {
             Ok(r) => r,
             Err(_) => {
                 unlink_node(&downlink);
                 continue;
             }
         };
-        if try_flock_ex(dl.as_raw_fd()).is_err() {
+        if lock_read_end(dl.as_raw_fd()).is_err() {
             // Taken by another dialer — drop (releasing our failed attempt) + retry.
             drop(dl);
             continue;
@@ -433,7 +521,7 @@ fn dedicate(base: &str, mode: libc::mode_t) -> io::Result<(u32, FifoReadEnd)> {
             unlink_node(&downlink);
             continue;
         }
-        let ul = match OpenOptions::new().open_receiver(&uplink) {
+        let ul = match open_read_end(&uplink) {
             Ok(r) => r,
             Err(_) => {
                 drop(dl);
@@ -442,7 +530,7 @@ fn dedicate(base: &str, mode: libc::mode_t) -> io::Result<(u32, FifoReadEnd)> {
                 continue;
             }
         };
-        if try_flock_ex(ul.as_raw_fd()).is_err() {
+        if lock_read_end(ul.as_raw_fd()).is_err() {
             drop(ul);
             drop(dl);
             unlink_node(&downlink);
@@ -496,7 +584,7 @@ pub async fn dial_unixpipe(path: &str, file_mask: Option<u32>) -> io::Result<Uni
         }
         Err(e) => return Err(e),
     };
-    if try_flock_ex(base_sender.as_raw_fd()).is_ok() {
+    if !listener_holds_lock(base_sender.as_raw_fd()) {
         // We acquired the lock => no listener holds it. Drop releases it.
         return Err(io::Error::new(
             io::ErrorKind::ConnectionRefused,
@@ -549,8 +637,8 @@ async fn finish_handshake(base: &str, suffix: u32, mode: libc::mode_t) -> io::Re
     // it (EEXIST-tolerant) and open + flock it as our read end. The flock is what
     // a zenoh CLIENT's `PipeW::new(uplink)` probes.
     create_fifo_tolerant(&uplink, mode)?;
-    let ul_reader = OpenOptions::new().open_receiver(&uplink)?;
-    try_flock_ex(ul_reader.as_raw_fd()).map_err(|e| {
+    let ul_reader = open_read_end(&uplink)?;
+    lock_read_end(ul_reader.as_raw_fd()).map_err(|e| {
         io::Error::new(
             io::ErrorKind::AddrInUse,
             format!("dedicated uplink {uplink} already locked: {e}"),
@@ -702,11 +790,9 @@ pub async fn bind_unixpipe(path: &str, file_mask: Option<u32>) -> io::Result<Uni
 
     create_fifo_tolerant(&base_uplink, mode)?;
     // O_RDWR so the base reader is its own writer -> never EOFs across client churn.
-    let base_reader = OpenOptions::new()
-        .read_write(true)
-        .open_receiver(&base_uplink)?;
+    let base_reader = open_base_reader(&base_uplink)?;
     // Single-listener invariant + the listener-detection lock a dialer probes.
-    try_flock_ex(base_reader.as_raw_fd()).map_err(|_| {
+    lock_read_end(base_reader.as_raw_fd()).map_err(|_| {
         io::Error::new(
             io::ErrorKind::AddrInUse,
             format!("another unixpipe listener already owns {base_uplink}"),

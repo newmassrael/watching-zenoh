@@ -7,11 +7,12 @@ ANSWER, AND WZ HAS TO GIVE THE SAME ONE, BUILD AND RUN.
 
 ## Why the citation says no item while the file answers for two
 
-The two gaps this gate carries are open-debt items 851 and 852, which live in
-the half of the register that is not the store, so there is no `debt-` id to
-cite -- the standing `upstream_link_axis_gate.py` is in for item 593. They are
-named in full in `SERVE_GAPS` / `EXEC_GAPS` below, which is where a reader
-grepping for either will land.
+The two gaps this gate was written to carry are open-debt items 851 and 852,
+which live in the half of the register that is not the store, so there is no
+`debt-` id to cite -- the standing `upstream_link_axis_gate.py` is in for item
+593. Item 851 is BUILT (R2994: unixpipe is served on macOS, and `SERVE_GAPS` is
+empty); item 852 is still named in full in `EXEC_GAPS` below, which is where a
+reader grepping for it will land.
 
 ## What was wrong, measured at R2973
 
@@ -155,15 +156,13 @@ RUNTIME_FEATURES: dict[str, tuple[str, str, str]] = {
 
 #: (surface, host) where upstream serves it and wz does not -> (open-debt item,
 #: why). Each row is a debt, never a design decision.
-SERVE_GAPS: dict[tuple[str, str], tuple[int, str]] = {
-    ("Unixpipe", "macos"): (
-        851,
-        "wz opens its FIFOs through tokio's `pipe::OpenOptions::read_write`, "
-        "which tokio compiles on Linux only; upstream opens them with std's "
-        "`OpenOptions` (read + write + O_NONBLOCK) under an `AsyncFd`, which is "
-        "any Unix, and drops only its advisory lock on macOS",
-    ),
-}
+#:
+#: Empty since item 851 was built (R2994): wz opened its FIFOs through tokio's
+#: `pipe::OpenOptions::read_write`, which tokio compiles on Linux only, where
+#: upstream opens them with std's `OpenOptions` (read + write + O_NONBLOCK) on
+#: any Unix and drops only its advisory lock on macOS. wz now does the same, so
+#: the gate derives unixpipe as served on macOS and a stale row here is a finding.
+SERVE_GAPS: dict[tuple[str, str], tuple[int, str]] = {}
 
 #: wz kind -> the wz-runtime-tokio integration-test targets that run it.
 EVIDENCE: dict[str, tuple[str, ...]] = {

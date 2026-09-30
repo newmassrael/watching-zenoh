@@ -3803,7 +3803,7 @@ mod tests {
     /// each initiator a DISTINCT dedicated FIFO pair, so N of these are held as N
     /// ZID-keyed mesh faces at once — the property the mesh-join discriminator
     /// asserts.
-    #[cfg(all(feature = "transport-link-unixpipe", target_os = "linux"))]
+    #[cfg(all(feature = "transport-link-unixpipe", unix))]
     async fn unixpipe_idle_initiator(base: String, zid: u8, mut go: watch::Receiver<bool>) {
         use crate::session_open::{connect_and_open_session, DialConfig};
         use wz_session_core::locator::parse_any_locator;
@@ -4520,7 +4520,7 @@ mod tests {
     /// `accepted != 2`. NON-FLAKY: a loopback FIFO pair is lossless + in-order, so
     /// two clean handshakes are deterministic (the unixsock/udp N-peer siblings'
     /// assumption). [[feedback-no-flaky-ever]]
-    #[cfg(all(feature = "transport-link-unixpipe", target_os = "linux"))]
+    #[cfg(all(feature = "transport-link-unixpipe", unix))]
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn mesh_accept_loop_holds_two_unixpipe_peers() {
         use crate::session_open::bind_endpoint;

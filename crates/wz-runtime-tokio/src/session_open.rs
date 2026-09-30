@@ -238,7 +238,7 @@ use tokio_vsock::{VsockListener, VsockStream};
 // acceptor MULTI-CLIENT + zenoh-wire-compatible: `bind_unixpipe` returns a
 // `UnixpipeAcceptor` (the spawned-task + channel handle, the udp demux twin) and
 // `accept_raw` awaits its next completed link.
-#[cfg(all(feature = "transport-link-unixpipe", target_os = "linux"))]
+#[cfg(all(feature = "transport-link-unixpipe", unix))]
 use crate::unixpipe_pipeline::{
     bind_unixpipe, dial_unixpipe, wire_unixpipe_stream, UnixpipeAcceptor, UnixpipeLink,
     UnixpipeReadDriver,
@@ -738,7 +738,7 @@ pub enum DialedLink {
     /// fd pair). Produced by [`dial_locator`] for a `unixpipe/...` locator (no
     /// cert config, like unixsock/udp). Linux-only (the FIFO open-rendezvous),
     /// gated with the backend.
-    #[cfg(all(feature = "transport-link-unixpipe", target_os = "linux"))]
+    #[cfg(all(feature = "transport-link-unixpipe", unix))]
     Unixpipe(UnixpipeLink),
     /// A connected + QUIC-handshaked link, split downstream via
     /// [`wire_quic_stream`] (R311xk). Like serial/tls, the handshake (here the
@@ -801,7 +801,7 @@ impl DialedLink {
             DialedLink::Unixsock(_) => "unixsock",
             #[cfg(all(feature = "transport-link-vsock", target_os = "linux"))]
             DialedLink::Vsock(_) => "vsock",
-            #[cfg(all(feature = "transport-link-unixpipe", target_os = "linux"))]
+            #[cfg(all(feature = "transport-link-unixpipe", unix))]
             DialedLink::Unixpipe(_) => "unixpipe",
             #[cfg(feature = "transport-link-quic")]
             DialedLink::Quic(_) => "quic",
@@ -916,7 +916,7 @@ pub enum BoundListener {
     /// and the reject-throttle that bounded the old non-blocking accept is retired.
     /// The udp demux [`crate::udp_pipeline::UdpDemux`] analogue for a streamed,
     /// per-peer transport.
-    #[cfg(all(feature = "transport-link-unixpipe", target_os = "linux"))]
+    #[cfg(all(feature = "transport-link-unixpipe", unix))]
     Unixpipe(UnixpipeAcceptor),
     /// A multi-peer DATAGRAM demux listener (R311y382) — the first
     /// structurally-datagram acceptor. UDP has no `accept()` yielding a per-peer
@@ -1168,7 +1168,7 @@ impl BoundListener {
             BoundListener::Unixsock(_) => "unixsock",
             #[cfg(all(feature = "transport-link-vsock", target_os = "linux"))]
             BoundListener::Vsock(_) => "vsock",
-            #[cfg(all(feature = "transport-link-unixpipe", target_os = "linux"))]
+            #[cfg(all(feature = "transport-link-unixpipe", unix))]
             BoundListener::Unixpipe(_) => "unixpipe",
             #[cfg(feature = "transport-link-udp")]
             BoundListener::Udp(_) => "udp",
@@ -1242,7 +1242,7 @@ impl BoundListener {
             BoundListener::Unixsock(_) => LinkKind::UnixsockStream,
             #[cfg(all(feature = "transport-link-vsock", target_os = "linux"))]
             BoundListener::Vsock(_) => LinkKind::Vsock,
-            #[cfg(all(feature = "transport-link-unixpipe", target_os = "linux"))]
+            #[cfg(all(feature = "transport-link-unixpipe", unix))]
             BoundListener::Unixpipe(_) => LinkKind::Unixpipe,
             #[cfg(feature = "transport-link-udp")]
             BoundListener::Udp(_) => LinkKind::Udp,
@@ -1293,7 +1293,7 @@ impl BoundListener {
             // R311y392: the multi-client acceptor makes unixpipe mesh-capable, so
             // this flipped `false -> true` (its `AcceptedLink` twin too). The
             // acceptor holds N ZID-keyed faces exactly like the stream families.
-            #[cfg(all(feature = "transport-link-unixpipe", target_os = "linux"))]
+            #[cfg(all(feature = "transport-link-unixpipe", unix))]
             BoundListener::Unixpipe(_) => true,
             #[cfg(feature = "transport-link-udp")]
             BoundListener::Udp(_) => true,
@@ -1380,7 +1380,7 @@ impl BoundListener {
             // A unixpipe rendezvous has no IP -- render the bound listen BASE path
             // (the request-channel rendezvous); that IS its address (the non-IP
             // address type this per-variant String accessor exists for).
-            #[cfg(all(feature = "transport-link-unixpipe", target_os = "linux"))]
+            #[cfg(all(feature = "transport-link-unixpipe", unix))]
             BoundListener::Unixpipe(acc) => acc.base_path().to_string(),
             // A UDP demux listener HAS a real bound IP address (unlike the
             // same-host non-IP families), cached at bind -- always available (the
@@ -1442,7 +1442,7 @@ impl BoundListener {
                 "a vsock listener has no IP SocketAddr (it addresses by cid:port); \
                  use local_addr_display",
             )),
-            #[cfg(all(feature = "transport-link-unixpipe", target_os = "linux"))]
+            #[cfg(all(feature = "transport-link-unixpipe", unix))]
             BoundListener::Unixpipe(_) => Err(io::Error::new(
                 io::ErrorKind::Unsupported,
                 "a unixpipe listener has no IP SocketAddr (it addresses by FIFO path); \
@@ -1548,7 +1548,7 @@ impl BoundListener {
             // now avoids (the R311y380 non-blocking-accept throttle is retired).
             // Direct wrap, anonymous peer -> NonIp, mirroring unixsock/vsock;
             // unixpipe is now mesh-capable (holds N ZID-keyed faces).
-            #[cfg(all(feature = "transport-link-unixpipe", target_os = "linux"))]
+            #[cfg(all(feature = "transport-link-unixpipe", unix))]
             BoundListener::Unixpipe(acc) => {
                 let link = match acc.recv_new_link().await {
                     Some(link) => link,
@@ -1766,7 +1766,7 @@ pub enum AcceptedLink {
     /// [`Self::handshake`] wraps it directly as [`DialedLink::Unixpipe`]
     /// (R311y380). Already a connected [`UnixpipeLink`] (the FIFO open IS the
     /// rendezvous), unlike the stream family's raw `TcpStream` awaiting a wrap.
-    #[cfg(all(feature = "transport-link-unixpipe", target_os = "linux"))]
+    #[cfg(all(feature = "transport-link-unixpipe", unix))]
     Unixpipe(UnixpipeLink),
     /// An ACCEPTED datagram face from the multi-peer demux listener — NO
     /// post-accept handshake (like [`Self::Tcp`]); [`Self::handshake`] wraps it
@@ -1884,7 +1884,7 @@ impl AcceptedLink {
             // Direct wrap, the acceptor mirror of dial_locator's
             // `DialedLink::Unixpipe` (R311y380) — the FIFO link is already
             // connected, so like unixsock/vsock there is nothing to handshake.
-            #[cfg(all(feature = "transport-link-unixpipe", target_os = "linux"))]
+            #[cfg(all(feature = "transport-link-unixpipe", unix))]
             AcceptedLink::Unixpipe(link) => DialedLink::Unixpipe(link),
             // Direct wrap (R311y382) — an accepted demux face has no server
             // handshake; the pump already queued its first datagram (the InitSyn)
@@ -1996,7 +1996,7 @@ impl AcceptedLink {
             AcceptedLink::Unixsock(_) => "",
             #[cfg(all(feature = "transport-link-vsock", target_os = "linux"))]
             AcceptedLink::Vsock(_) => "",
-            #[cfg(all(feature = "transport-link-unixpipe", target_os = "linux"))]
+            #[cfg(all(feature = "transport-link-unixpipe", unix))]
             AcceptedLink::Unixpipe(_) => "",
             #[cfg(feature = "transport-link-udp")]
             AcceptedLink::UdpDemuxed { .. } => "",
@@ -2070,7 +2070,7 @@ pub const COMPILED_IN_LINK_SCHEMES: &[&str] = &[
     "serial",
     #[cfg(all(feature = "transport-link-unixsock", unix))]
     "unixsock-stream",
-    #[cfg(all(feature = "transport-link-unixpipe", target_os = "linux"))]
+    #[cfg(all(feature = "transport-link-unixpipe", unix))]
     "unixpipe",
     #[cfg(all(feature = "transport-link-vsock", target_os = "linux"))]
     "vsock",
@@ -2594,7 +2594,7 @@ pub async fn dial_locator(locator: AnyLocator, cfg: &DialConfig) -> io::Result<D
         // unixsock). ASYNC now (the invitation handshake awaits the peer), running
         // within the tokio runtime this async dial seam provides. No cert config
         // (like unixsock/udp).
-        #[cfg(all(feature = "transport-link-unixpipe", target_os = "linux"))]
+        #[cfg(all(feature = "transport-link-unixpipe", unix))]
         AnyLocator::Unixpipe(ep) => Ok(DialedLink::Unixpipe(
             dial_unixpipe(&ep.path, ep.file_mask).await?,
         )),
@@ -2604,10 +2604,10 @@ pub async fn dial_locator(locator: AnyLocator, cfg: &DialConfig) -> io::Result<D
         // combo. Without the backend (feature off, or a non-Linux target) it
         // dials to a typed `Unsupported`, exactly as vsock/serial/udp do —
         // keeping the match exhaustive and avoiding cross-crate/cross-target skew.
-        #[cfg(not(all(feature = "transport-link-unixpipe", target_os = "linux")))]
+        #[cfg(not(all(feature = "transport-link-unixpipe", unix)))]
         AnyLocator::Unixpipe(_ep) => Err(io::Error::new(
             io::ErrorKind::Unsupported,
-            "unixpipe session-open requires the transport-link-unixpipe feature on a Linux target",
+            "unixpipe session-open requires the transport-link-unixpipe feature on a Unix target",
         )),
     }
 }
@@ -3577,19 +3577,19 @@ pub async fn bind_locator(locator: AnyLocator, cfg: &AcceptConfig) -> io::Result
         // acceptor task (`bind_unixpipe`, now ASYNC like `bind_udp_demux` — it
         // spawns a task) into `BoundListener::Unixpipe`, the accept-side mirror of
         // `dial_locator`'s `AnyLocator::Unixpipe => DialedLink::Unixpipe`. Like the
-        // vsock arm, gated `all(transport-link-unixpipe, target_os = "linux")` (the
-        // FIFO `read_write` open-rendezvous is Linux-only), with the
-        // cfg-off/non-Linux twin returning a typed `Unsupported` so the
+        // vsock arm, gated `all(transport-link-unixpipe, unix)` (upstream serves
+        // the link on every Unix; the FIFO `O_RDWR` open is made through `std`),
+        // with the cfg-off/non-Unix twin returning a typed `Unsupported` so the
         // always-present `AnyLocator::Unixpipe` variant (ungated in
         // wz-session-core) stays exhaustive on every target. `udp` is the remaining
         // acceptor extension point.
-        #[cfg(all(feature = "transport-link-unixpipe", target_os = "linux"))]
+        #[cfg(all(feature = "transport-link-unixpipe", unix))]
         AnyLocator::Unixpipe(ep) => Ok(BoundListener::Unixpipe(
             bind_unixpipe(&ep.path, ep.file_mask).await?,
         )),
-        #[cfg(not(all(feature = "transport-link-unixpipe", target_os = "linux")))]
+        #[cfg(not(all(feature = "transport-link-unixpipe", unix)))]
         AnyLocator::Unixpipe(_ep) => Err(unsupported(
-            "unixpipe accept requires the transport-link-unixpipe feature on Linux",
+            "unixpipe accept requires the transport-link-unixpipe feature on a Unix target",
         )),
     }
 }
@@ -3760,7 +3760,7 @@ pub enum InboundLink {
     Unixsock(UnixsockReadDriver),
     #[cfg(all(feature = "transport-link-vsock", target_os = "linux"))]
     Vsock(VsockReadDriver),
-    #[cfg(all(feature = "transport-link-unixpipe", target_os = "linux"))]
+    #[cfg(all(feature = "transport-link-unixpipe", unix))]
     Unixpipe(UnixpipeReadDriver),
     #[cfg(feature = "transport-link-quic")]
     Quic(QuicReadDriver),
@@ -3784,7 +3784,7 @@ impl LinkDriver for InboundLink {
             InboundLink::Unixsock(d) => d.open().await,
             #[cfg(all(feature = "transport-link-vsock", target_os = "linux"))]
             InboundLink::Vsock(d) => d.open().await,
-            #[cfg(all(feature = "transport-link-unixpipe", target_os = "linux"))]
+            #[cfg(all(feature = "transport-link-unixpipe", unix))]
             InboundLink::Unixpipe(d) => d.open().await,
             #[cfg(feature = "transport-link-quic")]
             InboundLink::Quic(d) => d.open().await,
@@ -3808,7 +3808,7 @@ impl LinkDriver for InboundLink {
             InboundLink::Unixsock(d) => d.send(frame, reliability).await,
             #[cfg(all(feature = "transport-link-vsock", target_os = "linux"))]
             InboundLink::Vsock(d) => d.send(frame, reliability).await,
-            #[cfg(all(feature = "transport-link-unixpipe", target_os = "linux"))]
+            #[cfg(all(feature = "transport-link-unixpipe", unix))]
             InboundLink::Unixpipe(d) => d.send(frame, reliability).await,
             #[cfg(feature = "transport-link-quic")]
             InboundLink::Quic(d) => d.send(frame, reliability).await,
@@ -3832,7 +3832,7 @@ impl LinkDriver for InboundLink {
             InboundLink::Unixsock(d) => d.close().await,
             #[cfg(all(feature = "transport-link-vsock", target_os = "linux"))]
             InboundLink::Vsock(d) => d.close().await,
-            #[cfg(all(feature = "transport-link-unixpipe", target_os = "linux"))]
+            #[cfg(all(feature = "transport-link-unixpipe", unix))]
             InboundLink::Unixpipe(d) => d.close().await,
             #[cfg(feature = "transport-link-quic")]
             InboundLink::Quic(d) => d.close().await,
@@ -3856,7 +3856,7 @@ impl LinkDriver for InboundLink {
             InboundLink::Unixsock(d) => d.poll_event().await,
             #[cfg(all(feature = "transport-link-vsock", target_os = "linux"))]
             InboundLink::Vsock(d) => d.poll_event().await,
-            #[cfg(all(feature = "transport-link-unixpipe", target_os = "linux"))]
+            #[cfg(all(feature = "transport-link-unixpipe", unix))]
             InboundLink::Unixpipe(d) => d.poll_event().await,
             #[cfg(feature = "transport-link-quic")]
             InboundLink::Quic(d) => d.poll_event().await,
@@ -3941,7 +3941,7 @@ pub fn wire_dialed_link_with_lowlatency(
             let (inbound, outbound, handle) = wire_vsock_stream(stream);
             (InboundLink::Vsock(inbound), outbound, handle)
         }
-        #[cfg(all(feature = "transport-link-unixpipe", target_os = "linux"))]
+        #[cfg(all(feature = "transport-link-unixpipe", unix))]
         DialedLink::Unixpipe(link) => {
             let (inbound, outbound, handle) = wire_unixpipe_stream(link);
             (InboundLink::Unixpipe(inbound), outbound, handle)
@@ -6626,7 +6626,7 @@ mod tests {
     /// `boundlistener_unixpipe_is_not_mesh_capable` (whose FALSE assertion the flip
     /// broke). The `AcceptedLink` twin is pinned by `acceptedlink_unixpipe_*` in
     /// accept_loop.
-    #[cfg(all(feature = "transport-link-unixpipe", target_os = "linux"))]
+    #[cfg(all(feature = "transport-link-unixpipe", unix))]
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn boundlistener_unixpipe_is_mesh_capable() {
         use crate::unixpipe_pipeline::bind_unixpipe;
