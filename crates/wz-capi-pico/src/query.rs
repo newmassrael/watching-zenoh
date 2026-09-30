@@ -236,16 +236,28 @@ struct ReplyMetaOwned {
     encoding: Option<wz_runtime_tokio::sample::EncodingHint>,
     timestamp: Option<wz_runtime_tokio::sample::TimestampHint>,
     source_info: Option<wz_runtime_tokio::sample::SourceInfo>,
+    /// The `is_express` its options carried, `false` when there were none. pico
+    /// builds every reply's QoS from THIS flag and the query's own congestion
+    /// control and priority (`vendor/zenoh-pico/src/net/primitives.c` @
+    /// `_z_n_qos_create(is_express, _z_n_qos_get_congestion_control(query->_qos), _z_n_qos_get_priority(query->_qos));`),
+    /// so it replaces the query's express bit rather than inheriting it.
+    express: bool,
 }
 
 impl ReplyMetaOwned {
-    /// Borrow the owned hints back into the seam's borrowed view.
-    fn view<'a>(&'a self, attachment: Option<&'a [u8]>) -> ReplyMeta<'a> {
+    /// Borrow the owned hints back into the seam's borrowed view, with the QoS
+    /// pico gives the reply: the query's `query_qos` and this reply's express bit.
+    fn view<'a>(
+        &'a self,
+        attachment: Option<&'a [u8]>,
+        query_qos: wz_runtime_tokio::sample::QosLevel,
+    ) -> ReplyMeta<'a> {
         ReplyMeta::new()
             .with_encoding(self.encoding.as_ref())
             .with_timestamp(self.timestamp.as_ref())
             .with_source_info(self.source_info.as_ref())
             .with_attachment(attachment)
+            .with_qos(Some(query_qos.with_express(self.express)))
     }
 }
 
@@ -287,16 +299,24 @@ enum PendingReply {
 /// GET for a query it asked of itself) and releases the Final on drop. This ABI
 /// only formats the reply, through the same [`flush_one`] the in-dispatch flush
 /// uses. Until R2953 it carried its own wire-only responder.
-fn emit_held(held: &HeldQuery, reply: PendingReply) {
+fn emit_held(held: &HeldQuery, reply: PendingReply, query_qos: wz_runtime_tokio::sample::QosLevel) {
     held.reply(|out| {
         let mut out = out;
-        flush_one(&mut out, reply);
+        flush_one(&mut out, reply, query_qos);
     });
 }
 
 /// Route ONE accumulated reply into a [`ReplyOut`]. Shared by the in-dispatch
 /// flush and the deferred emit so the two cannot answer differently.
-fn flush_one(out: &mut &mut dyn ReplyOut, reply: PendingReply) {
+///
+/// `query_qos` is the QoS of the query being answered: a reply takes its
+/// congestion control and priority from it and its express bit from its own
+/// options ([`ReplyMetaOwned::express`]).
+fn flush_one(
+    out: &mut &mut dyn ReplyOut,
+    reply: PendingReply,
+    query_qos: wz_runtime_tokio::sample::QosLevel,
+) {
     match reply {
         // R311y562 — ONE seam carries all four metadata arms now
         // ([`ReplyMeta`]). The previous shape had to pick between
@@ -312,13 +332,13 @@ fn flush_one(out: &mut &mut dyn ReplyOut, reply: PendingReply) {
         } => admitted_at_the_abi(out.reply_keyed_meta(
             &keyexpr,
             &payload,
-            meta.view(attachment.as_ref().map(|a| a.as_slice())),
+            meta.view(attachment.as_ref().map(|a| a.as_slice()), query_qos),
         )),
         // The Del arm passes no attachment: a Del body encodes none
         // (`has_attachment = _is_put && ..`, `message.c:263`), which is why
         // `z_query_reply_del` takes-and-drops the caller's — as pico does.
         PendingReply::Del { keyexpr, meta } => {
-            admitted_at_the_abi(out.reply_keyed_del_meta(&keyexpr, meta.view(None)))
+            admitted_at_the_abi(out.reply_keyed_del_meta(&keyexpr, meta.view(None, query_qos)))
         }
         PendingReply::Err { payload, encoding } => {
             // UNPACKED. `EncodingHint::packed_id` is the wire word
@@ -579,7 +599,7 @@ impl QueryMarshal {
         // behalf. Emit on its own route instead of into an accumulator nobody
         // will drain.
         if let Some(held) = self.deferred.as_ref() {
-            emit_held(held, reply);
+            emit_held(held, reply, self.qos);
             return;
         }
         (*self.replies.get()).push(reply);
@@ -588,8 +608,9 @@ impl QueryMarshal {
     /// Flush the accumulated replies into the wz responder. Runs after the C
     /// callback returned, on the drive thread.
     fn flush(&mut self, mut out: &mut dyn ReplyOut) {
+        let query_qos = self.qos;
         for reply in self.replies.get_mut().drain(..) {
-            flush_one(&mut out, reply);
+            flush_one(&mut out, reply, query_qos);
         }
     }
 }
@@ -1482,10 +1503,13 @@ pub unsafe extern "C" fn z_query_attachment(
 ///
 /// R311y562 — of `options`, `attachment`, `encoding`, `timestamp` AND
 /// `source_info` are all honoured now. `congestion_control` / `priority` are
-/// documented ignored by pico itself. `is_express` remains a NAMED DIVERGENCE:
-/// wz's [`ReplyOut`] has no express arm on any reply form, so the flag cannot be
-/// honoured and is dropped. It is a batching hint with no effect on delivery or
-/// content.
+/// documented ignored by pico itself: a reply takes both from the query.
+/// `is_express` is READ, and it is the reply's express bit: pico builds the
+/// reply's QoS from it and the query's congestion control and priority
+/// (`vendor/zenoh-pico/src/net/primitives.c` @ `_z_n_qos_create(is_express,`).
+/// It stood here as a NAMED DIVERGENCE ("wz's [`ReplyOut`] has no express arm on
+/// any reply form"), which stopped being true when [`ReplyMeta::with_qos`] landed
+/// for the advanced cache's replies, and nothing struck the sentence.
 #[no_mangle]
 pub unsafe extern "C" fn z_query_reply(
     query: *const z_loaned_query_t,
@@ -1514,6 +1538,7 @@ pub unsafe extern "C" fn z_query_reply(
                 encoding: crate::encoding::take_moved_encoding((*options).encoding as *mut c_void),
                 timestamp: crate::pubsub::timestamp_hint_of((*options).timestamp),
                 source_info: crate::pubsub::source_info_hint_of((*options).source_info),
+                express: (*options).is_express,
             };
             (attachment, meta)
         };
@@ -1586,6 +1611,7 @@ pub unsafe extern "C" fn z_query_reply_del(
                 encoding: None,
                 timestamp: crate::pubsub::timestamp_hint_of((*options).timestamp),
                 source_info: crate::pubsub::source_info_hint_of((*options).source_info),
+                express: (*options).is_express,
             };
             (attachment, meta)
         };
@@ -1864,5 +1890,87 @@ mod tests {
                 Some("demo/q")
             );
         }
+    }
+
+    /// A [`ReplyOut`] that records the QoS each staged reply was given.
+    #[derive(Default)]
+    struct QosTap {
+        seen: Vec<Option<wz_runtime_tokio::sample::QosLevel>>,
+    }
+
+    impl ReplyOut for QosTap {
+        fn reply(&mut self, _payload: &[u8]) {}
+        fn reply_del(&mut self) {}
+        fn reply_err(&mut self, _id: Option<u32>, _schema: Option<&str>, _payload: &[u8]) {}
+        fn with_responder(&mut self, _zid: &[u8], _eid: u32) {}
+        fn clear_responder(&mut self) {}
+        fn responder(&self) -> Option<(&[u8], u32)> {
+            None
+        }
+        fn reply_keyed_meta(
+            &mut self,
+            _keyexpr: &str,
+            _payload: &[u8],
+            meta: ReplyMeta<'_>,
+        ) -> Result<(), wz_runtime_tokio::query_sink::ReplyError> {
+            self.seen.push(meta.qos);
+            Ok(())
+        }
+        fn reply_keyed_del_meta(
+            &mut self,
+            _keyexpr: &str,
+            meta: ReplyMeta<'_>,
+        ) -> Result<(), wz_runtime_tokio::query_sink::ReplyError> {
+            self.seen.push(meta.qos);
+            Ok(())
+        }
+    }
+
+    /// A reply's QoS is the query's congestion control and priority with the
+    /// express bit of the reply's OWN options, and the options' bit REPLACES the
+    /// query's: a reply made with default options is not express even when the
+    /// query was (`vendor/zenoh-pico/src/net/primitives.c` @
+    /// `_z_n_qos_create(is_express,`). Both reply forms, both directions of the
+    /// bit.
+    #[test]
+    fn a_reply_takes_the_express_bit_of_its_options_and_the_rest_of_the_queries_qos() {
+        use wz_runtime_tokio::qos::{CongestionControl, Priority};
+        use wz_runtime_tokio::sample::QosLevel;
+        let query_qos = QosLevel::from_parts(Priority::RealTime, CongestionControl::Block, false);
+        let put = |express| PendingReply::Put {
+            keyexpr: "a/b".to_owned(),
+            payload: crate::bytes::ByteBuf::from(&[1u8][..]),
+            attachment: None,
+            meta: ReplyMetaOwned {
+                express,
+                ..ReplyMetaOwned::default()
+            },
+        };
+        let del = |express| PendingReply::Del {
+            keyexpr: "a/b".to_owned(),
+            meta: ReplyMetaOwned {
+                express,
+                ..ReplyMetaOwned::default()
+            },
+        };
+        let mut tap = QosTap::default();
+        {
+            let mut out: &mut dyn ReplyOut = &mut tap;
+            flush_one(&mut out, put(true), query_qos);
+            flush_one(&mut out, del(true), query_qos);
+            flush_one(&mut out, put(false), query_qos.with_express(true));
+            flush_one(&mut out, del(false), query_qos.with_express(true));
+        }
+        let expressed = query_qos.with_express(true);
+        assert_eq!(
+            tap.seen,
+            vec![
+                Some(expressed),
+                Some(expressed),
+                Some(query_qos),
+                Some(query_qos)
+            ],
+            "the express bit is the options', over the query's priority and congestion control"
+        );
     }
 }
