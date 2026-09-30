@@ -2325,7 +2325,15 @@ PIN_NO_SYMBOL = 2
 # publisher declaration whose ignored options it names), and the atom is still
 # PARTIAL. READ off the census's own FAIL line, `wz citations: 40 against a pin
 # of 31`; `reached` and `ambiguous` hold at 4 and 8.
-PIN_WZ_CITATIONS = 40
+#
+# R2991 — 40 -> 51, one atom. `api-compat-pico`'s reason gains the CORRECTION
+# for the declared options, which cites eleven wz anchors (the publisher's
+# declared QoS, the advanced plane's two declarations, the querier's encoding,
+# the detection metadata, the reply express test, the open default, the error
+# reply's two ends, the defaults differential and the publisher wire leg), and
+# the atom is still PARTIAL. READ off the census's own FAIL line, `wz citations:
+# 51 against a pin of 40`; `reached` and `ambiguous` hold at 4 and 8.
+PIN_WZ_CITATIONS = 51
 # R2626 — 44 -> 42, and this one is worth a sentence because it HELD through
 # every earlier retirement in this run (R2612, R2622). `time-hlc`'s reason is the
 # first retiree carrying AMBIGUOUS citations of its own: its oldest clauses cite
