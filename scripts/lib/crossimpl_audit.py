@@ -816,7 +816,7 @@ HOST_GATED_CI_TARGETS: dict[str, str] = {
 # the diff and not assumed. 963 + 1 = 964, measured by
 # `WZ_A4_REQUIRE=1 run-ci.sh --layer A4` at this round's tree, and the value
 # gate 2b measured when this push was refused for the constant not moving.
-# +4 R2990, `a_publisher_declared_with_options_sends_the_same_qos_as_the_real_pico`,
+# +4 R2991, `a_publisher_declared_with_options_sends_the_same_qos_as_the_real_pico`,
 # `a_publisher_declared_with_options_beside_a_peer_sends_the_same_qos_as_the_real_pico`,
 # `wz_router_hears_a_pico_peer_publisher_with_options_the_same_on_wz_and_on_the_real_pico`
 # and `every_options_default_writes_the_values_the_real_pico_writes` (1 test x

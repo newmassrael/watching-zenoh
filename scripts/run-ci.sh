@@ -3627,7 +3627,7 @@ layer_c0_test_discipline() {
     # job, which is the only place those hosts exist.
     python3 scripts/lib/platform_surface_matrix.py --selftest || return 1
     python3 scripts/lib/platform_surface_matrix.py --check || return 1
-    # R2990 — a field of a pico options struct that NO function reads. The pico
+    # R2991 — a field of a pico options struct that NO function reads. The pico
     # ABI mirrors zenoh-pico's options field for field, and mirroring the layout
     # is not reading the fields: a program's request that nothing reads links,
     # runs and does nothing. Five rounds found one struct each by reading it; this
@@ -17938,7 +17938,7 @@ layer_e5_router_forward() {
     # filter reaches it.
     # R2983 — 2 -> 3, the advanced subscriber's
     # (`wz_router_hears_a_pico_peer_advanced_subscriber_...`).
-    # R2990 — 3 -> 4, the declared publisher options'
+    # R2991 — 3 -> 4, the declared publisher options'
     # (`wz_router_hears_a_pico_peer_publisher_with_options_...`).
     if [[ ! -f target/zenoh-pico-build/lib/libzenohpico.so ]]; then
         _pico_cli_unavailable "Layer E5 (pico peer beside a router, libzenohpico oracle)" || return 1

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: AGPL-3.0-or-later OR LicenseRef-watching-zenoh-Commercial
 # SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
-"""R2990 (no register item) -- a field of a pico options struct must be READ by
+"""R2991 (no register item) -- a field of a pico options struct must be READ by
 something, or be listed here with the reason nothing reads it.
 
 ## The defect this closes, and why it is a class
@@ -18,8 +18,8 @@ times, each time found by reading one struct:
   * `z_get_options_t`'s QoS trio was carried and dropped (R311y551);
   * the reply options' encoding, timestamp and source info (R311y562);
   * `z_declare_publisher`'s options, five fields, with the advanced publisher's
-    embedded copy of them (R2990);
-  * and, found in R2990 by the audit this gate makes permanent, a querier's
+    embedded copy of them (R2991);
+  * and, found in R2991 by the audit this gate makes permanent, a querier's
     encoding, a detection key's metadata and a reply's express flag.
 
 Each of those was a SENTENCE in a reason ("options are ignored", "a named gap")
@@ -472,7 +472,7 @@ def selftest():
     _, _, unread = analyse({"a.rs": embedded})
     assert unread == set(), f"a read through the struct that EMBEDS it counts: {unread}"
 
-    # THE CONTROL THAT FOUND THE FIRST CUT WEAK (R2990): two structs with a field of
+    # THE CONTROL THAT FOUND THE FIRST CUT WEAK (R2991): two structs with a field of
     # the same name, one embedded in the function's parameter. Matching `.priority`
     # anywhere satisfied the publisher's field with the cache's, and the real tree
     # stayed green with the publisher's priority read deleted. The read has to go
