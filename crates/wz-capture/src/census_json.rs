@@ -231,13 +231,7 @@ pub fn interests_json(
         // this document's rule that an empty string is a value. See
         // `NodeCensus::zid_on` for why a guess is worse than a null here.
         match nodes.zid_on(&d.flow, d.declarer) {
-            Some(zid) => {
-                out.push('"');
-                for b in zid {
-                    let _ = write!(out, "{b:02x}");
-                }
-                out.push('"');
-            }
+            Some(zid) => push_zid(zid, &mut out),
             None => out.push_str("null"),
         }
         let _ = write!(out, ",\"id\":{},\"keyexpr\":", d.id);
@@ -485,6 +479,21 @@ pub fn keyexprs_json(t: &ThroughputTable) -> String {
     out
 }
 
+/// A zid as this document writes it: a JSON string holding zenoh's spelling.
+///
+/// ZA-3687 — the ONE place the census names a node by text, called by the node
+/// plane's `zid` and the interest plane's `declarer_zid`. Both used to write
+/// each wire byte in turn, so this document printed `584f1edb…` for a node
+/// zenohd logs as `af0b5b89…` (the same bytes reversed), and a consumer joining
+/// the two by text found no match. The spelling is
+/// [`zid_to_zenoh_hex`](wz_session_core::zid_hex::zid_to_zenoh_hex), which is
+/// the recipe every other surface that names a zid now uses.
+fn push_zid(zid: &[u8], out: &mut String) {
+    out.push('"');
+    out.push_str(&wz_session_core::zid_hex::zid_to_zenoh_hex(zid));
+    out.push('"');
+}
+
 /// The NODE plane: the capture keyed by zid, and the links where both ends
 /// named themselves.
 pub fn nodes_json(c: &NodeCensus) -> String {
@@ -493,11 +502,8 @@ pub fn nodes_json(c: &NodeCensus) -> String {
         if i > 0 {
             out.push(',');
         }
-        out.push_str("{\"zid\":\"");
-        for byte in &node.zid {
-            let _ = write!(out, "{byte:02x}");
-        }
-        out.push('"');
+        out.push_str("{\"zid\":");
+        push_zid(&node.zid, &mut out);
         match node.whatami {
             Some(w) => {
                 let _ = write!(out, ",\"whatami\":{w}");
@@ -1536,6 +1542,18 @@ pub(crate) mod fed_tests {
         locator: Option<&str>,
         contradicting: bool,
     ) -> (Dissection, alloc::vec::Vec<u8>) {
+        every_plane_capture_with_zids(keyexpr, locator, contradicting, &ZID_A, &ZID_B)
+    }
+
+    /// [`every_plane_capture_with_file`] with the two zids the handshakes carry
+    /// named by the caller (ZA-3687: see [`four_plane_streams_for`]).
+    pub(crate) fn every_plane_capture_with_zids(
+        keyexpr: &'static str,
+        locator: Option<&str>,
+        contradicting: bool,
+        zid_a: &[u8],
+        zid_b: &[u8],
+    ) -> (Dissection, alloc::vec::Vec<u8>) {
         let mut packets: alloc::vec::Vec<(u32, u32, alloc::vec::Vec<u8>)> = alloc::vec::Vec::new();
         let mut d = Dissection::new();
         if let Some(locator) = locator {
@@ -1562,7 +1580,7 @@ pub(crate) mod fed_tests {
             packets.push((0, 0, scout));
             packets.push((1, 0, hello));
         }
-        let (mut low, high) = four_plane_streams(keyexpr);
+        let (mut low, high) = four_plane_streams_for(keyexpr, zid_a, zid_b);
         if contradicting {
             low.extend_from_slice(&framed_frame(4, &contradicting_records(keyexpr)));
             low.extend_from_slice(&framed_frame(5, &unresolved_records()));
@@ -1829,7 +1847,21 @@ pub(crate) mod fed_tests {
         out
     }
 
-    fn four_plane_streams(keyexpr: &'static str) -> (alloc::vec::Vec<u8>, alloc::vec::Vec<u8>) {
+    /// The two directions of the every-plane capture, with the two ZIDs the
+    /// handshakes carry named by the caller.
+    ///
+    /// ZA-3687 — the callers pass [`ZID_A`] and [`ZID_B`], which are `[0xA1; 4]`
+    /// and `[0xB2; 4]`: they read the same forwards and backwards, so nothing
+    /// built on them could tell a zid printed in wire order from one printed in
+    /// zenoh's order, and that is how a consumer's fixtures hid a spelling
+    /// defect in the census. The zids became an ARGUMENT rather than the
+    /// constants changing, because eight files' worth of expected strings name
+    /// them, and a caller that is ADDED cannot move any of those.
+    fn four_plane_streams_for(
+        keyexpr: &'static str,
+        zid_a: &[u8],
+        zid_b: &[u8],
+    ) -> (alloc::vec::Vec<u8>, alloc::vec::Vec<u8>) {
         // R311y869 — the CONTROL plane, and the reason it is in this fixture
         // rather than in one of its own: the module's own rule above is that
         // the planes have to be seen agreeing about ONE capture, and the
@@ -1896,12 +1928,12 @@ pub(crate) mod fed_tests {
         // The DECLARATION leads each direction's data, as it does on a real
         // session: a subscriber that arrived after the sample would be a
         // capture begun mid-session, which is a different fixture.
-        let mut low_to_high = framed_init(&ZID_A);
+        let mut low_to_high = framed_init(zid_a);
         low_to_high.extend_from_slice(&declare_sub);
         low_to_high.extend_from_slice(&interest);
         low_to_high.extend_from_slice(&put);
         low_to_high.extend_from_slice(&query);
-        let mut high_to_low = framed_init(&ZID_B);
+        let mut high_to_low = framed_init(zid_b);
         high_to_low.extend_from_slice(&declare_qbl);
         high_to_low.extend_from_slice(&answer);
 
@@ -2605,6 +2637,52 @@ pub(crate) mod fed_tests {
                 "so the unclaimed list is a floor and says so: {interests}"
             );
         }
+    }
+
+    /// ZA-3687 — THE CENSUS NAMES A NODE THE WAY ZENOHD LOGS IT: `zid` on the
+    /// node plane and `declarer_zid` on the interest plane are zenoh's spelling,
+    /// not the wire bytes in the order they arrived.
+    ///
+    /// The two zids are NOT palindromes, and that is the whole test. The shared
+    /// fixture's `a1a1a1a1` and `b2b2b2b2` read the same reversed, so a census
+    /// that wrote each wire byte in turn passed every assertion above while
+    /// naming a node `584f1edb…` that zenohd logs as `af0b5b89…`. Here
+    /// `01 02 03 04` is `4030201` (the little-endian id read as a `u128`, a
+    /// leading zero nibble dropped) and `b1 b2 b3 b4` is `b4b3b2b1`, so the
+    /// order, the reversal and the leading-zero rule are each visible.
+    ///
+    /// The wire spelling is asserted ABSENT, not only the new one present: a
+    /// renderer that emitted both, or the wrong one first, must not pass.
+    #[test]
+    fn the_census_names_a_node_by_the_spelling_zenoh_prints() {
+        let zid_a = [0x01u8, 0x02, 0x03, 0x04];
+        let zid_b = [0xB1u8, 0xB2, 0xB3, 0xB4];
+        let (d, _file) = every_plane_capture_with_zids("demo/temp", None, false, &zid_a, &zid_b);
+        let json = census_json(&d);
+
+        let nodes = plane(&json, ",\"nodes\":");
+        assert!(
+            nodes.contains("\"zid\":\"4030201\"") && nodes.contains("\"zid\":\"b4b3b2b1\""),
+            "both nodes must be named in zenoh's spelling: {nodes}"
+        );
+        assert!(
+            !nodes.contains("01020304") && !nodes.contains("b1b2b3b4"),
+            "the wire order must not be what the node plane prints: {nodes}"
+        );
+
+        let interests = plane(&json, ",\"interests\":");
+        assert!(
+            interests.contains("\"declarer\":\"a\",\"declarer_zid\":\"4030201\""),
+            "A's declaration must name A in zenoh's spelling: {interests}"
+        );
+        assert!(
+            interests.contains("\"declarer\":\"b\",\"declarer_zid\":\"b4b3b2b1\""),
+            "and B's must name B: {interests}"
+        );
+        assert!(
+            !interests.contains("01020304") && !interests.contains("b1b2b3b4"),
+            "the wire order must not be what the interest plane prints: {interests}"
+        );
     }
 
     /// R311y851 — A KEYEXPR IS WIRE INPUT, SO IT IS ESCAPED.

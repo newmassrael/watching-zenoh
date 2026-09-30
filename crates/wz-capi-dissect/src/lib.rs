@@ -4239,6 +4239,81 @@ mod tests {
         wz_capture::pcap::write(1, &[(0, 0, a.as_slice()), (0, 9_000, b.as_slice())])
     }
 
+    /// ZA-3687 — A NODE CROSSES THIS BOUNDARY UNDER ONE NAME, in the census and
+    /// in the field tree, and the name is the one zenohd logs.
+    ///
+    /// The seam a consumer reads through, and the one no test in the crates
+    /// below it can stand in for: `wz-capture` proves what its emitters write,
+    /// this proves what a C caller receives from the two doors that name a node
+    /// — `wz_dissect_pcap_census` and `wz_dissect_pcap_fields` — for ONE capture,
+    /// so a consumer joining the two by text finds a match.
+    ///
+    /// The zids are `01 02 03 04` and `b1 b2 b3 b4`, and not the palindromes the
+    /// rest of this module uses (`a1a1a1a1` reads the same reversed), because a
+    /// palindrome cannot tell the wire order from zenoh's. Zenoh prints the
+    /// little-endian id read as a `u128`: `4030201` (a leading zero nibble
+    /// dropped) and `b4b3b2b1`. The expected texts are literals worked out by
+    /// hand, and the field tree's raw bytes are read back OUT OF THE CAPTURE at
+    /// the span, so nothing here grades the renderer against the function it
+    /// calls.
+    ///
+    /// The wire spelling is asserted ABSENT from both documents.
+    #[test]
+    fn a_node_crosses_the_boundary_under_the_name_zenohd_logs() {
+        let (zid_a, zid_b) = ([0x01u8, 0x02, 0x03, 0x04], [0xB1u8, 0xB2, 0xB3, 0xB4]);
+        let a = tcp_packet(1000, &framed_init(&zid_a));
+        let b = tcp_packet_reverse(2000, &framed_init(&zid_b));
+        let file = wz_capture::pcap::write(1, &[(0, 0, a.as_slice()), (0, 9_000, b.as_slice())]);
+
+        let census = call_census(&file).expect("the capture reads");
+        assert!(
+            census.contains("\"zid\":\"4030201\"") && census.contains("\"zid\":\"b4b3b2b1\""),
+            "both nodes must cross in zenoh's spelling: {census}"
+        );
+        assert!(
+            !census.contains("01020304") && !census.contains("b1b2b3b4"),
+            "the wire order must not cross as a node's name: {census}"
+        );
+
+        let fields = call_fields(&file, 0).expect("the capture reads");
+        for (text, raw) in [("4030201", &zid_a[..]), ("b4b3b2b1", &zid_b[..])] {
+            let needle = format!("\"kind\":\"zid\",\"value\":\"{text}\"");
+            assert!(
+                fields.contains(&needle),
+                "the tree must name the node {text} as a `zid`: {fields}"
+            );
+            // The span still names the raw wire bytes: find the tree node, read
+            // its `start`/`end` back out of the JSON, and compare the capture's
+            // own bytes at those offsets with the zid this test wrote.
+            let at = fields.find(&needle).expect("checked above");
+            let head = &fields[..at];
+            let node_start = head.rfind("{\"name\":\"zid\"").expect("a node named zid");
+            let node = &fields[node_start..at + needle.len()];
+            let number = |key: &str| -> usize {
+                let from = node.find(key).expect("the span key") + key.len();
+                node[from..]
+                    .chars()
+                    .take_while(char::is_ascii_digit)
+                    .collect::<String>()
+                    .parse()
+                    .expect("a number")
+            };
+            let (start, end) = (number("\"start\":"), number("\"end\":"));
+            let packet_bytes = if raw == &zid_a[..] { &a } else { &b };
+            let frame = &packet_bytes[packet_bytes.len() - framed_init(raw).len()..];
+            assert_eq!(
+                &frame[2..][start..end],
+                raw,
+                "the span of {text} must name the raw wire bytes of the zid"
+            );
+        }
+        assert!(
+            !fields.contains("\"value\":\"01020304\"")
+                && !fields.contains("\"value\":\"b1b2b3b4\""),
+            "a zid's `value` must not be the per-byte wire order: {fields}"
+        );
+    }
+
     /// R311y851 — THE ANALYSIS PLANES CROSS THIS BOUNDARY, AND THE SUMMARY
     /// DOOR DOES NOT CARRY THEM.
     ///

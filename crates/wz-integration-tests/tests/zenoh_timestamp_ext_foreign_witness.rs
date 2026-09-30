@@ -432,14 +432,14 @@ fn the_timestamp_walker_reads_what_a_stock_zenohd_stamped() {
     // length prefix into the value, lands somewhere that is not this zid.
     let expected = zid_wire_bytes(ZENOHD_ZID);
     match read("zid") {
-        Some(FieldValue::Bytes(zid)) => assert_eq!(
+        Some(FieldValue::Zid(zid)) => assert_eq!(
             zid, &expected,
             "the zid inside the stamp is not the router this test pinned \
              (`id:{ZENOHD_ZID}` -> {expected:02x?}). The stamp names WHO \
              stamped, so this is the field that says these bytes came from that \
              process and not from anywhere else"
         ),
-        other => panic!("the stamp's `zid` is not raw bytes: {other:?}"),
+        other => panic!("the stamp's `zid` is not a `Zid` field: {other:?}"),
     }
     // The length prefix must agree with the bytes it introduces -- the pair is
     // what `walk_timestamp` reads, and a length taken from the wrong place is

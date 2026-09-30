@@ -2969,9 +2969,12 @@ fn handshake_field_from_a_config(
         // and the adminspace interop legs), so the wire text here is compared
         // in the one spelling both implementations print.
         //
-        // Only the zid is a `Bytes` reading. A second bytes-valued key falls to
-        // the arm below, which names it, rather than inheriting this recipe.
-        Some(FieldValue::Bytes(b)) if wire_name == "zid" => zid_to_zenoh_hex(b),
+        // ZA-3687 — the tree types a zid as `Zid` since revision 17 of the field
+        // document, so that is the variant this arm reads; it used to be a
+        // `Bytes` field, and the recipe above is now also the one the tree's own
+        // `value` uses. Only the zid is a reading of this kind: a bytes-valued
+        // key falls to the arm below, which names it, rather than inheriting it.
+        Some(FieldValue::Zid(b)) if wire_name == "zid" => zid_to_zenoh_hex(b),
         other => panic!("the frame carries no {wire_name}: {other:?}\n{field:?}"),
     }
 }

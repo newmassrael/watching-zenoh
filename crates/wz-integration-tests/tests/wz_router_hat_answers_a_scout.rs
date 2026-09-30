@@ -232,8 +232,11 @@ fn hello_zid_hex(datagram: &[u8]) -> Option<String> {
     // ZA-3362 — rendered as zenoh prints a `ZenohId`, which is the form `--zid`
     // and the config `id` are now read in. A per-byte hex of the wire bytes is
     // the reverse of that.
+    // ZA-3687 — the tree types a `zid` as `Zid` now, so this reads the raw wire
+    // bytes off that variant and renders them itself, with the same function the
+    // document's `value` uses.
     match walked.find("zid").map(|f| &f.value) {
-        Some(FieldValue::Bytes(b)) => Some(wz_session_core::zid_hex::zid_to_zenoh_hex(b)),
+        Some(FieldValue::Zid(b)) => Some(wz_session_core::zid_hex::zid_to_zenoh_hex(b)),
         _ => None,
     }
 }
@@ -541,7 +544,7 @@ fn a_wz_router_hat_answers_a_scout_with_a_hello_that_says_router() {
         // responder that happens to share the group. Read by value against the
         // zid this arm pinned.
         let zid = match walked.find("zid").map(|f| &f.value) {
-            Some(FieldValue::Bytes(b)) => b.clone(),
+            Some(FieldValue::Zid(b)) => b.clone(),
             other => panic!(
                 "{} arm: a Hello always carries a zid; got {other:?}",
                 arm.name

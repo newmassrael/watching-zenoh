@@ -1592,8 +1592,13 @@ int main(void) {
      * `doc_revision::DOCUMENT_HISTORY` and this file, reports EVERY stale pin
      * rather than only the first, and runs in pre-push in about a second.
      * R2630 (item 745) -- 12: `dropped_by_limits` gains `scouting`, the SCOUT
-     * and HELLO datagrams a `frames_per_flow` ceiling evicted. */
-    revisioned[0].revision = 12;
+     * and HELLO datagrams a `frames_per_flow` ceiling evicted.
+     * ZA-3687 -- 13: the ZID values change SPELLING under stationary keys.
+     * `nodes[].zid` and `interests[].declarer_zid` were each wire byte in turn
+     * and are zenoh's spelling now, the little-endian id read as a u128 (the
+     * bytes reversed, a leading zero nibble dropped), which is what zenohd
+     * logs. No key moves; the number is the whole notice. */
+    revisioned[0].revision = 13;
     revisioned[0].doc = NULL;
     rc = wz_dissect_pcap_census(pcap, sizeof pcap, &revisioned[0].doc);
     CHECK(rc == WZ_DISSECT_OK, "census rc=%d", rc);
@@ -1680,8 +1685,13 @@ int main(void) {
      * ZA-3214 -- 15: a row can carry a record's `list_id`, `anchor` and
      * `batch_index`, written by wz_dissect_live_fields_where alone.
      * ZA-3215 -- 16: a `packet` row can be a DECLINED one, over an lz4 batch
-     * this build cannot open. */
-    revisioned[2].revision = 16;
+     * this build cannot open.
+     * ZA-3687 -- 17: the tree gains the `kind` word `zid`. A field named `zid`
+     * is an identity: `value` is zenoh's spelling of it (the bytes reversed, a
+     * leading zero nibble dropped) and the span still names the raw wire bytes.
+     * A switch on `kind` written against the eight earlier words is no longer
+     * exhaustive. */
+    revisioned[2].revision = 17;
     revisioned[2].doc = NULL;
     rc = wz_dissect_pcap_fields(pcap, sizeof pcap, 0, &revisioned[2].doc);
     CHECK(rc == WZ_DISSECT_OK, "fields rc=%d", rc);

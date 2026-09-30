@@ -4940,14 +4940,25 @@ mod tests {
              `doc_revision::DOCUMENT_HISTORY` carrying the widened set, which is \
              the notice a consumer's switch needs"
         );
+        // ZA-3687 — EIGHT now. The fixture's two Init frames each carry a `zid`,
+        // and that field is `kind: "zid"` since revision 17, so the word joined
+        // the ones this capture reaches without the capture changing. It
+        // reached seven when the family was written; the extra word is a
+        // consequence of the family widening by exactly the word the fixture
+        // already exercised.
         assert_eq!(
             seen.len(),
-            7,
+            8,
             "this fixture reached {} of the declared kind words ({seen:?}); it \
-             reached seven when the family was written, and a capture that \
+             reached eight when `zid` joined the family, and a capture that \
              stopped producing rows would make the subset above true by having \
              nothing to compare",
             seen.len()
+        );
+        assert!(
+            seen.contains(&"zid"),
+            "the fixture's handshakes carry a zid, so the new word must be one \
+             this capture reaches: {seen:?}"
         );
         assert!(
             !seen.contains(&"opaque") && declared.contains(&"opaque"),

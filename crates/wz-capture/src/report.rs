@@ -167,15 +167,20 @@ fn interest_scope_words(r: &crate::interest::InterestRequest) -> String {
     format!("{what}{where_}{aggregate}")
 }
 
-/// R311y714 — a zid as the hex a reader can match against a config file.
+/// R311y714 — a zid as the text a reader can match against a config file.
 ///
-/// zenoh prints zids as lowercase hex with no separators and so does this.
-fn hex_zid(zid: &[u8]) -> String {
-    let mut out = String::with_capacity(zid.len() * 2);
-    for b in zid {
-        out.push_str(&alloc::format!("{b:02x}"));
-    }
-    out
+/// ZA-3687 — THROUGH THE ONE RECIPE, [`zid_to_zenoh_hex`]. This used to claim
+/// "zenoh prints zids as lowercase hex with no separators and so does this",
+/// which was true of the alphabet and false of the ORDER: it wrote each wire
+/// byte in turn, and zenoh prints the little-endian id read as a `u128`, i.e.
+/// the bytes reversed. A node census and the zenohd log then named one node two
+/// ways, and no fixture noticed because the ones written used palindromes.
+/// Named `zid_text` rather than `hex_zid` so the word "hex" stops suggesting a
+/// per-byte dump.
+///
+/// [`zid_to_zenoh_hex`]: wz_session_core::zid_hex::zid_to_zenoh_hex
+fn zid_text(zid: &[u8]) -> String {
+    wz_session_core::zid_hex::zid_to_zenoh_hex(zid)
 }
 
 /// Round 2019 (item 270) — what a match's keys say about the WINDOW, or
@@ -292,7 +297,7 @@ fn declarer_prefix(
     i: &crate::interest::DeclaredInterest,
 ) -> String {
     match nodes.and_then(|n| n.zid_on(&i.flow, i.declarer)) {
-        Some(zid) => alloc::format!("{} ", hex_zid(zid)),
+        Some(zid) => alloc::format!("{} ", zid_text(zid)),
         None => String::new(),
     }
 }
@@ -1276,7 +1281,7 @@ impl<'a> CaptureReport<'a> {
                      \"share_bp\":{},\"init\":{},\"join\":{},\
                      \"hello\":{},\"scout\":{},\"inadmissible\":{},\"flows\":{},\
                      \"locators\":[{}]}}",
-                    hex_zid(&node.zid),
+                    zid_text(&node.zid),
                     match node.whatami {
                         Some(w) => alloc::format!("\"{}\"", role_name(w)),
                         None => "null".into(),
@@ -1316,8 +1321,8 @@ impl<'a> CaptureReport<'a> {
                 }
                 s.push_str(&alloc::format!(
                     "{{\"a\":\"{}\",\"b\":\"{}\"}}",
-                    hex_zid(&n.nodes()[link.a].zid),
-                    hex_zid(&n.nodes()[link.b].zid)
+                    zid_text(&n.nodes()[link.a].zid),
+                    zid_text(&n.nodes()[link.b].zid)
                 ));
             }
             s.push(']');
@@ -1350,7 +1355,7 @@ impl<'a> CaptureReport<'a> {
                         .interest_zids
                         .and_then(|n| n.zid_on(&interest.flow, interest.declarer))
                     {
-                        Some(zid) => alloc::format!("\"{}\"", hex_zid(zid)),
+                        Some(zid) => alloc::format!("\"{}\"", zid_text(zid)),
                         None => "null".into(),
                     },
                     interest.id,
@@ -1545,7 +1550,7 @@ impl<'a> CaptureReport<'a> {
                 s.push_str(&format!(
                     "    {} role {} -- share {}.{:02}%, init {}, join {}, \
                      hello {}, scout {}, inadmissible {}, flows {}\n",
-                    hex_zid(&node.zid),
+                    zid_text(&node.zid),
                     match node.whatami {
                         Some(w) => role_name(w),
                         None => "unstated",
@@ -1569,8 +1574,8 @@ impl<'a> CaptureReport<'a> {
             for link in n.links() {
                 s.push_str(&format!(
                     "    link {} <-> {}\n",
-                    hex_zid(&n.nodes()[link.a].zid),
-                    hex_zid(&n.nodes()[link.b].zid)
+                    zid_text(&n.nodes()[link.a].zid),
+                    zid_text(&n.nodes()[link.b].zid)
                 ));
             }
         }
@@ -8015,6 +8020,109 @@ mod tests {
         assert!(bare_text.contains("subscriber robot/arm"), "{bare_text}");
         assert!(!bare_text.contains("a1a1a1a1 subscriber"), "{bare_text}");
         assert!(bare_json.contains("\"declarer_zid\":null"), "{bare_json}");
+    }
+
+    /// ZA-3687 — THE REPORT NAMES A NODE THE WAY ZENOHD LOGS IT, in the node
+    /// plane, the link list and the declarer prefix, in text and in JSON.
+    ///
+    /// `hex_zid` (now `zid_text`) wrote each wire byte in turn; zenoh prints the
+    /// little-endian id read as a `u128`. The fixtures above use `a1a1a1a1` and
+    /// `b2b2b2b2`, which read the same reversed, so nothing could tell. The two
+    /// zids here are `01 02 03 04` (zenoh: `4030201`, the leading zero nibble
+    /// dropped) and `b1 b2 b3 b4` (zenoh: `b4b3b2b1`), so the order and the
+    /// leading-zero rule are each visible in every rendering asked.
+    ///
+    /// Every rendering is judged for the wire spelling being ABSENT as well as
+    /// the new one present, because six call sites shared one renderer and a
+    /// fix to only some of them would leave the rest naming a node the old way.
+    #[cfg(feature = "network-codecs")]
+    #[test]
+    fn a_report_names_a_node_by_the_spelling_zenoh_prints() {
+        use crate::datagram_tests::{tcp_packet, tcp_packet_reverse};
+        use crate::node::tests::framed_init;
+
+        let declare = {
+            let wire =
+                wz_session_core::declare_build::build_declare_subscriber(7, 0, Some("robot/arm"))
+                    .expect("the production builder")
+                    .try_as_borrowed()
+                    .expect("re-borrow")
+                    .encode_to_vec();
+            let mut unit = alloc::vec![
+                wz_session_core::wire_const::T_MID_FRAME
+                    | wz_session_core::wire_const::FLAG_T_FRAME_R,
+                0x00,
+            ];
+            unit.extend_from_slice(&wire);
+            let mut out = (unit.len() as u16).to_le_bytes().to_vec();
+            out.extend_from_slice(&unit);
+            out
+        };
+        let (zid_a, zid_b) = ([0x01u8, 0x02, 0x03, 0x04], [0xB1u8, 0xB2, 0xB3, 0xB4]);
+        let mut d = crate::Dissection::new();
+        let mut seq = 1000u32;
+        d.push_packet(
+            crate::link::LINKTYPE_ETHERNET,
+            0,
+            &tcp_packet(seq, &framed_init(&zid_a)),
+        );
+        seq += framed_init(&zid_a).len() as u32;
+        d.push_packet(
+            crate::link::LINKTYPE_ETHERNET,
+            1,
+            &tcp_packet_reverse(2000, &framed_init(&zid_b)),
+        );
+        d.push_packet(
+            crate::link::LINKTYPE_ETHERNET,
+            2,
+            &tcp_packet(seq, &declare),
+        );
+        d.finish();
+
+        let census = crate::interest::interests(&d);
+        let table = crate::agg::aggregate(&d);
+        let coverage = census.coverage(&table);
+        let nodes = crate::node::nodes(&d);
+        assert_eq!(nodes.nodes().len(), 2, "both ends named themselves");
+        assert_eq!(
+            nodes.links().len(),
+            1,
+            "and the handshake both ways is a link"
+        );
+
+        let report = CaptureReport::of(&d).with_nodes(&nodes).with_interests(
+            &census,
+            &coverage,
+            Some(&nodes),
+        );
+        let (text, json) = (report.to_text(), report.to_json());
+
+        for (what, rendering) in [("text", &text), ("json", &json)] {
+            assert!(
+                rendering.contains("4030201") && rendering.contains("b4b3b2b1"),
+                "the {what} report must name both nodes in zenoh's spelling:\n{rendering}"
+            );
+            assert!(
+                !rendering.contains("01020304") && !rendering.contains("b1b2b3b4"),
+                "the {what} report must not print the wire order anywhere:\n{rendering}"
+            );
+        }
+        assert!(
+            text.contains("4030201 subscriber robot/arm"),
+            "the declarer prefix is a third caller of the renderer:\n{text}"
+        );
+        assert!(
+            text.contains("link 4030201 <-> b4b3b2b1"),
+            "and so is the link line:\n{text}"
+        );
+        assert!(
+            json.contains("\"a\":\"4030201\",\"b\":\"b4b3b2b1\""),
+            "and the JSON link pair:\n{json}"
+        );
+        assert!(
+            json.contains("\"declarer_zid\":\"4030201\""),
+            "and the JSON declarer:\n{json}"
+        );
     }
 
     /// One `T_MID_FRAME` carrying a subscriber declaration, for a datagram

@@ -667,6 +667,33 @@ pub const DOCUMENT_HISTORY: &[DocumentShape] = &[
         planes: CENSUS_R6_PLANES,
         carries: CENSUS_R11_CARRIES,
     },
+    // ZA-3687 — THE ZID VALUES CHANGED SPELLING UNDER STATIONARY KEYS.
+    //
+    // No key moves, nothing retires, and no family, plane or carries axis has
+    // anything to say: `nodes[].zid` and `interests[].declarer_zid` are the two
+    // keys that carry a zid and both were already in the set. What moved is
+    // the TEXT under them. They used to write each wire byte in turn; they now
+    // write zenoh's spelling, the little-endian id read as a `u128` (the bytes
+    // REVERSED, a leading zero nibble dropped), which is what zenohd logs and
+    // what a config file's `id` takes. A node that read `584f1edb…` here and
+    // `af0b5b89…` in the router's log now reads the same in both.
+    //
+    // ⚠ SO THE REVISION NUMBER IS THE WHOLE NOTICE, on the rule revisions 9 and
+    // 10 set for a value that moves under a stationary key. A consumer that
+    // JOINED a census row to a zid it obtained elsewhere by text found no
+    // match before and will find one now; a consumer that STORED the old text
+    // is holding a spelling no other surface prints. The selector notation
+    // moved with it (`zid ==`), so a stored selector fails loudly on a leading
+    // zero instead of quietly naming another node.
+    DocumentShape {
+        document: CENSUS,
+        revision: 13,
+        keys: CENSUS_R13_KEYS,
+        retiring: &[],
+        families: CENSUS_R11_FAMILIES,
+        planes: CENSUS_R6_PLANES,
+        carries: CENSUS_R11_CARRIES,
+    },
     DocumentShape {
         document: FIELDS,
         revision: 1,
@@ -1012,6 +1039,36 @@ pub const DOCUMENT_HISTORY: &[DocumentShape] = &[
         families: FIELDS_R14_FAMILIES,
         planes: &[],
         carries: FIELDS_R16_CARRIES,
+    },
+    // ZA-3687 — a tree field named `zid` is an IDENTITY, and gets a `kind` word
+    // of its own.
+    //
+    // ONE NEW WORD, no key added and none retired: `kind` gains `zid`, and a
+    // field the tree used to write as `"kind":"bytes"` with the hex of its span
+    // in wire order is now `"kind":"zid"` with `value` in zenoh's spelling, the
+    // little-endian id read as a `u128` (its bytes REVERSED, a leading zero
+    // nibble dropped). The span is unchanged and still names the raw wire
+    // bytes, so a consumer that highlights the cells reads them from the
+    // capture at `start..end` as before.
+    //
+    // ⚠ SO THIS REVISION IS THE WHOLE NOTICE FOR TWO THINGS, and the second is
+    // a VALUE moving under a stationary key, revision 9's class of census
+    // revision. A consumer's switch on `kind` is no longer exhaustive (the
+    // family widens), and a consumer that matched a zid off the old `value` has
+    // been reading the byte order zenohd does NOT log: the same node was
+    // `584f1edb…` here and `af0b5b89…` in the router's log.
+    //
+    // A consumer pinned to 16 loses nothing it could read correctly before: an
+    // unknown `kind` word is one to SHOW rather than drop, and its `value` is
+    // the identity the rest of this library now names a node by.
+    DocumentShape {
+        document: FIELDS,
+        revision: 17,
+        keys: FIELDS_R15_KEYS,
+        retiring: &[],
+        families: FIELDS_R17_FAMILIES,
+        planes: &[],
+        carries: FIELDS_R17_CARRIES,
     },
     DocumentShape {
         document: SUMMARY,
@@ -2210,6 +2267,26 @@ pub const CENSUS_R12_KEYS: &[&str] = &[
     "zid",
 ];
 
+/// The census document's key set at revision 13 (ZA-3687).
+///
+/// IDENTICAL to revision 12, and aliased for [`CENSUS_R2_KEYS`]' reason: a
+/// second hand-written copy of this list would be a claim that they are the
+/// same, checked by nobody, where the alias is that fact.
+///
+/// ⚠ NO AXIS HERE CAN SEE WHAT MOVED, which is revision 9's and 10's situation
+/// again. The two keys that carry a zid, `zid` on a `nodes[]` entry and
+/// `declarer_zid` on an interest row, are in this set since revision 1, so
+/// [`DocumentShape::keys`] cannot move however the text under them changes; and
+/// neither draws from a closed vocabulary, so [`ValueFamily`] has nothing to
+/// declare, and neither decides the shape of the object it sits in, so
+/// [`KeyCarries`] has nothing either. What changed is the SPELLING: each wire
+/// byte in turn until this revision, zenoh's own since — the little-endian id
+/// read as a `u128`, the bytes reversed, a leading zero nibble dropped. The
+/// revision number is therefore the WHOLE notice a consumer gets, which is why
+/// it is written down here and on the [`DocumentShape`] row rather than left to
+/// a commit message.
+pub const CENSUS_R13_KEYS: &[&str] = CENSUS_R12_KEYS;
+
 /// WHY a keyexpr reference did not resolve, at census revision 11.
 ///
 /// `crate::agg::UnresolvedCause::name` is the one place these are spelled, and
@@ -3044,6 +3121,23 @@ pub const FIELDS_R3_FAMILIES: &[ValueFamily] = &[
 /// it, and then the revision would never have to move.
 pub const FIELD_VALUE_KIND_R3: &[&str] = &[
     "bits", "bytes", "flag", "label", "nested", "opaque", "text", "uint",
+];
+
+/// `fields[].kind` at field-document revision 17 — revision 3's PLUS `zid`, and
+/// SORTED for the same reason.
+///
+/// ZA-3687. A field named `zid` is an identity, not opaque bytes, and the tree
+/// now says so: `kind` is `zid` and its `value` is zenoh's spelling of the
+/// identity, while the span still names the raw wire bytes. The word is NEW, so
+/// a consumer whose switch on `kind` was written against revision 3's eight is
+/// no longer exhaustive and must add an arm — which is why this is a revision
+/// and not a silent widening. Until it does, an unknown word is a value it
+/// should SHOW rather than drop.
+///
+/// Written out rather than pointing at the walk, for the reason
+/// [`FIELD_VALUE_KIND_R3`] gives.
+pub const FIELD_VALUE_KIND_R17: &[&str] = &[
+    "bits", "bytes", "flag", "label", "nested", "opaque", "text", "uint", "zid",
 ];
 
 /// The field document's key set at revision 4 — revision 3's, unchanged.
@@ -4328,6 +4422,52 @@ pub const FIELD_VALUE_KIND_CARRIES_R4: &[WordCarries] = &[
     },
 ];
 
+/// Every shape each `fields[].kind` word's object takes, at field-document
+/// revision 17 — revision 4's PLUS `zid`.
+///
+/// ZA-3687. `zid` arrives with `name`, `start`, `end` and `value` like the
+/// other scalar words: the identity's text rides in `value`, and the span keeps
+/// naming the raw wire bytes. One shape, because the object is still written by
+/// the single `match` whose arm the word IS.
+pub const FIELD_VALUE_KIND_CARRIES_R17: &[WordCarries] = &[
+    WordCarries {
+        word: "bits",
+        shapes: &[&["end", "name", "start", "value"]],
+    },
+    WordCarries {
+        word: "bytes",
+        shapes: &[&["end", "name", "start", "value"]],
+    },
+    WordCarries {
+        word: "flag",
+        shapes: &[&["end", "name", "start", "value"]],
+    },
+    WordCarries {
+        word: "label",
+        shapes: &[&["end", "name", "start", "value"]],
+    },
+    WordCarries {
+        word: "nested",
+        shapes: &[&["end", "fields", "name", "start"]],
+    },
+    WordCarries {
+        word: "opaque",
+        shapes: &[&["end", "name", "start"]],
+    },
+    WordCarries {
+        word: "text",
+        shapes: &[&["end", "name", "start", "value"]],
+    },
+    WordCarries {
+        word: "uint",
+        shapes: &[&["end", "name", "start", "value"]],
+    },
+    WordCarries {
+        word: "zid",
+        shapes: &[&["end", "name", "start", "value"]],
+    },
+];
+
 /// Every shape each `fields[].offset_space` word's object takes, at
 /// field-document revision 4.
 ///
@@ -4997,6 +5137,76 @@ pub const FIELDS_R16_CARRIES: &[KeyCarries] = &[
     },
 ];
 
+/// What each field-document family's WORD decides at revision 17 — revision
+/// 16's, with `kind` read from [`FIELD_VALUE_KIND_CARRIES_R17`] (ZA-3687: the
+/// tree gains the word `zid`).
+pub const FIELDS_R17_CARRIES: &[KeyCarries] = &[
+    KeyCarries {
+        key: "carried_state",
+        shape: CarriesShape::Discriminant(CARRIED_STATE_CARRIES_R12),
+    },
+    KeyCarries {
+        key: "direction",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "keyexpr_cause",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "kind",
+        shape: CarriesShape::Discriminant(FIELD_VALUE_KIND_CARRIES_R17),
+    },
+    KeyCarries {
+        key: "link",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "message",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "offset_space",
+        shape: CarriesShape::Discriminant(FIELD_OFFSET_SPACE_CARRIES_R16),
+    },
+    KeyCarries {
+        key: "outcome",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "phase",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "priority",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "reason",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "selected",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "state",
+        shape: CarriesShape::Discriminant(PAYLOAD_STATE_CARRIES_R4),
+    },
+    KeyCarries {
+        key: "under",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "verdict",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "wrong",
+        shape: CarriesShape::Passenger,
+    },
+];
+
 /// What each field-document family's WORD decides at revision 15 — revision
 /// 14's, with `offset_space`'s shapes corrected and widened (see
 /// [`FIELD_OFFSET_SPACE_CARRIES_R15`]). Generated from revision 14's table.
@@ -5341,6 +5551,80 @@ pub const FIELDS_R14_FAMILIES: &[ValueFamily] = &[
     ValueFamily {
         key: "kind",
         values: FIELD_VALUE_KIND_R3,
+    },
+    ValueFamily {
+        key: "link",
+        values: LINK_KIND_R7,
+    },
+    ValueFamily {
+        key: "message",
+        values: MESSAGE_R10,
+    },
+    ValueFamily {
+        key: "offset_space",
+        values: ANCHOR_SPACE_FIELDS_R2,
+    },
+    ValueFamily {
+        key: "outcome",
+        values: CHAIN_OUTCOME_R14,
+    },
+    ValueFamily {
+        key: "phase",
+        values: SESSION_PHASE_R14,
+    },
+    ValueFamily {
+        key: "priority",
+        values: PRIORITY_R14,
+    },
+    ValueFamily {
+        key: "reason",
+        values: CHAIN_REASON_R14,
+    },
+    ValueFamily {
+        key: "selected",
+        values: SELECTED_R13,
+    },
+    ValueFamily {
+        key: "state",
+        values: PAYLOAD_STATE_R2,
+    },
+    ValueFamily {
+        key: "under",
+        values: REFUSED_UNDER_R2,
+    },
+    ValueFamily {
+        key: "verdict",
+        values: SN_VERDICT_R14,
+    },
+    ValueFamily {
+        key: "wrong",
+        values: MISBOUND_R2,
+    },
+];
+
+/// The value families the field document declares at revision 17 — revision
+/// 14's (which revisions 15 and 16 kept), with `kind` read from
+/// [`FIELD_VALUE_KIND_R17`]: the tree gains the word `zid`.
+///
+/// ZA-3687. Written out rather than derived from revision 14's table, for the
+/// reason [`ValueFamily::values`] gives: a list that read the earlier one would
+/// widen with it, and then the revision would never have to move.
+pub const FIELDS_R17_FAMILIES: &[ValueFamily] = &[
+    ValueFamily {
+        key: "carried_state",
+        values: CARRIED_STATE_R12,
+    },
+    ValueFamily {
+        key: "direction",
+        values: DIRECTION_FIELDS_R2,
+    },
+    ValueFamily {
+        key: "keyexpr_cause",
+        values: UNRESOLVED_CAUSE_R11,
+    },
+    ValueFamily {
+        key: "kind",
+        values: FIELD_VALUE_KIND_R17,
     },
     ValueFamily {
         key: "link",
@@ -7544,7 +7828,11 @@ mod tests {
             // R2630 (item 745) — to 12 when the shared `dropped_by_limits`
             // group gained `scouting`. One key, and the count it names was
             // already measured; only this document's rendering was missing it.
-            (CENSUS, 12u32),
+            // ZA-3687 — to 13 when the two zid values (`nodes[].zid`,
+            // `interests[].declarer_zid`) changed SPELLING under stationary
+            // keys: the bytes reversed, zenoh's own. No axis here can see a
+            // value move, so this entry is the notice, as for 9 and 10.
+            (CENSUS, 13u32),
             // R2175 (open-debt item 552) — the field document moved to 2 when
             // its PAYLOAD PLANE joined the pin (fifteen keys revision 1 had
             // never covered) and its first three value families were declared.
@@ -7599,7 +7887,10 @@ mod tests {
             // never handed over.
             // ZA-3214 ① — to 15 when a row could carry a record's coordinates.
             // ZA-3215 ⑤ — to 16 when a packet row could be a declined one.
-            (FIELDS, 16),
+            // ZA-3687 — to 17 when the tree gained the `kind` word `zid`, a
+            // field named `zid` being an identity whose `value` is zenoh's
+            // spelling. The family widens by one word and no key moves.
+            (FIELDS, 17),
             // R2121 (open-debt item 460) — the summary moved to 2 when it
             // gained `inert_counters`; R2122 (item 238) to 3 when its
             // `framing` group stopped disagreeing with the capture report's.

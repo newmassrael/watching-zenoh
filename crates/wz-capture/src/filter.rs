@@ -483,9 +483,16 @@ impl Term {
             // negation rides inside rather than wrapping the answer. Negating
             // an unknown gives an unknown: a record whose sender we cannot name
             // cannot be shown to be someone else either.
+            // ZA-3687 — compared in CANONICAL form. `want` came out of
+            // `zenoh_hex_to_zid` and is length-trimmed; a wire zid from a peer
+            // that padded it with trailing zero bytes prints as the same text
+            // (`zid_to_zenoh_hex` zero-pads to 16), so it must select the same
+            // node rather than a second one that reads alike.
             Self::Zid { want, negated } => match record.zid {
                 None => Truth::Unknown,
-                Some(seen) => Truth::of((seen == want.as_slice()) != *negated),
+                Some(seen) => Truth::of(
+                    (wz_session_core::zid_hex::canonical_zid(seen) == want.as_slice()) != *negated,
+                ),
             },
             Self::Dir { want, negated } => {
                 Truth::of((dir_index(record.direction) == dir_index(*want)) != *negated)
@@ -571,22 +578,40 @@ use crate::agg::dir_index;
 /// R2757 (open debt 790) — a ZID as written in a selector, as the bytes a
 /// record carries.
 ///
-/// Bare lowercase-or-uppercase hex, an even number of digits, no prefix and no
-/// separators. The three refusals are separate on purpose rather than folded
-/// into one "malformed": a reader who typed an odd number of digits has
-/// truncated a byte and a reader who typed `0x` has brought a convention from
-/// somewhere else, and telling them apart is the difference between a message
-/// they can act on and one they have to guess at.
+/// Bare hex in ZENOH'S spelling, no prefix and no separators, either case.
+///
+/// ZA-3687 — THE NOTATION IS THE ONE EVERY OTHER SURFACE PRINTS. It used to be
+/// the wire order, byte by byte: `0a0b0c0d` meant the bytes `0a 0b 0c 0d`, an
+/// even number of digits was required, and it matched what the field document
+/// then printed, so a reader could lift a zid off a row into a selector. That
+/// spelling is not the one zenohd logs or the one a config file's `id` takes:
+/// zenoh prints the little-endian id read as a `u128`, so the same node was
+/// `af0b5b89…` in the log and `584f1edb…` in the census. Both documents and this
+/// notation now go through [`zid_to_zenoh_hex`] and its inverse, so what a
+/// reader copies from a row, a report, a log line or a config is what a selector
+/// takes.
+///
+/// What that changes for a selector typed against the old notation: a leading
+/// `0` is refused, exactly as zenohd refuses it in an `id`, and an ODD number of
+/// digits is now the ordinary case (`4030201` is a zid; zenoh strips the leading
+/// zero nibble when it prints one). A stored `zid == 0a0b0c0d` therefore fails
+/// LOUDLY instead of quietly selecting some other node.
+///
+/// Two departures from [`zenoh_hex_to_zid`], both deliberate because a selector
+/// is typed by a reader and not loaded from a config: UPPERCASE is accepted (the
+/// selector took either case before, and `A1A1A1A1` and `a1a1a1a1` are one
+/// zid), and a leading `+` is not (upstream's config loader takes it as a quirk
+/// of `from_str_radix`; nothing here should).
 ///
 /// ⚠ THE EMPTY GUARD IS UNREACHABLE FROM THE PARSER, and it is kept anyway —
 /// with the reason stated rather than left to look like a live arm. `zid ==`
 /// with nothing after it is refused one level up, by the tokenizer, as
 /// `UnexpectedEnd`; measured, not assumed. What the guard buys is that this
 /// function is correct on its OWN terms for a second caller that does not come
-/// through the grammar: without it, `""` passes the even-length check (`0 % 2`
-/// is `0`) and `chunks(2)` yields nothing, compiling to a term that matches a
-/// zero-length zid no node announces — a selector that selects nothing while
-/// looking like a measurement.
+/// through the grammar.
+///
+/// [`zid_to_zenoh_hex`]: wz_session_core::zid_hex::zid_to_zenoh_hex
+/// [`zenoh_hex_to_zid`]: wz_session_core::zid_hex::zenoh_hex_to_zid
 fn parse_zid(value: &str, at: usize) -> Result<Vec<u8>, FilterError> {
     let refuse = || FilterError {
         at,
@@ -595,19 +620,10 @@ fn parse_zid(value: &str, at: usize) -> Result<Vec<u8>, FilterError> {
             value: value.to_string(),
         },
     };
-    if value.is_empty() || !value.len().is_multiple_of(2) {
+    if value.is_empty() || !value.bytes().all(|b| b.is_ascii_hexdigit()) {
         return Err(refuse());
     }
-    let bytes: Option<Vec<u8>> = value
-        .as_bytes()
-        .chunks(2)
-        .map(|pair| {
-            let hi = (pair[0] as char).to_digit(16)?;
-            let lo = (pair[1] as char).to_digit(16)?;
-            Some((hi * 16 + lo) as u8)
-        })
-        .collect();
-    bytes.ok_or_else(refuse)
+    wz_session_core::zid_hex::zenoh_hex_to_zid(&value.to_ascii_lowercase()).ok_or_else(refuse)
 }
 
 /// The parsed expression tree.
@@ -1363,11 +1379,14 @@ impl<'a> Parser<'a> {
             //
             // The notation is BARE HEX with no prefix and no separators, and
             // that is a measurement rather than a preference: the consuming
-            // viewer already renders a short `Bytes` field as exactly these
-            // characters, so a reader can lift a zid off a row and drop it
-            // into a selector without re-typing it. A `0x` prefix or a
-            // colon-separated form would have made the two surfaces disagree
-            // about one value.
+            // viewer renders a zid as exactly these characters, so a reader can
+            // lift one off a row and drop it into a selector without
+            // re-typing it. A `0x` prefix or a colon-separated form would have
+            // made the two surfaces disagree about one value.
+            //
+            // ZA-3687 — "these characters" is ZENOH'S spelling now, and was the
+            // wire order until a consumer found the census and the zenohd log
+            // naming one node two ways. See `parse_zid` for what changed.
             "zid" => {
                 let negated = equality_negation(op, "zid", op_at)?;
                 Term::Zid {
@@ -1700,10 +1719,18 @@ mod tests {
     /// R2757 — WHAT THE NOTATION REFUSES, each for its own reason.
     ///
     /// Separate cases rather than one "malformed" assertion, because they are
-    /// different mistakes: an odd digit count has truncated a byte, a `0x` or a
-    /// colon form has brought a convention from another tool, and a non-hex
-    /// digit is a typo. Each is refused BY NAME so the message says which term
-    /// was wrong rather than only that something was.
+    /// different mistakes: a `0x` or a colon form has brought a convention from
+    /// another tool, a non-hex digit is a typo, and each refusal is BY NAME so
+    /// the message says which term was wrong rather than only that something
+    /// was.
+    ///
+    /// ZA-3687 — the list is zenoh's refusals now. An ODD digit count LEFT it
+    /// (it is how zenoh prints a zid whose top nibble is zero, so `a1a1a1a` is a
+    /// zid), and three spellings ARRIVED: a leading `0` (`01020304`, the old
+    /// per-byte spelling of `1 2 3 4`, which zenohd refuses in an `id` and which
+    /// would otherwise have quietly meant a DIFFERENT node), a leading `+` (an
+    /// upstream quirk of the config loader that a selector should not take), and
+    /// a value past 32 digits, which is more than the 16 bytes a zid can be.
     ///
     /// ⚠ EMPTY IS NOT IN THIS LIST, and finding out why corrected this term's
     /// own documentation. `zid ==` with nothing after it never reaches
@@ -1714,7 +1741,16 @@ mod tests {
     /// being presented as the arm that catches this.
     #[test]
     fn the_node_notation_refuses_what_it_cannot_read() {
-        for bad in ["a1a1a1a", "0xa1a1a1a1", "a1a1a1ag", "a1:a1:a1:a1"] {
+        let too_long = alloc::format!("1{}", "0".repeat(32));
+        for bad in [
+            "0xa1a1a1a1",
+            "a1a1a1ag",
+            "a1:a1:a1:a1",
+            "01020304",
+            "0",
+            "+1",
+            too_long.as_str(),
+        ] {
             let parsed = Filter::parse(&alloc::format!("zid == {bad}"));
             assert!(parsed.is_err(), "this notation must not parse: {bad:?}");
             let err = parsed.unwrap_err();
@@ -1724,6 +1760,78 @@ mod tests {
                  it was: {bad:?} gave {err:?}"
             );
         }
+        // What LEFT the list: an odd digit count is an ordinary zid.
+        assert!(
+            Filter::parse("zid == a1a1a1a").is_ok(),
+            "an odd number of digits is how zenoh prints a zid with a zero top nibble"
+        );
+    }
+
+    /// ZA-3687 — THE SELECTOR TAKES THE SPELLING ZENOH PRINTS, not the wire
+    /// order, judged on a zid that is NOT a palindrome.
+    ///
+    /// The record's zid is the wire bytes `01 02 03 04`. Zenoh prints that as
+    /// `4030201` (the little-endian id read as a `u128`), and that is what the
+    /// census, the field document and a zenohd log now all say, so it is what
+    /// selects the node. The per-byte spelling `01020304` is REFUSED (leading
+    /// zero), and its digits reversed byte by byte, `1020304`, is a well-formed
+    /// zid that names a DIFFERENT node — which is the whole reason a spelling
+    /// change is announced by revision rather than slipped in: the old text does
+    /// not stop working, it starts meaning someone else.
+    ///
+    /// A palindromic fixture (`a1a1a1a1`, `0a0a0a0a`) reads the same both ways
+    /// and cannot tell any of this apart; every other zid test in this file uses
+    /// one, which is how the disagreement went unseen.
+    #[test]
+    fn the_selector_takes_zenohs_spelling_and_the_wire_order_names_another_node() {
+        let record = RecordView {
+            zid: Some(&[0x01, 0x02, 0x03, 0x04]),
+            ..put(Some("demo/a"))
+        };
+        let zenoh = Filter::parse("zid == 4030201").expect("parses");
+        assert_eq!(
+            zenoh.matches(&record),
+            Truth::Yes,
+            "zenoh's spelling selects it"
+        );
+
+        let err =
+            Filter::parse("zid == 01020304").expect_err("the per-byte spelling has a leading 0");
+        assert!(
+            matches!(err.kind, FilterErrorKind::UnknownValue { field: "zid", .. }),
+            "{err:?}"
+        );
+
+        let other = Filter::parse("zid == 1020304").expect("a well-formed zid");
+        assert_eq!(
+            other.matches(&record),
+            Truth::No,
+            "the old text's digits, in zenoh's order, are a different node"
+        );
+    }
+
+    /// ZA-3687 — a wire zid a peer PADDED with trailing zero bytes is the node
+    /// its printed text names.
+    ///
+    /// `zid_to_zenoh_hex` zero-pads to 16 bytes, so `01 02 03 04` and
+    /// `01 02 03 04 00 00` print as the same `4030201` and are one node to
+    /// zenoh. The selector compares in canonical form so the record with the
+    /// padding is selected by that text instead of by a second selector that
+    /// reads alike. The unpadded record is judged in the same test, so a
+    /// comparison that only ever trimmed the wrong side cannot pass.
+    #[test]
+    fn a_zid_padded_with_trailing_zero_bytes_is_the_node_its_text_names() {
+        let f = Filter::parse("zid == 4030201").expect("parses");
+        let padded = RecordView {
+            zid: Some(&[0x01, 0x02, 0x03, 0x04, 0x00, 0x00]),
+            ..put(Some("demo/a"))
+        };
+        let plain = RecordView {
+            zid: Some(&[0x01, 0x02, 0x03, 0x04]),
+            ..put(Some("demo/a"))
+        };
+        assert_eq!(f.matches(&padded), Truth::Yes);
+        assert_eq!(f.matches(&plain), Truth::Yes);
     }
 
     /// R2757 — and the empty value is refused ONE LAYER UP, which is where it

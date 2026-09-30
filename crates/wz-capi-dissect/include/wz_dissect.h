@@ -202,17 +202,27 @@
  * R2182 -- AND THE FIELD TREE'S OWN DISCRIMINANT, at field-document revision 3:
  *
  *     `kind`          what a walked field holds, and therefore WHICH KEY comes
- *                     with it. `bits`, `flag`, `uint`, `bytes`, `text` and
- *                     `label` each carry `value`; `nested` carries `fields`,
- *                     an array of further field objects; `opaque` carries
- *                     NEITHER -- its span is the whole answer, and it means
- *                     this build knows where the structure is and did not walk
- *                     into it, which is not the same as there being nothing
- *                     there.
+ *                     with it. `bits`, `flag`, `uint`, `bytes`, `zid`, `text`
+ *                     and `label` each carry `value`; `nested` carries
+ *                     `fields`, an array of further field objects; `opaque`
+ *                     carries NEITHER -- its span is the whole answer, and it
+ *                     means this build knows where the structure is and did
+ *                     not walk into it, which is not the same as there being
+ *                     nothing there.
+ *
+ * ZA-3687 -- `zid`, at field-document revision 17: a field named `zid` is an
+ * IDENTITY and no longer opaque `bytes`. Its `value` is zenoh's spelling of the
+ * id -- the little-endian id read as a `u128`, so the wire bytes REVERSED, with
+ * a leading zero nibble dropped -- which is what zenohd logs, what a config
+ * file's `id` takes, and what the census and the `zid ==` selector now use. Its
+ * span is unchanged and still names the RAW WIRE BYTES: highlight the cells the
+ * span covers, and read the identity text beside them. A switch on `kind` that
+ * was written against the eight earlier words is no longer exhaustive; show an
+ * unknown word rather than dropping the field.
  *
  * @values fields kind
  *
- * ⚠ READ THE COMPANION KEY OFF THE WORD, not off the seven arms that happen to
+ * ⚠ READ THE COMPANION KEY OFF THE WORD, not off the arms that happen to
  * share one. `opaque` is the arm no capture in the wz tree produces, so a
  * consumer whose goldens come from real traffic meets it first in the field --
  * which is how the surface that asked for this vocabulary came to be missing
@@ -508,7 +518,7 @@
  *
  * SO THE DOCUMENT CARRIES THE LIST. Its envelope reads
  *
- *     {"document":{"name":"census","revision":12,
+ *     {"document":{"name":"census","revision":13,
  *                  "planes":["exchanges","interests","keyexprs","nodes",
  *                            "payloads"]}, ...}
  *
@@ -554,11 +564,11 @@
  *
  * Every family in `value_families` now carries a `carries` axis:
  *
- *     {"name":"fields","revision":16,"key":"kind","values":[...],
+ *     {"name":"fields","revision":17,"key":"kind","values":[...],
  *      "carries":[{"word":"bits","shapes":[["end","name","start","value"]]},
  *                 {"word":"opaque","shapes":[["end","name","start"]]}, ...]}
  *
- *     {"name":"census","revision":12,"key":"mode","values":[...],
+ *     {"name":"census","revision":13,"key":"mode","values":[...],
  *      "carries":null}
  *
  * `null` is a VALUE here and not an absence: it says the word is a PASSENGER --
@@ -1475,7 +1485,7 @@ int wz_dissect_declarations_diagnose(const char *declarations, char **out);
  *
  * R2175 -- the document is at REVISION 3, and the fourth key is `value_families`:
  *
- *     "value_families":[{"name":"fields","revision":16,"key":"state",
+ *     "value_families":[{"name":"fields","revision":17,"key":"state",
  *                        "values":["decoded","encoding_mismatch",…]}, …]
  *
  * every key in every document whose VALUE this build draws from a closed set,

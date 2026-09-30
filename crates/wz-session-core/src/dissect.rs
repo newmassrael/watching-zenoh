@@ -119,6 +119,24 @@ pub enum FieldValue {
     /// Raw bytes, carried owned so a dissection outlives the buffer it was
     /// read from (the same reason the inbound path owns its payloads).
     Bytes(Vec<u8>),
+    /// A ZenohId: the raw wire bytes of a `zid` field, carried owned like
+    /// [`Bytes`](FieldValue::Bytes) and OWNING their span the same way.
+    ///
+    /// ZA-3687 — a zid is an identity with a canonical text, not opaque bytes,
+    /// and the two were one variant until a consumer found the text wrong. A
+    /// `Bytes` field is written as the hex of its span, per byte in wire order,
+    /// and that is right for a payload and wrong for a zid: zenoh prints a zid
+    /// as the little-endian id read as a `u128`, i.e. the bytes REVERSED
+    /// ([`zid_to_zenoh_hex`](crate::zid_hex::zid_to_zenoh_hex)). Rendering it
+    /// through a generic bytes arm made this document and every other place that
+    /// names a node disagree about one identity.
+    ///
+    /// The bytes are still the wire's, and still what the span names, so a
+    /// consumer drawing the field on a hex column highlights the right cells and
+    /// reads the identity text beside them. Only the JSON word and its `value`
+    /// are decided by the variant: `kind` is `zid` and `value` is zenoh's
+    /// spelling.
+    Zid(Vec<u8>),
     /// UTF-8 text the decode validated.
     Text(String),
     /// A sub-structure walked into its own fields. The parent's span covers
@@ -178,6 +196,7 @@ impl FieldValue {
             FieldValue::Flag(_) => "flag",
             FieldValue::Uint(_) => "uint",
             FieldValue::Bytes(_) => "bytes",
+            FieldValue::Zid(_) => "zid",
             FieldValue::Text(_) => "text",
             FieldValue::Opaque => "opaque",
             FieldValue::Label(_) => "label",
@@ -257,7 +276,8 @@ impl FieldValue {
             FieldValue::Bits(_) => FieldValue::Flag(true),
             FieldValue::Flag(_) => FieldValue::Uint(0),
             FieldValue::Uint(_) => FieldValue::Bytes(Vec::new()),
-            FieldValue::Bytes(_) => FieldValue::Text(String::new()),
+            FieldValue::Bytes(_) => FieldValue::Zid(Vec::new()),
+            FieldValue::Zid(_) => FieldValue::Text(String::new()),
             FieldValue::Text(_) => FieldValue::Opaque,
             FieldValue::Opaque => FieldValue::Label(Cow::Borrowed("")),
             FieldValue::Label(_) => FieldValue::Nested(Vec::new()),
@@ -644,6 +664,23 @@ impl<'a> SpanCursor<'a> {
                 end: self.offset(),
             },
             value: FieldValue::Bytes(raw),
+        })
+    }
+
+    /// Read a ZenohId of `n` wire bytes, as a field named `zid`.
+    ///
+    /// ZA-3687 — the one constructor of a [`FieldValue::Zid`], so the seven
+    /// places a codec names a `zid` cannot each choose whether it is an identity
+    /// or opaque bytes. The bytes and the span are exactly what
+    /// [`Self::bytes`] returns; only the variant differs.
+    pub fn zid(&mut self, n: usize) -> Result<Field, CodecError> {
+        let field = self.bytes("zid", n)?;
+        let FieldValue::Bytes(raw) = field.value else {
+            unreachable!("bytes() builds a Bytes value")
+        };
+        Ok(Field {
+            value: FieldValue::Zid(raw),
+            ..field
         })
     }
 
@@ -1861,7 +1898,7 @@ fn walk_zid_prefixed(c: &mut SpanCursor<'_>) -> Result<Vec<Field>, CodecError> {
     let carrier = hdr.span;
     let len_m1 = ((byte >> 4) & 0x0F) as u64;
     let mut out = alloc::vec![hdr, bits("zid_len_m1", carrier, len_m1)];
-    out.push(c.bytes("zid", len_m1 as usize + 1)?);
+    out.push(c.zid(len_m1 as usize + 1)?);
     Ok(out)
 }
 
@@ -1992,7 +2029,7 @@ fn walk_ext_chain_fill(
 pub fn walk_timestamp(c: &mut SpanCursor<'_>) -> Result<Vec<Field>, CodecError> {
     let (_, time) = c.vle_u64("time")?;
     let (n, zid_len) = c.vle_u64("zid_len")?;
-    let zid = c.bytes("zid", n as usize)?;
+    let zid = c.zid(n as usize)?;
     Ok(alloc::vec![time, zid_len, zid])
 }
 
@@ -2679,7 +2716,7 @@ pub fn walk_scout(c: &mut SpanCursor<'_>) -> Result<Vec<Field>, CodecError> {
     ];
     // I-gated, and the LENGTH rides the same carrier: `(cbyte >> 4) + 1`.
     if (cbyte & 0x08) != 0 {
-        out.push(c.bytes("zid", (((cbyte >> 4) & 0x0F) as usize) + 1)?);
+        out.push(c.zid((((cbyte >> 4) & 0x0F) as usize) + 1)?);
     }
     Ok(out)
 }
@@ -2700,7 +2737,7 @@ pub fn walk_hello(c: &mut SpanCursor<'_>, l: bool) -> Result<Vec<Field>, CodecEr
         bits("whatami", carrier, (cbyte & 0x03) as u64),
         bits("zid_len_m1", carrier, ((cbyte >> 4) & 0x0F) as u64),
     ];
-    out.push(c.bytes("zid", (((cbyte >> 4) & 0x0F) as usize) + 1)?);
+    out.push(c.zid((((cbyte >> 4) & 0x0F) as usize) + 1)?);
     if l {
         let (n, count) = c.vle_u64("num_locators")?;
         out.push(count);
@@ -2755,7 +2792,7 @@ fn walk_linkstate_entry(c: &mut SpanCursor<'_>) -> Result<Field, CodecError> {
     if (options & 0x01) != 0 {
         let (n, len) = c.vle_u64("zid_len")?;
         fields.push(len);
-        fields.push(c.bytes("zid", n as usize)?);
+        fields.push(c.zid(n as usize)?);
     }
     if (options & 0x02) != 0 {
         let (_, w) = c.u8("whatami")?;
@@ -3405,7 +3442,7 @@ pub fn dissect_transport_message(bytes: &[u8], base: usize) -> Result<Field, Cod
             out.push(cbyte_field);
             out.push(bits("whatami", cb_span, (cbyte & 0x03) as u64));
             out.push(bits("zid_len", cb_span, (((cbyte >> 4) & 0xF) + 1) as u64));
-            out.push(c.bytes("zid", ((cbyte >> 4) & 0xF) as usize + 1)?);
+            out.push(c.zid(((cbyte >> 4) & 0xF) as usize + 1)?);
             if (header & 0x40) != 0 {
                 out.extend(sn_res_and_batch(&mut c)?);
             }
@@ -3455,7 +3492,7 @@ pub fn dissect_transport_message(bytes: &[u8], base: usize) -> Result<Field, Cod
             out.push(cbyte_field);
             out.push(bits("whatami", cb_span, (cbyte & 0x03) as u64));
             out.push(bits("zid_len", cb_span, (((cbyte >> 4) & 0xF) + 1) as u64));
-            out.push(c.bytes("zid", ((cbyte >> 4) & 0xF) as usize + 1)?);
+            out.push(c.zid(((cbyte >> 4) & 0xF) as usize + 1)?);
             if (header & 0x40) != 0 {
                 out.extend(sn_res_and_batch(&mut c)?);
             }
@@ -3572,7 +3609,7 @@ fn push_json(field: &Field, out: &mut String) {
     //
     // What each arm still owns is the COMPANION KEY, which is a function of the
     // word and not the same fact: `opaque` has none — its span is the whole
-    // answer — `nested` carries `fields`, and the other six carry `value`. That
+    // answer — `nested` carries `fields`, and the other seven carry `value`. That
     // map is pinned by `the_field_object_carries_one_key_per_kind_word`; see
     // its doc for why this round declares the WORDS to a consumer and files the
     // per-word key map as its own item rather than declaring half an axis.
@@ -3594,6 +3631,16 @@ fn push_json(field: &Field, out: &mut String) {
             for byte in b {
                 let _ = write!(out, "{byte:02x}");
             }
+            out.push('"');
+        }
+        // ZA-3687 — a zid's `value` is the identity text, zenoh's spelling, and
+        // not the hex of its span: the span still names the raw wire bytes, and
+        // a consumer that wants THOSE reads them from the capture at
+        // `start..end`. Written through the one recipe, so this document and
+        // every other place that names a node cannot spell a zid two ways.
+        FieldValue::Zid(z) => {
+            out.push_str(",\"value\":\"");
+            out.push_str(&crate::zid_hex::zid_to_zenoh_hex(z));
             out.push('"');
         }
         FieldValue::Text(s) => {
@@ -4418,8 +4465,19 @@ mod tests {
     #[track_caller]
     fn raw(root: &Field, name: &str) -> Vec<u8> {
         match root.find(name).map(|f| &f.value) {
-            Some(FieldValue::Bytes(v)) => v.clone(),
-            other => panic!("{name} is not bytes: {other:?}"),
+            // ZA-3687 — THE NAME DECIDES THE VARIANT, both ways. A field named
+            // `zid` must be a `Zid` and any other name must be `Bytes`, so every
+            // test here that reads a `zid` through this helper is also a check
+            // that the walker under test emits an identity and not opaque bytes.
+            // That is the population of emission sites (`Cursor::zid`'s seven
+            // callers), taken from the tests that already build one message of
+            // each shape rather than from a list this file would have to keep.
+            Some(FieldValue::Zid(v)) if name == "zid" => v.clone(),
+            Some(FieldValue::Bytes(v)) if name != "zid" => v.clone(),
+            other => panic!(
+                "{name} is not the variant its name asks for (`zid` is a Zid, \
+                 anything else Bytes): {other:?}"
+            ),
         }
     }
 
@@ -6470,6 +6528,48 @@ mod tests {
         assert_eq!(uint(ts, "time"), 0x0123_4567);
         assert_eq!(raw(ts, "zid"), zid.to_vec());
         assert!(ts.find("value").is_none());
+    }
+
+    /// ZA-3687 — A ZID FIELD IS AN IDENTITY: `kind` is `zid`, `value` is zenoh's
+    /// spelling, and the span still names the raw wire bytes.
+    ///
+    /// The zid is `01 02 03 04` on purpose. A palindrome (`0a0a0a0a`) reads the
+    /// same reversed, so a renderer with the order wrong passes every test
+    /// written with one — which is how a consumer's fixtures hid this. Here the
+    /// per-byte wire spelling (`01020304`) and zenoh's (`4030201`, the
+    /// little-endian id read as a `u128`) differ in length as well as in digits,
+    /// so neither the order nor the leading-zero rule can be wrong unseen.
+    ///
+    /// The expected text is a literal worked out by hand from the recipe, and
+    /// the raw bytes are read back OUT OF THE INPUT at the span, so the test
+    /// does not grade the renderer against the function it calls.
+    #[test]
+    fn a_zid_field_reaches_the_document_as_zenohs_spelling_over_its_raw_span() {
+        let zid = [0x01u8, 0x02, 0x03, 0x04];
+        let bytes = timestamp(0x0123_4567, &zid);
+        let mut c = SpanCursor::new(&bytes);
+        let fields = walk_timestamp(&mut c).expect("the timestamp walks");
+        let field = fields
+            .iter()
+            .find(|f| f.name == "zid")
+            .expect("a timestamp names its zid");
+
+        assert_eq!(field.value, FieldValue::Zid(zid.to_vec()), "an identity");
+        assert_eq!(
+            &bytes[field.span.start..field.span.end],
+            &zid[..],
+            "the span names the raw wire bytes, not the identity text"
+        );
+        let json = to_json(field);
+        assert!(json.contains("\"kind\":\"zid\""), "the word: {json}");
+        assert!(
+            json.contains("\"value\":\"4030201\""),
+            "zenoh's spelling: {json}"
+        );
+        assert!(
+            !json.contains("01020304"),
+            "the per-byte wire spelling must not be what a zid prints: {json}"
+        );
     }
 
     // ── R311y894: `Join`'s ZBuf `qos`, the per-priority next-SN table ─────
@@ -8829,8 +8929,8 @@ mod tests {
     /// The kind vocabulary as MEASURED off the wire, in walk order -- written
     /// down only after an empty table made the test print what `to_json`
     /// actually writes, so this is a record and not a wish.
-    const FIELD_VALUE_KINDS: [&str; 8] = [
-        "bits", "flag", "uint", "bytes", "text", "opaque", "label", "nested",
+    const FIELD_VALUE_KINDS: [&str; 9] = [
+        "bits", "flag", "uint", "bytes", "zid", "text", "opaque", "label", "nested",
     ];
 
     /// One representative per variant, in the order [`FieldValue::kind_words`]
@@ -9027,8 +9127,8 @@ mod tests {
         use alloc::string::ToString as _;
         /// The companion of each word, in walk order. `""` is "no companion at
         /// all", which is `opaque`'s answer and the reason this test exists.
-        const COMPANIONS: [&str; 8] = [
-            "value", "value", "value", "value", "value", "", "value", "fields",
+        const COMPANIONS: [&str; 9] = [
+            "value", "value", "value", "value", "value", "value", "", "value", "fields",
         ];
 
         let mut seen: Vec<(String, String)> = Vec::new();

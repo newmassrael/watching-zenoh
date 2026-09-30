@@ -10404,10 +10404,16 @@ mod quic_pass_tests {
             "the fixture is QUIC and it opens: {rendered}"
         );
         // THE PLANE: the zid the Init carried, reached through the QUIC stream.
+        //
+        // ZA-3687 — in ZENOH'S spelling: the Init carries `51 52 53 54` and
+        // zenoh prints the little-endian id read as a `u128`, so the node is
+        // `54535251`. The per-byte wire order `51525354` is what this used to
+        // expect, and it is asserted ABSENT: this fixture's zid is not a
+        // palindrome, which is why it can tell the two apart at all.
         assert!(
-            rendered.contains("51525354"),
-            "the node census names the zid that was inside the QUIC stream: \
-             {rendered}"
+            rendered.contains("54535251") && !rendered.contains("51525354"),
+            "the node census names the zid that was inside the QUIC stream, in \
+             zenoh's spelling: {rendered}"
         );
 
         // AND THE FIELD LAYER, which is a SECOND plane with a second seam --
@@ -10556,9 +10562,14 @@ mod quic_pass_tests {
             "the zenoh inside the RFC 9221 datagram is decoded: {rendered}"
         );
         // And it reached a plane, by the identity only that message carries.
+        //
+        // ZA-3687 — in ZENOH'S spelling: the datagram's Init carries
+        // `61 62 63 64`, printed by zenoh as the little-endian id read as a
+        // `u128`, `64636261`. The per-byte order `61626364` is asserted absent.
         assert!(
-            rendered.contains("61626364"),
-            "the node census names the zid the datagram carried: {rendered}"
+            rendered.contains("64636261") && !rendered.contains("61626364"),
+            "the node census names the zid the datagram carried, in zenoh's \
+             spelling: {rendered}"
         );
         // The floor lifted, by name.
         let (_, outcome) = analyze(&capture, Some(keylog.as_bytes())).expect("it reads");
