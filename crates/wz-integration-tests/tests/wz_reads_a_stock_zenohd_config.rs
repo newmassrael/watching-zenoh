@@ -88,6 +88,7 @@ use wz_session_core::dissect::{dissect_transport_message, FieldValue};
 use wz_session_core::handshake_encode::encode_init;
 use wz_session_core::json5::{self, Json5Value};
 use wz_session_core::lease::lease_from_wire;
+use wz_session_core::zid_hex::zid_to_zenoh_hex;
 
 /// zenohd prints its resolved config on this line before doing anything else.
 const RESOLVED_CONF_MARKER: &str = "Initial conf:";
@@ -1396,12 +1397,18 @@ fn every_key_proven_on_the_wire_is_in_the_frame_a_zenohd_would_receive() {
             "transport: { link: { tx: { batch_size: 8192 } } }",
             "8192",
         ),
+        // ZA-3362 (ZA-3659) — the second id had a LEADING zero (`0f1e2d3c`), and
+        // zenohd refuses one in an `id` ("Leading 0s are not valid"), so does the
+        // demo since it reads the text as zenoh does, and the run exited before
+        // any frame was written. The pair keeps its point — two ids that differ
+        // and each read back as written — with an inner zero (`1f0e2d3c`), which
+        // is a digit and stays.
         (
             "id",
             r#"id: "a1b2c3d4""#,
             "a1b2c3d4",
-            r#"id: "0f1e2d3c""#,
-            "0f1e2d3c",
+            r#"id: "1f0e2d3c""#,
+            "1f0e2d3c",
         ),
         // R2085 (item 505) — the first key read out of a frame BEYOND the
         // InitSyn. Both values are deliberately not whole seconds: the OPEN
@@ -2947,7 +2954,24 @@ fn handshake_field_from_a_config(
         // gap rather than reporting the key as missing. That is the arm doing
         // its job: an unreadable field is not an absent one.
         Some(FieldValue::Bits(v)) => v.to_string(),
-        Some(FieldValue::Bytes(b)) => b.iter().map(|byte| format!("{byte:02x}")).collect(),
+        // ZA-3362 (ZA-3659) — the zid, spelled as ZENOH prints it and not in the
+        // wire's byte order. The frame carries the id as its little-endian bytes;
+        // zenoh prints those read as a `u128` in hex, so the text is the bytes
+        // REVERSED. This arm rendered them per byte in wire order until the demo
+        // learned to read `--zid` and a config `id` the way zenoh does, and from
+        // that round `id: "a1b2c3d4"` reached the wire correctly and was read
+        // back here as `d4c3b2a1`: the leg had agreed with the demo's old,
+        // reversed decode rather than with zenoh's.
+        //
+        // The recipe is `zid_to_zenoh_hex`, the function the demo names its own
+        // node with. It is adjudicated against a running zenohd where a zenohd
+        // prints a zid it received (`a_configured_zenohd_zid_renders_as_it_was_written`
+        // and the adminspace interop legs), so the wire text here is compared
+        // in the one spelling both implementations print.
+        //
+        // Only the zid is a `Bytes` reading. A second bytes-valued key falls to
+        // the arm below, which names it, rather than inheriting this recipe.
+        Some(FieldValue::Bytes(b)) if wire_name == "zid" => zid_to_zenoh_hex(b),
         other => panic!("the frame carries no {wire_name}: {other:?}\n{field:?}"),
     }
 }
@@ -3575,7 +3599,17 @@ fn a_wz_node_configured_only_by_a_stock_zenoh_config_reaches_a_real_zenohd() {
   //
   // The unhonoured keys stay out on purpose: they are reported, and this leg
   // is about the ones wz claims to apply.
-  id: "a1b2c3d4",
+  //
+  // ZA-3362 (ZA-3659) — the `id` is NOT the router file's (`a1b2c3d4`). A node
+  // that dials a zenohd carrying its own zid is refused: zenohd logs "Attempt to
+  // establish transport to itself" and closes the link with `CONNECTION_TO_SELF`
+  // (zenoh-transport `unicast/manager.rs`), so the demo reports the link lost
+  // right after connecting. This leg passed only because the demo decoded the
+  // text per byte, which gave the two nodes DIFFERENT wire zids for the SAME
+  // text; once the demo read the text as zenoh does, the shared string became a
+  // shared identity. It is also not `b1b2c3d4`, the destination the weight below
+  // names: a node weighing a link to itself is not what this fixture is about.
+  id: "c1d2e3f4",
   namespace: "demo/ns",
   // R2626 — `drop_future_timestamp` joins the EXISTING `timestamping` block for
   // the reason `peer/mode` joined `routing` below: a second block naming the
