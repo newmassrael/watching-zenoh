@@ -31,10 +31,21 @@ more than twice gets a gate.
 
 POPULATION, derived from the source and never listed: every `pub struct
 <name>_options_t` under `crates/wz-capi-pico/src`, and each named field of it.
-A field is READ when some function that takes that struct -- or a struct that
-EMBEDS it, which is how `ze_advanced_publisher_options_t` carries a
-`z_publisher_options_t` -- reads it as `.field` in its body, a function named
-`*_default` (which only writes) not counting, and an assignment not counting.
+A field is READ when some function with a parameter of that struct's type reads
+it off THAT PARAMETER in its body -- `(*options).field` or `options.field`, the
+parameter's own name, which a `let options = &*options;` re-binds harmlessly --
+or, for a struct EMBEDDED in the parameter's type, through the embedding field's
+name (`(*options).publisher_options.priority`, which is how
+`ze_advanced_publisher_options_t` carries a `z_publisher_options_t`). A function
+named `*_default` (which only writes) does not count, and neither does an
+assignment.
+
+The receiver matters: the first cut of this gate matched `.priority` anywhere in
+a function that took the struct, and the control that deleted the publisher's
+priority read stayed GREEN, because `ze_advanced_publisher_options_t`'s function
+also reads `.cache.priority`. The four fields that matter most to a publisher
+(encoding, congestion control, priority, express) are also fields of the cache,
+the reply and the querier options, so the name collision was the ordinary case.
 
 An UNREAD field must be in `UNREAD_WITH_REASON`, each with the reason nothing
 reads it. The table is checked in BOTH directions: an unread field that is not
@@ -43,14 +54,14 @@ cannot outlive the gap it explained.
 
 ## What it does NOT measure, stated rather than implied
 
-It finds fields NO function reads. It cannot say a read is the RIGHT read: a
-function that reads `.encoding` of a different struct than the one it takes
-would satisfy it, and a field read and then dropped would too. That half is the
-wire legs' and the round trips'. It is also text-based: a read through a
-destructuring pattern (`Struct { field, .. } = *options`) is invisible to it.
-A real read it misses shows up as a FALSE unread, which fails loudly, and the
-fix is to write the read as a field access. The blind spot that matters runs
-the other way (a wrong read passes), and it is the first one.
+It finds fields NO function reads off the parameter. It cannot say a read is the
+RIGHT read: a field read and then dropped satisfies it, and so does one read
+into the wrong slot. That half is the wire legs' and the round trips'. It is
+also text-based: a read through a destructuring pattern (`Struct { field, .. } =
+*options`) or through a local alias of the parameter is invisible to it. A real
+read it misses shows up as a FALSE unread, which fails loudly, and the fix is to
+write the read as a field access of the parameter. The blind spot that matters
+runs the other way (a wrong read passes), and it is the first one.
 
 ## Population zero is a FAIL
 
@@ -246,6 +257,31 @@ def parse_functions(code):
     return fns
 
 
+def split_params(params):
+    """`[(name, type text)]` of a parameter list, split at top-level commas.
+    A receiver (`self`) and a pattern that binds no single name are skipped."""
+    out = []
+    depth = 0
+    start = 0
+    pieces = []
+    for i, ch in enumerate(params):
+        if ch in "<([{":
+            depth += 1
+        elif ch == ">" and i > 0 and params[i - 1] == "-":
+            continue
+        elif ch in ">)]}":
+            depth -= 1
+        elif ch == "," and depth == 0:
+            pieces.append(params[start:i])
+            start = i + 1
+    pieces.append(params[start:])
+    for piece in pieces:
+        m = re.match(r"\s*(?:mut\s+)?(\w+)\s*:\s*(.+)", piece, re.S)
+        if m:
+            out.append((m.group(1), m.group(2)))
+    return out
+
+
 def analyse(sources):
     """(structs, functions, unread) over `{path: source text}`.
 
@@ -255,36 +291,94 @@ def analyse(sources):
     code = "\n".join(strip_code(t) for t in sources.values())
     structs = parse_structs(code)
     fns = parse_functions(code)
-    embeds = {}
-    for name, fields in structs.items():
-        inner = set()
-        for _, ty in fields:
-            for ident in re.findall(r"\w+", ty):
-                if ident in structs and ident != name:
-                    inner.add(ident)
-        embeds[name] = inner
 
-    def holders(name):
-        out = {name}
-        changed = True
-        while changed:
-            changed = False
-            for outer, inner in embeds.items():
-                if outer not in out and inner & out:
-                    out.add(outer)
-                    changed = True
+    def reads_through(struct, prefix, seen):
+        """(struct.field, regex) for each field of `struct` reached from a receiver
+        whose expression is `prefix`, and the same through every options struct it
+        EMBEDS (the field's type names it), each through the embedding field's name."""
+        for fld, ty in structs[struct]:
+            field_path = prefix + r"\s*\.\s*" + re.escape(fld)
+            yield f"{struct}.{fld}", field_path + r"\b(?!\s*=[^=])"
+            for ident in re.findall(r"\w+", ty):
+                if ident in structs and ident not in seen:
+                    yield from reads_through(ident, field_path, seen | {ident})
+
+    def embedded(struct):
+        """[(embedding field, embedded struct)] of `struct`."""
+        out = []
+        for fld, ty in structs[struct]:
+            for ident in re.findall(r"\w+", ty):
+                if ident in structs:
+                    out.append((fld, ident))
         return out
 
+    def receivers(body, pname, struct):
+        """Every expression in `body` that denotes a value of an options struct
+        derived from parameter `pname`, as (regex, struct type): the parameter
+        itself, a local bound to a reference to it or to a struct it embeds, and
+        the `Some(x)` of `param.as_ref()`. An alias carries the TYPE it aliases,
+        so `let c = &(*o).cache; c.priority` reads the cache's priority and not
+        the publisher's."""
+        base = r"(?:\(\s*\*\s*" + re.escape(pname) + r"\s*\)|\*\s*" + re.escape(pname) + r"\b|\b" + re.escape(pname) + r")"
+        found = [(base, struct)]
+        bound = set()
+        for _ in range(4):
+            grew = False
+            for rx, typ in list(found):
+                steps = [(rx, typ)]
+                frontier = [(rx, typ, {typ})]
+                while frontier:
+                    f_rx, f_typ, f_seen = frontier.pop()
+                    for f, s in embedded(f_typ):
+                        if s in f_seen:
+                            continue
+                        step = (f_rx + r"\s*\.\s*" + re.escape(f), s)
+                        steps.append(step)
+                        frontier.append((step[0], s, f_seen | {s}))
+                for path_rx, path_typ in steps:
+                    for m in re.finditer(
+                        r"\blet\s+(?:mut\s+)?(\w+)\s*(?::[^=;]+)?=\s*&\s*(?:mut\s+)?" + path_rx + r"\s*;",
+                        body,
+                    ):
+                        name = m.group(1)
+                        if (name, path_typ) not in bound:
+                            bound.add((name, path_typ))
+                            found.append((r"\b" + re.escape(name) + r"\b", path_typ))
+                            grew = True
+                for m in re.finditer(
+                    r"\bmatch\s+" + rx + r"\s*\.\s*as_(?:ref|mut)\s*\(\s*\)\s*\{\s*Some\s*\(\s*(\w+)\s*\)",
+                    body,
+                ):
+                    name = m.group(1)
+                    if (name, typ) not in bound:
+                        bound.add((name, typ))
+                        found.append((r"\b" + re.escape(name) + r"\b", typ))
+                        grew = True
+                for m in re.finditer(
+                    r"\bif\s+let\s+Some\s*\(\s*(\w+)\s*\)\s*=\s*" + rx + r"\s*\.\s*as_(?:ref|mut)\s*\(\s*\)",
+                    body,
+                ):
+                    name = m.group(1)
+                    if (name, typ) not in bound:
+                        bound.add((name, typ))
+                        found.append((r"\b" + re.escape(name) + r"\b", typ))
+                        grew = True
+            if not grew:
+                break
+        return found
+
     read = set()
-    for name, fields in structs.items():
-        held = holders(name)
-        pat = re.compile(r"\b(?:" + "|".join(map(re.escape, sorted(held))) + r")\b")
-        for fname, params, body in fns:
-            if fname.endswith("_default") or not pat.search(params):
-                continue
-            for fld, _ in fields:
-                if re.search(r"\." + re.escape(fld) + r"\b(?!\s*=[^=])", body):
-                    read.add(f"{name}.{fld}")
+    for fname, params, body in fns:
+        if fname.endswith("_default"):
+            continue
+        for pname, ptype in split_params(params):
+            for ident in set(re.findall(r"\w+", ptype)):
+                if ident not in structs:
+                    continue
+                for rx, typ in receivers(body, pname, ident):
+                    for key, field_rx in reads_through(typ, rx, {typ}):
+                        if re.search(field_rx, body):
+                            read.add(key)
     unread = set()
     for name, fields in structs.items():
         for fld, _ in fields:
@@ -373,10 +467,94 @@ def selftest():
 
     embedded = base + """
         pub struct b_options_t { pub inner: a_options_t, pub z: bool }
-        pub unsafe extern "C" fn take_b(o: *const b_options_t) -> i32 { let i = &(*o).inner; i.y + (*o).z as i32 }
+        pub unsafe extern "C" fn take_b(o: *const b_options_t) -> i32 { (*o).inner.y + (*o).z as i32 }
     """
     _, _, unread = analyse({"a.rs": embedded})
     assert unread == set(), f"a read through the struct that EMBEDS it counts: {unread}"
+
+    # THE CONTROL THAT FOUND THE FIRST CUT WEAK (R2990): two structs with a field of
+    # the same name, one embedded in the function's parameter. Matching `.priority`
+    # anywhere satisfied the publisher's field with the cache's, and the real tree
+    # stayed green with the publisher's priority read deleted. The read has to go
+    # through the receiver and the embedding field's name.
+    collision = """
+        pub struct pub_options_t { pub priority: i32, pub encoding: u8 }
+        pub struct cache_options_t { pub priority: i32 }
+        pub struct adv_options_t { pub publisher_options: pub_options_t, pub cache: cache_options_t }
+        pub unsafe extern "C" fn take_adv(o: *const adv_options_t) -> i32 {
+            (*o).cache.priority + (*o).publisher_options.encoding as i32
+        }
+    """
+    _, _, unread = analyse({"a.rs": collision})
+    assert unread == {"pub_options_t.priority"}, f"a same-named field of another struct is not a read: {unread}"
+
+    receiver_only = """
+        pub struct a_options_t { pub x: i32 }
+        pub unsafe extern "C" fn take_a(o: *const a_options_t, meta: &Meta) -> i32 { meta.x }
+    """
+    _, _, unread = analyse({"a.rs": receiver_only})
+    assert unread == {"a_options_t.x"}, f"a field read off some OTHER receiver is not a read: {unread}"
+
+    aliased = """
+        pub struct a_options_t { pub x: i32 }
+        pub unsafe extern "C" fn take_a(o: *const a_options_t) -> i32 { let alias = &*o; alias.x }
+    """
+    _, _, unread = analyse({"a.rs": aliased})
+    assert unread == set(), f"a local bound to a reference to the parameter is the parameter: {unread}"
+
+    # An alias carries the TYPE it aliases: the cache's local reads the cache's
+    # priority, and the publisher's stays unread -- the collision control again,
+    # now through a local.
+    alias_collision = """
+        pub struct pub_options_t { pub priority: i32 }
+        pub struct cache_options_t { pub priority: i32 }
+        pub struct adv_options_t { pub publisher_options: pub_options_t, pub cache: cache_options_t }
+        pub unsafe extern "C" fn take_adv(o: *const adv_options_t) -> i32 {
+            let c = &(*o).cache;
+            c.priority
+        }
+    """
+    _, _, unread = analyse({"a.rs": alias_collision})
+    assert unread == {"pub_options_t.priority", "adv_options_t.publisher_options"}, unread
+
+    alias_embedded = alias_collision.replace("let c = &(*o).cache;", "let c = &(*o).publisher_options;")
+    _, _, unread = analyse({"a.rs": alias_embedded})
+    assert unread == {"cache_options_t.priority", "adv_options_t.cache"}, unread
+
+    two_levels = """
+        pub struct leaf_options_t { pub on: bool, pub period: u64 }
+        pub struct mid_options_t { pub leaf: leaf_options_t, pub other: u8 }
+        pub struct top_options_t { pub mid: mid_options_t }
+        pub unsafe extern "C" fn take_top(o: *const top_options_t) -> u64 {
+            let last = &(*o).mid.leaf;
+            if last.on { last.period } else { 0 }
+        }
+    """
+    _, _, unread = analyse({"t.rs": two_levels})
+    assert unread == {"mid_options_t.other"}, f"an alias of a struct two levels down is followed: {unread}"
+
+    as_ref_form = """
+        pub struct s_options_t { pub what: u8, pub timeout_ms: u32 }
+        pub unsafe fn scout(options: *const s_options_t) -> u32 {
+            match options.as_ref() { Some(o) => o.what as u32 + o.timeout_ms, None => 0 }
+        }
+    """
+    _, _, unread = analyse({"s.rs": as_ref_form})
+    assert unread == set(), f"the Some(x) of param.as_ref() is the parameter: {unread}"
+
+    if_let_form = as_ref_form.replace(
+        "match options.as_ref() { Some(o) => o.what as u32 + o.timeout_ms, None => 0 }",
+        "if let Some(o) = options.as_ref() { o.what as u32 + o.timeout_ms } else { 0 }",
+    )
+    _, _, unread = analyse({"s.rs": if_let_form})
+    assert unread == set(), f"so is the binding of an if-let: {unread}"
+
+    shadowed = """
+        pub struct a_options_t { pub x: i32 }
+        pub unsafe extern "C" fn take_a(options: *const a_options_t) -> i32 { let options = &*options; options.x }
+    """
+    _, _, unread = analyse({"a.rs": shadowed})
+    assert unread == set(), f"re-binding the parameter's own name is a read of it: {unread}"
 
     only_b = """
         pub struct a_options_t { pub x: i32 }
