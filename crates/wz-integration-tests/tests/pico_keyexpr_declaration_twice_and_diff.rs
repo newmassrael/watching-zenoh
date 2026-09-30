@@ -326,6 +326,226 @@ int main(int argc, char **argv) {
 }
 "#;
 
+/// Publishers declared with options, and what each one's samples carry.
+///
+/// pico keeps a publisher's encoding, congestion control, priority, express flag
+/// and reliability in the publisher and sends every put and delete with them
+/// (`vendor/zenoh-pico/src/net/primitives.c` @
+/// `publisher->_congestion_control = congestion_control;`), so the declaration is
+/// where they come from and nothing else about a put can supply them. Each of the
+/// five is varied ALONE on a publisher of its own, and all of them together on
+/// another, so a field wired to the wrong slot shows as a different rendering
+/// rather than as the same default twice: a program whose options are all changed
+/// at once cannot tell a priority that landed in the congestion bit from one that
+/// landed where it belongs.
+///
+/// The publishers are, in order: everything changed (a put with no encoding of
+/// its own, a put with one, a delete); nothing declared (NULL options); the
+/// priority alone; express alone; best-effort alone; BLOCK alone; and an encoding
+/// with a schema alone (a put with none of its own, a put with one). Then the
+/// same options embedded in an ADVANCED publisher, without and with sequence
+/// numbers, because pico builds that from a plain publisher declared with them.
+const PUBLISHER_OPTIONS_DRIVER_SRC: &str = r#"
+#include <stdio.h>
+#include <string.h>
+#include <zenoh-pico.h>
+
+static int view(z_view_keyexpr_t *ke, const char *s) {
+    if (z_view_keyexpr_from_str(ke, s) < 0) {
+        printf("driver: bad keyexpr %s\n", s);
+        return -1;
+    }
+    return 0;
+}
+
+static int put_text(const z_loaned_publisher_t *pub, const char *text, const char *own_encoding) {
+    z_owned_bytes_t payload;
+    z_bytes_copy_from_str(&payload, text);
+    z_publisher_put_options_t opt;
+    z_publisher_put_options_default(&opt);
+    z_owned_encoding_t encoding;
+    if (own_encoding != NULL) {
+        z_encoding_from_str(&encoding, own_encoding);
+        opt.encoding = z_move(encoding);
+    }
+    if (z_publisher_put(pub, z_move(payload), &opt) < 0) {
+        printf("driver: put %s failed\n", text);
+        return -1;
+    }
+    z_sleep_ms(150);
+    return 0;
+}
+
+static int delete_it(const z_loaned_publisher_t *pub, const char *what) {
+    if (z_publisher_delete(pub, NULL) < 0) {
+        printf("driver: delete %s failed\n", what);
+        return -1;
+    }
+    z_sleep_ms(150);
+    return 0;
+}
+
+static int declare(const z_loaned_session_t *zs, z_owned_publisher_t *pub, const char *key,
+                   const z_publisher_options_t *opt) {
+    z_view_keyexpr_t ke;
+    if (view(&ke, key) < 0) {
+        return -1;
+    }
+    if (z_declare_publisher(zs, pub, z_loan(ke), opt) < 0) {
+        printf("driver: declare %s failed\n", key);
+        return -1;
+    }
+    z_sleep_ms(200);
+    return 0;
+}
+
+static int adv_put(const ze_loaned_advanced_publisher_t *pub, const char *text, const char *own_encoding) {
+    z_owned_bytes_t payload;
+    z_bytes_copy_from_str(&payload, text);
+    ze_advanced_publisher_put_options_t opt;
+    ze_advanced_publisher_put_options_default(&opt);
+    z_owned_encoding_t encoding;
+    if (own_encoding != NULL) {
+        z_encoding_from_str(&encoding, own_encoding);
+        opt.put_options.encoding = z_move(encoding);
+    }
+    if (ze_advanced_publisher_put(pub, z_move(payload), &opt) < 0) {
+        printf("driver: advanced put %s failed\n", text);
+        return -1;
+    }
+    z_sleep_ms(150);
+    return 0;
+}
+
+int main(int argc, char **argv) {
+    (void)argc;
+    const char *endpoint = argv[1];
+
+    z_owned_config_t config;
+    z_config_default(&config);
+    zp_config_insert(z_loan_mut(config), Z_CONFIG_MODE_KEY, "@MODE@");
+    zp_config_insert(z_loan_mut(config), Z_CONFIG_CONNECT_KEY, endpoint);
+
+    z_owned_session_t s;
+    if (z_open(&s, z_move(config), NULL) < 0) {
+        printf("driver: unable to open session\n");
+        return -1;
+    }
+    z_sleep_ms(300);
+    const z_loaned_session_t *zs = z_loan(s);
+
+    z_owned_publisher_t all, none, prio, express, unreliable, block, enc;
+    z_publisher_options_t opt;
+    z_owned_encoding_t encoding;
+
+    /* Everything away from the default at once. */
+    z_publisher_options_default(&opt);
+    z_encoding_from_str(&encoding, "text/plain");
+    opt.encoding = z_move(encoding);
+    opt.congestion_control = Z_CONGESTION_CONTROL_BLOCK;
+    opt.priority = Z_PRIORITY_REAL_TIME;
+    opt.is_express = true;
+    opt.reliability = Z_RELIABILITY_BEST_EFFORT;
+    if (declare(zs, &all, "demo/po/all", &opt) < 0) return -1;
+    if (put_text(z_loan(all), "all-plain", NULL) < 0) return -1;
+    if (put_text(z_loan(all), "all-own", "application/json") < 0) return -1;
+    if (delete_it(z_loan(all), "all") < 0) return -1;
+
+    /* Nothing declared. */
+    if (declare(zs, &none, "demo/po/none", NULL) < 0) return -1;
+    if (put_text(z_loan(none), "none-plain", NULL) < 0) return -1;
+    if (delete_it(z_loan(none), "none") < 0) return -1;
+
+    /* One field at a time. */
+    z_publisher_options_default(&opt);
+    opt.priority = Z_PRIORITY_BACKGROUND;
+    if (declare(zs, &prio, "demo/po/prio", &opt) < 0) return -1;
+    if (put_text(z_loan(prio), "prio-plain", NULL) < 0) return -1;
+    if (delete_it(z_loan(prio), "prio") < 0) return -1;
+
+    z_publisher_options_default(&opt);
+    opt.is_express = true;
+    if (declare(zs, &express, "demo/po/express", &opt) < 0) return -1;
+    if (put_text(z_loan(express), "express-plain", NULL) < 0) return -1;
+
+    z_publisher_options_default(&opt);
+    opt.reliability = Z_RELIABILITY_BEST_EFFORT;
+    if (declare(zs, &unreliable, "demo/po/unreliable", &opt) < 0) return -1;
+    if (put_text(z_loan(unreliable), "unreliable-plain", NULL) < 0) return -1;
+    if (delete_it(z_loan(unreliable), "unreliable") < 0) return -1;
+
+    z_publisher_options_default(&opt);
+    opt.congestion_control = Z_CONGESTION_CONTROL_BLOCK;
+    if (declare(zs, &block, "demo/po/block", &opt) < 0) return -1;
+    if (put_text(z_loan(block), "block-plain", NULL) < 0) return -1;
+
+    z_publisher_options_default(&opt);
+    z_encoding_from_str(&encoding, "text/plain;utf-8");
+    opt.encoding = z_move(encoding);
+    if (declare(zs, &enc, "demo/po/enc", &opt) < 0) return -1;
+    if (put_text(z_loan(enc), "enc-plain", NULL) < 0) return -1;
+    if (put_text(z_loan(enc), "enc-own", "application/json;v1") < 0) return -1;
+
+    /* The same options, embedded in an advanced publisher. */
+    ze_advanced_publisher_options_t adv_opt;
+    ze_advanced_publisher_options_default(&adv_opt);
+    z_encoding_from_str(&encoding, "text/plain");
+    adv_opt.publisher_options.encoding = z_move(encoding);
+    adv_opt.publisher_options.congestion_control = Z_CONGESTION_CONTROL_BLOCK;
+    adv_opt.publisher_options.priority = Z_PRIORITY_INTERACTIVE_LOW;
+    adv_opt.publisher_options.is_express = true;
+    adv_opt.publisher_options.reliability = Z_RELIABILITY_BEST_EFFORT;
+    z_view_keyexpr_t adv_ke;
+    if (view(&adv_ke, "demo/po/adv") < 0) return -1;
+    ze_owned_advanced_publisher_t adv;
+    if (ze_declare_advanced_publisher(zs, &adv, z_loan(adv_ke), &adv_opt) < 0) {
+        printf("driver: advanced publisher failed\n");
+        return -1;
+    }
+    z_sleep_ms(200);
+    if (adv_put(ze_advanced_publisher_loan(&adv), "adv-plain", NULL) < 0) return -1;
+    if (adv_put(ze_advanced_publisher_loan(&adv), "adv-own", "application/json") < 0) return -1;
+    if (ze_advanced_publisher_delete(ze_advanced_publisher_loan(&adv), NULL) < 0) {
+        printf("driver: advanced delete failed\n");
+        return -1;
+    }
+    z_sleep_ms(150);
+
+    /* With sequence numbers: the sample the publisher sends carries them and the
+       QoS it was declared with. */
+    ze_advanced_publisher_options_t seq_opt;
+    ze_advanced_publisher_options_default(&seq_opt);
+    seq_opt.publisher_options.priority = Z_PRIORITY_DATA_LOW;
+    seq_opt.publisher_options.is_express = true;
+    seq_opt.sample_miss_detection.is_enabled = true;
+    z_view_keyexpr_t seq_ke;
+    if (view(&seq_ke, "demo/po/seq") < 0) return -1;
+    ze_owned_advanced_publisher_t seq;
+    if (ze_declare_advanced_publisher(zs, &seq, z_loan(seq_ke), &seq_opt) < 0) {
+        printf("driver: sequenced advanced publisher failed\n");
+        return -1;
+    }
+    z_sleep_ms(200);
+    if (adv_put(ze_advanced_publisher_loan(&seq), "seq-plain", NULL) < 0) return -1;
+
+    ze_undeclare_advanced_publisher(ze_advanced_publisher_move(&seq));
+    z_sleep_ms(150);
+    ze_undeclare_advanced_publisher(ze_advanced_publisher_move(&adv));
+    z_sleep_ms(150);
+    z_undeclare_publisher(z_publisher_move(&enc));
+    z_undeclare_publisher(z_publisher_move(&block));
+    z_undeclare_publisher(z_publisher_move(&unreliable));
+    z_undeclare_publisher(z_publisher_move(&express));
+    z_undeclare_publisher(z_publisher_move(&prio));
+    z_undeclare_publisher(z_publisher_move(&none));
+    z_undeclare_publisher(z_publisher_move(&all));
+    z_sleep_ms(300);
+
+    z_drop(z_move(s));
+    return 0;
+}
+"#;
+
 /// The advanced PUBLISHER in its three shapes, each with every option that makes
 /// pico declare something.
 ///
@@ -611,6 +831,9 @@ enum Program {
     /// The advanced subscriber in its three shapes
     /// ([`ADVANCED_SUBSCRIBER_DRIVER_SRC`]).
     AdvancedSubscriber,
+    /// Publishers declared with options, plain and advanced
+    /// ([`PUBLISHER_OPTIONS_DRIVER_SRC`]).
+    PublisherOptions,
 }
 
 impl Program {
@@ -620,6 +843,7 @@ impl Program {
             Program::SharedKeys => "shared_keys",
             Program::AdvancedPublisher => "advanced_publisher",
             Program::AdvancedSubscriber => "advanced_subscriber",
+            Program::PublisherOptions => "publisher_options",
         }
     }
 
@@ -629,15 +853,19 @@ impl Program {
             Program::SharedKeys => SHARED_KEYS_DRIVER_SRC,
             Program::AdvancedPublisher => ADVANCED_PUBLISHER_DRIVER_SRC,
             Program::AdvancedSubscriber => ADVANCED_SUBSCRIBER_DRIVER_SRC,
+            Program::PublisherOptions => PUBLISHER_OPTIONS_DRIVER_SRC,
         }
     }
 
     /// How much of a data message the rendering carries. The plain entities
     /// publish nothing whose content is in question, and their legs have always
     /// compared the KEY a message names; the advanced publisher's samples carry
-    /// the options it sequences and retains, and those are what it is for.
+    /// the options it sequences and retains, and those are what it is for. A
+    /// publisher declared with options is measured by the QoS its samples are
+    /// SENT with, which is on the message's envelope and on the channel it rides.
     fn push_detail(self) -> PushDetail {
         match self {
+            Program::PublisherOptions => PushDetail::Qos,
             Program::AdvancedPublisher => PushDetail::Whole,
             Program::Entities | Program::SharedKeys | Program::AdvancedSubscriber => {
                 PushDetail::Key
@@ -653,6 +881,10 @@ enum PushDetail {
     Key,
     /// The key, the kind, the envelope, and what the body carries.
     Whole,
+    /// [`Self::Whole`], with the VALUE of each envelope extension (the QoS byte:
+    /// priority, the no-drop bit and the express bit) and the channel the
+    /// message rode: the transport frame's reliability and its priority.
+    Qos,
 }
 
 /// Compile the program against upstream's headers, linked to `lib`. Only the
@@ -1017,12 +1249,45 @@ fn body_extensions(chain: Option<&[wz_codecs::ext_entry::ExtEntryOwned]>) -> Str
     format!(" ext({})", parts.join(","))
 }
 
+/// An extension chain as `extensions` renders it, with the VALUE of each integer
+/// extension after its header: the QoS byte of a data message's envelope is one
+/// (`0x01` for the id, `0x20` for the integer form; bits 0-2 the priority, bit 3
+/// the no-drop flag that BLOCK sets, bit 4 the express flag).
+fn valued_extensions(chain: Option<&[wz_codecs::ext_entry::ExtEntryOwned]>) -> String {
+    use wz_codecs::ext_entry::ExtEntryOwnedVariant;
+    let Some(chain) = chain else {
+        return String::new();
+    };
+    let parts: Vec<String> = chain
+        .iter()
+        .map(|e| match &e.body {
+            ExtEntryOwnedVariant::CodecZenohExtZint(z) => {
+                format!("{:#04x}={:#04x}", e.header, z.value)
+            }
+            ExtEntryOwnedVariant::CodecZenohExtZbuf(z) => {
+                format!("{:#04x}:zbuf[{}]", e.header, z.value_len)
+            }
+            _ => format!("{:#04x}", e.header),
+        })
+        .collect();
+    if parts.is_empty() {
+        String::new()
+    } else {
+        format!(" ext({})", parts.join(","))
+    }
+}
+
 /// A data message whole: its envelope, its kind, whether it carries a timestamp
 /// (its VALUE is each session's own clock and zid), its encoding, what its body
-/// carries, and its payload.
-fn push_whole(p: &wz_codecs::push::PushOwned) -> String {
+/// carries, and its payload. With `valued`, the envelope's integer extensions
+/// carry their values ([`valued_extensions`]).
+fn push_whole(p: &wz_codecs::push::PushOwned, valued: bool) -> String {
     use wz_codecs::push::PushOwnedVariant;
-    let envelope = extensions(p.extensions.as_deref());
+    let envelope = if valued {
+        valued_extensions(p.extensions.as_deref())
+    } else {
+        extensions(p.extensions.as_deref())
+    };
     let body = match &p.body {
         PushOwnedVariant::CodecZenohMsgPut(put) => format!(
             " put ts={} enc={} body{} payload={:?}",
@@ -1070,6 +1335,19 @@ fn render(
     for frame in frames.iter().filter(|f| f.direction == dialer) {
         let Carried::Batch(batch) = &frame.carried else {
             continue;
+        };
+        // The channel a data message rode: the transport frame's reliability and
+        // its priority. A batch never mixes them, so the message inherits its
+        // frame's.
+        let channel = match &frame.frame {
+            Ok(InboundFrame::Frame {
+                reliable, priority, ..
+            }) => format!(
+                "[{} p{}]",
+                if *reliable { "reliable" } else { "best-effort" },
+                priority.wire_byte()
+            ),
+            _ => String::from("[not a frame]"),
         };
         for message in &batch.messages {
             match message {
@@ -1129,7 +1407,10 @@ fn render(
                     let key = wire(&mut names, &p.keyexpr);
                     lines.push(match detail {
                         PushDetail::Key => format!("Push on {key}"),
-                        PushDetail::Whole => format!("Push on {key}{}", push_whole(p)),
+                        PushDetail::Whole => format!("Push on {key}{}", push_whole(p, false)),
+                        PushDetail::Qos => {
+                            format!("Push on {key} {channel}{}", push_whole(p, true))
+                        }
                     });
                 }
                 NetworkMessage::Request(r) => {
@@ -1860,4 +2141,155 @@ fn an_advanced_subscriber_beside_a_peer_declares_the_same_wire_as_the_real_pico(
             Layer E5"]
 fn wz_router_hears_a_pico_peer_advanced_subscriber_the_same_on_wz_and_on_the_real_pico() {
     assert_an_advanced_subscriber_declares_the_same_wire_as_the_real_pico(Topology::PeerToRouter);
+}
+
+/// What the real pico's samples carry for a publisher declared with options, and
+/// what wz's must then carry, in one topology.
+fn assert_declared_publisher_options_are_sent_as_the_real_pico_sends_them(topology: Topology) {
+    let Arms { wz, reference, .. } = record_both_arms(topology, Program::PublisherOptions);
+
+    let push_of = |lines: &[String], payload: &str| -> Option<String> {
+        let needle = format!("payload={payload:?}");
+        lines
+            .iter()
+            .find(|l| l.starts_with("Push") && l.contains(&needle))
+            .cloned()
+    };
+    // ANTI-VACUITY, first: the REFERENCE arm carries every sample the program
+    // made, so the equality below cannot be two renderings that both left one
+    // out. (A delete has no payload, so it is counted.)
+    for payload in [
+        "all-plain",
+        "all-own",
+        "none-plain",
+        "prio-plain",
+        "express-plain",
+        "unreliable-plain",
+        "block-plain",
+        "enc-plain",
+        "enc-own",
+        "adv-plain",
+        "adv-own",
+        "seq-plain",
+    ] {
+        assert!(
+            push_of(&reference, payload).is_some(),
+            "the REFERENCE arm carries no Push with payload `{payload}`, so this leg is \
+             measuring the harness rather than wz:\n{}",
+            reference.join("\n")
+        );
+    }
+    let deletes = reference
+        .iter()
+        .filter(|l| l.starts_with("Push") && l.contains(" del "))
+        .count();
+    assert_eq!(
+        deletes,
+        5,
+        "the program deletes through five publishers (all, none, prio, unreliable and \
+         the advanced one):\n{}",
+        reference.join("\n")
+    );
+
+    // ANTI-VACUITY, second: the publishers really do send DIFFERENTLY. A rendering
+    // in which every publisher sends the same thing would make each field's
+    // wiring indistinguishable from any other's. The envelope and channel of the
+    // samples that carry no encoding of their own must differ across the seven
+    // plain publishers wherever their options differ.
+    let qos_of = |payload: &str| -> String {
+        let line = push_of(&reference, payload).expect("checked above");
+        // Everything between the key and the kind: the channel and the envelope.
+        let after_key = line
+            .split_once(" [")
+            .map(|(_, rest)| format!("[{rest}"))
+            .expect("a Qos rendering names its channel");
+        after_key
+            .split(" put ")
+            .next()
+            .expect("split yields one part")
+            .to_owned()
+    };
+    let distinct: std::collections::BTreeSet<String> = [
+        "all-plain",
+        "none-plain",
+        "prio-plain",
+        "express-plain",
+        "unreliable-plain",
+        "block-plain",
+    ]
+    .into_iter()
+    .map(qos_of)
+    .collect();
+    assert_eq!(
+        distinct.len(),
+        6,
+        "six publishers declared six different ways must send six different \
+         envelope-and-channel renderings; got {distinct:#?}"
+    );
+    // The two the program declares alone on the CHANNEL: reliability is the frame's
+    // reliable flag and nothing else, and only best-effort publishers clear it.
+    assert!(
+        qos_of("unreliable-plain").starts_with("[best-effort"),
+        "a best-effort publisher rides the best-effort channel: {}",
+        qos_of("unreliable-plain")
+    );
+    assert!(
+        qos_of("none-plain").starts_with("[reliable"),
+        "a publisher declared with nothing rides the reliable channel: {}",
+        qos_of("none-plain")
+    );
+    // A put with an encoding of its own carries THAT encoding and the publisher's
+    // QoS; a put with none carries the publisher's encoding. Two publishers, so
+    // the encoding's id and its schema are both read off the wire. (The number is
+    // the wire's packed id: the encoding's id shifted left one, the schema flag in
+    // bit 0 — `text/plain` is 8, `application/json` 10, and a schema sets the
+    // low bit.)
+    for (payload, encoding) in [
+        ("all-plain", " enc=8+None"),
+        ("all-own", " enc=10+None"),
+        ("enc-plain", " enc=9+Some(\"utf-8\")"),
+        ("enc-own", " enc=11+Some(\"v1\")"),
+    ] {
+        let line = push_of(&reference, payload).expect("checked above");
+        assert!(
+            line.contains(encoding),
+            "the reference sample `{payload}` should carry `{encoding}`:\n{line}"
+        );
+    }
+    assert_eq!(
+        qos_of("all-plain"),
+        qos_of("all-own"),
+        "a put's own encoding does not change the QoS the publisher sends with"
+    );
+
+    assert_eq!(
+        wz,
+        reference,
+        "wz sends a declared publisher's samples differently from the real zenoh-pico \
+         for the same program.\n--- wz ---\n{}\n--- reference ---\n{}",
+        wz.join("\n"),
+        reference.join("\n")
+    );
+}
+
+/// A publisher declared with options sends every put and delete with them: its
+/// encoding as the default a put's own overrides, and its congestion control,
+/// priority, express flag and reliability on the envelope and the channel. Each is
+/// varied alone as well as together, and an advanced publisher, which pico builds
+/// out of a plain one, sends the QoS it was declared with.
+// wz-proves: api-compat-pico wz->pico partial
+#[test]
+#[ignore = "cc-compiles a driver against both libraries and runs each through a \
+            tap to a wz-ap-demo node; run by run-ci Layer E"]
+fn a_publisher_declared_with_options_sends_the_same_qos_as_the_real_pico() {
+    assert_declared_publisher_options_are_sent_as_the_real_pico_sends_them(Topology::Client);
+}
+
+/// The same program from a pico PEER with no router among its peers.
+// wz-proves: api-compat-pico wz->pico partial
+#[test]
+#[ignore = "cc-compiles a driver against both libraries and runs each through a \
+            tap to a wz-ap-demo peer; run by run-ci Layer E"]
+fn a_publisher_declared_with_options_beside_a_peer_sends_the_same_qos_as_the_real_pico() {
+    assert_declared_publisher_options_are_sent_as_the_real_pico_sends_them(Topology::PeerToPeer);
 }
