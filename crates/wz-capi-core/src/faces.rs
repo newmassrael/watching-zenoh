@@ -71,7 +71,9 @@ use tokio::sync::Notify;
 use crate::group::{retire_copies, FaceGroup, GroupAggregate, GroupError, GroupId};
 use wz_runtime_tokio::accept_loop::{FaceForwarder, FaceId};
 use wz_runtime_tokio::advanced_publisher::{AdvancedPublisher, AdvancedPublisherOptions};
-use wz_runtime_tokio::advanced_subscriber::{AdvancedSubscriber, AdvancedSubscriberOptions, Miss};
+use wz_runtime_tokio::advanced_subscriber::{
+    AdvancedSubscriber, AdvancedSubscriberOptions, DeclarationForms, EntityForm, Miss,
+};
 use wz_runtime_tokio::declare::LivelinessSample;
 use wz_runtime_tokio::group::Member;
 use wz_runtime_tokio::locality::Locality;
@@ -574,6 +576,55 @@ struct AdvPubEntry {
     id: AdvPubId,
     keyexpr: String,
     options: AdvancedPublisherOptions,
+}
+
+/// A host's [`DeclarationForms`] with the identity of the C advanced subscriber
+/// they were supplied for — its registry id, which is what the C handle reports.
+///
+/// Every other question goes to the host unchanged.
+struct IdentifiedForms {
+    id: AdvSubId,
+    host: Arc<dyn DeclarationForms>,
+}
+
+/// What the LOCAL plane is told about naming: nothing. Every answer is the
+/// literal form, which is the trait's default for each.
+///
+/// The local plane has no wire. A key declaration exists to shorten what a peer
+/// is sent, so naming the local plane's entities by one would hold a declaration
+/// for an entity no peer sees — and, since that declaration is shared with the
+/// wire face's entities, would hold it past the wire face's own, which is where
+/// a peer sees it retracted.
+struct Unnamed;
+
+impl DeclarationForms for Unnamed {}
+
+impl DeclarationForms for IdentifiedForms {
+    fn entity_id(&self) -> Option<u32> {
+        // A counter that has outrun `u32` has no spelling in the detection
+        // key: the per-declaration id is the honest answer then.
+        u32::try_from(self.id).ok()
+    }
+
+    fn subscriber(&self, keyexpr: &str) -> EntityForm {
+        self.host.subscriber(keyexpr)
+    }
+
+    fn late_publishers(&self, keyexpr: &str) -> EntityForm {
+        self.host.late_publishers(keyexpr)
+    }
+
+    fn heartbeat(&self, keyexpr: &str) -> EntityForm {
+        self.host.heartbeat(keyexpr)
+    }
+
+    fn token(&self, keyexpr: &str) -> EntityForm {
+        self.host.token(keyexpr)
+    }
+
+    fn retain(&self, anchor: Arc<dyn Send + Sync>) {
+        self.host.retain(anchor)
+    }
 }
 
 /// A C-declared ADVANCED subscriber — the seventh SSOT.
@@ -1189,6 +1240,49 @@ impl Inner {
     fn declaration_targets_ref(&self) -> impl Iterator<Item = &FaceEntry> {
         self.faces.values().chain(self.local_face.iter())
     }
+
+    /// [`Self::declaration_targets`] as values a declaration can be made on
+    /// AFTER the registry lock is released: each target's key, its session and
+    /// the runtime that drives it.
+    ///
+    /// For a declaration that must not run under the lock — one that calls back
+    /// into a host which takes the lock itself (see
+    /// [`SharedSession::declare_advanced_subscriber`]). The key is how the
+    /// finished declaration finds its way back
+    /// ([`SharedSession::attach_advanced_subscriber`]).
+    fn declaration_target_handles(
+        &self,
+    ) -> Vec<(
+        DeclarationTarget,
+        TokioSession,
+        Option<tokio::runtime::Handle>,
+    )> {
+        self.faces
+            .iter()
+            .map(|(id, face)| {
+                (
+                    DeclarationTarget::Face(*id),
+                    face.session.clone(),
+                    face.runtime.clone(),
+                )
+            })
+            .chain(self.local_face.iter().map(|face| {
+                (
+                    DeclarationTarget::Local,
+                    face.session.clone(),
+                    face.runtime.clone(),
+                )
+            }))
+            .collect()
+    }
+}
+
+/// Where a declaration made outside the registry lock is filed when it is done:
+/// a live face by id, or the session's own local plane.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum DeclarationTarget {
+    Face(u64),
+    Local,
 }
 
 /// The registry behind a `z_owned_session_t`, shared between the C thread
@@ -1556,25 +1650,32 @@ impl SharedSession {
                 adv_pubs.insert(entry.id, pub_);
             }
         }
-        let mut adv_subs = BTreeMap::new();
-        for entry in &guard.adv_subs {
-            let (on_sample, on_miss) = (entry.sink)();
-            // R2814 — the seeded form: this is a replay of a subscriber the C
-            // program already holds, so its miss listener exists before the
-            // face's startup history GET can report anything.
-            if let Ok(sub) = AdvancedSubscriber::declare_with_options_and_miss_listener(
-                &session,
-                entry.keyexpr.clone(),
-                // R311y826 — cloned, not moved: `AdvancedSubscriberOptions`
-                // stopped being `Copy` when detection gained an owned metadata
-                // key expression, and this entry is replayed on every reconnect.
-                entry.options.clone(),
-                on_sample,
-                on_miss,
-            ) {
-                adv_subs.insert(entry.id, sub);
-            }
-        }
+        // The advanced subscribers are NOT replayed here. Each declares a
+        // sequence of entities, and a host that declares keys takes this lock to
+        // declare the next one — so they are declared once the lock is released,
+        // from the snapshot taken here. Taking it in the SAME critical section as
+        // the face's insertion is what makes that safe: an entry recorded after
+        // this point finds the face in `declaration_target_handles`, and one
+        // recorded before it is in the snapshot, so each is declared on this face
+        // exactly once. See [`Self::declare_advanced_subscriber`].
+        let adv_sub_replays: Vec<_> = guard
+            .adv_subs
+            .iter()
+            .map(|entry| {
+                (
+                    entry.id,
+                    entry.keyexpr.clone(),
+                    // R311y826 — cloned, not moved: `AdvancedSubscriberOptions`
+                    // stopped being `Copy` when detection gained an owned
+                    // metadata key expression, and this entry is replayed on
+                    // every reconnect.
+                    entry.options.clone(),
+                    Arc::clone(&entry.sink),
+                )
+            })
+            .collect();
+        let adv_subs = BTreeMap::new();
+        let replay_session = session.clone();
         // R2932 — the groups, so a member joined before this peer connected
         // announces itself to it. Best-effort per face like every replay above:
         // the join's only fallible checks (canon, wildcards) already passed on
@@ -1617,6 +1718,29 @@ impl SharedSession {
         // is gone, so their members leave the union the way `face_down`'s do.
         if let Some(mut old) = replaced {
             retire_copies(std::mem::take(&mut old.groups).into_values());
+        }
+        // The advanced subscribers, outside the lock — see where the snapshot is
+        // taken. This runs on the drive task, which is the runtime the face is
+        // driven by, so a declaration that spawns has the one it needs.
+        for (adv_id, keyexpr, options, sink) in adv_sub_replays {
+            let (on_sample, on_miss) = (sink)();
+            // R2814 — the seeded form: this is a replay of a subscriber the C
+            // program already holds, so its miss listener exists before the
+            // face's startup history GET can report anything.
+            if let Ok(sub) = AdvancedSubscriber::declare_with_options_and_miss_listener(
+                &replay_session,
+                keyexpr,
+                options,
+                on_sample,
+                on_miss,
+            ) {
+                self.attach_advanced_subscriber(
+                    DeclarationTarget::Face(id),
+                    &replay_session,
+                    adv_id,
+                    sub,
+                );
+            }
         }
         // Outside the lock, for the reason `fire_face_event` states: a C
         // listener may re-enter this registry.
@@ -3105,38 +3229,142 @@ impl SharedSession {
         options: AdvancedSubscriberOptions,
         sink: AdvancedSubscriberSink,
     ) -> AdvSubId {
-        let mut guard = self.lock();
-        let id = guard.next_adv_sub_id;
-        guard.next_adv_sub_id = guard.next_adv_sub_id.wrapping_add(1);
+        self.declare_advanced_subscriber_with(keyexpr, options, None, sink)
+    }
+
+    /// [`Self::declare_advanced_subscriber`] for a host that declares KEYS:
+    /// `forms` says how each entity of the subscriber is named on the wire
+    /// ([`DeclarationForms`]).
+    ///
+    /// The registry adds the one thing it owns and a host has no way to know
+    /// before this call returns: the subscriber's identity, its own
+    /// [`AdvSubId`]. The subscriber is declared once per face, each face with
+    /// its own plain subscription id, and the identity the C handle reports and
+    /// the detection token is named with has to be the same on all of them.
+    pub fn declare_advanced_subscriber_declaring_keys(
+        &self,
+        keyexpr: String,
+        options: AdvancedSubscriberOptions,
+        forms: Arc<dyn DeclarationForms>,
+        sink: AdvancedSubscriberSink,
+    ) -> AdvSubId {
+        self.declare_advanced_subscriber_with(keyexpr, options, Some(forms), sink)
+    }
+
+    fn declare_advanced_subscriber_with(
+        &self,
+        keyexpr: String,
+        mut options: AdvancedSubscriberOptions,
+        forms: Option<Arc<dyn DeclarationForms>>,
+        sink: AdvancedSubscriberSink,
+    ) -> AdvSubId {
+        // ## THE PER-FACE DECLARATIONS RUN OUTSIDE THE REGISTRY LOCK
+        //
+        // An advanced subscriber is not one declaration but a sequence — the
+        // subscription, a startup history GET, the late-publisher and heartbeat
+        // subscriptions, a detection token — and a host that declares keys
+        // ([`wz_runtime_tokio::advanced_subscriber::DeclarationForms`]) declares
+        // a key for each of them as it goes, which takes this lock.
+        // Holding it across the sequence deadlocks that host on its first key.
+        //
+        // The history GET is the same hazard in another costume and was there
+        // before any host declared a key: in loopback it completes inside the
+        // declaration and runs the C sample callback, which a C program is
+        // entitled to use to re-enter the session. The matching listeners are
+        // installed outside the lock for the same reason.
+        //
+        // ## What makes that safe
+        //
+        // The entry is recorded and the targets taken in ONE critical section.
+        // A face that comes up afterwards replays the entry (`face_up` takes its
+        // own snapshot under the same lock it inserts the face under), and a
+        // face that is already up is in `targets` — so every face declares the
+        // subscriber exactly once, whichever side of this section it is on.
+        let hosted = forms.is_some();
+        let (id, targets) = {
+            let mut guard = self.lock();
+            let id = guard.next_adv_sub_id;
+            guard.next_adv_sub_id = guard.next_adv_sub_id.wrapping_add(1);
+            if let Some(host) = forms {
+                options = options.with_declaration_forms(Arc::new(IdentifiedForms { id, host }));
+            }
+            guard.adv_subs.push(AdvSubEntry {
+                id,
+                keyexpr: keyexpr.clone(),
+                options: options.clone(),
+                sink: Arc::clone(&sink),
+            });
+            (id, guard.declaration_target_handles())
+        };
         // R2580 — the plane included; the receiving half of the advanced
         // measurement recorded on `declare_advanced_publisher`.
-        for face in guard.declaration_targets() {
+        for (target, session, runtime) in targets {
             let (on_sample, on_miss) = (sink)();
             // Same reason as the publisher's: a `recovery.periodic_queries`
             // subscriber spawns a background task at declare time — and, since
             // R2366, that task names the `app` subsystem, so this guard is the
             // same defence-in-depth the publisher's now is.
-            let _guard = face.runtime.as_ref().map(|rt| rt.enter());
-            // R2814 — seeded for the same reason as the replay in `face_up`.
-            if let Ok(sub) = AdvancedSubscriber::declare_with_options_and_miss_listener(
-                &face.session,
-                keyexpr.clone(),
+            let _guard = runtime.as_ref().map(|rt| rt.enter());
+            // The local plane has no wire to name anything on; see [`Unnamed`].
+            let for_target = match target {
+                DeclarationTarget::Local if hosted => {
+                    options
+                        .clone()
+                        .with_declaration_forms(Arc::new(IdentifiedForms {
+                            id,
+                            host: Arc::new(Unnamed),
+                        }))
+                }
                 // Cloned per face: the loop declares one subscriber on each,
                 // and the options are no longer `Copy` (R311y826).
-                options.clone(),
+                _ => options.clone(),
+            };
+            // R2814 — seeded for the same reason as the replay in `face_up`.
+            if let Ok(sub) = AdvancedSubscriber::declare_with_options_and_miss_listener(
+                &session,
+                keyexpr.clone(),
+                for_target,
                 on_sample,
                 on_miss,
             ) {
-                face.adv_subs.insert(id, sub);
+                self.attach_advanced_subscriber(target, &session, id, sub);
             }
         }
-        guard.adv_subs.push(AdvSubEntry {
-            id,
-            keyexpr,
-            options,
-            sink,
-        });
         id
+    }
+
+    /// File a per-face advanced subscriber declared outside the registry lock
+    /// ([`Self::declare_advanced_subscriber`], [`Self::face_up`]) in its face.
+    ///
+    /// It is filed only if what it was declared for still stands: the C
+    /// subscriber is still declared (it may have been undeclared while this was
+    /// being made), and the target is still the very session it was declared on
+    /// (a face id is reused by a reconnect, and a subscriber declared on the old
+    /// session filed under the new one would be retracted on a session that is
+    /// gone). Otherwise it is dropped — outside the lock, because dropping it
+    /// retracts its entities and releases its C closures.
+    fn attach_advanced_subscriber(
+        &self,
+        target: DeclarationTarget,
+        session: &TokioSession,
+        id: AdvSubId,
+        sub: AdvancedSubscriber<TokioRuntime>,
+    ) {
+        let rejected = {
+            let mut guard = self.lock();
+            let declared = guard.adv_subs.iter().any(|entry| entry.id == id);
+            let face = match target {
+                DeclarationTarget::Face(face_id) => guard.faces.get_mut(&face_id),
+                DeclarationTarget::Local => guard.local_face.as_mut(),
+            };
+            match face {
+                Some(face) if declared && face.session.is_same_session(session) => {
+                    face.adv_subs.insert(id, sub)
+                }
+                _ => Some(sub),
+            }
+        };
+        drop(rejected);
     }
 
     /// Retract a C advanced subscriber. Mirror of
