@@ -1631,6 +1631,26 @@ pub mod common {
         path.is_file().then_some(path)
     }
 
+    /// Locate one of upstream's own SHM examples (`z_pub_shm`, `z_sub_shm`): the
+    /// `WZ_ZENOH_SHM_EXAMPLES_DIR` env override, else the directory
+    /// `ZENOHD_SHM=1 scripts/build-zenohd.sh` installs them into beside
+    /// [`zenohd_shm_binary`].
+    ///
+    /// They are the only processes on this machine that WRITE a payload through
+    /// upstream's metadata segment and READ one back (`zenohd` relays an SHM
+    /// buffer and never makes one), so a wz reader or writer of that segment is
+    /// graded against nothing but wz's own counterpart without them. Returns
+    /// `None` rather than panicking for the reason [`zenohd_shm_binary`] does: the
+    /// shared-memory oracle is a source build that hosted CI does not provision.
+    pub fn zenoh_shm_example_binary(name: &str) -> Option<PathBuf> {
+        let dir = match std::env::var("WZ_ZENOH_SHM_EXAMPLES_DIR") {
+            Ok(dir) => PathBuf::from(dir),
+            Err(_) => project_root().join("target/zenohd-shm"),
+        };
+        let path = dir.join(name);
+        path.is_file().then_some(path)
+    }
+
     /// Locate the VSOCK-enabled `zenohd` (R311y400): the `WZ_ZENOHD_VSOCK_BIN`
     /// env override, else `scripts/build-zenohd.sh ZENOHD_VSOCK=1`'s
     /// `target/zenohd-vsock/zenohd` install. A SEPARATE binary from

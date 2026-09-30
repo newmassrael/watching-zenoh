@@ -450,6 +450,17 @@ wz-runtime-tokio = { path = "../wz-runtime-tokio", features = [
     # table's closure, so `link-interfaces` adds no third-party dep either.
     "scouting-active",
     "link-interfaces",
+    # R2993 -- the SHM PAYLOAD interop witnesses
+    # (tests/wz_shm_payload_zenohd_interop.rs) open a wz session IN-PROCESS with
+    # `connect_and_open_session_with_shm` / `accept_and_open_session_with_shm`
+    # against upstream's own `z_pub_shm` / `z_sub_shm`, and publish through
+    # `Session::publish_shm` and resolve through `PosixShmResolver`: the
+    # shared-memory provider, the resolver and the challenge-response are all
+    # behind this feature (`session-extshm` brings `transport-shm` and `libc`).
+    # Same additive-unification note as the storage-* pins above: under
+    # `cargo test --workspace` this reaches the shared wz-runtime-tokio build, so
+    # the provider's unit tests additionally run there.
+    "session-extshm",
 ] }
 # R71 — `fixture_session_init_params` / `install_session_actions_for_test`
 # / `dispatch_script` live in this sibling crate. Replaces the
