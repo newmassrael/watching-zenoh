@@ -736,6 +736,91 @@ pub(crate) struct PlainPublisher {
     /// `SharedSession::next_entity_id` for why it is allocated rather than
     /// derived.
     eid: u64,
+    /// What it was declared with, applied to every put and delete it makes
+    /// ([`PublisherQos`]).
+    declared: PublisherQos,
+}
+
+/// What a pico publisher is declared with, and sends with on every put and
+/// delete it makes: its default encoding, congestion control, priority, express
+/// flag and reliability.
+///
+/// pico stores them in the publisher at declare
+/// (`vendor/zenoh-pico/src/net/primitives.c` @
+/// `publisher->_congestion_control = congestion_control;`) and `z_publisher_put`
+/// and `z_publisher_delete` send with THOSE (`vendor/zenoh-pico/src/api/api.c` @
+/// `ret = _z_write(session, &pub->_key, payload_bytes, &encoding, Z_SAMPLE_KIND_PUT, pub->_congestion_control,`):
+/// the put and delete options carry a timestamp, an attachment and a source
+/// info, and no priority, no congestion control, no express flag and no
+/// reliability, so there is nothing else for a publisher's QoS to come from. The
+/// encoding is the one exception, a put's own encoding winning when it has one.
+///
+/// The publisher owns the values rather than each caller composing them into the
+/// options it passes, so an advanced publisher, which pico builds out of a plain
+/// one, cannot send a publisher's samples with different QoS than the publisher
+/// it wraps.
+#[derive(Clone, Debug)]
+pub(crate) struct PublisherQos {
+    encoding: Option<wz_runtime_tokio::sample::EncodingHint>,
+    congestion_control: wz_runtime_tokio::qos::CongestionControl,
+    priority: wz_runtime_tokio::qos::Priority,
+    is_express: bool,
+    reliability: Reliability,
+}
+
+impl PublisherQos {
+    /// pico's `z_publisher_options_default`, which is what a NULL options
+    /// pointer means (`vendor/zenoh-pico/src/api/api.c` @
+    /// `z_publisher_options_default(&opt);`) and what the heartbeat publisher of
+    /// an advanced publisher is declared with.
+    pub(crate) fn pico_default() -> Self {
+        Self {
+            encoding: None,
+            congestion_control: push_congestion_from_pico(crate::query::Z_CONGESTION_CONTROL_DROP),
+            priority: crate::query::priority_from_pico(crate::query::Z_PRIORITY_DEFAULT),
+            is_express: false,
+            reliability: reliability_from_pico(Z_RELIABILITY_RELIABLE),
+        }
+    }
+
+    /// What one C `z_publisher_options_t` declares, consuming its moved
+    /// encoding: pico steals it at declare (`vendor/zenoh-pico/src/net/primitives.c` @
+    /// `publisher->_encoding = encoding == NULL ? _z_encoding_null() : _z_encoding_steal(encoding);`),
+    /// so the caller's slot is empty afterwards whatever else the declare does. A
+    /// NULL pointer is the default.
+    ///
+    /// # Safety
+    /// `options` must be null or a valid publisher-options struct.
+    pub(crate) unsafe fn declared_by(options: *const z_publisher_options_t) -> Self {
+        if options.is_null() {
+            return Self::pico_default();
+        }
+        let options = &*options;
+        Self {
+            encoding: crate::encoding::take_moved_encoding(options.encoding),
+            congestion_control: push_congestion_from_pico(options.congestion_control),
+            priority: crate::query::priority_from_pico(options.priority),
+            is_express: options.is_express,
+            reliability: reliability_from_pico(options.reliability),
+        }
+    }
+
+    /// `opts` as this publisher sends it: its QoS on top of whatever the call
+    /// carried, and its encoding when the call carried none.
+    fn apply(&self, opts: &PublishOptions) -> PublishOptions {
+        let mut out = opts
+            .clone()
+            .with_priority(self.priority)
+            .with_congestion_control(self.congestion_control)
+            .with_express(self.is_express)
+            .with_reliability(self.reliability);
+        if out.encoding.is_none() {
+            if let Some(encoding) = self.encoding.clone() {
+                out = out.with_encoding(encoding);
+            }
+        }
+        out
+    }
 }
 
 impl PlainPublisher {
@@ -743,11 +828,13 @@ impl PlainPublisher {
     /// filter that names it — pico's order in `z_declare_publisher`.
     ///
     /// `existing` is the caller's own key when it is already a declaration
-    /// (`declared_of`), which is shared rather than declared again.
+    /// (`declared_of`), which is shared rather than declared again. `declared` is
+    /// what the publisher then sends every sample with.
     pub(crate) fn declare(
         session: &PicoSession,
         keyexpr: &str,
         existing: Option<&DeclaredKeyexpr>,
+        declared: PublisherQos,
     ) -> Result<Self, ZResult> {
         let key = DeclaredKeyexpr::declare(&session.shared, keyexpr, existing)?;
         // R2962 — the filter is created AFTER the key, because its Interest names
@@ -759,22 +846,25 @@ impl PlainPublisher {
             shared: session.shared.clone(),
             filter,
             key,
+            declared,
         })
     }
 
-    /// Publish on this publisher's key, in its declared wire form — unless its
-    /// write filter says nothing matches, in which case NOTHING is sent and the
-    /// call still answers `Z_OK`, as `z_publisher_put` / `z_publisher_delete`
-    /// do upstream (`vendor/zenoh-pico/src/api/api.c` @
+    /// Publish on this publisher's key, in its declared wire form and with the
+    /// QoS it was declared with ([`PublisherQos`]) — unless its write filter says
+    /// nothing matches, in which case NOTHING is sent and the call still answers
+    /// `Z_OK`, as `z_publisher_put` / `z_publisher_delete` do upstream
+    /// (`vendor/zenoh-pico/src/api/api.c` @
     /// `!_z_write_filter_active(&pub->_filter)`).
     pub(crate) fn publish(&self, payload: &[u8], opts: &PublishOptions) -> ZResult {
         if self.filter.active() {
             return Z_OK;
         }
         let wire = self.key.wire(&self.shared);
+        let opts = self.declared.apply(opts);
         match self
             .shared
-            .publish_on_wire_all(self.key.literal(), &wire, payload, opts)
+            .publish_on_wire_all(self.key.literal(), &wire, payload, &opts)
         {
             Ok(_) => Z_OK,
             Err(_) => Z_ERR_GENERIC,
@@ -1536,15 +1626,16 @@ pub unsafe extern "C" fn z_publisher_delete(
 /// the R311y466 trap; both were read off `config.h`, and the offsets are pinned
 /// in this module's tests.
 ///
-/// wz's `z_declare_publisher` does not yet READ these fields (its options
-/// parameter is still `*const c_void`), and that is stated rather than implied:
-/// this type exists so a pico program can stack-allocate and default it, which
-/// is what `z_pub_thr.c` does. Honouring `congestion_control` / `priority` /
-/// `is_express` / `reliability` on the declared publisher is separate surface.
+/// `z_declare_publisher` READS these fields and the publisher then sends every
+/// put and delete with them ([`PublisherQos`]), as pico's does. The struct is
+/// also what an advanced publisher's options embed
+/// ([`crate::advanced::ze_advanced_publisher_options_t`]), so the two are one
+/// layout.
 #[repr(C)]
 pub struct z_publisher_options_t {
     /// Moved default encoding, or NULL. Typed as an opaque pointer here because
-    /// this crate has no encoding plane yet; the SLOT must exist and be 8 B
+    /// the moved wrapper is only ever read through
+    /// [`crate::encoding::take_moved_encoding`]; the SLOT must exist and be 8 B
     /// wide or every field after it lands at the wrong offset.
     pub encoding: *mut c_void,
     pub congestion_control: c_int,
@@ -1553,11 +1644,14 @@ pub struct z_publisher_options_t {
     pub reliability: c_int,
 }
 
-/// Default publisher options (pico `z_publisher_options_default`).
+/// Default publisher options (pico `z_publisher_options_default`,
+/// `vendor/zenoh-pico/src/api/api.c` @
+/// `options->congestion_control = z_internal_congestion_control_default_push();`).
 ///
-/// pico zeroes the encoding slot and takes the library defaults for the rest;
-/// the numeric defaults are its enum zero values, which is what a
-/// `memset`-style default yields and what `z_pub_thr.c` then publishes with.
+/// No encoding, DROP, `Z_PRIORITY_DEFAULT` (Data, 5 — not the enum's zero, which
+/// is pico's control priority), not express, reliable. The values used to be
+/// written as "the enum's zero values", which was right for three of the four
+/// and wrong for the priority; nothing showed it while the declare ignored them.
 #[no_mangle]
 pub unsafe extern "C" fn z_publisher_options_default(options: *mut z_publisher_options_t) {
     if options.is_null() {
@@ -1565,25 +1659,29 @@ pub unsafe extern "C" fn z_publisher_options_default(options: *mut z_publisher_o
     }
     *options = z_publisher_options_t {
         encoding: std::ptr::null_mut(),
-        congestion_control: 0,
-        priority: 0,
+        congestion_control: crate::query::Z_CONGESTION_CONTROL_DROP,
+        priority: crate::query::Z_PRIORITY_DEFAULT,
         is_express: false,
-        reliability: 0,
+        reliability: Z_RELIABILITY_RELIABLE,
     };
 }
 
-/// Declare a publisher (pico `z_declare_publisher`).
+/// Declare a publisher (pico `z_declare_publisher`). Consumes the options'
+/// moved encoding on every path once `publisher` is a valid out-parameter, as
+/// pico's declare steals it before anything can fail.
 #[no_mangle]
 pub unsafe extern "C" fn z_declare_publisher(
     zs: *const z_loaned_session_t,
     publisher: *mut z_owned_publisher_t,
     keyexpr: *const z_loaned_keyexpr_t,
-    _options: *const c_void,
+    options: *const z_publisher_options_t,
 ) -> ZResult {
     guarded(|| {
         if publisher.is_null() {
             return Z_ERR_NULL;
         }
+        // FIRST, before any early return could skip it: the moved encoding.
+        let declared = PublisherQos::declared_by(options);
         let state = match session_state(zs) {
             Some(s) => s,
             None => return Z_ERR_NULL,
@@ -1591,8 +1689,12 @@ pub unsafe extern "C" fn z_declare_publisher(
         let Some(ke) = keyexpr_str(keyexpr) else {
             return Z_ERR_INVALID;
         };
-        let core = match PlainPublisher::declare(&PicoSession::of(state), ke, declared_of(keyexpr))
-        {
+        let core = match PlainPublisher::declare(
+            &PicoSession::of(state),
+            ke,
+            declared_of(keyexpr),
+            declared,
+        ) {
             Ok(core) => core,
             Err(rc) => return rc,
         };

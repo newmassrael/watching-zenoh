@@ -35,7 +35,7 @@ use wz_runtime_tokio::session::{PublishError, PublishOptions, TokioSession};
 use wz_runtime_tokio::Reliability;
 
 use crate::liveliness::TokenState;
-use crate::pubsub::PlainPublisher;
+use crate::pubsub::{PlainPublisher, PublisherQos};
 use crate::query::PlainQueryable;
 use crate::result::{ZResult, Z_OK};
 use crate::write_filter::PicoSession;
@@ -49,15 +49,24 @@ pub(crate) struct PicoPlane {
     /// What a beacon's period is slept on. Any clock would do — the period is a
     /// duration — and the session's is the one the rest of the session reads.
     time: Arc<TokioTime>,
+    /// What the advanced publisher's own publisher is declared with: the
+    /// `publisher_options` the program embedded in its advanced options, which
+    /// pico hands to the `z_declare_publisher` that builds it. The heartbeat
+    /// publisher is not declared with them: pico declares it with the defaults
+    /// (`vendor/zenoh-pico/src/api/advanced_publisher.c` @
+    /// `z_publisher_options_default(&heatbeat_opts);`).
+    declared: PublisherQos,
 }
 
 impl PicoPlane {
-    /// The plane of `session`.
-    pub(crate) fn new(session: PicoSession) -> Self {
+    /// The plane of `session`, whose advanced publisher's publisher is declared
+    /// with `declared`.
+    pub(crate) fn new(session: PicoSession, declared: PublisherQos) -> Self {
         Self {
             hlc: session.hlc.clone(),
             time: Arc::clone(session.shared.local_session().clock()),
             session,
+            declared,
         }
     }
 
@@ -117,8 +126,13 @@ impl AdvancedPublisherPlane for PicoPlane {
         keyexpr: &str,
         _options: PublishOptions,
     ) -> Result<DeclaredPublisher<PlainPublisher>, AdvancedPublisherError> {
-        let publisher = PlainPublisher::declare(&self.session, keyexpr, None)
-            .map_err(|code| Self::refusal("publisher", code))?;
+        // The QoS the program declared the composite with, and not the
+        // `PublishOptions` the composite folds its own knobs into: those reach the
+        // publisher as the options of each put, and the publisher's declared QoS
+        // is what it sends with (`PlainPublisher::publish`).
+        let publisher =
+            PlainPublisher::declare(&self.session, keyexpr, None, self.declared.clone())
+                .map_err(|code| Self::refusal("publisher", code))?;
         Ok(DeclaredPublisher {
             eid: publisher.entity_id() as u32,
             handle: publisher,
@@ -151,7 +165,7 @@ impl AdvancedPublisherPlane for PicoPlane {
         keyexpr: &str,
         _sporadic: bool,
     ) -> Result<PlainPublisher, AdvancedPublisherError> {
-        PlainPublisher::declare(&self.session, keyexpr, None)
+        PlainPublisher::declare(&self.session, keyexpr, None, PublisherQos::pico_default())
             .map_err(|code| Self::refusal("beacon publisher", code))
     }
 

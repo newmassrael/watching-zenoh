@@ -306,27 +306,18 @@ pub struct ze_advanced_publisher_sample_miss_detection_options_t {
     pub heartbeat_period_ms: u64,
 }
 
-/// pico `z_publisher_options_t` as the advanced options embed it, 24 B
-/// measured. Re-declared here rather than imported because the publisher
-/// module models its own options separately; the fields are carried for layout
-/// and the advanced declare reads none of them (a NAMED gap, the same one
-/// `z_declare_publisher` already records for `congestion_control` / `priority`
-/// / `is_express`).
-#[repr(C)]
-pub struct ze_embedded_publisher_options_t {
-    pub encoding: *mut c_void,
-    pub congestion_control: std::ffi::c_int,
-    pub priority: std::ffi::c_int,
-    pub is_express: bool,
-    pub reliability: std::ffi::c_int,
-}
-
 /// pico `ze_advanced_publisher_options_t` (`api/advanced_publisher.h:124-130`),
 /// 88 B measured with `publisher_options@0 / cache@24 / sample_miss_detection@56
 /// / publisher_detection@72 / publisher_detection_metadata@80`.
+///
+/// `publisher_options` is the PLAIN publisher's own options type, not a second
+/// spelling of its five fields: pico embeds a `z_publisher_options_t` and hands
+/// it to `z_declare_publisher` (`vendor/zenoh-pico/src/api/advanced_publisher.c` @
+/// `_Z_RETURN_IF_ERR(z_declare_publisher(zs, &pub->_val._publisher, keyexpr, &opt.publisher_options));`),
+/// so the declaration that reads it is one function and the layout is one.
 #[repr(C)]
 pub struct ze_advanced_publisher_options_t {
-    pub publisher_options: ze_embedded_publisher_options_t,
+    pub publisher_options: crate::pubsub::z_publisher_options_t,
     pub cache: ze_advanced_publisher_cache_options_t,
     pub sample_miss_detection: ze_advanced_publisher_sample_miss_detection_options_t,
     pub publisher_detection: bool,
@@ -373,7 +364,7 @@ pub unsafe extern "C" fn ze_advanced_publisher_cache_options_default(
     (*options).max_samples = 1;
     // `z_internal_congestion_control_default_push()` = DROP, the push-side
     // default (NOT the request-side BLOCK `z_get` uses).
-    (*options).congestion_control = 0;
+    (*options).congestion_control = crate::query::Z_CONGESTION_CONTROL_DROP;
     (*options).priority = crate::query::Z_PRIORITY_DEFAULT;
     (*options).is_express = false;
     (*options)._liveliness = false;
@@ -406,13 +397,7 @@ pub unsafe extern "C" fn ze_advanced_publisher_options_default(
     if options.is_null() {
         return;
     }
-    (*options).publisher_options = ze_embedded_publisher_options_t {
-        encoding: std::ptr::null_mut(),
-        congestion_control: 0,
-        priority: crate::query::Z_PRIORITY_DEFAULT,
-        is_express: false,
-        reliability: 0,
-    };
+    crate::pubsub::z_publisher_options_default(&mut (*options).publisher_options);
     ze_advanced_publisher_cache_options_default(&mut (*options).cache);
     (*options).cache.is_enabled = false;
     ze_advanced_publisher_sample_miss_detection_options_default(
@@ -592,12 +577,6 @@ pub unsafe extern "C" fn ze_declare_advanced_publisher(
             Some(k) => k.to_owned(),
             None => return Z_ERR_INVALID,
         };
-        // The same outbound canon gate every declare in this crate hoists, so a
-        // key no peer could take is refused with the code a plain publisher
-        // gives it before anything is declared.
-        if wz_runtime_tokio::keyexpr_canon::check_outbound_keyexpr_pico_safe(&ke).is_err() {
-            return Z_ERR_INVALID;
-        }
         // pico validates this before declaring anything, and so must wz: a
         // heartbeat mode with a zero period is a publisher that would beacon in
         // a tight loop (`advanced_publisher.c:234-238`).
@@ -609,12 +588,27 @@ pub unsafe extern "C" fn ze_declare_advanced_publisher(
         {
             return Z_ERR_INVALID;
         }
+        // What the publisher inside is declared with: the embedded plain
+        // options, read by the one function that reads them for a plain
+        // publisher, and consumed at the point pico's `z_declare_publisher`
+        // consumes them (after the validation above, before anything can fail).
+        let declared = crate::pubsub::PublisherQos::declared_by(if options.is_null() {
+            std::ptr::null()
+        } else {
+            &(*options).publisher_options
+        });
+        // The same outbound canon gate every declare in this crate hoists, so a
+        // key no peer could take is refused with the code a plain publisher
+        // gives it before anything is declared.
+        if wz_runtime_tokio::keyexpr_canon::check_outbound_keyexpr_pico_safe(&ke).is_err() {
+            return Z_ERR_INVALID;
+        }
         let session = PicoSession::of(state);
         // The publisher's source identity is the session's own zid, the one its
         // peers see in the handshake.
         let zid = session.shared.zid().to_vec();
         let publisher = match AdvancedPublisherOn::declare_on(
-            Arc::new(PicoPlane::new(session)),
+            Arc::new(PicoPlane::new(session, declared)),
             ke,
             advanced_publisher_options(options),
             zid,
