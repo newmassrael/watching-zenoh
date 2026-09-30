@@ -805,7 +805,11 @@ HOST_GATED_CI_TARGETS: dict[str, str] = {
 # topologies). 959 + 3 = 962, measured by `WZ_A4_REQUIRE=1 run-ci.sh --layer A4`
 # at this round's working tree. A4 is a run-ci layer that pre-push defers to
 # hosted CI, so it is run by hand with the round-fed gates from now on.
-FOREIGN_ADJUDICATOR_LINKS = 962
+# +1 R2985, `a_peer_arriving_listed_and_leaving_is_told_the_same_on_wz_and_on_the_real_pico`
+# (`api-compat-pico`, the connectivity plane: what a session lists and what its
+# transport and link listeners are told, against libzenohpico). 962 + 1 = 963,
+# measured by `WZ_A4_REQUIRE=1 run-ci.sh --layer A4` at this round's tree.
+FOREIGN_ADJUDICATOR_LINKS = 963
 
 # ── Execution disclosure ────────────────────────────────────────────────────────
 #

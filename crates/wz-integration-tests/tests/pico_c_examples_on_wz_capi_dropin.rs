@@ -231,6 +231,58 @@ fn bounded_exit(
     }
 }
 
+/// Run upstream's `z_info` against `endpoint` as a client until it has printed
+/// everything it is going to print, end it the way a user would, and return what
+/// it printed.
+///
+/// With `Z_FEATURE_CONNECTIVITY` compiled in — which the oracle's headers now do,
+/// and which wz now implements — `z_info.c` does not return after listing: it
+/// declares its transport and link listeners and then runs
+/// `while (running) z_sleep_s(1)` until SIGINT or SIGTERM sets `running`. Its
+/// legs used to `.status()` it, which was an exit only because that half of the
+/// program was compiled out; the same call is a hang now. So the program is
+/// given its own CTRL-C, and its exit is still asserted — a clean exit on a
+/// signal is the program undeclaring its listener and closing the session, which
+/// is wz's half of what is being measured.
+fn run_zinfo(dropin: &std::path::Path, endpoint: &str) -> String {
+    let mut capture = tempfile::tempfile().expect("z_info stdout capture");
+    let writer = capture.try_clone().expect("dup z_info stdout handle");
+    let mut child = ChildGuard::wrap(
+        "z_info drop-in",
+        Command::new("stdbuf")
+            .args(["-oL", "-eL"])
+            .arg(dropin)
+            .args(["-e", endpoint, "-m", "client"])
+            .stdout(Stdio::from(writer))
+            .stderr(Stdio::from(capture.try_clone().expect("dup stderr handle")))
+            .spawn()
+            .expect("run the compiled z_info drop-in"),
+    );
+    // The last line it prints before it waits.
+    if let Err(captured) =
+        wait_for_substring(&mut capture, "Press CTRL-C to quit...", EXCHANGE_TIMEOUT)
+    {
+        panic!("z_info.c on wz never reached its wait:\n{captured}");
+    }
+    let _ = Command::new("kill")
+        .arg("-INT")
+        .arg(child.child_mut().id().to_string())
+        .status();
+    let status = match wait_for_exit(child.child_mut(), EXIT_TIMEOUT) {
+        Ok(status) => status,
+        Err(why) => panic!(
+            "z_info.c on wz did not exit after SIGINT — {why}.\n--- its output ---\n{}",
+            read_captured(&mut capture)
+        ),
+    };
+    assert!(
+        status.success(),
+        "z_info.c on wz exited {status:?} on SIGINT.\n--- its output ---\n{}",
+        read_captured(&mut capture)
+    );
+    read_captured(&mut capture)
+}
+
 /// LEG 1 (`pico->wz`) — upstream's `z_sub.c`, running on wz, receives a sample
 /// published by the REAL zenoh-pico `z_put` binary.
 ///
@@ -1375,20 +1427,7 @@ fn pico_zinfo_source_on_wz_capi_reports_a_real_zenohd_as_a_router() {
         .unwrap_or_else(|captured| panic!("zenohd never printed its ZID:\n{captured}"));
     let expected_zid = canonical_zid_32(&logged_zid(&router_log));
 
-    let mut info_out = tempfile::tempfile().expect("z_info stdout capture");
-    let info_writer = info_out.try_clone().expect("dup z_info stdout handle");
-    let info = Command::new("stdbuf")
-        .args(["-oL", "-eL"])
-        .arg(&dropin)
-        .args(["-e", &endpoint, "-m", "client"])
-        .stdout(Stdio::from(info_writer))
-        .stderr(Stdio::from(
-            info_out.try_clone().expect("dup stderr handle"),
-        ))
-        .status()
-        .expect("run the compiled z_info drop-in");
-    assert!(info.success(), "z_info.c on wz exited {info:?}");
-    let printed = read_captured(&mut info_out);
+    let printed = run_zinfo(&dropin, &endpoint);
 
     let (routers, peers) = split_info_sections(&printed);
     assert!(
@@ -1413,6 +1452,7 @@ fn pico_zinfo_source_on_wz_capi_reports_a_real_zenohd_as_a_router() {
         "z_info reported its own zid as the router's, so the enumeration is \
          not reading the peer set"
     );
+    assert_connected_face(&printed, &expected_zid, "Router", &endpoint);
 
     graceful_terminate(router.child_mut(), Duration::from_secs(5));
 }
@@ -1513,20 +1553,7 @@ fn pico_zinfo_source_on_wz_capi_pads_a_short_zenohd_zid_to_32() {
     );
     assert_eq!(canonical_zid_32(&logged), padded);
 
-    let mut info_out = tempfile::tempfile().expect("z_info stdout capture");
-    let info_writer = info_out.try_clone().expect("dup z_info stdout handle");
-    let info = Command::new("stdbuf")
-        .args(["-oL", "-eL"])
-        .arg(&dropin)
-        .args(["-e", &endpoint, "-m", "client"])
-        .stdout(Stdio::from(info_writer))
-        .stderr(Stdio::from(
-            info_out.try_clone().expect("dup stderr handle"),
-        ))
-        .status()
-        .expect("run the compiled z_info drop-in");
-    assert!(info.success(), "z_info.c on wz exited {info:?}");
-    let printed = read_captured(&mut info_out);
+    let printed = run_zinfo(&dropin, &endpoint);
 
     let (routers, _peers) = split_info_sections(&printed);
     let listed: Vec<&str> = routers.split_whitespace().collect();
@@ -1538,6 +1565,8 @@ fn pico_zinfo_source_on_wz_capi_pads_a_short_zenohd_zid_to_32() {
          no trimming (vendor/zenoh-pico/src/utils/uuid.c:38-41), so the leading \
          zero must survive.\n--- z_info (on wz) stdout ---\n{printed}"
     );
+    // The transport snapshot renders the same zid through the same conversion.
+    assert_connected_face(&printed, &padded, "Router", &endpoint);
 
     graceful_terminate(router.child_mut(), Duration::from_secs(5));
 }
@@ -1586,20 +1615,7 @@ fn pico_zinfo_source_on_wz_capi_reports_a_real_pico_peer_as_a_peer() {
     }
     drop(reservation);
 
-    let mut info_out = tempfile::tempfile().expect("z_info stdout capture");
-    let info_writer = info_out.try_clone().expect("dup z_info stdout handle");
-    let info = Command::new("stdbuf")
-        .args(["-oL", "-eL"])
-        .arg(&dropin)
-        .args(["-e", &endpoint, "-m", "client"])
-        .stdout(Stdio::from(info_writer))
-        .stderr(Stdio::from(
-            info_out.try_clone().expect("dup stderr handle"),
-        ))
-        .status()
-        .expect("run the compiled z_info drop-in");
-    assert!(info.success(), "z_info.c on wz exited {info:?}");
-    let printed = read_captured(&mut info_out);
+    let printed = run_zinfo(&dropin, &endpoint);
 
     let (routers, peers) = split_info_sections(&printed);
     let listed: Vec<&str> = peers.split_whitespace().collect();
@@ -1619,8 +1635,77 @@ fn pico_zinfo_source_on_wz_capi_reports_a_real_pico_peer_as_a_peer() {
         "a pico PEER was reported under Routers IDs -- the whatami split is \
          inverted or collapsed.\n--- z_info (on wz) stdout ---\n{printed}"
     );
+    // The peer's id is whatever the foreign process chose; the transport and
+    // link snapshots must name that same id, as a peer.
+    assert_connected_face(&printed, listed[0], "Peer", &endpoint);
 
     graceful_terminate(peer.child_mut(), Duration::from_secs(5));
+}
+
+/// The `transport{…}` and `link{…}` lines `z_info.c` prints under
+/// `Connected transports:` and `Connected links:` — the snapshots
+/// `z_info_transports` / `z_info_links` handed to its callbacks, before it
+/// declares the event listeners (which would print `>> [… Event]` headers of
+/// their own, and are cut off here).
+fn connected_sections(printed: &str) -> (Vec<String>, Vec<String>) {
+    let after = printed.split("Connected transports:").nth(1).unwrap_or("");
+    let (transports, rest) = after.split_once("Connected links:").unwrap_or((after, ""));
+    let links = rest
+        .split("Declaring transport events listener")
+        .next()
+        .unwrap_or("");
+    let lines = |block: &str| -> Vec<String> {
+        block
+            .lines()
+            .map(str::trim)
+            .filter(|line| !line.is_empty())
+            .map(str::to_owned)
+            .collect()
+    };
+    (lines(transports), lines(links))
+}
+
+/// What a connected face must look like through `z_info_transports` and
+/// `z_info_links` when the far end is `whatami` at `zid`, reached over the TCP
+/// `endpoint`.
+///
+/// Every value asserted is one pico fixes for a TCP link, not one wz chose: the
+/// MTU, `is_streamed` and `is_reliable` are per-link-TYPE constants in pico
+/// (`vendor/zenoh-pico/src/link/unicast/tcp.c:86-89` and `:107-111`), so a build
+/// that reported the negotiated batch size, or the wrong flags for a stream
+/// link, differs here and nowhere else. The zid and whatami come from the
+/// foreign process that was spawned, not from wz. `whatami` is pico's own
+/// spelling of the role — `Router`, `Peer`, `Client`, capitalised, per the map
+/// `z_whatami_to_view_string` indexes (`vendor/zenoh-pico/src/api/api.c:780-788`)
+/// — which differs from the lowercase one zenohd logs.
+fn assert_connected_face(printed: &str, zid: &str, whatami: &str, endpoint: &str) {
+    let (transports, links) = connected_sections(printed);
+    let want_transport = format!(
+        "transport{{zid={zid}, whatami={whatami}, is_qos=false, is_multicast=false, is_shm=false}}"
+    );
+    assert_eq!(
+        transports,
+        vec![want_transport],
+        "z_info_transports did not report exactly the one connected face.\n\
+         --- z_info (on wz) stdout ---\n{printed}"
+    );
+    assert_eq!(
+        links.len(),
+        1,
+        "z_info_links did not report exactly the one connected link.\n\
+         --- z_info (on wz) stdout ---\n{printed}"
+    );
+    let link = &links[0];
+    for part in [
+        format!("link{{zid={zid}, src="),
+        format!(", dst={endpoint}"),
+        ", mtu=65535, is_streamed=true, is_reliable=true}".to_owned(),
+    ] {
+        assert!(
+            link.contains(&part),
+            "the link line lacks `{part}`.\n--- z_info (on wz) stdout ---\n{printed}"
+        );
+    }
 }
 
 /// Split `z_info.c`'s output into its `Routers IDs:` and `Peers IDs:` sections.
