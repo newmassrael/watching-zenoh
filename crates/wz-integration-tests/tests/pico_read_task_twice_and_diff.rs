@@ -41,6 +41,13 @@
 //! - `dial`: the driver DIALS a listening demo with `auto_start_read_task` false,
 //!   which is the usual shape of the flag: a client opens, declares, then starts.
 //!
+//! - `dial-coalesced`: `dial` through a proxy that holds the demo's OPEN ack and
+//!   its burst and delivers them in one write. The frames are already in the
+//!   dialler's socket the moment its open is through, and its subscriber is not
+//!   declared yet: a session that reads them in the poll that announced the open
+//!   drops all five, where pico holds them for the subscriber. No ordinary peer
+//!   puts data behind its OPEN ack, so without the proxy that window is never hit.
+//!
 //! The reference arm's content is asserted BEFORE the equality: two outputs that
 //! both held nothing are equal, and this leg would then be measuring the harness.
 //!
@@ -50,6 +57,8 @@
 //! and the peers are wz-ap-demo. Absence is a hard FAIL rather than a skip.
 
 use std::fs::File;
+use std::io::{Read, Write};
+use std::net::{Shutdown, TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
@@ -271,6 +280,105 @@ fn spawn_demo(demo: &Path, mode_args: &[&str], value: &str, stderr: File, arm: &
     )
 }
 
+/// Whole length-prefixed frames at the front of `pending` (a u16 little-endian
+/// length and then that many bytes, which is how every zenoh stream link frames a
+/// message), drained from it one at a time.
+fn next_frame(pending: &mut Vec<u8>) -> Option<Vec<u8>> {
+    if pending.len() < 2 {
+        return None;
+    }
+    let total = 2 + usize::from(u16::from_le_bytes([pending[0], pending[1]]));
+    if pending.len() < total {
+        return None;
+    }
+    Some(pending.drain(..total).collect())
+}
+
+/// Carry the demo's bytes to the dialler, holding every frame after the first --
+/// the INIT ack, which the dialler must have to send its OPEN -- and delivering
+/// the held ones in ONE write once `hold` has passed since the first was held.
+/// The OPEN ack is therefore in the same write as the burst that follows it, and
+/// the dialler finds those frames already in its socket the moment its open is
+/// through, which no ordinary peer arranges: the window is the point.
+fn relay_held_then_coalesced(mut server: TcpStream, mut client: TcpStream, hold: Duration) {
+    server
+        .set_read_timeout(Some(Duration::from_millis(20)))
+        .expect("read timeout on the demo side");
+    let mut pending: Vec<u8> = Vec::new();
+    let mut held: Vec<u8> = Vec::new();
+    let mut passed = 0usize;
+    let mut first_held_at: Option<Instant> = None;
+    let mut released = false;
+    let mut chunk = [0u8; 4096];
+    loop {
+        let eof = match server.read(&mut chunk) {
+            Ok(0) => true,
+            Ok(n) => {
+                pending.extend_from_slice(&chunk[..n]);
+                false
+            }
+            Err(e)
+                if matches!(
+                    e.kind(),
+                    std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                ) =>
+            {
+                false
+            }
+            Err(_) => true,
+        };
+        while let Some(frame) = next_frame(&mut pending) {
+            if released || passed < 1 {
+                passed += 1;
+                if client.write_all(&frame).is_err() {
+                    return;
+                }
+            } else {
+                first_held_at.get_or_insert_with(Instant::now);
+                held.extend_from_slice(&frame);
+            }
+        }
+        let due = first_held_at.is_some_and(|t| t.elapsed() >= hold);
+        if (due || eof) && !held.is_empty() {
+            released = true;
+            if client.write_all(&held).is_err() {
+                return;
+            }
+            held.clear();
+        }
+        if eof {
+            let _ = client.shutdown(Shutdown::Write);
+            return;
+        }
+    }
+}
+
+/// A proxy in front of the demo at `upstream_port` that runs
+/// [`relay_held_then_coalesced`] for the one connection it serves. Returns the
+/// port the dialler is to use.
+fn spawn_coalescing_proxy(upstream_port: u16, hold: Duration) -> u16 {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind the proxy");
+    let port = listener.local_addr().expect("proxy address").port();
+    std::thread::spawn(move || {
+        let Ok((client, _)) = listener.accept() else {
+            return;
+        };
+        let Ok(server) = TcpStream::connect(("127.0.0.1", upstream_port)) else {
+            return;
+        };
+        let (Ok(mut from_client), Ok(mut to_server)) = (client.try_clone(), server.try_clone())
+        else {
+            return;
+        };
+        std::thread::spawn(move || {
+            let _ = std::io::copy(&mut from_client, &mut to_server);
+            let _ = to_server.shutdown(Shutdown::Write);
+        });
+        relay_held_then_coalesced(server, client, hold);
+    });
+    port
+}
+
 /// How many Puts on `demo/tx/**` a demo's log says it received.
 fn received_from_the_driver(demo_stderr: &mut File) -> usize {
     read_captured(demo_stderr)
@@ -288,12 +396,23 @@ fn run_arm(driver: &Path, arm: &str, mode: &str) -> String {
     let mut capture = tempfile::tempfile().expect("the driver capture");
     let mut first_stderr = tempfile::tempfile().expect("the first demo's stderr");
 
+    // `dial-coalesced` is the `dial` leg through the proxy above: the driver is
+    // told `dial` and the endpoint of the proxy, which connects to the demo once
+    // the driver connects to it.
+    let dials = mode.starts_with("dial");
+    let driver_mode = if dials { "dial" } else { mode };
+    let driver_port = if mode == "dial-coalesced" {
+        spawn_coalescing_proxy(port, Duration::from_millis(1500))
+    } else {
+        port
+    };
+
     let spawn_driver = |capture: &File| {
         ChildGuard::wrap(
             format!("{arm} driver"),
             Command::new(driver)
-                .arg(format!("tcp/127.0.0.1:{port}"))
-                .arg(mode)
+                .arg(format!("tcp/127.0.0.1:{driver_port}"))
+                .arg(driver_mode)
                 .stdout(capture.try_clone().expect("dup stdout handle"))
                 .stderr(capture.try_clone().expect("dup stderr handle"))
                 .spawn()
@@ -303,7 +422,7 @@ fn run_arm(driver: &Path, arm: &str, mode: &str) -> String {
 
     let mut demos: Vec<ChildGuard> = Vec::new();
     let mut driver_child;
-    if mode == "dial" {
+    if dials {
         // The demo listens and the driver dials it, so the demo is ready first.
         let stderr = first_stderr.try_clone().expect("dup the demo's stderr");
         demos.push(spawn_demo(
@@ -459,6 +578,31 @@ fn a_session_opened_with_its_read_task_delivers_at_once_and_stops_when_told() {
             "held-while-stopped samples=0",
             "restart rc=0 running=1",
             "second-burst samples=5",
+            "closed running=0",
+            "demo-received-from-driver=1",
+        ],
+    );
+    assert_arms_agree(&wz, &reference);
+}
+
+/// The same dialled session, but the demo's OPEN ack and its whole burst reach it
+/// in one write: the five Puts are in its socket before it has returned from
+/// `z_open`, and the subscriber that is to receive them does not exist yet. All
+/// five must be there when the task is started.
+// wz-proves: api-compat-pico wz->pico partial
+#[test]
+#[ignore = "cc-compiles a driver against both libraries and runs each against a \
+            wz-ap-demo listener behind a proxy; run by run-ci Layer E"]
+fn a_dialled_session_whose_first_traffic_arrives_with_its_open_reads_none_of_it_until_started() {
+    let (wz, reference) = both_arms("dial-coalesced");
+    assert_reference_holds(
+        &reference,
+        &[
+            "opened running=0",
+            "before-start running=0 samples>0=0",
+            "put-while-stopped rc=0",
+            "start rc=0 running=1",
+            "first-burst samples=5",
             "closed running=0",
             "demo-received-from-driver=1",
         ],
