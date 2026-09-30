@@ -74,9 +74,11 @@ use crate::write_filter::{PicoSession, WriteFilter};
 /// pinned in this module's tests.
 #[repr(C)]
 pub struct z_querier_options_t {
-    /// Moved default encoding, or NULL. Opaque here — this crate has no
-    /// encoding plane yet — but the SLOT must be 8 B or everything after it
-    /// lands wrong.
+    /// Moved default encoding, or NULL: the encoding of the value of every get
+    /// through the querier that names none of its own. Read (and consumed) at
+    /// declare. Typed as an opaque pointer because the moved wrapper is only read
+    /// through [`crate::encoding::take_moved_encoding`]; the SLOT must be 8 B or
+    /// everything after it lands wrong.
     pub encoding: *mut c_void,
     pub target: z_query_target_t,
     pub consolidation: z_query_consolidation_t,
@@ -197,6 +199,13 @@ pub(crate) struct QuerierState {
     /// carries no QoS fields, so the per-get call has nothing to override with;
     /// this is where they have to live.
     qos: crate::get::PicoQueryQos,
+    /// The encoding the querier was declared with: the DEFAULT encoding of a
+    /// get's value, which the get's own encoding overrides. pico keeps it in the
+    /// querier (`vendor/zenoh-pico/src/net/primitives.c` @
+    /// `querier->_encoding = encoding == NULL ? _z_encoding_null() : _z_encoding_steal(encoding);`)
+    /// and a get without one of its own sends with it (`vendor/zenoh-pico/src/api/api.c` @
+    /// `&querier->_encoding);  // it is safe to use alias`).
+    encoding: Option<wz_runtime_tokio::sample::EncodingHint>,
     matches: StdMutex<Vec<MatchId>>,
 }
 
@@ -326,6 +335,13 @@ pub unsafe extern "C" fn z_declare_querier(
             return Z_ERR_NULL;
         }
         *querier = z_owned_querier_t::null_value();
+        // FIRST, before any early return could skip it: the moved encoding, which
+        // pico steals at declare.
+        let encoding = if options.is_null() {
+            None
+        } else {
+            crate::encoding::take_moved_encoding((*options).encoding)
+        };
         let state = match session_state(zs) {
             Some(s) => s,
             None => return Z_ERR_NULL,
@@ -391,6 +407,7 @@ pub unsafe extern "C" fn z_declare_querier(
             timeout_ms,
             accept_replies,
             qos,
+            encoding,
             matches: StdMutex::new(Vec::new()),
         });
         boxed.bind();
@@ -496,6 +513,12 @@ pub unsafe extern "C" fn z_querier_get_with_parameters_substr(
         } else {
             std::slice::from_raw_parts(parameters as *const u8, parameters_len)
         };
+        // A get's own encoding wins; without one the value is sent with the
+        // encoding the querier was declared with.
+        let mut value_meta = value_meta;
+        if value_meta.encoding.is_none() {
+            value_meta.encoding = state.encoding.clone();
+        }
         issue_get(
             &state.shared,
             state.key.literal().to_owned(),
