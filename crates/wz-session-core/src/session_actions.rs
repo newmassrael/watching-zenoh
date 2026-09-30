@@ -7611,7 +7611,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// The outbound mapping table already holds the pair, so writing it again
     /// would be a no-op; the reconnect cache is the one that matters. It holds
     /// one entry per declaration and an undeclare prunes ONE
-    /// ([`Self::prune_declaration`]'s first-match rule), so a second entry for
+    /// (`prune_declaration`'s first-match rule), so a second entry for
     /// an id that is retracted once would be replayed after a reconnect as a key
     /// nobody holds any more. The declaration is already cached, so this does
     /// not add another.
