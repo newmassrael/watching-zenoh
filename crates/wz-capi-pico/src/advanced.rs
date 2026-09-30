@@ -60,9 +60,10 @@ use wz_runtime_tokio::sample::Sample;
 use wz_runtime_tokio::sink::SampleView;
 
 use crate::abi::{handle_ref, z_loaned_keyexpr_t, z_moved_bytes_t};
+use crate::advanced_forms::PicoSubscriberForms;
 use crate::advanced_plane::PicoPlane;
 use crate::ffi::{guard_val, guarded, CClosure as FfiClosure};
-use crate::keyexpr::keyexpr_str;
+use crate::keyexpr::{declared_of, keyexpr_str, DeclaredKeyexpr};
 use crate::pubsub::{
     z_closure_drop_callback_t, z_moved_closure_sample_t, z_owned_closure_sample_t,
     z_owned_subscriber_t, CClosure, SubscriberState,
@@ -1013,27 +1014,38 @@ pub unsafe extern "C" fn ze_declare_advanced_subscriber(
         let opts = advanced_subscriber_options(options);
         // R311y559 — kept for `ze_advanced_subscriber_keyexpr`; `ke` is moved.
         let adv_keyexpr = ke.clone();
-        let id = state.shared.declare_advanced_subscriber(ke, opts, {
-            let closure = cclosure.clone();
-            let miss = miss.clone();
-            Arc::new(move || {
-                let sample_cb = {
-                    let mut inner = crate::pubsub::make_subscriber_callback(closure.clone());
-                    // The advanced subscriber hands an OWNED `Sample`; the
-                    // existing marshal reads `&dyn SampleView`, which `Sample`
-                    // implements — so the two planes share one marshal instead
-                    // of growing a second.
-                    Box::new(move |sample: Sample| inner(&sample as &dyn SampleView))
-                        as Box<dyn FnMut(Sample) + Send + 'static>
-                };
-                let miss_cb = {
-                    let miss = miss.clone();
-                    Box::new(move |m: Miss| fire_miss(&miss, &m))
-                        as Box<dyn FnMut(Miss) + Send + 'static>
-                };
-                (sample_cb, miss_cb)
-            })
-        });
+        // pico builds this subscriber from plain entities, each declaring and
+        // naming its key the way its own entry point does — see
+        // `crate::advanced_forms`. The caller's key is what they derive from.
+        let forms = Arc::new(PicoSubscriberForms::new(
+            &PicoSession::of(state),
+            declared_of(keyexpr)
+                .map(DeclaredKeyexpr::share)
+                .unwrap_or_else(|| DeclaredKeyexpr::literal_only(ke.clone())),
+        ));
+        let id = state
+            .shared
+            .declare_advanced_subscriber_declaring_keys(ke, opts, forms, {
+                let closure = cclosure.clone();
+                let miss = miss.clone();
+                Arc::new(move || {
+                    let sample_cb = {
+                        let mut inner = crate::pubsub::make_subscriber_callback(closure.clone());
+                        // The advanced subscriber hands an OWNED `Sample`; the
+                        // existing marshal reads `&dyn SampleView`, which `Sample`
+                        // implements — so the two planes share one marshal instead
+                        // of growing a second.
+                        Box::new(move |sample: Sample| inner(&sample as &dyn SampleView))
+                            as Box<dyn FnMut(Sample) + Send + 'static>
+                    };
+                    let miss_cb = {
+                        let miss = miss.clone();
+                        Box::new(move |m: Miss| fire_miss(&miss, &m))
+                            as Box<dyn FnMut(Miss) + Send + 'static>
+                    };
+                    (sample_cb, miss_cb)
+                })
+            });
         let mut boxed = Box::new(AdvSubState {
             shared: state.shared.clone(),
             id,

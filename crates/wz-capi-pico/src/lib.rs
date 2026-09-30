@@ -69,6 +69,7 @@
 
 pub mod abi;
 pub mod advanced;
+mod advanced_forms;
 mod advanced_plane;
 pub mod bytes;
 pub mod codec;

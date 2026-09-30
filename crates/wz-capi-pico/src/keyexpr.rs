@@ -173,7 +173,7 @@ impl DeclaredKeyexpr {
     /// the joined text, which can in principle rewrite the seam, and a
     /// declaration naming bytes the key no longer starts with would put the
     /// wrong key on the wire.
-    fn extended(&self, literal: String) -> Self {
+    pub(crate) fn extended(&self, literal: String) -> Self {
         let declaration = self.declaration.clone().filter(|d| {
             literal.get(..d.prefix_len).is_some()
                 && literal.get(..d.prefix_len) == self.literal.get(..d.prefix_len)
@@ -221,10 +221,21 @@ impl DeclaredKeyexpr {
     /// and that key is the one this is called on: for a subscriber it is not
     /// the key the subscription was announced on, which is the caller's.
     pub(crate) fn retraction_naming(&self, session: &PicoSession) -> Option<RetractionKey> {
-        if session.mode == WhatAmI::Client {
+        self.retraction_naming_in(session.mode, &session.shared)
+    }
+
+    /// [`Self::retraction_naming`] for a caller that holds the two facts it
+    /// reads — the role and the registry — without a whole [`PicoSession`]: one
+    /// that has to hold the registry WEAKLY, because the registry holds it.
+    pub(crate) fn retraction_naming_in(
+        &self,
+        mode: WhatAmI,
+        shared: &Arc<SharedSession>,
+    ) -> Option<RetractionKey> {
+        if mode == WhatAmI::Client {
             return None;
         }
-        let wire = self.wire(&session.shared);
+        let wire = self.wire(shared);
         Some(if wire.mapping_id == 0 {
             RetractionKey {
                 mapping_id: 0,
