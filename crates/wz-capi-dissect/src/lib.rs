@@ -331,6 +331,7 @@ pub extern "C" fn wz_dissect_abi_version() -> c_int {
     // 20, for `wz_dissect_live_selection`.
     // 21, for `wz_dissect_pcap_frame_bytes`.
     // 22, for `wz_dissect_live_fields_since`.
+    // 23, for `wz_dissect_live_retention`.
     WZ_DISSECT_ABI_REVISION
 }
 
@@ -348,7 +349,7 @@ pub extern "C" fn wz_dissect_abi_version() -> c_int {
 /// It lives AFTER the function rather than above it on purpose: an item placed
 /// between a doc comment and the item it documents takes that doc, which is
 /// the doc-ownership defect the C1bz budget records.
-pub const WZ_DISSECT_ABI_REVISION: c_int = 22;
+pub const WZ_DISSECT_ABI_REVISION: c_int = 23;
 
 /// R2108 (open-debt item 525) — THE RECORD'S LAYOUT, reported by the artifact.
 ///
@@ -2502,6 +2503,70 @@ pub unsafe extern "C" fn wz_dissect_live_selection(
     // SAFETY: caller contract above.
     let doc = unsafe { (*handle).selection(&filter) };
     write_string(doc, out)
+}
+
+/// (ABI 23) — WHAT AN OPEN HANDLE STILL HOLDS, beside the ceilings that bound
+/// it: the retention window a live consumer renders.
+///
+/// # The gap this closes
+///
+/// Every ceiling a consumer could read (`dropped_by_limits.caps`) says how much
+/// this reader MAY keep, and every counter beside it says how much it has
+/// already discarded. Nothing said what it holds NOW, so a viewer that wanted
+/// to caption "the last N messages; older ones are gone" counted the rows of a
+/// document it had rendered for another purpose.
+///
+/// # There is no single window
+///
+/// A request for this door assumed one ring with one byte budget. There is
+/// none: `frames_per_flow` bounds each flow's decoded messages, and on a
+/// datagram flow one budget is SHARED by the cleartext, scouting and recovered
+/// QUIC datagram lists; `stream_bytes_per_direction` bounds each direction of
+/// each TCP flow; `max_flows_per_table` bounds each flow table. So the document
+/// carries, for the axes where the scope matters, the TOTAL a caption wants and
+/// the FULLEST scope, which is the only figure comparable to a ceiling. A total
+/// of 40,000 messages under a per-flow cap of 10,000 is four busy flows and
+/// healthy; only the fullest scope says whether it is one flow at its edge.
+///
+/// # What the counts are
+///
+/// `held.frames` is decoded transport messages retained whether or not a drain
+/// has handed their records out — a drain reads and removes nothing — so it is
+/// neither the records still to drain nor a byte count. `held.stream_bytes` is
+/// the one place this library holds BYTES: the reassembled streams. A datagram
+/// flow holds decoded messages only, and no byte figure is invented for it.
+///
+/// # `oldest_ts_ns`
+///
+/// The capture instant of the oldest retained message or scouting datagram, in
+/// the unit and on the clock a drained record's `ts_ns` uses, so the two
+/// compare directly; `null` when nothing held has a clock, which is a different
+/// fact from a clock reading zero.
+///
+/// # A READ, and the handle is `const` to say so
+///
+/// The lists are counted in place: no record is handed out and no id is settled,
+/// so the next [`wz_dissect_live_drain`] returns exactly what it would have.
+/// The document is `retention` at revision one, and its `dropped_by_limits`
+/// group is the same one every other document carries, from the same emitter.
+///
+/// Returns [`WZ_DISSECT_ERR_INVALID_ARG`] and no string for a null `handle` or
+/// `out`. The string is released by [`wz_dissect_string_free`].
+///
+/// # Safety
+/// `handle` must be a handle from [`wz_dissect_live_open`] or
+/// [`wz_dissect_pcap_replay`] that has not been closed, and `out` a writable
+/// pointer to a `*mut c_char`. Neither may be null.
+#[no_mangle]
+pub unsafe extern "C" fn wz_dissect_live_retention(
+    handle: *const live::LiveDissection,
+    out: *mut *mut c_char,
+) -> c_int {
+    if handle.is_null() || out.is_null() {
+        return WZ_DISSECT_ERR_INVALID_ARG;
+    }
+    // SAFETY: caller contract above.
+    write_string(unsafe { (*handle).retention() }, out)
 }
 
 /// R2453 (open-debt item 700) — THE FEED ENDED: spend the patience a capture's
@@ -5839,7 +5904,7 @@ mod tests {
         // 22, for `wz_dissect_live_fields_since`: the field document's rows
         // after a cursor, from a live handle. One symbol; the memory rule and
         // the record layout stay put.
-        assert_eq!(wz_dissect_abi_version(), 22);
+        assert_eq!(wz_dissect_abi_version(), 23);
     }
 
     /// R311y913 (unregistered item 435) — THE LINKED SURFACE CAN SAY WHAT IT
@@ -6396,6 +6461,7 @@ mod tests {
             (rev::DECLARATIONS_DIAGNOSE, vec![decl_ok, decl_bad]),
             // Built by a door that takes a handle, so it comes from one.
             (rev::SELECTION, selection_documents()),
+            (rev::RETENTION, retention_documents()),
         ];
 
         let mut failures: Vec<String> = Vec::new();
@@ -6532,6 +6598,14 @@ mod tests {
                     .next()
                     .expect("a document"),
             ),
+            // Declares no plane either, for the same reason.
+            (
+                rev::RETENTION,
+                retention_documents()
+                    .into_iter()
+                    .next()
+                    .expect("a document"),
+            ),
             (rev::CENSUS, call_census(&stream).expect("the census door")),
             (
                 rev::FIELDS,
@@ -6647,6 +6721,8 @@ mod tests {
             ),
             // Both shapes, for the reason `selection_documents` gives.
             (rev::SELECTION, selection_documents()),
+            // With a clock and without, for the reason `retention_documents` gives.
+            (rev::RETENTION, retention_documents()),
             (
                 rev::CENSUS,
                 vec![call_census(&stream).expect("the census door")],
@@ -7672,6 +7748,210 @@ mod tests {
         ];
         unsafe { wz_dissect_live_close(handle) };
         docs
+    }
+
+    /// `wz_dissect_live_retention`, the way C calls it, with the refusal code
+    /// when it refuses.
+    fn live_retention(handle: *const live::LiveDissection) -> Result<String, c_int> {
+        let mut out: *mut c_char = core::ptr::null_mut();
+        let rc = unsafe { wz_dissect_live_retention(handle, &mut out) };
+        if rc != WZ_DISSECT_OK {
+            assert!(out.is_null(), "an error must hand back no string");
+            return Err(rc);
+        }
+        assert!(!out.is_null(), "OK must come with a string");
+        let doc = unsafe { std::ffi::CStr::from_ptr(out) }
+            .to_str()
+            .expect("utf8")
+            .to_string();
+        unsafe { wz_dissect_string_free(out) };
+        Ok(doc)
+    }
+
+    /// The raw JSON value of `key` inside the object that holds `holder`, read
+    /// by the library's own scope walker so the `held` group's `frames` is never
+    /// mistaken for the same word under `dropped_by_limits`.
+    fn in_group(doc: &str, holder: &str, key: &str) -> String {
+        wz_capture::doc_revision::object_scopes(doc)
+            .into_iter()
+            .find(|scope| scope.iter().any(|(k, _)| *k == holder))
+            .and_then(|scope| {
+                scope
+                    .iter()
+                    .find(|(k, _)| *k == key)
+                    .map(|(_, v)| (*v).to_string())
+            })
+            .unwrap_or_else(|| panic!("no `{key}` beside `{holder}`: {doc}"))
+    }
+
+    /// The retention document as it CROSSES THE ABI, for the gates that hold
+    /// every document this library emits to a table.
+    ///
+    /// Two shapes, because one key is a number or a `null`: a handle replayed
+    /// from a capture has the capture's clock, and one fed packets that carry
+    /// none has no oldest instant to report. A key set cannot tell the two
+    /// apart, so they are both here for the top-level checks that can.
+    fn retention_documents() -> Vec<String> {
+        let capture = verdict_capture();
+        let replayed = replay(&capture, WZ_DISSECT_LIMITS_NONE).expect("the replay opens");
+        let clocked = live_retention(replayed).expect("a replayed handle");
+        unsafe { wz_dissect_live_close(replayed) };
+
+        let fed = open_live(WZ_DISSECT_LIMITS_NONE).expect("the preset opens");
+        let packet = udp_packet([10, 0, 0, 1], 7447, [10, 0, 0, 2], 7447, &KEEPALIVE);
+        push_live(fed, WZ_DISSECT_NO_TIMESTAMP, &packet);
+        let clockless = live_retention(fed).expect("a fed handle");
+        unsafe { wz_dissect_live_close(fed) };
+        vec![clocked, clockless]
+    }
+
+    /// What a drain hands out is what the lists held all along, and the door
+    /// says so from three directions that share no code: the records a drain
+    /// returns, the rows of the field document, and the document's own count.
+    ///
+    /// The window is also the drained records' window: the oldest instant is
+    /// the smallest `ts_ns` any record carries, in the same unit, so a consumer
+    /// comparing the two compares numbers one rule rounded.
+    #[test]
+    fn the_retention_door_counts_what_a_drain_hands_out_and_a_drain_removes_nothing() {
+        let framed = [0x01, 0x00, 0x04, 0x01, 0x00, 0x04];
+        let packets = [
+            tcp_packet(1000, &framed),
+            udp_packet([10, 0, 0, 1], 7447, [10, 0, 0, 2], 7447, &KEEPALIVE),
+            udp_packet([10, 0, 0, 3], 7447, [10, 0, 0, 4], 7447, &KEEPALIVE),
+            scout_to_group([192, 168, 1, 5], 43210),
+        ];
+        // The clock starts at 100 s so no instant is zero, which a missing
+        // clock and an epoch timestamp would otherwise share.
+        let rows: Vec<(u32, u32, &[u8])> = packets
+            .iter()
+            .enumerate()
+            .map(|(i, p)| (100 + i as u32, 0, p.as_slice()))
+            .collect();
+        let capture = wz_capture::pcap::write(1, &rows);
+        let handle = replay(&capture, WZ_DISSECT_LIMITS_NONE).expect("the replay opens");
+
+        let before = live_retention(handle).expect("a handle");
+        let records = drain_live(handle, 64);
+        assert_eq!(records.len(), 5, "two stream, two datagram, one scout");
+        let after = live_retention(handle).expect("a handle");
+        assert_eq!(
+            before, after,
+            "a drain reads the lists and removes nothing, so the window does not move"
+        );
+
+        let frames: usize = in_group(&after, "serial_frames", "frames").parse().unwrap();
+        let scouting: usize = in_group(&after, "serial_frames", "scouting")
+            .parse()
+            .unwrap();
+        assert_eq!(scouting, 1, "one scout");
+        assert_eq!(frames + scouting, records.len(), "held == records drained");
+        assert_eq!(
+            live_fields(handle, &capture)
+                .matches("\"list_id\":")
+                .count(),
+            frames + scouting,
+            "and a row of the field document for each"
+        );
+
+        let oldest = records.iter().map(|r| r.ts_ns).min().expect("records");
+        assert_eq!(oldest, 100_000_000_000, "the fixture's first packet");
+        assert_eq!(
+            in_group(&after, "serial_frames", "oldest_ts_ns"),
+            oldest.to_string(),
+            "the window reaches back to the smallest ts_ns a record carries"
+        );
+        assert_eq!(in_group(&after, "serial_frames", "stream_flows"), "1");
+        assert_eq!(in_group(&after, "serial_frames", "datagram_flows"), "3");
+        unsafe { wz_dissect_live_close(handle) };
+    }
+
+    /// A ceiling that bites moves the window, and the document shows the three
+    /// places it shows: the held count at the cap, the scope at the cap, and the
+    /// oldest instant past the messages that went.
+    #[test]
+    fn a_ceiling_that_bites_moves_the_window_and_the_door_says_where() {
+        const CAP: usize = 10_000;
+        const SENT: usize = 10_050;
+        let handle = open_live(WZ_DISSECT_LIMITS_LIVE_TAP).expect("the preset opens");
+        let packet = udp_packet([10, 0, 0, 1], 7447, [10, 0, 0, 2], 7447, &KEEPALIVE);
+        for i in 0..SENT {
+            // One millisecond apart, the unit this reader keeps, so every
+            // message has an instant of its own to be the oldest.
+            push_live(handle, (i as u64 + 1) * 1_000_000, &packet);
+        }
+
+        let doc = live_retention(handle).expect("a handle");
+        assert_eq!(
+            in_group(&doc, "frames_per_flow", "frames_per_flow"),
+            "10000"
+        );
+        assert_eq!(in_group(&doc, "serial_frames", "frames"), CAP.to_string());
+        assert_eq!(
+            in_group(&doc, "messages", "messages"),
+            CAP.to_string(),
+            "one flow at its ceiling: the scope is the cap, not a total of anything"
+        );
+        assert_eq!(
+            in_group(&doc, "scout_askers", "frames"),
+            (SENT - CAP).to_string(),
+            "and the ones that went are the ones the drop counter names"
+        );
+        // The first 50 are gone, so the oldest held is the 51st, at 51 ms.
+        assert_eq!(in_group(&doc, "serial_frames", "oldest_ts_ns"), "51000000");
+        let records = drain_live(handle, SENT);
+        assert_eq!(records.len(), CAP);
+        assert_eq!(
+            records[0].ts_ns, 51_000_000,
+            "the drain starts where it says"
+        );
+        assert_eq!(unsafe { wz_dissect_live_lost(handle) }, (SENT - CAP) as u64);
+        unsafe { wz_dissect_live_close(handle) };
+    }
+
+    /// A handle with no clock has no oldest instant to report, and a handle
+    /// with no ceiling reports none for each axis, not zero.
+    #[test]
+    fn a_clockless_unbounded_handle_reports_null_for_what_it_does_not_have() {
+        let docs = retention_documents();
+        let clocked = &docs[0];
+        let clockless = &docs[1];
+        assert_ne!(
+            in_group(clocked, "serial_frames", "oldest_ts_ns"),
+            "null",
+            "a replayed capture has a clock: {clocked}"
+        );
+        assert_eq!(
+            in_group(clockless, "serial_frames", "oldest_ts_ns"),
+            "null",
+            "a packet pushed with no timestamp has none: {clockless}"
+        );
+        assert_eq!(in_group(clockless, "serial_frames", "frames"), "1");
+        assert_eq!(
+            in_group(clockless, "frames_per_flow", "frames_per_flow"),
+            "null",
+            "no ceiling is a null, never a number: {clockless}"
+        );
+    }
+
+    #[test]
+    fn the_retention_door_refuses_a_null_argument_and_writes_nothing() {
+        let handle = open_live(WZ_DISSECT_LIMITS_NONE).expect("the preset opens");
+        let mut out: *mut c_char = core::ptr::null_mut();
+        assert_eq!(
+            unsafe { wz_dissect_live_retention(core::ptr::null(), &mut out) },
+            WZ_DISSECT_ERR_INVALID_ARG
+        );
+        assert!(out.is_null(), "a refused call hands back no string");
+        assert_eq!(
+            unsafe { wz_dissect_live_retention(handle, core::ptr::null_mut()) },
+            WZ_DISSECT_ERR_INVALID_ARG
+        );
+        // A fresh handle holds nothing and says so rather than refusing.
+        let doc = live_retention(handle).expect("an empty handle still answers");
+        assert_eq!(in_group(&doc, "serial_frames", "frames"), "0");
+        assert_eq!(in_group(&doc, "serial_frames", "oldest_ts_ns"), "null");
+        unsafe { wz_dissect_live_close(handle) };
     }
 
     /// One row of a document that carries the record coordinates, as

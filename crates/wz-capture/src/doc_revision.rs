@@ -1420,6 +1420,22 @@ pub const DOCUMENT_HISTORY: &[DocumentShape] = &[
         planes: &[],
         carries: SELECTION_R1_CARRIES,
     },
+    // What a live handle still holds, beside the ceilings that bound it.
+    //
+    // A document of its own because it answers a question no other document's
+    // subject is: the fields and census documents describe the messages, this
+    // one describes the reader's memory of them. No value family and no carried
+    // word: every key is a count, a nested group, or the one instant that is a
+    // number or null.
+    DocumentShape {
+        document: RETENTION,
+        revision: 1,
+        keys: RETENTION_R1_KEYS,
+        retiring: &[],
+        families: &[],
+        planes: &[],
+        carries: &[],
+    },
 ];
 
 // The key sets below are MEASURED, never transcribed: each was printed by the
@@ -1444,6 +1460,9 @@ pub const DECLARATIONS_DIAGNOSE: &str = "declarations_diagnose";
 /// A selector's verdict over the field document's rows, and nothing else
 /// (`wz_dissect_live_selection`).
 pub const SELECTION: &str = "selection";
+/// What a live handle still holds and the ceilings that bound it
+/// (`wz_dissect_live_retention`).
+pub const RETENTION: &str = "retention";
 
 /// The census document's key set at revision 1.
 ///
@@ -7720,6 +7739,42 @@ pub const SELECTION_R1_CARRIES: &[KeyCarries] = &[
     },
 ];
 
+/// The retention document's key set at revision 1.
+///
+/// The envelope, the `held` group with its nested `fullest_window`, and the
+/// `dropped_by_limits` group whose inner keys are the ones every other document
+/// carries. Spelled out rather than built from a sibling table, for the reason
+/// `CENSUS_R3_KEYS` gives: a pin that follows its subject is not a pin.
+///
+/// `frames`, `scouting`, `skipped`, `flows` and `stream_bytes` each appear twice
+/// under different parents — held now, dropped so far — which a flat key set
+/// cannot tell apart and the `retention` tests read by path instead.
+pub const RETENTION_R1_KEYS: &[&str] = &[
+    "caps",
+    "datagram_flows",
+    "document",
+    "dropped_by_limits",
+    "flows",
+    "frames",
+    "frames_per_flow",
+    "fullest_window",
+    "held",
+    "max_flows_per_table",
+    "max_scout_askers",
+    "messages",
+    "name",
+    "oldest_ts_ns",
+    "revision",
+    "scout_askers",
+    "scouting",
+    "serial_frames",
+    "skipped",
+    "skipped_packets",
+    "stream_bytes",
+    "stream_bytes_per_direction",
+    "stream_flows",
+];
+
 /// The three keys the envelope itself contributes to every document.
 ///
 /// Named rather than repeated into six tables: they are the same three keys
@@ -9164,6 +9219,8 @@ mod tests {
             (DECLARATIONS_DIAGNOSE, 1),
             // The selector's verdict over the field document's rows.
             (SELECTION, 1),
+            // What a live handle holds, beside its ceilings.
+            (RETENTION, 1),
         ] {
             named.push(name);
             assert_eq!(revision(name), Some(expected), "{name}");

@@ -603,6 +603,21 @@ ONLY_CAPI = {
         "would parse, every row it already has.",
         (),
     ),
+    # What an open handle holds now, beside its ceilings. Filed in the round
+    # that added the symbol.
+    "what an OPEN handle still HOLDS, beside its ceilings": (
+        "wz_dissect_live_retention",
+        "DELIBERATE, for the reason the rows above give and one more. The "
+        "question is a window that keeps moving -- how much of a feed that is "
+        "still arriving has been kept, and how far back it reaches -- and a "
+        "terminal run has no such window: `wz-analyze` reads a capture to its "
+        "last packet and prints what it kept, so what it HOLDS is the listing it "
+        "just printed, and what its ceilings discarded is already printed "
+        "beside it by `--bounded`. The ceilings and the losses have a "
+        "counterpart there; the figure that changes between two looks does "
+        "not, because a run has one look.",
+        (),
+    ),
     "declaring a live feed OVER": (
         "wz_dissect_live_end",
         "DELIBERATE. A terminal run cannot NOT end its feed: every flag "

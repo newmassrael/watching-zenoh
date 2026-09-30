@@ -71,7 +71,7 @@
  * here would only ever be a copy. (The envelope carries one more key for a
  * document that declares planes -- see R2180 below.) The names are "census",
  * "fields", "summary", "readable_surfaces", "selector_diagnose",
- * "declarations_diagnose" and "selection" — one per door group, because a consumer calls the
+ * "declarations_diagnose", "selection" and "retention" — one per door group, because a consumer calls the
  * door it wants and a single library-wide number would tell a reader of the
  * census that a document it never calls had moved.
  *
@@ -962,7 +962,7 @@ extern "C" {
  * calls the function, and refuses when the two disagree.
  *
  * @unknown ABI not-an-enumeration */
-#define WZ_DISSECT_ABI_REVISION 22
+#define WZ_DISSECT_ABI_REVISION 23
 
 /* Symbol/memory-contract revision. Not a JSON-shape revision. This is the
  * revision the LOADED library reports; the block above says why it exists
@@ -2394,6 +2394,75 @@ int wz_dissect_live_fields_since(wz_dissect_live *h,
  * @carries selection selected passenger */
 int wz_dissect_live_selection(wz_dissect_live *h, const char *selector,
                               char **out);
+
+/* ── (ABI 23) — WHAT AN OPEN HANDLE STILL HOLDS ──────────────────────────
+ *
+ * Every ceiling a consumer could read (dropped_by_limits.caps) says how much
+ * this reader MAY keep, and every counter beside it says how much it has
+ * already discarded. Nothing said what it holds NOW, so a viewer captioning
+ * "the last N messages; older ones are gone" had to count the rows of a
+ * document it had rendered for another purpose. This door writes that:
+ *
+ *     {"document":{"name":"retention","revision":R},
+ *      "held":{"frames":F,"scouting":S,"serial_frames":L,"skipped":K,
+ *              "stream_bytes":B,"stream_flows":N,"datagram_flows":M,
+ *              "fullest_window":{"messages":W,"stream_bytes":X},
+ *              "oldest_ts_ns":T},
+ *      "dropped_by_limits":{...}}
+ *
+ * THERE IS NO SINGLE WINDOW, and the document says so rather than summing
+ * scopes that share no ceiling. frames_per_flow bounds each flow's decoded
+ * messages; on a DATAGRAM flow one budget is shared by its cleartext list, its
+ * scouting list and its recovered QUIC datagram list, and each QUIC stream is
+ * bounded apart. stream_bytes_per_direction bounds each direction of each TCP
+ * flow. max_flows_per_table bounds each of the two flow tables. So for the
+ * axes where the scope matters the document gives the TOTAL a caption wants
+ * and the FULLEST scope, which is the only figure comparable to a ceiling:
+ * held.fullest_window.messages against dropped_by_limits.caps.frames_per_flow,
+ * held.fullest_window.stream_bytes against caps.stream_bytes_per_direction,
+ * held.stream_flows and held.datagram_flows against caps.max_flows_per_table.
+ * Forty thousand messages under a per-flow cap of ten thousand is four busy
+ * flows and healthy; the same forty thousand in one flow is a bug, and only the
+ * fullest scope tells them apart. A null cap means no ceiling exists.
+ *
+ * WHAT THE COUNTS ARE.
+ *   - held.frames is decoded transport messages RETAINED, whether or not a
+ *     wz_dissect_live_drain has handed their records out: a drain reads the
+ *     lists and removes nothing. It is not the number of records still to
+ *     drain, and it is not a byte count. held.scouting is the same for
+ *     scouting datagrams, which a drain also hands out one record each.
+ *   - held.stream_bytes is the reassembled bytes RETAINED, over both directions
+ *     of every TCP flow. It is the one place this library holds bytes; a
+ *     datagram flow holds decoded messages only and no byte figure is invented
+ *     for it. It is not the count of bytes ever reassembled, which a trim does
+ *     not lower.
+ *   - held.serial_frames is the part of held.frames that is a serial line. No
+ *     ceiling bounds it, so it is left out of fullest_window: a caption that
+ *     sees frames far above fullest_window.messages has a serial line to thank.
+ *   - held.skipped is the skipped-packet list, against caps.skipped_packets.
+ *
+ * oldest_ts_ns is the capture instant of the oldest retained message or
+ * scouting datagram, in the unit and on the clock a drained record's ts_ns
+ * uses, so the two compare directly: it is a whole number of milliseconds,
+ * widened, for the reason wz_dissect_record.ts_ns gives. It is the MINIMUM
+ * over everything held and not the head of each list, because a capture merged
+ * from two taps can put a later message ahead of an earlier one and "how far
+ * back can I read" asks for the earliest instant. It is null when nothing held
+ * carries a clock -- a source with no clock, or nothing held yet -- which is a
+ * different fact from 0.
+ *
+ * NOT IN IT: scout_askers. The set that ceiling bounds is private to the
+ * scouting observer, so dropped_by_limits carries the askers dropped so far and
+ * no figure for the askers held. No coordinates of the oldest record either:
+ * the oldest instant can belong to a scouting datagram, which has no row to
+ * name, and a coordinate that sometimes exists would be a second shape.
+ *
+ * A READ, and `h` is const to say so: the lists are counted in place, no record
+ * is handed out and no id is settled, so the next wz_dissect_live_drain returns
+ * exactly what it would have. The limit preset is the handle's, chosen at open.
+ * Null `h` or `out` is WZ_DISSECT_ERR_INVALID_ARG and no string. The string is
+ * released by wz_dissect_string_free. */
+int wz_dissect_live_retention(const wz_dissect_live *h, char **out);
 
 /* Release a live handle. Null is a no-op, so your cleanup path needs no
  * guard of its own -- the same rule wz_dissect_string_free follows, and the

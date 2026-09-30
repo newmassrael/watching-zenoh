@@ -338,6 +338,35 @@ static int check_live_door(void) {
         wz_dissect_string_free(census);
     }
 
+    /* (ABI 23) -- WHAT THIS HANDLE STILL HOLDS. Five keepalives went in above
+     * (three, then two), one packet on an unreadable link was skipped, and two
+     * drains handed the five out. A drain reads and removes nothing, so the
+     * window still holds all five, and the oldest instant is the first push's
+     * 1 ms -- the same number the first record's ts_ns carried. */
+    {
+        char *retention = NULL;
+        rc = wz_dissect_live_retention(h, &retention);
+        CHECK(rc == WZ_DISSECT_OK, "live_retention rc=%d", rc);
+        CHECK(retention != NULL, "OK must come with a string");
+        CHECK(strstr(retention,
+                     "\"held\":{\"frames\":5,\"scouting\":0,\"serial_frames\":0,"
+                     "\"skipped\":1,") != NULL,
+              "five held though all were drained, one skipped: %s", retention);
+        CHECK(strstr(retention, "\"oldest_ts_ns\":1000000}") != NULL,
+              "the oldest instant is the first push, in a record's unit: %s",
+              retention);
+        CHECK(strstr(retention, "\"frames_per_flow\":10000") != NULL,
+              "the live-tap ceiling is named beside what is held: %s", retention);
+        wz_dissect_string_free(retention);
+
+        retention = NULL;
+        rc = wz_dissect_live_retention(NULL, &retention);
+        CHECK(rc == WZ_DISSECT_ERR_INVALID_ARG && retention == NULL,
+              "null handle retention rc=%d", rc);
+        rc = wz_dissect_live_retention(h, NULL);
+        CHECK(rc == WZ_DISSECT_ERR_INVALID_ARG, "null out retention rc=%d", rc);
+    }
+
     /* Nulls are refused before anything is dereferenced. A panic unwinding
      * across extern "C" is undefined behaviour and these are the calls that
      * would trip it. */
@@ -1557,7 +1586,7 @@ int main(void) {
         const char *name;
         unsigned revision;
         char *doc;
-    } revisioned[4];
+    } revisioned[5];
     revisioned[0].name = "census";
     /* R2119 (open-debt item 455) -- 2: the census announced `first_packet`'s
      * retirement beside its successor `first_anchor`.
@@ -1762,6 +1791,20 @@ int main(void) {
     revisioned[3].doc = NULL;
     rc = wz_dissect_readable_surfaces(&revisioned[3].doc);
     CHECK(rc == WZ_DISSECT_OK, "surfaces rc=%d", rc);
+    /* (ABI 23) -- built by a door that takes a handle, so it comes from one; an
+     * empty handle still answers, which is the cheapest way to hold the
+     * document's opening to the revision this consumer was written against. */
+    revisioned[4].name = "retention";
+    revisioned[4].revision = 1;
+    revisioned[4].doc = NULL;
+    {
+        wz_dissect_live *retained = NULL;
+        rc = wz_dissect_live_open(WZ_DISSECT_LIMITS_NONE, &retained);
+        CHECK(rc == WZ_DISSECT_OK, "retention handle rc=%d", rc);
+        rc = wz_dissect_live_retention(retained, &revisioned[4].doc);
+        CHECK(rc == WZ_DISSECT_OK, "retention rc=%d", rc);
+        wz_dissect_live_close(retained);
+    }
 
     /* R2182 -- THE ENVELOPE MAY CARRY MORE AFTER THE REVISION, and this loop
      * used to forbid it by ending the expected prefix with `}`.

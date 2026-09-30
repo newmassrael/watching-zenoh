@@ -785,6 +785,26 @@ impl LiveDissection {
         wz_capture::census_json::census_json_where(&self.dissection, filter)
     }
 
+    /// WHAT THIS HANDLE STILL HOLDS, beside the ceilings that bound it.
+    ///
+    /// # `&self`, for the reason [`Self::census`] is
+    ///
+    /// Counting the lists must not change what the tap decodes, and it does not:
+    /// this reads them in place. Unlike the field and selection documents it
+    /// joins no row to a record, so it needs none of the ids a drain settles and
+    /// a consumer can call it as often as it draws.
+    ///
+    /// # Why a document and not a struct
+    ///
+    /// The retention is several ceilings over several scopes, and a fixed
+    /// out-struct would freeze today's axes into the ABI. A document carries a
+    /// revision and a pinned key set, so an axis that arrives later is an
+    /// expressible edit, which is the argument every other read here already
+    /// made.
+    pub fn retention(&self) -> String {
+        wz_capture::retention_json::retention_json(&self.dissection)
+    }
+
     /// THE FIELD DOCUMENT OF WHAT THIS HANDLE HAS SEEN, each row
     /// carrying the coordinates its record carries.
     ///
@@ -985,8 +1005,10 @@ fn record_of(
             // Widened back from the millisecond clock this reader keeps. The
             // caller's sub-millisecond digits are gone and the record says so
             // by carrying a whole number of milliseconds, which is a better
-            // answer than a precision this reader never had.
-            Some(ms) => ms.saturating_mul(1_000_000),
+            // answer than a precision this reader never had. The one widening
+            // rule is `millis_as_ns`, shared with the retention document's
+            // `oldest_ts_ns` so the two compare directly.
+            Some(ms) => wz_capture::retention_json::millis_as_ns(ms),
             None => NO_TIMESTAMP,
         },
         flow_id,
@@ -1219,7 +1241,7 @@ fn advance(
 fn record_of_scouting(datagram: &ScoutingDatagram, flow_id: u64, list_id: u64) -> WzDissectRecord {
     WzDissectRecord {
         ts_ns: match datagram.observed_at_ms {
-            Some(ms) => ms.saturating_mul(1_000_000),
+            Some(ms) => wz_capture::retention_json::millis_as_ns(ms),
             None => NO_TIMESTAMP,
         },
         flow_id,

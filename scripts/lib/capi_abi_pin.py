@@ -50,7 +50,7 @@ import subprocess
 import sys
 
 # The pinned pair. Edit BOTH halves deliberately -- see the module doc.
-EXPECTED_VERSION = 22
+EXPECTED_VERSION = 23
 
 # R2108 (open-debt item 525) -- THE RECORD'S LAYOUT, pinned HERE and read from
 # the artifact through `wz_dissect_record_layout`.
@@ -175,6 +175,15 @@ EXPECTED_SYMBOLS = {
     # their trees and this document walks none -- so it is its own symbol and
     # not a flag on the one above, which would have given one name two shapes.
     "wz_dissect_live_selection",
+    # (ABI 23) — what an open handle still HOLDS beside the ceilings that bound
+    # it: counts per list family, the fullest scope each ceiling bounds, and the
+    # oldest retained capture instant. The memory rule does not move: a `char*`
+    # released by `wz_dissect_string_free`, from the handle `wz_dissect_live_open`
+    # made, and the handle is `const` because nothing is drained or settled. It
+    # is its own symbol and not a key of another document, because the field and
+    # census documents describe the messages and this describes the reader's
+    # memory of them.
+    "wz_dissect_live_retention",
     # R2171 (open-debt item 547) — the door BETWEEN the two families above and
     # the nine document doors below. It hands back the same opaque handle
     # `wz_dissect_live_open` does, so the memory rule does not move with it:

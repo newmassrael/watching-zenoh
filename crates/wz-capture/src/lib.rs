@@ -247,6 +247,12 @@ mod raweth_capture_fixture;
 /// something that is not a Rust caller, with their loss counters structurally
 /// attached.
 pub mod report;
+/// What a dissection still HOLDS, beside the ceilings that decide how much it
+/// may: the retention window a live consumer renders and cannot otherwise read.
+///
+/// Ungated, like [`report`] whose ceilings group it embeds: it counts lists
+/// every build has and walks no tree.
+pub mod retention_json;
 pub mod serial;
 pub mod tcp;
 /// R311y648 (§1.2a) — RECOGNISING TLS, and deliberately not decrypting it.
@@ -1061,6 +1067,20 @@ impl DatagramDissection {
     pub fn frame_lists(&self) -> impl Iterator<Item = &[PassiveFrame]> {
         self.frame_lists_with_origin()
             .map(|(_, list)| list.as_slice())
+    }
+
+    /// The messages `frames_per_flow` counts against THIS flow: the cleartext
+    /// list, the scouting list and the recovered QUIC datagram list, one
+    /// budget between them.
+    ///
+    /// `quic_streams` are not in it. Their frames are offset in stream bytes
+    /// and the packet-indexed three are not, so the ceiling is applied to each
+    /// stream's list where it is fed. Named as a method so the trim in
+    /// `Dissection::enforce_datagram_message_cap` and a reader asking how full
+    /// the budget is stand on one definition of "the budget" rather than on
+    /// two sums that agree today.
+    pub fn budgeted_messages(&self) -> usize {
+        self.frames.len() + self.scouting.len() + self.quic_datagrams.len()
     }
 
     /// R2102 (open-debt item 524) — the same enumeration, saying WHICH list
@@ -5742,7 +5762,7 @@ impl Dissection {
             // comparison across the two spaces would evict by a number that
             // means different things in each. That list is bounded where it is
             // fed, against the same ceiling.
-            if flow.frames.len() + flow.scouting.len() + flow.quic_datagrams.len() <= cap {
+            if flow.budgeted_messages() <= cap {
                 return;
             }
             // The oldest of the three, by the one coordinate they share.
