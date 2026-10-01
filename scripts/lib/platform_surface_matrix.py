@@ -102,12 +102,13 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import pathlib
 import re
 import subprocess
 import sys
 from dataclasses import dataclass, field
-from typing import Callable, Iterable
+from typing import Callable, Iterable, Mapping
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 import upstream_link_axis_gate as axis  # noqa: E402  the LinkKind population + pin root
@@ -984,6 +985,37 @@ _RUNNING = re.compile(r"^\s*Running (?:tests[\\/])?([A-Za-z0-9_-]+)\.rs\b")
 _RESULT = re.compile(r"^test result: (ok|FAILED)\. (\d+) passed")
 
 
+def cargo_env(ambient: Mapping[str, str]) -> dict[str, str]:
+    """The environment the leg's cargo runs under: the ambient one, colour off.
+
+    `_RUNNING` is anchored at the start of the line, and the hosted workflow
+    sets `CARGO_TERM_COLOR: always` for every job. Cargo then wraps the word in
+    SGR escapes (`ESC[1m ESC[92m     Running ESC[0m tests\\ws_e2e.rs`), so no
+    line matches, every target reads as "reported no result -- it did not run",
+    and a Windows leg whose eight targets all PASSED fails. The leg parses
+    cargo's human output, so the leg decides how cargo prints it rather than
+    inheriting whatever the job happens to export -- the same fix, in the same
+    place, as `scripts/install-zenoh-c-arm.sh` made for its own parser.
+    """
+    env = dict(ambient)
+    env["CARGO_TERM_COLOR"] = "never"
+    return env
+
+
+def spawn_leg(cmd: list[str], cwd: str, ambient: Mapping[str, str]) -> subprocess.Popen[str]:
+    """Start the leg's command with stdout and stderr merged, colour pinned off."""
+    return subprocess.Popen(
+        cmd,
+        cwd=cwd,
+        env=cargo_env(ambient),
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+    )
+
+
 def attribute_results(lines: Iterable[str]) -> dict[str, tuple[str, int]]:
     """target -> (verdict, passed), from cargo test's own output."""
     out: dict[str, tuple[str, int]] = {}
@@ -1253,15 +1285,7 @@ def run(host: str) -> int:
     leg = legs[host]
     cmd = leg_command(leg)
     print(f"  platform-surface-matrix: {host} leg: {' '.join(cmd)}", flush=True)
-    proc = subprocess.Popen(
-        cmd,
-        cwd=str(ROOT / "crates"),
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
-    )
+    proc = spawn_leg(cmd, str(ROOT / "crates"), os.environ)
     lines: list[str] = []
     assert proc.stdout is not None
     for line in proc.stdout:
@@ -1481,6 +1505,23 @@ def selftest() -> int:
     one = Leg("macos", ["tls_e2e"], frozenset(), [])
     expect("all green", result_findings(one, res, 0), [])
     refused("rc without a red target", result_findings(one, res, 101), "exited 101")
+
+    # the leg's cargo prints what `_RUNNING` can read whatever the job exports:
+    # a REAL child process, started under the hosted workflow's own setting,
+    # reports the colour it was handed. A Windows leg whose eight targets all
+    # passed was failed by "reported no result" before this was pinned.
+    probe = spawn_leg(
+        [sys.executable, "-c", "import os; print(os.environ.get('CARGO_TERM_COLOR'))"],
+        str(ROOT),
+        {**os.environ, "CARGO_TERM_COLOR": "always", "WZ_PSM_PROBE": "kept"},
+    )
+    seen = (probe.communicate()[0] or "").strip()
+    expect("leg cargo colour under an `always` job", seen, "never")
+    expect(
+        "the rest of the ambient environment is kept",
+        cargo_env({"CARGO_TERM_COLOR": "always", "WZ_PSM_PROBE": "kept"}),
+        {"CARGO_TERM_COLOR": "never", "WZ_PSM_PROBE": "kept"},
+    )
 
     if failures:
         print(f"platform-surface-matrix selftest: FAIL -- {len(failures)}")
