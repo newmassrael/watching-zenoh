@@ -1789,6 +1789,31 @@ pub mod common {
         zid_value_after(line, "zid ")
     }
 
+    /// Whether `segment` has the SHAPE of a zid as either library spells it: one
+    /// to 32 hex digits. The third time a rendered zid's WIDTH was taken for a
+    /// constant, after items 417 and 420, and the first for a comparison that
+    /// is meant to ignore the value.
+    ///
+    /// Two libraries spell one id two ways, and both are right:
+    ///
+    /// * zenoh prints `{:x}` of the little-endian `u128`, which drops EVERY
+    ///   leading zero nibble — 32 digits fifteen times in sixteen, 31 one time
+    ///   in sixteen, and 30 or fewer one time in 256 (a hosted Layer E run drew
+    ///   `cac487b7b6a26afe883042d630a712`, 30 digits, and a `31..=32` range read
+    ///   it as not a zid).
+    /// * zenoh-pico's `_z_id_to_string` prints all sixteen bytes and trims
+    ///   nothing, so its zid is always 32 digits, leading zeros included.
+    ///
+    /// So no width narrower than the whole range holds for both arms, and a
+    /// strict reading of zenoh's spelling would refuse pico's one time in
+    /// sixteen. The VALUE of a rendering is exact and its width is not — that
+    /// is [`zid_value_after`]'s rule — and a caller that does not compare the
+    /// value asks only whether the text could be a zid. Empty, longer than a
+    /// 16-byte id can render, or not hex: it could not.
+    pub fn has_zid_shape(segment: &str) -> bool {
+        (1..=32).contains(&segment.len()) && segment.chars().all(|c| c.is_ascii_hexdigit())
+    }
+
     /// The zid of a peer wz DISCOVERED, out of the `hellos=[..]` rendering.
     ///
     /// R311y904, open-debt item 420. `wz_scout_zenohd_interop.rs` asserted the
@@ -6520,7 +6545,7 @@ pub mod common {
 #[cfg(test)]
 mod tests {
     use super::common::{
-        configured_zid_value, face_zid_value, hello_zid_value, line_with,
+        configured_zid_value, face_zid_value, has_zid_shape, hello_zid_value, line_with,
         parse_zenoh_admin_sessions, still_running_reason, wait_for_tcp_accept_alive, ChildGuard,
         ZenohSession, ZENOHD_TCP_ACCEPT_BUDGET,
     };
@@ -6695,6 +6720,54 @@ mod tests {
     fn a_line_without_a_zid_yields_no_zenohd_value() {
         assert_eq!(hello_zid_value("no marker here"), None);
         assert_eq!(hello_zid_value("hellos=[v9 router zid= locators=[]]"), None);
+    }
+
+    /// THE DETERMINISTIC REPRODUCTION of the hosted Layer E red on
+    /// `a_publisher_declared_with_options_sends_the_same_qos_as_the_real_pico`.
+    ///
+    /// The fixture is a real measurement: the run's wz session drew the zid
+    /// `cac487b7b6a26afe883042d630a712`, thirty digits because its top byte was
+    /// zero, and the `@adv` key normaliser, which accepted 31 or 32 digits,
+    /// left it in the key and the two arms differed on that one line. zenoh-pico
+    /// spells the same id with its zero byte, thirty-two digits — one id, two
+    /// right spellings, one number.
+    ///
+    /// It runs here and not in the test file that asked the question because
+    /// that file's tests need a pico binary and carry `#[ignore]`, and a
+    /// reproduction of a one-in-256 draw has to run on every lane.
+    #[test]
+    fn a_zid_segment_has_the_shape_at_every_width_a_library_renders() {
+        let zenoh_spelling = "cac487b7b6a26afe883042d630a712";
+        let pico_spelling = format!("00{zenoh_spelling}");
+        assert_eq!((zenoh_spelling.len(), pico_spelling.len()), (30, 32));
+        assert_eq!(
+            u128::from_str_radix(zenoh_spelling, 16),
+            u128::from_str_radix(&pico_spelling, 16),
+            "the two spellings are one id: width is lossy and the value is exact"
+        );
+        assert!(has_zid_shape(zenoh_spelling), "the measured 30-digit zid");
+        assert!(has_zid_shape(&pico_spelling), "pico's padded spelling");
+        for width in 1..=32 {
+            assert!(
+                has_zid_shape(&"a".repeat(width)),
+                "{width} hex digits is a width a zid can render at"
+            );
+        }
+    }
+
+    /// The negative half: what could not be a zid is still left alone, so a
+    /// key spelled wrongly shows in the diff instead of being normalised away.
+    #[test]
+    fn a_segment_that_could_not_be_a_zid_has_no_zid_shape() {
+        assert!(!has_zid_shape(""), "an empty segment");
+        assert!(
+            !has_zid_shape(&"a".repeat(33)),
+            "longer than a 16-byte id renders"
+        );
+        assert!(
+            !has_zid_shape("cac487b7b6a26afe883042d630a71g"),
+            "a non-hex digit"
+        );
     }
 
     /// The config-to-log relation the e2e depend on, pinned so a change reds

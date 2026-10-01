@@ -1164,7 +1164,8 @@ impl Names {
 /// id: `<key>/@adv/pub/<zid>/<eid>/_`. Both values are each library's own
 /// counters (a random zid per session, an entity id from its own allocator), so
 /// their VALUES cannot agree between the arms while their SHAPE can — the zid is
-/// hex (`ZenohId`'s display drops one leading zero, so 31 or 32 digits) and the
+/// hex of one to 32 digits (`has_zid_shape` says why no narrower width holds:
+/// zenoh drops every leading zero nibble and zenoh-pico drops none) and the
 /// entity id is a number — and the shape is what is compared. A segment that
 /// does not have the shape is left as it is, so a key spelled wrongly still
 /// shows.
@@ -1177,9 +1178,10 @@ fn normalize_adv_key(key: &str) -> String {
         let head = out[..at + marker.len()].to_owned();
         let tail = out[at + marker.len()..].to_owned();
         let mut parts: Vec<String> = tail.split('/').map(str::to_owned).collect();
-        if parts.first().is_some_and(|z| {
-            (31..=32).contains(&z.len()) && z.chars().all(|c| c.is_ascii_hexdigit())
-        }) {
+        if parts
+            .first()
+            .is_some_and(|z| wz_integration_tests::common::has_zid_shape(z))
+        {
             parts[0] = String::from("<zid>");
         }
         if parts
