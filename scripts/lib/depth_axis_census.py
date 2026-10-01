@@ -2361,7 +2361,15 @@ PIN_NO_SYMBOL = 2
 # gate and the matrix gate's now-empty gap table, and the atom is still PARTIAL.
 # READ off the census's own FAIL line, `wz citations: 20 against a pin of 16`;
 # `reached` and `ambiguous` hold at 3 and 2.
-PIN_WZ_CITATIONS = 20
+#
+# R3007 -- 20 -> 22, one atom. `platform-macos`'s reason gains the CORRECTION
+# that the serial witnesses opening a pty by device path do not run on macOS,
+# which cites two wz anchors (the tokio-serial open in the serial pipeline and
+# the cfg that gates those tests off macOS), and the atom is still PARTIAL.
+# `platform-windows` gains a CORRECTION that cites none. READ off the census's
+# own FAIL line, `wz citations: 22 against a pin of 20`; `reached` and
+# `ambiguous` hold at 3 and 2.
+PIN_WZ_CITATIONS = 22
 # R2626 — 44 -> 42, and this one is worth a sentence because it HELD through
 # every earlier retirement in this run (R2612, R2622). `time-hlc`'s reason is the
 # first retiree carrying AMBIGUOUS citations of its own: its oldest clauses cite
