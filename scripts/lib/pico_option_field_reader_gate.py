@@ -80,8 +80,19 @@ import os
 import re
 import sys
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import upstream_release_distance as urd  # noqa: E402  the live pins; the deriver the pin gates share
+
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 SRC_DIR = os.path.join(ROOT, "crates", "wz-capi-pico", "src")
+
+# The zenoh-pico release the reasons in UNREAD_WITH_REASON were read against, and the
+# submodule they are bound to. A reason such as "a no-op in pico X" is a claim about ONE
+# release. It is a tripwire, not a copy: moving the pico pin must force a human to re-read
+# each reason, so `check()` refuses until REASONS_READ_AT moves with them. The pin is read
+# from the tree's own pins, which needs no provisioned checkout.
+PICO_REPO = "https://github.com/eclipse-zenoh/zenoh-pico"
+REASONS_READ_AT = "1.10.1"
 
 # The floors. A parse that finds fewer has stopped reading the crate.
 MIN_STRUCTS = 25
@@ -100,7 +111,7 @@ UNREAD_WITH_REASON = {
         "thread attributes of pico's read task; wz has no such thread to apply them to"
     ),
     "zp_task_lease_options_t.task_attributes": (
-        "thread attributes of pico's lease task, itself a no-op in pico 1.10.1"
+        f"thread attributes of pico's lease task, itself a no-op in pico {REASONS_READ_AT}"
     ),
     "z_query_reply_options_t.congestion_control": (
         "documented ignored by pico itself: a reply's congestion control is the query's"
@@ -399,6 +410,22 @@ def judge(structs, unread, exceptions):
     return findings
 
 
+def pin_binding_findings(read_at, live_pins, repo):
+    """Findings for the bond between the reasons and the pico pin; empty means bound."""
+    live = live_pins.get(repo)
+    if not live:
+        return [
+            f"the tree's pico pin cannot be read ({repo} is not among its submodule pins), "
+            "so REASONS_READ_AT binds to nothing"
+        ]
+    if live != read_at:
+        return [
+            f"UNREAD_WITH_REASON was read at pico {read_at} and the tree now pins pico {live}: "
+            f"re-read every reason against {live}, then move REASONS_READ_AT with them"
+        ]
+    return []
+
+
 def read_sources():
     if not os.path.isdir(SRC_DIR):
         print(f"pico-option-field-readers: INPUT ERROR: {SRC_DIR} is not a directory", file=sys.stderr)
@@ -427,7 +454,8 @@ def check():
         )
         return 2
     findings = judge(structs, unread, UNREAD_WITH_REASON)
-    for f in findings:
+    pin_findings = pin_binding_findings(REASONS_READ_AT, urd.submodule_pins(), PICO_REPO)
+    for f in findings + pin_findings:
         print(f"  FAIL {f}")
     if findings:
         print(
@@ -435,6 +463,12 @@ def check():
             "reads is a program's request that does nothing. Read it, or list it in "
             "UNREAD_WITH_REASON with the reason (pico ignores it too, pico overwrites it, ...)."
         )
+    if pin_findings:
+        print(
+            "pico-option-field-readers: FAIL -- the reasons in UNREAD_WITH_REASON are claims about "
+            "one pico release. A reason carried across a pin bump is one nobody re-read."
+        )
+    if findings or pin_findings:
         return 1
     print("pico-option-field-readers: OK -- every options field is read or carries its reason")
     return 0
@@ -582,6 +616,17 @@ def selftest():
     assert judge(structs, unread, {"a_options_t.y": "r", "a_options_t.q": "r"}) == [
         "listed but no such field: a_options_t.q"
     ]
+
+    # The reasons are bound to the pico pin, in both directions and on an unreadable pin.
+    # Fake versions on purpose: a fixture that spells the live pin stops exercising its
+    # claim when the pin moves.
+    repo = "https://example.invalid/pico"
+    assert pin_binding_findings("0.0.1", {repo: "0.0.1"}, repo) == []
+    moved = pin_binding_findings("0.0.1", {repo: "0.0.2"}, repo)
+    assert len(moved) == 1 and "0.0.1" in moved[0] and "0.0.2" in moved[0], moved
+    assert len(pin_binding_findings("0.0.1", {}, repo)) == 1, "a pin that cannot be read binds to nothing"
+    assert len(pin_binding_findings("0.0.1", {repo: ""}, repo)) == 1, "an empty pin is not a pin"
+    assert urd.submodule_pins().get(PICO_REPO), "the tree must pin zenoh-pico, or the binding is vacuous"
 
     # Zero population is not green: the floor is what the real check tests.
     structs, fns, _ = analyse({"empty.rs": "pub fn f() {}"})
