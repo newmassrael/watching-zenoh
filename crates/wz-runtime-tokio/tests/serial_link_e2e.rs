@@ -9,6 +9,20 @@
 // needs a real tty -- binding a listener to a device PATH, the retained-device
 // second link, the accept-side buffer clear -- carries `#[cfg(unix)]` on the test
 // itself, which is where that fact belongs.
+//
+// Item 856 -- what opens a pty by its DEVICE PATH is further gated off macOS:
+// `#[cfg(all(unix, not(target_os = "macos")))]`. serialport 4.9.0's macOS
+// `set_termios` issues the `IOSSIOSPEED` ioctl whenever the
+// baud rate is above zero, and a pty answers it with `ENOTTY` ("Not a
+// typewriter"); the crate's own documentation says a macOS pty has to be opened
+// with baud 0. wz cannot hand it 0: the locator refuses `baudrate=0` because
+// zenoh-pico's `_z_serial_parse_u32` does. Upstream opens with
+// `z-serial-0.3.1` @ `tokio_serial::new(port.clone(), baud_rate).open_native_async()?`,
+// the same call, so a macOS pty is refused there as well and the refusal is
+// parity, not a defect; a real macOS tty takes the speed ioctl. The macOS leg
+// still runs the memory arm, the pair-based pty arm (which opens no path) and the
+// listener-bind test that opens no device. What it cannot run is `open_serial_device`
+// on a macOS tty: no hosted runner has one, so that path is unwitnessed there.
 #![cfg(feature = "transport-link-serial")]
 
 //! R311nv — wz<->wz SERIAL link end-to-end, over an in-memory pair on every host
@@ -48,14 +62,14 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use tokio::io::DuplexStream;
-#[cfg(unix)]
+#[cfg(all(unix, not(target_os = "macos")))]
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 #[cfg(unix)]
 use tokio_serial::SerialStream;
 
 use wz_runtime_tokio::observer::ApplicationLayerObserver;
 use wz_runtime_tokio::runtime_impl::TokioTime;
-#[cfg(unix)]
+#[cfg(all(unix, not(target_os = "macos")))]
 use wz_runtime_tokio::serial_pipeline::wire_serial_stream;
 use wz_runtime_tokio::serial_pipeline::{drive_serial_handshake, SerialByteStream, SerialPort};
 use wz_runtime_tokio::session::{PublishOptions, TokioSession};
@@ -64,7 +78,7 @@ use wz_runtime_tokio::session_open::{
     accept_and_open_session, bind_locator, initiate_and_open_session, AcceptConfig, BoundListener,
     DialedLink, DEFAULT_OPEN_TICK_MS,
 };
-#[cfg(unix)]
+#[cfg(all(unix, not(target_os = "macos")))]
 use wz_runtime_tokio::session_open::{accept_endpoint, AcceptedLink, AcceptedPeer};
 use wz_runtime_tokio::sync::Mutex;
 use wz_runtime_tokio_test_support::fixture_session_init_params;
@@ -93,6 +107,13 @@ fn memory_pair() -> (DuplexStream, DuplexStream) {
 }
 
 const ITER_CAP: usize = 4096;
+/// The wall-clock bound on the transport open. `ITER_CAP` bounds the open's loop
+/// by iterations, and an open that waits on bytes a device never delivers makes no
+/// iterations, so it is not a bound on time. A hosted macOS run stood in a
+/// pair-based test for over a minute with the 5 s handshake bound unreached; which
+/// phase it stood in was not observed. This bound makes the next stall in the open
+/// fail by name instead of waiting for the leg's deadline.
+const OPEN_BOUND: Duration = Duration::from_secs(20);
 const KEYEXPR: &str = "demo/serial";
 
 /// A Push published over a wz<->wz serial link reaches the peer's subscriber
@@ -155,7 +176,10 @@ async fn wz_to_wz_handshakes_and_delivers_push_over(
         .await
         .expect("initiator reaches Established over serial")
     };
-    let (mut opened_acc, mut opened_init) = tokio::join!(acc_open, init_open);
+    let (mut opened_acc, mut opened_init) =
+        tokio::time::timeout(OPEN_BOUND, async { tokio::join!(acc_open, init_open) })
+            .await
+            .expect("both ends reach Established within the bound");
 
     // ── Subscriber on the acceptor's observer; asserts the delivered payload
     //    byte-for-byte.
@@ -331,7 +355,10 @@ async fn wz_to_wz_fragments_and_reassembles_an_oversize_put_over(
         .await
         .expect("initiator reaches Established over serial")
     };
-    let (mut opened_acc, mut opened_init) = tokio::join!(acc_open, init_open);
+    let (mut opened_acc, mut opened_init) =
+        tokio::time::timeout(OPEN_BOUND, async { tokio::join!(acc_open, init_open) })
+            .await
+            .expect("both ends reach Established within the bound");
 
     // ── Fragmentation precondition, asserted BY CONSTRUCTION (R311nw): the
     //    serial link MTU caps the negotiated TX budget to SERIAL_MTU even
@@ -465,14 +492,14 @@ async fn wz_to_wz_over_serial_pty_fragments_and_reassembles_oversize_put() {
 /// own slave fd only later; never read because two fds on one pts share an input
 /// queue, so a keepalive that read would steal the seam's bytes. Same shape as
 /// `wz-integration-tests`' pico serial witness, which learned it first.
-#[cfg(unix)]
+#[cfg(all(unix, not(target_os = "macos")))]
 struct PtyEnd {
     master: SerialStream,
     path: String,
     _slave_keepalive: SerialStream,
 }
 
-#[cfg(unix)]
+#[cfg(all(unix, not(target_os = "macos")))]
 fn pty_end() -> PtyEnd {
     let (master, slave) = SerialStream::pair().expect("openpty serial pair");
     let path = tokio_serial::SerialPort::name(&slave).expect("pty slave has a device path");
@@ -581,7 +608,7 @@ async fn serial_listen_binds_without_opening_the_device_and_addresses_by_tty() {
 /// It then pins the second half: the SAME accepted link, handed the handshake
 /// once the peer does speak, completes into `DialedLink::Serial`. Without that
 /// leg the test would pass on an accept that returned something unusable.
-#[cfg(unix)]
+#[cfg(all(unix, not(target_os = "macos")))]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn serial_accept_returns_before_the_peer_speaks_and_defers_the_link_handshake() {
     let mut end = pty_end();
@@ -649,7 +676,7 @@ async fn serial_accept_returns_before_the_peer_speaks_and_defers_the_link_handsh
 /// The half that did NOT is its sibling below: parking while the link is live is
 /// upstream's behaviour, parking after it has gone was wz having no way to tell
 /// the two apart.
-#[cfg(unix)]
+#[cfg(all(unix, not(target_os = "macos")))]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn serial_listener_parks_while_its_link_is_live() {
     let end = pty_end();
@@ -679,7 +706,7 @@ async fn serial_listener_parks_while_its_link_is_live() {
 
 /// Bind a `serial/...` listen STRING through the shipped seam, asserting only
 /// that it classified and bound.
-#[cfg(unix)]
+#[cfg(all(unix, not(target_os = "macos")))]
 async fn bind_serial_listen(locator: &str) -> BoundListener {
     let endpoint = match parse_any_locator(locator).expect("locator parses") {
         AnyLocator::Serial(ep) => ep,
@@ -695,7 +722,7 @@ async fn bind_serial_listen(locator: &str) -> BoundListener {
 /// Reached through the VARIANT rather than the concrete listener type: no other
 /// `BoundListener` arm can answer this, because no other scheme's accept is a
 /// local open.
-#[cfg(unix)]
+#[cfg(all(unix, not(target_os = "macos")))]
 fn retains_device(listener: &BoundListener) -> bool {
     match listener {
         BoundListener::Serial(l) => l.retains_device(),
@@ -705,7 +732,7 @@ fn retains_device(listener: &BoundListener) -> bool {
 
 /// Accept one link off `listener` and complete its DEFERRED handshake against
 /// `peer` driven as the Initiator, yielding the parts a session would wire.
-#[cfg(unix)]
+#[cfg(all(unix, not(target_os = "macos")))]
 async fn accept_and_handshake(
     listener: &mut BoundListener,
     peer: &mut SerialStream,
@@ -746,7 +773,7 @@ async fn accept_and_handshake(
 /// half has anywhere to come back FROM — a retain witness built on that path
 /// would be green for a listener that retains nothing. The three retention arms
 /// below therefore all tear down through here.
-#[cfg(unix)]
+#[cfg(all(unix, not(target_os = "macos")))]
 async fn wire_and_tear_down(port: SerialPort, endpoint: &SerialEndpoint) {
     let (inbound, outbound, handle) = wire_serial_stream(port, endpoint);
     drop(inbound); // the read half goes home; the guard frees the device
@@ -770,7 +797,7 @@ async fn wire_and_tear_down(port: SerialPort, endpoint: &SerialEndpoint) {
 /// ANTI-VACUITY: a retained fd that no longer worked would satisfy the flag and
 /// nothing else, so the second half carries a SECOND link over the retained
 /// device and completes its handshake on it. Its sibling below is the control.
-#[cfg(unix)]
+#[cfg(all(unix, not(target_os = "macos")))]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn serial_listen_honours_release_on_close_false_by_retaining_the_device() {
     let mut end = pty_end();
@@ -821,7 +848,7 @@ async fn serial_listen_honours_release_on_close_false_by_retaining_the_device() 
 /// It then accepts AGAIN, because releasing the device must leave the listener
 /// able to re-open it: that is the R2722 property this round must not have
 /// broken, and a release that merely lost the port would fail here.
-#[cfg(unix)]
+#[cfg(all(unix, not(target_os = "macos")))]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn serial_listen_releases_the_device_on_close_by_default() {
     let mut end = pty_end();
@@ -863,7 +890,7 @@ async fn serial_listen_releases_the_device_on_close_by_default() {
 /// wz needed no clear before this round and needs one now. Upstream clears at the
 /// same seam and unconditionally (`z-serial-0.3.1` @ `pub async fn accept(&mut self)`,
 /// whose first act past the status check is `// Clear all buffers` / `self.clear()?`).
-#[cfg(unix)]
+#[cfg(all(unix, not(target_os = "macos")))]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_serial_re_accept_clears_what_the_previous_peer_left_on_the_wire() {
     let mut end = pty_end();
@@ -926,7 +953,7 @@ async fn a_serial_re_accept_clears_what_the_previous_peer_left_on_the_wire() {
 /// RED-FIRST: this arm fails before the liveness seam exists (the second accept
 /// times out exactly as its sibling above asserts), and that failure is what says
 /// the sibling was pinning a defect rather than a decision.
-#[cfg(unix)]
+#[cfg(all(unix, not(target_os = "macos")))]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn serial_listener_accepts_again_once_its_link_is_dropped() {
     let end = pty_end();
@@ -966,7 +993,7 @@ async fn serial_listener_accepts_again_once_its_link_is_dropped() {
 /// the role pico is forced into (it implements only `_z_connect_serial` and never
 /// emits `ACK`), so the direction under test is the one a foreign client
 /// produces.
-#[cfg(unix)]
+#[cfg(all(unix, not(target_os = "macos")))]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn wz_acceptor_binds_a_serial_listen_string_and_delivers_a_push() {
     let payload: Vec<u8> = b"serial-listen-seam-byte-exact".to_vec();
@@ -1021,7 +1048,10 @@ async fn wz_acceptor_binds_a_serial_listen_string_and_delivers_a_push() {
         .await
         .expect("initiator reaches Established over serial")
     };
-    let (mut opened_acc, mut opened_init) = tokio::join!(acc_open, init_open);
+    let (mut opened_acc, mut opened_init) =
+        tokio::time::timeout(OPEN_BOUND, async { tokio::join!(acc_open, init_open) })
+            .await
+            .expect("both ends reach Established within the bound");
 
     let fired = Arc::new(AtomicUsize::new(0));
     let mut observer = ApplicationLayerObserver::new();
