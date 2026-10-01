@@ -33,6 +33,79 @@
 # gate exists to make safe, not to reverse. The cost is stated rather than
 # hidden: a red is caught at the NEXT push rather than at the one that caused
 # it, exactly as the round-start read would have caught it.
+#
+# ## A cancelled predecessor is expected, and it is not a verdict
+#
+# ci.yml groups by ref and never cancels a run in flight (owner decision,
+# 2026-10-01). A push that arrives while one run executes and another waits
+# REPLACES the waiting one, and the replaced run ends `cancelled` having
+# executed no job. So a `cancelled` run for the commit being replaced is the
+# ordinary result of a burst, not an anomaly: it is stepped over and the gate
+# looks further back for a run that graded something, exactly as it does for a
+# pending one. It is never read as green. When nothing on the history has
+# graded anything the gate says so and passes, the same trade the pending arm
+# already makes; it does not refuse a push over a run that measured nothing.
+
+# Grade the newest FINISHED run on the history of one commit, for the arms that
+# cannot grade that commit's own run: it has not finished, or it was cancelled
+# and graded nothing. R2639 (carry N70): "not graded" must not be the last
+# word, or a red hides behind the queue.
+#
+# $1 — the commit whose history to search.
+# $2 — caller name, for the messages.
+# $3 — what stopped the commit's own run from grading: `pending` or `cancelled`.
+#
+# Returns 0 to proceed (green, nothing finished, or the search could not run)
+# and 1 when a RED or AMBER run was found, having set `kind`, `rest` and
+# `graded_sha` in the CALLER for the shared refusal. Those three are the
+# caller's `local`s on purpose: bash scopes them dynamically, and the refusal
+# below the case statement reads them.
+_wz_grade_earlier() {
+    local sha="$1"
+    local context="$2"
+    local why="$3"
+    local anc_file fallback fb_kind runs
+    anc_file="$(mktemp)"
+    if git rev-list --max-count=400 "$sha" > "$anc_file" 2>/dev/null \
+        && runs="$(gh run list --limit 40 \
+            --json databaseId,status,conclusion,workflowName,headSha,createdAt \
+            2>/dev/null)" \
+        && [[ -n "$runs" ]]; then
+        fallback="$(printf '%s' "$runs" | python3 \
+            scripts/lib/newest_completed_ancestor_run.py \
+            --ancestors-file "$anc_file" 2>/dev/null)"
+    else
+        fallback=""
+    fi
+    rm -f "$anc_file"
+    fb_kind="${fallback%%$'\t'*}"
+    case "$fb_kind" in
+        GREEN)
+            echo "          the newest FINISHED run on this history was green (run ${fallback#*$'\t'})."
+            return 0
+            ;;
+        RED|AMBER)
+            # Fall through to the shared refusal, naming the run that actually
+            # graded something.
+            kind="$fb_kind"
+            rest="${fallback#*$'\t'}"
+            graded_sha="$(printf '%s' "$rest" | cut -f4)"
+            echo "" >&2
+            echo "$context: the $why run above hides an EARLIER verdict on this history." >&2
+            return 1
+            ;;
+        NONE)
+            echo "          NOTHING on this history has finished (${fallback#*$'\t'} run(s) seen)," >&2
+            echo "          so this gate measured nothing — that is not the same as no red." >&2
+            return 0
+            ;;
+        *)
+            echo "          the earlier-verdict fallback did NOT run (no gh, no python3," >&2
+            echo "          or an unreadable payload); only the $why line above is known." >&2
+            return 0
+            ;;
+    esac
+}
 
 # Read the hosted verdict for one commit.
 #
@@ -102,7 +175,7 @@ if not runs:
     print("NORUN\tno hosted run exists for this commit")
     raise SystemExit(0)
 
-pending, pending_ids, red, amber = [], [], [], []
+pending, pending_ids, red, amber, cancelled = [], [], [], [], []
 for r in runs:
     name = r.get("workflowName") or "?"
     rid = r.get("databaseId")
@@ -117,17 +190,26 @@ for r in runs:
     c = r.get("conclusion")
     if c in GREEN:
         continue
+    if c == "cancelled":
+        # Set apart from the other non-green conclusions. The CI group never
+        # cancels a run in flight but does replace a waiting one, so a cancelled
+        # run is the ordinary result of a burst of pushes. It graded nothing:
+        # it is stepped over, never counted as green.
+        cancelled.append("%s (%s)" % (name, rid))
+        continue
     (red if c in RED else amber).append("%s\t%s\t%s" % (name, rid, c))
 
 if red:
     print("RED\t" + "\t".join(red[:1]))
 elif amber:
-    # NOT a failure and NOT a pass. On main this workflow groups per commit and
-    # does not cancel in progress (ci.yml:105-107), so a cancelled run here is
-    # an anomaly rather than supersession, and it graded nothing either way.
+    # NOT a failure and NOT a pass: a conclusion that is neither success, a
+    # failure, nor a cancellation (neutral, action_required, stale). It graded
+    # nothing either way, and it is not an ordinary result of this workflow.
     print("AMBER\t" + "\t".join(amber[:1]))
 elif pending:
     print("PENDING\t" + ",".join(pending_ids) + "\t" + "; ".join(pending))
+elif cancelled:
+    print("SUPERSEDED\t" + "; ".join(cancelled))
 else:
     print("GREEN\t")
 ' 2>/dev/null)"
@@ -204,46 +286,20 @@ else:
             # it as "no red" is what made the queue a hiding place. So when the
             # immediate predecessor has not finished, grade the newest run on
             # this history that HAS.
-            local anc_file fallback fb_kind
-            anc_file="$(mktemp)"
-            if git rev-list --max-count=400 "$sha" > "$anc_file" 2>/dev/null \
-                && runs="$(gh run list --limit 40 \
-                    --json databaseId,status,conclusion,workflowName,headSha,createdAt \
-                    2>/dev/null)" \
-                && [[ -n "$runs" ]]; then
-                fallback="$(printf '%s' "$runs" | python3 \
-                    scripts/lib/newest_completed_ancestor_run.py \
-                    --ancestors-file "$anc_file" 2>/dev/null)"
-            else
-                fallback=""
+            if _wz_grade_earlier "$sha" "$context" pending; then
+                return 0
             fi
-            rm -f "$anc_file"
-            fb_kind="${fallback%%$'\t'*}"
-            case "$fb_kind" in
-                GREEN)
-                    echo "          the newest FINISHED run on this history was green (run ${fallback#*$'\t'})."
-                    return 0
-                    ;;
-                RED|AMBER)
-                    # Fall through to the shared refusal below, naming the run
-                    # that actually graded something.
-                    kind="$fb_kind"
-                    rest="${fallback#*$'\t'}"
-                    graded_sha="$(printf '%s' "$rest" | cut -f4)"
-                    echo "" >&2
-                    echo "$context: the pending run above hides an EARLIER verdict on this history." >&2
-                    ;;
-                NONE)
-                    echo "          NOTHING on this history has finished (${fallback#*$'\t'} run(s) seen)," >&2
-                    echo "          so this gate measured nothing — that is not the same as no red." >&2
-                    return 0
-                    ;;
-                *)
-                    echo "          the earlier-verdict fallback did NOT run (no gh, no python3," >&2
-                    echo "          or an unreadable payload); only the pending line above is known." >&2
-                    return 0
-                    ;;
-            esac
+            ;;
+        SUPERSEDED)
+            # The run for this commit ended `cancelled`: a later push replaced
+            # it while it waited, which is what ci.yml's group does by design.
+            # It executed nothing, so it says nothing about this commit, and it
+            # is not green. Look for the newest run that graded something.
+            echo "$context: the hosted run for ${sha:0:12} was cancelled ($rest)."
+            echo "          A later push replaced it while it waited; it graded nothing."
+            if _wz_grade_earlier "$sha" "$context" cancelled; then
+                return 0
+            fi
             ;;
         UNREADABLE|NORUN)
             # Announced, never green: this gate graded nothing about this

@@ -29,6 +29,17 @@ skipped, not blamed. What changes is only this: when nothing recent has
 finished, the gate looks FURTHER BACK for something that did, instead of
 reporting that it found no red.
 
+## A cancelled run is stepped over, not graded
+
+ci.yml groups by ref and never cancels a run in flight, but a group keeps only
+one WAITING run, so a push replaces the waiting one and that run ends
+`cancelled` having executed no job. Under that policy a cancelled run is the
+ordinary result of a burst of pushes, and it graded nothing, so it is skipped
+exactly as a pending one is. It is never counted as green. If nothing on the
+history graded anything the answer is NONE, which the gate announces as "measured
+nothing" rather than as a pass. Earlier this module reported a cancelled run as
+AMBER, which was right while a cancellation could only be an anomaly.
+
 ## Why the ancestor set is required
 
 A run's `headSha` may belong to another branch or to a commit this history never
@@ -66,12 +77,17 @@ def newest_completed(runs, ancestors):
     newest first today, and a verdict that depends on that would be a verdict
     resting on an undocumented ordering, so `createdAt` decides when it is
     present and input order only breaks ties.
+
+    A cancelled run is skipped, like a pending one: it executed nothing, so it
+    is the newest run that GRADED something this function is asked for.
     """
     considered = []
     for i, r in enumerate(runs):
         if not isinstance(r, dict):
             continue
         if r.get("status") != "completed":
+            continue
+        if r.get("conclusion") == "cancelled":
             continue
         head = r.get("headSha") or ""
         if head not in ancestors:
@@ -132,9 +148,24 @@ def selftest() -> int:
         run(1, "completed", "failure", A, "2026-09-15T02:00:00Z"),
         run(5, "completed", "success", B, "2026-09-15T07:00:00Z"),
     ], anc, "GREEN\t5"))
-    seen.add(case("cancelled is amber", [
+    # A cancelled run executed nothing and is stepped over. The red behind it
+    # must still be found: a cancellation is not a place for a red to hide.
+    seen.add(case("red behind a cancelled run", [
         run(4, "completed", "cancelled", B, "2026-09-15T07:00:00Z"),
-    ], anc, "AMBER\tCI\t4\tcancelled"))
+        run(1, "completed", "failure", A, "2026-09-15T02:00:00Z"),
+    ], anc, "RED\tCI\t1\tfailure"))
+    seen.add(case("green behind a cancelled run", [
+        run(4, "completed", "cancelled", B, "2026-09-15T07:00:00Z"),
+        run(1, "completed", "success", A, "2026-09-15T02:00:00Z"),
+    ], anc, "GREEN\t1"))
+    # And a cancellation is never promoted to a pass: with nothing behind it the
+    # answer is NONE, which the gate announces as measuring nothing.
+    seen.add(case("cancelled alone is not a pass", [
+        run(4, "completed", "cancelled", B, "2026-09-15T07:00:00Z"),
+    ], anc, "NONE\t1"))
+    seen.add(case("a conclusion that is neither green nor red is amber", [
+        run(6, "completed", "action_required", B, "2026-09-15T07:00:00Z"),
+    ], anc, "AMBER\tCI\t6\taction_required"))
     seen.add(case("nothing finished", [
         run(3, "queued", None, C, "2026-09-15T09:00:00Z"),
     ], anc, "NONE\t1"))
