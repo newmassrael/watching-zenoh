@@ -128,8 +128,8 @@ use tokio::net::UdpSocket;
 // transport-link-serial feature here.
 #[cfg(feature = "transport-link-serial")]
 use crate::serial_pipeline::{
-    clear_serial_buffers, dial_serial, drive_serial_handshake, open_serial_device,
-    wire_serial_stream, SerialLiveness, SerialPort, SerialReadDriver,
+    dial_serial, drive_serial_handshake, open_serial_device, wire_serial_stream, BoxedSerialStream,
+    SerialLiveness, SerialPort, SerialReadDriver,
 };
 #[cfg(feature = "transport-link-serial")]
 use wz_session_core::serial_link::SerialRole;
@@ -1698,14 +1698,14 @@ impl BoundListener {
                 if l.liveness.is_live() {
                     std::future::pending::<()>().await;
                 }
-                let stream = match l.liveness.take_retained() {
+                let stream: BoxedSerialStream = match l.liveness.take_retained() {
                     Some(retained) => retained,
-                    None => open_serial_device(&l.endpoint)?,
+                    None => Box::new(open_serial_device(&l.endpoint)?),
                 };
-                clear_serial_buffers(&stream)?;
+                stream.clear_buffers()?;
                 (
                     AcceptedLink::Serial {
-                        stream: SerialPort::accepted(stream, l.liveness.claim()),
+                        stream: SerialPort::accepted_boxed(stream, l.liveness.claim()),
                         endpoint: l.endpoint.clone(),
                     },
                     AcceptedPeer::NonIp("serial"),

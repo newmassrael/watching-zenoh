@@ -487,19 +487,22 @@ async fn unixpipe_link_ends_report_mirrored_dedicated_fifo_endpoints() {
 /// the exact `SerialEndpoint` that opened it — for both address forms of the
 /// grammar, a `Device` path and a `Pins` pair.
 ///
-/// There is no mirror to check here: `SerialStream::pair()` exposes no device name
-/// and a tty's address is not readable off the stream, so each end is given its
-/// endpoint the way the real dial path is given the one it parsed. Handing the two
-/// ends DIFFERENT endpoints is what keeps that non-vacuous, and covering both
-/// `SerialTarget` variants is what catches an emitter that hard-codes one spelling.
+/// There is no mirror to check here: a tty's address is not readable off the
+/// stream, so each end is given its endpoint the way the real dial path is given
+/// the one it parsed. Handing the two ends DIFFERENT endpoints is what keeps that
+/// non-vacuous, and covering both `SerialTarget` variants is what catches an
+/// emitter that hard-codes one spelling.
+///
+/// The ends are an in-memory pair (R2995, open-debt 852): nothing is read or
+/// written, so a pty added nothing and its `unix` gate was only ever the pair's,
+/// not the assertion's. The test now runs on every host the serial link is served on.
 ///
 /// Both ends reporting the same locator for `src` and `dst` is upstream's DIAL-side
 /// behaviour verbatim (`io/zenoh-links/zenoh-link-serial/src/unicast.rs` @ `async fn new_link(&self, endpoint: EndPoint) -> ZResult<LinkUnicast> {`
 /// passes its one `path` as both), so `assert_mirrored`'s distinctness rule does not apply.
-#[cfg(all(feature = "transport-link-serial", feature = "transport-unicast", unix))]
+#[cfg(all(feature = "transport-link-serial", feature = "transport-unicast"))]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn serial_link_ends_report_their_own_endpoint_for_both_address_forms() {
-    use tokio_serial::SerialStream;
     use wz_runtime_tokio::serial_pipeline::{wire_serial_stream, SerialPort};
     use wz_session_core::link::BoxedLinkDriver;
     use wz_session_core::locator::{SerialEndpoint, SerialOptions, SerialTarget};
@@ -517,7 +520,7 @@ async fn serial_link_ends_report_their_own_endpoint_for_both_address_forms() {
         qos: None,
     };
 
-    let (a, b) = SerialStream::pair().expect("openpty serial pair");
+    let (a, b) = tokio::io::duplex(1024);
     let (_a_in, a_out, _a_h) = wire_serial_stream(SerialPort::dialled(a), &device_end);
     let (_b_in, b_out, _b_h) = wire_serial_stream(SerialPort::dialled(b), &pins_end);
 

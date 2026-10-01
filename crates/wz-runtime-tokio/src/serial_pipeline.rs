@@ -45,7 +45,11 @@
 //!
 //! ## Split shape
 //!
-//! [`SerialStream`] is `AsyncRead + AsyncWrite` but NOT owned-half
+//! The stream the link runs over is a `BoxedSerialStream` (R2995, open-debt
+//! 852): a tty's `SerialStream` when there is a device, or an in-memory
+//! duplex where there is none, so the framing, handshake, MTU cap, liveness claim
+//! and retained device are exercised on every host rather than only on one with
+//! an `openpty` pair. [`SerialStream`] is `AsyncRead + AsyncWrite` but NOT owned-half
 //! splittable the way [`tokio::net::TcpStream::into_split`] is, so
 //! [`tokio::io::split`] is used (a `BiLock` shared between the halves —
 //! each `poll_read` / `poll_write` is non-blocking on the tty `AsyncFd`, so
@@ -59,7 +63,9 @@ use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
 use std::sync::Arc;
 use std::time::Duration;
 
-use tokio::io::{split, AsyncReadExt, AsyncWriteExt, ReadHalf, WriteHalf};
+use tokio::io::{
+    split, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, DuplexStream, ReadHalf, WriteHalf,
+};
 use tokio_serial::SerialStream;
 
 use crate::link_interfaces::{addressless_link_endpoints, addressless_link_subject};
@@ -84,6 +90,50 @@ const SERIAL_DATA_HEADER: u8 = 0x00;
 /// Initiator back-off between INIT retries when the peer answers RESET
 /// (`SERIAL_CONNECT_THROTTLE_TIME_MS`, serial_protocol.c:37).
 const SERIAL_CONNECT_THROTTLE: Duration = Duration::from_millis(250);
+
+/// R2995 (open-debt 852) -- what the serial link needs of the byte stream it
+/// runs over: a duplex of bytes it can move between tasks, and a way to discard
+/// what the OS is still holding for it.
+///
+/// ⛔ THE STRUCTURE THIS ADDS is the boundary between the link and the device. The
+/// handshake, the COBS framing, the MTU cap, the liveness claim and the retained
+/// device never depended on a tty -- they read and write bytes -- but every type
+/// that carried the stream was spelled `SerialStream`, so the only way to run any
+/// of it was to own a tty, and the only tty pair there is (`SerialStream::pair`,
+/// an `openpty` pair) exists on a Unix alone. A Windows runner therefore compiled
+/// the link and executed none of it. The trait is what lets a test hand the same
+/// machinery an in-memory duplex on EVERY host, and leaves the real-device arms
+/// (open, exclusive, clear) to the tests that need a real device.
+///
+/// `clear_buffers` is the one thing a duplex cannot answer honestly by doing
+/// nothing -- a tty holds kernel queues, an in-memory pipe does not -- so it is a
+/// method with the no-queue answer as its default, and [`SerialStream`] is the one
+/// implementor that overrides it. Upstream clears at open and at every accept
+/// (see [`clear_serial_buffers`]); this is the accept-side half, reached through
+/// whatever the listener retained.
+pub trait SerialByteStream: AsyncRead + AsyncWrite + Send + Unpin + 'static {
+    /// Discard whatever this device holds unread or unsent. A stream with no
+    /// device queues has nothing to discard.
+    fn clear_buffers(&self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+impl SerialByteStream for SerialStream {
+    fn clear_buffers(&self) -> io::Result<()> {
+        clear_serial_buffers(self)
+    }
+}
+
+/// The in-memory stream: a serial link with no device under it. It exists so the
+/// link's logic has a witness that runs on a host with no tty pair (open-debt 852).
+impl SerialByteStream for DuplexStream {}
+
+/// A serial stream with its concrete type erased -- what a [`SerialPort`] and a
+/// listener's retained device carry, so one `DialedLink::Serial` can hold either a
+/// tty or an in-memory stream. The cost is one vtable hop per poll on a link whose
+/// line rate is a few hundred kilobits at most.
+pub type BoxedSerialStream = Box<dyn SerialByteStream>;
 
 /// R2722 — "a link is live on this tty", shared between the listener that
 /// accepted it and the link itself.
@@ -163,10 +213,10 @@ struct SerialLivenessInner {
 /// retain** here.
 #[derive(Default)]
 struct SerialRetainSlot {
-    reader: Option<ReadHalf<SerialStream>>,
-    writer: Option<WriteHalf<SerialStream>>,
+    reader: Option<ReadHalf<BoxedSerialStream>>,
+    writer: Option<WriteHalf<BoxedSerialStream>>,
     /// Both halves, re-assembled — the device the next accept reuses.
-    port: Option<SerialStream>,
+    port: Option<BoxedSerialStream>,
 }
 
 impl std::fmt::Debug for SerialRetainSlot {
@@ -238,7 +288,7 @@ impl SerialLiveness {
     }
 
     /// Hand the READ half home. Called from [`SerialReadDriver`]'s `Drop`.
-    fn return_reader(&self, reader: ReadHalf<SerialStream>) {
+    fn return_reader(&self, reader: ReadHalf<BoxedSerialStream>) {
         if !self.0.retain_device {
             return; // `release_on_close=true`: let the half close.
         }
@@ -248,7 +298,7 @@ impl SerialLiveness {
     }
 
     /// Hand the WRITE half home. Called when [`serial_writer_task`] returns.
-    fn return_writer(&self, writer: WriteHalf<SerialStream>) {
+    fn return_writer(&self, writer: WriteHalf<BoxedSerialStream>) {
         if !self.0.retain_device {
             return; // `release_on_close=true`: let the half close.
         }
@@ -258,7 +308,7 @@ impl SerialLiveness {
     }
 
     /// Take the retained device, if one is being held. The accept seam's read.
-    pub(crate) fn take_retained(&self) -> Option<SerialStream> {
+    pub(crate) fn take_retained(&self) -> Option<BoxedSerialStream> {
         self.lock_returned().port.take()
     }
 
@@ -319,8 +369,12 @@ impl Drop for SerialLinkGuard {
 /// whatever outlives the split. A guard silently dropped at the split would mark
 /// the device free while the link was still running, which is the same defect as
 /// having no guard at all and harder to see.
+///
+/// R2995 (open-debt 852) -- the stream is a [`BoxedSerialStream`], not a
+/// [`SerialStream`]: a tty is the usual provider of the bytes and no longer the
+/// only one, which is what lets the link's logic run where no tty pair exists.
 pub struct SerialPort {
-    stream: SerialStream,
+    stream: BoxedSerialStream,
     guard: Option<SerialLinkGuard>,
 }
 
@@ -334,15 +388,22 @@ impl std::fmt::Debug for SerialPort {
 
 impl SerialPort {
     /// A device this process opened for itself — no listener is waiting on it.
-    pub fn dialled(stream: SerialStream) -> Self {
+    pub fn dialled(stream: impl SerialByteStream) -> Self {
         Self {
-            stream,
+            stream: Box::new(stream),
             guard: None,
         }
     }
 
     /// A device a listener handed out, carrying the guard that frees it.
-    pub fn accepted(stream: SerialStream, guard: SerialLinkGuard) -> Self {
+    pub fn accepted(stream: impl SerialByteStream, guard: SerialLinkGuard) -> Self {
+        Self::accepted_boxed(Box::new(stream), guard)
+    }
+
+    /// [`Self::accepted`] for a stream that is already erased -- the device a
+    /// listener RETAINED, which comes back out of its slot as a
+    /// [`BoxedSerialStream`] and must not be boxed a second time.
+    pub(crate) fn accepted_boxed(stream: BoxedSerialStream, guard: SerialLinkGuard) -> Self {
         Self {
             stream,
             guard: Some(guard),
@@ -351,13 +412,13 @@ impl SerialPort {
 
     /// The stream, mutably — the serial-link handshake runs over the WHOLE
     /// device before the split, exactly as it did when this was a bare stream.
-    pub fn stream_mut(&mut self) -> &mut SerialStream {
+    pub fn stream_mut(&mut self) -> &mut BoxedSerialStream {
         &mut self.stream
     }
 
     /// Split into the two things the wiring seam needs to keep apart: the stream
     /// it consumes, and the guard it must keep alive past the consumption.
-    pub fn into_parts(self) -> (SerialStream, Option<SerialLinkGuard>) {
+    pub fn into_parts(self) -> (BoxedSerialStream, Option<SerialLinkGuard>) {
         (self.stream, self.guard)
     }
 }
@@ -711,7 +772,7 @@ pub struct SerialReadDriver {
     /// listener (R2727); it is `Some` for this driver's whole usable life, and
     /// `None` is reachable only from inside `Drop`, after which nothing can call
     /// [`Self::poll_event`] again.
-    reader: Option<ReadHalf<SerialStream>>,
+    reader: Option<ReadHalf<BoxedSerialStream>>,
     /// Byte accumulator detecting `0x00`-EOP frame boundaries across reads.
     framer: SerialFrameReader,
     /// Frames decoded from a single `read` that returned more than one
@@ -731,7 +792,7 @@ pub struct SerialReadDriver {
 }
 
 impl SerialReadDriver {
-    fn new(reader: ReadHalf<SerialStream>, liveness: Option<SerialLinkGuard>) -> Self {
+    fn new(reader: ReadHalf<BoxedSerialStream>, liveness: Option<SerialLinkGuard>) -> Self {
         Self {
             reader: Some(reader),
             framer: SerialFrameReader::new(),
@@ -988,7 +1049,7 @@ impl BoxedLinkDriver for SerialWriteDriver {
 /// cancels this future where it stands; see `SerialRetainSlot` for why
 /// re-opening is right in that case.
 pub async fn serial_writer_task(
-    writer: WriteHalf<SerialStream>,
+    writer: WriteHalf<BoxedSerialStream>,
     queue: OutboundQueue,
     retain: Option<SerialLiveness>,
 ) {
@@ -1001,9 +1062,9 @@ pub async fn serial_writer_task(
 /// The draining loop of [`serial_writer_task`], returning the half it was given
 /// on every path out.
 async fn drain_serial_writes(
-    mut writer: WriteHalf<SerialStream>,
+    mut writer: WriteHalf<BoxedSerialStream>,
     mut queue: OutboundQueue,
-) -> WriteHalf<SerialStream> {
+) -> WriteHalf<BoxedSerialStream> {
     while let Some(payload) = queue.next().await {
         // Defensive: send_blocking already rejects oversize, but a future
         // caller could bypass it. encode_frame rejects > SERIAL_MTU.
@@ -1049,15 +1110,24 @@ async fn drain_serial_writes(
     writer
 }
 
-// R2973 — every test here that opens a link carries `#[cfg(unix)]`, and the
-// reason is the TEST'S, not the link's: upstream serves serial on Windows and so
-// does wz, but `SerialStream::pair` is an `openpty` pair, `#[cfg(unix)]` inside
-// tokio-serial. Without it a Windows test build naming the feature did not
-// compile. The one test that opens nothing stays on every host. What running
-// serial on Windows would take is open-debt 852.
+// R2995 (open-debt 852) -- the link's LOGIC is witnessed here over an in-memory
+// duplex on EVERY host, and over an `openpty` pair as well where there is one.
+// R2973 had to fence these tests `#[cfg(unix)]` because the only pair they knew
+// how to open was `SerialStream::pair`, `#[cfg(unix)]` inside tokio-serial, so a
+// Windows runner built the link and ran none of it. The handshake, the framing,
+// the MTU cap, the liveness claim and the retained device read and write bytes
+// and never needed a tty, so each body below is generic over the stream and is
+// instantiated twice: the duplex is what a host with no tty pair runs, and the
+// pty is what keeps the real device underneath the same logic witnessed on a Unix.
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Two connected ends of an in-memory serial link: what a host with no tty
+    /// pair runs these witnesses over.
+    fn memory_pair() -> (DuplexStream, DuplexStream) {
+        tokio::io::duplex(64 * 1024)
+    }
 
     /// R2704 — the locator's `tout` bounds the handshake, as upstream's does.
     ///
@@ -1065,10 +1135,10 @@ mod tests {
     /// upstream's `port.connect(Some(..))` exists for. Before this round the
     /// initiator would re-send INIT on every RESET forever, so the only bound
     /// was whatever the caller happened to compose.
-    #[cfg(unix)]
-    #[tokio::test]
-    async fn a_handshake_is_bounded_by_the_locators_tout() {
-        let (mut a, _b) = SerialStream::pair().expect("openpty serial pair");
+    async fn assert_a_handshake_is_bounded(
+        mut a: impl SerialByteStream,
+        _b: impl SerialByteStream,
+    ) {
         // A short window so the test costs nothing; the VALUE is the point, not
         // the duration -- it is read from the endpoint, not hard-coded in the
         // seam.
@@ -1094,13 +1164,26 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn a_handshake_over_memory_is_bounded_by_the_locators_tout() {
+        let (a, b) = memory_pair();
+        assert_a_handshake_is_bounded(a, b).await;
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_handshake_is_bounded_by_the_locators_tout() {
+        let (a, b) = SerialStream::pair().expect("openpty serial pair");
+        assert_a_handshake_is_bounded(a, b).await;
+    }
+
     /// The ANTI-VACUITY half: the bound must not be so eager that it refuses a
     /// handshake that DOES complete. Without this, a `drive_serial_handshake_within`
     /// that returned `TimedOut` unconditionally would satisfy the test above.
-    #[cfg(unix)]
-    #[tokio::test]
-    async fn a_bounded_handshake_still_completes_against_a_peer_that_answers() {
-        let (mut a, mut b) = SerialStream::pair().expect("openpty serial pair");
+    async fn assert_a_bounded_handshake_completes_against_a_peer_that_answers(
+        mut a: impl SerialByteStream,
+        mut b: impl SerialByteStream,
+    ) {
         let responder =
             tokio::spawn(
                 async move { drive_serial_handshake(&mut b, SerialRole::Responder).await },
@@ -1114,15 +1197,27 @@ mod tests {
             .expect("the responder half completes too");
     }
 
-    /// The endpoint a PTY-pair test stands in for. `SerialStream::pair()` opens an
-    /// `openpty` pair and exposes NEITHER end's device name, so a wired PTY link
-    /// has no readable address — the endpoint is supplied, exactly as the real dial
-    /// path supplies the one it parsed from the locator.
+    #[tokio::test]
+    async fn a_bounded_handshake_over_memory_still_completes_against_a_peer_that_answers() {
+        let (a, b) = memory_pair();
+        assert_a_bounded_handshake_completes_against_a_peer_that_answers(a, b).await;
+    }
+
     #[cfg(unix)]
-    fn pty_endpoint() -> SerialEndpoint {
+    #[tokio::test]
+    async fn a_bounded_handshake_still_completes_against_a_peer_that_answers() {
+        let (a, b) = SerialStream::pair().expect("openpty serial pair");
+        assert_a_bounded_handshake_completes_against_a_peer_that_answers(a, b).await;
+    }
+
+    /// The endpoint a wired test link stands in for. Neither a pty pair nor a
+    /// memory pair has a device name to read back, so a wired test link has no
+    /// readable address -- the endpoint is supplied, exactly as the real dial path
+    /// supplies the one it parsed from the locator.
+    fn link_endpoint() -> SerialEndpoint {
         use wz_session_core::locator::SerialOptions;
         SerialEndpoint {
-            target: SerialTarget::Device("/dev/wz-test-pty".to_string()),
+            target: SerialTarget::Device("/dev/wz-test-link".to_string()),
             baudrate: 115_200,
             options: SerialOptions::default(),
             qos: None,
@@ -1134,7 +1229,7 @@ mod tests {
     /// transport's `negotiated_batch_mtu` mins its TX fragment budget down
     /// to a frame the serial link can actually emit. This is the link-side
     /// half of the >MTU fragmentation wiring; the end-to-end split is
-    /// proved in `serial_pty_e2e`.
+    /// proved in `serial_link_e2e`.
     #[test]
     fn serial_write_driver_reports_serial_link_mtu() {
         // Static invariant: the serial cap must bind BELOW the unbounded
@@ -1148,14 +1243,14 @@ mod tests {
         assert_eq!(driver.link_mtu(), SERIAL_MTU);
     }
 
-    /// A PTY pair handshakes end to end: the Initiator end sends INIT, the
+    /// A pair handshakes end to end: the Initiator end sends INIT, the
     /// Responder end replies INIT|ACK, both `drive_serial_handshake` futures
     /// resolve Ok. Bounded by a `timeout` so a handshake regression fails
     /// fast instead of hanging.
-    #[cfg(unix)]
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn pty_pair_completes_handshake_both_roles() {
-        let (mut a, mut b) = SerialStream::pair().expect("openpty pair");
+    async fn assert_a_pair_completes_the_handshake_in_both_roles(
+        mut a: impl SerialByteStream,
+        mut b: impl SerialByteStream,
+    ) {
         let init = drive_serial_handshake(&mut a, SerialRole::Initiator);
         let resp = drive_serial_handshake(&mut b, SerialRole::Responder);
         let bounded =
@@ -1165,14 +1260,27 @@ mod tests {
         rb.expect("responder reaches Connected");
     }
 
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn memory_pair_completes_handshake_both_roles() {
+        let (a, b) = memory_pair();
+        assert_a_pair_completes_the_handshake_in_both_roles(a, b).await;
+    }
+
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn pty_pair_completes_handshake_both_roles() {
+        let (a, b) = SerialStream::pair().expect("openpty pair");
+        assert_a_pair_completes_the_handshake_in_both_roles(a, b).await;
+    }
+
     /// After the handshake, the wired drivers carry a data frame byte-exact:
     /// `send_blocking` enqueues a raw payload, the writer task COBS-frames it
     /// with header 0x00, and the peer's read driver re-frames + delivers the
     /// payload unchanged.
-    #[cfg(unix)]
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn wired_pty_pair_round_trips_one_data_frame() {
-        let (mut a, mut b) = SerialStream::pair().expect("openpty pair");
+    async fn assert_wired_drivers_round_trip_one_data_frame(
+        mut a: impl SerialByteStream,
+        mut b: impl SerialByteStream,
+    ) {
         let bounded = tokio::time::timeout(Duration::from_secs(5), async {
             tokio::join!(
                 drive_serial_handshake(&mut a, SerialRole::Initiator),
@@ -1183,9 +1291,9 @@ mod tests {
         ia.expect("initiator connected");
         rb.expect("responder connected");
 
-        let (_a_in, a_out, a_writer) = wire_serial_stream(SerialPort::dialled(a), &pty_endpoint());
+        let (_a_in, a_out, a_writer) = wire_serial_stream(SerialPort::dialled(a), &link_endpoint());
         let (mut b_in, _b_out, _b_writer) =
-            wire_serial_stream(SerialPort::dialled(b), &pty_endpoint());
+            wire_serial_stream(SerialPort::dialled(b), &link_endpoint());
 
         let payload = b"hello-serial-frame";
         assert_eq!(
@@ -1203,5 +1311,134 @@ mod tests {
 
         drop(a_out);
         let _ = a_writer.into_join().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn wired_memory_pair_round_trips_one_data_frame() {
+        let (a, b) = memory_pair();
+        assert_wired_drivers_round_trip_one_data_frame(a, b).await;
+    }
+
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn wired_pty_pair_round_trips_one_data_frame() {
+        let (a, b) = SerialStream::pair().expect("openpty pair");
+        assert_wired_drivers_round_trip_one_data_frame(a, b).await;
+    }
+
+    /// Wire an ACCEPTED link off `liveness` the way the accept seam does, and tear
+    /// it down the way a CLEAN session teardown does: drop the read driver, release
+    /// the last sender, and drain the writer task to completion. Returns the far
+    /// end, still open.
+    ///
+    /// ⛔ THE WIRING IS NOT INCIDENTAL. A `SerialPort` that is merely dropped never
+    /// reaches [`wire_serial_stream`], so its stream is never split and neither half
+    /// has anywhere to come back FROM -- a retain witness built on that path would be
+    /// green for a listener that retains nothing.
+    async fn accept_wire_and_tear_down(liveness: &SerialLiveness) -> DuplexStream {
+        let (mut device, mut peer) = memory_pair();
+        let bounded = tokio::time::timeout(Duration::from_secs(5), async {
+            tokio::join!(
+                drive_serial_handshake(&mut peer, SerialRole::Initiator),
+                drive_serial_handshake(&mut device, SerialRole::Responder),
+            )
+        });
+        let (ip, rd) = bounded.await.expect("handshake completes");
+        ip.expect("peer initiator connected");
+        rd.expect("device responder connected");
+
+        let port = SerialPort::accepted(device, liveness.claim());
+        assert!(
+            liveness.is_live(),
+            "claiming the device marks it taken for as long as the link holds the guard"
+        );
+        let (inbound, outbound, handle) = wire_serial_stream(port, &link_endpoint());
+        assert!(
+            inbound.device_is_claimed(),
+            "an accepted link carries its listener's claim on the read driver"
+        );
+        drop(inbound); // the read half goes home; the guard frees the device
+        drop(outbound); // the last sender goes, which seals the outbound queue
+        handle.drain().await; // the writer task ends, and its half goes home
+        assert!(
+            !liveness.is_live(),
+            "tearing the link down must free the device for the next accept"
+        );
+        peer
+    }
+
+    /// `release_on_close=false` keeps the OPEN device past the link that used it,
+    /// and the accept that follows TAKES it rather than leaving a copy behind.
+    ///
+    /// ANTI-VACUITY: a retained object that was not the live device would satisfy
+    /// `retains_device()` and nothing else, so the retained stream is READ: a byte
+    /// the far end writes must arrive on it. (Only the read direction is asserted,
+    /// and that is a fact about this stream type and not a hole in the witness: the
+    /// writer task's clean teardown shuts the write half, which closes a duplex's
+    /// direction where a tty has no half-close to perform. The pty-backed
+    /// listener witnesses in `serial_link_e2e` carry a SECOND LINK over the
+    /// retained tty, which is the full property.)
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_retained_device_comes_home_and_is_taken_once() {
+        let liveness = SerialLiveness::new(true);
+        assert!(
+            !liveness.retains_device(),
+            "nothing is retained before a link has lived on the device"
+        );
+
+        let mut peer = accept_wire_and_tear_down(&liveness).await;
+        assert!(
+            liveness.retains_device(),
+            "both halves home must re-assemble the device: that is the key's whole \
+             observable effect"
+        );
+
+        let mut retained = liveness
+            .take_retained()
+            .expect("a retained device is handed to the next accept");
+        assert!(
+            !liveness.retains_device(),
+            "the accept must CONSUME the retained device"
+        );
+
+        peer.write_all(b"x").await.expect("the far end writes");
+        peer.flush().await.expect("the byte reaches the wire");
+        let mut byte = [0u8; 1];
+        tokio::time::timeout(Duration::from_secs(5), retained.read_exact(&mut byte))
+            .await
+            .expect("the retained device delivers within 5s")
+            .expect("the retained device is readable");
+        assert_eq!(&byte, b"x", "what came back is the device the link ran on");
+    }
+
+    /// THE CONTROL for its sibling above: under the DEFAULT `release_on_close=true`
+    /// the same teardown retains NOTHING.
+    ///
+    /// Without this arm a slot that retained UNCONDITIONALLY would pass the sibling,
+    /// and unconditional retention is the wrong behaviour rather than a harmless
+    /// surplus: upstream drops the port on close in exactly this case, and a device
+    /// held by a listener nobody is using is a tty no other process can open.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_released_device_is_not_kept() {
+        let liveness = SerialLiveness::new(false);
+        let _peer = accept_wire_and_tear_down(&liveness).await;
+        assert!(
+            !liveness.retains_device(),
+            "the default key RELEASES the device on close"
+        );
+        assert!(
+            liveness.take_retained().is_none(),
+            "a released device leaves nothing for the next accept to take"
+        );
+    }
+
+    /// The in-memory stream has no kernel queues, so clearing it is a no-op that
+    /// must SUCCEED: the accept seam clears whatever it retained, and an error here
+    /// would make every memory-backed accept fail.
+    #[test]
+    fn a_stream_with_no_device_queues_clears_cleanly() {
+        let (a, _b) = memory_pair();
+        a.clear_buffers()
+            .expect("a duplex has no device buffers to fail to clear");
     }
 }

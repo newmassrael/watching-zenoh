@@ -823,7 +823,7 @@ mod tests {
     /// `_z_get_link_mtu_udp_unicast` (1450). This is the link-side half of
     /// the >MTU fragmentation wiring; the transport-agnostic split +
     /// reassembly is proved end-to-end by `layer3_reassembly_tx` (TCP) /
-    /// `serial_pty_e2e`.
+    /// `serial_link_e2e`.
     #[test]
     fn udp_write_driver_reports_udp_link_mtu() {
         // Static invariants: the UDP cap must bind BELOW the unbounded stream

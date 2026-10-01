@@ -11,8 +11,10 @@ The two gaps this gate was written to carry are open-debt items 851 and 852,
 which live in the half of the register that is not the store, so there is no
 `debt-` id to cite -- the standing `upstream_link_axis_gate.py` is in for item
 593. Item 851 is BUILT (R2994: unixpipe is served on macOS, and `SERVE_GAPS` is
-empty); item 852 is still named in full in `EXEC_GAPS` below, which is where a
-reader grepping for it will land.
+empty); item 852 is BUILT too (R2995: the serial link's logic is witnessed over
+an in-memory stream on every host, and `EXEC_GAPS` is empty). Both tables stay,
+and stay selftested, because a gap is how this gate is told about the next
+host-restricted surface.
 
 ## What was wrong, measured at R2973
 
@@ -37,8 +39,10 @@ say what was missing, and five defects sat in that silence:
     host upstream runs that link on and wz does not (item 851).
   * the serial tests all open an `openpty` pair, which does not exist on
     Windows, so a Windows test build naming the feature did not compile, and
-    upstream serves serial there (item 852 is the half that stays open: nothing
-    can EXECUTE a serial link on a Windows runner).
+    upstream serves serial there (item 852 was the half that stayed open for a
+    round: nothing could EXECUTE a serial link on a Windows runner, until R2995
+    made the link's logic generic over its byte stream and ran it over an
+    in-memory one).
 
 The population is the thing that was missing, so the population is derived.
 
@@ -179,7 +183,7 @@ EVIDENCE: dict[str, tuple[str, ...]] = {
     "Tls": ("tls_e2e",),
     "Quic": ("quic_e2e",),
     "QuicDatagram": ("quic_datagram_e2e",),
-    "Serial": ("serial_pty_e2e",),
+    "Serial": ("serial_link_e2e",),
     "Unixpipe": ("unixpipe_e2e",),
     "UnixsockStream": ("unixsock_e2e",),
     "Vsock": ("vsock_e2e",),
@@ -188,14 +192,14 @@ EVIDENCE: dict[str, tuple[str, ...]] = {
 
 #: (kind, host) that wz serves and BUILDS in the leg but no target can run
 #: there -> (open-debt item, why).
-EXEC_GAPS: dict[tuple[str, str], tuple[int, str]] = {
-    ("Serial", "windows"): (
-        852,
-        "every serial witness opens an `openpty` pair (`SerialStream::pair`, "
-        "`#[cfg(unix)]` in tokio-serial) and a Windows runner has no virtual "
-        "COM pair, so the leg compiles the link there and executes none of it",
-    ),
-}
+#:
+#: Empty since item 852 was built (R2995): every serial witness opened an
+#: `openpty` pair (`SerialStream::pair`, `#[cfg(unix)]` in tokio-serial), which a
+#: Windows runner does not have, so the leg compiled the serial link there and
+#: executed none of it. The link's logic now runs over any `SerialByteStream`, and
+#: `serial_link_e2e` instantiates it over an in-memory duplex on every host, so the
+#: target selects tests on Windows and a stale row here is a finding.
+EXEC_GAPS: dict[tuple[str, str], tuple[int, str]] = {}
 
 
 # ─── Rust text: comments and literals masked, offsets kept ──────────────────
@@ -1572,18 +1576,38 @@ def selftest() -> int:
     serial = _src(
         '#![cfg(all(feature = "transport-link-serial", unix))]\n'
         "#[tokio::test]\nasync fn a() {}\n#[test]\n#[ignore]\nfn b() {}\n",
-        "serial_pty_e2e.rs",
+        "serial_link_e2e.rs",
     )
     expect("head features", head_features(serial)[0], frozenset({"transport-link-serial"}))
     feats = frozenset({"transport-link-serial"})
     expect("runnable on macos", runnable_tests([(serial, ())], "macos", feats), ["a"])
     expect("runnable on windows", runnable_tests([(serial, ())], "windows", feats), [])
+    # R2995 -- the shape item 852 was closed with: a file gated on the feature
+    # alone, one test that runs everywhere and one that needs a tty. The host
+    # gate sits on the TEST, so the file is selected on every host and Windows
+    # runs the part that does not need a device.
+    mixed = _src(
+        '#![cfg(feature = "transport-link-serial")]\n'
+        "#[tokio::test]\nasync fn everywhere() {}\n"
+        "#[cfg(unix)]\n#[tokio::test]\nasync fn tty_only() {}\n",
+        "serial_link_e2e.rs",
+    )
+    expect(
+        "a per-test host gate on macos",
+        runnable_tests([(mixed, ())], "macos", feats),
+        ["everywhere", "tty_only"],
+    )
+    expect(
+        "a per-test host gate on windows",
+        runnable_tests([(mixed, ())], "windows", feats),
+        ["everywhere"],
+    )
     either_head = _src('#![cfg(any(feature = "a", feature = "b"))]\n#[test]\nfn t() {}\n')
     expect("an `any` head is refused", head_features(either_head)[0], None)
-    files = {"serial_pty_e2e": [(serial, ())]}
+    files = {"serial_link_e2e": [(serial, ())]}
     tf = files.get
     served = {"Serial": ALL_HOSTS}
-    ev = {"Serial": ("serial_pty_e2e",)}
+    ev = {"Serial": ("serial_link_e2e",)}
     leg, got = leg_findings("windows", served, tf, frozenset, ev, {})
     refused("an empty selection", got, "selects NO runnable test")
     xgap = {("Serial", "windows"): (852, "no COM pair")}
@@ -1595,7 +1619,7 @@ def selftest() -> int:
     expect(
         "the macos leg",
         (leg.targets, sorted(leg.features), got),
-        (["serial_pty_e2e"], ["transport-link-serial"], []),
+        (["serial_link_e2e"], ["transport-link-serial"], []),
     )
     leg, got = leg_findings("macos", served, tf, frozenset, ev, {("Serial", "macos"): (852, "x")})
     refused("a stale exec gap", got, "now selects 1 test(s)")

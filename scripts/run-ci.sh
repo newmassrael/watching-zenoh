@@ -4946,7 +4946,17 @@ layer_c1t_cargo_test_serial() {
         && cargo test -p wz-session-core --features transport-link-serial --quiet \
         && cargo test -p wz-session-core --no-default-features --features transport-link-serial --quiet) \
         || return 1
-    _runci_guarded_test C1t 5 cargo test -p wz-runtime-tokio --features transport-link-serial --lib serial_pipeline --quiet \
+    # Open-debt 852 — the lib count 5 -> 12 and the e2e counts 9 -> 10 and
+    # 10 -> 12, and the target is RENAMED serial_pty_e2e -> serial_link_e2e
+    # because it no longer needs a pty: its session tests are written once
+    # over any SerialByteStream and run over an in-memory duplex on every
+    # host as well as over an openpty pair. Lib +7: four logic tests gained
+    # a memory twin, plus retained-device, released-device and clear-buffers
+    # witnesses. E2E +1 frag-off (the push) and +2 frag-on (push and
+    # fragmentation), the same pty tests all kept. READ off what the
+    # commands PRINTED, not counted off the diff. link_endpoints_pairing
+    # stays 2: its serial test changed stream, not count.
+    _runci_guarded_test C1t 12 cargo test -p wz-runtime-tokio --features transport-link-serial --lib serial_pipeline --quiet \
         || return 1
     # R2725 — 5 -> 7 and 6 -> 8. R2722 split
     # serial_listener_yields_one_link_then_parks into a parks-while-live arm
@@ -4972,9 +4982,9 @@ layer_c1t_cargo_test_serial() {
     # buffer-clear witness: +2 in both feature sets. READ off what the two
     # commands PRINTED (9 and 10), and the two deltas are EQUAL, which is
     # R311y805's check that no new case hid behind transport-fragmentation.
-    _runci_guarded_test C1t 9 cargo test -p wz-runtime-tokio --features transport-link-serial --test serial_pty_e2e --quiet \
+    _runci_guarded_test C1t 10 cargo test -p wz-runtime-tokio --features transport-link-serial --test serial_link_e2e --quiet \
         || return 1
-    _runci_guarded_test C1t 10 cargo test -p wz-runtime-tokio --features transport-link-serial,transport-fragmentation --test serial_pty_e2e --quiet \
+    _runci_guarded_test C1t 12 cargo test -p wz-runtime-tokio --features transport-link-serial,transport-fragmentation --test serial_link_e2e --quiet \
         || return 1
     _runci_guarded_test C1t 2 cargo test -p wz-runtime-tokio --features transport-link-serial --test link_endpoints_pairing --quiet \
         || return 1

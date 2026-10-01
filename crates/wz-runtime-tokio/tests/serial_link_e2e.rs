@@ -1,22 +1,30 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later OR LicenseRef-watching-zenoh-Commercial
 // SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
-// R2973 — `unix` too, and it is NOT the link's host set: upstream serves serial
-// on Windows, and so does wz. It is this FILE's: every pair here is an `openpty`
-// pair (`SerialStream::pair`, `#[cfg(unix)]` in tokio-serial), which Windows
-// does not have. What running serial on Windows would need is open-debt 852.
-#![cfg(all(feature = "transport-link-serial", unix))]
+// R2995 (open-debt 852) -- this file is gated on the FEATURE alone. R2973 had to
+// add `unix` because every pair here was an `openpty` pair (`SerialStream::pair`,
+// `#[cfg(unix)]` in tokio-serial), which Windows does not have, so a Windows runner
+// compiled the serial link and executed none of it. The session tests below are now
+// written once over any `SerialByteStream` and instantiated twice: over an in-memory
+// duplex on EVERY host, and over an `openpty` pair where there is one. What still
+// needs a real tty -- binding a listener to a device PATH, the retained-device
+// second link, the accept-side buffer clear -- carries `#[cfg(unix)]` on the test
+// itself, which is where that fact belongs.
+#![cfg(feature = "transport-link-serial")]
 
-//! R311nv — wz<->wz SERIAL link end-to-end over a PTY pair.
+//! R311nv — wz<->wz SERIAL link end-to-end, over an in-memory pair on every host
+//! and over a PTY pair on a Unix.
 //!
 //! The proof that the R311nt 2-layer SERIAL split composes into a working
 //! transport: the transport-agnostic framing/handshake/locator LOGIC
 //! (`wz_session_core::serial_link`) driven by the host tty BACKEND
 //! (`wz_runtime_tokio::serial_pipeline`) carries a full wz<->wz session
-//! over a real `openpty` serial pair, with NO network socket involved.
+//! over a serial pair, with NO network socket involved. The PTY arm is a real
+//! `openpty` serial pair; the memory arm (R2995) is the same machinery with no
+//! device under it, which is what a host without a tty pair can run.
 //!
 //! Two phases, mirroring zenoh-pico's serial link:
 //!
-//! 1. **Serial-link handshake** — each PTY end drives
+//! 1. **Serial-link handshake** — each end drives
 //!    `drive_serial_handshake` to Connected (Initiator sends INIT, Responder
 //!    replies INIT|ACK). This is the link-level handshake that runs BEFORE
 //!    the zenoh transport (`_z_connect_serial`), absent on TCP/UDP.
@@ -28,58 +36,73 @@
 //!    drivers; the session FSM is transport-uniform.
 //!
 //! Non-flaky by construction: a PTY pair is `cfmakeraw` (serialport
-//! `TTYPort::pair`, so no line-discipline byte mangling) and both ends are
-//! immediately readable/writable, so the handshake never hits the RESET
-//! throttle/retry path — there is no retry timing to race. The handshake is
-//! bounded by a `timeout` and the transport open by an iteration cap so any
-//! regression fails fast instead of hanging.
+//! `TTYPort::pair`, so no line-discipline byte mangling) and a memory pair is
+//! lossless, and both ends are immediately readable/writable, so the handshake
+//! never hits the RESET throttle/retry path — there is no retry timing to race.
+//! The handshake is bounded by a `timeout` and the transport open by an
+//! iteration cap so any regression fails fast instead of hanging.
 
 use std::io;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
+use tokio::io::DuplexStream;
+#[cfg(unix)]
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
+#[cfg(unix)]
 use tokio_serial::SerialStream;
 
 use wz_runtime_tokio::observer::ApplicationLayerObserver;
 use wz_runtime_tokio::runtime_impl::TokioTime;
-use wz_runtime_tokio::serial_pipeline::{drive_serial_handshake, wire_serial_stream, SerialPort};
+#[cfg(unix)]
+use wz_runtime_tokio::serial_pipeline::wire_serial_stream;
+use wz_runtime_tokio::serial_pipeline::{drive_serial_handshake, SerialByteStream, SerialPort};
 use wz_runtime_tokio::session::{PublishOptions, TokioSession};
 use wz_runtime_tokio::session_glue::drive_session_until_terminal;
 use wz_runtime_tokio::session_open::{
-    accept_and_open_session, accept_endpoint, bind_locator, initiate_and_open_session,
-    AcceptConfig, AcceptedLink, AcceptedPeer, BoundListener, DialedLink, DEFAULT_OPEN_TICK_MS,
+    accept_and_open_session, bind_locator, initiate_and_open_session, AcceptConfig, BoundListener,
+    DialedLink, DEFAULT_OPEN_TICK_MS,
 };
+#[cfg(unix)]
+use wz_runtime_tokio::session_open::{accept_endpoint, AcceptedLink, AcceptedPeer};
 use wz_runtime_tokio::sync::Mutex;
 use wz_runtime_tokio_test_support::fixture_session_init_params;
 use wz_session_core::locator::{
     parse_any_locator, AnyLocator, SerialEndpoint, SerialOptions, SerialTarget,
 };
 use wz_session_core::serial_link::SerialRole;
+use wz_session_core::session_timeouts::SessionTimeouts;
 
-/// The endpoint a PTY-pair test stands in for — `SerialStream::pair()` exposes no
-/// device name, so the address is supplied the way the real dial path supplies the
-/// one it parsed out of the locator.
-fn pty_endpoint() -> SerialEndpoint {
+/// The endpoint a wired test link stands in for — neither a pty pair nor a memory
+/// pair exposes a device name, so the address is supplied the way the real dial
+/// path supplies the one it parsed out of the locator.
+fn link_endpoint() -> SerialEndpoint {
     SerialEndpoint {
-        target: SerialTarget::Device("/dev/wz-test-pty".to_string()),
+        target: SerialTarget::Device("/dev/wz-test-link".to_string()),
         baudrate: 115_200,
         options: SerialOptions::default(),
         qos: None,
     }
 }
-use wz_session_core::session_timeouts::SessionTimeouts;
+
+/// Two connected ends of an in-memory serial link — what a host with no tty pair
+/// runs these witnesses over.
+fn memory_pair() -> (DuplexStream, DuplexStream) {
+    tokio::io::duplex(64 * 1024)
+}
 
 const ITER_CAP: usize = 4096;
 const KEYEXPR: &str = "demo/serial";
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn wz_to_wz_over_serial_pty_handshakes_and_delivers_push() {
+/// A Push published over a wz<->wz serial link reaches the peer's subscriber
+/// byte-exact. The body is generic over the stream so it is instantiated over a
+/// memory pair on every host and over a pty pair on a Unix.
+async fn wz_to_wz_handshakes_and_delivers_push_over(
+    mut end_init: impl SerialByteStream,
+    mut end_acc: impl SerialByteStream,
+) {
     let payload: Vec<u8> = b"serial-push-byte-exact".to_vec();
-
-    // ── A connected async serial pair (two ends of one openpty link).
-    let (mut end_init, mut end_acc) = SerialStream::pair().expect("openpty serial pair");
 
     // ── Phase 1: the serial-LINK handshake on both ends, over the whole
     //    stream, BEFORE the zenoh transport. Initiator sends INIT, Responder
@@ -106,7 +129,7 @@ async fn wz_to_wz_over_serial_pty_handshakes_and_delivers_push() {
         accept_and_open_session(
             DialedLink::Serial {
                 stream: SerialPort::dialled(end_acc),
-                endpoint: pty_endpoint(),
+                endpoint: link_endpoint(),
             },
             params,
             TokioTime::new(),
@@ -122,7 +145,7 @@ async fn wz_to_wz_over_serial_pty_handshakes_and_delivers_push() {
         initiate_and_open_session(
             DialedLink::Serial {
                 stream: SerialPort::dialled(end_init),
-                endpoint: pty_endpoint(),
+                endpoint: link_endpoint(),
             },
             params,
             TokioTime::new(),
@@ -213,6 +236,20 @@ async fn wz_to_wz_over_serial_pty_handshakes_and_delivers_push() {
     );
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn wz_to_wz_over_serial_memory_handshakes_and_delivers_push() {
+    let (end_init, end_acc) = memory_pair();
+    wz_to_wz_handshakes_and_delivers_push_over(end_init, end_acc).await;
+}
+
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn wz_to_wz_over_serial_pty_handshakes_and_delivers_push() {
+    // ── A connected async serial pair (two ends of one openpty link).
+    let (end_init, end_acc) = SerialStream::pair().expect("openpty serial pair");
+    wz_to_wz_handshakes_and_delivers_push_over(end_init, end_acc).await;
+}
+
 /// R311nw — an oversize Put (> `SERIAL_MTU`) published over the wz<->wz
 /// serial link FRAGMENTS at the transport layer to chunks the serial frame
 /// can carry, and the peer REASSEMBLES them into exactly one byte-exact
@@ -232,11 +269,13 @@ async fn wz_to_wz_over_serial_pty_handshakes_and_delivers_push() {
 /// persists across the fragment chain's arrivals; `select!` drops the
 /// drives once the scenario observes the delivery. Requires
 /// `transport-fragmentation` (the session-layer split + the reassembly
-/// pool); the file's `transport-link-serial` gate provides the serial tty
+/// pool); the file's `transport-link-serial` gate provides the serial
 /// backend.
 #[cfg(feature = "transport-fragmentation")]
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn wz_to_wz_over_serial_pty_fragments_and_reassembles_oversize_put() {
+async fn wz_to_wz_fragments_and_reassembles_an_oversize_put_over(
+    mut end_init: impl SerialByteStream,
+    mut end_acc: impl SerialByteStream,
+) {
     use wz_session_core::serial_link::SERIAL_MTU;
 
     // A payload several serial frames long (4 KB > the 1500 SERIAL_MTU),
@@ -246,8 +285,6 @@ async fn wz_to_wz_over_serial_pty_fragments_and_reassembles_oversize_put() {
         payload.len() > SERIAL_MTU,
         "payload must exceed one serial frame to force fragmentation"
     );
-
-    let (mut end_init, mut end_acc) = SerialStream::pair().expect("openpty serial pair");
 
     // ── Phase 1: serial-LINK handshake on both ends.
     let (hs_init, hs_acc) = tokio::time::timeout(Duration::from_secs(5), async {
@@ -268,7 +305,7 @@ async fn wz_to_wz_over_serial_pty_fragments_and_reassembles_oversize_put() {
         accept_and_open_session(
             DialedLink::Serial {
                 stream: SerialPort::dialled(end_acc),
-                endpoint: pty_endpoint(),
+                endpoint: link_endpoint(),
             },
             params,
             TokioTime::new(),
@@ -284,7 +321,7 @@ async fn wz_to_wz_over_serial_pty_fragments_and_reassembles_oversize_put() {
         initiate_and_open_session(
             DialedLink::Serial {
                 stream: SerialPort::dialled(end_init),
-                endpoint: pty_endpoint(),
+                endpoint: link_endpoint(),
             },
             params,
             TokioTime::new(),
@@ -389,9 +426,23 @@ async fn wz_to_wz_over_serial_pty_fragments_and_reassembles_oversize_put() {
     );
 }
 
+#[cfg(feature = "transport-fragmentation")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn wz_to_wz_over_serial_memory_fragments_and_reassembles_oversize_put() {
+    let (end_init, end_acc) = memory_pair();
+    wz_to_wz_fragments_and_reassembles_an_oversize_put_over(end_init, end_acc).await;
+}
+
+#[cfg(all(feature = "transport-fragmentation", unix))]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn wz_to_wz_over_serial_pty_fragments_and_reassembles_oversize_put() {
+    let (end_init, end_acc) = SerialStream::pair().expect("openpty serial pair");
+    wz_to_wz_fragments_and_reassembles_an_oversize_put_over(end_init, end_acc).await;
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // R311y805 — the ACCEPT SEAM slice. Everything above hand-composes
-// `DialedLink::Serial` from a `SerialStream::pair()`, which proves the serial
+// `DialedLink::Serial` from a connected pair, which proves the serial
 // TRANSPORT and says nothing about whether a `serial/...` LISTEN STRING reaches
 // it. Until this round it did not: `bind_locator`'s `AnyLocator::Serial` arm was
 // a typed `Unsupported`, so `accept_serial` had no production caller and the
@@ -400,6 +451,10 @@ async fn wz_to_wz_over_serial_pty_fragments_and_reassembles_oversize_put() {
 //
 // These four bind through the SHIPPED seam (`bind_locator` / `accept_endpoint`),
 // so each one fails if the arm is removed.
+//
+// R2995 — all but the first need a REAL device: they bind a listener to a tty
+// PATH and the accept opens it, so they run where an `openpty` pair exists. The
+// first opens nothing, so it runs on every host.
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// One PTY pair reduced to what an accept test needs: the master (the PEER's
@@ -410,12 +465,14 @@ async fn wz_to_wz_over_serial_pty_fragments_and_reassembles_oversize_put() {
 /// own slave fd only later; never read because two fds on one pts share an input
 /// queue, so a keepalive that read would steal the seam's bytes. Same shape as
 /// `wz-integration-tests`' pico serial witness, which learned it first.
+#[cfg(unix)]
 struct PtyEnd {
     master: SerialStream,
     path: String,
     _slave_keepalive: SerialStream,
 }
 
+#[cfg(unix)]
 fn pty_end() -> PtyEnd {
     let (master, slave) = SerialStream::pair().expect("openpty serial pair");
     let path = tokio_serial::SerialPort::name(&slave).expect("pty slave has a device path");
@@ -524,6 +581,7 @@ async fn serial_listen_binds_without_opening_the_device_and_addresses_by_tty() {
 /// It then pins the second half: the SAME accepted link, handed the handshake
 /// once the peer does speak, completes into `DialedLink::Serial`. Without that
 /// leg the test would pass on an accept that returned something unusable.
+#[cfg(unix)]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn serial_accept_returns_before_the_peer_speaks_and_defers_the_link_handshake() {
     let mut end = pty_end();
@@ -591,6 +649,7 @@ async fn serial_accept_returns_before_the_peer_speaks_and_defers_the_link_handsh
 /// The half that did NOT is its sibling below: parking while the link is live is
 /// upstream's behaviour, parking after it has gone was wz having no way to tell
 /// the two apart.
+#[cfg(unix)]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn serial_listener_parks_while_its_link_is_live() {
     let end = pty_end();
@@ -620,6 +679,7 @@ async fn serial_listener_parks_while_its_link_is_live() {
 
 /// Bind a `serial/...` listen STRING through the shipped seam, asserting only
 /// that it classified and bound.
+#[cfg(unix)]
 async fn bind_serial_listen(locator: &str) -> BoundListener {
     let endpoint = match parse_any_locator(locator).expect("locator parses") {
         AnyLocator::Serial(ep) => ep,
@@ -635,6 +695,7 @@ async fn bind_serial_listen(locator: &str) -> BoundListener {
 /// Reached through the VARIANT rather than the concrete listener type: no other
 /// `BoundListener` arm can answer this, because no other scheme's accept is a
 /// local open.
+#[cfg(unix)]
 fn retains_device(listener: &BoundListener) -> bool {
     match listener {
         BoundListener::Serial(l) => l.retains_device(),
@@ -644,6 +705,7 @@ fn retains_device(listener: &BoundListener) -> bool {
 
 /// Accept one link off `listener` and complete its DEFERRED handshake against
 /// `peer` driven as the Initiator, yielding the parts a session would wire.
+#[cfg(unix)]
 async fn accept_and_handshake(
     listener: &mut BoundListener,
     peer: &mut SerialStream,
@@ -684,6 +746,7 @@ async fn accept_and_handshake(
 /// half has anywhere to come back FROM — a retain witness built on that path
 /// would be green for a listener that retains nothing. The three retention arms
 /// below therefore all tear down through here.
+#[cfg(unix)]
 async fn wire_and_tear_down(port: SerialPort, endpoint: &SerialEndpoint) {
     let (inbound, outbound, handle) = wire_serial_stream(port, endpoint);
     drop(inbound); // the read half goes home; the guard frees the device
@@ -707,6 +770,7 @@ async fn wire_and_tear_down(port: SerialPort, endpoint: &SerialEndpoint) {
 /// ANTI-VACUITY: a retained fd that no longer worked would satisfy the flag and
 /// nothing else, so the second half carries a SECOND link over the retained
 /// device and completes its handshake on it. Its sibling below is the control.
+#[cfg(unix)]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn serial_listen_honours_release_on_close_false_by_retaining_the_device() {
     let mut end = pty_end();
@@ -757,6 +821,7 @@ async fn serial_listen_honours_release_on_close_false_by_retaining_the_device() 
 /// It then accepts AGAIN, because releasing the device must leave the listener
 /// able to re-open it: that is the R2722 property this round must not have
 /// broken, and a release that merely lost the port would fail here.
+#[cfg(unix)]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn serial_listen_releases_the_device_on_close_by_default() {
     let mut end = pty_end();
@@ -798,6 +863,7 @@ async fn serial_listen_releases_the_device_on_close_by_default() {
 /// wz needed no clear before this round and needs one now. Upstream clears at the
 /// same seam and unconditionally (`z-serial-0.3.1` @ `pub async fn accept(&mut self)`,
 /// whose first act past the status check is `// Clear all buffers` / `self.clear()?`).
+#[cfg(unix)]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_serial_re_accept_clears_what_the_previous_peer_left_on_the_wire() {
     let mut end = pty_end();
@@ -860,6 +926,7 @@ async fn a_serial_re_accept_clears_what_the_previous_peer_left_on_the_wire() {
 /// RED-FIRST: this arm fails before the liveness seam exists (the second accept
 /// times out exactly as its sibling above asserts), and that failure is what says
 /// the sibling was pinning a defect rather than a decision.
+#[cfg(unix)]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn serial_listener_accepts_again_once_its_link_is_dropped() {
     let end = pty_end();
@@ -899,6 +966,7 @@ async fn serial_listener_accepts_again_once_its_link_is_dropped() {
 /// the role pico is forced into (it implements only `_z_connect_serial` and never
 /// emits `ACK`), so the direction under test is the one a foreign client
 /// produces.
+#[cfg(unix)]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn wz_acceptor_binds_a_serial_listen_string_and_delivers_a_push() {
     let payload: Vec<u8> = b"serial-listen-seam-byte-exact".to_vec();
@@ -943,7 +1011,7 @@ async fn wz_acceptor_binds_a_serial_listen_string_and_delivers_a_push() {
         initiate_and_open_session(
             DialedLink::Serial {
                 stream: SerialPort::dialled(end.master),
-                endpoint: pty_endpoint(),
+                endpoint: link_endpoint(),
             },
             params,
             TokioTime::new(),

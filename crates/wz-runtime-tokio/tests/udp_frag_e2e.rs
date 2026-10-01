@@ -4,14 +4,14 @@
 
 //! R311nz — unicast >MTU FRAGMENTATION end-to-end over a real loopback UDP
 //! link, where the split is LINK-driven (the 1450 UDP link MTU), not
-//! batch-negotiated. The UDP sibling of `serial_pty_e2e`'s
+//! batch-negotiated. The UDP sibling of `serial_link_e2e`'s
 //! `wz_to_wz_over_serial_pty_fragments_and_reassembles_oversize_put` and the
 //! datagram complement of `layer3_reassembly_tx` (TCP stream).
 //!
 //! ## What this proves that the TCP / serial e2e do not
 //!
 //! `layer3_reassembly_tx` fragments over a TCP STREAM (the chunks ride one
-//! length-prefixed byte stream); `serial_pty_e2e` fragments over a serial
+//! length-prefixed byte stream); `serial_link_e2e` fragments over a serial
 //! link (COBS-framed). This test fragments over UDP, where each zenoh
 //! `T_MID_FRAGMENT` frame is ONE DATAGRAM — no stream reassembly, no link
 //! framing, the datagram boundary IS the frame boundary. So it exercises the

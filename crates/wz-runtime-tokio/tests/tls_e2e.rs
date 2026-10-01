@@ -4,7 +4,7 @@
 
 //! R311oa — wz<->wz session end to end over a real loopback TLS link.
 //!
-//! The TLS analogue of `serial_pty_e2e` and the secured-stream sibling of the
+//! The TLS analogue of `serial_link_e2e` and the secured-stream sibling of the
 //! TCP session tests: two nodes complete the rustls handshake, bring a zenoh
 //! session up to Established over the encrypted byte stream, and a `Put`
 //! published on one node is delivered byte-exact to a subscriber on the other
