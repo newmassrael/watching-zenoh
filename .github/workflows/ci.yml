@@ -52,59 +52,46 @@ on:
     branches: [main]
   workflow_dispatch:
 
-# R311y619 — only the newest run per ref survives.
+# Latest-only, and a run in flight is never cancelled (owner decision,
+# 2026-10-01).
 #
-# Three full runs were live at once on 2026-08-09 (heads 500a52e4, 6eb2b15b,
-# 43dc4e16) because three pushes landed inside twenty minutes and each started
-# its own 15-job matrix. Two of them were already validating a tree the third
-# contained, and one was re-proving a defect the second had fixed: 45 job-runs
-# where 15 was the whole question.
+# While a run for a ref is executing, a newer push neither cancels it nor
+# starts a second run beside it. The push waits, and when the running one ends
+# the group runs ONE more run: for the newest commit pushed in the meantime.
+# GitHub keeps at most one running and one pending run per group, and a newer
+# pending run replaces an older pending one, so a burst of N pushes costs two
+# runs (the one in flight and the last), not N.
 #
-# That was a one-off human mistake then, and it becomes the STANDING condition
-# once the headless round runner (scripts/round-runner.sh) pushes once per
-# round. A round waits for its own hosted verdict before continuing, so the
-# usual case never queues a second run — but any burst does, and a superseded
-# run is compute spent on a tree nobody will ship.
+# `cancel-in-progress: false` is what protects the run that is already
+# executing. Replacing a PENDING run is not controlled by that flag; it is how
+# a concurrency group behaves (measured at R311y706: the run for `3210c80a`,
+# the commit carrying a fix, was cancelled while still queued). The replaced
+# run ends `cancelled` having executed no job.
 #
-# Grouped by ref rather than globally: `push` to main and a `pull_request` carry
-# different `github.ref`, so a PR's run is never cancelled by a push to main.
-# The trade is explicit: an intermediate commit can end WITHOUT a completed run
-# of its own. That is the right trade here because main is the only pushed
-# branch and the question this gate answers is "is the tip shippable", never
-# "was each intermediate commit green".
-# R311y704 — cancellation is right on a BRANCH and wrong on `main`, and the
-# difference was measured rather than argued.
+# What this trades, stated rather than hidden:
+#   - An intermediate commit on main can end without a verdict of its own, so a
+#     red is attributable only to the range between two graded commits. That is
+#     bisect cost rather than a lost verdict: every hosted job here grades the
+#     tree at its sha and none is selected by change set, so the run for a
+#     later commit answers for the commits it contains (docs/hosted-red-acks.md,
+#     R2643).
+#   - A burst is judged only after the run in flight has finished, so the
+#     newest commit's verdict can arrive later than it did with a group per
+#     commit.
 #
-# On a branch only the tip matters, so a superseded run is wasted runner time.
-# On `main` every commit is a state someone can bisect to, and the run IS its
-# verdict. With cancellation on, a sequence of pushes leaves NO commit with one:
-# R311y701 through R311y703 were pushed in succession and all three runs came
-# back `cancelled` -- five in a row counting the two before them. Two Layer C0
-# reds fixed in R311y701 have therefore never been confirmed on hosted CI, and
-# `cancelled` is neither red nor green, so nothing even reported the gap.
+# What this replaces. R311y619 grouped by ref and cancelled in progress;
+# R311y704 found that on main a sequence of pushes then left no commit with a
+# verdict (R311y701 to R311y703 all came back `cancelled`); R311y706 keyed the
+# group on the commit sha on main so that every commit queued a full run of its
+# own. That per-commit group is the behaviour this block ends.
 #
-# The cost of this is runner time: pushes to main now QUEUE rather than
-# superseding each other. That is what the runner time is for.
-# R311y706 — and `cancel-in-progress: false` was only HALF of it. MEASURED on
-# the very next pair of pushes: the run for `345ee1cb` survived two of them
-# (which is the flag working, and would not have happened before), while the run
-# for `3210c80a` -- the commit carrying the fix -- was CANCELLED at 05:08 while
-# still QUEUED. GitHub's flag protects the run that is already executing; a
-# pending run is superseded regardless, because a group keeps at most one.
-#
-# R311y704's carry predicted "two in succession should now yield two runs that
-# both reach a conclusion". That was wrong, and this is the correction: on main
-# the group is per-COMMIT, so nothing supersedes anything and every commit gets
-# its own verdict. Branches keep the collapsing group, where only the tip
-# matters.
-#
-# The cost is queue time rather than money -- Actions is free for public repos
-# on standard runners -- and it is the cost R311y704's own argument already
-# accepted: every commit on main is a state someone can bisect to, and the run
-# IS its verdict.
+# Grouped by ref rather than globally: a `pull_request` carries a different
+# `github.ref` from a push to main, so neither supersedes the other.
+# `scripts/lib/previous-run-gate.sh` (pre-push gate 2c) grades a `cancelled`
+# predecessor accordingly.
 concurrency:
-  group: ci-${{ github.ref }}${{ github.ref == 'refs/heads/main' && format('-{0}', github.sha) || '' }}
-  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
 
 env:
   CARGO_TERM_COLOR: always
