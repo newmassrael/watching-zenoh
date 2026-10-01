@@ -708,8 +708,34 @@ declare -A BASELINE_MC_TEXT=(
     # R2808 — IRQ-safe clock cells: same-toolchain text deltas -880 / -888 B,
     # transferred to the hosted baseline (local gcc sits +36 / +8 B).
     # The unused fallback support also removes 2156 B of bss on both targets.
-    ["thumbv7m-none-eabi"]=55648
-    ["thumbv7em-none-eabihf"]=55732
+    # R3001 — GREW +228 / +288 B since R2808, and the bytes are NAMED. Hosted
+    # runs `36828650264` and `36833892538` read the same 55876 / 56020, so the
+    # figure is deterministic, not jitter; the second is 32 B past the band.
+    # This host builds R2808's tree (`5607be38`) and `f3855e4d` at text 56064 ->
+    # 56304 (+240) under gcc 13.2, the same magnitude as hosted gcc 10.3, and a
+    # per-symbol diff of the two ELFs (`arm-none-eabi-nm -S`, hashes stripped;
+    # text symbols 50236 -> 50440 = +204, the other 36 B alignment) names it:
+    #   +154  __cortex_m_rt_main -- the absorber: callees inline into main, so
+    #         its figure is where the window's other changes sit
+    #    +88  MulticastDispatcher::peer_zid_by_src (NEW, f0728bcd: the drive
+    #         loop records where upstream counts)
+    #    +78  wz_link_lwip::send_datagram (NEW, 5a0b6367: a UDP send gives back
+    #         the pbuf it allocated), against -108 for the send_to it replaced
+    #    +64  wz_mcu_multicast_e2e::params (f5079cb9, the only commit of the
+    #         window in the e2e crate)
+    #   -124  multicast_tx_emit -- shrank when the transmit task took the lanes
+    #    +32  RawVec<Vec<u8>>::grow_one (NEW)
+    #    +30  InboundFrame drop glue (694201ef: a frame is the buffer it was
+    #         read into)
+    # NOT A LEAK: `data` is 4 and `bss` is flat across the pair, so nothing new
+    # is retained and the whole delta is ROM, and every named symbol is a
+    # capability or a correction that deliberately landed in the window.
+    # THE FIGURES ARE THE HOSTED ONES, as Round 2047 settled: the hosted job is
+    # the gate that blocks main. thumbv7m rises too, though it was inside the
+    # band at +228, so the next commit does not start with 28 B of headroom.
+    # Old: 55648/55732 (R2808).
+    ["thumbv7m-none-eabi"]=55876
+    ["thumbv7em-none-eabihf"]=56020
 )
 # shellcheck disable=SC2034  # resolved through the `declare -n _bt/_bd/_bb`
                             # namerefs in the `case "$artifact"` dispatch below; shellcheck
