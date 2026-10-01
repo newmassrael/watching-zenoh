@@ -179,6 +179,7 @@ int main(int argc, char **argv) {
     insert_case("not_hex", "\"zz\"");
     insert_case("seventeen_bytes", "\"1ffffffffffffffffffffffffffffffff\"");
     insert_case("not_a_string", "123");
+    insert_case("null", "null");
 
     document_case("valid", "{\"id\":\"c11e47c11e49\"}");
     document_case("short", "{\"id\":\"1\"}");
@@ -186,6 +187,7 @@ int main(int argc, char **argv) {
     document_case("leading_zero", "{\"id\":\"01\"}");
     document_case("empty", "{\"id\":\"\"}");
     document_case("not_a_string", "{\"id\":123}");
+    document_case("null", "{\"id\":null}");
 
     /* A session opened with an id stands on it. */
     z_id_t configured;
@@ -206,6 +208,16 @@ int main(int argc, char **argv) {
     printf("without_id.zid_nonzero=%d\n", nonzero);
     printf("without_id.zid_differs_from_configured=%d\n",
            memcmp(&fresh, &configured, sizeof fresh) != 0);
+
+    /* An `id` of null states no identity, which is how every config zenoh itself
+       renders begins, so a session opened on one gets a fresh id too. The first
+       session's listener is gone by now, so its endpoint is free again. */
+    z_id_t from_null;
+    memset(&from_null, 0, sizeof from_null);
+    if (open_case("null_id", "null", argv[1], &from_null) != 0) { return 1; }
+    int null_nonzero = 0;
+    for (int i = 0; i < 16; i++) { null_nonzero |= from_null.id[i] != 0; }
+    printf("null_id.zid_nonzero=%d\n", null_nonzero);
     printf("done\n");
     return 0;
 }
@@ -411,6 +423,8 @@ fn an_open_stands_on_its_configured_id_identically_on_wz_and_libzenohc() {
     for line in [
         "without_id.zid_nonzero=1",
         "without_id.zid_differs_from_configured=1",
+        "null_id.open.rc=0",
+        "null_id.zid_nonzero=1",
     ] {
         assert!(
             ref_stdout.lines().any(|l| l == line) && wz_stdout.lines().any(|l| l == line),

@@ -151,7 +151,7 @@ impl ConfigState {
     ///
     /// Upstream's config is TYPED: a value is deserialised into the field it is
     /// for at the moment it is inserted, so a value the field cannot hold never
-    /// reaches a session. Measured on `libzenohc.so` 1.10.0 for the session `id`,
+    /// reaches a session. Measured on `libzenohc.so` 1.10.1 for the session `id`,
     /// which is the one key checked here: it is a `ZenohId`, and the insert
     /// refuses an empty string, `0`, a leading `0`, uppercase, a non-hex digit,
     /// more than sixteen bytes and a value that is neither a string nor `null`,
