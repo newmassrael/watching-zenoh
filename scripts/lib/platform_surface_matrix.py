@@ -108,7 +108,7 @@ import re
 import subprocess
 import sys
 from dataclasses import dataclass, field
-from typing import Callable, Iterable, Mapping
+from typing import Callable, Iterable, Mapping, TextIO
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 import upstream_link_axis_gate as axis  # noqa: E402  the LinkKind population + pin root
@@ -1002,6 +1002,22 @@ def cargo_env(ambient: Mapping[str, str]) -> dict[str, str]:
     return env
 
 
+def relay_lines(stream: Iterable[str], out: TextIO) -> list[str]:
+    """Relay the leg's output as it arrives, one flush per line; return it stripped.
+
+    A pipe is block-buffered. Unflushed, a stalled target shows nothing, and a
+    job cancelled at its timeout loses what was buffered: the first hosted
+    macOS leg sat in this step for the whole job and its log held no cargo
+    line at all, only the runner's cleanup naming the process it killed.
+    """
+    lines: list[str] = []
+    for line in stream:
+        out.write(line)
+        out.flush()
+        lines.append(line.rstrip("\r\n"))
+    return lines
+
+
 def spawn_leg(cmd: list[str], cwd: str, ambient: Mapping[str, str]) -> subprocess.Popen[str]:
     """Start the leg's command with stdout and stderr merged, colour pinned off."""
     return subprocess.Popen(
@@ -1286,11 +1302,8 @@ def run(host: str) -> int:
     cmd = leg_command(leg)
     print(f"  platform-surface-matrix: {host} leg: {' '.join(cmd)}", flush=True)
     proc = spawn_leg(cmd, str(ROOT / "crates"), os.environ)
-    lines: list[str] = []
     assert proc.stdout is not None
-    for line in proc.stdout:
-        sys.stdout.write(line)
-        lines.append(line.rstrip("\r\n"))
+    lines = relay_lines(proc.stdout, sys.stdout)
     rc = proc.wait()
     got = result_findings(leg, attribute_results(lines), rc)
     if got:
@@ -1522,6 +1535,24 @@ def selftest() -> int:
         cargo_env({"CARGO_TERM_COLOR": "always", "WZ_PSM_PROBE": "kept"}),
         {"CARGO_TERM_COLOR": "never", "WZ_PSM_PROBE": "kept"},
     )
+
+    # the relay flushes every line as it arrives, so a stalled target leaves its
+    # last line in the log instead of in a buffer the cancel throws away
+    class Recorder:
+        def __init__(self) -> None:
+            self.events: list[str] = []
+
+        def write(self, _s: str) -> int:
+            self.events.append("write")
+            return 0
+
+        def flush(self) -> None:
+            self.events.append("flush")
+
+    rec = Recorder()
+    relayed = relay_lines(["a\n", "b\r\n", "c\n"], rec)  # type: ignore[arg-type]
+    expect("each relayed line is flushed", rec.events, ["write", "flush"] * 3)
+    expect("relayed lines come back stripped", relayed, ["a", "b", "c"])
 
     if failures:
         print(f"platform-surface-matrix selftest: FAIL -- {len(failures)}")

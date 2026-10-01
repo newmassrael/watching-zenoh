@@ -5143,6 +5143,13 @@ jobs:
           python-version: "3.12"
 
       - name: platform surface matrix — the leg this host is owed
+        # A stalled target fails THIS step, with the last line the leg relayed
+        # in its log, instead of running until the job's 30 minutes expire and
+        # cancelling the whole job: the first hosted macOS leg did that, and
+        # nothing in its log named the target but the runner's own cleanup
+        # line (`serial_pty_e2e`). The Windows leg's whole step took under
+        # three minutes, build included.
+        timeout-minutes: 20
         shell: bash
         run: |
           host="$(echo "$RUNNER_OS" | tr '[:upper:]' '[:lower:]')"
