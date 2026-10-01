@@ -185,12 +185,23 @@ jobs:
           df -h /
           # `|| true` throughout: a path absent on a future runner image must
           # not fail the build — this step is headroom, not a gate.
-          sudo rm -rf /usr/share/dotnet || true
-          sudo rm -rf /usr/local/lib/android || true
-          sudo rm -rf /opt/ghc || true
-          sudo rm -rf /usr/local/share/boost || true
-          sudo rm -rf /opt/hostedtoolcache/CodeQL || true
-          sudo docker image prune --all --force || true
+          # The deletions are independent and this step is headroom, so they run
+          # together: it costs its slowest delete and not their sum. Run one after
+          # another it took 256 s of a 1800 s job budget (hosted run
+          # 36845142812), the largest single cost outside the lanes. Each prints
+          # how long it took, so the next run says which delete is the slow one.
+          prune() {
+            local started=$SECONDS
+            "$@" || true
+            echo "prune: $* took $((SECONDS - started))s"
+          }
+          prune sudo rm -rf /usr/share/dotnet &
+          prune sudo rm -rf /usr/local/lib/android &
+          prune sudo rm -rf /opt/ghc &
+          prune sudo rm -rf /usr/local/share/boost &
+          prune sudo rm -rf /opt/hostedtoolcache/CodeQL &
+          prune sudo docker image prune --all --force &
+          wait
           echo "=== free space AFTER prune ==="
           df -h /
 
@@ -4107,12 +4118,23 @@ jobs:
           df -h /
           # `|| true` throughout: a path absent on a future runner image must
           # not fail the build — this step is headroom, not a gate.
-          sudo rm -rf /usr/share/dotnet || true
-          sudo rm -rf /usr/local/lib/android || true
-          sudo rm -rf /opt/ghc || true
-          sudo rm -rf /usr/local/share/boost || true
-          sudo rm -rf /opt/hostedtoolcache/CodeQL || true
-          sudo docker image prune --all --force || true
+          # The deletions are independent and this step is headroom, so they run
+          # together: it costs its slowest delete and not their sum. Run one after
+          # another it took 256 s of a 1800 s job budget (hosted run
+          # 36845142812), the largest single cost outside the lanes. Each prints
+          # how long it took, so the next run says which delete is the slow one.
+          prune() {
+            local started=$SECONDS
+            "$@" || true
+            echo "prune: $* took $((SECONDS - started))s"
+          }
+          prune sudo rm -rf /usr/share/dotnet &
+          prune sudo rm -rf /usr/local/lib/android &
+          prune sudo rm -rf /opt/ghc &
+          prune sudo rm -rf /usr/local/share/boost &
+          prune sudo rm -rf /opt/hostedtoolcache/CodeQL &
+          prune sudo docker image prune --all --force &
+          wait
           echo "=== free space AFTER prune ==="
           df -h /
 
@@ -4306,12 +4328,23 @@ jobs:
           df -h /
           # `|| true` throughout: a path absent on a future runner image must
           # not fail the build — this step is headroom, not a gate.
-          sudo rm -rf /usr/share/dotnet || true
-          sudo rm -rf /usr/local/lib/android || true
-          sudo rm -rf /opt/ghc || true
-          sudo rm -rf /usr/local/share/boost || true
-          sudo rm -rf /opt/hostedtoolcache/CodeQL || true
-          sudo docker image prune --all --force || true
+          # The deletions are independent and this step is headroom, so they run
+          # together: it costs its slowest delete and not their sum. Run one after
+          # another it took 256 s of a 1800 s job budget (hosted run
+          # 36845142812), the largest single cost outside the lanes. Each prints
+          # how long it took, so the next run says which delete is the slow one.
+          prune() {
+            local started=$SECONDS
+            "$@" || true
+            echo "prune: $* took $((SECONDS - started))s"
+          }
+          prune sudo rm -rf /usr/share/dotnet &
+          prune sudo rm -rf /usr/local/lib/android &
+          prune sudo rm -rf /opt/ghc &
+          prune sudo rm -rf /usr/local/share/boost &
+          prune sudo rm -rf /opt/hostedtoolcache/CodeQL &
+          prune sudo docker image prune --all --force &
+          wait
           echo "=== free space AFTER prune ==="
           df -h /
 
