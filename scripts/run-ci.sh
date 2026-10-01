@@ -4881,35 +4881,41 @@ layer_c1c_cargo_test_codec_declare() {
 layer_c1t_cargo_test_serial() {
     (cd crates \
         && cargo test -p wz-session-core --features transport-link-serial --quiet \
-        && cargo test -p wz-session-core --no-default-features --features transport-link-serial --quiet \
-        && cargo test -p wz-runtime-tokio --features transport-link-serial --lib serial_pipeline --quiet 2>&1 | grep -qE '^test result: ok\. 5 passed' \
-        `# R2725 — 5 -> 7 and 6 -> 8. R2722 split` \
-        `# serial_listener_yields_one_link_then_parks into a parks-while-live arm` \
-        `# and an accepts-again-once-dropped arm and added the release_on_close` \
-        `# refusal arm: +2 in both feature sets. READ off what the two commands` \
-        `# PRINTED, not counted off the diff.` \
-        `#` \
-        `# ⛔ THE PINS MOVED A ROUND LATE AND THE GATE IS NOT WHY. An earlier` \
-        `# draft of this comment blamed guarded_count_gate's DEFERRED set. That` \
-        `# is false and the logs say so: the gate SELECTED this line and printed` \
-        `# "run-ci.sh:4786: declares 5 passed, the run printed 7" on two separate` \
-        `# runs, exiting 1 both times. It was read as green because the reader` \
-        `# grepped for "^  OK " and "MISMATCH" -- neither is this gate's verdict` \
-        `# token -- and took a task notification's exit 0, which belonged to the` \
-        `# wrapper shell, for the gate's own. Hosted run 35414066328 then redded` \
-        `# Layer C1t and merely confirmed it. A proxy read in place of a verdict` \
-        `# is the defect; the instrument worked.` \
-        `#` \
-        `# R2727 — 7 -> 9 and 8 -> 10, IN THE SAME COMMIT as the tests, which is` \
-        `# what R2725 did a round late. The retain round replaced the` \
-        `# release_on_close REFUSAL arm with an arm that HONOURS it and added its` \
-        `# control (the default key must retain NOTHING) and the accept-seam` \
-        `# buffer-clear witness: +2 in both feature sets. READ off what the two` \
-        `# commands PRINTED (9 and 10), and the two deltas are EQUAL, which is` \
-        `# R311y805's check that no new case hid behind transport-fragmentation.` \
-        && cargo test -p wz-runtime-tokio --features transport-link-serial --test serial_pty_e2e --quiet 2>&1 | grep -qE '^test result: ok\. 9 passed' \
-        && cargo test -p wz-runtime-tokio --features transport-link-serial,transport-fragmentation --test serial_pty_e2e --quiet 2>&1 | grep -qE '^test result: ok\. 10 passed' \
-        && cargo test -p wz-runtime-tokio --features transport-link-serial --test link_endpoints_pairing --quiet 2>&1 | grep -qE '^test result: ok\. 2 passed' \
+        && cargo test -p wz-session-core --no-default-features --features transport-link-serial --quiet) \
+        || return 1
+    _runci_guarded_test C1t 5 cargo test -p wz-runtime-tokio --features transport-link-serial --lib serial_pipeline --quiet \
+        || return 1
+    # R2725 — 5 -> 7 and 6 -> 8. R2722 split
+    # serial_listener_yields_one_link_then_parks into a parks-while-live arm
+    # and an accepts-again-once-dropped arm and added the release_on_close
+    # refusal arm: +2 in both feature sets. READ off what the two commands
+    # PRINTED, not counted off the diff.
+    #
+    # ⛔ THE PINS MOVED A ROUND LATE AND THE GATE IS NOT WHY. An earlier
+    # draft of this comment blamed guarded_count_gate's DEFERRED set. That
+    # is false and the logs say so: the gate SELECTED this line and printed
+    # "run-ci.sh:4786: declares 5 passed, the run printed 7" on two separate
+    # runs, exiting 1 both times. It was read as green because the reader
+    # grepped for "^  OK " and "MISMATCH" -- neither is this gate's verdict
+    # token -- and took a task notification's exit 0, which belonged to the
+    # wrapper shell, for the gate's own. Hosted run 35414066328 then redded
+    # Layer C1t and merely confirmed it. A proxy read in place of a verdict
+    # is the defect; the instrument worked.
+    #
+    # R2727 — 7 -> 9 and 8 -> 10, IN THE SAME COMMIT as the tests, which is
+    # what R2725 did a round late. The retain round replaced the
+    # release_on_close REFUSAL arm with an arm that HONOURS it and added its
+    # control (the default key must retain NOTHING) and the accept-seam
+    # buffer-clear witness: +2 in both feature sets. READ off what the two
+    # commands PRINTED (9 and 10), and the two deltas are EQUAL, which is
+    # R311y805's check that no new case hid behind transport-fragmentation.
+    _runci_guarded_test C1t 9 cargo test -p wz-runtime-tokio --features transport-link-serial --test serial_pty_e2e --quiet \
+        || return 1
+    _runci_guarded_test C1t 10 cargo test -p wz-runtime-tokio --features transport-link-serial,transport-fragmentation --test serial_pty_e2e --quiet \
+        || return 1
+    _runci_guarded_test C1t 2 cargo test -p wz-runtime-tokio --features transport-link-serial --test link_endpoints_pairing --quiet \
+        || return 1
+    (cd crates \
         && cargo clippy -p wz-runtime-tokio --all-targets --features transport-link-serial --quiet -- -D warnings \
         && cargo clippy -p wz-runtime-tokio --all-targets --features transport-link-serial,transport-fragmentation --quiet -- -D warnings)
 }
@@ -5124,10 +5130,13 @@ layer_c1v_cargo_test_ws() {
 # `^test result: ok\. 3 passed` / `2 passed` count-guards (were bare). A unix
 # socket loopback needs no kernel module -> pure cargo, hostable.
 layer_c1aa_cargo_test_unixsock() {
+    (cd crates && cargo test -p wz-session-core --features alloc --lib locator --quiet) \
+        || return 1
+    _runci_guarded_test C1aa 7 cargo test -p wz-runtime-tokio --features transport-link-unixsock --lib unixsock_pipeline --quiet \
+        || return 1
+    _runci_guarded_test C1aa 2 cargo test -p wz-runtime-tokio --features transport-link-unixsock --test unixsock_e2e --quiet \
+        || return 1
     (cd crates \
-        && cargo test -p wz-session-core --features alloc --lib locator --quiet \
-        && cargo test -p wz-runtime-tokio --features transport-link-unixsock --lib unixsock_pipeline --quiet 2>&1 | grep -qE '^test result: ok\. 7 passed' \
-        && cargo test -p wz-runtime-tokio --features transport-link-unixsock --test unixsock_e2e --quiet 2>&1 | grep -qE '^test result: ok\. 2 passed' \
         && cargo clippy -p wz-runtime-tokio --all-targets --features transport-link-unixsock --quiet -- -D warnings \
         && cargo clippy -p wz-runtime-tokio --no-default-features --features transport-link-unixsock --quiet -- -D warnings)
 }
@@ -5252,9 +5261,11 @@ layer_c1ab_cargo_test_vsock() {
 # hosted), and this whole lane is now HOSTED on ci.yml's feature-gates job (see
 # that step's comment for the never-hosted-gate rationale).
 layer_c1ac_cargo_test_quic() {
+    (cd crates && cargo test -p wz-session-core --features alloc --lib locator --quiet) \
+        || return 1
+    _runci_guarded_test C1ac 5 cargo test -p wz-runtime-tokio --features transport-link-quic --test quic_e2e --quiet \
+        || return 1
     (cd crates \
-        && cargo test -p wz-session-core --features alloc --lib locator --quiet \
-        && cargo test -p wz-runtime-tokio --features transport-link-quic --test quic_e2e --quiet 2>&1 | grep -qE '^test result: ok\. 5 passed' \
         && cargo clippy -p wz-runtime-tokio --all-targets --features transport-link-quic --quiet -- -D warnings \
         && cargo clippy -p wz-runtime-tokio --no-default-features --features transport-link-quic --quiet -- -D warnings)
 }
@@ -6703,10 +6714,13 @@ layer_c1ai_cargo_test_liveliness_history() {
 # assertion, and it is what this commit's control reds again. The number is
 # what this exact command PRINTED (`test result: ok. 4 passed`).
 layer_c1aj_cargo_test_quic_datagram() {
+    (cd crates && cargo test -p wz-session-core --features alloc --lib locator --quiet) \
+        || return 1
+    _runci_guarded_test C1aj 4 cargo test -p wz-runtime-tokio --features transport-link-quic-datagram --test quic_datagram_e2e --quiet \
+        || return 1
+    _runci_guarded_test C1aj 3 cargo test -p wz-runtime-tokio --features transport-link-quic-datagram --test link_endpoints_pairing --quiet \
+        || return 1
     (cd crates \
-        && cargo test -p wz-session-core --features alloc --lib locator --quiet \
-        && cargo test -p wz-runtime-tokio --features transport-link-quic-datagram --test quic_datagram_e2e --quiet 2>&1 | grep -qE '^test result: ok\. 4 passed' \
-        && cargo test -p wz-runtime-tokio --features transport-link-quic-datagram --test link_endpoints_pairing --quiet 2>&1 | grep -qE '^test result: ok\. 3 passed' \
         && cargo clippy -p wz-runtime-tokio --all-targets --features transport-link-quic-datagram --quiet -- -D warnings \
         && cargo clippy -p wz-runtime-tokio --no-default-features --features transport-link-quic-datagram --quiet -- -D warnings)
 }
@@ -6920,10 +6934,15 @@ layer_c1ak_cargo_test_transport_stats() {
 layer_c1al_cargo_test_unixpipe() {
     (cd crates \
         && cargo test -p wz-session-core --features alloc --lib locator --quiet \
-        && cargo test -p wz-runtime-tokio --features transport-link-unixpipe --test unixpipe_e2e --quiet \
-        && cargo test -p wz-runtime-tokio --features transport-link-unixpipe --test link_endpoints_pairing --quiet 2>&1 | grep -qE '^test result: ok\. 2 passed' \
-        && cargo test -p wz-runtime-tokio --features routing-accept,transport-link-unixpipe --lib mesh_accept_loop_holds_two_unixpipe_peers --quiet 2>&1 | grep -qE '^test result: ok\. 1 passed' \
-        && cargo test -p wz-runtime-tokio --features routing-accept,transport-link-unixpipe --lib boundlistener_unixpipe_is_mesh_capable --quiet 2>&1 | grep -qE '^test result: ok\. 1 passed' \
+        && cargo test -p wz-runtime-tokio --features transport-link-unixpipe --test unixpipe_e2e --quiet) \
+        || return 1
+    _runci_guarded_test C1al 2 cargo test -p wz-runtime-tokio --features transport-link-unixpipe --test link_endpoints_pairing --quiet \
+        || return 1
+    _runci_guarded_test C1al 1 cargo test -p wz-runtime-tokio --features routing-accept,transport-link-unixpipe --lib mesh_accept_loop_holds_two_unixpipe_peers --quiet \
+        || return 1
+    _runci_guarded_test C1al 1 cargo test -p wz-runtime-tokio --features routing-accept,transport-link-unixpipe --lib boundlistener_unixpipe_is_mesh_capable --quiet \
+        || return 1
+    (cd crates \
         && cargo clippy -p wz-runtime-tokio --all-targets --features routing-accept,transport-link-unixpipe --quiet -- -D warnings \
         && cargo clippy -p wz-runtime-tokio --all-targets --features transport-link-unixpipe --quiet -- -D warnings \
         && cargo clippy -p wz-runtime-tokio --no-default-features --features transport-link-unixpipe --quiet -- -D warnings)
@@ -8024,14 +8043,21 @@ layer_c1aw_cargo_test_ext_pubsub_group_membership() {
 # C1w's mesh accept units are now continuously enforced, not decorative (the unixpipe
 # mesh unit lives in the still-local-only C1al, out of y409 scope).
 layer_c1w_cargo_test_routing_accept() {
+    (cd crates && cargo test -p wz-runtime-tokio --features routing-accept --lib accept_loop --quiet) \
+        || return 1
+    _runci_guarded_test C1w 1 cargo test -p wz-runtime-tokio --features routing-accept,transport-link-udp --lib mesh_accept_loop_holds_two_udp_peers --quiet \
+        || return 1
+    _runci_guarded_test C1w 1 cargo test -p wz-runtime-tokio --features routing-accept,transport-link-unixsock --lib mesh_accept_loop_holds_two_unixsock_peers --quiet \
+        || return 1
+    _runci_guarded_test C1w 1 cargo test -p wz-runtime-tokio --features routing-accept,transport-link-quic --lib mesh_accept_loop_holds_two_quic_peers --quiet \
+        || return 1
+    _runci_guarded_test C1w 1 cargo test -p wz-runtime-tokio --features routing-accept,transport-link-quic --lib boundlistener_quic_is_mesh_capable --quiet \
+        || return 1
+    _runci_guarded_test C1w 1 cargo test -p wz-runtime-tokio --features routing-accept,transport-link-quic-datagram --lib mesh_accept_loop_holds_two_quic_datagram_peers --quiet \
+        || return 1
+    _runci_guarded_test C1w 1 cargo test -p wz-runtime-tokio --features routing-accept,transport-link-quic-datagram --lib boundlistener_quic_datagram_is_mesh_capable --quiet \
+        || return 1
     (cd crates \
-        && cargo test -p wz-runtime-tokio --features routing-accept --lib accept_loop --quiet \
-        && cargo test -p wz-runtime-tokio --features routing-accept,transport-link-udp --lib mesh_accept_loop_holds_two_udp_peers --quiet 2>&1 | grep -qE '^test result: ok\. 1 passed' \
-        && cargo test -p wz-runtime-tokio --features routing-accept,transport-link-unixsock --lib mesh_accept_loop_holds_two_unixsock_peers --quiet 2>&1 | grep -qE '^test result: ok\. 1 passed' \
-        && cargo test -p wz-runtime-tokio --features routing-accept,transport-link-quic --lib mesh_accept_loop_holds_two_quic_peers --quiet 2>&1 | grep -qE '^test result: ok\. 1 passed' \
-        && cargo test -p wz-runtime-tokio --features routing-accept,transport-link-quic --lib boundlistener_quic_is_mesh_capable --quiet 2>&1 | grep -qE '^test result: ok\. 1 passed' \
-        && cargo test -p wz-runtime-tokio --features routing-accept,transport-link-quic-datagram --lib mesh_accept_loop_holds_two_quic_datagram_peers --quiet 2>&1 | grep -qE '^test result: ok\. 1 passed' \
-        && cargo test -p wz-runtime-tokio --features routing-accept,transport-link-quic-datagram --lib boundlistener_quic_datagram_is_mesh_capable --quiet 2>&1 | grep -qE '^test result: ok\. 1 passed' \
         && cargo clippy -p wz-runtime-tokio --all-targets --features routing-accept --quiet -- -D warnings \
         && cargo clippy -p wz-runtime-tokio --all-targets --features routing-accept,transport-link-unixsock --quiet -- -D warnings \
         && cargo clippy -p wz-runtime-tokio --all-targets --features routing-accept,transport-link-quic --quiet -- -D warnings \
