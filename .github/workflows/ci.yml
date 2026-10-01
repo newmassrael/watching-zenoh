@@ -5125,8 +5125,9 @@ jobs:
       # `scripts/lib/platform_surface_matrix.py` derives, from the pin, which
       # links and host-restricted features upstream serves on each host, and
       # declares the leg this host is owed: the integration-test targets that
-      # exercise each link wz serves here, run in ONE cargo invocation with the
-      # union feature set, each required to pass at least one test.
+      # exercise each link wz serves here, built once under the union feature
+      # set and run one target at a time on its own deadline, each required to
+      # pass at least one test.
       #
       # It is `--run`, not `--check`: the static arms run on the Linux jobs (Layer
       # C0 and Layer Z), and this step is the one thing only these two hosts can
@@ -5143,12 +5144,14 @@ jobs:
           python-version: "3.12"
 
       - name: platform surface matrix — the leg this host is owed
-        # A stalled target fails THIS step, with the last line the leg relayed
-        # in its log, instead of running until the job's 30 minutes expire and
-        # cancelling the whole job: the first hosted macOS leg did that, and
-        # nothing in its log named the target but the runner's own cleanup
-        # line (`serial_pty_e2e`). The Windows leg's whole step took under
-        # three minutes, build included.
+        # The leg bounds each target itself and names a stalled one by its
+        # last line, so the targets after it still report. This is the
+        # backstop for a stall the leg cannot see, such as a build that never
+        # ends: it fails THIS step instead of running until the job's 30
+        # minutes expire and cancel everything, which is what the first hosted
+        # macOS leg did, leaving only the runner's own cleanup line naming
+        # `serial_pty_e2e`. The Windows leg's whole step took under three
+        # minutes, build included.
         timeout-minutes: 20
         shell: bash
         run: |

@@ -72,10 +72,12 @@ The population is the thing that was missing, so the population is derived.
   4. EVIDENCE. For macOS and Windows -- the two hosts no other lane runs -- each
      link wz serves names the integration-test targets that exercise it, and the
      target's own cfg must select at least one non-ignored test on that host
-     under the leg's features. `--run <host>` executes the leg in ONE cargo
-     invocation (one build of the union feature set) and requires every target
-     to report a passing count of at least one. `EXEC_GAPS` names what cannot
-     run there, and a gap whose target now selects a test is stale.
+     under the leg's features. `--run <host>` builds the union feature set ONCE,
+     then runs each target on its own deadline and requires every target to
+     report a passing count of at least one; a target that stalls is killed
+     with its tree and named by its last line, and the targets after it still
+     report. `EXEC_GAPS` names what cannot run there, and a gap whose target
+     now selects a test is stale.
 
 The three graded hosts are the CI runners': Linux and Windows on x86_64, macOS
 on aarch64 (`macos-latest`). Linux is the reference host: its links are graded
@@ -101,12 +103,16 @@ where a checkout of the pinned zenoh is reachable, and SAYS so when it is not;
 from __future__ import annotations
 
 import argparse
+import io
 import json
 import os
 import pathlib
 import re
+import signal
 import subprocess
 import sys
+import threading
+import time
 from dataclasses import dataclass, field
 from typing import Callable, Iterable, Mapping, TextIO
 
@@ -1019,7 +1025,13 @@ def relay_lines(stream: Iterable[str], out: TextIO) -> list[str]:
 
 
 def spawn_leg(cmd: list[str], cwd: str, ambient: Mapping[str, str]) -> subprocess.Popen[str]:
-    """Start the leg's command with stdout and stderr merged, colour pinned off."""
+    """Start the leg's command with stdout and stderr merged, colour pinned off.
+
+    On a Unix host it leads a process group of its own, so `kill_tree` can end
+    cargo AND the test binary cargo started. Killing cargo alone leaves the binary
+    holding the pipe open, and the relay would wait on it for the rest of the job.
+    """
+    group = {} if os.name == "nt" else {"start_new_session": True}
     return subprocess.Popen(
         cmd,
         cwd=cwd,
@@ -1029,7 +1041,59 @@ def spawn_leg(cmd: list[str], cwd: str, ambient: Mapping[str, str]) -> subproces
         text=True,
         encoding="utf-8",
         errors="replace",
+        **group,
     )
+
+
+def kill_tree(proc: subprocess.Popen[str]) -> None:
+    """End the process and everything it started."""
+    if os.name == "nt":
+        subprocess.run(
+            ["taskkill", "/F", "/T", "/PID", str(proc.pid)], capture_output=True, check=False
+        )
+        return
+    try:
+        os.killpg(proc.pid, signal.SIGKILL)
+    except ProcessLookupError:
+        pass
+
+
+def run_bounded(
+    cmd: list[str],
+    cwd: str,
+    ambient: Mapping[str, str],
+    deadline_s: float | None,
+    out: TextIO,
+) -> tuple[list[str], int, bool]:
+    """Run `cmd`, relaying its output, and end its whole tree at the deadline.
+
+    Returns (lines, return code, whether the deadline ended it). `None` is no
+    deadline, for a build whose length is the job's concern, not this leg's.
+
+    A leg that is one process makes one stalled test erase what every later target
+    would have said: the first hosted macOS leg printed nothing for the whole job,
+    and a stalled `serial_pty_e2e` stood between it and the targets after it. Each
+    target runs on its own clock instead, so a stall is named and the rest report.
+    """
+    proc = spawn_leg(cmd, cwd, ambient)
+    fired = threading.Event()
+
+    def expire() -> None:
+        fired.set()
+        kill_tree(proc)
+
+    timer = threading.Timer(deadline_s, expire) if deadline_s is not None else None
+    if timer is not None:
+        timer.daemon = True
+        timer.start()
+    try:
+        assert proc.stdout is not None
+        lines = relay_lines(proc.stdout, out)
+        rc = proc.wait()
+    finally:
+        if timer is not None:
+            timer.cancel()
+    return lines, rc, fired.is_set()
 
 
 def attribute_results(lines: Iterable[str]) -> dict[str, tuple[str, int]]:
@@ -1063,13 +1127,35 @@ def result_findings(leg: Leg, results: dict[str, tuple[str, int]], rc: int) -> l
     return out
 
 
-def leg_command(leg: Leg) -> list[str]:
-    cmd = ["cargo", "test", "-p", RUNTIME]
+#: How long ONE target may run, its build excluded. The Windows leg's whole step
+#: (build and eight targets) took under three minutes, and the macOS step is
+#: bounded at twenty, so a target that has not finished in four is stuck.
+TARGET_DEADLINE_S = 240
+
+
+def _leg_cargo(leg: Leg, *extra: str) -> list[str]:
+    cmd = ["cargo", "test", *extra, "-p", RUNTIME]
     if leg.features:
         cmd += ["--features", ",".join(sorted(leg.features))]
+    return cmd
+
+
+def leg_build_command(leg: Leg) -> list[str]:
+    """Build every target of the leg once, so no target's clock includes the build."""
+    cmd = _leg_cargo(leg, "--no-run")
     for t in leg.targets:
         cmd += ["--test", t]
     return cmd
+
+
+def leg_target_command(leg: Leg, target: str) -> list[str]:
+    """Run one target, with the same features the build used.
+
+    `--nocapture` because libtest prints a failing test's message only when its
+    whole binary finishes. A binary that never does keeps the reason in a buffer, and
+    the first hosted macOS run showed seven failed tests and no message for any.
+    """
+    return _leg_cargo(leg) + ["--test", target, "--", "--nocapture"]
 
 
 # ─── the real tree ───────────────────────────────────────────────────────────
@@ -1299,13 +1385,27 @@ def run(host: str) -> int:
     if rc != 0:
         return rc
     leg = legs[host]
-    cmd = leg_command(leg)
-    print(f"  platform-surface-matrix: {host} leg: {' '.join(cmd)}", flush=True)
-    proc = spawn_leg(cmd, str(ROOT / "crates"), os.environ)
-    assert proc.stdout is not None
-    lines = relay_lines(proc.stdout, sys.stdout)
-    rc = proc.wait()
-    got = result_findings(leg, attribute_results(lines), rc)
+    cwd = str(ROOT / "crates")
+    build = leg_build_command(leg)
+    print(f"  platform-surface-matrix: {host} leg: {' '.join(build)}", flush=True)
+    _lines, build_rc, _hung = run_bounded(build, cwd, os.environ, None, sys.stdout)
+    if build_rc != 0:
+        print(f"platform-surface-matrix: {host} leg FAIL -- the leg did not build (cargo exited {build_rc})")
+        return 1
+    got: list[str] = []
+    for target in leg.targets:
+        cmd = leg_target_command(leg, target)
+        print(f"  platform-surface-matrix: {host} leg: {' '.join(cmd)}", flush=True)
+        lines, target_rc, hung = run_bounded(cmd, cwd, os.environ, TARGET_DEADLINE_S, sys.stdout)
+        if hung:
+            last = next((ln.strip() for ln in reversed(lines) if ln.strip()), "(it printed nothing)")
+            got.append(
+                f"`{target}` did not finish in {TARGET_DEADLINE_S} s and its tree was killed; "
+                f"its last line: {last[:160]}"
+            )
+            continue
+        one = Leg(host, [target], leg.features, [])
+        got += result_findings(one, attribute_results(lines), target_rc)
     if got:
         print(f"platform-surface-matrix: {host} leg FAIL -- {len(got)} finding(s)")
         for f in got:
@@ -1554,6 +1654,46 @@ def selftest() -> int:
     expect("each relayed line is flushed", rec.events, ["write", "flush"] * 3)
     expect("relayed lines come back stripped", relayed, ["a", "b", "c"])
 
+    # the plan: one build for the union, then one run per target on the same features
+    plan = Leg("macos", ["a_e2e", "b_e2e"], frozenset({"f2", "f1"}), [])
+    expect(
+        "one build covers every target",
+        leg_build_command(plan),
+        ["cargo", "test", "--no-run", "-p", RUNTIME, "--features", "f1,f2",
+         "--test", "a_e2e", "--test", "b_e2e"],
+    )
+    expect(
+        "a target runs alone, uncaptured, on the build's features",
+        leg_target_command(plan, "b_e2e"),
+        ["cargo", "test", "-p", RUNTIME, "--features", "f1,f2",
+         "--test", "b_e2e", "--", "--nocapture"],
+    )
+
+    # a target that stalls is ended with its whole tree at its deadline, and one that
+    # finishes is left alone. The stalled one is a child that starts a grandchild
+    # holding the same pipe, the shape of cargo and the test binary it started: ending
+    # only the child would leave the relay waiting on the grandchild.
+    if os.name != "nt":
+        py = sys.executable
+        tree = (
+            "import subprocess, sys, time\n"
+            "print('before', flush=True)\n"
+            "subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(25)'])\n"
+            "time.sleep(25)\n"
+        )
+        began = time.monotonic()
+        stalled, _rc, hung = run_bounded([py, "-c", tree], str(ROOT), os.environ, 1.0, io.StringIO())
+        expect(
+            "a stalled tree is ended at its deadline",
+            (hung, stalled, time.monotonic() - began < 15),
+            (True, ["before"], True),
+        )
+        done, done_rc, done_hung = run_bounded(
+            [py, "-c", "import sys\nprint('a')\nprint('b')\nsys.exit(3)\n"],
+            str(ROOT), os.environ, 30.0, io.StringIO(),
+        )
+        expect("a command that finishes is not marked stalled", (done, done_rc, done_hung), (["a", "b"], 3, False))
+
     if failures:
         print(f"platform-surface-matrix selftest: FAIL -- {len(failures)}")
         for f in failures:
@@ -1584,7 +1724,9 @@ def main(argv: list[str]) -> int:
     _tree, legs, rc = check(require=False, quiet=True)
     if rc != 0 or host not in legs:
         return rc or 2
-    print(" ".join(leg_command(legs[host])))
+    print(" ".join(leg_build_command(legs[host])))
+    for target in legs[host].targets:
+        print(" ".join(leg_target_command(legs[host], target)))
     return 0
 
 
