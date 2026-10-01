@@ -154,8 +154,10 @@ impl ConfigState {
     /// reaches a session. Measured on `libzenohc.so` 1.10.0 for the session `id`,
     /// which is the one key checked here: it is a `ZenohId`, and the insert
     /// refuses an empty string, `0`, a leading `0`, uppercase, a non-hex digit,
-    /// more than sixteen bytes and a value that is not a string, while accepting
-    /// an odd number of digits and a leading `+`. What is refused is exactly what
+    /// more than sixteen bytes and a value that is neither a string nor `null`,
+    /// while accepting an odd number of digits and a leading `+`. A `null` is
+    /// accepted because it is how zenoh spells an id never given (measured on the
+    /// same library: both doors answer `Z_OK`). What is refused is exactly what
     /// [`ConfiguredZid::from_zenoh_text`] refuses, so the two are one rule.
     ///
     /// The question is asked of the LEAVES the insert would write, by
@@ -166,10 +168,16 @@ impl ConfigState {
     fn refuses(key: &str, value: &Json5Value) -> bool {
         let names_an_id_zenoh_refuses = |path: &str, leaf: &Json5Value| {
             path == SESSION_ZID_KEY
-                && !matches!(
-                    leaf,
-                    Json5Value::String(text) if ConfiguredZid::from_zenoh_text(text).is_some()
-                )
+                && match leaf {
+                    // `null` is how zenoh's own config spells an id it was never
+                    // given -- its default document opens `{"id":null,...}` -- and
+                    // both doors take it, so it names no identity to refuse. The
+                    // reader reads it the same way: a null is the absence of an
+                    // instruction, not one.
+                    Json5Value::Null => false,
+                    Json5Value::String(text) => ConfiguredZid::from_zenoh_text(text).is_none(),
+                    _ => true,
+                }
         };
         if matches!(value, Json5Value::Object(entries) if !entries.is_empty()) {
             value
@@ -1575,6 +1583,45 @@ mod tests {
                 "document holding `{value}`"
             );
         }
+    }
+
+    /// `null` is how zenoh's own config spells an `id` it was never given: the
+    /// default document opens `{"id":null,"metadata":null,...}`, and measured on
+    /// `libzenohc.so` 1.10.0 both `zc_config_insert_json5(cfg, "id", "null")` and
+    /// `zc_config_from_str("{\"id\":null}")` answer `Z_OK`. The refusal above is
+    /// for an id that names an identity zenoh cannot make; a null names none, so
+    /// there is nothing to refuse. The cross-implementation oracle failed all five
+    /// reader doors on exactly this document, because its reference side writes
+    /// `"id":null` for every config whose id was left alone.
+    #[test]
+    fn a_null_id_is_zenohs_spelling_of_no_id_and_every_door_takes_it() {
+        let key = std::ffi::CString::new(SESSION_ZID_KEY).expect("no NUL");
+        let null = std::ffi::CString::new("null").expect("no NUL");
+        // SAFETY: a config built through the C doors, and NUL-terminated strings.
+        let mut cfg = unsafe { config_of(&[]) };
+
+        let rc = unsafe {
+            zc_config_insert_json5(z_config_loan_mut(&mut cfg), key.as_ptr(), null.as_ptr())
+        };
+        assert_eq!(rc, Z_OK, "insert `null`");
+        let rc = unsafe {
+            zc_config_insert_json5_from_substr(
+                z_config_loan_mut(&mut cfg),
+                key.as_ptr().cast(),
+                SESSION_ZID_KEY.len(),
+                null.as_ptr().cast(),
+                4,
+            )
+        };
+        assert_eq!(rc, Z_OK, "counted insert `null`");
+
+        let document = std::ffi::CString::new("{\"id\":null}").expect("no NUL");
+        let mut owned: z_owned_config_t = unsafe { std::mem::zeroed() };
+        assert_eq!(
+            unsafe { zc_config_from_str(&mut owned, document.as_ptr()) },
+            Z_OK,
+            "document holding `null`"
+        );
     }
 
     /// The keys THIS MODULE declares as upstream's `Z_CONFIG_*`, paired with a
