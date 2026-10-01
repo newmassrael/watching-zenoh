@@ -248,6 +248,32 @@ wz_apt_mark_dirty() {
     fi
 }
 
+# Hand the archive directory back to the user the workflow runs as.
+#
+# apt runs under `sudo`, so what it leaves in the directory belongs to root: a
+# `lock` file nothing else may read and a `partial/` directory handed to the
+# `_apt` user at mode 0700. The `tar` inside `actions/cache/save` is the runner
+# user, cannot open either, and exits 2 -- and the action refuses to save a
+# partial archive, so the cache this directory exists for was never written.
+# A hosted run read exactly that: `tar: .../wz-apt/lock: Cannot open: Permission
+# denied`, `Failed to save`, and `Cache not found` on the run after it.
+#
+# It is also why `wz_apt_fingerprint` could not see a resumed download: its
+# `find` runs as the same user and could not descend into `partial/`, so a
+# half-fetched .deb never made the archive look changed. The directory is
+# handed back BEFORE it is fingerprinted, on every path that fingerprints it.
+#
+# `$2` is the privilege prefix apt itself ran under (`sudo`, or empty). Off a
+# runner, and in the test lane where `WZ_APT_CMD` is a stub, nothing here is
+# root's, so the chown is a no-op on files already owned and the chmod is what
+# repairs a directory that arrived unreadable.
+wz_apt_hand_back() {
+    local dir="$1" priv="${2:-}"
+    [[ -n "${dir}" && -d "${dir}" ]] || return 0
+    ${priv:+"${priv}"} chown -R "$(id -u):$(id -g)" "${dir}" 2>/dev/null || true
+    chmod -R u+rwX "${dir}" 2>/dev/null || true
+}
+
 # The one entry point. Split from `main` so the test lane can drive the ceiling
 # without installing anything.
 wz_apt_install() {
@@ -351,7 +377,8 @@ wz_apt_install() {
     # variable whether there is anything new to save. Without that question a
     # warm fleet re-uploads ~35 MB per job per run into a 10 GB repo-wide cap
     # and evicts the Rust caches to store bytes that did not change.
-    local before
+    local before priv=""
+    [[ "${apt[0]}" == "sudo" ]] && priv="sudo"
     before="$(wz_apt_fingerprint "${archives}")"
     local stale=0
     if ! wz_apt_bounded "warning" "update" "${WZ_APT_UPDATE_DEADLINE}" \
@@ -368,6 +395,7 @@ wz_apt_install() {
         # survive into the next run. apt keeps completed .debs in the archive and
         # resumes the one it was cut off in, so a job that dies at 60% makes the
         # next one start at 60%.
+        wz_apt_hand_back "${archives}" "${priv}"
         wz_apt_mark_dirty "${archives}" "${before}"
         if [[ "${stale}" -eq 1 ]]; then
             echo "::error::apt: and update had ALREADY failed above, so this install ran" \
@@ -376,6 +404,7 @@ wz_apt_install() {
         fi
         return 1
     fi
+    wz_apt_hand_back "${archives}" "${priv}"
     wz_apt_mark_dirty "${archives}" "${before}"
     if [[ "${stale}" -eq 1 ]]; then
         echo "::notice::apt: installed from the image's shipped index -- update failed" \

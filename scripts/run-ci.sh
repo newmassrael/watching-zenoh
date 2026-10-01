@@ -4243,6 +4243,69 @@ EOF
     fi
     rm -rf "$fake_home"
 
+    # AND THE DIRECTORY HANDED BACK. apt runs under `sudo`, so what it leaves in
+    # the archive directory belongs to root: a `lock` nobody else may read and a
+    # `partial/` closed to everyone but its owner. The `tar` inside
+    # `actions/cache/save` is the runner user, cannot open either, exits 2 and
+    # the action refuses to save -- a hosted run read `tar: .../wz-apt/lock:
+    # Cannot open: Permission denied` and a cold cache on the run after it,
+    # for every job in the workflow.
+    #
+    # The stub leaves the SAME class of damage as the current user (mode 000 on
+    # the lock and on `partial/`, with a half-fetched .deb inside), which this
+    # lane can make without root. What it cannot make is root's OWNERSHIP, so
+    # that half of the repair is read hosted, not here. Two things are asserted:
+    # `tar` reads the whole directory afterwards, and the half-fetched .deb made
+    # the archive look changed, because a fingerprint blind to `partial/` threw
+    # a resumable download away.
+    #
+    # The `lock` file ALREADY EXISTS before the run, the way it does in a restored
+    # warm cache. Without that the lock apt creates would change the fingerprint
+    # on its own and the second assertion would pass with or without the repair:
+    # the half-fetched .deb must be the ONLY difference.
+    local handback_dir handback_env handback_stub
+    handback_dir="$(mktemp -d)"
+    handback_env="$(mktemp)"
+    handback_stub="$(mktemp)"
+    : >"${handback_dir}/lock"
+    cat >"$handback_stub" <<'EOF'
+#!/usr/bin/env bash
+case " $* " in
+    *" install "*)
+        : >"$WZ_TEST_ARCHIVES/lock"
+        chmod 000 "$WZ_TEST_ARCHIVES/lock"
+        echo half >"$WZ_TEST_ARCHIVES/partial/half.deb"
+        chmod 000 "$WZ_TEST_ARCHIVES/partial"
+        ;;
+esac
+exit 0
+EOF
+    chmod +x "$handback_stub"
+    if ! WZ_TEST_ARCHIVES="$handback_dir" GITHUB_ENV="$handback_env" \
+        WZ_APT_ARCHIVES="$handback_dir" WZ_APT_CMD="$handback_stub" \
+        WZ_APT_DEADLINE=5 bash "$script" cmake >/dev/null 2>&1; then
+        chmod -R u+rwX "$handback_dir" 2>/dev/null
+        rm -rf "$handback_dir" "$handback_env" "$handback_stub"
+        echo "  Layer C0g FAIL: the install refused when apt left an unreadable" \
+            "archive directory behind" >&2
+        return 1
+    fi
+    if ! tar -cf /dev/null -C "$handback_dir" . 2>/dev/null; then
+        chmod -R u+rwX "$handback_dir" 2>/dev/null
+        rm -rf "$handback_dir" "$handback_env" "$handback_stub"
+        echo "  Layer C0g FAIL: apt left the archive directory unreadable and it" \
+            "was not handed back, so the unprivileged tar inside actions/cache/save" \
+            "exits 2 and the cache is never written" >&2
+        return 1
+    fi
+    if ! grep -qx 'WZ_APT_CACHE_DIRTY=true' "$handback_env"; then
+        rm -rf "$handback_dir" "$handback_env" "$handback_stub"
+        echo "  Layer C0g FAIL: a half-fetched .deb under partial/ did not mark the" \
+            "archive dirty, so a resumable download would be thrown away" >&2
+        return 1
+    fi
+    rm -rf "$handback_dir" "$handback_env" "$handback_stub"
+
     # AND THE FALLBACK, which is the arm that matters on the bad day. A cache is
     # an optimisation; an optimisation that can break the build is a defect. An
     # archive directory that cannot be created must warn and install anyway.
