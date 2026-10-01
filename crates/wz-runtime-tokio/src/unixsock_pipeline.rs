@@ -640,6 +640,107 @@ mod tests {
         out
     }
 
+    /// The call signature of a top-level function: everything between its name
+    /// and the `{` that opens its body, whitespace-normalised. `body` starts at
+    /// the name (see [`top_level_functions`]), so a lock function taking one fd
+    /// and answering whether it got the lock has the signature
+    /// `(fd: RawFd) -> io::Result<()>`.
+    fn signature_of(name: &str, body: &str) -> String {
+        let after = &body[name.len()..];
+        let head = &after[..after.find('{').unwrap_or(after.len())];
+        head.split_whitespace().collect::<Vec<_>>().join(" ")
+    }
+
+    /// Whether `body` CALLS `callee`: the name directly followed by `(` and not
+    /// the tail of a longer identifier. A bare mention (a comment, a string, a
+    /// doc line) is not a call, so it cannot stand in for one.
+    fn calls(body: &str, callee: &str) -> bool {
+        body.match_indices(callee).any(|(at, _)| {
+            let starts_an_identifier = body[..at]
+                .chars()
+                .next_back()
+                .is_none_or(|c| !(c.is_ascii_alphanumeric() || c == '_'));
+            starts_an_identifier && body[at + callee.len()..].starts_with('(')
+        })
+    }
+
+    /// Derivation 1 — the advisory-lock helpers, as a function of the modules'
+    /// text so a fixture can drive it as well as the real sources.
+    ///
+    /// SEEDS are the functions whose bodies actually call `libc::flock` with
+    /// `LOCK_EX`. A WRAPPER is a synchronous function that has a helper's own
+    /// signature and calls that helper by name: it takes the same lock, behind a
+    /// name that says why (open-debt 853: `lock_read_end` skips the lock on
+    /// macOS, where upstream compiles every lock out, and was reported as a seam
+    /// with no lock because only direct callers of `libc::flock` counted).
+    /// Wrappers are added to a fixed point, so a wrapper of a wrapper counts.
+    ///
+    /// The signature is what keeps this from accepting every caller of a lock:
+    /// a probe that ANSWERS about the lock (`-> bool`) or a function that does
+    /// other work around it has a different signature and stays out, so a seam
+    /// that only reaches one of those still fails.
+    fn derive_lock_helpers(modules: &[(String, String)]) -> Vec<String> {
+        let functions: Vec<(String, String, String)> = modules
+            .iter()
+            .flat_map(|(_, text)| top_level_functions(text))
+            .collect();
+        let mut helpers: Vec<(String, String)> = functions
+            .iter()
+            .filter(|(_, _, body)| body.contains("libc::flock") && body.contains("LOCK_EX"))
+            .map(|(_, name, body)| (name.clone(), signature_of(name, body)))
+            .collect();
+        loop {
+            let known = helpers.len();
+            for (qualifiers, name, body) in &functions {
+                if qualifiers.contains("async") || helpers.iter().any(|(h, _)| h == name) {
+                    continue;
+                }
+                let signature = signature_of(name, body);
+                if helpers
+                    .iter()
+                    .any(|(h, s)| *s == signature && calls(body, h))
+                {
+                    helpers.push((name.clone(), signature));
+                }
+            }
+            if helpers.len() == known {
+                break;
+            }
+        }
+        let mut names: Vec<String> = helpers.into_iter().map(|(name, _)| name).collect();
+        names.sort();
+        names.dedup();
+        names
+    }
+
+    /// Derivation 2 — the seams: `pub async fn bind_*(path: &str)`, i.e. a bind
+    /// addressed by a FILESYSTEM PATH rather than by an IP socket, a vsock
+    /// `(cid, port)` or a quinn endpoint. Each is `(module::name, body)`.
+    fn path_addressed_bind_seams(modules: &[(String, String)]) -> Vec<(String, String)> {
+        let mut seams = Vec::new();
+        for (module, text) in modules {
+            for (qualifiers, name, body) in top_level_functions(text) {
+                if qualifiers != "pub async " || !name.starts_with("bind_") {
+                    continue;
+                }
+                if !body[name.len()..].starts_with("(path: &str") {
+                    continue;
+                }
+                seams.push((format!("{module}::{name}"), body));
+            }
+        }
+        seams
+    }
+
+    /// The seams in `seams` whose bodies call none of `helpers`.
+    fn seams_without_a_lock(seams: &[(String, String)], helpers: &[String]) -> Vec<String> {
+        seams
+            .iter()
+            .filter(|(_, body)| !helpers.iter().any(|h| calls(body, h)))
+            .map(|(seam, _)| seam.clone())
+            .collect()
+    }
+
     /// Population guard for the class this round paid off, derived TWICE from
     /// the source so neither half is a list written here.
     ///
@@ -650,70 +751,108 @@ mod tests {
     /// not the population. `bind_unixpipe` is in the same class and was already
     /// arbitrated, which is why the derivation must find it too.
     ///
-    /// Derivation 1 — the advisory-lock helpers: functions in this crate's
-    /// `*_pipeline.rs` whose bodies actually call `libc::flock` with `LOCK_EX`.
-    /// Taking the NAMES from the code rather than typing them is what stops the
-    /// needle from outliving the call.
-    ///
-    /// Derivation 2 — the seams: `pub async fn bind_*(path: &str)` in the same
-    /// modules, i.e. a bind addressed by a path rather than by an IP socket, a
-    /// vsock `(cid, port)` or a quinn endpoint.
+    /// Derivation 1 ([`derive_lock_helpers`]) takes the NAMES of the lock
+    /// helpers from the code rather than typing them, which is what stops the
+    /// needle from outliving the call; derivation 2
+    /// ([`path_addressed_bind_seams`]) takes the seams.
     ///
     /// Either population being EMPTY fails: a guard whose subject vanished must
-    /// not report green.
+    /// not report green. And the derivation is itself checked on a fixture
+    /// BEFORE it is trusted on the real sources, because a guard that reports
+    /// green by being too permissive and one that reports red by being too
+    /// narrow look the same from outside: the fixture holds a wrapper (must be a
+    /// helper), a probe and a bare mention (must not be), and a seam that
+    /// reaches each.
     #[test]
     fn every_path_addressed_bind_seam_takes_an_advisory_lock() {
+        // Built from separate string pieces on purpose: this file is one of the
+        // sources the guard scans, and a fixture line that began at column 0
+        // with `fn ` would be read as a real top-level function of it.
+        let fixture_modules = vec![(
+            "fixture_pipeline.rs".to_string(),
+            [
+                "fn take_it(fd: RawFd) -> io::Result<()> {",
+                "    let rc = unsafe { libc::flock(fd, libc::LOCK_EX | libc::LOCK_NB) };",
+                "    if rc != 0 { return Err(io::Error::last_os_error()); }",
+                "    Ok(())",
+                "}",
+                "fn take_it_where_the_host_has_one(fd: RawFd) -> io::Result<()> {",
+                "    take_it(fd)",
+                "}",
+                "fn does_it_hold_it(fd: RawFd) -> bool {",
+                "    take_it(fd).is_err()",
+                "}",
+                "fn describes_it(fd: RawFd) -> io::Result<()> {",
+                "    // take_it is named here and never called",
+                "    Ok(())",
+                "}",
+                "pub async fn bind_directly(path: &str) -> io::Result<()> {",
+                "    take_it(fd)?;",
+                "    Ok(())",
+                "}",
+                "pub async fn bind_through_a_wrapper(path: &str) -> io::Result<()> {",
+                "    take_it_where_the_host_has_one(fd)?;",
+                "    Ok(())",
+                "}",
+                "pub async fn bind_through_a_probe(path: &str) -> bool {",
+                "    does_it_hold_it(fd)",
+                "}",
+                "pub async fn bind_that_only_names_it(path: &str) -> io::Result<()> {",
+                "    // take_it, take_it_where_the_host_has_one: named, not called",
+                "    Ok(())",
+                "}",
+                "pub async fn bind_bare(path: &str) -> io::Result<()> {",
+                "    Ok(())",
+                "}",
+                "",
+            ]
+            .join("\n"),
+        )];
+        let fixture_helpers = derive_lock_helpers(&fixture_modules);
+        assert_eq!(
+            fixture_helpers,
+            ["take_it", "take_it_where_the_host_has_one"],
+            "a delegating wrapper with the helper's own signature is a helper; a \
+             probe that answers about the lock and a function that only names it \
+             are not"
+        );
+        assert_eq!(
+            seams_without_a_lock(
+                &path_addressed_bind_seams(&fixture_modules),
+                &fixture_helpers
+            ),
+            [
+                "fixture_pipeline.rs::bind_through_a_probe",
+                "fixture_pipeline.rs::bind_that_only_names_it",
+                "fixture_pipeline.rs::bind_bare",
+            ],
+            "a seam reaching only a probe, a bare mention or nothing has no lock"
+        );
+
         let modules = pipeline_modules();
         assert!(
             !modules.is_empty(),
             "derived NO *_pipeline.rs modules — the source walk broke"
         );
-
-        let mut lock_helpers: Vec<String> = Vec::new();
-        for (_, text) in &modules {
-            for (_, name, body) in top_level_functions(text) {
-                if body.contains("libc::flock") && body.contains("LOCK_EX") {
-                    lock_helpers.push(name);
-                }
-            }
-        }
-        lock_helpers.sort();
-        lock_helpers.dedup();
+        let lock_helpers = derive_lock_helpers(&modules);
         assert!(
             !lock_helpers.is_empty(),
             "derived NO advisory-lock helper: nothing in this crate's pipelines \
              calls libc::flock with LOCK_EX any more, so the guard below would \
              be checking for a needle that cannot exist"
         );
-
-        let mut seams: Vec<String> = Vec::new();
-        for (module, text) in &modules {
-            for (qualifiers, name, body) in top_level_functions(text) {
-                // A path-ADDRESSED public listen seam: `pub async fn bind_*` whose
-                // first parameter is a filesystem path (not a `SocketAddr`, a vsock
-                // `(cid, port)` or a quinn endpoint).
-                if qualifiers != "pub async " || !name.starts_with("bind_") {
-                    continue;
-                }
-                if !body[name.len()..].starts_with("(path: &str") {
-                    continue;
-                }
-                let seam = format!("{module}::{name}");
-                assert!(
-                    lock_helpers.iter().any(|h| body.contains(h.as_str())),
-                    "{seam} is addressed by a filesystem path but calls none of the \
-                     advisory-lock helpers {lock_helpers:?}: its unlink cannot tell a \
-                     crashed predecessor from a LIVE peer"
-                );
-                seams.push(seam);
-            }
-        }
-        seams.sort();
-        seams.dedup();
+        let seams = path_addressed_bind_seams(&modules);
         assert!(
             !seams.is_empty(),
             "derived an EMPTY population of path-addressed bind seams — the \
              derivation broke, which must fail rather than report green"
+        );
+        let unlocked = seams_without_a_lock(&seams, &lock_helpers);
+        assert!(
+            unlocked.is_empty(),
+            "{unlocked:?} is addressed by a filesystem path but calls none of the \
+             advisory-lock helpers {lock_helpers:?}: its unlink cannot tell a \
+             crashed predecessor from a LIVE peer"
         );
     }
 }
