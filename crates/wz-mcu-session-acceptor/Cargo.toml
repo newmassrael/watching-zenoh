@@ -61,6 +61,29 @@ description = "Stage 5 MCU acceptor session e2e SSOT — run_acceptor_e2e<C> dri
 name = "wz_mcu_session_acceptor"
 path = "src/lib.rs"
 
+# The scenario these four tests drive is `run_acceptor_e2e`, which exists only
+# in the lwIP topology (the `lwip` feature and a real lwIP build). With that
+# feature off there is nothing for them to call, so `required-features` has
+# cargo skip them instead of failing to compile their import. The three
+# reassembly tests were hidden from this only because `reassembly` is off by
+# default and does not imply `lwip`. Layer C1cf, which builds every crate with
+# its defaults off, is what found it.
+[[test]]
+name = "host_acceptor_e2e"
+required-features = ["lwip"]
+
+[[test]]
+name = "host_acceptor_reassembly_e2e"
+required-features = ["lwip"]
+
+[[test]]
+name = "host_acceptor_reassembly_ooo_e2e"
+required-features = ["lwip"]
+
+[[test]]
+name = "host_acceptor_reassembly_timeout_e2e"
+required-features = ["lwip"]
+
 [dependencies]
 # The composable-framework boundary. `session-lwip` lights up
 # `wz::{session_lwip, link_lwip, runtime_coop}` together with the
