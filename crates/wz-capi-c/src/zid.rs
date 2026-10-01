@@ -13,21 +13,37 @@
 //!
 //! ## The RENDERING is where a drop-in can be silently wrong
 //!
-//! `z_id_to_string` emits 32 lowercase hex characters with the BYTE ORDER
-//! REVERSED and NO trimming — upstream's own doc comment says "16-digit hex
-//! string (LSB-first order)" (`zenoh_commons.h:3067`). Two mistakes are
-//! individually plausible and each produces a string that looks like a zid:
+//! `z_id_to_string` prints the id the way zenoh PRINTS it: lowercase hex of the
+//! sixteen bytes read as a little-endian `u128`, so the byte order is REVERSED,
+//! and with the leading zeros TRIMMED, so a short id is a short string. The id
+//! `1` is the text `1`, the all-zero id is `0`, and an id whose top nibble is
+//! zero is 31 characters.
 //!
-//!   * big-endian rendering, which disagrees with every id a zenoh-c program
-//!     prints;
-//!   * trimming leading zeros, which is what the RUST side does — `uhlc::ID`'s
-//!     `Display` is `{:x}` over a `u128` (`uhlc-0.8.2/src/id.rs:281`), so a
-//!     zenohd whose top nibble is zero logs 31 characters, not 32. The C side
-//!     never trims, and a build that copied the Rust spelling would disagree with
-//!     the reference on 1 zid in 16 and agree on the other 15.
+//! The header's one-line doc comment says "16-digit hex string (LSB-first
+//! order)", and only the second half of it is true. This function used to follow
+//! the whole sentence, and printed the id `123456789` as
+//! `00000000000000000000000123456789` where zenohd logs `Using ZID: 123456789`.
+//! MEASURED against the real library, which is what settled it
+//! (`zenoh_c_open_zid_twice_and_diff`, compiled once and linked against both):
+//! the real `z_id_to_string` trims.
 //!
-//! The sibling `wz-capi-pico` renders identically for the same reason and carries
-//! a foreign-oracle test for it.
+//! That is no accident of the build. zenoh-c's function is one line over zenoh's
+//! own `Display` for the id (`z_id_to_string` in `src/info.rs` is
+//! `zid.to_string()`), and that is `uhlc::ID`'s `{:x}` over a `u128`
+//! (`uhlc-0.8.2/src/id.rs:281`) — the SAME spelling the config's `id` key, the
+//! keyexpr a zid is rendered into, and zenohd's log use. There is one recipe in
+//! this workspace, `zid_hex::zid_to_zenoh_hex`, and this function calls it.
+//!
+//! Two mistakes are individually plausible and each produces a string that looks
+//! like a zid: a big-endian rendering, which disagrees with every id a zenoh-c
+//! program prints, and a fixed-width one, which agrees with the reference on a
+//! full sixteen-byte id and on nothing shorter.
+//!
+//! The sibling `wz-capi-pico` renders differently and rightly so: pico's own
+//! `_z_id_to_string` converts all sixteen bytes unconditionally, so its text is
+//! always 32 characters, and `pico_pure_function_oracle` holds that against the
+//! real `libzenohpico`. The two ABIs share an id type and a byte order, not a
+//! width.
 //!
 //! ## The peers/routers SPLIT is made here, at the ABI boundary
 //!
@@ -278,11 +294,13 @@ fn release_zid_closure(taken: z_owned_closure_zid_t) {
     }
 }
 
-/// Render a zid as 32 lowercase hex characters, BYTE ORDER REVERSED (zenoh-c
-/// `z_id_to_string`).
+/// Render a zid the way zenoh prints it: lowercase hex of the bytes read as a
+/// little-endian `u128`, leading zeros trimmed (zenoh-c `z_id_to_string`).
 ///
-/// Returns `void` upstream — unlike zenoh-pico's, which returns a status. See the
-/// module note for the two renderings that would look right and be wrong.
+/// Returns `void` upstream — unlike zenoh-pico's, which returns a status. The
+/// zero id is the text `0`, never an empty string: it is a legal value (upstream's
+/// "invalid session" answer), not an absence. See the module note for what was
+/// measured and why the header's "16-digit" is not what the library does.
 ///
 /// # Safety
 /// `zid` must be null or a valid `z_id_t`; `dst` must be null or valid and
@@ -298,19 +316,11 @@ pub unsafe extern "C" fn z_id_to_string(zid: *const z_id_t, dst: *mut z_owned_st
             unsafe { *dst = owned_string_from(b"") };
             return;
         }
-        const HEX: &[u8; 16] = b"0123456789abcdef";
-        let mut buf = [0u8; Z_ID_SIZE * 2];
         // SAFETY: the caller's contract.
         let bytes = unsafe { &(*zid).id };
-        let mut pos = buf.len();
-        for byte in bytes.iter() {
-            pos -= 1;
-            buf[pos] = HEX[(byte & 0x0F) as usize];
-            pos -= 1;
-            buf[pos] = HEX[((byte & 0xF0) >> 4) as usize];
-        }
+        let text = wz_runtime_tokio::zid_hex::zid_to_zenoh_hex(bytes);
         // SAFETY: the caller's contract.
-        unsafe { *dst = owned_string_from(&buf) };
+        unsafe { *dst = owned_string_from(text.as_bytes()) };
     });
 }
 
@@ -479,32 +489,89 @@ mod tests {
         bytes
     }
 
-    /// The rendering is REVERSED and ZERO-PADDED. Both halves are asserted by one
-    /// vector whose first byte is 0x01 and whose last is 0x00: a big-endian
-    /// rendering would start `01`, and a trimming one would be 30 characters.
+    /// The rendering is REVERSED and TRIMMED, asserted against texts the REAL
+    /// libzenohc printed for these bytes.
+    ///
+    /// The literals were read off that library, not off this function, and the
+    /// differential test `zenoh_c_open_zid_twice_and_diff` re-asks the library the
+    /// same questions on every run, so a literal that drifted from upstream fails
+    /// there. They are here as well because this test runs where the oracle does
+    /// not. This test used to assert the opposite — `2301` rendered as 32 padded
+    /// characters — against nothing but the model that wrote it.
+    ///
+    /// A big-endian rendering would start `01` for the first vector and a
+    /// fixed-width one would be 32 characters for all but the full-width id.
     #[test]
-    fn a_zid_renders_lsb_first_and_never_trims() {
-        let mut id = z_id_t::empty();
-        id.id[0] = 0x01;
-        id.id[1] = 0x23;
-        // bytes 2..15 stay zero, so the MOST significant nibbles are zeros.
-        // SAFETY: local values, valid for the call.
-        let text = unsafe { rendered(&id) };
-        assert_eq!(text.len(), 32, "a zid is 32 hex characters, never trimmed");
-        assert_eq!(
-            std::str::from_utf8(&text).unwrap(),
-            "00000000000000000000000000002301",
-            "the byte order must be reversed (LSB-first), as upstream documents"
-        );
+    fn a_zid_renders_as_the_real_library_prints_it() {
+        let prefixed = |prefix: &[u8]| {
+            let mut id = z_id_t::empty();
+            id.id[..prefix.len()].copy_from_slice(prefix);
+            id
+        };
+        let mut full = z_id_t::empty();
+        let mut top_nibble_zero = z_id_t::empty();
+        for (i, (low, high)) in full
+            .id
+            .iter_mut()
+            .zip(top_nibble_zero.id.iter_mut())
+            .enumerate()
+        {
+            *low = 0x10 + i as u8;
+            *high = 0xa0 + i as u8;
+        }
+        // The most significant byte is 0x05, so a full-width rendering would
+        // begin with a zero digit.
+        top_nibble_zero.id[Z_ID_SIZE - 1] = 0x05;
+        let cases: [(z_id_t, &str); 7] = [
+            (z_id_t::empty(), "0"),
+            (prefixed(&[0x01]), "1"),
+            (prefixed(&[0x01, 0x23]), "2301"),
+            (
+                prefixed(&[0x49, 0x1e, 0xc1, 0x47, 0x1e, 0xc1]),
+                "c11e47c11e49",
+            ),
+            (prefixed(&[0x89, 0x67, 0x45, 0x23, 0x01]), "123456789"),
+            (full, "1f1e1d1c1b1a19181716151413121110"),
+            (top_nibble_zero, "5aeadacabaaa9a8a7a6a5a4a3a2a1a0"),
+        ];
+        for (id, want) in &cases {
+            // SAFETY: local values, valid for the call.
+            let text = unsafe { rendered(id) };
+            assert_eq!(
+                std::str::from_utf8(&text).unwrap(),
+                *want,
+                "the text of {:02x?}",
+                id.id
+            );
+        }
+        // Said again in the one place the two halves of the claim meet: the id
+        // whose most significant nibble is zero is 31 characters, not 32.
+        assert_eq!(cases[6].1.len(), 31);
     }
 
-    /// The zero id renders as 32 zeros rather than as an empty string — it is a
-    /// legal value (upstream's "invalid session" answer), not an absence.
+    /// Every byte position and every nibble boundary, against the standard
+    /// library's own `{:x}` over a `u128`.
+    ///
+    /// The vectors above are chosen; this one is swept, so a trim that is right
+    /// for the ids somebody thought of and off by one nibble for another cannot
+    /// pass. The expectation is `format!("{:x}", ..)` and so is derived from
+    /// nothing in this crate.
     #[test]
-    fn the_empty_zid_renders_as_32_zeros() {
-        // SAFETY: local values, valid for the call.
-        let text = unsafe { rendered(&z_id_t::empty()) };
-        assert_eq!(std::str::from_utf8(&text).unwrap(), "0".repeat(32));
+    fn a_zid_with_one_byte_set_renders_as_the_u128_in_hex() {
+        for position in 0..Z_ID_SIZE {
+            for value in [0x01u8, 0x0f, 0x10, 0x7f, 0x80, 0xf0, 0xff] {
+                let mut id = z_id_t::empty();
+                id.id[position] = value;
+                let want = format!("{:x}", u128::from_le_bytes(id.id));
+                // SAFETY: local values, valid for the call.
+                let text = unsafe { rendered(&id) };
+                assert_eq!(
+                    std::str::from_utf8(&text).unwrap(),
+                    want,
+                    "byte {position} = {value:#04x}"
+                );
+            }
+        }
     }
 
     /// A wire zid shorter than 16 bytes is zero-padded on the RIGHT, because

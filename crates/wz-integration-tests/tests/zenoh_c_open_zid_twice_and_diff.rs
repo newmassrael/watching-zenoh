@@ -96,6 +96,43 @@ static void print_zid(const char *label, z_id_t id) {
     printf("\n");
 }
 
+/* The id as TEXT, through the library's own accessors on whichever library the
+   probe was linked against. The length is printed beside the text because the
+   claim under test is about how many characters there are. */
+static void print_text(const char *label, z_id_t id) {
+    z_owned_string_t text;
+    z_id_to_string(&id, &text);
+    const z_loaned_string_t *loaned = z_string_loan(&text);
+    printf("%s.text=%.*s\n", label, (int)z_string_len(loaned), z_string_data(loaned));
+    printf("%s.text_len=%zu\n", label, z_string_len(loaned));
+    z_string_drop(z_string_move(&text));
+}
+
+/* Ids whose spelling is the question: the whole of a zid is its sixteen bytes,
+   and what text a SHORT one gets is exactly what a consumer matching it against
+   a zenohd's `Using ZID:` line reads. Each is built from bytes, so neither arm
+   is asked to parse anything. */
+static void text_cases(void) {
+    unsigned char zero[16] = {0};
+    unsigned char one[16] = {1};
+    unsigned char six[16] = {0x49, 0x1e, 0xc1, 0x47, 0x1e, 0xc1};
+    unsigned char odd[16] = {0x89, 0x67, 0x45, 0x23, 0x01};
+    unsigned char full[16];
+    unsigned char top_nibble_zero[16];
+    for (int i = 0; i < 16; i++) {
+        full[i] = (unsigned char)(0x10 + i);
+        top_nibble_zero[i] = (unsigned char)(0xa0 + i);
+    }
+    top_nibble_zero[15] = 0x05;
+    z_id_t id;
+    memcpy(id.id, zero, 16); print_text("text.zero", id);
+    memcpy(id.id, one, 16); print_text("text.one", id);
+    memcpy(id.id, six, 16); print_text("text.six_bytes", id);
+    memcpy(id.id, odd, 16); print_text("text.odd_digits", id);
+    memcpy(id.id, full, 16); print_text("text.sixteen_bytes", id);
+    memcpy(id.id, top_nibble_zero, 16); print_text("text.top_nibble_zero", id);
+}
+
 /* Open a peer that reaches nothing, with `id` (or none) and the listener the
    caller reserved, and print the session's own zid. */
 static int open_case(const char *label, const char *id_json, const char *endpoint,
@@ -155,6 +192,10 @@ int main(int argc, char **argv) {
     memset(&configured, 0, sizeof configured);
     if (open_case("with_id", "\"c11e47c11e49\"", argv[1], &configured) != 0) { return 1; }
     print_zid("with_id", configured);
+    /* And says so in the text a zenohd prints for that id. */
+    print_text("with_id", configured);
+
+    text_cases();
 
     /* A session opened without one is still given one of its own. */
     z_id_t fresh;
@@ -258,8 +299,61 @@ fn expected_zid_hex() -> String {
         .collect()
 }
 
+/// The ids [`PROBE`]'s `text_cases` renders, as sixteen bytes each, and the text
+/// each must get.
+///
+/// Derived from the documented reading and from nothing in this workspace: zenoh
+/// prints an id as its little-endian bytes read as a `u128`, in lowercase hex,
+/// with no leading zero. The bytes are written out here a second time on purpose
+/// (the probe holds the first copy), and that is checked rather than trusted: the
+/// REFERENCE arm must print these exact lines, so a byte that drifted between the
+/// two copies fails the oracle check before it can reach a comparison.
+///
+/// `odd_digits` is the id a consumer reported (`zenohd --id 123456789`, whose
+/// `Using ZID:` line reads `123456789`): nine digits, so neither a pair of
+/// digits per byte nor a fixed width explains it.
+fn expected_text_lines() -> Vec<String> {
+    let bytes = |prefix: &[u8]| {
+        let mut id = [0u8; 16];
+        id[..prefix.len()].copy_from_slice(prefix);
+        id
+    };
+    let mut full = [0u8; 16];
+    let mut top_nibble_zero = [0u8; 16];
+    for i in 0..16u8 {
+        full[usize::from(i)] = 0x10 + i;
+        top_nibble_zero[usize::from(i)] = 0xa0 + i;
+    }
+    // The most significant byte is 0x05, so the first hex digit of a full-width
+    // rendering would be a zero.
+    top_nibble_zero[15] = 0x05;
+    let cases: [(&str, [u8; 16]); 6] = [
+        ("zero", [0u8; 16]),
+        ("one", bytes(&[1])),
+        ("six_bytes", bytes(&[0x49, 0x1e, 0xc1, 0x47, 0x1e, 0xc1])),
+        ("odd_digits", bytes(&[0x89, 0x67, 0x45, 0x23, 0x01])),
+        ("sixteen_bytes", full),
+        ("top_nibble_zero", top_nibble_zero),
+    ];
+    let mut lines = Vec::new();
+    for (label, id) in cases {
+        let text = format!("{:x}", u128::from_le_bytes(id));
+        lines.push(format!("text.{label}.text={text}"));
+        lines.push(format!("text.{label}.text_len={}", text.len()));
+    }
+    // The session that stood on `CONFIGURED` says the text it was configured with.
+    lines.push(format!("with_id.text={CONFIGURED}"));
+    lines.push(format!("with_id.text_len={}", CONFIGURED.len()));
+    lines
+}
+
 /// THE GATE: a session opened with an `id` stands on it, the config refuses what
 /// zenoh refuses, and wz answers what zenoh's own library answers.
+///
+/// It also holds the id's TEXT to the same two-armed standard: `z_id_to_string`
+/// prints the id the way zenoh does, which TRIMS leading zeros. zenoh-c's own
+/// header calls it a "16-digit hex string", and the real library does not do
+/// that: its answer for the id `1` is the text `1`.
 ///
 /// `partial`: it covers the config's `id` at `z_open` on the zenoh-c ABI. The
 /// zenoh-pico ABI reads its zid through a numeric key with its own spelling and
@@ -290,6 +384,29 @@ fn an_open_stands_on_its_configured_id_identically_on_wz_and_libzenohc() {
         wz_stdout.lines().any(|l| l == expected),
         "wz's session did not stand on the configured id `{CONFIGURED}` \
          (expected `{expected}`):\n--- wz ---\n{wz_stdout}\n--- reference ---\n{ref_stdout}"
+    );
+    // The text of an id, the same way: the ORACLE must print the derived lines
+    // (so the derivation, and the second copy of the bytes, are right), and then
+    // wz must print them too. Collected rather than asserted one at a time, so a
+    // failure names every line that is wrong and not only the first.
+    let mut wrong_text: Vec<String> = Vec::new();
+    for line in expected_text_lines() {
+        if !ref_stdout.lines().any(|l| l == line) {
+            panic!(
+                "the ORACLE did not print `{line}`, so the derivation of an id's text in \
+                 this test is wrong:\n{ref_stdout}"
+            );
+        }
+        if !wz_stdout.lines().any(|l| l == line) {
+            wrong_text.push(line);
+        }
+    }
+    assert!(
+        wrong_text.is_empty(),
+        "wz's `z_id_to_string` does not print the text the real libzenohc prints for \
+         {} line(s), expected:\n  {}\n--- wz ---\n{wz_stdout}",
+        wrong_text.len(),
+        wrong_text.join("\n  ")
     );
     for line in [
         "without_id.zid_nonzero=1",
