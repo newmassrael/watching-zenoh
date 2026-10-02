@@ -1669,8 +1669,11 @@ int main(void) {
      * moves; the number is the whole notice.
      * 15: every endpoint of every flow object gains `family`, `ipv4` or
      * `ipv6` on a TCP or UDP link and `null` on a link that does not address
-     * by IP. One key and one word set, a passenger; nothing retires. */
-    revisioned[0].revision = 15;
+     * by IP. One key and one word set, a passenger; nothing retires.
+     * 16: a counter that can pass 2^53 - 1 is a decimal string beyond that
+     * line and a bare number up to it (`json::u64_into`), so a consumer
+     * whose JSON reader holds a double reads no wrong digit. */
+    revisioned[0].revision = 16;
     revisioned[0].doc = NULL;
     rc = wz_dissect_pcap_census(pcap, sizeof pcap, &revisioned[0].doc);
     CHECK(rc == WZ_DISSECT_OK, "census rc=%d", rc);
@@ -1686,8 +1689,9 @@ int main(void) {
      * must be written here too, and R2121 did not -- it moved the summary to 2,
      * ran the crate tests, and left this at 1, which only this lane can see.
      * R2630 (item 745) -- 4: the health object's `dropped_by_limits` gains
-     * `scouting`, a key `datagram_flows[]` rows already carried undeclared. */
-    revisioned[1].revision = 4;
+     * `scouting`, a key `datagram_flows[]` rows already carried undeclared.
+     * 5: the summary's counters follow the integer line (see the census). */
+    revisioned[1].revision = 5;
     revisioned[1].doc = NULL;
     rc = wz_dissect_pcap_summary(pcap, sizeof pcap, &revisioned[1].doc);
     CHECK(rc == WZ_DISSECT_OK, "summary rc=%d", rc);
@@ -1780,8 +1784,9 @@ int main(void) {
      * handshake announced (`null` before any Init), and each record of a
      * completed chain under `above_transport.carried` gains the
      * `payload_decode` a row's own message carries. One new key name; no word
-     * moves; nothing retires. */
-    revisioned[2].revision = 22;
+     * moves; nothing retires.
+     * 23: a `uint` value beyond 2^53 - 1 is a decimal string (see the census). */
+    revisioned[2].revision = 23;
     revisioned[2].doc = NULL;
     rc = wz_dissect_pcap_fields(pcap, sizeof pcap, 0, &revisioned[2].doc);
     CHECK(rc == WZ_DISSECT_OK, "fields rc=%d", rc);
@@ -1800,7 +1805,8 @@ int main(void) {
      * empty handle still answers, which is the cheapest way to hold the
      * document's opening to the revision this consumer was written against. */
     revisioned[4].name = "retention";
-    revisioned[4].revision = 1;
+    /* 2: the retention counters follow the integer line (see the census). */
+    revisioned[4].revision = 2;
     revisioned[4].doc = NULL;
     {
         wz_dissect_live *retained = NULL;
