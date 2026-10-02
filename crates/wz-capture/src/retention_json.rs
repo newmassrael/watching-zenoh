@@ -213,10 +213,12 @@ pub fn retention_json(d: &Dissection) -> String {
         held.fullest_window_messages,
         held.fullest_window_stream_bytes,
     );
+    // An instant in nanoseconds since 1970 is about 1.7e18: past 2^53, which a
+    // reader on doubles cannot hold, and under 2^63. Written through the shared
+    // `u64` door, so it is a number while it is exact and a string once it is
+    // not, by the same rule as a protocol field's value.
     match held.oldest_ms {
-        Some(ms) => {
-            let _ = write!(out, "{}", millis_as_ns(ms));
-        }
+        Some(ms) => wz_session_core::json::u64_into(millis_as_ns(ms), &mut out),
         None => out.push_str("null"),
     }
     out.push_str("},\"dropped_by_limits\":");
@@ -273,7 +275,7 @@ mod tests {
         let doc = retention_json(&Dissection::new());
         assert_eq!(
             doc,
-            "{\"document\":{\"name\":\"retention\",\"revision\":1},\
+            "{\"document\":{\"name\":\"retention\",\"revision\":2},\
              \"held\":{\"frames\":0,\"scouting\":0,\"serial_frames\":0,\"skipped\":0,\
              \"stream_bytes\":0,\"stream_flows\":0,\"datagram_flows\":0,\
              \"fullest_window\":{\"messages\":0,\"stream_bytes\":0},\"oldest_ts_ns\":null},\
@@ -529,6 +531,34 @@ mod tests {
         push_stream_keepalives(&mut zero, &[Some(0)]);
         assert_eq!(Retention::of(&zero).oldest_ms, Some(0));
         assert!(retention_json(&zero).contains("\"oldest_ts_ns\":0}"));
+    }
+
+    /// A real capture clock, in nanoseconds since 1970, is past 2^53: written
+    /// bare, a reader on doubles loses its low bits and says nothing. From
+    /// revision 2 it is a string once it is not exact, and a number below the
+    /// line, which is also what the one value a test clock usually is (a few
+    /// seconds) keeps being.
+    #[test]
+    fn an_instant_past_the_exact_integer_line_is_a_string() {
+        // 1_700_000_000_000 ms is 1.7e18 ns: 2^53 is 9.007e15.
+        let mut d = Dissection::new();
+        push_stream_keepalives(&mut d, &[Some(1_700_000_000_000)]);
+        assert_eq!(Retention::of(&d).oldest_ms, Some(1_700_000_000_000));
+        let doc = retention_json(&d);
+        assert!(
+            doc.contains("\"oldest_ts_ns\":\"1700000000000000000\"}"),
+            "a real-clock instant is the digits in a string: {doc}"
+        );
+        assert!(doc.contains("\"revision\":2"), "{doc}");
+
+        // The last millisecond that stays a number: 9_007_199_254 ms is 9.007e15 ns
+        // and under the line; one more is over it.
+        let mut under = Dissection::new();
+        push_stream_keepalives(&mut under, &[Some(9_007_199_254)]);
+        assert!(retention_json(&under).contains("\"oldest_ts_ns\":9007199254000000}"));
+        let mut over = Dissection::new();
+        push_stream_keepalives(&mut over, &[Some(9_007_199_255)]);
+        assert!(retention_json(&over).contains("\"oldest_ts_ns\":\"9007199255000000\"}"));
     }
 
     /// The skipped-packet list is bounded by its own ceiling and counted

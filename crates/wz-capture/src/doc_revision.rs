@@ -748,6 +748,27 @@ pub const DOCUMENT_HISTORY: &[DocumentShape] = &[
         planes: CENSUS_R6_PLANES,
         carries: CENSUS_R15_CARRIES,
     },
+    // AN `id` THAT A NUMBER WOULD MISREAD IS A STRING.
+    //
+    // NO KEY NAME MOVES and nothing retires; the four lists are revision 15's,
+    // by name. What moves is the JSON TYPE of one value, which no axis of this
+    // table declares, so this row is the whole notice (see fields revision 23).
+    //
+    // Every `id` this document writes is a `u64` read off the wire — a
+    // declaration's, an interest request's, the unresolved alias a reference
+    // named — and so is `solicited_by`. Each is a bare number up to 2^53 - 1 and
+    // the same digits in a string above it. zenoh's own ids are 32-bit, so a
+    // value past the line is a peer that is not following the protocol, which
+    // is exactly the capture an analyzer is pointed at.
+    DocumentShape {
+        document: CENSUS,
+        revision: 16,
+        keys: CENSUS_R16_KEYS,
+        retiring: &[],
+        families: CENSUS_R15_FAMILIES,
+        planes: CENSUS_R6_PLANES,
+        carries: CENSUS_R15_CARRIES,
+    },
     DocumentShape {
         document: FIELDS,
         revision: 1,
@@ -1293,6 +1314,38 @@ pub const DOCUMENT_HISTORY: &[DocumentShape] = &[
         planes: &[],
         carries: FIELDS_R20_CARRIES,
     },
+    // A 64-BIT INTEGER THAT A NUMBER WOULD MISREAD IS A STRING.
+    //
+    // NO KEY NAME MOVES and nothing retires; the three lists below are revision
+    // 22's, by name. What moves is the JSON TYPE of one value, and that is an axis
+    // this table has no way to declare: `keys` names keys, `families` closes the
+    // strings a key can carry, `carries` says which keys a word brings. So, as for
+    // revision 6, THIS ROW IS THE WHOLE NOTICE a consumer gets.
+    //
+    // The `value` of a field whose `kind` is `uint` (and of one whose `kind` is
+    // `bits`, which can never reach the line) is a bare number up to 2^53 - 1 and
+    // the same digits in a string above it. A `uint` is a decoded protocol scalar
+    // and ranges over all of `u64`: a reader on doubles loses the low bits above
+    // 2^53 and a reader on `int64` falls back to its default above 2^63, and both
+    // say nothing. The line is 2^53 - 1 and not 2^63 because it has to be safe
+    // for the narrowest reader a consumer may have.
+    //
+    // ⚠ A CONSUMER THAT READS `value` AS A NUMBER, pinned to 22 or earlier, keeps
+    // working until a field carries a value past the line, and then reads a string
+    // where it expected a number. That is the point: the alternative was a number
+    // it would have read wrongly. A consumer that wants the digits asks for the
+    // string when the cell is one; the same rule holds in the retention document
+    // (`oldest_ts_ns`, revision 2) and nowhere else, because no other document
+    // carries a `u64` the host cannot bound.
+    DocumentShape {
+        document: FIELDS,
+        revision: 23,
+        keys: FIELDS_R23_KEYS,
+        retiring: &[],
+        families: FIELDS_R20_FAMILIES,
+        planes: &[],
+        carries: FIELDS_R20_CARRIES,
+    },
     DocumentShape {
         document: SUMMARY,
         revision: 1,
@@ -1352,6 +1405,27 @@ pub const DOCUMENT_HISTORY: &[DocumentShape] = &[
         document: SUMMARY,
         revision: 4,
         keys: SUMMARY_R4_KEYS,
+        retiring: &[],
+        families: &[],
+        planes: &[],
+        carries: &[],
+    },
+    // A WIRE-SOURCED `u64` THAT A NUMBER WOULD MISREAD IS A STRING.
+    //
+    // NO KEY NAME MOVES and nothing retires; the lists are revision 4's. The
+    // JSON TYPE of three values moves, and this table declares no axis for that,
+    // so this row is the whole notice (see fields revision 23): the `id` and
+    // `solicited_by` of an interest, the `id` of a request and of an unresolved
+    // alias, and the sequence group's `missing`. Each is a bare number up to
+    // 2^53 - 1 and the same digits in a string above it.
+    //
+    // `missing` is the sum of the gaps the sequence numbers showed. A gap is a
+    // distance in the session's SN window, which is as wide as 2^63 at a 64-bit
+    // resolution, so no host limit bounds it.
+    DocumentShape {
+        document: SUMMARY,
+        revision: 5,
+        keys: SUMMARY_R5_KEYS,
         retiring: &[],
         families: &[],
         planes: &[],
@@ -1480,6 +1554,23 @@ pub const DOCUMENT_HISTORY: &[DocumentShape] = &[
         document: RETENTION,
         revision: 1,
         keys: RETENTION_R1_KEYS,
+        retiring: &[],
+        families: &[],
+        planes: &[],
+        carries: &[],
+    },
+    // THE ONE INSTANT IS A STRING ONCE A NUMBER WOULD MISREAD IT.
+    //
+    // NO KEY NAME MOVES. `oldest_ts_ns` is nanoseconds since 1970, about 1.7e18
+    // today: past 2^53, which a reader on doubles cannot hold, and far under
+    // 2^63. It is a bare number up to 2^53 - 1 and the same digits in a string
+    // above it, so on a real clock it is a string. The JSON TYPE is the only
+    // thing that moved and no axis of this table declares one; this row is the
+    // whole notice (see fields revision 23). `null` still means no clock.
+    DocumentShape {
+        document: RETENTION,
+        revision: 2,
+        keys: RETENTION_R2_KEYS,
         retiring: &[],
         families: &[],
         planes: &[],
@@ -7940,6 +8031,30 @@ pub const RETENTION_R1_KEYS: &[&str] = &[
     "stream_flows",
 ];
 
+/// The retention document's key set at revision 2: revision 1's, by name.
+///
+/// The revision moved the JSON type of one value (`oldest_ts_ns`: a number or
+/// null, now a number, a string or null), not a key; see the row.
+pub const RETENTION_R2_KEYS: &[&str] = RETENTION_R1_KEYS;
+
+/// The field document's key set at revision 23: revision 22's, by name.
+///
+/// The revision moved the JSON type of one value (a `uint` field's `value`: a
+/// number, now a number or a string), not a key; see the row.
+pub const FIELDS_R23_KEYS: &[&str] = FIELDS_R22_KEYS;
+
+/// The census document's key set at revision 16: revision 15's, by name.
+///
+/// The revision moved the JSON type of the wire-sourced `id` values (a number,
+/// now a number or a string), not a key; see the row.
+pub const CENSUS_R16_KEYS: &[&str] = CENSUS_R15_KEYS;
+
+/// The summary document's key set at revision 5: revision 4's, by name.
+///
+/// The revision moved the JSON type of three wire-sourced values, not a key; see
+/// the row.
+pub const SUMMARY_R5_KEYS: &[&str] = SUMMARY_R4_KEYS;
+
 /// The three keys the envelope itself contributes to every document.
 ///
 /// Named rather than repeated into six tables: they are the same three keys
@@ -9298,7 +9413,10 @@ mod tests {
             // text. Again no axis can see it; this entry is the notice.
             // To 15 when every endpoint gained `family`: one key, one word set
             // (`ipv4`, `ipv6`, and `null` off an IP link) and a passenger.
-            (CENSUS, 15u32),
+            // To 16 when the wire-sourced `id` values became a number or a
+            // string: the JSON type moved under stationary keys, which no axis
+            // here can see, so this entry is the notice.
+            (CENSUS, 16u32),
             // R2175 (open-debt item 552) — the field document moved to 2 when
             // its PAYLOAD PLANE joined the pin (fifteen keys revision 1 had
             // never covered) and its first three value families were declared.
@@ -9365,14 +9483,21 @@ mod tests {
             // one key, one word set and a passenger.
             // To 21 when a row's `l2` object gained its place in the frame:
             // `frame_offset` (already a key) and `length` (the one new one).
-            (FIELDS, 22),
+            // To 22 when a row gained the flow's version and a chain's decodes.
+            // To 23 when a `uint` field's `value` (and the sequence gap
+            // `missing`) became a number or a string: the JSON type moved under
+            // stationary keys, so this entry is the notice.
+            (FIELDS, 23),
             // R2121 (open-debt item 460) — the summary moved to 2 when it
             // gained `inert_counters`; R2122 (item 238) to 3 when its
             // `framing` group stopped disagreeing with the capture report's.
             // R2630 (item 745) — to 4 when `health.dropped_by_limits` gained
             // `scouting`, which also declares the key `datagram_flows[]` rows
             // had carried undeclared since R311y608.
-            (SUMMARY, 4),
+            // To 5 when the wire-sourced `u64` values (interest and request
+            // ids, `solicited_by`, the sequence gap sum) became a number or a
+            // string: the JSON type moved under stationary keys.
+            (SUMMARY, 5),
             // R2175 (open-debt item 552) — to 3 when it gained
             // `value_families`, the catalogue of every switchable key's words.
             // R2184 (item 556) — to 4 when the `value_families` rows gained
@@ -9385,7 +9510,9 @@ mod tests {
             // The selector's verdict over the field document's rows.
             (SELECTION, 1),
             // What a live handle holds, beside its ceilings.
-            (RETENTION, 1),
+            // To 2 when `oldest_ts_ns` became a number, a string or null: a
+            // nanosecond clock is past 2^53.
+            (RETENTION, 2),
         ] {
             named.push(name);
             assert_eq!(revision(name), Some(expected), "{name}");

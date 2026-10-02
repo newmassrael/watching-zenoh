@@ -83,9 +83,74 @@ where
     out.push(']');
 }
 
+/// The largest integer every JSON reader holds exactly: 2^53 - 1.
+///
+/// RFC 8259 §6 leaves the range of a number to the reader, and the readers that
+/// matter are IEEE-754 doubles: JavaScript's `JSON.parse`, Qt's `toDouble()`.
+/// A double holds every integer up to 2^53 and cannot tell 2^53 from 2^53 + 1,
+/// so 2^53 - 1 is the last value a bare number names unambiguously. RFC 7493
+/// (I-JSON) §2.2 draws the same line and says what to do beyond it: send the
+/// integer as a string.
+pub const MAX_EXACT_INTEGER: u64 = (1 << 53) - 1;
+
+/// Push `v` onto `out` as the JSON value of an unsigned 64-bit integer: a bare
+/// number up to [`MAX_EXACT_INTEGER`], the same digits in a string beyond it.
+///
+/// # Why a string and not a number, and why at 2^53
+///
+/// A bare 64-bit integer is a value some readers cannot hold. A reader on
+/// doubles loses the low bits above 2^53 and says nothing; a reader on `int64`
+/// is exact to 2^63 and then falls back to its default, which Qt's
+/// `toInteger()` does. Both fail silently, and a wrong number is worse than a
+/// missing one. A string cannot be misread as a number: a reader either asks
+/// for the digits or finds that it asked for the wrong type.
+///
+/// The line is 2^53, not 2^63, because it must be the one that is safe for the
+/// narrowest reader: a boundary at 2^63 would leave every double-based consumer
+/// reading `2^53 + 1` as `2^53` and no way for the writer to know.
+///
+/// # Where it applies
+///
+/// Wherever a document carries a `u64` whose range is not bounded by something
+/// the host can hold: a protocol field's value, and a nanosecond instant since
+/// 1970 (about 1.7e18 today, past 2^53 and far under 2^63). Counters and offsets
+/// stay bare numbers because they count things that live in memory or on a disk.
+pub fn u64_into(v: u64, out: &mut String) {
+    use core::fmt::Write as _;
+    if v <= MAX_EXACT_INTEGER {
+        let _ = write!(out, "{v}");
+    } else {
+        let _ = write!(out, "\"{v}\"");
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The boundary is 2^53 - 1, spelled out as the number a JavaScript reader
+    /// calls `Number.MAX_SAFE_INTEGER`, not read back from [`MAX_EXACT_INTEGER`]:
+    /// a pin that follows its subject is not a pin. Both neighbours are checked,
+    /// so an off-by-one in either direction reddens.
+    #[test]
+    fn a_u64_is_a_number_up_to_two_to_the_53_minus_1_and_a_string_beyond() {
+        for (v, expected) in [
+            (0u64, "0"),
+            (1, "1"),
+            (9_007_199_254_740_990, "9007199254740990"),
+            (9_007_199_254_740_991, "9007199254740991"),
+            (9_007_199_254_740_992, "\"9007199254740992\""),
+            (9_007_199_254_740_993, "\"9007199254740993\""),
+            (1_700_000_000_000_000_000, "\"1700000000000000000\""),
+            (i64::MAX as u64, "\"9223372036854775807\""),
+            (i64::MAX as u64 + 1, "\"9223372036854775808\""),
+            (u64::MAX, "\"18446744073709551615\""),
+        ] {
+            let mut got = String::new();
+            u64_into(v, &mut got);
+            assert_eq!(got, expected, "writing {v}");
+        }
+    }
 
     /// R311y921 (open-debt item 379) — EVERY ESCAPE RFC 8259 §7 REQUIRES, in
     /// the form the RFC names, checked one character at a time.

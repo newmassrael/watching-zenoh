@@ -7,3 +7,9 @@
 # failed `wz-session-core` on run 35951199951 while every Linux lane passed.
 # Declaring the kind rather than the one file is what covers the next golden.
 *.golden text eol=lf
+
+# R3012 — a tracked capture is compared byte for byte by an `include_bytes!`
+# oracle, and a pcap is not text. Git's own detection keeps it binary today
+# because a pcap header holds NUL bytes; this makes that a declaration rather
+# than a property of the first sixteen bytes, for the same reason as above.
+*.pcap -text

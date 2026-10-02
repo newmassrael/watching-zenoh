@@ -2292,6 +2292,82 @@ mod tests {
         assert_eq!(cov.matched[0].keys, alloc::vec!["svc/status"]);
     }
 
+    /// R3011 — EVERY `id` THE DOCUMENTS WRITE IS A WIRE `u64`, AND FOLLOWS THE
+    /// INTEGER RULE.
+    ///
+    /// A declaration's id, the id an interest request carries, the interest id a
+    /// declaration cites (`solicited_by`) and the alias an unresolved reference
+    /// names are all read off the wire as VLE and held as `u64`. zenoh's own are
+    /// 32-bit, so one past 2^53 - 1 is a peer not following the protocol, which is
+    /// the capture an analyzer is pointed at. Each is given a DISTINCT value past
+    /// the line so a site that kept the bare spelling is named by its own digits,
+    /// and one small id rides along to show a number stays a number. The census
+    /// document and the summary are both read, because they render the same rows
+    /// by separate writers.
+    #[test]
+    fn a_wire_id_past_the_exact_integer_line_is_a_string_in_both_documents() {
+        const DECLARATION: u64 = u64::MAX;
+        const ALIAS: u64 = u64::MAX - 1;
+        const SOLICITED_BY: u64 = 1 << 60;
+        const REQUEST: u64 = (1 << 60) + 1;
+        // The alias a PUBLISH referenced that nothing declared: the throughput
+        // plane's unresolved list, which the census and the summary each write
+        // with a writer of their own, apart from a declaration's `unresolved`.
+        const PUBLISHED_UNDECLARED: u64 = (1 << 60) + 7;
+        let d = wire(&[
+            (true, interest_subs(REQUEST, true, true, "demo/**")),
+            (
+                false,
+                declare_sub_solicited(DECLARATION, "demo/a", SOLICITED_BY),
+            ),
+            (true, declare_sub_aliased(7, ALIAS, Some("b"))),
+            (
+                true,
+                push(sender_space(PUBLISHED_UNDECLARED, None), &[0u8; 4]),
+            ),
+        ]);
+        let census = interests(&d);
+        let table = crate::agg::aggregate(&d);
+        assert_eq!(census.interests().len(), 2, "both declarations were read");
+        assert_eq!(census.requests().len(), 1, "and the request");
+        let coverage = census.coverage(&table);
+
+        let census_doc = crate::census_json::census_json(&d);
+        let summary = crate::report::CaptureReport::of(&d)
+            .with_throughput(&table)
+            .with_interests(&census, &coverage, None)
+            .to_json();
+        for (which, doc) in [("census", &census_doc), ("summary", &summary)] {
+            for digits in [
+                "18446744073709551615", // the declaration
+                "1152921504606846977",  // the request
+                "1152921504606846976",  // solicited_by
+                "1152921504606846983",  // the published, undeclared alias
+            ] {
+                assert!(
+                    doc.contains(&alloc::format!("\"{digits}\"")),
+                    "{which}: {digits} must be written as a string: {doc}"
+                );
+                assert!(
+                    !doc.contains(&alloc::format!(":{digits}")),
+                    "{which}: {digits} must not appear as a bare number: {doc}"
+                );
+            }
+            assert!(
+                doc.contains("\"id\":7,"),
+                "{which}: the small id stays a number: {doc}"
+            );
+        }
+        // The alias is an unresolved reference: only the census document names
+        // the declaration's own `unresolved` object; the summary lists it under
+        // the throughput plane's unresolved references.
+        assert!(
+            census_doc.contains("\"18446744073709551614\"")
+                && !census_doc.contains(":18446744073709551614"),
+            "{census_doc}"
+        );
+    }
+
     fn qbl_reply(interest_id: u64, keyexpr: &str) -> Vec<u8> {
         declare_build::build_declare_queryable_reply(
             interest_id,

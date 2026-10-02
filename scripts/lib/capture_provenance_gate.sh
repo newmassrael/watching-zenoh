@@ -67,12 +67,27 @@ EXPECTED=(
 CRATE="wz-capture"
 FILTER="raweth_capture"
 
-# Grade a `cargo test` transcript against EXPECTED. Separated from the run so
-# `--selftest` can drive it over transcripts that never came from cargo, which
-# is the only way to show this gate can still fail.
+# R3012 (open-debt item 809) — the SECOND tracked capture: a compression-
+# negotiated session with one intact batch and one the lz4 decoder refuses.
+# Its batches are the compressor's output and its last oracle reads the field
+# document, so it runs under two features the first set does not need, which is
+# why it is a second invocation and not a wider filter on the first.
+EXPECTED_COMPRESSED=(
+    the_tracked_compressed_capture_is_byte_identical_to_what_wz_emits
+    the_tracked_compressed_capture_breaks_exactly_one_named_spot
+    the_tracked_compressed_capture_reaches_the_consumer_surface
+)
+FILTER_COMPRESSED="compressed_capture"
+FEATURES_COMPRESSED="compression,dissect"
+
+# Grade a `cargo test` transcript against the oracle names that follow it.
+# Separated from the run so `--selftest` can drive it over transcripts that never
+# came from cargo, which is the only way to show this gate can still fail.
 grade_transcript() {
     local transcript="$1" missing=0 name
-    for name in "${EXPECTED[@]}"; do
+    shift
+    local total=$#
+    for name in "$@"; do
         if grep -qE "^test [A-Za-z0-9_:]*${name} \.\.\. ok$" "$transcript"; then
             echo "  capture-provenance: ok    ${name}"
         else
@@ -81,60 +96,71 @@ grade_transcript() {
         fi
     done
     if [[ $missing -ne 0 ]]; then
-        echo "  capture-provenance: ${missing} of ${#EXPECTED[@]} oracle(s) did not report ok" >&2
+        echo "  capture-provenance: ${missing} of ${total} oracle(s) did not report ok" >&2
         return 1
     fi
-    echo "  capture-provenance: ${#EXPECTED[@]} of ${#EXPECTED[@]} oracle(s) reported ok"
+    echo "  capture-provenance: ${total} of ${total} oracle(s) reported ok"
     return 0
 }
 
-selftest() {
-    local tmp rc
+# The four arms, driven over ONE oracle set. A set is selftested separately
+# because the matcher is handed a set per call: a second set that was never
+# driven could hold a name the matcher cannot fail on.
+selftest_set() {
+    local label="$1" tmp rc name
+    shift
     tmp="$(mktemp -d)"
-    trap 'rm -rf "$tmp"' RETURN
 
     # A transcript in which every expected name reported ok must PASS.
     : >"$tmp/all-ok"
-    for name in "${EXPECTED[@]}"; do
-        echo "test raweth_capture_fixture::${name} ... ok" >>"$tmp/all-ok"
+    for name in "$@"; do
+        echo "test ${label}::${name} ... ok" >>"$tmp/all-ok"
     done
-    if ! grade_transcript "$tmp/all-ok" >/dev/null 2>&1; then
-        echo "capture-provenance SELFTEST: a transcript with every oracle ok was rejected" >&2
+    if ! grade_transcript "$tmp/all-ok" "$@" >/dev/null 2>&1; then
+        echo "capture-provenance SELFTEST (${label}): a transcript with every oracle ok was rejected" >&2
+        rm -rf "$tmp"
         return 1
     fi
 
     # One name FAILED instead of ok must be caught. This is the shape a real
     # red arrives in.
-    sed "s/${EXPECTED[0]} \.\.\. ok/${EXPECTED[0]} ... FAILED/" \
-        "$tmp/all-ok" >"$tmp/one-failed"
-    grade_transcript "$tmp/one-failed" >/dev/null 2>&1
+    sed "s/${1} \.\.\. ok/${1} ... FAILED/" "$tmp/all-ok" >"$tmp/one-failed"
+    grade_transcript "$tmp/one-failed" "$@" >/dev/null 2>&1
     rc=$?
     if [[ $rc -eq 0 ]]; then
-        echo "capture-provenance SELFTEST: a FAILED oracle was read as a pass" >&2
+        echo "capture-provenance SELFTEST (${label}): a FAILED oracle was read as a pass" >&2
+        rm -rf "$tmp"
         return 1
     fi
 
     # One name ABSENT must be caught — the rename case, which is the reason
     # the set is pinned rather than the count.
-    grep -v "${EXPECTED[0]}" "$tmp/all-ok" >"$tmp/one-absent"
-    grade_transcript "$tmp/one-absent" >/dev/null 2>&1
+    grep -v "${1}" "$tmp/all-ok" >"$tmp/one-absent"
+    grade_transcript "$tmp/one-absent" "$@" >/dev/null 2>&1
     rc=$?
     if [[ $rc -eq 0 ]]; then
-        echo "capture-provenance SELFTEST: an ABSENT oracle was read as a pass" >&2
+        echo "capture-provenance SELFTEST (${label}): an ABSENT oracle was read as a pass" >&2
+        rm -rf "$tmp"
         return 1
     fi
 
     # An EMPTY transcript — what a filter that matched nothing leaves behind —
     # must be caught. The whole point.
     : >"$tmp/empty"
-    grade_transcript "$tmp/empty" >/dev/null 2>&1
+    grade_transcript "$tmp/empty" "$@" >/dev/null 2>&1
     rc=$?
+    rm -rf "$tmp"
     if [[ $rc -eq 0 ]]; then
-        echo "capture-provenance SELFTEST: an empty transcript was read as a pass" >&2
+        echo "capture-provenance SELFTEST (${label}): an empty transcript was read as a pass" >&2
         return 1
     fi
+    return 0
+}
 
-    echo "capture-provenance SELFTEST: 4 arm(s) of 4 — all-ok passes; FAILED, absent and empty each refused"
+selftest() {
+    selftest_set raweth_capture_fixture "${EXPECTED[@]}" || return 1
+    selftest_set compressed_capture_fixture "${EXPECTED_COMPRESSED[@]}" || return 1
+    echo "capture-provenance SELFTEST: 4 arm(s) of 4 over each of 2 set(s) — all-ok passes; FAILED, absent and empty each refused"
     return 0
 }
 
@@ -160,4 +186,15 @@ if [[ $run_rc -ne 0 ]]; then
     tail -40 "$log" >&2
     exit 1
 fi
-grade_transcript "$log"
+grade_transcript "$log" "${EXPECTED[@]}" || exit 1
+
+# The second tracked capture, under the features its oracles need. A failure in
+# the first set has already exited above, so a red here is this set's own.
+(cd "$REPO_ROOT/crates" && cargo test -p "$CRATE" --features "$FEATURES_COMPRESSED" --lib "$FILTER_COMPRESSED") >"$log" 2>&1
+run_rc=$?
+if [[ $run_rc -ne 0 ]]; then
+    echo "  capture-provenance: \`cargo test -p ${CRATE} --features ${FEATURES_COMPRESSED} --lib ${FILTER_COMPRESSED}\` exited ${run_rc}" >&2
+    tail -40 "$log" >&2
+    exit 1
+fi
+grade_transcript "$log" "${EXPECTED_COMPRESSED[@]}"

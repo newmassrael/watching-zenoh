@@ -81,7 +81,7 @@ use alloc::string::String;
 use alloc::vec::Vec;
 use core::fmt::Write as _;
 
-use wz_session_core::json::escape_into;
+use wz_session_core::json::{escape_into, u64_into};
 use wz_session_core::passive::Direction;
 
 use crate::agg::{
@@ -234,7 +234,12 @@ pub fn interests_json(
             Some(zid) => push_zid(zid, &mut out),
             None => out.push_str("null"),
         }
-        let _ = write!(out, ",\"id\":{},\"keyexpr\":", d.id);
+        // Every id in this document is a `u64` read off the wire, so it goes
+        // through the shared integer door: a number while exact, a string past
+        // 2^53 - 1 (see `wz_session_core::json::u64_into`).
+        out.push_str(",\"id\":");
+        u64_into(d.id, &mut out);
+        out.push_str(",\"keyexpr\":");
         match &d.keyexpr {
             Some(k) => escape_into(k, &mut out),
             // Not an empty string: a declaration this reader could not name is
@@ -244,7 +249,9 @@ pub fn interests_json(
         out.push_str(",\"unresolved\":");
         match d.unresolved {
             Some((space, id)) => {
-                let _ = write!(out, "{{\"space\":\"{}\",\"id\":{id}}}", dir_name(space));
+                let _ = write!(out, "{{\"space\":\"{}\",\"id\":", dir_name(space));
+                u64_into(id, &mut out);
+                out.push('}');
             }
             None => out.push_str("null"),
         }
@@ -273,9 +280,7 @@ pub fn interests_json(
         // a zero here would be indistinguishable from one.
         out.push_str(",\"solicited_by\":");
         match d.solicited_by {
-            Some(id) => {
-                let _ = write!(out, "{id}");
-            }
+            Some(id) => u64_into(id, &mut out),
             None => out.push_str("null"),
         }
         out.push_str(",\"flow\":");
@@ -325,10 +330,14 @@ pub fn interests_json(
             // R311y919 (item 452) — one `offset_space` for the THREE anchors
             // this row carries (`asked_at`, `closed_at`, `cancelled_at`), which
             // share a space because they are all this request's own flow.
-            "{{\"asker\":\"{}\",\"id\":{},\"mode\":\"{}\",\"answers\":{},\
-             \"offset_space\":\"{}\",\"asked_at\":{},\"closed_at\":",
+            "{{\"asker\":\"{}\",\"id\":",
             dir_name(r.asker),
-            r.id,
+        );
+        u64_into(r.id, &mut out);
+        let _ = write!(
+            out,
+            ",\"mode\":\"{}\",\"answers\":{},\
+             \"offset_space\":\"{}\",\"asked_at\":{},\"closed_at\":",
             r.mode.name(),
             r.answers,
             r.anchors.name(),
@@ -443,11 +452,11 @@ pub fn keyexprs_json(t: &ThroughputTable) -> String {
         // "this capture began mid-session" and "a declaration is missing" are
         // one number and a reader chasing the wrong one searches a capture
         // that never held the answer. See `crate::agg::UnresolvedCause`.
+        let _ = write!(out, "{{\"space\":\"{}\",\"id\":", dir_name(alias.space));
+        u64_into(alias.id, &mut out);
         let _ = write!(
             out,
-            "{{\"space\":\"{}\",\"id\":{},\"references\":{},\"cause\":\"{}\"}}",
-            dir_name(alias.space),
-            alias.id,
+            ",\"references\":{},\"cause\":\"{}\"}}",
             alias.references,
             alias.cause.name()
         );

@@ -189,6 +189,13 @@ pub mod quic;
 // the producer gate reads, and moving a type is not a reason to also move every
 // sentence about it.
 pub use wz_session_core::passive_messages as messages;
+/// R3012 (open-debt item 809) — the tracked capture of a compression-negotiated
+/// session with one intact batch and one the lz4 decoder refuses, and the oracle
+/// that keeps it a function of the encoders. Gated on `compression` because the
+/// batches are the compressor's output: a build without lz4 cannot produce them,
+/// and one that read them would say `undecompressible` for both.
+#[cfg(all(test, feature = "compression", feature = "network-codecs"))]
+mod compressed_capture_fixture;
 /// R311y617 (§1.1f) — the PAYLOAD sub-decoder: what is INSIDE a Put, judged
 /// against the encoding the sender declared rather than rendered on its word.
 ///
@@ -3401,7 +3408,9 @@ fn add_ws(h: &mut FramingHealth, a: ws::WsResyncAccounting) {
 /// R311y609 — fold one direction's sequence-number accounting into the total.
 fn add_sn(h: &mut FramingHealth, a: wz_session_core::passive::SnAccounting) {
     h.sn_frames += a.frames;
-    h.sn_missing += a.missing;
+    // Saturating, like the per-direction sum it folds: see
+    // `PassiveSession`'s accumulation of a gap.
+    h.sn_missing = h.sn_missing.saturating_add(a.missing);
     h.sn_gaps += a.gaps;
     h.sn_duplicates += a.duplicates;
     h.sn_out_of_window += a.out_of_window;
@@ -7280,7 +7289,7 @@ mod datagram_tests {
     /// entry, because `ext_chain::encode_ext_chain` sets the continuation `Z`
     /// bit on every entry BUT the last. `the_compression_offer_is_the_entry_
     /// the_ext_codec_names` is what keeps that reading honest.
-    fn compression_offer() -> Vec<u8> {
+    pub(crate) fn compression_offer() -> Vec<u8> {
         let entry: wz_codecs::ext_entry::ExtEntryOwned = wz_codecs::ext_entry::ExtEntryOwned {
             header: wz_session_core::ext_header::establishment_ext_id::COMPRESSION,
             body: wz_codecs::ext_entry::ExtEntryOwnedVariant::CodecZenohExtUnit(
@@ -7292,7 +7301,7 @@ mod datagram_tests {
 
     /// One `T_MID_INIT` datagram trailing `ext_bytes` as its chain, through the
     /// InitBody codec's own encode.
-    fn init_datagram(is_ack: bool, ext_bytes: &[u8]) -> Vec<u8> {
+    pub(crate) fn init_datagram(is_ack: bool, ext_bytes: &[u8]) -> Vec<u8> {
         let mut flags = 0u8;
         if is_ack {
             flags |= wz_codecs::wire_const::FLAG_T_INIT_A;
@@ -7323,7 +7332,7 @@ mod datagram_tests {
 
     /// One `T_MID_OPEN` datagram. INVERTED against Init: the cookie rides the
     /// SYN here, not the ACK.
-    fn open_datagram(is_ack: bool) -> Vec<u8> {
+    pub(crate) fn open_datagram(is_ack: bool) -> Vec<u8> {
         let mut flags = 0u8;
         if is_ack {
             flags |= wz_codecs::wire_const::FLAG_T_OPEN_A;
@@ -7339,6 +7348,97 @@ mod datagram_tests {
             .encode_to_vec(u8::from(is_ack)),
         );
         wire
+    }
+
+    /// One `T_MID_INIT` datagram that ANNOUNCES a sequence-number resolution:
+    /// the S flag set and `sn_res` as its byte. [`init_datagram`] leaves it out,
+    /// which makes the session's window the default (28 bits); a fixture that
+    /// needs the widest window has to say so on the wire.
+    fn init_datagram_resolving(is_ack: bool, sn_res: u8) -> Vec<u8> {
+        let mut flags = wz_codecs::wire_const::FLAG_T_INIT_S;
+        if is_ack {
+            flags |= wz_codecs::wire_const::FLAG_T_INIT_A;
+        }
+        let mut wire = alloc::vec![flags | wz_session_core::wire_const::T_MID_INIT];
+        let body = wz_codecs::init_body::InitBody {
+            version: 0x09,
+            cbyte: 0x31,
+            zid: &[0xAA; 4],
+            // The S flag announces BOTH size parameters: the resolution byte and
+            // the batch size travel together, and leaving one out makes the
+            // decoder read the next field's bytes as the missing one.
+            sn_res: Some(sn_res),
+            batch_size: Some(u16::MAX),
+            cookie_len: if is_ack { Some(0) } else { None },
+            cookie: if is_ack { Some(&[]) } else { None },
+        };
+        wire.extend_from_slice(&body.encode_to_vec(1, u8::from(is_ack)));
+        wire
+    }
+
+    /// `v` as zenoh's VLE: seven data bits per byte, the high bit continuing,
+    /// and the ninth byte of a 64-bit value carrying eight data bits unmasked.
+    fn vle_bytes(mut v: u64) -> Vec<u8> {
+        let mut out = Vec::new();
+        for _ in 0..8 {
+            let low = (v & 0x7F) as u8;
+            v >>= 7;
+            if v == 0 {
+                out.push(low);
+                return out;
+            }
+            out.push(low | 0x80);
+        }
+        out.push(v as u8);
+        out
+    }
+
+    /// R3011 — a capture whose session NEGOTIATED THE WIDEST SEQUENCE-NUMBER
+    /// WINDOW (63 bits), followed by reliable frames numbered `sns` in order.
+    ///
+    /// The window is what makes a gap's size a value the host cannot bound: at
+    /// 63 bits a single gap reaches 2^62 - 2, past the 2^53 a JSON number holds
+    /// exactly. The frame bodies are arbitrary; the sequence accounting reads
+    /// the frame's own number. With the file bytes, for the field document.
+    pub(crate) fn wide_sn_dissection_with_file(sns: &[u64]) -> (Dissection, Vec<u8>) {
+        // `seq_num_res` 3 is the 63-bit window; the request-id resolution
+        // rides the next two bits and is left at its default (2).
+        const SN_RES_63_BIT: u8 = 0x03 | (0x02 << 2);
+        let frame = |sn: u64| {
+            let mut wire = alloc::vec![
+                wz_session_core::wire_const::T_MID_FRAME | wz_codecs::wire_const::FLAG_T_FRAME_R
+            ];
+            wire.extend_from_slice(&vle_bytes(sn));
+            wire.extend_from_slice(&[0x1F, 0x00, 0x00, 0x00]);
+            wire
+        };
+        let mut messages = alloc::vec![
+            (true, init_datagram_resolving(false, SN_RES_63_BIT)),
+            (false, init_datagram_resolving(true, SN_RES_63_BIT)),
+            (true, open_datagram(false)),
+            (false, open_datagram(true)),
+        ];
+        for sn in sns {
+            messages.push((true, frame(*sn)));
+        }
+        let mut d = Dissection::new();
+        let mut packets: Vec<(u32, u32, Vec<u8>)> = Vec::new();
+        for (i, (from_low, message)) in messages.into_iter().enumerate() {
+            let packet = if from_low {
+                udp_packet([10, 0, 0, 1], 43210, [10, 0, 0, 2], 7447, &message)
+            } else {
+                udp_packet([10, 0, 0, 2], 7447, [10, 0, 0, 1], 43210, &message)
+            };
+            d.push_packet(LINKTYPE_ETHERNET, i, &packet);
+            packets.push((i as u32, 0, packet));
+        }
+        d.finish();
+        let refs: Vec<(u32, u32, &[u8])> = packets
+            .iter()
+            .map(|(s, u, b)| (*s, *u, b.as_slice()))
+            .collect();
+        let file = crate::pcap::write(LINKTYPE_ETHERNET, &refs);
+        (d, file)
     }
 
     /// One `T_MID_FRAME` datagram carrying `body` as its batch, at sn 0.
@@ -10489,6 +10589,40 @@ mod datagram_tests {
             alloc::vec![crate::report::VerdictReason::SnMissing],
             "one frame is enough to make the totals a floor, and it is the \
              whole of this verdict"
+        );
+    }
+
+    /// R3011 — THE GAP TOTAL SATURATES; IT DOES NOT WRAP OR PANIC.
+    ///
+    /// A gap is read off the wire as a distance in the session's window, and at
+    /// the widest window (63 bits) one gap reaches 2^62 - 2. Six of them sum past
+    /// `u64::MAX`, so a capture of seven frames could overflow the accumulator:
+    /// a panic in a build with overflow checks, a small wrong number without. The
+    /// total is a floor ("at least this many were lost") and a floor that cannot
+    /// grow further says so by sticking at the top.
+    ///
+    /// Red-first: both accumulators were plain `+=` before this round, and this
+    /// capture panicked the first.
+    #[test]
+    fn gaps_that_sum_past_the_top_of_u64_saturate() {
+        let mask = (1u64 << 63) - 1;
+        // The widest forward jump the window calls "ahead": half the ring.
+        let step = (1u64 << 62) - 1;
+        // Wrapping on purpose: the ring is modulo 2^63, which divides 2^64.
+        let sns: Vec<u64> = (0..7u64)
+            .map(|k| 1u64.wrapping_add(k.wrapping_mul(step)) & mask)
+            .collect();
+        let (d, _file) = wide_sn_dissection_with_file(&sns);
+        let fh = d.framing_health();
+        assert_eq!(
+            fh.sn_without_resolution, 0,
+            "the handshake must have resolved the numbering: {fh:?}"
+        );
+        assert_eq!(fh.sn_gaps, 6, "every jump is a gap of its own: {fh:?}");
+        assert_eq!(
+            fh.sn_missing,
+            u64::MAX,
+            "six gaps of 2^62 - 2 are more than a u64 holds: {fh:?}"
         );
     }
 

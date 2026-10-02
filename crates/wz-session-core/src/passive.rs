@@ -1982,7 +1982,12 @@ impl PassiveSession {
             SnVerdict::OutOfWindow => acc.out_of_window += 1,
             SnVerdict::Gap { missing } => {
                 acc.gaps += 1;
-                acc.missing += missing;
+                // A gap is a distance in the session's window, up to 2^62 - 2 at
+                // the widest, so a handful of them overflow the sum. The total
+                // is a floor ("at least this many were lost"), and a floor that
+                // cannot grow further sticks at the top rather than wrapping to
+                // a small wrong number or panicking.
+                acc.missing = acc.missing.saturating_add(missing);
             }
             _ => {}
         }

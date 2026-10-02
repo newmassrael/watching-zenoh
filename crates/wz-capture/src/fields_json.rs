@@ -2134,11 +2134,13 @@ fn push_session_row(row: &SessionRow, out: &mut String) {
         Some(sn) => {
             out.push_str("{\"verdict\":");
             escape_into(sn.verdict.name(), out);
+            // The number of sequence numbers the gap skipped. It is read off
+            // the wire as a distance in the session's SN window, which is as
+            // wide as 2^63 at a 64-bit resolution: no host limit bounds it, so
+            // it takes the shared integer door (a string past 2^53 - 1).
             out.push_str(",\"missing\":");
             match sn.missing {
-                Some(n) => {
-                    let _ = write!(out, "{n}");
-                }
+                Some(n) => wz_session_core::json::u64_into(n, out),
                 None => out.push_str("null"),
             }
             let _ = write!(
@@ -4456,6 +4458,39 @@ mod tests {
                     .collect()
             })
             .collect()
+    }
+
+    /// R3011 — A SEQUENCE GAP THAT A JSON NUMBER WOULD MISREAD IS A STRING.
+    ///
+    /// `sn.missing` is the number of sequence numbers a gap skipped, read off the
+    /// wire as a distance in the session's window. At the widest window (63
+    /// bits) that is up to 2^62 - 2, which no host limit bounds and a reader on
+    /// doubles cannot hold, so a gap past 2^53 - 1 is the digits in a string
+    /// and a small one stays a number. Both are asserted on the RAW text:
+    /// `scoped` strips quotes, so it cannot tell the two apart.
+    #[test]
+    fn a_gap_past_the_exact_integer_line_is_a_string_and_a_small_one_a_number() {
+        let wide = 1u64 << 60;
+        let (d, file) =
+            crate::datagram_tests::wide_sn_dissection_with_file(&[1, 1 + wide, 1 + wide + 2]);
+        assert_eq!(
+            d.framing_health().sn_without_resolution,
+            0,
+            "the handshake must have resolved the numbering"
+        );
+        let doc = fields_json(&d, &file, None, None);
+        assert!(
+            doc.contains("\"missing\":\"1152921504606846975\""),
+            "a gap of 2^60 - 1 is past the line: {doc}"
+        );
+        assert!(
+            doc.contains("\"missing\":1,"),
+            "a gap of one stays a bare number: {doc}"
+        );
+        assert!(
+            doc.contains("\"name\":\"fields\",\"revision\":23"),
+            "and the document says it moved: {doc}"
+        );
     }
 
     /// EVERY FRAGMENT ROW NAMES WHAT THE ROUTER DID WITH IT, and

@@ -3675,14 +3675,23 @@ fn push_json(field: &Field, out: &mut String) {
     out.push_str(field.value.kind_word());
     out.push('"');
     match &field.value {
+        // The two integer arms write through `json::u64_into`: a number up to
+        // 2^53 - 1, the same digits in a string beyond it. A `Uint` is a decoded
+        // protocol scalar and ranges over all of `u64` (an NTP64 timestamp, a
+        // 64-bit id, a VLE field), which a reader on doubles or on `int64`
+        // silently loses. `Bits` is at most one carrier byte and can never reach
+        // the line, but it takes the same door so that the rule has no exception
+        // for a reader to learn.
         FieldValue::Bits(v) => {
-            let _ = write!(out, ",\"value\":{v}");
+            out.push_str(",\"value\":");
+            crate::json::u64_into(*v, out);
         }
         FieldValue::Flag(b) => {
             let _ = write!(out, ",\"value\":{b}");
         }
         FieldValue::Uint(v) => {
-            let _ = write!(out, ",\"value\":{v}");
+            out.push_str(",\"value\":");
+            crate::json::u64_into(*v, out);
         }
         FieldValue::Bytes(b) => {
             out.push_str(",\"value\":\"");
@@ -9113,6 +9122,57 @@ mod tests {
         let rest = &json[at + opener.len()..];
         let end = rest.find('"').expect("the kind word is quoted");
         rest[..end].to_string()
+    }
+
+    /// The text a scalar field's `value` is written as: everything between the
+    /// `"value":` key and the closing brace of the field object.
+    fn value_text_on_the_wire(value: FieldValue) -> String {
+        use alloc::string::ToString as _;
+        let json = to_json(&Field {
+            name: "m".into(),
+            span: Span { start: 0, end: 1 },
+            value,
+        });
+        let opener = "\"value\":";
+        let at = json.find(opener).expect("a scalar field carries a value");
+        json[at + opener.len()..json.len() - 1].to_string()
+    }
+
+    /// A decoded integer is a bare number while every JSON reader holds it
+    /// exactly (up to 2^53 - 1) and its digits in a string beyond that.
+    ///
+    /// A `uint` ranges over all of `u64` -- an NTP64 timestamp, a 64-bit id, a
+    /// VLE scalar -- and a reader on doubles loses the low bits above 2^53 where
+    /// one on `int64` falls to its default above 2^63; both are silent. The
+    /// expectations are spelled out as the digits a reader sees, not read back
+    /// from the constant the writer compares against, and the line is probed on
+    /// BOTH sides so an off-by-one in either direction reddens.
+    ///
+    /// This one writer serves the field document, the analyzer and the C ABI's
+    /// transport-message door, which is why the rule is pinned here.
+    #[test]
+    fn a_uint_past_the_exact_integer_line_is_written_as_a_string() {
+        for (value, expected) in [
+            (0u64, "0"),
+            (9_007_199_254_740_991, "9007199254740991"),
+            (9_007_199_254_740_992, "\"9007199254740992\""),
+            (u64::MAX, "\"18446744073709551615\""),
+        ] {
+            assert_eq!(
+                value_text_on_the_wire(FieldValue::Uint(value)),
+                expected,
+                "uint {value}"
+            );
+        }
+        // `bits` is one carrier byte and can never reach the line; it takes the
+        // same door so that the rule has no exception for a reader to learn.
+        assert_eq!(value_text_on_the_wire(FieldValue::Bits(255)), "255");
+        assert_eq!(
+            value_text_on_the_wire(FieldValue::Bits(u64::MAX)),
+            "\"18446744073709551615\"",
+        );
+        // The kind word is unchanged: a consumer branches on it.
+        assert_eq!(kind_word_on_the_wire(FieldValue::Uint(u64::MAX)), "uint");
     }
 
     /// The kind vocabulary as MEASURED off the wire, in walk order -- written

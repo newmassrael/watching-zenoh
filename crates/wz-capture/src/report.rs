@@ -1360,7 +1360,7 @@ impl<'a> CaptureReport<'a> {
                         Some(zid) => alloc::format!("\"{}\"", zid_text(zid)),
                         None => "null".into(),
                     },
-                    interest.id,
+                    u64_json(interest.id),
                     match &interest.keyexpr {
                         // ESCAPED: a keyexpr is the attacker-influenced text
                         // this module's own doc names, and it reached this
@@ -1381,7 +1381,7 @@ impl<'a> CaptureReport<'a> {
                     // UNSOLICITED declaration is a contract state rather than
                     // an absent field.
                     match interest.solicited_by {
-                        Some(id) => alloc::format!("{id}"),
+                        Some(id) => u64_json(id),
                         None => "null".into(),
                     },
                 ));
@@ -1419,7 +1419,7 @@ impl<'a> CaptureReport<'a> {
                         wz_session_core::passive::Direction::A => "a",
                         wz_session_core::passive::Direction::B => "b",
                     },
-                    r.id,
+                    u64_json(r.id),
                     r.mode.name(),
                     r.answers,
                     r.mismatched.len(),
@@ -2659,7 +2659,7 @@ fn throughput_json(t: &ThroughputTable, s: &mut String) {
                 wz_session_core::passive::Direction::A => "A",
                 wz_session_core::passive::Direction::B => "B",
             },
-            u.id,
+            u64_json(u.id),
             u.references,
             u.cause.name()
         ));
@@ -2893,6 +2893,17 @@ fn mismatch_offset(m: &crate::payload::Mismatch) -> usize {
     }
 }
 
+/// `v` as the JSON value of an unsigned 64-bit integer that was read off the
+/// wire: a number while every reader holds it exactly, its digits in a string
+/// beyond 2^53 - 1. The allocating form of [`wz_session_core::json::u64_into`],
+/// for the emitters that build a field inside a `format!`. `opt_u64` below is for
+/// counters and millisecond spans, which the host bounds, and stays bare.
+fn u64_json(v: u64) -> String {
+    let mut out = String::new();
+    wz_session_core::json::u64_into(v, &mut out);
+    out
+}
+
 fn opt_u64(v: Option<u64>) -> String {
     match v {
         Some(v) => v.to_string(),
@@ -3009,7 +3020,10 @@ fn sequence_json(fr: &crate::FramingHealth, s: &mut String) {
         "{{\"frames\":{},\"missing\":{},\"gaps\":{},\
          \"duplicates\":{},\"out_of_window\":{},\"without_resolution\":{}}}",
         fr.sn_frames,
-        fr.sn_missing,
+        // The sum of the gaps the sequence numbers showed. A gap is read off the
+        // wire as a distance in the session's SN window, which is as wide as
+        // 2^63 at a 64-bit resolution, so nothing the host holds bounds it.
+        u64_json(fr.sn_missing),
         fr.sn_gaps,
         fr.sn_duplicates,
         fr.sn_out_of_window,
@@ -3779,6 +3793,27 @@ pub fn health_text(d: &crate::Dissection) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// R3011 — THE SEQUENCE GROUP'S GAP SUM FOLLOWS THE SAME INTEGER RULE.
+    ///
+    /// `missing` is the sum of the gaps the sequence numbers showed. Two frames
+    /// 2^60 apart and a third two on skip (2^60 - 1) + 1 = 2^60 numbers, past
+    /// the 2^53 a JSON number holds exactly, so it is the digits in a string; the
+    /// groups' counts beside it stay bare. Asserted on the raw text, with the
+    /// neighbours on both sides, so the group cannot change shape unnoticed.
+    #[test]
+    fn the_sequence_groups_gap_sum_is_a_string_past_the_exact_integer_line() {
+        let wide = 1u64 << 60;
+        let (d, _file) =
+            crate::datagram_tests::wide_sn_dissection_with_file(&[1, 1 + wide, 1 + wide + 2]);
+        let json = CaptureReport::of(&d).to_json();
+        assert!(
+            json.contains(
+                "\"sequence\":{\"frames\":3,\"missing\":\"1152921504606846976\",\"gaps\":2,"
+            ),
+            "{json}"
+        );
+    }
 
     /// R311y921 (open-debt item 379) — THIS WORKSPACE HAS ONE JSON ESCAPER.
     ///

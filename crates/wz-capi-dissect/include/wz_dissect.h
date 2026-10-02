@@ -441,6 +441,27 @@
  * so from revision 22 they count these records too: a capture whose only
  * refused samples were reassembled used to write both arrays empty.
  *
+ * ⚠ AN INTEGER A JSON NUMBER WOULD MISREAD IS A STRING (field document 23, and
+ * the same rule in the other documents below). A 64-bit integer that this
+ * library reads off the wire or off a clock is written as a bare number while
+ * every JSON reader holds it exactly, which is up to 2^53 - 1 (9007199254740991),
+ * and as the same digits in a string beyond that. A reader on doubles (a
+ * JavaScript `JSON.parse`, a `toDouble()`) loses the low bits above 2^53, and
+ * one on `int64` falls back to its default above 2^63; both are silent, and a
+ * wrong number is worse than a missing one. The line is 2^53 - 1 and not 2^63
+ * because it has to be safe for the narrowest reader. A cell that can reach it
+ * is therefore either a number or a string, and a consumer asks which before
+ * it reads; a cell below the line is a number exactly as before.
+ *
+ * It applies to a `uint` (and a `bits`) field's `value` in every field tree;
+ * to the `missing` of a row's `sn` and of the summary's `sequence` group; to
+ * the `id` and `solicited_by` values the census and the summary write for a
+ * declaration, an interest request and an unresolved alias; and to
+ * `oldest_ts_ns` in the retention document. It does NOT apply to counts,
+ * offsets, sizes and millisecond spans: those count things the host holds, and
+ * stay bare numbers. Revisions: fields 23, census 16, summary 5, retention 2.
+ * The gap total saturates at the top of `u64` instead of wrapping.
+ *
  * @values fields carried_state
  *
  * AND THE SESSION'S PER-FRAME VERDICTS, at field-document
@@ -592,7 +613,7 @@
  *
  * SO THE DOCUMENT CARRIES THE LIST. Its envelope reads
  *
- *     {"document":{"name":"census","revision":15,
+ *     {"document":{"name":"census","revision":16,
  *                  "planes":["exchanges","interests","keyexprs","nodes",
  *                            "payloads"]}, ...}
  *
@@ -638,11 +659,11 @@
  *
  * Every family in `value_families` now carries a `carries` axis:
  *
- *     {"name":"fields","revision":22,"key":"kind","values":[...],
+ *     {"name":"fields","revision":23,"key":"kind","values":[...],
  *      "carries":[{"word":"bits","shapes":[["end","name","start","value"]]},
  *                 {"word":"opaque","shapes":[["end","name","start"]]}, ...]}
  *
- *     {"name":"census","revision":15,"key":"mode","values":[...],
+ *     {"name":"census","revision":16,"key":"mode","values":[...],
  *      "carries":null}
  *
  * `null` is a VALUE here and not an absence: it says the word is a PASSENGER --
@@ -1561,7 +1582,7 @@ int wz_dissect_declarations_diagnose(const char *declarations, char **out);
  *
  * R2175 -- the document is at REVISION 3, and the fourth key is `value_families`:
  *
- *     "value_families":[{"name":"fields","revision":22,"key":"state",
+ *     "value_families":[{"name":"fields","revision":23,"key":"state",
  *                        "values":["decoded","encoding_mismatch",…]}, …]
  *
  * every key in every document whose VALUE this build draws from a closed set,
@@ -2443,6 +2464,11 @@ int wz_dissect_live_selection(wz_dissect_live *h, const char *selector,
  *              "fullest_window":{"messages":W,"stream_bytes":X},
  *              "oldest_ts_ns":T},
  *      "dropped_by_limits":{...}}
+ *
+ * T is nanoseconds since 1970, about 1.7e18 on a real clock: past 2^53, so from
+ * revision 2 it is a STRING of digits there and a bare number only while it is
+ * at most 9007199254740991; `null` still means no clock. See the integer rule
+ * under the field document.
  *
  * THERE IS NO SINGLE WINDOW, and the document says so rather than summing
  * scopes that share no ceiling. frames_per_flow bounds each flow's decoded

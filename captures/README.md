@@ -100,3 +100,88 @@ The refresher is `#[ignore]`d so that no CI run can rewrite the artifact it is
 meant to be checking, and it asserts nothing — the second command is what
 believes it. Commit the rewritten `.pcap` in the same commit as the change that
 moved it.
+
+## `compressed-session-refused-body.pcap`
+
+A session that **negotiated compression**, with two batches on it, of which the
+lz4 decoder opens one and refuses the other. It is the specimen of the field
+document's `carried_state: "undecompressible"`: the word says the batch's body
+could not be opened, and this is the only file here in which a body really is
+refused.
+
+| | |
+|---|---|
+| link type | 1 (`LINKTYPE_ETHERNET`) |
+| packets | **6**: four handshake datagrams, then two batches |
+| flow | one UDP flow, `10.0.0.1:43210` → `10.0.0.2:7447` for the initiator's packets |
+| handshake | both Inits carry the compression offer (establishment extension `0x6`), so the batch header is on the wire from the first batch on |
+| timestamps | 0.000000 onward, 1 ms apart |
+
+| packet | what it is | read as |
+|---|---|---|
+| 0, 1 | Init, InitAck, each offering compression | handshake rows |
+| 2, 3 | Open, OpenAck | handshake rows |
+| 4 | the compressor's output for a `Frame` (sequence number 0) carrying a literal `Push` of 240 bytes, unchanged | `carried_state` **`batch`** |
+| 5 | the same construction at sequence number 1, with **two bytes overwritten** | `carried_state` **`undecompressible`** |
+
+### The one broken spot, by name
+
+Packet 5's datagram payload is `[BatchHeader][lz4 block]`. The header is `0x01`
+(the body is lz4) and is intact. The damage is in the block: the **match offset
+of its first sequence**, the 2-byte little-endian field that follows the first
+run of literals, is overwritten with `ff ff`. An offset is the distance back
+into the output decoded so far, so `0xffff` reaches before the start of
+everything the block can have produced; no lz4 decoder can satisfy it, which
+makes the refusal a property of the format and not of this workspace's decoder.
+The position is read off the block's own first token (literal length, its
+extension bytes, the literals) rather than written as a constant; it falls at
+payload bytes 27 and 28 of this file. Nothing else differs from the intact twin
+at the same sequence number.
+
+### Why there are two batches
+
+A sample with only the damaged one cannot tell a reader that recognises a refused
+body from one that says `undecompressible` to anything after a compression offer.
+Packet 4 is the control: the same session, the same construction, undamaged, and
+it must read `batch`.
+
+### What a reader reports on it
+
+Read with a build that has lz4 (`wz-capi-dissect` does):
+
+* the field document has one row with `carried_state` `batch` and one with
+  `undecompressible`;
+* the census document's `undecompressible_batches` is **1**, and so is the
+  summary's, which is the number of rows that say `undecompressible`;
+* the summary's `unaccounted_batch_bytes` is the damaged batch's length (37),
+  because no message inside a refused batch can be located.
+
+⚠ A build **without** lz4 reads packet 4 as `undecompressible` as well. That is
+the honest answer for a reader that cannot open a compressed body, and it is why
+the word's definition above says "the lz4 decoder refused", not "compressed".
+
+### Where the bytes came from
+
+Nothing was written by hand: the handshake is the codecs' own Init and Open, the
+batches are `wz_session_core::compression::compress_batch` over
+`frame_encode::encode_frame_with_push` of `push_build::build_push_literal`, the
+damage is applied to the compressor's output at the position found above, and the
+container is `wz_capture::pcap::write`. Three tests in
+`crates/wz-capture/src/compressed_capture_fixture.rs` grade it:
+
+| test | what it settles |
+|---|---|
+| `the_tracked_compressed_capture_is_byte_identical_to_what_wz_emits` | the whole file equals what the encoders emit, byte for byte |
+| `the_tracked_compressed_capture_breaks_exactly_one_named_spot` | packet 4 opens to exactly the frame the encoder produced; packet 5 differs from its undamaged twin only inside the match offset, and is refused |
+| `the_tracked_compressed_capture_reaches_the_consumer_surface` | the two batches read as `batch` then `undecompressible`, and the three counts above agree |
+
+`scripts/lib/capture_provenance_gate.sh` runs them (under `--features
+compression,dissect`) on every push, beside the raweth set.
+
+### Regenerating
+
+```sh
+cargo test -p wz-capture --features compression,dissect --lib \
+  refresh_the_tracked_compressed_capture -- --ignored
+cargo test -p wz-capture --features compression,dissect --lib compressed_capture
+```

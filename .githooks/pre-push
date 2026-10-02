@@ -1579,6 +1579,8 @@ if ! bash scripts/lib/capture_provenance_gate.sh; then
     echo "          A capture is refreshed, never edited:" >&2
     echo "            cargo test -p wz-capture --lib \\" >&2
     echo "              refresh_the_tracked_raweth_capture -- --ignored" >&2
+    echo "            cargo test -p wz-capture --features compression,dissect \\" >&2
+    echo "              --lib refresh_the_tracked_compressed_capture -- --ignored" >&2
     echo "          then re-run the suite to grade it. See captures/README.md." >&2
     echo "          Bypass with \`git push --no-verify\` only for genuine hotfixes." >&2
     exit 1
