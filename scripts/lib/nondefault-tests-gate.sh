@@ -266,7 +266,17 @@ router-connect-reconcile,transport-link-tcp,transport-unicast|session_lifecycle_
     # MEASURED before widening, per this block's own rule: `cargo test -p
     # wz-capture --features dissect,fixtures` = 700 passed / 0 failed / 3
     # ignored, exactly two more than `dissect` alone.
-    "wz-capture|hook|dissect,fixtures|"
+    # R3013 — `compression` joins. R3012 added the tracked compressed-session
+    # capture and its four tests, which need the Lz4 arm that feature turns on
+    # (without it BOTH batches read `undecompressible`, so the intact twin would
+    # fail its own oracle). The leg stayed green because a leg only runs what its
+    # own list builds, and the census arm is what said so, hosted, on the push
+    # that added them:
+    #
+    #   nondefault-tests: FAIL -- wz-capture has 88 test(s) only a feature
+    #     build reaches; legs run 84 and SKIPS excuses 0, leaving 4 claimed by
+    #     NOTHING (all four in `compressed_capture_fixture`).
+    "wz-capture|hook|compression,dissect,fixtures|"
     "wz-mcu-session-acceptor|hook|buffer-pool-session-rx-slim,reassembly|"
     "wz-packet-socket|hook|tap|"
     # R2680 — widened from `rest-sse-subscribe` alone when `wz-rest` gained
