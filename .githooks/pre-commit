@@ -309,6 +309,43 @@ fi
 
 wz_home_path_pending 'pre-commit' ':' || exit 1
 
+# ─── Check 7: every committed lock still resolves (R3013) ──────────
+# grades: worktree
+#
+# The commit that moves a lock's SUBJECT owes the lock. Hosted Layer L ("every
+# committed Cargo.lock resolves") is the gate that says so, and it ran only
+# there: the default pre-push defers it, and the commit that moves the subject
+# touches neither lock, so nothing local can fail on it. MEASURED, R3009: the
+# SCE pin took libxml, bindgen and minijinja out of the crate graph, and two
+# standalone workspaces (`deploy/mcu-admin-node`, `deploy/zephyr-app/rust`)
+# kept locks that still listed them. Hosted Layer L went red on the push, and a
+# consumer's `cargo build --locked` of the first target failed with "cannot
+# update the lock file" -- found by them, not by a gate, a day later.
+#
+# The subject is: the `vendor/sce` pin (a gitlink, which `--name-only` lists as
+# the bare path), any manifest or lock, or the toolchain pin. The check runs
+# only when one is staged, so an ordinary commit pays nothing; when one is, the
+# layer costs about 5 s offline.
+#
+# `worktree` and not `index-content`, the distinction Check 4 records: `cargo
+# metadata` reads the CHECKOUT and has no index mode, so a partly staged lock
+# is graded by the file that is not being committed. Declared rather than
+# repaired, as Check 4's header says.
+staged_lock_subject=$(_staged_matching '(^vendor/sce$|(^|/)Cargo\.(toml|lock)$|^rust-toolchain)') || exit 1
+if [[ -n "$staged_lock_subject" ]]; then
+    lock_rc=0
+    lock_out="$(bash scripts/run-ci.sh --layer L 2>&1)" || lock_rc=$?
+    if (( lock_rc != 0 )); then
+        printf '%s\n' "$lock_out" | grep -E '^\s*L (FAIL|\./)|Layer L' >&2 || printf '%s\n' "$lock_out" >&2
+        echo "" >&2
+        echo "pre-commit: a lock, manifest or pin is staged and a committed Cargo.lock" >&2
+        echo "  no longer resolves against its manifests (Layer L, above)." >&2
+        echo "  Refresh each lock it names, in ITS directory, and stage it:" >&2
+        echo "    (cd <dir> && cargo update --workspace) && git add <dir>/Cargo.lock" >&2
+        exit 1
+    fi
+fi
+
 # ─── Check 4: Mnemosyne SSOT gate ──────────────────────────────────
 # grades: worktree
 #

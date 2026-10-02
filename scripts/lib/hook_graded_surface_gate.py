@@ -113,6 +113,11 @@ WORKTREE_CMD = (
     re.compile(r"cargo\s+clippy"),
     re.compile(r"mnemosyne-cli\s+validate-workspace"),
     re.compile(r"\brustfmt\b"),
+    # R3013 — Layer L resolves every committed Cargo.lock with `cargo metadata`,
+    # which reads the manifests and locks of the CHECKOUT and has no index mode.
+    # pre-commit Check 7 is the commit-time caller; a worktree declaration over
+    # this command is a true one.
+    re.compile(r"run-ci\.sh\s+--layer\s+L\b"),
 )
 
 
@@ -276,6 +281,12 @@ _CASES = [
      _sec("Check 1", "worktree", _FMT_TREE)),
     ("worktree declared with nothing to refute it", False,
      _sec("Check 1", "worktree", "echo hi\n")),
+    # R3013 — the lock-resolution layer reads the checkout, and only that layer:
+    # another layer's name does not count.
+    ("worktree declared over the lockfile layer", True,
+     _sec("Check 1", "worktree", "lock_out=\"$(bash scripts/run-ci.sh --layer L 2>&1)\"\n")),
+    ("worktree declared over a layer that is not the lockfile one", False,
+     _sec("Check 1", "worktree", "lock_out=\"$(bash scripts/run-ci.sh --layer M 2>&1)\"\n")),
     ("not-a-file, and it really is not", True,
      _sec("Check 1", "not-a-file", _IDENT)),
     ("not-a-file while touching the index", False,
