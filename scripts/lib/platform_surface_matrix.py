@@ -118,7 +118,7 @@ import sys
 import threading
 import time
 from dataclasses import dataclass, field
-from typing import Callable, Iterable, Mapping, TextIO
+from typing import Callable, Iterable, Mapping, Sequence, TextIO
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 import upstream_link_axis_gate as axis  # noqa: E402  the LinkKind population + pin root
@@ -1062,6 +1062,92 @@ def kill_tree(proc: subprocess.Popen[str]) -> None:
         pass
 
 
+#: How long `sample` watches one process of a stalled tree. Five seconds is enough for a
+#: thread blocked in a call to show the same frame at every tick; the selftest shortens
+#: it, because the stalled tree it builds does not need a real observation window.
+STALL_SAMPLE_S = 5
+
+
+def group_pids(ps_output: str, pgid: int) -> list[int]:
+    """The pids of process group `pgid`, from `ps -axo pid,pgid,command` output.
+
+    The leg leads a group of its own (`spawn_leg`), so the group is cargo and the
+    test binary it started. Pure so the selftest can drive it without a ps.
+    """
+    pids: list[int] = []
+    for line in ps_output.splitlines():
+        parts = line.split(None, 2)
+        if len(parts) >= 2 and parts[0].isdigit() and parts[1].isdigit() and int(parts[1]) == pgid:
+            pids.append(int(parts[0]))
+    return pids
+
+
+def stall_diagnostic_commands(host: str, pids: Sequence[int]) -> list[list[str]]:
+    """What to run, BEFORE the tree is killed, to learn where a stalled target stands.
+
+    A stalled target left only its last output line, and that line names a phase,
+    not a call: on macOS a pair-based serial test stood past its 240 s deadline
+    with every wz-level bound unreached, so the stall is a call that never returns
+    to the runtime, or a readiness that never arrives. Which of the two is
+    visible in a stack sample, and only before the process is gone.
+
+    macOS: `sample` (a stack of every thread) and `lsof` (the open descriptors, a
+    pty pair among them) for each process. Windows: the process and socket
+    tables, since no stack tool is installed on a hosted image. Linux: the process
+    listing. A host with less than a stack says so in the log instead of implying
+    one; `-ww` keeps BSD `ps` from cutting a command line at the window width.
+    """
+    listing = ["ps", "-ax", "-ww", "-o", "pid,ppid,pgid,stat,command"]
+    if host == "windows":
+        return [["tasklist", "/V"], ["netstat", "-ano"]]
+    if host != "macos":
+        return [listing]
+    cmds: list[list[str]] = [listing]
+    for pid in pids:
+        cmds.append(["sample", str(pid), str(STALL_SAMPLE_S), "-file", f"/tmp/wz-stall-{pid}.txt"])
+        cmds.append(["lsof", "-p", str(pid)])
+    return cmds
+
+
+def capture_stall(proc: subprocess.Popen[str], out: TextIO) -> None:
+    """Print where a stalled target stands, then return so the caller can kill it."""
+    host = _this_host()
+    out.write(f"\n  platform-surface-matrix: STALL DIAGNOSTICS ({host}) -- the target is about to be killed\n")
+    out.flush()
+    pids: list[int] = []
+    if os.name != "nt":
+        try:
+            listing = subprocess.run(
+                ["ps", "-ax", "-ww", "-o", "pid,pgid,command"],
+                capture_output=True, text=True, timeout=20, check=False,
+            ).stdout
+            pids = group_pids(listing, proc.pid)
+        except (OSError, subprocess.SubprocessError) as e:
+            out.write(f"  (could not list the process group: {e})\n")
+    cmds = stall_diagnostic_commands(host, pids)
+    if not cmds:
+        out.write(f"  (no stall diagnostic is defined for {host})\n")
+    for cmd in cmds:
+        out.write(f"  $ {' '.join(cmd)}\n")
+        out.flush()
+        try:
+            res = subprocess.run(cmd, capture_output=True, text=True, timeout=60, check=False)
+            text = (res.stdout or "") + (res.stderr or "")
+        except (OSError, subprocess.SubprocessError) as e:
+            text = f"(failed: {e})\n"
+        out.write(text if text.endswith("\n") or not text else text + "\n")
+        if cmd[0] == "sample":
+            path = cmd[-1]
+            try:
+                with open(path, encoding="utf-8", errors="replace") as f:
+                    out.write(f.read())
+            except OSError as e:
+                out.write(f"(no sample file: {e})\n")
+        out.flush()
+    out.write("  platform-surface-matrix: END STALL DIAGNOSTICS\n")
+    out.flush()
+
+
 def run_bounded(
     cmd: list[str],
     cwd: str,
@@ -1084,6 +1170,11 @@ def run_bounded(
 
     def expire() -> None:
         fired.set()
+        # Look BEFORE the kill: a killed tree has no stack to sample.
+        try:
+            capture_stall(proc, out)
+        except Exception as e:  # a diagnostic must never keep the kill from happening
+            out.write(f"  (stall diagnostics failed: {e})\n")
         kill_tree(proc)
 
     timer = threading.Timer(deadline_s, expire) if deadline_s is not None else None
@@ -1370,7 +1461,27 @@ def _this_host() -> str:
     return sys.platform
 
 
-def run(host: str) -> int:
+def select_targets(leg: Leg, only: Sequence[str]) -> tuple[Leg | None, str]:
+    """The leg narrowed to `only`, or why it cannot be.
+
+    A narrowed leg is for DIAGNOSIS: isolating one stalling target so its stack
+    sample is not drowned by its neighbours, and so a retry costs one target and
+    not the leg. It never stands for the leg, and `run` says so in its verdict.
+    A name the leg does not run is refused: a typo that silently selected nothing
+    would pass a run that executed nothing.
+    """
+    unknown = [t for t in only if t not in leg.targets]
+    if unknown:
+        return None, (
+            f"the {leg.host} leg does not run {', '.join(unknown)}; it runs {', '.join(leg.targets)}"
+        )
+    kept = [t for t in leg.targets if t in only]
+    if not kept:
+        return None, "--only named no target"
+    return Leg(leg.host, kept, leg.features, leg.deferred), ""
+
+
+def run(host: str, only: Sequence[str] = ()) -> int:
     if host not in LEG_HOSTS:
         print(f"platform-surface-matrix: no leg is declared for `{host}` (legs: {LEG_HOSTS})")
         return 2
@@ -1389,6 +1500,13 @@ def run(host: str) -> int:
     if rc != 0:
         return rc
     leg = legs[host]
+    full_targets = len(leg.targets)
+    if only:
+        narrowed, why = select_targets(leg, only)
+        if narrowed is None:
+            print(f"platform-surface-matrix: {why}")
+            return 2
+        leg = narrowed
     cwd = str(ROOT / "crates")
     build = leg_build_command(leg)
     print(f"  platform-surface-matrix: {host} leg: {' '.join(build)}", flush=True)
@@ -1415,6 +1533,13 @@ def run(host: str) -> int:
         for f in got:
             print(f"  {f}")
         return 1
+    if only:
+        print(
+            f"  platform-surface-matrix: {host} leg PARTIAL: {len(leg.targets)} of {full_targets} "
+            f"target(s) passed ({', '.join(leg.targets)}); a narrowed run is a diagnosis and proves "
+            f"nothing about the other {full_targets - len(leg.targets)}"
+        )
+        return 0
     print(f"  platform-surface-matrix: {host} leg: all {len(leg.targets)} target(s) passed")
     for d in leg.deferred:
         print(f"  platform-surface-matrix: {host} leg DID NOT EXECUTE {d}")
@@ -1434,6 +1559,8 @@ def _hosts(expr: str) -> frozenset[str]:
 
 
 def selftest() -> int:
+    global STALL_SAMPLE_S
+    sample_window = STALL_SAMPLE_S
     failures: list[str] = []
 
     def expect(label: str, got: object, want: object) -> None:
@@ -1693,12 +1820,48 @@ def selftest() -> int:
          "--test", "b_e2e", "--", "--nocapture"],
     )
 
+    # stall diagnostics: which pids are the leg's, and what each host is asked to show
+    listing = (
+        "  PID  PGID COMMAND\n"
+        "  100   100 cargo test\n"
+        "  101   100 /x/deps/serial_link_e2e-1 --nocapture\n"
+        "  102   200 an unrelated process\n"
+        "  103   1001 a group whose id merely starts with 100\n"
+        "not a row\n"
+    )
+    expect("the leg's group", group_pids(listing, 100), [100, 101])
+    expect("no group", group_pids(listing, 999), [])
+    mac = stall_diagnostic_commands("macos", [100, 101])
+    expect("macos samples every process of the group", [c[0] for c in mac], ["ps", "sample", "lsof", "sample", "lsof"])
+    expect(
+        "macos sample is bounded and named",
+        mac[1],
+        ["sample", "100", str(STALL_SAMPLE_S), "-file", "/tmp/wz-stall-100.txt"],
+    )
+    expect("the listing is not cut at the window width", "-ww" in mac[0], True)
+    expect("linux lists processes only", [c[0] for c in stall_diagnostic_commands("linux", [100])], ["ps"])
+    expect(
+        "windows shows the process and socket tables",
+        [c[0] for c in stall_diagnostic_commands("windows", [])],
+        ["tasklist", "netstat"],
+    )
+
+    # a narrowed leg: only what the leg runs, in the leg's order, and a typo is refused
+    full = Leg("macos", ["a_e2e", "b_e2e", "c_e2e"], frozenset({"f"}), ["d"])
+    narrowed, why = select_targets(full, ["c_e2e", "a_e2e"])
+    expect("narrowed targets keep the leg's order", (narrowed.targets if narrowed else None, why), (["a_e2e", "c_e2e"], ""))
+    expect("narrowing keeps features and deferrals", (narrowed.features, narrowed.deferred) if narrowed else None, (frozenset({"f"}), ["d"]))
+    narrowed, why = select_targets(full, ["a_e2e", "typo_e2e"])
+    expect("a typo selects nothing", narrowed, None)
+    refused("a typo is named", [why], "does not run typo_e2e")
+
     # a target that stalls is ended with its whole tree at its deadline, and one that
     # finishes is left alone. The stalled one is a child that starts a grandchild
     # holding the same pipe, the shape of cargo and the test binary it started: ending
     # only the child would leave the relay waiting on the grandchild.
     if os.name != "nt":
         py = sys.executable
+        STALL_SAMPLE_S = 1  # a real observation window would only slow the fixture
         tree = (
             "import subprocess, sys, time\n"
             "print('before', flush=True)\n"
@@ -1706,12 +1869,20 @@ def selftest() -> int:
             "time.sleep(25)\n"
         )
         began = time.monotonic()
-        stalled, _rc, hung = run_bounded([py, "-c", tree], str(ROOT), os.environ, 1.0, io.StringIO())
+        stall_log = io.StringIO()
+        stalled, _rc, hung = run_bounded([py, "-c", tree], str(ROOT), os.environ, 1.0, stall_log)
         expect(
             "a stalled tree is ended at its deadline",
             (hung, stalled, time.monotonic() - began < 15),
             (True, ["before"], True),
         )
+        # ...and it is LOOKED AT first: the banner is in the log before the tree is gone,
+        # and on a unix host the process listing names the stalled interpreter.
+        logged = stall_log.getvalue()
+        expect("the stall is looked at before the kill", "STALL DIAGNOSTICS" in logged, True)
+        expect("the stall diagnostics end cleanly", "END STALL DIAGNOSTICS" in logged, True)
+        expect("the listing names the stalled tree", "time.sleep(25)" in logged, True)
+        STALL_SAMPLE_S = sample_window
         done, done_rc, done_hung = run_bounded(
             [py, "-c", "import sys\nprint('a')\nprint('b')\nsys.exit(3)\n"],
             str(ROOT), os.environ, 30.0, io.StringIO(),
@@ -1737,14 +1908,24 @@ def main(argv: list[str]) -> int:
     mode.add_argument("--legs", metavar="HOST", help="print HOST's leg command without running it")
     mode.add_argument("--run", metavar="HOST", help="run HOST's leg; must be run ON that host")
     ap.add_argument("--require", action="store_true", help="the upstream arm must run")
+    ap.add_argument(
+        "--only",
+        metavar="TARGET[,TARGET...]",
+        help="with --run: run only these targets of the leg (a diagnosis, reported PARTIAL)",
+    )
     args = ap.parse_args(argv)
+    if args.only is not None and not args.run:
+        ap.error("--only narrows a run; it needs --run HOST")
+    only = [t for t in (args.only or "").split(",") if t]
+    if args.only is not None and not only:
+        ap.error("--only named no target")
     if args.selftest:
         return selftest()
     if args.check:
         return check(args.require)[2]
     host = (args.legs or args.run).lower()
     if args.run:
-        return run(host)
+        return run(host, only)
     _tree, legs, rc = check(require=False, quiet=True)
     if rc != 0 or host not in legs:
         return rc or 2
