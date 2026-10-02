@@ -71,46 +71,41 @@ env:
   RUST_BACKTRACE: 1
 
 jobs:
-  plan:
-    name: plan
-    runs-on: ubuntu-22.04
-    timeout-minutes: 5
-    outputs:
-      hosts: ${{ steps.pick.outputs.hosts }}
-    steps:
-      - name: Pick the hosts
-        id: pick
-        env:
-          WZ_HOST: ${{ inputs.host }}
-        run: |
-          case "${WZ_HOST:-both}" in
-            both)    hosts='["macos-latest","windows-latest"]' ;;
-            macos)   hosts='["macos-latest"]' ;;
-            windows) hosts='["windows-latest"]' ;;
-            *)       echo "unknown host: ${WZ_HOST}" >&2; exit 1 ;;
-          esac
-          echo "hosts=${hosts}" >> "$GITHUB_OUTPUT"
-
   leg:
     name: leg (${{ matrix.os }})
-    needs: plan
     runs-on: ${{ matrix.os }}
     timeout-minutes: 30
     strategy:
       # Each host is its own signal: a macOS stall must not hide the Windows result.
       fail-fast: false
       matrix:
-        os: ${{ fromJSON(needs.plan.outputs.hosts) }}
+        include:
+          - os: macos-latest
+            host: macos
+          - os: windows-latest
+            host: windows
+    env:
+      # Which hosts a dispatch asked for, decided WITHOUT a job of its own. This lane
+      # used to open with a Linux `plan` job that picked the matrix; the first runs
+      # showed why that was wrong: the Linux pool is the one the full CI saturates
+      # (22 jobs a push), so the lane meant to answer in minutes waited behind it
+      # for over ten, to choose between two hosts that never needed Linux. A push
+      # selects both; a dispatch selects what `host` names. An unselected host's job
+      # still takes a runner for the seconds it needs to skip its steps.
+      WZ_HOST_SELECTED: ${{ (inputs.host == '' || inputs.host == 'both' || inputs.host == matrix.host) && 'true' || 'false' }}
     steps:
       - name: Checkout (with submodules)
+        if: ${{ env.WZ_HOST_SELECTED == 'true' }}
         uses: actions/checkout@v4
         with:
           submodules: recursive
 
       - name: Install Rust toolchain (pinned by rust-toolchain.toml)
+        if: ${{ env.WZ_HOST_SELECTED == 'true' }}
         run: rustup show
 
       - name: Cache Cargo registry + build artifacts
+        if: ${{ env.WZ_HOST_SELECTED == 'true' }}
         uses: Swatinem/rust-cache@v2
         with:
           # This lane is read while it is red; a cache saved only on success
@@ -121,6 +116,7 @@ jobs:
             vendor/sce -> target
 
       - name: Set up Python (the platform-surface matrix gate is python)
+        if: ${{ env.WZ_HOST_SELECTED == 'true' }}
         uses: actions/setup-python@v5
         with:
           python-version: "3.12"
@@ -129,6 +125,7 @@ jobs:
         # The gate's own verdicts, driven on the host the leg will run on: the
         # process-tree handling and the stall diagnostics are the parts whose
         # behaviour differs per host, and the Linux lanes cannot see them.
+        if: ${{ env.WZ_HOST_SELECTED == 'true' }}
         timeout-minutes: 5
         shell: bash
         run: python scripts/lib/platform_surface_matrix.py --selftest
@@ -137,6 +134,7 @@ jobs:
         # `RUNNER_OS` is lower-cased with `tr`: macOS ships bash 3.2, which has
         # no `${var,,}`. The dispatch input travels through the environment, not
         # through the script text.
+        if: ${{ env.WZ_HOST_SELECTED == 'true' }}
         timeout-minutes: 20
         shell: bash
         env:
@@ -171,7 +169,7 @@ jobs:
       # (`!cancelled()`): the first run skipped it on macOS behind the serial stall
       # and so said nothing about macOS multicast.
       - name: multicast on this host, observed (gates nothing yet)
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && env.WZ_HOST_SELECTED == 'true' }}
         timeout-minutes: 12
         continue-on-error: true
         shell: bash
