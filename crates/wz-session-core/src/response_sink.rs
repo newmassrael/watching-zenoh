@@ -43,7 +43,7 @@
 //! grab-bag union.
 
 #[cfg(feature = "codec-response")]
-use wz_codecs::response::ResponseOwned;
+use crate::wire::ResponseOwned;
 
 /// Outbound sink for the queryable reply chain. The application-layer
 /// observer drains its staged `QueryReply` records (and the matching

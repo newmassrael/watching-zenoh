@@ -175,7 +175,7 @@ use crate::sync::Mutex;
 /// because the trimmed meta pins `timeout_ms` to its `0` default, and
 /// `query_value` asserts nothing.
 #[cfg(all(feature = "query-get", feature = "query-queryable"))]
-fn build_loopback_query(opts: &QueryOptions) -> wz_codecs::query::QueryOwned {
+fn build_loopback_query(opts: &QueryOptions) -> wz_session_core::wire::parts::QueryOwned {
     // Carry only the queryable-observable Query-body slots (parameters +
     // value / source_info / attachment); target / consolidation / timeout stay
     // at their `Default` sentinels. R311y321 review — this comment used to call

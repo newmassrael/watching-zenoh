@@ -77,7 +77,16 @@ fn zenoh_pico_encode_push_default() -> Vec<u8> {
 // wz-proves: codec-push codec-parity partial
 #[test]
 fn layer3_push_default_byte_equivalent() {
-    let wz = Push::default().encode_to_vec();
+    // A bare `Push::default()` is no longer an encodable Put: the payload is
+    // gated on the extension chain (`msg_put.scxml`), so the default names
+    // neither layout and the encoder refuses it. The shape pico's encoder is
+    // driven with here is a Put with an EMPTY inline payload, so say that.
+    let mut push = Push::default();
+    if let wz_codecs::push::PushVariant::CodecZenohMsgPut(put) = &mut push.body {
+        put.payload_len = Some(0);
+        put.payload = Some(&[]);
+    }
+    let wz = push.encode_to_vec();
     let pico = zenoh_pico_encode_push_default();
     assert_eq!(
         wz, pico,

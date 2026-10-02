@@ -86,6 +86,7 @@
 
 use alloc::vec::Vec;
 
+use sce_forge_runtime::codec::CodecStorage;
 #[cfg(feature = "codec-declare")]
 use wz_codecs::declare::DeclareOwned;
 use wz_codecs::ext_entry::{ExtEntryOwned, ExtEntryOwnedVariant};
@@ -119,7 +120,7 @@ pub const QOS_DECLARE: QosLevel =
 /// Build the `ext_qos` extension entry carrying `qos`. Terminal header (the
 /// caller's chain normalisation via [`ext_nodeid::apply_chain_z_bits`] sets the
 /// continuation bit if another entry follows).
-pub fn qos_ext(qos: QosLevel) -> ExtEntryOwned {
+pub fn qos_ext<S: CodecStorage>(qos: QosLevel) -> ExtEntryOwned<S> {
     ExtEntryOwned {
         header: QOS_EXT_HEADER,
         body: ExtEntryOwnedVariant::CodecZenohExtZint(ExtZint {
@@ -164,7 +165,7 @@ pub fn declare_envelope_extensions() -> Vec<ExtEntryOwned> {
 ///
 /// Carrier-agnostic because the chain is: the two public readers below differ
 /// only in which struct's field they hand over.
-fn read_qos_chain(exts: Option<&Vec<ExtEntryOwned>>) -> QosLevel {
+fn read_qos_chain<S: CodecStorage>(exts: Option<&Vec<ExtEntryOwned<S>>>) -> QosLevel {
     ext_nodeid::read_z64_ext(exts, QOS_EXT_ID)
         .map(|v| QosLevel::from_raw(v as u8))
         .unwrap_or(QosLevel::DEFAULT)
@@ -178,7 +179,11 @@ fn read_qos_chain(exts: Option<&Vec<ExtEntryOwned>>) -> QosLevel {
 /// The header byte is passed in rather than the message, because WHICH header
 /// carries the bit is the only thing the Declare and Interest arms do not
 /// share; everything above it does, which is why it is one function.
-fn set_qos_chain(exts: &mut Option<Vec<ExtEntryOwned>>, header: &mut u8, qos: QosLevel) {
+fn set_qos_chain<S: CodecStorage>(
+    exts: &mut Option<Vec<ExtEntryOwned<S>>>,
+    header: &mut u8,
+    qos: QosLevel,
+) {
     let value = if qos == QosLevel::DEFAULT {
         None
     } else {
@@ -227,7 +232,7 @@ pub fn set_declare_qos(declare: &mut DeclareOwned, qos: QosLevel) {
 /// `QoSType::REQUEST`, whose `Block` makes it non-DEFAULT, so the reply
 /// carries the extension too.
 #[cfg(feature = "codec-request")]
-pub fn read_request_qos(request: &wz_codecs::request::RequestOwned) -> QosLevel {
+pub fn read_request_qos(request: &crate::wire::RequestOwned) -> QosLevel {
     read_qos_chain(request.extensions.as_ref())
 }
 
@@ -236,7 +241,7 @@ pub fn read_request_qos(request: &wz_codecs::request::RequestOwned) -> QosLevel 
 /// `priority` label is the message's own band
 /// (`zenoh/src/net/routing/dispatcher/stats.rs` @ `self.ext_qos.get_priority()`).
 #[cfg(feature = "codec-push")]
-pub fn read_push_qos(push: &wz_codecs::push::PushOwned) -> QosLevel {
+pub fn read_push_qos(push: &crate::wire::PushOwned) -> QosLevel {
     read_qos_chain(push.extensions.as_ref())
 }
 
@@ -260,7 +265,7 @@ pub fn read_oam_qos(oam: &wz_codecs::oam::OamOwned) -> QosLevel {
 /// not; [`relay_response`](crate::response_build::relay_response) now stamps
 /// it through [`set_response_qos`].
 #[cfg(feature = "codec-response")]
-pub fn read_response_qos(response: &wz_codecs::response::ResponseOwned) -> QosLevel {
+pub fn read_response_qos(response: &crate::wire::ResponseOwned) -> QosLevel {
     read_qos_chain(response.extensions.as_ref())
 }
 
@@ -278,7 +283,7 @@ pub fn read_response_qos(response: &wz_codecs::response::ResponseOwned) -> QosLe
 /// upstream router emits. Receivers accept either order; the bytes are what
 /// a capture compares.
 #[cfg(feature = "codec-response")]
-pub fn set_response_qos(response: &mut wz_codecs::response::ResponseOwned, qos: QosLevel) {
+pub fn set_response_qos(response: &mut crate::wire::ResponseOwned, qos: QosLevel) {
     let exts = &mut response.extensions;
     if let Some(list) = exts.as_mut() {
         list.retain(|e| ext_nodeid::ext_id(e.header) != QOS_EXT_ID);

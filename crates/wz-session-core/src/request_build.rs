@@ -29,19 +29,22 @@ use alloc::string::{String, ToString};
 // module, which carries its own `use alloc::vec`).
 use alloc::vec::Vec;
 
-use wz_codecs::ext_entry::{ExtEntryOwned, ExtEntryOwnedVariant};
-use wz_codecs::ext_zbuf::ExtZbufOwned;
 use wz_codecs::ext_zint::ExtZint;
-use wz_codecs::query::QueryOwned;
-use wz_codecs::request::{RequestOwned, RequestOwnedVariant};
-use wz_codecs::timestamp::TimestampOwned;
-use wz_codecs::wireexpr::{WireexprOwned, WireexprOwnedVariant};
-use wz_codecs::wireexpr_local::WireexprLocalOwned;
 
-use crate::codec_owned::{owned_bytes, owned_string};
+// R3011 — a Request is built at the wire profile (`crate::wire`), the type a
+// receive path hands to the registries, so the part types and the two byte/text
+// constructors are the wire-profile ones. The constructors keep the names the
+// default-profile helpers have in `codec_owned`: what they build is the same
+// kind of field, at the profile the message is on.
 use crate::qos::{CongestionControl, Priority};
 use crate::query_mode::{ConsolidationMode, QueryTarget, TARGET_EXT_ID};
 use crate::request_routing_context::TIMEOUT_EXT_ID;
+use crate::wire::parts::{
+    ExtEntryOwned, ExtEntryOwnedVariant, ExtZbufOwned, QueryOwned, TimestampOwned,
+    WireexprLocalOwned, WireexprOwned, WireexprOwnedVariant,
+};
+use crate::wire::{wire_bytes as owned_bytes, wire_string as owned_string};
+use crate::wire::{RequestOwned, RequestOwnedVariant};
 use sce_forge_runtime::codec::CodecError;
 
 /// R121j-1 — build a `Request` network-message that carries a

@@ -68,7 +68,14 @@ fn declare_dispatch_does_not_swallow_subsequent_records() {
     // against the "unknown body length" failure mode that
     // `NetworkMessage::Unknown` is documented to avoid.
     let mut wire = Vec::new();
-    wire.extend_from_slice(&Push::default().encode_to_vec());
+    // A bare default Put is not encodable (its payload is gated on the extension
+    // chain), so the Push in the batch carries an explicit empty inline payload.
+    let mut push = Push::default();
+    if let wz_codecs::push::PushVariant::CodecZenohMsgPut(put) = &mut push.body {
+        put.payload_len = Some(0);
+        put.payload = Some(&[]);
+    }
+    wire.extend_from_slice(&push.encode_to_vec());
     wire.extend_from_slice(&Declare::default().encode_to_vec());
     wire.extend_from_slice(&ResponseFinal::default().encode_to_vec());
 

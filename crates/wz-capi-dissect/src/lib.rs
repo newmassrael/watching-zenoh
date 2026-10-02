@@ -4317,8 +4317,8 @@ mod tests {
                 header: wz_codecs::push::Push::default().header | wz_codecs::wire_const::FLAG_N_N,
                 keyexpr: literal("demo/temp"),
                 body: wz_codecs::push::PushVariant::CodecZenohMsgPut(wz_codecs::msg_put::MsgPut {
-                    payload_len: 5,
-                    payload: b"hello",
+                    payload_len: Some(5),
+                    payload: Some(b"hello"),
                     ..Default::default()
                 }),
                 ..Default::default()
@@ -4347,8 +4347,8 @@ mod tests {
             body: wz_codecs::response::ResponseVariant::CodecZenohReply(wz_codecs::reply::Reply {
                 body: wz_codecs::reply::ReplyVariant::CodecZenohMsgPut(
                     wz_codecs::msg_put::MsgPut {
-                        payload_len: 6,
-                        payload: b"answer",
+                        payload_len: Some(6),
+                        payload: Some(b"answer"),
                         ..Default::default()
                     },
                 ),
@@ -4838,8 +4838,8 @@ mod tests {
             header: wz_codecs::push::Push::default().header | wz_codecs::wire_const::FLAG_N_N,
             keyexpr: literal("demo/temp"),
             body: wz_codecs::push::PushVariant::CodecZenohMsgPut(wz_codecs::msg_put::MsgPut {
-                payload_len: 5,
-                payload: b"hello",
+                payload_len: Some(5),
+                payload: Some(b"hello"),
                 ..Default::default()
             }),
             ..Default::default()
@@ -6107,8 +6107,8 @@ mod tests {
                 header: wz_codecs::push::Push::default().header | wz_codecs::wire_const::FLAG_N_N,
                 keyexpr: literal("demo/sensor"),
                 body: wz_codecs::push::PushVariant::CodecZenohMsgPut(wz_codecs::msg_put::MsgPut {
-                    payload_len: 3,
-                    payload: &[0x08, 0x96, 0x01],
+                    payload_len: Some(3),
+                    payload: Some(&[0x08, 0x96, 0x01]),
                     ..Default::default()
                 }),
                 ..Default::default()
@@ -6176,8 +6176,8 @@ mod tests {
                         schema_len: None,
                         schema: None,
                     }),
-                    payload_len: payload.len() as u64,
-                    payload,
+                    payload_len: Some(payload.len() as u64),
+                    payload: Some(payload),
                     ..Default::default()
                 }),
                 ..Default::default()

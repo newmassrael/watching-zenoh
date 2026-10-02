@@ -22,9 +22,8 @@
 
 use alloc::vec::Vec;
 
-use crate::codec_owned::owned_bytes;
 use crate::vle::encode_vle_u64_into;
-use sce_forge_runtime::codec::CodecError;
+use sce_forge_runtime::codec::{CodecError, CodecStorage, SceByteBuf};
 use wz_codecs::ext_entry::{ExtEntryOwned, ExtEntryOwnedVariant};
 use wz_codecs::ext_zbuf::ExtZbufOwned;
 
@@ -79,17 +78,17 @@ pub const SOURCE_INFO_EXT_ID: u8 = 0x01;
 /// (`crate::ext_nodeid::apply_chain_z_bits` for body chains, the per-builder
 /// finalize loop for Query / Err); this helper emits the entry with `Z` clear.
 /// Fallible (the owned ext-zbuf copy; unbounded under `alloc`).
-pub fn encode_source_info_ext_entry(
+pub fn encode_source_info_ext_entry<S: CodecStorage>(
     zid: &[u8],
     eid: u32,
     sn: u32,
-) -> Result<ExtEntryOwned, CodecError> {
+) -> Result<ExtEntryOwned<S>, CodecError> {
     let value = encode_source_info_ext_body(zid, eid, sn);
     Ok(ExtEntryOwned {
         header: SOURCE_INFO_EXT_HEADER_ENC_ZBUF | SOURCE_INFO_EXT_ID,
         body: ExtEntryOwnedVariant::CodecZenohExtZbuf(ExtZbufOwned {
             value_len: value.len() as u64,
-            value: owned_bytes(&value)?,
+            value: <S::Bytes<32> as SceByteBuf>::from_slice(&value)?,
         }),
     })
 }
@@ -156,7 +155,9 @@ mod tests {
     /// body), so the `0x40 | 0x01` header is no longer re-hand-rolled per site.
     #[test]
     fn encode_source_info_ext_entry_wraps_value_in_enc_zbuf_envelope() {
-        let entry = encode_source_info_ext_entry(&[0xDE, 0xAD], 0x80, 0x4000).unwrap();
+        let entry =
+            encode_source_info_ext_entry::<crate::wire::WireStorage>(&[0xDE, 0xAD], 0x80, 0x4000)
+                .unwrap();
         // ENC_ZBUF(0x40) | source_info id(0x01); no M flag, Z clear.
         assert_eq!(entry.header, 0x41);
         match entry.body {

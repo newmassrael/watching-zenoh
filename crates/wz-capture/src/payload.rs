@@ -1436,8 +1436,8 @@ use crate::agg::carries_shm_marker;
 fn carried_payload(
     message: &wz_session_core::network_message::NetworkMessage,
 ) -> Option<(
-    &wz_codecs::wireexpr::WireexprOwnedVariant,
-    Option<&wz_codecs::encoding::EncodingOwned>,
+    &wz_session_core::wire::parts::WireexprOwnedVariant,
+    Option<&wz_session_core::wire::parts::EncodingOwned>,
     &[u8],
     bool,
 )> {
@@ -1450,11 +1450,11 @@ fn carried_payload(
     // A free fn rather than a closure: the two borrows must carry the CALLER's
     // lifetime, and a closure's inferred one is tied to the call.
     fn put<'a>(
-        k: &'a wz_codecs::wireexpr::WireexprOwnedVariant,
-        p: &'a wz_codecs::msg_put::MsgPutOwned,
+        k: &'a wz_session_core::wire::parts::WireexprOwnedVariant,
+        p: &'a wz_session_core::wire::parts::MsgPutOwned,
     ) -> (
-        &'a wz_codecs::wireexpr::WireexprOwnedVariant,
-        Option<&'a wz_codecs::encoding::EncodingOwned>,
+        &'a wz_session_core::wire::parts::WireexprOwnedVariant,
+        Option<&'a wz_session_core::wire::parts::EncodingOwned>,
         &'a [u8],
         bool,
     ) {
@@ -1776,7 +1776,6 @@ pub(crate) mod tests_support {
                 extensions: Some(core::iter::once(foreign).collect()),
                 payload_len: payload.len() as u64,
                 payload,
-                ..Default::default()
             }),
             ..Default::default()
         }

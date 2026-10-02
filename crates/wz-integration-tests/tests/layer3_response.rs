@@ -73,7 +73,17 @@ fn zenoh_pico_encode_response_default() -> Vec<u8> {
 // wz-proves: codec-response codec-parity partial
 #[test]
 fn layer3_response_default_byte_equivalent() {
-    let wz = Response::default().encode_to_vec();
+    // As for `Push`: a bare default Put names neither payload layout and the
+    // encoder refuses it, so the Put inside the default Reply gets the empty
+    // inline payload pico's encoder is driven with.
+    let mut response = Response::default();
+    if let wz_codecs::response::ResponseVariant::CodecZenohReply(reply) = &mut response.body {
+        if let wz_codecs::reply::ReplyVariant::CodecZenohMsgPut(put) = &mut reply.body {
+            put.payload_len = Some(0);
+            put.payload = Some(&[]);
+        }
+    }
+    let wz = response.encode_to_vec();
     let pico = zenoh_pico_encode_response_default();
     assert_eq!(
         wz, pico,

@@ -450,7 +450,7 @@ async fn r99_subscriber_registry_routes_framepayload_push_to_callback() {
         },
         ..Push::default()
     };
-    let push_bytes = push.encode_to_vec();
+    let push_bytes = wz_codecs_test_support::with_empty_inline_put(push).encode_to_vec();
     // Frame envelope: T_MID_FRAME | R = 0x25, sn=1 VLE (0x01), tail = push_bytes.
     let mut frame_wire = vec![0x25, 0x01];
     frame_wire.extend_from_slice(&push_bytes);

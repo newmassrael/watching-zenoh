@@ -45,8 +45,8 @@ fn reply(request_id: u64, suffix: &'static str, payload: &'static [u8]) -> Vec<u
         keyexpr: keyexpr(suffix),
         body: wz_codecs::response::ResponseVariant::CodecZenohReply(wz_codecs::reply::Reply {
             body: wz_codecs::reply::ReplyVariant::CodecZenohMsgPut(wz_codecs::msg_put::MsgPut {
-                payload_len: payload.len() as u64,
-                payload,
+                payload_len: Some(payload.len() as u64),
+                payload: Some(payload),
                 ..Default::default()
             }),
             ..Default::default()
@@ -74,8 +74,8 @@ fn push(suffix: &'static str, payload: &'static [u8]) -> Vec<u8> {
         header: wz_codecs::push::Push::default().header | wz_codecs::wire_const::FLAG_N_N,
         keyexpr: keyexpr(suffix),
         body: wz_codecs::push::PushVariant::CodecZenohMsgPut(wz_codecs::msg_put::MsgPut {
-            payload_len: payload.len() as u64,
-            payload,
+            payload_len: Some(payload.len() as u64),
+            payload: Some(payload),
             ..Default::default()
         }),
         ..Default::default()
@@ -223,8 +223,8 @@ fn aliased_reply(request_id: u64, id: u64, payload: &'static [u8]) -> Vec<u8> {
         },
         body: wz_codecs::response::ResponseVariant::CodecZenohReply(wz_codecs::reply::Reply {
             body: wz_codecs::reply::ReplyVariant::CodecZenohMsgPut(wz_codecs::msg_put::MsgPut {
-                payload_len: payload.len() as u64,
-                payload,
+                payload_len: Some(payload.len() as u64),
+                payload: Some(payload),
                 ..Default::default()
             }),
             ..Default::default()

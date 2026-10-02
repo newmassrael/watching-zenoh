@@ -23,8 +23,15 @@
 
 use alloc::vec::Vec;
 
+use sce_forge_runtime::codec::CodecStorage;
 use wz_codecs::ext_entry::{ExtEntryOwned, ExtEntryOwnedVariant};
 use wz_codecs::ext_zint::ExtZint;
+
+// R3011 — the chain helpers below are generic over the storage profile. An
+// extension chain is carried by messages of both planes (a `Declare`'s on the
+// default profile, a `Push`'s on `WireStorage`), a `Z64` entry has no byte
+// field to be profile-specific about, and a helper that named one profile would
+// serve one plane and refuse the other.
 
 /// The `ext_nodeid` extension id — zenoh Push/Declare `NodeId`,
 /// `zextz64!(0x3, true)` (the id is identical for both messages).
@@ -70,7 +77,7 @@ pub fn sync_header_z(header: &mut u8, chain_present: bool) {
 /// Set the chain-continuation `Z` bit on every entry except the last (which
 /// terminates the chain) — zenoh's per-entry `FLAG_Z` invariant. The single
 /// owner of this normalisation for every owned ext chain.
-pub fn apply_chain_z_bits(entries: &mut [ExtEntryOwned]) {
+pub fn apply_chain_z_bits<S: CodecStorage>(entries: &mut [ExtEntryOwned<S>]) {
     if entries.is_empty() {
         return;
     }
@@ -90,7 +97,7 @@ pub fn apply_chain_z_bits(entries: &mut [ExtEntryOwned]) {
 /// hop-limit). `None` when no entry with `id` is present (or its body is not a
 /// `Z64` zint). The id-keyed scan + body-variant match lives here ONCE so each
 /// per-id reader is a one-line projection.
-pub fn read_z64_ext(exts: Option<&Vec<ExtEntryOwned>>, id: u8) -> Option<u64> {
+pub fn read_z64_ext<S: CodecStorage>(exts: Option<&Vec<ExtEntryOwned<S>>>, id: u8) -> Option<u64> {
     let exts = exts?;
     for ext in exts {
         if ext_id(ext.header) == id {
@@ -112,8 +119,8 @@ pub fn read_z64_ext(exts: Option<&Vec<ExtEntryOwned>>, id: u8) -> Option<u64> {
 /// field that differs per message type — Push header vs Declare header). The
 /// retain-drop / push / `Z`-normalise mechanics live here ONCE; a per-id setter
 /// supplies only its id, header, and value.
-pub fn set_z64_ext(
-    exts: &mut Option<Vec<ExtEntryOwned>>,
+pub fn set_z64_ext<S: CodecStorage>(
+    exts: &mut Option<Vec<ExtEntryOwned<S>>>,
     id: u8,
     header: u8,
     value: Option<u64>,
@@ -170,7 +177,7 @@ pub const NODE_ID_BITS: u32 = NodeId::BITS;
 /// boundary, and `dissect`'s width-binding test drives this function across it
 /// so the constant is held against this function's BEHAVIOUR and not only
 /// against its signature.
-pub fn read_source(exts: Option<&Vec<ExtEntryOwned>>) -> NodeId {
+pub fn read_source<S: CodecStorage>(exts: Option<&Vec<ExtEntryOwned<S>>>) -> NodeId {
     read_z64_ext(exts, NODEID_EXT_ID).map_or(0, |v| v as NodeId)
 }
 
@@ -180,7 +187,7 @@ pub fn read_source(exts: Option<&Vec<ExtEntryOwned>>) -> NodeId {
 /// the chain is now NON-EMPTY, so the caller can sync its message-level header
 /// `Z` flag. A thin projection of the shared [`set_z64_ext`] over the
 /// `ext_nodeid` id/header, supplying `None` (remove) for the DEFAULT 0.
-pub fn set_source(exts: &mut Option<Vec<ExtEntryOwned>>, node_id: u16) -> bool {
+pub fn set_source<S: CodecStorage>(exts: &mut Option<Vec<ExtEntryOwned<S>>>, node_id: u16) -> bool {
     set_z64_ext(
         exts,
         NODEID_EXT_ID,
@@ -210,7 +217,10 @@ mod tests {
 
     #[test]
     fn read_absent_is_zero() {
-        assert_eq!(read_source(None), 0);
+        assert_eq!(
+            read_source::<sce_forge_runtime::codec::DefaultStorage>(None),
+            0
+        );
         assert_eq!(read_source(Some(&vec![other_ext()])), 0);
     }
 
@@ -236,7 +246,7 @@ mod tests {
 
     #[test]
     fn set_inserts_terminal_nodeid_and_reports_present() {
-        let mut exts = None;
+        let mut exts: Option<Vec<ExtEntryOwned>> = None;
         assert!(set_source(&mut exts, 7), "chain now non-empty");
         let list = exts.as_ref().expect("ext present");
         assert_eq!(list.len(), 1);

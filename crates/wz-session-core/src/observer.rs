@@ -1038,7 +1038,8 @@ mod tests {
         )
     ))]
     mod push_fixtures {
-        use wz_codecs::push::{Push, PushOwned};
+        use crate::wire::PushOwned;
+        use wz_codecs::push::Push;
         use wz_codecs::wireexpr::{Wireexpr, WireexprVariant};
         use wz_codecs::wireexpr_nonlocal::WireexprNonlocal;
 
@@ -1059,7 +1060,8 @@ mod tests {
                 put.payload_len = Some(payload.len() as u64);
                 put.payload = Some(payload);
             }
-            push.try_into_owned().unwrap()
+            push.try_into_owned_in::<crate::wire::WireStorage>()
+                .unwrap()
         }
     }
 
@@ -1419,7 +1421,7 @@ mod tests {
         // `M=0` (`Mapping::Receiver`) fixtures: the id names OUR space. Local
         // to this module because the cross-talk suite above deliberately uses
         // the id=0 LITERAL form, which consults no space at all.
-        fn push_own_alias(mapping_id: u64) -> wz_codecs::push::PushOwned {
+        fn push_own_alias(mapping_id: u64) -> crate::wire::PushOwned {
             use wz_codecs::push::Push;
             Push {
                 keyexpr: Wireexpr {
@@ -1431,7 +1433,7 @@ mod tests {
                 },
                 ..Push::default()
             }
-            .try_into_owned()
+            .try_into_owned_in::<crate::wire::WireStorage>()
             .unwrap()
         }
 
@@ -1498,7 +1500,7 @@ mod tests {
                 body: RequestVariant::CodecZenohQuery(Query::default()),
                 ..Request::default()
             }
-            .try_into_owned()
+            .try_into_owned_in::<crate::wire::WireStorage>()
             .unwrap();
             let outcome = make_outcome(vec![NetworkMessage::Request(Box::new(request))]);
             observer.dispatch_event(IterationEvent::Poll(&outcome));

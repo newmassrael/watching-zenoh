@@ -69,6 +69,7 @@ use alloc::string::String;
 use alloc::vec::Vec;
 
 use crate::vle::read_vle_u64;
+use sce_forge_runtime::codec::{CodecStorage, SceByteBuf, SceStr};
 
 #[cfg(test)]
 use wz_codecs::ext_entry::{ExtEntry, ExtEntryVariant};
@@ -98,14 +99,16 @@ pub struct TimestampHint {
 impl TimestampHint {
     /// Project a decoded codec [`wz_codecs::timestamp::Timestamp`]
     /// into a wz-owned [`TimestampHint`].
-    pub fn from_codec(ts: &wz_codecs::timestamp::TimestampOwned) -> Self {
+    pub fn from_codec<S: CodecStorage>(ts: &wz_codecs::timestamp::TimestampOwned<S>) -> Self {
         Self {
             time: ts.time,
             // SCE pin 7a94d084a (W3) stores the codec owned mirror as a
             // no-alloc bounded `heapless::Vec<u8, 16>`; this AP-side hint
             // retains an alloc `Vec<u8>` (Decision 2: AP retention is
             // alloc), so copy out of the bounded buffer at the boundary.
-            zid: ts.zid.as_slice().to_vec(),
+            // (Generic over the storage profile since R3011: both a received
+            // message's timestamp and a transport one's are projected here.)
+            zid: SceByteBuf::as_slice(&ts.zid).to_vec(),
         }
     }
 
@@ -181,13 +184,16 @@ pub struct EncodingHint {
 impl EncodingHint {
     /// Project a decoded codec [`wz_codecs::encoding::Encoding`] into
     /// a wz-owned [`EncodingHint`].
-    pub fn from_codec(encoding: &wz_codecs::encoding::EncodingOwned) -> Self {
+    pub fn from_codec<S: CodecStorage>(encoding: &wz_codecs::encoding::EncodingOwned<S>) -> Self {
         Self {
             packed_id: encoding.packed_id,
             // W3 (SCE 7a94d084a): the codec owned mirror's schema is a
             // bounded `heapless::String<128>`; copy it into this AP hint's
             // alloc `Option<String>` at the projection boundary.
-            schema: encoding.schema.as_ref().map(|s| String::from(s.as_str())),
+            schema: encoding
+                .schema
+                .as_ref()
+                .map(|s| String::from(SceStr::as_str(s))),
         }
     }
 
@@ -751,7 +757,7 @@ impl Sample {
 /// `(ext_id, enc)` combination, or when the matching extension's body
 /// variant is unexpectedly not `ExtZint` (which the wire decoder
 /// would only produce if the upstream catalog drifted).
-pub fn extract_qos(extensions: &[ExtEntryOwned]) -> Option<QosLevel> {
+pub fn extract_qos<S: CodecStorage>(extensions: &[ExtEntryOwned<S>]) -> Option<QosLevel> {
     const QOS_EXT_ID: u8 = 0x01;
     const ENC_ZINT: u8 = 0x01;
     for ext in extensions {
@@ -785,13 +791,13 @@ pub fn extract_qos(extensions: &[ExtEntryOwned]) -> Option<QosLevel> {
 /// Returns `None` on missing extension, on a non-`ExtZbuf` body
 /// variant for the matching tuple, or on any parse failure (truncation
 /// / overflow / impossible `zidlen`).
-pub fn extract_source_info(extensions: &[ExtEntryOwned]) -> Option<SourceInfo> {
+pub fn extract_source_info<S: CodecStorage>(extensions: &[ExtEntryOwned<S>]) -> Option<SourceInfo> {
     const SOURCE_INFO_EXT_ID: u8 = 0x01;
     const ENC_ZBUF: u8 = 0x02;
     for ext in extensions {
         if ext.ext_id() == SOURCE_INFO_EXT_ID && ext.enc() == ENC_ZBUF {
             if let ExtEntryOwnedVariant::CodecZenohExtZbuf(z) = &ext.body {
-                return decode_source_info_payload(&z.value);
+                return decode_source_info_payload(SceByteBuf::as_slice(&z.value));
             }
         }
     }
@@ -987,7 +993,7 @@ mod tests {
 
     #[test]
     fn timestamp_hint_from_codec_round_trips_fields() {
-        let codec = wz_codecs::timestamp::TimestampOwned {
+        let codec: wz_codecs::timestamp::TimestampOwned = wz_codecs::timestamp::TimestampOwned {
             time: 0xDEAD_BEEF,
             zid_len: 4,
             zid: crate::codec_owned::owned_bytes(&[1, 2, 3, 4]).unwrap(),
@@ -999,7 +1005,7 @@ mod tests {
 
     #[test]
     fn encoding_hint_from_codec_round_trips_fields() {
-        let codec = wz_codecs::encoding::EncodingOwned {
+        let codec: wz_codecs::encoding::EncodingOwned = wz_codecs::encoding::EncodingOwned {
             packed_id: 0x1234,
             schema_len: Some(4),
             schema: Some(crate::codec_owned::owned_string("text").unwrap()),
@@ -1011,7 +1017,7 @@ mod tests {
 
     #[test]
     fn encoding_hint_from_codec_preserves_absent_schema() {
-        let codec = wz_codecs::encoding::EncodingOwned {
+        let codec: wz_codecs::encoding::EncodingOwned = wz_codecs::encoding::EncodingOwned {
             packed_id: 0x4000,
             schema_len: None,
             schema: None,
@@ -1220,7 +1226,7 @@ mod tests {
 
     #[test]
     fn extract_qos_returns_none_on_empty_chain() {
-        assert!(extract_qos(&[]).is_none());
+        assert!(extract_qos::<sce_forge_runtime::codec::DefaultStorage>(&[]).is_none());
     }
 
     #[test]

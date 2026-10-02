@@ -155,7 +155,7 @@ use wz_codecs::declare::DeclareOwnedVariant;
     feature = "alloc",
     any(feature = "pubsub-put", feature = "pubsub-delete")
 ))]
-use wz_codecs::push::{PushOwned, PushOwnedVariant};
+use crate::wire::{PushOwned, PushOwnedVariant};
 
 #[cfg(all(
     feature = "alloc",
@@ -1392,7 +1392,7 @@ impl<C: SampleSink> SubscriberRegistry<C> {
             match &push.body {
                 #[cfg(feature = "pubsub-put")]
                 PushOwnedVariant::CodecZenohMsgPut(put) => {
-                    let body_exts: &[wz_codecs::ext_entry::ExtEntryOwned] =
+                    let body_exts: &[crate::wire::parts::ExtEntryOwned] =
                         put.extensions.as_deref().unwrap_or(&[]);
                     #[cfg(feature = "pubsub-timestamp")]
                     let body_timestamp = put.timestamp.as_ref().map(TimestampHint::from_codec);
@@ -1493,7 +1493,7 @@ impl<C: SampleSink> SubscriberRegistry<C> {
                 }
                 #[cfg(feature = "pubsub-delete")]
                 PushOwnedVariant::CodecZenohMsgDel(del) => {
-                    let body_exts: &[wz_codecs::ext_entry::ExtEntryOwned] =
+                    let body_exts: &[crate::wire::parts::ExtEntryOwned] =
                         del.extensions.as_deref().unwrap_or(&[]);
                     #[cfg(feature = "pubsub-timestamp")]
                     let body_timestamp = del.timestamp.as_ref().map(TimestampHint::from_codec);
@@ -1531,7 +1531,7 @@ impl<C: SampleSink> SubscriberRegistry<C> {
                 }
                 _ => return,
             };
-        let outer_exts: &[wz_codecs::ext_entry::ExtEntryOwned] =
+        let outer_exts: &[crate::wire::parts::ExtEntryOwned] =
             push.extensions.as_deref().unwrap_or(&[]);
         // R311em / R311y307 — the outer QoS extension is a single packed
         // byte (priority / congestion-control / express are bit views of
@@ -1990,7 +1990,7 @@ mod push_fixtures {
             },
             ..Push::default()
         }
-        .try_into_owned()
+        .try_into_owned_in::<crate::wire::WireStorage>()
         .unwrap()
     }
 
@@ -2000,7 +2000,7 @@ mod push_fixtures {
         let mut push = push_with_keyexpr(suffix);
         push.body = PushOwnedVariant::CodecZenohMsgDel(
             wz_codecs::msg_del::MsgDel::default()
-                .try_into_owned()
+                .try_into_owned_in::<crate::wire::WireStorage>()
                 .unwrap(),
         );
         push
@@ -2173,7 +2173,7 @@ mod tests {
             },
             ..Push::default()
         }
-        .try_into_owned()
+        .try_into_owned_in::<crate::wire::WireStorage>()
         .unwrap();
         registry.dispatch(&NetworkMessage::Push(Box::new(push)), Reliability::Reliable);
 
@@ -3233,7 +3233,7 @@ mod tests {
             },
             ..Push::default()
         }
-        .try_into_owned()
+        .try_into_owned_in::<crate::wire::WireStorage>()
         .unwrap()
     }
 
@@ -3254,7 +3254,7 @@ mod tests {
             },
             ..Push::default()
         }
-        .try_into_owned()
+        .try_into_owned_in::<crate::wire::WireStorage>()
         .unwrap()
     }
 
@@ -4235,9 +4235,11 @@ mod tests {
         // The owned `MsgPut` carries an alloc `Vec<ExtEntryOwned>` (vs the
         // borrowed heapless `Vec<_, 4>`); deep-copy the borrowed ext in.
         let mut put = wz_codecs::msg_put::MsgPut::default()
-            .try_into_owned()
+            .try_into_owned_in::<crate::wire::WireStorage>()
             .unwrap();
-        put.extensions = Some(vec![ext.try_into_owned().unwrap()]);
+        put.extensions = Some(vec![ext
+            .try_into_owned_in::<crate::wire::WireStorage>()
+            .unwrap()]);
         let mut push = Push {
             keyexpr: wz_codecs::wireexpr::Wireexpr {
                 body: WireexprVariant::WireexprLocal(wz_codecs::wireexpr_local::WireexprLocal {
@@ -4248,7 +4250,7 @@ mod tests {
             },
             ..Push::default()
         }
-        .try_into_owned()
+        .try_into_owned_in::<crate::wire::WireStorage>()
         .unwrap();
         push.body = PushOwnedVariant::CodecZenohMsgPut(put);
         push
@@ -4385,7 +4387,7 @@ mod tests {
             ),
             ..Push::default()
         }
-        .try_into_owned()
+        .try_into_owned_in::<crate::wire::WireStorage>()
         .unwrap();
         registry.dispatch(&NetworkMessage::Push(Box::new(push)), Reliability::Reliable);
 
@@ -4430,7 +4432,7 @@ mod tests {
             }),
             ..wz_codecs::msg_put::MsgPut::default()
         }
-        .try_into_owned()
+        .try_into_owned_in::<crate::wire::WireStorage>()
         .unwrap();
         let mut push = Push {
             keyexpr: wz_codecs::wireexpr::Wireexpr {
@@ -4442,7 +4444,7 @@ mod tests {
             },
             ..Push::default()
         }
-        .try_into_owned()
+        .try_into_owned_in::<crate::wire::WireStorage>()
         .unwrap();
         push.body = PushOwnedVariant::CodecZenohMsgPut(put);
         push
@@ -4595,9 +4597,11 @@ mod tests {
             ),
             ..Push::default()
         }
-        .try_into_owned()
+        .try_into_owned_in::<crate::wire::WireStorage>()
         .unwrap();
-        push.extensions = Some(vec![ext.try_into_owned().unwrap()]);
+        push.extensions = Some(vec![ext
+            .try_into_owned_in::<crate::wire::WireStorage>()
+            .unwrap()]);
         push
     }
 
@@ -4675,7 +4679,7 @@ mod tests {
             }),
             ..wz_codecs::msg_put::MsgPut::default()
         }
-        .try_into_owned()
+        .try_into_owned_in::<crate::wire::WireStorage>()
         .unwrap();
         let mut push = Push {
             keyexpr: wz_codecs::wireexpr::Wireexpr {
@@ -4687,7 +4691,7 @@ mod tests {
             },
             ..Push::default()
         }
-        .try_into_owned()
+        .try_into_owned_in::<crate::wire::WireStorage>()
         .unwrap();
         push.body = PushOwnedVariant::CodecZenohMsgPut(put);
         push
@@ -4705,9 +4709,11 @@ mod tests {
             },
         );
         let mut put = wz_codecs::msg_put::MsgPut::default()
-            .try_into_owned()
+            .try_into_owned_in::<crate::wire::WireStorage>()
             .unwrap();
-        put.extensions = Some(vec![ext.try_into_owned().unwrap()]);
+        put.extensions = Some(vec![ext
+            .try_into_owned_in::<crate::wire::WireStorage>()
+            .unwrap()]);
         let mut push = Push {
             keyexpr: wz_codecs::wireexpr::Wireexpr {
                 body: WireexprVariant::WireexprLocal(wz_codecs::wireexpr_local::WireexprLocal {
@@ -4718,7 +4724,7 @@ mod tests {
             },
             ..Push::default()
         }
-        .try_into_owned()
+        .try_into_owned_in::<crate::wire::WireStorage>()
         .unwrap();
         push.body = PushOwnedVariant::CodecZenohMsgPut(put);
         push
@@ -5104,7 +5110,7 @@ mod metadata_decode_isolation_tests {
             },
             ..Push::default()
         }
-        .try_into_owned()
+        .try_into_owned_in::<crate::wire::WireStorage>()
         .unwrap()
     }
 
@@ -5121,7 +5127,7 @@ mod metadata_decode_isolation_tests {
             }),
             ..wz_codecs::msg_put::MsgPut::default()
         }
-        .try_into_owned()
+        .try_into_owned_in::<crate::wire::WireStorage>()
         .unwrap();
         let mut push = put_push_literal(keyexpr);
         push.body = PushOwnedVariant::CodecZenohMsgPut(put);
@@ -5142,9 +5148,11 @@ mod metadata_decode_isolation_tests {
             },
         );
         let mut put = wz_codecs::msg_put::MsgPut::default()
-            .try_into_owned()
+            .try_into_owned_in::<crate::wire::WireStorage>()
             .unwrap();
-        put.extensions = Some(vec![ext.try_into_owned().unwrap()]);
+        put.extensions = Some(vec![ext
+            .try_into_owned_in::<crate::wire::WireStorage>()
+            .unwrap()]);
         let mut push = put_push_literal(keyexpr);
         push.body = PushOwnedVariant::CodecZenohMsgPut(put);
         push

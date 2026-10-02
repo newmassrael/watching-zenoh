@@ -365,7 +365,7 @@ impl NodeHlc {
     /// egress leg must carry the SAME timestamp. zenoh stamps at `pubsub.rs:328`
     /// and fans the one stamped `msg` out to all of `route`.
     #[cfg(feature = "codec-push")]
-    pub fn treat_timestamp(&self, push: &mut wz_codecs::push::PushOwned) -> TimestampVerdict {
+    pub fn treat_timestamp(&self, push: &mut wz_session_core::wire::PushOwned) -> TimestampVerdict {
         #[cfg(feature = "time-hlc")]
         {
             let Some(clock) = self.clock.as_deref() else {
@@ -412,8 +412,8 @@ impl NodeHlc {
     #[cfg(feature = "codec-push")]
     pub fn stamp_for_every_destination<'a>(
         &self,
-        push: &'a wz_codecs::push::PushOwned,
-    ) -> Option<std::borrow::Cow<'a, wz_codecs::push::PushOwned>> {
+        push: &'a wz_session_core::wire::PushOwned,
+    ) -> Option<std::borrow::Cow<'a, wz_session_core::wire::PushOwned>> {
         if !self.is_stamping() {
             return Some(std::borrow::Cow::Borrowed(push));
         }
@@ -634,13 +634,13 @@ mod tests {
 
         /// A Put whose inline timestamp slot is empty — what a client that does
         /// not set one puts on the wire.
-        fn bare_put() -> wz_codecs::push::PushOwned {
+        fn bare_put() -> wz_session_core::wire::PushOwned {
             build_push_literal("demo/hlc", b"v").expect("build put")
         }
 
         /// A Put carrying `time` paired with `zid`.
         #[cfg(feature = "time-hlc")]
-        fn stamped_put(time: u64, zid: &[u8]) -> wz_codecs::push::PushOwned {
+        fn stamped_put(time: u64, zid: &[u8]) -> wz_session_core::wire::PushOwned {
             let meta = wz_session_core::metadata::PushMetadata {
                 timestamp: Some(wz_session_core::sample::TimestampHint {
                     time,

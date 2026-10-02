@@ -142,18 +142,18 @@ use sce_forge_runtime::codec::CodecError;
 // split as `SubscriberRegistry::dispatch_push` (R311g1 signature
 // stability), now also alloc-aware.
 #[cfg(all(feature = "codec-request", feature = "alloc"))]
-use wz_codecs::query::QueryOwned;
+use crate::wire::parts::QueryOwned;
 #[cfg(all(feature = "codec-request", feature = "alloc"))]
-use wz_codecs::request::{RequestOwned, RequestOwnedVariant};
+use crate::wire::{RequestOwned, RequestOwnedVariant};
 // R311r — `Response` + the `ResponseReplyBuilder` / `ResponseErrBuilder`
 // pair (now in wz-session-core::response_build) back `into_response`,
 // gated on `all(codec-response, alloc)` (the `QueryReply` owned record is
 // `alloc`-gated). The dispatch / loopback / registration paths only stage
 // entries into `Vec<QueryReply>` and do not need codec-response.
+#[cfg(all(feature = "codec-response", feature = "alloc"))]
+use crate::wire::ResponseOwned;
 #[cfg(all(feature = "codec-request", feature = "alloc"))]
 use crate::wireexpr_resolve::{resolve_wireexpr_in, MappingSpaces};
-#[cfg(all(feature = "codec-response", feature = "alloc"))]
-use wz_codecs::response::ResponseOwned;
 
 #[cfg(all(feature = "codec-response-final", feature = "alloc"))]
 use wz_codecs::response_final::{ResponseFinal, ResponseFinalOwned};
@@ -2291,7 +2291,7 @@ mod tests {
             extensions: None,
             body: RequestVariant::CodecZenohQuery(Query::default()),
         }
-        .try_into_owned()
+        .try_into_owned_in::<crate::wire::WireStorage>()
         .unwrap()
     }
 
@@ -2327,9 +2327,13 @@ mod tests {
             value_len: attachment.len() as u64,
             value: attachment,
         });
-        let mut query = Query::default().try_into_owned().unwrap();
+        let mut query = Query::default()
+            .try_into_owned_in::<crate::wire::WireStorage>()
+            .unwrap();
         query.header |= 0x80;
-        query.extensions = Some(vec![ext.try_into_owned().unwrap()]);
+        query.extensions = Some(vec![ext
+            .try_into_owned_in::<crate::wire::WireStorage>()
+            .unwrap()]);
         let mut request = Request {
             header: 0x1c,
             rid,
@@ -2337,7 +2341,7 @@ mod tests {
             extensions: None,
             body: RequestVariant::CodecZenohQuery(Query::default()),
         }
-        .try_into_owned()
+        .try_into_owned_in::<crate::wire::WireStorage>()
         .unwrap();
         request.body = RequestOwnedVariant::CodecZenohQuery(query);
         request
@@ -2358,7 +2362,7 @@ mod tests {
             extensions: None,
             body: RequestVariant::CodecZenohMsgPut(MsgPut::default()),
         }
-        .try_into_owned()
+        .try_into_owned_in::<crate::wire::WireStorage>()
         .unwrap()
     }
 
@@ -2382,7 +2386,7 @@ mod tests {
             extensions: None,
             body: RequestVariant::CodecZenohQuery(Query::default()),
         }
-        .try_into_owned()
+        .try_into_owned_in::<crate::wire::WireStorage>()
         .unwrap()
     }
 
@@ -2705,7 +2709,7 @@ mod tests {
             parameters: Some(params),
             ..Query::default()
         }
-        .try_into_owned()
+        .try_into_owned_in::<crate::wire::WireStorage>()
         .unwrap();
         let mut request = Request {
             header: 0x1c,
@@ -2714,7 +2718,7 @@ mod tests {
             extensions: None,
             body: RequestVariant::CodecZenohQuery(Query::default()),
         }
-        .try_into_owned()
+        .try_into_owned_in::<crate::wire::WireStorage>()
         .unwrap();
         request.body = RequestOwnedVariant::CodecZenohQuery(query);
         request
@@ -2756,9 +2760,13 @@ mod tests {
             value_len: payload.len() as u64,
             value: &payload,
         });
-        let mut query = Query::default().try_into_owned().unwrap();
+        let mut query = Query::default()
+            .try_into_owned_in::<crate::wire::WireStorage>()
+            .unwrap();
         query.header |= 0x80;
-        query.extensions = Some(vec![ext.try_into_owned().unwrap()]);
+        query.extensions = Some(vec![ext
+            .try_into_owned_in::<crate::wire::WireStorage>()
+            .unwrap()]);
         let keyexpr = Wireexpr {
             body: wz_codecs::wireexpr::WireexprVariant::WireexprLocal(WireexprLocal {
                 id: 0,
@@ -2773,7 +2781,7 @@ mod tests {
             extensions: None,
             body: RequestVariant::CodecZenohQuery(Query::default()),
         }
-        .try_into_owned()
+        .try_into_owned_in::<crate::wire::WireStorage>()
         .unwrap();
         request.body = RequestOwnedVariant::CodecZenohQuery(query);
         request
@@ -3972,7 +3980,9 @@ mod tests {
         });
 
         let mut replies = Vec::new();
-        let query = Query::default().try_into_owned().unwrap();
+        let query = Query::default()
+            .try_into_owned_in::<crate::wire::WireStorage>()
+            .unwrap();
         reg.local_query(7, "demo/**", &query, None, QosLevel::DEFAULT, &mut replies);
         assert_eq!(
             *outcomes.lock().unwrap(),
@@ -4073,7 +4083,7 @@ mod tests {
             parameters: Some(b"_anyke"),
             ..Query::default()
         }
-        .try_into_owned()
+        .try_into_owned_in::<crate::wire::WireStorage>()
         .unwrap();
         reg.local_query(7, "demo/**", &query, None, QosLevel::DEFAULT, &mut replies);
 
@@ -4107,7 +4117,9 @@ mod tests {
         });
 
         let mut replies = Vec::new();
-        let query = Query::default().try_into_owned().unwrap();
+        let query = Query::default()
+            .try_into_owned_in::<crate::wire::WireStorage>()
+            .unwrap();
         reg.local_query(
             /*rid=*/ 7,
             "home/temp",
@@ -4154,7 +4166,9 @@ mod tests {
         });
 
         let mut replies = Vec::new();
-        let query = Query::default().try_into_owned().unwrap();
+        let query = Query::default()
+            .try_into_owned_in::<crate::wire::WireStorage>()
+            .unwrap();
         reg.local_query(
             1,
             "home/temp",
@@ -4189,7 +4203,9 @@ mod tests {
         });
 
         let mut replies = Vec::new();
-        let query = Query::default().try_into_owned().unwrap();
+        let query = Query::default()
+            .try_into_owned_in::<crate::wire::WireStorage>()
+            .unwrap();
         reg.local_query(
             1,
             "home/temp",
@@ -4221,7 +4237,9 @@ mod tests {
         });
 
         let mut replies = Vec::new();
-        let query = Query::default().try_into_owned().unwrap();
+        let query = Query::default()
+            .try_into_owned_in::<crate::wire::WireStorage>()
+            .unwrap();
         reg.local_query(
             1,
             "home/humid",
@@ -4267,7 +4285,9 @@ mod tests {
             responder.reply(b"incomplete");
         });
 
-        let query = Query::default().try_into_owned().unwrap();
+        let query = Query::default()
+            .try_into_owned_in::<crate::wire::WireStorage>()
+            .unwrap();
 
         // AllComplete: only the complete queryable fires.
         let mut replies = Vec::new();
@@ -4467,7 +4487,9 @@ mod tests {
 
         // The loopback leg inherits the requester's QoS the same way.
         let mut replies = Vec::new();
-        let query = Query::default().try_into_owned().unwrap();
+        let query = Query::default()
+            .try_into_owned_in::<crate::wire::WireStorage>()
+            .unwrap();
         reg.local_query(4, "metrics/cpu", &query, None, express_rt, &mut replies);
         assert_eq!(replies.len(), arms);
         for reply in replies {
@@ -4603,9 +4625,13 @@ mod tests {
             value_len: body.len() as u64,
             value: &body,
         });
-        let mut query = Query::default().try_into_owned().unwrap();
+        let mut query = Query::default()
+            .try_into_owned_in::<crate::wire::WireStorage>()
+            .unwrap();
         query.header |= 0x80;
-        query.extensions = Some(vec![ext.try_into_owned().unwrap()]);
+        query.extensions = Some(vec![ext
+            .try_into_owned_in::<crate::wire::WireStorage>()
+            .unwrap()]);
         let mut request = Request {
             header: 0x1c,
             rid,
@@ -4613,7 +4639,7 @@ mod tests {
             extensions: None,
             body: RequestVariant::CodecZenohQuery(Query::default()),
         }
-        .try_into_owned()
+        .try_into_owned_in::<crate::wire::WireStorage>()
         .unwrap();
         request.body = RequestOwnedVariant::CodecZenohQuery(query);
         request
@@ -4847,9 +4873,13 @@ mod request_decode_isolation_tests {
             value_len: attachment.len() as u64,
             value: attachment,
         });
-        let mut query = Query::default().try_into_owned().unwrap();
+        let mut query = Query::default()
+            .try_into_owned_in::<crate::wire::WireStorage>()
+            .unwrap();
         query.header |= 0x80;
-        query.extensions = Some(vec![ext.try_into_owned().unwrap()]);
+        query.extensions = Some(vec![ext
+            .try_into_owned_in::<crate::wire::WireStorage>()
+            .unwrap()]);
         let mut request = Request {
             header: 0x1c,
             rid,
@@ -4857,7 +4887,7 @@ mod request_decode_isolation_tests {
             extensions: None,
             body: RequestVariant::CodecZenohQuery(Query::default()),
         }
-        .try_into_owned()
+        .try_into_owned_in::<crate::wire::WireStorage>()
         .unwrap();
         request.body = RequestOwnedVariant::CodecZenohQuery(query);
         request
@@ -4874,7 +4904,7 @@ mod request_decode_isolation_tests {
             parameters: Some(params),
             ..Query::default()
         }
-        .try_into_owned()
+        .try_into_owned_in::<crate::wire::WireStorage>()
         .unwrap();
         let mut request = Request {
             header: 0x1c,
@@ -4883,7 +4913,7 @@ mod request_decode_isolation_tests {
             extensions: None,
             body: RequestVariant::CodecZenohQuery(Query::default()),
         }
-        .try_into_owned()
+        .try_into_owned_in::<crate::wire::WireStorage>()
         .unwrap();
         request.body = RequestOwnedVariant::CodecZenohQuery(query);
         request
@@ -4958,9 +4988,13 @@ mod request_decode_isolation_tests {
             value_len: payload.len() as u64,
             value: &payload,
         });
-        let mut query = Query::default().try_into_owned().unwrap();
+        let mut query = Query::default()
+            .try_into_owned_in::<crate::wire::WireStorage>()
+            .unwrap();
         query.header |= 0x80;
-        query.extensions = Some(vec![ext.try_into_owned().unwrap()]);
+        query.extensions = Some(vec![ext
+            .try_into_owned_in::<crate::wire::WireStorage>()
+            .unwrap()]);
         let mut request = Request {
             header: 0x1c,
             rid,
@@ -4968,7 +5002,7 @@ mod request_decode_isolation_tests {
             extensions: None,
             body: RequestVariant::CodecZenohQuery(Query::default()),
         }
-        .try_into_owned()
+        .try_into_owned_in::<crate::wire::WireStorage>()
         .unwrap();
         request.body = RequestOwnedVariant::CodecZenohQuery(query);
         request

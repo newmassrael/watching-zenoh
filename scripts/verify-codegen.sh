@@ -199,6 +199,21 @@ emit() {
     if [[ "$backend" == "go" ]]; then
         extra_args+=("--go-module-prefix" "$GO_MOD_PREFIX")
     fi
+    # R3011 — the C++ backend is emitted WITHOUT clang-format. From the SCE pin
+    # of R3008 on, generating C++ formats it by default and refuses to run
+    # unless clang-format 19 (the pinned major) is on the host, because the
+    # formatter is an input to the bytes. The runner this layer runs on is
+    # ubuntu-22.04, which has no clang-format 19 to install, so every one of
+    # the sixty-six stems failed its cpp emit on a tool this layer does not
+    # judge: wz ships no C++, and what is compared here is that the six
+    # backends emit and that the input emits what the upstream fixture does,
+    # both sides through the same templates. `--no-format` is SCE's own
+    # opt-out ("emit C++ exactly as the templates produce it"), and it holds
+    # on both sides of the golden compare, so a whitespace-only difference
+    # that a formatter would have hidden is visible here rather than excused.
+    if [[ "$backend" == "cpp" ]]; then
+        extra_args+=("--no-format")
+    fi
 
     # R311y756 — NAME THE WORKSPACE ROOT; do not let it be discovered.
     #

@@ -35,7 +35,7 @@
 //!   - Trust-class gating, io_uring path, pool-slot zero-copy
 //!     borrows (all deferred per docs/runtime-crate-tokio.md).
 
-use sce_forge_runtime::codec::SceCursor;
+use sce_forge_runtime::codec::{SceByteBuf, SceCursor};
 use std::time::Duration;
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::oneshot;
@@ -119,8 +119,14 @@ async fn echo_demo_msg_put_round_trip() {
 
     assert_eq!(received.header, original.header, "header round-trip");
     assert_eq!(received.payload_len, original.payload_len, "payload_len");
+    // Read off the field directly: this lane builds the handshake-only subset, in
+    // which `wz_session_core::put_payload` (gated on a data codec) does not exist.
+    assert!(
+        received.slices.is_none(),
+        "the inline layout, not a sliced one"
+    );
     assert_eq!(
-        wz_session_core::put_payload::inline_bytes(&received),
+        received.payload.as_ref().map(SceByteBuf::as_slice),
         original.payload,
         "payload bytes"
     );

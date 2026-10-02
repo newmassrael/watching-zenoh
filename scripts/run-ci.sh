@@ -1498,7 +1498,24 @@ layer_b_verify_codegen() {
     #             read ONLY on a failing pair, so a stale entry would excuse
     #             a FUTURE genuine divergence in these stems as
     #             audit-traced.
-    local LAYER2_KNOWN_DIVERGENCE=(request wireexpr)
+    #
+    #             R3011 — `msg_put` is back, for a different reason, and the
+    #             reason is the same kind of thing the removal above said it
+    #             must be: a genuine divergence, named. The Put layout round
+    #             (R3008) gave this codec the two payload layouts the extension
+    #             chain chooses between, which SCE's own resource
+    #             (vendor/sce/tests/forge/resources/codec_zenoh_msg_put.scxml)
+    #             does not carry. MEASURED, not assumed: the element body of the
+    #             two sources differs in exactly these places and no other —
+    #             the `entry-id="header.ext_id"` on the chain, the
+    #             `present-if="!extensions.has(0x2)"` on `payload_len` and
+    #             `payload`, the `slice_count` field, the `slices` repeat, and
+    #             the `zbuf_slice` import — and every backend reports
+    #             `golden mismatch`. Layer 3 (layer3_msg_put.rs and the SHM
+    #             witnesses, byte-compared against zenoh-pico and zenohd) is the
+    #             wire check. Remove this entry the day the upstream resource
+    #             carries the layout; the array is read only on a failing pair.
+    local LAYER2_KNOWN_DIVERGENCE=(request wireexpr msg_put)
 
     local fail=0
     for scxml in sources/codecs/*.scxml sources/algorithms/*.scxml; do
@@ -6485,7 +6502,12 @@ layer_c1af_cargo_test_shm() {
     # to move it to what the command printed, never to what the diff suggests.
     # R2862 — 18 -> 20, MEASURED: the descriptor took upstream's four-field
     # shape and gained its byte pin and its zero-length / oversized-slot arm.
-    _runci_guarded_test C1af 20 cargo test -p wz-session-core --features session-extshm,codec-push --lib shm --quiet \
+    # R3011 — 20 -> 22, MEASURED: the Put layout round (R3008) added
+    # `an_upstream_shm_put_reads_as_one_shm_slice` and
+    # `the_shm_builder_writes_what_upstream_wrote` to `put_payload`, behind no
+    # gate this leg lacks, and the hosted run for that push was the first to
+    # run this leg (it printed 22 where the guard wanted 20).
+    _runci_guarded_test C1af 22 cargo test -p wz-session-core --features session-extshm,codec-push --lib shm --quiet \
         || return 1
     # R311y894 — the establishment SHM surface WITH THE DISSECTOR ON, which no
     # lane had. `dissect` and `session-extshm` are disjoint feature sets: the
@@ -6520,7 +6542,9 @@ layer_c1af_cargo_test_shm() {
     # at all, so every leg whose filter matches compiles and runs it.
     # R2862 — 28 -> 30, MEASURED: the same two descriptor tests, which sit
     # behind no gate this leg lacks.
-    _runci_guarded_test C1af 30 cargo test -p wz-session-core --features session-extshm,dissect --lib shm --quiet \
+    # R3011 — 30 -> 32, MEASURED: the same two `put_payload` tests as the leg
+    # above, for the same reason.
+    _runci_guarded_test C1af 32 cargo test -p wz-session-core --features session-extshm,dissect --lib shm --quiet \
         || return 1
     # Round 2037, open-debt item 330 — THE TRANSPORT-OAM BATCH WALK, which no
     # lane in this file was running.

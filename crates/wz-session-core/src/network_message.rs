@@ -51,6 +51,85 @@ use wz_codecs::response::ResponseOwned;
 #[cfg(feature = "codec-response-final")]
 use wz_codecs::response_final::ResponseFinalOwned;
 
+/// R3011 (open-debt item 850) — the storage profile of the DATA-PLANE messages
+/// a receive path hands up: `Push`, `Request` and `Response`.
+///
+/// On an AP build ([`rx-shared-bytes`](crate::rx_profile)) it is
+/// [`RxShared`](crate::rx_profile::RxShared), whose byte fields are ranges of the
+/// frame the message was decoded from, so a received payload is the frame's own
+/// bytes and a deep clone of the message is a reference count. On every other
+/// build it is the SCE default, which is exactly what these variants held before
+/// there was a choice: the MCU profiles are Arc-free by construction and keep
+/// the owned form.
+///
+/// The control-plane variants (`Declare`, `Interest`, `Oam`, `ResponseFinal`)
+/// stay on the default: their byte fields are a few bytes of extension, not a
+/// payload, and a second profile there would only make every helper that reads
+/// both a generic one.
+#[cfg(feature = "rx-shared-bytes")]
+pub type WireStorage = crate::rx_profile::RxShared;
+/// See the `rx-shared-bytes` form of this alias.
+#[cfg(not(feature = "rx-shared-bytes"))]
+pub type WireStorage = sce_forge_runtime::codec::DefaultStorage;
+
+/// What a decode projects its messages out of: the frame, when there is one to
+/// share, and nothing on a build that has no sharing to do.
+#[cfg(all(feature = "codec-frame", feature = "rx-shared-bytes"))]
+type Origin<'a> = Option<&'a crate::link::RxBytes>;
+#[cfg(all(feature = "codec-frame", not(feature = "rx-shared-bytes")))]
+type Origin<'a> = core::marker::PhantomData<&'a ()>;
+
+/// No origin to share: the walk copies, as every walk did before there was one.
+#[cfg(all(feature = "codec-frame", feature = "rx-shared-bytes"))]
+const NO_ORIGIN: Origin<'static> = None;
+#[cfg(all(feature = "codec-frame", not(feature = "rx-shared-bytes")))]
+const NO_ORIGIN: Origin<'static> = core::marker::PhantomData;
+
+/// Project a borrowed view into its owned message at [`WireStorage`], sharing
+/// `origin` when there is one and copying when there is not.
+///
+/// A macro, not a function: the projection is a method of each generated codec
+/// (`try_into_owned_in_origin` is generic over the profile and takes the
+/// profile's own origin type), there are seven of them, and a function would
+/// have to be generic over all seven. The `None` arm is a COPY, the behaviour
+/// of every caller before the origin existed.
+///
+/// Defined only where a data codec exists to project: the three call sites are
+/// the `Push`, `Request` and `Response` arms, and a build with none of them has
+/// no use for the macro (an unused definition is a `-D warnings` error).
+#[cfg(all(
+    feature = "codec-frame",
+    feature = "rx-shared-bytes",
+    any(
+        feature = "codec-push",
+        feature = "codec-request",
+        feature = "codec-response"
+    )
+))]
+macro_rules! own_wire {
+    ($view:expr, $origin:expr) => {
+        match $origin {
+            Some(origin) => $view.try_into_owned_in_origin::<WireStorage>(origin)?,
+            None => $view.try_into_owned_in::<WireStorage>()?,
+        }
+    };
+}
+#[cfg(all(
+    feature = "codec-frame",
+    not(feature = "rx-shared-bytes"),
+    any(
+        feature = "codec-push",
+        feature = "codec-request",
+        feature = "codec-response"
+    )
+))]
+macro_rules! own_wire {
+    ($view:expr, $origin:expr) => {{
+        let _: Origin<'_> = $origin;
+        $view.try_into_owned_in::<WireStorage>()?
+    }};
+}
+
 /// R311dl — re-export the wire-spec MID constants from the
 /// wz-codecs single-source-of-truth home. Callsite references
 /// (`wire_const::N_MID_REQUEST` etc.) below keep their existing
@@ -77,13 +156,13 @@ pub enum NetworkMessage {
     /// / Query structs, making the inline form much larger than the
     /// `Unknown` variant.
     #[cfg(feature = "codec-request")]
-    Request(Box<RequestOwned>),
+    Request(Box<RequestOwned<WireStorage>>),
     /// R90 — Network MID `_Z_MID_N_PUSH` (0x1D). Pub/sub data
     /// carrier wrapping a put / del inner body — same envelope
     /// shape as `Request` minus the rid field. The `Box` mirrors
     /// the `Request` variant's size-balancing rationale.
     #[cfg(feature = "codec-push")]
-    Push(Box<PushOwned>),
+    Push(Box<PushOwned<WireStorage>>),
     /// R91 — Network MID `_Z_MID_N_RESPONSE_FINAL` (0x1A). Pure
     /// correlation marker that closes a Request's reply stream;
     /// payload is header + request_id VLE only (no embed, no
@@ -117,7 +196,7 @@ pub enum NetworkMessage {
     /// the `Unknown` variant (mirrors the Request sizing
     /// rationale).
     #[cfg(feature = "codec-response")]
-    Response(Box<ResponseOwned>),
+    Response(Box<ResponseOwned<WireStorage>>),
     /// R110/R115 — Network MID `_Z_MID_N_DECLARE` (0x1E). Declarations
     /// envelope wrapping one of the nine sub-MID inner bodies
     /// (DECL_KEXPR / DECL_SUBSCRIBER / DECL_QUERYABLE / DECL_TOKEN /
@@ -175,6 +254,33 @@ pub enum NetworkMessage {
 /// (`N_MID_PUSH` under `codec-push`, etc.).
 #[cfg(feature = "codec-frame")]
 pub fn parse_frame_payload(bytes: &[u8]) -> Result<Vec<NetworkMessage>, CodecError> {
+    parse_batch(bytes, NO_ORIGIN)
+}
+
+/// [`parse_frame_payload`] over a frame that can be shared: each decoded
+/// message's byte fields are ranges of `origin` (on an AP build) rather than
+/// copies out of it. The decode runs over `origin`'s own bytes, which is what
+/// makes a slice of them recognisable as part of `origin`; handing in a copy of
+/// the frame would decode correctly and share nothing.
+///
+/// Off `rx-shared-bytes` there is nothing to share, and this is
+/// [`parse_frame_payload`] over the same bytes.
+#[cfg(feature = "codec-frame")]
+pub fn parse_frame_payload_in(
+    origin: &crate::link::RxBytes,
+) -> Result<Vec<NetworkMessage>, CodecError> {
+    #[cfg(feature = "rx-shared-bytes")]
+    {
+        parse_batch(origin.as_slice(), Some(origin))
+    }
+    #[cfg(not(feature = "rx-shared-bytes"))]
+    {
+        parse_batch(origin.as_slice(), NO_ORIGIN)
+    }
+}
+
+#[cfg(feature = "codec-frame")]
+fn parse_batch(bytes: &[u8], origin: Origin<'_>) -> Result<Vec<NetworkMessage>, CodecError> {
     let mut messages = Vec::new();
     let mut cursor = SceCursor::new(bytes);
     while cursor.remaining() > 0 {
@@ -183,7 +289,7 @@ pub fn parse_frame_payload(bytes: &[u8]) -> Result<Vec<NetworkMessage>, CodecErr
         // here is unchanged: `Ok(None)` (no envelope decoder for the MID)
         // absorbs the tail as `Unknown` and terminates, a codec error
         // propagates and fails the whole batch.
-        if !decode_one_record(&mut cursor, &mut messages)? {
+        if !decode_one_record(&mut cursor, &mut messages, origin)? {
             {
                 let mid = cursor.peek_slice(1)?[0] & 0x1F;
                 let rem = cursor.remaining();
@@ -353,7 +459,7 @@ fn parse_payload_best_effort(bytes: &[u8], max_records: usize) -> BatchParse {
         // than by assuming one. A step that pushed two would otherwise leave the
         // vectors one apart for the rest of the walk.
         let before = messages.len();
-        match decode_one_record(&mut cursor, &mut messages) {
+        match decode_one_record(&mut cursor, &mut messages, NO_ORIGIN) {
             Ok(true) => {
                 let len = (total - cursor.remaining()) - offset;
                 spans.resize(before, (0, 0));
@@ -431,19 +537,28 @@ fn parse_payload_best_effort(bytes: &[u8], max_records: usize) -> BatchParse {
 fn decode_one_record(
     cursor: &mut SceCursor<'_>,
     out: &mut Vec<NetworkMessage>,
+    origin: Origin<'_>,
 ) -> Result<bool, CodecError> {
     let header = cursor.peek_slice(1)?[0];
     let mid = header & 0x1F;
+    // Only the three data-plane arms project through the origin; on a build with
+    // none of them this is the one parameter nothing reads.
+    #[cfg(not(any(
+        feature = "codec-request",
+        feature = "codec-push",
+        feature = "codec-response"
+    )))]
+    let _ = origin;
     match mid {
         #[cfg(feature = "codec-request")]
         wire_const::N_MID_REQUEST => {
             let req = wz_codecs::request::Request::decode(cursor)?;
-            out.push(NetworkMessage::Request(Box::new(req.try_into_owned()?)));
+            out.push(NetworkMessage::Request(Box::new(own_wire!(req, origin))));
         }
         #[cfg(feature = "codec-push")]
         wire_const::N_MID_PUSH => {
             let push = wz_codecs::push::Push::decode(cursor)?;
-            out.push(NetworkMessage::Push(Box::new(push.try_into_owned()?)));
+            out.push(NetworkMessage::Push(Box::new(own_wire!(push, origin))));
         }
         #[cfg(feature = "codec-response-final")]
         wire_const::N_MID_RESPONSE_FINAL => {
@@ -461,7 +576,7 @@ fn decode_one_record(
         #[cfg(feature = "codec-response")]
         wire_const::N_MID_RESPONSE => {
             let resp = wz_codecs::response::Response::decode(cursor)?;
-            out.push(NetworkMessage::Response(Box::new(resp.try_into_owned()?)));
+            out.push(NetworkMessage::Response(Box::new(own_wire!(resp, origin))));
         }
         #[cfg(feature = "codec-declare")]
         wire_const::N_MID_DECLARE => {
@@ -719,7 +834,7 @@ pub fn network_message_priority(msg: &NetworkMessage) -> crate::qos::Priority {
     )
 ))]
 fn stats_space_of<F>(
-    keyexpr: &wz_codecs::wireexpr::WireexprOwned,
+    keyexpr: &crate::wire::parts::WireexprOwned,
     resolve_alias: &F,
 ) -> crate::stats::StatSpace
 where
@@ -756,7 +871,7 @@ fn stats_data_class(
     message: crate::stats::StatMessage,
     space: crate::stats::StatSpace,
     pl_bytes: usize,
-    _extensions: Option<&[wz_codecs::ext_entry::ExtEntryOwned]>,
+    _extensions: Option<&[crate::wire::parts::ExtEntryOwned]>,
 ) -> crate::stats::NetworkStatsClass {
     let class = crate::stats::NetworkStatsClass::net(kind, message, space, pl_bytes);
     #[cfg(feature = "transport-shm")]
@@ -775,7 +890,7 @@ fn stats_data_class(
         feature = "codec-response"
     )
 ))]
-fn zbuf_ext_len(extensions: Option<&[wz_codecs::ext_entry::ExtEntryOwned]>, id: u8) -> usize {
+fn zbuf_ext_len(extensions: Option<&[crate::wire::parts::ExtEntryOwned]>, id: u8) -> usize {
     use wz_codecs::ext_entry::ExtEntryOwnedVariant as E;
     extensions
         .unwrap_or_default()
@@ -801,7 +916,7 @@ fn zbuf_ext_len(extensions: Option<&[wz_codecs::ext_entry::ExtEntryOwned]>, id: 
         feature = "codec-response"
     )
 ))]
-fn put_payload_size(put: &wz_codecs::msg_put::MsgPutOwned) -> usize {
+fn put_payload_size(put: &crate::wire::parts::MsgPutOwned) -> usize {
     crate::put_payload::payload_len(put)
         + zbuf_ext_len(
             put.extensions.as_deref(),
@@ -818,7 +933,7 @@ fn put_payload_size(put: &wz_codecs::msg_put::MsgPutOwned) -> usize {
         feature = "codec-response"
     )
 ))]
-fn del_payload_size(extensions: Option<&[wz_codecs::ext_entry::ExtEntryOwned]>) -> usize {
+fn del_payload_size(extensions: Option<&[crate::wire::parts::ExtEntryOwned]>) -> usize {
     zbuf_ext_len(extensions, crate::ext_header::body_ext_id::DEL_ATTACHMENT)
 }
 
@@ -826,7 +941,7 @@ fn del_payload_size(extensions: Option<&[wz_codecs::ext_entry::ExtEntryOwned]>) 
 /// chokepoint (which holds the typed body, not the enum) and the RX walk.
 #[cfg(all(feature = "transport-stats", feature = "codec-push"))]
 pub fn push_stats_class<F>(
-    push: &wz_codecs::push::PushOwned,
+    push: &crate::wire::PushOwned,
     resolve_alias: F,
 ) -> crate::stats::NetworkStatsClass
 where
@@ -856,7 +971,7 @@ where
 /// [`stats_class`] for a `Request` body — a Put, a Del, or a Query.
 #[cfg(all(feature = "transport-stats", feature = "codec-request"))]
 pub fn request_stats_class<F>(
-    request: &wz_codecs::request::RequestOwned,
+    request: &crate::wire::RequestOwned,
     resolve_alias: F,
 ) -> crate::stats::NetworkStatsClass
 where
@@ -901,7 +1016,7 @@ where
 /// counts: a `get` with parameters and no value reported bytes where upstream
 /// reports none.
 #[cfg(all(feature = "transport-stats", feature = "codec-request"))]
-fn query_payload_size(extensions: Option<&[wz_codecs::ext_entry::ExtEntryOwned]>) -> usize {
+fn query_payload_size(extensions: Option<&[crate::wire::parts::ExtEntryOwned]>) -> usize {
     use wz_codecs::ext_entry::ExtEntryOwnedVariant as E;
     let value = extensions
         .unwrap_or_default()
@@ -920,7 +1035,7 @@ fn query_payload_size(extensions: Option<&[wz_codecs::ext_entry::ExtEntryOwned]>
 /// MessageLabel::ReplyErr` arm rather than a wz simplification.
 #[cfg(all(feature = "transport-stats", feature = "codec-response"))]
 pub fn response_stats_class<F>(
-    response: &wz_codecs::response::ResponseOwned,
+    response: &crate::wire::ResponseOwned,
     resolve_alias: F,
 ) -> crate::stats::NetworkStatsClass
 where
@@ -1353,10 +1468,9 @@ mod declare_body_ext_chain_tests {
 ))]
 mod payload_size_tests {
     use super::*;
-    use crate::codec_owned::owned_bytes;
     use crate::ext_header::body_ext_id;
-    use wz_codecs::ext_entry::{ExtEntryOwned, ExtEntryOwnedVariant};
-    use wz_codecs::ext_zbuf::ExtZbufOwned;
+    use crate::wire::parts::{ExtEntryOwned, ExtEntryOwnedVariant, ExtZbufOwned, MsgPutOwned};
+    use crate::wire::wire_bytes as owned_bytes;
 
     /// A ZBUF extension `id` carrying `value` — the shape an attachment and a
     /// query value both have on the wire (`ENC_ZBUF` in the header's high bits).
@@ -1371,10 +1485,8 @@ mod payload_size_tests {
     }
 
     /// An inline Put of twelve payload bytes carrying `exts` in its chain.
-    fn twelve_byte_put_with(
-        exts: alloc::vec::Vec<ExtEntryOwned>,
-    ) -> wz_codecs::msg_put::MsgPutOwned {
-        let mut put: wz_codecs::msg_put::MsgPutOwned =
+    fn twelve_byte_put_with(exts: alloc::vec::Vec<ExtEntryOwned>) -> MsgPutOwned {
+        let mut put: MsgPutOwned =
             crate::put_payload::inline(b"twelve bytes").expect("a literal put");
         for ext in exts {
             put.extensions
@@ -1446,5 +1558,114 @@ mod payload_size_tests {
         let class = push_stats_class(&push, |_| None);
         assert_eq!(class.kind, Some(crate::stats::MessageLabel::Put));
         assert_eq!(class.payload.map(|p| p.pl_bytes), Some(12 + 8));
+    }
+}
+
+// ── R3011 (open-debt item 850) — the receive walk can SHARE the frame it decodes
+//    from. The pin's origin seam is only worth having if a decoded payload really
+//    is a range of the frame: `subrange_of` is address-based, so a walk over a COPY
+//    of the frame would decode correctly and share nothing, and no value-level
+//    assertion would notice. These tests read the ADDRESS. ──
+#[cfg(all(test, feature = "rx-shared-bytes", feature = "codec-push"))]
+mod shared_decode_tests {
+    use super::*;
+    use crate::link::RxBytes;
+    use wz_codecs_test_support::TestWire;
+
+    const PAYLOAD: &[u8] = b"shared-payload";
+
+    /// The batch a Frame would carry: one literal Put.
+    fn batch() -> Vec<u8> {
+        crate::push_build::build_push_literal("demo/x", PAYLOAD)
+            .expect("build a literal put")
+            .wire()
+    }
+
+    fn push_payload(message: &NetworkMessage) -> &[u8] {
+        let NetworkMessage::Push(push) = message else {
+            panic!("the batch is one Push, got {message:?}");
+        };
+        let crate::wire::PushOwnedVariant::CodecZenohMsgPut(put) = &push.body else {
+            panic!("a literal put carries a Put body");
+        };
+        crate::put_payload::inline_bytes(put).expect("an inline Put")
+    }
+
+    fn lies_within(whole: &[u8], part: &[u8]) -> bool {
+        whole.as_ptr_range().contains(&part.as_ptr())
+    }
+
+    /// The discriminator: a lent frame decodes to a payload that sits INSIDE the
+    /// frame's own bytes, and the message holds the storage, so the frame handle
+    /// can go while the payload stays readable. Replacing the origin with `None`
+    /// in `parse_frame_payload_in` copies the payload out and reds the address
+    /// check.
+    #[test]
+    fn a_walk_over_a_lent_frame_decodes_its_payload_as_a_range_of_that_frame() {
+        let frame = RxBytes::lend(batch());
+        assert!(frame.is_shared(), "the premise: this frame is lent storage");
+        let messages = parse_frame_payload_in(&frame).expect("the batch parses");
+        assert_eq!(messages.len(), 1);
+        assert_eq!(push_payload(&messages[0]), PAYLOAD);
+        assert!(
+            lies_within(frame.as_slice(), push_payload(&messages[0])),
+            "the payload must be a range of the frame, not a copy of it"
+        );
+        drop(frame);
+        assert_eq!(
+            push_payload(&messages[0]),
+            PAYLOAD,
+            "the message keeps the storage alive after the frame handle is gone"
+        );
+    }
+
+    /// The control: the copying walk over the same bytes puts the payload
+    /// OUTSIDE them. Without this, the address check above could pass for a
+    /// reason that has nothing to do with sharing.
+    #[test]
+    fn the_copying_walk_over_the_same_bytes_does_not_share_them() {
+        let bytes = batch();
+        let messages = parse_frame_payload(&bytes).expect("the batch parses");
+        assert_eq!(push_payload(&messages[0]), PAYLOAD);
+        assert!(
+            !lies_within(&bytes, push_payload(&messages[0])),
+            "the copying walk owns its payload"
+        );
+    }
+
+    /// An OWNED frame has no storage to share, so its sub-ranges are copies: the
+    /// cost the owned arm always had, stated so a change to it is a decision.
+    #[test]
+    fn a_walk_over_an_owned_frame_copies_because_there_is_nothing_to_share() {
+        let frame = RxBytes::from(batch());
+        assert!(!frame.is_shared(), "the premise: this frame is owned");
+        let messages = parse_frame_payload_in(&frame).expect("the batch parses");
+        assert_eq!(push_payload(&messages[0]), PAYLOAD);
+        assert!(!lies_within(frame.as_slice(), push_payload(&messages[0])));
+    }
+
+    /// The Response arm is projected through the same macro with its own call
+    /// site, so it is witnessed on its own: a Reply's Put payload is a range of
+    /// the lent frame too.
+    #[cfg(feature = "codec-response")]
+    #[test]
+    fn a_reply_put_payload_is_a_range_of_the_lent_frame() {
+        let bytes = crate::response_build::build_response_reply_literal(7, "demo/q", PAYLOAD)
+            .expect("build a literal reply")
+            .wire();
+        let frame = RxBytes::lend(bytes);
+        let messages = parse_frame_payload_in(&frame).expect("the batch parses");
+        let NetworkMessage::Response(response) = &messages[0] else {
+            panic!("the batch is one Response, got {:?}", messages[0]);
+        };
+        let crate::wire::ResponseOwnedVariant::CodecZenohReply(reply) = &response.body else {
+            panic!("a literal reply carries a Reply body");
+        };
+        let crate::wire::parts::ReplyOwnedVariant::CodecZenohMsgPut(put) = &reply.body else {
+            panic!("a literal reply carries a Put");
+        };
+        let payload = crate::put_payload::inline_bytes(put).expect("an inline Put");
+        assert_eq!(payload, PAYLOAD);
+        assert!(lies_within(frame.as_slice(), payload));
     }
 }

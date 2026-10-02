@@ -34,9 +34,8 @@
 
 use alloc::vec::Vec;
 
-use crate::codec_owned::owned_bytes;
 use crate::sample::EncodingHint;
-use sce_forge_runtime::codec::CodecError;
+use sce_forge_runtime::codec::{CodecError, CodecStorage, SceByteBuf};
 use wz_codecs::ext_entry::{ExtEntryOwned, ExtEntryOwnedVariant};
 use wz_codecs::ext_zbuf::ExtZbufOwned;
 
@@ -72,16 +71,16 @@ pub fn encode_query_value_ext_body(encoding: &EncodingHint, payload: &[u8]) -> V
 /// (terminator). Mirror of [`crate::attachment::encode_attachment_ext`] /
 /// [`crate::source_info_ext::encode_source_info_ext_entry`]. Fallible only on
 /// the `no_std` profile (the owned ext-zbuf copy is unbounded under `alloc`).
-pub fn encode_query_value_ext(
+pub fn encode_query_value_ext<S: CodecStorage>(
     encoding: &EncodingHint,
     payload: &[u8],
-) -> Result<ExtEntryOwned, CodecError> {
+) -> Result<ExtEntryOwned<S>, CodecError> {
     let value = encode_query_value_ext_body(encoding, payload);
     Ok(ExtEntryOwned {
         header: QUERY_VALUE_EXT_HEADER_ENC_ZBUF | QUERY_VALUE_EXT_ID,
         body: ExtEntryOwnedVariant::CodecZenohExtZbuf(ExtZbufOwned {
             value_len: value.len() as u64,
-            value: owned_bytes(&value)?,
+            value: <S::Bytes<32> as SceByteBuf>::from_slice(&value)?,
         }),
     })
 }
@@ -94,7 +93,9 @@ pub fn encode_query_value_ext(
 /// `None` when the chain carries no `0x03` ext or the encoding prefix is
 /// malformed (a corrupt value ext is dropped, not surfaced). Mirror of
 /// [`crate::attachment::decode_attachment_ext`].
-pub fn decode_query_value_ext(extensions: &[ExtEntryOwned]) -> Option<(EncodingHint, &[u8])> {
+pub fn decode_query_value_ext<S: CodecStorage>(
+    extensions: &[ExtEntryOwned<S>],
+) -> Option<(EncodingHint, &[u8])> {
     for ext in extensions {
         if ext.ext_id() == QUERY_VALUE_EXT_ID {
             if let ExtEntryOwnedVariant::CodecZenohExtZbuf(z) = &ext.body {
@@ -102,7 +103,7 @@ pub fn decode_query_value_ext(extensions: &[ExtEntryOwned]) -> Option<(EncodingH
                 // `_z_zbuf_len(zbf)` after `_z_encoding_decode`); the split is
                 // `crate::encoding::split_value_body`'s, shared with the stats
                 // classifier that sizes the same payload.
-                return crate::encoding::split_value_body(z.value.as_slice());
+                return crate::encoding::split_value_body(SceByteBuf::as_slice(&z.value));
             }
         }
     }
@@ -113,6 +114,10 @@ pub fn decode_query_value_ext(extensions: &[ExtEntryOwned]) -> Option<(EncodingH
 mod tests {
     use super::*;
     use alloc::string::ToString;
+
+    /// The profile a received message's chain is on; the helpers under test
+    /// are generic and a test that does not say which one it means has none.
+    type Wire = crate::wire::WireStorage;
 
     // A default (id 0, no schema) encoding — the common `zenoh::get` value
     // shape when the querier attaches only a payload. `packed_id = 0` = id 0,
@@ -143,7 +148,7 @@ mod tests {
     /// `encoding || payload`, Z clear).
     #[test]
     fn encode_query_value_ext_wraps_in_enc_zbuf_envelope() {
-        let entry = encode_query_value_ext(&default_encoding(), b"hi").unwrap();
+        let entry = encode_query_value_ext::<Wire>(&default_encoding(), b"hi").unwrap();
         assert_eq!(entry.header, 0x43, "ENC_ZBUF(0x40) | value id(0x03)");
         match entry.body {
             ExtEntryOwnedVariant::CodecZenohExtZbuf(z) => {
@@ -161,7 +166,7 @@ mod tests {
     #[test]
     fn query_value_encode_decode_round_trip() {
         let enc = default_encoding();
-        let entry = encode_query_value_ext(&enc, &[0xDE, 0xAD, 0xBE, 0xEF]).unwrap();
+        let entry = encode_query_value_ext::<Wire>(&enc, &[0xDE, 0xAD, 0xBE, 0xEF]).unwrap();
         let chain = [entry];
         let (got_enc, got_payload) =
             decode_query_value_ext(&chain).expect("value ext decodes back");
@@ -181,7 +186,7 @@ mod tests {
             packed_id: 0x0B,
             schema: Some("json".to_string()),
         };
-        let entry = encode_query_value_ext(&enc, b"payload-bytes").unwrap();
+        let entry = encode_query_value_ext::<Wire>(&enc, b"payload-bytes").unwrap();
         let chain = [entry];
         let (got_enc, got_payload) =
             decode_query_value_ext(&chain).expect("schema-encoding value ext decodes");
@@ -194,7 +199,7 @@ mod tests {
     /// remainder after the encoding is a zero-length slice.
     #[test]
     fn query_value_round_trip_empty_payload() {
-        let entry = encode_query_value_ext(&default_encoding(), b"").unwrap();
+        let entry = encode_query_value_ext::<Wire>(&default_encoding(), b"").unwrap();
         let chain = [entry];
         let (_enc, payload) = decode_query_value_ext(&chain).expect("empty-payload value decodes");
         assert_eq!(payload, b"");
@@ -204,7 +209,8 @@ mod tests {
     /// `0x01`) in the chain is invisible to the value (`0x03`) lookup.
     #[test]
     fn decode_ignores_non_value_exts() {
-        let si = crate::source_info_ext::encode_source_info_ext_entry(&[0xAA], 1, 2).unwrap();
+        let si =
+            crate::source_info_ext::encode_source_info_ext_entry::<Wire>(&[0xAA], 1, 2).unwrap();
         let chain = [si];
         assert!(decode_query_value_ext(&chain).is_none());
     }
@@ -212,6 +218,6 @@ mod tests {
     /// An empty chain yields `None`.
     #[test]
     fn decode_returns_none_on_empty_chain() {
-        assert!(decode_query_value_ext(&[]).is_none());
+        assert!(decode_query_value_ext::<Wire>(&[]).is_none());
     }
 }

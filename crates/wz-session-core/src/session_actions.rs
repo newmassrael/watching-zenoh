@@ -61,11 +61,11 @@ use wz_runtime_core::TimeSource;
 // serves exactly one item and must carry exactly that item's gate; carrying a
 // narrower one is what turned a `declare-subscriber`-without-`liveliness-token`
 // build into E0425 the moment the method's own gate was widened.
+#[cfg(feature = "codec-response")]
+use crate::wire::ResponseOwned;
 #[cfg(any(feature = "liveliness-token", feature = "declare-subscriber"))]
 use wz_codecs::declare::DeclareOwned;
 use wz_codecs::ext_entry::ExtEntryOwned;
-#[cfg(feature = "codec-response")]
-use wz_codecs::response::ResponseOwned;
 
 use crate::action_trace::ActionTrace;
 use crate::close_reason::CloseReason;
@@ -6895,7 +6895,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     fn dispatch_push(
         &self,
         priority: Priority,
-        push: wz_codecs::push::PushOwned,
+        push: crate::wire::PushOwned,
         reliable: bool,
     ) -> Result<(), SendWireError> {
         let class = self.outbound_push_class(&push);
@@ -6929,7 +6929,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     #[cfg(feature = "codec-push")]
     fn outbound_push_class(
         &self,
-        _push: &wz_codecs::push::PushOwned,
+        _push: &crate::wire::PushOwned,
     ) -> crate::stats::NetworkStatsClass {
         #[cfg(feature = "transport-stats")]
         {
@@ -6945,7 +6945,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     #[cfg(feature = "codec-request")]
     fn outbound_request_class(
         &self,
-        _request: &wz_codecs::request::RequestOwned,
+        _request: &crate::wire::RequestOwned,
     ) -> crate::stats::NetworkStatsClass {
         #[cfg(feature = "transport-stats")]
         {
@@ -6963,7 +6963,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     #[cfg(feature = "codec-response")]
     fn outbound_response_class(
         &self,
-        _response: &wz_codecs::response::ResponseOwned,
+        _response: &crate::wire::ResponseOwned,
     ) -> crate::stats::NetworkStatsClass {
         #[cfg(feature = "transport-stats")]
         {
@@ -7282,7 +7282,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     #[cfg(feature = "codec-request")]
     fn dispatch_request(
         &self,
-        request: wz_codecs::request::RequestOwned,
+        request: crate::wire::RequestOwned,
         reliable: bool,
     ) -> Result<(), SendWireError> {
         let class = self.outbound_request_class(&request);
@@ -7302,7 +7302,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     #[cfg(feature = "codec-response")]
     fn dispatch_response(
         &self,
-        response: wz_codecs::response::ResponseOwned,
+        response: crate::wire::ResponseOwned,
         reliable: bool,
     ) -> Result<(), SendWireError> {
         let class = self.outbound_response_class(&response);

@@ -91,10 +91,16 @@ pub mod whatami;
 /// drift from them the way an independently-pinned dependency could.
 ///
 /// Deliberately NARROW: the four names that read or write a codec's own bytes,
-/// not the runtime. A consumer needing more of it has a different relationship
-/// with SCE than "reads and writes the wire", and should say so in its own
-/// manifest.
-pub use sce_forge_runtime::codec::{SceByteBuf, SceCursor, SceSink};
+/// not the runtime, and [`CodecStorage`], the bound every generic owned type
+/// carries. A consumer needing more of it has a different relationship with SCE
+/// than "reads and writes the wire", and should say so in its own manifest.
+///
+/// [`CodecStorage`] is here because a function generic over the profile a
+/// message was decoded into (`fn f<S: CodecStorage>(p: &PushOwned<S>)`) cannot
+/// be written without naming it, and the consumers that need to be generic
+/// (`wz-codecs-test-support`, which projects an owned message of either plane
+/// back to its bytes) are exactly the ones that do not depend on the runtime.
+pub use sce_forge_runtime::codec::{CodecStorage, SceByteBuf, SceCursor, SceSink};
 
 /// The `alloc`-only append sink, beside the three above for the same reason:
 /// a caller assembling a nested body (an ext whose payload is itself a

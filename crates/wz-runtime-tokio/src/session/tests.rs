@@ -947,7 +947,7 @@ fn inbound_push_aliased_in_our_space(
         }),
         ..wz_codecs::push::Push::default()
     }
-    .try_into_owned()
+    .try_into_owned_in::<wz_session_core::wire::WireStorage>()
     .expect("fixture Push is representable");
     wz_session_core::driver_loop::DriverLoopOutcome::FramePayload {
         priority: wz_session_core::qos::Priority::DEFAULT,
@@ -11620,7 +11620,7 @@ fn subscriber_sample_staged_before_undeclare_is_suppressed() {
 /// queryable-plane tests (mirror of `make_decl_token` — the
 /// wz-session-core test builders are not a dev-dep here per R311ds).
 #[cfg(all(feature = "query-queryable", feature = "codec-response-final"))]
-fn make_request_query(rid: u64, keyexpr_literal: &str) -> wz_codecs::request::RequestOwned {
+fn make_request_query(rid: u64, keyexpr_literal: &str) -> wz_session_core::wire::RequestOwned {
     use wz_codecs::request::{Request, RequestVariant};
     use wz_codecs::wireexpr::{Wireexpr, WireexprVariant};
     use wz_codecs::wireexpr_local::WireexprLocal;
@@ -11638,13 +11638,13 @@ fn make_request_query(rid: u64, keyexpr_literal: &str) -> wz_codecs::request::Re
         extensions: None,
         body: RequestVariant::CodecZenohQuery(wz_codecs::query::Query::default()),
     }
-    .try_into_owned()
+    .try_into_owned_in::<wz_session_core::wire::WireStorage>()
     .unwrap()
 }
 
 #[cfg(all(feature = "query-queryable", feature = "codec-response-final"))]
 fn query_frame_outcome(
-    request: wz_codecs::request::RequestOwned,
+    request: wz_session_core::wire::RequestOwned,
 ) -> wz_session_core::driver_loop::DriverLoopOutcome {
     wz_session_core::driver_loop::DriverLoopOutcome::FramePayload {
         priority: wz_session_core::qos::Priority::DEFAULT,

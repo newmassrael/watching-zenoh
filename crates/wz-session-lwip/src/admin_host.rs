@@ -312,8 +312,8 @@ mod tests {
             ..Push::default()
         };
         if let PushVariant::CodecZenohMsgPut(ref mut msg) = push.body {
-            msg.payload_len = payload.len() as u64;
-            msg.payload = payload;
+            msg.payload_len = Some(payload.len() as u64);
+            msg.payload = Some(payload);
         }
         NetworkMessage::Push(Box::new(push.try_into_owned().unwrap()))
     }

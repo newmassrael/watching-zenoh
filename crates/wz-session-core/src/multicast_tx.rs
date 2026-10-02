@@ -86,7 +86,7 @@ pub enum MulticastTxItem {
         /// The built Push network message
         /// ([`build_push_literal`](crate::push_build::build_push_literal) and
         /// friends). Boxed (R311mb) to bound the enum size.
-        push: Box<wz_codecs::push::PushOwned>,
+        push: Box<crate::wire::PushOwned>,
         /// Channel selection: reliable mints on the reliable ring,
         /// best-effort on the other (multicast UDP delivery is
         /// best-effort either way; the flag governs the SN channel +
@@ -115,7 +115,7 @@ pub enum MulticastTxItem {
         /// The built `Response` network message (drained from the
         /// observer's `pending_replies` via `QueryReply::into_response`).
         /// Boxed (R311mb) to bound the enum size.
-        response: Box<wz_codecs::response::ResponseOwned>,
+        response: Box<crate::wire::ResponseOwned>,
     },
     /// R311lq — the `ResponseFinal` terminating a multicast reply chain
     /// for `request_id`. Unconditionally reliable: dropping it would leave

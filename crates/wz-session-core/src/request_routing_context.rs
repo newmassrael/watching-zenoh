@@ -32,7 +32,7 @@
 //! the Request-level header `Z` sync — the one field that differs from the Push
 //! / Declare twins.
 
-use wz_codecs::request::RequestOwned;
+use crate::wire::RequestOwned;
 
 use crate::ext_nodeid;
 use crate::query_mode::{QueryTarget, TARGET_EXT_ID};
@@ -93,8 +93,8 @@ mod tests {
     use super::*;
     use crate::ext_nodeid::{EXT_ENC_Z64, EXT_FLAG_Z, MESSAGE_FLAG_Z};
     use crate::request_build::build_request_query;
+    use crate::wire::parts::{ExtEntryOwned, ExtEntryOwnedVariant};
     use alloc::vec;
-    use wz_codecs::ext_entry::{ExtEntryOwned, ExtEntryOwnedVariant};
     use wz_codecs::ext_zint::ExtZint;
 
     /// A routed Query Request (rid 42, literal keyexpr via mapping id 0) — the
@@ -261,7 +261,7 @@ mod tests {
 
         let mut cursor = SceCursor::new(&bytes);
         let decoded = Request::decode(&mut cursor)
-            .and_then(|x| x.try_into_owned())
+            .and_then(|x| x.try_into_owned_in::<crate::wire::WireStorage>())
             .expect("decode request");
         assert_eq!(
             read_request_source(&decoded),

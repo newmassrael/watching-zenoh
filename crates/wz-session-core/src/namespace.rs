@@ -62,7 +62,7 @@
 use alloc::string::{String, ToString as _};
 
 use hashbrown::{HashMap, HashSet};
-use sce_forge_runtime::codec::CodecError;
+use sce_forge_runtime::codec::{CodecError, CodecStorage, SceStr};
 
 use crate::driver_loop::DriverLoopOutcome;
 use crate::keyexpr_prefix::{strip_nonwild_prefix, OwnedNonWildKeyExpr};
@@ -88,16 +88,20 @@ const INTEREST_F: u8 = 0x40;
 const INTEREST_BODY_M: u8 = 0x40;
 
 /// Read `(id, suffix)` from a wireexpr regardless of Local/Nonlocal arm.
-fn id_suffix(we: &WireexprOwned) -> (u64, Option<&str>) {
+///
+/// Generic over the storage profile (R3011): a namespace decorates messages of
+/// both planes, and a `Declare`'s key expression is on the default profile while
+/// a `Push`'s is on [`WireStorage`](crate::wire::WireStorage).
+fn id_suffix<S: CodecStorage>(we: &WireexprOwned<S>) -> (u64, Option<&str>) {
     match &we.body {
-        WireexprOwnedVariant::WireexprLocal(a) => (a.id, a.suffix.as_deref()),
-        WireexprOwnedVariant::WireexprNonlocal(a) => (a.id, a.suffix.as_deref()),
+        WireexprOwnedVariant::WireexprLocal(a) => (a.id, a.suffix.as_ref().map(SceStr::as_str)),
+        WireexprOwnedVariant::WireexprNonlocal(a) => (a.id, a.suffix.as_ref().map(SceStr::as_str)),
     }
 }
 
 /// `true` iff the wireexpr is Sender-mapped (Local arm, M=1). Receiver-mapped
 /// (Nonlocal, M=0) references the receiver's own already-relative table.
-fn is_sender_mapped(we: &WireexprOwned) -> bool {
+fn is_sender_mapped<S: CodecStorage>(we: &WireexprOwned<S>) -> bool {
     matches!(&we.body, WireexprOwnedVariant::WireexprLocal(_))
 }
 
@@ -105,8 +109,11 @@ fn is_sender_mapped(we: &WireexprOwned) -> bool {
 /// Local/Nonlocal arm. The keyexpr's suffix was already PRESENT (we only ever
 /// rewrite a keyexpr that carried a literal suffix), so no owning-message
 /// suffix-presence flag needs touching.
-fn set_literal_suffix(we: &mut WireexprOwned, suffix: String) -> Result<(), CodecError> {
-    let sce = crate::codec_owned::owned_string::<128>(&suffix)?;
+fn set_literal_suffix<S: CodecStorage>(
+    we: &mut WireexprOwned<S>,
+    suffix: String,
+) -> Result<(), CodecError> {
+    let sce = <S::Str<128> as SceStr>::from_view(&suffix)?;
     let len = suffix.len() as u64;
     match &mut we.body {
         WireexprOwnedVariant::WireexprLocal(a) => {
@@ -170,7 +177,7 @@ pub fn apply_egress(ns: &OwnedNonWildKeyExpr, msg: &mut NetworkMessage) -> Resul
 #[cfg(feature = "codec-push")]
 pub fn apply_egress_push(
     ns: &OwnedNonWildKeyExpr,
-    p: &mut wz_codecs::push::PushOwned,
+    p: &mut crate::wire::PushOwned,
 ) -> Result<(), CodecError> {
     if let Some(new) = literal_prefix(ns, &p.keyexpr) {
         crate::push_build::set_push_keyexpr_literal(p, &new)?;
@@ -188,7 +195,7 @@ pub fn apply_egress_push(
 #[cfg(feature = "codec-response")]
 pub fn apply_egress_response(
     ns: &OwnedNonWildKeyExpr,
-    r: &mut wz_codecs::response::ResponseOwned,
+    r: &mut crate::wire::ResponseOwned,
 ) -> Result<(), CodecError> {
     if let Some(new) = literal_prefix(ns, &r.keyexpr) {
         crate::response_build::set_response_keyexpr_literal(r, &new)?;
@@ -218,7 +225,10 @@ pub fn apply_egress_interest(
 /// The literal-prefix egress rule: `Some(<ns>/<suffix>)` when the keyexpr is a
 /// literal (`id == 0`), else `None` (an aliased use already carries the
 /// namespace from its declaration). zenoh `handle_namespace_egress(.., false)`.
-fn literal_prefix(ns: &OwnedNonWildKeyExpr, we: &WireexprOwned) -> Option<String> {
+fn literal_prefix<S: CodecStorage>(
+    ns: &OwnedNonWildKeyExpr,
+    we: &WireexprOwned<S>,
+) -> Option<String> {
     let (id, suffix) = id_suffix(we);
     if id == 0 {
         Some(ns.prepend(suffix.unwrap_or("")))
@@ -458,7 +468,7 @@ impl NamespaceIngress {
     /// namespace from one keyexpr in place, returning whether the message is
     /// kept. `decl_id` is `Some` only for a `DeclareKeyExpr` DEFINITION (so a
     /// non-matching definition is parked in `incomplete` by that id).
-    fn strip(&mut self, we: &mut WireexprOwned, decl_id: Option<u64>) -> bool {
+    fn strip<S: CodecStorage>(&mut self, we: &mut WireexprOwned<S>, decl_id: Option<u64>) -> bool {
         let sender = is_sender_mapped(we);
         self.strip_mapped(we, decl_id, sender)
     }
@@ -483,7 +493,12 @@ impl NamespaceIngress {
     /// `wireexpr_nonlocal.rs`), so the mis-tagged variant corrupts no value — it
     /// only forgets which table the id belongs to. Reading `M` here recovers
     /// exactly that, with no change to the pinned codegen.
-    fn strip_mapped(&mut self, we: &mut WireexprOwned, decl_id: Option<u64>, sender: bool) -> bool {
+    fn strip_mapped<S: CodecStorage>(
+        &mut self,
+        we: &mut WireexprOwned<S>,
+        decl_id: Option<u64>,
+        sender: bool,
+    ) -> bool {
         let (id, suffix_opt) = id_suffix(we);
         // id != 0, Receiver(Nonlocal): an alias in OUR own table, already in
         // relative (stripped) form — pass through without re-stripping.
@@ -692,7 +707,7 @@ mod tests {
         }
     }
 
-    fn suffix_of(we: &WireexprOwned) -> Option<String> {
+    fn suffix_of<S: CodecStorage>(we: &WireexprOwned<S>) -> Option<String> {
         id_suffix(we).1.map(str::to_string)
     }
 

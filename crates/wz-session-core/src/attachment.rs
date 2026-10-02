@@ -22,8 +22,7 @@
 //! the catalog primitive the `pubsub-attachment` / `query-attachment`
 //! consumer features select.
 
-use crate::codec_owned::owned_bytes;
-use sce_forge_runtime::codec::CodecError;
+use sce_forge_runtime::codec::{CodecError, CodecStorage, SceByteBuf};
 use wz_codecs::ext_entry::{ExtEntryOwned, ExtEntryOwnedVariant};
 use wz_codecs::ext_zbuf::ExtZbufOwned;
 
@@ -85,17 +84,27 @@ const ATTACHMENT_EXT_HEADER_ENC_ZBUF: u8 = 0x40;
 /// surrounding codec applies the chain-continuation `Z` bit; this helper
 /// emits the entry with `Z` clear (terminator) so a caller appending it
 /// as the sole / last entry needs no fix-up.
-pub fn encode_attachment_ext(ext_id: u8, payload: &[u8]) -> Result<ExtEntryOwned, CodecError> {
+pub fn encode_attachment_ext<S: CodecStorage>(
+    ext_id: u8,
+    payload: &[u8],
+) -> Result<ExtEntryOwned<S>, CodecError> {
     // W3: the ext_zbuf `value` owned mirror is `SceBytes<32>` — under `alloc`
     // an UNBOUNDED `Vec` (the `32` is advisory; proven by the 200-byte reply
     // (A8a) + query (A8c-1) attachment tests), under `no_std` a
     // `heapless::Vec<u8, 32>` that returns `TooManyElements` past 32. So this
     // is fallible only on the `no_std` profile; under `alloc` any length rides.
+    //
+    // R3011 — generic over the storage profile, because the entry goes into a
+    // chain whose profile the CALLER chose (a message built to be encoded and
+    // dispatched locally is on the wire profile; an attachment on a transport
+    // message is on the default). The value is built by that profile's own
+    // byte container, which is a copy of `payload` on every profile: this
+    // builds a field that has no frame to share.
     Ok(ExtEntryOwned {
         header: ATTACHMENT_EXT_HEADER_ENC_ZBUF | ext_id,
         body: ExtEntryOwnedVariant::CodecZenohExtZbuf(ExtZbufOwned {
             value_len: payload.len() as u64,
-            value: owned_bytes(payload)?,
+            value: <S::Bytes<32> as SceByteBuf>::from_slice(payload)?,
         }),
     })
 }
@@ -105,11 +114,14 @@ pub fn encode_attachment_ext(ext_id: u8, payload: &[u8]) -> Result<ExtEntryOwned
 /// variant is exactly the decode-time witness that the header carried the
 /// ENC_ZBUF encoding, so no separate `enc()` test is needed. Returns the
 /// borrowed body slice; callers needing ownership map with `<[u8]>::to_vec`.
-pub fn decode_attachment_ext(extensions: &[ExtEntryOwned], ext_id: u8) -> Option<&[u8]> {
+pub fn decode_attachment_ext<S: CodecStorage>(
+    extensions: &[ExtEntryOwned<S>],
+    ext_id: u8,
+) -> Option<&[u8]> {
     for ext in extensions {
         if ext.ext_id() == ext_id {
             if let ExtEntryOwnedVariant::CodecZenohExtZbuf(z) = &ext.body {
-                return Some(z.value.as_slice());
+                return Some(SceByteBuf::as_slice(&z.value));
             }
         }
     }
@@ -182,11 +194,16 @@ pub fn deserialize_kv_attachment(
 mod tests {
     use super::*;
 
+    /// The profile a received message's chain is on; the helpers under test
+    /// are generic and a test that does not say which one it means has none.
+    type Wire = crate::wire::WireStorage;
+
     /// Round-trips the encode helper against the decode helper for the
     /// PUSH carrier and locks the on-the-wire header byte (`0x40 | 0x03`).
     #[test]
     fn push_encode_decode_round_trip() {
-        let ext = encode_attachment_ext(ATTACHMENT_EXT_ID_PUSH, &[0xDE, 0xAD, 0xBE, 0xEF]).unwrap();
+        let ext = encode_attachment_ext::<Wire>(ATTACHMENT_EXT_ID_PUSH, &[0xDE, 0xAD, 0xBE, 0xEF])
+            .unwrap();
         assert_eq!(
             ext.header, 0x43,
             "ENC_ZBUF | id_attachment(push) = 0x40 | 0x03"
@@ -201,7 +218,7 @@ mod tests {
     /// Same round-trip for the Query carrier (`0x40 | 0x05`).
     #[test]
     fn query_encode_decode_round_trip() {
-        let ext = encode_attachment_ext(ATTACHMENT_EXT_ID_QUERY, &[0x01, 0x02]).unwrap();
+        let ext = encode_attachment_ext::<Wire>(ATTACHMENT_EXT_ID_QUERY, &[0x01, 0x02]).unwrap();
         assert_eq!(
             ext.header, 0x45,
             "ENC_ZBUF | id_attachment(query) = 0x40 | 0x05"
@@ -218,14 +235,17 @@ mod tests {
     /// but the predicate must still discriminate).
     #[test]
     fn decode_discriminates_carrier_ext_id() {
-        let chain = [encode_attachment_ext(ATTACHMENT_EXT_ID_PUSH, &[0xAA]).unwrap()];
+        let chain = [encode_attachment_ext::<Wire>(ATTACHMENT_EXT_ID_PUSH, &[0xAA]).unwrap()];
         assert_eq!(decode_attachment_ext(&chain, ATTACHMENT_EXT_ID_QUERY), None);
     }
 
     /// An empty chain (and a chain with no matching ext) yields `None`.
     #[test]
     fn decode_returns_none_on_empty_chain() {
-        assert_eq!(decode_attachment_ext(&[], ATTACHMENT_EXT_ID_PUSH), None);
+        assert_eq!(
+            decode_attachment_ext::<Wire>(&[], ATTACHMENT_EXT_ID_PUSH),
+            None
+        );
     }
 
     /// Locks the exact `ze_serializer` kv-sequence wire bytes for a single

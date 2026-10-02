@@ -12,21 +12,24 @@
 //! `alloc`, so the Request forward path (`set_request_keyexpr_literal`) can
 //! reuse the SAME constructor without pulling in the Push codec.
 
-use sce_forge_runtime::codec::CodecError;
+use sce_forge_runtime::codec::{CodecError, CodecStorage, SceStr};
 use wz_codecs::wireexpr::{WireexprOwned, WireexprOwnedVariant};
 use wz_codecs::wireexpr_local::WireexprLocalOwned;
 
 /// A literal `Wireexpr` carrying `suffix` (mapping id 0 — the literal
 /// sentinel). The codec-agnostic SSOT a forwarder re-expresses an aliased
 /// keyexpr through before it crosses a link that does not share the inbound
-/// alias table (c3c-3 B1). Fallible only by the owned-string copy
-/// ([`owned_string`](crate::codec_owned::owned_string)).
-pub fn literal_wireexpr(suffix: &str) -> Result<WireexprOwned, CodecError> {
+/// alias table (c3c-3 B1). Fallible only by the owned-string copy.
+///
+/// Generic over the storage profile (R3011): Push, Request and Response build
+/// theirs at the wire profile and Declare at the default, and the profile is
+/// the one the caller's field names.
+pub fn literal_wireexpr<S: CodecStorage>(suffix: &str) -> Result<WireexprOwned<S>, CodecError> {
     Ok(WireexprOwned {
         body: WireexprOwnedVariant::WireexprLocal(WireexprLocalOwned {
             id: 0,
             suffix_len: Some(suffix.len() as u64),
-            suffix: Some(crate::codec_owned::owned_string(suffix)?),
+            suffix: Some(<S::Str<128> as SceStr>::from_view(suffix)?),
         }),
     })
 }
@@ -43,8 +46,8 @@ pub const NAMED_FLAG: u8 = 0x20;
 /// suffix-bearing wireexpr offset-shifts the peer's decode of the following body.
 /// Takes the two fields by `&mut` (disjoint borrows of the message struct) so the
 /// per-message wrappers are a one-line delegation with no duplicated logic.
-pub fn set_literal_keyexpr_fields(
-    keyexpr: &mut WireexprOwned,
+pub fn set_literal_keyexpr_fields<S: CodecStorage>(
+    keyexpr: &mut WireexprOwned<S>,
     header: &mut u8,
     suffix: &str,
 ) -> Result<(), CodecError> {

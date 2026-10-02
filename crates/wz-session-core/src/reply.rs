@@ -131,6 +131,8 @@ use crate::wireexpr_resolve::resolve_wireexpr_in;
 // R311y739 — the two-space PAIR is `alloc`-only: the `dispatch_messages` /
 // `dispatch_iteration_event` signatures name it under that gate alone, while
 // only the `Response` arm inside them resolves and so carries `codec-response`.
+#[cfg(all(feature = "codec-response", feature = "alloc"))]
+use crate::wire::{ResponseOwned, ResponseOwnedVariant};
 #[cfg(feature = "alloc")]
 use crate::wireexpr_resolve::MappingSpaces;
 #[cfg(all(
@@ -143,8 +145,6 @@ use crate::wireexpr_resolve::MappingSpaces;
     )
 ))]
 use wz_codecs::reply::ReplyOwnedVariant;
-#[cfg(all(feature = "codec-response", feature = "alloc"))]
-use wz_codecs::response::{ResponseOwned, ResponseOwnedVariant};
 #[cfg(all(feature = "codec-response-final", feature = "alloc"))]
 use wz_codecs::response_final::ResponseFinalOwned;
 
@@ -498,7 +498,7 @@ fn loopback_reply_timestamp(
     feature = "alloc",
     any(feature = "pubsub-put", feature = "query-reply")
 ))]
-fn put_reply_attachment(put: &wz_codecs::msg_put::MsgPutOwned) -> Option<Vec<u8>> {
+fn put_reply_attachment(put: &crate::wire::parts::MsgPutOwned) -> Option<Vec<u8>> {
     #[cfg(feature = "pubsub-attachment")]
     {
         put.extensions.as_ref().and_then(|exts| {
@@ -530,7 +530,7 @@ fn put_reply_attachment(put: &wz_codecs::msg_put::MsgPutOwned) -> Option<Vec<u8>
     feature = "alloc",
     any(feature = "pubsub-delete", feature = "query-reply")
 ))]
-fn del_reply_attachment(del: &wz_codecs::msg_del::MsgDelOwned) -> Option<Vec<u8>> {
+fn del_reply_attachment(del: &crate::wire::parts::MsgDelOwned) -> Option<Vec<u8>> {
     #[cfg(feature = "pubsub-attachment")]
     {
         del.extensions.as_ref().and_then(|exts| {
@@ -565,7 +565,7 @@ fn del_reply_attachment(del: &wz_codecs::msg_del::MsgDelOwned) -> Option<Vec<u8>
     )
 ))]
 fn reply_body_source_info(
-    exts: Option<&Vec<wz_codecs::ext_entry::ExtEntryOwned>>,
+    exts: Option<&Vec<crate::wire::parts::ExtEntryOwned>>,
 ) -> Option<crate::sample::SourceInfo> {
     #[cfg(feature = "reply-source-info")]
     {
@@ -604,7 +604,7 @@ fn reply_body_source_info(
     )
 ))]
 fn reply_body_timestamp(
-    ts: Option<&wz_codecs::timestamp::TimestampOwned>,
+    ts: Option<&crate::wire::parts::TimestampOwned>,
 ) -> Option<crate::sample::TimestampHint> {
     #[cfg(feature = "pubsub-timestamp")]
     {
@@ -625,7 +625,7 @@ fn reply_body_timestamp(
     feature = "alloc",
     any(feature = "pubsub-put", feature = "query-reply")
 ))]
-fn put_reply_encoding(put: &wz_codecs::msg_put::MsgPutOwned) -> Option<(u32, Option<String>)> {
+fn put_reply_encoding(put: &crate::wire::parts::MsgPutOwned) -> Option<(u32, Option<String>)> {
     #[cfg(feature = "pubsub-encoding")]
     {
         put.encoding.as_ref().map(|e| {
@@ -1553,7 +1553,7 @@ mod tests {
             body: ResponseVariant::CodecZenohReply(reply),
             ..Response::default()
         }
-        .try_into_owned()
+        .try_into_owned_in::<crate::wire::WireStorage>()
         .unwrap()
     }
 
@@ -1575,7 +1575,7 @@ mod tests {
             body: ResponseVariant::CodecZenohReply(reply),
             ..Response::default()
         }
-        .try_into_owned()
+        .try_into_owned_in::<crate::wire::WireStorage>()
         .unwrap()
     }
 
@@ -1611,7 +1611,7 @@ mod tests {
             body: ResponseVariant::CodecZenohErr(err_body),
             ..Response::default()
         }
-        .try_into_owned()
+        .try_into_owned_in::<crate::wire::WireStorage>()
         .unwrap()
     }
 
@@ -1654,7 +1654,7 @@ mod tests {
             body: ResponseVariant::CodecZenohReply(reply),
             ..Response::default()
         }
-        .try_into_owned()
+        .try_into_owned_in::<crate::wire::WireStorage>()
         .unwrap()
     }
 
@@ -3708,7 +3708,7 @@ mod decode_isolation_tests {
             body: ResponseVariant::CodecZenohReply(reply),
             ..Response::default()
         }
-        .try_into_owned()
+        .try_into_owned_in::<crate::wire::WireStorage>()
         .unwrap()
     }
 
@@ -3733,7 +3733,7 @@ mod decode_isolation_tests {
             body: ResponseVariant::CodecZenohReply(reply),
             ..Response::default()
         }
-        .try_into_owned()
+        .try_into_owned_in::<crate::wire::WireStorage>()
         .unwrap()
     }
 
@@ -3764,7 +3764,7 @@ mod decode_isolation_tests {
             body: ResponseVariant::CodecZenohErr(err_body),
             ..Response::default()
         }
-        .try_into_owned()
+        .try_into_owned_in::<crate::wire::WireStorage>()
         .unwrap()
     }
 
@@ -3879,7 +3879,7 @@ mod reply_timestamp_decode_isolation_tests {
     /// through `gated_reply_timestamp` and would elide it in this profile. The
     /// codec field is ungated, so this is constructible with the feature off —
     /// which is precisely the foreign-peer shape being guarded.
-    fn stamped_put_response(rid: u64, keyexpr: &str) -> wz_codecs::response::ResponseOwned {
+    fn stamped_put_response(rid: u64, keyexpr: &str) -> crate::wire::ResponseOwned {
         let zid = [0x01u8, 0x02, 0x03, 0x04];
         let put = wz_codecs::msg_put::MsgPut {
             timestamp: Some(wz_codecs::timestamp::Timestamp {
@@ -3889,7 +3889,7 @@ mod reply_timestamp_decode_isolation_tests {
             }),
             ..wz_codecs::msg_put::MsgPut::default()
         }
-        .try_into_owned()
+        .try_into_owned_in::<crate::wire::WireStorage>()
         .unwrap();
         let mut resp =
             crate::response_build::ResponseReplyBuilder::new(rid, 0, Some(keyexpr), b"v")

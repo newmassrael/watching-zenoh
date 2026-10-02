@@ -1126,6 +1126,32 @@ impl RxBytes {
         matches!(self.0, RxRepr::Shared { .. })
     }
 
+    /// `bytes` as storage that can be shared: lent behind an `Arc` where there
+    /// is one, owned where there is not.
+    ///
+    /// The conversion a caller makes when it HAS a buffer it built itself (a
+    /// decompressed batch, a reassembled message, a parked remainder) and wants
+    /// the messages decoded from it to share it rather than copy out of it.
+    /// `From<Vec<u8>>` is the owned arm and its sub-ranges copy; this is the
+    /// arm whose sub-ranges do not. The cost is one allocation for the `Arc`,
+    /// paid once per buffer and not once per message.
+    pub fn lend(bytes: Vec<u8>) -> Self {
+        #[cfg(feature = "rx-shared-bytes")]
+        {
+            let end = bytes.len();
+            let storage: alloc::sync::Arc<dyn RxStorage> = alloc::sync::Arc::new(bytes);
+            Self(RxRepr::Shared {
+                storage,
+                start: 0,
+                end,
+            })
+        }
+        #[cfg(not(feature = "rx-shared-bytes"))]
+        {
+            Self(RxRepr::Owned(bytes))
+        }
+    }
+
     /// The `range` of THESE bytes (positions in `self`, not in the storage
     /// behind it), sharing the storage when there is one. `None` when `range`
     /// does not lie inside the bytes -- upstream's `ZSlice::subslice` answers the

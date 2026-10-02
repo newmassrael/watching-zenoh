@@ -88,7 +88,7 @@ impl<Q> MulticastReplySink<Q> {
 #[cfg(any(feature = "codec-response", feature = "codec-response-final"))]
 impl<Q: MulticastReplyEnqueue> crate::response_sink::ResponseSink for MulticastReplySink<Q> {
     #[cfg(feature = "codec-response")]
-    fn send_response(&self, response: wz_codecs::response::ResponseOwned) {
+    fn send_response(&self, response: crate::wire::ResponseOwned) {
         self.queue.enqueue(MulticastTxItem::Response {
             response: Box::new(response),
         });

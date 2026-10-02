@@ -99,7 +99,9 @@ struct Answers {
 /// Comparing this rather than
 /// presence is what makes the assertion about behaviour — under the shared
 /// omit-on-DEFAULT encode rule the two are the same fact.
-fn effective_qos(exts: Option<&Vec<wz_codecs::ext_entry::ExtEntryOwned>>) -> QosLevel {
+fn effective_qos<S: wz_codecs::CodecStorage>(
+    exts: Option<&Vec<wz_codecs::ext_entry::ExtEntryOwned<S>>>,
+) -> QosLevel {
     read_z64_ext(exts, QOS_EXT_ID)
         .map(|v| QosLevel::from_raw(v as u8))
         .unwrap_or(QosLevel::DEFAULT)

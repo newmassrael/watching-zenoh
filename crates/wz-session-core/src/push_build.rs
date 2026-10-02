@@ -23,12 +23,15 @@ use alloc::vec::Vec;
 use sce_forge_runtime::codec::CodecError;
 use wz_codecs::wire_const;
 
-use wz_codecs::ext_entry::ExtEntryOwned;
-use wz_codecs::msg_del::MsgDelOwned;
-use wz_codecs::msg_put::MsgPutOwned;
-use wz_codecs::push::{PushOwned, PushOwnedVariant};
-use wz_codecs::wireexpr::{WireexprOwned, WireexprOwnedVariant};
-use wz_codecs::wireexpr_local::WireexprLocalOwned;
+// R3011 — every part of a message built here is spelled at the wire profile
+// (`crate::wire`), because the builders' output is both encoded and dispatched
+// to local subscribers, and the dispatch takes the message type a receive path
+// hands up.
+use crate::wire::parts::{
+    ExtEntryOwned, MsgDelOwned, MsgPutOwned, WireexprLocalOwned, WireexprOwned,
+    WireexprOwnedVariant,
+};
+use crate::wire::{PushOwned, PushOwnedVariant};
 
 use crate::metadata::PushMetadata;
 
@@ -48,7 +51,7 @@ use crate::source_info_ext::encode_source_info_ext_entry;
 // *which cfg arm happens to name a type* drifts the moment that arm is
 // refactored, and only an unbuilt subset pays.
 #[cfg(feature = "pubsub-qos")]
-use wz_codecs::ext_entry::ExtEntryOwnedVariant;
+use crate::wire::parts::ExtEntryOwnedVariant;
 #[cfg(feature = "pubsub-qos")]
 use wz_codecs::ext_zint::ExtZint;
 
@@ -164,7 +167,7 @@ pub fn build_push_aliased(
         "build_push_aliased requires a non-zero mapping id; use build_push_literal for id=0",
     );
     let suffix_len = suffix.map(|s| s.len() as u64);
-    let suffix_string = suffix.map(crate::codec_owned::owned_string).transpose()?;
+    let suffix_string = suffix.map(crate::wire::wire_string).transpose()?;
     // Push.header.N (bit 5, 0x20) is the "suffix carrier present"
     // flag: set when the WireexprLocal carries a non-None suffix,
     // clear for a pure-aliased Push (`suffix=None`). The peer's
@@ -226,7 +229,7 @@ pub fn build_push_del_literal(keyexpr_suffix: &str) -> Result<PushOwned, CodecEr
             body: WireexprOwnedVariant::WireexprLocal(WireexprLocalOwned {
                 id: 0,
                 suffix_len: Some(suffix_len),
-                suffix: Some(crate::codec_owned::owned_string(keyexpr_suffix)?),
+                suffix: Some(crate::wire::wire_string(keyexpr_suffix)?),
             }),
         },
         extensions: None,
@@ -260,7 +263,7 @@ pub fn reliteralize_push(push: &PushOwned, keyexpr: &str) -> Result<PushOwned, C
         body: WireexprOwnedVariant::WireexprLocal(WireexprLocalOwned {
             id: 0,
             suffix_len: Some(keyexpr.len() as u64),
-            suffix: Some(crate::codec_owned::owned_string(keyexpr)?),
+            suffix: Some(crate::wire::wire_string(keyexpr)?),
         }),
     };
     // Push.header N flag (0x20, "suffix carrier present") — set because the
@@ -299,7 +302,7 @@ pub fn build_push_del_aliased(
         "build_push_del_aliased requires a non-zero mapping id; use build_push_del_literal for id=0",
     );
     let suffix_len = suffix.map(|s| s.len() as u64);
-    let suffix_string = suffix.map(crate::codec_owned::owned_string).transpose()?;
+    let suffix_string = suffix.map(crate::wire::wire_string).transpose()?;
     // Same N-flag derivation as build_push_aliased: bit 5 set when
     // a per-Push suffix tail is present, cleared for the
     // pure-aliased shape. The flag has identical decoder semantics
@@ -473,10 +476,12 @@ fn build_push_outer_extensions(qos: Option<crate::sample::QosLevel>) -> Option<V
 /// keeps the builders' signatures stable across the toggle.
 fn gated_timestamp_field(
     timestamp: Option<&crate::sample::TimestampHint>,
-) -> Result<Option<wz_codecs::timestamp::TimestampOwned>, CodecError> {
+) -> Result<Option<crate::wire::parts::TimestampOwned>, CodecError> {
     #[cfg(feature = "pubsub-timestamp")]
     {
-        timestamp.map(|t| t.to_codec().try_into_owned()).transpose()
+        timestamp
+            .map(|t| t.to_codec().try_into_owned_in::<crate::wire::WireStorage>())
+            .transpose()
     }
     #[cfg(not(feature = "pubsub-timestamp"))]
     {
@@ -496,10 +501,12 @@ fn gated_timestamp_field(
 /// the toggle.
 fn gated_encoding_field(
     encoding: Option<&crate::sample::EncodingHint>,
-) -> Result<Option<wz_codecs::encoding::EncodingOwned>, CodecError> {
+) -> Result<Option<crate::wire::parts::EncodingOwned>, CodecError> {
     #[cfg(feature = "pubsub-encoding")]
     {
-        encoding.map(|e| e.to_codec().try_into_owned()).transpose()
+        encoding
+            .map(|e| e.to_codec().try_into_owned_in::<crate::wire::WireStorage>())
+            .transpose()
     }
     #[cfg(not(feature = "pubsub-encoding"))]
     {
@@ -666,7 +673,7 @@ pub fn build_push_literal_with_meta(
             body: WireexprOwnedVariant::WireexprLocal(WireexprLocalOwned {
                 id: 0,
                 suffix_len: Some(keyexpr_suffix.len() as u64),
-                suffix: Some(crate::codec_owned::owned_string(keyexpr_suffix)?),
+                suffix: Some(crate::wire::wire_string(keyexpr_suffix)?),
             }),
         },
         extensions: outer_exts,
@@ -739,7 +746,7 @@ pub fn build_push_shm_literal(
             body: WireexprOwnedVariant::WireexprLocal(WireexprLocalOwned {
                 id: 0,
                 suffix_len: Some(keyexpr_suffix.len() as u64),
-                suffix: Some(crate::codec_owned::owned_string(keyexpr_suffix)?),
+                suffix: Some(crate::wire::wire_string(keyexpr_suffix)?),
             }),
         },
         extensions: outer_exts,
@@ -768,7 +775,7 @@ pub fn build_push_aliased_with_meta(
     let outer_exts = build_push_outer_extensions(meta.qos);
     let z_flag = if outer_exts.is_some() { 0x80u8 } else { 0x00u8 };
     let suffix_len = suffix.map(|s| s.len() as u64);
-    let suffix_string = suffix.map(crate::codec_owned::owned_string).transpose()?;
+    let suffix_string = suffix.map(crate::wire::wire_string).transpose()?;
     let n_flag = if suffix.is_some() { 0x20u8 } else { 0x00u8 };
     Ok(PushOwned {
         header: wire_const::N_MID_PUSH | n_flag | z_flag,
@@ -806,7 +813,7 @@ pub fn build_push_del_literal_with_meta(
             body: WireexprOwnedVariant::WireexprLocal(WireexprLocalOwned {
                 id: 0,
                 suffix_len: Some(keyexpr_suffix.len() as u64),
-                suffix: Some(crate::codec_owned::owned_string(keyexpr_suffix)?),
+                suffix: Some(crate::wire::wire_string(keyexpr_suffix)?),
             }),
         },
         extensions: outer_exts,
@@ -832,7 +839,7 @@ pub fn build_push_del_aliased_with_meta(
     let outer_exts = build_push_outer_extensions(meta.qos);
     let z_flag = if outer_exts.is_some() { 0x80u8 } else { 0x00u8 };
     let suffix_len = suffix.map(|s| s.len() as u64);
-    let suffix_string = suffix.map(crate::codec_owned::owned_string).transpose()?;
+    let suffix_string = suffix.map(crate::wire::wire_string).transpose()?;
     let n_flag = if suffix.is_some() { 0x20u8 } else { 0x00u8 };
     Ok(PushOwned {
         header: wire_const::N_MID_PUSH | n_flag | z_flag,
@@ -1590,7 +1597,7 @@ mod tests {
         let mut cursor = sce_forge_runtime::codec::SceCursor::new(&encoded);
         let decoded = Push::decode(&mut cursor)
             .expect("Push round-trip decode")
-            .try_into_owned()
+            .try_into_owned_in::<crate::wire::WireStorage>()
             .unwrap();
 
         // Outer Push extensions: qos must round-trip.
@@ -1668,7 +1675,7 @@ mod tests {
         let mut cursor = sce_forge_runtime::codec::SceCursor::new(&encoded);
         let decoded = Push::decode(&mut cursor)
             .expect("Push(MsgDel) round-trip")
-            .try_into_owned()
+            .try_into_owned_in::<crate::wire::WireStorage>()
             .unwrap();
 
         if let PushOwnedVariant::CodecZenohMsgDel(del) = &decoded.body {

@@ -743,7 +743,7 @@ mod tests {
 
     // Build a wire-inbound Put Push carrying a literal keyexpr (id=0 ⇒
     // resolve_wireexpr returns the suffix verbatim, no table lookup).
-    fn put_push(keyexpr: &str, payload: &[u8]) -> wz_codecs::push::PushOwned {
+    fn put_push(keyexpr: &str, payload: &[u8]) -> crate::wire::PushOwned {
         use wz_codecs::push::{Push, PushOwnedVariant};
         use wz_codecs::wireexpr::{Wireexpr, WireexprVariant};
         use wz_codecs::wireexpr_local::WireexprLocal;
@@ -757,7 +757,7 @@ mod tests {
             },
             ..Push::default()
         }
-        .try_into_owned()
+        .try_into_owned_in::<crate::wire::WireStorage>()
         .unwrap();
         if let PushOwnedVariant::CodecZenohMsgPut(ref mut put) = push.body {
             *put = crate::put_payload::inline(payload).unwrap();
@@ -765,7 +765,7 @@ mod tests {
         push
     }
 
-    fn frame_event(push: wz_codecs::push::PushOwned) -> crate::driver_loop::DriverLoopOutcome {
+    fn frame_event(push: crate::wire::PushOwned) -> crate::driver_loop::DriverLoopOutcome {
         use crate::network_message::NetworkMessage;
         use std::boxed::Box;
         use std::vec;
@@ -802,7 +802,7 @@ mod tests {
 
     /// R311y740 (N37) — the `M=0` (`Mapping::Receiver`) twin of [`put_push`]:
     /// the mapping id names OUR space, not the peer's.
-    fn put_push_own_alias(mapping_id: u64, payload: &[u8]) -> wz_codecs::push::PushOwned {
+    fn put_push_own_alias(mapping_id: u64, payload: &[u8]) -> crate::wire::PushOwned {
         use wz_codecs::push::{Push, PushOwnedVariant};
         use wz_codecs::wireexpr::{Wireexpr, WireexprVariant};
         use wz_codecs::wireexpr_nonlocal::WireexprNonlocal;
@@ -816,7 +816,7 @@ mod tests {
             },
             ..Push::default()
         }
-        .try_into_owned()
+        .try_into_owned_in::<crate::wire::WireStorage>()
         .unwrap();
         if let PushOwnedVariant::CodecZenohMsgPut(ref mut put) = push.body {
             *put = crate::put_payload::inline(payload).unwrap();

@@ -59,6 +59,8 @@ use wz_session_core::network_message::{BatchParse, NetworkMessage};
 use wz_session_core::passive::{Carried, Direction, PassiveFrame};
 
 use wz_codecs::wireexpr::WireexprOwnedVariant;
+use wz_codecs::CodecStorage;
+use wz_session_core::wire::parts::WireexprOwnedVariant as WireKeyexpr;
 
 use crate::filter::{Filter, RecordKind, RecordView, Selection, Truth};
 
@@ -831,21 +833,20 @@ impl KeyexprSpaces {
     ///
     /// `Ok(literal)` when it resolved, `Err(alias)` naming the space and id
     /// when it did not. Never a lookup in the space the `M` bit did not name.
-    pub fn resolve(
+    pub fn resolve<S: CodecStorage>(
         &self,
         direction: Direction,
-        body: &WireexprOwnedVariant,
+        body: &WireexprOwnedVariant<S>,
     ) -> Result<String, (Direction, u64)> {
         // The variant tag IS the mapping bit (`wireexpr_resolve`'s rule): our
         // codec's `WireexprLocal` is `M=1` — the SENDER's space, which for a
         // record travelling in `direction` is `direction`'s own — and
         // `WireexprNonlocal` is `M=0`, the RECEIVER's, which is the peer's.
-        let (id, suffix, space) = match body {
-            WireexprOwnedVariant::WireexprLocal(a) => (a.id, a.suffix.as_deref(), direction),
-            WireexprOwnedVariant::WireexprNonlocal(a) => {
-                (a.id, a.suffix.as_deref(), direction.peer())
-            }
+        let space = match body {
+            WireexprOwnedVariant::WireexprLocal(_) => direction,
+            WireexprOwnedVariant::WireexprNonlocal(_) => direction.peer(),
         };
+        let (id, suffix) = wz_session_core::wireexpr_resolve::id_and_suffix(body);
         self.resolve_parts(space, id, suffix)
     }
 
@@ -866,15 +867,12 @@ impl KeyexprSpaces {
     /// `Err` names the DECLARER's space and id when nothing resolved, matching
     /// what [`Self::resolve`] reports for the same reference, and is also what
     /// an ambiguous scope yields: two candidate bases and no bit to choose.
-    fn resolve_declared(
+    fn resolve_declared<S: CodecStorage>(
         &self,
         direction: Direction,
-        body: &WireexprOwnedVariant,
+        body: &WireexprOwnedVariant<S>,
     ) -> Result<String, (Direction, u64)> {
-        let (id, suffix) = match body {
-            WireexprOwnedVariant::WireexprLocal(a) => (a.id, a.suffix.as_deref()),
-            WireexprOwnedVariant::WireexprNonlocal(a) => (a.id, a.suffix.as_deref()),
-        };
+        let (id, suffix) = wz_session_core::wireexpr_resolve::id_and_suffix(body);
         if id == 0 {
             return Ok(suffix.unwrap_or("").to_string());
         }
@@ -2020,7 +2018,7 @@ pub(crate) fn sized_payload(counts: &KeyexprCounts) -> Option<u64> {
 /// one question, which is exactly what a single function forecloses.
 #[cfg(feature = "network-codecs")]
 pub(crate) fn carries_shm_marker(
-    extensions: Option<&[wz_codecs::ext_entry::ExtEntryOwned]>,
+    extensions: Option<&[wz_session_core::wire::parts::ExtEntryOwned]>,
 ) -> bool {
     use wz_session_core::ext_header::{body_ext_id, ext_eid, EXT_FLAG_M};
 
@@ -2061,7 +2059,7 @@ pub(crate) fn carries_shm_marker(
 #[cfg(feature = "network-codecs")]
 pub(crate) fn source_delay_ms(
     observed_at_ms: Option<u64>,
-    timestamp: Option<&wz_codecs::timestamp::TimestampOwned>,
+    timestamp: Option<&wz_session_core::wire::parts::TimestampOwned>,
 ) -> Result<Option<u64>, SourceAhead> {
     let (Some(seen), Some(ts)) = (observed_at_ms, timestamp) else {
         return Ok(None);
@@ -2085,7 +2083,7 @@ pub(crate) struct SourceAhead;
 /// empty slice and the caller reads [`put_payload_is_elsewhere`] to know the
 /// emptiness is not a measurement.
 #[cfg(feature = "network-codecs")]
-pub(crate) fn put_bytes(put: &wz_codecs::msg_put::MsgPutOwned) -> &[u8] {
+pub(crate) fn put_bytes(put: &wz_session_core::wire::parts::MsgPutOwned) -> &[u8] {
     wz_session_core::put_payload::inline_bytes(put).unwrap_or(&[])
 }
 
@@ -2101,14 +2099,14 @@ pub(crate) fn put_bytes(put: &wz_codecs::msg_put::MsgPutOwned) -> &[u8] {
 /// disagree the codec's reading is the one the payload was laid out by, so a
 /// sliced Put is never reported as a measured payload of zero bytes.
 #[cfg(feature = "network-codecs")]
-pub(crate) fn put_payload_is_elsewhere(put: &wz_codecs::msg_put::MsgPutOwned) -> bool {
+pub(crate) fn put_payload_is_elsewhere(put: &wz_session_core::wire::parts::MsgPutOwned) -> bool {
     wz_session_core::put_payload::is_sliced(put) || carries_shm_marker(put.extensions.as_deref())
 }
 
 /// What one `Put`'s payload slot is worth to the totals: the inline bytes
 /// measured, or the shared-memory answer ([`PayloadSize::Elsewhere`]).
 #[cfg(feature = "network-codecs")]
-fn measured_put(put: &wz_codecs::msg_put::MsgPutOwned) -> PayloadSize {
+fn measured_put(put: &wz_session_core::wire::parts::MsgPutOwned) -> PayloadSize {
     if put_payload_is_elsewhere(put) {
         PayloadSize::Elsewhere
     } else {
@@ -2124,7 +2122,7 @@ fn measured_put(put: &wz_codecs::msg_put::MsgPutOwned) -> PayloadSize {
 #[cfg(feature = "network-codecs")]
 fn measured_payload(
     payload: &[u8],
-    extensions: Option<&[wz_codecs::ext_entry::ExtEntryOwned]>,
+    extensions: Option<&[wz_session_core::wire::parts::ExtEntryOwned]>,
 ) -> PayloadSize {
     if carries_shm_marker(extensions) {
         // R311y646 (§4.34) — ELSEWHERE and not "unresolved with a bound": the
@@ -2203,7 +2201,9 @@ fn query_value_bytes(body: &[u8]) -> PayloadSize {
 /// holding the body can measure it, and a caller holding only `true` had no
 /// choice but to report the record as unmeasurable.
 #[cfg(feature = "network-codecs")]
-fn query_body_bytes(extensions: Option<&[wz_codecs::ext_entry::ExtEntryOwned]>) -> Option<&[u8]> {
+fn query_body_bytes(
+    extensions: Option<&[wz_session_core::wire::parts::ExtEntryOwned]>,
+) -> Option<&[u8]> {
     extensions?.iter().find_map(|ext| {
         match (
             ext.ext_id() == wz_session_core::ext_header::body_ext_id::QUERY_BODY,
@@ -2227,7 +2227,7 @@ fn query_body_bytes(extensions: Option<&[wz_codecs::ext_entry::ExtEntryOwned]>) 
 #[cfg(feature = "network-codecs")]
 pub(crate) fn source_timestamp(
     message: &NetworkMessage,
-) -> Option<&wz_codecs::timestamp::TimestampOwned> {
+) -> Option<&wz_session_core::wire::parts::TimestampOwned> {
     use wz_codecs::push::PushOwnedVariant;
     use wz_codecs::reply::ReplyOwnedVariant;
     use wz_codecs::request::RequestOwnedVariant;
@@ -2259,7 +2259,7 @@ pub(crate) fn source_timestamp(
 
 pub(crate) fn classify(
     message: &NetworkMessage,
-) -> Option<(&WireexprOwnedVariant, KeyexprCounts, RecordKind)> {
+) -> Option<(&WireKeyexpr, KeyexprCounts, RecordKind)> {
     #[cfg(feature = "network-codecs")]
     use wz_codecs::push::PushOwnedVariant;
     #[cfg(feature = "network-codecs")]

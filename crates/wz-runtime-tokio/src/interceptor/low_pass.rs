@@ -81,11 +81,13 @@ use wz_codecs::push::PushOwnedVariant;
 use wz_codecs::reply::ReplyOwnedVariant;
 use wz_codecs::request::RequestOwnedVariant;
 use wz_codecs::response::ResponseOwnedVariant;
+use wz_codecs::CodecStorage;
 use wz_session_core::attachment::{
     decode_attachment_ext, ATTACHMENT_EXT_ID_DEL, ATTACHMENT_EXT_ID_PUSH, ATTACHMENT_EXT_ID_QUERY,
 };
 use wz_session_core::keyexpr_match::keyexpr_includes_target;
 use wz_session_core::network_message::NetworkMessage;
+use wz_session_core::put_payload::payload_len as put_payload_len;
 use wz_session_core::query_value_ext::decode_query_value_ext;
 
 use wz_session_core::link::{InterceptorLink, LinkSubject};
@@ -276,7 +278,10 @@ impl LowPassInterceptor {
 /// than in a named field, so the size comes from the
 /// [`decode_attachment_ext`](wz_session_core::attachment::decode_attachment_ext)
 /// SSOT (Push body id `0x03`, Query id `0x05`) instead of a struct read.
-fn attachment_len(extensions: Option<&Vec<ExtEntryOwned>>, ext_id: u8) -> usize {
+fn attachment_len<S: CodecStorage>(
+    extensions: Option<&Vec<ExtEntryOwned<S>>>,
+    ext_id: u8,
+) -> usize {
     extensions
         .and_then(|exts| decode_attachment_ext(exts, ext_id))
         .map_or(0, <[u8]>::len)
@@ -288,7 +293,7 @@ fn attachment_len(extensions: Option<&Vec<ExtEntryOwned>>, ext_id: u8) -> usize 
 /// ext whose body is `encoding || payload`, so the PAYLOAD half comes from
 /// [`decode_query_value_ext`] — the encoding bytes are not part of zenoh's
 /// budget and are not counted here either.
-fn query_value_len(extensions: Option<&Vec<ExtEntryOwned>>) -> usize {
+fn query_value_len<S: CodecStorage>(extensions: Option<&Vec<ExtEntryOwned<S>>>) -> usize {
     extensions
         .and_then(|exts| decode_query_value_ext(exts))
         .map_or(0, |(_, payload)| payload.len())
@@ -312,7 +317,7 @@ fn message_size(msg: &NetworkMessage) -> Option<(LowPassMessage, usize, usize)> 
         NetworkMessage::Push(p) => match &p.body {
             PushOwnedVariant::CodecZenohMsgPut(put) => Some((
                 LowPassMessage::Put,
-                put.payload.as_slice().len(),
+                put_payload_len(put),
                 attachment_len(put.extensions.as_ref(), ATTACHMENT_EXT_ID_PUSH),
             )),
             PushOwnedVariant::CodecZenohMsgDel(del) => Some((
@@ -330,7 +335,7 @@ fn message_size(msg: &NetworkMessage) -> Option<(LowPassMessage, usize, usize)> 
             )),
             RequestOwnedVariant::CodecZenohMsgPut(put) => Some((
                 LowPassMessage::Put,
-                put.payload.as_slice().len(),
+                put_payload_len(put),
                 attachment_len(put.extensions.as_ref(), ATTACHMENT_EXT_ID_PUSH),
             )),
             RequestOwnedVariant::CodecZenohMsgDel(del) => Some((
@@ -344,7 +349,7 @@ fn message_size(msg: &NetworkMessage) -> Option<(LowPassMessage, usize, usize)> 
             ResponseOwnedVariant::CodecZenohReply(reply) => match &reply.body {
                 ReplyOwnedVariant::CodecZenohMsgPut(put) => Some((
                     LowPassMessage::Reply,
-                    put.payload.as_slice().len(),
+                    put_payload_len(put),
                     attachment_len(put.extensions.as_ref(), ATTACHMENT_EXT_ID_PUSH),
                 )),
                 ReplyOwnedVariant::CodecZenohMsgDel(del) => Some((

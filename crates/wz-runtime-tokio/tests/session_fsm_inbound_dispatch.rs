@@ -584,7 +584,7 @@ fn parse_frame_payload_dispatches_push_mid_to_push_decoder() {
         header: 0x1D,
         ..Push::default()
     };
-    let bytes = push.encode_to_vec();
+    let bytes = wz_codecs_test_support::with_empty_inline_put(push).encode_to_vec();
 
     let parsed = parse_frame_payload(&bytes).expect("Push envelope parses");
     assert_eq!(
@@ -615,7 +615,7 @@ fn parse_frame_payload_decodes_push_then_request_chain() {
         header: 0x1C,
         ..Request::default()
     };
-    let mut bytes = push.encode_to_vec();
+    let mut bytes = wz_codecs_test_support::with_empty_inline_put(push).encode_to_vec();
     bytes.extend_from_slice(&req.encode_to_vec());
 
     let parsed = parse_frame_payload(&bytes).expect("Push+Request batch parses");
@@ -735,7 +735,9 @@ fn parse_frame_payload_dispatches_response_mid_to_response_decoder() {
         header: 0x1B,
         ..Response::default()
     };
-    let bytes = resp.encode_to_vec();
+    // The Put inside the default Reply names no payload layout (R3008), and an
+    // encoder refuses that, so it carries the empty inline payload explicitly.
+    let bytes = wz_codecs_test_support::with_empty_inline_put_reply(resp).encode_to_vec();
     let parsed = parse_frame_payload(&bytes).expect("Response envelope parses");
     assert_eq!(
         parsed.len(),

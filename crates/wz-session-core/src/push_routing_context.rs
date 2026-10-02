@@ -28,7 +28,7 @@
 //! why it is a deliberate, client-transparent divergence beyond zenoh's
 //! (loop-bound-less) data plane.
 
-use wz_codecs::push::PushOwned;
+use crate::wire::PushOwned;
 
 use crate::ext_nodeid::{self, EXT_ENC_Z64};
 
@@ -107,8 +107,8 @@ mod tests {
     use super::*;
     use crate::ext_nodeid::{EXT_ENC_Z64, EXT_FLAG_Z, MESSAGE_FLAG_Z};
     use crate::push_build::build_push_literal;
+    use crate::wire::parts::{ExtEntryOwned, ExtEntryOwnedVariant};
     use alloc::vec;
-    use wz_codecs::ext_entry::{ExtEntryOwned, ExtEntryOwnedVariant};
     use wz_codecs::ext_zint::ExtZint;
 
     fn push() -> PushOwned {
@@ -317,7 +317,7 @@ mod tests {
         let mut cursor = sce_forge_runtime::codec::SceCursor::new(&encoded);
         let decoded = wz_codecs::push::Push::decode(&mut cursor)
             .expect("Push round-trip decode")
-            .try_into_owned()
+            .try_into_owned_in::<crate::wire::WireStorage>()
             .expect("into owned");
 
         assert_eq!(read_push_source(&decoded), 7, "ext_nodeid source survives");

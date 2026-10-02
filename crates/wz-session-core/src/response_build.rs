@@ -23,18 +23,15 @@ use alloc::string::{String, ToString};
 use alloc::vec;
 use alloc::vec::Vec;
 
-use wz_codecs::encoding::EncodingOwned;
-use wz_codecs::err::ErrOwned;
-use wz_codecs::ext_entry::{ExtEntryOwned, ExtEntryOwnedVariant};
-use wz_codecs::ext_zbuf::ExtZbufOwned;
-use wz_codecs::msg_del::MsgDelOwned;
-use wz_codecs::reply::{ReplyOwned, ReplyOwnedVariant};
-use wz_codecs::response::{ResponseOwned, ResponseOwnedVariant};
-use wz_codecs::wireexpr::{WireexprOwned, WireexprOwnedVariant};
-use wz_codecs::wireexpr_local::WireexprLocalOwned;
-
-use crate::codec_owned::{owned_bytes, owned_string};
+// R3011 — a Response is built at the wire profile (`crate::wire`); see
+// `request_build` for why the two constructors keep their `owned_*` names.
 use crate::query_mode::ConsolidationMode;
+use crate::wire::parts::{
+    EncodingOwned, ErrOwned, ExtEntryOwned, ExtEntryOwnedVariant, ExtZbufOwned, MsgDelOwned,
+    ReplyOwned, ReplyOwnedVariant, WireexprLocalOwned, WireexprOwned, WireexprOwnedVariant,
+};
+use crate::wire::{wire_bytes as owned_bytes, wire_string as owned_string};
+use crate::wire::{ResponseOwned, ResponseOwnedVariant};
 use sce_forge_runtime::codec::CodecError;
 // R311ek — the source_info ext encoder + the shared VLE primitive moved
 // to the codec-feature-agnostic `source_info_ext` module so the
@@ -434,10 +431,12 @@ fn reply_body(payload: &[u8]) -> Result<ResponseOwnedVariant, CodecError> {
 #[cfg(feature = "codec-response")]
 fn gated_reply_timestamp(
     timestamp: Option<&crate::sample::TimestampHint>,
-) -> Result<Option<wz_codecs::timestamp::TimestampOwned>, CodecError> {
+) -> Result<Option<crate::wire::parts::TimestampOwned>, CodecError> {
     #[cfg(feature = "pubsub-timestamp")]
     {
-        timestamp.map(|t| t.to_codec().try_into_owned()).transpose()
+        timestamp
+            .map(|t| t.to_codec().try_into_owned_in::<crate::wire::WireStorage>())
+            .transpose()
     }
     #[cfg(not(feature = "pubsub-timestamp"))]
     {
@@ -457,10 +456,12 @@ fn gated_reply_timestamp(
 #[cfg(feature = "codec-response")]
 fn gated_reply_encoding(
     encoding: Option<&crate::sample::EncodingHint>,
-) -> Result<Option<wz_codecs::encoding::EncodingOwned>, CodecError> {
+) -> Result<Option<crate::wire::parts::EncodingOwned>, CodecError> {
     #[cfg(feature = "pubsub-encoding")]
     {
-        encoding.map(|e| e.to_codec().try_into_owned()).transpose()
+        encoding
+            .map(|e| e.to_codec().try_into_owned_in::<crate::wire::WireStorage>())
+            .transpose()
     }
     #[cfg(not(feature = "pubsub-encoding"))]
     {

@@ -338,8 +338,8 @@ mod tests {
             ..Push::default()
         };
         if let PushVariant::CodecZenohMsgPut(ref mut msg) = push.body {
-            msg.payload_len = payload.len() as u64;
-            msg.payload = payload;
+            msg.payload_len = Some(payload.len() as u64);
+            msg.payload = Some(payload);
         }
         DriverLoopOutcome::FramePayload {
             priority: wz_session_core::qos::Priority::DEFAULT,

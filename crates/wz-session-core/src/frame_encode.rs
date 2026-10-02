@@ -28,6 +28,12 @@ use wz_codecs::interest::{Interest, InterestOwned};
 // R311y578 (G7) — tracks [`oam_body`]'s gate exactly, `session-unicast`
 // included: the import exists for that one signature, so any predicate the
 // function does not have makes the import unused under `-D warnings`.
+#[cfg(feature = "codec-push")]
+use crate::wire::PushOwned;
+#[cfg(feature = "codec-request")]
+use crate::wire::RequestOwned;
+#[cfg(feature = "codec-response")]
+use crate::wire::ResponseOwned;
 #[cfg(all(
     feature = "codec-linkstate",
     feature = "codec-push",
@@ -35,11 +41,11 @@ use wz_codecs::interest::{Interest, InterestOwned};
 ))]
 use wz_codecs::oam::OamOwned;
 #[cfg(feature = "codec-push")]
-use wz_codecs::push::{Push, PushOwned};
+use wz_codecs::push::Push;
 #[cfg(feature = "codec-request")]
-use wz_codecs::request::{Request, RequestOwned};
+use wz_codecs::request::Request;
 #[cfg(feature = "codec-response")]
-use wz_codecs::response::{Response, ResponseOwned};
+use wz_codecs::response::Response;
 #[cfg(feature = "codec-response-final")]
 use wz_codecs::response_final::{ResponseFinal, ResponseFinalOwned};
 
@@ -1167,13 +1173,14 @@ mod tests {
     /// refuses a Put that names neither. An empty inline payload is what the
     /// default used to mean, so these tests say it.
     #[cfg(feature = "codec-push")]
-    fn empty_payload_push() -> wz_codecs::push::PushOwned {
+    fn empty_payload_push() -> crate::wire::PushOwned {
         let mut push = Push::default();
         if let wz_codecs::push::PushVariant::CodecZenohMsgPut(put) = &mut push.body {
             put.payload_len = Some(0);
             put.payload = Some(&[]);
         }
-        push.try_into_owned().unwrap()
+        push.try_into_owned_in::<crate::wire::WireStorage>()
+            .unwrap()
     }
 
     #[cfg(feature = "codec-push")]

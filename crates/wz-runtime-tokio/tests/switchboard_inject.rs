@@ -21,7 +21,7 @@
 use std::sync::Arc;
 
 use sce_rust_runtime::Engine;
-use wz_codecs::push::{Push, PushOwned, PushOwnedVariant};
+use wz_codecs::push::{Push, PushOwnedVariant};
 use wz_codecs::wireexpr::{Wireexpr, WireexprVariant};
 use wz_codecs::wireexpr_local::WireexprLocal;
 use wz_runtime_tokio::observer::ApplicationLayerObserver;
@@ -32,6 +32,7 @@ use wz_runtime_tokio::session_glue::{
     NetworkMessage, SessionActionsBinding,
 };
 use wz_runtime_tokio_test_support::{fixture_session_init_params, NoopOutboundDriver};
+use wz_session_core::wire::{PushOwned, WireStorage};
 use wz_statechart_bridge::EngineInjector;
 
 /// Build a wire-inbound Put Push carrying a literal keyexpr (id=0 ⇒
@@ -47,11 +48,10 @@ fn put_push(keyexpr: &str, payload: &[u8]) -> PushOwned {
         },
         ..Push::default()
     }
-    .try_into_owned()
+    .try_into_owned_in::<WireStorage>()
     .unwrap();
     if let PushOwnedVariant::CodecZenohMsgPut(ref mut put) = push.body {
-        put.payload_len = payload.len() as u64;
-        put.payload = wz_session_core::codec_owned::owned_bytes(payload).unwrap();
+        *put = wz_session_core::put_payload::inline(payload).unwrap();
     }
     push
 }

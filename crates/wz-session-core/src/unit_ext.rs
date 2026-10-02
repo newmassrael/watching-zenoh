@@ -18,6 +18,7 @@
 //! says to abstract as the MECHANISM while keeping the DATA (the id constant + the
 //! zenoh-cited wrapper) per-capability.
 
+use sce_forge_runtime::codec::CodecStorage;
 use wz_codecs::ext_entry::{ExtEntryOwned, ExtEntryOwnedVariant};
 use wz_codecs::ext_unit::ExtUnit;
 
@@ -50,7 +51,10 @@ pub fn encode_unit_ext(ext_id: u8) -> ExtEntryOwned {
 /// Callers pass the header they ENCODE, so a capability offer
 /// ([`encode_unit_ext`], header == id) and an M-flagged body marker (header ==
 /// `id | EXT_FLAG_M`) each match only their own form.
-pub fn chain_has_ext_eid(extensions: &[ExtEntryOwned], expected_header: u8) -> bool {
+pub fn chain_has_ext_eid<S: CodecStorage>(
+    extensions: &[ExtEntryOwned<S>],
+    expected_header: u8,
+) -> bool {
     let want = crate::ext_header::ext_eid(expected_header);
     extensions
         .iter()
@@ -71,7 +75,7 @@ mod tests {
         assert_eq!(ext.as_borrowed().encode_to_vec().len(), 1);
         assert!(chain_has_ext_eid(&[ext], 0x05));
         assert!(!chain_has_ext_eid(&[encode_unit_ext(0x06)], 0x05));
-        assert!(!chain_has_ext_eid(&[], 0x05));
+        assert!(!chain_has_ext_eid::<sce_forge_runtime::codec::DefaultStorage>(&[], 0x05));
     }
 
     /// R311y505 — the regression this round exists for: an entry that shares the
@@ -88,14 +92,14 @@ mod tests {
     #[test]
     fn a_shared_id_with_another_encoding_is_a_different_extension() {
         // A zenoh ZBuf ext at id 0x2 (its establishment `Shm`).
-        let zbuf_at_2 = ExtEntryOwned {
+        let zbuf_at_2: ExtEntryOwned = ExtEntryOwned {
             header: 0x02 | crate::ext_header::EXT_ENC_ZBUF,
             body: ExtEntryOwnedVariant::CodecZenohExtUnit(ExtUnit::default()),
         };
         assert!(!chain_has_ext_eid(&[zbuf_at_2], 0x02));
 
         // A zenoh Z64 ext at id 0x1 (its establishment `QoSLink`).
-        let z64_at_1 = ExtEntryOwned {
+        let z64_at_1: ExtEntryOwned = ExtEntryOwned {
             header: 0x01 | crate::ext_header::EXT_ENC_Z64,
             body: ExtEntryOwnedVariant::CodecZenohExtUnit(ExtUnit::default()),
         };
@@ -103,7 +107,7 @@ mod tests {
 
         // The M bit is part of the identity too: a body MARKER (id | M) and a
         // capability OFFER (bare id) at the same id do not match each other.
-        let marker = ExtEntryOwned {
+        let marker: ExtEntryOwned = ExtEntryOwned {
             header: 0x02 | crate::ext_header::EXT_FLAG_M,
             body: ExtEntryOwnedVariant::CodecZenohExtUnit(ExtUnit::default()),
         };
@@ -115,7 +119,7 @@ mod tests {
 
         // The CHAIN flag is not part of the identity: a non-final entry still
         // matches (that is the one bit `eid` drops).
-        let chained = ExtEntryOwned {
+        let chained: ExtEntryOwned = ExtEntryOwned {
             header: 0x05 | crate::ext_header::EXT_FLAG_Z,
             body: ExtEntryOwnedVariant::CodecZenohExtUnit(ExtUnit::default()),
         };

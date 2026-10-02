@@ -16,11 +16,12 @@
 
 use wz_ap_demo_app::temp_payload::TempPayload;
 use wz_ap_demo_app::{new_engine, register_bindings, SensorMonitorInjector, SensorMonitorState};
-use wz_codecs::push::{Push, PushOwned, PushOwnedVariant};
+use wz_codecs::push::{Push, PushOwnedVariant};
 use wz_codecs::wireexpr::{Wireexpr, WireexprVariant};
 use wz_codecs::wireexpr_local::WireexprLocal;
 use wz_runtime_tokio::observer::ApplicationLayerObserver;
 use wz_runtime_tokio::session_glue::{DriverLoopOutcome, IterationEvent, NetworkMessage};
+use wz_session_core::wire::{PushOwned, WireStorage};
 
 /// Encode a temp_payload frame (single big-endian uint16 centidegrees) the way
 /// a real publisher would, so the fan-out decode reads back the exact bytes.
@@ -45,11 +46,10 @@ fn put_push(keyexpr: &str, payload: &[u8]) -> PushOwned {
         },
         ..Push::default()
     }
-    .try_into_owned()
+    .try_into_owned_in::<WireStorage>()
     .unwrap();
     if let PushOwnedVariant::CodecZenohMsgPut(ref mut put) = push.body {
-        put.payload_len = payload.len() as u64;
-        put.payload = wz_session_core::codec_owned::owned_bytes(payload).unwrap();
+        *put = wz_session_core::put_payload::inline(payload).unwrap();
     }
     push
 }

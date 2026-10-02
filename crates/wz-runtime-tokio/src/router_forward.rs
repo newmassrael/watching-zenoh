@@ -345,7 +345,6 @@ use sce_forge_runtime::codec::CodecError;
 use wz_codecs::declare::{DeclareOwned, DeclareOwnedVariant};
 use wz_codecs::interest::InterestOwned;
 use wz_codecs::linkstate_list::LinkstateListOwned;
-use wz_codecs::push::{PushOwned, PushOwnedVariant};
 use wz_routing_graph::{
     AutoConnect, Changes, LinkEdgeWeight, LinkId, LinkInfo, LinkstateNetwork, Versioned, WhatAmI,
     Zid,
@@ -411,8 +410,6 @@ use wz_session_core::sink::BorrowedSample;
 use crate::linkstate_interest::LinkstatepeerInterest;
 use crate::linkstate_pending::{PendingQueries, QueryFan};
 use crate::session_glue::{IterationEvent, SessionLinkActions};
-use wz_codecs::request::RequestOwned;
-use wz_codecs::response::ResponseOwned;
 use wz_codecs::response_final::ResponseFinalOwned;
 use wz_session_core::link::LinkSubject;
 use wz_session_core::query_mode::QueryTarget;
@@ -421,6 +418,7 @@ use wz_session_core::request_build::set_request_keyexpr_literal;
 use wz_session_core::request_routing_context::{
     read_request_source, read_request_target, read_request_timeout_ms, set_request_source,
 };
+use wz_session_core::wire::{PushOwned, PushOwnedVariant, RequestOwned, ResponseOwned};
 
 /// R2866 (open-debt item 751, step 2) — the router's faces, planes and tables
 /// are keyed by the pin's [`Region`] now. The 1.5.0 `FaceTier` classifier
@@ -17131,7 +17129,7 @@ mod tests {
 
     /// The single forwarded Response decoded from a recorded wire frame — so a
     /// test can assert the rewritten `request_id` landed ON THE WIRE.
-    fn forwarded_response(frame: &[u8]) -> wz_codecs::response::ResponseOwned {
+    fn forwarded_response(frame: &[u8]) -> ResponseOwned {
         use crate::session_glue::{parse_frame_payload, parse_inbound, InboundFrame};
         let InboundFrame::Frame { payload, .. } = parse_inbound(frame).expect("parse frame") else {
             panic!("not a Frame");
@@ -17722,7 +17720,7 @@ mod tests {
     #[cfg(feature = "router-multicast-faces")]
     fn group_push(
         tap: &mut crate::multicast_pipeline::MulticastTxTap,
-    ) -> Option<(wz_codecs::push::PushOwned, bool)> {
+    ) -> Option<(PushOwned, bool)> {
         use wz_session_core::inbound::{parse_inbound, InboundFrame};
         let datagram = tap.try_next()?;
         let Ok(InboundFrame::Frame {

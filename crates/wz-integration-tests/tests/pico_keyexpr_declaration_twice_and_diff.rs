@@ -1196,12 +1196,18 @@ fn normalize_adv_key(key: &str) -> String {
 }
 
 /// A wire expression as `<id>+"suffix"`, the id named in the keyexpr space.
-fn wire(names: &mut Names, expr: &WireexprOwned) -> String {
+///
+/// Generic over the storage profile: a Declare's key expression is on the
+/// default one and a Push's is on the wire one, and this reads both.
+fn wire<S: wz_codecs::CodecStorage>(names: &mut Names, expr: &WireexprOwned<S>) -> String {
+    use sce_forge_runtime::codec::SceStr;
     let (id, suffix) = match &expr.body {
         WireexprOwnedVariant::WireexprNonlocal(w) => {
-            (w.id, w.suffix.as_ref().map(|s| s.to_string()))
+            (w.id, w.suffix.as_ref().map(|s| s.as_str().to_string()))
         }
-        WireexprOwnedVariant::WireexprLocal(w) => (w.id, w.suffix.as_ref().map(|s| s.to_string())),
+        WireexprOwnedVariant::WireexprLocal(w) => {
+            (w.id, w.suffix.as_ref().map(|s| s.as_str().to_string()))
+        }
     };
     let scope = if id == 0 {
         String::from("literal")
@@ -1220,7 +1226,9 @@ fn wire(names: &mut Names, expr: &WireexprOwned) -> String {
 /// (pico's `_z_make_undecl_token(id, &wireexpr)`). Its bytes hold an id, whose
 /// value cannot agree between the arms, so the length is rendered instead: it
 /// still tells a literal suffix from an aliased one.
-fn extensions(chain: Option<&[wz_codecs::ext_entry::ExtEntryOwned]>) -> String {
+fn extensions<S: wz_codecs::CodecStorage>(
+    chain: Option<&[wz_codecs::ext_entry::ExtEntryOwned<S>]>,
+) -> String {
     use wz_codecs::ext_entry::ExtEntryOwnedVariant;
     let Some(chain) = chain else {
         return String::new();
@@ -1247,8 +1255,11 @@ fn extensions(chain: Option<&[wz_codecs::ext_entry::ExtEntryOwned]>) -> String {
 /// neither of which can agree between two libraries' sessions, so it is rendered
 /// as present and no more; the attachment is the caller's own bytes, and every
 /// other extension is named by its header.
-fn body_extensions(chain: Option<&[wz_codecs::ext_entry::ExtEntryOwned]>) -> String {
+fn body_extensions<S: wz_codecs::CodecStorage>(
+    chain: Option<&[wz_codecs::ext_entry::ExtEntryOwned<S>]>,
+) -> String {
     use wz_codecs::ext_entry::ExtEntryOwnedVariant;
+    use wz_codecs::SceByteBuf;
     const SOURCE_INFO: u8 = 0x01;
     let Some(chain) = chain else {
         return String::from(" ext()");
@@ -1275,7 +1286,9 @@ fn body_extensions(chain: Option<&[wz_codecs::ext_entry::ExtEntryOwned]>) -> Str
 /// extension after its header: the QoS byte of a data message's envelope is one
 /// (`0x01` for the id, `0x20` for the integer form; bits 0-2 the priority, bit 3
 /// the no-drop flag that BLOCK sets, bit 4 the express flag).
-fn valued_extensions(chain: Option<&[wz_codecs::ext_entry::ExtEntryOwned]>) -> String {
+fn valued_extensions<S: wz_codecs::CodecStorage>(
+    chain: Option<&[wz_codecs::ext_entry::ExtEntryOwned<S>]>,
+) -> String {
     use wz_codecs::ext_entry::ExtEntryOwnedVariant;
     let Some(chain) = chain else {
         return String::new();
@@ -1303,7 +1316,7 @@ fn valued_extensions(chain: Option<&[wz_codecs::ext_entry::ExtEntryOwned]>) -> S
 /// (its VALUE is each session's own clock and zid), its encoding, what its body
 /// carries, and its payload. With `valued`, the envelope's integer extensions
 /// carry their values ([`valued_extensions`]).
-fn push_whole(p: &wz_codecs::push::PushOwned, valued: bool) -> String {
+fn push_whole(p: &wz_session_core::wire::PushOwned, valued: bool) -> String {
     use wz_codecs::push::PushOwnedVariant;
     let envelope = if valued {
         valued_extensions(p.extensions.as_deref())

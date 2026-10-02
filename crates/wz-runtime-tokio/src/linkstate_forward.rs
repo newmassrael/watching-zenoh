@@ -91,9 +91,6 @@ use wz_codecs::interest::InterestOwned;
 use wz_codecs::interest_body::InterestBodyOwned;
 use wz_codecs::linkstate_list::LinkstateListOwned;
 use wz_codecs::oam::OamOwned;
-use wz_codecs::push::{PushOwned, PushOwnedVariant};
-use wz_codecs::request::RequestOwned;
-use wz_codecs::response::ResponseOwned;
 use wz_codecs::response_final::ResponseFinalOwned;
 use wz_codecs::wireexpr::WireexprOwned;
 use wz_session_core::declare_build::{
@@ -110,6 +107,7 @@ use wz_session_core::declare_routing_context::{read_declare_source, set_declare_
 use wz_session_core::driver_loop::DriverLoopOutcome;
 #[cfg(feature = "routing-interest-pending-gc")]
 use wz_session_core::interest_build::{build_interest_propagated, InterestKinds};
+use wz_session_core::wire::{PushOwned, PushOwnedVariant, RequestOwned, ResponseOwned};
 // R2662 — `keyexpr_pattern_matches` is GONE from this file's imports, and its
 // absence is the repair: the forwarder's local-subscriber delivery was its last
 // caller here, so there is no longer a way to match an arriving key as a

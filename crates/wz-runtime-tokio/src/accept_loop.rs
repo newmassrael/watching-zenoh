@@ -79,11 +79,11 @@ use std::time::Duration;
 // plane); gated on `codec-push` (which provides it) so the accept-only foundation
 // (`routing-accept` without `codec-push`, run-ci Layer C1w) stays minimal.
 #[cfg(feature = "codec-push")]
-use wz_codecs::push::PushOwned;
+use wz_session_core::wire::PushOwned;
 // R2734 — the second arm of `McastIngressBody`, gated with the plane it rides
 // (see that enum's own note on why a Query and not all seven kinds).
 #[cfg(feature = "codec-push")]
-use wz_codecs::request::RequestOwned;
+use wz_session_core::wire::RequestOwned;
 
 use futures_util::stream::FuturesUnordered;
 use futures_util::StreamExt;
@@ -1447,7 +1447,11 @@ enum Step {
     /// A Push arrived on the multicast INGRESS channel (the deferred `mcast_faces`
     /// plane, I1) — route it via [`FaceForwarder::route_mcast_ingress`]. Only ever
     /// produced when [`FaceSources::mcast_ingress`] is `Some`.
-    McastIngress(McastIngressItem),
+    ///
+    /// Boxed: the item carries a whole owned `Push` or `Request`, which is far
+    /// larger than every other `Step` (clippy `large_enum_variant`), and one box
+    /// per group-ingress message is negligible beside the message it carries.
+    McastIngress(Box<McastIngressItem>),
     /// The on-group ROUTER member set changed (I3b) — relay it to
     /// [`FaceForwarder::set_mcast_group_members`] for the Designated-Router
     /// election. Only ever produced when [`FaceSources::mcast_members`] is `Some`.
@@ -2231,7 +2235,7 @@ where
             accepted = accept_any(&mut listeners) => Step::Accepted(accepted),
             _ = forwarder_tick(&mut tick_timer) => Step::Tick,
             intent = recv_dial_intent(&mut dial_intents) => Step::Dial(intent),
-            item = recv_mcast_ingress(&mut mcast_ingress) => Step::McastIngress(item),
+            item = recv_mcast_ingress(&mut mcast_ingress) => Step::McastIngress(Box::new(item)),
             members = recv_mcast_members(&mut mcast_members) => Step::McastMembers(members),
             subs = recv_mcast_group_subs(&mut mcast_group_subs) => Step::McastGroupSubs(subs),
             set = recv_reconcile(&mut reconcile) => Step::Reconcile(set),

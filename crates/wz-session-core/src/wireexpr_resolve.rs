@@ -53,9 +53,32 @@ use alloc::string::{String, ToString};
 
 use hashbrown::HashMap;
 
+use sce_forge_runtime::codec::{CodecStorage, SceStr};
 #[cfg(feature = "codec-declare")]
 use wz_codecs::declare::{DeclareOwned, DeclareOwnedVariant};
 use wz_codecs::wireexpr::WireexprOwnedVariant;
+
+/// The `(id, suffix)` a Wireexpr carries, whichever mapping arm holds them.
+///
+/// Generic over the storage profile because both planes carry Wireexprs: a
+/// `Declare`'s key expression is on the default profile and a received
+/// `Push`'s is on [`WireStorage`](crate::wire::WireStorage), and every reader in
+/// this module serves both. The text is read through [`SceStr`], which is what
+/// every profile's text container provides.
+///
+/// Public so an observer that reads a Wireexpr off a received message
+/// (`wz-capture`) asks the same function, rather than re-spelling the two-arm
+/// match against a text container whose type depends on the build.
+pub fn id_and_suffix<S: CodecStorage>(body: &WireexprOwnedVariant<S>) -> (u64, Option<&str>) {
+    match body {
+        WireexprOwnedVariant::WireexprLocal(arm) => {
+            (arm.id, arm.suffix.as_ref().map(SceStr::as_str))
+        }
+        WireexprOwnedVariant::WireexprNonlocal(arm) => {
+            (arm.id, arm.suffix.as_ref().map(SceStr::as_str))
+        }
+    }
+}
 
 /// Resolve a `Wireexpr` to its literal keyexpr string using a peer
 /// mapping table.
@@ -80,11 +103,8 @@ use wz_codecs::wireexpr::WireexprOwnedVariant;
 /// for it — an empty keyexpr resolves to nothing) but pass it through with only
 /// the rid rewritten, exactly as zenoh's `route_send_response` forwards a reply
 /// with NO keyexpr resolution at all (`dispatcher/queries.rs:595-635`).
-pub fn wireexpr_is_empty(body: &WireexprOwnedVariant) -> bool {
-    let (id, suffix_opt) = match body {
-        WireexprOwnedVariant::WireexprLocal(arm) => (arm.id, arm.suffix.as_deref()),
-        WireexprOwnedVariant::WireexprNonlocal(arm) => (arm.id, arm.suffix.as_deref()),
-    };
+pub fn wireexpr_is_empty<S: CodecStorage>(body: &WireexprOwnedVariant<S>) -> bool {
+    let (id, suffix_opt) = id_and_suffix(body);
     id == 0 && suffix_opt.map_or(true, str::is_empty)
 }
 
@@ -95,11 +115,8 @@ pub fn wireexpr_is_empty(body: &WireexprOwnedVariant) -> bool {
 /// (`zenoh/src/net/routing/dispatcher/pubsub.rs` @ `None => compute_route(),`);
 /// an id plus a suffix may name a child no one declared, so it is not
 /// answered here.
-pub fn wireexpr_names_a_declaration(body: &WireexprOwnedVariant) -> bool {
-    let (id, suffix_opt) = match body {
-        WireexprOwnedVariant::WireexprLocal(arm) => (arm.id, arm.suffix.as_deref()),
-        WireexprOwnedVariant::WireexprNonlocal(arm) => (arm.id, arm.suffix.as_deref()),
-    };
+pub fn wireexpr_names_a_declaration<S: CodecStorage>(body: &WireexprOwnedVariant<S>) -> bool {
+    let (id, suffix_opt) = id_and_suffix(body);
     id != 0 && suffix_opt.map_or(true, str::is_empty)
 }
 
@@ -141,8 +158,8 @@ pub fn wireexpr_names_a_declaration(body: &WireexprOwnedVariant) -> bool {
 /// [`resolve_wireexpr_in`] with [`MappingSpaces::with_own`] and gets the `M=0`
 /// arm answered out of the right space. This peer-only form stays for the
 /// callers that have no second space to offer.
-pub fn resolve_wireexpr(
-    body: &WireexprOwnedVariant,
+pub fn resolve_wireexpr<S: CodecStorage>(
+    body: &WireexprOwnedVariant<S>,
     table: &HashMap<u64, String>,
 ) -> Option<String> {
     resolve_wireexpr_in(body, MappingSpaces::peer_only(table))
@@ -316,16 +333,17 @@ impl<'a> From<&'a HashMap<u64, String>> for MappingSpaces<'a> {
 /// Never reads one space to answer for the other. Both sides number their
 /// mappings from 1, so a wrong-space read very likely FINDS an entry and
 /// returns a confident, wrong keyexpr.
-pub fn resolve_wireexpr_in(
-    body: &WireexprOwnedVariant,
+pub fn resolve_wireexpr_in<S: CodecStorage>(
+    body: &WireexprOwnedVariant<S>,
     spaces: MappingSpaces<'_>,
 ) -> Option<String> {
     // The variant tag IS the mapping bit, so the arms cannot be folded: our
     // codec's `WireexprLocal` is `M=1` (the SENDER's space — the peer's, on an
     // inbound message) and `WireexprNonlocal` is `M=0` (the RECEIVER's = ours).
-    let (id, suffix_opt, arm) = match body {
-        WireexprOwnedVariant::WireexprLocal(a) => (a.id, a.suffix.as_deref(), Space::Peer),
-        WireexprOwnedVariant::WireexprNonlocal(a) => (a.id, a.suffix.as_deref(), Space::Own),
+    let (id, suffix_opt) = id_and_suffix(body);
+    let arm = match body {
+        WireexprOwnedVariant::WireexprLocal(_) => Space::Peer,
+        WireexprOwnedVariant::WireexprNonlocal(_) => Space::Own,
     };
     if id == 0 {
         // id 0 names no mapping at all — the suffix IS the keyexpr, so it
@@ -411,17 +429,14 @@ pub fn resolve_wireexpr_in(
 /// A caller holding only the peer's space ([`MappingSpaces::peer_only`]) gets
 /// exactly the pre-existing behaviour: with no second space there is nothing to
 /// disagree with, and the rule collapses to the one-space lookup.
-pub fn resolve_declared_keyexpr(
-    body: &WireexprOwnedVariant,
+pub fn resolve_declared_keyexpr<S: CodecStorage>(
+    body: &WireexprOwnedVariant<S>,
     spaces: MappingSpaces<'_>,
 ) -> Option<String> {
     // The arm is deliberately NOT read for a space here — see the docblock.
     // Both variants carry the same two fields; only the tag differs, and on
     // D_KEXPR that tag came from the decoder rather than from a header bit.
-    let (id, suffix_opt) = match body {
-        WireexprOwnedVariant::WireexprLocal(a) => (a.id, a.suffix.as_deref()),
-        WireexprOwnedVariant::WireexprNonlocal(a) => (a.id, a.suffix.as_deref()),
-    };
+    let (id, suffix_opt) = id_and_suffix(body);
     if id == 0 {
         return suffix_opt.map(str::to_string);
     }

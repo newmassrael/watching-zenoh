@@ -51,6 +51,15 @@
   the chain still unterminated, which is what upstream's loop bound
   expresses. A caller reporting `codec/vle-width-overflow` (RFC §5.B
   diagnostics) keys on that count, not on `data[8] & 0x80`.
+
+  R3011 — the return declares `may-fail`. The pin's integer contract
+  (SCE_FORGE.md §3.4.1) refuses an operation its range analysis cannot
+  prove safe in an algorithm that does not declare it, since the backends
+  disagree on the result: `shift + 7` on a uint8 and the shift of a uint64
+  by `shift` both leave their range on a chain that never terminates. That
+  is the `codec/vle-width-overflow` case above, so the failure reaches the
+  caller instead of a backend-specific wrap; the result for every input that
+  does not overflow is unchanged.
 -->
 <scxml xmlns="http://www.w3.org/2005/07/scxml"
        xmlns:sce="http://sce.dev/ext"
@@ -61,7 +70,7 @@
        version="1.0">
   <sce:signature>
     <sce:param name="data" type="bytes"/>
-    <sce:return type="uint64"/>
+    <sce:return type="uint64" may-fail="true"/>
   </sce:signature>
   <sce:body>
     <sce:var name="result" type="uint64" init="0"/>

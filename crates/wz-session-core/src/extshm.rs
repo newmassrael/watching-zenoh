@@ -43,6 +43,7 @@ use crate::ext_header::EXT_FLAG_M;
 use crate::vle::{encode_vle_u64_into, read_vle_u64};
 #[cfg(feature = "session-extshm")]
 use sce_forge_runtime::codec::CodecError;
+use sce_forge_runtime::codec::CodecStorage;
 #[cfg(feature = "session-extshm")]
 use wz_codecs::ext_zbuf::ExtZbufOwned;
 
@@ -121,7 +122,7 @@ pub fn decode_shm_descriptor(bytes: &[u8]) -> Option<ShmDescriptor> {
 /// MANDATORY bit, `put.rs:73 zextunit!(0x2, true)`, so a peer that does not
 /// understand SHM rejects the Put rather than reading the descriptor as payload).
 /// The surrounding body-ext codec applies the chain-continuation `Z` bit.
-pub fn encode_shm_marker_ext() -> ExtEntryOwned {
+pub fn encode_shm_marker_ext<S: CodecStorage>() -> ExtEntryOwned<S> {
     ExtEntryOwned {
         header: SHM_BODY_EXT_ID | EXT_FLAG_M,
         body: ExtEntryOwnedVariant::CodecZenohExtUnit(ExtUnit::default()),
@@ -131,7 +132,7 @@ pub fn encode_shm_marker_ext() -> ExtEntryOwned {
 /// `true` iff a Put body ext chain carries the `ext_shm` marker — the RX signal
 /// that the payload field is a descriptor to resolve (not raw bytes). Detects by
 /// id (the [`crate::unit_ext`] mechanism), so the marker's M bit is ignored.
-pub fn body_has_shm_marker(extensions: &[ExtEntryOwned]) -> bool {
+pub fn body_has_shm_marker<S: CodecStorage>(extensions: &[ExtEntryOwned<S>]) -> bool {
     crate::unit_ext::chain_has_ext_eid(extensions, SHM_BODY_EXT_ID | EXT_FLAG_M)
 }
 
@@ -738,7 +739,7 @@ mod tests {
     /// the shape zenoh emits for `put::ext::Shm`.
     #[test]
     fn marker_header_is_unit_id_two_mandatory() {
-        let ext = encode_shm_marker_ext();
+        let ext = encode_shm_marker_ext::<crate::wire::WireStorage>();
         assert_eq!(
             ext.header, 0x12,
             "UNIT (0x00) | SHM_BODY_EXT_ID (0x02) | M (0x10)"
@@ -755,13 +756,15 @@ mod tests {
     /// exts (0x1 source_info, 0x3 attachment).
     #[test]
     fn marker_detected_and_not_confused_with_siblings() {
-        assert!(body_has_shm_marker(&[encode_shm_marker_ext()]));
-        assert!(!body_has_shm_marker(&[]));
-        let source_info = ExtEntryOwned {
+        assert!(body_has_shm_marker(&[encode_shm_marker_ext::<
+            crate::wire::WireStorage,
+        >()]));
+        assert!(!body_has_shm_marker::<crate::wire::WireStorage>(&[]));
+        let source_info: ExtEntryOwned = ExtEntryOwned {
             header: 0x01,
             body: ExtEntryOwnedVariant::CodecZenohExtUnit(ExtUnit::default()),
         };
-        let attachment = ExtEntryOwned {
+        let attachment: ExtEntryOwned = ExtEntryOwned {
             header: 0x03,
             body: ExtEntryOwnedVariant::CodecZenohExtUnit(ExtUnit::default()),
         };

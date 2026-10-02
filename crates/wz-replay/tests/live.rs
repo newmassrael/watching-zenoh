@@ -539,10 +539,13 @@ fn keyexpr_and_payload(message: &NetworkMessage) -> Option<(String, Vec<u8>)> {
         WireexprOwnedVariant::WireexprNonlocal(a) => (a.id, a.suffix.as_deref()),
     };
     assert_eq!(id, 0, "a replay must publish literal keyexprs");
-    Some((
-        suffix.unwrap_or("").to_string(),
-        put.payload.as_slice().to_vec(),
-    ))
+    // The payload is read through the layout SSOT: a replay emits inline Puts,
+    // and a sliced one would be a defect in what the tool sent, not a shape to
+    // flatten here.
+    let payload = wz_session_core::put_payload::inline_bytes(put)
+        .expect("a replay publishes an inline Put")
+        .to_vec();
+    Some((suffix.unwrap_or("").to_string(), payload))
 }
 
 fn peer_init_params() -> SessionInitParams {

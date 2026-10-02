@@ -690,6 +690,13 @@ pub mod serde_codec;
 #[cfg(feature = "alloc")]
 pub mod network_message;
 
+/// R3011 (open-debt item 850) — the data-plane owned wire types
+/// (`PushOwned`, `RequestOwned`, `ResponseOwned` and their bodies) spelled at
+/// the storage profile a receive path hands up, under the short names the
+/// generated types have.
+#[cfg(feature = "alloc")]
+pub mod wire;
+
 /// R76 / R83 / R311di-12 — `DriverLoopOutcome` + `IterationEvent`
 /// driver-loop observer surface. Wraps `Vec<NetworkMessage>` +
 /// `Vec<ExtEntry>` (FramePayload variant) so alloc-gated.
