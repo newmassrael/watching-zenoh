@@ -453,3 +453,33 @@ impl<S: ::sce_forge_runtime::codec::CodecStorage> LinkstateOwned<S> {
         self.try_as_borrowed()?.try_into_owned_in::<D>()
     }
 }
+
+#[allow(dead_code)]
+impl<'a> Linkstate<'a> {
+    /// Project this borrowed view into an owned [`LinkstateOwned`]
+    /// whose byte and text containers are made by the profile's
+    /// `OriginStorage` from each slice AND `origin`, the buffer the
+    /// view was decoded from. A profile that shares that buffer builds
+    /// containers that refer back to it instead of copying out of it; what the
+    /// origin is, and what to do with a slice that does not come from it, is
+    /// the profile's to say.
+    ///
+    /// `try_into_owned_in` stays the copying projection. Every codec this one
+    /// embeds, repeats or dispatches to must have been generated with
+    /// `--owned-origin` as well.
+    pub fn try_into_owned_in_origin<S: ::sce_forge_runtime::codec::OriginStorage>(self, origin: &<S as ::sce_forge_runtime::codec::OriginStorage>::Origin) -> Result<LinkstateOwned<S>, CodecError> {
+        Ok(LinkstateOwned {
+            options: self.options,
+            psid: self.psid,
+            sn: self.sn,
+            zid_len: self.zid_len,
+            zid: self.zid.map(|_v| <S as ::sce_forge_runtime::codec::OriginStorage>::bytes_from::<16>(origin, _v)).transpose()?,
+            whatami: self.whatami,
+            num_locators: self.num_locators,
+            locators: self.locators.map(|_v| ::sce_forge_runtime::codec::try_collect_list(_v, |_e| _e.try_into_owned_in_origin::<S>(origin))).transpose()?,
+            links_len: self.links_len,
+            links: ::sce_forge_runtime::codec::try_collect_list(self.links, Ok)?,
+            weights: self.weights.map(|_v| ::sce_forge_runtime::codec::try_collect_list(_v, Ok)).transpose()?,
+        })
+    }
+}

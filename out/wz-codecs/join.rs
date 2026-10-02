@@ -329,3 +329,30 @@ impl<S: ::sce_forge_runtime::codec::CodecStorage> JoinOwned<S> {
         self.as_borrowed().try_into_owned_in::<D>()
     }
 }
+
+#[allow(dead_code)]
+impl<'a> Join<'a> {
+    /// Project this borrowed view into an owned [`JoinOwned`]
+    /// whose byte and text containers are made by the profile's
+    /// `OriginStorage` from each slice AND `origin`, the buffer the
+    /// view was decoded from. A profile that shares that buffer builds
+    /// containers that refer back to it instead of copying out of it; what the
+    /// origin is, and what to do with a slice that does not come from it, is
+    /// the profile's to say.
+    ///
+    /// `try_into_owned_in` stays the copying projection. Every codec this one
+    /// embeds, repeats or dispatches to must have been generated with
+    /// `--owned-origin` as well.
+    pub fn try_into_owned_in_origin<S: ::sce_forge_runtime::codec::OriginStorage>(self, origin: &<S as ::sce_forge_runtime::codec::OriginStorage>::Origin) -> Result<JoinOwned<S>, CodecError> {
+        Ok(JoinOwned {
+            version: self.version,
+            cbyte: self.cbyte,
+            zid: <S as ::sce_forge_runtime::codec::OriginStorage>::bytes_from::<16>(origin, self.zid)?,
+            sn_res: self.sn_res,
+            batch_size: self.batch_size,
+            lease: self.lease,
+            next_sn_reliable: self.next_sn_reliable,
+            next_sn_best_effort: self.next_sn_best_effort,
+        })
+    }
+}

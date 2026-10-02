@@ -425,6 +425,13 @@ pub mod session_init_params;
 #[cfg(feature = "alloc")]
 pub mod link;
 
+/// R3011 (open-debt item 850) — the receive-side storage profile: a decoded
+/// message whose byte fields are ranges of the frame it was decoded from, built
+/// on SCE's origin seam (`try_into_owned_in_origin`). AP-only for the reason
+/// `RxBytes`' lent arm is: `Arc` needs pointer-width atomics.
+#[cfg(feature = "rx-shared-bytes")]
+pub mod rx_profile;
+
 /// R2928 — a pushed message's congestion outcome and deadline, shared by the
 /// unicast session and the multicast transmission pipeline. Alloc-gated with
 /// the two modules it reads ([`link`] and [`session_init_params`]).

@@ -1126,6 +1126,32 @@ impl RxBytes {
         matches!(self.0, RxRepr::Shared { .. })
     }
 
+    /// The `range` of THESE bytes (positions in `self`, not in the storage
+    /// behind it), sharing the storage when there is one. `None` when `range`
+    /// does not lie inside the bytes -- upstream's `ZSlice::subslice` answers the
+    /// same.
+    ///
+    /// A lent frame's sub-range is a second reference to the same storage, so
+    /// the storage goes home when the last of them drops. An OWNED frame has no
+    /// storage to share, and its sub-range is a copy: that is what a `Vec`
+    /// allows, and it is what the owned arm already cost before this existed.
+    /// A caller that needs the sharing makes the frame lent first.
+    pub fn subslice(&self, range: core::ops::Range<usize>) -> Option<Self> {
+        let len = self.as_slice().len();
+        if range.start > range.end || range.end > len {
+            return None;
+        }
+        Some(match &self.0 {
+            RxRepr::Owned(bytes) => Self(RxRepr::Owned(bytes[range].to_vec())),
+            #[cfg(feature = "rx-shared-bytes")]
+            RxRepr::Shared { storage, start, .. } => Self(RxRepr::Shared {
+                storage: storage.clone(),
+                start: start + range.start,
+                end: start + range.end,
+            }),
+        })
+    }
+
     /// The bytes as an owned `Vec`: moved out when owned, copied when lent.
     pub fn into_vec(self) -> Vec<u8> {
         match self.0 {

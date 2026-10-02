@@ -261,3 +261,25 @@ impl<S: ::sce_forge_runtime::codec::CodecStorage> EncodingOwned<S> {
         self.as_borrowed().try_into_owned_in::<D>()
     }
 }
+
+#[allow(dead_code)]
+impl<'a> Encoding<'a> {
+    /// Project this borrowed view into an owned [`EncodingOwned`]
+    /// whose byte and text containers are made by the profile's
+    /// `OriginStorage` from each slice AND `origin`, the buffer the
+    /// view was decoded from. A profile that shares that buffer builds
+    /// containers that refer back to it instead of copying out of it; what the
+    /// origin is, and what to do with a slice that does not come from it, is
+    /// the profile's to say.
+    ///
+    /// `try_into_owned_in` stays the copying projection. Every codec this one
+    /// embeds, repeats or dispatches to must have been generated with
+    /// `--owned-origin` as well.
+    pub fn try_into_owned_in_origin<S: ::sce_forge_runtime::codec::OriginStorage>(self, origin: &<S as ::sce_forge_runtime::codec::OriginStorage>::Origin) -> Result<EncodingOwned<S>, CodecError> {
+        Ok(EncodingOwned {
+            packed_id: self.packed_id,
+            schema_len: self.schema_len,
+            schema: self.schema.map(|_v| <S as ::sce_forge_runtime::codec::OriginStorage>::str_from::<128>(origin, _v)).transpose()?,
+        })
+    }
+}
