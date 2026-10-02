@@ -87,14 +87,22 @@ REPO = pathlib.Path(__file__).resolve().parents[2]
 # `wz_negotiated_axes_zenohd_interop.rs`, each with an orthogonal mutation
 # recorded in that file's ledger entry.
 #
-# The two that remain SYNTHETIC-ONLY are named on every run and are not an
+# The two that remained SYNTHETIC-ONLY were named on every run and were not an
 # oversight. `ext:negotiate_qos_link_against_peer` and
 # `ext:negotiate_shm_against_peer` sit outside the set of negotiated axes the
-# consuming surface claimed; shm additionally reads its witness through a HELPER
-# that parses the demo line, so the value is laundered out of every assertion —
+# consuming surface claimed; shm additionally read its witness through a HELPER
+# that parses the demo line, so the value was laundered out of every assertion —
 # the shape R2221 recorded as "assert where the session is alive", and the
-# repair for it is that leg's to make, not this gate's to chase.
-GENUINE_AXIS_FLOOR = 7
+# repair for it was that leg's to make, not this gate's to chase.
+#
+# R3010 -- `negotiate_shm_against_peer` is no longer one of them, and the repair
+# was the one that paragraph named. `wz_shm_payload_zenohd_interop.rs` asserts
+# `opened.actions.is_shm()` on the SESSION's own handle, in the leg that dials
+# upstream's `z_sub_shm`, before it publishes anything: where the session is
+# alive, against a foreign peer, and not through a parsed line. The floor moves
+# 7 -> 8 in the commit that adds the witness, as the gate asks. One axis is
+# left, `negotiate_qos_link_against_peer`.
+GENUINE_AXIS_FLOOR = 8
 
 
 def corpus_files() -> set[str]:

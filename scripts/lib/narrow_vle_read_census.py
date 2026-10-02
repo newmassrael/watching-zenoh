@@ -179,10 +179,11 @@ ADJUDICATED: dict[str, tuple[str, str]] = {
     # upstream: `Zenoh080Sliced::<u32>` holds a `Zenoh080Bounded::<u32>` and
     # reads BOTH the slice count (`let num: usize = self.codec.read(..)`) and
     # each kind (`let kind: u8 = self.codec.read(..)`) through it
-    # (`commons/zenoh-codec/src/core/zbuf.rs`, the `RCodec<ZBuf, &mut R> for
-    # Zenoh080Sliced<$bound>` impl), and `Zenoh080Bounded<u32>` answers
-    # `DidntRead` on a varint past u32 (`commons/zenoh-codec/src/core/zint.rs`,
-    # `zint_impl_codec!`). The kind is then narrowed to its low byte by the
+    # (`commons/zenoh-codec/src/core/zbuf.rs` @
+    # `impl<R> RCodec<ZBuf, &mut R> for Zenoh080Sliced<$bound>`), and
+    # `Zenoh080Bounded<u32>` answers `DidntRead` on a varint past u32
+    # (`commons/zenoh-codec/src/core/zint.rs` @
+    # `macro_rules! zint_impl_codec {`). The kind is then narrowed to its low byte by the
     # `as` in that macro, which the host does with `put_payload::slice_kind`;
     # the REFUSAL, which is what this census asks about, is at 32 bits.
     "crates/wz-session-core/src/dissect.rs::walk_msg_put::slice_count": (
