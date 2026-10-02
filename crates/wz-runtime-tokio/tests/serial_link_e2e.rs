@@ -128,6 +128,79 @@ fn phase(label: &str, what: &str) {
     eprintln!("serial_link_e2e[{label}]: {what}");
 }
 
+/// One end of an `openpty` pair, with the device's drain taken out.
+///
+/// A flush on a serial stream is `tcdrain` (`mio-serial`'s `Write::flush`, which
+/// `tokio-serial`'s `poll_flush` calls from inside the poll). On a real device it
+/// returns when the bytes have left the transmitter. A pty has no transmitter, and
+/// on macOS the pair shares ONE tty queue: `tcdrain` on either end returns only
+/// when the queue is empty, and the queue holds what the OTHER end wrote and has not
+/// yet read. The link handshake has the two ends write and flush at the same time
+/// (INIT, and the reply to it), so each end's drain waits on a read the other, also
+/// draining, cannot make. The hosted macOS leg showed it twice, in the sample of the
+/// stalled process: first one thread in `tcdrain` under a `join!` of both ends, then,
+/// with each end on a task of its own, BOTH workers in `tcdrain`.
+///
+/// So the pty arm models what a pty is, a byte pipe with termios, and leaves the
+/// drain to the devices that have something to drain. What the arm still proves is
+/// the part that is wz's: the non-blocking fd, the raw termios `pair()` sets, the
+/// buffer clear, and the link and session logic over them. Upstream's serial link
+/// flushes from async code the same way (`z-serial-0.3.1` @ `self.serial.flush().await?;`),
+/// so the product is at parity, and a real tty does not couple its ends.
+#[cfg(unix)]
+struct Undrained<S>(S);
+
+#[cfg(unix)]
+impl<S: tokio::io::AsyncRead + Unpin> tokio::io::AsyncRead for Undrained<S> {
+    fn poll_read(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        buf: &mut tokio::io::ReadBuf<'_>,
+    ) -> std::task::Poll<io::Result<()>> {
+        std::pin::Pin::new(&mut self.0).poll_read(cx, buf)
+    }
+}
+
+#[cfg(unix)]
+impl<S: tokio::io::AsyncWrite + Unpin> tokio::io::AsyncWrite for Undrained<S> {
+    fn poll_write(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        buf: &[u8],
+    ) -> std::task::Poll<io::Result<usize>> {
+        std::pin::Pin::new(&mut self.0).poll_write(cx, buf)
+    }
+
+    fn poll_flush(
+        self: std::pin::Pin<&mut Self>,
+        _cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<io::Result<()>> {
+        std::task::Poll::Ready(Ok(()))
+    }
+
+    fn poll_shutdown(
+        self: std::pin::Pin<&mut Self>,
+        _cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<io::Result<()>> {
+        // `tokio-serial`'s shutdown is a flush, so it drains too.
+        std::task::Poll::Ready(Ok(()))
+    }
+}
+
+#[cfg(unix)]
+impl<S: SerialByteStream> SerialByteStream for Undrained<S> {
+    fn clear_buffers(&self) -> io::Result<()> {
+        self.0.clear_buffers()
+    }
+}
+
+/// A connected `openpty` pair whose ends do not drain; see [`Undrained`].
+#[cfg(unix)]
+fn undrained_pty_pair() -> (Undrained<SerialStream>, Undrained<SerialStream>) {
+    let (a, b) = SerialStream::pair().expect("openpty serial pair");
+    (Undrained(a), Undrained(b))
+}
+
 /// Hand back a task's output, or end this test with the task's own panic.
 fn finished<T>(joined: Result<T, tokio::task::JoinError>) -> T {
     match joined {
@@ -140,20 +213,19 @@ fn finished<T>(joined: Result<T, tokio::task::JoinError>) -> T {
 /// Run two futures, each on a task of its own, and return both outputs.
 ///
 /// The two ends of a serial pair must not share a polling thread. A flush on a
-/// serial stream is `tcdrain` (`mio-serial`'s `Write::flush`, which
-/// `tokio-serial`'s `poll_flush` calls from inside the poll), and `tcdrain` on a
-/// macOS pty returns only once the OTHER end has read what was written. Two
-/// futures under one `join!` are polled by one thread, so the end that flushes
-/// first blocks the thread its peer would be read on: the hosted macOS leg
-/// stood in exactly that call (`tcdrain` -> `ioctl`, every one of a five-second
-/// sample's frames) with the 5 s handshake bound unreached, because a timeout
-/// that shares the blocked thread cannot fire. On a Linux pty `tcdrain` returns
-/// at once, which is why this only ever showed on the host that needed it.
+/// serial stream is `tcdrain`, which blocks its thread inside the poll (see
+/// [`Undrained`] for why a pty's drain waits on the other end). Two futures under
+/// one `join!` are polled by one thread, so the end that flushes first blocks the
+/// thread its peer would be read on: the hosted macOS leg stood in exactly that
+/// call (`tcdrain` -> `ioctl`, every one of a five-second sample's frames) with
+/// the 5 s handshake bound unreached, because a timeout that shares the blocked
+/// thread cannot fire. With each end on a task of its own that bound CAN fire, and
+/// a stall in one end no longer hides which one it is.
 ///
-/// Real devices have this shape too: upstream's serial link flushes from async
-/// code the same way (`z-serial-0.3.1` @ `self.serial.flush().await?;`), and
-/// its two ends are two processes. The test must give each end the thread a
-/// process would have.
+/// Its two ends are two processes in real use, and each has a thread of its own;
+/// the test gives each end the thread a process would have. Spawning did not by
+/// itself clear the macOS stall (the drain deadlocks across threads too), which is
+/// what [`Undrained`] is for; both are kept because they answer different faults.
 async fn on_own_tasks<A, B>(a: A, b: B) -> (A::Output, B::Output)
 where
     A: std::future::Future + Send + 'static,
@@ -363,15 +435,12 @@ async fn wz_to_wz_over_serial_memory_handshakes_and_delivers_push() {
     wz_to_wz_handshakes_and_delivers_push_over("memory", end_init, end_acc).await;
 }
 
-// Four workers, not two, for a pty pair: each end's writer may be inside `tcdrain`
-// at once (see [`on_own_tasks`]), and a worker so held cannot read what would
-// release the other, so there must be workers left over for the readers.
 #[cfg(unix)]
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn wz_to_wz_over_serial_pty_handshakes_and_delivers_push() {
     // ── A connected async serial pair (two ends of one openpty link).
     phase("pty", "opening the pair");
-    let (end_init, end_acc) = SerialStream::pair().expect("openpty serial pair");
+    let (end_init, end_acc) = undrained_pty_pair();
     phase("pty", "pair opened");
     wz_to_wz_handshakes_and_delivers_push_over("pty", end_init, end_acc).await;
     phase("pty", "the session test returned, the runtime drops next");
@@ -503,11 +572,10 @@ async fn wz_to_wz_over_serial_memory_fragments_and_reassembles_oversize_put() {
     wz_to_wz_fragments_and_reassembles_an_oversize_put_over(end_init, end_acc).await;
 }
 
-// Four workers for the reason the push test above gives.
 #[cfg(all(feature = "transport-fragmentation", unix))]
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn wz_to_wz_over_serial_pty_fragments_and_reassembles_oversize_put() {
-    let (end_init, end_acc) = SerialStream::pair().expect("openpty serial pair");
+    let (end_init, end_acc) = undrained_pty_pair();
     wz_to_wz_fragments_and_reassembles_an_oversize_put_over(end_init, end_acc).await;
 }
 
