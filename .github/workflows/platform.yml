@@ -176,19 +176,54 @@ jobs:
         continue-on-error: true
         shell: bash
         run: |
+          # What the OS itself does, before any wz code: the first macOS run failed
+          # EVERY multicast send with EHOSTUNREACH, and a send to a group has three
+          # candidate causes that read the same (no multicast route on the default
+          # path, an egress interface nobody pinned, a privacy denial for local-network
+          # traffic). One socket each way tells them apart.
           python - <<'PY'
           import socket, struct
+          GROUP, PORT = "224.0.0.224", 7451
           try:
               s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
               s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
               s.bind(("0.0.0.0", 0))
-              mreq = struct.pack("4s4s", socket.inet_aton("224.0.0.224"), socket.inet_aton("0.0.0.0"))
+              mreq = struct.pack("4s4s", socket.inet_aton(GROUP), socket.inet_aton("0.0.0.0"))
               s.setsockopt(socket.IPPROTO_IP, socket.IP_ADD_MEMBERSHIP, mreq)
-              print("IGMP join 224.0.0.224 via INADDR_ANY: OK")
+              print(f"IGMP join {GROUP} via INADDR_ANY: OK")
               s.close()
           except OSError as exc:
-              print(f"IGMP join 224.0.0.224 via INADDR_ANY: FAILED ({exc})")
+              print(f"IGMP join {GROUP} via INADDR_ANY: FAILED ({exc})")
+
+          def send(label, iface):
+              s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+              try:
+                  if iface is not None:
+                      s.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_IF, socket.inet_aton(iface))
+                  s.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_LOOP, 1)
+                  s.sendto(b"x", (GROUP, PORT))
+                  print(f"multicast send, {label}: OK")
+              except OSError as exc:
+                  print(f"multicast send, {label}: FAILED ({exc})")
+              finally:
+                  s.close()
+
+          send("no interface pinned", None)
+          send("pinned to 127.0.0.1", "127.0.0.1")
+          try:
+              p = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+              p.connect(("192.0.2.1", 9))  # a route lookup, no packet leaves
+              addr = p.getsockname()[0]
+              p.close()
+              send(f"pinned to the default-route address {addr}", addr)
+          except OSError as exc:
+              print(f"default-route address: none ({exc})")
           PY
+          case "$RUNNER_OS" in
+            macOS)   ifconfig -a; netstat -rn -f inet; route -n get "224.0.0.224" || true ;;
+            Windows) ipconfig; route print -4 ;;
+            *)       ip -4 addr; ip -4 route ;;
+          esac
           cd crates
           scouting=PASS
           pubsub=PASS
