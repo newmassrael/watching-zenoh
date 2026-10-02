@@ -1,7 +1,5 @@
 // SCE-GENERATED — DO NOT EDIT
 // source-hash: 86c38c2b1a76a7050e9db1388ec695bd17b2709b53db5db55f4a2e7ab727b7bd
-// template-hash: 26e5b2b0aec9ad85a8375690dfa8db213377e6dd6bcde53d334d893cb6b448b2
-// generated-at: 0
 // SCE-MAP: temp_reading_codec.scxml:16 :: _forge_body
 
 // SCE Forge: Auto-generated from Extended SCXML (sce:kind="codec")
@@ -32,10 +30,13 @@ pub struct TempReadingCodec {
 
 #[allow(dead_code)]
 impl TempReadingCodec {
-    /// Construct an instance with every field zero-initialized via
+    /// Construct an instance with every field at its own type's
     /// [`Default`]. Generated procedure_l2 code stores codec instances
     /// as owned members and needs an infallible constructor to
-    /// initialize them before any `encode()` or `decode()` call.
+    /// initialize them before any `encode()` or `decode()` call. An
+    /// enum-typed field starts at the first variant its document
+    /// declares, not at the carrier's zero: a closed set does not hold
+    /// a value it never declared.
     pub fn new() -> Self {
         Self::default()
     }
