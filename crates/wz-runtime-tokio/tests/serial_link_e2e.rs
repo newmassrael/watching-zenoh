@@ -116,14 +116,28 @@ const ITER_CAP: usize = 4096;
 const OPEN_BOUND: Duration = Duration::from_secs(20);
 const KEYEXPR: &str = "demo/serial";
 
+/// Say, on stderr, which phase of a session test has just been reached.
+///
+/// The hosted macOS leg runs these with `--nocapture` and kills a test that has
+/// not finished in 240 s, and a stalled pair-based test left only its name as
+/// evidence: neither the 5 s handshake bound nor the 20 s open bound fired, so
+/// the stall is a call that never returns to the runtime. The last line of this
+/// kind in the log names the phase it stood in. It writes through `eprintln!`,
+/// which is unbuffered, so a killed process has still said it.
+fn phase(label: &str, what: &str) {
+    eprintln!("serial_link_e2e[{label}]: {what}");
+}
+
 /// A Push published over a wz<->wz serial link reaches the peer's subscriber
 /// byte-exact. The body is generic over the stream so it is instantiated over a
 /// memory pair on every host and over a pty pair on a Unix.
 async fn wz_to_wz_handshakes_and_delivers_push_over(
+    label: &str,
     mut end_init: impl SerialByteStream,
     mut end_acc: impl SerialByteStream,
 ) {
     let payload: Vec<u8> = b"serial-push-byte-exact".to_vec();
+    phase(label, "streams in hand, link handshake next");
 
     // ── Phase 1: the serial-LINK handshake on both ends, over the whole
     //    stream, BEFORE the zenoh transport. Initiator sends INIT, Responder
@@ -139,6 +153,7 @@ async fn wz_to_wz_handshakes_and_delivers_push_over(
     .expect("serial link handshake completes within 5s");
     hs_init.expect("initiator link handshake reaches Connected");
     hs_acc.expect("responder link handshake reaches Connected");
+    phase(label, "link handshake done, transport open next");
 
     // ── Phase 2: the zenoh transport open over the handshaked serial links,
     //    driven concurrently (the 4-way handshake needs both sides
@@ -180,6 +195,8 @@ async fn wz_to_wz_handshakes_and_delivers_push_over(
         tokio::time::timeout(OPEN_BOUND, async { tokio::join!(acc_open, init_open) })
             .await
             .expect("both ends reach Established within the bound");
+
+    phase(label, "transport open done, drives and publish next");
 
     // ── Subscriber on the acceptor's observer; asserts the delivered payload
     //    byte-for-byte.
@@ -234,10 +251,12 @@ async fn wz_to_wz_handshakes_and_delivers_push_over(
     let scenario = async move {
         // Let both drives reach steady state, then publish once.
         tokio::time::sleep(Duration::from_millis(300)).await;
+        phase(label, "publishing");
         let delivered = publisher
             .publish(KEYEXPR, &payload, PublishOptions::put())
             .expect("serial publish builds and routes through the send seam");
         assert_eq!(delivered, 0, "no local subscriber on the publisher side");
+        phase(label, "published, waiting for the subscriber");
         for _ in 0..100 {
             if fired_probe.load(Ordering::SeqCst) > 0 {
                 return;
@@ -252,6 +271,7 @@ async fn wz_to_wz_handshakes_and_delivers_push_over(
         _ = drive_init => panic!("initiator drive loop ended unexpectedly"),
         _ = scenario => {}
     }
+    phase(label, "delivered, test body done");
 
     assert_eq!(
         fired.load(Ordering::SeqCst),
@@ -263,15 +283,18 @@ async fn wz_to_wz_handshakes_and_delivers_push_over(
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn wz_to_wz_over_serial_memory_handshakes_and_delivers_push() {
     let (end_init, end_acc) = memory_pair();
-    wz_to_wz_handshakes_and_delivers_push_over(end_init, end_acc).await;
+    wz_to_wz_handshakes_and_delivers_push_over("memory", end_init, end_acc).await;
 }
 
 #[cfg(unix)]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn wz_to_wz_over_serial_pty_handshakes_and_delivers_push() {
     // ── A connected async serial pair (two ends of one openpty link).
+    phase("pty", "opening the pair");
     let (end_init, end_acc) = SerialStream::pair().expect("openpty serial pair");
-    wz_to_wz_handshakes_and_delivers_push_over(end_init, end_acc).await;
+    phase("pty", "pair opened");
+    wz_to_wz_handshakes_and_delivers_push_over("pty", end_init, end_acc).await;
+    phase("pty", "the session test returned, the runtime drops next");
 }
 
 /// R311nw — an oversize Put (> `SERIAL_MTU`) published over the wz<->wz
