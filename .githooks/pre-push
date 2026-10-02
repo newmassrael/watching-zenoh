@@ -870,6 +870,13 @@ round_fed_gates=(
     # no combined `actions/cache`, and every restore has its save.
     "workflow_cache_save_gate.py --selftest"
     "workflow_cache_save_gate.py"
+    # R3013 — reads the writers (every call of the JSON integer door in
+    # `crates/*/src`), the header's integer paragraph and the revision rows, so a
+    # round that adds a cell to any of them feeds it. The fields row once named
+    # one cell of two; a consumer found it by reading the writers, and this gate
+    # reads them on every push.
+    "json_integer_cell_gate.py --selftest"
+    "json_integer_cell_gate.py"
 )
 # ⚠ The module and its ARGUMENTS are expanded separately, and that too is
 # forced rather than chosen: `scripts/lib/"${cmd[@]}"` attaches the prefix to
