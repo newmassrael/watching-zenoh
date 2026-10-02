@@ -16760,6 +16760,20 @@ layer_z_zenohd_interop() {
     (cd crates && cargo build -p wz-ap-demo --features session-extshm --quiet) || return 1
     (cd crates && cargo test -p wz-integration-tests \
         --test wz_shm_establishment_zenohd_interop -- --ignored --quiet --test-threads=1) || return 1
+    # R3009 -- the SHM PAYLOAD interop: what establishment agreed to carry,
+    # carried, in both directions, against upstream's own `z_pub_shm` and
+    # `z_sub_shm` (built beside the shared-memory zenohd by the same
+    # `ZENOHD_SHM=1 scripts/build-zenohd.sh`). It rides the `session-extshm` demo
+    # build above only in the sense that the oracle is the same build: the test
+    # drives the wz node IN PROCESS through the library entry points and spawns
+    # no demo, so it needs no feature restatement and cannot disturb the shared
+    # `--bin` path. ABSENT oracle is a SKIP inside each leg, as for establishment
+    # (hosted CI provisions no source build), which is why this carries a COUNT:
+    # four legs must report, so a dropped `#[ignore]` or a rename cannot select
+    # zero tests and pass. One of the four (leg 3) PINS the provider-lifecycle
+    # defect of open-debt item 823 (6) and passes while the defect stands.
+    _runci_guarded_test Z 4 cargo test -p wz-integration-tests \
+        --test wz_shm_payload_zenohd_interop -- --ignored --quiet --test-threads=1 || return 1
     # Restore the lane's OWN demo build: the `session-extshm` build above wrote over
     # the same `--bin` path (R311y269 — cargo uplifts every feature variant of one
     # bin to one path), and every leg after this point expects the big feature set

@@ -40,9 +40,10 @@
 //! header before it maps anything (`commons/zenoh-shm/src/reader.rs` @
 //! `pub fn read_shmbuf(`). Leg 3 is the lifecycle arm: the publisher lets go of
 //! its payload the moment `publish_shm` returns, which is what every real
-//! publisher does. The receiver reads some time later, so a buffer that stopped
-//! being valid when its owner let go is a sample zenoh drops with `Buffer is
-//! invalidated`.
+//! publisher does, and the receiver reads some time later. That arm FAILS today
+//! (open-debt item 823 (6): wz's provider unlinks the segment when its owner
+//! drops), so it is a PIN of the measured defect rather than a proof, and the
+//! doc on it says what turns it red.
 //!
 //! ## The wz node is the ordinary one
 //!
@@ -291,6 +292,7 @@ async fn zenoh_publishes_to_wz(offer_shm: bool) -> Option<ZenohToWz> {
 /// acceptor that does not offer shared memory. zenoh sends the payload RAW, so
 /// the samples must arrive without the resolver being asked anything. If this
 /// arm fails, leg 1's failure is the harness and says nothing about SHM.
+// wz-proves: none -- the raw control for leg 1: wz offers no shared memory, so a delivery proves the topology and not the layout
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "binary-dep e2e (ZENOHD_SHM=1 build-zenohd.sh: z_pub_shm); Layer Z runs via --ignored"]
 async fn zenohd_publisher_reaches_a_wz_subscriber_raw_when_shm_is_not_offered() {
@@ -325,7 +327,7 @@ async fn zenohd_publisher_reaches_a_wz_subscriber_raw_when_shm_is_not_offered() 
 /// Leg 1 -- a zenoh SHM publisher dials a wz acceptor that offers shared memory;
 /// every sample must reach the wz subscriber byte-exact AND by way of the
 /// resolver.
-// wz-proves: transport-shm zenohd->wz
+// wz-proves: transport-shm zenoh->wz
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "binary-dep e2e (ZENOHD_SHM=1 build-zenohd.sh: z_pub_shm); Layer Z runs via --ignored"]
 async fn zenohd_shm_publisher_payload_reaches_a_wz_subscriber_through_shared_memory() {
@@ -483,7 +485,7 @@ async fn wz_publishes_to_zenoh_subscriber(owner: Owner, key: &str, text: &str) -
 
 /// Leg 2 -- wz publishes a payload it keeps alive; zenoh's reader must map it and
 /// `z_sub_shm` must say it arrived through shared memory.
-// wz-proves: transport-shm wz->zenohd
+// wz-proves: transport-shm wz->zenoh
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "binary-dep e2e (ZENOHD_SHM=1 build-zenohd.sh: z_sub_shm); Layer Z runs via --ignored"]
 async fn wz_shm_payload_held_by_its_owner_reaches_a_zenohd_shm_subscriber() {
@@ -504,24 +506,43 @@ async fn wz_shm_payload_held_by_its_owner_reaches_a_zenohd_shm_subscriber() {
     );
 }
 
-/// Leg 3 -- the same, for a publisher that lets go at once. The payload must
-/// still be there when zenoh's reader gets to it, because zenoh's reader is
-/// promised the buffer by the reference count the SENDER took for it.
+/// Leg 3 -- the same, for a publisher that lets go at once, and this one PINS A
+/// DEFECT instead of proving a property. A real publisher lets go of its payload
+/// the moment `publish_shm` returns, and zenoh's reader is promised the buffer
+/// for as long as the reference count the SENDER took for it says so, so the
+/// payload ought to still be there when the reader gets to it.
 ///
-/// RED, and on purpose: this is the arm the layout fix uncovered, and it is not
-/// fixed. wz's provider unlinks the data segment the moment its owner drops
+/// It is not, and that is open-debt item 823 (6), the provider lifecycle. wz's
+/// provider unlinks the data segment the moment its owner drops
 /// (`shm_provider.rs`, `impl Drop for ShmBackedPayload`), so a reader that comes
-/// later finds nothing: `z_sub_shm` logs `Error receiving SHM buffer: Unable to
-/// open POSIX shm segment: OS error 2`. Upstream's sender instead takes one
-/// reference per serialization and its receiver drops it
-/// (`commons/zenoh-codec/src/core/zbuf.rs` @ `unsafe { shmb.inc_ref_count() };`),
-/// and the allocator reclaims a chunk when the count reaches zero. Where the
-/// oracle is absent, as on hosted CI, this returns at the SKIP below and says
-/// nothing; where it is present, it fails until the provider holds by count.
-// wz-proves: transport-shm wz->zenohd
+/// later finds nothing, and `z_sub_shm` logs `Error receiving SHM buffer: Unable
+/// to open POSIX shm segment: OS error 2` and delivers no sample. Upstream's
+/// sender instead takes one reference per serialization and its receiver drops
+/// it (`commons/zenoh-codec/src/core/zbuf.rs` @ `unsafe { shmb.inc_ref_count() };`),
+/// and the allocator reclaims a chunk when the count reaches zero.
+///
+/// WHY A PIN AND NOT A RED TEST. This leg was first written as the positive
+/// witness, failed for exactly this reason, and was kept red on purpose to say
+/// the atom is not finished. A lane cannot carry a test that is red by design:
+/// where the oracle is present it reds the lane for a defect that is already
+/// registered, and where it is absent (hosted CI) it SKIPs and says nothing, so
+/// the failing property was only ever visible on one machine. What the tree
+/// does with a measured, registered defect is pin it (the linkstate walker's cap
+/// divergence is the precedent): assert the defect as measured, in both of its
+/// halves, so the test passes now and cannot go on passing unnoticed.
+///
+/// WHAT TURNS IT RED. The day the provider holds by count, zenoh's reader finds
+/// the segment, the error line disappears and the sample arrives, so BOTH
+/// assertions fail together. That is the signal to delete this pin, turn the
+/// leg into the positive twin of leg 2 with a `transport-shm wz->zenoh` claim,
+/// and close item 823 (6). A DIFFERENT failure (the error line absent and no
+/// sample either) fails the first assertion alone, which is how a change in the
+/// failure's shape is told apart from the defect being fixed.
+// wz-proves: none -- pins the lifecycle defect of item 823 (6): it passes while a payload its owner let go of is unreadable to zenoh, so no passing foreign witness stands behind the atom for that arm
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "binary-dep e2e (ZENOHD_SHM=1 build-zenohd.sh: z_sub_shm); Layer Z runs via --ignored"]
-async fn wz_shm_payload_its_owner_let_go_of_at_once_still_reaches_a_zenohd_shm_subscriber() {
+async fn wz_shm_payload_its_owner_let_go_of_at_once_is_not_yet_readable_by_a_zenohd_shm_subscriber()
+{
     if zenoh_shm_example_binary("z_sub_shm").is_none() {
         eprintln!(
             "SKIP: no z_sub_shm at target/zenohd-shm (run `ZENOHD_SHM=1 scripts/build-zenohd.sh`)"
@@ -533,9 +554,16 @@ async fn wz_shm_payload_its_owner_let_go_of_at_once_still_reaches_a_zenohd_shm_s
         wz_publishes_to_zenoh_subscriber(Owner::LetsGoAtOnce, "demo/example/wz-released", text)
             .await;
     assert!(
-        printed.contains(&format!(
+        printed.contains("Error receiving SHM buffer"),
+        "the defect of item 823 (6) did not show its signature. If the payload ARRIVED, the \
+         provider now holds by count: turn this pin into the positive twin of leg 2 and close the \
+         item. If it neither arrived nor errored, the failure changed shape and wants a look:\n{printed}"
+    );
+    assert!(
+        !printed.contains(&format!(
             "('demo/example/wz-released': '{text}') {ZENOH_SAW_SHM}"
         )),
-        "z_sub_shm did not receive a payload its wz owner let go of right after publishing:\n{printed}"
+        "a payload its wz owner let go of right after publishing reached z_sub_shm through \
+         shared memory, so the defect this pins is gone:\n{printed}"
     );
 }

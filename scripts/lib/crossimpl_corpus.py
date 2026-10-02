@@ -92,6 +92,15 @@ FOREIGN_ROOTS = {
     # omits `shared-memory`), so every §5.1/§5.13 SHM establishment claim rests on
     # it and a test that spawns it IS a foreign zenohd witness.
     "zenohd_shm_binary": "zenohd",
+    # R3009 — the shared-memory EXAMPLES (`z_pub_shm` / `z_sub_shm`), built beside
+    # the shared-memory zenohd by `ZENOHD_SHM=1 scripts/build-zenohd.sh`. They are
+    # the CORE `zenoh-examples` applications and not the router, which relays a
+    # shared-memory buffer and neither makes nor reads one: `z_pub_shm` allocates
+    # in a pool and publishes a descriptor, `z_sub_shm` reads it and says whether
+    # it arrived as shared memory. That is the relation `zenoh_core_example_binary`
+    # has to `z_queryable` / `z_get`, so the class is `zenoh-core` and the claims
+    # read `zenoh->wz` / `wz->zenoh`, not a `zenohd` the counterparty is not.
+    "zenoh_shm_example_binary": "zenoh-core",
     # R311y442 — the zenoh-ext EXAMPLE applications (`z_advanced_pub` /
     # `z_advanced_sub`), a class of their own rather than more `zenohd` roots.
     # They are the real zenoh-full Rust stack at the pinned version, but they are

@@ -838,7 +838,18 @@ HOST_GATED_CI_TARGETS: dict[str, str] = {
 # that calls it, against libzenohpico). They are the only new `wz-proves`
 # markers in the range, counted from the diff and not assumed. 968 + 6 = 974,
 # measured by `scripts/audit-crossimpl-proof.sh` at this round's tree.
-FOREIGN_ADJUDICATOR_LINKS = 974
+# R3009 -- 974 -> 976, RISING because the shared-memory payload had no foreign
+# adjudicator in either direction until the Put's layout followed its extension
+# chain, and now has two: upstream's own `z_pub_shm` publishing a descriptor to a
+# wz subscriber (`transport-shm zenoh->wz`) and wz's `publish_shm` read by
+# upstream's own `z_sub_shm` (`transport-shm wz->zenoh`). They are the CORE
+# `zenoh-examples` applications, class `zenoh-core`, registered in
+# `crossimpl_corpus.py` as `zenoh_shm_example_binary`. Two links and not three:
+# the same file's third leg (the publisher that lets go at once) is RED while
+# the provider unlinks on drop, so it declares `none` and claims nothing, and
+# the raw control declares `none` too. Counted from the diff: exactly the two
+# `wz-proves` lines added.
+FOREIGN_ADJUDICATOR_LINKS = 976
 
 # ── Execution disclosure ────────────────────────────────────────────────────────
 #
