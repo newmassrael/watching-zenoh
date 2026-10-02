@@ -452,8 +452,15 @@ mod alloc_impl {
                 // typed `_event.data`, so the SampleView must already carry it.
                 // Mirrors SubscriberRegistry::dispatch_push's body arm.
                 let (kind, payload): (SampleKind, &[u8]) = match &push.body {
+                    // A sliced Put carries a shared-memory descriptor, not
+                    // bytes, and turning one into bytes needs the platform's
+                    // resolver, which this registry does not hold. Dropping it
+                    // is the same answer an ambiguous body gets below.
                     PushOwnedVariant::CodecZenohMsgPut(put) => {
-                        (SampleKind::Put, put.payload.as_slice())
+                        match crate::put_payload::inline_bytes(put) {
+                            Some(bytes) => (SampleKind::Put, bytes),
+                            None => continue,
+                        }
                     }
                     PushOwnedVariant::CodecZenohMsgDel(_) => (SampleKind::Del, &[]),
                     // Unknown/Default body tag: neither a confirmed Put nor
@@ -753,8 +760,7 @@ mod tests {
         .try_into_owned()
         .unwrap();
         if let PushOwnedVariant::CodecZenohMsgPut(ref mut put) = push.body {
-            put.payload_len = payload.len() as u64;
-            put.payload = crate::codec_owned::owned_bytes(payload).unwrap();
+            *put = crate::put_payload::inline(payload).unwrap();
         }
         push
     }
@@ -813,8 +819,7 @@ mod tests {
         .try_into_owned()
         .unwrap();
         if let PushOwnedVariant::CodecZenohMsgPut(ref mut put) = push.body {
-            put.payload_len = payload.len() as u64;
-            put.payload = crate::codec_owned::owned_bytes(payload).unwrap();
+            *put = crate::put_payload::inline(payload).unwrap();
         }
         push
     }

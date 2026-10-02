@@ -4027,7 +4027,15 @@ impl LinkstateForwarder {
         // do. An ungated arm here would have made the two disagree in a build
         // that carries one and not the other.
         let (payload, kind): (&[u8], SampleKind) = match &push.body {
-            PushOwnedVariant::CodecZenohMsgPut(put) => (put.payload.as_slice(), SampleKind::Put),
+            PushOwnedVariant::CodecZenohMsgPut(put) => {
+                match wz_session_core::put_payload::inline_bytes(put) {
+                    Some(bytes) => (bytes, SampleKind::Put),
+                    // A sliced Put names a shared-memory buffer and this seam holds
+                    // no resolver: nothing is delivered, rather than the descriptor
+                    // handed to a host subscriber in place of its data.
+                    None => return,
+                }
+            }
             #[cfg(feature = "pubsub-delete")]
             PushOwnedVariant::CodecZenohMsgDel(_) => (&[], SampleKind::Del),
             _ => return,

@@ -175,6 +175,38 @@ ADJUDICATED: dict[str, tuple[str, str]] = {
         "same reason: upstream's `Encoding` codec is `Zenoh080Bounded::<u32>` "
         "on both sides.",
     ),
+    # The sliced Put payload (item 852 follow-on, R3009). Read at the pinned
+    # upstream: `Zenoh080Sliced::<u32>` holds a `Zenoh080Bounded::<u32>` and
+    # reads BOTH the slice count (`let num: usize = self.codec.read(..)`) and
+    # each kind (`let kind: u8 = self.codec.read(..)`) through it
+    # (`commons/zenoh-codec/src/core/zbuf.rs`, the `RCodec<ZBuf, &mut R> for
+    # Zenoh080Sliced<$bound>` impl), and `Zenoh080Bounded<u32>` answers
+    # `DidntRead` on a varint past u32 (`commons/zenoh-codec/src/core/zint.rs`,
+    # `zint_impl_codec!`). The kind is then narrowed to its low byte by the
+    # `as` in that macro, which the host does with `put_payload::slice_kind`;
+    # the REFUSAL, which is what this census asks about, is at 32 bits.
+    "crates/wz-session-core/src/dissect.rs::walk_msg_put::slice_count": (
+        "REFUSE",
+        "the slice count, read at `Zenoh080Bounded::<u32>` upstream "
+        "(`zbuf.rs` `let num: usize = self.codec.read(..)`): a varint past "
+        "u32 is `DidntRead` there too.",
+    ),
+    "crates/wz-session-core/src/dissect.rs::walk_zbuf_slice::kind": (
+        "REFUSE",
+        "a slice's kind, read at `Zenoh080Bounded::<u32>` upstream "
+        "(`zbuf.rs` `let kind: u8 = self.codec.read(..)`): a varint past "
+        "u32 is refused there, and only then is the value cut to a byte.",
+    ),
+    "out/wz-codecs/msg_put.rs::decode::": (
+        "REFUSE",
+        "the generated sibling of `walk_msg_put`'s `slice_count`, correct for "
+        "the same reason: the count is `Zenoh080Bounded::<u32>` upstream.",
+    ),
+    "out/wz-codecs/zbuf_slice.rs::decode::": (
+        "REFUSE",
+        "the generated sibling of `walk_zbuf_slice`'s `kind`, correct for the "
+        "same reason: the kind is `Zenoh080Bounded::<u32>` upstream.",
+    ),
 }
 
 

@@ -22,9 +22,10 @@
 //! not the plan.
 //!
 //! What this module does NOT do is touch a shared-memory segment. A slice of
-//! kind [`SLICE_KIND_SHM_PTR`] carries a serialized descriptor, and turning a
-//! descriptor into bytes needs the platform's resolver
-//! (`wz-runtime-tokio::shm_provider`); [`collect_payload`] takes it as a
+//! kind [`SLICE_KIND_SHM_PTR`](crate::put_payload::SLICE_KIND_SHM_PTR) carries
+//! a serialized descriptor, and turning a descriptor into bytes needs the
+//! platform's resolver (`wz-runtime-tokio::shm_provider`);
+//! [`collect_payload`](crate::put_payload::collect_payload) takes it as a
 //! closure so this crate stays the no_std half.
 
 use alloc::vec::Vec;
@@ -35,11 +36,26 @@ use wz_codecs::zbuf_slice::ZbufSliceOwned;
 
 /// A slice whose bytes are payload bytes, as an unsliced Put would carry them
 /// (`commons/zenoh-codec/src/core/zbuf.rs` @ `const RAW: u8 = 0;`).
-pub const SLICE_KIND_RAW: u16 = 0;
+pub const SLICE_KIND_RAW: u8 = 0;
 
 /// A slice whose bytes are a serialized shared-memory buffer descriptor, not
 /// payload (`commons/zenoh-codec/src/core/zbuf.rs` @ `const SHM_PTR: u8 = 1;`).
-pub const SLICE_KIND_SHM_PTR: u16 = 1;
+pub const SLICE_KIND_SHM_PTR: u8 = 1;
+
+/// How many slices one Put holds: the capacity `msg_put.scxml` gives its
+/// `slices` repeat (`max-count="4"`). A count past it is refused by the codec
+/// after the element that does not fit has been read, and the dissector, which
+/// must refuse the same input, reads this to say where.
+pub const MAX_SLICES: usize = 4;
+
+/// The kind of a slice as upstream reads it. The wire carries a varint up to
+/// 32 bits wide, which the codec keeps whole; upstream keeps its low byte
+/// (`commons/zenoh-codec/src/core/zbuf.rs` @
+/// `let kind: u8 = self.codec.read(&mut *reader)?;`), so a kind of `0x101` is
+/// a shared-memory slice there and is one here.
+pub const fn slice_kind(wire: u32) -> u8 {
+    wire as u8
+}
 
 /// How one Put carries its payload.
 #[derive(Debug)]
@@ -79,6 +95,44 @@ pub fn is_sliced<S: CodecStorage>(put: &MsgPutOwned<S>) -> bool {
     put.slices.is_some()
 }
 
+/// How many payload bytes `put` carries, as upstream's statistics count them:
+/// the length of the ZBuf the receiver would hold. An inline payload is its
+/// bytes; a RAW slice is its bytes; a shared-memory slice is the length of the
+/// buffer its descriptor names, because that buffer, not the descriptor, is
+/// what the receiver holds. The descriptor is read, never resolved, so this
+/// costs no segment access. A descriptor that does not parse, or a slice kind
+/// this node does not know, contributes nothing: there is no length to report
+/// for bytes that cannot be read.
+pub fn payload_len<S: CodecStorage>(put: &MsgPutOwned<S>) -> usize {
+    match layout(put) {
+        PutPayload::Inline(bytes) => bytes.len(),
+        PutPayload::Sliced(slices) => slices
+            .iter()
+            .map(|slice| {
+                let bytes = SceByteBuf::as_slice(&slice.bytes);
+                match slice_kind(slice.kind) {
+                    SLICE_KIND_RAW => bytes.len(),
+                    SLICE_KIND_SHM_PTR => shm_slice_len(bytes),
+                    _ => 0,
+                }
+            })
+            .sum(),
+    }
+}
+
+/// The buffer length a shared-memory slice's descriptor names, or `0` when the
+/// descriptor does not parse. Without `transport-shm` this node has no reader
+/// for descriptors, and such a slice is dropped before any size is asked.
+#[cfg(feature = "transport-shm")]
+fn shm_slice_len(descriptor: &[u8]) -> usize {
+    crate::extshm::decode_shm_descriptor(descriptor).map_or(0, |d| d.data_len as usize)
+}
+
+#[cfg(not(feature = "transport-shm"))]
+fn shm_slice_len(_descriptor: &[u8]) -> usize {
+    0
+}
+
 /// A Put that carries `bytes` in the inline layout.
 ///
 /// The header is the bare Put header and every optional field is absent: a
@@ -107,7 +161,7 @@ pub fn inline<S: CodecStorage>(bytes: &[u8]) -> Result<MsgPutOwned<S>, CodecErro
 pub fn shm<S: CodecStorage>(descriptor: &[u8]) -> Result<MsgPutOwned<S>, CodecError> {
     let mut slices = <S::List<ZbufSliceOwned<S>, 4> as SceList<ZbufSliceOwned<S>>>::empty();
     slices.try_push(ZbufSliceOwned {
-        kind: SLICE_KIND_SHM_PTR,
+        kind: u32::from(SLICE_KIND_SHM_PTR),
         len: descriptor.len() as u64,
         bytes: <S::Bytes<256> as SceByteBuf>::from_slice(descriptor)?,
     })?;
@@ -129,7 +183,7 @@ pub enum PayloadFault {
     /// A slice has a kind this node does not know. Upstream defines two; a third
     /// is a peer speaking something newer, and guessing at its bytes would hand
     /// the application data that is not its payload.
-    UnknownKind(u16),
+    UnknownKind(u8),
     /// A shared-memory slice's descriptor did not resolve: a stale or foreign
     /// segment, no resolver installed, or a descriptor that does not parse.
     Unresolved,
@@ -152,7 +206,7 @@ pub fn collect_payload<S: CodecStorage>(
             let mut out = Vec::new();
             for slice in slices {
                 let bytes = SceByteBuf::as_slice(&slice.bytes);
-                match slice.kind {
+                match slice_kind(slice.kind) {
                     SLICE_KIND_RAW => out.extend_from_slice(bytes),
                     SLICE_KIND_SHM_PTR => {
                         let resolved = resolve(bytes).ok_or(PayloadFault::Unresolved)?;
@@ -220,7 +274,7 @@ mod tests {
         match layout(&put) {
             PutPayload::Sliced(slices) => {
                 assert_eq!(slices.len(), 1);
-                assert_eq!(slices[0].kind, SLICE_KIND_SHM_PTR);
+                assert_eq!(slice_kind(slices[0].kind), SLICE_KIND_SHM_PTR);
                 assert_eq!(
                     SceByteBuf::as_slice(&slices[0].bytes),
                     &[0x35, 0xCA, 0xC3, 0x01, 0x00, 0x00]
@@ -271,7 +325,7 @@ mod tests {
     fn slices_concatenate_in_order_and_an_unknown_kind_is_refused() {
         let mut put = shm::<Heap>(&[0x01]).expect("one slice fits");
         let raw = ZbufSliceOwned::<Heap> {
-            kind: SLICE_KIND_RAW,
+            kind: u32::from(SLICE_KIND_RAW),
             len: 2,
             bytes: <<Heap as CodecStorage>::Bytes<256> as SceByteBuf>::from_slice(b"hi")
                 .expect("two bytes fit"),
@@ -302,6 +356,66 @@ mod tests {
         assert_eq!(
             collect_payload(&odd, |_| Some(Vec::new())),
             Err(PayloadFault::UnknownKind(7))
+        );
+    }
+
+    /// Upstream reads the kind as a bounded-u32 varint and keeps its low byte,
+    /// so `0x101` is a shared-memory slice there (`let kind: u8 = ...`). The
+    /// codec keeps the whole 32 bits and the host takes the low byte, which
+    /// must give the same answer; a varint wider than 32 bits is refused by
+    /// the codec as upstream's bounded read refuses it.
+    #[test]
+    fn a_kind_is_its_low_byte_as_upstream_reads_it() {
+        assert_eq!(slice_kind(0x101), SLICE_KIND_SHM_PTR);
+        assert_eq!(slice_kind(0x100), SLICE_KIND_RAW);
+        // header with the marker, one slice, kind 0x81 0x02 (= 0x101), len 1,
+        // one descriptor byte.
+        let wire = [0x81, 0x12, 0x01, 0x81, 0x02, 0x01, 0x35];
+        let put = decode(&wire).expect("a 32-bit kind decodes");
+        match layout(&put) {
+            PutPayload::Sliced(slices) => {
+                assert_eq!(slices[0].kind, 0x101);
+                assert_eq!(slice_kind(slices[0].kind), SLICE_KIND_SHM_PTR);
+            }
+            PutPayload::Inline(_) => panic!("the Put is sliced"),
+        }
+        // A kind needing 33 bits (five varint bytes, top group 0x10) is
+        // refused by the bounded read, not truncated.
+        let wide = [0x81, 0x12, 0x01, 0x80, 0x80, 0x80, 0x80, 0x10, 0x01, 0x35];
+        assert!(decode(&wide).is_err());
+    }
+
+    /// The statistics size of a Put is the length of the buffer the receiver
+    /// holds: for a shared-memory slice that is the length its descriptor
+    /// names (the first varint of the upstream descriptor, `0x35`, is 53), not
+    /// the six bytes of descriptor.
+    #[test]
+    fn payload_len_counts_the_buffer_a_slice_names_not_its_descriptor() {
+        let inline_put = decode(&[0x01, 0x03, b'a', b'b', b'c']).expect("inline decodes");
+        assert_eq!(payload_len(&inline_put), 3);
+
+        let shm_put = decode(&UPSTREAM_SHM_PUT[..11]).expect("the sliced layout decodes");
+        assert_eq!(payload_len(&shm_put), 53);
+
+        let mut mixed = shm::<Heap>(&[0x35, 0xCA, 0xC3, 0x01, 0x00, 0x00]).expect("one slice");
+        mixed
+            .slices
+            .as_mut()
+            .expect("shm() populates the slices")
+            .try_push(ZbufSliceOwned::<Heap> {
+                kind: u32::from(SLICE_KIND_RAW),
+                len: 2,
+                bytes: <<Heap as CodecStorage>::Bytes<256> as SceByteBuf>::from_slice(b"hi")
+                    .expect("two bytes fit"),
+            })
+            .expect("a second slice fits");
+        assert_eq!(payload_len(&mixed), 55, "the slices add up in the receiver");
+
+        let garbage = shm::<Heap>(&[0x80]).expect("one slice fits");
+        assert_eq!(
+            payload_len(&garbage),
+            0,
+            "a descriptor that does not parse has no length to report"
         );
     }
 }

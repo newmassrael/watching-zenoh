@@ -913,7 +913,10 @@ mod tests {
         match crate::put_payload::layout(put) {
             crate::put_payload::PutPayload::Sliced(slices) => {
                 assert_eq!(slices.len(), 1, "one shared-memory buffer, one slice");
-                assert_eq!(slices[0].kind, crate::put_payload::SLICE_KIND_SHM_PTR);
+                assert_eq!(
+                    crate::put_payload::slice_kind(slices[0].kind),
+                    crate::put_payload::SLICE_KIND_SHM_PTR
+                );
                 assert_eq!(
                     crate::extshm::decode_shm_descriptor(
                         sce_forge_runtime::codec::SceByteBuf::as_slice(&slices[0].bytes)

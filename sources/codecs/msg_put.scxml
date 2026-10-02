@@ -75,6 +75,24 @@
        which is what `extensions.has(0x2)` reads. An encoder refuses a Put
        whose chain and payload disagree (`CodecError::PresentIfMismatch`).
 
+       KNOWN GAP (open-debt item 860): upstream does not identify an
+       extension by that 4-bit id. It matches the header without its chain
+       flag, id plus mandatory bit plus encoding, and the marker is the one
+       value 0x12 (`commons/zenoh-protocol/src/common/extension.rs` @
+       `pub const fn eid(header: u8) -> u8 {`, and `commons/zenoh-codec/src/zenoh/put.rs` @
+       `Ok(match iext::eid(ext) {`), so an id-2 extension that is not
+       mandatory-unit is an unknown extension there. This codec takes any
+       id-2 entry for the marker and so reads such a Put in the wrong
+       layout. SCE cannot name the wider identity yet: a flag must be
+       disjoint from its siblings (`ext_id` already holds bits 0..3), a
+       whole-header entry id would carry the chain flag, and `has` has no
+       conjunction or outer negation that could stand two values (0x12 and
+       0x92) for one. The dissector and the capture layer already match the
+       full identity (`dissect.rs` `SHM_MARKER_EID`), so they and this
+       codec disagree only on that input. No extension with id 2 other than
+       the marker exists on a Put in the pinned upstream, which is why the
+       gap has no traffic today and is still recorded.
+
      Composition: B1-γ flags (header) + B1-δ present-if-on-fields
      (T / E gates) + Y3 atomic 2a present-if-on-tlv-chain (header.Z
      gate) + Y3 atomic 1 entry-flag termination (chain followed by

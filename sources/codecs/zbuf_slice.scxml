@@ -21,10 +21,16 @@
                         descriptor (`ShmBufInfo`), not payload: the payload
                         lives in the segment the descriptor names.
 
-     `kind` is written as a variable-length integer. Upstream writes it as
-     one byte through the bounded codec, and the two are the same byte for
-     every value a slice can have (0 and 1); a decoder that meets any other
-     value has met a kind this codec does not know, and the host refuses it
+     `kind` is a variable-length integer read at the width upstream reads
+     it. Upstream reads it through the sliced codec's bounded-u32 codec and
+     keeps the low byte (`commons/zenoh-codec/src/core/zbuf.rs` @
+     `let kind: u8 = self.codec.read(&mut *reader)?;`), and that codec
+     refuses a value wider than 32 bits (`commons/zenoh-codec/src/core/zint.rs` @
+     `if (x & !(<$bound>::MAX as u64)) != 0 {`). So the field is 32 bits wide
+     here, which refuses what upstream refuses, and the host takes its low
+     byte, which keeps what upstream keeps. A writer produces one byte for
+     the two kinds there are (0 and 1); a decoder that meets any other low
+     byte has met a kind this node does not know, and the host refuses it
      rather than guessing.
 
      `bytes` carries `sce:max-size="256"` like the unsliced `payload` it
@@ -39,7 +45,7 @@
        xmlns:sce="http://sce.dev/ext"
        sce:kind="codec" sce:default-endian="big" name="zbuf_slice">
   <datamodel>
-    <sce:field id="kind"  sce:type="uint16" sce:byte="0" sce:bit-size="vle"/>
+    <sce:field id="kind"  sce:type="uint32" sce:byte="0" sce:bit-size="vle"/>
     <sce:field id="len"   sce:type="uint64" sce:byte="1" sce:bit-size="vle"/>
     <sce:field id="bytes" sce:type="bytes"  sce:byte="2" sce:bit-size="length-ref"
                sce:length-field="len" sce:max-size="256"/>

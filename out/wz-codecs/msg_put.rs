@@ -1,4 +1,4 @@
-// SCE-MAP: msg_put:116 :: _forge_body
+// SCE-MAP: msg_put:134 :: _forge_body
 
 // SCE Forge: Auto-generated from Extended SCXML (sce:kind="codec")
 // Runtime: none
@@ -234,7 +234,7 @@ impl<'a> MsgPut<'a> {
     /// against which `VecSink::new` reserves capacity in the
     /// `encode_to_vec` facade, and the natural reserve hint for
     /// caller-owned `SliceSink` allocations.
-    pub const MAX_ENCODED_BYTES: usize = 2191;
+    pub const MAX_ENCODED_BYTES: usize = 2199;
 
     /// Encode `self` into the caller-owned sink. Returns
     /// `CodecError::BufferOverflow` from a bounded sink when the

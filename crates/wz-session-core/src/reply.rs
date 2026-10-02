@@ -1541,8 +1541,8 @@ mod tests {
         };
         let reply = Reply {
             body: ReplyVariant::CodecZenohMsgPut(MsgPut {
-                payload_len: payload.len() as u64,
-                payload,
+                payload_len: Some(payload.len() as u64),
+                payload: Some(payload),
                 ..MsgPut::default()
             }),
             ..Reply::default()
@@ -1642,8 +1642,8 @@ mod tests {
         };
         let reply = Reply {
             body: ReplyVariant::CodecZenohMsgPut(MsgPut {
-                payload_len: payload.len() as u64,
-                payload,
+                payload_len: Some(payload.len() as u64),
+                payload: Some(payload),
                 ..MsgPut::default()
             }),
             ..Reply::default()
@@ -3696,8 +3696,8 @@ mod decode_isolation_tests {
         };
         let reply = Reply {
             body: ReplyVariant::CodecZenohMsgPut(MsgPut {
-                payload_len: payload.len() as u64,
-                payload,
+                payload_len: Some(payload.len() as u64),
+                payload: Some(payload),
                 ..MsgPut::default()
             }),
             ..Reply::default()

@@ -181,8 +181,8 @@ mod tests {
                 ),
             },
             body: wz_codecs::push::PushVariant::CodecZenohMsgPut(wz_codecs::msg_put::MsgPut {
-                payload_len: 8,
-                payload: &[0u8; 8],
+                payload_len: Some(8),
+                payload: Some(&[0u8; 8]),
                 ..Default::default()
             }),
             ..Default::default()

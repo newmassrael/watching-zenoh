@@ -349,7 +349,11 @@ impl FieldValue {
 /// * `shm_descriptor` — the `Put` / `Err` payload slot when the body ext chain
 ///   carries the SHM marker. **Not** `payload`, and the split is the point:
 ///   the codec's field IS the payload, these bytes are an ADDRESS, and sharing
-///   one name is exactly what let a reader take one for the other (R311y597)
+///   one name is exactly what let a reader take one for the other (R311y597).
+///   In a `Put` it sits inside a `slice_entry`, the slice whose kind is
+///   shared-memory
+/// * `slice_entry` — one element of a sliced `Put` payload, held apart from the
+///   `slices` aggregate by the same shadowing rule as `locator_entry`
 /// * `linkstate` — an OAM ZBuf body walked as a `LinkstateList`; the codec
 ///   names the body `value`, and only the OAM id says which body it is
 /// * `linkstate_entry` — one `Linkstate` record, held apart from the
@@ -2104,10 +2108,62 @@ pub fn walk_msg_put(c: &mut SpanCursor<'_>) -> Result<Vec<Field>, CodecError> {
             Ok(chain)
         })?);
     }
-    let (n, len) = c.vle_u64("payload_len")?;
-    out.push(len);
-    out.push(payload_or_shm_descriptor(c, n as usize, is_shm)?);
+    if is_shm {
+        // The marker changes the payload's whole layout, not only what its
+        // bytes mean: a count of slices, then that many elements
+        // (`commons/zenoh-codec/src/zenoh/put.rs` @
+        // `let codec = Zenoh080Sliced::<u32>::new(ext_shm.is_some());`).
+        let (count, count_field) = c.vle_u32("slice_count")?;
+        out.push(count_field);
+        out.push(c.nested("slices", |c| walk_zbuf_slices(c, count))?);
+    } else {
+        let (n, len) = c.vle_u64("payload_len")?;
+        out.push(len);
+        out.push(c.bytes("payload", n as usize)?);
+    }
     Ok(out)
+}
+
+/// The elements of a sliced payload, `count` of them, as `MsgPut`'s codec
+/// reads them: each element is decoded first and only then pushed, so a
+/// count past the codec's capacity is refused AFTER the element that does not
+/// fit has been read, and a truncated element wins over the capacity error
+/// exactly as it does there (`msg_put.scxml`, `max-count="4"`).
+fn walk_zbuf_slices(c: &mut SpanCursor<'_>, count: u32) -> Result<Vec<Field>, CodecError> {
+    let mut out = Vec::new();
+    for _ in 0..count {
+        let element = c.nested("slice_entry", walk_zbuf_slice)?;
+        if out.len() >= crate::put_payload::MAX_SLICES {
+            return Err(CodecError::TooManyElements);
+        }
+        out.push(element);
+    }
+    Ok(out)
+}
+
+/// One element of a sliced payload: a kind, a length and that many bytes.
+///
+/// A shared-memory slice's bytes are a descriptor, and that is reported as one
+/// ([`FieldValue::Opaque`] under `shm_descriptor`, the name
+/// [`payload_or_shm_descriptor`] explains) rather than as `bytes`: they are an
+/// address, and a reader that took them for content would be misled. Any other
+/// kind, the unknown ones included, keeps its bytes as `bytes`; whether the
+/// host refuses an unknown kind is its decision and not the codec's, which
+/// reads any kind.
+fn walk_zbuf_slice(c: &mut SpanCursor<'_>) -> Result<Vec<Field>, CodecError> {
+    let (kind, kind_field) = c.vle_u32("kind")?;
+    let (n, len_field) = c.vle_u64("len")?;
+    let n = n as usize;
+    let body = if crate::put_payload::slice_kind(kind) == crate::put_payload::SLICE_KIND_SHM_PTR {
+        let (_, field) = c.opaque("shm_descriptor", |cur| {
+            cur.peek_slice(n)?;
+            cur.advance(n)
+        })?;
+        field
+    } else {
+        c.bytes("bytes", n)?
+    };
+    Ok(alloc::vec![kind_field, len_field, body])
 }
 
 /// `MsgDel` (zenoh MID 0x02).
@@ -4115,6 +4171,25 @@ mod tests {
         out
     }
 
+    /// A `MsgPut` whose chain carries the shared-memory marker: the payload is
+    /// then a count of slices and that many `(kind, length, bytes)` elements,
+    /// and the inline length-prefixed payload is not there at all. `exts` must
+    /// contain the marker; the builder does not add it, so a test that wants a
+    /// marker-less sliced body cannot be written by accident.
+    fn msg_put_sliced(exts: &[Vec<u8>], slices: &[(u64, &[u8])]) -> Vec<u8> {
+        let mut out = alloc::vec![0x01u8 | 0x80];
+        for e in exts {
+            out.extend_from_slice(e);
+        }
+        out.extend(vle(slices.len() as u64));
+        for (kind, bytes) in slices {
+            out.extend(vle(*kind));
+            out.extend(vle(bytes.len() as u64));
+            out.extend_from_slice(bytes);
+        }
+        out
+    }
+
     fn msg_del(ts: Option<(u64, &[u8])>, exts: &[Vec<u8>]) -> Vec<u8> {
         let mut header = 0x02u8;
         if ts.is_some() {
@@ -4509,7 +4584,13 @@ mod tests {
     #[test]
     fn an_shm_marked_put_does_not_call_its_descriptor_a_payload() {
         let descriptor = [0x04u8, 0x07, 0x00];
-        let marked = msg_put(None, None, &[ext_unit(SHM_MARKER_BYTE, false)], &descriptor);
+        let marked = msg_put_sliced(
+            &[ext_unit(SHM_MARKER_BYTE, false)],
+            &[(
+                u64::from(crate::put_payload::SLICE_KIND_SHM_PTR),
+                &descriptor,
+            )],
+        );
 
         let mut w = SpanCursor::new(&marked);
         let fields = walk_msg_put(&mut w).expect("an SHM-marked put must still walk");
@@ -4519,6 +4600,11 @@ mod tests {
             root.find("payload").is_none(),
             "the descriptor must not be reachable under the name `payload`",
         );
+        assert!(
+            root.find("payload_len").is_none(),
+            "a sliced put has no inline length: the count and the elements replace it",
+        );
+        assert_eq!(uint(&root, "slice_count"), 1);
         let shm = root
             .find("shm_descriptor")
             .expect("the descriptor must be named");
@@ -4535,6 +4621,95 @@ mod tests {
         assert_eq!(w.remaining(), 0, "the walker left bytes unread");
     }
 
+    /// A sliced `Put` is walked as its codec reads it: the same elements in the
+    /// same order, ending at the same byte. A RAW slice keeps its bytes, a
+    /// shared-memory slice reports an opaque descriptor, and a kind this node
+    /// does not know keeps its bytes too, because the codec reads any kind and
+    /// refusing one is the host's decision.
+    #[test]
+    fn a_sliced_put_is_walked_to_the_same_end_the_codec_reads_to() {
+        let raw_kind = u64::from(crate::put_payload::SLICE_KIND_RAW);
+        let shm_kind = u64::from(crate::put_payload::SLICE_KIND_SHM_PTR);
+        let marked = msg_put_sliced(
+            &[ext_unit(SHM_MARKER_BYTE, false)],
+            &[
+                (raw_kind, b"hi"),
+                (shm_kind, &[0x04, 0x07, 0x00]),
+                (7, b"odd"),
+            ],
+        );
+
+        let mut w = SpanCursor::new(&marked);
+        let root = group(
+            "MsgPut",
+            0,
+            marked.len(),
+            walk_msg_put(&mut w).expect("a sliced put walks"),
+        );
+        assert_eq!(uint(&root, "slice_count"), 3);
+        let FieldValue::Nested(entries) = &root.find("slices").expect("slices").value else {
+            panic!("the slices are a group");
+        };
+        assert_eq!(entries.len(), 3);
+        assert_eq!(raw(&entries[0], "bytes"), b"hi".to_vec());
+        assert_eq!(
+            entries[1].find("shm_descriptor").map(|f| &f.value),
+            Some(&FieldValue::Opaque)
+        );
+        assert!(entries[1].find("bytes").is_none());
+        assert_eq!(uint(&entries[2], "kind"), 7);
+        assert_eq!(raw(&entries[2], "bytes"), b"odd".to_vec());
+
+        let mut c = SceCursor::new(&marked);
+        let m = wz_codecs::msg_put::MsgPut::decode(&mut c).expect("the codec reads it too");
+        assert_eq!(m.slices.as_ref().map(|s| s.len()), Some(3));
+        assert_eq!(
+            w.remaining(),
+            c.remaining(),
+            "the walker and the codec must stop at the same byte"
+        );
+    }
+
+    /// The codec holds four slices and refuses a fifth AFTER reading it; a
+    /// truncated element wins over that refusal. The walker answers the same
+    /// on the same bytes (`msg_put.scxml`, `max-count="4"`), four being the
+    /// control that keeps a walker refusing every count from passing.
+    #[test]
+    fn a_sliced_put_is_refused_past_four_slices_as_the_codec_refuses_it() {
+        let marker = [ext_unit(SHM_MARKER_BYTE, false)];
+        let slice =
+            |n: usize| -> Vec<(u64, &'static [u8])> { (0..n).map(|_| (0u64, &b"a"[..])).collect() };
+        let answers = |bytes: &[u8]| {
+            let walked = walk_msg_put(&mut SpanCursor::new(bytes)).err();
+            let read = wz_codecs::msg_put::MsgPut::decode(&mut SceCursor::new(bytes)).err();
+            (walked, read)
+        };
+
+        let four = msg_put_sliced(&marker, &slice(4));
+        assert_eq!(answers(&four), (None, None), "four slices fit");
+
+        let five = msg_put_sliced(&marker, &slice(5));
+        assert_eq!(
+            answers(&five),
+            (
+                Some(CodecError::TooManyElements),
+                Some(CodecError::TooManyElements)
+            )
+        );
+
+        // A count of five whose fifth element is cut short: the truncation is
+        // what both report, not the capacity.
+        let mut cut = msg_put_sliced(&marker, &slice(5));
+        cut.truncate(cut.len() - 1);
+        assert_eq!(
+            answers(&cut),
+            (
+                Some(CodecError::NeedMoreBytes),
+                Some(CodecError::NeedMoreBytes)
+            )
+        );
+    }
+
     /// The header byte's four fields, split the way zenoh splits them.
     ///
     /// The walker reported `header & 0x1F` as `ext_id`, so the MANDATORY flag
@@ -4546,7 +4721,7 @@ mod tests {
     /// extension has the same id under either mask and cannot fail here.
     #[test]
     fn a_mandatory_extensions_id_is_four_bits_and_its_flag_is_its_own_field() {
-        let marked = msg_put(None, None, &[ext_unit(SHM_MARKER_BYTE, false)], b"x");
+        let marked = msg_put_sliced(&[ext_unit(SHM_MARKER_BYTE, false)], &[]);
         let mut w = SpanCursor::new(&marked);
         let root = group(
             "MsgPut",
@@ -5020,8 +5195,11 @@ mod tests {
                 let mut c = SceCursor::new(b);
                 let m = wz_codecs::msg_put::MsgPut::decode(&mut c).expect("codec rejected fixture");
                 // Cross-check the codec's own view while it is in scope.
-                assert_eq!(m.payload.len(), 200);
-                assert_eq!(m.payload_len, 200);
+                assert_eq!(
+                    m.payload.expect("an inline put carries a payload").len(),
+                    200
+                );
+                assert_eq!(m.payload_len, Some(200));
                 assert_eq!(m.timestamp.as_ref().unwrap().time, 0x0123_4567);
                 assert_eq!(m.timestamp.as_ref().unwrap().zid, &zid);
                 assert_eq!(m.encoding.as_ref().unwrap().schema, Some("json"));
@@ -5309,7 +5487,16 @@ mod tests {
         // nothing for is meaningless by construction, and stays meaningless when
         // upstream adds an extension — the loop moves instead of the comment
         // going stale.
+        //
+        // The SHM id is left out of the candidates even though the table names
+        // nothing for the BARE byte `0x02`. The walker matches the marker on
+        // its whole identity (`0x12`) and so reads that byte as a filler, but
+        // `msg_put`'s codec matches on the 4-bit id alone and would read the
+        // payload after it as a count of slices (open-debt item 860). The row
+        // is about chain depth, so it keeps clear of the one input on which the
+        // walker and the codec are known to disagree.
         let meaningless: Vec<u8> = (0x00u8..=0x0f)
+            .filter(|id| *id != crate::ext_header::body_ext_id::SHM)
             .filter(|id| crate::ext_name::ext_name(crate::ext_name::ExtCarrier::Put, *id).is_none())
             .take(cap)
             .collect();
@@ -5336,7 +5523,7 @@ mod tests {
             let m = wz_codecs::msg_put::MsgPut::decode(&mut c)
                 .expect("a chain terminated at the cap must decode");
             assert_eq!(m.extensions.as_ref().map_or(0, |e| e.len()), cap);
-            assert_eq!(m.payload, &payload);
+            assert_eq!(m.payload, Some(&payload[..]));
             assert_eq!(c.remaining(), 0, "the codec left bytes unread");
         }
     }

@@ -3163,7 +3163,7 @@ pub(crate) mod tests {
                 slice_count: Some(1),
                 slices: Some(
                     core::iter::once(wz_codecs::zbuf_slice::ZbufSlice {
-                        kind: wz_session_core::put_payload::SLICE_KIND_SHM_PTR,
+                        kind: u32::from(wz_session_core::put_payload::SLICE_KIND_SHM_PTR),
                         len: payload.len() as u64,
                         bytes: payload,
                     })

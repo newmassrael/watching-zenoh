@@ -801,11 +801,12 @@ fn zbuf_ext_len(extensions: Option<&[wz_codecs::ext_entry::ExtEntryOwned]>, id: 
         feature = "codec-response"
     )
 ))]
-fn put_payload_size(
-    payload_len: u64,
-    extensions: Option<&[wz_codecs::ext_entry::ExtEntryOwned]>,
-) -> usize {
-    payload_len as usize + zbuf_ext_len(extensions, crate::ext_header::body_ext_id::PUT_ATTACHMENT)
+fn put_payload_size(put: &wz_codecs::msg_put::MsgPutOwned) -> usize {
+    crate::put_payload::payload_len(put)
+        + zbuf_ext_len(
+            put.extensions.as_deref(),
+            crate::ext_header::body_ext_id::PUT_ATTACHMENT,
+        )
 }
 
 /// See [`put_payload_size`].
@@ -839,7 +840,7 @@ where
             MessageLabel::Put,
             StatMessage::Put,
             space,
-            put_payload_size(b.payload_len, b.extensions.as_deref()),
+            put_payload_size(b),
             b.extensions.as_deref(),
         ),
         V::CodecZenohMsgDel(b) => stats_data_class(
@@ -872,7 +873,7 @@ where
             MessageLabel::Query,
             StatMessage::Put,
             space,
-            put_payload_size(b.payload_len, b.extensions.as_deref()),
+            put_payload_size(b),
             b.extensions.as_deref(),
         ),
         V::CodecZenohMsgDel(b) => stats_data_class(
@@ -938,7 +939,7 @@ where
                     MessageLabel::Reply,
                     StatMessage::Reply,
                     space,
-                    put_payload_size(p.payload_len, p.extensions.as_deref()),
+                    put_payload_size(p),
                     p.extensions.as_deref(),
                 ),
                 RV::CodecZenohMsgDel(d) => stats_data_class(
@@ -1369,14 +1370,34 @@ mod payload_size_tests {
         }
     }
 
+    /// An inline Put of twelve payload bytes carrying `exts` in its chain.
+    fn twelve_byte_put_with(
+        exts: alloc::vec::Vec<ExtEntryOwned>,
+    ) -> wz_codecs::msg_put::MsgPutOwned {
+        let mut put: wz_codecs::msg_put::MsgPutOwned =
+            crate::put_payload::inline(b"twelve bytes").expect("a literal put");
+        for ext in exts {
+            put.extensions
+                .get_or_insert_with(Default::default)
+                .push(ext);
+        }
+        put
+    }
+
     #[test]
     fn a_put_counts_its_payload_and_its_attachment() {
-        let exts = alloc::vec![zbuf_ext(body_ext_id::PUT_ATTACHMENT, b"attached")];
-        assert_eq!(put_payload_size(12, Some(&exts)), 12 + 8);
-        assert_eq!(put_payload_size(12, None), 12);
+        let with = twelve_byte_put_with(alloc::vec![zbuf_ext(
+            body_ext_id::PUT_ATTACHMENT,
+            b"attached"
+        )]);
+        assert_eq!(put_payload_size(&with), 12 + 8);
+        assert_eq!(put_payload_size(&twelve_byte_put_with(alloc::vec![])), 12);
         // The Del's id on a Put body is not the Put's attachment.
-        let wrong = alloc::vec![zbuf_ext(body_ext_id::DEL_ATTACHMENT, b"attached")];
-        assert_eq!(put_payload_size(12, Some(&wrong)), 12);
+        let wrong = twelve_byte_put_with(alloc::vec![zbuf_ext(
+            body_ext_id::DEL_ATTACHMENT,
+            b"attached"
+        )]);
+        assert_eq!(put_payload_size(&wrong), 12);
     }
 
     #[test]

@@ -108,6 +108,10 @@ OWN_VOCABULARY = {
     "it holds rather than for what it means",
     "locator_entry": "one locator record. NOT `locator`: `Field::find` is "
     "first-match-by-name and a group sharing its leaf's name shadows it (R311y585)",
+    "slice_entry": "one element of a sliced Put payload; the codec models the "
+    "repeat as the field `slices` and the element only as a type. NOT `slices`: "
+    "`Field::find` is first-match-by-name and an element sharing its aggregate's "
+    "name would shadow it, on the rule `locator_entry` records",
     "keyexprs": "the Declare body's keyexpr group",
     "subscribers": "the Declare body's subscriber group",
     "queryables": "the Declare body's queryable group",

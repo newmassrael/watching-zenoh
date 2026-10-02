@@ -2999,8 +2999,7 @@ mod tests {
     fn push_with_payload(keyexpr: &str, payload: &[u8]) -> PushOwned {
         let mut push = push_with_keyexpr(keyexpr);
         if let PushOwnedVariant::CodecZenohMsgPut(ref mut put) = push.body {
-            put.payload_len = payload.len() as u64;
-            put.payload = crate::codec_owned::owned_bytes(payload).unwrap();
+            *put = crate::put_payload::inline(payload).unwrap();
         }
         push
     }

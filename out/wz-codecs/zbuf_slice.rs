@@ -1,4 +1,4 @@
-// SCE-MAP: zbuf_slice:38 :: _forge_body
+// SCE-MAP: zbuf_slice:44 :: _forge_body
 
 // SCE Forge: Auto-generated from Extended SCXML (sce:kind="codec")
 // Runtime: none
@@ -23,7 +23,7 @@ use sce_forge_runtime::codec::VecSink;
 #[allow(dead_code)]
 #[derive(Default, Debug, Clone, PartialEq)]
 pub struct ZbufSlice<'a> {
-    pub kind: u16,
+    pub kind: u32,
     pub len: u64,
     pub bytes: &'a [u8],
 }
@@ -58,7 +58,7 @@ impl<'a> ZbufSlice<'a> {
         // `is_tlv_chain` / `is_embed` route to their dedicated helpers;
         // every other field flows through `present_if_decode_stmt`, whose
         // non-gated arm covers plain fixed / tail / length-ref / VLE reads.
-        let kind = cursor.read_vle_u16()?;
+        let kind = cursor.read_vle_u32()?;
         let len = cursor.read_vle_u64()?;
         let bytes = {
             let _n = len as usize;
@@ -78,7 +78,7 @@ impl<'a> ZbufSlice<'a> {
     /// against which `VecSink::new` reserves capacity in the
     /// `encode_to_vec` facade, and the natural reserve hint for
     /// caller-owned `SliceSink` allocations.
-    pub const MAX_ENCODED_BYTES: usize = 268;
+    pub const MAX_ENCODED_BYTES: usize = 270;
 
     /// Encode `self` into the caller-owned sink. Returns
     /// `CodecError::BufferOverflow` from a bounded sink when the
@@ -94,7 +94,7 @@ impl<'a> ZbufSlice<'a> {
         // Per-field `is_repeat` / `is_tlv_chain` / `is_embed` route to their
         // dedicated helpers; everything else uses `present_if_encode_block`
         // (its non-gated arm covers plain fixed / tail / length-ref / VLE).
-        w.write_vle_u16(self.kind)?;
+        w.write_vle_u32(self.kind)?;
         w.write_vle_u64(self.len)?;
         w.write_bytes(self.bytes)?;
         Ok(())
@@ -158,7 +158,7 @@ impl<'a> ZbufSlice<'a> {
 #[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq)]
 pub struct ZbufSliceOwned<S: ::sce_forge_runtime::codec::CodecStorage = ::sce_forge_runtime::codec::DefaultStorage> {
-    pub kind: u16,
+    pub kind: u32,
     pub len: u64,
     pub bytes: S::Bytes<256>,
 }
