@@ -182,17 +182,20 @@ to the fee paid.
   grants remain valid for the copies they were given with; they do not
   extend to this revision or later ones.
 
-- **MIT (generated code)**
-  Code emitted by `sce-codegen` from watching-zenoh's SCXML sources is
-  MIT-licensed (per SCE's `LICENSE-GENERATED.md`). The author of the
-  input SCXML file owns the copyright. For watching-zenoh's own
-  `sources/`, copyright belongs to newmassrael.
+- **SCE-generated code**
+  Code emitted by `sce-codegen` from watching-zenoh's SCXML sources
+  follows SCE's own `LICENSE-GENERATED.md` at the revision of
+  `vendor/sce` this tree pins (see THIRD_PARTY.md); it was MIT before
+  the 2026-10-02 pin. The author of the input SCXML file owns the
+  copyright in the material derived from the input document. For
+  watching-zenoh's own `sources/`, copyright belongs to newmassrael.
 
-- **SCE runtime engine (LGPL-2.1 + Static-Linking-Exception OR
-  SCE Commercial)**
-  Separately licensed by SCE. Required at runtime by all
-  watching-zenoh `out/` artifacts. A watching-zenoh Commercial License
-  does NOT include SCE Commercial.
+- **SCE runtime engine (free option OR SCE Commercial)**
+  Separately licensed by SCE, on the terms in `LICENSE` at the pinned
+  revision of `vendor/sce` (see THIRD_PARTY.md); the free option was
+  LGPL-2.1 + Static-Linking-Exception before the 2026-10-02 pin.
+  Required at runtime by all watching-zenoh `out/` artifacts. A
+  watching-zenoh Commercial License does NOT include SCE Commercial.
 
 - **Zenoh / zenoh-pico (Apache-2.0 OR EPL-2.0)**
   Independent projects. watching-zenoh is a wire-protocol-compatible

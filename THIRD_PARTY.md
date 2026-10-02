@@ -15,10 +15,15 @@ changelog that authorized the bump.
 ## vendor/sce — SCXML Core Engine
 
 - **Origin**: https://github.com/newmassrael/scxml-core-engine
-- **Commit pin**: `ebf3b3ff` (Round 209, 2026-05-21)
-- **License**: dual-licensed — LGPL-2.1 WITH SCE Static Linking
+- **Commit pin**: `9111a8535f` (Round 3008, 2026-10-02)
+- **License**: dual-licensed — AGPL-3.0-only WITH SCE Linking
   Exception OR LicenseRef-SCE-Commercial. See
-  `vendor/sce/LICENSE` for the full text.
+  `vendor/sce/LICENSE` for the full text. Before the Round 3008 pin
+  (`d3db11c415` and earlier) the terms were LGPL-2.1 WITH SCE Static
+  Linking Exception OR LicenseRef-SCE-Commercial; SCE's own commit
+  `a4a7252ee0` made the change, inside the range this pin crossed.
+  The Linking Exception covers an UNMODIFIED engine and generator, so
+  `vendor/sce` must stay unmodified.
 - **Scope of use**: codegen toolchain, run out-of-band by the
   `xtask` codegen SSOT (R311y22), not at consumer build time. The
   `sce-codegen` binary built from this submodule emits Rust
@@ -26,12 +31,20 @@ changelog that authorized the bump.
   `out/<crate>/` tree (R311y22 committed it in-repo; it is therefore
   redistributed with this repo). SCE itself is not redistributed in
   binary form by watching-zenoh. The generated output carries SCE's
-  own MIT header where SCE emits one (statechart `*_sm.rs`) and no
-  SPDX header on the codec / pool emits — per the `sce-codegen`
-  generation-time policy (see `LICENSE-GENERATED.md` in the SCE repo).
-- **Upstream-tracking**: Round 209 bumped from `27accb35` to
-  `ebf3b3ff` (+9 commits drift; Rust camelCase codegen fixes +
-  schema/validator refactors; 8-lane CI regression-zero).
+  own header where SCE emits one (the eight statechart `*_sm.rs`
+  files: AGPL-3.0-only WITH LicenseRef-SCE-Linking-Exception OR
+  LicenseRef-SCE-Commercial since the Round 3008 pin, MIT before it)
+  and no SPDX header on the codec / pool emits — per the
+  `sce-codegen` generation-time policy (see `LICENSE-GENERATED.md` in
+  the SCE repo at the pinned revision, which states the two
+  conditions: an unmodified generator, and a work that is not a
+  competing product).
+- **Upstream-tracking**: Round 3008 bumped from `d3db11c415` to
+  `9111a8535f` (the chain-membership predicate on a codec field, the
+  owned-origin projection, and SCE's relicensing; the codec outputs
+  differ in comments only, the eight statechart outputs differ in
+  code). Round 209 had bumped from `27accb35` to `ebf3b3ff`; the pin
+  carried between the two was not recorded here.
 
 ## vendor/zenoh-pico — embedded zenoh client
 
@@ -190,11 +203,13 @@ Source files under `out/<crate>/` (e.g. `out/wz-codecs/`,
 `out/wz-session-core/`) are emitted by `sce-codegen` / the `xtask`
 codegen SSOT and, as of R311y22, are COMMITTED in-repo (regenerated
 out-of-band, not at consumer build time; gated by run-ci Layer B2).
-They carry SCE's MIT header where SCE emits one (statechart `*_sm.rs`)
-and no SPDX header on the codec / pool emits. They are not authored by
-watching-zenoh and are not tracked under the AGPL-3.0 / Commercial
-license that covers the rest of this repo. See `LICENSE-GENERATED.md`
-in the SCE repo for the generation-time policy.
+They carry SCE's header where SCE emits one (the statechart `*_sm.rs`
+files; MIT before the Round 3008 pin, AGPL-3.0-only WITH the SCE
+Linking Exception OR SCE Commercial since) and no SPDX header on the
+codec / pool emits. They are not authored by watching-zenoh and are
+not tracked under the AGPL-3.0 / Commercial license that covers the
+rest of this repo. See `LICENSE-GENERATED.md` in the SCE repo at the
+pinned revision for the generation-time policy.
 
 ## How this ledger is maintained
 

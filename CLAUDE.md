@@ -274,8 +274,10 @@ was a rule with no subject — the same class of residual the atom register
 carries, found here while mapping paths to lanes for pre-push gate 5.)
 
 **Generated files** (`out/**`, committed in-repo since R311y22) carry
-whatever header `sce-codegen` emits: SCE's MIT header where SCE emits
-one (the statechart `*_sm.rs` files), and NO SPDX header at all on the
+whatever header `sce-codegen` emits: SCE's own header where SCE emits
+one (the statechart `*_sm.rs` files; MIT before the Round 3008 pin,
+AGPL-3.0-only WITH the SCE Linking Exception OR SCE Commercial since),
+and NO SPDX header at all on the
 codec / buffer-pool emits (SCE does not header those). Do NOT add a wz
 SPDX header to any `out/**` file, and do not overwrite an SCE-emitted
 one — SCE owns the generation-time header policy (see
