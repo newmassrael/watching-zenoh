@@ -734,8 +734,36 @@ declare -A BASELINE_MC_TEXT=(
     # the gate that blocks main. thumbv7m rises too, though it was inside the
     # band at +228, so the next commit does not start with 28 B of headroom.
     # Old: 55648/55732 (R2808).
-    ["thumbv7m-none-eabi"]=55876
-    ["thumbv7em-none-eabihf"]=56020
+    # R3009 — GREW +8056 / +7904 B since R3001, and the bytes are NAMED. Two
+    # changes moved it, built apart on this host (gcc 13.2, the normalised
+    # flags): the SCE pin bump `d3db11c415` -> `9111a8535f` alone reads 62232 /
+    # 62292 (+6356 / +6272 on thumbv7m / thumbv7em), and the Put payload layout
+    # on top of it reads 63932 / 63924 (+1700 / +1632). The old tree, rebuilt
+    # here, reads 55872 on thumbv7m against the hosted 55876, so the two hosts
+    # agree to 4 B and the local figure is a fair stand-in until a hosted run
+    # reads the new one.
+    # A per-symbol diff of the old and new thumbv7m ELFs (`arm-none-eabi-nm -S`,
+    # hashes stripped; text and rodata symbols +7582, the rest alignment and
+    # unnamed sections) groups the growth as:
+    #  +5264  sce_rust_runtime: the engine's microstep procedures
+    #         (`select_transitions` +884/+826, `microstep`, `enter_states`,
+    #         `compute_exit_set`, `sort_in_exit_order`), generic over the
+    #         policy and so instantiated once for each of the three statecharts
+    #         this bin carries (`reassembly_slot`, `multicast_peer`,
+    #         `session_fsm_multicast`). The pin moved Appendix D's selection and
+    #         entry/exit procedures out of generated code and into the runtime.
+    #  +1408  the Put codec: `try_into_owned_in` +518, `decode` +350, `encode`
+    #         +252, `try_as_borrowed` +188 -- the sliced payload layout that a
+    #         shared-memory Put needs, carried by a bin that never sends one
+    #   +542  wz_session_core and the app (the parse and emit paths that call
+    #         those codecs, the statechart policies' own methods)
+    #   +258  anonymous rodata
+    # NOT A LEAK: `data` is 4 and `bss` moves by 8, so the delta is ROM. It is
+    # not free either: the Put layout is 21% of it and is paid by every bin
+    # that links the Put codec, whatever its host.
+    # Old: 55876/56020 (R3001).
+    ["thumbv7m-none-eabi"]=63932
+    ["thumbv7em-none-eabihf"]=63924
 )
 # shellcheck disable=SC2034  # resolved through the `declare -n _bt/_bd/_bb`
                             # namerefs in the `case "$artifact"` dispatch below; shellcheck
