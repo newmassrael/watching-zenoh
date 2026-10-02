@@ -88,14 +88,23 @@ jobs:
             apt-${{ runner.os }}-${{ github.job }}-
 
       - name: Install system dependencies
-        # R2104 (open-debt item 522) — `libxml2-dev` and `pkg-config` are here
-        # because this job runs `cargo test --workspace`, which compiles
-        # `sce-forge-runtime`'s build script -> `sce-build` -> the `libxml`
+        # R2104 (open-debt item 522) — `libxml2-dev` and `pkg-config` were put
+        # here because this job runs `cargo test --workspace`, which then
+        # compiled the forge runtime's build script, which pulled the `libxml`
         # crate, whose own build script probes pkg-config for `libxml-2.0` and
-        # PANICS when it is absent. This step had neither for as long as it has
-        # existed and passed anyway, because the ubuntu runner image carries
-        # libxml2. `scripts/lib/apt_package_census.py`'s shortfall arm reads
-        # this file too and reds if either goes missing again.
+        # PANICS when it is absent. This step had neither for as long as it
+        # had existed and passed anyway, because the ubuntu runner image
+        # carries libxml2.
+        #
+        # R3009 — `libxml2-dev` is gone from this list. The SCE pin of that
+        # round removed the XML toolchain from the forge runtime's build
+        # script, so `libxml` is no longer in the `crates` workspace that
+        # `--workspace` builds, and this job does not run `xtask`, the one
+        # workspace that still reaches it. `pkg-config` stays, as on every job
+        # (`ci.yml`'s `ci` job gives the reason). `scripts/lib/apt_package_census.py`
+        # reads this file too, in both directions: it reds if a job reaching
+        # the probe loses either package, and if a job that does not reach it
+        # installs `libxml2-dev`.
         #
         # R2189 (open-debt item 529) — THROUGH THE CEILING, like every step in
         # `ci.yml`. This step called `apt-get` raw for as long as it has
@@ -112,7 +121,7 @@ jobs:
         # of `sudo` rather than its parent for the signal to land on apt.
         run: |
           bash scripts/lib/apt-install.sh \
-            cmake libclang-dev libxml2-dev pkg-config clang perl \
+            cmake libclang-dev pkg-config clang perl \
             python3-yaml protobuf-compiler
 
       - name: Save apt archives

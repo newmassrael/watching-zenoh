@@ -121,15 +121,15 @@ in both polarities, wherever prose makes one.
 
 from __future__ import annotations
 
-import json
 import pathlib
 import re
 import subprocess
 import sys
 import tempfile
 
+import cargo_workspaces
+
 ROOT = pathlib.Path(__file__).resolve().parents[2]
-CRATES = ROOT / "crates"
 
 # A leading comment marker, so a run of comment lines folds into the one
 # paragraph the sentence was written as. A quoted command or clause routinely
@@ -204,15 +204,6 @@ UNRESOLVED_DECLARED: dict[tuple[str, str, str], str] = {
         "belong to something it did not read"
     ),
     (
-        "clause",
-        "scripts/lib/apt_package_census.py",
-        "sce-forge-runtime->sce-build",
-    ): (
-        "one of the two sites in this file puts a colon and a pronoun between "
-        "the ticked subject and the verb; the other site states the same pair "
-        "plainly and IS adjudicated"
-    ),
-    (
         "arrow",
         "crates/wz-integration-tests/tests/wz_router_routes_pico_interop.rs",
         "z_pub->wz",
@@ -256,20 +247,22 @@ def graph() -> tuple[set[str], set[tuple[str, str]]]:
     The edges are the DECLARED ones from each manifest rather than the resolve
     nodes, so a dev- or build-dependency is an edge the same way a normal one
     is -- which is the kind the measured case ran through.
+
+    R3009 -- over EVERY workspace this repository builds (`cargo_workspaces`),
+    not `crates/` alone. A sentence naming `sce-build` is about a package that
+    exists in this repository and lives in the `xtask/` workspace; reading only
+    `crates/` called it "not a package this graph carries" the moment the SCE
+    pin took it out of that workspace's closure. The union is sound for edges:
+    a manifest declares the same dependencies whichever workspace resolves it.
     """
-    out = subprocess.run(
-        ["cargo", "metadata", "--format-version", "1", "--all-features"],
-        cwd=CRATES,
-        capture_output=True,
-        text=True,
-    )
-    if out.returncode != 0:
-        raise RuntimeError(f"cargo metadata failed: {out.stderr[:400]}")
-    meta = json.loads(out.stdout)
-    names = {p["name"] for p in meta["packages"]}
-    edges = {
-        (p["name"], d["name"]) for p in meta["packages"] for d in p["dependencies"]
-    }
+    names: set[str] = set()
+    edges: set[tuple[str, str]] = set()
+    for workspace in cargo_workspaces.MANIFESTS:
+        meta = cargo_workspaces.metadata(workspace)
+        names |= {p["name"] for p in meta["packages"]}
+        edges |= {
+            (p["name"], d["name"]) for p in meta["packages"] for d in p["dependencies"]
+        }
     return names, edges
 
 

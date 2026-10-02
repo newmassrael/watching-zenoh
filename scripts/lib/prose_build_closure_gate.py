@@ -104,17 +104,15 @@ there is its author's claim about its own tree, not this one's.
 from __future__ import annotations
 
 import collections
-import json
 import pathlib
 import re
 import subprocess
 import sys
 import tempfile
 
-import cargo_activation
+import cargo_workspaces
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
-CRATES = ROOT / "crates"
 
 # A leading comment marker, so a run of comment lines folds into the one
 # paragraph the sentence was written as -- the measured claim spans two.
@@ -229,15 +227,18 @@ def normalise(name: str) -> str:
 
 
 def metadata() -> dict:
-    out = subprocess.run(
-        ["cargo", "metadata", "--format-version", "1", "--all-features"],
-        cwd=CRATES,
-        capture_output=True,
-        text=True,
-    )
-    if out.returncode != 0:
-        raise RuntimeError(f"cargo metadata failed: {out.stderr[:400]}")
-    return json.loads(out.stdout)
+    """The packages every workspace this repository builds ACTIVATES.
+
+    R3009 -- not `crates/` alone. The build-time vocabulary a denial resolves
+    against is read off the graph, so a toolchain that lives in a workspace the
+    gate does not read is a name it cannot resolve, and every denial of it goes
+    unadjudicated: that is how the SCE pin, which moved `libxml` from the
+    `crates/` closure to the `xtask/` workspace, took this gate's floor to zero
+    without a line of it changing. Reading both keeps the vocabulary whole and
+    lets "this crate pulls no libxml2" be what it always claimed to be, a
+    statement about the closure of THIS crate, now true instead of vacuous.
+    """
+    return cargo_workspaces.merged_active()
 
 
 def build_edges(meta: dict) -> set[tuple[str, str]]:
@@ -481,21 +482,14 @@ def owner_resolver(table: list[tuple[str, str]], root: pathlib.Path):
     return owner_of
 
 
-def active_only(meta: dict) -> dict:
-    """`meta` with its package list cut to the packages a build ACTIVATES.
-
-    R2801 — the metadata also lists an optional dependency that a weak
-    `dep?/feat` merely mentions. Its build script never runs and its `links`
-    library is never linked, so it is not in any build closure this gate
-    adjudicates; left in, `libz-sys`'s `links = "z"` turned `z_id_to_string` in
-    a doc comment into a claim about libz. `cargo_activation` holds the rule.
-    """
-    active = cargo_activation.activated_packages(meta)
-    return {**meta, "packages": [p for p in meta["packages"] if p["id"] in active]}
-
-
 def check() -> int:
-    meta = active_only(metadata())
+    # R2801 — `metadata()` is already cut to the packages a build ACTIVATES (the
+    # metadata also lists an optional dependency that a weak `dep?/feat` merely
+    # mentions, whose build script never runs and whose `links` library is never
+    # linked; left in, `libz-sys`'s `links = "z"` turned `z_id_to_string` in a
+    # doc comment into a claim about libz). `cargo_activation` holds the rule
+    # and `cargo_workspaces.merged_active` applies it inside each workspace.
+    meta = metadata()
     edges = build_edges(meta)
     scripted = has_build_script(meta)
     vocab = build_time_vocabulary(meta)

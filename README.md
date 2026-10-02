@@ -130,17 +130,24 @@ is what a build of any part of this workspace needs:
 
 <!-- BUILD-PREREQS-BEGIN -->
 ```sh
-sudo apt-get install -y clang libclang-dev libxml2-dev pkg-config
+sudo apt-get install -y clang libclang-dev pkg-config
 ```
 <!-- BUILD-PREREQS-END -->
 
 None of these is optional and none of them is only for CI. `libclang-dev`
-and `clang` are bindgen's; `libxml2-dev` and `pkg-config` are the `libxml`
-crate's, which a plain `cargo build` reaches through
-`sce-forge-runtime`'s build script (`sce-build` -> `libxml` -> `bindgen`).
-Without them the build stops at *"The system library `libxml-2.0` required
-by crate `libxml` was not found"*, which names the crate and not the
-package — the error a consumer of this tree actually met.
+and `clang` are bindgen's: the storage engine and the lwIP bindings run it at
+build time. `pkg-config` is what the build scripts and the helper scripts
+ask for `.pc` files with.
+
+A plain `cargo build` of this workspace needs no libxml2. That held again
+only with the SCE pin of R3009: before it, SCE's forge runtime pulled its XML
+codegen toolchain into every build through its own build script, and a build
+without `libxml2-dev` stopped at *"The system library `libxml-2.0` required
+by crate `libxml` was not found"*, which names the crate and not the package
+— the error a consumer of this tree actually met. What still needs
+`libxml2-dev` is regenerating the committed `out/**` (`scripts/regen-codegen.sh`,
+which runs the `xtask` codegen driver and links SCE's XML toolchain); nothing
+that only builds or tests does.
 
 The list above is DERIVED, not maintained by hand: it is the set of
 packages every CI job installs, and

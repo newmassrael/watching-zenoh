@@ -49,10 +49,15 @@ reaches that crate, or if the job invokes cmake outside cargo (Zephyr's west
 build, which is declared below by name).
 
 The other packages are adjudicated as PROSE and that is a stated limit, not
-an oversight: `libclang-dev` is needed wherever `bindgen` is in the closure,
-which is everywhere, because `sce-forge-runtime`'s build script
-build-depends on `sce-build` -> `libxml` -> `bindgen`. A prose reason can go
-stale the way open-debt item 338 describes, and nothing here re-checks it.
+an oversight: `libclang-dev` is needed wherever `bindgen` is in a closure a
+job builds, and that is two graphs now. In the `crates` workspace `bindgen` is
+a build dependency of `librocksdb-sys` (the storage engine under
+`wz-runtime-tokio`) and of `lwip-sys`; in the `xtask` workspace it is the
+`libxml` crate's. Until the SCE pin of R3009 it was also
+`sce-forge-runtime`'s own build script that reached it, which put it in every
+crate carrying a generated codec; that chain is gone, and the prose rows below
+were rewritten to the two that remain. A prose reason can go stale the way
+open-debt item 338 describes, and nothing here re-checks it.
 
 ## The OTHER direction (R2104, open-debt item 522)
 
@@ -83,6 +88,30 @@ pkg-config module names it probes for are the system libraries the build will
 demand. Today that derivation yields exactly one, `libxml-2.0`, wanted by the
 `libxml` crate — which is the crate the downstream error names.
 
+R3009 — the graph is TWO graphs. The SCE pin that added the chain-membership
+predicate also took `sce-build` out of `sce-forge-runtime`'s build
+dependencies, so `libxml` left the `crates` workspace entirely and survives
+only in `xtask`, the codegen driver, which is a separate cargo workspace. An
+arm that read `crates/Cargo.toml` alone would have found no build script that
+probes anything and reported an EMPTY population, which is how it first read
+the pin; the derivation now reads every workspace this repository builds
+(`GRAPHS`), and a job reaches the probing crate by running `xtask`, not by
+`--workspace`.
+
+THE EXCESS HALF OF THE SAME DERIVATION. `libxml2-dev` used to be on every job
+because every job compiled `libxml`. It is now needed exactly where a job
+builds a probing crate, so the arm checks the other direction too: a job that
+installs the library without that reach is told to drop it. Without that
+direction the pin would have left the install lines claiming a need the graph
+no longer has, which is the stale-reason class this file exists to close.
+
+The `pkg-config` TOOL is the one package kept out of the excess direction, and
+the reason is a limit rather than a preference: a probe needs it, which the
+shortfall arm derives, but a job can need it without any probing crate (two
+scripts read `.pc` files by hand, and pico's CMake arm resolves Mbed TLS through
+it from inside a cmake run), and none of that is visible in a text this census
+reads. It stays on every job as R311y865 decided, adjudicated as prose.
+
 `MODULE_APT` maps a module to the Debian package that provides it, and it is
 the one hand-written thing here. It is not believed: wherever `pkg-config` and
 `dpkg` are both present the gate RESOLVES each row -- `pkg-config
@@ -94,8 +123,10 @@ WHICH JOBS. The same reverse-reachability the `cmake` arm uses, over the real
 resolve graph: a job needs the package if anything it runs reaches a workspace
 member whose closure contains the probing crate. Scoped to jobs whose
 `runs-on` names ubuntu, because `apt-install.sh` is what this file is about —
-`portability` (macOS + Windows) needs libxml2 just as much and gets it from
-vcpkg, which is out of this gate's subject rather than exempt from it.
+`portability` (macOS + Windows) is out of this gate's subject rather than
+exempt from it. It used to install libxml2 through vcpkg on Windows, which this
+gate could not see and so could not retire; the SCE pin of R3009 removed the
+need and the step with it (`ci.yml` says why).
 
 STATED LIMIT: this arm sees pkg-config consumers and nothing else. `libclang`
 is dlopen'd by `clang-sys` rather than probed, `perl` is a program, and
@@ -115,6 +146,7 @@ import sys
 from pathlib import Path
 
 import cargo_activation
+import cargo_workspaces
 
 ROOT = Path(__file__).resolve().parents[2]
 CI_YML = ROOT / ".github/workflows/ci.yml"
@@ -145,23 +177,34 @@ _add("cmake", "Builds the cached native RocksDB engine via the local composite a
      ["nondefault"])
 
 
-# bindgen, via `sce-forge-runtime`'s BUILD SCRIPT: it build-depends on
-# `sce-build` -> `libxml` -> `bindgen`, so every crate that uses the SCE forge
-# runtime -- which is every wz crate carrying a generated codec -- compiles a
-# libclang consumer. 25.2 MB of a 32.3 MB job, and the largest single item in
-# this whole census.
+# bindgen, which is where libclang is consumed. 25.2 MB of a 32.3 MB job, and
+# the largest single item in this whole census.
 #
-# It is worth naming what that build script is FOR, because it is not wz:
-# `vendor/sce/backends/rust/forge-runtime/build.rs` generates SCE's own
-# numerical-conformance test fixtures. R311y22 moved wz's codegen into
-# committed `out/**` so "a plain `cargo build` of the wz stack needs no
-# libxml2/SCE toolchain" (`scripts/regen-codegen.sh`), and this build-dep is
-# why that sentence is not true. SCE is pinned and read-only from wz sessions,
-# so this is a HANDOFF, not a row anyone here can delete.
+# R3009 -- who consumes it changed. Until the SCE pin of that round the
+# consumer was the forge runtime's own build script, which pulled SCE's XML
+# codegen toolchain and, through it, bindgen: a libclang consumer under every wz
+# crate carrying a generated codec, and the reason the sentence "a plain `cargo
+# build` of the wz stack needs no libxml2/SCE toolchain" was false (R311y22 had
+# moved the codegen into committed `out/**` to make it true, and that build
+# script undid it; SCE is pinned and read-only from wz sessions, so that was a
+# HANDOFF). SCE has since dropped the build script's toolchain, and the
+# handoff is paid. What still consumes bindgen:
+# `librocksdb-sys` (the storage engine under `wz-runtime-tokio`), `lwip-sys`,
+# and, in the `xtask` workspace only, `libxml`. Measured with
+# `cargo tree -e normal,build -i bindgen@<version> --workspace --all-features`
+# on each of the two `crates` versions and on `xtask`.
+#
+# THE ROW BELOW STILL LISTS EVERY JOB IT DID BEFORE, and that is deliberate
+# rather than an oversight: libclang is `dlopen`ed or invoked, not probed, so
+# this file cannot derive which jobs reach a consumer the way it derives
+# `libxml2-dev`, and a job dropping a 25 MB package on the strength of a prose
+# reading is a change only a hosted run can verify. It is registered as
+# open-debt item 861 to be done from a measurement, not from this comment.
 _add(
     "libclang-dev",
-    "bindgen, reached through sce-forge-runtime's build script (sce-build -> "
-    "libxml -> bindgen). Every wz crate with a generated codec pulls it.",
+    "bindgen, reached through librocksdb-sys (wz-runtime-tokio's storage "
+    "engine), lwip-sys, and the `libxml` crate in the xtask workspace. Not "
+    "derived: jobs that reach none of those may no longer need it (item 861).",
     [
         "ci",
         "validate-codegen",
@@ -363,11 +406,20 @@ _add(
 # and not the others. The SHORTFALL arm refutes it: `libxml`'s build script
 # probes pkg-config on EVERY job that compiles it, which is all thirteen, and
 # the other ten were getting the binary from the runner image.
+#
+# R3009 -- the probe left the `crates` workspace with the SCE pin, so the
+# derived reason now covers one job (`validate-codegen`, which builds `xtask`).
+# The row still lists every job and that is deliberate: the tool is kept on all
+# of them as R311y865 decided, because two scripts and pico's TLS cmake arm read
+# `.pc` files with it and none of that is visible to a text census (see
+# `DERIVED_NATIVE`). It costs about a second per job.
 _add(
     "pkg-config",
-    "the tool libxml's build script probes libxml-2.0 through; required "
-    "wherever that build script runs, which the SHORTFALL arm derives as "
-    "every job reaching the crate.",
+    "the tool libxml's build script probes libxml-2.0 through (the SHORTFALL "
+    "arm derives that as the jobs that run `xtask`), and, on every job, the "
+    "tool `install-mbedtls.sh` / `build-zenoh-pico-cli.sh` and pico's Mbed TLS "
+    "cmake arm read `.pc` files with. Not derivable as excess; kept per "
+    "R311y865.",
     [
         "ci",
         "validate-codegen",
@@ -402,50 +454,25 @@ _add(
     ],
 )
 _add("python3-yaml", "the workflow-shape lints Layer C0 runs on ci.yml.", ["ci"])
-# R2104 (open-debt item 522) — the other half of the `libclang-dev` chain, and
-# the package this file was carrying a hole for. `libxml`'s build script probes
-# pkg-config for `libxml-2.0` and PANICS when it is absent; every job below
-# builds a member whose closure reaches that crate. The job list is the same as
-# `libclang-dev`'s and that is not a copy: SHORTFALL below derives it from the
-# resolve graph, so the two lists check each other rather than agreeing by
-# habit.
+# R2104 (open-debt item 522) — the package this file was carrying a hole for.
+# `libxml`'s build script probes pkg-config for `libxml-2.0` and PANICS when it
+# is absent.
+#
+# R3009 -- this row used to list every job in the file, because every job
+# compiled that crate through the forge runtime's build script. The SCE pin of
+# that round dropped the XML toolchain from that build script, so `libxml` is in
+# the `xtask` workspace only, and the row names the one job that RUNS `xtask`
+# (Layer B2 builds it for the regen-diff gate). It is one job because that is
+# what the derivation finds, not because the list was cut: the SHORTFALL arm
+# demands the package wherever a job reaches the probe and the EXCESS arm reds
+# wherever a job installs it without reaching it, so this row is checked from
+# both sides and a second job joins it the day it starts running `xtask`.
 _add(
     "libxml2-dev",
-    "libxml's build script probes pkg-config for `libxml-2.0`; reached "
-    "through sce-forge-runtime's build script (sce-build -> libxml), the same "
-    "chain libclang-dev is carried for. DERIVED by the SHORTFALL arm.",
-    [
-        "ci",
-        "validate-codegen",
-        "verdict-legs",
-        # R2163 — Layer C1cn's own job, peeled off `ci` for its budget. It
-        # compiles EVERY member at its non-default features, so every reason on
-        # this row that reaches a member reaches it. Its Rust lanes do not reach
-        # zenoh-pico-sys; R2805 independently adds cmake for the native engine.
-        "nondefault",
-        # R2525 — Layer C0 + C1cf's own job, peeled off `ci` for item 590's
-        # budget. C1cf builds EVERY workspace member with default features OFF,
-        # so every reason on this row that reaches a member reaches it. ⚠ It
-        # DOES reach the Rust cmake dependency: the nondefault lane iterates
-        # the 20 crates carrying a non-default feature, this one iterates all 53
-        # members, and `crates/zenoh-pico-sys` is one of them.
-        "defaults-off",
-        "footprint",
-        "interop",
-        "cross-mcu",
-        "zephyr-mcu",
-        "feature-gates",
-        # R2778 — four lanes peeled off `feature-gates` for its budget (C1j,
-        # C1z, C1bl, C1bi), none reaching `zenoh-pico-sys` or
-        # `wz-integration-tests`, so it takes this row's package and not cmake.
-        "feature-gates-peel",
-        "routing-adminspace",
-        "transport-modes",
-        "isolated-crates",
-        "capi-c-arms",
-        "e2e-demo",
-        "dissect",
-    ],
+    "libxml's build script probes pkg-config for `libxml-2.0`, and `libxml` is "
+    "reached only through `sce-build`, which only the `xtask` codegen driver "
+    "depends on. DERIVED by the SHORTFALL and EXCESS arms.",
+    ["validate-codegen"],
 )
 _add(
     "protobuf-compiler",
@@ -790,65 +817,80 @@ MODULE_APT: dict[str, str] = {
 PKG_CONFIG_TOOL = "pkg-config"
 
 
-@functools.lru_cache(maxsize=1)
-def _metadata() -> dict:
-    """The resolved build graph, at `--all-features`.
+#
+# R3009 -- EVERY workspace this repository builds, not only `crates`. The
+# codegen driver `xtask` is a workspace of its own (its `sce-build` dependency
+# links libxml2, and keeping it out of `crates` is what lets a plain build of
+# the wz stack need no libxml2), so a derivation that read `crates/Cargo.toml`
+# alone saw the SCE pin remove the one probing crate from its graph and then
+# saw nothing at all. `cargo_workspaces` is where the list is written.
+GRAPHS = cargo_workspaces.MANIFESTS
+
+
+def _metadata(graph: str = "crates") -> dict:
+    """The resolved build graph of one workspace, at `--all-features`.
 
     All features because the question is what any lane may demand, and a lane
     that turns a feature on must not be the first thing to discover the library
     is missing.
     """
-    proc = subprocess.run(
-        [
-            "cargo", "metadata", "--all-features", "--format-version", "1",
-            "--manifest-path", str(ROOT / "crates/Cargo.toml"),
-        ],
-        capture_output=True, text=True, check=False,
-    )
-    if proc.returncode != 0:
-        raise RuntimeError(f"`cargo metadata` failed (rc={proc.returncode}): {proc.stderr}")
-    return json.loads(proc.stdout)
+    return cargo_workspaces.metadata(graph)
 
 
-def probed_modules() -> dict[str, set[str]]:
-    """pkg-config module -> the crates whose build scripts ask for it.
+def probed_by_graph() -> dict[str, dict[str, set[str]]]:
+    """workspace -> pkg-config module -> the crates whose build scripts ask for it.
 
     R2801 — only crates a build ACTIVATES. `cargo metadata`'s package list and
     resolve graph also carry an optional dependency that a weak `dep?/feat`
     merely mentions, and whose build script therefore never runs;
     `cargo_activation` is where that rule lives and why.
     """
-    meta = _metadata()
-    active = cargo_activation.activated_packages(meta)
-    out: dict[str, set[str]] = {}
-    for pkg in meta["packages"]:
-        if pkg["id"] not in active:
-            continue
-        for target in pkg["targets"]:
-            if "custom-build" not in target["kind"]:
+    out: dict[str, dict[str, set[str]]] = {}
+    for graph in GRAPHS:
+        meta = _metadata(graph)
+        active = cargo_activation.activated_packages(meta)
+        modules: dict[str, set[str]] = {}
+        for pkg in meta["packages"]:
+            if pkg["id"] not in active:
                 continue
-            src = Path(target["src_path"])
-            if not src.is_file():
-                # An unreadable build script is a hole in the population, and a
-                # population with a hole must not report a clean shortfall.
-                raise RuntimeError(
-                    f"build script for `{pkg['name']}` is not on disk ({src}); "
-                    f"run `cargo fetch` so the graph can be read"
-                )
-            for mod in PKG_CONFIG_PROBE.findall(src.read_text(errors="replace")):
-                out.setdefault(mod, set()).add(pkg["name"])
+            for target in pkg["targets"]:
+                if "custom-build" not in target["kind"]:
+                    continue
+                src = Path(target["src_path"])
+                if not src.is_file():
+                    # An unreadable build script is a hole in the population,
+                    # and a population with a hole must not report a clean
+                    # shortfall.
+                    raise RuntimeError(
+                        f"build script for `{pkg['name']}` is not on disk "
+                        f"({src}); run `cargo fetch` so the graph can be read"
+                    )
+                for mod in PKG_CONFIG_PROBE.findall(src.read_text(errors="replace")):
+                    modules.setdefault(mod, set()).add(pkg["name"])
+        out[graph] = modules
     return out
 
 
-def members_reaching(crates: set[str]) -> set[str]:
-    """Workspace members whose dependency closure contains any of `crates`.
+def probed_modules() -> dict[str, set[str]]:
+    """pkg-config module -> the crates whose build scripts ask for it, in any
+    workspace this repository builds."""
+    merged: dict[str, set[str]] = {}
+    for modules in probed_by_graph().values():
+        for mod, crates in modules.items():
+            merged.setdefault(mod, set()).update(crates)
+    return merged
+
+
+def members_reaching(crates: set[str], graph: str = "crates") -> set[str]:
+    """Workspace members of `graph` whose dependency closure contains any of
+    `crates`.
 
     Walked backwards over cargo's own `resolve` graph — every dependency kind,
     dev included, for the reason the `cmake` arm records: `-e normal,build`
     answers "no dependents" for a crate a test target pulls in, and acting on
     that answer is how a needed package gets dropped.
     """
-    meta = _metadata()
+    meta = _metadata(graph)
     by_id = {p["id"]: p for p in meta["packages"]}
     rev: dict[str, set[str]] = {}
     # R2801 — over ACTIVE edges only, for the reason `probed_modules` gives.
@@ -886,8 +928,9 @@ def linux_jobs(path: Path) -> set[str]:
     here — but only because this asks for one.
 
     A job on a non-ubuntu runner is OUT OF SUBJECT, not exempt: `portability`
-    builds the same crates on macOS and Windows and gets libxml2 from vcpkg,
-    which this gate has nothing to say about.
+    builds the same crates on macOS and Windows, with no package manager step
+    this gate could read. Its libxml2 install (vcpkg, on Windows) was the one
+    such step and R3009 removed it; the derivation here is what licensed that.
     """
     out: set[str] = set()
     job = None
@@ -1063,6 +1106,77 @@ def undocumented(sites: dict[str, set[str]]) -> list[str]:
     return findings
 
 
+# The libraries the EXCESS arm derives instead of believing: what a probed
+# module resolves to. The probe's TOOL is deliberately not here. The SHORTFALL
+# arm demands it wherever a probe runs, but its absence from a job is not
+# derivable as excess: `install-mbedtls.sh` and `build-zenoh-pico-cli.sh` read
+# `.pc` files by hand, and pico's own CMake arm resolves Mbed TLS through
+# pkg-config from inside a cmake run, which no text this census reads shows. R311y865
+# measured the tool at about a second per job and kept it for that reason, and
+# that decision stands; it is adjudicated as prose in the table above.
+DERIVED_NATIVE: frozenset[str] = frozenset(MODULE_APT.values())
+
+
+# How a job reaches a workspace that is not `crates`: by cargo-building it by
+# manifest path. A bare mention is NOT reach -- the gates this census runs
+# quote `xtask` in their own docstrings, so a substring test made the job that
+# hosts them look like it ran the codegen driver, which is a false "needed" and
+# would have hidden the excess it exists to find. The `crates` workspace keeps
+# the member-name test below because `--workspace` and `-p <member>` have no
+# single invocation shape.
+GRAPH_INVOCATION: dict[str, re.Pattern[str]] = {
+    "xtask": re.compile(
+        r"cargo\s+(?:run|build|test|check|clippy)\b[^\n]*"
+        r"--manifest-path\s+xtask/Cargo\.toml"
+    ),
+}
+
+
+def _builds_member(text: str, graph: str, members: set[str]) -> bool:
+    """Whether what a job runs builds one of `members` of `graph`.
+
+    `--workspace` names every member of the `crates` workspace and says nothing
+    about `xtask`, which is a workspace of its own: a job reaches that one by
+    running it (`GRAPH_INVOCATION`).
+    """
+    invocation = GRAPH_INVOCATION.get(graph)
+    if invocation is not None:
+        return invocation.search(text) is not None
+    if WORKSPACE_FLAG.search(text):
+        return True
+    return any(m in text for m in members)
+
+
+def native_need() -> dict[tuple[str, str], dict[str, str]]:
+    """(workflow, job) -> {package -> the evidence that the job needs it}.
+
+    Covers every ubuntu job of every workflow, a job that needs nothing here
+    included (an empty map), because the EXCESS arm has to be able to say that a
+    job needs none of them. Derived from the resolved graphs and from what the
+    job runs, never from a list of jobs.
+    """
+    probed_graphs = probed_by_graph()
+    workflows = sorted(WORKFLOWS.glob("*.yml"))
+    need: dict[tuple[str, str], dict[str, str]] = {}
+    for wf in workflows:
+        reach = job_reachable_text(wf)
+        for job in sorted(linux_jobs(wf)):
+            text = reach.get(job, "")
+            row: dict[str, str] = {}
+            for graph, modules in sorted(probed_graphs.items()):
+                for module, crates in sorted(modules.items()):
+                    pkg = MODULE_APT.get(module)
+                    if pkg is None:
+                        continue
+                    members = members_reaching(crates, graph)
+                    if _builds_member(text, graph, members):
+                        why = f"builds a member of `{graph}` reaching {'/'.join(sorted(crates))}"
+                        row.setdefault(pkg, why)
+                        row.setdefault(PKG_CONFIG_TOOL, f"the tool the `{module}` probe runs ({why})")
+            need[(wf.name, job)] = row
+    return need
+
+
 def shortfall() -> list[str]:
     """Every (workflow, job, package) the build demands and no apt step installs."""
     probed = probed_modules()
@@ -1071,9 +1185,10 @@ def shortfall() -> list[str]:
         # them probes for anything. That is possible in principle and false
         # today; either way an empty population must not print a clean line.
         return [
-            "SHORTFALL population is EMPTY: no build script in the resolved "
-            "graph probes pkg-config. Either the probe pattern has drifted from "
-            "what the pkg-config crate offers, or this arm just asserted nothing."
+            "SHORTFALL population is EMPTY: no build script in any resolved "
+            f"graph ({', '.join(sorted(GRAPHS))}) probes pkg-config. Either the "
+            "probe pattern has drifted from what the pkg-config crate offers, or "
+            "this arm just asserted nothing."
         ]
 
     findings: list[str] = []
@@ -1107,27 +1222,39 @@ def shortfall() -> list[str]:
                 f"machine says `{owner}` owns its .pc file. Fix the row."
             )
 
-        members = members_reaching(crates)
-        for wf in workflows:
-            sites = apt_sites(wf)
-            reach = job_reachable_text(wf)
-            for job in sorted(linux_jobs(wf)):
-                text = reach.get(job, "")
-                if "--workspace" not in text and not any(m in text for m in members):
-                    continue
-                for want, what in ((pkg, f"the library `{module}` resolves to"),
-                                   (PKG_CONFIG_TOOL, "the tool the probe itself runs")):
-                    if want in sites.get(job, set()):
-                        continue
-                    findings.append(
-                        f"{wf.name} job `{job}` builds a member that reaches "
-                        f"{'/'.join(sorted(crates))}, whose build script probes "
-                        f"pkg-config for `{module}` — and it never installs "
-                        f"`{want}`, {what}. It passes today only because the "
-                        f"runner image happens to carry it; nothing declares "
-                        f"that, and nothing would notice its removal. Add "
-                        f"`{want}` to that job's apt install line."
-                    )
+    for (wf_name, job), row in sorted(native_need().items()):
+        installed = apt_sites(WORKFLOWS / wf_name).get(job, set())
+        for want, why in sorted(row.items()):
+            if want in installed:
+                continue
+            findings.append(
+                f"{wf_name} job `{job}` needs `{want}` ({why}) and never "
+                f"installs it. It passes today only because the runner image "
+                f"happens to carry it; nothing declares that, and nothing would "
+                f"notice its removal. Add `{want}` to that job's apt install line."
+            )
+    return findings
+
+
+def excess() -> list[str]:
+    """Every (workflow, job, library) an apt step installs that nothing the job
+    runs needs -- the other direction of `shortfall`, over the same derivation.
+
+    R3009. The SCE pin took `libxml` out of the `crates` workspace, and with it
+    the reason most jobs carried `libxml2-dev`. A package that stays on a job
+    after its consumer left is a download nobody can justify and a reason that
+    is no longer true, which is the class the ADJUDICATED table above exists to
+    close for the packages it adjudicates by hand.
+    """
+    findings: list[str] = []
+    for (wf_name, job), row in sorted(native_need().items()):
+        installed = apt_sites(WORKFLOWS / wf_name).get(job, set())
+        for pkg in sorted((installed & DERIVED_NATIVE) - row.keys()):
+            findings.append(
+                f"{wf_name} job `{job}` installs `{pkg}`, but nothing it runs "
+                f"builds a crate whose build script probes for it. Drop "
+                f"`{pkg}` from that job's apt install line."
+            )
     return findings
 
 
@@ -1199,6 +1326,17 @@ def main() -> int:
               file=sys.stderr)
         return 1
     for finding in missing:
+        failed = True
+        print(f"  apt-packages FAIL: {finding}", file=sys.stderr)
+
+    # The EXCESS arm, over the derivation the shortfall arm just used.
+    try:
+        surplus = excess()
+    except (OSError, RuntimeError, json.JSONDecodeError) as e:
+        print(f"  apt-packages FAIL: the excess arm could not read its input: {e}",
+              file=sys.stderr)
+        return 1
+    for finding in surplus:
         failed = True
         print(f"  apt-packages FAIL: {finding}", file=sys.stderr)
 

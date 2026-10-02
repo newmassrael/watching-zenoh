@@ -229,12 +229,18 @@ sce-portable-bytes = { path = "../../vendor/sce/backends/rust/portable-bytes", d
 # crate runs no codegen of its own.
 #
 # R2196 (open-debt item 530) — the clause used to end "so this crate no longer
-# pulls `sce-build` (hence libxml2) into the build graph", and that was FALSE.
-# `wz-codecs` depends on `sce-forge-runtime`, `sce-forge-runtime` build-depends
-# on `sce-build`, and `sce-build` depends on `libxml`, so the resolve graph
-# reaches both whatever this manifest stops doing. R2105 caught the same
-# sentence in run-ci.sh and xtask and never reached these two sites. What
-# R311y22 removed is a build script here, not the chain.
+# pulls `sce-build` (hence libxml2) into the build graph", and that was FALSE
+# at the SCE pin of the time: the forge runtime this crate links had a build
+# script that pulled SCE's XML codegen toolchain into the resolve graph whatever
+# this manifest stopped doing. R2105 caught the same sentence in run-ci.sh and
+# xtask and never reached these two sites. What R311y22 removed was a build
+# script here, not that chain.
+#
+# R3009 — the chain is gone. The SCE pin of that round dropped the toolchain
+# from the forge runtime's build script, so this crate no longer pulls
+# `sce-build` (hence libxml2) into the build graph, and the old clause is true
+# for the reason it always gave. The two names now live only in the `xtask`
+# workspace.
 
 [lints]
 workspace = true

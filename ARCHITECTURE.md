@@ -516,14 +516,19 @@ watching-zenoh/
 > is a verified cache of the SCXML SSOT (manual edits still forbidden, per
 > §2.4 point 6 / §11.5). This replaced wz's build-time codegen and the
 > sce-codegen BINARY requirement (consumers no longer need a built sce-codegen
-> or per-build regeneration). It does NOT, however, remove libxml2:
+> or per-build regeneration). It did NOT, at first, remove libxml2:
 > `sce-forge-runtime` — the runtime support crate every generated codec links
-> against — has its OWN build.rs build-dependency on `sce-build` (→ `libxml` →
-> native libxml2), so building the wz stack still compiles libxml2 (R311y22d
+> against — had its OWN build.rs build-dependency on `sce-build` (→ `libxml` →
+> native libxml2), so building the wz stack still compiled libxml2 (R311y22d
 > wrongly assumed otherwise + dropped the Windows CI libxml2 install; R311y22f
 > re-added it after the fresh windows CI caught the sce-forge-runtime build-dep
-> the Linux-cached build had hidden). Eliminating libxml2 entirely needs an
-> SCE-upstream change (sce-forge-runtime not build-depping sce-build). The
+> the Linux-cached build had hidden). Eliminating libxml2 needed an SCE-upstream
+> change (sce-forge-runtime not build-depping sce-build), and R3009's SCE pin
+> carries it: `libxml` is no longer in the `crates/` workspace, so building or
+> testing the wz stack needs no libxml2, and only the `xtask` codegen driver
+> (its own workspace) still links it. The Windows CI libxml2 install that
+> R311y22f restored is therefore no longer required by the build; see the
+> `portability` job's own note. The
 > `out/ap` + `out/mcu` generated-library-crate restructure below stays the
 > longer-term vision (it needs SCE emitting standalone crates); R311y22 is a
 > STEP toward it, not its completion.

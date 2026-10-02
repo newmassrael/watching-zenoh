@@ -1532,15 +1532,22 @@ layer_b_verify_codegen() {
 #
 # R2105 (open-debt item 526) — that clause used to end "so a plain `cargo
 # build` of the wz stack needs no libxml2/SCE toolchain", and the second half
-# of that was FALSE. Measured: `cargo tree -e normal,build -i libxml
-# --workspace` reaches `libxml` through `sce-forge-runtime`'s own build script
-# (`sce-build` -> `libxml`), and sce-forge-runtime is the runtime support crate
-# every generated codec links. So a plain `cargo build` needs native libxml2
-# whether or not it runs codegen. The `portability` job's vcpkg step has said
+# of that was FALSE at the SCE pin of the time. Measured then: `cargo tree -e
+# normal,build -i libxml --workspace` reached `libxml` through the forge
+# runtime's own build script, and the forge runtime is the support crate every
+# generated codec links. So a plain `cargo build` needed native libxml2
+# whether or not it ran codegen. The `portability` job's vcpkg step had said
 # so in its own comment for rounds, which made this tree carry two statements
 # that contradicted each other -- and the consumer who hit the wall had
-# believed this one. What R311y22 removed is the sce-codegen BINARY
+# believed this one. What R311y22 removed was the sce-codegen BINARY
 # requirement, not the libxml2 one.
+#
+# R3009 -- the clause is true now. The SCE pin of that round dropped the XML
+# toolchain from the forge runtime's build script, and the same `cargo tree`
+# finds no `libxml` in the `crates/` workspace at all. It survives in `xtask`,
+# the codegen driver, which is a workspace of its own, so libxml2 is needed to
+# RUN this layer and to regenerate `out/**`, and by nothing that only builds or
+# tests.
 #
 # This gate keeps the
 # committed tree honest: regenerate it via the xtask codegen SSOT, then
@@ -2406,8 +2413,10 @@ layer_c0_test_discipline() {
     # directory the file sits in: "so this crate has no build script and pulls
     # no libxml2/SCE toolchain". Re-measured here, that sentence was still in
     # the tree in two wz-codecs sites R2105 never reached, and both were FALSE
-    # -- `sce-forge-runtime`'s build script reaches `sce-build` and `libxml`
-    # from exactly that crate.
+    # -- the forge runtime's build script reached the XML toolchain from
+    # exactly that crate. (R3009: the SCE pin dropped it, those two sites are
+    # true again, and the gate reads `xtask` too so a denial of a toolchain that
+    # lives there stays adjudicable instead of going vacuous.)
     #
     # THE SUBJECT IS THE FILE'S LOCATION, and that is what makes this exact
     # rather than a phrase list. The tree writes the same object word, verb and

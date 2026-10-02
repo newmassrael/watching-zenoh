@@ -7,19 +7,21 @@
 //! the matching `sources/codecs/<stem>.scxml` file. R311y22: that output
 //! is COMMITTED under `out/wz-codecs/<stem>.rs` (resolved via
 //! `env!("CARGO_MANIFEST_DIR")`), so this crate has no build script of its
-//! own. `xtask` (scripts/regen-codegen.sh) regenerates the committed files
-//! from the SCXML SSOT and the CI regen-diff lane enforces
-//! committed == regenerated. Manual edits to `out/**` are forbidden.
+//! own and pulls no libxml2/SCE toolchain. `xtask` (scripts/regen-codegen.sh)
+//! regenerates the committed files from the SCXML SSOT and the CI regen-diff
+//! lane enforces committed == regenerated. Manual edits to `out/**` are
+//! forbidden.
 //!
-//! R2196 (open-debt item 530) — that sentence used to end "and pulls no
-//! libxml2/SCE toolchain", and the libxml2 half was FALSE. `wz-codecs`
-//! depends on `sce-forge-runtime`, `sce-forge-runtime` build-depends on
-//! `sce-build`, and `sce-build` depends on `libxml`, so native libxml2 is in
-//! the build closure whether or not codegen runs. R2105 corrected the same
-//! claim in `run-ci.sh` and `xtask/src/main.rs` and did not reach the two
-//! sites that make it about the crate the chain runs through.
-//! `scripts/lib/prose_build_closure_gate.py` now adjudicates the shape, and
-//! the three hops above are adjudicated by `prose_dep_graph_gate.py`.
+//! The second half of that sentence is true again, and was not for a long
+//! stretch. R2196 (open-debt item 530) found it FALSE: the forge runtime this
+//! crate links had a build script that pulled SCE's XML codegen toolchain, and
+//! native libxml2 with it, into the build closure whether or not codegen ran.
+//! R2105 had corrected the same claim in `run-ci.sh` and `xtask/src/main.rs`
+//! and not reached the two sites that make it about the crate that chain ran
+//! through. The SCE pin of R3009 dropped the toolchain from that build script;
+//! `cargo metadata --all-features` no longer reaches `libxml` from this crate,
+//! and `scripts/lib/prose_build_closure_gate.py` holds the sentence above to
+//! that closure.
 //!
 //! The codegen output references sibling modules with
 //! `use super::X::Y;`, so all stems are declared at the same level in

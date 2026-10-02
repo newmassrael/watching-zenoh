@@ -107,17 +107,22 @@ Debian/Ubuntu 패키지 이름. CI job 13개가 «전부» 이 집합을 깔므�
 
 <!-- BUILD-PREREQS-BEGIN -->
 ```sh
-sudo apt-get install -y clang libclang-dev libxml2-dev pkg-config
+sudo apt-get install -y clang libclang-dev pkg-config
 ```
 <!-- BUILD-PREREQS-END -->
 
-넷 다 선택이 아니고, CI 전용도 아니다. `libclang-dev`/`clang` 은
-bindgen 의 것이고, `libxml2-dev`/`pkg-config` 는 `libxml` crate 의
-것인데 «맨» `cargo build` 가 `sce-forge-runtime` 의 build script 를 통해
-거기 닿는다 (`sce-build` -> `libxml` -> `bindgen`). 없으면 빌드가
-*"The system library `libxml-2.0` required by crate `libxml` was not
-found"* 에서 선다 — crate 이름만 대고 «패키지» 이름은 안 대는 에러이고,
-이 트리의 소비자가 실제로 만난 벽이다.
+셋 다 선택이 아니고, CI 전용도 아니다. `libclang-dev`/`clang` 은
+bindgen 의 것이다 — 저장 엔진과 lwIP 바인딩이 빌드 때 돌린다.
+`pkg-config` 는 build script 와 보조 스크립트가 `.pc` 파일을 찾는 데 쓴다.
+
+이 워크스페이스의 «맨» `cargo build` 는 libxml2 가 필요 없다. 이게 다시 참이
+된 것은 R3009 의 SCE 핀부터다: 그 전에는 SCE forge runtime 이 자기 build
+script 로 XML codegen 툴체인을 모든 빌드에 끌어들였고, `libxml2-dev` 없이는
+빌드가 *"The system library `libxml-2.0` required by crate `libxml` was not
+found"* 에서 섰다 — crate 이름만 대고 «패키지» 이름은 안 대는 에러이고, 이
+트리의 소비자가 실제로 만난 벽이다. 지금 `libxml2-dev` 가 필요한 것은 커밋된
+`out/**` 를 재생성할 때(`scripts/regen-codegen.sh`, SCE 의 XML 툴체인을 링크하는
+`xtask` codegen 드라이버를 돌린다)뿐이고, 빌드·시험만 하는 경로에는 없다.
 
 위 목록은 손으로 유지하는 것이 «아니라 유도된다»: CI job 이 전부 까는
 집합이고, `scripts/lib/apt_package_census.py` 가 이 블록과 그 집합이

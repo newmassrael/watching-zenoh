@@ -271,16 +271,25 @@ jobs:
         # measured that; the package costs about a second. Recorded so the next
         # reader knows the reason above is now historical rather than current.
         #
-        # R2104 (open-debt item 522) — that measurement now EXISTS, and it says
+        # R2104 (open-debt item 522) — that measurement now EXISTS, and it said
         # keeping it was right for a reason nobody had: the `libxml` crate's
-        # build script probes `libxml-2.0`, so every job compiling it needs both
-        # the tool and `libxml2-dev`. Ten jobs had neither and were getting them
-        # from the runner image. `apt_package_census.py`'s shortfall arm derives
-        # the requirement from the resolved build graph and reds on a job that
-        # reaches the crate without installing them.
+        # build script probes `libxml-2.0`, so every job compiling it needed
+        # both the tool and `libxml2-dev`. Ten jobs had neither and were getting
+        # them from the runner image. `apt_package_census.py`'s shortfall arm
+        # derives the requirement from the resolved build graphs and reds on a
+        # job that reaches the crate without installing them.
+        #
+        # R3009 — the reason moved, the tool stayed. The SCE pin of that round
+        # took the XML codegen toolchain out of the forge runtime's build
+        # script, so `libxml` is no longer in the `crates` workspace and only
+        # `xtask` (a workspace of its own) reaches it. `libxml2-dev` is
+        # therefore on the jobs that run `xtask` and on no other; the census's
+        # excess arm enforces that direction. `pkg-config` stays here for the
+        # reason R311y865 gave: a second of apt against not knowing which lane
+        # reads a `.pc`.
         run: |
           bash scripts/lib/apt-install.sh libsnappy-dev liblz4-dev libzstd-dev zlib1g-dev libbz2-dev \
-            cmake libclang-dev libxml2-dev clang perl pkg-config
+            cmake libclang-dev clang perl pkg-config
 
       - name: Install shellcheck (pinned + checksum-verified)
         # Same contract as the actionlint step below, and for the same reason:
@@ -847,6 +856,12 @@ jobs:
         # cmake + libclang-dev for the sce-codegen / xtask (Layer B/B2)
         # toolchain; perl for verify-codegen.sh Layer 2 include sort.
         #
+        # libxml2-dev + pkg-config: `xtask` links SCE's XML toolchain
+        # (`sce-build` -> `libxml`, whose build script probes `libxml-2.0`),
+        # and this is the one job that builds it. Since the SCE pin of R3009 it
+        # is the only job that needs either for that reason:
+        # `apt_package_census.py` derives it in both directions.
+        #
         # This job's `Save apt archives` step is NOT here: it installs twice
         # (protoc below), and a save between the two would carry half the
         # archive and then sit on a key nothing updates.
@@ -1165,9 +1180,10 @@ jobs:
         # directly or through `wz-integration-tests`' dev-dependency) and this
         # job's lanes reach neither. `scripts/lib/apt_package_census.py` is
         # what keeps that answer honest; it derives the cmake rows rather than
-        # reading this comment.
+        # reading this comment. Nor `libxml2-dev` (R3009): that library is
+        # needed only by the jobs that run `xtask`, which this one does not.
         run: |
-          bash scripts/lib/apt-install.sh libclang-dev libxml2-dev clang perl pkg-config
+          bash scripts/lib/apt-install.sh libclang-dev clang perl pkg-config
 
       - name: Save apt archives
         # See the `feature-gates` copy for why `always()` and why the dirty gate.
@@ -1273,9 +1289,10 @@ jobs:
             apt-${{ runner.os }}-${{ github.job }}-
 
       - name: Install system dependencies
+        # No `libxml2-dev` (R3009): only the jobs that run `xtask` need it.
         run: |
           bash scripts/lib/apt-install.sh libsnappy-dev liblz4-dev libzstd-dev zlib1g-dev libbz2-dev \
-            cmake libclang-dev libxml2-dev clang perl pkg-config
+            cmake libclang-dev clang perl pkg-config
 
       - name: Save apt archives
         if: always() && env.WZ_APT_CACHE_DIRTY == 'true'
@@ -1431,8 +1448,9 @@ jobs:
             apt-${{ runner.os }}-${{ github.job }}-
 
       - name: Install system dependencies
+        # No `libxml2-dev` (R3009): only the jobs that run `xtask` need it.
         run: |
-          bash scripts/lib/apt-install.sh cmake libclang-dev libxml2-dev clang perl pkg-config
+          bash scripts/lib/apt-install.sh cmake libclang-dev clang perl pkg-config
 
       - name: Save apt archives
         if: always() && env.WZ_APT_CACHE_DIRTY == 'true'
@@ -1580,7 +1598,7 @@ jobs:
           # because "the image happens to carry it" is not a thing this file
           # states and the leg arms on its absence.
           bash scripts/lib/apt-install.sh libsnappy-dev liblz4-dev libzstd-dev zlib1g-dev libbz2-dev \
-            cmake libclang-dev libxml2-dev clang perl pkg-config tcpdump \
+            cmake libclang-dev clang perl pkg-config tcpdump \
             libpcap-dev netbase
 
       - name: Save apt archives
@@ -1736,9 +1754,11 @@ jobs:
       - name: Install system dependencies
         # perl included, and libclang for the reason the old comment here gave
         # and R311y881 confirmed: `wz-ap-demo`'s manifest lists only the `wz`
-        # facade, but its resolved tree pulls bindgen (libclang), libxml, and
-        # the vendor/sce crates — a direct-dependency read says "needs nothing"
-        # and is wrong.
+        # facade, but its resolved tree pulls bindgen (libclang) and the
+        # vendor/sce crates — a direct-dependency read says "needs nothing"
+        # and is wrong. (It also pulled `libxml` until the SCE pin of R3009
+        # removed the XML toolchain from the forge runtime's build script, so
+        # `libxml2-dev` is no longer in this list.)
         #
         # `cmake` is the one that read WAS right about, and "mirrors `ci`'s list
         # EXACTLY" is how it survived unexamined. Only `zenoh-pico-sys` pulls
@@ -1747,7 +1767,7 @@ jobs:
         # `scripts/lib/apt_package_census.py` derives it and reds if this job's
         # lanes ever do reach it.
         run: |
-          bash scripts/lib/apt-install.sh libclang-dev libxml2-dev clang perl pkg-config
+          bash scripts/lib/apt-install.sh libclang-dev clang perl pkg-config
 
       - name: Save apt archives
         # See the `feature-gates` copy for why `always()` and why the dirty gate.
@@ -1868,10 +1888,12 @@ jobs:
       - name: Install system dependencies
         # cmake + libclang-dev: zenoh-pico-sys (cmake crate + bindgen), which the
         # wz-integration-tests dev-dep pulls in even for the spawn-class lanes.
-        # libxml2-dev + pkg-config: the libxml probe (item 522).
+        # pkg-config: the pico/Mbed TLS builds this job provisions read a `.pc`
+        # (item 522 added it for the libxml probe, which left the `crates`
+        # workspace with the SCE pin of R3009 and so took `libxml2-dev` with it).
         run: |
           bash scripts/lib/apt-install.sh libsnappy-dev liblz4-dev libzstd-dev zlib1g-dev libbz2-dev \
-            cmake libclang-dev libxml2-dev clang pkg-config
+            cmake libclang-dev clang pkg-config
 
       - name: Save apt archives
         # See the `feature-gates` copy for why `always()` and why the dirty gate.
@@ -2803,7 +2825,7 @@ jobs:
         # `fatal error: string.h: No such file or directory` (Layer G.6 /
         # G.11). qemu-system-arm boots the mps2 / microbit ELFs (Q.2 / Q.4).
         run: |
-          bash scripts/lib/apt-install.sh libclang-dev libxml2-dev clang \
+          bash scripts/lib/apt-install.sh libclang-dev clang \
             pkg-config gcc-arm-none-eabi libnewlib-arm-none-eabi qemu-system-arm
 
       - name: Save apt archives
@@ -2958,7 +2980,7 @@ jobs:
         run: |
           bash scripts/lib/apt-install.sh \
             cmake ninja-build device-tree-compiler \
-            libclang-dev libxml2-dev clang pkg-config \
+            libclang-dev clang pkg-config \
             gcc-arm-none-eabi libnewlib-arm-none-eabi \
             qemu-system-arm xz-utils
 
@@ -3321,9 +3343,10 @@ jobs:
         # moved to the `dissect` job; the packages moved with it rather than
         # being left behind for a lane that no longer runs here. Their reasons
         # travelled too, and are stated in full on that job's own install step.
+        # No `libxml2-dev` (R3009): only the jobs that run `xtask` need it.
         run: |
           bash scripts/lib/apt-install.sh libsnappy-dev liblz4-dev libzstd-dev zlib1g-dev libbz2-dev \
-            cmake libclang-dev libxml2-dev clang perl pkg-config
+            cmake libclang-dev clang perl pkg-config
 
       - name: Save apt archives
         # `always()`: the job this exists for is the one a slow mirror REDS, and
@@ -3776,9 +3799,10 @@ jobs:
             apt-${{ runner.os }}-${{ github.job }}-
 
       - name: Install system dependencies
-        # No `cmake`, for the reason in the header above.
+        # No `cmake`, for the reason in the header above. No `libxml2-dev`
+        # either (R3009): only the jobs that run `xtask` need it.
         run: |
-          bash scripts/lib/apt-install.sh libclang-dev libxml2-dev clang perl pkg-config
+          bash scripts/lib/apt-install.sh libclang-dev clang perl pkg-config
 
       - name: Save apt archives
         # See the `feature-gates` copy for why `always()` and why the dirty gate.
@@ -3888,9 +3912,13 @@ jobs:
 
       - name: What the runner image already ships (measurement, not a gate)
         # R311y881 — `libclang-dev` is 25.2 MB of this job's download, the
-        # single largest item in the whole apt census, and it is needed because
-        # `sce-forge-runtime`'s build script build-depends on `sce-build` ->
-        # `libxml` -> `bindgen`. What NOBODY here can answer from a laptop is
+        # single largest item in the whole apt census, and it was needed
+        # because the forge runtime's build script pulled SCE's XML codegen
+        # toolchain, which runs bindgen. (R3009: the SCE pin dropped that
+        # toolchain from the build script. A bindgen consumer is still compiled
+        # wherever a lane here reaches `librocksdb-sys`, the storage engine under
+        # `wz-runtime-tokio`, or `lwip-sys`; whether every lane of this job
+        # still does is open-debt item 861.) What NOBODY here can answer from a laptop is
         # whether bindgen would have found a libclang the image already ships:
         # the `clang` package came down in 3558 bytes on run 32266212482, which
         # is a metapackage, so clang-14 itself is already installed and the
@@ -3943,9 +3971,10 @@ jobs:
         # `wz-integration-tests`, and those are the only routes to the `cmake`
         # crate in this workspace (R311y881, derived by
         # `scripts/lib/apt_package_census.py`). It is the job whose 32.3 MB was
-        # killed at the 900s ceiling on run 32266212482.
+        # killed at the 900s ceiling on run 32266212482. No `libxml2-dev`
+        # either (R3009): only the jobs that run `xtask` need it.
         run: |
-          bash scripts/lib/apt-install.sh libclang-dev libxml2-dev clang perl pkg-config
+          bash scripts/lib/apt-install.sh libclang-dev clang perl pkg-config
 
       - name: Save apt archives
         # See the `feature-gates` copy for why `always()` and why the dirty gate.
@@ -4181,10 +4210,11 @@ jobs:
 
       - name: Install system dependencies
         # cmake + clang/libclang are for those two C builds (bindgen included);
-        # perl matches the sibling job's set.
+        # perl matches the sibling job's set. No `libxml2-dev` (R3009): only the
+        # jobs that run `xtask` need it.
         run: |
           bash scripts/lib/apt-install.sh libsnappy-dev liblz4-dev libzstd-dev zlib1g-dev libbz2-dev \
-            cmake libclang-dev libxml2-dev clang perl pkg-config
+            cmake libclang-dev clang perl pkg-config
 
       - name: Save apt archives
         # `always()`: the job this exists for is the one a slow mirror REDS, and
@@ -4394,9 +4424,12 @@ jobs:
         # lwip-sys runs bindgen (crates/lwip-sys/Cargo.toml:58) — and this job
         # cmake-builds nothing. It is kept whole anyway: trimming it trades a
         # few seconds of apt for a first-run red on a dependency this job has
-        # never been observed to need or not need.
+        # never been observed to need or not need. The one exception is
+        # `libxml2-dev` (R3009), which `apt_package_census.py` derives: the
+        # only crate that probes for it is in the `xtask` workspace, and this
+        # job does not run `xtask`.
         run: |
-          bash scripts/lib/apt-install.sh cmake libclang-dev libxml2-dev clang perl pkg-config
+          bash scripts/lib/apt-install.sh cmake libclang-dev clang perl pkg-config
 
       - name: Save apt archives
         # `always()`: the job this exists for is the one a slow mirror REDS, and
@@ -4575,10 +4608,12 @@ jobs:
         # C1cc moving here: it builds `wz-capi-c` through cargo, whose graph
         # reaches zenoh-pico-sys (cmake crate + bindgen). A narrow list was right
         # while this job only ran C1ce and the arms gate; it stopped being right
-        # the moment a cargo lane arrived.
+        # the moment a cargo lane arrived. R3009 took `libxml2-dev` back out: the
+        # widened list was the `ci` job's, and that job's `libxml2-dev` was for
+        # a crate (`libxml`) that left the `crates` workspace with the SCE pin.
         run: |
           bash scripts/lib/apt-install.sh libsnappy-dev liblz4-dev libzstd-dev zlib1g-dev libbz2-dev \
-            cmake libclang-dev libxml2-dev clang perl pkg-config
+            cmake libclang-dev clang perl pkg-config
 
       - name: Save apt archives
         # See the `feature-gates` copy for why `always()` and why the dirty gate.
@@ -4893,9 +4928,10 @@ jobs:
             apt-${{ runner.os }}-${{ github.job }}-
 
       - name: Install system dependencies
+        # No `libxml2-dev` (R3009): only the jobs that run `xtask` need it.
         run: |
           bash scripts/lib/apt-install.sh libsnappy-dev liblz4-dev libzstd-dev zlib1g-dev libbz2-dev \
-            cmake libclang-dev libxml2-dev clang perl pkg-config
+            cmake libclang-dev clang perl pkg-config
 
       - name: Save apt archives
         # See the `feature-gates` copy for why `always()` and why the dirty gate.
@@ -5031,31 +5067,29 @@ jobs:
             crates -> target
             vendor/sce -> target
 
-      # R311y22f — libxml2 IS still required on the native windows-msvc gate.
-      # R311y22 committed the SCE codegen under out/** and removed wz's
-      # build-time codegen + the sce-codegen BINARY requirement (real wins: the
-      # AP clippy below runs NO codegen and needs no sce-codegen binary). But it
-      # does NOT remove libxml2: `sce-forge-runtime` — the RUNTIME support crate
-      # every generated codec links — has its OWN build.rs build-dependency on
-      # `sce-build` (-> the `libxml` crate -> native libxml2). So compiling
-      # wz-runtime-tokio compiles sce-forge-runtime's build script, which links
-      # libxml2. macOS finds it via system pkg-config; windows-msvc resolves it
-      # through vcpkg and HARD-PANICS ("Could not find libxml2") without this
-      # install. (R311y22d wrongly dropped this step, assuming committed codegen
-      # removed ALL libxml2 need; the Linux-cached build hid the
-      # sce-forge-runtime build-dep, the fresh windows CI caught it — R311y22f
-      # re-adds it. The deeper fix — sce-forge-runtime not build-depping
-      # sce-build — is SCE-upstream.) The `build sce-codegen` step stays removed:
-      # the AP build runs no codegen, so it needs the libxml2 LIBRARY but not the
-      # sce-codegen binary (macOS passes without either).
-      - name: Install libxml2 (Windows; sce-forge-runtime build-deps sce-build -> libxml)
-        if: runner.os == 'Windows'
-        shell: bash
-        run: |
-          "$VCPKG_INSTALLATION_ROOT/vcpkg" install libxml2:x64-windows-static-md
-          echo "VCPKG_ROOT=$VCPKG_INSTALLATION_ROOT" >> "$GITHUB_ENV"
-          echo "VCPKGRS_TRIPLET=x64-windows-static-md" >> "$GITHUB_ENV"
-
+      # R3009 — no libxml2 install on the native windows-msvc gate any more.
+      #
+      # History, because this step was added, dropped and re-added on evidence.
+      # R311y22 committed the SCE codegen under out/** and removed wz's build-time
+      # codegen + the sce-codegen BINARY requirement, but it did not remove
+      # libxml2: the forge runtime every generated codec links had its OWN
+      # build-dependency on SCE's XML codegen toolchain, so compiling
+      # wz-runtime-tokio compiled a build script that linked libxml2, and
+      # windows-msvc HARD-PANICKED ("Could not find libxml2") without a vcpkg
+      # install. R311y22d dropped the step on the assumption that committed
+      # codegen had removed ALL libxml2 need, the Linux-cached build hid the
+      # build-dependency, and the fresh windows CI caught it; R311y22f re-added
+      # it and named the deeper fix as SCE-upstream.
+      #
+      # That fix has landed: the SCE pin of R3009 took the toolchain out of the
+      # forge runtime's build script. `cargo tree --workspace --all-features
+      # --target all -e normal,build,dev -i libxml` over `crates/` now finds no
+      # such package, so nothing this job builds links libxml2 on any target. It
+      # survives only in `xtask` (its own workspace), which this job does not
+      # build. The step is removed, not skipped. This leg is where a wrong
+      # derivation would show first: a red here that names libxml2 means the
+      # derivation missed a consumer, and the step comes back WITH that
+      # consumer named, not as a precaution.
       - name: cargo clippy — wz-runtime-tokio (default AP surface)
         # The portable AP stack (tcp/udp transport, pub/sub, query, declare,
         # liveliness). No unix-only backend in the default set, so it compiles
