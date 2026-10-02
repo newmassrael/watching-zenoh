@@ -185,3 +185,64 @@ cargo test -p wz-capture --features compression,dissect --lib \
   refresh_the_tracked_compressed_capture -- --ignored
 cargo test -p wz-capture --features compression,dissect --lib compressed_capture
 ```
+
+## `fragmented-push-midsession-and-established.pcap`
+
+One fragmented message, seen twice: in a flow whose handshake the capture
+**missed**, and in a flow whose handshake it holds. It is the specimen of the
+field document's `carried_state: "fragment_without_resolution"`, and its control.
+
+The word says a Fragment was seen before the reader saw the session's InitAck, so
+the sequence-number resolution is unknown and the reader will not guess a mask (a
+wrap and a gap look the same without it). It is the state of a capture that began
+in the middle of a session. A fragment in a session whose handshake IS in the
+capture reads `fragment` and, when its chain completes, `reassembled`.
+
+| | |
+|---|---|
+| link type | 1 (`LINKTYPE_ETHERNET`) |
+| packets | **8**: flow A is 2, flow B is 6 |
+| timestamps | 0.000000 onward, 1 ms apart |
+
+| packets | flow | what they are | read as |
+|---|---|---|---|
+| 0, 1 | A: `10.0.0.1:43210` → `10.0.0.2:7447` | the two fragments of the message, no handshake | `fragment_without_resolution`, twice |
+| 2–5 | B: `10.0.0.3:43211` ↔ `10.0.0.4:7447` | Init, InitAck, Open, OpenAck | handshake rows |
+| 6 | B | the **same** first fragment, byte for byte | `fragment` |
+| 7 | B | the **same** second fragment, byte for byte | `reassembled`, its record a `Push` |
+
+The two flows differ in exactly one fact, the handshake, which is the condition
+the word names. The message is a literal `Push` of a 120-byte value, cut at its
+middle; the fragments are reliable, the first with the more flag, sequence
+numbers 0 and 1.
+
+### What a reader reports on it
+
+* the field document has `fragment_without_resolution` on 2 rows, `fragment` on 1
+  and `reassembled` on 1;
+* the census document's `unresolvable_fragments` is **2**, the number of rows that
+  say `fragment_without_resolution` (it counts frames, not chains).
+
+### Where the bytes came from
+
+The message is `push_build::build_push_literal` written by its codec. A Fragment
+is hand-walked by the reader and has no body codec (the MID vocabulary in
+`datagram_tests` records the same), so each is the transport header byte, built
+from `wire_const` names with the reliable and more flags, a one-byte sequence
+number and its piece. The handshake is the codecs' own Init and Open, and the
+container is `wz_capture::pcap::write`. Three tests in
+`crates/wz-capture/src/midsession_capture_fixture.rs` grade it:
+
+| test | what it settles |
+|---|---|
+| `the_tracked_midsession_capture_is_byte_identical_to_what_wz_emits` | the whole file equals what the encoders emit |
+| `the_tracked_midsession_capture_differs_between_its_flows_only_in_the_handshake` | the two flows carry the same fragment datagrams, flow A holds nothing but them, flow B's four datagrams before them are the handshake, and the two pieces join to the encoded message |
+| `the_tracked_midsession_capture_reaches_the_consumer_surface` | one flow reads `fragment_without_resolution` twice, the other `fragment` then `reassembled` with a `Push`, and the counts above agree |
+
+### Regenerating
+
+```sh
+cargo test -p wz-capture --features dissect --lib \
+  refresh_the_tracked_midsession_capture -- --ignored
+cargo test -p wz-capture --features dissect --lib midsession_capture
+```

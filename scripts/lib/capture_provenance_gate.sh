@@ -80,6 +80,17 @@ EXPECTED_COMPRESSED=(
 FILTER_COMPRESSED="compressed_capture"
 FEATURES_COMPRESSED="compression,dissect"
 
+# R3012 (open-debt item 809) — the THIRD tracked capture: one fragmented message
+# in two flows, with and without the handshake that resolves the sequence
+# numbers. Its last oracle reads the field document, hence `dissect`.
+EXPECTED_MIDSESSION=(
+    the_tracked_midsession_capture_is_byte_identical_to_what_wz_emits
+    the_tracked_midsession_capture_differs_between_its_flows_only_in_the_handshake
+    the_tracked_midsession_capture_reaches_the_consumer_surface
+)
+FILTER_MIDSESSION="midsession_capture"
+FEATURES_MIDSESSION="dissect"
+
 # Grade a `cargo test` transcript against the oracle names that follow it.
 # Separated from the run so `--selftest` can drive it over transcripts that never
 # came from cargo, which is the only way to show this gate can still fail.
@@ -160,7 +171,8 @@ selftest_set() {
 selftest() {
     selftest_set raweth_capture_fixture "${EXPECTED[@]}" || return 1
     selftest_set compressed_capture_fixture "${EXPECTED_COMPRESSED[@]}" || return 1
-    echo "capture-provenance SELFTEST: 4 arm(s) of 4 over each of 2 set(s) — all-ok passes; FAILED, absent and empty each refused"
+    selftest_set midsession_capture_fixture "${EXPECTED_MIDSESSION[@]}" || return 1
+    echo "capture-provenance SELFTEST: 4 arm(s) of 4 over each of 3 set(s) — all-ok passes; FAILED, absent and empty each refused"
     return 0
 }
 
@@ -197,4 +209,14 @@ if [[ $run_rc -ne 0 ]]; then
     tail -40 "$log" >&2
     exit 1
 fi
-grade_transcript "$log" "${EXPECTED_COMPRESSED[@]}"
+grade_transcript "$log" "${EXPECTED_COMPRESSED[@]}" || exit 1
+
+# The third, under `dissect` for its field-document oracle.
+(cd "$REPO_ROOT/crates" && cargo test -p "$CRATE" --features "$FEATURES_MIDSESSION" --lib "$FILTER_MIDSESSION") >"$log" 2>&1
+run_rc=$?
+if [[ $run_rc -ne 0 ]]; then
+    echo "  capture-provenance: \`cargo test -p ${CRATE} --features ${FEATURES_MIDSESSION} --lib ${FILTER_MIDSESSION}\` exited ${run_rc}" >&2
+    tail -40 "$log" >&2
+    exit 1
+fi
+grade_transcript "$log" "${EXPECTED_MIDSESSION[@]}"

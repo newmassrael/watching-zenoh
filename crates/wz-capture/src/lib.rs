@@ -196,6 +196,13 @@ pub use wz_session_core::passive_messages as messages;
 /// and one that read them would say `undecompressible` for both.
 #[cfg(all(test, feature = "compression", feature = "network-codecs"))]
 mod compressed_capture_fixture;
+/// R3012 (open-debt item 809) — the tracked capture of one fragmented message in
+/// two flows, one with the handshake the reader needs to resolve the sequence
+/// numbers and one without, and its oracle. Gated on `reassembly` because a
+/// fragment chain is only tracked there, and on `network-codecs` because the
+/// message it cuts is a `Push`.
+#[cfg(all(test, feature = "reassembly", feature = "network-codecs"))]
+mod midsession_capture_fixture;
 /// R311y617 (§1.1f) — the PAYLOAD sub-decoder: what is INSIDE a Put, judged
 /// against the encoding the sender declared rather than rendered on its word.
 ///
