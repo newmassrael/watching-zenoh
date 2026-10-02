@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later OR LicenseRef-watching-zenoh-Commercial
 // SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
 
-//! The owned wire types of the data plane, spelled at [`WireStorage`].
+//! The owned wire types of the data plane, spelled at
+//! [`WireStorage`](crate::network_message::WireStorage).
 //!
 //! # Why a module of aliases
 //!

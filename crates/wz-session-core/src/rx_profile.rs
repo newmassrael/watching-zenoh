@@ -6,7 +6,7 @@
 //!
 //! # What this is for
 //!
-//! A received frame is an [`RxBytes`], and since R2971 it can be a range of the
+//! A received frame is an [`RxBytes`](crate::link::RxBytes), and since R2971 it can be a range of the
 //! storage the link read into (a recycled buffer, a slot of the node's receive
 //! pool, a datagram quinn already refcounts) rather than a copy of it. The
 //! decode that follows used to undo that: `try_into_owned` builds every byte
@@ -14,14 +14,15 @@
 //! copied out of the frame it sat in, and the sample a subscriber was handed was
 //! copied again. SCE's origin seam (`generate --owned-origin`,
 //! `OriginStorage`) is the missing place to say where a slice came from, and
-//! this module is the profile that uses it: [`RxShared`] builds each byte field
+//! this module is the profile that uses it: [`RxShared`](crate::rx_profile::RxShared) builds each byte field
 //! as a second reference to the frame, so the payload of a received `Put` is
 //! the frame's own bytes for as long as anything holds it.
 //!
 //! Upstream's receiver does the same thing and calls it a `ZSlice`: an `Arc` on
 //! the storage plus a range (`commons/zenoh-buffers/src/zslice.rs` @
-//! `pub struct ZSlice {`). [`RxBytes`] is that type here and [`RxSharedBytes`]
-//! is the byte container of the owned message, one field wide.
+//! `pub struct ZSlice {`). [`RxBytes`](crate::link::RxBytes) is that type here and
+//! [`RxSharedBytes`](crate::rx_profile::RxSharedBytes) is the byte container of
+//! the owned message, one field wide.
 //!
 //! # What is shared and what is not
 //!
@@ -35,7 +36,7 @@
 //!
 //! A borrowed view can be built by hand: a default field is the empty slice, a
 //! test passes a literal, a builder encodes a message and decodes it back from a
-//! buffer of its own. [`OriginStorage::bytes_from`] is told to decide, so this
+//! buffer of its own. [`OriginStorage::bytes_from`](sce_forge_runtime::codec::OriginStorage::bytes_from) is told to decide, so this
 //! profile COPIES such a slice. The alternative, refusing it, would turn a
 //! message assembled outside a frame into a decode error for no reason the
 //! sender could act on; copying is what every byte field cost before.
