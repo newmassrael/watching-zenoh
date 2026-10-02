@@ -73,10 +73,10 @@ use wz_runtime_tokio::runtime_impl::TokioTime;
 use wz_runtime_tokio::serial_pipeline::wire_serial_stream;
 use wz_runtime_tokio::serial_pipeline::{drive_serial_handshake, SerialByteStream, SerialPort};
 use wz_runtime_tokio::session::{PublishOptions, TokioSession};
-use wz_runtime_tokio::session_glue::drive_session_until_terminal;
+use wz_runtime_tokio::session_glue::{drive_session_until_terminal, DriverOutcome, IterationEvent};
 use wz_runtime_tokio::session_open::{
     accept_and_open_session, bind_locator, initiate_and_open_session, AcceptConfig, BoundListener,
-    DialedLink, DEFAULT_OPEN_TICK_MS,
+    DialedLink, OpenedSession, DEFAULT_OPEN_TICK_MS,
 };
 #[cfg(all(unix, not(target_os = "macos")))]
 use wz_runtime_tokio::session_open::{accept_endpoint, AcceptedLink, AcceptedPeer};
@@ -128,38 +128,83 @@ fn phase(label: &str, what: &str) {
     eprintln!("serial_link_e2e[{label}]: {what}");
 }
 
-/// A Push published over a wz<->wz serial link reaches the peer's subscriber
-/// byte-exact. The body is generic over the stream so it is instantiated over a
-/// memory pair on every host and over a pty pair on a Unix.
-async fn wz_to_wz_handshakes_and_delivers_push_over(
-    label: &str,
-    mut end_init: impl SerialByteStream,
-    mut end_acc: impl SerialByteStream,
-) {
-    let payload: Vec<u8> = b"serial-push-byte-exact".to_vec();
-    phase(label, "streams in hand, link handshake next");
+/// Hand back a task's output, or end this test with the task's own panic.
+fn finished<T>(joined: Result<T, tokio::task::JoinError>) -> T {
+    match joined {
+        Ok(output) => output,
+        Err(e) if e.is_panic() => std::panic::resume_unwind(e.into_panic()),
+        Err(e) => panic!("an end's task did not run to completion: {e}"),
+    }
+}
 
-    // ── Phase 1: the serial-LINK handshake on both ends, over the whole
-    //    stream, BEFORE the zenoh transport. Initiator sends INIT, Responder
-    //    replies INIT|ACK; both must reach Connected. Bounded so a handshake
-    //    regression fails fast.
-    let (hs_init, hs_acc) = tokio::time::timeout(Duration::from_secs(5), async {
-        tokio::join!(
-            drive_serial_handshake(&mut end_init, SerialRole::Initiator),
-            drive_serial_handshake(&mut end_acc, SerialRole::Responder),
-        )
-    })
+/// Run two futures, each on a task of its own, and return both outputs.
+///
+/// The two ends of a serial pair must not share a polling thread. A flush on a
+/// serial stream is `tcdrain` (`mio-serial`'s `Write::flush`, which
+/// `tokio-serial`'s `poll_flush` calls from inside the poll), and `tcdrain` on a
+/// macOS pty returns only once the OTHER end has read what was written. Two
+/// futures under one `join!` are polled by one thread, so the end that flushes
+/// first blocks the thread its peer would be read on: the hosted macOS leg
+/// stood in exactly that call (`tcdrain` -> `ioctl`, every one of a five-second
+/// sample's frames) with the 5 s handshake bound unreached, because a timeout
+/// that shares the blocked thread cannot fire. On a Linux pty `tcdrain` returns
+/// at once, which is why this only ever showed on the host that needed it.
+///
+/// Real devices have this shape too: upstream's serial link flushes from async
+/// code the same way (`z-serial-0.3.1` @ `self.serial.flush().await?;`), and
+/// its two ends are two processes. The test must give each end the thread a
+/// process would have.
+async fn on_own_tasks<A, B>(a: A, b: B) -> (A::Output, B::Output)
+where
+    A: std::future::Future + Send + 'static,
+    A::Output: Send + 'static,
+    B: std::future::Future + Send + 'static,
+    B::Output: Send + 'static,
+{
+    let (a, b) = tokio::join!(tokio::spawn(a), tokio::spawn(b));
+    (finished(a), finished(b))
+}
+
+/// Phase 1: the serial-LINK handshake on both ends over the whole stream, BEFORE
+/// the zenoh transport. Initiator sends INIT, Responder replies INIT|ACK; both
+/// must reach Connected. Bounded so a handshake regression fails fast, and the
+/// bound can fire because the ends run on tasks of their own
+/// ([`on_own_tasks`]). Returns the streams, handshaked.
+async fn link_handshake<I, A>(mut end_init: I, mut end_acc: A) -> (I, A)
+where
+    I: SerialByteStream,
+    A: SerialByteStream,
+{
+    let ((hs_init, end_init), (hs_acc, end_acc)) = tokio::time::timeout(
+        Duration::from_secs(5),
+        on_own_tasks(
+            async move {
+                let r = drive_serial_handshake(&mut end_init, SerialRole::Initiator).await;
+                (r, end_init)
+            },
+            async move {
+                let r = drive_serial_handshake(&mut end_acc, SerialRole::Responder).await;
+                (r, end_acc)
+            },
+        ),
+    )
     .await
     .expect("serial link handshake completes within 5s");
     hs_init.expect("initiator link handshake reaches Connected");
     hs_acc.expect("responder link handshake reaches Connected");
-    phase(label, "link handshake done, transport open next");
+    (end_init, end_acc)
+}
 
-    // ── Phase 2: the zenoh transport open over the handshaked serial links,
-    //    driven concurrently (the 4-way handshake needs both sides
-    //    progressing). Uniform with TCP — the serial framing lives entirely
-    //    inside the wired drivers.
-    let acc_open = async {
+/// Phase 2: the zenoh transport open over the handshaked serial links, the two
+/// ends concurrent (the 4-way handshake needs both progressing) and each on a
+/// task of its own. Uniform with TCP: the serial framing lives entirely inside
+/// the wired drivers. Returns `(acceptor, initiator)`.
+async fn open_sessions<I, A>(end_init: I, end_acc: A) -> (OpenedSession, OpenedSession)
+where
+    I: SerialByteStream,
+    A: SerialByteStream,
+{
+    let acc_open = async move {
         let mut params = fixture_session_init_params();
         params.zid = vec![0x02; 4]; // distinct from the initiator
         accept_and_open_session(
@@ -175,7 +220,7 @@ async fn wz_to_wz_handshakes_and_delivers_push_over(
         .await
         .expect("acceptor reaches Established over serial")
     };
-    let init_open = async {
+    let init_open = async move {
         let mut params = fixture_session_init_params();
         params.zid = vec![0x01; 4];
         initiate_and_open_session(
@@ -191,11 +236,58 @@ async fn wz_to_wz_handshakes_and_delivers_push_over(
         .await
         .expect("initiator reaches Established over serial")
     };
-    let (mut opened_acc, mut opened_init) =
-        tokio::time::timeout(OPEN_BOUND, async { tokio::join!(acc_open, init_open) })
-            .await
-            .expect("both ends reach Established within the bound");
+    tokio::time::timeout(OPEN_BOUND, on_own_tasks(acc_open, init_open))
+        .await
+        .expect("both ends reach Established within the bound")
+}
 
+/// Drive one opened session on a task of its own until it ends.
+///
+/// The session moves in WHOLE. `let mut opened = opened;` is what makes the
+/// capture whole: Rust 2021 closure capture is per field, so a body that only
+/// named `opened.inbound`, `.actions`, `.engine` and `.clock` would take those
+/// four and leave `opened.writer_handle` behind to be dropped when this function
+/// returned. Dropping that token seals the writer's queue
+/// ([`OpenedSession::writer_handle`], R2423), and the session would end before
+/// its first byte.
+fn drive_on_own_task<F>(
+    opened: OpenedSession,
+    on_event: F,
+) -> tokio::task::JoinHandle<DriverOutcome>
+where
+    F: for<'e> FnMut(IterationEvent<'e>) + Send + 'static,
+{
+    let timeouts = SessionTimeouts::spec_defaults();
+    tokio::spawn(async move {
+        let mut opened = opened;
+        drive_session_until_terminal(
+            &mut opened.inbound,
+            &opened.actions,
+            &mut opened.engine,
+            None,
+            &opened.clock,
+            &timeouts,
+            on_event,
+        )
+        .await
+    })
+}
+
+/// A Push published over a wz<->wz serial link reaches the peer's subscriber
+/// byte-exact. The body is generic over the stream so it is instantiated over a
+/// memory pair on every host and over a pty pair on a Unix.
+async fn wz_to_wz_handshakes_and_delivers_push_over(
+    label: &str,
+    end_init: impl SerialByteStream,
+    end_acc: impl SerialByteStream,
+) {
+    let payload: Vec<u8> = b"serial-push-byte-exact".to_vec();
+    phase(label, "streams in hand, link handshake next");
+
+    let (end_init, end_acc) = link_handshake(end_init, end_acc).await;
+    phase(label, "link handshake done, transport open next");
+
+    let (opened_acc, opened_init) = open_sessions(end_init, end_acc).await;
     phase(label, "transport open done, drives and publish next");
 
     // ── Subscriber on the acceptor's observer; asserts the delivered payload
@@ -224,28 +316,11 @@ async fn wz_to_wz_handshakes_and_delivers_push_over(
         Arc::new(opened_init.clock),
     );
 
-    let timeouts = SessionTimeouts::spec_defaults();
     // Both sides driven continuously so steady state persists across the
-    // publish + delivery; select! drops the drives once the scenario observes
-    // the delivery.
-    let drive_acc = drive_session_until_terminal(
-        &mut opened_acc.inbound,
-        &opened_acc.actions,
-        &mut opened_acc.engine,
-        None,
-        &opened_acc.clock,
-        &timeouts,
-        |event| observer.dispatch_event(event),
-    );
-    let drive_init = drive_session_until_terminal(
-        &mut opened_init.inbound,
-        &opened_init.actions,
-        &mut opened_init.engine,
-        None,
-        &opened_init.clock,
-        &timeouts,
-        |_| {},
-    );
+    // publish + delivery, each on a task of its own ([`on_own_tasks`] says why);
+    // they are ended once the scenario observes the delivery.
+    let mut drive_acc = drive_on_own_task(opened_acc, move |event| observer.dispatch_event(event));
+    let mut drive_init = drive_on_own_task(opened_init, |_| {});
 
     let fired_probe = fired.clone();
     let scenario = async move {
@@ -267,10 +342,12 @@ async fn wz_to_wz_handshakes_and_delivers_push_over(
     };
 
     tokio::select! {
-        _ = drive_acc => panic!("acceptor drive loop ended unexpectedly"),
-        _ = drive_init => panic!("initiator drive loop ended unexpectedly"),
+        ended = &mut drive_acc => panic!("acceptor drive loop ended unexpectedly: {:?}", finished(ended)),
+        ended = &mut drive_init => panic!("initiator drive loop ended unexpectedly: {:?}", finished(ended)),
         _ = scenario => {}
     }
+    drive_acc.abort();
+    drive_init.abort();
     phase(label, "delivered, test body done");
 
     assert_eq!(
@@ -286,8 +363,11 @@ async fn wz_to_wz_over_serial_memory_handshakes_and_delivers_push() {
     wz_to_wz_handshakes_and_delivers_push_over("memory", end_init, end_acc).await;
 }
 
+// Four workers, not two, for a pty pair: each end's writer may be inside `tcdrain`
+// at once (see [`on_own_tasks`]), and a worker so held cannot read what would
+// release the other, so there must be workers left over for the readers.
 #[cfg(unix)]
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn wz_to_wz_over_serial_pty_handshakes_and_delivers_push() {
     // ── A connected async serial pair (two ends of one openpty link).
     phase("pty", "opening the pair");
@@ -320,8 +400,8 @@ async fn wz_to_wz_over_serial_pty_handshakes_and_delivers_push() {
 /// backend.
 #[cfg(feature = "transport-fragmentation")]
 async fn wz_to_wz_fragments_and_reassembles_an_oversize_put_over(
-    mut end_init: impl SerialByteStream,
-    mut end_acc: impl SerialByteStream,
+    end_init: impl SerialByteStream,
+    end_acc: impl SerialByteStream,
 ) {
     use wz_session_core::serial_link::SERIAL_MTU;
 
@@ -333,55 +413,10 @@ async fn wz_to_wz_fragments_and_reassembles_an_oversize_put_over(
         "payload must exceed one serial frame to force fragmentation"
     );
 
-    // ── Phase 1: serial-LINK handshake on both ends.
-    let (hs_init, hs_acc) = tokio::time::timeout(Duration::from_secs(5), async {
-        tokio::join!(
-            drive_serial_handshake(&mut end_init, SerialRole::Initiator),
-            drive_serial_handshake(&mut end_acc, SerialRole::Responder),
-        )
-    })
-    .await
-    .expect("serial link handshake completes within 5s");
-    hs_init.expect("initiator link handshake reaches Connected");
-    hs_acc.expect("responder link handshake reaches Connected");
-
-    // ── Phase 2: the zenoh transport open over the handshaked serial links.
-    let acc_open = async {
-        let mut params = fixture_session_init_params();
-        params.zid = vec![0x02; 4];
-        accept_and_open_session(
-            DialedLink::Serial {
-                stream: SerialPort::dialled(end_acc),
-                endpoint: link_endpoint(),
-            },
-            params,
-            TokioTime::new(),
-            Some(ITER_CAP),
-            DEFAULT_OPEN_TICK_MS,
-        )
-        .await
-        .expect("acceptor reaches Established over serial")
-    };
-    let init_open = async {
-        let mut params = fixture_session_init_params();
-        params.zid = vec![0x01; 4];
-        initiate_and_open_session(
-            DialedLink::Serial {
-                stream: SerialPort::dialled(end_init),
-                endpoint: link_endpoint(),
-            },
-            params,
-            TokioTime::new(),
-            Some(ITER_CAP),
-            DEFAULT_OPEN_TICK_MS,
-        )
-        .await
-        .expect("initiator reaches Established over serial")
-    };
-    let (mut opened_acc, mut opened_init) =
-        tokio::time::timeout(OPEN_BOUND, async { tokio::join!(acc_open, init_open) })
-            .await
-            .expect("both ends reach Established within the bound");
+    // ── Phase 1: serial-LINK handshake on both ends; Phase 2: the zenoh
+    //    transport open over the handshaked serial links.
+    let (end_init, end_acc) = link_handshake(end_init, end_acc).await;
+    let (opened_acc, opened_init) = open_sessions(end_init, end_acc).await;
 
     // ── Fragmentation precondition, asserted BY CONSTRUCTION (R311nw): the
     //    serial link MTU caps the negotiated TX budget to SERIAL_MTU even
@@ -427,25 +462,8 @@ async fn wz_to_wz_fragments_and_reassembles_an_oversize_put_over(
         Arc::new(opened_init.clock),
     );
 
-    let timeouts = SessionTimeouts::spec_defaults();
-    let drive_acc = drive_session_until_terminal(
-        &mut opened_acc.inbound,
-        &opened_acc.actions,
-        &mut opened_acc.engine,
-        None,
-        &opened_acc.clock,
-        &timeouts,
-        |event| observer.dispatch_event(event),
-    );
-    let drive_init = drive_session_until_terminal(
-        &mut opened_init.inbound,
-        &opened_init.actions,
-        &mut opened_init.engine,
-        None,
-        &opened_init.clock,
-        &timeouts,
-        |_| {},
-    );
+    let mut drive_acc = drive_on_own_task(opened_acc, move |event| observer.dispatch_event(event));
+    let mut drive_init = drive_on_own_task(opened_init, |_| {});
 
     let fired_probe = fired.clone();
     let scenario = async move {
@@ -464,10 +482,12 @@ async fn wz_to_wz_fragments_and_reassembles_an_oversize_put_over(
     };
 
     tokio::select! {
-        _ = drive_acc => panic!("acceptor drive loop ended unexpectedly"),
-        _ = drive_init => panic!("initiator drive loop ended unexpectedly"),
+        ended = &mut drive_acc => panic!("acceptor drive loop ended unexpectedly: {:?}", finished(ended)),
+        ended = &mut drive_init => panic!("initiator drive loop ended unexpectedly: {:?}", finished(ended)),
         _ = scenario => {}
     }
+    drive_acc.abort();
+    drive_init.abort();
 
     assert_eq!(
         fired.load(Ordering::SeqCst),
@@ -483,8 +503,9 @@ async fn wz_to_wz_over_serial_memory_fragments_and_reassembles_oversize_put() {
     wz_to_wz_fragments_and_reassembles_an_oversize_put_over(end_init, end_acc).await;
 }
 
+// Four workers for the reason the push test above gives.
 #[cfg(all(feature = "transport-fragmentation", unix))]
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn wz_to_wz_over_serial_pty_fragments_and_reassembles_oversize_put() {
     let (end_init, end_acc) = SerialStream::pair().expect("openpty serial pair");
     wz_to_wz_fragments_and_reassembles_an_oversize_put_over(end_init, end_acc).await;
