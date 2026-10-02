@@ -751,15 +751,18 @@ pub const DOCUMENT_HISTORY: &[DocumentShape] = &[
     // AN `id` THAT A NUMBER WOULD MISREAD IS A STRING.
     //
     // NO KEY NAME MOVES and nothing retires; the four lists are revision 15's,
-    // by name. What moves is the JSON TYPE of one value, which no axis of this
+    // by name. What moves is the JSON TYPE of five cells, which no axis of this
     // table declares, so this row is the whole notice (see fields revision 23).
     //
     // Every `id` this document writes is a `u64` read off the wire — a
     // declaration's, an interest request's, the unresolved alias a reference
-    // named — and so is `solicited_by`. Each is a bare number up to 2^53 - 1 and
-    // the same digits in a string above it. zenoh's own ids are 32-bit, so a
-    // value past the line is a peer that is not following the protocol, which
-    // is exactly the capture an analyzer is pointed at.
+    // named — and so is `solicited_by`. The five cells: `declarations[].id`, a
+    // declaration's `unresolved.id`, `declarations[].solicited_by` and
+    // `requests[].id` in the interests plane, and an unresolved alias's `id` in
+    // the keyexprs plane. Each is a bare number up to 2^53 - 1 and the same
+    // digits in a string above it. zenoh's own ids are 32-bit, so a value past
+    // the line is a peer that is not following the protocol, which is exactly the
+    // capture an analyzer is pointed at.
     DocumentShape {
         document: CENSUS,
         revision: 16,
@@ -1317,26 +1320,40 @@ pub const DOCUMENT_HISTORY: &[DocumentShape] = &[
     // A 64-BIT INTEGER THAT A NUMBER WOULD MISREAD IS A STRING.
     //
     // NO KEY NAME MOVES and nothing retires; the three lists below are revision
-    // 22's, by name. What moves is the JSON TYPE of one value, and that is an axis
+    // 22's, by name. What moves is the JSON TYPE of two cells, and that is an axis
     // this table has no way to declare: `keys` names keys, `families` closes the
     // strings a key can carry, `carries` says which keys a word brings. So, as for
     // revision 6, THIS ROW IS THE WHOLE NOTICE a consumer gets.
     //
-    // The `value` of a field whose `kind` is `uint` (and of one whose `kind` is
-    // `bits`, which can never reach the line) is a bare number up to 2^53 - 1 and
-    // the same digits in a string above it. A `uint` is a decoded protocol scalar
-    // and ranges over all of `u64`: a reader on doubles loses the low bits above
-    // 2^53 and a reader on `int64` falls back to its default above 2^63, and both
-    // say nothing. The line is 2^53 - 1 and not 2^63 because it has to be safe
-    // for the narrowest reader a consumer may have.
+    // The two cells, each a bare number up to 2^53 - 1 and the same digits in a
+    // string above it:
     //
-    // ⚠ A CONSUMER THAT READS `value` AS A NUMBER, pinned to 22 or earlier, keeps
-    // working until a field carries a value past the line, and then reads a string
-    // where it expected a number. That is the point: the alternative was a number
-    // it would have read wrongly. A consumer that wants the digits asks for the
-    // string when the cell is one; the same rule holds in the retention document
-    // (`oldest_ts_ns`, revision 2) and nowhere else, because no other document
-    // carries a `u64` the host cannot bound.
+    //   * the `value` of a field whose `kind` is `uint` (and of one whose `kind`
+    //     is `bits`, which takes the same door and can never reach the line: it is
+    //     at most one carrier byte). A `uint` is a decoded protocol scalar and
+    //     ranges over all of `u64`;
+    //   * a row's `sn.missing`, the sequence numbers a gap skipped. It is a
+    //     distance in the session's SN window, which is as wide as 2^63 at a
+    //     64-bit resolution, so no host limit bounds it.
+    //
+    // A reader on doubles loses the low bits above 2^53 and a reader on `int64`
+    // falls back to its default above 2^63, and both say nothing. The line is
+    // 2^53 - 1 and not 2^63 because it has to be safe for the narrowest reader a
+    // consumer may have.
+    //
+    // ⚠ A CONSUMER THAT READS EITHER CELL AS A NUMBER, pinned to 22 or earlier,
+    // keeps working until one carries a value past the line, and then reads a
+    // string where it expected a number. That is the point: the alternative was a
+    // number it would have read wrongly. The same rule holds in the census (16),
+    // the summary (5) and the retention document (2), each row naming its own
+    // cells; the header's integer paragraph lists all of them.
+    //
+    // ⚠ CORRECTED BY R3013: as R3012 landed it, this row named the `uint` value
+    // alone and said the rule held nowhere but retention. The writers moved
+    // `sn.missing` in the same commit (a consumer found the gap by reading
+    // `fields_json.rs`). The document's bytes did not change; this row did, and
+    // `json_integer_cell_gate.py` now derives every such cell from the writers and
+    // refuses a row or a header that does not name it.
     DocumentShape {
         document: FIELDS,
         revision: 23,
@@ -1413,7 +1430,7 @@ pub const DOCUMENT_HISTORY: &[DocumentShape] = &[
     // A WIRE-SOURCED `u64` THAT A NUMBER WOULD MISREAD IS A STRING.
     //
     // NO KEY NAME MOVES and nothing retires; the lists are revision 4's. The
-    // JSON TYPE of three values moves, and this table declares no axis for that,
+    // JSON TYPE of five cells moves, and this table declares no axis for that,
     // so this row is the whole notice (see fields revision 23): the `id` and
     // `solicited_by` of an interest, the `id` of a request and of an unresolved
     // alias, and the sequence group's `missing`. Each is a bare number up to
@@ -8039,8 +8056,9 @@ pub const RETENTION_R2_KEYS: &[&str] = RETENTION_R1_KEYS;
 
 /// The field document's key set at revision 23: revision 22's, by name.
 ///
-/// The revision moved the JSON type of one value (a `uint` field's `value`: a
-/// number, now a number or a string), not a key; see the row.
+/// The revision moved the JSON type of two cells (a `uint` field's `value` and a
+/// row's `sn.missing`: a number, now a number or a string), not a key; see the
+/// row.
 pub const FIELDS_R23_KEYS: &[&str] = FIELDS_R22_KEYS;
 
 /// The census document's key set at revision 16: revision 15's, by name.
@@ -8051,8 +8069,9 @@ pub const CENSUS_R16_KEYS: &[&str] = CENSUS_R15_KEYS;
 
 /// The summary document's key set at revision 5: revision 4's, by name.
 ///
-/// The revision moved the JSON type of three wire-sourced values, not a key; see
-/// the row.
+/// The revision moved the JSON type of five wire-sourced cells (an interest's
+/// `id` and `solicited_by`, a request's `id`, an unresolved alias's `id` and the
+/// sequence group's `missing`), not a key; see the row.
 pub const SUMMARY_R5_KEYS: &[&str] = SUMMARY_R4_KEYS;
 
 /// The three keys the envelope itself contributes to every document.
