@@ -1068,8 +1068,14 @@ def kill_tree(proc: subprocess.Popen[str]) -> None:
 STALL_SAMPLE_S = 5
 
 
+#: The process listing the stall diagnostics read. `pid` and `pgid` come first because
+#: `group_pids` and `group_rows` read the first two columns; `-ww` keeps BSD `ps` from
+#: cutting a command line at the window width.
+PS_LISTING = ["ps", "-ax", "-ww", "-o", "pid,pgid,ppid,stat,command"]
+
+
 def group_pids(ps_output: str, pgid: int) -> list[int]:
-    """The pids of process group `pgid`, from `ps -axo pid,pgid,command` output.
+    """The pids of process group `pgid`, from `PS_LISTING` output.
 
     The leg leads a group of its own (`spawn_leg`), so the group is cargo and the
     test binary it started. Pure so the selftest can drive it without a ps.
@@ -1080,6 +1086,22 @@ def group_pids(ps_output: str, pgid: int) -> list[int]:
         if len(parts) >= 2 and parts[0].isdigit() and parts[1].isdigit() and int(parts[1]) == pgid:
             pids.append(int(parts[0]))
     return pids
+
+
+def group_rows(ps_output: str, pgid: int) -> list[str]:
+    """The listing's header and the rows of process group `pgid`, nothing else.
+
+    The first stall log printed the whole machine's table, 500 lines of system
+    daemons around the two processes that mattered.
+    """
+    lines = ps_output.splitlines()
+    rows = [lines[0]] if lines and lines[0].split()[:1] == ["PID"] else []
+    keep = set(group_pids(ps_output, pgid))
+    for line in lines:
+        parts = line.split(None, 1)
+        if parts and parts[0].isdigit() and int(parts[0]) in keep:
+            rows.append(line)
+    return rows
 
 
 def stall_diagnostic_commands(host: str, pids: Sequence[int]) -> list[list[str]]:
@@ -1093,16 +1115,16 @@ def stall_diagnostic_commands(host: str, pids: Sequence[int]) -> list[list[str]]
 
     macOS: `sample` (a stack of every thread) and `lsof` (the open descriptors, a
     pty pair among them) for each process. Windows: the process and socket
-    tables, since no stack tool is installed on a hosted image. Linux: the process
-    listing. A host with less than a stack says so in the log instead of implying
-    one; `-ww` keeps BSD `ps` from cutting a command line at the window width.
+    tables, since no stack tool is installed on a hosted image. Elsewhere none:
+    the leg's process rows are printed first by `capture_stall` on every unix
+    host, and a host with less than a stack says so in the log instead of
+    implying one.
     """
-    listing = ["ps", "-ax", "-ww", "-o", "pid,ppid,pgid,stat,command"]
     if host == "windows":
         return [["tasklist", "/V"], ["netstat", "-ano"]]
     if host != "macos":
-        return [listing]
-    cmds: list[list[str]] = [listing]
+        return []
+    cmds: list[list[str]] = []
     for pid in pids:
         cmds.append(["sample", str(pid), str(STALL_SAMPLE_S), "-file", f"/tmp/wz-stall-{pid}.txt"])
         cmds.append(["lsof", "-p", str(pid)])
@@ -1118,15 +1140,17 @@ def capture_stall(proc: subprocess.Popen[str], out: TextIO) -> None:
     if os.name != "nt":
         try:
             listing = subprocess.run(
-                ["ps", "-ax", "-ww", "-o", "pid,pgid,command"],
-                capture_output=True, text=True, timeout=20, check=False,
+                PS_LISTING, capture_output=True, text=True, timeout=20, check=False
             ).stdout
             pids = group_pids(listing, proc.pid)
+            out.write("  the leg's process group:\n")
+            for row in group_rows(listing, proc.pid):
+                out.write(f"    {row}\n")
         except (OSError, subprocess.SubprocessError) as e:
             out.write(f"  (could not list the process group: {e})\n")
     cmds = stall_diagnostic_commands(host, pids)
     if not cmds:
-        out.write(f"  (no stall diagnostic is defined for {host})\n")
+        out.write(f"  (no stack diagnostic is defined for {host}; the rows above are all there is)\n")
     for cmd in cmds:
         out.write(f"  $ {' '.join(cmd)}\n")
         out.flush()
@@ -1822,24 +1846,30 @@ def selftest() -> int:
 
     # stall diagnostics: which pids are the leg's, and what each host is asked to show
     listing = (
-        "  PID  PGID COMMAND\n"
-        "  100   100 cargo test\n"
-        "  101   100 /x/deps/serial_link_e2e-1 --nocapture\n"
-        "  102   200 an unrelated process\n"
-        "  103   1001 a group whose id merely starts with 100\n"
+        "  PID  PGID  PPID STAT COMMAND\n"
+        "  100   100     1 S<s  cargo test\n"
+        "  101   100   100 S<   /x/deps/serial_link_e2e-1 --nocapture\n"
+        "  102   200     1 Ss   an unrelated process\n"
+        "  103  1001     1 Ss   a group whose id merely starts with 100\n"
         "not a row\n"
     )
     expect("the leg's group", group_pids(listing, 100), [100, 101])
     expect("no group", group_pids(listing, 999), [])
+    expect(
+        "only the leg's rows are printed, under the header",
+        group_rows(listing, 100),
+        [listing.splitlines()[0], listing.splitlines()[1], listing.splitlines()[2]],
+    )
+    expect("a group with no process prints its header only", group_rows(listing, 999), [listing.splitlines()[0]])
+    expect("the listing is not cut at the window width", "-ww" in PS_LISTING, True)
     mac = stall_diagnostic_commands("macos", [100, 101])
-    expect("macos samples every process of the group", [c[0] for c in mac], ["ps", "sample", "lsof", "sample", "lsof"])
+    expect("macos samples every process of the group", [c[0] for c in mac], ["sample", "lsof", "sample", "lsof"])
     expect(
         "macos sample is bounded and named",
-        mac[1],
+        mac[0],
         ["sample", "100", str(STALL_SAMPLE_S), "-file", "/tmp/wz-stall-100.txt"],
     )
-    expect("the listing is not cut at the window width", "-ww" in mac[0], True)
-    expect("linux lists processes only", [c[0] for c in stall_diagnostic_commands("linux", [100])], ["ps"])
+    expect("linux has the group rows and no stack tool", stall_diagnostic_commands("linux", [100]), [])
     expect(
         "windows shows the process and socket tables",
         [c[0] for c in stall_diagnostic_commands("windows", [])],
