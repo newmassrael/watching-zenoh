@@ -163,7 +163,15 @@ jobs:
       # of the tests a host can run at all (the Linux-only `127.0.0.2` leg is one
       # that a macOS loopback has no address for), and the step becomes a leg of the
       # matrix gate, with its counts pinned, once there is something to pin.
+      #
+      # Two things about reading it. A step with `continue-on-error` reports
+      # `conclusion: success` whatever it did (its `outcome` is the truth, and the
+      # jobs API does not carry it), so the verdict is printed as a line of its own
+      # and written to the job summary. And it runs after a leg that failed
+      # (`!cancelled()`): the first run skipped it on macOS behind the serial stall
+      # and so said nothing about macOS multicast.
       - name: multicast on this host, observed (gates nothing yet)
+        if: ${{ !cancelled() }}
         timeout-minutes: 12
         continue-on-error: true
         shell: bash
@@ -182,9 +190,12 @@ jobs:
               print(f"IGMP join 224.0.0.224 via INADDR_ANY: FAILED ({exc})")
           PY
           cd crates
-          status=0
+          scouting=PASS
+          pubsub=PASS
           cargo test -p wz-runtime-tokio --features scouting-active,transport-link-tls \
-            --test scouting_multicast_loopback -- --ignored --nocapture || status=1
+            --test scouting_multicast_loopback -- --ignored --nocapture || scouting=FAIL
           cargo test -p wz-runtime-tokio --features transport-multicast \
-            --test multicast_pubsub_loopback -- --ignored --nocapture || status=1
-          exit "$status"
+            --test multicast_pubsub_loopback -- --ignored --nocapture || pubsub=FAIL
+          echo "multicast-probe on ${RUNNER_OS}: scouting ${scouting}, pubsub ${pubsub}"
+          echo "multicast-probe on ${RUNNER_OS}: scouting ${scouting}, pubsub ${pubsub}" >> "$GITHUB_STEP_SUMMARY"
+          [ "$scouting" = PASS ] && [ "$pubsub" = PASS ]
