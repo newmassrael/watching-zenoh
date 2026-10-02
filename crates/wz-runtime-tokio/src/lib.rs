@@ -2906,6 +2906,14 @@ impl UdpDriver {
         // socket is built through socket2 and adopted by tokio post-bind.
         let raw = Socket::new(plan.domain(), Type::DGRAM, Some(Protocol::UDP))?;
         raw.set_reuse_address(true)?;
+        // `SO_REUSEPORT` is a unix socket option and socket2 has no setter for
+        // it elsewhere: the first hosted Windows build of `transport-multicast`
+        // failed to compile on exactly this call. Upstream sets it under
+        // `target_family = "unix"` only
+        // (`io/zenoh-links/zenoh-link-udp/src/multicast.rs` @ `.set_reuse_port(true)`);
+        // on Windows `SO_REUSEADDR` alone is what lets several sockets bind the
+        // group port.
+        #[cfg(unix)]
         raw.set_reuse_port(true)?;
         // tokio requires the std socket to be non-blocking before adoption.
         raw.set_nonblocking(true)?;
