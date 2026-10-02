@@ -1056,8 +1056,8 @@ mod tests {
             };
             // Set the inner MsgPut body's payload to the test bytes.
             if let wz_codecs::push::PushVariant::CodecZenohMsgPut(ref mut put) = push.body {
-                put.payload_len = payload.len() as u64;
-                put.payload = payload;
+                put.payload_len = Some(payload.len() as u64);
+                put.payload = Some(payload);
             }
             push.try_into_owned().unwrap()
         }

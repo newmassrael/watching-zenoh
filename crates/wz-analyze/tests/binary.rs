@@ -1821,8 +1821,8 @@ fn reply(request_id: u64, suffix: &'static str, payload: &'static [u8]) -> Vec<u
         keyexpr: keyexpr(suffix),
         body: wz_codecs::response::ResponseVariant::CodecZenohReply(wz_codecs::reply::Reply {
             body: wz_codecs::reply::ReplyVariant::CodecZenohMsgPut(wz_codecs::msg_put::MsgPut {
-                payload_len: payload.len() as u64,
-                payload,
+                payload_len: Some(payload.len() as u64),
+                payload: Some(payload),
                 ..Default::default()
             }),
             ..Default::default()
@@ -5370,8 +5370,8 @@ fn aliased_reply(
         keyexpr: aliased_keyexpr(id, suffix),
         body: wz_codecs::response::ResponseVariant::CodecZenohReply(wz_codecs::reply::Reply {
             body: wz_codecs::reply::ReplyVariant::CodecZenohMsgPut(wz_codecs::msg_put::MsgPut {
-                payload_len: payload.len() as u64,
-                payload,
+                payload_len: Some(payload.len() as u64),
+                payload: Some(payload),
                 ..Default::default()
             }),
             ..Default::default()

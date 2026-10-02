@@ -1461,8 +1461,8 @@ fn carried_payload(
         (
             k,
             p.encoding.as_ref(),
-            p.payload.as_slice(),
-            carries_shm_marker(p.extensions.as_deref()),
+            crate::agg::put_bytes(p),
+            crate::agg::put_payload_is_elsewhere(p),
         )
     }
     match message {
@@ -1590,8 +1590,8 @@ pub(crate) mod tests_support {
                     schema_len: None,
                     schema: None,
                 }),
-                payload_len: payload.len() as u64,
-                payload,
+                payload_len: Some(payload.len() as u64),
+                payload: Some(payload),
                 ..Default::default()
             }),
             ..Default::default()
@@ -1634,8 +1634,8 @@ pub(crate) mod tests_support {
                     schema_len: None,
                     schema: None,
                 }),
-                payload_len: payload.len() as u64,
-                payload,
+                payload_len: Some(payload.len() as u64),
+                payload: Some(payload),
                 ..Default::default()
             }),
             ..Default::default()
@@ -1697,18 +1697,54 @@ pub(crate) mod tests_support {
                 wz_codecs::ext_unit::ExtUnit::default(),
             ),
         };
-        push_with_body_ext(keyexpr, encoding_id, descriptor, marker)
+        // The marker makes the payload SLICED, which is how a descriptor reaches
+        // the wire: one slice of kind SHM_PTR whose bytes are the descriptor. The
+        // inline pair is absent, and the encoder would refuse a Put that kept it.
+        wz_codecs::push::Push {
+            header: wz_codecs::push::Push::default().header | wz_codecs::wire_const::FLAG_N_N,
+            keyexpr: fx::sender_space(0, Some(keyexpr)),
+            body: wz_codecs::push::PushVariant::CodecZenohMsgPut(wz_codecs::msg_put::MsgPut {
+                header: wz_codecs::msg_put::MsgPut::default().header
+                    | wz_codecs::wire_const::FLAG_Z_PUT_E
+                    | wz_codecs::wire_const::FLAG_Z_PUT_Z,
+                encoding: Some(wz_codecs::encoding::Encoding {
+                    packed_id: (encoding_id as u32) << 1,
+                    schema_len: None,
+                    schema: None,
+                }),
+                extensions: Some(core::iter::once(marker).collect()),
+                slice_count: Some(1),
+                slices: Some(
+                    core::iter::once(wz_codecs::zbuf_slice::ZbufSlice {
+                        kind: wz_session_core::put_payload::SLICE_KIND_SHM_PTR,
+                        len: descriptor.len() as u64,
+                        bytes: descriptor,
+                    })
+                    .collect(),
+                ),
+                ..Default::default()
+            }),
+            ..Default::default()
+        }
+        .encode_to_vec()
     }
 
-    /// R311y622 (§1.1o) — THE DISCRIMINATOR'S fixture: a body ext that shares
-    /// the SHM marker's 4-BIT ID FIELD and is a DIFFERENT extension, told apart
-    /// by its encoding bits exactly as zenoh tells `QoS` from `QoSLink`.
+    /// R311y622 (§1.1o) — THE DISCRIMINATOR'S fixture: an `Err` whose body ext
+    /// shares the SHM marker's 4-BIT ID FIELD and is a DIFFERENT extension, told
+    /// apart by its encoding bits exactly as zenoh tells `QoS` from `QoSLink`.
     ///
     /// A ZBuf at id `0x2` with no mandatory bit. Nothing in this fixture is an
     /// SHM descriptor, and a matcher that read the id column alone would call
     /// it one — silencing a payload this plane could have judged, which is the
     /// R311y505 defect pointed the other way.
-    pub(crate) fn push_with_foreign_body_ext(
+    ///
+    /// It is an `Err` and not a `Put` since the Put's payload layout became a
+    /// function of its chain: a Put picks sliced or inline by the 4-bit id of
+    /// its extensions, exactly as upstream's decoder does
+    /// (`commons/zenoh-codec/src/zenoh/put.rs` @ `match iext::eid(ext) {`), so a
+    /// Put cannot carry a different extension at that id. The `Err` carrier has
+    /// no such gate, and there the identity rule is still the whole question.
+    pub(crate) fn err_with_foreign_body_ext(
         keyexpr: &'static str,
         encoding_id: u16,
         payload: &[u8],
@@ -1723,32 +1759,21 @@ pub(crate) mod tests_support {
                 },
             ),
         };
-        push_with_body_ext(keyexpr, encoding_id, payload, foreign)
-    }
-
-    /// A `Push` carrying `payload` under a declared encoding, with one entry on
-    /// its zenoh-body ext chain. ONE builder for both fixtures above, so the two
-    /// captures the discriminator compares differ by that entry and nothing
-    /// else.
-    fn push_with_body_ext(
-        keyexpr: &'static str,
-        encoding_id: u16,
-        payload: &[u8],
-        entry: wz_codecs::ext_entry::ExtEntry<'_>,
-    ) -> Vec<u8> {
-        wz_codecs::push::Push {
-            header: wz_codecs::push::Push::default().header | wz_codecs::wire_const::FLAG_N_N,
+        wz_codecs::response::Response {
+            header: wz_codecs::response::Response::default().header
+                | wz_codecs::wire_const::FLAG_N_N,
+            request_id: 7,
             keyexpr: fx::sender_space(0, Some(keyexpr)),
-            body: wz_codecs::push::PushVariant::CodecZenohMsgPut(wz_codecs::msg_put::MsgPut {
-                header: wz_codecs::msg_put::MsgPut::default().header
-                    | wz_codecs::wire_const::FLAG_Z_PUT_E
-                    | wz_codecs::wire_const::FLAG_Z_PUT_Z,
+            body: wz_codecs::response::ResponseVariant::CodecZenohErr(wz_codecs::err::Err {
+                header: wz_codecs::err::Err::default().header
+                    | wz_codecs::wire_const::FLAG_Z_ERR_E
+                    | wz_codecs::wire_const::FLAG_Z_ERR_Z,
                 encoding: Some(wz_codecs::encoding::Encoding {
                     packed_id: (encoding_id as u32) << 1,
                     schema_len: None,
                     schema: None,
                 }),
-                extensions: Some(core::iter::once(entry).collect()),
+                extensions: Some(core::iter::once(foreign).collect()),
                 payload_len: payload.len() as u64,
                 payload,
                 ..Default::default()
@@ -3538,7 +3563,7 @@ mod census_tests {
     fn an_extension_sharing_the_id_field_is_not_the_shm_marker() {
         let c = census(&[(
             true,
-            tests_support::push_with_foreign_body_ext("shm/topic", ID_JSON, &[0x01, 0x00, 0x2A]),
+            tests_support::err_with_foreign_body_ext("shm/topic", ID_JSON, &[0x01, 0x00, 0x2A]),
         )]);
 
         assert_eq!(
@@ -3753,8 +3778,8 @@ mod census_tests {
             header: wz_codecs::push::Push::default().header | wz_codecs::wire_const::FLAG_N_N,
             keyexpr: fx::sender_space(0, Some(keyexpr)),
             body: wz_codecs::push::PushVariant::CodecZenohMsgPut(wz_codecs::msg_put::MsgPut {
-                payload_len: payload.len() as u64,
-                payload,
+                payload_len: Some(payload.len() as u64),
+                payload: Some(payload),
                 ..Default::default()
             }),
             ..Default::default()
@@ -3922,8 +3947,8 @@ mod census_tests {
                     schema_len: None,
                     schema: None,
                 }),
-                payload_len: 2,
-                payload: b"hi",
+                payload_len: Some(2),
+                payload: Some(b"hi"),
                 ..Default::default()
             }),
             ..Default::default()

@@ -1,0 +1,47 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  SPDX-License-Identifier: AGPL-3.0-or-later OR LicenseRef-watching-zenoh-Commercial
+  SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
+-->
+<!-- One element of a SLICED payload: the codec `msg_put` repeats when its
+     extension chain carries the shared-memory marker.
+
+     Upstream lays a Put's payload out one of two ways. Without the marker
+     it is a length and that many bytes. With it, the payload is a count of
+     slices followed by that many elements, and each element is a kind, a
+     length and that many bytes (`commons/zenoh-codec/src/core/zbuf.rs` @
+     `impl<W> WCodec<&ZBuf, &mut W> for Zenoh080Sliced<$bound>`). Two kinds
+     share the one element shape, which is why one codec is enough
+     (`commons/zenoh-codec/src/core/zbuf.rs` @ `const RAW: u8 = 0;` and
+     `const SHM_PTR: u8 = 1;`):
+
+       kind 0  RAW      the bytes are payload bytes, as an unsliced Put
+                        would have carried them.
+       kind 1  SHM_PTR  the bytes are a serialized shared-memory buffer
+                        descriptor (`ShmBufInfo`), not payload: the payload
+                        lives in the segment the descriptor names.
+
+     `kind` is written as a variable-length integer. Upstream writes it as
+     one byte through the bounded codec, and the two are the same byte for
+     every value a slice can have (0 and 1); a decoder that meets any other
+     value has met a kind this codec does not know, and the host refuses it
+     rather than guessing.
+
+     `bytes` carries `sce:max-size="256"` like the unsliced `payload` it
+     replaces: the no-alloc owned projection keeps that as its inline
+     capacity and the alloc projection is unbounded, so a RAW slice is no
+     tighter than the payload was. A descriptor is far shorter than that.
+
+     Imported by `msg_put.scxml`, which gates its two layouts on the
+     extension chain with `extensions.has(0x2)` (SCE's chain-membership
+     predicate) and repeats this element `slice_count` times. -->
+<scxml xmlns="http://www.w3.org/2005/07/scxml"
+       xmlns:sce="http://sce.dev/ext"
+       sce:kind="codec" sce:default-endian="big" name="zbuf_slice">
+  <datamodel>
+    <sce:field id="kind"  sce:type="uint16" sce:byte="0" sce:bit-size="vle"/>
+    <sce:field id="len"   sce:type="uint64" sce:byte="1" sce:bit-size="vle"/>
+    <sce:field id="bytes" sce:type="bytes"  sce:byte="2" sce:bit-size="length-ref"
+               sce:length-field="len" sce:max-size="256"/>
+  </datamodel>
+</scxml>

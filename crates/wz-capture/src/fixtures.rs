@@ -154,8 +154,8 @@ fn push(keyexpr: Wireexpr<'static>, payload: &'static [u8]) -> Vec<u8> {
     wz_codecs::push::Push {
         keyexpr,
         body: wz_codecs::push::PushVariant::CodecZenohMsgPut(wz_codecs::msg_put::MsgPut {
-            payload_len: payload.len() as u64,
-            payload,
+            payload_len: Some(payload.len() as u64),
+            payload: Some(payload),
             ..Default::default()
         }),
         ..Default::default()

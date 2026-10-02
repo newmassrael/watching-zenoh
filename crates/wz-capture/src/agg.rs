@@ -2079,6 +2079,43 @@ pub(crate) fn source_delay_ms(
 #[cfg(feature = "network-codecs")]
 pub(crate) struct SourceAhead;
 
+/// The bytes of a `Put`'s payload slot, read through the one place that knows
+/// the two layouts. A Put that uses the inline layout has them; a sliced Put (the
+/// shared-memory layout) has none that this observer can size, so it answers an
+/// empty slice and the caller reads [`put_payload_is_elsewhere`] to know the
+/// emptiness is not a measurement.
+#[cfg(feature = "network-codecs")]
+pub(crate) fn put_bytes(put: &wz_codecs::msg_put::MsgPutOwned) -> &[u8] {
+    wz_session_core::put_payload::inline_bytes(put).unwrap_or(&[])
+}
+
+/// Whether a `Put`'s application bytes are NOT in its payload slot: the chain
+/// carries the shared-memory marker, or the codec read the sliced layout.
+///
+/// Both are asked because they are two readings of one fact that can part. The
+/// marker predicate here matches an extension's IDENTITY, mandatory bit and
+/// encoding included; the codec picks the layout by the extension's 4-bit id
+/// alone, which is also how upstream's Put decoder dispatches
+/// (`commons/zenoh-codec/src/zenoh/put.rs` @ `match iext::eid(ext) {`). On a Put
+/// the two agree for every extension upstream would accept, and when they
+/// disagree the codec's reading is the one the payload was laid out by, so a
+/// sliced Put is never reported as a measured payload of zero bytes.
+#[cfg(feature = "network-codecs")]
+pub(crate) fn put_payload_is_elsewhere(put: &wz_codecs::msg_put::MsgPutOwned) -> bool {
+    wz_session_core::put_payload::is_sliced(put) || carries_shm_marker(put.extensions.as_deref())
+}
+
+/// What one `Put`'s payload slot is worth to the totals: the inline bytes
+/// measured, or the shared-memory answer ([`PayloadSize::Elsewhere`]).
+#[cfg(feature = "network-codecs")]
+fn measured_put(put: &wz_codecs::msg_put::MsgPutOwned) -> PayloadSize {
+    if put_payload_is_elsewhere(put) {
+        PayloadSize::Elsewhere
+    } else {
+        PayloadSize::Measured(put_bytes(put).len() as u64)
+    }
+}
+
 /// R311y639 (§4.30) — what one `MsgPut` / `Err` slot is worth to the totals.
 ///
 /// The pair the carrier arms hand to [`KeyexprCounts::record_payload`], so the
@@ -2243,10 +2280,7 @@ pub(crate) fn classify(
                 PushOwnedVariant::CodecZenohMsgPut(put)
                 | PushOwnedVariant::Default { body: put, .. } => {
                     counts.puts = 1;
-                    counts.record_payload(measured_payload(
-                        put.payload.as_slice(),
-                        put.extensions.as_deref(),
-                    ));
+                    counts.record_payload(measured_put(put));
                     RecordKind::Put
                 }
                 PushOwnedVariant::CodecZenohMsgDel(_) => {
@@ -2261,10 +2295,7 @@ pub(crate) fn classify(
             let kind = match &r.body {
                 RequestOwnedVariant::CodecZenohMsgPut(put) => {
                     counts.puts = 1;
-                    counts.record_payload(measured_payload(
-                        put.payload.as_slice(),
-                        put.extensions.as_deref(),
-                    ));
+                    counts.record_payload(measured_put(put));
                     RecordKind::Put
                 }
                 RequestOwnedVariant::CodecZenohMsgDel(_) => {
@@ -2322,10 +2353,7 @@ pub(crate) fn classify(
                         // (`zenoh-protocol-1.5.0/src/zenoh/reply.rs:53`) and the
                         // `Reply` itself declares no shm ext, so the chain to
                         // ask is the one this arm already holds.
-                        counts.record_payload(measured_payload(
-                            put.payload.as_slice(),
-                            put.extensions.as_deref(),
-                        ));
+                        counts.record_payload(measured_put(put));
                     }
                     RecordKind::Reply
                 }
@@ -3113,14 +3141,44 @@ pub(crate) mod tests {
         ext: BodyExt,
     ) -> Vec<u8> {
         use wz_codecs::wire_const::{FLAG_N_N, FLAG_Z_ERR_Z, FLAG_Z_PUT_Z};
+        // A Put picks its payload layout by the 4-bit id of the extensions in its
+        // chain (`msg_put.scxml`, `extensions.has(0x2)`), as upstream's decoder
+        // does, so a Put cannot carry "a different extension at the marker's id":
+        // upstream and the codec both read that as the marker. The fixture
+        // exists for the carriers where the marker is a convention of the
+        // payload slot and not a layout, which is the Err carrier.
+        assert!(
+            ext != BodyExt::ForeignAtTheSameId || matches!(carrier, Carrier::Err),
+            "an extension at the shared-memory marker's id on a Put IS the marker on the \
+             wire; the foreign-extension fixture is only representable on the Err carrier"
+        );
         let entry = ext.entry();
         let z_put = if entry.is_some() { FLAG_Z_PUT_Z } else { 0 };
-        let put = wz_codecs::msg_put::MsgPut {
-            header: wz_codecs::msg_put::MsgPut::default().header | z_put,
-            extensions: entry.clone().map(|e| core::iter::once(e).collect()),
-            payload_len: payload.len() as u64,
-            payload,
-            ..Default::default()
+        let put = if ext == BodyExt::ShmMarker {
+            // The marker makes the payload sliced: one slice of kind SHM_PTR
+            // whose bytes stand in for the descriptor, and no inline pair.
+            wz_codecs::msg_put::MsgPut {
+                header: wz_codecs::msg_put::MsgPut::default().header | z_put,
+                extensions: entry.clone().map(|e| core::iter::once(e).collect()),
+                slice_count: Some(1),
+                slices: Some(
+                    core::iter::once(wz_codecs::zbuf_slice::ZbufSlice {
+                        kind: wz_session_core::put_payload::SLICE_KIND_SHM_PTR,
+                        len: payload.len() as u64,
+                        bytes: payload,
+                    })
+                    .collect(),
+                ),
+                ..Default::default()
+            }
+        } else {
+            wz_codecs::msg_put::MsgPut {
+                header: wz_codecs::msg_put::MsgPut::default().header | z_put,
+                extensions: entry.clone().map(|e| core::iter::once(e).collect()),
+                payload_len: Some(payload.len() as u64),
+                payload: Some(payload),
+                ..Default::default()
+            }
         };
         let kexpr = sender_space(0, Some(keyexpr));
         match carrier {
@@ -3195,16 +3253,27 @@ pub(crate) mod tests {
     fn each_carrier_puts_three_distinct_records_on_the_wire() {
         for (carrier, name) in CARRIERS {
             let shm = record_with_body_ext(carrier, "demo/shm", b"descriptor", BodyExt::ShmMarker);
-            let foreign = record_with_body_ext(
-                carrier,
-                "demo/shm",
-                b"descriptor",
-                BodyExt::ForeignAtTheSameId,
-            );
             let plain = record_with_body_ext(carrier, "demo/shm", b"descriptor", BodyExt::None);
-            assert_ne!(shm, foreign, "{name}: the two exts must differ on the wire");
             assert_ne!(shm, plain, "{name}: the marker must reach the wire");
-            for (bytes, which) in [(&shm, "shm"), (&foreign, "foreign"), (&plain, "plain")] {
+            let mut records = alloc::vec![(&shm, "shm"), (&plain, "plain")];
+            // The third record exists only where it is representable: on a Put
+            // an extension at the marker's id IS the marker (see the fixture).
+            let foreign = matches!(carrier, Carrier::Err).then(|| {
+                record_with_body_ext(
+                    carrier,
+                    "demo/shm",
+                    b"descriptor",
+                    BodyExt::ForeignAtTheSameId,
+                )
+            });
+            if let Some(foreign) = &foreign {
+                assert_ne!(
+                    &shm, foreign,
+                    "{name}: the two exts must differ on the wire"
+                );
+                records.push((foreign, "foreign"));
+            }
+            for (bytes, which) in records {
                 let t = aggregate_datagrams(&[(true, bytes.clone())]);
                 assert_eq!(t.records(), 1, "{name}/{which}: one record");
                 assert!(
@@ -3370,7 +3439,14 @@ pub(crate) mod tests {
     /// `ext_id` where it means `ext_eid`.
     #[test]
     fn a_body_ext_sharing_the_markers_id_field_leaves_the_payload_measured() {
-        for (carrier, name) in CARRIERS {
+        // Only the Err carrier can hold it: on a Put an extension at the marker's
+        // id is read as the marker by the codec and by upstream's decoder alike
+        // (`msg_put.scxml` picks the layout by the 4-bit id), so there is no Put
+        // on the wire that has "a different extension at that id".
+        for (carrier, name) in CARRIERS
+            .into_iter()
+            .filter(|(c, _)| matches!(c, Carrier::Err))
+        {
             let foreign = aggregate_datagrams(&[(
                 true,
                 record_with_body_ext(
@@ -3429,14 +3505,14 @@ pub(crate) mod tests {
                 },
                 "{name}: the descriptor's own length is not the payload's"
             );
+            // The control that holds on every carrier: ten real bytes with no
+            // marker decide yes. The foreign-extension record that used to stand
+            // here cannot be built on a Put (see `record_with_body_ext`), and
+            // what this leg guards is that the unknown stays scoped to the one
+            // record whose size is unavailable.
             assert_eq!(
                 one(
-                    record_with_body_ext(
-                        carrier,
-                        "demo/shm",
-                        b"descriptor",
-                        BodyExt::ForeignAtTheSameId
-                    ),
+                    record_with_body_ext(carrier, "demo/shm", b"descriptor", BodyExt::None),
                     "bytes == 10"
                 )
                 .matched,

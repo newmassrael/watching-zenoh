@@ -97,10 +97,14 @@ async fn echo_demo_msg_put_round_trip() {
             timestamp: None,
             encoding: None,
             extensions: None,
-            payload_len: 5,
-            payload: &[0xCA, 0xFE, 0xBA, 0xBE, 0x42],
+            payload_len: Some(5),
+            payload: Some(&[0xCA, 0xFE, 0xBA, 0xBE, 0x42]),
+            slice_count: None,
+            slices: None,
         };
-        let bytes = original.encode_to_vec();
+        let bytes = original
+            .encode_to_vec()
+            .expect("a Put in the inline layout encodes");
         driver
             .send(&TxFrame { bytes: &bytes }, Reliability::Reliable)
             .await
@@ -115,7 +119,11 @@ async fn echo_demo_msg_put_round_trip() {
 
     assert_eq!(received.header, original.header, "header round-trip");
     assert_eq!(received.payload_len, original.payload_len, "payload_len");
-    assert_eq!(received.payload, original.payload, "payload bytes");
+    assert_eq!(
+        wz_session_core::put_payload::inline_bytes(&received),
+        original.payload,
+        "payload bytes"
+    );
     assert!(
         received.timestamp.is_none()
             && received.encoding.is_none()

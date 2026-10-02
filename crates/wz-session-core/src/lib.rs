@@ -777,6 +777,17 @@ pub mod initial_sn;
 #[cfg(all(feature = "alloc", feature = "codec-push"))]
 pub mod push_build;
 
+/// The payload of a Put body and the one rule that picks between its two wire
+/// layouts (a length and bytes, or the slices a shared-memory Put carries).
+/// `MsgPutOwned` holds the four fields of both layouts; every site that builds
+/// or reads a Put payload goes through here so the layouts cannot drift. Gated
+/// on either Put-carrying codec: a Push body and a Reply body both hold one.
+#[cfg(all(
+    feature = "alloc",
+    any(feature = "codec-push", feature = "codec-response")
+))]
+pub mod put_payload;
+
 /// Shared codec-agnostic `Wireexpr` constructors (`literal_wireexpr`) — the
 /// SSOT a forwarder normalizes an aliased keyexpr through before it crosses a
 /// link without the inbound alias table (c3c-3 B1). Relocated out of

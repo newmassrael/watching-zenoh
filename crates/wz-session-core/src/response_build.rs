@@ -28,7 +28,6 @@ use wz_codecs::err::ErrOwned;
 use wz_codecs::ext_entry::{ExtEntryOwned, ExtEntryOwnedVariant};
 use wz_codecs::ext_zbuf::ExtZbufOwned;
 use wz_codecs::msg_del::MsgDelOwned;
-use wz_codecs::msg_put::MsgPutOwned;
 use wz_codecs::reply::{ReplyOwned, ReplyOwnedVariant};
 use wz_codecs::response::{ResponseOwned, ResponseOwnedVariant};
 use wz_codecs::wireexpr::{WireexprOwned, WireexprOwnedVariant};
@@ -420,14 +419,7 @@ fn reply_body(payload: &[u8]) -> Result<ResponseOwnedVariant, CodecError> {
         header: 0x04,
         consolidation: None,
         extensions: None,
-        body: ReplyOwnedVariant::CodecZenohMsgPut(MsgPutOwned {
-            header: 0x01,
-            timestamp: None,
-            encoding: None,
-            extensions: None,
-            payload_len: payload.len() as u64,
-            payload: owned_bytes(payload)?,
-        }),
+        body: ReplyOwnedVariant::CodecZenohMsgPut(crate::put_payload::inline(payload)?),
     }))
 }
 
@@ -1371,8 +1363,11 @@ mod tests {
                 match &reply.body {
                     ReplyOwnedVariant::CodecZenohMsgPut(put) => {
                         assert_eq!(put.header, 0x01);
-                        assert_eq!(put.payload_len, 11);
-                        assert_eq!(put.payload.as_slice(), b"hello-reply");
+                        assert_eq!(put.payload_len, Some(11));
+                        assert_eq!(
+                            crate::put_payload::inline_bytes(put),
+                            Some(&b"hello-reply"[..])
+                        );
                     }
                     _ => panic!("Reply.body must be CodecZenohMsgPut"),
                 }

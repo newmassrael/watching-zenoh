@@ -6408,8 +6408,8 @@ mod tests {
                     schema_len: None,
                     schema: None,
                 }),
-                payload_len: payload.len() as u64,
-                payload,
+                payload_len: Some(payload.len() as u64),
+                payload: Some(payload),
                 ..Default::default()
             }),
             ..Default::default()
@@ -7103,8 +7103,8 @@ mod tests {
                     ),
                 },
                 body: wz_codecs::push::PushVariant::CodecZenohMsgPut(wz_codecs::msg_put::MsgPut {
-                    payload_len: payload.len() as u64,
-                    payload,
+                    payload_len: Some(payload.len() as u64),
+                    payload: Some(payload),
                     ..Default::default()
                 }),
                 ..Default::default()
@@ -8147,8 +8147,8 @@ mod tests {
                     schema_len: None,
                     schema: None,
                 }),
-                payload_len: payload.len() as u64,
-                payload,
+                payload_len: Some(payload.len() as u64),
+                payload: Some(payload),
                 ..Default::default()
             }),
             ..Default::default()

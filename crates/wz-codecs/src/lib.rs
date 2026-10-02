@@ -352,6 +352,17 @@ pub mod ext_envelope {
     ));
 }
 
+// The element of a sliced payload: what `msg_put` repeats when its extension
+// chain carries the shared-memory marker. A leaf, so it is declared before the
+// module that imports it.
+pub mod zbuf_slice {
+    codec_alloc_prelude!();
+    include!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../out/wz-codecs/zbuf_slice.rs"
+    ));
+}
+
 pub mod msg_put {
     codec_alloc_prelude!();
     include!(concat!(

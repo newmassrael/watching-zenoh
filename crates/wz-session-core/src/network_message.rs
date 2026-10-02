@@ -497,12 +497,18 @@ mod chain_saturation_tests {
     /// if the chain saturates — so an unguarded parse SUCCEEDS with the wrong
     /// answer instead of failing. A fixture whose overflow byte was
     /// implausible would prove only that the codec noticed a truncated read.
+    ///
+    /// The leading extensions' ids start at 5, not 1. Id 2 is the shared-memory
+    /// marker, and a Put whose chain carries it lays its payload out as slices,
+    /// so a chain of ids 1, 2, 3 reads the payload as a slice count and the
+    /// fixture would fail for a reason that is not the one under test. The
+    /// terminating id stays 3: it is the plausible byte the control relies on.
     fn push_with_put_exts(ext_count: usize) -> Vec<u8> {
         let mut wire = alloc::vec![wire_const::N_MID_PUSH, 0x01];
         // MsgPut header: MID 0x01 plus Z, since the chain is present.
         wire.push(0x01 | 0x80);
         for i in 1..ext_count {
-            wire.push(0x80 | (i as u8));
+            wire.push(0x80 | (4 + i as u8));
         }
         wire.push(0x03);
         wire.extend_from_slice(&[0x03, 0xAA, 0xBB, 0xCC]);
@@ -521,7 +527,10 @@ mod chain_saturation_tests {
         match &msgs[0] {
             NetworkMessage::Push(p) => match &p.body {
                 wz_codecs::push::PushOwnedVariant::CodecZenohMsgPut(put) => {
-                    assert_eq!(put.payload.as_ref(), &[0xAAu8, 0xBB, 0xCC]);
+                    assert_eq!(
+                        crate::put_payload::inline_bytes(put),
+                        Some(&[0xAAu8, 0xBB, 0xCC][..])
+                    );
                     assert_eq!(
                         put.extensions.as_ref().map_or(0, |e| e.len()),
                         crate::ext_chain::NETWORK_EXT_CHAIN_DEPTH

@@ -126,10 +126,14 @@ async fn echo_msg_put_udp_round_trip() {
             timestamp: None,
             encoding: None,
             extensions: None,
-            payload_len: 3,
-            payload: &[0x11, 0x22, 0x33],
+            payload_len: Some(3),
+            payload: Some(&[0x11, 0x22, 0x33]),
+            slice_count: None,
+            slices: None,
         };
-        let bytes = original.encode_to_vec();
+        let bytes = original
+            .encode_to_vec()
+            .expect("a Put in the inline layout encodes");
         // Tiny grace so the subscriber's recv_from is ready; UDP
         // is connectionless, so a too-early send would be silently
         // dropped (no kernel buffer set up yet on the listener).
@@ -145,6 +149,9 @@ async fn echo_msg_put_udp_round_trip() {
     let original = publisher.await.expect("publisher join");
     let received = subscriber.await.expect("subscriber join");
     assert_eq!(received.header, original.header);
-    assert_eq!(received.payload, original.payload);
+    assert_eq!(
+        wz_session_core::put_payload::inline_bytes(&received),
+        original.payload
+    );
     assert_eq!(received.payload_len, original.payload_len);
 }

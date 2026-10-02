@@ -941,7 +941,8 @@ fn inbound_push_aliased_in_our_space(
             ),
         },
         body: wz_codecs::push::PushVariant::CodecZenohMsgPut(wz_codecs::msg_put::MsgPut {
-            payload,
+            payload_len: Some(payload.len() as u64),
+            payload: Some(payload),
             ..Default::default()
         }),
         ..wz_codecs::push::Push::default()

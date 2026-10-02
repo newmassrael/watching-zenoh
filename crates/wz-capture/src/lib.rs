@@ -7238,8 +7238,8 @@ mod datagram_tests {
                     zid_len: ZID.len() as u64,
                     zid: &ZID,
                 }),
-                payload_len: payload.len() as u64,
-                payload,
+                payload_len: Some(payload.len() as u64),
+                payload: Some(payload),
                 ..Default::default()
             }),
             ..Default::default()
@@ -7261,8 +7261,8 @@ mod datagram_tests {
             header: wz_codecs::push::Push::default().header | n_flag,
             keyexpr,
             body: wz_codecs::push::PushVariant::CodecZenohMsgPut(wz_codecs::msg_put::MsgPut {
-                payload_len: payload.len() as u64,
-                payload,
+                payload_len: Some(payload.len() as u64),
+                payload: Some(payload),
                 ..Default::default()
             }),
             ..Default::default()
@@ -9329,10 +9329,20 @@ mod datagram_tests {
         // three lines had spelled since R311y613. R311y615 named the constant
         // and left the fixtures writing the number; a constant with one
         // consumer is a naming exercise, not a single source.
+        // A bare `Put::default()` names no payload layout and the encoder refuses
+        // it (the payload is gated on the extension chain, `msg_put.scxml`), so
+        // the two records that hold a Put say it: an inline payload of no bytes,
+        // which is what the default used to mean.
+        let empty_put = || wz_codecs::msg_put::MsgPut {
+            payload_len: Some(0),
+            payload: Some(&[]),
+            ..Default::default()
+        };
         let push = wz_codecs::push::Push {
             // N: the keyexpr carries a suffix.
             header: wz_codecs::push::Push::default().header | FLAG_N_N,
             keyexpr: literal("census/push"),
+            body: wz_codecs::push::PushVariant::CodecZenohMsgPut(empty_put()),
             ..Default::default()
         }
         .encode_to_vec();
@@ -9347,6 +9357,10 @@ mod datagram_tests {
             header: wz_codecs::response::Response::default().header | FLAG_N_N,
             request_id: 1,
             keyexpr: literal("census/response"),
+            body: wz_codecs::response::ResponseVariant::CodecZenohReply(wz_codecs::reply::Reply {
+                body: wz_codecs::reply::ReplyVariant::CodecZenohMsgPut(empty_put()),
+                ..Default::default()
+            }),
             ..Default::default()
         }
         .encode_to_vec();

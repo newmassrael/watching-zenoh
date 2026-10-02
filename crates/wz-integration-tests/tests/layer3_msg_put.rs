@@ -92,10 +92,13 @@ fn layer3_msg_put_no_flags_payload_variants() {
             timestamp: None,
             encoding: None,
             extensions: None,
-            payload_len: payload.len() as u64,
-            payload: &payload,
+            payload_len: Some(payload.len() as u64),
+            payload: Some(&payload),
+            slice_count: None,
+            slices: None,
         }
-        .encode_to_vec();
+        .encode_to_vec()
+        .expect("a Put in the inline layout encodes");
         let pico_bytes = zenoh_pico_encode_put_no_flags(&payload);
         assert_eq!(
             wz_bytes,
@@ -115,10 +118,13 @@ fn layer3_msg_put_empty_payload_yields_header_and_zero_vle() {
         timestamp: None,
         encoding: None,
         extensions: None,
-        payload_len: 0,
-        payload: &[],
+        payload_len: Some(0),
+        payload: Some(&[]),
+        slice_count: None,
+        slices: None,
     }
-    .encode_to_vec();
+    .encode_to_vec()
+    .expect("a Put in the inline layout encodes");
     let pico = zenoh_pico_encode_put_no_flags(&[]);
     assert_eq!(wz, pico);
     assert_eq!(wz, vec![MID_Z_PUT, 0x00], "empty-PUT canonical form");

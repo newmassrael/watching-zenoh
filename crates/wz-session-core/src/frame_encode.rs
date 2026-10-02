@@ -1159,6 +1159,23 @@ mod tests {
     /// header byte (T_MID_FRAME | parent_flags) with the
     /// `Frame.wire()` body (VLE(sn) + payload). With reliable=true
     /// the FLAG_T_FRAME_R bit appears in the header byte.
+    /// A `Push::default()` whose Put carries an explicit, empty payload.
+    ///
+    /// A bare default is no longer an encodable Put: the payload is gated on the
+    /// extension chain (`msg_put.scxml`), so `payload_len` and `payload` are
+    /// `None` until a caller says which layout the Put uses, and the encoder
+    /// refuses a Put that names neither. An empty inline payload is what the
+    /// default used to mean, so these tests say it.
+    #[cfg(feature = "codec-push")]
+    fn empty_payload_push() -> wz_codecs::push::PushOwned {
+        let mut push = Push::default();
+        if let wz_codecs::push::PushVariant::CodecZenohMsgPut(put) = &mut push.body {
+            put.payload_len = Some(0);
+            put.payload = Some(&[]);
+        }
+        push.try_into_owned().unwrap()
+    }
+
     #[cfg(feature = "codec-push")]
     #[test]
     fn encode_frame_with_push_emits_transport_header_plus_frame_body() {
@@ -1166,12 +1183,11 @@ mod tests {
         // the transport-envelope header byte and the Frame body
         // shape. Push::default()'s wire bytes are independently
         // pinned by layer3_push.rs's byte-equiv test.
-        let push = Push::default().try_into_owned().unwrap();
+        let push = empty_payload_push();
         let push_bytes = push.wire();
 
         // Reliable Frame at sn=0.
-        let wire_reliable =
-            encode_frame_with_push(0, Push::default().try_into_owned().unwrap(), true);
+        let wire_reliable = encode_frame_with_push(0, empty_payload_push(), true);
         assert_eq!(
             wire_reliable[0],
             wire_const::FLAG_T_FRAME_R | wire_const::T_MID_FRAME,
@@ -1187,8 +1203,7 @@ mod tests {
         );
 
         // Best-effort Frame: same shape minus FLAG_T_FRAME_R.
-        let wire_best_effort =
-            encode_frame_with_push(0, Push::default().try_into_owned().unwrap(), false);
+        let wire_best_effort = encode_frame_with_push(0, empty_payload_push(), false);
         assert_eq!(
             wire_best_effort[0],
             wire_const::T_MID_FRAME,
@@ -1206,7 +1221,7 @@ mod tests {
     #[test]
     fn encode_frame_with_push_carries_vle_sn_across_widths() {
         for sn in [0u64, 1, 127, 128, 16383, 16384, 1_000_000] {
-            let wire = encode_frame_with_push(sn, Push::default().try_into_owned().unwrap(), true);
+            let wire = encode_frame_with_push(sn, empty_payload_push(), true);
             // Round-trip through parse_inbound to recover the
             // sn — it carries us through both the transport-header
             // byte decode AND the Frame.sn VLE decode.

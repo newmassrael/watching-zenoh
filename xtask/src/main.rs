@@ -60,6 +60,7 @@ const CODECS: &[&str] = &[
     "ext_unit",
     "ext_zint",
     "ext_zbuf",
+    "zbuf_slice",
     "crc32",
     "serial_envelope",
     "cobs_encode",

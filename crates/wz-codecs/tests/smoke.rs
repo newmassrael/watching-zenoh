@@ -31,10 +31,31 @@ use sce_forge_runtime::codec::SceCursor;
 use wz_codecs::msg_del::MsgDel;
 use wz_codecs::msg_put::MsgPut;
 
+/// A default Put names neither payload layout, and the encoder refuses it.
+///
+/// The payload is gated on the extension chain (`extensions.has(0x2)`), so
+/// `payload_len` and `payload` are `None` until a caller says the Put is inline
+/// and the slice fields are `None` until it says the Put is sliced. A Put that
+/// says neither is two descriptions of nothing, not an empty payload, and the
+/// encoder turns it away before writing a byte instead of guessing a layout.
+#[test]
+fn a_default_msg_put_names_no_payload_layout_and_is_refused() {
+    let put = MsgPut::default();
+    assert!(
+        put.encode_to_vec().is_err(),
+        "a Put with neither payload pair given must not encode"
+    );
+}
+
 #[test]
 fn msg_put_default_encode_decode_roundtrip() {
-    let put = MsgPut::default();
-    let encoded = put.encode_to_vec();
+    // The default with the one thing it lacks: an explicit, empty inline payload.
+    let put = MsgPut {
+        payload_len: Some(0),
+        payload: Some(&[]),
+        ..MsgPut::default()
+    };
+    let encoded = put.encode_to_vec().expect("an inline Put encodes");
     assert!(
         !encoded.is_empty(),
         "Default MsgPut encode produced 0 bytes — at minimum the \
@@ -90,9 +111,19 @@ fn reply_default_encode_decode_roundtrip() {
     // the ext-chain absent; the always-present push_body variant
     // defaults to MsgPut (declared default arm) whose header is 0x01
     // baked-in.
-    use wz_codecs::reply::Reply;
+    use wz_codecs::reply::{Reply, ReplyVariant};
 
-    let reply = Reply::default();
+    // The default body is a Put that names no payload layout, which the encoder
+    // refuses (see `a_default_msg_put_names_no_payload_layout_and_is_refused`),
+    // so the body carries an explicit, empty inline payload.
+    let reply = Reply {
+        body: ReplyVariant::CodecZenohMsgPut(MsgPut {
+            payload_len: Some(0),
+            payload: Some(&[]),
+            ..MsgPut::default()
+        }),
+        ..Reply::default()
+    };
     let encoded = reply.encode_to_vec();
     assert!(
         !encoded.is_empty(),

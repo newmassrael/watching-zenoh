@@ -1,4 +1,4 @@
-// SCE-MAP: msg_put:95 :: _forge_body
+// SCE-MAP: msg_put:116 :: _forge_body
 
 // SCE Forge: Auto-generated from Extended SCXML (sce:kind="codec")
 // Runtime: none
@@ -25,6 +25,7 @@ use sce_forge_runtime::heapless::Vec as HeaplessVec;
 use super::timestamp::Timestamp;
 use super::encoding::Encoding;
 use super::ext_entry::ExtEntry;
+use super::zbuf_slice::ZbufSlice;
 
 // pub API: codecs are intended for cross-crate consumption (SCE_FORGE.md
 // §6 codec). The kind-agnostic conformance harness only references a
@@ -37,8 +38,10 @@ pub struct MsgPut<'a> {
     pub timestamp: Option<Timestamp<'a>>,
     pub encoding: Option<Encoding<'a>>,
     pub extensions: Option<HeaplessVec<ExtEntry<'a>, 8>>,
-    pub payload_len: u64,
-    pub payload: &'a [u8],
+    pub payload_len: Option<u64>,
+    pub payload: Option<&'a [u8]>,
+    pub slice_count: Option<u32>,
+    pub slices: Option<HeaplessVec<ZbufSlice<'a>, 4>>,
 }
 
 // RFC variant-default-uniformity: at least one field's
@@ -57,6 +60,8 @@ impl<'a> Default for MsgPut<'a> {
             extensions: Default::default(),
             payload_len: Default::default(),
             payload: Default::default(),
+            slice_count: Default::default(),
+            slices: Default::default(),
         }
     }
 }
@@ -130,13 +135,38 @@ impl<'a> MsgPut<'a> {
         } else {
             None
         };
-        let payload_len = cursor.read_vle_u64()?;
-        let payload = {
-            let _n = payload_len as usize;
+        let _has_extensions_2 = extensions.as_ref().is_some_and(|_c| _c.iter().any(|_e| u64::from(_e.ext_id()) == 2u64));
+        let payload_len = if !_has_extensions_2 {
+            let _v = cursor.read_vle_u64()?;
+            Some(_v)
+        } else {
+            None
+        };
+        let payload = if !_has_extensions_2 {
+            let _n = payload_len.unwrap() as usize;
             let raw = cursor.peek_slice(_n)?;
             let _v = raw;
             cursor.advance(_n)?;
-            _v
+            Some(_v)
+        } else {
+            None
+        };
+        let slice_count = if _has_extensions_2 {
+            let _v = cursor.read_vle_u32()?;
+            Some(_v)
+        } else {
+            None
+        };
+        let slices = if _has_extensions_2 {
+            let _n = slice_count.expect("co-gating: count present-if matches repeat");
+            let mut _vec: HeaplessVec<ZbufSlice<'a>, 4> = HeaplessVec::new();
+            for _ in 0.._n {
+                _vec.push(ZbufSlice::decode(cursor)?)
+                    .map_err(|_| CodecError::TooManyElements)?;
+            }
+            Some(_vec)
+        } else {
+            None
         };
         Ok(Self {
             header,
@@ -145,6 +175,8 @@ impl<'a> MsgPut<'a> {
             extensions,
             payload_len,
             payload,
+            slice_count,
+            slices,
         })
     }
 
@@ -202,13 +234,42 @@ impl<'a> MsgPut<'a> {
     /// against which `VecSink::new` reserves capacity in the
     /// `encode_to_vec` facade, and the natural reserve hint for
     /// caller-owned `SliceSink` allocations.
-    pub const MAX_ENCODED_BYTES: usize = 1114;
+    pub const MAX_ENCODED_BYTES: usize = 2191;
 
     /// Encode `self` into the caller-owned sink. Returns
     /// `CodecError::BufferOverflow` from a bounded sink when the
     /// destination has insufficient remaining capacity; growable
     /// sinks (e.g. `VecSink`) are effectively infallible.
     pub fn encode<S: SceSink>(&self, w: &mut S) -> Result<(), CodecError> {
+        let _has_extensions_2 = self.extensions.as_ref().is_some_and(|_c| _c.iter().any(|_e| u64::from(_e.ext_id()) == 2u64));
+        if !_has_extensions_2 {
+            if self.payload_len.is_none() {
+                return Err(CodecError::PresentIfMismatch);
+            }
+        } else if self.payload_len.is_some() {
+            return Err(CodecError::PresentIfMismatch);
+        }
+        if !_has_extensions_2 {
+            if self.payload.is_none() {
+                return Err(CodecError::PresentIfMismatch);
+            }
+        } else if self.payload.is_some() {
+            return Err(CodecError::PresentIfMismatch);
+        }
+        if _has_extensions_2 {
+            if self.slice_count.is_none() {
+                return Err(CodecError::PresentIfMismatch);
+            }
+        } else if self.slice_count.is_some() {
+            return Err(CodecError::PresentIfMismatch);
+        }
+        if _has_extensions_2 {
+            if self.slices.is_none() {
+                return Err(CodecError::PresentIfMismatch);
+            }
+        } else if self.slices.is_some() {
+            return Err(CodecError::PresentIfMismatch);
+        }
         // Streaming cursor encode (SSOT selection: `needs_streaming`).
         // Mirrors the streaming decode: every field appends its own bytes
         // in declaration order through the per-field encode blocks, so a
@@ -230,29 +291,42 @@ impl<'a> MsgPut<'a> {
                 _e.encode(w)?;
             }
         }
-        w.write_vle_u64(self.payload_len)?;
-        w.write_bytes(self.payload)?;
+        if let Some(_v) = self.payload_len {
+        w.write_vle_u64(_v)?;
+        }
+        if let Some(_v) = &self.payload {
+            w.write_bytes(_v)?;
+        }
+        if let Some(_v) = self.slice_count {
+        w.write_vle_u32(_v)?;
+        }
+        if let Some(_list) = &self.slices {
+            for _e in _list {
+                _e.encode(w)?;
+            }
+        }
         Ok(())
     }
 
     /// Heap-backed convenience facade. Pre-reserves
     /// `MAX_ENCODED_BYTES` so the worst-case write path performs at
     /// most one allocation, then delegates to `encode` over a
-    /// `VecSink`. Returns the freshly-encoded byte vector. Callers
-    /// targeting zero-alloc hot paths should call `encode` directly
-    /// against a caller-owned sink.
+    /// `VecSink`. Returns the freshly-encoded byte vector, or the
+    /// `CodecError::PresentIfMismatch` `encode` refuses a message with
+    /// when a field's presence disagrees with the `sce:present-if`
+    /// that gates it. Callers targeting zero-alloc hot paths should
+    /// call `encode` directly against a caller-owned sink.
     ///
     /// Gated on the `alloc` feature — `VecSink` lives behind the
     /// same gate (see `backends/rust/forge-runtime/src/codec.rs`). MCU /
     /// `no_std` builds without `alloc` only see the sink-based
     /// primary `encode`.
     #[cfg(feature = "alloc")]
-    pub fn encode_to_vec(&self) -> Vec<u8> {
+    pub fn encode_to_vec(&self) -> Result<Vec<u8>, CodecError> {
         let mut _sce_v: Vec<u8> = Vec::with_capacity(Self::MAX_ENCODED_BYTES);
         let mut _sce_sink = VecSink::new(&mut _sce_v);
-        self.encode(&mut _sce_sink)
-            .expect("VecSink is infallible");
-        _sce_v
+        self.encode(&mut _sce_sink)?;
+        Ok(_sce_v)
     }
 }
 
@@ -290,6 +364,7 @@ impl<'a> MsgPut<'a> {
 use super::timestamp::TimestampOwned;
 use super::encoding::EncodingOwned;
 use super::ext_entry::ExtEntryOwned;
+use super::zbuf_slice::ZbufSliceOwned;
 // Same pub-API policy as the borrowed view above: the owned mirror and its
 // projections are cross-crate surface, and which of them a given in-repo
 // fixture happens to call says nothing about their value.
@@ -300,8 +375,10 @@ pub struct MsgPutOwned<S: ::sce_forge_runtime::codec::CodecStorage = ::sce_forge
     pub timestamp: Option<TimestampOwned<S>>,
     pub encoding: Option<EncodingOwned<S>>,
     pub extensions: Option<S::List<ExtEntryOwned<S>, 16>>,
-    pub payload_len: u64,
-    pub payload: S::Bytes<256>,
+    pub payload_len: Option<u64>,
+    pub payload: Option<S::Bytes<256>>,
+    pub slice_count: Option<u32>,
+    pub slices: Option<S::List<ZbufSliceOwned<S>, 4>>,
 }
 
 #[allow(dead_code)]
@@ -349,7 +426,9 @@ impl<'a> MsgPut<'a> {
             encoding: self.encoding.map(|_v| _v.try_into_owned_in::<S>()).transpose()?,
             extensions: self.extensions.map(|_v| ::sce_forge_runtime::codec::try_collect_list(_v, |_e| _e.try_into_owned_in::<S>())).transpose()?,
             payload_len: self.payload_len,
-            payload: <S::Bytes<256> as ::sce_forge_runtime::codec::SceByteBuf>::from_slice(self.payload)?,
+            payload: self.payload.map(<S::Bytes<256> as ::sce_forge_runtime::codec::SceByteBuf>::from_slice).transpose()?,
+            slice_count: self.slice_count,
+            slices: self.slices.map(|_v| ::sce_forge_runtime::codec::try_collect_list(_v, |_e| _e.try_into_owned_in::<S>())).transpose()?,
         })
     }
 
@@ -378,7 +457,9 @@ impl<S: ::sce_forge_runtime::codec::CodecStorage> MsgPutOwned<S> {
             encoding: self.encoding.as_ref().map(|_v| _v.as_borrowed()),
             extensions: self.extensions.as_ref().map(|_l| ::sce_forge_runtime::codec::try_project_bounded(_l, |_e| Ok(_e.as_borrowed()))).transpose()?,
             payload_len: self.payload_len,
-            payload: ::sce_forge_runtime::codec::SceByteBuf::as_slice(&self.payload),
+            payload: self.payload.as_ref().map(::sce_forge_runtime::codec::SceByteBuf::as_slice),
+            slice_count: self.slice_count,
+            slices: self.slices.as_ref().map(|_l| ::sce_forge_runtime::codec::try_project_bounded(_l, |_e| Ok(_e.as_borrowed()))).transpose()?,
         })
     }
 

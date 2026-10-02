@@ -993,8 +993,8 @@ pub(crate) mod tests {
             keyexpr,
             body: wz_codecs::request::RequestVariant::CodecZenohMsgPut(
                 wz_codecs::msg_put::MsgPut {
-                    payload_len: payload.len() as u64,
-                    payload,
+                    payload_len: Some(payload.len() as u64),
+                    payload: Some(payload),
                     ..Default::default()
                 },
             ),
@@ -1017,8 +1017,8 @@ pub(crate) mod tests {
             body: wz_codecs::response::ResponseVariant::CodecZenohReply(wz_codecs::reply::Reply {
                 body: wz_codecs::reply::ReplyVariant::CodecZenohMsgPut(
                     wz_codecs::msg_put::MsgPut {
-                        payload_len: payload.len() as u64,
-                        payload,
+                        payload_len: Some(payload.len() as u64),
+                        payload: Some(payload),
                         ..Default::default()
                     },
                 ),

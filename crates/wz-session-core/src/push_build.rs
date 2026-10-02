@@ -93,21 +93,15 @@ use wz_codecs::ext_zint::ExtZint;
 /// `wz_codecs::push::Push`; principled exemption from the
 /// signature-stability sweep per `feedback_signature_stability`).
 pub fn build_push_literal(keyexpr_suffix: &str, value: &[u8]) -> Result<PushOwned, CodecError> {
-    let payload_len = value.len() as u64;
     Ok(PushOwned {
         // `N_MID_PUSH | N_flag(0x20)` — M flag derives from the
         // WireexprLocal arm at encode time (push.rs:189).
         header: wire_const::N_MID_PUSH | 0x20,
         keyexpr: literal_wireexpr(keyexpr_suffix)?,
         extensions: None,
-        body: PushOwnedVariant::CodecZenohMsgPut(MsgPutOwned {
-            header: 0x01,
-            timestamp: None,
-            encoding: None,
-            extensions: None,
-            payload_len,
-            payload: crate::codec_owned::owned_bytes(value)?,
-        }),
+        // The bare Put header, no optional field, the application bytes in the
+        // inline payload layout.
+        body: PushOwnedVariant::CodecZenohMsgPut(crate::put_payload::inline(value)?),
     })
 }
 
@@ -171,7 +165,6 @@ pub fn build_push_aliased(
     );
     let suffix_len = suffix.map(|s| s.len() as u64);
     let suffix_string = suffix.map(crate::codec_owned::owned_string).transpose()?;
-    let payload_len = value.len() as u64;
     // Push.header.N (bit 5, 0x20) is the "suffix carrier present"
     // flag: set when the WireexprLocal carries a non-None suffix,
     // clear for a pure-aliased Push (`suffix=None`). The peer's
@@ -192,14 +185,7 @@ pub fn build_push_aliased(
             }),
         },
         extensions: None,
-        body: PushOwnedVariant::CodecZenohMsgPut(MsgPutOwned {
-            header: 0x01,
-            timestamp: None,
-            encoding: None,
-            extensions: None,
-            payload_len,
-            payload: crate::codec_owned::owned_bytes(value)?,
-        }),
+        body: PushOwnedVariant::CodecZenohMsgPut(crate::put_payload::inline(value)?),
     })
 }
 
@@ -605,15 +591,12 @@ fn build_msg_put_with_meta(
     source_info: Option<&crate::sample::SourceInfo>,
     attachment: Option<&[u8]>,
 ) -> Result<MsgPutOwned, CodecError> {
-    let payload_len = payload.len() as u64;
     let extensions = build_body_extensions(source_info, attachment, PushBodyKind::Put)?;
     let mut put = MsgPutOwned {
-        header: 0x01,
         timestamp: gated_timestamp_field(timestamp)?,
         encoding: gated_encoding_field(encoding)?,
         extensions,
-        payload_len,
-        payload: crate::codec_owned::owned_bytes(payload)?,
+        ..crate::put_payload::inline(payload)?
     };
     // `MsgPutOwned` is read-only (no `set_*` write accessors —
     // those live on the borrowed view per the owned-encode-omitted
@@ -712,20 +695,21 @@ fn build_msg_put_shm(
     attachment: Option<&[u8]>,
 ) -> Result<MsgPutOwned, CodecError> {
     let descriptor_bytes = crate::extshm::encode_shm_descriptor(descriptor);
-    let payload_len = descriptor_bytes.len() as u64;
     // Reuse the source_info / attachment SSOT, then append the 0x2 marker and
     // re-normalise the chain-continuation Z bits over the full chain.
     let mut exts =
         build_body_extensions(source_info, attachment, PushBodyKind::Put)?.unwrap_or_default();
     exts.push(crate::extshm::encode_shm_marker_ext());
     crate::ext_nodeid::apply_chain_z_bits(&mut exts);
+    // The marker in the chain is what makes the payload SLICED: the descriptor
+    // goes out as one slice of kind SHM_PTR, which is what upstream's receiver
+    // reads (the inline pair is absent, and the encoder refuses a chain and a
+    // payload that disagree).
     let mut put = MsgPutOwned {
-        header: 0x01,
         timestamp: gated_timestamp_field(timestamp)?,
         encoding: gated_encoding_field(encoding)?,
         extensions: Some(exts),
-        payload_len,
-        payload: crate::codec_owned::owned_bytes(&descriptor_bytes)?,
+        ..crate::put_payload::shm(&descriptor_bytes)?
     };
     if put.timestamp.is_some() {
         put.header |= 0x20;
@@ -924,11 +908,25 @@ mod tests {
             PushOwnedVariant::CodecZenohMsgPut(put) => put,
             _ => panic!("expected a MsgPut body"),
         };
-        assert_eq!(
-            crate::extshm::decode_shm_descriptor(put.payload.as_slice()),
-            Some(descriptor),
-            "the Put payload field is the SHM descriptor, not data bytes"
-        );
+        // The marker makes the payload sliced: one slice of kind SHM_PTR whose
+        // bytes are the descriptor, and the inline pair is absent.
+        match crate::put_payload::layout(put) {
+            crate::put_payload::PutPayload::Sliced(slices) => {
+                assert_eq!(slices.len(), 1, "one shared-memory buffer, one slice");
+                assert_eq!(slices[0].kind, crate::put_payload::SLICE_KIND_SHM_PTR);
+                assert_eq!(
+                    crate::extshm::decode_shm_descriptor(
+                        sce_forge_runtime::codec::SceByteBuf::as_slice(&slices[0].bytes)
+                    ),
+                    Some(descriptor),
+                    "the slice is the SHM descriptor, not data bytes"
+                );
+            }
+            crate::put_payload::PutPayload::Inline(_) => {
+                panic!("a Put that carries the SHM marker must use the sliced layout")
+            }
+        }
+        assert_eq!(put.payload_len, None, "the inline pair is absent");
         let exts = put.extensions.as_deref().unwrap_or(&[]);
         assert!(
             crate::extshm::body_has_shm_marker(exts),
@@ -1280,11 +1278,13 @@ mod tests {
             PushOwnedVariant::CodecZenohMsgPut(put) => {
                 assert_eq!(put.header, 0x01, "MsgPut header MID = 0x01 with no flags");
                 assert_eq!(
-                    put.payload, b"hello",
+                    crate::put_payload::inline_bytes(put),
+                    Some(&b"hello"[..]),
                     "MsgPut.payload carries the application bytes verbatim"
                 );
                 assert_eq!(
-                    put.payload_len, 5,
+                    put.payload_len,
+                    Some(5),
                     "MsgPut.payload_len must match payload.len() for the VLE writer"
                 );
                 assert!(put.timestamp.is_none(), "no timestamp flag on the MVP path");
@@ -1327,8 +1327,8 @@ mod tests {
         }
         match &pure.body {
             PushOwnedVariant::CodecZenohMsgPut(p) => {
-                assert_eq!(p.payload.as_slice(), b"hello");
-                assert_eq!(p.payload_len, 5);
+                assert_eq!(crate::put_payload::inline_bytes(p), Some(&b"hello"[..]));
+                assert_eq!(p.payload_len, Some(5));
             }
             _ => panic!("build_push_aliased must wrap a MsgPut body"),
         }
@@ -1736,7 +1736,11 @@ mod tests {
         // The Put body is preserved verbatim through the re-key.
         match &fwd.body {
             PushOwnedVariant::CodecZenohMsgPut(put) => {
-                assert_eq!(put.payload, b"hi", "payload preserved through re-key");
+                assert_eq!(
+                    crate::put_payload::inline_bytes(put),
+                    Some(&b"hi"[..]),
+                    "payload preserved through re-key"
+                );
             }
             _ => panic!("MsgPut body expected"),
         }

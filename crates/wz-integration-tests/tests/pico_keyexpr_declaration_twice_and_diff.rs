@@ -1323,7 +1323,19 @@ fn push_whole(p: &wz_codecs::push::PushOwned, valued: bool) -> String {
                 )
             ),
             body_extensions(put.extensions.as_deref()),
-            String::from_utf8_lossy(put.payload.as_slice()),
+            // Both layouts a Put can carry its payload in, rendered so that two
+            // sessions that agree on the wire render the same line: the inline
+            // bytes, or each slice as its kind and bytes.
+            match wz_session_core::put_payload::layout(put) {
+                wz_session_core::put_payload::PutPayload::Inline(bytes) => {
+                    String::from_utf8_lossy(bytes).into_owned()
+                }
+                wz_session_core::put_payload::PutPayload::Sliced(slices) => slices
+                    .iter()
+                    .map(|s| format!("{}:{}", s.kind, String::from_utf8_lossy(s.bytes.as_slice())))
+                    .collect::<Vec<_>>()
+                    .join("|"),
+            },
         ),
         PushOwnedVariant::CodecZenohMsgDel(del) => format!(
             " del ts={} body{}",

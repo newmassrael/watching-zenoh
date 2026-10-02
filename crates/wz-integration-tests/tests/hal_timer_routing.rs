@@ -31,7 +31,7 @@
 use core::time::Duration;
 use std::sync::{Mutex, MutexGuard, PoisonError};
 
-use sce_rust_runtime::{Engine, Hal, StatePolicy};
+use sce_rust_runtime::{EnabledTransition, Engine, EntryTarget, Hal, NoHistory, StatePolicy};
 use wz_runtime_tokio_test_support::{
     test_hal_advance_ticks, test_hal_now_ticks, test_hal_set_ticks, TestHal,
 };
@@ -80,19 +80,16 @@ enum Ev {
     ClosingTimeout,
 }
 
-struct TimerProbePolicy {
-    last_internal: bool,
-    last_targetless: bool,
-    last_source: St,
-}
+/// A flat, single-state machine with nothing to run: the probe exists to drive
+/// the scheduler clock, not to be a statechart. It keeps no per-transition
+/// bookkeeping because the engine no longer asks the policy for any (SCE's
+/// `StatePolicy` dropped `last_transition_*`, `is_descendant_of` and
+/// `process_transition` when selection moved into the engine).
+struct TimerProbePolicy;
 
 impl TimerProbePolicy {
     fn new() -> Self {
-        Self {
-            last_internal: false,
-            last_targetless: false,
-            last_source: St::S0,
-        }
+        Self
     }
 }
 
@@ -101,6 +98,8 @@ impl StatePolicy for TimerProbePolicy {
     type Event = Ev;
     type Payload = ();
     type Hal = TestHal;
+    // The document declares no `<history>`, so no target list can name one.
+    type History = NoHistory;
     // SCE pin 4ec1aa642 added these two per-machine sizing levers to
     // `StatePolicy`. This probe exercises the full scheduler-routing
     // substrate (it schedules with real send_ids), so it keeps the
@@ -123,8 +122,24 @@ impl StatePolicy for TimerProbePolicy {
     fn is_compound_state(_s: Self::State) -> bool {
         false
     }
-    fn is_descendant_of(_d: Self::State, _a: Self::State) -> bool {
-        false
+    // A flat machine: no state has children, and the document's own initial
+    // transition enters the one state.
+    fn get_child_states(_s: Self::State) -> &'static [Self::State] {
+        &[]
+    }
+    fn get_initial_targets(_s: Self::State) -> &'static [EntryTarget<Self::State, Self::History>] {
+        &[]
+    }
+    fn get_document_initial_targets() -> &'static [EntryTarget<Self::State, Self::History>] {
+        &[EntryTarget::State(St::S0)]
+    }
+    fn get_history_parent(history: Self::History) -> Self::State {
+        match history {}
+    }
+    fn get_history_default_targets(
+        history: Self::History,
+    ) -> &'static [EntryTarget<Self::State, Self::History>] {
+        match history {}
     }
     fn get_document_order(_s: Self::State) -> u32 {
         0
@@ -168,54 +183,43 @@ impl StatePolicy for TimerProbePolicy {
         }
     }
 
-    fn last_transition_is_internal(&self) -> bool {
-        self.last_internal
-    }
-    fn set_last_transition_is_internal(&mut self, v: bool) {
-        self.last_internal = v;
-    }
-    fn last_transition_is_targetless(&self) -> bool {
-        self.last_targetless
-    }
-    fn set_last_transition_is_targetless(&mut self, v: bool) {
-        self.last_targetless = v;
-    }
-    fn last_transition_source_state(&self) -> Self::State {
-        self.last_source
-    }
-    fn set_last_transition_source_state(&mut self, s: Self::State) {
-        self.last_source = s;
+    // No `<history>` exists, so nothing was ever recorded.
+    fn history_value(&self, history: Self::History) -> Option<&[Self::State]> {
+        match history {}
     }
 
-    // `_path_child` distinguishes an entry TARGET (`None`) from an ancestor on
-    // the way to a deeper one (`Some(child)`), which is what keeps a compound
-    // state from taking its default child while a descendant is already
-    // entering (SCE `StatePolicy`, policy.rs:332-348). This fixture is a
-    // single flat state with no entry actions at all, so both answers are the
-    // same empty one.
+    // Appendix D selection: the one state has no transitions, so none is ever
+    // enabled, whatever the event. The probe only schedules and fires timers.
+    fn first_enabled_transition(
+        &mut self,
+        _state: Self::State,
+        _event: Self::Event,
+        _eng: &mut Engine<Self>,
+    ) -> Option<EnabledTransition<Self::State, Self::History>> {
+        None
+    }
+    fn execute_transition_content(
+        &mut self,
+        _source: Self::State,
+        _transition_index: usize,
+        _eng: &mut Engine<Self>,
+    ) {
+    }
+    // The fixture is a single flat state with no entry or exit actions at all.
     fn execute_entry_actions(
         &mut self,
         _s: Self::State,
         _eng: &mut Engine<Self>,
-        _path_child: Option<Self::State>,
+        _is_default_entry: bool,
     ) {
     }
     fn execute_exit_actions(
         &mut self,
         _s: Self::State,
         _eng: &mut Engine<Self>,
-        _pre: &[Self::State],
+        _configuration_before_exit: &[Self::State],
     ) {
     }
-    fn process_transition(
-        &mut self,
-        _cur: &mut Self::State,
-        _e: Self::Event,
-        _eng: &mut Engine<Self>,
-    ) -> bool {
-        false
-    }
-    fn execute_transition_actions(&mut self, _eng: &mut Engine<Self>) {}
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -244,7 +248,9 @@ fn link_open_timeout_5s_fires_when_hal_advances_past_ready_at() {
     let _guard = hal_lock();
     let mut engine = anchor(10_000_000);
 
-    engine.schedule_event(Ev::LinkOpenTimeout, Duration::from_secs(5), "lk1", "");
+    // The trailing "" is the delayed send's `_event.origin` (SCE added the
+    // argument after this probe was written): a host-side timer has none.
+    engine.schedule_event(Ev::LinkOpenTimeout, Duration::from_secs(5), "lk1", "", "");
 
     assert!(
         !engine.has_ready_events(),
@@ -273,7 +279,7 @@ fn init_ack_timeout_2s_fires_at_exact_ready_at() {
     let _guard = hal_lock();
     let mut engine = anchor(20_000_000);
 
-    engine.schedule_event(Ev::InitAckTimeout, Duration::from_secs(2), "ia1", "");
+    engine.schedule_event(Ev::InitAckTimeout, Duration::from_secs(2), "ia1", "", "");
 
     assert!(!engine.has_ready_events());
 
@@ -296,8 +302,8 @@ fn open_ack_timeout_2s_separate_send_ids_each_fires_independently() {
     let _guard = hal_lock();
     let mut engine = anchor(30_000_000);
 
-    engine.schedule_event(Ev::InitAckTimeout, Duration::from_secs(2), "ia2", "");
-    engine.schedule_event(Ev::OpenAckTimeout, Duration::from_secs(2), "oa1", "");
+    engine.schedule_event(Ev::InitAckTimeout, Duration::from_secs(2), "ia2", "", "");
+    engine.schedule_event(Ev::OpenAckTimeout, Duration::from_secs(2), "oa1", "", "");
 
     test_hal_advance_ticks(2_001);
     assert!(
@@ -316,7 +322,13 @@ fn closing_timeout_100ms_fires_at_millisecond_resolution() {
     let _guard = hal_lock();
     let mut engine = anchor(40_000_000);
 
-    engine.schedule_event(Ev::ClosingTimeout, Duration::from_millis(100), "cl1", "");
+    engine.schedule_event(
+        Ev::ClosingTimeout,
+        Duration::from_millis(100),
+        "cl1",
+        "",
+        "",
+    );
 
     test_hal_advance_ticks(99);
     assert!(
@@ -346,7 +358,7 @@ fn synthetic_clock_reset_backward_keeps_event_pending() {
     let _guard = hal_lock();
     let mut engine = anchor(50_000_000);
 
-    engine.schedule_event(Ev::LinkOpenTimeout, Duration::from_secs(5), "rb1", "");
+    engine.schedule_event(Ev::LinkOpenTimeout, Duration::from_secs(5), "rb1", "", "");
 
     test_hal_set_ticks(50_000_000 + 5_000); // exactly ready_at
     assert!(

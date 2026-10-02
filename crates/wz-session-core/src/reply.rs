@@ -998,7 +998,15 @@ impl<C: ReplySink> ReplyRegistry<C> {
                 // composes on `query-reply` alone.
                 #[cfg(any(feature = "pubsub-put", feature = "query-reply"))]
                 ReplyOwnedVariant::CodecZenohMsgPut(put) => InboundReplyBody::Put {
-                    payload: put.payload.as_slice().to_vec(),
+                    // A Reply's Put has the same two layouts as a Push's. This
+                    // path holds no shared-memory resolver, so a reply whose
+                    // slice names a segment cannot be delivered and is dropped
+                    // here, as an undecodable reply is, instead of handing the
+                    // application the descriptor in place of its data.
+                    payload: match crate::put_payload::collect_payload(put, |_| None) {
+                        Ok(bytes) => bytes,
+                        Err(_) => return,
+                    },
                     attachment: put_reply_attachment(put),
                     encoding: put_reply_encoding(put),
                     source_info: reply_body_source_info(put.extensions.as_ref()),

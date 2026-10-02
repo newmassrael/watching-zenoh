@@ -1428,8 +1428,14 @@ impl<C: SampleSink> SubscriberRegistry<C> {
                     // resolver installed, drops the Sample (the scoped lifecycle:
                     // the owner backs the segment until the round-trip completes).
                     // Absent the marker, the inline-bytes path is byte-identical.
+                    //
+                    // The marker in the chain is what makes the payload sliced
+                    // (`put_payload`): the codec reads the slice list instead
+                    // of a length and bytes, so "carries the marker" and "has
+                    // slices" are one fact, and a slice of kind SHM_PTR is the
+                    // descriptor this branch resolves.
                     #[cfg(feature = "transport-shm")]
-                    let put_payload = if crate::extshm::body_has_shm_marker(body_exts) {
+                    let put_payload = if crate::put_payload::is_sliced(put) {
                         // R311y516 — ENFORCE the negotiation before opening
                         // anything. zenoh gates its whole RX un-swap on the
                         // negotiated per-transport capability
@@ -1448,23 +1454,34 @@ impl<C: SampleSink> SubscriberRegistry<C> {
                             self.shm_unnegotiated_drops += 1;
                             return;
                         }
-                        match crate::extshm::decode_shm_descriptor(put.payload.as_slice())
-                            .and_then(|d| self.shm_resolver.as_ref().and_then(|r| r.resolve(&d)))
-                        {
-                            Some(bytes) => bytes,
-                            None => {
+                        let resolver = self.shm_resolver.as_ref();
+                        match crate::put_payload::collect_payload(put, |descriptor| {
+                            crate::extshm::decode_shm_descriptor(descriptor)
+                                .and_then(|d| resolver.and_then(|r| r.resolve(&d)))
+                        }) {
+                            Ok(bytes) => bytes,
+                            Err(_) => {
                                 // Unresolvable descriptor (no resolver, or a stale
-                                // / foreign segment): drop the Sample, but COUNT it
+                                // / foreign segment) or a slice kind this node
+                                // does not know: drop the Sample, but COUNT it
                                 // so the misconfiguration is observable.
                                 self.shm_unresolved_drops += 1;
                                 return;
                             }
                         }
                     } else {
-                        put.payload.as_slice().to_vec()
+                        // The inline layout never fails: no slice, no descriptor.
+                        crate::put_payload::collect_payload(put, |_| None).unwrap_or_default()
                     };
+                    // Without the shared-memory transport there is no resolver to
+                    // ask, so a sliced Put can only be delivered when every slice
+                    // is plain bytes; one that names a segment is dropped rather
+                    // than delivered as the descriptor it carries.
                     #[cfg(not(feature = "transport-shm"))]
-                    let put_payload = put.payload.as_slice().to_vec();
+                    let put_payload = match crate::put_payload::collect_payload(put, |_| None) {
+                        Ok(bytes) => bytes,
+                        Err(_) => return,
+                    };
                     (
                         SampleKind::Put,
                         put_payload,
