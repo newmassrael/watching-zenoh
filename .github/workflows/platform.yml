@@ -1,0 +1,190 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later OR LicenseRef-watching-zenoh-Commercial
+# SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
+#
+# Platform -- the lean lane for the hosts wz cannot be run on from this
+# repository's own machines.
+#
+# The `platform-macos` and `platform-windows` inventory atoms claim that wz RUNS
+# on those hosts, and the only evidence for that is a hosted runner of the
+# host's own kind. `ci.yml` carries it in its `portability` job, behind every
+# other job's queue: a run in flight is never cancelled there (owner decision,
+# 2026-10-01), so one question about a macOS test costs a full CI wait. This
+# lane asks only that question.
+#
+# What it runs is exactly the leg `scripts/lib/platform_surface_matrix.py`
+# declares for the host: the integration-test targets that exercise each link
+# the pin serves there, built once under their union feature set and run one at
+# a time on their own deadline. It is the SAME gate as the `portability` job's
+# last step, not a second definition of the leg, so the two cannot disagree
+# about what a host owes. `ci.yml` stays the proof lane; this one is where a
+# red on a host is read, narrowed (`only`) and, when a target stalls, looked at
+# (the gate samples the stalled process before it kills it).
+#
+# What a red here means, stated because gate 2c reads every workflow: the
+# previous-run gate grades EVERY run on the tip commit, whichever workflow it
+# belongs to. A red Platform run therefore refuses the next push until it is
+# acknowledged in `docs/hosted-red-acks.md`, exactly as a red CI run does. That
+# is the intended coupling: a host that does not run wz is a red, not a note.
+#
+# Triggers. A push to main that touches what the leg builds or the gate that
+# declares it, and a manual dispatch for a narrowed or repeated run.
+
+name: Platform
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/platform.yml"
+      - "scripts/lib/platform_surface_matrix.py"
+      - "scripts/lib/upstream_link_axis_gate.py"
+      - "crates/wz-runtime-tokio/**"
+      - "crates/wz-session-core/**"
+      - "crates/Cargo.toml"
+      - "crates/Cargo.lock"
+      - "rust-toolchain.toml"
+  workflow_dispatch:
+    inputs:
+      host:
+        description: "Which host to run"
+        type: choice
+        options: [both, macos, windows]
+        default: both
+      only:
+        description: "Comma-separated test targets of the leg (a diagnosis; reported PARTIAL). Empty runs the whole leg."
+        type: string
+        default: ""
+
+# Latest-only and never cancelling a run in flight, the policy `ci.yml` records
+# (owner decision, 2026-10-01): a waiting run is replaced by the newest, a
+# running one is left to finish and be read.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: "0"
+  RUST_BACKTRACE: 1
+
+jobs:
+  plan:
+    name: plan
+    runs-on: ubuntu-22.04
+    timeout-minutes: 5
+    outputs:
+      hosts: ${{ steps.pick.outputs.hosts }}
+    steps:
+      - name: Pick the hosts
+        id: pick
+        env:
+          WZ_HOST: ${{ inputs.host }}
+        run: |
+          case "${WZ_HOST:-both}" in
+            both)    hosts='["macos-latest","windows-latest"]' ;;
+            macos)   hosts='["macos-latest"]' ;;
+            windows) hosts='["windows-latest"]' ;;
+            *)       echo "unknown host: ${WZ_HOST}" >&2; exit 1 ;;
+          esac
+          echo "hosts=${hosts}" >> "$GITHUB_OUTPUT"
+
+  leg:
+    name: leg (${{ matrix.os }})
+    needs: plan
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    strategy:
+      # Each host is its own signal: a macOS stall must not hide the Windows result.
+      fail-fast: false
+      matrix:
+        os: ${{ fromJSON(needs.plan.outputs.hosts) }}
+    steps:
+      - name: Checkout (with submodules)
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install Rust toolchain (pinned by rust-toolchain.toml)
+        run: rustup show
+
+      - name: Cache Cargo registry + build artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          # This lane is read while it is red; a cache saved only on success
+          # would make every diagnostic run pay the cold build again.
+          cache-on-failure: true
+          workspaces: |
+            crates -> target
+            vendor/sce -> target
+
+      - name: Set up Python (the platform-surface matrix gate is python)
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: platform surface matrix selftest, on this host
+        # The gate's own verdicts, driven on the host the leg will run on: the
+        # process-tree handling and the stall diagnostics are the parts whose
+        # behaviour differs per host, and the Linux lanes cannot see them.
+        timeout-minutes: 5
+        shell: bash
+        run: python scripts/lib/platform_surface_matrix.py --selftest
+
+      - name: platform surface matrix, the leg this host is owed
+        # `RUNNER_OS` is lower-cased with `tr`: macOS ships bash 3.2, which has
+        # no `${var,,}`. The dispatch input travels through the environment, not
+        # through the script text.
+        timeout-minutes: 20
+        shell: bash
+        env:
+          WZ_ONLY: ${{ inputs.only }}
+        run: |
+          host="$(echo "$RUNNER_OS" | tr '[:upper:]' '[:lower:]')"
+          if [ -n "$WZ_ONLY" ]; then
+            python scripts/lib/platform_surface_matrix.py --run "$host" --only "$WZ_ONLY"
+          else
+            python scripts/lib/platform_surface_matrix.py --run "$host"
+          fi
+
+      # ── Multicast: an OBSERVATION, not a gate (yet) ─────────────────────
+      #
+      # Upstream serves UDP multicast on every host (`zenoh-link-udp`), and the
+      # `platform-macos` / `platform-windows` atoms list "multicast" among what
+      # the host has not been shown to do. The wz witnesses are the `#[ignore]`
+      # Layer M tests, opt-in on Linux for a reason that was written about
+      # containers: "a CI container without a multicast route drops the IGMP
+      # join". A hosted macOS or Windows runner is a VM, so whether the join and
+      # the loopback work there is a fact nobody has read. This step reads it.
+      #
+      # `continue-on-error` is the point, and it expires: the first runs say which
+      # of the tests a host can run at all (the Linux-only `127.0.0.2` leg is one
+      # that a macOS loopback has no address for), and the step becomes a leg of the
+      # matrix gate, with its counts pinned, once there is something to pin.
+      - name: multicast on this host, observed (gates nothing yet)
+        timeout-minutes: 12
+        continue-on-error: true
+        shell: bash
+        run: |
+          python - <<'PY'
+          import socket, struct
+          try:
+              s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+              s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+              s.bind(("0.0.0.0", 0))
+              mreq = struct.pack("4s4s", socket.inet_aton("224.0.0.224"), socket.inet_aton("0.0.0.0"))
+              s.setsockopt(socket.IPPROTO_IP, socket.IP_ADD_MEMBERSHIP, mreq)
+              print("IGMP join 224.0.0.224 via INADDR_ANY: OK")
+              s.close()
+          except OSError as exc:
+              print(f"IGMP join 224.0.0.224 via INADDR_ANY: FAILED ({exc})")
+          PY
+          cd crates
+          status=0
+          cargo test -p wz-runtime-tokio --features scouting-active,transport-link-tls \
+            --test scouting_multicast_loopback -- --ignored --nocapture || status=1
+          cargo test -p wz-runtime-tokio --features transport-multicast \
+            --test multicast_pubsub_loopback -- --ignored --nocapture || status=1
+          exit "$status"
