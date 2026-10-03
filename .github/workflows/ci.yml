@@ -1092,11 +1092,16 @@ jobs:
   # stretch of Layer B compiles was not read, only its length; it behaves as
   # work that is cheap when the cache restores and costs minutes when it does not.
   #
-  # WHY IT DID NOT HEAL. A cancelled job saves no cache, so the next run starts
-  # cold as well. This job needed more than 30 minutes cold, so it could not
-  # finish once to repopulate the cache it needed. A cold state is a legitimate
-  # state here, because eviction is the platform's behaviour and not a fault, so
-  # the budget has to cover it, and this job's did not.
+  # WHAT THE NEXT RUN SHOWED. A cancelled job saves no cache, so the next run
+  # starts cold as well, and this comment first said that it therefore could not
+  # finish once to heal. That was wrong, and the run that followed measured it:
+  # run 37091754554 was cold too (`No cache found`) and passed in 18m23s, Layer B
+  # at 337s. So the cold cost is not one number. It was 530s of Layer B and a
+  # cancellation on one runner and 337s and a pass on the next. A cold state is a
+  # legitimate state here, because eviction is the platform's behaviour and not
+  # a fault, and a cost that moves between 18 and over 30 minutes with the runner,
+  # against a 30 minute ceiling, is a margin smaller than the variance of one
+  # step, which is not a margin.
   #
   # WHY SPLIT RATHER THAN RAISE, this file's own doctrine (see the verdict-leg
   # job below): a bigger number buys one atom's worth of time and re-arms the
