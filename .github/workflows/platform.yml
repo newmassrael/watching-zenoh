@@ -40,6 +40,8 @@ on:
       - "scripts/lib/upstream_link_axis_gate.py"
       - "crates/wz-runtime-tokio/**"
       - "crates/wz-session-core/**"
+      - "crates/wz-integration-tests/**"
+      - "crates/wz-host-interop-tests/**"
       - "crates/Cargo.toml"
       - "crates/Cargo.lock"
       - "rust-toolchain.toml"
@@ -244,19 +246,25 @@ jobs:
   # ── Router interop: what a host owes of the interop corpus ────────────
   #
   # Round 3015 settled the scope: a host owes a subset of the zenohd interop corpus
-  # derived from the corpus, not a hand-picked few, and the corpus cannot run on a
-  # host as it stands. The integration harness library reads captured files through
-  # a Unix-only trait and sets socket options through libc, neither behind a host
-  # gate, and its crate links the pico C build. This job is the MEASUREMENT that
-  # comes before the design: it asks, per host and in order, whether the demo
-  # builds, whether the harness compiles, whether the router builds and whether one
-  # handshake completes, and prints one verdict line for each.
+  # derived from the corpus, not a hand-picked few. The corpus crate cannot be built
+  # on a host as it stands: its dev-dependencies are the pico C library, the pico C
+  # ABI crate and the POSIX shm feature of the runtime, and a dev-dependency is
+  # built for every test target of the package. Two hosted probes measured that
+  # (the first at the harness library's own Unix-only calls, which are gated now,
+  # the second at those dev-dependencies), so the host-owed tests live in
+  # `wz-host-interop-tests`, which uses the corpus crate as a library and so gets
+  # only its ordinary dependencies.
+  #
+  # This job asks, per host and in order, whether the demo builds, whether that
+  # crate's tests compile, whether the router builds and whether one handshake
+  # completes, and prints one verdict line for each. It is an observation: a test
+  # becomes a gate after two consecutive green hosted runs on its host.
   #
   # The router is built with `cargo install` and not with `scripts/build-zenohd.sh`,
-  # on purpose and for this round only. That script's source path names the plugin
-  # libraries `.so` and the binary without a host suffix, so it cannot finish on
-  # either host, and a verdict about the script would hide the verdict about the
-  # router. Making the script portable is an item of its own, carried by Round 3016.
+  # on purpose and for now. That script's source path names the plugin libraries
+  # `.so` and the binary without a host suffix, so it cannot finish on either host,
+  # and a verdict about the script would hide the verdict about the router. Making
+  # the script portable is an item of its own, carried by Round 3016.
   #
   # It is its own job and not steps of `leg` for a reason of time, not of tidiness:
   # a cold router build is the longest thing this lane does, and `leg` answers in
@@ -326,17 +334,18 @@ jobs:
           handshake=SKIPPED
           (cd crates && cargo build -p wz-ap-demo) && demo=PASS
           verdict "wz-ap-demo builds:" "$demo"
-          (cd crates && cargo test -p wz-integration-tests --no-run --test wz_to_zenohd_router) && harness=PASS
-          verdict "interop harness compiles:" "$harness"
+          (cd crates && cargo test -p wz-host-interop-tests --no-run) && harness=PASS
+          verdict "host interop tests compile:" "$harness"
           cargo +1.97.1 install zenohd --version 1.10.1 --locked --root "$root" && router=PASS
           verdict "zenohd 1.10.1 builds:" "$router"
           if [ "$demo$harness$router" = PASSPASSPASS ]; then
             handshake=FAIL
             bin="$root/bin/zenohd$exe"
             if command -v cygpath > /dev/null 2>&1; then bin="$(cygpath -m "$bin")"; fi
-            (cd crates && WZ_ZENOHD_BIN="$bin" cargo test -p wz-integration-tests \
-              --test wz_to_zenohd_router \
-              -- --ignored --exact wz_client_reaches_established_against_zenohd --nocapture) && handshake=PASS
+            (cd crates && WZ_ZENOHD_BIN="$bin" cargo test -p wz-host-interop-tests \
+              --test zenohd_handshake \
+              -- --ignored --exact wz_client_reaches_established_against_a_stock_zenohd_on_this_host \
+              --nocapture) && handshake=PASS
           fi
           verdict "wz reaches Established against zenohd:" "$handshake"
           [ "$handshake" = PASS ]

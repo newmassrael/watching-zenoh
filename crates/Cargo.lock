@@ -2855,6 +2855,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "wz-host-interop-tests"
+version = "0.1.0"
+dependencies = [
+ "tempfile",
+ "wz-integration-tests",
+]
+
+[[package]]
 name = "wz-integration-tests"
 version = "0.1.0"
 dependencies = [

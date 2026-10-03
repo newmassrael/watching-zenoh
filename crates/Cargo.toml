@@ -126,6 +126,11 @@ members = [
     "wz-ap-demo-app",
     "zenoh-pico-sys",
     "wz-integration-tests",
+    # R3018 -- the router interop a macOS or Windows host owes: the subset of the
+    # corpus above that needs none of the corpus crate's dev-dependencies (the pico
+    # C library, the pico C ABI crate, the POSIX shm feature), so a host can build
+    # it. It uses the corpus crate as a library, so the harness has one copy.
+    "wz-host-interop-tests",
     # R311qw — the linkstate-peer routing topology graph, lifted out of
     # wz-runtime-tokio so the runtime-agnostic kernel mirrors the
     # RouteTable(wz-session-core)/RoutingForwarder(wz-runtime-tokio) split.

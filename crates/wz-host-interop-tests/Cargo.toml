@@ -1,0 +1,48 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later OR LicenseRef-watching-zenoh-Commercial
+# SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
+#
+# wz-host-interop-tests -- the router interop that a macOS or Windows host owes.
+#
+# Round 3015 settled the scope: a host owes a subset of the zenohd interop corpus,
+# derived from what each test needs of the host. The corpus itself cannot run on a
+# host as it stands. `wz-integration-tests` builds the pico C library, the pico C
+# ABI crate and the POSIX shared-memory feature of the runtime as DEV-dependencies,
+# and a dev-dependency is built for every test target of that package, so the one
+# test of the corpus that needs none of them could not be compiled on a host (the
+# first two hosted interop probes, which is where this was measured).
+#
+# This crate depends on `wz-integration-tests` as a LIBRARY only. A dependency's
+# dev-dependencies are not built, so what comes in is that crate's own
+# `[dependencies]`, which compile on every host (the library carries per-host gates
+# for what does not). That keeps ONE implementation of the harness -- spawning
+# zenohd, discovering its port, capturing a child's output -- instead of a host
+# copy beside the Linux one, which matters because the router's announcement line
+# is pin-sensitive knowledge (R2230) that must be spelled in one place.
+#
+# Tests here are binary-dependent and opt-in (`#[ignore]`): they need a router
+# built by the same recipe as the Linux corpus's, named with `WZ_ZENOHD_BIN`, and
+# the demo built with `cargo build -p wz-ap-demo`. The Platform workflow's interop
+# job runs them on each host as an OBSERVATION; a test is promoted to a gate after
+# two consecutive green hosted runs on its host.
+
+[package]
+name = "wz-host-interop-tests"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "Router interop tests that run on macOS and Windows hosts: the host-portable subset of the zenohd interop corpus."
+publish = false
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+wz-integration-tests = { path = "../wz-integration-tests" }
+
+[dev-dependencies]
+tempfile = "3"
+
+[lints]
+workspace = true
