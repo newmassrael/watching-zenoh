@@ -478,8 +478,10 @@ jobs:
   # 37127231232 and 37130390017, read from the job logs and not from the conclusion),
   # the owner's rule for promoting an observation. A red here now fails the run, and
   # what it means is that a C ABI crate stopped building or passing on a host it had
-  # been shown to, which is a regression and not a measurement. What stays unclaimed
-  # is not this job's: no pico C program runs against the cdylib on a host yet.
+  # been shown to, which is a regression and not a measurement. Two zenoh-pico C
+  # programs now run against the cdylib on each host, the host layer and a pair of
+  # sessions over loopback, and both are gates. What stays unclaimed is not this
+  # job's: it is the owner's decision whether the platform tags may claim the C ABI.
   capi:
     name: C ABI (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
@@ -661,19 +663,21 @@ jobs:
         shell: bash
         run: bash scripts/pico-c-program.sh crates/wz-capi-pico/tests/c/pico_host_layer.c "a pico C program against the wz cdylib"
 
-      # A zenoh-pico C program that opens SESSIONS, on this host. An OBSERVATION: it is
-      # new, so it has not read green twice. It is the session half of what a pico
-      # program does, and the evidence the session surface of the C ABI needs before a
-      # platform tag can claim it: a config, two sessions over the host's loopback (an
+      # A zenoh-pico C program that opens SESSIONS, on this host. A GATE since two
+      # consecutive hosted runs read it green on both hosts (Platform runs
+      # 37151725737 and 37158440974, from the job logs). It is the session half of what
+      # a pico program does, and the evidence the session surface of the C ABI needs
+      # before a platform tag can claim it: a config, two sessions over the host's loopback (an
       # acceptor on a task of its own and a client dialing it), a subscriber declared
       # with a closure, a publish, and the sample the closure is handed, read as pico's
       # z_sub.c reads it. Every owned type the program declares (the config, the
       # session, the closure, the subscriber, the task) sits between guard bytes, so an
       # export that writes past the size pico's header gives it is caught where it
-      # happens. Both sessions are the wz library, which is what one process can hold.
-      - name: a zenoh-pico C program that opens sessions (observation)
+      # happens. Both sessions are the wz library, which is what one process can hold. A
+      # red here now fails the run: a session no longer opens, or a sample no longer
+      # reaches its closure, on a host it had been shown to.
+      - name: a zenoh-pico C program that opens sessions (gated)
         if: ${{ env.WZ_HOST_SELECTED == 'true' }}
         timeout-minutes: 25
-        continue-on-error: true
         shell: bash
         run: bash scripts/pico-c-program.sh crates/wz-capi-pico/tests/c/pico_session_loopback.c "a pico C program that opens two sessions over loopback"
