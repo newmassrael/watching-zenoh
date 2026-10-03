@@ -81,7 +81,10 @@ The population is the thing that was missing, so the population is derived.
      report a passing count of at least one; a target that stalls is killed
      with its tree and named by its last line, and the targets after it still
      report. `EXEC_GAPS` names what cannot run there, and a gap whose target
-     now selects a test is stale.
+     now selects a test is stale. R3014: `PLANES` carries the surfaces that are
+     not links (UDP multicast), each witnessed by an OPT-IN (`#[ignore]`) target
+     that must select at least one opt-in test on the host and runs with
+     `--ignored`, under the same one build, one deadline and one-pass rule.
 
 The three graded hosts are the CI runners': Linux and Windows on x86_64, macOS
 on aarch64 (`macos-latest`). Linux is the reference host: its links are graded
@@ -188,6 +191,27 @@ EVIDENCE: dict[str, tuple[str, ...]] = {
     "UnixsockStream": ("unixsock_e2e",),
     "Vsock": ("vsock_e2e",),
     "Ws": ("ws_e2e",),
+}
+
+#: Surfaces that are not links, and the opt-in (`#[ignore]`) test targets that witness
+#: them on a host -> (the hosts that owe it, the targets). The leg runs these with
+#: `--ignored`, one build, one deadline, at least one pass.
+#:
+#: UDP multicast is one. Upstream serves it on every host (`zenoh-link-udp`), and wz's
+#: fuller multicast suites are not evidence a host can be graded on: they run in
+#: parallel on one machine-wide group port, and on a hosted Windows runner the same
+#: scouting suite passed 6 of 6, then 4 of 6, then 5 of 6, a different test each
+#: time, all of them OS interface selection. `multicast_host_roundtrip` is the narrow
+#: deterministic witness of the host-specific part, wz's own two drivers on one host
+#: over the interface that host lets a CI process send multicast out of (macOS: only
+#: loopback; Windows: the default interface, never loopback; the test's header holds
+#: the measurements). It passed on both hosts. Multicast over a REAL interface is not
+#: provable on a hosted macOS runner at all, so this row does not claim it.
+#:
+#: Declared knowledge and not derived: no manifest says which surface a test target
+#: witnesses, and the upstream arm reads link crates, not planes.
+PLANES: dict[str, tuple[frozenset[str], tuple[str, ...]]] = {
+    "UdpMulticast": (ALL_HOSTS, ("multicast_host_roundtrip",)),
 }
 
 #: (kind, host) that wz serves and BUILDS in the leg but no target can run
@@ -886,14 +910,24 @@ def head_features(src: SourceFile) -> tuple[frozenset[str] | None, str]:
 
 
 def runnable_tests(
-    files: list[tuple[SourceFile, tuple[tuple, ...]]], host: str, enabled: frozenset[str]
+    files: list[tuple[SourceFile, tuple[tuple, ...]]],
+    host: str,
+    enabled: frozenset[str],
+    ignored: bool = False,
 ) -> list[str]:
+    """The tests a target selects on `host` under `enabled`.
+
+    `ignored=False` counts what a plain `cargo test` runs. `ignored=True` counts the
+    opt-in `#[ignore]` tests instead, which is what a plane target's leg runs with
+    `--ignored`: the two sets never overlap, so a target cannot satisfy the one
+    question with the other's tests.
+    """
     out: list[str] = []
     for src, ctx in files:
         for m in _TEST_ATTR.finditer(src.masked):
             run_end = _skip_attrs(src.masked, m.start())
             run = src.masked[_attr_run_start(src.masked, m.start()) : run_end]
-            if re.search(r"#\[\s*ignore\b", run):
+            if bool(re.search(r"#\[\s*ignore\b", run)) != ignored:
                 continue
             fn = _FN.match(src.masked, run_end)
             if fn is None:
@@ -910,6 +944,8 @@ class Leg:
     targets: list[str]
     features: frozenset[str]
     deferred: list[str]
+    #: Targets (a subset of `targets`) that run their `#[ignore]` tests, with `--ignored`.
+    ignored: frozenset[str] = frozenset()
 
 
 def leg_findings(
@@ -919,6 +955,7 @@ def leg_findings(
     closure: Callable[[Iterable[str]], frozenset[str]],
     evidence: dict[str, tuple[str, ...]],
     exec_gaps: dict[tuple[str, str], tuple[int, str]],
+    planes: Mapping[str, tuple[frozenset[str], tuple[str, ...]]] | None = None,
 ) -> tuple[Leg, list[str]]:
     out: list[str] = []
     targets: list[str] = []
@@ -953,11 +990,35 @@ def leg_findings(
             )
             continue
         heads[name] = feats
+    # A PLANE is a surface that is not a link (multicast): its target's tests are
+    # `#[ignore]`d opt-ins, so the leg runs them with `--ignored`. Its features join
+    # the union build like a link's, before the closure is taken.
+    plane_rows: list[tuple[str, str]] = []
+    plane_heads: dict[str, frozenset[str]] = {}
+    for plane, (plane_hosts, names) in sorted((planes or {}).items()):
+        if host not in plane_hosts:
+            continue
+        for name in names:
+            plane_rows.append((plane, name))
+            files = target_files(name)
+            if files is None:
+                out.append(f"PLANES names `{name}` for {plane}, and there is no tests/{name}.rs")
+                continue
+            feats, how = head_features(files[0][0])
+            if feats is None:
+                out.append(
+                    f"tests/{name}.rs is gated `{how}`, which names no single feature set -- "
+                    f"the leg cannot say what to enable for it"
+                )
+                continue
+            plane_heads[name] = feats
     # An exec-gap link is still BUILT: the union build is the only place its
     # module compiles on this host at all.
     for kind, name in rows:
         if name in heads:
             wanted |= heads[name]
+    for feats in plane_heads.values():
+        wanted |= feats
     enabled = closure(wanted)
     for kind, name in rows:
         if name not in heads:
@@ -985,10 +1046,29 @@ def leg_findings(
             continue
         if name not in targets:
             targets.append(name)
+    ignored_targets: set[str] = set()
+    for plane, name in plane_rows:
+        if name not in plane_heads:
+            continue
+        files = target_files(name)
+        assert files is not None
+        tests = runnable_tests(files, host, enabled, ignored=True)
+        if not tests:
+            out.append(
+                f"tests/{name}.rs is {plane}'s evidence on {host} and selects NO opt-in "
+                f"(`#[ignore]`) test there under the leg's features -- the leg would "
+                f"pass it on an empty selection"
+            )
+            continue
+        if name in targets:
+            out.append(f"`{name}` is both a link's evidence and {plane}'s; a target runs one way")
+            continue
+        targets.append(name)
+        ignored_targets.add(name)
     for kind, _h in exec_gaps:
         if kind not in served:
             out.append(f"EXEC_GAPS names {kind}, which `LinkKind` does not have")
-    return Leg(host, targets, frozenset(wanted), deferred), out
+    return Leg(host, targets, frozenset(wanted), deferred, frozenset(ignored_targets)), out
 
 
 _RUNNING = re.compile(r"^\s*Running (?:tests[\\/])?([A-Za-z0-9_-]+)\.rs\b")
@@ -1273,8 +1353,13 @@ def leg_target_command(leg: Leg, target: str) -> list[str]:
     `--nocapture` because libtest prints a failing test's message only when its
     whole binary finishes. A binary that never does keeps the reason in a buffer, and
     the first hosted macOS run showed seven failed tests and no message for any.
+
+    A plane target's tests are opt-in (`#[ignore]`): it runs with `--ignored`, and
+    only it does, so a link target's `#[ignore]`d tests (real-time waits, a spawned
+    foreign binary) stay out of the leg.
     """
-    return _leg_cargo(leg) + ["--test", target, "--", "--nocapture"]
+    tail = ["--nocapture"] + (["--ignored"] if target in leg.ignored else [])
+    return _leg_cargo(leg) + ["--test", target, "--", *tail]
 
 
 # ─── the real tree ───────────────────────────────────────────────────────────
@@ -1443,7 +1528,7 @@ def check(require: bool, quiet: bool = False) -> tuple[Tree | None, dict[str, Le
     legs: dict[str, Leg] = {}
     for host in LEG_HOSTS:
         try:
-            leg, got = leg_findings(host, links, target_files, closure, EVIDENCE, EXEC_GAPS)
+            leg, got = leg_findings(host, links, target_files, closure, EVIDENCE, EXEC_GAPS, PLANES)
         except (UnknownCfg, ValueError) as e:
             findings.append(f"the {host} leg: {e}")
             continue
@@ -1502,7 +1587,7 @@ def select_targets(leg: Leg, only: Sequence[str]) -> tuple[Leg | None, str]:
     kept = [t for t in leg.targets if t in only]
     if not kept:
         return None, "--only named no target"
-    return Leg(leg.host, kept, leg.features, leg.deferred), ""
+    return Leg(leg.host, kept, leg.features, leg.deferred, leg.ignored & set(kept)), ""
 
 
 def run(host: str, only: Sequence[str] = ()) -> int:
@@ -1550,7 +1635,7 @@ def run(host: str, only: Sequence[str] = ()) -> int:
                 f"its last line: {last[:160]}"
             )
             continue
-        one = Leg(host, [target], leg.features, [])
+        one = Leg(host, [target], leg.features, [], leg.ignored)
         got += result_findings(one, attribute_results(lines), target_rc)
     if got:
         print(f"platform-surface-matrix: {host} leg FAIL -- {len(got)} finding(s)")
@@ -1776,6 +1861,55 @@ def selftest() -> int:
     refused("a stale exec gap", got, "now selects 1 test(s)")
     leg, got = leg_findings("macos", {"Serial": ALL_HOSTS, "Ws": ALL_HOSTS}, tf, frozenset, ev, {})
     refused("a served link with no evidence", got, "EVIDENCE names no target")
+
+    # a PLANE target: opt-in tests, run with --ignored, features joined to the union
+    witness = _src(
+        '#![cfg(all(feature = "transport-multicast", feature = "locator-iface"))]\n'
+        "#[tokio::test]\n#[ignore = \"opt-in\"]\nasync fn round_trips() {}\n"
+        "#[test]\nfn a_plain_one() {}\n",
+        "multicast_host_roundtrip.rs",
+    )
+    mc = {"UdpMulticast": (ALL_HOSTS, ("multicast_host_roundtrip",))}
+    pfiles = {"serial_link_e2e": [(serial, ())], "multicast_host_roundtrip": [(witness, ())]}
+    mfeats = frozenset({"transport-multicast", "locator-iface"})
+    expect("a plane counts its ignored tests", runnable_tests([(witness, ())], "macos", mfeats, ignored=True), ["round_trips"])
+    expect("and not the plain one", runnable_tests([(witness, ())], "macos", mfeats), ["a_plain_one"])
+    leg, got = leg_findings("macos", served, pfiles.get, frozenset, ev, {}, mc)
+    expect(
+        "the plane joins the macos leg",
+        (leg.targets, sorted(leg.ignored), sorted(leg.features), got),
+        (
+            ["serial_link_e2e", "multicast_host_roundtrip"],
+            ["multicast_host_roundtrip"],
+            ["locator-iface", "transport-link-serial", "transport-multicast"],
+            [],
+        ),
+    )
+    expect(
+        "only the plane runs --ignored",
+        (
+            "--ignored" in leg_target_command(leg, "multicast_host_roundtrip"),
+            "--ignored" in leg_target_command(leg, "serial_link_e2e"),
+        ),
+        (True, False),
+    )
+    expect("the plane is built with the leg", "multicast_host_roundtrip" in leg_build_command(leg), True)
+    narrowed, why = select_targets(leg, ["multicast_host_roundtrip"])
+    expect("a narrowed leg keeps the plane's mode", narrowed.ignored if narrowed else None, frozenset({"multicast_host_roundtrip"}))
+    narrowed, why = select_targets(leg, ["serial_link_e2e"])
+    expect("and drops it with the target", narrowed.ignored if narrowed else None, frozenset())
+    no_optin = _src(
+        '#![cfg(all(feature = "transport-multicast", feature = "locator-iface"))]\n#[test]\nfn plain() {}\n',
+        "multicast_host_roundtrip.rs",
+    )
+    leg, got = leg_findings(
+        "macos", served, {**pfiles, "multicast_host_roundtrip": [(no_optin, ())]}.get, frozenset, ev, {}, mc
+    )
+    refused("a plane with no opt-in test", got, "selects NO opt-in")
+    leg, got = leg_findings("macos", served, {"serial_link_e2e": [(serial, ())]}.get, frozenset, ev, {}, mc)
+    refused("a plane target that does not exist", got, "no tests/multicast_host_roundtrip.rs")
+    leg, got = leg_findings("macos", served, pfiles.get, frozenset, ev, {}, {"UdpMulticast": (frozenset({"linux"}), ("multicast_host_roundtrip",))})
+    expect("a plane another host owes is not this host's", ("multicast_host_roundtrip" in leg.targets, got), (False, []))
 
     # the runner's attribution of cargo's output
     lines = [
