@@ -213,6 +213,23 @@ getrandom = "0.2"
 # optionally — so this adds no new third-party crate.
 libc = "0.2"
 
+# The Windows host layer (`src/os/windows.rs`). pico's own Windows backend types its
+# mutex as SRWLOCK, its condvar as CONDITION_VARIABLE, its clock as a performance
+# counter and its task as a thread HANDLE, so wz's exports over those bytes call the
+# same Win32 functions: libc carries none of them. Already in this workspace's graph
+# (the async runtime reaches it), so this adds no new third-party crate; each feature
+# below is one namespace the file calls into, and nothing else is enabled.
+[target.'cfg(windows)'.dependencies.windows-sys]
+version = "0.61"
+features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_System_Performance",
+    "Win32_System_SystemInformation",
+    "Win32_System_Threading",
+    "Win32_System_Time",
+]
+
 [dependencies.tokio]
 version = "1"
 default-features = false

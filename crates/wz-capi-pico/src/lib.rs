@@ -82,6 +82,7 @@ pub mod handlers;
 pub mod keyexpr;
 pub mod liveliness;
 pub mod matching;
+mod os;
 pub mod platform;
 pub mod pubsub;
 pub mod querier;

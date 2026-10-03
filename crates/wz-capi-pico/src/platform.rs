@@ -21,27 +21,30 @@
 //! `std::alloc::dealloc` also needs a `Layout` that a bare `void*` cannot
 //! supply. Forwarding keeps the two allocators the same allocator.
 //!
-//! `z_clock_now` is `clock_gettime(CLOCK_MONOTONIC)` for the same reason it is
-//! in pico: the value is handed back to `z_clock_elapsed_*`, so it has to be
-//! monotonic, and `std::time::Instant` cannot be used because the C side
-//! stack-allocates the result as a `struct timespec` it may read. Taking
-//! `libc` as a direct dependency (it is already in this workspace's graph via
-//! `wz-runtime-tokio`) is what keeps `CLOCK_MONOTONIC` correct per platform —
-//! it is 1 on Linux and 6 on macOS, and hand-writing the constant is a
-//! portability bug waiting for the first non-Linux build.
+//! The clock, the wall time, the random source and the sync objects are the part of
+//! pico's platform that differs by HOST in its bytes, not just its code: the C
+//! program stack-allocates a `struct timespec` on a Unix and a `LARGE_INTEGER` on
+//! Windows before wz sees it. Those operations live in `crate::os`, one backend per
+//! host modelled on pico's own, and the exports here are the null checks, the panic
+//! guards and the unit each export names. On a Unix `z_clock_now` is
+//! `clock_gettime(CLOCK_MONOTONIC)`, for the same reason it is in pico: the value is
+//! handed back to `z_clock_elapsed_*`, so it has to be monotonic, and
+//! `std::time::Instant` cannot be used because the C side stack-allocates the
+//! result and may read it.
 
 use std::ffi::{c_ulong, c_void};
 use std::time::Duration;
 
 use crate::ffi::{guard_val, guarded};
+use crate::os::{self, Unit};
 use crate::result::{ZResult, Z_OK};
 
-/// pico `z_clock_t` — `struct timespec` on every Unix
-/// (`vendor/zenoh-pico/include/zenoh-pico/system/platform/unix.h:41`), 16 B
-/// measured. Returned BY VALUE from [`z_clock_now`], which the SysV AMD64 ABI
-/// passes back in two integer registers; `libc::timespec` is `#[repr(C)]` with
-/// the same two fields, so the register assignment matches without a shim.
-pub type z_clock_t = libc::timespec;
+/// pico `z_clock_t` — the host's own type: `struct timespec` on a Unix
+/// (`vendor/zenoh-pico/include/zenoh-pico/system/platform/unix.h:41`, 16 B) and
+/// `LARGE_INTEGER` on Windows (8 B). Returned BY VALUE from [`z_clock_now`], which
+/// the host ABI passes back in registers; the backend's type is `#[repr(C)]` with the
+/// same fields, so the register assignment matches without a shim.
+pub type z_clock_t = os::Clock;
 
 /// Allocate (pico `z_malloc`). Plain `malloc`, so the result is freeable by
 /// [`z_free`] or by the caller's own `free`.
@@ -91,54 +94,46 @@ pub unsafe extern "C" fn z_sleep_s(time: usize) -> ZResult {
 /// Read the monotonic clock (pico `z_clock_now`).
 #[no_mangle]
 pub unsafe extern "C" fn z_clock_now() -> z_clock_t {
-    let mut now = libc::timespec {
-        tv_sec: 0,
-        tv_nsec: 0,
-    };
-    libc::clock_gettime(libc::CLOCK_MONOTONIC, &mut now);
-    now
+    os::clock_now()
 }
 
 /// Microseconds elapsed since `instant` (pico `z_clock_elapsed_us`).
 ///
-/// The arithmetic is pico's, saturation included: it computes the difference
-/// as a SIGNED `long` and clamps a negative result to 0
-/// (`system.c:235-238`). Reproducing the clamp rather than the obvious
-/// `Duration` subtraction matters because the C side may hand back a `z_clock_t`
-/// it advanced past now (`z_clock_advance_us` exists for exactly that), and a
-/// `Duration` subtraction would panic where pico returns zero.
+/// The arithmetic is pico's, saturation included: on a Unix it computes the
+/// difference as a SIGNED `long` and clamps a negative result to 0
+/// (`system.c:235-238`), and Windows' is the same floor and clamp over counter
+/// ticks. Reproducing the clamp rather than the obvious `Duration` subtraction
+/// matters because the C side may hand back a `z_clock_t` it advanced past now
+/// (`z_clock_advance_us` exists for exactly that), and a `Duration` subtraction
+/// would panic where pico returns zero.
 #[no_mangle]
 pub unsafe extern "C" fn z_clock_elapsed_us(instant: *mut z_clock_t) -> c_ulong {
-    elapsed_since(instant, 1_000_000, 1_000)
+    elapsed_since(instant, Unit::Micro)
 }
 
 /// Milliseconds elapsed since `instant` (pico `z_clock_elapsed_ms`).
 #[no_mangle]
 pub unsafe extern "C" fn z_clock_elapsed_ms(instant: *mut z_clock_t) -> c_ulong {
-    elapsed_since(instant, 1_000, 1_000_000)
+    elapsed_since(instant, Unit::Milli)
 }
 
 /// Seconds elapsed since `instant` (pico `z_clock_elapsed_s`).
 #[no_mangle]
 pub unsafe extern "C" fn z_clock_elapsed_s(instant: *mut z_clock_t) -> c_ulong {
-    elapsed_since(instant, 1, 0)
+    elapsed_since(instant, Unit::Second)
 }
 
-/// The shared body of the three `z_clock_elapsed_*` exports.
-///
-/// `sec_scale` converts whole seconds into the target unit and `nsec_div`
-/// converts nanoseconds into it (0 meaning "drop the sub-second part", which is
-/// what pico's `_s` variant does — it uses only `tv_sec`). One body rather than
+/// The shared body of the three `z_clock_elapsed_*` exports. One body rather than
 /// three keeps the clamp and the null guard from drifting between siblings, the
 /// asymmetry this crate has already been bitten by once.
-unsafe fn elapsed_since(instant: *mut z_clock_t, sec_scale: i64, nsec_div: i64) -> c_ulong {
+unsafe fn elapsed_since(instant: *mut z_clock_t, unit: Unit) -> c_ulong {
     // Upstream's own definition: `z_clock_elapsed_X(i)` IS
     // `zp_clock_elapsed_X_since(&now, i)` (`system.c:249-268`). Delegating
     // rather than repeating the arithmetic is what keeps the clamp from
     // drifting between the two families — the asymmetry this crate has already
     // been bitten by once.
     let mut now = z_clock_now();
-    elapsed_between(&mut now, instant, sec_scale, nsec_div)
+    elapsed_between(&mut now, instant, unit)
 }
 
 /// Elapsed microseconds between two READINGS (pico `zp_clock_elapsed_us_since`).
@@ -155,7 +150,7 @@ pub unsafe extern "C" fn zp_clock_elapsed_us_since(
     instant: *mut z_clock_t,
     epoch: *mut z_clock_t,
 ) -> c_ulong {
-    elapsed_between(instant, epoch, 1_000_000, 1_000)
+    elapsed_between(instant, epoch, Unit::Micro)
 }
 
 /// Elapsed milliseconds between two readings (pico `zp_clock_elapsed_ms_since`).
@@ -167,13 +162,13 @@ pub unsafe extern "C" fn zp_clock_elapsed_ms_since(
     instant: *mut z_clock_t,
     epoch: *mut z_clock_t,
 ) -> c_ulong {
-    elapsed_between(instant, epoch, 1_000, 1_000_000)
+    elapsed_between(instant, epoch, Unit::Milli)
 }
 
 /// Elapsed whole seconds between two readings (pico `zp_clock_elapsed_s_since`).
 ///
 /// Sub-second parts are DROPPED rather than rounded — upstream's body reads
-/// only `tv_sec` (`system.c:245-248`), so a 0.9 s gap is 0.
+/// only `tv_sec` on a Unix (`system.c:245-248`), so a 0.9 s gap is 0.
 ///
 /// # Safety
 /// As [`zp_clock_elapsed_us_since`].
@@ -182,53 +177,35 @@ pub unsafe extern "C" fn zp_clock_elapsed_s_since(
     instant: *mut z_clock_t,
     epoch: *mut z_clock_t,
 ) -> c_ulong {
-    elapsed_between(instant, epoch, 1, 0)
+    elapsed_between(instant, epoch, Unit::Second)
 }
 
 /// The shared body of the `zp_clock_elapsed_*_since` trio, and — through
 /// [`elapsed_since`] — of the `z_clock_elapsed_*` trio too.
-unsafe fn elapsed_between(
-    instant: *mut z_clock_t,
-    epoch: *mut z_clock_t,
-    sec_scale: i64,
-    nsec_div: i64,
-) -> c_ulong {
+unsafe fn elapsed_between(instant: *mut z_clock_t, epoch: *mut z_clock_t, unit: Unit) -> c_ulong {
     guard_val(0, || {
         if instant.is_null() || epoch.is_null() {
             return 0;
         }
-        let secs: i64 = (*instant).tv_sec - (*epoch).tv_sec;
-        let mut elapsed = secs.saturating_mul(sec_scale);
-        if nsec_div != 0 {
-            let nsecs: i64 = (*instant).tv_nsec - (*epoch).tv_nsec;
-            elapsed = elapsed.saturating_add(nsecs / nsec_div);
-        }
-        if elapsed > 0 {
-            elapsed as c_ulong
-        } else {
-            0
-        }
+        os::clock_elapsed_between(&*instant, &*epoch, unit)
     })
 }
 
 /// Move a clock reading FORWARD by `duration` microseconds (pico
 /// `z_clock_advance_us`).
 ///
-/// The normalisation is upstream's and it is deliberately ONE carry, not a
-/// loop: `tv_nsec` starts below 1e9 and gains at most 999_999_000 ns, so a
+/// On a Unix the normalisation is upstream's and it is deliberately ONE carry,
+/// not a loop: `tv_nsec` starts below 1e9 and gains at most 999_999_000 ns, so a
 /// single borrow suffices. Reproduced rather than replaced by a `Duration`
 /// addition because a caller may then hand the advanced clock to
 /// `z_clock_elapsed_*`, whose clamp is what makes a FUTURE instant read as 0.
+/// On Windows the duration becomes counter ticks.
 ///
 /// # Safety
 /// `clock` must be null or a valid, writable `z_clock_t`.
 #[no_mangle]
 pub unsafe extern "C" fn z_clock_advance_us(clock: *mut z_clock_t, duration: c_ulong) {
-    advance(
-        clock,
-        (duration / 1_000_000) as i64,
-        ((duration % 1_000_000) * 1_000) as i64,
-    );
+    advance(clock, Unit::Micro, duration);
 }
 
 /// Move a clock reading forward by `duration` milliseconds (pico
@@ -238,11 +215,7 @@ pub unsafe extern "C" fn z_clock_advance_us(clock: *mut z_clock_t, duration: c_u
 /// As [`z_clock_advance_us`].
 #[no_mangle]
 pub unsafe extern "C" fn z_clock_advance_ms(clock: *mut z_clock_t, duration: c_ulong) {
-    advance(
-        clock,
-        (duration / 1_000) as i64,
-        ((duration % 1_000) * 1_000_000) as i64,
-    );
+    advance(clock, Unit::Milli, duration);
 }
 
 /// Move a clock reading forward by whole seconds (pico `z_clock_advance_s`).
@@ -251,54 +224,45 @@ pub unsafe extern "C" fn z_clock_advance_ms(clock: *mut z_clock_t, duration: c_u
 /// As [`z_clock_advance_us`].
 #[no_mangle]
 pub unsafe extern "C" fn z_clock_advance_s(clock: *mut z_clock_t, duration: c_ulong) {
-    advance(clock, duration as i64, 0);
+    advance(clock, Unit::Second, duration);
 }
 
 /// The shared body of the three `z_clock_advance_*` exports.
-unsafe fn advance(clock: *mut z_clock_t, secs: i64, nsecs: i64) {
+unsafe fn advance(clock: *mut z_clock_t, unit: Unit, duration: c_ulong) {
     let _ = guarded(|| {
         if clock.is_null() {
             return Z_OK;
         }
-        (*clock).tv_sec += secs;
-        (*clock).tv_nsec += nsecs;
-        if (*clock).tv_nsec >= 1_000_000_000 {
-            (*clock).tv_sec += 1;
-            (*clock).tv_nsec -= 1_000_000_000;
-        }
+        os::clock_advance(&mut *clock, unit, duration);
         Z_OK
     });
 }
 
-/// pico `z_time_t` — `struct timeval`
-/// (`system/platform/unix.h`), the WALL clock, distinct from
-/// [`z_clock_t`]'s monotonic one. 16 B measured; `libc::timeval` is the same
-/// two-field `#[repr(C)]`, so the by-value return matches without a shim.
-pub type z_time_t = libc::timeval;
+/// pico `z_time_t` — the host's own type: `struct timeval` on a Unix
+/// (`system/platform/unix.h`, 16 B) and the C runtime's `struct timeb` on Windows
+/// (16 B), the WALL clock, distinct from [`z_clock_t`]'s monotonic one. The backend's
+/// type is `#[repr(C)]` with the same fields, so the by-value return matches
+/// without a shim.
+pub type z_time_t = os::WallTime;
 
-/// Read the wall clock (pico `z_time_now`) — `gettimeofday`, not the monotonic
-/// clock [`z_clock_now`] reads. The two are separate exports in pico because
-/// they answer different questions, and a program that timestamps a log line
-/// wants this one.
+/// Read the wall clock (pico `z_time_now`) — `gettimeofday` on a Unix and the system
+/// time on Windows, not the monotonic clock [`z_clock_now`] reads. The two are
+/// separate exports in pico because they answer different questions, and a program
+/// that timestamps a log line wants this one.
 #[no_mangle]
 pub unsafe extern "C" fn z_time_now() -> z_time_t {
-    let mut now = libc::timeval {
-        tv_sec: 0,
-        tv_usec: 0,
-    };
-    libc::gettimeofday(&mut now, std::ptr::null_mut());
-    now
+    os::wall_now()
 }
 
 /// Render the current LOCAL time into `buf` as `%Y-%m-%dT%H:%M:%SZ` (pico
 /// `z_time_now_as_str`), returning `buf`.
 ///
-/// `localtime` + `strftime` are called through libc rather than reimplemented.
-/// The format string is upstream's, but the VALUE depends on the process's
-/// timezone database and `TZ`, so a Rust-side formatter would agree with
-/// upstream only until the first non-UTC machine — and this is a log-line
-/// helper, where the mismatch would be silent. (Upstream's trailing `Z` on a
-/// LOCAL time is upstream's; reproducing it is fidelity, not endorsement.)
+/// The host's own zone rules do the conversion rather than a Rust reimplementation:
+/// the format string is upstream's, but the VALUE depends on the process's timezone
+/// database, so a Rust-side formatter would agree with upstream only until the first
+/// non-UTC machine — and this is a log-line helper, where the mismatch would be
+/// silent. (Upstream's trailing `Z` on a LOCAL time is upstream's; reproducing it is
+/// fidelity, not endorsement.)
 ///
 /// # Safety
 /// `buf` must be null or point at `buflen` writable bytes.
@@ -312,18 +276,10 @@ pub unsafe extern "C" fn z_time_now_as_str(
             return buf;
         }
         let now = z_time_now();
-        let secs = now.tv_sec;
-        let tm = libc::localtime(&secs);
-        if tm.is_null() {
-            *buf = 0;
-            return buf;
-        }
-        let fmt = c"%Y-%m-%dT%H:%M:%SZ";
-        let written = libc::strftime(buf, buflen as usize, fmt.as_ptr(), tm);
-        // `strftime` returns 0 when the result did not fit and leaves the
-        // buffer's contents unspecified; NUL-terminating keeps the returned
-        // pointer safe to pass to `printf`, which is what the caller does.
-        if written == 0 {
+        // A time that did not render or did not fit leaves the buffer's contents
+        // unspecified; NUL-terminating keeps the returned pointer safe to pass to
+        // `printf`, which is what the caller does.
+        if !os::wall_render_local(&now, buf, buflen as usize) {
             *buf = 0;
         }
         buf
@@ -343,7 +299,7 @@ pub unsafe extern "C" fn z_time_now_as_str(
 /// `time` must be null or a valid `z_time_t`.
 #[no_mangle]
 pub unsafe extern "C" fn z_time_elapsed_us(time: *mut z_time_t) -> c_ulong {
-    wall_elapsed(time, 1_000_000, 1)
+    wall_elapsed(time, Unit::Micro)
 }
 
 /// Milliseconds elapsed on the wall clock since `time` (pico
@@ -353,7 +309,7 @@ pub unsafe extern "C" fn z_time_elapsed_us(time: *mut z_time_t) -> c_ulong {
 /// As [`z_time_elapsed_us`].
 #[no_mangle]
 pub unsafe extern "C" fn z_time_elapsed_ms(time: *mut z_time_t) -> c_ulong {
-    wall_elapsed(time, 1_000, 1_000)
+    wall_elapsed(time, Unit::Milli)
 }
 
 /// Whole seconds elapsed on the wall clock since `time` (pico
@@ -363,33 +319,16 @@ pub unsafe extern "C" fn z_time_elapsed_ms(time: *mut z_time_t) -> c_ulong {
 /// As [`z_time_elapsed_us`].
 #[no_mangle]
 pub unsafe extern "C" fn z_time_elapsed_s(time: *mut z_time_t) -> c_ulong {
-    wall_elapsed(time, 1, 0)
+    wall_elapsed(time, Unit::Second)
 }
 
-/// A `timeval`'s microseconds as `i64`. `suseconds_t` is `i64` on Linux and `i32`
-/// on macOS, so this is an identity on one host and a widening on the other, and
-/// the two lints name exactly those two cases.
-#[allow(clippy::unnecessary_cast, clippy::useless_conversion)]
-fn usec_i64(usec: libc::suseconds_t) -> i64 {
-    usec as i64
-}
-
-/// The shared body of the three `z_time_elapsed_*` exports. `usec_div` of 0
-/// drops the sub-second part, which is upstream's `_s` arm.
-unsafe fn wall_elapsed(time: *mut z_time_t, sec_scale: i64, usec_div: i64) -> c_ulong {
+/// The shared body of the three `z_time_elapsed_*` exports.
+unsafe fn wall_elapsed(time: *mut z_time_t, unit: Unit) -> c_ulong {
     guard_val(0, || {
         if time.is_null() {
             return 0;
         }
-        let now = z_time_now();
-        let secs: i64 = now.tv_sec - (*time).tv_sec;
-        let mut elapsed = secs.saturating_mul(sec_scale);
-        if usec_div != 0 {
-            let usecs: i64 = usec_i64(now.tv_usec) - usec_i64((*time).tv_usec);
-            elapsed = elapsed.saturating_add(usecs / usec_div);
-        }
-        // The wrapping cast IS the contract here — see the `_us` doc.
-        elapsed as c_ulong
+        os::wall_elapsed(&*time, unit)
     })
 }
 
@@ -406,15 +345,11 @@ pub unsafe extern "C" fn z_realloc(ptr: *mut c_void, size: usize) -> *mut c_void
 /// Fill `len` bytes of `buf` with cryptographic-quality randomness (pico
 /// `z_random_fill`).
 ///
-/// `getrandom` in a retry loop, which is upstream's own body. The loop is not
-/// decoration: `getrandom` short-reads for a request above 256 bytes and
-/// returns `EINTR` on a signal, and pico's `while (getrandom(..) <= 0)` spins
-/// on both. wz advances the cursor on a short read instead of restarting, which
-/// is the same contract with the O(n^2) worst case removed.
-///
-/// On macOS it is `arc4random_buf`, as pico's own macOS arm is
-/// (`system.c:95-96`): `getrandom` does not exist there, and `arc4random_buf`
-/// cannot fail or short-read, so there is no loop to keep.
+/// The host's own source, as pico's backend for that host uses: `getrandom` in a
+/// retry loop on Linux (upstream's own body: it short-reads above 256 bytes and
+/// returns `EINTR` on a signal, and pico spins on both), `arc4random_buf` on macOS
+/// (`system.c:95-96`), and the operating system's generator on Windows. Each is in
+/// the backend; the export is the null and length guard.
 ///
 /// # Safety
 /// `buf` must be null or point at `len` writable bytes.
@@ -424,31 +359,9 @@ pub unsafe extern "C" fn z_random_fill(buf: *mut c_void, len: usize) {
         if buf.is_null() || len == 0 {
             return Z_OK;
         }
-        fill_random(buf, len);
+        os::random_fill(buf, len);
         Z_OK
     });
-}
-
-#[cfg(not(target_os = "macos"))]
-unsafe fn fill_random(buf: *mut c_void, len: usize) {
-    let mut filled = 0usize;
-    while filled < len {
-        let got = libc::getrandom(
-            buf.cast::<u8>().add(filled).cast::<c_void>(),
-            len - filled,
-            0,
-        );
-        if got > 0 {
-            filled += got as usize;
-        }
-        // A negative return is EINTR / EAGAIN; upstream spins, and so does
-        // this, because there is no error channel on the export.
-    }
-}
-
-#[cfg(target_os = "macos")]
-unsafe fn fill_random(buf: *mut c_void, len: usize) {
-    libc::arc4random_buf(buf, len);
 }
 
 /// A random byte (pico `z_random_u8`).
@@ -542,65 +455,38 @@ pub unsafe extern "C" fn z_bytes_from_static_buf(
 mod tests {
     use super::*;
 
-    /// The carry in `z_clock_advance_*` is ONE borrow, and it has to fire when
-    /// the nanosecond field crosses 1e9 — the single arithmetic step in this
-    /// family that a plausible implementation gets wrong by omitting.
+    /// The advance and the elapsed families name the same unit for the same suffix:
+    /// a reading advanced by N of a unit is that many of the unit away from the
+    /// reading it came from. Written against the exports alone, so it runs on every
+    /// host and pins the unit each export hands its backend; the exact carry and
+    /// clamp arithmetic of each host is tested in its own backend. The bounds are
+    /// one unit wide because a host that counts in ticks truncates.
     #[test]
-    fn advancing_a_clock_normalises_exactly_one_carry() {
-        let mut c = libc::timespec {
-            tv_sec: 100,
-            tv_nsec: 900_000_000,
-        };
-        // SAFETY: a live local.
-        unsafe { z_clock_advance_ms(&mut c, 200) };
-        assert_eq!(c.tv_sec, 101, "the carry fired");
-        assert_eq!(c.tv_nsec, 100_000_000);
-
-        // No carry when the sum stays below 1e9.
-        let mut d = libc::timespec {
-            tv_sec: 5,
-            tv_nsec: 1_000,
-        };
-        // SAFETY: a live local.
-        unsafe { z_clock_advance_us(&mut d, 999) };
-        assert_eq!((d.tv_sec, d.tv_nsec), (5, 1_000_000));
-
-        // The seconds arm touches only `tv_sec`.
-        let mut e = libc::timespec {
-            tv_sec: 7,
-            tv_nsec: 123,
-        };
-        // SAFETY: a live local.
-        unsafe { z_clock_advance_s(&mut e, 3) };
-        assert_eq!((e.tv_sec, e.tv_nsec), (10, 123));
-    }
-
-    /// `zp_clock_elapsed_*_since` CLAMPS a negative interval to zero and DROPS
-    /// the sub-second part in the `_s` arm. Both are upstream behaviours a
-    /// `Duration` subtraction would get wrong in opposite directions (panic,
-    /// and rounding up).
-    #[test]
-    fn elapsed_since_clamps_backwards_and_truncates_seconds() {
-        let mut early = libc::timespec {
-            tv_sec: 10,
-            tv_nsec: 0,
-        };
-        let mut late = libc::timespec {
-            tv_sec: 11,
-            tv_nsec: 500_000_000,
-        };
-        // SAFETY: live locals.
+    fn the_advance_and_elapsed_families_agree_on_their_units() {
+        // SAFETY: live locals throughout.
         unsafe {
-            assert_eq!(zp_clock_elapsed_ms_since(&mut late, &mut early), 1_500);
-            assert_eq!(zp_clock_elapsed_us_since(&mut late, &mut early), 1_500_000);
-            assert_eq!(
-                zp_clock_elapsed_s_since(&mut late, &mut early),
-                1,
-                "1.5 s truncates to 1, it does not round to 2"
+            let mut epoch = z_clock_now();
+            let mut at = epoch;
+            z_clock_advance_s(&mut at, 2);
+            assert!((1_999..=2_000).contains(&zp_clock_elapsed_ms_since(&mut at, &mut epoch)));
+            assert!((1..=2).contains(&zp_clock_elapsed_s_since(&mut at, &mut epoch)));
+
+            let mut at = epoch;
+            z_clock_advance_ms(&mut at, 1_500);
+            assert!(
+                (1_499_000..=1_500_000).contains(&zp_clock_elapsed_us_since(&mut at, &mut epoch))
             );
-            // Backwards: clamped, not wrapped.
-            assert_eq!(zp_clock_elapsed_ms_since(&mut early, &mut late), 0);
-            assert_eq!(zp_clock_elapsed_s_since(&mut early, &mut late), 0);
+            assert!((1_499..=1_500).contains(&zp_clock_elapsed_ms_since(&mut at, &mut epoch)));
+
+            let mut at = epoch;
+            z_clock_advance_us(&mut at, 2_500);
+            assert!((2_499..=2_500).contains(&zp_clock_elapsed_us_since(&mut at, &mut epoch)));
+
+            // Backwards is clamped, not wrapped, in every unit.
+            let mut later = epoch;
+            z_clock_advance_s(&mut later, 5);
+            assert_eq!(zp_clock_elapsed_ms_since(&mut epoch, &mut later), 0);
+            assert_eq!(zp_clock_elapsed_s_since(&mut epoch, &mut later), 0);
         }
     }
 
@@ -617,32 +503,10 @@ mod tests {
             assert_eq!(z_clock_elapsed_ms(&mut future), 0);
             assert_eq!(z_clock_elapsed_s(&mut future), 0);
 
+            // A reading taken before a real sleep is at least the sleep in the past.
             let mut past = z_clock_now();
-            z_clock_advance_s(&mut past, 0);
-            past.tv_sec -= 2;
-            assert!(z_clock_elapsed_ms(&mut past) >= 2_000);
-        }
-    }
-
-    /// The WALL clock family does NOT clamp — upstream casts a signed
-    /// difference to `unsigned long`, so a future timestamp wraps. Pinned
-    /// because it is the opposite of the monotonic family two tests up, and
-    /// "obviously both should clamp" is the plausible wrong repair.
-    #[test]
-    fn a_future_wall_time_wraps_rather_than_clamping() {
-        // SAFETY: a live local.
-        unsafe {
-            let now = z_time_now();
-            let mut future = libc::timeval {
-                tv_sec: now.tv_sec + 3_600,
-                tv_usec: now.tv_usec,
-            };
-            let elapsed = z_time_elapsed_s(&mut future);
-            assert!(
-                elapsed > u64::from(u32::MAX) as c_ulong,
-                "a future wall time must WRAP (got {elapsed}), which is what \
-                 upstream's unsigned cast does"
-            );
+            assert_eq!(z_sleep_ms(60), Z_OK);
+            assert!(z_clock_elapsed_ms(&mut past) >= 40);
         }
     }
 

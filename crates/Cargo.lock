@@ -2719,6 +2719,7 @@ dependencies = [
  "getrandom 0.2.17",
  "libc",
  "tokio",
+ "windows-sys 0.61.2",
  "wz-capi-core",
  "wz-cdylib-build",
  "wz-runtime-tokio",
