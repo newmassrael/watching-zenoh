@@ -42,31 +42,37 @@ const KEYEXPR: &str = "wz/connect-retry/demo";
 /// time its kernel takes added to this: see [`host_refusal_time`].
 const LISTENER_LATE_BY: Duration = Duration::from_millis(400);
 
-/// How long this host's kernel takes to REFUSE one connect to a loopback port
-/// nobody listens on, measured with a bare socket and no wz code.
+/// How long this host's kernel takes to REFUSE one connect to `port` on the
+/// loopback, a port nobody listens on, measured with a bare socket and no wz code.
 ///
-/// Linux and macOS answer a connect to a dead loopback port with a reset at once,
-/// so one attempt fails within a millisecond. Windows does not report the refusal
-/// on the first reset: its TCP stack retransmits the SYN twice at half-second
-/// intervals before it fails the connect, so a single attempt is outstanding for
-/// over a second. A listener that comes up inside that window is reached by the
-/// stack's own retransmit, and the "one attempt" then succeeds without wz having
-/// retried anything, which is the failure hosted Windows run 37123941999 reported
-/// for [`a_client_without_a_connect_budget_fails_on_its_one_attempt`]
-/// (the open returned `Z_OK` where a refusal was expected).
+/// Linux answers a connect to a dead loopback port with a reset at once, so one
+/// attempt fails within a millisecond. A hosted Windows runner measured 2.0 s for
+/// the same connect: its TCP stack keeps the attempt outstanding across SYN
+/// retransmits before it reports the refusal. A listener that comes up inside that
+/// window is reached by the stack's own retransmit, and the "one attempt" then
+/// succeeds without wz having retried anything, which is the failure hosted
+/// Windows run 37123941999 reported for
+/// [`a_client_without_a_connect_budget_fails_on_its_one_attempt`] (the open
+/// returned `Z_OK` where a refusal was expected). The mechanism is the stack's and
+/// is not read here; the duration is what was measured.
 ///
 /// The control leg is only a control when its listener appears AFTER the one
 /// attempt has failed, so the leg derives its delay from this measurement instead
 /// of assuming the kernel refuses at once. The number is printed, because it is
 /// what a reader needs to tell a host whose kernel is slow from a wz that retried.
-fn host_refusal_time() -> Duration {
-    let dead = wz_runtime_tokio_test_support::refusing_port();
+///
+/// The probe dials THE PORT THE LEG WILL DIAL, not a stand-in. A first version
+/// measured a held socket that was bound and never listening, which is a different
+/// state from a released port, and a hosted macOS runner reported 7.8 s for it; the
+/// leg's own target is what its client attempt will meet, so that is what is timed.
+fn host_refusal_time(port: u16) -> Duration {
+    let addr = std::net::SocketAddr::from(([127, 0, 0, 1], port));
     let started = Instant::now();
-    let outcome = std::net::TcpStream::connect_timeout(&dead.addr(), Duration::from_secs(30));
+    let outcome = std::net::TcpStream::connect_timeout(&addr, Duration::from_secs(30));
     let took = started.elapsed();
     assert!(
         outcome.is_err(),
-        "a connect to a bound, never-listening loopback port must be refused"
+        "a connect to a loopback port nobody listens on must be refused"
     );
     println!("refusal-probe: this host refuses one loopback connect in {took:?}");
     took
@@ -162,8 +168,8 @@ fn a_client_with_a_connect_budget_waits_for_a_late_listener() {
 fn a_client_without_a_connect_budget_fails_on_its_one_attempt() {
     // The listener must appear after the one attempt has FAILED, which on a host
     // whose kernel refuses slowly is later than a fixed 400 ms.
-    let late_by = host_refusal_time() + LISTENER_LATE_BY;
     let port = free_port();
+    let late_by = host_refusal_time(port) + LISTENER_LATE_BY;
     let listener = listen_later(port, late_by);
     let started = Instant::now();
     // SAFETY: fresh config and session.
