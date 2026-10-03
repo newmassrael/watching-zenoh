@@ -41,6 +41,9 @@ on:
       - "crates/wz-runtime-tokio/**"
       - "crates/wz-session-core/**"
       - "crates/wz-integration-tests/**"
+      - "crates/wz-capi-core/**"
+      - "crates/wz-capi-pico/**"
+      - "crates/wz-capi-c/**"
       - "crates/wz-host-interop-tests/**"
       - "crates/Cargo.toml"
       - "crates/Cargo.lock"
@@ -441,3 +444,76 @@ jobs:
             fi
           done < promoted.tsv
           echo "interop-gate on ${RUNNER_OS}: ${count} promoted test(s) passed"
+
+  # ── The C ABI crates on a host: an observation ─────────────────────────
+  #
+  # The platform tags do not claim the wz C ABI crates on a host (the open debt row
+  # `debt-capi-hosts` keeps that gap), and until this job nothing built them on one:
+  # the measurements that sized the gap were source-only checks from a Linux machine
+  # with the C build steps stubbed. This job is what turns them into hosted evidence.
+  # It builds the three crates, linking their `cdylib` outputs, which a source check
+  # never does, and runs each one's unit tests, and prints one verdict line for each.
+  #
+  # An observation, for the reason the interop job's is: a red here is a measurement
+  # of a debt that is registered, so it prints a line and never fails the run. On
+  # Windows the pico crate is expected to fail until its Win32 implementation exists,
+  # and that baseline is the first thing the job records. When a crate passes on a
+  # host twice in a row, the step can be promoted the way the interop tests are.
+  capi:
+    name: C ABI (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-latest
+            host: macos
+          - os: windows-latest
+            host: windows
+    env:
+      WZ_HOST_SELECTED: ${{ (inputs.host == '' || inputs.host == 'both' || inputs.host == matrix.host) && 'true' || 'false' }}
+    steps:
+      - name: Checkout (with submodules)
+        if: ${{ env.WZ_HOST_SELECTED == 'true' }}
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install Rust toolchain (pinned by rust-toolchain.toml)
+        if: ${{ env.WZ_HOST_SELECTED == 'true' }}
+        run: rustup show
+
+      - name: Cache Cargo registry + build artifacts
+        if: ${{ env.WZ_HOST_SELECTED == 'true' }}
+        uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
+          workspaces: |
+            crates -> target
+            vendor/sce -> target
+
+      - name: the C ABI crates on this host, observed (one verdict line per question)
+        if: ${{ env.WZ_HOST_SELECTED == 'true' }}
+        timeout-minutes: 35
+        continue-on-error: true
+        shell: bash
+        run: |
+          verdict() {
+            echo "capi-probe on ${RUNNER_OS}: $1 $2"
+            echo "capi-probe on ${RUNNER_OS}: $1 $2" >> "$GITHUB_STEP_SUMMARY"
+          }
+          overall=PASS
+          for crate in wz-capi-core wz-capi-pico wz-capi-c; do
+            built=FAIL
+            (cd crates && cargo build -p "$crate") && built=PASS
+            verdict "$crate builds:" "$built"
+            tested=SKIPPED
+            if [ "$built" = PASS ]; then
+              tested=FAIL
+              (cd crates && cargo test -p "$crate" --lib) && tested=PASS
+            fi
+            verdict "$crate unit tests:" "$tested"
+            [ "$tested" = PASS ] || overall=FAIL
+          done
+          [ "$overall" = PASS ]
