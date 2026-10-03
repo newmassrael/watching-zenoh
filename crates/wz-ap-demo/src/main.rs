@@ -106,7 +106,40 @@ use crate::args::{
 use crate::runner::run_demo;
 use crate::usage::{print_usage, ABOUT};
 
+/// The stack, in bytes, of the thread the demo does its work on.
+///
+/// A process's FIRST thread has a stack the host chose, not the demo: 8 MiB on
+/// Linux and macOS, 1 MiB on Windows. `--peer` polls the whole mesh future on that
+/// thread through `Runtime::block_on`, and an unoptimised build gives that future
+/// frames of tens of KiB each (measured on Linux, debug: `main` 69 KB, a face
+/// driver's constructor 57 KB, the peer's run-loop 49 KB, the shutdown wait 34 KB,
+/// 255 KB in all before the first subscriber is declared). Windows' debug codegen
+/// spends more per frame than that, and on a hosted Windows runner the peer died
+/// with `thread 'main' has overflowed its stack` before it dialled anything, while
+/// every other host passed. The budget is therefore the demo's own, the same on
+/// every host: the work runs on a thread this size.
+const DEMO_STACK_BYTES: usize = 16 * 1024 * 1024;
+
+/// Runs [`demo_main`] on a thread of [`DEMO_STACK_BYTES`] and reports its exit
+/// status. A panic in it is the process's exit status 101, as a panic on the first
+/// thread would have been.
 fn main() -> ExitCode {
+    let worker = std::thread::Builder::new()
+        .name("wz-ap-demo".to_owned())
+        .stack_size(DEMO_STACK_BYTES)
+        .spawn(demo_main);
+    match worker {
+        Ok(handle) => handle.join().unwrap_or(ExitCode::from(101)),
+        Err(e) => {
+            eprintln!(
+                "wz-ap-demo: cannot start the demo thread ({DEMO_STACK_BYTES} byte stack): {e}"
+            );
+            ExitCode::from(1)
+        }
+    }
+}
+
+fn demo_main() -> ExitCode {
     let args: Vec<String> = env::args().collect();
     // R2886 (open-debt item 824) — `--router` is a spelling of `--router-hat`,
     // resolved HERE, before any reader of the argv, so every later check sees
