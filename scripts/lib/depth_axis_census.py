@@ -1190,9 +1190,14 @@ CITATION = re.compile(r"\b((?:[A-Za-z0-9_.-]+/)*[A-Za-z0-9_.-]+\.(?:rs|c|h))(?::
 # and six differential files name its symbols), so it leaves the census with its
 # grade. UNREACHED and NO_SYMBOL hold at 0 and 2. READ off the census's own FAIL
 # line, `reached: 3 against a pin of 4`.
+# R3023 -- NO_SYMBOL 2 -> 0. `platform-macos` and `platform-windows` leave PARTIAL
+# for FOUNDATIONAL, and they were the two atoms this bucket held: target_os-routed
+# platform identity has no cargo-feature symbol for this derivation to own, which is
+# the honest record of what they were. READ off the census's own FAIL line,
+# `no-symbol: 0 against a pin of 2`; `reached` and `unreached` hold at 3 and 0.
 PIN_REACHED = 3
 PIN_UNREACHED = 0
-PIN_NO_SYMBOL = 2
+PIN_NO_SYMBOL = 0
 # R2534 — 346 -> 347. The atom is `adminspace-metrics` and the citation is the
 # one R2533 added to its reason when the owner declined a gzip dependency: the
 # reason now names `wz-session-core/src/adminspace.rs` as the file holding
@@ -2369,7 +2374,15 @@ PIN_NO_SYMBOL = 2
 # `platform-windows` gains a CORRECTION that cites none. READ off the census's
 # own FAIL line, `wz citations: 22 against a pin of 20`; `reached` and
 # `ambiguous` hold at 3 and 2.
-PIN_WZ_CITATIONS = 22
+#
+# R3023 -- 22 -> 16, two atoms. `platform-macos` and `platform-windows` leave PARTIAL
+# for FOUNDATIONAL, so their reasons leave this population and take their citations
+# with them: the 6 the census had counted across the two, of which the one macOS
+# correction above holds two anchors. The new reasons lead with a verdict that cites
+# no tracked wz file, and the old text below it no longer counts, because the census
+# grades PARTIAL atoms and neither is one. READ off the census's own FAIL line,
+# `wz citations: 16 against a pin of 22`; `reached` and `ambiguous` hold at 3 and 2.
+PIN_WZ_CITATIONS = 16
 # R2626 — 44 -> 42, and this one is worth a sentence because it HELD through
 # every earlier retirement in this run (R2612, R2622). `time-hlc`'s reason is the
 # first retiree carrying AMBIGUOUS citations of its own: its oldest clauses cite
