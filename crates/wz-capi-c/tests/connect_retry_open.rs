@@ -37,8 +37,40 @@ use wz_runtime_tokio_test_support::free_port;
 const KEYEXPR: &str = "wz/connect-retry/demo";
 
 /// How long each leg lets the dial fail before a listener appears. Long
-/// enough that a single immediate attempt has certainly been refused.
+/// enough that a single immediate attempt has certainly been refused, on a host
+/// whose kernel refuses at once. A host that does not refuse at once needs the
+/// time its kernel takes added to this: see [`host_refusal_time`].
 const LISTENER_LATE_BY: Duration = Duration::from_millis(400);
+
+/// How long this host's kernel takes to REFUSE one connect to a loopback port
+/// nobody listens on, measured with a bare socket and no wz code.
+///
+/// Linux and macOS answer a connect to a dead loopback port with a reset at once,
+/// so one attempt fails within a millisecond. Windows does not report the refusal
+/// on the first reset: its TCP stack retransmits the SYN twice at half-second
+/// intervals before it fails the connect, so a single attempt is outstanding for
+/// over a second. A listener that comes up inside that window is reached by the
+/// stack's own retransmit, and the "one attempt" then succeeds without wz having
+/// retried anything, which is the failure hosted Windows run 37123941999 reported
+/// for [`a_client_without_a_connect_budget_fails_on_its_one_attempt`]
+/// (the open returned `Z_OK` where a refusal was expected).
+///
+/// The control leg is only a control when its listener appears AFTER the one
+/// attempt has failed, so the leg derives its delay from this measurement instead
+/// of assuming the kernel refuses at once. The number is printed, because it is
+/// what a reader needs to tell a host whose kernel is slow from a wz that retried.
+fn host_refusal_time() -> Duration {
+    let dead = wz_runtime_tokio_test_support::refusing_port();
+    let started = Instant::now();
+    let outcome = std::net::TcpStream::connect_timeout(&dead.addr(), Duration::from_secs(30));
+    let took = started.elapsed();
+    assert!(
+        outcome.is_err(),
+        "a connect to a bound, never-listening loopback port must be refused"
+    );
+    println!("refusal-probe: this host refuses one loopback connect in {took:?}");
+    took
+}
 
 /// Open with `entries` inserted as json5 values, returning the result code and
 /// the session (in its gravestone state when the code is not `Z_OK`).
@@ -128,8 +160,11 @@ fn a_client_with_a_connect_budget_waits_for_a_late_listener() {
 /// default, `timeout_ms: 0`, and fails on its one attempt.
 #[test]
 fn a_client_without_a_connect_budget_fails_on_its_one_attempt() {
+    // The listener must appear after the one attempt has FAILED, which on a host
+    // whose kernel refuses slowly is later than a fixed 400 ms.
+    let late_by = host_refusal_time() + LISTENER_LATE_BY;
     let port = free_port();
-    let listener = listen_later(port, LISTENER_LATE_BY);
+    let listener = listen_later(port, late_by);
     let started = Instant::now();
     // SAFETY: fresh config and session.
     let (rc, session) = unsafe {
@@ -142,8 +177,9 @@ fn a_client_without_a_connect_budget_fails_on_its_one_attempt() {
     let SendSession(listen) = listener.join().expect("listener thread");
     assert_eq!(rc, Z_ENETWORK, "a client's default is one attempt");
     assert!(
-        waited < LISTENER_LATE_BY,
-        "the one attempt took {waited:?}; it must not have waited for the listener"
+        waited < late_by,
+        "the one attempt took {waited:?}; it must not have waited for the listener, \
+         which came up after {late_by:?}"
     );
     // SAFETY: the failed open left a gravestone, which drops as a no-op.
     unsafe {

@@ -519,12 +519,13 @@ jobs:
             # The integration tests drive the exported symbols through a real session over
             # the host's loopback, so they are the end-to-end answer where the unit tests
             # are the layout and arithmetic one. The ones that need a router binary are
-            # `#[ignore]`d and do not run here.
+            # `#[ignore]`d and do not run here. Output is not captured so that a test
+            # which measures the host (`refusal-probe:`) prints its number on a pass.
             if [ -d "crates/$crate/tests" ]; then
               integrated=SKIPPED
               if [ "$built" = PASS ]; then
                 integrated=FAIL
-                (cd crates && cargo test -p "$crate" --test '*') && integrated=PASS
+                (cd crates && cargo test -p "$crate" --test '*' -- --nocapture) && integrated=PASS
               fi
               verdict "$crate integration tests:" "$integrated"
               [ "$integrated" = PASS ] || overall=FAIL
