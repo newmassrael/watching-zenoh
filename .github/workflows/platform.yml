@@ -373,3 +373,51 @@ jobs:
           fi
           verdict "wz reaches Established against zenohd:" "$handshake"
           [ "$handshake" = PASS ] && [ "$all" = PASS ]
+
+      - name: Set up Python (the promoted-test list is read from the matrix gate)
+        if: ${{ !cancelled() && env.WZ_HOST_SELECTED == 'true' }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      # The promoted tests are the GATE half of this job. The step above observes and
+      # cannot fail the run; this one has no `continue-on-error`, so a red here fails the
+      # job and reaches the previous-run gate like any other. Which tests are promoted is
+      # `INTEROP_PROMOTED` in the matrix gate, which holds the two hosted runs that earned
+      # each one, and the list is printed by `--promoted HOST` so the workflow carries no
+      # second copy of it. It runs after the observation step because it needs what that
+      # step built (the demo and the router); a promoted test that cannot run for want of
+      # them is a red, not a skip.
+      - name: router interop on this host, the promoted tests (gate)
+        if: ${{ !cancelled() && env.WZ_HOST_SELECTED == 'true' }}
+        timeout-minutes: 10
+        shell: bash
+        run: |
+          host="$(echo "$RUNNER_OS" | tr '[:upper:]' '[:lower:]')"
+          exe=""
+          if [ "$RUNNER_OS" = Windows ]; then exe=".exe"; fi
+          bin="$PWD/target/zenohd-host/bin/zenohd$exe"
+          if command -v cygpath > /dev/null 2>&1; then bin="$(cygpath -m "$bin")"; fi
+          python scripts/lib/platform_surface_matrix.py --promoted "$host" > promoted.tsv
+          count=0
+          while IFS=$'\t' read -r target test; do
+            # Python writes a Windows line ending on a Windows runner; a name with a
+            # carriage return selects no test, and `cargo test` calls that a pass.
+            target="${target%$'\r'}"
+            test="${test%$'\r'}"
+            [ -n "$test" ] || continue
+            count=$((count + 1))
+            if [ ! -f "$bin" ]; then
+              echo "::error::the promoted test $test needs the router at $bin and the observation step did not build it"
+              exit 1
+            fi
+            log="$RUNNER_TEMP/promoted-$count.log"
+            (cd crates && WZ_ZENOHD_BIN="$bin" cargo test -p wz-host-interop-tests --test "$target" \
+              -- --ignored --exact "$test" --nocapture) > "$log" 2>&1 || { cat "$log"; exit 1; }
+            cat "$log"
+            if ! grep -q '^test result: ok\. 1 passed' "$log"; then
+              echo "::error::the promoted test $test did not run exactly one passing test"
+              exit 1
+            fi
+          done < promoted.tsv
+          echo "interop-gate on ${RUNNER_OS}: ${count} promoted test(s) passed"

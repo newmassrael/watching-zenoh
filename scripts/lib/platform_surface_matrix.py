@@ -46,7 +46,7 @@ say what was missing, and five defects sat in that silence:
 
 The population is the thing that was missing, so the population is derived.
 
-## Four arms
+## Five arms
 
   1. UPSTREAM, from the pin. A LINK is served on a host when BOTH the registry's
      `pub use zenoh_link_<crate> as ..` in `io/zenoh-link/src/lib.rs` @
@@ -85,6 +85,17 @@ The population is the thing that was missing, so the population is derived.
      not links (UDP multicast), each witnessed by an OPT-IN (`#[ignore]`) target
      that must select at least one opt-in test on the host and runs with
      `--ignored`, under the same one build, one deadline and one-pass rule.
+  5. INTEROP. R3020. What a host owes the router interop is the part of it whose
+     subject depends on the host, and the host-dependent surface of a transport is
+     its links. So every link wz serves on a leg host has an opt-in test in
+     `crates/wz-host-interop-tests` that dials a stock `zenohd` over it (`INTEROP`),
+     or a row that says why not (`INTEROP_GAPS`, one reason: the pin's default
+     `zenohd` omits the link, checked against the pin's own default feature list).
+     Each test must exist, compile on the host, and be run by the Platform
+     workflow's `interop` job. `INTEROP_PROMOTED` holds the two consecutive green
+     hosted runs that turn a test from an observation into a gate, and a promoted
+     test must be run by a step that is not `continue-on-error`; `--promoted HOST`
+     prints the list that step runs, so the workflow holds no second copy.
 
 The three graded hosts are the CI runners': Linux and Windows on x86_64, macOS
 on aarch64 (`macos-latest`). Linux is the reference host: its links are graded
@@ -102,7 +113,7 @@ it expands.
 
 ## Arms by lane
 
-`--selftest` needs nothing. `--check` grades arms 2-4 everywhere and arm 1
+`--selftest` needs nothing. `--check` grades arms 2-5 everywhere and arm 1
 where a checkout of the pinned zenoh is reachable, and SAYS so when it is not;
 `--require` turns that into a FAIL, which is how Layer Z runs it.
 """
@@ -118,6 +129,7 @@ import re
 import signal
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 from dataclasses import dataclass, field
@@ -224,6 +236,54 @@ PLANES: dict[str, tuple[frozenset[str], tuple[str, ...]]] = {
 #: `serial_link_e2e` instantiates it over an in-memory duplex on every host, so the
 #: target selects tests on Windows and a stale row here is a finding.
 EXEC_GAPS: dict[tuple[str, str], tuple[int, str]] = {}
+
+#: The crate that holds the router interop a host owes, and the workflow whose
+#: `interop` job runs it. Paths to READ, not claims about upstream.
+HOST_INTEROP_TESTS = pathlib.Path("crates/wz-host-interop-tests/tests")
+PLATFORM_WORKFLOW = pathlib.Path(".github/workflows/platform.yml")
+#: The pin's manifest that names what `zenohd` is built with by default.
+ZENOH_MANIFEST = pathlib.Path("zenoh") / "Cargo.toml"
+
+#: wz link kind -> the opt-in test in the host-interop crate that dials a stock `zenohd`
+#: over it. What a host owes the router interop is the part of it whose subject depends
+#: on the host, and the host-dependent surface of a transport is its links, so this is
+#: the INDEX of that part: every link wz serves on a host appears here or in
+#: `INTEROP_GAPS`, and every opt-in test of the crate appears here.
+INTEROP: dict[str, str] = {
+    "Tcp": "wz_client_reaches_established_against_a_stock_zenohd_on_this_host",
+    "Udp": "wz_client_reaches_established_against_a_stock_zenohd_over_udp_on_this_host",
+    "UdpReliable": "wz_client_reaches_established_against_a_stock_zenohd_over_udp_reliable_on_this_host",
+    "Tls": "wz_client_reaches_established_against_a_stock_zenohd_over_tls_on_this_host",
+    "Quic": "wz_client_reaches_established_against_a_stock_zenohd_over_quic_on_this_host",
+    "QuicDatagram": "wz_client_reaches_established_against_a_stock_zenohd_over_quic_datagram_on_this_host",
+    "UnixsockStream": "wz_client_reaches_established_against_a_stock_zenohd_over_unixsock_on_this_host",
+    "Ws": "wz_client_reaches_established_against_a_stock_zenohd_over_ws_on_this_host",
+}
+
+#: (kind, host) that wz serves and no interop test dials -> (reason, why). There is
+#: ONE reason, because a gap that is a debt is an open-debt item and not a row here
+#: (the two links that looked like debts, UdpReliable and QuicDatagram, were built
+#: as rows instead): `router-omits` says the default `zenohd` does not serve the link,
+#: so there is nothing to dial. It is a claim about the pin and the gate checks it
+#: against the pin's own default feature list, so a router that gains the link turns
+#: the row into a finding.
+ROUTER_OMITS = "router-omits"
+INTEROP_GAPS: dict[tuple[str, str], tuple[str, str]] = {
+    ("Serial", "macos"): (ROUTER_OMITS, "`transport_serial` is not in zenoh's default features"),
+    ("Serial", "windows"): (ROUTER_OMITS, "`transport_serial` is not in zenoh's default features"),
+    ("Unixpipe", "macos"): (ROUTER_OMITS, "`transport_unixpipe` is not in zenoh's default features"),
+}
+
+#: (kind, host) -> the two hosted runs, consecutive, in which that host's test passed.
+#: The owner's rule: an observation becomes a gate after two consecutive green hosted
+#: runs on its host, counted in runs and not in days. A promoted test is run by a step
+#: of the `interop` job that is NOT `continue-on-error`, so a red there fails the run
+#: and reaches the previous-run gate; the step reads its list from `--promoted HOST`.
+#: Evidence recorded by hand from the runs' own logs, and not derivable offline.
+INTEROP_PROMOTED: dict[tuple[str, str], tuple[int, int]] = {
+    ("Tcp", "macos"): (37102598609, 37105204094),
+    ("Tcp", "windows"): (37102598609, 37105204094),
+}
 
 
 # ─── Rust text: comments and literals masked, offsets kept ──────────────────
@@ -1071,6 +1131,230 @@ def leg_findings(
     return Leg(host, targets, frozenset(wanted), deferred, frozenset(ignored_targets)), out
 
 
+# ─── arm 5: the router interop a host owes ──────────────────────────────────
+
+_OVER = re.compile(r"_over_(\w+)_on_this_host$")
+_LINKS_ASSIGN = re.compile(r'^\s*links="([^"]*)"', re.M)
+
+
+def scheme_of(test: str) -> str | None:
+    """The link a host-interop test's name says it dials, or None for the TCP one.
+
+    The name is the contract between the test file and the workflow: the workflow
+    runs `..._over_<link>_on_this_host` once per token of its `links=` list, and a
+    link name's hyphen is the test name's underscore.
+    """
+    m = _OVER.search(test)
+    return m.group(1).replace("_", "-") if m else None
+
+
+def workflow_runs(test: str, workflow: str) -> bool:
+    """Whether the interop job runs `test`: the TCP one by name, the others by link."""
+    scheme = scheme_of(test)
+    if scheme is None:
+        return test in workflow
+    tokens: set[str] = set()
+    for m in _LINKS_ASSIGN.finditer(workflow):
+        tokens |= set(m.group(1).split())
+    return scheme in tokens
+
+
+def gate_step_findings(workflow: str, promoted: Mapping[tuple[str, str], tuple[int, int]]) -> list[str]:
+    """Whether the promoted tests are run by a step that can fail the job.
+
+    "Promoted to a gate" means the difference between a step that cannot fail the run
+    and one that can, so the table alone says nothing: a promoted row beside a workflow
+    whose only interop step is `continue-on-error` is an observation wearing a gate's
+    name. The step is the one that asks for the list (`--promoted`); it is found in the
+    workflow's text, since this gate runs on hosts where no YAML reader is installed.
+    """
+    if not promoted:
+        return []
+    # Comment lines are dropped first: the comment that explains a step sits ABOVE its
+    # `- name:` line and so belongs, by position, to the step before it.
+    code = "\n".join(l for l in workflow.splitlines() if not l.lstrip().startswith("#"))
+    blocks = re.split(r"(?m)^      - name: ", code)
+    asking = [b for b in blocks[1:] if "--promoted" in b]
+    if not asking:
+        return [
+            f"INTEROP_PROMOTED names {len(promoted)} test(s) and no step of {PLATFORM_WORKFLOW} "
+            f"asks `--promoted` for the list -- nothing gates them"
+        ]
+    out = []
+    for block in asking:
+        if re.search(r"(?m)^\s*continue-on-error:\s*true\b", block):
+            out.append(
+                f"the step of {PLATFORM_WORKFLOW} that runs the promoted tests is "
+                f"`continue-on-error`, so a red there cannot fail the job: that is an "
+                f"observation, not a gate"
+            )
+        if "cargo test" not in block or "--ignored" not in block:
+            out.append(
+                f"the promoted-tests step of {PLATFORM_WORKFLOW} does not run `cargo test ... "
+                f"--ignored`, which is how an opt-in test runs"
+            )
+    return out
+
+
+def router_default_kinds(root: pathlib.Path) -> frozenset[str] | None:
+    """The wz link kinds the pin's DEFAULT `zenohd` serves, read from the pin.
+
+    `zenohd` is built with `zenoh/default`, so what it can listen on is the
+    `transport_*` entries of that feature list. A kind maps to its upstream crate's
+    suffix (`axis.KINDS`), and the feature spells a hyphen either way, so both sides
+    are compared with hyphens folded to underscores. None when the manifest cannot be
+    read, which is not the same as "serves nothing".
+    """
+    path = root / ZENOH_MANIFEST
+    if not path.is_file():
+        return None
+    text = path.read_text(encoding="utf-8")
+    section = re.search(r"^\[features\]\s*$(.*?)(?=^\[)", text, re.S | re.M)
+    if section is None:
+        return None
+    default = re.search(r"^default\s*=\s*\[(.*?)\]", section.group(1), re.S | re.M)
+    if default is None:
+        return None
+    served = {t.replace("-", "_") for t in re.findall(r'"([^"]+)"', default.group(1))}
+    return frozenset(
+        kind
+        for kind, row in axis.KINDS.items()
+        if "transport_" + row[1].replace("-", "_") in served
+    )
+
+
+def interop_findings(
+    served: Mapping[str, frozenset[str]],
+    tests_on_host: Mapping[str, frozenset[str]],
+    all_tests: frozenset[str],
+    workflow: str,
+    router_default: frozenset[str] | None,
+    interop: Mapping[str, str],
+    gaps: Mapping[tuple[str, str], tuple[str, str]],
+    promoted: Mapping[tuple[str, str], tuple[int, int]],
+    hosts: Sequence[str] = LEG_HOSTS,
+) -> list[str]:
+    out: list[str] = []
+    for kind in sorted(served):
+        for host in hosts:
+            if host not in served[kind]:
+                continue
+            test, gap = interop.get(kind), gaps.get((kind, host))
+            if test is not None and gap is not None:
+                out.append(
+                    f"INTEROP_GAPS names ({kind}, {host}), but INTEROP now dials it with "
+                    f"`{test}` -- the gap is closed: drop the row"
+                )
+            elif test is not None:
+                if test not in tests_on_host.get(host, frozenset()):
+                    out.append(
+                        f"INTEROP names `{test}` for {kind}, and the host-interop crate "
+                        f"has no opt-in test of that name that compiles on {host}"
+                    )
+                if not workflow_runs(test, workflow):
+                    out.append(
+                        f"`{test}` is {kind}'s interop test and the `interop` job of "
+                        f"{PLATFORM_WORKFLOW} never runs it -- a test nothing runs reports "
+                        f"nothing"
+                    )
+                if router_default is not None and kind not in router_default:
+                    out.append(
+                        f"INTEROP dials a stock router over {kind}, and the pin's default "
+                        f"`zenohd` does not serve it -- the test cannot pass"
+                    )
+            elif gap is not None:
+                reason, _why = gap
+                if reason != ROUTER_OMITS:
+                    out.append(f"INTEROP_GAPS gives ({kind}, {host}) the reason `{reason}`, which is none this gate knows")
+                elif router_default is not None and kind in router_default:
+                    out.append(
+                        f"INTEROP_GAPS says the default `zenohd` omits {kind}, and the pin's "
+                        f"default feature list carries it -- build the row"
+                    )
+            else:
+                out.append(
+                    f"wz serves {kind} on {host} and nothing dials a stock router over it: "
+                    f"add an INTEROP row, or an INTEROP_GAPS row that says why not"
+                )
+    for (kind, host) in gaps:
+        if kind not in served or host not in served[kind]:
+            out.append(f"INTEROP_GAPS names ({kind}, {host}), which wz does not serve")
+    for kind, test in interop.items():
+        if kind not in served:
+            out.append(f"INTEROP names {kind}, which is not a link wz serves")
+        elif test not in all_tests:
+            out.append(f"INTEROP names `{test}` for {kind}, and no host-interop test has that name")
+    named = set(interop.values())
+    for test in sorted(all_tests - named):
+        out.append(
+            f"the host-interop crate has the opt-in test `{test}` and INTEROP names it for no "
+            f"link -- the table is the index of what a host owes, so add the row or drop the test"
+        )
+    for (kind, host), runs in promoted.items():
+        if kind not in interop or host not in served.get(kind, frozenset()):
+            out.append(f"INTEROP_PROMOTED names ({kind}, {host}), which has no interop test there")
+        if len(set(runs)) != 2 or not all(isinstance(r, int) and r > 0 for r in runs):
+            out.append(
+                f"INTEROP_PROMOTED ({kind}, {host}) needs two DISTINCT hosted run ids, got {runs!r}"
+            )
+        elif runs[0] > runs[1]:
+            out.append(f"INTEROP_PROMOTED ({kind}, {host}) lists its runs newest first; oldest first")
+    # A cause that is not about one host (a test the workflow never runs) is found once per
+    # host the link is served on; it is one finding.
+    return list(dict.fromkeys(out))
+
+
+def host_interop_tests(
+    cache: dict[pathlib.Path, SourceFile],
+) -> tuple[dict[str, frozenset[str]], frozenset[str], dict[str, str], list[str]]:
+    """The opt-in tests of the host-interop crate: those that compile on each leg host,
+    every one on any host, the test target each lives in, and what could not be read.
+
+    Derived from the crate's own `tests/` directory, so a new file is graded the day it
+    exists and not the day someone remembers to list it.
+    """
+    findings: list[str] = []
+    on_host: dict[str, set[str]] = {h: set() for h in LEG_HOSTS}
+    every: set[str] = set()
+    target_of: dict[str, str] = {}
+    directory = ROOT / HOST_INTEROP_TESTS
+    if not directory.is_dir():
+        return (
+            {h: frozenset() for h in LEG_HOSTS},
+            frozenset(),
+            {},
+            [f"there is no {HOST_INTEROP_TESTS}: the router interop a host owes has no crate"],
+        )
+    for path in sorted(directory.glob("*.rs")):
+        try:
+            files, missing = walk(path, lambda p: load(p, cache), pathlib.Path.is_file)
+        except (UnknownCfg, ValueError) as e:
+            findings.append(f"{rel(path)}: {e}")
+            continue
+        findings += [m for m in missing if m not in findings]
+        for host in HOSTS:
+            for name in runnable_tests(files, host, frozenset(), ignored=True):
+                every.add(name)
+                target_of[name] = path.stem
+                if host in on_host:
+                    on_host[host].add(name)
+    return {h: frozenset(v) for h, v in on_host.items()}, frozenset(every), target_of, findings
+
+
+def promoted_tests(
+    host: str,
+    interop: Mapping[str, str],
+    promoted: Mapping[tuple[str, str], tuple[int, int]],
+    target_of: Mapping[str, str],
+) -> list[tuple[str, str]]:
+    """The (target, test) pairs the interop job must GATE on `host`, in kind order."""
+    rows: list[tuple[str, str]] = []
+    for kind in sorted(interop):
+        if (kind, host) in promoted and interop[kind] in target_of:
+            rows.append((target_of[interop[kind]], interop[kind]))
+    return rows
+
+
 _RUNNING = re.compile(r"^\s*Running (?:tests[\\/])?([A-Za-z0-9_-]+)\.rs\b")
 _RESULT = re.compile(r"^test result: (ok|FAILED)\. (\d+) passed")
 
@@ -1535,6 +1819,20 @@ def check(require: bool, quiet: bool = False) -> tuple[Tree | None, dict[str, Le
         findings += got
         legs[host] = leg
 
+    # arm 5
+    on_host, every, _target_of, got = host_interop_tests(tree.cache)
+    findings += got
+    try:
+        workflow = (ROOT / PLATFORM_WORKFLOW).read_text(encoding="utf-8")
+    except OSError as e:
+        findings.append(f"cannot read {PLATFORM_WORKFLOW}: {e}")
+        workflow = ""
+    router_default = router_default_kinds(root) if root is not None else None
+    findings += interop_findings(
+        links, on_host, every, workflow, router_default, INTEROP, INTEROP_GAPS, INTEROP_PROMOTED
+    )
+    findings += gate_step_findings(workflow, INTEROP_PROMOTED)
+
     if findings:
         print(f"platform-surface-matrix: FAIL -- {len(findings)} finding(s)")
         for f in findings:
@@ -1911,6 +2209,95 @@ def selftest() -> int:
     leg, got = leg_findings("macos", served, pfiles.get, frozenset, ev, {}, {"UdpMulticast": (frozenset({"linux"}), ("multicast_host_roundtrip",))})
     expect("a plane another host owes is not this host's", ("multicast_host_roundtrip" in leg.targets, got), (False, []))
 
+    # arm 5: the router interop a host owes
+    t_tcp = "wz_client_reaches_established_against_a_stock_zenohd_on_this_host"
+    t_ws = "wz_client_reaches_established_against_a_stock_zenohd_over_ws_on_this_host"
+    t_ur = "wz_client_reaches_established_against_a_stock_zenohd_over_udp_reliable_on_this_host"
+    t_us = "wz_client_reaches_established_against_a_stock_zenohd_over_unixsock_on_this_host"
+    expect("tcp has no link in its name", scheme_of(t_tcp), None)
+    expect("a link's underscore is the scheme's hyphen", scheme_of(t_ur), "udp-reliable")
+    expect("reliable udp is not plain udp", scheme_of(t_ur) == "udp", False)
+    wf = 'x\n  links="ws udp udp-reliable"\n  if mac; then\n    links="$links unixsock"\n  fi\n  --exact ' + t_tcp + "\n"
+    expect("the workflow runs tcp by name", workflow_runs(t_tcp, wf), True)
+    expect("the workflow runs a link by its token", workflow_runs(t_ur, wf), True)
+    expect("a token is whole, not a prefix", workflow_runs(t_ur, 'links="ws udp"'), False)
+    expect("udp is not run because udp-reliable is", workflow_runs(
+        "wz_client_reaches_established_against_a_stock_zenohd_over_udp_on_this_host", 'links="ws udp-reliable"'), False)
+    expect("a link nothing names is not run", workflow_runs(t_ws, 'links="udp"'), False)
+    expect("the tcp test is not run by a links list", workflow_runs(t_tcp, 'links="ws"'), False)
+
+    served5 = {"Tcp": ALL_HOSTS, "Ws": ALL_HOSTS, "Serial": ALL_HOSTS, "UnixsockStream": UNIX_HOSTS}
+    inter5 = {"Tcp": t_tcp, "Ws": t_ws, "UnixsockStream": t_us}
+    gaps5 = {("Serial", "macos"): (ROUTER_OMITS, "x"), ("Serial", "windows"): (ROUTER_OMITS, "x")}
+    on5 = {"macos": frozenset({t_tcp, t_ws, t_us}), "windows": frozenset({t_tcp, t_ws})}
+    all5 = frozenset({t_tcp, t_ws, t_us})
+    wf5 = f'links="ws unixsock"\n--exact {t_tcp}\n'
+    default5 = frozenset({"Tcp", "Ws", "UnixsockStream"})
+
+    def arm5(**over: object) -> list[str]:
+        args = dict(served=served5, on=on5, every=all5, wf=wf5, default=default5, inter=inter5, gaps=gaps5, promoted={})
+        args.update(over)
+        return interop_findings(
+            args["served"], args["on"], args["every"], args["wf"], args["default"], args["inter"], args["gaps"], args["promoted"]  # type: ignore[arg-type]
+        )
+
+    expect("a consistent interop arm is green", arm5(), [])
+    expect("it is also green with no upstream checkout", arm5(default=None), [])
+    refused("a link nothing dials", arm5(inter={"Tcp": t_tcp, "UnixsockStream": t_us}), "nothing dials a stock router over it")
+    refused("an unserved gap row", arm5(gaps={**gaps5, ("Vsock", "macos"): (ROUTER_OMITS, "x")}), "which wz does not serve")
+    refused("a gap on a link that is dialed", arm5(gaps={**gaps5, ("Ws", "macos"): (ROUTER_OMITS, "x")}), "the gap is closed")
+    refused("a gap whose reason is unknown", arm5(gaps={**gaps5, ("Serial", "macos"): ("because", "x")}), "none this gate knows")
+    refused("router-omits is false when the pin carries the link", arm5(default=default5 | {"Serial"}), "build the row")
+    refused("a dialed link the router omits", arm5(default=frozenset({"Tcp", "UnixsockStream"})), "cannot pass")
+    refused("a test that does not compile on the host", arm5(on={**on5, "windows": frozenset({t_tcp})}), "no opt-in test of that name that compiles on windows")
+    refused("a test the workflow never runs", arm5(wf='links="ws"\n--exact ' + t_tcp), "never runs it")
+    refused("a test the table does not name", arm5(every=all5 | {"stray_on_this_host"}), "names it for no link")
+    refused("a table name with no test", arm5(every=frozenset({t_tcp, t_ws})), "no host-interop test has that name")
+    refused("a table kind wz does not serve", arm5(inter={**inter5, "Vsock": t_ws}), "not a link wz serves")
+    good = {("Tcp", "macos"): (101, 102)}
+    expect("promotion with two distinct ordered runs is green", arm5(promoted=good), [])
+    refused("promotion with one run twice", arm5(promoted={("Tcp", "macos"): (101, 101)}), "two DISTINCT hosted run ids")
+    refused("promotion with a non-run", arm5(promoted={("Tcp", "macos"): (101, 0)}), "two DISTINCT hosted run ids")
+    refused("promotion newest first", arm5(promoted={("Tcp", "macos"): (102, 101)}), "oldest first")
+    refused("promotion of a link with no test", arm5(promoted={("Serial", "macos"): (101, 102)}), "no interop test there")
+    refused("promotion on a host that does not serve it", arm5(promoted={("UnixsockStream", "windows"): (101, 102)}), "no interop test there")
+    expect(
+        "the gated list is the promoted tests, with their targets, in kind order",
+        promoted_tests("macos", inter5, {("Ws", "macos"): (1, 2), ("Tcp", "macos"): (1, 2)}, {t_tcp: "a", t_ws: "b"}),
+        [("a", t_tcp), ("b", t_ws)],
+    )
+    expect("another host's promotion is not this host's", promoted_tests("windows", inter5, good, {t_tcp: "a"}), [])
+    gate_ok = (
+        "jobs:\n    steps:\n      - name: observe\n        continue-on-error: true\n        run: cargo test x\n"
+        "      - name: gate\n        run: |\n          python m.py --promoted \"$h\"\n          cargo test -- --ignored --exact t\n"
+    )
+    expect("a promoted row with a step that can fail is green", gate_step_findings(gate_ok, good), [])
+    expect("no promotion needs no gating step", gate_step_findings("nothing here", {}), [])
+    refused("a promoted row with no step that asks for the list", gate_step_findings("      - name: observe\n        run: cargo test\n", good), "nothing gates them")
+    refused(
+        "a promoted row whose step is continue-on-error",
+        gate_step_findings(gate_ok.replace("      - name: gate\n", "      - name: gate\n        continue-on-error: true\n"), good),
+        "an observation, not a gate",
+    )
+    refused("a gating step that does not run the opt-in tests", gate_step_findings(gate_ok.replace("--ignored", ""), good), "does not run `cargo test")
+    commented = "      # prints --promoted HOST\n      - name: gate\n        run: |\n          python m.py --promoted h\n          cargo test -- --ignored\n"
+    expect("a comment naming the flag does not move the step's boundary", gate_step_findings("      - name: before\n        run: x\n" + commented, good), [])
+    with tempfile.TemporaryDirectory() as td:
+        manifest = pathlib.Path(td) / "zenoh"
+        manifest.mkdir()
+        (manifest / "Cargo.toml").write_text(
+            '[features]\nauth = []\ndefault = [\n  "transport_tcp",\n  "transport_quic_datagram",\n'
+            '  "transport_unixsock-stream",\n  "transport_udp",\n]\nunstable = []\n[dependencies]\n'
+        )
+        expect(
+            "the router's default links are read from the pin, hyphen or underscore",
+            router_default_kinds(pathlib.Path(td)),
+            frozenset({"Tcp", "QuicDatagram", "UnixsockStream", "Udp", "UdpReliable"}),
+        )
+        (manifest / "Cargo.toml").write_text("[package]\nname = 'x'\n")
+        expect("a manifest with no feature list is unreadable, not empty", router_default_kinds(pathlib.Path(td)), None)
+    expect("no manifest is unreadable, not empty", router_default_kinds(pathlib.Path("/nonexistent-pin")), None)
+
     # the runner's attribution of cargo's output
     lines = [
         "     Running tests/tls_e2e.rs (target/debug/deps/tls_e2e-1)",
@@ -2071,6 +2458,11 @@ def main(argv: list[str]) -> int:
     mode.add_argument("--selftest", action="store_true", help="drive every verdict on fixtures")
     mode.add_argument("--legs", metavar="HOST", help="print HOST's leg command without running it")
     mode.add_argument("--run", metavar="HOST", help="run HOST's leg; must be run ON that host")
+    mode.add_argument(
+        "--promoted",
+        metavar="HOST",
+        help="print the router-interop tests promoted to a gate on HOST, one `target<TAB>test` per line",
+    )
     ap.add_argument("--require", action="store_true", help="the upstream arm must run")
     ap.add_argument(
         "--only",
@@ -2087,6 +2479,19 @@ def main(argv: list[str]) -> int:
         return selftest()
     if args.check:
         return check(args.require)[2]
+    if args.promoted:
+        # The list a gating step runs. The tree is graded first, so a table that no longer
+        # matches the crate prints nothing instead of a list that is wrong.
+        tree, _legs, rc = check(require=False, quiet=True)
+        if rc != 0 or tree is None:
+            return rc or 2
+        _on_host, _every, target_of, _got = host_interop_tests(tree.cache)
+        host = args.promoted.lower()
+        if host not in LEG_HOSTS:
+            ap.error(f"--promoted names {host!r}; the hosts with a leg are {LEG_HOSTS}")
+        for target, test in promoted_tests(host, INTEROP, INTEROP_PROMOTED, target_of):
+            print(f"{target}\t{test}")
+        return 0
     host = (args.legs or args.run).lower()
     if args.run:
         return run(host, only)
