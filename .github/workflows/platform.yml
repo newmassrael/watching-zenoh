@@ -601,20 +601,21 @@ jobs:
           echo "layout-probe on ${RUNNER_OS} (${used}): the Rust types against the compiler's sizeof: ${verdict}" >> "$GITHUB_STEP_SUMMARY"
           [ "$verdict" = PASS ]
 
-      # The vendored zenoh-pico C library through its build script, on this host. An
-      # OBSERVATION. It is the build that stood between a Windows host and the corpus
-      # crate and every pico-backed test: a hosted run showed the script handing CMake
-      # the verbatim `\\?\` form of the vendored directory, and MSBuild failing with
-      # "Cannot open source file" on every translation unit. The script now asks
-      # `dunce` for the path, which is the ordinary drive-letter form on Windows. This
-      # step is where that is read, and until it has been green twice on both hosts it
-      # is a measurement and not a gate. It needs CMake, a C compiler and libclang,
-      # which the hosted runners carry, and which is what the line says when it is the
-      # thing that is missing.
-      - name: the vendored pico C library on this host (observation)
+      # The vendored zenoh-pico C library through its build script, on this host. A GATE
+      # since two consecutive hosted runs read it green on both hosts (Platform runs
+      # 37147312977 and 37148862140, from the job logs). It is the build that stood
+      # between a Windows host and the corpus crate and every pico-backed test, and it
+      # took three fixes the runs asked for in turn: a hosted run showed the script
+      # handing CMake the verbatim `\\?\` form of the vendored directory, and MSBuild
+      # failing with "Cannot open source file" on every translation unit (the script
+      # now asks `dunce` for the path); the next run stopped on a target with no
+      # platform macro (the mapping gained a Windows arm); and bindgen's clang read
+      # pico's inline function named `__asm__` as a keyword (the parse renames it). It
+      # needs CMake, a C compiler and libclang, which the hosted runners carry. A red
+      # here now fails the run: the vendored library stopped building on a host.
+      - name: the vendored pico C library on this host (gated)
         if: ${{ env.WZ_HOST_SELECTED == 'true' }}
         timeout-minutes: 25
-        continue-on-error: true
         shell: bash
         run: |
           built=FAIL
@@ -623,11 +624,14 @@ jobs:
           echo "pico-sys-probe on ${RUNNER_OS}: the vendored zenoh-pico C library builds: ${built}" >> "$GITHUB_STEP_SUMMARY"
           [ "$built" = PASS ]
 
-      # A zenoh-pico C program against the wz cdylib, on this host. An OBSERVATION, and
-      # the evidence the platform tags do not yet have: a program compiled against
+      # A zenoh-pico C program against the wz cdylib, on this host. A GATE since two
+      # consecutive hosted runs read it green on both hosts, forty checks and none
+      # failing (Platform runs 37147312977 and 37148862140, from the job logs). It is
+      # the evidence the platform tags did not have: a program compiled against
       # pico's OWN headers for this host (the ones the step above installs, with the
       # generated config), linked against the wz library in place of libzenohpico, and
-      # run. It covers the part of the C ABI that differs by host (the mutex, condition
+      # run. A red here now fails the run: a pico-typed value was written past its
+      # type, or a host-layer export stopped answering as pico's does. It covers the part of the C ABI that differs by host (the mutex, condition
       # variable, task, clock, wall time and random exports), places every value pico's
       # header types between guard bytes to catch a wrong layout where it happens, and
       # carries a control that must trip the guard. It opens no session; the sessions
@@ -636,10 +640,9 @@ jobs:
       # On Windows the program is compiled with MSVC's `cl` through the Visual Studio
       # environment, the compiler pico's own build uses: pico's Windows header names an
       # inline function `__asm__`, which a GNU-mode compiler reads as a keyword.
-      - name: a zenoh-pico C program against the wz cdylib (observation)
+      - name: a zenoh-pico C program against the wz cdylib (gated)
         if: ${{ env.WZ_HOST_SELECTED == 'true' }}
         timeout-minutes: 25
-        continue-on-error: true
         shell: bash
         run: |
           src="crates/wz-capi-pico/tests/c/pico_host_layer.c"
