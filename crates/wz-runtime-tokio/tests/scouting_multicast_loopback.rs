@@ -40,6 +40,50 @@ const GROUP: Ipv4Addr = Ipv4Addr::new(224, 0, 0, 224);
 const PORT: u16 = 7446;
 const PEER_LOCATOR: &str = "udp/127.0.0.1:7447";
 
+/// The socket every test here sends its foreign datagrams from: a responder
+/// answering a scout, or a stranger writing to the group.
+///
+/// Unpinned everywhere except Windows. There the operating system chooses the
+/// egress interface at send time from among several multicast-capable ones, and
+/// on a hosted runner a send has failed with `WSAENETUNREACH` (10051) at the
+/// responder's own `send_to`, in the control arm of
+/// `a_scouter_told_to_use_another_group_joins_that_group_and_only_that_group`:
+/// the arm that sends to a group nobody has joined, which that arm's comment
+/// calls harmless. Whether the missing member is the cause was not established;
+/// what was observed is that the failing send is this helper socket's and not
+/// wz's, and that the same run's OS probe sent unpinned, and pinned to the
+/// default-route address, without error. Pinning the SENDER to the address a route
+/// lookup returns takes the choice away from the OS and leaves what is under
+/// test, the scouter's own socket, exactly as it was. It is an experiment that
+/// only a Windows runner can judge: if the pin breaks an arm that passes today,
+/// it is reverted.
+async fn group_sender() -> UdpSocket {
+    let sock = UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0))
+        .await
+        .expect("bind ephemeral group sender");
+    #[cfg(windows)]
+    pin_egress_to_the_default_route(&sock);
+    sock
+}
+
+/// Windows only: set the sender's multicast egress to the local address a route
+/// lookup toward a documentation address returns (a UDP `connect` selects a
+/// source and sends nothing). A host with no such route keeps the OS's choice,
+/// which is the behaviour every other host has.
+#[cfg(windows)]
+fn pin_egress_to_the_default_route(sock: &UdpSocket) {
+    let probe = std::net::UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0)).expect("bind route probe");
+    if probe.connect((Ipv4Addr::new(192, 0, 2, 1), 9)).is_err() {
+        return;
+    }
+    let Ok(std::net::SocketAddr::V4(local)) = probe.local_addr() else {
+        return;
+    };
+    socket2::SockRef::from(sock)
+        .set_multicast_if_v4(local.ip())
+        .expect("pin the sender's multicast egress to the default-route address");
+}
+
 /// Build a `[S_MID_HELLO|L][version][cbyte][zid][VLE 1][locator]` Hello
 /// datagram carrying one locator (mirror of the layer3_hello wire shape).
 fn craft_hello_datagram(locator: &str) -> Vec<u8> {
@@ -149,9 +193,7 @@ async fn scout_discovers_peer_locator_over_multicast() {
     // Responder: an ephemeral socket (no group-port bind, so no
     // SO_REUSEADDR contention) that sends a Hello to the group once the
     // scout is in AwaitingHello.
-    let responder = UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0))
-        .await
-        .expect("bind ephemeral responder");
+    let responder = group_sender().await;
     let hello = craft_hello_datagram(PEER_LOCATOR);
     let responder_task = tokio::spawn(async move {
         tokio::time::sleep(Duration::from_millis(100)).await;
@@ -232,9 +274,7 @@ async fn a_scouter_told_to_use_another_group_joins_that_group_and_only_that_grou
         });
         let mut engine = new_scouting_engine(&actions);
 
-        let responder = UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0))
-            .await
-            .expect("bind ephemeral responder");
+        let responder = group_sender().await;
         let hello = craft_hello_datagram(MOVED_LOCATOR);
         let responder_task = tokio::spawn(async move {
             tokio::time::sleep(Duration::from_millis(100)).await;
@@ -325,9 +365,7 @@ async fn every_datagram_from_a_real_group_lands_in_exactly_one_accumulator() {
     });
     let mut engine = new_scouting_engine(&actions);
 
-    let stranger = UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0))
-        .await
-        .expect("bind ephemeral sender");
+    let stranger = group_sender().await;
     let sent: Vec<Vec<u8>> = vec![
         // 1. a usable Hello -> `hellos`
         craft_hello_datagram(PEER_LOCATOR),
@@ -419,9 +457,7 @@ async fn an_empty_answer_from_the_group_does_not_end_an_exit_on_first_window() {
     });
     let mut engine = new_scouting_engine(&actions);
 
-    let stranger = UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0))
-        .await
-        .expect("bind ephemeral sender");
+    let stranger = group_sender().await;
     let empty = craft_locator_less_hello(&[0xA1]);
     let usable = craft_hello_datagram(PEER_LOCATOR);
     let sender = tokio::spawn(async move {
@@ -479,7 +515,7 @@ mod round2 {
     use std::net::Ipv4Addr;
     use std::time::Duration;
 
-    use tokio::net::{TcpListener, UdpSocket};
+    use tokio::net::TcpListener;
 
     use wz_runtime_tokio::link_pipeline::wire_tcp_stream;
     use wz_runtime_tokio::runtime_impl::TokioTime;
@@ -573,9 +609,7 @@ mod round2 {
 
         // Responder: an ephemeral socket that replies with a Hello carrying
         // the TCP session locator once the scout is in AwaitingHello.
-        let responder = UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0))
-            .await
-            .expect("bind ephemeral responder");
+        let responder = super::group_sender().await;
         let hello = super::craft_hello_datagram(&session_locator);
         let responder_task = tokio::spawn(async move {
             tokio::time::sleep(Duration::from_millis(100)).await;
@@ -657,7 +691,7 @@ mod round3_tls {
     use std::net::Ipv4Addr;
     use std::time::Duration;
 
-    use tokio::net::{TcpListener, UdpSocket};
+    use tokio::net::TcpListener;
     use tokio_rustls::rustls::pki_types::ServerName;
 
     use wz_runtime_tokio::runtime_impl::TokioTime;
@@ -714,9 +748,7 @@ mod round3_tls {
 
         // Responder: an ephemeral socket that replies with a Hello carrying
         // the TLS session locator once the scout is in AwaitingHello.
-        let responder = UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0))
-            .await
-            .expect("bind ephemeral responder");
+        let responder = super::group_sender().await;
         let hello = super::craft_hello_datagram(&session_locator);
         let responder_task = tokio::spawn(async move {
             tokio::time::sleep(Duration::from_millis(100)).await;
