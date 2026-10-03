@@ -294,6 +294,16 @@ INTEROP_PROMOTED: dict[tuple[str, str], tuple[int, int]] = {
     ("Tls", "windows"): (37105204094, 37109725746),
     ("Quic", "macos"): (37105204094, 37109725746),
     ("Quic", "windows"): (37105204094, 37109725746),
+    # The rows first observed in 37109725746 and green again in 37111623432: reliable UDP
+    # and QUIC datagram on both hosts, a Unix socket on macOS (Windows does not serve it).
+    # With these every row of INTEROP is promoted on every host that owes it. The second
+    # run is also the first in which the pin was READ from the builder script and the
+    # promoted-tests step ran five tests, and both passed on both hosts.
+    ("UdpReliable", "macos"): (37109725746, 37111623432),
+    ("UdpReliable", "windows"): (37109725746, 37111623432),
+    ("QuicDatagram", "macos"): (37109725746, 37111623432),
+    ("QuicDatagram", "windows"): (37109725746, 37111623432),
+    ("UnixsockStream", "macos"): (37109725746, 37111623432),
 }
 
 
@@ -1352,6 +1362,34 @@ def host_interop_tests(
     return {h: frozenset(v) for h, v in on_host.items()}, frozenset(every), target_of, findings
 
 
+def interop_summary(
+    served: Mapping[str, frozenset[str]],
+    interop: Mapping[str, str],
+    gaps: Mapping[tuple[str, str], tuple[str, str]],
+    promoted: Mapping[tuple[str, str], tuple[int, int]],
+    hosts: Sequence[str] = LEG_HOSTS,
+) -> list[str]:
+    """Where each host stands on the router interop it owes, in numbers and by name.
+
+    Whether a host's subset is complete is a question the owner asked in advance of
+    closing anything, so the answer is printed by the gate that holds the tables, not
+    counted by hand from them: owed rows, how many are gated, which are still only
+    observed, and which links no stock router can be dialed over (with the reason).
+    """
+    out: list[str] = []
+    for host in hosts:
+        owed = sorted(k for k in served if host in served[k] and k in interop)
+        gated = [k for k in owed if (k, host) in promoted]
+        observed = [k for k in owed if (k, host) not in promoted]
+        omitted = sorted(k for (k, h) in gaps if h == host)
+        line = f"interop {host}: {len(owed)} owed, {len(gated)} gated"
+        line += f", {len(observed)} observed ({', '.join(observed)})" if observed else ", none observed only"
+        if omitted:
+            line += f"; router omits {', '.join(omitted)}"
+        out.append(line)
+    return out
+
+
 def promoted_tests(
     host: str,
     interop: Mapping[str, str],
@@ -1866,6 +1904,8 @@ def check(require: bool, quiet: bool = False) -> tuple[Tree | None, dict[str, Le
             print(f"    leg {host}: {len(leg.targets)} target(s): {', '.join(leg.targets)}")
             for d in leg.deferred:
                 print(f"    leg {host} DOES NOT EXECUTE {d}")
+        for line in interop_summary(links, INTEROP, INTEROP_GAPS, INTEROP_PROMOTED):
+            print(f"    {line}")
     return tree, legs, 0
 
 
@@ -2278,6 +2318,19 @@ def selftest() -> int:
         [("a", t_tcp), ("b", t_ws)],
     )
     expect("another host's promotion is not this host's", promoted_tests("windows", inter5, good, {t_tcp: "a"}), [])
+    expect(
+        "the summary counts owed, gated and observed rows and names the omitted links",
+        interop_summary(served5, inter5, gaps5, {("Tcp", "macos"): (1, 2), ("Ws", "macos"): (1, 2)}),
+        [
+            "interop macos: 3 owed, 2 gated, 1 observed (UnixsockStream); router omits Serial",
+            "interop windows: 2 owed, 0 gated, 2 observed (Tcp, Ws); router omits Serial",
+        ],
+    )
+    expect(
+        "a fully gated host says so",
+        interop_summary({"Tcp": ALL_HOSTS}, {"Tcp": t_tcp}, {}, {("Tcp", "macos"): (1, 2), ("Tcp", "windows"): (1, 2)}),
+        ["interop macos: 1 owed, 1 gated, none observed only", "interop windows: 1 owed, 1 gated, none observed only"],
+    )
     gate_ok = (
         "jobs:\n    steps:\n      - name: observe\n        continue-on-error: true\n        run: cargo test x\n"
         "      - name: gate\n        run: |\n          python m.py --promoted \"$h\"\n          cargo test -- --ignored --exact t\n"
