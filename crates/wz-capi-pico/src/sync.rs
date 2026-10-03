@@ -900,6 +900,57 @@ mod tests {
         assert_eq!(std::mem::size_of::<z_owned_condvar_t>(), 48);
     }
 
+    // The constants above are a claim read off a header; this is the measurement. pico's
+    // unix layer types its mutex, condvar and task attribute as the host's `pthread_*_t`
+    // (system/platform/unix.h), so the host C compiler's own `sizeof` is the layout pico
+    // programs see, and the Rust owned types must be exactly that large on every host
+    // that builds them. A missing compiler fails the test; it is never a skip.
+    #[cfg(unix)]
+    #[test]
+    fn owned_sync_types_match_the_host_c_compilers_pthread_sizes() {
+        use std::io::Write;
+        use std::process::{Command, Stdio};
+
+        let source = "#include <pthread.h>\n#include <stdio.h>\n\
+                      int main(void) { printf(\"%zu %zu %zu\\n\", sizeof(pthread_attr_t), \
+                      sizeof(pthread_mutex_t), sizeof(pthread_cond_t)); return 0; }\n";
+        let exe =
+            std::env::temp_dir().join(format!("wz_capi_pico_pthread_sizes_{}", std::process::id()));
+        let cc = std::env::var("CC").unwrap_or_else(|_| "cc".to_string());
+        let mut compile = Command::new(&cc)
+            .args(["-x", "c", "-", "-o"])
+            .arg(&exe)
+            .stdin(Stdio::piped())
+            .spawn()
+            .unwrap_or_else(|e| panic!("the host C compiler `{cc}` could not be started: {e}"));
+        compile
+            .stdin
+            .take()
+            .expect("the compiler's stdin is piped")
+            .write_all(source.as_bytes())
+            .expect("the probe source reaches the compiler");
+        assert!(compile.wait().expect("the compiler finishes").success());
+        let out = Command::new(&exe)
+            .output()
+            .expect("the compiled probe runs");
+        std::fs::remove_file(&exe).expect("the probe binary is removed");
+        assert!(out.status.success());
+        let measured: Vec<usize> = String::from_utf8(out.stdout)
+            .expect("the probe prints ASCII")
+            .split_whitespace()
+            .map(|n| n.parse().expect("the probe prints three integers"))
+            .collect();
+        assert_eq!(
+            measured,
+            [
+                std::mem::size_of::<z_task_attr_t>(),
+                std::mem::size_of::<z_owned_mutex_t>(),
+                std::mem::size_of::<z_owned_condvar_t>(),
+            ],
+            "pthread_attr_t, pthread_mutex_t, pthread_cond_t as the host C compiler sizes them"
+        );
+    }
+
     /// The one place the macOS condvar wait differs, tested where the tests run.
     #[test]
     fn a_relative_deadline_is_the_interval_to_the_instant_or_zero() {
