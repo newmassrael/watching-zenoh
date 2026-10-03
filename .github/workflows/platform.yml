@@ -299,12 +299,32 @@ jobs:
         if: ${{ env.WZ_HOST_SELECTED == 'true' }}
         run: rustup show
 
-      - name: Install Rust toolchain 1.97.1 (the channel zenoh 1.10.1 pins)
+      - name: Read the router's pin (version from the builder script, channel from its release)
+        # The router version and the channel it is built on were literals here, which is
+        # one fact in two places: the builder script declares the version, and the release
+        # declares its own channel. Moving the pin would have left the host legs testing
+        # against the old router and saying nothing. The version is READ from the script
+        # that owns it; the channel is read from that release's `rust-toolchain.toml`, the
+        # same file the script reads, over plain HTTPS (no token, no API quota). An empty
+        # answer fails the step, so a changed shape cannot become a build with no version.
+        if: ${{ env.WZ_HOST_SELECTED == 'true' }}
+        shell: bash
+        run: |
+          version="$(grep -m1 '^ZENOHD_VERSION=' scripts/build-zenohd.sh | sed 's/.*:-\([0-9][0-9.]*\)}.*/\1/')"
+          [[ "$version" =~ ^[0-9]+(\.[0-9]+)+$ ]] || { echo "::error::scripts/build-zenohd.sh declares no ZENOHD_VERSION default (read: ${version})"; exit 1; }
+          curl -fsSL --retry 3 "https://raw.githubusercontent.com/eclipse-zenoh/zenoh/${version}/rust-toolchain.toml" > zenoh-toolchain.toml
+          channel="$(sed -n 's/^[[:space:]]*channel[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' zenoh-toolchain.toml | head -1)"
+          [ -n "$channel" ] || { echo "::error::zenoh ${version} declares no toolchain channel"; exit 1; }
+          echo "ZENOHD_VERSION=${version}" >> "$GITHUB_ENV"
+          echo "ZENOHD_CHANNEL=${channel}" >> "$GITHUB_ENV"
+          echo "router pin: zenohd ${version} on channel ${channel}"
+
+      - name: Install the router's Rust toolchain
         # The router is built on its own release's channel, as ci.yml does for the
         # Linux build: building it on another is not a reproducibility trade.
         if: ${{ env.WZ_HOST_SELECTED == 'true' }}
         shell: bash
-        run: rustup toolchain install 1.97.1 --profile minimal
+        run: rustup toolchain install "$ZENOHD_CHANNEL" --profile minimal
 
       - name: Cache Cargo registry + build artifacts
         if: ${{ env.WZ_HOST_SELECTED == 'true' }}
@@ -348,8 +368,8 @@ jobs:
           verdict "wz-ap-demo builds:" "$demo"
           (cd crates && cargo test -p wz-host-interop-tests --no-run) && harness=PASS
           verdict "host interop tests compile:" "$harness"
-          cargo +1.97.1 install zenohd --version 1.10.1 --locked --root "$root" && router=PASS
-          verdict "zenohd 1.10.1 builds:" "$router"
+          cargo "+$ZENOHD_CHANNEL" install zenohd --version "$ZENOHD_VERSION" --locked --root "$root" && router=PASS
+          verdict "zenohd $ZENOHD_VERSION builds:" "$router"
           all=PASS
           if [ "$demo$harness$router" = PASSPASSPASS ]; then
             handshake=FAIL
