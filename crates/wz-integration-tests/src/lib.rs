@@ -2037,21 +2037,56 @@ pub mod common {
     /// cursor it sets is then the very place the child's next write goes. So the
     /// buffer must be larger than any capture a test takes, and one megabyte is
     /// two orders above the largest (a demo's stderr at `RUST_LOG=info`). A
-    /// capture that ever outgrows it would be read in several calls, and the
-    /// child writing between two of them would write over its own output.
+    /// capture that outgrows it is REFUSED on Windows (see [`read_whole`]): it
+    /// would be read in several calls, and the child writing between two of them
+    /// would write over its own output.
     #[cfg(unix)]
     const CAPTURE_READ_CHUNK: usize = 8192;
     #[cfg(windows)]
     const CAPTURE_READ_CHUNK: usize = 1 << 20;
 
-    pub fn read_captured(file: &mut File) -> String {
+    /// Whether a read that fills the buffer is an error on this host.
+    ///
+    /// It is on Windows, where the cursor a read leaves is shared with the child's
+    /// handle (see [`read_at`]); on Unix a read leaves the cursor alone and a
+    /// capture of any size is read in as many calls as it takes.
+    const FULL_READ_IS_AN_ERROR: bool = cfg!(windows);
+
+    /// Why a capture could not be read whole.
+    #[derive(Debug, PartialEq, Eq)]
+    pub struct CaptureTooLarge {
+        /// The read size, which the capture filled.
+        pub chunk: usize,
+    }
+
+    /// The bytes of `file`, read from the start in reads of `chunk`.
+    ///
+    /// When `full_read_is_an_error` is set, a read that FILLS the buffer is refused
+    /// instead of continued, because a read that returns as much as it was asked for
+    /// has not shown that it reached the end of the file. On Windows the cursor such
+    /// a read leaves is mid-file and shared with the child that is writing the
+    /// capture, so continuing would move the place the child writes next, silently,
+    /// and the output would be corrupted without a sign. A capture exactly `chunk`
+    /// long is refused too, since that read cannot be told from a longer one.
+    ///
+    /// The rule is a parameter and not a `cfg` inside the loop so that it is
+    /// testable on every host: only the Windows build sets it, and a rule only a
+    /// Windows build can run is one nothing here would exercise.
+    pub fn read_whole(
+        file: &File,
+        chunk: usize,
+        full_read_is_an_error: bool,
+    ) -> Result<Vec<u8>, CaptureTooLarge> {
         let mut bytes = Vec::new();
-        let mut buf = vec![0u8; CAPTURE_READ_CHUNK];
+        let mut buf = vec![0u8; chunk];
         let mut at = 0u64;
         loop {
             match read_at(file, &mut buf, at) {
                 Ok(0) => break,
                 Ok(n) => {
+                    if full_read_is_an_error && n == buf.len() {
+                        return Err(CaptureTooLarge { chunk });
+                    }
                     bytes.extend_from_slice(&buf[..n]);
                     at += n as u64;
                 }
@@ -2059,6 +2094,20 @@ pub mod common {
                 Err(e) => panic!("read captured bytes at offset {at}: {e}"),
             }
         }
+        Ok(bytes)
+    }
+
+    pub fn read_captured(file: &mut File) -> String {
+        let bytes =
+            read_whole(file, CAPTURE_READ_CHUNK, FULL_READ_IS_AN_ERROR).unwrap_or_else(|e| {
+                panic!(
+                    "a capture filled a {}-byte read: on this host a read leaves the cursor it \
+                 shares with the child's handle mid-file, so a capture this large cannot be \
+                 read without moving the place the child writes next. Capture to a pipe read \
+                 by a thread instead, or raise CAPTURE_READ_CHUNK past the capture's size",
+                    e.chunk
+                )
+            });
         String::from_utf8_lossy(&bytes).into_owned()
     }
 
@@ -6642,9 +6691,66 @@ pub mod common {
 mod tests {
     use super::common::{
         configured_zid_value, face_zid_value, has_zid_shape, hello_zid_value, line_with,
-        parse_zenoh_admin_sessions, still_running_reason, wait_for_tcp_accept_alive, ChildGuard,
-        ZenohSession, ZENOHD_TCP_ACCEPT_BUDGET,
+        parse_zenoh_admin_sessions, read_whole, still_running_reason, wait_for_tcp_accept_alive,
+        CaptureTooLarge, ChildGuard, ZenohSession, ZENOHD_TCP_ACCEPT_BUDGET,
     };
+
+    /// A capture file holding `bytes`, as the tests make one: an anonymous temporary
+    /// file written through a duplicate handle, so the writer and the reader share
+    /// the file the way a test and its child do.
+    fn capture_holding(bytes: &[u8]) -> std::fs::File {
+        use std::io::Write as _;
+        let reader = tempfile::tempfile().expect("a temporary capture file");
+        let mut writer = reader
+            .try_clone()
+            .expect("a duplicate handle to write through");
+        writer.write_all(bytes).expect("write the capture");
+        reader
+    }
+
+    /// THE WINDOWS RULE, held on every host: a read that fills its buffer has not
+    /// shown that it reached the end of the file, and on Windows the cursor it
+    /// leaves is shared with the child that is writing, so a capture that large is
+    /// REFUSED instead of read in several calls.
+    ///
+    /// Three sizes decide it, against a four-byte read: a capture that fits with
+    /// room to spare reads whole; one that is exactly the read size is refused,
+    /// because that read cannot be told from a longer file's; and a longer one is
+    /// refused. The control is the same three files with the rule off, which read
+    /// whole in as many calls as they take, as Unix does: without it the refusals
+    /// could be a reader that never worked.
+    #[test]
+    fn a_capture_that_fills_the_read_is_refused_when_a_full_read_is_an_error() {
+        let fits = capture_holding(b"abc");
+        assert_eq!(read_whole(&fits, 4, true), Ok(b"abc".to_vec()));
+        let exact = capture_holding(b"abcd");
+        assert_eq!(
+            read_whole(&exact, 4, true),
+            Err(CaptureTooLarge { chunk: 4 })
+        );
+        let longer = capture_holding(b"abcdefghij");
+        assert_eq!(
+            read_whole(&longer, 4, true),
+            Err(CaptureTooLarge { chunk: 4 })
+        );
+
+        for (file, want) in [
+            (&fits, &b"abc"[..]),
+            (&exact, &b"abcd"[..]),
+            (&longer, &b"abcdefghij"[..]),
+        ] {
+            assert_eq!(read_whole(file, 4, false).as_deref(), Ok(want));
+        }
+    }
+
+    /// An empty capture is a capture, not an error, with the rule on: the read
+    /// returns nothing and nothing was filled.
+    #[test]
+    fn an_empty_capture_reads_as_empty_under_either_rule() {
+        let empty = capture_holding(b"");
+        assert_eq!(read_whole(&empty, 4, true), Ok(Vec::new()));
+        assert_eq!(read_whole(&empty, 4, false), Ok(Vec::new()));
+    }
 
     /// R2118 (open-debt item 507) — the stalled message offers HYPOTHESES and
     /// reaches no verdict.
