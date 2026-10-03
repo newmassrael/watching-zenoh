@@ -538,10 +538,13 @@ jobs:
           done
           [ "$overall" = PASS ]
 
-      # The Windows layouts, measured by a C compiler on this host. An OBSERVATION: it
-      # is new, so it has not read green twice, and a compiler on a hosted runner is
-      # not guaranteed to find the Windows SDK headers without the Visual Studio
-      # environment, so the first thing it records may be that it could not compile.
+      # The Windows layouts, measured by a C compiler on this host. A GATE since two
+      # consecutive hosted runs read it green (Platform runs 37132181187 and
+      # 37147312977, from the job logs): clang found the Windows SDK headers without the
+      # Visual Studio environment and its `sizeof` equalled the Rust types' sizes both
+      # times. It began as an observation because a compiler on a hosted runner was not
+      # guaranteed to find those headers. A red here now fails the run, and it means a
+      # Rust type changed size or the runner's compiler stopped finding the SDK.
       #
       # pico's Windows backend types its mutex, condition variable, task handle and
       # attribute as pointer-sized values, its clock as a `LARGE_INTEGER` and its
@@ -551,10 +554,9 @@ jobs:
       # types and compares it with what the Rust test prints for its own types, so
       # the comparison is a build-to-build fact and not a pair of literals. The Unix
       # hosts already do this inside a unit test (the host C compiler's pthread sizes).
-      - name: the Windows layouts against the host's C compiler (observation)
+      - name: the Windows layouts against the host's C compiler (gated)
         if: ${{ env.WZ_HOST_SELECTED == 'true' && runner.os == 'Windows' }}
         timeout-minutes: 15
-        continue-on-error: true
         shell: bash
         run: |
           probe="$(cygpath -u "$RUNNER_TEMP")/layout_probe"
