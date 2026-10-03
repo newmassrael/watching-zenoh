@@ -49,9 +49,12 @@ use std::time::Duration;
 use wz_runtime_tokio::{LinkDriver, LinkEvent, McastSocketConfig, Reliability, TxFrame, UdpDriver};
 
 const GROUP: Ipv4Addr = Ipv4Addr::new(224, 0, 0, 224);
-// Distinct from the other multicast tests' group ports (7446, 7448, 7449) so an
-// `--ignored` run never contends with them on a bind.
-const PORT: u16 = 7453;
+// A multicast group is machine-wide, so two tests on one (group, port) read each
+// other's datagrams whenever the scheduler overlaps them. This port is in the
+// 17xxx range the scouting tests moved to after exactly that collision, and no
+// other test binds it: `multicast_address_collision_gate.py` is what says so, and
+// it refused the first choice here (7453, already the qos test's).
+const PORT: u16 = 17490;
 const PAYLOAD: &[u8] = b"wz-multicast-host-roundtrip";
 
 /// The interface this host's witness uses; see the module doc for the measurement
