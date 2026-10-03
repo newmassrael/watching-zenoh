@@ -452,7 +452,8 @@ jobs:
   # the measurements that sized the gap were source-only checks from a Linux machine
   # with the C build steps stubbed. This job is what turns them into hosted evidence.
   # It builds the three crates, linking their `cdylib` outputs, which a source check
-  # never does, and runs each one's unit tests, and prints one verdict line for each.
+  # never does, runs each one's unit tests and the integration tests of those that have
+  # them, and prints one verdict line for each.
   #
   # An observation, for the reason the interop job's is: a red here is a measurement
   # of a debt that is registered, so it prints a line and never fails the run. On
@@ -515,5 +516,18 @@ jobs:
             fi
             verdict "$crate unit tests:" "$tested"
             [ "$tested" = PASS ] || overall=FAIL
+            # The integration tests drive the exported symbols through a real session over
+            # the host's loopback, so they are the end-to-end answer where the unit tests
+            # are the layout and arithmetic one. The ones that need a router binary are
+            # `#[ignore]`d and do not run here.
+            if [ -d "crates/$crate/tests" ]; then
+              integrated=SKIPPED
+              if [ "$built" = PASS ]; then
+                integrated=FAIL
+                (cd crates && cargo test -p "$crate" --test '*') && integrated=PASS
+              fi
+              verdict "$crate integration tests:" "$integrated"
+              [ "$integrated" = PASS ] || overall=FAIL
+            fi
           done
           [ "$overall" = PASS ]
