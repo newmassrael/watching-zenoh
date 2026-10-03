@@ -445,7 +445,7 @@ jobs:
           done < promoted.tsv
           echo "interop-gate on ${RUNNER_OS}: ${count} promoted test(s) passed"
 
-  # ── The C ABI crates on a host: an observation ─────────────────────────
+  # ── The C ABI crates on a host: a gate ─────────────────────────────────
   #
   # The platform tags do not claim the wz C ABI crates on a host (the open debt row
   # `debt-capi-hosts` keeps that gap), and until this job nothing built them on one:
@@ -455,11 +455,16 @@ jobs:
   # never does, runs each one's unit tests and the integration tests of those that have
   # them, and prints one verdict line for each.
   #
-  # An observation, for the reason the interop job's is: a red here is a measurement
-  # of a debt that is registered, so it prints a line and never fails the run. On
-  # Windows the pico crate is expected to fail until its Win32 implementation exists,
-  # and that baseline is the first thing the job records. When a crate passes on a
-  # host twice in a row, the step can be promoted the way the interop tests are.
+  # It started as an observation, for the reason the interop job's tests did: a red
+  # was a measurement of a registered debt and printed a line instead of failing the
+  # run. Windows' first run measured the pico crate's 42 compile errors, which is the
+  # baseline the host layer then paid off. It is a gate since two consecutive hosted
+  # runs read every one of its verdict lines green on BOTH hosts (Platform runs
+  # 37127231232 and 37130390017, read from the job logs and not from the conclusion),
+  # the owner's rule for promoting an observation. A red here now fails the run, and
+  # what it means is that a C ABI crate stopped building or passing on a host it had
+  # been shown to, which is a regression and not a measurement. What stays unclaimed
+  # is not this job's: no pico C program runs against the cdylib on a host yet.
   capi:
     name: C ABI (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
@@ -494,10 +499,9 @@ jobs:
             crates -> target
             vendor/sce -> target
 
-      - name: the C ABI crates on this host, observed (one verdict line per question)
+      - name: the C ABI crates on this host, gated (one verdict line per question)
         if: ${{ env.WZ_HOST_SELECTED == 'true' }}
         timeout-minutes: 35
-        continue-on-error: true
         shell: bash
         run: |
           verdict() {
