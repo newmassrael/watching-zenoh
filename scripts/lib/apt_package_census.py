@@ -208,6 +208,9 @@ _add(
     [
         "ci",
         "validate-codegen",
+        # R3016 -- Layers B and B2 and the sce-codegen build left
+        # `validate-codegen` for this job and took the install line with them.
+        "codegen-verify",
         "verdict-legs",
         # R2163 — Layer C1cn's own job, peeled off `ci` for its budget. It
         # compiles EVERY member at its non-default features, so every reason on
@@ -245,6 +248,7 @@ _add(
     [
         "ci",
         "validate-codegen",
+        "codegen-verify",
         "verdict-legs",
         # R2163 — Layer C1cn's own job, peeled off `ci` for its budget. It
         # compiles EVERY member at its non-default features, so every reason on
@@ -285,6 +289,7 @@ _add(
     [
         "ci",
         "validate-codegen",
+        "codegen-verify",
         "verdict-legs",
         # R2163 — Layer C1cn's own job, peeled off `ci` for its budget. It
         # compiles EVERY member at its non-default features, so every reason on
@@ -372,8 +377,9 @@ _add(
     # `crates/zenoh-pico-sys` is a member, so the lane reaches the one `cmake`
     # consumer by naming it. That is the same test the row already applies, and
     # nondefault gets a separate native-engine row above (R2805).
-    ["ci", "validate-codegen", "interop", "feature-gates", "transport-modes",
-     "isolated-crates", "capi-c-arms", "e2e-demo", "dissect", "defaults-off"],
+    ["ci", "validate-codegen", "codegen-verify", "interop", "feature-gates",
+     "transport-modes", "isolated-crates", "capi-c-arms", "e2e-demo", "dissect",
+     "defaults-off"],
 )
 _add(
     "cmake",
@@ -423,6 +429,7 @@ _add(
     [
         "ci",
         "validate-codegen",
+        "codegen-verify",
         "verdict-legs",
         # R2163 — Layer C1cn's own job, peeled off `ci` for its budget. It
         # compiles EVERY member at its non-default features, so every reason on
@@ -472,11 +479,17 @@ _add(
     "libxml's build script probes pkg-config for `libxml-2.0`, and `libxml` is "
     "reached only through `sce-build`, which only the `xtask` codegen driver "
     "depends on. DERIVED by the SHORTFALL and EXCESS arms.",
-    ["validate-codegen"],
+    # R3016 -- Layer B2 moved to `codegen-verify`, and with it the `xtask` build
+    # this row exists for: the one job is now that one.
+    ["codegen-verify"],
 )
 _add(
     "protobuf-compiler",
-    "the Protobuf reference emit Layer B verifies.",
+    "mnemosyne-server's build script, which is what the `Install protoc` step "
+    "of `validate-codegen` says it is for (it sits beside `Install "
+    "mnemosyne-cli`). This row used to name the Protobuf emit Layer B verifies; "
+    "Layer B left that job in R3016 and nothing in `xtask` or the vendored "
+    "backends spells `protoc`.",
     ["validate-codegen"],
 )
 

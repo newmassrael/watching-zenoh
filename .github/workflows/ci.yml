@@ -806,8 +806,13 @@ jobs:
   # the workflow critical path drops to the reduced `ci` (~9m). Same split
   # rationale as this file's interop and footprint (Layer F) jobs — "must
   # not eat the primary job's budget".
+  #
+  # R3016 — LAYERS B AND B2 LEFT THIS JOB for `codegen-verify` (below), with the
+  # `sce-codegen` build that only they read, so the job id stays (the apt cache
+  # key and the package census are keyed on it) and the display name no longer
+  # says `codegen`. Earlier rows of docs/hosted-red-acks.md name it as it was.
   validate-codegen:
-    name: validate + codegen (Layers A + B)
+    name: validate (Layers A + C0)
     runs-on: ubuntu-22.04
     timeout-minutes: 30
     steps:
@@ -853,20 +858,20 @@ jobs:
             apt-${{ runner.os }}-${{ github.job }}-
 
       - name: Install system dependencies
-        # cmake + libclang-dev for the sce-codegen / xtask (Layer B/B2)
-        # toolchain; perl for verify-codegen.sh Layer 2 include sort.
-        #
-        # libxml2-dev + pkg-config: `xtask` links SCE's XML toolchain
-        # (`sce-build` -> `libxml`, whose build script probes `libxml-2.0`),
-        # and this is the one job that builds it. Since the SCE pin of R3009 it
-        # is the only job that needs either for that reason:
-        # `apt_package_census.py` derives it in both directions.
+        # R3016 — this line was written for Layers B and B2 (the sce-codegen and
+        # xtask toolchain, verify-codegen.sh's include sort, `xtask`'s XML
+        # toolchain), and they now run in `codegen-verify`. `libxml2-dev` went
+        # with them, because `apt_package_census.py` derives it in both
+        # directions and nothing left here builds a crate that probes for it.
+        # The rest stay: the census cannot derive whether the mnemosyne-cli
+        # build or the Layer A lanes reach them, and dropping a package on a
+        # prose reading is a change only a hosted run can verify (item 861).
         #
         # This job's `Save apt archives` step is NOT here: it installs twice
         # (protoc below), and a save between the two would carry half the
         # archive and then sit on a key nothing updates.
         run: |
-          bash scripts/lib/apt-install.sh cmake libclang-dev libxml2-dev clang perl pkg-config
+          bash scripts/lib/apt-install.sh cmake libclang-dev clang perl pkg-config
 
       - name: Install Rust toolchain (pinned by rust-toolchain.toml)
         run: rustup show
@@ -905,9 +910,6 @@ jobs:
         # from a pass") and then not applied here. An install failure is a
         # provisioning regression; it now reds this step.
         run: bash scripts/install-mnemosyne-cli.sh
-
-      - name: Build sce-codegen (vendor/sce)
-        run: bash scripts/build-sce.sh
 
       - name: Layer A — Mnemosyne workspace validate
         run: bash scripts/run-ci.sh --layer A
@@ -1048,22 +1050,9 @@ jobs:
         # as text, needs only bash + awk, and costs ~0s.
         run: bash scripts/run-ci.sh --layer C0f
 
-      # WZ_SCE_ORACLE_REQUIRE=1 on both lanes: each opens by grading the
-      # provenance of vendor/sce/target/release/sce-codegen, and an oracle that
-      # cannot be established at all degrades to a SKIP so a developer without
-      # the submodule is not blocked. This job checks the submodule out and
-      # builds the binary above, so here that SKIP could only mean the
-      # provisioning broke — the same rule WZ_A3_REQUIRE / WZ_C0_REQUIRE apply,
-      # and the reason both of those exist: a lane that skips still prints green.
-      - name: Layer B — verify-codegen.sh per codec
-        env:
-          WZ_SCE_ORACLE_REQUIRE: "1"
-        run: bash scripts/run-ci.sh --layer B
-
-      - name: Layer B2 — regen-diff (committed out/** == regenerated)
-        env:
-          WZ_SCE_ORACLE_REQUIRE: "1"
-        run: bash scripts/run-ci.sh --layer B2
+      # Layers B and B2 are NOT here any more: R3016 peeled them, with the
+      # `sce-codegen` build that only they read, into `codegen-verify` below. The
+      # reason is a measured cold run, written there.
 
       - name: Layer U — how many releases behind each pinned upstream is
         # R2228 (open-debt item 578). Two rounds judged "what a genuine zenoh
@@ -1084,6 +1073,112 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: bash scripts/run-ci.sh --layer U
+
+  # ─────────────────────────────────────────────────────────────────
+  # R3016 — Layers B and B2, peeled off `validate-codegen` for its COLD budget.
+  #
+  # WHAT FORCED THE SPLIT. Run 37089053802 (the R3014 tip) CANCELLED
+  # `validate-codegen` at its 30-minute ceiling, on step Layer B2, with every
+  # other job in the run green but the two portability legs (a different cause,
+  # repaired the same round). The three successful runs before it took 23m57s,
+  # 24m21s and 25m09s; this one ran 30m16s, and the difference sat in Layer B:
+  # 530s against 120s, all of it BEFORE the first codec line. The step list shows
+  # nothing else moved (the same job's `Build sce-codegen` took 276s against
+  # 257s). What is measured about the cause is that this job's Rust cache did
+  # not restore: its log says `No cache found`, where the run before it says
+  # `Restored from cache key ... full match: true`, and the repository's cache
+  # list holds no Rust cache keyed `validate-codegen`. The same list totals 12.4
+  # GB against GitHub's 10 GB cap, so entries are being evicted. What that
+  # stretch of Layer B compiles was not read, only its length; it behaves as
+  # work that is cheap when the cache restores and costs minutes when it does not.
+  #
+  # WHY IT DID NOT HEAL. A cancelled job saves no cache, so the next run starts
+  # cold as well. This job needed more than 30 minutes cold, so it could not
+  # finish once to repopulate the cache it needed. A cold state is a legitimate
+  # state here, because eviction is the platform's behaviour and not a fault, so
+  # the budget has to cover it, and this job's did not.
+  #
+  # WHY SPLIT RATHER THAN RAISE, this file's own doctrine (see the verdict-leg
+  # job below): a bigger number buys one atom's worth of time and re-arms the
+  # same failure, and the cold cost grows with the codec set. Layers B and B2 and
+  # the `sce-codegen` build that only they read were the cold-expensive part:
+  # `sce_codegen_ensure` is called from those two layers and from no other. Each
+  # job's cold run is measured by the first run that follows this change.
+  codegen-verify:
+    name: codegen verify (Layers B + B2)
+    runs-on: ubuntu-22.04
+    timeout-minutes: 30
+    steps:
+      - name: Checkout (with submodules)
+        # fetch-depth: 0 and submodules: recursive as in `validate-codegen`: the
+        # sce-codegen build resolves through vendor/sce.
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          fetch-depth: 0
+
+      - name: Restore apt archives (R311y882 — keep the mirror off the path)
+        # The cache, the path and the always-save rule are the ones recorded on the
+        # same step of `validate-codegen`; the key is per JOB, so this job warms
+        # its own archive.
+        id: apt-archives
+        uses: actions/cache/restore@v4
+        with:
+          path: ~/.cache/wz-apt
+          key: apt-${{ runner.os }}-${{ github.job }}-${{ hashFiles('.github/workflows/ci.yml') }}
+          restore-keys: |
+            apt-${{ runner.os }}-${{ github.job }}-
+
+      - name: Install system dependencies
+        # What `sce-codegen` and `xtask` need, as `validate-codegen` recorded it
+        # before the peel: cmake + libclang-dev for the toolchain, perl for
+        # verify-codegen.sh's include sort, libxml2-dev + pkg-config because
+        # `xtask` links SCE's XML toolchain.
+        run: |
+          bash scripts/lib/apt-install.sh cmake libclang-dev libxml2-dev clang perl pkg-config
+
+      - name: Save apt archives
+        # One install in this job, so the save sits right after it. `always()` and
+        # the dirty gate are explained on the `feature-gates` copy.
+        if: always() && env.WZ_APT_CACHE_DIRTY == 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: ~/.cache/wz-apt
+          key: ${{ steps.apt-archives.outputs.cache-primary-key }}-${{ github.run_id }}
+
+      - name: Install Rust toolchain (pinned by rust-toolchain.toml)
+        run: rustup show
+
+      - name: Cache Cargo registry + build artifacts
+        # Distinct key, as `validate-codegen` had: this job's build set is
+        # sce-codegen + xtask + what Layer B compiles, and a shared key across
+        # differing sets thrashes.
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            crates -> target
+            vendor/sce -> target
+          key: codegen-verify
+
+      - name: Build sce-codegen (vendor/sce)
+        run: bash scripts/build-sce.sh
+
+      # WZ_SCE_ORACLE_REQUIRE=1 on both lanes: each opens by grading the
+      # provenance of vendor/sce/target/release/sce-codegen, and an oracle that
+      # cannot be established at all degrades to a SKIP so a developer without
+      # the submodule is not blocked. This job checks the submodule out and
+      # builds the binary above, so here that SKIP could only mean the
+      # provisioning broke — the same rule WZ_A3_REQUIRE / WZ_C0_REQUIRE apply,
+      # and the reason both of those exist: a lane that skips still prints green.
+      - name: Layer B — verify-codegen.sh per codec
+        env:
+          WZ_SCE_ORACLE_REQUIRE: "1"
+        run: bash scripts/run-ci.sh --layer B
+
+      - name: Layer B2 — regen-diff (committed out/** == regenerated)
+        env:
+          WZ_SCE_ORACLE_REQUIRE: "1"
+        run: bash scripts/run-ci.sh --layer B2
 
   # ─────────────────────────────────────────────────────────────────
   # R311y791 — the VERDICT-LEG MUTATION job. Layer C0mut ran as step 11 of the
