@@ -217,7 +217,7 @@ pub unsafe extern "C" fn z_condvar_init(cv: *mut z_owned_condvar_t) -> ZResult {
         if rc != 0 {
             return sys(rc);
         }
-        let rc = libc::pthread_condattr_setclock(&mut attr, libc::CLOCK_MONOTONIC);
+        let rc = condattr_use_monotonic(&mut attr);
         let out = if rc != 0 {
             sys(rc)
         } else {
@@ -226,6 +226,20 @@ pub unsafe extern "C" fn z_condvar_init(cv: *mut z_owned_condvar_t) -> ZResult {
         libc::pthread_condattr_destroy(&mut attr);
         out
     })
+}
+
+/// Put `CLOCK_MONOTONIC` on the condattr, which is what makes an absolute
+/// deadline taken from [`crate::platform::z_clock_now`] mean the same instant to
+/// the wait. macOS has no `pthread_condattr_setclock`, and pico skips the call
+/// there (`system.c:162-165`); [`cond_wait_until`] is where that gap is closed.
+#[cfg(not(target_os = "macos"))]
+unsafe fn condattr_use_monotonic(attr: *mut libc::pthread_condattr_t) -> libc::c_int {
+    libc::pthread_condattr_setclock(attr, libc::CLOCK_MONOTONIC)
+}
+
+#[cfg(target_os = "macos")]
+unsafe fn condattr_use_monotonic(_attr: *mut libc::pthread_condattr_t) -> libc::c_int {
+    0
 }
 
 /// Destroy a condvar (pico `z_condvar_drop`).
@@ -316,12 +330,58 @@ pub unsafe extern "C" fn z_condvar_wait_until(
         if cv.is_null() || m.is_null() || abstime.is_null() {
             return Z_ERR_NULL;
         }
-        let rc = libc::pthread_cond_timedwait(cv, m, abstime);
+        let rc = cond_wait_until(cv, m, abstime);
         if rc == libc::ETIMEDOUT {
             return Z_ETIMEDOUT;
         }
         sys(rc)
     })
+}
+
+#[cfg(not(target_os = "macos"))]
+unsafe fn cond_wait_until(
+    cv: *mut libc::pthread_cond_t,
+    m: *mut libc::pthread_mutex_t,
+    abstime: *const z_clock_t,
+) -> libc::c_int {
+    libc::pthread_cond_timedwait(cv, m, abstime)
+}
+
+/// macOS: `pthread_cond_timedwait` reads its deadline against the REALTIME clock,
+/// while a `z_clock_t` is a MONOTONIC instant, so pico (`system.c:178-203`) turns
+/// the deadline into an interval from `z_clock_now` and waits on that with the
+/// Darwin-only `pthread_cond_timedwait_relative_np`. This is the same.
+#[cfg(target_os = "macos")]
+unsafe fn cond_wait_until(
+    cv: *mut libc::pthread_cond_t,
+    m: *mut libc::pthread_mutex_t,
+    abstime: *const z_clock_t,
+) -> libc::c_int {
+    let deadline = relative_deadline(crate::platform::z_clock_now(), *abstime);
+    libc::pthread_cond_timedwait_relative_np(cv, m, &deadline)
+}
+
+/// The interval from `now` to the absolute instant `abs`, or zero when `abs` is
+/// not in the future. Pure arithmetic and compiled on every host, so the one place
+/// the macOS wait differs from the others is tested where the tests run.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+fn relative_deadline(now: z_clock_t, abs: z_clock_t) -> z_clock_t {
+    let mut sec = abs.tv_sec - now.tv_sec;
+    let mut nsec = abs.tv_nsec - now.tv_nsec;
+    if nsec < 0 {
+        sec -= 1;
+        nsec += 1_000_000_000;
+    }
+    if sec < 0 {
+        return libc::timespec {
+            tv_sec: 0,
+            tv_nsec: 0,
+        };
+    }
+    libc::timespec {
+        tv_sec: sec,
+        tv_nsec: nsec,
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -344,12 +404,24 @@ pub type z_loaned_task_t = libc::pthread_t;
 /// Moved task — see [`z_owned_task_t`].
 pub type z_moved_task_t = libc::pthread_t;
 
-/// pico `z_task_attr_t` — `pthread_attr_t` on unix, 56 B measured.
+/// pico `z_task_attr_t` — `pthread_attr_t` on unix: 56 B on Linux, measured; 64 B
+/// on macOS, where Darwin's pthread types are a signature word plus an opaque
+/// block (`__sig` and `__opaque[56]`). The Darwin figure is read off that layout
+/// and not yet measured against pico's headers on a macOS runner.
 pub type z_task_attr_t = libc::pthread_attr_t;
+
+/// What `sizeof(pthread_attr_t)` is on this host. The pin exists so that a target
+/// whose layout is not the one a size was measured on fails the build instead of
+/// writing past the caller's storage, which is exactly what it did on macOS the
+/// first time this crate was built there.
+#[cfg(target_os = "macos")]
+const TASK_ATTR_BYTES: usize = 64;
+#[cfg(not(target_os = "macos"))]
+const TASK_ATTR_BYTES: usize = 56;
 
 const _: () = {
     assert!(std::mem::size_of::<z_owned_task_t>() == 8);
-    assert!(std::mem::size_of::<z_task_attr_t>() == 56);
+    assert!(std::mem::size_of::<z_task_attr_t>() == TASK_ATTR_BYTES);
 };
 
 /// Start a thread running `fun(arg)` (pico `z_task_init`).
@@ -821,8 +893,35 @@ mod tests {
     /// storage.
     #[test]
     fn owned_sync_types_match_picos_measured_sizes() {
-        assert_eq!(std::mem::size_of::<z_owned_mutex_t>(), 40);
+        // Linux: measured. macOS: `__sig` plus `__opaque[56]` for the mutex and
+        // `__opaque[40]` for the condvar, read off Darwin's layout.
+        let mutex_bytes = if cfg!(target_os = "macos") { 64 } else { 40 };
+        assert_eq!(std::mem::size_of::<z_owned_mutex_t>(), mutex_bytes);
         assert_eq!(std::mem::size_of::<z_owned_condvar_t>(), 48);
+    }
+
+    /// The one place the macOS condvar wait differs, tested where the tests run.
+    #[test]
+    fn a_relative_deadline_is_the_interval_to_the_instant_or_zero() {
+        let at = |tv_sec, tv_nsec| libc::timespec { tv_sec, tv_nsec };
+        let same = |a: z_clock_t, b: z_clock_t| a.tv_sec == b.tv_sec && a.tv_nsec == b.tv_nsec;
+        // Later in the same second, and across a second boundary with a borrow.
+        assert!(same(
+            relative_deadline(at(10, 100), at(10, 600)),
+            at(0, 500)
+        ));
+        assert!(same(
+            relative_deadline(at(10, 900_000_000), at(12, 100_000_000)),
+            at(1, 200_000_000)
+        ));
+        assert!(same(relative_deadline(at(10, 0), at(12, 0)), at(2, 0)));
+        // Now, and any instant already past, are zero, never a negative interval.
+        assert!(same(relative_deadline(at(10, 500), at(10, 500)), at(0, 0)));
+        assert!(same(relative_deadline(at(10, 600), at(10, 500)), at(0, 0)));
+        assert!(same(
+            relative_deadline(at(11, 0), at(10, 999_999_999)),
+            at(0, 0)
+        ));
     }
 
     /// loan / loan_mut / move are pointer identity in pico's macro expansion,

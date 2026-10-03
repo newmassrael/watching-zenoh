@@ -366,6 +366,14 @@ pub unsafe extern "C" fn z_time_elapsed_s(time: *mut z_time_t) -> c_ulong {
     wall_elapsed(time, 1, 0)
 }
 
+/// A `timeval`'s microseconds as `i64`. `suseconds_t` is `i64` on Linux and `i32`
+/// on macOS, so this is an identity on one host and a widening on the other, and
+/// the two lints name exactly those two cases.
+#[allow(clippy::unnecessary_cast, clippy::useless_conversion)]
+fn usec_i64(usec: libc::suseconds_t) -> i64 {
+    usec as i64
+}
+
 /// The shared body of the three `z_time_elapsed_*` exports. `usec_div` of 0
 /// drops the sub-second part, which is upstream's `_s` arm.
 unsafe fn wall_elapsed(time: *mut z_time_t, sec_scale: i64, usec_div: i64) -> c_ulong {
@@ -377,7 +385,7 @@ unsafe fn wall_elapsed(time: *mut z_time_t, sec_scale: i64, usec_div: i64) -> c_
         let secs: i64 = now.tv_sec - (*time).tv_sec;
         let mut elapsed = secs.saturating_mul(sec_scale);
         if usec_div != 0 {
-            let usecs: i64 = now.tv_usec - (*time).tv_usec;
+            let usecs: i64 = usec_i64(now.tv_usec) - usec_i64((*time).tv_usec);
             elapsed = elapsed.saturating_add(usecs / usec_div);
         }
         // The wrapping cast IS the contract here — see the `_us` doc.
@@ -404,6 +412,10 @@ pub unsafe extern "C" fn z_realloc(ptr: *mut c_void, size: usize) -> *mut c_void
 /// on both. wz advances the cursor on a short read instead of restarting, which
 /// is the same contract with the O(n^2) worst case removed.
 ///
+/// On macOS it is `arc4random_buf`, as pico's own macOS arm is
+/// (`system.c:95-96`): `getrandom` does not exist there, and `arc4random_buf`
+/// cannot fail or short-read, so there is no loop to keep.
+///
 /// # Safety
 /// `buf` must be null or point at `len` writable bytes.
 #[no_mangle]
@@ -412,21 +424,31 @@ pub unsafe extern "C" fn z_random_fill(buf: *mut c_void, len: usize) {
         if buf.is_null() || len == 0 {
             return Z_OK;
         }
-        let mut filled = 0usize;
-        while filled < len {
-            let got = libc::getrandom(
-                buf.cast::<u8>().add(filled).cast::<c_void>(),
-                len - filled,
-                0,
-            );
-            if got > 0 {
-                filled += got as usize;
-            }
-            // A negative return is EINTR / EAGAIN; upstream spins, and so does
-            // this, because there is no error channel on the export.
-        }
+        fill_random(buf, len);
         Z_OK
     });
+}
+
+#[cfg(not(target_os = "macos"))]
+unsafe fn fill_random(buf: *mut c_void, len: usize) {
+    let mut filled = 0usize;
+    while filled < len {
+        let got = libc::getrandom(
+            buf.cast::<u8>().add(filled).cast::<c_void>(),
+            len - filled,
+            0,
+        );
+        if got > 0 {
+            filled += got as usize;
+        }
+        // A negative return is EINTR / EAGAIN; upstream spins, and so does
+        // this, because there is no error channel on the export.
+    }
+}
+
+#[cfg(target_os = "macos")]
+unsafe fn fill_random(buf: *mut c_void, len: usize) {
+    libc::arc4random_buf(buf, len);
 }
 
 /// A random byte (pico `z_random_u8`).
