@@ -460,6 +460,29 @@ pub unsafe fn task_detach(handle: RawTask) -> ZResult {
 mod tests {
     use super::*;
 
+    /// The sizes the Rust types occupy, printed in the one line shape a C probe's
+    /// output is compared with.
+    ///
+    /// The compile-time asserts above pin these against what pico's Windows header
+    /// says they are (a pointer for the lock, the condition variable, the task
+    /// handle and the attribute; eight bytes for the counter reading; sixteen for
+    /// `struct timeb`), which is a claim read off that header. A C compiler on a
+    /// Windows host is what can measure it, and the CI job that does prints its own
+    /// line in the same shape and compares the two. This test is what makes the
+    /// Rust half of that comparison come from the build and not from a literal
+    /// typed into a workflow, so a type that changes size changes the line.
+    #[test]
+    fn the_rust_types_report_their_sizes_in_the_shape_the_c_probe_does() {
+        println!(
+            "layout-rust: srwlock={} condvar={} large_integer={} timeb={} handle={}",
+            std::mem::size_of::<RawMutex>(),
+            std::mem::size_of::<RawCondvar>(),
+            std::mem::size_of::<Clock>(),
+            std::mem::size_of::<WallTime>(),
+            std::mem::size_of::<RawTask>(),
+        );
+    }
+
     /// The wall clock reads the same instant the standard library does, which is the
     /// one thing the FILETIME-to-Unix conversion can be wrong about without any
     /// arithmetic test noticing.

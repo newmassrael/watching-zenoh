@@ -28,10 +28,21 @@
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
-/* z_clock_t is `struct timespec` on every Unix, as it is in zenoh-pico. */
-#include <time.h>
 
+/* z_clock_t is the host's own type, as it is in zenoh-pico: `struct timespec`
+ * on a Unix (16 B) and `LARGE_INTEGER` on Windows (8 B, one performance-counter
+ * reading). Declaring the Unix type on Windows would give a program a clock
+ * twice the size of the one the library returns by value. Only the member
+ * zenoh-pico reads is reproduced for Windows, so this header needs no
+ * <windows.h>. */
+#if defined(_WIN32)
+typedef union {
+    long long QuadPart;
+} z_clock_t;
+#else
+#include <time.h>
 typedef struct timespec z_clock_t;
+#endif
 
 #ifdef __cplusplus
 extern "C" {
