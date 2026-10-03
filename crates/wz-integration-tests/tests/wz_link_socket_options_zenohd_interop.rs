@@ -70,6 +70,11 @@
 //! one JSON5 document and give it to zenohd with `-c` and to the demo with
 //! `--config`, so the demo's config reader and its expansion onto
 //! `--link-config` are judged against zenohd reading the same file.
+//!
+//! LINUX ONLY, by what the observers read: `peer_window_scale` is `TCP_INFO` and
+//! `opening_segment_tos_v4` is `IP_PKTOPTIONS`, neither of which the macOS `libc`
+//! has, so the helpers are Linux-gated in the library and this file with them.
+#![cfg(target_os = "linux")]
 
 use std::io::Read as _;
 use std::net::{IpAddr, Ipv4Addr, UdpSocket};

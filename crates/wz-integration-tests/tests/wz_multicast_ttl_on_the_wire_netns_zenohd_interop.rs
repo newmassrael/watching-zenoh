@@ -41,6 +41,10 @@
 //! the variable, that entry is the reader's own CALIBRATION: on `lo` it must
 //! read back two DIFFERENT values it set itself, so a reader that always
 //! answers one number cannot pass the witness.
+//!
+//! LINUX ONLY, by what it needs: a network namespace, and a reader
+//! (`read_multicast_ttl_v4`) that the library compiles on Linux alone.
+#![cfg(target_os = "linux")]
 
 use std::io::Write as _;
 use std::net::{Ipv4Addr, UdpSocket};

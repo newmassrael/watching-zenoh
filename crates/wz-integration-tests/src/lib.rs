@@ -332,9 +332,11 @@ pub mod common {
     /// mislead those.
     pub fn wz_ap_demo_binary() -> PathBuf {
         let crates_dir = project_root().join("crates");
+        // The host's own name for an executable: `wz-ap-demo.exe` on Windows.
+        let name = format!("wz-ap-demo{}", std::env::consts::EXE_SUFFIX);
         let candidates = [
-            crates_dir.join("target/debug/wz-ap-demo"),
-            crates_dir.join("target/release/wz-ap-demo"),
+            crates_dir.join("target/debug").join(&name),
+            crates_dir.join("target/release").join(&name),
         ];
         for c in &candidates {
             if c.is_file() {
@@ -1502,7 +1504,11 @@ pub mod common {
         if let Ok(p) = std::env::var("WZ_ZENOHD_BIN") {
             return PathBuf::from(p);
         }
-        let path = project_root().join("target/zenohd/zenohd");
+        // `zenohd.exe` on Windows, where `build-zenohd.sh` does not yet install; a
+        // host that built the router another way names it with `WZ_ZENOHD_BIN`.
+        let path = project_root()
+            .join("target/zenohd")
+            .join(format!("zenohd{}", std::env::consts::EXE_SUFFIX));
         assert!(
             path.is_file(),
             "zenohd binary missing at {}; set WZ_ZENOHD_BIN or run scripts/build-zenohd.sh first",
@@ -2004,13 +2010,46 @@ pub mod common {
         )
     }
 
-    pub fn read_captured(file: &mut File) -> String {
+    /// A positional read of `file`, from `at`.
+    ///
+    /// On Unix this leaves the file's cursor alone. On Windows it does not: the
+    /// cursor ends where the read ended, and the tests hand a child a duplicate of
+    /// this very handle (`tempfile()` then `try_clone()`), so the two share ONE
+    /// cursor and a reader that stops short of the end would move the place the
+    /// child writes next. [`read_captured`] is written to never stop short.
+    #[cfg(unix)]
+    fn read_at(file: &File, buf: &mut [u8], at: u64) -> std::io::Result<usize> {
         use std::os::unix::fs::FileExt;
+        file.read_at(buf, at)
+    }
+
+    #[cfg(windows)]
+    fn read_at(file: &File, buf: &mut [u8], at: u64) -> std::io::Result<usize> {
+        use std::os::windows::fs::FileExt;
+        file.seek_read(buf, at)
+    }
+
+    /// How much one positional read asks for.
+    ///
+    /// Unix is not affected by the size. On Windows the size is what makes the
+    /// shared cursor safe (see [`read_at`]): a read that returns FEWER bytes than
+    /// it asked for reached the end of the file inside that one call, and the
+    /// cursor it sets is then the very place the child's next write goes. So the
+    /// buffer must be larger than any capture a test takes, and one megabyte is
+    /// two orders above the largest (a demo's stderr at `RUST_LOG=info`). A
+    /// capture that ever outgrows it would be read in several calls, and the
+    /// child writing between two of them would write over its own output.
+    #[cfg(unix)]
+    const CAPTURE_READ_CHUNK: usize = 8192;
+    #[cfg(windows)]
+    const CAPTURE_READ_CHUNK: usize = 1 << 20;
+
+    pub fn read_captured(file: &mut File) -> String {
         let mut bytes = Vec::new();
-        let mut buf = [0u8; 8192];
+        let mut buf = vec![0u8; CAPTURE_READ_CHUNK];
         let mut at = 0u64;
         loop {
-            match file.read_at(&mut buf, at) {
+            match read_at(file, &mut buf, at) {
                 Ok(0) => break,
                 Ok(n) => {
                     bytes.extend_from_slice(&buf[..n]);
@@ -4836,6 +4875,12 @@ pub mod common {
     /// correctly, it just may not make the sender block, and the leg's own
     /// assertions are what report that. Panicking here would turn a portability
     /// question into a test failure in a place that cannot explain it.
+    ///
+    /// Unix only, by what it calls. On any other host this is a no-op that says so
+    /// on stderr, which is the same shape as the kernel refusing: the stall legs
+    /// that depend on the bound are Unix tests, and a host without the call does
+    /// not take part in them.
+    #[cfg(unix)]
     fn bound_recv_buffer(sock: &TcpStream, bytes: usize) {
         use std::os::fd::AsRawFd;
         let size = bytes as libc::c_int;
@@ -4856,6 +4901,14 @@ pub mod common {
                  stall fault may not make the sender block"
             );
         }
+    }
+
+    #[cfg(not(unix))]
+    fn bound_recv_buffer(_sock: &TcpStream, bytes: usize) {
+        eprintln!(
+            "counting relay: SO_RCVBUF({bytes}) is not asked for on this host; a \
+             stall fault may not make the sender block"
+        );
     }
 
     /// How small [`spawn_zenohd_shallow_tx_queue_on_ephemeral_tcp`] asks the
@@ -6141,6 +6194,11 @@ pub mod common {
     /// The socket is wildcard-bound with `SO_REUSEADDR`, the only shape that
     /// receives group traffic, and joined on `iface_addr` so the membership lands on
     /// the interface the caller named rather than the default route's.
+    ///
+    /// LINUX ONLY, by what it reads: it fills a `libc::sockaddr_in` without the
+    /// `sin_len` field macOS requires. A macOS leg that builds this crate for the
+    /// router interop probe stopped here, at the first hosted run that tried.
+    #[cfg(target_os = "linux")]
     pub fn read_multicast_ttl_v4(
         group: Ipv4Addr,
         port: u16,
@@ -6266,6 +6324,10 @@ pub mod common {
     /// one-byte payload of its `IPPROTO_IP` / `IP_TOS` message, if it has one.
     /// Shared by both TOS readers below: `recvmsg` fills such a buffer per
     /// datagram, `IP_PKTOPTIONS` returns one for a stream.
+    ///
+    /// Unix only, by the control-message walk it does (`CMSG_*`), which `libc`
+    /// has no Windows spelling of; the readers that call it are Unix readers.
+    #[cfg(unix)]
     fn ip_tos_in_control(control: &mut [u8], len: usize) -> Option<u8> {
         // SAFETY: the msghdr only carries the control buffer, which is live for
         // this call; CMSG_* read inside `len`, which the kernel wrote.
@@ -6290,6 +6352,9 @@ pub mod common {
     /// it reports what the SENDER put on the wire, whatever implementation that
     /// was. It is the observer for the `dscp` and `bind` link keys on datagram
     /// links, where the key's whole effect is those two header fields.
+    ///
+    /// Unix only, by what it calls: `recvmsg` and the control-message macros.
+    #[cfg(unix)]
     pub fn next_datagram_tos_and_source_v4(
         socket: &std::net::UdpSocket,
         timeout: Duration,
@@ -6359,6 +6424,9 @@ pub mod common {
     ///
     /// `IP_RECVTOS` is set on the listening socket, and an accepted socket
     /// inherits it from its listener.
+    ///
+    /// Unix only, by the `setsockopt` and raw descriptor it uses.
+    #[cfg(unix)]
     pub fn tos_recording_listener_v4() -> TcpListener {
         use std::os::fd::AsRawFd as _;
         let listener =
@@ -6397,6 +6465,10 @@ pub mod common {
     /// The stream-link counterpart of [`next_datagram_tos_and_source_v4`]: a TCP
     /// peer's TOS is visible only here, since a stream read carries no
     /// per-segment control message.
+    ///
+    /// LINUX ONLY, by what it reads: `IP_PKTOPTIONS` is Linux's, and the macOS
+    /// `libc` has no such constant.
+    #[cfg(target_os = "linux")]
     pub fn opening_segment_tos_v4(stream: &TcpStream) -> Option<u8> {
         use std::os::fd::AsRawFd as _;
         let mut control = [0u8; 256];
@@ -6430,6 +6502,10 @@ pub mod common {
     /// nibble of the byte glibc's `tcp_info` names `tcpi_snd_rcv_wscale`; the
     /// calibration in `wz_link_socket_options_zenohd_interop.rs` pins that
     /// reading against a plain socket.
+    ///
+    /// LINUX ONLY, by what it reads: `TCP_INFO` and `tcp_info` are Linux's, and
+    /// the macOS `libc` has neither.
+    #[cfg(target_os = "linux")]
     pub fn peer_window_scale(stream: &TcpStream) -> u8 {
         use std::os::fd::AsRawFd as _;
         // SAFETY: `info` is a live, zeroed `tcp_info` and `len` is its size.
