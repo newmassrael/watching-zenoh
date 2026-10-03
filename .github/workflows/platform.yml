@@ -332,12 +332,15 @@ jobs:
           harness=FAIL
           router=FAIL
           handshake=SKIPPED
-          (cd crates && cargo build -p wz-ap-demo) && demo=PASS
+          # The links the rows of zenohd_link_handshakes.rs dial: tls and quic carry a
+          # certificate, ws needs its locator feature, udp is in the demo's default.
+          (cd crates && cargo build -p wz-ap-demo --features ws,tls,quic) && demo=PASS
           verdict "wz-ap-demo builds:" "$demo"
           (cd crates && cargo test -p wz-host-interop-tests --no-run) && harness=PASS
           verdict "host interop tests compile:" "$harness"
           cargo +1.97.1 install zenohd --version 1.10.1 --locked --root "$root" && router=PASS
           verdict "zenohd 1.10.1 builds:" "$router"
+          all=PASS
           if [ "$demo$harness$router" = PASSPASSPASS ]; then
             handshake=FAIL
             bin="$root/bin/zenohd$exe"
@@ -346,6 +349,17 @@ jobs:
               --test zenohd_handshake \
               -- --ignored --exact wz_client_reaches_established_against_a_stock_zenohd_on_this_host \
               --nocapture) && handshake=PASS
+            # One verdict per link, each its own test: a link's two consecutive green
+            # runs are counted from its own line, and a red names its link.
+            for scheme in ws udp tls quic; do
+              link=FAIL
+              (cd crates && WZ_ZENOHD_BIN="$bin" cargo test -p wz-host-interop-tests \
+                --test zenohd_link_handshakes \
+                -- --ignored --exact "wz_client_reaches_established_against_a_stock_zenohd_over_${scheme}_on_this_host" \
+                --nocapture) && link=PASS
+              verdict "wz reaches Established against zenohd over ${scheme}:" "$link"
+              [ "$link" = PASS ] || all=FAIL
+            done
           fi
           verdict "wz reaches Established against zenohd:" "$handshake"
-          [ "$handshake" = PASS ]
+          [ "$handshake" = PASS ] && [ "$all" = PASS ]

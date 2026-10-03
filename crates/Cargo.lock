@@ -2860,6 +2860,7 @@ version = "0.1.0"
 dependencies = [
  "tempfile",
  "wz-integration-tests",
+ "wz-runtime-tokio-test-support",
 ]
 
 [[package]]

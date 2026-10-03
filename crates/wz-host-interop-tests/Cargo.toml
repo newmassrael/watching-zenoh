@@ -43,6 +43,10 @@ wz-integration-tests = { path = "../wz-integration-tests" }
 
 [dev-dependencies]
 tempfile = "3"
+# The certificate the two certificate links hand to the router and to the demo. Its
+# dependency on the runtime is the minimal feature set the leg already builds on a
+# host, so it brings no feature the host crate was split off to avoid.
+wz-runtime-tokio-test-support = { path = "../wz-runtime-tokio-test-support", features = ["tls-fixtures"] }
 
 [lints]
 workspace = true
