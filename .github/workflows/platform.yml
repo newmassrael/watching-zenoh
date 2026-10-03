@@ -223,12 +223,22 @@ jobs:
             *)       ip -4 addr; ip -4 route ;;
           esac
           cd crates
+          # The host witness first: wz's own two drivers, one round trip on this
+          # host. It is the one whose interface is chosen per host from the
+          # measurements above (macOS over lo0), so its verdict is the one that
+          # says whether wz's multicast plane works HERE.
+          host=PASS
           scouting=PASS
           pubsub=PASS
+          cargo test -p wz-runtime-tokio --features transport-multicast,locator-iface \
+            --test multicast_host_roundtrip -- --ignored --nocapture || host=FAIL
+          # The fuller suites run ONE test at a time. They share a group port, so
+          # in parallel each sees the others' datagrams: the second Windows run
+          # failed two scouting tests that the first passed, on the same code.
           cargo test -p wz-runtime-tokio --features scouting-active,transport-link-tls \
-            --test scouting_multicast_loopback -- --ignored --nocapture || scouting=FAIL
+            --test scouting_multicast_loopback -- --ignored --nocapture --test-threads=1 || scouting=FAIL
           cargo test -p wz-runtime-tokio --features transport-multicast \
-            --test multicast_pubsub_loopback -- --ignored --nocapture || pubsub=FAIL
-          echo "multicast-probe on ${RUNNER_OS}: scouting ${scouting}, pubsub ${pubsub}"
-          echo "multicast-probe on ${RUNNER_OS}: scouting ${scouting}, pubsub ${pubsub}" >> "$GITHUB_STEP_SUMMARY"
-          [ "$scouting" = PASS ] && [ "$pubsub" = PASS ]
+            --test multicast_pubsub_loopback -- --ignored --nocapture --test-threads=1 || pubsub=FAIL
+          echo "multicast-probe on ${RUNNER_OS}: host ${host}, scouting ${scouting}, pubsub ${pubsub}"
+          echo "multicast-probe on ${RUNNER_OS}: host ${host}, scouting ${scouting}, pubsub ${pubsub}" >> "$GITHUB_STEP_SUMMARY"
+          [ "$host" = PASS ] && [ "$scouting" = PASS ] && [ "$pubsub" = PASS ]
