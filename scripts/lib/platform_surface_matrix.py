@@ -283,6 +283,17 @@ INTEROP_GAPS: dict[tuple[str, str], tuple[str, str]] = {
 INTEROP_PROMOTED: dict[tuple[str, str], tuple[int, int]] = {
     ("Tcp", "macos"): (37102598609, 37105204094),
     ("Tcp", "windows"): (37102598609, 37105204094),
+    # The four links first observed in 37105204094 and green again in 37109725746, on
+    # both hosts. The second run is also the first in which the promoted-tests step ran,
+    # and it passed there (one promoted test per host), so the step itself is proven.
+    ("Ws", "macos"): (37105204094, 37109725746),
+    ("Ws", "windows"): (37105204094, 37109725746),
+    ("Udp", "macos"): (37105204094, 37109725746),
+    ("Udp", "windows"): (37105204094, 37109725746),
+    ("Tls", "macos"): (37105204094, 37109725746),
+    ("Tls", "windows"): (37105204094, 37109725746),
+    ("Quic", "macos"): (37105204094, 37109725746),
+    ("Quic", "windows"): (37105204094, 37109725746),
 }
 
 
