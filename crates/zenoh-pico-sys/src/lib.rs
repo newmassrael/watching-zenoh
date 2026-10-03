@@ -48,4 +48,8 @@
 /// ordinary code with ordinary tests, and `build.rs` includes it.
 pub mod cmake_cache;
 
+/// Which platform macro and extra clang arguments bindgen needs for a cargo
+/// target, shared with `build.rs` for the same reason `cmake_cache` is.
+pub mod platform_map;
+
 include!(concat!(env!("OUT_DIR"), "/bindings.rs"));

@@ -42,6 +42,10 @@ use std::path::{Path, PathBuf};
 // what makes `cargo test -p zenoh-pico-sys` cover it.
 include!("src/cmake_cache.rs");
 
+// The platform macro and the extra clang arguments bindgen needs for a target,
+// shared with the crate for the same reason.
+include!("src/platform_map.rs");
+
 fn main() {
     let manifest_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap());
     // `dunce::canonicalize` and not `Path::canonicalize`: on Windows the standard
@@ -116,27 +120,23 @@ fn main() {
     //   x86_64-unknown-linux-gnu  → ZENOH_LINUX
     //   aarch64-unknown-linux-gnu → ZENOH_LINUX
     //   *-apple-darwin            → ZENOH_MACOS
-    //   *-windows-*               → (ZENOH_WINDOWS not bound here —
-    //                                Windows builds need windows.cmake
-    //                                semantics that are out of R41
-    //                                scope; will be wired when a wz
-    //                                Windows deploy class is needed)
+    //   *-windows-*               → ZENOH_WINDOWS
+    //
+    // The mapping lives in `src/platform_map.rs`, where it is tested; the
+    // Windows arm was added when a hosted Windows run got past the CMake step
+    // (the verbatim path, fixed above) and stopped here.
     //
     // The compiler-flavor macro (`ZENOH_COMPILER_GCC` etc.) is also
     // CMake-driven; since clang/clang++ is what bindgen uses
     // internally, pass `ZENOH_COMPILER_CLANG` so any C-side
     // #if-branches reach a consistent set of declarations.
     let target = env::var("TARGET").unwrap_or_default();
-    let platform_def = if target.contains("linux") {
-        "ZENOH_LINUX"
-    } else if target.contains("apple-darwin") {
-        "ZENOH_MACOS"
-    } else {
+    let platform_def = platform_definition(&target).unwrap_or_else(|| {
         panic!(
             "zenoh-pico-sys: unsupported TARGET `{target}` — add the \
-             matching `ZENOH_*` platform macro to build.rs's mapping"
-        );
-    };
+             matching `ZENOH_*` platform macro to src/platform_map.rs"
+        )
+    });
 
     let bindings = bindgen::Builder::default()
         .header(main_header)
@@ -145,6 +145,9 @@ fn main() {
         .clang_arg(format!("-D{platform_def}"))
         .clang_arg("-DZENOH_COMPILER_CLANG")
         .clang_arg("-DZENOH_C_STANDARD=11")
+        // What this target's pico headers need beyond the macro (Windows: the
+        // header's inline function named `__asm__`); see `platform_map.rs`.
+        .clang_args(extra_clang_args(&target))
         // Allowlist policy — see Cargo.toml + module docstring.
         // Adding a function here without a paired Layer 3 test round
         // is a violation of the "production-level surface, no auto-
