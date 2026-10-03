@@ -147,28 +147,32 @@ jobs:
             python scripts/lib/platform_surface_matrix.py --run "$host"
           fi
 
-      # ── Multicast: an OBSERVATION, not a gate (yet) ─────────────────────
+      # ── Multicast: what the leg does NOT gate ───────────────────────────
       #
-      # Upstream serves UDP multicast on every host (`zenoh-link-udp`), and the
-      # `platform-macos` / `platform-windows` atoms list "multicast" among what
-      # the host has not been shown to do. The wz witnesses are the `#[ignore]`
-      # Layer M tests, opt-in on Linux for a reason that was written about
-      # containers: "a CI container without a multicast route drops the IGMP
-      # join". A hosted macOS or Windows runner is a VM, so whether the join and
-      # the loopback work there is a fact nobody has read. This step reads it.
+      # Upstream serves UDP multicast on every host (`zenoh-link-udp`). The host
+      # facets of it are GATED now, in the leg above: `multicast_host_roundtrip`
+      # is a plane of the matrix gate (`PLANES`), run with `--ignored`, and it
+      # passes on both hosts (macOS over `lo0`, Windows over the default
+      # interface). What stays here is an OBSERVATION of two things the leg cannot
+      # gate:
       #
-      # `continue-on-error` is the point, and it expires: the first runs say which
-      # of the tests a host can run at all (the Linux-only `127.0.0.2` leg is one
-      # that a macOS loopback has no address for), and the step becomes a leg of the
-      # matrix gate, with its counts pinned, once there is something to pin.
+      #   * the OS itself, before any wz code: a send to the group unpinned, on
+      #     127.0.0.1 and on the default-route address, beside the interface and
+      #     route tables. This is where the macOS finding came from: the real
+      #     interface is denied to a process the runner spawns, loopback is not.
+      #   * wz's FULLER multicast suites (scouting, pub/sub). They run one test at a
+      #     time, and on Windows the scouting suite is still intermittent (6/6, 4/6,
+      #     5/6 on three runs, a different test each time, all of them the OS's choice
+      #     among three multicast-capable interfaces). On macOS they fail outright,
+      #     because they use the default interface. Neither says wz is wrong, and a
+      #     gate that flakes teaches nobody anything, so they do not gate.
       #
       # Two things about reading it. A step with `continue-on-error` reports
       # `conclusion: success` whatever it did (its `outcome` is the truth, and the
       # jobs API does not carry it), so the verdict is printed as a line of its own
       # and written to the job summary. And it runs after a leg that failed
-      # (`!cancelled()`): the first run skipped it on macOS behind the serial stall
-      # and so said nothing about macOS multicast.
-      - name: multicast on this host, observed (gates nothing yet)
+      # (`!cancelled()`).
+      - name: multicast on this host, observed (the suites; the leg gates the host witness)
         if: ${{ !cancelled() && env.WZ_HOST_SELECTED == 'true' }}
         timeout-minutes: 12
         continue-on-error: true
@@ -223,22 +227,16 @@ jobs:
             *)       ip -4 addr; ip -4 route ;;
           esac
           cd crates
-          # The host witness first: wz's own two drivers, one round trip on this
-          # host. It is the one whose interface is chosen per host from the
-          # measurements above (macOS over lo0), so its verdict is the one that
-          # says whether wz's multicast plane works HERE.
-          host=PASS
           scouting=PASS
           pubsub=PASS
-          cargo test -p wz-runtime-tokio --features transport-multicast,locator-iface \
-            --test multicast_host_roundtrip -- --ignored --nocapture || host=FAIL
-          # The fuller suites run ONE test at a time. They share a group port, so
-          # in parallel each sees the others' datagrams: the second Windows run
-          # failed two scouting tests that the first passed, on the same code.
+          # One test at a time: the suites share a group port, so in parallel each
+          # sees the others' datagrams. That was the first suspicion for Windows
+          # flaking, and the serial run still failed a test, so it is a cleaner
+          # observation and not the whole explanation.
           cargo test -p wz-runtime-tokio --features scouting-active,transport-link-tls \
             --test scouting_multicast_loopback -- --ignored --nocapture --test-threads=1 || scouting=FAIL
           cargo test -p wz-runtime-tokio --features transport-multicast \
             --test multicast_pubsub_loopback -- --ignored --nocapture --test-threads=1 || pubsub=FAIL
-          echo "multicast-probe on ${RUNNER_OS}: host ${host}, scouting ${scouting}, pubsub ${pubsub}"
-          echo "multicast-probe on ${RUNNER_OS}: host ${host}, scouting ${scouting}, pubsub ${pubsub}" >> "$GITHUB_STEP_SUMMARY"
-          [ "$host" = PASS ] && [ "$scouting" = PASS ] && [ "$pubsub" = PASS ]
+          echo "multicast-probe on ${RUNNER_OS}: scouting ${scouting}, pubsub ${pubsub}"
+          echo "multicast-probe on ${RUNNER_OS}: scouting ${scouting}, pubsub ${pubsub}" >> "$GITHUB_STEP_SUMMARY"
+          [ "$scouting" = PASS ] && [ "$pubsub" = PASS ]
