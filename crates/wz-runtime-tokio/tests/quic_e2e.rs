@@ -230,7 +230,13 @@ async fn wz_to_wz_over_quic_reaches_established_and_delivers_put() {
 /// `wz-integration-tests/tests/wz_quic_acceptor_iface_zenohd_interop.rs`, where the
 /// dialer is a real zenohd; this one keeps the same discriminator inside the crate
 /// that owns the code, so a regression reds without a foreign binary present.
-#[cfg(feature = "locator-iface")]
+///
+/// LINUX ONLY, by what it asks and not by accident. It reads `/sys/class/net` for a
+/// device to bind to and relies on `SO_BINDTODEVICE` accepting it, and neither exists
+/// on macOS or Windows. It carried only the feature gate until the host legs began
+/// to build `locator-iface` (the multicast plane needs it), and then the first hosted
+/// macOS and Windows runs both failed here with `No such file or directory`.
+#[cfg(all(feature = "locator-iface", target_os = "linux"))]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_listen_iface_bind_decides_whether_a_loopback_quic_dial_connects() {
     use wz_runtime_tokio::quic_pipeline::{accept_quic_on, dial_quic};
