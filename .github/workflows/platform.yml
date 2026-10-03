@@ -38,6 +38,7 @@ on:
       - ".github/workflows/platform.yml"
       - "scripts/lib/platform_surface_matrix.py"
       - "scripts/lib/upstream_link_axis_gate.py"
+      - "scripts/pico-c-program.sh"
       - "crates/wz-runtime-tokio/**"
       - "crates/wz-session-core/**"
       - "crates/wz-integration-tests/**"
@@ -631,65 +632,35 @@ jobs:
       # pico's OWN headers for this host (the ones the step above installs, with the
       # generated config), linked against the wz library in place of libzenohpico, and
       # run. A red here now fails the run: a pico-typed value was written past its
-      # type, or a host-layer export stopped answering as pico's does. It covers the part of the C ABI that differs by host (the mutex, condition
-      # variable, task, clock, wall time and random exports), places every value pico's
-      # header types between guard bytes to catch a wrong layout where it happens, and
-      # carries a control that must trip the guard. It opens no session; the sessions
-      # are what the Rust integration tests already drive over the host's loopback.
+      # type, or a host-layer export stopped answering as pico's does. It covers the
+      # part of the C ABI that differs by host (the mutex, condition variable, task,
+      # clock, wall time and random exports), places every value pico's header types
+      # between guard bytes to catch a wrong layout where it happens, and carries a
+      # control that must trip the guard. It opens no session; the next step does.
       #
-      # On Windows the program is compiled with MSVC's `cl` through the Visual Studio
-      # environment, the compiler pico's own build uses: pico's Windows header names an
-      # inline function `__asm__`, which a GNU-mode compiler reads as a keyword.
+      # The build and run live in scripts/pico-c-program.sh, which both programs share:
+      # on Windows the program is compiled with MSVC's `cl` through the Visual Studio
+      # environment, the compiler pico's own build uses, because pico's Windows header
+      # names an inline function `__asm__`, which a GNU-mode compiler reads as a keyword.
       - name: a zenoh-pico C program against the wz cdylib (gated)
         if: ${{ env.WZ_HOST_SELECTED == 'true' }}
         timeout-minutes: 25
         shell: bash
-        run: |
-          src="crates/wz-capi-pico/tests/c/pico_host_layer.c"
-          lib_dir="$PWD/crates/target/debug"
-          if ! (cd crates && cargo build -p zenoh-pico-sys -p wz-capi-pico); then
-            echo "pico-program-probe on ${RUNNER_OS}: the pico headers and the cdylib did not build NOT-MEASURED"
-            echo "pico-program-probe on ${RUNNER_OS}: the pico headers and the cdylib did not build NOT-MEASURED" >> "$GITHUB_STEP_SUMMARY"
-            exit 1
-          fi
-          # shellcheck disable=SC2012
-          inc="$PWD/$(ls -dt crates/target/debug/build/zenoh-pico-sys-*/out/include | head -n 1)"
-          echo "pico headers: $inc"
-          compiled=FAIL
-          temp="$(cygpath -u "$RUNNER_TEMP" 2> /dev/null || echo "$RUNNER_TEMP")"
-          exe="$temp/pico_host_layer"
-          case "$RUNNER_OS" in
-            macOS)
-              compiler=cc
-              cc -std=c11 -DZENOH_MACOS -I"$inc" "$src" -o "$exe" -L"$lib_dir" -lwz_capi_pico -Wl,-rpath,"$lib_dir" && compiled=PASS
-              ;;
-            Windows)
-              compiler=cl
-              vswhere="/c/Program Files (x86)/Microsoft Visual Studio/Installer/vswhere.exe"
-              vsroot="$("$vswhere" -latest -products '*' -property installationPath)"
-              bat="$temp/build_pico_host_layer.bat"
-              {
-                printf '@echo off\r\n'
-                printf 'call "%s\\VC\\Auxiliary\\Build\\vcvars64.bat" > nul\r\n' "$vsroot"
-                printf 'cd /d "%s"\r\n' "$(cygpath -w "$temp")"
-                printf 'cl /nologo /std:c11 /DZENOH_WINDOWS /I"%s" "%s" "%s" /Fe:"%s"\r\n' \
-                  "$(cygpath -w "$inc")" "$(cygpath -w "$PWD/$src")" \
-                  "$(cygpath -w "$lib_dir/wz_capi_pico.dll.lib")" "$(cygpath -w "$exe.exe")"
-              } > "$bat"
-              cmd.exe //c "$(cygpath -w "$bat")" && compiled=PASS
-              exe="$exe.exe"
-              ;;
-            *)
-              compiler=none
-              ;;
-          esac
-          if [ "$compiled" != PASS ]; then
-            echo "pico-program-probe on ${RUNNER_OS} (${compiler}): the program did not compile or link NOT-MEASURED"
-            echo "pico-program-probe on ${RUNNER_OS} (${compiler}): the program did not compile or link NOT-MEASURED" >> "$GITHUB_STEP_SUMMARY"
-            exit 1
-          fi
-          result=FAIL
-          PATH="$lib_dir:$PATH" "$exe" && result=PASS
-          echo "pico-program-probe on ${RUNNER_OS} (${compiler}): a pico C program against the wz cdylib: ${result}"
-          echo "pico-program-probe on ${RUNNER_OS} (${compiler}): a pico C program against the wz cdylib: ${result}" >> "$GITHUB_STEP_SUMMARY"
-          [ "$result" = PASS ]
+        run: bash scripts/pico-c-program.sh crates/wz-capi-pico/tests/c/pico_host_layer.c "a pico C program against the wz cdylib"
+
+      # A zenoh-pico C program that opens SESSIONS, on this host. An OBSERVATION: it is
+      # new, so it has not read green twice. It is the session half of what a pico
+      # program does, and the evidence the session surface of the C ABI needs before a
+      # platform tag can claim it: a config, two sessions over the host's loopback (an
+      # acceptor on a task of its own and a client dialing it), a subscriber declared
+      # with a closure, a publish, and the sample the closure is handed, read as pico's
+      # z_sub.c reads it. Every owned type the program declares (the config, the
+      # session, the closure, the subscriber, the task) sits between guard bytes, so an
+      # export that writes past the size pico's header gives it is caught where it
+      # happens. Both sessions are the wz library, which is what one process can hold.
+      - name: a zenoh-pico C program that opens sessions (observation)
+        if: ${{ env.WZ_HOST_SELECTED == 'true' }}
+        timeout-minutes: 25
+        continue-on-error: true
+        shell: bash
+        run: bash scripts/pico-c-program.sh crates/wz-capi-pico/tests/c/pico_session_loopback.c "a pico C program that opens two sessions over loopback"
