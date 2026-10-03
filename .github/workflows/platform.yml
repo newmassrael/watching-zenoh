@@ -620,3 +620,71 @@ jobs:
           echo "pico-sys-probe on ${RUNNER_OS}: the vendored zenoh-pico C library builds: ${built}"
           echo "pico-sys-probe on ${RUNNER_OS}: the vendored zenoh-pico C library builds: ${built}" >> "$GITHUB_STEP_SUMMARY"
           [ "$built" = PASS ]
+
+      # A zenoh-pico C program against the wz cdylib, on this host. An OBSERVATION, and
+      # the evidence the platform tags do not yet have: a program compiled against
+      # pico's OWN headers for this host (the ones the step above installs, with the
+      # generated config), linked against the wz library in place of libzenohpico, and
+      # run. It covers the part of the C ABI that differs by host (the mutex, condition
+      # variable, task, clock, wall time and random exports), places every value pico's
+      # header types between guard bytes to catch a wrong layout where it happens, and
+      # carries a control that must trip the guard. It opens no session; the sessions
+      # are what the Rust integration tests already drive over the host's loopback.
+      #
+      # On Windows the program is compiled with MSVC's `cl` through the Visual Studio
+      # environment, the compiler pico's own build uses: pico's Windows header names an
+      # inline function `__asm__`, which a GNU-mode compiler reads as a keyword.
+      - name: a zenoh-pico C program against the wz cdylib (observation)
+        if: ${{ env.WZ_HOST_SELECTED == 'true' }}
+        timeout-minutes: 25
+        continue-on-error: true
+        shell: bash
+        run: |
+          src="crates/wz-capi-pico/tests/c/pico_host_layer.c"
+          lib_dir="$PWD/crates/target/debug"
+          if ! (cd crates && cargo build -p zenoh-pico-sys -p wz-capi-pico); then
+            echo "pico-program-probe on ${RUNNER_OS}: the pico headers and the cdylib did not build NOT-MEASURED"
+            echo "pico-program-probe on ${RUNNER_OS}: the pico headers and the cdylib did not build NOT-MEASURED" >> "$GITHUB_STEP_SUMMARY"
+            exit 1
+          fi
+          # shellcheck disable=SC2012
+          inc="$PWD/$(ls -dt crates/target/debug/build/zenoh-pico-sys-*/out/include | head -n 1)"
+          echo "pico headers: $inc"
+          compiled=FAIL
+          temp="$(cygpath -u "$RUNNER_TEMP" 2> /dev/null || echo "$RUNNER_TEMP")"
+          exe="$temp/pico_host_layer"
+          case "$RUNNER_OS" in
+            macOS)
+              compiler=cc
+              cc -std=c11 -DZENOH_MACOS -I"$inc" "$src" -o "$exe" -L"$lib_dir" -lwz_capi_pico -Wl,-rpath,"$lib_dir" && compiled=PASS
+              ;;
+            Windows)
+              compiler=cl
+              vswhere="/c/Program Files (x86)/Microsoft Visual Studio/Installer/vswhere.exe"
+              vsroot="$("$vswhere" -latest -products '*' -property installationPath)"
+              bat="$temp/build_pico_host_layer.bat"
+              {
+                printf '@echo off\r\n'
+                printf 'call "%s\\VC\\Auxiliary\\Build\\vcvars64.bat" > nul\r\n' "$vsroot"
+                printf 'cd /d "%s"\r\n' "$(cygpath -w "$temp")"
+                printf 'cl /nologo /std:c11 /DZENOH_WINDOWS /I"%s" "%s" "%s" /Fe:"%s"\r\n' \
+                  "$(cygpath -w "$inc")" "$(cygpath -w "$PWD/$src")" \
+                  "$(cygpath -w "$lib_dir/wz_capi_pico.dll.lib")" "$(cygpath -w "$exe.exe")"
+              } > "$bat"
+              cmd.exe //c "$(cygpath -w "$bat")" && compiled=PASS
+              exe="$exe.exe"
+              ;;
+            *)
+              compiler=none
+              ;;
+          esac
+          if [ "$compiled" != PASS ]; then
+            echo "pico-program-probe on ${RUNNER_OS} (${compiler}): the program did not compile or link NOT-MEASURED"
+            echo "pico-program-probe on ${RUNNER_OS} (${compiler}): the program did not compile or link NOT-MEASURED" >> "$GITHUB_STEP_SUMMARY"
+            exit 1
+          fi
+          result=FAIL
+          PATH="$lib_dir:$PATH" "$exe" && result=PASS
+          echo "pico-program-probe on ${RUNNER_OS} (${compiler}): a pico C program against the wz cdylib: ${result}"
+          echo "pico-program-probe on ${RUNNER_OS} (${compiler}): a pico C program against the wz cdylib: ${result}" >> "$GITHUB_STEP_SUMMARY"
+          [ "$result" = PASS ]
