@@ -4670,11 +4670,17 @@ fn payload_block(
         // failure to explain.
         PayloadDecoding::KeyexprUnresolved => {
             let why = match wz_capture::payload_decode::subtree_keyexpr_outcome(field, at) {
-                Some(Err(wz_capture::agg::UnresolvedCause::NoSession)) => {
+                Some(Err(wz_capture::payload_decode::UnresolvedRef {
+                    cause: wz_capture::agg::UnresolvedCause::NoSession,
+                    ..
+                })) => {
                     " -- this capture never saw the handshake of the flow it \
                      travelled on, so the declaration may be one link over"
                 }
-                Some(Err(wz_capture::agg::UnresolvedCause::NoDeclaration)) => {
+                Some(Err(wz_capture::payload_decode::UnresolvedRef {
+                    cause: wz_capture::agg::UnresolvedCause::NoDeclaration,
+                    ..
+                })) => {
                     " -- the session is known and nothing on it ever declared \
                      that id, so the binding is not in this capture"
                 }

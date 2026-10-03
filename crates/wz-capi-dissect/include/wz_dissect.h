@@ -360,6 +360,22 @@
  *
  * @values fields keyexpr_cause
  *
+ * AND WHICH ID, at field-document revision 24.
+ *
+ *     `keyexpr_id`  the numeric id the message referenced, or `null`.
+ *
+ * It sits on every entry of `carried` and of `above_transport.carried`, beside
+ * `keyexpr` and `keyexpr_cause`, and it is a number exactly when
+ * `keyexpr_cause` is a word: a key that resolved, and a message that
+ * referenced none, have no id to report, and it is `null` for both. It is the
+ * id as the message wrote it -- not remapped between the sender's table and
+ * the receiver's, and without the suffix a reference may add after it. A list
+ * that has no key to print for a row prints this where it would have printed
+ * the key (`id 7`), and it comes from this array because every row of such a
+ * list does. It is an integer a JSON number could misread, so it takes the rule
+ * of the paragraph on integers below. Like `keyexpr` and `keyexpr_cause` it can
+ * change in an issued row (see the list of revisable cells).
+ *
  * ⚠ REVISION 9 ALSO MOVED WHICH REFERENCES RESOLVE AT ALL, under a stationary
  * `keyexpr`, and no `value_families` row can say so. Until it, this document
  * folded a keyexpr id space PER FLOW, while a zenoh session with
@@ -456,7 +472,9 @@
  * It applies to a `uint` (and a `bits`) field's `value` in every field tree;
  * to the `missing` of a row's `sn` and of the summary's `sequence` group; to
  * the `id` and `solicited_by` values the census and the summary write for a
- * declaration, an interest request and an unresolved alias; and to
+ * declaration, an interest request and an unresolved alias; to the
+ * `keyexpr_id` of a `carried` entry (a key that exists from field document 24
+ * and takes the rule from its first appearance); and to
  * `oldest_ts_ns` in the retention document. It does NOT apply to counts,
  * offsets, sizes and millisecond spans: those count things the host holds, and
  * stay bare numbers. Revisions: fields 23, census 16, summary 5, retention 2.
@@ -659,7 +677,7 @@
  *
  * Every family in `value_families` now carries a `carries` axis:
  *
- *     {"name":"fields","revision":23,"key":"kind","values":[...],
+ *     {"name":"fields","revision":24,"key":"kind","values":[...],
  *      "carries":[{"word":"bits","shapes":[["end","name","start","value"]]},
  *                 {"word":"opaque","shapes":[["end","name","start"]]}, ...]}
  *
@@ -1572,7 +1590,16 @@ int wz_dissect_declarations_diagnose(const char *declarations, char **out);
  *
  * Writes {"link_types":"0 NULL, 1 ETHERNET, …",
  *         "ext_bodies":{"zbuf":"Auth/pubkey, …","z64":"Declare/node_id, …"},
- *         "payload_field_types":"u8, i8, u16le, …"}
+ *         "payload_field_types":"u8, i8, u16le, …",
+ *         "payload_formats":["cbor","json","protobuf"]}
+ *
+ * Revision 5 -- `payload_formats` is the list of payload formats this build
+ * decodes without a declared layout, by name, in the order the build lists
+ * them. A reader that shows its operator which sub-decoders exist reads this
+ * instead of keeping a list of its own, which ages the moment a build gains a
+ * format. A name in it is one a payload rule or a declaration may use. It is
+ * NOT a closed set a consumer may switch on: it says what THIS build has, and
+ * a later build may list more. An addition; nothing retires.
  *
  * R2114 -- the third key is why the document moved to revision 2. A consumer
  * writing a format DEFINITION (see the declarations door above) needs the
@@ -1582,7 +1609,7 @@ int wz_dissect_declarations_diagnose(const char *declarations, char **out);
  *
  * R2175 -- the document is at REVISION 3, and the fourth key is `value_families`:
  *
- *     "value_families":[{"name":"fields","revision":23,"key":"state",
+ *     "value_families":[{"name":"fields","revision":24,"key":"state",
  *                        "values":["decoded","encoding_mismatch",…]}, …]
  *
  * every key in every document whose VALUE this build draws from a closed set,
@@ -2351,7 +2378,9 @@ int wz_dissect_live_fields_where(wz_dissect_live *h,
  *                                              fills -- resolves a reference that
  *                                              was written unresolved. Do not
  *                                              keep these across calls as final.
- *     /chain/chain_id                          chains are numbered from the first
+ *     /carried[]/keyexpr_id                    since revision 24: the id moves with
+ *     /above_transport/carried[]/keyexpr_id    the `keyexpr` it was written beside.
+ *     /chain/chain_id                         chains are numbered from the first
  *                                              message the list still holds, so
  *                                              a front trim renumbers them. It
  *                                              names a chain within ONE document.

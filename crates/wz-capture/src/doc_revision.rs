@@ -1363,6 +1363,50 @@ pub const DOCUMENT_HISTORY: &[DocumentShape] = &[
         planes: &[],
         carries: FIELDS_R20_CARRIES,
     },
+    // AN UNRESOLVED REFERENCE NAMES ITS ID.
+    //
+    // Revision 24 ADDS one key, `keyexpr_id`, and retires nothing. It arrives on
+    // EVERY entry of a `carried` array and of an `above_transport.carried` array,
+    // beside `keyexpr` and `keyexpr_cause`, and it is `null` whenever the cause is:
+    // a key that resolved, or a message that referenced none, has no id to report.
+    // When the cause is a word, the id is the numeric id the message referenced, as
+    // it wrote it. It is not remapped between the sender's table and the receiver's,
+    // and the suffix a reference may add after the id is not part of it, because the
+    // id is what a reader has to look up and the suffix is not part of that key.
+    //
+    // WHY IT BELONGS ON THE ENTRY. A reader that lists rows has one cell for the
+    // key, and a row whose key did not resolve left that cell with a word and no
+    // way to say WHICH reference it could not resolve; the row's own tree names the
+    // id, but only for the row a reader has selected, and every row of a list comes
+    // from this array. The cause says why a key is missing and the id says what was
+    // asked, and the second is the one a reader prints where it would have printed
+    // the key.
+    //
+    // THE SAME WALK. The id comes out of the step that decided the miss, so when a
+    // batched record references several ids and none resolves, the id reported is
+    // the one whose lookup the cause describes, not whichever a second pass would
+    // choose.
+    //
+    // ONE CELL TAKES THE INTEGER DOOR. `keyexpr_id` is a protocol field's value, so
+    // it is a bare number up to 2^53 - 1 and the same digits in a string above it,
+    // the rule revision 23 set for every such value. A wire id is a 32-bit value in
+    // practice, so a string here means a capture that is not a zenoh capture, and
+    // the door is what keeps that from being a number a reader would round.
+    //
+    // A consumer pinned to 23 loses nothing: this is an addition to an object it
+    // reads by name. What it may not do is treat the new cell as fixed once it has
+    // stored a record: it moves with `keyexpr` and `keyexpr_cause`, a declaration
+    // decoded later can resolve a reference written unresolved, and it is among the
+    // cells a live handle may rewrite (`REVISABLE_ROW_CELLS`).
+    DocumentShape {
+        document: FIELDS,
+        revision: 24,
+        keys: FIELDS_R24_KEYS,
+        retiring: &[],
+        families: FIELDS_R20_FAMILIES,
+        planes: &[],
+        carries: FIELDS_R20_CARRIES,
+    },
     DocumentShape {
         document: SUMMARY,
         revision: 1,
@@ -1500,6 +1544,27 @@ pub const DOCUMENT_HISTORY: &[DocumentShape] = &[
         document: READABLE_SURFACES,
         revision: 4,
         keys: READABLE_SURFACES_R4_KEYS,
+        retiring: &[],
+        families: &[],
+        planes: &[],
+        carries: &[],
+    },
+    // Revision 5 ADDS `payload_formats` and retires nothing: the NAMES of the payload
+    // formats this build decodes without being told a layout (the ones a
+    // `--payload-format` rule or a declaration can name directly), as an array of
+    // strings in the order the build lists them.
+    //
+    // A reader that shows which sub-decoders are available has nothing to show them
+    // from but a copy of the list, and a copy ages the moment the build gains a
+    // format. The names are emitted from the table the decoder itself dispatches
+    // on, so a format added there is in this answer without a second edit, and a
+    // name here is one a declaration may use. An ADDITION, so a consumer pinned to
+    // 4 loses nothing. The format names are NOT a closed vocabulary a consumer
+    // may switch on: this build lists what it has, and a later build may list more.
+    DocumentShape {
+        document: READABLE_SURFACES,
+        revision: 5,
+        keys: READABLE_SURFACES_R5_KEYS,
         retiring: &[],
         families: &[],
         planes: &[],
@@ -7898,6 +7963,31 @@ pub const READABLE_SURFACES_R4_KEYS: &[&str] = &[
     "zbuf",
 ];
 
+/// The readable-surfaces catalogue's key set at revision 5: revision 4's plus
+/// `payload_formats`.
+///
+/// Spelled out rather than built from [`READABLE_SURFACES_R4_KEYS`], on the same
+/// rule.
+pub const READABLE_SURFACES_R5_KEYS: &[&str] = &[
+    "carries",
+    "document",
+    "doors",
+    "ext_bodies",
+    "key",
+    "link_types",
+    "name",
+    "payload_field_types",
+    "payload_formats",
+    "revision",
+    "shapes",
+    "subsumed_by",
+    "value_families",
+    "values",
+    "word",
+    "z64",
+    "zbuf",
+];
+
 /// The selector verdict's key set at revision 1, over BOTH branches.
 ///
 /// The UNION of `{ok:true}` and `{ok:false,at,message}`: a pin over one branch
@@ -8060,6 +8150,117 @@ pub const RETENTION_R2_KEYS: &[&str] = RETENTION_R1_KEYS;
 /// row's `sn.missing`: a number, now a number or a string), not a key; see the
 /// row.
 pub const FIELDS_R23_KEYS: &[&str] = FIELDS_R22_KEYS;
+
+/// The field document's key set at revision 24: revision 23's PLUS `keyexpr_id`.
+///
+/// Written out rather than aliased, on the rule revision 7 set for a key that
+/// arrives.
+///
+/// MEASURED: `the_field_documents_key_set_is_pinned` prints what the document
+/// emits and this is that printout.
+pub const FIELDS_R24_KEYS: &[&str] = &[
+    "abandoned_at_end",
+    "abandoned_on_eviction",
+    "above_transport",
+    "addr",
+    "after_seq",
+    "anchor",
+    "batch_index",
+    "batch_size",
+    "caps",
+    "capture_reread",
+    "carried",
+    "carried_state",
+    "chain",
+    "chain_id",
+    "compression",
+    "conduit",
+    "context",
+    "datagram_flows",
+    "declaration_checked",
+    "declared",
+    "descriptor_bytes",
+    "despite_encoding",
+    "direction",
+    "document",
+    "dropped_by_limits",
+    "dst",
+    "end",
+    "example",
+    "expired_chains",
+    "family",
+    "fields",
+    "first_byte",
+    "flow",
+    "flows",
+    "format",
+    "frame_offset",
+    "frames",
+    "frames_per_flow",
+    "high",
+    "keyexpr",
+    "keyexpr_cause",
+    "keyexpr_id",
+    "kind",
+    "l2",
+    "length",
+    "link",
+    "list_id",
+    "low",
+    "lowlatency",
+    "max_flows_per_table",
+    "max_scout_askers",
+    "message",
+    "message_at",
+    "messages",
+    "missing",
+    "name",
+    "negotiated",
+    "note",
+    "offset_space",
+    "omitted",
+    "outcome",
+    "packet",
+    "patch",
+    "path",
+    "payload_decode",
+    "payload_mapping",
+    "payload_mapping_counts_exact",
+    "payload_offset",
+    "payload_refusals",
+    "phase",
+    "port",
+    "priority",
+    "qos",
+    "reason",
+    "reassembly",
+    "reliable",
+    "revision",
+    "samples",
+    "scout_askers",
+    "scouting",
+    "selected",
+    "seq",
+    "shown",
+    "skipped",
+    "skipped_packets",
+    "sn",
+    "sn_mask",
+    "src",
+    "start",
+    "state",
+    "stream_bytes",
+    "stream_bytes_per_direction",
+    "stream_flows",
+    "through_seq",
+    "under",
+    "value",
+    "verdict",
+    "version",
+    "why",
+    "window",
+    "wrong",
+];
 
 /// The census document's key set at revision 16: revision 15's, by name.
 ///
@@ -9506,7 +9707,9 @@ mod tests {
             // To 23 when a `uint` field's `value` (and the sequence gap
             // `missing`) became a number or a string: the JSON type moved under
             // stationary keys, so this entry is the notice.
-            (FIELDS, 23),
+            // To 24 when every `carried` entry gained `keyexpr_id`, the id an
+            // unresolved reference named.
+            (FIELDS, 24),
             // R2121 (open-debt item 460) — the summary moved to 2 when it
             // gained `inert_counters`; R2122 (item 238) to 3 when its
             // `framing` group stopped disagreeing with the capture report's.
@@ -9522,7 +9725,9 @@ mod tests {
             // R2184 (item 556) — to 4 when the `value_families` rows gained
             // `carries` and the `word` / `keys` under it, which is where the
             // third axis reaches a consumer at runtime.
-            (READABLE_SURFACES, 4),
+            // To 5 when it gained `payload_formats`, the names of the payload
+            // formats this build can decode without a declaration.
+            (READABLE_SURFACES, 5),
             // To 2 when the verdict gained the lexer's `tokens`.
             (SELECTOR_DIAGNOSE, 2),
             (DECLARATIONS_DIAGNOSE, 1),

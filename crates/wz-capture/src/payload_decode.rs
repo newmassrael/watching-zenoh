@@ -1183,6 +1183,22 @@ pub fn subtree_keyexpr(field: &Field, at: KeyexprAt<'_>) -> Option<String> {
     subtree_keyexpr_outcome(field, at).and_then(Result::ok)
 }
 
+/// One keyexpr reference the tables could not answer: WHY, and WHICH id.
+///
+/// The cause is [`crate::agg::UnresolvedCause`], the split the census and the field
+/// document already carry. The id is the numeric id of the `WireExpr` as the message
+/// wrote it: not remapped between the sender's table and the receiver's, and without
+/// the suffix a `WireExpr` may add after it, because the id is what a reader has to
+/// look up and a suffix is not part of that lookup's key. A reader showing an
+/// unresolved reference prints this id where a resolved one prints its keyexpr.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct UnresolvedRef {
+    /// Why the tables could not answer.
+    pub cause: crate::agg::UnresolvedCause,
+    /// The numeric id the message referenced.
+    pub id: u64,
+}
+
 /// R2458 (open-debt item 703) — the same walk, answering WHY when it does not
 /// resolve.
 ///
@@ -1209,10 +1225,19 @@ pub fn subtree_keyexpr(field: &Field, at: KeyexprAt<'_>) -> Option<String> {
 /// different stopping behaviour — a quiet change to which keyexpr a batched
 /// record reports would be a WRONG key rather than a missing one, which is the
 /// defect this function's neighbours were written to end.
+///
+/// # Which id, and why it rides with the cause
+///
+/// A miss names the numeric id the message referenced, in [`UnresolvedRef::id`].
+/// It is read off the same `keyexpr` node as the cause and returned from the same
+/// step of the same walk, so the id a reader is shown is the id whose lookup
+/// failed. Reconstructing it afterwards by a second walk would be a second
+/// opinion on which of several unresolved references in one batched record
+/// counts as the first.
 pub fn subtree_keyexpr_outcome(
     field: &Field,
     at: KeyexprAt<'_>,
-) -> Option<Result<String, crate::agg::UnresolvedCause>> {
+) -> Option<Result<String, UnresolvedRef>> {
     if field.name == "keyexpr" {
         if let FieldValue::Nested(parts) = &field.value {
             let mut id = 0u64;
@@ -1245,7 +1270,10 @@ pub fn subtree_keyexpr_outcome(
                 Ok(_) => None,
                 // R2457's rule, read off the OWNER rather than off the tables:
                 // see `KeyexprSpaces::cause`.
-                Err((space, _)) => Some(Err(at.spaces.cause(space))),
+                Err((space, _)) => Some(Err(UnresolvedRef {
+                    cause: at.spaces.cause(space),
+                    id,
+                })),
             };
         }
     }

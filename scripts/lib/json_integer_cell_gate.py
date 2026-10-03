@@ -89,6 +89,12 @@ class Cell:
     name: str
     header: str
     row: str
+    #: The revision at which THIS cell first existed under the rule, when that is
+    #: later than its document's `RULE_REVISION`. A cell added after the document
+    #: took the rule is born under it, so the row that announced the cell is the
+    #: row of the revision that added it and not the one that introduced the rule.
+    #: `None` is the document's own rule revision.
+    born: int | None = None
 
 
 _ID_HEADER = "the `id` and `solicited_by` values the census and the summary write"
@@ -101,6 +107,15 @@ CELLS: dict[tuple[str, str], tuple[Cell, ...]] = {
     ),
     ("crates/wz-capture/src/fields_json.rs", "push_session_row"): (
         Cell("fields", "a row's sn.missing", "the `missing` of a row's `sn`", "`sn.missing`"),
+    ),
+    ("crates/wz-capture/src/fields_json.rs", "push_keyexpr_miss"): (
+        Cell(
+            "fields",
+            "a carried entry's keyexpr_id",
+            "the `keyexpr_id` of a `carried` entry",
+            "`keyexpr_id` is a protocol field's value",
+            born=24,
+        ),
     ),
     ("crates/wz-capture/src/census_json.rs", "interests_json"): (
         Cell("census", "declarations[].id", _ID_HEADER, "`declarations[].id`"),
@@ -320,19 +335,25 @@ def row_comment(doc_revision: str, document: str, revision: int) -> str | None:
 
 
 def row_findings(doc_revision: str, cells: Iterable[Cell], rule: Mapping[str, int]) -> list[str]:
+    """Each cell is looked for in the row of the revision it was born under: its own
+    `born`, or its document's rule revision when it has none. A document with cells
+    born at two revisions is read at both, and each row must name its own."""
     out: list[str] = []
-    for doc, rev in rule.items():
-        text = row_comment(doc_revision, doc, rev)
+    cells = list(cells)
+    for doc, rule_rev in rule.items():
         mine = [c for c in cells if c.document == doc]
-        if text is None:
-            out.append(f"{DOC_REVISION}: no commented `DocumentShape` row for {doc} revision {rev}")
-            continue
-        out += [
-            f"{DOC_REVISION}: the {doc} revision {rev} row does not name {c.name} "
-            f"(it should say: {_flat(c.row)})"
-            for c in mine
-            if _flat(c.row) not in text
-        ]
+        for rev in sorted({rule_rev} | {c.born for c in mine if c.born is not None}):
+            text = row_comment(doc_revision, doc, rev)
+            here = [c for c in mine if (c.born if c.born is not None else rule_rev) == rev]
+            if text is None:
+                out.append(f"{DOC_REVISION}: no commented `DocumentShape` row for {doc} revision {rev}")
+                continue
+            out += [
+                f"{DOC_REVISION}: the {doc} revision {rev} row does not name {c.name} "
+                f"(it should say: {_flat(c.row)})"
+                for c in here
+                if _flat(c.row) not in text
+            ]
     return out
 
 
@@ -429,6 +450,27 @@ def selftest() -> int:
     expect("a row naming both cells", row_findings(rows, [c1, c2], rule), [])
     refused("a row missing a cell", row_findings(rows.replace("`y`", "`q`"), [c1, c2], rule), "does not name y")
     refused("no row at the rule revision", row_findings(rows, [c1], {"fields": 3}), "no commented")
+
+    # A cell born AFTER the document took the rule is read in the row that added it,
+    # and the rule revision's row is not asked about it.
+    later = (
+        rows
+        + "        keys: K,\n        retiring: &[],\n    },\n"
+        + "    // a later revision names `z` as well.\n"
+        + "    DocumentShape {\n        document: FIELDS,\n        revision: 4,\n"
+    )
+    cz = Cell("fields", "z", "the `z` cell", "`z`", born=4)
+    expect("a cell born later is found in its own row", row_findings(later, [c1, cz], rule), [])
+    refused(
+        "a cell born later is NOT excused by the rule revision's row",
+        row_findings(later.replace("names `z`", "names `q`"), [c1, cz], rule),
+        "revision 4 row does not name z",
+    )
+    refused(
+        "a birth revision with no row is a finding",
+        row_findings(rows, [cz], rule),
+        "no commented `DocumentShape` row for fields revision 4",
+    )
 
     if failures:
         print(f"json-integer-cell selftest: FAIL -- {len(failures)}")

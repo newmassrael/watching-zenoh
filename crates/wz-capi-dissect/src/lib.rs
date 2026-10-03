@@ -436,8 +436,13 @@ pub unsafe extern "C" fn wz_dissect_record_layout(out: *mut usize, cap: usize) -
 ///
 /// ```json
 /// {"link_types":"0 NULL, 1 ETHERNET, …",
-///  "ext_bodies":{"zbuf":"Auth/pubkey, …","z64":"Declare/node_id, …"}}
+///  "ext_bodies":{"zbuf":"Auth/pubkey, …","z64":"Declare/node_id, …"},
+///  "payload_formats":["cbor","json","protobuf"]}
 /// ```
+///
+/// (The document also carries `payload_field_types`, `value_families` and
+/// `doors`, described where each arrived; `payload_formats` is the list of
+/// payload formats this build decodes without a declared layout.)
 ///
 /// Strings rather than arrays, and deliberately: they are the SAME strings the
 /// command line prints, so a consumer rendering them beside a capture shows
@@ -486,6 +491,23 @@ pub unsafe extern "C" fn wz_dissect_readable_surfaces(out: *mut *mut c_char) -> 
         &wz_capture::payload::formats::readable_field_types_line(),
         &mut s,
     );
+    // Revision 5 — the payload formats this build decodes without a declared
+    // layout, by name. A reader that lists its available sub-decoders has no
+    // other source for the list, and a copy of it ages when the build gains a
+    // format. It is emitted from `BUILTIN_NAMES`, the table the usage text and
+    // every refusal already read and that a test holds to what `builtin`
+    // dispatches, so there is no second list here to fall behind.
+    s.push_str(",\"payload_formats\":[");
+    for (i, name) in wz_capture::payload::formats::BUILTIN_NAMES
+        .iter()
+        .enumerate()
+    {
+        if i > 0 {
+            s.push(',');
+        }
+        wz_session_core::json::escape_into(name, &mut s);
+    }
+    s.push(']');
     // R2175 (open-debt item 552) — the fourth surface, and the one that is
     // about the documents rather than about the wire: every key whose VALUE
     // this build draws from a closed set, with that set. A consumer switches on
@@ -5974,12 +5996,40 @@ mod tests {
         // is. The literal moves with it, on the same reasoning.
         // R2184 (open-debt item 556) — revision 4, because those rows grew
         // `carries`: which keys arrive beside each word.
+        // Revision 5, because it grew `payload_formats`: which payload formats
+        // this build decodes without a declared layout.
         assert!(
             doc.starts_with(
-                "{\"document\":{\"name\":\"readable_surfaces\",\"revision\":4},\"link_types\":\""
+                "{\"document\":{\"name\":\"readable_surfaces\",\"revision\":5},\"link_types\":\""
             ),
             "the document is one JSON object opening with its revision: {doc}"
         );
+        // The format names are in it, taken from the table the decoder dispatches
+        // on and not from a second list, and in that table's own order. The
+        // population is asserted non-empty first, because a build with no format
+        // would make the array check below true of nothing.
+        let formats = wz_capture::payload::formats::BUILTIN_NAMES;
+        assert!(
+            !formats.is_empty(),
+            "no built-in format, so this asserts nothing"
+        );
+        let listed = formats
+            .iter()
+            .map(|n| format!("\"{n}\""))
+            .collect::<Vec<_>>()
+            .join(",");
+        assert!(
+            doc.contains(&format!("\"payload_formats\":[{listed}]")),
+            "the built-in payload formats must be reported by name: {doc}"
+        );
+        // And every name it reports is one a rule can actually use: the door says
+        // "available" only about what `builtin` resolves.
+        for name in formats {
+            assert!(
+                wz_capture::payload::formats::builtin(name).is_some(),
+                "{name} is reported as available and resolves to no decoder"
+            );
+        }
         // And the third surface is IN it, derived from the same table the help
         // text is held to, so a consumer can learn the spellings before it
         // writes a layout.
@@ -9090,7 +9140,11 @@ mod tests {
                 ),
                 Default::default(),
                 "",
-                cells(&["/carried[]/keyexpr", "/carried[]/keyexpr_cause"]),
+                cells(&[
+                    "/carried[]/keyexpr",
+                    "/carried[]/keyexpr_cause",
+                    "/carried[]/keyexpr_id",
+                ]),
             ),
             (
                 "the same under a payload declaration",
@@ -9103,6 +9157,7 @@ mod tests {
                 cells(&[
                     "/carried[]/keyexpr",
                     "/carried[]/keyexpr_cause",
+                    "/carried[]/keyexpr_id",
                     "/payload_decode/format",
                     "/payload_decode/keyexpr",
                     "/payload_decode/state",
@@ -9120,6 +9175,7 @@ mod tests {
                 cells(&[
                     "/above_transport/carried[]/keyexpr",
                     "/above_transport/carried[]/keyexpr_cause",
+                    "/above_transport/carried[]/keyexpr_id",
                 ]),
             ),
             (
@@ -9133,6 +9189,7 @@ mod tests {
                 cells(&[
                     "/above_transport/carried[]/keyexpr",
                     "/above_transport/carried[]/keyexpr_cause",
+                    "/above_transport/carried[]/keyexpr_id",
                     "/above_transport/carried[]/payload_decode/format",
                     "/above_transport/carried[]/payload_decode/keyexpr",
                     "/above_transport/carried[]/payload_decode/state",

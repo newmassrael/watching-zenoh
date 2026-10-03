@@ -307,9 +307,9 @@ pub struct Since {
 ///   arrived ahead of the one before it is held until the gap fills — still
 ///   carries the earlier packet, so a reference written unresolved before it was
 ///   decoded is written resolved after. The cells that read the table are the
-///   `keyexpr` and `keyexpr_cause` of each `carried` entry, the same two of each
-///   `above_transport.carried` entry (a reference inside a completed chain, read
-///   from the joined buffer), and everything under `payload_decode` — the row's
+///   `keyexpr`, `keyexpr_cause` and `keyexpr_id` of each `carried` entry, the same
+///   three of each `above_transport.carried` entry (a reference inside a completed
+///   chain, read from the joined buffer), and everything under `payload_decode` — the row's
 ///   own and each `above_transport.carried` entry's — whose verdict starts from
 ///   the resolved key.
 /// * **The chain fold** numbers chains from the first message the list still
@@ -332,9 +332,11 @@ pub struct Since {
 pub const REVISABLE_ROW_CELLS: &[&str] = &[
     "/above_transport/carried[]/keyexpr",
     "/above_transport/carried[]/keyexpr_cause",
+    "/above_transport/carried[]/keyexpr_id",
     "/above_transport/carried[]/payload_decode/**",
     "/carried[]/keyexpr",
     "/carried[]/keyexpr_cause",
+    "/carried[]/keyexpr_id",
     "/chain/chain_id",
     "/payload_decode/**",
 ];
@@ -1429,6 +1431,15 @@ fn push_payload_block(
 /// that references no keyexpr at all — a `KeepAlive`, or a `WireExpr` naming
 /// `id 0` with an empty suffix — has nothing to explain. A word for it would
 /// declare a failure where there was no reference.
+///
+/// # Revision 24 — AND WHICH ID, when it does not resolve
+///
+/// `keyexpr_id` follows the cause: the numeric id the message referenced, present
+/// exactly when `keyexpr_cause` is. A list that has to name a row whose key it
+/// cannot print has nothing but this to print, and the row's own tree names the id
+/// only once the row is selected. The entry is where every row of such a list comes
+/// from, so the id has to arrive here and not be fetched per row. See
+/// [`push_keyexpr_miss`], which writes the three keys from one place.
 fn push_carried(
     bytes: &[u8],
     field: &wz_session_core::dissect::Field,
@@ -1441,7 +1452,7 @@ fn push_carried(
     let mut first = true;
     let mut entry = |word: &str,
                      span: &wz_session_core::dissect::Span,
-                     keyexpr: Option<Result<String, crate::agg::UnresolvedCause>>,
+                     keyexpr: Option<Result<String, crate::payload_decode::UnresolvedRef>>,
                      out: &mut String| {
         if !first {
             out.push(',');
@@ -1458,11 +1469,7 @@ fn push_carried(
             Some(Ok(keyexpr)) => escape_into(keyexpr, out),
             Some(Err(_)) | None => out.push_str("null"),
         }
-        out.push_str(",\"keyexpr_cause\":");
-        match &keyexpr {
-            Some(Err(cause)) => escape_into(cause.name(), out),
-            Some(Ok(_)) | None => out.push_str("null"),
-        }
+        push_keyexpr_miss(keyexpr.as_ref().and_then(|k| k.as_ref().err()), out);
         out.push('}');
     };
     // The first listing entry is the row itself; subsequent entries are its
@@ -1493,6 +1500,29 @@ fn push_carried(
         );
     }
     out.push(']');
+}
+
+/// The `keyexpr_cause` and `keyexpr_id` keys of one `carried` entry, after its
+/// `keyexpr`.
+///
+/// One body for the two places an entry is written, so the pair cannot drift: a
+/// miss writes its cause word and its id, and anything else, a resolved key or no
+/// reference at all, writes `null` for both. The id is a protocol field's value, so
+/// it takes the shared integer door like every other such value in this document
+/// (a bare number up to 2^53 - 1, a decimal string past it); the wire id is a
+/// 32-bit value in practice, and the door is what makes that a property of the
+/// writer rather than of a capture that obeys it.
+fn push_keyexpr_miss(miss: Option<&crate::payload_decode::UnresolvedRef>, out: &mut String) {
+    out.push_str(",\"keyexpr_cause\":");
+    match miss {
+        Some(miss) => escape_into(miss.cause.name(), out),
+        None => out.push_str("null"),
+    }
+    out.push_str(",\"keyexpr_id\":");
+    match miss {
+        Some(miss) => wz_session_core::json::u64_into(miss.id, out),
+        None => out.push_str("null"),
+    }
 }
 
 /// The network records a `Frame` batched, or nothing for every other message.
@@ -1705,15 +1735,12 @@ fn push_above_transport(
                 ",\"start\":{},\"end\":{},\"keyexpr\":",
                 record.span.start, record.span.end
             );
-            match crate::payload_decode::subtree_keyexpr_outcome(record, at) {
-                Some(Ok(keyexpr)) => escape_into(&keyexpr, out),
+            let outcome = crate::payload_decode::subtree_keyexpr_outcome(record, at);
+            match &outcome {
+                Some(Ok(keyexpr)) => escape_into(keyexpr, out),
                 _ => out.push_str("null"),
             }
-            out.push_str(",\"keyexpr_cause\":");
-            match crate::payload_decode::subtree_keyexpr_outcome(record, at) {
-                Some(Err(cause)) => escape_into(cause.name(), out),
-                _ => out.push_str("null"),
-            }
+            push_keyexpr_miss(outcome.as_ref().and_then(|o| o.as_ref().err()), out);
             push_payload_block(record, declarations, at, out);
             out.push('}');
         }
@@ -3153,6 +3180,26 @@ mod tests {
             .collect()
     }
 
+    /// Every `(keyexpr, keyexpr_cause, keyexpr_id)` triple the document carries, as
+    /// the raw JSON values. An entry that has the first two and not the third is
+    /// returned with `"<absent>"` for it, which is not a JSON value, so a document
+    /// that stopped writing the id cannot be mistaken for one that wrote `null`.
+    #[cfg(feature = "network-codecs")]
+    fn carried_triples(doc: &str) -> Vec<(&str, &str, &str)> {
+        crate::doc_revision::object_scopes(doc)
+            .into_iter()
+            .filter_map(|scope| {
+                let key = scope.iter().find(|(k, _)| *k == "keyexpr")?.1;
+                let cause = scope.iter().find(|(k, _)| *k == "keyexpr_cause")?.1;
+                let id = scope
+                    .iter()
+                    .find(|(k, _)| *k == "keyexpr_id")
+                    .map_or("<absent>", |(_, v)| *v);
+                Some((key, cause, id))
+            })
+            .collect()
+    }
+
     /// A document with every row's `selected` key taken out — what a selector
     /// ADDS, so that the rest can be compared against a document made without
     /// one. `RowVerdict::push` writes the key with its trailing comma, and the
@@ -3920,6 +3967,86 @@ mod tests {
         );
     }
 
+    /// AN UNRESOLVED REFERENCE NAMES ITS ID, and the id is present exactly when the
+    /// cause is.
+    ///
+    /// A list of rows that cannot print a key prints the id the message asked
+    /// for, and every row of that list comes from a `carried` entry, so the entry
+    /// has to carry it. Measured over the same captures the cause is, so the id
+    /// and the word are held to one another and not each to its own fixture:
+    ///
+    /// * the reference that preceded its declaration is unresolved, says
+    ///   `no_declaration`, and says `7`, the id that capture's declaration binds
+    ///   later;
+    /// * a reference that resolves, to the later link's declaration or to its own
+    ///   flow's, has no id to report and writes `null`, which is a value and not an
+    ///   absence;
+    /// * no entry anywhere has a cause and no id, an id and no cause, or a key and
+    ///   an id.
+    ///
+    /// The population is asserted non-empty and to hold at least one entry of each
+    /// kind first: a document with no unresolved entry would make the iff below
+    /// true of nothing.
+    #[cfg(feature = "network-codecs")]
+    #[test]
+    fn an_unresolved_reference_names_its_id_and_a_resolved_one_does_not() {
+        let (d, file) =
+            crate::agg::tests::multilink_session_declaring_after_the_reference_with_file();
+        let unresolved = fields_json(&d, &file, None, None);
+        let (d, file) =
+            crate::agg::tests::multilink_session_declaring_on_the_later_link_carrying_with_file(
+                crate::agg::tests::push_for_item_713(),
+            );
+        let later_link = fields_json(&d, &file, None, None);
+        let (d, file) = crate::agg::tests::orphan_flow_session_with_file();
+        let own_flow = fields_json(&d, &file, None, None);
+
+        let triples = carried_triples(&unresolved);
+        assert!(
+            triples
+                .iter()
+                .any(|(k, c, _)| *k == "null" && *c == "\"no_declaration\""),
+            "the capture must hold an unresolved reference: {triples:?}"
+        );
+        assert_eq!(
+            triples
+                .iter()
+                .filter(|(k, c, i)| *k == "null" && *c == "\"no_declaration\"" && *i == "7")
+                .count(),
+            1,
+            "the unresolved reference must name id 7, as a bare number: {triples:?}"
+        );
+        for (name, doc) in [
+            ("a reference before its declaration", &unresolved),
+            ("a declaration on the later link", &later_link),
+            ("a handshakeless flow", &own_flow),
+        ] {
+            let triples = carried_triples(doc);
+            assert!(!triples.is_empty(), "{name}: no carried entry at all");
+            for (key, cause, id) in &triples {
+                assert_ne!(*id, "<absent>", "{name}: an entry has no `keyexpr_id` key");
+                assert_eq!(
+                    *cause == "null",
+                    *id == "null",
+                    "{name}: the id is present exactly when the cause is: \
+                     {key} {cause} {id}"
+                );
+                assert!(
+                    *key == "null" || *id == "null",
+                    "{name}: a key that resolved names no id: {key} {cause} {id}"
+                );
+            }
+        }
+        // Resolved entries really do exist in the two controls, or the loop above
+        // only graded unresolved ones.
+        assert!(
+            carried_triples(&later_link)
+                .iter()
+                .any(|(k, _, i)| *k == "\"demo/temp\"" && *i == "null"),
+            "a resolved entry must write `keyexpr_id` as null"
+        );
+    }
+
     /// THE PROPERTY THE PER-FLOW RULE PROTECTED, kept in this document: a flow
     /// whose session is unknown still resolves its OWN declarations.
     ///
@@ -4487,9 +4614,19 @@ mod tests {
             doc.contains("\"missing\":1,"),
             "a gap of one stays a bare number: {doc}"
         );
+        // The rule arrived with revision 23, so the document must say a revision
+        // at or past it, and say it as the envelope the table declares rather than
+        // as a literal that every later revision would have to chase.
         assert!(
-            doc.contains("\"name\":\"fields\",\"revision\":23"),
-            "and the document says it moved: {doc}"
+            crate::doc_revision::revision(crate::doc_revision::FIELDS) >= Some(23),
+            "the integer rule is a revision 23 fact"
+        );
+        assert!(
+            doc.starts_with(&alloc::format!(
+                "{{{}",
+                crate::doc_revision::envelope(crate::doc_revision::FIELDS)
+            )),
+            "and the document says the revision the table declares: {doc}"
         );
     }
 
@@ -6991,7 +7128,8 @@ mod tests {
         // walks `above_transport.carried` looks.
         assert!(
             chain.contains(
-                "\"keyexpr_cause\":null,\"payload_decode\":{\"state\":\"decoded\",\
+                "\"keyexpr_cause\":null,\"keyexpr_id\":null,\
+                 \"payload_decode\":{\"state\":\"decoded\",\
                  \"keyexpr\":\"demo/sensor\""
             ),
             "under the carried entry: {chain}"
@@ -7108,13 +7246,16 @@ mod tests {
         map.declare("demo/**=protobuf").expect("a rule");
         let doc = fields_json(&d, &file, None, Some(&Declarations::new(&map)));
         // Beside the entry's own `keyexpr` and the cause it has none, which is
-        // where a reader of `above_transport.carried` finds it. The placement is
+        // where a reader of `above_transport.carried` finds it, and the id that
+        // could not be resolved is beside them: the record references id 7, and
+        // the entry has to say so because a list of rows has nothing else to
+        // print where it would print the key. The placement is
         // the claim: the fragment rows' OWN blocks say `keyexpr_unresolved` too,
         // because a Fragment's raw body is the only payload their walk finds, so
         // the bare word appears in rows that are not this record.
         assert!(
             doc.contains(
-                "\"keyexpr\":null,\"keyexpr_cause\":\"no_session\",\
+                "\"keyexpr\":null,\"keyexpr_cause\":\"no_session\",\"keyexpr_id\":7,\
                  \"payload_decode\":{\"state\":\"keyexpr_unresolved\"}"
             ),
             "{doc}"

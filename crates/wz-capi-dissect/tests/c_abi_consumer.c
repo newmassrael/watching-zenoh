@@ -1555,6 +1555,14 @@ int main(void) {
     CHECK(strstr(surfaces, "\"z64\"") != NULL, "no z64 bodies in %s", surfaces);
     CHECK(strstr(surfaces, "/qos") != NULL,
           "the z64 line must name a body it opens: %s", surfaces);
+    /* The payload formats this build can decode, by name, so a settings screen
+     * can list its sub-decoders instead of keeping a copy. An array and a NAME
+     * in it: an empty array would satisfy the key alone. */
+    CHECK(strstr(surfaces, "\"payload_formats\":[") != NULL,
+          "no payload formats in %s", surfaces);
+    CHECK(strstr(surfaces, "\"json\"") != NULL,
+          "the payload formats must name a decoder this build has: %s",
+          surfaces);
     wz_dissect_string_free(surfaces);
 
     /* Null out is the argument error, not a crash -- the rule every door here
@@ -1785,8 +1793,11 @@ int main(void) {
      * completed chain under `above_transport.carried` gains the
      * `payload_decode` a row's own message carries. One new key name; no word
      * moves; nothing retires.
-     * 23: a `uint` value beyond 2^53 - 1 is a decimal string (see the census). */
-    revisioned[2].revision = 23;
+     * 23: a `uint` value beyond 2^53 - 1 is a decimal string (see the census).
+     * 24: every `carried` entry gains `keyexpr_id`, the numeric id an
+     * unresolved reference named (`null` when the key resolved or none was
+     * referenced). One new key name; no word moves; nothing retires. */
+    revisioned[2].revision = 24;
     revisioned[2].doc = NULL;
     rc = wz_dissect_pcap_fields(pcap, sizeof pcap, 0, &revisioned[2].doc);
     CHECK(rc == WZ_DISSECT_OK, "fields rc=%d", rc);
@@ -1796,8 +1807,10 @@ int main(void) {
      * discover a widened set as a switch fallthrough.
      * R2184 (item 556) -- 4 when those rows gained `carries`, and `word` /
      * `shapes` under it: which keys arrive beside each word, or `null` when the
-     * word decides none. */
-    revisioned[3].revision = 4;
+     * word decides none.
+     * 5 when it gained `payload_formats`: the names of the payload formats this
+     * build decodes without a declared layout. An addition; nothing retires. */
+    revisioned[3].revision = 5;
     revisioned[3].doc = NULL;
     rc = wz_dissect_readable_surfaces(&revisioned[3].doc);
     CHECK(rc == WZ_DISSECT_OK, "surfaces rc=%d", rc);
