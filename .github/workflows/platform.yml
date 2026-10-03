@@ -332,12 +332,14 @@ jobs:
           harness=FAIL
           router=FAIL
           handshake=SKIPPED
-          # The links the rows of zenohd_link_handshakes.rs dial: tls and quic carry a
-          # certificate, ws needs its locator feature, udp is in the demo's default. A
-          # Unix socket is served on macOS and not on Windows, so only macOS owes it
-          # (and the demo's `unixsock` feature is built there alone).
-          features=ws,tls,quic
-          links="ws udp tls quic"
+          # The links the rows of zenohd_link_handshakes.rs dial: tls, quic and
+          # quic-datagram carry a certificate, ws and udp-reliable need their locator
+          # features, plain udp is in the demo's default. A Unix socket is served on
+          # macOS and not on Windows, so only macOS owes it (and the demo's `unixsock`
+          # feature is built there alone). A link's name has a hyphen where its test's
+          # name has an underscore.
+          features=ws,tls,quic,udp-reliable,quic-datagram
+          links="ws udp udp-reliable tls quic quic-datagram"
           if [ "$RUNNER_OS" = macOS ]; then
             features="$features,unixsock"
             links="$links unixsock"
@@ -363,7 +365,7 @@ jobs:
               link=FAIL
               (cd crates && WZ_ZENOHD_BIN="$bin" cargo test -p wz-host-interop-tests \
                 --test zenohd_link_handshakes \
-                -- --ignored --exact "wz_client_reaches_established_against_a_stock_zenohd_over_${scheme}_on_this_host" \
+                -- --ignored --exact "wz_client_reaches_established_against_a_stock_zenohd_over_${scheme//-/_}_on_this_host" \
                 --nocapture) && link=PASS
               verdict "wz reaches Established against zenohd over ${scheme}:" "$link"
               [ "$link" = PASS ] || all=FAIL

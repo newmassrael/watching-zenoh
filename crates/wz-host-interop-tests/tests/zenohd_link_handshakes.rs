@@ -33,8 +33,10 @@ use std::time::Duration;
 #[cfg(unix)]
 use wz_integration_tests::common::spawn_zenohd_tcp_unixsock;
 use wz_integration_tests::common::{
-    read_captured, spawn_zenohd_tcp_quic, spawn_zenohd_tcp_tls, spawn_zenohd_tcp_udp,
-    spawn_zenohd_tcp_ws, wait_for_substring, wz_ap_demo_binary, ChildGuard, PortReservation,
+    read_captured, spawn_zenohd_dialer_on_ephemeral_tcp, spawn_zenohd_listeners,
+    spawn_zenohd_tcp_quic, spawn_zenohd_tcp_tls, spawn_zenohd_tcp_udp, spawn_zenohd_tcp_ws,
+    wait_for_substring, wait_for_zenohd_handshake_ready, wz_ap_demo_binary, zenohd_binary,
+    ChildGuard, PortReservation,
 };
 use wz_runtime_tokio_test_support::localhost_cert_key_pem;
 
@@ -81,6 +83,45 @@ fn router_over_quic(c: &Ctx) -> ChildGuard {
     spawn_zenohd_tcp_quic(c.tcp_port, c.link_port, &c.cert, &c.key, probe_stderr)
 }
 
+/// Upstream's udp link has a reliable variant selected by `?rel=1` on the same
+/// scheme, so the router listens on `udp/...?rel=1` and the demo dials it, and wz names
+/// the variant `udp-reliable`.
+fn router_over_udp_reliable(c: &Ctx) -> ChildGuard {
+    spawn_zenohd_listeners(
+        &[
+            format!("tcp/127.0.0.1:{}", c.tcp_port),
+            format!("udp/127.0.0.1:{}?rel=1", c.link_port),
+        ],
+        c.tcp_port,
+        &format!("127.0.0.1:{}", c.tcp_port),
+        probe_stderr,
+    )
+}
+
+/// Upstream's quic link has a datagram variant selected by `?rel=0` on the same
+/// scheme, and the listener reads its certificate from the same `transport.link.tls`
+/// block as the reliable one. wz spells the variant as its own scheme, `quic-datagram/`.
+/// The router's TCP listener is discovered, and the datagram listener is an extra one
+/// on the reserved link port.
+fn router_over_quic_datagram(c: &Ctx) -> ChildGuard {
+    let cfg_path = format!("{}.zenohd.json5", c.cert);
+    let cfg = format!(
+        "{{ transport: {{ link: {{ tls: {{ listen_private_key: {:?}, \
+         listen_certificate: {:?} }} }} }} }}",
+        c.key, c.cert
+    );
+    std::fs::write(&cfg_path, cfg).expect("write zenohd quic-datagram config");
+    let (guard, tcp_port) = spawn_zenohd_dialer_on_ephemeral_tcp(
+        &zenohd_binary(),
+        "zenohd (reference router, quic-datagram)",
+        None,
+        &[format!("quic/127.0.0.1:{}?rel=0", c.link_port)],
+        Some(&cfg_path),
+    );
+    wait_for_zenohd_handshake_ready(&format!("127.0.0.1:{tcp_port}"), probe_stderr);
+    guard
+}
+
 fn dial_ws(c: &Ctx) -> String {
     format!("ws/127.0.0.1:{}", c.link_port)
 }
@@ -95,6 +136,14 @@ fn dial_tls(c: &Ctx) -> String {
 
 fn dial_quic(c: &Ctx) -> String {
     format!("quic/127.0.0.1:{}", c.link_port)
+}
+
+fn dial_udp_reliable(c: &Ctx) -> String {
+    format!("udp/127.0.0.1:{}?rel=1", c.link_port)
+}
+
+fn dial_quic_datagram(c: &Ctx) -> String {
+    format!("quic-datagram/127.0.0.1:{}", c.link_port)
 }
 
 /// The socket a Unix-socket row listens on, keyed on the reserved TCP port so
@@ -154,6 +203,18 @@ const QUIC: Link = Link {
     ca_flag: Some("--quic-ca"),
     spawn: router_over_quic,
     connect: dial_quic,
+};
+const UDP_RELIABLE: Link = Link {
+    transport: "udp-reliable",
+    ca_flag: None,
+    spawn: router_over_udp_reliable,
+    connect: dial_udp_reliable,
+};
+const QUIC_DATAGRAM: Link = Link {
+    transport: "quic-datagram",
+    ca_flag: Some("--quic-ca"),
+    spawn: router_over_quic_datagram,
+    connect: dial_quic_datagram,
 };
 #[cfg(unix)]
 const UNIXSOCK: Link = Link {
@@ -287,6 +348,18 @@ fn wz_client_reaches_established_against_a_stock_zenohd_over_tls_on_this_host() 
 #[ignore = "binary-dep e2e (zenohd router, quic); set WZ_ZENOHD_BIN, run via the Platform interop job / --ignored"]
 fn wz_client_reaches_established_against_a_stock_zenohd_over_quic_on_this_host() {
     handshake_over(&QUIC);
+}
+
+#[test]
+#[ignore = "binary-dep e2e (zenohd router, udp-reliable); set WZ_ZENOHD_BIN, run via the Platform interop job / --ignored"]
+fn wz_client_reaches_established_against_a_stock_zenohd_over_udp_reliable_on_this_host() {
+    handshake_over(&UDP_RELIABLE);
+}
+
+#[test]
+#[ignore = "binary-dep e2e (zenohd router, quic-datagram); set WZ_ZENOHD_BIN, run via the Platform interop job / --ignored"]
+fn wz_client_reaches_established_against_a_stock_zenohd_over_quic_datagram_on_this_host() {
+    handshake_over(&QUIC_DATAGRAM);
 }
 
 #[cfg(unix)]
