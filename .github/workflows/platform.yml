@@ -240,3 +240,103 @@ jobs:
           echo "multicast-probe on ${RUNNER_OS}: scouting ${scouting}, pubsub ${pubsub}"
           echo "multicast-probe on ${RUNNER_OS}: scouting ${scouting}, pubsub ${pubsub}" >> "$GITHUB_STEP_SUMMARY"
           [ "$scouting" = PASS ] && [ "$pubsub" = PASS ]
+
+  # ── Router interop: what a host owes of the interop corpus ────────────
+  #
+  # Round 3015 settled the scope: a host owes a subset of the zenohd interop corpus
+  # derived from the corpus, not a hand-picked few, and the corpus cannot run on a
+  # host as it stands. The integration harness library reads captured files through
+  # a Unix-only trait and sets socket options through libc, neither behind a host
+  # gate, and its crate links the pico C build. This job is the MEASUREMENT that
+  # comes before the design: it asks, per host and in order, whether the demo
+  # builds, whether the harness compiles, whether the router builds and whether one
+  # handshake completes, and prints one verdict line for each.
+  #
+  # The router is built with `cargo install` and not with `scripts/build-zenohd.sh`,
+  # on purpose and for this round only. That script's source path names the plugin
+  # libraries `.so` and the binary without a host suffix, so it cannot finish on
+  # either host, and a verdict about the script would hide the verdict about the
+  # router. Making the script portable is an item of its own, carried by Round 3016.
+  #
+  # It is its own job and not steps of `leg` for a reason of time, not of tidiness:
+  # a cold router build is the longest thing this lane does, and `leg` answers in
+  # minutes under a 30 minute bound that a router build would break, turning a
+  # question about a host into a red leg. It is an observation, so every verdict is
+  # a printed line and the step never fails the run: a step with
+  # `continue-on-error` reports `conclusion: success` whatever it did, and its own
+  # `timeout-minutes` is below the job's, so a slow build ends the step and not the
+  # job.
+  interop:
+    name: interop (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-latest
+            host: macos
+          - os: windows-latest
+            host: windows
+    env:
+      WZ_HOST_SELECTED: ${{ (inputs.host == '' || inputs.host == 'both' || inputs.host == matrix.host) && 'true' || 'false' }}
+    steps:
+      - name: Checkout (with submodules)
+        if: ${{ env.WZ_HOST_SELECTED == 'true' }}
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install Rust toolchain (pinned by rust-toolchain.toml)
+        if: ${{ env.WZ_HOST_SELECTED == 'true' }}
+        run: rustup show
+
+      - name: Install Rust toolchain 1.97.1 (the channel zenoh 1.10.1 pins)
+        # The router is built on its own release's channel, as ci.yml does for the
+        # Linux build: building it on another is not a reproducibility trade.
+        if: ${{ env.WZ_HOST_SELECTED == 'true' }}
+        shell: bash
+        run: rustup toolchain install 1.97.1 --profile minimal
+
+      - name: Cache Cargo registry + build artifacts
+        if: ${{ env.WZ_HOST_SELECTED == 'true' }}
+        uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
+          workspaces: |
+            crates -> target
+            vendor/sce -> target
+
+      - name: router interop on this host, observed (one verdict line per question)
+        if: ${{ env.WZ_HOST_SELECTED == 'true' }}
+        timeout-minutes: 75
+        continue-on-error: true
+        shell: bash
+        run: |
+          verdict() {
+            echo "interop-probe on ${RUNNER_OS}: $1 $2"
+            echo "interop-probe on ${RUNNER_OS}: $1 $2" >> "$GITHUB_STEP_SUMMARY"
+          }
+          exe=""
+          if [ "$RUNNER_OS" = Windows ]; then exe=".exe"; fi
+          root="$PWD/target/zenohd-host"
+          demo=FAIL
+          harness=FAIL
+          router=FAIL
+          handshake=SKIPPED
+          (cd crates && cargo build -p wz-ap-demo) && demo=PASS
+          verdict "wz-ap-demo builds:" "$demo"
+          (cd crates && cargo test -p wz-integration-tests --no-run --test wz_to_zenohd_router) && harness=PASS
+          verdict "interop harness compiles:" "$harness"
+          cargo +1.97.1 install zenohd --version 1.10.1 --locked --root "$root" && router=PASS
+          verdict "zenohd 1.10.1 builds:" "$router"
+          if [ "$demo$harness$router" = PASSPASSPASS ]; then
+            handshake=FAIL
+            bin="$root/bin/zenohd$exe"
+            if command -v cygpath > /dev/null 2>&1; then bin="$(cygpath -m "$bin")"; fi
+            (cd crates && WZ_ZENOHD_BIN="$bin" cargo test -p wz-integration-tests \
+              --test wz_to_zenohd_router \
+              -- --ignored --exact wz_client_reaches_established_against_zenohd --nocapture) && handshake=PASS
+          fi
+          verdict "wz reaches Established against zenohd:" "$handshake"
+          [ "$handshake" = PASS ]
