@@ -15791,6 +15791,20 @@ PY
         cargo test -p wz-runtime-tokio \
         --features transport-multicast,locator-iface \
         --test multicast_pubsub_loopback an_ipv6_group -- --ignored || return 1
+    # R3014 — the HOST facets of multicast, with wz's own two drivers and no raw
+    # socket: a datagram sent to the group reaches a member on the same host. It
+    # is the one multicast witness the Platform lane runs on macOS and Windows
+    # (macOS over `lo0`, the only interface a hosted macOS runner lets a spawned
+    # process send multicast out of; see the test's own header for the
+    # measurements), and this leg is its Linux owner. Count-guarded at 1: it
+    # selects a whole binary, but the binary is gated on `transport-multicast`,
+    # `locator-iface` and `transport-link-udp`, so a build that lost one would
+    # compile an EMPTY target and `cargo test` would exit 0 having run nothing.
+    # 1 = the number this command PRINTED.
+    _runci_guarded_test "M host multicast roundtrip" 1 \
+        cargo test -p wz-runtime-tokio \
+        --features transport-multicast,locator-iface \
+        --test multicast_host_roundtrip -- --ignored --quiet || return 1
     # R311y428 — ACTIVE SCOUTING cross-impl: a wz `--scout` discovers a
     # multicast-scouting zenohd on 224.0.0.224:7446 and opens a session on the
     # locator that router's HELLO advertised. The first cross-impl witness for
