@@ -44,6 +44,7 @@ on:
       - "crates/wz-capi-core/**"
       - "crates/wz-capi-pico/**"
       - "crates/wz-capi-c/**"
+      - "crates/zenoh-pico-sys/**"
       - "crates/wz-host-interop-tests/**"
       - "crates/Cargo.toml"
       - "crates/Cargo.lock"
@@ -597,3 +598,25 @@ jobs:
           echo "layout-probe on ${RUNNER_OS} (${used}): the Rust types against the compiler's sizeof: ${verdict}"
           echo "layout-probe on ${RUNNER_OS} (${used}): the Rust types against the compiler's sizeof: ${verdict}" >> "$GITHUB_STEP_SUMMARY"
           [ "$verdict" = PASS ]
+
+      # The vendored zenoh-pico C library through its build script, on this host. An
+      # OBSERVATION. It is the build that stood between a Windows host and the corpus
+      # crate and every pico-backed test: a hosted run showed the script handing CMake
+      # the verbatim `\\?\` form of the vendored directory, and MSBuild failing with
+      # "Cannot open source file" on every translation unit. The script now asks
+      # `dunce` for the path, which is the ordinary drive-letter form on Windows. This
+      # step is where that is read, and until it has been green twice on both hosts it
+      # is a measurement and not a gate. It needs CMake, a C compiler and libclang,
+      # which the hosted runners carry, and which is what the line says when it is the
+      # thing that is missing.
+      - name: the vendored pico C library on this host (observation)
+        if: ${{ env.WZ_HOST_SELECTED == 'true' }}
+        timeout-minutes: 25
+        continue-on-error: true
+        shell: bash
+        run: |
+          built=FAIL
+          (cd crates && cargo build -p zenoh-pico-sys) && built=PASS
+          echo "pico-sys-probe on ${RUNNER_OS}: the vendored zenoh-pico C library builds: ${built}"
+          echo "pico-sys-probe on ${RUNNER_OS}: the vendored zenoh-pico C library builds: ${built}" >> "$GITHUB_STEP_SUMMARY"
+          [ "$built" = PASS ]

@@ -43,6 +43,10 @@ name = "zenoh_pico_sys"
 path = "src/lib.rs"
 
 [build-dependencies]
+# The path handed to CMake: a Windows build must not pass the verbatim `\\?\` form
+# `std::fs::canonicalize` returns there. Already a dependency of the async runtime,
+# so it adds no crate to the graph.
+dunce = "1"
 # CMake-driven build of the vendored zenoh-pico C library. The `cmake`
 # crate (0.1.x) invokes the upstream `CMakeLists.txt` with the static-
 # lib + minimal-features flag set and returns the install prefix path

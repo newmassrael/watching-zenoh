@@ -44,9 +44,15 @@ include!("src/cmake_cache.rs");
 
 fn main() {
     let manifest_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap());
-    let zenoh_src = manifest_dir
-        .join("../../vendor/zenoh-pico")
-        .canonicalize()
+    // `dunce::canonicalize` and not `Path::canonicalize`: on Windows the standard
+    // library answers with a VERBATIM path (`\\?\C:\...`), which is a legal Win32
+    // path and one CMake and MSBuild do not take. The `cmake` crate hands this
+    // directory to `cmake -S`, and a hosted Windows run showed MSBuild given the
+    // verbatim form and failing on it. `dunce` returns the ordinary drive-letter
+    // path when that names the same file and the verbatim one only when it cannot
+    // (a path past the legacy length limit, a reserved name), and on every other
+    // host it is `std::fs::canonicalize` unchanged.
+    let zenoh_src = dunce::canonicalize(manifest_dir.join("../../vendor/zenoh-pico"))
         .expect("canonicalize vendor/zenoh-pico");
     let include_dir = zenoh_src.join("include");
     let out_dir = PathBuf::from(env::var("OUT_DIR").unwrap());

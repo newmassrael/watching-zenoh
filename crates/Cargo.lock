@@ -3257,6 +3257,7 @@ dependencies = [
  "bindgen 0.71.1",
  "cc",
  "cmake",
+ "dunce",
 ]
 
 [[package]]
