@@ -333,8 +333,16 @@ jobs:
           router=FAIL
           handshake=SKIPPED
           # The links the rows of zenohd_link_handshakes.rs dial: tls and quic carry a
-          # certificate, ws needs its locator feature, udp is in the demo's default.
-          (cd crates && cargo build -p wz-ap-demo --features ws,tls,quic) && demo=PASS
+          # certificate, ws needs its locator feature, udp is in the demo's default. A
+          # Unix socket is served on macOS and not on Windows, so only macOS owes it
+          # (and the demo's `unixsock` feature is built there alone).
+          features=ws,tls,quic
+          links="ws udp tls quic"
+          if [ "$RUNNER_OS" = macOS ]; then
+            features="$features,unixsock"
+            links="$links unixsock"
+          fi
+          (cd crates && cargo build -p wz-ap-demo --features "$features") && demo=PASS
           verdict "wz-ap-demo builds:" "$demo"
           (cd crates && cargo test -p wz-host-interop-tests --no-run) && harness=PASS
           verdict "host interop tests compile:" "$harness"
@@ -351,7 +359,7 @@ jobs:
               --nocapture) && handshake=PASS
             # One verdict per link, each its own test: a link's two consecutive green
             # runs are counted from its own line, and a red names its link.
-            for scheme in ws udp tls quic; do
+            for scheme in $links; do
               link=FAIL
               (cd crates && WZ_ZENOHD_BIN="$bin" cargo test -p wz-host-interop-tests \
                 --test zenohd_link_handshakes \
