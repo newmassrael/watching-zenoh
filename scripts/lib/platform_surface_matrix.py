@@ -306,6 +306,35 @@ INTEROP_PROMOTED: dict[tuple[str, str], tuple[int, int]] = {
     ("UnixsockStream", "macos"): (37109725746, 37111623432),
 }
 
+#: wz link kind -> the opt-in test that carries a publication across that link. The
+#: handshake rows above prove the two ends agree on the link's framing; they say nothing
+#: about a Put that has to cross it, which is where a host's socket behaviour (a datagram
+#: boundary, a stream that coalesces, a close that races the last write) would show. The
+#: test starts a wz subscriber and a wz publisher on the SAME stock `zenohd` and requires
+#: the value to arrive, with the publisher's side dialed over the link under test. It is
+#: a second row per link and not a replacement: a red here with the handshake green says
+#: the link connects and does not carry. Every link `INTEROP` dials owes one.
+INTEROP_DATA: dict[str, str] = {
+    "Tcp": "wz_publisher_reaches_a_subscriber_through_a_stock_zenohd_over_tcp_on_this_host",
+    "Udp": "wz_publisher_reaches_a_subscriber_through_a_stock_zenohd_over_udp_on_this_host",
+    "UdpReliable": "wz_publisher_reaches_a_subscriber_through_a_stock_zenohd_over_udp_reliable_on_this_host",
+    "Tls": "wz_publisher_reaches_a_subscriber_through_a_stock_zenohd_over_tls_on_this_host",
+    "Quic": "wz_publisher_reaches_a_subscriber_through_a_stock_zenohd_over_quic_on_this_host",
+    "QuicDatagram": "wz_publisher_reaches_a_subscriber_through_a_stock_zenohd_over_quic_datagram_on_this_host",
+    "UnixsockStream": "wz_publisher_reaches_a_subscriber_through_a_stock_zenohd_over_unixsock_on_this_host",
+    "Ws": "wz_publisher_reaches_a_subscriber_through_a_stock_zenohd_over_ws_on_this_host",
+}
+
+#: The prefix every data test's name carries, which is also what the workflow's data
+#: loop builds its test names from; the gate looks for it in the workflow the way it
+#: looks for the TCP handshake test's name.
+DATA_STEM = "wz_publisher_reaches_a_subscriber_through_a_stock_zenohd_over_"
+
+#: (kind, host) -> the two consecutive green hosted runs of that host's DATA test, by the
+#: same rule as `INTEROP_PROMOTED` and read from the same place (the job log). Empty on
+#: the day the rows land: they are observations first.
+INTEROP_DATA_PROMOTED: dict[tuple[str, str], tuple[int, int]] = {}
+
 
 # ─── Rust text: comments and literals masked, offsets kept ──────────────────
 
@@ -1180,6 +1209,22 @@ def workflow_runs(test: str, workflow: str) -> bool:
     return scheme in tokens
 
 
+def workflow_runs_data(test: str, workflow: str) -> bool:
+    """Whether the interop job runs the DATA test `test`.
+
+    The workflow builds every data test's name from `DATA_STEM` and one link token, and
+    its loop covers TCP as well as the `links=` list, so TCP is run when the stem is
+    there and any other link only when it is also a token of a `links=` list.
+    """
+    scheme = scheme_of(test)
+    if scheme is None or DATA_STEM not in workflow:
+        return False
+    tokens: set[str] = {"tcp"}
+    for m in _LINKS_ASSIGN.finditer(workflow):
+        tokens |= set(m.group(1).split())
+    return scheme in tokens
+
+
 def gate_step_findings(workflow: str, promoted: Mapping[tuple[str, str], tuple[int, int]]) -> list[str]:
     """Whether the promoted tests are run by a step that can fail the job.
 
@@ -1244,6 +1289,24 @@ def router_default_kinds(root: pathlib.Path) -> frozenset[str] | None:
     )
 
 
+def promotion_findings(
+    label: str,
+    table: Mapping[str, str],
+    promoted: Mapping[tuple[str, str], tuple[int, int]],
+    served: Mapping[str, frozenset[str]],
+) -> list[str]:
+    """What is wrong with the promoted rows of one interop table (`label` names it)."""
+    out: list[str] = []
+    for (kind, host), runs in promoted.items():
+        if kind not in table or host not in served.get(kind, frozenset()):
+            out.append(f"{label} names ({kind}, {host}), which has no interop test there")
+        if len(set(runs)) != 2 or not all(isinstance(r, int) and r > 0 for r in runs):
+            out.append(f"{label} ({kind}, {host}) needs two DISTINCT hosted run ids, got {runs!r}")
+        elif runs[0] > runs[1]:
+            out.append(f"{label} ({kind}, {host}) lists its runs newest first; oldest first")
+    return out
+
+
 def interop_findings(
     served: Mapping[str, frozenset[str]],
     tests_on_host: Mapping[str, frozenset[str]],
@@ -1253,6 +1316,8 @@ def interop_findings(
     interop: Mapping[str, str],
     gaps: Mapping[tuple[str, str], tuple[str, str]],
     promoted: Mapping[tuple[str, str], tuple[int, int]],
+    data: Mapping[str, str],
+    data_promoted: Mapping[tuple[str, str], tuple[int, int]],
     hosts: Sequence[str] = LEG_HOSTS,
 ) -> list[str]:
     out: list[str] = []
@@ -1261,6 +1326,26 @@ def interop_findings(
             if host not in served[kind]:
                 continue
             test, gap = interop.get(kind), gaps.get((kind, host))
+            if test is not None and gap is None:
+                # A link whose handshake is dialed also owes the data plane over it.
+                dtest = data.get(kind)
+                if dtest is None:
+                    out.append(
+                        f"INTEROP dials a stock router over {kind} and INTEROP_DATA has no row "
+                        f"for it: a link that connects also owes a publication carried across it"
+                    )
+                else:
+                    if dtest not in tests_on_host.get(host, frozenset()):
+                        out.append(
+                            f"INTEROP_DATA names `{dtest}` for {kind}, and the host-interop crate "
+                            f"has no opt-in test of that name that compiles on {host}"
+                        )
+                    if not workflow_runs_data(dtest, workflow):
+                        out.append(
+                            f"`{dtest}` is {kind}'s data test and the `interop` job of "
+                            f"{PLATFORM_WORKFLOW} never runs it -- a test nothing runs reports "
+                            f"nothing"
+                        )
             if test is not None and gap is not None:
                 out.append(
                     f"INTEROP_GAPS names ({kind}, {host}), but INTEROP now dials it with "
@@ -1305,21 +1390,19 @@ def interop_findings(
             out.append(f"INTEROP names {kind}, which is not a link wz serves")
         elif test not in all_tests:
             out.append(f"INTEROP names `{test}` for {kind}, and no host-interop test has that name")
-    named = set(interop.values())
+    for kind, test in data.items():
+        if kind not in interop:
+            out.append(f"INTEROP_DATA names {kind}, which INTEROP does not dial -- a data row needs its handshake row")
+        elif test not in all_tests:
+            out.append(f"INTEROP_DATA names `{test}` for {kind}, and no host-interop test has that name")
+    named = set(interop.values()) | set(data.values())
     for test in sorted(all_tests - named):
         out.append(
             f"the host-interop crate has the opt-in test `{test}` and INTEROP names it for no "
-            f"link -- the table is the index of what a host owes, so add the row or drop the test"
+            f"link -- the tables are the index of what a host owes, so add the row or drop the test"
         )
-    for (kind, host), runs in promoted.items():
-        if kind not in interop or host not in served.get(kind, frozenset()):
-            out.append(f"INTEROP_PROMOTED names ({kind}, {host}), which has no interop test there")
-        if len(set(runs)) != 2 or not all(isinstance(r, int) and r > 0 for r in runs):
-            out.append(
-                f"INTEROP_PROMOTED ({kind}, {host}) needs two DISTINCT hosted run ids, got {runs!r}"
-            )
-        elif runs[0] > runs[1]:
-            out.append(f"INTEROP_PROMOTED ({kind}, {host}) lists its runs newest first; oldest first")
+    out += promotion_findings("INTEROP_PROMOTED", interop, promoted, served)
+    out += promotion_findings("INTEROP_DATA_PROMOTED", data, data_promoted, served)
     # A cause that is not about one host (a test the workflow never runs) is found once per
     # host the link is served on; it is one finding.
     return list(dict.fromkeys(out))
@@ -1368,6 +1451,8 @@ def interop_summary(
     gaps: Mapping[tuple[str, str], tuple[str, str]],
     promoted: Mapping[tuple[str, str], tuple[int, int]],
     hosts: Sequence[str] = LEG_HOSTS,
+    data: Mapping[str, str] | None = None,
+    data_promoted: Mapping[tuple[str, str], tuple[int, int]] | None = None,
 ) -> list[str]:
     """Where each host stands on the router interop it owes, in numbers and by name.
 
@@ -1386,6 +1471,12 @@ def interop_summary(
         line += f", {len(observed)} observed ({', '.join(observed)})" if observed else ", none observed only"
         if omitted:
             line += f"; router omits {', '.join(omitted)}"
+        if data is not None:
+            owed_data = [k for k in owed if k in data]
+            gated_data = [k for k in owed_data if (k, host) in (data_promoted or {})]
+            line += f"; data plane: {len(owed_data)} owed, {len(gated_data)} gated"
+            if len(gated_data) < len(owed_data):
+                line += f", {len(owed_data) - len(gated_data)} observed"
         out.append(line)
     return out
 
@@ -1395,12 +1486,16 @@ def promoted_tests(
     interop: Mapping[str, str],
     promoted: Mapping[tuple[str, str], tuple[int, int]],
     target_of: Mapping[str, str],
+    data: Mapping[str, str],
+    data_promoted: Mapping[tuple[str, str], tuple[int, int]],
 ) -> list[tuple[str, str]]:
-    """The (target, test) pairs the interop job must GATE on `host`, in kind order."""
+    """The (target, test) pairs the interop job must GATE on `host`: the handshake rows
+    in kind order, then the data rows in kind order."""
     rows: list[tuple[str, str]] = []
-    for kind in sorted(interop):
-        if (kind, host) in promoted and interop[kind] in target_of:
-            rows.append((target_of[interop[kind]], interop[kind]))
+    for table, earned in ((interop, promoted), (data, data_promoted)):
+        for kind in sorted(table):
+            if (kind, host) in earned and table[kind] in target_of:
+                rows.append((target_of[table[kind]], table[kind]))
     return rows
 
 
@@ -1878,9 +1973,14 @@ def check(require: bool, quiet: bool = False) -> tuple[Tree | None, dict[str, Le
         workflow = ""
     router_default = router_default_kinds(root) if root is not None else None
     findings += interop_findings(
-        links, on_host, every, workflow, router_default, INTEROP, INTEROP_GAPS, INTEROP_PROMOTED
+        links, on_host, every, workflow, router_default, INTEROP, INTEROP_GAPS, INTEROP_PROMOTED,
+        INTEROP_DATA, INTEROP_DATA_PROMOTED,
     )
-    findings += gate_step_findings(workflow, INTEROP_PROMOTED)
+    # The gating step runs both tables' promoted rows from one list, so either table
+    # being non-empty is what requires it.
+    findings += gate_step_findings(
+        workflow, {**INTEROP_PROMOTED, **{(f"{k}/data", h): r for (k, h), r in INTEROP_DATA_PROMOTED.items()}}
+    )
 
     if findings:
         print(f"platform-surface-matrix: FAIL -- {len(findings)} finding(s)")
@@ -1904,7 +2004,9 @@ def check(require: bool, quiet: bool = False) -> tuple[Tree | None, dict[str, Le
             print(f"    leg {host}: {len(leg.targets)} target(s): {', '.join(leg.targets)}")
             for d in leg.deferred:
                 print(f"    leg {host} DOES NOT EXECUTE {d}")
-        for line in interop_summary(links, INTEROP, INTEROP_GAPS, INTEROP_PROMOTED):
+        for line in interop_summary(
+            links, INTEROP, INTEROP_GAPS, INTEROP_PROMOTED, data=INTEROP_DATA, data_promoted=INTEROP_DATA_PROMOTED
+        ):
             print(f"    {line}")
     return tree, legs, 0
 
@@ -2277,19 +2379,35 @@ def selftest() -> int:
     expect("a link nothing names is not run", workflow_runs(t_ws, 'links="udp"'), False)
     expect("the tcp test is not run by a links list", workflow_runs(t_tcp, 'links="ws"'), False)
 
+    d_tcp = DATA_STEM + "tcp_on_this_host"
+    d_ws = DATA_STEM + "ws_on_this_host"
+    d_us = DATA_STEM + "unixsock_on_this_host"
+    d_ur = DATA_STEM + "udp_reliable_on_this_host"
+    expect("a data test's scheme is read as a handshake test's is", (scheme_of(d_tcp), scheme_of(d_ur)), ("tcp", "udp-reliable"))
+    wfd = f'links="ws udp-reliable"\n  for s in tcp $links; do --exact "{DATA_STEM}${{s}}_on_this_host"; done\n'
+    expect("the data loop covers tcp without a links token", workflow_runs_data(d_tcp, wfd), True)
+    expect("the data loop covers a link by its token", workflow_runs_data(d_ur, wfd), True)
+    expect("a link no links list names has no data run", workflow_runs_data(d_us, wfd), False)
+    expect("no data stem, no data run", workflow_runs_data(d_tcp, 'links="ws"\n'), False)
+
     served5 = {"Tcp": ALL_HOSTS, "Ws": ALL_HOSTS, "Serial": ALL_HOSTS, "UnixsockStream": UNIX_HOSTS}
     inter5 = {"Tcp": t_tcp, "Ws": t_ws, "UnixsockStream": t_us}
+    data5 = {"Tcp": d_tcp, "Ws": d_ws, "UnixsockStream": d_us}
     gaps5 = {("Serial", "macos"): (ROUTER_OMITS, "x"), ("Serial", "windows"): (ROUTER_OMITS, "x")}
-    on5 = {"macos": frozenset({t_tcp, t_ws, t_us}), "windows": frozenset({t_tcp, t_ws})}
-    all5 = frozenset({t_tcp, t_ws, t_us})
-    wf5 = f'links="ws unixsock"\n--exact {t_tcp}\n'
+    on5 = {"macos": frozenset({t_tcp, t_ws, t_us, d_tcp, d_ws, d_us}), "windows": frozenset({t_tcp, t_ws, d_tcp, d_ws})}
+    all5 = frozenset({t_tcp, t_ws, t_us, d_tcp, d_ws, d_us})
+    wf5 = f'links="ws unixsock"\n--exact {t_tcp}\nfor s in tcp $links; do --exact "{DATA_STEM}${{s}}_on_this_host"; done\n'
     default5 = frozenset({"Tcp", "Ws", "UnixsockStream"})
 
     def arm5(**over: object) -> list[str]:
-        args = dict(served=served5, on=on5, every=all5, wf=wf5, default=default5, inter=inter5, gaps=gaps5, promoted={})
+        args = dict(
+            served=served5, on=on5, every=all5, wf=wf5, default=default5, inter=inter5, gaps=gaps5,
+            promoted={}, data=data5, data_promoted={},
+        )
         args.update(over)
         return interop_findings(
-            args["served"], args["on"], args["every"], args["wf"], args["default"], args["inter"], args["gaps"], args["promoted"]  # type: ignore[arg-type]
+            args["served"], args["on"], args["every"], args["wf"], args["default"], args["inter"], args["gaps"],  # type: ignore[arg-type]
+            args["promoted"], args["data"], args["data_promoted"],  # type: ignore[arg-type]
         )
 
     expect("a consistent interop arm is green", arm5(), [])
@@ -2312,18 +2430,47 @@ def selftest() -> int:
     refused("promotion newest first", arm5(promoted={("Tcp", "macos"): (102, 101)}), "oldest first")
     refused("promotion of a link with no test", arm5(promoted={("Serial", "macos"): (101, 102)}), "no interop test there")
     refused("promotion on a host that does not serve it", arm5(promoted={("UnixsockStream", "windows"): (101, 102)}), "no interop test there")
+    # the data plane is a second table over the same links
+    refused("a dialed link with no data row", arm5(data={"Tcp": d_tcp, "Ws": d_ws}), "INTEROP_DATA has no row")
+    refused("a data row for a link nothing dials", arm5(data={**data5, "Vsock": d_ws}), "which INTEROP does not dial")
+    refused("a data test that does not compile on the host", arm5(on={**on5, "windows": frozenset({t_tcp, t_ws, d_tcp})}), "INTEROP_DATA names")
+    refused("a data test the workflow never runs", arm5(wf=f'links="ws unixsock"\n--exact {t_tcp}\n'), "is Ws's data test and the `interop` job")
+    refused("a data row whose test does not exist", arm5(every=frozenset({t_tcp, t_ws, t_us, d_tcp, d_ws})), "no host-interop test has that name")
+    refused("a data test the tables do not name", arm5(data={"Tcp": d_tcp, "Ws": d_ws}, every=all5), "names it for no link")
+    dgood = {("Tcp", "macos"): (201, 202)}
+    expect("a promoted data row with two ordered runs is green", arm5(data_promoted=dgood), [])
+    refused("a data promotion with one run twice", arm5(data_promoted={("Tcp", "macos"): (201, 201)}), "INTEROP_DATA_PROMOTED (Tcp, macos) needs two DISTINCT")
+    refused("a data promotion newest first", arm5(data_promoted={("Tcp", "macos"): (202, 201)}), "INTEROP_DATA_PROMOTED (Tcp, macos) lists its runs newest first")
+    refused("a data promotion with no data row", arm5(data_promoted={("Serial", "macos"): (201, 202)}), "INTEROP_DATA_PROMOTED names (Serial, macos)")
+    refused("a data promotion on a host that does not serve it", arm5(data_promoted={("UnixsockStream", "windows"): (201, 202)}), "INTEROP_DATA_PROMOTED names (UnixsockStream, windows)")
     expect(
         "the gated list is the promoted tests, with their targets, in kind order",
-        promoted_tests("macos", inter5, {("Ws", "macos"): (1, 2), ("Tcp", "macos"): (1, 2)}, {t_tcp: "a", t_ws: "b"}),
+        promoted_tests("macos", inter5, {("Ws", "macos"): (1, 2), ("Tcp", "macos"): (1, 2)}, {t_tcp: "a", t_ws: "b"}, {}, {}),
         [("a", t_tcp), ("b", t_ws)],
     )
-    expect("another host's promotion is not this host's", promoted_tests("windows", inter5, good, {t_tcp: "a"}), [])
+    expect("another host's promotion is not this host's", promoted_tests("windows", inter5, good, {t_tcp: "a"}, {}, {}), [])
+    expect(
+        "the data rows follow the handshake rows in the gated list",
+        promoted_tests(
+            "macos", inter5, {("Tcp", "macos"): (1, 2)}, {t_tcp: "a", d_tcp: "c", d_ws: "d"}, data5,
+            {("Ws", "macos"): (1, 2), ("Tcp", "macos"): (1, 2)},
+        ),
+        [("a", t_tcp), ("c", d_tcp), ("d", d_ws)],
+    )
     expect(
         "the summary counts owed, gated and observed rows and names the omitted links",
         interop_summary(served5, inter5, gaps5, {("Tcp", "macos"): (1, 2), ("Ws", "macos"): (1, 2)}),
         [
             "interop macos: 3 owed, 2 gated, 1 observed (UnixsockStream); router omits Serial",
             "interop windows: 2 owed, 0 gated, 2 observed (Tcp, Ws); router omits Serial",
+        ],
+    )
+    expect(
+        "the summary adds the data plane's owed and gated counts when it is asked",
+        interop_summary(served5, inter5, gaps5, {("Tcp", "macos"): (1, 2)}, data=data5, data_promoted={("Tcp", "macos"): (1, 2)}),
+        [
+            "interop macos: 3 owed, 1 gated, 2 observed (UnixsockStream, Ws); router omits Serial; data plane: 3 owed, 1 gated, 2 observed",
+            "interop windows: 2 owed, 0 gated, 2 observed (Tcp, Ws); router omits Serial; data plane: 2 owed, 0 gated, 2 observed",
         ],
     )
     expect(
@@ -2553,7 +2700,7 @@ def main(argv: list[str]) -> int:
         host = args.promoted.lower()
         if host not in LEG_HOSTS:
             ap.error(f"--promoted names {host!r}; the hosts with a leg are {LEG_HOSTS}")
-        for target, test in promoted_tests(host, INTEROP, INTEROP_PROMOTED, target_of):
+        for target, test in promoted_tests(host, INTEROP, INTEROP_PROMOTED, target_of, INTEROP_DATA, INTEROP_DATA_PROMOTED):
             print(f"{target}\t{test}")
         return 0
     host = (args.legs or args.run).lower()

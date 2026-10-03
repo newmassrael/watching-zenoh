@@ -362,8 +362,9 @@ jobs:
           # features, plain udp is in the demo's default. A Unix socket is served on
           # macOS and not on Windows, so only macOS owes it (and the demo's `unixsock`
           # feature is built there alone). A link's name has a hyphen where its test's
-          # name has an underscore.
-          features=ws,tls,quic,udp-reliable,quic-datagram
+          # name has an underscore. `routing-peer` is the data tests' subscriber: it
+          # declares and receives, which the client-only demo does not.
+          features=ws,tls,quic,udp-reliable,quic-datagram,routing-peer
           links="ws udp udp-reliable tls quic quic-datagram"
           if [ "$RUNNER_OS" = macOS ]; then
             features="$features,unixsock"
@@ -394,6 +395,18 @@ jobs:
                 --nocapture) && link=PASS
               verdict "wz reaches Established against zenohd over ${scheme}:" "$link"
               [ "$link" = PASS ] || all=FAIL
+            done
+            # The data plane over the same links, TCP included: a link that connects is not
+            # yet a link that carries a Put. Each is its own test and its own verdict line,
+            # for the same reason as the handshakes above.
+            for scheme in tcp $links; do
+              carried=FAIL
+              (cd crates && WZ_ZENOHD_BIN="$bin" cargo test -p wz-host-interop-tests \
+                --test zenohd_link_handshakes \
+                -- --ignored --exact "wz_publisher_reaches_a_subscriber_through_a_stock_zenohd_over_${scheme//-/_}_on_this_host" \
+                --nocapture) && carried=PASS
+              verdict "wz publisher reaches a subscriber through zenohd over ${scheme}:" "$carried"
+              [ "$carried" = PASS ] || all=FAIL
             done
           fi
           verdict "wz reaches Established against zenohd:" "$handshake"
