@@ -2420,7 +2420,16 @@ PIN_NO_SYMBOL = 0
 # standing for a receiver, the positive twin of the held leg, and the slice walk's
 # witness), and the atom is still PARTIAL. READ off the census's own FAIL line,
 # `wz citations: 36 against a pin of 31`; `reached` and `ambiguous` hold at 3 and 2.
-PIN_WZ_CITATIONS = 36
+#
+# R3040 -- 36 -> 45, one atom. `transport-shm`'s reason gains the UPDATE that the
+# watchdog, the receiver's hold and the handoff acknowledgement are built, which cites
+# nine wz anchors (the confirmator, the validation pass, the receiver's hold, the
+# mapping-identity check, the AP handoff, the handoff trait, the registry's
+# acknowledgement witness, the session-level witness through a real Open exchange, and
+# the watchdog leg against upstream's validator), and the atom is still PARTIAL. READ
+# off the census's own FAIL line, `wz citations: 45 against a pin of 36`; `reached` and
+# `ambiguous` hold at 3 and 2.
+PIN_WZ_CITATIONS = 45
 # R2626 — 44 -> 42, and this one is worth a sentence because it HELD through
 # every earlier retirement in this run (R2612, R2622). `time-hlc`'s reason is the
 # first retiree carrying AMBIGUOUS citations of its own: its oldest clauses cite
