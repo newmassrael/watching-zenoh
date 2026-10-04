@@ -918,6 +918,146 @@ fn a_session_resolves_an_shm_put_without_a_hand_installed_resolver() {
     );
 }
 
+/// R3040 -- THE STAMP: a session whose Open exchange named handoff counters
+/// acknowledges the shared-memory slices it receives through them, and stops when
+/// a new establishment begins.
+///
+/// This is the step the oracle legs cannot witness on a host without the
+/// shared-memory source build, and the one that puts the handoff where the
+/// received slices are counted: the Open exchange opens it in the session's
+/// actions, and the unicast dispatch SSOT hands it to the registry on the next
+/// iteration. The exchange here is the real one, forged from the public encoders
+/// (the peer's InitSyn, then an OpenSyn echoing OUR challenge and naming a counter
+/// block), and the Put is a real slot-backed payload sent the way production
+/// sends one, so the acknowledgement is read at the end of the whole path and not
+/// at one seam of it.
+#[cfg(all(
+    feature = "session-extshm",
+    feature = "codec-push",
+    feature = "pubsub-put",
+    target_os = "linux"
+))]
+#[test]
+fn a_session_acknowledges_the_shm_slices_it_receives_through_the_counters_its_peer_named() {
+    use wz_session_core::extshm::{
+        encode_shm_init_syn_body, encode_shm_open_syn_body, encode_shm_zbuf_ext, ShmAuthenticator,
+        ShmHandoff, ShmHandoffCounters, SHM_PRIORITY_BANDS,
+    };
+
+    const PEER_SEGMENT: u32 = 77;
+    const LOCAL_CHALLENGE: u64 = 0x5EED;
+    const COUNTERS: [u16; SHM_PRIORITY_BANDS] = [10, 11, 12, 13, 14, 15, 16, 17];
+
+    struct BandLog(Arc<Mutex<Vec<usize>>>);
+    impl ShmHandoff for BandLog {
+        fn on_rx(&self, band: usize) {
+            self.0.lock().unwrap().push(band);
+        }
+    }
+
+    /// An authenticator that can see the peer's segment and open its counters,
+    /// recording every acknowledgement the handoff it hands out is asked for.
+    struct Auth {
+        bands: Arc<Mutex<Vec<usize>>>,
+    }
+    impl ShmAuthenticator for Auth {
+        fn local_segment_id(&self) -> u32 {
+            1
+        }
+        fn local_challenge(&self) -> u64 {
+            LOCAL_CHALLENGE
+        }
+        fn open_peer_challenge(&self, segment_id: u32) -> Option<u64> {
+            (segment_id == PEER_SEGMENT).then_some(0xA11CE)
+        }
+        fn open_peer_handoff(
+            &self,
+            peer_segment: u32,
+            counters: &[u16; SHM_PRIORITY_BANDS],
+        ) -> Option<Box<dyn ShmHandoff>> {
+            assert_eq!(peer_segment, PEER_SEGMENT, "the peer's own segment");
+            assert_eq!(*counters, COUNTERS, "the ids the peer named, in band order");
+            Some(Box::new(BandLog(self.bands.clone())))
+        }
+    }
+
+    let (session, _driver) = build_session();
+    let bands: Arc<Mutex<Vec<usize>>> = Arc::default();
+    session.actions().install_shm_auth(Box::new(Auth {
+        bands: bands.clone(),
+    }));
+    session.actions().set_shm_offer(true);
+
+    // The Open exchange, from the ACCEPTOR's side: the initiator's InitSyn names
+    // its segment, and its OpenSyn echoes our challenge and names its counters.
+    let init_syn = encode_shm_zbuf_ext(&encode_shm_init_syn_body(PEER_SEGMENT)).expect("fits");
+    session
+        .actions()
+        .shm_recv_init_syn(std::slice::from_ref(&init_syn))
+        .expect("well-formed InitSyn");
+    let open_syn = encode_shm_zbuf_ext(&encode_shm_open_syn_body(
+        LOCAL_CHALLENGE,
+        ShmHandoffCounters::PerPriority(COUNTERS),
+    ))
+    .expect("fits");
+    session.actions().shm_recv_open_syn(&[open_syn]);
+    assert!(session.actions().is_shm(), "the proof stood, so SHM stands");
+
+    let got: Arc<Mutex<Vec<Vec<u8>>>> = Arc::default();
+    let got_cb = got.clone();
+    let _sub = session.declare_subscriber("demo/shm", SubscribeOptions::default(), move |s| {
+        got_cb.lock().unwrap().push(s.payload().to_vec());
+    });
+
+    // One shared-memory Put, sent as production sends it: a reference taken for the
+    // receiver, and the descriptor built from that reference.
+    let dispatch_one = |text: &[u8]| {
+        let mut payload = crate::shm_provider::ShmBackedPayload::alloc(text.len()).expect("alloc");
+        payload.write(text);
+        let wire = payload.wire_reference();
+        let push = wz_session_core::push_build::build_push_shm_literal(
+            "demo/shm",
+            &wire.descriptor(),
+            &wz_session_core::metadata::PushMetadata::default(),
+        )
+        .expect("build the SHM Put");
+        wire.commit();
+        let outcome = wz_session_core::driver_loop::DriverLoopOutcome::FramePayload {
+            priority: wz_session_core::qos::Priority::DEFAULT,
+            reliable: true,
+            sn: 0,
+            messages: vec![wz_session_core::network_message::NetworkMessage::Push(
+                Box::new(push),
+            )],
+            has_ext: false,
+            extensions: Vec::new(),
+        };
+        session.dispatch_iteration_event(crate::session_glue::IterationEvent::Poll(&outcome));
+    };
+
+    dispatch_one(b"first");
+    assert_eq!(*got.lock().unwrap(), vec![b"first".to_vec()], "delivered");
+    assert_eq!(
+        *bands.lock().unwrap(),
+        [5],
+        "and acknowledged once, at the default priority's band"
+    );
+
+    // A NEW establishment: the old peer's handoff is withdrawn from the registry,
+    // so a Put after it writes no counter of the peer this session has left.
+    session
+        .actions()
+        .shm_recv_init_syn(std::slice::from_ref(&init_syn))
+        .expect("well-formed InitSyn");
+    dispatch_one(b"second");
+    assert_eq!(got.lock().unwrap().len(), 2, "still delivered");
+    assert_eq!(
+        *bands.lock().unwrap(),
+        [5],
+        "but not acknowledged through the handoff of the peer that was left"
+    );
+}
+
 // ── R311y739 Session::new auto-wire of OUR keyexpr id space ──
 
 /// Build an `IterationEvent`-shaped inbound Push whose keyexpr is an `M=0`

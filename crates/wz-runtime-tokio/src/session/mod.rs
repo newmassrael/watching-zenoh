@@ -2794,6 +2794,17 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
             // fail-closed at the field default.
             #[cfg(feature = "transport-shm")]
             obs.subscribers.set_shm_negotiated(self.actions().is_shm());
+            // R3040 -- hand the registry the means of ACKNOWLEDGING the peer's
+            // shared-memory slices, before the un-swap can run, as the negotiated
+            // flag above is. The Open exchange opens it (the counters the peer
+            // names live in its auth segment), and a new establishment withdraws
+            // the old one, so a registry never writes the counters of a peer this
+            // session has moved on from. Taken, not read: the actions hold it only
+            // until the registry has it, and a change is reported once.
+            #[cfg(feature = "session-extshm")]
+            if let Some(update) = self.actions().shm_take_handoff_update() {
+                obs.subscribers.set_shm_handoff(update);
+            }
             obs.dispatch_event(event);
             // R2690 (§5.23) — refresh the admin introspection cache from the
             // tables this dispatch has just moved. AFTER `dispatch_event`, not

@@ -73,8 +73,9 @@
 //! make wz's segments look invalid to a peer.
 
 use std::io;
+use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 
-use wz_session_core::extshm::ShmAuthenticator;
+use wz_session_core::extshm::{ShmAuthenticator, ShmHandoff, SHM_PRIORITY_BANDS};
 
 /// zenoh `SHM_VERSION` (`commons/zenoh-shm/src/version.rs`, the `SHM_VERSION`
 /// constant). A peer whose segment carries a different value is treated as
@@ -99,6 +100,9 @@ const PROTOCOL_SLOTS: usize = 256;
 /// `shm_counters: [AtomicU32; 762 + 2048]`, restated as upstream spells the sum
 /// so a reader can join the two halves to the declaration.
 const COUNTER_SLOTS: usize = 762 + 2048;
+/// Byte offset of `ShmTransportMetadata::shm_counters`: straight after the
+/// protocol array, 1048 (the table in the module docs).
+const COUNTERS_OFFSET: usize = PROTOCOLS_OFFSET + PROTOCOL_SLOTS * core::mem::size_of::<u32>();
 
 /// The one protocol wz's segment advertises. Written into `protocols[0]` with
 /// `id_count = 1`; upstream's `PartnerShmConfig::supports_protocol`
@@ -121,7 +125,7 @@ const SEGMENT_BYTES: usize = PROTOCOLS_OFFSET
 // metadata and data segments share this namespace, so they share its counter.
 #[cfg(test)]
 use crate::posix_shm::candidate_id;
-use crate::posix_shm::{next_candidate_id, OwnedSegment, PeerSegment};
+use crate::posix_shm::{next_candidate_id, OwnedSegment, PeerSegment, PeerSegmentRw};
 
 /// This segment kind's `/dev/shm` path, for the tests that open one by hand.
 #[cfg(test)]
@@ -229,6 +233,91 @@ pub fn open_peer_challenge(segment_id: u32) -> Option<u64> {
     read_u64(map, CHALLENGE_INDEX)
 }
 
+/// R3040 -- a PEER's handoff counters, opened for writing: the means of telling a
+/// zenoh sender that a shared-memory slice it sent has arrived.
+///
+/// The sender keeps a hard reference to every buffer it sends until the receiver
+/// lowers one of the counters in the sender's auth segment, one counter per
+/// priority, at the ids the sender named in its Open message
+/// (`io/zenoh-transport/src/unicast/establishment/ext/shm/segment.rs` @
+/// `pub fn counter_decrease(&self) {`). This holds that segment mapped WRITABLE,
+/// where `open_peer_challenge` maps it read-only and lets it go, and the eight
+/// ids, and `ShmHandoff::on_rx` lowers the one named for a message's priority.
+///
+/// The decrement SATURATES at zero where upstream's wraps. A counter that was
+/// lowered below zero would read as four billion and be larger than the number of
+/// buffers the sender holds for ever, which is a sender that never lets go of
+/// anything again, so a mismatch between what was sent and what is acknowledged
+/// must cost a missed acknowledgement and not the whole channel.
+pub struct PeerHandoff {
+    segment: PeerSegmentRw,
+    ids: [u16; SHM_PRIORITY_BANDS],
+}
+
+impl PeerHandoff {
+    /// Open the peer's auth segment `segment_id` for writing, with the counter
+    /// ids it named for each priority.
+    ///
+    /// `None` when the segment cannot be opened, is too small, carries another
+    /// `SHM_VERSION`, or when any id names a counter past the array: upstream
+    /// refuses such an id when it builds its channel
+    /// (`ShmRXCounterLease::new` @ `Invalid counter index`) and carries on without
+    /// a handoff, which is the same outcome here.
+    pub fn open(segment_id: u32, ids: &[u16; SHM_PRIORITY_BANDS]) -> Option<Self> {
+        let segment = PeerSegmentRw::open(u64::from(segment_id)).ok()?;
+        if segment.len() < SEGMENT_BYTES {
+            return None;
+        }
+        // SAFETY: the mapping is at least `SEGMENT_BYTES` long, and `VERSION_INDEX`
+        // names an 8-byte-aligned `u64` inside it (a page-aligned base plus 16); it
+        // is read through an atomic load because the peer may write it.
+        let version = unsafe {
+            (*segment
+                .base()
+                .add(VERSION_INDEX * core::mem::size_of::<u64>())
+                .cast::<AtomicU64>())
+            .load(Ordering::Relaxed)
+        };
+        if version != SHM_VERSION {
+            return None;
+        }
+        if ids.iter().any(|&id| usize::from(id) >= COUNTER_SLOTS) {
+            return None;
+        }
+        Some(Self { segment, ids: *ids })
+    }
+
+    /// The counter `id` names. `id` was checked against the array at `open`.
+    fn counter(&self, id: u16) -> &AtomicU32 {
+        // SAFETY: `id < COUNTER_SLOTS` and the mapping holds `SEGMENT_BYTES`, so the
+        // four bytes at `COUNTERS_OFFSET + 4 * id` are inside it; the offset is a
+        // multiple of four from a page-aligned base, so the pointer is aligned for an
+        // `AtomicU32`; and the mapping lives as long as `self.segment`, which the
+        // returned borrow cannot outlive.
+        unsafe {
+            &*self
+                .segment
+                .base()
+                .add(COUNTERS_OFFSET + usize::from(id) * core::mem::size_of::<u32>())
+                .cast::<AtomicU32>()
+        }
+    }
+}
+
+impl ShmHandoff for PeerHandoff {
+    fn on_rx(&self, band: usize) {
+        // A band past the eight priorities holds no counter: nothing to lower.
+        let Some(&id) = self.ids.get(band) else {
+            return;
+        };
+        // Release, so the reads this node made of the buffer happen before the
+        // sender sees that the buffer was acknowledged.
+        let _ = self
+            .counter(id)
+            .fetch_update(Ordering::Release, Ordering::Relaxed, |n| n.checked_sub(1));
+    }
+}
+
 /// The [`ShmAuthenticator`] a session is handed at bring-up: this node's own
 /// segment plus the ability to open a peer's.
 pub struct PosixShmAuthenticator {
@@ -263,6 +352,15 @@ impl ShmAuthenticator for PosixShmAuthenticator {
 
     fn open_peer_challenge(&self, segment_id: u32) -> Option<u64> {
         open_peer_challenge(segment_id)
+    }
+
+    fn open_peer_handoff(
+        &self,
+        peer_segment: u32,
+        counters: &[u16; SHM_PRIORITY_BANDS],
+    ) -> Option<Box<dyn ShmHandoff>> {
+        PeerHandoff::open(peer_segment, counters)
+            .map(|handoff| Box::new(handoff) as Box<dyn ShmHandoff>)
     }
 }
 
@@ -405,6 +503,151 @@ mod tests {
     #[test]
     fn an_unknown_segment_id_reads_as_no_shm() {
         assert_eq!(open_peer_challenge(0xFFFF_FFFE), None);
+    }
+
+    /// One counter id per band, distinct, so a handoff that lowered the wrong
+    /// band's counter, or read the ids in the wrong order, cannot pass.
+    const BAND_IDS: [u16; SHM_PRIORITY_BANDS] = [40, 41, 42, 43, 44, 45, 46, 47];
+
+    /// Set a handoff counter of a segment this test owns, through the file, so
+    /// the write is what a peer's own process would have made.
+    fn set_counter(segment_id: u32, id: u16, value: u32) {
+        let file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(auth_segment_path(segment_id))
+            .unwrap();
+        // SAFETY: same-process remap of a file this test owns.
+        let mut map = unsafe { MmapOptions::new().map_mut(&file).unwrap() };
+        write_u32_at(
+            &mut map,
+            COUNTERS_OFFSET + usize::from(id) * core::mem::size_of::<u32>(),
+            value,
+        );
+        map.flush().unwrap();
+    }
+
+    /// Read a handoff counter of a segment, through the file and not through the
+    /// handoff under test, so the assertion is on the bytes a peer would read.
+    fn counter_of(segment_id: u32, id: u16) -> u32 {
+        let raw = std::fs::read(auth_segment_path(segment_id)).expect("read back");
+        read_u32_at(
+            &raw,
+            COUNTERS_OFFSET + usize::from(id) * core::mem::size_of::<u32>(),
+        )
+        .expect("inside the segment")
+    }
+
+    /// R3040 -- THE ACKNOWLEDGEMENT, on real shared-memory bytes: `on_rx(band)`
+    /// lowers exactly the counter the peer named for that band by one, and no
+    /// other. Every counter is set to 3, so a handoff that lowered a neighbour, or
+    /// the wrong band's, shows as a 2 where a 3 must stay.
+    #[test]
+    fn a_handoff_lowers_exactly_the_counter_named_for_the_band() {
+        let peer = ShmAuthSegment::create(1).expect("create the peer's segment");
+        for id in BAND_IDS {
+            set_counter(peer.id(), id, 3);
+        }
+        let handoff = PeerHandoff::open(peer.id(), &BAND_IDS).expect("open the handoff");
+
+        handoff.on_rx(5);
+        assert_eq!(counter_of(peer.id(), BAND_IDS[5]), 2, "band 5's counter");
+        for (band, id) in BAND_IDS.into_iter().enumerate() {
+            if band != 5 {
+                assert_eq!(counter_of(peer.id(), id), 3, "band {band} was not touched");
+            }
+        }
+        handoff.on_rx(2);
+        handoff.on_rx(5);
+        assert_eq!(counter_of(peer.id(), BAND_IDS[2]), 2);
+        assert_eq!(counter_of(peer.id(), BAND_IDS[5]), 1);
+    }
+
+    /// R3040 -- a counter already at zero stays at zero. Upstream's decrement
+    /// wraps, and a wrapped counter reads as four billion, so the sender would
+    /// never again see fewer than it holds and would keep every buffer for ever.
+    #[test]
+    fn a_counter_at_zero_stays_at_zero() {
+        let peer = ShmAuthSegment::create(1).expect("create the peer's segment");
+        set_counter(peer.id(), BAND_IDS[5], 1);
+        let handoff = PeerHandoff::open(peer.id(), &BAND_IDS).expect("open the handoff");
+        for _ in 0..3 {
+            handoff.on_rx(5);
+        }
+        assert_eq!(
+            counter_of(peer.id(), BAND_IDS[5]),
+            0,
+            "one acknowledgement owed and three given: it stops at zero"
+        );
+    }
+
+    /// R3040 -- a band past the eight priorities holds no counter, and lowers
+    /// nothing, rather than indexing past the ids.
+    #[test]
+    fn a_band_past_the_priorities_lowers_nothing() {
+        let peer = ShmAuthSegment::create(1).expect("create the peer's segment");
+        for id in BAND_IDS {
+            set_counter(peer.id(), id, 3);
+        }
+        let handoff = PeerHandoff::open(peer.id(), &BAND_IDS).expect("open the handoff");
+        handoff.on_rx(SHM_PRIORITY_BANDS);
+        handoff.on_rx(usize::MAX);
+        for id in BAND_IDS {
+            assert_eq!(counter_of(peer.id(), id), 3);
+        }
+    }
+
+    /// R3040 -- a counter id past the array opens no handoff, as upstream's
+    /// `ShmRXCounterLease::new` refuses it: an id from a peer is an index into
+    /// memory this node writes, and one past the end is not written.
+    #[test]
+    fn a_counter_id_past_the_array_opens_no_handoff() {
+        let peer = ShmAuthSegment::create(1).expect("create the peer's segment");
+        let mut ids = BAND_IDS;
+        ids[3] = COUNTER_SLOTS as u16;
+        assert!(PeerHandoff::open(peer.id(), &ids).is_none());
+        ids[3] = COUNTER_SLOTS as u16 - 1;
+        assert!(
+            PeerHandoff::open(peer.id(), &ids).is_some(),
+            "the last counter is inside the array"
+        );
+    }
+
+    /// R3040 -- a peer segment that is missing, or carries another version, opens
+    /// no handoff: the same reading `open_peer_challenge` gives it, so a segment
+    /// refused for the challenge is not written for the counters.
+    #[test]
+    fn a_missing_or_foreign_version_segment_opens_no_handoff() {
+        assert!(PeerHandoff::open(0xFFFF_FFFE, &BAND_IDS).is_none());
+
+        let peer = ShmAuthSegment::create(1).expect("create the peer's segment");
+        {
+            let file = OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open(auth_segment_path(peer.id()))
+                .unwrap();
+            // SAFETY: same-process remap of a file this test owns.
+            let mut map = unsafe { MmapOptions::new().map_mut(&file).unwrap() };
+            write_u64(&mut map, VERSION_INDEX, SHM_VERSION + 1);
+            map.flush().unwrap();
+        }
+        assert!(PeerHandoff::open(peer.id(), &BAND_IDS).is_none());
+    }
+
+    /// R3040 -- the authenticator the session is handed opens the handoff through
+    /// the trait the establishment calls, and the object it returns is the one
+    /// that lowers the counter.
+    #[test]
+    fn the_authenticator_opens_a_handoff_through_the_trait() {
+        let peer = ShmAuthSegment::create(1).expect("create the peer's segment");
+        set_counter(peer.id(), BAND_IDS[5], 2);
+        let a = PosixShmAuthenticator::new().expect("authenticator");
+        let handoff = a
+            .open_peer_handoff(peer.id(), &BAND_IDS)
+            .expect("the peer's counters open");
+        handoff.on_rx(5);
+        assert_eq!(counter_of(peer.id(), BAND_IDS[5]), 1);
     }
 
     /// The authenticator draws a challenge that is neither zero nor a counter

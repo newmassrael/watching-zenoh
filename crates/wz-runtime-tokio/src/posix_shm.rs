@@ -108,6 +108,21 @@ fn lock_shared(file: &File) -> io::Result<()> {
 /// Best-effort and silent, as upstream's is: it runs from exit paths where no
 /// error has anywhere to go. A no-op off Linux, where upstream's is too.
 pub fn cleanup_orphaned_segments() {
+    cleanup_orphaned_segments_where(|_| true);
+}
+
+/// [`cleanup_orphaned_segments`] over the ids `wanted` accepts.
+///
+/// R3040 -- the production sweep takes every id, and that is its whole job, but
+/// it is also why a test that ran it could not be left alone in a process that
+/// made segments elsewhere. A segment exists for an instant between its creation
+/// and the shared lock that marks it held (`OwnedSegment::create` creates the
+/// object and only then locks it, as upstream's does), and in that instant the
+/// sweep reads it as an orphan and removes it. MEASURED: the sweep's own test ran
+/// beside a test that had just created a segment, and that one failed opening it
+/// with `NotFound`. A test that wants to watch the sweep decide names the ids it
+/// owns, and cannot touch anyone else's.
+fn cleanup_orphaned_segments_where(wanted: impl Fn(u64) -> bool) {
     #[cfg(target_os = "linux")]
     {
         let Ok(entries) = std::fs::read_dir("/dev/shm") else {
@@ -125,11 +140,17 @@ pub fn cleanup_orphaned_segments() {
             else {
                 continue;
             };
+            if !wanted(id) {
+                continue;
+            }
             if segment_is_dangling(id) {
                 let _ = std::fs::remove_file(segment_path(id));
             }
         }
     }
+    // Off Linux there is nothing to sweep, and `wanted` is not read.
+    #[cfg(not(target_os = "linux"))]
+    let _ = wanted;
 }
 
 /// Whether segment `id` is held by no process — upstream's
@@ -373,7 +394,10 @@ mod tests {
             .expect("create a held segment");
         let held_path = segment_path(held.id());
 
-        cleanup_orphaned_segments();
+        // Scoped to the two ids this test owns: the whole-directory sweep would also
+        // read a segment another test has created and not yet locked as an orphan.
+        let held_id = held.id();
+        cleanup_orphaned_segments_where(|id| id == orphan_id || id == held_id);
 
         assert!(!orphan.exists(), "a segment no process holds is removed");
         assert!(held_path.exists(), "a segment this process holds is kept");

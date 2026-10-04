@@ -5693,6 +5693,19 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         }
     }
 
+    /// R3040 -- what changed in the means of acknowledging the peer's
+    /// shared-memory slices since the last call: `None` for nothing, `Some(Some(h))`
+    /// for a handoff opened by the Open exchange, `Some(None)` for the loss of the
+    /// old one. The holder that counts received slices (the subscriber registry)
+    /// takes it on each dispatch iteration, so a handoff reaches it whenever the
+    /// exchange completes and is withdrawn when a new establishment begins.
+    #[cfg(feature = "session-extshm")]
+    pub fn shm_take_handoff_update(
+        &self,
+    ) -> Option<Option<alloc::boxed::Box<dyn crate::extshm::ShmHandoff>>> {
+        R::with_mutex_mut(&self.shm_auth, |d| d.take_handoff_update())
+    }
+
     pub fn trace_snapshot(&self) -> ActionTrace {
         R::with_mutex_mut(&self.trace, |t| t.clone_via_copy())
     }

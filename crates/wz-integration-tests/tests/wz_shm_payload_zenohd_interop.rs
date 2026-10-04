@@ -83,7 +83,7 @@ use wz_runtime_tokio::session_open::{
     DialConfig, DialedLink, DEFAULT_OPEN_TICK_MS,
 };
 use wz_runtime_tokio::shm_provider::{
-    reference_state, PosixShmResolver, ReferenceState, ShmBackedPayload,
+    is_invalidated, reference_state, ChunkHold, PosixShmResolver, ReferenceState, ShmBackedPayload,
 };
 use wz_runtime_tokio::sync::Mutex;
 use wz_runtime_tokio_test_support::zenoh_interop_session_init_params;
@@ -135,6 +135,101 @@ impl ShmResolver for CountingResolver {
     }
 }
 
+/// How the resolver of a zenoh-to-wz run treats the descriptors it is shown.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum RunMode {
+    /// Resolve every descriptor: link it, read it and let go.
+    Resolving,
+    /// HOLD the first chunk (link it and keep the hold) and link-and-release every
+    /// other one at once, so that zenoh's OWN watchdog validator can be watched
+    /// deciding between a chunk wz still holds and chunks wz has let go of.
+    WatchdogProbe,
+}
+
+/// The resolver of [`RunMode::WatchdogProbe`]: the first descriptor is linked and
+/// the hold kept; every other one is linked and let go at once, which confirms it
+/// a single time and gives its reference back, and is refused.
+struct HoldingResolver {
+    held: Arc<StdMutex<Option<ChunkHold>>>,
+    seen: Arc<StdMutex<Vec<ShmDescriptor>>>,
+}
+
+impl ShmResolver for HoldingResolver {
+    fn resolve(&self, descriptor: &ShmDescriptor) -> Option<Vec<u8>> {
+        let mut seen = self.seen.lock().expect("seen");
+        seen.push(*descriptor);
+        let first = seen.len() == 1;
+        drop(seen);
+        let hold = ChunkHold::link(descriptor)?;
+        if !first {
+            // Dropped here: confirmed once, released, and nothing confirms it again.
+            return None;
+        }
+        let bytes = hold.read();
+        *self.held.lock().expect("held") = Some(hold);
+        bytes
+    }
+}
+
+/// What zenoh's own validator did with the chunks of a [`RunMode::WatchdogProbe`]
+/// run, read off the headers in zenoh's metadata segment.
+struct WatchdogOutcome {
+    /// Whether the chunk wz held stayed un-invalidated for the whole hold.
+    held_stayed_valid: bool,
+    /// How many chunks wz linked and let go of at once.
+    released: usize,
+    /// Of those, the ones zenoh's validator had NOT invalidated by the end of the
+    /// wait, each with what its header says: whether it is invalidated and what its
+    /// reference count is. A chunk nobody holds and nobody confirms is invalidated
+    /// within a window or two.
+    released_still_valid: Vec<(ShmDescriptor, Option<bool>, Option<ReferenceState>)>,
+}
+
+/// THE WATCHDOG, read off ZENOH'S validator. wz linked the first chunk and holds
+/// it; every other one it linked and let go of at once. zenoh's validator clears
+/// each chunk's bit every 100 ms and invalidates one that nobody confirmed in the
+/// window, so if wz confirms the bit zenoh's validator reads, the held chunk stays
+/// valid for as long as it is held (six windows here) and the released ones, which
+/// nobody confirms any more, do not. A wz that confirmed a DIFFERENT bit would see
+/// its held chunk invalidated.
+///
+/// It runs inside the scenario, so wz keeps driving its session, and so keeps
+/// acknowledging what zenoh sends, while zenoh's validator is watched.
+///
+/// `None` when fewer than two descriptors were seen, so there is no control.
+async fn probe_watchdog(seen: &StdMutex<Vec<ShmDescriptor>>) -> Option<WatchdogOutcome> {
+    let descriptors = seen.lock().expect("seen").clone();
+    if descriptors.len() < 2 {
+        return None;
+    }
+    let held_descriptor = descriptors[0];
+    let mut held_stayed_valid = true;
+    for _ in 0..12 {
+        if is_invalidated(&held_descriptor) != Some(false) {
+            held_stayed_valid = false;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    let released = descriptors[1..].to_vec();
+    let mut still_valid = released.clone();
+    for _ in 0..60 {
+        still_valid.retain(|d| is_invalidated(d) != Some(true));
+        if still_valid.is_empty() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    Some(WatchdogOutcome {
+        held_stayed_valid,
+        released: released.len(),
+        released_still_valid: still_valid
+            .iter()
+            .map(|d| (*d, is_invalidated(d), reference_state(d)))
+            .collect(),
+    })
+}
+
 /// Start an upstream SHM example with the flags every leg shares, its output
 /// going to one capture file. `RUST_LOG` is raised so a failing leg can show what
 /// zenoh itself said about the buffer it refused.
@@ -173,6 +268,18 @@ struct ZenohToWz {
     /// wait for the publisher's own release to land. A wz that never gives a
     /// reference back leaves every one of them at one, in a header zenoh owns.
     unreleased: Vec<(ShmDescriptor, Option<ReferenceState>)>,
+    /// Of the chunks zenoh's provider handed over, those its OWN watchdog
+    /// validator had not invalidated once the wz side had read them and, by the
+    /// handoff counters, acknowledged them. zenoh's sender keeps a hard reference
+    /// to every buffer it sends, and that reference keeps the buffer's watchdog bit
+    /// confirmed, until the receiver lowers the sender's handoff counter; a wz that
+    /// never does leaves every chunk confirmed for as long as the publisher runs
+    /// (MEASURED: counter at 3 after three puts and still 3 seconds later, every
+    /// chunk confirmed and not invalidated), where a chunk its receiver
+    /// acknowledged is invalidated within about 200 ms. Read off zenoh's own header.
+    uninvalidated: Vec<(ShmDescriptor, Option<bool>)>,
+    /// What zenoh's validator did, in [`RunMode::WatchdogProbe`] only.
+    watchdog: Option<WatchdogOutcome>,
     /// Everything the publisher printed.
     zenoh_log: String,
 }
@@ -182,6 +289,11 @@ struct ZenohToWz {
 /// offers shared memory at establishment; when it does not, zenoh must send the
 /// payload raw, which is this helper's own control.
 async fn zenoh_publishes_to_wz(offer_shm: bool) -> Option<ZenohToWz> {
+    zenoh_publishes_to_wz_in(offer_shm, RunMode::Resolving).await
+}
+
+/// [`zenoh_publishes_to_wz`] with the resolver's behaviour chosen: see [`RunMode`].
+async fn zenoh_publishes_to_wz_in(offer_shm: bool, mode: RunMode) -> Option<ZenohToWz> {
     let Some(z_pub) = zenoh_shm_example_binary("z_pub_shm") else {
         eprintln!(
             "SKIP: no z_pub_shm at target/zenohd-shm (run `ZENOHD_SHM=1 scripts/build-zenohd.sh`)"
@@ -248,12 +360,19 @@ async fn zenoh_publishes_to_wz(offer_shm: bool) -> Option<ZenohToWz> {
     let resolved = Arc::new(AtomicUsize::new(0));
     let refused = Arc::new(AtomicUsize::new(0));
     let seen: Arc<StdMutex<Vec<ShmDescriptor>>> = Arc::default();
-    session.set_shm_resolver(Box::new(CountingResolver {
-        inner: PosixShmResolver,
-        resolved: resolved.clone(),
-        refused: refused.clone(),
-        seen: seen.clone(),
-    }));
+    let held: Arc<StdMutex<Option<ChunkHold>>> = Arc::default();
+    match mode {
+        RunMode::Resolving => session.set_shm_resolver(Box::new(CountingResolver {
+            inner: PosixShmResolver,
+            resolved: resolved.clone(),
+            refused: refused.clone(),
+            seen: seen.clone(),
+        })),
+        RunMode::WatchdogProbe => session.set_shm_resolver(Box::new(HoldingResolver {
+            held: held.clone(),
+            seen: seen.clone(),
+        })),
+    }
     let received: Arc<StdMutex<Vec<Vec<u8>>>> = Arc::default();
     let sink = received.clone();
     // The routed declaration: a zenoh publisher sends nothing to a peer that has
@@ -280,22 +399,33 @@ async fn zenoh_publishes_to_wz(offer_shm: bool) -> Option<ZenohToWz> {
     );
 
     let probe = received.clone();
+    let probe_seen = seen.clone();
     let scenario = async move {
         for _ in 0..400 {
-            if probe.lock().expect("received").len() >= 3 {
-                return;
+            // Resolving: three samples DELIVERED. Probing: three descriptors SEEN,
+            // since all but the first are refused and so deliver nothing.
+            let enough = match mode {
+                RunMode::Resolving => probe.lock().expect("received").len() >= 3,
+                RunMode::WatchdogProbe => probe_seen.lock().expect("seen").len() >= 3,
+            };
+            if enough {
+                return match mode {
+                    RunMode::WatchdogProbe => probe_watchdog(&probe_seen).await,
+                    RunMode::Resolving => None,
+                };
             }
             tokio::time::sleep(Duration::from_millis(50)).await;
         }
+        None
     };
     let mut drive_log = zenoh_log.try_clone().expect("dup");
-    tokio::select! {
+    let watchdog = tokio::select! {
         _ = drive => panic!(
             "the wz drive loop ended before the scenario did:\n{}",
             read_captured(&mut drive_log)
         ),
-        _ = scenario => {}
-    }
+        outcome = scenario => outcome,
+    };
 
     let received = received.lock().expect("received").clone();
     // Read the publisher's own headers while its process still lives. A chunk is
@@ -311,23 +441,41 @@ async fn zenoh_publishes_to_wz(offer_shm: bool) -> Option<ZenohToWz> {
         )
     };
     let mut unreleased: Vec<(ShmDescriptor, Option<ReferenceState>)> = Vec::new();
-    for _ in 0..60 {
-        unreleased = descriptors
-            .iter()
-            .map(|d| (*d, reference_state(d)))
-            .filter(|(_, state)| !given_back(state))
-            .collect();
-        if unreleased.is_empty() {
-            break;
+    let mut uninvalidated: Vec<(ShmDescriptor, Option<bool>)> = Vec::new();
+    // Only the resolving mode releases and acknowledges what it is shown with the
+    // hold dropped: the probe holds the first chunk on purpose, and reads zenoh's
+    // validator inside the scenario instead.
+    if mode == RunMode::Resolving {
+        for _ in 0..60 {
+            unreleased = descriptors
+                .iter()
+                .map(|d| (*d, reference_state(d)))
+                .filter(|(_, state)| !given_back(state))
+                .collect();
+            // `None` is a slot the publisher's provider has since reclaimed, which
+            // is further along than invalidated; only a header still reading
+            // "valid" is a chunk zenoh is still holding confirmed.
+            uninvalidated = descriptors
+                .iter()
+                .map(|d| (*d, is_invalidated(d)))
+                .filter(|(_, state)| *state == Some(false))
+                .collect();
+            if unreleased.is_empty() && uninvalidated.is_empty() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
         }
-        tokio::time::sleep(Duration::from_millis(50)).await;
     }
+    // The hold ends here, which gives back the reference zenoh took for it.
+    drop(held);
     Some(ZenohToWz {
         negotiated,
         received,
         resolved: resolved.load(Ordering::SeqCst),
         refused: refused.load(Ordering::SeqCst),
         unreleased,
+        uninvalidated,
+        watchdog,
         zenoh_log: read_captured(&mut zenoh_log),
     })
 }
@@ -423,6 +571,90 @@ async fn zenohd_shm_publisher_payload_reaches_a_wz_subscriber_through_shared_mem
          wz read them: {:?}\n{}",
         run.unreleased.len(),
         run.unreleased,
+        run.zenoh_log
+    );
+    // THE HANDOFF, read off zenoh's own validator. zenoh's sender keeps a hard
+    // reference to each buffer it sends, which keeps the buffer's watchdog bit
+    // confirmed, until the receiver lowers the sender's handoff counter for it
+    // (`io/zenoh-transport/src/unicast/establishment/ext/shm/handoff.rs` @
+    // `pub fn on_rx(&self, priority: Priority) {`). A wz that reads every chunk and
+    // releases its reference but never lowers the counter passes the check above and
+    // leaves every chunk confirmed, and never invalidated, for as long as the
+    // publisher runs: MEASURED before the handoff was built, the counter read 3
+    // after three puts and still 3 seconds later. A chunk wz acknowledged is
+    // invalidated by zenoh's validator within about 200 ms, as it is between two
+    // zenoh programs.
+    assert!(
+        run.uninvalidated.is_empty(),
+        "{} chunk(s) zenoh's provider handed over were still confirmed and not invalidated after wz \
+         read and released them, so zenoh is still holding them for an acknowledgement wz never \
+         gave: {:?}\n{}",
+        run.uninvalidated.len(),
+        run.uninvalidated,
+        run.zenoh_log
+    );
+}
+
+/// Leg 5 -- THE WATCHDOG, against zenoh's own validator. A zenoh SHM publisher
+/// lets go of each buffer it sends once its receiver has acknowledged it, so from
+/// then on only a RECEIVER's confirmation keeps a chunk valid, and zenoh's provider
+/// invalidates a chunk nobody confirmed for a whole 100 ms window
+/// (`commons/zenoh-shm/src/watchdog/validator.rs` @
+/// `WatchdogValidator::new(Duration::from_millis(100));`).
+///
+/// wz links the FIRST chunk it is sent and holds it for six windows, and links
+/// every other one and lets go of it at once. Both facts are read off zenoh's own
+/// header, in a segment zenoh made: the held chunk must stay valid for the whole
+/// hold, which is only true if the bit wz confirms is the bit zenoh's validator
+/// clears, and every chunk wz released must be invalidated, which is the CONTROL:
+/// it shows zenoh's validator is running and invalidates a chunk nobody confirms,
+/// so the held chunk's survival is the confirmation and not a validator that
+/// never acted.
+///
+/// THIS LEG WAS BUILT TWICE. The first time it could not be kept: its control
+/// failed in three designs, because zenoh's publisher held every chunk it sent wz
+/// confirmed for as long as it ran, whatever wz did with the chunk, and an
+/// invalidation that never happens makes a held chunk's survival vacuous. The
+/// cause was the handoff counters wz never lowered, found by freezing upstream's
+/// own subscriber so that it could not acknowledge (the counter climbed to five
+/// and every chunk stayed confirmed for five seconds, then all six were
+/// invalidated within 400 ms of it being thawed). With the acknowledgement built
+/// the control works, and this is the leg.
+// wz-proves: transport-shm zenoh->wz
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "binary-dep e2e (ZENOHD_SHM=1 build-zenohd.sh: z_pub_shm); Layer Z runs via --ignored"]
+async fn a_zenoh_chunk_wz_holds_stays_valid_while_one_wz_released_is_invalidated() {
+    let Some(run) = zenoh_publishes_to_wz_in(true, RunMode::WatchdogProbe).await else {
+        return;
+    };
+    assert!(
+        run.negotiated,
+        "the session did not negotiate SHM, so zenoh sent the payload RAW and this leg measured \
+         nothing about the watchdog:\n{}",
+        run.zenoh_log
+    );
+    let outcome = run
+        .watchdog
+        .as_ref()
+        .unwrap_or_else(|| panic!("fewer than two descriptors arrived:\n{}", run.zenoh_log));
+    assert!(
+        outcome.released >= 1,
+        "no chunk was released, so there is no control:\n{}",
+        run.zenoh_log
+    );
+    assert!(
+        outcome.released_still_valid.is_empty(),
+        "zenoh's validator did not invalidate {} of {} chunk(s) wz released and acknowledged ({:?}), \
+         so it is not acting and the held chunk's survival proves nothing:\n{}",
+        outcome.released_still_valid.len(),
+        outcome.released,
+        outcome.released_still_valid,
+        run.zenoh_log
+    );
+    assert!(
+        outcome.held_stayed_valid,
+        "zenoh's validator invalidated the chunk wz was HOLDING, so the bit wz confirms is not the \
+         bit zenoh's validator reads:\n{}",
         run.zenoh_log
     );
 }

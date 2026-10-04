@@ -6518,7 +6518,14 @@ layer_c1af_cargo_test_shm() {
     # joined `put_payload`'s tests (a resolver must be offered every shared-memory
     # slice of a message, so a failure does not strand the references behind it),
     # behind no gate this leg lacks.
-    _runci_guarded_test C1af 23 cargo test -p wz-session-core --features session-extshm,codec-push --lib shm --quiet \
+    # R3040 -- 23 -> 29, MEASURED: the six establishment tests for the handoff
+    # counters joined the dispatch's `fsm` module (an acceptor and an initiator each
+    # open the handoff from the counter block their peer names, a failed echo and a
+    # disabled block open none, a new establishment withdraws the old one, and an
+    # authenticator that cannot open counters still negotiates). They are selected
+    # by `extshm` in their module path. The registry's own five acknowledgement tests
+    # need the Put arm and the other pub/sub features and are not compiled here.
+    _runci_guarded_test C1af 29 cargo test -p wz-session-core --features session-extshm,codec-push --lib shm --quiet \
         || return 1
     # R311y894 — the establishment SHM surface WITH THE DISSECTOR ON, which no
     # lane had. `dissect` and `session-extshm` are disjoint feature sets: the
@@ -6556,7 +6563,8 @@ layer_c1af_cargo_test_shm() {
     # R3011 — 30 -> 32, MEASURED: the same two `put_payload` tests as the leg
     # above, for the same reason.
     # R3038 -- 32 -> 33, MEASURED: the one `put_payload` test the leg above gained.
-    _runci_guarded_test C1af 33 cargo test -p wz-session-core --features session-extshm,dissect --lib shm --quiet \
+    # R3040 -- 33 -> 39, MEASURED: the six establishment tests the leg above gained.
+    _runci_guarded_test C1af 39 cargo test -p wz-session-core --features session-extshm,dissect --lib shm --quiet \
         || return 1
     # Round 2037, open-debt item 330 — THE TRANSPORT-OAM BATCH WALK, which no
     # lane in this file was running.
