@@ -1400,7 +1400,20 @@ impl<C: SampleSink> SubscriberRegistry<C> {
         let resolved: String = match resolve_wireexpr_in(&push.keyexpr.body, self.mapping_spaces())
         {
             Some(r) => r,
-            None => return,
+            None => {
+                // R3041 -- a Put that cannot be routed has still ARRIVED, and
+                // the shared-memory slices it carries are owed their release
+                // and their acknowledgement: upstream un-swaps a message in
+                // `trigger_callback` BEFORE it hands the message to the
+                // routing callback (`io/zenoh-transport/src/unicast/universal/rx.rs`
+                // @ `map_zmsg_to_shmbuf`), so a message routing then refuses has
+                // already been read and is dropped with its buffers released.
+                // Returning here without that would leave the sender holding
+                // every such buffer, confirmed, until the transport ends.
+                #[cfg(all(feature = "transport-shm", feature = "pubsub-put"))]
+                self.settle_unrouted_shm(push);
+                return;
+            }
         };
 
         // R222 / R225 — project the decoded Push into a Sample once
@@ -1490,60 +1503,9 @@ impl<C: SampleSink> SubscriberRegistry<C> {
                     // descriptor this branch resolves.
                     #[cfg(feature = "transport-shm")]
                     let put_payload = if crate::put_payload::is_sliced(put) {
-                        // R311y516 — ENFORCE the negotiation before opening
-                        // anything. zenoh gates its whole RX un-swap on the
-                        // negotiated per-transport capability
-                        // (`if self.config.shm.is_some() {
-                        // map_zmsg_to_shmbuf(..) }`,
-                        // io/zenoh-transport/src/unicast/universal/rx.rs:50-51 —
-                        // literally the expression behind its `is_shm()`,
-                        // unicast/universal/transport.rs:349-350). wz honoured
-                        // only the body's 0x2 marker, so a peer that never
-                        // negotiated SHM could name a /dev/shm segment and have
-                        // this node map it. Drop + COUNT instead: delivering the
-                        // raw descriptor bytes as if they were the payload would
-                        // hand the application 8 bytes of struct in place of its
-                        // data, which is worse than a counted drop.
-                        if !self.shm_negotiated {
-                            self.shm_unnegotiated_drops += 1;
-                            return;
-                        }
-                        let resolver = self.shm_resolver.as_ref();
-                        // R3040 -- ONE acknowledgement per shared-memory slice, at
-                        // the message's priority, whether or not the slice then
-                        // resolves, and AFTER the attempt to read it: upstream maps
-                        // the slice, which attaches to the buffer's watchdog first,
-                        // and only then calls `handoff.on_rx(priority)` for it, for
-                        // every `ShmPtr` slice and whatever the mapping returned
-                        // (`io/zenoh-transport/src/common/shm/interop.rs` @
-                        // `handoff.on_rx(priority);`). The order matters: the
-                        // sender drops its own hold on the buffer once it is
-                        // acknowledged, and a receiver that acknowledged first
-                        // would leave a window in which nobody confirmed it. The
-                        // sender's counter counts slices SENT, so a slice that is
-                        // not acknowledged is a buffer its sender pins and keeps
-                        // confirmed until the transport ends. `collect_payload`
-                        // offers every such slice to the closure exactly once,
-                        // which is what makes this the place to count them.
-                        let band = push_priority_band(push);
-                        let handoff = self.shm_handoff.as_deref();
-                        match crate::put_payload::collect_wire_payload(put, |descriptor| {
-                            let resolved = crate::extshm::decode_shm_descriptor(descriptor)
-                                .and_then(|d| resolver.and_then(|r| r.resolve(&d)));
-                            if let Some(handoff) = handoff {
-                                handoff.on_rx(band);
-                            }
-                            resolved
-                        }) {
-                            Ok(bytes) => bytes,
-                            Err(_) => {
-                                // Unresolvable descriptor (no resolver, or a stale
-                                // / foreign segment) or a slice kind this node
-                                // does not know: drop the Sample, but COUNT it
-                                // so the misconfiguration is observable.
-                                self.shm_unresolved_drops += 1;
-                                return;
-                            }
+                        match self.unswap_shm_payload(push, put) {
+                            Some(bytes) => bytes,
+                            None => return,
                         }
                     } else {
                         // The inline layout never fails: no slice, no descriptor.
@@ -1686,6 +1648,93 @@ impl<C: SampleSink> SubscriberRegistry<C> {
         }
 
         self.fire_to_subscribers(&sample, is_remote);
+    }
+
+    /// The receive-side un-swap of a sliced Put: refuse it when shared memory
+    /// was never negotiated, otherwise read every slice through the resolver and
+    /// acknowledge each to the handoff. `None` is a counted drop; `Some` is the
+    /// assembled payload.
+    ///
+    /// R3041 -- this is ONE method because two places owe the same thing and must
+    /// not drift apart: the delivery path in [`dispatch_push`](Self::dispatch_push),
+    /// and [`settle_unrouted_shm`](Self::settle_unrouted_shm) for a Put whose
+    /// keyexpr routing then refuses. What each slice is owed does not depend on
+    /// whether the message goes anywhere.
+    #[cfg(all(feature = "alloc", feature = "transport-shm", feature = "pubsub-put"))]
+    fn unswap_shm_payload(
+        &mut self,
+        push: &PushOwned,
+        put: &wz_codecs::msg_put::MsgPutOwned<crate::wire::WireStorage>,
+    ) -> Option<crate::link::RxBytes> {
+        // R311y516 — ENFORCE the negotiation before opening
+        // anything. zenoh gates its whole RX un-swap on the
+        // negotiated per-transport capability
+        // (`if self.config.shm.is_some() {
+        // map_zmsg_to_shmbuf(..) }`,
+        // io/zenoh-transport/src/unicast/universal/rx.rs:50-51 —
+        // literally the expression behind its `is_shm()`,
+        // unicast/universal/transport.rs:349-350). wz honoured
+        // only the body's 0x2 marker, so a peer that never
+        // negotiated SHM could name a /dev/shm segment and have
+        // this node map it. Drop + COUNT instead: delivering the
+        // raw descriptor bytes as if they were the payload would
+        // hand the application 8 bytes of struct in place of its
+        // data, which is worse than a counted drop.
+        if !self.shm_negotiated {
+            self.shm_unnegotiated_drops += 1;
+            return None;
+        }
+        let resolver = self.shm_resolver.as_ref();
+        // R3040 -- ONE acknowledgement per shared-memory slice, at
+        // the message's priority, whether or not the slice then
+        // resolves, and AFTER the attempt to read it: upstream maps
+        // the slice, which attaches to the buffer's watchdog first,
+        // and only then calls `handoff.on_rx(priority)` for it, for
+        // every `ShmPtr` slice and whatever the mapping returned
+        // (`io/zenoh-transport/src/common/shm/interop.rs` @
+        // `handoff.on_rx(priority);`). The order matters: the
+        // sender drops its own hold on the buffer once it is
+        // acknowledged, and a receiver that acknowledged first
+        // would leave a window in which nobody confirmed it. The
+        // sender's counter counts slices SENT, so a slice that is
+        // not acknowledged is a buffer its sender pins and keeps
+        // confirmed until the transport ends. `collect_payload`
+        // offers every such slice to the closure exactly once,
+        // which is what makes this the place to count them.
+        let band = push_priority_band(push);
+        let handoff = self.shm_handoff.as_deref();
+        match crate::put_payload::collect_wire_payload(put, |descriptor| {
+            let resolved = crate::extshm::decode_shm_descriptor(descriptor)
+                .and_then(|d| resolver.and_then(|r| r.resolve(&d)));
+            if let Some(handoff) = handoff {
+                handoff.on_rx(band);
+            }
+            resolved
+        }) {
+            Ok(bytes) => Some(bytes),
+            Err(_) => {
+                // Unresolvable descriptor (no resolver, or a stale
+                // / foreign segment) or a slice kind this node
+                // does not know: drop the Sample, but COUNT it
+                // so the misconfiguration is observable.
+                self.shm_unresolved_drops += 1;
+                None
+            }
+        }
+    }
+
+    /// Settle the shared-memory slices of a Put that routing cannot deliver
+    /// (its keyexpr names an id the peer never declared, or is empty): read
+    /// each, which releases the reference its sender took for this receiver, and
+    /// acknowledge each, then let the bytes go. A Put with no slice has nothing
+    /// to settle and costs nothing: the inline layout is not touched.
+    #[cfg(all(feature = "alloc", feature = "transport-shm", feature = "pubsub-put"))]
+    fn settle_unrouted_shm(&mut self, push: &PushOwned) {
+        if let PushOwnedVariant::CodecZenohMsgPut(put) = &push.body {
+            if crate::put_payload::is_sliced(put) {
+                let _ = self.unswap_shm_payload(push, put);
+            }
+        }
     }
 
     /// Apply the locality filter + keyexpr pattern match against every
@@ -4570,6 +4619,117 @@ mod tests {
             Reliability::Reliable,
         );
         assert_eq!(registry.shm_unnegotiated_drops(), 1);
+        assert!(bands.lock().expect("bands").is_empty());
+    }
+
+    /// A resolver that resolves and COUNTS the descriptors it is asked about, so
+    /// a test reads how many slices were read, which is how many references were
+    /// given back to the sender.
+    #[cfg(all(feature = "transport-shm", feature = "pubsub-put"))]
+    struct CountingResolver(Arc<AtomicUsize>);
+
+    #[cfg(all(feature = "transport-shm", feature = "pubsub-put"))]
+    impl crate::extshm::ShmResolver for CountingResolver {
+        fn resolve(&self, _descriptor: &crate::extshm::ShmDescriptor) -> Option<Vec<u8>> {
+            self.0.fetch_add(1, Ordering::SeqCst);
+            Some(b"payload".to_vec())
+        }
+    }
+
+    /// The same shared-memory Put, addressed to an id the peer never declared, so
+    /// routing refuses it.
+    #[cfg(all(feature = "transport-shm", feature = "pubsub-put"))]
+    fn unroutable(mut push: PushOwned) -> PushOwned {
+        push.keyexpr = push_with_mapping_id(9, None).keyexpr;
+        push
+    }
+
+    /// R3041 -- A PUT THAT ROUTING REFUSES HAS STILL ARRIVED. Its slice is read,
+    /// which gives back the reference its sender took for this receiver, and
+    /// acknowledged, though nothing is delivered: upstream un-swaps a message
+    /// before it routes it, so a refused message is dropped with its buffers
+    /// already released. Before this, the keyexpr was resolved first and the
+    /// return skipped both, and the sender pinned the buffer, confirmed, until the
+    /// transport ended. The twin is the same message to a declared key, which pays
+    /// the same and also delivers, so the counter is read to count and not to be
+    /// always zero.
+    #[cfg(all(feature = "transport-shm", feature = "pubsub-put"))]
+    #[test]
+    fn an_unroutable_shm_put_is_still_released_and_acknowledged() {
+        let (mut registry, bands, fired) = handoff_registry();
+        let resolved = Arc::new(AtomicUsize::new(0));
+        registry.set_shm_resolver(Box::new(CountingResolver(resolved.clone())));
+
+        registry.dispatch(
+            &NetworkMessage::Push(Box::new(unroutable(shm_push(Some(0x02))))),
+            Reliability::Reliable,
+        );
+        assert_eq!(fired.load(Ordering::SeqCst), 0, "routing refused it");
+        assert_eq!(
+            resolved.load(Ordering::SeqCst),
+            1,
+            "yet its slice was read, which releases the sender's reference"
+        );
+        assert_eq!(
+            *bands.lock().expect("bands"),
+            [2],
+            "and acknowledged at the message's own priority"
+        );
+
+        registry.dispatch(
+            &NetworkMessage::Push(Box::new(shm_push(Some(0x02)))),
+            Reliability::Reliable,
+        );
+        assert_eq!(fired.load(Ordering::SeqCst), 1, "the twin is delivered");
+        assert_eq!(resolved.load(Ordering::SeqCst), 2, "and read once");
+        assert_eq!(
+            *bands.lock().expect("bands"),
+            [2, 2],
+            "and acknowledged once"
+        );
+    }
+
+    /// R3041 -- the settlement is for SLICES: an inline Put routing refuses
+    /// touches no resolver and no counter, so a flood to an undeclared id costs
+    /// what it cost before and lowers nothing it never raised.
+    #[cfg(all(feature = "transport-shm", feature = "pubsub-put"))]
+    #[test]
+    fn an_unroutable_inline_put_settles_nothing() {
+        let (mut registry, bands, fired) = handoff_registry();
+        let resolved = Arc::new(AtomicUsize::new(0));
+        registry.set_shm_resolver(Box::new(CountingResolver(resolved.clone())));
+
+        registry.dispatch(
+            &NetworkMessage::Push(Box::new(unroutable(push_put_with_qos("demo/shm", 0x00)))),
+            Reliability::Reliable,
+        );
+        assert_eq!(fired.load(Ordering::SeqCst), 0);
+        assert_eq!(resolved.load(Ordering::SeqCst), 0, "no slice, nothing read");
+        assert!(
+            bands.lock().expect("bands").is_empty(),
+            "nothing acknowledged"
+        );
+        assert_eq!(registry.shm_unresolved_drops(), 0);
+        assert_eq!(registry.shm_unnegotiated_drops(), 0);
+    }
+
+    /// R3041 -- a session that never negotiated shared memory refuses a sliced Put
+    /// the same way whether or not its key routes: counted, nothing read, nothing
+    /// acknowledged. The count was silent when the key was refused first.
+    #[cfg(all(feature = "transport-shm", feature = "pubsub-put"))]
+    #[test]
+    fn an_unroutable_put_of_an_unnegotiated_session_is_counted_and_not_read() {
+        let (mut registry, bands, _fired) = handoff_registry();
+        let resolved = Arc::new(AtomicUsize::new(0));
+        registry.set_shm_resolver(Box::new(CountingResolver(resolved.clone())));
+        registry.set_shm_negotiated(false);
+
+        registry.dispatch(
+            &NetworkMessage::Push(Box::new(unroutable(shm_push(None)))),
+            Reliability::Reliable,
+        );
+        assert_eq!(registry.shm_unnegotiated_drops(), 1);
+        assert_eq!(resolved.load(Ordering::SeqCst), 0, "no segment was opened");
         assert!(bands.lock().expect("bands").is_empty());
     }
 
