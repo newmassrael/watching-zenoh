@@ -2405,7 +2405,15 @@ PIN_NO_SYMBOL = 0
 # frame samples share, and the completion edge that is the only way into the shared-read
 # state), and the atom is still PARTIAL. READ off the census's own FAIL line,
 # `wz citations: 27 against a pin of 23`; `reached` and `ambiguous` hold at 3 and 2.
-PIN_WZ_CITATIONS = 27
+#
+# R3037 -- 27 -> 31, one atom. `runtime-zero-copy`'s reason gains the UPDATE that the AP
+# host walks the pool's receive lifecycle, which cites four wz anchors (the framing
+# loop's completion edge, the arena's completion method, the abandoned-frame witness and
+# the uring delivery witness), and the atom is still PARTIAL. READ off the census's own
+# FAIL line, `wz citations: 31 against a pin of 27`; `reached` and `ambiguous` hold at 3
+# and 2. The census also read one more token as an upstream file, because the anchor
+# text `arena.complete(frame)` contains `arena.c`; that bucket is counted and not pinned.
+PIN_WZ_CITATIONS = 31
 # R2626 — 44 -> 42, and this one is worth a sentence because it HELD through
 # every earlier retirement in this run (R2612, R2622). `time-hlc`'s reason is the
 # first retiree carrying AMBIGUOUS citations of its own: its oldest clauses cite
