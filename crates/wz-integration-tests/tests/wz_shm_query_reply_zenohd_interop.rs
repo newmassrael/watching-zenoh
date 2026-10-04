@@ -317,7 +317,13 @@ async fn tap(router_port: u16) -> (u16, Arc<StdMutex<Vec<u8>>>) {
     let seen: Arc<StdMutex<Vec<u8>>> = Arc::default();
     let keep = seen.clone();
     tokio::spawn(async move {
-        let (wz, _) = listener.accept().await.expect("tap accept");
+        // A deadline, because the one that dials this relay is the wz session the
+        // test opens next, and a test that fails before it dials must end the relay
+        // and not leave it parked on an accept with the test's own task.
+        let (wz, _) = tokio::time::timeout(Duration::from_secs(30), listener.accept())
+            .await
+            .unwrap_or_else(|_| panic!("the wz session never dialled the tap relay within 30s"))
+            .expect("tap accept");
         let router = tokio::net::TcpStream::connect(("127.0.0.1", router_port))
             .await
             .expect("tap connect");
