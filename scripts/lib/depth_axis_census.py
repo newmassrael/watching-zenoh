@@ -2382,7 +2382,15 @@ PIN_NO_SYMBOL = 0
 # no tracked wz file, and the old text below it no longer counts, because the census
 # grades PARTIAL atoms and neither is one. READ off the census's own FAIL line,
 # `wz citations: 16 against a pin of 22`; `reached` and `ambiguous` hold at 3 and 2.
-PIN_WZ_CITATIONS = 16
+#
+# R3034 -- 16 -> 20, one atom. `runtime-zero-copy`'s reason gains the UPDATE that the
+# batch parse and the sample are no longer copies on the unicast receive path, which
+# cites four wz anchors (the decode over a shareable unit, the sample's payload type,
+# and the two witnesses that read the kept sample against the pool and against the
+# count of holders of a lent storage), and the atom is still PARTIAL on the multicast
+# receive path. READ off the census's own FAIL line, `wz citations: 20 against a pin
+# of 16`; `reached` and `ambiguous` hold at 3 and 2.
+PIN_WZ_CITATIONS = 20
 # R2626 — 44 -> 42, and this one is worth a sentence because it HELD through
 # every earlier retirement in this run (R2612, R2622). `time-hlc`'s reason is the
 # first retiree carrying AMBIGUOUS citations of its own: its oldest clauses cite
