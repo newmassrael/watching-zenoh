@@ -12,6 +12,16 @@
 //! selected the sliced layout here and was an unknown extension there. These
 //! tests feed the wire bytes that tell the two readings apart.
 //!
+//! The same bytes were run through upstream's own decoder (`zenoh-codec`
+//! 1.10.1 with `shared-memory`) when this file was written, and every layout
+//! choice below is the one it makes: the marker at `0x12` and `0x92` is its
+//! shared-memory extension, every other id-2 shape is an unknown extension and
+//! the payload is plain. One row differs in a different way and is not about
+//! layout: with the mandatory bit set (`0x32`) upstream refuses the whole Put
+//! as carrying an unknown mandatory extension, where this codec reads the entry
+//! and the payload. Whether the receive path should refuse it is not decided by
+//! this file.
+//!
 //! Every Put below starts with header `0x81` (Put, extension chain follows),
 //! then a chain, then a payload in whichever layout the chain selects. An
 //! entry's header is `id | M(0x10) | enc<<5 | Z(0x80)`; the continuation flag
