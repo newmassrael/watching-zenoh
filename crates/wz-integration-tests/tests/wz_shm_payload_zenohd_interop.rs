@@ -623,7 +623,7 @@ async fn zenohd_shm_publisher_payload_reaches_a_wz_subscriber_through_shared_mem
 // wz-proves: transport-shm zenoh->wz
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "binary-dep e2e (ZENOHD_SHM=1 build-zenohd.sh: z_pub_shm); Layer Z runs via --ignored"]
-async fn a_zenoh_chunk_wz_holds_stays_valid_while_one_wz_released_is_invalidated() {
+async fn zenohd_shm_publisher_chunk_wz_holds_stays_valid_while_one_wz_released_is_invalidated() {
     let Some(run) = zenoh_publishes_to_wz_in(true, RunMode::WatchdogProbe).await else {
         return;
     };

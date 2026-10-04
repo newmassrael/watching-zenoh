@@ -456,10 +456,11 @@ pub trait ShmResolver {
 /// hard reference to it, which keeps the buffer's watchdog bit confirmed, until
 /// its receiver says the buffer has arrived. "Says" is one decrement of a
 /// counter in the SENDER's auth segment, one counter per priority, whose ids the
-/// sender names in its Open message (`io/zenoh-transport/src/unicast/
-/// establishment/ext/shm/handoff.rs` @ `pub fn on_rx(&self, priority: Priority) {`,
-/// called once per shared-memory slice of every received message at
-/// `io/zenoh-transport/src/common/shm/interop.rs` @ `handoff.on_rx(priority);`).
+/// sender names in its Open message
+/// (`io/zenoh-transport/src/unicast/establishment/ext/shm/handoff.rs` @
+/// `pub fn on_rx(&self, priority: Priority) {`), called once per shared-memory
+/// slice of every received message at
+/// `io/zenoh-transport/src/common/shm/interop.rs` @ `handoff.on_rx(priority);`.
 ///
 /// A receiver that never decrements leaves every buffer the sender ever sent it
 /// pinned and confirmed for the life of the transport, which is what wz was until

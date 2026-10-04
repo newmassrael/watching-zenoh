@@ -16846,7 +16846,12 @@ layer_z_zenohd_interop() {
     # defect of open-debt item 823 (6) until the provider held a chunk by
     # upstream's reference count; it is the positive twin of leg 2 now, and the
     # legs also read the reference count off the OTHER side's header.
-    _runci_guarded_test Z 4 cargo test -p wz-integration-tests \
+    # R3040 -- 4 -> 5, MEASURED: the watchdog leg (wz holds the first chunk zenoh's
+    # publisher sends and releases the others, and zenoh's own validator is read
+    # invalidating the ones wz let go of while sparing the one it holds) came back
+    # once wz acknowledged what it received. Leg 1 also asserts that zenoh
+    # invalidates the chunks it read, which is what the acknowledgement is read by.
+    _runci_guarded_test Z 5 cargo test -p wz-integration-tests \
         --test wz_shm_payload_zenohd_interop -- --ignored --quiet --test-threads=1 || return 1
     # Restore the lane's OWN demo build: the `session-extshm` build above wrote over
     # the same `--bin` path (R311y269 — cargo uplifts every feature variant of one

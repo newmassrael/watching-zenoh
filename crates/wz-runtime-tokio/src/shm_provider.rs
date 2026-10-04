@@ -590,7 +590,8 @@ impl Drop for ShmBackedPayload {
 /// The metadata segments this process has opened as a reader, by id, so a
 /// receiver maps a provider's segment once and not once per sample: upstream
 /// links a metadata segment the first time it sees it and keeps the mapping
-/// (`commons/zenoh-shm/src/metadata/subscription.rs`).
+/// (`commons/zenoh-shm/src/metadata/subscription.rs` @
+/// `pub fn link(&self, descriptor: &MetadataDescriptor) -> ZResult<OwnedMetadataDescriptor> {`).
 fn peer_metadata_cache() -> &'static Mutex<HashMap<u64, Arc<PeerSegmentRw>>> {
     static CACHE: OnceLock<Mutex<HashMap<u64, Arc<PeerSegmentRw>>>> = OnceLock::new();
     CACHE.get_or_init(|| Mutex::new(HashMap::new()))

@@ -849,7 +849,23 @@ HOST_GATED_CI_TARGETS: dict[str, str] = {
 # the provider unlinks on drop, so it declares `none` and claims nothing, and
 # the raw control declares `none` too. Counted from the diff: exactly the two
 # `wz-proves` lines added.
-FOREIGN_ADJUDICATOR_LINKS = 976
+# R3038 + R3040 -- 976 -> 978, RISING by two, both in
+# `wz_shm_payload_zenohd_interop.rs`. +1 `transport-shm wz->zenoh`: the leg for a
+# publisher that lets go at once, which the paragraph above records as a PIN of a
+# defect declaring `none`, and which is the positive twin of the held leg now that
+# the provider holds a chunk by upstream's reference count, `z_sub_shm` reading a
+# payload its wz owner had already dropped. +1 `transport-shm zenoh->wz`: the
+# watchdog leg, in which wz holds the first chunk zenoh's publisher sends and
+# links and releases the others, and zenoh's OWN validator invalidates the ones
+# wz let go of while it spares the one wz holds. Both are the same `zenoh-core`
+# applications as the two above, so no new class. Counted from the diff: exactly
+# the `wz-proves` line the first flipped from `none`, and the one the second added.
+# 976 + 2 = 978, measured by `run-ci.sh --layer A4` at this round's tree. R3038's
+# push carried the first and did not move this constant, which is the red hosted
+# CI read on its run (`[A4-9]`, measured 977 against 976): A4 is a run-ci layer
+# the pre-push hook defers to hosted CI, and the preflight that round was derived
+# without it.
+FOREIGN_ADJUDICATOR_LINKS = 978
 
 # ── Execution disclosure ────────────────────────────────────────────────────────
 #
