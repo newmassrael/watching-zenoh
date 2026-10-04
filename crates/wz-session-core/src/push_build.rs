@@ -694,7 +694,7 @@ pub fn build_push_literal_with_meta(
 /// descriptor + the marker that tells the RX to resolve it. The chain always has
 /// at least the marker, so the Z header bit (0x80) is always set.
 #[cfg(feature = "transport-shm")]
-fn build_msg_put_shm(
+pub(crate) fn build_msg_put_shm(
     descriptor: &crate::extshm::ShmDescriptor,
     timestamp: Option<&crate::sample::TimestampHint>,
     encoding: Option<&crate::sample::EncodingHint>,

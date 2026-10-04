@@ -852,6 +852,17 @@ struct Pending<C: ReplySink> {
 /// carry `alloc` / `codec-*` gates per-method below.
 pub struct ReplyRegistry<C: ReplySink> {
     pending: BoundedVec<Pending<C>, { caps::MAX_PENDING_QUERIES }>,
+    /// transport-shm -- the receive side of shared memory for a reply: the same
+    /// state a push has (the negotiated capability, the resolver, the means of
+    /// acknowledging the peer's slices, the drop counters, the un-swap). Upstream
+    /// un-swaps the payload of a reply as it does a push's, before routing it; this
+    /// registry held no resolver, so a reply whose slice named a segment was dropped
+    /// unread and unacknowledged, and its sender kept the buffer, confirmed, until
+    /// the transport ended (MEASURED against `z_queryable_shm`: a getter that asked
+    /// past the size of the queryable's pool stopped being answered). The session
+    /// keeps it in step with the subscriber registry's.
+    #[cfg(feature = "transport-shm")]
+    shm: crate::extshm::ShmReceiveState,
 }
 
 impl<C: ReplySink> Default for ReplyRegistry<C> {
@@ -875,7 +886,55 @@ impl<C: ReplySink> ReplyRegistry<C> {
     pub fn with_sink_backing() -> Self {
         Self {
             pending: BoundedVec::new(),
+            #[cfg(feature = "transport-shm")]
+            shm: crate::extshm::ShmReceiveState::default(),
         }
+    }
+
+    /// transport-shm -- install the resolver a reply's shared-memory slices are read
+    /// through. Shared with the subscriber registry by the session, so a reply is
+    /// read by the same resolver a push is. Without one a reply whose slice names a
+    /// segment drops, counted.
+    #[cfg(feature = "transport-shm")]
+    pub fn set_shm_resolver_shared(
+        &mut self,
+        resolver: alloc::sync::Arc<dyn crate::extshm::ShmResolver + Send + Sync>,
+    ) {
+        self.shm.set_resolver(resolver);
+    }
+
+    /// transport-shm -- restamp the LIVE negotiated capability of the session
+    /// feeding this registry, per dispatch iteration, as the subscriber registry's
+    /// is: see [`crate::extshm::ShmReceiveState::set_negotiated`] for why it is
+    /// restamped and never snapshotted.
+    #[cfg(feature = "transport-shm")]
+    pub fn set_shm_negotiated(&mut self, negotiated: bool) {
+        self.shm.set_negotiated(negotiated);
+    }
+
+    /// transport-shm -- install or withdraw the means of acknowledging the peer's
+    /// shared-memory slices. Shared with the subscriber registry: the counters the
+    /// peer named are the peer's, and a reply's slice is acknowledged through the
+    /// same ones a push's is.
+    #[cfg(feature = "transport-shm")]
+    pub fn set_shm_handoff_shared(
+        &mut self,
+        handoff: Option<alloc::sync::Arc<dyn crate::extshm::ShmHandoff>>,
+    ) {
+        self.shm.set_handoff(handoff);
+    }
+
+    /// transport-shm -- replies dropped because a slice did not resolve.
+    #[cfg(feature = "transport-shm")]
+    pub fn shm_unresolved_drops(&self) -> u64 {
+        self.shm.unresolved_drops()
+    }
+
+    /// transport-shm -- replies dropped because a descriptor arrived on a session
+    /// that never negotiated shared memory.
+    #[cfg(feature = "transport-shm")]
+    pub fn shm_unnegotiated_drops(&self) -> u64 {
+        self.shm.unnegotiated_drops()
     }
 
     /// R311gb-3c — register a pending z_get with an explicit
@@ -999,7 +1058,20 @@ impl<C: ReplySink> ReplyRegistry<C> {
         let peer_keyexpr_table = peer_keyexpr_table.into();
         let resolved = match resolve_wireexpr_in(&response.keyexpr.body, peer_keyexpr_table) {
             Some(s) => s,
-            None => return,
+            None => {
+                // R3042 -- a reply routing cannot place has still ARRIVED, and the
+                // shared-memory slice it carries is owed its release and its
+                // acknowledgement, as a push's is: upstream un-swaps a message
+                // before it routes it
+                // (`io/zenoh-transport/src/unicast/universal/rx.rs` @
+                // `map_zmsg_to_shmbuf(`).
+                #[cfg(all(
+                    feature = "transport-shm",
+                    any(feature = "pubsub-put", feature = "query-reply")
+                ))]
+                self.settle_unrouted_reply(response);
+                return;
+            }
         };
         // R311cc — pubsub-put / pubsub-delete gate the inbound Reply
         // body variants. cfg-off drops the corresponding Reply (the
@@ -1017,14 +1089,15 @@ impl<C: ReplySink> ReplyRegistry<C> {
                 // composes on `query-reply` alone.
                 #[cfg(any(feature = "pubsub-put", feature = "query-reply"))]
                 ReplyOwnedVariant::CodecZenohMsgPut(put) => InboundReplyBody::Put {
-                    // A Reply's Put has the same two layouts as a Push's. This
-                    // path holds no shared-memory resolver, so a reply whose
-                    // slice names a segment cannot be delivered and is dropped
-                    // here, as an undecodable reply is, instead of handing the
+                    // A Reply's Put has the same two layouts as a Push's, and is
+                    // read the same way: a slice that names a segment goes through
+                    // the shared un-swap, which reads it, acknowledges it and
+                    // counts a refusal. A reply that cannot be read is dropped
+                    // here, as an undecodable one is, instead of handing the
                     // application the descriptor in place of its data.
-                    payload: match crate::put_payload::collect_wire_payload(put, |_| None) {
-                        Ok(bytes) => bytes,
-                        Err(_) => return,
+                    payload: match self.reply_put_payload(put, response) {
+                        Some(bytes) => bytes,
+                        None => return,
                     },
                     attachment: put_reply_attachment(put),
                     encoding: put_reply_encoding(put),
@@ -1069,6 +1142,54 @@ impl<C: ReplySink> ReplyRegistry<C> {
             body,
         };
         self.fire_replies_for(&inbound);
+    }
+
+    /// The bytes a Reply's Put delivers. A Put in the inline layout is read as it
+    /// is; one whose slices name shared memory goes through the shared un-swap
+    /// ([`crate::extshm::ShmReceiveState::unswap_put`]) at the priority the
+    /// RESPONSE was sent at, which is read from the response's own extension chain.
+    /// `None` is a reply that could not be read and is dropped by the caller.
+    #[cfg(all(
+        feature = "codec-response",
+        feature = "alloc",
+        any(feature = "pubsub-put", feature = "query-reply")
+    ))]
+    fn reply_put_payload(
+        &mut self,
+        put: &wz_codecs::msg_put::MsgPutOwned<crate::wire::WireStorage>,
+        response: &ResponseOwned,
+    ) -> Option<crate::link::RxBytes> {
+        #[cfg(feature = "transport-shm")]
+        if crate::put_payload::is_sliced(put) {
+            let band =
+                crate::put_payload::priority_band(response.extensions.as_deref().unwrap_or(&[]));
+            return self.shm.unswap_put(put, band);
+        }
+        #[cfg(not(feature = "transport-shm"))]
+        let _ = (&self, response);
+        // The inline layout never touches shared memory. Without the shared-memory
+        // transport a slice that names a segment cannot be read, and drops here.
+        crate::put_payload::collect_wire_payload(put, |_| None).ok()
+    }
+
+    /// Settle the shared-memory slices of a Reply that routing cannot place (its
+    /// keyexpr names an id the peer never declared): read each, which releases the
+    /// reference its sender took for this receiver, and acknowledge each, then let
+    /// the bytes go. A Reply with no slice has nothing to settle and costs nothing.
+    #[cfg(all(
+        feature = "codec-response",
+        feature = "alloc",
+        feature = "transport-shm",
+        any(feature = "pubsub-put", feature = "query-reply")
+    ))]
+    fn settle_unrouted_reply(&mut self, response: &ResponseOwned) {
+        if let ResponseOwnedVariant::CodecZenohReply(reply) = &response.body {
+            if let ReplyOwnedVariant::CodecZenohMsgPut(put) = &reply.body {
+                if crate::put_payload::is_sliced(put) {
+                    let _ = self.reply_put_payload(put, response);
+                }
+            }
+        }
     }
 
     /// Route an inbound [`ResponseFinal`] through the pending table.
@@ -1906,6 +2027,222 @@ mod tests {
             !wire.as_ptr_range().contains(&payload.as_ptr()),
             "the copying walk's reply owns its payload"
         );
+    }
+
+    // ---- R3042: a reply whose payload is in shared memory ----
+
+    /// The bands a recording handoff was told about.
+    #[cfg(all(feature = "transport-shm", feature = "pubsub-put"))]
+    type Bands = Arc<Mutex<Vec<usize>>>;
+
+    /// The replies a pending query's callback captured.
+    #[cfg(all(feature = "transport-shm", feature = "pubsub-put"))]
+    type Captured = Arc<Mutex<Vec<InboundReply>>>;
+
+    /// A negotiated reply registry with the things a test reads through it.
+    #[cfg(all(feature = "transport-shm", feature = "pubsub-put"))]
+    type ShmReplyFixture = (
+        ReplyRegistry<ConsolidatingSink<BoxedReplySink>>,
+        Bands,
+        Arc<AtomicUsize>,
+        Captured,
+    );
+
+    /// A negotiated reply registry with a recording handoff, a resolver that counts
+    /// what it is asked, and one pending query (rid 42) whose replies are captured.
+    #[cfg(all(feature = "transport-shm", feature = "pubsub-put"))]
+    fn shm_reply_registry() -> ShmReplyFixture {
+        use crate::extshm::test_support::{CountingResolver, RecordingHandoff};
+        let mut reg = ReplyRegistry::new();
+        let captured: Arc<Mutex<Vec<InboundReply>>> = Arc::new(Mutex::new(Vec::new()));
+        let sink = captured.clone();
+        reg.register(
+            42,
+            1,
+            None,
+            crate::reply_acceptance::ReplyAcceptance::Any,
+            move |reply| sink.lock().unwrap().push(InboundReply::from_view(reply)),
+            |_| {},
+        );
+        let resolved = Arc::new(AtomicUsize::new(0));
+        reg.set_shm_resolver_shared(Arc::new(CountingResolver(resolved.clone())));
+        reg.set_shm_negotiated(true);
+        let bands = Arc::new(Mutex::new(Vec::new()));
+        reg.set_shm_handoff_shared(Some(Arc::new(RecordingHandoff(bands.clone()))));
+        (reg, bands, resolved, captured)
+    }
+
+    /// A Reply to rid 42 whose Put carries one shared-memory slice, at the QoS byte
+    /// `qos` (`None` for a response that carries none). `mapping_id` 0 with a
+    /// suffix is a literal keyexpr; any other id is one the peer never declared in
+    /// these tests.
+    #[cfg(all(feature = "transport-shm", feature = "pubsub-put"))]
+    fn response_reply_shm(mapping_id: u64, suffix: Option<&str>, qos: Option<u8>) -> ResponseOwned {
+        let mut response = response_reply_put(42, mapping_id, suffix, b"");
+        let descriptor = crate::extshm::ShmDescriptor {
+            data_len: 7,
+            metadata_id: 0x12,
+            metadata_index: 0x34,
+            generation: 0,
+        };
+        let put =
+            crate::push_build::build_msg_put_shm(&descriptor, None, None, None, None).unwrap();
+        if let ResponseOwnedVariant::CodecZenohReply(reply) = &mut response.body {
+            reply.body = ReplyOwnedVariant::CodecZenohMsgPut(put);
+        }
+        // The QoS extension is put on by hand: what an acknowledgement is owed at is
+        // read from the wire whether or not any feature projects it.
+        if let Some(raw) = qos {
+            let mut ext = wz_codecs::ext_entry::ExtEntry::new();
+            ext.set_ext_id(0x01); // QOS_EXT_ID
+            ext.set_enc(0x01); // ENC_ZINT
+            ext.body = wz_codecs::ext_entry::ExtEntryVariant::CodecZenohExtZint(
+                wz_codecs::ext_zint::ExtZint {
+                    value: u64::from(raw),
+                },
+            );
+            response.extensions = Some(vec![ext
+                .try_into_owned_in::<crate::wire::WireStorage>()
+                .unwrap()]);
+            response.header |= 0x80;
+        }
+        response
+    }
+
+    /// R3042 -- A REPLY IN SHARED MEMORY IS READ AND ACKNOWLEDGED. Upstream un-swaps
+    /// the payload of a reply as it does a push's; wz held no resolver here, so a
+    /// getter was handed nothing and the replier's buffer stayed pinned until the
+    /// transport ended (MEASURED against `z_queryable_shm`: eight answered and then
+    /// the queryable parked in its allocator). The reply is delivered with the bytes
+    /// the resolver returned, read once, and acknowledged once at the priority the
+    /// RESPONSE was sent at.
+    #[cfg(all(feature = "transport-shm", feature = "pubsub-put"))]
+    #[test]
+    fn a_shm_reply_is_read_and_acknowledged_once_at_its_responses_priority() {
+        let (mut reg, bands, resolved, captured) = shm_reply_registry();
+        reg.dispatch_response(
+            &response_reply_shm(0, Some("home/temp"), Some(0x02)),
+            &HashMap::new(),
+        );
+        let snapshot = captured.lock().unwrap();
+        assert_eq!(snapshot.len(), 1, "the reply is delivered");
+        match &snapshot[0].body {
+            InboundReplyBody::Put { payload, .. } => assert_eq!(payload, b"payload"),
+            other => panic!("expected Put, got {other:?}"),
+        }
+        assert_eq!(
+            resolved.load(Ordering::SeqCst),
+            1,
+            "its slice was read once"
+        );
+        assert_eq!(
+            *bands.lock().unwrap(),
+            [2],
+            "and acknowledged at priority 2"
+        );
+    }
+
+    /// R3042 -- the response with no QoS extension acknowledges the default band, as a
+    /// push does, because the sender's counter for it is where the sender put it.
+    #[cfg(all(feature = "transport-shm", feature = "pubsub-put"))]
+    #[test]
+    fn a_shm_reply_with_no_qos_acknowledges_the_default_band() {
+        let (mut reg, bands, _resolved, _captured) = shm_reply_registry();
+        reg.dispatch_response(
+            &response_reply_shm(0, Some("home/temp"), None),
+            &HashMap::new(),
+        );
+        assert_eq!(*bands.lock().unwrap(), [5]);
+    }
+
+    /// R3042 -- A REPLY THAT ROUTING REFUSES HAS STILL ARRIVED. Its keyexpr names an
+    /// id the peer never declared, so nothing is delivered, and its slice is read
+    /// and acknowledged all the same: upstream un-swaps a message before it routes
+    /// it. The twin to a literal key reads the same counts and also delivers, so the
+    /// counter is read to count and not to be always zero.
+    #[cfg(all(feature = "transport-shm", feature = "pubsub-put"))]
+    #[test]
+    fn an_unroutable_shm_reply_is_still_read_and_acknowledged() {
+        let (mut reg, bands, resolved, captured) = shm_reply_registry();
+        reg.dispatch_response(&response_reply_shm(9, None, Some(0x03)), &HashMap::new());
+        assert!(captured.lock().unwrap().is_empty(), "routing refused it");
+        assert_eq!(
+            resolved.load(Ordering::SeqCst),
+            1,
+            "yet its slice was read, which releases the sender's reference"
+        );
+        assert_eq!(*bands.lock().unwrap(), [3], "and acknowledged");
+
+        reg.dispatch_response(
+            &response_reply_shm(0, Some("home/temp"), Some(0x03)),
+            &HashMap::new(),
+        );
+        assert_eq!(captured.lock().unwrap().len(), 1, "the twin is delivered");
+        assert_eq!(resolved.load(Ordering::SeqCst), 2, "and read once");
+        assert_eq!(*bands.lock().unwrap(), [3, 3], "and acknowledged once");
+    }
+
+    /// R3042 -- the settlement is for SLICES: an inline reply that routing refuses
+    /// touches no resolver and no counter.
+    #[cfg(all(feature = "transport-shm", feature = "pubsub-put"))]
+    #[test]
+    fn an_unroutable_inline_reply_settles_nothing() {
+        let (mut reg, bands, resolved, captured) = shm_reply_registry();
+        reg.dispatch_response(&response_reply_put(42, 9, None, b"21.0"), &HashMap::new());
+        assert!(captured.lock().unwrap().is_empty());
+        assert_eq!(resolved.load(Ordering::SeqCst), 0, "no slice, nothing read");
+        assert!(bands.lock().unwrap().is_empty(), "nothing acknowledged");
+        assert_eq!(reg.shm_unresolved_drops(), 0);
+        assert_eq!(reg.shm_unnegotiated_drops(), 0);
+    }
+
+    /// R3042 -- a session that never negotiated shared memory refuses a reply that
+    /// names a segment: counted, nothing read, nothing acknowledged, nothing
+    /// delivered.
+    #[cfg(all(feature = "transport-shm", feature = "pubsub-put"))]
+    #[test]
+    fn a_shm_reply_on_an_unnegotiated_session_is_counted_and_not_read() {
+        let (mut reg, bands, resolved, captured) = shm_reply_registry();
+        reg.set_shm_negotiated(false);
+        reg.dispatch_response(
+            &response_reply_shm(0, Some("home/temp"), None),
+            &HashMap::new(),
+        );
+        assert!(captured.lock().unwrap().is_empty());
+        assert_eq!(reg.shm_unnegotiated_drops(), 1);
+        assert_eq!(resolved.load(Ordering::SeqCst), 0, "no segment was opened");
+        assert!(bands.lock().unwrap().is_empty());
+    }
+
+    /// R3042 -- a negotiated registry with NO resolver installed counts the reply
+    /// unresolved and delivers nothing, and still acknowledges the slice, as the push
+    /// path does: the sender counted that slice sent.
+    #[cfg(all(feature = "transport-shm", feature = "pubsub-put"))]
+    #[test]
+    fn a_shm_reply_with_no_resolver_is_counted_unresolved_and_acknowledged() {
+        use crate::extshm::test_support::RecordingHandoff;
+        let mut reg = ReplyRegistry::new();
+        let captured: Arc<Mutex<Vec<InboundReply>>> = Arc::new(Mutex::new(Vec::new()));
+        let sink = captured.clone();
+        reg.register(
+            42,
+            1,
+            None,
+            crate::reply_acceptance::ReplyAcceptance::Any,
+            move |reply| sink.lock().unwrap().push(InboundReply::from_view(reply)),
+            |_| {},
+        );
+        reg.set_shm_negotiated(true);
+        let bands = Arc::new(Mutex::new(Vec::new()));
+        reg.set_shm_handoff_shared(Some(Arc::new(RecordingHandoff(bands.clone()))));
+
+        reg.dispatch_response(
+            &response_reply_shm(0, Some("home/temp"), None),
+            &HashMap::new(),
+        );
+        assert!(captured.lock().unwrap().is_empty());
+        assert_eq!(reg.shm_unresolved_drops(), 1);
+        assert_eq!(*bands.lock().unwrap(), [5]);
     }
 
     #[test]

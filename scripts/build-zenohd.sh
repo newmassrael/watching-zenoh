@@ -334,10 +334,18 @@ if [[ -n "$ZH" ]]; then
         # would be graded against nothing but wz's own writer. They are the
         # examples upstream ships for exactly this, behind the features their
         # manifest requires (`required-features = ["shared-memory", "unstable"]`).
+        #
+        # R3042 — and the QUERY plane's pair, `z_queryable_shm` (replies through a
+        # buffer of its own provider) and `z_get_shm` (sends the value of its query
+        # through one). Upstream's receive path maps the buffers of a reply and of a
+        # query's value exactly as it does a push's, and `zenohd` makes none of them
+        # either, so wz's reply path read against nothing but wz's own writer until
+        # these existed. They measured two defects at once.
         if [[ "$VARIANT_NAME" == "shared-memory" ]]; then
-            echo "build-zenohd: building zenoh SHM examples (z_pub_shm, z_sub_shm) ..." >&2
+            echo "build-zenohd: building zenoh SHM examples (z_pub_shm, z_sub_shm, z_queryable_shm, z_get_shm) ..." >&2
             CARGO_TARGET_DIR="$BUILD_DIR" cargo "+$TOOLCHAIN" build \
                 -p zenoh-examples --example z_pub_shm --example z_sub_shm \
+                --example z_queryable_shm --example z_get_shm \
                 --features shared-memory,unstable \
                 --release --manifest-path "$ZH/Cargo.toml"
             SHM_EXAMPLES_SRC="$BUILD_DIR/release/examples"
@@ -483,7 +491,7 @@ else
     echo "  the wz<->zenoh-ext advanced-pubsub interop legs cannot run." >&2
 fi
 if [[ -n "${SHM_EXAMPLES_SRC:-}" ]]; then
-    for ex in z_pub_shm z_sub_shm; do
+    for ex in z_pub_shm z_sub_shm z_queryable_shm z_get_shm; do
         install -m 0755 "$SHM_EXAMPLES_SRC/$ex" "$INSTALL_DIR/$ex"
         echo "build-zenohd: installed -> $INSTALL_DIR/$ex" >&2
     done

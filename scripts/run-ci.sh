@@ -16853,6 +16853,16 @@ layer_z_zenohd_interop() {
     # invalidates the chunks it read, which is what the acknowledgement is read by.
     _runci_guarded_test Z 5 cargo test -p wz-integration-tests \
         --test wz_shm_payload_zenohd_interop -- --ignored --quiet --test-threads=1 || return 1
+    # R3042 -- the QUERY plane of the same oracle: a reply through shared memory
+    # (upstream's `z_queryable_shm`, asked past the size of its ten-chunk pool, which
+    # a getter that never gives a chunk back cannot be answered through), the value
+    # of a query through shared memory (upstream's `z_get_shm`, through the shared-
+    # memory `zenohd`), and the raw control for it. The value leg is a PIN of an open
+    # defect, not a pass of the capability: it records that the session ends on a
+    # frame wz's generated codec cannot read, and why. THREE must report, so a
+    # dropped `#[ignore]` or a rename cannot select zero tests and pass.
+    _runci_guarded_test Z 3 cargo test -p wz-integration-tests \
+        --test wz_shm_query_reply_zenohd_interop -- --ignored --quiet --test-threads=1 || return 1
     # Restore the lane's OWN demo build: the `session-extshm` build above wrote over
     # the same `--bin` path (R311y269 — cargo uplifts every feature variant of one
     # bin to one path), and every leg after this point expects the big feature set

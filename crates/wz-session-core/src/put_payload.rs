@@ -270,6 +270,24 @@ pub fn collect_wire_payload(
     collect_payload(put, resolve).map(crate::link::RxBytes::from)
 }
 
+/// The priority band a received message was sent at, as the index of the handoff
+/// counter a shared-memory sender names for it: the QoS extension's low three bits,
+/// and the default priority when the message carries none, which is how upstream
+/// reads `ext_qos.get_priority()` for the same purpose.
+///
+/// Independent of the `pubsub-qos` projection on purpose: that feature decides
+/// whether a SAMPLE carries a QoS, and an acknowledgement owed to the sender does
+/// not depend on whether anyone here reads the QoS. It is read from the message's
+/// OWN extension chain, which is the push's for a push and the response's for a
+/// reply, so one function serves both.
+pub fn priority_band<S: CodecStorage>(
+    extensions: &[wz_codecs::ext_entry::ExtEntryOwned<S>],
+) -> usize {
+    crate::sample::extract_qos(extensions)
+        .map_or(crate::qos::Priority::DEFAULT, |qos| qos.priority())
+        .wire_byte() as usize
+}
+
 // The witnesses build the marker extension, which lives behind `transport-shm`.
 #[cfg(all(test, feature = "transport-shm"))]
 mod tests {

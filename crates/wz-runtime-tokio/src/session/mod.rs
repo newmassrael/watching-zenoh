@@ -2107,8 +2107,16 @@ impl<R: SessionRuntime, T: TimeSource, Tp: TransportState<R, T>> Session<R, T, T
         &self,
         resolver: Box<dyn wz_session_core::extshm::ShmResolver + Send + Sync>,
     ) {
+        // R3042 -- ONE resolver for every registry that receives a payload: the
+        // push registry reads a Put with it and the reply registry reads a Reply
+        // with the same one, because upstream un-swaps both the same way.
+        let resolver: std::sync::Arc<dyn wz_session_core::extshm::ShmResolver + Send + Sync> =
+            std::sync::Arc::from(resolver);
         R::with_mutex_mut(&self.observer, |observer| {
-            observer.subscribers.set_shm_resolver(resolver);
+            observer
+                .subscribers
+                .set_shm_resolver_shared(resolver.clone());
+            observer.replies.set_shm_resolver_shared(resolver);
         });
     }
 
@@ -2793,7 +2801,13 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
             // NOT stamp — a multicast registry has no SHM negotiation and stays
             // fail-closed at the field default.
             #[cfg(feature = "transport-shm")]
-            obs.subscribers.set_shm_negotiated(self.actions().is_shm());
+            {
+                let negotiated = self.actions().is_shm();
+                obs.subscribers.set_shm_negotiated(negotiated);
+                // R3042 -- and onto the reply registry, which un-swaps a reply as
+                // the subscriber registry does a push, behind the same gate.
+                obs.replies.set_shm_negotiated(negotiated);
+            }
             // R3040 -- hand the registry the means of ACKNOWLEDGING the peer's
             // shared-memory slices, before the un-swap can run, as the negotiated
             // flag above is. The Open exchange opens it (the counters the peer
@@ -2803,7 +2817,13 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
             // until the registry has it, and a change is reported once.
             #[cfg(feature = "session-extshm")]
             if let Some(update) = self.actions().shm_take_handoff_update() {
-                obs.subscribers.set_shm_handoff(update);
+                // R3042 -- the counters the peer named are the peer's, whichever
+                // message a slice arrives in, so a reply's slice is acknowledged
+                // through the same handoff a push's is.
+                let shared: Option<std::sync::Arc<dyn wz_session_core::extshm::ShmHandoff>> =
+                    update.map(std::sync::Arc::from);
+                obs.subscribers.set_shm_handoff_shared(shared.clone());
+                obs.replies.set_shm_handoff_shared(shared);
             }
             obs.dispatch_event(event);
             // R2690 (§5.23) — refresh the admin introspection cache from the

@@ -326,66 +326,16 @@ pub struct SubscriberRegistry<C: SampleSink> {
     /// `dispatch_push`; `alloc`-gated per the borrow boundary.
     #[cfg(feature = "alloc")]
     own_zid: Option<alloc::vec::Vec<u8>>,
-    /// transport-shm — the AP-injected resolver that maps an inbound SHM
-    /// descriptor's segment off /dev/shm (the no_std/std seam; the impl is
-    /// `wz-runtime-tokio::shm_provider::PosixShmResolver`). `None` until the AP
-    /// bring-up installs it via [`set_shm_resolver`](Self::set_shm_resolver) — an
-    /// SHM Put arriving with no resolver installed drops (the marker is honoured,
-    /// the descriptor unresolvable). Boxed (not a generic param) so the ~110
-    /// registry construction sites keep their inferred `C = BoxedSink`; `Send +
-    /// Sync` keeps `ApplicationLayerObserver: Send` (the drive-task boundary).
+    /// transport-shm — the receive side of shared memory for a push: the negotiated
+    /// capability, the AP-injected resolver, the means of acknowledging the peer's
+    /// slices, the drop counters, and the un-swap itself. R3042 moved all of it into
+    /// one [`ShmReceiveState`](crate::extshm::ShmReceiveState) that the reply
+    /// registry holds a twin of, because upstream un-swaps every message that
+    /// carries a payload and wz did it for a push alone. The setters below keep
+    /// their signatures and forward to it, so the ~110 registry construction sites
+    /// are unchanged and `ApplicationLayerObserver` stays `Send`.
     #[cfg(feature = "transport-shm")]
-    shm_resolver: Option<alloc::boxed::Box<dyn crate::extshm::ShmResolver + Send + Sync>>,
-    /// transport-shm — count of SHM Puts dropped because their descriptor could
-    /// NOT be resolved (no resolver installed, or a stale / foreign segment). The
-    /// drop is silent on the data path (the Sample is discarded), but it is
-    /// OBSERVABLE here so a misconfiguration (resolver never installed) is a
-    /// readable counter rather than a mystery of vanishing samples
-    /// ([`shm_unresolved_drops`](Self::shm_unresolved_drops)).
-    #[cfg(feature = "transport-shm")]
-    shm_unresolved_drops: u64,
-    /// R311y516 (transport-shm) — the LIVE negotiated SHM capability for the
-    /// session that feeds this registry, restamped on every dispatch iteration
-    /// by [`set_shm_negotiated`](Self::set_shm_negotiated).
-    ///
-    /// This is the RX-side enforcement gate, and it is the wz counterpart of
-    /// zenoh's `if self.config.shm.is_some()` guard around
-    /// `map_zmsg_to_shmbuf` (`io/zenoh-transport/src/unicast/universal/rx.rs`
-    /// :50-51, the same expression as its `is_shm()` at
-    /// `unicast/universal/transport.rs:349-350`). Before R311y516 the wz
-    /// un-swap consulted only the body's 0x2 marker, so a peer that had NOT
-    /// negotiated SHM could still name a `/dev/shm` segment and have this node
-    /// map it — the negotiation was decorative on the receive side.
-    ///
-    /// Defaults to `false` and is restamped rather than snapshotted on
-    /// purpose: `negotiate_shm_against_peer` is a monotonic `&=`, so a
-    /// reconnect can only drive the capability DOWN, and a construction-time
-    /// snapshot would therefore go stale in the fail-OPEN direction. A
-    /// multicast registry is never stamped and so stays fail-closed.
-    #[cfg(feature = "transport-shm")]
-    shm_negotiated: bool,
-    /// transport-shm — count of SHM Puts dropped because the 0x2 marker
-    /// arrived on a session that never NEGOTIATED SHM. Distinct from
-    /// [`shm_unresolved_drops`](Self::shm_unresolved_drops), which counts a
-    /// negotiated-but-unmappable descriptor: this one means the peer sent a
-    /// descriptor it had no right to send (or the registry was never stamped),
-    /// and the segment was deliberately not opened.
-    #[cfg(feature = "transport-shm")]
-    shm_unnegotiated_drops: u64,
-    /// R3040 (transport-shm) -- the means of acknowledging the peer's
-    /// shared-memory slices: one decrement of the counter the peer named for the
-    /// message's priority, per slice, as upstream's receive path does
-    /// (`io/zenoh-transport/src/common/shm/interop.rs` @ `handoff.on_rx(priority);`).
-    /// A sender keeps a hard reference to every shared-memory buffer it sends, which
-    /// keeps the buffer confirmed, until this is called for it, so a registry that
-    /// never calls it pins every buffer its peer ever sent for the life of the
-    /// transport. `None` when the peer named no counters, which upstream does for a
-    /// best-effort link.
-    ///
-    /// Set and withdrawn through [`set_shm_handoff`](Self::set_shm_handoff), once
-    /// per establishment, from the unicast dispatch SSOT.
-    #[cfg(feature = "transport-shm")]
-    shm_handoff: Option<alloc::boxed::Box<dyn crate::extshm::ShmHandoff>>,
+    shm: crate::extshm::ShmReceiveState,
     /// R311y530 — inbound SUBSCRIBER `Interest`s this session has been told
     /// about, zenoh's per-face `remote-interests` table restricted to the
     /// session-local half. Retired on that interest's `Interest(Final)`.
@@ -406,23 +356,15 @@ pub struct SubscriberRegistry<C: SampleSink> {
     pending_sub_interest_replies: BoundedVec<SubInterestReply, { caps::MAX_PENDING_DECLARES }>,
 }
 
-/// R3040 (transport-shm) -- the priority band a received Push was sent at, as the
-/// index of the handoff counter the sender names for it: the QoS extension's low
-/// three bits, and the default priority when the message carries none, which is
-/// how upstream reads `ext_qos.get_priority()` for the same purpose.
-///
-/// Independent of the `pubsub-qos` projection on purpose: that feature decides
-/// whether a SAMPLE carries a QoS, and an acknowledgement owed to the sender does
-/// not depend on whether anyone here reads the QoS.
+/// R3040 (transport-shm) -- the priority band a received Push was sent at: the
+/// shared [`priority_band`](crate::put_payload::priority_band) over the push's own
+/// extension chain.
 ///
 /// Gated with the Put arm that calls it, which is also what brings `PushOwned`
 /// into scope.
 #[cfg(all(feature = "transport-shm", feature = "pubsub-put"))]
 fn push_priority_band(push: &PushOwned) -> usize {
-    let extensions = push.extensions.as_deref().unwrap_or(&[]);
-    crate::sample::extract_qos(extensions)
-        .map_or(crate::qos::Priority::DEFAULT, |qos| qos.priority())
-        .wire_byte() as usize
+    crate::put_payload::priority_band(push.extensions.as_deref().unwrap_or(&[]))
 }
 
 /// R311y530 — whether a session-local subscription `pattern` intersects an
@@ -578,15 +520,7 @@ impl<C: SampleSink> SubscriberRegistry<C> {
             #[cfg(feature = "alloc")]
             own_zid: None,
             #[cfg(feature = "transport-shm")]
-            shm_resolver: None,
-            #[cfg(feature = "transport-shm")]
-            shm_unresolved_drops: 0,
-            #[cfg(feature = "transport-shm")]
-            shm_negotiated: false,
-            #[cfg(feature = "transport-shm")]
-            shm_unnegotiated_drops: 0,
-            #[cfg(feature = "transport-shm")]
-            shm_handoff: None,
+            shm: crate::extshm::ShmReceiveState::default(),
             #[cfg(feature = "declare-subscriber")]
             inbound_sub_interests: BoundedVec::new(),
             #[cfg(feature = "declare-subscriber")]
@@ -628,7 +562,19 @@ impl<C: SampleSink> SubscriberRegistry<C> {
         &mut self,
         resolver: alloc::boxed::Box<dyn crate::extshm::ShmResolver + Send + Sync>,
     ) {
-        self.shm_resolver = Some(resolver);
+        self.shm.set_resolver(alloc::sync::Arc::from(resolver));
+    }
+
+    /// R3042 (transport-shm) -- [`set_shm_resolver`](Self::set_shm_resolver) for a
+    /// resolver that more than one registry of a session shares: the session turns
+    /// the one it was given into a shared handle and installs it here and on the
+    /// reply registry, so a reply is read by the same resolver a push is.
+    #[cfg(feature = "transport-shm")]
+    pub fn set_shm_resolver_shared(
+        &mut self,
+        resolver: alloc::sync::Arc<dyn crate::extshm::ShmResolver + Send + Sync>,
+    ) {
+        self.shm.set_resolver(resolver);
     }
 
     /// transport-shm — the number of SHM Puts dropped because their descriptor
@@ -637,7 +583,7 @@ impl<C: SampleSink> SubscriberRegistry<C> {
     /// [`set_shm_resolver`](Self::set_shm_resolver).
     #[cfg(feature = "transport-shm")]
     pub fn shm_unresolved_drops(&self) -> u64 {
-        self.shm_unresolved_drops
+        self.shm.unresolved_drops()
     }
 
     /// R311y516 (transport-shm) — restamp the LIVE negotiated SHM capability of
@@ -651,7 +597,7 @@ impl<C: SampleSink> SubscriberRegistry<C> {
     /// field doc for why a snapshot fails OPEN across a reconnect.
     #[cfg(feature = "transport-shm")]
     pub fn set_shm_negotiated(&mut self, negotiated: bool) {
-        self.shm_negotiated = negotiated;
+        self.shm.set_negotiated(negotiated);
     }
 
     /// R3040 (transport-shm) -- install or withdraw the means of acknowledging the
@@ -663,21 +609,33 @@ impl<C: SampleSink> SubscriberRegistry<C> {
         &mut self,
         handoff: Option<alloc::boxed::Box<dyn crate::extshm::ShmHandoff>>,
     ) {
-        self.shm_handoff = handoff;
+        self.shm.set_handoff(handoff.map(alloc::sync::Arc::from));
+    }
+
+    /// R3042 (transport-shm) -- [`set_shm_handoff`](Self::set_shm_handoff) for a
+    /// handoff that more than one registry of a session shares: the counters the
+    /// peer named are the peer's, and a reply's slice is acknowledged through the
+    /// same ones a push's is.
+    #[cfg(feature = "transport-shm")]
+    pub fn set_shm_handoff_shared(
+        &mut self,
+        handoff: Option<alloc::sync::Arc<dyn crate::extshm::ShmHandoff>>,
+    ) {
+        self.shm.set_handoff(handoff);
     }
 
     /// R3040 (transport-shm) -- whether a handoff is installed. For tests and
-    /// diagnostics: the data path reads the field directly.
+    /// diagnostics: the data path reads the state directly.
     #[cfg(feature = "transport-shm")]
     pub fn has_shm_handoff(&self) -> bool {
-        self.shm_handoff.is_some()
+        self.shm.has_handoff()
     }
 
     /// R311y516 (transport-shm) — whether the RX un-swap will currently honour
     /// an inbound 0x2 SHM marker on this registry.
     #[cfg(feature = "transport-shm")]
     pub fn shm_negotiated(&self) -> bool {
-        self.shm_negotiated
+        self.shm.negotiated()
     }
 
     /// R311y516 (transport-shm) — the number of SHM Puts dropped because the
@@ -686,7 +644,7 @@ impl<C: SampleSink> SubscriberRegistry<C> {
     /// custom drive loop, that the registry is never stamped).
     #[cfg(feature = "transport-shm")]
     pub fn shm_unnegotiated_drops(&self) -> u64 {
-        self.shm_unnegotiated_drops
+        self.shm.unnegotiated_drops()
     }
 
     /// R231 — release the previously-installed own zid (e.g. on
@@ -1650,77 +1608,23 @@ impl<C: SampleSink> SubscriberRegistry<C> {
         self.fire_to_subscribers(&sample, is_remote);
     }
 
-    /// The receive-side un-swap of a sliced Put: refuse it when shared memory
-    /// was never negotiated, otherwise read every slice through the resolver and
-    /// acknowledge each to the handoff. `None` is a counted drop; `Some` is the
-    /// assembled payload.
+    /// The receive-side un-swap of a sliced Put, at the priority the push was sent
+    /// at: [`ShmReceiveState::unswap_put`](crate::extshm::ShmReceiveState::unswap_put),
+    /// which holds the negotiation check, the read and the acknowledgement. `None`
+    /// is a counted drop; `Some` is the assembled payload.
     ///
-    /// R3041 -- this is ONE method because two places owe the same thing and must
-    /// not drift apart: the delivery path in [`dispatch_push`](Self::dispatch_push),
-    /// and [`settle_unrouted_shm`](Self::settle_unrouted_shm) for a Put whose
-    /// keyexpr routing then refuses. What each slice is owed does not depend on
-    /// whether the message goes anywhere.
+    /// R3041 -- one entry for the two places that owe the same thing and must not
+    /// drift apart: the delivery path in [`dispatch_push`](Self::dispatch_push), and
+    /// [`settle_unrouted_shm`](Self::settle_unrouted_shm) for a Put whose keyexpr
+    /// routing then refuses.
     #[cfg(all(feature = "alloc", feature = "transport-shm", feature = "pubsub-put"))]
     fn unswap_shm_payload(
         &mut self,
         push: &PushOwned,
         put: &wz_codecs::msg_put::MsgPutOwned<crate::wire::WireStorage>,
     ) -> Option<crate::link::RxBytes> {
-        // R311y516 — ENFORCE the negotiation before opening
-        // anything. zenoh gates its whole RX un-swap on the
-        // negotiated per-transport capability
-        // (`if self.config.shm.is_some() {
-        // map_zmsg_to_shmbuf(..) }`,
-        // io/zenoh-transport/src/unicast/universal/rx.rs:50-51 —
-        // literally the expression behind its `is_shm()`,
-        // unicast/universal/transport.rs:349-350). wz honoured
-        // only the body's 0x2 marker, so a peer that never
-        // negotiated SHM could name a /dev/shm segment and have
-        // this node map it. Drop + COUNT instead: delivering the
-        // raw descriptor bytes as if they were the payload would
-        // hand the application 8 bytes of struct in place of its
-        // data, which is worse than a counted drop.
-        if !self.shm_negotiated {
-            self.shm_unnegotiated_drops += 1;
-            return None;
-        }
-        let resolver = self.shm_resolver.as_ref();
-        // R3040 -- ONE acknowledgement per shared-memory slice, at
-        // the message's priority, whether or not the slice then
-        // resolves, and AFTER the attempt to read it: upstream maps
-        // the slice, which attaches to the buffer's watchdog first,
-        // and only then calls `handoff.on_rx(priority)` for it, for
-        // every `ShmPtr` slice and whatever the mapping returned
-        // (`io/zenoh-transport/src/common/shm/interop.rs` @
-        // `handoff.on_rx(priority);`). The order matters: the
-        // sender drops its own hold on the buffer once it is
-        // acknowledged, and a receiver that acknowledged first
-        // would leave a window in which nobody confirmed it. The
-        // sender's counter counts slices SENT, so a slice that is
-        // not acknowledged is a buffer its sender pins and keeps
-        // confirmed until the transport ends. `collect_payload`
-        // offers every such slice to the closure exactly once,
-        // which is what makes this the place to count them.
         let band = push_priority_band(push);
-        let handoff = self.shm_handoff.as_deref();
-        match crate::put_payload::collect_wire_payload(put, |descriptor| {
-            let resolved = crate::extshm::decode_shm_descriptor(descriptor)
-                .and_then(|d| resolver.and_then(|r| r.resolve(&d)));
-            if let Some(handoff) = handoff {
-                handoff.on_rx(band);
-            }
-            resolved
-        }) {
-            Ok(bytes) => Some(bytes),
-            Err(_) => {
-                // Unresolvable descriptor (no resolver, or a stale
-                // / foreign segment) or a slice kind this node
-                // does not know: drop the Sample, but COUNT it
-                // so the misconfiguration is observable.
-                self.shm_unresolved_drops += 1;
-                None
-            }
-        }
+        self.shm.unswap_put(put, band)
     }
 
     /// Settle the shared-memory slices of a Put that routing cannot deliver
@@ -4461,30 +4365,10 @@ mod tests {
         );
     }
 
-    /// R3040 -- a [`ShmHandoff`](crate::extshm::ShmHandoff) that records the band
-    /// of every slice it is told about, so a test reads what the receive path
-    /// acknowledged and at which priority.
+    // R3042 -- the doubles the acknowledgement tests read through live in
+    // `extshm::test_support`, shared with the reply registry's tests.
     #[cfg(all(feature = "transport-shm", feature = "pubsub-put"))]
-    struct RecordingHandoff(Arc<std::sync::Mutex<Vec<usize>>>);
-
-    #[cfg(all(feature = "transport-shm", feature = "pubsub-put"))]
-    impl crate::extshm::ShmHandoff for RecordingHandoff {
-        fn on_rx(&self, band: usize) {
-            self.0.lock().expect("bands").push(band);
-        }
-    }
-
-    /// A resolver that always resolves, so a test isolates what the handoff does
-    /// from whether a descriptor resolves.
-    #[cfg(all(feature = "transport-shm", feature = "pubsub-put"))]
-    struct AlwaysResolves;
-
-    #[cfg(all(feature = "transport-shm", feature = "pubsub-put"))]
-    impl crate::extshm::ShmResolver for AlwaysResolves {
-        fn resolve(&self, _descriptor: &crate::extshm::ShmDescriptor) -> Option<Vec<u8>> {
-            Some(b"payload".to_vec())
-        }
-    }
+    use crate::extshm::test_support::{AlwaysResolves, CountingResolver, RecordingHandoff};
 
     /// A negotiated registry with a recording handoff, a subscriber, and the
     /// recorded bands to read.
@@ -4620,20 +4504,6 @@ mod tests {
         );
         assert_eq!(registry.shm_unnegotiated_drops(), 1);
         assert!(bands.lock().expect("bands").is_empty());
-    }
-
-    /// A resolver that resolves and COUNTS the descriptors it is asked about, so
-    /// a test reads how many slices were read, which is how many references were
-    /// given back to the sender.
-    #[cfg(all(feature = "transport-shm", feature = "pubsub-put"))]
-    struct CountingResolver(Arc<AtomicUsize>);
-
-    #[cfg(all(feature = "transport-shm", feature = "pubsub-put"))]
-    impl crate::extshm::ShmResolver for CountingResolver {
-        fn resolve(&self, _descriptor: &crate::extshm::ShmDescriptor) -> Option<Vec<u8>> {
-            self.0.fetch_add(1, Ordering::SeqCst);
-            Some(b"payload".to_vec())
-        }
     }
 
     /// The same shared-memory Put, addressed to an id the peer never declared, so

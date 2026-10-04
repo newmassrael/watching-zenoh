@@ -476,6 +476,212 @@ pub trait ShmHandoff: Send + Sync {
     fn on_rx(&self, band: usize);
 }
 
+/// Test doubles for the receive side, shared by every registry that un-swaps a
+/// payload so that what one asserts about acknowledgement is the same thing the
+/// others assert.
+#[cfg(all(
+    test,
+    feature = "pubsub-put",
+    any(feature = "codec-push", feature = "codec-response")
+))]
+pub(crate) mod test_support {
+    use super::{ShmDescriptor, ShmHandoff, ShmResolver};
+    use alloc::vec::Vec;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::{Arc, Mutex};
+
+    /// A [`ShmHandoff`] that records the band of every slice it is told about, so a
+    /// test reads what the receive path acknowledged and at which priority.
+    pub(crate) struct RecordingHandoff(pub(crate) Arc<Mutex<Vec<usize>>>);
+
+    impl ShmHandoff for RecordingHandoff {
+        fn on_rx(&self, band: usize) {
+            self.0.lock().expect("bands").push(band);
+        }
+    }
+
+    /// A resolver that always resolves, so a test isolates what the handoff does
+    /// from whether a descriptor resolves.
+    pub(crate) struct AlwaysResolves;
+
+    impl ShmResolver for AlwaysResolves {
+        fn resolve(&self, _descriptor: &ShmDescriptor) -> Option<Vec<u8>> {
+            Some(b"payload".to_vec())
+        }
+    }
+
+    /// A resolver that resolves and COUNTS the descriptors it is asked about, so a
+    /// test reads how many slices were read, which is how many references were
+    /// given back to the sender.
+    pub(crate) struct CountingResolver(pub(crate) Arc<AtomicUsize>);
+
+    impl ShmResolver for CountingResolver {
+        fn resolve(&self, _descriptor: &ShmDescriptor) -> Option<Vec<u8>> {
+            self.0.fetch_add(1, Ordering::SeqCst);
+            Some(b"payload".to_vec())
+        }
+    }
+}
+
+/// The receive side of shared memory, in ONE place: what a session knows about the
+/// peer's shared-memory capability, the means of reading and of acknowledging what
+/// it sends, and the un-swap itself.
+///
+/// R3042 -- upstream does this once, for every network message that carries a
+/// payload (`io/zenoh-transport/src/common/shm/interop.rs` @
+/// `pub fn map_zmsg_to_shmbuf(`: the Put of a push, the value of a query, the
+/// payload of a reply and of an error), before any of them is routed. wz had it
+/// inside the subscriber registry and so for a push only, which left a reply whose
+/// slice names a segment dropped unread and unacknowledged: its sender kept the
+/// buffer, confirmed, until the transport ended, and a getter that asked past the
+/// size of its peer's pool stopped being answered at all. Each registry that
+/// receives a payload now holds one of these, and the session keeps them in step.
+///
+/// The state is restamped per iteration where the capability is concerned (see
+/// [`Self::set_negotiated`]) and installed once where the means are (the resolver
+/// at bring-up, the handoff per establishment).
+#[derive(Default)]
+pub struct ShmReceiveState {
+    /// R311y516 -- the LIVE negotiated capability of the session that feeds this
+    /// state, restamped on every dispatch iteration. It is the RX-side enforcement
+    /// gate and wz's counterpart of zenoh's `if self.config.shm.is_some()` guard
+    /// around `map_zmsg_to_shmbuf` (`io/zenoh-transport/src/unicast/universal/rx.rs`
+    /// @ `if let Some(shm_context) = &self.shm_context {`): before it the un-swap
+    /// consulted only the body's marker, so a peer that had NOT negotiated shared
+    /// memory could name a `/dev/shm` segment and have this node map it.
+    ///
+    /// Defaults to `false` and is restamped, not snapshotted, on purpose:
+    /// `negotiate_shm_against_peer` is a monotonic `&=`, so a reconnect can only
+    /// drive the capability DOWN and a construction-time snapshot would go stale in
+    /// the fail-OPEN direction. A multicast registry is never stamped and so stays
+    /// fail-closed.
+    negotiated: bool,
+    /// The AP-injected resolver that maps a descriptor's segment off `/dev/shm` (the
+    /// no_std/std seam; the implementation is
+    /// `wz-runtime-tokio::shm_provider::PosixShmResolver`). `None` until bring-up
+    /// installs it; a descriptor arriving with none installed drops. Shared, so one
+    /// resolver serves every registry of a session.
+    resolver: Option<alloc::sync::Arc<dyn ShmResolver + Send + Sync>>,
+    /// R3040 -- the means of acknowledging the peer's slices: one decrement of the
+    /// counter the peer named for the message's priority, per slice. A sender keeps
+    /// a hard reference to every buffer it sends, which keeps it confirmed, until
+    /// this is called for it. `None` when the peer named no counters, which
+    /// upstream does for a best-effort link.
+    handoff: Option<alloc::sync::Arc<dyn ShmHandoff>>,
+    /// Messages dropped because a descriptor arrived on a session that never
+    /// negotiated shared memory: the peer named a segment it had no right to name
+    /// (or the state was never stamped), and the segment was deliberately not
+    /// opened.
+    unnegotiated_drops: u64,
+    /// Messages dropped because a descriptor could not be resolved, or a slice had a
+    /// kind this node does not know. Silent on the data path, observable here so a
+    /// missing resolver is a readable counter and not a mystery of vanishing
+    /// payloads.
+    unresolved_drops: u64,
+}
+
+impl ShmReceiveState {
+    /// Install the resolver. Shared, so the session hands the same one to every
+    /// registry that receives a payload.
+    pub fn set_resolver(&mut self, resolver: alloc::sync::Arc<dyn ShmResolver + Send + Sync>) {
+        self.resolver = Some(resolver);
+    }
+
+    /// Restamp the LIVE negotiated capability of the session feeding this state.
+    pub fn set_negotiated(&mut self, negotiated: bool) {
+        self.negotiated = negotiated;
+    }
+
+    /// Install or withdraw the means of acknowledging the peer's slices. `None`
+    /// withdraws, which a new establishment does first, so a registry never writes
+    /// the counters of a peer the session has moved on from.
+    pub fn set_handoff(&mut self, handoff: Option<alloc::sync::Arc<dyn ShmHandoff>>) {
+        self.handoff = handoff;
+    }
+
+    /// Whether the un-swap will currently honour a descriptor.
+    pub fn negotiated(&self) -> bool {
+        self.negotiated
+    }
+
+    /// Whether a handoff is installed.
+    pub fn has_handoff(&self) -> bool {
+        self.handoff.is_some()
+    }
+
+    /// Messages dropped for want of a negotiated capability.
+    pub fn unnegotiated_drops(&self) -> u64 {
+        self.unnegotiated_drops
+    }
+
+    /// Messages dropped because a descriptor did not resolve.
+    pub fn unresolved_drops(&self) -> u64 {
+        self.unresolved_drops
+    }
+
+    /// The un-swap of a sliced Put: refuse it when shared memory was never
+    /// negotiated, otherwise read every slice through the resolver and acknowledge
+    /// each to the handoff at `band`. `None` is a counted drop; `Some` is the
+    /// assembled payload.
+    ///
+    /// Every slice is read and acknowledged whether or not the message is then
+    /// delivered, which is what lets a caller use this for a message routing
+    /// refuses: what a slice is owed does not depend on whether the message goes
+    /// anywhere.
+    #[cfg(all(
+        feature = "alloc",
+        any(feature = "codec-push", feature = "codec-response")
+    ))]
+    pub fn unswap_put(
+        &mut self,
+        put: &wz_codecs::msg_put::MsgPutOwned<crate::wire::WireStorage>,
+        band: usize,
+    ) -> Option<crate::link::RxBytes> {
+        // R311y516 -- ENFORCE the negotiation before opening anything. wz honoured
+        // only the body's marker, so a peer that never negotiated shared memory
+        // could name a segment and have this node map it. Drop and COUNT instead:
+        // delivering the raw descriptor bytes as if they were the payload would
+        // hand the application a few bytes of struct in place of its data, which is
+        // worse than a counted drop.
+        if !self.negotiated {
+            self.unnegotiated_drops += 1;
+            return None;
+        }
+        let resolver = self.resolver.as_deref();
+        // R3040 -- ONE acknowledgement per shared-memory slice, at the message's
+        // priority, whether or not the slice then resolves, and AFTER the attempt to
+        // read it: upstream maps the slice, which attaches to the buffer's watchdog
+        // first, and only then calls `handoff.on_rx(priority)` for it, for every
+        // `ShmPtr` slice and whatever the mapping returned
+        // (`io/zenoh-transport/src/common/shm/interop.rs` @
+        // `handoff.on_rx(priority);`). The order matters: the sender drops its own
+        // hold on the buffer once it is acknowledged, and a receiver that
+        // acknowledged first would leave a window in which nobody confirmed it. The
+        // sender's counter counts slices SENT, so a slice that is not acknowledged
+        // is a buffer its sender pins and keeps confirmed until the transport ends.
+        // `collect_payload` offers every such slice to the closure exactly once,
+        // which is what makes this the place to count them.
+        let handoff = self.handoff.as_deref();
+        match crate::put_payload::collect_wire_payload(put, |descriptor| {
+            let resolved = decode_shm_descriptor(descriptor)
+                .and_then(|d| resolver.and_then(|r| r.resolve(&d)));
+            if let Some(handoff) = handoff {
+                handoff.on_rx(band);
+            }
+            resolved
+        }) {
+            Ok(bytes) => Some(bytes),
+            Err(_) => {
+                // An unresolvable descriptor (no resolver, or a stale or foreign
+                // segment) or a slice kind this node does not know: drop the
+                // message, but COUNT it so the misconfiguration is observable.
+                self.unresolved_drops += 1;
+                None
+            }
+        }
+    }
+}
+
 /// Why a SHM challenge-response step refused. Only ONE of zenoh's arms is an
 /// error; every other failure degrades to "no shared memory" and lets the
 /// session continue, which is deliberate and asymmetric upstream.
