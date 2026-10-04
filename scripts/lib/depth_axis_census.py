@@ -2398,7 +2398,14 @@ PIN_NO_SYMBOL = 0
 # the atom is still PARTIAL on four pieces the update names by whose each is. READ off
 # the census's own FAIL line, `wz citations: 23 against a pin of 20`; `reached` and
 # `ambiguous` hold at 3 and 2.
-PIN_WZ_CITATIONS = 23
+#
+# R3036 -- 23 -> 27, one atom. `runtime-zero-copy`'s reason gains the UPDATE that decides
+# the grade, which cites four wz anchors (the descriptor-ring adapter that constructs the
+# DMA arms, the lwIP copy that fills the MCU slot, the arena's writable-state hold of a
+# frame samples share, and the completion edge that is the only way into the shared-read
+# state), and the atom is still PARTIAL. READ off the census's own FAIL line,
+# `wz citations: 27 against a pin of 23`; `reached` and `ambiguous` hold at 3 and 2.
+PIN_WZ_CITATIONS = 27
 # R2626 — 44 -> 42, and this one is worth a sentence because it HELD through
 # every earlier retirement in this run (R2612, R2622). `time-hlc`'s reason is the
 # first retiree carrying AMBIGUOUS citations of its own: its oldest clauses cite
