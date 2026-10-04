@@ -15,7 +15,7 @@ changelog that authorized the bump.
 ## vendor/sce — SCXML Core Engine
 
 - **Origin**: https://github.com/newmassrael/scxml-core-engine
-- **Commit pin**: `9111a8535f` (Round 3008, 2026-10-02)
+- **Commit pin**: `6d7c7b6f65` (Round 3033, 2026-10-04)
 - **License**: dual-licensed — AGPL-3.0-only WITH SCE Linking
   Exception OR LicenseRef-SCE-Commercial. See
   `vendor/sce/LICENSE` for the full text. Before the Round 3008 pin
@@ -39,7 +39,12 @@ changelog that authorized the bump.
   the SCE repo at the pinned revision, which states the two
   conditions: an unmodified generator, and a work that is not a
   competing product).
-- **Upstream-tracking**: Round 3008 bumped from `d3db11c415` to
+- **Upstream-tracking**: Round 3033 bumped from `9111a8535f` to
+  `6d7c7b6f65` (a chain's entry identifier may leave a continuation
+  flag out, which the Put codec needs to tell the shared-memory marker
+  from any other extension of the same 4-bit id; SCE's license files do
+  not differ across the range, and every generated tree under `out/`
+  regenerates byte for byte). Round 3008 bumped from `d3db11c415` to
   `9111a8535f` (the chain-membership predicate on a codec field, the
   owned-origin projection, and SCE's relicensing; the codec outputs
   differ in comments only, the eight statechart outputs differ in
