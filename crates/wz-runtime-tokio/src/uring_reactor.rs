@@ -680,6 +680,10 @@ fn deliver_completion(
         return;
     }
     frame.truncate(n);
+    // R3037 -- THE COMPLETION EDGE, on the row where the bus master is real: the
+    // kernel's completion for this read was reaped above, so it has finished
+    // writing the slot, and everything handed up from here only reads it.
+    let frame = frame.complete();
     // R2971 — the completion's slot is handed up WITH the frames that lie in
     // it: each one is a range of the slot, and the slot goes home when the last
     // of them drops. Only a frame the window assembled across completions is
@@ -822,7 +826,7 @@ mod tests {
     /// worker had split it, so the count would already be full here.
     #[tokio::test]
     async fn two_frames_of_one_completion_are_ranges_of_its_slot() {
-        use crate::session_rx_pool_ap::SLOT_COUNT;
+        use crate::session_rx_pool_ap::{SlotState, SLOT_COUNT};
 
         let arena = LinkRxArena::new();
         let reactor = UringReactor::start(arena.clone()).expect("a reactor");
@@ -847,14 +851,21 @@ mod tests {
             .bytes
             .as_ptr()
             .wrapping_sub(crate::prefix_width(false));
-        assert!(
-            arena.slot_of(slot_start).is_some(),
-            "the first frame starts a slot of this table, by the pool's own answer"
-        );
+        let slot = arena
+            .slot_of(slot_start)
+            .expect("the first frame starts a slot of this table, by the pool's own answer");
         assert_eq!(
             arena.free_slots(),
             SLOT_COUNT - 1,
             "both frames are ranges of the one slot their completion filled"
+        );
+        // R3037 -- the kernel's completion was reaped, so the pool records the
+        // slot as shared read-only, not as still owned by the read that filled
+        // it. This is the edge on the row where the bus master is real.
+        assert_eq!(
+            arena.slot_state(slot),
+            Some(SlotState::CpuRef),
+            "a delivered completion's slot is shared read-only while any frame of it lives"
         );
 
         drop(alpha);
@@ -863,12 +874,14 @@ mod tests {
             SLOT_COUNT - 1,
             "the second frame still holds the slot"
         );
+        assert_eq!(arena.slot_state(slot), Some(SlotState::CpuRef));
         drop(beta);
         assert_eq!(
             arena.free_slots(),
             SLOT_COUNT,
             "the last range is gone, so the slot is home"
         );
+        assert_eq!(arena.slot_state(slot), Some(SlotState::Free));
 
         drop(rx);
         drop((wr, rd));

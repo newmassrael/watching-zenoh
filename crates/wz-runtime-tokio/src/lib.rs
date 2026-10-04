@@ -2538,6 +2538,11 @@ where
                     if empty {
                         continue;
                     }
+                    // R3037 -- THE COMPLETION EDGE. The read returned the last
+                    // byte of the frame, so what filled the buffer is finished
+                    // and everything downstream of here only reads: the arena
+                    // says so in its own lifecycle before the frame is shared.
+                    let frame = arena.complete(frame);
                     let end = frame.as_ref().len();
                     let storage: std::sync::Arc<dyn RxStorage> = std::sync::Arc::new(frame);
                     let bytes = RxBytes::shared(storage, w..end)

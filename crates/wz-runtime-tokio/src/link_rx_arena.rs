@@ -76,11 +76,9 @@
 
 use std::sync::{Arc, Mutex};
 
-use wz_runtime_core::rx_slots::RxSlots;
-
 use crate::frame_arena::FrameArena;
 use crate::link_rx_pool::heap_pool;
-use crate::session_rx_pool_ap::{CpuMut, SessionRxPoolAp, Slot, SLOT_SIZE};
+use crate::session_rx_pool_ap::{CpuRef, SessionRxPoolAp, Slot, SLOT_SIZE};
 
 /// One link-RX slot table, plus the lock that serialises reserve and release.
 ///
@@ -193,28 +191,42 @@ impl FrameArena for LinkRxArena {
             return LinkRxFrame::spilled(want);
         };
         let slots: &mut SessionRxPoolAp = &mut guard;
-        let Some(mut held) = slots.reserve() else {
+        let Some(armed) = slots.link_arm_rx() else {
             // Upstream's dry-pool arm is `pool.try_take().unwrap_or_else(||
             // pool.alloc())`, so falling back to the allocator is its shape
-            // rather than an optimism here. `RxSlots::reserve` documents `None`
-            // as back-pressure, but a link cannot apply back-pressure to a peer
+            // rather than an optimism here. The pool's own arm answers `None` as
+            // back-pressure, but a link cannot apply back-pressure to a peer
             // whose bytes are already in the socket, so the frame costs an
             // allocation and the steady state keeps its slots.
             return LinkRxFrame::spilled(want);
         };
-        // The borrow of `slots` and `held` ends with this statement, which is
-        // what lets the handle move into the frame on the next one. Same
-        // manoeuvre as `crate::uring`'s registration, which collects every
-        // slot's address without holding N mutable borrows.
-        let data = slots.buf(&mut held).as_mut_ptr();
+        // R3037 -- THE AP ROW OF ARCHITECTURE SECTION 9.5. The slot walks the
+        // lifecycle the bus-master rows walk: armed, its address published, then
+        // started. On this row the bus master is the read the caller issues into
+        // the frame's bytes (the kernel's socket copy, or the ring's completion),
+        // and the edge action is the no-op the table names for it, so arming and
+        // starting are one step here for the reason `DescriptorRingRx` gives for
+        // a buffer-request callback: handing the address to the reader IS the
+        // hand-off.
+        let idx = armed.idx();
+        let data = armed.dma_armed_rx_ptr(slots);
+        // SAFETY: the "peripheral" this slot is started for is the read the
+        // caller is about to issue into `data`, and the frame returned below is
+        // the only handle on the slot, so nothing else can read or write it
+        // until `complete` or `Drop` takes it back through the completion edge.
+        unsafe { armed.dma_start_rx(slots) };
         LinkRxFrame {
             len: want,
             storage: Storage::Slot {
                 data,
-                held: Some(held),
+                hold: Hold::Filling { idx },
                 home: Arc::clone(&self.table),
             },
         }
+    }
+
+    fn complete(&mut self, buf: LinkRxFrame) -> LinkRxFrame {
+        buf.complete()
     }
 }
 
@@ -233,20 +245,38 @@ enum Storage {
         /// First byte of the slot, valid for `SLOT_SIZE` bytes.
         ///
         /// Stable because `heap_pool` puts the table in a `Box` and `home`
-        /// keeps that box alive; exclusive because `reserve` handed this slot
-        /// out and nothing else can hold it until `release` takes it back.
+        /// keeps that box alive; exclusive because the arming handed this slot
+        /// out and nothing else can hold it until the hold is returned.
         data: *mut u8,
-        /// `Option` only so [`Drop`] can move the handle out; `Some` for the
-        /// whole observable life of the value.
-        held: Option<Slot<CpuMut>>,
+        /// Where the slot is in the generated lifecycle, which is also who may
+        /// touch its bytes.
+        hold: Hold,
         home: Arc<NodeTable>,
     },
     /// No slot was available, so this frame is an allocation that goes nowhere.
     Spilled(Vec<u8>),
 }
 
+/// R3037 -- the slot's place in the lifecycle the pool's own emit generates,
+/// held as the handle the emit gives for it where it gives one.
+///
+/// The emit hands out no handle for a slot a bus master owns (the completion
+/// signal carries an index and nothing else), so the first state is the index
+/// and the second is the handle the completion edge mints.
+enum Hold {
+    /// Armed and started: the reader owns the bytes and may write them, and the
+    /// CPU shares nothing yet. Left by `LinkRxFrame::complete`, or by `Drop` for
+    /// a frame abandoned before it was whole.
+    Filling { idx: usize },
+    /// Complete: the bytes are the frame, shared and read-only until the last
+    /// range of them drops. Only a read accessor exists for this state.
+    Filled(Slot<CpuRef>),
+    /// The slot has been given back. Only `Drop` writes this.
+    Home,
+}
+
 // SAFETY: the only reason this is not automatic is the raw pointer, and it
-// names memory this value alone may touch -- `reserve` granted the slot
+// names memory this value alone may touch -- the arming granted the slot
 // exclusively and no other `LinkRxFrame`, and no accessor on the table, can
 // reach those bytes until `Drop` returns the handle. The `Arc<NodeTable>` keeps
 // the boxed storage alive and at its address for at least as long as the
@@ -262,7 +292,10 @@ unsafe impl Send for LinkRxFrame {}
 // slice of the slot and `is_pooled` reads the tag — and the only writer is
 // `as_mut`, which needs `&mut self`, which nothing can have while the value is
 // shared. The slot is this value's alone until `Drop`, so no other frame and
-// no table operation writes those bytes under a reader either.
+// no table operation writes those bytes under a reader either. R3037 -- the
+// pool now says the same thing in its own terms: a shared frame's slot is in
+// the shared-read state, which has no write accessor, and `as_mut` asserts it
+// is not called in that state.
 unsafe impl Sync for LinkRxFrame {}
 
 impl LinkRxFrame {
@@ -310,6 +343,35 @@ impl LinkRxFrame {
             }
         }
     }
+
+    /// R3037 -- the completion edge: the reader has finished writing, so the
+    /// slot moves from the state a bus master owns to the state the CPU shares.
+    ///
+    /// The caller is whoever OBSERVED the completion: the framing loop when its
+    /// read returned the last byte of the frame, the ring worker when the
+    /// kernel's completion for the read was reaped. Calling it earlier is the
+    /// contract the generated edge is `unsafe` for, which is why this is not a
+    /// public method: the two callers are in this crate and each holds the proof.
+    ///
+    /// Idempotent, and a no-op for a spilled frame, which has no lifecycle. A
+    /// poisoned lock leaves the frame as it was and `Drop` forfeits the slot as
+    /// it always has.
+    pub(crate) fn complete(mut self) -> Self {
+        if let Storage::Slot { hold, home, .. } = &mut self.storage {
+            if let Hold::Filling { idx } = *hold {
+                if let Ok(mut guard) = home.slots.lock() {
+                    let slots: &mut SessionRxPoolAp = &mut guard;
+                    // SAFETY: the completion was observed by this method's
+                    // caller, and `Filling` is the state `take` left this
+                    // frame in, so the slot is in the state the edge names.
+                    if let Some(filled) = unsafe { slots.rx_complete(idx) } {
+                        *hold = Hold::Filled(filled);
+                    }
+                }
+            }
+        }
+        self
+    }
 }
 
 impl AsRef<[u8]> for LinkRxFrame {
@@ -340,7 +402,13 @@ impl AsMut<[u8]> for LinkRxFrame {
         match &mut self.storage {
             // SAFETY: as above, and `&mut self` is what makes the exclusive
             // reference this hands out sound rather than merely unique.
-            Storage::Slot { data, .. } => unsafe { std::slice::from_raw_parts_mut(*data, len) },
+            Storage::Slot { data, hold, .. } => {
+                debug_assert!(
+                    matches!(hold, Hold::Filling { .. }),
+                    "a completed frame is shared read-only; nothing writes it again"
+                );
+                unsafe { std::slice::from_raw_parts_mut(*data, len) }
+            }
             Storage::Spilled(bytes) => bytes,
         }
     }
@@ -348,21 +416,36 @@ impl AsMut<[u8]> for LinkRxFrame {
 
 impl Drop for LinkRxFrame {
     fn drop(&mut self) {
-        let Storage::Slot { held, home, .. } = &mut self.storage else {
+        let Storage::Slot { hold, home, .. } = &mut self.storage else {
             return;
         };
-        let Some(held) = held.take() else {
-            return;
-        };
+        let hold = std::mem::replace(hold, Hold::Home);
         // A poisoned lock forfeits this slot, and that is the honest arm rather
         // than an `unwrap`: the only code that holds this lock does freelist
         // bookkeeping and cannot panic, so poisoning means a thread died
         // somewhere this destructor cannot repair. Forfeiting costs one of
         // SLOT_COUNT slots; panicking in a destructor costs the process.
-        if let Ok(mut guard) = home.slots.lock() {
-            let slots: &mut SessionRxPoolAp = &mut guard;
-            slots.release(held);
-        }
+        let Ok(mut guard) = home.slots.lock() else {
+            return;
+        };
+        let slots: &mut SessionRxPoolAp = &mut guard;
+        let filled = match hold {
+            Hold::Filled(filled) => filled,
+            // A frame abandoned before it was whole: the read was dropped, the
+            // stream ended or errored, or the completion was reaped for a link
+            // that had left. In every one the reader has finished with the bytes
+            // (a dropped socket read leaves nothing in flight, and the ring
+            // keeps a frame until its completion is reaped), so the completion
+            // edge is the honest way home, and a slot the pool does not recognise
+            // in that state is forfeited rather than guessed at.
+            // SAFETY: as in `complete`.
+            Hold::Filling { idx } => match unsafe { slots.rx_complete(idx) } {
+                Some(filled) => filled,
+                None => return,
+            },
+            Hold::Home => return,
+        };
+        filled.pool_return(slots);
     }
 }
 
@@ -460,8 +543,8 @@ mod tests {
             .expect("the frame's bytes ARE a slot of this table, by the pool's own answer");
         assert_eq!(
             arena.slot_state(idx),
-            Some(SlotState::CpuMut),
-            "the emit's lifecycle records the slot as checked out for CPU writing"
+            Some(SlotState::DmaBusyRx),
+            "the emit's lifecycle records the slot as owned by the reader that is filling it"
         );
         assert_eq!(
             arena.free_slots(),
@@ -508,8 +591,8 @@ mod tests {
             .expect("the frame's bytes ARE a slot of this table, by the pool's own answer");
         assert_eq!(
             arena.slot_state(idx),
-            Some(SlotState::CpuMut),
-            "the slot is still checked out while the frame lives"
+            Some(SlotState::CpuRef),
+            "a completed frame's slot is shared read-only while the frame lives"
         );
         assert_eq!(arena.free_slots(), SLOT_COUNT - 1);
 
@@ -520,6 +603,11 @@ mod tests {
             SLOT_COUNT - 1,
             "a clone is a second range of the same slot, so the slot stays out"
         );
+        assert_eq!(
+            arena.slot_state(idx),
+            Some(SlotState::CpuRef),
+            "and it stays shared read-only for as long as any range of it lives"
+        );
         assert_eq!(&second_range[..], b"pool-routed");
         drop(second_range);
         assert_eq!(
@@ -527,6 +615,69 @@ mod tests {
             SLOT_COUNT,
             "the last range is gone, so the slot is back on the freelist"
         );
+        assert_eq!(
+            arena.slot_state(idx),
+            Some(SlotState::Free),
+            "and the emit records it as free"
+        );
+    }
+
+    /// R3037 -- A FRAME THAT NEVER BECAME WHOLE GOES HOME THROUGH THE SAME EDGE.
+    ///
+    /// The slot a framing read is filling is owned by that read in the emit's
+    /// lifecycle, and the generated pool has no edge that returns such a slot
+    /// directly: the only way out of the state is the completion. A read that
+    /// ends mid-frame (the peer closes, the task is dropped) therefore has to be
+    /// completed before it can be returned, and a drop that forgot would leave
+    /// the slot owned by a reader that no longer exists. Observed through the
+    /// pool's own state and freelist, not through this module's bookkeeping.
+    #[tokio::test]
+    async fn a_frame_abandoned_mid_fill_goes_home_through_the_completion_edge() {
+        let mut arena = LinkRxArena::new();
+        let frame = arena.take(32);
+        let idx = arena
+            .slot_of(frame.as_ref().as_ptr())
+            .expect("the frame's bytes ARE a slot of this table, by the pool's own answer");
+        assert_eq!(arena.slot_state(idx), Some(SlotState::DmaBusyRx));
+        assert_eq!(arena.free_slots(), SLOT_COUNT - 1);
+
+        drop(frame);
+        assert_eq!(
+            arena.free_slots(),
+            SLOT_COUNT,
+            "an abandoned frame's slot is back on the freelist"
+        );
+        assert_eq!(arena.slot_state(idx), Some(SlotState::Free));
+    }
+
+    /// R3037 -- THE EDGE IS ONE-WAY AND IDEMPOTENT: completing a completed frame
+    /// changes nothing, and a spilled frame has no lifecycle to advance.
+    #[test]
+    fn completing_twice_changes_nothing_and_a_spill_has_no_lifecycle() {
+        let mut arena = LinkRxArena::new();
+        let frame = arena.take(8);
+        let idx = arena
+            .slot_of(frame.as_ref().as_ptr())
+            .expect("a slot of this table");
+        let frame = arena.complete(frame);
+        assert_eq!(arena.slot_state(idx), Some(SlotState::CpuRef));
+        let frame = arena.complete(frame);
+        assert_eq!(
+            arena.slot_state(idx),
+            Some(SlotState::CpuRef),
+            "a second completion finds the frame already shared and changes nothing"
+        );
+        drop(frame);
+        assert_eq!(arena.slot_state(idx), Some(SlotState::Free));
+
+        let held: Vec<LinkRxFrame> = (0..SLOT_COUNT).map(|_| arena.take(8)).collect();
+        let spilled = arena.take(8);
+        assert!(!spilled.is_pooled());
+        let spilled = arena.complete(spilled);
+        assert!(!spilled.is_pooled(), "a spill stays an allocation");
+        drop(spilled);
+        drop(held);
+        assert_eq!(arena.free_slots(), SLOT_COUNT);
     }
 
     /// THE DECLARED F, READ AT ITS FAR END: a SAMPLE lives in the pool slot.
@@ -574,7 +725,7 @@ mod tests {
         let slot = arena
             .slot_of(rx.bytes.as_ptr().wrapping_sub(crate::prefix_width(false)))
             .expect("the frame's bytes ARE a slot of this table, by the pool's own answer");
-        assert_eq!(arena.slot_state(slot), Some(SlotState::CpuMut));
+        assert_eq!(arena.slot_state(slot), Some(SlotState::CpuRef));
         assert_eq!(arena.free_slots(), SLOT_COUNT - 1);
 
         let kept = Arc::new(Mutex::new(None::<Sample>));
@@ -607,6 +758,11 @@ mod tests {
             SLOT_COUNT - 1,
             "the frame is gone but a sample the application kept still holds the slot"
         );
+        assert_eq!(
+            arena.slot_state(slot),
+            Some(SlotState::CpuRef),
+            "and the emit records the slot as shared read-only for as long as the sample lives"
+        );
         assert_eq!(sample.payload.as_slice(), BODY, "and it still reads");
         drop(sample);
         assert_eq!(
@@ -614,6 +770,7 @@ mod tests {
             SLOT_COUNT,
             "the sample was the last holder, so the slot is back on the freelist"
         );
+        assert_eq!(arena.slot_state(slot), Some(SlotState::Free));
     }
 
     /// The two arenas reassemble the same bytes — the property that lets this

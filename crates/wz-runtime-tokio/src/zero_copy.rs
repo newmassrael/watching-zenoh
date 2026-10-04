@@ -37,10 +37,17 @@
 //! progression happens "via IRQ handlers (not exposed in this atomic)".
 //!
 //! So this consumer uses `pool_acquire_for_encode` / `write` / `read` /
-//! `pool_return`, and that is the honest fit rather than a fallback: a tokio
-//! host has no DMA controller, so the RX arm has no meaning here. The DMA arms
-//! belong to the lwip pools (`out/wz-link-lwip/*_rx_pool_mcu.rs`), and when a
-//! consumer for those lands it will exercise the half this one cannot.
+//! `pool_return`, and that is the honest fit rather than a fallback: a chain's
+//! fragments are copied into the slot by the CPU, so there is no bus master to
+//! arm it for. The DMA arms belong to the rows that have one.
+//!
+//! R3037 -- CORRECTED. The measurement above was true of the emit it read and
+//! is not true of the tree: the emit now carries the `dma-armed-rx` arms, the
+//! lwip link tier constructs them in `DescriptorRingRx`, and the link-RX arena
+//! (`crate::link_rx_arena`) walks `free -> dma-armed-rx -> dma-busy-rx ->
+//! cpu-ref -> free` for every frame it serves, with the reader as the bus
+//! master and the table's no-op edge action. What this module says about ITS OWN
+//! consumer, the reassembly staging, is unchanged: it writes by CPU.
 
 use wz_session_core::chain_staging::{ChainStaging, StagingError};
 

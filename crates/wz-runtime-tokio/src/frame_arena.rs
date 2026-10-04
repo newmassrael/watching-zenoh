@@ -143,6 +143,20 @@ pub trait FrameArena {
     /// cannot get a buffer has no way to apply back-pressure to a TCP peer
     /// that has already sent the bytes.
     fn take(&mut self, want: usize) -> Self::Buf;
+
+    /// The fill is over: whatever wrote into `buf` has finished, the bytes in it
+    /// are the frame, and nothing will write them again.
+    ///
+    /// R3037 -- the edge a buffer's lifecycle has between "being filled" and
+    /// "shared read-only". A frame is handed up to a session and from there to
+    /// any number of ranges and samples, all of which only read, so this is the
+    /// last point at which the arena can say so. The default is the identity
+    /// because an allocation or a recycled box has no lifecycle to advance; the
+    /// pool-backed arena moves its slot from the state a bus master owns to the
+    /// state the CPU shares.
+    fn complete(&mut self, buf: Self::Buf) -> Self::Buf {
+        buf
+    }
 }
 
 /// The allocator as an arena: one fresh `Vec` per frame, recycled never.
