@@ -335,9 +335,10 @@ DATA_STEM = "wz_publisher_reaches_a_subscriber_through_a_stock_zenohd_over_"
 #: the day the rows land: they are observations first.
 INTEROP_DATA_PROMOTED: dict[tuple[str, str], tuple[int, int]] = {
     # macOS: the first hosted reading (37158440974) and the next (37160712846) were green for all
-    # eight rows. Windows is NOT here: its first reading failed on the demo's 1 MiB first-thread
-    # stack, which the demo no longer depends on, and only the run after that one is green, so it
-    # has one of the two runs it needs.
+    # eight rows. Windows: its first reading (37158440974) failed on the demo's 1 MiB first-thread
+    # stack, which the demo no longer depends on, so its two runs are the two that followed the fix
+    # (37160712846 and 37167490616), green for all seven rows it owes. The run that failed is not
+    # one of the two: consecutive means no red between them.
     ("Tcp", "macos"): (37158440974, 37160712846),
     ("Ws", "macos"): (37158440974, 37160712846),
     ("Udp", "macos"): (37158440974, 37160712846),
@@ -346,6 +347,13 @@ INTEROP_DATA_PROMOTED: dict[tuple[str, str], tuple[int, int]] = {
     ("Quic", "macos"): (37158440974, 37160712846),
     ("QuicDatagram", "macos"): (37158440974, 37160712846),
     ("UnixsockStream", "macos"): (37158440974, 37160712846),
+    ("Tcp", "windows"): (37160712846, 37167490616),
+    ("Ws", "windows"): (37160712846, 37167490616),
+    ("Udp", "windows"): (37160712846, 37167490616),
+    ("UdpReliable", "windows"): (37160712846, 37167490616),
+    ("Tls", "windows"): (37160712846, 37167490616),
+    ("Quic", "windows"): (37160712846, 37167490616),
+    ("QuicDatagram", "windows"): (37160712846, 37167490616),
 }
 
 
