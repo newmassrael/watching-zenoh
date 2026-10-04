@@ -1507,14 +1507,21 @@ layer_b_verify_codegen() {
     #             (vendor/sce/tests/forge/resources/codec_zenoh_msg_put.scxml)
     #             does not carry. MEASURED, not assumed: the element body of the
     #             two sources differs in exactly these places and no other —
-    #             the `entry-id="header.ext_id"` on the chain, the
-    #             `present-if="!extensions.has(0x2)"` on `payload_len` and
+    #             the `entry-id` on the chain, the
+    #             `present-if="!extensions.has(...)"` on `payload_len` and
     #             `payload`, the `slice_count` field, the `slices` repeat, and
     #             the `zbuf_slice` import — and every backend reports
     #             `golden mismatch`. Layer 3 (layer3_msg_put.rs and the SHM
     #             witnesses, byte-compared against zenoh-pico and zenohd) is the
     #             wire check. Remove this entry the day the upstream resource
     #             carries the layout; the array is read only on a failing pair.
+    #
+    #             R3033 — the divergence keeps its places and changes its
+    #             values: the chain's identifier is the whole entry header
+    #             without its continuation flag (`entry-id="header"
+    #             entry-id-except="header.Z"`) and the predicates are
+    #             `has(0x12)`, upstream's `eid` of the marker, where it was the
+    #             4-bit id and `has(0x2)` (open-debt item 860).
     local LAYER2_KNOWN_DIVERGENCE=(request wireexpr msg_put)
 
     local fail=0

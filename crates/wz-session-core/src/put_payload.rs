@@ -6,13 +6,17 @@
 //! A Put lays its payload out one of two ways, and nothing in any header says
 //! which. Without the shared-memory marker in its extension chain the payload
 //! is a length and that many bytes. With the marker (`Shm`, body extension id
-//! 0x2) it is a count of slices followed by that many elements, each a kind, a
-//! length and bytes: upstream's sliced layout, written when the Put carries a
-//! shared-memory buffer (`commons/zenoh-codec/src/zenoh/put.rs` @
+//! 0x2, mandatory, unit: the identity `0x12`) it is a count of slices followed
+//! by that many elements, each a kind, a length and bytes: upstream's sliced
+//! layout, written when the Put carries a shared-memory buffer
+//! (`commons/zenoh-codec/src/zenoh/put.rs` @
 //! `let codec = Zenoh080Sliced::<u32>::new(ext_shm.is_some());`).
 //!
 //! `msg_put.scxml` states both and gates them on the chain
-//! (`extensions.has(0x2)`), so [`MsgPutOwned`](wz_codecs::msg_put::MsgPutOwned)
+//! (`extensions.has(0x12)`, over each entry's header without its continuation
+//! flag, which is upstream's `eid`; an extension that shares only the 4-bit id
+//! is not the marker and leaves the first layout),
+//! so [`MsgPutOwned`](wz_codecs::msg_put::MsgPutOwned)
 //! carries four fields for one payload: `payload_len` and `payload` for the
 //! first layout, `slice_count` and `slices` for the second. Exactly one pair is
 //! present. Reading or building those four by hand at every site is how the two

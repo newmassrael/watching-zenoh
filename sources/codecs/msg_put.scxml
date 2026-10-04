@@ -44,7 +44,7 @@
                   `_Z_MSG_EXT_ENC_ZBUF | 0x03` per push_body_encode).
        payload, one of two layouts, chosen by the extension chain and by
        nothing in any header:
-         no shared-memory marker in the chain (`!extensions.has(0x2)`):
+         no shared-memory marker in the chain (`!extensions.has(0x12)`):
          bytes  : payload_len (VLE u64) + payload (bytes max=256;
                               upstream is unbounded zbuf — caller-
                               supplied length-prefix per
@@ -56,7 +56,7 @@
                               matching the unbounded upstream zbuf; no-alloc
                               keeps the 256 heapless cap. Uniform across
                               every sce:max-size scalar field).
-         the marker is in the chain (`extensions.has(0x2)`):
+         the marker is in the chain (`extensions.has(0x12)`):
          slices : slice_count (VLE u32) + that many codec_zenoh_zbuf_slice
                   elements, each a kind (RAW or SHM_PTR), a length and
                   bytes. This is upstream's sliced layout, written when the
@@ -71,27 +71,28 @@
                   first slice's kind for a payload byte, and read the rest
                   as the next message.
        The chain declares where an entry keeps its identifier
-       (`entry-id="header.ext_id"`, the 4-bit id of the entry header),
-       which is what `extensions.has(0x2)` reads. An encoder refuses a Put
-       whose chain and payload disagree (`CodecError::PresentIfMismatch`).
+       (`entry-id="header"`, the whole entry header) and which flag of it is
+       left out (`entry-id-except="header.Z"`, the continuation flag), which
+       is what `extensions.has(0x12)` reads. That is upstream's identity:
+       an extension is told apart by its header without its chain flag, id
+       plus mandatory bit plus encoding, and the marker is the one value
+       0x12 (`commons/zenoh-protocol/src/common/extension.rs` @
+       `pub const fn eid(header: u8) -> u8 {`, and
+       `commons/zenoh-codec/src/zenoh/put.rs` @
+       `Ok(match iext::eid(ext) {`). The same marker is the byte 0x12 at the
+       end of a chain and 0x92 in the middle of one, and `has(0x12)` is true
+       for both; an extension that shares only the 4-bit id (the mandatory
+       bit clear, or another encoding) is an unknown extension upstream and
+       here, and the payload is read in the first layout. An encoder refuses
+       a Put whose chain and payload disagree
+       (`CodecError::PresentIfMismatch`).
 
-       KNOWN GAP (open-debt item 860): upstream does not identify an
-       extension by that 4-bit id. It matches the header without its chain
-       flag, id plus mandatory bit plus encoding, and the marker is the one
-       value 0x12 (`commons/zenoh-protocol/src/common/extension.rs` @
-       `pub const fn eid(header: u8) -> u8 {`, and `commons/zenoh-codec/src/zenoh/put.rs` @
-       `Ok(match iext::eid(ext) {`), so an id-2 extension that is not
-       mandatory-unit is an unknown extension there. This codec takes any
-       id-2 entry for the marker and so reads such a Put in the wrong
-       layout. SCE cannot name the wider identity yet: a flag must be
-       disjoint from its siblings (`ext_id` already holds bits 0..3), a
-       whole-header entry id would carry the chain flag, and `has` has no
-       conjunction or outer negation that could stand two values (0x12 and
-       0x92) for one. The dissector and the capture layer already match the
-       full identity (`dissect.rs` `SHM_MARKER_EID`), so they and this
-       codec disagree only on that input. No extension with id 2 other than
-       the marker exists on a Put in the pinned upstream, which is why the
-       gap has no traffic today and is still recorded.
+       This closes open-debt item 860. Until the attribute existed (SCE's
+       `entry-id-except`, which this tree pins from SCE 6d7c7b6f65) the chain
+       named the 4-bit id (`entry-id="header.ext_id"`) and this codec took
+       any id-2 entry for the marker, so it disagreed with the dissector and
+       the capture layer, which already matched the full identity
+       (`dissect.rs` `SHM_MARKER_EID`), on exactly that input.
 
      Composition: B1-γ flags (header) + B1-δ present-if-on-fields
      (T / E gates) + Y3 atomic 2a present-if-on-tlv-chain (header.Z
@@ -153,16 +154,16 @@
                    max-depth="8" on-overflow="reject"
                    sce:present-if="header.Z"
                    terminate-on="entry-flag" entry-flag-name="Z"
-                   entry-id="header.ext_id"/>
+                   entry-id="header" entry-id-except="header.Z"/>
     <sce:field id="payload_len" sce:type="uint64" sce:byte="4" sce:bit-size="vle"
-               sce:present-if="!extensions.has(0x2)"/>
+               sce:present-if="!extensions.has(0x12)"/>
     <sce:field id="payload" sce:type="bytes" sce:byte="5" sce:bit-size="length-ref"
                sce:length-field="payload_len" sce:max-size="256"
-               sce:present-if="!extensions.has(0x2)"/>
+               sce:present-if="!extensions.has(0x12)"/>
     <sce:field id="slice_count" sce:type="uint32" sce:byte="6" sce:bit-size="vle"
-               sce:present-if="extensions.has(0x2)"/>
+               sce:present-if="extensions.has(0x12)"/>
     <sce:repeat id="slices" type="codec_zenoh_zbuf_slice" sce:byte="7"
                 count="slice_count" max-count="4"
-                sce:present-if="extensions.has(0x2)"/>
+                sce:present-if="extensions.has(0x12)"/>
   </datamodel>
 </scxml>

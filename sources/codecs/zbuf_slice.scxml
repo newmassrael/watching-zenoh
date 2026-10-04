@@ -39,8 +39,9 @@
      tighter than the payload was. A descriptor is far shorter than that.
 
      Imported by `msg_put.scxml`, which gates its two layouts on the
-     extension chain with `extensions.has(0x2)` (SCE's chain-membership
-     predicate) and repeats this element `slice_count` times. -->
+     extension chain with `extensions.has(0x12)` (SCE's chain-membership
+     predicate, over the entry header without its continuation flag) and
+     repeats this element `slice_count` times. -->
 <scxml xmlns="http://www.w3.org/2005/07/scxml"
        xmlns:sce="http://sce.dev/ext"
        sce:kind="codec" sce:default-endian="big" name="zbuf_slice">

@@ -3141,17 +3141,11 @@ pub(crate) mod tests {
         ext: BodyExt,
     ) -> Vec<u8> {
         use wz_codecs::wire_const::{FLAG_N_N, FLAG_Z_ERR_Z, FLAG_Z_PUT_Z};
-        // A Put picks its payload layout by the 4-bit id of the extensions in its
-        // chain (`msg_put.scxml`, `extensions.has(0x2)`), as upstream's decoder
-        // does, so a Put cannot carry "a different extension at the marker's id":
-        // upstream and the codec both read that as the marker. The fixture
-        // exists for the carriers where the marker is a convention of the
-        // payload slot and not a layout, which is the Err carrier.
-        assert!(
-            ext != BodyExt::ForeignAtTheSameId || matches!(carrier, Carrier::Err),
-            "an extension at the shared-memory marker's id on a Put IS the marker on the \
-             wire; the foreign-extension fixture is only representable on the Err carrier"
-        );
+        // A Put picks its payload layout by the whole identity of the extensions
+        // in its chain (`msg_put.scxml`, `extensions.has(0x12)`), as upstream's
+        // decoder does, so an extension at the marker's id that is not the marker
+        // leaves it in the plain layout: the `else` arm below builds it, and so
+        // it is representable on every carrier.
         let entry = ext.entry();
         let z_put = if entry.is_some() { FLAG_Z_PUT_Z } else { 0 };
         let put = if ext == BodyExt::ShmMarker {
@@ -3256,23 +3250,18 @@ pub(crate) mod tests {
             let plain = record_with_body_ext(carrier, "demo/shm", b"descriptor", BodyExt::None);
             assert_ne!(shm, plain, "{name}: the marker must reach the wire");
             let mut records = alloc::vec![(&shm, "shm"), (&plain, "plain")];
-            // The third record exists only where it is representable: on a Put
-            // an extension at the marker's id IS the marker (see the fixture).
-            let foreign = matches!(carrier, Carrier::Err).then(|| {
-                record_with_body_ext(
-                    carrier,
-                    "demo/shm",
-                    b"descriptor",
-                    BodyExt::ForeignAtTheSameId,
-                )
-            });
-            if let Some(foreign) = &foreign {
-                assert_ne!(
-                    &shm, foreign,
-                    "{name}: the two exts must differ on the wire"
-                );
-                records.push((foreign, "foreign"));
-            }
+            // The third record is an extension at the marker's id that is not the
+            // marker. Every carrier can hold it: the Put codec tells the marker by
+            // its whole identity, as upstream's decoder does, so such an extension
+            // leaves a Put in its plain layout.
+            let foreign = record_with_body_ext(
+                carrier,
+                "demo/shm",
+                b"descriptor",
+                BodyExt::ForeignAtTheSameId,
+            );
+            assert_ne!(shm, foreign, "{name}: the two exts must differ on the wire");
+            records.push((&foreign, "foreign"));
             for (bytes, which) in records {
                 let t = aggregate_datagrams(&[(true, bytes.clone())]);
                 assert_eq!(t.records(), 1, "{name}/{which}: one record");
@@ -3439,14 +3428,13 @@ pub(crate) mod tests {
     /// `ext_id` where it means `ext_eid`.
     #[test]
     fn a_body_ext_sharing_the_markers_id_field_leaves_the_payload_measured() {
-        // Only the Err carrier can hold it: on a Put an extension at the marker's
-        // id is read as the marker by the codec and by upstream's decoder alike
-        // (`msg_put.scxml` picks the layout by the 4-bit id), so there is no Put
-        // on the wire that has "a different extension at that id".
-        for (carrier, name) in CARRIERS
-            .into_iter()
-            .filter(|(c, _)| matches!(c, Carrier::Err))
-        {
+        // Every carrier holds it. A Put tells the marker by its whole identity
+        // (`msg_put.scxml`, `entry-id-except="header.Z"`), as upstream's decoder
+        // does, so an extension at the marker's id with no mandatory bit leaves
+        // the Put in its plain layout. Until that attribute existed the codec
+        // read the 4-bit id alone and this fixture was only representable on
+        // the Err carrier, which declares its own extension field.
+        for (carrier, name) in CARRIERS {
             let foreign = aggregate_datagrams(&[(
                 true,
                 record_with_body_ext(

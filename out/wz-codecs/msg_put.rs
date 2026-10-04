@@ -1,4 +1,4 @@
-// SCE-MAP: msg_put:134 :: _forge_body
+// SCE-MAP: msg_put:135 :: _forge_body
 
 // SCE Forge: Auto-generated from Extended SCXML (sce:kind="codec")
 // Runtime: none
@@ -135,14 +135,14 @@ impl<'a> MsgPut<'a> {
         } else {
             None
         };
-        let _has_extensions_2 = extensions.as_ref().is_some_and(|_c| _c.iter().any(|_e| u64::from(_e.ext_id()) == 2u64));
-        let payload_len = if !_has_extensions_2 {
+        let _has_extensions_18 = extensions.as_ref().is_some_and(|_c| _c.iter().any(|_e| (u64::from(_e.header) & 127u64) == 18u64));
+        let payload_len = if !_has_extensions_18 {
             let _v = cursor.read_vle_u64()?;
             Some(_v)
         } else {
             None
         };
-        let payload = if !_has_extensions_2 {
+        let payload = if !_has_extensions_18 {
             let _n = payload_len.unwrap() as usize;
             let raw = cursor.peek_slice(_n)?;
             let _v = raw;
@@ -151,13 +151,13 @@ impl<'a> MsgPut<'a> {
         } else {
             None
         };
-        let slice_count = if _has_extensions_2 {
+        let slice_count = if _has_extensions_18 {
             let _v = cursor.read_vle_u32()?;
             Some(_v)
         } else {
             None
         };
-        let slices = if _has_extensions_2 {
+        let slices = if _has_extensions_18 {
             let _n = slice_count.expect("co-gating: count present-if matches repeat");
             let mut _vec: HeaplessVec<ZbufSlice<'a>, 4> = HeaplessVec::new();
             for _ in 0.._n {
@@ -241,29 +241,29 @@ impl<'a> MsgPut<'a> {
     /// destination has insufficient remaining capacity; growable
     /// sinks (e.g. `VecSink`) are effectively infallible.
     pub fn encode<S: SceSink>(&self, w: &mut S) -> Result<(), CodecError> {
-        let _has_extensions_2 = self.extensions.as_ref().is_some_and(|_c| _c.iter().any(|_e| u64::from(_e.ext_id()) == 2u64));
-        if !_has_extensions_2 {
+        let _has_extensions_18 = self.extensions.as_ref().is_some_and(|_c| _c.iter().any(|_e| (u64::from(_e.header) & 127u64) == 18u64));
+        if !_has_extensions_18 {
             if self.payload_len.is_none() {
                 return Err(CodecError::PresentIfMismatch);
             }
         } else if self.payload_len.is_some() {
             return Err(CodecError::PresentIfMismatch);
         }
-        if !_has_extensions_2 {
+        if !_has_extensions_18 {
             if self.payload.is_none() {
                 return Err(CodecError::PresentIfMismatch);
             }
         } else if self.payload.is_some() {
             return Err(CodecError::PresentIfMismatch);
         }
-        if _has_extensions_2 {
+        if _has_extensions_18 {
             if self.slice_count.is_none() {
                 return Err(CodecError::PresentIfMismatch);
             }
         } else if self.slice_count.is_some() {
             return Err(CodecError::PresentIfMismatch);
         }
-        if _has_extensions_2 {
+        if _has_extensions_18 {
             if self.slices.is_none() {
                 return Err(CodecError::PresentIfMismatch);
             }

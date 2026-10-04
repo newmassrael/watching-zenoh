@@ -33,7 +33,7 @@ use wz_codecs::msg_put::MsgPut;
 
 /// A default Put names neither payload layout, and the encoder refuses it.
 ///
-/// The payload is gated on the extension chain (`extensions.has(0x2)`), so
+/// The payload is gated on the extension chain (`extensions.has(0x12)`), so
 /// `payload_len` and `payload` are `None` until a caller says the Put is inline
 /// and the slice fields are `None` until it says the Put is sliced. A Put that
 /// says neither is two descriptions of nothing, not an empty payload, and the
