@@ -381,9 +381,10 @@ pub enum IterationEvent<'a> {
 
 /// Build the [`DriverLoopOutcome`] a completed reassembly chain re-enters
 /// the loop with: the reassembled bytes go back through
-/// [`parse_frame_payload`](crate::network_message::parse_frame_payload), so
-/// the application's per-MID dispatch sees the reassembled message exactly
-/// as it sees a `T_MID_FRAME` payload. The reassembled bytes are the inner
+/// [`parse_frame_payload_lending`](crate::network_message::parse_frame_payload_lending),
+/// so the application's per-MID dispatch sees the reassembled message exactly
+/// as it sees a `T_MID_FRAME` payload, and what it is handed holds a copy of
+/// its own and not a slice of the reassembler's slot. The reassembled bytes are the inner
 /// NetworkMessage batch; transport ext chains were per-fragment, so the
 /// reassembled outcome carries none. Shared by the unicast
 /// [`crate::drive::report_outcome_reassembling`] and the multicast
@@ -403,7 +404,7 @@ pub fn reassembled_frame_outcome(
     priority: crate::qos::Priority,
     msg: &[u8],
 ) -> DriverLoopOutcome {
-    match crate::network_message::parse_frame_payload(msg) {
+    match crate::network_message::parse_frame_payload_lending(msg) {
         Ok(messages) => DriverLoopOutcome::FramePayload {
             reliable,
             sn,

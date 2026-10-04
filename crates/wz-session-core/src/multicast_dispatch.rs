@@ -2940,7 +2940,7 @@ mod tests {
             let Ok(InboundFrame::Frame { payload, .. }) = parse_inbound(&frame) else {
                 panic!("frame fixture must parse");
             };
-            payload
+            payload.into_vec()
         }
 
         fn reasm() -> ReassemblyDispatcher<4, 4096> {

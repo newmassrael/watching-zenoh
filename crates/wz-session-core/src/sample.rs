@@ -68,6 +68,7 @@
 use alloc::string::String;
 use alloc::vec::Vec;
 
+use crate::link::RxBytes;
 use crate::vle::read_vle_u64;
 use sce_forge_runtime::codec::{CodecStorage, SceByteBuf, SceStr};
 
@@ -558,8 +559,16 @@ pub struct Sample {
     /// Whether this sample is data ([`SampleKind::Put`]) or a key
     /// deletion ([`SampleKind::Del`]).
     pub kind: SampleKind,
-    /// Payload bytes for Put samples; empty `Vec<u8>` for Del.
-    pub payload: Vec<u8>,
+    /// Payload bytes for Put samples; empty for Del.
+    ///
+    /// The bytes the peer sent, and on an AP build usually the very bytes the
+    /// link read them into: a sample off the wire holds a range of the received
+    /// frame (see [`RxBytes`]), so cloning it shares that storage and the
+    /// storage goes home when the last holder drops. Holding a sample therefore
+    /// keeps its frame's storage out of the pool; a caller that keeps samples
+    /// for long and wants the storage back copies the bytes out
+    /// ([`RxBytes::into_vec`]). Reads go through `Deref` to `[u8]`.
+    pub payload: RxBytes,
     /// Body-level timestamp (zenoh-pico `_z_m_push_commons_t._timestamp`,
     /// gated by `_Z_FLAG_Z_P_T` for Put / `_Z_FLAG_Z_D_T` for Del).
     /// `None` when the wire bit was clear. The hint mirrors the codec
@@ -657,10 +666,17 @@ impl Sample {
     /// (`None` / `Reliable`) metadata fields. Chain `with_*` setters to
     /// attach decoded extension values.
     pub fn new_put(keyexpr: impl Into<String>, payload: impl Into<Vec<u8>>) -> Self {
+        Self::new_put_shared(keyexpr, RxBytes::from(payload.into()))
+    }
+
+    /// [`Self::new_put`] over bytes that are already a frame's range: the
+    /// sample holds them as they are, with no copy. What the receive path calls;
+    /// [`Self::new_put`] is for bytes the caller owns as a `Vec`.
+    pub fn new_put_shared(keyexpr: impl Into<String>, payload: RxBytes) -> Self {
         Self {
             keyexpr: keyexpr.into(),
             kind: SampleKind::Put,
-            payload: payload.into(),
+            payload,
             timestamp: None,
             encoding: None,
             qos: None,
@@ -677,7 +693,7 @@ impl Sample {
         Self {
             keyexpr: keyexpr.into(),
             kind: SampleKind::Del,
-            payload: Vec::new(),
+            payload: RxBytes::from(Vec::new()),
             timestamp: None,
             encoding: None,
             qos: None,

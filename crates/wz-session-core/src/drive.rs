@@ -36,12 +36,14 @@ use crate::session_fsm_unicast::SessionFsmUnicastPolicy;
 // `InboundFrame` is named by the ungated `Unknown` match arm; the codec-gated
 // arms (`Frame` / `KeepAlive` / `Fragment` / `Init` / `Open` / `Close`) reuse it.
 use crate::inbound::InboundFrame;
-// parse_frame_payload backs the codec-frame `Frame` arm only.
+// parse_frame_payload_in backs the codec-frame `Frame` arm only.
 #[cfg(feature = "codec-frame")]
-use crate::network_message::parse_frame_payload;
+use crate::network_message::parse_frame_payload_in;
 
-/// R2965 (open-debt item 847) — [`parse_frame_payload`], never inlined, for
-/// [`dispatch_unit`]'s callers of it and no one else's.
+/// R2965 (open-debt item 847) — [`parse_frame_payload_in`], never inlined, for
+/// [`dispatch_unit`]'s callers of it and no one else's. It takes the batch as a
+/// [`RxBytes`](crate::link::RxBytes) so the messages it decodes are ranges of
+/// it, not copies out of it.
 ///
 /// Decoding a batch builds each message into a local of that message's own size
 /// (an `Interest` is 336 bytes, an `Oam` 312, an extension chain 264), and a
@@ -60,12 +62,12 @@ use crate::network_message::parse_frame_payload;
 #[cfg(feature = "codec-frame")]
 #[inline(never)]
 fn parse_frame_payload_out_of_line(
-    bytes: &[u8],
+    batch: &crate::link::RxBytes,
 ) -> Result<
     alloc::vec::Vec<crate::network_message::NetworkMessage>,
     sce_forge_runtime::codec::CodecError,
 > {
-    parse_frame_payload(bytes)
+    parse_frame_payload_in(batch)
 }
 // transport-lowlatency — the lean rx branch reads the leading message id
 // (wire_const) and synthesizes an empty ext list (Vec); transport-compression's
@@ -192,11 +194,21 @@ pub fn dispatch_link_event<R: SessionRuntime, T: TimeSource>(
             } else {
                 None
             };
+            // The unit, made shareable ONCE, before anything is decoded out of
+            // it: a link that lent its buffer hands it up lent and a heap read
+            // is moved behind the one `Arc`, so the frame's payload, the
+            // messages decoded from it and a remainder parked for the next turn
+            // are all ranges of this storage and not copies of it. A
+            // decompressed batch is a buffer this function built, which is
+            // what `RxBytes::lend` is for.
             #[cfg(feature = "transport-compression")]
-            let bytes: &[u8] = decompressed.as_deref().unwrap_or(&rx.bytes);
+            let unit = match decompressed {
+                Some(inflated) => crate::link::RxBytes::lend(inflated),
+                None => rx.bytes.into_lent(),
+            };
             #[cfg(not(feature = "transport-compression"))]
-            let bytes: &[u8] = &rx.bytes;
-            dispatch_unit(bytes, actions, engine)
+            let unit = rx.bytes.into_lent();
+            dispatch_unit(&unit, actions, engine)
         }
     }
 }
@@ -209,11 +221,16 @@ pub fn dispatch_link_event<R: SessionRuntime, T: TimeSource>(
 /// that have already come out of it must not go back in.
 /// [`dispatch_pending`] is the other caller.
 fn dispatch_unit<R: SessionRuntime, T: TimeSource>(
-    bytes: &[u8],
+    unit: &crate::link::RxBytes,
     actions: &SessionLinkActions<R, T>,
     engine: &mut Engine<SessionFsmUnicastPolicy<SessionActionsBinding<R, T>>>,
 ) -> DriverLoopOutcome {
     use crate::session_fsm_unicast::SessionFsmUnicastEvent as E;
+    // The unit is read two ways below: as bytes, for the leading id and the
+    // lengths, and as a shareable value, for every decode and for the remainder
+    // it parks. The decodes run over `unit` itself and never over a copy of it,
+    // because a range is recognisable as part of `unit` only if it is.
+    let bytes: &[u8] = unit.as_slice();
 
     // transport-lowlatency — lean rx: once this session negotiated
     // lowlatency AND is established, a datagram whose leading message id
@@ -251,7 +268,7 @@ fn dispatch_unit<R: SessionRuntime, T: TimeSource>(
             Some(_) => true,
         };
         if lean_network {
-            return match parse_frame_payload_out_of_line(bytes) {
+            return match parse_frame_payload_out_of_line(unit) {
                 Ok(messages) => {
                     // R2825 — a lean datagram is ONE transport message whatever
                     // it carries, which is how upstream's lowlatency rx counts it.
@@ -284,13 +301,15 @@ fn dispatch_unit<R: SessionRuntime, T: TimeSource>(
     // message begins: nothing is parked, and the `Unknown` frame below already
     // projects to `FramingError`, which is what both reference implementations
     // do with a batch they cannot finish reading.
-    let parsed = actions.handle_inbound_consuming(bytes);
+    let parsed = actions.handle_inbound_consuming_in(unit);
     if let Ok((_, consumed)) = &parsed {
         // R2825 — one transport message decoded off the front of the unit.
         #[cfg(feature = "transport-stats")]
         count_rx_transport_message(actions);
         if *consumed > 0 && *consumed < bytes.len() {
-            actions.park_pending_batch(&bytes[*consumed..]);
+            if let Some(rest) = unit.subslice(*consumed..bytes.len()) {
+                actions.park_pending_unit(rest);
+            }
         }
     }
     match parsed.map(|(frame, _)| frame) {
@@ -738,6 +757,8 @@ fn dispatch_unit<R: SessionRuntime, T: TimeSource>(
                         };
                     }
                     match parse_frame_payload_out_of_line(&payload) {
+                        // `payload` is a range of the unit when the unit was
+                        // lent, so the messages below are ranges of it too.
                         Ok(messages) => DriverLoopOutcome::FramePayload {
                             reliable,
                             sn,

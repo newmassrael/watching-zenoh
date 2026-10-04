@@ -1152,6 +1152,22 @@ impl RxBytes {
         }
     }
 
+    /// These bytes as a frame that can be shared: itself when it already is, and
+    /// the buffer moved (not copied) behind an `Arc` when it is owned.
+    ///
+    /// What a receive loop does once, to the unit it was handed, before it
+    /// decodes: every range taken of the result afterwards is a reference to the
+    /// one storage and not a copy out of it. The cost is the one allocation
+    /// [`Self::lend`] pays. Without `rx-shared-bytes` there is nothing to share
+    /// and the bytes come back as they were.
+    pub fn into_lent(self) -> Self {
+        match self.0 {
+            RxRepr::Owned(bytes) => Self::lend(bytes),
+            #[cfg(feature = "rx-shared-bytes")]
+            RxRepr::Shared { .. } => self,
+        }
+    }
+
     /// The `range` of THESE bytes (positions in `self`, not in the storage
     /// behind it), sharing the storage when there is one. `None` when `range`
     /// does not lie inside the bytes -- upstream's `ZSlice::subslice` answers the

@@ -1488,7 +1488,7 @@ pub struct LinkState<R: SessionRuntime> {
     /// here has already come out of the decompressor and must not go back in —
     /// which is why [`crate::drive::dispatch_pending`] re-enters at
     /// `dispatch_unit` and not at `dispatch_link_event`.
-    pub pending_batch: R::Mutex<Option<Vec<u8>>>,
+    pub pending_batch: R::Mutex<Option<crate::link::RxBytes>>,
     /// R84 — monotonic timestamp in milliseconds captured when the
     /// session FSM enters the `Established` state. Populated by the
     /// `record_established_at()` Lua action wired to the
@@ -2144,7 +2144,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             link: R::share(LinkState {
                 driver,
                 last_inbound_at: R::new_mutex(None::<u64>),
-                pending_batch: R::new_mutex(None::<Vec<u8>>),
+                pending_batch: R::new_mutex(None::<crate::link::RxBytes>),
                 established_at: R::new_mutex(None::<u64>),
                 last_outbound_at: R::new_mutex(None::<u64>),
                 transport_available: R::new_mutex(true),
@@ -5801,7 +5801,26 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         &self,
         bytes: &[u8],
     ) -> Result<(InboundFrame, usize), InboundParseError> {
-        let (frame, consumed) = parse_inbound_consuming(bytes)?;
+        Ok(self.observe_inbound(parse_inbound_consuming(bytes)?))
+    }
+
+    /// [`Self::handle_inbound_consuming`] over a unit that can be shared: the
+    /// frame it returns holds a range of `unit` where the other one holds a
+    /// copy (see [`crate::inbound::parse_inbound_consuming_in`]). Everything
+    /// the handler does with the frame is the same code, in
+    /// [`Self::observe_inbound`].
+    pub fn handle_inbound_consuming_in(
+        &self,
+        unit: &crate::link::RxBytes,
+    ) -> Result<(InboundFrame, usize), InboundParseError> {
+        Ok(self.observe_inbound(crate::inbound::parse_inbound_consuming_in(unit)?))
+    }
+
+    /// What the link records about one decoded transport message: the
+    /// handshake facts it carries and the RX-activity stamp. Total: a parsed
+    /// frame is always taken, so it cannot fail and takes the frame by value.
+    fn observe_inbound(&self, parsed: (InboundFrame, usize)) -> (InboundFrame, usize) {
+        let (frame, consumed) = parsed;
         match &frame {
             #[cfg(feature = "codec-init-body")]
             InboundFrame::Init {
@@ -5926,7 +5945,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                 *slot = Some(now);
             });
         }
-        Ok((frame, consumed))
+        (frame, consumed)
     }
 
     /// R311y632 (§17) — park the undispatched remainder of a framing unit.
@@ -5935,16 +5954,25 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// the same fact, and storing `Some(vec![])` would make the drain hand the
     /// dispatcher an empty unit to fail on.
     pub fn park_pending_batch(&self, residue: &[u8]) {
+        self.park_pending_unit(crate::link::RxBytes::from(residue.to_vec()));
+    }
+
+    /// [`Self::park_pending_batch`] for a remainder that is already a unit: a
+    /// range of the frame it was cut from (see
+    /// [`RxBytes::subslice`](crate::link::RxBytes::subslice)), so a lent frame
+    /// stays one storage across the batch it carried instead of being copied
+    /// out whole.
+    pub fn park_pending_unit(&self, residue: crate::link::RxBytes) {
         if residue.is_empty() {
             return;
         }
         R::with_mutex_mut(&self.link.pending_batch, |slot| {
-            *slot = Some(residue.to_vec());
+            *slot = Some(residue);
         });
     }
 
     /// R311y632 (§17) — take the parked remainder, if any.
-    pub fn take_pending_batch(&self) -> Option<Vec<u8>> {
+    pub fn take_pending_batch(&self) -> Option<crate::link::RxBytes> {
         R::with_mutex_mut(&self.link.pending_batch, |slot| slot.take())
     }
 

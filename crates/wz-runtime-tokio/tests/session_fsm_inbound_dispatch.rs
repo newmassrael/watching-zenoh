@@ -233,7 +233,7 @@ fn inbound_to_fsm_event_covers_every_inbound_variant() {
     let frame = InboundFrame::Frame {
         reliable: true,
         sn: 0,
-        payload: Vec::new(),
+        payload: Vec::new().into(),
         has_ext: false,
         extensions: Vec::new(),
         priority: wz_runtime_tokio::session_glue::Priority::DEFAULT,

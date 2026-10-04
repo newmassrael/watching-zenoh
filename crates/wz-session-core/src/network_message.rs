@@ -279,6 +279,32 @@ pub fn parse_frame_payload_in(
     }
 }
 
+/// [`parse_frame_payload`] for a batch that exists only as a BORROWED slice,
+/// which is the one shape a completed reassembly chain has: its bytes are a slot
+/// of the reassembler, reused the moment the completion returns, so nothing
+/// decoded out of it may keep pointing there.
+///
+/// On an AP build the batch is copied ONCE into a buffer that can be shared
+/// (see [`RxBytes::lend`](crate::link::RxBytes::lend)) and walked from there, so
+/// each message holds a range of that one copy; the per-message copies the walk
+/// used to make are the same bytes, so the total moved is unchanged. That is
+/// also why this is not a policy of [`parse_frame_payload`] itself: a caller
+/// whose bytes are already a frame has a copy to save and should call
+/// [`parse_frame_payload_in`] instead. Off `rx-shared-bytes` there is nothing to
+/// share, a lent copy would be a second copy for nothing, and this is
+/// [`parse_frame_payload`] over the same bytes.
+#[cfg(feature = "codec-frame")]
+pub fn parse_frame_payload_lending(bytes: &[u8]) -> Result<Vec<NetworkMessage>, CodecError> {
+    #[cfg(feature = "rx-shared-bytes")]
+    {
+        parse_frame_payload_in(&crate::link::RxBytes::lend(bytes.to_vec()))
+    }
+    #[cfg(not(feature = "rx-shared-bytes"))]
+    {
+        parse_frame_payload(bytes)
+    }
+}
+
 #[cfg(feature = "codec-frame")]
 fn parse_batch(bytes: &[u8], origin: Origin<'_>) -> Result<Vec<NetworkMessage>, CodecError> {
     let mut messages = Vec::new();
@@ -1593,6 +1619,53 @@ mod shared_decode_tests {
 
     fn lies_within(whole: &[u8], part: &[u8]) -> bool {
         whole.as_ptr_range().contains(&part.as_ptr())
+    }
+
+    /// Whether the message's payload is a range of lent storage rather than
+    /// bytes it owns: what `RxSharedBytes::is_shared` answers.
+    fn payload_is_lent(message: &NetworkMessage) -> bool {
+        let NetworkMessage::Push(push) = message else {
+            panic!("the batch is Pushes, got {message:?}");
+        };
+        let crate::wire::PushOwnedVariant::CodecZenohMsgPut(put) = &push.body else {
+            panic!("a literal put carries a Put body");
+        };
+        put.payload.as_ref().expect("an inline Put").is_shared()
+    }
+
+    /// A completed reassembly chain is a BORROWED slice, a slot the reassembler
+    /// reuses the moment the completion returns, so what is decoded out of it
+    /// must not point there. It is copied once into a lent buffer and every
+    /// message is a range of that one copy: the payloads are lent (and not
+    /// owned, as the copying walk's are), lie outside the borrowed bytes, and
+    /// survive the slot being overwritten.
+    #[test]
+    fn a_batch_that_is_only_a_slice_is_decoded_into_one_copy_the_messages_share() {
+        let mut slot = batch();
+        slot.extend_from_slice(&batch());
+        let messages = parse_frame_payload_lending(&slot).expect("the batch parses");
+        assert_eq!(messages.len(), 2);
+        for message in &messages {
+            assert!(payload_is_lent(message), "a range of the one lent copy");
+            assert!(
+                !lies_within(&slot, push_payload(message)),
+                "a copy of its own, not a slice of the slot it was reassembled in"
+            );
+        }
+        slot.fill(0);
+        for message in &messages {
+            assert_eq!(
+                push_payload(message),
+                PAYLOAD,
+                "the slot is reused; the messages must not notice"
+            );
+        }
+        // The control: the copying walk over the same slice owns each payload.
+        let copied = parse_frame_payload(&batch()).expect("the batch parses");
+        assert!(
+            !payload_is_lent(&copied[0]),
+            "the copying walk's payload is owned"
+        );
     }
 
     /// The discriminator: a lent frame decodes to a payload that sits INSIDE the

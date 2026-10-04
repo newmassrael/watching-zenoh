@@ -34,6 +34,10 @@ use alloc::vec::Vec;
 use crate::parse_error::InboundParseError;
 
 use crate::ext_chain::decode_ext_chain;
+use crate::link::RxBytes;
+// `CodecError` is named only by the `Frame` arm, which is `codec-frame`'s.
+#[cfg(feature = "codec-frame")]
+use sce_forge_runtime::codec::CodecError;
 use sce_forge_runtime::codec::SceCursor;
 use wz_codecs::ext_entry::ExtEntryOwned;
 use wz_codecs::wire_const;
@@ -155,7 +159,12 @@ pub enum InboundFrame {
     Frame {
         reliable: bool,
         sn: u64,
-        payload: Vec<u8>,
+        /// The batch of network messages the frame carries. A range of the
+        /// unit it was decoded from when that unit was handed to
+        /// [`parse_inbound_consuming_in`] lent, a copy of it otherwise. Reads
+        /// are through `Deref` to `[u8]`, so a caller that only reads it need
+        /// not care which.
+        payload: RxBytes,
         has_ext: bool,
         extensions: Vec<ExtEntryOwned>,
         /// R311y215 — the QoS priority projected from the `ext_qos` transport
@@ -519,6 +528,38 @@ pub fn parse_inbound(bytes: &[u8]) -> Result<InboundFrame, InboundParseError> {
 /// they consume the remainder by construction, which is why upstream puts them
 /// last in a batch (`zenoh-codec-1.5.0/src/transport/frame.rs:173`).
 pub fn parse_inbound_consuming(bytes: &[u8]) -> Result<(InboundFrame, usize), InboundParseError> {
+    parse_unit(bytes, None)
+}
+
+/// [`parse_inbound_consuming`] over a unit that can be SHARED: a
+/// [`InboundFrame::Frame`]'s payload is a range of `unit` rather than a copy of
+/// it, so on a lent unit (see [`RxBytes::lend`]) the payload and the messages
+/// later decoded out of it are all references to the one storage the link read
+/// into.
+///
+/// The decode runs over `unit`'s own bytes, which is what makes a range of them
+/// recognisable as part of `unit`; handing in a copy of the frame would decode
+/// correctly and share nothing. On an owned unit the payload is a copy, which is
+/// exactly what [`parse_inbound_consuming`] does, so a caller that has not made
+/// its unit lent loses nothing by calling this.
+pub fn parse_inbound_consuming_in(
+    unit: &RxBytes,
+) -> Result<(InboundFrame, usize), InboundParseError> {
+    parse_unit(unit.as_slice(), Some(unit))
+}
+
+/// The one decode behind [`parse_inbound_consuming`] and
+/// [`parse_inbound_consuming_in`]. `origin`, when there is one, is the
+/// [`RxBytes`] that `bytes` was taken from, and is only consulted by the arm
+/// whose payload is a tail of the unit (`Frame`).
+fn parse_unit(
+    bytes: &[u8],
+    origin: Option<&RxBytes>,
+) -> Result<(InboundFrame, usize), InboundParseError> {
+    debug_assert!(
+        origin.map_or(true, |o| core::ptr::eq(o.as_slice(), bytes)),
+        "the origin of a decode is the very bytes being decoded"
+    );
     let header = *bytes.first().ok_or(InboundParseError::Empty)?;
     let mid = header & 0x1F;
     // R311g1 — `flags` extraction is gated on the same predicate as
@@ -643,10 +684,19 @@ pub fn parse_inbound_consuming(bytes: &[u8]) -> Result<(InboundFrame, usize), In
                 Vec::new()
             };
             let remaining = cursor.remaining();
-            let payload = cursor
+            // The payload is the tail of the unit, so it is `remaining` bytes
+            // ending where the unit does. With an origin it is a range of it
+            // (a second reference to the storage when the unit is lent); without
+            // one it is a copy, as it was before there was a choice.
+            let tail = cursor
                 .peek_slice(remaining)
-                .map_err(InboundParseError::Codec)?
-                .to_vec();
+                .map_err(InboundParseError::Codec)?;
+            let payload = match origin {
+                Some(unit) => unit
+                    .subslice(bytes.len() - remaining..bytes.len())
+                    .ok_or(InboundParseError::Codec(CodecError::NeedMoreBytes))?,
+                None => RxBytes::from(tail.to_vec()),
+            };
             cursor
                 .advance(remaining)
                 .map_err(InboundParseError::Codec)?;

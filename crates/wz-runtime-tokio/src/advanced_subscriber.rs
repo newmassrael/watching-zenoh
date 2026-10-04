@@ -4727,7 +4727,7 @@ mod tests {
         let delivered = Arc::new(Mutex::new(Vec::<Vec<u8>>::new()));
         let d = Arc::clone(&delivered);
         let _sub = AdvancedSubscriber::declare(&session, "demo/data", move |sample: Sample| {
-            d.lock().unwrap().push(sample.payload.clone())
+            d.lock().unwrap().push(sample.payload.to_vec())
         })
         .expect("advanced subscriber declares against the test link");
 
@@ -4780,7 +4780,7 @@ mod tests {
         let d = Arc::clone(&delivered);
         let m = Arc::clone(&misses);
         let sub = AdvancedSubscriber::declare(&session, "demo/data", move |sample: Sample| {
-            d.lock().unwrap().push(sample.payload.clone())
+            d.lock().unwrap().push(sample.payload.to_vec())
         })
         .expect("advanced subscriber declares against the test link");
         let _listener = sub.sample_miss_listener(move |miss: Miss| m.lock().unwrap().push(miss));
@@ -5290,7 +5290,7 @@ mod tests {
             move |sample: Sample| {
                 d.lock()
                     .unwrap()
-                    .push((sample.kind, sample.payload.clone()));
+                    .push((sample.kind, sample.payload.to_vec()));
                 ts.lock().unwrap().push(sample.timestamp.map(|t| t.time));
             },
             move |_miss: Miss| *m.lock().unwrap() += 1,

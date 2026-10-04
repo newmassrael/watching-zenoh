@@ -224,6 +224,30 @@ pub fn collect_payload<S: CodecStorage>(
     }
 }
 
+/// [`collect_payload`] for a Put the receive path decoded, returning the bytes as
+/// a value that can stay shared.
+///
+/// A Put in the inline layout holds its payload as a field of the wire profile
+/// ([`WireStorage`](crate::wire::WireStorage)), which on an AP build is a range of
+/// the frame it was decoded from; that field IS what the sample should hold, so
+/// it is handed on as it is (a second reference to the frame's storage, no copy).
+/// A sliced Put has to be assembled from its slices, which is a new buffer and the
+/// same copy [`collect_payload`] makes. Off `rx-shared-bytes` there is no sharing
+/// and this is [`collect_payload`] moved into the shareable type.
+pub fn collect_wire_payload(
+    put: &MsgPutOwned<crate::wire::WireStorage>,
+    resolve: impl FnMut(&[u8]) -> Option<Vec<u8>>,
+) -> Result<crate::link::RxBytes, PayloadFault> {
+    #[cfg(feature = "rx-shared-bytes")]
+    if put.slices.is_none() {
+        return Ok(match put.payload.as_ref() {
+            Some(field) => field.as_rx_bytes().clone(),
+            None => crate::link::RxBytes::from(Vec::new()),
+        });
+    }
+    collect_payload(put, resolve).map(crate::link::RxBytes::from)
+}
+
 // The witnesses build the marker extension, which lives behind `transport-shm`.
 #[cfg(all(test, feature = "transport-shm"))]
 mod tests {

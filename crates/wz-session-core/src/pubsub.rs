@@ -1455,7 +1455,7 @@ impl<C: SampleSink> SubscriberRegistry<C> {
                             return;
                         }
                         let resolver = self.shm_resolver.as_ref();
-                        match crate::put_payload::collect_payload(put, |descriptor| {
+                        match crate::put_payload::collect_wire_payload(put, |descriptor| {
                             crate::extshm::decode_shm_descriptor(descriptor)
                                 .and_then(|d| resolver.and_then(|r| r.resolve(&d)))
                         }) {
@@ -1471,14 +1471,16 @@ impl<C: SampleSink> SubscriberRegistry<C> {
                         }
                     } else {
                         // The inline layout never fails: no slice, no descriptor.
-                        crate::put_payload::collect_payload(put, |_| None).unwrap_or_default()
+                        crate::put_payload::collect_wire_payload(put, |_| None)
+                            .unwrap_or_else(|_| crate::link::RxBytes::from(alloc::vec::Vec::new()))
                     };
                     // Without the shared-memory transport there is no resolver to
                     // ask, so a sliced Put can only be delivered when every slice
                     // is plain bytes; one that names a segment is dropped rather
                     // than delivered as the descriptor it carries.
                     #[cfg(not(feature = "transport-shm"))]
-                    let put_payload = match crate::put_payload::collect_payload(put, |_| None) {
+                    let put_payload = match crate::put_payload::collect_wire_payload(put, |_| None)
+                    {
                         Ok(bytes) => bytes,
                         Err(_) => return,
                     };
@@ -1522,7 +1524,7 @@ impl<C: SampleSink> SubscriberRegistry<C> {
                     };
                     (
                         SampleKind::Del,
-                        alloc::vec::Vec::new(),
+                        crate::link::RxBytes::from(alloc::vec::Vec::new()),
                         body_timestamp,
                         None,
                         body_attachment,
@@ -1560,7 +1562,7 @@ impl<C: SampleSink> SubscriberRegistry<C> {
         // shape (kind-dispatched constructor + every applicable
         // optional setter); semantics are byte-identical.
         let mut sample = match kind {
-            SampleKind::Put => Sample::new_put(resolved, payload),
+            SampleKind::Put => Sample::new_put_shared(resolved, payload),
             SampleKind::Del => Sample::new_del(resolved),
         };
         if let Some(ts) = body_timestamp {
