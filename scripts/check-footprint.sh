@@ -762,8 +762,35 @@ declare -A BASELINE_MC_TEXT=(
     # not free either: the Put layout is 21% of it and is paid by every bin
     # that links the Put codec, whatever its host.
     # Old: 55876/56020 (R3001).
-    ["thumbv7m-none-eabi"]=63932
-    ["thumbv7em-none-eabihf"]=63924
+    # R3034 -- GREW +264 / +100 B since R3009 on the hosted run for `2af818e9`
+    # (`37168871935`, thumbv7m 64196, 8 B past the band; thumbv7em 64024 inside it),
+    # and the bytes are the PIN's, not the Put codec's. Built apart on this host
+    # (gcc 13.2, the normalised flags), thumbv7m text: the previous green tree
+    # (`3a17842e`) 64048, the same tree with only the SCE pin moved `9111a8535f`
+    # -> `6d7c7b6f65` (162 SCE commits) 64192, and the pushed tree 64192 -- so the
+    # Put codec's new chain identifier (`entry-id-except`, the codec now compares
+    # the entry header's low seven bits with 0x12 where it compared four bits with
+    # 2) costs 0 B in this bin. The old tree reads 64048 against the hosted 64056,
+    # and the pushed tree 64192 against 64196, so the hosts agree to 4-8 B and the
+    # +144 local is the +140 hosted.
+    # A per-symbol diff of the old-pin and new-pin thumbv7m ELFs (`arm-none-eabi-nm
+    # -S`, hashes stripped; 32 symbols moved, net +138, the rest alignment) names it:
+    #   +102  sce_rust_runtime::engine::Engine, once per statechart this bin carries
+    #         (`session_fsm_multicast` +48, `reassembly_slot` +30, `multicast_peer`
+    #         +24): the microstep procedures the pin keeps growing, the same
+    #         instantiations R3009 charged +5264 to
+    #    +18  __cortex_m_rt_main -- the absorber, where the pin's other changes sit
+    #    +12  wz_runtime_coop::reassembly_rx::mcu_reassembly
+    #     +6  PeerSlot::new
+    # and the rest is anonymous rodata and switch tables that changed only their
+    # content hash (they appear NEW and GONE at the same size, net zero).
+    # NOT A LEAK: `data` is 4 and `bss` moves by 8, so the delta is ROM. The change
+    # that follows this one in the same push, the receive path handing a Sample
+    # the frame it arrived in, builds at 64180 here, 12 B under the pushed tree,
+    # so it is not part of this figure and the headroom is the pin's alone.
+    # Old: 63932/63924 (R3009).
+    ["thumbv7m-none-eabi"]=64196
+    ["thumbv7em-none-eabihf"]=64024
 )
 # shellcheck disable=SC2034  # resolved through the `declare -n _bt/_bd/_bb`
                             # namerefs in the `case "$artifact"` dispatch below; shellcheck
