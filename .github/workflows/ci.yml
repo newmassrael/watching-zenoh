@@ -3872,10 +3872,22 @@ jobs:
   # the FIRST run builds these feature sets cold. 780s is the warm number; the
   # margin step below reports where it lands, and its floor is what will ask
   # for the budget back once the cache is warm.
+  #
+  # R3043 -- 45 -> 30, ASKED FOR BY THAT FLOOR. Run 37205006166 read 486s of
+  # 2700s (18%, floor 20%) and the margin step said "Nothing failed": the lanes
+  # passed and the budget was too large to be a gate. It is not a regression of
+  # the push that read it. Measured over the last eight runs of this job, the
+  # warm runs took 486, 608, 617, 756, 763, 765 and 828s (18% to 31% of 2700),
+  # so the previous runs were above the floor by margin and not by design; the
+  # eighth, 311s, is a run whose lane died early and is not a sample. A budget
+  # has to satisfy two things at once: the floor at 20% needs it no larger than
+  # 2430s (486 / 0.20), and the alarm at 90% needs it no smaller than 920s
+  # (828 / 0.90) to stay silent on a healthy run. 1800s, the budget its sibling
+  # jobs run under, is inside both and leaves the slowest observed run at 46%.
   feature-gates-peel:
     name: feature-gate NEG lanes, the four heaviest (peeled for budget)
     runs-on: ubuntu-22.04
-    timeout-minutes: 45
+    timeout-minutes: 30
     steps:
       - name: Budget stamp — start this job's own clock
         run: date +%s > "$RUNNER_TEMP/wz_job_start"
@@ -3959,13 +3971,14 @@ jobs:
         run: df -h /
 
       - name: Budget margin — this job may not approach its timeout in silence
-        # 2700 is `timeout-minutes: 45` in seconds; the two are one fact and
+        # 1800 is `timeout-minutes: 30` in seconds; the two are one fact and
         # `scripts/lib/job_budget_binding.py` holds them together. 90 / 20 are
         # the parent job's alarm and floor, and for its reason: a threshold
         # tuned to sit above this job's first measurement would be the raise
-        # this split exists instead of.
+        # this split exists instead of. The budget moved 2700 -> 1800 (R3043)
+        # because the floor, unchanged, was the thing that asked for it.
         if: always()
-        run: bash scripts/lib/job-budget-margin.sh "$RUNNER_TEMP/wz_job_start" 2700 90 20 '${{ job.status }}'
+        run: bash scripts/lib/job-budget-margin.sh "$RUNNER_TEMP/wz_job_start" 1800 90 20 '${{ job.status }}'
 
   # ─────────────────────────────────────────────────────────────────
   # R311y793 — the ROUTING + ADMINSPACE job. Eight lanes peeled off
