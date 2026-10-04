@@ -125,10 +125,10 @@ use wz_session_core::multicast_join::encode_join;
 // dispatch + sweep (the tail wiring lives in `multicast_rx`, not hand-mirrored
 // here); a non-reassembly build calls the bare classify + acts on Close only.
 #[cfg(not(feature = "reassembly"))]
-use wz_session_core::multicast_rx::{dispatch_multicast_inbound, MulticastRxNext};
+use wz_session_core::multicast_rx::{dispatch_multicast_inbound_in, MulticastRxNext};
 #[cfg(feature = "reassembly")]
 use wz_session_core::multicast_rx::{
-    dispatch_multicast_inbound_reassembling, sweep_multicast_reassembling,
+    dispatch_multicast_inbound_reassembling_in, sweep_multicast_reassembling,
 };
 // R2848 — where the loop and the RX dispatch report this transport's counts.
 pub use wz_session_core::multicast_stats::MulticastStatsRecorder;
@@ -936,22 +936,29 @@ where
                         // a non-reassembly build calls the bare classify and acts
                         // only on Close (FrameOutOfOrder / Fragment are no-ops
                         // without a Router).
+                        //
+                        // The datagram is made shareable ONCE, before anything is
+                        // decoded out of it: a data frame's payload and the messages
+                        // walked from it are then ranges of the buffer the link
+                        // read, so a sample from the group is a reference to it and
+                        // not a copy (the unicast drive loop does the same).
+                        let unit = rx.bytes.into_lent();
                         #[cfg(feature = "reassembly")]
-                        dispatch_multicast_inbound_reassembling(
+                        dispatch_multicast_inbound_reassembling_in(
                             dispatcher,
                             &mut reasm,
                             params,
-                            &rx.bytes,
+                            &unit,
                             src,
                             now,
                             &mut on_event,
                             stats,
                         );
                         #[cfg(not(feature = "reassembly"))]
-                        if let MulticastRxNext::Close = dispatch_multicast_inbound(
+                        if let MulticastRxNext::Close = dispatch_multicast_inbound_in(
                             dispatcher,
                             params,
-                            &rx.bytes,
+                            &unit,
                             src,
                             now,
                             &mut on_event,

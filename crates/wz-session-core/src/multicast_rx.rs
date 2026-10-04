@@ -29,7 +29,8 @@
 use core::net::SocketAddr;
 
 use crate::driver_loop::{DriverLoopOutcome, IterationEvent};
-use crate::inbound::{parse_inbound, InboundFrame};
+use crate::inbound::{parse_inbound, parse_inbound_consuming_in, InboundFrame};
+use crate::link::RxBytes;
 use crate::multicast_dispatch::{FrameIngest, JoinOutcome, MulticastDispatcher};
 #[cfg(feature = "transport-qos")]
 use crate::multicast_join::decode_join_qos;
@@ -37,7 +38,7 @@ use crate::multicast_join::{decode_join, validate_join};
 use crate::multicast_params::MulticastParams;
 use crate::multicast_peer_arrived::MulticastPeerArrived;
 use crate::multicast_peer_lost::{MulticastPeerId, MulticastPeerLostReason};
-use crate::network_message::parse_frame_payload;
+use crate::network_message::parse_frame_payload_in;
 use crate::wire_const;
 use wz_codecs::whatami::WhatAmI;
 // R311mh — the reassembly-divergent tail SSOT (dispatch_multicast_inbound_reassembling
@@ -138,11 +139,80 @@ where
     F: FnMut(IterationEvent<'_>),
     R: MulticastStatsRecorder + ?Sized,
 {
+    walk_multicast_inbound(
+        dispatcher, params, bytes, None, src, now_ms, on_event, stats,
+    )
+}
+
+/// [`dispatch_multicast_inbound`] over a datagram that can be SHARED: a data
+/// frame's payload, and the messages decoded out of it, are ranges of `unit`
+/// rather than copies, so on a lent datagram (see
+/// [`RxBytes::into_lent`](crate::link::RxBytes::into_lent)) a sample from the
+/// group is a reference to the buffer the link read.
+///
+/// The decode runs over `unit`'s own bytes, which is what makes a range of them
+/// recognisable as part of `unit`; this is not [`dispatch_multicast_inbound`]
+/// over a copy. The walk, the verdicts and everything the observer sees are the
+/// same code, [`dispatch_multicast_inbound`]'s own, with an origin to share.
+pub fn dispatch_multicast_inbound_in<F, R, const MAX_PEERS: usize>(
+    dispatcher: &mut MulticastDispatcher<MAX_PEERS>,
+    params: &MulticastParams,
+    unit: &RxBytes,
+    src: SocketAddr,
+    now_ms: u64,
+    on_event: &mut F,
+    stats: &R,
+) -> MulticastRxNext
+where
+    F: FnMut(IterationEvent<'_>),
+    R: MulticastStatsRecorder + ?Sized,
+{
+    walk_multicast_inbound(
+        dispatcher,
+        params,
+        unit.as_slice(),
+        Some(unit),
+        src,
+        now_ms,
+        on_event,
+        stats,
+    )
+}
+
+/// The walk behind [`dispatch_multicast_inbound`] and
+/// [`dispatch_multicast_inbound_in`]. `origin`, when there is one, is the
+/// [`RxBytes`] that `bytes` was taken from; each message of the batch is handed
+/// to [`dispatch_multicast_message`] with the range of it that starts at that
+/// message.
+#[allow(clippy::too_many_arguments)] // the public entry point's seven plus the origin
+fn walk_multicast_inbound<F, R, const MAX_PEERS: usize>(
+    dispatcher: &mut MulticastDispatcher<MAX_PEERS>,
+    params: &MulticastParams,
+    bytes: &[u8],
+    origin: Option<&RxBytes>,
+    src: SocketAddr,
+    now_ms: u64,
+    on_event: &mut F,
+    stats: &R,
+) -> MulticastRxNext
+where
+    F: FnMut(IterationEvent<'_>),
+    R: MulticastStatsRecorder + ?Sized,
+{
     let mut pos = 0usize;
     loop {
         let msg = &bytes[pos..];
-        let next =
-            dispatch_multicast_message(dispatcher, params, msg, src, now_ms, on_event, stats);
+        let msg_unit = origin.and_then(|unit| unit.subslice(pos..bytes.len()));
+        let next = dispatch_multicast_message(
+            dispatcher,
+            params,
+            msg,
+            msg_unit.as_ref(),
+            src,
+            now_ms,
+            on_event,
+            stats,
+        );
         if !matches!(next, MulticastRxNext::Done) {
             return next;
         }
@@ -169,10 +239,12 @@ where
 /// A KeepAlive, a Close and a Fragment are counted off their MID, which is all
 /// of them this arm reads; a JOIN or a Frame that does not decode is not
 /// counted, as upstream's walk stops at a decoding error.
+#[allow(clippy::too_many_arguments)] // the walk's seven plus the range of the datagram the message is
 fn dispatch_multicast_message<F, R, const MAX_PEERS: usize>(
     dispatcher: &mut MulticastDispatcher<MAX_PEERS>,
     params: &MulticastParams,
     bytes: &[u8],
+    origin: Option<&RxBytes>,
     src: SocketAddr,
     now_ms: u64,
     on_event: &mut F,
@@ -315,6 +387,14 @@ where
             // batch to the observer. A frame from an unknown peer or a
             // malformed envelope / payload is dropped; an out-of-order SN hands
             // the in-progress-chain abort back to the caller.
+            //
+            // With an origin the frame is decoded OUT OF it, so its payload and the
+            // messages walked from the payload are ranges of the datagram the link
+            // read; without one the decode copies, as it always did.
+            let parsed = match origin {
+                Some(unit) => parse_inbound_consuming_in(unit).map(|(frame, _)| frame),
+                None => parse_inbound(bytes),
+            };
             if let Ok(InboundFrame::Frame {
                 reliable,
                 sn,
@@ -323,7 +403,7 @@ where
                 extensions,
                 priority,
                 ..
-            }) = parse_inbound(bytes)
+            }) = parsed
             {
                 stats.transport_message_received();
                 // R311y227 — admit against the frame's OWN per-priority conduit
@@ -332,7 +412,7 @@ where
                 // single DEFAULT conduit — byte-identical to the pre-R311y227 gate.
                 match dispatcher.ingest_frame_by_src_qos(src, priority, reliable, sn, now_ms) {
                     FrameIngest::Admitted => {
-                        if let Ok(messages) = parse_frame_payload(&payload) {
+                        if let Ok(messages) = parse_frame_payload_in(&payload) {
                             // The `ingest_frame_by_src` `&mut dispatcher` borrow
                             // ended at the match scrutinee (`FrameIngest` is a
                             // fieldless enum), so the dispatcher is free to
@@ -461,6 +541,77 @@ pub fn dispatch_multicast_inbound_reassembling<
     F: FnMut(IterationEvent<'_>),
     R: MulticastStatsRecorder + ?Sized,
 {
+    walk_multicast_inbound_reassembling(
+        dispatcher, reasm, params, bytes, None, src, now_ms, on_event, stats,
+    )
+}
+
+/// [`dispatch_multicast_inbound_reassembling`] over a datagram that can be
+/// SHARED, as [`dispatch_multicast_inbound_in`] is to the plain entry point: a
+/// data frame's payload and the messages decoded out of it are ranges of `unit`.
+/// A completed reassembly chain is still a borrowed slot of the reassembler and
+/// is copied once into a buffer of its own, as it is on the unicast path.
+#[cfg(all(feature = "reassembly", feature = "alloc"))]
+#[allow(clippy::too_many_arguments)] // the plain entry point's seven plus the caller's Router
+pub fn dispatch_multicast_inbound_reassembling_in<
+    F,
+    const MAX_PEERS: usize,
+    const SLOTS: usize,
+    const CAP: usize,
+    S,
+    R,
+>(
+    dispatcher: &mut MulticastDispatcher<MAX_PEERS>,
+    reasm: &mut ReassemblyDispatcher<SLOTS, CAP, S>,
+    params: &MulticastParams,
+    unit: &RxBytes,
+    src: SocketAddr,
+    now_ms: u64,
+    on_event: &mut F,
+    stats: &R,
+) where
+    S: crate::chain_staging::ChainStaging<SLOTS, CAP>,
+    F: FnMut(IterationEvent<'_>),
+    R: MulticastStatsRecorder + ?Sized,
+{
+    walk_multicast_inbound_reassembling(
+        dispatcher,
+        reasm,
+        params,
+        unit.as_slice(),
+        Some(unit),
+        src,
+        now_ms,
+        on_event,
+        stats,
+    )
+}
+
+/// The walk behind [`dispatch_multicast_inbound_reassembling`] and its `_in` twin.
+#[cfg(all(feature = "reassembly", feature = "alloc"))]
+#[allow(clippy::too_many_arguments)] // the entry point's eight plus the origin
+fn walk_multicast_inbound_reassembling<
+    F,
+    const MAX_PEERS: usize,
+    const SLOTS: usize,
+    const CAP: usize,
+    S,
+    R,
+>(
+    dispatcher: &mut MulticastDispatcher<MAX_PEERS>,
+    reasm: &mut ReassemblyDispatcher<SLOTS, CAP, S>,
+    params: &MulticastParams,
+    bytes: &[u8],
+    origin: Option<&RxBytes>,
+    src: SocketAddr,
+    now_ms: u64,
+    on_event: &mut F,
+    stats: &R,
+) where
+    S: crate::chain_staging::ChainStaging<SLOTS, CAP>,
+    F: FnMut(IterationEvent<'_>),
+    R: MulticastStatsRecorder + ?Sized,
+{
     // R311y633 (§17.6) — the SAME walk as the plain entry point, but the tail
     // has to run per MESSAGE: the `Fragment` arm re-parses the bytes it was
     // handed, and parsing from the front of the DATAGRAM would read the message
@@ -468,7 +619,17 @@ pub fn dispatch_multicast_inbound_reassembling<
     let mut pos = 0usize;
     loop {
         let msg = &bytes[pos..];
-        match dispatch_multicast_message(dispatcher, params, msg, src, now_ms, on_event, stats) {
+        let msg_unit = origin.and_then(|unit| unit.subslice(pos..bytes.len()));
+        match dispatch_multicast_message(
+            dispatcher,
+            params,
+            msg,
+            msg_unit.as_ref(),
+            src,
+            now_ms,
+            on_event,
+            stats,
+        ) {
             MulticastRxNext::Done => match multicast_message_len(msg) {
                 Some(consumed) => {
                     pos += consumed;
@@ -692,6 +853,93 @@ mod batch_walk_tests {
             polls, 1,
             "the frame BEHIND the beacon must be fanned: a walk that stopped \
              at the JOIN reports zero"
+        );
+    }
+
+    /// The multicast twin of the unicast sharing witness: the payload of a data
+    /// frame a group member sent is a range of the DATAGRAM it arrived in, and
+    /// not a copy of it.
+    ///
+    /// The datagram is a JOIN and then a data frame, so the frame is not at the
+    /// front: the walk hands it the range of the datagram that starts at it, which
+    /// is what a sample from the group has to be a part of. The address is read off
+    /// the message the observer is handed, not off anything the test retains.
+    ///
+    /// The control is the copying entry point over the same bytes, which puts the
+    /// payload OUTSIDE them and owns it; without it the address check could pass
+    /// for a reason that has nothing to do with sharing.
+    #[cfg(all(feature = "rx-shared-bytes", feature = "codec-push"))]
+    #[test]
+    fn a_multicast_frames_payload_is_a_range_of_the_datagram_it_arrived_in() {
+        use crate::network_message::NetworkMessage;
+
+        const BODY: &[u8] = b"multicast-payload-shared";
+
+        /// The address of the first Push's payload in a delivered batch, and
+        /// whether the message holds it as lent storage.
+        fn first_payload(outcome: &DriverLoopOutcome) -> (usize, bool) {
+            let DriverLoopOutcome::FramePayload { messages, .. } = outcome else {
+                panic!("a data frame is fanned as a FramePayload, got {outcome:?}");
+            };
+            let NetworkMessage::Push(push) = &messages[0] else {
+                panic!("the batch is one Push, got {:?}", messages[0]);
+            };
+            let crate::wire::PushOwnedVariant::CodecZenohMsgPut(put) = &push.body else {
+                panic!("a literal put carries a Put body");
+            };
+            let lent = put.payload.as_ref().expect("an inline Put").is_shared();
+            let at = crate::put_payload::inline_bytes(put).expect("an inline Put");
+            (at.as_ptr() as usize, lent)
+        }
+
+        let push = crate::push_build::build_push_literal("demo/mc", BODY).expect("a literal put");
+        let mut datagram = peer_join(&[0x22; 4]);
+        datagram.extend_from_slice(&crate::frame_encode::encode_frame_with_push(0, push, true));
+        let local = params(&[0x11; 4]);
+
+        let lent = RxBytes::lend(datagram.clone());
+        let span = lent.as_slice().as_ptr_range();
+        let mut shared = None;
+        let _ = dispatch_multicast_inbound_in(
+            &mut running::<4>(),
+            &local,
+            &lent,
+            PEER,
+            1_000,
+            &mut |event| {
+                if let IterationEvent::Poll(outcome) = event {
+                    shared = Some(first_payload(outcome));
+                }
+            },
+            &(),
+        );
+        let (at, lent_field) = shared.expect("the frame behind the beacon was fanned");
+        assert!(lent_field, "the message holds the payload as lent storage");
+        assert!(
+            span.contains(&(at as *const u8)),
+            "the payload must be a range of the datagram, not a copy of it"
+        );
+
+        let span = datagram.as_ptr_range();
+        let mut copied = None;
+        let _ = dispatch_multicast_inbound(
+            &mut running::<4>(),
+            &local,
+            &datagram,
+            PEER,
+            1_000,
+            &mut |event| {
+                if let IterationEvent::Poll(outcome) = event {
+                    copied = Some(first_payload(outcome));
+                }
+            },
+            &(),
+        );
+        let (at, lent_field) = copied.expect("the copying walk fanned the frame too");
+        assert!(!lent_field, "the copying walk owns its payload");
+        assert!(
+            !span.contains(&(at as *const u8)),
+            "the copying walk's payload lies outside the datagram"
         );
     }
 
