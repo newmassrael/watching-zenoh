@@ -2413,7 +2413,14 @@ PIN_NO_SYMBOL = 0
 # FAIL line, `wz citations: 31 against a pin of 27`; `reached` and `ambiguous` hold at 3
 # and 2. The census also read one more token as an upstream file, because the anchor
 # text `arena.complete(frame)` contains `arena.c`; that bucket is counted and not pinned.
-PIN_WZ_CITATIONS = 31
+#
+# R3038 -- 31 -> 36, one atom. `transport-shm`'s reason gains the UPDATE that the
+# provider's lifecycle arm is built, which cites five wz anchors (the guarded
+# serialization step, the busy-list collection, the arm that leaves a chunk
+# standing for a receiver, the positive twin of the held leg, and the slice walk's
+# witness), and the atom is still PARTIAL. READ off the census's own FAIL line,
+# `wz citations: 36 against a pin of 31`; `reached` and `ambiguous` hold at 3 and 2.
+PIN_WZ_CITATIONS = 36
 # R2626 — 44 -> 42, and this one is worth a sentence because it HELD through
 # every earlier retirement in this run (R2612, R2622). `time-hlc`'s reason is the
 # first retiree carrying AMBIGUOUS citations of its own: its oldest clauses cite
