@@ -2390,7 +2390,15 @@ PIN_NO_SYMBOL = 0
 # count of holders of a lent storage), and the atom is still PARTIAL on the multicast
 # receive path. READ off the census's own FAIL line, `wz citations: 20 against a pin
 # of 16`; `reached` and `ambiguous` hold at 3 and 2.
-PIN_WZ_CITATIONS = 20
+#
+# R3035 -- 20 -> 23, one atom. `runtime-zero-copy`'s reason gains the UPDATE that the
+# multicast receive path and the reply plane are no longer copies, which cites three wz
+# anchors (the multicast entry point that takes the shareable datagram, and the two
+# witnesses that read the multicast payload's address and the kept reply's holders), and
+# the atom is still PARTIAL on four pieces the update names by whose each is. READ off
+# the census's own FAIL line, `wz citations: 23 against a pin of 20`; `reached` and
+# `ambiguous` hold at 3 and 2.
+PIN_WZ_CITATIONS = 23
 # R2626 — 44 -> 42, and this one is worth a sentence because it HELD through
 # every earlier retirement in this run (R2612, R2622). `time-hlc`'s reason is the
 # first retiree carrying AMBIGUOUS citations of its own: its oldest clauses cite
