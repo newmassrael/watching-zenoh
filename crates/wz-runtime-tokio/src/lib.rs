@@ -1667,6 +1667,11 @@ pub mod posix_shm;
 /// live in the no_std core.
 #[cfg(feature = "transport-shm")]
 pub mod shm_provider;
+/// R3039 -- the shared-memory watchdog: holders confirm a chunk's liveness
+/// bit and its provider validates it, upstream's two periodic halves. Gated
+/// with the provider it serves.
+#[cfg(feature = "transport-shm")]
+pub mod shm_watchdog;
 
 /// session-extshm (R311y507) — the POSIX AUTH SEGMENT behind zenoh's SHM
 /// establishment challenge-response: a `/dev/shm/{id}.zenoh` object holding a

@@ -6600,7 +6600,14 @@ layer_c1af_cargo_test_shm() {
     # renamed), the replay that cannot wrap the count, and the first-in
     # first-out slot queue joined; `dropping_the_owner_invalidates_the_slot`
     # became the arm for an owner with no receiver.
-    _runci_guarded_test C1af 12 cargo test -p wz-runtime-tokio --features session-extshm,transport-unicast,transport-link-tcp --lib shm_provider --quiet \
+    # R3039 -- 12 -> 17, MEASURED. The watchdog joined the provider: a chunk nobody
+    # confirmed for a window is invalidated, one confirmed in every window is not,
+    # a receiver's hold keeps its chunk confirmed until it lets go and releases on
+    # drop, a hold on another generation links nothing, and the running thread
+    # invalidates a parked chunk no one holds. The watchdog module's own three
+    # tests and the segment-identity test live in other modules this filter does
+    # not select.
+    _runci_guarded_test C1af 17 cargo test -p wz-runtime-tokio --features session-extshm,transport-unicast,transport-link-tcp --lib shm_provider --quiet \
         || return 1
     # R311y507 — 2 -> 5. The target gained the challenge-response over a real
     # driven handshake plus the two half-mix arms (a ONE-SIDED authenticator must

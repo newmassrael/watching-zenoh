@@ -280,19 +280,35 @@ pub struct PeerSegmentRw {
     /// mapping it points into lives exactly as long as `_map`.
     ptr: *mut u8,
     len: usize,
+    id: u64,
+    /// Which object this mapping is of: the device and inode the open file had.
+    /// A segment name can be reused after its owner exits, and a mapping of the
+    /// old object would read a dead provider's headers as if they were live.
+    identity: (u64, u64),
     _map: MmapMut,
     _file: File,
 }
+
+// SAFETY: `ptr` points into `_map`, which this value owns and which is `Send`; the
+// pointer is only ever handed out as a raw pointer whose uses are the caller's, and
+// every field reached through it is an atomic.
+unsafe impl Send for PeerSegmentRw {}
+// SAFETY: as for `Send`; sharing the value shares the address of a mapping that is
+// itself shared memory, and nothing here reads or writes it.
+unsafe impl Sync for PeerSegmentRw {}
 
 impl PeerSegmentRw {
     /// Open the segment named by `id`. An error, never a panic, when it does not
     /// exist or cannot be locked or mapped, as for [`PeerSegment::open`].
     pub fn open(id: u64) -> io::Result<Self> {
+        use std::os::unix::fs::MetadataExt;
+
         let file = OpenOptions::new()
             .read(true)
             .write(true)
             .open(segment_path(id))?;
         lock_shared(&file)?;
+        let meta = file.metadata()?;
         // SAFETY: a writable view of a peer-owned mapping. The peer and this
         // process both write it concurrently, which is the shared-memory
         // contract; every field a caller reaches through it is an atomic.
@@ -302,9 +318,24 @@ impl PeerSegmentRw {
         Ok(Self {
             ptr,
             len,
+            id,
+            identity: (meta.dev(), meta.ino()),
             _map: map,
             _file: file,
         })
+    }
+
+    /// Whether the name this segment was opened by still names the same object.
+    ///
+    /// False once its owner has unlinked it, or unlinked it and another process
+    /// has made a new segment under the same id. A holder that keeps a mapping
+    /// for reuse asks this before it trusts one.
+    pub fn is_current(&self) -> bool {
+        use std::os::unix::fs::MetadataExt;
+
+        std::fs::metadata(segment_path(self.id))
+            .map(|m| (m.dev(), m.ino()) == self.identity)
+            .unwrap_or(false)
     }
 
     /// The segment's size in bytes.
@@ -348,5 +379,31 @@ mod tests {
         assert!(held_path.exists(), "a segment this process holds is kept");
         drop(held);
         assert!(!held_path.exists(), "and its own drop still unlinks it");
+    }
+
+    /// R3039 -- a cached mapping is trusted only while its name still names the
+    /// object it was opened as: true while its owner holds the segment, false once
+    /// the owner has unlinked it, and false again if another segment is made under
+    /// the same id (a new inode), which is the case a reader that keeps a mapping
+    /// must not read a dead provider's headers through.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_mapping_is_current_only_while_its_name_names_its_object() {
+        let owner = OwnedSegment::create(64, || u64::from(next_candidate_id())).expect("create");
+        let id = owner.id();
+        let peer = PeerSegmentRw::open(id).expect("open writable");
+        assert!(peer.is_current(), "the owner still holds the segment");
+        assert_eq!(peer.len(), 64);
+
+        drop(owner);
+        assert!(!peer.is_current(), "the owner unlinked it");
+
+        // The same id, made again: a different object under the same name.
+        std::fs::write(segment_path(id), [0u8; 64]).expect("make another segment of that id");
+        assert!(
+            !peer.is_current(),
+            "the name now names a different inode, so the mapping is of a dead object"
+        );
+        std::fs::remove_file(segment_path(id)).expect("clean up");
     }
 }
