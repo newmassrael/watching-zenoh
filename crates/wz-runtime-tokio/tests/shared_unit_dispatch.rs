@@ -24,7 +24,11 @@
 //!   storage and dispatched on the next turn, and its payload lies inside it;
 //! - the CONTROL: a copy of the same frame decoded without an origin puts the
 //!   payload outside it, so the three address checks cannot pass for a reason
-//!   that has nothing to do with sharing.
+//!   that has nothing to do with sharing;
+//! - a SUBSCRIBER's callback, and a sample the application KEEPS: these go on to
+//!   project the Put into a sample, which `pubsub-put` gates. Without it a Push is
+//!   delivered to the observer and no subscriber fires, so they carry that gate
+//!   themselves and the legs above, which stop at the message, do not.
 
 #![cfg(all(
     feature = "session-unicast-open",
@@ -34,7 +38,9 @@
     feature = "codec-push"
 ))]
 
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
+#[cfg(feature = "pubsub-put")]
+use std::sync::Mutex;
 
 use wz_runtime_tokio::runtime_impl::TokioTime;
 use wz_runtime_tokio::session_fsm_unicast::{SessionFsmUnicastEvent as E, SessionFsmUnicastState};
@@ -47,6 +53,7 @@ use wz_session_core::drive::{dispatch_link_event, dispatch_pending};
 use wz_session_core::driver_loop::DriverLoopOutcome;
 use wz_session_core::frame_encode::encode_frame_with_push;
 use wz_session_core::network_message::NetworkMessage;
+#[cfg(feature = "pubsub-put")]
 use wz_session_core::pubsub::SubscriberRegistry;
 use wz_session_core::push_build::build_push_literal;
 use wz_session_wire_fixtures::{craft_initack_wire, craft_openack_wire};
@@ -191,6 +198,7 @@ fn the_remainder_of_a_batch_is_parked_as_a_range_of_the_unit_and_decoded_from_it
 ///
 /// The payload address is read INSIDE the callback, from the view the subscriber
 /// is given, so nothing here can be satisfied by a retained copy.
+#[cfg(feature = "pubsub-put")]
 #[test]
 fn a_subscriber_is_handed_a_sample_whose_payload_is_the_buffer_the_link_read() {
     established!(actions, engine);
@@ -234,6 +242,7 @@ fn a_subscriber_is_handed_a_sample_whose_payload_is_the_buffer_the_link_read() {
 /// is what keeps that storage out of its pool. The count of holders of the lent
 /// storage is the observable: the link's handle, the frame's, and the retained
 /// sample's, down to the sample's alone and then to none once it drops.
+#[cfg(feature = "pubsub-put")]
 #[test]
 fn a_sample_the_application_keeps_holds_the_lent_storage_until_it_is_dropped() {
     established!(actions, engine);
