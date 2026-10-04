@@ -5807,8 +5807,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// [`Self::handle_inbound_consuming`] over a unit that can be shared: the
     /// frame it returns holds a range of `unit` where the other one holds a
     /// copy (see [`crate::inbound::parse_inbound_consuming_in`]). Everything
-    /// the handler does with the frame is the same code, in
-    /// [`Self::observe_inbound`].
+    /// the handler does with the frame is the same code, in `observe_inbound`.
     pub fn handle_inbound_consuming_in(
         &self,
         unit: &crate::link::RxBytes,
