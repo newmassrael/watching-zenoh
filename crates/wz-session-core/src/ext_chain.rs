@@ -51,11 +51,12 @@ use wz_codecs::ext_entry::ExtEntryOwned;
 ))]
 pub const NETWORK_EXT_CHAIN_DEPTH: usize = 8;
 
-/// `Query`'s chain is generated with the fill-to-end strategy and its own,
-/// larger depth. Separate constant rather than a second use of
-/// [`NETWORK_EXT_CHAIN_DEPTH`]: the two are different numbers in the SCXML for
+/// `Query`'s chain has a depth of its own, a number the SCXML declares apart from
+/// the network messages'. Separate constant rather than a second use of
+/// [`NETWORK_EXT_CHAIN_DEPTH`]: they are declared in different documents for
 /// different reasons, and collapsing them would make a future divergence
-/// invisible.
+/// invisible. Until R3046 the chain also read to the end of the frame where the
+/// others stop at the entry whose Z flag is clear; it stops there now.
 #[cfg(feature = "dissect")]
 pub const QUERY_EXT_CHAIN_DEPTH: usize = 8;
 

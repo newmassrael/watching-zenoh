@@ -1530,9 +1530,11 @@ layer_b_verify_codegen() {
     #             codec_zenoh_query.scxml) carries the generic entry and no
     #             such input. MEASURED, not assumed: the element body of the
     #             two sources differs in exactly these places and no other —
-    #             the chain's `type`, its `entry-id`, its `entry-flag-bind`
-    #             child and the import that names the entry — and every
-    #             backend reports `golden mismatch`. Layer 3 and the shared-
+    #             the chain's `type`, its `entry-id`, its `terminate-on` (R3046:
+    #             SCE's resource ends the chain at the end of the frame, which
+    #             two queries in one frame do not survive), its
+    #             `entry-flag-bind` child and the import that names the entry —
+    #             and every backend reports `golden mismatch`. Layer 3 and the shared-
     #             memory witnesses (a router linked against upstream's own
     #             `zenoh`, `wz_shm_query_reply_zenohd_interop`) are the wire
     #             check. Remove this entry the day the upstream resource

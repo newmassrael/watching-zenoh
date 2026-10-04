@@ -112,6 +112,12 @@ OWN_VOCABULARY = {
     "repeat as the field `slices` and the element only as a type. NOT `slices`: "
     "`Field::find` is first-match-by-name and an element sharing its aggregate's "
     "name would shadow it, on the rule `locator_entry` records",
+    "value_encoding": "the encoding of a Query's value when it follows a "
+    "shared-memory marker; the codec's field is `encoding` in the Query value's own "
+    "body codec. NOT "
+    "`encoding`: the same entry's header already carries a bit-range of that name, "
+    "and `Field::find` is first-match-by-name, so a group sharing it would be "
+    "unreachable, on the rule `locator_entry` records (R3046)",
     "keyexprs": "the Declare body's keyexpr group",
     "subscribers": "the Declare body's subscriber group",
     "queryables": "the Declare body's queryable group",

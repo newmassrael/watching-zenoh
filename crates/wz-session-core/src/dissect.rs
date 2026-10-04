@@ -889,21 +889,13 @@ pub fn walk_ext_entry(
     c: &mut SpanCursor<'_>,
     carrier_kind: crate::ext_name::ExtCarrier,
 ) -> Result<(bool, Field), CodecError> {
-    let start = c.offset();
-    let (header, header_field) = c.u8("header")?;
-    let carrier = header_field.span;
-    let z = (header & crate::ext_header::EXT_FLAG_Z) != 0;
-    let enc = (header >> 5) & 0x03;
-    let mut fields = alloc::vec![
-        header_field,
-        bits("ext_id", carrier, crate::ext_header::ext_id(header) as u64),
-        flag("m", carrier, crate::ext_header::ext_mandatory(header)),
-        bits("encoding", carrier, enc as u64),
-        flag("z", carrier, z),
-    ];
-    if let Some(name) = crate::ext_name::ext_name(carrier_kind, header) {
-        fields.push(label("ext_name", carrier, name));
-    }
+    let ExtEntryHead {
+        start,
+        header,
+        z,
+        enc,
+        mut fields,
+    } = walk_ext_entry_head(c, carrier_kind)?;
     match enc {
         // ExtUnit — no body bytes at all.
         0 => {}
@@ -935,6 +927,48 @@ pub fn walk_ext_entry(
         _ => {}
     }
     Ok((z, group("ext", start, c.offset(), fields)))
+}
+
+/// What every extension entry starts with: its header byte, the four named
+/// bit-ranges of it and, when the carrier declares the id, the extension's name.
+/// The body that follows is the caller's, and it is a different one for the
+/// entry of a Query's chain that comes after a shared-memory marker
+/// ([`walk_query_ext_chain`]), which is why this is not inside
+/// [`walk_ext_entry`].
+struct ExtEntryHead {
+    start: usize,
+    header: u8,
+    z: bool,
+    enc: u8,
+    fields: Vec<Field>,
+}
+
+fn walk_ext_entry_head(
+    c: &mut SpanCursor<'_>,
+    carrier_kind: crate::ext_name::ExtCarrier,
+) -> Result<ExtEntryHead, CodecError> {
+    let start = c.offset();
+    let (header, header_field) = c.u8("header")?;
+    let carrier = header_field.span;
+    let z = (header & crate::ext_header::EXT_FLAG_Z) != 0;
+    let enc = (header >> 5) & 0x03;
+    let mut fields = alloc::vec![
+        header_field,
+        bits("ext_id", carrier, crate::ext_header::ext_id(header) as u64),
+        flag("m", carrier, crate::ext_header::ext_mandatory(header)),
+        bits("encoding", carrier, enc as u64),
+        flag("z", carrier, z),
+    ];
+    if let Some(name) = crate::ext_name::ext_name(carrier_kind, header) {
+        fields.push(label("ext_name", carrier, name));
+    }
+    Ok(ExtEntryHead {
+        start,
+        header,
+        z,
+        enc,
+        fields,
+    })
 }
 
 /// The ZBuf extension bodies this build can READ, walked into their fields
@@ -2009,26 +2043,75 @@ fn walk_ext_chain_z(
     Ok(out)
 }
 
-/// The fill-to-end ext chain: `Query` reads entries until its cursor is empty
-/// and rejects a chain longer than `max`, ignoring the Z bit entirely
-/// (`out/wz-codecs/query.rs`). Mirrored exactly, overflow error included.
-fn walk_ext_chain_fill(
-    c: &mut SpanCursor<'_>,
-    max: usize,
-    carrier_kind: crate::ext_name::ExtCarrier,
-) -> Result<Vec<Field>, CodecError> {
+/// A Query's ext chain: it ends at the entry whose Z flag is clear, as every
+/// other chain does ([`walk_ext_chain_z`]), and the entry after a shared-memory
+/// marker that carries the value is read in its sliced shape
+/// ([`walk_query_sliced_value`]).
+///
+/// The generated chain tells each entry whether the one before it was the
+/// marker by that entry's identifier alone, whatever its encoding
+/// (`out/wz-codecs/query.rs`, `_prev_extensions_after_shm`), and this does the
+/// same, so a unit entry at identifier 4 is the marker and a ZBuf entry at
+/// identifier 4 is too. The two failure rows are those of [`walk_ext_chain_z`].
+fn walk_query_ext_chain(c: &mut SpanCursor<'_>, max: usize) -> Result<Vec<Field>, CodecError> {
     let mut out = Vec::new();
+    let mut more = false;
+    let mut after_shm = false;
     for _ in 0..max {
         if c.remaining() == 0 {
             break;
         }
-        let (_, f) = walk_ext_entry(c, carrier_kind)?;
-        out.push(f);
+        let header = c.peek_u8()?;
+        let id = crate::ext_header::ext_id(header);
+        let sliced = after_shm
+            && id == crate::ext_header::body_ext_id::QUERY_BODY
+            && (header & crate::ext_header::EXT_ENC_MASK) == crate::ext_header::EXT_ENC_ZBUF;
+        let (z, field) = if sliced {
+            walk_query_sliced_value(c)?
+        } else {
+            walk_ext_entry(c, crate::ext_name::ExtCarrier::Query)?
+        };
+        out.push(field);
+        more = z;
+        after_shm = id == crate::ext_header::body_ext_id::QUERY_SHM;
+        if !z {
+            break;
+        }
     }
-    if c.remaining() > 0 {
+    if more && c.remaining() == 0 {
+        return Err(CodecError::NeedMoreBytes);
+    }
+    if more {
         return Err(CodecError::TlvChainOverflow);
     }
     Ok(out)
+}
+
+/// The value entry of a Query's chain when a shared-memory marker came before
+/// it: a declared length, an encoding, a count of slices and the slices, which
+/// is how upstream writes a value that is a list of slices: its extension codec
+/// hands the payload to the same sliced reader a Put's payload goes through.
+///
+/// The declared length is read and does not end the body: upstream computes it
+/// from the logical length of each buffer, which is not the length of the
+/// descriptor written, so it runs past the frame. The generated body mirrors
+/// that (`query_value_zbuf.scxml`) and so does this. The encoding is named
+/// `value_encoding` because `encoding` is already the header's bit-range in this
+/// entry.
+fn walk_query_sliced_value(c: &mut SpanCursor<'_>) -> Result<(bool, Field), CodecError> {
+    let ExtEntryHead {
+        start,
+        z,
+        mut fields,
+        ..
+    } = walk_ext_entry_head(c, crate::ext_name::ExtCarrier::Query)?;
+    let (_, len_field) = c.vle_u64("value_len")?;
+    fields.push(len_field);
+    fields.push(c.nested("value_encoding", walk_encoding)?);
+    let (count, count_field) = c.vle_u32("slice_count")?;
+    fields.push(count_field);
+    fields.push(c.nested("slices", |c| walk_zbuf_slices(c, count))?);
+    Ok((z, group("ext", start, c.offset(), fields)))
 }
 
 /// `Timestamp` — an NTP64 VLE plus a length-prefixed ZID.
@@ -2191,9 +2274,11 @@ pub fn walk_msg_del(c: &mut SpanCursor<'_>) -> Result<Vec<Field>, CodecError> {
     Ok(out)
 }
 
-/// `Query` (zenoh MID 0x03). Its ext chain is the fill-to-end shape, so a
-/// Query carrying extensions consumes to the end of the cursor it was handed
-/// — the generated codec's behaviour, mirrored rather than corrected.
+/// `Query` (zenoh MID 0x03). Its ext chain ends at the entry whose Z flag is
+/// clear (until R3046 it consumed to the end of the cursor it was handed, which
+/// two queries in one frame could not survive), and its value is read in the
+/// sliced shape when a shared-memory marker precedes it
+/// ([`walk_query_ext_chain`]).
 pub fn walk_query(c: &mut SpanCursor<'_>) -> Result<Vec<Field>, CodecError> {
     let (header, header_field) = c.u8("header")?;
     let carrier = header_field.span;
@@ -2215,11 +2300,7 @@ pub fn walk_query(c: &mut SpanCursor<'_>) -> Result<Vec<Field>, CodecError> {
     }
     if (header & 0x80) != 0 {
         out.push(c.nested("extensions", |c| {
-            walk_ext_chain_fill(
-                c,
-                crate::ext_chain::QUERY_EXT_CHAIN_DEPTH,
-                crate::ext_name::ExtCarrier::Query,
-            )
+            walk_query_ext_chain(c, crate::ext_chain::QUERY_EXT_CHAIN_DEPTH)
         })?);
     }
     Ok(out)
@@ -5385,8 +5466,9 @@ mod tests {
             NETWORK_EXT_CHAIN_DEPTH
         );
 
-        // Query is the odd one out on BOTH axes: a larger depth and the
-        // fill-to-end strategy.
+        // Query has a depth constant of its own. Its chain ends at the entry
+        // whose Z flag is clear like the others' (R3046), and not at the end
+        // of the cursor as it did before.
         assert_eq!(
             cap_query(&wz_codecs::query::Query::default().extensions),
             QUERY_EXT_CHAIN_DEPTH
@@ -6626,6 +6708,76 @@ mod tests {
         assert!(rid.find("value").is_none());
     }
 
+    /// R3046 -- a Query's chain ends at the entry whose Z flag is clear, so the
+    /// bytes of the NEXT message in the frame stay where they are, for the walker
+    /// and for the generated codec alike. Before it both read every byte left as
+    /// entries, and two queries in one frame ended in a chain overflow.
+    #[test]
+    fn a_query_chain_ends_at_its_last_entry_and_leaves_the_next_message() {
+        let next = alloc::vec![0xfcu8, 0x01, 0x00, 0x00];
+        let bytes = concat(&[
+            alloc::vec![0x03u8 | 0x80],
+            ext_zbuf(0x05, false, b"hi"),
+            next.clone(),
+        ]);
+
+        let mut w = SpanCursor::new(&bytes);
+        walk_query(&mut w).expect("the walker rejected a query followed by another message");
+        assert_eq!(
+            w.remaining(),
+            next.len(),
+            "the walker read into the next message"
+        );
+
+        let mut c = SceCursor::new(&bytes);
+        wz_codecs::query::Query::decode(&mut c).expect("the codec rejected it");
+        assert_eq!(
+            c.remaining(),
+            next.len(),
+            "the codec read into the next message"
+        );
+    }
+
+    /// R3046 -- the value of a Query that follows a shared-memory marker is walked
+    /// as a count and a list of slices, to the same end the codec reads to, with
+    /// the length it declares read and not used. The bytes are the query upstream's
+    /// router sent a wz queryable for `z_get_shm`: the marker (`0x84`), then the
+    /// value (`0x43`) declaring 1026 bytes over eleven, a default encoding, one
+    /// slice of kind `SHM_PTR` and its seven-byte descriptor.
+    #[test]
+    fn a_query_value_after_the_shm_marker_is_walked_as_slices() {
+        let bytes = [
+            0xa3u8, 0x03, 0x84, 0x43, 0x82, 0x08, 0x00, 0x01, 0x01, 0x07, 0x80, 0x08, 0xf2, 0x9e,
+            0x01, 0x00, 0x00,
+        ];
+        let f = agree(
+            "Query",
+            &bytes,
+            |b| {
+                let mut c = SceCursor::new(b);
+                wz_codecs::query::Query::decode(&mut c).expect("codec rejected");
+                b.len() - c.remaining()
+            },
+            walk_query,
+        );
+
+        assert_eq!(uint(&f, "value_len"), 1026, "the declared length is read");
+        assert_eq!(uint(&f, "slice_count"), 1);
+        assert!(
+            f.find("value_encoding").is_some(),
+            "the encoding precedes the slices and is named apart from the header's"
+        );
+        let shm = f
+            .find("shm_descriptor")
+            .expect("the descriptor must be named");
+        assert_eq!(shm.value, FieldValue::Opaque);
+        assert_eq!(shm.span.end - shm.span.start, 7);
+        assert!(
+            f.find("value").is_none(),
+            "a list of slices is not a run of bytes called `value`"
+        );
+    }
+
     /// `query_body` — the ext a reader that looks only at the message body
     /// never finds.
     ///
@@ -6648,7 +6800,7 @@ mod tests {
             bytes.len(),
             walk_query(&mut c).expect("the walker rejected its own fixture"),
         );
-        assert_eq!(c.remaining(), 0, "the fill-to-end chain left bytes unread");
+        assert_eq!(c.remaining(), 0, "the chain left bytes unread");
         assert_tiles(&f, 0, bytes.len());
 
         let qb = f.find("query_body").expect("the query VALUE must be named");

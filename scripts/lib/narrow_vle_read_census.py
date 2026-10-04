@@ -213,6 +213,12 @@ ADJUDICATED: dict[str, tuple[str, str]] = {
     # payload is (`commons/zenoh-codec/src/zenoh/mod.rs` @
     # `let codec = Zenoh080Sliced::<u32>::new(true);`), so its slice count is the
     # same `Zenoh080Bounded::<u32>` read as the Put's, above.
+    "crates/wz-session-core/src/dissect.rs::walk_query_sliced_value::slice_count": (
+        "REFUSE",
+        "the dissector's walk of the same slice count (R3046), read at "
+        "`Zenoh080Bounded::<u32>` upstream as `walk_msg_put`'s is: a varint "
+        "past u32 is `DidntRead` there too.",
+    ),
     "out/wz-codecs/query_value_zbuf.rs::decode::": (
         "REFUSE",
         "the Query value's slice count, the sibling of `msg_put.rs`'s above: "

@@ -15,10 +15,13 @@
      in the caller (mirrors zenoh-pico's `_z_query_decode_extensions`
      callback pattern). Y3 atomic 2a chain is the codec's LAST field
      (zenoh-pico decoder line 501-503: chain is the only thing after
-     the gated parameters), so `terminate-on="exhaust-or-depth"` is
-     sufficient — the entry-flag termination strategy is a Y3 atomic
-     2b consumer surface (request/response/declare/oam where the body
-     variant follows the chain).
+     the gated parameters). R3046 — that is the last field of the BODY,
+     and it is not the last thing in the frame: network messages sit one
+     after another with no length in front of them, so the chain ends at
+     the entry whose Z flag is clear, as the chain of every other message
+     does (`terminate-on="entry-flag"`). Until R3046 it was
+     `exhaust-or-depth`, which reads every byte left in the frame as
+     entries, and two queries in one frame failed with a chain overflow.
 
      Wire shape (1+ bytes):
        byte 0   : header     (MID 0x03 in bits 0..4 + Q_C@5 + Q_P@6 +
@@ -32,10 +35,9 @@
          bytes  : parameters_len (VLE u64) + parameters (UTF-8 bytes,
                                                           max 256)
        Z-gated:
-         chain  : codec_zenoh_query_ext_entry tlv-chain (exhaust-or-depth
-                  termination — chain is codec's last field; max-
-                  depth=8 covers query's 3 ext slots with safety
-                  margin). The chain tells each entry whether the entry
+         chain  : codec_zenoh_query_ext_entry tlv-chain (entry-flag
+                  termination on Z; max-depth=8 covers query's 3 ext
+                  slots with safety margin). The chain tells each entry whether the entry
                   BEFORE it was the shared-memory marker (ext_id 4),
                   because upstream reads the value extension (ext_id 3)
                   as an encoding and a list of slices when it was and as
@@ -46,13 +48,12 @@
      does not describe the bytes after it, and a reader that trusts the
      length reads past the frame: a query whose value upstream sent
      through shared memory ended the wz session (MEASURED against
-     `z_get_shm`). The chain's termination is DELIBERATELY unchanged:
-     exhaust-or-depth reads every byte left as entries when Z is set,
-     where upstream ends the chain at the entry whose Z flag is clear, and
-     that may let a Query's chain read the next message of a frame that
-     holds several. That is a separate question, UNMEASURED, and the
-     dissector's walker mirrors the termination as it is
-     (`dissect.rs`, `QUERY_EXT_CHAIN_DEPTH`), so it is not changed here.
+     `z_get_shm`). R3046 — the chain's termination was left as it was in
+     R3044 and measured the round after: two queries in one frame failed
+     with a chain overflow, with and without the marker, because the chain
+     read the second query as entries of the first. It now ends at the
+     entry whose Z flag is clear, and the dissector's walker ends the same
+     way.
 
      Composition: B1-γ flags (header) + B1-δ present-if-on-fields
      (Q_C/Q_P gates) + Y3 atomic 2a present-if-on-tlv-chain (header.Z
@@ -110,6 +111,7 @@
     <sce:tlv-chain id="extensions" type="codec_zenoh_query_ext_entry" sce:byte="4"
                    max-depth="8" on-overflow="reject"
                    sce:present-if="header.Z"
+                   terminate-on="entry-flag" entry-flag-name="Z"
                    entry-id="header.ext_id">
       <sce:entry-flag-bind input="after_shm" previous-entry-id="0x4"/>
     </sce:tlv-chain>

@@ -5506,6 +5506,29 @@ mod shm_value_tests {
         );
     }
 
+    /// MEASUREMENT of a question R3045 left open: a frame that holds two queries
+    /// is two messages, with the plain value and with the one in shared memory.
+    /// Upstream ends a Query's extensions at the entry whose continuation flag is
+    /// clear, and a chain that read every byte left would swallow the second
+    /// query as entries of the first.
+    #[test]
+    fn two_queries_in_one_frame_are_two_messages_with_and_without_the_marker() {
+        let attachment = [0x45, 0x02, b'h', b'i'];
+        let mut shm = MARKER.to_vec();
+        shm.extend_from_slice(&shm_value(0x43));
+        for (name, chain) in [("plain", attachment.to_vec()), ("shared memory", shm)] {
+            let mut frame = message(&chain);
+            frame.extend_from_slice(&message(&chain));
+            let messages = crate::network_message::parse_frame_payload(&frame)
+                .unwrap_or_else(|e| panic!("{name}: two queries in one frame do not parse: {e:?}"));
+            assert_eq!(
+                messages.len(),
+                2,
+                "{name}: the second query was read as entries of the first"
+            );
+        }
+    }
+
     /// An entry after the value is read as itself. The value is the middle of the
     /// chain here, so the walk has to end the value where its slices end and not
     /// where its declared length would have, or the attachment is lost or the

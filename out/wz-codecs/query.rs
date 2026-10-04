@@ -1,4 +1,4 @@
-// SCE-MAP: query:92 :: _forge_body
+// SCE-MAP: query:93 :: _forge_body
 
 // SCE Forge: Auto-generated from Extended SCXML (sce:kind="codec")
 // Runtime: none
@@ -119,16 +119,22 @@ impl<'a> Query<'a> {
         let extensions = if (header & 0x80u8) != 0 {
             let mut _vec: HeaplessVec<QueryExtEntry<'a>, 8> = HeaplessVec::new();
             let mut _prev_extensions_after_shm: u8 = 0;
+            let mut _more = false;
             for _ in 0..8u32 {
                 if cursor.remaining() == 0 { break; }
                 let _entry = QueryExtEntry::decode(cursor, _prev_extensions_after_shm)?;
+                _more = _entry.z();
                 _prev_extensions_after_shm = u8::from(u64::from(_entry.ext_id()) == 4u64);
                 // Bounded by max-depth on both sides — loop count and `_vec`
                 // capacity are the same literal — so this push cannot fail. An
                 // over-long chain is refused by the guard after the loop.
                 _vec.push(_entry).map_err(|_| CodecError::TooManyElements)?;
+                if !_more { break; }
             }
-            if cursor.remaining() > 0 {
+            if _more && cursor.remaining() == 0 {
+                return Err(CodecError::NeedMoreBytes);
+            }
+            if _more {
                 return Err(CodecError::TlvChainOverflow);
             }
             Some(_vec)
