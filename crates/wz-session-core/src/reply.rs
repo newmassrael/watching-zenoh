@@ -202,8 +202,11 @@ pub enum InboundReplyBody {
     /// response_build.rs), so dropping it on receive made `pubsub-timestamp`
     /// send-only on the reply leg while the push leg carried both directions.
     Put {
-        /// The reply value bytes.
-        payload: Vec<u8>,
+        /// The reply value bytes. A reply off the wire holds a range of the frame
+        /// it arrived in (see [`RxBytes`](crate::link::RxBytes)), as a received
+        /// [`Sample`](crate::sample::Sample) does, so keeping the reply keeps that
+        /// storage; reads go through `Deref` to `[u8]`.
+        payload: crate::link::RxBytes,
         /// The inner-`MsgPut` body attachment (push-body ext id 0x03) the
         /// reply carried, if any — the side-band a storage aligner reads
         /// its `AlignmentReply` off. `None` when the reply had no
@@ -364,6 +367,12 @@ impl ReplyView for InboundReply {
             InboundReplyBody::Err { .. } => None,
         }
     }
+    fn payload_shared(&self) -> Option<&crate::link::RxBytes> {
+        match &self.body {
+            InboundReplyBody::Put { payload, .. } => Some(payload),
+            InboundReplyBody::Del { .. } | InboundReplyBody::Err { .. } => None,
+        }
+    }
 }
 
 #[cfg(feature = "alloc")]
@@ -375,10 +384,18 @@ impl InboundReply {
     /// needs to keep a reply past the `on_reply` call copies it out
     /// through this constructor. AP-only (it allocates the owned payload /
     /// keyexpr); an MCU sink retains nothing or uses a pool slot instead.
+    ///
+    /// A Put reply's payload is copied unless the view holds it as shareable
+    /// bytes ([`ReplyView::payload_shared`]), as the view of a received reply
+    /// does: then the retained reply is a second reference to the storage the
+    /// frame arrived in.
     pub fn from_view(view: &dyn ReplyView) -> Self {
         let body = match view.kind() {
             ReplyKind::Put => InboundReplyBody::Put {
-                payload: view.payload().to_vec(),
+                payload: view
+                    .payload_shared()
+                    .cloned()
+                    .unwrap_or_else(|| crate::link::RxBytes::from(view.payload().to_vec())),
                 attachment: view.attachment().map(<[u8]>::to_vec),
                 encoding: view
                     .put_encoding()
@@ -700,7 +717,9 @@ impl From<QueryReply> for InboundReply {
             } => {
                 let body = match body {
                     ReplyBody::Put(payload) => InboundReplyBody::Put {
-                        payload,
+                        // A loopback reply's bytes are the responder's own vector,
+                        // so there is no frame to share; they move in as they are.
+                        payload: payload.into(),
                         // Gate the side-bands on the same `pubsub-attachment` /
                         // `pubsub-encoding` / `reply-source-info` the wire decode
                         // uses (see loopback_put_attachment), so the CONTENT
@@ -1003,7 +1022,7 @@ impl<C: ReplySink> ReplyRegistry<C> {
                     // slice names a segment cannot be delivered and is dropped
                     // here, as an undecodable reply is, instead of handing the
                     // application the descriptor in place of its data.
-                    payload: match crate::put_payload::collect_payload(put, |_| None) {
+                    payload: match crate::put_payload::collect_wire_payload(put, |_| None) {
                         Ok(bytes) => bytes,
                         Err(_) => return,
                     },
@@ -1796,6 +1815,97 @@ mod tests {
         assert_eq!(reg.len(), 1);
         assert!(reg.unregister(8));
         assert!(reg.is_empty());
+    }
+
+    /// The reply plane's twin of the unicast sample witness: a querier that KEEPS a
+    /// Put reply (`InboundReply::from_view`, which is what the session does for
+    /// every `on_reply` callback) holds a second reference to the storage the
+    /// response arrived in, not a copy of its bytes.
+    ///
+    /// The response is decoded OUT of a lent frame, walked and dispatched through
+    /// the registry exactly as the receive path does, and the address is read off
+    /// the reply the querier keeps. The count of holders of the lent storage says
+    /// when it goes home: the test's own handle and the kept reply while the reply
+    /// lives, the test's alone once it is dropped. The control is the same bytes
+    /// through the copying walk, whose reply owns its payload.
+    #[cfg(all(
+        feature = "rx-shared-bytes",
+        feature = "codec-response",
+        feature = "query-reply"
+    ))]
+    #[test]
+    fn a_reply_the_querier_keeps_holds_the_lent_storage_until_it_is_dropped() {
+        use crate::link::RxBytes;
+        use crate::network_message::{parse_frame_payload, parse_frame_payload_in, NetworkMessage};
+        use wz_codecs_test_support::TestWire;
+
+        const BODY: &[u8] = b"a reply the querier keeps";
+        let wire = crate::response_build::build_response_reply_literal(42, "home/temp", BODY)
+            .expect("build a literal reply")
+            .wire();
+
+        /// Dispatch the decoded batch through a registry whose callback keeps the
+        /// reply, and return what it kept.
+        fn kept(messages: &[NetworkMessage]) -> InboundReply {
+            let NetworkMessage::Response(response) = &messages[0] else {
+                panic!("the batch is one Response, got {:?}", messages[0]);
+            };
+            let mut reg = ReplyRegistry::new();
+            let slot: Arc<Mutex<Option<InboundReply>>> = Arc::new(Mutex::new(None));
+            let sink = slot.clone();
+            reg.register(
+                42,
+                1,
+                None,
+                crate::reply_acceptance::ReplyAcceptance::Any,
+                move |view| *sink.lock().unwrap() = Some(InboundReply::from_view(view)),
+                |_| {},
+            );
+            reg.dispatch_response(response, &HashMap::new());
+            let reply = slot.lock().unwrap().take().expect("the reply fired");
+            reply
+        }
+
+        let storage: Arc<Vec<u8>> = Arc::new(wire.clone());
+        let span = storage.as_slice().as_ptr_range();
+        let lent: Arc<dyn crate::link::RxStorage> = storage.clone();
+        let frame = RxBytes::shared(lent, 0..storage.len()).expect("the whole storage is a range");
+        let messages = parse_frame_payload_in(&frame).expect("the batch parses");
+        let reply = kept(&messages);
+        let InboundReplyBody::Put { payload, .. } = &reply.body else {
+            panic!("expected a Put reply, got {:?}", reply.body);
+        };
+        assert_eq!(&payload[..], BODY);
+        assert!(
+            span.contains(&payload.as_ptr()),
+            "the kept reply's payload must be a range of the lent storage, not a copy"
+        );
+
+        // The frame handle and the messages go; the kept reply alone holds it.
+        drop(messages);
+        drop(frame);
+        assert_eq!(
+            Arc::strong_count(&storage),
+            2,
+            "the test's handle and the kept reply hold the lent storage"
+        );
+        drop(reply);
+        assert_eq!(
+            Arc::strong_count(&storage),
+            1,
+            "dropping the reply sends the storage home"
+        );
+
+        // The control: the copying walk's reply owns its bytes, outside the wire.
+        let messages = parse_frame_payload(&wire).expect("the batch parses");
+        let reply = kept(&messages);
+        let InboundReplyBody::Put { payload, .. } = &reply.body else {
+            panic!("expected a Put reply, got {:?}", reply.body);
+        };
+        assert!(
+            !wire.as_ptr_range().contains(&payload.as_ptr()),
+            "the copying walk's reply owns its payload"
+        );
     }
 
     #[test]
@@ -2668,7 +2778,7 @@ mod tests {
             rid: 7,
             keyexpr_literal: "home/temp".to_string(),
             body: InboundReplyBody::Put {
-                payload: b"21.0".to_vec(),
+                payload: b"21.0".to_vec().into(),
                 attachment: None,
                 encoding: None,
                 source_info: None,
@@ -2782,7 +2892,7 @@ mod tests {
                 rid: 7,
                 keyexpr_literal: keyexpr.to_string(),
                 body: InboundReplyBody::Put {
-                    payload: b"x".to_vec(),
+                    payload: b"x".to_vec().into(),
                     attachment: None,
                     encoding: None,
                     source_info: None,

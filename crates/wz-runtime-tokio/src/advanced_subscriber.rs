@@ -7372,7 +7372,7 @@ mod tests {
             rid,
             keyexpr_literal: "demo/data".to_string(),
             body: InboundReplyBody::Put {
-                payload: vec![0x42],
+                payload: vec![0x42].into(),
                 attachment: None,
                 encoding: None,
                 source_info: Some(SourceInfo::new(&[0x02], 7, 0)),

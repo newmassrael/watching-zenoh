@@ -130,6 +130,17 @@ pub trait ReplyView {
     fn timestamp(&self) -> Option<&crate::sample::TimestampHint> {
         None
     }
+    /// The Put reply's payload as the shareable value the view holds it in, when
+    /// it holds one: the view of a received reply answers with the range of the
+    /// frame it arrived in, so a querier that keeps the reply
+    /// ([`InboundReply::from_view`](crate::reply::InboundReply::from_view)) takes a
+    /// second reference to that storage instead of copying the bytes out. The
+    /// reply-plane twin of [`SampleView::payload_shared`](crate::sink::SampleView::payload_shared).
+    /// Default `None`: a view over loose borrowed bytes has nothing to share.
+    #[cfg(feature = "alloc")]
+    fn payload_shared(&self) -> Option<&crate::link::RxBytes> {
+        None
+    }
 }
 
 /// A [`ReplyView`] over loose borrowed fields — the canonical impl for a
@@ -853,7 +864,7 @@ mod consolidating_sink_tests {
             rid: 1,
             keyexpr_literal: keyexpr.to_string(),
             body: InboundReplyBody::Put {
-                payload: payload.to_vec(),
+                payload: payload.to_vec().into(),
                 attachment: None,
                 encoding: None,
                 source_info: None,
