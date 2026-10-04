@@ -2429,7 +2429,14 @@ PIN_NO_SYMBOL = 0
 # the watchdog leg against upstream's validator), and the atom is still PARTIAL. READ
 # off the census's own FAIL line, `wz citations: 45 against a pin of 36`; `reached` and
 # `ambiguous` hold at 3 and 2.
-PIN_WZ_CITATIONS = 45
+#
+# R3041 -- 45 -> 47, one atom. `transport-shm`'s reason gains the UPDATE that a Put
+# routing refuses still releases and acknowledges its slices, which cites two wz
+# anchors (the one un-swap method both paths call, and the witness that sends a Put to
+# an id the peer never declared), and the atom is still PARTIAL. READ off the census's
+# own FAIL line, `wz citations: 47 against a pin of 45`; `reached` and `ambiguous` hold
+# at 3 and 2.
+PIN_WZ_CITATIONS = 47
 # R2626 — 44 -> 42, and this one is worth a sentence because it HELD through
 # every earlier retirement in this run (R2612, R2622). `time-hlc`'s reason is the
 # first retiree carrying AMBIGUOUS citations of its own: its oldest clauses cite
