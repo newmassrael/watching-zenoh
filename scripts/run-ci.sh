@@ -6514,7 +6514,11 @@ layer_c1af_cargo_test_shm() {
     # `the_shm_builder_writes_what_upstream_wrote` to `put_payload`, behind no
     # gate this leg lacks, and the hosted run for that push was the first to
     # run this leg (it printed 22 where the guard wanted 20).
-    _runci_guarded_test C1af 22 cargo test -p wz-session-core --features session-extshm,codec-push --lib shm --quiet \
+    # R3038 -- 22 -> 23, MEASURED: `every_shm_slice_reaches_the_resolver_after_one_fails`
+    # joined `put_payload`'s tests (a resolver must be offered every shared-memory
+    # slice of a message, so a failure does not strand the references behind it),
+    # behind no gate this leg lacks.
+    _runci_guarded_test C1af 23 cargo test -p wz-session-core --features session-extshm,codec-push --lib shm --quiet \
         || return 1
     # R311y894 — the establishment SHM surface WITH THE DISSECTOR ON, which no
     # lane had. `dissect` and `session-extshm` are disjoint feature sets: the
@@ -6551,7 +6555,8 @@ layer_c1af_cargo_test_shm() {
     # behind no gate this leg lacks.
     # R3011 — 30 -> 32, MEASURED: the same two `put_payload` tests as the leg
     # above, for the same reason.
-    _runci_guarded_test C1af 32 cargo test -p wz-session-core --features session-extshm,dissect --lib shm --quiet \
+    # R3038 -- 32 -> 33, MEASURED: the one `put_payload` test the leg above gained.
+    _runci_guarded_test C1af 33 cargo test -p wz-session-core --features session-extshm,dissect --lib shm --quiet \
         || return 1
     # Round 2037, open-debt item 330 — THE TRANSPORT-OAM BATCH WALK, which no
     # lane in this file was running.
@@ -6588,7 +6593,14 @@ layer_c1af_cargo_test_shm() {
     # header layout pin, the descriptor-addresses-a-slot arm, the stale
     # generation refusal and the zero-length refusal joined the three that
     # were here (the round trip and the drop now go through the slot).
-    _runci_guarded_test C1af 7 cargo test -p wz-runtime-tokio --features session-extshm,transport-unicast,transport-link-tcp --lib shm_provider --quiet \
+    # R3038 -- 7 -> 12, MEASURED. The provider holds a chunk by upstream's
+    # reference count: the owner-lets-go arm that leaves the chunk standing for a
+    # receiver, the one-reference-per-resolve step, the uncommitted wire
+    # reference, the stale generation that touches no count (the old stale test,
+    # renamed), the replay that cannot wrap the count, and the first-in
+    # first-out slot queue joined; `dropping_the_owner_invalidates_the_slot`
+    # became the arm for an owner with no receiver.
+    _runci_guarded_test C1af 12 cargo test -p wz-runtime-tokio --features session-extshm,transport-unicast,transport-link-tcp --lib shm_provider --quiet \
         || return 1
     # R311y507 — 2 -> 5. The target gained the challenge-response over a real
     # driven handshake plus the two half-mix arms (a ONE-SIDED authenticator must
@@ -16815,8 +16827,10 @@ layer_z_zenohd_interop() {
     # `--bin` path. ABSENT oracle is a SKIP inside each leg, as for establishment
     # (hosted CI provisions no source build), which is why this carries a COUNT:
     # four legs must report, so a dropped `#[ignore]` or a rename cannot select
-    # zero tests and pass. One of the four (leg 3) PINS the provider-lifecycle
-    # defect of open-debt item 823 (6) and passes while the defect stands.
+    # zero tests and pass. R3038: leg 3 was a PIN of the provider-lifecycle
+    # defect of open-debt item 823 (6) until the provider held a chunk by
+    # upstream's reference count; it is the positive twin of leg 2 now, and the
+    # legs also read the reference count off the OTHER side's header.
     _runci_guarded_test Z 4 cargo test -p wz-integration-tests \
         --test wz_shm_payload_zenohd_interop -- --ignored --quiet --test-threads=1 || return 1
     # Restore the lane's OWN demo build: the `session-extshm` build above wrote over

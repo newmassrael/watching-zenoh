@@ -417,6 +417,16 @@ pub trait ShmAuthenticator {
 pub trait ShmResolver {
     /// Open the descriptor's segment and copy its `length` bytes out (the bounded
     /// scoped copy off the shared page into wz's owned Sample payload).
+    ///
+    /// R3038 -- THE CONTRACT INCLUDES THE RELEASE. A descriptor is sent with one
+    /// reference taken for its receiver, as upstream's sender takes it when it
+    /// serializes the buffer, and the receiver gives it back when it lets go of
+    /// the buffer. This call is where wz's receiver lets go: an implementation
+    /// that reads a chunk it was sent must give back that reference exactly once
+    /// on every way out, including a read that fails once the descriptor is known
+    /// to be this receiver's, because a reference nobody gives back keeps the
+    /// sender's chunk out of its pool for good. A descriptor that is not this
+    /// receiver's (a slot that has since been reclaimed) is not released.
     fn resolve(&self, descriptor: &ShmDescriptor) -> Option<Vec<u8>>;
 }
 

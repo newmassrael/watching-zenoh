@@ -263,6 +263,67 @@ impl PeerSegment {
     }
 }
 
+/// R3038 -- a segment ANOTHER process created, opened by id and mapped
+/// READ-WRITE, for a reader that has to write what it reads.
+///
+/// A receiver gives a buffer's reference back by decrementing the `refcount` in
+/// the PROVIDER's metadata segment, so its view of that segment cannot be
+/// read-only (a write through a read-only mapping is a SIGSEGV, found the hard
+/// way). Upstream's reader maps it writable for the same reason. The data
+/// segment stays a [`PeerSegment`]: a reader of a payload writes nothing there.
+///
+/// What is exposed is a POINTER with write provenance, not a `&[u8]`: the
+/// contents are atomics, and a shared reference to bytes is a promise that
+/// nothing writes them.
+pub struct PeerSegmentRw {
+    /// Taken from `as_mut_ptr` at open, so it carries the right to write; the
+    /// mapping it points into lives exactly as long as `_map`.
+    ptr: *mut u8,
+    len: usize,
+    _map: MmapMut,
+    _file: File,
+}
+
+impl PeerSegmentRw {
+    /// Open the segment named by `id`. An error, never a panic, when it does not
+    /// exist or cannot be locked or mapped, as for [`PeerSegment::open`].
+    pub fn open(id: u64) -> io::Result<Self> {
+        let file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(segment_path(id))?;
+        lock_shared(&file)?;
+        // SAFETY: a writable view of a peer-owned mapping. The peer and this
+        // process both write it concurrently, which is the shared-memory
+        // contract; every field a caller reaches through it is an atomic.
+        let mut map = unsafe { MmapOptions::new().map_mut(&file)? };
+        let ptr = map.as_mut_ptr();
+        let len = map.len();
+        Ok(Self {
+            ptr,
+            len,
+            _map: map,
+            _file: file,
+        })
+    }
+
+    /// The segment's size in bytes.
+    pub fn len(&self) -> usize {
+        self.len
+    }
+
+    /// Whether the segment is empty.
+    pub fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+
+    /// The segment's first byte, as a pointer that may be written through. Valid
+    /// for [`Self::len`] bytes for as long as `self` lives.
+    pub fn base(&self) -> *mut u8 {
+        self.ptr
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

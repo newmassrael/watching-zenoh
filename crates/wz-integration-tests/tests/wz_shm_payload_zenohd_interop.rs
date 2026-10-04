@@ -40,10 +40,16 @@
 //! header before it maps anything (`commons/zenoh-shm/src/reader.rs` @
 //! `pub fn read_shmbuf(`). Leg 3 is the lifecycle arm: the publisher lets go of
 //! its payload the moment `publish_shm` returns, which is what every real
-//! publisher does, and the receiver reads some time later. That arm FAILS today
-//! (open-debt item 823 (6): wz's provider unlinks the segment when its owner
-//! drops), so it is a PIN of the measured defect rather than a proof, and the
-//! doc on it says what turns it red.
+//! publisher does, and the receiver reads some time later. Until R3038 that arm
+//! FAILED (open-debt item 823 (6): wz's provider unlinked the segment when its
+//! owner dropped) and was a PIN of the defect; the provider now holds a chunk by
+//! the reference count upstream uses, and the leg is the positive twin of leg 2.
+//!
+//! Both directions also read the reference count itself off the OTHER side's
+//! header. Leg 1 reads zenoh's metadata segment after wz has read each sample and
+//! asserts every chunk was given back; legs 2 and 3 assert that the chunk comes
+//! home to wz's provider after zenoh's subscriber lets go, a decrement made by
+//! zenoh's own `Drop for ShmBufInner`.
 //!
 //! ## The wz node is the ordinary one
 //!
@@ -76,7 +82,9 @@ use wz_runtime_tokio::session_open::{
     accept_and_open_session, accept_and_open_session_with_shm, connect_and_open_session_with_shm,
     DialConfig, DialedLink, DEFAULT_OPEN_TICK_MS,
 };
-use wz_runtime_tokio::shm_provider::{PosixShmResolver, ShmBackedPayload};
+use wz_runtime_tokio::shm_provider::{
+    reference_state, PosixShmResolver, ReferenceState, ShmBackedPayload,
+};
 use wz_runtime_tokio::sync::Mutex;
 use wz_runtime_tokio_test_support::zenoh_interop_session_init_params;
 use wz_session_core::extshm::{ShmDescriptor, ShmResolver};
@@ -108,10 +116,14 @@ struct CountingResolver {
     inner: PosixShmResolver,
     resolved: Arc<AtomicUsize>,
     refused: Arc<AtomicUsize>,
+    /// Every descriptor the registry asked about, so a leg can read the OTHER
+    /// side's bookkeeping for each chunk afterwards.
+    seen: Arc<StdMutex<Vec<ShmDescriptor>>>,
 }
 
 impl ShmResolver for CountingResolver {
     fn resolve(&self, descriptor: &ShmDescriptor) -> Option<Vec<u8>> {
+        self.seen.lock().expect("seen").push(*descriptor);
         let bytes = self.inner.resolve(descriptor);
         let counter = if bytes.is_some() {
             &self.resolved
@@ -156,6 +168,11 @@ struct ZenohToWz {
     resolved: usize,
     /// Descriptors the resolver refused.
     refused: usize,
+    /// Of the chunks zenoh's provider handed over, how many were still holding
+    /// the reference zenoh took for wz once the wz side had read them, after a
+    /// wait for the publisher's own release to land. A wz that never gives a
+    /// reference back leaves every one of them at one, in a header zenoh owns.
+    unreleased: Vec<(ShmDescriptor, Option<ReferenceState>)>,
     /// Everything the publisher printed.
     zenoh_log: String,
 }
@@ -230,10 +247,12 @@ async fn zenoh_publishes_to_wz(offer_shm: bool) -> Option<ZenohToWz> {
     );
     let resolved = Arc::new(AtomicUsize::new(0));
     let refused = Arc::new(AtomicUsize::new(0));
+    let seen: Arc<StdMutex<Vec<ShmDescriptor>>> = Arc::default();
     session.set_shm_resolver(Box::new(CountingResolver {
         inner: PosixShmResolver,
         resolved: resolved.clone(),
         refused: refused.clone(),
+        seen: seen.clone(),
     }));
     let received: Arc<StdMutex<Vec<Vec<u8>>>> = Arc::default();
     let sink = received.clone();
@@ -279,11 +298,36 @@ async fn zenoh_publishes_to_wz(offer_shm: bool) -> Option<ZenohToWz> {
     }
 
     let received = received.lock().expect("received").clone();
+    // Read the publisher's own headers while its process still lives. A chunk is
+    // given back when its count reads zero or its slot has been reclaimed (the
+    // publisher's provider collects when it allocates). The publisher's OWN
+    // reference to a buffer it just sent goes when it drops that buffer, a moment
+    // after the put returns, so the read waits for that rather than racing it.
+    let descriptors = seen.lock().expect("seen").clone();
+    let given_back = |state: &Option<ReferenceState>| {
+        matches!(
+            state,
+            Some(ReferenceState::Held(0) | ReferenceState::Reclaimed)
+        )
+    };
+    let mut unreleased: Vec<(ShmDescriptor, Option<ReferenceState>)> = Vec::new();
+    for _ in 0..60 {
+        unreleased = descriptors
+            .iter()
+            .map(|d| (*d, reference_state(d)))
+            .filter(|(_, state)| !given_back(state))
+            .collect();
+        if unreleased.is_empty() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
     Some(ZenohToWz {
         negotiated,
         received,
         resolved: resolved.load(Ordering::SeqCst),
         refused: refused.load(Ordering::SeqCst),
+        unreleased,
         zenoh_log: read_captured(&mut zenoh_log),
     })
 }
@@ -367,6 +411,20 @@ async fn zenohd_shm_publisher_payload_reaches_a_wz_subscriber_through_shared_mem
         run.received.len(),
         run.resolved
     );
+    // THE LIFECYCLE, read off the OTHER side's bookkeeping: zenoh's sender took
+    // one reference per serialization for its receiver and its provider reclaims
+    // a chunk only when the count reads zero, so a receiver that reads and never
+    // lets go drains the publisher's pool one buffer per sample. The headers read
+    // here are zenoh's, in a segment zenoh made; a wz that asked itself whether it
+    // had released would be grading wz with wz.
+    assert!(
+        run.unreleased.is_empty(),
+        "{} chunk(s) zenoh's provider handed over still hold the reference zenoh took for wz after \
+         wz read them: {:?}\n{}",
+        run.unreleased.len(),
+        run.unreleased,
+        run.zenoh_log
+    );
 }
 
 /// What a wz publisher does with its payload after `publish_shm` returns.
@@ -378,9 +436,22 @@ enum Owner {
     LetsGoAtOnce,
 }
 
+/// What one run of a wz publisher against `z_sub_shm` showed.
+struct WzToZenoh {
+    /// Everything the zenoh subscriber printed.
+    printed: String,
+    /// Whether the chunk came home to wz's provider: the owner let go, zenoh's
+    /// receiver let go of the reference wz's descriptor carried, the count read
+    /// zero and the next allocation collected it. Read off wz's own header, but the
+    /// DECREMENT it depends on was made by zenoh's `Drop for ShmBufInner` in a
+    /// process wz does not control, which is what makes it a foreign witness of the
+    /// reference count rather than wz reading its own writes.
+    chunk_came_home: bool,
+}
+
 /// Dial `z_sub_shm` with SHM offered, publish one payload through `publish_shm`
-/// and return what the zenoh subscriber printed.
-async fn wz_publishes_to_zenoh_subscriber(owner: Owner, key: &str, text: &str) -> String {
+/// and return what the zenoh subscriber printed and whether the chunk came home.
+async fn wz_publishes_to_zenoh_subscriber(owner: Owner, key: &str, text: &str) -> WzToZenoh {
     let z_sub = zenoh_shm_example_binary("z_sub_shm").expect("checked by the caller");
     let port = PortReservation::pick();
     let (_guard, mut zenoh_log) = spawn_zenoh(
@@ -452,6 +523,7 @@ async fn wz_publishes_to_zenoh_subscriber(owner: Owner, key: &str, text: &str) -
         tokio::time::sleep(Duration::from_millis(500)).await;
         let mut payload = ShmBackedPayload::alloc(bytes.len()).expect("alloc a payload");
         payload.write(&bytes);
+        let descriptor = payload.descriptor();
         session
             .publish_shm(&key, &payload, PublishOptions::put())
             .expect("publish_shm");
@@ -472,15 +544,32 @@ async fn wz_publishes_to_zenoh_subscriber(owner: Owner, key: &str, text: &str) -
             tokio::time::sleep(Duration::from_millis(50)).await;
         }
         drop(held);
+        // zenoh's subscriber drops the sample after printing it, which gives back
+        // the reference this descriptor carried. Every holder gone, the chunk is
+        // collected by the next allocation, so allocate (and let go) until it is
+        // or the wait ends.
+        let mut came_home = false;
+        for _ in 0..60 {
+            let _collect = ShmBackedPayload::alloc(1);
+            if reference_state(&descriptor) == Some(ReferenceState::Reclaimed) {
+                came_home = true;
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        came_home
     };
-    tokio::select! {
+    let chunk_came_home = tokio::select! {
         outcome = drive => panic!(
             "the wz drive loop ended before the scenario did ({outcome:?}):\n{}",
             read_captured(&mut drive_log)
         ),
-        _ = scenario => {}
+        came_home = scenario => came_home,
+    };
+    WzToZenoh {
+        printed: read_captured(&mut zenoh_log),
+        chunk_came_home,
     }
-    read_captured(&mut zenoh_log)
 }
 
 /// Leg 2 -- wz publishes a payload it keeps alive; zenoh's reader must map it and
@@ -496,53 +585,46 @@ async fn wz_shm_payload_held_by_its_owner_reaches_a_zenohd_shm_subscriber() {
         return;
     }
     let text = "held-payload-from-wz";
-    let printed =
-        wz_publishes_to_zenoh_subscriber(Owner::HoldsIt, "demo/example/wz-held", text).await;
+    let run = wz_publishes_to_zenoh_subscriber(Owner::HoldsIt, "demo/example/wz-held", text).await;
     assert!(
-        printed.contains(&format!(
+        run.printed.contains(&format!(
             "('demo/example/wz-held': '{text}') {ZENOH_SAW_SHM}"
         )),
-        "z_sub_shm did not report wz's payload as a shared-memory buffer:\n{printed}"
+        "z_sub_shm did not report wz's payload as a shared-memory buffer:\n{}",
+        run.printed
+    );
+    assert!(
+        run.chunk_came_home,
+        "the chunk never came home to wz's provider after the owner and zenoh's subscriber had both \
+         let go, so zenoh's release of the reference wz's descriptor carried was not observed:\n{}",
+        run.printed
     );
 }
 
-/// Leg 3 -- the same, for a publisher that lets go at once, and this one PINS A
-/// DEFECT instead of proving a property. A real publisher lets go of its payload
-/// the moment `publish_shm` returns, and zenoh's reader is promised the buffer
-/// for as long as the reference count the SENDER took for it says so, so the
-/// payload ought to still be there when the reader gets to it.
+/// Leg 3 -- the same, for a publisher that lets go at once, which is what a real
+/// publisher does: the payload is dropped the moment `publish_shm` returns, and
+/// zenoh's reader gets to it afterwards.
 ///
-/// It is not, and that is open-debt item 823 (6), the provider lifecycle. wz's
-/// provider unlinks the data segment the moment its owner drops
-/// (`shm_provider.rs`, `impl Drop for ShmBackedPayload`), so a reader that comes
-/// later finds nothing, and `z_sub_shm` logs `Error receiving SHM buffer: Unable
-/// to open POSIX shm segment: OS error 2` and delivers no sample. Upstream's
-/// sender instead takes one reference per serialization and its receiver drops
-/// it (`commons/zenoh-codec/src/core/zbuf.rs` @ `unsafe { shmb.inc_ref_count() };`),
-/// and the allocator reclaims a chunk when the count reaches zero.
+/// THE LIFECYCLE ARM, AND IT WAS A PIN UNTIL R3038. Until then wz's provider
+/// unlinked the data segment the moment its owner dropped, so the reader found
+/// nothing and `z_sub_shm` logged `Error receiving SHM buffer: Unable to open
+/// POSIX shm segment: OS error 2` (open-debt item 823 (6)). This test asserted
+/// that signature, so it passed while the defect stood and went red the day the
+/// provider held by count. It holds by count now: serializing the descriptor
+/// takes a reference for the receiver, as upstream's does
+/// (`commons/zenoh-codec/src/core/zbuf.rs` @ `unsafe { shmb.inc_ref_count() };`),
+/// the owner's drop gives back only its own, and the chunk is collected when the
+/// count reads zero. This is the positive twin of leg 2 the pin said it would
+/// become, with the same claim.
 ///
-/// WHY A PIN AND NOT A RED TEST. This leg was first written as the positive
-/// witness, failed for exactly this reason, and was kept red on purpose to say
-/// the atom is not finished. A lane cannot carry a test that is red by design:
-/// where the oracle is present it reds the lane for a defect that is already
-/// registered, and where it is absent (hosted CI) it SKIPs and says nothing, so
-/// the failing property was only ever visible on one machine. What the tree
-/// does with a measured, registered defect is pin it (the linkstate walker's cap
-/// divergence is the precedent): assert the defect as measured, in both of its
-/// halves, so the test passes now and cannot go on passing unnoticed.
-///
-/// WHAT TURNS IT RED. The day the provider holds by count, zenoh's reader finds
-/// the segment, the error line disappears and the sample arrives, so BOTH
-/// assertions fail together. That is the signal to delete this pin, turn the
-/// leg into the positive twin of leg 2 with a `transport-shm wz->zenoh` claim,
-/// and close item 823 (6). A DIFFERENT failure (the error line absent and no
-/// sample either) fails the first assertion alone, which is how a change in the
-/// failure's shape is told apart from the defect being fixed.
-// wz-proves: none -- pins the lifecycle defect of item 823 (6): it passes while a payload its owner let go of is unreadable to zenoh, so no passing foreign witness stands behind the atom for that arm
+/// It also asserts the end of the protocol, off wz's own header: after zenoh's
+/// subscriber has printed the sample and let go of the buffer, the reference its
+/// descriptor carried is back and the chunk is collected. That decrement is made
+/// by zenoh's `Drop for ShmBufInner` in a process wz does not control.
+// wz-proves: transport-shm wz->zenoh
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "binary-dep e2e (ZENOHD_SHM=1 build-zenohd.sh: z_sub_shm); Layer Z runs via --ignored"]
-async fn wz_shm_payload_its_owner_let_go_of_at_once_is_not_yet_readable_by_a_zenohd_shm_subscriber()
-{
+async fn wz_shm_payload_its_owner_let_go_of_at_once_is_still_readable_by_a_zenohd_shm_subscriber() {
     if zenoh_shm_example_binary("z_sub_shm").is_none() {
         eprintln!(
             "SKIP: no z_sub_shm at target/zenohd-shm (run `ZENOHD_SHM=1 scripts/build-zenohd.sh`)"
@@ -550,20 +632,27 @@ async fn wz_shm_payload_its_owner_let_go_of_at_once_is_not_yet_readable_by_a_zen
         return;
     }
     let text = "released-payload-from-wz";
-    let printed =
+    let run =
         wz_publishes_to_zenoh_subscriber(Owner::LetsGoAtOnce, "demo/example/wz-released", text)
             .await;
     assert!(
-        printed.contains("Error receiving SHM buffer"),
-        "the defect of item 823 (6) did not show its signature. If the payload ARRIVED, the \
-         provider now holds by count: turn this pin into the positive twin of leg 2 and close the \
-         item. If it neither arrived nor errored, the failure changed shape and wants a look:\n{printed}"
+        !run.printed.contains("Error receiving SHM buffer"),
+        "zenoh's reader refused a buffer its wz owner had let go of, which is the lifecycle defect \
+         (the provider unlinked its segment when the owner dropped):\n{}",
+        run.printed
     );
     assert!(
-        !printed.contains(&format!(
+        run.printed.contains(&format!(
             "('demo/example/wz-released': '{text}') {ZENOH_SAW_SHM}"
         )),
-        "a payload its wz owner let go of right after publishing reached z_sub_shm through \
-         shared memory, so the defect this pins is gone:\n{printed}"
+        "z_sub_shm did not report a payload its wz owner let go of at once as a shared-memory \
+         buffer:\n{}",
+        run.printed
+    );
+    assert!(
+        run.chunk_came_home,
+        "the chunk never came home to wz's provider after zenoh's subscriber had let go, so zenoh's \
+         release of the reference wz's descriptor carried was not observed:\n{}",
+        run.printed
     );
 }

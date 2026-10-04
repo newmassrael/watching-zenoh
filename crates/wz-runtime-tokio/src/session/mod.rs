@@ -2609,9 +2609,9 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
     /// off /dev/shm (zero-copy on the wire). The LOCAL loopback leg delivers the
     /// bytes directly (same-host). Without negotiation, this is the ordinary
     /// inline `publish` of the bytes read back from the segment, so the API is
-    /// always usable. The caller must keep `payload` alive until the round-trip
-    /// completes (the scoped lifecycle: the owner backs the segment, Drop
-    /// unlinks).
+    /// always usable. The caller may let go of `payload` as soon as this returns
+    /// (R3038): the descriptor on the wire carries a reference the receiver
+    /// releases, and the segment stays until it has.
     #[cfg(feature = "transport-shm")]
     pub fn publish_shm(
         &self,
@@ -2627,9 +2627,14 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
         if self.actions().is_shm() && opts.allowed_destination.allows_remote() {
             use wz_session_core::send_wire_error::SendWireError;
             let meta = opts.push_metadata();
+            // R3038 -- SERIALIZING THE DESCRIPTOR TAKES A REFERENCE FOR THE
+            // RECEIVER, as it does upstream, and the receiver's resolver gives it
+            // back. The guard returns it if the frame does not build or the send
+            // refuses, so the count is only left raised for a frame that left.
+            let wire = payload.wire_reference();
             let push = wz_session_core::push_build::build_push_shm_literal(
                 keyexpr,
-                &payload.descriptor(),
+                &wire.descriptor(),
                 &meta,
             )
             .map_err(SendWireError::Codec)?;
@@ -2647,6 +2652,7 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
                 meta.is_express(),
                 opts.priority_band(),
             )?;
+            wire.commit();
             // The remote leg fired the descriptor; deliver the bytes to any LOCAL
             // subscriber (same-host) directly.
             #[cfg(feature = "pubsub-allow-loop")]

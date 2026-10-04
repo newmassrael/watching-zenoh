@@ -208,18 +208,40 @@ pub fn collect_payload<S: CodecStorage>(
         PutPayload::Inline(bytes) => Ok(bytes.to_vec()),
         PutPayload::Sliced(slices) => {
             let mut out = Vec::new();
+            // The FIRST fault is the one reported, but the walk goes on after it:
+            // R3038 -- the resolver of a shared-memory slice gives back the
+            // reference the sender took for this receiver, so a slice that is
+            // never offered to it is a reference nobody releases. Upstream maps
+            // every slice of a message when it arrives and drops them all with
+            // the message, whether or not the message is then delivered.
+            let mut fault = None;
             for slice in slices {
                 let bytes = SceByteBuf::as_slice(&slice.bytes);
                 match slice_kind(slice.kind) {
-                    SLICE_KIND_RAW => out.extend_from_slice(bytes),
-                    SLICE_KIND_SHM_PTR => {
-                        let resolved = resolve(bytes).ok_or(PayloadFault::Unresolved)?;
-                        out.extend_from_slice(&resolved);
+                    SLICE_KIND_RAW => {
+                        if fault.is_none() {
+                            out.extend_from_slice(bytes);
+                        }
                     }
-                    other => return Err(PayloadFault::UnknownKind(other)),
+                    SLICE_KIND_SHM_PTR => match resolve(bytes) {
+                        Some(resolved) => {
+                            if fault.is_none() {
+                                out.extend_from_slice(&resolved);
+                            }
+                        }
+                        None => {
+                            fault.get_or_insert(PayloadFault::Unresolved);
+                        }
+                    },
+                    other => {
+                        fault.get_or_insert(PayloadFault::UnknownKind(other));
+                    }
                 }
             }
-            Ok(out)
+            match fault {
+                Some(fault) => Err(fault),
+                None => Ok(out),
+            }
         }
     }
 }
@@ -384,6 +406,81 @@ mod tests {
         assert_eq!(
             collect_payload(&odd, |_| Some(Vec::new())),
             Err(PayloadFault::UnknownKind(7))
+        );
+    }
+
+    /// R3038 -- a slice that fails does not hide the slices after it from the
+    /// resolver. The resolver of a shared-memory slice gives back the reference the
+    /// sender took for this receiver, so every descriptor of a message must be
+    /// offered to it once, as upstream's receiver maps every slice of a message
+    /// before it decides anything about delivery. The fault reported is still the
+    /// FIRST one.
+    #[test]
+    fn every_shm_slice_reaches_the_resolver_after_one_fails() {
+        use alloc::vec;
+
+        let mut put = shm::<Heap>(&[0x01]).expect("one slice fits");
+        let slices = put.slices.as_mut().expect("shm() populates the slices");
+        for descriptor in [&[0x02u8][..], &[0x03u8][..]] {
+            slices
+                .try_push(ZbufSliceOwned::<Heap> {
+                    kind: u32::from(SLICE_KIND_SHM_PTR),
+                    len: 1,
+                    bytes: <<Heap as CodecStorage>::Bytes<256> as SceByteBuf>::from_slice(
+                        descriptor,
+                    )
+                    .expect("one byte fits"),
+                })
+                .expect("a further slice fits");
+        }
+
+        // The FIRST of three fails; the other two must still be offered.
+        let mut offered = Vec::new();
+        let result = collect_payload(&put, |d| {
+            offered.push(d.to_vec());
+            if d == [0x01] {
+                None
+            } else {
+                Some(b"x".to_vec())
+            }
+        });
+        assert_eq!(result, Err(PayloadFault::Unresolved));
+        assert_eq!(
+            offered,
+            [vec![0x01], vec![0x02], vec![0x03]],
+            "every shared-memory slice reached the resolver, in order"
+        );
+
+        // An unknown kind in the middle: the fault is ITS, and the shared-memory
+        // slice behind it is still offered.
+        let mut odd = shm::<Heap>(&[0x09]).expect("one slice fits");
+        let slices = odd.slices.as_mut().expect("populated");
+        slices
+            .try_push(ZbufSliceOwned::<Heap> {
+                kind: 7,
+                len: 0,
+                bytes: <<Heap as CodecStorage>::Bytes<256> as SceByteBuf>::from_slice(&[])
+                    .expect("empty fits"),
+            })
+            .expect("fits");
+        slices
+            .try_push(ZbufSliceOwned::<Heap> {
+                kind: u32::from(SLICE_KIND_SHM_PTR),
+                len: 1,
+                bytes: <<Heap as CodecStorage>::Bytes<256> as SceByteBuf>::from_slice(&[0x0a])
+                    .expect("one byte fits"),
+            })
+            .expect("fits");
+        let mut offered = Vec::new();
+        let result = collect_payload(&odd, |d| {
+            offered.push(d.to_vec());
+            Some(Vec::new())
+        });
+        assert_eq!(result, Err(PayloadFault::UnknownKind(7)));
+        assert_eq!(
+            offered,
+            [vec![0x09], vec![0x0a]],
+            "the shared-memory slice behind the odd one was offered"
         );
     }
 
