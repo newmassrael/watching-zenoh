@@ -104,6 +104,17 @@ pub trait SampleView {
     fn source_info(&self) -> Option<&crate::sample::SourceInfo> {
         None
     }
+    /// The payload as the shareable value the view holds it in, when it holds
+    /// one: the view of a received [`Sample`](crate::sample::Sample) answers with
+    /// the range of the frame it arrived in, so a subscriber that keeps the sample
+    /// past the call ([`Sample::from_view`](crate::sample::Sample::from_view))
+    /// takes a second reference to that storage instead of copying the bytes out.
+    /// Defaults to `None`: a view over loose borrowed bytes has nothing to share,
+    /// and retaining it copies, as it always did.
+    #[cfg(feature = "alloc")]
+    fn payload_shared(&self) -> Option<&crate::link::RxBytes> {
+        None
+    }
 }
 
 /// A [`SampleView`] over loose borrowed bytes — the canonical impl for a

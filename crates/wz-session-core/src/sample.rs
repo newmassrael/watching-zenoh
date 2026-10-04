@@ -637,6 +637,9 @@ impl crate::sink::SampleView for Sample {
     fn source_info(&self) -> Option<&SourceInfo> {
         self.source_info.as_ref()
     }
+    fn payload_shared(&self) -> Option<&RxBytes> {
+        Some(&self.payload)
+    }
 }
 
 impl Sample {
@@ -648,9 +651,20 @@ impl Sample {
     /// accessors. The inverse of dispatching `&Sample as &dyn SampleView`:
     /// use it when a subscriber must own the sample past the delivery
     /// call (buffering, deferred processing) rather than read-and-drop.
+    ///
+    /// The payload is copied unless the view holds it in a shareable value
+    /// ([`SampleView::payload_shared`](crate::sink::SampleView::payload_shared)),
+    /// as the view of a received sample does: then the retained sample is a second
+    /// reference to the storage the frame arrived in, which stays out of its pool
+    /// until the retained sample is dropped.
     pub fn from_view(view: &dyn crate::sink::SampleView) -> Self {
         let mut sample = match view.kind() {
-            SampleKind::Put => Self::new_put(view.keyexpr(), view.payload().to_vec()),
+            SampleKind::Put => Self::new_put_shared(
+                view.keyexpr(),
+                view.payload_shared()
+                    .cloned()
+                    .unwrap_or_else(|| RxBytes::from(view.payload().to_vec())),
+            ),
             SampleKind::Del => Self::new_del(view.keyexpr()),
         };
         sample.reliability = view.reliability();

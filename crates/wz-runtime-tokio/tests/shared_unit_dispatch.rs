@@ -227,6 +227,56 @@ fn a_subscriber_is_handed_a_sample_whose_payload_is_the_buffer_the_link_read() {
     );
 }
 
+/// The sample an application KEEPS. The session hands every user callback an owned
+/// retention sample built from the borrowed view (`Sample::from_view`), and a
+/// subscriber that stores samples stores that one, so the claim has to hold for
+/// it: it is a second reference to the storage the link lent, not a copy, and it
+/// is what keeps that storage out of its pool. The count of holders of the lent
+/// storage is the observable: the link's handle, the frame's, and the retained
+/// sample's, down to the sample's alone and then to none once it drops.
+#[test]
+fn a_sample_the_application_keeps_holds_the_lent_storage_until_it_is_dropped() {
+    established!(actions, engine);
+    let storage = Arc::new(frame_wire(FIRST_SN));
+    let span = storage.as_slice().as_ptr_range();
+    let lent: Arc<dyn RxStorage> = storage.clone();
+    let unit = RxBytes::shared(lent, 0..storage.len()).expect("the whole storage is a range of it");
+
+    let outcome = dispatch_link_event(LinkEvent::Rx(RxFrame::new(unit)), &actions, &mut engine);
+    let DriverLoopOutcome::FramePayload { messages, .. } = &outcome else {
+        panic!("a data frame in an established session is delivered, got {outcome:?}");
+    };
+    let kept = Arc::new(Mutex::new(None::<wz_session_core::sample::Sample>));
+    let sink = Arc::clone(&kept);
+    let mut registry = SubscriberRegistry::new();
+    registry.register("demo/shared", move |view| {
+        *sink.lock().unwrap() = Some(wz_session_core::sample::Sample::from_view(view));
+    });
+    registry.dispatch(&messages[0], Reliability::Reliable);
+    let sample = kept.lock().unwrap().take().expect("the subscriber fired");
+
+    assert_eq!(sample.payload.as_slice(), PAYLOAD);
+    assert!(
+        span.contains(&sample.payload.as_ptr()),
+        "the retained sample must be a range of the lent storage, not a copy of it"
+    );
+    // Everything the drive loop and the registry held is let go. What is left is
+    // the test's own handle and the retained sample's reference.
+    drop(outcome);
+    drop(registry);
+    assert_eq!(
+        Arc::strong_count(&storage),
+        2,
+        "after the frame and the messages are gone, the retained sample holds the storage"
+    );
+    drop(sample);
+    assert_eq!(
+        Arc::strong_count(&storage),
+        1,
+        "and when the sample is dropped the storage goes home"
+    );
+}
+
 /// The control. The copying decode of the same frame, with no origin to share,
 /// owns its payload: it lies outside the bytes it was decoded from. Without this
 /// the three checks above could pass for a reason that has nothing to do with

@@ -529,6 +529,93 @@ mod tests {
         );
     }
 
+    /// THE DECLARED F, READ AT ITS FAR END: a SAMPLE lives in the pool slot.
+    ///
+    /// The test above ends at the frame; this one carries the frame the rest of
+    /// the way a subscriber's data goes: the transport frame is decoded out of the
+    /// slot (`parse_inbound_consuming_in`), its batch is walked
+    /// (`parse_frame_payload_in`), the registry projects the Push into a sample
+    /// and the subscriber KEEPS it (`Sample::from_view`, which is what the session
+    /// does for every user callback). Two things are read, both off the pool and
+    /// not off this test's arithmetic: the kept sample's payload is an address
+    /// inside the slot's frame, and the slot stays out of the freelist until the
+    /// SAMPLE drops, not merely until the frame does.
+    ///
+    /// Each of the three copies that stood between the link and the callback reds
+    /// it: the frame's payload copied out, the batch walk copying, the sample
+    /// projection or the retention copying. The first two redden the address and
+    /// the third reddens the address AND the count, because a copy frees the slot
+    /// the moment the frame's own handles are gone.
+    #[cfg(all(feature = "codec-push", feature = "pubsub-put"))]
+    #[tokio::test]
+    async fn a_sample_the_application_keeps_is_its_slot_until_the_sample_drops() {
+        use std::sync::{Arc, Mutex};
+        use wz_session_core::frame_encode::encode_frame_with_push;
+        use wz_session_core::inbound::{parse_inbound_consuming_in, InboundFrame};
+        use wz_session_core::network_message::parse_frame_payload_in;
+        use wz_session_core::pubsub::SubscriberRegistry;
+        use wz_session_core::push_build::build_push_literal;
+        use wz_session_core::sample::Sample;
+
+        const BODY: &[u8] = b"a payload the subscriber keeps";
+        let transport_frame = encode_frame_with_push(
+            0,
+            build_push_literal("demo/kept", BODY).expect("build a literal put"),
+            true,
+        );
+        let mut arena = LinkRxArena::new();
+        let mut st: ReadState<LinkRxFrame> = ReadState::Idle;
+        let wire = framed(&transport_frame);
+        let mut src = &wire[..];
+        let LinkEvent::Rx(rx) = poll_framed(&mut st, &mut src, false, &mut arena).await else {
+            panic!("a complete frame is an Rx");
+        };
+        let frame_span = rx.bytes.as_slice().as_ptr_range();
+        let slot = arena
+            .slot_of(rx.bytes.as_ptr().wrapping_sub(crate::prefix_width(false)))
+            .expect("the frame's bytes ARE a slot of this table, by the pool's own answer");
+        assert_eq!(arena.slot_state(slot), Some(SlotState::CpuMut));
+        assert_eq!(arena.free_slots(), SLOT_COUNT - 1);
+
+        let kept = Arc::new(Mutex::new(None::<Sample>));
+        {
+            let (frame, _) = parse_inbound_consuming_in(&rx.bytes).expect("the frame parses");
+            let InboundFrame::Frame { payload, .. } = frame else {
+                panic!("the unit is one transport Frame");
+            };
+            let messages = parse_frame_payload_in(&payload).expect("the batch parses");
+            let sink = Arc::clone(&kept);
+            let mut registry = SubscriberRegistry::new();
+            registry.register("demo/kept", move |view| {
+                *sink.lock().unwrap() = Some(Sample::from_view(view));
+            });
+            registry.dispatch(&messages[0], crate::Reliability::Reliable);
+        }
+        let sample = kept.lock().unwrap().take().expect("the subscriber fired");
+        assert_eq!(sample.payload.as_slice(), BODY);
+        assert!(
+            frame_span.contains(&sample.payload.as_ptr()),
+            "the kept sample's payload must be bytes of the slot the link read into"
+        );
+
+        // The link's own frame handle goes, as it does when the session has
+        // dispatched it. Everything it handed up is gone with it; the sample is
+        // all that is left holding the slot.
+        drop(rx);
+        assert_eq!(
+            arena.free_slots(),
+            SLOT_COUNT - 1,
+            "the frame is gone but a sample the application kept still holds the slot"
+        );
+        assert_eq!(sample.payload.as_slice(), BODY, "and it still reads");
+        drop(sample);
+        assert_eq!(
+            arena.free_slots(),
+            SLOT_COUNT,
+            "the sample was the last holder, so the slot is back on the freelist"
+        );
+    }
+
     /// The two arenas reassemble the same bytes — the property that lets this
     /// one be selected without reading every consumer.
     ///
