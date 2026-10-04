@@ -34,6 +34,7 @@
 
 use alloc::vec::Vec;
 
+use crate::ext_view::ExtEntryView;
 use crate::sample::EncodingHint;
 use sce_forge_runtime::codec::{CodecError, CodecStorage, SceByteBuf};
 use wz_codecs::ext_entry::{ExtEntryOwned, ExtEntryOwnedVariant};
@@ -93,17 +94,22 @@ pub fn encode_query_value_ext<S: CodecStorage>(
 /// `None` when the chain carries no `0x03` ext or the encoding prefix is
 /// malformed (a corrupt value ext is dropped, not surfaced). Mirror of
 /// [`crate::attachment::decode_attachment_ext`].
-pub fn decode_query_value_ext<S: CodecStorage>(
-    extensions: &[ExtEntryOwned<S>],
-) -> Option<(EncodingHint, &[u8])> {
+///
+/// R3044 -- this reads the PLAIN shape only. A value whose ZBuf is a list of
+/// slices (the extension after a shared-memory marker) answers `None` here, by
+/// the entry's own `plain_zbuf`, and is read through the shared-memory receive
+/// state by the caller that owns one (`QueryableRegistry`). Handing this the
+/// slices' descriptor as though it were a value would deliver a few bytes of a
+/// buffer's address as the application's data.
+pub fn decode_query_value_ext<E: ExtEntryView>(extensions: &[E]) -> Option<(EncodingHint, &[u8])> {
     for ext in extensions {
         if ext.ext_id() == QUERY_VALUE_EXT_ID {
-            if let ExtEntryOwnedVariant::CodecZenohExtZbuf(z) = &ext.body {
+            if let Some(bytes) = ext.plain_zbuf() {
                 // The remainder after the encoding is the payload (pico takes
                 // `_z_zbuf_len(zbf)` after `_z_encoding_decode`); the split is
                 // `crate::encoding::split_value_body`'s, shared with the stats
                 // classifier that sizes the same payload.
-                return crate::encoding::split_value_body(SceByteBuf::as_slice(&z.value));
+                return crate::encoding::split_value_body(bytes);
             }
         }
     }
@@ -218,6 +224,6 @@ mod tests {
     /// An empty chain yields `None`.
     #[test]
     fn decode_returns_none_on_empty_chain() {
-        assert!(decode_query_value_ext::<Wire>(&[]).is_none());
+        assert!(decode_query_value_ext::<wz_codecs::ext_entry::ExtEntryOwned<Wire>>(&[]).is_none());
     }
 }

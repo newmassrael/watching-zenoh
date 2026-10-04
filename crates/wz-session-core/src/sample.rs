@@ -818,16 +818,22 @@ pub fn extract_qos<S: CodecStorage>(extensions: &[ExtEntryOwned<S>]) -> Option<Q
 /// 3. VLE-encoded `eid` (rejected when overflow to u32).
 /// 4. VLE-encoded `sn` (rejected when overflow to u32).
 ///
-/// Returns `None` on missing extension, on a non-`ExtZbuf` body
-/// variant for the matching tuple, or on any parse failure (truncation
+/// Returns `None` on missing extension, on a non-plain-ZBuf body
+/// for the matching tuple, or on any parse failure (truncation
 /// / overflow / impossible `zidlen`).
-pub fn extract_source_info<S: CodecStorage>(extensions: &[ExtEntryOwned<S>]) -> Option<SourceInfo> {
+///
+/// R3044 -- generic over the entry, because a Query's chain holds its own kind of
+/// entry and the other messages' chains hold the generic one
+/// ([`crate::ext_view`]).
+pub fn extract_source_info<E: crate::ext_view::ExtEntryView>(
+    extensions: &[E],
+) -> Option<SourceInfo> {
     const SOURCE_INFO_EXT_ID: u8 = 0x01;
     const ENC_ZBUF: u8 = 0x02;
     for ext in extensions {
         if ext.ext_id() == SOURCE_INFO_EXT_ID && ext.enc() == ENC_ZBUF {
-            if let ExtEntryOwnedVariant::CodecZenohExtZbuf(z) = &ext.body {
-                return decode_source_info_payload(SceByteBuf::as_slice(&z.value));
+            if let Some(bytes) = ext.plain_zbuf() {
+                return decode_source_info_payload(bytes);
             }
         }
     }

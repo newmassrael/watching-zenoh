@@ -132,7 +132,9 @@ pub fn encode_shm_marker_ext<S: CodecStorage>() -> ExtEntryOwned<S> {
 /// `true` iff a Put body ext chain carries the `ext_shm` marker — the RX signal
 /// that the payload field is a descriptor to resolve (not raw bytes). Detects by
 /// id (the [`crate::unit_ext`] mechanism), so the marker's M bit is ignored.
-pub fn body_has_shm_marker<S: CodecStorage>(extensions: &[ExtEntryOwned<S>]) -> bool {
+/// Reads any entry kind a chain can hold: the Put's generic entry and the
+/// Query's own (R3044).
+pub fn body_has_shm_marker<E: crate::ext_view::ExtEntryView>(extensions: &[E]) -> bool {
     crate::unit_ext::chain_has_ext_eid(extensions, SHM_BODY_EXT_ID | EXT_FLAG_M)
 }
 
@@ -647,28 +649,9 @@ impl ShmReceiveState {
             self.unnegotiated_drops += 1;
             return None;
         }
-        let resolver = self.resolver.as_deref();
-        // R3040 -- ONE acknowledgement per shared-memory slice, at the message's
-        // priority, whether or not the slice then resolves, and AFTER the attempt to
-        // read it: upstream maps the slice, which attaches to the buffer's watchdog
-        // first, and only then calls `handoff.on_rx(priority)` for it, for every
-        // `ShmPtr` slice and whatever the mapping returned
-        // (`io/zenoh-transport/src/common/shm/interop.rs` @
-        // `handoff.on_rx(priority);`). The order matters: the sender drops its own
-        // hold on the buffer once it is acknowledged, and a receiver that
-        // acknowledged first would leave a window in which nobody confirmed it. The
-        // sender's counter counts slices SENT, so a slice that is not acknowledged
-        // is a buffer its sender pins and keeps confirmed until the transport ends.
-        // `collect_payload` offers every such slice to the closure exactly once,
-        // which is what makes this the place to count them.
-        let handoff = self.handoff.as_deref();
+        let (resolver, handoff) = (self.resolver.as_deref(), self.handoff.as_deref());
         match crate::put_payload::collect_wire_payload(put, |descriptor| {
-            let resolved = decode_shm_descriptor(descriptor)
-                .and_then(|d| resolver.and_then(|r| r.resolve(&d)));
-            if let Some(handoff) = handoff {
-                handoff.on_rx(band);
-            }
-            resolved
+            read_and_acknowledge(resolver, handoff, band, descriptor)
         }) {
             Ok(bytes) => Some(bytes),
             Err(_) => {
@@ -680,6 +663,79 @@ impl ShmReceiveState {
             }
         }
     }
+
+    /// The un-swap of a LIST OF SLICES that is not a Put's payload: the value of a
+    /// query, which upstream writes as the same list after the same marker. The
+    /// same rules as [`Self::unswap_put`]: refused and counted when shared memory
+    /// was never negotiated, every slice read and acknowledged at `band` whether
+    /// or not the message is then delivered, `None` a counted drop and `Some` the
+    /// bytes the slices held, in order.
+    #[cfg(all(
+        feature = "alloc",
+        any(
+            feature = "codec-push",
+            feature = "codec-response",
+            feature = "codec-request"
+        )
+    ))]
+    pub fn unswap_slices(
+        &mut self,
+        slices: &[wz_codecs::zbuf_slice::ZbufSliceOwned<crate::wire::WireStorage>],
+        band: usize,
+    ) -> Option<Vec<u8>> {
+        if !self.negotiated {
+            self.unnegotiated_drops += 1;
+            return None;
+        }
+        let (resolver, handoff) = (self.resolver.as_deref(), self.handoff.as_deref());
+        match crate::put_payload::collect_slices(slices, |descriptor| {
+            read_and_acknowledge(resolver, handoff, band, descriptor)
+        }) {
+            Ok(bytes) => Some(bytes),
+            Err(_) => {
+                self.unresolved_drops += 1;
+                None
+            }
+        }
+    }
+}
+
+/// Read one shared-memory slice through `resolver` and acknowledge it to
+/// `handoff` at `band`.
+///
+/// R3040 -- ONE acknowledgement per shared-memory slice, at the message's
+/// priority, whether or not the slice then resolves, and AFTER the attempt to
+/// read it: upstream maps the slice, which attaches to the buffer's watchdog
+/// first, and only then calls `handoff.on_rx(priority)` for it, for every
+/// `ShmPtr` slice and whatever the mapping returned
+/// (`io/zenoh-transport/src/common/shm/interop.rs` @
+/// `handoff.on_rx(priority);`). The order matters: the sender drops its own
+/// hold on the buffer once it is acknowledged, and a receiver that
+/// acknowledged first would leave a window in which nobody confirmed it. The
+/// sender's counter counts slices SENT, so a slice that is not acknowledged
+/// is a buffer its sender pins and keeps confirmed until the transport ends.
+/// The slice walk offers every such slice to its closure exactly once, which
+/// is what makes this the place to count them.
+#[cfg(all(
+    feature = "alloc",
+    any(
+        feature = "codec-push",
+        feature = "codec-response",
+        feature = "codec-request"
+    )
+))]
+fn read_and_acknowledge(
+    resolver: Option<&(dyn ShmResolver + Send + Sync)>,
+    handoff: Option<&dyn ShmHandoff>,
+    band: usize,
+    descriptor: &[u8],
+) -> Option<Vec<u8>> {
+    let resolved =
+        decode_shm_descriptor(descriptor).and_then(|d| resolver.and_then(|r| r.resolve(&d)));
+    if let Some(handoff) = handoff {
+        handoff.on_rx(band);
+    }
+    resolved
 }
 
 /// Why a SHM challenge-response step refused. Only ONE of zenoh's arms is an
@@ -1106,7 +1162,9 @@ mod tests {
         assert!(body_has_shm_marker(&[encode_shm_marker_ext::<
             crate::wire::WireStorage,
         >()]));
-        assert!(!body_has_shm_marker::<crate::wire::WireStorage>(&[]));
+        assert!(!body_has_shm_marker::<crate::wire::parts::ExtEntryOwned>(
+            &[]
+        ));
         let source_info: ExtEntryOwned = ExtEntryOwned {
             header: 0x01,
             body: ExtEntryOwnedVariant::CodecZenohExtUnit(ExtUnit::default()),

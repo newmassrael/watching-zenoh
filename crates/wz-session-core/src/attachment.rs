@@ -22,6 +22,7 @@
 //! the catalog primitive the `pubsub-attachment` / `query-attachment`
 //! consumer features select.
 
+use crate::ext_view::ExtEntryView;
 use sce_forge_runtime::codec::{CodecError, CodecStorage, SceByteBuf};
 use wz_codecs::ext_entry::{ExtEntryOwned, ExtEntryOwnedVariant};
 use wz_codecs::ext_zbuf::ExtZbufOwned;
@@ -110,18 +111,19 @@ pub fn encode_attachment_ext<S: CodecStorage>(
 }
 
 /// Project the first attachment payload from an ext chain for the given
-/// carrier `ext_id`. Matches on `(ext_id, ExtZbuf body)`; the `ExtZbuf`
-/// variant is exactly the decode-time witness that the header carried the
-/// ENC_ZBUF encoding, so no separate `enc()` test is needed. Returns the
-/// borrowed body slice; callers needing ownership map with `<[u8]>::to_vec`.
-pub fn decode_attachment_ext<S: CodecStorage>(
-    extensions: &[ExtEntryOwned<S>],
-    ext_id: u8,
-) -> Option<&[u8]> {
+/// carrier `ext_id`. Matches on `(ext_id, plain ZBuf body)`; a ZBuf body is
+/// exactly the decode-time witness that the header carried the ENC_ZBUF
+/// encoding, so no separate `enc()` test is needed. Returns the borrowed body
+/// slice; callers needing ownership map with `<[u8]>::to_vec`.
+///
+/// R3044 -- generic over the entry, because a Query's chain holds its own kind
+/// of entry and the other messages' chains hold the generic one
+/// ([`crate::ext_view`]).
+pub fn decode_attachment_ext<E: ExtEntryView>(extensions: &[E], ext_id: u8) -> Option<&[u8]> {
     for ext in extensions {
         if ext.ext_id() == ext_id {
-            if let ExtEntryOwnedVariant::CodecZenohExtZbuf(z) = &ext.body {
-                return Some(SceByteBuf::as_slice(&z.value));
+            if let Some(bytes) = ext.plain_zbuf() {
+                return Some(bytes);
             }
         }
     }
@@ -243,7 +245,7 @@ mod tests {
     #[test]
     fn decode_returns_none_on_empty_chain() {
         assert_eq!(
-            decode_attachment_ext::<Wire>(&[], ATTACHMENT_EXT_ID_PUSH),
+            decode_attachment_ext::<ExtEntryOwned<Wire>>(&[], ATTACHMENT_EXT_ID_PUSH),
             None
         );
     }

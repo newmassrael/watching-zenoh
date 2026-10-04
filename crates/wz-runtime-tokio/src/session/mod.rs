@@ -2116,7 +2116,10 @@ impl<R: SessionRuntime, T: TimeSource, Tp: TransportState<R, T>> Session<R, T, T
             observer
                 .subscribers
                 .set_shm_resolver_shared(resolver.clone());
-            observer.replies.set_shm_resolver_shared(resolver);
+            observer.replies.set_shm_resolver_shared(resolver.clone());
+            // R3044 -- and the queryable registry, which reads the value of a
+            // query that arrives as a list of slices.
+            observer.queryables.set_shm_resolver_shared(resolver);
         });
     }
 
@@ -2807,6 +2810,9 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
                 // R3042 -- and onto the reply registry, which un-swaps a reply as
                 // the subscriber registry does a push, behind the same gate.
                 obs.replies.set_shm_negotiated(negotiated);
+                // R3044 -- and the queryable registry, which un-swaps a query's
+                // value behind the same gate.
+                obs.queryables.set_shm_negotiated(negotiated);
             }
             // R3040 -- hand the registry the means of ACKNOWLEDGING the peer's
             // shared-memory slices, before the un-swap can run, as the negotiated
@@ -2823,7 +2829,8 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
                 let shared: Option<std::sync::Arc<dyn wz_session_core::extshm::ShmHandoff>> =
                     update.map(std::sync::Arc::from);
                 obs.subscribers.set_shm_handoff_shared(shared.clone());
-                obs.replies.set_shm_handoff_shared(shared);
+                obs.replies.set_shm_handoff_shared(shared.clone());
+                obs.queryables.set_shm_handoff_shared(shared);
             }
             obs.dispatch_event(event);
             // R2690 (§5.23) — refresh the admin introspection cache from the

@@ -796,9 +796,15 @@ pub mod push_build;
 /// `MsgPutOwned` holds the four fields of both layouts; every site that builds
 /// or reads a Put payload goes through here so the layouts cannot drift. Gated
 /// on either Put-carrying codec: a Push body and a Reply body both hold one.
+/// R3044 -- and on the Query's, whose value is the same list of slices after the
+/// same marker and is read by the same walk (`collect_slices`).
 #[cfg(all(
     feature = "alloc",
-    any(feature = "codec-push", feature = "codec-response")
+    any(
+        feature = "codec-push",
+        feature = "codec-response",
+        feature = "codec-request"
+    )
 ))]
 pub mod put_payload;
 
@@ -1155,6 +1161,12 @@ pub mod extcompression;
 /// `wz-runtime-tokio::shm_provider` behind the resolver trait.
 #[cfg(feature = "transport-shm")]
 pub mod extshm;
+
+/// What a reader of an extension chain asks of one entry (identifier, encoding,
+/// the bytes of a plain ZBuf body), implemented by the generic entry and by the
+/// Query's own, so the attachment, source-info and value helpers shared across
+/// messages read either (R3044).
+pub mod ext_view;
 
 /// The method-agnostic Z_EXT_AUTH dispatch kernel — the wz mirror of zenoh
 /// `establishment/ext/auth/mod.rs` (`AuthFsm`'s OpenFsm + AcceptFsm). Mux/demux

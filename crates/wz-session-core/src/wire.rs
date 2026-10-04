@@ -116,6 +116,15 @@ pub mod parts {
     /// A Query body.
     #[cfg(feature = "codec-request")]
     pub type QueryOwned = wz_codecs::query::QueryOwned<WireStorage>;
+    /// An extension entry of a Query's chain, which has an entry of its own
+    /// (R3044): its ZBuf arm reads the shape a shared-memory marker before it
+    /// selects.
+    #[cfg(feature = "codec-request")]
+    pub type QueryExtEntryOwned = wz_codecs::query_ext_entry::QueryExtEntryOwned<WireStorage>;
+    /// The body variant of a [`QueryExtEntryOwned`].
+    #[cfg(feature = "codec-request")]
+    pub type QueryExtEntryOwnedVariant =
+        wz_codecs::query_ext_entry::QueryExtEntryOwnedVariant<WireStorage>;
     /// A Reply body.
     #[cfg(feature = "codec-response")]
     pub type ReplyOwned = wz_codecs::reply::ReplyOwned<WireStorage>;

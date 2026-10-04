@@ -219,6 +219,15 @@ pub mod body_ext_id {
     /// attachment 0x2}`, Query `{sinfo 0x1, body 0x3, attachment 0x5}`.
     pub const QUERY_BODY: u8 = 0x03;
 
+    /// R3045 — the marker that comes before a `Query`'s value when the value is
+    /// a list of slices and not a run of bytes: the second parameter of the same
+    /// `ValueType<{ ZExtZBuf::<0x03>::id(false) }, 0x04>` that names
+    /// [`QUERY_BODY`], a UNIT extension whose header is `0x04` and, with the
+    /// value after it, `0x84`. It has no mandatory bit, which a `Put`'s marker
+    /// ([`SHM`], `0x02` and mandatory) does, so the two are different
+    /// identities and a reader of one must not look for the other.
+    pub const QUERY_SHM: u8 = 0x04;
+
     /// R2825 — the three ATTACHMENT ids, one per carrier, moved here from
     /// `crate::attachment` (which names them from this table). They were gated
     /// on `attachment-bytes`, the feature that lets an application SEND an

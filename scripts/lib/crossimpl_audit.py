@@ -876,7 +876,15 @@ HOST_GATED_CI_TARGETS: dict[str, str] = {
 # class. Counted from the diff: exactly the one `wz-proves` line the file adds that
 # is not `none`. 978 + 1 = 979, measured by `run-ci.sh --layer A4` at this round's
 # tree, which this time was run BEFORE the push.
-FOREIGN_ADJUDICATOR_LINKS = 979
+# R3045 -- 979 -> 980, RISING by one, in the same file: the PIN of the query value
+# ending the wz session became the leg that proves the value arrives. Its
+# `wz-proves` line went from `none` to `transport-shm zenoh->wz`, and its name
+# from `..._ends_the_wz_session_until_its_codec_reads_upstreams_extension` to
+# `..._reaches_a_wz_queryable_through_shared_memory`. It runs against the same
+# `z_get_shm` program as before, so no new class. Counted from the diff: exactly
+# that one line. 979 + 1 = 980, measured by `run-ci.sh --layer A4` at this round's
+# tree, which was run before the push.
+FOREIGN_ADJUDICATOR_LINKS = 980
 
 # ── Execution disclosure ────────────────────────────────────────────────────────
 #

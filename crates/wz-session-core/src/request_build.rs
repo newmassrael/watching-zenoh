@@ -697,7 +697,16 @@ impl RequestQueryBuilder {
                         ext.header |= 0x80;
                     }
                 }
-                query.extensions = Some(query_exts);
+                // R3044 -- the Query's chain holds its own kind of entry (the
+                // ZBuf arm reads a value differently after a shared-memory
+                // marker). The three entries built above are all plain, so each
+                // becomes the plain shape of the Query's entry.
+                query.extensions = Some(
+                    query_exts
+                        .into_iter()
+                        .map(crate::ext_view::query_ext_from_generic)
+                        .collect(),
+                );
             }
         } else {
             unreachable!(
@@ -1664,11 +1673,16 @@ mod tests {
                     "ExtEntry.header = ENC_ZBUF(0x40) | id_attachment(0x05)"
                 );
                 match &exts[0].body {
-                    ExtEntryOwnedVariant::CodecZenohExtZbuf(zb) => {
+                    crate::wire::parts::QueryExtEntryOwnedVariant::CodecZenohQueryValueZbuf(zb) => {
                         assert_eq!(zb.value_len, 2);
-                        assert_eq!(zb.value.as_slice(), b"hi".as_slice());
+                        assert_eq!(
+                            zb.value.as_ref().map(|v| v.as_slice()),
+                            Some(b"hi".as_slice()),
+                            "an attachment is the plain shape, never the sliced one"
+                        );
+                        assert!(zb.slices.is_none());
                     }
-                    _ => panic!("attachment ext body must be CodecZenohExtZbuf"),
+                    _ => panic!("attachment ext body must be a ZBuf"),
                 }
                 assert!(
                     q.consolidation.is_none() && q.parameters.is_none(),

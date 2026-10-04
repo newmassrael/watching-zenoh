@@ -892,16 +892,47 @@ where
         feature = "codec-response"
     )
 ))]
-fn stats_data_class(
+fn stats_data_class<E: crate::ext_view::ExtEntryView>(
     kind: crate::stats::MessageLabel,
     message: crate::stats::StatMessage,
     space: crate::stats::StatSpace,
     pl_bytes: usize,
-    _extensions: Option<&[crate::wire::parts::ExtEntryOwned]>,
+    extensions: Option<&[E]>,
+) -> crate::stats::NetworkStatsClass {
+    stats_class_marked(
+        kind,
+        message,
+        space,
+        pl_bytes,
+        extensions,
+        crate::ext_header::body_ext_id::SHM | crate::ext_header::EXT_FLAG_M,
+    )
+}
+
+/// [`stats_data_class`] for a body whose shared-memory marker is not a `Put`'s:
+/// the marker is named by its identity (its header without the chain flag), so
+/// that the Query, whose marker is another extension at another id, is held to
+/// its own (R3045). Before it a Query that carried the marker could not be
+/// decoded at all, so there was no class to get wrong.
+#[cfg(all(
+    feature = "transport-stats",
+    any(
+        feature = "codec-push",
+        feature = "codec-request",
+        feature = "codec-response"
+    )
+))]
+fn stats_class_marked<E: crate::ext_view::ExtEntryView>(
+    kind: crate::stats::MessageLabel,
+    message: crate::stats::StatMessage,
+    space: crate::stats::StatSpace,
+    pl_bytes: usize,
+    _extensions: Option<&[E]>,
+    _marker: u8,
 ) -> crate::stats::NetworkStatsClass {
     let class = crate::stats::NetworkStatsClass::net(kind, message, space, pl_bytes);
     #[cfg(feature = "transport-shm")]
-    if _extensions.is_some_and(crate::extshm::body_has_shm_marker) {
+    if _extensions.is_some_and(|exts| crate::unit_ext::chain_has_ext_eid(exts, _marker)) {
         return class.on_shm();
     }
     class
@@ -916,17 +947,13 @@ fn stats_data_class(
         feature = "codec-response"
     )
 ))]
-fn zbuf_ext_len(extensions: Option<&[crate::wire::parts::ExtEntryOwned]>, id: u8) -> usize {
-    use wz_codecs::ext_entry::ExtEntryOwnedVariant as E;
+fn zbuf_ext_len<E: crate::ext_view::ExtEntryView>(extensions: Option<&[E]>, id: u8) -> usize {
     extensions
         .unwrap_or_default()
         .iter()
         .find(|ext| ext.ext_id() == id)
-        .and_then(|ext| match &ext.body {
-            E::CodecZenohExtZbuf(z) => Some(z.value.len()),
-            _ => None,
-        })
-        .unwrap_or(0)
+        .and_then(|ext| ext.plain_zbuf())
+        .map_or(0, <[u8]>::len)
 }
 
 /// R2825 (open-debt item 820) — a data body's payload SIZE as upstream counts
@@ -1024,12 +1051,16 @@ where
             del_payload_size(b.extensions.as_deref()),
             b.extensions.as_deref(),
         ),
-        V::CodecZenohQuery(b) | V::Default { body: b, .. } => stats_data_class(
+        // The marker that precedes a Query's value is its own extension, not a
+        // Put's (`ext_header::body_ext_id::QUERY_SHM`), and upstream's `is_shm`
+        // for a Request reads it off the Query's value body.
+        V::CodecZenohQuery(b) | V::Default { body: b, .. } => stats_class_marked(
             MessageLabel::Query,
             StatMessage::Query,
             space,
             query_payload_size(b.extensions.as_deref()),
             b.extensions.as_deref(),
+            crate::ext_header::body_ext_id::QUERY_SHM,
         ),
     }
 }
@@ -1042,17 +1073,25 @@ where
 /// counts: a `get` with parameters and no value reported bytes where upstream
 /// reports none.
 #[cfg(all(feature = "transport-stats", feature = "codec-request"))]
-fn query_payload_size(extensions: Option<&[crate::wire::parts::ExtEntryOwned]>) -> usize {
-    use wz_codecs::ext_entry::ExtEntryOwnedVariant as E;
+fn query_payload_size(extensions: Option<&[crate::wire::parts::QueryExtEntryOwned]>) -> usize {
+    use crate::wire::parts::QueryExtEntryOwnedVariant as E;
     let value = extensions
         .unwrap_or_default()
         .iter()
         .find(|ext| ext.ext_id() == crate::ext_header::body_ext_id::QUERY_BODY)
-        .and_then(|ext| match &ext.body {
-            E::CodecZenohExtZbuf(z) => crate::encoding::split_value_body(z.value.as_slice()),
-            _ => None,
-        })
-        .map_or(0, |(_, payload)| payload.len());
+        .map_or(0, |ext| match &ext.body {
+            // The value after a shared-memory marker is a list of slices, and
+            // its encoding is a field of its own, so the whole list is value.
+            E::CodecZenohQueryValueZbuf(z) => match (&z.value, &z.slices) {
+                (Some(bytes), _) => crate::encoding::split_value_body(bytes.as_slice())
+                    .map_or(0, |(_, payload)| payload.len()),
+                (None, Some(slices)) => crate::put_payload::slices_len(
+                    sce_forge_runtime::codec::SceList::as_slice(slices),
+                ),
+                (None, None) => 0,
+            },
+            _ => 0,
+        });
     value + zbuf_ext_len(extensions, crate::ext_header::body_ext_id::QUERY_ATTACHMENT)
 }
 
@@ -1554,10 +1593,13 @@ mod payload_size_tests {
         let mut value = encoding.to_codec().encode_to_vec();
         let encoding_len = value.len();
         value.extend_from_slice(b"value!");
-        let exts = alloc::vec![
+        let exts: alloc::vec::Vec<_> = [
             zbuf_ext(body_ext_id::QUERY_BODY, &value),
             zbuf_ext(body_ext_id::QUERY_ATTACHMENT, b"xyz"),
-        ];
+        ]
+        .into_iter()
+        .map(crate::ext_view::query_ext_from_generic)
+        .collect();
         assert!(
             encoding_len > 1,
             "the encoding really occupies bytes to leave out"

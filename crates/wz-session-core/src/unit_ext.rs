@@ -18,7 +18,6 @@
 //! says to abstract as the MECHANISM while keeping the DATA (the id constant + the
 //! zenoh-cited wrapper) per-capability.
 
-use sce_forge_runtime::codec::CodecStorage;
 use wz_codecs::ext_entry::{ExtEntryOwned, ExtEntryOwnedVariant};
 use wz_codecs::ext_unit::ExtUnit;
 
@@ -51,14 +50,14 @@ pub fn encode_unit_ext(ext_id: u8) -> ExtEntryOwned {
 /// Callers pass the header they ENCODE, so a capability offer
 /// ([`encode_unit_ext`], header == id) and an M-flagged body marker (header ==
 /// `id | EXT_FLAG_M`) each match only their own form.
-pub fn chain_has_ext_eid<S: CodecStorage>(
-    extensions: &[ExtEntryOwned<S>],
+pub fn chain_has_ext_eid<E: crate::ext_view::ExtEntryView>(
+    extensions: &[E],
     expected_header: u8,
 ) -> bool {
     let want = crate::ext_header::ext_eid(expected_header);
     extensions
         .iter()
-        .any(|e| crate::ext_header::ext_eid(e.header) == want)
+        .any(|e| crate::ext_header::ext_eid(e.header()) == want)
 }
 
 #[cfg(test)]
@@ -75,7 +74,7 @@ mod tests {
         assert_eq!(ext.as_borrowed().encode_to_vec().len(), 1);
         assert!(chain_has_ext_eid(&[ext], 0x05));
         assert!(!chain_has_ext_eid(&[encode_unit_ext(0x06)], 0x05));
-        assert!(!chain_has_ext_eid::<sce_forge_runtime::codec::DefaultStorage>(&[], 0x05));
+        assert!(!chain_has_ext_eid::<ExtEntryOwned>(&[], 0x05));
     }
 
     /// R311y505 — the regression this round exists for: an entry that shares the

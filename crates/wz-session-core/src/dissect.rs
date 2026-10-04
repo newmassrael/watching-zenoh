@@ -5308,6 +5308,15 @@ mod tests {
             N
         }
 
+        /// The same, for the Query's chain, whose entry is its own kind (R3044).
+        fn cap_query<const N: usize>(
+            _: &Option<
+                sce_forge_runtime::heapless::Vec<wz_codecs::query_ext_entry::QueryExtEntry<'_>, N>,
+            >,
+        ) -> usize {
+            N
+        }
+
         // The network layer.
         assert_eq!(
             cap(&wz_codecs::push::Push::default().extensions),
@@ -5379,7 +5388,7 @@ mod tests {
         // Query is the odd one out on BOTH axes: a larger depth and the
         // fill-to-end strategy.
         assert_eq!(
-            cap(&wz_codecs::query::Query::default().extensions),
+            cap_query(&wz_codecs::query::Query::default().extensions),
             QUERY_EXT_CHAIN_DEPTH
         );
     }

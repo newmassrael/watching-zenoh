@@ -1,4 +1,4 @@
-// SCE-MAP: request:110 :: _forge_body
+// SCE-MAP: query_ext_entry:26 :: _forge_body
 
 // SCE Forge: Auto-generated from Extended SCXML (sce:kind="codec")
 // Runtime: none
@@ -15,18 +15,10 @@ extern crate alloc;
 use alloc::vec::Vec;
 #[cfg(feature = "alloc")]
 use sce_forge_runtime::codec::VecSink;
-// RFC §synth-5-B B2/B3: bounded inline list storage for repeat / tlv-chain
-// fields — heap-free `heapless::Vec<T, N>` (re-exported by the runtime),
-// the Rust mirror of the C11 `T elems[MAX]; len` representation. Always
-// available (no `alloc` gate) so list-bearing codecs compile on the
-// pure no_std no-alloc MCU tier.
-use sce_forge_runtime::heapless::Vec as HeaplessVec;
 
-use super::wireexpr::{Wireexpr, WireexprVariant};
-use super::ext_entry::ExtEntry;
-use super::msg_put::MsgPut;
-use super::msg_del::MsgDel;
-use super::query::Query;
+use super::ext_unit::ExtUnit;
+use super::ext_zint::ExtZint;
+use super::query_value_zbuf::QueryValueZbuf;
 
 // RFC §synth-5-B variant primitive: discriminated-union body for the
 // codec's tag-field suffix. Each arm wraps an imported codec's decoded
@@ -34,24 +26,24 @@ use super::query::Query;
 // alongside its catch-all body.
 #[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq)]
-pub enum RequestVariant<'a> {
-    CodecZenohMsgPut(MsgPut<'a>),
-    CodecZenohMsgDel(MsgDel<'a>),
-    CodecZenohQuery(Query<'a>),
+pub enum QueryExtEntryVariant<'a> {
+    CodecZenohExtUnit(ExtUnit),
+    CodecZenohExtZint(ExtZint),
+    CodecZenohQueryValueZbuf(QueryValueZbuf<'a>),
     Default {
         tag: u8,
-        body: Query<'a>,
+        body: ExtUnit,
     },
 }
 
-impl<'a> Default for RequestVariant<'a> {
+impl<'a> Default for QueryExtEntryVariant<'a> {
     fn default() -> Self {
         // RFC variant-default-uniformity: pick the declared default
         // arm (`<sce:arm default="true"/>`) so a freshly-constructed
         // envelope round-trips byte-exactly through `encode() ->
         // decode()` — pairs with the inner codec's `<sce:flag value=>`
         // -baked `Default::default()` to close the dispatch loop.
-        Self::CodecZenohQuery(Query::default())
+        Self::CodecZenohExtUnit(ExtUnit::default())
     }
 }
 
@@ -60,36 +52,14 @@ impl<'a> Default for RequestVariant<'a> {
 // subset of fixtures, so unused-but-pub fields/methods would otherwise
 // trigger dead_code on every codec build.
 #[allow(dead_code)]
-#[derive(Debug, Clone, PartialEq)]
-pub struct Request<'a> {
+#[derive(Default, Debug, Clone, PartialEq)]
+pub struct QueryExtEntry<'a> {
     pub header: u8,
-    pub rid: u64,
-    pub keyexpr: Wireexpr<'a>,
-    pub extensions: Option<HeaplessVec<ExtEntry<'a>, 8>>,
-    pub body: RequestVariant<'a>,
-}
-
-// RFC variant-default-uniformity: at least one field's
-// `<sce:flags>` carrier declares a wire-MID constant via
-// `<sce:flag value="N"/>`. Manual `impl Default` bakes the OR of
-// every declared `(value & mask) << bit` into that carrier so a
-// freshly-constructed instance carries the wire-MID for its own
-// dispatch tag. Fields without declared values fall through to
-// `Default::default()` (preserving derive(Default) semantics).
-impl<'a> Default for Request<'a> {
-    fn default() -> Self {
-        Self {
-            header: 0x1cu8,
-            rid: Default::default(),
-            keyexpr: Default::default(),
-            extensions: Default::default(),
-            body: RequestVariant::default(),
-        }
-    }
+    pub body: QueryExtEntryVariant<'a>,
 }
 
 #[allow(dead_code)]
-impl<'a> Request<'a> {
+impl<'a> QueryExtEntry<'a> {
     /// Construct an instance with every field at its own type's
     /// [`Default`]. Generated procedure_l2 code stores codec instances
     /// as owned members and needs an infallible constructor to
@@ -105,64 +75,32 @@ impl<'a> Request<'a> {
     /// advances past the consumed bytes; on `NeedMoreBytes` the cursor
     /// is left untouched so the caller can resume after appending more
     /// bytes (RFC §synth-5-B L494-519).
-    pub fn decode(cursor: &mut SceCursor<'a>) -> Result<Self, CodecError> {
-        // RFC §synth-5-B peek-byte / streaming-prefix:
-        // streaming prefix decode (variable-length fields supported via
-        // per-field present_if/tlv-chain/embed/repeat helpers). Peek-byte
-        // mode additionally peeks the cursor's next byte for the variant
-        // tag without advancing — the arm body decoder reads the peeked
-        // byte as its own header byte (Zenoh response/request body MID
-        // dispatch shape per network.c:347-364 + 220-235).
-        let header = {
-            let raw = cursor.peek_slice(1)?;
-            let _v = raw[0];
-            cursor.advance(1)?;
-            _v
-        };
-        let rid = cursor.read_vle_u64()?;
-        let keyexpr = Wireexpr::decode(cursor, (header >> 5) & 0x1, (header >> 6) & 0x1)?;
-        let extensions = if (header & 0x80u8) != 0 {
-            let mut _vec: HeaplessVec<ExtEntry<'a>, 8> = HeaplessVec::new();
-            let mut _more = false;
-            for _ in 0..8u32 {
-                if cursor.remaining() == 0 { break; }
-                let _entry = ExtEntry::decode(cursor)?;
-                _more = _entry.z();
-                // Bounded by max-depth on both sides — loop count and `_vec`
-                // capacity are the same literal — so this push cannot fail. An
-                // over-long chain is refused by the guard after the loop.
-                _vec.push(_entry).map_err(|_| CodecError::TooManyElements)?;
-                if !_more { break; }
-            }
-            if _more && cursor.remaining() == 0 {
-                return Err(CodecError::NeedMoreBytes);
-            }
-            if _more {
-                return Err(CodecError::TlvChainOverflow);
-            }
-            Some(_vec)
-        } else {
-            None
-        };
-        let _peek = cursor.peek_slice(1)?[0];
+    pub fn decode(cursor: &mut SceCursor<'a>, after_shm: u8) -> Result<Self, CodecError> {
+        // Declared-but-unconsumed flag inputs: defensive suppress per declared
+        // `<sce:flag-input>` so codecs that haven't (yet) consumed an
+        // input via `present-if` compile cleanly. The validator enforces
+        // declaration; consumption is a per-codec design choice.
+        let _ = after_shm;
+        // Decode fixed prefix (RFC §synth-5-B variant primitive: fields
+        // sit before the variant suffix on the wire).
+        let raw = cursor.peek_slice(1)?;
+        let header = raw[0];
+        cursor.advance(1)?;
         // Dispatch on the tag field; each arm decodes its body codec
         // from the cursor. The default arm (when declared) carries the
         // runtime tag value so encode can round-trip it back onto the
         // wire.
-        let body = match _peek & 0x1F {
-            1u8 => RequestVariant::CodecZenohMsgPut(MsgPut::decode(cursor)?),
-            2u8 => RequestVariant::CodecZenohMsgDel(MsgDel::decode(cursor)?),
-            3u8 => RequestVariant::CodecZenohQuery(Query::decode(cursor)?),
-            other => RequestVariant::Default {
+        let body = match (header >> 5) & 0x03 {
+            0u8 => QueryExtEntryVariant::CodecZenohExtUnit(ExtUnit::decode(cursor)?),
+            1u8 => QueryExtEntryVariant::CodecZenohExtZint(ExtZint::decode(cursor)?),
+            2u8 => QueryExtEntryVariant::CodecZenohQueryValueZbuf(QueryValueZbuf::decode(cursor, after_shm)?),
+            other => QueryExtEntryVariant::Default {
                 tag: other,
-                body: Query::decode(cursor)?,
+                body: ExtUnit::decode(cursor)?,
             },
         };
         Ok(Self {
             header,
-            rid,
-            keyexpr,
-            extensions,
             body,
         })
     }
@@ -173,36 +111,32 @@ impl<'a> Request<'a> {
     // range. Setters mask + shift on the way in so out-of-range
     // callers can't corrupt sibling bits. Wire layout is unchanged —
     // the carrier still occupies its declared bytes.
-    pub fn mid(&self) -> u8 {
-        self.header & 0x1F
+    pub fn ext_id(&self) -> u8 {
+        self.header & 0x0F
     }
 
-    pub fn set_mid(&mut self, v: u8) {
-        self.header = (self.header & !0x1F) | (v & 0x1F);
-    }
-
-    pub fn n(&self) -> bool {
-        (self.header & 0x20) != 0
-    }
-
-    pub fn set_n(&mut self, v: bool) {
-        if v {
-            self.header |= 0x20;
-        } else {
-            self.header &= !0x20;
-        }
+    pub fn set_ext_id(&mut self, v: u8) {
+        self.header = (self.header & !0x0F) | (v & 0x0F);
     }
 
     pub fn m(&self) -> bool {
-        (self.header & 0x40) != 0
+        (self.header & 0x10) != 0
     }
 
     pub fn set_m(&mut self, v: bool) {
         if v {
-            self.header |= 0x40;
+            self.header |= 0x10;
         } else {
-            self.header &= !0x40;
+            self.header &= !0x10;
         }
+    }
+
+    pub fn enc(&self) -> u8 {
+        (self.header >> 5) & 0x03
+    }
+
+    pub fn set_enc(&mut self, v: u8) {
+        self.header = (self.header & !0x60) | ((v & 0x03) << 5);
     }
 
     pub fn z(&self) -> bool {
@@ -221,46 +155,34 @@ impl<'a> Request<'a> {
     /// against which `VecSink::new` reserves capacity in the
     /// `encode_to_vec` facade, and the natural reserve hint for
     /// caller-owned `SliceSink` allocations.
-    pub const MAX_ENCODED_BYTES: usize = 11597;
+    pub const MAX_ENCODED_BYTES: usize = 1383;
 
     /// Encode `self` into the caller-owned sink. Returns
     /// `CodecError::BufferOverflow` from a bounded sink when the
     /// destination has insufficient remaining capacity; growable
     /// sinks (e.g. `VecSink`) are effectively infallible.
-    pub fn encode<S: SceSink>(&self, w: &mut S) -> Result<(), CodecError> {
-        // RFC §synth-5-B parent-tag carriers — derive carrier bits from each embedded
-        // parent-tag variant's active arm before the carrier byte is
-        // emitted. Each `_derived_<carrier>` local is OR'd into the
-        // carrier's encode site (see `inject_parent_tag_carrier_suffix`).
-        let _derived_header: u8 = match &self.keyexpr.body { WireexprVariant::WireexprNonlocal(_) => 0x00u8, WireexprVariant::WireexprLocal(_) => 0x40u8 };
-
-        // RFC §synth-5-B peek-byte / streaming-prefix:
-        // streaming prefix encode (per-field present_if/tlv-chain/embed/
-        // repeat helpers). Peek-byte mode: the arm body's encode prepends
-        // its own header byte (which the decoder peeked); no separate
-        // tag byte is emitted here. Streaming-prefix mode (own-field
-        // variant): the carrier is part of the prefix fields and emits
-        // through the same per-field path.
-        w.write_u8(self.header | _derived_header)?;
-        w.write_vle_u64(self.rid)?;
-        self.keyexpr.encode(w, (self.header >> 5) & 0x1)?;
-        if let Some(_list) = &self.extensions {
-            for _e in _list {
-                _e.encode(w)?;
-            }
-        }
+    pub fn encode<S: SceSink>(&self, w: &mut S, after_shm: u8) -> Result<(), CodecError> {
+        // Declared-but-unconsumed flag inputs: see `decode` — same suppress per
+        // declared `<sce:flag-input>`.
+        let _ = after_shm;
+        // Encode fixed prefix (tag field is part of the prefix). The
+        // tag value is read from the struct field, NOT derived from
+        // the body discriminant — keeping author-set msg_id / body in
+        // sync is the caller's responsibility (v1 keeps the layout
+        // simple; future extensions may auto-sync via a typed setter).
+        w.write_u8(self.header)?;
         // Append the active arm's encoded bytes.
         match &self.body {
-            RequestVariant::CodecZenohMsgPut(b) => {
+            QueryExtEntryVariant::CodecZenohExtUnit(b) => {
                 b.encode(w)?;
             }
-            RequestVariant::CodecZenohMsgDel(b) => {
+            QueryExtEntryVariant::CodecZenohExtZint(b) => {
                 b.encode(w)?;
             }
-            RequestVariant::CodecZenohQuery(b) => {
-                b.encode(w)?;
+            QueryExtEntryVariant::CodecZenohQueryValueZbuf(b) => {
+                b.encode(w, after_shm)?;
             }
-            RequestVariant::Default { body, .. } => {
+            QueryExtEntryVariant::Default { body, .. } => {
                 body.encode(w)?;
             }
         }
@@ -279,28 +201,28 @@ impl<'a> Request<'a> {
     /// `no_std` builds without `alloc` only see the sink-based
     /// primary `encode`.
     #[cfg(feature = "alloc")]
-    pub fn encode_to_vec(&self) -> Vec<u8> {
+    pub fn encode_to_vec(&self, after_shm: u8) -> Vec<u8> {
         let mut _sce_v: Vec<u8> = Vec::with_capacity(Self::MAX_ENCODED_BYTES);
         let mut _sce_sink = VecSink::new(&mut _sce_v);
-        self.encode(&mut _sce_sink)
+        self.encode(&mut _sce_sink, after_shm)
             .expect("VecSink is infallible");
         _sce_v
     }
 }
 
 // ── Owned projection (storage-parameterised native form) ─────────────
-// `Request<'a>` above is a zero-copy view borrowing the decode
+// `QueryExtEntry<'a>` above is a zero-copy view borrowing the decode
 // buffer. Consumers that persist a decoded value beyond the buffer's
 // lifetime — including the self-contained bounded-collection that stores
 // elements by value — call `.try_into_owned()` for this lifetime-free
-// `RequestOwned`. The rkyv-style Archived(borrowed) ↔ native
+// `QueryExtEntryOwned`. The rkyv-style Archived(borrowed) ↔ native
 // (owned) split, both generated from the one SCXML source (SSOT).
 //
 // The owned form is parameterised by a storage profile rather than fixed at
-// build-configuration time: `RequestOwned<Heap>` holds growable
-// containers with the declared capacities advisory, `RequestOwned<Inline>`
+// build-configuration time: `QueryExtEntryOwned<Heap>` holds growable
+// containers with the declared capacities advisory, `QueryExtEntryOwned<Inline>`
 // holds every field inline at its declared capacity and never allocates, and
-// both exist in the same binary. `RequestOwned` alone is the build's
+// both exist in the same binary. `QueryExtEntryOwned` alone is the build's
 // default profile. Because the non-allocating profile is a *type*, this mirror
 // carries no `alloc` gate at all — a list- or embed-bearing codec has an owned
 // form on the heap-free tier too, and a heap-capable consumer can still pin a
@@ -314,47 +236,40 @@ impl<'a> Request<'a> {
 //
 // Decoding picks the profile from the call (`try_into_owned_in::<Inline>()`).
 // Hand-assembling one instead names it on the value or its binding —
-// `let v: RequestOwned = RequestOwned { .. };`
+// `let v: QueryExtEntryOwned = QueryExtEntryOwned { .. };`
 // — because the fields reach the profile through its associated container
 // types, which cannot be run backwards to recover the profile from a value.
 // Naming it once is also what lets each field's declared capacity infer,
 // so no call site repeats a `sce:max-size` / `sce:max-count` constant.
-use super::wireexpr::WireexprOwned;
-use super::ext_entry::ExtEntryOwned;
-use super::msg_put::MsgPutOwned;
-use super::msg_del::MsgDelOwned;
-use super::query::QueryOwned;
+use super::query_value_zbuf::QueryValueZbufOwned;
 // Same pub-API policy as the borrowed view above: the owned mirror and its
 // projections are cross-crate surface, and which of them a given in-repo
 // fixture happens to call says nothing about their value.
 #[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq)]
-pub struct RequestOwned<S: ::sce_forge_runtime::codec::CodecStorage = ::sce_forge_runtime::codec::DefaultStorage> {
+pub struct QueryExtEntryOwned<S: ::sce_forge_runtime::codec::CodecStorage = ::sce_forge_runtime::codec::DefaultStorage> {
     pub header: u8,
-    pub rid: u64,
-    pub keyexpr: WireexprOwned<S>,
-    pub extensions: Option<S::List<ExtEntryOwned<S>, 16>>,
-    pub body: RequestOwnedVariant<S>,
+    pub body: QueryExtEntryOwnedVariant<S>,
 }
 
 #[allow(dead_code)]
-impl<S: ::sce_forge_runtime::codec::CodecStorage> RequestOwned<S> {
+impl<S: ::sce_forge_runtime::codec::CodecStorage> QueryExtEntryOwned<S> {
     // RFC §synth-5-B read-accessor parity with the borrowed view: pure
     // bit getters over the copied carrier (rkyv Archived↔native getter
     // parity), so owned consumers read `{Codec}Owned` with the same API as
     // the borrowed view and never re-derive the SCE wire bit layout (SSOT).
     // Read-only — write accessors belong with an owned-encode path, which
     // does not exist yet.
-    pub fn mid(&self) -> u8 {
-        self.header & 0x1F
-    }
-
-    pub fn n(&self) -> bool {
-        (self.header & 0x20) != 0
+    pub fn ext_id(&self) -> u8 {
+        self.header & 0x0F
     }
 
     pub fn m(&self) -> bool {
-        (self.header & 0x40) != 0
+        (self.header & 0x10) != 0
+    }
+
+    pub fn enc(&self) -> u8 {
+        (self.header >> 5) & 0x03
     }
 
     pub fn z(&self) -> bool {
@@ -371,57 +286,57 @@ impl<S: ::sce_forge_runtime::codec::CodecStorage> RequestOwned<S> {
 #[allow(clippy::large_enum_variant)]
 #[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq)]
-pub enum RequestOwnedVariant<S: ::sce_forge_runtime::codec::CodecStorage = ::sce_forge_runtime::codec::DefaultStorage> {
-    CodecZenohMsgPut(MsgPutOwned<S>),
-    CodecZenohMsgDel(MsgDelOwned<S>),
-    CodecZenohQuery(QueryOwned<S>),
+pub enum QueryExtEntryOwnedVariant<S: ::sce_forge_runtime::codec::CodecStorage = ::sce_forge_runtime::codec::DefaultStorage> {
+    CodecZenohExtUnit(ExtUnit),
+    CodecZenohExtZint(ExtZint),
+    CodecZenohQueryValueZbuf(QueryValueZbufOwned<S>),
     Default {
         tag: u8,
-        body: QueryOwned<S>,
+        body: ExtUnit,
     },
 }
 
 #[allow(dead_code)]
-impl<'a> RequestVariant<'a> {
+impl<'a> QueryExtEntryVariant<'a> {
     /// Deep-copy this borrowed variant body into its owned mirror at the
     /// given storage profile. Fallible because a borrowed arm body's own
     /// projection re-checks its declared capacities (the same bounds decode
     /// enforces) — on the growable profile no check can fire.
-    pub fn try_into_owned_in<S: ::sce_forge_runtime::codec::CodecStorage>(self) -> Result<RequestOwnedVariant<S>, CodecError> {
+    pub fn try_into_owned_in<S: ::sce_forge_runtime::codec::CodecStorage>(self) -> Result<QueryExtEntryOwnedVariant<S>, CodecError> {
         Ok(match self {
-            RequestVariant::CodecZenohMsgPut(_b) => RequestOwnedVariant::CodecZenohMsgPut(_b.try_into_owned_in::<S>()?),
-            RequestVariant::CodecZenohMsgDel(_b) => RequestOwnedVariant::CodecZenohMsgDel(_b.try_into_owned_in::<S>()?),
-            RequestVariant::CodecZenohQuery(_b) => RequestOwnedVariant::CodecZenohQuery(_b.try_into_owned_in::<S>()?),
-            RequestVariant::Default { tag, body } => RequestOwnedVariant::Default { tag, body: body.try_into_owned_in::<S>()? },
+            QueryExtEntryVariant::CodecZenohExtUnit(_b) => QueryExtEntryOwnedVariant::CodecZenohExtUnit(_b),
+            QueryExtEntryVariant::CodecZenohExtZint(_b) => QueryExtEntryOwnedVariant::CodecZenohExtZint(_b),
+            QueryExtEntryVariant::CodecZenohQueryValueZbuf(_b) => QueryExtEntryOwnedVariant::CodecZenohQueryValueZbuf(_b.try_into_owned_in::<S>()?),
+            QueryExtEntryVariant::Default { tag, body } => QueryExtEntryOwnedVariant::Default { tag, body },
         })
     }
 
     /// The same projection at the build's default storage profile.
-    pub fn try_into_owned(self) -> Result<RequestOwnedVariant, CodecError> {
+    pub fn try_into_owned(self) -> Result<QueryExtEntryOwnedVariant, CodecError> {
         self.try_into_owned_in()
     }
 }
 
 #[allow(dead_code)]
-impl<S: ::sce_forge_runtime::codec::CodecStorage> RequestOwnedVariant<S> {
+impl<S: ::sce_forge_runtime::codec::CodecStorage> QueryExtEntryOwnedVariant<S> {
     /// Re-borrow this owned variant body back into its borrowed mirror —
     /// the inverse of the projection above. Reuses the borrowed view's
     /// single `encode`; the owned form deliberately carries no encode of
     /// its own.
-    pub fn try_as_borrowed(&self) -> Result<RequestVariant<'_>, CodecError> {
+    pub fn try_as_borrowed(&self) -> Result<QueryExtEntryVariant<'_>, CodecError> {
         Ok(match self {
-            RequestOwnedVariant::CodecZenohMsgPut(_b) => RequestVariant::CodecZenohMsgPut(_b.try_as_borrowed()?),
-            RequestOwnedVariant::CodecZenohMsgDel(_b) => RequestVariant::CodecZenohMsgDel(_b.try_as_borrowed()?),
-            RequestOwnedVariant::CodecZenohQuery(_b) => RequestVariant::CodecZenohQuery(_b.try_as_borrowed()?),
-            RequestOwnedVariant::Default { tag, body } => RequestVariant::Default { tag: *tag, body: body.try_as_borrowed()? },
+            QueryExtEntryOwnedVariant::CodecZenohExtUnit(_b) => QueryExtEntryVariant::CodecZenohExtUnit(_b.clone()),
+            QueryExtEntryOwnedVariant::CodecZenohExtZint(_b) => QueryExtEntryVariant::CodecZenohExtZint(_b.clone()),
+            QueryExtEntryOwnedVariant::CodecZenohQueryValueZbuf(_b) => QueryExtEntryVariant::CodecZenohQueryValueZbuf(_b.try_as_borrowed()?),
+            QueryExtEntryOwnedVariant::Default { tag, body } => QueryExtEntryVariant::Default { tag: *tag, body: body.clone() },
         })
     }
 }
 
 #[allow(dead_code)]
-impl<'a> Request<'a> {
+impl<'a> QueryExtEntry<'a> {
     /// Deep-copy this borrowed zero-copy view into an owned, lifetime-free
-    /// [`RequestOwned`] held in the given storage profile. Call at
+    /// [`QueryExtEntryOwned`] held in the given storage profile. Call at
     /// a decode boundary when the decoded value must outlive the input
     /// buffer — stored in a long-lived enum, moved across an async task, or
     /// inserted by value into a bounded-collection.
@@ -431,25 +346,22 @@ impl<'a> Request<'a> {
     /// same bound and error decode enforces), on the growable profile the
     /// copy cannot fail. The borrowed zero-copy path is unaffected either
     /// way.
-    pub fn try_into_owned_in<S: ::sce_forge_runtime::codec::CodecStorage>(self) -> Result<RequestOwned<S>, CodecError> {
-        Ok(RequestOwned {
+    pub fn try_into_owned_in<S: ::sce_forge_runtime::codec::CodecStorage>(self) -> Result<QueryExtEntryOwned<S>, CodecError> {
+        Ok(QueryExtEntryOwned {
             header: self.header,
-            rid: self.rid,
-            keyexpr: self.keyexpr.try_into_owned_in::<S>()?,
-            extensions: self.extensions.map(|_v| ::sce_forge_runtime::codec::try_collect_list(_v, |_e| _e.try_into_owned_in::<S>())).transpose()?,
             body: self.body.try_into_owned_in::<S>()?,
         })
     }
 
     /// The same projection at the build's default storage profile — growable
     /// where an allocator exists, inline on the heap-free tier.
-    pub fn try_into_owned(self) -> Result<RequestOwned, CodecError> {
+    pub fn try_into_owned(self) -> Result<QueryExtEntryOwned, CodecError> {
         self.try_into_owned_in()
     }
 }
 
 #[allow(dead_code)]
-impl<S: ::sce_forge_runtime::codec::CodecStorage> RequestOwned<S> {
+impl<S: ::sce_forge_runtime::codec::CodecStorage> QueryExtEntryOwned<S> {
     /// Re-borrow this owned value back into the zero-copy borrowed view —
     /// the inverse of `try_into_owned_in`. `encode` lives only on the
     /// borrowed view (the owned form is read-only), so an owned consumer
@@ -459,12 +371,9 @@ impl<S: ::sce_forge_runtime::codec::CodecStorage> RequestOwned<S> {
     /// more than its declared `N` raises `CodecError::TooManyElements` — the
     /// same bound decode enforces. Only a growable profile can hold such a
     /// list; on the inline profile the source is already within bounds.
-    pub fn try_as_borrowed(&self) -> Result<Request<'_>, CodecError> {
-        Ok(Request {
+    pub fn try_as_borrowed(&self) -> Result<QueryExtEntry<'_>, CodecError> {
+        Ok(QueryExtEntry {
             header: self.header,
-            rid: self.rid,
-            keyexpr: self.keyexpr.as_borrowed(),
-            extensions: self.extensions.as_ref().map(|_l| ::sce_forge_runtime::codec::try_project_bounded(_l, |_e| Ok(_e.as_borrowed()))).transpose()?,
             body: self.body.try_as_borrowed()?,
         })
     }
@@ -477,28 +386,28 @@ impl<S: ::sce_forge_runtime::codec::CodecStorage> RequestOwned<S> {
     /// bytes are copied once and every destination capacity is enforced, so
     /// a value that cannot fit the target profile is rejected here rather
     /// than truncated.
-    pub fn transcode_in<D: ::sce_forge_runtime::codec::CodecStorage>(&self) -> Result<RequestOwned<D>, CodecError> {
+    pub fn transcode_in<D: ::sce_forge_runtime::codec::CodecStorage>(&self) -> Result<QueryExtEntryOwned<D>, CodecError> {
         self.try_as_borrowed()?.try_into_owned_in::<D>()
     }
 }
 
 #[allow(dead_code)]
-impl<'a> RequestVariant<'a> {
+impl<'a> QueryExtEntryVariant<'a> {
     /// The projection above, with the profile's byte and text containers made
     /// from `origin` — what the decoded bytes were taken from.
-    pub fn try_into_owned_in_origin<S: ::sce_forge_runtime::codec::OriginStorage>(self, origin: &<S as ::sce_forge_runtime::codec::OriginStorage>::Origin) -> Result<RequestOwnedVariant<S>, CodecError> {
+    pub fn try_into_owned_in_origin<S: ::sce_forge_runtime::codec::OriginStorage>(self, origin: &<S as ::sce_forge_runtime::codec::OriginStorage>::Origin) -> Result<QueryExtEntryOwnedVariant<S>, CodecError> {
         Ok(match self {
-            RequestVariant::CodecZenohMsgPut(_b) => RequestOwnedVariant::CodecZenohMsgPut(_b.try_into_owned_in_origin::<S>(origin)?),
-            RequestVariant::CodecZenohMsgDel(_b) => RequestOwnedVariant::CodecZenohMsgDel(_b.try_into_owned_in_origin::<S>(origin)?),
-            RequestVariant::CodecZenohQuery(_b) => RequestOwnedVariant::CodecZenohQuery(_b.try_into_owned_in_origin::<S>(origin)?),
-            RequestVariant::Default { tag, body } => RequestOwnedVariant::Default { tag, body: body.try_into_owned_in_origin::<S>(origin)? },
+            QueryExtEntryVariant::CodecZenohExtUnit(_b) => QueryExtEntryOwnedVariant::CodecZenohExtUnit(_b),
+            QueryExtEntryVariant::CodecZenohExtZint(_b) => QueryExtEntryOwnedVariant::CodecZenohExtZint(_b),
+            QueryExtEntryVariant::CodecZenohQueryValueZbuf(_b) => QueryExtEntryOwnedVariant::CodecZenohQueryValueZbuf(_b.try_into_owned_in_origin::<S>(origin)?),
+            QueryExtEntryVariant::Default { tag, body } => QueryExtEntryOwnedVariant::Default { tag, body },
         })
     }
 }
 
 #[allow(dead_code)]
-impl<'a> Request<'a> {
-    /// Project this borrowed view into an owned [`RequestOwned`]
+impl<'a> QueryExtEntry<'a> {
+    /// Project this borrowed view into an owned [`QueryExtEntryOwned`]
     /// whose byte and text containers are made by the profile's
     /// `OriginStorage` from each slice AND `origin`, the buffer the
     /// view was decoded from. A profile that shares that buffer builds
@@ -509,12 +418,9 @@ impl<'a> Request<'a> {
     /// `try_into_owned_in` stays the copying projection. Every codec this one
     /// embeds, repeats or dispatches to must have been generated with
     /// `--owned-origin` as well.
-    pub fn try_into_owned_in_origin<S: ::sce_forge_runtime::codec::OriginStorage>(self, origin: &<S as ::sce_forge_runtime::codec::OriginStorage>::Origin) -> Result<RequestOwned<S>, CodecError> {
-        Ok(RequestOwned {
+    pub fn try_into_owned_in_origin<S: ::sce_forge_runtime::codec::OriginStorage>(self, origin: &<S as ::sce_forge_runtime::codec::OriginStorage>::Origin) -> Result<QueryExtEntryOwned<S>, CodecError> {
+        Ok(QueryExtEntryOwned {
             header: self.header,
-            rid: self.rid,
-            keyexpr: self.keyexpr.try_into_owned_in_origin::<S>(origin)?,
-            extensions: self.extensions.map(|_v| ::sce_forge_runtime::codec::try_collect_list(_v, |_e| _e.try_into_owned_in_origin::<S>(origin))).transpose()?,
             body: self.body.try_into_owned_in_origin::<S>(origin)?,
         })
     }

@@ -2201,18 +2201,19 @@ fn query_value_bytes(body: &[u8]) -> PayloadSize {
 /// holding the body can measure it, and a caller holding only `true` had no
 /// choice but to report the record as unmeasurable.
 #[cfg(feature = "network-codecs")]
-fn query_body_bytes(
-    extensions: Option<&[wz_session_core::wire::parts::ExtEntryOwned]>,
+fn query_body_bytes<E: wz_session_core::ext_view::ExtEntryView>(
+    extensions: Option<&[E]>,
 ) -> Option<&[u8]> {
+    // R3044 -- generic over the entry, because a Query's chain holds its own kind
+    // of entry. A value that arrived as a list of slices after a shared-memory
+    // marker has no plain bytes to measure, and answers `None` here as a record
+    // that carries no value does: what a capture can say about it is that it is
+    // not plain bytes, and the descriptor it holds is not its size.
     extensions?.iter().find_map(|ext| {
-        match (
-            ext.ext_id() == wz_session_core::ext_header::body_ext_id::QUERY_BODY,
-            &ext.body,
-        ) {
-            (true, wz_codecs::ext_entry::ExtEntryOwnedVariant::CodecZenohExtZbuf(z)) => {
-                Some(wz_codecs::SceByteBuf::as_slice(&z.value))
-            }
-            _ => None,
+        if ext.ext_id() == wz_session_core::ext_header::body_ext_id::QUERY_BODY {
+            ext.plain_zbuf()
+        } else {
+            None
         }
     })
 }
@@ -2865,14 +2866,20 @@ pub(crate) mod tests {
             .try_into_owned_in()
             .expect("an empty query owns trivially");
         if let Some(body) = value {
-            owned.extensions = Some(alloc::vec![ExtEntryOwned {
-                header: body_ext_id::QUERY_BODY | EXT_ENC_ZBUF,
-                body: ExtEntryOwnedVariant::CodecZenohExtZbuf(wz_codecs::ext_zbuf::ExtZbufOwned {
-                    value_len: body.len() as u64,
-                    value: wz_session_core::codec_owned::owned_bytes(&body)
-                        .expect("the fixture value is within the owned bound"),
-                }),
-            }]);
+            // R3044 -- a Query's chain holds its own kind of entry; the plain one
+            // is the generic entry's ZBuf body moved across.
+            owned.extensions = Some(alloc::vec![
+                wz_session_core::ext_view::query_ext_from_generic(ExtEntryOwned {
+                    header: body_ext_id::QUERY_BODY | EXT_ENC_ZBUF,
+                    body: ExtEntryOwnedVariant::CodecZenohExtZbuf(
+                        wz_codecs::ext_zbuf::ExtZbufOwned {
+                            value_len: body.len() as u64,
+                            value: wz_session_core::codec_owned::owned_bytes(&body)
+                                .expect("the fixture value is within the owned bound"),
+                        }
+                    ),
+                })
+            ]);
             owned.header |= 0x80;
         }
         let query = owned.try_as_borrowed().expect("the chain is within bounds");

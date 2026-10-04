@@ -110,18 +110,25 @@ pub fn is_sliced<S: CodecStorage>(put: &MsgPutOwned<S>) -> bool {
 pub fn payload_len<S: CodecStorage>(put: &MsgPutOwned<S>) -> usize {
     match layout(put) {
         PutPayload::Inline(bytes) => bytes.len(),
-        PutPayload::Sliced(slices) => slices
-            .iter()
-            .map(|slice| {
-                let bytes = SceByteBuf::as_slice(&slice.bytes);
-                match slice_kind(slice.kind) {
-                    SLICE_KIND_RAW => bytes.len(),
-                    SLICE_KIND_SHM_PTR => shm_slice_len(bytes),
-                    _ => 0,
-                }
-            })
-            .sum(),
+        PutPayload::Sliced(slices) => slices_len(slices),
     }
+}
+
+/// How many payload bytes a list of slices carries, counted as [`payload_len`]
+/// counts a sliced Put's. A Query's value in the sliced layout is the same list
+/// of slices and is counted by the same rule (R3044).
+pub fn slices_len<S: CodecStorage>(slices: &[ZbufSliceOwned<S>]) -> usize {
+    slices
+        .iter()
+        .map(|slice| {
+            let bytes = SceByteBuf::as_slice(&slice.bytes);
+            match slice_kind(slice.kind) {
+                SLICE_KIND_RAW => bytes.len(),
+                SLICE_KIND_SHM_PTR => shm_slice_len(bytes),
+                _ => 0,
+            }
+        })
+        .sum()
 }
 
 /// The buffer length a shared-memory slice's descriptor names, or `0` when the
@@ -202,47 +209,59 @@ pub enum PayloadFault {
 /// their concatenation.
 pub fn collect_payload<S: CodecStorage>(
     put: &MsgPutOwned<S>,
-    mut resolve: impl FnMut(&[u8]) -> Option<Vec<u8>>,
+    resolve: impl FnMut(&[u8]) -> Option<Vec<u8>>,
 ) -> Result<Vec<u8>, PayloadFault> {
     match layout(put) {
         PutPayload::Inline(bytes) => Ok(bytes.to_vec()),
-        PutPayload::Sliced(slices) => {
-            let mut out = Vec::new();
-            // The FIRST fault is the one reported, but the walk goes on after it:
-            // R3038 -- the resolver of a shared-memory slice gives back the
-            // reference the sender took for this receiver, so a slice that is
-            // never offered to it is a reference nobody releases. Upstream maps
-            // every slice of a message when it arrives and drops them all with
-            // the message, whether or not the message is then delivered.
-            let mut fault = None;
-            for slice in slices {
-                let bytes = SceByteBuf::as_slice(&slice.bytes);
-                match slice_kind(slice.kind) {
-                    SLICE_KIND_RAW => {
-                        if fault.is_none() {
-                            out.extend_from_slice(bytes);
-                        }
-                    }
-                    SLICE_KIND_SHM_PTR => match resolve(bytes) {
-                        Some(resolved) => {
-                            if fault.is_none() {
-                                out.extend_from_slice(&resolved);
-                            }
-                        }
-                        None => {
-                            fault.get_or_insert(PayloadFault::Unresolved);
-                        }
-                    },
-                    other => {
-                        fault.get_or_insert(PayloadFault::UnknownKind(other));
-                    }
+        PutPayload::Sliced(slices) => collect_slices(slices, resolve),
+    }
+}
+
+/// The bytes of a list of slices, each a RAW slice contributing its bytes and a
+/// shared-memory slice contributing what `resolve` returns for its descriptor.
+///
+/// R3044 -- split out of [`collect_payload`] because a Put is not the only place
+/// upstream writes a payload as slices: the value of a query is the same list
+/// after the same marker, and what a slice is owed does not depend on which
+/// message it arrived in.
+pub fn collect_slices<S: CodecStorage>(
+    slices: &[ZbufSliceOwned<S>],
+    mut resolve: impl FnMut(&[u8]) -> Option<Vec<u8>>,
+) -> Result<Vec<u8>, PayloadFault> {
+    let mut out = Vec::new();
+    // The FIRST fault is the one reported, but the walk goes on after it:
+    // R3038 -- the resolver of a shared-memory slice gives back the
+    // reference the sender took for this receiver, so a slice that is
+    // never offered to it is a reference nobody releases. Upstream maps
+    // every slice of a message when it arrives and drops them all with
+    // the message, whether or not the message is then delivered.
+    let mut fault = None;
+    for slice in slices {
+        let bytes = SceByteBuf::as_slice(&slice.bytes);
+        match slice_kind(slice.kind) {
+            SLICE_KIND_RAW => {
+                if fault.is_none() {
+                    out.extend_from_slice(bytes);
                 }
             }
-            match fault {
-                Some(fault) => Err(fault),
-                None => Ok(out),
+            SLICE_KIND_SHM_PTR => match resolve(bytes) {
+                Some(resolved) => {
+                    if fault.is_none() {
+                        out.extend_from_slice(&resolved);
+                    }
+                }
+                None => {
+                    fault.get_or_insert(PayloadFault::Unresolved);
+                }
+            },
+            other => {
+                fault.get_or_insert(PayloadFault::UnknownKind(other));
             }
         }
+    }
+    match fault {
+        Some(fault) => Err(fault),
+        None => Ok(out),
     }
 }
 

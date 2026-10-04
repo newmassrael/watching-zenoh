@@ -97,6 +97,10 @@ const CODECS: &[&str] = &[
     "wireexpr_local",
     "wireexpr_nonlocal",
     "wireexpr",
+    // R3044 -- the Query's own extension entry and the ZBuf body it hands the
+    // marker to, ahead of `query`, which imports the entry.
+    "query_value_zbuf",
+    "query_ext_entry",
     "query",
     "request",
     "push",

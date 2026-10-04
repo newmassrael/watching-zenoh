@@ -208,6 +208,18 @@ ADJUDICATED: dict[str, tuple[str, str]] = {
         "the generated sibling of `walk_zbuf_slice`'s `kind`, correct for the "
         "same reason: the kind is `Zenoh080Bounded::<u32>` upstream.",
     ),
+    # The sliced Query value (R3045). The value of a Query that follows the
+    # shared-memory marker is read by the same `Zenoh080Sliced::<u32>` the Put's
+    # payload is (`commons/zenoh-codec/src/zenoh/mod.rs` @
+    # `let codec = Zenoh080Sliced::<u32>::new(true);`), so its slice count is the
+    # same `Zenoh080Bounded::<u32>` read as the Put's, above.
+    "out/wz-codecs/query_value_zbuf.rs::decode::": (
+        "REFUSE",
+        "the Query value's slice count, the sibling of `msg_put.rs`'s above: "
+        "`ValueType`'s reader hands its payload to `Zenoh080Sliced::<u32>`, "
+        "whose count is `Zenoh080Bounded::<u32>`, so a varint past u32 is "
+        "`DidntRead` upstream too.",
+    ),
 }
 
 

@@ -422,7 +422,15 @@ pub mod wireexpr {
 
 codec_group!(
     "codec-request",
-    [(query, "query.rs"), (request, "request.rs"),]
+    [
+        // R3044 -- the Query's own extension entry and its ZBuf body, which `query`
+        // imports: the body reads a value one way after a shared-memory marker and
+        // another way otherwise.
+        (query_value_zbuf, "query_value_zbuf.rs"),
+        (query_ext_entry, "query_ext_entry.rs"),
+        (query, "query.rs"),
+        (request, "request.rs"),
+    ]
 );
 
 #[cfg(feature = "codec-push")]

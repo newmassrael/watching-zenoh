@@ -361,8 +361,10 @@ async fn tap(router_port: u16) -> (u16, Arc<StdMutex<Vec<u8>>>) {
 /// `Zenoh080Sliced::w_len` adds `1 + x.len()` per slice where `x.len()` is the
 /// LOGICAL length of the buffer, 1024, and not the seven bytes of descriptor it
 /// writes (`commons/zenoh-codec/src/core/zbuf.rs` @ `message.zslices().fold(0, |acc, x| acc + 1 + x.len())`).
-/// Upstream's own reader ignores the length when the marker is there
-/// (`commons/zenoh-codec/src/zenoh/mod.rs` @ `if ext_shm.is_some() {`).
+/// Upstream's own reader treats the declared length as a lower bound when the
+/// marker is there: it requires the length to cover the encoding and then reads
+/// the slices by their own structure (`commons/zenoh-codec/src/zenoh/mod.rs` @
+/// `if ext_shm.is_some() {`).
 fn shm_value_extension_overruns_its_frame(stream: &[u8]) -> bool {
     let mut at = 0;
     let mut last: Option<&[u8]> = None;
@@ -698,63 +700,78 @@ async fn zenohd_get_value_reaches_a_wz_queryable_raw_when_shm_is_not_offered() {
     );
 }
 
-/// PIN of an open defect, and the leg that becomes the positive one when it is
-/// closed: a query whose VALUE upstream sends through shared memory ends the wz
-/// session instead of reaching the queryable.
+/// A node that follows upstream reads the shared-memory VALUE of a QUERY: the
+/// getter puts its value in a buffer of its own provider, the router relays the
+/// query to wz with the value as a list of slices after the shared-memory marker,
+/// and the wz queryable is handed the bytes and, through the counting resolver,
+/// shown to have read them out of shared memory.
 ///
-/// The router relays the query to wz with the value in a ZBuf extension that
-/// follows the shared-memory marker, and the length that extension DECLARES is not
-/// the length it has (see [`shm_value_extension_overruns_its_frame`]): upstream's
-/// reader ignores it once the marker is seen, and wz's generated extension chain
-/// trusts it, reads past the frame and reports `NeedMoreBytes`. The session then
-/// ends. MEASURED: the drive loop's last polls are the router's OAM frame, then
-/// `ParseError(Codec(NeedMoreBytes))`, then `LinkLost(PeerClosed)`, and the raw
-/// control above, the same getter and the same router and the same queryable with
-/// wz not offering shared memory, delivers the value.
-///
-/// Closing it takes the generated codec reading an extension whose declared length
-/// is advisory when the marker precedes it, which is a request to SCE and not a
-/// change this tree can make by hand. When it lands this leg turns into the target:
-/// the query reaches the queryable, its value starts with the getter's text, and the
-/// resolver is asked for the one slice.
-// wz-proves: none -- a pin of an open defect (the query value through shared memory ends the wz session); it proves what is NOT yet true
+/// The extension that carries the value declares a length that is not the length
+/// it has (see [`shm_value_extension_overruns_its_frame`]), and this leg asserts
+/// that it still does, because that is the premise: a fixture that stopped sending
+/// it would pass without reading anything. R3045 made the query's chain read the
+/// value as upstream does, by its structure and not by the length in front of it.
+/// Until then the generated chain trusted the length, read past the frame and
+/// reported `NeedMoreBytes`, and the session ended: the drive loop's last polls
+/// were the router's OAM frame, then `ParseError(Codec(NeedMoreBytes))`, then
+/// `LinkLost(PeerClosed)`. The raw control above, the same getter and router and
+/// queryable with wz not offering shared memory, delivered the value throughout.
+// wz-proves: transport-shm zenoh->wz
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "binary-dep e2e (ZENOHD_SHM=1 build-zenohd.sh: z_get_shm); Layer Z runs via --ignored"]
-async fn zenohd_shm_get_value_ends_the_wz_session_until_its_codec_reads_upstreams_extension() {
+async fn zenohd_shm_get_value_reaches_a_wz_queryable_through_shared_memory() {
     let Some(run) = shm_get_to_wz_queryable(true).await else {
         return;
     };
     assert!(
         run.negotiated,
-        "wz and the router must have negotiated SHM, or this pin proves nothing:\n{}",
+        "wz and the router must have negotiated SHM, or this leg proves nothing:\n{}",
         run.router_log
     );
     assert!(
         run.value_extension_overruns,
         "the last frame the router sent wz no longer carries a shared-memory value extension \
-         whose declared length overruns the frame, so the CAUSE this pin names is gone or never \
-         arrived; drive ended: {:?}; trace:\n{}\n--- getter ---\n{}\n--- router ---\n{}",
+         whose declared length overruns the frame, so this leg no longer exercises the shape \
+         it is for; drive ended: {:?}; trace:\n{}\n--- getter ---\n{}\n--- router ---\n{}",
         run.drive_ended,
         run.trace.join("\n"),
         run.getter_log,
         run.router_log
     );
     assert_eq!(
-        run.queries_seen, 0,
-        "a query WAS delivered to the wz queryable, so this defect is closed: turn this pin into \
-         the target (the value starts with {GET_PAYLOAD:?} and the resolver is asked for it)"
-    );
-    assert_eq!(
-        run.drive_ended.as_deref(),
-        Some("Terminated"),
-        "the wz session was expected to end on the frame it cannot read; trace:\n{}",
-        run.trace.join("\n")
+        run.drive_ended, None,
+        "the wz session ended under the scenario; trace:\n{}\n--- getter ---\n{}\n--- router ---\n{}",
+        run.trace.join("\n"),
+        run.getter_log,
+        run.router_log
     );
     assert!(
-        run.trace
+        run.queries_seen > 0,
+        "no query reached the wz queryable; trace:\n{}\n--- getter ---\n{}\n--- router ---\n{}",
+        run.trace.join("\n"),
+        run.getter_log,
+        run.router_log
+    );
+    assert!(
+        run.values
             .iter()
-            .any(|line| line == "ParseError(Codec(NeedMoreBytes))"),
-        "the session ended, but not on the parse error this pin names; trace:\n{}",
-        run.trace.join("\n")
+            .any(|v| v.starts_with(GET_PAYLOAD.as_bytes())),
+        "a query reached the wz queryable but its value was not the getter's {GET_PAYLOAD:?}; \
+         values: {:?}",
+        run.values
+            .iter()
+            .map(|v| v.iter().take(32).copied().collect::<Vec<u8>>())
+            .collect::<Vec<_>>()
+    );
+    assert!(
+        run.resolved >= 1,
+        "the value arrived but the resolver was never asked for it, so it did not cross as \
+         shared memory:\n{}",
+        run.router_log
+    );
+    assert_eq!(
+        run.refused, 0,
+        "the resolver refused a descriptor the router sent:\n{}",
+        run.router_log
     );
 }

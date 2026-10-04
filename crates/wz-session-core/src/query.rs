@@ -1390,6 +1390,14 @@ impl ReplyOut for QueryResponder<'_> {
 pub struct QueryableRegistry<C: QuerySink> {
     queryables: BoundedVec<Queryable<C>, { caps::MAX_QUERYABLES }>,
     next_id: u64,
+    /// transport-shm -- the receive side of shared memory for the VALUE of a
+    /// query: the same state a push and a reply have (the negotiated capability,
+    /// the resolver, the means of acknowledging the peer's slices, the drop
+    /// counters, the un-swap). Upstream un-swaps the value of a query as it does
+    /// a push's, before routing it. The session keeps it in step with the other
+    /// registries'.
+    #[cfg(feature = "transport-shm")]
+    shm: crate::extshm::ShmReceiveState,
 }
 
 impl<C: QuerySink> Default for QueryableRegistry<C> {
@@ -1415,7 +1423,55 @@ impl<C: QuerySink> QueryableRegistry<C> {
         Self {
             queryables: BoundedVec::new(),
             next_id: 1,
+            #[cfg(feature = "transport-shm")]
+            shm: crate::extshm::ShmReceiveState::default(),
         }
+    }
+
+    /// transport-shm -- install the resolver the shared-memory slices of a query's
+    /// value are read through. Shared with the other registries by the session,
+    /// so a query's value is read by the same resolver a push is. Without one a
+    /// query whose value names a segment is dropped, counted.
+    #[cfg(feature = "transport-shm")]
+    pub fn set_shm_resolver_shared(
+        &mut self,
+        resolver: alloc::sync::Arc<dyn crate::extshm::ShmResolver + Send + Sync>,
+    ) {
+        self.shm.set_resolver(resolver);
+    }
+
+    /// transport-shm -- restamp the LIVE negotiated capability of the session
+    /// feeding this registry, per dispatch iteration, as the other registries' is:
+    /// see [`crate::extshm::ShmReceiveState::set_negotiated`] for why it is
+    /// restamped and never snapshotted.
+    #[cfg(feature = "transport-shm")]
+    pub fn set_shm_negotiated(&mut self, negotiated: bool) {
+        self.shm.set_negotiated(negotiated);
+    }
+
+    /// transport-shm -- install or withdraw the means of acknowledging the peer's
+    /// shared-memory slices. Shared with the other registries: the counters the
+    /// peer named are the peer's, whichever message a slice arrives in.
+    #[cfg(feature = "transport-shm")]
+    pub fn set_shm_handoff_shared(
+        &mut self,
+        handoff: Option<alloc::sync::Arc<dyn crate::extshm::ShmHandoff>>,
+    ) {
+        self.shm.set_handoff(handoff);
+    }
+
+    /// transport-shm -- queries dropped because a slice of their value did not
+    /// resolve.
+    #[cfg(feature = "transport-shm")]
+    pub fn shm_unresolved_drops(&self) -> u64 {
+        self.shm.unresolved_drops()
+    }
+
+    /// transport-shm -- queries dropped because a value naming a segment arrived
+    /// on a session that never negotiated shared memory.
+    #[cfg(feature = "transport-shm")]
+    pub fn shm_unnegotiated_drops(&self) -> u64 {
+        self.shm.unnegotiated_drops()
     }
 
     /// R311gb-3b — register an explicit [`QuerySink`] for a keyexpr
@@ -1764,6 +1820,30 @@ impl<C: QuerySink> QueryableRegistry<C> {
             _ => return DispatchOutcome::NOT_DISPATCHED,
         };
 
+        // R3044 -- the value of a query that arrived as a list of slices after a
+        // shared-memory marker is read and acknowledged FIRST, before the query is
+        // routed, as upstream's transport does for every message that carries a
+        // payload (`io/zenoh-transport/src/unicast/universal/rx.rs` @
+        // `map_zmsg_to_shmbuf(`). Two things follow from the order. A query that
+        // routing then refuses has still arrived, so its slices are already given
+        // back and acknowledged when the keyexpr below fails to resolve. And a
+        // value that cannot be read drops the WHOLE query, with no Final, which is
+        // what upstream does when mapping fails: the requester is not told
+        // anything it could act on, and no queryable sees a query whose value is
+        // a descriptor.
+        #[cfg(feature = "transport-shm")]
+        let unswapped_value = {
+            let band = crate::declare_ext_qos::read_request_qos(request)
+                .priority()
+                .wire_byte() as usize;
+            match self.unswap_query_value(query, band) {
+                Ok(value) => value,
+                Err(()) => return DispatchOutcome::NOT_DISPATCHED,
+            }
+        };
+        #[cfg(not(feature = "transport-shm"))]
+        let unswapped_value: Option<(crate::sample::EncodingHint, Vec<u8>)> = None;
+
         // R311gn-follow — resolve via the shared resolve_wireexpr SSOT
         // (id==0 -> suffix verbatim; id!=0 -> table[id] + optional suffix;
         // None -> drop, covering the empty form + an undeclared id).
@@ -1805,12 +1885,65 @@ impl<C: QuerySink> QueryableRegistry<C> {
             qos,
         };
         let matched = self.fire_matching_queryables(
-            envelope, &resolved, query, replies, /* is_remote = */ true,
+            envelope,
+            &resolved,
+            query,
+            unswapped_value,
+            replies,
+            /* is_remote = */ true,
         );
         DispatchOutcome {
             dispatched: true,
             matched,
         }
+    }
+
+    /// The value of `query` when it arrived as a list of slices after a
+    /// shared-memory marker: every slice read through the resolver and
+    /// acknowledged at `band`, and the bytes returned with the value's encoding.
+    ///
+    /// `Ok(None)` is a query whose value is not that shape (no value, or the
+    /// plain one, which the fan-out reads off the chain borrowed). `Err(())` is a
+    /// value that could not be read, counted by the receive state, and the caller
+    /// drops the whole query.
+    #[cfg(feature = "transport-shm")]
+    fn unswap_query_value(
+        &mut self,
+        query: &QueryOwned,
+        band: usize,
+    ) -> Result<Option<(crate::sample::EncodingHint, Vec<u8>)>, ()> {
+        use crate::ext_view::ExtEntryView;
+        use sce_forge_runtime::codec::SceList;
+        use wz_codecs::query_ext_entry::QueryExtEntryOwnedVariant;
+        let Some(exts) = query.extensions.as_deref() else {
+            return Ok(None);
+        };
+        for ext in exts {
+            if ExtEntryView::ext_id(ext) != crate::ext_header::body_ext_id::QUERY_BODY {
+                continue;
+            }
+            let QueryExtEntryOwnedVariant::CodecZenohQueryValueZbuf(value) = &ext.body else {
+                continue;
+            };
+            let Some(slices) = value.slices.as_ref() else {
+                continue;
+            };
+            // The encoding precedes the slices on the wire, in the same codec the
+            // plain shape's leading bytes are read with, and defaults when absent.
+            let encoding = value
+                .encoding
+                .as_ref()
+                .map(crate::sample::EncodingHint::from_codec)
+                .unwrap_or(crate::sample::EncodingHint {
+                    packed_id: 0,
+                    schema: None,
+                });
+            return match self.shm.unswap_slices(SceList::as_slice(slices), band) {
+                Some(bytes) => Ok(Some((encoding, bytes))),
+                None => Err(()),
+            };
+        }
+        Ok(None)
     }
 
     /// R238 — in-process query loopback mirror of
@@ -1871,8 +2004,10 @@ impl<C: QuerySink> QueryableRegistry<C> {
         replies: &mut Vec<QueryReply>,
     ) -> usize {
         let envelope = QueryEnvelope { rid, target, qos };
+        // A loopback query is built in this process, so its value is never a list
+        // of slices after a marker: there is nothing to un-swap.
         self.fire_matching_queryables(
-            envelope, keyexpr, query, replies, /* is_remote = */ false,
+            envelope, keyexpr, query, None, replies, /* is_remote = */ false,
         )
     }
 
@@ -1898,6 +2033,7 @@ impl<C: QuerySink> QueryableRegistry<C> {
         envelope: QueryEnvelope,
         keyexpr: &str,
         query: &QueryOwned,
+        unswapped_value: Option<(crate::sample::EncodingHint, Vec<u8>)>,
         replies: &mut Vec<QueryReply>,
         is_remote: bool,
     ) -> usize {
@@ -1924,7 +2060,33 @@ impl<C: QuerySink> QueryableRegistry<C> {
         // this local (owned encoding + borrowed payload); each matched
         // queryable's `BorrowedQuery` lends both, matching the source_info
         // borrow shape.
-        let value_view = extract_query_value(query);
+        //
+        // R3044 -- a value that arrived as a list of slices after a
+        // shared-memory marker was read and acknowledged BEFORE this query was
+        // routed (`dispatch_request`), and its bytes come in as `unswapped_value`
+        // and are lent as they are; the plain shape is still read off the
+        // chain here, borrowed.
+        let plain_value = extract_query_value(query);
+        #[cfg(feature = "query-value")]
+        let value_view: Option<(
+            crate::sample::EncodingHint,
+            alloc::borrow::Cow<'_, [u8]>,
+        )> = match unswapped_value {
+            Some((encoding, bytes)) => Some((encoding, alloc::borrow::Cow::Owned(bytes))),
+            None => {
+                plain_value.map(|(encoding, bytes)| (encoding, alloc::borrow::Cow::Borrowed(bytes)))
+            }
+        };
+        // Without `query-value` the application sees no value at all: the slices
+        // were still read and acknowledged, which is owed whatever is delivered.
+        #[cfg(not(feature = "query-value"))]
+        let value_view: Option<(
+            crate::sample::EncodingHint,
+            alloc::borrow::Cow<'_, [u8]>,
+        )> = {
+            let _ = (unswapped_value, plain_value);
+            None
+        };
         // R311y834 — resolved ONCE per inbound query beside the other
         // projections, because it is a property of the query rather than of any
         // matched queryable. Non-UTF-8 parameters cannot spell the ASCII
@@ -1972,7 +2134,7 @@ impl<C: QuerySink> QueryableRegistry<C> {
                     parameters: parameters_view,
                     attachment: attachment_view,
                     source_info: source_info_view.as_ref(),
-                    payload: value_view.as_ref().map(|(_, p)| *p),
+                    payload: value_view.as_ref().map(|(_, p)| p.as_ref()),
                     encoding: value_view.as_ref().map(|(e, _)| e),
                     rid,
                     // R311li — loopback origin marker (pico _is_local
@@ -2331,9 +2493,9 @@ mod tests {
             .try_into_owned_in::<crate::wire::WireStorage>()
             .unwrap();
         query.header |= 0x80;
-        query.extensions = Some(vec![ext
-            .try_into_owned_in::<crate::wire::WireStorage>()
-            .unwrap()]);
+        query.extensions = Some(vec![crate::ext_view::query_ext_from_generic(
+            ext.try_into_owned_in::<crate::wire::WireStorage>().unwrap(),
+        )]);
         let mut request = Request {
             header: 0x1c,
             rid,
@@ -2764,9 +2926,9 @@ mod tests {
             .try_into_owned_in::<crate::wire::WireStorage>()
             .unwrap();
         query.header |= 0x80;
-        query.extensions = Some(vec![ext
-            .try_into_owned_in::<crate::wire::WireStorage>()
-            .unwrap()]);
+        query.extensions = Some(vec![crate::ext_view::query_ext_from_generic(
+            ext.try_into_owned_in::<crate::wire::WireStorage>().unwrap(),
+        )]);
         let keyexpr = Wireexpr {
             body: wz_codecs::wireexpr::WireexprVariant::WireexprLocal(WireexprLocal {
                 id: 0,
@@ -4629,9 +4791,9 @@ mod tests {
             .try_into_owned_in::<crate::wire::WireStorage>()
             .unwrap();
         query.header |= 0x80;
-        query.extensions = Some(vec![ext
-            .try_into_owned_in::<crate::wire::WireStorage>()
-            .unwrap()]);
+        query.extensions = Some(vec![crate::ext_view::query_ext_from_generic(
+            ext.try_into_owned_in::<crate::wire::WireStorage>().unwrap(),
+        )]);
         let mut request = Request {
             header: 0x1c,
             rid,
@@ -4877,9 +5039,9 @@ mod request_decode_isolation_tests {
             .try_into_owned_in::<crate::wire::WireStorage>()
             .unwrap();
         query.header |= 0x80;
-        query.extensions = Some(vec![ext
-            .try_into_owned_in::<crate::wire::WireStorage>()
-            .unwrap()]);
+        query.extensions = Some(vec![crate::ext_view::query_ext_from_generic(
+            ext.try_into_owned_in::<crate::wire::WireStorage>().unwrap(),
+        )]);
         let mut request = Request {
             header: 0x1c,
             rid,
@@ -4992,9 +5154,9 @@ mod request_decode_isolation_tests {
             .try_into_owned_in::<crate::wire::WireStorage>()
             .unwrap();
         query.header |= 0x80;
-        query.extensions = Some(vec![ext
-            .try_into_owned_in::<crate::wire::WireStorage>()
-            .unwrap()]);
+        query.extensions = Some(vec![crate::ext_view::query_ext_from_generic(
+            ext.try_into_owned_in::<crate::wire::WireStorage>().unwrap(),
+        )]);
         let mut request = Request {
             header: 0x1c,
             rid,
@@ -5168,6 +5330,268 @@ mod local_matching_tests {
             wide.has_local_matching("home/kitchen/temp", true),
             "`home/**` includes `home/kitchen/temp`, so the complete arm \
              is not simply refusing everything",
+        );
+    }
+}
+
+// ── R3045 — a query whose VALUE is a list of slices after a shared-memory marker ──
+//
+// A module of its own, with its own gate, because the main `mod tests` gate is the
+// full query union and this needs `transport-shm` and a frame parser besides. The
+// frame is not composed here: it is what a router linked against upstream's own
+// `zenoh` sent the wz queryable when `z_get_shm` asked it for
+// `demo/example/**`, kept byte for byte (see `message` for which bytes are which),
+// so these tests read what upstream writes and not what this tree believes it
+// writes. The same exchange is run live by `wz_shm_query_reply_zenohd_interop`.
+#[cfg(all(
+    test,
+    feature = "transport-shm",
+    feature = "pubsub-put",
+    feature = "query-queryable",
+    feature = "query-value",
+    feature = "codec-frame"
+))]
+mod shm_value_tests {
+    use super::*;
+    use crate::extshm::test_support::{CountingResolver, RecordingHandoff};
+    use crate::extshm::{ShmDescriptor, ShmResolver};
+    use alloc::vec::Vec;
+    use core::sync::atomic::{AtomicUsize, Ordering};
+    use hashbrown::HashMap;
+    use std::sync::{Arc, Mutex};
+
+    /// The shared-memory marker: a unit extension, identifier 4, with another
+    /// extension after it.
+    const MARKER: [u8; 1] = [0x84];
+
+    /// The value extension as upstream wrote it after the marker, with `header`
+    /// as its first byte (`0x43`: ZBuf, identifier 3, the last of the chain).
+    ///
+    /// The length it declares is `0x82 0x08`, 1026: the length of the encoding
+    /// (1) plus one byte for each slice and the LOGICAL length of the buffer
+    /// (1024), and the bytes that follow are eleven, not 1026: an encoding of
+    /// `0x00`, a count of one slice (`0x01`), its kind `SHM_PTR` (`0x01`), the
+    /// length of its descriptor (`0x07`) and the descriptor, which names a
+    /// buffer of 1024 bytes (`0x80 0x08`) in a segment.
+    fn shm_value(header: u8) -> Vec<u8> {
+        let mut bytes = alloc::vec![header, 0x82, 0x08, 0x00, 0x01, 0x01, 0x07];
+        bytes.extend_from_slice(&[0x80, 0x08, 0xf2, 0x9e, 0x01, 0x00, 0x00]);
+        bytes
+    }
+
+    /// The network message around a query whose extension chain is `chain`: the
+    /// bytes of the router's frame after the transport frame's header and
+    /// sequence number.
+    fn message(chain: &[u8]) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        // A Request (identifier 0x1c, with its extensions to follow) for request
+        // id 1, whose key expression has no alias and a suffix of fifteen bytes.
+        bytes.extend_from_slice(&[0xfc, 0x01, 0x00, 0x0f]);
+        bytes.extend_from_slice(b"demo/example/**");
+        // Its QoS extension, `0x0d`: priority 5 (data), which is the band an
+        // acknowledgement of the value's slice is owed at.
+        bytes.extend_from_slice(&[0xa1, 0x0d]);
+        // A timeout extension of 10000 ms.
+        bytes.extend_from_slice(&[0x26, 0x90, 0x4e]);
+        // The Query: its header with a consolidation and a chain to follow, and
+        // the consolidation.
+        bytes.extend_from_slice(&[0xa3, 0x03]);
+        bytes.extend_from_slice(chain);
+        bytes
+    }
+
+    /// The query the router sent, with the value in shared memory.
+    fn upstream_shm_get() -> Vec<u8> {
+        let mut chain = MARKER.to_vec();
+        chain.extend_from_slice(&shm_value(0x43));
+        message(&chain)
+    }
+
+    fn parse_request(bytes: &[u8]) -> RequestOwned {
+        let mut messages =
+            crate::network_message::parse_frame_payload(bytes).expect("the frame parses");
+        match (messages.pop(), messages.is_empty()) {
+            (Some(crate::network_message::NetworkMessage::Request(request)), true) => *request,
+            (other, _) => panic!("expected exactly one Request, got {other:?}"),
+        }
+    }
+
+    /// A resolver that refuses every descriptor, as one does for a segment it
+    /// cannot attach.
+    struct Refuses;
+
+    impl ShmResolver for Refuses {
+        fn resolve(&self, _descriptor: &ShmDescriptor) -> Option<Vec<u8>> {
+            None
+        }
+    }
+
+    /// What a queryable was shown: its value, its encoding id and its attachment.
+    type Seen = (Option<Vec<u8>>, Option<u32>, Option<Vec<u8>>);
+
+    /// A registry with one queryable on `demo/example/**` and the receive side of
+    /// shared memory installed with `resolver`, and the things a test reads.
+    struct Rig {
+        registry: QueryableRegistry<crate::query_sink::BoxedQuerySink>,
+        seen: Arc<Mutex<Vec<Seen>>>,
+        bands: Arc<Mutex<Vec<usize>>>,
+    }
+
+    fn rig(negotiated: bool, resolver: Arc<dyn ShmResolver + Send + Sync>) -> Rig {
+        let mut registry = QueryableRegistry::new();
+        let seen: Arc<Mutex<Vec<Seen>>> = Arc::default();
+        let sink = seen.clone();
+        registry.register("demo/example/**", move |event, _responder| {
+            sink.lock().expect("seen").push((
+                event.payload().map(<[u8]>::to_vec),
+                event.encoding().map(|e| e.packed_id),
+                event.attachment().map(<[u8]>::to_vec),
+            ));
+        });
+        let bands: Arc<Mutex<Vec<usize>>> = Arc::default();
+        registry.set_shm_resolver_shared(resolver);
+        registry.set_shm_negotiated(negotiated);
+        registry.set_shm_handoff_shared(Some(Arc::new(RecordingHandoff(bands.clone()))));
+        Rig {
+            registry,
+            seen,
+            bands,
+        }
+    }
+
+    fn counting(resolved: &Arc<AtomicUsize>) -> Arc<dyn ShmResolver + Send + Sync> {
+        Arc::new(CountingResolver(resolved.clone()))
+    }
+
+    /// THE POINT: the query upstream sends, with its value in shared memory,
+    /// reaches the queryable carrying the bytes the resolver read, and the one
+    /// slice is read once and acknowledged once at the priority the query was
+    /// sent at.
+    #[test]
+    fn an_upstream_shm_query_reaches_its_queryable_with_the_value_read_through_the_resolver() {
+        let resolved = Arc::new(AtomicUsize::new(0));
+        let mut rig = rig(true, counting(&resolved));
+        let request = parse_request(&upstream_shm_get());
+        let mut replies = Vec::new();
+        let outcome = rig
+            .registry
+            .dispatch_request(&request, &HashMap::new(), &mut replies);
+        assert!(outcome.dispatched, "the query was routed");
+        assert_eq!(outcome.matched, 1, "the one queryable fired");
+        assert_eq!(
+            *rig.seen.lock().expect("seen"),
+            [(Some(b"payload".to_vec()), Some(0), None)],
+            "the queryable is handed what the resolver read, not the descriptor, and the \
+             default encoding"
+        );
+        assert_eq!(resolved.load(Ordering::SeqCst), 1, "the slice is read once");
+        assert_eq!(
+            *rig.bands.lock().expect("bands"),
+            [5],
+            "and acknowledged once, at the priority in the query's QoS"
+        );
+    }
+
+    /// The CONTROL that says what the marker changes: the same extension with the
+    /// same declared length and no marker before it is a plain ZBuf whose length
+    /// is to be believed, so a frame that does not hold 1026 bytes is refused.
+    /// Without this a chain that never looked at the marker would pass the test
+    /// above on a frame it happened to read right.
+    #[test]
+    fn the_same_value_without_the_marker_is_read_by_its_length_and_refused() {
+        let frame = message(&shm_value(0x43));
+        assert!(
+            crate::network_message::parse_frame_payload(&frame).is_err(),
+            "a plain ZBuf that declares 1026 bytes and holds eleven is a truncated frame"
+        );
+    }
+
+    /// An entry after the value is read as itself. The value is the middle of the
+    /// chain here, so the walk has to end the value where its slices end and not
+    /// where its declared length would have, or the attachment is lost or the
+    /// frame is refused.
+    #[cfg(feature = "query-attachment")]
+    #[test]
+    fn the_entry_after_a_shm_value_is_read_as_its_own_entry() {
+        let mut chain = MARKER.to_vec();
+        chain.extend_from_slice(&shm_value(0x43 | 0x80));
+        // An attachment: ZBuf, identifier 5, the last of the chain, two bytes.
+        chain.extend_from_slice(&[0x45, 0x02, b'h', b'i']);
+        let resolved = Arc::new(AtomicUsize::new(0));
+        let mut rig = rig(true, counting(&resolved));
+        let request = parse_request(&message(&chain));
+        let mut replies = Vec::new();
+        let outcome = rig
+            .registry
+            .dispatch_request(&request, &HashMap::new(), &mut replies);
+        assert!(outcome.dispatched);
+        assert_eq!(
+            *rig.seen.lock().expect("seen"),
+            [(Some(b"payload".to_vec()), Some(0), Some(b"hi".to_vec()))],
+            "the value from shared memory and the attachment that follows it"
+        );
+    }
+
+    /// A value that names a segment on a session that never negotiated shared
+    /// memory is not read: the peer had no right to name it. The query is dropped
+    /// whole and counted, the resolver is not asked, and nothing is acknowledged.
+    #[test]
+    fn a_shm_query_on_a_session_that_never_negotiated_shared_memory_is_dropped_unread() {
+        let resolved = Arc::new(AtomicUsize::new(0));
+        let mut rig = rig(false, counting(&resolved));
+        let request = parse_request(&upstream_shm_get());
+        let mut replies = Vec::new();
+        let outcome = rig
+            .registry
+            .dispatch_request(&request, &HashMap::new(), &mut replies);
+        assert!(!outcome.dispatched, "no queryable sees the query");
+        assert!(rig.seen.lock().expect("seen").is_empty());
+        assert_eq!(resolved.load(Ordering::SeqCst), 0, "no segment is opened");
+        assert!(rig.bands.lock().expect("bands").is_empty());
+        assert_eq!(rig.registry.shm_unnegotiated_drops(), 1);
+        assert!(
+            replies.is_empty(),
+            "and no Final is owed for a dropped query"
+        );
+    }
+
+    /// A slice that does not resolve drops the whole query, counted, and the
+    /// slice is still acknowledged: its sender holds the buffer until it is told
+    /// the receiver is done with it, and a receiver that could not read it is.
+    #[test]
+    fn a_shm_query_whose_slice_does_not_resolve_is_dropped_whole_and_still_acknowledged() {
+        let mut rig = rig(true, Arc::new(Refuses));
+        let request = parse_request(&upstream_shm_get());
+        let mut replies = Vec::new();
+        let outcome = rig
+            .registry
+            .dispatch_request(&request, &HashMap::new(), &mut replies);
+        assert!(
+            !outcome.dispatched,
+            "no queryable sees a descriptor as a value"
+        );
+        assert!(rig.seen.lock().expect("seen").is_empty());
+        assert_eq!(rig.registry.shm_unresolved_drops(), 1);
+        assert_eq!(
+            *rig.bands.lock().expect("bands"),
+            [5],
+            "acknowledged even though it did not resolve"
+        );
+    }
+
+    /// The statistics of the same query are upstream's: the medium is `shm`, and
+    /// the size is the buffer's, the 1024 bytes the descriptor names, and not
+    /// the eleven bytes the value occupies on the wire or the 1026 it declares.
+    #[cfg(feature = "transport-stats")]
+    #[test]
+    fn the_stats_of_a_shm_query_count_the_buffer_it_names() {
+        let request = parse_request(&upstream_shm_get());
+        let class = crate::network_message::request_stats_class(&request, |_| None);
+        assert_eq!(class.medium, crate::stats::StatMedium::Shm);
+        assert_eq!(
+            class.payload.map(|p| p.pl_bytes),
+            Some(1024),
+            "the size is the logical length of the buffer"
         );
     }
 }
