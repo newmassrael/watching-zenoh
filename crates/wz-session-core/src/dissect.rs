@@ -2278,7 +2278,7 @@ pub fn walk_msg_del(c: &mut SpanCursor<'_>) -> Result<Vec<Field>, CodecError> {
 /// clear (until R3046 it consumed to the end of the cursor it was handed, which
 /// two queries in one frame could not survive), and its value is read in the
 /// sliced shape when a shared-memory marker precedes it
-/// ([`walk_query_ext_chain`]).
+/// (`walk_query_ext_chain`).
 pub fn walk_query(c: &mut SpanCursor<'_>) -> Result<Vec<Field>, CodecError> {
     let (header, header_field) = c.u8("header")?;
     let carrier = header_field.span;
