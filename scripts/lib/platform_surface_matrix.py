@@ -333,7 +333,20 @@ DATA_STEM = "wz_publisher_reaches_a_subscriber_through_a_stock_zenohd_over_"
 #: (kind, host) -> the two consecutive green hosted runs of that host's DATA test, by the
 #: same rule as `INTEROP_PROMOTED` and read from the same place (the job log). Empty on
 #: the day the rows land: they are observations first.
-INTEROP_DATA_PROMOTED: dict[tuple[str, str], tuple[int, int]] = {}
+INTEROP_DATA_PROMOTED: dict[tuple[str, str], tuple[int, int]] = {
+    # macOS: the first hosted reading (37158440974) and the next (37160712846) were green for all
+    # eight rows. Windows is NOT here: its first reading failed on the demo's 1 MiB first-thread
+    # stack, which the demo no longer depends on, and only the run after that one is green, so it
+    # has one of the two runs it needs.
+    ("Tcp", "macos"): (37158440974, 37160712846),
+    ("Ws", "macos"): (37158440974, 37160712846),
+    ("Udp", "macos"): (37158440974, 37160712846),
+    ("UdpReliable", "macos"): (37158440974, 37160712846),
+    ("Tls", "macos"): (37158440974, 37160712846),
+    ("Quic", "macos"): (37158440974, 37160712846),
+    ("QuicDatagram", "macos"): (37158440974, 37160712846),
+    ("UnixsockStream", "macos"): (37158440974, 37160712846),
+}
 
 
 # ─── Rust text: comments and literals masked, offsets kept ──────────────────
