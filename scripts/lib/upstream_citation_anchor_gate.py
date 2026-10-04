@@ -428,11 +428,18 @@ _ANY_TOKEN = re.compile(r"(?<![\w/.-])(\w[\w-]*)/[\w/.-]+\.rs")
 #: 286 -> 285 (R2934). The RouteTable engine's retirement (`c867f7b8`) deleted
 #: the old routing modules and a line-form citation with them; that commit did
 #: not lower this, and hosted run 36327713731 measured 285 before R2934 began.
-LINE_BUDGET = 285
+#: 285 -> 284 (R3042). The shared-memory receive path moved out of the subscriber
+#: registry into one type that a reply registry holds as well, and the comment that
+#: justified the negotiation check went with it: it cited the transport's receive
+#: callback and its `is_shm` predicate by line. The comment now says the same thing
+#: with the callback as a needle. (Described, not spelled: see the warning above.)
+LINE_BUDGET = 284
 #: 58 -> 57 (R2862). The SHM payload provider's module doc named the upstream
 #: POSIX shm implementation file with no anchor; the rewrite that mirrors the
 #: metadata segment cites the files it follows by needle instead.
-BARE_BUDGET = 57
+#: 57 -> 56 (R3042). The same moved comment named the transport's own `is_shm`
+#: predicate with no anchor; the new one names the guard it stands for as a needle.
+BARE_BUDGET = 56
 #: The root-less axis, after R2317 repaired the 49 citations that named a file
 #: gone at the pin. Same two-directional ratchet as LINE and BARE.
 #:
@@ -614,7 +621,11 @@ ROOTLESS_STALE_LINE_BUDGET = 1
 # reads 59 / 57, so the only form that would have passed is `path` @ `needle`.
 # An ack row is graded with `--check` on the tree BEFORE it is committed;
 # `--prose` does not read this axis.
-ROOTLESS_UNDECLARED_BUDGET = 623
+# 623 -> 621 (R3042): measured, and the two occurrences are the ones the line and
+# bare budgets above lost in the same move: the moved comment's two root-less
+# citations of the transport's receive callback and its shared-memory predicate,
+# rewritten with a root and a needle. (Written without their spellings on purpose.)
+ROOTLESS_UNDECLARED_BUDGET = 621
 #: EVERY root-less occurrence, graded or not: `rootless_line + rootless_bare +
 #: residue`. One ratchet over the union of the three above, and it exists
 #: because those three CANNOT express the invariant that matters.
@@ -692,7 +703,8 @@ ROOTLESS_UNDECLARED_BUDGET = 623
 # R2934 — 772 -> 733, the `c867f7b8` module deletion's line and bare removals.
 # R2944 — 733 -> 728, the same five removals as ROOTLESS_UNDECLARED_BUDGET.
 # R2945 — 728 -> 730, the same frozen ack row as ROOTLESS_UNDECLARED_BUDGET.
-ROOTLESS_TOTAL_BUDGET = 730
+# R3042 — 730 -> 728, the same two removals as ROOTLESS_UNDECLARED_BUDGET.
+ROOTLESS_TOTAL_BUDGET = 728
 
 #: A LIVE invocation of the RESOLUTION arm. R2242 split this gate in two and,
 #: in doing so, made `--resolve` a flag someone can simply stop passing: delete

@@ -865,7 +865,18 @@ HOST_GATED_CI_TARGETS: dict[str, str] = {
 # CI read on its run (`[A4-9]`, measured 977 against 976): A4 is a run-ci layer
 # the pre-push hook defers to hosted CI, and the preflight that round was derived
 # without it.
-FOREIGN_ADJUDICATOR_LINKS = 978
+# R3042 -- 978 -> 979, RISING by one, in the new
+# `wz_shm_query_reply_zenohd_interop.rs`: +1 `transport-shm zenoh->wz`, the leg in
+# which upstream's `z_queryable_shm` answers through a buffer of its own provider and
+# is asked past the size of its ten-chunk pool, which only a getter that gives each
+# chunk back can be answered through. The same file holds two legs that declare
+# `none` and claim nothing: the raw control, and the PIN of the query value ending
+# the wz session, which proves what is NOT yet true. `z_queryable_shm` is another of
+# the `zenoh-core` applications registered as `zenoh_shm_example_binary`, so no new
+# class. Counted from the diff: exactly the one `wz-proves` line the file adds that
+# is not `none`. 978 + 1 = 979, measured by `run-ci.sh --layer A4` at this round's
+# tree, which this time was run BEFORE the push.
+FOREIGN_ADJUDICATOR_LINKS = 979
 
 # ── Execution disclosure ────────────────────────────────────────────────────────
 #

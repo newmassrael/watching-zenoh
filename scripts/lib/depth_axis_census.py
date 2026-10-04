@@ -2436,7 +2436,15 @@ PIN_NO_SYMBOL = 0
 # an id the peer never declared), and the atom is still PARTIAL. READ off the census's
 # own FAIL line, `wz citations: 47 against a pin of 45`; `reached` and `ambiguous` hold
 # at 3 and 2.
-PIN_WZ_CITATIONS = 47
+#
+# R3042 -- 47 -> 51, one atom. `transport-shm`'s reason gains the UPDATE that the query
+# plane is measured against upstream's own programs, which cites four wz anchors (the
+# receive-side type that a push registry and a reply registry each hold, the reply
+# witness that routing refuses, the upstream leg that asks past the pool, and the pin of
+# the query value that ends the session), and the atom is still PARTIAL. READ off the
+# census's own FAIL line, `wz citations: 51 against a pin of 47`; `reached` and
+# `ambiguous` hold at 3 and 2.
+PIN_WZ_CITATIONS = 51
 # R2626 — 44 -> 42, and this one is worth a sentence because it HELD through
 # every earlier retirement in this run (R2612, R2622). `time-hlc`'s reason is the
 # first retiree carrying AMBIGUOUS citations of its own: its oldest clauses cite
