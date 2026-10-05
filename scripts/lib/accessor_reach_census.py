@@ -148,10 +148,15 @@ ROSTER: frozenset[tuple[str, str]] = frozenset(
         # they were the map's own reason for existing, waiting for a caller.
         ("FlowDissection", "ws_resyncs"),
         ("FragmentStats", "any"),
-        ("StreamAssembler", "fin_seen"),
+        # R3055 -- `StreamAssembler::fin_seen` and `StreamAssembler::rst_seen`
+        # LEFT this roster by being asked: a flow's `halves` in the field document
+        # reports, per direction, whether a FIN and an RST were observed, and both
+        # shipped surfaces render that document. They were observed at the stream
+        # layer since the assembler existed and read by nothing outside it, which
+        # is the debt this roster files, so the rows are struck and not kept with
+        # a note: the gate is a ratchet in both directions.
         ("StreamAssembler", "held_segments"),
         ("StreamAssembler", "is_empty"),
-        ("StreamAssembler", "rst_seen"),
         ("StreamAssembler", "runs"),
         ("StreamAssembler", "synced_from_syn"),
         ("Tunnel", "depth"),
