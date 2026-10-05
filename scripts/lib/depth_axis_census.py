@@ -2458,7 +2458,13 @@ PIN_NO_SYMBOL = 0
 # and the allocation policy enum). The atom is still PARTIAL. READ off the census's own
 # FAIL line, `wz citations: 59 against a pin of 55`; `reached` and `ambiguous` hold at 3
 # and 2.
-PIN_WZ_CITATIONS = 59
+#
+# R3057 -- 59 -> 61, one atom. `transport-shm`'s reason gains the UPDATE that the pool is
+# carved by upstream's own allocator, which cites two wz anchors (the line that builds the
+# allocator and the provider's layout reporting). The atom is still PARTIAL. READ off the
+# census's own FAIL line, `wz citations: 61 against a pin of 59`; `reached` and `ambiguous`
+# hold at 3 and 2.
+PIN_WZ_CITATIONS = 61
 # R2626 — 44 -> 42, and this one is worth a sentence because it HELD through
 # every earlier retirement in this run (R2612, R2622). `time-hlc`'s reason is the
 # first retiree carrying AMBIGUOUS citations of its own: its oldest clauses cite
