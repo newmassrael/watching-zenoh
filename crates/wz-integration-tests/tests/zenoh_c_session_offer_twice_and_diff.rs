@@ -48,16 +48,18 @@
 //!   lowlatency on both ends.
 //! - `qos_and_lowlatency` — refused at the open.
 //!
-//! ## The shared-memory column is a HELD divergence
+//! ## The shared-memory column
 //!
-//! On the shared-memory arm upstream negotiates SHM by default and wz does not
-//! offer it: a zenoh peer that agreed on SHM would send Puts laid out as slices,
-//! which wz's generated Put codec cannot read yet (open-debt item 823; see
-//! `wz_capi_c::session`'s `session_offer`). That column is therefore compared
-//! as a PIN — upstream `1` where wz is `0` — rather than as an equality, and
-//! the pin reds on the day wz starts offering it, which is when this file and
-//! item 823 move together. On an arm without shared memory neither library has
-//! `z_transport_is_shm` and the whole output is compared as it stands.
+//! On the shared-memory arm upstream negotiates SHM by default and reports it on a
+//! transport. This column was HELD as a pin -- upstream `1` where wz was `0` -- while a
+//! zenoh peer that agreed on SHM would have sent Puts laid out as slices that wz's
+//! generated Put codec could not read (open-debt item 823). That stopped being true when
+//! the layout was adopted and the session began offering SHM (R3052), but the column went
+//! on reading `0` for another round, because the transport snapshot reads `is_shm` from
+//! the session only when the session model is built with its SHM feature and the C ABI's
+//! SHM arm did not enable it (R3059). With it enabled the column is the real library's,
+//! `1,1,0,1,1,1`, and the whole output is compared as it stands, on an arm without shared
+//! memory as on one with it.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -306,27 +308,17 @@ fn run_both_arms(include: &Path) -> (String, String) {
     (wz_stdout, ref_stdout)
 }
 
-/// Every `shm=<v>` value the probe printed, in order, and the output with each
-/// of them replaced by `shm=?` — the two halves the held divergence is judged
-/// on separately.
-fn split_shm_column(stdout: &str) -> (Vec<String>, String) {
-    let mut values = Vec::new();
-    let masked = stdout
+/// Every `shm=<v>` value the probe printed, in order: the column the reference's own
+/// rule is read off, so a reference that does not show it measures nothing.
+fn shm_column(stdout: &str) -> Vec<String> {
+    stdout
         .lines()
-        .map(|line| match line.split_once(" shm=") {
-            Some((head, value)) => {
-                values.push(value.to_owned());
-                format!("{head} shm=?")
-            }
-            None => line.to_owned(),
-        })
-        .collect::<Vec<_>>()
-        .join("\n");
-    (values, masked)
+        .filter_map(|line| line.split_once(" shm=").map(|(_, value)| value.to_owned()))
+        .collect()
 }
 
 /// THE GATE: a session offers what its config enables, on both sides of a
-/// link, identically on wz and libzenohc — with the shared-memory column held.
+/// link, identically on wz and libzenohc.
 // wz-proves: api-compat-c zenoh-c->wz partial
 #[test]
 #[ignore = "opens sessions and reads a zenoh-c oracle; run by run-ci Layer C1cc \
@@ -388,32 +380,24 @@ fn a_sessions_transport_capabilities_follow_its_config_on_wz_and_libzenohc() {
         );
     }
 
-    let (wz_shm, wz_masked) = split_shm_column(&wz_stdout);
-    let (ref_shm, ref_masked) = split_shm_column(&ref_stdout);
+    if shm_arm {
+        // Upstream agrees on SHM wherever both ends leave it on: every leg but the one
+        // that turned it off. The oracle first, so the equality below is against a
+        // reference that shows the rule.
+        assert_eq!(
+            shm_column(&ref_stdout),
+            ["1", "1", "0", "1", "1", "1"],
+            "the reference's SHM column is not the one this leg was taken from:\n{ref_stdout}"
+        );
+    } else {
+        assert!(
+            shm_column(&ref_stdout).iter().all(|v| v == "-"),
+            "on an arm without shared memory the reference prints `shm=-`:\n{ref_stdout}"
+        );
+    }
     assert_eq!(
-        wz_masked, ref_masked,
+        wz_stdout, ref_stdout,
         "§5.27 api-compat-c: wz's C ABI and libzenohc disagree about what a session's \
          links offer.\n--- wz ---\n{wz_stdout}--- libzenohc ---\n{ref_stdout}"
     );
-
-    if shm_arm {
-        // The HELD divergence (item 823): upstream agrees on SHM wherever both
-        // ends leave it on, and wz never offers it.
-        let expected_ref: Vec<&str> = ["1", "1", "0", "1", "1", "1"].to_vec();
-        assert_eq!(
-            ref_shm, expected_ref,
-            "the reference's SHM column is not the one this pin was taken from:\n{ref_stdout}"
-        );
-        assert!(
-            wz_shm.iter().all(|v| v == "0") && wz_shm.len() == ref_shm.len(),
-            "wz's zenoh-c session now reports SHM on a transport. That is the change \
-             open-debt item 823 holds back: move this pin, the offer in \
-             `wz_capi_c::session::session_offer` and item 823 together.\n{wz_stdout}"
-        );
-    } else {
-        assert_eq!(
-            wz_shm, ref_shm,
-            "on an arm without shared memory both libraries print `shm=-`"
-        );
-    }
 }

@@ -2652,10 +2652,11 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
     /// transport-shm — publish a SHM-backed payload. When this session has
     /// NEGOTIATED SHM, the REMOTE leg carries only the segment DESCRIPTOR (+ the
     /// 0x2 ext_shm marker) instead of the bytes — the receiver mmaps the segment
-    /// off /dev/shm (zero-copy on the wire). The LOCAL loopback leg delivers the
-    /// bytes directly (same-host). Without negotiation, this is the ordinary
-    /// inline `publish` of the bytes read back from the segment, so the API is
-    /// always usable. The caller may let go of `payload` as soon as this returns
+    /// off /dev/shm (zero-copy on the wire). Without negotiation the remote leg is
+    /// the ordinary inline publish of the bytes read back from the segment, so the
+    /// API is always usable. The LOCAL leg hands a subscriber of this session the
+    /// chunk itself, as a remote receiver is handed it (R3059), and not a copy of
+    /// its bytes. The caller may let go of `payload` as soon as this returns
     /// (R3038): the descriptor on the wire carries a reference the receiver
     /// releases, and the segment stays until it has.
     #[cfg(feature = "transport-shm")]
@@ -2666,55 +2667,206 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
         mut opts: PublishOptions,
     ) -> Result<usize, PublishError> {
         // R311y818 — the third publish body, and the same `resolve_put` head.
-        // Idempotent, so the not-negotiated fall-through to `Self::publish`
-        // below re-runs it as a no-op rather than double-stamping.
+        // Idempotent, so the inline remote leg below re-runs it as a no-op rather
+        // than double-stamping.
         self.resolve_publish_timestamp(&mut opts);
+        self.publish_shm_legs(
+            keyexpr,
+            payload,
+            opts,
+            |descriptor, meta| {
+                wz_session_core::push_build::build_push_shm_literal(keyexpr, descriptor, meta)
+            },
+            |remote| self.publish(keyexpr, payload.bytes(), remote),
+        )
+    }
+
+    /// transport-shm -- the two legs of an SHM publish, whatever its key: the REMOTE leg
+    /// puts the descriptor on the wire where this session negotiated shared memory and
+    /// `inline` sends the bytes where it did not, and the LOCAL leg hands a subscriber of
+    /// this session the chunk.
+    ///
+    /// `inline` is given the options narrowed to `Locality::Remote`, because the local leg
+    /// is this function's: an inline publish that delivered locally as well would hand a
+    /// subscriber the bytes and then the chunk.
+    #[cfg(feature = "transport-shm")]
+    fn publish_shm_legs<B, E, I>(
+        &self,
+        loopback_keyexpr: &str,
+        payload: &crate::shm_provider::ShmBackedPayload,
+        opts: PublishOptions,
+        build: B,
+        inline: I,
+    ) -> Result<usize, PublishError>
+    where
+        B: FnOnce(
+            &wz_session_core::extshm::ShmDescriptor,
+            &wz_session_core::metadata::PushMetadata,
+        ) -> Result<wz_session_core::wire::PushOwned, E>,
+        E: Into<wz_session_core::send_wire_error::SendWireError>,
+        I: FnOnce(PublishOptions) -> Result<usize, PublishError>,
+    {
         #[cfg(feature = "codec-push")]
-        if self.actions().is_shm() && opts.allowed_destination.allows_remote() {
-            use wz_session_core::send_wire_error::SendWireError;
-            let meta = opts.push_metadata();
-            // R3038 -- SERIALIZING THE DESCRIPTOR TAKES A REFERENCE FOR THE
-            // RECEIVER, as it does upstream, and the receiver's resolver gives it
-            // back. The guard returns it if the frame does not build or the send
-            // refuses, so the count is only left raised for a frame that left.
-            let wire = payload.wire_reference();
-            let push = wz_session_core::push_build::build_push_shm_literal(
-                keyexpr,
-                &wire.descriptor(),
-                &meta,
-            )
-            .map_err(SendWireError::Codec)?;
-            // R311y-item3 — route the SHM descriptor leg through the QoS send
-            // seam with the band derived from the SINGLE `opts.qos` source, so a
-            // prioritized zero-copy publish rides the matching per-priority
-            // conduit like `Self::publish` (was `send_network_message` = hard
-            // DEFAULT conduit — the last split literal-publish surface, which
-            // already carried the observable qos ext + `express` but pinned the
-            // conduit to DEFAULT). The `_qos` seam is present under this
-            // `transport-unicast` + `codec-push` leg (same gate `publish` uses).
-            self.send_network_message_qos(
-                wz_session_core::network_message::NetworkMessage::Push(Box::new(push)),
-                opts.reliable_bool(),
-                meta.is_express(),
-                opts.priority_band(),
-            )?;
-            wire.commit();
-            // The remote leg fired the descriptor; deliver the bytes to any LOCAL
-            // subscriber (same-host) directly.
-            #[cfg(feature = "pubsub-allow-loop")]
-            if opts.allowed_destination.allows_local() {
-                let sample = build_loopback_sample(keyexpr, payload.bytes(), &opts);
-                let delivered =
-                    R::with_mutex_mut(&self.observer, |o| o.subscribers.local_publish(&sample));
-                // R311y554 — same policy gate as `Session::publish`.
-                self.drain_local_fires_if_inline();
-                return Ok(delivered);
+        if opts.allowed_destination.allows_remote() {
+            if self.actions().is_shm() {
+                self.send_shm_descriptor(payload, &opts, build)?;
+            } else {
+                inline(
+                    opts.clone()
+                        .with_locality(crate::locality::Locality::Remote),
+                )?;
             }
-            return Ok(0);
         }
-        // Not negotiated (or remote disabled) -> ordinary inline publish of the
-        // bytes read back out of the segment.
-        self.publish(keyexpr, payload.bytes(), opts)
+        #[cfg(not(feature = "codec-push"))]
+        let _ = (build, inline);
+        Ok(self.deliver_shm_loopback(loopback_keyexpr, payload, &opts))
+    }
+
+    /// transport-shm -- [`Self::publish_shm`] on a DECLARED keyexpr: the wire names the key
+    /// by `mapping_id` (and `inline_suffix` after the declared prefix), and the loopback leg
+    /// fires on `loopback_keyexpr`, as [`Self::publish_aliased`] does for bytes.
+    ///
+    /// A payload that lives in shared memory and a key that was declared are independent
+    /// choices, and a program that makes both is owed the descriptor and not the bytes:
+    /// without this the declared-key publish was the one SHM publish a program could make
+    /// that silently copied. Everything that is not the key is [`Self::publish_shm`]'s,
+    /// through the same two helpers.
+    #[cfg(feature = "transport-shm")]
+    pub fn publish_shm_aliased(
+        &self,
+        mapping_id: u64,
+        inline_suffix: Option<&str>,
+        loopback_keyexpr: &str,
+        payload: &crate::shm_provider::ShmBackedPayload,
+        mut opts: PublishOptions,
+    ) -> Result<usize, PublishError> {
+        // The same `resolve_put` head as the two bodies around it; idempotent, so the
+        // inline remote leg re-runs it as a no-op.
+        self.resolve_publish_timestamp(&mut opts);
+        self.publish_shm_legs(
+            loopback_keyexpr,
+            payload,
+            opts,
+            |descriptor, meta| {
+                wz_session_core::push_build::build_push_shm_aliased(
+                    mapping_id,
+                    inline_suffix,
+                    descriptor,
+                    meta,
+                )
+            },
+            |remote| {
+                self.publish_aliased(
+                    mapping_id,
+                    inline_suffix,
+                    loopback_keyexpr,
+                    payload.bytes(),
+                    remote,
+                )
+            },
+        )
+    }
+
+    /// transport-shm -- [`Self::publish_shm_aliased`] with the loopback literal resolved from
+    /// the outbound mapping table, as [`Self::publish_aliased_auto`] does for bytes. An id no
+    /// prior declaration registered fires neither branch.
+    #[cfg(feature = "transport-shm")]
+    pub fn publish_shm_aliased_auto(
+        &self,
+        mapping_id: u64,
+        inline_suffix: Option<&str>,
+        payload: &crate::shm_provider::ShmBackedPayload,
+        opts: PublishOptions,
+    ) -> Result<usize, PublishAliasError> {
+        let mut loopback_keyexpr = self
+            .actions()
+            .resolve_outbound_mapping(mapping_id)
+            .ok_or(PublishAliasError::UnknownMapping(mapping_id))?;
+        if let Some(suffix) = inline_suffix {
+            loopback_keyexpr.push_str(suffix);
+        }
+        Ok(self.publish_shm_aliased(mapping_id, inline_suffix, &loopback_keyexpr, payload, opts)?)
+    }
+
+    /// transport-shm -- put one Push that carries `payload`'s DESCRIPTOR on the wire, built by
+    /// `build` from the descriptor and the options' metadata. The remote leg of every SHM
+    /// publish, whatever its key.
+    #[cfg(all(feature = "transport-shm", feature = "codec-push"))]
+    fn send_shm_descriptor<B, E>(
+        &self,
+        payload: &crate::shm_provider::ShmBackedPayload,
+        opts: &PublishOptions,
+        build: B,
+    ) -> Result<(), PublishError>
+    where
+        B: FnOnce(
+            &wz_session_core::extshm::ShmDescriptor,
+            &wz_session_core::metadata::PushMetadata,
+        ) -> Result<wz_session_core::wire::PushOwned, E>,
+        E: Into<wz_session_core::send_wire_error::SendWireError>,
+    {
+        let meta = opts.push_metadata();
+        // R3038 -- SERIALIZING THE DESCRIPTOR TAKES A REFERENCE FOR THE
+        // RECEIVER, as it does upstream, and the receiver's resolver gives it
+        // back. The guard returns it if the frame does not build or the send
+        // refuses, so the count is only left raised for a frame that left.
+        let wire = payload.wire_reference();
+        let push = build(&wire.descriptor(), &meta)
+            .map_err(Into::<wz_session_core::send_wire_error::SendWireError>::into)?;
+        // R311y-item3 — route the SHM descriptor leg through the QoS send
+        // seam with the band derived from the SINGLE `opts.qos` source, so a
+        // prioritized zero-copy publish rides the matching per-priority
+        // conduit like `Self::publish` (was `send_network_message` = hard
+        // DEFAULT conduit — the last split literal-publish surface, which
+        // already carried the observable qos ext + `express` but pinned the
+        // conduit to DEFAULT). The `_qos` seam is present under this
+        // `transport-unicast` + `codec-push` leg (same gate `publish` uses).
+        self.send_network_message_qos(
+            wz_session_core::network_message::NetworkMessage::Push(Box::new(push)),
+            opts.reliable_bool(),
+            meta.is_express(),
+            opts.priority_band(),
+        )?;
+        wire.commit();
+        Ok(())
+    }
+
+    /// transport-shm -- the LOCAL leg of an SHM publish: any subscriber of this session that
+    /// the options' locality reaches is handed the CHUNK, the page it lies on and not a copy
+    /// of its bytes, with a reference of its own that goes back when it lets go
+    /// ([`ShmBackedPayload::receiver_view`](crate::shm_provider::ShmBackedPayload::receiver_view)).
+    /// Upstream hands a local subscriber the buffer (MEASURED against the real library), and
+    /// the view is built only when a subscriber matches, so a publish nobody here listens to
+    /// maps nothing. Returns the number of subscriber callbacks that fired.
+    #[cfg(feature = "transport-shm")]
+    fn deliver_shm_loopback(
+        &self,
+        keyexpr: &str,
+        payload: &crate::shm_provider::ShmBackedPayload,
+        opts: &PublishOptions,
+    ) -> usize {
+        #[cfg(feature = "pubsub-allow-loop")]
+        if opts.allowed_destination.allows_local() {
+            let listened_to = R::with_mutex_mut(&self.observer, |o| {
+                o.subscribers.has_local_matching(keyexpr)
+            });
+            if !listened_to {
+                return 0;
+            }
+            let mut sample = build_loopback_sample(keyexpr, payload.bytes(), opts);
+            // The chunk where it can be handed over; the copy built above when it cannot.
+            if let Some(shared) = payload.receiver_view() {
+                sample.payload = shared;
+            }
+            let delivered =
+                R::with_mutex_mut(&self.observer, |o| o.subscribers.local_publish(&sample));
+            // R311y554 — same policy gate as `Session::publish`.
+            self.drain_local_fires_if_inline();
+            return delivered;
+        }
+        #[cfg(not(feature = "pubsub-allow-loop"))]
+        let _ = (keyexpr, payload, opts);
+        0
     }
 
     // R311mn (B2) — `observer` / `drain_deferred_fires` are

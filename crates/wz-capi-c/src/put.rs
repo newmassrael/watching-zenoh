@@ -27,7 +27,7 @@ use wz_runtime_tokio::sample::SampleKind;
 use wz_runtime_tokio::session::PublishOptions;
 
 use crate::abi::{z_loaned_keyexpr_t, z_loaned_session_t, z_moved_bytes_t, z_moved_encoding_t};
-use crate::bytes::take_payload;
+use crate::bytes::{publish_outbound, take_outbound, take_payload};
 use crate::ffi::guarded;
 use crate::keyexpr::keyexpr_str;
 use crate::publisher::{
@@ -311,7 +311,7 @@ pub unsafe extern "C" fn z_put(
         // caller a value upstream would have invalidated — a divergence that only
         // shows up as a double free in their code, not ours.
         // SAFETY: the caller's contract.
-        let payload = unsafe { take_payload(payload) };
+        let payload = unsafe { take_outbound(payload) };
         // SAFETY: the caller's contract for the options struct.
         let publish = unsafe { resolve_put_options(options) };
         let (Some(state), Some(keyexpr), Some(payload)) = (
@@ -325,14 +325,11 @@ pub unsafe extern "C" fn z_put(
         // R311y564 — a keyexpr that carries a DECLARATION publishes aliased, the
         // bandwidth saving `z_declare_keyexpr` exists to enable. Undeclared
         // views take the literal path, which is every keyexpr this crate could
-        // build before the owned family shipped.
+        // build before the owned family shipped. A payload that is a chunk of
+        // shared memory goes out as its descriptor on either (R3059).
         // SAFETY: the caller's contract for the handle.
-        let sent = match unsafe { crate::keyexpr::keyexpr_mapping(key_expr) } {
-            Some(mapping) => state
-                .shared
-                .publish_aliased_all(mapping, None, &payload, &publish),
-            None => state.shared.publish_all(keyexpr, &payload, &publish),
-        };
+        let mapping = unsafe { crate::keyexpr::keyexpr_mapping(key_expr) };
+        let sent = publish_outbound(&state.shared, keyexpr, mapping, &payload, &publish);
         match sent {
             Ok(_) => Z_OK,
             // The only fan-out failure is a payload/keyexpr the bounded codec

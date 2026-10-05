@@ -759,6 +759,319 @@ fn upstream_z_sub_shm_on_wz_capi_c_reports_the_same_buffer_type_for_a_shared_mem
     );
 }
 
+/// Run a PUBLISHING example against upstream's own `z_sub_shm` and return what that
+/// subscriber printed.
+///
+/// The subscriber is the Rust example that labels every sample it receives `SHM (MUT)`,
+/// `SHM (IMMUT)` or `RAW` (`examples/examples/z_sub_shm.rs`), listening as a peer that
+/// offers shared memory. It is a third implementation of the protocol that shares no
+/// code with either arm, which is why what it prints is the witness: a publisher that
+/// only SAYS it sent a chunk and sent the bytes reads `RAW` here, and `wz-ap-demo`, the
+/// observer LEG 1 uses, cannot tell the two apart because it negotiates no shared memory.
+///
+/// The publisher dials the subscriber, and the capture is read while both run, because
+/// `z_pub_shm.c` publishes once a second until killed.
+fn observe_with_z_sub_shm(
+    z_sub_shm: &Path,
+    program: &Path,
+    libdir: &Path,
+    arm: Arm,
+    publisher_args: impl Fn(&str) -> Vec<String>,
+    settle: Duration,
+) -> String {
+    let label = arm.label();
+    let reservation = PortReservation::pick();
+    let port = reservation.port();
+    let endpoint = format!("tcp/127.0.0.1:{port}");
+
+    let mut sub_out = tempfile::tempfile().expect("subscriber output capture");
+    let sub_writer = sub_out.try_clone().expect("dup subscriber output handle");
+    let mut subscriber = ChildGuard::wrap(
+        format!("upstream z_sub_shm ({label})"),
+        Command::new("stdbuf")
+            .args(["-oL", "-eL"])
+            .arg(z_sub_shm)
+            .args([
+                "-m",
+                "peer",
+                "-l",
+                &endpoint,
+                "-k",
+                "demo/example/**",
+                "--no-multicast-scouting",
+                "--enable-shm",
+            ])
+            .env(
+                "RUST_LOG",
+                "zenoh=info,zenoh_shm=debug,zenoh_transport=debug",
+            )
+            .stdout(Stdio::from(sub_writer))
+            .stderr(Stdio::from(sub_out.try_clone().expect("dup stderr handle")))
+            .spawn()
+            .expect("spawn upstream's z_sub_shm"),
+    );
+    if let Err(why) = wait_for_tcp_accept_alive(subscriber.child_mut(), port, LISTEN_TIMEOUT) {
+        panic!(
+            "upstream's z_sub_shm ({label}) never accepted on {endpoint} -- {why}; capture so \
+             far:\n{}",
+            read_captured(&mut sub_out)
+        );
+    }
+    drop(reservation);
+
+    let mut prog_out = tempfile::tempfile().expect("publisher output capture");
+    let prog_writer = prog_out.try_clone().expect("dup publisher output handle");
+    let mut publisher = ChildGuard::wrap(
+        format!("upstream z_pub_shm.c ({label})"),
+        Command::new("stdbuf")
+            .args(["-oL", "-eL"])
+            .arg(program)
+            .args(publisher_args(&endpoint))
+            .env("LD_LIBRARY_PATH", libdir)
+            .stdout(Stdio::from(prog_writer.try_clone().expect("dup")))
+            .stderr(Stdio::from(prog_writer))
+            .spawn()
+            .expect("spawn the publisher"),
+    );
+
+    let observed = wait_for_substring(&mut sub_out, "Received", EXCHANGE_TIMEOUT);
+    // A settle window after the first sample, so the tags of a few more are read and a
+    // sample that changed its buffer type between the first and the third would show.
+    if observed.is_ok() {
+        std::thread::sleep(settle);
+    }
+    let full = read_captured(&mut sub_out);
+    graceful_terminate(publisher.child_mut(), TERMINATE_TIMEOUT);
+    graceful_terminate(subscriber.child_mut(), TERMINATE_TIMEOUT);
+    if observed.is_err() {
+        panic!(
+            "upstream's z_sub_shm never received a sample from the {label} arm\n\
+             --- publisher stdout+stderr ---\n{}\n--- subscriber ---\n{full}",
+            read_captured(&mut prog_out)
+        );
+    }
+    full
+}
+
+/// The `(keyexpr, buffer type)` of every sample upstream's `z_sub_shm` printed, run-length
+/// deduplicated so two arms that attached at different points of a continuous publisher
+/// compare on what they received and not on how many.
+fn received_tags(log: &str) -> Vec<(String, String)> {
+    let mut seen: Vec<(String, String)> = log
+        .lines()
+        .filter(|l| l.contains("Received PUT ('"))
+        .filter_map(keyexpr_and_tag)
+        .collect();
+    seen.dedup();
+    seen
+}
+
+/// LEG 7 -- upstream's `z_pub_shm.c`, UNMODIFIED, puts its chunk on the wire as SHARED
+/// MEMORY on wz's ABI, as on the real library: upstream's own `z_sub_shm` prints every
+/// sample it receives from it as a shared-memory buffer on both arms.
+///
+/// This is the leg the sending half is for. Until R3059 `z_bytes_from_shm` copied the
+/// chunk and every put was bytes, so the same example reached this subscriber as `RAW`
+/// from wz and as `SHM` from the real library; LEG 1 could not see it because its
+/// observer negotiates no shared memory. The reference arm is the control: if it reports
+/// anything but a shared-memory buffer, the machine's oracle or the subscriber's offer is
+/// not what this leg assumes, and the comparison says nothing.
+///
+/// What is compared is the key and the buffer type, not the payload line: the publisher
+/// numbers its payloads, and two arms attach at different counts.
+// wz-proves: api-compat-c wz->zenoh partial
+#[test]
+#[ignore = "compiles an upstream zenoh-c example with cc and spawns upstream's own \
+            z_sub_shm; needs the machine-local SHARED-MEMORY zenoh-c oracle and the \
+            shared-memory zenohd build; run-ci Layer C1cc drives it"]
+fn upstream_z_pub_shm_on_wz_capi_c_reaches_a_real_z_sub_shm_as_shared_memory() {
+    let Some((include, libdir_ref, examples)) = oracle_or_note() else {
+        return;
+    };
+    let Some(z_sub_shm) = zenoh_shm_example_binary("z_sub_shm") else {
+        eprintln!(
+            "skip: no z_sub_shm at target/zenohd-shm (run `ZENOHD_SHM=1 scripts/build-zenohd.sh`)"
+        );
+        return;
+    };
+    let dir = tempfile::tempdir().expect("tempdir for the compiled arms");
+    let (on_wz, libdir_wz) = arm_binary(
+        "z_pub_shm",
+        Arm::Wz,
+        dir.path(),
+        &include,
+        &examples,
+        &libdir_ref,
+    );
+    let (on_ref, libdir_r) = arm_binary(
+        "z_pub_shm",
+        Arm::Reference,
+        dir.path(),
+        &include,
+        &examples,
+        &libdir_ref,
+    );
+
+    let key = "demo/example/zenoh-c-pub-shm";
+    let payload = "SHM-FROM-C";
+    let settle = Duration::from_millis(2500);
+    let args = |endpoint: &str| {
+        vec![
+            "-e".to_string(),
+            endpoint.to_string(),
+            "-k".to_string(),
+            key.to_string(),
+            "-p".to_string(),
+            payload.to_string(),
+            "--no-multicast-scouting".to_string(),
+        ]
+    };
+    let ref_log =
+        observe_with_z_sub_shm(&z_sub_shm, &on_ref, &libdir_r, Arm::Reference, args, settle);
+    let wz_log = observe_with_z_sub_shm(&z_sub_shm, &on_wz, &libdir_wz, Arm::Wz, args, settle);
+
+    let (wz_tags, ref_tags) = (received_tags(&wz_log), received_tags(&ref_log));
+    assert!(
+        !ref_tags.is_empty() && ref_tags.iter().all(|(_, tag)| tag.starts_with("SHM")),
+        "the reference arm did not reach upstream's z_sub_shm as shared memory: {ref_tags:?}, \
+         so the comparison below says nothing about it\n--- reference ---\n{ref_log}"
+    );
+    assert!(
+        !wz_tags.is_empty(),
+        "the wz arm reached upstream's z_sub_shm with nothing it could tag\n--- wz ---\n{wz_log}"
+    );
+    assert_eq!(
+        wz_tags, ref_tags,
+        "the two arms of the SAME compiled z_pub_shm.c reached upstream's z_sub_shm as \
+         different buffer types. wz: {wz_tags:?}; the real libzenohc: {ref_tags:?}.\n--- wz \
+         ---\n{wz_log}\n--- reference ---\n{ref_log}"
+    );
+    assert!(
+        wz_log.contains(payload),
+        "upstream's z_sub_shm printed nothing carrying the payload the wz arm sent\n{wz_log}"
+    );
+}
+
+/// A publisher that puts a chunk of shared memory on a DECLARED keyexpr: `z_pub_shm.c`
+/// with the publisher replaced by `z_declare_keyexpr` and `z_put`, which is the one
+/// combination of the two choices (a key the wire names by id, a payload that lives in
+/// shared memory) no upstream example makes. It is ours, and the same source is compiled
+/// for both arms. Arguments: the endpoint to dial and the key to declare.
+const DECLARED_KEY_SHM_PUBLISHER: &str = r#"#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <unistd.h>
+#include "zenoh.h"
+
+int main(int argc, char **argv) {
+    setvbuf(stdout, NULL, _IONBF, 0);
+    if (argc != 3) { return 2; }
+    z_owned_config_t config;
+    z_config_default(&config);
+    char connect[512];
+    snprintf(connect, sizeof connect, "[\"%s\"]", argv[1]);
+    if (zc_config_insert_json5(z_loan_mut(config), Z_CONFIG_CONNECT_KEY, connect) < 0) { return 3; }
+    if (zc_config_insert_json5(z_loan_mut(config), Z_CONFIG_MULTICAST_SCOUTING_KEY, "false") < 0) { return 3; }
+    z_owned_session_t s;
+    if (z_open(&s, z_move(config), NULL) < 0) { printf("open failed\n"); return 4; }
+    z_view_keyexpr_t ke;
+    if (z_view_keyexpr_from_str(&ke, argv[2]) < 0) { return 5; }
+    z_owned_keyexpr_t declared;
+    if (z_declare_keyexpr(z_loan(s), &declared, z_loan(ke)) < 0) { printf("declare failed\n"); return 5; }
+    z_owned_shm_provider_t provider;
+    if (z_shm_provider_default_new(&provider, 4096) != Z_OK) { printf("provider failed\n"); return 6; }
+    for (int idx = 0; idx < 1000; ++idx) {
+        z_sleep_s(1);
+        z_buf_layout_alloc_result_t alloc;
+        z_shm_provider_alloc_gc_defrag_blocking(&alloc, z_loan(provider), 1024);
+        if (alloc.status != ZC_BUF_LAYOUT_ALLOC_STATUS_OK) { printf("alloc failed\n"); return 7; }
+        uint8_t *buf = z_shm_mut_data_mut(z_loan_mut(alloc.buf));
+        snprintf((char *)buf, 1024, "[%4d] declared-key-shm", idx);
+        z_owned_bytes_t payload;
+        z_bytes_from_shm_mut(&payload, z_move(alloc.buf));
+        if (z_put(z_loan(s), z_loan(declared), z_move(payload), NULL) < 0) { printf("put failed\n"); return 8; }
+        printf("put %d\n", idx);
+    }
+    return 0;
+}
+"#;
+
+/// LEG 8 -- a chunk put on a DECLARED keyexpr reaches upstream's `z_sub_shm` as shared
+/// memory on both arms. LEG 7 is the literal key; this is the id the wire names instead,
+/// which is a different message (the Push carries `(id, suffix)` and not the literal) built
+/// by a different function, and a program that declares its keys and allocates its
+/// payloads from a provider is not unusual.
+///
+/// The subscriber resolves the id from the declaration the publisher sent first, so the
+/// key it prints is the declared literal on both arms, and a publish that named the key
+/// wrongly, or sent the bytes, would differ from the reference in the tag or the key.
+// wz-proves: api-compat-c wz->zenoh partial
+#[test]
+#[ignore = "compiles a C program with cc and spawns upstream's own z_sub_shm; needs the \
+            machine-local SHARED-MEMORY zenoh-c oracle and the shared-memory zenohd build; \
+            run-ci Layer C1cc drives it"]
+fn a_chunk_put_on_a_declared_keyexpr_reaches_a_real_z_sub_shm_as_shared_memory_on_wz_capi_c() {
+    let Some((include, libdir_ref, _examples)) = oracle_or_note() else {
+        return;
+    };
+    let Some(z_sub_shm) = zenoh_shm_example_binary("z_sub_shm") else {
+        eprintln!(
+            "skip: no z_sub_shm at target/zenohd-shm (run `ZENOHD_SHM=1 scripts/build-zenohd.sh`)"
+        );
+        return;
+    };
+    let dir = tempfile::tempdir().expect("tempdir for the compiled arms");
+    let src_dir = dir.path().join("src");
+    std::fs::create_dir_all(&src_dir).expect("source dir");
+    std::fs::write(
+        src_dir.join("declared_key_shm_pub.c"),
+        DECLARED_KEY_SHM_PUBLISHER,
+    )
+    .expect("write the publisher source");
+    let (on_wz, libdir_wz) = arm_binary(
+        "declared_key_shm_pub",
+        Arm::Wz,
+        dir.path(),
+        &include,
+        &src_dir,
+        &libdir_ref,
+    );
+    let (on_ref, libdir_r) = arm_binary(
+        "declared_key_shm_pub",
+        Arm::Reference,
+        dir.path(),
+        &include,
+        &src_dir,
+        &libdir_ref,
+    );
+
+    let key = "demo/example/declared-shm";
+    let settle = Duration::from_millis(2500);
+    let args = |endpoint: &str| vec![endpoint.to_string(), key.to_string()];
+    let ref_log =
+        observe_with_z_sub_shm(&z_sub_shm, &on_ref, &libdir_r, Arm::Reference, args, settle);
+    let wz_log = observe_with_z_sub_shm(&z_sub_shm, &on_wz, &libdir_wz, Arm::Wz, args, settle);
+
+    let (wz_tags, ref_tags) = (received_tags(&wz_log), received_tags(&ref_log));
+    assert!(
+        !ref_tags.is_empty() && ref_tags.iter().all(|(_, tag)| tag.starts_with("SHM")),
+        "the reference arm did not reach upstream's z_sub_shm as shared memory on a declared \
+         key: {ref_tags:?}, so the comparison below says nothing about it\n--- reference \
+         ---\n{ref_log}"
+    );
+    assert_eq!(
+        wz_tags, ref_tags,
+        "the two arms of the SAME program put a chunk on a declared key and reached upstream's \
+         z_sub_shm as different samples. wz: {wz_tags:?}; the real libzenohc: {ref_tags:?}.\n--- \
+         wz ---\n{wz_log}\n--- reference ---\n{ref_log}"
+    );
+    assert!(
+        wz_tags.iter().all(|(ke, _)| ke == key),
+        "the key upstream's z_sub_shm resolved from wz's declaration is not the declared \
+         one: {wz_tags:?}"
+    );
+}
+
 /// LEG 4 — upstream's `z_advanced_sub.c` receives the SAME samples on both arms
 /// from a REAL zenoh-pico advanced publisher, and neither is handed `@adv`.
 ///

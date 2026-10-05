@@ -927,7 +927,15 @@ HOST_GATED_CI_TARGETS: dict[str, str] = {
 # of `zenoh_c_shm_and_advanced_on_wz_capi_c.rs`, which declares `api-compat-c wz->pico
 # partial` (+1); and the old leg, which now pins both arms refusing, declares `none` (-1).
 # Measured by `scripts/audit-crossimpl-proof.sh` at this round's tree.
-FOREIGN_ADJUDICATOR_LINKS = 990
+# R3059 -- 990 -> 993, RISING by three, each a new `wz-proves` line in a file the audit
+# already reads: leg 7 of `zenoh_c_shm_and_advanced_on_wz_capi_c.rs` (upstream's `z_pub_shm.c`
+# on wz's ABI reaches upstream's own `z_sub_shm` as shared memory, `api-compat-c wz->zenoh
+# partial`), leg 8 of the same file (the same for a chunk put on a declared keyexpr, same
+# class), and the new `zenoh_c_shm_local_delivery_twice_and_diff.rs` (`api-compat-c
+# zenoh-c->wz partial`, the class its sibling differentials declare). No new class, so no
+# new execution lane is owed: leg 7 and 8 run on C1cc like leg 3b, which declares the same
+# application. Measured by `scripts/audit-crossimpl-proof.sh` at this round's tree.
+FOREIGN_ADJUDICATOR_LINKS = 993
 
 # ── Execution disclosure ────────────────────────────────────────────────────────
 #

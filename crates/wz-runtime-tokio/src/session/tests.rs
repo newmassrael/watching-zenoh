@@ -918,6 +918,250 @@ fn a_session_resolves_an_shm_put_without_a_hand_installed_resolver() {
     );
 }
 
+/// The frame bytes of `push`, as the encoder lays them out, so a test can look for them in
+/// what a session sent.
+#[cfg(all(
+    feature = "session-extshm",
+    feature = "codec-push",
+    feature = "pubsub-put",
+    target_os = "linux"
+))]
+fn encoded(push: &wz_session_core::wire::PushOwned) -> Vec<u8> {
+    push.try_as_borrowed()
+        .expect("owned Push re-borrows")
+        .encode_to_vec()
+}
+
+/// A Put on a DECLARED keyexpr whose payload lives in shared memory goes out as the
+/// descriptor under the declared id, and not as the bytes and not under the literal.
+///
+/// The three legs of an SHM publish are one send path (`send_shm_descriptor`), and the
+/// key is the only thing the aliased one changes. The expected frame is built by the
+/// aliased SHM builder from the descriptor the payload names, and looked for in what the
+/// session sent: a send that fell back to the bytes, or that named the key literally,
+/// carries neither those bytes nor that header.
+#[cfg(all(
+    feature = "session-extshm",
+    feature = "codec-push",
+    feature = "pubsub-put",
+    target_os = "linux"
+))]
+#[test]
+fn publish_shm_aliased_puts_the_descriptor_on_the_wire_under_the_declared_id() {
+    let (session, driver) = build_session();
+    session.actions().set_shm_offer(true);
+    assert!(session.actions().is_shm(), "the fixture negotiated SHM");
+
+    let mut payload = crate::shm_provider::ShmBackedPayload::alloc(11).expect("alloc");
+    payload.write(b"zero-copy!!");
+    let opts = || PublishOptions::put().with_locality(Locality::Remote);
+    let meta = opts().push_metadata();
+
+    session
+        .publish_shm_aliased(7, Some("/kitchen"), "home/temp/kitchen", &payload, opts())
+        .expect("publish");
+
+    assert_eq!(driver.frame_count(), 1, "one Push on the wire");
+    let frame = driver.frame_bytes(0);
+    let carries = |push: &wz_session_core::wire::PushOwned| {
+        let bytes = encoded(push);
+        frame.windows(bytes.len()).any(|w| w == bytes)
+    };
+    let expected = wz_session_core::push_build::build_push_shm_aliased(
+        7,
+        Some("/kitchen"),
+        &payload.descriptor(),
+        &meta,
+    )
+    .expect("build");
+    assert!(
+        carries(&expected),
+        "the frame carries the descriptor under id 7 and the suffix after the declared prefix"
+    );
+    let literal = wz_session_core::push_build::build_push_shm_literal(
+        "home/temp/kitchen",
+        &payload.descriptor(),
+        &meta,
+    )
+    .expect("build");
+    assert!(
+        !carries(&literal),
+        "and does not name the key literally, which is what the control would be"
+    );
+    let inline = wz_session_core::push_build::build_push_aliased_with_meta(
+        7,
+        Some("/kitchen"),
+        b"zero-copy!!",
+        &meta,
+    )
+    .expect("build");
+    assert!(
+        !carries(&inline),
+        "and does not carry the bytes, which is what a copy would send"
+    );
+}
+
+/// The declared id is resolved from the outbound table: an id no declaration registered
+/// sends nothing, and the id a declaration registered sends the descriptor and loops the
+/// bytes back to a same-session subscriber on the RESOLVED key.
+#[cfg(all(
+    feature = "session-extshm",
+    feature = "codec-push",
+    feature = "pubsub-put",
+    feature = "pubsub-allow-loop",
+    target_os = "linux"
+))]
+#[test]
+fn publish_shm_aliased_auto_resolves_the_declared_id_for_the_wire_and_the_loopback() {
+    let (session, driver) = build_session();
+    session.actions().set_shm_offer(true);
+    assert!(session.actions().is_shm(), "the fixture negotiated SHM");
+    /// What a subscriber saw: the key it fired on and the bytes it was handed.
+    type Fired = Vec<(String, Vec<u8>)>;
+    let got: Arc<Mutex<Fired>> = Arc::default();
+    let got_cb = got.clone();
+    let _sub = session.declare_subscriber("home/temp/**", SubscribeOptions::default(), move |s| {
+        got_cb
+            .lock()
+            .unwrap()
+            .push((s.keyexpr().to_string(), s.payload().to_vec()));
+    });
+    let mut payload = crate::shm_provider::ShmBackedPayload::alloc(4).expect("alloc");
+    payload.write(b"loop");
+
+    // The subscriber's own declaration is a frame, so the count is read from here.
+    let baseline = driver.frame_count();
+    let undeclared = session.publish_shm_aliased_auto(9, None, &payload, PublishOptions::put());
+    assert!(
+        matches!(undeclared, Err(PublishAliasError::UnknownMapping(9))),
+        "an id nothing declared is refused: {undeclared:?}"
+    );
+    assert_eq!(
+        driver.frame_count(),
+        baseline,
+        "and nothing was sent for it"
+    );
+    assert!(got.lock().unwrap().is_empty(), "nor looped back");
+
+    session
+        .actions()
+        .send_declare_keyexpr(9, "home/temp")
+        .expect("declare");
+    let declared = driver.frame_count();
+    let delivered = session
+        .publish_shm_aliased_auto(9, Some("/kitchen"), &payload, PublishOptions::put())
+        .expect("publish");
+    assert_eq!(delivered, 1, "one same-session subscriber");
+    assert_eq!(
+        driver.frame_count(),
+        declared + 1,
+        "and one Push on the wire"
+    );
+    assert_eq!(
+        *got.lock().unwrap(),
+        vec![("home/temp/kitchen".to_string(), b"loop".to_vec())],
+        "the loopback fires on the declared prefix plus the suffix, with the bytes"
+    );
+}
+
+/// A subscriber of the PUBLISHING session is handed the chunk, the page it lies on and not
+/// a copy of its bytes, whether or not the session negotiated shared memory: upstream hands
+/// a local subscriber the buffer (MEASURED against the real library), and the local leg is
+/// not the wire's. The owner is unique again once the subscriber lets go, and a key nobody
+/// here listens to fires nothing.
+#[cfg(all(
+    feature = "session-extshm",
+    feature = "codec-push",
+    feature = "pubsub-put",
+    feature = "pubsub-allow-loop",
+    target_os = "linux"
+))]
+#[test]
+fn publish_shm_hands_a_same_session_subscriber_the_chunk_and_only_when_it_listens() {
+    let (session, driver) = build_session();
+    assert!(
+        !session.actions().is_shm(),
+        "no SHM negotiated: the remote leg is inline"
+    );
+    /// What a subscriber saw: whether the payload was the chunk, and its bytes.
+    type Seen = Vec<(bool, Vec<u8>)>;
+    let seen: Arc<Mutex<Seen>> = Arc::default();
+    let seen_cb = seen.clone();
+    let _sub = session.declare_subscriber("home/temp", SubscribeOptions::default(), move |s| {
+        let is_chunk = s
+            .payload_shared()
+            .is_some_and(|bytes| bytes.is_shared_memory());
+        seen_cb
+            .lock()
+            .unwrap()
+            .push((is_chunk, s.payload().to_vec()));
+    });
+    let mut payload = crate::shm_provider::ShmBackedPayload::alloc(5).expect("alloc");
+    payload.write(b"local");
+
+    let delivered = session
+        .publish_shm("home/temp", &payload, PublishOptions::put())
+        .expect("publish");
+    assert_eq!(delivered, 1);
+    assert_eq!(
+        *seen.lock().unwrap(),
+        vec![(true, b"local".to_vec())],
+        "the subscriber was handed the chunk, with its bytes"
+    );
+    assert!(
+        payload.is_unique(),
+        "and gave its reference back when the sample was dropped"
+    );
+    assert_eq!(
+        driver.frame_count(),
+        2,
+        "the declaration and the inline put"
+    );
+
+    // A key nobody here listens to fires nothing, and leaves the owner unique.
+    let delivered = session
+        .publish_shm("home/other", &payload, PublishOptions::put())
+        .expect("publish");
+    assert_eq!(delivered, 0);
+    assert_eq!(seen.lock().unwrap().len(), 1, "the subscriber did not fire");
+    assert!(payload.is_unique());
+}
+
+/// Without negotiated shared memory the aliased SHM publish is the ordinary aliased publish
+/// of the bytes read back out of the segment: the API is always usable.
+#[cfg(all(
+    feature = "session-extshm",
+    feature = "codec-push",
+    feature = "pubsub-put",
+    target_os = "linux"
+))]
+#[test]
+fn publish_shm_aliased_without_negotiated_shm_sends_the_bytes_under_the_declared_id() {
+    let (session, driver) = build_session();
+    assert!(
+        !session.actions().is_shm(),
+        "the fixture negotiated nothing"
+    );
+    let mut payload = crate::shm_provider::ShmBackedPayload::alloc(5).expect("alloc");
+    payload.write(b"bytes");
+    let opts = PublishOptions::put().with_locality(Locality::Remote);
+    let meta = opts.push_metadata();
+
+    session
+        .publish_shm_aliased(7, None, "home/temp", &payload, opts)
+        .expect("publish");
+
+    let frame = driver.frame_bytes(0);
+    let expected = encoded(
+        &wz_session_core::push_build::build_push_aliased_with_meta(7, None, b"bytes", &meta)
+            .expect("build"),
+    );
+    assert!(
+        frame.windows(expected.len()).any(|w| w == expected),
+        "the inline aliased Put, which is what an unnegotiated session owes"
+    );
+}
+
 /// R3040 -- THE STAMP: a session whose Open exchange named handoff counters
 /// acknowledges the shared-memory slices it receives through them, and stops when
 /// a new establishment begins.

@@ -760,6 +760,55 @@ pub fn build_push_shm_literal(
     })
 }
 
+/// transport-shm -- the SHM counterpart of [`build_push_aliased_with_meta`]: a Put on a
+/// DECLARED keyexpr (an id, and optionally a suffix after the declared prefix) whose payload
+/// is the descriptor and whose body chain carries the 0x2 marker.
+///
+/// A payload that lives in shared memory and a key that was declared are independent
+/// choices, and a program that makes both must not be sent the bytes because the literal
+/// builder was the only SHM one: the key half is the aliased builder's, the body half the
+/// literal SHM builder's, and this is where they meet.
+///
+/// Panics if `mapping_id == 0`, as [`build_push_aliased_with_meta`] does: id zero is the
+/// literal sentinel and [`build_push_shm_literal`] is its builder.
+#[cfg(feature = "transport-shm")]
+pub fn build_push_shm_aliased(
+    mapping_id: u64,
+    suffix: Option<&str>,
+    descriptor: &crate::extshm::ShmDescriptor,
+    meta: &PushMetadata,
+) -> Result<PushOwned, CodecError> {
+    assert!(
+        mapping_id != 0,
+        "build_push_shm_aliased requires a non-zero mapping id; \
+         use build_push_shm_literal for id=0",
+    );
+    let outer_exts = build_push_outer_extensions(meta.qos);
+    let z_flag = if outer_exts.is_some() { 0x80u8 } else { 0x00u8 };
+    let suffix_len = suffix.map(|s| s.len() as u64);
+    let suffix_string = suffix.map(crate::wire::wire_string).transpose()?;
+    // The same N flag the aliased Put sets: present exactly when a suffix follows the id.
+    let n_flag = if suffix.is_some() { 0x20u8 } else { 0x00u8 };
+    Ok(PushOwned {
+        header: wire_const::N_MID_PUSH | n_flag | z_flag,
+        keyexpr: WireexprOwned {
+            body: WireexprOwnedVariant::WireexprLocal(WireexprLocalOwned {
+                id: mapping_id,
+                suffix_len,
+                suffix: suffix_string,
+            }),
+        },
+        extensions: outer_exts,
+        body: PushOwnedVariant::CodecZenohMsgPut(build_msg_put_shm(
+            descriptor,
+            meta.timestamp.as_ref(),
+            meta.encoding.as_ref(),
+            meta.source_info.as_ref(),
+            meta.attachment.as_deref(),
+        )?),
+    })
+}
+
 /// R233 — metadata-bearing counterpart of [`build_push_aliased`].
 pub fn build_push_aliased_with_meta(
     mapping_id: u64,
@@ -942,6 +991,69 @@ mod tests {
             crate::extshm::body_has_shm_marker(exts),
             "the Put body carries the ext_shm 0x2 marker"
         );
+    }
+
+    /// transport-shm -- a Put on a DECLARED keyexpr carries the descriptor and the marker
+    /// exactly as the literal one does, and names its key exactly as the inline aliased
+    /// Put does: the id alone, or the id and the suffix after the declared prefix, with
+    /// the N flag present only when a suffix follows. Each half is read against its
+    /// counterpart rather than restated, so a change to either builder moves this test.
+    #[cfg(feature = "transport-shm")]
+    #[test]
+    fn build_push_shm_aliased_names_its_key_like_the_inline_put_and_carries_the_descriptor() {
+        let descriptor = crate::extshm::ShmDescriptor {
+            data_len: 1024,
+            metadata_id: 0x12,
+            metadata_index: 0x34,
+            generation: 7,
+        };
+        let meta = PushMetadata::default();
+        for suffix in [None, Some("/kitchen")] {
+            let shm =
+                build_push_shm_aliased(5, suffix, &descriptor, &meta).expect("build shm aliased");
+            let inline =
+                build_push_aliased_with_meta(5, suffix, b"x", &meta).expect("build inline aliased");
+            assert_eq!(
+                shm.header, inline.header,
+                "the Push header (N flag included) of the key {suffix:?}"
+            );
+            let (shm_key, inline_key) = match (&shm.keyexpr.body, &inline.keyexpr.body) {
+                (
+                    WireexprOwnedVariant::WireexprLocal(a),
+                    WireexprOwnedVariant::WireexprLocal(b),
+                ) => (a, b),
+                _ => panic!("a declared keyexpr is a local wire expression"),
+            };
+            assert_eq!(shm_key.id, 5);
+            assert_eq!(
+                (shm_key.id, shm_key.suffix_len, &shm_key.suffix),
+                (inline_key.id, inline_key.suffix_len, &inline_key.suffix),
+                "the key half is the inline aliased Put's"
+            );
+            let put = match &shm.body {
+                PushOwnedVariant::CodecZenohMsgPut(put) => put,
+                _ => panic!("expected a MsgPut body"),
+            };
+            match crate::put_payload::layout(put) {
+                crate::put_payload::PutPayload::Sliced(slices) => {
+                    assert_eq!(slices.len(), 1);
+                    assert_eq!(
+                        crate::extshm::decode_shm_descriptor(
+                            sce_forge_runtime::codec::SceByteBuf::as_slice(&slices[0].bytes)
+                        ),
+                        Some(descriptor),
+                        "the slice is the descriptor"
+                    );
+                }
+                crate::put_payload::PutPayload::Inline(_) => {
+                    panic!("a Put that carries the SHM marker must use the sliced layout")
+                }
+            }
+            assert!(
+                crate::extshm::body_has_shm_marker(put.extensions.as_deref().unwrap_or(&[])),
+                "the body carries the ext_shm 0x2 marker"
+            );
+        }
     }
 
     #[cfg(all(feature = "codec-push", feature = "pubsub-timestamp"))]

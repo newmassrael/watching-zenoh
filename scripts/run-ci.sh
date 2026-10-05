@@ -6542,7 +6542,12 @@ layer_c1af_cargo_test_shm() {
     # authenticator that cannot open counters still negotiates). They are selected
     # by `extshm` in their module path. The registry's own five acknowledgement tests
     # need the Put arm and the other pub/sub features and are not compiled here.
-    _runci_guarded_test C1af 29 cargo test -p wz-session-core --features session-extshm,codec-push --lib shm --quiet \
+    # R3059 -- 29 -> 30, MEASURED by running this exact command: the builder test for a Put
+    # on a declared keyexpr whose payload is the SHM descriptor
+    # (`push_build::tests::build_push_shm_aliased_names_its_key_like_the_inline_put_and_carries_the_descriptor`),
+    # which has `shm` in its name and sits behind `transport-shm` and `codec-push`, both of
+    # which this leg carries.
+    _runci_guarded_test C1af 30 cargo test -p wz-session-core --features session-extshm,codec-push --lib shm --quiet \
         || return 1
     # R311y894 — the establishment SHM surface WITH THE DISSECTOR ON, which no
     # lane had. `dissect` and `session-extshm` are disjoint feature sets: the
@@ -6589,7 +6594,10 @@ layer_c1af_cargo_test_shm() {
     # guards are measured by `guarded_count_gate.py --range`, which that push did not run.
     # None of this round's own tests are selected here, which the listing also shows:
     # the error-reply test and the builder tests need features this leg does not carry.
-    _runci_guarded_test C1af 40 cargo test -p wz-session-core --features session-extshm,dissect --lib shm --quiet \
+    # R3059 -- 40 -> 41, MEASURED by running this exact command, and for the reason the
+    # R3048 note gives: the aliased-SHM builder test above is selected here too, because
+    # `session-extshm` brings `transport-shm` and `codec-push` with it on this leg as well.
+    _runci_guarded_test C1af 41 cargo test -p wz-session-core --features session-extshm,dissect --lib shm --quiet \
         || return 1
     # Round 2037, open-debt item 330 — THE TRANSPORT-OAM BATCH WALK, which no
     # lane in this file was running.
@@ -6663,7 +6671,10 @@ layer_c1af_cargo_test_shm() {
     # ever be released, a mapped chunk is refused when it is longer than its chunk or not the
     # backend's, and an owner is unique exactly while nothing else holds its chunk; each was
     # reddened by its own mutation.
-    _runci_guarded_test C1af 36 cargo test -p wz-runtime-tokio --features session-extshm,transport-unicast,transport-link-tcp --lib shm_provider --quiet \
+    # R3059 -- 36 -> 37, MEASURED: the view a receiver in this process is handed is the page,
+    # reports itself shared memory, and holds a reference of its own that goes back when it
+    # drops (`a_receiver_view_holds_a_reference_until_it_drops`).
+    _runci_guarded_test C1af 37 cargo test -p wz-runtime-tokio --features session-extshm,transport-unicast,transport-link-tcp --lib shm_provider --quiet \
         || return 1
     # R3056 -- the provider's two new modules, which the filter above does not select:
     # `shm_backend` (the value types an allocation speaks in, 4 tests) and
@@ -19875,12 +19886,26 @@ layer_c1cc_api_compat_c() {
         --test-threads=1 \
         --exact a_providers_allocation_semantics_are_identical_on_wz_and_libzenohc \
         || return 1
+    # R3059 -- a SUBSCRIBER OF THE PUBLISHING SESSION, one C program on both libraries: a
+    # chunk put on a literal key and on a declared key is handed to a local subscriber as a
+    # shared-memory buffer, a plain-bytes put as a raw one. The legs that put a chunk on the
+    # wire see only the remote half of a publish; the local half is a different code path,
+    # and before this round wz handed its own subscriber the bytes where the real library
+    # hands it the buffer. SKIPs on an oracle without the SHM+unstable arm.
+    _runci_guarded_test \
+        "C1cc a_local_subscriber_is_handed_the_same_kind_of_buffer_on_wz_and_libzenohc" 1 \
+        cargo test -p wz-integration-tests \
+        --test zenoh_c_shm_local_delivery_twice_and_diff -- --ignored --quiet \
+        --test-threads=1 \
+        --exact a_local_subscriber_is_handed_the_same_kind_of_buffer_on_wz_and_libzenohc \
+        || return 1
     # R2970 — what a session's links OFFER, read from its config: QoS by
     # default, lowlatency and compression when asked, qos+lowlatency refused at
     # the open, on the dialling and the accepting side alike. Before this round
     # the session offered nothing on either side (`qos=0` where upstream says
-    # `1`). The shared-memory column is a held pin (open-debt item 823). Needs
-    # the unstable arm; SKIPs without it.
+    # `1`). The shared-memory column was a held pin (open-debt item 823) until
+    # R3059, which found it already equal to the real library's and compares it as
+    # it stands. Needs the unstable arm; SKIPs without it.
     _runci_guarded_test \
         "C1cc a_sessions_transport_capabilities_follow_its_config_on_wz_and_libzenohc" 1 \
         cargo test -p wz-integration-tests \
@@ -19935,7 +19960,9 @@ layer_c1cc_api_compat_c() {
         upstream_z_sub_shm_on_wz_capi_c_reports_the_same_buffer_type_on_both_arms \
         upstream_z_sub_shm_on_wz_capi_c_reports_the_same_buffer_type_for_a_shared_memory_publisher \
         upstream_z_get_shm_on_wz_capi_c_runs_on_neither_arm_at_the_pinned_version \
-        a_shm_allocated_query_payload_reaches_a_real_pico_queryable_identically_on_wz_capi_c_and_libzenohc; do
+        a_shm_allocated_query_payload_reaches_a_real_pico_queryable_identically_on_wz_capi_c_and_libzenohc \
+        upstream_z_pub_shm_on_wz_capi_c_reaches_a_real_z_sub_shm_as_shared_memory \
+        a_chunk_put_on_a_declared_keyexpr_reaches_a_real_z_sub_shm_as_shared_memory_on_wz_capi_c; do
         _runci_guarded_test "C1cc $leg" 1 \
             cargo test -p wz-integration-tests \
             --test zenoh_c_shm_and_advanced_on_wz_capi_c -- --ignored --quiet --test-threads=1 \

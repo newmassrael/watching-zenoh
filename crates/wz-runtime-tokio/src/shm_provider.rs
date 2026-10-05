@@ -1065,6 +1065,26 @@ impl ShmBackedPayload {
         }
     }
 
+    /// The bytes as a RECEIVER in this process is handed them: a range of the shared page that
+    /// reports itself shared memory, holding a reference of its own that goes back when the
+    /// last range of it drops.
+    ///
+    /// What a subscriber of the publishing session is owed, since upstream hands a local
+    /// subscriber the buffer and not a copy of it (MEASURED against the real library: a
+    /// same-session subscriber's `z_bytes_as_loaned_shm` succeeds). It is built by the path a
+    /// remote receiver's payload takes, a descriptor sent and a reference resolved, so there
+    /// is one implementation of "a receiver holds a chunk", and this owner stays unique only
+    /// until that reference is given back.
+    ///
+    /// `None` when the descriptor cannot be resolved, in which case the reference taken for
+    /// it has been returned and the caller falls back to the bytes.
+    pub fn receiver_view(&self) -> Option<RxBytes> {
+        let wire = self.wire_reference();
+        let descriptor = wire.descriptor();
+        wire.commit();
+        PosixShmResolver.resolve_shared(&descriptor)
+    }
+
     /// Whether this owner is the chunk's ONLY holder: no descriptor of it is in flight and
     /// no receiver holds one, which the slot's count reads as one. Upstream's `is_unique`
     /// (`commons/zenoh-shm/src/api/buffer/zshmmut.rs` @ `impl TryFrom<&mut zshm> for &mut zshmmut {`),
@@ -1694,6 +1714,38 @@ mod tests {
             shared.as_slice(),
             b"after!!!",
             "the receiver reads the page itself, so the owner's later write shows"
+        );
+    }
+
+    /// The view a receiver in this process is handed is the page, reports itself shared
+    /// memory, and holds a reference of its own: the owner is not unique while the view is
+    /// alive and is again once it drops. A view that gave its reference back early would
+    /// let the owner write a page a subscriber is still reading, and one that never gave
+    /// it back would keep the chunk out of its pool for good.
+    #[test]
+    fn a_receiver_view_holds_a_reference_until_it_drops() {
+        let mut payload = ShmBackedPayload::alloc(8).expect("alloc");
+        payload.write(b"in-place");
+        assert!(payload.is_unique(), "the control: nothing else holds it");
+
+        let view = payload.receiver_view().expect("a view of a live chunk");
+        assert!(view.is_shared_memory(), "the view is the chunk, not a copy");
+        assert_eq!(view.as_slice(), b"in-place");
+        assert!(
+            !payload.is_unique(),
+            "the view is a holder, so the owner may not write"
+        );
+
+        let second = view.clone();
+        drop(view);
+        assert!(
+            !payload.is_unique(),
+            "a clone of the view still holds the reference"
+        );
+        drop(second);
+        assert!(
+            payload.is_unique(),
+            "the last range letting go gave the reference back"
         );
     }
 

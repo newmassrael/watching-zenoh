@@ -213,6 +213,45 @@ pub enum FanoutError {
     ExceedsCapacity,
 }
 
+/// How ONE leg of a publish fan-out ended, which is all [`SharedSession`]'s fan-out needs
+/// to know about a call that is otherwise a bytes publish, an SHM publish or either of
+/// them on a declared key.
+enum Leg {
+    /// The leg ran, and this many subscriber callbacks fired.
+    Delivered(usize),
+    /// The leg did not run for a reason particular to its face (the link was released or
+    /// is reconnecting, or the face was never told an alias): best-effort, so the surviving
+    /// faces still receive the sample, as pico's multi-peer send does.
+    Skipped,
+    /// The leg failed for a reason that is the same on every face, such as a payload or
+    /// keyexpr the bounded codec cannot carry.
+    Refused,
+}
+
+impl Leg {
+    /// A literal-key publish's result, classified.
+    fn of_publish(result: Result<usize, PublishError>) -> Self {
+        match result {
+            Ok(n) => Leg::Delivered(n),
+            Err(PublishError::TransportUnavailable) => Leg::Skipped,
+            Err(_) => Leg::Refused,
+        }
+    }
+
+    /// A declared-key publish's result, classified: an alias this face does not know is as
+    /// per-face as a link that is down (it is reachable without any bug, when a face's
+    /// declare failed mid-teardown).
+    fn of_alias(result: Result<usize, PublishAliasError>) -> Self {
+        match result {
+            Ok(n) => Leg::Delivered(n),
+            Err(PublishAliasError::UnknownMapping(_) | PublishAliasError::TransportUnavailable) => {
+                Leg::Skipped
+            }
+            Err(_) => Leg::Refused,
+        }
+    }
+}
+
 /// How a C declaration's key goes on the WIRE, as distinct from the literal it
 /// matches on locally.
 ///
@@ -2045,34 +2084,89 @@ impl SharedSession {
         payload: &[u8],
         opts: &PublishOptions,
     ) -> Result<usize, FanoutError> {
+        self.fan_out(opts, |session, leg| {
+            Leg::of_publish(session.publish(keyexpr, payload, leg))
+        })
+    }
+
+    /// [`Self::publish_all`] for a payload that lives in SHARED MEMORY: each face that
+    /// negotiated it is sent the chunk's descriptor and each face that did not is sent the
+    /// bytes read back out of the chunk, which is `Session::publish_shm`'s contract per
+    /// face. The local leg is the bytes, once.
+    ///
+    /// The fan-out, the one local leg and the error classification are
+    /// [`Self::fan_out`]'s, so this and the byte publish cannot disagree about any of them;
+    /// what differs is the call each leg makes.
+    #[cfg(feature = "transport-shm")]
+    pub fn publish_shm_all(
+        &self,
+        keyexpr: &str,
+        payload: &wz_runtime_tokio::shm_provider::ShmBackedPayload,
+        opts: &PublishOptions,
+    ) -> Result<usize, FanoutError> {
+        self.fan_out(opts, |session, leg| {
+            Leg::of_publish(session.publish_shm(keyexpr, payload, leg))
+        })
+    }
+
+    /// [`Self::publish_aliased_all`] for a payload that lives in shared memory: the key is
+    /// named on the wire by the declared id, and the payload is the descriptor where a face
+    /// negotiated shared memory.
+    #[cfg(feature = "transport-shm")]
+    pub fn publish_shm_aliased_all(
+        &self,
+        mapping_id: u64,
+        suffix: Option<&str>,
+        payload: &wz_runtime_tokio::shm_provider::ShmBackedPayload,
+        opts: &PublishOptions,
+    ) -> Result<usize, FanoutError> {
+        self.fan_out(opts, |session, leg| {
+            Leg::of_alias(session.publish_shm_aliased_auto(mapping_id, suffix, payload, leg))
+        })
+    }
+
+    /// The fan-out every publish shares: the wire leg to each face, then the local leg
+    /// once, with `send` making the one call a leg is.
+    ///
+    /// ## The classification is the part that must not drift
+    ///
+    /// A face that fails TRANSIENTLY (link released, reconnecting, an alias it was never
+    /// told) is skipped and the surviving faces still receive the sample, because pico's
+    /// multi-peer send discards each peer's result; a DETERMINISTIC failure, one that would
+    /// fail identically on every face, is surfaced. [`Leg`] carries that decision out of
+    /// the call, and the two constructors name which errors are which.
+    ///
+    /// ## The local leg is issued ONCE, with the plane's own session
+    ///
+    /// R311y555 -- WAKE THE DRAIN. Staging a fire does not make a drive loop iterate;
+    /// without the notification the delivery rides the next inbound message or the keepalive
+    /// tick, MEASURED at 3.334 s.
+    fn fan_out<F>(&self, opts: &PublishOptions, send: F) -> Result<usize, FanoutError>
+    where
+        F: Fn(&TokioSession, PublishOptions) -> Leg,
+    {
         let sessions = self.face_sessions_with_wake();
         let mut delivered = 0usize;
         if opts.allowed_destination.allows_remote() {
             let remote = opts.clone().with_locality(Locality::Remote);
             for (session, _) in &sessions {
-                match session.publish(keyexpr, payload, remote.clone()) {
-                    Ok(n) => delivered += n,
-                    // Per-face transient failure (link released / reconnecting):
-                    // best-effort, keep delivering to the surviving faces.
-                    Err(PublishError::TransportUnavailable) => {}
-                    // Deterministic, face-independent: fails on every face.
-                    Err(_) => return Err(FanoutError::ExceedsCapacity),
+                match send(session, remote.clone()) {
+                    Leg::Delivered(n) => delivered += n,
+                    Leg::Skipped => {}
+                    Leg::Refused => return Err(FanoutError::ExceedsCapacity),
                 }
             }
         }
         if opts.allowed_destination.allows_local() {
             let local = opts.clone().with_locality(Locality::SessionLocal);
-            match self.local.publish(keyexpr, payload, local) {
-                Ok(n) => delivered += n,
-                // The plane's link is inert, so this arm is unreachable through
-                // it; kept because the local leg's error handling must not be
-                // more brittle than the wire leg's if the plane ever changes.
-                Err(PublishError::TransportUnavailable) => {}
-                Err(_) => return Err(FanoutError::ExceedsCapacity),
+            match send(&self.local, local) {
+                Leg::Delivered(n) => delivered += n,
+                // The plane's link is inert, so the skipped arm is unreachable through
+                // it; kept because the local leg's error handling must not be more
+                // brittle than the wire leg's if the plane ever changes.
+                Leg::Skipped => {}
+                Leg::Refused => return Err(FanoutError::ExceedsCapacity),
             }
-            // R311y555 — WAKE THE DRAIN. Staging a fire does not make a drive
-            // loop iterate; without this the delivery rides the next inbound
-            // message or the keepalive tick, MEASURED at 3.334 s.
             self.local_wake.notify_one();
         }
         Ok(delivered)
@@ -2130,38 +2224,13 @@ impl SharedSession {
         // took `send_declare_keyexpr` in [`Self::declare_keyexpr`] alongside
         // every face, so it always resolves an alias the caller could legally
         // publish on, and it resolves it whether or not any face does.
-        let sessions = self.face_sessions_with_wake();
-        let mut delivered = 0usize;
-        if opts.allowed_destination.allows_remote() {
-            let remote = opts.clone().with_locality(Locality::Remote);
-            for (session, _) in &sessions {
-                match session.publish_aliased_auto(mapping_id, suffix, payload, remote.clone()) {
-                    Ok(n) => delivered += n,
-                    Err(PublishAliasError::UnknownMapping(_)) => {}
-                    Err(PublishAliasError::TransportUnavailable) => {}
-                    Err(_) => return Err(FanoutError::ExceedsCapacity),
-                }
-            }
-        }
-        if opts.allowed_destination.allows_local() {
-            let local = opts.clone().with_locality(Locality::SessionLocal);
-            match self
-                .local
-                .publish_aliased_auto(mapping_id, suffix, payload, local)
-            {
-                Ok(n) => delivered += n,
-                // An id the plane does not know is an id no face was told about
-                // either (`declare_keyexpr` announces to both, and
-                // `undeclare_keyexpr` retracts from both), so this is the
-                // caller publishing on an alias it never declared.
-                Err(PublishAliasError::UnknownMapping(_)) => {}
-                Err(PublishAliasError::TransportUnavailable) => {}
-                Err(_) => return Err(FanoutError::ExceedsCapacity),
-            }
-            // R311y555 — see `publish_all`.
-            self.local_wake.notify_one();
-        }
-        Ok(delivered)
+        // An id the local plane does not know is an id no face was told about either
+        // (`declare_keyexpr` announces to both, and `undeclare_keyexpr` retracts from
+        // both), so an unknown mapping is the caller publishing on an alias it never
+        // declared, and is skipped on every leg (see [`Leg::of_alias`]).
+        self.fan_out(opts, |session, leg| {
+            Leg::of_alias(session.publish_aliased_auto(mapping_id, suffix, payload, leg))
+        })
     }
 
     /// Record a C keyexpr declaration in the SSOT and announce it on every live

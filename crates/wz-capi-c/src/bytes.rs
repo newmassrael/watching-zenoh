@@ -59,6 +59,15 @@ pub(crate) struct BytesState {
 pub(crate) enum Payload {
     Owned(Vec<u8>),
     Shared(wz_runtime_tokio::RxBytes),
+    /// A chunk of a provider of THIS process, kept as the chunk (R3059): the payload a
+    /// program builds from a buffer with `z_bytes_from_shm`. It reads as its bytes like
+    /// any other, and a put of it sends the chunk's descriptor to a peer that negotiated
+    /// shared memory and the bytes to one that did not, which a copy cannot do.
+    #[cfg(all(
+        feature = "zenoh-c-shared-memory",
+        not(feature = "zenoh-c-no-unstable-api")
+    ))]
+    Issued(std::sync::Arc<wz_runtime_tokio::shm_provider::ShmBackedPayload>),
 }
 
 impl core::ops::Deref for Payload {
@@ -68,6 +77,11 @@ impl core::ops::Deref for Payload {
         match self {
             Payload::Owned(bytes) => bytes,
             Payload::Shared(bytes) => bytes.as_slice(),
+            #[cfg(all(
+                feature = "zenoh-c-shared-memory",
+                not(feature = "zenoh-c-no-unstable-api")
+            ))]
+            Payload::Issued(chunk) => chunk.bytes(),
         }
     }
 }
@@ -84,19 +98,11 @@ impl Payload {
         match self {
             Payload::Owned(bytes) => bytes,
             Payload::Shared(bytes) => bytes.into_vec(),
-        }
-    }
-
-    /// The shareable bytes, when these are not a buffer of their own. Asked only by
-    /// the shared-memory buffer plane, which a build without that axis does not have.
-    #[cfg(all(
-        feature = "zenoh-c-shared-memory",
-        not(feature = "zenoh-c-no-unstable-api")
-    ))]
-    pub(crate) fn shared(&self) -> Option<&wz_runtime_tokio::RxBytes> {
-        match self {
-            Payload::Owned(_) => None,
-            Payload::Shared(bytes) => Some(bytes),
+            #[cfg(all(
+                feature = "zenoh-c-shared-memory",
+                not(feature = "zenoh-c-no-unstable-api")
+            ))]
+            Payload::Issued(chunk) => chunk.bytes().to_vec(),
         }
     }
 }
@@ -208,6 +214,81 @@ pub(crate) unsafe fn take_payload(moved: *mut z_moved_bytes_t) -> Option<Vec<u8>
     let state = unsafe { Box::from_raw(handle as *mut BytesState) };
     unsafe { (*moved)._this = z_owned_bytes_t::null_value() };
     Some(state.payload.into_vec())
+}
+
+/// A payload on its way out: the bytes to send, or a chunk of shared memory whose
+/// descriptor a peer that negotiated it is sent instead (R3059).
+///
+/// Only the two put entry points take one, because only they have a send path that can
+/// carry a descriptor; every other consumer of a payload calls [`take_payload`] and gets
+/// the bytes whatever the payload was built from.
+pub(crate) enum Outbound {
+    Bytes(Vec<u8>),
+    #[cfg(all(
+        feature = "zenoh-c-shared-memory",
+        not(feature = "zenoh-c-no-unstable-api")
+    ))]
+    Chunk(std::sync::Arc<wz_runtime_tokio::shm_provider::ShmBackedPayload>),
+}
+
+/// Take the payload out of a MOVED bytes for a put, leaving a gravestone, keeping a chunk
+/// of shared memory a chunk.
+///
+/// # Safety
+/// `moved` must be null or a valid moved bytes whose handle is live.
+pub(crate) unsafe fn take_outbound(moved: *mut z_moved_bytes_t) -> Option<Outbound> {
+    if moved.is_null() {
+        return None;
+    }
+    // SAFETY: the caller's contract.
+    let handle = unsafe { (*moved)._this.handle };
+    if handle.is_null() {
+        return None;
+    }
+    // SAFETY: a live `Box<BytesState>` this crate leaked; reclaimed here.
+    let state = unsafe { Box::from_raw(handle as *mut BytesState) };
+    unsafe { (*moved)._this = z_owned_bytes_t::null_value() };
+    match state.payload {
+        #[cfg(all(
+            feature = "zenoh-c-shared-memory",
+            not(feature = "zenoh-c-no-unstable-api")
+        ))]
+        Payload::Issued(chunk) => Some(Outbound::Chunk(chunk)),
+        other => Some(Outbound::Bytes(other.into_vec())),
+    }
+}
+
+/// Publish `payload` on `keyexpr` over every face: under the declared id when the key was
+/// declared (`mapping`), literally otherwise, and as the chunk's descriptor where the
+/// payload is a chunk and a face negotiated shared memory.
+///
+/// The one place the two put entry points decide how a payload goes out, so a declared key
+/// and a payload in shared memory are both honoured wherever they meet.
+pub(crate) fn publish_outbound(
+    shared: &wz_capi_core::faces::SharedSession,
+    keyexpr: &str,
+    mapping: Option<u64>,
+    payload: &Outbound,
+    opts: &wz_runtime_tokio::session::PublishOptions,
+) -> Result<usize, wz_capi_core::faces::FanoutError> {
+    match (payload, mapping) {
+        (Outbound::Bytes(bytes), Some(mapping)) => {
+            shared.publish_aliased_all(mapping, None, bytes, opts)
+        }
+        (Outbound::Bytes(bytes), None) => shared.publish_all(keyexpr, bytes, opts),
+        #[cfg(all(
+            feature = "zenoh-c-shared-memory",
+            not(feature = "zenoh-c-no-unstable-api")
+        ))]
+        (Outbound::Chunk(chunk), Some(mapping)) => {
+            shared.publish_shm_aliased_all(mapping, None, chunk, opts)
+        }
+        #[cfg(all(
+            feature = "zenoh-c-shared-memory",
+            not(feature = "zenoh-c-no-unstable-api")
+        ))]
+        (Outbound::Chunk(chunk), None) => shared.publish_shm_all(keyexpr, chunk, opts),
+    }
 }
 
 /// Build a payload from a NUL-terminated string (zenoh-c

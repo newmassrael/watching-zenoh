@@ -682,7 +682,7 @@ pub unsafe extern "C" fn z_publisher_put(
         // owned fields go the same way, and for the same reason, which is why
         // `apply_publisher_put_options` runs before the null check below.
         // SAFETY: the caller's contract.
-        let payload = unsafe { take_payload(payload) };
+        let payload = unsafe { crate::bytes::take_outbound(payload) };
         // SAFETY: the caller's contract for the options struct.
         let overrides = unsafe { PutOverrides::take(options) };
         // SAFETY: the caller's contract.
@@ -692,14 +692,15 @@ pub unsafe extern "C" fn z_publisher_put(
         // The publisher's declare-time bundle is the base; the per-put options
         // taken above override it field by field.
         let publish = overrides.apply(state.base.clone());
-        let sent = match state.keyexpr.mapping {
-            Some(mapping) => state
-                .shared
-                .publish_aliased_all(mapping, None, &payload, &publish),
-            None => state
-                .shared
-                .publish_all(&state.keyexpr.keyexpr, &payload, &publish),
-        };
+        // A payload that is a chunk of shared memory goes out as its descriptor on
+        // either key (R3059).
+        let sent = crate::bytes::publish_outbound(
+            &state.shared,
+            &state.keyexpr.keyexpr,
+            state.keyexpr.mapping,
+            &payload,
+            &publish,
+        );
         match sent {
             Ok(_) => Z_OK,
             Err(_) => Z_EINVAL,
