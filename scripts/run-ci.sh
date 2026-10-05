@@ -16891,7 +16891,9 @@ layer_z_zenohd_interop() {
     # direction, a wz getter sending the value of its query through shared memory to
     # upstream's `z_queryable_shm`, read from upstream's side (the buffer type it
     # printed) and from wz's chunks (the owner's single reference after the reply).
-    _runci_guarded_test Z 4 cargo test -p wz-integration-tests \
+    # R3049 -- 4 -> 6, MEASURED: the same leg through a declared querier's `get_shm` and
+    # through a querier declared on a keyexpr mapping, whose Query names its key by id.
+    _runci_guarded_test Z 6 cargo test -p wz-integration-tests \
         --test wz_shm_query_reply_zenohd_interop -- --ignored --quiet --test-threads=1 || return 1
     # Restore the lane's OWN demo build: the `session-extshm` build above wrote over
     # the same `--bin` path (R311y269 — cargo uplifts every feature variant of one

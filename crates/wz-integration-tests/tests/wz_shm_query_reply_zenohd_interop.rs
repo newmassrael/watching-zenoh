@@ -89,14 +89,27 @@ const GET_PAYLOAD: &str = "Get from Rust SHM!";
 /// that never gives a chunk back cannot reach.
 const POOL_TURNOVER: usize = 11;
 
-/// What the wz getter sends as the VALUE of its query.
+/// What the wz getter sends as the VALUE of its query, and through which call.
 #[derive(Clone, Copy)]
 enum GetterValue {
     /// No value: the query this file has always sent.
     None,
-    /// This text, in a buffer of the wz getter's own shared-memory provider.
+    /// This text, in a buffer of the wz getter's own shared-memory provider, through
+    /// `Session::query_shm`.
     Shm(&'static str),
+    /// The same, through a declared querier's `get_shm`.
+    QuerierShm(&'static str),
+    /// The same, through a querier declared on a keyexpr MAPPING: the Query carries
+    /// the mapping's id and not the expression, which the queryable resolves through
+    /// the declaration it was sent first.
+    AliasedQuerierShm(&'static str),
 }
+
+/// The id the aliased leg declares its keyexpr under.
+const QUERY_MAPPING_ID: u64 = 7;
+
+/// The key `z_queryable_shm` declares its queryable on.
+const QUERYABLE_KEY: &str = "demo/example/zenoh-rs-queryable";
 
 /// What the wz getter sends through shared memory in the leg that asks for it.
 const WZ_QUERY_VALUE: &str = "Query from wz through SHM";
@@ -123,14 +136,27 @@ async fn ask(
     let on_reply = move |reply: &dyn wz_session_core::reply_sink::ReplyView| {
         let _ = tx.send(reply.payload().to_vec());
     };
-    let key = "demo/example/zenoh-rs-queryable";
+    let key = QUERYABLE_KEY;
     let mut buffer: Option<ShmBackedPayload> = None;
+    let options = QueryOptions::default();
     match value {
-        GetterValue::None => session.query(key, QueryOptions::default(), on_reply, |_| {}),
-        GetterValue::Shm(text) => {
+        GetterValue::None => session.query(key, options, on_reply, |_| {}),
+        GetterValue::Shm(text)
+        | GetterValue::QuerierShm(text)
+        | GetterValue::AliasedQuerierShm(text) => {
             let mut held = ShmBackedPayload::alloc(text.len()).expect("alloc a value buffer");
             held.write(text.as_bytes());
-            let sent = session.query_shm(key, QueryOptions::default(), &held, on_reply, |_| {});
+            let sent = match value {
+                GetterValue::QuerierShm(_) => {
+                    session
+                        .declare_querier(key, options)
+                        .get_shm(&held, on_reply, |_| {})
+                }
+                GetterValue::AliasedQuerierShm(_) => session
+                    .declare_querier_aliased(QUERY_MAPPING_ID, None, options)
+                    .get_shm(&held, on_reply, |_| {}),
+                _ => session.query_shm(key, options, &held, on_reply, |_| {}),
+            };
             buffer = Some(held);
             sent
         }
@@ -302,6 +328,15 @@ async fn wz_getter_against_shm_queryable(value: GetterValue) -> Option<GetterRun
         },
     );
 
+    // The aliased leg's queries name their key by id, so the queryable is told the id
+    // first, on the same reliable stream and before any query that uses it.
+    if matches!(value, GetterValue::AliasedQuerierShm(_)) {
+        opened
+            .actions
+            .send_declare_keyexpr(QUERY_MAPPING_ID, QUERYABLE_KEY)
+            .expect("declare the keyexpr mapping the aliased querier names its key by");
+    }
+
     let replies: Arc<StdMutex<Vec<Vec<u8>>>> = Arc::default();
     let states: ValueStates = Arc::default();
     let scenario = async {
@@ -380,6 +415,42 @@ async fn zenohd_shm_queryable_reads_a_wz_getters_query_value_through_shared_memo
     let Some(run) = wz_getter_against_shm_queryable(GetterValue::Shm(WZ_QUERY_VALUE)).await else {
         return;
     };
+    assert_value_reached_the_queryable_through_shared_memory(&run);
+}
+
+/// The same leg through a declared querier's `get_shm`: a getter that holds its key
+/// and options and asks again is the shape upstream's `Querier` has, and it reaches
+/// the wire through a call of its own.
+// wz-proves: transport-shm wz->zenoh
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "binary-dep e2e (ZENOHD_SHM=1 build-zenohd.sh: z_queryable_shm); Layer Z runs via --ignored"]
+async fn zenohd_shm_queryable_reads_a_wz_queriers_query_value_through_shared_memory() {
+    let Some(run) = wz_getter_against_shm_queryable(GetterValue::QuerierShm(WZ_QUERY_VALUE)).await
+    else {
+        return;
+    };
+    assert_value_reached_the_queryable_through_shared_memory(&run);
+}
+
+/// The same leg through a querier declared on a keyexpr MAPPING, whose Query names the
+/// key by id and not by expression. The value's marker and slice sit in the same chain
+/// as the id, and the queryable must resolve the id to answer a query it read.
+// wz-proves: transport-shm wz->zenoh
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "binary-dep e2e (ZENOHD_SHM=1 build-zenohd.sh: z_queryable_shm); Layer Z runs via --ignored"]
+async fn zenohd_shm_queryable_reads_an_aliased_wz_queriers_query_value_through_shared_memory() {
+    let Some(run) =
+        wz_getter_against_shm_queryable(GetterValue::AliasedQuerierShm(WZ_QUERY_VALUE)).await
+    else {
+        return;
+    };
+    assert_value_reached_the_queryable_through_shared_memory(&run);
+}
+
+/// What every leg above asserts of its run: the queryable answered every query, it
+/// printed the value from a mapped buffer each time and from copied bytes never, and
+/// every chunk wz handed over came back to the owner's single reference.
+fn assert_value_reached_the_queryable_through_shared_memory(run: &GetterRun) {
     assert!(
         run.negotiated,
         "wz and the queryable must have negotiated SHM, or this leg proves nothing:\n{}",
