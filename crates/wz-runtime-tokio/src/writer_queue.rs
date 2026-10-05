@@ -881,6 +881,41 @@ mod tests {
         );
     }
 
+    /// R3052 -- THE ORDER A HANDSHAKE MESSAGE'S LANE IS CHOSEN FOR. The `Control`
+    /// lane leaves before any other lane however late its frame was queued, and a
+    /// lane is FIFO. So an OpenAck queued on `Control` leaves before a Declare
+    /// queued on `Control` after it, and before everything else; the same OpenAck on
+    /// `Data` leaves AFTER a Declare queued on `Control` behind it, which is the
+    /// overtaking a C subscriber replaying its declarations lost one connection in
+    /// twenty to. The second half is the control: it shows the lanes DO reorder, so
+    /// the first half is the lane choice doing its work and not a queue that never
+    /// reorders anything.
+    #[test]
+    fn the_control_lane_leaves_first_and_a_lane_is_fifo() {
+        let drain = |lane_of_the_ack: Priority| {
+            let (tx, mut rx) = outbound_channel();
+            tx.send(lane_of_the_ack, b"OpenAck".to_vec())
+                .expect("queue the OpenAck");
+            tx.send(Priority::Control, b"Declare".to_vec())
+                .expect("queue the Declare");
+            let mut order = Vec::new();
+            while let Some(frame) = rx.try_recv() {
+                order.push(String::from_utf8(frame).expect("ascii"));
+            }
+            order
+        };
+        assert_eq!(
+            drain(Priority::Control),
+            ["OpenAck", "Declare"],
+            "one lane is FIFO, and the OpenAck was queued first"
+        );
+        assert_eq!(
+            drain(Priority::Data),
+            ["Declare", "OpenAck"],
+            "a lower lane leaves after a Control frame queued behind it"
+        );
+    }
+
     /// The seal ends the writer even though a sender clone is still ALIVE.
     ///
     /// This is the accept-path shape in miniature: the routing registry holds a

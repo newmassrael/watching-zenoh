@@ -4135,6 +4135,48 @@ mod link_priority_tests {
         assert_eq!(driver.frame_priority(0), Priority::DEFAULT);
     }
 
+    /// R3052 -- THE HANDSHAKE RIDES THE CONTROL LANE. The link's writer drains its
+    /// lanes in strict ascending priority, so a message handed over at a lane that
+    /// something else can outrank can be overtaken by it. The acceptor's OpenAck is
+    /// the message that matters: once it is queued the session is open on this side,
+    /// and the first thing a session sends is a Declare, which is handed over on the
+    /// Control lane. An OpenAck at DEFAULT behind a Declare at Control is a Frame
+    /// where the dialler is waiting for an OpenAck, and upstream's opener ends the
+    /// transport on it (`Received an invalid message in response to an OpenSyn`,
+    /// `io/zenoh-transport/src/unicast/establishment/open.rs`), which is how a C
+    /// subscriber with a declaration to replay lost about one connection in twenty
+    /// to a shared-memory publisher. Nothing outranks Control, and one lane is FIFO,
+    /// so the handshake message queued first leaves first.
+    #[cfg(all(
+        feature = "codec-init-body",
+        feature = "codec-open-body",
+        feature = "session-unicast-accept"
+    ))]
+    #[test]
+    fn every_handshake_message_reaches_the_link_on_the_control_lane() {
+        use crate::runtime_impl::{TokioRuntime, TokioTime};
+        use crate::session_fsm_unicast::SessionFsmUnicastActions;
+        use crate::session_glue::SessionActionsBinding;
+
+        let (actions, driver) = crate::test_fixtures::recording_actions();
+        let mut binding = SessionActionsBinding::<TokioRuntime, TokioTime>::new(actions);
+        binding.send_init_syn();
+        binding.send_open_syn();
+        binding.send_init_ack_with_cookie();
+        binding.send_open_ack();
+        assert_eq!(driver.frame_count(), 4, "one frame per handshake message");
+        for (index, name) in ["InitSyn", "OpenSyn", "InitAck", "OpenAck"]
+            .into_iter()
+            .enumerate()
+        {
+            assert_eq!(
+                driver.frame_priority(index),
+                Priority::Control,
+                "{name} left on a lane that a Declare on the Control lane can overtake"
+            );
+        }
+    }
+
     /// A link write that STALLS on one band, and takes every other band at once.
     struct StallOneBand {
         stall: Priority,

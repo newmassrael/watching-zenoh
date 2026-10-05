@@ -394,6 +394,26 @@ const TX_CONDUITS: usize = Priority::NUM;
 #[cfg(not(feature = "transport-qos"))]
 const TX_CONDUITS: usize = 1;
 
+/// R3052 -- the lane the four handshake messages (InitSyn, InitAck, OpenSyn,
+/// OpenAck) are handed to the link on.
+///
+/// The link's writer drains one FIFO lane per priority in strict ascending order, so
+/// a message handed over on a lane that something else can outrank can be
+/// overtaken. The acceptor's OpenAck is the one that was: once it is queued the
+/// session is open on that side, a face replays its declarations at once, and a
+/// Declare is handed over on `Control`, ahead of an OpenAck on `DEFAULT`. The dialler
+/// then read a Frame where it waited for an OpenAck and ended the transport
+/// (`Received an invalid message in response to an OpenSyn`, upstream's
+/// `io/zenoh-transport/src/unicast/establishment/open.rs`). Establishment is not
+/// session traffic upstream either: it is written to the link directly, before any
+/// pipeline exists. Nothing outranks `Control` and a lane is FIFO, so the handshake
+/// message queued first leaves first.
+#[cfg(all(
+    any(feature = "codec-init-body", feature = "codec-open-body"),
+    any(feature = "session-unicast-open", feature = "session-unicast-accept")
+))]
+const HANDSHAKE_LANE: Priority = Priority::Control;
+
 /// R2923 / R2924 — the outbound queue configuration and its upstream
 /// defaults live with the per-session parameters that carry them
 /// ([`crate::session_init_params::TxQueueConf`]).
@@ -10074,7 +10094,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionFsmUnicastActionsTrait
                     ExtChainRole::InitSyn,
                 )
                 .expect("InitSyn zid/cookie are protocol-bounded (zid 1..=16, no cookie on Syn)");
-            a.send_wire(&bytes, Reliability::Reliable, Priority::DEFAULT);
+            a.send_wire(&bytes, Reliability::Reliable, HANDSHAKE_LANE);
         }
     }
 
@@ -10114,7 +10134,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionFsmUnicastActionsTrait
                     ExtChainRole::OpenSyn,
                 )
                 .expect("OpenSyn cookie echo is decode-bounded (peer InitAck cookie <= codec cap)");
-            a.send_wire(&bytes, Reliability::Reliable, Priority::DEFAULT);
+            a.send_wire(&bytes, Reliability::Reliable, HANDSHAKE_LANE);
             // R2782 — the one OpenAck this OpenSyn asks for is now awaited.
             R::with_mutex_mut(&a.awaiting_open_ack, |s| *s = true);
         }
@@ -10274,7 +10294,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionFsmUnicastActionsTrait
                     "the widest accept cookie is held under the codec's 128 cap by \
                      accept_cookie::the_widest_cookie_fits_the_generated_field",
                 );
-            a.send_wire(&bytes, Reliability::Reliable, Priority::DEFAULT);
+            a.send_wire(&bytes, Reliability::Reliable, HANDSHAKE_LANE);
             // R2774 — LET GO of what the cookie now carries. Upstream's
             // acceptor keeps nothing negotiated between InitAck and OpenSyn:
             // `send_init_ack` takes its `State` by value and `recv_open_syn`
@@ -10331,7 +10351,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionFsmUnicastActionsTrait
                     ExtChainRole::OpenAck,
                 )
                 .expect("OpenAck omits the cookie field (A=1); only zid 1..=16 is bounded-copied");
-            a.send_wire(&bytes, Reliability::Reliable, Priority::DEFAULT);
+            a.send_wire(&bytes, Reliability::Reliable, HANDSHAKE_LANE);
         }
     }
 
