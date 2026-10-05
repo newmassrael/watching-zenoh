@@ -3105,7 +3105,9 @@ pub struct DissectionDrops {
     pub stream_bytes: usize,
     /// Skipped-packet records discarded to stay inside `skipped_packets`.
     pub skipped: usize,
-    /// Flows evicted to stay inside `max_flows_per_table`.
+    /// Flows evicted to stay inside `max_flows_per_table`, from EITHER table:
+    /// the stream table and the datagram table each have the bound and this is
+    /// the one number over both. [`FlowsSeen`] has them apart.
     pub flows: usize,
     /// R311y651 (§4.4) — scouting datagrams discarded to stay inside
     /// `frames_per_flow`.
