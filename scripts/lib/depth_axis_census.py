@@ -2471,7 +2471,15 @@ PIN_NO_SYMBOL = 0
 # provider's behaviours, which cites one (the blocking policy's test). Both atoms are still
 # PARTIAL. READ off the census's own FAIL line, `wz citations: 64 against a pin of 61`;
 # `reached` and `ambiguous` hold at 3 and 2.
-PIN_WZ_CITATIONS = 64
+#
+# R3059 -- 64 -> 70, two atoms. `api-compat-c`'s reason gains the UPDATE that the sending half
+# of the two puts is built, which cites four wz anchors (the outbound payload taker, the
+# model's SHM publish, and the two legs that witness it against upstream's own subscriber
+# and against the real library's local delivery), and `transport-shm`'s gains the UPDATE
+# for the declared-key publish and the local leg, which cites two (the aliased publish and
+# the receiver's view). Both atoms are still PARTIAL. READ off the census's own FAIL line,
+# `wz citations: 70 against a pin of 64`; `reached` and `ambiguous` hold at 3 and 2.
+PIN_WZ_CITATIONS = 70
 # R2626 — 44 -> 42, and this one is worth a sentence because it HELD through
 # every earlier retirement in this run (R2612, R2622). `time-hlc`'s reason is the
 # first retiree carrying AMBIGUOUS citations of its own: its oldest clauses cite

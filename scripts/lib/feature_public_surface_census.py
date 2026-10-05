@@ -271,6 +271,20 @@ OFF_AXIS: dict[str, tuple[str, frozenset[str]]] = {
             }
         ),
     ),
+    # R3059 -- `transport-shm` gates `SharedSession::publish_shm_all` and
+    # `publish_shm_aliased_all`, the model's shared-memory publish, which exists only where
+    # the runtime's own `transport-shm` does. The row is PROSE and sits in `PROSE_ONLY`
+    # while it is: the claim is about who consumes the crate, not about what the feature
+    # gates, and `wz-capi-core`'s other non-default features gate no public item.
+    "wz-capi-core": (
+        "the ABI-neutral session model: a workspace-internal rlib whose only "
+        "consumers are the two C ABI crates, and the one of them that turns this "
+        "feature on does it from its own shared-memory arm (`wz-capi-c`'s "
+        "`zenoh-c-shared-memory`). What a C program can reach is that crate's "
+        "symbol set, graded against upstream's own library, and the gated methods "
+        "are exercised by that arm's legs against upstream's own subscriber",
+        frozenset({"transport-shm"}),
+    ),
     "wz-capi-c": (
         "a C ABI crate: its public contract is the SYMBOL SET a C program "
         "links against, not a Rust path a consumer names, and that contract "
@@ -774,7 +788,14 @@ def axis_reachable_crate(pkg: str) -> str | None:
 # row added tomorrow lands while its reason is still prose, and the
 # both/neither rule below is what forces that landing to be deliberate. An
 # empty residue is not the same as no residue mechanism.
-PROSE_ONLY: frozenset[str] = frozenset()
+#
+# R3059 -- `wz-capi-core` lands here, which is the use this set was kept for: its row's
+# reason is a claim about who consumes the crate (the two C ABI crates and nothing else,
+# MEASURED in the dependency graph this round), and no predicate above holds a row to that.
+# The set is no longer empty for exactly one row, and retiring it is a predicate for
+# "every workspace consumer of this package is a package this file already holds to
+# `ABI_CONTRACT`", which `wz-capi-pico` does not yet have a row for.
+PROSE_ONLY: frozenset[str] = frozenset({"wz-capi-core"})
 
 
 class Dep(typing.NamedTuple):
