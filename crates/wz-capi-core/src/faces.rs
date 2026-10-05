@@ -2092,11 +2092,12 @@ impl SharedSession {
     /// [`Self::publish_all`] for a payload that lives in SHARED MEMORY: each face that
     /// negotiated it is sent the chunk's descriptor and each face that did not is sent the
     /// bytes read back out of the chunk, which is `Session::publish_shm`'s contract per
-    /// face. The local leg is the bytes, once.
+    /// face. The local leg runs once, and hands a subscriber of this session the chunk
+    /// itself rather than a copy of its bytes.
     ///
-    /// The fan-out, the one local leg and the error classification are
-    /// [`Self::fan_out`]'s, so this and the byte publish cannot disagree about any of them;
-    /// what differs is the call each leg makes.
+    /// The fan-out, the one local leg and the error classification are the private
+    /// fan-out's, shared with the byte publish, so the two cannot disagree about any of
+    /// them; what differs is the call each leg makes.
     #[cfg(feature = "transport-shm")]
     pub fn publish_shm_all(
         &self,
