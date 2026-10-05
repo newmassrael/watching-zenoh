@@ -16904,6 +16904,14 @@ layer_z_zenohd_interop() {
     # through a querier declared on a keyexpr mapping, whose Query names its key by id.
     _runci_guarded_test Z 6 cargo test -p wz-integration-tests \
         --test wz_shm_query_reply_zenohd_interop -- --ignored --quiet --test-threads=1 || return 1
+    # R3051 -- the ROUTER HOP of the same oracle: every leg above dials the upstream
+    # program directly, and these put the shared-memory `zenohd` between the two ends
+    # (a wz publisher to `z_sub_shm`, `z_pub_shm` to a wz subscriber, a wz getter's
+    # value to `z_queryable_shm`), plus the raw control of the subscriber leg. FOUR
+    # must report, so a dropped `#[ignore]` or a rename cannot select zero tests and
+    # pass.
+    _runci_guarded_test Z 4 cargo test -p wz-integration-tests \
+        --test wz_shm_router_zenohd_interop -- --ignored --quiet --test-threads=1 || return 1
     # Restore the lane's OWN demo build: the `session-extshm` build above wrote over
     # the same `--bin` path (R311y269 — cargo uplifts every feature variant of one
     # bin to one path), and every leg after this point expects the big feature set

@@ -900,7 +900,14 @@ HOST_GATED_CI_TARGETS: dict[str, str] = {
 # off zenoh's own headers, against the application `z_pub_shm` the file already
 # registers, so no new class. Counted from the diff: exactly the one `wz-proves` line
 # the file adds. 983 + 1 = 984, measured by `run-ci.sh --layer A4` at this round's tree.
-FOREIGN_ADJUDICATOR_LINKS = 984
+# R3051 -- 984 -> 987, RISING by three, in a NEW file `wz_shm_router_zenohd_interop.rs`:
+# the three router-hop legs, a wz publisher to `z_sub_shm`, `z_pub_shm` to a wz
+# subscriber and a wz getter's value to `z_queryable_shm`, each with the shared-memory
+# `zenohd` between the two ends, so `transport-shm` against applications the other two
+# files already register and no new class. Counted from the diff: exactly the three
+# `wz-proves` lines that name a layout; the raw control carries `none`.
+# 984 + 3 = 987, measured by `run-ci.sh --layer A4` at this round's tree.
+FOREIGN_ADJUDICATOR_LINKS = 987
 
 # ── Execution disclosure ────────────────────────────────────────────────────────
 #
