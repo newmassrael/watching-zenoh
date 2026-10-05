@@ -2452,7 +2452,13 @@ PIN_NO_SYMBOL = 0
 # runtime has the view the C ABI host reads, which cites one (the view's trait). Both
 # atoms are still PARTIAL. READ off the census's own FAIL line, `wz citations: 55
 # against a pin of 51`; `reached` and `ambiguous` hold at 3 and 2.
-PIN_WZ_CITATIONS = 55
+#
+# R3056 -- 55 -> 59, one atom. `transport-shm`'s reason gains the UPDATE that the pool is
+# built, which cites four wz anchors (the backend trait, the pool backend, the provider
+# and the allocation policy enum). The atom is still PARTIAL. READ off the census's own
+# FAIL line, `wz citations: 59 against a pin of 55`; `reached` and `ambiguous` hold at 3
+# and 2.
+PIN_WZ_CITATIONS = 59
 # R2626 — 44 -> 42, and this one is worth a sentence because it HELD through
 # every earlier retirement in this run (R2612, R2622). `time-hlc`'s reason is the
 # first retiree carrying AMBIGUOUS citations of its own: its oldest clauses cite
