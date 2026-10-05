@@ -98,6 +98,7 @@ class Cell:
 
 
 _ID_HEADER = "the `id` and `solicited_by` values the census and the summary write"
+_HALVES_HEADER = "the `lease_ms` and `last_seen_ts_ns` of a flow's `halves`"
 
 #: (file, enclosing fn) -> the cells that function writes through a door, one per call.
 CELLS: dict[tuple[str, str], tuple[Cell, ...]] = {
@@ -116,6 +117,10 @@ CELLS: dict[tuple[str, str], tuple[Cell, ...]] = {
             "`keyexpr_id` is a protocol field's value",
             born=24,
         ),
+    ),
+    ("crates/wz-capture/src/fields_json.rs", "push_halves"): (
+        Cell("fields", "a half's lease_ms", _HALVES_HEADER, "`lease_ms` is a wire field's value", born=25),
+        Cell("fields", "a half's last_seen_ts_ns", _HALVES_HEADER, "`last_seen_ts_ns` a nanosecond instant", born=25),
     ),
     ("crates/wz-capture/src/census_json.rs", "interests_json"): (
         Cell("census", "declarations[].id", _ID_HEADER, "`declarations[].id`"),

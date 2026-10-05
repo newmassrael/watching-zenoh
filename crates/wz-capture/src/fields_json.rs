@@ -761,6 +761,7 @@ fn push_stream_flow(
     out.push_str("{\"flow\":");
     push_flow(&flow.flow, out);
     push_context(&flow.session.context(), out);
+    push_halves(&flow.half(Direction::A), &flow.half(Direction::B), out);
     out.push_str(",\"messages\":[");
     let (mut shown, mut omitted, mut emitted) = (0usize, 0usize, 0usize);
     let mut chains = ChainIds::default();
@@ -885,6 +886,7 @@ fn push_datagram_flow(
     out.push_str("{\"flow\":");
     push_flow(&flow.flow, out);
     push_context(&flow.session.context(), out);
+    push_halves(&flow.half(Direction::A), &flow.half(Direction::B), out);
     out.push_str(",\"messages\":[");
     let (mut shown, mut omitted, mut emitted) = (0usize, 0usize, 0usize);
     let mut chains = ChainIds::default();
@@ -2363,6 +2365,70 @@ fn push_context(context: &wz_session_core::passive::FlowContext, out: &mut Strin
         None => out.push_str("null"),
     }
     out.push('}');
+}
+
+/// R3054 — the flow's two DIRECTIONS, each with what its sender has been seen
+/// to do, beside [`push_context`]'s negotiated parameters.
+///
+/// The context says what the handshake settled for the session. A reader asking
+/// whether a direction has gone quiet, and how it stopped, needs facts about
+/// each SENDER, and a negotiated value cannot say either: so the unit here is
+/// the direction, exactly as the rows' `direction` is, and the two entries come
+/// in the order `a` then `b`.
+///
+/// * `lease_ms` — the lease that direction's sender announced in its own
+///   `Open`, in milliseconds; `null` until that `Open` was read. It judges THIS
+///   direction going quiet.
+/// * `last_seen_ts_ns` — the capture instant of the last message record that
+///   direction produced, in the unit and on the clock a drained record's
+///   `ts_ns` uses; `null` when nothing was read with a clock, which is a
+///   different fact from `0`.
+/// * `close_seen` — whether that direction carried a `Close`.
+/// * `fin_seen`, `rst_seen` — whether a TCP FIN or RST was observed on that
+///   direction; `null` on a flow that is not TCP, where the flag does not
+///   exist, and never `false` for a flag that could not have been looked for.
+///
+/// Every cell is an OBSERVATION. Whether a direction has expired is an
+/// arithmetic the reader does on `lease_ms`, `last_seen_ts_ns` and its own
+/// clock, and none of it is decided here. The two instants-and-leases follow
+/// the integer rule: a bare number up to 2^53 - 1 and a string of the same
+/// digits above it, and `last_seen_ts_ns` is past that on a real clock.
+fn push_halves(a: &crate::HalfObservation, b: &crate::HalfObservation, out: &mut String) {
+    use wz_session_core::json::u64_into;
+    let flag = |v: Option<bool>| match v {
+        Some(true) => "true",
+        Some(false) => "false",
+        None => "null",
+    };
+    out.push_str(",\"halves\":[");
+    for (i, (direction, half)) in [(Direction::A, a), (Direction::B, b)]
+        .into_iter()
+        .enumerate()
+    {
+        if i > 0 {
+            out.push(',');
+        }
+        out.push_str("{\"direction\":");
+        escape_into(dir_name(direction), out);
+        out.push_str(",\"lease_ms\":");
+        match half.lease_ms {
+            Some(ms) => u64_into(ms, out),
+            None => out.push_str("null"),
+        }
+        out.push_str(",\"last_seen_ts_ns\":");
+        match half.last_seen_ms {
+            Some(ms) => u64_into(crate::retention_json::millis_as_ns(ms), out),
+            None => out.push_str("null"),
+        }
+        let _ = write!(
+            out,
+            ",\"close_seen\":{},\"fin_seen\":{},\"rst_seen\":{}}}",
+            half.close_seen,
+            flag(half.fin_seen),
+            flag(half.rst_seen)
+        );
+    }
+    out.push(']');
 }
 
 /// The word `context.phase` carries, one per `SessionPhase` variant.
@@ -4795,6 +4861,155 @@ mod tests {
                  {unseen_doc}"
             );
         }
+    }
+
+    /// R3054 — EACH DIRECTION OF A TCP FLOW REPORTS WHAT ITS SENDER HAS DONE.
+    ///
+    /// The two directions are driven APART on purpose: different leases in
+    /// their own `Open`s, different last instants, a `Close` and an RST on one
+    /// and a FIN on the other. A cell read from the session as a whole, or
+    /// copied between the two entries, would still satisfy a fixture where they
+    /// agree. The last instant of `a` stays at its `Open`: the FIN that follows
+    /// carries no message, and it does not move it.
+    #[test]
+    fn a_tcp_flows_halves_report_lease_last_seen_close_fin_and_rst_per_direction() {
+        use crate::datagram_tests::{
+            init_datagram, open_datagram_leased, tcp_packet, tcp_packet_reverse,
+        };
+        use crate::link::LINKTYPE_ETHERNET;
+
+        let framed = |message: &[u8]| {
+            let mut wire = (message.len() as u16).to_le_bytes().to_vec();
+            wire.extend_from_slice(message);
+            wire
+        };
+        let close = [wz_session_core::wire_const::T_MID_CLOSE, 0x00];
+        // (from the low end, capture instant in ms, the segment's payload)
+        let steps: [(bool, u64, Vec<u8>); 5] = [
+            (true, 1_000, framed(&init_datagram(false, &[]))),
+            (false, 1_500, framed(&init_datagram(true, &[]))),
+            (true, 2_000, framed(&open_datagram_leased(false, 10_000))),
+            (false, 2_500, framed(&open_datagram_leased(true, 20_000))),
+            (false, 9_000, framed(&close)),
+        ];
+        let (mut seq_a, mut seq_b) = (1_000u32, 5_000u32);
+        let mut packets: Vec<(u64, Vec<u8>)> = Vec::new();
+        for (from_low, at, payload) in &steps {
+            let packet = if *from_low {
+                let p = tcp_packet(seq_a, payload);
+                seq_a += payload.len() as u32;
+                p
+            } else {
+                let p = tcp_packet_reverse(seq_b, payload);
+                seq_b += payload.len() as u32;
+                p
+            };
+            packets.push((*at, packet));
+        }
+        // A's FIN and B's RST: no payload, only the flag byte of the TCP header
+        // (14 bytes of Ethernet and 20 of IPv4 ahead of it, 13 into the header).
+        let mut fin = tcp_packet(seq_a, &[]);
+        fin[34 + 13] = 0x11;
+        packets.push((9_500, fin));
+        let mut rst = tcp_packet_reverse(seq_b, &[]);
+        rst[34 + 13] = 0x14;
+        packets.push((9_800, rst));
+
+        let mut d = Dissection::new();
+        let mut rows: Vec<(u32, u32, &[u8])> = Vec::new();
+        for (i, (at, packet)) in packets.iter().enumerate() {
+            d.push_packet_at(LINKTYPE_ETHERNET, i, Some(*at), packet);
+            rows.push(((*at / 1_000) as u32, 0, packet.as_slice()));
+        }
+        let file = crate::pcap::write(LINKTYPE_ETHERNET, &rows);
+        let doc = fields_json(&d, &file, None, None);
+
+        assert_eq!(d.flows().len(), 1, "one TCP flow: {doc}");
+        let halves = scoped(
+            &doc,
+            "lease_ms",
+            &[
+                "direction",
+                "lease_ms",
+                "last_seen_ts_ns",
+                "close_seen",
+                "fin_seen",
+                "rst_seen",
+            ],
+        );
+        assert_eq!(
+            halves,
+            alloc::vec![
+                alloc::vec!["a", "10000", "2000000000", "false", "true", "false"],
+                alloc::vec!["b", "20000", "9000000000", "true", "false", "true"],
+            ],
+            "{doc}"
+        );
+    }
+
+    /// R3054 — A DATAGRAM FLOW HAS NO TCP FLAG, and the two integer cells
+    /// follow the integer rule.
+    ///
+    /// `fin_seen` and `rst_seen` are `null` there and never `false`: a flag that
+    /// could not have been looked for was not looked for and found absent. The
+    /// lease is `2^53`, one past the exact line, so it is a string; the instant
+    /// is a real clock's, past the line by two orders, so it is a string too; a
+    /// small value staying a bare number is the sibling test's.
+    #[test]
+    fn a_datagram_flows_halves_have_no_tcp_flags_and_follow_the_integer_rule() {
+        use crate::datagram_tests::{init_datagram, open_datagram_leased, udp_packet};
+        use crate::link::LINKTYPE_ETHERNET;
+
+        let at = 1_700_000_000_000u64;
+        let packets = [
+            (
+                at,
+                udp_packet(
+                    [10, 0, 0, 1],
+                    7447,
+                    [10, 0, 0, 2],
+                    7447,
+                    &init_datagram(false, &[]),
+                ),
+            ),
+            (
+                at + 1,
+                udp_packet(
+                    [10, 0, 0, 1],
+                    7447,
+                    [10, 0, 0, 2],
+                    7447,
+                    &open_datagram_leased(false, 1u64 << 53),
+                ),
+            ),
+        ];
+        let mut d = Dissection::new();
+        let mut rows: Vec<(u32, u32, &[u8])> = Vec::new();
+        for (i, (instant, packet)) in packets.iter().enumerate() {
+            d.push_packet_at(LINKTYPE_ETHERNET, i, Some(*instant), packet);
+            rows.push(((*instant / 1_000) as u32, 0, packet.as_slice()));
+        }
+        let file = crate::pcap::write(LINKTYPE_ETHERNET, &rows);
+        let doc = fields_json(&d, &file, None, None);
+
+        assert_eq!(d.datagram_flows().len(), 1, "one datagram flow: {doc}");
+        assert_eq!(
+            doc.matches("\"fin_seen\":null,\"rst_seen\":null").count(),
+            2,
+            "both directions, and neither says false for a flag UDP does not have: {doc}"
+        );
+        assert!(
+            doc.contains("\"lease_ms\":\"9007199254740992\""),
+            "a lease of 2^53 is past the exact line: {doc}"
+        );
+        assert!(
+            doc.contains("\"last_seen_ts_ns\":\"1700000000001000000\""),
+            "a real clock's nanoseconds are past the exact line: {doc}"
+        );
+        assert!(
+            doc.contains("\"lease_ms\":null,\"last_seen_ts_ns\":null,\"close_seen\":false"),
+            "the direction that sent nothing has no lease and no instant: {doc}"
+        );
     }
 
     /// A STREAM ROW NAMES THE PACKET HOLDING ITS FIRST BYTE, and

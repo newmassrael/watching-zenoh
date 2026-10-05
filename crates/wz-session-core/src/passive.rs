@@ -214,6 +214,37 @@ pub struct FlowContext {
     pub version: Option<u8>,
 }
 
+/// What the observer knows of ONE direction's half of a session, as of the
+/// last byte it read.
+///
+/// Kept apart from [`FlowContext`] on purpose. The context is copied onto every
+/// frame, and these change with every record: a per-frame copy of a last-seen
+/// instant would be the same number a thousand times and a different one on
+/// the thousand-and-first. They answer a different question too. The context
+/// says what the handshake negotiated for the SESSION; this says what each
+/// SENDER has done, which is what a reader judging "is this direction still
+/// talking, and how did it stop" needs and what no negotiated value can say.
+///
+/// Every field is a statement of what was OBSERVED, and none is a verdict.
+/// Whether a direction has expired is an arithmetic on `lease_ms`,
+/// `last_seen_ms` and a clock this type does not have, and it is the reader's.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct HalfFacts {
+    /// The lease this direction's sender announced in its own `Open`, in
+    /// milliseconds; `None` until that `Open` was read. A sender's lease says
+    /// how long its PEER tolerates silence from it, so it is the figure that
+    /// judges THIS direction going quiet.
+    pub lease_ms: Option<u64>,
+    /// The capture instant of the last message record this direction produced,
+    /// in the observer's milliseconds. A record counts whether it decoded or
+    /// not, because traffic that cannot be read is still traffic. `None` while
+    /// nothing was read with a clock, which is a different fact from `Some(0)`.
+    pub last_seen_ms: Option<u64>,
+    /// Whether this direction carried a `Close`. Whichever scope it asked for:
+    /// the frame's own row says which.
+    pub close_seen: bool,
+}
+
 impl Default for FlowContext {
     fn default() -> Self {
         Self {
@@ -1106,6 +1137,19 @@ pub struct PassiveSession {
     /// the time" a fact a consumer has to handle rather than a plausible
     /// measurement it cannot detect.
     observed_at: Option<u64>,
+    /// R3054 — the lease each direction's SENDER announced in its own `Open`, in
+    /// milliseconds, `None` until that direction's `Open` was read.
+    ///
+    /// Per direction because the two are different facts: each side states how
+    /// long it will tolerate silence from the other, and the lease that judges
+    /// whether a direction has gone quiet is the one its sender announced.
+    lease_ms: [Option<u64>; 2],
+    /// R3054 — the capture instant of the last message record this direction
+    /// produced, in the observer's milliseconds, `None` while nothing with a
+    /// clock was read. See [`HalfFacts::last_seen_ms`].
+    last_seen_ms: [Option<u64>; 2],
+    /// R3054 — whether this direction carried a `Close`.
+    close_seen: [bool; 2],
     /// R311y609 (C12) — last SN seen per `[direction][conduit]`, where the
     /// conduit index is [`sn_conduit`]. `None` = nothing seen there yet, which
     /// is what makes the first frame a [`SnVerdict::Baseline`] rather than a
@@ -1277,6 +1321,9 @@ impl Default for PassiveSession {
                 ReassemblyDispatcher::new(ReassemblyConfig::new(PASSIVE_CHAIN_QUOTA, u64::MAX))
             }),
             observed_at: None,
+            lease_ms: [None; 2],
+            last_seen_ms: [None; 2],
+            close_seen: [false; 2],
             #[cfg(feature = "codec-frame")]
             sn_last: [[None; SN_CONDUITS]; 2],
             #[cfg(feature = "codec-frame")]
@@ -1677,6 +1724,13 @@ impl PassiveSession {
             offset,
             space: offset_space,
         } = anchor;
+        // R3054 — every unit that reaches this walk produces at least one
+        // record, decodable or not, so this is the one place a direction's
+        // last-seen instant is written. It is `None` until the observer was
+        // given a clock, and an observer that has one never loses it, so there
+        // is no earlier reading for a clockless unit to erase.
+        let seat = usize::from(direction == Direction::B);
+        self.last_seen_ms[seat] = self.observed_at;
         // The ceiling is on what the WIRE carried, so it is judged on these
         // bytes and not on anything decompressed out of them.
         let exceeds_negotiated_batch = self.exceeds_batch(bytes.len());
@@ -1884,6 +1938,17 @@ impl PassiveSession {
     /// Always zero on a datagram link, which has no framing to lose.
     pub fn resync_accounting(&self, direction: Direction) -> ResyncAccounting {
         self.stream(direction).accounting
+    }
+
+    /// R3054 — what is known of one direction's half of the session. See
+    /// [`HalfFacts`].
+    pub fn half(&self, direction: Direction) -> HalfFacts {
+        let seat = usize::from(direction == Direction::B);
+        HalfFacts {
+            lease_ms: self.lease_ms[seat],
+            last_seen_ms: self.last_seen_ms[seat],
+            close_seen: self.close_seen[seat],
+        }
     }
 
     /// R311y611 (§1.4b) — messages this direction decoded whose header set a
@@ -2301,18 +2366,25 @@ impl PassiveSession {
                     SessionPhase::HalfInit
                 };
             }
-            InboundFrame::Open { .. } => {
+            InboundFrame::Open { body, .. } => {
                 // R2789 (open debt 812) — the DIRECTION's own transition. The
                 // phase below is the session's and still moves on the first
                 // Open; the width does not, because the peer is still narrow
                 // until it carries its own.
-                self.context.open_seen[usize::from(direction == Direction::B)] = true;
+                let seat = usize::from(direction == Direction::B);
+                self.context.open_seen[seat] = true;
+                // R3054 — the first Open of a direction states its lease, in
+                // milliseconds: the wire's seconds form is already projected
+                // back during parse. First wins, like `init_seen`, because a
+                // repeated Open is a replay and not a new announcement.
+                self.lease_ms[seat].get_or_insert(body.lease);
                 if self.context.phase == SessionPhase::InitComplete {
                     self.context.phase = SessionPhase::Established;
                 }
             }
             InboundFrame::Close { .. } => {
                 self.context.phase = SessionPhase::Closed;
+                self.close_seen[usize::from(direction == Direction::B)] = true;
             }
             _ => {}
         }
@@ -2676,6 +2748,13 @@ mod tests {
     }
 
     fn open_wire(is_ack: bool) -> Vec<u8> {
+        open_wire_leased(is_ack, 10_000)
+    }
+
+    /// [`open_wire`], announcing `lease` milliseconds: the one number that
+    /// differs between the two directions in the tests that ask which sender
+    /// said what.
+    fn open_wire_leased(is_ack: bool, lease: u64) -> Vec<u8> {
         let mut flags = 0u8;
         if is_ack {
             flags |= wz_codecs::wire_const::FLAG_T_OPEN_A;
@@ -2683,7 +2762,7 @@ mod tests {
         let mut wire = vec![flags | wz_codecs::wire_const::T_MID_OPEN];
         wire.extend_from_slice(
             &wz_codecs::open_body::OpenBody {
-                lease: 10_000,
+                lease,
                 initial_sn: 0,
                 // INVERTED against Init: on Open the cookie rides the SYN
                 // (`a == 0`), not the ACK (`out/wz-codecs/open_body.rs:67-79`).
@@ -2693,6 +2772,101 @@ mod tests {
             .encode_to_vec(u8::from(is_ack)),
         );
         wire
+    }
+
+    fn close_wire() -> Vec<u8> {
+        let mut w = vec![wz_codecs::wire_const::T_MID_CLOSE];
+        w.extend_from_slice(&wz_codecs::close::Close { reason: 0 }.encode_to_vec());
+        w
+    }
+
+    /// R3054 — each direction reports what ITS sender did: the lease its own
+    /// `Open` announced, the instant of the last record it produced, and
+    /// whether it carried a `Close`.
+    ///
+    /// The two directions are driven APART on purpose — different leases,
+    /// different instants, a `Close` on one only — because a value read from the
+    /// session as a whole, or copied between the two seats, would still satisfy
+    /// a fixture where both agree.
+    #[test]
+    fn each_direction_reports_its_own_lease_last_seen_and_close() {
+        let mut s = PassiveSession::new();
+        assert_eq!(s.half(Direction::A), HalfFacts::default());
+        assert_eq!(s.half(Direction::B), HalfFacts::default());
+
+        s.observe_at(1_000);
+        s.push(Direction::A, &framed(&init_wire(false, Vec::new()), 2));
+        s.next_frame(Direction::A).expect("init syn");
+        s.observe_at(1_500);
+        s.push(Direction::B, &framed(&init_wire(true, Vec::new()), 2));
+        s.next_frame(Direction::B).expect("init ack");
+        assert_eq!(s.half(Direction::A).last_seen_ms, Some(1_000));
+        assert_eq!(s.half(Direction::B).last_seen_ms, Some(1_500));
+        assert_eq!(s.half(Direction::A).lease_ms, None, "no Open was read yet");
+
+        s.observe_at(2_000);
+        s.push(Direction::A, &framed(&open_wire_leased(false, 10_000), 2));
+        s.next_frame(Direction::A).expect("open syn");
+        s.observe_at(2_500);
+        s.push(Direction::B, &framed(&open_wire_leased(true, 20_000), 2));
+        s.next_frame(Direction::B).expect("open ack");
+        assert_eq!(
+            s.half(Direction::A),
+            HalfFacts {
+                lease_ms: Some(10_000),
+                last_seen_ms: Some(2_000),
+                close_seen: false
+            }
+        );
+        assert_eq!(
+            s.half(Direction::B),
+            HalfFacts {
+                lease_ms: Some(20_000),
+                last_seen_ms: Some(2_500),
+                close_seen: false
+            }
+        );
+
+        // A Close from B alone: A's half does not move, B's last-seen does.
+        s.observe_at(9_000);
+        s.push(Direction::B, &framed(&close_wire(), 2));
+        s.next_frame(Direction::B).expect("close");
+        assert_eq!(
+            s.half(Direction::A),
+            HalfFacts {
+                lease_ms: Some(10_000),
+                last_seen_ms: Some(2_000),
+                close_seen: false
+            },
+            "the other direction's half is untouched by a Close"
+        );
+        assert_eq!(
+            s.half(Direction::B),
+            HalfFacts {
+                lease_ms: Some(20_000),
+                last_seen_ms: Some(9_000),
+                close_seen: true
+            }
+        );
+    }
+
+    /// R3054 — a session that was never told the time has no last-seen
+    /// instant, which is a different fact from one at epoch: a latency or an
+    /// expiry computed from a fabricated zero would be confident and wrong.
+    #[test]
+    fn a_session_without_a_clock_has_no_last_seen_instant() {
+        let mut s = PassiveSession::new();
+        s.push(Direction::A, &framed(&init_wire(false, Vec::new()), 2));
+        s.next_frame(Direction::A).expect("init syn");
+        assert_eq!(s.half(Direction::A).last_seen_ms, None);
+
+        // Once the clock is supplied the next unit carries it, and the half
+        // that was read before it stays unset: no instant is back-filled.
+        s.observe_at(700);
+        s.push(Direction::B, &framed(&init_wire(true, Vec::new()), 2));
+        s.next_frame(Direction::B).expect("init ack");
+        assert_eq!(s.half(Direction::B).last_seen_ms, Some(700));
+        assert_eq!(s.half(Direction::A).last_seen_ms, None);
     }
 
     fn unit_ext(id: u8) -> ExtEntryOwned {

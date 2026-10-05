@@ -1825,8 +1825,11 @@ int main(void) {
      * 23: a `uint` value beyond 2^53 - 1 is a decimal string (see the census).
      * 24: every `carried` entry gains `keyexpr_id`, the numeric id an
      * unresolved reference named (`null` when the key resolved or none was
-     * referenced). One new key name; no word moves; nothing retires. */
-    revisioned[2].revision = 24;
+     * referenced). One new key name; no word moves; nothing retires.
+     * 25: a flow gains `halves`, one entry per direction (`a`, then `b`) with
+     * `lease_ms`, `last_seen_ts_ns`, `close_seen`, `fin_seen` and `rst_seen`.
+     * Six new key names; no word moves; nothing retires. */
+    revisioned[2].revision = 25;
     revisioned[2].doc = NULL;
     rc = wz_dissect_pcap_fields(pcap, sizeof pcap, 0, &revisioned[2].doc);
     CHECK(rc == WZ_DISSECT_OK, "fields rc=%d", rc);

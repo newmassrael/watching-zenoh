@@ -474,10 +474,14 @@
  * the `id` and `solicited_by` values the census and the summary write for a
  * declaration, an interest request and an unresolved alias; to the
  * `keyexpr_id` of a `carried` entry (a key that exists from field document 24
- * and takes the rule from its first appearance); and to
+ * and takes the rule from its first appearance); to the `lease_ms` and
+ * `last_seen_ts_ns` of a flow's `halves` (keys that exist from field document
+ * 25 and take the rule from their first appearance: the lease is a wire
+ * field's value and the instant is a clock's); and to
  * `oldest_ts_ns` in the retention document. It does NOT apply to counts,
- * offsets, sizes and millisecond spans: those count things the host holds, and
- * stay bare numbers. Revisions: fields 23, census 16, summary 5, retention 2.
+ * offsets, sizes and millisecond spans this library measures: those count
+ * things the host holds, and stay bare numbers. Revisions: fields 23, census
+ * 16, summary 5, retention 2.
  * The gap total saturates at the top of `u64` instead of wrapping.
  *
  * @values fields carried_state
@@ -583,6 +587,36 @@
  *
  * @values fields phase
  *
+ * Also per FLOW, beside `context`, and since field-document revision 25 --
+ * WHAT EACH DIRECTION'S SENDER HAS DONE:
+ *
+ *   "halves":[{"direction":"a","lease_ms":N|null,"last_seen_ts_ns":N|null,
+ *              "close_seen":bool,"fin_seen":bool|null,"rst_seen":bool|null},
+ *             {"direction":"b", ...the same six keys...}]
+ *
+ *     Two entries, `a` then `b`, with the `direction` the rows carry. The
+ *     context says what the handshake settled for the SESSION; whether a
+ *     sender has gone quiet, and how it stopped, are facts about each SENDER,
+ *     so the unit here is the direction. `lease_ms` is the lease that
+ *     direction's sender announced in its own `Open`, in milliseconds, and
+ *     `null` until that `Open` was read; it is the figure that judges THIS
+ *     direction going quiet. `last_seen_ts_ns` is the capture instant of the
+ *     last message record the direction produced, decodable or not, in the unit
+ *     and on the clock a drained record's `ts_ns` uses; `null` when nothing was
+ *     read with a clock, a different fact from 0. `close_seen` is whether the
+ *     direction carried a `Close`, whichever scope the Close asked for (the
+ *     Close row says). `fin_seen` and `rst_seen` are whether a TCP FIN or RST
+ *     was observed on the direction, and `null` on a flow that is not TCP,
+ *     where the flag does not exist.
+ *
+ *     EVERY CELL IS AN OBSERVATION AND NONE IS A VERDICT. Whether a direction
+ *     has expired is arithmetic the reader does on `lease_ms`,
+ *     `last_seen_ts_ns` and its own clock; nothing here computes it. The two
+ *     instants-and-leases follow the integer rule: a bare number up to
+ *     2^53 - 1 and a string of the same digits above it, and
+ *     `last_seen_ts_ns` is past that on a real clock. Like `context`, `halves`
+ *     is the flow's value at the END of the document and is not a row.
+ *
  * And at the TOP LEVEL, `"reassembly":{"expired_chains":N,
  * "abandoned_at_end":N,"abandoned_on_eviction":N}` -- the chains that ended
  * with NO row: past their deadline, still open when the capture stopped, or on
@@ -677,7 +711,7 @@
  *
  * Every family in `value_families` now carries a `carries` axis:
  *
- *     {"name":"fields","revision":24,"key":"kind","values":[...],
+ *     {"name":"fields","revision":25,"key":"kind","values":[...],
  *      "carries":[{"word":"bits","shapes":[["end","name","start","value"]]},
  *                 {"word":"opaque","shapes":[["end","name","start"]]}, ...]}
  *
@@ -1609,7 +1643,7 @@ int wz_dissect_declarations_diagnose(const char *declarations, char **out);
  *
  * R2175 -- the document is at REVISION 3, and the fourth key is `value_families`:
  *
- *     "value_families":[{"name":"fields","revision":24,"key":"state",
+ *     "value_families":[{"name":"fields","revision":25,"key":"state",
  *                        "values":["decoded","encoding_mismatch",…]}, …]
  *
  * every key in every document whose VALUE this build draws from a closed set,

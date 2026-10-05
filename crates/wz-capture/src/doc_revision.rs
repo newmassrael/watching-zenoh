@@ -1407,6 +1407,42 @@ pub const DOCUMENT_HISTORY: &[DocumentShape] = &[
         planes: &[],
         carries: FIELDS_R20_CARRIES,
     },
+    // R3054 — EACH DIRECTION OF A FLOW REPORTS WHAT ITS SENDER HAS DONE.
+    //
+    // The flow object gains `halves`, an array of two entries (`direction`
+    // `a`, then `b`), beside `context`. Each carries `lease_ms` (the lease that
+    // direction's sender announced in its own `Open`), `last_seen_ts_ns` (the
+    // capture instant of the last message record it produced), `close_seen`,
+    // and `fin_seen` / `rst_seen` (the TCP flags, `null` on a flow that is not
+    // TCP). Six new keys; `direction` is the key the rows already carry, with
+    // the same two words, so no value family widens and nothing retires.
+    //
+    // WHY THE UNIT IS THE DIRECTION. The context states what the handshake
+    // settled for the session; whether a sender has gone quiet and how it
+    // stopped are facts about each sender, and a FIN is already per direction at
+    // the stream layer. Every cell is an observation: "expired" is arithmetic on
+    // `lease_ms`, `last_seen_ts_ns` and a clock the reader owns, and none of it
+    // is decided here.
+    //
+    // TWO CELLS TAKE THE INTEGER DOOR. `lease_ms` is a wire field's value and
+    // `last_seen_ts_ns` a nanosecond instant since 1970, past 2^53 on a real
+    // clock: both are a bare number up to 2^53 - 1 and the same digits in a
+    // string above it, the rule revision 23 set.
+    //
+    // A consumer pinned to 24 loses nothing: this is an addition to an object it
+    // reads by name. The flow object is not a row, so these cells are not among
+    // `REVISABLE_ROW_CELLS`; like `context` they are written fresh with the flow
+    // on every document, and a held row's value for them is the value at the
+    // state of that document and no later one.
+    DocumentShape {
+        document: FIELDS,
+        revision: 25,
+        keys: FIELDS_R25_KEYS,
+        retiring: &[],
+        families: FIELDS_R20_FAMILIES,
+        planes: &[],
+        carries: FIELDS_R20_CARRIES,
+    },
     DocumentShape {
         document: SUMMARY,
         revision: 1,
@@ -8382,6 +8418,126 @@ pub const FIELDS_R24_KEYS: &[&str] = &[
     "wrong",
 ];
 
+/// The field document's key set at revision 25: revision 24's PLUS the six keys
+/// of a flow's `halves`: `close_seen`, `fin_seen`, `halves`, `last_seen_ts_ns`,
+/// `lease_ms` and `rst_seen`.
+///
+/// Written out rather than aliased, on the rule revision 7 set for a key that
+/// arrives. `direction`, which each entry of `halves` also carries, is the key
+/// the rows already have.
+///
+/// MEASURED: `the_field_documents_key_set_is_pinned` prints what the document
+/// emits and this is that printout.
+pub const FIELDS_R25_KEYS: &[&str] = &[
+    "abandoned_at_end",
+    "abandoned_on_eviction",
+    "above_transport",
+    "addr",
+    "after_seq",
+    "anchor",
+    "batch_index",
+    "batch_size",
+    "caps",
+    "capture_reread",
+    "carried",
+    "carried_state",
+    "chain",
+    "chain_id",
+    "close_seen",
+    "compression",
+    "conduit",
+    "context",
+    "datagram_flows",
+    "declaration_checked",
+    "declared",
+    "descriptor_bytes",
+    "despite_encoding",
+    "direction",
+    "document",
+    "dropped_by_limits",
+    "dst",
+    "end",
+    "example",
+    "expired_chains",
+    "family",
+    "fields",
+    "fin_seen",
+    "first_byte",
+    "flow",
+    "flows",
+    "format",
+    "frame_offset",
+    "frames",
+    "frames_per_flow",
+    "halves",
+    "high",
+    "keyexpr",
+    "keyexpr_cause",
+    "keyexpr_id",
+    "kind",
+    "l2",
+    "last_seen_ts_ns",
+    "lease_ms",
+    "length",
+    "link",
+    "list_id",
+    "low",
+    "lowlatency",
+    "max_flows_per_table",
+    "max_scout_askers",
+    "message",
+    "message_at",
+    "messages",
+    "missing",
+    "name",
+    "negotiated",
+    "note",
+    "offset_space",
+    "omitted",
+    "outcome",
+    "packet",
+    "patch",
+    "path",
+    "payload_decode",
+    "payload_mapping",
+    "payload_mapping_counts_exact",
+    "payload_offset",
+    "payload_refusals",
+    "phase",
+    "port",
+    "priority",
+    "qos",
+    "reason",
+    "reassembly",
+    "reliable",
+    "revision",
+    "rst_seen",
+    "samples",
+    "scout_askers",
+    "scouting",
+    "selected",
+    "seq",
+    "shown",
+    "skipped",
+    "skipped_packets",
+    "sn",
+    "sn_mask",
+    "src",
+    "start",
+    "state",
+    "stream_bytes",
+    "stream_bytes_per_direction",
+    "stream_flows",
+    "through_seq",
+    "under",
+    "value",
+    "verdict",
+    "version",
+    "why",
+    "window",
+    "wrong",
+];
+
 /// The census document's key set at revision 16: revision 15's, by name.
 ///
 /// The revision moved the JSON type of the wire-sourced `id` values (a number,
@@ -9829,7 +9985,11 @@ mod tests {
             // stationary keys, so this entry is the notice.
             // To 24 when every `carried` entry gained `keyexpr_id`, the id an
             // unresolved reference named.
-            (FIELDS, 24),
+            // To 25 when a flow gained `halves`: per direction, the lease its
+            // sender announced, the instant of its last record, whether it
+            // carried a `Close`, and the TCP FIN and RST. Six keys, no word
+            // moves and nothing retires.
+            (FIELDS, 25),
             // R2121 (open-debt item 460) — the summary moved to 2 when it
             // gained `inert_counters`; R2122 (item 238) to 3 when its
             // `framing` group stopped disagreeing with the capture report's.

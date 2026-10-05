@@ -1022,6 +1022,19 @@ impl QuicStreamDissection {
 }
 
 impl DatagramDissection {
+    /// What `direction` of this flow has been seen to do. A datagram link has
+    /// no TCP flag, so the two are `None`: see [`HalfObservation`].
+    pub fn half(&self, direction: Direction) -> HalfObservation {
+        let facts = self.session.half(direction);
+        HalfObservation {
+            lease_ms: facts.lease_ms,
+            last_seen_ms: facts.last_seen_ms,
+            close_seen: facts.close_seen,
+            fin_seen: None,
+            rst_seen: None,
+        }
+    }
+
     fn new(flow: FlowKey, window_ms: Option<u64>) -> Self {
         Self {
             flow,
@@ -1952,6 +1965,22 @@ impl FlowDissection {
     /// The zenoh context inferred for this flow.
     pub fn context(&self) -> FlowContext {
         self.session.context()
+    }
+
+    /// What `direction` of this flow has been seen to do. See
+    /// [`HalfObservation`]; the two TCP flags are read off that direction's
+    /// assembler and only when this flow IS a TCP one.
+    pub fn half(&self, direction: Direction) -> HalfObservation {
+        let facts = self.session.half(direction);
+        let assembler = self.assembler(direction);
+        let tcp = self.flow.link() == link::LinkKind::Tcp;
+        HalfObservation {
+            lease_ms: facts.lease_ms,
+            last_seen_ms: facts.last_seen_ms,
+            close_seen: facts.close_seen,
+            fin_seen: tcp.then(|| assembler.fin_seen()),
+            rst_seen: tcp.then(|| assembler.rst_seen()),
+        }
     }
 
     /// Which capture packet carried the byte at `stream_offset` in
@@ -3157,6 +3186,37 @@ pub struct FlowsSeen {
     pub stream: usize,
     /// The same for the datagram table.
     pub datagram: usize,
+}
+
+/// What one DIRECTION of a flow has been seen to do: the facts a reader needs
+/// to judge whether that sender has gone quiet and how it stopped.
+///
+/// Every field is an observation and none is a verdict. "Expired" is an
+/// arithmetic on `lease_ms`, `last_seen_ms` and a clock the reader owns, and a
+/// consumer that wants it computes it; this type exists so the inputs are
+/// readable from the flow and need not be re-derived from its message list,
+/// which a bounded dissection trims from the front.
+///
+/// The session half ([`wz_session_core::passive::HalfFacts`]) is what the
+/// handshake and the messages said; the two TCP flags are what the stream
+/// layer saw, and exist only on a TCP flow.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct HalfObservation {
+    /// The lease this direction's sender announced in its own `Open`, in
+    /// milliseconds; `None` until that `Open` was read.
+    pub lease_ms: Option<u64>,
+    /// The capture instant of the last message record this direction produced,
+    /// in the observer's milliseconds; `None` while nothing was read with a
+    /// clock.
+    pub last_seen_ms: Option<u64>,
+    /// Whether this direction carried a `Close`.
+    pub close_seen: bool,
+    /// Whether a FIN was observed on this direction. `None` where the flow is
+    /// not TCP: a UDP flow and a vsock connection have no such flag, and
+    /// `false` there would claim a fact that was looked for and not found.
+    pub fin_seen: Option<bool>,
+    /// Whether an RST was observed on this direction; `None` as `fin_seen` is.
+    pub rst_seen: Option<bool>,
 }
 
 /// R311y605 (F5) — the totals across a whole dissection.
@@ -7369,6 +7429,13 @@ mod datagram_tests {
     /// One `T_MID_OPEN` datagram. INVERTED against Init: the cookie rides the
     /// SYN here, not the ACK.
     pub(crate) fn open_datagram(is_ack: bool) -> Vec<u8> {
+        open_datagram_leased(is_ack, 10_000)
+    }
+
+    /// [`open_datagram`] announcing `lease` milliseconds: the one number that
+    /// differs between the two directions in the tests that ask which sender
+    /// said what.
+    pub(crate) fn open_datagram_leased(is_ack: bool, lease: u64) -> Vec<u8> {
         let mut flags = 0u8;
         if is_ack {
             flags |= wz_codecs::wire_const::FLAG_T_OPEN_A;
@@ -7376,7 +7443,7 @@ mod datagram_tests {
         let mut wire = alloc::vec![flags | wz_session_core::wire_const::T_MID_OPEN];
         wire.extend_from_slice(
             &wz_codecs::open_body::OpenBody {
-                lease: 10_000,
+                lease,
                 initial_sn: 0,
                 cookie_len: if is_ack { None } else { Some(0) },
                 cookie: if is_ack { None } else { Some(&[]) },
