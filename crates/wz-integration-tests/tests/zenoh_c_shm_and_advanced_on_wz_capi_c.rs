@@ -975,6 +975,7 @@ fn run_get_shm_against_pico(
 /// same C source, same argv, same queryable, same oracle installation — only
 /// the library differs, and the sibling legs in this file drive that same
 /// oracle green.
+// wz-proves: none -- a pin: it asserts that an upstream defect is still there and that wz refuses the same pool, and no atom's cross-implementation proof rests on a refusal (LEG 6 carries the pico witness)
 #[test]
 #[ignore = "compiles an upstream zenoh-c example with cc and spawns the real \
             zenoh-pico z_queryable CLI; needs the machine-local SHARED-MEMORY \

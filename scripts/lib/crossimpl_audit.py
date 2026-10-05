@@ -920,7 +920,14 @@ HOST_GATED_CI_TARGETS: dict[str, str] = {
 # is `transport-shm wz->zenoh` against an application the file already registers, so no
 # new class. Counted from the diff: exactly the one `wz-proves` line the file adds.
 # 988 + 1 = 989, to be measured by `run-ci.sh --layer A4` at this round's tree.
-FOREIGN_ADJUDICATOR_LINKS = 989
+# R3058 -- 989 -> 990, RISING by one, and the net of three edits to `wz-proves` lines:
+# the allocation differential `zenoh_c_shm_provider_allocation_twice_and_diff.rs` is
+# restored into the tree and declares `api-compat-c zenoh-c->wz partial` (+1); the pico
+# witness for an SHM-allocated query payload moves from the `z_get_shm` leg to a new leg
+# of `zenoh_c_shm_and_advanced_on_wz_capi_c.rs`, which declares `api-compat-c wz->pico
+# partial` (+1); and the old leg, which now pins both arms refusing, declares `none` (-1).
+# Measured by `scripts/audit-crossimpl-proof.sh` at this round's tree.
+FOREIGN_ADJUDICATOR_LINKS = 990
 
 # ── Execution disclosure ────────────────────────────────────────────────────────
 #
