@@ -2479,7 +2479,15 @@ PIN_NO_SYMBOL = 0
 # for the declared-key publish and the local leg, which cites two (the aliased publish and
 # the receiver's view). Both atoms are still PARTIAL. READ off the census's own FAIL line,
 # `wz citations: 70 against a pin of 64`; `reached` and `ambiguous` hold at 3 and 2.
-PIN_WZ_CITATIONS = 70
+#
+# R3060 -- 70 -> 73, one atom. `api-compat-c`'s reason gains the UPDATE that the value of a
+# get and of a querier is sent as its chunk, which names three wz paths (the value taker,
+# the leg helper and the file of the two legs that witness it against upstream's own
+# queryable; the second leg is named as the same file's and costs no path of its own). The
+# census counts a PATH it can resolve, not an anchor, which is why four anchors are three.
+# The atom is still PARTIAL. READ off the census's own FAIL line, `wz citations: 73 against
+# a pin of 70`; `reached` and `ambiguous` hold at 3 and 2.
+PIN_WZ_CITATIONS = 73
 # R2626 — 44 -> 42, and this one is worth a sentence because it HELD through
 # every earlier retirement in this run (R2612, R2622). `time-hlc`'s reason is the
 # first retiree carrying AMBIGUOUS citations of its own: its oldest clauses cite
