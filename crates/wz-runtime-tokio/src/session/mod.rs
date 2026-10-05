@@ -374,10 +374,12 @@ use crate::session_glue::SessionLinkActions;
 /// The buffer whose descriptor the remote leg of a query carries in place of its
 /// value (R3048). Without `transport-shm` there is no such buffer and the option is
 /// always `None`, which is why the type is uninhabited there and not absent: the
-/// ordinary query takes the same parameter in every build.
-#[cfg(feature = "transport-shm")]
+/// ordinary query takes the same parameter in every build. Its two users are in the
+/// unicast `impl`, so a multicast-only build has no use for it and the alias is
+/// gated with them.
+#[cfg(all(feature = "transport-unicast", feature = "transport-shm"))]
 type ShmValueRef<'a> = &'a crate::shm_provider::ShmBackedPayload;
-#[cfg(not(feature = "transport-shm"))]
+#[cfg(all(feature = "transport-unicast", not(feature = "transport-shm")))]
 type ShmValueRef<'a> = &'a core::convert::Infallible;
 // R311nb — the `PushMetadata` import is retired here: its sole mod.rs
 // consumer was `PublishOptions::push_metadata`, which moved to
