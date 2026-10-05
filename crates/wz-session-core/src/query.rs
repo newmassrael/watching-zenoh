@@ -1726,7 +1726,7 @@ impl<C: QuerySink> QueryableRegistry<C> {
 /// queryable, and the positional list had outgrown clippy's argument budget
 /// the moment the QoS joined it.
 ///
-/// R3061 -- public, because [`QueryableRegistry::local_query_shared`] takes it: that entry
+/// R3061 -- public, because [`QueryableRegistry::local_query_with_value`] takes it: that entry
 /// point carries a value beside these three and has no argument left to spend on them
 /// singly.
 #[cfg(all(feature = "codec-request", feature = "alloc"))]
