@@ -1022,6 +1022,7 @@ pub(crate) fn issue_get(
     keyexpr: String,
     parameters: Option<Vec<u8>>,
     opts: QueryOptions,
+    value: crate::bytes::ValueChunk,
     closure: Arc<CReplyClosure>,
     token: Option<Arc<wz_capi_core::cancellation::CancellationToken>>,
 ) -> ZResult {
@@ -1096,11 +1097,12 @@ pub(crate) fn issue_get(
             // timeout sweep and a face death alike — whereas a counter
             // incremented in `on_final` would never be reached by the face-death
             // path.
-            let issued = session.query(
+            let issued = query_leg(
+                &session,
                 &keyexpr,
                 opts.clone().with_allowed_destination(Locality::Remote),
+                &value,
                 move |view: &dyn ReplyView| per_face.fire(view),
-                |_rid| {},
             );
             stopped = matches!(&issued, Ok(handle) if cancelled_mid_fan(&session, handle.rid()));
             // A per-face issue error (a face mid-teardown) is swallowed,
@@ -1119,11 +1121,12 @@ pub(crate) fn issue_get(
     if want_local && !stopped {
         let local = leg();
         let local_session = shared.local_session();
-        let issued = local_session.query(
+        let issued = query_leg(
+            local_session,
             &keyexpr,
             opts.with_allowed_destination(Locality::SessionLocal),
+            &value,
             move |view: &dyn ReplyView| local.fire(view),
-            |_rid| {},
         );
         if let Ok(handle) = &issued {
             // The local leg is cancellable like a face's: same registry, same
@@ -1143,6 +1146,33 @@ pub(crate) fn issue_get(
     // could return before a zero-leg get's C `drop(context)` had run.
     drop(registration);
     Z_OK
+}
+
+/// Issue one leg of a get on `session`: the ordinary query, or the query whose VALUE is a
+/// chunk of shared memory (R3059), which the session sends as a descriptor where it
+/// negotiated shared memory and as the chunk's bytes everywhere else, the local leg
+/// included. The one place a get decides which of the two it is, so the faces and the
+/// local plane cannot decide it differently.
+fn query_leg(
+    session: &wz_runtime_tokio::session::TokioSession,
+    keyexpr: &str,
+    opts: QueryOptions,
+    value: &crate::bytes::ValueChunk,
+    on_reply: impl FnMut(&dyn ReplyView) + Send + 'static,
+) -> Result<wz_runtime_tokio::reply::ReplyHandle, wz_runtime_tokio::session::QueryAliasError> {
+    match value {
+        None => session.query(keyexpr, opts, on_reply, |_rid| {}),
+        #[cfg(all(
+            feature = "zenoh-c-shared-memory",
+            not(feature = "zenoh-c-no-unstable-api")
+        ))]
+        Some(chunk) => session.query_shm(keyexpr, opts, chunk, on_reply, |_rid| {}),
+        #[cfg(not(all(
+            feature = "zenoh-c-shared-memory",
+            not(feature = "zenoh-c-no-unstable-api")
+        )))]
+        Some(never) => match *never {},
+    }
 }
 
 /// R2949 — what one leg's reply callback owns: the C closure, the reply gate,
@@ -1171,13 +1201,17 @@ impl LegReply {
 ///
 /// A NULL pointer is upstream's "defaults", not an error.
 ///
+/// The second half of the answer is the chunk of shared memory the query's value is, when
+/// it is one (R3059): it is not in the [`QueryOptions`], whose `payload` slot is bytes, and
+/// the fan-out hands it to each leg beside them.
+///
 /// # Safety
 /// `options` must be null or a valid get options struct; its `payload` and
 /// `attachment` are CONSUMED.
-unsafe fn get_options(options: *mut z_get_options_t) -> QueryOptions {
+unsafe fn get_options(options: *mut z_get_options_t) -> (QueryOptions, crate::bytes::ValueChunk) {
     let mut opts = QueryOptions::default();
     if options.is_null() {
-        return opts;
+        return (opts, None);
     }
     // SAFETY: the caller's contract.
     let o = unsafe { &mut *options };
@@ -1191,7 +1225,8 @@ unsafe fn get_options(options: *mut z_get_options_t) -> QueryOptions {
         opts = opts.with_consolidation(mode);
     }
     // SAFETY: the caller's contract — both are moved values this consumes.
-    if let Some(payload) = unsafe { crate::bytes::take_payload(o.payload) } {
+    let (value_bytes, value_chunk) = unsafe { crate::bytes::take_query_value(o.payload) };
+    if let Some(payload) = value_bytes {
         opts = opts.with_payload(payload);
     }
     // R311y547 — the query VALUE's encoding. `payload` + `encoding` collapse
@@ -1245,7 +1280,7 @@ unsafe fn get_options(options: *mut z_get_options_t) -> QueryOptions {
     // fan anyway. `fan_get` is what keeps the local half from running once per
     // face.
     opts = opts.with_allowed_destination(crate::put::locality_from_c(o.allowed_destination));
-    opts
+    (opts, value_chunk)
 }
 
 /// zenoh-c's target constant as a wz target. An unknown value is `None`, which
@@ -1396,7 +1431,7 @@ unsafe fn get_with_selector(
         // The options' moved payload / attachment are consumed here too, on
         // every path, for the same reason.
         // SAFETY: the caller's contract.
-        let opts = unsafe { get_options(options) };
+        let (opts, value) = unsafe { get_options(options) };
         // R2949 — the token too, on the same every-path line.
         // SAFETY: the caller's contract.
         let token = unsafe { take_get_token(options) };
@@ -1411,13 +1446,94 @@ unsafe fn get_with_selector(
         if wz_runtime_tokio::keyexpr_canon::check_outbound_keyexpr_pico_safe(&ke).is_err() {
             return Z_EINVAL;
         }
-        issue_get(&state.shared, ke, params, opts, closure, token)
+        issue_get(&state.shared, ke, params, opts, value, closure, token)
     })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// R3059 -- a query's value that is a chunk of shared memory stays a chunk: the options
+    /// carry no bytes for it and the chunk rides beside them, so the fan-out can send its
+    /// descriptor; a value of plain bytes is the other way round. The pair is what makes
+    /// the first half mean something: a `get_options` that copied every value into the
+    /// options would leave the chunk `None` for both.
+    #[cfg(all(
+        feature = "zenoh-c-shared-memory",
+        not(feature = "zenoh-c-no-unstable-api")
+    ))]
+    #[test]
+    fn a_value_that_is_a_chunk_rides_beside_the_options_and_plain_bytes_ride_in_them() {
+        use crate::abi::{z_moved_bytes_t, z_owned_bytes_t};
+        use crate::shm::*;
+
+        let mut provider = z_owned_shm_provider_t::null_value();
+        // SAFETY: a live local.
+        assert_eq!(
+            unsafe { z_shm_provider_default_new(&mut provider, 4096) },
+            crate::result::Z_OK
+        );
+        let mut alloc: z_buf_layout_alloc_result_t = unsafe { std::mem::zeroed() };
+        // SAFETY: a live provider and a writable result.
+        unsafe { z_shm_provider_alloc(&mut alloc, z_shm_provider_loan(&provider), 5) };
+        assert_eq!(alloc.status, ZC_BUF_LAYOUT_ALLOC_STATUS_OK);
+        // SAFETY: the status says the buffer is live.
+        unsafe {
+            std::ptr::copy_nonoverlapping(
+                b"chunk".as_ptr(),
+                z_shm_mut_data_mut(z_shm_mut_loan_mut(&mut alloc.buf)),
+                5,
+            )
+        };
+        let mut chunk_payload = z_owned_bytes_t::null_value();
+        // SAFETY: both are live locals; the buffer is consumed.
+        assert_eq!(
+            unsafe {
+                z_bytes_from_shm_mut(
+                    &mut chunk_payload,
+                    &mut alloc.buf as *mut z_owned_shm_mut_t as *mut z_moved_shm_mut_t,
+                )
+            },
+            crate::result::Z_OK
+        );
+
+        let mut o: z_get_options_t = unsafe { std::mem::zeroed() };
+        let mut moved = z_moved_bytes_t {
+            _this: chunk_payload,
+        };
+        o.payload = &mut moved;
+        // SAFETY: a live local whose other owned pointer fields are null.
+        let (opts, chunk) = unsafe { get_options(&mut o) };
+        assert!(
+            opts.payload.is_none(),
+            "a chunk is not copied into the options"
+        );
+        assert_eq!(
+            chunk.expect("the chunk rides beside the options").bytes(),
+            b"chunk"
+        );
+
+        let mut plain = z_owned_bytes_t::null_value();
+        // SAFETY: a live local.
+        assert_eq!(
+            unsafe { crate::bytes::z_bytes_copy_from_buf(&mut plain, b"plain".as_ptr(), 5) },
+            crate::result::Z_OK
+        );
+        let mut moved = z_moved_bytes_t { _this: plain };
+        o.payload = &mut moved;
+        // SAFETY: as above.
+        let (opts, chunk) = unsafe { get_options(&mut o) };
+        assert_eq!(opts.payload.as_deref(), Some(&b"plain"[..]));
+        assert!(chunk.is_none(), "plain bytes are not a chunk");
+
+        // SAFETY: dropped once.
+        unsafe {
+            z_shm_provider_drop(
+                &mut provider as *mut z_owned_shm_provider_t as *mut z_moved_shm_provider_t,
+            )
+        };
+    }
 
     /// R311y554 — `z_get_options_t.allowed_destination` reaches
     /// [`QueryOptions`], on every value.
@@ -1441,7 +1557,7 @@ mod tests {
             let mut o: z_get_options_t = unsafe { std::mem::zeroed() };
             o.allowed_destination = c_value;
             // SAFETY: a live local whose owned pointer fields are all null.
-            let resolved = unsafe { get_options(&mut o) };
+            let resolved = unsafe { get_options(&mut o) }.0;
             assert_eq!(
                 resolved.allowed_destination, expected,
                 "z_get_options_t.allowed_destination = {c_value} -> {expected:?}",
@@ -1492,7 +1608,7 @@ mod tests {
         // No encoding set: the slot stays empty, so the assertion below cannot
         // pass on a build that hard-codes one.
         // SAFETY: a live local.
-        let bare = unsafe { get_options(&mut opts) };
+        let bare = unsafe { get_options(&mut opts) }.0;
         assert!(
             bare.encoding.is_none(),
             "an unset encoding must not synthesise one"
@@ -1509,7 +1625,7 @@ mod tests {
         let mut moved = crate::abi::z_moved_encoding_t { _this: owned };
         opts.encoding = &mut moved as *mut crate::abi::z_moved_encoding_t;
         // SAFETY: a live local.
-        let resolved = unsafe { get_options(&mut opts) };
+        let resolved = unsafe { get_options(&mut opts) }.0;
         let hint = resolved
             .encoding
             .expect("a set encoding reaches QueryOptions");
@@ -1567,7 +1683,7 @@ mod tests {
             cancellation_token: std::ptr::null_mut(),
         };
         // SAFETY: a live local.
-        let resolved = unsafe { get_options(&mut opts) };
+        let resolved = unsafe { get_options(&mut opts) }.0;
         let qos = resolved.qos.expect("the QoS trio reaches QueryOptions");
         assert_eq!(qos.priority(), Priority::RealTime, "priority");
         assert_eq!(qos.congestion(), CongestionControl::Drop, "congestion");
@@ -1582,7 +1698,7 @@ mod tests {
         // SAFETY: a live local.
         unsafe { z_get_options_default(&mut opts) };
         // SAFETY: a live local.
-        let defaulted = unsafe { get_options(&mut opts) };
+        let defaulted = unsafe { get_options(&mut opts) }.0;
         let default_qos = defaulted
             .qos
             .expect("the options-default QoS reaches QueryOptions too");

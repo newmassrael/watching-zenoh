@@ -258,6 +258,47 @@ pub(crate) unsafe fn take_outbound(moved: *mut z_moved_bytes_t) -> Option<Outbou
     }
 }
 
+/// The chunk of shared memory a query's value is, when it is one (R3059): the value
+/// `z_get` and `z_querier_get` carry as a descriptor to a peer that negotiated shared
+/// memory. `None` whenever the value is bytes, and on a build without that axis there is
+/// no chunk to be, so the type is uninhabited and the arm that would use it cannot exist.
+#[cfg(all(
+    feature = "zenoh-c-shared-memory",
+    not(feature = "zenoh-c-no-unstable-api")
+))]
+pub(crate) type ValueChunk =
+    Option<std::sync::Arc<wz_runtime_tokio::shm_provider::ShmBackedPayload>>;
+/// See the shared-memory spelling: there is no chunk on this arm.
+#[cfg(not(all(
+    feature = "zenoh-c-shared-memory",
+    not(feature = "zenoh-c-no-unstable-api")
+)))]
+pub(crate) type ValueChunk = Option<std::convert::Infallible>;
+
+/// Take the VALUE of a query out of a MOVED bytes, leaving a gravestone: the bytes to
+/// carry, or the chunk they are. At most one of the two is `Some`; both are `None` for an
+/// absent value.
+///
+/// The sibling of [`take_outbound`] for the query side, which splits its answer in two
+/// because a query's bytes live in its options and its chunk goes beside them.
+///
+/// # Safety
+/// `moved` must be null or a valid moved bytes whose handle is live.
+pub(crate) unsafe fn take_query_value(
+    moved: *mut z_moved_bytes_t,
+) -> (Option<Vec<u8>>, ValueChunk) {
+    // SAFETY: the caller's contract.
+    match unsafe { take_outbound(moved) } {
+        None => (None, None),
+        Some(Outbound::Bytes(bytes)) => (Some(bytes), None),
+        #[cfg(all(
+            feature = "zenoh-c-shared-memory",
+            not(feature = "zenoh-c-no-unstable-api")
+        ))]
+        Some(Outbound::Chunk(chunk)) => (None, Some(chunk)),
+    }
+}
+
 /// Publish `payload` on `keyexpr` over every face: under the declared id when the key was
 /// declared (`mapping`), literally otherwise, and as the chunk's descriptor where the
 /// payload is a chunk and a face negotiated shared memory.

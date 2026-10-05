@@ -1380,6 +1380,59 @@ const UPSTREAM_PROVIDER_CALL: &str = "z_shm_provider_default_new(&provider, valu
 /// 4096 is `z_pub_shm.c`'s own provider size, upstream's convention one file over.
 const SIZED_PROVIDER_CALL: &str = "z_shm_provider_default_new(&provider, 4096);";
 
+/// Derive `z_get_shm.c` with its provider sized as `z_pub_shm.c` sizes its own, compile the
+/// result against both libraries, and return `((wz binary, wz libdir), (reference binary,
+/// reference libdir))`.
+///
+/// The replacement is asserted to happen exactly once, so an upstream that rewrites the file
+/// fails here by name instead of silently testing a different program; and the SAME derived
+/// source is compiled for both arms. LEG 6 and LEG 9 are two counterparties for one program.
+fn derived_get_shm_arms(
+    dir: &Path,
+    include: &Path,
+    libdir_ref: &Path,
+    examples: &Path,
+) -> ((PathBuf, PathBuf), (PathBuf, PathBuf)) {
+    let src_dir = dir.join("src");
+    std::fs::create_dir_all(&src_dir).expect("derived source dir");
+    let upstream =
+        std::fs::read_to_string(examples.join("z_get_shm.c")).expect("upstream's z_get_shm.c");
+    assert_eq!(
+        upstream.matches(UPSTREAM_PROVIDER_CALL).count(),
+        1,
+        "upstream's z_get_shm.c no longer sizes its provider with `{UPSTREAM_PROVIDER_CALL}` \
+         exactly once, so the derivation LEG 6 and LEG 9 rest on has changed: read the file \
+         and decide whether LEG 5 and these legs still say what upstream does."
+    );
+    std::fs::write(
+        src_dir.join("z_get_shm_sized.c"),
+        upstream.replace(UPSTREAM_PROVIDER_CALL, SIZED_PROVIDER_CALL),
+    )
+    .expect("write the derived source");
+    // The example includes its argument parser from its own directory, and the
+    // compile helper uses ONE directory for both the source and the includes.
+    std::fs::copy(examples.join("parse_args.h"), src_dir.join("parse_args.h"))
+        .expect("copy upstream's parse_args.h");
+
+    let wz = arm_binary(
+        "z_get_shm_sized",
+        Arm::Wz,
+        dir,
+        include,
+        &src_dir,
+        libdir_ref,
+    );
+    let reference = arm_binary(
+        "z_get_shm_sized",
+        Arm::Reference,
+        dir,
+        include,
+        &src_dir,
+        libdir_ref,
+    );
+    (wz, reference)
+}
+
 /// LEG 6 — a query payload ALLOCATED IN SHARED MEMORY reaches a REAL zenoh-pico
 /// queryable, which answers it, identically on wz's ABI and on the real library.
 ///
@@ -1398,10 +1451,9 @@ const SIZED_PROVIDER_CALL: &str = "z_shm_provider_default_new(&provider, 4096);"
 ///
 /// The foreign queryable shares no code with either library and is the party
 /// that decodes the payload, so its seeing the bytes is agreement on the wire.
-/// It does not witness that the payload travelled as a SHARED-MEMORY reference:
-/// `z_bytes_from_shm` copies on wz today, and a pico peer has no segment to map
-/// either way, so the bytes cross as bytes on both arms. That half is the send
-/// plane's to witness against a peer that can map the segment.
+/// It does not witness that the payload travelled as a SHARED-MEMORY reference: a pico
+/// peer has no segment to map, so the bytes cross as bytes on both arms whatever either
+/// library could have done. That half is LEG 9's, against a peer that can map the segment.
 // wz-proves: api-compat-c wz->pico partial
 #[test]
 #[ignore = "compiles an upstream zenoh-c example with cc and spawns the real \
@@ -1413,43 +1465,8 @@ fn a_shm_allocated_query_payload_reaches_a_real_pico_queryable_identically_on_wz
         return;
     };
     let dir = tempfile::tempdir().expect("tempdir for the derived program");
-    let src_dir = dir.path().join("src");
-    std::fs::create_dir_all(&src_dir).expect("derived source dir");
-    let upstream =
-        std::fs::read_to_string(examples.join("z_get_shm.c")).expect("upstream's z_get_shm.c");
-    assert_eq!(
-        upstream.matches(UPSTREAM_PROVIDER_CALL).count(),
-        1,
-        "upstream's z_get_shm.c no longer sizes its provider with `{UPSTREAM_PROVIDER_CALL}` \
-         exactly once, so the derivation this leg rests on has changed: read the file and \
-         decide whether LEG 5 and this leg still say what upstream does."
-    );
-    std::fs::write(
-        src_dir.join("z_get_shm_sized.c"),
-        upstream.replace(UPSTREAM_PROVIDER_CALL, SIZED_PROVIDER_CALL),
-    )
-    .expect("write the derived source");
-    // The example includes its argument parser from its own directory, and the
-    // compile helper uses ONE directory for both the source and the includes.
-    std::fs::copy(examples.join("parse_args.h"), src_dir.join("parse_args.h"))
-        .expect("copy upstream's parse_args.h");
-
-    let (on_wz, libdir_wz) = arm_binary(
-        "z_get_shm_sized",
-        Arm::Wz,
-        dir.path(),
-        &include,
-        &src_dir,
-        &libdir_ref,
-    );
-    let (on_ref, libdir_r) = arm_binary(
-        "z_get_shm_sized",
-        Arm::Reference,
-        dir.path(),
-        &include,
-        &src_dir,
-        &libdir_ref,
-    );
+    let ((on_wz, libdir_wz), (on_ref, libdir_r)) =
+        derived_get_shm_arms(dir.path(), &include, &libdir_ref, &examples);
 
     let (ref_status, ref_stdout, ref_both, ref_queryable) =
         run_get_shm_against_pico(&on_ref, &libdir_r, Arm::Reference);
@@ -1497,5 +1514,330 @@ fn a_shm_allocated_query_payload_reaches_a_real_pico_queryable_identically_on_wz
         "§5.27 api-compat-c: the derived z_get_shm reported different replies on wz's \
          C ABI and on libzenohc against the same real pico queryable.\n\
          --- wz ---\n{wz_stdout}--- libzenohc ---\n{ref_stdout}"
+    );
+}
+
+/// Run the derived `z_get_shm` against upstream's own `z_queryable_shm` and return what
+/// that queryable printed.
+///
+/// The queryable is the Rust example that labels the VALUE of every query it receives `SHM`
+/// or `RAW` (`examples/examples/z_queryable_shm.rs` @ `Some(_) => "SHM",`), listening as a
+/// peer that offers shared memory: the third implementation that shares no code with either
+/// arm, and the counterparty LEG 6's pico queryable cannot be, because a pico peer maps no
+/// segment. The program dials it, asks once, and exits when the replies end, so the
+/// capture is read after it has.
+fn observe_query_with_z_queryable_shm(
+    z_queryable_shm: &Path,
+    program: &Path,
+    libdir: &Path,
+    arm: Arm,
+    program_args: impl Fn(&str) -> Vec<String>,
+) -> (ExitStatus, String, String) {
+    let label = arm.label();
+    let reservation = PortReservation::pick();
+    let port = reservation.port();
+    let endpoint = format!("tcp/127.0.0.1:{port}");
+
+    let mut q_out = tempfile::tempfile().expect("queryable output capture");
+    let q_writer = q_out.try_clone().expect("dup queryable output handle");
+    let mut queryable = ChildGuard::wrap(
+        format!("upstream z_queryable_shm ({label})"),
+        Command::new("stdbuf")
+            .args(["-oL", "-eL"])
+            .arg(z_queryable_shm)
+            .args([
+                "-m",
+                "peer",
+                "-l",
+                &endpoint,
+                "-k",
+                "demo/capic/qshm",
+                "--no-multicast-scouting",
+                "--enable-shm",
+            ])
+            .env(
+                "RUST_LOG",
+                "zenoh=info,zenoh_shm=debug,zenoh_transport=debug",
+            )
+            .stdout(Stdio::from(q_writer))
+            .stderr(Stdio::from(q_out.try_clone().expect("dup stderr handle")))
+            .spawn()
+            .expect("spawn upstream's z_queryable_shm"),
+    );
+    if let Err(why) = wait_for_tcp_accept_alive(queryable.child_mut(), port, LISTEN_TIMEOUT) {
+        panic!(
+            "upstream's z_queryable_shm ({label}) never accepted on {endpoint} -- {why}; capture \
+             so far:\n{}",
+            read_captured(&mut q_out)
+        );
+    }
+    drop(reservation);
+
+    let out = Command::new(program)
+        .args(program_args(&endpoint))
+        .env("LD_LIBRARY_PATH", libdir)
+        .output()
+        .unwrap_or_else(|e| panic!("failed to run the {label} getter: {e}"));
+    // The queryable prints before it replies, so what it printed is complete once the
+    // getter has its reply; a short settle covers the flush of its line buffer.
+    std::thread::sleep(Duration::from_millis(500));
+    let seen = read_captured(&mut q_out);
+    graceful_terminate(queryable.child_mut(), TERMINATE_TIMEOUT);
+    let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
+    (out.status, stdout, seen)
+}
+
+/// The buffer-type tag of every query upstream's `z_queryable_shm` printed: the `SHM` or
+/// `RAW` it appends in square brackets to `Received Query ('selector': 'value')`.
+fn queryable_value_tags(log: &str) -> Vec<String> {
+    log.lines()
+        .filter(|l| l.contains("[Queryable] Received Query ('"))
+        .filter_map(|l| {
+            Some(
+                l.trim_end()
+                    .rsplit_once('[')?
+                    .1
+                    .split(']')
+                    .next()?
+                    .to_owned(),
+            )
+        })
+        .collect()
+}
+
+/// LEG 9 -- a query whose VALUE is a chunk of shared memory reaches upstream's own
+/// `z_queryable_shm` as shared memory, on wz's ABI as on the real library: the queryable
+/// labels the value it received `SHM` on both arms.
+///
+/// This is LEG 7 for the getter. LEG 6 runs the same derived program against a pico
+/// queryable, which maps no segment, so it can only show that the bytes arrive; this
+/// counterparty maps the segment and says what it was handed. Until R3059 a get's payload
+/// was taken as bytes (the chunk was copied out of the provider), so the same program
+/// reached this queryable as `RAW` from wz and as `SHM` from the real library. The
+/// reference arm is the control: a reference that labels the value anything but `SHM`
+/// means the oracle or the queryable's offer is not what this leg assumes.
+// wz-proves: api-compat-c wz->zenoh partial
+#[test]
+#[ignore = "compiles an upstream zenoh-c example with cc and spawns upstream's own \
+            z_queryable_shm; needs the machine-local SHARED-MEMORY zenoh-c oracle and the \
+            shared-memory zenohd build; run-ci Layer C1cc drives it"]
+fn a_get_whose_value_is_a_chunk_reaches_a_real_z_queryable_shm_as_shared_memory_on_wz_capi_c() {
+    let Some((include, libdir_ref, examples)) = oracle_or_note() else {
+        return;
+    };
+    let Some(z_queryable_shm) = zenoh_shm_example_binary("z_queryable_shm") else {
+        eprintln!(
+            "skip: no z_queryable_shm at target/zenohd-shm (run `ZENOHD_SHM=1 scripts/build-zenohd.sh`)"
+        );
+        return;
+    };
+    let dir = tempfile::tempdir().expect("tempdir for the derived program");
+    let ((on_wz, libdir_wz), (on_ref, libdir_r)) =
+        derived_get_shm_arms(dir.path(), &include, &libdir_ref, &examples);
+
+    let args = |endpoint: &str| {
+        vec![
+            "-e".to_string(),
+            endpoint.to_string(),
+            "-m".to_string(),
+            "client".to_string(),
+            "-s".to_string(),
+            "demo/capic/qshm".to_string(),
+            "-p".to_string(),
+            GET_SHM_SENT.to_string(),
+        ]
+    };
+    let (ref_status, ref_stdout, ref_seen) = observe_query_with_z_queryable_shm(
+        &z_queryable_shm,
+        &on_ref,
+        &libdir_r,
+        Arm::Reference,
+        args,
+    );
+    let (wz_status, wz_stdout, wz_seen) =
+        observe_query_with_z_queryable_shm(&z_queryable_shm, &on_wz, &libdir_wz, Arm::Wz, args);
+
+    let (ref_tags, wz_tags) = (
+        queryable_value_tags(&ref_seen),
+        queryable_value_tags(&wz_seen),
+    );
+    assert!(
+        ref_status.success() && !ref_tags.is_empty() && ref_tags.iter().all(|t| t == "SHM"),
+        "the reference arm's query did not reach upstream's z_queryable_shm as shared memory \
+         (exit {:?}, tags {ref_tags:?}), so the comparison below says nothing about it\n\
+         --- program ---\n{ref_stdout}\n--- queryable ---\n{ref_seen}",
+        ref_status.code(),
+    );
+    assert!(
+        wz_status.success(),
+        "the derived z_get_shm on wz's C ABI exited {:?}\n{wz_stdout}\n--- queryable \
+         ---\n{wz_seen}",
+        wz_status.code(),
+    );
+    assert_eq!(
+        wz_tags, ref_tags,
+        "the two arms of the SAME derived z_get_shm reached upstream's z_queryable_shm with \
+         different buffer types. wz: {wz_tags:?}; the real libzenohc: {ref_tags:?}.\n--- wz \
+         ---\n{wz_seen}\n--- reference ---\n{ref_seen}"
+    );
+    assert!(
+        wz_seen.contains(GET_SHM_SENT),
+        "upstream's z_queryable_shm printed nothing carrying the value the wz arm sent\n{wz_seen}"
+    );
+    assert!(
+        !report_lines(&wz_stdout).is_empty() && !report_lines(&ref_stdout).is_empty(),
+        "an arm got no reply from the queryable: wz {:?}, reference {:?}",
+        report_lines(&wz_stdout),
+        report_lines(&ref_stdout),
+    );
+}
+
+/// A getter that asks through a DECLARED QUERIER with a chunk of shared memory as the
+/// value: `z_get_shm.c` with the session's `z_get` replaced by `z_declare_querier` and
+/// `z_querier_get`. The querier takes its options' payload at a site of its own, so a
+/// `z_get` that sends the chunk says nothing about it. Ours, and the same source is
+/// compiled for both arms. Arguments: the endpoint to dial, the key, the value.
+const QUERIER_SHM_GETTER: &str = r#"#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include "zenoh.h"
+
+int main(int argc, char **argv) {
+    setvbuf(stdout, NULL, _IONBF, 0);
+    if (argc != 4) { return 2; }
+    z_owned_config_t config;
+    z_config_default(&config);
+    char connect[512];
+    snprintf(connect, sizeof connect, "[\"%s\"]", argv[1]);
+    if (zc_config_insert_json5(z_loan_mut(config), Z_CONFIG_CONNECT_KEY, connect) < 0) { return 3; }
+    if (zc_config_insert_json5(z_loan_mut(config), Z_CONFIG_MODE_KEY, "\"client\"") < 0) { return 3; }
+    z_owned_session_t s;
+    if (z_open(&s, z_move(config), NULL) < 0) { printf("open failed\n"); return 4; }
+    z_view_keyexpr_t ke;
+    if (z_view_keyexpr_from_str(&ke, argv[2]) < 0) { return 5; }
+    z_owned_querier_t querier;
+    if (z_declare_querier(z_loan(s), &querier, z_loan(ke), NULL) < 0) { printf("querier failed\n"); return 6; }
+
+    z_owned_shm_provider_t provider;
+    if (z_shm_provider_default_new(&provider, 4096) != Z_OK) { printf("provider failed\n"); return 7; }
+    size_t len = strlen(argv[3]);
+    z_buf_layout_alloc_result_t alloc;
+    z_shm_provider_alloc_gc_defrag_blocking(&alloc, z_loan(provider), len);
+    if (alloc.status != ZC_BUF_LAYOUT_ALLOC_STATUS_OK) { printf("alloc failed\n"); return 8; }
+    memcpy(z_shm_mut_data_mut(z_loan_mut(alloc.buf)), argv[3], len);
+    z_owned_bytes_t payload;
+    if (z_bytes_from_shm_mut(&payload, z_move(alloc.buf)) != Z_OK) { printf("bytes failed\n"); return 9; }
+
+    z_owned_fifo_handler_reply_t handler;
+    z_owned_closure_reply_t closure;
+    z_fifo_channel_reply_new(&closure, &handler, 16);
+    z_querier_get_options_t opts;
+    z_querier_get_options_default(&opts);
+    opts.payload = z_move(payload);
+    printf("Sending Query '%s'...\n", argv[2]);
+    if (z_querier_get(z_loan(querier), "", z_move(closure), &opts) < 0) { printf("get failed\n"); return 10; }
+    z_owned_reply_t reply;
+    while (z_recv(z_loan(handler), &reply) == Z_OK) {
+        if (z_reply_is_ok(z_loan(reply))) {
+            const z_loaned_sample_t *sample = z_reply_ok(z_loan(reply));
+            z_view_string_t key_str;
+            z_keyexpr_as_view_string(z_sample_keyexpr(sample), &key_str);
+            printf(">> Received reply for '%.*s'\n", (int)z_string_len(z_loan(key_str)), z_string_data(z_loan(key_str)));
+        } else {
+            printf("Received an error\n");
+        }
+        z_drop(z_move(reply));
+    }
+    z_drop(z_move(handler));
+    z_drop(z_move(s));
+    return 0;
+}
+"#;
+
+/// LEG 10 -- a get through a DECLARED QUERIER whose value is a chunk reaches upstream's
+/// `z_queryable_shm` as shared memory on both arms. LEG 9 covers `z_get`; the querier takes
+/// its options' payload at a site of its own, and a declared querier is how a program that
+/// asks the same question repeatedly asks it.
+// wz-proves: api-compat-c wz->zenoh partial
+#[test]
+#[ignore = "compiles a C program with cc and spawns upstream's own z_queryable_shm; needs the \
+            machine-local SHARED-MEMORY zenoh-c oracle and the shared-memory zenohd build; \
+            run-ci Layer C1cc drives it"]
+fn a_querier_get_whose_value_is_a_chunk_reaches_a_real_z_queryable_shm_as_shared_memory_on_wz_capi_c(
+) {
+    let Some((include, libdir_ref, _examples)) = oracle_or_note() else {
+        return;
+    };
+    let Some(z_queryable_shm) = zenoh_shm_example_binary("z_queryable_shm") else {
+        eprintln!(
+            "skip: no z_queryable_shm at target/zenohd-shm (run `ZENOHD_SHM=1 scripts/build-zenohd.sh`)"
+        );
+        return;
+    };
+    let dir = tempfile::tempdir().expect("tempdir for the compiled arms");
+    let src_dir = dir.path().join("src");
+    std::fs::create_dir_all(&src_dir).expect("source dir");
+    std::fs::write(src_dir.join("querier_shm_getter.c"), QUERIER_SHM_GETTER)
+        .expect("write the getter source");
+    let (on_wz, libdir_wz) = arm_binary(
+        "querier_shm_getter",
+        Arm::Wz,
+        dir.path(),
+        &include,
+        &src_dir,
+        &libdir_ref,
+    );
+    let (on_ref, libdir_r) = arm_binary(
+        "querier_shm_getter",
+        Arm::Reference,
+        dir.path(),
+        &include,
+        &src_dir,
+        &libdir_ref,
+    );
+
+    let args = |endpoint: &str| {
+        vec![
+            endpoint.to_string(),
+            "demo/capic/qshm".to_string(),
+            GET_SHM_SENT.to_string(),
+        ]
+    };
+    let (ref_status, ref_stdout, ref_seen) = observe_query_with_z_queryable_shm(
+        &z_queryable_shm,
+        &on_ref,
+        &libdir_r,
+        Arm::Reference,
+        args,
+    );
+    let (wz_status, wz_stdout, wz_seen) =
+        observe_query_with_z_queryable_shm(&z_queryable_shm, &on_wz, &libdir_wz, Arm::Wz, args);
+
+    let (ref_tags, wz_tags) = (
+        queryable_value_tags(&ref_seen),
+        queryable_value_tags(&wz_seen),
+    );
+    assert!(
+        ref_status.success() && !ref_tags.is_empty() && ref_tags.iter().all(|t| t == "SHM"),
+        "the reference arm's querier did not reach upstream's z_queryable_shm as shared memory \
+         (exit {:?}, tags {ref_tags:?}), so the comparison below says nothing about it\n\
+         --- program ---\n{ref_stdout}\n--- queryable ---\n{ref_seen}",
+        ref_status.code(),
+    );
+    assert!(
+        wz_status.success(),
+        "the querier getter on wz's C ABI exited {:?}\n{wz_stdout}\n--- queryable ---\n{wz_seen}",
+        wz_status.code(),
+    );
+    assert_eq!(
+        wz_tags, ref_tags,
+        "the two arms of the SAME querier program reached upstream's z_queryable_shm with \
+         different buffer types. wz: {wz_tags:?}; the real libzenohc: {ref_tags:?}.\n--- wz \
+         ---\n{wz_seen}\n--- reference ---\n{ref_seen}"
+    );
+    assert!(
+        wz_seen.contains(GET_SHM_SENT) && wz_stdout.contains(">> Received reply for"),
+        "the wz arm's querier did not carry the value and get the queryable's reply\n--- program \
+         ---\n{wz_stdout}\n--- queryable ---\n{wz_seen}"
     );
 }

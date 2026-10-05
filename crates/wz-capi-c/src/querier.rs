@@ -479,13 +479,13 @@ unsafe fn querier_get_with_selector(
 
         // The per-get moved payload / attachment are consumed on every path
         // too, matching upstream's unconditional ownership transfer.
-        let (payload, attachment, encoding, source_info, token) = if options.is_null() {
-            (None, None, None, None, None)
+        let ((payload, value), attachment, encoding, source_info, token) = if options.is_null() {
+            ((None, None), None, None, None, None)
         } else {
             // SAFETY: the caller's contract.
             unsafe {
                 (
-                    crate::bytes::take_payload((*options).payload),
+                    crate::bytes::take_query_value((*options).payload),
                     crate::bytes::take_payload((*options).attachment),
                     crate::encoding::take_moved_encoding((*options).encoding),
                     querier_get_source_info(options),
@@ -516,6 +516,7 @@ unsafe fn querier_get_with_selector(
             state.keyexpr.literal().to_owned(),
             params,
             opts,
+            value,
             closure,
             token,
         )

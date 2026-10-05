@@ -19962,7 +19962,9 @@ layer_c1cc_api_compat_c() {
         upstream_z_get_shm_on_wz_capi_c_runs_on_neither_arm_at_the_pinned_version \
         a_shm_allocated_query_payload_reaches_a_real_pico_queryable_identically_on_wz_capi_c_and_libzenohc \
         upstream_z_pub_shm_on_wz_capi_c_reaches_a_real_z_sub_shm_as_shared_memory \
-        a_chunk_put_on_a_declared_keyexpr_reaches_a_real_z_sub_shm_as_shared_memory_on_wz_capi_c; do
+        a_chunk_put_on_a_declared_keyexpr_reaches_a_real_z_sub_shm_as_shared_memory_on_wz_capi_c \
+        a_get_whose_value_is_a_chunk_reaches_a_real_z_queryable_shm_as_shared_memory_on_wz_capi_c \
+        a_querier_get_whose_value_is_a_chunk_reaches_a_real_z_queryable_shm_as_shared_memory_on_wz_capi_c; do
         _runci_guarded_test "C1cc $leg" 1 \
             cargo test -p wz-integration-tests \
             --test zenoh_c_shm_and_advanced_on_wz_capi_c -- --ignored --quiet --test-threads=1 \

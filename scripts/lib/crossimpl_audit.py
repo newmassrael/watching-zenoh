@@ -935,7 +935,13 @@ HOST_GATED_CI_TARGETS: dict[str, str] = {
 # zenoh-c->wz partial`, the class its sibling differentials declare). No new class, so no
 # new execution lane is owed: leg 7 and 8 run on C1cc like leg 3b, which declares the same
 # application. Measured by `scripts/audit-crossimpl-proof.sh` at this round's tree.
-FOREIGN_ADJUDICATOR_LINKS = 993
+# R3060 -- 993 -> 995, RISING by two, each a new `wz-proves` line in
+# `zenoh_c_shm_and_advanced_on_wz_capi_c.rs`: leg 9 (the derived `z_get_shm` reaches
+# upstream's own `z_queryable_shm` with its value as shared memory) and leg 10 (the same
+# through a declared querier), each `api-compat-c wz->zenoh partial`, the class legs 7 and 8
+# already declare against the same lane and the same application. No new class, so no new
+# execution lane is owed. Measured by `scripts/audit-crossimpl-proof.sh` at this round's tree.
+FOREIGN_ADJUDICATOR_LINKS = 995
 
 # ── Execution disclosure ────────────────────────────────────────────────────────
 #

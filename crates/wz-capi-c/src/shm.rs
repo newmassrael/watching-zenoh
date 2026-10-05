@@ -29,20 +29,24 @@
 //!   that segment, mapped and not copied, and [`z_bytes_as_loaned_shm`] and
 //!   [`z_bytes_as_mut_loaned_shm`] answer for it as upstream's do: the mutable view
 //!   only while this payload is the chunk's sole holder.
-//! - **Sending (R3059): `z_put` and `z_publisher_put`.** The provider allocates out of
-//!   a real segment (R3058), and [`z_bytes_from_shm`] KEEPS the chunk of one: the
-//!   payload is the chunk, [`z_bytes_as_loaned_shm`] says so for it, and a put of it
-//!   sends the chunk's descriptor to every peer that negotiated shared memory and the
-//!   bytes to every peer that did not, on a literal key and on a declared one alike.
-//!   Upstream's own `z_pub_shm.c` reaches upstream's own `z_sub_shm` as a
-//!   shared-memory buffer through it (`zenoh_c_shm_and_advanced_on_wz_capi_c`, legs 7
-//!   and 8). What is still bytes: a payload in `z_get`, a querier's get, a query's
-//!   reply and the advanced publisher's put, which take the chunk's bytes whatever
-//!   it was built from; and the sample a SAME-SESSION subscriber is handed, which is
-//!   the bytes and not a buffer, so `z_bytes_as_loaned_shm` on it answers `Z_EINVAL`
-//!   where upstream's would answer a buffer. A buffer received from a peer is copied
-//!   when it is built into a payload, because its memory is the peer's segment and
-//!   not one of this process's providers.
+//! - **Sending (R3059, R3060): `z_put`, `z_publisher_put`, `z_get` and
+//!   `z_querier_get`.** The provider allocates out of a real segment (R3058), and
+//!   [`z_bytes_from_shm`] KEEPS the chunk of one: the payload is the chunk,
+//!   [`z_bytes_as_loaned_shm`] says so for it, and a put of it sends the chunk's
+//!   descriptor to every peer that negotiated shared memory and the bytes to every peer
+//!   that did not, on a literal key and on a declared one alike; a get or a querier
+//!   whose VALUE is a chunk does the same with the value. Upstream's own `z_pub_shm.c`
+//!   reaches upstream's own `z_sub_shm`, and the derived `z_get_shm` upstream's own
+//!   `z_queryable_shm`, as a shared-memory buffer through it
+//!   (`zenoh_c_shm_and_advanced_on_wz_capi_c`, legs 7 to 10). A subscriber of the
+//!   PUBLISHING session is handed the chunk as well, as upstream hands it
+//!   (`zenoh_c_shm_local_delivery_twice_and_diff`). What is still bytes: a query's
+//!   reply and the advanced publisher's put, which take the chunk's bytes whatever it
+//!   was built from; and the VALUE a queryable is handed, whether the query was its own
+//!   session's or a peer's, so `z_bytes_as_loaned_shm(z_query_payload(..))` answers
+//!   `Z_EINVAL` where upstream's answers a buffer. A buffer received from a peer is
+//!   copied when it is built into a payload, because its memory is the peer's segment
+//!   and not one of this process's providers.
 //!
 //! ⚠ R2970 corrected two sentences that said this ABI's SHM fallback was upstream's
 //! and the reason the two arms of the drop-in test agree. They were wrong then, and
