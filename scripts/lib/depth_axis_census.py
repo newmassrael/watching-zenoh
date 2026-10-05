@@ -2497,7 +2497,18 @@ PIN_NO_SYMBOL = 0
 # value, which names three (the unswap, the view accessor and the runtime's local leg).
 # Both atoms are still PARTIAL. READ off the census's own FAIL line, `wz citations: 84
 # against a pin of 73`; `reached` and `ambiguous` hold at 3 and 2.
-PIN_WZ_CITATIONS = 84
+#
+# R3062 -- 84 -> 99, two atoms. `api-compat-c`'s reason gains the UPDATE that a C queryable's
+# reply that is a chunk is sent as shared memory and a C getter is handed one as the buffer,
+# which names the seam's carrier, the sending trait and its runtime implementation, the
+# offer-aware conversion, the Response builder's descriptor setter, the send that reports,
+# the runtime's one drain function, the C ABI's outbound reply and its reply marshal, and the
+# files of the witnesses; and `transport-shm`'s gains the UPDATE for the reply half, which
+# names the handle, the builder and the owning reservation. Both atoms are still PARTIAL. READ
+# off the census's own FAIL line, `wz citations: 99 against a pin of 84`, rather than summed
+# from the prose, because the count is of resolved paths per reason and the same file named
+# in two reasons is counted in each; `reached` and `ambiguous` hold at 3 and 2.
+PIN_WZ_CITATIONS = 99
 # R2626 — 44 -> 42, and this one is worth a sentence because it HELD through
 # every earlier retirement in this run (R2612, R2622). `time-hlc`'s reason is the
 # first retiree carrying AMBIGUOUS citations of its own: its oldest clauses cite
