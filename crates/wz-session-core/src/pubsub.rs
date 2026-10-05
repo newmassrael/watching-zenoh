@@ -4490,6 +4490,42 @@ mod tests {
         assert!(bands.lock().expect("bands").is_empty());
     }
 
+    /// R3049 -- A PUT WHOSE PAYLOAD IS ONE SHARED-MEMORY BUFFER IS DELIVERED AS THE
+    /// BUFFER THE RESOLVER RETURNED. The address is the witness: the subscriber is
+    /// handed bytes that start where the resolver's storage starts, which a copy
+    /// cannot be made to do, where comparing the bytes with the ones sent passes a
+    /// copy too.
+    #[cfg(all(
+        feature = "transport-shm",
+        feature = "pubsub-put",
+        feature = "rx-shared-bytes"
+    ))]
+    #[test]
+    fn a_put_of_one_shm_buffer_is_delivered_as_the_storage_the_resolver_lent() {
+        let storage = Arc::new(b"seven b".to_vec());
+        let delivered = Arc::new(AtomicUsize::new(0));
+        let mut registry = SubscriberRegistry::<BoxedSink>::new();
+        let seen = delivered.clone();
+        registry.register("demo/shm", move |sample| {
+            seen.store(sample.payload().as_ptr() as usize, Ordering::SeqCst);
+        });
+        registry.set_shm_negotiated(true);
+        registry.set_shm_resolver(Box::new(crate::extshm::test_support::LendsStorage(
+            storage.clone(),
+        )));
+
+        registry.dispatch(
+            &NetworkMessage::Push(Box::new(shm_push(None))),
+            Reliability::Reliable,
+        );
+
+        assert_eq!(
+            delivered.load(Ordering::SeqCst),
+            storage.as_ptr() as usize,
+            "the sample's bytes are the storage the resolver lent and not a copy of it"
+        );
+    }
+
     /// R3040 -- a session that never negotiated shared memory acknowledges
     /// nothing: the Put is refused before any slice is read, so no counter of a
     /// peer this node has no agreement with is written.

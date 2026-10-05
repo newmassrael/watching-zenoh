@@ -102,6 +102,7 @@ use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering}
 use std::sync::{Arc, Mutex, OnceLock};
 
 use wz_session_core::extshm::{ShmDescriptor, ShmResolver};
+use wz_session_core::link::{RxBytes, RxStorage};
 
 use crate::posix_shm::{next_candidate_id, OwnedSegment, PeerSegment, PeerSegmentRw};
 use crate::shm_watchdog::{confirmator, Confirmed, WatchdogBit};
@@ -701,11 +702,11 @@ impl ChunkHold {
         }
     }
 
-    /// Copy the chunk's bytes out of the shared page (the bounded scoped copy
-    /// into an owned buffer), or `None` when the chunk is not valid, names a
-    /// protocol this node does not speak, claims more than its length, or its data
-    /// segment will not open.
-    pub fn read(&self) -> Option<Vec<u8>> {
+    /// The chunk's data segment, mapped, and where in it the chunk's bytes lie, or
+    /// `None` when the chunk is not valid, names a protocol this node does not
+    /// speak, claims more than its length, its data segment will not open, or the
+    /// window does not lie inside the segment.
+    fn window(&self) -> Option<(PeerSegment, std::ops::Range<usize>)> {
         let header = self.header()?;
         if header.watchdog_invalidated.load(Ordering::Acquire)
             || header.protocol.load(Ordering::Relaxed) != POSIX_PROTOCOL_ID
@@ -718,9 +719,56 @@ impl ChunkHold {
             return None;
         }
         let data = PeerSegment::open(u64::from(header.segment.load(Ordering::Relaxed))).ok()?;
-        data.bytes()
-            .get(chunk..chunk.checked_add(data_len)?)
-            .map(<[u8]>::to_vec)
+        let end = chunk.checked_add(data_len)?;
+        data.bytes().get(chunk..end)?;
+        Some((data, chunk..end))
+    }
+
+    /// Copy the chunk's bytes out of the shared page (the bounded scoped copy
+    /// into an owned buffer), or `None` when the chunk has no readable window (see
+    /// `window`).
+    pub fn read(&self) -> Option<Vec<u8>> {
+        let (data, window) = self.window()?;
+        Some(data.bytes()[window].to_vec())
+    }
+
+    /// The chunk's bytes as they lie on the shared page, with this hold kept for as
+    /// long as any range of them lives (R3049): the delivered payload IS the page,
+    /// and the reference the sender took for this receiver goes back, and the
+    /// watchdog bit stops being confirmed, when the last range drops and not before.
+    ///
+    /// Upstream's receiver is the same: its `ShmBuf` reads straight out of the
+    /// mapped segment and gives the reference back in `Drop for ShmBufInner`.
+    /// `None` when the chunk has no readable window, and then `self` drops here, so the
+    /// reference goes back on that way out as it does for a copy.
+    pub fn into_shared(self) -> Option<RxBytes> {
+        let (data, window) = self.window()?;
+        let len = window.len();
+        let storage: Arc<dyn RxStorage> = Arc::new(SharedChunk {
+            data,
+            window,
+            _hold: self,
+        });
+        RxBytes::shared(storage, 0..len)
+    }
+}
+
+/// The storage a received shared-memory payload is a range of: a chunk's data
+/// segment, mapped, and the hold that keeps the chunk the sender's until the last
+/// range of it drops.
+///
+/// The fields drop in the order they are declared and the order is the point: the
+/// mapping goes first, so nothing can read the page after the sender is free to
+/// reuse it, and the hold goes second and gives the reference back.
+struct SharedChunk {
+    data: PeerSegment,
+    window: std::ops::Range<usize>,
+    _hold: ChunkHold,
+}
+
+impl RxStorage for SharedChunk {
+    fn as_slice(&self) -> &[u8] {
+        &self.data.bytes()[self.window.clone()]
     }
 }
 
@@ -734,8 +782,11 @@ impl Drop for ChunkHold {
 
 /// The reader-side resolver: the AP impl of the no_std [`ShmResolver`] seam.
 ///
-/// Follows a descriptor as upstream's reader does: [`ChunkHold::link`] it, read
-/// the bytes off the shared page into an owned buffer, and let the hold go.
+/// Follows a descriptor as upstream's reader does: [`ChunkHold::link`] it, then
+/// either read the bytes off the shared page into an owned buffer and let the hold
+/// go (`resolve`), or hand the bytes up where they lie and keep the hold until the
+/// last range of them drops (`resolve_shared`, which is the path a delivered sample
+/// takes, R3050).
 #[derive(Debug, Clone, Copy, Default)]
 pub struct PosixShmResolver;
 
@@ -756,6 +807,12 @@ impl ShmResolver for PosixShmResolver {
     fn resolve(&self, descriptor: &ShmDescriptor) -> Option<Vec<u8>> {
         let hold = ChunkHold::link(descriptor)?;
         hold.read()
+    }
+
+    /// R3049 -- the bytes where they lie on the shared page, the reference given
+    /// back when the last range of them drops (see [`ChunkHold::into_shared`]).
+    fn resolve_shared(&self, descriptor: &ShmDescriptor) -> Option<RxBytes> {
+        ChunkHold::link(descriptor)?.into_shared()
     }
 }
 
@@ -944,6 +1001,90 @@ mod tests {
             reference_state(&first),
             Some(ReferenceState::Reclaimed),
             "the owner's was the last reference"
+        );
+    }
+
+    /// R3049 -- THE PAYLOAD IS THE PAGE. A resolved payload that is a copy cannot
+    /// see what the owner writes into the segment afterwards, and one that is the
+    /// page can, so the owner's later write is the witness that separates them:
+    /// comparing the bytes it was handed with the bytes that were sent passes a
+    /// copy too.
+    #[test]
+    fn a_resolved_payload_is_the_page_and_not_a_copy_of_it() {
+        let mut payload = ShmBackedPayload::alloc(8).expect("alloc");
+        payload.write(b"before!!");
+        let descriptor = sent(&payload);
+
+        let shared = PosixShmResolver
+            .resolve_shared(&descriptor)
+            .expect("resolve_shared");
+        assert_eq!(shared.as_slice(), b"before!!");
+        assert!(shared.is_shared(), "the bytes are a range of lent storage");
+
+        payload.write(b"after!!!");
+        assert_eq!(
+            shared.as_slice(),
+            b"after!!!",
+            "the receiver reads the page itself, so the owner's later write shows"
+        );
+    }
+
+    /// R3049 -- the reference the sender took for this receiver is NOT given back
+    /// when the payload is resolved: it goes back when the last range of the
+    /// payload drops, however many ranges were taken of it. The count is read off
+    /// the slot's own header, so a payload that gave it back early (a copy) reads
+    /// 1 where this reads 2.
+    #[test]
+    fn the_reference_goes_back_when_the_last_range_of_a_shared_payload_drops() {
+        let mut payload = ShmBackedPayload::alloc(4).expect("alloc");
+        payload.write(b"held");
+        let descriptor = sent(&payload);
+        assert_eq!(reference_state(&descriptor), Some(ReferenceState::Held(2)));
+
+        let shared = PosixShmResolver
+            .resolve_shared(&descriptor)
+            .expect("resolve_shared");
+        assert_eq!(
+            reference_state(&descriptor),
+            Some(ReferenceState::Held(2)),
+            "a resolve keeps the receiver's reference for as long as the bytes live"
+        );
+
+        let part = shared.subslice(0..2).expect("a range of the payload");
+        drop(shared);
+        assert_eq!(
+            reference_state(&descriptor),
+            Some(ReferenceState::Held(2)),
+            "a range of the payload still holds the chunk after the payload is gone"
+        );
+
+        drop(part);
+        assert_eq!(
+            reference_state(&descriptor),
+            Some(ReferenceState::Held(1)),
+            "the last range dropped, so the receiver's reference is back and only the owner's is left"
+        );
+    }
+
+    /// R3049 -- a read that fails after the descriptor is known to be this
+    /// receiver's still gives the reference back, as a copy does: the way out of a
+    /// failed shared read is the drop of the hold.
+    #[test]
+    fn a_shared_read_that_fails_gives_its_reference_back() {
+        let mut payload = ShmBackedPayload::alloc(4).expect("alloc");
+        payload.write(b"torn");
+        let mut lies = sent(&payload);
+        assert_eq!(reference_state(&lies), Some(ReferenceState::Held(2)));
+
+        lies.data_len += 1_000_000;
+        assert!(
+            PosixShmResolver.resolve_shared(&lies).is_none(),
+            "a length past the chunk's own is refused"
+        );
+        assert_eq!(
+            reference_state(&lies),
+            Some(ReferenceState::Held(1)),
+            "and the reference the descriptor carried is not left raised"
         );
     }
 

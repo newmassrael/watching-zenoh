@@ -236,28 +236,61 @@ pub fn collect_payload<S: CodecStorage>(
 /// message it arrived in.
 pub fn collect_slices<S: CodecStorage>(
     slices: &[ZbufSliceOwned<S>],
-    mut resolve: impl FnMut(&[u8]) -> Option<Vec<u8>>,
+    resolve: impl FnMut(&[u8]) -> Option<Vec<u8>>,
 ) -> Result<Vec<u8>, PayloadFault> {
-    let mut out = Vec::new();
-    // The FIRST fault is the one reported, but the walk goes on after it:
-    // R3038 -- the resolver of a shared-memory slice gives back the
-    // reference the sender took for this receiver, so a slice that is
-    // never offered to it is a reference nobody releases. Upstream maps
-    // every slice of a message when it arrives and drops them all with
-    // the message, whether or not the message is then delivered.
+    Ok(match walk_slices(slices, resolve, Vec::as_slice)? {
+        Walked::Whole(bytes) | Walked::Joined(bytes) => bytes,
+    })
+}
+
+/// What a walk of a list of slices produced.
+enum Walked<R> {
+    /// The list was ONE shared-memory slice, and this is what its descriptor
+    /// resolved to, handed on as it is: a resolver that returns a view of the
+    /// segment is not copied out of here.
+    Whole(R),
+    /// More than one slice, or a RAW one: the bytes of each, in order, in a buffer
+    /// of their own. Joining slices is a new buffer and is the copy upstream's
+    /// `ZBuf` avoids by holding the slices apart, which a contiguous payload
+    /// cannot.
+    Joined(Vec<u8>),
+}
+
+/// The walk every collector of slices shares, so what a slice is owed is one rule
+/// and not one per return type (R3049). `view` reads the bytes out of what a
+/// resolver returned.
+///
+/// The FIRST fault is the one reported, but the walk goes on after it:
+/// R3038 -- the resolver of a shared-memory slice gives back the reference the
+/// sender took for this receiver, so a slice that is never offered to it is a
+/// reference nobody releases. Upstream maps every slice of a message when it
+/// arrives and drops them all with the message, whether or not the message is then
+/// delivered.
+fn walk_slices<S: CodecStorage, R>(
+    slices: &[ZbufSliceOwned<S>],
+    mut resolve: impl FnMut(&[u8]) -> Option<R>,
+    view: impl Fn(&R) -> &[u8],
+) -> Result<Walked<R>, PayloadFault> {
+    let mut joined = Vec::new();
+    let mut whole = None;
     let mut fault = None;
+    let only_one = slices.len() == 1;
     for slice in slices {
         let bytes = SceByteBuf::as_slice(&slice.bytes);
         match slice_kind(slice.kind) {
             SLICE_KIND_RAW => {
                 if fault.is_none() {
-                    out.extend_from_slice(bytes);
+                    joined.extend_from_slice(bytes);
                 }
             }
             SLICE_KIND_SHM_PTR => match resolve(bytes) {
                 Some(resolved) => {
                     if fault.is_none() {
-                        out.extend_from_slice(&resolved);
+                        if only_one {
+                            whole = Some(resolved);
+                        } else {
+                            joined.extend_from_slice(view(&resolved));
+                        }
                     }
                 }
                 None => {
@@ -269,9 +302,10 @@ pub fn collect_slices<S: CodecStorage>(
             }
         }
     }
-    match fault {
-        Some(fault) => Err(fault),
-        None => Ok(out),
+    match (fault, whole) {
+        (Some(fault), _) => Err(fault),
+        (None, Some(whole)) => Ok(Walked::Whole(whole)),
+        (None, None) => Ok(Walked::Joined(joined)),
     }
 }
 
@@ -285,9 +319,16 @@ pub fn collect_slices<S: CodecStorage>(
 /// A sliced Put has to be assembled from its slices, which is a new buffer and the
 /// same copy [`collect_payload`] makes. Off `rx-shared-bytes` there is no sharing
 /// and this is [`collect_payload`] moved into the shareable type.
+///
+/// R3049 -- `resolve` returns the bytes a descriptor names as the shareable type
+/// too, so a Put whose payload is ONE shared-memory buffer is delivered as the
+/// buffer the resolver returned: a resolver that keeps the segment mapped and
+/// returns a range of it hands the application the page and not a copy of it, and
+/// the reference the descriptor carried goes back when the last range of it
+/// drops. Several slices are still joined into a buffer of their own.
 pub fn collect_wire_payload(
     put: &MsgPutOwned<crate::wire::WireStorage>,
-    resolve: impl FnMut(&[u8]) -> Option<Vec<u8>>,
+    resolve: impl FnMut(&[u8]) -> Option<crate::link::RxBytes>,
 ) -> Result<crate::link::RxBytes, PayloadFault> {
     #[cfg(feature = "rx-shared-bytes")]
     if put.slices.is_none() {
@@ -296,7 +337,15 @@ pub fn collect_wire_payload(
             None => crate::link::RxBytes::from(Vec::new()),
         });
     }
-    collect_payload(put, resolve).map(crate::link::RxBytes::from)
+    match layout(put) {
+        PutPayload::Inline(bytes) => Ok(crate::link::RxBytes::from(bytes.to_vec())),
+        PutPayload::Sliced(slices) => Ok(
+            match walk_slices(slices, resolve, crate::link::RxBytes::as_slice)? {
+                Walked::Whole(bytes) => bytes,
+                Walked::Joined(bytes) => crate::link::RxBytes::from(bytes),
+            },
+        ),
+    }
 }
 
 /// The priority band a received message was sent at, as the index of the handoff

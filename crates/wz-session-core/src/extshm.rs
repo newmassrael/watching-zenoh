@@ -438,7 +438,10 @@ pub trait ShmAuthenticator {
 /// the Sample). Used on the RX path (R3b wires it onto the subscriber registry).
 pub trait ShmResolver {
     /// Open the descriptor's segment and copy its `length` bytes out (the bounded
-    /// scoped copy off the shared page into wz's owned Sample payload).
+    /// scoped copy off the shared page into an owned buffer). A payload that is
+    /// delivered to the application is read through [`Self::resolve_shared`]
+    /// instead, which leaves the bytes on the page; this copy is what a message
+    /// that is not delivered as one buffer is joined from.
     ///
     /// R3038 -- THE CONTRACT INCLUDES THE RELEASE. A descriptor is sent with one
     /// reference taken for its receiver, as upstream's sender takes it when it
@@ -450,6 +453,18 @@ pub trait ShmResolver {
     /// sender's chunk out of its pool for good. A descriptor that is not this
     /// receiver's (a slot that has since been reclaimed) is not released.
     fn resolve(&self, descriptor: &ShmDescriptor) -> Option<Vec<u8>>;
+
+    /// [`Self::resolve`] returning the bytes as the shareable type, so an
+    /// implementation that keeps the segment mapped can hand them up where they
+    /// are (R3049). The contract on the reference changes with it and only in WHEN:
+    /// it is given back exactly once on every way out, and the way out of a read
+    /// that succeeded is the drop of the last range of the bytes returned, because
+    /// the page must stay the sender's, unreclaimed, for as long as anything reads
+    /// it. The default copies and gives the reference back before it returns, which
+    /// is the same contract with the last drop already past.
+    fn resolve_shared(&self, descriptor: &ShmDescriptor) -> Option<crate::link::RxBytes> {
+        self.resolve(descriptor).map(crate::link::RxBytes::from)
+    }
 }
 
 /// R3040 -- the RECEIVING end of zenoh's SHM handoff counters.
@@ -509,6 +524,24 @@ pub(crate) mod test_support {
     impl ShmResolver for AlwaysResolves {
         fn resolve(&self, _descriptor: &ShmDescriptor) -> Option<Vec<u8>> {
             Some(b"payload".to_vec())
+        }
+    }
+
+    /// A resolver that hands up a range of storage IT KEEPS, so a test reads
+    /// whether what the application was delivered is that storage or a copy of it:
+    /// the address of the bytes is the storage's own, and a copy has another.
+    #[cfg(feature = "rx-shared-bytes")]
+    pub(crate) struct LendsStorage(pub(crate) Arc<Vec<u8>>);
+
+    #[cfg(feature = "rx-shared-bytes")]
+    impl ShmResolver for LendsStorage {
+        fn resolve(&self, _descriptor: &ShmDescriptor) -> Option<Vec<u8>> {
+            Some(self.0.to_vec())
+        }
+
+        fn resolve_shared(&self, _descriptor: &ShmDescriptor) -> Option<crate::link::RxBytes> {
+            let storage: Arc<dyn crate::link::RxStorage> = self.0.clone();
+            crate::link::RxBytes::shared(storage, 0..self.0.len())
         }
     }
 
@@ -651,7 +684,9 @@ impl ShmReceiveState {
         }
         let (resolver, handoff) = (self.resolver.as_deref(), self.handoff.as_deref());
         match crate::put_payload::collect_wire_payload(put, |descriptor| {
-            read_and_acknowledge(resolver, handoff, band, descriptor)
+            read_and_acknowledge(resolver, handoff, band, descriptor, |resolver, d| {
+                resolver.resolve_shared(d)
+            })
         }) {
             Ok(bytes) => Some(bytes),
             Err(_) => {
@@ -689,7 +724,9 @@ impl ShmReceiveState {
         }
         let (resolver, handoff) = (self.resolver.as_deref(), self.handoff.as_deref());
         match crate::put_payload::collect_slices(slices, |descriptor| {
-            read_and_acknowledge(resolver, handoff, band, descriptor)
+            read_and_acknowledge(resolver, handoff, band, descriptor, |resolver, d| {
+                resolver.resolve(d)
+            })
         }) {
             Ok(bytes) => Some(bytes),
             Err(_) => {
@@ -724,14 +761,15 @@ impl ShmReceiveState {
         feature = "codec-request"
     )
 ))]
-fn read_and_acknowledge(
+fn read_and_acknowledge<R>(
     resolver: Option<&(dyn ShmResolver + Send + Sync)>,
     handoff: Option<&dyn ShmHandoff>,
     band: usize,
     descriptor: &[u8],
-) -> Option<Vec<u8>> {
-    let resolved =
-        decode_shm_descriptor(descriptor).and_then(|d| resolver.and_then(|r| r.resolve(&d)));
+    read: impl FnOnce(&(dyn ShmResolver + Send + Sync), &ShmDescriptor) -> Option<R>,
+) -> Option<R> {
+    let resolved = decode_shm_descriptor(descriptor)
+        .and_then(|d| resolver.and_then(|resolver| read(resolver, &d)));
     if let Some(handoff) = handoff {
         handoff.on_rx(band);
     }
