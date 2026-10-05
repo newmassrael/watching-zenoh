@@ -371,6 +371,14 @@ use crate::session_glue::SendDeclareError;
 use crate::session_glue::SendWireError;
 #[cfg(feature = "transport-unicast")]
 use crate::session_glue::SessionLinkActions;
+/// The buffer whose descriptor the remote leg of a query carries in place of its
+/// value (R3048). Without `transport-shm` there is no such buffer and the option is
+/// always `None`, which is why the type is uninhabited there and not absent: the
+/// ordinary query takes the same parameter in every build.
+#[cfg(feature = "transport-shm")]
+type ShmValueRef<'a> = &'a crate::shm_provider::ShmBackedPayload;
+#[cfg(not(feature = "transport-shm"))]
+type ShmValueRef<'a> = &'a core::convert::Infallible;
 // R311nb — the `PushMetadata` import is retired here: its sole mod.rs
 // consumer was `PublishOptions::push_metadata`, which moved to
 // `publish_common` (importing `PushMetadata` from its ungated real home
@@ -3315,9 +3323,54 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
         on_reply: impl FnMut(&dyn ReplyView) + Send + 'static,
         on_final: impl FnMut(u64) + Send + 'static,
     ) -> Result<ReplyHandle, QueryAliasError> {
+        self.query_inner(keyexpr, opts, None, on_reply, on_final)
+    }
+
+    /// transport-shm -- the query whose VALUE is a shared-memory buffer, the getter's
+    /// counterpart of [`Self::publish_shm`]. When this session has NEGOTIATED SHM and
+    /// the query may go remote, the wire carries the marker and the buffer's
+    /// DESCRIPTOR in place of the bytes, as upstream's `get(..).payload(shm_buf)` does,
+    /// and the receiver maps the segment. The SessionLocal leg, and a session that did
+    /// not negotiate SHM, carry the bytes read back out of the segment, so the API is
+    /// always usable. The caller may let go of `value` as soon as this returns: the
+    /// descriptor on the wire carries a reference the receiver releases (R3038).
+    ///
+    /// The buffer IS the query's value: `opts.payload` is replaced by it, and
+    /// `opts.encoding` still names its encoding.
+    #[cfg(all(feature = "transport-shm", feature = "query-value"))]
+    pub fn query_shm(
+        &self,
+        keyexpr: &str,
+        mut opts: QueryOptions,
+        value: &crate::shm_provider::ShmBackedPayload,
+        on_reply: impl FnMut(&dyn ReplyView) + Send + 'static,
+        on_final: impl FnMut(u64) + Send + 'static,
+    ) -> Result<ReplyHandle, QueryAliasError> {
+        opts.payload = Some(value.bytes().to_vec());
+        let by_descriptor = self.actions().is_shm() && opts.allowed_destination.allows_remote();
+        self.query_inner(
+            keyexpr,
+            opts,
+            by_descriptor.then_some(value),
+            on_reply,
+            on_final,
+        )
+    }
+
+    /// The body of [`Self::query`] and [`Self::query_shm`]. `shm_value` is the buffer
+    /// whose descriptor the REMOTE leg carries in place of `opts.payload`; `None` is
+    /// the ordinary query.
+    fn query_inner(
+        &self,
+        keyexpr: &str,
+        opts: QueryOptions,
+        shm_value: Option<ShmValueRef<'_>>,
+        on_reply: impl FnMut(&dyn ReplyView) + Send + 'static,
+        on_final: impl FnMut(u64) + Send + 'static,
+    ) -> Result<ReplyHandle, QueryAliasError> {
         #[cfg(not(feature = "query-get"))]
         {
-            let _ = (keyexpr, opts, on_reply, on_final);
+            let _ = (keyexpr, opts, shm_value, on_reply, on_final);
             Err(QueryAliasError::FeatureDisabled)
         }
         #[cfg(feature = "query-get")]
@@ -3437,7 +3490,14 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
                 // builder so the byte-stable
                 // `send_request_query` wire shape stays unchanged for
                 // callers that pass `QueryOptions::default()`.
-                let meta = opts.query_metadata();
+                #[allow(unused_mut)] // only the descriptor leg writes it
+                let mut meta = opts.query_metadata();
+                // R3048 -- on the descriptor leg the value rides as a list of
+                // slices after the marker, so the plain slot must not carry it too.
+                #[cfg(feature = "transport-shm")]
+                if shm_value.is_some() {
+                    meta.value = None;
+                }
                 // R311mu (B5b-2b-2) — build the Query as a
                 // `NetworkMessage::Request` and route through the
                 // [`Self::send_network_message`] send seam instead of
@@ -3462,13 +3522,7 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
                 }
                 .map_err(SendWireError::Codec)
                 .and_then(|request| {
-                    self.send_network_message(
-                        wz_session_core::network_message::NetworkMessage::Request(Box::new(
-                            request,
-                        )),
-                        /*reliable=*/ true,
-                        /*express=*/ false,
-                    )
+                    self.send_query_request(request, shm_value, opts.encoding.as_ref())
                 });
                 // R311ln — roll the pending entry back on a failed wire
                 // emit (unregister-only; see the header comment).
@@ -3576,6 +3630,51 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
 
             Ok(handle)
         }
+    }
+
+    /// Send the built query. On the descriptor leg (`shm_value`) the marker and the
+    /// buffer's descriptor are put in the Query's chain first, and the reference the
+    /// receiver will release is held by a guard that returns it if the frame does not
+    /// build or the send refuses, so the count is only left raised for a frame that
+    /// left (R3038). Without a buffer this is the ordinary send.
+    #[cfg(feature = "query-get")]
+    #[cfg_attr(not(feature = "transport-shm"), allow(unused_variables))]
+    fn send_query_request(
+        &self,
+        request: wz_session_core::wire::RequestOwned,
+        shm_value: Option<ShmValueRef<'_>>,
+        encoding: Option<&wz_session_core::sample::EncodingHint>,
+    ) -> Result<(), SendWireError> {
+        #[cfg(feature = "transport-shm")]
+        let (request, reference) = match shm_value {
+            Some(value) => {
+                let mut request = request;
+                let reference = value.wire_reference();
+                let wz_session_core::wire::RequestOwnedVariant::CodecZenohQuery(query) =
+                    &mut request.body
+                else {
+                    unreachable!("a query is built as a Query body")
+                };
+                wz_session_core::request_build::attach_query_value_shm(
+                    query,
+                    &encoding.cloned().unwrap_or_default(),
+                    &reference.descriptor(),
+                )
+                .map_err(SendWireError::Codec)?;
+                (request, Some(reference))
+            }
+            None => (request, None),
+        };
+        self.send_network_message(
+            wz_session_core::network_message::NetworkMessage::Request(Box::new(request)),
+            /*reliable=*/ true,
+            /*express=*/ false,
+        )?;
+        #[cfg(feature = "transport-shm")]
+        if let Some(reference) = reference {
+            reference.commit();
+        }
+        Ok(())
     }
 
     /// R241 — aliased-keyexpr counterpart of [`Session::query`].

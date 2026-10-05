@@ -65,7 +65,9 @@ use wz_runtime_tokio::session_open::{
     accept_and_open_session_with_shm, connect_and_open_session, connect_and_open_session_with_shm,
     DialConfig, DialedLink, DEFAULT_OPEN_TICK_MS,
 };
-use wz_runtime_tokio::shm_provider::PosixShmResolver;
+use wz_runtime_tokio::shm_provider::{
+    reference_state, PosixShmResolver, ReferenceState, ShmBackedPayload,
+};
 use wz_runtime_tokio::sync::Mutex;
 use wz_runtime_tokio_test_support::zenoh_interop_session_init_params;
 use wz_session_core::extshm::{ShmDescriptor, ShmResolver};
@@ -87,21 +89,67 @@ const GET_PAYLOAD: &str = "Get from Rust SHM!";
 /// that never gives a chunk back cannot reach.
 const POOL_TURNOVER: usize = 11;
 
+/// What the wz getter sends as the VALUE of its query.
+#[derive(Clone, Copy)]
+enum GetterValue {
+    /// No value: the query this file has always sent.
+    None,
+    /// This text, in a buffer of the wz getter's own shared-memory provider.
+    Shm(&'static str),
+}
+
+/// What the wz getter sends through shared memory in the leg that asks for it.
+const WZ_QUERY_VALUE: &str = "Query from wz through SHM";
+
+/// The state of the chunk behind each value the wz getter sent through shared
+/// memory, read from its own metadata slot once the reply to that query arrived.
+type ValueStates = Arc<StdMutex<Vec<Option<ReferenceState>>>>;
+
 /// Send one query for the queryable's key and wait up to `within` for its first
 /// reply, returning that reply's payload. `None` is no reply in time.
-async fn ask(session: &TokioSession, within: Duration) -> Option<Vec<u8>> {
+///
+/// A value in shared memory is held until the reply arrives, and then the state of
+/// its chunk is read: the queryable has by then read the query and, when it let go of
+/// it, given back the reference the descriptor carried, which leaves the owner's own
+/// and no other. The read polls for that, because the queryable replies before it
+/// drops the query. The state is pushed to `states`.
+async fn ask(
+    session: &TokioSession,
+    value: GetterValue,
+    states: &ValueStates,
+    within: Duration,
+) -> Option<Vec<u8>> {
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
-    session
-        .query(
-            "demo/example/zenoh-rs-queryable",
-            QueryOptions::default(),
-            move |reply| {
-                let _ = tx.send(reply.payload().to_vec());
-            },
-            |_| {},
-        )
-        .unwrap_or_else(|e| panic!("the wz getter could not send its query: {e:?}"));
-    tokio::time::timeout(within, rx.recv()).await.ok().flatten()
+    let on_reply = move |reply: &dyn wz_session_core::reply_sink::ReplyView| {
+        let _ = tx.send(reply.payload().to_vec());
+    };
+    let key = "demo/example/zenoh-rs-queryable";
+    let mut buffer: Option<ShmBackedPayload> = None;
+    match value {
+        GetterValue::None => session.query(key, QueryOptions::default(), on_reply, |_| {}),
+        GetterValue::Shm(text) => {
+            let mut held = ShmBackedPayload::alloc(text.len()).expect("alloc a value buffer");
+            held.write(text.as_bytes());
+            let sent = session.query_shm(key, QueryOptions::default(), &held, on_reply, |_| {});
+            buffer = Some(held);
+            sent
+        }
+    }
+    .unwrap_or_else(|e| panic!("the wz getter could not send its query: {e:?}"));
+    let reply = tokio::time::timeout(within, rx.recv()).await.ok().flatten();
+    if let (Some(buffer), Some(_)) = (&buffer, &reply) {
+        let descriptor = buffer.descriptor();
+        let mut state = reference_state(&descriptor);
+        for _ in 0..40 {
+            if state == Some(ReferenceState::Held(1)) {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            state = reference_state(&descriptor);
+        }
+        states.lock().expect("states").push(state);
+    }
+    reply
 }
 
 /// A resolver that counts what it was asked to resolve, so a leg can tell a payload
@@ -157,6 +205,9 @@ struct GetterRun {
     refused: usize,
     /// The last frames the wz drive loop polled, oldest first.
     trace: Vec<String>,
+    /// The chunk state behind each value sent through shared memory, once its reply
+    /// arrived: see [`ask`]. Empty when the getter sent no value.
+    value_states: Vec<Option<ReferenceState>>,
     /// Everything the queryable printed.
     zenoh_log: String,
 }
@@ -164,7 +215,7 @@ struct GetterRun {
 /// Run `z_queryable_shm` against a wz acceptor, and have wz ask it until a reply
 /// arrived and then twelve in all. The queryable answers with a shared-memory
 /// buffer, so a wz that cannot read one hands the getter nothing.
-async fn wz_getter_against_shm_queryable() -> Option<GetterRun> {
+async fn wz_getter_against_shm_queryable(value: GetterValue) -> Option<GetterRun> {
     let Some(z_queryable) = zenoh_shm_example_binary("z_queryable_shm") else {
         eprintln!(
             "SKIP: no z_queryable_shm at target/zenohd-shm (run `ZENOHD_SHM=1 scripts/build-zenohd.sh`)"
@@ -252,13 +303,14 @@ async fn wz_getter_against_shm_queryable() -> Option<GetterRun> {
     );
 
     let replies: Arc<StdMutex<Vec<Vec<u8>>>> = Arc::default();
+    let states: ValueStates = Arc::default();
     let scenario = async {
         // The queryable is declared a moment after the session opens, and a get
         // sent before the declaration is routed answers nothing, so ask again
         // until the first reply arrives.
         let mut first = None;
         for _ in 0..80 {
-            if let Some(payload) = ask(&session, Duration::from_millis(500)).await {
+            if let Some(payload) = ask(&session, value, &states, Duration::from_millis(500)).await {
                 first = Some(payload);
                 break;
             }
@@ -279,7 +331,7 @@ async fn wz_getter_against_shm_queryable() -> Option<GetterRun> {
         // "Responding" lines and then silence, with zenoh warning that no final
         // reply came). Twelve in a row is the witness that wz gives each back.
         for _ in 0..POOL_TURNOVER {
-            match ask(&session, Duration::from_secs(5)).await {
+            match ask(&session, value, &states, Duration::from_secs(5)).await {
                 Some(payload) => replies.lock().expect("replies").push(payload),
                 None => break,
             }
@@ -296,14 +348,81 @@ async fn wz_getter_against_shm_queryable() -> Option<GetterRun> {
 
     let replies = replies.lock().expect("replies").clone();
     let trace = trace.lock().expect("trace").clone();
+    let value_states = states.lock().expect("states").clone();
     Some(GetterRun {
         negotiated,
         replies,
         resolved: resolved.load(Ordering::SeqCst),
         refused: refused.load(Ordering::SeqCst),
         trace,
+        value_states,
         zenoh_log: read_captured(&mut zenoh_log),
     })
+}
+
+/// A wz GETTER sends the value of its query through shared memory, to upstream's own
+/// shared-memory queryable: the other direction of the query leg below, and the half
+/// of the query's value that wz writes where the leg below is the half it reads.
+///
+/// What a node that follows upstream does is asserted from upstream's side. The
+/// queryable prints each query it receives with the type of the buffer its value
+/// arrived in (`z_queryable_shm`'s `handle_bytes`: `SHM` when the value is a mapped
+/// shared-memory buffer, `RAW` when the bytes were copied), so a line that reads the
+/// getter's text and `[SHM]` is the queryable having mapped wz's segment and read it
+/// there. A wz that sent the bytes instead is `RAW`, and one that sent a frame
+/// upstream cannot read gets no query printed at all. Twelve in a row, because the
+/// reference each descriptor carries must be given back for the owner's chunk to be
+/// collectable, and the state of each chunk is read from its own metadata slot.
+// wz-proves: transport-shm wz->zenoh
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "binary-dep e2e (ZENOHD_SHM=1 build-zenohd.sh: z_queryable_shm); Layer Z runs via --ignored"]
+async fn a_wz_getter_sends_its_query_value_through_shared_memory_to_zenohs_queryable() {
+    let Some(run) = wz_getter_against_shm_queryable(GetterValue::Shm(WZ_QUERY_VALUE)).await else {
+        return;
+    };
+    assert!(
+        run.negotiated,
+        "wz and the queryable must have negotiated SHM, or this leg proves nothing:\n{}",
+        run.zenoh_log
+    );
+    let wanted = 1 + POOL_TURNOVER;
+    assert_eq!(
+        run.replies.len(),
+        wanted,
+        "the queryable answered {} of {wanted} queries; the last frames wz polled:\n{}\n--- \
+         queryable ---\n{}",
+        run.replies.len(),
+        run.trace.join("\n"),
+        run.zenoh_log
+    );
+    let through_shm = format!("'{WZ_QUERY_VALUE}') [SHM]");
+    let received = run.zenoh_log.matches(&through_shm).count();
+    assert!(
+        received >= wanted,
+        "the queryable printed the getter's value through shared memory {received} times, \
+         where {wanted} queries were answered:\n{}",
+        run.zenoh_log
+    );
+    assert!(
+        !run.zenoh_log
+            .contains(&format!("'{WZ_QUERY_VALUE}') [RAW]")),
+        "a query's value reached the queryable as copied bytes, which is not what this leg \
+         proves:\n{}",
+        run.zenoh_log
+    );
+    assert_eq!(
+        run.value_states.len(),
+        wanted,
+        "the state of each value's chunk was read once per answered query"
+    );
+    assert!(
+        run.value_states
+            .iter()
+            .all(|state| *state == Some(ReferenceState::Held(1))),
+        "a reference a descriptor carried was not given back: expected only the owner's \
+         (Held(1)) for every chunk, got {:?}",
+        run.value_states
+    );
 }
 
 /// A TCP relay between wz and the router that keeps every byte the router sends
@@ -615,7 +734,7 @@ async fn shm_get_to_wz_queryable(offer_shm: bool) -> Option<QueryableRun> {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "binary-dep e2e (ZENOHD_SHM=1 build-zenohd.sh: z_queryable_shm); Layer Z runs via --ignored"]
 async fn zenohd_shm_queryable_reply_reaches_a_wz_getter_through_shared_memory() {
-    let Some(run) = wz_getter_against_shm_queryable().await else {
+    let Some(run) = wz_getter_against_shm_queryable(GetterValue::None).await else {
         return;
     };
     assert!(

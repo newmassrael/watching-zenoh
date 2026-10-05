@@ -170,12 +170,6 @@ pub fn inline<S: CodecStorage>(bytes: &[u8]) -> Result<MsgPutOwned<S>, CodecErro
 /// carry the marker (`extshm::encode_shm_marker_ext`), because the marker is
 /// what the receiver reads to know the payload is sliced.
 pub fn shm<S: CodecStorage>(descriptor: &[u8]) -> Result<MsgPutOwned<S>, CodecError> {
-    let mut slices = <S::List<ZbufSliceOwned<S>, 4> as SceList<ZbufSliceOwned<S>>>::empty();
-    slices.try_push(ZbufSliceOwned {
-        kind: u32::from(SLICE_KIND_SHM_PTR),
-        len: descriptor.len() as u64,
-        bytes: <S::Bytes<256> as SceByteBuf>::from_slice(descriptor)?,
-    })?;
     Ok(MsgPutOwned {
         header: 0x01,
         timestamp: None,
@@ -184,8 +178,24 @@ pub fn shm<S: CodecStorage>(descriptor: &[u8]) -> Result<MsgPutOwned<S>, CodecEr
         payload_len: None,
         payload: None,
         slice_count: Some(1),
-        slices: Some(slices),
+        slices: Some(shm_slices::<S>(descriptor)?),
     })
+}
+
+/// The list of slices that carries one shared-memory buffer: a single slice of
+/// kind `SHM_PTR` whose bytes are `descriptor`. A Put's payload and the value of a
+/// Query are the same list on the wire (`Zenoh080Sliced`), so both take it from
+/// here and no site spells a slice by hand (R3048).
+pub fn shm_slices<S: CodecStorage>(
+    descriptor: &[u8],
+) -> Result<S::List<ZbufSliceOwned<S>, 4>, CodecError> {
+    let mut slices = <S::List<ZbufSliceOwned<S>, 4> as SceList<ZbufSliceOwned<S>>>::empty();
+    slices.try_push(ZbufSliceOwned {
+        kind: u32::from(SLICE_KIND_SHM_PTR),
+        len: descriptor.len() as u64,
+        bytes: <S::Bytes<256> as SceByteBuf>::from_slice(descriptor)?,
+    })?;
+    Ok(slices)
 }
 
 /// Why the payload of a received Put could not be assembled.

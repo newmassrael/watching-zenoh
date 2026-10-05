@@ -2214,6 +2214,70 @@ mod tests {
         assert!(bands.lock().unwrap().is_empty());
     }
 
+    /// R3048 -- AN ERROR REPLY IS NOT A SLICE LIST, AND THAT IS UPSTREAM'S WIRE. The
+    /// error reply's payload was listed as not un-swapped, as though upstream swapped
+    /// it. It does not: the Err codec writes and reads its payload as a flat
+    /// length-prefixed buffer whatever the marker says
+    /// (`commons/zenoh-codec/src/zenoh/err.rs` @ `let bodec = Zenoh080Bounded::<u32>::new();`),
+    /// and what a shared-memory buffer contributes to that buffer is its DATA, not
+    /// its descriptor (`commons/zenoh-shm/src/lib.rs` @ `impl ZSliceBuffer for ShmBufInner`
+    /// `fn as_slice(&self) -> &[u8]`). The reader's slice is a raw one, which
+    /// `map_to_shmbuf` leaves alone (`io/zenoh-transport/src/common/shm/interop.rs` @
+    /// `if zs.kind == ZSliceKind::ShmPtr {`). So an Err that carries the marker arrives
+    /// with its bytes in line, and the right thing is to hand them over: nothing is
+    /// read through the resolver, nothing is acknowledged (no slice was counted sent),
+    /// and no segment is opened.
+    ///
+    /// The bytes go through the generated codec both ways, so the chain that holds the
+    /// marker followed by an inline payload is what the codec reads and writes, not
+    /// only what the registry is handed.
+    #[cfg(all(
+        feature = "transport-shm",
+        feature = "pubsub-put",
+        feature = "query-reply"
+    ))]
+    #[test]
+    fn an_err_that_carries_the_shm_marker_delivers_its_inline_payload_unswapped() {
+        use crate::network_message::{parse_frame_payload, NetworkMessage};
+        use wz_codecs_test_support::TestWire;
+
+        let mut response =
+            crate::response_build::build_response_err_literal(42, "home/temp", b"boom")
+                .expect("build a literal err");
+        let ResponseOwnedVariant::CodecZenohErr(err) = &mut response.body else {
+            panic!("an err builder builds an Err body");
+        };
+        err.extensions = Some(vec![crate::extshm::encode_shm_marker_ext()]);
+        err.header |= 0x80; // the Z chain bit, as the generated chain requires
+        let wire = response.wire();
+
+        // The marker is on the wire, the payload follows it in line: the length and
+        // the four bytes, and no slice count or kind between.
+        assert!(
+            wire.windows(6)
+                .any(|w| w == [0x12, 0x04, b'b', b'o', b'o', b'm']),
+            "the marker, then the payload's length and bytes: {wire:02x?}"
+        );
+
+        let mut messages = parse_frame_payload(&wire).expect("the codec reads its own Err");
+        let NetworkMessage::Response(parsed) = messages.pop().expect("one message") else {
+            panic!("a Response");
+        };
+        let (mut reg, bands, resolved, captured) = shm_reply_registry();
+        reg.dispatch_response(&parsed, &HashMap::new());
+
+        let snapshot = captured.lock().unwrap();
+        assert_eq!(snapshot.len(), 1, "the error reply is delivered");
+        match &snapshot[0].body {
+            InboundReplyBody::Err { payload, .. } => assert_eq!(payload, b"boom"),
+            other => panic!("expected Err, got {other:?}"),
+        }
+        assert_eq!(resolved.load(Ordering::SeqCst), 0, "no slice, nothing read");
+        assert!(bands.lock().unwrap().is_empty(), "nothing acknowledged");
+        assert_eq!(reg.shm_unresolved_drops(), 0);
+        assert_eq!(reg.shm_unnegotiated_drops(), 0);
+    }
+
     /// R3042 -- a negotiated registry with NO resolver installed counts the reply
     /// unresolved and delivers nothing, and still acknowledges the slice, as the push
     /// path does: the sender counted that slice sent.

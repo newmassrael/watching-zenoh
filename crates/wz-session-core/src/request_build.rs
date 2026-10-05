@@ -282,6 +282,84 @@ pub fn build_request_query_with_meta(
     builder.build()
 }
 
+/// transport-shm -- give a built Query the VALUE that a shared-memory buffer holds:
+/// the marker, then the value as a declared length, an encoding, a count and one
+/// slice whose bytes are `descriptor`. This is what upstream writes for a query whose
+/// value it sends through shared memory, and what its receiver reads back
+/// (`commons/zenoh-codec/src/zenoh/mod.rs` @ `impl<W, const VID: u8, const SID: u8> WCodec<(&ext::ValueType<{ VID }, { SID }>, bool), &mut W>`).
+///
+/// The marker and the value go FIRST in the chain, before the source info and the
+/// attachment, as a plain value does (pico's `_z_query_encode` order), and the
+/// chain's continuation flags are set over the whole chain again.
+///
+/// The length it declares is upstream's: the encoding's bytes plus, for each
+/// slice, one byte and the LOGICAL length of the buffer, which is `data_len` and not
+/// the length of the descriptor written (`commons/zenoh-codec/src/core/zbuf.rs` @
+/// `message.zslices().fold(0, |acc, x| acc + 1 + x.len())`). A receiver that follows
+/// upstream requires the length to cover the encoding and reads the slices by
+/// their own structure, so this is the number upstream's own writer puts there and
+/// not a minimum.
+///
+/// A Query that already carries a value is refused: two values in one chain are two
+/// extensions at one identifier, and which one a receiver reads is its own business.
+#[cfg(all(feature = "codec-request", feature = "transport-shm"))]
+pub fn attach_query_value_shm(
+    query: &mut crate::wire::parts::QueryOwned,
+    encoding: &crate::sample::EncodingHint,
+    descriptor: &crate::extshm::ShmDescriptor,
+) -> Result<(), CodecError> {
+    use crate::ext_header::{body_ext_id, EXT_ENC_ZBUF, EXT_FLAG_Z};
+    use crate::wire::parts::{QueryExtEntryOwned, QueryExtEntryOwnedVariant};
+    use wz_codecs::ext_unit::ExtUnit;
+    use wz_codecs::query_value_zbuf::QueryValueZbufOwned;
+
+    let existing = query.extensions.take().unwrap_or_default();
+    if existing
+        .iter()
+        .any(|ext| ext.ext_id() == body_ext_id::QUERY_BODY)
+    {
+        query.extensions = Some(existing);
+        // The chain already describes a value, and so does the one asked for: two
+        // descriptions of one wire that contradict each other, which is what
+        // this error says of a chain and a field.
+        return Err(CodecError::PresentIfMismatch);
+    }
+
+    let descriptor_bytes = crate::extshm::encode_shm_descriptor(descriptor);
+    let encoding_codec = encoding.to_codec();
+    let declared = encoding_codec.encode_to_vec().len() as u64 + 1 + u64::from(descriptor.data_len);
+    let marker = QueryExtEntryOwned {
+        header: body_ext_id::QUERY_SHM,
+        body: QueryExtEntryOwnedVariant::CodecZenohExtUnit(ExtUnit::default()),
+    };
+    let value = QueryExtEntryOwned {
+        header: EXT_ENC_ZBUF | body_ext_id::QUERY_BODY,
+        body: QueryExtEntryOwnedVariant::CodecZenohQueryValueZbuf(QueryValueZbufOwned {
+            value_len: declared,
+            value: None,
+            encoding: Some(encoding_codec.try_into_owned_in::<crate::wire::WireStorage>()?),
+            slice_count: Some(1),
+            slices: Some(crate::put_payload::shm_slices::<crate::wire::WireStorage>(
+                &descriptor_bytes,
+            )?),
+        }),
+    };
+
+    let mut chain = alloc::vec![marker, value];
+    chain.extend(existing);
+    let last = chain.len() - 1;
+    for (i, ext) in chain.iter_mut().enumerate() {
+        ext.header = if i == last {
+            ext.header & !EXT_FLAG_Z
+        } else {
+            ext.header | EXT_FLAG_Z
+        };
+    }
+    query.header |= 0x80; // Q_Z: the chain is present
+    query.extensions = Some(chain);
+    Ok(())
+}
+
 /// R121j-2a — fluent builder for `Request(Query)` that composes the
 /// layered options exposed individually by R121j-1a/1b/1c/1d/1e
 /// (consolidation / parameters / Query-attachment / Request-timeout
@@ -2537,5 +2615,143 @@ mod tests {
             .request_timeout_ms(0)
             .build()
             .unwrap();
+    }
+}
+
+// R3048 -- the value of a Query sent through shared memory. A module of its own
+// because the main `mod tests` gate knows no shared memory, and the bytes it asserts
+// are not this tree's idea of the layout: they are what upstream's own writer put
+// on the wire for `z_get_shm` (see `query::shm_value_tests`, which reads them).
+#[cfg(all(
+    test,
+    feature = "codec-request",
+    feature = "codec-frame",
+    feature = "transport-shm",
+    feature = "query-attachment"
+))]
+mod shm_value_build_tests {
+    use super::*;
+    use crate::extshm::ShmDescriptor;
+    use crate::sample::EncodingHint;
+    use wz_codecs_test_support::TestWire;
+
+    /// The value extension of the query `z_get_shm` sent through a router, from the
+    /// marker to the last descriptor byte: the marker (`0x84`: unit, identifier 4,
+    /// more to follow), the value (`0x43`: ZBuf, identifier 3, last) declaring 1026
+    /// bytes, a default encoding, one slice of kind `SHM_PTR` and its seven-byte
+    /// descriptor for a buffer of 1024 bytes in metadata segment 20338, slot 0,
+    /// generation 0.
+    const UPSTREAMS_VALUE: [u8; 15] = [
+        0x84, 0x43, 0x82, 0x08, 0x00, 0x01, 0x01, 0x07, 0x80, 0x08, 0xf2, 0x9e, 0x01, 0x00, 0x00,
+    ];
+
+    const DESCRIPTOR: ShmDescriptor = ShmDescriptor {
+        data_len: 1024,
+        metadata_id: 20338,
+        metadata_index: 0,
+        generation: 0,
+    };
+
+    fn default_encoding() -> EncodingHint {
+        EncodingHint {
+            packed_id: 0,
+            schema: None,
+        }
+    }
+
+    fn query_of(request: &mut RequestOwned) -> &mut crate::wire::parts::QueryOwned {
+        match &mut request.body {
+            RequestOwnedVariant::CodecZenohQuery(q) => q,
+            _ => panic!("a Query builder builds a Query body"),
+        }
+    }
+
+    /// THE POINT: the extension bytes are the ones upstream's writer produces,
+    /// declared length included. It is the whole of what a receiver that follows
+    /// upstream reads, and it is compared against bytes kept from upstream and not
+    /// against a re-derivation of the layout.
+    #[test]
+    fn the_value_is_the_bytes_upstream_writes() {
+        let mut request = build_request_query(1, 0, Some("demo/example/**")).unwrap();
+        attach_query_value_shm(query_of(&mut request), &default_encoding(), &DESCRIPTOR).unwrap();
+        let wire = request.wire();
+        assert!(
+            wire.ends_with(&UPSTREAMS_VALUE),
+            "the Query ends with upstream's value extension: {wire:02x?}"
+        );
+    }
+
+    /// The marker and the value come before an attachment already in the chain,
+    /// and the continuation flags are over the whole chain: the marker and the value
+    /// say more follows, the attachment is last. The generated codec reads it back
+    /// and the walk finds the attachment where it was.
+    #[test]
+    fn an_attachment_stays_after_the_value_and_the_chain_is_flagged_end_to_end() {
+        let mut request = RequestQueryBuilder::new(1, 0, Some("demo/example/**"))
+            .query_attachment(b"hi")
+            .build()
+            .unwrap();
+        attach_query_value_shm(query_of(&mut request), &default_encoding(), &DESCRIPTOR).unwrap();
+        let wire = request.wire();
+        let mut tail = UPSTREAMS_VALUE.to_vec();
+        tail[1] |= 0x80; // the value is no longer the last of the chain
+        tail.extend_from_slice(&[0x45, 0x02, b'h', b'i']);
+        assert!(wire.ends_with(&tail), "{wire:02x?}");
+
+        let mut messages = crate::network_message::parse_frame_payload(&wire).unwrap();
+        let crate::network_message::NetworkMessage::Request(parsed) = messages.pop().unwrap()
+        else {
+            panic!("a Request");
+        };
+        let RequestOwnedVariant::CodecZenohQuery(query) = &parsed.body else {
+            panic!("a Query body");
+        };
+        let exts = query.extensions.as_deref().expect("the chain survives");
+        assert_eq!(crate::ext_view::query_value_payload_len(exts), 1024);
+        assert_eq!(
+            crate::attachment::decode_attachment_ext(
+                exts,
+                crate::attachment::ATTACHMENT_EXT_ID_QUERY
+            ),
+            Some(&b"hi"[..]),
+            "the attachment after the value is read as its own entry"
+        );
+    }
+
+    /// An encoding other than the default is declared in the length and written in
+    /// front of the slices: the length is the encoding's bytes plus one plus the
+    /// buffer's, so a receiver that checks it against the encoding is satisfied.
+    #[test]
+    fn a_schema_bearing_encoding_is_in_the_declared_length() {
+        let encoding = EncodingHint {
+            packed_id: 0x0B, // id 5, schema flag set
+            schema: Some("json".into()),
+        };
+        let encoding_len = encoding.to_codec().encode_to_vec().len();
+        let mut request = build_request_query(1, 0, Some("k")).unwrap();
+        attach_query_value_shm(query_of(&mut request), &encoding, &DESCRIPTOR).unwrap();
+        let wire = request.wire();
+        let declared = (encoding_len + 1 + 1024) as u64;
+        let mut expected = alloc::vec![0x84u8, 0x43];
+        crate::vle::encode_vle_u64_into(&mut expected, declared);
+        expected.extend_from_slice(&encoding.to_codec().encode_to_vec());
+        expected.extend_from_slice(&UPSTREAMS_VALUE[5..]);
+        assert!(wire.ends_with(&expected), "{wire:02x?}");
+    }
+
+    /// A Query that already carries a value is refused and left as it was: two
+    /// values are two extensions at one identifier.
+    #[cfg(feature = "query-value")]
+    #[test]
+    fn a_query_that_already_has_a_value_is_refused_and_unchanged() {
+        let mut request = RequestQueryBuilder::new(1, 0, Some("k"))
+            .query_value(b"plain", default_encoding())
+            .build()
+            .unwrap();
+        let before = request.wire();
+        let refused =
+            attach_query_value_shm(query_of(&mut request), &default_encoding(), &DESCRIPTOR);
+        assert!(refused.is_err(), "two values in one chain are refused");
+        assert_eq!(request.wire(), before, "and the Query is as it was");
     }
 }
