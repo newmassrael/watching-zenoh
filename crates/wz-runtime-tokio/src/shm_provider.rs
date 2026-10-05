@@ -608,7 +608,10 @@ pub enum AllocPolicy {
     },
     /// Ask `inner` until it succeeds or fails for a reason waiting cannot fix,
     /// sleeping a millisecond between attempts as upstream's does (it polls; nothing
-    /// signals a release made by another process).
+    /// signals a release made by another process). It stops when the provider has no
+    /// chunk outstanding, because then nothing could ever be released: upstream waits
+    /// forever there, and this is the single point where this policy returns where
+    /// upstream's does not.
     BlockOn(Box<AllocPolicy>),
 }
 
@@ -686,7 +689,16 @@ impl AllocPolicy {
             }
             AllocPolicy::BlockOn(inner) => loop {
                 match inner.run(layout, core) {
-                    Err(AllocError::NeedDefragment | AllocError::OutOfMemory) => {
+                    res @ Err(AllocError::NeedDefragment | AllocError::OutOfMemory) => {
+                        // THE ONE PLACE this differs from upstream's, which sleeps and asks
+                        // again forever: with nothing on the provider's busy list there is
+                        // no chunk whose release could ever make room, so waiting is a hang
+                        // and not a wait (a request larger than the whole pool is the usual
+                        // case). The refusal is returned instead. A chunk another process
+                        // still holds IS on the list, so a wait that can end still waits.
+                        if core.busy().is_empty() {
+                            return res;
+                        }
                         std::thread::sleep(std::time::Duration::from_millis(1));
                     }
                     other => return other,
@@ -770,7 +782,7 @@ impl ShmProvider {
     /// which has the length `len` or more: upstream's `map`, for a backend that pushes
     /// chunks rather than serving a request.
     pub fn map(&self, chunk: AllocatedChunk, len: usize) -> Result<ShmBackedPayload, AllocError> {
-        if len == 0 {
+        if len == 0 || len > chunk.descriptor.len.get() || !self.core.backend.accepts(&chunk) {
             return Err(AllocError::Other);
         }
         ShmBackedPayload::issue(&self.core, chunk, len)
@@ -1051,6 +1063,17 @@ impl ShmBackedPayload {
         if header.generation.load(Ordering::SeqCst) == self.generation {
             release_reference(header);
         }
+    }
+
+    /// Whether this owner is the chunk's ONLY holder: no descriptor of it is in flight and
+    /// no receiver holds one, which the slot's count reads as one. Upstream's `is_unique`
+    /// (`commons/zenoh-shm/src/api/buffer/zshmmut.rs` @ `impl TryFrom<&mut zshm> for &mut zshmmut {`),
+    /// the condition for a shared buffer to become writable again. A slot that has been made
+    /// stale is not this payload's and is not unique.
+    pub fn is_unique(&self) -> bool {
+        let header = self.header();
+        header.generation.load(Ordering::SeqCst) == self.generation
+            && header.refcount.load(Ordering::SeqCst) == 1
     }
 
     /// The payload's length: what was asked for, which may be less than the chunk the
@@ -2271,12 +2294,17 @@ mod tests {
             .alloc(layout(BIG), &AllocPolicy::JustAlloc)
             .expect("fill it");
         let descriptor = held.descriptor();
+        assert!(held.is_unique(), "the control: the owner holds it alone");
         let policy = AllocPolicy::deallocate(1, AllocPolicy::JustAlloc, AllocPolicy::JustAlloc);
         let replacement = provider.alloc(layout(BIG), &policy).expect("made room");
         assert_eq!(
             reference_state(&descriptor),
             Some(ReferenceState::Reclaimed),
             "the held chunk's descriptor went stale"
+        );
+        assert!(
+            !held.is_unique(),
+            "a chunk taken back is not its owner's, and the slot may be another chunk's now"
         );
         // The slot is stale and may be recycled to another chunk; an owner that lets go
         // afterwards must not touch its count. Planted at 5, so a decrement is visible
@@ -2312,6 +2340,85 @@ mod tests {
         let waited = provider.alloc(layout(BIG), &policy);
         releaser.join().expect("releaser");
         assert!(waited.is_ok(), "it waited until the chunk was released");
+    }
+
+    /// `BlockOn` returns where waiting could never help: a request larger than the whole
+    /// pool, with nothing outstanding, is refused and not waited on forever. Upstream waits
+    /// forever there, and this is the one place the policy returns where upstream's does
+    /// not. The test above is its control: with a chunk outstanding the same policy waits.
+    ///
+    /// A thread and a timeout stand in for the hang that a missing check would be, so that
+    /// the failure is a red test and not a test run that never ends.
+    #[test]
+    fn the_blocking_policy_gives_up_when_nothing_could_ever_be_released() {
+        let provider = ShmProvider::pool(&layout(4096)).expect("a pool");
+        let policy = AllocPolicy::block_on(AllocPolicy::garbage_collect(
+            AllocPolicy::JustAlloc,
+            AllocPolicy::JustAlloc,
+        ));
+        let (answered, hears) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let refused = provider.alloc(layout(8192), &policy).is_err();
+            let _ = answered.send(refused);
+        });
+        assert_eq!(
+            hears.recv_timeout(std::time::Duration::from_secs(10)),
+            Ok(true),
+            "a request no release could ever make room for was waited on, or was served"
+        );
+    }
+
+    /// `map` takes on a chunk something else produced, and refuses one this provider's
+    /// backend could not have issued and one shorter than the length asked for: the provider
+    /// hands the range back to its backend when it collects, and a range the backend never
+    /// issued may corrupt it.
+    #[test]
+    fn a_mapped_chunk_must_be_one_the_backend_could_have_issued_and_long_enough() {
+        let backend = Arc::new(PosixShmProviderBackend::new(&layout(4096)).expect("a pool"));
+        let provider = ShmProvider::new(backend.clone());
+        let elsewhere = PosixShmProviderBackend::new(&layout(4096)).expect("another pool");
+
+        let own = backend.alloc(&layout(1024)).expect("a chunk of the pool");
+        let mapped = provider
+            .map(own, 512)
+            .expect("the control: a chunk of this pool, mapped at a length it holds");
+        assert_eq!(mapped.len(), 512);
+
+        let own = backend.alloc(&layout(1024)).expect("a second chunk");
+        assert!(
+            matches!(provider.map(own, 1025), Err(AllocError::Other)),
+            "a length beyond the chunk"
+        );
+
+        let foreign = elsewhere
+            .alloc(&layout(1024))
+            .expect("a chunk of another pool");
+        assert!(
+            matches!(provider.map(foreign, 512), Err(AllocError::Other)),
+            "a chunk of a pool this provider does not own"
+        );
+    }
+
+    /// An owner is UNIQUE while nothing else holds its chunk, which is what lets a buffer
+    /// that was shared become writable again: a descriptor in flight, and a receiver that
+    /// resolved it, each make it not unique.
+    #[test]
+    fn an_owner_is_unique_until_a_descriptor_of_its_chunk_is_held() {
+        let mut payload = ShmBackedPayload::alloc(4).expect("alloc");
+        payload.write(b"uniq");
+        assert!(payload.is_unique(), "nothing else has been given the chunk");
+
+        let descriptor = sent(&payload);
+        assert!(
+            !payload.is_unique(),
+            "a descriptor is in flight and holds the second reference"
+        );
+        let shared = PosixShmResolver
+            .resolve_shared(&descriptor)
+            .expect("resolve_shared");
+        assert!(!payload.is_unique(), "the receiver holds it");
+        drop(shared);
+        assert!(payload.is_unique(), "the receiver gave its reference back");
     }
 
     /// A layout the backend extends is allocated at the extended size, and the payload is the

@@ -848,18 +848,100 @@ fn upstream_z_advanced_sub_on_wz_capi_c_receives_the_same_samples_from_real_pico
     }
 }
 
-/// LEG 5 — upstream's `z_get_shm.c` sends an SHM-allocated query payload that a
-/// REAL zenoh-pico queryable reads and answers ON WZ'S ABI, and CANNOT RUN AT
-/// ALL on upstream's own library at the pinned version.
+/// What `z_get_shm`-shaped programs ask of the real pico queryable in LEG 5 and
+/// LEG 6, and what it answers.
+const GET_SHM_REPLY: &str = "REPLY-FROM-REAL-PICO";
+const GET_SHM_SENT: &str = "GET-SHM-PAYLOAD";
+
+/// One run of a `z_get_shm`-shaped program against a fresh real zenoh-pico
+/// `z_queryable`, returning the arm's EXIT STATUS, its stdout, stdout and stderr
+/// together, and what the queryable printed.
 ///
-/// ## The doubled witness this leg used to make, and why half of it is gone
+/// R2245 kept the success assertion out of this function, because the two arms
+/// did not make the same claim: a helper that asserted success for both could
+/// only express the claim that stopped being true. LEG 5 expects a refusal and
+/// LEG 6 expects a reply, from the same code.
+fn run_get_shm_against_pico(
+    program: &Path,
+    libdir: &Path,
+    arm: Arm,
+) -> (ExitStatus, String, String, String) {
+    let label = arm.label();
+    let reservation = PortReservation::pick();
+    let port = reservation.port();
+    let endpoint = format!("tcp/127.0.0.1:{port}");
+
+    let mut qbl_out = tempfile::tempfile().expect("queryable stdout capture");
+    let qbl_writer = qbl_out.try_clone().expect("dup queryable stdout handle");
+    let mut queryable = ChildGuard::wrap(
+        format!("real zenoh-pico z_queryable ({label})"),
+        Command::new("stdbuf")
+            .args(["-oL", "-eL"])
+            .arg(zenoh_pico_cli_binary("z_queryable"))
+            .args([
+                "-l",
+                &endpoint,
+                "-m",
+                "peer",
+                "-k",
+                "demo/capic/qshm",
+                "-v",
+                GET_SHM_REPLY,
+            ])
+            .stdout(Stdio::from(qbl_writer))
+            .stderr(Stdio::from(qbl_out.try_clone().expect("dup stderr handle")))
+            .spawn()
+            .expect("spawn the real zenoh-pico z_queryable"),
+    );
+    if let Err(why) = wait_for_tcp_accept_alive(queryable.child_mut(), port, LISTEN_TIMEOUT) {
+        panic!(
+            "the real zenoh-pico z_queryable never accepted on {endpoint} — {why}; \
+             capture so far:\n{}",
+            read_captured(&mut qbl_out)
+        );
+    }
+    drop(reservation);
+
+    // `z_get_shm.c` terminates on its own once the reply channel closes, so
+    // this arm is a plain wait rather than a capture race.
+    let out = Command::new(program)
+        .args([
+            "-e",
+            &format!("tcp/127.0.0.1:{port}"),
+            "-m",
+            "client",
+            "-s",
+            "demo/capic/qshm",
+            "-p",
+            GET_SHM_SENT,
+        ])
+        .env("LD_LIBRARY_PATH", libdir)
+        .output()
+        .unwrap_or_else(|e| panic!("failed to run the {label} z_get_shm: {e}"));
+    let queryable_saw = read_captured(&mut qbl_out);
+    graceful_terminate(queryable.child_mut(), TERMINATE_TIMEOUT);
+    // BOTH streams, because the two arms fail in different places: the wz arm
+    // reports on stdout, and the reference arm's Talc refusal is a tracing line
+    // on stdout while the abort's panic lands on stderr.
+    let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
+    let mut both = stdout.clone();
+    both.push_str(&String::from_utf8_lossy(&out.stderr));
+    (out.status, stdout, both, queryable_saw)
+}
+
+/// LEG 5 — upstream's `z_get_shm.c` CANNOT RUN on upstream's own library at the
+/// pinned version, and, since R3058, cannot run on wz's ABI either.
 ///
-/// It compared the two arms' stdout AND had a foreign queryable decode the
-/// SHM-allocated payload. R2245 measured that the first half is unavailable at
-/// zenoh-c 1.10.0: the REFERENCE arm aborts before it opens a session, so there
-/// is nothing to compare against. The surviving half is not the weaker one —
-/// the foreign queryable is still the party that decoded wz's SHM-allocated
-/// bytes, and it shares no code with wz.
+/// ## What this leg used to claim, and why it no longer can
+///
+/// Until R3058 the wz arm ran this example to the end and a real zenoh-pico
+/// queryable decoded its payload: wz's allocator served a pool sized exactly at
+/// the payload, which upstream's cannot, so wz succeeded where the reference
+/// aborted. That was a divergence in wz's favour and a divergence all the same.
+/// The C ABI's provider is now the runtime's, carved by upstream's own
+/// allocator, and it refuses the pool as the real library does. The witness
+/// that a real pico queryable reads an SHM-allocated query payload moved to LEG
+/// 6, which runs a program both libraries CAN run.
 ///
 /// ## The upstream defect, derived from source and measured on the axis
 ///
@@ -887,16 +969,17 @@ fn upstream_z_advanced_sub_on_wz_capi_c_receives_the_same_samples_from_real_pico
 ///
 /// A skip would report green over a claim nobody is checking. The reference arm
 /// is therefore asserted to fail IN THE MEASURED WAY, so the day upstream fixes
-/// it this test reds and whoever sees it restores the cross-arm comparison.
-/// The control is intrinsic: same C source, same argv, same queryable, same
-/// oracle installation — only the library differs, and the four sibling legs in
-/// this file drive that same oracle green.
-// wz-proves: api-compat-c wz->pico partial
+/// it this test reds and whoever sees it runs the example on both arms. The wz
+/// arm is asserted to fail at the allocation the example checks, so a wz pool
+/// more permissive than upstream's reds here too. The control is intrinsic:
+/// same C source, same argv, same queryable, same oracle installation — only
+/// the library differs, and the sibling legs in this file drive that same
+/// oracle green.
 #[test]
 #[ignore = "compiles an upstream zenoh-c example with cc and spawns the real \
             zenoh-pico z_queryable CLI; needs the machine-local SHARED-MEMORY \
-            zenoh-c oracle; run-ci Layer C1ce drives it"]
-fn upstream_z_get_shm_on_wz_capi_c_is_answered_by_real_pico_where_the_reference_arm_aborts() {
+            zenoh-c oracle; run-ci Layer C1cc drives it"]
+fn upstream_z_get_shm_on_wz_capi_c_runs_on_neither_arm_at_the_pinned_version() {
     let Some((include, libdir_ref, examples)) = oracle_or_note() else {
         return;
     };
@@ -918,97 +1001,10 @@ fn upstream_z_get_shm_on_wz_capi_c_is_answered_by_real_pico_where_the_reference_
         &libdir_ref,
     );
 
-    let reply = "REPLY-FROM-REAL-PICO";
-    let sent = "GET-SHM-PAYLOAD";
-
-    // Returns the arm's EXIT STATUS as well as its output. R2245 moved the
-    // success assertion out to the caller, because the two arms no longer make
-    // the same claim: the wz arm must succeed, and the reference arm must fail
-    // in one measured way. A closure that asserted success for both could only
-    // express the claim that stopped being true.
-    let run = |program: &Path, libdir: &Path, arm: Arm| -> (ExitStatus, String, String, String) {
-        let label = arm.label();
-        let reservation = PortReservation::pick();
-        let port = reservation.port();
-        let endpoint = format!("tcp/127.0.0.1:{port}");
-
-        let mut qbl_out = tempfile::tempfile().expect("queryable stdout capture");
-        let qbl_writer = qbl_out.try_clone().expect("dup queryable stdout handle");
-        let mut queryable = ChildGuard::wrap(
-            format!("real zenoh-pico z_queryable ({label})"),
-            Command::new("stdbuf")
-                .args(["-oL", "-eL"])
-                .arg(zenoh_pico_cli_binary("z_queryable"))
-                .args([
-                    "-l",
-                    &endpoint,
-                    "-m",
-                    "peer",
-                    "-k",
-                    "demo/capic/qshm",
-                    "-v",
-                    reply,
-                ])
-                .stdout(Stdio::from(qbl_writer))
-                .stderr(Stdio::from(qbl_out.try_clone().expect("dup stderr handle")))
-                .spawn()
-                .expect("spawn the real zenoh-pico z_queryable"),
-        );
-        if let Err(why) = wait_for_tcp_accept_alive(queryable.child_mut(), port, LISTEN_TIMEOUT) {
-            panic!(
-                "the real zenoh-pico z_queryable never accepted on {endpoint} — {why}; \
-                 capture so far:\n{}",
-                read_captured(&mut qbl_out)
-            );
-        }
-        drop(reservation);
-
-        // `z_get_shm.c` terminates on its own once the reply channel closes, so
-        // this arm is a plain wait rather than a capture race.
-        let out = Command::new(program)
-            .args([
-                "-e",
-                &format!("tcp/127.0.0.1:{port}"),
-                "-m",
-                "client",
-                "-s",
-                "demo/capic/qshm",
-                "-p",
-                sent,
-            ])
-            .env("LD_LIBRARY_PATH", libdir)
-            .output()
-            .unwrap_or_else(|e| panic!("failed to run the {label} z_get_shm: {e}"));
-        let queryable_saw = read_captured(&mut qbl_out);
-        graceful_terminate(queryable.child_mut(), TERMINATE_TIMEOUT);
-        // BOTH streams, because the two arms fail in different places: the wz
-        // arm would report on stdout, and the reference arm's Talc refusal is a
-        // tracing line on stdout while the abort's panic lands on stderr.
-        let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
-        let mut both = stdout.clone();
-        both.push_str(&String::from_utf8_lossy(&out.stderr));
-        (out.status, stdout, both, queryable_saw)
-    };
-
-    let (ref_status, _ref_stdout, ref_both, _ref_queryable) =
-        run(&on_ref, &libdir_r, Arm::Reference);
-    let (wz_status, wz_stdout, wz_both, wz_queryable) = run(&on_wz, &libdir_wz, Arm::Wz);
-
-    // ── THE PROOF: wz's ABI runs upstream's example end to end ──────────
-    assert!(
-        wz_status.success(),
-        "upstream z_get_shm.c on wz's C ABI exited {:?}\n{wz_both}",
-        wz_status.code(),
-    );
-    assert!(
-        report_lines(&wz_stdout).iter().any(|l| l.contains(reply)),
-        "the wz arm did not print the reply the real pico queryable sent: {wz_stdout:?}"
-    );
-    assert!(
-        wz_queryable.contains(sent),
-        "the real pico queryable did not read the SHM-allocated query payload \
-         from the wz arm — it saw:\n{wz_queryable}"
-    );
+    let (ref_status, _ref_stdout, ref_both, ref_queryable) =
+        run_get_shm_against_pico(&on_ref, &libdir_r, Arm::Reference);
+    let (wz_status, _wz_stdout, wz_both, wz_queryable) =
+        run_get_shm_against_pico(&on_wz, &libdir_wz, Arm::Wz);
 
     // ── THE PIN: upstream's own library cannot run its own example ──────
     //
@@ -1020,8 +1016,8 @@ fn upstream_z_get_shm_on_wz_capi_c_is_answered_by_real_pico_where_the_reference_
     assert!(
         !ref_status.success(),
         "the REFERENCE z_get_shm SUCCEEDED. Upstream has repaired \
-         examples/z_get_shm.c (or the pin moved): restore the cross-arm stdout \
-         comparison this leg carried before R2245, and delete this pin."
+         examples/z_get_shm.c (or the pin moved): run the example itself on both \
+         arms and diff them as LEG 6 does its derived program, and delete this pin."
     );
     assert!(
         ref_both.contains("Error initializing Talc backend"),
@@ -1031,5 +1027,161 @@ fn upstream_z_get_shm_on_wz_capi_c_is_answered_by_real_pico_where_the_reference_
          is a different problem and must be attributed, not absorbed here.\n\
          {ref_both}",
         ref_status.code(),
+    );
+
+    // ── THE WZ HALF: wz refuses where the library refuses ───────────────
+    //
+    // R3058. The wz arm used to RUN this example to the end, because its
+    // allocator served a pool sized exactly at the payload. A pool the real
+    // library cannot make is not one wz may serve: a program that works on wz
+    // and aborts on zenoh-c is not behaving as a drop-in. The refusal is the
+    // same, the MANNER is not and is not meant to be: upstream's out-parameter
+    // is left uninitialised, so its next call reads garbage and dies on a
+    // signal, while wz leaves a gravestone, which the example's own allocation
+    // check then reports (named divergence, `z_shm_provider_default_new`).
+    assert!(
+        !wz_status.success(),
+        "wz's C ABI RAN upstream's z_get_shm.c to the end, which the real \
+         library cannot. Its provider accepted a pool sized exactly at the \
+         payload, so it is more permissive than upstream's Talc pool again.\n\
+         {wz_both}"
+    );
+    assert!(
+        wz_both.contains("Unexpected failure during SHM buffer allocation"),
+        "wz's z_get_shm failed, but not at the allocation the example checks \
+         (exit {:?}), so the refusal is not the pool's:\n{wz_both}",
+        wz_status.code(),
+    );
+    for (arm, saw) in [("reference", &ref_queryable), ("wz", &wz_queryable)] {
+        assert!(
+            !saw.contains(GET_SHM_SENT),
+            "the {arm} arm got as far as sending the query, so it did not fail \
+             at the provider this leg pins:\n{saw}"
+        );
+    }
+}
+
+/// The one call LEG 6 changes in upstream's `z_get_shm.c`, and what it becomes.
+const UPSTREAM_PROVIDER_CALL: &str = "z_shm_provider_default_new(&provider, value_len);";
+/// 4096 is `z_pub_shm.c`'s own provider size, upstream's convention one file over.
+const SIZED_PROVIDER_CALL: &str = "z_shm_provider_default_new(&provider, 4096);";
+
+/// LEG 6 — a query payload ALLOCATED IN SHARED MEMORY reaches a REAL zenoh-pico
+/// queryable, which answers it, identically on wz's ABI and on the real library.
+///
+/// ## Why this is a derived program and not upstream's example
+///
+/// LEG 5 pins that `z_get_shm.c` cannot run on either library, because it sizes
+/// its provider at exactly the payload. What that example was FOR is a
+/// different claim: that a payload allocated out of a provider and handed to
+/// `z_get` is delivered. This leg keeps every byte of upstream's source except
+/// the one call that sizes the pool, which becomes 4096, the size `z_pub_shm.c`
+/// uses. The replacement is asserted to happen exactly once, so an upstream that
+/// rewrites the file fails here by name instead of silently testing a different
+/// program; and the SAME derived source is compiled for both arms.
+///
+/// ## What it witnesses, and what it does not
+///
+/// The foreign queryable shares no code with either library and is the party
+/// that decodes the payload, so its seeing the bytes is agreement on the wire.
+/// It does not witness that the payload travelled as a SHARED-MEMORY reference:
+/// `z_bytes_from_shm` copies on wz today, and a pico peer has no segment to map
+/// either way, so the bytes cross as bytes on both arms. That half is the send
+/// plane's to witness against a peer that can map the segment.
+// wz-proves: api-compat-c wz->pico partial
+#[test]
+#[ignore = "compiles an upstream zenoh-c example with cc and spawns the real \
+            zenoh-pico z_queryable CLI; needs the machine-local SHARED-MEMORY \
+            zenoh-c oracle; run-ci Layer C1cc drives it"]
+fn a_shm_allocated_query_payload_reaches_a_real_pico_queryable_identically_on_wz_capi_c_and_libzenohc(
+) {
+    let Some((include, libdir_ref, examples)) = oracle_or_note() else {
+        return;
+    };
+    let dir = tempfile::tempdir().expect("tempdir for the derived program");
+    let src_dir = dir.path().join("src");
+    std::fs::create_dir_all(&src_dir).expect("derived source dir");
+    let upstream =
+        std::fs::read_to_string(examples.join("z_get_shm.c")).expect("upstream's z_get_shm.c");
+    assert_eq!(
+        upstream.matches(UPSTREAM_PROVIDER_CALL).count(),
+        1,
+        "upstream's z_get_shm.c no longer sizes its provider with `{UPSTREAM_PROVIDER_CALL}` \
+         exactly once, so the derivation this leg rests on has changed: read the file and \
+         decide whether LEG 5 and this leg still say what upstream does."
+    );
+    std::fs::write(
+        src_dir.join("z_get_shm_sized.c"),
+        upstream.replace(UPSTREAM_PROVIDER_CALL, SIZED_PROVIDER_CALL),
+    )
+    .expect("write the derived source");
+    // The example includes its argument parser from its own directory, and the
+    // compile helper uses ONE directory for both the source and the includes.
+    std::fs::copy(examples.join("parse_args.h"), src_dir.join("parse_args.h"))
+        .expect("copy upstream's parse_args.h");
+
+    let (on_wz, libdir_wz) = arm_binary(
+        "z_get_shm_sized",
+        Arm::Wz,
+        dir.path(),
+        &include,
+        &src_dir,
+        &libdir_ref,
+    );
+    let (on_ref, libdir_r) = arm_binary(
+        "z_get_shm_sized",
+        Arm::Reference,
+        dir.path(),
+        &include,
+        &src_dir,
+        &libdir_ref,
+    );
+
+    let (ref_status, ref_stdout, ref_both, ref_queryable) =
+        run_get_shm_against_pico(&on_ref, &libdir_r, Arm::Reference);
+    let (wz_status, wz_stdout, wz_both, wz_queryable) =
+        run_get_shm_against_pico(&on_wz, &libdir_wz, Arm::Wz);
+
+    // The ORACLE first: two identical failures diff clean.
+    assert!(
+        ref_status.success()
+            && report_lines(&ref_stdout)
+                .iter()
+                .any(|l| l.contains(GET_SHM_REPLY))
+            && ref_queryable.contains(GET_SHM_SENT),
+        "the REFERENCE arm did not run the derived program to a reply (exit {:?}), so \
+         this machine's oracle cannot serve as one for it:\n{ref_both}",
+        ref_status.code(),
+    );
+
+    assert!(
+        wz_status.success(),
+        "the derived z_get_shm on wz's C ABI exited {:?}\n{wz_both}",
+        wz_status.code(),
+    );
+    assert!(
+        wz_queryable.contains(GET_SHM_SENT),
+        "the real pico queryable did not read the SHM-allocated query payload \
+         from the wz arm — it saw:\n{wz_queryable}"
+    );
+    // The PROGRAM's own lines, not the whole of stdout: the real library writes
+    // its tracing there too, and measured against this pico peer it logs
+    // `Unknown interest` at ERROR from its client routing, which wz's session
+    // has no counterpart of. That line is the library's diagnostics and not the
+    // program's output, and the sibling legs compare `report_lines` for the
+    // same reason.
+    let sending = "Sending Query 'demo/capic/qshm'...";
+    for (arm, stdout) in [("reference", &ref_stdout), ("wz", &wz_stdout)] {
+        assert!(
+            stdout.lines().any(|l| l == sending),
+            "the {arm} arm never reached the send the leg is about:\n{stdout}"
+        );
+    }
+    assert_eq!(
+        report_lines(&wz_stdout),
+        report_lines(&ref_stdout),
+        "§5.27 api-compat-c: the derived z_get_shm reported different replies on wz's \
+         C ABI and on libzenohc against the same real pico queryable.\n\
+         --- wz ---\n{wz_stdout}--- libzenohc ---\n{ref_stdout}"
     );
 }

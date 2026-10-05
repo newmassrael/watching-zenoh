@@ -362,6 +362,17 @@ pub trait ShmProviderBackend: Send + Sync {
     /// Validate `layout` against this backend and adapt it to what the backend can
     /// serve. The provider allocates by the layout this returns.
     fn layout_for(&self, layout: MemoryLayout) -> Result<MemoryLayout, LayoutError>;
+
+    /// Whether `chunk`, which something else produced, is one this backend could have
+    /// issued. A provider asks before it takes a mapped chunk on
+    /// ([`ShmProvider::map`](crate::shm_provider::ShmProvider::map)), because it will hand
+    /// the range back to this backend when it collects, and a backend given a range it never
+    /// issued may corrupt itself. Upstream asks nothing; a backend that can tell (a pool knows
+    /// its own segment) refuses what it cannot own, and the default accepts, for a backend
+    /// whose memory is the host's and whose `free` is the host's to get right.
+    fn accepts(&self, _chunk: &AllocatedChunk) -> bool {
+        true
+    }
 }
 
 #[cfg(test)]

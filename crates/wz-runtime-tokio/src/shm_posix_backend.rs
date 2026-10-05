@@ -106,8 +106,18 @@ impl PosixShmProviderBackend {
     /// The layout's alignment is the alignment every chunk is freed at, as upstream's
     /// `free` uses the backend's, and what [`Self::layout_for`] extends a request to.
     pub fn new(layout: &MemoryLayout) -> io::Result<Self> {
-        let size = layout.size().get();
-        let segment = OwnedSegment::create(size, || u64::from(next_candidate_id()))?;
+        let segment = OwnedSegment::create(layout.size().get(), || u64::from(next_candidate_id()))?;
+        Self::over(segment, layout.alignment())
+    }
+
+    /// A pool carved out of `segment`, which it takes ownership of: a segment too small
+    /// for the allocator to claim is dropped here, and dropping it unlinks it.
+    ///
+    /// Split from [`Self::new`] so that the refusal can be tested on a segment whose id the
+    /// test chose, instead of by counting the objects in a directory every other test is
+    /// also creating segments in.
+    fn over(segment: OwnedSegment, alignment: AllocAlignment) -> io::Result<Self> {
+        let size = segment.len();
         let mut talc = Talc::new(ErrOnOom);
         // SAFETY: `base` is the start of a live mapping of exactly `len` bytes that this
         // function owns and nothing else has been handed a pointer into yet.
@@ -122,7 +132,7 @@ impl PosixShmProviderBackend {
         Ok(Self {
             segment: Arc::new(PoolSegment { segment }),
             talc: Mutex::new(talc),
-            alignment: layout.alignment(),
+            alignment,
         })
     }
 
@@ -202,6 +212,18 @@ impl ShmProviderBackend for PosixShmProviderBackend {
     fn layout_for(&self, layout: MemoryLayout) -> Result<MemoryLayout, LayoutError> {
         layout.extend(self.alignment)
     }
+
+    /// A chunk is this pool's only if it names this pool's segment, lies inside it, and its
+    /// address is the segment's base plus the offset it names.
+    fn accepts(&self, chunk: &AllocatedChunk) -> bool {
+        let d = &chunk.descriptor;
+        let offset = d.chunk as usize;
+        u64::from(d.segment) == self.segment_id()
+            && offset
+                .checked_add(d.len.get())
+                .is_some_and(|end| end <= self.capacity())
+            && chunk.data.ptr() as usize == self.segment.segment.base() as usize + offset
+    }
 }
 
 #[cfg(all(test, target_os = "linux"))]
@@ -266,23 +288,71 @@ mod tests {
         }
     }
 
-    /// A refused pool leaves no segment behind: the segment it made is unlinked with the
-    /// failed backend.
+    /// A refused pool leaves no segment behind: the segment it was carved from is unlinked
+    /// with the failed backend.
+    ///
+    /// The segment is made here, with an id this test holds, so the assertion is about that
+    /// one file. Counting the objects in `/dev/shm` before and after would measure every
+    /// test of this crate that runs beside it, which is what the first version of this test
+    /// did, with a tolerance that hid it.
     #[test]
     fn a_refused_pool_unlinks_the_segment_it_made() {
-        let before = std::fs::read_dir("/dev/shm")
-            .map(|d| d.filter_map(Result::ok).count())
-            .unwrap_or(0);
-        for _ in 0..4 {
-            assert!(PosixShmProviderBackend::new(&layout(300)).is_err());
-        }
-        let after = std::fs::read_dir("/dev/shm")
-            .map(|d| d.filter_map(Result::ok).count())
-            .unwrap_or(0);
+        let id = u64::from(next_candidate_id());
+        let segment = OwnedSegment::create(300, || id).expect("a segment of 300 bytes");
         assert!(
-            after <= before + 8,
-            "four refused pools left {} extra objects in /dev/shm",
-            after.saturating_sub(before)
+            segment_path(id).exists(),
+            "the control: the segment exists while the pool is being carved from it, so its \
+             absence afterwards is the refusal's doing and not a path this test got wrong"
+        );
+        let refused = PosixShmProviderBackend::over(segment, AllocAlignment::new(0).unwrap());
+        assert!(refused.is_err(), "300 bytes is too small for the allocator");
+        assert!(
+            !segment_path(id).exists(),
+            "a refused pool left its segment in /dev/shm"
+        );
+    }
+
+    /// `accepts` holds three claims of a chunk, and each is checked ON ITS OWN: the chunk
+    /// as issued is accepted, and a chunk that breaks exactly one claim is not. A chunk of
+    /// another pool breaks two at once (its segment and its address), so a test of that alone
+    /// would pass with either check removed.
+    #[test]
+    fn a_chunk_is_accepted_only_when_each_of_its_three_claims_holds() {
+        let backend = PosixShmProviderBackend::new(&layout(4096)).expect("a pool");
+        let chunk = backend.alloc(&layout(1024)).expect("a chunk");
+        let issued = chunk.descriptor;
+        let ptr = chunk.data.ptr();
+        let with = |descriptor: ChunkDescriptor, ptr: *mut u8| AllocatedChunk {
+            descriptor,
+            data: PtrInSegment::new(ptr, Arc::new(())),
+        };
+        assert!(
+            backend.accepts(&with(issued, ptr)),
+            "the control: the chunk exactly as the pool issued it"
+        );
+        assert!(
+            !backend.accepts(&with(
+                ChunkDescriptor {
+                    segment: issued.segment.wrapping_add(1),
+                    ..issued
+                },
+                ptr
+            )),
+            "a descriptor that names another segment"
+        );
+        assert!(
+            !backend.accepts(&with(
+                ChunkDescriptor {
+                    len: std::num::NonZeroUsize::new(4096).expect("non-zero"),
+                    ..issued
+                },
+                ptr
+            )),
+            "a descriptor that reaches past the end of the pool"
+        );
+        assert!(
+            !backend.accepts(&with(issued, ptr.wrapping_add(8))),
+            "an address that is not the segment's base plus the offset the descriptor names"
         );
     }
 

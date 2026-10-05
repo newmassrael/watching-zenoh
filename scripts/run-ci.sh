@@ -6659,13 +6659,19 @@ layer_c1af_cargo_test_shm() {
     # incompatibility and not a malformed layout, which is how upstream's provider reports it;
     # the same round moved the pool onto upstream's allocator, so the tests that filled a tiny
     # pool now fill a 4096-byte one with the chunk sizes the real library was measured with.
-    _runci_guarded_test C1af 33 cargo test -p wz-runtime-tokio --features session-extshm,transport-unicast,transport-link-tcp --lib shm_provider --quiet \
+    # R3058 -- 33 -> 36, MEASURED. The provider's blocking policy returns where nothing could
+    # ever be released, a mapped chunk is refused when it is longer than its chunk or not the
+    # backend's, and an owner is unique exactly while nothing else holds its chunk; each was
+    # reddened by its own mutation.
+    _runci_guarded_test C1af 36 cargo test -p wz-runtime-tokio --features session-extshm,transport-unicast,transport-link-tcp --lib shm_provider --quiet \
         || return 1
     # R3056 -- the provider's two new modules, which the filter above does not select:
     # `shm_backend` (the value types an allocation speaks in, 4 tests) and
     # `shm_posix_backend` (the pool, 11 tests). Counted so a dropped or renamed test cannot
     # select fewer and pass.
-    _runci_guarded_test C1af 15 cargo test -p wz-runtime-tokio --features session-extshm,transport-unicast,transport-link-tcp --lib --quiet -- shm_backend shm_posix_backend \
+    # R3058 -- 15 -> 16, MEASURED: the three claims a pool makes of a chunk before it takes
+    # it on, each checked on its own.
+    _runci_guarded_test C1af 16 cargo test -p wz-runtime-tokio --features session-extshm,transport-unicast,transport-link-tcp --lib --quiet -- shm_backend shm_posix_backend \
         || return 1
     # R311y507 — 2 -> 5. The target gained the challenge-response over a real
     # driven handshake plus the two half-mix arms (a ONE-SIDED authenticator must
@@ -19682,7 +19688,7 @@ layer_c1cc_api_compat_c() {
     _runci_guarded_test "C1cc wz-capi-c unit" + \
         cargo test -p wz-capi-c --quiet || return 1
     # R311y543 — the SHM arm carries unit tests the other three do not (the
-    # segment allocator's), so running only the default arm would leave them
+    # provider plane's, over the runtime's pool since R3058), so running only the default arm would leave them
     # ungated. Same argument as the clippy loop above.
     _runci_guarded_test "C1cc wz-capi-c unit (shared-memory arm)" + \
         cargo test -p wz-capi-c --features zenoh-c-shared-memory --quiet || return 1
@@ -19855,6 +19861,20 @@ layer_c1cc_api_compat_c() {
         --test-threads=1 \
         --exact a_sessions_own_shm_provider_is_obtained_identically_on_wz_and_libzenohc \
         || return 1
+    # R3058 — a provider's ALLOCATION, one C program on both libraries: which pools
+    # are made and refused (0 and 1000 bytes are refused, 4096 and 5000 made), how
+    # many chunks of each size a pool holds, that a dropped chunk is back only after
+    # a collection, what each policy spelling does when the pool is full, and which
+    # aligned requests a provider built at byte alignment refuses. Before this round
+    # the C ABI had an allocator of its own and differed on every one of those.
+    # SKIPs on an oracle without the SHM+unstable arm.
+    _runci_guarded_test \
+        "C1cc a_providers_allocation_semantics_are_identical_on_wz_and_libzenohc" 1 \
+        cargo test -p wz-integration-tests \
+        --test zenoh_c_shm_provider_allocation_twice_and_diff -- --ignored --quiet \
+        --test-threads=1 \
+        --exact a_providers_allocation_semantics_are_identical_on_wz_and_libzenohc \
+        || return 1
     # R2970 — what a session's links OFFER, read from its config: QoS by
     # default, lowlatency and compression when asked, qos+lowlatency refused at
     # the open, on the dialling and the accepting side alike. Before this round
@@ -19914,7 +19934,8 @@ layer_c1cc_api_compat_c() {
         upstream_z_pub_shm_on_wz_capi_c_publishes_the_same_shm_chunk_on_both_arms \
         upstream_z_sub_shm_on_wz_capi_c_reports_the_same_buffer_type_on_both_arms \
         upstream_z_sub_shm_on_wz_capi_c_reports_the_same_buffer_type_for_a_shared_memory_publisher \
-        upstream_z_get_shm_on_wz_capi_c_is_answered_by_real_pico_where_the_reference_arm_aborts; do
+        upstream_z_get_shm_on_wz_capi_c_runs_on_neither_arm_at_the_pinned_version \
+        a_shm_allocated_query_payload_reaches_a_real_pico_queryable_identically_on_wz_capi_c_and_libzenohc; do
         _runci_guarded_test "C1cc $leg" 1 \
             cargo test -p wz-integration-tests \
             --test zenoh_c_shm_and_advanced_on_wz_capi_c -- --ignored --quiet --test-threads=1 \

@@ -30,9 +30,11 @@
 //!   [`z_bytes_as_mut_loaned_shm`] answer for it as upstream's do: the mutable view
 //!   only while this payload is the chunk's sole holder.
 //! - **Sending.** Every put of an SHM buffer from this ABI still serialises. The
-//!   provider below is an in-process allocator, and [`z_bytes_from_shm`] copies the
-//!   chunk out of it, so a payload this session PRODUCES is an ordinary one and
-//!   [`z_bytes_as_loaned_shm`] says so for it.
+//!   provider below allocates out of a real segment since R3058, but
+//!   [`z_bytes_from_shm`] copies the chunk out of it, so a payload this session
+//!   PRODUCES is an ordinary one and [`z_bytes_as_loaned_shm`] says so for it. The
+//!   runtime can already put a chunk on the wire as a descriptor; routing this ABI's
+//!   puts, gets and replies to it is the next step and not this module's today.
 //!
 //! ⚠ R2970 corrected two sentences that said this ABI's SHM fallback was upstream's
 //! and the reason the two arms of the drop-in test agree. They were wrong then, and
@@ -43,25 +45,35 @@
 //! `zenoh_c_shm_and_advanced_on_wz_capi_c`, measured red before the change). See
 //! `crate::session`'s `session_offer`.
 //!
-//! ## The allocator is real, because the examples depend on it being real
+//! ## The provider is the runtime's, because upstream's lifecycle is observable
 //!
 //! `z_pub_shm.c` creates a 4096-byte provider and allocates a 1024-byte chunk
-//! once per second, forever. A provider that never reclaimed would fail on the
-//! fifth iteration, so reclamation is not decoration: a chunk returns to the
-//! segment when its owner drops and adjacent free ranges coalesce.
+//! once per second, forever. What makes that loop run is not that a dropped chunk
+//! is free again: in upstream's provider it is NOT, until a collection takes it
+//! off the provider's busy list, and the policy a spelling names decides whether
+//! that collection happens (`z_shm_provider_alloc` does not collect,
+//! `z_shm_provider_alloc_gc` and the spellings after it do). The built-in pool is
+//! carved by the allocator upstream's default backend uses, so which pools can be
+//! made (1000 bytes or fewer cannot), how many chunks of each size a pool holds
+//! and which aligned requests it refuses are upstream's answers rather than
+//! this crate's. All of that lives in `wz_runtime_tokio::shm_provider`, and the
+//! differential `zenoh_c_shm_provider_allocation_twice_and_diff` measures it on
+//! this ABI and on the real library from one C program.
 //! (`z_shm_provider_available` does NOT report what is left, on purpose: R2957
-//! measured upstream's default POSIX backend answering `0` there, so this
-//! allocator's native providers answer the same.) `z_get_shm.c` goes further
-//! and creates a provider of EXACTLY the size it needs, so an allocator with any
-//! per-chunk overhead taken out of the segment would fail its very first
-//! allocation.
+//! measured upstream's default POSIX backend answering `0` there, and the built-in
+//! pool answers the same.)
 //!
-//! The segment is ordinary process memory rather than a POSIX `/dev/shm`
-//! mapping. A real mapping would be strictly more machinery for the same
-//! observable behaviour while the sending side hands a payload over by copy —
-//! nothing outside this process can attach to it — and it would add a cleanup obligation
-//! (`shm_unlink` on abnormal exit) that buys nothing. The type is what upstream
-//! names `z_owned_shm_provider_t`; what backs it is not ABI.
+//! Before R3058 this module carried an allocator of its own over process memory,
+//! which freed a chunk the moment its owner dropped it and served a pool sized
+//! exactly at the payload. Each was a difference from the real library that a
+//! program could observe, and `z_get_shm.c` shows the second: it ran on this ABI and
+//! aborts on upstream's (`zenoh_c_shm_and_advanced_on_wz_capi_c` leg 5).
+//!
+//! The segment is a real POSIX `/dev/shm` mapping now, which is what lets the
+//! runtime put one of its chunks on the wire as a descriptor. A C program's own
+//! allocator (`z_shm_provider_new` over callbacks) is a [`ForeignBackend`] that
+//! implements the runtime's backend trait, so the two kinds of provider share one
+//! set of allocation semantics and differ only in where the memory comes from.
 //!
 //! ## Gating
 //!
@@ -136,368 +148,114 @@ pub const Z_LAYOUT_ERROR_INCORRECT_LAYOUT_ARGS: z_layout_error_t = 0;
 pub const Z_LAYOUT_ERROR_PROVIDER_INCOMPATIBLE_LAYOUT: z_layout_error_t = 1;
 
 // ---------------------------------------------------------------------------
-// the segment
+// the chunk
 // ---------------------------------------------------------------------------
 
-/// One free range in a segment, as `[start, end)`.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-struct FreeRange {
-    start: usize,
-    end: usize,
-}
-
-/// The segment's book-keeping, behind the provider's mutex.
-#[derive(Debug)]
-struct SegmentBooks {
-    /// Free ranges, kept SORTED by `start` and never overlapping. Sorted is what
-    /// makes coalescing a linear scan instead of a search, and it is an
-    /// invariant [`SegmentBooks::release`] restores on every free.
-    free: Vec<FreeRange>,
-}
-
-impl SegmentBooks {
-    /// First-fit. Returns the offset of a `len`-byte range aligned to `align`,
-    /// or `None`.
-    ///
-    /// First fit rather than best fit deliberately: `z_get_shm.c` sizes its
-    /// provider to EXACTLY the payload it will allocate, so the property that
-    /// matters is "a request for the whole segment succeeds", which first fit
-    /// gives and any strategy that reserves header bytes does not.
-    fn claim(&mut self, len: usize, align: usize) -> Option<usize> {
-        for (i, range) in self.free.iter().enumerate() {
-            let start = range.start.next_multiple_of(align);
-            let Some(end) = start.checked_add(len) else {
-                continue;
-            };
-            if end > range.end {
-                continue;
-            }
-            let (was_start, was_end) = (range.start, range.end);
-            self.free.remove(i);
-            // The alignment gap before the chunk and the remainder after it are
-            // both still free; re-inserting them keeps the list sorted because
-            // they sit where the removed range was.
-            let mut insert = i;
-            if start > was_start {
-                self.free.insert(
-                    insert,
-                    FreeRange {
-                        start: was_start,
-                        end: start,
-                    },
-                );
-                insert += 1;
-            }
-            if end < was_end {
-                self.free.insert(
-                    insert,
-                    FreeRange {
-                        start: end,
-                        end: was_end,
-                    },
-                );
-            }
-            return Some(start);
-        }
-        None
-    }
-
-    /// Return `[start, end)` to the free list, coalescing with its neighbours.
-    fn release(&mut self, start: usize, end: usize) {
-        let at = self.free.partition_point(|r| r.start < start);
-        self.free.insert(at, FreeRange { start, end });
-        // Coalesce forwards from the predecessor, so a release that bridges two
-        // free ranges merges all three in one pass.
-        let mut i = at.saturating_sub(1);
-        while i + 1 < self.free.len() {
-            if self.free[i].end == self.free[i + 1].start {
-                self.free[i].end = self.free[i + 1].end;
-                self.free.remove(i + 1);
-            } else {
-                i += 1;
-            }
-        }
-    }
-
-    /// Total free bytes.
-    fn available(&self) -> usize {
-        self.free.iter().map(|r| r.end - r.start).sum()
-    }
-
-    /// The largest single free range — what an allocation of that size could
-    /// still satisfy without any further reclamation.
-    ///
-    /// Test-only since R2957: `defragment` stopped reporting it, because
-    /// upstream's default backend reports `0` there
-    /// ([`Provider::available`]). The coalescing it measures is still the
-    /// allocator's, and the tests still hold it.
-    #[cfg(test)]
-    fn largest(&self) -> usize {
-        self.free.iter().map(|r| r.end - r.start).max().unwrap_or(0)
-    }
-}
-
-/// A provider's memory and its book-keeping.
+/// Where one chunk's bytes live, and who gives them back.
 ///
-/// The bytes live in a boxed slice this type owns for its whole life; chunks
-/// index into it. `Segment` is shared by `Arc` between the provider and every
-/// live buffer, so a buffer that OUTLIVES its provider — which
-/// `z_pub_shm.c` permits, since it drops the provider last but hands buffers to
-/// zenoh — still points at live memory.
-struct Segment {
-    /// The segment's base pointer and length. A raw pointer rather than a
-    /// `Box<[u8]>` field because chunks hand out `&mut` interior slices while
-    /// this struct is shared behind an `Arc`; the allocator's non-overlap
-    /// invariant is what makes that sound, and it is stated at each use.
-    base: *mut u8,
-    len: usize,
-    /// The alignment `base` was allocated at, so `Drop` can name the same
-    /// layout `new` did. R2289 made this a FIELD rather than reading
-    /// [`SEGMENT_ALIGN`] in both places: `z_posix_shm_provider_with_layout_new`
-    /// lets a caller ask for more than a page, and a `dealloc` at a different
-    /// alignment than the `alloc` is undefined behaviour rather than a leak.
-    align: usize,
-    books: Mutex<SegmentBooks>,
-    /// Signalled whenever a chunk is released — what the BLOCKING allocation
-    /// waits on.
-    released: Condvar,
-}
-
-// SAFETY: `base` is a heap allocation this type owns for its whole life and
-// frees in `Drop`. It is shared across threads only through `Arc<Segment>`, and
-// every access to the bytes goes through a `ShmChunk` whose range was handed out
-// by `SegmentBooks::claim` and is not handed out again until the chunk is
-// released — so no two live chunks alias, and `books` serialises the allocator
-// itself.
-unsafe impl Send for Segment {}
-// SAFETY: as above.
-unsafe impl Sync for Segment {}
-
-/// R2264 — the alignment every segment's base carries, so an offset aligned
-/// inside it is aligned in MEMORY too.
-///
-/// A page, because that is what upstream's `mmap`ed segments give and therefore
-/// the boundary a C program written against zenoh-c may already assume. Nothing
-/// here needs a page specifically; what it needs is a bound, stated once.
-const SEGMENT_ALIGN: usize = 4096;
-
-impl Segment {
-    /// Allocate a segment of `len` bytes, all free.
-    ///
-    /// A ZERO-length segment is legal and is not an edge case to reject:
-    /// `z_get_shm.c` builds its provider from `strlen(value)`, which is 0 when
-    /// the example is run without a payload.
-    fn new(len: usize) -> Arc<Self> {
-        Self::with_alignment(len, SEGMENT_ALIGN)
-    }
-
-    /// Allocate a segment of `len` bytes whose base is aligned to at least
-    /// `align`.
-    ///
-    /// R2289 — `z_posix_shm_provider_with_layout_new` takes a
-    /// `z_loaned_memory_layout_t`, which carries an alignment the caller chose,
-    /// and upstream's backend honours it when it maps the segment. A request
-    /// BELOW a page is widened to [`SEGMENT_ALIGN`] rather than narrowed: the
-    /// page bound is what every other constructor already promises, and giving
-    /// one provider a weaker base than its siblings would make the alignment
-    /// tests pass or fail depending on which constructor built the provider.
-    fn with_alignment(len: usize, align: usize) -> Arc<Self> {
-        let align = align.max(SEGMENT_ALIGN);
-        // R2264 — the segment is allocated at PAGE alignment, and that is a
-        // correctness requirement rather than a tidiness one.
-        //
-        // `claim` aligns an OFFSET inside the segment. A caller of
-        // `z_shm_provider_alloc_aligned` is handed a POINTER and told it meets
-        // the alignment it asked for, so the two agree only when the base does
-        // too. This was `vec![0u8; len]` — alignment 1 — so a 64-byte request
-        // returned an address that was 64-aligned within the segment and
-        // arbitrary in memory. MEASURED: the first aligned spelling this round
-        // added came back at `addr % 64 == 48`.
-        //
-        // Upstream has this for free: its segments are `mmap`ed and therefore
-        // page-aligned. Matching that here makes every alignment up to a page
-        // exact, and beyond a page neither implementation promises anything.
-        let base = if len == 0 {
-            std::ptr::null_mut()
-        } else {
-            let layout = std::alloc::Layout::from_size_align(len, align)
-                .expect("a segment layout at page alignment");
-            // SAFETY: `len` is non-zero, so the layout is non-zero-sized.
-            let p = unsafe { std::alloc::alloc_zeroed(layout) };
-            if p.is_null() {
-                std::alloc::handle_alloc_error(layout);
-            }
-            p
-        };
-        Arc::new(Self {
-            base,
-            len,
-            align,
-            books: Mutex::new(SegmentBooks {
-                free: if len == 0 {
-                    Vec::new()
-                } else {
-                    vec![FreeRange { start: 0, end: len }]
-                },
-            }),
-            released: Condvar::new(),
-        })
-    }
-
-    /// Lock the books, ignoring poisoning — a panic while holding them cannot
-    /// leave the free list torn, because every mutation is a single statement
-    /// sequence with no `?` inside.
-    fn books(&self) -> std::sync::MutexGuard<'_, SegmentBooks> {
-        self.books.lock().unwrap_or_else(|e| e.into_inner())
-    }
-}
-
-impl Drop for Segment {
-    fn drop(&mut self) {
-        if self.len == 0 || self.base.is_null() {
-            return;
-        }
-        // SAFETY: `base` came from `alloc_zeroed` in `new` with exactly this
-        // layout, and no chunk can outlive the `Arc` that owns this. R2264 — the
-        // matching `dealloc`; it was `Box::from_raw` while `new` used `vec!`,
-        // and both had to move together when the segment gained an alignment.
-        let layout = std::alloc::Layout::from_size_align(self.len, self.align)
-            .expect("the layout `new` allocated with");
-        unsafe { std::alloc::dealloc(self.base, layout) };
-    }
-}
-
-/// Where one allocated chunk's bytes live, and what returning them means.
-///
-/// R2289 — TWO arms, because a provider now has two backends (see [`Provider`])
-/// and a chunk must be released to the one that issued it: wz's own allocator
-/// takes the range back into its free list, a C-supplied backend is told through
-/// its `free_fn`. Nothing above [`ShmChunk`] branches on which — the buffer
-/// plane asks for a pointer and a length and gets the same answers either way.
+/// R3058 -- TWO arms, and the allocator is no longer one of them. A chunk a provider
+/// of this process issued is the runtime's
+/// [`ShmBackedPayload`](wz_runtime_tokio::shm_provider::ShmBackedPayload) whichever
+/// backend made it (the built-in pool, or a C program's callbacks), so the lifecycle
+/// is the runtime's: the chunk is on its provider's busy list, a descriptor of it can
+/// go on the wire, and its memory goes back to the backend when every holder has let
+/// go and the provider is asked to collect. What used to stand here was an arm per
+/// allocator, each returning memory in its own `Drop`, which could not do any of those.
 enum ChunkBacking {
-    /// A range of a segment wz allocated.
-    Native {
-        segment: Arc<Segment>,
-        /// The chunk's offset into `segment`.
-        start: usize,
-    },
-    /// A chunk a C backend allocated and is the only one able to free.
-    Foreign {
-        backend: Arc<ForeignBackend>,
-        /// What `free_fn` is handed back. Upstream's `free` takes the
-        /// DESCRIPTOR rather than the pointer, so the descriptor is the part
-        /// that has to survive.
-        descriptor: z_chunk_descriptor_t,
-        /// The pointer the backend handed over, and the segment context it
-        /// keeps alive. Held for its `Drop` as much as for its address: the
-        /// context's `delete_fn` must not run while a chunk still points into
-        /// the memory that context owns.
-        ptr: PtrInSegment,
-    },
+    /// A chunk of a provider of this process. The `Arc` is what makes a
+    /// `z_shm_t` copy a SHARED buffer, as upstream's is: the buffer is writable again
+    /// only when this is the last holder.
+    Issued(Arc<wz_runtime_tokio::shm_provider::ShmBackedPayload>),
     /// R3052 -- the bytes of a payload a peer sent as a chunk of shared memory, which
     /// this session delivered as a range of the mapped chunk and not as a copy.
     /// Nothing here allocates or frees: the reference the sender took for this
     /// receiver goes back when the last range of the bytes drops, which this chunk
     /// holding one is what defers.
-    Received { bytes: wz_runtime_tokio::RxBytes },
+    ///
+    /// `holders` is a token every buffer made from ONE received payload shares: the
+    /// slot's own count sees the sender and this receiver and nothing finer, so the
+    /// buffers of one payload that are alive in this process are counted by it, and a
+    /// received buffer is writable only while it is the only one (R3058).
+    Received {
+        bytes: wz_runtime_tokio::RxBytes,
+        holders: Arc<()>,
+    },
 }
 
-/// One allocated chunk. Dropping it returns the memory to whichever backend
-/// issued it.
+/// One chunk, owned or shared. Dropping it lets go of its hold on the memory; the
+/// memory goes back to its provider's backend when the provider collects it.
 struct ShmChunk {
     backing: ChunkBacking,
     len: usize,
-    /// `false` once the chunk has been frozen into an immutable `z_owned_shm_t`.
-    /// The flag is what [`z_shm_try_reloan_mut`] answers with, so it has to
-    /// travel with the chunk rather than with the handle that names it.
-    mutable: bool,
 }
 
 impl ShmChunk {
+    /// A chunk a provider issued.
+    fn issued(payload: wz_runtime_tokio::shm_provider::ShmBackedPayload) -> Box<Self> {
+        let len = payload.len();
+        Box::new(Self {
+            backing: ChunkBacking::Issued(Arc::new(payload)),
+            len,
+        })
+    }
+
     /// The chunk's bytes.
     fn as_slice(&self) -> &[u8] {
         if self.len == 0 {
             return &[];
         }
-        if let ChunkBacking::Received { bytes } = &self.backing {
-            return bytes.as_slice();
+        match &self.backing {
+            ChunkBacking::Issued(payload) => payload.bytes(),
+            ChunkBacking::Received { bytes, .. } => bytes.as_slice(),
         }
-        // SAFETY: a native range was handed out by `claim` and is not handed
-        // out again until this chunk drops; a foreign one is the backend's
-        // promise for the life of the descriptor. No other live chunk aliases
-        // either.
-        unsafe { std::slice::from_raw_parts(self.as_mut_ptr(), self.len) }
     }
 
     /// The chunk's bytes, mutably.
     fn as_mut_ptr(&self) -> *mut u8 {
         match &self.backing {
-            // SAFETY: as `as_slice` — exclusive by the allocator's invariant.
-            ChunkBacking::Native { segment, start } => unsafe { segment.base.add(*start) },
-            ChunkBacking::Foreign { ptr, .. } => ptr.ptr,
+            ChunkBacking::Issued(payload) => payload.as_mut_ptr(),
             // The page a peer sent, mapped writable when it can be. A chunk that
             // cannot be written answers its read-only address, which no caller
             // writes through because `may_write` was false for it.
-            ChunkBacking::Received { bytes } => bytes
+            ChunkBacking::Received { bytes, .. } => bytes
                 .shm_writable_ptr()
                 .unwrap_or(bytes.as_slice().as_ptr() as *mut u8),
         }
     }
 
-    /// Whether this chunk may be written through now. A chunk that was frozen
-    /// ([`z_shm_from_mut`]) may not; one the allocator issued may; one a peer sent
-    /// may only while this receiver holds the ONLY reference to it and the page
-    /// maps writable, which is upstream's conversion to a mutable buffer
+    /// Whether this chunk may be written through now: upstream's conversion of a
+    /// shared buffer to a mutable one, which succeeds only for the SOLE holder
     /// (`commons/zenoh-shm/src/api/buffer/zshmmut.rs` @
     /// `impl TryFrom<&mut zshm> for &mut zshmmut {`).
+    ///
+    /// A chunk of this process's provider is the sole holder when no copy of it is
+    /// alive here and no descriptor of it is in flight, which the slot's own count says;
+    /// one a peer sent, when this receiver holds the only reference and the page maps
+    /// writable.
     fn may_write(&self) -> bool {
-        if !self.mutable {
-            return false;
-        }
         match &self.backing {
-            ChunkBacking::Received { bytes } => {
-                bytes.shm_chunk().is_some_and(|view| view.is_unique())
+            ChunkBacking::Issued(payload) => Arc::strong_count(payload) == 1 && payload.is_unique(),
+            ChunkBacking::Received { bytes, holders } => {
+                Arc::strong_count(holders) == 1
+                    && bytes.shm_chunk().is_some_and(|view| view.is_unique())
                     && bytes.shm_writable_ptr().is_some()
             }
-            _ => true,
         }
     }
 
-    /// The provider this chunk came out of, so a copy can be taken from the
-    /// same place ([`z_shm_clone`]).
-    fn provider(&self) -> Provider {
-        match &self.backing {
-            ChunkBacking::Native { segment, .. } => Provider::Native(segment.clone()),
-            ChunkBacking::Foreign { backend, .. } => Provider::Foreign(backend.clone()),
-            // A chunk a peer owns has no provider of this process to copy from, so
-            // its copy is made in a segment of its own, of exactly its length.
-            ChunkBacking::Received { .. } => Provider::Native(Segment::new(self.len)),
-        }
-    }
-}
-
-impl Drop for ShmChunk {
-    fn drop(&mut self) {
-        match &self.backing {
-            ChunkBacking::Native { segment, start } => {
-                if self.len > 0 {
-                    segment.books().release(*start, *start + self.len);
-                }
-                // Woken even for a zero-length chunk: a waiter blocked on a
-                // request this release cannot satisfy re-checks and blocks
-                // again, which is cheaper than reasoning about which releases
-                // are worth a notify.
-                segment.released.notify_all();
-            }
-            ChunkBacking::Foreign {
-                backend,
-                descriptor,
-                ..
-            } => backend.free(descriptor),
-            // Dropping `bytes` is the release: the last range of a chunk of shared
-            // memory gives the sender's reference back.
-            ChunkBacking::Received { .. } => {}
-        }
+    /// A second holder of the same chunk: upstream's `z_shm_clone`, a reference copy.
+    fn shared(&self) -> Box<Self> {
+        let backing = match &self.backing {
+            ChunkBacking::Issued(payload) => ChunkBacking::Issued(payload.clone()),
+            ChunkBacking::Received { bytes, holders } => ChunkBacking::Received {
+                bytes: bytes.clone(),
+                holders: holders.clone(),
+            },
+        };
+        Box::new(Self {
+            backing,
+            len: self.len,
+        })
     }
 }
 
@@ -540,9 +298,9 @@ fn received_shm(state: &crate::bytes::BytesState) -> Option<*mut z_loaned_shm_t>
             let chunk = Box::new(ShmChunk {
                 backing: ChunkBacking::Received {
                     bytes: bytes.clone(),
+                    holders: Arc::new(()),
                 },
                 len: bytes.len(),
-                mutable: true,
             });
             Some(ReceivedShm {
                 owned: z_owned_shm_t::from_handle(Box::into_raw(chunk) as Handle),
@@ -775,83 +533,140 @@ fn provider_handle(provider: Provider) -> Handle {
     Box::into_raw(Box::new(provider)) as Handle
 }
 
-/// Where a provider's memory comes from.
+/// A provider handle: the runtime's [`ShmProvider`], and whether its callbacks may run
+/// concurrently.
 ///
-/// R2289 (open-debt item 607) — until this round there was one answer and the
-/// type did not exist: every provider owned a [`Segment`] wz allocated. Upstream
-/// has FOUR arms (`CSHMProvider::{Posix, SharedPosix, Dynamic,
-/// DynamicThreadsafe}`) and the two that matter here are the split between
-/// memory wz manages and memory a C program manages, because
-/// `z_shm_provider_new` hands the whole allocator to the caller.
+/// R3058 -- until this round a provider was an ALLOCATOR of this crate's own, in two
+/// arms (a process-memory free list, and an adapter over a C program's callbacks), and a
+/// chunk of either was ordinary memory returned in its own `Drop`. Upstream's provider
+/// is the thing that owns the lifecycle of what it issues, and the runtime now has it:
+/// the built-in pool is the runtime's POSIX backend (a real `/dev/shm` segment, which is
+/// what lets a chunk go on the wire as a descriptor) and a C program's allocator is a
+/// [`ForeignBackend`] implementing the same backend trait. There is one provider type
+/// and one set of allocation semantics, which is why the difference between the two is
+/// only where the memory comes from.
 ///
-/// The `threadsafe` flag lives inside [`ForeignBackend`] rather than being a
-/// third arm: it changes what the callbacks are allowed to do, not where the
-/// memory is.
+/// The `threadsafe` flag changes what the callbacks are allowed to do, not where the
+/// memory is: the `_async` spellings refuse a provider whose caller did not promise it,
+/// as upstream's non-threadsafe provider is `!Sync`.
 #[derive(Clone)]
-enum Provider {
-    /// wz's own segment allocator — `z_shm_provider_default_new`,
-    /// `z_posix_shm_provider_new`, `z_posix_shm_provider_with_layout_new`.
-    Native(Arc<Segment>),
-    /// A backend the C caller supplied — `z_shm_provider_new`,
-    /// `z_shm_provider_threadsafe_new`.
-    Foreign(Arc<ForeignBackend>),
+struct Provider {
+    shm: wz_runtime_tokio::shm_provider::ShmProvider,
+    threadsafe: bool,
+}
+
+/// Why an allocation through this ABI failed, in the two vocabularies the C result
+/// carries.
+enum AllocFailure {
+    /// The backend could not serve the request.
+    Alloc(z_alloc_error_t),
+    /// The layout was refused: malformed, or not one this provider can serve.
+    Layout(z_layout_error_t),
+}
+
+/// The allocation policies zenoh-c composes, by the name of the function that
+/// selects them (`zenoh-c/src/shm/provider/shm_provider.rs` @
+/// `alloc::<Defragment<UnsafeGarbageCollect>>(`).
+///
+/// `UnsafeGarbageCollect` -- upstream's collecting spellings use the UNSAFE collection,
+/// which also takes a chunk the watchdog invalidated (`shm_provider_impl.rs` @
+/// `pub(crate) type UnsafeGarbageCollect = GarbageCollect<JustAlloc, JustAlloc, ConstBool<false>>;`).
+mod policy {
+    use wz_runtime_tokio::shm_provider::AllocPolicy;
+
+    pub(super) fn just_alloc() -> AllocPolicy {
+        AllocPolicy::JustAlloc
+    }
+
+    pub(super) fn gc() -> AllocPolicy {
+        AllocPolicy::GarbageCollect {
+            inner: Box::new(AllocPolicy::JustAlloc),
+            alt: Box::new(AllocPolicy::JustAlloc),
+            safe: false,
+        }
+    }
+
+    pub(super) fn gc_defrag() -> AllocPolicy {
+        AllocPolicy::defragment(gc(), AllocPolicy::JustAlloc)
+    }
+
+    /// `Deallocate<ConstUsize<100>, Defragment<UnsafeGarbageCollect>>`: the alternative
+    /// defaults to the inner policy.
+    pub(super) fn gc_defrag_dealloc() -> AllocPolicy {
+        AllocPolicy::deallocate(100, gc_defrag(), gc_defrag())
+    }
+
+    pub(super) fn gc_defrag_blocking() -> AllocPolicy {
+        AllocPolicy::block_on(gc_defrag())
+    }
 }
 
 impl Provider {
-    /// Allocate `size` bytes at `align`, blocking for a release if asked.
+    /// A provider over the built-in POSIX pool of `layout`, or why none could be made.
+    fn pool(layout: &wz_runtime_tokio::shm_backend::MemoryLayout) -> std::io::Result<Self> {
+        Ok(Self {
+            shm: wz_runtime_tokio::shm_provider::ShmProvider::pool(layout)?,
+            threadsafe: true,
+        })
+    }
+
+    /// Allocate `size` bytes at the alignment `alignment` names, under `policy`.
     fn alloc(
         &self,
         size: usize,
-        align: usize,
-        blocking: bool,
-    ) -> Result<Box<ShmChunk>, z_alloc_error_t> {
-        match self {
-            Provider::Native(segment) => native_alloc(segment, size, align, blocking),
-            Provider::Foreign(backend) => backend.alloc(size, align, blocking),
+        alignment: z_alloc_alignment_t,
+        policy: &wz_runtime_tokio::shm_provider::AllocPolicy,
+    ) -> Result<Box<ShmChunk>, AllocFailure> {
+        use wz_runtime_tokio::shm_backend::{
+            AllocAlignment, AllocError, LayoutAllocError, LayoutError, MemoryLayout,
+        };
+        // A layout that cannot be made is a LAYOUT error, not an allocation one: upstream
+        // splits the two statuses for exactly this.
+        let layout = AllocAlignment::new(alignment.pow)
+            .and_then(|alignment| MemoryLayout::new(size, alignment))
+            .map_err(|_| AllocFailure::Layout(Z_LAYOUT_ERROR_INCORRECT_LAYOUT_ARGS))?;
+        match self.shm.alloc(layout, policy) {
+            Ok(payload) => Ok(ShmChunk::issued(payload)),
+            Err(LayoutAllocError::Alloc(e)) => Err(AllocFailure::Alloc(match e {
+                AllocError::NeedDefragment => Z_ALLOC_ERROR_NEED_DEFRAGMENT,
+                AllocError::OutOfMemory => Z_ALLOC_ERROR_OUT_OF_MEMORY,
+                AllocError::Other => Z_ALLOC_ERROR_OTHER,
+            })),
+            Err(LayoutAllocError::Layout(e)) => Err(AllocFailure::Layout(match e {
+                LayoutError::IncorrectLayoutArgs => Z_LAYOUT_ERROR_INCORRECT_LAYOUT_ARGS,
+                LayoutError::ProviderIncompatibleLayout => {
+                    Z_LAYOUT_ERROR_PROVIDER_INCOMPATIBLE_LAYOUT
+                }
+            })),
         }
     }
 
-    /// Bytes still allocatable, as the BACKEND reports them.
-    ///
-    /// R2957 — the native arm answers `0`, and that is upstream's answer rather
-    /// than a stub: every provider wz builds natively stands for upstream's
-    /// DEFAULT POSIX backend (`PosixShmProviderBackend` is its talc backend,
-    /// `commons/zenoh-shm/src/api/protocol_implementations/posix/posix_shm_provider_backend.rs` @
-    /// `pub type PosixShmProviderBackend = PosixShmProviderBackendTalc;`), and
-    /// that backend does not account: its `available` and `defragment` both
-    /// return `0`
-    /// (`commons/zenoh-shm/src/api/protocol_implementations/posix/posix_shm_provider_backend_talc.rs` @ `fn available(&self) -> usize {`).
-    /// Measured through the C ABI against libzenohc on the session's own
-    /// provider. wz's books still decide every allocation; they are not what a
-    /// caller of this function is told. A C-supplied backend answers for
-    /// itself.
+    /// Bytes still allocatable, as the BACKEND reports them: `0` for the built-in pool
+    /// (upstream's default POSIX backend does not account), and a C-supplied backend
+    /// answers for itself.
     fn available(&self) -> usize {
-        match self {
-            Provider::Native(_) => 0,
-            Provider::Foreign(backend) => backend.available(),
-        }
+        self.shm.available()
     }
 
-    /// Defragment, reporting what that leaves reachable — `0` on the native
-    /// arm for the reason [`Self::available`] gives.
+    /// Defragment, reporting what that leaves reachable.
     fn defragment(&self) -> usize {
-        match self {
-            Provider::Native(_) => 0,
-            Provider::Foreign(backend) => backend.defragment(),
-        }
+        self.shm.defragment()
+    }
+
+    /// Take home every chunk nobody holds and report the largest, by the UNSAFE
+    /// collection zenoh-c's `z_shm_provider_garbage_collect` runs.
+    fn garbage_collect(&self) -> usize {
+        // SAFETY: the C ABI promises upstream's contract, which is the caller's: nothing
+        // may be reading a chunk its watchdog invalidated. That is zenoh-c's own
+        // signature and its own warning, restated, not weakened.
+        unsafe { self.shm.garbage_collect_unsafe() }
     }
 
     /// Whether the caller promised this provider's callbacks may run
-    /// concurrently — what the `_async` spellings refuse on.
-    ///
-    /// TRUE for the native arm: wz's own allocator is behind a mutex and has
-    /// always been callable from any thread, and upstream agrees (its `Posix`
-    /// and `SharedPosix` arms both accept an async allocation).
+    /// concurrently — what the `_async` spellings refuse on. TRUE for the built-in
+    /// pool, which sits behind a mutex.
     fn is_threadsafe(&self) -> bool {
-        match self {
-            Provider::Native(_) => true,
-            Provider::Foreign(backend) => backend.threadsafe,
-        }
+        self.threadsafe
     }
 }
 
@@ -892,7 +707,17 @@ pub unsafe extern "C" fn z_shm_provider_default_new(
         // The gravestone contract, written before any fallible work.
         // SAFETY: the caller's contract.
         unsafe { *this_ = z_owned_shm_provider_t::null_value() };
-        let handle = provider_handle(Provider::Native(Segment::new(size)));
+        // Upstream builds this from `size` as a layout at byte alignment, and refuses with
+        // `Z_EINVAL` whatever goes wrong: a size of zero is no layout, and a pool too small
+        // for its allocator to claim is no pool (1000 bytes or fewer, MEASURED on the real
+        // library).
+        let built = wz_runtime_tokio::shm_backend::MemoryLayout::of_size(size)
+            .map_err(|e| std::io::Error::other(e.to_string()))
+            .and_then(|layout| Provider::pool(&layout));
+        let Ok(provider) = built else {
+            return Z_EINVAL;
+        };
+        let handle = provider_handle(provider);
         // SAFETY: `this_` was checked non-null above.
         unsafe { *this_ = z_owned_shm_provider_t::from_handle(handle) };
         Z_OK
@@ -917,7 +742,7 @@ unsafe fn provider_alloc(
     provider: *const z_loaned_shm_provider_t,
     size: usize,
     alignment: z_alloc_alignment_t,
-    blocking: bool,
+    policy: &wz_runtime_tokio::shm_provider::AllocPolicy,
 ) {
     if out.is_null() {
         return;
@@ -936,19 +761,7 @@ unsafe fn provider_alloc(
     let Some(backend) = (unsafe { provider_of(provider) }) else {
         return;
     };
-    if alignment.pow >= usize::BITS as u8 {
-        // An alignment that does not fit in a `usize` is a LAYOUT error, not an
-        // allocation one — upstream splits the two statuses for exactly this.
-        // SAFETY: `out` was checked non-null above.
-        unsafe {
-            (*out).status = ZC_BUF_LAYOUT_ALLOC_STATUS_LAYOUT_ERROR;
-            (*out).layout_error = Z_LAYOUT_ERROR_INCORRECT_LAYOUT_ARGS;
-        }
-        return;
-    }
-    let align = 1usize << alignment.pow;
-
-    match backend.alloc(size, align, blocking) {
+    match backend.alloc(size, alignment, policy) {
         Ok(chunk) => {
             // SAFETY: `out` was checked non-null above.
             unsafe {
@@ -958,57 +771,24 @@ unsafe fn provider_alloc(
                 (*out).layout_error = Z_LAYOUT_ERROR_INCORRECT_LAYOUT_ARGS;
             }
         }
-        Err(reason) => {
+        Err(AllocFailure::Alloc(reason)) => {
             // SAFETY: `out` was checked non-null above.
             unsafe {
                 (*out).status = ZC_BUF_LAYOUT_ALLOC_STATUS_ALLOC_ERROR;
                 (*out).alloc_error = reason;
             }
         }
+        // A layout that cannot be made, or that this provider cannot serve, is a LAYOUT
+        // error and not an allocation one: upstream splits the two statuses for exactly
+        // this.
+        Err(AllocFailure::Layout(reason)) => {
+            // SAFETY: `out` was checked non-null above.
+            unsafe {
+                (*out).status = ZC_BUF_LAYOUT_ALLOC_STATUS_LAYOUT_ERROR;
+                (*out).layout_error = reason;
+            }
+        }
     }
-}
-
-/// Claim `size` bytes at `align` out of wz's own segment.
-///
-/// Split out of [`provider_alloc`] by R2289 so the two backends are two
-/// functions rather than two arms inside one — the entry point now decides
-/// WHICH allocator runs and nothing else.
-fn native_alloc(
-    segment: &Arc<Segment>,
-    size: usize,
-    align: usize,
-    blocking: bool,
-) -> Result<Box<ShmChunk>, z_alloc_error_t> {
-    let mut books = segment.books();
-    let start = loop {
-        if let Some(start) = books.claim(size, align) {
-            break start;
-        }
-        // A request LARGER than the whole segment can never be satisfied, no
-        // matter who releases what, so blocking on it would be the deadlock
-        // rather than the wait. Reported as out-of-memory on both policies.
-        if size > segment.len || !blocking {
-            return Err(if size > segment.len || books.available() < size {
-                Z_ALLOC_ERROR_OUT_OF_MEMORY
-            } else {
-                // Enough total room, but no single range holds it.
-                Z_ALLOC_ERROR_NEED_DEFRAGMENT
-            });
-        }
-        books = segment
-            .released
-            .wait(books)
-            .unwrap_or_else(|e| e.into_inner());
-    };
-    drop(books);
-    Ok(Box::new(ShmChunk {
-        backing: ChunkBacking::Native {
-            segment: segment.clone(),
-            start,
-        },
-        len: size,
-        mutable: true,
-    }))
 }
 
 /// The default alignment upstream's unaligned spellings imply: byte alignment.
@@ -1028,7 +808,15 @@ pub unsafe extern "C" fn z_shm_provider_alloc(
 ) {
     guard_val((), || {
         // SAFETY: the caller's contract, delegated.
-        unsafe { provider_alloc(out_result, provider, size, ALIGN_BYTE, false) };
+        unsafe {
+            provider_alloc(
+                out_result,
+                provider,
+                size,
+                ALIGN_BYTE,
+                &policy::just_alloc(),
+            )
+        };
     });
 }
 
@@ -1045,18 +833,19 @@ pub unsafe extern "C" fn z_shm_provider_alloc_aligned(
 ) {
     guard_val((), || {
         // SAFETY: the caller's contract, delegated.
-        unsafe { provider_alloc(out_result, provider, size, alignment, false) };
+        unsafe { provider_alloc(out_result, provider, size, alignment, &policy::just_alloc()) };
     });
 }
 
 /// Allocate, reclaiming released chunks first (zenoh-c
 /// `z_shm_provider_alloc_gc`).
 ///
-/// Identical to [`z_shm_provider_alloc`] here, and that is a property of the
-/// allocator rather than a shortcut: a chunk returns to the free list in its
-/// own `Drop`, so there is never a released-but-unreclaimed chunk for a garbage
-/// collection pass to find. [`z_shm_provider_garbage_collect`] reports 0 for the
-/// same reason.
+/// A chunk its owner has dropped is NOT back in the pool until a collection takes it,
+/// as upstream's is not (R3058; this spelling used to be identical to the plain one
+/// because the old allocator freed a chunk in its own `Drop`, which upstream's does not
+/// do). A request the pool cannot serve is retried once after a collection, and only if
+/// that collection freed a chunk at least as large as the request. The collection is the
+/// UNSAFE one, as zenoh-c's is: it also takes a chunk the watchdog invalidated.
 ///
 /// # Safety
 /// As [`z_shm_provider_alloc`].
@@ -1068,17 +857,14 @@ pub unsafe extern "C" fn z_shm_provider_alloc_gc(
 ) {
     guard_val((), || {
         // SAFETY: the caller's contract, delegated.
-        unsafe { provider_alloc(out_result, provider, size, ALIGN_BYTE, false) };
+        unsafe { provider_alloc(out_result, provider, size, ALIGN_BYTE, &policy::gc()) };
     });
 }
 
 /// Allocate, reclaiming and defragmenting first (zenoh-c
-/// `z_shm_provider_alloc_gc_defrag`).
-///
-/// Also identical, and for the second half of the same reason: adjacent free
-/// ranges coalesce in `Drop`, so the free list is always as defragmented as it
-/// can be without moving live chunks — which no allocator may do behind a
-/// pointer the C side is holding.
+/// `z_shm_provider_alloc_gc_defrag`): the collecting policy, then a defragmentation when
+/// the backend asks for one. The built-in pool never asks (its allocator has no such
+/// status), so the second step is for a backend a C program supplies.
 ///
 /// # Safety
 /// As [`z_shm_provider_alloc`].
@@ -1090,7 +876,7 @@ pub unsafe extern "C" fn z_shm_provider_alloc_gc_defrag(
 ) {
     guard_val((), || {
         // SAFETY: the caller's contract, delegated.
-        unsafe { provider_alloc(out_result, provider, size, ALIGN_BYTE, false) };
+        unsafe { provider_alloc(out_result, provider, size, ALIGN_BYTE, &policy::gc_defrag()) };
     });
 }
 
@@ -1107,7 +893,15 @@ pub unsafe extern "C" fn z_shm_provider_alloc_gc_defrag_blocking(
 ) {
     guard_val((), || {
         // SAFETY: the caller's contract, delegated.
-        unsafe { provider_alloc(out_result, provider, size, ALIGN_BYTE, true) };
+        unsafe {
+            provider_alloc(
+                out_result,
+                provider,
+                size,
+                ALIGN_BYTE,
+                &policy::gc_defrag_blocking(),
+            )
+        };
     });
 }
 
@@ -1191,6 +985,23 @@ unsafe fn precomputed_new(
     if size == 0 || usize::from(alignment.pow) >= usize::BITS as usize {
         return Z_EINVAL;
     }
+    // And the provider's own refusal, at the same moment: upstream computes the layout
+    // the provider will allocate by when it builds a precomputed one
+    // (`commons/zenoh-shm/src/api/provider/shm_provider.rs` @
+    // `.map_err(|_| ZLayoutError::ProviderIncompatibleLayout)?;`), so a layout this
+    // provider cannot serve fails HERE with `Z_EINVAL`
+    // (`zenoh-c/src/shm/provider/precomputed_layout_impl.rs` @ `provider.alloc_layout(mem_layout)`)
+    // and not as an allocation failure later.
+    {
+        use wz_runtime_tokio::shm_backend::{AllocAlignment, MemoryLayout};
+        let served = AllocAlignment::new(alignment.pow)
+            .and_then(|alignment| MemoryLayout::new(size, alignment))
+            .map_err(|_| ())
+            .and_then(|layout| backend.shm.layout_for(layout).map_err(|_| ()));
+        if served.is_err() {
+            return Z_EINVAL;
+        }
+    }
     let state = PrecomputedLayoutState {
         provider: backend.clone(),
         size,
@@ -1209,7 +1020,7 @@ unsafe fn precomputed_new(
 unsafe fn precomputed_alloc(
     out_result: *mut z_buf_alloc_result_t,
     layout: *const z_loaned_precomputed_layout_t,
-    blocking: bool,
+    policy: &wz_runtime_tokio::shm_provider::AllocPolicy,
 ) {
     if out_result.is_null() {
         return;
@@ -1245,12 +1056,12 @@ unsafe fn precomputed_alloc(
             z_shm_provider_loan(&provider),
             state.size,
             state.alignment,
-            blocking,
+            policy,
         )
     };
     let mut moved = z_moved_shm_provider_t { _this: provider };
-    // SAFETY: dropped exactly once; the segment itself is kept alive by the
-    // layout's own `Arc`.
+    // SAFETY: dropped exactly once; the pool itself is kept alive by the layout's own
+    // handle on the provider.
     unsafe { z_shm_provider_drop(&mut moved) };
 
     if wide.status == ZC_BUF_LAYOUT_ALLOC_STATUS_OK {
@@ -1267,7 +1078,7 @@ unsafe fn precomputed_alloc(
 
 /// Emit one alloc spelling for each of the two family names.
 macro_rules! precomputed_alloc_spelling {
-    ($precomputed:ident, $alloc_layout:ident, $blocking:expr, $what:literal) => {
+    ($precomputed:ident, $alloc_layout:ident, $policy:expr, $what:literal) => {
         #[doc = concat!("Allocate through a precomputed layout, ", $what, " (zenoh-c `")]
         #[doc = stringify!($precomputed)]
         /// `).
@@ -1281,7 +1092,7 @@ macro_rules! precomputed_alloc_spelling {
         ) {
             guard_val((), || {
                 // SAFETY: the caller's contract, delegated.
-                unsafe { precomputed_alloc(out_result, layout, $blocking) };
+                unsafe { precomputed_alloc(out_result, layout, &$policy) };
             });
         }
 
@@ -1301,7 +1112,7 @@ macro_rules! precomputed_alloc_spelling {
         ) {
             guard_val((), || {
                 // SAFETY: the caller's contract, delegated.
-                unsafe { precomputed_alloc(out_result, layout, $blocking) };
+                unsafe { precomputed_alloc(out_result, layout, &$policy) };
             });
         }
     };
@@ -1310,32 +1121,32 @@ macro_rules! precomputed_alloc_spelling {
 precomputed_alloc_spelling!(
     z_precomputed_layout_alloc,
     z_alloc_layout_alloc,
-    false,
+    policy::just_alloc(),
     "failing rather than waiting"
 );
 precomputed_alloc_spelling!(
     z_precomputed_layout_alloc_gc,
     z_alloc_layout_alloc_gc,
-    false,
+    policy::gc(),
     "reclaiming first"
 );
 precomputed_alloc_spelling!(
     z_precomputed_layout_alloc_gc_defrag,
     z_alloc_layout_alloc_gc_defrag,
-    false,
+    policy::gc_defrag(),
     "reclaiming and defragmenting"
 );
 precomputed_alloc_spelling!(
     z_precomputed_layout_alloc_gc_defrag_blocking,
     z_alloc_layout_alloc_gc_defrag_blocking,
-    true,
+    policy::gc_defrag_blocking(),
     "blocking rather than failing"
 );
 precomputed_alloc_spelling!(
     z_precomputed_layout_alloc_gc_defrag_dealloc,
     z_alloc_layout_alloc_gc_defrag_dealloc,
-    false,
-    "with the third reclaim step wz has nothing to take"
+    policy::gc_defrag_dealloc(),
+    "taking back the newest chunk, held or not, as the last resort"
 );
 
 /// Build a precomputed layout at the provider's default alignment (zenoh-c
@@ -1545,14 +1356,10 @@ pub unsafe extern "C" fn z_internal_alloc_layout_null(this_: *mut z_owned_alloc_
 // the CALLER'S, so a program that asks for 64-byte alignment gets it — which
 // `z_shm_provider_alloc_aligned` already proved reachable on the non-gc path.
 //
-// ⚠ `dealloc` is upstream's THIRD reclaim step: when gc and defrag both fail,
-// forcibly release the least recently used segment. wz's allocator has nothing
-// to force — a chunk returns to the free list in its own `Drop` and adjacent
-// ranges coalesce there, so by the time an allocation fails there is nothing
-// held that releasing could recover. That makes these two identical to their
-// defrag twins HERE, for the same measured reason `alloc_gc` is identical to
-// `alloc`, and the doc says so rather than leaving a reader to infer a
-// shortcut.
+// `dealloc` is upstream's THIRD reclaim step: when collecting and defragmenting
+// both fail, take back the NEWEST chunk whether or not anything still holds it,
+// up to a hundred times (R3058; this was "identical to the defrag twin" while the
+// allocator freed a chunk in its own `Drop`, and there was nothing left to take).
 
 /// Allocate at the caller's alignment, reclaiming first (zenoh-c
 /// `z_shm_provider_alloc_gc_aligned`).
@@ -1568,7 +1375,7 @@ pub unsafe extern "C" fn z_shm_provider_alloc_gc_aligned(
 ) {
     guard_val((), || {
         // SAFETY: the caller's contract, delegated.
-        unsafe { provider_alloc(out_result, provider, size, alignment, false) };
+        unsafe { provider_alloc(out_result, provider, size, alignment, &policy::gc()) };
     });
 }
 
@@ -1586,7 +1393,7 @@ pub unsafe extern "C" fn z_shm_provider_alloc_gc_defrag_aligned(
 ) {
     guard_val((), || {
         // SAFETY: the caller's contract, delegated.
-        unsafe { provider_alloc(out_result, provider, size, alignment, false) };
+        unsafe { provider_alloc(out_result, provider, size, alignment, &policy::gc_defrag()) };
     });
 }
 
@@ -1604,15 +1411,22 @@ pub unsafe extern "C" fn z_shm_provider_alloc_gc_defrag_blocking_aligned(
 ) {
     guard_val((), || {
         // SAFETY: the caller's contract, delegated.
-        unsafe { provider_alloc(out_result, provider, size, alignment, true) };
+        unsafe {
+            provider_alloc(
+                out_result,
+                provider,
+                size,
+                alignment,
+                &policy::gc_defrag_blocking(),
+            )
+        };
     });
 }
 
 /// Allocate, reclaiming, defragmenting and force-releasing (zenoh-c
-/// `z_shm_provider_alloc_gc_defrag_dealloc`).
-///
-/// Identical to its defrag twin here — see the block comment above for why wz
-/// has no third reclaim step to take.
+/// `z_shm_provider_alloc_gc_defrag_dealloc`): when everything else fails, the newest
+/// chunk is taken back whether or not it is held. The caller owns the consequence --
+/// a holder may be reading a chunk that has been given to another.
 ///
 /// # Safety
 /// As [`z_shm_provider_alloc`].
@@ -1624,7 +1438,15 @@ pub unsafe extern "C" fn z_shm_provider_alloc_gc_defrag_dealloc(
 ) {
     guard_val((), || {
         // SAFETY: the caller's contract, delegated.
-        unsafe { provider_alloc(out_result, provider, size, ALIGN_BYTE, false) };
+        unsafe {
+            provider_alloc(
+                out_result,
+                provider,
+                size,
+                ALIGN_BYTE,
+                &policy::gc_defrag_dealloc(),
+            )
+        };
     });
 }
 
@@ -1642,7 +1464,15 @@ pub unsafe extern "C" fn z_shm_provider_alloc_gc_defrag_dealloc_aligned(
 ) {
     guard_val((), || {
         // SAFETY: the caller's contract, delegated.
-        unsafe { provider_alloc(out_result, provider, size, alignment, false) };
+        unsafe {
+            provider_alloc(
+                out_result,
+                provider,
+                size,
+                alignment,
+                &policy::gc_defrag_dealloc(),
+            )
+        };
     });
 }
 
@@ -1665,10 +1495,13 @@ pub unsafe extern "C" fn z_shm_provider_available(
 }
 
 /// Reclaim released chunks (zenoh-c `z_shm_provider_garbage_collect`), reporting
-/// how many bytes that freed.
+/// the size of the largest chunk that came home.
 ///
-/// Always 0 here, and the reason is stated on [`z_shm_provider_alloc_gc`]: this
-/// allocator has no deferred-release state to collect.
+/// A chunk comes home when nothing holds it any more -- its owner has dropped it and no
+/// receiver still holds a reference to the descriptor it sent -- and, as zenoh-c's
+/// does, the collection is the UNSAFE one, which also takes a chunk the watchdog
+/// invalidated (`zenoh-c/src/shm/provider/shm_provider.rs` @
+/// `unsafe { garbage_collect_unsafe(provider) }`).
 ///
 /// # Safety
 /// `provider` must be null or a valid loaned provider.
@@ -1677,17 +1510,16 @@ pub unsafe extern "C" fn z_shm_provider_garbage_collect(
     provider: *const z_loaned_shm_provider_t,
 ) -> usize {
     guard_val(0, || {
-        // Still dereferenced, so a bad handle is caught here rather than at the
-        // next call: a function that ignores its argument would report success
-        // for a gravestone provider.
         // SAFETY: the caller's contract.
-        let _ = unsafe { provider_of(provider) };
-        0
+        match unsafe { provider_of(provider) } {
+            Some(backend) => backend.garbage_collect(),
+            None => 0,
+        }
     })
 }
 
-/// Defragment the free list (zenoh-c `z_shm_provider_defragment`), reporting
-/// what the BACKEND reports: `0` for a native provider, as upstream's default
+/// Defragment the provider (zenoh-c `z_shm_provider_defragment`), reporting
+/// what the BACKEND reports: `0` for the built-in pool, as upstream's default
 /// POSIX backend answers (R2957, [`Provider::available`]); a C-supplied
 /// backend answers for itself.
 ///
@@ -1802,6 +1634,9 @@ enum SessionProviderInit {
     Initializing,
     /// Built.
     Ready(Provider),
+    /// The build failed: a pool too small for its allocator to claim, or no
+    /// `/dev/shm` to make it in. Upstream's `ProviderInitState::Error`, and it stays so.
+    Failed,
 }
 
 /// The zenoh-c session's shared-memory state, attached to its `SessionState`
@@ -1843,15 +1678,21 @@ impl SessionShm {
                 (Z_SHM_PROVIDER_STATE_READY, Some(provider.clone()))
             }
             SessionProviderInit::Initializing => (Z_SHM_PROVIDER_STATE_INITIALIZING, None),
+            SessionProviderInit::Failed => (Z_SHM_PROVIDER_STATE_ERROR, None),
             SessionProviderInit::Idle => {
                 *state = SessionProviderInit::Initializing;
                 let this = Arc::clone(self);
                 let spawned = std::thread::Builder::new()
                     .name("wz-shm-provider-init".into())
                     .spawn(move || {
-                        let provider = Provider::Native(Segment::new(pool_size));
+                        let built = wz_runtime_tokio::shm_backend::MemoryLayout::of_size(pool_size)
+                            .map_err(|e| std::io::Error::other(e.to_string()))
+                            .and_then(|layout| Provider::pool(&layout));
                         if let Ok(mut state) = this.state.lock() {
-                            *state = SessionProviderInit::Ready(provider);
+                            *state = match built {
+                                Ok(provider) => SessionProviderInit::Ready(provider),
+                                Err(_) => SessionProviderInit::Failed,
+                            };
                         }
                         this.ready.notify_all();
                     });
@@ -1873,7 +1714,7 @@ impl SessionShm {
         loop {
             match &*state {
                 SessionProviderInit::Ready(provider) => return Some(provider.clone()),
-                SessionProviderInit::Idle => return None,
+                SessionProviderInit::Idle | SessionProviderInit::Failed => return None,
                 SessionProviderInit::Initializing => state = self.ready.wait(state).ok()?,
             }
         }
@@ -2372,10 +2213,11 @@ pub unsafe extern "C" fn z_internal_shm_mut_check(this_: *const z_owned_shm_mut_
 /// Freeze a mutable buffer into an immutable one (zenoh-c `z_shm_from_mut`,
 /// `zenoh_commons.h:4550-4551`). The source is consumed.
 ///
-/// The chunk itself does not move; only its `mutable` flag is cleared, which is
-/// what makes [`z_shm_try_reloan_mut`] answer "no" afterwards. Upstream's
-/// freeze is the same shape — the point of it is to permit reference copies,
-/// not to relocate bytes.
+/// The chunk itself does not move and nothing about it changes: the same handle is
+/// now named by the immutable type, and it is WRITABLE AGAIN
+/// ([`z_shm_try_reloan_mut`]) for as long as it is the sole holder -- no copy of it
+/// alive here, no descriptor of it in flight. That is upstream's rule, and the point of
+/// the freeze is to permit reference copies ([`z_shm_clone`]), not to relocate bytes.
 ///
 /// # Safety
 /// `this_` must be valid and writable; `that` must be null or a valid moved
@@ -2399,12 +2241,10 @@ pub unsafe extern "C" fn z_shm_from_mut(this_: *mut z_owned_shm_t, that: *mut z_
         if handle.is_null() {
             return;
         }
-        // SAFETY: a live `Box<ShmChunk>` this crate leaked; taken and re-leaked
-        // rather than dropped, so the range is not released here.
-        let mut boxed = unsafe { Box::from_raw(handle as *mut ShmChunk) };
-        boxed.mutable = false;
+        // The handle is a live `Box<ShmChunk>` this crate leaked, and it keeps being one:
+        // it is re-named, not re-made, so nothing is released here.
         // SAFETY: `this_` was checked non-null above.
-        unsafe { *this_ = z_owned_shm_t::from_handle(Box::into_raw(boxed) as Handle) };
+        unsafe { *this_ = z_owned_shm_t::from_handle(handle) };
     });
 }
 
@@ -2463,10 +2303,12 @@ pub unsafe extern "C" fn z_shm_loan_mut(this_: *mut z_owned_shm_t) -> *mut z_loa
 /// Try to recover MUTABLE access to a borrowed buffer (zenoh-c
 /// `z_shm_try_reloan_mut`, `zenoh_commons.h:4871`).
 ///
-/// NULL when the buffer has been frozen by [`z_shm_from_mut`], or when it came off
-/// the wire and some other party still holds the chunk (or its page maps read-only
-/// here), which is what `z_sub_shm.c` distinguishes `SHM (MUT)` from
-/// `SHM (IMMUT)` by (R3052).
+/// NULL while some other party still holds the chunk -- a copy of it alive here
+/// ([`z_shm_clone`]), a descriptor of it in flight or a receiver reading it -- or, for a
+/// chunk that came off the wire, when its page maps read-only here. That is what
+/// `z_sub_shm.c` distinguishes `SHM (MUT)` from `SHM (IMMUT)` by (R3052), and since R3058 it
+/// is the same rule for a chunk this process allocated: freezing one with
+/// [`z_shm_from_mut`] does not make it read-only, sharing it does.
 ///
 /// # Safety
 /// `this_` must be null or a valid loaned buffer.
@@ -2496,21 +2338,15 @@ pub unsafe extern "C" fn z_shm_try_reloan_mut(
 /// reappears in `immut` so the caller has not lost it. Success leaves `immut` a
 /// gravestone; failure leaves `this_` one.
 ///
-/// The predicate is the SAME one [`z_shm_try_mut`] answers with — the chunk's
-/// own `mutable` flag — because both calls ask one question ("may this buffer
-/// be written again?") and a second, disagreeing answer to it would be a bug
-/// the two could not both be right about.
+/// The predicate is the SAME one [`z_shm_try_mut`] answers with --
+/// [`ShmChunk::may_write`], the chunk's sole holder -- because both calls ask one
+/// question ("may this buffer be written again?") and a second, disagreeing answer to
+/// it would be a bug the two could not both be right about.
 ///
-/// ⚠ MEASURED DIVERGENCE, R2294. Upstream succeeds when the buffer is UNIQUELY
-/// OWNED (a refcount), so a `z_shm_from_mut` result that nothing else holds can
-/// be taken back. wz freezes instead: every producer of a `z_owned_shm_t` in
-/// this crate — [`z_shm_from_mut`] and [`z_shm_clone`] — sets `mutable = false`,
-/// so through the C surface this call always refuses and always hands the
-/// buffer back. That is not an unimplemented arm: it is the same answer
-/// `z_shm_try_mut` already gives for the same buffers, and a success here would
-/// contradict it. The success arm is reached only by a chunk that still carries
-/// `mutable`, which is why its witness constructs one directly rather than
-/// pretending the C surface can.
+/// R3058 -- this used to be a MEASURED DIVERGENCE (R2294): upstream succeeds when the
+/// buffer is uniquely owned, and wz froze a buffer with a flag, so through the C surface
+/// the call always refused. A buffer is now a reference-counted chunk as upstream's is,
+/// and a `z_shm_from_mut` result that nothing else holds is taken back.
 ///
 /// # Safety
 /// `this_` must be null or valid and writable; `that` must be null or a valid
@@ -2543,7 +2379,7 @@ pub unsafe extern "C" fn z_shm_mut_try_from_immut(
             return Z_ENULL;
         }
         // SAFETY: a live `Box<ShmChunk>` this crate leaked.
-        let recovered = unsafe { &*(handle as *const ShmChunk) }.mutable;
+        let recovered = unsafe { &*(handle as *const ShmChunk) }.may_write();
         if recovered {
             if this_.is_null() {
                 return Z_ENULL;
@@ -2623,16 +2459,13 @@ pub unsafe extern "C" fn z_internal_shm_check(this_: *const z_owned_shm_t) -> bo
     })
 }
 
-/// Copy an immutable buffer into a NEW chunk of the same segment (zenoh-c
-/// `z_shm_clone`).
+/// Take a second reference to an immutable buffer (zenoh-c `z_shm_clone`): "a shallow
+/// SHM reference copy" (`zenoh-c/src/shm/buffer/zshm.rs` @ `let copy = this.to_owned();`).
 ///
-/// Upstream's clone is a reference copy, which it can afford because its buffers
-/// are reference-counted inside the segment. Here a clone allocates and copies,
-/// so the two agree on what the result CONTAINS and differ on how much of the
-/// segment it costs — a difference `z_shm_provider_available` reports honestly.
-/// The out value is a gravestone when the segment cannot satisfy the
-/// allocation, which upstream's cannot produce; no example in the corpus calls
-/// this.
+/// R3058 -- this used to allocate a new chunk and copy the bytes, which cost room in the
+/// pool upstream's does not and could fail where upstream's cannot. The copy is now the
+/// SAME chunk with one more holder: nothing is allocated, and the buffer is writable
+/// again ([`z_shm_try_reloan_mut`]) only once every copy has been dropped.
 ///
 /// # Safety
 /// `out` must be valid and writable; `this_` must be null or a valid loaned
@@ -2652,18 +2485,7 @@ pub unsafe extern "C" fn z_shm_clone(out: *mut z_owned_shm_t, this_: *const z_lo
         let Some(source) = (unsafe { chunk((*this_).handle) }) else {
             return;
         };
-        // Through the SAME allocator the source came out of, so a foreign
-        // backend's copy is its own memory rather than a range of a segment wz
-        // would then try to free through the wrong route.
-        let Ok(mut copy) = source.provider().alloc(source.len, 1, false) else {
-            return;
-        };
-        copy.mutable = false;
-        // SAFETY: both ranges are live and, being distinct allocator ranges, do
-        // not overlap.
-        unsafe {
-            std::ptr::copy_nonoverlapping(source.as_slice().as_ptr(), copy.as_mut_ptr(), copy.len)
-        };
+        let copy = source.shared();
         // SAFETY: `out` was checked non-null above.
         unsafe { *out = z_owned_shm_t::from_handle(Box::into_raw(copy) as Handle) };
     });
@@ -2818,15 +2640,24 @@ pub unsafe extern "C" fn z_bytes_to_owned_shm(
         if dst.is_null() {
             return Z_OK;
         }
-        // Immutable: an owned buffer that is a second reference to a chunk the
-        // payload still holds is not unique, and upstream's owned conversion is the
-        // immutable one.
+        // A second reference to a chunk the payload still holds: it shares the token of
+        // the buffer the payload lends, so the two count as two holders and neither is
+        // writable until the other is dropped, which is upstream's owned conversion.
+        let Some(lent) = received_shm(state) else {
+            return Z_EINVAL;
+        };
+        // SAFETY: `received_shm` answers a loan whose handle is a live
+        // `Box<ShmChunk>` of the payload's own, that the payload keeps alive.
+        let holders = match unsafe { chunk((*lent).handle) }.map(|lent| &lent.backing) {
+            Some(ChunkBacking::Received { holders, .. }) => holders.clone(),
+            _ => return Z_EINVAL,
+        };
         let chunk = Box::new(ShmChunk {
             backing: ChunkBacking::Received {
                 bytes: bytes.clone(),
+                holders,
             },
             len: bytes.len(),
-            mutable: false,
         });
         // SAFETY: `dst` was checked non-null above.
         unsafe { *dst = z_owned_shm_t::from_handle(Box::into_raw(chunk) as Handle) };
@@ -2911,10 +2742,11 @@ pub unsafe extern "C" fn z_bytes_as_mut_loaned_shm(
 //      `alloc_fn`. Upstream passes `MaybeUninit` and calls `assume_init()`, so a
 //      callback that writes nothing has it reading uninitialised memory; here it
 //      reads a gravestone and the allocation fails cleanly.
-//   2. A BLOCKING allocation against a foreign backend that has NOTHING
-//      outstanding fails instead of waiting. Upstream's `BlockOn` waits for a
-//      buffer release that, with no live buffer, can never come — a deadlock
-//      rather than a wait. wz keeps the count that makes the difference sayable.
+//   2. A BLOCKING allocation against a provider that has NOTHING outstanding
+//      fails instead of waiting. Upstream's `BlockOn` waits for a buffer release
+//      that, with no live buffer, can never come — a deadlock rather than a
+//      wait. The provider keeps the busy list that makes the difference sayable,
+//      and the runtime documents this as the only place its `BlockOn` differs.
 //   3. The `_async` spellings CLONE the provider (an `Arc` bump) rather than
 //      requiring the `&'static` upstream's signature demands, so a caller that
 //      drops the provider handle while the allocation is in flight is not a
@@ -3109,7 +2941,16 @@ enum ChunkAllocResult {
     Err(z_alloc_error_t),
 }
 
-/// A backend the C caller supplied, and the book-keeping wz keeps around it.
+/// A backend the C caller supplied, as a backend of the runtime's provider.
+///
+/// R3058 -- this used to be a second allocator of this crate's own, with its own
+/// blocking loop, its own count of live chunks and its own condition variable, beside the
+/// built-in one. It is the runtime's backend trait now, so a C program's chunks are
+/// issued, watched, held and collected by the same provider as the built-in pool's, and
+/// what a callback has to do is the six things upstream's `DynamicShmProviderBackend`
+/// does (`zenoh-c/src/shm/provider/shm_provider_backend.rs` @
+/// `pub struct DynamicShmProviderBackend<TContext>`): allocate, free, defragment, report
+/// what is available, adapt a layout, and name its protocol.
 struct ForeignBackend {
     context: Arc<DroppableContext>,
     callbacks: zc_shm_provider_backend_callbacks_t,
@@ -3123,13 +2964,6 @@ struct ForeignBackend {
     /// are reachable from C on any thread, so the promise the header prints is
     /// kept here by holding this.
     serialise: Mutex<()>,
-    /// Chunks this backend has issued and not yet had freed.
-    ///
-    /// Read for ONE decision: whether a blocking allocation has anything to wait
-    /// for. See divergence 2 in this section's banner.
-    live: Mutex<usize>,
-    /// Signalled by [`ForeignBackend::free`].
-    released: Condvar,
 }
 
 impl ForeignBackend {
@@ -3143,21 +2977,41 @@ impl ForeignBackend {
             f(self.context.ptr)
         }
     }
+}
+
+impl wz_runtime_tokio::shm_backend::ShmProviderBackend for ForeignBackend {
+    /// `id_fn`, the protocol every chunk of this backend carries in its header and so the
+    /// client a receiver reads it through. A backend with no `id_fn` cannot be a valid C
+    /// struct (upstream's field is not optional), and answers `0` -- which is the POSIX
+    /// protocol, so it is also refused at allocation (see `alloc`).
+    fn id(&self) -> wz_runtime_tokio::shm_backend::ProtocolId {
+        match self.callbacks.id_fn {
+            // SAFETY: `ctx` is the caller's own pointer.
+            Some(f) => self.with_context(|ctx| unsafe { f(ctx) }),
+            None => 0,
+        }
+    }
 
     /// One call into `alloc_fn`, with the result decoded.
-    fn try_alloc(
-        self: &Arc<Self>,
-        size: usize,
-        align: usize,
-    ) -> Result<Box<ShmChunk>, z_alloc_error_t> {
-        let Some(alloc_fn) = self.callbacks.alloc_fn else {
-            return Err(Z_ALLOC_ERROR_OTHER);
+    fn alloc(
+        &self,
+        layout: &wz_runtime_tokio::shm_backend::MemoryLayout,
+    ) -> Result<
+        wz_runtime_tokio::shm_backend::AllocatedChunk,
+        wz_runtime_tokio::shm_backend::AllocError,
+    > {
+        use wz_runtime_tokio::shm_backend::{
+            AllocError, AllocatedChunk, ChunkDescriptor, PtrInSegment as RuntimePtr,
         };
-        let layout =
+        let (Some(alloc_fn), Some(_)) = (self.callbacks.alloc_fn, self.callbacks.id_fn) else {
+            return Err(AllocError::Other);
+        };
+        let size = layout.size().get();
+        let layout_handle =
             z_owned_memory_layout_t::from_handle(Box::into_raw(Box::new(MemoryLayoutState {
                 size,
                 alignment: z_alloc_alignment_t {
-                    pow: align.trailing_zeros() as u8,
+                    pow: layout.alignment().pow(),
                 },
             })) as Handle);
         // Divergence 1: a GRAVESTONE, not `MaybeUninit`. A callback that writes
@@ -3165,17 +3019,20 @@ impl ForeignBackend {
         // the stack.
         let mut out = z_owned_chunk_alloc_result_t::null_value();
         self.with_context(|ctx| {
-            // SAFETY: `out` and `layout` are live locals this frame owns, and
+            // SAFETY: `out` and `layout_handle` are live locals this frame owns, and
             // `ctx` is the caller's own pointer.
             unsafe {
                 alloc_fn(
                     &mut out,
-                    &layout as *const z_owned_memory_layout_t as *const z_loaned_memory_layout_t,
+                    &layout_handle as *const z_owned_memory_layout_t
+                        as *const z_loaned_memory_layout_t,
                     ctx,
                 )
             }
         });
-        let mut moved_layout = z_moved_memory_layout_t { _this: layout };
+        let mut moved_layout = z_moved_memory_layout_t {
+            _this: layout_handle,
+        };
         // SAFETY: dropped exactly once; the callback borrowed it and does not
         // own it, which is what `_loaned_` says.
         unsafe { z_memory_layout_drop(&mut moved_layout) };
@@ -3184,71 +3041,55 @@ impl ForeignBackend {
         out = z_owned_chunk_alloc_result_t::null_value();
         let _ = out;
         if handle.is_null() {
-            return Err(Z_ALLOC_ERROR_OTHER);
+            return Err(AllocError::Other);
         }
         // SAFETY: a live `Box<ChunkAllocResult>` minted by this module's own
         // constructors, which are the only way a callback can fill this out.
         let result = unsafe { Box::from_raw(handle as *mut ChunkAllocResult) };
         let (descriptor, ptr) = match *result {
             ChunkAllocResult::Ok { descriptor, ptr } => (descriptor, ptr),
-            ChunkAllocResult::Err(reason) => return Err(reason),
+            ChunkAllocResult::Err(reason) => {
+                return Err(match reason {
+                    Z_ALLOC_ERROR_NEED_DEFRAGMENT => AllocError::NeedDefragment,
+                    Z_ALLOC_ERROR_OUT_OF_MEMORY => AllocError::OutOfMemory,
+                    _ => AllocError::Other,
+                })
+            }
         };
-        if descriptor.len < size || ptr.ptr.is_null() {
+        let described = std::num::NonZeroUsize::new(descriptor.len);
+        let Some(len) = described.filter(|len| len.get() >= size && !ptr.ptr.is_null()) else {
             // The backend said OK and delivered less than was asked for, or
             // nothing. Reported rather than trusted: the buffer plane hands this
             // pointer and length straight to the caller.
-            self.free(&descriptor);
-            return Err(Z_ALLOC_ERROR_OTHER);
-        }
-        *self.live.lock().unwrap_or_else(|e| e.into_inner()) += 1;
-        Ok(Box::new(ShmChunk {
-            backing: ChunkBacking::Foreign {
-                backend: self.clone(),
-                descriptor,
-                ptr,
+            self.free_descriptor(&descriptor);
+            return Err(AllocError::Other);
+        };
+        Ok(AllocatedChunk {
+            descriptor: ChunkDescriptor {
+                segment: descriptor.segment,
+                chunk: descriptor.chunk,
+                len,
             },
-            len: size,
-            mutable: true,
-        }))
-    }
-
-    /// Allocate, retrying while a blocking caller still has something
-    /// outstanding that could be released.
-    fn alloc(
-        self: &Arc<Self>,
-        size: usize,
-        align: usize,
-        blocking: bool,
-    ) -> Result<Box<ShmChunk>, z_alloc_error_t> {
-        loop {
-            let reason = match self.try_alloc(size, align) {
-                Ok(chunk) => return Ok(chunk),
-                Err(reason) => reason,
-            };
-            if !blocking {
-                return Err(reason);
-            }
-            let live = self.live.lock().unwrap_or_else(|e| e.into_inner());
-            // Divergence 2: with nothing outstanding, no release can ever come,
-            // so waiting would be a deadlock rather than a wait.
-            if *live == 0 {
-                return Err(reason);
-            }
-            drop(self.released.wait(live).unwrap_or_else(|e| e.into_inner()));
-        }
+            data: RuntimePtr::new(ptr.ptr, ptr._segment),
+        })
     }
 
     /// Hand a chunk back to the backend that issued it.
-    fn free(&self, descriptor: &z_chunk_descriptor_t) {
-        if let Some(free_fn) = self.callbacks.free_fn {
-            // SAFETY: the descriptor is a live local and `ctx` the caller's own
-            // pointer.
-            self.with_context(|ctx| unsafe { free_fn(descriptor, ctx) });
+    fn free(&self, chunk: &wz_runtime_tokio::shm_backend::ChunkDescriptor) {
+        self.free_descriptor(&z_chunk_descriptor_t {
+            segment: chunk.segment,
+            chunk: chunk.chunk,
+            len: chunk.len.get(),
+        });
+    }
+
+    /// `defragment_fn`, or 0 when the caller supplied none.
+    fn defragment(&self) -> usize {
+        match self.callbacks.defragment_fn {
+            // SAFETY: `ctx` is the caller's own pointer.
+            Some(f) => self.with_context(|ctx| unsafe { f(ctx) }),
+            None => 0,
         }
-        let mut live = self.live.lock().unwrap_or_else(|e| e.into_inner());
-        *live = live.saturating_sub(1);
-        drop(live);
-        self.released.notify_all();
     }
 
     /// `available_fn`, or 0 when the caller supplied none.
@@ -3260,12 +3101,50 @@ impl ForeignBackend {
         }
     }
 
-    /// `defragment_fn`, or 0 when the caller supplied none.
-    fn defragment(&self) -> usize {
-        match self.callbacks.defragment_fn {
-            // SAFETY: `ctx` is the caller's own pointer.
-            Some(f) => self.with_context(|ctx| unsafe { f(ctx) }),
-            None => 0,
+    /// `layout_for_fn`: the callback adapts the layout in place, and drops it to refuse
+    /// (`zenoh-c/src/shm/provider/shm_provider_backend.rs` @
+    /// `layout.ok_or(ZLayoutError::ProviderIncompatibleLayout)`). A backend without one
+    /// serves the layout as it is.
+    fn layout_for(
+        &self,
+        layout: wz_runtime_tokio::shm_backend::MemoryLayout,
+    ) -> Result<
+        wz_runtime_tokio::shm_backend::MemoryLayout,
+        wz_runtime_tokio::shm_backend::LayoutError,
+    > {
+        use wz_runtime_tokio::shm_backend::{AllocAlignment, LayoutError, MemoryLayout};
+        let Some(layout_for_fn) = self.callbacks.layout_for_fn else {
+            return Ok(layout);
+        };
+        let mut owned =
+            z_owned_memory_layout_t::from_handle(Box::into_raw(Box::new(MemoryLayoutState {
+                size: layout.size().get(),
+                alignment: z_alloc_alignment_t {
+                    pow: layout.alignment().pow(),
+                },
+            })) as Handle);
+        // SAFETY: `owned` is a live local this frame owns and `ctx` is the caller's own
+        // pointer.
+        self.with_context(|ctx| unsafe { layout_for_fn(&mut owned, ctx) });
+        if owned.handle.is_null() {
+            // The callback dropped the layout: it will not serve this one.
+            return Err(LayoutError::ProviderIncompatibleLayout);
+        }
+        // SAFETY: a live `Box<MemoryLayoutState>` this module minted, taken back exactly
+        // once.
+        let state = unsafe { Box::from_raw(owned.handle as *mut MemoryLayoutState) };
+        AllocAlignment::new(state.alignment.pow)
+            .and_then(|alignment| MemoryLayout::new(state.size, alignment))
+            .map_err(|_| LayoutError::ProviderIncompatibleLayout)
+    }
+}
+
+impl ForeignBackend {
+    /// `free_fn` on a descriptor, or nothing when the caller supplied none.
+    fn free_descriptor(&self, descriptor: &z_chunk_descriptor_t) {
+        if let Some(free_fn) = self.callbacks.free_fn {
+            // SAFETY: the descriptor is a live borrow and `ctx` the caller's own pointer.
+            self.with_context(|ctx| unsafe { free_fn(descriptor, ctx) });
         }
     }
 }
@@ -3621,8 +3500,6 @@ unsafe fn foreign_provider_new(
         callbacks,
         threadsafe,
         serialise: Mutex::new(()),
-        live: Mutex::new(0),
-        released: Condvar::new(),
     });
     guard_val((), || {
         if this_.is_null() {
@@ -3631,11 +3508,12 @@ unsafe fn foreign_provider_new(
             // longer reach.
             return;
         }
-        // SAFETY: `this_` was checked non-null above.
-        unsafe {
-            *this_ =
-                z_owned_shm_provider_t::from_handle(provider_handle(Provider::Foreign(backend)))
+        let provider = Provider {
+            shm: wz_runtime_tokio::shm_provider::ShmProvider::new(backend),
+            threadsafe,
         };
+        // SAFETY: `this_` was checked non-null above.
+        unsafe { *this_ = z_owned_shm_provider_t::from_handle(provider_handle(provider)) };
     });
 }
 
@@ -3683,14 +3561,19 @@ pub unsafe extern "C" fn z_posix_shm_provider_with_layout_new(
         let Some(state) = (unsafe { memory_layout_state(layout) }) else {
             return Z_ENULL;
         };
-        if usize::from(state.alignment.pow) >= usize::BITS as usize {
+        use wz_runtime_tokio::shm_backend::{AllocAlignment, MemoryLayout};
+        // The layout is the pool's size AND the alignment every chunk of it is freed at
+        // and every request is extended to, which is what makes a provider built here
+        // serve an aligned request a default provider refuses.
+        let built = AllocAlignment::new(state.alignment.pow)
+            .and_then(|alignment| MemoryLayout::new(state.size, alignment))
+            .map_err(|e| std::io::Error::other(e.to_string()))
+            .and_then(|layout| Provider::pool(&layout));
+        let Ok(provider) = built else {
             return Z_EINVAL;
-        }
-        let segment = Segment::with_alignment(state.size, 1usize << state.alignment.pow);
-        // SAFETY: `this_` was checked non-null above.
-        unsafe {
-            *this_ = z_owned_shm_provider_t::from_handle(provider_handle(Provider::Native(segment)))
         };
+        // SAFETY: `this_` was checked non-null above.
+        unsafe { *this_ = z_owned_shm_provider_t::from_handle(provider_handle(provider)) };
         Z_OK
     })
 }
@@ -3698,11 +3581,13 @@ pub unsafe extern "C" fn z_posix_shm_provider_with_layout_new(
 /// Hand a chunk the BACKEND allocated back as a buffer (zenoh-c
 /// `z_shm_provider_map`). The chunk's pointer is CONSUMED.
 ///
-/// ⛔ REFUSES on a native provider, and that is not a gap: nothing in wz issues a
-/// `z_allocated_chunk_t` for a segment wz owns, so a descriptor handed in here
-/// names a chunk this allocator never made. Upstream refuses the same call for
-/// the same reason — its POSIX backend cannot resolve a descriptor it did not
-/// issue either.
+/// Served by EVERY provider, as upstream's is (`zenoh-c/src/shm/provider/shm_provider_impl.rs` @
+/// `super::shm_provider::CSHMProvider::Posix(provider) => provider.map(chunk, len),`). R3058
+/// corrects the earlier note that said a built-in provider refuses it because "upstream
+/// refuses the same call": it does not. What the built-in pool adds is a check upstream's
+/// has not: the chunk must lie in the pool's own segment, at the address its offset names,
+/// because the provider will hand the range back to its allocator when it collects, and an
+/// allocator given a range it never issued corrupts itself.
 ///
 /// # Safety
 /// `out_result` must be null or writable; `provider` null or a valid loaned
@@ -3729,26 +3614,35 @@ pub unsafe extern "C" fn z_shm_provider_map(
             return Z_ENULL;
         }
         // SAFETY: the caller's contract.
-        let Some(Provider::Foreign(backend)) = (unsafe { provider_of(provider) }) else {
+        let Some(backend) = (unsafe { provider_of(provider) }) else {
             return Z_EINVAL;
         };
         let descriptor = allocated_chunk.descriptpr;
-        if ptr.ptr.is_null() || len > descriptor.len {
+        let Some(described) = std::num::NonZeroUsize::new(descriptor.len) else {
+            return Z_EINVAL;
+        };
+        if ptr.ptr.is_null() || len == 0 || len > descriptor.len {
             return Z_EINVAL;
         }
-        *backend.live.lock().unwrap_or_else(|e| e.into_inner()) += 1;
-        let chunk = Box::new(ShmChunk {
-            backing: ChunkBacking::Foreign {
-                backend: backend.clone(),
-                descriptor,
-                ptr,
+        let chunk = wz_runtime_tokio::shm_backend::AllocatedChunk {
+            descriptor: wz_runtime_tokio::shm_backend::ChunkDescriptor {
+                segment: descriptor.segment,
+                chunk: descriptor.chunk,
+                len: described,
             },
-            len,
-            mutable: true,
-        });
-        // SAFETY: `out_result` was checked non-null above.
-        unsafe { *out_result = z_owned_shm_mut_t::from_handle(Box::into_raw(chunk) as Handle) };
-        Z_OK
+            data: wz_runtime_tokio::shm_backend::PtrInSegment::new(ptr.ptr, ptr._segment),
+        };
+        match backend.shm.map(chunk, len) {
+            Ok(payload) => {
+                let chunk = ShmChunk::issued(payload);
+                // SAFETY: `out_result` was checked non-null above.
+                unsafe {
+                    *out_result = z_owned_shm_mut_t::from_handle(Box::into_raw(chunk) as Handle)
+                };
+                Z_OK
+            }
+            Err(_) => Z_EINVAL,
+        }
     })
 }
 
@@ -3821,15 +3715,15 @@ unsafe fn provider_alloc_async(
                 alloc_error: Z_ALLOC_ERROR_OTHER,
                 layout_error: Z_LAYOUT_ERROR_INCORRECT_LAYOUT_ARGS,
             };
-            if usize::from(alignment.pow) >= usize::BITS as usize {
-                wide.status = ZC_BUF_LAYOUT_ALLOC_STATUS_LAYOUT_ERROR;
-            } else {
-                match backend.alloc(size, 1usize << alignment.pow, true) {
-                    Ok(chunk) => {
-                        wide.status = ZC_BUF_LAYOUT_ALLOC_STATUS_OK;
-                        wide.buf = z_owned_shm_mut_t::from_handle(Box::into_raw(chunk) as Handle);
-                    }
-                    Err(reason) => wide.alloc_error = reason,
+            match backend.alloc(size, alignment, &policy::gc_defrag_blocking()) {
+                Ok(chunk) => {
+                    wide.status = ZC_BUF_LAYOUT_ALLOC_STATUS_OK;
+                    wide.buf = z_owned_shm_mut_t::from_handle(Box::into_raw(chunk) as Handle);
+                }
+                Err(AllocFailure::Alloc(reason)) => wide.alloc_error = reason,
+                Err(AllocFailure::Layout(reason)) => {
+                    wide.status = ZC_BUF_LAYOUT_ALLOC_STATUS_LAYOUT_ERROR;
+                    wide.layout_error = reason;
                 }
             }
             // SAFETY: the caller's storage, which outlives this callback by the
@@ -3939,7 +3833,7 @@ pub unsafe extern "C" fn z_precomputed_layout_threadsafe_alloc_gc_defrag_async(
             return Z_EINVAL;
         }
         let backend = state.provider.clone();
-        let (size, align) = (state.size, 1usize << state.alignment.pow);
+        let (size, alignment) = (state.size, state.alignment);
         let out = AsyncOut(out_result);
         let callback = result_callback;
         std::thread::spawn(move || {
@@ -3950,12 +3844,16 @@ pub unsafe extern "C" fn z_precomputed_layout_threadsafe_alloc_gc_defrag_async(
                 buf: z_owned_shm_mut_t::null_value(),
                 error: Z_ALLOC_ERROR_OTHER,
             };
-            match backend.alloc(size, align, true) {
+            match backend.alloc(size, alignment, &policy::gc_defrag_blocking()) {
                 Ok(chunk) => {
                     narrow.status = ZC_BUF_ALLOC_STATUS_OK;
                     narrow.buf = z_owned_shm_mut_t::from_handle(Box::into_raw(chunk) as Handle);
                 }
-                Err(reason) => narrow.error = reason,
+                Err(AllocFailure::Alloc(reason)) => narrow.error = reason,
+                // The layout was validated when it was built, so this arm is not reached
+                // with a layout this crate made; if it is, the narrow result has nowhere
+                // to say so but `OTHER`.
+                Err(AllocFailure::Layout(_)) => narrow.error = Z_ALLOC_ERROR_OTHER,
             }
             // SAFETY: the caller's storage, per `AsyncOut`.
             unsafe { *out.0 = narrow };
@@ -4026,15 +3924,16 @@ mod precomputed_layout_tests {
 
     /// ⛔⛔ SKEW THE SEGMENT FIRST, or the alignment assertion is VACUOUS.
     ///
-    /// Since R2264 a segment's base is page-aligned, so the FIRST allocation
-    /// sits at offset 0 and satisfies every alignment by accident. MEASURED: a
+    /// A segment's base is page-aligned, so a FIRST allocation can satisfy an
+    /// alignment by accident (it did, before R3058, when the pool kept no headers
+    /// and the first chunk sat at offset 0). MEASURED in R2264: a
     /// mutation that made `precomputed_new` store `ALIGN_BYTE` instead of the
     /// caller's alignment PASSED the first draft of these tests. Claiming one
-    /// odd byte first moves the free list off the boundary, so the next
-    /// allocation is aligned only if the code aligns it.
+    /// odd byte first moves the pool's next free address off the boundary, so the
+    /// next allocation is aligned only if the code aligns it.
     ///
-    /// The returned buffer must be held for the duration — dropping it returns
-    /// the byte and re-coalesces the free list.
+    /// The returned buffer must be held for the duration — dropping it puts the
+    /// byte on the provider's busy list, which a collection later empties.
     ///
     /// # Safety
     /// `p` must be a live owned provider.
@@ -4060,7 +3959,8 @@ mod precomputed_layout_tests {
     #[test]
     fn a_layout_allocates_at_its_own_size_and_alignment() {
         const POW: u8 = 6;
-        const SIZE: usize = 300;
+        // A multiple of the alignment: a layout whose size is not one is no layout.
+        const SIZE: usize = 320;
         type Alloc =
             unsafe extern "C" fn(*mut z_buf_alloc_result_t, *const z_loaned_precomputed_layout_t);
         let spellings: [(&str, Alloc); 10] = [
@@ -4094,10 +3994,10 @@ mod precomputed_layout_tests {
             ),
         ];
         for (name, f) in spellings {
-            // SAFETY: a live provider this frame owns.
-            let mut p = unsafe { provider(64 * 1024) };
+            // SAFETY: a live provider this frame owns, built to serve the alignment.
+            let mut p = unsafe { super::aligned_alloc_tests::aligned_provider(64 * 1024, POW) };
             // SAFETY: `p` is live; the buffer is held until the end of the
-            // iteration so the free list stays skewed.
+            // iteration so the pool stays skewed.
             let skewed = unsafe { skew(&p) };
             let mut layout = z_owned_precomputed_layout_t::null_value();
             // SAFETY: `layout` is writable and `p` is live.
@@ -4155,10 +4055,10 @@ mod precomputed_layout_tests {
     /// A layout OUTLIVES the provider handle it was built from, and still
     /// allocates.
     ///
-    /// The layout holds an `Arc<Segment>`, not the provider's box, and this is
-    /// the only assertion that can tell those apart: a layout that kept a raw
-    /// pointer into the provider would allocate fine until the provider was
-    /// dropped and then read freed memory.
+    /// The layout holds its own handle on the provider, not a pointer to the
+    /// caller's box, and this is the only assertion that can tell those apart: a layout
+    /// that kept a raw pointer into the provider would allocate fine until the provider
+    /// was dropped and then read freed memory.
     #[test]
     fn a_layout_outlives_the_provider_handle() {
         // SAFETY: a live provider this frame owns.
@@ -4261,6 +4161,28 @@ mod aligned_alloc_tests {
         p
     }
 
+    /// A provider built to serve requests aligned to `1 << pow`, which is what an
+    /// aligned request needs: a default provider is built at byte alignment and refuses
+    /// one as the provider's incompatibility, as the real library does (MEASURED).
+    ///
+    /// # Safety
+    /// The returned provider is the caller's to drop.
+    pub(super) unsafe fn aligned_provider(total: usize, pow: u8) -> z_owned_shm_provider_t {
+        let mut layout = z_owned_memory_layout_t::null_value();
+        assert_eq!(
+            z_memory_layout_new(&mut layout, total, z_alloc_alignment_t { pow }),
+            Z_OK
+        );
+        let mut p = z_owned_shm_provider_t::null_value();
+        assert_eq!(
+            z_posix_shm_provider_with_layout_new(&mut p, z_memory_layout_loan(&layout)),
+            Z_OK
+        );
+        let mut moved = z_moved_memory_layout_t { _this: layout };
+        z_memory_layout_drop(&mut moved);
+        p
+    }
+
     /// R2264 — the CALLER's alignment reaches the allocator on every one of the
     /// new aligned spellings.
     ///
@@ -4295,7 +4217,7 @@ mod aligned_alloc_tests {
         ];
         for (name, f) in spellings {
             // SAFETY: a live provider this frame owns.
-            let mut p = unsafe { provider(64 * 1024) };
+            let mut p = unsafe { aligned_provider(64 * 1024, POW) };
             // ⛔ R2265 — SKEW FIRST. R2264 wrote this test when segments were
             // alignment-1, so a wrong answer showed up as `addr % 64 == 48`.
             // Page-aligning the segment (the repair R2264 itself made) turned
@@ -4459,123 +4381,146 @@ mod memory_layout_tests {
 }
 
 #[cfg(test)]
-mod segment_tests {
+mod pool_provider_tests {
+    //! R3058 -- the built-in provider through the exported entry points, now that it is the
+    //! runtime's pool and not an allocator of this crate. What a pool holds and when a chunk
+    //! comes home are the runtime's facts and are tested there; these are the C ABI's answers
+    //! about them, and they were READ OFF THE REAL LIBRARY (the differential that records
+    //! them is `zenoh_c_shm_provider_allocation_twice_and_diff`).
+
     use super::*;
 
-    /// The property `z_pub_shm.c` depends on and nothing else in the corpus
-    /// states: a provider whose chunks are released can serve the SAME request
-    /// forever. A allocator that leaked would fail on the fifth iteration of
-    /// that example's loop and on no earlier one, which is exactly the shape of
-    /// bug a single-shot test does not see.
-    #[test]
-    fn a_released_chunk_is_reusable_indefinitely() {
-        let segment = Segment::new(4096);
-        for _ in 0..64 {
-            let start = segment
-                .books()
-                .claim(1024, 1)
-                .expect("a 1024-byte chunk fits in a 4096-byte segment");
-            let chunk = ShmChunk {
-                backing: ChunkBacking::Native {
-                    segment: segment.clone(),
-                    start,
-                },
-                len: 1024,
-                mutable: true,
-            };
-            drop(chunk);
-        }
-        assert_eq!(segment.books().available(), 4096);
+    /// A default provider of `size` bytes, or `None` where the real library refuses.
+    fn provider(size: usize) -> Option<z_owned_shm_provider_t> {
+        let mut p = z_owned_shm_provider_t::null_value();
+        // SAFETY: `p` is a live local.
+        let rc = unsafe { z_shm_provider_default_new(&mut p, size) };
+        (rc == Z_OK).then_some(p)
     }
 
-    /// Adjacent releases COALESCE, so a segment cut into four and freed can
-    /// serve a request for the whole of it again. Without coalescing this is
-    /// the first request that fails while `available()` still reports 4096 —
-    /// the failure mode `Z_ALLOC_ERROR_NEED_DEFRAGMENT` exists to name.
-    #[test]
-    fn adjacent_frees_coalesce_back_into_one_range() {
-        let segment = Segment::new(4096);
-        let chunks: Vec<ShmChunk> = (0..4)
-            .map(|_| {
-                let start = segment.books().claim(1024, 1).expect("quarter fits");
-                ShmChunk {
-                    backing: ChunkBacking::Native {
-                        segment: segment.clone(),
-                        start,
-                    },
-                    len: 1024,
-                    mutable: true,
-                }
-            })
-            .collect();
-        assert_eq!(segment.books().available(), 0);
-        drop(chunks);
-        assert_eq!(segment.books().largest(), 4096);
-        assert!(segment.books().claim(4096, 1).is_some());
-    }
-
-    /// `z_get_shm.c` sizes its provider to EXACTLY the payload it allocates, so
-    /// an allocator taking any per-chunk overhead out of the segment fails that
-    /// example's FIRST call. Pinned here because the example only shows it when
-    /// the oracle is present.
-    #[test]
-    fn a_request_for_the_whole_segment_succeeds() {
-        let segment = Segment::new(11);
-        assert_eq!(segment.books().claim(11, 1), Some(0));
-        assert_eq!(segment.books().available(), 0);
-    }
-
-    /// A zero-length segment is legal — `z_get_shm.c` builds one when run with
-    /// no payload — and a zero-length request out of it succeeds rather than
-    /// reporting out-of-memory.
-    #[test]
-    fn a_zero_length_segment_serves_a_zero_length_request() {
-        let segment = Segment::new(0);
-        assert_eq!(segment.books().available(), 0);
-        // `claim` finds no range to cut from, so the caller gets None and the
-        // ALLOC path reports out-of-memory. The example only allocates when it
-        // has a payload, so this documents the boundary rather than asserting a
-        // success the C side would then write zero bytes into.
-        assert_eq!(segment.books().claim(0, 1), None);
-    }
-
-    /// Alignment is honoured out of the middle of a range, and the skipped
-    /// bytes stay FREE rather than being lost — a leak here would show only as
-    /// a provider that slowly stops serving.
-    #[test]
-    fn an_aligned_claim_leaves_the_alignment_gap_free() {
-        let segment = Segment::new(4096);
-        // Take one byte so the next range starts at an odd offset.
-        let head = segment.books().claim(1, 1).expect("one byte fits");
-        assert_eq!(head, 0);
-        let aligned = segment.books().claim(16, 64).expect("64-aligned fits");
-        assert_eq!(aligned % 64, 0);
-        assert_eq!(aligned, 64);
-        // 4096 - 1 (head) - 16 (chunk) = 4079, so the 63-byte gap is still free.
-        assert_eq!(segment.books().available(), 4079);
-    }
-
-    /// Freezing clears the mutable flag and does NOT move the bytes — the
-    /// property `z_shm_try_reloan_mut` reports and `z_sub_shm.c` prints.
-    #[test]
-    fn freezing_keeps_the_range_and_clears_mutability() {
-        let segment = Segment::new(64);
-        let start = segment.books().claim(8, 1).expect("fits");
-        let mut chunk = ShmChunk {
-            backing: ChunkBacking::Native {
-                segment: segment.clone(),
-                start,
-            },
-            len: 8,
-            mutable: true,
+    fn alloc_with(
+        p: &z_owned_shm_provider_t,
+        size: usize,
+        spelling: unsafe extern "C" fn(
+            *mut z_buf_layout_alloc_result_t,
+            *const z_loaned_shm_provider_t,
+            usize,
+        ),
+    ) -> z_buf_layout_alloc_result_t {
+        let mut out = z_buf_layout_alloc_result_t {
+            status: ZC_BUF_LAYOUT_ALLOC_STATUS_LAYOUT_ERROR,
+            buf: z_owned_shm_mut_t::null_value(),
+            alloc_error: Z_ALLOC_ERROR_OTHER,
+            layout_error: Z_LAYOUT_ERROR_INCORRECT_LAYOUT_ARGS,
         };
-        assert!(chunk.mutable);
-        chunk.mutable = false;
-        assert!(matches!(
-            chunk.backing,
-            ChunkBacking::Native { start: at, .. } if at == start
-        ));
-        assert_eq!(segment.books().available(), 56);
+        // SAFETY: `out` is a live local and `p` a live provider.
+        unsafe { spelling(&mut out, z_shm_provider_loan(p), size) };
+        out
+    }
+
+    fn release(result: z_buf_layout_alloc_result_t) {
+        if result.status == ZC_BUF_LAYOUT_ALLOC_STATUS_OK {
+            let mut buf = result.buf;
+            // SAFETY: a live buffer, dropped once.
+            unsafe { z_shm_mut_drop(&mut buf as *mut z_owned_shm_mut_t as *mut z_moved_shm_mut_t) };
+        }
+    }
+
+    fn drop_provider(mut p: z_owned_shm_provider_t) {
+        // SAFETY: a live provider, dropped once.
+        unsafe {
+            z_shm_provider_drop(
+                &mut p as *mut z_owned_shm_provider_t as *mut z_moved_shm_provider_t,
+            )
+        };
+    }
+
+    /// THE PROPERTY `z_pub_shm.c` DEPENDS ON: a provider whose chunks are released serves
+    /// the SAME request forever, through the collecting spelling the example calls. A
+    /// pool that leaked would fail on the third iteration (two 1024-byte chunks fill a
+    /// 4096-byte provider), which is exactly the shape of bug a single-shot test does not
+    /// see.
+    #[test]
+    fn a_released_chunk_is_reusable_indefinitely_through_the_collecting_spelling() {
+        let p = provider(4096).expect("a 4096-byte provider is made");
+        for round in 0..64 {
+            let chunk = alloc_with(&p, 1024, z_shm_provider_alloc_gc_defrag_blocking);
+            assert_eq!(
+                chunk.status, ZC_BUF_LAYOUT_ALLOC_STATUS_OK,
+                "round {round}: the previous chunk was dropped and the collecting spelling takes it"
+            );
+            release(chunk);
+        }
+        drop_provider(p);
+    }
+
+    /// A dropped chunk is NOT back in the pool until a collection takes it, which is what the
+    /// real library does and the old allocator did not: the plain spelling is refused while the
+    /// collecting one is served.
+    #[test]
+    fn a_dropped_chunk_waits_for_a_collection() {
+        let p = provider(4096).expect("a provider");
+        let a = alloc_with(&p, 1024, z_shm_provider_alloc);
+        let b = alloc_with(&p, 1024, z_shm_provider_alloc);
+        assert_eq!(
+            (a.status, b.status),
+            (ZC_BUF_LAYOUT_ALLOC_STATUS_OK, ZC_BUF_LAYOUT_ALLOC_STATUS_OK)
+        );
+        release(a);
+        let plain = alloc_with(&p, 1024, z_shm_provider_alloc);
+        assert_eq!(plain.status, ZC_BUF_LAYOUT_ALLOC_STATUS_ALLOC_ERROR);
+        assert_eq!(plain.alloc_error, Z_ALLOC_ERROR_OUT_OF_MEMORY);
+        // SAFETY: a live provider.
+        assert_eq!(
+            unsafe { z_shm_provider_garbage_collect(z_shm_provider_loan(&p)) },
+            1024,
+            "the collection reports the largest chunk it took"
+        );
+        let again = alloc_with(&p, 1024, z_shm_provider_alloc);
+        assert_eq!(again.status, ZC_BUF_LAYOUT_ALLOC_STATUS_OK);
+        release(again);
+        release(b);
+        drop_provider(p);
+    }
+
+    /// The pools the real library makes and refuses: 1000 bytes or fewer, and zero, are
+    /// refused; 4096 and 5000 are made.
+    #[test]
+    fn a_pool_is_made_or_refused_as_the_real_library_does() {
+        for size in [0usize, 1, 64, 300, 1000] {
+            assert!(provider(size).is_none(), "{size} bytes is refused");
+        }
+        for size in [4096usize, 5000] {
+            drop_provider(provider(size).unwrap_or_else(|| panic!("{size} bytes is made")));
+        }
+    }
+
+    /// An aligned request is served at its alignment by a provider built to serve it, and
+    /// refused as the PROVIDER's incompatibility by a default one.
+    #[test]
+    fn an_aligned_request_needs_a_provider_built_for_it() {
+        let default = provider(4096).expect("a provider");
+        let mut out = z_buf_layout_alloc_result_t {
+            status: ZC_BUF_LAYOUT_ALLOC_STATUS_OK,
+            buf: z_owned_shm_mut_t::null_value(),
+            alloc_error: Z_ALLOC_ERROR_OTHER,
+            layout_error: Z_LAYOUT_ERROR_INCORRECT_LAYOUT_ARGS,
+        };
+        // SAFETY: a live provider and a live result.
+        unsafe {
+            z_shm_provider_alloc_aligned(
+                &mut out,
+                z_shm_provider_loan(&default),
+                64,
+                z_alloc_alignment_t { pow: 5 },
+            )
+        };
+        assert_eq!(out.status, ZC_BUF_LAYOUT_ALLOC_STATUS_LAYOUT_ERROR);
+        assert_eq!(
+            out.layout_error,
+            Z_LAYOUT_ERROR_PROVIDER_INCOMPATIBLE_LAYOUT
+        );
+        drop_provider(default);
     }
 }
 
@@ -4585,11 +4530,12 @@ mod immutability_recovery_tests {
     //! `z_bytes_to_owned_shm`, the two strays of the SHM residue that need
     //! neither a session-owned provider nor the SHM client chain.
     //!
-    //! Both arms of the recovery are driven. The REFUSING arm is what the C
-    //! surface can reach — every `z_owned_shm_t` this crate produces is frozen
-    //! by construction — and the SUCCEEDING one is reached by building a chunk
-    //! that still carries `mutable`, because a test whose fixture cannot
-    //! construct the input its branch needs measures nothing (R2289, item 625).
+    //! Both arms of the recovery are driven, and since R3058 BOTH are reachable through the
+    //! C surface, as upstream's are: a buffer is recoverable while it is the sole holder
+    //! (nothing else alive here, no descriptor in flight) and refused while it is shared,
+    //! which a `z_shm_clone` is. The earlier version of this module built a chunk by hand
+    //! to reach the succeeding arm, because every buffer the crate produced was frozen by a
+    //! flag; the flag is gone and the fixture is an ordinary allocation.
 
     use super::*;
     // The payload half of the bridge lives in `bytes`, and this module drives
@@ -4597,43 +4543,46 @@ mod immutability_recovery_tests {
     use crate::abi::z_moved_bytes_t;
     use crate::bytes::{z_bytes_drop, z_bytes_loan};
 
-    /// Build an OWNED immutable buffer over a real segment range, with the
-    /// mutability flag the caller asks for.
-    ///
-    /// `frozen = true` is what `z_shm_from_mut` and `z_shm_clone` both produce;
-    /// `false` is the shape upstream's refcount can still hand back and wz's
-    /// C surface cannot make, which is precisely why it is made here.
-    fn owned_shm(segment: &Arc<Segment>, frozen: bool) -> z_owned_shm_t {
-        let start = segment.books().claim(8, 1).expect("8 bytes fit");
-        let chunk = ShmChunk {
-            backing: ChunkBacking::Native {
-                segment: segment.clone(),
-                start,
-            },
-            len: 8,
-            mutable: !frozen,
+    /// A 4096-byte provider and an OWNED immutable buffer of 8 bytes out of it, frozen by
+    /// `z_shm_from_mut` as a C program freezes one.
+    fn owned_shm() -> (Provider, z_owned_shm_t) {
+        let layout = wz_runtime_tokio::shm_backend::MemoryLayout::of_size(4096).expect("a layout");
+        let provider = Provider::pool(&layout).expect("a pool");
+        let chunk = provider
+            .alloc(8, ALIGN_BYTE, &policy::just_alloc())
+            .unwrap_or_else(|_| panic!("8 bytes fit in a fresh pool"));
+        let mut mutable = z_owned_shm_mut_t::from_handle(Box::into_raw(chunk) as Handle);
+        let mut frozen = z_owned_shm_t::null_value();
+        // SAFETY: both are live locals; the buffer is consumed.
+        unsafe {
+            z_shm_from_mut(
+                &mut frozen,
+                &mut mutable as *mut z_owned_shm_mut_t as *mut z_moved_shm_mut_t,
+            )
         };
-        z_owned_shm_t::from_handle(Box::into_raw(Box::new(chunk)) as Handle)
+        (provider, frozen)
     }
 
-    /// THE ARM THE C SURFACE REACHES: a frozen buffer is refused, and the
-    /// refusal HANDS IT BACK rather than dropping it.
+    /// THE REFUSING ARM: a buffer that is SHARED is refused, and the refusal HANDS IT BACK
+    /// rather than dropping it.
     ///
     /// The returned buffer is the point. A refusal that consumed `that` and
-    /// wrote nothing to `immut` would free the chunk, and the caller — who
+    /// wrote nothing to `immut` would drop a holder, and the caller — who
     /// still believes it owns a buffer — would have neither the mutable one it
-    /// asked for nor the immutable one it started with. The segment's own
-    /// accounting is what says the range is still out.
+    /// asked for nor the immutable one it started with. The provider's own
+    /// accounting says the chunk is still out: a collection finds nothing to take
+    /// until every holder has let go.
     #[test]
-    fn a_frozen_buffer_is_refused_and_handed_back() {
-        let segment = Segment::new(64);
-        let mut owned = owned_shm(&segment, /*frozen=*/ true);
-        assert_eq!(
-            segment.books().available(),
-            56,
-            "the fixture must hold a live 8-byte range, else the accounting \
-             below cannot tell a returned buffer from a dropped one"
+    fn a_shared_buffer_is_refused_and_handed_back() {
+        let (provider, mut owned) = owned_shm();
+        let mut copy = z_owned_shm_t::null_value();
+        // SAFETY: a live buffer and a live out-parameter.
+        unsafe { z_shm_clone(&mut copy, z_shm_loan(&owned)) };
+        assert!(
+            unsafe { z_internal_shm_check(&copy) },
+            "the fixture must hold a second reference, else the buffer is not shared"
         );
+        assert_eq!(provider.garbage_collect(), 0, "the chunk is held by two");
 
         let mut out = z_owned_shm_mut_t::null_value();
         let mut back = z_owned_shm_t::null_value();
@@ -4646,7 +4595,7 @@ mod immutability_recovery_tests {
             )
         };
 
-        assert_eq!(rc, Z_EINVAL, "a frozen buffer cannot become mutable again");
+        assert_eq!(rc, Z_EINVAL, "a shared buffer cannot become mutable");
         assert!(
             !unsafe { z_internal_shm_mut_check(&out) },
             "the mutable out-parameter must be a gravestone on refusal"
@@ -4661,31 +4610,30 @@ mod immutability_recovery_tests {
             "`that` is consumed on every path, refusal included"
         );
         assert_eq!(
-            segment.books().available(),
-            56,
-            "the range is still out: the chunk moved to `immut`, it was not freed"
+            provider.garbage_collect(),
+            0,
+            "the chunk is still out: it moved to `immut`, it was not dropped"
         );
 
-        // SAFETY: dropped once, through the owner it was handed back to.
+        // SAFETY: both dropped once.
         unsafe { z_shm_drop(&mut back as *mut z_owned_shm_t as *mut z_moved_shm_t) };
+        unsafe { z_shm_drop(&mut copy as *mut z_owned_shm_t as *mut z_moved_shm_t) };
         assert_eq!(
-            segment.books().available(),
-            64,
-            "and dropping THAT handle is what returns the range"
+            provider.garbage_collect(),
+            8,
+            "and dropping the LAST holder is what lets the collection take the chunk"
         );
     }
 
-    /// THE OTHER ARM, and the fixture is what makes it reachable: a chunk that
-    /// still carries `mutable` is recovered, and `immut` is left a gravestone.
+    /// THE OTHER ARM: a buffer nothing else holds is recovered, and `immut` is left a
+    /// gravestone.
     ///
-    /// Without this the refusal above would be the whole test, and a wz that
-    /// refused unconditionally — ignoring the flag entirely — would pass it.
-    /// That is the vacuity item 625 is about, in the one place this round could
-    /// have walked into it.
+    /// Without this the refusal above would be the whole test, and a wz that refused
+    /// unconditionally would pass it. That is the vacuity item 625 is about, in the one
+    /// place this round could have walked into it.
     #[test]
-    fn a_buffer_that_is_still_mutable_is_recovered() {
-        let segment = Segment::new(64);
-        let mut owned = owned_shm(&segment, /*frozen=*/ false);
+    fn a_buffer_nothing_else_holds_is_recovered() {
+        let (provider, mut owned) = owned_shm();
 
         let mut out = z_owned_shm_mut_t::null_value();
         let mut back = z_owned_shm_t::null_value();
@@ -4698,7 +4646,7 @@ mod immutability_recovery_tests {
             )
         };
 
-        assert_eq!(rc, Z_OK, "a buffer still marked mutable is recoverable");
+        assert_eq!(rc, Z_OK, "the sole holder of a buffer may write it again");
         assert!(
             unsafe { z_internal_shm_mut_check(&out) },
             "the recovered buffer must be live"
@@ -4709,14 +4657,76 @@ mod immutability_recovery_tests {
              in `this_`, and a live `immut` too would be two owners of one chunk"
         );
         assert_eq!(
-            segment.books().available(),
-            56,
-            "recovery moves the SAME chunk; it does not allocate a second one"
+            provider.garbage_collect(),
+            0,
+            "recovery moves the SAME chunk; it neither allocates a second one nor frees this"
         );
 
         // SAFETY: dropped once, through the recovered handle.
         unsafe { z_shm_mut_drop(&mut out as *mut z_owned_shm_mut_t as *mut z_moved_shm_mut_t) };
-        assert_eq!(segment.books().available(), 64);
+        assert_eq!(provider.garbage_collect(), 8);
+    }
+
+    /// Freezing a buffer keeps the bytes where they are and keeps it WRITABLE for as long
+    /// as it is the sole holder: a copy makes it read-only and dropping the copy makes it
+    /// writable again. This is `z_sub_shm.c`'s `SHM (MUT)` / `SHM (IMMUT)` question
+    /// asked of a buffer this process allocated.
+    #[test]
+    fn a_frozen_buffer_is_writable_exactly_while_it_is_the_sole_holder() {
+        let (provider, mut owned) = owned_shm();
+        // SAFETY: a live owned buffer.
+        let sole = unsafe { z_shm_try_mut(&mut owned) };
+        assert!(
+            !sole.is_null(),
+            "a frozen buffer nothing else holds is writable"
+        );
+
+        let mut copy = z_owned_shm_t::null_value();
+        // SAFETY: a live buffer and a live out-parameter.
+        unsafe { z_shm_clone(&mut copy, z_shm_loan(&owned)) };
+        // SAFETY: both live.
+        assert!(
+            unsafe { z_shm_try_mut(&mut owned) }.is_null(),
+            "shared, so read-only"
+        );
+        assert!(
+            unsafe { z_shm_try_mut(&mut copy) }.is_null(),
+            "from either side"
+        );
+
+        // SAFETY: dropped once.
+        unsafe { z_shm_drop(&mut copy as *mut z_owned_shm_t as *mut z_moved_shm_t) };
+        // SAFETY: a live owned buffer.
+        assert!(
+            !unsafe { z_shm_try_mut(&mut owned) }.is_null(),
+            "the copy let go, so the buffer is the sole holder again"
+        );
+        // SAFETY: dropped once.
+        unsafe { z_shm_drop(&mut owned as *mut z_owned_shm_t as *mut z_moved_shm_t) };
+        assert_eq!(provider.garbage_collect(), 8);
+    }
+
+    /// A copy shares the bytes and allocates nothing: the copy's address is the original's,
+    /// and a pool one chunk fills still has no room for another after the copy (it needed none).
+    #[test]
+    fn a_clone_is_a_second_holder_of_the_same_bytes() {
+        let (provider, owned) = owned_shm();
+        let mut copy = z_owned_shm_t::null_value();
+        // SAFETY: a live buffer and a live out-parameter.
+        unsafe { z_shm_clone(&mut copy, z_shm_loan(&owned)) };
+        // SAFETY: both live.
+        let (a, b) = unsafe {
+            (
+                z_shm_data(z_shm_loan(&owned)),
+                z_shm_data(z_shm_loan(&copy)),
+            )
+        };
+        assert_eq!(a, b, "a reference copy has the original's address");
+        let mut owned = owned;
+        // SAFETY: both dropped once.
+        unsafe { z_shm_drop(&mut owned as *mut z_owned_shm_t as *mut z_moved_shm_t) };
+        unsafe { z_shm_drop(&mut copy as *mut z_owned_shm_t as *mut z_moved_shm_t) };
+        assert_eq!(provider.garbage_collect(), 8);
     }
 
     /// R2294 — `z_bytes_to_owned_shm` refuses, and the refusal is ABOUT THE
@@ -4730,8 +4740,7 @@ mod immutability_recovery_tests {
     /// `z_bytes_as_loaned_shm` already gives.
     #[test]
     fn a_payload_built_from_an_shm_buffer_is_still_not_shm_backed() {
-        let segment = Segment::new(64);
-        let mut owned = owned_shm(&segment, /*frozen=*/ true);
+        let (provider, mut owned) = owned_shm();
         let mut payload = z_owned_bytes_t::null_value();
         // SAFETY: both are live locals.
         let rc = unsafe {
@@ -4742,9 +4751,9 @@ mod immutability_recovery_tests {
         };
         assert_eq!(rc, Z_OK, "the payload must have been built");
         assert_eq!(
-            segment.books().available(),
-            64,
-            "`z_bytes_from_shm` copied the bytes and returned the chunk — which \
+            provider.garbage_collect(),
+            8,
+            "`z_bytes_from_shm` copied the bytes and let go of the chunk — which \
              is exactly why the payload is not SHM-backed"
         );
 
@@ -4991,7 +5000,12 @@ mod received_chunk_tests {
         let rc = unsafe { z_bytes_to_owned_shm(z_bytes_loan(&payload), &mut owned) };
         assert_eq!(rc, Z_OK);
         assert!(unsafe { z_internal_shm_check(&owned) });
-        assert_eq!(Arc::strong_count(&storage), 3, "and the owned buffer's");
+        assert_eq!(
+            Arc::strong_count(&storage),
+            4,
+            "the owned buffer's, and the payload's own loan the conversion made first: the \
+             two share one holder token, which is how neither is writable while the other lives"
+        );
         // SAFETY: a live owned buffer.
         assert_eq!(unsafe { z_shm_len(z_shm_loan(&owned)) }, 10);
         // SAFETY: a live owned buffer.
@@ -5045,6 +5059,23 @@ mod foreign_backend_tests {
     use std::time::Duration;
 
     use super::*;
+
+    /// Wait, bounded, until `done` holds.
+    ///
+    /// A provider's backend is released by whichever thread lets go of its LAST reference,
+    /// and the process-wide sweep of orphaned providers takes a short-lived reference to each
+    /// while it looks. Beside the other tests of this crate, which create providers on their
+    /// own threads, that thread can be a sweeper's, a moment after the drop that orphaned the
+    /// provider returned. What is owed is that the backend is released EXACTLY once and that it
+    /// is released at all; it is not owed to this thread before the drop returns, and a test
+    /// that asserted the instant would be a coin that lands wrong under load.
+    fn eventually(what: &str, done: impl Fn() -> bool) {
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        while !done() {
+            assert!(std::time::Instant::now() < deadline, "{what}");
+            std::thread::sleep(Duration::from_millis(1));
+        }
+    }
 
     /// The segment id this backend stamps into every descriptor, so a test can
     /// tell its own descriptors from a zeroed struct.
@@ -5427,6 +5458,18 @@ mod foreign_backend_tests {
 
         // SAFETY: dropped once.
         unsafe { drop_buf(out.buf) };
+        assert_eq!(
+            harness.lock().free_calls,
+            0,
+            "a dropped chunk is on the provider's busy list, not yet the backend's \
+             again: the backend is told when a COLLECTION takes it (R3058)"
+        );
+        // SAFETY: the provider is live.
+        let largest = unsafe { z_shm_provider_garbage_collect(z_shm_provider_loan(&provider)) };
+        assert_eq!(
+            largest, 256,
+            "the collection reports the chunk it took home"
+        );
         {
             let state = harness.lock();
             assert_eq!(state.free_calls, 1);
@@ -5446,6 +5489,9 @@ mod foreign_backend_tests {
         let deleted = harness.deleted.clone();
         // SAFETY: dropped once; `harness` must not be read after this.
         unsafe { drop_provider(provider) };
+        eventually("the provider owes the context a delete_fn", || {
+            deleted.load(Ordering::SeqCst) >= 1
+        });
         assert_eq!(
             deleted.load(Ordering::SeqCst),
             1,
@@ -5887,10 +5933,13 @@ mod foreign_backend_tests {
         );
         // SAFETY: dropped once.
         unsafe { drop_buf(buf) };
+        // SAFETY: the provider is live.
+        unsafe { z_shm_provider_garbage_collect(z_shm_provider_loan(&provider)) };
         assert_eq!(
             harness.lock().freed,
             vec![(SEGMENT_ID, 0, 128)],
-            "a mapped chunk is released to the backend like an allocated one"
+            "a mapped chunk is released to the backend like an allocated one, when a \
+             collection takes it"
         );
 
         // A length beyond the chunk is refused.
@@ -5915,7 +5964,7 @@ mod foreign_backend_tests {
         assert_eq!(rc, Z_EINVAL);
         assert!(!unsafe { z_internal_shm_mut_check(&buf) });
 
-        // A NATIVE provider cannot have issued this descriptor, and says so.
+        // The built-in pool cannot have issued this descriptor, and says so.
         let mut native = z_owned_shm_provider_t::null_value();
         assert_eq!(
             unsafe { z_shm_provider_default_new(&mut native, 4096) },
@@ -6191,23 +6240,30 @@ mod foreign_backend_tests {
     fn the_posix_constructors_size_and_align_their_segment() {
         let mut plain = z_owned_shm_provider_t::null_value();
         assert_eq!(unsafe { z_posix_shm_provider_new(&mut plain, 4096) }, Z_OK);
-        // R2973 — the SEGMENT's own length, not `available()`. This asserted
-        // `available() == 4096` until `available()` on the native arm became `0`,
-        // which is upstream's answer for its default POSIX backend (see
-        // `Provider::available`, measured against libzenohc), and the test went
-        // red on every machine that ran it -- pc2 and this one, on origin/main
-        // and on a tree with none of this round's changes. The constructor's
-        // sizing is what the test is about, and the second half already reads it
-        // where it lives.
-        // SAFETY: the provider is live and this crate minted its handle.
-        match unsafe { provider_of(z_shm_provider_loan(&plain)) }.expect("a live provider") {
-            Provider::Native(segment) => assert_eq!(segment.len, 4096),
-            Provider::Foreign(_) => panic!("the POSIX constructor builds a native provider"),
+        // The constructor's SIZING is what this half is about, read where it lives: a pool
+        // of 4096 bytes serves two chunks of 1024 and refuses a third (the real library's
+        // count, MEASURED), and `available()` says nothing about it because the default
+        // backend does not account.
+        let mut held = Vec::new();
+        for _ in 0..2 {
+            let mut out: z_buf_layout_alloc_result_t = unsafe { std::mem::zeroed() };
+            // SAFETY: `out` is writable and the provider live.
+            unsafe { z_shm_provider_alloc(&mut out, z_shm_provider_loan(&plain), 1024) };
+            assert_eq!(out.status, ZC_BUF_LAYOUT_ALLOC_STATUS_OK);
+            held.push(out);
+        }
+        let mut third: z_buf_layout_alloc_result_t = unsafe { std::mem::zeroed() };
+        // SAFETY: as above.
+        unsafe { z_shm_provider_alloc(&mut third, z_shm_provider_loan(&plain), 1024) };
+        assert_eq!(third.status, ZC_BUF_LAYOUT_ALLOC_STATUS_ALLOC_ERROR);
+        for out in held {
+            // SAFETY: dropped once each.
+            unsafe { drop_buf(out.buf) };
         }
         // SAFETY: dropped once.
         unsafe { drop_provider(plain) };
 
-        const POW: u8 = 13; // 8192, deliberately wider than SEGMENT_ALIGN
+        const POW: u8 = 13; // 8192, deliberately wider than a page's usual placement
         let mut layout = z_owned_memory_layout_t::null_value();
         assert_eq!(
             unsafe {
@@ -6226,18 +6282,15 @@ mod foreign_backend_tests {
         // SAFETY: the provider is live and this crate minted its handle.
         let backend =
             unsafe { provider_of(z_shm_provider_loan(&provider)) }.expect("a live provider");
-        match backend {
-            Provider::Native(segment) => {
-                assert_eq!(segment.len, 64 * 1024);
-                assert_eq!(
-                    segment.align,
-                    1usize << POW,
-                    "a constructor that ignored the layout would leave SEGMENT_ALIGN"
-                );
-                assert_eq!(segment.base as usize % (1usize << POW), 0);
-            }
-            Provider::Foreign(_) => panic!("the POSIX constructor builds a native provider"),
-        }
+        // The layout's ALIGNMENT is the pool's: a request is extended to it, so a hundred
+        // bytes become one aligned unit. A constructor that ignored the layout would leave
+        // the request as it was.
+        let served = backend
+            .shm
+            .layout_for(wz_runtime_tokio::shm_backend::MemoryLayout::of_size(100).expect("layout"))
+            .expect("a pool serves a small layout");
+        assert_eq!(served.alignment().pow(), POW);
+        assert_eq!(served.size().get(), 1usize << POW);
 
         // And an allocation at that alignment reaches an aligned ADDRESS, with a
         // skew first so the answer is not the base's by accident.
@@ -6248,10 +6301,11 @@ mod foreign_backend_tests {
         let mut out: z_buf_layout_alloc_result_t = unsafe { std::mem::zeroed() };
         // SAFETY: as above.
         unsafe {
+            // A size that is a multiple of the alignment: any other is no layout.
             z_shm_provider_alloc_aligned(
                 &mut out,
                 z_shm_provider_loan(&provider),
-                128,
+                1usize << POW,
                 z_alloc_alignment_t { pow: POW },
             )
         };
@@ -6283,7 +6337,7 @@ mod foreign_backend_tests {
     /// A foreign provider's BUFFER outlives the provider handle, and the
     /// backend is not released until the last buffer is gone.
     ///
-    /// `z_pub_shm.c`'s teardown order relies on this for the native provider;
+    /// `z_pub_shm.c`'s teardown order relies on this for the built-in pool;
     /// the foreign one has the sharper version of it, because releasing the
     /// context early would run a C destructor over memory a live buffer still
     /// points into.
@@ -6309,6 +6363,9 @@ mod foreign_backend_tests {
         assert_eq!(unsafe { std::slice::from_raw_parts(data, 64) }.len(), 64);
         // SAFETY: dropped once.
         unsafe { drop_buf(out.buf) };
+        eventually("the last buffer's drop releases the backend", || {
+            deleted.load(Ordering::SeqCst) >= 1
+        });
         assert_eq!(deleted.load(Ordering::SeqCst), 1);
     }
 
