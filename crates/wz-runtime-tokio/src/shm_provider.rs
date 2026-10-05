@@ -137,6 +137,13 @@ use crate::shm_backend::{
 use crate::shm_posix_backend::PosixShmProviderBackend;
 use crate::shm_watchdog::{confirmator, Confirmed, WatchdogBit};
 
+/// What the pool of a lone payload has beyond the payload: the room its allocator needs.
+/// Talc claims about a kilobyte of its arena for its own bins and spends a few bytes of
+/// header on every chunk, and a pool smaller than its bins cannot be made at all
+/// (see [`crate::shm_posix_backend`]), so a pool for one chunk of `len` bytes is `len`
+/// plus this, with room to spare.
+const SINGLE_PAYLOAD_POOL_HEADROOM: usize = 4096;
+
 /// upstream `POSIX_PROTOCOL_ID`
 /// (`commons/zenoh-shm/src/api/protocol_implementations/posix/protocol_id.rs` @
 /// `pub const POSIX_PROTOCOL_ID: ProtocolID = 0;`): the protocol a header names
@@ -727,8 +734,18 @@ impl ShmProvider {
     }
 
     /// `layout` as this provider's backend would serve it, or why it cannot.
+    ///
+    /// Whatever the backend refuses with, the provider answers
+    /// [`LayoutError::ProviderIncompatibleLayout`]: the layout was well formed (the caller
+    /// built it) and THIS provider cannot serve it, which is how upstream reports it
+    /// (`commons/zenoh-shm/src/api/provider/shm_provider.rs` @
+    /// `.map_err(|_| ZLayoutError::ProviderIncompatibleLayout)?;`), and what the real
+    /// library's C ABI shows for a 32-byte-aligned request on a default provider.
     pub fn layout_for(&self, layout: MemoryLayout) -> Result<MemoryLayout, LayoutError> {
-        self.core.backend.layout_for(layout)
+        self.core
+            .backend
+            .layout_for(layout)
+            .map_err(|_| LayoutError::ProviderIncompatibleLayout)
     }
 
     /// Allocate a chunk for `layout` under `policy`.
@@ -741,7 +758,7 @@ impl ShmProvider {
         layout: MemoryLayout,
         policy: &AllocPolicy,
     ) -> Result<ShmBackedPayload, LayoutAllocError> {
-        let backend_layout = self.core.backend.layout_for(layout)?;
+        let backend_layout = self.layout_for(layout)?;
         // Anything else's orphaned chunks come home first, so a slot or a range one of
         // them was keeping is available to this request.
         sweep_orphans();
@@ -862,7 +879,7 @@ impl Drop for WireReference<'_> {
         if self.committed {
             return;
         }
-        release_reference(self.payload.header());
+        self.payload.release_if_current();
     }
 }
 
@@ -898,8 +915,9 @@ pub fn reference_state(descriptor: &ShmDescriptor) -> Option<ReferenceState> {
 }
 
 impl ShmBackedPayload {
-    /// Allocate a `len`-byte payload in a pool of its own: a new POSIX segment of exactly
-    /// that size, one chunk of it, and a metadata slot whose header names the chunk.
+    /// Allocate a `len`-byte payload in a pool of its own: a new POSIX segment big enough
+    /// for that one chunk and its allocator's overhead, the chunk, and a metadata slot
+    /// whose header names it.
     ///
     /// This is a provider whose pool is one payload, which is what a publisher that sends
     /// one buffer wants and what this function has always been; a program that allocates
@@ -922,10 +940,20 @@ impl ShmBackedPayload {
         })?;
         let layout = MemoryLayout::of_size(len)
             .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e.to_string()))?;
+        // The pool is the chunk plus the room its allocator needs around it: talc claims
+        // part of its arena for its own bins and spends a header on the chunk, so a pool
+        // of exactly `len` bytes could not be made, let alone serve the chunk.
+        let pool_size = len
+            .checked_add(SINGLE_PAYLOAD_POOL_HEADROOM)
+            .ok_or_else(|| {
+                io::Error::new(io::ErrorKind::InvalidInput, "an SHM payload is too large")
+            })?;
+        let pool = MemoryLayout::of_size(pool_size)
+            .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e.to_string()))?;
         // The handle goes out of scope at the end of this function and the provider
         // becomes an orphan holding one chunk, which is the point: the process collects it
         // when the owner and every receiver have let go.
-        let provider = ShmProvider::pool(&layout)?;
+        let provider = ShmProvider::pool(&pool)?;
         provider
             .alloc(layout, &AllocPolicy::JustAlloc)
             .map_err(|e| io::Error::other(e.to_string()))
@@ -1015,6 +1043,16 @@ impl ShmBackedPayload {
         header_of(&self.metadata, self.slot)
     }
 
+    /// Give one reference back, but only while the slot is still this payload's: a slot
+    /// that was made stale and recycled belongs to another chunk, whose count is not this
+    /// payload's to touch (see the owner's `Drop`).
+    fn release_if_current(&self) {
+        let header = self.header();
+        if header.generation.load(Ordering::SeqCst) == self.generation {
+            release_reference(header);
+        }
+    }
+
     /// The payload's length: what was asked for, which may be less than the chunk the
     /// backend set aside.
     pub fn len(&self) -> usize {
@@ -1096,7 +1134,13 @@ impl Drop for ShmBackedPayload {
         // Give the owner's own reference back. Whether a receiver still holds one is the
         // count's to say, and the chunk stays on its provider's busy list either way: the
         // collection decides, and at zero it takes the chunk home.
-        release_reference(self.header());
+        //
+        // Only while the slot is still this payload's. The unsafe policy that takes back the
+        // newest chunk whether or not it is held makes the slot stale and recycles it, and an
+        // owner that lets go afterwards would otherwise decrement the count of whatever chunk
+        // the slot has been given to since. Upstream's release has no such check and leaves it
+        // to the policy's warning; costing one comparison removes the corruption.
+        self.release_if_current();
         // A provider nobody can ask to collect is collected now, so a publisher that lets
         // go the moment it has sent gets its memory back when the receiver has let go too,
         // without waiting for the next allocation or the watchdog's sweep. A provider a
@@ -1496,7 +1540,8 @@ mod tests {
                 .expect("data")
                 .bytes()
                 .len(),
-            5
+            5 + SINGLE_PAYLOAD_POOL_HEADROOM,
+            "the lone payload's pool is the payload plus its allocator's room"
         );
     }
 
@@ -1994,6 +2039,11 @@ mod tests {
         MemoryLayout::of_size(size).expect("a layout")
     }
 
+    /// A chunk that fills a 4096-byte pool: the allocator spends about a kilobyte of the
+    /// arena on its bins, so one chunk of this size is all a pool of that size serves (the
+    /// real library gave the same for a default provider).
+    const BIG: usize = 2048;
+
     /// Read the chunk offset and segment a descriptor's header names, the way a peer
     /// does: off the metadata segment.
     fn header_position(descriptor: &ShmDescriptor) -> (u32, u32) {
@@ -2023,10 +2073,13 @@ mod tests {
         let (da, db) = (sent(&a), sent(&b));
         let ((seg_a, off_a), (seg_b, off_b)) = (header_position(&da), header_position(&db));
         assert_eq!(seg_a, seg_b, "one pool is one segment");
-        assert_eq!(
-            off_b - off_a,
-            1024,
-            "the second chunk lies a chunk past the first"
+        assert!(
+            off_a.abs_diff(off_b) >= 1024,
+            "two chunks of 1024 bytes cannot lie closer than that: {off_a} and {off_b}"
+        );
+        assert!(
+            off_a > 0 && off_b > 0,
+            "the allocator keeps its bins at the front, so no chunk starts at offset 0"
         );
         let read_a = PosixShmResolver.resolve(&da).expect("read a");
         let read_b = PosixShmResolver.resolve(&db).expect("read b");
@@ -2038,10 +2091,10 @@ mod tests {
     /// to collect, and not before: a live provider is not emptied behind its program's back.
     #[test]
     fn a_live_provider_keeps_a_released_chunk_until_it_is_asked_to_collect() {
-        let provider = ShmProvider::pool(&layout(128)).expect("a pool");
+        let provider = ShmProvider::pool(&layout(4096)).expect("a pool");
         let first = provider
-            .alloc(layout(128), &AllocPolicy::JustAlloc)
-            .expect("the whole pool");
+            .alloc(layout(BIG), &AllocPolicy::JustAlloc)
+            .expect("the chunk that fills the pool");
         let descriptor = first.descriptor();
         drop(first);
         // Nobody holds it, but nobody has collected it either.
@@ -2051,42 +2104,77 @@ mod tests {
             "a live provider does not collect on its own"
         );
         assert!(
-            provider.alloc(layout(1), &AllocPolicy::JustAlloc).is_err(),
+            provider
+                .alloc(layout(BIG), &AllocPolicy::JustAlloc)
+                .is_err(),
             "so the pool is still full"
         );
-        assert_eq!(provider.garbage_collect(), 128, "the collection frees it");
+        assert_eq!(provider.garbage_collect(), BIG, "the collection frees it");
         assert_eq!(
             reference_state(&descriptor),
             Some(ReferenceState::Reclaimed),
             "and every descriptor of it is now stale"
         );
-        assert!(provider.alloc(layout(128), &AllocPolicy::JustAlloc).is_ok());
+        assert!(provider.alloc(layout(BIG), &AllocPolicy::JustAlloc).is_ok());
     }
 
     /// A chunk a receiver still holds is NOT collected: its memory is not handed to anyone
     /// else, and it is collected after the receiver lets go.
     #[test]
     fn a_chunk_a_receiver_holds_is_not_given_to_another() {
-        let provider = ShmProvider::pool(&layout(64)).expect("a pool");
-        let mut chunk = provider
-            .alloc(layout(64), &AllocPolicy::JustAlloc)
-            .expect("the whole pool");
-        chunk.write(&[7u8; 64]);
-        let descriptor = sent(&chunk);
-        drop(chunk);
+        // Two chunks of 1024 fill the pool. One goes to a receiver, the other is let go.
+        let provider = ShmProvider::pool(&layout(4096)).expect("a pool");
+        let mut held = provider
+            .alloc(layout(1024), &AllocPolicy::JustAlloc)
+            .expect("the first chunk");
+        let spare = provider
+            .alloc(layout(1024), &AllocPolicy::JustAlloc)
+            .expect("the second chunk");
+        held.write(&[7u8; 1024]);
+        let descriptor = sent(&held);
+        drop(held);
+        drop(spare);
 
         assert_eq!(
             provider.garbage_collect(),
-            0,
-            "a receiver holds a reference"
+            1024,
+            "the spare chunk comes home and the one a receiver holds does not"
         );
+        let reuse = provider
+            .alloc(layout(1024), &AllocPolicy::JustAlloc)
+            .expect("the spare chunk's room is served again");
         assert!(
-            provider.alloc(layout(8), &AllocPolicy::JustAlloc).is_err(),
-            "so its range is not another chunk's"
+            provider
+                .alloc(layout(1024), &AllocPolicy::JustAlloc)
+                .is_err(),
+            "and the held chunk's room is NOT another chunk's"
         );
         assert!(PosixShmResolver.resolve(&descriptor).is_some());
-        assert_eq!(provider.garbage_collect(), 64, "now nobody holds it");
-        assert!(provider.alloc(layout(8), &AllocPolicy::JustAlloc).is_ok());
+        assert_eq!(provider.garbage_collect(), 1024, "now nobody holds it");
+        assert!(provider
+            .alloc(layout(1024), &AllocPolicy::JustAlloc)
+            .is_ok());
+        drop(reuse);
+    }
+
+    /// A layout the backend will not serve is the PROVIDER's incompatibility and not a malformed
+    /// layout: a 32-byte-aligned request on a provider built at byte alignment is well formed
+    /// and cannot be served, which the real library's C ABI reports as
+    /// `PROVIDER_INCOMPATIBLE_LAYOUT` (read off it for exactly this request).
+    #[test]
+    fn a_layout_the_backend_will_not_serve_is_the_providers_incompatibility() {
+        let provider = ShmProvider::pool(&layout(4096)).expect("a pool at byte alignment");
+        let aligned = crate::shm_backend::AllocAlignment::new(5).expect("32 bytes");
+        let request = MemoryLayout::new(64, aligned).expect("a well-formed layout");
+        match provider.alloc(request, &AllocPolicy::JustAlloc) {
+            Err(LayoutAllocError::Layout(LayoutError::ProviderIncompatibleLayout)) => {}
+            Err(other) => panic!("a different refusal: {other}"),
+            Ok(_) => panic!("a 32-byte-aligned request was served by a byte-aligned provider"),
+        }
+        assert_eq!(
+            provider.layout_for(request),
+            Err(LayoutError::ProviderIncompatibleLayout)
+        );
     }
 
     /// A holder that died without releasing leaves its chunk with a count that never reaches
@@ -2095,9 +2183,9 @@ mod tests {
     /// nobody is reading, takes it home.
     #[test]
     fn only_the_unsafe_collection_takes_a_chunk_the_watchdog_invalidated() {
-        let provider = ShmProvider::pool(&layout(8)).expect("a pool");
+        let provider = ShmProvider::pool(&layout(4096)).expect("a pool");
         let payload = provider
-            .alloc(layout(8), &AllocPolicy::JustAlloc)
+            .alloc(layout(BIG), &AllocPolicy::JustAlloc)
             .expect("alloc");
         // A reference for a receiver that never reads it and never gives it back.
         let descriptor = sent(&payload);
@@ -2115,15 +2203,17 @@ mod tests {
             0,
             "a safe collection leaves a chunk a holder may still be reading"
         );
-        assert!(provider.alloc(layout(8), &AllocPolicy::JustAlloc).is_err());
+        assert!(provider
+            .alloc(layout(BIG), &AllocPolicy::JustAlloc)
+            .is_err());
         // SAFETY: nothing reads this chunk: the one reference outstanding is a descriptor
         // this test took and never used.
-        assert_eq!(unsafe { provider.garbage_collect_unsafe() }, 8);
+        assert_eq!(unsafe { provider.garbage_collect_unsafe() }, BIG);
         assert_eq!(
             reference_state(&descriptor),
             Some(ReferenceState::Reclaimed)
         );
-        assert!(provider.alloc(layout(8), &AllocPolicy::JustAlloc).is_ok());
+        assert!(provider.alloc(layout(BIG), &AllocPolicy::JustAlloc).is_ok());
     }
 
     /// A provider whose last handle is gone still owes its in-flight chunks to their
@@ -2131,7 +2221,7 @@ mod tests {
     /// has let go.
     #[test]
     fn a_chunk_outlives_its_provider_handle_and_is_collected_by_the_process() {
-        let provider = ShmProvider::pool(&layout(32)).expect("a pool");
+        let provider = ShmProvider::pool(&layout(4096)).expect("a pool");
         let mut chunk = provider
             .alloc(layout(32), &AllocPolicy::JustAlloc)
             .expect("alloc");
@@ -2158,17 +2248,17 @@ mod tests {
     /// pool whose only chunk was released serves the next request in one call.
     #[test]
     fn the_garbage_collecting_policy_serves_a_request_a_collection_makes_room_for() {
-        let provider = ShmProvider::pool(&layout(100)).expect("a pool");
+        let provider = ShmProvider::pool(&layout(4096)).expect("a pool");
         let full = provider
-            .alloc(layout(100), &AllocPolicy::JustAlloc)
+            .alloc(layout(BIG), &AllocPolicy::JustAlloc)
             .expect("fill it");
         drop(full);
         assert!(provider
-            .alloc(layout(100), &AllocPolicy::JustAlloc)
+            .alloc(layout(BIG), &AllocPolicy::JustAlloc)
             .is_err());
         let policy = AllocPolicy::garbage_collect(AllocPolicy::JustAlloc, AllocPolicy::JustAlloc);
         assert!(
-            provider.alloc(layout(100), &policy).is_ok(),
+            provider.alloc(layout(BIG), &policy).is_ok(),
             "the policy collected the released chunk and asked again"
         );
     }
@@ -2176,29 +2266,40 @@ mod tests {
     /// `Deallocate` takes back the newest chunk held or not: the unsafe way to make room.
     #[test]
     fn the_deallocating_policy_takes_back_a_chunk_even_while_it_is_held() {
-        let provider = ShmProvider::pool(&layout(64)).expect("a pool");
+        let provider = ShmProvider::pool(&layout(4096)).expect("a pool");
         let held = provider
-            .alloc(layout(64), &AllocPolicy::JustAlloc)
+            .alloc(layout(BIG), &AllocPolicy::JustAlloc)
             .expect("fill it");
         let descriptor = held.descriptor();
         let policy = AllocPolicy::deallocate(1, AllocPolicy::JustAlloc, AllocPolicy::JustAlloc);
-        let replacement = provider.alloc(layout(64), &policy).expect("made room");
+        let replacement = provider.alloc(layout(BIG), &policy).expect("made room");
         assert_eq!(
             reference_state(&descriptor),
             Some(ReferenceState::Reclaimed),
             "the held chunk's descriptor went stale"
         );
-        drop(replacement);
+        // The slot is stale and may be recycled to another chunk; an owner that lets go
+        // afterwards must not touch its count. Planted at 5, so a decrement is visible
+        // where a count of zero (saturated) would hide it.
+        held.header().refcount.store(5, Ordering::SeqCst);
+        let header_of_held = held.header() as *const ChunkHeader;
         drop(held);
+        // SAFETY: the metadata segment lives for the process, and the header is in it.
+        let after = unsafe { (*header_of_held).refcount.load(Ordering::SeqCst) };
+        assert_eq!(
+            after, 5,
+            "a stale owner decremented a count that is not its own"
+        );
+        drop(replacement);
     }
 
     /// `BlockOn` waits for room instead of failing, and gets it when another thread lets
     /// go and the policy's collection runs.
     #[test]
     fn the_blocking_policy_waits_for_a_chunk_to_be_released() {
-        let provider = ShmProvider::pool(&layout(16)).expect("a pool");
+        let provider = ShmProvider::pool(&layout(4096)).expect("a pool");
         let held = provider
-            .alloc(layout(16), &AllocPolicy::JustAlloc)
+            .alloc(layout(BIG), &AllocPolicy::JustAlloc)
             .expect("fill it");
         let releaser = std::thread::spawn(move || {
             std::thread::sleep(std::time::Duration::from_millis(50));
@@ -2208,7 +2309,7 @@ mod tests {
             AllocPolicy::JustAlloc,
             AllocPolicy::JustAlloc,
         ));
-        let waited = provider.alloc(layout(16), &policy);
+        let waited = provider.alloc(layout(BIG), &policy);
         releaser.join().expect("releaser");
         assert!(waited.is_ok(), "it waited until the chunk was released");
     }
@@ -2218,7 +2319,8 @@ mod tests {
     #[test]
     fn a_payload_is_the_size_asked_for_in_a_chunk_the_backend_sized() {
         let alignment = crate::shm_backend::AllocAlignment::ALIGN_8_BYTES;
-        let provider = ShmProvider::pool(&MemoryLayout::new(64, alignment).unwrap()).expect("pool");
+        let provider =
+            ShmProvider::pool(&MemoryLayout::new(4096, alignment).unwrap()).expect("pool");
         let payload = provider
             .alloc(layout(10), &AllocPolicy::JustAlloc)
             .expect("alloc");

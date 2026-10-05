@@ -1045,14 +1045,18 @@ async fn wz_shm_payload_its_owner_let_go_of_at_once_is_still_readable_by_a_zenoh
 struct PoolRun {
     /// Where each chunk's own header says it lies: (segment id, offset).
     positions: Vec<(u32, u32)>,
-    /// Whether a pool of exactly two chunks was still full after both were published and
-    /// their owners had let go, with a live provider that had not been asked to collect.
-    full_before_collect: bool,
+    /// Whether the pool, which two chunks fill, still refused a third AFTER zenoh had
+    /// released both and BEFORE the provider was asked to collect: a live provider is not
+    /// emptied behind its program's back, and a released chunk's room is not served again
+    /// until a collection takes it.
+    full_after_release_before_collect: bool,
+    /// Whether zenoh released the references wz's descriptors carried, read off wz's own
+    /// headers (a count of zero) within the wait.
+    zenoh_released_both: bool,
     /// The size of the largest chunk any collection took back (upstream's
-    /// `garbage_collect` answers the largest, not the total), once zenoh's subscriber had
-    /// printed both samples, within the wait.
+    /// `garbage_collect` answers the largest, not the total).
     largest_collected: usize,
-    /// Whether the whole pool could be allocated as one chunk after that.
+    /// Whether two chunks could be allocated again after that.
     pool_reusable: bool,
     /// Whether both of the first two descriptors went stale.
     descriptors_stale: bool,
@@ -1062,16 +1066,18 @@ struct PoolRun {
 ///
 /// Legs 2 and 3 publish one payload, which is a pool of one chunk at offset 0, so a wz
 /// that named the wrong offset for the SECOND chunk of a segment would pass both. Here a
-/// provider owns a segment of exactly two 16-byte chunks and publishes both: zenoh's
-/// reader follows each header to the segment and the offset in it, and `z_sub_shm` must print
-/// each chunk's own text as a shared-memory buffer. A reader that took the offset to be 0
-/// would print the first chunk's text for the second, and that is the failure this leg
-/// would show.
+/// provider owns a 4096-byte pool, which its allocator fills with two 1024-byte chunks,
+/// and publishes both: zenoh's reader follows each header to the segment and the offset in
+/// it, and `z_sub_shm` must print each chunk's own text as a shared-memory buffer. A wz that
+/// named the same offset for both would make `z_sub_shm` print the first chunk's text for the
+/// second, and that is the failure this leg would show.
 ///
 /// It also reads the OTHER side's end of the lifecycle: the provider is live and is not
-/// asked to collect until zenoh has printed both samples, and the bytes it takes back are
-/// bytes zenoh's `Drop for ShmBufInner` released in a process wz does not control. The
-/// whole pool is then one chunk again, which is the reuse a pool exists for.
+/// asked to collect until zenoh has released both references (read off wz's own headers,
+/// where the decrement zenoh's `Drop for ShmBufInner` made in a process wz does not control
+/// shows as a count of zero), and until it is asked the pool still refuses a third chunk.
+/// A collection then takes both home, and the pool serves two chunks again, which is the
+/// reuse a pool exists for.
 // wz-proves: transport-shm wz->zenoh
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "binary-dep e2e (ZENOHD_SHM=1 build-zenohd.sh: z_sub_shm); Layer Z runs via --ignored"]
@@ -1082,20 +1088,25 @@ async fn wz_shm_pool_chunks_at_two_offsets_reach_a_zenohd_shm_subscriber_and_the
         );
         return;
     }
-    const CHUNK: usize = 16;
-    let texts = ["pool-chunk-0001!", "pool-chunk-0002!"];
+    const CHUNK: usize = 1024;
+    // Two texts of a chunk each, different in every sixteenth byte, so a reader that took
+    // the wrong offset cannot print the right text.
+    let texts = [
+        "pool-chunk-0001!".repeat(CHUNK / 16),
+        "pool-chunk-0002!".repeat(CHUNK / 16),
+    ];
     assert!(texts.iter().all(|text| text.len() == CHUNK));
     let eight = AllocAlignment::ALIGN_8_BYTES;
+    let sent_texts = texts.clone();
     let (printed, run) = against_z_sub_shm(|session, probe_log| {
         Box::pin(async move {
             tokio::time::sleep(Duration::from_millis(500)).await;
-            let provider = ShmProvider::pool(
-                &MemoryLayout::new(2 * CHUNK, eight).expect("a layout of two chunks"),
-            )
-            .expect("a pool");
+            let provider =
+                ShmProvider::pool(&MemoryLayout::new(4096, eight).expect("a pool layout"))
+                    .expect("a pool");
             let chunk_layout = MemoryLayout::new(CHUNK, eight).expect("a chunk layout");
             let mut descriptors = Vec::new();
-            for (i, text) in texts.iter().enumerate() {
+            for (i, text) in sent_texts.iter().enumerate() {
                 let mut payload = provider
                     .alloc(chunk_layout, &AllocPolicy::JustAlloc)
                     .expect("a chunk of the pool");
@@ -1115,10 +1126,6 @@ async fn wz_shm_pool_chunks_at_two_offsets_reach_a_zenohd_shm_subscriber_and_the
                 .iter()
                 .map(|d| chunk_position(d).expect("a header for a live chunk"))
                 .collect();
-            let full_before_collect = provider
-                .alloc(chunk_layout, &AllocPolicy::JustAlloc)
-                .is_err();
-
             let mut probe_log = probe_log;
             for _ in 0..200 {
                 let seen = read_captured(&mut probe_log);
@@ -1128,7 +1135,23 @@ async fn wz_shm_pool_chunks_at_two_offsets_reach_a_zenohd_shm_subscriber_and_the
                 tokio::time::sleep(Duration::from_millis(50)).await;
             }
             // zenoh's subscriber drops each sample after printing it, which gives back
-            // the reference its descriptor carried. Collect until both chunks are home.
+            // the reference its descriptor carried: wait until wz's own headers read both
+            // at zero, which is nothing collected yet.
+            let mut zenoh_released_both = false;
+            for _ in 0..100 {
+                zenoh_released_both = descriptors
+                    .iter()
+                    .all(|d| reference_state(d) == Some(ReferenceState::Held(0)));
+                if zenoh_released_both {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+            // Released and not collected: the pool must still be full.
+            let full_after_release_before_collect = provider
+                .alloc(chunk_layout, &AllocPolicy::JustAlloc)
+                .is_err();
+            // Collect until both chunks are home.
             let mut largest_collected = 0;
             let mut descriptors_stale = false;
             for _ in 0..100 {
@@ -1141,15 +1164,14 @@ async fn wz_shm_pool_chunks_at_two_offsets_reach_a_zenohd_shm_subscriber_and_the
                 }
                 tokio::time::sleep(Duration::from_millis(50)).await;
             }
-            let pool_reusable = provider
-                .alloc(
-                    MemoryLayout::new(2 * CHUNK, eight).expect("whole-pool layout"),
-                    &AllocPolicy::JustAlloc,
-                )
-                .is_ok();
+            let again: Vec<_> = (0..2)
+                .map(|_| provider.alloc(chunk_layout, &AllocPolicy::JustAlloc))
+                .collect();
+            let pool_reusable = again.iter().all(Result::is_ok);
             PoolRun {
                 positions,
-                full_before_collect,
+                full_after_release_before_collect,
+                zenoh_released_both,
                 largest_collected,
                 pool_reusable,
                 descriptors_stale,
@@ -1172,14 +1194,22 @@ async fn wz_shm_pool_chunks_at_two_offsets_reach_a_zenohd_shm_subscriber_and_the
         "the two chunks of one provider must name one segment: {:?}",
         run.positions
     );
-    assert_eq!(
-        (run.positions[0].1, run.positions[1].1),
-        (0, CHUNK as u32),
-        "the second chunk lies a chunk past the first in the shared segment"
+    assert!(
+        run.positions[0].1 != run.positions[1].1
+            && run.positions[0].1.abs_diff(run.positions[1].1) >= CHUNK as u32,
+        "the two chunks must lie at different offsets of the shared segment, a chunk apart at \
+         least: {:?}",
+        run.positions
     );
     assert!(
-        run.full_before_collect,
-        "a live provider that was not asked to collect must still hold both released chunks"
+        run.zenoh_released_both,
+        "zenoh never released the references wz's descriptors carried, so there is nothing for \
+         the provider to collect:\n{printed}"
+    );
+    assert!(
+        run.full_after_release_before_collect,
+        "a live provider that was not asked to collect must still refuse a third chunk once \
+         zenoh has released both"
     );
     assert_eq!(
         run.largest_collected, CHUNK,

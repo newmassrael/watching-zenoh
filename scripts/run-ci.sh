@@ -6655,7 +6655,11 @@ layer_c1af_cargo_test_shm() {
     # watchdog invalidated, a chunk outlives its provider's handle and is collected by the
     # process, the four allocation policies serve what they promise, and a payload is the size
     # asked for in the chunk the backend sized.
-    _runci_guarded_test C1af 32 cargo test -p wz-runtime-tokio --features session-extshm,transport-unicast,transport-link-tcp --lib shm_provider --quiet \
+    # R3057 -- 32 -> 33, MEASURED. A layout the backend will not serve is the provider's
+    # incompatibility and not a malformed layout, which is how upstream's provider reports it;
+    # the same round moved the pool onto upstream's allocator, so the tests that filled a tiny
+    # pool now fill a 4096-byte one with the chunk sizes the real library was measured with.
+    _runci_guarded_test C1af 33 cargo test -p wz-runtime-tokio --features session-extshm,transport-unicast,transport-link-tcp --lib shm_provider --quiet \
         || return 1
     # R3056 -- the provider's two new modules, which the filter above does not select:
     # `shm_backend` (the value types an allocation speaks in, 4 tests) and

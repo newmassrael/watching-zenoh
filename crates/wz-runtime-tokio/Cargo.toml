@@ -792,7 +792,7 @@ session-extcompression = ["wz-session-core/session-extcompression"]
 # pulls memmap2 for the AP POSIX segment (shm_provider). AP-only (no MCU forward
 # -- pico has no SHM). R3a is the inert provider + codec; R3b adds the live swap +
 # the Z_EXT_SHM challenge handshake (session-extshm).
-transport-shm = ["wz-session-core/transport-shm", "posix-shm-segment"]
+transport-shm = ["wz-session-core/transport-shm", "posix-shm-segment", "dep:talc"]
 # R2954 — the POSIX shm SEGMENT protocol on its own (`posix_shm`: upstream's
 # `{id}.zenoh` naming, 0600 mode, shared advisory lock, and the orphan cleanup
 # that protocol defines), without the SHM transport. The zenoh-c ABI's SHM arm
@@ -1858,6 +1858,15 @@ webpki-roots = { version = "1", optional = true }
 # version-steady mmap wrapper (vs nix's shifting mman API). The wire carries the
 # descriptor, not the local mmap mechanism, so this is faithful for same-host.
 memmap2 = { version = "0.9", optional = true }
+# R3057 — talc is the allocator zenoh's default shared-memory backend carves chunks out
+# of a pool with (`commons/zenoh-shm/Cargo.toml` @ `talc = { workspace = true }`, pinned
+# at its workspace root `talc = { version = "4.4.3", default-features = false }`). wz
+# reuses it for the reason it reuses memmap2 and uhlc: what a pool can hold, and what is
+# the smallest pool that can be created, are the allocator's facts (it spends a header
+# per chunk and claims part of its arena for its own bins), and a program written
+# against zenoh-c observes both. `default-features = false` is upstream's choice and
+# leaves the crate with no dependencies at all. Behind `transport-shm`.
+talc = { version = "4.4.3", default-features = false, optional = true }
 # R311xt — uhlc is zenoh's own Hybrid Logical Clock crate (zenoh pins the
 # same 0.8 at its workspace root, `default-features = false` for no_std
 # usage). wz reuses it rather than re-deriving the subtle
