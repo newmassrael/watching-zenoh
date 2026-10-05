@@ -763,8 +763,8 @@ fn upstream_z_sub_shm_on_wz_capi_c_reports_the_same_buffer_type_for_a_shared_mem
 /// subscriber printed.
 ///
 /// The subscriber is the Rust example that labels every sample it receives `SHM (MUT)`,
-/// `SHM (IMMUT)` or `RAW` (`examples/examples/z_sub_shm.rs`), listening as a peer that
-/// offers shared memory. It is a third implementation of the protocol that shares no
+/// `SHM (IMMUT)` or `RAW` (`examples/examples/z_sub_shm.rs` @
+/// `Ok(_shm_mut) => "SHM (MUT)",`), listening as a peer that offers shared memory. It is a third implementation of the protocol that shares no
 /// code with either arm, which is why what it prints is the witness: a publisher that
 /// only SAYS it sent a chunk and sent the bytes reads `RAW` here, and `wz-ap-demo`, the
 /// observer LEG 1 uses, cannot tell the two apart because it negotiates no shared memory.
