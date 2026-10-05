@@ -6581,7 +6581,15 @@ layer_c1af_cargo_test_shm() {
     # above, for the same reason.
     # R3038 -- 32 -> 33, MEASURED: the one `put_payload` test the leg above gained.
     # R3040 -- 33 -> 39, MEASURED: the six establishment tests the leg above gained.
-    _runci_guarded_test C1af 39 cargo test -p wz-session-core --features session-extshm,dissect --lib shm --quiet \
+    # R3048 -- 39 -> 40, MEASURED by listing the tests this exact command selects at the
+    # head: the one that moved it is `dissect::tests::a_query_value_after_the_shm_marker_is_walked_as_slices`,
+    # which R3046 pushed with `dissect` and `shm` in its name and which sits behind no
+    # feature this leg lacks. R3046's push did not move this pin and hosted CI read it
+    # red (`expected exactly 39 passed`, the run printed 40, run 37250820713): the count
+    # guards are measured by `guarded_count_gate.py --range`, which that push did not run.
+    # None of this round's own tests are selected here, which the listing also shows:
+    # the error-reply test and the builder tests need features this leg does not carry.
+    _runci_guarded_test C1af 40 cargo test -p wz-session-core --features session-extshm,dissect --lib shm --quiet \
         || return 1
     # Round 2037, open-debt item 330 — THE TRANSPORT-OAM BATCH WALK, which no
     # lane in this file was running.
@@ -16878,7 +16886,12 @@ layer_z_zenohd_interop() {
     # defect, not a pass of the capability: it records that the session ends on a
     # frame wz's generated codec cannot read, and why. THREE must report, so a
     # dropped `#[ignore]` or a rename cannot select zero tests and pass.
-    _runci_guarded_test Z 3 cargo test -p wz-integration-tests \
+    # R3045 -- the value leg is no longer a pin: it is the leg that proves the value
+    # arrives, against the same program. R3048 -- 3 -> 4, MEASURED: the getter's own
+    # direction, a wz getter sending the value of its query through shared memory to
+    # upstream's `z_queryable_shm`, read from upstream's side (the buffer type it
+    # printed) and from wz's chunks (the owner's single reference after the reply).
+    _runci_guarded_test Z 4 cargo test -p wz-integration-tests \
         --test wz_shm_query_reply_zenohd_interop -- --ignored --quiet --test-threads=1 || return 1
     # Restore the lane's OWN demo build: the `session-extshm` build above wrote over
     # the same `--bin` path (R311y269 — cargo uplifts every feature variant of one

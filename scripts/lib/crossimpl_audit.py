@@ -884,7 +884,13 @@ HOST_GATED_CI_TARGETS: dict[str, str] = {
 # `z_get_shm` program as before, so no new class. Counted from the diff: exactly
 # that one line. 979 + 1 = 980, measured by `run-ci.sh --layer A4` at this round's
 # tree, which was run before the push.
-FOREIGN_ADJUDICATOR_LINKS = 980
+# R3048 -- 980 -> 981, RISING by one, in the same file: a new leg, the getter's own
+# direction. A wz getter sends the value of its query through shared memory and
+# upstream's `z_queryable_shm` reads it, which is `transport-shm wz->zenoh` against
+# the `zenoh-core` application `z_queryable_shm` the file already registers, so no new
+# class. Counted from the diff: exactly the one `wz-proves` line the file adds.
+# 980 + 1 = 981, measured by `run-ci.sh --layer A4` at this round's tree.
+FOREIGN_ADJUDICATOR_LINKS = 981
 
 # ── Execution disclosure ────────────────────────────────────────────────────────
 #

@@ -376,7 +376,7 @@ async fn wz_getter_against_shm_queryable(value: GetterValue) -> Option<GetterRun
 // wz-proves: transport-shm wz->zenoh
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "binary-dep e2e (ZENOHD_SHM=1 build-zenohd.sh: z_queryable_shm); Layer Z runs via --ignored"]
-async fn a_wz_getter_sends_its_query_value_through_shared_memory_to_zenohs_queryable() {
+async fn zenohd_shm_queryable_reads_a_wz_getters_query_value_through_shared_memory() {
     let Some(run) = wz_getter_against_shm_queryable(GetterValue::Shm(WZ_QUERY_VALUE)).await else {
         return;
     };
