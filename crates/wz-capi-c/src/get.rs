@@ -41,7 +41,7 @@ use crate::abi::{
     z_moved_reply_t, z_owned_closure_reply_t, z_owned_reply_err_t, z_owned_reply_t, Handle,
     Z_SAMPLE_KIND_PUT,
 };
-use crate::bytes::BytesState;
+use crate::bytes::{BytesState, Payload};
 use crate::ffi::{guard_val, guarded, CClosure as FfiClosure};
 use crate::keyexpr::keyexpr_str;
 use crate::result::{ZResult, Z_EINVAL, Z_ENULL, Z_OK};
@@ -324,10 +324,23 @@ impl ReplyMarshal {
         let is_ok = !matches!(kind, ReplyKind::Err);
         // A Del reply carries no payload bytes; an Err's payload is the error
         // blob and belongs on the err arm, not the sample.
-        let (sample_payload, err_payload) = match kind {
-            ReplyKind::Put => (view.payload().to_vec(), Vec::new()),
-            ReplyKind::Del => (Vec::new(), Vec::new()),
-            ReplyKind::Err => (Vec::new(), view.payload().to_vec()),
+        //
+        // R3062 -- a Put reply's payload stays where the session delivered it: the marshal
+        // holds a second reference to the frame the reply arrived in, or to the chunk of
+        // shared memory a queryable answered with, for as long as the C program keeps the
+        // reply, exactly as a sample's payload does (R3052). Copying it out is what made
+        // `z_bytes_as_loaned_shm(z_sample_payload(z_reply_ok(..)))` answer `Z_EINVAL` for a
+        // reply the real library answers with a buffer.
+        let (sample_payload, err_payload): (Payload, Vec<u8>) = match kind {
+            ReplyKind::Put => (
+                match view.payload_shared() {
+                    Some(shared) => Payload::Shared(shared.clone()),
+                    None => Payload::Owned(view.payload().to_vec()),
+                },
+                Vec::new(),
+            ),
+            ReplyKind::Del => (Payload::Owned(Vec::new()), Vec::new()),
+            ReplyKind::Err => (Payload::Owned(Vec::new()), view.payload().to_vec()),
         };
         let sample_kind = match kind {
             ReplyKind::Del => sample_kind_of(SampleKind::Del),

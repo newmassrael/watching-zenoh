@@ -85,9 +85,7 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
             self.drain_or_wake_local();
         } else {
             for reply in replies {
-                if let Ok(response) = reply.into_response() {
-                    self.actions().send_response(response);
-                }
+                super::queryable::send_staged_reply(self.actions(), reply);
             }
         }
     }

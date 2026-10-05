@@ -111,6 +111,32 @@ impl QueryableOptions {
 /// — unconditionally available after R311r observer field ungate.
 // R311cu — R267 helper cascade. Same pattern as Subscriber: `!Clone`
 // by construction; Drop is generic via R::with_mutex_mut.
+/// R3062 -- send ONE staged reply on the wire, as the descriptor of its buffer when it is one and
+/// the face negotiated shared memory, and as bytes otherwise. The one place a staged reply
+/// leaves for a peer, shared by the deferred handler job and by a query a handler kept
+/// ([`HeldQuery`]), so the two cannot answer differently.
+///
+/// The reference taken for the receiver (see `QueryReply::into_response_shm`) is committed only
+/// when the link took the frame: a send that is refused returns it with the reservation's drop,
+/// where the old fire-and-forget would have left the chunk pinned for good.
+#[cfg(feature = "query-queryable")]
+pub(super) fn send_staged_reply<R: SessionRuntime, T: TimeSource>(
+    actions: &SessionLinkActions<R, T>,
+    reply: wz_session_core::query::QueryReply,
+) {
+    #[cfg(feature = "transport-shm")]
+    if let Ok((response, reservation)) = reply.into_response_shm(actions.is_shm()) {
+        let left = actions.try_send_response(response).is_ok();
+        if let (true, Some(reservation)) = (left, reservation) {
+            reservation.commit();
+        }
+    }
+    #[cfg(not(feature = "transport-shm"))]
+    if let Ok(response) = reply.into_response() {
+        actions.send_response(response);
+    }
+}
+
 /// R311li — the type-erased user handler a deferred queryable's cell
 /// holds: erased at registration so the [`Queryable`] handle has a
 /// nameable cell type (the [`Subscriber`] / [`DeclListener`]
@@ -283,11 +309,8 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
                         // the dispatch SSOT emits the ResponseFinal
                         // after the drain. Overflow-rejected replies
                         // are skipped, mirroring flush_pending.
-                        use wz_session_core::response_sink::ResponseSink as _;
                         for reply in replies.drain(..) {
-                            if let Ok(response) = reply.into_response() {
-                                actions.send_response(response);
-                            }
+                            send_staged_reply(&actions, reply);
                         }
                     }
                 })

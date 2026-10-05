@@ -219,9 +219,9 @@ pub(crate) unsafe fn take_payload(moved: *mut z_moved_bytes_t) -> Option<Vec<u8>
 /// A payload on its way out: the bytes to send, or a chunk of shared memory whose
 /// descriptor a peer that negotiated it is sent instead (R3059).
 ///
-/// Only the two put entry points take one, because only they have a send path that can
-/// carry a descriptor; every other consumer of a payload calls [`take_payload`] and gets
-/// the bytes whatever the payload was built from.
+/// The two put entry points take one, and so does `z_query_reply` since R3062, because those
+/// are the sends with a path that can carry a descriptor; every other consumer of a payload
+/// calls [`take_payload`] and gets the bytes whatever the payload was built from.
 pub(crate) enum Outbound {
     Bytes(Vec<u8>),
     #[cfg(all(
@@ -229,6 +229,21 @@ pub(crate) enum Outbound {
         not(feature = "zenoh-c-no-unstable-api")
     ))]
     Chunk(std::sync::Arc<wz_runtime_tokio::shm_provider::ShmBackedPayload>),
+}
+
+impl Outbound {
+    /// The bytes this payload holds, whichever way it is held: what a path that cannot
+    /// carry a descriptor sends, and what the descriptor stands in for on one that can.
+    pub(crate) fn bytes(&self) -> &[u8] {
+        match self {
+            Outbound::Bytes(bytes) => bytes,
+            #[cfg(all(
+                feature = "zenoh-c-shared-memory",
+                not(feature = "zenoh-c-no-unstable-api")
+            ))]
+            Outbound::Chunk(chunk) => chunk.bytes(),
+        }
+    }
 }
 
 /// Take the payload out of a MOVED bytes for a put, leaving a gravestone, keeping a chunk

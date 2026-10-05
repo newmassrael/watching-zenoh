@@ -45,7 +45,7 @@ use crate::abi::{
     z_moved_closure_query_t, z_moved_query_t, z_moved_queryable_t, z_owned_closure_query_t,
     z_owned_query_t, z_owned_queryable_t, z_view_string_t, Handle,
 };
-use crate::bytes::{BytesState, Payload};
+use crate::bytes::{BytesState, Outbound, Payload};
 use crate::ffi::{guard_val, guarded, CClosure as FfiClosure};
 use crate::keyexpr::{keyexpr_str, KeyexprState};
 use crate::result::{ZResult, Z_EINVAL, Z_ENULL, Z_OK};
@@ -78,7 +78,10 @@ enum PendingReply {
     /// `z_query_reply` — a Put-form reply under an explicit keyexpr.
     Put {
         keyexpr: String,
-        payload: Vec<u8>,
+        /// The reply's payload: bytes, or a chunk of shared memory a peer that negotiated it is
+        /// sent the descriptor of (R3062). Kept as taken, so a chunk is not copied out to be
+        /// sent as what it is.
+        payload: Outbound,
         /// R311y547 — the reply's value encoding, from
         /// `z_query_reply_options_t::encoding`. The `ReplyOut` seam has
         /// carried this slot since the storage per-version reply landed
@@ -202,18 +205,33 @@ fn flush_one(
             timestamp,
             source_info,
             express,
-        } => admitted_at_the_abi(
-            out.reply_keyed_meta(
-                &keyexpr,
-                &payload,
-                ReplyMeta::new()
-                    .with_encoding(encoding.as_ref())
-                    .with_timestamp(timestamp.as_ref())
-                    .with_source_info(source_info.as_ref())
-                    .with_attachment(attachment.as_deref())
-                    .with_qos(express_over(express)),
-            ),
-        ),
+        } => {
+            // R3062 -- a chunk of shared memory goes out AS the chunk: the session core stages
+            // the buffer, sends its descriptor to a face that negotiated shared memory and its
+            // bytes to one that did not, and hands a requester of this very session the chunk.
+            // The `payload` argument is the chunk's bytes either way, so a sink that cannot
+            // stage a buffer answers with them and loses nothing.
+            #[cfg(all(
+                feature = "zenoh-c-shared-memory",
+                not(feature = "zenoh-c-no-unstable-api")
+            ))]
+            let shared = match &payload {
+                Outbound::Chunk(chunk) => Some(chunk.send_handle()),
+                Outbound::Bytes(_) => None,
+            };
+            let meta = ReplyMeta::new()
+                .with_encoding(encoding.as_ref())
+                .with_timestamp(timestamp.as_ref())
+                .with_source_info(source_info.as_ref())
+                .with_attachment(attachment.as_deref())
+                .with_qos(express_over(express));
+            #[cfg(all(
+                feature = "zenoh-c-shared-memory",
+                not(feature = "zenoh-c-no-unstable-api")
+            ))]
+            let meta = meta.with_shared(shared.as_ref());
+            admitted_at_the_abi(out.reply_keyed_meta(&keyexpr, payload.bytes(), meta))
+        }
         // The SAME `ReplyMeta` seam, minus the payload and the encoding — so a
         // Del reply and a Put reply cannot drift on how a timestamp or a
         // source_info reaches the wire.
@@ -1332,8 +1350,10 @@ pub unsafe extern "C" fn z_query_reply(
         // Consume the payload FIRST and on every path — upstream's ownership
         // transfer is unconditional, so an early return that skipped it would
         // leak the caller's payload.
+        // R3062 -- taken as an OUTBOUND payload, so a chunk of shared memory stays a chunk
+        // until the reply is sent, and is sent as one.
         // SAFETY: the caller's contract.
-        let taken = unsafe { crate::bytes::take_payload(payload) };
+        let taken = unsafe { crate::bytes::take_outbound(payload) };
         let (encoding, attachment, timestamp, source_info) = if options.is_null() {
             (None, None, None, None)
         } else {
@@ -1788,7 +1808,7 @@ mod tests {
         let query_qos = QosLevel::from_parts(Priority::RealTime, CongestionControl::Block, false);
         let put = |express| PendingReply::Put {
             keyexpr: "a/b".to_owned(),
-            payload: vec![1],
+            payload: Outbound::Bytes(vec![1]),
             encoding: None,
             attachment: None,
             timestamp: None,

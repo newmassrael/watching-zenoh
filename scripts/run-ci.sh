@@ -6674,7 +6674,11 @@ layer_c1af_cargo_test_shm() {
     # R3059 -- 36 -> 37, MEASURED: the view a receiver in this process is handed is the page,
     # reports itself shared memory, and holds a reference of its own that goes back when it
     # drops (`a_receiver_view_holds_a_reference_until_it_drops`).
-    _runci_guarded_test C1af 37 cargo test -p wz-runtime-tokio --features session-extshm,transport-unicast,transport-link-tcp --lib shm_provider --quiet \
+    # R3062 -- 37 -> 38, MEASURED: the reservation a message takes through the sending seam
+    # owns its payload and gives its reference back unless it is committed
+    # (`an_owned_reservation_is_returned_unless_it_is_committed`); reddened by a drop that
+    # stops returning it.
+    _runci_guarded_test C1af 38 cargo test -p wz-runtime-tokio --features session-extshm,transport-unicast,transport-link-tcp --lib shm_provider --quiet \
         || return 1
     # R3056 -- the provider's two new modules, which the filter above does not select:
     # `shm_backend` (the value types an allocation speaks in, 4 tests) and
@@ -19911,6 +19915,17 @@ layer_c1cc_api_compat_c() {
         --test-threads=1 \
         --exact a_local_queryable_is_handed_the_same_kind_of_buffer_on_wz_and_libzenohc \
         || return 1
+    # R3062 -- the same, for a REPLY: a queryable answers with a chunk and with bytes, and a
+    # getter of its own session asks of each reply's payload whether it is shared memory. The
+    # remote half of a reply is legs 12 and 13 of the shared-memory legs above. SKIPs on an
+    # oracle without the SHM+unstable arm.
+    _runci_guarded_test \
+        "C1cc a_local_getter_is_handed_the_same_kind_of_reply_buffer_on_wz_and_libzenohc" 1 \
+        cargo test -p wz-integration-tests \
+        --test zenoh_c_shm_reply_twice_and_diff -- --ignored --quiet \
+        --test-threads=1 \
+        --exact a_local_getter_is_handed_the_same_kind_of_reply_buffer_on_wz_and_libzenohc \
+        || return 1
     # R3061 -- what `z_bytes_to_string` does with bytes that are not text, one C program on
     # both libraries: refused with `-1` by the real library, which wz copied until this round.
     # Needs only the oracle, not the SHM arm.
@@ -19987,7 +20002,9 @@ layer_c1cc_api_compat_c() {
         a_chunk_put_on_a_declared_keyexpr_reaches_a_real_z_sub_shm_as_shared_memory_on_wz_capi_c \
         a_get_whose_value_is_a_chunk_reaches_a_real_z_queryable_shm_as_shared_memory_on_wz_capi_c \
         a_querier_get_whose_value_is_a_chunk_reaches_a_real_z_queryable_shm_as_shared_memory_on_wz_capi_c \
-        a_c_queryable_is_handed_a_value_from_shared_memory_as_shared_memory_on_wz_capi_c; do
+        a_c_queryable_is_handed_a_value_from_shared_memory_as_shared_memory_on_wz_capi_c \
+        a_c_queryable_reply_that_is_a_chunk_reaches_a_real_z_get_shm_as_shared_memory_on_wz_capi_c \
+        a_c_getter_is_handed_a_real_z_queryable_shm_reply_as_shared_memory_on_wz_capi_c; do
         _runci_guarded_test "C1cc $leg" 1 \
             cargo test -p wz-integration-tests \
             --test zenoh_c_shm_and_advanced_on_wz_capi_c -- --ignored --quiet --test-threads=1 \

@@ -126,7 +126,7 @@ use std::io;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 
-use wz_session_core::extshm::{ShmDescriptor, ShmResolver};
+use wz_session_core::extshm::{ShmDescriptor, ShmReservation, ShmResolver, ShmSendBuffer};
 use wz_session_core::link::{RxBytes, RxStorage, ShmChunkView};
 
 use crate::posix_shm::{next_candidate_id, OwnedSegment, PeerSegment, PeerSegmentRw};
@@ -895,6 +895,55 @@ impl Drop for WireReference<'_> {
     }
 }
 
+/// R3062 -- [`WireReference`] that OWNS its payload, for a message whose send outlives the
+/// call that took the reference: a reply is staged by a queryable's handler and sent when the
+/// handler's job drains, so the reservation travels with the staged reply and cannot borrow
+/// from a stack frame. The same contract: the reference goes back unless [`ShmReservation::commit`]
+/// says the frame left.
+struct OwnedWireReference {
+    payload: Arc<ShmBackedPayload>,
+    committed: bool,
+}
+
+impl ShmReservation for OwnedWireReference {
+    fn descriptor(&self) -> ShmDescriptor {
+        self.payload.descriptor()
+    }
+
+    fn commit(mut self: Box<Self>) {
+        self.committed = true;
+    }
+}
+
+impl Drop for OwnedWireReference {
+    fn drop(&mut self) {
+        if self.committed {
+            return;
+        }
+        self.payload.release_if_current();
+    }
+}
+
+/// A chunk of this process's provider is a buffer a message can be sent from: the session core
+/// sees the seam and never the segment.
+impl ShmSendBuffer for ShmBackedPayload {
+    fn bytes(&self) -> &[u8] {
+        ShmBackedPayload::bytes(self)
+    }
+
+    fn receiver_view(&self) -> Option<RxBytes> {
+        ShmBackedPayload::receiver_view(self)
+    }
+
+    fn reserve_for_receiver(self: Arc<Self>) -> Box<dyn ShmReservation> {
+        self.take_reference();
+        Box::new(OwnedWireReference {
+            payload: self,
+            committed: false,
+        })
+    }
+}
+
 /// What a descriptor's chunk is doing, as its own metadata slot says.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ReferenceState {
@@ -1144,11 +1193,24 @@ impl ShmBackedPayload {
     /// between the two; returned if the guard is dropped without
     /// [`WireReference::commit`].
     pub fn wire_reference(&self) -> WireReference<'_> {
-        self.header().refcount.fetch_add(1, Ordering::SeqCst);
+        self.take_reference();
         WireReference {
             payload: self,
             committed: false,
         }
+    }
+
+    /// This chunk as a buffer a message can be sent from (R3062): the handle a staged reply
+    /// carries, so the session core can send the descriptor, or the bytes, or hand a receiver of
+    /// the same session the chunk, without naming this type. Cheap: a clone of the `Arc`.
+    pub fn send_handle(self: &Arc<Self>) -> wz_session_core::extshm::ShmSendHandle {
+        wz_session_core::extshm::ShmSendHandle::new(self.clone())
+    }
+
+    /// The increment both guards share: one reference for a receiver, which the guard that
+    /// carries it gives back unless it is committed.
+    fn take_reference(&self) {
+        self.header().refcount.fetch_add(1, Ordering::SeqCst);
     }
 
     /// The payload bytes in the shared segment — the source for the inline-bytes
@@ -1889,6 +1951,35 @@ mod tests {
             reference_state(&descriptor),
             Some(ReferenceState::Held(1)),
             "back to the owner's alone"
+        );
+    }
+
+    /// R3062 -- the reservation a message takes through the session core's sending seam is the
+    /// owning twin of the wire reference, and has the same contract: it names the chunk's own
+    /// descriptor, raises the count while it lives, gives the reference back when it drops without
+    /// a commit, and leaves it with the receiver when it is committed. It owns its payload, so it
+    /// outlives the handle it was taken from (a reply is sent after the handler returned).
+    #[test]
+    fn an_owned_reservation_is_returned_unless_it_is_committed() {
+        let payload = Arc::new(ShmBackedPayload::alloc(2).expect("alloc"));
+        let descriptor = payload.descriptor();
+
+        let reservation = payload.send_handle().reserve_for_receiver();
+        assert_eq!(reservation.descriptor(), descriptor);
+        assert_eq!(reference_state(&descriptor), Some(ReferenceState::Held(2)));
+        drop(reservation);
+        assert_eq!(
+            reference_state(&descriptor),
+            Some(ReferenceState::Held(1)),
+            "a frame that did not leave gives the receiver's reference back"
+        );
+
+        let reservation = payload.send_handle().reserve_for_receiver();
+        reservation.commit();
+        assert_eq!(
+            reference_state(&descriptor),
+            Some(ReferenceState::Held(2)),
+            "a frame that left keeps it raised: the receiver releases it when it lets go"
         );
     }
 

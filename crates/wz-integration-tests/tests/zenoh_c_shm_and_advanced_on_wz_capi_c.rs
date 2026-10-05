@@ -1904,21 +1904,30 @@ int main(int argc, char **argv) {
 }
 "#;
 
-/// Run [`SHM_VALUE_QUERYABLE`] on one arm and ask it once with upstream's own Rust
-/// `z_get_shm`, and return what the queryable printed.
+/// What one run of a C queryable asked once by upstream's `z_get_shm` printed: the queryable's
+/// own output, and the getter's (which says how the getter saw each reply).
+struct QueryableRun {
+    queryable: String,
+    getter: String,
+}
+
+/// Run a C queryable program (`program`, taking the endpoint to listen on, the key, and then
+/// `program_args`) on one arm and ask it once with upstream's own Rust `z_get_shm`, and return
+/// what both printed.
 ///
 /// The getter is the third implementation, the one that shares no code with either arm: it
 /// allocates its value in shared memory when it is given one and sends it as the descriptor
-/// to a peer that offers shared memory. `offer_shm` is whether it does the offering, and
-/// `value` is the optional value argument.
+/// to a peer that offers shared memory, and it prints what each reply's payload is. `offer_shm`
+/// is whether it does the offering, and `value` is the optional value argument.
 fn observe_c_queryable_with_z_get_shm(
     z_get_shm: &Path,
     program: &Path,
+    program_args: &[&str],
     libdir: &Path,
     arm: Arm,
     offer_shm: bool,
     value: Option<&str>,
-) -> String {
+) -> QueryableRun {
     let label = arm.label();
     let reservation = PortReservation::pick();
     let port = reservation.port();
@@ -1931,7 +1940,8 @@ fn observe_c_queryable_with_z_get_shm(
         Command::new("stdbuf")
             .args(["-oL", "-eL"])
             .arg(program)
-            .args([&endpoint, "demo/capic/qshm"])
+            .args([endpoint.as_str(), "demo/capic/qshm"])
+            .args(program_args)
             .env("LD_LIBRARY_PATH", libdir)
             .stdout(Stdio::from(q_writer))
             .stderr(Stdio::from(q_out.try_clone().expect("dup stderr handle")))
@@ -1981,7 +1991,10 @@ fn observe_c_queryable_with_z_get_shm(
             String::from_utf8_lossy(&asked.stderr),
         );
     }
-    seen
+    QueryableRun {
+        queryable: seen,
+        getter: String::from_utf8_lossy(&asked.stdout).into_owned(),
+    }
 }
 
 /// The `query:` lines a [`SHM_VALUE_QUERYABLE`] printed, which are the subject; its
@@ -2063,19 +2076,23 @@ fn a_c_queryable_is_handed_a_value_from_shared_memory_as_shared_memory_on_wz_cap
         let ref_log = observe_c_queryable_with_z_get_shm(
             &z_get_shm,
             &on_ref,
+            &[],
             &libdir_r,
             Arm::Reference,
             offer_shm,
             value,
-        );
+        )
+        .queryable;
         let wz_log = observe_c_queryable_with_z_get_shm(
             &z_get_shm,
             &on_wz,
+            &[],
             &libdir_wz,
             Arm::Wz,
             offer_shm,
             value,
-        );
+        )
+        .queryable;
         let (ref_lines, wz_lines) = (value_kind_lines(&ref_log), value_kind_lines(&wz_log));
         assert_eq!(
             wz_lines, ref_lines,
@@ -2117,5 +2134,303 @@ fn a_c_queryable_is_handed_a_value_from_shared_memory_as_shared_memory_on_wz_cap
             && default_value[0].contains("Get from Rust S"),
         "the example's default value did not reach the reference as shared memory: \
          {default_value:?}"
+    );
+}
+
+/// A QUERYABLE that answers its first query with a reply whose payload is either a CHUNK of
+/// shared memory holding a known text (`chunk`) or the same text as plain bytes (`plain`).
+/// Ours, and the same source is compiled for both arms. Arguments: the endpoint to listen on,
+/// the key to answer, the mode.
+const SHM_REPLY_QUERYABLE: &str = r#"#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include "zenoh.h"
+
+static z_owned_shm_provider_t provider;
+static volatile int queries = 0;
+static int use_chunk = 0;
+
+static void on_query(z_loaned_query_t *query, void *arg) {
+    (void)arg;
+    z_owned_bytes_t reply;
+    if (use_chunk) {
+        z_buf_layout_alloc_result_t alloc;
+        z_shm_provider_alloc_gc_defrag_blocking(&alloc, z_loan(provider), 64);
+        if (alloc.status != ZC_BUF_LAYOUT_ALLOC_STATUS_OK) { printf("alloc failed\n"); return; }
+        memset(z_shm_mut_data_mut(z_loan_mut(alloc.buf)), 0, 64);
+        memcpy(z_shm_mut_data_mut(z_loan_mut(alloc.buf)), "REPLY-FROM-C-CHUNK", 18);
+        z_bytes_from_shm_mut(&reply, z_move(alloc.buf));
+    } else {
+        z_bytes_copy_from_str(&reply, "REPLY-FROM-C-PLAIN");
+    }
+    z_query_reply(query, z_query_keyexpr(query), z_move(reply), NULL);
+    queries = queries + 1;
+}
+
+int main(int argc, char **argv) {
+    setvbuf(stdout, NULL, _IONBF, 0);
+    if (argc != 4) { return 2; }
+    use_chunk = strcmp(argv[3], "chunk") == 0;
+    z_owned_config_t config;
+    z_config_default(&config);
+    char listen[512];
+    snprintf(listen, sizeof listen, "[\"%s\"]", argv[1]);
+    zc_config_insert_json5(z_loan_mut(config), Z_CONFIG_MULTICAST_SCOUTING_KEY, "false");
+    if (zc_config_insert_json5(z_loan_mut(config), Z_CONFIG_LISTEN_KEY, listen) < 0) { return 3; }
+    z_owned_session_t s;
+    if (z_open(&s, z_move(config), NULL) < 0) { printf("open failed\n"); return 4; }
+    if (z_shm_provider_default_new(&provider, 4096) != Z_OK) { printf("provider failed\n"); return 5; }
+    z_view_keyexpr_t ke;
+    if (z_view_keyexpr_from_str(&ke, argv[2]) < 0) { return 6; }
+    z_owned_closure_query_t qcb;
+    z_closure(&qcb, on_query, NULL, NULL);
+    z_owned_queryable_t qable;
+    if (z_declare_queryable(z_loan(s), &qable, z_loan(ke), z_move(qcb), NULL) < 0) { printf("queryable failed\n"); return 7; }
+    printf("ready\n");
+    int waited = 0;
+    while (queries == 0 && waited < 200) { z_sleep_ms(100); waited = waited + 1; }
+    z_sleep_ms(500);
+    printf("done queries=%d\n", queries);
+    return 0;
+}
+"#;
+
+/// The `>> Received (` lines upstream's `z_get_shm` printed: for each reply, the key and either
+/// the text the shared-memory buffer holds or `Not a ShmBufInner` when the payload is not one.
+fn received_replies(getter_stdout: &str) -> Vec<String> {
+    getter_stdout
+        .lines()
+        .filter(|l| l.starts_with(">> Received ("))
+        .map(str::to_owned)
+        .collect()
+}
+
+/// LEG 12 -- a C queryable's reply whose payload is a CHUNK of shared memory reaches upstream's
+/// own Rust `z_get_shm` as shared memory, on wz's ABI as on the real library: the getter prints
+/// the text the buffer holds, where a reply that is bytes prints `Not a ShmBufInner`. The sending
+/// end of the plane legs 9 to 11 are the getter and the queryable's receiving end of.
+///
+/// Until R3062 a reply was staged as the chunk's bytes and sent as bytes, so the same program
+/// reached this getter as `Not a ShmBufInner` from wz and as the buffer from the real library
+/// (MEASURED, red before green). The `plain` mode is the control in both directions: the same
+/// program answering with bytes is `Not a ShmBufInner` on BOTH arms, so the label is a property
+/// of the reply and not of the getter. The reference arm is the oracle: a reference that prints
+/// anything but the text for `chunk` means the machine's oracle or the getter's offer is not
+/// what this leg assumes, and the comparison says nothing.
+// wz-proves: api-compat-c wz->zenoh partial
+#[test]
+#[ignore = "compiles a C program with cc and spawns upstream's own z_get_shm; needs the \
+            machine-local SHARED-MEMORY zenoh-c oracle and the shared-memory zenohd build; \
+            run-ci Layer C1cc drives it"]
+fn a_c_queryable_reply_that_is_a_chunk_reaches_a_real_z_get_shm_as_shared_memory_on_wz_capi_c() {
+    let Some((include, libdir_ref, _examples)) = oracle_or_note() else {
+        return;
+    };
+    let Some(z_get_shm) = zenoh_shm_example_binary("z_get_shm") else {
+        eprintln!(
+            "skip: no z_get_shm at target/zenohd-shm (run `ZENOHD_SHM=1 scripts/build-zenohd.sh`)"
+        );
+        return;
+    };
+    let dir = tempfile::tempdir().expect("tempdir for the compiled arms");
+    let src_dir = dir.path().join("src");
+    std::fs::create_dir_all(&src_dir).expect("source dir");
+    std::fs::write(src_dir.join("shm_reply_queryable.c"), SHM_REPLY_QUERYABLE)
+        .expect("write the queryable source");
+    let (on_wz, libdir_wz) = arm_binary(
+        "shm_reply_queryable",
+        Arm::Wz,
+        dir.path(),
+        &include,
+        &src_dir,
+        &libdir_ref,
+    );
+    let (on_ref, libdir_r) = arm_binary(
+        "shm_reply_queryable",
+        Arm::Reference,
+        dir.path(),
+        &include,
+        &src_dir,
+        &libdir_ref,
+    );
+
+    let mut observed = Vec::new();
+    for mode in ["chunk", "plain"] {
+        let run = |program: &Path, libdir: &Path, arm: Arm| {
+            received_replies(
+                &observe_c_queryable_with_z_get_shm(
+                    &z_get_shm,
+                    program,
+                    &[mode],
+                    libdir,
+                    arm,
+                    true,
+                    None,
+                )
+                .getter,
+            )
+        };
+        let on_reference = run(&on_ref, &libdir_r, Arm::Reference);
+        let on_wizard = run(&on_wz, &libdir_wz, Arm::Wz);
+        assert_eq!(
+            on_wizard, on_reference,
+            "§5.27 api-compat-c: {mode}: upstream's z_get_shm saw the C queryable's reply as a \
+             different kind of buffer on wz's ABI and on libzenohc"
+        );
+        observed.push(on_reference);
+    }
+
+    // The ORACLE, after the diff so a divergence is reported as one.
+    let [chunk, plain] = &observed[..] else {
+        unreachable!("two modes were run")
+    };
+    assert!(
+        chunk.len() == 1
+            && chunk[0].contains("REPLY-FROM-C-CHUNK")
+            && !chunk[0].contains("Not a ShmBufInner"),
+        "the reference did not hand upstream's getter the chunk as shared memory, so the rule \
+         this leg compares against is not what it assumes: {chunk:?}"
+    );
+    assert!(
+        plain.len() == 1 && plain[0].contains("Not a ShmBufInner"),
+        "the control: a reply that is bytes was not labelled so by upstream's getter: {plain:?}"
+    );
+}
+
+/// A GETTER that asks once and says what kind of buffer each reply's payload is, by upstream's
+/// own question (`z_bytes_as_loaned_shm`), and how long it is. Ours, and the same source is
+/// compiled for both arms. Arguments: the endpoint to dial, the key.
+const SHM_REPLY_GETTER: &str = r#"#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include "zenoh.h"
+
+int main(int argc, char **argv) {
+    setvbuf(stdout, NULL, _IONBF, 0);
+    if (argc != 3) { return 2; }
+    z_owned_config_t config;
+    z_config_default(&config);
+    char connect[512];
+    snprintf(connect, sizeof connect, "[\"%s\"]", argv[1]);
+    if (zc_config_insert_json5(z_loan_mut(config), Z_CONFIG_CONNECT_KEY, connect) < 0) { return 3; }
+    if (zc_config_insert_json5(z_loan_mut(config), Z_CONFIG_MODE_KEY, "\"client\"") < 0) { return 3; }
+    z_owned_session_t s;
+    if (z_open(&s, z_move(config), NULL) < 0) { printf("open failed\n"); return 4; }
+    z_view_keyexpr_t ke;
+    if (z_view_keyexpr_from_str(&ke, argv[2]) < 0) { return 5; }
+    z_owned_fifo_handler_reply_t handler;
+    z_owned_closure_reply_t closure;
+    z_fifo_channel_reply_new(&closure, &handler, 16);
+    z_get_options_t opts;
+    z_get_options_default(&opts);
+    opts.timeout_ms = 5000;
+    if (z_get(z_loan(s), z_loan(ke), "", z_move(closure), &opts) < 0) { printf("get failed\n"); return 6; }
+    z_owned_reply_t reply;
+    int replies = 0;
+    while (z_recv(z_loan(handler), &reply) == Z_OK) {
+        if (z_reply_is_ok(z_loan(reply))) {
+            const z_loaned_sample_t *sample = z_reply_ok(z_loan(reply));
+            const z_loaned_bytes_t *payload = z_sample_payload(sample);
+            const z_loaned_shm_t *shm = NULL;
+            int rc = z_bytes_as_loaned_shm(payload, &shm);
+            printf("reply: as_loaned_shm rc=%d len=%zu\n", rc, z_bytes_len(payload));
+            replies++;
+        } else {
+            printf("reply: error\n");
+        }
+        z_drop(z_move(reply));
+    }
+    z_drop(z_move(handler));
+    printf("done replies=%d\n", replies);
+    z_drop(z_move(s));
+    return 0;
+}
+"#;
+
+/// The `reply:` lines a [`SHM_REPLY_GETTER`] printed, which are the subject.
+fn reply_kind_lines(stdout: &str) -> Vec<String> {
+    stdout
+        .lines()
+        .filter(|l| l.starts_with("reply:") || l.starts_with("done replies="))
+        .map(str::to_owned)
+        .collect()
+}
+
+/// LEG 13 -- a C GETTER is handed the reply of upstream's own Rust `z_queryable_shm`, which
+/// answers with a shared-memory buffer, as shared memory, on wz's ABI as on the real library:
+/// `z_bytes_as_loaned_shm(z_sample_payload(z_reply_ok(..)))` answers `0` on both. The receiving
+/// end of the plane leg 12 is the sending end of.
+///
+/// The C ABI's reply marshal copied the reply's payload out of whatever held it, so the question
+/// answered `-1` for a reply the real library answers `0` for, whether the reply came from a
+/// peer or from the getter's own session; the sample path stopped copying in R3052 and the
+/// reply path was the one left. The reference arm is the oracle.
+// wz-proves: api-compat-c zenoh->wz partial
+#[test]
+#[ignore = "compiles a C program with cc and spawns upstream's own z_queryable_shm; needs the \
+            machine-local SHARED-MEMORY zenoh-c oracle and the shared-memory zenohd build; \
+            run-ci Layer C1cc drives it"]
+fn a_c_getter_is_handed_a_real_z_queryable_shm_reply_as_shared_memory_on_wz_capi_c() {
+    let Some((include, libdir_ref, _examples)) = oracle_or_note() else {
+        return;
+    };
+    let Some(z_queryable_shm) = zenoh_shm_example_binary("z_queryable_shm") else {
+        eprintln!(
+            "skip: no z_queryable_shm at target/zenohd-shm (run `ZENOHD_SHM=1 scripts/build-zenohd.sh`)"
+        );
+        return;
+    };
+    let dir = tempfile::tempdir().expect("tempdir for the compiled arms");
+    let src_dir = dir.path().join("src");
+    std::fs::create_dir_all(&src_dir).expect("source dir");
+    std::fs::write(src_dir.join("shm_reply_getter.c"), SHM_REPLY_GETTER)
+        .expect("write the getter source");
+    let (on_wz, libdir_wz) = arm_binary(
+        "shm_reply_getter",
+        Arm::Wz,
+        dir.path(),
+        &include,
+        &src_dir,
+        &libdir_ref,
+    );
+    let (on_ref, libdir_r) = arm_binary(
+        "shm_reply_getter",
+        Arm::Reference,
+        dir.path(),
+        &include,
+        &src_dir,
+        &libdir_ref,
+    );
+
+    let args = |endpoint: &str| vec![endpoint.to_string(), "demo/capic/qshm".to_string()];
+    let (ref_status, ref_stdout, ref_seen) = observe_query_with_z_queryable_shm(
+        &z_queryable_shm,
+        &on_ref,
+        &libdir_r,
+        Arm::Reference,
+        args,
+    );
+    let (wz_status, wz_stdout, wz_seen) =
+        observe_query_with_z_queryable_shm(&z_queryable_shm, &on_wz, &libdir_wz, Arm::Wz, args);
+
+    let (ref_lines, wz_lines) = (reply_kind_lines(&ref_stdout), reply_kind_lines(&wz_stdout));
+    assert!(
+        ref_status.success()
+            && ref_lines.len() == 2
+            && ref_lines[0].starts_with("reply: as_loaned_shm rc=0 "),
+        "the reference arm's getter was not handed upstream's reply as shared memory, so the \
+         comparison below says nothing about it: {ref_lines:?}\n--- program ---\n{ref_stdout}\n\
+         --- queryable ---\n{ref_seen}"
+    );
+    assert!(
+        wz_status.success(),
+        "the getter on wz's C ABI exited {:?}\n{wz_stdout}\n--- queryable ---\n{wz_seen}",
+        wz_status.code(),
+    );
+    assert_eq!(
+        wz_lines, ref_lines,
+        "§5.27 api-compat-c: the same getter was handed upstream's shared-memory reply as a \
+         different kind of buffer on wz's ABI and on libzenohc.\n--- wz ---\n{wz_stdout}\n--- \
+         reference ---\n{ref_stdout}"
     );
 }

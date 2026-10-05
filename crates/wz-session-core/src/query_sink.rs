@@ -212,10 +212,27 @@ pub struct ReplyMeta<'a> {
     /// to reach the staged reply, and this is the seam every other per-reply
     /// value already travels through.
     pub qos: Option<crate::sample::QosLevel>,
+    /// R3062 -- the reply's payload as a buffer of shared memory, when it is one. The `payload`
+    /// argument of the call that carries this is still the buffer's BYTES (an implementation that
+    /// cannot send a descriptor reads those and loses nothing); this is the same payload as the
+    /// thing a peer that negotiated shared memory is sent the descriptor of, and a receiver of the
+    /// SAME session is handed as the chunk. Put-only: a Del reply has no payload.
+    ///
+    /// An implementation that stages the reply and keeps this is the one the descriptor is
+    /// emitted from; the default of [`ReplyOut::reply_keyed_meta`] drops it, like every field it
+    /// has no parameter for.
+    #[cfg(feature = "transport-shm")]
+    pub shared: Option<&'a crate::extshm::ShmSendHandle>,
 }
 
 #[cfg(feature = "alloc")]
 impl<'a> ReplyMeta<'a> {
+    /// R3062 -- set the reply's payload as a buffer of shared memory (see [`Self::shared`]).
+    #[cfg(feature = "transport-shm")]
+    pub fn with_shared(mut self, shared: Option<&'a crate::extshm::ShmSendHandle>) -> Self {
+        self.shared = shared;
+        self
+    }
     /// The all-absent metadata — a reply that carries none of the four arms.
     pub fn new() -> Self {
         Self::default()

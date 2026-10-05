@@ -429,6 +429,13 @@ pub enum ReplyBody {
     /// payload the queryable wants to return; encoded as the inner
     /// `MsgPut` body of the Reply.
     Put(Vec<u8>),
+    /// R3062 -- a data reply whose payload is a buffer of shared memory. On the wire it is the
+    /// same inner `MsgPut` with its payload a descriptor and the marker in the body chain, when
+    /// the face negotiated shared memory ([`QueryReply::into_response_shm`]), and the buffer's
+    /// bytes when it did not ([`QueryReply::into_response`], which cannot know). A requester of
+    /// the same session is handed the chunk.
+    #[cfg(feature = "transport-shm")]
+    PutShared(crate::extshm::ShmSendHandle),
     /// Delete-keyexpr reply. No payload bytes (the inner `MsgDel`
     /// body carries only a header + optional timestamp + ext chain).
     /// Used by queryables whose semantic is "the value at this
@@ -552,6 +559,22 @@ pub enum QueryReply {
     },
 }
 
+/// The descriptor a reply is to go out as, when it is to go out as one (R3062). Without
+/// `transport-shm` there is none to name and the option is the uninhabited one, so the same
+/// signature serves both builds and no site has to spell the difference.
+#[cfg(all(
+    feature = "alloc",
+    feature = "codec-response",
+    feature = "transport-shm"
+))]
+type ShmDescriptorArg = Option<crate::extshm::ShmDescriptor>;
+#[cfg(all(
+    feature = "alloc",
+    feature = "codec-response",
+    not(feature = "transport-shm")
+))]
+type ShmDescriptorArg = Option<core::convert::Infallible>;
+
 #[cfg(feature = "alloc")]
 impl QueryReply {
     /// Compose the wire-form [`Response`] for this Reply / Err using
@@ -575,6 +598,56 @@ impl QueryReply {
     /// wire frame to compose.
     #[cfg(feature = "codec-response")]
     pub fn into_response(self) -> Result<ResponseOwned, CodecError> {
+        self.response_with(None)
+    }
+
+    /// R3062 -- [`Self::into_response`] for a face that MAY have negotiated shared memory:
+    /// `offer` is whether it did. A reply whose payload is a buffer of shared memory goes out as
+    /// the buffer's descriptor when it did, and the reservation of the reference its receiver will
+    /// release comes back beside the response; the caller commits it once the frame has been
+    /// handed to the link and lets it drop if the send refused, which returns the reference.
+    /// Every other reply, and every reply on a face that did not negotiate, is exactly what
+    /// [`Self::into_response`] builds and comes back with no reservation.
+    ///
+    /// The reference is taken BEFORE the response is built, so the chunk cannot be reclaimed
+    /// between the two, and given back if the build fails: the reservation is dropped on the
+    /// error path like on any other.
+    #[cfg(all(feature = "codec-response", feature = "transport-shm"))]
+    pub fn into_response_shm(
+        self,
+        offer: bool,
+    ) -> Result<
+        (
+            ResponseOwned,
+            Option<alloc::boxed::Box<dyn crate::extshm::ShmReservation>>,
+        ),
+        CodecError,
+    > {
+        let reservation = match (&self, offer) {
+            (
+                QueryReply::Reply {
+                    body: ReplyBody::PutShared(handle),
+                    ..
+                },
+                true,
+            ) => Some(handle.reserve_for_receiver()),
+            _ => None,
+        };
+        let descriptor = reservation
+            .as_ref()
+            .map(|reservation| reservation.descriptor());
+        let response = self.response_with(descriptor)?;
+        Ok((response, reservation))
+    }
+
+    /// The one body of [`Self::into_response`] and [`Self::into_response_shm`]: `descriptor` is
+    /// the descriptor of the reply's buffer when it is to go out as one, `None` for the bytes.
+    #[cfg(feature = "codec-response")]
+    fn response_with(self, descriptor: ShmDescriptorArg) -> Result<ResponseOwned, CodecError> {
+        // Without `transport-shm` there is no descriptor to carry and the argument is the
+        // uninhabited option, which is never `Some`.
+        #[cfg(not(feature = "transport-shm"))]
+        let _ = descriptor;
         match self {
             QueryReply::Reply {
                 rid,
@@ -591,6 +664,22 @@ impl QueryReply {
                     ReplyBody::Put(payload) => {
                         ResponseReplyBuilder::new(rid, 0, Some(&keyexpr_literal), &payload)
                     }
+                    // R3062 -- as the descriptor when one was reserved, so the bytes are not
+                    // copied into a builder that will not send them; as the buffer's bytes
+                    // otherwise, which is what a face that cannot map the segment is owed.
+                    #[cfg(feature = "transport-shm")]
+                    ReplyBody::PutShared(handle) => match descriptor {
+                        Some(descriptor) => {
+                            ResponseReplyBuilder::new(rid, 0, Some(&keyexpr_literal), &[])
+                                .shm_descriptor(descriptor)
+                        }
+                        None => ResponseReplyBuilder::new(
+                            rid,
+                            0,
+                            Some(&keyexpr_literal),
+                            handle.bytes(),
+                        ),
+                    },
                     ReplyBody::Del => {
                         // The payload slot is unused on the Del path
                         // (the builder drops it when reply_del() flips
@@ -1088,10 +1177,20 @@ impl<'a> QueryResponder<'a> {
         meta: ReplyMeta<'_>,
     ) -> Result<(), ReplyError> {
         self.admit(keyexpr)?;
+        // R3062 -- a payload that is a buffer of shared memory is staged AS the buffer, not as
+        // a copy of its bytes: the copy is what the descriptor exists to avoid, and the
+        // bytes stay one call away on the handle for a peer that cannot map the segment.
+        #[cfg(feature = "transport-shm")]
+        let body = match meta.shared {
+            Some(shared) => ReplyBody::PutShared(shared.clone()),
+            None => ReplyBody::Put(payload.to_vec()),
+        };
+        #[cfg(not(feature = "transport-shm"))]
+        let body = ReplyBody::Put(payload.to_vec());
         self.replies.push(QueryReply::Reply {
             rid: self.rid,
             keyexpr_literal: keyexpr.to_string(),
-            body: ReplyBody::Put(payload.to_vec()),
+            body,
             encoding: meta.encoding.cloned(),
             timestamp: meta.timestamp.cloned(),
             responder: self.responder.clone(),
@@ -5736,5 +5835,200 @@ mod shm_value_tests {
             Some(1024),
             "the size is the logical length of the buffer"
         );
+    }
+}
+
+// ── R3062 -- a reply whose payload is a buffer of shared memory ──
+//
+// The sending end of the plane R3044 and R3061 built the receiving end of. A queryable that
+// answers with a chunk stages the CHUNK; whether the reply leaves as its descriptor or as its
+// bytes is decided where the face's negotiation is known, and a requester of the same session is
+// handed the chunk. These read each of those against the same buffer, with the receive path's own
+// slice walk as the judge of the wire form.
+#[cfg(all(
+    test,
+    feature = "transport-shm",
+    feature = "query-queryable",
+    feature = "codec-response",
+    feature = "codec-frame"
+))]
+mod shm_reply_tests {
+    use super::*;
+    use crate::extshm::send_test_support::{FakeSendBuffer, Reservations};
+    use crate::extshm::{decode_shm_descriptor, ShmSendHandle};
+    use crate::query_sink::ReplyMeta;
+    use alloc::vec::Vec;
+    use std::sync::Arc;
+    use wz_codecs::query::Query;
+    use wz_codecs_test_support::TestWire;
+
+    /// Eleven bytes, the length the fake's descriptor names.
+    const BYTES: &[u8] = b"hello shm!!";
+
+    fn handle() -> (ShmSendHandle, Arc<Reservations>) {
+        let (buffer, reservations) = FakeSendBuffer::new(BYTES);
+        (ShmSendHandle::new(buffer), reservations)
+    }
+
+    /// The reply a queryable stages when it answers `demo/x` with `shared` as its payload,
+    /// read off the registry the way the runtime drains it.
+    fn staged(shared: &ShmSendHandle) -> QueryReply {
+        let shared = shared.clone();
+        let mut reg: QueryableRegistry<crate::query_sink::BoxedQuerySink> =
+            QueryableRegistry::new();
+        reg.register("demo/**", move |_q, responder| {
+            responder
+                .reply_keyed_meta(
+                    "demo/x",
+                    shared.bytes(),
+                    ReplyMeta::new().with_shared(Some(&shared)),
+                )
+                .expect("the reply is admitted");
+        });
+        let query = Query::default()
+            .try_into_owned_in::<crate::wire::WireStorage>()
+            .unwrap();
+        let mut replies = Vec::new();
+        reg.local_query(7, "demo/x", &query, None, QosLevel::DEFAULT, &mut replies);
+        assert_eq!(replies.len(), 1, "the queryable answered once");
+        replies.pop().unwrap()
+    }
+
+    /// The same reply with its payload as plain bytes, built from the staged one so every
+    /// other field is the same.
+    // Without `query-reply-err` a `QueryReply` has one variant, and the pattern is
+    // irrefutable; with it, it is not. One spelling serves both.
+    #[allow(irrefutable_let_patterns)]
+    fn as_plain_bytes(reply: &QueryReply) -> QueryReply {
+        let mut plain = reply.clone();
+        if let QueryReply::Reply { body, .. } = &mut plain {
+            *body = ReplyBody::Put(BYTES.to_vec());
+        }
+        plain
+    }
+
+    /// The Put a built Response carries, re-read from its wire bytes.
+    fn put_of(
+        response: ResponseOwned,
+    ) -> wz_codecs::msg_put::MsgPutOwned<crate::wire::WireStorage> {
+        let messages = crate::network_message::parse_frame_payload(&response.wire())
+            .expect("the response parses");
+        let crate::network_message::NetworkMessage::Response(response) = &messages[0] else {
+            panic!("expected a Response, got {:?}", messages[0]);
+        };
+        let crate::wire::ResponseOwnedVariant::CodecZenohReply(reply) = &response.body else {
+            panic!("a reply carries a Reply body");
+        };
+        let crate::wire::parts::ReplyOwnedVariant::CodecZenohMsgPut(put) = &reply.body else {
+            panic!("a data reply carries a Put");
+        };
+        put.clone()
+    }
+
+    fn contains(haystack: &[u8], needle: &[u8]) -> bool {
+        haystack.windows(needle.len()).any(|w| w == needle)
+    }
+
+    // As `as_plain_bytes`: the `else` is unreachable exactly when the Err variant is compiled out.
+    #[allow(irrefutable_let_patterns)]
+    #[test]
+    fn a_reply_answered_with_a_buffer_is_staged_as_the_buffer_not_as_a_copy() {
+        let (shared, _) = handle();
+        let QueryReply::Reply { body, .. } = staged(&shared) else {
+            panic!("a data reply");
+        };
+        assert_eq!(
+            body,
+            ReplyBody::PutShared(shared),
+            "the staged body is the buffer itself, which is what the descriptor is made from"
+        );
+    }
+
+    #[test]
+    fn without_an_offer_the_reply_is_the_bytes_and_no_reference_is_taken() {
+        let (shared, reservations) = handle();
+        let reply = staged(&shared);
+        let plain = as_plain_bytes(&reply);
+
+        let (response, reservation) = reply.into_response_shm(false).expect("builds");
+
+        assert!(reservation.is_none(), "no descriptor, so nothing reserved");
+        assert_eq!(reservations.counts(), (0, 0, 0));
+        assert_eq!(
+            response.wire(),
+            plain.into_response().unwrap().wire(),
+            "a face that did not negotiate is sent exactly the reply it would have been sent \
+             had the payload been bytes all along"
+        );
+    }
+
+    #[test]
+    fn into_response_cannot_know_the_face_and_sends_the_bytes() {
+        let (shared, reservations) = handle();
+        let reply = staged(&shared);
+        let plain = as_plain_bytes(&reply);
+        assert_eq!(
+            reply.into_response().unwrap().wire(),
+            plain.into_response().unwrap().wire()
+        );
+        assert_eq!(reservations.counts(), (0, 0, 0));
+    }
+
+    #[test]
+    fn with_an_offer_the_reply_is_the_descriptor_and_the_reference_is_the_callers_to_commit() {
+        let (shared, reservations) = handle();
+        let (response, reservation) = staged(&shared).into_response_shm(true).expect("builds");
+        let reservation = reservation.expect("a buffer on a face that offered: reserved");
+        assert_eq!(
+            reservations.counts(),
+            (1, 0, 0),
+            "one reference taken for the receiver, not yet given or returned"
+        );
+
+        let wire = response.clone().wire();
+        assert!(
+            !contains(&wire, BYTES),
+            "the bytes are not on the wire: the descriptor is what the buffer was reserved for"
+        );
+
+        // The receive path's own walk is the judge: the marker must be what makes the payload
+        // sliced, and the slice must be the descriptor the reservation named.
+        let put = put_of(response);
+        let mut asked = Vec::new();
+        let read = crate::put_payload::collect_wire_payload(&put, |descriptor| {
+            asked.push(decode_shm_descriptor(descriptor));
+            Some(crate::link::RxBytes::from(BYTES.to_vec()))
+        })
+        .expect("the sliced Put reads back");
+        assert_eq!(
+            asked,
+            [Some(FakeSendBuffer::descriptor())],
+            "exactly one slice, and it is the descriptor the reservation named"
+        );
+        assert_eq!(read.as_slice(), BYTES);
+
+        reservation.commit();
+        assert_eq!(reservations.counts(), (1, 1, 0));
+    }
+
+    #[test]
+    fn a_reservation_dropped_without_a_commit_returns_the_reference() {
+        let (shared, reservations) = handle();
+        let (_, reservation) = staged(&shared).into_response_shm(true).expect("builds");
+        drop(reservation);
+        assert_eq!(
+            reservations.counts(),
+            (1, 0, 1),
+            "a frame that did not leave gives the receiver's reference back"
+        );
+    }
+
+    #[test]
+    fn a_plain_reply_reserves_nothing_even_for_a_face_that_offered() {
+        let (shared, reservations) = handle();
+        let plain = as_plain_bytes(&staged(&shared));
+        let (_, reservation) = plain.into_response_shm(true).expect("builds");
+        assert!(reservation.is_none());
+        assert_eq!(reservations.counts(), (0, 0, 0));
     }
 }

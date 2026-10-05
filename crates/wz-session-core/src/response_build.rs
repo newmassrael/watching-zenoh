@@ -680,6 +680,12 @@ pub struct ResponseReplyBuilder {
     // queryable's reply seeds it from its query's own QoS. DEFAULT is omitted
     // on the wire, so a builder nobody sets stays byte-identical.
     qos: crate::sample::QosLevel,
+    // R3062: the descriptor of a buffer of shared memory the Put reply's payload is. When set,
+    // the inner MsgPut goes out in the sliced layout with the descriptor as its one SHM_PTR slice
+    // and the 0x2 marker in its body chain (the shape `build_msg_put_shm` writes for a Push), and
+    // the `payload` handed to `new` is not sent. Put-only: a Del reply has no payload to replace.
+    #[cfg(feature = "transport-shm")]
+    shm: Option<crate::extshm::ShmDescriptor>,
 }
 
 /// R2594 — the Response ENVELOPE extension chain, in the order upstream's
@@ -746,7 +752,25 @@ impl ResponseReplyBuilder {
             source_info: None,
             responder: None,
             qos: crate::sample::QosLevel::DEFAULT,
+            #[cfg(feature = "transport-shm")]
+            shm: None,
         }
+    }
+
+    /// R3062 -- send the Put reply's payload as the DESCRIPTOR of a buffer of shared memory
+    /// instead of bytes: the inner `MsgPut` takes the sliced layout, one `SHM_PTR` slice holding
+    /// the descriptor, and the 0x2 marker is appended to its body chain after the source info and
+    /// the attachment, which is the order and the shape `build_msg_put_shm` writes for a Push and
+    /// upstream's receiver reads for a Reply (a Reply body IS a Put push-body). The `payload`
+    /// given to [`Self::new`] is then not sent; pass an empty slice there. Ignored on a Del.
+    ///
+    /// The caller owns the reference the descriptor names: it must have taken one for the
+    /// receiver before building, and give it back if the frame does not leave
+    /// ([`crate::extshm::ShmReservation`]).
+    #[cfg(feature = "transport-shm")]
+    pub fn shm_descriptor(mut self, descriptor: crate::extshm::ShmDescriptor) -> Self {
+        self.shm = Some(descriptor);
+        self
     }
 
     /// R2594 — set the Response-envelope `ext_qos`. Subsequent calls overwrite
@@ -986,6 +1010,22 @@ impl ResponseReplyBuilder {
                     }
                     if let Some(att_ext) = reply_attachment {
                         exts.push(att_ext);
+                    }
+                    // R3062 -- the payload is a buffer of shared memory: the marker closes the
+                    // chain, as `build_msg_put_shm` puts it after the same two entries for a
+                    // Push, and the payload fields take the sliced layout. The marker is what
+                    // makes the payload sliced; a chain and a payload that disagree are refused
+                    // by the encoder, so the two are set together or not at all.
+                    #[cfg(feature = "transport-shm")]
+                    if let Some(descriptor) = self.shm.as_ref() {
+                        let sliced = crate::put_payload::shm::<crate::wire::WireStorage>(
+                            &crate::extshm::encode_shm_descriptor(descriptor),
+                        )?;
+                        put.payload_len = sliced.payload_len;
+                        put.payload = sliced.payload;
+                        put.slice_count = sliced.slice_count;
+                        put.slices = sliced.slices;
+                        exts.push(crate::extshm::encode_shm_marker_ext());
                     }
                     if !exts.is_empty() {
                         crate::ext_nodeid::apply_chain_z_bits(&mut exts);

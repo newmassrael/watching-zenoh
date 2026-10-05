@@ -9346,6 +9346,19 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// R267 Session<R,T> reparam-adjacent architectural cascade).
     #[cfg(feature = "codec-response")]
     pub fn send_response(&self, response: ResponseOwned) {
+        // F2 — this surface has no error channel; a transport-down
+        // reject drops the emit exactly as the dead link would.
+        let _ = self.try_send_response(response);
+    }
+
+    /// R3062 -- [`Self::send_response`] that says whether the response was handed to the link.
+    /// The drop of a response with nobody told is harmless when the response is bytes; it is
+    /// a LEAK when the response is the descriptor of a shared-memory buffer, because the
+    /// reference taken for its receiver is released only by that receiver, so the caller that
+    /// took one needs the verdict to give it back (`QueryReply::into_response_shm`). Same
+    /// egress as [`Self::send_response`], which is this with the verdict dropped.
+    #[cfg(feature = "codec-response")]
+    pub fn try_send_response(&self, response: ResponseOwned) -> Result<(), SendWireError> {
         // §5.21 routing-namespace — the reply EGRESS seam. Query replies flush
         // through this dedicated `dispatch_response` path, which bypasses BOTH
         // the `send_network_message` floor AND the unicast `Tp` send arm, so the
@@ -9361,9 +9374,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                 let _ = crate::namespace::apply_egress_response(ns, &mut response);
             }
         });
-        // F2 — this surface has no error channel; a transport-down
-        // reject drops the emit exactly as the dead link would.
-        let _ = self.dispatch_response(response, /*reliable=*/ true);
+        self.dispatch_response(response, /*reliable=*/ true)
     }
 
     /// R284 — encode + dispatch a session-layer `Close` frame

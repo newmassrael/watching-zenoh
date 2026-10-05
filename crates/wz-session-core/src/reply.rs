@@ -715,11 +715,27 @@ impl From<QueryReply> for InboundReply {
                 // projection's.
                 qos: _,
             } => {
-                let body = match body {
-                    ReplyBody::Put(payload) => InboundReplyBody::Put {
+                // R3062 -- the payload of a Put reply, whichever way it was staged: the
+                // responder's own vector, moved in, or a buffer of shared memory, which the
+                // requester of THIS session is handed as the chunk (a range of the shared page
+                // with a reference of its own) and not as a copy of its bytes. The side-bands
+                // below are one mapping for both, so a shared reply and a plain one cannot
+                // disagree about what a timestamp or an encoding is.
+                let put_payload: Option<crate::link::RxBytes> = match body {
+                    ReplyBody::Put(payload) => Some(payload.into()),
+                    #[cfg(feature = "transport-shm")]
+                    ReplyBody::PutShared(handle) => Some(
+                        handle
+                            .receiver_view()
+                            .unwrap_or_else(|| handle.bytes().to_vec().into()),
+                    ),
+                    ReplyBody::Del => None,
+                };
+                let body = match put_payload {
+                    Some(payload) => InboundReplyBody::Put {
                         // A loopback reply's bytes are the responder's own vector,
                         // so there is no frame to share; they move in as they are.
-                        payload: payload.into(),
+                        payload,
                         // Gate the side-bands on the same `pubsub-attachment` /
                         // `pubsub-encoding` / `reply-source-info` the wire decode
                         // uses (see loopback_put_attachment), so the CONTENT
@@ -732,7 +748,7 @@ impl From<QueryReply> for InboundReply {
                     // R311y81 — a Del recovery reply re-keys via the same
                     // source_info the Put arm carries (the staged QueryReply
                     // holds it regardless of body arm), gated reply-source-info.
-                    ReplyBody::Del => InboundReplyBody::Del {
+                    None => InboundReplyBody::Del {
                         // R311y769 — the loopback arm carries it too, under the
                         // same gate as the Put arm. A loopback reply that
                         // dropped what the wire path now delivers would make
@@ -3582,6 +3598,56 @@ mod tests {
             InboundReplyBody::Put { payload, .. } => assert_eq!(payload, b"value"),
             other => panic!("expected Put, got {other:?}"),
         }
+    }
+
+    /// R3062 -- a reply staged with a buffer of shared memory projects, for a requester of the
+    /// SAME session, as that buffer and not as a copy of its bytes: the payload is the range of
+    /// the page the buffer lends a receiver, which the address of its bytes tells from a copy.
+    /// The plain reply beside it is the control that the address comparison can fail.
+    #[cfg(all(
+        feature = "query-queryable",
+        feature = "transport-shm",
+        feature = "rx-shared-bytes"
+    ))]
+    #[test]
+    fn from_query_reply_put_shared_surfaces_the_buffer_not_a_copy() {
+        use crate::extshm::send_test_support::FakeSendBuffer;
+        use crate::extshm::ShmSendHandle;
+        use crate::query::{QueryReply, ReplyBody};
+        let (buffer, reservations) = FakeSendBuffer::new(b"hello shm!!");
+        let storage_address = buffer.storage.as_ptr() as usize;
+        let staged = |body| QueryReply::Reply {
+            rid: 11,
+            keyexpr_literal: "sensors/a".to_string(),
+            body,
+            encoding: None,
+            timestamp: None,
+            responder: None,
+            attachment: None,
+            source_info: None,
+            qos: crate::sample::QosLevel::DEFAULT,
+        };
+        let address_of = |reply: QueryReply| match InboundReply::from(reply).body {
+            InboundReplyBody::Put { payload, .. } => payload.as_slice().as_ptr() as usize,
+            other => panic!("expected Put, got {other:?}"),
+        };
+
+        assert_eq!(
+            address_of(staged(ReplyBody::PutShared(ShmSendHandle::new(buffer)))),
+            storage_address,
+            "the requester is handed the range of the page the buffer lent"
+        );
+        assert_ne!(
+            address_of(staged(ReplyBody::Put(b"hello shm!!".to_vec()))),
+            storage_address,
+            "control: a plain reply is its own bytes, so the comparison above can fail"
+        );
+        assert_eq!(
+            reservations.counts(),
+            (0, 0, 0),
+            "a requester of this very session is handed the view, and no reference is taken \
+             for a remote receiver that does not exist"
+        );
     }
 
     /// A8b — the loopback receive twin: a `QueryReply` staged with an

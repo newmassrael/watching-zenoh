@@ -467,6 +467,88 @@ pub trait ShmResolver {
     }
 }
 
+/// R3062 -- the SENDING end of a shared-memory payload: a buffer some owner of a segment holds,
+/// that a message can be sent from as its descriptor. The seam beside [`ShmResolver`], which is
+/// where a received descriptor is read; this is where a sent one is made. The session core knows
+/// the descriptor's bytes and the rules of the wire, and nothing about the segment, so what a
+/// reply or any later message carries is this and not a runtime type.
+///
+/// A message that carries one is sent as the descriptor to a peer that negotiated shared memory
+/// and as [`Self::bytes`] to one that did not, and delivered to a receiver of the SAME session as
+/// [`Self::receiver_view`], so the three never disagree about what the payload is.
+pub trait ShmSendBuffer: Send + Sync {
+    /// The bytes the buffer holds: what a peer that cannot map the segment is sent.
+    fn bytes(&self) -> &[u8];
+
+    /// The buffer as a holder in this process sees it, for a receiver of the session that
+    /// sent it: a range of the shared page holding a reference of its own, which goes back
+    /// when the view drops. `None` when the page cannot be viewed.
+    fn receiver_view(&self) -> Option<crate::link::RxBytes>;
+
+    /// Take the reference one REMOTE receiver will release and return the reservation that
+    /// carries it. Taken before the descriptor is built, so the chunk cannot be reclaimed
+    /// between the two; given back if the reservation drops without [`ShmReservation::commit`],
+    /// because the frame did not build or the send refused. The reservation owns what it
+    /// needs, so it may outlive the handle it was taken from.
+    fn reserve_for_receiver(self: alloc::sync::Arc<Self>) -> alloc::boxed::Box<dyn ShmReservation>;
+}
+
+/// The reference [`ShmSendBuffer::reserve_for_receiver`] took, and the descriptor naming it.
+pub trait ShmReservation: Send {
+    /// The descriptor this reference is for.
+    fn descriptor(&self) -> ShmDescriptor;
+
+    /// The frame carrying the descriptor has been handed to the link: the receiver now owns the
+    /// reference and releases it when it lets go. A reservation dropped any other way gives the
+    /// reference back.
+    fn commit(self: alloc::boxed::Box<Self>);
+}
+
+/// A shared handle to a [`ShmSendBuffer`] that can sit in a staged message: cloneable, printable,
+/// and equal to itself and to nothing else, because two handles are the same payload exactly
+/// when they are the same buffer.
+#[derive(Clone)]
+pub struct ShmSendHandle(alloc::sync::Arc<dyn ShmSendBuffer>);
+
+impl ShmSendHandle {
+    /// Wrap a buffer.
+    pub fn new(buffer: alloc::sync::Arc<dyn ShmSendBuffer>) -> Self {
+        Self(buffer)
+    }
+
+    /// The bytes the buffer holds.
+    pub fn bytes(&self) -> &[u8] {
+        self.0.bytes()
+    }
+
+    /// The buffer as a receiver of this session holds it; see [`ShmSendBuffer::receiver_view`].
+    pub fn receiver_view(&self) -> Option<crate::link::RxBytes> {
+        self.0.receiver_view()
+    }
+
+    /// Take the reference a remote receiver will release; see
+    /// [`ShmSendBuffer::reserve_for_receiver`].
+    pub fn reserve_for_receiver(&self) -> alloc::boxed::Box<dyn ShmReservation> {
+        self.0.clone().reserve_for_receiver()
+    }
+}
+
+impl core::fmt::Debug for ShmSendHandle {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("ShmSendHandle")
+            .field("len", &self.0.bytes().len())
+            .finish()
+    }
+}
+
+impl PartialEq for ShmSendHandle {
+    fn eq(&self, other: &Self) -> bool {
+        alloc::sync::Arc::ptr_eq(&self.0, &other.0)
+    }
+}
+
+impl Eq for ShmSendHandle {}
+
 /// R3040 -- the RECEIVING end of zenoh's SHM handoff counters.
 ///
 /// A zenoh sender that puts a shared-memory buffer on a reliable link keeps a
@@ -491,6 +573,126 @@ pub trait ShmResolver {
 pub trait ShmHandoff: Send + Sync {
     /// One shared-memory slice of a message of priority `band` has been received.
     fn on_rx(&self, band: usize);
+}
+
+/// Test double for the SENDING side (R3062): a buffer a message can be sent from, that counts the
+/// references taken for receivers and what became of each, so a test reads whether the reference
+/// of a frame that left was kept and the reference of a frame that did not was given back.
+///
+/// Gated by the union of its users' gates and by nothing wider: under `-D warnings` an item
+/// nobody reads is an error, and the two users (the staged-reply tests of `query`, and the local
+/// projection test of `reply`) each read every item, so the module exists exactly when one of
+/// them does.
+#[cfg(all(
+    test,
+    feature = "query-queryable",
+    any(
+        all(feature = "codec-response", feature = "codec-frame"),
+        feature = "rx-shared-bytes"
+    )
+))]
+pub(crate) mod send_test_support {
+    use super::{ShmDescriptor, ShmReservation, ShmSendBuffer};
+    use std::boxed::Box;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+    use std::vec::Vec;
+
+    /// What happened to the references the buffer reserved.
+    #[derive(Default)]
+    pub(crate) struct Reservations {
+        pub(crate) taken: AtomicUsize,
+        pub(crate) committed: AtomicUsize,
+        pub(crate) returned: AtomicUsize,
+    }
+
+    impl Reservations {
+        pub(crate) fn counts(&self) -> (usize, usize, usize) {
+            (
+                self.taken.load(Ordering::SeqCst),
+                self.committed.load(Ordering::SeqCst),
+                self.returned.load(Ordering::SeqCst),
+            )
+        }
+    }
+
+    /// A buffer whose bytes live in storage the test keeps, so a receiver view can be told from
+    /// a copy by the address of its bytes.
+    pub(crate) struct FakeSendBuffer {
+        pub(crate) storage: Arc<Vec<u8>>,
+        pub(crate) reservations: Arc<Reservations>,
+    }
+
+    impl FakeSendBuffer {
+        pub(crate) fn new(bytes: &[u8]) -> (Arc<Self>, Arc<Reservations>) {
+            let reservations = Arc::new(Reservations::default());
+            let buffer = Arc::new(Self {
+                storage: Arc::new(bytes.to_vec()),
+                reservations: reservations.clone(),
+            });
+            (buffer, reservations)
+        }
+
+        /// The descriptor every reservation of this buffer names.
+        pub(crate) fn descriptor() -> ShmDescriptor {
+            ShmDescriptor {
+                data_len: 11,
+                metadata_id: 7,
+                metadata_index: 3,
+                generation: 5,
+            }
+        }
+    }
+
+    impl ShmSendBuffer for FakeSendBuffer {
+        fn bytes(&self) -> &[u8] {
+            &self.storage
+        }
+
+        fn receiver_view(&self) -> Option<crate::link::RxBytes> {
+            #[cfg(feature = "rx-shared-bytes")]
+            {
+                let storage: Arc<dyn crate::link::RxStorage> = self.storage.clone();
+                crate::link::RxBytes::shared(storage, 0..self.storage.len())
+            }
+            #[cfg(not(feature = "rx-shared-bytes"))]
+            {
+                Some(crate::link::RxBytes::from(self.storage.to_vec()))
+            }
+        }
+
+        fn reserve_for_receiver(self: Arc<Self>) -> Box<dyn ShmReservation> {
+            self.reservations.taken.fetch_add(1, Ordering::SeqCst);
+            Box::new(FakeReservation {
+                reservations: self.reservations.clone(),
+                committed: false,
+            })
+        }
+    }
+
+    struct FakeReservation {
+        reservations: Arc<Reservations>,
+        committed: bool,
+    }
+
+    impl ShmReservation for FakeReservation {
+        fn descriptor(&self) -> ShmDescriptor {
+            FakeSendBuffer::descriptor()
+        }
+
+        fn commit(mut self: Box<Self>) {
+            self.committed = true;
+            self.reservations.committed.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    impl Drop for FakeReservation {
+        fn drop(&mut self) {
+            if !self.committed {
+                self.reservations.returned.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+    }
 }
 
 /// Test doubles for the receive side, shared by every registry that un-swaps a

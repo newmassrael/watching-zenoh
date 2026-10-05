@@ -6800,3 +6800,12 @@ mod tests;
     feature = "declare-keyexpr"
 ))]
 mod shm_query_value_tests;
+
+#[cfg(all(
+    test,
+    feature = "session-extshm",
+    feature = "query-get",
+    feature = "query-queryable",
+    feature = "codec-response-final"
+))]
+mod shm_reply_tests;
