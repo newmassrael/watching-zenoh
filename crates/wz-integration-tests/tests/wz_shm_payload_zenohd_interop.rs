@@ -88,6 +88,7 @@ use wz_runtime_tokio::shm_provider::{
 use wz_runtime_tokio::sync::Mutex;
 use wz_runtime_tokio_test_support::zenoh_interop_session_init_params;
 use wz_session_core::extshm::{ShmDescriptor, ShmResolver};
+use wz_session_core::link::RxBytes;
 use wz_session_core::locator::parse_any_locator;
 use wz_session_core::session_timeouts::SessionTimeouts;
 
@@ -121,16 +122,33 @@ struct CountingResolver {
     seen: Arc<StdMutex<Vec<ShmDescriptor>>>,
 }
 
-impl ShmResolver for CountingResolver {
-    fn resolve(&self, descriptor: &ShmDescriptor) -> Option<Vec<u8>> {
+impl CountingResolver {
+    /// Note one descriptor and whether it resolved.
+    fn count<T>(&self, descriptor: &ShmDescriptor, resolved: &Option<T>) {
         self.seen.lock().expect("seen").push(*descriptor);
-        let bytes = self.inner.resolve(descriptor);
-        let counter = if bytes.is_some() {
+        let counter = if resolved.is_some() {
             &self.resolved
         } else {
             &self.refused
         };
         counter.fetch_add(1, Ordering::SeqCst);
+    }
+}
+
+impl ShmResolver for CountingResolver {
+    fn resolve(&self, descriptor: &ShmDescriptor) -> Option<Vec<u8>> {
+        let bytes = self.inner.resolve(descriptor);
+        self.count(descriptor, &bytes);
+        bytes
+    }
+
+    /// The path the session reads a payload through: the production resolver's own,
+    /// which hands the bytes up where they lie on the page, so the references this
+    /// leg reads back off zenoh's headers are given back by the drop of the
+    /// delivered sample and not by a copy having been made (R3050).
+    fn resolve_shared(&self, descriptor: &ShmDescriptor) -> Option<RxBytes> {
+        let bytes = self.inner.resolve_shared(descriptor);
+        self.count(descriptor, &bytes);
         bytes
     }
 }
@@ -144,6 +162,12 @@ enum RunMode {
     /// other one at once, so that zenoh's OWN watchdog validator can be watched
     /// deciding between a chunk wz still holds and chunks wz has let go of.
     WatchdogProbe,
+    /// The production path end to end (R3050): the resolver is the production one,
+    /// the payloads are delivered as the pages they lie on, and the application
+    /// KEEPS the first sample it is handed and lets go of the rest by returning
+    /// from its callback. What is kept is then a sample and not a hold built by the
+    /// test, so the chunk's survival is what holding a sample does.
+    RetainedSample,
 }
 
 /// The resolver of [`RunMode::WatchdogProbe`]: the first descriptor is linked and
@@ -278,8 +302,13 @@ struct ZenohToWz {
     /// chunk confirmed and not invalidated), where a chunk its receiver
     /// acknowledged is invalidated within about 200 ms. Read off zenoh's own header.
     uninvalidated: Vec<(ShmDescriptor, Option<bool>)>,
-    /// What zenoh's validator did, in [`RunMode::WatchdogProbe`] only.
+    /// What zenoh's validator did, in [`RunMode::WatchdogProbe`] and
+    /// [`RunMode::RetainedSample`] only.
     watchdog: Option<WatchdogOutcome>,
+    /// In [`RunMode::RetainedSample`] only: whether the reference zenoh took for the
+    /// chunk of the sample the application kept was given back once that sample was
+    /// dropped.
+    kept_given_back: Option<bool>,
     /// Everything the publisher printed.
     zenoh_log: String,
 }
@@ -362,12 +391,14 @@ async fn zenoh_publishes_to_wz_in(offer_shm: bool, mode: RunMode) -> Option<Zeno
     let seen: Arc<StdMutex<Vec<ShmDescriptor>>> = Arc::default();
     let held: Arc<StdMutex<Option<ChunkHold>>> = Arc::default();
     match mode {
-        RunMode::Resolving => session.set_shm_resolver(Box::new(CountingResolver {
-            inner: PosixShmResolver,
-            resolved: resolved.clone(),
-            refused: refused.clone(),
-            seen: seen.clone(),
-        })),
+        RunMode::Resolving | RunMode::RetainedSample => {
+            session.set_shm_resolver(Box::new(CountingResolver {
+                inner: PosixShmResolver,
+                resolved: resolved.clone(),
+                refused: refused.clone(),
+                seen: seen.clone(),
+            }))
+        }
         RunMode::WatchdogProbe => session.set_shm_resolver(Box::new(HoldingResolver {
             held: held.clone(),
             seen: seen.clone(),
@@ -375,12 +406,22 @@ async fn zenoh_publishes_to_wz_in(offer_shm: bool, mode: RunMode) -> Option<Zeno
     }
     let received: Arc<StdMutex<Vec<Vec<u8>>>> = Arc::default();
     let sink = received.clone();
+    // The sample the application keeps in `RunMode::RetainedSample`: the shareable
+    // payload of the FIRST one, which is a second reference to the page it lies on.
+    let kept: Arc<StdMutex<Option<RxBytes>>> = Arc::default();
+    let keeper = kept.clone();
     // The routed declaration: a zenoh publisher sends nothing to a peer that has
     // not told it there is a subscriber.
     let _subscriber = session.declare_subscriber(
         "demo/example/**",
         SubscribeOptions::default(),
         move |sample| {
+            if mode == RunMode::RetainedSample {
+                let mut kept = keeper.lock().expect("kept");
+                if kept.is_none() {
+                    *kept = sample.payload_shared().cloned();
+                }
+            }
             sink.lock()
                 .expect("received")
                 .push(sample.payload().to_vec());
@@ -405,12 +446,16 @@ async fn zenoh_publishes_to_wz_in(offer_shm: bool, mode: RunMode) -> Option<Zeno
             // Resolving: three samples DELIVERED. Probing: three descriptors SEEN,
             // since all but the first are refused and so deliver nothing.
             let enough = match mode {
-                RunMode::Resolving => probe.lock().expect("received").len() >= 3,
+                RunMode::Resolving | RunMode::RetainedSample => {
+                    probe.lock().expect("received").len() >= 3
+                }
                 RunMode::WatchdogProbe => probe_seen.lock().expect("seen").len() >= 3,
             };
             if enough {
                 return match mode {
-                    RunMode::WatchdogProbe => probe_watchdog(&probe_seen).await,
+                    RunMode::WatchdogProbe | RunMode::RetainedSample => {
+                        probe_watchdog(&probe_seen).await
+                    }
                     RunMode::Resolving => None,
                 };
             }
@@ -468,6 +513,24 @@ async fn zenoh_publishes_to_wz_in(offer_shm: bool, mode: RunMode) -> Option<Zeno
     }
     // The hold ends here, which gives back the reference zenoh took for it.
     drop(held);
+    // The kept sample ends here, and with it the last range of the page it lies on:
+    // the reference zenoh took for wz must then come back, read off zenoh's own
+    // header. It was NOT given back while the sample lived (the probe above read the
+    // chunk valid for that whole time), so this is the drop doing it.
+    let mut kept_given_back = None;
+    if mode == RunMode::RetainedSample {
+        drop(kept.lock().expect("kept").take());
+        let first = descriptors.first().copied();
+        let mut back = false;
+        for _ in 0..60 {
+            back = first.is_some_and(|d| given_back(&reference_state(&d)));
+            if back {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        kept_given_back = Some(back);
+    }
     Some(ZenohToWz {
         negotiated,
         received,
@@ -476,6 +539,7 @@ async fn zenoh_publishes_to_wz_in(offer_shm: bool, mode: RunMode) -> Option<Zeno
         unreleased,
         uninvalidated,
         watchdog,
+        kept_given_back,
         zenoh_log: read_captured(&mut zenoh_log),
     })
 }
@@ -655,6 +719,69 @@ async fn zenohd_shm_publisher_chunk_wz_holds_stays_valid_while_one_wz_released_i
         outcome.held_stayed_valid,
         "zenoh's validator invalidated the chunk wz was HOLDING, so the bit wz confirms is not the \
          bit zenoh's validator reads:\n{}",
+        run.zenoh_log
+    );
+}
+
+/// Leg 6 -- THE SAMPLE IS THE PAGE, against zenoh's own validator and headers. The
+/// application keeps the first sample it is handed and lets go of the others by
+/// returning from its callback, with the production resolver and nothing built by
+/// the test: a delivered payload is a range of the mapped chunk, so what holds the
+/// chunk is the sample.
+///
+/// Three things are read off zenoh's own headers, in a segment zenoh made. While
+/// the sample lives its chunk stays valid for six validation windows, which is only
+/// true if the bit wz confirms is the bit zenoh's validator clears, held by the
+/// sample's own storage and not by a hold the test made. The chunks of the samples
+/// that were dropped are invalidated, which is the control: it shows the validator
+/// is acting. And once the kept sample is dropped the reference zenoh took for it
+/// comes back, which is the reference given back at the last drop and not before.
+///
+/// The twin of the leg above, which holds a chunk by linking it by hand: that one
+/// proves the confirmation, and this one proves the delivered sample is what
+/// carries it.
+// wz-proves: transport-shm zenoh->wz
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "binary-dep e2e (ZENOHD_SHM=1 build-zenohd.sh: z_pub_shm); Layer Z runs via --ignored"]
+async fn zenohd_shm_publisher_chunk_of_a_sample_wz_keeps_stays_valid_until_the_sample_drops() {
+    let Some(run) = zenoh_publishes_to_wz_in(true, RunMode::RetainedSample).await else {
+        return;
+    };
+    assert!(
+        run.negotiated,
+        "the session did not negotiate SHM, so zenoh sent the payload RAW and this leg measured \
+         nothing about the sample:\n{}",
+        run.zenoh_log
+    );
+    let outcome = run
+        .watchdog
+        .as_ref()
+        .unwrap_or_else(|| panic!("fewer than two descriptors arrived:\n{}", run.zenoh_log));
+    assert!(
+        outcome.released >= 1,
+        "no sample was dropped, so there is no control:\n{}",
+        run.zenoh_log
+    );
+    assert!(
+        outcome.released_still_valid.is_empty(),
+        "zenoh's validator did not invalidate {} of {} chunk(s) of samples wz dropped ({:?}), so \
+         it is not acting and the kept sample's survival proves nothing:\n{}",
+        outcome.released_still_valid.len(),
+        outcome.released,
+        outcome.released_still_valid,
+        run.zenoh_log
+    );
+    assert!(
+        outcome.held_stayed_valid,
+        "zenoh's validator invalidated the chunk of the sample the application KEPT, so the \
+         delivered sample does not hold its chunk:\n{}",
+        run.zenoh_log
+    );
+    assert_eq!(
+        run.kept_given_back,
+        Some(true),
+        "the reference zenoh took for the kept sample's chunk was not given back after the sample \
+         was dropped:\n{}",
         run.zenoh_log
     );
 }

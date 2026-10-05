@@ -6640,7 +6640,12 @@ layer_c1af_cargo_test_shm() {
     # invalidates a parked chunk no one holds. The watchdog module's own three
     # tests and the segment-identity test live in other modules this filter does
     # not select.
-    _runci_guarded_test C1af 17 cargo test -p wz-runtime-tokio --features session-extshm,transport-unicast,transport-link-tcp --lib shm_provider --quiet \
+    # R3050 -- 17 -> 20, MEASURED. The payload of a received shared-memory buffer is
+    # the page and not a copy of it: the owner's later write shows in what the
+    # receiver was handed, the receiver's reference goes back when the last range of
+    # the payload drops and not at the read, and a shared read that fails gives its
+    # reference back as a copy does.
+    _runci_guarded_test C1af 20 cargo test -p wz-runtime-tokio --features session-extshm,transport-unicast,transport-link-tcp --lib shm_provider --quiet \
         || return 1
     # R311y507 — 2 -> 5. The target gained the challenge-response over a real
     # driven handshake plus the two half-mix arms (a ONE-SIDED authenticator must
@@ -16876,7 +16881,11 @@ layer_z_zenohd_interop() {
     # invalidating the ones wz let go of while sparing the one it holds) came back
     # once wz acknowledged what it received. Leg 1 also asserts that zenoh
     # invalidates the chunks it read, which is what the acknowledgement is read by.
-    _runci_guarded_test Z 5 cargo test -p wz-integration-tests \
+    # R3050 -- 5 -> 6, MEASURED: the sample leg (the application keeps the first
+    # sample it is handed, the production resolver delivers it as the page it lies
+    # on, and zenoh's validator keeps that chunk valid until the sample drops, when
+    # the reference comes back), the twin of the watchdog leg that holds by hand.
+    _runci_guarded_test Z 6 cargo test -p wz-integration-tests \
         --test wz_shm_payload_zenohd_interop -- --ignored --quiet --test-threads=1 || return 1
     # R3042 -- the QUERY plane of the same oracle: a reply through shared memory
     # (upstream's `z_queryable_shm`, asked past the size of its ten-chunk pool, which

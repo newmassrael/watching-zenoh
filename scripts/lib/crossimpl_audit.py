@@ -895,7 +895,12 @@ HOST_GATED_CI_TARGETS: dict[str, str] = {
 # the application `z_queryable_shm` the file already registers, so no new class.
 # Counted from the diff: exactly the two `wz-proves` lines the file adds.
 # 981 + 2 = 983, measured by `run-ci.sh --layer A4` at this round's tree.
-FOREIGN_ADJUDICATOR_LINKS = 983
+# R3050 -- 983 -> 984, RISING by one, in the same file: a zenoh publisher's shared-memory
+# chunk that stays valid while the application keeps the sample it arrived in, read
+# off zenoh's own headers, against the application `z_pub_shm` the file already
+# registers, so no new class. Counted from the diff: exactly the one `wz-proves` line
+# the file adds. 983 + 1 = 984, measured by `run-ci.sh --layer A4` at this round's tree.
+FOREIGN_ADJUDICATOR_LINKS = 984
 
 # ── Execution disclosure ────────────────────────────────────────────────────────
 #
