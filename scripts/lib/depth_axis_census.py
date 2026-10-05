@@ -2487,7 +2487,17 @@ PIN_NO_SYMBOL = 0
 # census counts a PATH it can resolve, not an anchor, which is why four anchors are three.
 # The atom is still PARTIAL. READ off the census's own FAIL line, `wz citations: 73 against
 # a pin of 70`; `reached` and `ambiguous` hold at 3 and 2.
-PIN_WZ_CITATIONS = 73
+#
+# R3061 -- 73 -> 84, two atoms. `api-compat-c`'s reason gains the UPDATE that a C queryable
+# is handed the value of a query as the chunk, which names eight wz paths (the shareable
+# query view, the slice collector, the session core's loopback entry point, the C marshal,
+# the UTF-8 check in the byte conversion, and the three files of the witnesses: the
+# same-session differential, the file of the shared-memory legs, and the conversion
+# differential), and `transport-shm`'s gains the UPDATE for the shareable unswap of a query
+# value, which names three (the unswap, the view accessor and the runtime's local leg).
+# Both atoms are still PARTIAL. READ off the census's own FAIL line, `wz citations: 84
+# against a pin of 73`; `reached` and `ambiguous` hold at 3 and 2.
+PIN_WZ_CITATIONS = 84
 # R2626 — 44 -> 42, and this one is worth a sentence because it HELD through
 # every earlier retirement in this run (R2612, R2622). `time-hlc`'s reason is the
 # first retiree carrying AMBIGUOUS citations of its own: its oldest clauses cite
