@@ -2464,7 +2464,14 @@ PIN_NO_SYMBOL = 0
 # allocator and the provider's layout reporting). The atom is still PARTIAL. READ off the
 # census's own FAIL line, `wz citations: 61 against a pin of 59`; `reached` and `ambiguous`
 # hold at 3 and 2.
-PIN_WZ_CITATIONS = 61
+#
+# R3058 -- 61 -> 64, two atoms. `api-compat-c`'s reason gains the UPDATE that the C ABI's
+# provider is the runtime's, which cites two wz anchors (the callback adapter and the
+# allocation differential), and `transport-shm`'s gains the UPDATE that pins three of the
+# provider's behaviours, which cites one (the blocking policy's test). Both atoms are still
+# PARTIAL. READ off the census's own FAIL line, `wz citations: 64 against a pin of 61`;
+# `reached` and `ambiguous` hold at 3 and 2.
+PIN_WZ_CITATIONS = 64
 # R2626 — 44 -> 42, and this one is worth a sentence because it HELD through
 # every earlier retirement in this run (R2612, R2622). `time-hlc`'s reason is the
 # first retiree carrying AMBIGUOUS citations of its own: its oldest clauses cite
