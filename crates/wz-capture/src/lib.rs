@@ -3138,6 +3138,25 @@ impl DissectionDrops {
     }
 }
 
+/// How many flows each of the two tables has ever held, evicted ones included.
+///
+/// [`DissectionDrops::flows`] cannot answer this: it counts evictions from BOTH
+/// tables as one number, so `held + drops.flows` over-reads the stream table on
+/// any capture that evicted a datagram flow. A consumer that wants to say "this
+/// capture has no TCP flow, so a retransmission count of zero is a fact and not
+/// an absence" needs the stream table's own count.
+///
+/// It counts TABLE ENTRIES, not distinct 5-tuples: a flow evicted and then
+/// seen again enters the table again and is counted again.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct FlowsSeen {
+    /// Entries the stream (TCP) table has held: the flows in it now plus the
+    /// stream flows evicted from it.
+    pub stream: usize,
+    /// The same for the datagram table.
+    pub datagram: usize,
+}
+
 /// R311y605 (F5) — the totals across a whole dissection.
 ///
 /// Every counter this crate had was PER-OBJECT by design: the TCP anomaly
@@ -3767,6 +3786,14 @@ impl Dissection {
         DissectionDrops {
             flows: self.carry.flows(),
             ..self.drops
+        }
+    }
+
+    /// How many flows each table has ever held. See [`FlowsSeen`].
+    pub fn flows_seen(&self) -> FlowsSeen {
+        FlowsSeen {
+            stream: self.flows.len() + self.carry.stream_flows(),
+            datagram: self.datagram_flows.len() + self.carry.datagram_flows(),
         }
     }
 
@@ -10919,6 +10946,62 @@ mod datagram_tests {
             held > limits.max_flows_per_table.unwrap(),
             "and it must be the TOTAL, not one table's share — the whole point \
              is that a caller reading the per-table field sizes for half"
+        );
+    }
+
+    /// A datagram flow evicted from its table is not a stream flow.
+    ///
+    /// `drops.flows` is one number over two tables, so a consumer that added it
+    /// to the stream table's held count read TCP flows on a capture that has
+    /// none. The fixture is that capture: six datagram 5-tuples through a table
+    /// of two, and no TCP packet at all.
+    #[test]
+    fn a_datagram_eviction_is_not_a_stream_flow() {
+        let msg = alloc::vec![wz_session_core::wire_const::T_MID_KEEP_ALIVE];
+        let mut d = Dissection::with_limits(DissectionLimits {
+            max_flows_per_table: Some(2),
+            ..DissectionLimits::default()
+        });
+        for i in 0..6u8 {
+            d.push_packet(
+                LINKTYPE_ETHERNET,
+                i as usize,
+                &udp_packet([10, 1, 1, i], 7447, [10, 1, 2, i], 7447, &msg),
+            );
+        }
+        assert_eq!(
+            d.drops().flows,
+            4,
+            "four datagram flows were evicted from a table of two"
+        );
+        assert_eq!(
+            d.flows_seen(),
+            FlowsSeen {
+                stream: 0,
+                datagram: 6
+            },
+            "no TCP packet was pushed, so the stream table never held a flow, \
+             whatever the combined eviction count says"
+        );
+
+        // Then five stream 5-tuples through the same cap: the two counts must
+        // move independently and `drops.flows` stay their sum.
+        for i in 0..5u8 {
+            let mut pkt = tcp_packet(1000, &framed_keepalive());
+            pkt[26] = 100 + i;
+            d.push_packet(LINKTYPE_ETHERNET, 100 + i as usize, &pkt);
+        }
+        assert_eq!(
+            d.flows_seen(),
+            FlowsSeen {
+                stream: 5,
+                datagram: 6
+            }
+        );
+        assert_eq!(
+            d.drops().flows,
+            4 + 3,
+            "three stream flows were evicted from a table of two, on top of the four"
         );
     }
 

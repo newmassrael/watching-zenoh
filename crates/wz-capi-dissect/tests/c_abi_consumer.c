@@ -367,6 +367,35 @@ static int check_live_door(void) {
         CHECK(rc == WZ_DISSECT_ERR_INVALID_ARG, "null out retention rc=%d", rc);
     }
 
+    /* (ABI 24) -- WHAT THIS HANDLE HAS LOST OR DOUBTED. The same five
+     * keepalives and the one packet on an unreadable link, which the skip
+     * census counts. Every push was a datagram, so the handle has held one
+     * datagram flow and no stream flow: `flows_seen.stream` is 0, and the
+     * retransmission count beside it is an absence and not a measurement --
+     * the one thing the document exists to let a consumer say. */
+    {
+        char *health = NULL;
+        rc = wz_dissect_live_health(h, &health);
+        CHECK(rc == WZ_DISSECT_OK, "live_health rc=%d", rc);
+        CHECK(health != NULL, "OK must come with a string");
+        CHECK(strstr(health, "\"flows_seen\":{\"stream\":0,\"datagram\":1}") != NULL,
+              "no TCP packet went in, so the stream table never held a flow: %s",
+              health);
+        CHECK(strstr(health, "\"retransmits\":0") != NULL,
+              "the counter is there and zero: %s", health);
+        CHECK(strstr(health, "\"unsupported_link_type\":1") != NULL,
+              "the unreadable packet is in the summary's own skip census: %s",
+              health);
+        wz_dissect_string_free(health);
+
+        health = NULL;
+        rc = wz_dissect_live_health(NULL, &health);
+        CHECK(rc == WZ_DISSECT_ERR_INVALID_ARG && health == NULL,
+              "null handle health rc=%d", rc);
+        rc = wz_dissect_live_health(h, NULL);
+        CHECK(rc == WZ_DISSECT_ERR_INVALID_ARG, "null out health rc=%d", rc);
+    }
+
     /* Nulls are refused before anything is dereferenced. A panic unwinding
      * across extern "C" is undefined behaviour and these are the calls that
      * would trip it. */
@@ -1594,7 +1623,7 @@ int main(void) {
         const char *name;
         unsigned revision;
         char *doc;
-    } revisioned[5];
+    } revisioned[6];
     revisioned[0].name = "census";
     /* R2119 (open-debt item 455) -- 2: the census announced `first_packet`'s
      * retirement beside its successor `first_anchor`.
@@ -1828,6 +1857,19 @@ int main(void) {
         rc = wz_dissect_live_retention(retained, &revisioned[4].doc);
         CHECK(rc == WZ_DISSECT_OK, "retention rc=%d", rc);
         wz_dissect_live_close(retained);
+    }
+    /* (ABI 24) -- the health document, from an empty handle for the same
+     * reason: an empty handle still answers. */
+    revisioned[5].name = "health";
+    revisioned[5].revision = 1;
+    revisioned[5].doc = NULL;
+    {
+        wz_dissect_live *healthy = NULL;
+        rc = wz_dissect_live_open(WZ_DISSECT_LIMITS_NONE, &healthy);
+        CHECK(rc == WZ_DISSECT_OK, "health handle rc=%d", rc);
+        rc = wz_dissect_live_health(healthy, &revisioned[5].doc);
+        CHECK(rc == WZ_DISSECT_OK, "health rc=%d", rc);
+        wz_dissect_live_close(healthy);
     }
 
     /* R2182 -- THE ENVELOPE MAY CARRY MORE AFTER THE REVISION, and this loop

@@ -805,6 +805,24 @@ impl LiveDissection {
         wz_capture::retention_json::retention_json(&self.dissection)
     }
 
+    /// WHAT THIS HANDLE HAS LOST OR DOUBTED: the summary's `health` object and
+    /// the count of flows its stream counters are over.
+    ///
+    /// # `&self`, for the reason [`Self::retention`] is
+    ///
+    /// The counters are read where they already sit, so asking changes nothing
+    /// the next drain returns and a consumer can call it as often as it draws.
+    ///
+    /// # One emitter, not a second selection of the counters
+    ///
+    /// The `health` key is [`wz_capture::report::health_json`] over the
+    /// handle's own dissection, which is what the container summary renders over
+    /// its own: a consumer that reads the summary's health reads this one's with
+    /// the same code, and neither can report a figure the other omits.
+    pub fn health(&self) -> String {
+        wz_capture::report::health_document_json(&self.dissection)
+    }
+
     /// THE FIELD DOCUMENT OF WHAT THIS HANDLE HAS SEEN, each row
     /// carrying the coordinates its record carries.
     ///

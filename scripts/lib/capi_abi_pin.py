@@ -50,7 +50,7 @@ import subprocess
 import sys
 
 # The pinned pair. Edit BOTH halves deliberately -- see the module doc.
-EXPECTED_VERSION = 23
+EXPECTED_VERSION = 24
 
 # R2108 (open-debt item 525) -- THE RECORD'S LAYOUT, pinned HERE and read from
 # the artifact through `wz_dissect_record_layout`.
@@ -184,6 +184,15 @@ EXPECTED_SYMBOLS = {
     # census documents describe the messages and this describes the reader's
     # memory of them.
     "wz_dissect_live_retention",
+    # (ABI 24) — what an open handle has LOST OR DOUBTED: the summary's `health`
+    # object over a live handle, beside the count of flows its stream counters
+    # are over. The memory rule does not move: a `char*` released by
+    # `wz_dissect_string_free`, from the handle `wz_dissect_live_open` made, and
+    # the handle is `const` because nothing is drained or settled. It is its own
+    # symbol because the summary needs the whole capture in one buffer, which a
+    # running tap never has, and not a key of the retention document because that
+    # one describes what is held and this one what the wire and the ceilings cost.
+    "wz_dissect_live_health",
     # R2171 (open-debt item 547) — the door BETWEEN the two families above and
     # the nine document doors below. It hands back the same opaque handle
     # `wz_dissect_live_open` does, so the memory rule does not move with it:

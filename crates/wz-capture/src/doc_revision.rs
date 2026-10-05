@@ -1658,6 +1658,25 @@ pub const DOCUMENT_HISTORY: &[DocumentShape] = &[
         planes: &[],
         carries: &[],
     },
+    // What a live handle has lost or doubted, in the summary's own words.
+    //
+    // A document of its own because the summary is the only other place the
+    // `health` object lives and a summary needs the whole capture in one
+    // buffer, which a running tap never has. The `health` key holds that object
+    // unchanged, from the same emitter, so no key of it is declared a second
+    // time here with a different meaning; `flows_seen` is the one addition, the
+    // count of flows the stream counters inside it are summed over. No value
+    // family and no carried word: every key is a count, a nested group, or a
+    // list of layer names.
+    DocumentShape {
+        document: HEALTH,
+        revision: 1,
+        keys: HEALTH_R1_KEYS,
+        retiring: &[],
+        families: &[],
+        planes: &[],
+        carries: &[],
+    },
 ];
 
 // The key sets below are MEASURED, never transcribed: each was printed by the
@@ -1685,6 +1704,9 @@ pub const SELECTION: &str = "selection";
 /// What a live handle still holds and the ceilings that bound it
 /// (`wz_dissect_live_retention`).
 pub const RETENTION: &str = "retention";
+/// What a live handle has lost or doubted, and how many flows that is over
+/// (`wz_dissect_live_health`).
+pub const HEALTH: &str = "health";
 
 /// The census document's key set at revision 1.
 ///
@@ -8144,6 +8166,104 @@ pub const RETENTION_R1_KEYS: &[&str] = &[
 /// null, now a number, a string or null), not a key; see the row.
 pub const RETENTION_R2_KEYS: &[&str] = RETENTION_R1_KEYS;
 
+/// The health document's key set at revision 1: the envelope, the summary's
+/// whole `health` object, and `flows_seen`.
+///
+/// MEASURED off the document by the pin test in `wz-capi-dissect`, which is the
+/// one that crosses the ABI, and pasted back; see the note above
+/// `CENSUS_R1_KEYS`. Spelled out and not built from the summary's table, for
+/// the reason `CENSUS_R3_KEYS` gives: a pin that follows its subject is not a
+/// pin. `stream` and `datagram` appear only under `flows_seen`.
+pub const HEALTH_R1_KEYS: &[&str] = &[
+    "bytes_absent",
+    "caps",
+    "capture_reported_drops",
+    "completed",
+    "datagram",
+    "desyncs",
+    "document",
+    "dropped_by_limits",
+    "duplicates",
+    "encapsulation_depth_bound",
+    "encapsulation_too_deep",
+    "encapsulations",
+    "evicted",
+    "expired",
+    "flows",
+    "flows_seen",
+    "fragments",
+    "frames",
+    "frames_per_flow",
+    "framing",
+    "gap_bytes_missing",
+    "gaps",
+    "gaps_forced",
+    "gre_payload",
+    "gre_payloads",
+    "health",
+    "held",
+    "inert_counters",
+    "ip_checksum_absent",
+    "ip_checksum_invalid",
+    "ip_checksum_valid",
+    "ip_fragment_pending",
+    "ipv4_fragment",
+    "ipv6_extension_chain",
+    "ipv6_fragment",
+    "link_types",
+    "malformed",
+    "max_flows_per_table",
+    "max_scout_askers",
+    "missing",
+    "name",
+    "not_ip",
+    "not_this_protocol",
+    "not_transport",
+    "not_transport_protos",
+    "open",
+    "out_of_order",
+    "out_of_window",
+    "overlapping",
+    "partial_overlaps",
+    "pieces",
+    "recoveries",
+    "reserved_headers",
+    "resync_skipped_bytes",
+    "retransmits",
+    "revision",
+    "scout_askers",
+    "scouting",
+    "sequence",
+    "skipped",
+    "skipped_packets",
+    "skips",
+    "stream",
+    "stream_bytes",
+    "stream_bytes_per_direction",
+    "streams",
+    "too_deep_protos",
+    "total",
+    "transport_checksum_absent",
+    "transport_checksum_invalid",
+    "transport_checksum_valid",
+    "truncated",
+    "tunnel_checksum_absent",
+    "tunnel_checksum_invalid",
+    "tunnel_checksum_valid",
+    "unaccounted_batch_bytes",
+    "uncorroborated_layers",
+    "undefined_mandatory_exts",
+    "unfinished",
+    "unfinished_bytes",
+    "unsupported_link_type",
+    "unwalked_encapsulation",
+    "vsock_non_payload",
+    "without_resolution",
+    "ws_desyncs",
+    "ws_recoveries",
+    "ws_resync_skipped_bytes",
+];
+
 /// The field document's key set at revision 23: revision 22's, by name.
 ///
 /// The revision moved the JSON type of two cells (a `uint` field's `value` and a
@@ -9737,6 +9857,9 @@ mod tests {
             // To 2 when `oldest_ts_ns` became a number, a string or null: a
             // nanosecond clock is past 2^53.
             (RETENTION, 2),
+            // What a live handle has lost or doubted: the summary's `health`
+            // object and the count of flows its stream counters are over.
+            (HEALTH, 1),
         ] {
             named.push(name);
             assert_eq!(revision(name), Some(expected), "{name}");

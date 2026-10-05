@@ -332,6 +332,7 @@ pub extern "C" fn wz_dissect_abi_version() -> c_int {
     // 21, for `wz_dissect_pcap_frame_bytes`.
     // 22, for `wz_dissect_live_fields_since`.
     // 23, for `wz_dissect_live_retention`.
+    // 24, for `wz_dissect_live_health`.
     WZ_DISSECT_ABI_REVISION
 }
 
@@ -349,7 +350,7 @@ pub extern "C" fn wz_dissect_abi_version() -> c_int {
 /// It lives AFTER the function rather than above it on purpose: an item placed
 /// between a doc comment and the item it documents takes that doc, which is
 /// the doc-ownership defect the C1bz budget records.
-pub const WZ_DISSECT_ABI_REVISION: c_int = 23;
+pub const WZ_DISSECT_ABI_REVISION: c_int = 24;
 
 /// R2108 (open-debt item 525) — THE RECORD'S LAYOUT, reported by the artifact.
 ///
@@ -2589,6 +2590,48 @@ pub unsafe extern "C" fn wz_dissect_live_retention(
     }
     // SAFETY: caller contract above.
     write_string(unsafe { (*handle).retention() }, out)
+}
+
+/// WHAT A LIVE HANDLE HAS LOST OR DOUBTED, read where it already sits.
+///
+/// The summary's `health` object (`wz_dissect_pcap_summary`) needs the whole
+/// capture in one buffer, which a running tap never has. This reads the same
+/// counters off the handle, with the same emitter, so a consumer parses it with
+/// the code it already has for the summary's.
+///
+/// # The document
+///
+/// `{"document":{"name":"health","revision":R},"health":{...},
+///   "flows_seen":{"stream":S,"datagram":D}}`
+///
+/// `health` is the summary's `health` object byte for byte. `flows_seen` is how
+/// many flows each flow table has held, evicted ones included: the denominator
+/// of the stream counters inside `health`. It is NOT the retention document's
+/// `held.stream_flows` plus `dropped_by_limits.flows`, because the second counts
+/// evictions from both tables as one number.
+///
+/// # A READ, and the handle is `const` to say so
+///
+/// Nothing is handed out and no id is settled, so the next
+/// [`wz_dissect_live_drain`] returns exactly what it would have.
+///
+/// Returns [`WZ_DISSECT_ERR_INVALID_ARG`] and no string for a null `handle` or
+/// `out`. The string is released by [`wz_dissect_string_free`].
+///
+/// # Safety
+/// `handle` must be a handle from [`wz_dissect_live_open`] or
+/// [`wz_dissect_pcap_replay`] that has not been closed, and `out` a writable
+/// pointer to a `*mut c_char`. Neither may be null.
+#[no_mangle]
+pub unsafe extern "C" fn wz_dissect_live_health(
+    handle: *const live::LiveDissection,
+    out: *mut *mut c_char,
+) -> c_int {
+    if handle.is_null() || out.is_null() {
+        return WZ_DISSECT_ERR_INVALID_ARG;
+    }
+    // SAFETY: caller contract above.
+    write_string(unsafe { (*handle).health() }, out)
 }
 
 /// R2453 (open-debt item 700) — THE FEED ENDED: spend the patience a capture's
@@ -5926,7 +5969,13 @@ mod tests {
         // 22, for `wz_dissect_live_fields_since`: the field document's rows
         // after a cursor, from a live handle. One symbol; the memory rule and
         // the record layout stay put.
-        assert_eq!(wz_dissect_abi_version(), 23);
+        // 23, for `wz_dissect_live_retention`: what an open handle holds,
+        // beside its ceilings. One symbol, a `char*` released by
+        // `wz_dissect_string_free`.
+        // 24, for `wz_dissect_live_health`: the summary's `health` object over
+        // a live handle, with the count of flows its stream counters are over.
+        // One symbol, the same release rule.
+        assert_eq!(wz_dissect_abi_version(), 24);
     }
 
     /// R311y913 (unregistered item 435) — THE LINKED SURFACE CAN SAY WHAT IT
@@ -6512,6 +6561,7 @@ mod tests {
             // Built by a door that takes a handle, so it comes from one.
             (rev::SELECTION, selection_documents()),
             (rev::RETENTION, retention_documents()),
+            (rev::HEALTH, health_documents()),
         ];
 
         let mut failures: Vec<String> = Vec::new();
@@ -6656,6 +6706,11 @@ mod tests {
                     .next()
                     .expect("a document"),
             ),
+            // Declares no plane either: every key is a count or a group.
+            (
+                rev::HEALTH,
+                health_documents().into_iter().next().expect("a document"),
+            ),
             (rev::CENSUS, call_census(&stream).expect("the census door")),
             (
                 rev::FIELDS,
@@ -6773,6 +6828,9 @@ mod tests {
             (rev::SELECTION, selection_documents()),
             // With a clock and without, for the reason `retention_documents` gives.
             (rev::RETENTION, retention_documents()),
+            // A stream flow and datagram flows in one handle, and a lone
+            // datagram in the other.
+            (rev::HEALTH, health_documents()),
             (
                 rev::CENSUS,
                 vec![call_census(&stream).expect("the census door")],
@@ -8001,6 +8059,118 @@ mod tests {
         let doc = live_retention(handle).expect("an empty handle still answers");
         assert_eq!(in_group(&doc, "serial_frames", "frames"), "0");
         assert_eq!(in_group(&doc, "serial_frames", "oldest_ts_ns"), "null");
+        unsafe { wz_dissect_live_close(handle) };
+    }
+
+    /// `wz_dissect_live_health`, the way C calls it, with the refusal code when
+    /// it refuses.
+    fn live_health(handle: *const live::LiveDissection) -> Result<String, c_int> {
+        let mut out: *mut c_char = core::ptr::null_mut();
+        let rc = unsafe { wz_dissect_live_health(handle, &mut out) };
+        if rc != WZ_DISSECT_OK {
+            assert!(out.is_null(), "an error must hand back no string");
+            return Err(rc);
+        }
+        assert!(!out.is_null(), "OK must come with a string");
+        let doc = unsafe { std::ffi::CStr::from_ptr(out) }
+            .to_str()
+            .expect("utf8")
+            .to_string();
+        unsafe { wz_dissect_string_free(out) };
+        Ok(doc)
+    }
+
+    /// The health document as it CROSSES THE ABI, for the gates that hold every
+    /// document this library emits to a table.
+    ///
+    /// Two handles, because the key set is one shape but the values the pin
+    /// cannot see differ: one replayed from a capture that holds a stream flow,
+    /// datagram flows and a scout, and one fed a single datagram.
+    fn health_documents() -> Vec<String> {
+        let capture = verdict_capture();
+        let replayed = replay(&capture, WZ_DISSECT_LIMITS_NONE).expect("the replay opens");
+        let rich = live_health(replayed).expect("a replayed handle");
+        unsafe { wz_dissect_live_close(replayed) };
+
+        let fed = open_live(WZ_DISSECT_LIMITS_NONE).expect("the preset opens");
+        let packet = udp_packet([10, 0, 0, 1], 7447, [10, 0, 0, 2], 7447, &KEEPALIVE);
+        push_live(fed, WZ_DISSECT_NO_TIMESTAMP, &packet);
+        let datagram_only = live_health(fed).expect("a fed handle");
+        unsafe { wz_dissect_live_close(fed) };
+        vec![rich, datagram_only]
+    }
+
+    /// The `health` key of a live handle's document is the summary's `health`
+    /// object over the same bytes, and `flows_seen` says how many flows of each
+    /// kind the stream counters are over.
+    ///
+    /// The three directions share no code beyond the emitter the claim is
+    /// about: the container summary, the retention document's own count of what
+    /// is held, and the new count. The datagram-only handle is the case the
+    /// consumer's rule rests on: with no TCP flow there is no stream counter to
+    /// read, and the document has to say so with a zero.
+    #[test]
+    fn the_health_door_reads_the_summarys_health_and_counts_the_flows_it_is_over() {
+        let capture = verdict_capture();
+        let summary = call_summary(&capture).expect("the summary door reads a pcap");
+        let handle = replay(&capture, WZ_DISSECT_LIMITS_NONE).expect("the replay opens");
+        let doc = live_health(handle).expect("a replayed handle");
+        let retention = live_retention(handle).expect("the same handle");
+        unsafe { wz_dissect_live_close(handle) };
+
+        assert_eq!(
+            in_group(&doc, "health", "health"),
+            in_group(&summary, "health", "health"),
+            "one emitter renders both, so the two health objects over the same \
+             bytes are the same bytes\nlive:    {doc}\nsummary: {summary}"
+        );
+        assert_eq!(
+            in_group(&doc, "stream", "stream"),
+            in_group(&retention, "stream_flows", "stream_flows"),
+            "nothing was evicted, so the flows seen are the flows held: {doc}"
+        );
+        assert_eq!(
+            in_group(&doc, "stream", "datagram"),
+            in_group(&retention, "datagram_flows", "datagram_flows"),
+            "{doc}"
+        );
+        assert_eq!(in_group(&doc, "stream", "stream"), "1", "{doc}");
+
+        let datagram_only = &health_documents()[1];
+        assert_eq!(
+            in_group(datagram_only, "stream", "stream"),
+            "0",
+            "a capture with no TCP packet has no stream flow: {datagram_only}"
+        );
+        assert_eq!(
+            in_group(datagram_only, "stream", "datagram"),
+            "1",
+            "{datagram_only}"
+        );
+        assert_eq!(
+            in_group(datagram_only, "retransmits", "retransmits"),
+            "0",
+            "{datagram_only}"
+        );
+    }
+
+    #[test]
+    fn the_health_door_refuses_a_null_argument_and_writes_nothing() {
+        let handle = open_live(WZ_DISSECT_LIMITS_NONE).expect("the preset opens");
+        let mut out: *mut c_char = core::ptr::null_mut();
+        assert_eq!(
+            unsafe { wz_dissect_live_health(core::ptr::null(), &mut out) },
+            WZ_DISSECT_ERR_INVALID_ARG
+        );
+        assert!(out.is_null(), "a refused call hands back no string");
+        assert_eq!(
+            unsafe { wz_dissect_live_health(handle, core::ptr::null_mut()) },
+            WZ_DISSECT_ERR_INVALID_ARG
+        );
+        // A fresh handle has lost nothing and says so rather than refusing.
+        let doc = live_health(handle).expect("an empty handle still answers");
+        assert_eq!(in_group(&doc, "stream", "stream"), "0");
+        assert_eq!(in_group(&doc, "stream", "datagram"), "0");
         unsafe { wz_dissect_live_close(handle) };
     }
 

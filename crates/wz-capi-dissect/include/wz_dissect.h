@@ -71,7 +71,7 @@
  * here would only ever be a copy. (The envelope carries one more key for a
  * document that declares planes -- see R2180 below.) The names are "census",
  * "fields", "summary", "readable_surfaces", "selector_diagnose",
- * "declarations_diagnose", "selection" and "retention" — one per door group, because a consumer calls the
+ * "declarations_diagnose", "selection", "retention" and "health" — one per door group, because a consumer calls the
  * door it wants and a single library-wide number would tell a reader of the
  * census that a document it never calls had moved.
  *
@@ -1030,7 +1030,7 @@ extern "C" {
  * calls the function, and refuses when the two disagree.
  *
  * @unknown ABI not-an-enumeration */
-#define WZ_DISSECT_ABI_REVISION 23
+#define WZ_DISSECT_ABI_REVISION 24
 
 /* Symbol/memory-contract revision. Not a JSON-shape revision. This is the
  * revision the LOADED library reports; the block above says why it exists
@@ -2552,6 +2552,44 @@ int wz_dissect_live_selection(wz_dissect_live *h, const char *selector,
  * Null `h` or `out` is WZ_DISSECT_ERR_INVALID_ARG and no string. The string is
  * released by wz_dissect_string_free. */
 int wz_dissect_live_retention(const wz_dissect_live *h, char **out);
+
+/* ── (ABI 24) — WHAT AN OPEN HANDLE HAS LOST OR DOUBTED ──────────────────
+ *
+ * The summary's `health` object (wz_dissect_pcap_summary) counts what the wire
+ * did to the capture -- retransmissions, reordering, checksums that did not
+ * verify, fragment chains that never finished -- and what this reader's own
+ * ceilings and reach cost it. A summary needs the whole capture in one buffer,
+ * which a running tap never has, so a consumer watching a link had every one of
+ * those counters inside the handle and no door to read them. This door writes:
+ *
+ *     {"document":{"name":"health","revision":R},
+ *      "health":{...},
+ *      "flows_seen":{"stream":S,"datagram":D}}
+ *
+ * `health` is the summary's `health` object byte for byte, from the same
+ * emitter, so the code that reads one reads the other and neither can report a
+ * figure the other omits. Read the summary's description of it for the groups
+ * and what each counter counts; nothing about them is restated here.
+ *
+ * `flows_seen` is how many flows each of the two flow tables has held, evicted
+ * ones included. It is the denominator of the stream counters inside `health`:
+ * streams.retransmits of 0 is a measurement when S is above 0, and when S is 0
+ * there was no TCP flow to retransmit on, which nothing else in `health` says.
+ * It counts TABLE ENTRIES, not distinct 5-tuples, so a flow that was evicted
+ * and then seen again is counted again.
+ *
+ * IT IS NOT `held.stream_flows + dropped_by_limits.flows`. The retention
+ * document's `held.stream_flows` is the flows in the stream table now, and
+ * `dropped_by_limits.flows` counts evictions from BOTH tables as one number, so
+ * the sum over-reads the stream table on any capture that evicted a datagram
+ * flow -- on a capture with no TCP packet at all it is not zero.
+ *
+ * A READ, and `h` is const to say so: the counters are read where they sit, no
+ * record is handed out and no id is settled, so the next
+ * wz_dissect_live_drain returns exactly what it would have. The limit preset is
+ * the handle's, chosen at open. Null `h` or `out` is WZ_DISSECT_ERR_INVALID_ARG
+ * and no string. The string is released by wz_dissect_string_free. */
+int wz_dissect_live_health(const wz_dissect_live *h, char **out);
 
 /* Release a live handle. Null is a no-op, so your cleanup path needs no
  * guard of its own -- the same rule wz_dissect_string_free follows, and the

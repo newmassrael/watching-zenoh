@@ -3681,6 +3681,34 @@ pub fn health_json(d: &crate::Dissection) -> String {
     out
 }
 
+/// The health document a live handle hands out: the summary's `health` object,
+/// beside the one count that object cannot carry.
+///
+/// `health` is [`health_json`] unchanged, so a consumer that reads the
+/// summary's health reads this one's with the same code, and the two cannot
+/// drift: one emitter renders both.
+///
+/// # `flows_seen`
+///
+/// How many flows each table has held, evicted ones included
+/// ([`crate::FlowsSeen`]). It is the denominator the stream counters inside
+/// `health` are over: `streams.retransmits` of zero is a measurement when
+/// `flows_seen.stream` is above zero and an absence when it is zero, and
+/// nothing else in `health` says which. It is not `held + dropped_by_limits.flows`,
+/// because that group counts evictions from both tables as one number.
+pub fn health_document_json(d: &crate::Dissection) -> String {
+    let seen = d.flows_seen();
+    let mut out = String::from("{");
+    crate::doc_revision::envelope_into(crate::doc_revision::HEALTH, &mut out);
+    out.push_str(",\"health\":");
+    out.push_str(&health_json(d));
+    out.push_str(&format!(
+        ",\"flows_seen\":{{\"stream\":{},\"datagram\":{}}}}}",
+        seen.stream, seen.datagram
+    ));
+    out
+}
+
 /// R311y857 — the same counters for a person at a terminal.
 ///
 /// A SECOND rendering of one value and not a second selection of the counters,

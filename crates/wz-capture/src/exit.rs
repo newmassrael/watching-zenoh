@@ -244,7 +244,13 @@ pub(crate) struct ExitCarry {
     residue: ByteResidue,
     chains: ChainLoss,
     messages: usize,
-    flows: usize,
+    /// Flows retired from the stream table, and from the datagram table.
+    ///
+    /// Two counters and not one: `flows()` is their sum and is what the
+    /// combined eviction count reports, but a reader asking how many TCP flows
+    /// a capture held cannot take it from a sum that includes the other table.
+    stream_flows: usize,
+    datagram_flows: usize,
 }
 
 impl ExitCarry {
@@ -287,7 +293,7 @@ impl ExitCarry {
         // capture that evicts a flow reports less unfed residue than it
         // recovered, and the residue gate reads a healthier tree than it has.
         self.residue.absorb(flow.residue());
-        self.flows += 1;
+        self.stream_flows += 1;
     }
 
     /// Retire a datagram flow. Fewer counters, same rule.
@@ -310,7 +316,7 @@ impl ExitCarry {
             add_sn(&mut self.sessions, flow.session.sn_accounting(dir));
         }
         self.residue.absorb(flow.residue());
-        self.flows += 1;
+        self.datagram_flows += 1;
     }
 
     /// The assembler counters of every retired flow.
@@ -348,9 +354,20 @@ impl ExitCarry {
         self.messages
     }
 
-    /// How many flows have been retired — the eviction count itself.
+    /// How many flows have been retired from either table — the eviction count
+    /// itself, which is the sum of the two below.
     pub(crate) fn flows(&self) -> usize {
-        self.flows
+        self.stream_flows + self.datagram_flows
+    }
+
+    /// How many of them left the stream table.
+    pub(crate) fn stream_flows(&self) -> usize {
+        self.stream_flows
+    }
+
+    /// How many of them left the datagram table.
+    pub(crate) fn datagram_flows(&self) -> usize {
+        self.datagram_flows
     }
 }
 

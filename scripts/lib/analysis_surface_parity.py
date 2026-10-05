@@ -618,6 +618,19 @@ ONLY_CAPI = {
         "not, because a run has one look.",
         (),
     ),
+    # What an open handle has lost or doubted. Filed in the round that added
+    # the symbol.
+    "what an OPEN handle has LOST OR DOUBTED, beside the flows it is over": (
+        "wz_dissect_live_health",
+        "DELIBERATE, for the reason the retention row above gives, and the "
+        "counters themselves HAVE a counterpart: `--health` prints exactly the "
+        "object this symbol renders, from the same emitter, for a capture that "
+        "has ended. What has no counterpart is reading them while the feed is "
+        "still arriving, which needs a handle a caller keeps between looks and "
+        "a terminal run does not have. `flows_seen` is the one figure the "
+        "terminal does not print, and it is the denominator of figures it does.",
+        (),
+    ),
     "declaring a live feed OVER": (
         "wz_dissect_live_end",
         "DELIBERATE. A terminal run cannot NOT end its feed: every flag "
