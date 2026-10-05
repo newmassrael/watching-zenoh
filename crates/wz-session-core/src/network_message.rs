@@ -1074,25 +1074,8 @@ where
 /// reports none.
 #[cfg(all(feature = "transport-stats", feature = "codec-request"))]
 fn query_payload_size(extensions: Option<&[crate::wire::parts::QueryExtEntryOwned]>) -> usize {
-    use crate::wire::parts::QueryExtEntryOwnedVariant as E;
-    let value = extensions
-        .unwrap_or_default()
-        .iter()
-        .find(|ext| ext.ext_id() == crate::ext_header::body_ext_id::QUERY_BODY)
-        .map_or(0, |ext| match &ext.body {
-            // The value after a shared-memory marker is a list of slices, and
-            // its encoding is a field of its own, so the whole list is value.
-            E::CodecZenohQueryValueZbuf(z) => match (&z.value, &z.slices) {
-                (Some(bytes), _) => crate::encoding::split_value_body(bytes.as_slice())
-                    .map_or(0, |(_, payload)| payload.len()),
-                (None, Some(slices)) => crate::put_payload::slices_len(
-                    sce_forge_runtime::codec::SceList::as_slice(slices),
-                ),
-                (None, None) => 0,
-            },
-            _ => 0,
-        });
-    value + zbuf_ext_len(extensions, crate::ext_header::body_ext_id::QUERY_ATTACHMENT)
+    crate::ext_view::query_value_payload_len(extensions.unwrap_or_default())
+        + zbuf_ext_len(extensions, crate::ext_header::body_ext_id::QUERY_ATTACHMENT)
 }
 
 /// [`stats_class`] for a `Response` body. Reply and Err BOTH fold onto

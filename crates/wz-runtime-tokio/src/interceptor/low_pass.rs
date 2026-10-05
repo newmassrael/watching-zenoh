@@ -76,8 +76,8 @@
 //!   wz witnesses drops with the flow-agnostic
 //!   `LinkstateForwarder::interceptor_dropped` counter.
 
-use wz_codecs::ext_entry::ExtEntryOwned;
 use wz_codecs::push::PushOwnedVariant;
+use wz_codecs::query_ext_entry::QueryExtEntryOwned;
 use wz_codecs::reply::ReplyOwnedVariant;
 use wz_codecs::request::RequestOwnedVariant;
 use wz_codecs::response::ResponseOwnedVariant;
@@ -85,10 +85,10 @@ use wz_codecs::CodecStorage;
 use wz_session_core::attachment::{
     decode_attachment_ext, ATTACHMENT_EXT_ID_DEL, ATTACHMENT_EXT_ID_PUSH, ATTACHMENT_EXT_ID_QUERY,
 };
+use wz_session_core::ext_view::{query_value_payload_len, ExtEntryView};
 use wz_session_core::keyexpr_match::keyexpr_includes_target;
 use wz_session_core::network_message::NetworkMessage;
 use wz_session_core::put_payload::payload_len as put_payload_len;
-use wz_session_core::query_value_ext::decode_query_value_ext;
 
 use wz_session_core::link::{InterceptorLink, LinkSubject};
 
@@ -278,10 +278,10 @@ impl LowPassInterceptor {
 /// than in a named field, so the size comes from the
 /// [`decode_attachment_ext`](wz_session_core::attachment::decode_attachment_ext)
 /// SSOT (Push body id `0x03`, Query id `0x05`) instead of a struct read.
-fn attachment_len<S: CodecStorage>(
-    extensions: Option<&Vec<ExtEntryOwned<S>>>,
-    ext_id: u8,
-) -> usize {
+///
+/// Generic over the kind of entry, because a Query's chain holds its own
+/// (R3044) and every other message's holds the generic one.
+fn attachment_len<E: ExtEntryView>(extensions: Option<&Vec<E>>, ext_id: u8) -> usize {
     extensions
         .and_then(|exts| decode_attachment_ext(exts, ext_id))
         .map_or(0, <[u8]>::len)
@@ -291,12 +291,13 @@ fn attachment_len<S: CodecStorage>(
 /// `query.ext_body.map(|body| body.payload.len()).unwrap_or(0)`
 /// (`low_pass.rs:265-269`). wz carries the query VALUE as the `0x03` ENC_ZBUF
 /// ext whose body is `encoding || payload`, so the PAYLOAD half comes from
-/// [`decode_query_value_ext`] — the encoding bytes are not part of zenoh's
-/// budget and are not counted here either.
-fn query_value_len<S: CodecStorage>(extensions: Option<&Vec<ExtEntryOwned<S>>>) -> usize {
-    extensions
-        .and_then(|exts| decode_query_value_ext(exts))
-        .map_or(0, |(_, payload)| payload.len())
+/// [`query_value_payload_len`] — the encoding bytes are not part of zenoh's
+/// budget and are not counted here either. A value that arrived as a list of
+/// slices after a shared-memory marker is counted by the buffers the slices
+/// name, as a sliced Put's payload is, so a large value in shared memory is not
+/// under the limit for want of bytes on the wire (R3045).
+fn query_value_len<S: CodecStorage>(extensions: Option<&Vec<QueryExtEntryOwned<S>>>) -> usize {
+    extensions.map_or(0, |exts| query_value_payload_len(exts))
 }
 
 /// Classify `msg` into `(kind, payload bytes, attachment bytes)`, or `None` for
@@ -581,6 +582,33 @@ mod tests {
                 .expect("build decl queryable"),
         ));
         assert_eq!(message_size(&declare), None);
+    }
+
+    /// R3045 -- a Query whose value is in shared memory is sized by the buffer
+    /// its slice names, as a sliced Put is, and not as zero for want of plain
+    /// bytes: otherwise a value of any size passes a size limit. The frame is
+    /// what upstream's router sent a wz queryable for `z_get_shm` (see
+    /// `wz-session-core`'s `shm_value_tests`): a marker, then a value declaring
+    /// 1026 bytes over eleven, whose one slice names a buffer of 1024.
+    #[cfg(feature = "transport-shm")]
+    #[test]
+    fn a_query_value_in_shared_memory_is_sized_by_its_buffer() {
+        let mut frame = vec![0xfc, 0x01, 0x00, 0x0f];
+        frame.extend_from_slice(b"demo/example/**");
+        frame.extend_from_slice(&[0xa1, 0x0d, 0x26, 0x90, 0x4e, 0xa3, 0x03]);
+        frame.extend_from_slice(&[
+            0x84, 0x43, 0x82, 0x08, 0x00, 0x01, 0x01, 0x07, 0x80, 0x08, 0xf2, 0x9e, 0x01, 0x00,
+            0x00,
+        ]);
+        let mut messages = wz_session_core::network_message::parse_frame_payload(&frame)
+            .expect("the frame parses");
+        let message = messages.pop().expect("one message");
+        assert!(messages.is_empty(), "the frame holds one message");
+        assert_eq!(
+            message_size(&message),
+            Some((LowPassMessage::Query, 1024, 0)),
+            "the size is the logical length of the buffer the descriptor names"
+        );
     }
 
     /// The attachment SIZE is read off the real ext chain, not a struct field —

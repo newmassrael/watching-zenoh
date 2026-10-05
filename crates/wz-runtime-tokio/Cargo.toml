@@ -1267,9 +1267,14 @@ access-downsampling = [
 # attachment (`net/routing/interceptor/low_pass.rs:358-361`), and wz carries the
 # attachment on the generic ext chain, so the count comes from the
 # `attachment-bytes` decode SSOT (Push id 0x03 / Query id 0x05). Sizing a Query
-# additionally needs the `query-value` ext read, since zenoh budgets
+# additionally needs its value, since zenoh budgets
 # `query.ext_body.payload.len()` (`:265-269`) and wz carries that value as the
 # 0x03 ENC_ZBUF `encoding || payload` ext. Neither rides `routing-peer`.
+# R3045 -- the value is now read by `ext_view::query_value_payload_len`, which
+# needs no feature beyond `codec-request`, so the `query-value` forward below is
+# no longer what the size read stands on. It is left in the set: dropping it
+# moves feature unification for every build that composes `access-quota`, and
+# that is a decision of its own.
 access-quota = [
     "link-interfaces",
     "dep:wz-routing-graph",

@@ -92,6 +92,40 @@ mod query {
         }
     }
 
+    /// How many payload bytes the VALUE of a Query carries, as upstream counts
+    /// them (`commons/zenoh-protocol/src/network/request.rs` @
+    /// `q.ext_body.as_ref().map_or(0, |b| b.payload.len())`), and `0` for a
+    /// Query that has none: the bytes after the encoding when the value is a
+    /// plain run of bytes, and the length of the buffer each slice names when it
+    /// is a list of slices, which is how a sliced Put's payload is counted
+    /// ([`crate::put_payload::slices_len`]). The statistics and the low-pass
+    /// size limit both ask this, so a value in shared memory is as large to one
+    /// as to the other.
+    #[cfg(feature = "alloc")]
+    pub fn query_value_payload_len<S: CodecStorage>(extensions: &[QueryExtEntryOwned<S>]) -> usize {
+        use sce_forge_runtime::codec::SceList;
+        extensions
+            .iter()
+            .find(|ext| {
+                QueryExtEntryOwned::ext_id(ext) == crate::ext_header::body_ext_id::QUERY_BODY
+            })
+            .map_or(0, |ext| match &ext.body {
+                QueryExtEntryOwnedVariant::CodecZenohQueryValueZbuf(z) => {
+                    match (&z.value, &z.slices) {
+                        (Some(bytes), _) => {
+                            crate::encoding::split_value_body(SceByteBuf::as_slice(bytes))
+                                .map_or(0, |(_, payload)| payload.len())
+                        }
+                        (None, Some(slices)) => {
+                            crate::put_payload::slices_len(SceList::as_slice(slices))
+                        }
+                        (None, None) => 0,
+                    }
+                }
+                _ => 0,
+            })
+    }
+
     /// A generic extension entry as the entry of a Query's chain. The three
     /// entries a Query is built with (the value, the source info, the
     /// attachment) are all plain, so a ZBuf body becomes the plain shape of the
@@ -128,3 +162,5 @@ mod query {
 
 #[cfg(feature = "codec-request")]
 pub use query::query_ext_from_generic;
+#[cfg(all(feature = "codec-request", feature = "alloc"))]
+pub use query::query_value_payload_len;
