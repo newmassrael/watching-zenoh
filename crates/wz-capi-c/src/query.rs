@@ -493,11 +493,11 @@ impl QueryMarshal {
             payload: self
                 .payload
                 .as_ref()
-                .map(|s| BytesState::whole(s.payload.clone())),
+                .map(|s| BytesState::of(s.payload.clone())),
             attachment: self
                 .attachment
                 .as_ref()
-                .map(|s| BytesState::whole(s.payload.clone())),
+                .map(|s| BytesState::of(s.payload.clone())),
             encoding: self.encoding.deep_copy(),
             // R2261 — the ESCAPED copy keeps the querier's identity. A query
             // escaped into a `z_owned_query_t` outlives the callback, and the
@@ -559,10 +559,10 @@ impl QueryView for QueryMarshal {
         Some(&self.parameters)
     }
     fn attachment(&self) -> Option<&[u8]> {
-        self.attachment.as_ref().map(|s| s.payload.as_slice())
+        self.attachment.as_ref().map(|s| &s.payload[..])
     }
     fn payload(&self) -> Option<&[u8]> {
-        self.payload.as_ref().map(|s| s.payload.as_slice())
+        self.payload.as_ref().map(|s| &s.payload[..])
     }
     fn rid(&self) -> u64 {
         self.rid

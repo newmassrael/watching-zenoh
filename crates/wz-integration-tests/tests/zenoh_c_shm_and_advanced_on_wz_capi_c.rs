@@ -86,7 +86,7 @@ use std::time::Duration;
 use wz_integration_tests::common::{
     compile_zenoh_c_example, graceful_terminate, read_captured, wait_for_substring,
     wait_for_tcp_accept_alive, wz_ap_demo_binary, wz_capi_c_cdylib, zenoh_c_oracle,
-    zenoh_pico_cli_binary, ChildGuard, PortReservation,
+    zenoh_pico_cli_binary, zenoh_shm_example_binary, ChildGuard, PortReservation,
 };
 
 /// How long a listener gets to bind and accept.
@@ -467,6 +467,33 @@ fn drive_subscriber(
     pico_args: impl Fn(&str) -> Vec<String>,
     settle: Duration,
 ) -> String {
+    drive_subscriber_against(
+        program,
+        libdir,
+        arm,
+        "demo/capic/**",
+        &zenoh_pico_cli_binary(pico_cli),
+        &format!("real zenoh-pico {pico_cli}"),
+        pico_args,
+        settle,
+    )
+}
+
+/// [`drive_subscriber`] with the counterparty and the subscriber's key chosen: the C
+/// program listens on `key`, and `driver` (named `driver_label` in messages) dials it
+/// with `driver_args(endpoint)` and publishes. The program's own stdout is the
+/// witness.
+#[allow(clippy::too_many_arguments)]
+fn drive_subscriber_against(
+    program: &Path,
+    libdir: &Path,
+    arm: Arm,
+    key: &str,
+    driver: &Path,
+    driver_label: &str,
+    driver_args: impl Fn(&str) -> Vec<String>,
+    settle: Duration,
+) -> String {
     let label = arm.label();
     let reservation = PortReservation::pick();
     let port = reservation.port();
@@ -479,7 +506,7 @@ fn drive_subscriber(
         Command::new("stdbuf")
             .args(["-oL", "-eL"])
             .arg(program)
-            .args(["-l", &endpoint, "-m", "peer", "-k", "demo/capic/**"])
+            .args(["-l", &endpoint, "-m", "peer", "-k", key])
             .env("LD_LIBRARY_PATH", libdir)
             .stdout(Stdio::from(writer))
             .stderr(Stdio::from(sub_out.try_clone().expect("dup stderr handle")))
@@ -495,16 +522,29 @@ fn drive_subscriber(
     }
     drop(reservation);
 
+    // The driver's own output is kept, so a subscriber that is handed nothing can
+    // say what the publisher did: a driver that could not negotiate, or whose
+    // session ended, reads here and nowhere else.
+    let mut driver_out = tempfile::tempfile().expect("driver output capture");
+    let driver_writer = driver_out.try_clone().expect("dup driver output handle");
     let mut driver = ChildGuard::wrap(
-        format!("real zenoh-pico {pico_cli} ({label})"),
+        format!("{driver_label} ({label})"),
         Command::new("stdbuf")
             .args(["-oL", "-eL"])
-            .arg(zenoh_pico_cli_binary(pico_cli))
-            .args(pico_args(&endpoint))
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
+            .arg(driver)
+            .args(driver_args(&endpoint))
+            // Read only by a driver that is a zenoh Rust program; a pico CLI has no
+            // log filter to read.
+            .env(
+                "RUST_LOG",
+                "zenoh=info,zenoh_shm=debug,zenoh_transport=debug",
+            )
+            .stdout(Stdio::from(driver_writer))
+            .stderr(Stdio::from(
+                driver_out.try_clone().expect("dup driver stderr handle"),
+            ))
             .spawn()
-            .expect("spawn the real zenoh-pico driver"),
+            .expect("spawn the driver"),
     );
 
     // The wait is on the CAPTURE, not on a sleep: the barrier is the first
@@ -517,7 +557,11 @@ fn drive_subscriber(
     graceful_terminate(driver.child_mut(), TERMINATE_TIMEOUT);
     graceful_terminate(sub.child_mut(), TERMINATE_TIMEOUT);
     if captured.is_err() {
-        panic!("the {label} subscriber printed no report line\n--- capture ---\n{full}");
+        let driver_log = read_captured(&mut driver_out);
+        panic!(
+            "the {label} subscriber printed no report line\n--- capture ---\n{full}\n--- \
+             {driver_label} ---\n{driver_log}"
+        );
     }
     full
 }
@@ -527,9 +571,12 @@ fn drive_subscriber(
 /// This is the leg that measures the module note on [`wz_capi_c::shm`] rather
 /// than restating it. The example asks `z_bytes_as_mut_loaned_shm` whether the
 /// payload it received is backed by shared memory and prints `SHM (MUT)`,
-/// `SHM (IMMUT)` or `RAW`. wz answers "not SHM" for every payload because it
-/// negotiates no SHM transport — and against a publisher that negotiated none,
-/// the REAL `libzenohc.so` answers the same. Both arms report `RAW`, which is
+/// `SHM (IMMUT)` or `RAW`. Against a publisher that negotiated no shared memory
+/// every payload arrives as bytes, and wz answers "not SHM" for it — as the REAL
+/// `libzenohc.so` does. (R3052: wz's C ABI session does offer shared memory now, so
+/// that answer comes from what the publisher sent and not from an offer wz never
+/// made; leg 3b below is the one that sends it a shared-memory payload.) Both
+/// arms report `RAW`, which is
 /// the equality this asserts; the claim would be a guess without it.
 ///
 /// ## The driver is `z_pub`, not `z_put`, and that is not a preference
@@ -610,6 +657,105 @@ fn upstream_z_sub_shm_on_wz_capi_c_reports_the_same_buffer_type_on_both_arms() {
     assert!(
         report_lines(&wz_log).iter().any(|l| l.contains(payload)),
         "the wz arm reported no line carrying the payload the real pico published"
+    );
+}
+
+/// LEG 3b — upstream's `z_sub_shm.c` reports the SAME buffer type on both arms for a
+/// payload a SHARED-MEMORY publisher put on the wire as shared memory.
+///
+/// Leg 3 above cannot tell the arms apart on this question, because its publisher is
+/// a zenoh-pico CLI, which negotiates no shared memory and so sends every payload as
+/// bytes: both arms print `RAW` and agree for a reason that has nothing to do with
+/// whether wz can receive a buffer. The counterparty here is upstream's own Rust
+/// `z_pub_shm`, which publishes each payload as a chunk of its own provider and, to a
+/// peer that negotiated shared memory, as a descriptor of it. The reference arm
+/// negotiates and reports a shared-memory buffer type. An arm whose session offers no
+/// shared memory is sent the same payload as bytes and reports `RAW`, which is how
+/// this leg reads when wz's C ABI session declines the offer.
+// wz-proves: api-compat-c zenoh->wz partial
+#[test]
+#[ignore = "compiles an upstream zenoh-c example with cc and spawns upstream's own \
+            z_pub_shm; needs the machine-local SHARED-MEMORY zenoh-c oracle and the \
+            shared-memory zenohd build; run-ci Layer C1cc drives it"]
+fn upstream_z_sub_shm_on_wz_capi_c_reports_the_same_buffer_type_for_a_shared_memory_publisher() {
+    let Some((include, libdir_ref, examples)) = oracle_or_note() else {
+        return;
+    };
+    let Some(z_pub_shm) = zenoh_shm_example_binary("z_pub_shm") else {
+        eprintln!(
+            "skip: no z_pub_shm at target/zenohd-shm (run `ZENOHD_SHM=1 scripts/build-zenohd.sh`)"
+        );
+        return;
+    };
+    let dir = tempfile::tempdir().expect("tempdir for the compiled arms");
+    let (on_wz, libdir_wz) = arm_binary(
+        "z_sub_shm",
+        Arm::Wz,
+        dir.path(),
+        &include,
+        &examples,
+        &libdir_ref,
+    );
+    let (on_ref, libdir_r) = arm_binary(
+        "z_sub_shm",
+        Arm::Reference,
+        dir.path(),
+        &include,
+        &examples,
+        &libdir_ref,
+    );
+
+    let args = |endpoint: &str| {
+        vec![
+            "-m".to_string(),
+            "peer".to_string(),
+            "-e".to_string(),
+            endpoint.to_string(),
+            "--no-multicast-scouting".to_string(),
+            "--enable-shm".to_string(),
+        ]
+    };
+    let settle = Duration::from_millis(1500);
+    let drive = |program: &Path, libdir: &Path, arm: Arm| {
+        drive_subscriber_against(
+            program,
+            libdir,
+            arm,
+            "demo/example/**",
+            &z_pub_shm,
+            "upstream z_pub_shm",
+            args,
+            settle,
+        )
+    };
+    let ref_log = drive(&on_ref, &libdir_r, Arm::Reference);
+    let wz_log = drive(&on_wz, &libdir_wz, Arm::Wz);
+
+    let tags = |log: &str| -> Vec<(String, String)> {
+        let mut seen: Vec<(String, String)> = report_lines(log)
+            .iter()
+            .filter_map(|l| keyexpr_and_tag(l))
+            .collect();
+        seen.dedup();
+        seen
+    };
+    let (wz_tags, ref_tags) = (tags(&wz_log), tags(&ref_log));
+    assert!(
+        !ref_tags.is_empty(),
+        "the reference arm reported nothing, so the publisher did not reach it and this leg \
+         measured nothing\n--- reference ---\n{ref_log}"
+    );
+    assert!(
+        ref_tags.iter().any(|(_, tag)| tag.starts_with("SHM")),
+        "the reference arm did not report a shared-memory buffer: {ref_tags:?}, so the \
+         publisher was not offered shared memory and the comparison below says nothing about \
+         it\n--- reference ---\n{ref_log}"
+    );
+    assert_eq!(
+        wz_tags, ref_tags,
+        "the two arms of the SAME compiled z_sub_shm.c disagree on the buffer type of what a \
+         shared-memory publisher sent. wz: {wz_tags:?}; the real libzenohc: {ref_tags:?}.\n--- wz \
+         ---\n{wz_log}\n--- reference ---\n{ref_log}"
     );
 }
 

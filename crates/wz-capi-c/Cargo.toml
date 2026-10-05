@@ -128,13 +128,14 @@ zenoh-c-no-unstable-api = []
 # an attach is `mmap` — there is no std spelling for a shared read-only view of
 # a file. The dependency is optional and named only here, so the default build's
 # footprint is unchanged, which is what Layer F measures.
-# R2954 — and the runtime's POSIX segment PROTOCOL, without its SHM transport:
-# `zc_cleanup_orphaned_shm_segments` is that protocol's own orphan cleanup, and
-# the transport would turn on SHM negotiation for this ABI's sessions.
-# R2970 — why that must not happen yet is written where the session's offer is
-# built (`session::session_offer`): a zenoh peer that agreed on SHM would send
-# Puts laid out as slices, which the generated Put codec cannot read (item 823).
-zenoh-c-shared-memory = ["dep:libc", "wz-runtime-tokio/posix-shm-segment"]
+# R2954 — and the runtime's POSIX segment PROTOCOL: `zc_cleanup_orphaned_shm_segments`
+# is that protocol's own orphan cleanup. R2954 and R2970 took it WITHOUT the SHM
+# transport, because a zenoh peer that agreed on SHM would have sent Puts laid out
+# as slices, which the generated Put codec could not read (item 823). That has not
+# been true since the layout was adopted, so R3052 takes the transport too:
+# `session-extshm` is the negotiation and the data path, and `session::session_offer`
+# stages the offer from the node's `shared_memory` key.
+zenoh-c-shared-memory = ["dep:libc", "wz-runtime-tokio/session-extshm"]
 
 [dependencies]
 # R2299 — `mmap`/`munmap` for the SHM client registry's POSIX attach. Optional:

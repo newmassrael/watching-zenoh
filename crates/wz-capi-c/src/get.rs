@@ -393,7 +393,7 @@ impl ReplyMarshal {
         Self {
             is_ok: self.is_ok,
             sample: self.sample.deep_copy(),
-            err_payload: BytesState::whole(self.err_payload.payload.clone()),
+            err_payload: BytesState::of(self.err_payload.payload.clone()),
             err_encoding: self.err_encoding.deep_copy(),
             loaned_err_payload: z_loaned_bytes_t::null_value(),
             loaned_err_encoding: crate::abi::z_loaned_encoding_t::null_value(),

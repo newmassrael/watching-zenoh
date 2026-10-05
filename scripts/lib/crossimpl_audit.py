@@ -907,7 +907,14 @@ HOST_GATED_CI_TARGETS: dict[str, str] = {
 # files already register and no new class. Counted from the diff: exactly the three
 # `wz-proves` lines that name a layout; the raw control carries `none`.
 # 984 + 3 = 987, measured by `run-ci.sh --layer A4` at this round's tree.
-FOREIGN_ADJUDICATOR_LINKS = 987
+# R3052 -- 987 -> 988, RISING by one, in the file `zenoh_c_shm_and_advanced_on_wz_capi_c.rs`:
+# upstream's `z_sub_shm.c`, compiled against wz's C ABI and against the real library,
+# reports the same buffer type for a payload that upstream's own `z_pub_shm` put on
+# the wire as shared memory, which is `api-compat-c zenoh->wz` against the
+# application `z_pub_shm` that `zenoh_shm_example_binary` already registers, so no
+# new class. Counted from the diff: exactly the one `wz-proves` line the file adds.
+# 987 + 1 = 988, measured by `run-ci.sh --layer A4` at this round's tree.
+FOREIGN_ADJUDICATOR_LINKS = 988
 
 # ── Execution disclosure ────────────────────────────────────────────────────────
 #

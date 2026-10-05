@@ -18,32 +18,30 @@
 //!    receiver maps the same pages instead of copying. When they do not, zenoh
 //!    serialises the bytes and the receiver sees an ordinary payload.
 //!
-//! This module implements (1) completely and does not implement (2), and the
+//! This module implements (1) completely, and (2) on the RECEIVING side only; the
 //! difference is stated here rather than left for a reader to infer from a
-//! symbol list. This ABI's session offers no SHM at its handshake, so it never
-//! negotiates the optimisation — which means every put of an SHM buffer from
-//! it serialises, and every payload it RECEIVES is an ordinary one.
+//! symbol list.
 //!
-//! ⚠ R2970 corrected the two sentences that stood here. They said this was
-//! "not wz declining to implement a wire feature it should have" but upstream's
-//! fallback, and that the fallback is why the two arms of the drop-in test
-//! agree. Both were wrong. wz's transport does negotiate SHM (session-extshm,
-//! with a real zenohd), and upstream's zenoh-c sessions negotiate it with each
-//! other BY DEFAULT on the shared-memory build — measured, `z_transport_is_shm`
-//! answers `1` between two of them (`zenoh_c_session_offer_twice_and_diff`).
-//! The arms of `z_sub_shm.c` agree on `RAW` because that leg's publisher is a
-//! zenoh-pico CLI, which negotiates no SHM at all. So it IS this session
-//! declining, and for a stated reason: a zenoh peer that agreed on SHM would
-//! send Puts laid out as slices, which the generated Put codec cannot read yet
-//! (open-debt item 823). See `crate::session`'s `session_offer`.
+//! - **Receiving (R3052).** On a build with the `zenoh-c-shared-memory` feature the
+//!   session offers shared memory at its handshake whenever
+//!   `transport/shared_memory/enabled` is on, which upstream defaults to. A payload
+//!   a peer put on the wire as a chunk of its own segment arrives as a range of
+//!   that segment, mapped and not copied, and [`z_bytes_as_loaned_shm`] and
+//!   [`z_bytes_as_mut_loaned_shm`] answer for it as upstream's do: the mutable view
+//!   only while this payload is the chunk's sole holder.
+//! - **Sending.** Every put of an SHM buffer from this ABI still serialises. The
+//!   provider below is an in-process allocator, and [`z_bytes_from_shm`] copies the
+//!   chunk out of it, so a payload this session PRODUCES is an ordinary one and
+//!   [`z_bytes_as_loaned_shm`] says so for it.
 //!
-//! The named consequence, with its re-open trigger: [`z_bytes_as_loaned_shm`]
-//! and [`z_bytes_as_mut_loaned_shm`] answer "this payload is not carrying an
-//! SHM buffer" for every payload this session can produce or receive. That
-//! answer is TRUE today. It stops being true the day the session offers SHM,
-//! which waits on item 823, and that is the round that should revisit these
-//! two functions — and the payload delivery behind them, which today copies an
-//! SHM payload out of its segment rather than handing the segment over.
+//! ⚠ R2970 corrected two sentences that said this ABI's SHM fallback was upstream's
+//! and the reason the two arms of the drop-in test agree. They were wrong then, and
+//! R3052 is the round the session stopped declining: before it, the arms of
+//! `z_sub_shm.c` agreed on `RAW` because the publisher in that leg is a zenoh-pico
+//! CLI, which negotiates no SHM at all, and a publisher that DID negotiate was
+//! answered `RAW` by wz and `SHM (MUT)` by the real library (the second leg of
+//! `zenoh_c_shm_and_advanced_on_wz_capi_c`, measured red before the change). See
+//! `crate::session`'s `session_offer`.
 //!
 //! ## The allocator is real, because the examples depend on it being real
 //!
@@ -60,8 +58,8 @@
 //!
 //! The segment is ordinary process memory rather than a POSIX `/dev/shm`
 //! mapping. A real mapping would be strictly more machinery for the same
-//! observable behaviour while this session negotiates no SHM transport — nothing outside
-//! this process can attach to it — and it would add a cleanup obligation
+//! observable behaviour while the sending side hands a payload over by copy —
+//! nothing outside this process can attach to it — and it would add a cleanup obligation
 //! (`shm_unlink` on abnormal exit) that buys nothing. The type is what upstream
 //! names `z_owned_shm_provider_t`; what backs it is not ABI.
 //!
@@ -77,7 +75,7 @@ use std::ffi::c_void;
 use std::sync::{Arc, Condvar, Mutex};
 
 use crate::abi::{z_loaned_bytes_t, z_owned_bytes_t, Handle};
-use crate::bytes::{bytes_slice, BytesState};
+use crate::bytes::BytesState;
 use crate::ffi::{guard_val, guarded};
 use crate::result::{ZResult, Z_EINVAL, Z_ENULL, Z_EUNAVAILABLE, Z_OK};
 
@@ -396,6 +394,12 @@ enum ChunkBacking {
         /// the memory that context owns.
         ptr: PtrInSegment,
     },
+    /// R3052 -- the bytes of a payload a peer sent as a chunk of shared memory, which
+    /// this session delivered as a range of the mapped chunk and not as a copy.
+    /// Nothing here allocates or frees: the reference the sender took for this
+    /// receiver goes back when the last range of the bytes drops, which this chunk
+    /// holding one is what defers.
+    Received { bytes: wz_runtime_tokio::RxBytes },
 }
 
 /// One allocated chunk. Dropping it returns the memory to whichever backend
@@ -415,6 +419,9 @@ impl ShmChunk {
         if self.len == 0 {
             return &[];
         }
+        if let ChunkBacking::Received { bytes } = &self.backing {
+            return bytes.as_slice();
+        }
         // SAFETY: a native range was handed out by `claim` and is not handed
         // out again until this chunk drops; a foreign one is the backend's
         // promise for the life of the descriptor. No other live chunk aliases
@@ -428,6 +435,31 @@ impl ShmChunk {
             // SAFETY: as `as_slice` — exclusive by the allocator's invariant.
             ChunkBacking::Native { segment, start } => unsafe { segment.base.add(*start) },
             ChunkBacking::Foreign { ptr, .. } => ptr.ptr,
+            // The page a peer sent, mapped writable when it can be. A chunk that
+            // cannot be written answers its read-only address, which no caller
+            // writes through because `may_write` was false for it.
+            ChunkBacking::Received { bytes } => bytes
+                .shm_writable_ptr()
+                .unwrap_or(bytes.as_slice().as_ptr() as *mut u8),
+        }
+    }
+
+    /// Whether this chunk may be written through now. A chunk that was frozen
+    /// ([`z_shm_from_mut`]) may not; one the allocator issued may; one a peer sent
+    /// may only while this receiver holds the ONLY reference to it and the page
+    /// maps writable, which is upstream's conversion to a mutable buffer
+    /// (`commons/zenoh-shm/src/api/buffer/zshmmut.rs` @
+    /// `impl TryFrom<&mut zshm> for &mut zshmmut {`).
+    fn may_write(&self) -> bool {
+        if !self.mutable {
+            return false;
+        }
+        match &self.backing {
+            ChunkBacking::Received { bytes } => {
+                bytes.shm_chunk().is_some_and(|view| view.is_unique())
+                    && bytes.shm_writable_ptr().is_some()
+            }
+            _ => true,
         }
     }
 
@@ -437,6 +469,9 @@ impl ShmChunk {
         match &self.backing {
             ChunkBacking::Native { segment, .. } => Provider::Native(segment.clone()),
             ChunkBacking::Foreign { backend, .. } => Provider::Foreign(backend.clone()),
+            // A chunk a peer owns has no provider of this process to copy from, so
+            // its copy is made in a segment of its own, of exactly its length.
+            ChunkBacking::Received { .. } => Provider::Native(Segment::new(self.len)),
         }
     }
 }
@@ -459,8 +494,62 @@ impl Drop for ShmChunk {
                 descriptor,
                 ..
             } => backend.free(descriptor),
+            // Dropping `bytes` is the release: the last range of a chunk of shared
+            // memory gives the sender's reference back.
+            ChunkBacking::Received { .. } => {}
         }
     }
+}
+
+/// The `z_owned_shm_t` a payload that is a chunk of shared memory lends to the C
+/// side, owned by the payload's [`crate::bytes::BytesState`] (R3052).
+///
+/// The loan `z_bytes_as_loaned_shm` returns is a POINTER to this value, so it has to
+/// live as long as the payload does, and it is the payload that frees it.
+pub(crate) struct ReceivedShm {
+    owned: z_owned_shm_t,
+}
+
+// SAFETY: the handle is a `Box<ShmChunk>` this value owns and frees in `Drop`, and a
+// `ShmChunk` is `Send + Sync` through what it holds: an `Arc` of a segment, a
+// foreign backend behind an `Arc`, or the shareable bytes a session delivered.
+unsafe impl Send for ReceivedShm {}
+// SAFETY: as above; the chunk behind the handle is only read through shared
+// references.
+unsafe impl Sync for ReceivedShm {}
+
+impl Drop for ReceivedShm {
+    fn drop(&mut self) {
+        if !self.owned.handle.is_null() {
+            // SAFETY: a live `Box<ShmChunk>` made by `received_shm`, freed only here.
+            drop(unsafe { Box::from_raw(self.owned.handle as *mut ShmChunk) });
+        }
+    }
+}
+
+/// The shared-memory chunk a payload is, as a loan, or `None` when the payload is
+/// a buffer of its own or a range of anything that is not a chunk a peer sent.
+fn received_shm(state: &crate::bytes::BytesState) -> Option<*mut z_loaned_shm_t> {
+    let loan = state
+        .shm_loan
+        .get_or_init(|| {
+            let bytes = state.payload.shared()?;
+            if !bytes.is_shared_memory() {
+                return None;
+            }
+            let chunk = Box::new(ShmChunk {
+                backing: ChunkBacking::Received {
+                    bytes: bytes.clone(),
+                },
+                len: bytes.len(),
+                mutable: true,
+            });
+            Some(ReceivedShm {
+                owned: z_owned_shm_t::from_handle(Box::into_raw(chunk) as Handle),
+            })
+        })
+        .as_ref()?;
+    Some(&loan.owned as *const z_owned_shm_t as *mut z_loaned_shm_t)
 }
 
 // ---------------------------------------------------------------------------
@@ -2374,9 +2463,10 @@ pub unsafe extern "C" fn z_shm_loan_mut(this_: *mut z_owned_shm_t) -> *mut z_loa
 /// Try to recover MUTABLE access to a borrowed buffer (zenoh-c
 /// `z_shm_try_reloan_mut`, `zenoh_commons.h:4871`).
 ///
-/// NULL when the buffer has been frozen by [`z_shm_from_mut`] or when it came
-/// off the wire, which is what `z_sub_shm.c` distinguishes `SHM (MUT)` from
-/// `SHM (IMMUT)` by.
+/// NULL when the buffer has been frozen by [`z_shm_from_mut`], or when it came off
+/// the wire and some other party still holds the chunk (or its page maps read-only
+/// here), which is what `z_sub_shm.c` distinguishes `SHM (MUT)` from
+/// `SHM (IMMUT)` by (R3052).
 ///
 /// # Safety
 /// `this_` must be null or a valid loaned buffer.
@@ -2392,7 +2482,7 @@ pub unsafe extern "C" fn z_shm_try_reloan_mut(
         match unsafe { chunk((*this_).handle) } {
             // The two loaned types have identical layout and identical handle
             // contents, so the recovery is a cast — see `chunk`.
-            Some(c) if c.mutable => this_ as *mut z_loaned_shm_mut_t,
+            Some(c) if c.may_write() => this_ as *mut z_loaned_shm_mut_t,
             _ => std::ptr::null_mut(),
         }
     })
@@ -2588,9 +2678,11 @@ pub unsafe extern "C" fn z_shm_clone(out: *mut z_owned_shm_t, this_: *const z_lo
 ///
 /// The bytes are COPIED into an ordinary payload and the chunk returns to its
 /// segment. That is what makes `z_pub_shm.c`'s forever-loop work on a
-/// 4096-byte provider, and it costs nothing observable while wz negotiates no
-/// SHM transport: the put would serialise the same bytes anyway. See the module
-/// note for the named consequence.
+/// 4096-byte provider, and it costs nothing a program here can observe while the
+/// provider is an in-process allocator: a chunk of it is not one a peer could map, so
+/// the put would serialise the same bytes anyway. When the provider is backed by a
+/// segment a peer can map, this copy is the thing to remove. See the module note for
+/// the named consequence.
 ///
 /// # Safety
 /// `this_` must be valid and writable; `shm` must be null or a valid moved
@@ -2649,10 +2741,11 @@ pub unsafe extern "C" fn z_bytes_from_shm_mut(
 /// Try to view a payload as an immutable SHM buffer (zenoh-c
 /// `z_bytes_as_loaned_shm`, `zenoh_commons.h:1452-1453`).
 ///
-/// Always `Z_EINVAL` with `*dst` left NULL, and that is the TRUE answer rather
-/// than an unimplemented one: wz's transport negotiates no SHM segment, so no
-/// payload a wz session produces or receives is backed by one. The module note
-/// states the re-open trigger.
+/// `Z_OK` with `*dst` the buffer when the payload IS a chunk of shared memory a peer
+/// sent, which a session that negotiated shared memory delivers as a range of the
+/// mapped chunk and not as a copy (R3052). Every other payload, including one this
+/// side built from a buffer ([`z_bytes_from_shm`] copies), is `Z_EINVAL` with `*dst`
+/// left NULL.
 ///
 /// # Safety
 /// `this_` must be null or a valid loaned payload; `dst` must be null or valid
@@ -2671,27 +2764,29 @@ pub unsafe extern "C" fn z_bytes_as_loaned_shm(
         // that merely carries no SHM: a function that ignored its argument would
         // give the same answer for a null pointer.
         // SAFETY: the caller's contract.
-        if unsafe { bytes_slice(this_) }.is_none() {
+        let Some(state) = (unsafe { crate::bytes::bytes_state(this_) }) else {
             return Z_ENULL;
+        };
+        match received_shm(state) {
+            Some(loan) => {
+                if !dst.is_null() {
+                    // SAFETY: the caller's contract.
+                    unsafe { *dst = loan as *const z_loaned_shm_t };
+                }
+                Z_OK
+            }
+            None => Z_EINVAL,
         }
-        Z_EINVAL
     })
 }
 
 /// Take an OWNED immutable SHM buffer out of a payload (zenoh-c
 /// `z_bytes_to_owned_shm`).
 ///
-/// The owned twin of [`z_bytes_as_loaned_shm`], and it gives the same answer
-/// for the same reason: `Z_EINVAL` with `*dst` a gravestone. wz's transport
-/// negotiates no SHM segment, so no payload a wz session produces or receives
-/// is backed by one — and wz's own [`z_bytes_from_shm`] COPIES the chunk's
-/// bytes into an ordinary payload and returns the chunk, so even a payload
-/// built from an SHM buffer on this side is not SHM-backed afterwards. There
-/// is therefore no `z_owned_shm_t` this call could hand back, and answering
-/// `Z_OK` with a fabricated one would be a different library.
-///
-/// It is the TRUE answer rather than an unimplemented one; the module note
-/// carries the re-open trigger for the whole bridge.
+/// The owned twin of [`z_bytes_as_loaned_shm`], and it answers the same question the
+/// same way: `Z_OK` with an owned, immutable buffer that is a second reference to the
+/// chunk when the payload is a chunk of shared memory a peer sent, `Z_EINVAL` with
+/// `*dst` a gravestone when it is not (R3052).
 ///
 /// # Safety
 /// `this_` must be null or a valid loaned payload; `dst` must be null or valid
@@ -2710,15 +2805,42 @@ pub unsafe extern "C" fn z_bytes_to_owned_shm(
         // that ignored its argument would answer the same for a null pointer,
         // and then the refusal would say nothing about the payload.
         // SAFETY: the caller's contract.
-        if unsafe { bytes_slice(this_) }.is_none() {
+        let Some(state) = (unsafe { crate::bytes::bytes_state(this_) }) else {
             return Z_ENULL;
+        };
+        let Some(bytes) = state
+            .payload
+            .shared()
+            .filter(|bytes| bytes.is_shared_memory())
+        else {
+            return Z_EINVAL;
+        };
+        if dst.is_null() {
+            return Z_OK;
         }
-        Z_EINVAL
+        // Immutable: an owned buffer that is a second reference to a chunk the
+        // payload still holds is not unique, and upstream's owned conversion is the
+        // immutable one.
+        let chunk = Box::new(ShmChunk {
+            backing: ChunkBacking::Received {
+                bytes: bytes.clone(),
+            },
+            len: bytes.len(),
+            mutable: false,
+        });
+        // SAFETY: `dst` was checked non-null above.
+        unsafe { *dst = z_owned_shm_t::from_handle(Box::into_raw(chunk) as Handle) };
+        Z_OK
     })
 }
 
 /// Try to view a payload as a MUTABLE SHM buffer (zenoh-c
 /// `z_bytes_as_mut_loaned_shm`, `zenoh_commons.h:1464-1465`).
+///
+/// `Z_OK` for every payload that is a chunk of shared memory, as for
+/// [`z_bytes_as_loaned_shm`]; whether the buffer may then be WRITTEN is the next
+/// question, which [`z_shm_try_reloan_mut`] answers (`z_sub_shm.c` asks it to print
+/// `SHM (MUT)` or `SHM (IMMUT)`).
 ///
 /// # Safety
 /// As [`z_bytes_as_loaned_shm`].
@@ -2733,10 +2855,20 @@ pub unsafe extern "C" fn z_bytes_as_mut_loaned_shm(
             unsafe { *dst = std::ptr::null_mut() };
         }
         // SAFETY: the caller's contract.
-        if unsafe { bytes_slice(this_ as *const z_loaned_bytes_t) }.is_none() {
+        let Some(state) = (unsafe { crate::bytes::bytes_state(this_ as *const z_loaned_bytes_t) })
+        else {
             return Z_ENULL;
+        };
+        match received_shm(state) {
+            Some(loan) => {
+                if !dst.is_null() {
+                    // SAFETY: the caller's contract.
+                    unsafe { *dst = loan };
+                }
+                Z_OK
+            }
+            None => Z_EINVAL,
         }
-        Z_EINVAL
     })
 }
 
@@ -4650,6 +4782,245 @@ mod immutability_recovery_tests {
 }
 
 #[cfg(test)]
+mod received_chunk_tests {
+    //! R3052 -- what the C side is told about a payload that ARRIVED as a chunk of
+    //! shared memory, driven through the exported entry points a C program calls.
+    //!
+    //! The storage is a test double that answers what a mapped chunk answers, because
+    //! the two things a C program can learn are decided by two answers the double
+    //! controls: whether the chunk is a chunk of shared memory at all, and whether
+    //! this receiver holds the only reference to it. The integration leg runs the real
+    //! thing against the real publisher and sees ONE of the combinations; the others
+    //! are reachable only here.
+
+    use super::*;
+    use crate::abi::z_moved_bytes_t;
+    use crate::bytes::{z_bytes_drop, z_bytes_loan, z_bytes_loan_mut, Payload};
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use wz_runtime_tokio::{RxBytes, RxStorage, ShmChunkView};
+
+    /// A received chunk of shared memory, as far as the C side can tell. The bytes are
+    /// never written through the pointer it hands out; the tests compare the pointer.
+    struct LentChunk {
+        bytes: Vec<u8>,
+        unique: AtomicBool,
+        mapped_writable: bool,
+    }
+
+    impl RxStorage for LentChunk {
+        fn as_slice(&self) -> &[u8] {
+            &self.bytes
+        }
+
+        fn shm_chunk(&self) -> Option<&dyn ShmChunkView> {
+            Some(self)
+        }
+    }
+
+    impl ShmChunkView for LentChunk {
+        fn is_unique(&self) -> bool {
+            self.unique.load(Ordering::SeqCst)
+        }
+
+        fn writable_ptr(&self) -> Option<*mut u8> {
+            self.mapped_writable.then(|| self.bytes.as_ptr() as *mut u8)
+        }
+    }
+
+    fn chunk(unique: bool, mapped_writable: bool) -> Arc<LentChunk> {
+        Arc::new(LentChunk {
+            bytes: b"0123456789".to_vec(),
+            unique: AtomicBool::new(unique),
+            mapped_writable,
+        })
+    }
+
+    /// A payload that is the whole of `storage`, as a C program holds one.
+    fn payload_over(storage: Arc<dyn RxStorage>) -> z_owned_bytes_t {
+        let len = storage.as_slice().len();
+        let bytes = RxBytes::shared(storage, 0..len).expect("the range is the whole storage");
+        let state = BytesState::of(Payload::Shared(bytes));
+        z_owned_bytes_t::from_handle(Box::into_raw(Box::new(state)) as Handle)
+    }
+
+    fn drop_payload(mut payload: z_owned_bytes_t) {
+        // SAFETY: a live payload, dropped once.
+        unsafe { z_bytes_drop(&mut payload as *mut z_owned_bytes_t as *mut z_moved_bytes_t) };
+    }
+
+    /// THE POSITIVE ANSWER, and it is the payload's own: `z_bytes_as_loaned_shm` is
+    /// `Z_OK` for a chunk a peer sent, the buffer it lends is that chunk's bytes and
+    /// not a copy, and asking twice lends the same buffer, which a C program holding the
+    /// first pointer depends on.
+    #[test]
+    fn a_payload_that_is_a_chunk_of_shared_memory_is_loaned_as_that_chunk() {
+        let storage = chunk(true, true);
+        let payload = payload_over(storage.clone());
+
+        let mut first: *const z_loaned_shm_t = std::ptr::null();
+        let mut second: *const z_loaned_shm_t = std::ptr::null();
+        // SAFETY: a live payload and writable out-pointers.
+        let (rc1, rc2) = unsafe {
+            (
+                z_bytes_as_loaned_shm(z_bytes_loan(&payload), &mut first),
+                z_bytes_as_loaned_shm(z_bytes_loan(&payload), &mut second),
+            )
+        };
+        assert_eq!((rc1, rc2), (Z_OK, Z_OK));
+        assert!(!first.is_null(), "a Z_OK that lends nothing is no answer");
+        assert_eq!(
+            first, second,
+            "the loan is one buffer for the payload's life"
+        );
+        // SAFETY: `first` is a live loan of the payload.
+        let (len, data) = unsafe { (z_shm_len(first), z_shm_data(first)) };
+        assert_eq!(len, 10);
+        assert_eq!(
+            data,
+            storage.bytes.as_ptr(),
+            "the buffer IS the chunk's memory; a copy would have an address of its own"
+        );
+
+        drop_payload(payload);
+    }
+
+    /// THE REFUSAL: a range of lent storage that is not a chunk of shared memory (a
+    /// frame, a pool slot) and a payload of a buffer's own are both `Z_EINVAL` with
+    /// nothing lent. This is the control of the test above: it fails only if the
+    /// answer ignores WHAT the payload is.
+    #[test]
+    fn a_payload_that_is_not_a_chunk_of_shared_memory_is_refused() {
+        let frame: Arc<dyn RxStorage> = Arc::new(b"0123456789".to_vec());
+        let ranged = payload_over(frame);
+        let mut owned = z_owned_bytes_t::null_value();
+        // SAFETY: `owned` is a live local.
+        let rc = unsafe { crate::bytes::z_bytes_copy_from_buf(&mut owned, b"abc".as_ptr(), 3) };
+        assert_eq!(rc, Z_OK, "the owned payload must have been built");
+
+        for (what, payload) in [("a range of a frame", &ranged), ("a buffer", &owned)] {
+            let mut dst: *const z_loaned_shm_t = std::ptr::NonNull::dangling().as_ptr();
+            // SAFETY: a live payload and a writable out-pointer.
+            let rc = unsafe { z_bytes_as_loaned_shm(z_bytes_loan(payload), &mut dst) };
+            assert_eq!(rc, Z_EINVAL, "{what} is not shared memory");
+            assert!(
+                dst.is_null(),
+                "a refusal must not leave a stale loan: {what}"
+            );
+        }
+
+        drop_payload(ranged);
+        drop_payload(owned);
+    }
+
+    /// `SHM (MUT)` or `SHM (IMMUT)`, which is the question `z_sub_shm.c` exists to
+    /// ask: the mutable view is granted only while this receiver holds the ONLY
+    /// reference to the chunk AND the page maps writable, and the answer follows the
+    /// chunk as the sender lets go, not as it stood when the payload arrived.
+    #[test]
+    fn the_mutable_view_is_granted_only_to_the_sole_holder_of_a_writable_chunk() {
+        // (unique, mapped writable, may the C side write?)
+        let cases = [
+            (false, true, false),
+            (true, false, false),
+            (true, true, true),
+        ];
+        for (unique, mapped_writable, granted) in cases {
+            let storage = chunk(unique, mapped_writable);
+            let mut payload = payload_over(storage.clone());
+            let mut loan: *mut z_loaned_shm_t = std::ptr::null_mut();
+            // SAFETY: a live payload and a writable out-pointer.
+            let rc =
+                unsafe { z_bytes_as_mut_loaned_shm(z_bytes_loan_mut(&mut payload), &mut loan) };
+            assert_eq!(rc, Z_OK, "the buffer is lent either way");
+
+            // SAFETY: `loan` is a live loan of the payload.
+            let reloaned = unsafe { z_shm_try_reloan_mut(loan) };
+            assert_eq!(
+                !reloaned.is_null(),
+                granted,
+                "unique={unique} mapped_writable={mapped_writable}"
+            );
+            if granted {
+                // SAFETY: a live mutable loan; only the address is read.
+                let ptr = unsafe { z_shm_mut_data_mut(reloaned) };
+                assert_eq!(ptr as *const u8, storage.bytes.as_ptr());
+            }
+            drop_payload(payload);
+        }
+    }
+
+    /// The sender letting go takes the answer from IMMUT to MUT on the SAME loan.
+    #[test]
+    fn the_answer_follows_the_chunk_when_the_sender_lets_go() {
+        let storage = chunk(false, true);
+        let mut payload = payload_over(storage.clone());
+        let mut loan: *mut z_loaned_shm_t = std::ptr::null_mut();
+        // SAFETY: a live payload and a writable out-pointer.
+        let rc = unsafe { z_bytes_as_mut_loaned_shm(z_bytes_loan_mut(&mut payload), &mut loan) };
+        assert_eq!(rc, Z_OK);
+        // SAFETY: a live loan.
+        assert!(
+            unsafe { z_shm_try_reloan_mut(loan) }.is_null(),
+            "shared: IMMUT"
+        );
+
+        storage.unique.store(true, Ordering::SeqCst);
+        // SAFETY: the same live loan.
+        assert!(
+            !unsafe { z_shm_try_reloan_mut(loan) }.is_null(),
+            "the sender let go: MUT"
+        );
+        drop_payload(payload);
+    }
+
+    /// `z_bytes_to_owned_shm` hands out a SECOND reference that is immutable however
+    /// unique the chunk is, and every reference the C side took is given back with the
+    /// payload and the buffers it owns: the chunk's last holder going away is what
+    /// releases the sender's reference, so a leak here is a chunk the sender never gets
+    /// back.
+    #[test]
+    fn an_owned_buffer_is_a_second_immutable_reference_and_all_of_them_are_given_back() {
+        let storage = chunk(true, true);
+        assert_eq!(Arc::strong_count(&storage), 1);
+        let payload = payload_over(storage.clone());
+        assert_eq!(Arc::strong_count(&storage), 2, "the payload's range");
+
+        let mut owned = z_owned_shm_t::null_value();
+        // SAFETY: a live payload and a writable destination.
+        let rc = unsafe { z_bytes_to_owned_shm(z_bytes_loan(&payload), &mut owned) };
+        assert_eq!(rc, Z_OK);
+        assert!(unsafe { z_internal_shm_check(&owned) });
+        assert_eq!(Arc::strong_count(&storage), 3, "and the owned buffer's");
+        // SAFETY: a live owned buffer.
+        assert_eq!(unsafe { z_shm_len(z_shm_loan(&owned)) }, 10);
+        // SAFETY: a live owned buffer.
+        let mutable = unsafe { z_shm_try_reloan_mut(z_shm_loan_mut(&mut owned)) };
+        assert!(
+            mutable.is_null(),
+            "an owned conversion is the immutable one, even for a unique chunk"
+        );
+
+        let mut loan: *const z_loaned_shm_t = std::ptr::null();
+        // SAFETY: a live payload and a writable out-pointer.
+        assert_eq!(
+            unsafe { z_bytes_as_loaned_shm(z_bytes_loan(&payload), &mut loan) },
+            Z_OK
+        );
+        assert_eq!(Arc::strong_count(&storage), 4, "and the payload's own loan");
+
+        // SAFETY: dropped once each.
+        unsafe { z_shm_drop(&mut owned as *mut z_owned_shm_t as *mut z_moved_shm_t) };
+        assert_eq!(Arc::strong_count(&storage), 3);
+        drop_payload(payload);
+        assert_eq!(
+            Arc::strong_count(&storage),
+            1,
+            "the payload took its loan with it; nothing of the chunk is left held"
+        );
+    }
+}
+
+#[cfg(test)]
 mod foreign_backend_tests {
     //! R2289 (open-debt item 607) — the C-SUPPLIED backend, driven the way a C
     //! program drives it.
@@ -6044,6 +6415,12 @@ mod foreign_backend_tests {
 // path (`wz-session-core/src/extshm.rs` says so in its own banner: R3a landed
 // the codec and the trait, R3b never wired the RX resolver). The two are
 // different sentences, and the register had merged them.
+//
+// ⚠ R3052: the PAYLOAD path is no longer inert. The RX resolver was wired in R3050
+// (`resolve_shared` hands a received chunk over as a range of its mapped segment) and
+// this ABI's receiving side reads it, so a received shared-memory payload is a
+// payload the C program can loan. The sending side is the part still left (module
+// note). The paragraph above is what was true when the register item was settled.
 //
 // ## Divergence, named because it is a promise this plane cannot keep silently
 //

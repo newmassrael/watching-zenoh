@@ -33,19 +33,101 @@ use crate::string::owned_string_from;
 /// exactly when the payload is, matching upstream's zero-slice empty value;
 /// otherwise its last element is `payload.len()`.
 pub(crate) struct BytesState {
-    pub(crate) payload: Vec<u8>,
+    pub(crate) payload: Payload,
     pub(crate) bounds: Vec<usize>,
+    /// The `z_loaned_shm_t` this payload answers `z_bytes_as_loaned_shm` with, made the
+    /// first time it is asked and kept for as long as the payload lives, because
+    /// the loan is a pointer the caller holds (R3052). `None` inside is a payload
+    /// that is not a chunk of shared memory.
+    #[cfg(all(
+        feature = "zenoh-c-shared-memory",
+        not(feature = "zenoh-c-no-unstable-api")
+    ))]
+    pub(crate) shm_loan: std::sync::OnceLock<Option<crate::shm::ReceivedShm>>,
+}
+
+/// The bytes of a payload: a buffer of its own, or the bytes a session delivered
+/// where it received them (R3052).
+///
+/// The second is what a sample from the wire is: a range of the frame it arrived in,
+/// or of the chunk of shared memory a peer sent, shared by reference count the way
+/// upstream's `ZBytes` shares its slices. A sample the C side keeps is then a second
+/// reference to that storage and not a copy of it, and a payload that is a chunk of
+/// shared memory can SAY so ([`Payload::shared_memory`]), which a copy cannot.
+/// Every read goes through [`core::ops::Deref`] to `[u8]`, whichever it is.
+#[derive(Clone)]
+pub(crate) enum Payload {
+    Owned(Vec<u8>),
+    Shared(wz_runtime_tokio::RxBytes),
+}
+
+impl core::ops::Deref for Payload {
+    type Target = [u8];
+
+    fn deref(&self) -> &[u8] {
+        match self {
+            Payload::Owned(bytes) => bytes,
+            Payload::Shared(bytes) => bytes.as_slice(),
+        }
+    }
+}
+
+impl From<Vec<u8>> for Payload {
+    fn from(bytes: Vec<u8>) -> Self {
+        Payload::Owned(bytes)
+    }
+}
+
+impl Payload {
+    /// The bytes as an owned `Vec`: moved out when owned, copied when shared.
+    pub(crate) fn into_vec(self) -> Vec<u8> {
+        match self {
+            Payload::Owned(bytes) => bytes,
+            Payload::Shared(bytes) => bytes.into_vec(),
+        }
+    }
+
+    /// The shareable bytes, when these are not a buffer of their own. Asked only by
+    /// the shared-memory buffer plane, which a build without that axis does not have.
+    #[cfg(all(
+        feature = "zenoh-c-shared-memory",
+        not(feature = "zenoh-c-no-unstable-api")
+    ))]
+    pub(crate) fn shared(&self) -> Option<&wz_runtime_tokio::RxBytes> {
+        match self {
+            Payload::Owned(_) => None,
+            Payload::Shared(bytes) => Some(bytes),
+        }
+    }
 }
 
 impl BytesState {
     /// A payload that is ONE slice — every constructor except the writer's.
     pub(crate) fn whole(payload: Vec<u8>) -> Self {
+        Self::of(Payload::Owned(payload))
+    }
+
+    /// A payload that is ONE slice, whatever holds it.
+    pub(crate) fn of(payload: Payload) -> Self {
         let bounds = if payload.is_empty() {
             Vec::new()
         } else {
             vec![payload.len()]
         };
-        Self { payload, bounds }
+        Self::from_parts(payload, bounds)
+    }
+
+    /// A payload with its slice boundaries named.
+    pub(crate) fn from_parts(payload: Payload, bounds: Vec<usize>) -> Self {
+        Self {
+            payload,
+            bounds,
+            #[cfg(all(
+                feature = "zenoh-c-shared-memory",
+                not(feature = "zenoh-c-no-unstable-api")
+            ))]
+            shm_loan: std::sync::OnceLock::new(),
+        }
     }
 
     /// The `index`-th slice, or `None` past the end.
@@ -83,6 +165,29 @@ pub(crate) unsafe fn bytes_slice<'a>(this_: *const z_loaned_bytes_t) -> Option<&
     Some(&unsafe { &*(handle as *const BytesState) }.payload)
 }
 
+/// The [`BytesState`] behind a LOANED handle, for a caller that needs more of it
+/// than its bytes (R3052: whether the payload is a chunk of shared memory).
+///
+/// # Safety
+/// `this_` must be null, or a valid loaned bytes whose handle slot holds a live
+/// `BytesState` pointer.
+#[cfg(all(
+    feature = "zenoh-c-shared-memory",
+    not(feature = "zenoh-c-no-unstable-api")
+))]
+pub(crate) unsafe fn bytes_state<'a>(this_: *const z_loaned_bytes_t) -> Option<&'a BytesState> {
+    if this_.is_null() {
+        return None;
+    }
+    // SAFETY: the caller's contract.
+    let handle = unsafe { (*this_).handle };
+    if handle.is_null() {
+        return None;
+    }
+    // SAFETY: as `bytes_slice`.
+    Some(unsafe { &*(handle as *const BytesState) })
+}
+
 /// Take the payload out of a MOVED bytes, leaving a gravestone.
 ///
 /// `z_put` consumes its payload, so this both reads and invalidates — a
@@ -102,7 +207,7 @@ pub(crate) unsafe fn take_payload(moved: *mut z_moved_bytes_t) -> Option<Vec<u8>
     // SAFETY: a live `Box<BytesState>` this crate leaked; reclaimed here.
     let state = unsafe { Box::from_raw(handle as *mut BytesState) };
     unsafe { (*moved)._this = z_owned_bytes_t::null_value() };
-    Some(state.payload)
+    Some(state.payload.into_vec())
 }
 
 /// Build a payload from a NUL-terminated string (zenoh-c
@@ -923,10 +1028,7 @@ impl WriterState {
     /// The finished payload: any still-open run becomes a final slice.
     fn finish(mut self) -> BytesState {
         self.seal();
-        BytesState {
-            payload: self.buf,
-            bounds: self.sealed,
-        }
+        BytesState::from_parts(Payload::Owned(self.buf), self.sealed)
     }
 }
 

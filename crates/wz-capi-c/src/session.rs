@@ -118,20 +118,20 @@ struct QosWithLowlatency;
 /// when it is built (`bail!("'qos' and 'lowlatency' options are incompatible");`),
 /// which is inside `zenoh::open` and so reaches a C caller as an open failure.
 ///
-/// ## Shared memory is NOT offered, and that is a held divergence
+/// ## Shared memory is offered on the shared-memory arm (R3052)
 ///
 /// Upstream's shared-memory build also offers SHM, from
 /// `transport/shared_memory/enabled`
 /// (`io/zenoh-transport/src/common/shm/shm_context.rs` @ `if !*cfg.enabled() {`),
-/// default on. This session does not, on any arm. Negotiating it would let a
-/// zenoh peer send this session SHM payloads — explicitly, or implicitly for any
-/// payload past `message_size_threshold` — and a Put carrying one is laid out
-/// as slices on the wire, which wz's generated Put codec cannot read yet
-/// (open-debt item 823, an SCE predicate this tree cannot write). A session that
-/// agreed on SHM would then lose every such sample and misread the message
-/// after it, where today the same peer sends it the ordinary way. So
-/// `node.shared_memory` is read by the config reader and deliberately not
-/// staged here; the SHM half of this offer lands with item 823.
+/// default on, and so does this session on the arm that carries the axis
+/// (`zenoh-c-shared-memory` without `zenoh-c-no-unstable-api`, the condition the
+/// `shm` module itself has): the offer is `node.shared_memory`. Until R3052 it did
+/// not, on any arm, because a Put carrying a shared-memory buffer is laid out as
+/// slices on the wire, which wz's generated Put codec could not read (open-debt
+/// item 823), so a session that agreed on SHM would have lost every such sample.
+/// The codec reads the layout now, and a payload a peer sends as shared memory is
+/// delivered as the page it lies on, so `z_bytes_as_loaned_shm` answers for it.
+/// Without the axis there is no shared memory to offer.
 fn session_offer(node: &ZenohNodeConfig) -> Result<SessionOffer, QosWithLowlatency> {
     let mode = match (node.qos, node.lowlatency) {
         (true, true) => return Err(QosWithLowlatency),
@@ -139,9 +139,18 @@ fn session_offer(node: &ZenohNodeConfig) -> Result<SessionOffer, QosWithLowlaten
         (false, true) => TransportMode::LowLatency,
         (false, false) => TransportMode::Universal,
     };
-    Ok(SessionOffer::universal()
+    #[allow(unused_mut)]
+    let mut offer = SessionOffer::universal()
         .with_mode(mode)
-        .with_compression(node.compression))
+        .with_compression(node.compression);
+    #[cfg(all(
+        feature = "zenoh-c-shared-memory",
+        not(feature = "zenoh-c-no-unstable-api")
+    ))]
+    {
+        offer = offer.with_shm(node.shared_memory);
+    }
+    Ok(offer)
 }
 
 /// The session's configuration, read ONCE, the way a zenoh node reads it.
@@ -631,13 +640,28 @@ mod tests {
         session_offer(&node)
     }
 
+    /// What an offer holds beside the unicast keys under test: shared memory on the
+    /// arm that carries that axis, because upstream's key defaults on and this
+    /// session reads the key (R3052), and nothing on an arm that does not.
+    fn with_the_arms_default(offer: SessionOffer) -> SessionOffer {
+        #[cfg(all(
+            feature = "zenoh-c-shared-memory",
+            not(feature = "zenoh-c-no-unstable-api")
+        ))]
+        let offer = offer.with_shm(true);
+        offer
+    }
+
     /// R2970 — an unconfigured session offers QoS, upstream's default, and no
-    /// other capability.
+    /// other capability but the one its arm's defaults add (R3052: shared memory,
+    /// on the arm that carries that axis).
     #[test]
     fn an_unconfigured_session_offers_qos_and_nothing_else() {
         assert_eq!(
             offer_for("{}"),
-            Ok(SessionOffer::universal().with_mode(TransportMode::Qos))
+            Ok(with_the_arms_default(
+                SessionOffer::universal().with_mode(TransportMode::Qos)
+            ))
         );
     }
 
@@ -648,19 +672,23 @@ mod tests {
     fn each_unicast_key_reaches_the_offer() {
         assert_eq!(
             offer_for(r#"{ transport: { unicast: { qos: { enabled: false } } } }"#),
-            Ok(SessionOffer::universal())
+            Ok(with_the_arms_default(SessionOffer::universal()))
         );
         assert_eq!(
             offer_for(
                 r#"{ transport: { unicast: { qos: { enabled: false }, lowlatency: true } } }"#
             ),
-            Ok(SessionOffer::universal().with_mode(TransportMode::LowLatency))
+            Ok(with_the_arms_default(
+                SessionOffer::universal().with_mode(TransportMode::LowLatency)
+            ))
         );
         assert_eq!(
             offer_for(r#"{ transport: { unicast: { compression: { enabled: true } } } }"#),
-            Ok(SessionOffer::universal()
-                .with_mode(TransportMode::Qos)
-                .with_compression(true))
+            Ok(with_the_arms_default(
+                SessionOffer::universal()
+                    .with_mode(TransportMode::Qos)
+                    .with_compression(true)
+            ))
         );
     }
 
@@ -674,16 +702,33 @@ mod tests {
         );
     }
 
-    /// Shared memory is read and NOT offered, on every arm: the held
-    /// divergence `session_offer` states (open-debt item 823). This is the test
-    /// that moves with that item.
+    /// R3052 -- shared memory is offered from the node's key on the arm that carries
+    /// the axis, and is never offered on one that does not: the offer was staged by
+    /// no arm until the Put codec read the sliced layout, and this is the test that
+    /// moved with that.
     #[test]
-    fn shared_memory_is_read_and_not_offered() {
-        let node =
-            ZenohNodeConfig::from_json5(r#"{ transport: { shared_memory: { enabled: true } } }"#)
-                .expect("the document is one the reader accepts")
-                .config;
-        assert!(node.shared_memory, "the reader carries the key");
-        assert!(!session_offer(&node).expect("no mode conflict").shm);
+    fn shared_memory_is_offered_from_the_key_on_the_arm_that_carries_it() {
+        let node = |enabled: bool| {
+            ZenohNodeConfig::from_json5(&format!(
+                r#"{{ transport: {{ shared_memory: {{ enabled: {enabled} }} }} }}"#
+            ))
+            .expect("the document is one the reader accepts")
+            .config
+        };
+        assert!(node(true).shared_memory, "the reader carries the key");
+        assert!(!node(false).shared_memory, "and carries it off");
+        #[cfg(all(
+            feature = "zenoh-c-shared-memory",
+            not(feature = "zenoh-c-no-unstable-api")
+        ))]
+        {
+            assert!(session_offer(&node(true)).expect("no mode conflict").shm);
+            assert!(!session_offer(&node(false)).expect("no mode conflict").shm);
+        }
+        #[cfg(not(all(
+            feature = "zenoh-c-shared-memory",
+            not(feature = "zenoh-c-no-unstable-api")
+        )))]
+        assert!(!session_offer(&node(true)).expect("no mode conflict").shm);
     }
 }

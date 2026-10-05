@@ -31,7 +31,7 @@ use crate::abi::{
     z_loaned_bytes_t, z_loaned_encoding_t, z_loaned_keyexpr_t, z_loaned_sample_t, z_sample_kind_t,
     z_view_string_t, Z_SAMPLE_KIND_DELETE, Z_SAMPLE_KIND_PUT,
 };
-use crate::bytes::BytesState;
+use crate::bytes::{BytesState, Payload};
 use crate::encoding::EncodingState;
 use crate::ffi::guard_val;
 use crate::keyexpr::KeyexprState;
@@ -193,13 +193,13 @@ impl SampleMarshal {
     /// note for why that is not an oversight.
     pub(crate) fn new(
         keyexpr: String,
-        payload: Vec<u8>,
+        payload: impl Into<Payload>,
         kind: z_sample_kind_t,
         meta: SampleMeta,
     ) -> Self {
         Self {
             keyexpr: KeyexprState::new(keyexpr),
-            payload: BytesState::whole(payload),
+            payload: BytesState::of(payload.into()),
             attachment: meta.attachment.map(BytesState::whole),
             kind,
             timestamp: meta.timestamp,
@@ -589,9 +589,18 @@ pub(crate) fn with_marshalled<R>(
     // place that names its accessors ([`SampleMeta::from_view`]). Before this
     // round the three metadata fields were named here, and the encoding + QoS
     // this round adds would have been a fourth and fifth transcription.
+    // R3052 -- a payload the session delivered where it received it stays there: the
+    // marshal holds a second reference to the frame, or to the chunk of shared memory
+    // a peer sent, for the length of the callback, and a C program that escapes the
+    // sample keeps it. Only a view with no shareable payload (a sample the C side
+    // built itself, a test's) is copied.
+    let payload = match view.payload_shared() {
+        Some(shared) => Payload::Shared(shared.clone()),
+        None => Payload::Owned(view.payload().to_vec()),
+    };
     let mut marshal = SampleMarshal::new(
         view.keyexpr().to_owned(),
-        view.payload().to_vec(),
+        payload,
         sample_kind_of(view.kind()),
         SampleMeta::from_view(view),
     );
@@ -757,11 +766,11 @@ impl SampleMarshal {
     pub(crate) fn deep_copy(&self) -> Self {
         Self {
             keyexpr: KeyexprState::new(self.keyexpr.keyexpr.clone()),
-            payload: BytesState::whole(self.payload.payload.clone()),
+            payload: BytesState::of(self.payload.payload.clone()),
             attachment: self
                 .attachment
                 .as_ref()
-                .map(|state| BytesState::whole(state.payload.clone())),
+                .map(|state| BytesState::of(state.payload.clone())),
             kind: self.kind,
             // `Copy`, and owned by value — the deep copy carries the same
             // 24 bytes rather than a pointer into the source marshal, so a

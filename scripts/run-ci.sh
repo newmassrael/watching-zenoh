@@ -19893,6 +19893,7 @@ layer_c1cc_api_compat_c() {
     for leg in \
         upstream_z_pub_shm_on_wz_capi_c_publishes_the_same_shm_chunk_on_both_arms \
         upstream_z_sub_shm_on_wz_capi_c_reports_the_same_buffer_type_on_both_arms \
+        upstream_z_sub_shm_on_wz_capi_c_reports_the_same_buffer_type_for_a_shared_memory_publisher \
         upstream_z_get_shm_on_wz_capi_c_is_answered_by_real_pico_where_the_reference_arm_aborts; do
         _runci_guarded_test "C1cc $leg" 1 \
             cargo test -p wz-integration-tests \
