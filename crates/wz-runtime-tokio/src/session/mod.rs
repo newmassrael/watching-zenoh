@@ -381,6 +381,31 @@ use crate::session_glue::SessionLinkActions;
 type ShmValueRef<'a> = &'a crate::shm_provider::ShmBackedPayload;
 #[cfg(all(feature = "transport-unicast", not(feature = "transport-shm")))]
 type ShmValueRef<'a> = &'a core::convert::Infallible;
+/// How one query's selector is spelled, on the wire and for the legs that stay in
+/// this process: the `(mapping_id, suffix)` pair the wire carries (`0` and the whole
+/// literal when nothing was declared), and the LITERAL expression the loopback leg and
+/// the reply filter read, which is the same expression either way. A build without
+/// `query-get` never reads the fields, which is why they are allowed to be unread
+/// there.
+#[cfg(feature = "transport-unicast")]
+#[cfg_attr(not(feature = "query-get"), allow(dead_code))]
+#[derive(Clone, Copy)]
+struct QuerySelector<'a> {
+    mapping_id: u64,
+    suffix: Option<&'a str>,
+    loopback_keyexpr: &'a str,
+}
+#[cfg(feature = "transport-unicast")]
+impl<'a> QuerySelector<'a> {
+    /// A selector nothing was declared for: the wire carries the literal itself.
+    fn literal(keyexpr: &'a str) -> Self {
+        Self {
+            mapping_id: 0,
+            suffix: Some(keyexpr),
+            loopback_keyexpr: keyexpr,
+        }
+    }
+}
 // R311nb — the `PushMetadata` import is retired here: its sole mod.rs
 // consumer was `PublishOptions::push_metadata`, which moved to
 // `publish_common` (importing `PushMetadata` from its ungated real home
@@ -3325,7 +3350,13 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
         on_reply: impl FnMut(&dyn ReplyView) + Send + 'static,
         on_final: impl FnMut(u64) + Send + 'static,
     ) -> Result<ReplyHandle, QueryAliasError> {
-        self.query_inner(keyexpr, opts, None, on_reply, on_final)
+        self.query_via(
+            QuerySelector::literal(keyexpr),
+            opts,
+            None,
+            on_reply,
+            on_final,
+        )
     }
 
     /// transport-shm -- the query whose VALUE is a shared-memory buffer, the getter's
@@ -3348,23 +3379,28 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
         on_reply: impl FnMut(&dyn ReplyView) + Send + 'static,
         on_final: impl FnMut(u64) + Send + 'static,
     ) -> Result<ReplyHandle, QueryAliasError> {
-        opts.payload = Some(value.bytes().to_vec());
-        let by_descriptor = self.actions().is_shm() && opts.allowed_destination.allows_remote();
-        self.query_inner(
-            keyexpr,
+        let by_descriptor = self.adopt_shm_value(&mut opts, value);
+        self.query_via(
+            QuerySelector::literal(keyexpr),
             opts,
-            by_descriptor.then_some(value),
+            by_descriptor,
             on_reply,
             on_final,
         )
     }
 
-    /// The body of [`Self::query`] and [`Self::query_shm`]. `shm_value` is the buffer
-    /// whose descriptor the REMOTE leg carries in place of `opts.payload`; `None` is
-    /// the ordinary query.
-    fn query_inner(
+    /// The one body of every query this session sends: [`Self::query`],
+    /// [`Self::query_shm`], [`Self::query_aliased`] and
+    /// [`Self::query_aliased_auto`] differ in how the selector is spelled on the wire
+    /// and in whether the value is a buffer, and in nothing else, so they are four
+    /// spellings of one call. They were two copies of this body until R3049, and the
+    /// copies had already drifted twice (R311y833, R311y836: the aliased getter kept a
+    /// different promise for the same options). `shm_value` is the buffer whose
+    /// descriptor the REMOTE leg carries in place of `opts.payload`; `None` is the
+    /// ordinary query.
+    fn query_via(
         &self,
-        keyexpr: &str,
+        selector: QuerySelector<'_>,
         opts: QueryOptions,
         shm_value: Option<ShmValueRef<'_>>,
         on_reply: impl FnMut(&dyn ReplyView) + Send + 'static,
@@ -3372,7 +3408,7 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
     ) -> Result<ReplyHandle, QueryAliasError> {
         #[cfg(not(feature = "query-get"))]
         {
-            let _ = (keyexpr, opts, shm_value, on_reply, on_final);
+            let _ = (selector, opts, shm_value, on_reply, on_final);
             Err(QueryAliasError::FeatureDisabled)
         }
         #[cfg(feature = "query-get")]
@@ -3472,8 +3508,13 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
             // selector parameters, so an `_anyke` GET — every `@adv` history /
             // recovery GET this tree already emits — keeps accepting replies
             // keyed on the cached sample's own expression.
+            //
+            // R3049 -- the guarantee is about the expression the caller asked under,
+            // which is the selector's literal whichever way the wire spells it: the
+            // same value the loopback fan matches queryables against. The aliased
+            // getter used to carry its own copy of this gate.
             let accept = wz_session_core::reply_acceptance::ReplyAcceptance::for_query(
-                keyexpr,
+                selector.loopback_keyexpr,
                 opts.effective_accept_replies(),
             );
 
@@ -3513,12 +3554,16 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
                 // `send_request_query` (dispatch_request reliable, no flush);
                 // the builder's `CodecError` maps to `SendWireError::Codec`.
                 let emit = if meta.is_empty() {
-                    wz_session_core::request_build::build_request_query(rid, 0, Some(keyexpr))
+                    wz_session_core::request_build::build_request_query(
+                        rid,
+                        selector.mapping_id,
+                        selector.suffix,
+                    )
                 } else {
                     wz_session_core::request_build::build_request_query_with_meta(
                         rid,
-                        0,
-                        Some(keyexpr),
+                        selector.mapping_id,
+                        selector.suffix,
                         &meta,
                     )
                 }
@@ -3571,7 +3616,7 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
                         // ext, which the receiver decodes as DEFAULT.
                         observer.queryables.local_query(
                             rid,
-                            keyexpr,
+                            selector.loopback_keyexpr,
                             &query,
                             opts.effective_target(),
                             opts.qos
@@ -3713,13 +3758,10 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
     /// `_z_declared_keyexpr_t` (`vendor/zenoh-pico/src/net/query.c`)
     /// carrying both the aliased pair and the resolved literal.
     ///
-    /// 8-argument signature (matches the 6 distinct atomic parameters
-    /// the aliased Query needs on the wire + 2 application closures).
-    /// `clippy::too_many_arguments` is explicitly allowed here because
-    /// every argument is load-bearing: mapping_id + inline_suffix +
-    /// loopback_keyexpr are the wire-aliased triple, opts is the
-    /// metadata bundle, clock is the R262 deadline source, and the
-    /// two closures are the on_reply / on_final consumer callbacks.
+    /// mapping_id + inline_suffix + loopback_keyexpr are the aliased triple
+    /// (`QuerySelector`'s three fields), opts is the metadata bundle, and the two
+    /// closures are the on_reply / on_final consumer callbacks. Since R3049 the body
+    /// is `query_via`, shared with the literal query.
     ///
     /// R311t — signature type-ungated and Result-form alongside
     /// [`Self::query`]. When `query-get` is OFF the body returns
@@ -3736,174 +3778,17 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
         on_reply: impl FnMut(&dyn ReplyView) + Send + 'static,
         on_final: impl FnMut(u64) + Send + 'static,
     ) -> Result<ReplyHandle, QueryAliasError> {
-        #[cfg(not(feature = "query-get"))]
-        {
-            let _ = (
+        self.query_via(
+            QuerySelector {
                 mapping_id,
-                inline_suffix,
+                suffix: inline_suffix,
                 loopback_keyexpr,
-                opts,
-                on_reply,
-                on_final,
-            );
-            Err(QueryAliasError::FeatureDisabled)
-        }
-        #[cfg(feature = "query-get")]
-        {
-            let rid = self.actions().alloc_next_request_id();
-            let expected_finals = opts.expected_finals();
-            let allows_remote = opts.allowed_destination.allows_remote();
-            let allows_local = opts.allowed_destination.allows_local();
-            // R262 — same deadline_ms computation as `Session::query`.
-            // R311cw — clock is Session-owned (`Arc<T>` field), same
-            // monotonic epoch shared with the sweep caller as long as
-            // both `Session::new` and `drive_session_until_terminal`
-            // receive the same `Arc<T>` instance (the wz-ap-demo runner
-            // is the production-side fixture that honours this).
-            // R311y317 — read the timeout through the gated accessor, NOT the
-            // pub field: `opts.timeout_ms` bypasses `with_timeout_ms`'s gate,
-            // and this site never touches `query_metadata`, so gating only the
-            // wire threading would leave this deadline armed with
-            // `query-timeout` off while every wire-byte test stayed green.
-            let t = opts.effective_timeout_ms();
-            let deadline_ms = (t > 0).then(|| self.clock.now_monotonic_ms() + t as u64);
-
-            // R311lg — deferred staging sink; same lock-free callback
-            // contract + tail drain as `Session::query`.
-            //
-            // R311y321 — consolidation wrap, identical to `Session::query`'s:
-            // the aliased get is the same requester plane and must consolidate
-            // the same way, or `Querier::get` and `Session::query` would honour
-            // the mode differently for the same options.
-            //
-            // R311y836 — including the resolution of the UNNAMED mode. Both
-            // getters share `resolved_consolidation` for the same reason they
-            // shared the wrap: a default that differed between them would be a
-            // parity gap wz created rather than inherited.
-            let sink = wz_session_core::reply_sink::ConsolidatingSink::new(
-                opts.resolved_consolidation(),
-                self.deferred_reply_sink(on_reply, on_final),
-            );
-
-            // R311dc — closure-form observer access via R::with_mutex_mut
-            // (R311ct API). Same closure body shape as Session::query.
-            // R311ln (Finding B sibling) — register, emit the wire
-            // Query, then fan the loopback; same pico `_z_query` order
-            // and unregister-only rollback as `Session::query` (see its
-            // header comment). The aliased wire branch routes by
-            // (mapping_id, inline_suffix); a failed emit rolls the FRESH
-            // rid back with `unregister` alone (no loopback fanned yet,
-            // no solicited reply can correlate before the send).
-            // R311y833 — same acceptance gate as `Session::query`. The aliased
-            // get routes its WIRE query by (mapping_id, inline_suffix), but the
-            // guarantee is about the expression the caller asked under, and
-            // `loopback_keyexpr` is that literal — the same value the loopback
-            // fan matches queryables against. Gating on anything else here
-            // would make the two getters keep different promises for the same
-            // options, which is the asymmetry this round exists to remove.
-            let accept = wz_session_core::reply_acceptance::ReplyAcceptance::for_query(
-                loopback_keyexpr,
-                opts.effective_accept_replies(),
-            );
-
-            let handle = R::with_mutex_mut(&self.observer, |observer| {
-                observer
-                    .replies
-                    .register_sink(rid, expected_finals, deadline_ms, accept, sink)
-                    .expect("register on the alloc backing never exceeds declared capacity")
-            });
-
-            if allows_remote {
-                let meta = opts.query_metadata();
-                // R311mu (B5b-2b-2) — aliased Query onto the send seam; same
-                // shape as `Session::query`, routed by (mapping_id,
-                // inline_suffix) instead of (0, literal). The seam emits the
-                // wire Query only; the unregister-only rollback below stays
-                // session-level.
-                let emit = if meta.is_empty() {
-                    wz_session_core::request_build::build_request_query(
-                        rid,
-                        mapping_id,
-                        inline_suffix,
-                    )
-                } else {
-                    wz_session_core::request_build::build_request_query_with_meta(
-                        rid,
-                        mapping_id,
-                        inline_suffix,
-                        &meta,
-                    )
-                }
-                .map_err(SendWireError::Codec)
-                .and_then(|request| {
-                    self.send_network_message(
-                        wz_session_core::network_message::NetworkMessage::Request(Box::new(
-                            request,
-                        )),
-                        /*reliable=*/ true,
-                        /*express=*/ false,
-                    )
-                });
-                if let Err(e) = emit {
-                    R::with_mutex_mut(&self.observer, |observer| {
-                        observer.replies.unregister(rid);
-                    });
-                    return Err(e.into());
-                }
-            }
-
-            // R311fq — `loopback_keyexpr` feeds only the query-queryable
-            // loopback fan; the wire branch routes by (mapping_id,
-            // inline_suffix). Under a wire-only getter (query-queryable
-            // OFF) the param is otherwise unused.
-            #[cfg(not(feature = "query-queryable"))]
-            let _ = loopback_keyexpr;
-            // R311ln — loopback fan AFTER a successful wire emit (pico
-            // parity). R311fq — gated on `query-queryable`; the synthetic
-            // Final (below) stays under `query-get` so a wire-only getter
-            // still closes the loopback half of the pending entry.
-            if allows_local {
-                #[cfg(feature = "query-queryable")]
-                {
-                    R::with_mutex_mut(&self.observer, |observer| {
-                        let mut replies: Vec<QueryReply> = Vec::new();
-                        // R311y94 (review V2) — carry the GET's selector params
-                        // (`_sn` / `_max`) into the loopback Query so a SessionLocal
-                        // queryable filters identically to the wire path.
-                        let query = build_loopback_query(&opts);
-                        // R311y321 residual closed: the GET's `target` rides the
-                        // call via the GATED `effective_target()` (the wire path's
-                        // accessor), NEVER the raw `opts.target` pub field — so
-                        // `query-target` OFF keeps this loopback leg inert
-                        // (R311y317 pub-field bypass class), and ON fires only
-                        // complete SessionLocal queryables here too.
-                        // R2594 — the GET's QoS, as on the leg above.
-                        observer.queryables.local_query(
-                            rid,
-                            loopback_keyexpr,
-                            &query,
-                            opts.effective_target(),
-                            opts.qos
-                                .unwrap_or(wz_session_core::sample::QosLevel::DEFAULT),
-                            &mut replies,
-                        );
-                        for reply in replies.drain(..) {
-                            let inbound: InboundReply = reply.into();
-                            observer.replies.deliver_local_reply(&inbound);
-                        }
-                    });
-                }
-            }
-
-            // R311lg / R311li / R311y554 — drain + loopback Final; see
-            // `Session::finalize_local_query` for the ordering rationale and
-            // `Session::query` for why R311y290 gates it on `allows_local`.
-            if allows_local {
-                self.finalize_local_query(rid);
-            }
-
-            Ok(handle)
-        }
+            },
+            opts,
+            None,
+            on_reply,
+            on_final,
+        )
     }
 
     /// R241 — auto-resolved counterpart of [`Self::query_aliased`].
@@ -3941,9 +3826,69 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
         on_reply: impl FnMut(&dyn ReplyView) + Send + 'static,
         on_final: impl FnMut(u64) + Send + 'static,
     ) -> Result<ReplyHandle, QueryAliasError> {
+        self.query_aliased_auto_via(mapping_id, inline_suffix, opts, None, on_reply, on_final)
+    }
+
+    /// transport-shm -- [`Self::query_aliased_auto`] whose VALUE is a shared-memory
+    /// buffer, the aliased counterpart of [`Self::query_shm`] and the call a
+    /// [`QuerierAliased`] makes. The wire carries the marker and the buffer's
+    /// descriptor on a session that negotiated SHM, and the bytes read back out of the
+    /// segment otherwise, exactly as [`Self::query_shm`] does.
+    #[cfg(all(feature = "transport-shm", feature = "query-value"))]
+    pub fn query_aliased_auto_shm(
+        &self,
+        mapping_id: u64,
+        inline_suffix: Option<&str>,
+        mut opts: QueryOptions,
+        value: &crate::shm_provider::ShmBackedPayload,
+        on_reply: impl FnMut(&dyn ReplyView) + Send + 'static,
+        on_final: impl FnMut(u64) + Send + 'static,
+    ) -> Result<ReplyHandle, QueryAliasError> {
+        let by_descriptor = self.adopt_shm_value(&mut opts, value);
+        self.query_aliased_auto_via(
+            mapping_id,
+            inline_suffix,
+            opts,
+            by_descriptor,
+            on_reply,
+            on_final,
+        )
+    }
+
+    /// Make `value` the query's value and say whether the remote leg carries it as a
+    /// descriptor: it does on a session that negotiated SHM when the query may go
+    /// remote, and the bytes already placed in `opts.payload` serve every other leg.
+    #[cfg(all(feature = "transport-shm", feature = "query-value"))]
+    fn adopt_shm_value<'v>(
+        &self,
+        opts: &mut QueryOptions,
+        value: &'v crate::shm_provider::ShmBackedPayload,
+    ) -> Option<&'v crate::shm_provider::ShmBackedPayload> {
+        opts.payload = Some(value.bytes().to_vec());
+        (self.actions().is_shm() && opts.allowed_destination.allows_remote()).then_some(value)
+    }
+
+    /// The body of [`Self::query_aliased_auto`] and its shared-memory sibling: the
+    /// outbound mapping is resolved first, so an unknown id fires neither leg.
+    fn query_aliased_auto_via(
+        &self,
+        mapping_id: u64,
+        inline_suffix: Option<&str>,
+        opts: QueryOptions,
+        shm_value: Option<ShmValueRef<'_>>,
+        on_reply: impl FnMut(&dyn ReplyView) + Send + 'static,
+        on_final: impl FnMut(u64) + Send + 'static,
+    ) -> Result<ReplyHandle, QueryAliasError> {
         #[cfg(not(feature = "query-get"))]
         {
-            let _ = (mapping_id, inline_suffix, opts, on_reply, on_final);
+            let _ = (
+                mapping_id,
+                inline_suffix,
+                opts,
+                shm_value,
+                on_reply,
+                on_final,
+            );
             Err(QueryAliasError::FeatureDisabled)
         }
         #[cfg(feature = "query-get")]
@@ -3960,13 +3905,16 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
                     composed
                 }
             };
-            // R311cw — clock fold-in: the inner `query_aliased` delegate
-            // reads `self.clock` directly; no clock parameter to thread.
-            self.query_aliased(
-                mapping_id,
-                inline_suffix,
-                &loopback_keyexpr,
+            // R311cw — clock fold-in: `query_via` reads `self.clock` directly;
+            // no clock parameter to thread.
+            self.query_via(
+                QuerySelector {
+                    mapping_id,
+                    suffix: inline_suffix,
+                    loopback_keyexpr: &loopback_keyexpr,
+                },
                 opts,
+                shm_value,
                 on_reply,
                 on_final,
             )
@@ -6659,3 +6607,12 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(all(
+    test,
+    feature = "session-extshm",
+    feature = "query-get",
+    feature = "query-value",
+    feature = "declare-keyexpr"
+))]
+mod shm_query_value_tests;

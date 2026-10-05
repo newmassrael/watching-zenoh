@@ -1307,6 +1307,26 @@ impl<R: SessionRuntime, T: TimeSource> Querier<R, T> {
             .query(&self.keyexpr, self.options.clone(), on_reply, on_final)
     }
 
+    /// transport-shm -- [`Self::get`] whose VALUE is a shared-memory buffer, as
+    /// upstream's `querier.get().payload(shm_buf)`. The buffer is the query's value
+    /// and replaces `options.payload`; see [`Session::query_shm`] for what the wire
+    /// carries and for the legs that carry the bytes instead.
+    #[cfg(all(feature = "transport-shm", feature = "query-value"))]
+    pub fn get_shm(
+        &self,
+        value: &crate::shm_provider::ShmBackedPayload,
+        on_reply: impl FnMut(&dyn ReplyView) + Send + 'static,
+        on_final: impl FnMut(u64) + Send + 'static,
+    ) -> Result<ReplyHandle, QueryAliasError> {
+        self.session.query_shm(
+            &self.keyexpr,
+            self.options.clone(),
+            value,
+            on_reply,
+            on_final,
+        )
+    }
+
     /// R288 — mirror of zenoh-pico's `z_querier_get_matching_status`
     /// (`vendor/zenoh-pico/src/api/api.c:1988`). Returns a
     /// [`MatchingStatus`] whose `matching` field is `true` iff at
@@ -1663,6 +1683,26 @@ impl<R: SessionRuntime, T: TimeSource> QuerierAliased<R, T> {
             self.mapping_id,
             self.inline_suffix.as_deref(),
             self.options.clone(),
+            on_reply,
+            on_final,
+        )
+    }
+
+    /// transport-shm -- [`Self::get`] whose VALUE is a shared-memory buffer; the
+    /// aliased counterpart of [`Querier::get_shm`], through
+    /// [`Session::query_aliased_auto_shm`].
+    #[cfg(all(feature = "transport-shm", feature = "query-value"))]
+    pub fn get_shm(
+        &self,
+        value: &crate::shm_provider::ShmBackedPayload,
+        on_reply: impl FnMut(&dyn ReplyView) + Send + 'static,
+        on_final: impl FnMut(u64) + Send + 'static,
+    ) -> Result<ReplyHandle, QueryAliasError> {
+        self.session.query_aliased_auto_shm(
+            self.mapping_id,
+            self.inline_suffix.as_deref(),
+            self.options.clone(),
+            value,
             on_reply,
             on_final,
         )
