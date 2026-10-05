@@ -45,7 +45,7 @@ use crate::abi::{
     z_moved_closure_query_t, z_moved_query_t, z_moved_queryable_t, z_owned_closure_query_t,
     z_owned_query_t, z_owned_queryable_t, z_view_string_t, Handle,
 };
-use crate::bytes::BytesState;
+use crate::bytes::{BytesState, Payload};
 use crate::ffi::{guard_val, guarded, CClosure as FfiClosure};
 use crate::keyexpr::{keyexpr_str, KeyexprState};
 use crate::result::{ZResult, Z_EINVAL, Z_ENULL, Z_OK};
@@ -421,7 +421,16 @@ impl QueryMarshal {
         Self {
             anyke: parameters_has_anyke(&parameters),
             parameters,
-            payload: view.payload().map(|p| BytesState::whole(p.to_vec())),
+            // R3061 -- a value the session delivered as a chunk of shared memory stays
+            // that chunk: the marshal holds a second reference to it for the callback,
+            // and a C program that escapes the query keeps it, so
+            // `z_bytes_as_loaned_shm(z_query_payload(..))` answers for a value a peer
+            // sent through shared memory, as it does for a sample's payload. Only a view
+            // with nothing shareable (a plain wire value, a test's) is copied.
+            payload: match view.payload_shared() {
+                Some(shared) => Some(BytesState::of(Payload::Shared(shared.clone()))),
+                None => view.payload().map(|p| BytesState::whole(p.to_vec())),
+            },
             attachment: view.attachment().map(|a| BytesState::whole(a.to_vec())),
             encoding: match view.encoding() {
                 Some(hint) => crate::encoding::EncodingState::from_hint(hint),

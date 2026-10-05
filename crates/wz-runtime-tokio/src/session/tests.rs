@@ -1127,6 +1127,76 @@ fn publish_shm_hands_a_same_session_subscriber_the_chunk_and_only_when_it_listen
     assert!(payload.is_unique());
 }
 
+/// R3061 -- the getter's twin of the test above: a queryable of THIS session that a chunk-valued
+/// get reaches is handed the chunk, not a copy of its bytes, and a get nobody here answers
+/// leaves the owner unique. The plain get beside it is the control that says the answer
+/// "shared memory" comes from the value and not from the queryable.
+#[cfg(all(
+    feature = "session-extshm",
+    feature = "query-get",
+    feature = "query-queryable",
+    feature = "query-value",
+    target_os = "linux"
+))]
+#[test]
+fn query_shm_hands_a_same_session_queryable_the_chunk_and_only_when_it_listens() {
+    let (session, _driver) = build_session();
+    /// What a queryable saw: whether the value was the chunk, and its bytes.
+    type Seen = Vec<(bool, Vec<u8>)>;
+    let seen: Arc<Mutex<Seen>> = Arc::default();
+    let seen_cb = seen.clone();
+    let _queryable = session
+        .declare_queryable(
+            "home/temp",
+            QueryableOptions::default(),
+            move |query, _out| {
+                let is_chunk = query
+                    .payload_shared()
+                    .is_some_and(|bytes| bytes.is_shared_memory());
+                seen_cb
+                    .lock()
+                    .unwrap()
+                    .push((is_chunk, query.payload().unwrap_or_default().to_vec()));
+            },
+        )
+        .expect("query-queryable is ON in this test build");
+    let mut payload = crate::shm_provider::ShmBackedPayload::alloc(5).expect("alloc");
+    payload.write(b"local");
+    let local = || QueryOptions::get().with_allowed_destination(Locality::SessionLocal);
+
+    session
+        .query_shm("home/temp", local(), &payload, |_| {}, |_| {})
+        .expect("query");
+    assert_eq!(
+        *seen.lock().unwrap(),
+        vec![(true, b"local".to_vec())],
+        "the queryable was handed the chunk, with its bytes"
+    );
+    assert!(
+        payload.is_unique(),
+        "and gave its reference back when the query was dropped"
+    );
+
+    // The control: the same bytes as a plain value are bytes.
+    let mut plain = local();
+    plain.payload = Some(b"local".to_vec());
+    session
+        .query("home/temp", plain, |_| {}, |_| {})
+        .expect("query");
+    assert_eq!(
+        seen.lock().unwrap()[1],
+        (false, b"local".to_vec()),
+        "a plain value is not shared memory"
+    );
+
+    // A key nobody here answers fires nothing, and leaves the owner unique.
+    session
+        .query_shm("home/other", local(), &payload, |_| {}, |_| {})
+        .expect("query");
+    assert_eq!(seen.lock().unwrap().len(), 2, "the queryable did not fire");
+    assert!(payload.is_unique());
+}
+
 /// Without negotiated shared memory the aliased SHM publish is the ordinary aliased publish
 /// of the bytes read back out of the segment: the API is always usable.
 #[cfg(all(

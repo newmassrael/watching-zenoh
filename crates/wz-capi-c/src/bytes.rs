@@ -523,10 +523,20 @@ pub unsafe extern "C" fn z_bytes_empty(this_: *mut z_owned_bytes_t) {
 
 /// Copy the payload into an owned string (zenoh-c `z_bytes_to_string`).
 ///
-/// The bytes are NOT validated as UTF-8, deliberately: upstream converts a byte
-/// run to a *non-null-terminated* string and prints it with `%.*s`, so rejecting
-/// a non-UTF-8 payload here would make wz refuse a sample zenoh-c delivers. wz's
-/// string carries bytes and a length for the same reason.
+/// The bytes ARE validated as UTF-8 (R3061): a payload that is not text is refused with
+/// `Z_EINVAL` and `dst` left as the gravestone, which is what the real library does
+/// (`z_bytes_to_string` @ `Err(e) => {` writes `CStringOwned::gravestone()` and returns
+/// `result::Z_EINVAL`). Until R3061 this function copied any bytes and said so was
+/// deliberate, on the ground that upstream "prints a byte run with `%.*s`" and refusing
+/// would make wz refuse a sample zenoh-c delivers. That premise was never measured, and the
+/// measurement (one C program on both libraries, bytes `a 0xff 0xfe b`) is the opposite:
+/// the real library answers `-1`, wz answered `0` with the four bytes. A program that
+/// branches on the code, as upstream's examples do, took the success arm on wz for a
+/// payload the real library calls an error. A program that wants the raw run reads it with
+/// [`z_bytes_to_slice`], which takes any bytes on both.
+///
+/// An embedded NUL is valid UTF-8 and is copied, as on the real library; the string carries
+/// bytes and a length.
 ///
 /// # Safety
 /// `this_` must be null or a valid loaned bytes; `dst` must be valid and
@@ -547,6 +557,9 @@ pub unsafe extern "C" fn z_bytes_to_string(
         let Some(bytes) = (unsafe { bytes_slice(this_) }) else {
             return Z_ENULL;
         };
+        if std::str::from_utf8(bytes).is_err() {
+            return Z_EINVAL;
+        }
         unsafe { *dst = owned_string_from(bytes) };
         Z_OK
     })
@@ -1468,6 +1481,58 @@ mod writer_tests {
             let mut moved_p = z_moved_bytes_t { _this: payload };
             z_bytes_drop(&mut moved_p);
         }
+    }
+
+    /// R3061 -- `z_bytes_to_string` is a text conversion: bytes that are not UTF-8 are
+    /// refused with `Z_EINVAL` and the destination is left as the gravestone, and an
+    /// embedded NUL is text. The measured answers of the real library, one C program on both
+    /// (`zenoh_c_bytes_to_string_twice_and_diff`); the slice conversion beside it is the
+    /// control that the refusal is the string's and not the payload's.
+    #[test]
+    fn capi_c_to_string_refuses_bytes_that_are_not_utf8() {
+        let convert = |data: &[u8]| {
+            // SAFETY: live locals; the payload and the string are dropped before return.
+            unsafe {
+                let mut payload = z_owned_bytes_t::null_value();
+                assert_eq!(
+                    z_bytes_copy_from_buf(&mut payload, data.as_ptr(), data.len()),
+                    Z_OK
+                );
+                let mut text = z_owned_string_t::null_value();
+                let rc = z_bytes_to_string(z_bytes_loan(&payload), &mut text);
+                let len = if rc == Z_OK {
+                    crate::string::z_string_len(crate::string::z_string_loan(&text))
+                } else {
+                    assert!(
+                        text.ptr.is_null() && text.len == 0,
+                        "a refused conversion leaves the gravestone"
+                    );
+                    0
+                };
+                if rc == Z_OK {
+                    let mut moved_text = crate::abi::z_moved_string_t { _this: text };
+                    crate::string::z_string_drop(&mut moved_text);
+                }
+                let mut slice = crate::abi::z_owned_slice_t::null_value();
+                let slice_rc = z_bytes_to_slice(z_bytes_loan(&payload), &mut slice);
+                let mut moved_slice = crate::abi::z_moved_slice_t { _this: slice };
+                crate::slice::z_slice_drop(&mut moved_slice);
+                let mut moved = z_moved_bytes_t { _this: payload };
+                z_bytes_drop(&mut moved);
+                (rc, len, slice_rc)
+            }
+        };
+        assert_eq!(convert(b"abc"), (Z_OK, 3, Z_OK));
+        assert_eq!(
+            convert(&[b'a', 0xff, 0xfe, b'b']),
+            (Z_EINVAL, 0, Z_OK),
+            "invalid UTF-8 is not a string, and it is still bytes"
+        );
+        assert_eq!(
+            convert(&[b'a', 0, b'b']),
+            (Z_OK, 3, Z_OK),
+            "an embedded NUL is valid UTF-8 and is copied"
+        );
     }
 
     /// An EMPTY payload has zero slices, matching upstream's empty `ZBytes` —

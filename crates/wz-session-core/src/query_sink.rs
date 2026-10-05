@@ -101,6 +101,19 @@ pub trait QueryView {
     fn payload(&self) -> Option<&[u8]> {
         None
     }
+    /// The value as the shareable type the view holds it in, when it holds one (R3061): a
+    /// query whose value arrived as a chunk of shared memory, or that this session sent
+    /// itself as one, answers with the page the chunk lies on, so a queryable that keeps
+    /// the query takes a second reference to it and one that asks whether the value is
+    /// shared memory gets an answer. [`Self::payload`] reads the same bytes.
+    ///
+    /// Defaults to `None`: a view over loose borrowed bytes has nothing to share, and the
+    /// value is copied wherever it is kept, as it always was. Mirrors
+    /// [`SampleView::payload_shared`](crate::sink::SampleView::payload_shared).
+    #[cfg(feature = "alloc")]
+    fn payload_shared(&self) -> Option<&crate::link::RxBytes> {
+        None
+    }
     /// Value encoding extracted from the Query body VALUE ext (id 0x03),
     /// describing [`Self::payload`]'s content type (zenoh-pico
     /// `z_query_encoding`). `None` when no value ext is present.
@@ -679,6 +692,56 @@ impl QueryView for BorrowedQuery<'_> {
     }
 }
 
+/// A [`BorrowedQuery`] whose value is held as a shareable [`RxBytes`](crate::link::RxBytes)
+/// (R3061): every accessor is `base`'s, and [`QueryView::payload_shared`] answers with the
+/// value.
+///
+/// A separate type and not a field on [`BorrowedQuery`] because that struct is built as a
+/// literal in a dozen places that have no value to share, and a field would make each of
+/// them say so. `base.payload` must read the SAME bytes as `value`; the dispatcher that
+/// builds this lends `value.as_slice()` for it.
+#[cfg(feature = "alloc")]
+pub struct SharedValueQuery<'a> {
+    /// The query, whose `payload` is `value`'s bytes.
+    pub base: BorrowedQuery<'a>,
+    /// The value, shareable.
+    pub value: &'a crate::link::RxBytes,
+}
+
+#[cfg(feature = "alloc")]
+impl QueryView for SharedValueQuery<'_> {
+    fn keyexpr(&self) -> &str {
+        self.base.keyexpr()
+    }
+    fn parameters(&self) -> Option<&[u8]> {
+        self.base.parameters()
+    }
+    fn attachment(&self) -> Option<&[u8]> {
+        self.base.attachment()
+    }
+    fn source_info(&self) -> Option<&crate::sample::SourceInfo> {
+        self.base.source_info()
+    }
+    fn payload(&self) -> Option<&[u8]> {
+        self.base.payload()
+    }
+    fn payload_shared(&self) -> Option<&crate::link::RxBytes> {
+        Some(self.value)
+    }
+    fn encoding(&self) -> Option<&crate::sample::EncodingHint> {
+        self.base.encoding()
+    }
+    fn rid(&self) -> u64 {
+        self.base.rid()
+    }
+    fn is_local(&self) -> bool {
+        self.base.is_local()
+    }
+    fn qos(&self) -> crate::sample::QosLevel {
+        self.base.qos()
+    }
+}
+
 /// Heap handler type backing [`BoxedQuerySink`]. Factored to a `type` per
 /// `clippy::type_complexity` — the two nested trait-object arguments push
 /// the inline `Box<dyn FnMut(...)>` over the complexity threshold.
@@ -894,5 +957,44 @@ mod tests {
         assert_eq!(got[0], "a/b");
         assert_eq!(got[1], "c/d");
         assert_eq!(out.replies, 2);
+    }
+
+    // R3061 -- a view over loose borrowed bytes has nothing to share, and the view that
+    // carries a shareable value answers with it while every other accessor stays the
+    // base's. The pair is one test because each half is the other's control: a default
+    // that answered `Some`, or a wrapper that dropped a field, fails here.
+    #[cfg(feature = "alloc")]
+    #[test]
+    fn a_shared_value_view_adds_the_buffer_and_changes_nothing_else() {
+        let value = crate::link::RxBytes::from(b"abc".to_vec());
+        let base = BorrowedQuery {
+            keyexpr: "a/b",
+            parameters: Some(b"x=1"),
+            attachment: Some(b"att"),
+            source_info: None,
+            payload: Some(value.as_slice()),
+            encoding: None,
+            rid: 7,
+            is_local: true,
+            qos: crate::sample::QosLevel::DEFAULT,
+        };
+        assert!(
+            base.payload_shared().is_none(),
+            "loose borrowed bytes hold nothing shareable"
+        );
+
+        let view = SharedValueQuery {
+            base: BorrowedQuery { ..base },
+            value: &value,
+        };
+        let shared = view.payload_shared().expect("the view carries the buffer");
+        assert_eq!(shared.as_slice().as_ptr(), value.as_slice().as_ptr());
+        assert_eq!(view.payload(), Some(&b"abc"[..]));
+        assert_eq!(view.keyexpr(), "a/b");
+        assert_eq!(view.parameters(), Some(&b"x=1"[..]));
+        assert_eq!(view.attachment(), Some(&b"att"[..]));
+        assert_eq!(view.rid(), 7);
+        assert!(view.is_local());
+        assert_eq!(view.qos(), crate::sample::QosLevel::DEFAULT);
     }
 }

@@ -1725,12 +1725,19 @@ impl<C: QuerySink> QueryableRegistry<C> {
 /// Grouped because the fan-out reads all three once per query and never per
 /// queryable, and the positional list had outgrown clippy's argument budget
 /// the moment the QoS joined it.
+///
+/// R3061 -- public, because [`QueryableRegistry::local_query_shared`] takes it: that entry
+/// point carries a value beside these three and has no argument left to spend on them
+/// singly.
 #[cfg(all(feature = "codec-request", feature = "alloc"))]
 #[derive(Debug, Clone, Copy)]
-struct QueryEnvelope {
-    rid: u64,
-    target: Option<QueryTarget>,
-    qos: QosLevel,
+pub struct QueryEnvelope {
+    /// The request id (correlation key).
+    pub rid: u64,
+    /// The requester's completeness target.
+    pub target: Option<QueryTarget>,
+    /// The requester's QoS, which every reply inherits.
+    pub qos: QosLevel,
 }
 
 #[cfg(all(feature = "codec-request", feature = "alloc"))]
@@ -1842,7 +1849,7 @@ impl<C: QuerySink> QueryableRegistry<C> {
             }
         };
         #[cfg(not(feature = "transport-shm"))]
-        let unswapped_value: Option<(crate::sample::EncodingHint, Vec<u8>)> = None;
+        let unswapped_value: Option<(crate::sample::EncodingHint, crate::link::RxBytes)> = None;
 
         // R311gn-follow — resolve via the shared resolve_wireexpr SSOT
         // (id==0 -> suffix verbatim; id!=0 -> table[id] + optional suffix;
@@ -1911,7 +1918,7 @@ impl<C: QuerySink> QueryableRegistry<C> {
         &mut self,
         query: &QueryOwned,
         band: usize,
-    ) -> Result<Option<(crate::sample::EncodingHint, Vec<u8>)>, ()> {
+    ) -> Result<Option<(crate::sample::EncodingHint, crate::link::RxBytes)>, ()> {
         use crate::ext_view::ExtEntryView;
         use sce_forge_runtime::codec::SceList;
         use wz_codecs::query_ext_entry::QueryExtEntryOwnedVariant;
@@ -2003,11 +2010,37 @@ impl<C: QuerySink> QueryableRegistry<C> {
         qos: QosLevel,
         replies: &mut Vec<QueryReply>,
     ) -> usize {
-        let envelope = QueryEnvelope { rid, target, qos };
         // A loopback query is built in this process, so its value is never a list
         // of slices after a marker: there is nothing to un-swap.
+        self.local_query_with_value(
+            QueryEnvelope { rid, target, qos },
+            keyexpr,
+            query,
+            None,
+            replies,
+        )
+    }
+
+    /// [`Self::local_query`] for a query whose VALUE this session may hold as a shareable
+    /// buffer, a chunk of shared memory it allocated (R3061): with `Some(value)` every
+    /// matched queryable is handed `value` as the value, through
+    /// [`QueryView::payload_shared`], in place of whatever bytes the loopback body
+    /// carries. `None` is [`Self::local_query`] exactly.
+    ///
+    /// The loopback body is a codec-shaped message and has no slot for a buffer, which is
+    /// why the value rides beside it and not in it. `value.0` is the encoding the body's
+    /// own value ext would have carried, and `value.1` is the same bytes the body carries
+    /// for a build that reads only the plain shape, so the two readings agree.
+    pub fn local_query_with_value(
+        &mut self,
+        envelope: QueryEnvelope,
+        keyexpr: &str,
+        query: &QueryOwned,
+        value: Option<(crate::sample::EncodingHint, crate::link::RxBytes)>,
+        replies: &mut Vec<QueryReply>,
+    ) -> usize {
         self.fire_matching_queryables(
-            envelope, keyexpr, query, None, replies, /* is_remote = */ false,
+            envelope, keyexpr, query, value, replies, /* is_remote = */ false,
         )
     }
 
@@ -2033,7 +2066,7 @@ impl<C: QuerySink> QueryableRegistry<C> {
         envelope: QueryEnvelope,
         keyexpr: &str,
         query: &QueryOwned,
-        unswapped_value: Option<(crate::sample::EncodingHint, Vec<u8>)>,
+        unswapped_value: Option<(crate::sample::EncodingHint, crate::link::RxBytes)>,
         replies: &mut Vec<QueryReply>,
         is_remote: bool,
     ) -> usize {
@@ -2067,24 +2100,24 @@ impl<C: QuerySink> QueryableRegistry<C> {
         // and are lent as they are; the plain shape is still read off the
         // chain here, borrowed.
         let plain_value = extract_query_value(query);
-        #[cfg(feature = "query-value")]
-        let value_view: Option<(
-            crate::sample::EncodingHint,
-            alloc::borrow::Cow<'_, [u8]>,
-        )> = match unswapped_value {
-            Some((encoding, bytes)) => Some((encoding, alloc::borrow::Cow::Owned(bytes))),
-            None => {
-                plain_value.map(|(encoding, bytes)| (encoding, alloc::borrow::Cow::Borrowed(bytes)))
-            }
-        };
-        // Without `query-value` the application sees no value at all: the slices
-        // were still read and acknowledged, which is owed whatever is delivered.
+        // R3061 -- the un-swapped value is held as the shareable type and LENT as it is,
+        // so a value that is one shared-memory slice reaches each matched queryable as
+        // the page it lies on (`QueryView::payload_shared`) as well as the bytes of it.
+        // Without `query-value` the application sees no value at all: the slices were
+        // still read and acknowledged, which is owed whatever is delivered.
         #[cfg(not(feature = "query-value"))]
-        let value_view: Option<(
-            crate::sample::EncodingHint,
-            alloc::borrow::Cow<'_, [u8]>,
-        )> = {
-            let _ = (unswapped_value, plain_value);
+        let unswapped_value = {
+            let _ = unswapped_value;
+            None::<(crate::sample::EncodingHint, crate::link::RxBytes)>
+        };
+        #[cfg(feature = "query-value")]
+        let value_view: Option<(crate::sample::EncodingHint, &[u8])> = match &unswapped_value {
+            Some((encoding, bytes)) => Some((encoding.clone(), bytes.as_slice())),
+            None => plain_value,
+        };
+        #[cfg(not(feature = "query-value"))]
+        let value_view: Option<(crate::sample::EncodingHint, &[u8])> = {
+            let _ = plain_value;
             None
         };
         // R311y834 — resolved ONCE per inbound query beside the other
@@ -2134,7 +2167,7 @@ impl<C: QuerySink> QueryableRegistry<C> {
                     parameters: parameters_view,
                     attachment: attachment_view,
                     source_info: source_info_view.as_ref(),
-                    payload: value_view.as_ref().map(|(_, p)| p.as_ref()),
+                    payload: value_view.as_ref().map(|(_, p)| *p),
                     encoding: value_view.as_ref().map(|(e, _)| e),
                     rid,
                     // R311li — loopback origin marker (pico _is_local
@@ -2143,7 +2176,17 @@ impl<C: QuerySink> QueryableRegistry<C> {
                     is_local: !is_remote,
                     qos,
                 };
-                queryable.sink.handle(&query_view, &mut responder);
+                // R3061 -- a value held as a shareable buffer is lent as one.
+                match unswapped_value.as_ref() {
+                    Some((_, shared)) => queryable.sink.handle(
+                        &crate::query_sink::SharedValueQuery {
+                            base: query_view,
+                            value: shared,
+                        },
+                        &mut responder,
+                    ),
+                    None => queryable.sink.handle(&query_view, &mut responder),
+                }
             }
         }
         matched
@@ -5553,6 +5596,83 @@ mod shm_value_tests {
             [(Some(b"payload".to_vec()), Some(0), Some(b"hi".to_vec()))],
             "the value from shared memory and the attachment that follows it"
         );
+    }
+
+    /// R3061 -- the value is handed on as the buffer, not read out of it. A resolver that
+    /// keeps its segment mapped and lends a range of it gives the queryable that range:
+    /// both accessors of the view read the address of the resolver's own storage, which a
+    /// copy cannot be made to do, where comparing bytes with the ones sent passes a copy
+    /// too. Before this the value was joined into a `Vec` on the way in, and a queryable
+    /// asked whether its value was shared memory could only be told no.
+    #[cfg(feature = "rx-shared-bytes")]
+    #[test]
+    fn a_shm_query_value_is_delivered_as_the_storage_the_resolver_lent() {
+        let storage = Arc::new(b"payload".to_vec());
+        let mut registry: QueryableRegistry<crate::query_sink::BoxedQuerySink> =
+            QueryableRegistry::new();
+        /// The address of the value as the plain accessor reads it, and as the shareable one does.
+        type Addresses = (Option<usize>, Option<usize>);
+        let seen: Arc<Mutex<Vec<Addresses>>> = Arc::default();
+        let sink = seen.clone();
+        registry.register("demo/example/**", move |event, _responder| {
+            sink.lock().expect("seen").push((
+                event.payload().map(|p| p.as_ptr() as usize),
+                event
+                    .payload_shared()
+                    .map(|shared| shared.as_slice().as_ptr() as usize),
+            ));
+        });
+        registry.set_shm_resolver_shared(Arc::new(crate::extshm::test_support::LendsStorage(
+            storage.clone(),
+        )));
+        registry.set_shm_negotiated(true);
+
+        let request = parse_request(&upstream_shm_get());
+        let mut replies = Vec::new();
+        let outcome = registry.dispatch_request(&request, &HashMap::new(), &mut replies);
+        assert_eq!(outcome.matched, 1);
+
+        let address = storage.as_ptr() as usize;
+        assert_eq!(
+            *seen.lock().expect("seen"),
+            [(Some(address), Some(address))],
+            "the plain accessor and the shareable one both read the storage the resolver lent, \
+             not a copy of it"
+        );
+    }
+
+    /// The CONTROL for the one above: a resolver that returns bytes it owns and cannot
+    /// lend still reaches the queryable as a shareable value, because the receive state
+    /// owes the application the same type whatever the resolver is; the view just holds
+    /// a buffer of its own. Without this the test above could pass on a view that only
+    /// answered `Some` when the resolver lent.
+    #[test]
+    fn a_shm_query_value_from_a_resolver_that_cannot_lend_is_still_one_shareable_value() {
+        let resolved = Arc::new(AtomicUsize::new(0));
+        let mut registry: QueryableRegistry<crate::query_sink::BoxedQuerySink> =
+            QueryableRegistry::new();
+        let seen: Arc<Mutex<Vec<Option<Vec<u8>>>>> = Arc::default();
+        let sink = seen.clone();
+        registry.register("demo/example/**", move |event, _responder| {
+            sink.lock().expect("seen").push(
+                event
+                    .payload_shared()
+                    .map(|shared| shared.as_slice().to_vec()),
+            );
+        });
+        registry.set_shm_resolver_shared(counting(&resolved));
+        registry.set_shm_negotiated(true);
+
+        let request = parse_request(&upstream_shm_get());
+        let mut replies = Vec::new();
+        registry.dispatch_request(&request, &HashMap::new(), &mut replies);
+
+        assert_eq!(
+            *seen.lock().expect("seen"),
+            [Some(b"payload".to_vec())],
+            "the value is a shareable buffer holding the bytes the resolver read"
+        );
+        assert_eq!(resolved.load(Ordering::SeqCst), 1, "read once");
     }
 
     /// A value that names a segment on a session that never negotiated shared

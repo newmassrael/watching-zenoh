@@ -371,8 +371,9 @@ use crate::session_glue::SendDeclareError;
 use crate::session_glue::SendWireError;
 #[cfg(feature = "transport-unicast")]
 use crate::session_glue::SessionLinkActions;
-/// The buffer whose descriptor the remote leg of a query carries in place of its
-/// value (R3048). Without `transport-shm` there is no such buffer and the option is
+/// The buffer a query's value is (R3048): the remote leg carries its descriptor in
+/// place of the bytes, when the session negotiated SHM, and the local leg hands a
+/// queryable the chunk (R3061). Without `transport-shm` there is no such buffer and the option is
 /// always `None`, which is why the type is uninhabited there and not absent: the
 /// ordinary query takes the same parameter in every build. Its two users are in the
 /// unicast `impl`, so a multicast-only build has no use for it and the alias is
@@ -3531,11 +3532,11 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
         on_reply: impl FnMut(&dyn ReplyView) + Send + 'static,
         on_final: impl FnMut(u64) + Send + 'static,
     ) -> Result<ReplyHandle, QueryAliasError> {
-        let by_descriptor = self.adopt_shm_value(&mut opts, value);
+        Self::adopt_shm_value(&mut opts, value);
         self.query_via(
             QuerySelector::literal(keyexpr),
             opts,
-            by_descriptor,
+            Some(value),
             on_reply,
             on_final,
         )
@@ -3677,6 +3678,14 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
                     .expect("register on the alloc backing never exceeds declared capacity")
             });
 
+            // R3061 -- the buffer the REMOTE leg sends as a descriptor: `shm_value` is the
+            // query's value whichever way it travels, and only a session that negotiated
+            // SHM can carry it as one. The bytes in `opts.payload` serve the rest.
+            #[cfg(feature = "transport-shm")]
+            let descriptor_value = shm_value.filter(|_| allows_remote && self.actions().is_shm());
+            #[cfg(not(feature = "transport-shm"))]
+            let descriptor_value = shm_value;
+
             if allows_remote {
                 // R240 — thread QueryOptions metadata (target /
                 // consolidation / attachment / timeout_ms) through the
@@ -3690,7 +3699,7 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
                 // R3048 -- on the descriptor leg the value rides as a list of
                 // slices after the marker, so the plain slot must not carry it too.
                 #[cfg(feature = "transport-shm")]
-                if shm_value.is_some() {
+                if descriptor_value.is_some() {
                     meta.value = None;
                 }
                 // R311mu (B5b-2b-2) — build the Query as a
@@ -3721,7 +3730,7 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
                 }
                 .map_err(SendWireError::Codec)
                 .and_then(|request| {
-                    self.send_query_request(request, shm_value, opts.encoding.as_ref())
+                    self.send_query_request(request, descriptor_value, opts.encoding.as_ref())
                 });
                 // R311ln — roll the pending entry back on a failed wire
                 // emit (unregister-only; see the header comment).
@@ -3744,6 +3753,28 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
             if allows_local {
                 #[cfg(feature = "query-queryable")]
                 {
+                    // R3061 -- a value that is a chunk is handed to a local queryable AS the
+                    // chunk, the way a local subscriber is handed a published one. Looked up
+                    // only when some local queryable listens, because the view takes a
+                    // reference to the segment that nobody would release. `false` for
+                    // completeness is the wider test: a complete-only query that dispatch
+                    // then refuses just drops the view.
+                    #[cfg(feature = "transport-shm")]
+                    let local_value = shm_value
+                        .filter(|_| {
+                            R::with_mutex_mut(&self.observer, |observer| {
+                                observer
+                                    .queryables
+                                    .has_local_matching(selector.loopback_keyexpr, false)
+                            })
+                        })
+                        .and_then(|chunk| chunk.receiver_view())
+                        .map(|view| (opts.encoding.clone().unwrap_or_default(), view));
+                    #[cfg(not(feature = "transport-shm"))]
+                    let local_value: Option<(
+                        wz_session_core::sample::EncodingHint,
+                        wz_session_core::link::RxBytes,
+                    )> = None;
                     R::with_mutex_mut(&self.observer, |observer| {
                         let mut replies: Vec<QueryReply> = Vec::new();
                         // R311y94 (review V2) — carry the GET's selector params
@@ -3766,13 +3797,18 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
                         // target, and it is the value a remote queryable reads
                         // off this GET's Request: an absent `opts.qos` emits no
                         // ext, which the receiver decodes as DEFAULT.
-                        observer.queryables.local_query(
+                        let envelope = wz_session_core::query::QueryEnvelope {
                             rid,
+                            target: opts.effective_target(),
+                            qos: opts
+                                .qos
+                                .unwrap_or(wz_session_core::sample::QosLevel::DEFAULT),
+                        };
+                        observer.queryables.local_query_with_value(
+                            envelope,
                             selector.loopback_keyexpr,
                             &query,
-                            opts.effective_target(),
-                            opts.qos
-                                .unwrap_or(wz_session_core::sample::QosLevel::DEFAULT),
+                            local_value,
                             &mut replies,
                         );
                         for reply in replies.drain(..) {
@@ -3996,28 +4032,24 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
         on_reply: impl FnMut(&dyn ReplyView) + Send + 'static,
         on_final: impl FnMut(u64) + Send + 'static,
     ) -> Result<ReplyHandle, QueryAliasError> {
-        let by_descriptor = self.adopt_shm_value(&mut opts, value);
+        Self::adopt_shm_value(&mut opts, value);
         self.query_aliased_auto_via(
             mapping_id,
             inline_suffix,
             opts,
-            by_descriptor,
+            Some(value),
             on_reply,
             on_final,
         )
     }
 
-    /// Make `value` the query's value and say whether the remote leg carries it as a
-    /// descriptor: it does on a session that negotiated SHM when the query may go
-    /// remote, and the bytes already placed in `opts.payload` serve every other leg.
+    /// Make `value` the query's value: its bytes go in `opts.payload`, which serves every
+    /// leg that cannot carry the buffer. The buffer itself rides beside the options into
+    /// [`Self::query_via`], which decides per leg: the remote one sends the descriptor on a
+    /// session that negotiated SHM, and the local one hands a queryable the chunk (R3061).
     #[cfg(all(feature = "transport-shm", feature = "query-value"))]
-    fn adopt_shm_value<'v>(
-        &self,
-        opts: &mut QueryOptions,
-        value: &'v crate::shm_provider::ShmBackedPayload,
-    ) -> Option<&'v crate::shm_provider::ShmBackedPayload> {
+    fn adopt_shm_value(opts: &mut QueryOptions, value: &crate::shm_provider::ShmBackedPayload) {
         opts.payload = Some(value.bytes().to_vec());
-        (self.actions().is_shm() && opts.allowed_destination.allows_remote()).then_some(value)
     }
 
     /// The body of [`Self::query_aliased_auto`] and its shared-memory sibling: the

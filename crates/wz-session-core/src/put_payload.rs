@@ -243,6 +243,28 @@ pub fn collect_slices<S: CodecStorage>(
     })
 }
 
+/// [`collect_slices`] whose result is the shareable type: a list that is ONE shared-memory
+/// slice is returned as the buffer `resolve` gave back, a resolver that keeps the segment
+/// mapped handing the application the page and not a copy of it, and the reference the
+/// descriptor carried goes back when the last range of it drops (R3061). Several slices,
+/// or a raw one, are joined into a buffer of their own, as [`collect_wire_payload`] does
+/// for a Put.
+///
+/// The value of a query was the one list of slices this module collected only as bytes,
+/// so a queryable that was sent a chunk was handed a copy of it; upstream hands it the
+/// buffer.
+pub fn collect_slices_shared<S: CodecStorage>(
+    slices: &[ZbufSliceOwned<S>],
+    resolve: impl FnMut(&[u8]) -> Option<crate::link::RxBytes>,
+) -> Result<crate::link::RxBytes, PayloadFault> {
+    Ok(
+        match walk_slices(slices, resolve, crate::link::RxBytes::as_slice)? {
+            Walked::Whole(bytes) => bytes,
+            Walked::Joined(bytes) => crate::link::RxBytes::from(bytes),
+        },
+    )
+}
+
 /// What a walk of a list of slices produced.
 enum Walked<R> {
     /// The list was ONE shared-memory slice, and this is what its descriptor

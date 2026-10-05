@@ -19899,6 +19899,28 @@ layer_c1cc_api_compat_c() {
         --test-threads=1 \
         --exact a_local_subscriber_is_handed_the_same_kind_of_buffer_on_wz_and_libzenohc \
         || return 1
+    # R3061 -- the same, for a QUERYABLE of the asking session: a `z_get` with a chunk, a
+    # `z_get` with plain bytes (the control, `-1` on both) and a declared querier's get with
+    # a chunk. The remote half of a get is leg 11 of the shared-memory legs above; this is the
+    # local half, which is a different code path. SKIPs on an oracle without the SHM+unstable
+    # arm.
+    _runci_guarded_test \
+        "C1cc a_local_queryable_is_handed_the_same_kind_of_buffer_on_wz_and_libzenohc" 1 \
+        cargo test -p wz-integration-tests \
+        --test zenoh_c_shm_query_local_twice_and_diff -- --ignored --quiet \
+        --test-threads=1 \
+        --exact a_local_queryable_is_handed_the_same_kind_of_buffer_on_wz_and_libzenohc \
+        || return 1
+    # R3061 -- what `z_bytes_to_string` does with bytes that are not text, one C program on
+    # both libraries: refused with `-1` by the real library, which wz copied until this round.
+    # Needs only the oracle, not the SHM arm.
+    _runci_guarded_test \
+        "C1cc bytes_that_are_not_utf8_are_refused_by_to_string_on_wz_and_libzenohc" 1 \
+        cargo test -p wz-integration-tests \
+        --test zenoh_c_bytes_to_string_twice_and_diff -- --ignored --quiet \
+        --test-threads=1 \
+        --exact bytes_that_are_not_utf8_are_refused_by_to_string_on_wz_and_libzenohc \
+        || return 1
     # R2970 — what a session's links OFFER, read from its config: QoS by
     # default, lowlatency and compression when asked, qos+lowlatency refused at
     # the open, on the dialling and the accepting side alike. Before this round
@@ -19964,7 +19986,8 @@ layer_c1cc_api_compat_c() {
         upstream_z_pub_shm_on_wz_capi_c_reaches_a_real_z_sub_shm_as_shared_memory \
         a_chunk_put_on_a_declared_keyexpr_reaches_a_real_z_sub_shm_as_shared_memory_on_wz_capi_c \
         a_get_whose_value_is_a_chunk_reaches_a_real_z_queryable_shm_as_shared_memory_on_wz_capi_c \
-        a_querier_get_whose_value_is_a_chunk_reaches_a_real_z_queryable_shm_as_shared_memory_on_wz_capi_c; do
+        a_querier_get_whose_value_is_a_chunk_reaches_a_real_z_queryable_shm_as_shared_memory_on_wz_capi_c \
+        a_c_queryable_is_handed_a_value_from_shared_memory_as_shared_memory_on_wz_capi_c; do
         _runci_guarded_test "C1cc $leg" 1 \
             cargo test -p wz-integration-tests \
             --test zenoh_c_shm_and_advanced_on_wz_capi_c -- --ignored --quiet --test-threads=1 \

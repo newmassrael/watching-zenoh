@@ -142,6 +142,10 @@ struct OwnedQueryEvent {
     // deferred handler can read it at drain time (the borrowed view is gone by
     // then, mirroring the attachment/source_info owned-copy shape).
     payload: Option<Vec<u8>>,
+    // R3061 -- the same value as the shareable buffer it arrived in, when the view held
+    // it as one (a chunk of shared memory). Kept as a second reference to the storage,
+    // not a copy: `payload` above is the bytes, this is the page they lie on.
+    payload_shared: Option<wz_session_core::link::RxBytes>,
     encoding: Option<EncodingHint>,
     rid: u64,
     is_local: bool,
@@ -206,6 +210,7 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
                 attachment: view.attachment().map(<[u8]>::to_vec),
                 source_info: view.source_info().cloned(),
                 payload: view.payload().map(<[u8]>::to_vec),
+                payload_shared: view.payload_shared().cloned(),
                 encoding: view.encoding().cloned(),
                 rid: view.rid(),
                 is_local: view.is_local(),
@@ -216,7 +221,7 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
             let actions = actions.clone();
             queue.stage(Box::new(move || {
                 cell.invoke(move |handler| {
-                    let view = crate::query_sink::BorrowedQuery {
+                    let borrowed = crate::query_sink::BorrowedQuery {
                         keyexpr: &owned.keyexpr,
                         parameters: owned.parameters.as_deref(),
                         attachment: owned.attachment.as_deref(),
@@ -226,6 +231,17 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
                         rid: owned.rid,
                         is_local: owned.is_local,
                         qos: owned.qos,
+                    };
+                    // R3061 -- lent as the buffer when the query held it as one.
+                    let shared_view = owned.payload_shared.as_ref().map(|value| {
+                        crate::query_sink::SharedValueQuery {
+                            base: crate::query_sink::BorrowedQuery { ..borrowed },
+                            value,
+                        }
+                    });
+                    let view: &dyn QueryView = match &shared_view {
+                        Some(shared) => shared,
+                        None => &borrowed,
                     };
                     let mut replies: Vec<crate::query::QueryReply> = Vec::new();
                     {
@@ -249,7 +265,7 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
                             owned.qos,
                             &mut replies,
                         );
-                        handler(&view, &mut responder);
+                        handler(view, &mut responder);
                     }
                     if owned.is_local {
                         // Loopback origin: deliver into the local reply

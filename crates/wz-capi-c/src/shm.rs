@@ -40,13 +40,16 @@
 //!   `z_queryable_shm`, as a shared-memory buffer through it
 //!   (`zenoh_c_shm_and_advanced_on_wz_capi_c`, legs 7 to 10). A subscriber of the
 //!   PUBLISHING session is handed the chunk as well, as upstream hands it
-//!   (`zenoh_c_shm_local_delivery_twice_and_diff`). What is still bytes: a query's
-//!   reply and the advanced publisher's put, which take the chunk's bytes whatever it
-//!   was built from; and the VALUE a queryable is handed, whether the query was its own
-//!   session's or a peer's, so `z_bytes_as_loaned_shm(z_query_payload(..))` answers
-//!   `Z_EINVAL` where upstream's answers a buffer. A buffer received from a peer is
-//!   copied when it is built into a payload, because its memory is the peer's segment
-//!   and not one of this process's providers.
+//!   (`zenoh_c_shm_local_delivery_twice_and_diff`).
+//! - **A queryable's value (R3061).** The VALUE a queryable is handed is the chunk too,
+//!   whether the query came from a peer that sent it through shared memory or from its
+//!   own session's get or querier: `z_bytes_as_loaned_shm(z_query_payload(..))` answers a
+//!   buffer, as upstream's does (`zenoh_c_shm_query_local_twice_and_diff` and leg 11 of
+//!   `zenoh_c_shm_and_advanced_on_wz_capi_c`, whose getter is upstream's own `z_get_shm`).
+//!   What is still bytes: a query's reply and the advanced publisher's put, which take the
+//!   chunk's bytes whatever it was built from. A buffer received from a peer is copied
+//!   when it is built into a payload, because its memory is the peer's segment and not
+//!   one of this process's providers.
 //!
 //! ⚠ R2970 corrected two sentences that said this ABI's SHM fallback was upstream's
 //! and the reason the two arms of the drop-in test agree. They were wrong then, and

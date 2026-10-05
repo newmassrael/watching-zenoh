@@ -705,6 +705,10 @@ impl ShmReceiveState {
     /// was never negotiated, every slice read and acknowledged at `band` whether
     /// or not the message is then delivered, `None` a counted drop and `Some` the
     /// bytes the slices held, in order.
+    ///
+    /// R3061 -- the bytes are returned as the shareable type, read through
+    /// [`ShmResolver::resolve_shared`] like a Put's, so a value that is ONE shared-memory
+    /// slice reaches the queryable as the page it lies on and not as a copy.
     #[cfg(all(
         feature = "alloc",
         any(
@@ -717,15 +721,15 @@ impl ShmReceiveState {
         &mut self,
         slices: &[wz_codecs::zbuf_slice::ZbufSliceOwned<crate::wire::WireStorage>],
         band: usize,
-    ) -> Option<Vec<u8>> {
+    ) -> Option<crate::link::RxBytes> {
         if !self.negotiated {
             self.unnegotiated_drops += 1;
             return None;
         }
         let (resolver, handoff) = (self.resolver.as_deref(), self.handoff.as_deref());
-        match crate::put_payload::collect_slices(slices, |descriptor| {
+        match crate::put_payload::collect_slices_shared(slices, |descriptor| {
             read_and_acknowledge(resolver, handoff, band, descriptor, |resolver, d| {
-                resolver.resolve(d)
+                resolver.resolve_shared(d)
             })
         }) {
             Ok(bytes) => Some(bytes),

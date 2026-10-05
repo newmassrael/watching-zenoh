@@ -941,7 +941,14 @@ HOST_GATED_CI_TARGETS: dict[str, str] = {
 # through a declared querier), each `api-compat-c wz->zenoh partial`, the class legs 7 and 8
 # already declare against the same lane and the same application. No new class, so no new
 # execution lane is owed. Measured by `scripts/audit-crossimpl-proof.sh` at this round's tree.
-FOREIGN_ADJUDICATOR_LINKS = 995
+# R3061 -- 995 -> 998, RISING by three, each a new `wz-proves` line in a corpus test that
+# adjudicates against a foreign implementation: leg 11 of `zenoh_c_shm_and_advanced_on_wz_capi_c.rs`
+# (upstream's own Rust `z_get_shm` asks a C queryable on each library, `api-compat-c zenoh->wz
+# partial`, the class leg 3 already declares), the same-session query differential and the
+# `z_bytes_to_string` differential (each `api-compat-c zenoh-c->wz partial`, the class the
+# local-delivery differential already declares). No new class, so no new execution lane is
+# owed. Measured by `scripts/audit-crossimpl-proof.sh` at this round's tree.
+FOREIGN_ADJUDICATOR_LINKS = 998
 
 # ── Execution disclosure ────────────────────────────────────────────────────────
 #
