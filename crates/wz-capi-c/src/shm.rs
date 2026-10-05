@@ -4823,7 +4823,8 @@ mod received_chunk_tests {
         }
 
         fn writable_ptr(&self) -> Option<*mut u8> {
-            self.mapped_writable.then(|| self.bytes.as_ptr() as *mut u8)
+            self.mapped_writable
+                .then_some(self.bytes.as_ptr() as *mut u8)
         }
     }
 
