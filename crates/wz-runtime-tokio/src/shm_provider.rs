@@ -102,7 +102,7 @@ use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering}
 use std::sync::{Arc, Mutex, OnceLock};
 
 use wz_session_core::extshm::{ShmDescriptor, ShmResolver};
-use wz_session_core::link::{RxBytes, RxStorage};
+use wz_session_core::link::{RxBytes, RxStorage, ShmChunkView};
 
 use crate::posix_shm::{next_candidate_id, OwnedSegment, PeerSegment, PeerSegmentRw};
 use crate::shm_watchdog::{confirmator, Confirmed, WatchdogBit};
@@ -706,7 +706,7 @@ impl ChunkHold {
     /// `None` when the chunk is not valid, names a protocol this node does not
     /// speak, claims more than its length, its data segment will not open, or the
     /// window does not lie inside the segment.
-    fn window(&self) -> Option<(PeerSegment, std::ops::Range<usize>)> {
+    fn window(&self) -> Option<(PeerSegment, std::ops::Range<usize>, u64)> {
         let header = self.header()?;
         if header.watchdog_invalidated.load(Ordering::Acquire)
             || header.protocol.load(Ordering::Relaxed) != POSIX_PROTOCOL_ID
@@ -718,17 +718,35 @@ impl ChunkHold {
         if data_len > header.len.load(Ordering::Relaxed) {
             return None;
         }
-        let data = PeerSegment::open(u64::from(header.segment.load(Ordering::Relaxed))).ok()?;
+        let segment = u64::from(header.segment.load(Ordering::Relaxed));
+        let data = PeerSegment::open(segment).ok()?;
         let end = chunk.checked_add(data_len)?;
         data.bytes().get(chunk..end)?;
-        Some((data, chunk..end))
+        Some((data, chunk..end, segment))
+    }
+
+    /// Whether this hold is the ONLY reference to the chunk: the count in the slot's
+    /// header reads one, which is the reference the sender took for this receiver.
+    /// The owner's own is given back when it lets go of the buffer, so a count of
+    /// one means nobody else reads the chunk, and it is upstream's `is_unique`
+    /// (`commons/zenoh-shm/src/api/buffer/zshmmut.rs` @
+    /// `impl TryFrom<&mut zshm> for &mut zshmmut {`) read the same way, off the
+    /// metadata slot.
+    pub fn is_unique(&self) -> bool {
+        match self.header() {
+            Some(header) => {
+                header.refcount.load(Ordering::SeqCst) == 1
+                    && header.generation.load(Ordering::SeqCst) == self.descriptor.generation
+            }
+            None => false,
+        }
     }
 
     /// Copy the chunk's bytes out of the shared page (the bounded scoped copy
     /// into an owned buffer), or `None` when the chunk has no readable window (see
     /// `window`).
     pub fn read(&self) -> Option<Vec<u8>> {
-        let (data, window) = self.window()?;
+        let (data, window, _) = self.window()?;
         Some(data.bytes()[window].to_vec())
     }
 
@@ -742,12 +760,14 @@ impl ChunkHold {
     /// `None` when the chunk has no readable window, and then `self` drops here, so the
     /// reference goes back on that way out as it does for a copy.
     pub fn into_shared(self) -> Option<RxBytes> {
-        let (data, window) = self.window()?;
+        let (data, window, segment) = self.window()?;
         let len = window.len();
         let storage: Arc<dyn RxStorage> = Arc::new(SharedChunk {
             data,
+            writable: OnceLock::new(),
             window,
-            _hold: self,
+            segment,
+            hold: self,
         });
         RxBytes::shared(storage, 0..len)
     }
@@ -758,17 +778,45 @@ impl ChunkHold {
 /// range of it drops.
 ///
 /// The fields drop in the order they are declared and the order is the point: the
-/// mapping goes first, so nothing can read the page after the sender is free to
-/// reuse it, and the hold goes second and gives the reference back.
+/// mappings go first, so nothing can read the page after the sender is free to
+/// reuse it, and the hold goes last and gives the reference back.
 struct SharedChunk {
     data: PeerSegment,
+    /// The segment mapped WRITABLE, made the first time a host asks for a pointer
+    /// it may write through (R3052) and not before: a payload that is only read
+    /// never needs it, and `None` is a segment that would not map writable.
+    writable: OnceLock<Option<PeerSegmentRw>>,
     window: std::ops::Range<usize>,
-    _hold: ChunkHold,
+    /// The id of the data segment, to map it a second time writable.
+    segment: u64,
+    hold: ChunkHold,
 }
 
 impl RxStorage for SharedChunk {
     fn as_slice(&self) -> &[u8] {
         &self.data.bytes()[self.window.clone()]
+    }
+
+    fn shm_chunk(&self) -> Option<&dyn ShmChunkView> {
+        Some(self)
+    }
+}
+
+impl ShmChunkView for SharedChunk {
+    fn is_unique(&self) -> bool {
+        self.hold.is_unique()
+    }
+
+    fn writable_ptr(&self) -> Option<*mut u8> {
+        let mapped = self
+            .writable
+            .get_or_init(|| PeerSegmentRw::open(self.segment).ok())
+            .as_ref()?;
+        if mapped.len() < self.window.end {
+            return None;
+        }
+        // SAFETY: the window lies inside the mapping, as just checked.
+        Some(unsafe { mapped.base().add(self.window.start) })
     }
 }
 
@@ -1086,6 +1134,74 @@ mod tests {
             Some(ReferenceState::Held(1)),
             "and the reference the descriptor carried is not left raised"
         );
+    }
+
+    /// R3052 -- a payload that is the page SAYS so, and one that is a copy does not:
+    /// a host's buffer plane reads this to tell the two apart, so the answer cannot
+    /// be a property of the bytes.
+    #[test]
+    fn a_shared_payload_says_it_is_a_chunk_of_shared_memory_and_a_copy_does_not() {
+        let mut payload = ShmBackedPayload::alloc(4).expect("alloc");
+        payload.write(b"page");
+        let descriptor = sent(&payload);
+
+        let shared = PosixShmResolver
+            .resolve_shared(&descriptor)
+            .expect("resolve_shared");
+        assert!(shared.is_shared_memory());
+        assert!(
+            !RxBytes::lend(b"page".to_vec()).is_shared_memory(),
+            "lent bytes that are not a chunk are not shared memory"
+        );
+        assert!(
+            !RxBytes::from(b"page".to_vec()).is_shared_memory(),
+            "owned bytes are not shared memory"
+        );
+    }
+
+    /// R3052 -- a chunk is UNIQUE while the owner has let go and only this receiver
+    /// holds it, which is the condition upstream converts a received buffer to a
+    /// mutable one on. The owner still holding its own reference reads the count
+    /// at two, so the same payload is not unique until the owner drops it.
+    #[test]
+    fn a_received_chunk_is_unique_only_once_the_owner_has_let_go() {
+        let mut payload = ShmBackedPayload::alloc(4).expect("alloc");
+        payload.write(b"uniq");
+        let descriptor = sent(&payload);
+        let shared = PosixShmResolver
+            .resolve_shared(&descriptor)
+            .expect("resolve_shared");
+        let view = shared.shm_chunk().expect("a shared-memory chunk");
+        assert!(
+            !view.is_unique(),
+            "the owner still holds its reference and the receiver holds the other"
+        );
+
+        drop(payload);
+        assert!(
+            shared.shm_chunk().expect("a chunk").is_unique(),
+            "the owner let go, so the receiver's reference is the only one"
+        );
+    }
+
+    /// R3052 -- the pointer a unique chunk is written through is the PAGE: a write
+    /// through it shows in what the payload reads, which is the second mapping of the
+    /// segment, so the two mappings are the same memory and not a copy.
+    #[test]
+    fn a_write_through_the_writable_pointer_shows_in_the_payload() {
+        let mut payload = ShmBackedPayload::alloc(4).expect("alloc");
+        payload.write(b"abcd");
+        let descriptor = sent(&payload);
+        let shared = PosixShmResolver
+            .resolve_shared(&descriptor)
+            .expect("resolve_shared");
+        drop(payload);
+
+        let ptr = shared.shm_writable_ptr().expect("a writable mapping");
+        // SAFETY: the chunk is unique (the owner dropped) and the pointer is valid
+        // for the four bytes of the payload.
+        unsafe { ptr.write(b'Z') };
+        assert_eq!(shared.as_slice(), b"Zbcd");
     }
 
     /// R3038 -- a reference taken for a frame that never left is given back, so a

@@ -1041,11 +1041,14 @@ pub struct TxFrame<'a> {
 ///
 /// Upstream's `ZSliceBuffer`
 /// (`commons/zenoh-buffers/src/zslice.rs` @ `pub trait ZSliceBuffer: Any + Send + Sync + fmt::Debug {`)
-/// without the downcasting, which wz has no caller for: a buffer a link read
-/// into — a recycled one, a slot of the node's receive pool, a datagram the
-/// transport already refcounts — handed up whole, with the frame a range of
-/// it. `as_slice` must answer the same bytes every time it is asked; nothing
-/// writes into a storage once it has been lent.
+/// without the general downcasting: a buffer a link read into — a recycled one, a
+/// slot of the node's receive pool, a datagram the transport already refcounts —
+/// handed up whole, with the frame a range of it. The one thing a caller can ask
+/// of a storage beyond its bytes is whether it is a chunk of SHARED MEMORY
+/// ([`Self::shm_chunk`], R3052), which is what a host's buffer plane reads to tell a
+/// payload that is the page from one that is a copy of it. `as_slice` must answer
+/// the same bytes every time it is asked; nothing writes into a storage once it has
+/// been lent.
 ///
 /// `Send + Sync` because the frame is shared by `Arc`, as upstream's is, and
 /// that is also why this exists only under `rx-shared-bytes`: `Arc` needs
@@ -1055,6 +1058,35 @@ pub struct TxFrame<'a> {
 pub trait RxStorage: Send + Sync {
     /// The whole of the storage. A frame is a range of it.
     fn as_slice(&self) -> &[u8];
+
+    /// The storage as a chunk of shared memory, when it is one. Every storage that is
+    /// not answers `None`, which is why this is provided and not required.
+    fn shm_chunk(&self) -> Option<&dyn ShmChunkView> {
+        None
+    }
+}
+
+/// What a host's buffer plane needs to know of a payload that is a chunk of shared
+/// memory a peer sent (R3052): upstream's `ZShm` / `ZShmMut` pair on the receiving
+/// side. Read-only on purpose: the view exposes no way to change what the storage
+/// holds except [`Self::writable_ptr`], whose caller has been told by
+/// [`Self::is_unique`] that nothing else reads the chunk.
+#[cfg(feature = "rx-shared-bytes")]
+pub trait ShmChunkView: Send + Sync {
+    /// Whether this receiver holds the ONLY reference to the chunk: the sender has
+    /// let go of its own and no other receiver was sent one. Upstream converts a
+    /// received buffer to a mutable one only when this is so
+    /// (`commons/zenoh-shm/src/api/buffer/zshmmut.rs` @
+    /// `impl TryFrom<&mut zshm> for &mut zshmmut {`, which matches on
+    /// `value.inner.is_unique() && value.inner.is_valid()`), because a write to a
+    /// chunk another party reads is a write to its data.
+    fn is_unique(&self) -> bool;
+
+    /// A pointer to the first byte of the STORAGE that may be written through, or
+    /// `None` when the chunk cannot be mapped writable here. Valid for as long as
+    /// the storage lives; the caller owns the question of whether a write is
+    /// allowed, which is [`Self::is_unique`].
+    fn writable_ptr(&self) -> Option<*mut u8>;
 }
 
 #[cfg(feature = "rx-shared-bytes")]
@@ -1124,6 +1156,37 @@ impl RxBytes {
     #[cfg(feature = "rx-shared-bytes")]
     pub fn is_shared(&self) -> bool {
         matches!(self.0, RxRepr::Shared { .. })
+    }
+
+    /// Whether the bytes are a range of a chunk of SHARED MEMORY a peer sent
+    /// (R3052): the payload is the page and not a copy of it.
+    #[cfg(feature = "rx-shared-bytes")]
+    pub fn is_shared_memory(&self) -> bool {
+        self.shm_chunk().is_some()
+    }
+
+    /// The chunk of shared memory these bytes lie in, when they do.
+    #[cfg(feature = "rx-shared-bytes")]
+    pub fn shm_chunk(&self) -> Option<&dyn ShmChunkView> {
+        match &self.0 {
+            RxRepr::Owned(_) => None,
+            RxRepr::Shared { storage, .. } => storage.shm_chunk(),
+        }
+    }
+
+    /// A pointer to the first byte of THESE bytes through which they may be written,
+    /// when they are a range of a shared-memory chunk that can be mapped writable.
+    /// Whether a write is allowed is [`ShmChunkView::is_unique`]'s to say, and the
+    /// caller asks it first.
+    #[cfg(feature = "rx-shared-bytes")]
+    pub fn shm_writable_ptr(&self) -> Option<*mut u8> {
+        let RxRepr::Shared { storage, start, .. } = &self.0 else {
+            return None;
+        };
+        let base = storage.shm_chunk()?.writable_ptr()?;
+        // SAFETY: `start` is a position inside the storage this range was made of,
+        // and `writable_ptr` is valid for the whole storage.
+        Some(unsafe { base.add(*start) })
     }
 
     /// `bytes` as storage that can be shared: lent behind an `Arc` where there

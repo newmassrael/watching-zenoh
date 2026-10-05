@@ -6645,7 +6645,11 @@ layer_c1af_cargo_test_shm() {
     # receiver was handed, the receiver's reference goes back when the last range of
     # the payload drops and not at the read, and a shared read that fails gives its
     # reference back as a copy does.
-    _runci_guarded_test C1af 20 cargo test -p wz-runtime-tokio --features session-extshm,transport-unicast,transport-link-tcp --lib shm_provider --quiet \
+    # R3052 -- 20 -> 23, MEASURED. A received chunk answers what a C host's buffer
+    # plane asks of it: a shared payload says it is a chunk of shared memory and a
+    # copy does not, the chunk is unique only once the owner has let go, and a write
+    # through the writable pointer shows in the payload.
+    _runci_guarded_test C1af 23 cargo test -p wz-runtime-tokio --features session-extshm,transport-unicast,transport-link-tcp --lib shm_provider --quiet \
         || return 1
     # R311y507 — 2 -> 5. The target gained the challenge-response over a real
     # driven handshake plus the two half-mix arms (a ONE-SIDED authenticator must

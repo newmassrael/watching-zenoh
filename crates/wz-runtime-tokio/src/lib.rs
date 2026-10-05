@@ -1227,7 +1227,9 @@ pub use wz_session_core::reliability::Reliability;
 // impls (TcpDriver / UdpDriver) stay in this crate. Re-exports keep
 // every external callsite (`wz_runtime_tokio::{TxFrame, RxFrame,
 // LinkEvent, LostCause}`) verbatim across the migration.
-pub use wz_session_core::link::{LinkEvent, LostCause, RxBytes, RxFrame, RxStorage, TxFrame};
+pub use wz_session_core::link::{
+    LinkEvent, LostCause, RxBytes, RxFrame, RxStorage, ShmChunkView, TxFrame,
+};
 
 /// R311et — canonical split-link session-open transport pipeline. Lifts the
 /// read/write-split + writer-task idiom (originally `wz-ap-demo`'s
