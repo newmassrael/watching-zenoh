@@ -1662,7 +1662,16 @@ pub mod quic_config;
 /// and which the zenoh-c ABI's SHM arm enables without the transport.
 #[cfg(feature = "posix-shm-segment")]
 pub mod posix_shm;
+// R3056 -- `shm_backend` (the seam between a shared-memory provider and the memory it hands
+// out) and `shm_posix_backend` (the built-in pool) carry their docs INSIDE the module and
+// none here: an outer doc on the `mod` line would make the module's own `//!` resolve its
+// links in this file's scope, which is the break Layer C1bz's budget counts.
+#[cfg(feature = "transport-shm")]
+pub mod shm_backend;
+#[cfg(feature = "transport-shm")]
+pub mod shm_posix_backend;
 /// transport-shm — the AP POSIX shared-memory provider (memmap2 over /dev/shm):
+/// `ShmProvider` (a backend, a busy list, allocation policies) +
 /// `ShmBackedPayload` (owner alloc/write) + `PosixShmResolver` (the reader-side
 /// impl of the no_std `wz_session_core::extshm::ShmResolver` seam). The std mmap
 /// half of the scoped same-host SHM transport; the descriptor + 0x2 marker codec

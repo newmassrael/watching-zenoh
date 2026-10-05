@@ -6649,7 +6649,19 @@ layer_c1af_cargo_test_shm() {
     # plane asks of it: a shared payload says it is a chunk of shared memory and a
     # copy does not, the chunk is unique only once the owner has let go, and a write
     # through the writable pointer shows in the payload.
-    _runci_guarded_test C1af 23 cargo test -p wz-runtime-tokio --features session-extshm,transport-unicast,transport-link-tcp --lib shm_provider --quiet \
+    # R3056 -- 23 -> 32, MEASURED. The provider: two chunks of one provider are two offsets of
+    # one segment, a live provider keeps a released chunk until it is asked to collect, a chunk
+    # a receiver holds is not given to another, only the unsafe collection takes a chunk the
+    # watchdog invalidated, a chunk outlives its provider's handle and is collected by the
+    # process, the four allocation policies serve what they promise, and a payload is the size
+    # asked for in the chunk the backend sized.
+    _runci_guarded_test C1af 32 cargo test -p wz-runtime-tokio --features session-extshm,transport-unicast,transport-link-tcp --lib shm_provider --quiet \
+        || return 1
+    # R3056 -- the provider's two new modules, which the filter above does not select:
+    # `shm_backend` (the value types an allocation speaks in, 4 tests) and
+    # `shm_posix_backend` (the pool, 11 tests). Counted so a dropped or renamed test cannot
+    # select fewer and pass.
+    _runci_guarded_test C1af 15 cargo test -p wz-runtime-tokio --features session-extshm,transport-unicast,transport-link-tcp --lib --quiet -- shm_backend shm_posix_backend \
         || return 1
     # R311y507 — 2 -> 5. The target gained the challenge-response over a real
     # driven handshake plus the two half-mix arms (a ONE-SIDED authenticator must
@@ -16889,7 +16901,11 @@ layer_z_zenohd_interop() {
     # sample it is handed, the production resolver delivers it as the page it lies
     # on, and zenoh's validator keeps that chunk valid until the sample drops, when
     # the reference comes back), the twin of the watchdog leg that holds by hand.
-    _runci_guarded_test Z 6 cargo test -p wz-integration-tests \
+    # R3056 -- 6 -> 7, MEASURED: the pool leg (a provider whose segment is two chunks
+    # publishes both, upstream's subscriber must print each chunk's own bytes, and the
+    # provider must take both home once it has let go), the first leg in which a chunk
+    # lies at an offset other than 0 of its segment.
+    _runci_guarded_test Z 7 cargo test -p wz-integration-tests \
         --test wz_shm_payload_zenohd_interop -- --ignored --quiet --test-threads=1 || return 1
     # R3042 -- the QUERY plane of the same oracle: a reply through shared memory
     # (upstream's `z_queryable_shm`, asked past the size of its ten-chunk pool, which

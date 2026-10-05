@@ -178,11 +178,25 @@ fn segment_is_dangling(id: u64) -> bool {
 /// The file is held so the shared lock lives as long as the segment does —
 /// `flock` locks are released when the last fd for the open file closes.
 pub struct OwnedSegment {
+    /// Taken from `as_mut_ptr` at creation, so it carries the right to write; the
+    /// mapping it points into lives exactly as long as `map`. A POOL's chunks are
+    /// written through this and never through a reference to `map`: they are disjoint
+    /// ranges written by different holders at once, which a `&mut [u8]` over the whole
+    /// mapping would claim nobody else does.
+    base: *mut u8,
     map: MmapMut,
     id: u64,
     path: PathBuf,
     _file: File,
 }
+
+// SAFETY: `base` points into `map`, which this value owns and which is `Send`; the pointer
+// is only ever handed out as a raw pointer whose uses are the caller's.
+unsafe impl Send for OwnedSegment {}
+// SAFETY: as for `Send`; sharing the value shares the address of a mapping that is itself
+// shared memory, and nothing reached through `&self` writes it except through `base`, whose
+// callers own disjoint ranges.
+unsafe impl Sync for OwnedSegment {}
 
 impl OwnedSegment {
     /// Create a segment of `len` bytes under the first free id `next_id`
@@ -205,8 +219,10 @@ impl OwnedSegment {
                     lock_shared(&file)?;
                     // SAFETY: the file was just created exclusively by this
                     // process, and this mapping is the only writer it makes.
-                    let map = unsafe { MmapOptions::new().map_mut(&file)? };
+                    let mut map = unsafe { MmapOptions::new().map_mut(&file)? };
+                    let base = map.as_mut_ptr();
                     return Ok(Self {
+                        base,
                         map,
                         id,
                         path,
@@ -237,6 +253,23 @@ impl OwnedSegment {
     /// The segment's bytes, writable.
     pub fn bytes_mut(&mut self) -> &mut [u8] {
         &mut self.map
+    }
+
+    /// The segment's first byte, as a pointer that may be written through. Valid for
+    /// [`Self::len`] bytes for as long as `self` lives. This is how a chunk of a pool is
+    /// reached: by an address into the mapping, not by a reference to all of it.
+    pub fn base(&self) -> *mut u8 {
+        self.base
+    }
+
+    /// The segment's size in bytes.
+    pub fn len(&self) -> usize {
+        self.map.len()
+    }
+
+    /// Whether the segment is empty.
+    pub fn is_empty(&self) -> bool {
+        self.map.is_empty()
     }
 
     /// Flush the mapping to the object.

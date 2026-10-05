@@ -82,8 +82,10 @@ use wz_runtime_tokio::session_open::{
     accept_and_open_session, accept_and_open_session_with_shm, connect_and_open_session_with_shm,
     DialConfig, DialedLink, DEFAULT_OPEN_TICK_MS,
 };
+use wz_runtime_tokio::shm_backend::{AllocAlignment, MemoryLayout};
 use wz_runtime_tokio::shm_provider::{
-    is_invalidated, reference_state, ChunkHold, PosixShmResolver, ReferenceState, ShmBackedPayload,
+    chunk_position, is_invalidated, reference_state, AllocPolicy, ChunkHold, PosixShmResolver,
+    ReferenceState, ShmBackedPayload, ShmProvider,
 };
 use wz_runtime_tokio::sync::Mutex;
 use wz_runtime_tokio_test_support::zenoh_interop_session_init_params;
@@ -808,9 +810,22 @@ struct WzToZenoh {
     chunk_came_home: bool,
 }
 
-/// Dial `z_sub_shm` with SHM offered, publish one payload through `publish_shm`
-/// and return what the zenoh subscriber printed and whether the chunk came home.
-async fn wz_publishes_to_zenoh_subscriber(owner: Owner, key: &str, text: &str) -> WzToZenoh {
+/// A scenario run against a wz session that has dialled a listening `z_sub_shm`: it is
+/// handed the session and a handle on the subscriber's capture, and returns whatever
+/// it measured.
+type ZSubScenario<'a, T> = std::pin::Pin<Box<dyn std::future::Future<Output = T> + 'a>>;
+
+/// Start upstream's `z_sub_shm` listening, dial it from a wz session with SHM offered,
+/// run `scenario` against that session, and return what the subscriber printed beside
+/// what the scenario measured.
+///
+/// The dial, the SHM-negotiation assertion and the drive loop are the harness every
+/// wz-to-zenoh leg shares; what a leg sends and what it reads off the far side's
+/// bookkeeping is its scenario.
+async fn against_z_sub_shm<T, F>(scenario: F) -> (String, T)
+where
+    F: for<'a> FnOnce(&'a TokioSession, std::fs::File) -> ZSubScenario<'a, T>,
+{
     let z_sub = zenoh_shm_example_binary("z_sub_shm").expect("checked by the caller");
     let port = PortReservation::pick();
     let (_guard, mut zenoh_log) = spawn_zenoh(
@@ -873,60 +888,70 @@ async fn wz_publishes_to_zenoh_subscriber(owner: Owner, key: &str, text: &str) -
         |event| session.dispatch_iteration_event(event),
     );
 
-    let key = key.to_string();
-    let bytes = text.as_bytes().to_vec();
     let probe_log = zenoh_log.try_clone().expect("dup");
     let mut drive_log = zenoh_log.try_clone().expect("dup");
-    let scenario = async {
-        // Let the session settle, then publish through shared memory.
-        tokio::time::sleep(Duration::from_millis(500)).await;
-        let mut payload = ShmBackedPayload::alloc(bytes.len()).expect("alloc a payload");
-        payload.write(&bytes);
-        let descriptor = payload.descriptor();
-        session
-            .publish_shm(&key, &payload, PublishOptions::put())
-            .expect("publish_shm");
-        // The arm that lets go drops it HERE, before the subscriber has had any
-        // time to read; a binding left in scope would keep it until the block ends.
-        let held = match owner {
-            Owner::HoldsIt => Some(payload),
-            Owner::LetsGoAtOnce => {
-                drop(payload);
-                None
-            }
-        };
-        let mut probe_log = probe_log;
-        for _ in 0..200 {
-            if read_captured(&mut probe_log).contains("Received") {
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(50)).await;
-        }
-        drop(held);
-        // zenoh's subscriber drops the sample after printing it, which gives back
-        // the reference this descriptor carried. Every holder gone, the chunk is
-        // collected by the next allocation, so allocate (and let go) until it is
-        // or the wait ends.
-        let mut came_home = false;
-        for _ in 0..60 {
-            let _collect = ShmBackedPayload::alloc(1);
-            if reference_state(&descriptor) == Some(ReferenceState::Reclaimed) {
-                came_home = true;
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(50)).await;
-        }
-        came_home
-    };
-    let chunk_came_home = tokio::select! {
+    let scenario = scenario(&session, probe_log);
+    let measured = tokio::select! {
         outcome = drive => panic!(
             "the wz drive loop ended before the scenario did ({outcome:?}):\n{}",
             read_captured(&mut drive_log)
         ),
-        came_home = scenario => came_home,
+        measured = scenario => measured,
     };
+    (read_captured(&mut zenoh_log), measured)
+}
+
+/// Dial `z_sub_shm` with SHM offered, publish one payload through `publish_shm`
+/// and return what the zenoh subscriber printed and whether the chunk came home.
+async fn wz_publishes_to_zenoh_subscriber(owner: Owner, key: &str, text: &str) -> WzToZenoh {
+    let key = key.to_string();
+    let bytes = text.as_bytes().to_vec();
+    let (printed, chunk_came_home) = against_z_sub_shm(|session, probe_log| {
+        Box::pin(async move {
+            // Let the session settle, then publish through shared memory.
+            tokio::time::sleep(Duration::from_millis(500)).await;
+            let mut payload = ShmBackedPayload::alloc(bytes.len()).expect("alloc a payload");
+            payload.write(&bytes);
+            let descriptor = payload.descriptor();
+            session
+                .publish_shm(&key, &payload, PublishOptions::put())
+                .expect("publish_shm");
+            // The arm that lets go drops it HERE, before the subscriber has had any
+            // time to read; a binding left in scope would keep it until the block ends.
+            let held = match owner {
+                Owner::HoldsIt => Some(payload),
+                Owner::LetsGoAtOnce => {
+                    drop(payload);
+                    None
+                }
+            };
+            let mut probe_log = probe_log;
+            for _ in 0..200 {
+                if read_captured(&mut probe_log).contains("Received") {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+            drop(held);
+            // zenoh's subscriber drops the sample after printing it, which gives back
+            // the reference this descriptor carried. Every holder gone, the chunk is
+            // collected by the next allocation, so allocate (and let go) until it is
+            // or the wait ends.
+            let mut came_home = false;
+            for _ in 0..60 {
+                let _collect = ShmBackedPayload::alloc(1);
+                if reference_state(&descriptor) == Some(ReferenceState::Reclaimed) {
+                    came_home = true;
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+            came_home
+        })
+    })
+    .await;
     WzToZenoh {
-        printed: read_captured(&mut zenoh_log),
+        printed,
         chunk_came_home,
     }
 }
@@ -1013,5 +1038,160 @@ async fn wz_shm_payload_its_owner_let_go_of_at_once_is_still_readable_by_a_zenoh
         "the chunk never came home to wz's provider after zenoh's subscriber had let go, so zenoh's \
          release of the reference wz's descriptor carried was not observed:\n{}",
         run.printed
+    );
+}
+
+/// What the pool leg measured on wz's side.
+struct PoolRun {
+    /// Where each chunk's own header says it lies: (segment id, offset).
+    positions: Vec<(u32, u32)>,
+    /// Whether a pool of exactly two chunks was still full after both were published and
+    /// their owners had let go, with a live provider that had not been asked to collect.
+    full_before_collect: bool,
+    /// The size of the largest chunk any collection took back (upstream's
+    /// `garbage_collect` answers the largest, not the total), once zenoh's subscriber had
+    /// printed both samples, within the wait.
+    largest_collected: usize,
+    /// Whether the whole pool could be allocated as one chunk after that.
+    pool_reusable: bool,
+    /// Whether both of the first two descriptors went stale.
+    descriptors_stale: bool,
+}
+
+/// Leg 4 -- A POOL, TWO CHUNKS OF ONE SEGMENT, read by zenoh's reader.
+///
+/// Legs 2 and 3 publish one payload, which is a pool of one chunk at offset 0, so a wz
+/// that named the wrong offset for the SECOND chunk of a segment would pass both. Here a
+/// provider owns a segment of exactly two 16-byte chunks and publishes both: zenoh's
+/// reader follows each header to the segment and the offset in it, and `z_sub_shm` must print
+/// each chunk's own text as a shared-memory buffer. A reader that took the offset to be 0
+/// would print the first chunk's text for the second, and that is the failure this leg
+/// would show.
+///
+/// It also reads the OTHER side's end of the lifecycle: the provider is live and is not
+/// asked to collect until zenoh has printed both samples, and the bytes it takes back are
+/// bytes zenoh's `Drop for ShmBufInner` released in a process wz does not control. The
+/// whole pool is then one chunk again, which is the reuse a pool exists for.
+// wz-proves: transport-shm wz->zenoh
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "binary-dep e2e (ZENOHD_SHM=1 build-zenohd.sh: z_sub_shm); Layer Z runs via --ignored"]
+async fn wz_shm_pool_chunks_at_two_offsets_reach_a_zenohd_shm_subscriber_and_the_pool_is_reused() {
+    if zenoh_shm_example_binary("z_sub_shm").is_none() {
+        eprintln!(
+            "SKIP: no z_sub_shm at target/zenohd-shm (run `ZENOHD_SHM=1 scripts/build-zenohd.sh`)"
+        );
+        return;
+    }
+    const CHUNK: usize = 16;
+    let texts = ["pool-chunk-0001!", "pool-chunk-0002!"];
+    assert!(texts.iter().all(|text| text.len() == CHUNK));
+    let eight = AllocAlignment::ALIGN_8_BYTES;
+    let (printed, run) = against_z_sub_shm(|session, probe_log| {
+        Box::pin(async move {
+            tokio::time::sleep(Duration::from_millis(500)).await;
+            let provider = ShmProvider::pool(
+                &MemoryLayout::new(2 * CHUNK, eight).expect("a layout of two chunks"),
+            )
+            .expect("a pool");
+            let chunk_layout = MemoryLayout::new(CHUNK, eight).expect("a chunk layout");
+            let mut descriptors = Vec::new();
+            for (i, text) in texts.iter().enumerate() {
+                let mut payload = provider
+                    .alloc(chunk_layout, &AllocPolicy::JustAlloc)
+                    .expect("a chunk of the pool");
+                payload.write(text.as_bytes());
+                descriptors.push(payload.descriptor());
+                session
+                    .publish_shm(
+                        &format!("demo/example/wz-pool-{i}"),
+                        &payload,
+                        PublishOptions::put(),
+                    )
+                    .expect("publish_shm");
+                // The owner lets go at once, as a real publisher does.
+                drop(payload);
+            }
+            let positions: Vec<(u32, u32)> = descriptors
+                .iter()
+                .map(|d| chunk_position(d).expect("a header for a live chunk"))
+                .collect();
+            let full_before_collect = provider
+                .alloc(chunk_layout, &AllocPolicy::JustAlloc)
+                .is_err();
+
+            let mut probe_log = probe_log;
+            for _ in 0..200 {
+                let seen = read_captured(&mut probe_log);
+                if seen.matches("wz-pool-").count() >= 2 {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+            // zenoh's subscriber drops each sample after printing it, which gives back
+            // the reference its descriptor carried. Collect until both chunks are home.
+            let mut largest_collected = 0;
+            let mut descriptors_stale = false;
+            for _ in 0..100 {
+                largest_collected = largest_collected.max(provider.garbage_collect());
+                descriptors_stale = descriptors
+                    .iter()
+                    .all(|d| reference_state(d) == Some(ReferenceState::Reclaimed));
+                if descriptors_stale {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+            let pool_reusable = provider
+                .alloc(
+                    MemoryLayout::new(2 * CHUNK, eight).expect("whole-pool layout"),
+                    &AllocPolicy::JustAlloc,
+                )
+                .is_ok();
+            PoolRun {
+                positions,
+                full_before_collect,
+                largest_collected,
+                pool_reusable,
+                descriptors_stale,
+            }
+        })
+    })
+    .await;
+
+    for (i, text) in texts.iter().enumerate() {
+        assert!(
+            printed.contains(&format!(
+                "('demo/example/wz-pool-{i}': '{text}') {ZENOH_SAW_SHM}"
+            )),
+            "z_sub_shm did not report chunk {i} of wz's pool as a shared-memory buffer with its \
+             own bytes:\n{printed}"
+        );
+    }
+    assert_eq!(
+        run.positions[0].0, run.positions[1].0,
+        "the two chunks of one provider must name one segment: {:?}",
+        run.positions
+    );
+    assert_eq!(
+        (run.positions[0].1, run.positions[1].1),
+        (0, CHUNK as u32),
+        "the second chunk lies a chunk past the first in the shared segment"
+    );
+    assert!(
+        run.full_before_collect,
+        "a live provider that was not asked to collect must still hold both released chunks"
+    );
+    assert_eq!(
+        run.largest_collected, CHUNK,
+        "the provider must have taken back a chunk zenoh released:\n{printed}"
+    );
+    assert!(
+        run.descriptors_stale,
+        "both chunks must have come home, which turns every descriptor that named them stale: \
+         zenoh's release of the references wz's descriptors carried was not observed for both:\n{printed}"
+    );
+    assert!(
+        run.pool_reusable,
+        "the whole pool must be one chunk again once both were taken back"
     );
 }

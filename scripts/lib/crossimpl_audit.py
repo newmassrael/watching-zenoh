@@ -914,7 +914,13 @@ HOST_GATED_CI_TARGETS: dict[str, str] = {
 # application `z_pub_shm` that `zenoh_shm_example_binary` already registers, so no
 # new class. Counted from the diff: exactly the one `wz-proves` line the file adds.
 # 987 + 1 = 988, measured by `run-ci.sh --layer A4` at this round's tree.
-FOREIGN_ADJUDICATOR_LINKS = 988
+# R3056 -- 988 -> 989, RISING by one, in the file `wz_shm_payload_zenohd_interop.rs`:
+# the pool leg, in which a wz provider publishes the two chunks of ONE segment and
+# upstream's `z_sub_shm` prints each chunk's own bytes as a shared-memory buffer, which
+# is `transport-shm wz->zenoh` against an application the file already registers, so no
+# new class. Counted from the diff: exactly the one `wz-proves` line the file adds.
+# 988 + 1 = 989, to be measured by `run-ci.sh --layer A4` at this round's tree.
+FOREIGN_ADJUDICATOR_LINKS = 989
 
 # ── Execution disclosure ────────────────────────────────────────────────────────
 #

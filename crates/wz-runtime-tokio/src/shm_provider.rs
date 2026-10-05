@@ -84,9 +84,34 @@
 //! as a lifecycle, with the bytes still to come. Metadata segments a receiver
 //! opens are kept, by id, and let go of once their name names another object.
 //!
+//! # R3056 — a PROVIDER, and a pool
+//!
+//! Until this round a payload WAS a data segment: created for it, named by it, unlinked with
+//! it. That gives a publisher that sends one buffer exactly what it needs and gives a program
+//! that allocates a chunk out of a fixed-size pool once a second nothing at all, which is the
+//! program upstream's own examples are. The lifecycle above is now the PROVIDER's
+//! ([`ShmProvider`](crate::shm_provider::ShmProvider)), not the payload's, and the memory under it is a
+//! [`ShmProviderBackend`](crate::shm_backend::ShmProviderBackend):
+//!
+//! * a backend allocates and frees chunks of its segments
+//!   ([`crate::shm_posix_backend`] is the built-in pool);
+//! * the provider draws a metadata slot for each chunk, writes the header a receiver follows,
+//!   keeps the chunk on its busy list, and gives its memory back to the backend only when the
+//!   reference count reads zero (`commons/zenoh-shm/src/api/provider/shm_provider.rs` @
+//!   `fn garbage_collect_impl<const SAFE: bool>(&self) -> usize {`);
+//! * a policy ([`AllocPolicy`](crate::shm_provider::AllocPolicy)) says what an allocation does when the backend cannot serve
+//!   it: collect, defragment, take back the newest chunk held or not, or wait.
+//!
+//! [`ShmBackedPayload::alloc`](crate::shm_provider::ShmBackedPayload::alloc) is a provider whose pool is one payload, so everything above
+//! still holds for it and nothing about its callers changed.
+//!
+//! A provider a program holds is collected when the program (or its policy) says so, as
+//! upstream's is: a program that watches how much of a pool is in use must not have the
+//! process quietly empty it. A provider whose last handle is gone is collected by the
+//! process, because chunks it issued may be in flight and nobody else can take them home.
+//!
 //! # What this increment does NOT do yet
 //!
-//! * No POOL: each payload still gets its own data segment, at chunk offset 0.
 //! * An invalidated chunk is only MARKED, and a holder that dies without
 //!   releasing leaves its chunk parked until the process ends: reclaiming is the
 //!   reference count's alone, as upstream's default collection leaves it.
@@ -105,6 +130,11 @@ use wz_session_core::extshm::{ShmDescriptor, ShmResolver};
 use wz_session_core::link::{RxBytes, RxStorage, ShmChunkView};
 
 use crate::posix_shm::{next_candidate_id, OwnedSegment, PeerSegment, PeerSegmentRw};
+use crate::shm_backend::{
+    AllocError, AllocatedChunk, ChunkDescriptor, LayoutAllocError, LayoutError, MemoryLayout,
+    PtrInSegment, ShmProviderBackend,
+};
+use crate::shm_posix_backend::PosixShmProviderBackend;
 use crate::shm_watchdog::{confirmator, Confirmed, WatchdogBit};
 
 /// upstream `POSIX_PROTOCOL_ID`
@@ -204,14 +234,18 @@ fn release_reference(header: &ChunkHeader) {
         .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| n.checked_sub(1));
 }
 
-/// An owner's chunk that is no longer held by its owner but may still be held by
-/// a receiver: its slot and the data segment it names, kept mapped and locked
-/// until the count reads zero.
+/// A chunk its provider issued and has not taken back: the metadata slot that
+/// describes it and where it lies, kept until every holder has let go
+/// (`commons/zenoh-shm/src/api/provider/shm_provider.rs` @ `struct BusyChunk {`).
+///
+/// The descriptor is what the backend is handed back when the chunk comes home,
+/// and it is held here and not read back out of the slot's header because a header
+/// is shared memory a receiver can write, and the memory a backend frees must not
+/// be whatever a stranger wrote there.
+#[derive(Clone, Copy)]
 struct BusyChunk {
     slot: u16,
-    /// Never read: it is held for what dropping it does, which is to unlink the
-    /// segment, and for what holding it is, a mapping that keeps its shared lock.
-    _data: OwnedSegment,
+    descriptor: ChunkDescriptor,
 }
 
 /// The watchdog word and the mask of `slot`'s bit in a metadata segment: bit
@@ -243,8 +277,14 @@ fn peer_bit(segment: &Arc<PeerSegmentRw>, slot: u16) -> Option<WatchdogBit> {
     Some(WatchdogBit::new(word, mask, segment.clone()))
 }
 
-/// This process's metadata segment, the slots it has not handed out, and the
-/// chunks that were handed out and have not come home.
+/// This process's metadata segment and the slots it has not handed out.
+///
+/// ONE per process, as upstream's `GLOBAL_METADATA_STORAGE` is: the slots are a
+/// shared resource every provider of the process draws from, and a receiver maps
+/// the segment once however many providers fill it. The chunks that were handed out
+/// and have not come home are NOT here since R3056: they are each provider's own
+/// (`ProviderCore::busy`), because only the provider that issued a chunk can give
+/// its memory back to the backend that holds it.
 struct MetadataStore {
     segment: Arc<OwnedSegment>,
     id: u16,
@@ -252,10 +292,9 @@ struct MetadataStore {
     /// goes to the back, so a stale descriptor meets a reused slot as late as it
     /// can, on top of the generation check that refuses it then.
     free: VecDeque<u16>,
-    busy: Vec<BusyChunk>,
-    /// The slots whose chunks this provider watches: upstream's validator list.
-    /// A slot joins at allocation and leaves when it is reclaimed or when its
-    /// chunk is invalidated, after which there is nothing left to watch.
+    /// The slots whose chunks the providers of this process watch: upstream's
+    /// validator list. A slot joins at allocation and leaves when it is reclaimed
+    /// or when its chunk is invalidated, after which there is nothing left to watch.
     validating: BTreeSet<u16>,
 }
 
@@ -273,7 +312,6 @@ impl MetadataStore {
             segment: Arc::new(segment),
             id,
             free,
-            busy: Vec::new(),
             validating: BTreeSet::new(),
         })
     }
@@ -306,31 +344,34 @@ impl MetadataStore {
         invalidated.len()
     }
 
-    /// Reclaim every busy chunk whose count reads zero: upstream's safe garbage
-    /// collection, which frees a chunk on the count and on nothing else.
+    /// Make `slots` stale: advance each one's generation, which turns every
+    /// descriptor still naming it into one a receiver refuses, and stop watching it.
     ///
-    /// A reclaimed slot advances its generation (so every descriptor still
-    /// naming it goes stale), joins the back of the free queue, and its data
-    /// segment is unlinked as it drops. Returns how many chunks came home.
-    fn collect_garbage(&mut self) -> usize {
-        let mut collected = 0;
-        let mut i = 0;
-        while i < self.busy.len() {
-            let header = header_of(&self.segment, self.busy[i].slot);
-            if header.refcount.load(Ordering::SeqCst) != 0 {
-                i += 1;
-                continue;
-            }
-            let chunk = self.busy.swap_remove(i);
-            header.generation.fetch_add(1, Ordering::SeqCst);
-            self.validating.remove(&chunk.slot);
-            self.free.push_back(chunk.slot);
-            collected += 1;
-            // `chunk` drops here and unlinks its segment; the slot is already
-            // stale, so a receiver that races the unlink refuses on the generation.
+    /// Done BEFORE the chunk's memory goes back to its backend (see
+    /// [`ProviderCore::take_back`]), so a descriptor that outlived its chunk can never
+    /// be followed into memory the backend has already handed to another chunk.
+    fn make_stale(&mut self, slots: &[u16]) {
+        for &slot in slots {
+            header_of(&self.segment, slot)
+                .generation
+                .fetch_add(1, Ordering::SeqCst);
+            self.validating.remove(&slot);
         }
-        collected
     }
+
+    /// Put `slots` on the back of the free queue, once their chunks are home.
+    fn recycle(&mut self, slots: &[u16]) {
+        self.free.extend(slots.iter().copied());
+    }
+}
+
+/// This process's metadata segment if one has been made, without making it.
+fn existing_metadata() -> Option<Arc<OwnedSegment>> {
+    store()
+        .lock()
+        .ok()?
+        .as_ref()
+        .map(|store| store.segment.clone())
 }
 
 /// The process-wide store, created on first use. `None` inside means the
@@ -340,22 +381,449 @@ fn store() -> &'static Mutex<Option<MetadataStore>> {
     STORE.get_or_init(|| Mutex::new(None))
 }
 
-/// An owner-side SHM-backed payload: a data segment the application writes its
-/// payload into, and the metadata slot that describes it to a receiver. The
+// ---------------------------------------------------------------------------
+// the provider
+// ---------------------------------------------------------------------------
+
+/// What a provider keeps for the chunks it issued: its backend, the chunks not yet
+/// taken back, and how many [`ShmProvider`] handles are alive.
+///
+/// Shared by the handles, by every payload it issued, and by the process-wide
+/// registry (see [`registry`]), because the chunks outlive the handle on purpose:
+/// a publisher that lets go of its payload the moment it has sent it, or that drops
+/// its provider, leaves a descriptor in flight that a receiver will follow later, and
+/// the memory it names must stay until that receiver has let go.
+struct ProviderCore {
+    backend: Arc<dyn ShmProviderBackend>,
+    /// Upstream's `busy_list`: a chunk is on it from the moment it is issued until the
+    /// provider takes it back.
+    busy: Mutex<Vec<BusyChunk>>,
+    /// The live [`ShmProvider`] handles. At zero the provider is an ORPHAN: nobody can
+    /// ask it to collect, so the process does it, and it goes when it has nothing left
+    /// to give back.
+    handles: AtomicUsize,
+}
+
+impl ProviderCore {
+    fn is_orphan(&self) -> bool {
+        self.handles.load(Ordering::Acquire) == 0
+    }
+
+    fn busy(&self) -> std::sync::MutexGuard<'_, Vec<BusyChunk>> {
+        // A panic while the list was held cannot leave it torn: every mutation is one
+        // statement sequence with no `?` in it.
+        self.busy.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// Take back every chunk nobody holds and return the size of the largest: upstream's
+    /// garbage collection (`commons/zenoh-shm/src/api/provider/shm_provider.rs` @
+    /// `fn garbage_collect_impl<const SAFE: bool>(&self) -> usize {`).
+    ///
+    /// SAFE collection takes a chunk when its count reads zero and on nothing else. The
+    /// unsafe form also takes one its watchdog invalidated, which is a chunk a holder may
+    /// still be reading: the caller is the one who knows there is none.
+    fn collect(&self, safe: bool) -> usize {
+        let Some(metadata) = existing_metadata() else {
+            return 0;
+        };
+        let mut due = Vec::new();
+        {
+            let mut busy = self.busy();
+            let mut i = 0;
+            while i < busy.len() {
+                let header = header_of(&metadata, busy[i].slot);
+                if header.refcount.load(Ordering::SeqCst) == 0
+                    || (!safe && header.watchdog_invalidated.load(Ordering::SeqCst))
+                {
+                    due.push(busy.swap_remove(i));
+                } else {
+                    i += 1;
+                }
+            }
+        }
+        self.take_back(&due)
+    }
+
+    /// Take back the NEWEST chunk whether or not anybody holds it: upstream's
+    /// `Deallocate` policy, which is unsafe by its own account. `false` when there is
+    /// none.
+    fn reclaim_newest(&self) -> bool {
+        let Some(chunk) = self.busy().pop() else {
+            return false;
+        };
+        self.take_back(&[chunk]);
+        true
+    }
+
+    /// Give chunks back. In this order, and the order is the safety: their slots go
+    /// stale first, so a descriptor that outlived its chunk is refused on the generation;
+    /// then the memory goes back to the backend, which may hand it to another chunk at
+    /// once; then the slots go back on the queue. Returns the size of the largest chunk.
+    ///
+    /// The backend is called with no lock of this module held, because a backend a host
+    /// supplies may allocate a chunk of its own from inside `free`.
+    fn take_back(&self, chunks: &[BusyChunk]) -> usize {
+        if chunks.is_empty() {
+            return 0;
+        }
+        let slots: Vec<u16> = chunks.iter().map(|chunk| chunk.slot).collect();
+        if let Ok(mut guard) = store().lock() {
+            if let Some(store) = guard.as_mut() {
+                store.make_stale(&slots);
+            }
+        }
+        let mut largest = 0;
+        for chunk in chunks {
+            self.backend.free(&chunk.descriptor);
+            largest = largest.max(chunk.descriptor.len.get());
+        }
+        if let Ok(mut guard) = store().lock() {
+            if let Some(store) = guard.as_mut() {
+                store.recycle(&slots);
+            }
+        }
+        largest
+    }
+}
+
+/// Every provider of this process that is alive or still owes a chunk back.
+///
+/// A provider whose handle is gone but whose chunks are in flight must still be
+/// collected, and by someone: this is how. It is swept when the watchdog thread ticks
+/// and when anything allocates, and a provider leaves it when it is an orphan with
+/// nothing on its busy list, which drops the backend and with it the segment.
+fn registry() -> &'static Mutex<Vec<Arc<ProviderCore>>> {
+    static REGISTRY: OnceLock<Mutex<Vec<Arc<ProviderCore>>>> = OnceLock::new();
+    REGISTRY.get_or_init(|| Mutex::new(Vec::new()))
+}
+
+/// Collect every orphaned provider, and forget the ones that have nothing left.
+///
+/// Live providers are NOT touched: upstream collects when its caller asks (or its
+/// policy does), and a program that watches how much a pool holds must not have the
+/// process quietly empty it.
+fn sweep_orphans() {
+    // WEAK references, upgraded one at a time: a snapshot of strong ones would hold every
+    // provider of the process alive for as long as the sweep runs, and a provider that
+    // was the last holder of its segment could not unlink it while another thread swept.
+    let snapshot: Vec<std::sync::Weak<ProviderCore>> = match registry().lock() {
+        Ok(list) => list.iter().map(Arc::downgrade).collect(),
+        Err(_) => return,
+    };
+    for core in &snapshot {
+        if let Some(core) = core.upgrade() {
+            if core.is_orphan() {
+                core.collect(true);
+            }
+        }
+    }
+    forget_finished(None);
+}
+
+/// Take the providers that are orphans with nothing left to give back out of the
+/// registry (all of them, or only `only`), and let go of them AFTER the registry's lock
+/// is released.
+///
+/// Letting go of the last reference to a provider drops its backend, and a backend a host
+/// supplies runs the host's code when it drops. That code may allocate a chunk, which sweeps,
+/// which takes this lock: dropping under it would deadlock on a lock the same thread holds.
+fn forget_finished(only: Option<&Arc<ProviderCore>>) {
+    let finished: Vec<Arc<ProviderCore>> = {
+        let Ok(mut list) = registry().lock() else {
+            return;
+        };
+        let mut finished = Vec::new();
+        let mut i = 0;
+        while i < list.len() {
+            let core = &list[i];
+            let selected = match only {
+                Some(only) => Arc::ptr_eq(only, core),
+                None => true,
+            };
+            if selected && core.is_orphan() && core.busy().is_empty() {
+                finished.push(list.swap_remove(i));
+            } else {
+                i += 1;
+            }
+        }
+        finished
+    };
+    drop(finished);
+}
+
+/// Drop `core` from the registry if it is an orphan with nothing left to give back.
+///
+/// The one-provider-one-payload case ends here the moment its owner lets go and every
+/// receiver already has, instead of waiting for the next sweep.
+fn forget_if_finished(core: &Arc<ProviderCore>) {
+    forget_finished(Some(core));
+}
+
+/// How an allocation reacts to a backend that cannot serve it: upstream's policies
+/// (`commons/zenoh-shm/src/api/provider/shm_provider.rs` @ `pub struct JustAlloc;`,
+/// `GarbageCollect`, `Defragment`, `Deallocate`, `BlockOn`), which compose.
+///
+/// A runtime value and not a type parameter, because the C ABI above this crate picks
+/// its policy by which function the program called, and a program's call is a runtime
+/// fact.
+#[derive(Clone, Debug)]
+pub enum AllocPolicy {
+    /// Ask the backend once.
+    JustAlloc,
+    /// Ask `inner`; if that fails, collect, and if the collection returned a chunk at
+    /// least as large as the request, ask `alt`. `safe` selects safe collection.
+    GarbageCollect {
+        /// The first attempt.
+        inner: Box<AllocPolicy>,
+        /// The attempt after a collection that freed enough.
+        alt: Box<AllocPolicy>,
+        /// Whether the collection takes only chunks nobody holds.
+        safe: bool,
+    },
+    /// Ask `inner`; if the backend says it needs defragmenting and defragmenting
+    /// yields a chunk big enough, ask `alt`.
+    Defragment {
+        /// The first attempt.
+        inner: Box<AllocPolicy>,
+        /// The attempt after a defragmentation that freed enough.
+        alt: Box<AllocPolicy>,
+    },
+    /// Ask `inner`; if the backend cannot serve it, take back the newest chunk WHETHER
+    /// OR NOT it is held, and ask again, up to `limit` times, then ask `alt`. Unsafe: the
+    /// chunk it takes may be one a holder is reading.
+    Deallocate {
+        /// How many chunks to take back before giving up.
+        limit: usize,
+        /// The attempt each round.
+        inner: Box<AllocPolicy>,
+        /// The attempt after `limit` chunks were taken back.
+        alt: Box<AllocPolicy>,
+    },
+    /// Ask `inner` until it succeeds or fails for a reason waiting cannot fix,
+    /// sleeping a millisecond between attempts as upstream's does (it polls; nothing
+    /// signals a release made by another process).
+    BlockOn(Box<AllocPolicy>),
+}
+
+impl AllocPolicy {
+    /// `GarbageCollect` with safe collection.
+    pub fn garbage_collect(inner: AllocPolicy, alt: AllocPolicy) -> Self {
+        Self::GarbageCollect {
+            inner: Box::new(inner),
+            alt: Box::new(alt),
+            safe: true,
+        }
+    }
+
+    /// `Defragment`.
+    pub fn defragment(inner: AllocPolicy, alt: AllocPolicy) -> Self {
+        Self::Defragment {
+            inner: Box::new(inner),
+            alt: Box::new(alt),
+        }
+    }
+
+    /// `Deallocate`.
+    pub fn deallocate(limit: usize, inner: AllocPolicy, alt: AllocPolicy) -> Self {
+        Self::Deallocate {
+            limit,
+            inner: Box::new(inner),
+            alt: Box::new(alt),
+        }
+    }
+
+    /// `BlockOn`.
+    pub fn block_on(inner: AllocPolicy) -> Self {
+        Self::BlockOn(Box::new(inner))
+    }
+
+    fn run(
+        &self,
+        layout: &MemoryLayout,
+        core: &ProviderCore,
+    ) -> Result<AllocatedChunk, AllocError> {
+        match self {
+            AllocPolicy::JustAlloc => core.backend.alloc(layout),
+            AllocPolicy::GarbageCollect { inner, alt, safe } => {
+                let result = inner.run(layout, core);
+                if result.is_err() {
+                    // Ask again only if the collection freed a chunk big enough to matter.
+                    let collected = core.collect(*safe);
+                    if collected >= layout.size().get() {
+                        return alt.run(layout, core);
+                    }
+                }
+                result
+            }
+            AllocPolicy::Defragment { inner, alt } => {
+                let result = inner.run(layout, core);
+                if let Err(AllocError::NeedDefragment) = result {
+                    if core.backend.defragment() >= layout.size().get() {
+                        return alt.run(layout, core);
+                    }
+                }
+                result
+            }
+            AllocPolicy::Deallocate { limit, inner, alt } => {
+                for _ in 0..*limit {
+                    match inner.run(layout, core) {
+                        res @ Err(AllocError::NeedDefragment | AllocError::OutOfMemory) => {
+                            if !core.reclaim_newest() {
+                                return res;
+                            }
+                        }
+                        other => return other,
+                    }
+                }
+                alt.run(layout, core)
+            }
+            AllocPolicy::BlockOn(inner) => loop {
+                match inner.run(layout, core) {
+                    Err(AllocError::NeedDefragment | AllocError::OutOfMemory) => {
+                        std::thread::sleep(std::time::Duration::from_millis(1));
+                    }
+                    other => return other,
+                }
+            },
+        }
+    }
+}
+
+/// A provider of shared-memory chunks: a backend, and the lifecycle of what it issued
+/// (`commons/zenoh-shm/src/api/provider/shm_provider.rs` @
+/// `pub struct ShmProvider<Backend> {`).
+///
+/// It draws a metadata slot for every chunk, watches it, and keeps the chunk on a busy
+/// list until the reference count reads zero; only then does the memory go back to the
+/// backend. A handle is cheap to clone. Dropping the last one does not end the provider:
+/// chunks it issued stay valid until their holders let go, and the process collects them.
+pub struct ShmProvider {
+    core: Arc<ProviderCore>,
+}
+
+impl ShmProvider {
+    /// A provider over `backend`.
+    pub fn new(backend: Arc<dyn ShmProviderBackend>) -> Self {
+        let core = Arc::new(ProviderCore {
+            backend,
+            busy: Mutex::new(Vec::new()),
+            handles: AtomicUsize::new(1),
+        });
+        if let Ok(mut list) = registry().lock() {
+            list.push(core.clone());
+        }
+        Self { core }
+    }
+
+    /// A provider over a new POSIX pool of `layout.size()` bytes: upstream's default
+    /// backend.
+    pub fn pool(layout: &MemoryLayout) -> io::Result<Self> {
+        Ok(Self::new(Arc::new(PosixShmProviderBackend::new(layout)?)))
+    }
+
+    /// The protocol id of this provider's chunks.
+    pub fn protocol_id(&self) -> u32 {
+        self.core.backend.id()
+    }
+
+    /// `layout` as this provider's backend would serve it, or why it cannot.
+    pub fn layout_for(&self, layout: MemoryLayout) -> Result<MemoryLayout, LayoutError> {
+        self.core.backend.layout_for(layout)
+    }
+
+    /// Allocate a chunk for `layout` under `policy`.
+    ///
+    /// The layout is checked against the backend first, and the backend is asked for the
+    /// layout it returned, which may be larger. The payload's length is the length that
+    /// was asked for.
+    pub fn alloc(
+        &self,
+        layout: MemoryLayout,
+        policy: &AllocPolicy,
+    ) -> Result<ShmBackedPayload, LayoutAllocError> {
+        let backend_layout = self.core.backend.layout_for(layout)?;
+        // Anything else's orphaned chunks come home first, so a slot or a range one of
+        // them was keeping is available to this request.
+        sweep_orphans();
+        let chunk = policy.run(&backend_layout, &self.core)?;
+        ShmBackedPayload::issue(&self.core, chunk, layout.size().get()).map_err(Into::into)
+    }
+
+    /// Wrap a chunk that something else allocated out of this provider's backend,
+    /// which has the length `len` or more: upstream's `map`, for a backend that pushes
+    /// chunks rather than serving a request.
+    pub fn map(&self, chunk: AllocatedChunk, len: usize) -> Result<ShmBackedPayload, AllocError> {
+        if len == 0 {
+            return Err(AllocError::Other);
+        }
+        ShmBackedPayload::issue(&self.core, chunk, len)
+    }
+
+    /// Take back every chunk nobody holds. The size of the largest, or 0.
+    pub fn garbage_collect(&self) -> usize {
+        self.core.collect(true)
+    }
+
+    /// As [`Self::garbage_collect`], but also takes a chunk the watchdog invalidated.
+    ///
+    /// # Safety
+    /// No holder may be reading a chunk that has been invalidated.
+    pub unsafe fn garbage_collect_unsafe(&self) -> usize {
+        self.core.collect(false)
+    }
+
+    /// Defragment the backend. The size of the largest chunk now allocatable.
+    pub fn defragment(&self) -> usize {
+        self.core.backend.defragment()
+    }
+
+    /// Bytes the backend reports available.
+    pub fn available(&self) -> usize {
+        self.core.backend.available()
+    }
+}
+
+impl Clone for ShmProvider {
+    fn clone(&self) -> Self {
+        self.core.handles.fetch_add(1, Ordering::AcqRel);
+        Self {
+            core: self.core.clone(),
+        }
+    }
+}
+
+impl Drop for ShmProvider {
+    fn drop(&mut self) {
+        if self.core.handles.fetch_sub(1, Ordering::AcqRel) == 1 {
+            // The last handle: nobody can ask this provider to collect any more, so the
+            // process takes over, and gets the first pass in at once.
+            sweep_orphans();
+        }
+    }
+}
+
+/// An owner-side SHM-backed payload: a chunk of a provider's memory the application
+/// writes its payload into, and the metadata slot that describes it to a receiver. The
 /// payload is published by a descriptor instead of by bytes
 /// ([`Self::wire_reference`] takes the reference that descriptor carries).
 ///
-/// Dropping it releases the owner's own reference. The data segment is NOT
-/// unlinked then unless that was the last reference: a receiver that was sent
-/// the descriptor still holds one, and the segment stays until it lets go.
+/// Dropping it releases the owner's own reference. The chunk is NOT taken back then
+/// unless that was the last reference: a receiver that was sent the descriptor still
+/// holds one, and the chunk stays until it lets go.
 pub struct ShmBackedPayload {
-    /// `Some` for the whole life of the handle; `Drop` moves it onto the busy
-    /// list so the segment outlives the handle for as long as a receiver needs it.
-    data: Option<OwnedSegment>,
+    /// Where the bytes are in this process, with the segment that keeps them mapped:
+    /// the chunk's memory stays valid for as long as this value does, whatever happens
+    /// to its provider.
+    data: PtrInSegment,
     len: usize,
+    /// The process's metadata segment, held so the header is reachable without taking
+    /// the store's lock.
+    metadata: Arc<OwnedSegment>,
     metadata_id: u16,
     slot: u16,
     generation: u32,
+    /// The provider that issued the chunk, to tell it when the owner lets go.
+    core: Arc<ProviderCore>,
     /// The owner's confirmation of its chunk's watchdog bit, kept up for as long
     /// as the handle lives and let go with it: upstream's buffer holds one the
     /// same way. After that only a receiver's confirmation keeps the chunk valid.
@@ -394,11 +862,7 @@ impl Drop for WireReference<'_> {
         if self.committed {
             return;
         }
-        if let Ok(guard) = store().lock() {
-            if let Some(store) = guard.as_ref() {
-                release_reference(header_of(&store.segment, self.payload.slot));
-            }
-        }
+        release_reference(self.payload.header());
     }
 }
 
@@ -434,9 +898,14 @@ pub fn reference_state(descriptor: &ShmDescriptor) -> Option<ReferenceState> {
 }
 
 impl ShmBackedPayload {
-    /// Allocate a `len`-byte payload: a fresh data segment, and a metadata slot
-    /// whose header names it. `len` must be non-zero — upstream's `data_len`
-    /// is a `NonZeroUsize`, so a 0-byte descriptor is not one a receiver takes.
+    /// Allocate a `len`-byte payload in a pool of its own: a new POSIX segment of exactly
+    /// that size, one chunk of it, and a metadata slot whose header names the chunk.
+    ///
+    /// This is a provider whose pool is one payload, which is what a publisher that sends
+    /// one buffer wants and what this function has always been; a program that allocates
+    /// many builds a [`ShmProvider`] and allocates from it. `len` must be non-zero —
+    /// upstream's `data_len` is a `NonZeroUsize`, so a 0-byte descriptor is not one a
+    /// receiver takes.
     pub fn alloc(len: usize) -> io::Result<Self> {
         if len == 0 {
             return Err(io::Error::new(
@@ -451,33 +920,74 @@ impl ShmBackedPayload {
                 "an SHM payload is at most u32::MAX bytes",
             )
         })?;
-        let data = OwnedSegment::create(len, || u64::from(next_candidate_id()))?;
-        let data_id = u32::try_from(data.id()).expect("data segment ids are drawn as u32");
+        let layout = MemoryLayout::of_size(len)
+            .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e.to_string()))?;
+        // The handle goes out of scope at the end of this function and the provider
+        // becomes an orphan holding one chunk, which is the point: the process collects it
+        // when the owner and every receiver have let go.
+        let provider = ShmProvider::pool(&layout)?;
+        provider
+            .alloc(layout, &AllocPolicy::JustAlloc)
+            .map_err(|e| io::Error::other(e.to_string()))
+    }
 
-        let mut guard = store()
-            .lock()
-            .map_err(|_| io::Error::other("SHM store poisoned"))?;
+    /// Wrap a chunk the backend allocated: draw its metadata slot, write the header a
+    /// receiver follows, and put the chunk on the provider's busy list.
+    ///
+    /// On a failure the chunk goes back to the backend, so a refusal here never loses
+    /// memory (upstream's own comment: "don't lose this chunk, it leaks at the backend").
+    fn issue(
+        core: &Arc<ProviderCore>,
+        chunk: AllocatedChunk,
+        len: usize,
+    ) -> Result<Self, AllocError> {
+        match Self::draw_slot(core, &chunk) {
+            Ok(slot) => {
+                core.busy().push(BusyChunk {
+                    slot: slot.slot,
+                    descriptor: chunk.descriptor,
+                });
+                Ok(Self {
+                    data: chunk.data,
+                    len,
+                    metadata: slot.metadata,
+                    metadata_id: slot.metadata_id,
+                    slot: slot.slot,
+                    generation: slot.generation,
+                    core: core.clone(),
+                    _confirmed: slot.confirmed,
+                })
+            }
+            Err(e) => {
+                core.backend.free(&chunk.descriptor);
+                Err(e)
+            }
+        }
+    }
+
+    /// The slot half of [`Self::issue`].
+    fn draw_slot(core: &ProviderCore, chunk: &AllocatedChunk) -> Result<DrawnSlot, AllocError> {
+        let mut guard = store().lock().map_err(|_| AllocError::Other)?;
         if guard.is_none() {
-            *guard = Some(MetadataStore::create()?);
+            *guard = Some(MetadataStore::create().map_err(|_| AllocError::Other)?);
         }
         let store = guard.as_mut().expect("just filled");
-        // Upstream collects when an allocation would otherwise fail; collecting
-        // first costs one scan of the busy list and means exhaustion is reported
-        // only when every slot really is held.
-        store.collect_garbage();
-        let slot = store
-            .free
-            .pop_front()
-            .ok_or_else(|| io::Error::other("every SHM metadata slot is in use"))?;
+        let slot = store.free.pop_front().ok_or(AllocError::Other)?;
         let header = header_of(&store.segment, slot);
         // The generation is NOT touched here: it advanced when this slot was
         // reclaimed, which is the moment every descriptor of its last use went
         // stale, and a descriptor of THIS use is stamped with the value read here.
         let generation = header.generation.load(Ordering::SeqCst);
-        header.protocol.store(POSIX_PROTOCOL_ID, Ordering::Relaxed);
-        header.segment.store(data_id, Ordering::Relaxed);
-        header.chunk.store(0, Ordering::Relaxed);
-        header.len.store(len, Ordering::Relaxed);
+        header.protocol.store(core.backend.id(), Ordering::Relaxed);
+        header
+            .segment
+            .store(chunk.descriptor.segment, Ordering::Relaxed);
+        header
+            .chunk
+            .store(chunk.descriptor.chunk, Ordering::Relaxed);
+        header
+            .len
+            .store(chunk.descriptor.len.get(), Ordering::Relaxed);
         // The owner's own reference.
         header.refcount.store(1, Ordering::SeqCst);
         // Last, and with Release: a receiver that sees the slot valid sees the
@@ -491,20 +1001,45 @@ impl ShmBackedPayload {
         bit.validate();
         let confirmed = confirmator().add(bit);
         store.validating.insert(slot);
-        Ok(Self {
-            data: Some(data),
-            len,
+        Ok(DrawnSlot {
+            metadata: store.segment.clone(),
             metadata_id: store.id,
             slot,
             generation,
-            _confirmed: confirmed,
+            confirmed,
         })
+    }
+
+    /// This payload's header in the metadata segment.
+    fn header(&self) -> &ChunkHeader {
+        header_of(&self.metadata, self.slot)
+    }
+
+    /// The payload's length: what was asked for, which may be less than the chunk the
+    /// backend set aside.
+    pub fn len(&self) -> usize {
+        self.len
+    }
+
+    /// Whether the payload is empty. It never is (a chunk is at least a byte), and the
+    /// method exists for the lint that wants it beside `len`.
+    pub fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+
+    /// The address of the first byte, writable. Valid for [`Self::len`] bytes for as long
+    /// as `self` lives.
+    pub fn as_mut_ptr(&self) -> *mut u8 {
+        self.data.ptr()
     }
 
     /// Copy `bytes` into the shared segment (truncated to the allocated `len`).
     pub fn write(&mut self, bytes: &[u8]) {
         let n = bytes.len().min(self.len);
-        self.segment_mut().bytes_mut()[..n].copy_from_slice(&bytes[..n]);
+        // SAFETY: the chunk is `len` bytes of live shared memory this payload owns, and
+        // `bytes` is a Rust slice that cannot overlap it: the source is in this process's
+        // heap or stack and the destination is a mapping.
+        unsafe { std::ptr::copy_nonoverlapping(bytes.as_ptr(), self.data.ptr(), n) };
     }
 
     /// The wire descriptor for this payload, as a value.
@@ -528,13 +1063,7 @@ impl ShmBackedPayload {
     /// between the two; returned if the guard is dropped without
     /// [`WireReference::commit`].
     pub fn wire_reference(&self) -> WireReference<'_> {
-        if let Ok(guard) = store().lock() {
-            if let Some(store) = guard.as_ref() {
-                header_of(&store.segment, self.slot)
-                    .refcount
-                    .fetch_add(1, Ordering::SeqCst);
-            }
-        }
+        self.header().refcount.fetch_add(1, Ordering::SeqCst);
         WireReference {
             payload: self,
             committed: false,
@@ -545,46 +1074,38 @@ impl ShmBackedPayload {
     /// fallback when a session did NOT negotiate SHM (`publish_shm` then ships the
     /// bytes the ordinary way).
     pub fn bytes(&self) -> &[u8] {
-        &self.segment().bytes()[..self.len]
+        // SAFETY: the chunk is `len` bytes of live shared memory this payload keeps mapped.
+        // A receiver in another process may write it only by the conversion to a mutable
+        // buffer that requires being the sole holder, which no holder is while this
+        // payload's owner reference stands.
+        unsafe { std::slice::from_raw_parts(self.data.ptr(), self.len) }
     }
+}
 
-    fn segment(&self) -> &OwnedSegment {
-        self.data
-            .as_ref()
-            .expect("the data segment lives as long as the handle")
-    }
-
-    fn segment_mut(&mut self) -> &mut OwnedSegment {
-        self.data
-            .as_mut()
-            .expect("the data segment lives as long as the handle")
-    }
+/// What drawing a metadata slot for a chunk produced.
+struct DrawnSlot {
+    metadata: Arc<OwnedSegment>,
+    metadata_id: u16,
+    slot: u16,
+    generation: u32,
+    confirmed: Confirmed,
 }
 
 impl Drop for ShmBackedPayload {
     fn drop(&mut self) {
-        let Some(data) = self.data.take() else {
-            return;
-        };
-        // A poisoned store forfeits the chunk: `data` drops and unlinks, which is
-        // the honest end for a process whose bookkeeping died, and a receiver
-        // that was mid-read refuses on the missing segment.
-        let Ok(mut guard) = store().lock() else {
-            return;
-        };
-        let Some(store) = guard.as_mut() else {
-            return;
-        };
-        // Give the owner's own reference back, then park the segment. Whether a
-        // receiver still holds one is the count's to say, so the chunk goes to
-        // the busy list either way and the collection decides: at zero it is
-        // reclaimed on the spot, otherwise it waits for the receiver.
-        release_reference(header_of(&store.segment, self.slot));
-        store.busy.push(BusyChunk {
-            slot: self.slot,
-            _data: data,
-        });
-        store.collect_garbage();
+        // Give the owner's own reference back. Whether a receiver still holds one is the
+        // count's to say, and the chunk stays on its provider's busy list either way: the
+        // collection decides, and at zero it takes the chunk home.
+        release_reference(self.header());
+        // A provider nobody can ask to collect is collected now, so a publisher that lets
+        // go the moment it has sent gets its memory back when the receiver has let go too,
+        // without waiting for the next allocation or the watchdog's sweep. A provider a
+        // program still holds is collected when the program (or its policy) says so, as
+        // upstream's is.
+        if self.core.is_orphan() {
+            self.core.collect(true);
+            forget_if_finished(&self.core);
+        }
     }
 }
 
@@ -633,6 +1154,9 @@ pub(crate) fn validate_tick() {
             store.validate();
         }
     }
+    // A provider whose handle is gone is collected by the process, and this is the clock
+    // that does it for a chunk whose receiver lets go after its owner has.
+    sweep_orphans();
 }
 
 /// A receiver's hold on one chunk: upstream's received `ShmBufInner`, as the
@@ -864,6 +1388,27 @@ impl ShmResolver for PosixShmResolver {
     }
 }
 
+/// Where a descriptor's chunk lies, as its own header names it: the data segment's id and
+/// the chunk's offset in that segment, or `None` when the metadata segment cannot be opened
+/// or the slot holds another generation.
+///
+/// A diagnostic, like [`reference_state`]: it reads what a PEER would read, so a witness
+/// that two chunks share a pool is a fact in the shared header and not a claim of the
+/// provider that made them.
+pub fn chunk_position(descriptor: &ShmDescriptor) -> Option<(u32, u32)> {
+    let segment = PeerSegment::open(u64::from(descriptor.metadata_id)).ok()?;
+    let header = metadata_of(segment.bytes())?
+        .headers
+        .get(descriptor.metadata_index as usize)?;
+    if header.generation.load(Ordering::SeqCst) != descriptor.generation {
+        return None;
+    }
+    Some((
+        header.segment.load(Ordering::SeqCst),
+        header.chunk.load(Ordering::SeqCst),
+    ))
+}
+
 /// Whether a descriptor's chunk has been invalidated by its provider's watchdog:
 /// `Some(true)` once no holder confirmed it for a whole validation window,
 /// `None` when the provider's metadata segment cannot be opened or the slot
@@ -1022,10 +1567,17 @@ mod tests {
             Some(ReferenceState::Reclaimed),
             "every holder let go, so the chunk was collected"
         );
-        assert!(
-            PeerSegment::open(data_id).is_err(),
-            "and its data segment is unlinked"
-        );
+        // Unlinked when the last holder of the pool lets go. Another test thread's sweep
+        // may be holding the provider for the instant it takes to collect it, so this
+        // waits a moment for the name to go and does not assert the instant.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while PeerSegment::open(data_id).is_ok() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the data segment was never unlinked once every holder had let go"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
         assert!(PosixShmResolver.resolve(&descriptor).is_none());
     }
 
@@ -1431,6 +1983,255 @@ mod tests {
             header.refcount.load(Ordering::SeqCst),
             1,
             "no reference was touched"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // R3056 -- the provider: many chunks out of one pool
+    // -----------------------------------------------------------------------
+
+    fn layout(size: usize) -> MemoryLayout {
+        MemoryLayout::of_size(size).expect("a layout")
+    }
+
+    /// Read the chunk offset and segment a descriptor's header names, the way a peer
+    /// does: off the metadata segment.
+    fn header_position(descriptor: &ShmDescriptor) -> (u32, u32) {
+        let meta = PeerSegment::open(u64::from(descriptor.metadata_id)).expect("metadata segment");
+        let header =
+            &metadata_of(meta.bytes()).expect("view").headers[descriptor.metadata_index as usize];
+        (
+            header.segment.load(Ordering::Relaxed),
+            header.chunk.load(Ordering::Relaxed),
+        )
+    }
+
+    /// THE POINT OF A POOL: two chunks of one provider are two offsets of ONE segment,
+    /// and each reads back its own bytes through the descriptor a peer would follow.
+    #[test]
+    fn two_chunks_of_one_provider_are_two_offsets_of_one_segment() {
+        let provider = ShmProvider::pool(&layout(4096)).expect("a pool");
+        let mut a = provider
+            .alloc(layout(1024), &AllocPolicy::JustAlloc)
+            .expect("first chunk");
+        let mut b = provider
+            .alloc(layout(1024), &AllocPolicy::JustAlloc)
+            .expect("second chunk");
+        a.write(&[0xA1; 1024]);
+        b.write(&[0xB2; 1024]);
+
+        let (da, db) = (sent(&a), sent(&b));
+        let ((seg_a, off_a), (seg_b, off_b)) = (header_position(&da), header_position(&db));
+        assert_eq!(seg_a, seg_b, "one pool is one segment");
+        assert_eq!(
+            off_b - off_a,
+            1024,
+            "the second chunk lies a chunk past the first"
+        );
+        let read_a = PosixShmResolver.resolve(&da).expect("read a");
+        let read_b = PosixShmResolver.resolve(&db).expect("read b");
+        assert!(read_a.iter().all(|&byte| byte == 0xA1));
+        assert!(read_b.iter().all(|&byte| byte == 0xB2));
+    }
+
+    /// A chunk goes back to the pool when its holders have let go AND the provider is asked
+    /// to collect, and not before: a live provider is not emptied behind its program's back.
+    #[test]
+    fn a_live_provider_keeps_a_released_chunk_until_it_is_asked_to_collect() {
+        let provider = ShmProvider::pool(&layout(128)).expect("a pool");
+        let first = provider
+            .alloc(layout(128), &AllocPolicy::JustAlloc)
+            .expect("the whole pool");
+        let descriptor = first.descriptor();
+        drop(first);
+        // Nobody holds it, but nobody has collected it either.
+        assert_eq!(
+            reference_state(&descriptor),
+            Some(ReferenceState::Held(0)),
+            "a live provider does not collect on its own"
+        );
+        assert!(
+            provider.alloc(layout(1), &AllocPolicy::JustAlloc).is_err(),
+            "so the pool is still full"
+        );
+        assert_eq!(provider.garbage_collect(), 128, "the collection frees it");
+        assert_eq!(
+            reference_state(&descriptor),
+            Some(ReferenceState::Reclaimed),
+            "and every descriptor of it is now stale"
+        );
+        assert!(provider.alloc(layout(128), &AllocPolicy::JustAlloc).is_ok());
+    }
+
+    /// A chunk a receiver still holds is NOT collected: its memory is not handed to anyone
+    /// else, and it is collected after the receiver lets go.
+    #[test]
+    fn a_chunk_a_receiver_holds_is_not_given_to_another() {
+        let provider = ShmProvider::pool(&layout(64)).expect("a pool");
+        let mut chunk = provider
+            .alloc(layout(64), &AllocPolicy::JustAlloc)
+            .expect("the whole pool");
+        chunk.write(&[7u8; 64]);
+        let descriptor = sent(&chunk);
+        drop(chunk);
+
+        assert_eq!(
+            provider.garbage_collect(),
+            0,
+            "a receiver holds a reference"
+        );
+        assert!(
+            provider.alloc(layout(8), &AllocPolicy::JustAlloc).is_err(),
+            "so its range is not another chunk's"
+        );
+        assert!(PosixShmResolver.resolve(&descriptor).is_some());
+        assert_eq!(provider.garbage_collect(), 64, "now nobody holds it");
+        assert!(provider.alloc(layout(8), &AllocPolicy::JustAlloc).is_ok());
+    }
+
+    /// A holder that died without releasing leaves its chunk with a count that never reaches
+    /// zero, and the watchdog invalidates it. The safe collection, which takes a chunk on the
+    /// count alone, leaves it, as upstream's does; only the unsafe one, whose caller promises
+    /// nobody is reading, takes it home.
+    #[test]
+    fn only_the_unsafe_collection_takes_a_chunk_the_watchdog_invalidated() {
+        let provider = ShmProvider::pool(&layout(8)).expect("a pool");
+        let payload = provider
+            .alloc(layout(8), &AllocPolicy::JustAlloc)
+            .expect("alloc");
+        // A reference for a receiver that never reads it and never gives it back.
+        let descriptor = sent(&payload);
+        drop(payload);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while is_invalidated(&descriptor) != Some(true) {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the watchdog never invalidated a chunk nobody confirmed"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        assert_eq!(
+            provider.garbage_collect(),
+            0,
+            "a safe collection leaves a chunk a holder may still be reading"
+        );
+        assert!(provider.alloc(layout(8), &AllocPolicy::JustAlloc).is_err());
+        // SAFETY: nothing reads this chunk: the one reference outstanding is a descriptor
+        // this test took and never used.
+        assert_eq!(unsafe { provider.garbage_collect_unsafe() }, 8);
+        assert_eq!(
+            reference_state(&descriptor),
+            Some(ReferenceState::Reclaimed)
+        );
+        assert!(provider.alloc(layout(8), &AllocPolicy::JustAlloc).is_ok());
+    }
+
+    /// A provider whose last handle is gone still owes its in-flight chunks to their
+    /// receivers: the chunk stays readable, and the process takes it home when the receiver
+    /// has let go.
+    #[test]
+    fn a_chunk_outlives_its_provider_handle_and_is_collected_by_the_process() {
+        let provider = ShmProvider::pool(&layout(32)).expect("a pool");
+        let mut chunk = provider
+            .alloc(layout(32), &AllocPolicy::JustAlloc)
+            .expect("alloc");
+        chunk.write(b"still here after the provider went");
+        let descriptor = sent(&chunk);
+        drop(provider);
+        drop(chunk);
+
+        assert_eq!(
+            PosixShmResolver.resolve(&descriptor).as_deref(),
+            Some(&b"still here after the provider went"[..][..32]),
+            "a receiver that comes after both are gone reads it"
+        );
+        // The receiver let go; the next allocation anywhere sweeps the orphan.
+        let _next = ShmBackedPayload::alloc(1).expect("alloc");
+        assert_eq!(
+            reference_state(&descriptor),
+            Some(ReferenceState::Reclaimed),
+            "the process collected a provider nobody could ask to"
+        );
+    }
+
+    /// `GarbageCollect` retries an allocation after a collection that freed enough: a full
+    /// pool whose only chunk was released serves the next request in one call.
+    #[test]
+    fn the_garbage_collecting_policy_serves_a_request_a_collection_makes_room_for() {
+        let provider = ShmProvider::pool(&layout(100)).expect("a pool");
+        let full = provider
+            .alloc(layout(100), &AllocPolicy::JustAlloc)
+            .expect("fill it");
+        drop(full);
+        assert!(provider
+            .alloc(layout(100), &AllocPolicy::JustAlloc)
+            .is_err());
+        let policy = AllocPolicy::garbage_collect(AllocPolicy::JustAlloc, AllocPolicy::JustAlloc);
+        assert!(
+            provider.alloc(layout(100), &policy).is_ok(),
+            "the policy collected the released chunk and asked again"
+        );
+    }
+
+    /// `Deallocate` takes back the newest chunk held or not: the unsafe way to make room.
+    #[test]
+    fn the_deallocating_policy_takes_back_a_chunk_even_while_it_is_held() {
+        let provider = ShmProvider::pool(&layout(64)).expect("a pool");
+        let held = provider
+            .alloc(layout(64), &AllocPolicy::JustAlloc)
+            .expect("fill it");
+        let descriptor = held.descriptor();
+        let policy = AllocPolicy::deallocate(1, AllocPolicy::JustAlloc, AllocPolicy::JustAlloc);
+        let replacement = provider.alloc(layout(64), &policy).expect("made room");
+        assert_eq!(
+            reference_state(&descriptor),
+            Some(ReferenceState::Reclaimed),
+            "the held chunk's descriptor went stale"
+        );
+        drop(replacement);
+        drop(held);
+    }
+
+    /// `BlockOn` waits for room instead of failing, and gets it when another thread lets
+    /// go and the policy's collection runs.
+    #[test]
+    fn the_blocking_policy_waits_for_a_chunk_to_be_released() {
+        let provider = ShmProvider::pool(&layout(16)).expect("a pool");
+        let held = provider
+            .alloc(layout(16), &AllocPolicy::JustAlloc)
+            .expect("fill it");
+        let releaser = std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(50));
+            drop(held);
+        });
+        let policy = AllocPolicy::block_on(AllocPolicy::garbage_collect(
+            AllocPolicy::JustAlloc,
+            AllocPolicy::JustAlloc,
+        ));
+        let waited = provider.alloc(layout(16), &policy);
+        releaser.join().expect("releaser");
+        assert!(waited.is_ok(), "it waited until the chunk was released");
+    }
+
+    /// A layout the backend extends is allocated at the extended size, and the payload is the
+    /// size that was asked for.
+    #[test]
+    fn a_payload_is_the_size_asked_for_in_a_chunk_the_backend_sized() {
+        let alignment = crate::shm_backend::AllocAlignment::ALIGN_8_BYTES;
+        let provider = ShmProvider::pool(&MemoryLayout::new(64, alignment).unwrap()).expect("pool");
+        let payload = provider
+            .alloc(layout(10), &AllocPolicy::JustAlloc)
+            .expect("alloc");
+        assert_eq!(payload.len(), 10);
+        let descriptor = payload.descriptor();
+        assert_eq!(descriptor.data_len, 10);
+        let meta = PeerSegment::open(u64::from(descriptor.metadata_id)).expect("metadata");
+        let header =
+            &metadata_of(meta.bytes()).expect("view").headers[descriptor.metadata_index as usize];
+        assert_eq!(
+            header.len.load(Ordering::Relaxed),
+            16,
+            "the header names the chunk the backend set aside, 10 rounded up to eight bytes"
         );
     }
 
