@@ -403,8 +403,8 @@ const TX_CONDUITS: usize = 1;
 /// session is open on that side, a face replays its declarations at once, and a
 /// Declare is handed over on `Control`, ahead of an OpenAck on `DEFAULT`. The dialler
 /// then read a Frame where it waited for an OpenAck and ended the transport
-/// (`Received an invalid message in response to an OpenSyn`, upstream's
-/// `io/zenoh-transport/src/unicast/establishment/open.rs`). Establishment is not
+/// (upstream's `io/zenoh-transport/src/unicast/establishment/open.rs`
+/// @ `Received an invalid message in response to an OpenSyn on`). Establishment is not
 /// session traffic upstream either: it is written to the link directly, before any
 /// pipeline exists. Nothing outranks `Control` and a lane is FIFO, so the handshake
 /// message queued first leaves first.

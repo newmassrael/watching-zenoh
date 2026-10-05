@@ -4142,8 +4142,8 @@ mod link_priority_tests {
     /// and the first thing a session sends is a Declare, which is handed over on the
     /// Control lane. An OpenAck at DEFAULT behind a Declare at Control is a Frame
     /// where the dialler is waiting for an OpenAck, and upstream's opener ends the
-    /// transport on it (`Received an invalid message in response to an OpenSyn`,
-    /// `io/zenoh-transport/src/unicast/establishment/open.rs`), which is how a C
+    /// transport on it (`io/zenoh-transport/src/unicast/establishment/open.rs`
+    /// @ `Received an invalid message in response to an OpenSyn on`), which is how a C
     /// subscriber with a declaration to replay lost about one connection in twenty
     /// to a shared-memory publisher. Nothing outranks Control, and one lane is FIFO,
     /// so the handshake message queued first leaves first.
