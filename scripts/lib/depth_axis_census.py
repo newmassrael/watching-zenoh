@@ -2444,7 +2444,15 @@ PIN_NO_SYMBOL = 0
 # the query value that ends the session), and the atom is still PARTIAL. READ off the
 # census's own FAIL line, `wz citations: 51 against a pin of 47`; `reached` and
 # `ambiguous` hold at 3 and 2.
-PIN_WZ_CITATIONS = 51
+#
+# R3052 -- 51 -> 55, two atoms. `api-compat-c`'s reason gains the CORRECTION that the
+# receiving half of the C ABI's shared-memory session is built, which cites three wz
+# anchors (the session's offer, the accessor that lends a received chunk, and the lane
+# the handshake messages ride), and `transport-shm`'s reason gains the UPDATE that the
+# runtime has the view the C ABI host reads, which cites one (the view's trait). Both
+# atoms are still PARTIAL. READ off the census's own FAIL line, `wz citations: 55
+# against a pin of 51`; `reached` and `ambiguous` hold at 3 and 2.
+PIN_WZ_CITATIONS = 55
 # R2626 — 44 -> 42, and this one is worth a sentence because it HELD through
 # every earlier retirement in this run (R2612, R2622). `time-hlc`'s reason is the
 # first retiree carrying AMBIGUOUS citations of its own: its oldest clauses cite
