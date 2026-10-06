@@ -16,8 +16,13 @@
 //!
 //! This module resolves WHAT to look for and binds the sockets; the decision about each answer
 //! is [`wz_runtime_tokio::scouting_autoconnect::autoconnect_verdict`] and the dial is the
-//! drive's (`crate::drive`), face by face on its own task. A node that scouts is not yet a node
-//! that is FOUND: answering a Scout is the responder's half, which this module does not carry.
+//! drive's (`crate::drive`), face by face on its own task.
+//!
+//! The other direction is here too (R3071): a node that is FOUND answers a Scout that asks for its
+//! role with a Hello ([`bind_responder`]), naming where its listener is reached
+//! ([`Advertised`]). The decision to answer is the runtime's responder's and is pure; this
+//! module resolves whether the node answers (`scouting/multicast/listen`), builds what it says
+//! about itself, and binds the sockets.
 //!
 //! ## Re-scouting is the recovery path
 //!
@@ -44,6 +49,10 @@ use wz_runtime_tokio::scouting_fanout::{
 use wz_runtime_tokio::scouting_glue::{
     drive_scouting_until_resolved, new_scouting_engine, ScoutOutcome, ScoutParams, ScoutingActions,
 };
+use wz_runtime_tokio::scouting_responder::{
+    bind_reply_sockets, serve, ResponderIdentity, ScoutingResponder,
+};
+use wz_runtime_tokio::session_open::BoundListener;
 use wz_runtime_tokio::zenoh_config::ZenohNodeConfig;
 use wz_runtime_tokio::{McastSocketConfig, UdpDriver};
 
@@ -99,6 +108,10 @@ pub struct ScoutingPlan {
     pub matcher: WhatAmIMatcher,
     /// `scouting/multicast/autoconnect_strategy`: the tie-break per discovered role.
     pub strategies: AutoConnectStrategies,
+    /// `scouting/multicast/listen` for this node's role: whether it ANSWERS a Scout, so that
+    /// another node can find it. Upstream's default is on for all three roles
+    /// (`commons/zenoh-config/src/defaults.rs` @ `pub mod listen {`).
+    pub answers: bool,
 }
 
 /// The group a config named is not one this node can scout on.
@@ -155,6 +168,7 @@ impl ScoutingPlan {
             strategies: node
                 .scout_multicast_autoconnect_strategy
                 .unwrap_or_default(),
+            answers: node.scout_multicast_listen.unwrap_or(true),
         }))
     }
 
@@ -270,6 +284,169 @@ impl ScoutLink {
     }
 }
 
+/// How a node is reached, as a Hello says it: the locator list for a scouter on this host and the
+/// one for a scouter beside it, which differ only by the loopback addresses an unspecified bind
+/// expands to. See [`ResponderIdentity::with_noloopback_locators`].
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Advertised {
+    /// What a process on this host is told.
+    pub local: Vec<String>,
+    /// What a node on another host is told.
+    pub remote: Vec<String>,
+}
+
+impl Advertised {
+    /// What a node with no listener tells a scouter: nothing it could dial. Upstream answers a
+    /// Hello with an empty locator list for a node bound to nothing (`listen/endpoints: []`).
+    pub fn none() -> Self {
+        Self::default()
+    }
+
+    /// The locators `bound` is reached at, once bound.
+    ///
+    /// The address is the one the listener ACTUALLY got, as upstream's is: it rebuilds the
+    /// endpoint from the bound socket address after the bind, so a port of `0` is advertised as
+    /// the port the kernel gave and a name as the address it resolved to
+    /// (`io/zenoh-links/zenoh-link-tcp/src/unicast.rs` @
+    /// `// Update the endpoint locator address`). An unspecified bind stands for the addresses of
+    /// the host, listed with and without the loopback ones
+    /// ([`wz_runtime_tokio::link_interfaces::expand_unspecified`]); when the host's addresses
+    /// cannot be read it stands for none, and the node is findable and not dialable, which is
+    /// what the Hello then says. The scheme and its metadata (`?rel=0`) are the listener kind's.
+    pub fn of(bound: &BoundListener) -> Self {
+        use wz_runtime_tokio::link_interfaces::{expand_unspecified, local_addresses};
+
+        let Ok(socket) = bound.local_addr() else {
+            // A listener with no IP address (a unix socket, a serial line) is reached at the
+            // address it renders.
+            return match bound.local_addr_display() {
+                Ok(address) => {
+                    let locator = bound.advertised_locator(&address);
+                    Self {
+                        local: vec![locator.clone()],
+                        remote: vec![locator],
+                    }
+                }
+                Err(_) => Self::none(),
+            };
+        };
+        let locators = |exclude_loopback: bool| -> Vec<String> {
+            let local = if socket.ip().is_unspecified() {
+                local_addresses().unwrap_or_default()
+            } else {
+                Vec::new()
+            };
+            expand_unspecified(socket, &local, exclude_loopback)
+                .iter()
+                .map(|address| bound.advertised_locator(&address.to_string()))
+                .collect()
+        };
+        Self {
+            local: locators(false),
+            remote: locators(true),
+        }
+    }
+}
+
+/// A session's scouting responder, answering until it is dropped.
+///
+/// Dropping it ends the answering: it runs on a task of the session's own runtime, and a session
+/// that is closing has no node left to be found at.
+pub struct Findable {
+    task: tokio::task::JoinHandle<()>,
+}
+
+impl Drop for Findable {
+    fn drop(&mut self) {
+        self.task.abort();
+    }
+}
+
+/// A responder whose sockets are bound and joined and which answers nobody yet.
+///
+/// Binding and answering are two steps because upstream's are: a client binds its scouting socket
+/// BEFORE it searches for a node to connect to, and starts answering only AFTER it has connected
+/// (`zenoh/src/net/runtime/orchestrator.rs` @ `async fn start_client(&self) -> ZResult<()> {`,
+/// where `this.responder(&mcast_socket, &sockets)` is spawned after `connect_first`). MEASURED on
+/// the real library: a client with a listener and nothing to dial answers no Scout while it
+/// searches. A bind that fails fails the open at the first step, and the search is then never
+/// started.
+pub struct Responder {
+    inner: ScoutingResponder,
+}
+
+impl Responder {
+    /// Begin answering, until the returned [`Findable`] is dropped.
+    pub fn start(self) -> Findable {
+        let responder = self.inner;
+        let task = tokio::spawn(async move {
+            let _ = serve(responder, |_step| {}).await;
+        });
+        Findable { task }
+    }
+}
+
+/// Bind the responder of a node: join the plan's group and be ready to answer a Scout that asks
+/// for this node's role with a Hello naming its zid, its role and where it is reached.
+///
+/// `None` when the plan says the node does not answer (`scouting/multicast/listen: false`).
+/// Bound before the open returns, so a node that cannot join its group fails its OPEN, as
+/// upstream's `start_scout` does with the `?` on its multicast bind (the responder shares that
+/// socket there), and a node that was told to be findable is never silently not.
+///
+/// The Hello leaves from the unicast socket nearest the asker, as upstream's does
+/// (`orchestrator.rs` @ `fn get_best_match<'a>(`): one per interface that can carry multicast
+/// when the config names none, and the named interface's own addresses when it does.
+pub async fn bind_responder(
+    plan: &ScoutingPlan,
+    whatami: wz_runtime_tokio::session_glue::WhatAmI,
+    zid: &[u8],
+    advertised: Advertised,
+) -> io::Result<Option<Responder>> {
+    if !plan.answers {
+        return Ok(None);
+    }
+    let identity =
+        ResponderIdentity::try_new(SCOUT_PROTO_VERSION, whatami, zid.to_vec(), advertised.local)
+            .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e.to_string()))?
+            .with_noloopback_locators(advertised.remote);
+    let config = McastSocketConfig {
+        iface: plan.interface.as_deref(),
+        ttl: plan.ttl,
+        ..McastSocketConfig::default()
+    };
+    let group_socket = UdpDriver::bind_multicast(IpAddr::V4(plan.group), plan.port, config).await?;
+    let replies = match plan.interface.as_deref() {
+        Some(iface) => wz_runtime_tokio::link_interfaces::unicast_addresses_of_interface(iface)
+            .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, format!("{e:?}")))?
+            .into_iter()
+            .filter(IpAddr::is_ipv4)
+            .collect(),
+        None => {
+            wz_runtime_tokio::link_interfaces::multicast_interface_addresses().unwrap_or_default()
+        }
+    };
+    // An address that cannot be held a moment after it was listed leaves the node answering from
+    // the interfaces that bound; the election runs on those.
+    // Heard on every interface the config scouts on, as upstream's one socket is joined on each
+    // (`bind_mcast_port`). The bind above joined the group on the interface the kernel chose; a
+    // config that names an interface is joined on that one alone, which is that bind. An
+    // interface already joined or gone is skipped, as upstream warns and goes on.
+    if plan.interface.is_none() {
+        for iface in &replies {
+            if let IpAddr::V4(iface) = iface {
+                let _ = group_socket.join_multicast_v4_on(plan.group, *iface);
+            }
+        }
+    }
+    // The addresses that could not be held are not reported: this crate has no logger, and the
+    // election runs on the sockets that bound.
+    let reply_sockets = bind_reply_sockets(&replies).await.0;
+    Ok(Some(Responder {
+        inner: ScoutingResponder::with_reply_sockets(group_socket, identity, reply_sockets),
+    }))
+}
+
 /// Post the intent of every responder of this window that has not been posted yet and whom the
 /// policy admits. `false` when the receiver is gone.
 fn post_admitted(
@@ -326,10 +503,18 @@ mod tests {
             assert!(plan.scouts());
             // router (1) | peer (2) | client (4)
             assert_eq!(plan.what(), 7, "a {role:?} asks for every role");
+            assert!(
+                plan.answers,
+                "a {role:?} answers a Scout unless told not to"
+            );
         }
         let router = resolved(&node, Role::Router);
         assert!(!router.scouts(), "a router connects to nobody it finds");
         assert_eq!(router.what(), 0);
+        assert!(
+            router.answers,
+            "a router connects to nobody and is still found: `listen` is on for all three roles"
+        );
     }
 
     /// Each stated key replaces its default, and `"auto"` is no interface.
@@ -342,7 +527,12 @@ mod tests {
         node.scouting_delay_ms = Some(40);
         node.scouting_timeout_ms = Some(70);
         node.scout_multicast_autoconnect = Some(WhatAmIMatcher::empty().router());
+        node.scout_multicast_listen = Some(false);
         let plan = resolved(&node, Role::Peer);
+        assert!(
+            !plan.answers,
+            "`scouting/multicast/listen: false` is honoured"
+        );
         assert_eq!(
             (plan.group, plan.port),
             (Ipv4Addr::new(224, 0, 0, 231), 7511)

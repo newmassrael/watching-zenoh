@@ -989,7 +989,12 @@ HOST_GATED_CI_TARGETS: dict[str, str] = {
 # other, and a peer with a live endpoint opens at once though it scouts (each
 # `api-compat-c zenoh-c->wz partial`, the class and lane R3067 and R3069 declared). Measured by
 # `scripts/audit-crossimpl-proof.sh`.
-FOREIGN_ADJUDICATOR_LINKS = 1016
+# R3071 -- 1016 -> 1018, RISING by two, each a new `wz-proves` line in
+# `zenoh_c_scouting_twice_and_diff.rs` for the other direction of scouting: what a wz node says when
+# a Scout asks for its role (six node shapes, read by the real library's `z_scout`), and whether a
+# real client and a real peer that are told nothing find a wz node that listens and hear it (each
+# `api-compat-c zenoh-c->wz partial`). Measured by `scripts/audit-crossimpl-proof.sh`.
+FOREIGN_ADJUDICATOR_LINKS = 1018
 
 # ── Execution disclosure ────────────────────────────────────────────────────────
 #

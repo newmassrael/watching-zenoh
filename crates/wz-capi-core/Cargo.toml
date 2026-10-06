@@ -141,6 +141,11 @@ wz-runtime-tokio = { path = "../wz-runtime-tokio", features = [
     "scouting-active",
     "link-interfaces",
     "locator-iface",
+    # R3071 -- the responder: a session that is told to answer a Scout (`scouting/multicast/
+    # listen`, on by default) is findable. Named here and not folded into `scouting-active`
+    # for the reason the runtime states: discovering and being discoverable are opposite
+    # directions, and this crate is the build that owes both.
+    "scouting-responder",
     "ext-pubsub-advanced-publisher",
     "ext-pubsub-advanced-history",
     "ext-pubsub-sample-miss-detection",

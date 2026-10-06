@@ -9,6 +9,10 @@
 //! tree refused the open outright, so a program that called `z_open` on a default config could
 //! not run at all.
 //!
+//! The same file holds the other direction, a node that is FOUND (R3071): what it says when a
+//! Scout asks for its role, read by the real library's `z_scout`, and whether a real node that is
+//! told nothing finds it and connects.
+//!
 //! ## What was measured before anything was built
 //!
 //! One C program linked to each library, on a multicast group of its own so it meets only the
@@ -126,8 +130,12 @@ int main(int argc, char** argv) {
     insert(&config, "scouting/multicast/address", buf);
     insert(&config, Z_CONFIG_SCOUTING_DELAY_KEY, delay);
     insert(&config, Z_CONFIG_SCOUTING_TIMEOUT_KEY, timeout);
+    /* Two knobs the answering rows turn, as text in the environment: whether the node ANSWERS a
+       Scout (`scouting/multicast/listen`), and the host its listener binds. */
+    if (getenv("SCOUT_LISTEN")) insert(&config, "scouting/multicast/listen", getenv("SCOUT_LISTEN"));
     if (lport) {
-        snprintf(buf, sizeof buf, "[\"tcp/127.0.0.1:%d\"]", lport);
+        const char* host = getenv("LISTEN_HOST") ? getenv("LISTEN_HOST") : "127.0.0.1";
+        snprintf(buf, sizeof buf, "[\"tcp/%s:%d\"]", host, lport);
         insert(&config, Z_CONFIG_LISTEN_KEY, buf);
     }
     if (cport) {
@@ -173,6 +181,59 @@ int main(int argc, char** argv) {
 }
 "#;
 
+/// The ASKER of the rows that ask whether a node is FOUND: `z_scout` on a group, printing every
+/// Hello that answers as `hello whatami=<role> locators=[a, b]`. It is always linked to the real
+/// library, so a node under test is read by the library whose reading is the standard and no
+/// answer is graded by wz's own parser. The zid is not printed: two libraries never agree on it.
+const PROBE: &str = r#"#define _GNU_SOURCE
+#include <stdio.h>
+#include <stdlib.h>
+#include <unistd.h>
+#include "zenoh.h"
+
+static int g_n = 0;
+
+static void on_hello(z_loaned_hello_t* hello, void* arg) {
+    (void)arg;
+    z_view_string_t w;
+    z_whatami_to_view_string(z_hello_whatami(hello), &w);
+    printf("hello whatami=%.*s locators=[", (int)z_string_len(z_loan(w)), z_string_data(z_loan(w)));
+    z_owned_string_array_t locs;
+    z_hello_locators(hello, &locs);
+    const z_loaned_string_array_t* l = z_loan(locs);
+    for (unsigned i = 0; i < z_string_array_len(l); i++) {
+        const z_loaned_string_t* s = z_string_array_get(l, i);
+        printf("%s%.*s", i ? ", " : "", (int)z_string_len(s), z_string_data(s));
+    }
+    printf("]\n");
+    z_string_array_drop(z_move(locs));
+    g_n++;
+}
+
+static void on_drop(void* arg) { (void)arg; }
+
+/* argv: group "a.b.c.d:port", what-mask (1 router, 2 peer, 4 client), timeout in ms. */
+int main(int argc, char** argv) {
+    setvbuf(stdout, NULL, _IONBF, 0);
+    if (argc < 4) return 2;
+    z_owned_config_t config;
+    z_config_default(&config);
+    char buf[128];
+    snprintf(buf, sizeof buf, "\"%s\"", argv[1]);
+    zc_config_insert_json5(z_loan_mut(config), "scouting/multicast/address", buf);
+    z_scout_options_t opts;
+    z_scout_options_default(&opts);
+    opts.what = (enum z_what_t)atoi(argv[2]);
+    opts.timeout_ms = (uint64_t)atoi(argv[3]);
+    z_owned_closure_hello_t closure;
+    z_closure(&closure, on_hello, on_drop, NULL);
+    int rc = z_scout(z_move(config), z_move(closure), &opts);
+    usleep(300 * 1000);
+    printf("scout rc=%d\n", rc);
+    return 0;
+}
+"#;
+
 /// A group of this file's own, one per row: the default group is shared with every zenoh node on
 /// the host, and these rows are to meet only the nodes they start.
 fn next_group() -> String {
@@ -203,12 +264,21 @@ struct Programs {
     _work: tempfile::TempDir,
     reference: Built,
     wz: Built,
+    /// The asker of the rows that read a node's Hello: `PROBE`, linked to the real library.
+    probe: Built,
 }
 
-fn compile(source_dir: &Path, out: &Path, include: &Path, libdir: &Path, link: &str) -> Built {
+fn compile(
+    name: &str,
+    source_dir: &Path,
+    out: &Path,
+    include: &Path,
+    libdir: &Path,
+    link: &str,
+) -> Built {
     std::fs::create_dir_all(out).expect("build dir");
-    let exe = compile_zenoh_c_example("scout_node", out, include, source_dir, libdir, link)
-        .unwrap_or_else(|d| panic!("the node program does not link against `{link}`\n{d}"));
+    let exe = compile_zenoh_c_example(name, out, include, source_dir, libdir, link)
+        .unwrap_or_else(|d| panic!("the `{name}` program does not link against `{link}`\n{d}"));
     Built {
         exe,
         libdir: libdir.to_path_buf(),
@@ -222,12 +292,14 @@ fn programs() -> Option<Programs> {
     let src = work.path().join("src");
     std::fs::create_dir_all(&src).expect("source dir");
     std::fs::write(src.join("scout_node.c"), NODE).expect("write the source");
+    std::fs::write(src.join("hello_probe.c"), PROBE).expect("write the probe source");
 
     let reference_lib = zenoh_c_shared_library().expect("the oracle resolved above");
     let reference_dir = reference_lib.parent().expect("libzenohc.so has a parent");
     let wz_lib = wz_capi_c_cdylib();
     let wz_dir = wz_lib.parent().expect("cdylib has a parent");
     let reference = compile(
+        "scout_node",
         &src,
         &work.path().join("zenohc"),
         &include,
@@ -235,16 +307,26 @@ fn programs() -> Option<Programs> {
         "zenohc",
     );
     let wz = compile(
+        "scout_node",
         &src,
         &work.path().join("wz_capi_c"),
         &include,
         wz_dir,
         "wz_capi_c",
     );
+    let probe = compile(
+        "hello_probe",
+        &src,
+        &work.path().join("probe"),
+        &include,
+        reference_dir,
+        "zenohc",
+    );
     Some(Programs {
         _work: work,
         reference,
         wz,
+        probe,
     })
 }
 
@@ -278,7 +360,14 @@ struct Outcome {
 
 impl Node {
     fn start(built: &Built, spec: &Spec<'_>) -> Self {
+        Self::start_with(built, spec, &[])
+    }
+
+    /// [`Self::start`] with environment variables the node program reads (`SCOUT_LISTEN`,
+    /// `LISTEN_HOST`).
+    fn start_with(built: &Built, spec: &Spec<'_>, env: &[(&str, &str)]) -> Self {
         let mut child = Command::new(&built.exe)
+            .envs(env.iter().copied())
             .args([
                 spec.mode,
                 &spec.listen.to_string(),
@@ -623,5 +712,314 @@ fn two_peers_that_scout_find_each_other_identically_on_wz_and_libzenohc() {
             "§5.27 api-compat-c: a wz peer (started first: {y_first}) and a real peer that scout \
              do not find each other the way two real peers do"
         );
+    }
+}
+
+// ---------------------------------------------------------------------------------------------
+// The other direction: a node that is FOUND. R3071.
+// ---------------------------------------------------------------------------------------------
+
+/// How long after a node's open it is asked, and how long the asker waits for answers: long enough
+/// for every interface's Scout to be answered, short enough that a node that answers nobody is
+/// known to within two seconds.
+const ASK_TIMEOUT_MS: &str = "1500";
+
+/// The Hello lines the real library's `z_scout` reads off `group` for roles `what` (1 router,
+/// 2 peer, 4 client), with each locator's PORT replaced by `PORT`, sorted and without
+/// repetition. Every interface a node is reachable by answers the asker's Scout once, so the same
+/// line comes back more than once; the SET is the answer.
+fn hellos(probe: &Built, group: &str, what: u8) -> Vec<String> {
+    let output = Command::new(&probe.exe)
+        .args([group, &what.to_string(), ASK_TIMEOUT_MS])
+        .env("LD_LIBRARY_PATH", &probe.libdir)
+        .stderr(Stdio::null())
+        .output()
+        .expect("run the scouting probe");
+    let mut lines: Vec<String> = String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .filter(|line| line.starts_with("hello "))
+        .map(|line| {
+            let (head, list) = line
+                .split_once("locators=[")
+                .expect("a hello line carries its locators");
+            let list = list.trim_end_matches(']');
+            let ported: Vec<String> = list
+                .split(", ")
+                .filter(|locator| !locator.is_empty())
+                .map(|locator| match locator.rsplit_once(':') {
+                    Some((host, _port)) => format!("{host}:PORT"),
+                    None => locator.to_owned(),
+                })
+                .collect();
+            format!("{head}locators=[{}]", ported.join(", "))
+        })
+        .collect();
+    lines.sort();
+    lines.dedup();
+    lines
+}
+
+/// What a node looks like to be found. Each carries what the real library measured.
+#[derive(Clone, Copy, Debug)]
+enum Shape {
+    /// A peer listening on loopback: its Hello names that address.
+    PeerOnLoopback,
+    /// A peer bound to `0.0.0.0`: its Hello names the host's own addresses and no loopback one, to
+    /// an asker that is not on loopback.
+    PeerOnTheWildcard,
+    /// A peer told not to answer (`scouting/multicast/listen: false`): nobody finds it.
+    PeerToldNotToAnswer,
+    /// A client connected to a peer, with a listener of its own: its Hello names the listener.
+    ClientConnectedWithAListener,
+    /// A client connected to a peer, with no listener: it answers with no locator.
+    ClientConnectedWithNone,
+    /// A client that is still SEARCHING for a node to connect to: it answers nobody, because
+    /// upstream starts its responder only after `connect_first`.
+    ClientStillSearching,
+}
+
+impl Shape {
+    /// The role mask the asker names.
+    fn what(self) -> u8 {
+        match self {
+            Shape::PeerOnLoopback | Shape::PeerToldNotToAnswer => 7,
+            Shape::PeerOnTheWildcard => 2,
+            Shape::ClientConnectedWithAListener
+            | Shape::ClientConnectedWithNone
+            | Shape::ClientStillSearching => 4,
+        }
+    }
+}
+
+/// Start a node of `shape` built as `built`, ask its group, and return what the real library's
+/// `z_scout` reads off it.
+fn hellos_of(built: &Built, reference: &Built, probe: &Built, shape: Shape) -> Vec<String> {
+    let group = next_group();
+    let key = "wz/scouting/found";
+    // A port picked and released at once: the reservation is not reentrant, so a row that needs two
+    // takes them one after the other.
+    let free_port = || {
+        let reservation = PortReservation::pick();
+        let port = reservation.port();
+        drop(reservation);
+        port
+    };
+    let spec = |mode, listen, connect| Spec {
+        mode,
+        listen,
+        connect,
+        key,
+        secs: 6,
+        tag: "A",
+        group: &group,
+        delay_ms: 500,
+        timeout_ms: 3000,
+    };
+    match shape {
+        Shape::PeerOnLoopback | Shape::PeerOnTheWildcard | Shape::PeerToldNotToAnswer => {
+            let env: &[(&str, &str)] = match shape {
+                Shape::PeerOnTheWildcard => &[("LISTEN_HOST", "0.0.0.0")],
+                Shape::PeerToldNotToAnswer => &[("SCOUT_LISTEN", "false")],
+                _ => &[],
+            };
+            let mut node = Node::start_with(built, &spec("peer", free_port(), 0), env);
+            let opened = node.opened();
+            let found = hellos(probe, &group, shape.what());
+            node.finish(opened);
+            found
+        }
+        Shape::ClientConnectedWithAListener | Shape::ClientConnectedWithNone => {
+            // The peer the client connects to is the real library's, so the only thing that
+            // differs between the two rows of a pair is the client.
+            let peer_port = free_port();
+            let mut peer = Node::start(
+                reference,
+                &Spec {
+                    tag: "L",
+                    ..spec("peer", peer_port, 0)
+                },
+            );
+            let peer_opened = peer.opened();
+            let listen = match shape {
+                Shape::ClientConnectedWithAListener => free_port(),
+                _ => 0,
+            };
+            let mut node = Node::start(built, &spec("client", listen, peer_port));
+            let opened = node.opened();
+            let found = hellos(probe, &group, shape.what());
+            node.finish(opened);
+            peer.finish(peer_opened);
+            found
+        }
+        Shape::ClientStillSearching => {
+            // Nothing for it to find: the group is its own, so the search runs its three seconds
+            // and the asker comes in the middle of it.
+            let mut node = Node::start(built, &spec("client", free_port(), 0));
+            std::thread::sleep(std::time::Duration::from_millis(1200));
+            let found = hellos(probe, &group, shape.what());
+            let opened = node.opened();
+            assert!(
+                opened.starts_with("open=-4"),
+                "a client that finds nobody fails its open: {opened}"
+            );
+            node.finish(opened);
+            found
+        }
+    }
+}
+
+/// THE GATE, being found: what a node says when a Scout asks for its role, read by the real
+/// library's `z_scout`, is what the real library's own node says. The Hello carries the node's
+/// role and the locators it is reached at, and a node that is not to answer, or does not yet,
+/// is silent.
+///
+/// Measured first, one row each, then built: a peer on loopback names that address; a peer on the
+/// wildcard names its host's addresses (global IPv6, public IPv4, link-local IPv6, private IPv4,
+/// in that order) and no loopback to a neighbour; a client names its listener or no locator at
+/// all; a peer asked for routers only does not answer; and a client that is still searching
+/// answers nobody (upstream spawns its responder after `connect_first`).
+// wz-proves: api-compat-c zenoh-c->wz partial
+#[test]
+#[ignore = "reads a zenoh-c oracle; run by run-ci Layer C1cc (which builds the matching \
+            ABI arm this needs)"]
+fn a_node_answers_a_scout_with_the_hello_the_real_library_sends_on_wz_and_libzenohc() {
+    let Some(programs) = programs() else {
+        return;
+    };
+    let loopback_peer = ["hello whatami=peer locators=[tcp/127.0.0.1:PORT]"];
+    let loopback_client = ["hello whatami=client locators=[tcp/127.0.0.1:PORT]"];
+    let no_locator_client = ["hello whatami=client locators=[]"];
+    for (shape, expected) in [
+        (Shape::PeerOnLoopback, Some(&loopback_peer[..])),
+        (Shape::PeerOnTheWildcard, None),
+        (Shape::PeerToldNotToAnswer, Some(&[][..])),
+        (
+            Shape::ClientConnectedWithAListener,
+            Some(&loopback_client[..]),
+        ),
+        (Shape::ClientConnectedWithNone, Some(&no_locator_client[..])),
+        (Shape::ClientStillSearching, Some(&[][..])),
+    ] {
+        let oracle = hellos_of(
+            &programs.reference,
+            &programs.reference,
+            &programs.probe,
+            shape,
+        );
+        match expected {
+            Some(rows) => assert_eq!(
+                oracle, rows,
+                "the REAL library's Hello for {shape:?} is not what this file expects"
+            ),
+            // The wildcard row names the host's own addresses, so what is fixed is its SHAPE:
+            // one peer Hello of IPv4 and IPv6 locators and not one of them on loopback.
+            None => {
+                assert_eq!(oracle.len(), 1, "one Hello for {shape:?}: {oracle:?}");
+                assert!(
+                    oracle[0].starts_with("hello whatami=peer locators=[tcp/")
+                        && !oracle[0].contains("127.0.0.1")
+                        && !oracle[0].contains("[::1]")
+                        && !oracle[0].contains("locators=[]"),
+                    "the real wildcard Hello is the host's own non-loopback addresses: {oracle:?}"
+                );
+            }
+        }
+        let wz = hellos_of(&programs.wz, &programs.reference, &programs.probe, shape);
+        assert_eq!(
+            wz, oracle,
+            "§5.27 api-compat-c: a wz node of shape {shape:?} does not answer a Scout with the \
+             Hello the real library's does"
+        );
+    }
+}
+
+/// A real node with no endpoint at all finds a node of `built`, which listens on loopback, and the
+/// two hear each other. `finder_mode` is the real node's role.
+fn real_finds(
+    built: &Built,
+    reference: &Built,
+    finder_mode: &str,
+    key: &str,
+) -> (Outcome, Outcome) {
+    let group = next_group();
+    let reservation = PortReservation::pick();
+    let port = reservation.port();
+    drop(reservation);
+    let mut found = Node::start(
+        built,
+        &Spec {
+            mode: "peer",
+            listen: port,
+            connect: 0,
+            key,
+            secs: 8,
+            tag: "F",
+            group: &group,
+            delay_ms: 500,
+            timeout_ms: 3000,
+        },
+    );
+    let found_open = found.opened();
+    let mut finder = Node::start(
+        reference,
+        &Spec {
+            mode: finder_mode,
+            listen: 0,
+            connect: 0,
+            key,
+            secs: 4,
+            tag: "Y",
+            group: &group,
+            delay_ms: 500,
+            timeout_ms: 3000,
+        },
+    );
+    let finder_open = finder.opened();
+    (finder.finish(finder_open), found.finish(found_open))
+}
+
+/// THE GATE, being dialled: a real node that is told nothing finds a node that listens, by
+/// scouting, connects to the locator in its Hello, and the two hear each other.
+///
+/// A real CLIENT's open is bounded as the real library's is, which is what scouting is for. A real
+/// PEER's open against a wz node is NOT bounded here: it waits out `scouting/delay` for a start
+/// condition a wz peer does not yet satisfy, whether it was found by scouting or dialled at an
+/// endpoint (measured both ways, 506 ms against 10 ms with a real node on the other end), which
+/// is the gossip introduction a wz peer does not speak and is not this row's claim.
+// wz-proves: api-compat-c zenoh-c->wz partial
+#[test]
+#[ignore = "reads a zenoh-c oracle; run by run-ci Layer C1cc (which builds the matching \
+            ABI arm this needs)"]
+fn a_real_node_that_scouts_finds_a_listening_node_identically_on_wz_and_libzenohc() {
+    let Some(programs) = programs() else {
+        return;
+    };
+    let expect = "open=0 | declare=0 senders=F,Y dups=0";
+    for (n, mode) in ["client", "peer"].into_iter().enumerate() {
+        let key = format!("wz/scouting/dialled/{n}");
+        let (oracle_finder, oracle_found) =
+            real_finds(&programs.reference, &programs.reference, mode, &key);
+        assert_eq!(
+            (oracle_finder.row.as_str(), oracle_found.row.as_str()),
+            (expect, expect),
+            "the REAL library's rows for a {mode} that finds a listening peer are not what this \
+             file expects"
+        );
+        let (wz_finder, wz_found) = real_finds(&programs.wz, &programs.reference, mode, &key);
+        assert_eq!(
+            (wz_finder.row.as_str(), wz_found.row.as_str()),
+            (expect, expect),
+            "§5.27 api-compat-c: a real {mode} that scouts does not find and hear a wz node the \
+             way it does a real one"
+        );
+        if mode == "client" {
+            assert!(
+                oracle_finder.open_ms < 400 && wz_finder.open_ms < 400,
+                "a real client's open took {} ms against a wz node (the real node's: {} ms): \
+                 scouting is what makes it short",
+                wz_finder.open_ms,
+                oracle_finder.open_ms
+            );
+        }
     }
 }

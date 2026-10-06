@@ -16202,6 +16202,17 @@ run: bash scripts/build-zenoh-pico-cli.sh)"
     _runci_guarded_test "M router lists a pico multicast member" 1 \
         cargo test -p wz-integration-tests \
         --test wz_router_lists_a_pico_multicast_member_in_its_sessions -- --ignored || return 1
+    # R3070/R3071 -- the C ABI's own sessions, over the group: a session that is told no endpoint
+    # scouts and connects to what answers, a session that listens answers and is found, a client
+    # does not open to a node that holds another zid or that refuses its locator, and a session
+    # told not to answer is not found. Six rows, serial because they share the machine's group
+    # space. They were not `#[ignore]`d at first, and the Platform lane's C ABI job, which runs
+    # every test of the crate on a hosted macOS and Windows runner, failed two of them there and
+    # passed three that assert that nothing was found, which on a host that delivers nothing is
+    # not a witness. The Linux rows read the real library (`C1cc`); these read no oracle. 6 = the
+    # number this command PRINTED; the file's seventh test needs no delivery and runs everywhere.
+    _runci_guarded_test "M a C ABI session scouts and is found" 6 \
+        cargo test -p wz-capi-c --test scouting_open -- --ignored --test-threads=1 || return 1
 }
 
 # ─── Layer Z — wz <-> zenohd (zenoh-full reference router) interop ────
@@ -20051,6 +20062,27 @@ layer_c1cc_api_compat_c() {
         --test zenoh_c_scouting_twice_and_diff -- --ignored --quiet \
         --test-threads=1 \
         --exact a_peer_with_a_live_endpoint_opens_at_once_though_it_scouts_on_wz_and_libzenohc \
+        || return 1
+    # R3071 -- the other direction: a node that is FOUND. What a wz node says when a Scout asks for
+    # its role is read by the real library's own `z_scout` and compared with what a real node says
+    # in six shapes (a peer on loopback, a peer on the wildcard, a peer told not to answer, a
+    # client connected with and without a listener, a client still searching); and a real client
+    # and a real peer that are told nothing find a wz node that listens, connect and hear it. The
+    # real peer's open against a wz peer is not timed: it waits out `scouting/delay` for a start
+    # condition a wz peer does not yet satisfy, whether found or dialled at an endpoint.
+    _runci_guarded_test \
+        "C1cc a_node_answers_a_scout_with_the_hello_the_real_library_sends_on_wz_and_libzenohc" 1 \
+        cargo test -p wz-integration-tests \
+        --test zenoh_c_scouting_twice_and_diff -- --ignored --quiet \
+        --test-threads=1 \
+        --exact a_node_answers_a_scout_with_the_hello_the_real_library_sends_on_wz_and_libzenohc \
+        || return 1
+    _runci_guarded_test \
+        "C1cc a_real_node_that_scouts_finds_a_listening_node_identically_on_wz_and_libzenohc" 1 \
+        cargo test -p wz-integration-tests \
+        --test zenoh_c_scouting_twice_and_diff -- --ignored --quiet \
+        --test-threads=1 \
+        --exact a_real_node_that_scouts_finds_a_listening_node_identically_on_wz_and_libzenohc \
         || return 1
     _runci_guarded_test \
         "C1cc an_advanced_subscriber_of_the_publishers_own_session_hears_it_on_wz_and_libzenohc" 1 \

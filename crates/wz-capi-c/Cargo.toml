@@ -190,8 +190,9 @@ wz-runtime-tokio = { path = "../wz-runtime-tokio", features = [
 # dev-dep adds no graph the tests were not already building.
 wz-runtime-tokio-test-support = { path = "../wz-runtime-tokio-test-support" }
 # R3070 -- `scouting_open` answers a session's Scout with the runtime's own responder, on a
-# runtime of its own: the responder half of scouting is not this ABI's yet, and a test that
-# needs a node to be FOUND takes the one the runtime has. Dev-only; both are already in the graph.
+# runtime of its own, so the finding half is pinned alone. (R3071 made a session answer for
+# itself, and two rows there use one; the stand-in stays for the rows that need a node whose zid
+# and locator are the test's to choose.) Dev-only; both are already in the graph.
 wz-runtime-tokio = { path = "../wz-runtime-tokio", features = ["scouting-responder"] }
 tokio = { version = "1", features = ["rt-multi-thread", "net", "time", "sync", "macros"] }
 # R2300 (open-debt item 631) — for `config_verdict_zenohd_interop`, which has to

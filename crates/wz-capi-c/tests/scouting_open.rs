@@ -6,8 +6,21 @@
 //!
 //! A node that is not told where to connect looks for peers and routers on the multicast group
 //! and opens a session to the first it finds (a client) or to each it is willing to (a peer).
-//! The node to be found here is a bare responder from the runtime, answering with the locator of
-//! a wz listener, on a group of its own, so no node outside the test can answer.
+//! Most of the nodes to be found here are a bare responder from the runtime, answering with the
+//! locator of a wz listener, on a group of its own, so no node outside the test can answer: it
+//! pins the finding half alone. The last two rows put a wz SESSION in its place, which answers
+//! for itself (R3071), and one that is told not to.
+//!
+//! ## Which of these run where
+//!
+//! Every row but one needs a multicast datagram to be DELIVERED, so it is `#[ignore]`d and owned
+//! by Layer M, as the runtime's own multicast e2e suites are: a hosted macOS runner denies a
+//! spawned process the real interface and a hosted Windows one picks among three at the OS's
+//! whim (`scripts/lib/platform_surface_matrix.py` and `multicast_host_roundtrip.rs` hold the
+//! measurements), so a row that needs delivery proves nothing there, and a row that asserts that
+//! nothing was found PASSES there for the wrong reason. R3070's first push ran them on both and
+//! they failed. The one that runs everywhere is a peer whose configured endpoint is live, which
+//! needs no delivery at all.
 //!
 //! The real library's rows for the same shapes are diffed in
 //! `wz-integration-tests/tests/zenoh_c_scouting_twice_and_diff.rs`; this file holds the rows
@@ -188,6 +201,7 @@ impl Drop for Responder {
 /// and a sample the found node publishes reaches the peer: the open returns when the connection
 /// is up and not after the whole scouting delay, which is what a scouted open is for.
 #[test]
+#[ignore = "multicast loopback e2e; Layer M runs via --layer M / WZ_RUN_LAYER_M=1 --ignored"]
 fn a_peer_that_scouts_connects_to_the_node_that_answers() {
     let (group_ip, group_port, group_text) = group(1);
     let port = free_port();
@@ -284,6 +298,7 @@ fn a_peer_with_a_live_endpoint_opens_at_once_though_it_scouts() {
 
 /// A client that is told nothing finds the node that answers and holds a session to it.
 #[test]
+#[ignore = "multicast loopback e2e; Layer M runs via --layer M / WZ_RUN_LAYER_M=1 --ignored"]
 fn a_client_that_scouts_connects_to_the_node_that_answers() {
     let (group_ip, group_port, group_text) = group(2);
     let port = free_port();
@@ -336,6 +351,7 @@ fn a_client_that_scouts_connects_to_the_node_that_answers() {
 /// whose only answer leads to a stranger does not hold a session to it. (Upstream's
 /// `open_transport_unicast_with_zid`.)
 #[test]
+#[ignore = "multicast loopback e2e; Layer M runs via --layer M / WZ_RUN_LAYER_M=1 --ignored"]
 fn a_client_does_not_hold_a_link_to_a_node_other_than_the_one_that_answered() {
     let (group_ip, group_port, group_text) = group(4);
     let port = free_port();
@@ -377,6 +393,7 @@ fn a_client_does_not_hold_a_link_to_a_node_other_than_the_one_that_answered() {
 /// A node that answers with a locator nothing listens at is not a node the client can open to:
 /// the search goes on until its timeout and the open fails, as it does with no answer at all.
 #[test]
+#[ignore = "multicast loopback e2e; Layer M runs via --layer M / WZ_RUN_LAYER_M=1 --ignored"]
 fn a_client_does_not_open_to_a_node_whose_locator_refuses() {
     let (group_ip, group_port, group_text) = group(3);
     let dead = free_port();
@@ -397,4 +414,92 @@ fn a_client_does_not_open_to_a_node_whose_locator_refuses() {
     assert_eq!(rc, Z_ENETWORK);
     // SAFETY: a gravestone drops as a no-op.
     unsafe { close_session(session) };
+}
+
+/// A wz session is FOUND by one that scouts: it answers a Scout on its group with its own zid and
+/// the locator its listener holds, a client that is told nothing opens to it, and a sample it
+/// publishes reaches the client. The node being found is a session and not the runtime's stand-in,
+/// so this is the answering half the stand-in rows cannot test.
+#[test]
+#[ignore = "multicast loopback e2e; Layer M runs via --layer M / WZ_RUN_LAYER_M=1 --ignored"]
+fn a_wz_session_is_found_by_a_session_that_scouts() {
+    let (_, _, group_text) = group(8);
+    let port = free_port();
+    // SAFETY: fresh configs and sessions.
+    let (rc, found) = unsafe {
+        open_with(&[
+            ("mode", String::from("\"peer\"")),
+            ("scouting/multicast/address", group_text.clone()),
+            ("scouting/delay", String::from("50")),
+            ("listen/endpoints", format!("[\"tcp/127.0.0.1:{port}\"]")),
+        ])
+    };
+    assert_eq!(rc, Z_OK);
+
+    let started = Instant::now();
+    // SAFETY: a fresh config and session.
+    let (rc, finder) = unsafe {
+        open_with(&[
+            ("mode", String::from("\"client\"")),
+            ("scouting/multicast/address", group_text),
+            ("scouting/timeout", String::from("5000")),
+        ])
+    };
+    let opened_in = started.elapsed();
+    assert_eq!(
+        rc, Z_OK,
+        "a client that is told nothing found no node: the session that listens did not answer \
+         its Scout ({opened_in:?})"
+    );
+    // SAFETY: the finder is live; `ctx` is freed after it closes.
+    let (hits, ctx) = unsafe { count_samples(&finder) };
+    // SAFETY: `found` is live.
+    assert!(
+        unsafe { put_until_it_arrives(&found, &hits) },
+        "a sample the found session published never reached the client that found it"
+    );
+    // SAFETY: both sessions are live and owned here; `ctx` is freed after its session.
+    unsafe {
+        close_session(finder);
+        close_session(found);
+        drop(Box::from_raw(ctx));
+    }
+}
+
+/// A session told not to answer (`scouting/multicast/listen: false`) is not found, though it
+/// listens and its group is the finder's: the client searches its whole timeout and its open
+/// fails, as it does with nobody on the group.
+#[test]
+#[ignore = "multicast loopback e2e; Layer M runs via --layer M / WZ_RUN_LAYER_M=1 --ignored"]
+fn a_wz_session_told_not_to_answer_is_not_found() {
+    let (_, _, group_text) = group(9);
+    let port = free_port();
+    // SAFETY: fresh configs and sessions.
+    let (rc, silent) = unsafe {
+        open_with(&[
+            ("mode", String::from("\"peer\"")),
+            ("scouting/multicast/address", group_text.clone()),
+            ("scouting/multicast/listen", String::from("false")),
+            ("scouting/delay", String::from("50")),
+            ("listen/endpoints", format!("[\"tcp/127.0.0.1:{port}\"]")),
+        ])
+    };
+    assert_eq!(rc, Z_OK);
+    // SAFETY: a fresh config and session.
+    let (rc, finder) = unsafe {
+        open_with(&[
+            ("mode", String::from("\"client\"")),
+            ("scouting/multicast/address", group_text),
+            ("scouting/timeout", String::from("1500")),
+        ])
+    };
+    assert_eq!(
+        rc, Z_ENETWORK,
+        "a session told not to answer was found all the same"
+    );
+    // SAFETY: a gravestone and a live session, both owned here.
+    unsafe {
+        close_session(finder);
+        close_session(silent);
+    }
 }

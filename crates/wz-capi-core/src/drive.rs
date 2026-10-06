@@ -47,7 +47,7 @@ use wz_runtime_tokio::startup_phase::{
 };
 
 use crate::faces::{CApiForwarder, OpenShmClients, SessionResources, SharedSession, DIAL_FACE_ID};
-use crate::scouting_node::{ScoutLink, ScoutingPlan};
+use crate::scouting_node::{bind_responder, Advertised, Responder, ScoutLink, ScoutingPlan};
 
 /// How the dial half of an open treats an attempt that fails — zenoh's
 /// `connect/timeout_ms` and `connect/exit_on_failure` ([`PhasePolicy`]) with the
@@ -868,7 +868,27 @@ async fn drive_dial(
         },
         None => None,
     };
+    // R3071 -- findable once its listener is bound, for either role: a client's
+    // bound-and-unserved listener is advertised too (measured: a real client with a listener
+    // answers a Scout naming it, and one with none answers with no locators at all).
+    let responder = match bound_responder(
+        scouting.as_ref(),
+        whatami,
+        &zid,
+        listen.as_ref().map(|leg| &leg.listening.listener),
+    )
+    .await
+    {
+        Ok(responder) => responder,
+        Err(()) => {
+            let _ = tx.send(false);
+            return;
+        }
+    };
     if whatami != WhatAmI::Client {
+        // A peer or router answers from the moment it is bound.
+        let _findable = responder.map(Responder::start);
+        // R3070 -- a peer or router that scouts also dials what it finds, beside the endpoints
         // R3070 -- a peer or router that scouts also dials what it finds, beside the endpoints
         // it was told, as upstream's `start_peer` starts its scouting after its connects.
         let scouting = scouting
@@ -895,10 +915,51 @@ async fn drive_dial(
         .filter(ScoutingPlan::scouts)
         .filter(|_| endpoints.is_empty())
         .map(|plan| (plan, zid.clone()));
+    // R3071 -- and a client that SEARCHES answers no Scout until it has connected, where one that
+    // was told its endpoint answers from the start (see [`Responder`]).
+    let (_findable, after_connecting) = if scouting.is_some() {
+        (None, responder)
+    } else {
+        (responder.map(Responder::start), None)
+    };
     drive_client(
-        endpoints, scheduled, scouting, phase, dialer, shared, tx, shutdown, stop, gate,
+        endpoints,
+        scheduled,
+        scouting,
+        after_connecting,
+        phase,
+        dialer,
+        shared,
+        tx,
+        shutdown,
+        stop,
+        gate,
     )
     .await;
+}
+
+/// R3071 -- bind the responder that makes the session FINDABLE when its plan says it answers a
+/// Scout: the group joined, ready to answer with the zid, the role and where the session's
+/// listener is reached (nothing, for a session with none). `Ok(None)` for a session that does
+/// not scout at all or does not answer.
+///
+/// Bound here and started by the caller, because a client that searches starts answering only
+/// once it has connected (see [`Responder`]). The started responder is held by the role's drive
+/// for the session's life and dropped with it. A bind that fails is an open failure, as the
+/// listener's is: a session that was told to be findable is never silently not.
+async fn bound_responder(
+    plan: Option<&ScoutingPlan>,
+    whatami: WhatAmI,
+    zid: &[u8],
+    listener: Option<&BoundListener>,
+) -> Result<Option<Responder>, ()> {
+    let Some(plan) = plan else {
+        return Ok(None);
+    };
+    let advertised = listener.map_or_else(Advertised::none, Advertised::of);
+    bind_responder(plan, whatami, zid, advertised)
+        .await
+        .map_err(|_| ())
 }
 
 /// A client with nothing to dial: scout the group and open a session to the first node that
@@ -955,6 +1016,7 @@ async fn drive_client(
     endpoints: Vec<String>,
     scheduled: Vec<(String, RetryPolicy)>,
     scouting: Option<(ScoutingPlan, Vec<u8>)>,
+    answer_after_connecting: Option<Responder>,
     phase: DialPhase,
     dialer: Arc<Dialer>,
     shared: Arc<SharedSession>,
@@ -1001,6 +1063,9 @@ async fn drive_client(
             return;
         }
     };
+    // R3071 -- connected, so findable, as upstream's client spawns its responder after
+    // `connect_first`. Held until the session ends.
+    let _findable = answer_after_connecting.map(Responder::start);
     let mut released = false;
 
     loop {
@@ -1983,7 +2048,7 @@ async fn accept_faces(
 
 /// The `listen` role: bind, unblock `z_open` immediately, then hold N
 /// concurrent inbound peers until `z_close` — pico's non-blocking listener.
-async fn drive_listen(endpoint: String, tls: CapiTlsConfig, ctx: DriveContext) {
+async fn drive_listen(endpoint: String, tls: CapiTlsConfig, whatami: WhatAmI, ctx: DriveContext) {
     let DriveContext {
         zid,
         shared,
@@ -1994,13 +2059,22 @@ async fn drive_listen(endpoint: String, tls: CapiTlsConfig, ctx: DriveContext) {
         tx_queue,
         offer,
         gate,
-        // A listener that is not also a dialler scouts for nobody: see `open_blocking`'s routing.
-        scouting: _,
+        // A listener that is not also a dialler scouts for nobody (see `open_blocking`'s
+        // routing), and is still FOUND when its plan answers.
+        scouting,
     } = ctx;
     let Some(listening) = bind_listener(&endpoint, &tls, &zid, tx_queue).await else {
         let _ = tx.send(false);
         return;
     };
+    let _findable =
+        match bound_responder(scouting.as_ref(), whatami, &zid, Some(&listening.listener)).await {
+            Ok(responder) => responder.map(Responder::start),
+            Err(()) => {
+                let _ = tx.send(false);
+                return;
+            }
+        };
     // The bind is the WHOLE of pico's `z_open(listen)`: it binds + listens,
     // spawns an async accept task, and returns with zero peers and no error.
     // Unblocking here — before any peer exists — is the R2 fix; Round 1 awaited
@@ -2036,15 +2110,26 @@ async fn drive_listen(endpoint: String, tls: CapiTlsConfig, ctx: DriveContext) {
 /// its own publishers and subscribers still meet (measured on the real library,
 /// `open` answers 0 and a same-session subscriber is delivered). Before this a
 /// config like that was refused, which no program written for zenoh-c expects.
-async fn drive_idle(ctx: DriveContext) {
+async fn drive_idle(whatami: WhatAmI, ctx: DriveContext) {
     let DriveContext {
+        zid,
         shared,
         tx,
         shutdown,
         stop,
         gate,
+        scouting,
         ..
     } = ctx;
+    // R3071 -- a session with no listener is still findable when it answers a Scout: it says
+    // what it is and that it has nowhere to be dialled, as upstream's does for `listen: []`.
+    let _findable = match bound_responder(scouting.as_ref(), whatami, &zid, None).await {
+        Ok(responder) => responder.map(Responder::start),
+        Err(()) => {
+            let _ = tx.send(false);
+            return;
+        }
+    };
     if gate.announce_open(&tx) {
         return;
     }
@@ -2244,14 +2329,14 @@ pub fn open_blocking(
                             drive_dial(connect, listen, dial_whatami, tls, dial_phase, ctx).await;
                         }
                         (true, Some(endpoint)) => {
-                            drive_listen(endpoint, tls, ctx).await;
+                            drive_listen(endpoint, tls, dial_whatami, ctx).await;
                         }
                         // R3067 -- no endpoint: a session alone, as zenoh starts one.
                         // Whether a config MAY open without one is the calling ABI's
                         // decision (a client may not, and a peer that scouts reaches
                         // others through it), so it is asked there, not here.
                         (true, None) => {
-                            drive_idle(ctx).await;
+                            drive_idle(dial_whatami, ctx).await;
                         }
                     }
                 }),
