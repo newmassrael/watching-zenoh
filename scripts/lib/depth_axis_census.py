@@ -2534,7 +2534,16 @@ PIN_NO_SYMBOL = 0
 # reader's POSIX-only refusal, the advertised list, the C storage's only reader). `transport-shm`
 # is not touched and is still PARTIAL beside it. READ off the census's own FAIL line, `wz
 # citations: 130 against a pin of 120`, for the reason the R3062 note gives.
-PIN_WZ_CITATIONS = 130
+#
+# R3066 -- 130 -> 141, one atom. `api-compat-c`'s reason gains the UPDATE that a session can be
+# opened over a client storage: it names the runtime's reader of clients and the one place a
+# chunk of another protocol is mapped through a client, the list type the offer carries and the
+# authenticator built from it, the registry's installation of the reader on the plane and every
+# face, the stance that takes reader and list from one set, the two exported symbols, the
+# witness and the census row that fell to zero. `transport-shm` is not touched and is still
+# PARTIAL beside it. READ off the census's own FAIL line, `wz citations: 141 against a pin of
+# 130`, for the reason the R3062 note gives.
+PIN_WZ_CITATIONS = 141
 # R2626 — 44 -> 42, and this one is worth a sentence because it HELD through
 # every earlier retirement in this run (R2612, R2622). `time-hlc`'s reason is the
 # first retiree carrying AMBIGUOUS citations of its own: its oldest clauses cite
