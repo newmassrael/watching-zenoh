@@ -2552,7 +2552,17 @@ PIN_NO_SYMBOL = 0
 # refusal it leaves in place. `transport-shm` is not touched and is still PARTIAL beside it.
 # READ off the census's own FAIL line, `wz citations: 156 against a pin of 141`, for the reason
 # the R3062 note gives.
-PIN_WZ_CITATIONS = 156
+#
+# R3069 -- 156 -> 168, one atom. `api-compat-c`'s reason gains the UPDATE that a delivery a session
+# makes to itself runs inside the call that causes it: it names the field the calling ABI chooses
+# the plane's drain by and the two ABIs' answers, the session's owned local leg and the fan-out
+# whose last leg consumes, the differential, the oracle-free tests with their control, and the
+# runtime test of the hand-over's three answers. `transport-shm` is not touched and is still
+# PARTIAL beside it. READ off the census's own FAIL line, `wz citations: 168 against a pin of
+# 156`, for the reason the R3062 note gives. A first draft named four modules by bare file name
+# and the census counted two of them AMBIGUOUS (ambiguous 4 against a pin of 2): a file name that
+# several tracked files share is not a citation, so the sentence was rewritten and the pin holds.
+PIN_WZ_CITATIONS = 168
 # R2626 — 44 -> 42, and this one is worth a sentence because it HELD through
 # every earlier retirement in this run (R2612, R2622). `time-hlc`'s reason is the
 # first retiree carrying AMBIGUOUS citations of its own: its oldest clauses cite
