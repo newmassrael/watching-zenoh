@@ -16,6 +16,7 @@ use wz_capi_core::drive::{
 use wz_capi_core::faces::{no_shm_clients, OpenShmClients};
 use wz_runtime_tokio::node_clock::TimestampingEnabled;
 use wz_runtime_tokio::retry_period::RetryPolicy;
+use wz_runtime_tokio::session::LocalDeliveryDrain;
 use wz_runtime_tokio::session_glue::{TxQueueConf, WhatAmI};
 use wz_runtime_tokio::session_open::{SessionOffer, TransportMode};
 use wz_runtime_tokio::startup_phase::PhasePolicy;
@@ -311,6 +312,14 @@ pub(crate) unsafe fn open_session(
             start_read_task: true,
             timestamping,
             shm_clients,
+            // R3069 -- zenoh-c runs the callbacks of a delivery a session makes to itself
+            // INSIDE the call that causes it, on the calling thread (measured: a put's
+            // subscriber, a get's queryable and its reply, and a put made from inside a
+            // callback, all complete before the call returns). A callback may therefore run on
+            // the thread that called, as well as on the drive thread for what arrives from a
+            // peer; a C program written for zenoh-c already tolerates both, and one that puts and
+            // then reads what its callback set relies on the first.
+            local_delivery: LocalDeliveryDrain::Caller,
         };
         // R3065 -- a session opened over a client storage advertises the protocols of THAT
         // reader: the stance takes both from the one set, so the list a peer's sender reads is

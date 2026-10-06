@@ -53,9 +53,12 @@ use wz_capi_core::faces::SharedSession;
 /// The Rust-side wrapper a get's per-face reply callbacks share.
 pub(crate) type CReplyClosure = FfiClosure<z_closure_reply_callback_t>;
 
-// SAFETY: the same argument as `crate::sub`'s. A get's callbacks run only on the
-// session's single drive task, and `drop` runs when the last `Arc` is released,
-// which cannot overlap a live `call`.
+// SAFETY: the same argument as `crate::sub`'s: the wrapper only reads its fields,
+// and what the C function does with its context is the program's. A get's
+// callbacks run on the drive task for what a peer answers and, since R3069,
+// inside the `z_get` for what the session's own queryable answers, as on the
+// real library. `drop` runs when the last `Arc` is released, which cannot
+// overlap a live `call`.
 unsafe impl Sync for CReplyClosure {}
 
 /// `Z_QUERY_TARGET_BEST_MATCHING` = 0.

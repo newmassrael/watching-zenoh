@@ -1127,6 +1127,64 @@ fn publish_shm_hands_a_same_session_subscriber_the_chunk_and_only_when_it_listen
     assert!(payload.is_unique());
 }
 
+/// R3069 -- whether a subscriber of the publishing session holds the chunk ALONE depends on
+/// whether the put gave the buffer up. The real library moves a put's buffer into the sample,
+/// so a callback that runs inside the put finds the one reference and may write the buffer
+/// again; a put that goes on holding its own, or a buffer another `Arc` still names, leaves a
+/// second holder. The three rows are the three answers, in the order they are asked.
+#[cfg(all(
+    feature = "session-extshm",
+    feature = "codec-push",
+    feature = "pubsub-put",
+    feature = "pubsub-allow-loop",
+    target_os = "linux"
+))]
+#[test]
+fn a_chunk_handed_to_the_local_leg_is_the_subscribers_sole_holder_only_when_nothing_else_holds_it()
+{
+    let (session, _driver) = build_session();
+    let sole: Arc<Mutex<Vec<bool>>> = Arc::default();
+    let sole_cb = sole.clone();
+    let _sub = session.declare_subscriber("home/temp", SubscribeOptions::default(), move |s| {
+        // Read INSIDE the callback: it runs inside the call, before the caller can drop
+        // anything it still holds.
+        let unique = s
+            .payload_shared()
+            .and_then(|bytes| bytes.shm_chunk().map(|view| view.is_unique()))
+            .unwrap_or(false);
+        sole_cb.lock().unwrap().push(unique);
+    });
+    let make = || {
+        let mut payload = crate::shm_provider::ShmBackedPayload::alloc(5).expect("alloc");
+        payload.write(b"local");
+        payload
+    };
+
+    // The put gave the buffer up.
+    let handed = session.deliver_shm_local_owned(
+        "home/temp",
+        std::sync::Arc::new(make()),
+        PublishOptions::put(),
+    );
+    assert_eq!(handed, 1);
+    // The put goes on holding its buffer.
+    let kept = make();
+    session
+        .publish_shm("home/temp", &kept, PublishOptions::put())
+        .expect("publish");
+    // The put gave its `Arc` up, and another of the same chunk is alive.
+    let other = std::sync::Arc::new(make());
+    session.deliver_shm_local_owned("home/temp", other.clone(), PublishOptions::put());
+
+    assert_eq!(
+        *sole.lock().unwrap(),
+        vec![true, false, false],
+        "sole holder after a hand-over; not while the put keeps its reference; not while \
+         another `Arc` of the chunk is alive"
+    );
+    drop(other);
+}
+
 /// R3061 -- the getter's twin of the test above: a queryable of THIS session that a chunk-valued
 /// get reaches is handed the chunk, not a copy of its bytes, and a get nobody here answers
 /// leaves the owner unique. The plain get beside it is the control that says the answer

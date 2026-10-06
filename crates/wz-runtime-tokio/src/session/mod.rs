@@ -580,6 +580,37 @@ pub enum LocalDeliveryDrain {
     DriveTask,
 }
 
+/// R3069 -- how a chunk publish holds the payload it hands to its LOCAL leg: borrowed from a
+/// caller that goes on holding it, or handed over by one that gave it up. See
+/// [`Session::deliver_shm_local_owned`] for why the second exists.
+#[cfg(feature = "transport-shm")]
+enum ShmHand<'a> {
+    Borrowed(&'a crate::shm_provider::ShmBackedPayload),
+    Handed(std::sync::Arc<crate::shm_provider::ShmBackedPayload>),
+}
+
+#[cfg(feature = "transport-shm")]
+impl ShmHand<'_> {
+    /// The payload, whichever way it is held.
+    fn payload(&self) -> &crate::shm_provider::ShmBackedPayload {
+        match self {
+            ShmHand::Borrowed(payload) => payload,
+            ShmHand::Handed(payload) => payload,
+        }
+    }
+
+    /// The view a local subscriber is handed, built before a handed payload's reference is
+    /// given back. `self` is consumed, so a handed `Arc` is released when this returns, which
+    /// is BEFORE the callbacks run: the view is then the chunk's sole holder, unless another
+    /// `Arc` of it is alive, which keeps the owner alive and is a holder.
+    fn into_view(self) -> Option<wz_session_core::link::RxBytes> {
+        match self {
+            ShmHand::Borrowed(payload) => payload.receiver_view(),
+            ShmHand::Handed(payload) => payload.receiver_view(),
+        }
+    }
+}
+
 /// R2543 — the session's OWNED STATE, behind the [`Session`] handle's `Arc`.
 ///
 /// Split out so a handle can hold a session WEAKLY. `liveliness-token`'s last
@@ -2738,7 +2769,7 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
         }
         #[cfg(not(feature = "codec-push"))]
         let _ = (build, inline);
-        Ok(self.deliver_shm_loopback(loopback_keyexpr, payload, &opts))
+        Ok(self.deliver_shm_loopback(loopback_keyexpr, ShmHand::Borrowed(payload), &opts))
     }
 
     /// transport-shm -- [`Self::publish_shm`] on a DECLARED keyexpr: the wire names the key
@@ -2861,7 +2892,7 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
     fn deliver_shm_loopback(
         &self,
         keyexpr: &str,
-        payload: &crate::shm_provider::ShmBackedPayload,
+        payload: ShmHand<'_>,
         opts: &PublishOptions,
     ) -> usize {
         #[cfg(feature = "pubsub-allow-loop")]
@@ -2872,9 +2903,9 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
             if !listened_to {
                 return 0;
             }
-            let mut sample = build_loopback_sample(keyexpr, payload.bytes(), opts);
+            let mut sample = build_loopback_sample(keyexpr, payload.payload().bytes(), opts);
             // The chunk where it can be handed over; the copy built above when it cannot.
-            if let Some(shared) = payload.receiver_view() {
+            if let Some(shared) = payload.into_view() {
                 sample.payload = shared;
             }
             let delivered =
@@ -2886,6 +2917,53 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
         #[cfg(not(feature = "pubsub-allow-loop"))]
         let _ = (keyexpr, payload, opts);
         0
+    }
+
+    /// transport-shm -- the LOCAL leg of an SHM publish alone, for a caller that GIVES UP the
+    /// payload: a subscriber of this session is handed the chunk, and when `payload` is the
+    /// chunk's only `Arc` the subscriber's view is its SOLE holder, so a callback that asks
+    /// whether it may write the buffer again is told yes.
+    ///
+    /// R3069 -- the real library moves a put's buffer into the sample, and with the
+    /// callback now running inside the put (`LocalDeliveryDrain::Caller`) the difference is
+    /// visible: a borrowed owner leaves two holders and the buffer reads `SHM (IMMUT)` where
+    /// the real library's reads `SHM (MUT)`. The remote legs of the same publish are the
+    /// caller's, made first with the borrowing form, so a descriptor in flight is still a
+    /// holder when there is one. The caller's `Arc` is released after the view is built and
+    /// before the callbacks run; where another `Arc` of the chunk is alive the owner stays
+    /// alive with it, which is the answer that other holder is owed.
+    #[cfg(feature = "transport-shm")]
+    pub fn deliver_shm_local_owned(
+        &self,
+        keyexpr: &str,
+        payload: std::sync::Arc<crate::shm_provider::ShmBackedPayload>,
+        mut opts: PublishOptions,
+    ) -> usize {
+        // The same `resolve_put` head as the publish bodies; idempotent.
+        self.resolve_publish_timestamp(&mut opts);
+        self.deliver_shm_loopback(keyexpr, ShmHand::Handed(payload), &opts)
+    }
+
+    /// transport-shm -- [`Self::deliver_shm_local_owned`] on a DECLARED keyexpr: the loopback
+    /// literal is resolved from the outbound mapping table, as
+    /// [`Self::publish_shm_aliased_auto`] does. An id no prior declaration registered fires
+    /// nothing.
+    #[cfg(feature = "transport-shm")]
+    pub fn deliver_shm_local_aliased_owned(
+        &self,
+        mapping_id: u64,
+        inline_suffix: Option<&str>,
+        payload: std::sync::Arc<crate::shm_provider::ShmBackedPayload>,
+        opts: PublishOptions,
+    ) -> Result<usize, PublishAliasError> {
+        let mut loopback_keyexpr = self
+            .actions()
+            .resolve_outbound_mapping(mapping_id)
+            .ok_or(PublishAliasError::UnknownMapping(mapping_id))?;
+        if let Some(suffix) = inline_suffix {
+            loopback_keyexpr.push_str(suffix);
+        }
+        Ok(self.deliver_shm_local_owned(&loopback_keyexpr, payload, opts))
     }
 
     // R311mn (B2) — `observer` / `drain_deferred_fires` are

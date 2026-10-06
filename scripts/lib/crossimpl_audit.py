@@ -979,7 +979,11 @@ HOST_GATED_CI_TARGETS: dict[str, str] = {
 # answers and with which code, a node that listens and dials is reached from both sides, and two
 # peers that dial each other keep one link (each `api-compat-c zenoh-c->wz partial`, the class and
 # lane the R3064 legs already declare). Measured by `scripts/audit-crossimpl-proof.sh`.
-FOREIGN_ADJUDICATOR_LINKS = 1011
+# R3069 -- 1011 -> 1012, RISING by one: `zenoh_c_local_delivery_inline_twice_and_diff.rs`, the
+# order in which the callbacks of a delivery a session makes to itself run against the calls
+# that cause them (`api-compat-c zenoh-c->wz partial`, the class and lane R3067 declared).
+# Measured by `scripts/audit-crossimpl-proof.sh`.
+FOREIGN_ADJUDICATOR_LINKS = 1012
 
 # ── Execution disclosure ────────────────────────────────────────────────────────
 #

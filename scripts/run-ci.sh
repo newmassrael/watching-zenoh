@@ -20002,6 +20002,19 @@ layer_c1cc_api_compat_c() {
         --test-threads=1 \
         --exact two_peers_that_dial_each_other_keep_one_link_identically_on_wz_and_libzenohc \
         || return 1
+    # R3069 -- WHERE a delivery a session makes to itself runs: inside the call that causes it, on
+    # the calling thread, in the real library's order. A put's subscriber, a publisher's put, a
+    # delete, a put from inside a callback (the inner callback runs between the outer's first
+    # and last event), a get with its query, reply and final, a get from inside a callback and a
+    # subscriber declared from inside one. wz staged them for its drive thread and every row came
+    # out after the call returned. Needs only the oracle, not the SHM arm.
+    _runci_guarded_test \
+        "C1cc a_delivery_a_session_makes_to_itself_runs_inside_the_call_on_wz_and_libzenohc" 1 \
+        cargo test -p wz-integration-tests \
+        --test zenoh_c_local_delivery_inline_twice_and_diff -- --ignored --quiet \
+        --test-threads=1 \
+        --exact a_delivery_a_session_makes_to_itself_runs_inside_the_call_on_wz_and_libzenohc \
+        || return 1
     _runci_guarded_test \
         "C1cc an_advanced_subscriber_of_the_publishers_own_session_hears_it_on_wz_and_libzenohc" 1 \
         cargo test -p wz-integration-tests \

@@ -341,6 +341,9 @@ pub unsafe extern "C" fn z_open(
                 // pico has no client storage: its sessions read shared memory through the
                 // default reader, as every session did before the field existed.
                 shm_clients: wz_capi_core::faces::no_shm_clients(),
+                // pico runs a callback only from its background executor, so a delivery the
+                // session makes to itself is staged and run there, never inside the call.
+                local_delivery: wz_runtime_tokio::session::LocalDeliveryDrain::DriveTask,
             },
         ) {
             Ok(state) => {

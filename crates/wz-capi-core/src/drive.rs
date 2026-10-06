@@ -30,6 +30,7 @@ use wz_runtime_tokio::accept_loop::accept_loop_offering;
 use wz_runtime_tokio::node_clock::{NodeHlc, TimestampingEnabled};
 use wz_runtime_tokio::retry_period::RetryPolicy;
 use wz_runtime_tokio::runtime_impl::TokioTime;
+use wz_runtime_tokio::session::LocalDeliveryDrain;
 use wz_runtime_tokio::session_glue::{
     drive_session_until_terminal_with_extra_deadline, EntropyUnavailable, ExtraDeadline,
     IterationEvent, OsEntropy, SessionInitParams, SessionTimeouts, SigningKey, TxQueueConf,
@@ -916,10 +917,12 @@ async fn drive_client(
         //
         // R311y557 — the LOCAL PLANE's drain is an arm of THIS select, not a
         // `tokio::spawn`. Both placements keep the C application thread out of
-        // the C callbacks, which is the `unsafe impl Sync` premise; only this one
-        // also keeps the plane's deliveries from overlapping the face's, because a
-        // `select!` polls its arms on ONE task while the per-session runtime has
-        // two worker threads a spawned task could land on.
+        // the C callbacks, which an ABI that drains its plane on the drive task
+        // (zenoh-pico's) needs; only this one also keeps the plane's deliveries
+        // from overlapping the face's, because a `select!` polls its arms on ONE
+        // task while the per-session runtime has two worker threads a spawned
+        // task could land on. (R3069: zenoh-c's plane drains on the calling
+        // thread, and this arm drains only what a staging path left behind.)
         let mut abandoned = false;
         tokio::select! {
             _ = drive_face(
@@ -1842,6 +1845,10 @@ pub struct OpenStance {
     /// advertises is [`Self::offer`]'s, and the two are set together by [`Self::with_shm_clients`]
     /// so that a node never lists a protocol its reader cannot resolve.
     pub shm_clients: OpenShmClients,
+    /// R3069 -- who runs the callbacks of a delivery the session makes to ITSELF; see
+    /// [`SessionResources::local_delivery`]. zenoh-pico's ABI says [`LocalDeliveryDrain::DriveTask`]
+    /// and zenoh-c's says [`LocalDeliveryDrain::Caller`].
+    pub local_delivery: LocalDeliveryDrain,
 }
 
 #[cfg(feature = "session-extshm")]
@@ -1887,6 +1894,7 @@ pub fn open_blocking(
         start_read_task,
         timestamping,
         shm_clients,
+        local_delivery,
     } = stance;
     let clock = TokioTime::new();
     // Fixed here, on the CALLING thread, so `SessionState` can hand it to
@@ -1907,6 +1915,7 @@ pub fn open_blocking(
             SessionResources {
                 node_hlc,
                 shm_clients,
+                local_delivery,
             },
         )
         .map_err(|_| OpenError::DriveFailed)?,

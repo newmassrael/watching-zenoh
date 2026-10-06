@@ -53,26 +53,24 @@ pub(crate) type CClosure = FfiClosure<z_closure_sample_callback_t>;
 // `Send`. Written for this concrete instantiation rather than blanket, because
 // the argument is specific to the subscriber plane:
 //
-// `call` is only ever invoked from the session's single drive task. Every face
-// of a session is driven on ONE task (the accept loop multiplexes its faces
-// through one `select!`; a dialed session has exactly one drive loop), and
-// inbound dispatch is the only caller.
+// The wrapper only READS its fields (`call`, `context`) and calls through them;
+// it holds no state a second thread could tear. What the C function does with
+// `context` is the C program's, and zenoh-c's own closure types carry the same
+// `unsafe impl Send` and `Sync` with no promise about which thread calls them.
 //
-// R311y554 — WHAT KEEPS THAT TRUE CHANGED, and the old text is worth keeping in
-// view because it named a real hazard. It used to be: "this crate's fan-out
-// publishes are `Locality::Remote`, so a `z_put` stages no loopback fire". That
-// held, but it made a soundness invariant depend on a FIDELITY knob — and it
-// silently did not cover `z_get`, whose default locality is `Any` on both
-// zenoh-c and wz, so `Session::query` drained the whole per-session queue on the
-// C thread whatever the queryables' own locality said.
-//
-// It is now the DRAIN that is pinned, not the locality: every session this ABI
-// builds adopts `LocalDeliveryDrain::DriveTask`
-// (`wz_capi_core::faces::SharedSession::face_up`), so a local delivery is
-// STAGED by whoever publishes and RUN by the drive task. A C-thread `z_put` or
-// `z_get` therefore returns without invoking `call`, on any locality, and the
-// "one thread ever calls into C" premise stops depending on what a caller asked
-// for. `SharedSession::dispatch` is the drainer.
+// R3069 -- THE PREMISE THIS COMMENT USED TO STATE WAS WZ'S, NOT UPSTREAM'S, and
+// it is withdrawn for this ABI. It said `call` is only ever invoked from the
+// session's single drive task, and R311y554 held that true by staging every local
+// delivery for the drive task (`LocalDeliveryDrain::DriveTask`). Measured on the
+// real library, zenoh-c runs a delivery a session makes to itself INSIDE the call
+// that causes it, on the calling thread: a put's subscriber, a get's queryable and
+// its reply, and a put made from inside a callback all complete before the call
+// returns. So `call` runs on the thread that made the put as well as on the drive
+// thread for what a peer sends, as it does on the real library, and a C program
+// written for zenoh-c already tolerates both. This ABI's open chooses
+// `LocalDeliveryDrain::Caller` for the local plane
+// (`crate::session::open_session`); zenoh-pico's keeps `DriveTask`, because its
+// callbacks are an executor's.
 //
 // `drop` runs only when the last `Arc` is released, which cannot overlap a live
 // `call` because a running callback holds a reference.

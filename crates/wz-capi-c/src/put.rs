@@ -120,12 +120,16 @@ pub(crate) fn locality_from_c(value: zc_locality_t) -> Locality {
 /// `Any` was wrong on the wire: `Session::publish` drained the fires it staged
 /// on the CALLER's thread, so a local-capable `z_put` from a C thread would run
 /// a subscriber callback concurrently with the drive thread running the same C
-/// context, breaking the `unsafe impl Sync for CClosure` in
-/// [`crate::sub`]. The pin was a soundness workaround wearing a fidelity
-/// argument. What removed it is [`wz_runtime_tokio::session::LocalDeliveryDrain`]:
-/// the C ABI's sessions stage local fires and let the drive task drain them, so
-/// the callback still runs on exactly one thread and the field can mean what
-/// the caller said.
+/// context, which the premise then behind `unsafe impl Sync for CClosure` in
+/// [`crate::sub`] forbade. The pin was a soundness workaround wearing a fidelity
+/// argument, and R311y554 removed it by staging local fires for the drive task.
+///
+/// R3069 -- and that premise was wz's own, so the staging is withdrawn for this
+/// ABI: the real library runs a same-session delivery inside the `z_put`, on the
+/// calling thread, and a C program written for it tolerates a callback on either
+/// thread. The field means what the caller said, and the callback runs where
+/// zenoh-c's does ([`wz_runtime_tokio::session::LocalDeliveryDrain::Caller`],
+/// chosen by [`crate::session::z_open`]).
 fn put_options() -> PublishOptions {
     PublishOptions::put()
         .with_locality(Locality::Any)
@@ -329,7 +333,7 @@ pub unsafe extern "C" fn z_put(
         // shared memory goes out as its descriptor on either (R3059).
         // SAFETY: the caller's contract for the handle.
         let mapping = unsafe { crate::keyexpr::keyexpr_mapping(key_expr) };
-        let sent = publish_outbound(&state.shared, keyexpr, mapping, &payload, &publish);
+        let sent = publish_outbound(&state.shared, keyexpr, mapping, payload, &publish);
         match sent {
             Ok(_) => Z_OK,
             // The only fan-out failure is a payload/keyexpr the bounded codec
@@ -414,18 +418,18 @@ mod tests {
     /// premise held.
     ///
     /// That premise was never about fidelity: `unsafe impl Sync for CClosure`
-    /// (`crate::sub`) rests on the C application thread never invoking `call`,
-    /// and until this round the only thing keeping it true was that these
+    /// (`crate::sub`) then rested on the C application thread never invoking
+    /// `call`, and until R311y554 the only thing keeping it true was that these
     /// publishes were `Remote`, so `Session::publish` stayed out of the branch
     /// that drains staged fires ON THE CALLER'S THREAD. y552 attempted the fan
     /// split, measured the race, and reverted — correctly.
     ///
-    /// What changed is the drain, not the argument:
-    /// [`wz_runtime_tokio::session::LocalDeliveryDrain::DriveTask`], adopted by
-    /// every session `wz_capi_core::faces::SharedSession::face_up` builds. The C
-    /// thread stages and returns; the drive task drains. So exactly one thread
-    /// still ever calls into C, and the field can finally mean what the caller
-    /// wrote.
+    /// What changed then was the drain, not the argument:
+    /// [`wz_runtime_tokio::session::LocalDeliveryDrain::DriveTask`], so the C
+    /// thread staged and returned and the drive task drained. R3069 withdrew the
+    /// premise itself for this ABI (see `crate::sub`): the real library runs the
+    /// callback on the calling thread, so the node's local plane drains there.
+    /// The assertions below are on options, and hold under either drain.
     ///
     /// The assertions are on RESOLVED options rather than on the constants, so
     /// they catch the change wherever it is made.

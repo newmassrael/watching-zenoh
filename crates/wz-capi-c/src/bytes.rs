@@ -320,18 +320,23 @@ pub(crate) unsafe fn take_query_value(
 ///
 /// The one place the two put entry points decide how a payload goes out, so a declared key
 /// and a payload in shared memory are both honoured wherever they meet.
+///
+/// R3069 -- the payload is CONSUMED, because the put is: `z_put` takes its payload by move
+/// and a chunk is handed on to the local leg, whose subscriber's callback runs inside this
+/// call and must find the buffer's one holder in the sample and not a second beside the put's
+/// own.
 pub(crate) fn publish_outbound(
     shared: &wz_capi_core::faces::SharedSession,
     keyexpr: &str,
     mapping: Option<u64>,
-    payload: &Outbound,
+    payload: Outbound,
     opts: &wz_runtime_tokio::session::PublishOptions,
 ) -> Result<usize, wz_capi_core::faces::FanoutError> {
     match (payload, mapping) {
         (Outbound::Bytes(bytes), Some(mapping)) => {
-            shared.publish_aliased_all(mapping, None, bytes, opts)
+            shared.publish_aliased_all(mapping, None, &bytes, opts)
         }
-        (Outbound::Bytes(bytes), None) => shared.publish_all(keyexpr, bytes, opts),
+        (Outbound::Bytes(bytes), None) => shared.publish_all(keyexpr, &bytes, opts),
         #[cfg(all(
             feature = "zenoh-c-shared-memory",
             not(feature = "zenoh-c-no-unstable-api")

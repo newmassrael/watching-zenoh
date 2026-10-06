@@ -698,7 +698,7 @@ pub unsafe extern "C" fn z_publisher_put(
             &state.shared,
             &state.keyexpr.keyexpr,
             state.keyexpr.mapping,
-            &payload,
+            payload,
             &publish,
         );
         match sent {

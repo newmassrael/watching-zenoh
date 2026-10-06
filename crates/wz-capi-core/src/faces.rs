@@ -1376,13 +1376,19 @@ pub struct SharedSession {
     ///
     /// ## Who drains it
     ///
-    /// The plane is [`LocalDeliveryDrain::DriveTask`] like every face session,
-    /// and the `unsafe impl Sync` premise behind every C closure on these ABIs —
-    /// the C application thread never invokes it — is kept by draining it from
-    /// the drive role's own `select!` arm ([`Self::drive_local_plane`]), which
-    /// is the SAME task the faces dispatch on. A `tokio::spawn`ed drain would
-    /// have satisfied "not the C thread" and still broken the premise, because
-    /// the per-session runtime has two workers.
+    /// The plane's drain is the calling ABI's choice ([`SessionResources::local_delivery`]).
+    ///
+    /// zenoh-pico's is [`LocalDeliveryDrain::DriveTask`] like every face session:
+    /// a callback runs only from the executor, so the plane is drained from the
+    /// drive role's own `select!` arm ([`Self::drive_local_plane`]), which is the
+    /// SAME task the faces dispatch on. A `tokio::spawn`ed drain would have
+    /// satisfied "not the C thread" and still broken that, because the
+    /// per-session runtime has two workers.
+    ///
+    /// zenoh-c's is [`LocalDeliveryDrain::Caller`] (R3069): a delivery the node
+    /// makes to itself runs inside the call that causes it, on the calling thread,
+    /// as the real library runs it. The drive arm still drains whatever a path
+    /// that stages without draining left behind (a declaration's matching flip).
     local: TokioSession,
     /// The local plane's re-arm signal — the twin of [`FaceEntry::revised`].
     ///
@@ -1440,14 +1446,23 @@ pub struct SessionResources {
     pub node_hlc: NodeHlc,
     /// The shared-memory reader's clients; see [`OpenShmClients`].
     pub shm_clients: OpenShmClients,
+    /// R3069 -- who runs the callbacks of a delivery the node makes to ITSELF: a put or a get
+    /// whose subscribers and queryables are in the same session. The calling ABI chooses,
+    /// because the two ABIs promise their C programs different things: zenoh-pico runs a
+    /// callback only from its executor ([`LocalDeliveryDrain::DriveTask`]), and zenoh-c runs it
+    /// inside the call that caused it ([`LocalDeliveryDrain::Caller`]). It governs the local
+    /// plane; a face session's loopback is always `Locality::Remote`, so it has none.
+    pub local_delivery: LocalDeliveryDrain,
 }
 
 impl Default for SessionResources {
-    /// No clock and the default reader: what a node was before it could be given either.
+    /// No clock, the default reader and the executor's thread for a local delivery: what a node
+    /// was before it could be given any of them.
     fn default() -> Self {
         Self {
             node_hlc: NodeHlc::disabled(),
             shm_clients: no_shm_clients(),
+            local_delivery: LocalDeliveryDrain::DriveTask,
         }
     }
 }
@@ -1528,6 +1543,7 @@ impl SharedSession {
         let SessionResources {
             node_hlc,
             shm_clients,
+            local_delivery,
         } = resources;
         let driver: Arc<dyn BoxedLinkDriver + Send + Sync> = Arc::new(InertLinkDriver);
         // `WhatAmI::Peer`: the plane never handshakes, so the role is inert on
@@ -1555,7 +1571,7 @@ impl SharedSession {
         let local_wake = Arc::new(Notify::new());
         let local = TokioSession::new(actions, observer, Arc::new(clock))
             .with_node_clock(node_hlc.clone())
-            .with_local_delivery_drain(LocalDeliveryDrain::DriveTask)
+            .with_local_delivery_drain(local_delivery)
             .with_local_stage_wake(Arc::clone(&local_wake));
         // R3065 -- a node opened over a client storage reads what its OWN peers send through it,
         // the plane included (a local get answered by a peer's queryable is read here).
@@ -1679,19 +1695,25 @@ impl SharedSession {
         let zid = actions.params.zid.clone();
         // R311y554 — THE hand-off that makes `allowed_destination` honourable.
         //
-        // Every C closure on this ABI is `unsafe impl Sync` on one premise: the
-        // C application thread never invokes it. Before this line the premise
-        // was kept by REFUSING local delivery (`Locality::Remote` pinned in
-        // `put_options` / `queryable_options`), because `Session::publish`
-        // drains the fires it stages on whatever thread called it — so a
-        // C-thread `z_put` matching a local subscription would have run that
-        // callback while the drive thread ran the same C context for another
-        // face. `DriveTask` moves the drain instead of forbidding the delivery:
-        // the C thread stages and returns, [`Self::next_reply_deadline_ms`]
-        // reports the face due NOW, its `deadline_revised` wake gets the loop
-        // back, and [`Self::dispatch`] drains — on the one thread the premise
-        // allows. The premise is unchanged; what changed is that honouring the
-        // field no longer breaks it.
+        // A FACE session's drain is `DriveTask` for both ABIs, and it is a
+        // face's own premise: what arrives from this peer, and what a C thread
+        // stages on this face (a get's wire leg, a declaration's replay), runs on
+        // the drive task, where the face's reply sweep and its deadline wake
+        // live. (A face's loopback is `Locality::Remote`, so it has no
+        // same-session delivery of its own; that goes through the local plane,
+        // whose drain the calling ABI chooses, [`SessionResources::local_delivery`].)
+        //
+        // R311y554 — this is the hand-off that made `allowed_destination`
+        // honourable. Before it a local delivery was REFUSED (`Locality::Remote`
+        // pinned in `put_options` / `queryable_options`), because
+        // `Session::publish` drains the fires it stages on whatever thread called
+        // it, which then ran a callback on the C thread while the drive thread
+        // ran the same C context for another face. `DriveTask` moves the drain
+        // instead of forbidding the delivery: the C thread stages and returns,
+        // [`Self::next_reply_deadline_ms`] reports the face due NOW, its
+        // `deadline_revised` wake gets the loop back, and [`Self::dispatch`]
+        // drains. zenoh-pico still wants that for the plane; zenoh-c, whose
+        // callbacks run on the calling thread, does not (R3069).
         let session = TokioSession::new(actions.clone(), observer, Arc::new(self.clock))
             .with_node_clock(self.node_hlc.clone())
             .with_local_delivery_drain(LocalDeliveryDrain::DriveTask);
@@ -2167,10 +2189,12 @@ impl SharedSession {
             session.sweep_expired_liveliness_gets();
             // R311y554 — the DRIVE-TASK half of the local-delivery hand-off.
             //
-            // A C-thread `z_put` whose `allowed_destination` allows local
-            // stages its subscriber fires and returns without running them
-            // (`LocalDeliveryDrain::DriveTask`, set in `face_up`). This is where
-            // they run. Explicit rather than left to the two sweeps above,
+            // What a C thread staged on THIS face session (and, for an ABI whose
+            // plane drains on the drive task, a C-thread `z_put` whose
+            // `allowed_destination` allows local: it stages its subscriber fires
+            // and returns without running them, `LocalDeliveryDrain::DriveTask`,
+            // set in `face_up`). This is where they run. Explicit rather than
+            // left to the two sweeps above,
             // because both are feature-gated (`query-get` / `liveliness-get`)
             // and the hand-off must hold in EVERY feature subset that has a
             // subscriber plane — which is all of them. Idempotent and cheap: an
@@ -2274,12 +2298,17 @@ impl SharedSession {
     pub fn publish_shm_all(
         &self,
         keyexpr: &str,
-        payload: &wz_runtime_tokio::shm_provider::ShmBackedPayload,
+        payload: Arc<wz_runtime_tokio::shm_provider::ShmBackedPayload>,
         opts: &PublishOptions,
     ) -> Result<usize, FanoutError> {
-        self.fan_out(opts, |session, leg| {
-            Leg::of_publish(session.publish_shm(keyexpr, payload, leg))
-        })
+        self.fan_out_with(
+            opts,
+            payload,
+            |session, leg, payload| Leg::of_publish(session.publish_shm(keyexpr, payload, leg)),
+            |session, leg, payload| {
+                Leg::Delivered(session.deliver_shm_local_owned(keyexpr, payload, leg))
+            },
+        )
     }
 
     /// [`Self::publish_aliased_all`] for a payload that lives in shared memory: the key is
@@ -2290,12 +2319,21 @@ impl SharedSession {
         &self,
         mapping_id: u64,
         suffix: Option<&str>,
-        payload: &wz_runtime_tokio::shm_provider::ShmBackedPayload,
+        payload: Arc<wz_runtime_tokio::shm_provider::ShmBackedPayload>,
         opts: &PublishOptions,
     ) -> Result<usize, FanoutError> {
-        self.fan_out(opts, |session, leg| {
-            Leg::of_alias(session.publish_shm_aliased_auto(mapping_id, suffix, payload, leg))
-        })
+        self.fan_out_with(
+            opts,
+            payload,
+            |session, leg, payload| {
+                Leg::of_alias(session.publish_shm_aliased_auto(mapping_id, suffix, payload, leg))
+            },
+            |session, leg, payload| {
+                Leg::of_alias(
+                    session.deliver_shm_local_aliased_owned(mapping_id, suffix, payload, leg),
+                )
+            },
+        )
     }
 
     /// The fan-out every publish shares: the wire leg to each face, then the local leg
@@ -2318,12 +2356,36 @@ impl SharedSession {
     where
         F: Fn(&TokioSession, PublishOptions) -> Leg,
     {
+        self.fan_out_with(
+            opts,
+            (),
+            |session, leg, ()| send(session, leg),
+            |session, leg, ()| send(session, leg),
+        )
+    }
+
+    /// [`Self::fan_out`] for a publish whose payload the caller GIVES UP: `payload` is lent to
+    /// each wire leg and handed over to the local leg, which runs last. R3069 -- a local
+    /// subscriber's callback now runs inside the put, and what it is handed must be the
+    /// buffer the put moved, not a second reference beside the put's own (see
+    /// [`wz_runtime_tokio::session::Session::deliver_shm_local_owned`]).
+    fn fan_out_with<P, R, L>(
+        &self,
+        opts: &PublishOptions,
+        payload: P,
+        remote_leg: R,
+        local_leg: L,
+    ) -> Result<usize, FanoutError>
+    where
+        R: Fn(&TokioSession, PublishOptions, &P) -> Leg,
+        L: FnOnce(&TokioSession, PublishOptions, P) -> Leg,
+    {
         let sessions = self.face_sessions_with_wake();
         let mut delivered = 0usize;
         if opts.allowed_destination.allows_remote() {
             let remote = opts.clone().with_locality(Locality::Remote);
             for (session, _) in &sessions {
-                match send(session, remote.clone()) {
+                match remote_leg(session, remote.clone(), &payload) {
                     Leg::Delivered(n) => delivered += n,
                     Leg::Skipped => {}
                     Leg::Refused => return Err(FanoutError::ExceedsCapacity),
@@ -2332,7 +2394,7 @@ impl SharedSession {
         }
         if opts.allowed_destination.allows_local() {
             let local = opts.clone().with_locality(Locality::SessionLocal);
-            match send(&self.local, local) {
+            match local_leg(&self.local, local, payload) {
                 Leg::Delivered(n) => delivered += n,
                 // The plane's link is inert, so the skipped arm is unreachable through
                 // it; kept because the local leg's error handling must not be more
@@ -3897,7 +3959,10 @@ impl SharedSession {
 /// is not a locality pin but [`LocalDeliveryDrain::DriveTask`], adopted by every
 /// session this crate builds ([`SharedSession::face_up`]): the C thread stages,
 /// the drive task drains, and there is still exactly one thread that ever calls
-/// into C. Worth stating plainly, because the pin was ALSO the only thing
+/// into C. (R3069: for zenoh-c's ABI that is no longer the goal -- the real
+/// library runs the handler on the calling thread, and its open chooses
+/// [`LocalDeliveryDrain::Caller`] for the plane -- but the hazard named here is
+/// what zenoh-pico's choice still answers.) Worth stating plainly, because the pin was ALSO the only thing
 /// containing the same hazard on the `z_get` side — a default-locality get made
 /// `Session::query` drain the whole per-session queue on the C thread whether or
 /// not any local queryable matched, and no locality pin on THIS function could

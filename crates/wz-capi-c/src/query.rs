@@ -59,18 +59,18 @@ pub(crate) type CQueryClosure = FfiClosure<z_closure_query_callback_t>;
 
 // SAFETY: the same argument as `crate::sub`'s, for the same reason: one
 // queryable's `CQueryClosure` is shared across per-face callbacks, so it must be
-// `Sync` for each callback to be `Send`. `call` runs only on the session's
-// single drive task (every face of a session is driven on one task, and inbound
-// dispatch is its only caller), and `drop` runs when the last `Arc` is released,
-// which cannot overlap a live `call` because a running callback holds a
-// reference.
+// `Sync` for each callback to be `Send`. The wrapper only reads its fields, and
+// `drop` runs when the last `Arc` is released, which cannot overlap a live `call`
+// because a running callback holds a reference.
 //
-// R311y554 — and now, as on the subscriber plane, that premise no longer rests
-// on a locality pin. `z_declare_queryable` honours the caller's
-// `allowed_origin`, so an in-process `z_get` CAN reach this session's own
-// queryable; what keeps the handler off the C thread is that the session runs
-// `LocalDeliveryDrain::DriveTask` and the local query's handler fires from the
-// staged queue that `SharedSession::dispatch` drains.
+// `z_declare_queryable` honours the caller's `allowed_origin`, so an in-process
+// `z_get` CAN reach this session's own queryable. R311y554 kept that handler off
+// the C thread by staging the local query's handler for the drive task
+// (`LocalDeliveryDrain::DriveTask`); R3069 withdrew that for this ABI, because the
+// real library runs the handler inside the `z_get`, on the calling thread, and
+// replies from inside it complete before the get returns. The handler therefore
+// runs on the drive task for a peer's query and on the calling thread for this
+// session's own, as it does on the real library.
 unsafe impl Sync for CQueryClosure {}
 
 /// One reply the C callback asked for, held until it can be flushed.
