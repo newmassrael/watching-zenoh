@@ -5536,6 +5536,33 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         R::with_mutex_mut(&self.is_shm, |s| *s)
     }
 
+    /// R3065 -- whether a buffer of shared-memory `protocol` may be sent to this peer as its
+    /// DESCRIPTOR: the session negotiated shared memory AND the peer's reader can resolve that
+    /// protocol. Negotiating is not enough. A peer lists the protocols its reader has a client
+    /// for in the segment it publishes, and a descriptor of any other protocol is dropped on
+    /// arrival, so a sender that ignored the list lost the message while reporting success
+    /// (MEASURED: a chunk of a custom protocol put to a default receiver was never delivered,
+    /// where the real library sends the bytes and delivers it). Upstream's sender asks the same
+    /// list (`io/zenoh-transport/src/common/shm/interop.rs` @ `fn supports_protocol(`).
+    ///
+    /// A peer whose list is unknown (no authenticator, or one that cannot read a list) admits
+    /// every protocol, which is what this was before the list was read.
+    #[cfg(feature = "transport-shm")]
+    pub fn shm_admits(&self, protocol: u32) -> bool {
+        if !self.is_shm() {
+            return false;
+        }
+        #[cfg(feature = "session-extshm")]
+        {
+            R::with_mutex_mut(&self.shm_auth, |d| d.peer_supports_protocol(protocol))
+        }
+        #[cfg(not(feature = "session-extshm"))]
+        {
+            let _ = protocol;
+            true
+        }
+    }
+
     /// session-extcompression — the AP layer's "this deploy offers compression
     /// toward this peer" config, set once at bring-up BEFORE the handshake drives
     /// (the wz analogue of zenoh `config.unicast.is_compression`). Seeds

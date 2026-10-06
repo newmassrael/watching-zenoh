@@ -429,6 +429,20 @@ pub trait ShmAuthenticator {
         let _ = (peer_segment, counters);
         None
     }
+
+    /// R3065 -- the protocol ids the peer's segment advertises: the shared-memory protocols its
+    /// reader can resolve a buffer of. A sender sends a buffer's descriptor only to a peer that
+    /// lists the buffer's protocol and sends its bytes to one that does not (upstream's
+    /// `io/zenoh-transport/src/common/shm/interop.rs` @ `fn supports_protocol(`, read off the
+    /// same list).
+    ///
+    /// `None` when the list cannot be read, which a sender takes as "unknown" and does not act
+    /// on: the descriptor goes out as it did before this was asked. That is the default, an
+    /// authenticator that cannot read a peer's list.
+    fn open_peer_protocols(&self, segment_id: u32) -> Option<alloc::vec::Vec<u32>> {
+        let _ = segment_id;
+        None
+    }
 }
 
 /// The no_std/std seam: an SHM-backed Put's descriptor is resolved to its bytes
@@ -480,6 +494,13 @@ pub trait ShmSendBuffer: Send + Sync {
     /// The bytes the buffer holds: what a peer that cannot map the segment is sent.
     fn bytes(&self) -> &[u8];
 
+    /// R3065 -- the shared-memory protocol the buffer's chunk belongs to: the id its provider's
+    /// backend reports and its header carries, which a receiver reads the chunk through. A peer
+    /// is sent the descriptor only if its segment lists this protocol (see
+    /// [`ShmAuthenticator::open_peer_protocols`]); every other peer is sent [`Self::bytes`].
+    /// `0` is upstream's POSIX protocol.
+    fn protocol(&self) -> u32;
+
     /// The buffer as a holder in this process sees it, for a receiver of the session that
     /// sent it: a range of the shared page holding a reference of its own, which goes back
     /// when the view drops. `None` when the page cannot be viewed.
@@ -519,6 +540,11 @@ impl ShmSendHandle {
     /// The bytes the buffer holds.
     pub fn bytes(&self) -> &[u8] {
         self.0.bytes()
+    }
+
+    /// The buffer's shared-memory protocol; see [`ShmSendBuffer::protocol`].
+    pub fn protocol(&self) -> u32 {
+        self.0.protocol()
     }
 
     /// The buffer as a receiver of this session holds it; see [`ShmSendBuffer::receiver_view`].
@@ -621,14 +647,22 @@ pub(crate) mod send_test_support {
     pub(crate) struct FakeSendBuffer {
         pub(crate) storage: Arc<Vec<u8>>,
         pub(crate) reservations: Arc<Reservations>,
+        /// The protocol the buffer reports: `0`, upstream's POSIX, unless a test asks for another.
+        pub(crate) protocol: u32,
     }
 
     impl FakeSendBuffer {
         pub(crate) fn new(bytes: &[u8]) -> (Arc<Self>, Arc<Reservations>) {
+            Self::with_protocol(bytes, 0)
+        }
+
+        /// [`Self::new`] for a buffer of a protocol other than POSIX.
+        pub(crate) fn with_protocol(bytes: &[u8], protocol: u32) -> (Arc<Self>, Arc<Reservations>) {
             let reservations = Arc::new(Reservations::default());
             let buffer = Arc::new(Self {
                 storage: Arc::new(bytes.to_vec()),
                 reservations: reservations.clone(),
+                protocol,
             });
             (buffer, reservations)
         }
@@ -647,6 +681,10 @@ pub(crate) mod send_test_support {
     impl ShmSendBuffer for FakeSendBuffer {
         fn bytes(&self) -> &[u8] {
             &self.storage
+        }
+
+        fn protocol(&self) -> u32 {
+            self.protocol
         }
 
         fn receiver_view(&self) -> Option<crate::link::RxBytes> {
@@ -1034,6 +1072,11 @@ pub struct ShmAuthDispatch {
     /// so the segment the challenge was read from is the one to write. Set only
     /// when the challenge was read, cleared with it.
     peer_segment: Option<u32>,
+    /// R3065 -- the protocol ids the peer's segment lists, read when the segment was recorded.
+    /// `None` is "unknown" (no authenticator, no segment, or one this node cannot read a list
+    /// from), and an unknown list admits every protocol, which is what a session did before the
+    /// list was read.
+    peer_protocols: Option<Vec<u32>>,
     /// R3040 -- the means of acknowledging the peer's shared-memory slices, opened
     /// from the counter block in its Open message. `None` when the peer named no
     /// counters, named bad ones, or this node's authenticator cannot write them.
@@ -1074,6 +1117,7 @@ impl ShmAuthDispatch {
             authenticator: None,
             peer_challenge: None,
             peer_segment: None,
+            peer_protocols: None,
             handoff: None,
             handoff_changed: false,
         }
@@ -1087,6 +1131,7 @@ impl ShmAuthDispatch {
             authenticator: Some(authenticator),
             peer_challenge: None,
             peer_segment: None,
+            peer_protocols: None,
             handoff: None,
             handoff_changed: false,
         }
@@ -1098,7 +1143,29 @@ impl ShmAuthDispatch {
     fn forget_peer(&mut self) {
         self.peer_challenge = None;
         self.peer_segment = None;
+        self.peer_protocols = None;
         self.set_handoff(None);
+    }
+
+    /// R3065 -- record the peer's segment with the challenge read out of it, and the protocol
+    /// list that segment carries. Both sites that learn the peer's segment (the acceptor on the
+    /// InitSyn, the initiator on the InitAck) record it through here, so the list is read
+    /// exactly when the segment is kept and never for a segment this node could not map.
+    fn record_peer(&mut self, segment: u32) {
+        self.peer_segment = self.peer_challenge.map(|_| segment);
+        self.peer_protocols = match (self.authenticator.as_ref(), self.peer_segment) {
+            (Some(a), Some(segment)) => a.open_peer_protocols(segment),
+            _ => None,
+        };
+    }
+
+    /// R3065 -- whether a buffer of `protocol` may be sent to this peer as its descriptor. A peer
+    /// whose list is known and does not name the protocol cannot resolve the descriptor, so the
+    /// buffer is sent as its bytes; a peer whose list is unknown is sent the descriptor as before.
+    pub fn peer_supports_protocol(&self, protocol: u32) -> bool {
+        self.peer_protocols
+            .as_ref()
+            .map_or(true, |list| list.contains(&protocol))
     }
 
     fn set_handoff(&mut self, handoff: Option<alloc::boxed::Box<dyn ShmHandoff>>) {
@@ -1167,7 +1234,7 @@ impl ShmAuthDispatch {
         self.peer_challenge = a.open_peer_challenge(alice_segment);
         // The segment is kept only with the challenge read out of it: a peer whose
         // memory this node could not map has no counters this node could write.
-        self.peer_segment = self.peer_challenge.map(|_| alice_segment);
+        self.record_peer(alice_segment);
         Ok(())
     }
 
@@ -1208,7 +1275,7 @@ impl ShmAuthDispatch {
             return false;
         }
         self.peer_challenge = a.open_peer_challenge(bob_segment);
-        self.peer_segment = self.peer_challenge.map(|_| bob_segment);
+        self.record_peer(bob_segment);
         self.peer_challenge.is_some()
     }
 
@@ -1712,6 +1779,119 @@ mod tests {
                     .push((peer_segment, *counters));
                 Some(Box::new(BandLog(self.bands.clone())))
             }
+        }
+
+        /// R3065 -- a [`FakeAuth`] that can read the protocol list of a peer's segment: the list
+        /// each visible segment advertises, by segment id. A segment with no entry here is one
+        /// whose list this node cannot read, which the dispatch takes as unknown.
+        #[derive(Clone)]
+        struct ListedAuth {
+            inner: FakeAuth,
+            lists: vec::Vec<(u32, vec::Vec<u32>)>,
+        }
+
+        impl ShmAuthenticator for ListedAuth {
+            fn local_segment_id(&self) -> u32 {
+                self.inner.local_segment_id()
+            }
+            fn local_challenge(&self) -> u64 {
+                self.inner.local_challenge()
+            }
+            fn open_peer_challenge(&self, segment_id: u32) -> Option<u64> {
+                self.inner.open_peer_challenge(segment_id)
+            }
+            fn open_peer_protocols(&self, segment_id: u32) -> Option<vec::Vec<u32>> {
+                self.lists
+                    .iter()
+                    .find(|(id, _)| *id == segment_id)
+                    .map(|(_, list)| list.clone())
+            }
+        }
+
+        /// A dispatch whose peer is `(ALICE_ID or BOB_ID, challenge)` and advertises `list`.
+        fn listed_node(
+            id: u32,
+            challenge: u64,
+            peer: (u32, u64),
+            list: Option<vec::Vec<u32>>,
+        ) -> ShmAuthDispatch {
+            ShmAuthDispatch::install(Box::new(ListedAuth {
+                inner: FakeAuth {
+                    id,
+                    challenge,
+                    visible: vec![peer],
+                },
+                lists: list.map(|l| vec![(peer.0, l)]).unwrap_or_default(),
+            }))
+        }
+
+        /// R3065 -- THE PEER'S LIST IS READ WHEN ITS SEGMENT IS RECORDED, on both roles: the
+        /// initiator reads the acceptor's on the InitAck and the acceptor the initiator's on the
+        /// InitSyn. A protocol the list names is admitted and one it does not is not, and the two
+        /// roles hold different lists because they hold different peers.
+        #[test]
+        fn each_role_reads_the_list_of_the_segment_it_maps() {
+            let mut alice = listed_node(
+                ALICE_ID,
+                ALICE_CHALLENGE,
+                (BOB_ID, BOB_CHALLENGE),
+                Some(vec![0, 100500]),
+            );
+            let mut bob = listed_node(
+                BOB_ID,
+                BOB_CHALLENGE,
+                (ALICE_ID, ALICE_CHALLENGE),
+                Some(vec![0]),
+            );
+            let (a, b) = drive(&mut alice, &mut bob);
+            assert!(a && b, "the handshake itself completes");
+            // Alice's peer is Bob; its list names 0 and 100500.
+            assert!(alice.peer_supports_protocol(0));
+            assert!(alice.peer_supports_protocol(100500));
+            assert!(!alice.peer_supports_protocol(7));
+            // Bob's peer is Alice; its list names 0 only.
+            assert!(bob.peer_supports_protocol(0));
+            assert!(
+                !bob.peer_supports_protocol(100500),
+                "a peer whose reader has no client for the protocol cannot be sent its descriptor"
+            );
+        }
+
+        /// R3065 -- an UNKNOWN list admits everything. A peer whose list cannot be read is not a
+        /// peer with an empty one: withholding every descriptor from it would turn a reader this
+        /// node cannot inspect into one that gets nothing, which is not what it was before.
+        #[test]
+        fn an_unreadable_list_admits_every_protocol() {
+            let mut alice = listed_node(ALICE_ID, ALICE_CHALLENGE, (BOB_ID, BOB_CHALLENGE), None);
+            let mut bob = listed_node(BOB_ID, BOB_CHALLENGE, (ALICE_ID, ALICE_CHALLENGE), None);
+            let (a, b) = drive(&mut alice, &mut bob);
+            assert!(a && b);
+            assert!(alice.peer_supports_protocol(0));
+            assert!(alice.peer_supports_protocol(100500));
+            // A dispatch that never met a peer is unknown too.
+            assert!(ShmAuthDispatch::empty().peer_supports_protocol(100500));
+        }
+
+        /// R3065 -- a new establishment is a new peer: the list of the last one is forgotten with
+        /// its segment, so a node never filters by a peer it has moved on from.
+        #[test]
+        fn a_new_establishment_forgets_the_last_peers_list() {
+            let mut bob = listed_node(
+                BOB_ID,
+                BOB_CHALLENGE,
+                (ALICE_ID, ALICE_CHALLENGE),
+                Some(vec![0]),
+            );
+            let mut alice = listed_node(ALICE_ID, ALICE_CHALLENGE, (BOB_ID, BOB_CHALLENGE), None);
+            let _ = drive(&mut alice, &mut bob);
+            assert!(!bob.peer_supports_protocol(100500));
+            // A fresh InitSyn from a peer this node cannot map: nothing is kept.
+            let stranger = encode_shm_zbuf_ext(&encode_shm_init_syn_body(9999)).expect("fits");
+            bob.recv_init_syn(&[stranger]).expect("well-formed");
+            assert!(
+                bob.peer_supports_protocol(100500),
+                "the old peer's list must not outlive its segment"
+            );
         }
 
         /// One counter id per band, distinct, so a test that opened the wrong

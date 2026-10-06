@@ -125,7 +125,9 @@ pub(super) fn send_staged_reply<R: SessionRuntime, T: TimeSource>(
     reply: wz_session_core::query::QueryReply,
 ) {
     #[cfg(feature = "transport-shm")]
-    if let Ok((response, reservation)) = reply.into_response_shm(actions.is_shm()) {
+    if let Ok((response, reservation)) =
+        reply.into_response_shm(|protocol| actions.shm_admits(protocol))
+    {
         let left = actions.try_send_response(response).is_ok();
         if let (true, Some(reservation)) = (left, reservation) {
             reservation.commit();

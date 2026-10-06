@@ -4501,8 +4501,8 @@ mod advanced_declaration_tests {
 
     /// A cache with no miss detection: it sequences by timestamp, so it needs a node clock.
     fn cache_only() -> AdvancedPublisherOptions {
-        // Assigned, not built as a literal: the options are `#[non_exhaustive]`, which is how
-        // the C ABI's own mapping builds them too.
+        // Assigned field by field and not written as a literal: the options are
+        // `#[non_exhaustive]`, which is how the C ABI's own mapping fills them too.
         let mut options = AdvancedPublisherOptions::default();
         options.sequencing = Sequencing::Timestamp;
         options.cache = Some(CacheConfig::default());

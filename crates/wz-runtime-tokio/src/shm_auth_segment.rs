@@ -149,15 +149,13 @@ fn write_u64(map: &mut [u8], index: usize, value: u64) {
 /// Read one `ProtocolID` slot — a `u32` at a BYTE offset, because the protocol
 /// array no longer shares the `u64` grid the three scalars sit on.
 ///
-/// TEST-ONLY on purpose, and the reason is interop rather than tidiness: the
-/// establishment path must NOT consult the peer's protocol list, because
-/// upstream does not. `RXAuthSegment` is opened and its `challenge()` read with
-/// no validation at all; the list is consulted later, at send time, by
-/// `PartnerShmConfig::supports_protocol`. A reader here that rejected a peer
-/// whose list it disliked would be stricter than the implementation it has to
-/// interoperate with. What the slot IS for is the layout assertion, which is
-/// where this is used.
-#[cfg(test)]
+/// The establishment path must NOT REJECT a peer over its protocol list, because upstream does
+/// not: `RXAuthSegment` is opened and its `challenge()` read with no validation at all, and the
+/// list is consulted later, at send time, by `PartnerShmConfig::supports_protocol`. A reader
+/// here that rejected a peer whose list it disliked would be stricter than the implementation it
+/// has to interoperate with. It was test-only (the layout assertion) until R3065, which reads the
+/// list the way upstream's sender does, to decide at send time whether a buffer goes out as its
+/// descriptor or as its bytes ([`open_peer_protocols`]); a peer is still never refused for it.
 fn read_u32_at(map: &[u8], offset: usize) -> Option<u32> {
     let bytes: [u8; 4] = map.get(offset..offset + 4)?.try_into().ok()?;
     Some(u32::from_ne_bytes(bytes))
@@ -231,6 +229,33 @@ pub fn open_peer_challenge(segment_id: u32) -> Option<u64> {
     }
     // Verbatim, the mirror of `create`.
     read_u64(map, CHALLENGE_INDEX)
+}
+
+/// R3065 -- the protocol ids a PEER's auth segment lists: the shared-memory protocols its reader
+/// has a client for, which is what decides whether this node may send it a descriptor
+/// (upstream's `io/zenoh-transport/src/common/shm/interop.rs` @
+/// `link_partner_segment.protocols().contains`, which `supports_protocol` answers from).
+///
+/// `None`, like [`open_peer_challenge`], when the object does not exist, is too small or carries
+/// another `SHM_VERSION`, and also when the count it names is past the array: a list that cannot
+/// be trusted is an UNKNOWN list, which the sender does not act on, and not an empty one, which
+/// would withhold every descriptor from a peer that may take them.
+pub fn open_peer_protocols(segment_id: u32) -> Option<Vec<u32>> {
+    let segment = PeerSegment::open(u64::from(segment_id)).ok()?;
+    let map = segment.bytes();
+    if map.len() < SEGMENT_BYTES {
+        return None;
+    }
+    if read_u64(map, VERSION_INDEX)? != SHM_VERSION {
+        return None;
+    }
+    let count = usize::try_from(read_u64(map, LEN_INDEX)?).ok()?;
+    if count > PROTOCOL_SLOTS {
+        return None;
+    }
+    (0..count)
+        .map(|i| read_u32_at(map, PROTOCOLS_OFFSET + i * core::mem::size_of::<u32>()))
+        .collect()
 }
 
 /// R3040 -- a PEER's handoff counters, opened for writing: the means of telling a
@@ -352,6 +377,10 @@ impl ShmAuthenticator for PosixShmAuthenticator {
 
     fn open_peer_challenge(&self, segment_id: u32) -> Option<u64> {
         open_peer_challenge(segment_id)
+    }
+
+    fn open_peer_protocols(&self, segment_id: u32) -> Option<Vec<u32>> {
+        open_peer_protocols(segment_id)
     }
 
     fn open_peer_handoff(
@@ -477,6 +506,67 @@ mod tests {
         // reader takes `protocols[..id_count]`, so a stray non-zero here would
         // be invisible to us and meaningful to a peer that read a larger count.
         assert_eq!(read_u32_at(&raw, PROTOCOLS_OFFSET + 4), Some(0));
+    }
+
+    /// R3065 -- a peer's list is read back as the protocols its segment advertises, which for a
+    /// segment this node made is the one protocol it declares. The read is of the OBJECT, the way
+    /// a peer process reads it, so a list written by another implementation reads the same.
+    #[test]
+    fn a_peers_protocol_list_is_read_back_from_its_segment() {
+        let seg = ShmAuthSegment::create(7).expect("create");
+        assert_eq!(
+            open_peer_protocols(seg.id()),
+            Some(vec![POSIX_PROTOCOL_ID]),
+            "the one protocol the segment declares"
+        );
+    }
+
+    /// R3065 -- a list that cannot be trusted is UNKNOWN, not empty: a version this node does
+    /// not speak and a count past the array both read as `None`. An empty list would withhold
+    /// every descriptor from a peer that may take them, where an unknown one leaves the send as
+    /// it was.
+    #[test]
+    fn a_list_that_cannot_be_trusted_reads_as_unknown() {
+        let seg = ShmAuthSegment::create(8).expect("create");
+        let path = auth_segment_path(seg.id());
+        {
+            let file = OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open(&path)
+                .unwrap();
+            // SAFETY: same-process remap of a file this test owns.
+            let mut map = unsafe { MmapOptions::new().map_mut(&file).unwrap() };
+            write_u64(&mut map, LEN_INDEX, PROTOCOL_SLOTS as u64 + 1);
+            map.flush().unwrap();
+        }
+        assert_eq!(
+            open_peer_protocols(seg.id()),
+            None,
+            "a count past the array is a list this node does not read"
+        );
+        {
+            let file = OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open(&path)
+                .unwrap();
+            // SAFETY: as above.
+            let mut map = unsafe { MmapOptions::new().map_mut(&file).unwrap() };
+            write_u64(&mut map, LEN_INDEX, 1);
+            write_u64(&mut map, VERSION_INDEX, SHM_VERSION + 1);
+            map.flush().unwrap();
+        }
+        assert_eq!(
+            open_peer_protocols(seg.id()),
+            None,
+            "a segment of another version is not read, as its challenge is not"
+        );
+        assert_eq!(
+            open_peer_protocols(u32::MAX),
+            None,
+            "a segment that does not exist is unknown"
+        );
     }
 
     /// A version mismatch reads as "no SHM", not as an error — the arm that

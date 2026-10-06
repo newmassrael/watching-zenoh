@@ -1372,6 +1372,92 @@ fn a_session_acknowledges_the_shm_slices_it_receives_through_the_counters_its_pe
     );
 }
 
+/// R3065 -- NEGOTIATING SHARED MEMORY IS NOT ENOUGH TO BE SENT A DESCRIPTOR: the peer's reader must
+/// have a client for the buffer's protocol. The session reads the list its peer's segment
+/// advertises when it records that segment, and `shm_admits` is the one question every transmit
+/// path asks. MEASURED against the real library: a chunk of a custom protocol put to a receiver
+/// that lists only POSIX was never delivered on wz and was delivered as bytes by the real sender.
+#[cfg(all(
+    feature = "session-extshm",
+    feature = "codec-init-body",
+    target_os = "linux"
+))]
+#[test]
+fn a_session_admits_a_protocol_only_when_the_peer_lists_it() {
+    use wz_session_core::extshm::{
+        encode_shm_init_syn_body, encode_shm_open_syn_body, encode_shm_zbuf_ext, ShmAuthenticator,
+        ShmHandoffCounters, SHM_PRIORITY_BANDS,
+    };
+
+    const PEER_SEGMENT: u32 = 77;
+    const LOCAL_CHALLENGE: u64 = 0x5EED;
+
+    struct Auth {
+        list: Option<Vec<u32>>,
+    }
+    impl ShmAuthenticator for Auth {
+        fn local_segment_id(&self) -> u32 {
+            1
+        }
+        fn local_challenge(&self) -> u64 {
+            LOCAL_CHALLENGE
+        }
+        fn open_peer_challenge(&self, segment_id: u32) -> Option<u64> {
+            (segment_id == PEER_SEGMENT).then_some(0xA11CE)
+        }
+        fn open_peer_protocols(&self, segment_id: u32) -> Option<Vec<u32>> {
+            (segment_id == PEER_SEGMENT)
+                .then(|| self.list.clone())
+                .flatten()
+        }
+    }
+
+    // A session that has run the acceptor's side of the establishment against a peer that
+    // advertises `list`, so it negotiated shared memory.
+    let established = |list: Option<Vec<u32>>| {
+        let (session, _driver) = build_session();
+        session.actions().install_shm_auth(Box::new(Auth { list }));
+        session.actions().set_shm_offer(true);
+        let init_syn = encode_shm_zbuf_ext(&encode_shm_init_syn_body(PEER_SEGMENT)).expect("fits");
+        session
+            .actions()
+            .shm_recv_init_syn(std::slice::from_ref(&init_syn))
+            .expect("well-formed InitSyn");
+        let open_syn = encode_shm_zbuf_ext(&encode_shm_open_syn_body(
+            LOCAL_CHALLENGE,
+            ShmHandoffCounters::Disabled,
+        ))
+        .expect("fits");
+        session.actions().shm_recv_open_syn(&[open_syn]);
+        assert!(session.actions().is_shm(), "the proof stood, so SHM stands");
+        let _ = SHM_PRIORITY_BANDS;
+        session
+    };
+
+    let posix_only = established(Some(vec![0]));
+    assert!(posix_only.actions().shm_admits(0), "POSIX is listed");
+    assert!(
+        !posix_only.actions().shm_admits(100500),
+        "a protocol the peer's reader has no client for is not sent as a descriptor"
+    );
+
+    let with_custom = established(Some(vec![0, 100500]));
+    assert!(with_custom.actions().shm_admits(100500));
+
+    let unknown = established(None);
+    assert!(
+        unknown.actions().shm_admits(100500),
+        "a list that cannot be read admits what it always admitted"
+    );
+
+    let withdrawn = established(Some(vec![0, 100500]));
+    withdrawn.actions().set_shm_offer(false);
+    assert!(
+        !withdrawn.actions().shm_admits(0),
+        "a session that did not negotiate shared memory admits no protocol at all"
+    );
+}
+
 // ── R311y739 Session::new auto-wire of OUR keyexpr id space ──
 
 /// Build an `IterationEvent`-shaped inbound Push whose keyexpr is an `M=0`

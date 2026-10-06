@@ -6547,7 +6547,11 @@ layer_c1af_cargo_test_shm() {
     # (`push_build::tests::build_push_shm_aliased_names_its_key_like_the_inline_put_and_carries_the_descriptor`),
     # which has `shm` in its name and sits behind `transport-shm` and `codec-push`, both of
     # which this leg carries.
-    _runci_guarded_test C1af 30 cargo test -p wz-session-core --features session-extshm,codec-push --lib shm --quiet \
+    # R3065 -- 30 -> 33, MEASURED by running this exact command: the three tests of the
+    # establishment's protocol list (`extshm::tests::fsm::each_role_reads_the_list_of_the_segment_it_maps`,
+    # `an_unreadable_list_admits_every_protocol`, `a_new_establishment_forgets_the_last_peers_list`),
+    # which have `shm` in their path and sit behind `session-extshm`, which this leg carries.
+    _runci_guarded_test C1af 33 cargo test -p wz-session-core --features session-extshm,codec-push --lib shm --quiet \
         || return 1
     # R311y894 — the establishment SHM surface WITH THE DISSECTOR ON, which no
     # lane had. `dissect` and `session-extshm` are disjoint feature sets: the
@@ -6597,7 +6601,9 @@ layer_c1af_cargo_test_shm() {
     # R3059 -- 40 -> 41, MEASURED by running this exact command, and for the reason the
     # R3048 note gives: the aliased-SHM builder test above is selected here too, because
     # `session-extshm` brings `transport-shm` and `codec-push` with it on this leg as well.
-    _runci_guarded_test C1af 41 cargo test -p wz-session-core --features session-extshm,dissect --lib shm --quiet \
+    # R3065 -- 41 -> 44, MEASURED by running this exact command, for the reason the note on the
+    # leg above gives: the same three tests of the establishment's protocol list.
+    _runci_guarded_test C1af 44 cargo test -p wz-session-core --features session-extshm,dissect --lib shm --quiet \
         || return 1
     # Round 2037, open-debt item 330 — THE TRANSPORT-OAM BATCH WALK, which no
     # lane in this file was running.
@@ -19940,6 +19946,18 @@ layer_c1cc_api_compat_c() {
         --test zenoh_c_advanced_publisher_declare_twice_and_diff -- --ignored --quiet \
         --test-threads=1 \
         --exact an_advanced_publisher_declaration_is_answered_with_the_same_code_on_wz_and_libzenohc \
+        || return 1
+    # R3065 -- what a SENDER does with a chunk of a shared-memory protocol its receiver may not
+    # be able to read: a custom provider's chunks, put, sent as a get's value and replied, to a
+    # receiver whose storage holds a client for the protocol (shared memory) and to two whose
+    # does not, the default storage and none (bytes, as the real sender sends them; wz delivered
+    # nothing). Needs the SHM arm.
+    _runci_guarded_test \
+        "C1cc a_chunk_of_a_custom_protocol_is_sent_as_bytes_to_a_receiver_that_cannot_read_it_on_wz_and_libzenohc" 1 \
+        cargo test -p wz-integration-tests \
+        --test zenoh_c_shm_custom_protocol_twice_and_diff -- --ignored --quiet \
+        --test-threads=1 \
+        --exact a_chunk_of_a_custom_protocol_is_sent_as_bytes_to_a_receiver_that_cannot_read_it_on_wz_and_libzenohc \
         || return 1
     _runci_guarded_test \
         "C1cc an_advanced_subscriber_of_the_publishers_own_session_hears_it_on_wz_and_libzenohc" 1 \

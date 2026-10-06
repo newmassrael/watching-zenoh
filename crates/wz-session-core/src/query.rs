@@ -602,12 +602,15 @@ impl QueryReply {
     }
 
     /// R3062 -- [`Self::into_response`] for a face that MAY have negotiated shared memory:
-    /// `offer` is whether it did. A reply whose payload is a buffer of shared memory goes out as
-    /// the buffer's descriptor when it did, and the reservation of the reference its receiver will
-    /// release comes back beside the response; the caller commits it once the frame has been
-    /// handed to the link and lets it drop if the send refused, which returns the reference.
-    /// Every other reply, and every reply on a face that did not negotiate, is exactly what
-    /// [`Self::into_response`] builds and comes back with no reservation.
+    /// `admits` says whether the face takes a buffer of a given protocol as its descriptor (R3065:
+    /// a face that negotiated shared memory still admits only the protocols its peer's reader can
+    /// resolve, so a buffer of another is sent as its bytes). A reply whose payload is a buffer of
+    /// shared memory goes out as the buffer's descriptor when the face admits its protocol, and
+    /// the reservation of the reference its receiver will release comes back beside the response;
+    /// the caller commits it once the frame has been handed to the link and lets it drop if the
+    /// send refused, which returns the reference. Every other reply, and every reply on a face
+    /// that does not admit the buffer, is exactly what [`Self::into_response`] builds and comes
+    /// back with no reservation.
     ///
     /// The reference is taken BEFORE the response is built, so the chunk cannot be reclaimed
     /// between the two, and given back if the build fails: the reservation is dropped on the
@@ -615,7 +618,7 @@ impl QueryReply {
     #[cfg(all(feature = "codec-response", feature = "transport-shm"))]
     pub fn into_response_shm(
         self,
-        offer: bool,
+        admits: impl Fn(u32) -> bool,
     ) -> Result<
         (
             ResponseOwned,
@@ -623,14 +626,11 @@ impl QueryReply {
         ),
         CodecError,
     > {
-        let reservation = match (&self, offer) {
-            (
-                QueryReply::Reply {
-                    body: ReplyBody::PutShared(handle),
-                    ..
-                },
-                true,
-            ) => Some(handle.reserve_for_receiver()),
+        let reservation = match &self {
+            QueryReply::Reply {
+                body: ReplyBody::PutShared(handle),
+                ..
+            } if admits(handle.protocol()) => Some(handle.reserve_for_receiver()),
             _ => None,
         };
         let descriptor = reservation
@@ -5950,7 +5950,7 @@ mod shm_reply_tests {
         let reply = staged(&shared);
         let plain = as_plain_bytes(&reply);
 
-        let (response, reservation) = reply.into_response_shm(false).expect("builds");
+        let (response, reservation) = reply.into_response_shm(|_| false).expect("builds");
 
         assert!(reservation.is_none(), "no descriptor, so nothing reserved");
         assert_eq!(reservations.counts(), (0, 0, 0));
@@ -5977,7 +5977,7 @@ mod shm_reply_tests {
     #[test]
     fn with_an_offer_the_reply_is_the_descriptor_and_the_reference_is_the_callers_to_commit() {
         let (shared, reservations) = handle();
-        let (response, reservation) = staged(&shared).into_response_shm(true).expect("builds");
+        let (response, reservation) = staged(&shared).into_response_shm(|_| true).expect("builds");
         let reservation = reservation.expect("a buffer on a face that offered: reserved");
         assert_eq!(
             reservations.counts(),
@@ -6014,7 +6014,7 @@ mod shm_reply_tests {
     #[test]
     fn a_reservation_dropped_without_a_commit_returns_the_reference() {
         let (shared, reservations) = handle();
-        let (_, reservation) = staged(&shared).into_response_shm(true).expect("builds");
+        let (_, reservation) = staged(&shared).into_response_shm(|_| true).expect("builds");
         drop(reservation);
         assert_eq!(
             reservations.counts(),
@@ -6027,8 +6027,45 @@ mod shm_reply_tests {
     fn a_plain_reply_reserves_nothing_even_for_a_face_that_offered() {
         let (shared, reservations) = handle();
         let plain = as_plain_bytes(&staged(&shared));
-        let (_, reservation) = plain.into_response_shm(true).expect("builds");
+        let (_, reservation) = plain.into_response_shm(|_| true).expect("builds");
         assert!(reservation.is_none());
         assert_eq!(reservations.counts(), (0, 0, 0));
+    }
+
+    /// R3065 -- A FACE THAT NEGOTIATED SHARED MEMORY STILL ADMITS ONLY THE PROTOCOLS ITS PEER'S
+    /// READER CAN RESOLVE. A reply whose buffer is of a protocol the face does not admit is the
+    /// bytes, with nothing reserved, exactly as for a face that did not negotiate at all; the same
+    /// reply of a protocol it admits is the descriptor. The closure receives the BUFFER's own
+    /// protocol, which is what makes the two cases different at all.
+    #[test]
+    fn a_buffer_of_a_protocol_the_face_does_not_admit_is_sent_as_its_bytes() {
+        let (shared, reservations) = {
+            let (buffer, reservations) = FakeSendBuffer::with_protocol(BYTES, 100500);
+            (ShmSendHandle::new(buffer), reservations)
+        };
+        let admitted = [0u32];
+        let reply = staged(&shared);
+        let plain = as_plain_bytes(&reply);
+        let (response, reservation) = reply
+            .into_response_shm(|protocol| admitted.contains(&protocol))
+            .expect("builds");
+        assert!(
+            reservation.is_none(),
+            "an unadmitted protocol reserves nothing"
+        );
+        assert_eq!(reservations.counts(), (0, 0, 0));
+        assert_eq!(
+            response.wire(),
+            plain.into_response().unwrap().wire(),
+            "the peer that cannot resolve the protocol is sent the bytes"
+        );
+
+        let (_, reservation) = staged(&shared)
+            .into_response_shm(|protocol| [0u32, 100500].contains(&protocol))
+            .expect("builds");
+        assert!(
+            reservation.is_some(),
+            "the same buffer on a face that lists its protocol is the descriptor"
+        );
     }
 }

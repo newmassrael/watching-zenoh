@@ -966,7 +966,11 @@ HOST_GATED_CI_TARGETS: dict[str, str] = {
 # each subscriber shape, and which nodes hold a clock, each `api-compat-c zenoh-c->wz partial`).
 # Each class is declared by an earlier witness against the same lane, so no new execution lane is
 # owed. Measured by `scripts/audit-crossimpl-proof.sh` at this round's tree.
-FOREIGN_ADJUDICATOR_LINKS = 1006
+# R3065 -- 1006 -> 1007, RISING by one: the sender-side custom-protocol differential, whose
+# receivers are the real library's and whose sender is the program linked against each arm
+# (`api-compat-c zenoh-c->wz partial`, the class the R3064 legs already declare against the same
+# lane, so no new execution lane is owed). Measured by `scripts/audit-crossimpl-proof.sh`.
+FOREIGN_ADJUDICATOR_LINKS = 1007
 
 # ── Execution disclosure ────────────────────────────────────────────────────────
 #

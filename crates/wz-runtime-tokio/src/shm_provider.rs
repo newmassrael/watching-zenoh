@@ -931,6 +931,10 @@ impl ShmSendBuffer for ShmBackedPayload {
         ShmBackedPayload::bytes(self)
     }
 
+    fn protocol(&self) -> u32 {
+        ShmBackedPayload::protocol(self)
+    }
+
     fn receiver_view(&self) -> Option<RxBytes> {
         ShmBackedPayload::receiver_view(self)
     }
@@ -1211,6 +1215,14 @@ impl ShmBackedPayload {
     /// carries it gives back unless it is committed.
     fn take_reference(&self) {
         self.header().refcount.fetch_add(1, Ordering::SeqCst);
+    }
+
+    /// R3065 -- the shared-memory protocol this chunk belongs to: the id its provider's backend
+    /// reports and its header carries, the one a receiver reads the chunk through. A peer whose
+    /// reader has no client for it cannot resolve the descriptor, so the payload is sent as its
+    /// bytes there (see `SessionLinkActions::shm_admits`).
+    pub fn protocol(&self) -> u32 {
+        self.core.backend.id()
     }
 
     /// The payload bytes in the shared segment — the source for the inline-bytes

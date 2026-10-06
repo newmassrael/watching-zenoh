@@ -2724,7 +2724,10 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
     {
         #[cfg(feature = "codec-push")]
         if opts.allowed_destination.allows_remote() {
-            if self.actions().is_shm() {
+            // R3065 -- negotiating shared memory is not enough: the peer's reader must also
+            // have a client for THIS chunk's protocol, or the descriptor is dropped on arrival
+            // and the message is lost behind a success code. Otherwise the bytes go out.
+            if self.actions().shm_admits(payload.protocol()) {
                 self.send_shm_descriptor(payload, &opts, build)?;
             } else {
                 inline(
@@ -3697,7 +3700,8 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
             // query's value whichever way it travels, and only a session that negotiated
             // SHM can carry it as one. The bytes in `opts.payload` serve the rest.
             #[cfg(feature = "transport-shm")]
-            let descriptor_value = shm_value.filter(|_| allows_remote && self.actions().is_shm());
+            let descriptor_value = shm_value
+                .filter(|value| allows_remote && self.actions().shm_admits(value.protocol()));
             #[cfg(not(feature = "transport-shm"))]
             let descriptor_value = shm_value;
 
