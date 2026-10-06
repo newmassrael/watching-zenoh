@@ -379,7 +379,11 @@ impl Responder {
     /// Begin answering, until the returned [`Findable`] is dropped.
     pub fn start(self) -> Findable {
         let responder = self.inner;
-        let task = tokio::spawn(async move {
+        // Network-tier upkeep, on the subsystem upstream puts its scouting on
+        // (`commons/zenoh-runtime/src/lib.rs` @ `pub enum ZRuntime`: `Net`), so `WZ_RUNTIME`
+        // paces it. Aborted when the [`Findable`] drops, which is before the session's own
+        // runtime is, so the socket it reads is never polled after its reactor is gone.
+        let task = wz_runtime_tokio::runtime_pool::WzRuntime::Net.spawn(async move {
             let _ = serve(responder, |_step| {}).await;
         });
         Findable { task }
