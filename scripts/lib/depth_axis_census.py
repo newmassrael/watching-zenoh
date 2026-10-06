@@ -2525,7 +2525,16 @@ PIN_NO_SYMBOL = 0
 # error code, the plane's session-local queries, and the three witnesses. `transport-shm` is not
 # touched and is still PARTIAL beside it. READ off the census's own FAIL line, `wz citations: 120
 # against a pin of 108`, for the reason the R3062 note gives.
-PIN_WZ_CITATIONS = 120
+#
+# R3065 -- 120 -> 130, one atom. `api-compat-c`'s reason gains the UPDATE that a sender sends a
+# buffer's descriptor only to a peer whose reader can resolve its protocol: it names the
+# establishment's recording of the peer's list, the authenticator's read of it, the buffer's
+# protocol, the actions' one admit question and the put site that asks it, the differential that
+# judges it, and the three places of the receiving half it measured and did not build (the
+# reader's POSIX-only refusal, the advertised list, the C storage's only reader). `transport-shm`
+# is not touched and is still PARTIAL beside it. READ off the census's own FAIL line, `wz
+# citations: 130 against a pin of 120`, for the reason the R3062 note gives.
+PIN_WZ_CITATIONS = 130
 # R2626 — 44 -> 42, and this one is worth a sentence because it HELD through
 # every earlier retirement in this run (R2612, R2622). `time-hlc`'s reason is the
 # first retiree carrying AMBIGUOUS citations of its own: its oldest clauses cite
