@@ -481,6 +481,25 @@ pub trait AdvancedPublisherPlane: Send + Sync + 'static {
         options: PublishOptions,
     ) -> Result<usize, PublishError>;
 
+    /// R3063 -- send one sample whose payload is a CHUNK of shared memory: the descriptor to a peer
+    /// that negotiated shared memory, the bytes to one that did not, and the chunk to a subscriber of
+    /// this very session, which is what a plane that can map the segment owes
+    /// ([`Session::publish_shm`]).
+    ///
+    /// The default sends the chunk's BYTES through [`Self::publish`], which is every plane's
+    /// correct answer when it cannot carry a descriptor (the pico plane has no segment to map), and
+    /// loses nothing but the saving.
+    #[cfg(feature = "transport-shm")]
+    fn publish_shm(
+        &self,
+        publisher: &Self::Publisher,
+        keyexpr: &str,
+        payload: &Arc<crate::shm_provider::ShmBackedPayload>,
+        options: PublishOptions,
+    ) -> Result<usize, PublishError> {
+        self.publish(publisher, keyexpr, payload.bytes(), options)
+    }
+
     /// Send one heartbeat beacon, on `beacon` when the publisher declared one
     /// and on the key itself when it did not (an on-demand beacon from a
     /// publisher with no heartbeat configured). A failure is non-fatal: the next
@@ -497,6 +516,16 @@ pub trait AdvancedPublisherPlane: Send + Sync + 'static {
     /// while the ring holds it — [`Retained`]. `None` for a plane whose key is
     /// not a declaration.
     fn retained_key(&self, publisher: &Self::Publisher) -> Option<Retained>;
+}
+
+/// What one put publishes (R3063): bytes, or a chunk of shared memory. Private, because the public
+/// surface is the two methods that build it ([`AdvancedPublisherOn::put_with`],
+/// [`AdvancedPublisherOn::put_shm_with`]), and a third spelling of "what a sample is" would be a
+/// third place to keep stamping in step.
+enum SamplePayload<'a> {
+    Bytes(&'a [u8]),
+    #[cfg(feature = "transport-shm")]
+    Chunk(&'a Arc<crate::shm_provider::ShmBackedPayload>),
 }
 
 /// The cache queryable and the ring it answers from.
@@ -694,6 +723,17 @@ where
         options: PublishOptions,
     ) -> Result<usize, PublishError> {
         self.session.publish(keyexpr, payload, options)
+    }
+
+    #[cfg(feature = "transport-shm")]
+    fn publish_shm(
+        &self,
+        _publisher: &Publisher<R, T>,
+        keyexpr: &str,
+        payload: &Arc<crate::shm_provider::ShmBackedPayload>,
+        options: PublishOptions,
+    ) -> Result<usize, PublishError> {
+        self.session.publish_shm(keyexpr, payload, options)
     }
 
     #[cfg(feature = "ext-pubsub-sample-miss-detection")]
@@ -1053,6 +1093,29 @@ impl<P: AdvancedPublisherPlane> AdvancedPublisherOn<P> {
         payload: &[u8],
         options: AdvancedPutOptions,
     ) -> Result<usize, PublishError> {
+        self.put_sample(SamplePayload::Bytes(payload), options)
+    }
+
+    /// R3063 -- [`Self::put_with`] for a payload that is a CHUNK of shared memory: the same
+    /// stamping, the same sequence number, the same QoS, and the sample goes out through the plane's
+    /// shared-memory send ([`AdvancedPublisherPlane::publish_shm`]) and is cached as the chunk, not as
+    /// a copy of its bytes, so a recovery reply replays it as shared memory too.
+    #[cfg(feature = "transport-shm")]
+    pub fn put_shm_with(
+        &self,
+        payload: &Arc<crate::shm_provider::ShmBackedPayload>,
+        options: AdvancedPutOptions,
+    ) -> Result<usize, PublishError> {
+        self.put_sample(SamplePayload::Chunk(payload), options)
+    }
+
+    /// The one body of [`Self::put_with`] and [`Self::put_shm_with`]: what a put stamps and
+    /// retains is written once, so a chunk and bytes cannot be sequenced differently.
+    fn put_sample(
+        &self,
+        payload: SamplePayload<'_>,
+        options: AdvancedPutOptions,
+    ) -> Result<usize, PublishError> {
         // fetch_add returns the pre-increment value, so the first sample
         // carries sn=0 (zenoh advanced_publisher.rs:490-501).
         let sn = self
@@ -1100,22 +1163,42 @@ impl<P: AdvancedPublisherPlane> AdvancedPublisherOn<P> {
         if let Some(att) = &options.attachment {
             opts = opts.with_attachment(att.clone());
         }
-        let written = self
-            .plane
-            .publish(&self.publisher, &self.keyexpr, payload, opts)?;
+        let written = match &payload {
+            SamplePayload::Bytes(bytes) => {
+                self.plane
+                    .publish(&self.publisher, &self.keyexpr, bytes, opts)?
+            }
+            #[cfg(feature = "transport-shm")]
+            SamplePayload::Chunk(chunk) => {
+                self.plane
+                    .publish_shm(&self.publisher, &self.keyexpr, chunk, opts)?
+            }
+        };
 
         if let Some(cache) = &self.cache {
-            cache.store.cache_sample(
-                CachedSample::new(
+            let sample = match &payload {
+                SamplePayload::Bytes(bytes) => CachedSample::new(
                     self.keyexpr.clone(),
-                    payload.to_vec(),
+                    bytes.to_vec(),
+                    source_info,
+                    timestamp,
+                    crate::sample::SampleKind::Put,
+                ),
+                #[cfg(feature = "transport-shm")]
+                SamplePayload::Chunk(chunk) => CachedSample::new(
+                    self.keyexpr.clone(),
+                    Vec::new(),
                     source_info,
                     timestamp,
                     crate::sample::SampleKind::Put,
                 )
-                .with_encoding(options.encoding)
-                .with_attachment(options.attachment)
-                .keeping(self.plane.retained_key(&self.publisher)),
+                .with_shared(Some(chunk.send_handle())),
+            };
+            cache.store.cache_sample(
+                sample
+                    .with_encoding(options.encoding)
+                    .with_attachment(options.attachment)
+                    .keeping(self.plane.retained_key(&self.publisher)),
             );
         }
         Ok(written)
@@ -1568,6 +1651,146 @@ mod tests {
                 ("demo/data".to_string(), vec![2]),
             ],
             "the loopback query recovered all three cached samples under their original key"
+        );
+    }
+
+    /// R3063 -- an advanced put of a CHUNK of shared memory: on a face that negotiated shared memory
+    /// the sample goes out as the chunk's descriptor and not its bytes, with the sequence number a
+    /// bytes put would carry; on one that did not, as bytes. The reference count on the chunk's slot
+    /// is what a descriptor that left must have raised and a sample sent as bytes must not have.
+    #[cfg(all(feature = "transport-shm", feature = "session-extshm"))]
+    #[test]
+    fn an_advanced_put_of_a_chunk_goes_as_the_descriptor_to_a_face_that_negotiated() {
+        use std::sync::Mutex;
+
+        use crate::observer::ApplicationLayerObserver;
+        use crate::runtime_impl::TokioTime;
+        use crate::session::TokioSession;
+        use crate::shm_provider::{reference_state, ReferenceState, ShmBackedPayload};
+        use wz_session_core::extshm::encode_shm_descriptor;
+
+        const VALUE: &[u8] = b"an advanced sample in shared memory";
+        let contains =
+            |haystack: &[u8], needle: &[u8]| haystack.windows(needle.len()).any(|w| w == needle);
+
+        for negotiated in [true, false] {
+            let (actions, driver) = crate::test_fixtures::recording_actions();
+            actions.set_shm_offer(true);
+            actions.negotiate_shm_against_peer(negotiated);
+            let observer = Arc::new(Mutex::new(ApplicationLayerObserver::new()));
+            let session = TokioSession::new(actions, observer, Arc::new(TokioTime::new()));
+            let options = AdvancedPublisherOptions {
+                sequencing: Sequencing::SequenceNumber,
+                cache: Some(CacheConfig::default()),
+                ..AdvancedPublisherOptions::default()
+            };
+            let publisher = AdvancedPublisher::declare(&session, "demo/data", options, vec![0x01])
+                .expect("advanced publisher declares against the test link");
+            let mut held = ShmBackedPayload::alloc(VALUE.len()).expect("alloc a sample buffer");
+            held.write(VALUE);
+            let chunk = Arc::new(held);
+            let descriptor = chunk.descriptor();
+            let before = driver.frame_count();
+
+            publisher
+                .put_shm_with(&chunk, AdvancedPutOptions::default())
+                .expect("the advanced put of a chunk publishes");
+
+            let frame = driver.frame_bytes(driver.frame_count() - 1);
+            assert!(driver.frame_count() > before, "the put left a frame");
+            if negotiated {
+                assert!(
+                    contains(&frame, &encode_shm_descriptor(&descriptor)),
+                    "the chunk's descriptor is on the wire of a face that negotiated shared memory"
+                );
+                assert!(
+                    !contains(&frame, VALUE),
+                    "and its bytes are not: the sample went as a reference to the segment"
+                );
+                assert_eq!(
+                    reference_state(&descriptor),
+                    Some(ReferenceState::Held(2)),
+                    "the owner's reference and the one its receiver will release"
+                );
+            } else {
+                assert!(
+                    contains(&frame, VALUE),
+                    "a face that did not negotiate is sent bytes"
+                );
+                assert!(!contains(&frame, &encode_shm_descriptor(&descriptor)));
+                assert_eq!(reference_state(&descriptor), Some(ReferenceState::Held(1)));
+            }
+        }
+    }
+
+    /// R3063 -- the cache keeps a chunk AS the chunk, and a recovery reply replays it as shared
+    /// memory: a requester of the same session is handed the chunk, not a copy of its bytes. The
+    /// handle count is the structural witness that the ring holds the buffer itself (a copy would
+    /// leave the caller's the only one), and the bytes put beside it is the control that the count
+    /// can stay put.
+    #[cfg(all(feature = "query-get", feature = "transport-shm"))]
+    #[test]
+    fn a_chunk_put_is_cached_as_the_chunk_and_recovered_as_shared_memory() {
+        use std::sync::Mutex;
+
+        use crate::observer::ApplicationLayerObserver;
+        use crate::reply_sink::ReplyView;
+        use crate::runtime_impl::TokioTime;
+        use crate::session::TokioSession;
+        use crate::shm_provider::ShmBackedPayload;
+
+        let (actions, _driver) = crate::test_fixtures::recording_actions();
+        let observer = Arc::new(Mutex::new(ApplicationLayerObserver::new()));
+        let session = TokioSession::new(actions, observer, Arc::new(TokioTime::new()));
+        let options = AdvancedPublisherOptions {
+            sequencing: Sequencing::SequenceNumber,
+            cache: Some(CacheConfig {
+                max_samples: 8,
+                ..CacheConfig::default()
+            }),
+            ..AdvancedPublisherOptions::default()
+        };
+        let publisher = AdvancedPublisher::declare(&session, "demo/data", options, vec![0x01])
+            .expect("advanced publisher declares against the test link");
+        let mut held = ShmBackedPayload::alloc(5).expect("alloc a sample buffer");
+        held.write(b"chunk");
+        let chunk = Arc::new(held);
+        assert_eq!(Arc::strong_count(&chunk), 1);
+
+        publisher
+            .put_shm_with(&chunk, AdvancedPutOptions::default())
+            .expect("the advanced put of a chunk publishes and caches");
+        publisher.put(b"bytes").expect("a bytes put beside it");
+
+        assert_eq!(
+            Arc::strong_count(&chunk),
+            2,
+            "the ring holds the buffer itself: a copy of its bytes would leave this handle alone"
+        );
+        let seen = Arc::new(Mutex::new(Vec::<(Vec<u8>, bool)>::new()));
+        let rec = Arc::clone(&seen);
+        session
+            .query(
+                "demo/data/@adv/**",
+                adv_recovery_get_options(),
+                move |reply: &dyn ReplyView| {
+                    rec.lock().expect("reply recorder poisoned").push((
+                        reply.payload().to_vec(),
+                        reply
+                            .payload_shared()
+                            .is_some_and(|bytes| bytes.is_shared_memory()),
+                    ));
+                },
+                |_rid| {},
+            )
+            .expect("loopback query fires the cache queryable inline");
+
+        let mut got = seen.lock().expect("reply recorder poisoned").clone();
+        got.sort();
+        assert_eq!(
+            got,
+            vec![(b"bytes".to_vec(), false), (b"chunk".to_vec(), true)],
+            "the cached chunk is recovered as shared memory and the cached bytes as bytes"
         );
     }
 

@@ -955,7 +955,11 @@ HOST_GATED_CI_TARGETS: dict[str, str] = {
 # differential (`api-compat-c zenoh-c->wz partial`). Each class is declared by an earlier
 # witness against the same lane, so no new execution lane is owed. Measured by
 # `scripts/audit-crossimpl-proof.sh` at this round's tree.
-FOREIGN_ADJUDICATOR_LINKS = 1001
+# R3063 -- 1001 -> 1002, RISING by one: leg 14 of `zenoh_c_shm_and_advanced_on_wz_capi_c.rs` (a
+# chunk put through an advanced publisher, judged by upstream's own Rust `z_sub_shm`,
+# `api-compat-c wz->zenoh partial`, the class legs 7 and 8 already declare against the same lane).
+# No new class, so no new execution lane is owed. Measured by `scripts/audit-crossimpl-proof.sh`.
+FOREIGN_ADJUDICATOR_LINKS = 1002
 
 # ── Execution disclosure ────────────────────────────────────────────────────────
 #

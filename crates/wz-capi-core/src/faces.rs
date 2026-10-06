@@ -3254,6 +3254,37 @@ impl SharedSession {
         delivered
     }
 
+    /// R3063 -- [`Self::advanced_publisher_put`] for a payload that is a CHUNK of shared memory: each
+    /// face sends the sample as the chunk's descriptor to a peer that negotiated shared memory and as
+    /// its bytes to one that did not, stamps and sequences it exactly as the bytes would be, and
+    /// caches the chunk, not a copy of it, so a recovery reply replays it as shared memory. A face
+    /// takes the reference its receiver will release on its own, so several faces are several
+    /// references.
+    #[cfg(feature = "transport-shm")]
+    pub fn advanced_publisher_put_shm(
+        &self,
+        id: AdvPubId,
+        payload: &std::sync::Arc<wz_runtime_tokio::shm_provider::ShmBackedPayload>,
+    ) -> usize {
+        let guard = self.lock();
+        let mut delivered = 0usize;
+        // The plane included, for the reason the byte put names.
+        for face in guard.declaration_targets_ref() {
+            if let Some(pub_) = face.adv_pubs.get(&id) {
+                if pub_
+                    .put_shm_with(
+                        payload,
+                        wz_runtime_tokio::advanced_publisher::AdvancedPutOptions::default(),
+                    )
+                    .is_ok()
+                {
+                    delivered += 1;
+                }
+            }
+        }
+        delivered
+    }
+
     /// Publish a DELETE through a C advanced publisher, on every face that
     /// carries it (R311y559). `true` when at least one face accepted it.
     ///

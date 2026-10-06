@@ -75,7 +75,7 @@ use crate::abi::{
     z_closure_drop_callback_t, z_loaned_keyexpr_t, z_loaned_session_t, z_moved_bytes_t,
     z_moved_closure_sample_t, z_owned_closure_sample_t, z_owned_subscriber_t, Handle,
 };
-use crate::bytes::take_payload;
+use crate::bytes::{take_outbound, take_payload, Outbound};
 use crate::ffi::{guard_val, guarded, CClosure as FfiClosure};
 use crate::keyexpr::keyexpr_str;
 use crate::publisher::{z_publisher_options_t, z_publisher_put_options_t};
@@ -824,8 +824,10 @@ pub unsafe extern "C" fn ze_advanced_publisher_put(
 ) -> ZResult {
     guarded(|| {
         // Taken FIRST and unconditionally — see the doc note.
+        // R3063 -- as an OUTBOUND payload: a chunk of shared memory stays a chunk until each face
+        // sends it, and goes out as the descriptor to a peer that negotiated shared memory.
         // SAFETY: the caller's contract.
-        let buf = unsafe { take_payload(payload) };
+        let buf = unsafe { take_outbound(payload) };
         if !options.is_null() {
             // SAFETY: the caller's contract.
             drop(unsafe { take_payload((*options).put_options.attachment) });
@@ -834,7 +836,18 @@ pub unsafe extern "C" fn ze_advanced_publisher_put(
         let (Some(state), Some(buf)) = (unsafe { adv_pub_state(this_) }, buf) else {
             return Z_ENULL;
         };
-        state.shared.advanced_publisher_put(state.id, &buf);
+        match buf {
+            Outbound::Bytes(bytes) => {
+                state.shared.advanced_publisher_put(state.id, &bytes);
+            }
+            #[cfg(all(
+                feature = "zenoh-c-shared-memory",
+                not(feature = "zenoh-c-no-unstable-api")
+            ))]
+            Outbound::Chunk(chunk) => {
+                state.shared.advanced_publisher_put_shm(state.id, &chunk);
+            }
+        }
         Z_OK
     })
 }

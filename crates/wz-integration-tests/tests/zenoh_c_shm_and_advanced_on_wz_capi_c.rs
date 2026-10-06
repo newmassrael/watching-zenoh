@@ -2434,3 +2434,139 @@ fn a_c_getter_is_handed_a_real_z_queryable_shm_reply_as_shared_memory_on_wz_capi
          reference ---\n{ref_stdout}"
     );
 }
+
+/// An ADVANCED publisher that puts one payload a second: a CHUNK of shared memory (`chunk`) or the
+/// same text as plain bytes (`bytes`). Declared as upstream's `z_advanced_pub.c` declares it: a
+/// cache of one sample, publisher detection and a periodic heartbeat. Ours, and the same source is
+/// compiled for both arms. Arguments: the endpoint to dial, the key, the mode.
+const ADVANCED_SHM_PUBLISHER: &str = r#"#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <unistd.h>
+#include "zenoh.h"
+
+int main(int argc, char **argv) {
+    setvbuf(stdout, NULL, _IONBF, 0);
+    if (argc != 4) { return 2; }
+    int use_chunk = strcmp(argv[3], "chunk") == 0;
+    z_owned_config_t config;
+    z_config_default(&config);
+    char connect[512];
+    snprintf(connect, sizeof connect, "[\"%s\"]", argv[1]);
+    if (zc_config_insert_json5(z_loan_mut(config), Z_CONFIG_CONNECT_KEY, connect) < 0) { return 3; }
+    if (zc_config_insert_json5(z_loan_mut(config), Z_CONFIG_MULTICAST_SCOUTING_KEY, "false") < 0) { return 3; }
+    if (zc_config_insert_json5(z_loan_mut(config), Z_CONFIG_ADD_TIMESTAMP_KEY, "true") < 0) { return 3; }
+    z_owned_session_t s;
+    if (z_open(&s, z_move(config), NULL) < 0) { printf("open failed\n"); return 4; }
+    z_view_keyexpr_t ke;
+    if (z_view_keyexpr_from_str(&ke, argv[2]) < 0) { return 5; }
+    ze_owned_advanced_publisher_t pub;
+    ze_advanced_publisher_options_t opts;
+    ze_advanced_publisher_options_default(&opts);
+    ze_advanced_publisher_cache_options_default(&opts.cache);
+    opts.cache.max_samples = 1;
+    opts.publisher_detection = true;
+    ze_advanced_publisher_sample_miss_detection_options_default(&opts.sample_miss_detection);
+    opts.sample_miss_detection.heartbeat_period_ms = 500;
+    opts.sample_miss_detection.heartbeat_mode = ZE_ADVANCED_PUBLISHER_HEARTBEAT_MODE_PERIODIC;
+    if (ze_declare_advanced_publisher(z_loan(s), &pub, z_loan(ke), &opts) < 0) { printf("declare failed\n"); return 5; }
+    z_owned_shm_provider_t provider;
+    if (z_shm_provider_default_new(&provider, 4096) != Z_OK) { printf("provider failed\n"); return 6; }
+    for (int idx = 0; idx < 1000; ++idx) {
+        z_sleep_s(1);
+        z_buf_layout_alloc_result_t alloc;
+        z_shm_provider_alloc_gc_defrag_blocking(&alloc, z_loan(provider), 1024);
+        if (alloc.status != ZC_BUF_LAYOUT_ALLOC_STATUS_OK) { printf("alloc failed\n"); return 7; }
+        uint8_t *buf = z_shm_mut_data_mut(z_loan_mut(alloc.buf));
+        memset(buf, 0, 1024);
+        snprintf((char *)buf, 1024, "[%4d] advanced-%s", idx, argv[3]);
+        z_owned_bytes_t payload;
+        if (use_chunk) {
+            z_bytes_from_shm_mut(&payload, z_move(alloc.buf));
+        } else {
+            z_bytes_copy_from_str(&payload, (const char *)buf);
+            z_drop(z_move(alloc.buf));
+        }
+        ze_advanced_publisher_put_options_t popts;
+        ze_advanced_publisher_put_options_default(&popts);
+        if (ze_advanced_publisher_put(z_loan(pub), z_move(payload), &popts) < 0) { printf("put failed\n"); return 8; }
+        printf("put %d\n", idx);
+    }
+    return 0;
+}
+"#;
+
+/// LEG 14 -- a chunk put through an ADVANCED publisher reaches upstream's own `z_sub_shm` as shared
+/// memory, on wz's ABI as on the real library: the subscriber labels each sample `SHM`, where it
+/// labelled the same program's samples `RAW` from wz (MEASURED, red before green). The advanced
+/// publisher stamps and sequences every sample and caches it, and each of those is a place the
+/// payload could have been copied out of the chunk; `bytes` is the control that the label follows
+/// the payload and not the publisher.
+///
+/// The reference arm is the oracle: a reference that labels the chunk anything but `SHM`, or the
+/// bytes anything but `RAW`, means the machine's oracle or the subscriber's offer is not what this
+/// leg assumes, and the comparison says nothing.
+// wz-proves: api-compat-c wz->zenoh partial
+#[test]
+#[ignore = "compiles a C program with cc and spawns upstream's own z_sub_shm; needs the \
+            machine-local SHARED-MEMORY zenoh-c oracle and the shared-memory zenohd build; \
+            run-ci Layer C1cc drives it"]
+fn a_chunk_put_through_an_advanced_publisher_reaches_a_real_z_sub_shm_as_shared_memory_on_wz_capi_c(
+) {
+    let Some((include, libdir_ref, _examples)) = oracle_or_note() else {
+        return;
+    };
+    let Some(z_sub_shm) = zenoh_shm_example_binary("z_sub_shm") else {
+        eprintln!(
+            "skip: no z_sub_shm at target/zenohd-shm (run `ZENOHD_SHM=1 scripts/build-zenohd.sh`)"
+        );
+        return;
+    };
+    let dir = tempfile::tempdir().expect("tempdir for the compiled arms");
+    let src_dir = dir.path().join("src");
+    std::fs::create_dir_all(&src_dir).expect("source dir");
+    std::fs::write(src_dir.join("advanced_shm_pub.c"), ADVANCED_SHM_PUBLISHER)
+        .expect("write the publisher source");
+    let (on_wz, libdir_wz) = arm_binary(
+        "advanced_shm_pub",
+        Arm::Wz,
+        dir.path(),
+        &include,
+        &src_dir,
+        &libdir_ref,
+    );
+    let (on_ref, libdir_r) = arm_binary(
+        "advanced_shm_pub",
+        Arm::Reference,
+        dir.path(),
+        &include,
+        &src_dir,
+        &libdir_ref,
+    );
+
+    let key = "demo/example/advanced-shm";
+    let settle = Duration::from_millis(2500);
+    for (mode, expected) in [("chunk", "SHM"), ("bytes", "RAW")] {
+        let args = |endpoint: &str| vec![endpoint.to_string(), key.to_string(), mode.to_string()];
+        let ref_log =
+            observe_with_z_sub_shm(&z_sub_shm, &on_ref, &libdir_r, Arm::Reference, args, settle);
+        let wz_log = observe_with_z_sub_shm(&z_sub_shm, &on_wz, &libdir_wz, Arm::Wz, args, settle);
+        let (wz_tags, ref_tags) = (received_tags(&wz_log), received_tags(&ref_log));
+        assert!(
+            !ref_tags.is_empty() && ref_tags.iter().all(|(_, tag)| tag.starts_with(expected)),
+            "the reference arm's advanced publisher in `{mode}` mode did not reach upstream's \
+             z_sub_shm as {expected}: {ref_tags:?}, so the comparison below says nothing about \
+             it\n--- reference ---\n{ref_log}"
+        );
+        assert_eq!(
+            wz_tags, ref_tags,
+            "the two arms of the SAME advanced publisher in `{mode}` mode reached upstream's \
+             z_sub_shm as different samples. wz: {wz_tags:?}; the real libzenohc: \
+             {ref_tags:?}.\n--- wz ---\n{wz_log}\n--- reference ---\n{ref_log}"
+        );
+        assert!(
+            wz_tags.iter().all(|(ke, _)| ke == key),
+            "`{mode}`: the key upstream's z_sub_shm saw is not the advanced publisher's: {wz_tags:?}"
+        );
+    }
+}

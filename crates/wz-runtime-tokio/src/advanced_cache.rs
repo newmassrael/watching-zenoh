@@ -124,6 +124,17 @@ pub struct CachedSample {
     /// Whatever the sample keeps alive for as long as the ring holds it — see
     /// [`Retained`].
     pub retained: Option<Retained>,
+    /// R3063 -- the sample's payload when it is a buffer of shared memory, KEPT AS THE BUFFER.
+    ///
+    /// zenoh caches the whole `Sample`, and a `Sample` whose payload lies in shared memory
+    /// holds a reference to that buffer, so the chunk stays allocated while the ring holds the
+    /// sample and a recovery reply sends the descriptor again (`zenoh-ext/src/advanced_cache.rs`
+    /// replies the cached sample as it is). A copy of the bytes would be a recovered sample the
+    /// real library would have delivered as shared memory arriving as bytes, and a second copy of
+    /// what the buffer exists to avoid copying. When this is `Some`, [`Self::payload`] is EMPTY
+    /// and the bytes are read through [`Self::bytes`].
+    #[cfg(feature = "transport-shm")]
+    pub shared: Option<wz_session_core::extshm::ShmSendHandle>,
 }
 
 /// What a cached sample keeps alive, dropped when the sample leaves the ring.
@@ -180,7 +191,27 @@ impl CachedSample {
             encoding: None,
             attachment: None,
             retained: None,
+            #[cfg(feature = "transport-shm")]
+            shared: None,
         }
+    }
+
+    /// R3063 -- keep the sample's payload as the buffer of shared memory it is (see
+    /// [`Self::shared`]). The `payload` given to [`Self::new`] is then not kept: pass an empty
+    /// vector there, and read the bytes through [`Self::bytes`].
+    #[cfg(feature = "transport-shm")]
+    pub fn with_shared(mut self, shared: Option<wz_session_core::extshm::ShmSendHandle>) -> Self {
+        self.shared = shared;
+        self
+    }
+
+    /// The sample's payload bytes: the buffer's when it is one, the vector's otherwise.
+    pub fn bytes(&self) -> &[u8] {
+        #[cfg(feature = "transport-shm")]
+        if let Some(shared) = &self.shared {
+            return shared.bytes();
+        }
+        &self.payload
     }
 
     /// Keep `owner` alive for as long as the ring holds this sample — see
@@ -507,10 +538,16 @@ fn answer_from_ring(
             .with_timestamp(Some(&s.timestamp))
             .with_source_info(s.source_info.as_ref())
             .with_qos(Some(replies_config.qos()));
+        // R3063 -- a sample cached as a buffer of shared memory is replied AS the buffer, so a
+        // recovering subscriber that can map the segment is sent the descriptor again, as
+        // upstream's cache replies the sample it holds. The bytes argument is the buffer's own
+        // either way, for a sink that cannot stage one.
+        #[cfg(feature = "transport-shm")]
+        let meta = meta.with_shared(s.shared.as_ref());
         let staged = match s.kind {
             SampleKind::Put => out.reply_keyed_meta(
                 &s.keyexpr,
-                &s.payload,
+                s.bytes(),
                 meta.with_encoding(s.encoding.as_ref())
                     .with_attachment(s.attachment.as_deref()),
             ),
