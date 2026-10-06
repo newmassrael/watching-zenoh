@@ -2571,7 +2571,16 @@ PIN_NO_SYMBOL = 0
 # push before it had to repair, and the four differentials and three oracle-free tests.
 # `transport-shm` is not touched and is still PARTIAL beside it. READ off the census's own FAIL
 # line, `wz citations: 188 against a pin of 168`, for the reason the R3062 note gives.
-PIN_WZ_CITATIONS = 188
+#
+# R3071 -- 188 -> 202, one atom. `api-compat-c`'s reason gains the UPDATE that a session that
+# listens answers a Scout and is found: it names the pure decision that picks the locator list by
+# the asker's address, the expansion of an unspecified bind, the responder's join on every
+# interface, the advertised locators and the responder's bind and start (and where a searching
+# client starts it), the differentials and the oracle-free rows, and the const that states the
+# listening drop-ins do not scout. `transport-shm` is not touched and is still PARTIAL beside it.
+# READ off the census's own FAIL line, `wz citations: 202 against a pin of 188`, for the reason
+# the R3062 note gives.
+PIN_WZ_CITATIONS = 202
 # R2626 — 44 -> 42, and this one is worth a sentence because it HELD through
 # every earlier retirement in this run (R2612, R2622). `time-hlc`'s reason is the
 # first retiree carrying AMBIGUOUS citations of its own: its oldest clauses cite
