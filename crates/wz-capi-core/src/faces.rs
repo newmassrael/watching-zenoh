@@ -70,13 +70,16 @@ use tokio::sync::Notify;
 
 use crate::group::{retire_copies, FaceGroup, GroupAggregate, GroupError, GroupId};
 use wz_runtime_tokio::accept_loop::{FaceForwarder, FaceId};
-use wz_runtime_tokio::advanced_publisher::{AdvancedPublisher, AdvancedPublisherOptions};
+use wz_runtime_tokio::advanced_publisher::{
+    AdvancedPublisher, AdvancedPublisherError, AdvancedPublisherOptions,
+};
 use wz_runtime_tokio::advanced_subscriber::{
     AdvancedSubscriber, AdvancedSubscriberOptions, DeclarationForms, EntityForm, Miss,
 };
 use wz_runtime_tokio::declare::LivelinessSample;
 use wz_runtime_tokio::group::Member;
 use wz_runtime_tokio::locality::Locality;
+use wz_runtime_tokio::node_clock::NodeHlc;
 use wz_runtime_tokio::observer::ApplicationLayerObserver;
 use wz_runtime_tokio::qos::Priority;
 use wz_runtime_tokio::query_sink::{QueryView, ReplyOut};
@@ -1377,6 +1380,16 @@ pub struct SharedSession {
     /// keepalive tick). Every path that stages onto the plane notifies this, and
     /// [`Self::drive_local_plane`] is what waits on it.
     local_wake: Arc<Notify>,
+    /// R3064 -- THE NODE'S CLOCK, built once from the session's `timestamping` config and installed
+    /// on the local plane and on every face session this registry makes, so they share one.
+    ///
+    /// ONE per node is the contract and not a convenience: [`NodeHlc`] documents that two clocks
+    /// with the same `uhlc::ID` are worse than none, and a C session is several `TokioSession`s
+    /// (the plane and a session per face) over ONE zid. Before this field each of them built its
+    /// own from its own handshake facts and the shipped defaults, so a config that enabled
+    /// timestamping reached none of them: the key was read by the config reader and ignored by
+    /// the node.
+    node_hlc: NodeHlc,
 }
 
 impl SharedSession {
@@ -1408,6 +1421,17 @@ impl SharedSession {
         clock: TokioTime,
         zid: Vec<u8>,
     ) -> Result<Self, wz_runtime_tokio::session_glue::EntropyUnavailable> {
+        Self::new_with_node_clock(clock, zid, NodeHlc::disabled())
+    }
+
+    /// [`Self::new`] for a node that holds the clock `node_hlc` (R3064): the plane and every face
+    /// session made later carry a clone of it. `new` is the node that holds none, which is what
+    /// every session was until the C ABI read its `timestamping` config.
+    pub fn new_with_node_clock(
+        clock: TokioTime,
+        zid: Vec<u8>,
+        node_hlc: NodeHlc,
+    ) -> Result<Self, wz_runtime_tokio::session_glue::EntropyUnavailable> {
         let driver: Arc<dyn BoxedLinkDriver + Send + Sync> = Arc::new(InertLinkDriver);
         // `WhatAmI::Peer`: the plane never handshakes, so the role is inert on
         // the wire, and Peer is what a session that both publishes and answers
@@ -1433,6 +1457,7 @@ impl SharedSession {
         // `notify_one` stores at most one.
         let local_wake = Arc::new(Notify::new());
         let local = TokioSession::new(actions, observer, Arc::new(clock))
+            .with_node_clock(node_hlc.clone())
             .with_local_delivery_drain(LocalDeliveryDrain::DriveTask)
             .with_local_stage_wake(Arc::clone(&local_wake));
         // R2580 — the plane's face-shaped entry. Its `session` is a CLONE of
@@ -1474,6 +1499,7 @@ impl SharedSession {
             clock,
             local,
             local_wake,
+            node_hlc,
         })
     }
 
@@ -1551,6 +1577,7 @@ impl SharedSession {
         // allows. The premise is unchanged; what changed is that honouring the
         // field no longer breaks it.
         let session = TokioSession::new(actions.clone(), observer, Arc::new(self.clock))
+            .with_node_clock(self.node_hlc.clone())
             .with_local_delivery_drain(LocalDeliveryDrain::DriveTask);
 
         let mut guard = self.lock();
@@ -3188,22 +3215,39 @@ impl SharedSession {
     /// registry, it is what the plane needs: an advanced publisher owns an
     /// `@adv` cache queryable and an `@adv` liveliness token, and both are
     /// per-session entities a subscriber reaches over ONE face.
+    ///
+    /// R3064 -- THE IN-PROCESS PLANE IS THE AUTHORITY, and a refusal of its declaration is the
+    /// declaration's refusal. The plane is the SESSION as zenoh-c has it: one object that owns the
+    /// publisher whatever peers are or are not connected, so what it refuses, upstream's
+    /// `ze_declare_advanced_publisher` refuses, and the C ABI answers with an error and records
+    /// nothing. Before this the plane's `Err` was dropped with every face's, so a refusal that is a
+    /// property of the NODE (a cache with no miss detection on a node that holds no clock, which
+    /// upstream answers `Z_EGENERIC`) left a dead publisher and a success code: MEASURED, the
+    /// publisher put to nobody and its subscriber heard nothing. The faces stay best-effort,
+    /// because a face can be mid-teardown and a C caller has no per-face handle to retry with;
+    /// the plane has none of that, it cannot be mid-teardown while the session stands.
     pub fn declare_advanced_publisher(
         &self,
         keyexpr: String,
         options: AdvancedPublisherOptions,
-    ) -> AdvPubId {
+    ) -> Result<AdvPubId, AdvancedPublisherError> {
         let mut guard = self.lock();
         let id = guard.next_adv_pub_id;
         guard.next_adv_pub_id = guard.next_adv_pub_id.wrapping_add(1);
         // R2580 — the plane included. MEASURED against `libzenohc.so`: an
         // advanced publisher and an advanced subscriber on ONE session saw
         // nothing (`after=0` against upstream's `2`), while across a real face
-        // both saw both puts. ⚠ The plane's `runtime` is `None`, so the guard
-        // below does not enter for it; that is sound on this field's own terms
-        // (R2366 moved the one measured spawner onto the process partition) and
-        // the in-process leg is what holds it to that.
-        for face in guard.declaration_targets() {
+        // both saw both puts. The plane's `runtime` is `None`, so nothing is
+        // entered for it: its declaration asks the calling thread for no
+        // runtime (R2366 moved the beacon onto the process partition, and R3064
+        // removed the precondition that still said otherwise).
+        if let Some(plane) = guard.local_face.as_mut() {
+            let zid = plane.session.actions().params.zid.clone();
+            let pub_ =
+                AdvancedPublisher::declare(&plane.session, keyexpr.clone(), options.clone(), zid)?;
+            plane.adv_pubs.insert(id, pub_);
+        }
+        for face in guard.faces.values_mut() {
             let zid = face.session.actions().params.zid.clone();
             // Enter the face's own runtime: this call site is the C application
             // thread, and a declaration may spawn. R2366 moved the beacon onto
@@ -3230,7 +3274,7 @@ impl SharedSession {
             keyexpr,
             options,
         });
-        id
+        Ok(id)
     }
 
     /// Publish one payload through a C advanced publisher, on every face that
@@ -3409,13 +3453,24 @@ impl SharedSession {
             let _guard = runtime.as_ref().map(|rt| rt.enter());
             // The local plane has no wire to name anything on; see [`Unnamed`].
             let for_target = match target {
-                DeclarationTarget::Local if hosted => {
-                    options
-                        .clone()
-                        .with_declaration_forms(Arc::new(IdentifiedForms {
-                            id,
-                            host: Arc::new(Unnamed),
-                        }))
+                // R3064 -- the plane's GETs are SESSION-LOCAL, as the groups' copy on it is
+                // (see `join_group`) and the plane's leg of a C `z_get` is. The plane has no
+                // wire: its link is inert, so a query issued with the default destination
+                // registers a remote half whose Final can never arrive, the pending entry waits
+                // for it, and nothing sweeps the plane's deadlines. For a subscriber with
+                // `history` that is the startup GET, and until it finishes every live sample is
+                // HELD for the history to come first: MEASURED, a same-session subscriber with
+                // history, with periodic recovery, or both received nothing while the real
+                // library delivered all three puts, and the declaration said success.
+                DeclarationTarget::Local if hosted => options
+                    .clone()
+                    .with_get_locality(Locality::SessionLocal)
+                    .with_declaration_forms(Arc::new(IdentifiedForms {
+                        id,
+                        host: Arc::new(Unnamed),
+                    })),
+                DeclarationTarget::Local => {
+                    options.clone().with_get_locality(Locality::SessionLocal)
                 }
                 // Cloned per face: the loop declares one subscriber on each,
                 // and the options are no longer `Copy` (R311y826).
@@ -4423,6 +4478,177 @@ mod matching_aggregate_tests {
         assert!(
             retire_matching_sink(&state).is_some(),
             "the sink is still there to retire once the callback has left"
+        );
+    }
+}
+
+/// R3064 -- what a C advanced publisher's declaration answers, and whether the in-process plane
+/// holds the publisher it was declared on. The differential
+/// (`zenoh_c_advanced_publisher_declare_twice_and_diff`) is the proof against the real library; these
+/// are the registry-level cases that need no oracle and no drive thread.
+#[cfg(test)]
+mod advanced_declaration_tests {
+    use super::*;
+    use std::time::Duration;
+    use wz_runtime_tokio::advanced_cache::CacheConfig;
+    use wz_runtime_tokio::advanced_publisher::{MissDetectionConfig, Sequencing};
+    use wz_runtime_tokio::node_clock::TimestampingEnabled;
+    use wz_runtime_tokio::session_glue::WhatAmI;
+
+    fn test_zid() -> Vec<u8> {
+        vec![0x22; 16]
+    }
+
+    /// A cache with no miss detection: it sequences by timestamp, so it needs a node clock.
+    fn cache_only() -> AdvancedPublisherOptions {
+        // Assigned, not built as a literal: the options are `#[non_exhaustive]`, which is how
+        // the C ABI's own mapping builds them too.
+        let mut options = AdvancedPublisherOptions::default();
+        options.sequencing = Sequencing::Timestamp;
+        options.cache = Some(CacheConfig::default());
+        options
+    }
+
+    /// THE REFUSAL IS THE DECLARATION'S, and it records nothing. A node that holds no clock refuses
+    /// the declaration, as upstream's does, and the registry keeps no entry for a face that comes up
+    /// later to replay; a node that holds one accepts it, and the plane holds the publisher so a put
+    /// has somewhere to go.
+    #[test]
+    fn a_cache_without_miss_detection_is_refused_on_a_node_with_no_clock_and_accepted_on_one_with()
+    {
+        let bare = SharedSession::new(TokioTime::new(), test_zid()).expect("test host entropy");
+        assert!(
+            matches!(
+                bare.declare_advanced_publisher("wz/adv".to_owned(), cache_only()),
+                Err(AdvancedPublisherError::TimestampingDisabled)
+            ),
+            "a node with no clock must refuse a publisher that sequences by timestamp"
+        );
+        assert_eq!(
+            bare.lock().adv_pubs.len(),
+            0,
+            "a refused declaration records no entry, so no later face replays it"
+        );
+
+        let clock = NodeHlc::for_node(&test_zid(), WhatAmI::Peer, TimestampingEnabled::all(true));
+        let clocked = SharedSession::new_with_node_clock(TokioTime::new(), test_zid(), clock)
+            .expect("test host entropy");
+        let id = clocked
+            .declare_advanced_publisher("wz/adv".to_owned(), cache_only())
+            .expect("a node that holds a clock accepts it");
+        assert_eq!(
+            clocked.advanced_publisher_put(id, b"x"),
+            1,
+            "the in-process plane holds the publisher, so the put has a place to go"
+        );
+    }
+
+    /// A publisher with a cache and miss detection on a node that holds a clock, and a subscriber of
+    /// the SAME session built with `subscriber`, and three puts. Returns how many the subscriber's
+    /// callback ran for once the plane has been drained to quiescence, which is the whole of what a
+    /// session with no peer can do: there is no drive thread here, so every delivery that happens
+    /// is one `drain_local_plane` made.
+    fn same_session_received(subscriber: AdvancedSubscriberOptions) -> usize {
+        let clock = NodeHlc::for_node(&test_zid(), WhatAmI::Peer, TimestampingEnabled::all(true));
+        let shared = SharedSession::new_with_node_clock(TokioTime::new(), test_zid(), clock)
+            .expect("test host entropy");
+        let seen = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let counter = seen.clone();
+        let sink: AdvancedSubscriberSink = Arc::new(move || {
+            let counter = counter.clone();
+            (
+                Box::new(move |_sample| {
+                    counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                }),
+                Box::new(|_miss| {}),
+            )
+        });
+        shared.declare_advanced_subscriber("wz/adv/same".to_owned(), subscriber, sink);
+        let mut options = AdvancedPublisherOptions::default();
+        options.sequencing = Sequencing::SequenceNumber;
+        options.cache = Some(CacheConfig::default());
+        options.sample_miss_detection =
+            MissDetectionConfig::default().heartbeat(Duration::from_millis(50));
+        let id = shared
+            .declare_advanced_publisher("wz/adv/same".to_owned(), options)
+            .expect("a clocked node accepts it");
+        for _ in 0..3 {
+            shared.advanced_publisher_put(id, b"x");
+        }
+        // Drained until two passes in a row find nothing, with a bound so a plane that never
+        // quiesces fails the count and not the run.
+        let deadline = std::time::Instant::now() + Duration::from_secs(3);
+        let mut quiet = 0;
+        while quiet < 2 && std::time::Instant::now() < deadline {
+            if shared.drain_local_plane() == 0 {
+                quiet += 1;
+                std::thread::sleep(Duration::from_millis(20));
+            } else {
+                quiet = 0;
+            }
+        }
+        seen.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    /// THE SUBSCRIBER'S OPTIONS DO NOT DECIDE WHETHER A SAME-SESSION PUBLISHER IS HEARD. MEASURED
+    /// against the real library, all of these hear all three puts; on wz the subscriber with history
+    /// heard none, because its startup GET was issued on the plane and nothing ever completed it, so
+    /// the live samples it was holding for the history never came out.
+    #[test]
+    fn a_history_subscriber_of_the_publishers_own_session_hears_it() {
+        let history = AdvancedSubscriberOptions::default()
+            .with_history(wz_runtime_tokio::advanced_subscriber::HistoryConfig::new());
+        assert_eq!(same_session_received(history), 3);
+    }
+
+    /// A subscriber with PERIODIC recovery: its declaration used to be refused on the plane for
+    /// want of a runtime on the calling thread, and the refusal was dropped, so the subscriber was
+    /// dead and the declare said success.
+    #[test]
+    fn a_periodic_recovery_subscriber_of_the_publishers_own_session_hears_it() {
+        let periodic = AdvancedSubscriberOptions::default().with_recovery(
+            wz_runtime_tokio::advanced_subscriber::RecoveryConfig::new()
+                .with_periodic_queries(Duration::from_millis(500)),
+        );
+        assert_eq!(same_session_received(periodic), 3);
+    }
+
+    /// Recovery driven by the publisher's HEARTBEAT, and recovery with history together: the two
+    /// shapes the measurement found delivering and the one it found dead, in one subscriber.
+    #[test]
+    fn heartbeat_recovery_and_recovery_with_history_hear_the_publishers_own_session() {
+        let heartbeat = AdvancedSubscriberOptions::default().with_recovery(
+            wz_runtime_tokio::advanced_subscriber::RecoveryConfig::new().with_heartbeat(),
+        );
+        assert_eq!(same_session_received(heartbeat), 3);
+        let all = AdvancedSubscriberOptions::default()
+            .with_history(wz_runtime_tokio::advanced_subscriber::HistoryConfig::new())
+            .with_recovery(
+                wz_runtime_tokio::advanced_subscriber::RecoveryConfig::new()
+                    .with_periodic_queries(Duration::from_millis(500)),
+            );
+        assert_eq!(same_session_received(all), 3);
+    }
+
+    /// THE PLANE ACCEPTS A HEARTBEAT FROM THE CALLING THREAD. This `#[test]` runs on a thread that is
+    /// inside no tokio runtime, as a C application thread is, and the declaration used to be refused
+    /// there on a precondition the beacon no longer had (it runs on the process's own runtime).
+    /// Before that was removed the refusal was dropped by the fan-out and the put below delivered to
+    /// nobody; the count is what separates a plane that holds the publisher from one that does not.
+    #[test]
+    fn a_heartbeat_declares_on_the_plane_from_a_thread_that_is_inside_no_runtime() {
+        let shared = SharedSession::new(TokioTime::new(), test_zid()).expect("test host entropy");
+        let mut options = AdvancedPublisherOptions::default();
+        options.sequencing = Sequencing::SequenceNumber;
+        options.sample_miss_detection =
+            MissDetectionConfig::default().heartbeat(Duration::from_millis(50));
+        let id = shared
+            .declare_advanced_publisher("wz/adv".to_owned(), options)
+            .expect("a heartbeat asks the calling thread for no runtime");
+        assert_eq!(
+            shared.advanced_publisher_put(id, b"x"),
+            1,
+            "the plane must hold the publisher that was declared on it"
         );
     }
 }

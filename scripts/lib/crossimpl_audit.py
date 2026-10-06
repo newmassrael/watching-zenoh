@@ -959,7 +959,14 @@ HOST_GATED_CI_TARGETS: dict[str, str] = {
 # chunk put through an advanced publisher, judged by upstream's own Rust `z_sub_shm`,
 # `api-compat-c wz->zenoh partial`, the class legs 7 and 8 already declare against the same lane).
 # No new class, so no new execution lane is owed. Measured by `scripts/audit-crossimpl-proof.sh`.
-FOREIGN_ADJUDICATOR_LINKS = 1002
+# R3064 -- 1002 -> 1006, RISING by four, each a new `wz-proves` line: leg 15 of
+# `zenoh_c_shm_and_advanced_on_wz_capi_c.rs` (a cache-only advanced publisher judged by upstream's
+# own Rust `z_sub_shm`, `api-compat-c wz->zenoh partial`) and the three legs of the advanced-publisher
+# declaration differential (the return code of each configuration, the same-session delivery of
+# each subscriber shape, and which nodes hold a clock, each `api-compat-c zenoh-c->wz partial`).
+# Each class is declared by an earlier witness against the same lane, so no new execution lane is
+# owed. Measured by `scripts/audit-crossimpl-proof.sh` at this round's tree.
+FOREIGN_ADJUDICATOR_LINKS = 1006
 
 # ── Execution disclosure ────────────────────────────────────────────────────────
 #

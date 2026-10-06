@@ -155,7 +155,8 @@ pub struct AdvancedPublisherOptions {
     /// R311y85 — last-sample-miss-detection: when its `state_publisher` is set,
     /// spawn the heartbeat beacon task. Requires `SequenceNumber` sequencing and
     /// the `ext-pubsub-sample-miss-detection` feature (a documented no-op
-    /// otherwise), plus a tokio runtime at declare time for the spawn.
+    /// otherwise). The task runs on the process's own `net` runtime, as upstream's
+    /// does, so the declaring thread need not be inside a tokio runtime (R3064).
     pub sample_miss_detection: MissDetectionConfig,
     /// R2618 — the publisher-side locality predicate, upstream's
     /// `zenoh-ext/src/advanced_publisher.rs` @ `pub fn allowed_destination(mut self, destination: Locality) -> Self {`.
@@ -306,13 +307,6 @@ pub enum AdvancedPublisherError {
     Cache(QueryableError),
     /// The `@adv` liveliness token declaration was rejected.
     Token(LivelinessAliasError),
-    /// R311y90 (review C5) — the heartbeat beacon task could not be spawned: no
-    /// tokio runtime was active. An [`AdvancedPublisher`] with a
-    /// `sample_miss_detection` heartbeat spawns a background beacon task, so it
-    /// must be declared from within a tokio runtime context. Fail-clear instead
-    /// of the `tokio::spawn` panic.
-    #[cfg(feature = "ext-pubsub-sample-miss-detection")]
-    NoRuntime,
     /// R2485 — [`Sequencing::Timestamp`] was asked for on a node that does not
     /// stamp, so the timestamps this publisher's downstream de-duplication
     /// keys on would not come from an HLC at all.
@@ -430,13 +424,6 @@ pub trait AdvancedPublisherPlane: Send + Sync + 'static {
     /// timestamps never depended on that says so.
     fn stamps(&self) -> bool {
         self.node_hlc().is_stamping()
-    }
-
-    /// Whether the beacon task can be spawned from the calling thread. A refusal
-    /// is reported BEFORE anything is declared, so it never leaves a
-    /// half-declared publisher to roll back.
-    fn check_can_spawn(&self) -> Result<(), AdvancedPublisherError> {
-        Ok(())
     }
 
     /// Declare the plain publisher on `keyexpr`. The wire knobs in `options` are
@@ -654,16 +641,6 @@ where
         self.session.clock()
     }
 
-    /// The runtime check this constructor has always made: the beacon task is
-    /// spawned from the calling context.
-    fn check_can_spawn(&self) -> Result<(), AdvancedPublisherError> {
-        #[cfg(feature = "ext-pubsub-sample-miss-detection")]
-        {
-            tokio::runtime::Handle::try_current().map_err(|_| AdvancedPublisherError::NoRuntime)?;
-        }
-        Ok(())
-    }
-
     fn declare_publisher(
         &self,
         keyexpr: &str,
@@ -824,17 +801,17 @@ impl<P: AdvancedPublisherPlane> AdvancedPublisherOn<P> {
             return Err(AdvancedPublisherError::TimestampingDisabled);
         }
 
-        // R311y90 (review C5) — fail fast & clear if off-runtime: the heartbeat
-        // beacon (below) is a spawned task, which PANICS without a runtime.
-        // Check the spawn precondition BEFORE declaring anything so no
-        // half-declared publisher needs rollback. `heartbeat_spawn_params` is the
-        // SSOT for "will spawn the beacon" — the spawn arm below gates on the same.
-        // Whether the calling context CAN spawn is the plane's to say: a runtime
-        // session spawns from the thread it is called on, a C session does not.
-        #[cfg(feature = "ext-pubsub-sample-miss-detection")]
-        if heartbeat_spawn_params(&options).is_some() {
-            plane.check_can_spawn()?;
-        }
+        // R3064 -- there is no off-runtime precondition here, and the one R311y90
+        // put here was false from R2366 on. The heartbeat beacon was a bare
+        // `tokio::spawn`, which PANICS without a runtime, so a declare off one was
+        // refused with a variant of its own; R2366 moved the beacon onto the
+        // process's `net` runtime (`WzRuntime::Net`, below), as upstream spawns the
+        // same task, and nothing the declare does asks the calling thread for a
+        // runtime any more. What survived was a refusal of a declaration that would
+        // have worked, and on a C session that is the ordinary case: the in-process
+        // plane is declared from the C application thread, the refusal was swallowed
+        // by the best-effort fan-out, and the publisher beaconed to nobody and put to
+        // nobody while the declare reported success.
         let keyexpr = keyexpr.into();
 
         // `@adv/pub/<zid>/<eid|uhlc>/_` — the detection + recovery suffix
@@ -926,8 +903,8 @@ impl<P: AdvancedPublisherPlane> AdvancedPublisherOn<P> {
         //
         // Placed before the FIRST declaration, the wrapped publisher's included,
         // so a refusal never leaves a half-declared publisher to roll back — the
-        // same ordering rule the `TimestampingDisabled` and `NoRuntime`
-        // preconditions above are placed by. That costs nothing the old order
+        // same ordering rule the `TimestampingDisabled` precondition above is
+        // placed by. That costs nothing the old order
         // bought: it burnt an entity id on a refusal, and this burns none.
         crate::keyexpr_canon::check_outbound_keyexpr_pico_safe(&adv_keyexpr_for(0))
             .map_err(AdvancedPublisherError::InvalidAdvKeyexpr)?;
@@ -2290,15 +2267,31 @@ mod tests {
         );
     }
 
-    /// R311y90 (review C5) regression: declaring an advanced publisher with a
-    /// heartbeat beacon OFF a tokio runtime must FAIL CLEAR with NoRuntime, not
-    /// panic inside tokio::spawn. This `#[test]` runs outside any runtime, so
-    /// Handle::try_current() returns Err -> the declare returns NoRuntime before
-    /// any cache / token is declared. Pre-fix the beacon spawn panicked (aborting
-    /// the test); the guard makes it a clean Result.
+    /// Whether a frame beyond `after` reaches the link within a few seconds. The beacon is a
+    /// task on the process's own `net` runtime, so its emission is a thing that happens on
+    /// ANOTHER thread, and the only honest way to ask whether it did is to look for its frame.
+    #[cfg(feature = "ext-pubsub-sample-miss-detection")]
+    fn a_frame_follows(driver: &crate::test_fixtures::RecordingLinkDriver, after: usize) -> bool {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while driver.frame_count() <= after && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        driver.frame_count() > after
+    }
+
+    /// R3064 -- declaring an advanced publisher with a heartbeat beacon OFF a tokio runtime
+    /// DECLARES, and the beacon is emitted. This `#[test]` runs outside any runtime.
+    ///
+    /// R311y90 asserted the opposite (a refusal with a variant of its own) because the beacon
+    /// was a bare `tokio::spawn`, which panics without a runtime. R2366 moved the task onto the
+    /// process's `net` runtime, as upstream spawns it, and the refusal outlived its reason: a C
+    /// program declares from its own thread, which is never inside one, so the in-process plane
+    /// of a C session refused a declaration upstream accepts, and the refusal was swallowed. The
+    /// witness that the claim is TRUE is the frame: a declaration that returned `Ok` and
+    /// spawned nothing would pass an assertion on the result alone.
     #[cfg(feature = "ext-pubsub-sample-miss-detection")]
     #[test]
-    fn declare_with_heartbeat_off_runtime_fails_clear_not_panic() {
+    fn declare_with_heartbeat_off_runtime_declares_and_beacons() {
         use std::sync::Mutex;
         use std::time::Duration;
 
@@ -2306,12 +2299,12 @@ mod tests {
         use crate::runtime_impl::TokioTime;
         use crate::session::TokioSession;
 
-        let (actions, _driver) = crate::test_fixtures::recording_actions();
+        let (actions, driver) = crate::test_fixtures::recording_actions();
         let observer = Arc::new(Mutex::new(ApplicationLayerObserver::new()));
         let clock = Arc::new(TokioTime::new());
         let session = TokioSession::new(actions, observer, clock);
 
-        let result = AdvancedPublisher::declare(
+        let publisher = AdvancedPublisher::declare(
             &session,
             "demo/data",
             AdvancedPublisherOptions {
@@ -2319,14 +2312,18 @@ mod tests {
                 cache: None,
                 publisher_detection: false,
                 sample_miss_detection: MissDetectionConfig::default()
-                    .heartbeat(Duration::from_millis(100)),
+                    .heartbeat(Duration::from_millis(50)),
                 ..AdvancedPublisherOptions::default()
             },
             vec![0x09],
-        );
+        )
+        .expect("a heartbeat declares off a tokio runtime: the beacon needs none");
+        // The beacon states the last sequence number, and says nothing before there is one.
+        publisher.put(b"sample").expect("the first put publishes");
+        let after_put = driver.frame_count();
         assert!(
-            matches!(result, Err(AdvancedPublisherError::NoRuntime)),
-            "heartbeat beacon off-runtime must fail clear with NoRuntime, not panic"
+            a_frame_follows(&driver, after_put),
+            "the beacon was never emitted: the declaration returned Ok and spawned nothing"
         );
     }
 
@@ -2341,11 +2338,13 @@ mod tests {
     /// builder assigns `Sequencing::SequenceNumber` as its first statement and
     /// its `Sequencing` is `pub(crate)`, so the mode is never a user choice.
     ///
-    /// THE DISCRIMINATOR IS THE SPAWN ATTEMPT, borrowed from the test above:
-    /// off a tokio runtime a beacon spawn fails clear with `NoRuntime`. So
-    /// "did the request win?" becomes observable without waiting on a timer —
-    /// before the fix this declare returned `Ok`, because there was no beacon
-    /// to spawn.
+    /// THE DISCRIMINATOR IS THE BEACON ITSELF. Until R3064 it was the spawn
+    /// attempt (off a tokio runtime a beacon spawn failed with `NoRuntime`, so
+    /// "did the request win?" was observable without waiting on a timer), but
+    /// that refusal was a precondition R2366 had already made false, and the
+    /// test above says why it went. A publisher whose request lost declares Ok
+    /// and emits no beacon, so the frame is the thing to look for, and the wait
+    /// is the price of looking at a task on another runtime.
     ///
     /// `Sequencing::None` and not `Timestamp` on purpose: `Timestamp` carries
     /// its own precondition (`TimestampingDisabled` on a non-stamping node), so
@@ -2360,12 +2359,12 @@ mod tests {
         use crate::runtime_impl::TokioTime;
         use crate::session::TokioSession;
 
-        let (actions, _driver) = crate::test_fixtures::recording_actions();
+        let (actions, driver) = crate::test_fixtures::recording_actions();
         let observer = Arc::new(Mutex::new(ApplicationLayerObserver::new()));
         let clock = Arc::new(TokioTime::new());
         let session = TokioSession::new(actions, observer, clock);
 
-        let result = AdvancedPublisher::declare(
+        let publisher = AdvancedPublisher::declare(
             &session,
             "demo/data",
             AdvancedPublisherOptions {
@@ -2374,16 +2373,18 @@ mod tests {
                 cache: None,
                 publisher_detection: false,
                 sample_miss_detection: MissDetectionConfig::default()
-                    .heartbeat(Duration::from_millis(100)),
+                    .heartbeat(Duration::from_millis(50)),
                 ..AdvancedPublisherOptions::default()
             },
             vec![0x09],
-        );
+        )
+        .expect("the declaration is valid whichever sequencing the caller named");
+        publisher.put(b"sample").expect("the first put publishes");
+        let after_put = driver.frame_count();
         assert!(
-            matches!(result, Err(AdvancedPublisherError::NoRuntime)),
-            "the miss-detection request must win over the named sequencing, so \
-             a beacon IS spawned (and off-runtime that spawn fails clear); \
-             before R2558 this returned Ok and silently never beaconed"
+            a_frame_follows(&driver, after_put),
+            "the miss-detection request must win over the named sequencing, so a beacon IS \
+             emitted; before R2558 this declared Ok and silently never beaconed"
         );
     }
 

@@ -2496,6 +2496,123 @@ int main(int argc, char **argv) {
 }
 "#;
 
+/// An advanced publisher declared with a CACHE and NO miss detection, which is the configuration
+/// `z_advanced_pub.c`'s own comment names as the alternative to miss detection, putting plain bytes
+/// once a second. Timestamping is enabled, as that example does, because upstream refuses this
+/// declaration on a node that holds no clock. Ours, and the same source is compiled for both arms.
+/// Arguments: the endpoint to dial, the key.
+const CACHE_ONLY_ADVANCED_PUBLISHER: &str = r#"#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <unistd.h>
+#include "zenoh.h"
+
+int main(int argc, char **argv) {
+    setvbuf(stdout, NULL, _IONBF, 0);
+    if (argc != 3) { return 2; }
+    z_owned_config_t config;
+    z_config_default(&config);
+    char connect[512];
+    snprintf(connect, sizeof connect, "[\"%s\"]", argv[1]);
+    if (zc_config_insert_json5(z_loan_mut(config), Z_CONFIG_CONNECT_KEY, connect) < 0) { return 3; }
+    if (zc_config_insert_json5(z_loan_mut(config), Z_CONFIG_MULTICAST_SCOUTING_KEY, "false") < 0) { return 3; }
+    if (zc_config_insert_json5(z_loan_mut(config), Z_CONFIG_ADD_TIMESTAMP_KEY, "true") < 0) { return 3; }
+    z_owned_session_t s;
+    if (z_open(&s, z_move(config), NULL) < 0) { printf("open failed\n"); return 4; }
+    z_view_keyexpr_t ke;
+    if (z_view_keyexpr_from_str(&ke, argv[2]) < 0) { return 5; }
+    ze_owned_advanced_publisher_t pub;
+    ze_advanced_publisher_options_t opts;
+    ze_advanced_publisher_options_default(&opts);
+    ze_advanced_publisher_cache_options_default(&opts.cache);
+    opts.cache.max_samples = 1;
+    if (ze_declare_advanced_publisher(z_loan(s), &pub, z_loan(ke), &opts) < 0) { printf("declare failed\n"); return 5; }
+    for (int idx = 0; idx < 1000; ++idx) {
+        z_sleep_s(1);
+        char text[64];
+        snprintf(text, sizeof text, "[%4d] cache-only", idx);
+        z_owned_bytes_t payload;
+        z_bytes_copy_from_str(&payload, text);
+        ze_advanced_publisher_put_options_t popts;
+        ze_advanced_publisher_put_options_default(&popts);
+        if (ze_advanced_publisher_put(z_loan(pub), z_move(payload), &popts) < 0) { printf("put failed\n"); return 8; }
+        printf("put %d\n", idx);
+    }
+    return 0;
+}
+"#;
+
+/// LEG 15 -- an advanced publisher with a cache and NO miss detection DELIVERS to upstream's own
+/// `z_sub_shm` on wz's ABI, as on the real library. On wz it was dead and said nothing: it sequences
+/// by timestamp, which upstream's declaration refuses on a node that holds no clock, wz gave no C
+/// session a clock, and the refusal was dropped by the fan-out, so the declare reported success and
+/// every put went to nobody (MEASURED, red before green: no sample reached the subscriber, nor a
+/// wz subscriber). Both halves are witnessed by the sibling differential
+/// (`zenoh_c_advanced_publisher_declare_twice_and_diff`); this is the leg that shows it end to end
+/// against a subscriber that shares no code with either arm.
+///
+/// The reference arm is the oracle: a reference that delivers nothing means the machine's oracle or
+/// the subscriber's offer is not what this leg assumes, and the comparison says nothing.
+// wz-proves: api-compat-c wz->zenoh partial
+#[test]
+#[ignore = "compiles a C program with cc and spawns upstream's own z_sub_shm; needs the \
+            machine-local SHARED-MEMORY zenoh-c oracle and the shared-memory zenohd build; \
+            run-ci Layer C1cc drives it"]
+fn a_cache_only_advanced_publisher_reaches_a_real_z_sub_shm_on_wz_capi_c() {
+    let Some((include, libdir_ref, _examples)) = oracle_or_note() else {
+        return;
+    };
+    let Some(z_sub_shm) = zenoh_shm_example_binary("z_sub_shm") else {
+        eprintln!(
+            "skip: no z_sub_shm at target/zenohd-shm (run `ZENOHD_SHM=1 scripts/build-zenohd.sh`)"
+        );
+        return;
+    };
+    let dir = tempfile::tempdir().expect("tempdir for the compiled arms");
+    let src_dir = dir.path().join("src");
+    std::fs::create_dir_all(&src_dir).expect("source dir");
+    std::fs::write(
+        src_dir.join("cache_only_advanced_pub.c"),
+        CACHE_ONLY_ADVANCED_PUBLISHER,
+    )
+    .expect("write the publisher source");
+    let (on_wz, libdir_wz) = arm_binary(
+        "cache_only_advanced_pub",
+        Arm::Wz,
+        dir.path(),
+        &include,
+        &src_dir,
+        &libdir_ref,
+    );
+    let (on_ref, libdir_r) = arm_binary(
+        "cache_only_advanced_pub",
+        Arm::Reference,
+        dir.path(),
+        &include,
+        &src_dir,
+        &libdir_ref,
+    );
+
+    let key = "demo/example/cache-only";
+    let settle = Duration::from_millis(2500);
+    let args = |endpoint: &str| vec![endpoint.to_string(), key.to_string()];
+    let ref_log =
+        observe_with_z_sub_shm(&z_sub_shm, &on_ref, &libdir_r, Arm::Reference, args, settle);
+    let wz_log = observe_with_z_sub_shm(&z_sub_shm, &on_wz, &libdir_wz, Arm::Wz, args, settle);
+    let (wz_tags, ref_tags) = (received_tags(&wz_log), received_tags(&ref_log));
+    assert!(
+        !ref_tags.is_empty() && ref_tags.iter().all(|(ke, tag)| ke == key && tag == "RAW"),
+        "the reference arm's cache-only advanced publisher did not reach upstream's z_sub_shm: \
+         {ref_tags:?}, so the comparison below says nothing about it\n--- reference ---\n{ref_log}"
+    );
+    assert_eq!(
+        wz_tags, ref_tags,
+        "the two arms of the SAME cache-only advanced publisher reached upstream's z_sub_shm \
+         differently. wz: {wz_tags:?}; the real libzenohc: {ref_tags:?}.\n--- wz ---\n{wz_log}\n---\
+         reference ---\n{ref_log}"
+    );
+}
+
 /// LEG 14 -- a chunk put through an ADVANCED publisher reaches upstream's own `z_sub_shm` as shared
 /// memory, on wz's ABI as on the real library: the subscriber labels each sample `SHM`, where it
 /// labelled the same program's samples `RAW` from wz (MEASURED, red before green). The advanced

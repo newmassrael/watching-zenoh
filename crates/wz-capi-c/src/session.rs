@@ -13,11 +13,12 @@ use std::ffi::c_void;
 use wz_capi_core::drive::{
     open_blocking, CapiTlsConfig, ConfiguredZid, DialPhase, OpenError, OpenStance, SessionState,
 };
+use wz_runtime_tokio::node_clock::TimestampingEnabled;
 use wz_runtime_tokio::retry_period::RetryPolicy;
 use wz_runtime_tokio::session_glue::{TxQueueConf, WhatAmI};
 use wz_runtime_tokio::session_open::{SessionOffer, TransportMode};
 use wz_runtime_tokio::startup_phase::PhasePolicy;
-use wz_runtime_tokio::zenoh_config::ZenohNodeConfig;
+use wz_runtime_tokio::zenoh_config::{ZenohConfigIngest, ZenohNodeConfig};
 
 use crate::abi::{
     z_loaned_session_t, z_moved_config_t, z_moved_session_t, z_owned_session_t, Handle,
@@ -163,12 +164,12 @@ fn session_offer(node: &ZenohNodeConfig) -> Result<SessionOffer, QosWithLowlaten
 /// reader refuses (a key zenoh does not have, two keys that cannot both be
 /// nested, a value out of range) is refused by the open too, which is where
 /// upstream stands: its insert refuses the same keys before an open is reached.
-fn read_node(cfg: &ConfigState, whatami: WhatAmI) -> Option<ZenohNodeConfig> {
+fn read_node(cfg: &ConfigState, whatami: WhatAmI) -> Option<ZenohConfigIngest> {
     let document = cfg
         .with_default_mode(whatami.to_str())
         .render_nested()
         .ok()?;
-    Some(ZenohNodeConfig::from_json5(&document).ok()?.config)
+    ZenohNodeConfig::from_json5(&document).ok()
 }
 
 /// Construct and open a session, consuming the moved config (zenoh-c `z_open`).
@@ -206,7 +207,15 @@ pub unsafe extern "C" fn z_open(
             .collect();
         let listen = cfg.first(LISTEN_KEY).map(str::to_owned);
         let whatami = dial_whatami(cfg);
-        let node = read_node(cfg, whatami);
+        let ingest = read_node(cfg, whatami);
+        // R3064 -- the clock map the document means. Read off the ingest and not the node
+        // config, because only the ingest knows whether the key was NAMED: the field reads
+        // `false` for a document that never mentioned it, and a router's own default is on.
+        let timestamping = ingest.as_ref().map_or_else(
+            TimestampingEnabled::default,
+            ZenohConfigIngest::timestamping_enabled,
+        );
+        let node = ingest.map(|ingest| ingest.config);
         let phase = node.as_ref().map(|node| dial_phase(node, whatami));
         let handle = unsafe { (*config)._this.handle };
         // SAFETY: a live `Box<ConfigState>` this crate leaked; consumed here.
@@ -279,6 +288,7 @@ pub unsafe extern "C" fn z_open(
                 // zenoh-c has no switch for a session's read task: its runtime
                 // drives the session from the open.
                 start_read_task: true,
+                timestamping,
             },
         ) {
             Ok(state) => {

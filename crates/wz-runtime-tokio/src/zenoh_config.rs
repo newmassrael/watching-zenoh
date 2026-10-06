@@ -4018,6 +4018,29 @@ pub struct ZenohConfigIngest {
 }
 
 impl ZenohConfigIngest {
+    /// R3064 -- the `timestamping.enabled` map this document means, for building a node's clock
+    /// ([`crate::node_clock::NodeHlc::for_node`]).
+    ///
+    /// A document that NAMES the key states ONE role's entry, the one this node plays, so that
+    /// entry is replaced and the other two stay at zenoh's shipped values
+    /// ([`TimestampingEnabled::with_role`]); a document that does not name it leaves all three at
+    /// the shipped values, and it is [`named`] that tells the two apart, because
+    /// [`ZenohNodeConfig::timestamping`] reads `false` for a document that never mentioned the key
+    /// and a router's own default is `true`. Reading the field alone would switch a router's clock
+    /// off for a config that said nothing.
+    ///
+    /// [`TimestampingEnabled`]: crate::node_clock::TimestampingEnabled
+    /// [`TimestampingEnabled::with_role`]: crate::node_clock::TimestampingEnabled::with_role
+    /// [`named`]: ZenohConfigIngest::named
+    pub fn timestamping_enabled(&self) -> crate::node_clock::TimestampingEnabled {
+        let shipped = crate::node_clock::TimestampingEnabled::default();
+        if self.named.contains(&"timestamping/enabled") {
+            shipped.with_role(self.config.mode, self.config.timestamping)
+        } else {
+            shipped
+        }
+    }
+
     /// The FOURTH answer: what this document's silence about `mode` means.
     ///
     /// R2109 (open-debt item 514). `Some` exactly when the document named no
@@ -6548,6 +6571,51 @@ fn push_endpoints(endpoints: &[String], out: &mut String) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// R3064 -- the clock map a document means: the role it names is replaced and the others keep
+    /// zenoh's shipped values, and a document that never names the key means the shipped map WHOLE,
+    /// which for a router is ON. The third case is the one a read of
+    /// [`ZenohNodeConfig::timestamping`] alone gets wrong, since that field reads `false` for
+    /// silence; the fourth is the per-role table form.
+    #[test]
+    fn the_clock_map_a_document_means_follows_the_role_it_names_and_the_shipped_default_otherwise()
+    {
+        use crate::node_clock::TimestampingEnabled;
+        let map = |doc: &str| {
+            ZenohNodeConfig::from_json5(doc)
+                .expect("the document parses")
+                .timestamping_enabled()
+        };
+
+        assert_eq!(
+            map(r#"{ "mode": "peer", "timestamping": { "enabled": true } }"#),
+            TimestampingEnabled {
+                router: true,
+                peer: true,
+                client: false
+            },
+            "a peer that states true turns its OWN entry on and leaves the others shipped"
+        );
+        assert_eq!(
+            map(r#"{ "mode": "router", "timestamping": { "enabled": false } }"#),
+            TimestampingEnabled {
+                router: false,
+                peer: false,
+                client: false
+            },
+            "a router that states false turns its own entry off"
+        );
+        assert_eq!(
+            map(r#"{ "mode": "router" }"#),
+            TimestampingEnabled::default(),
+            "silence is the shipped map, and a router's shipped entry is ON"
+        );
+        assert!(
+            map(r#"{ "mode": "peer", "timestamping": { "enabled": { "router": false, "peer": true } } }"#)
+                .get(wz_codecs::whatami::WhatAmI::Peer),
+            "the per-role table is read at the row this node plays"
+        );
+    }
 
     #[test]
     fn a_default_config_is_zenohs_own_defaults() {

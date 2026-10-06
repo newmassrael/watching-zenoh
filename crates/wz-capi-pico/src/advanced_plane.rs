@@ -115,12 +115,6 @@ impl AdvancedPublisherPlane for PicoPlane {
         true
     }
 
-    /// The beacon runs on the process's own `net` runtime, which no calling
-    /// thread has to be inside of: a C program declares from its own thread.
-    fn check_can_spawn(&self) -> Result<(), AdvancedPublisherError> {
-        Ok(())
-    }
-
     fn declare_publisher(
         &self,
         keyexpr: &str,

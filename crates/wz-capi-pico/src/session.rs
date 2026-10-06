@@ -333,6 +333,11 @@ pub unsafe extern "C" fn z_open(
                 // key.
                 zid: None,
                 start_read_task,
+                // pico has no `timestamping` config key, and its advanced publisher
+                // never consults this session's clock (its own plane stamps from the
+                // device's, `crate::advanced_plane`). The shipped map is what every
+                // session of this registry was given before the field existed.
+                timestamping: wz_runtime_tokio::node_clock::TimestampingEnabled::default(),
             },
         ) {
             Ok(state) => {

@@ -2585,11 +2585,10 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
     /// let session = TokioSession::new(actions, observer, clock)
     ///     .with_timestamping(TimestampingEnabled::default().with_role(role, on));
     /// ```
-    pub fn with_timestamping(mut self, enabled: crate::node_clock::TimestampingEnabled) -> Self
+    pub fn with_timestamping(self, enabled: crate::node_clock::TimestampingEnabled) -> Self
     where
         <Unicast as TransportState<R, T>>::Payload: Clone,
     {
-        // R2543 — see `with_local_delivery_drain` for why this is `make_mut`.
         // The read of `transport.params` is taken BEFORE the mutable borrow so
         // the two do not overlap.
         let hlc = crate::node_clock::NodeHlc::for_node(
@@ -2597,6 +2596,22 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
             self.transport.params.whatami,
             enabled,
         );
+        self.with_node_clock(hlc)
+    }
+
+    /// R3064 -- install a node clock that was built ELSEWHERE, so every session of ONE node can
+    /// share it. [`Self::with_timestamping`] builds a clock from this session's own identity and
+    /// is right for a node that is one session; a host whose node is several sessions (a C
+    /// session is one per face plus an in-process plane) built one clock per session, and two
+    /// clocks with the same `uhlc::ID` are worse than none: uhlc's "unique across the system"
+    /// guarantee stops holding while every individual stamp still looks well-formed
+    /// ([`crate::node_clock::NodeHlc`]). Such a host builds the clock once and installs a clone
+    /// of it here on each.
+    pub fn with_node_clock(mut self, hlc: crate::node_clock::NodeHlc) -> Self
+    where
+        <Unicast as TransportState<R, T>>::Payload: Clone,
+    {
+        // R2543 — see `with_local_delivery_drain` for why this is `make_mut`.
         Arc::make_mut(&mut self.0).node_hlc = hlc;
         self
     }

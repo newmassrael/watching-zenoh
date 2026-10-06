@@ -128,8 +128,9 @@ pub struct CachedSample {
     ///
     /// zenoh caches the whole `Sample`, and a `Sample` whose payload lies in shared memory
     /// holds a reference to that buffer, so the chunk stays allocated while the ring holds the
-    /// sample and a recovery reply sends the descriptor again (`zenoh-ext/src/advanced_cache.rs`
-    /// replies the cached sample as it is). A copy of the bytes would be a recovered sample the
+    /// sample and a recovery reply sends the descriptor again
+    /// (`zenoh-ext/src/advanced_cache.rs` @ `SampleBuilder::from(sample.clone())` replies the
+    /// cached sample as it is). A copy of the bytes would be a recovered sample the
     /// real library would have delivered as shared memory arriving as bytes, and a second copy of
     /// what the buffer exists to avoid copying. When this is `Some`, [`Self::payload`] is EMPTY
     /// and the bytes are read through [`Self::bytes`].

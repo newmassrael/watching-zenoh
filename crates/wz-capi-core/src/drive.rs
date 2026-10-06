@@ -27,6 +27,7 @@ use std::time::Duration;
 use tokio::sync::Notify;
 
 use wz_runtime_tokio::accept_loop::accept_loop_offering;
+use wz_runtime_tokio::node_clock::{NodeHlc, TimestampingEnabled};
 use wz_runtime_tokio::retry_period::RetryPolicy;
 use wz_runtime_tokio::runtime_impl::TokioTime;
 use wz_runtime_tokio::session_glue::{
@@ -1646,6 +1647,13 @@ pub struct OpenStance {
     /// passes true. False opens a session that connects or binds and then reads
     /// nothing until [`SessionState::start_read_task`]; see [`ReadGate`].
     pub start_read_task: bool,
+    /// R3064 -- the node's `timestamping.enabled` map: which roles hold a clock. Read from the
+    /// config by the ABI that reads configs ([`wz_runtime_tokio::zenoh_config::ZenohConfigIngest::timestamping_enabled`]
+    /// for zenoh-c), and [`TimestampingEnabled::default`] (zenoh's shipped map: only a router
+    /// stamps) for an ABI that has no such key, which is what every session was given before
+    /// this field existed. The session builds ONE clock from it, for the role it dials as, and
+    /// every session of the node shares that clock.
+    pub timestamping: TimestampingEnabled,
 }
 
 /// Open a session: spawn the drive thread and wait for the role's open
@@ -1668,15 +1676,24 @@ pub fn open_blocking(
         offer,
         zid,
         start_read_task,
+        timestamping,
     } = stance;
     let clock = TokioTime::new();
     // Fixed here, on the CALLING thread, so `SessionState` can hand it to
     // `z_info_zid` and the INIT cannot disagree with it — see the field doc.
     let (zid, wire_zid) = session_zids(zid).ok_or(OpenError::DriveFailed)?;
+    // R3064 -- the node's clock, built ONCE here from the identity just fixed and the role the
+    // session plays, and handed to the registry, which installs a clone on its plane and on every
+    // face session it makes. `None` inside when the config does not enable timestamping for this
+    // role, which is zenoh's own answer (`enabled().get(whatami)`) and the shipped one for a peer
+    // or client.
+    let node_hlc = NodeHlc::for_node(&wire_zid, dial_whatami, timestamping);
     // R311y820 — one line below the mint, and fallible for the same reason:
     // both need OS entropy and neither has an honest constant to fall back to.
-    let shared =
-        Arc::new(SharedSession::new(clock, wire_zid.clone()).map_err(|_| OpenError::DriveFailed)?);
+    let shared = Arc::new(
+        SharedSession::new_with_node_clock(clock, wire_zid.clone(), node_hlc)
+            .map_err(|_| OpenError::DriveFailed)?,
+    );
     let shutdown = Arc::new(Notify::new());
     let stop = Arc::new(AtomicBool::new(false));
     let (tx, rx) = mpsc::channel::<bool>();

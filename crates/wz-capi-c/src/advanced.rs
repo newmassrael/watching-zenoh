@@ -79,7 +79,7 @@ use crate::bytes::{take_outbound, take_payload, Outbound};
 use crate::ffi::{guard_val, guarded, CClosure as FfiClosure};
 use crate::keyexpr::keyexpr_str;
 use crate::publisher::{z_publisher_options_t, z_publisher_put_options_t};
-use crate::result::{ZResult, Z_EINVAL, Z_ENULL, Z_OK};
+use crate::result::{ZResult, Z_EGENERIC, Z_EINVAL, Z_ENULL, Z_OK};
 use crate::session::session_state;
 use crate::sub::{subscriber_state_handle, z_subscriber_options_t, CClosure};
 use crate::zid::{z_id_t, Z_ID_SIZE};
@@ -792,7 +792,13 @@ pub unsafe extern "C" fn ze_declare_advanced_publisher(
         // SAFETY: the caller's contract.
         let opts = unsafe { advanced_publisher_options(options) };
         let declared = ke.clone();
-        let id = state.shared.declare_advanced_publisher(ke, opts);
+        // R3064 -- a declaration the session refuses is REFUSED, with upstream's code: its
+        // `ze_declare_advanced_publisher` answers any construction error `Z_EGENERIC` (MEASURED:
+        // `-128` for a cache with no miss detection on a node that holds no clock, on the real
+        // library). The gravestone written above is what the caller is left holding.
+        let Ok(id) = state.shared.declare_advanced_publisher(ke, opts) else {
+            return Z_EGENERIC;
+        };
         let mut boxed = Box::new(AdvPubState {
             shared: state.shared.clone(),
             id,

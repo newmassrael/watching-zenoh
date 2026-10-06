@@ -461,11 +461,10 @@ struct TimestampedState {
     last_delivered: Option<wz_session_core::sample::TimestampHint>,
 }
 
-/// R311y90 (review C5) — why declaring a RECOVERING advanced subscriber failed.
+/// R311y90 (review C5) — why declaring an advanced subscriber failed.
 /// Distinct from the base [`SubscribeError`] (which stays the plain
-/// `Session::declare_subscriber` surface): the recovery form additionally spawns
-/// the periodic-recovery background task, so it has one extra failure mode
-/// ([`Self::NoRuntime`]). Kept OUT of `SubscribeError` so toggling the additive
+/// `Session::declare_subscriber` surface): the advanced form declares more than
+/// one entity and has failure modes of its own. Kept OUT of `SubscribeError` so toggling the additive
 /// `ext-pubsub-advanced-recovery` feature cannot change `SubscribeError`'s shape
 /// and break a base-subscriber caller's exhaustive match (the H1
 /// signature-stability invariant); mirrors the publisher's dedicated
@@ -507,12 +506,6 @@ pub enum AdvancedSubscribeError {
         /// The declaration id that did not fit.
         id: u64,
     },
-    /// The periodic-recovery task could not be spawned: no tokio runtime was
-    /// active. `declare_with_options` with `periodic_queries` set must be called
-    /// from within a tokio runtime context. Fail-clear instead of the
-    /// `tokio::spawn` panic.
-    #[cfg(feature = "ext-pubsub-advanced-recovery")]
-    NoRuntime,
     /// R311y100 — the late-publisher-detection liveliness subscriber
     /// declaration was rejected (only reachable with
     /// `HistoryConfig::detect_late_publishers`). Additive + gated, safe on the
@@ -623,9 +616,9 @@ pub struct RecoveryConfig<const CONFIGURED: bool = true> {
     /// no further live sample would trigger sample-driven recovery for (zenoh's
     /// `RecoveryConfig::periodic_queries`, advanced_subscriber.rs:111-116 + the
     /// `PeriodicQuery` TimedEvent :580-643). `None` (default) = sample-driven
-    /// recovery only. NB enabling this spawns a tokio task at declare time, so
-    /// the caller MUST be inside a tokio runtime context (the sample-driven and
-    /// no-recovery paths have no such requirement).
+    /// recovery only. NB enabling this spawns a task at declare time, on the
+    /// process's `Application` runtime (R3064: the caller need not be inside a
+    /// tokio runtime context).
     periodic_queries: Option<Duration>,
     /// R311y84 — when `true`, declare a second subscriber on
     /// `<key_expr>/@adv/pub/**` that decodes each publisher's last-sn heartbeat
@@ -3968,13 +3961,17 @@ impl<R: SessionRuntime, T: TimeSource> AdvancedSubscriber<R, T> {
         // is where upstream puts it, so a subscriber with no recovery config
         // runs no sweep: the same scope its `gc_task` has.
         let retention = recovery.map(|c| c.retention_period());
-        // R311y90 (review C5) — fail fast & clear if off-runtime: the periodic
-        // task (below) is a tokio::spawn, which PANICS without a runtime. Check
-        // before declaring the subscriber so no half-declared subscriber needs
-        // rollback. The sample-driven / heartbeat-sub / history paths do not spawn.
-        if periodic.is_some() {
-            tokio::runtime::Handle::try_current().map_err(|_| AdvancedSubscribeError::NoRuntime)?;
-        }
+        // R3064 -- there is no off-runtime precondition here, and the one R311y90 put
+        // here was false from R2366 on. The periodic task was a bare `tokio::spawn`,
+        // which PANICS without a runtime, so a declare off one was refused with a
+        // variant of its own; R2366 moved it onto the process's `Application`
+        // runtime, as upstream spawns the same task (see the spawn below), and
+        // nothing this declare does asks the calling thread for a runtime any more.
+        // What survived was a refusal of a declaration that would have worked, and
+        // on a C session that is the ordinary case: the in-process plane declares
+        // from the C application thread, the refusal was swallowed by the
+        // best-effort fan-out, and the subscriber was dead while the declare
+        // reported success.
         let heartbeat = recovery.map(|c| c.heartbeat).unwrap_or(false);
         // R311y89 (review C3) — the recovery + history GET timeout (zenoh's shared
         // builder `query_timeout`), threaded to every GET so the deadline sweep can
@@ -4057,7 +4054,7 @@ impl<R: SessionRuntime, T: TimeSource> AdvancedSubscriber<R, T> {
 
         // R311y83 — the periodic recovery trigger: a background loop that
         // re-asks every known source `_sn=last+1..` every `period`. Spawned
-        // here (the caller is in a tokio runtime context), aborted on drop.
+        // here (on the process's `Application` runtime), aborted on drop.
         // The loop is thin glue over `run_periodic_tick` / `periodic_requests`
         // (the deterministically tested core; the storage_replication
         // DigestPublisher pattern).
@@ -6561,21 +6558,27 @@ mod tests {
         );
     }
 
-    /// R311y90 (review C5) regression: declaring a recovering subscriber with
-    /// periodic_queries OFF a tokio runtime must FAIL CLEAR with NoRuntime, not
-    /// panic inside tokio::spawn. This `#[test]` runs outside any runtime, so
-    /// Handle::try_current() returns Err -> the declare returns NoRuntime before
-    /// any subscriber is declared. Pre-fix the periodic-task spawn panicked
-    /// (aborting the test); the guard makes it a clean Result.
+    /// R3064 (it replaces R311y90's review-C5 regression, which asserted the opposite):
+    /// declaring a recovering subscriber with periodic_queries OFF a tokio runtime
+    /// DECLARES. This `#[test]` runs outside any runtime. The refusal it used to pin was
+    /// true while the task was a bare `tokio::spawn` and false from R2366, when it moved
+    /// onto the process's `Application` runtime; on a C session it is the ordinary case
+    /// (the in-process plane declares from the C application thread), where the refusal
+    /// was swallowed and the subscriber was dead.
+    ///
+    /// What this does NOT show is the task asking: it sends nothing until a source is
+    /// known, which takes a sample from one. That behaviour is the deterministic core's
+    /// (`run_periodic_tick`, tested on its own), and its end-to-end form on a C session is
+    /// the same-session differential, where the periodic subscriber hears the puts.
     #[cfg(feature = "ext-pubsub-advanced-recovery")]
     #[test]
-    fn declare_with_periodic_off_runtime_fails_clear_not_panic() {
+    fn declare_with_periodic_off_runtime_declares() {
         let (actions, _driver) = crate::test_fixtures::recording_actions();
         let observer = Arc::new(Mutex::new(ApplicationLayerObserver::new()));
         let clock = Arc::new(TokioTime::new());
         let session = TokioSession::new(actions, observer, clock);
 
-        let result = AdvancedSubscriber::declare_with_options(
+        let declared = AdvancedSubscriber::declare_with_options(
             &session,
             "demo/data",
             AdvancedSubscriberOptions::new().with_recovery(
@@ -6584,8 +6587,9 @@ mod tests {
             |_sample: Sample| {},
         );
         assert!(
-            matches!(result, Err(AdvancedSubscribeError::NoRuntime)),
-            "periodic recovery off-runtime must fail clear with NoRuntime, not panic"
+            declared.is_ok(),
+            "a periodic recovery asks the calling thread for no runtime: {:?}",
+            declared.err()
         );
     }
 

@@ -19926,6 +19926,39 @@ layer_c1cc_api_compat_c() {
         --test-threads=1 \
         --exact a_local_getter_is_handed_the_same_kind_of_reply_buffer_on_wz_and_libzenohc \
         || return 1
+    # R3064 -- what `ze_declare_advanced_publisher` answers for fourteen configurations (seven
+    # option shapes, with and without the timestamp key), and whether a subscriber of the
+    # publisher's OWN session hears it, for three publisher shapes and four subscriber shapes.
+    # On wz a cache with no miss detection was a dead publisher behind a success code, a
+    # heartbeat was refused on the in-process plane for want of a runtime, and a subscriber with
+    # history or periodic recovery was dead on that plane; each was measured against the real
+    # library first. The remote half is leg 15 of the shared-memory legs below. SKIPs on an
+    # oracle without the SHM+unstable arm.
+    _runci_guarded_test \
+        "C1cc an_advanced_publisher_declaration_is_answered_with_the_same_code_on_wz_and_libzenohc" 1 \
+        cargo test -p wz-integration-tests \
+        --test zenoh_c_advanced_publisher_declare_twice_and_diff -- --ignored --quiet \
+        --test-threads=1 \
+        --exact an_advanced_publisher_declaration_is_answered_with_the_same_code_on_wz_and_libzenohc \
+        || return 1
+    _runci_guarded_test \
+        "C1cc an_advanced_subscriber_of_the_publishers_own_session_hears_it_on_wz_and_libzenohc" 1 \
+        cargo test -p wz-integration-tests \
+        --test zenoh_c_advanced_publisher_declare_twice_and_diff -- --ignored --quiet \
+        --test-threads=1 \
+        --exact an_advanced_subscriber_of_the_publishers_own_session_hears_it_on_wz_and_libzenohc \
+        || return 1
+    # R3064 -- which nodes hold a clock: a peer holds none unless the config says so, a router
+    # holds one unless it says not, and `false` wins over a router's default, spelled as the key
+    # a C program names or as the `timestamping/enabled` document. Nine rows, five of them
+    # refusals on the real library. The C ABI never read this key into a session's clock before.
+    _runci_guarded_test \
+        "C1cc a_nodes_clock_follows_its_role_and_its_config_on_wz_and_libzenohc" 1 \
+        cargo test -p wz-integration-tests \
+        --test zenoh_c_advanced_publisher_declare_twice_and_diff -- --ignored --quiet \
+        --test-threads=1 \
+        --exact a_nodes_clock_follows_its_role_and_its_config_on_wz_and_libzenohc \
+        || return 1
     # R3061 -- what `z_bytes_to_string` does with bytes that are not text, one C program on
     # both libraries: refused with `-1` by the real library, which wz copied until this round.
     # Needs only the oracle, not the SHM arm.
@@ -20005,7 +20038,8 @@ layer_c1cc_api_compat_c() {
         a_c_queryable_is_handed_a_value_from_shared_memory_as_shared_memory_on_wz_capi_c \
         a_c_queryable_reply_that_is_a_chunk_reaches_a_real_z_get_shm_as_shared_memory_on_wz_capi_c \
         a_c_getter_is_handed_a_real_z_queryable_shm_reply_as_shared_memory_on_wz_capi_c \
-        a_chunk_put_through_an_advanced_publisher_reaches_a_real_z_sub_shm_as_shared_memory_on_wz_capi_c; do
+        a_chunk_put_through_an_advanced_publisher_reaches_a_real_z_sub_shm_as_shared_memory_on_wz_capi_c \
+        a_cache_only_advanced_publisher_reaches_a_real_z_sub_shm_on_wz_capi_c; do
         _runci_guarded_test "C1cc $leg" 1 \
             cargo test -p wz-integration-tests \
             --test zenoh_c_shm_and_advanced_on_wz_capi_c -- --ignored --quiet --test-threads=1 \
