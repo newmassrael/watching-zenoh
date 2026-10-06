@@ -204,7 +204,7 @@ impl ScoutLink {
         Ok(Self { driver })
     }
 
-    /// Scout until `intents` has no receiver, posting a [`DialIntent`] for every responder the
+    /// Scout until `intents` has no receiver, posting a `DialIntent` for every responder the
     /// plan's policy admits, AS EACH ANSWERS. `zid` is this node's own wire zid: it is what the
     /// Scout announces and what the policy's tie-break compares against.
     ///
@@ -212,7 +212,7 @@ impl ScoutLink {
     /// the next window twice as long, and so on up to eight (`orchestrator.rs` @
     /// `const SCOUT_INITIAL_PERIOD: Duration`). An answer is acted on when it arrives and not
     /// when its window ends: the scouting machine hands its answers over only at the window's
-    /// end, so they are read from it every [`HARVEST_PERIOD`] while it runs, and a node that
+    /// end, so they are read from it every `HARVEST_PERIOD` while it runs, and a node that
     /// answers at once is dialled at once, which is what keeps a scouted open as quick as one
     /// that was told where to connect.
     ///
