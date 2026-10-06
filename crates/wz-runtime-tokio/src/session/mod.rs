@@ -583,13 +583,18 @@ pub enum LocalDeliveryDrain {
 /// R3069 -- how a chunk publish holds the payload it hands to its LOCAL leg: borrowed from a
 /// caller that goes on holding it, or handed over by one that gave it up. See
 /// [`Session::deliver_shm_local_owned`] for why the second exists.
-#[cfg(feature = "transport-shm")]
+///
+/// Gated on `pubsub-allow-loop` as well as `transport-shm`, because that is where it is READ:
+/// a session without the loopback has no local leg, so a value of this type there would be
+/// built and never looked at, which hosted CI turned into three dead-code errors (R3069's own
+/// first push). A type that exists only where it is read cannot be left unread.
+#[cfg(all(feature = "transport-shm", feature = "pubsub-allow-loop"))]
 enum ShmHand<'a> {
     Borrowed(&'a crate::shm_provider::ShmBackedPayload),
     Handed(std::sync::Arc<crate::shm_provider::ShmBackedPayload>),
 }
 
-#[cfg(feature = "transport-shm")]
+#[cfg(all(feature = "transport-shm", feature = "pubsub-allow-loop"))]
 impl ShmHand<'_> {
     /// The payload, whichever way it is held.
     fn payload(&self) -> &crate::shm_provider::ShmBackedPayload {
@@ -2769,7 +2774,16 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
         }
         #[cfg(not(feature = "codec-push"))]
         let _ = (build, inline);
-        Ok(self.deliver_shm_loopback(loopback_keyexpr, ShmHand::Borrowed(payload), &opts))
+        #[cfg(feature = "pubsub-allow-loop")]
+        {
+            Ok(self.deliver_shm_loopback(loopback_keyexpr, ShmHand::Borrowed(payload), &opts))
+        }
+        // No loopback in this build: nothing in this session can hear the publish.
+        #[cfg(not(feature = "pubsub-allow-loop"))]
+        {
+            let _ = (loopback_keyexpr, payload, &opts);
+            Ok(0)
+        }
     }
 
     /// transport-shm -- [`Self::publish_shm`] on a DECLARED keyexpr: the wire names the key
@@ -2888,35 +2902,31 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
     /// Upstream hands a local subscriber the buffer (MEASURED against the real library), and
     /// the view is built only when a subscriber matches, so a publish nobody here listens to
     /// maps nothing. Returns the number of subscriber callbacks that fired.
-    #[cfg(feature = "transport-shm")]
+    #[cfg(all(feature = "transport-shm", feature = "pubsub-allow-loop"))]
     fn deliver_shm_loopback(
         &self,
         keyexpr: &str,
         payload: ShmHand<'_>,
         opts: &PublishOptions,
     ) -> usize {
-        #[cfg(feature = "pubsub-allow-loop")]
-        if opts.allowed_destination.allows_local() {
-            let listened_to = R::with_mutex_mut(&self.observer, |o| {
-                o.subscribers.has_local_matching(keyexpr)
-            });
-            if !listened_to {
-                return 0;
-            }
-            let mut sample = build_loopback_sample(keyexpr, payload.payload().bytes(), opts);
-            // The chunk where it can be handed over; the copy built above when it cannot.
-            if let Some(shared) = payload.into_view() {
-                sample.payload = shared;
-            }
-            let delivered =
-                R::with_mutex_mut(&self.observer, |o| o.subscribers.local_publish(&sample));
-            // R311y554 — same policy gate as `Session::publish`.
-            self.drain_local_fires_if_inline();
-            return delivered;
+        if !opts.allowed_destination.allows_local() {
+            return 0;
         }
-        #[cfg(not(feature = "pubsub-allow-loop"))]
-        let _ = (keyexpr, payload, opts);
-        0
+        let listened_to = R::with_mutex_mut(&self.observer, |o| {
+            o.subscribers.has_local_matching(keyexpr)
+        });
+        if !listened_to {
+            return 0;
+        }
+        let mut sample = build_loopback_sample(keyexpr, payload.payload().bytes(), opts);
+        // The chunk where it can be handed over; the copy built above when it cannot.
+        if let Some(shared) = payload.into_view() {
+            sample.payload = shared;
+        }
+        let delivered = R::with_mutex_mut(&self.observer, |o| o.subscribers.local_publish(&sample));
+        // R311y554 — same policy gate as `Session::publish`.
+        self.drain_local_fires_if_inline();
+        delivered
     }
 
     /// transport-shm -- the LOCAL leg of an SHM publish alone, for a caller that GIVES UP the
@@ -2937,11 +2947,21 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
         &self,
         keyexpr: &str,
         payload: std::sync::Arc<crate::shm_provider::ShmBackedPayload>,
-        mut opts: PublishOptions,
+        opts: PublishOptions,
     ) -> usize {
-        // The same `resolve_put` head as the publish bodies; idempotent.
-        self.resolve_publish_timestamp(&mut opts);
-        self.deliver_shm_loopback(keyexpr, ShmHand::Handed(payload), &opts)
+        #[cfg(feature = "pubsub-allow-loop")]
+        {
+            // The same `resolve_put` head as the publish bodies; idempotent.
+            let mut opts = opts;
+            self.resolve_publish_timestamp(&mut opts);
+            self.deliver_shm_loopback(keyexpr, ShmHand::Handed(payload), &opts)
+        }
+        // No loopback in this build: nothing in this session can hear the publish.
+        #[cfg(not(feature = "pubsub-allow-loop"))]
+        {
+            let _ = (keyexpr, payload, opts);
+            0
+        }
     }
 
     /// transport-shm -- [`Self::deliver_shm_local_owned`] on a DECLARED keyexpr: the loopback
