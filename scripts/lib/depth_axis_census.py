@@ -2543,7 +2543,16 @@ PIN_NO_SYMBOL = 0
 # witness and the census row that fell to zero. `transport-shm` is not touched and is still
 # PARTIAL beside it. READ off the census's own FAIL line, `wz citations: 141 against a pin of
 # 130`, for the reason the R3062 note gives.
-PIN_WZ_CITATIONS = 141
+#
+# R3067 -- 141 -> 156, one atom. `api-compat-c`'s reason gains the UPDATE that a session's roles
+# are a set: it names the listener's bind and the local task its accept loop runs as, the
+# client's held and unserved listener, the drive of a session with no endpoint, the dial role's
+# own face-id space, the registry's one-face-per-node rule and the loop's question that asks it,
+# the C ABI's answer by role, the three differentials, the oracle-free witness and the pico
+# refusal it leaves in place. `transport-shm` is not touched and is still PARTIAL beside it.
+# READ off the census's own FAIL line, `wz citations: 156 against a pin of 141`, for the reason
+# the R3062 note gives.
+PIN_WZ_CITATIONS = 156
 # R2626 — 44 -> 42, and this one is worth a sentence because it HELD through
 # every earlier retirement in this run (R2612, R2622). `time-hlc`'s reason is the
 # first retiree carrying AMBIGUOUS citations of its own: its oldest clauses cite
