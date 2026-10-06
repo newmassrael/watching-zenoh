@@ -2508,7 +2508,15 @@ PIN_NO_SYMBOL = 0
 # off the census's own FAIL line, `wz citations: 99 against a pin of 84`, rather than summed
 # from the prose, because the count is of resolved paths per reason and the same file named
 # in two reasons is counted in each; `reached` and `ambiguous` hold at 3 and 2.
-PIN_WZ_CITATIONS = 99
+#
+# R3063 -- 99 -> 108, two atoms. `api-compat-c`'s reason gains the UPDATE that a chunk put through
+# an advanced publisher is sent, cached and replayed as the chunk, and that a cache-only advanced
+# publisher is dead on wz, which names the C ABI's put, the faces' fan-out, the publisher's put
+# body and its plane's shared-memory send, the cache's shared handle, and the two places the
+# dead declaration comes from; and `transport-shm`'s gains the UPDATE for the cached sample,
+# which names the cache's handle. Both atoms are still PARTIAL. READ off the census's own FAIL
+# line, `wz citations: 108 against a pin of 99`, for the reason the R3062 note gives.
+PIN_WZ_CITATIONS = 108
 # R2626 — 44 -> 42, and this one is worth a sentence because it HELD through
 # every earlier retirement in this run (R2612, R2622). `time-hlc`'s reason is the
 # first retiree carrying AMBIGUOUS citations of its own: its oldest clauses cite
