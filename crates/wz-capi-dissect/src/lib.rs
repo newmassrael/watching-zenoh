@@ -2602,13 +2602,20 @@ pub unsafe extern "C" fn wz_dissect_live_retention(
 /// # The document
 ///
 /// `{"document":{"name":"health","revision":R},"health":{...},
-///   "flows_seen":{"stream":S,"datagram":D}}`
+///   "flows_seen":{"stream":S,"datagram":D},
+///   "datagram_sequence":{"frames":F,"missing":M,"gaps":G,"duplicates":U,
+///   "out_of_window":W,"without_resolution":N}}`
 ///
 /// `health` is the summary's `health` object byte for byte. `flows_seen` is how
 /// many flows each flow table has held, evicted ones included: the denominator
 /// of the stream counters inside `health`. It is NOT the retention document's
 /// `held.stream_flows` plus `dropped_by_limits.flows`, because the second counts
 /// evictions from both tables as one number.
+///
+/// `datagram_sequence` (revision 2) is `health.sequence` over the datagram links
+/// alone, cumulative and never decreasing, retired datagram flows included: the
+/// counters a datagram loss rate is taken from without TCP frames in the
+/// denominator.
 ///
 /// # A READ, and the handle is `const` to say so
 ///
@@ -8151,6 +8158,52 @@ mod tests {
             in_group(datagram_only, "retransmits", "retransmits"),
             "0",
             "{datagram_only}"
+        );
+    }
+
+    /// `datagram_sequence` crosses the ABI as the datagram links' share of
+    /// `health.sequence`, and the sum beside it holds both kinds of link.
+    ///
+    /// Asserted on the raw text because the two groups share six key names and
+    /// the point is which numbers sit under which. Three numbered datagram
+    /// frames and two numbered stream frames, none judged for want of a
+    /// handshake: the sum reads five frames and five unresolved, the datagram
+    /// share reads three and three. A consumer taking a datagram loss rate from
+    /// the sum would divide by five.
+    #[test]
+    fn the_health_door_reports_the_datagram_sequence_apart_from_the_total() {
+        // A numbered `Frame` (`T_MID_FRAME | FLAG_T_FRAME_R`) with a four-byte
+        // body, as one datagram and as one length-prefixed stream message.
+        let frame = |sn: u8| [0x25, sn, 0x1F, 0x00, 0x00, 0x00];
+        let handle = open_live(WZ_DISSECT_LIMITS_NONE).expect("the preset opens");
+        for sn in [0u8, 1, 4] {
+            let packet = udp_packet([10, 0, 0, 1], 7447, [10, 0, 0, 2], 7447, &frame(sn));
+            push_live(handle, WZ_DISSECT_NO_TIMESTAMP, &packet);
+        }
+        let mut seq = 1000u32;
+        for sn in [0u8, 1] {
+            let mut framed = vec![6u8, 0];
+            framed.extend_from_slice(&frame(sn));
+            let packet = tcp_packet(seq, &framed);
+            seq += framed.len() as u32;
+            push_live(handle, WZ_DISSECT_NO_TIMESTAMP, &packet);
+        }
+        let doc = live_health(handle).expect("the handle answers");
+        unsafe { wz_dissect_live_close(handle) };
+
+        assert!(
+            doc.contains(
+                "\"datagram_sequence\":{\"frames\":3,\"missing\":0,\"gaps\":0,\
+                 \"duplicates\":0,\"out_of_window\":0,\"without_resolution\":3}"
+            ),
+            "the datagram share is the three datagram frames alone: {doc}"
+        );
+        assert!(
+            doc.contains(
+                "\"sequence\":{\"frames\":5,\"missing\":0,\"gaps\":0,\
+                 \"duplicates\":0,\"out_of_window\":0,\"without_resolution\":5}"
+            ),
+            "and health.sequence still holds both links: {doc}"
         );
     }
 

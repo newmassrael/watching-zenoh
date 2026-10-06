@@ -1105,7 +1105,7 @@ impl<'a> CaptureReport<'a> {
         s.push_str(",\"framing\":");
         framing_json(&f, s);
         s.push_str(",\"sequence\":");
-        sequence_json(&f, s);
+        sequence_json(&sequence_of(&f), s);
         // R311y624 — the pre-session namespace. Counted rather than listed: a
         // scouting message advances no session, so it belongs beside the flow
         // counts and not in any plane.
@@ -3015,20 +3015,37 @@ fn framing_json(fr: &crate::FramingHealth, s: &mut String) {
 /// had already gone wrong, and left its neighbours alone, which is how
 /// `framing` went wrong next. Sharing the one that agrees today is what stops
 /// this being the same repair a third time.
-fn sequence_json(fr: &crate::FramingHealth, s: &mut String) {
+fn sequence_json(sn: &wz_session_core::passive::SnAccounting, s: &mut String) {
     s.push_str(&format!(
         "{{\"frames\":{},\"missing\":{},\"gaps\":{},\
          \"duplicates\":{},\"out_of_window\":{},\"without_resolution\":{}}}",
-        fr.sn_frames,
+        sn.frames,
         // The sum of the gaps the sequence numbers showed. A gap is read off the
         // wire as a distance in the session's SN window, which is as wide as
         // 2^63 at a 64-bit resolution, so nothing the host holds bounds it.
-        u64_json(fr.sn_missing),
-        fr.sn_gaps,
-        fr.sn_duplicates,
-        fr.sn_out_of_window,
-        fr.sn_without_resolution
+        u64_json(sn.missing),
+        sn.gaps,
+        sn.duplicates,
+        sn.out_of_window,
+        sn.without_resolution
     ));
+}
+
+/// The six counters of a [`crate::FramingHealth`]'s sequence group, in the type
+/// the group is written from.
+///
+/// The group is written from the session's own accounting type so that the
+/// all-links total and the datagram-only total, which `health_document_json`
+/// carries beside it, go through the one writer above.
+fn sequence_of(fr: &crate::FramingHealth) -> wz_session_core::passive::SnAccounting {
+    wz_session_core::passive::SnAccounting {
+        frames: fr.sn_frames,
+        missing: fr.sn_missing,
+        gaps: fr.sn_gaps,
+        duplicates: fr.sn_duplicates,
+        out_of_window: fr.sn_out_of_window,
+        without_resolution: fr.sn_without_resolution,
+    }
 }
 
 fn skips_json(sk: &crate::SkipCensus, s: &mut String) {
@@ -3658,7 +3675,7 @@ pub fn health_json(d: &crate::Dissection) -> String {
     out.push_str(",\"framing\":");
     framing_json(&fr, &mut out);
     out.push_str(",\"sequence\":");
-    sequence_json(&fr, &mut out);
+    sequence_json(&sequence_of(&fr), &mut out);
     out.push_str(",\"skips\":");
     skips_json(d.skip_census(), &mut out);
     // Round 2041 (item 356) — the same finding the page carries, as a key a
@@ -3696,6 +3713,16 @@ pub fn health_json(d: &crate::Dissection) -> String {
 /// `flows_seen.stream` is above zero and an absence when it is zero, and
 /// nothing else in `health` says which. It is not `held + dropped_by_limits.flows`,
 /// because that group counts evictions from both tables as one number.
+///
+/// # `datagram_sequence`
+///
+/// The `sequence` group of `health` over the datagram links alone: the same six
+/// counters, written by the same emitter, so one reader reads both. `health.sequence`
+/// is the sum over every link, which puts TCP frames in the denominator of any
+/// loss rate taken from it; a datagram loss rate needs the datagram share and
+/// the sum cannot be split afterwards. Cumulative, so it never decreases, and
+/// it includes the datagram flows the flow cap has already retired. The stream
+/// share is `health.sequence` minus this.
 pub fn health_document_json(d: &crate::Dissection) -> String {
     let seen = d.flows_seen();
     let mut out = String::from("{");
@@ -3703,9 +3730,12 @@ pub fn health_document_json(d: &crate::Dissection) -> String {
     out.push_str(",\"health\":");
     out.push_str(&health_json(d));
     out.push_str(&format!(
-        ",\"flows_seen\":{{\"stream\":{},\"datagram\":{}}}}}",
+        ",\"flows_seen\":{{\"stream\":{},\"datagram\":{}}}",
         seen.stream, seen.datagram
     ));
+    out.push_str(",\"datagram_sequence\":");
+    sequence_json(&d.datagram_sequence(), &mut out);
+    out.push('}');
     out
 }
 
@@ -3821,6 +3851,32 @@ pub fn health_text(d: &crate::Dissection) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// EACH COUNTER OF THE SEQUENCE GROUP IS WRITTEN UNDER ITS OWN NAME.
+    ///
+    /// The group is written from the session's accounting type, and the all-links
+    /// figure reaches it through a conversion from [`crate::FramingHealth`]. Six
+    /// different values, so a conversion that crossed two fields, or a writer
+    /// that did, cannot pass on a capture whose counters happened to match.
+    #[test]
+    fn the_sequence_group_writes_each_counter_under_its_own_name() {
+        let fr = crate::FramingHealth {
+            sn_frames: 7,
+            sn_missing: 5,
+            sn_gaps: 3,
+            sn_duplicates: 11,
+            sn_out_of_window: 13,
+            sn_without_resolution: 17,
+            ..crate::FramingHealth::default()
+        };
+        let mut json = String::new();
+        sequence_json(&sequence_of(&fr), &mut json);
+        assert_eq!(
+            json,
+            "{\"frames\":7,\"missing\":5,\"gaps\":3,\
+             \"duplicates\":11,\"out_of_window\":13,\"without_resolution\":17}"
+        );
+    }
 
     /// R3011 — THE SEQUENCE GROUP'S GAP SUM FOLLOWS THE SAME INTEGER RULE.
     ///

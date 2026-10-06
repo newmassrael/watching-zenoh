@@ -3505,6 +3505,25 @@ fn add_sn(h: &mut FramingHealth, a: wz_session_core::passive::SnAccounting) {
     h.sn_without_resolution += a.without_resolution;
 }
 
+/// Fold one direction's sequence-number accounting into a running total of the
+/// same type.
+///
+/// [`add_sn`] is this rule for [`FramingHealth`], which spreads the six counters
+/// over six prefixed fields; the datagram-only total keeps the type the
+/// session reports, so it has no second spelling of them to drift from.
+fn add_sequence(
+    total: &mut wz_session_core::passive::SnAccounting,
+    a: wz_session_core::passive::SnAccounting,
+) {
+    total.frames += a.frames;
+    // Saturating, for the reason `add_sn` states.
+    total.missing = total.missing.saturating_add(a.missing);
+    total.gaps += a.gaps;
+    total.duplicates += a.duplicates;
+    total.out_of_window += a.out_of_window;
+    total.without_resolution += a.without_resolution;
+}
+
 /// A whole capture, dissected: every TCP connection in it, read as a zenoh
 /// session.
 #[derive(Debug)]
@@ -3857,6 +3876,27 @@ impl Dissection {
             stream: self.flows.len() + self.carry.stream_flows(),
             datagram: self.datagram_flows.len() + self.carry.datagram_flows(),
         }
+    }
+
+    /// The sequence-number accounting of the DATAGRAM links alone, cumulative.
+    ///
+    /// [`FramingHealth`]'s `sn_*` fields are the same counters over every link,
+    /// so TCP frames sit in the denominator of any loss rate read off them. This
+    /// is the datagram share: the live datagram flows, both directions, plus
+    /// every datagram flow the flow cap already retired. It never decreases for
+    /// the same reason `framing_health` does not: an eviction moves a flow's
+    /// counters into the carry and takes nothing out.
+    ///
+    /// A read of counters, so its cost follows the number of live datagram
+    /// flows and not the number of rows they hold.
+    pub fn datagram_sequence(&self) -> wz_session_core::passive::SnAccounting {
+        let mut total = self.carry.datagram_sequence();
+        for flow in &self.datagram_flows {
+            for dir in [Direction::A, Direction::B] {
+                add_sequence(&mut total, flow.session.sn_accounting(dir));
+            }
+        }
+        total
     }
 
     /// R311y605 (F5) — the whole dissection's counters in one value.
@@ -10726,6 +10766,230 @@ mod datagram_tests {
             fh.sn_missing,
             u64::MAX,
             "six gaps of 2^62 - 2 are more than a u64 holds: {fh:?}"
+        );
+    }
+
+    /// THE DATAGRAM-ONLY SEQUENCE TOTAL IS THE DATAGRAM LINKS' SHARE, not the sum.
+    ///
+    /// `framing_health` adds the sequence counters of every link, so TCP frames
+    /// sit in the `sn_frames` a datagram loss rate would divide by. The capture
+    /// below holds both kinds: eight numbered datagram frames with a gap of
+    /// four, two repeats and three stale numbers among them, and five numbered
+    /// stream frames
+    /// the stream session cannot judge. Each counter of `datagram_sequence` is
+    /// asserted on the datagram links alone, and the sum is asserted to be the
+    /// two shares, so a total that quietly included the stream side fails here
+    /// by its `frames` and its `without_resolution`.
+    #[test]
+    fn the_datagram_sequence_is_the_datagram_links_share_of_the_total() {
+        let frame = |sn: u8| {
+            alloc::vec![
+                wz_session_core::wire_const::T_MID_FRAME
+                    | wz_session_core::wire_const::FLAG_T_FRAME_R,
+                sn,
+                0x1F,
+                0x00,
+                0x00,
+                0x00,
+            ]
+        };
+        let mut d = Dissection::new();
+        let mut at = 0usize;
+        let feed = |d: &mut Dissection, from_low: bool, message: &[u8], at: &mut usize| {
+            let packet = if from_low {
+                udp_packet([10, 0, 0, 1], 43210, [10, 0, 0, 2], 7447, message)
+            } else {
+                udp_packet([10, 0, 0, 2], 7447, [10, 0, 0, 1], 43210, message)
+            };
+            d.push_packet(LINKTYPE_ETHERNET, *at, &packet);
+            *at += 1;
+        };
+        feed(&mut d, true, &init_datagram(false, &[]), &mut at);
+        feed(&mut d, false, &init_datagram(true, &[]), &mut at);
+        feed(&mut d, true, &open_datagram(false), &mut at);
+        feed(&mut d, false, &open_datagram(true), &mut at);
+        // 0, 1, then a jump to 6 (frames 2 to 5 are missing: one gap of four),
+        // 6 twice more (two repeats) and 2, 3, 4 (behind the baseline, which
+        // a stale number does not move: reorder or stale datagrams, not loss).
+        // The five counters take five different values on purpose, so a
+        // transposed pair cannot pass: a symmetric capture reads the same
+        // either way round.
+        for sn in [0u8, 1, 6, 6, 6, 2, 3, 4] {
+            feed(&mut d, true, &frame(sn), &mut at);
+        }
+        let datagram_only = d.datagram_sequence();
+        assert_eq!(
+            (
+                datagram_only.frames,
+                datagram_only.missing,
+                datagram_only.gaps,
+                datagram_only.duplicates,
+                datagram_only.out_of_window,
+                datagram_only.without_resolution
+            ),
+            (8, 4, 1, 2, 3, 0),
+            "the datagram links' own accounting: {datagram_only:?}"
+        );
+        assert_eq!(
+            d.framing_health().sn_frames,
+            8,
+            "with no stream flow the total and the datagram share agree"
+        );
+
+        // Five numbered frames on a TCP flow, with no handshake in front of
+        // them: counted, and none of them judged.
+        for (i, sn) in (0..5u8).enumerate() {
+            let pkt = tcp_packet(1000 + (i * framed_frame(0).len()) as u32, &framed_frame(sn));
+            d.push_packet(LINKTYPE_ETHERNET, at + i, &pkt);
+        }
+        let total = d.framing_health();
+        assert_eq!(
+            (total.sn_frames, total.sn_without_resolution),
+            (13, 5),
+            "the sum holds both links: {total:?}"
+        );
+        assert_eq!(
+            d.datagram_sequence(),
+            datagram_only,
+            "and the datagram share did not move when stream frames arrived"
+        );
+    }
+
+    /// THE DATAGRAM-ONLY TOTAL NEVER DECREASES: an evicted datagram flow's
+    /// counters are carried, and a retired STREAM flow adds nothing to it.
+    ///
+    /// The consumer reads this twice and subtracts to get a trailing window, so
+    /// a total that went down when the flow cap recycled a slot would turn into
+    /// a negative window. `an_evicted_datagram_flows_sequence_accounting_stays_in_the_total`
+    /// holds the all-links figure; this is the same property for the datagram
+    /// share, which has a carry of its own.
+    #[test]
+    fn an_evicted_datagram_flows_sequence_stays_in_the_datagram_total() {
+        let frame = |sn: u8| {
+            alloc::vec![
+                wz_session_core::wire_const::T_MID_FRAME
+                    | wz_session_core::wire_const::FLAG_T_FRAME_R,
+                sn,
+                0x1F,
+                0x00,
+                0x00,
+                0x00,
+            ]
+        };
+        let mut d = Dissection::with_limits(DissectionLimits {
+            max_flows_per_table: Some(1),
+            ..DissectionLimits::default()
+        });
+        for (i, sn) in [0u8, 1, 4].into_iter().enumerate() {
+            let pkt = udp_packet([10, 0, 0, 1], 7447, [224, 0, 0, 224], 7446, &frame(sn));
+            d.push_packet(LINKTYPE_ETHERNET, i, &pkt);
+        }
+        let before = d.datagram_sequence();
+        assert_eq!(
+            (before.frames, before.without_resolution),
+            (3, 3),
+            "three numbered frames, none judged: {before:?}"
+        );
+
+        // A stream flow, then a second one that evicts it: a retired STREAM flow
+        // must not move the datagram share.
+        let stream = tcp_packet(1000, &framed_frame(0));
+        d.push_packet(LINKTYPE_ETHERNET, 3, &stream);
+        let mut other = tcp_packet(2000, &framed_frame(0));
+        other[26] = 99;
+        d.push_packet(LINKTYPE_ETHERNET, 4, &other);
+        assert_eq!(d.flows().len(), 1, "the stream cap must have evicted");
+        assert_eq!(
+            d.datagram_sequence(),
+            before,
+            "a stream flow's frames are not datagram frames, live or retired"
+        );
+
+        // Now the datagram flow is the one evicted.
+        let keepalive = [wz_session_core::wire_const::T_MID_KEEP_ALIVE];
+        let second = udp_packet([10, 0, 0, 9], 7448, [224, 0, 0, 224], 7446, &keepalive);
+        d.push_packet(LINKTYPE_ETHERNET, 5, &second);
+        assert_eq!(
+            d.datagram_flows().len(),
+            1,
+            "the datagram cap must have evicted"
+        );
+        assert_eq!(
+            d.datagram_sequence(),
+            before,
+            "the evicted flow's counters are carried, not dropped"
+        );
+
+        // And a flow that arrives after the eviction ADDS to what was carried.
+        for (i, sn) in [7u8, 8].into_iter().enumerate() {
+            let pkt = udp_packet([10, 0, 0, 9], 7448, [224, 0, 0, 224], 7446, &frame(sn));
+            d.push_packet(LINKTYPE_ETHERNET, 6 + i, &pkt);
+        }
+        let after = d.datagram_sequence();
+        assert_eq!(
+            after.frames,
+            before.frames + 2,
+            "the carry and the live flow are summed, not replaced: {after:?}"
+        );
+    }
+
+    /// The datagram share saturates its gap total like the all-links figure.
+    ///
+    /// Six gaps of 2^62 - 2 sum past `u64::MAX` inside ONE flow, and the session
+    /// already saturates that (see `gaps_that_sum_past_the_top_of_u64_saturate`).
+    /// What the datagram share adds is the sum ACROSS flows, which is a second
+    /// accumulator: two flows that each reached the top add to more than a u64
+    /// holds, so the figure is asserted on two of them rather than inferred
+    /// from the one-flow case, which never makes this accumulator overflow.
+    #[test]
+    fn the_datagram_sequence_gap_total_saturates_across_flows() {
+        // `seq_num_res` 3 is the 63-bit window, as `wide_sn_dissection_with_file`
+        // spells it.
+        const SN_RES_63_BIT: u8 = 0x03 | (0x02 << 2);
+        let mask = (1u64 << 63) - 1;
+        let step = (1u64 << 62) - 1;
+        let sns: Vec<u64> = (0..7u64)
+            .map(|k| 1u64.wrapping_add(k.wrapping_mul(step)) & mask)
+            .collect();
+        let frame = |sn: u64| {
+            let mut wire = alloc::vec![
+                wz_session_core::wire_const::T_MID_FRAME | wz_codecs::wire_const::FLAG_T_FRAME_R
+            ];
+            wire.extend_from_slice(&vle_bytes(sn));
+            wire.extend_from_slice(&[0x1F, 0x00, 0x00, 0x00]);
+            wire
+        };
+        let mut d = Dissection::new();
+        let mut at = 0usize;
+        for client_port in [43210u16, 43211] {
+            let mut messages = alloc::vec![
+                (true, init_datagram_resolving(false, SN_RES_63_BIT)),
+                (false, init_datagram_resolving(true, SN_RES_63_BIT)),
+                (true, open_datagram(false)),
+                (false, open_datagram(true)),
+            ];
+            for sn in &sns {
+                messages.push((true, frame(*sn)));
+            }
+            for (from_low, message) in messages {
+                let packet = if from_low {
+                    udp_packet([10, 0, 0, 1], client_port, [10, 0, 0, 2], 7447, &message)
+                } else {
+                    udp_packet([10, 0, 0, 2], 7447, [10, 0, 0, 1], client_port, &message)
+                };
+                d.push_packet(LINKTYPE_ETHERNET, at, &packet);
+                at += 1;
+            }
+        }
+        d.finish();
+        assert_eq!(d.datagram_flows().len(), 2, "two flows, one per port");
+        let datagram_only = d.datagram_sequence();
+        assert_eq!(datagram_only.gaps, 12, "{datagram_only:?}");
+        assert_eq!(
+            datagram_only.missing,
+            u64::MAX,
+            "two flows at the top sum past the top, and the total sticks there: \
+             {datagram_only:?}"
         );
     }
 

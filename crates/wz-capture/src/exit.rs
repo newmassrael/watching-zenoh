@@ -47,8 +47,8 @@ use alloc::vec::Vec;
 use wz_session_core::chain_loss::ChainLoss;
 
 use crate::{
-    add_sn, add_ws, tls, ByteResidue, DatagramDissection, Direction, FlowDissection, FramingHealth,
-    StreamTally,
+    add_sequence, add_sn, add_ws, tls, ByteResidue, DatagramDissection, Direction, FlowDissection,
+    FramingHealth, StreamTally,
 };
 
 /// What performing a flow's exit obligations turned up.
@@ -251,6 +251,14 @@ pub(crate) struct ExitCarry {
     /// a capture held cannot take it from a sum that includes the other table.
     stream_flows: usize,
     datagram_flows: usize,
+    /// The sequence-number accounting of the flows retired from the DATAGRAM
+    /// table alone.
+    ///
+    /// `sessions` above already holds it, summed with the stream table's, and
+    /// the sum cannot be split afterwards. A reader asking what the datagram
+    /// links lost cannot take it from a total that has TCP frames in its
+    /// denominator, so the datagram half is kept apart as it arrives.
+    datagram_sequence: wz_session_core::passive::SnAccounting,
 }
 
 impl ExitCarry {
@@ -313,7 +321,9 @@ impl ExitCarry {
             self.sessions.reserved_headers += flow.session.reserved_headers(dir);
             self.sessions.undefined_mandatory_exts += flow.session.undefined_mandatory_exts(dir);
             self.sessions.unaccounted_batch_bytes += flow.session.unaccounted_batch_bytes(dir);
-            add_sn(&mut self.sessions, flow.session.sn_accounting(dir));
+            let sn = flow.session.sn_accounting(dir);
+            add_sn(&mut self.sessions, sn);
+            add_sequence(&mut self.datagram_sequence, sn);
         }
         self.residue.absorb(flow.residue());
         self.datagram_flows += 1;
@@ -368,6 +378,11 @@ impl ExitCarry {
     /// How many of them left the datagram table.
     pub(crate) fn datagram_flows(&self) -> usize {
         self.datagram_flows
+    }
+
+    /// The sequence-number accounting of the datagram flows among them.
+    pub(crate) fn datagram_sequence(&self) -> wz_session_core::passive::SnAccounting {
+        self.datagram_sequence
     }
 }
 

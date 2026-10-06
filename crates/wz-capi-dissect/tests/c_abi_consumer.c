@@ -386,6 +386,16 @@ static int check_live_door(void) {
         CHECK(strstr(health, "\"unsupported_link_type\":1") != NULL,
               "the unreadable packet is in the summary's own skip census: %s",
               health);
+        /* (health revision 2) -- the sequence group over the datagram links
+         * alone. A keepalive carries no sequence number, so the group is all
+         * zeros here, and it is there: a consumer's field lookup never
+         * depends on whether the capture held a numbered frame. */
+        CHECK(strstr(health,
+                     "\"datagram_sequence\":{\"frames\":0,\"missing\":0,"
+                     "\"gaps\":0,\"duplicates\":0,\"out_of_window\":0,"
+                     "\"without_resolution\":0}") != NULL,
+              "the datagram-only sequence group is missing or moved: %s",
+              health);
         wz_dissect_string_free(health);
 
         health = NULL;
@@ -1864,7 +1874,7 @@ int main(void) {
     /* (ABI 24) -- the health document, from an empty handle for the same
      * reason: an empty handle still answers. */
     revisioned[5].name = "health";
-    revisioned[5].revision = 1;
+    revisioned[5].revision = 2;
     revisioned[5].doc = NULL;
     {
         wz_dissect_live *healthy = NULL;

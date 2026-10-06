@@ -2598,7 +2598,9 @@ int wz_dissect_live_retention(const wz_dissect_live *h, char **out);
  *
  *     {"document":{"name":"health","revision":R},
  *      "health":{...},
- *      "flows_seen":{"stream":S,"datagram":D}}
+ *      "flows_seen":{"stream":S,"datagram":D},
+ *      "datagram_sequence":{"frames":F,"missing":M,"gaps":G,"duplicates":U,
+ *                           "out_of_window":W,"without_resolution":N}}
  *
  * `health` is the summary's `health` object byte for byte, from the same
  * emitter, so the code that reads one reads the other and neither can report a
@@ -2617,6 +2619,19 @@ int wz_dissect_live_retention(const wz_dissect_live *h, char **out);
  * `dropped_by_limits.flows` counts evictions from BOTH tables as one number, so
  * the sum over-reads the stream table on any capture that evicted a datagram
  * flow -- on a capture with no TCP packet at all it is not zero.
+ *
+ * (health revision 2) `datagram_sequence` is the `sequence` group of `health`
+ * over the datagram links alone: the same six counters with the same meaning,
+ * so one reader reads both. `health.sequence` is the sum over every link, which
+ * puts TCP frames in the denominator of any loss rate taken from it, and the
+ * sum cannot be split afterwards. This is the datagram share. It is
+ * CUMULATIVE and never decreases: it counts the datagram flows the handle holds
+ * and every datagram flow its flow cap has already retired, so a consumer that
+ * wants the trailing window reads it twice and subtracts. The stream share is
+ * `health.sequence` minus it. `missing` follows the integer rule (a bare number
+ * up to 2^53 - 1, the same digits in a string above it). A READ of counters: the
+ * cost follows the number of live datagram flows, not the number of rows they
+ * hold.
  *
  * A READ, and `h` is const to say so: the counters are read where they sit, no
  * record is handed out and no id is settled, so the next
