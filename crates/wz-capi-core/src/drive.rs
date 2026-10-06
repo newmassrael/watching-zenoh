@@ -1648,8 +1648,8 @@ pub struct OpenStance {
     /// nothing until [`SessionState::start_read_task`]; see [`ReadGate`].
     pub start_read_task: bool,
     /// R3064 -- the node's `timestamping.enabled` map: which roles hold a clock. Read from the
-    /// config by the ABI that reads configs ([`wz_runtime_tokio::zenoh_config::ZenohConfigIngest::timestamping_enabled`]
-    /// for zenoh-c), and [`TimestampingEnabled::default`] (zenoh's shipped map: only a router
+    /// config by the ABI that reads configs (`ZenohConfigIngest::timestamping_enabled` in the
+    /// runtime, for zenoh-c), and [`TimestampingEnabled::default`] (zenoh's shipped map: only a router
     /// stamps) for an ABI that has no such key, which is what every session was given before
     /// this field existed. The session builds ONE clock from it, for the role it dials as, and
     /// every session of the node shares that clock.
