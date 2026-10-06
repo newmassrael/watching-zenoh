@@ -2516,7 +2516,16 @@ PIN_NO_SYMBOL = 0
 # dead declaration comes from; and `transport-shm`'s gains the UPDATE for the cached sample,
 # which names the cache's handle. Both atoms are still PARTIAL. READ off the census's own FAIL
 # line, `wz citations: 108 against a pin of 99`, for the reason the R3062 note gives.
-PIN_WZ_CITATIONS = 108
+#
+# R3064 -- 108 -> 120, one atom. `api-compat-c`'s reason gains the UPDATE that a cache-only
+# advanced publisher works, that a declaration the session refuses is refused, and that the
+# in-process plane holds every shape of advanced subscriber; it names the node clock's
+# construction and its installation on the plane and the faces, the config reader's clock map,
+# the two removed off-runtime preconditions, the registry's declaration result and the C ABI's
+# error code, the plane's session-local queries, and the three witnesses. `transport-shm` is not
+# touched and is still PARTIAL beside it. READ off the census's own FAIL line, `wz citations: 120
+# against a pin of 108`, for the reason the R3062 note gives.
+PIN_WZ_CITATIONS = 120
 # R2626 — 44 -> 42, and this one is worth a sentence because it HELD through
 # every earlier retirement in this run (R2612, R2622). `time-hlc`'s reason is the
 # first retiree carrying AMBIGUOUS citations of its own: its oldest clauses cite
