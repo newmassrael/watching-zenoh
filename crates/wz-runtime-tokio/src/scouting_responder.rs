@@ -5,7 +5,7 @@
 //! scouting group, answer a Scout with this node's Hello, UNICAST back to the
 //! asker.
 //!
-//! The decision is [`wz_session_core::scout_responder::answer_scout`] and lives
+//! The decision is [`wz_session_core::scout_responder::answer_scout_from`] and lives
 //! there, with no socket in sight; this owns the IO. That is the same split
 //! `crate::scouting_glue` documents for the initiator, and it earns the same two
 //! things: the gates are unit-testable without a multicast route, and the reasons
@@ -39,7 +39,7 @@ use std::net::{IpAddr, SocketAddr};
 
 use wz_session_core::link::{LinkEvent, LostCause};
 use wz_session_core::scout_responder::{
-    answer_scout, best_reply_source, ScoutDecision, ScoutIgnored,
+    answer_scout_from, best_reply_source, ScoutDecision, ScoutIgnored,
 };
 // R311y428's rule, applied to this module's own parameter types: a consumer
 // reaches this crate through the wz facade (`wz::runtime_tokio::*`), which
@@ -247,7 +247,9 @@ impl ScoutingResponder {
                 }
             }
         };
-        match answer_scout(&self.identity, &rx.bytes) {
+        // R3071 -- the Hello carries the locator list its asker is owed, so the asker's address
+        // is read before the decision and not after it.
+        match answer_scout_from(&self.identity, &rx.bytes, rx.src.map(|src| src.ip())) {
             ScoutDecision::Ignored(why) => {
                 self.ignored += 1;
                 ResponderStep::Ignored { from: rx.src, why }

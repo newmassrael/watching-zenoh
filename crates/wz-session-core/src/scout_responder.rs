@@ -106,6 +106,10 @@ pub struct ResponderIdentity {
     whatami: WhatAmI,
     zid: Vec<u8>,
     locators: Vec<String>,
+    /// R3071 -- the list a Hello carries to an asker that is NOT on this host, when it differs
+    /// from `locators`. `None` is "the same list for everyone", which is every identity built
+    /// before an asker's address mattered.
+    locators_noloopback: Option<Vec<String>>,
 }
 
 /// Why an identity could not be built. Both arms are about the zid, and both
@@ -174,7 +178,33 @@ impl ResponderIdentity {
             whatami,
             zid,
             locators,
+            locators_noloopback: None,
         })
+    }
+
+    /// R3071 -- give a Hello to an asker on ANOTHER host the list without the loopback addresses
+    /// an unspecified bind expands to, and keep `locators` for an asker on this one.
+    ///
+    /// Upstream keeps the two lists side by side and picks per asker: `get_hello_locators`
+    /// answers the full list when the asker's source address is loopback and the list without
+    /// loopback otherwise (`zenoh/src/net/runtime/orchestrator.rs` @
+    /// `fn get_hello_locators(&self, peer: &SocketAddr) -> Vec<Locator> {`). A node bound to
+    /// `0.0.0.0` therefore tells a neighbour its LAN addresses and tells a process beside it
+    /// `127.0.0.1` as well, and an address the asker could not use is never offered.
+    #[must_use]
+    pub fn with_noloopback_locators(mut self, locators: Vec<String>) -> Self {
+        self.locators_noloopback = Some(locators);
+        self
+    }
+
+    /// The list a Hello to `asker` carries: the one without loopback addresses for an asker that
+    /// is not on this host, and the full one for a loopback asker and for one whose address is not
+    /// known (the pure decision may have none to look at).
+    pub fn locators_for(&self, asker: Option<IpAddr>) -> &[String] {
+        match (&self.locators_noloopback, asker) {
+            (Some(noloopback), Some(ip)) if !ip.is_loopback() => noloopback,
+            _ => &self.locators,
+        }
     }
 
     /// The protocol version byte this node answers with.
@@ -240,6 +270,17 @@ pub enum ScoutDecision {
 /// contract [`crate::scouting_message::parse_scouting`] documents, and for the
 /// same reason (`S_MID_SCOUT` and `T_MID_INIT` are the same byte).
 pub fn answer_scout(identity: &ResponderIdentity, datagram: &[u8]) -> ScoutDecision {
+    answer_scout_from(identity, datagram, None)
+}
+
+/// [`answer_scout`] for a Scout whose SOURCE address is known: the Hello carries the locator list
+/// that source is owed ([`ResponderIdentity::locators_for`]). The gates are the same; only the
+/// list differs, so an asker with no known address gets what [`answer_scout`] gives.
+pub fn answer_scout_from(
+    identity: &ResponderIdentity,
+    datagram: &[u8],
+    asker: Option<IpAddr>,
+) -> ScoutDecision {
     let frame = match parse_scouting(datagram) {
         Ok(f) => f,
         Err(_) => return ScoutDecision::Ignored(ScoutIgnored::Undecodable),
@@ -260,7 +301,7 @@ pub fn answer_scout(identity: &ResponderIdentity, datagram: &[u8]) -> ScoutDecis
     if what & identity.whatami.to_api() == 0 {
         return ScoutDecision::Ignored(ScoutIgnored::WhatMismatch { what });
     }
-    ScoutDecision::Answer(hello_datagram(identity))
+    ScoutDecision::Answer(hello_datagram_with(identity, identity.locators_for(asker)))
 }
 
 /// How many LEADING octets `asker` and `local` share, or `None` when the two are
@@ -348,6 +389,12 @@ pub fn best_reply_source(asker: IpAddr, candidates: &[IpAddr]) -> Option<usize> 
 /// (`zenoh-codec` `scouting/hello.rs:50-70`), so a Hello with the flag and no
 /// list is a decode failure at the other end rather than an empty list.
 pub fn hello_datagram(identity: &ResponderIdentity) -> Vec<u8> {
+    hello_datagram_with(identity, &identity.locators)
+}
+
+/// [`hello_datagram`] carrying `advertised` in place of the identity's own list, for the asker the
+/// list was chosen for.
+fn hello_datagram_with(identity: &ResponderIdentity, advertised: &[String]) -> Vec<u8> {
     let mut hello = Hello::new();
     hello.version = identity.version;
     hello.set_whatami(identity.whatami.to_wire());
@@ -358,7 +405,7 @@ pub fn hello_datagram(identity: &ResponderIdentity) -> Vec<u8> {
     hello.zid = &identity.zid;
 
     let mut locators = sce_forge_runtime::heapless::Vec::<Locator<'_>, 64>::new();
-    for l in &identity.locators {
+    for l in advertised {
         // The bound is the codec's declared `sce:max-count`, so overflowing it
         // is not an error to propagate but a list to TRUNCATE: a Hello carrying
         // 64 of a node's locators is still a usable dial hint, while a
@@ -439,6 +486,48 @@ mod tests {
             ScoutDecision::Answer(bytes) => bytes,
             ScoutDecision::Ignored(why) => panic!("expected a Hello, got Ignored({why:?})"),
         }
+    }
+
+    /// R3071 -- the Hello an asker is answered with carries the list that asker is owed: the full
+    /// one for a process on this host, the one without loopback for a neighbour, and the full one
+    /// when the pure decision was not told where the Scout came from. An identity given no second
+    /// list answers everyone with the one it has.
+    #[test]
+    fn the_locator_list_follows_the_asker() {
+        let both = peer_identity().with_noloopback_locators(vec!["tcp/10.0.0.7:7447".to_string()]);
+        let carried = |id: &ResponderIdentity, asker: Option<IpAddr>| -> Vec<String> {
+            let reply = answered(answer_scout_from(id, &scout_wire(0b011, None), asker));
+            match parse_scouting(&reply).expect("our own Hello must decode") {
+                ScoutingFrame::Hello { body, .. } => body
+                    .locators
+                    .as_ref()
+                    .map(|list| {
+                        list.iter()
+                            .map(|l| l.locator.as_str().to_string())
+                            .collect()
+                    })
+                    .unwrap_or_default(),
+                other => panic!("the reply is not a Hello: {other:?}"),
+            }
+        };
+        let loopback: IpAddr = "127.0.0.1".parse().unwrap();
+        let neighbour: IpAddr = "10.0.0.9".parse().unwrap();
+        assert_eq!(carried(&both, Some(loopback)), vec![OUR_LOCATOR]);
+        assert_eq!(carried(&both, Some(neighbour)), vec!["tcp/10.0.0.7:7447"]);
+        assert_eq!(carried(&both, None), vec![OUR_LOCATOR]);
+        // The loopback of the v6 family is loopback too.
+        assert_eq!(
+            carried(&both, Some("::1".parse().unwrap())),
+            vec![OUR_LOCATOR]
+        );
+        // One list for everyone when no second was given.
+        let single = peer_identity();
+        assert_eq!(carried(&single, Some(neighbour)), vec![OUR_LOCATOR]);
+        // A second list that is EMPTY is a Hello with no locators, not the first list: a node
+        // bound only to loopback tells a neighbour nothing it could dial.
+        let empty = peer_identity().with_noloopback_locators(Vec::new());
+        assert!(carried(&empty, Some(neighbour)).is_empty());
+        assert_eq!(carried(&empty, Some(loopback)), vec![OUR_LOCATOR]);
     }
 
     /// The positive arm — and it asserts the DECODED reply, not that bytes came

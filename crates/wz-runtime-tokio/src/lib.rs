@@ -3104,6 +3104,28 @@ impl UdpDriver {
         Ok(())
     }
 
+    /// R3071 -- also join `group` on the interface that holds `iface`, on this driver's own
+    /// socket.
+    ///
+    /// [`Self::bind_multicast`] installs ONE membership, on the interface the kernel resolves
+    /// `INADDR_ANY` to, and says in its own comment that it is "not one -> many". A node that
+    /// answers Scouts has to hear them on every interface it is reachable by: upstream binds
+    /// its scouting socket once and joins the group on each interface it was configured with
+    /// (`zenoh/src/net/runtime/orchestrator.rs` @
+    /// `socket.join_multicast_v4(&addr, iface_addr)`), so a neighbour on the second NIC of a
+    /// multi-homed host finds it. A membership the kernel refuses (the interface went away, it
+    /// is already joined) is the caller's to count, and not a reason to stop joining the others.
+    pub fn join_multicast_v4_on(
+        &self,
+        group: std::net::Ipv4Addr,
+        iface: std::net::Ipv4Addr,
+    ) -> io::Result<()> {
+        self.socket
+            .as_ref()
+            .ok_or_else(|| io::Error::new(io::ErrorKind::NotConnected, "no socket"))?
+            .join_multicast_v4(group, iface)
+    }
+
     /// The address this driver's socket is bound to.
     ///
     /// For a group-joined receiver that is `0.0.0.0:<group port>` — a wildcard,

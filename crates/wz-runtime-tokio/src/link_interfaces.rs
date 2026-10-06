@@ -529,6 +529,138 @@ pub fn unicast_addresses_of_multicast_interfaces() -> Option<Vec<IpAddr>> {
     None
 }
 
+/// R3071 -- EVERY address of every interface that is UP and RUNNING, loopback included, in
+/// `getifaddrs`' order: zenoh's `get_local_addresses(None)`
+/// (`commons/zenoh-util/src/net/mod.rs` @ `pub fn get_local_addresses(interface: Option<&str>) -> ZResult<Vec<IpAddr>> {`).
+///
+/// What an UNSPECIFIED listener stands for: a node bound to `0.0.0.0` or `[::]` tells a scouter
+/// the addresses of the host it is bound on, not the wildcard
+/// ([`expand_unspecified`] orders them). NOT [`unicast_addresses_of_multicast_interfaces`], which
+/// keeps only the interfaces that can carry multicast and so never names loopback; the two agree
+/// on a host whose only other interface is a NIC, and differ on one with a point-to-point or
+/// tunnel interface that carries no multicast.
+///
+/// The divergences are [`unicast_addresses_of_interface`]'s: resolved live per call, and `None`
+/// when the resolution could not run where upstream answers an empty vec.
+#[cfg(unix)]
+pub fn local_addresses() -> Option<Vec<IpAddr>> {
+    let mut head: *mut libc::ifaddrs = std::ptr::null_mut();
+    // SAFETY: as in `interface_names_for` -- `getifaddrs` allocates the list and writes its head
+    // through the out-pointer, returning 0 on success; on failure `head` is untouched and the
+    // early return never reads it.
+    if unsafe { libc::getifaddrs(&mut head) } != 0 {
+        return None;
+    }
+
+    let mut addrs: Vec<IpAddr> = Vec::new();
+    let mut cur = head;
+    while !cur.is_null() {
+        // SAFETY: `cur` is non-null and points at a node the successful `getifaddrs` above
+        // allocated; the list is not mutated while walked.
+        let ifa = unsafe { &*cur };
+        cur = ifa.ifa_next;
+
+        let flags = ifa.ifa_flags as i32;
+        if flags & libc::IFF_UP == 0 || flags & libc::IFF_RUNNING == 0 {
+            continue;
+        }
+        if let Some(ip) = sockaddr_ip(ifa.ifa_addr) {
+            addrs.push(ip);
+        }
+    }
+
+    // SAFETY: `head` came from the successful `getifaddrs` above and is freed exactly once here;
+    // no node pointer outlives this call (the addresses are copied out by value).
+    unsafe { libc::freeifaddrs(head) };
+    Some(addrs)
+}
+
+/// Non-unix: no `getifaddrs`, so this cannot answer. `None`, which a caller reads as "could not
+/// determine" and not as a host with no address.
+#[cfg(not(unix))]
+pub fn local_addresses() -> Option<Vec<IpAddr>> {
+    None
+}
+
+/// R3071 -- the socket addresses an UNSPECIFIED listener stands for on a host whose addresses are
+/// `local`, in the order zenoh lists them, with or without the loopback ones.
+///
+/// Pure, so the order is testable on a host that has one interface. The rule is zenoh's
+/// (`commons/zenoh-util/src/net/mod.rs` @ `pub fn get_ipv4_ipaddrs(interface: Option<&str>, noloopback: bool) -> Vec<IpAddr> {`
+/// for a `0.0.0.0` bind and
+/// `commons/zenoh-util/src/net/mod.rs` @ `pub fn get_ipv6_ipaddrs(interface: Option<&str>, noloopback: bool) -> Vec<IpAddr> {`
+/// for a `[::]` bind), MEASURED against the real library before it was written down: a peer
+/// bound to `[::]` told a scouter its global IPv6 address, then its public IPv4 one, then its
+/// link-local IPv6 ones, then its private IPv4 one, and nothing else.
+///
+/// - `0.0.0.0` stands for the host's IPv4 addresses, in the order given, none of them multicast.
+/// - `[::]` stands for BOTH families, ordered global IPv6, public IPv4, link-local IPv6, private
+///   IPv4; an IPv4 address that is link-local, multicast or broadcast is not offered.
+///
+/// A bound address that is not unspecified is not expanded and stands for itself.
+pub fn expand_unspecified(
+    bound: SocketAddr,
+    local: &[IpAddr],
+    exclude_loopback: bool,
+) -> Vec<SocketAddr> {
+    use std::net::{Ipv4Addr, Ipv6Addr};
+
+    if !bound.ip().is_unspecified() {
+        return vec![bound];
+    }
+    let port = bound.port();
+    let v4 = |keep: &dyn Fn(&Ipv4Addr) -> bool| -> Vec<Ipv4Addr> {
+        local
+            .iter()
+            .filter_map(|ip| match ip {
+                IpAddr::V4(a) if !(exclude_loopback && a.is_loopback()) && keep(a) => Some(*a),
+                _ => None,
+            })
+            .collect()
+    };
+    let v6 = |keep: &dyn Fn(&Ipv6Addr) -> bool| -> Vec<Ipv6Addr> {
+        local
+            .iter()
+            .filter_map(|ip| match ip {
+                IpAddr::V6(a) if !(exclude_loopback && a.is_loopback()) && keep(a) => Some(*a),
+                _ => None,
+            })
+            .collect()
+    };
+    let link_local = |a: &Ipv6Addr| (a.segments()[0] & 0xffc0) == 0xfe80;
+
+    let ips: Vec<IpAddr> = if bound.is_ipv4() {
+        v4(&|a| !a.is_multicast())
+            .into_iter()
+            .map(IpAddr::V4)
+            .collect()
+    } else {
+        let usable_v4 = |a: &Ipv4Addr| !a.is_link_local() && !a.is_multicast() && !a.is_broadcast();
+        v6(&|a| !a.is_multicast() && !link_local(a))
+            .into_iter()
+            .map(IpAddr::V6)
+            .chain(
+                v4(&|a| usable_v4(a) && !a.is_private())
+                    .into_iter()
+                    .map(IpAddr::V4),
+            )
+            .chain(
+                v6(&|a| !a.is_multicast() && link_local(a))
+                    .into_iter()
+                    .map(IpAddr::V6),
+            )
+            .chain(
+                v4(&|a| usable_v4(a) && a.is_private())
+                    .into_iter()
+                    .map(IpAddr::V4),
+            )
+            .collect()
+    };
+    ips.into_iter()
+        .map(|ip| SocketAddr::new(ip, port))
+        .collect()
+}
+
 /// R2584 — the kernel index of the interface named `name`.
 ///
 /// IPv6 multicast selects an interface by INDEX where IPv4 selects it by address:
@@ -1214,5 +1346,115 @@ mod tests {
                 "the wildcard set {all:?} must contain the loopback's {name}"
             );
         }
+    }
+
+    /// R3071 -- the host's own address list, read from the kernel, names loopback and a
+    /// non-loopback address, which is the population an unspecified listener expands over.
+    #[test]
+    fn the_local_address_list_holds_loopback_and_something_else() {
+        let local = local_addresses().expect("getifaddrs resolves");
+        assert!(
+            local.iter().any(IpAddr::is_loopback),
+            "an UP interface named loopback is in {local:?}"
+        );
+    }
+}
+
+/// R3071 -- the order an unspecified listener's locators are listed in, on a host whose addresses
+/// are written out here. The addresses and the order are the ones MEASURED from a real peer bound
+/// to `[::]` on a multi-homed host: global IPv6, public IPv4, link-local IPv6 (in the order the
+/// host lists them), private IPv4, and no loopback to a neighbour.
+#[cfg(test)]
+mod expansion {
+    use super::*;
+
+    fn ip(text: &str) -> IpAddr {
+        text.parse().expect("an address")
+    }
+
+    fn host() -> Vec<IpAddr> {
+        // The order `getifaddrs` gave on the measured host: the IPv4 ones first, then IPv6.
+        [
+            "127.0.0.1",
+            "172.30.1.74",
+            "100.75.93.118",
+            "::1",
+            "fe80::44be:2469:54d9:9a33",
+            "fe80::a583:492f:8016:3c7e",
+            "fd7a:115c:a1e0::db37:5d7a",
+        ]
+        .iter()
+        .map(|text| ip(text))
+        .collect()
+    }
+
+    fn texts(list: Vec<SocketAddr>) -> Vec<String> {
+        list.iter().map(ToString::to_string).collect()
+    }
+
+    #[test]
+    fn a_v6_wildcard_lists_global_then_public_then_link_local_then_private() {
+        let bound: SocketAddr = "[::]:36561".parse().unwrap();
+        assert_eq!(
+            texts(expand_unspecified(bound, &host(), true)),
+            [
+                "[fd7a:115c:a1e0::db37:5d7a]:36561",
+                "100.75.93.118:36561",
+                "[fe80::44be:2469:54d9:9a33]:36561",
+                "[fe80::a583:492f:8016:3c7e]:36561",
+                "172.30.1.74:36561",
+            ]
+        );
+    }
+
+    /// An asker on this host is owed the loopback addresses too: `::1` is a global-scope IPv6
+    /// address and so comes first of the IPv6 ones, and `127.0.0.1` is not private so it follows
+    /// the other public IPv4 address.
+    #[test]
+    fn a_loopback_asker_is_also_offered_loopback() {
+        let bound: SocketAddr = "[::]:1".parse().unwrap();
+        let with = texts(expand_unspecified(bound, &host(), false));
+        assert_eq!(with.len(), 7, "every address of the host: {with:?}");
+        assert_eq!(with[0], "[::1]:1");
+        assert!(with.contains(&"127.0.0.1:1".to_string()));
+    }
+
+    #[test]
+    fn a_v4_wildcard_lists_only_ipv4_in_the_hosts_order() {
+        let bound: SocketAddr = "0.0.0.0:17922".parse().unwrap();
+        assert_eq!(
+            texts(expand_unspecified(bound, &host(), true)),
+            ["172.30.1.74:17922", "100.75.93.118:17922"]
+        );
+        assert_eq!(
+            texts(expand_unspecified(bound, &host(), false)),
+            [
+                "127.0.0.1:17922",
+                "172.30.1.74:17922",
+                "100.75.93.118:17922"
+            ]
+        );
+    }
+
+    /// An address that is not unspecified stands for itself, and loopback in it is the node's
+    /// own choice and is not filtered.
+    #[test]
+    fn a_specific_bind_stands_for_itself() {
+        let bound: SocketAddr = "127.0.0.1:17921".parse().unwrap();
+        assert_eq!(expand_unspecified(bound, &host(), true), vec![bound]);
+    }
+
+    /// An IPv4 link-local, multicast or broadcast address is not offered through a `[::]` bind.
+    #[test]
+    fn a_v6_wildcard_does_not_offer_an_unusable_ipv4_address() {
+        let local: Vec<IpAddr> = ["169.254.3.4", "224.0.0.1", "255.255.255.255", "10.1.2.3"]
+            .iter()
+            .map(|text| ip(text))
+            .collect();
+        let bound: SocketAddr = "[::]:5".parse().unwrap();
+        assert_eq!(
+            texts(expand_unspecified(bound, &local, true)),
+            ["10.1.2.3:5"]
+        );
     }
 }
