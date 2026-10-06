@@ -2562,7 +2562,16 @@ PIN_NO_SYMBOL = 0
 # 156`, for the reason the R3062 note gives. A first draft named four modules by bare file name
 # and the census counted two of them AMBIGUOUS (ambiguous 4 against a pin of 2): a file name that
 # several tracked files share is not a citation, so the sentence was rewritten and the pin holds.
-PIN_WZ_CITATIONS = 168
+#
+# R3070 -- 168 -> 188, one atom. `api-compat-c`'s reason gains the UPDATE that a session told
+# nothing scouts for the nodes to join: it names the plan and its resolution, the C ABI's call to
+# it and pico's absence of one, the loop that acts on each answer as it arrives, the peer's
+# connector and the client's search, the zid check on a scouted link, the rule that the open's
+# window belongs to a session's own endpoints, the runtime gate it needed, the chunk-hand type the
+# push before it had to repair, and the four differentials and three oracle-free tests.
+# `transport-shm` is not touched and is still PARTIAL beside it. READ off the census's own FAIL
+# line, `wz citations: 188 against a pin of 168`, for the reason the R3062 note gives.
+PIN_WZ_CITATIONS = 188
 # R2626 — 44 -> 42, and this one is worth a sentence because it HELD through
 # every earlier retirement in this run (R2612, R2622). `time-hlc`'s reason is the
 # first retiree carrying AMBIGUOUS citations of its own: its oldest clauses cite
