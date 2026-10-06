@@ -162,13 +162,23 @@ unsafe fn put_exactly(publisher: &z_owned_session_t, hits: &Arc<AtomicUsize>, n:
     hits.load(Ordering::SeqCst)
 }
 
-/// A peer or router that states no endpoint opens, alone, and a sample it publishes reaches its
-/// own subscriber. Before this a config like that was refused, though zenoh starts one.
+/// A peer or router that states no endpoint to dial opens, alone, and a sample it publishes reaches
+/// its own subscriber. Before this a config like that was refused, though zenoh starts one.
+///
+/// What it LISTENS on is not the claim, and the two roles differ in it (R3071): a peer that says
+/// nothing binds `tcp/[::]:0` and takes the kernel's port, and a router would bind the fixed
+/// `tcp/[::]:7447`, a port a second router or a running daemon on the host holds. The router's row
+/// STATES an empty `listen/endpoints`, which is what "nothing to listen on" means to the real
+/// library and keeps this row off a port it does not own.
 #[test]
 fn a_peer_or_router_with_no_endpoint_opens_alone_and_hears_itself() {
     for mode in ["peer", "router"] {
+        let mut config = stated(mode, None, None);
+        if mode == "router" {
+            config.push(("listen/endpoints", String::from("[]")));
+        }
         // SAFETY: fresh config and session.
-        let (rc, session) = unsafe { open_with(&stated(mode, None, None)) };
+        let (rc, session) = unsafe { open_with(&config) };
         assert_eq!(rc, Z_OK, "a {mode} with no endpoint opens");
         // SAFETY: the session is live; `ctx` is freed after it closes.
         let (hits, ctx) = unsafe { count_samples(&session) };
@@ -202,8 +212,12 @@ fn a_client_with_nothing_to_dial_fails_its_open_listener_or_not() {
 }
 
 /// A group no other test or node on this host scouts on, so a session that scouts here meets
-/// nobody it was not started to meet.
-const PRIVATE_GROUP: &str = "\"224.0.0.231:7479\"";
+/// nobody it was not started to meet. ONE PER TEST: a peer answers a Scout now (R3071), so two
+/// tests of this file that shared a group found each other when they ran in parallel, and the one
+/// that expected to find nobody opened.
+const PEER_GROUP: &str = "\"224.0.0.231:7479\"";
+/// The group of the client that finds nobody; see [`PEER_GROUP`].
+const CLIENT_GROUP: &str = "\"224.0.0.231:7478\"";
 
 /// With multicast scouting ON (zenoh's default) and no endpoint, a peer opens: it scouts the group
 /// for the open's start window, finds nobody, and is a session alone, as the real library's is
@@ -215,7 +229,7 @@ fn a_peer_that_scouts_and_finds_nobody_opens_after_its_scouting_delay() {
     let (rc, session) = unsafe {
         open_with(&[
             ("mode", String::from("\"peer\"")),
-            ("scouting/multicast/address", String::from(PRIVATE_GROUP)),
+            ("scouting/multicast/address", String::from(PEER_GROUP)),
             ("scouting/delay", String::from("300")),
         ])
     };
@@ -252,7 +266,7 @@ fn a_client_that_scouts_and_finds_nobody_fails_after_its_timeout() {
     let (rc, session) = unsafe {
         open_with(&[
             ("mode", String::from("\"client\"")),
-            ("scouting/multicast/address", String::from(PRIVATE_GROUP)),
+            ("scouting/multicast/address", String::from(CLIENT_GROUP)),
             ("scouting/timeout", String::from("400")),
         ])
     };

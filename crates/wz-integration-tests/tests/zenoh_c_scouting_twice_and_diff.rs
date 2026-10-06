@@ -133,6 +133,8 @@ int main(int argc, char** argv) {
     /* Two knobs the answering rows turn, as text in the environment: whether the node ANSWERS a
        Scout (`scouting/multicast/listen`), and the host its listener binds. */
     if (getenv("SCOUT_LISTEN")) insert(&config, "scouting/multicast/listen", getenv("SCOUT_LISTEN"));
+    /* A listen list the config STATES, empty: it suppresses the listener a peer binds by default. */
+    if (getenv("LISTEN_EMPTY")) insert(&config, "listen/endpoints", "[]");
     if (lport) {
         const char* host = getenv("LISTEN_HOST") ? getenv("LISTEN_HOST") : "127.0.0.1";
         snprintf(buf, sizeof buf, "[\"tcp/%s:%d\"]", host, lport);
@@ -769,6 +771,13 @@ enum Shape {
     PeerOnTheWildcard,
     /// A peer told not to answer (`scouting/multicast/listen: false`): nobody finds it.
     PeerToldNotToAnswer,
+    /// A peer whose config says nothing about `listen/endpoints`: it binds `tcp/[::]:0` of its own,
+    /// and its Hello names the host's addresses at the port the kernel gave, as a peer bound to the
+    /// wildcard does (R3071).
+    PeerWithNoListener,
+    /// A peer whose config STATES an empty `listen/endpoints`: it binds nothing, and its Hello
+    /// names nothing.
+    PeerListenStatedEmpty,
     /// A client connected to a peer, with a listener of its own: its Hello names the listener.
     ClientConnectedWithAListener,
     /// A client connected to a peer, with no listener: it answers with no locator.
@@ -783,7 +792,9 @@ impl Shape {
     fn what(self) -> u8 {
         match self {
             Shape::PeerOnLoopback | Shape::PeerToldNotToAnswer => 7,
-            Shape::PeerOnTheWildcard => 2,
+            Shape::PeerOnTheWildcard | Shape::PeerWithNoListener | Shape::PeerListenStatedEmpty => {
+                2
+            }
             Shape::ClientConnectedWithAListener
             | Shape::ClientConnectedWithNone
             | Shape::ClientStillSearching => 4,
@@ -816,13 +827,23 @@ fn hellos_of(built: &Built, reference: &Built, probe: &Built, shape: Shape) -> V
         timeout_ms: 3000,
     };
     match shape {
-        Shape::PeerOnLoopback | Shape::PeerOnTheWildcard | Shape::PeerToldNotToAnswer => {
+        Shape::PeerOnLoopback
+        | Shape::PeerOnTheWildcard
+        | Shape::PeerToldNotToAnswer
+        | Shape::PeerWithNoListener
+        | Shape::PeerListenStatedEmpty => {
             let env: &[(&str, &str)] = match shape {
                 Shape::PeerOnTheWildcard => &[("LISTEN_HOST", "0.0.0.0")],
                 Shape::PeerToldNotToAnswer => &[("SCOUT_LISTEN", "false")],
+                Shape::PeerListenStatedEmpty => &[("LISTEN_EMPTY", "1")],
                 _ => &[],
             };
-            let mut node = Node::start_with(built, &spec("peer", free_port(), 0), env);
+            // Two shapes state no port: the first binds its own, the second binds nothing.
+            let listen = match shape {
+                Shape::PeerWithNoListener | Shape::PeerListenStatedEmpty => 0,
+                _ => free_port(),
+            };
+            let mut node = Node::start_with(built, &spec("peer", listen, 0), env);
             let opened = node.opened();
             let found = hellos(probe, &group, shape.what());
             node.finish(opened);
@@ -877,7 +898,9 @@ fn hellos_of(built: &Built, reference: &Built, probe: &Built, shape: Shape) -> V
 /// wildcard names its host's addresses (global IPv6, public IPv4, link-local IPv6, private IPv4,
 /// in that order) and no loopback to a neighbour; a client names its listener or no locator at
 /// all; a peer asked for routers only does not answer; and a client that is still searching
-/// answers nobody (upstream spawns its responder after `connect_first`).
+/// answers nobody (upstream spawns its responder after `connect_first`). A peer whose config says
+/// nothing about `listen/endpoints` binds `tcp/[::]:0` and names the host's addresses at the port
+/// it got, and one that STATES an empty list binds nothing and names nothing (R3071).
 // wz-proves: api-compat-c zenoh-c->wz partial
 #[test]
 #[ignore = "reads a zenoh-c oracle; run by run-ci Layer C1cc (which builds the matching \
@@ -889,9 +912,12 @@ fn a_node_answers_a_scout_with_the_hello_the_real_library_sends_on_wz_and_libzen
     let loopback_peer = ["hello whatami=peer locators=[tcp/127.0.0.1:PORT]"];
     let loopback_client = ["hello whatami=client locators=[tcp/127.0.0.1:PORT]"];
     let no_locator_client = ["hello whatami=client locators=[]"];
+    let no_locator_peer = ["hello whatami=peer locators=[]"];
     for (shape, expected) in [
         (Shape::PeerOnLoopback, Some(&loopback_peer[..])),
         (Shape::PeerOnTheWildcard, None),
+        (Shape::PeerWithNoListener, None),
+        (Shape::PeerListenStatedEmpty, Some(&no_locator_peer[..])),
         (Shape::PeerToldNotToAnswer, Some(&[][..])),
         (
             Shape::ClientConnectedWithAListener,
@@ -940,16 +966,20 @@ fn real_finds(
     reference: &Built,
     finder_mode: &str,
     key: &str,
+    stated_listener: bool,
 ) -> (Outcome, Outcome) {
     let group = next_group();
     let reservation = PortReservation::pick();
     let port = reservation.port();
     drop(reservation);
+    // A found node that states no listener binds one of its own, as a peer does by default, and
+    // names it in its Hello; the finder dials what the Hello names.
+    let listen = if stated_listener { port } else { 0 };
     let mut found = Node::start(
         built,
         &Spec {
             mode: "peer",
-            listen: port,
+            listen,
             connect: 0,
             key,
             secs: 8,
@@ -995,22 +1025,32 @@ fn a_real_node_that_scouts_finds_a_listening_node_identically_on_wz_and_libzenoh
         return;
     };
     let expect = "open=0 | declare=0 senders=F,Y dups=0";
-    for (n, mode) in ["client", "peer"].into_iter().enumerate() {
+    // The found node states a loopback listener, or states none and binds its own (R3071).
+    for (n, (mode, stated)) in [
+        ("client", true),
+        ("peer", true),
+        ("client", false),
+        ("peer", false),
+    ]
+    .into_iter()
+    .enumerate()
+    {
         let key = format!("wz/scouting/dialled/{n}");
         let (oracle_finder, oracle_found) =
-            real_finds(&programs.reference, &programs.reference, mode, &key);
+            real_finds(&programs.reference, &programs.reference, mode, &key, stated);
         assert_eq!(
             (oracle_finder.row.as_str(), oracle_found.row.as_str()),
             (expect, expect),
-            "the REAL library's rows for a {mode} that finds a listening peer are not what this \
-             file expects"
+            "the REAL library's rows for a {mode} that finds a peer (listener stated: {stated}) \
+             are not what this file expects"
         );
-        let (wz_finder, wz_found) = real_finds(&programs.wz, &programs.reference, mode, &key);
+        let (wz_finder, wz_found) =
+            real_finds(&programs.wz, &programs.reference, mode, &key, stated);
         assert_eq!(
             (wz_finder.row.as_str(), wz_found.row.as_str()),
             (expect, expect),
-            "§5.27 api-compat-c: a real {mode} that scouts does not find and hear a wz node the \
-             way it does a real one"
+            "§5.27 api-compat-c: a real {mode} that scouts does not find and hear a wz node \
+             (listener stated: {stated}) the way it does a real one"
         );
         if mode == "client" {
             assert!(

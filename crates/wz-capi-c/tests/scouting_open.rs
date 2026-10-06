@@ -503,3 +503,85 @@ fn a_wz_session_told_not_to_answer_is_not_found() {
         close_session(silent);
     }
 }
+
+/// A peer that says nothing about `listen/endpoints` binds a listener of its own, as the real
+/// library's peer binds `tcp/[::]:0`, and names it in its Hello: a client that is told nothing
+/// finds it, dials what the Hello names, and a sample the peer publishes reaches the client.
+/// Before R3071 such a peer answered and had nothing to dial.
+#[test]
+#[ignore = "multicast loopback e2e; Layer M runs via --layer M / WZ_RUN_LAYER_M=1 --ignored"]
+fn a_wz_peer_that_states_no_listener_is_found_at_the_one_it_binds() {
+    let (_, _, group_text) = group(10);
+    // SAFETY: fresh configs and sessions.
+    let (rc, found) = unsafe {
+        open_with(&[
+            ("mode", String::from("\"peer\"")),
+            ("scouting/multicast/address", group_text.clone()),
+            ("scouting/delay", String::from("50")),
+        ])
+    };
+    assert_eq!(rc, Z_OK);
+    // SAFETY: a fresh config and session.
+    let (rc, finder) = unsafe {
+        open_with(&[
+            ("mode", String::from("\"client\"")),
+            ("scouting/multicast/address", group_text),
+            ("scouting/timeout", String::from("5000")),
+        ])
+    };
+    assert_eq!(
+        rc, Z_OK,
+        "a client that is told nothing opened to no node: the peer that states no listener bound \
+         none, or named none in its Hello"
+    );
+    // SAFETY: the finder is live; `ctx` is freed after it closes.
+    let (hits, ctx) = unsafe { count_samples(&finder) };
+    // SAFETY: `found` is live.
+    assert!(
+        unsafe { put_until_it_arrives(&found, &hits) },
+        "a sample the found peer published never reached the client that dialled its own listener"
+    );
+    // SAFETY: both sessions are live and owned here; `ctx` is freed after its session.
+    unsafe {
+        close_session(finder);
+        close_session(found);
+        drop(Box::from_raw(ctx));
+    }
+}
+
+/// A peer that STATES an empty `listen/endpoints` binds nothing, and the default does not come
+/// back for it: it answers a Scout and names no locator, so a client that finds it has nothing to
+/// dial and its open fails after its timeout. (The real library's peer does the same, measured:
+/// its Hello carries `locators=[]`.)
+#[test]
+#[ignore = "multicast loopback e2e; Layer M runs via --layer M / WZ_RUN_LAYER_M=1 --ignored"]
+fn a_wz_peer_that_states_an_empty_listener_list_has_nothing_to_dial() {
+    let (_, _, group_text) = group(11);
+    // SAFETY: fresh configs and sessions.
+    let (rc, bare) = unsafe {
+        open_with(&[
+            ("mode", String::from("\"peer\"")),
+            ("scouting/multicast/address", group_text.clone()),
+            ("scouting/delay", String::from("50")),
+            ("listen/endpoints", String::from("[]")),
+        ])
+    };
+    assert_eq!(rc, Z_OK);
+    // SAFETY: a fresh config and session.
+    let (rc, finder) = unsafe {
+        open_with(&[
+            ("mode", String::from("\"client\"")),
+            ("scouting/multicast/address", group_text),
+            ("scouting/timeout", String::from("1500")),
+        ])
+    };
+    assert_eq!(
+        rc, Z_ENETWORK,
+        "a peer that stated an empty listener list was dialled: the default came back for it"
+    );
+    // SAFETY: a gravestone and a live session, both owned here.
+    unsafe {
+        close_session(finder);
+        close_session(bare);
+    }
+}

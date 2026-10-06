@@ -16209,9 +16209,12 @@ run: bash scripts/build-zenoh-pico-cli.sh)"
     # space. They were not `#[ignore]`d at first, and the Platform lane's C ABI job, which runs
     # every test of the crate on a hosted macOS and Windows runner, failed two of them there and
     # passed three that assert that nothing was found, which on a host that delivers nothing is
-    # not a witness. The Linux rows read the real library (`C1cc`); these read no oracle. 6 = the
-    # number this command PRINTED; the file's seventh test needs no delivery and runs everywhere.
-    _runci_guarded_test "M a C ABI session scouts and is found" 6 \
+    # not a witness. The Linux rows read the real library (`C1cc`); these read no oracle.
+    #
+    # R3071 -- 6 -> 8: a peer that states no listener binds one of its own and is found at it, and a
+    # peer that states an EMPTY list binds nothing and has nothing to dial. 8 = the number this
+    # command PRINTED; the file's ninth test needs no delivery and runs everywhere.
+    _runci_guarded_test "M a C ABI session scouts and is found" 8 \
         cargo test -p wz-capi-c --test scouting_open -- --ignored --test-threads=1 || return 1
 }
 

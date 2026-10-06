@@ -21,7 +21,7 @@ use wz_runtime_tokio::session::LocalDeliveryDrain;
 use wz_runtime_tokio::session_glue::{TxQueueConf, WhatAmI};
 use wz_runtime_tokio::session_open::{SessionOffer, TransportMode};
 use wz_runtime_tokio::startup_phase::PhasePolicy;
-use wz_runtime_tokio::zenoh_config::{ZenohConfigIngest, ZenohNodeConfig};
+use wz_runtime_tokio::zenoh_config::{default_listen_endpoint, ZenohConfigIngest, ZenohNodeConfig};
 
 use crate::abi::{
     z_loaned_session_t, z_moved_config_t, z_moved_session_t, z_owned_session_t, Handle,
@@ -175,6 +175,32 @@ fn read_node(cfg: &ConfigState, whatami: WhatAmI) -> Option<ZenohConfigIngest> {
     ZenohNodeConfig::from_json5(&document).ok()
 }
 
+/// The endpoint this session listens on: the one its config states, or, when the config says
+/// nothing about `listen/endpoints`, the one a zenoh node of its role binds on its own.
+///
+/// R3071 -- before this a session with no stated listener bound nothing, though a real peer binds
+/// `tcp/[::]:0` and a real router `tcp/[::]:7447` (`default_listen_endpoint`, MEASURED against a
+/// running zenohd at R2091b), so a node that scouts could answer and be found and still hand its
+/// finder nothing to dial. A key the config NAMES suppresses the default, as an explicitly empty
+/// list does on the real library, and so does a mode table that names no row for this role. A
+/// client has no default, and its absence is the instruction.
+fn listen_endpoint(
+    cfg: &ConfigState,
+    ingest: Option<&ZenohConfigIngest>,
+    whatami: WhatAmI,
+) -> Option<String> {
+    if let Some(stated) = cfg.first(LISTEN_KEY) {
+        return Some(stated.to_owned());
+    }
+    let stated = ingest.is_some_and(|ingest| {
+        ingest.named.contains(&LISTEN_KEY) || ingest.stated_for_other_modes.contains(&LISTEN_KEY)
+    });
+    if stated {
+        return None;
+    }
+    default_listen_endpoint(whatami).map(str::to_owned)
+}
+
 /// Construct and open a session, consuming the moved config (zenoh-c `z_open`).
 ///
 /// # Safety
@@ -223,9 +249,9 @@ pub(crate) unsafe fn open_session(
             .into_iter()
             .map(str::to_owned)
             .collect();
-        let listen = cfg.first(LISTEN_KEY).map(str::to_owned);
         let whatami = dial_whatami(cfg);
         let ingest = read_node(cfg, whatami);
+        let listen = listen_endpoint(cfg, ingest.as_ref(), whatami);
         // R3064 -- the clock map the document means. Read off the ingest and not the node
         // config, because only the ingest knows whether the key was NAMED: the field reads
         // `false` for a document that never mentioned it, and a router's own default is on.
