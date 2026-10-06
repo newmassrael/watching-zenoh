@@ -100,6 +100,14 @@ fn oracle_or_note() -> Option<(PathBuf, PathBuf, PathBuf)> {
     }
 }
 
+/// The flag upstream's examples take to open WITHOUT multicast scouting, which every drop-in that
+/// LISTENS passes here. A peer left to scout holds its `z_open` for `scouting/delay` (500 ms,
+/// MEASURED on the real library and now on wz) and finds every zenoh node on the host's default
+/// group, so a test that talks to the endpoint it states, and puts the moment the port accepts,
+/// is racing a subscriber that is not yet declared. R3070 gave this ABI that behaviour, and the
+/// real library had it all along; the drop-ins that DIAL (`-e`) open at once either way.
+const NO_MULTICAST_SCOUTING: &str = "--no-multicast-scouting";
+
 /// Compile an upstream zenoh-c example against WZ's cdylib, failing with the
 /// compiler's own diagnostics when it does not link.
 ///
@@ -158,6 +166,10 @@ fn upstream_z_sub_on_wz_capi_c_receives_from_a_real_pico_zput() {
         Command::new("stdbuf")
             .args(["-oL", "-eL"])
             .arg(&dropin)
+            // A peer that scouts holds its `z_open` for `scouting/delay` and declares its
+            // subscriber after it, so a put that arrives as soon as the port accepts is gone
+            // by then; on the real library too, which is why zenoh's own tests state this.
+            .arg(NO_MULTICAST_SCOUTING)
             .args(["-l", &endpoint, "-m", "peer", "-k", "demo/capic/**"])
             .env("LD_LIBRARY_PATH", &libdir)
             .stdout(Stdio::from(writer))
@@ -893,6 +905,7 @@ fn upstream_z_sub_liveliness_on_wz_capi_c_sees_a_real_pico_token_come_and_go() {
         Command::new("stdbuf")
             .args(["-oL", "-eL"])
             .arg(&dropin)
+            .arg(NO_MULTICAST_SCOUTING)
             .args(["-l", &endpoint, "-m", "peer", "-k", "demo/liveliness/**"])
             .env("LD_LIBRARY_PATH", &libdir)
             .stdout(Stdio::from(writer.try_clone().expect("dup")))
@@ -998,6 +1011,7 @@ fn upstream_z_queryable_on_wz_capi_c_answers_a_real_pico_zget() {
         Command::new("stdbuf")
             .args(["-oL", "-eL"])
             .arg(&dropin)
+            .arg(NO_MULTICAST_SCOUTING)
             .args(["-l", &endpoint, "-m", "peer", "-k", key, "-p", value])
             .env("LD_LIBRARY_PATH", &libdir)
             .stdout(Stdio::from(qbl_writer.try_clone().expect("dup")))
@@ -1202,6 +1216,7 @@ fn upstream_z_queryable_with_channels_on_wz_capi_c_answers_from_its_own_thread()
         Command::new("stdbuf")
             .args(["-oL", "-eL"])
             .arg(&dropin)
+            .arg(NO_MULTICAST_SCOUTING)
             .args(["-l", &endpoint, "-m", "peer", "-k", key, "-p", value])
             .env("LD_LIBRARY_PATH", &libdir)
             .stdout(Stdio::from(qbl_writer.try_clone().expect("dup")))
@@ -1303,6 +1318,7 @@ fn upstream_z_pull_on_wz_capi_c_pulls_a_real_pico_sample_out_of_a_ring() {
         Command::new("stdbuf")
             .args(["-oL", "-eL"])
             .arg(&dropin)
+            .arg(NO_MULTICAST_SCOUTING)
             .args(["-l", &endpoint, "-m", "peer", "-k", "demo/example/**"])
             .env("LD_LIBRARY_PATH", &libdir)
             .stdin(Stdio::piped())
