@@ -442,10 +442,17 @@ pub type AdvancedSubscriberSink = Arc<
         + Sync,
 >;
 
-/// The face id the dial (`connect`) role occupies. A dialed session has
-/// exactly one peer, so it needs no id space of its own; the accept role's
-/// ids come from the accept loop's own monotonic `FaceId`.
-pub const DIAL_FACE_ID: u64 = 0;
+/// The first face id of the dial (`connect`) role: a client's one face is this
+/// id, and a peer's faces are this id plus the index of their endpoint.
+///
+/// R3067 -- the dial role has an id space of its own, because a session may
+/// both dial and listen and the two must not meet in the registry. The accept
+/// loop mints its ids by counting up from 0 (`accept_loop`'s own `next_id`), so
+/// the dial role sits at the top of the range, where a counter that has to
+/// reach it would first have to outlive any process. Before this the two roles
+/// shared the low ids and were kept apart only by a session never being both,
+/// which a config stating `listen` and `connect` together now is.
+pub const DIAL_FACE_ID: u64 = 1 << 62;
 
 /// One connected peer: its wz session, plus the wz subscribers this face
 /// carries keyed by the C subscription id that spawned them. Dropping the
@@ -516,6 +523,10 @@ struct FaceEntry {
     /// than whatever the loop is currently parked on. Owned per face because
     /// each face has its own session, pending table, and drive wake.
     revised: Arc<Notify>,
+    /// R3067 -- the remote node this face is a link to, when its handshake
+    /// named one. A session keeps ONE face per remote zid, as zenoh's transport
+    /// manager keeps one transport per zid: see [`SharedSession::face_up`].
+    peer_zid: Option<Vec<u8>>,
 }
 
 /// A C-declared subscription — the SSOT replayed onto every face that comes
@@ -1579,6 +1590,8 @@ impl SharedSession {
                 // session for the same outside-the-lock reason; this one is
                 // never notified.
                 revised: Arc::new(Notify::new()),
+                // The plane is no link to anyone.
+                peer_zid: None,
             }),
             ..Default::default()
         };
@@ -1643,7 +1656,20 @@ impl SharedSession {
     /// A face reached Established: build its session and replay the whole
     /// declaration SSOT — subscriptions AND queryables — onto it (pico's
     /// push-declarations-to-the-new-peer, `accept.c:148-149`).
-    pub fn face_up(&self, id: u64, actions: &Arc<SessionLinkActions>) {
+    ///
+    /// R3067 -- `false` when the face is NOT admitted: the node it links to is
+    /// already held by another face, and nothing is declared to it. A session
+    /// that both dials and listens meets the same peer twice whenever the two
+    /// dial each other, and two faces to one node would deliver every sample
+    /// twice (measured: 30 duplicates over a six-second window between two wz
+    /// peers that each listen on and connect to the other, where the real
+    /// library keeps one transport and delivers each sample once). Zenoh's
+    /// transport manager keeps one transport per zid and adds a further link to
+    /// it only while `max_links` allows, which is 1
+    /// (`io/zenoh-transport/src/unicast/manager.rs` @
+    /// `init_existing_transport_unicast`); the face that came second is the
+    /// refused link, and the caller closes it.
+    pub fn face_up(&self, id: u64, actions: &Arc<SessionLinkActions>) -> bool {
         let observer = Arc::new(WzMutex::new(ApplicationLayerObserver::new()));
         // This face's LOCAL zid, read off the handshake params the same way
         // `Session::new` does. The advanced publisher stamps it into every
@@ -1673,6 +1699,19 @@ impl SharedSession {
         install_shm_reader(&session, &self.shm_clients);
 
         let mut guard = self.lock();
+        // Decided under the lock that inserts the face, so two faces that come up
+        // together cannot both pass: the one that takes the lock second sees the
+        // first.
+        let peer_zid = actions.peer_zid();
+        if let Some(zid) = peer_zid.as_deref() {
+            if guard
+                .faces
+                .iter()
+                .any(|(held, face)| *held != id && face.peer_zid.as_deref() == Some(zid))
+            {
+                return false;
+            }
+        }
         // Keyexpr aliases replay FIRST, before the subscriber and queryable
         // declares below. Ordering is load-bearing on the reliable channel: a
         // peer resolves an aliased id through the mapping table it built from
@@ -1870,6 +1909,7 @@ impl SharedSession {
                 // field for why the type admits `None`.
                 runtime: Some(tokio::runtime::Handle::current()),
                 revised: Arc::new(Notify::new()),
+                peer_zid,
             },
         );
         drop(guard);
@@ -1906,6 +1946,19 @@ impl SharedSession {
         if let Some(snapshot) = snapshot {
             self.fire_face_event(FaceEventKind::Up, &snapshot);
         }
+        true
+    }
+
+    /// Whether some face already links this session to the node `zid`.
+    ///
+    /// The accept loop asks it before it admits an inbound link, so a node that
+    /// is already held by a face the DIAL role made is not given a second one
+    /// ([`Self::face_up`] states the rule).
+    pub fn holds_peer(&self, zid: &[u8]) -> bool {
+        self.lock()
+            .faces
+            .values()
+            .any(|face| face.peer_zid.as_deref() == Some(zid))
     }
 
     /// A face left the live set (peer Close / link loss).
@@ -3884,7 +3937,25 @@ impl CApiForwarder {
 
 impl FaceForwarder for CApiForwarder {
     fn register(&self, id: FaceId, actions: &Arc<SessionLinkActions>) {
-        self.shared.face_up(id.0, actions);
+        // Admitted already: the loop asked `holds_peer` before it got here, and it
+        // is a single task, so nothing came up between the question and this call
+        // that the loop did not see. A refusal here would be a face the loop holds
+        // and the registry does not, which is why the question is asked there.
+        let admitted = self.shared.face_up(id.0, actions);
+        debug_assert!(
+            admitted,
+            "the accept loop admitted a face the registry refuses"
+        );
+    }
+
+    /// One face per remote node, across BOTH roles: see [`SharedSession::face_up`].
+    fn dedups_faces_by_zid(&self) -> bool {
+        true
+    }
+
+    /// A node the DIAL role already holds a face to.
+    fn holds_peer(&self, zid: &[u8]) -> bool {
+        self.shared.holds_peer(zid)
     }
 
     fn deregister(&self, id: FaceId) {

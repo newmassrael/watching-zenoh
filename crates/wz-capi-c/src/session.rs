@@ -266,19 +266,30 @@ pub(crate) unsafe fn open_session(
             Err(QosWithLowlatency) => return Z_ENETWORK,
         };
 
-        // A config with neither endpoint is a scouting open, which this slice
-        // does not implement. Refused rather than silently opening a session
-        // that reaches nothing.
-        if connect.is_empty() && listen.is_none() {
-            return Z_EINVAL;
+        // A config that states no endpoint to DIAL. Measured on the real library,
+        // with multicast scouting off: a client fails its open whether or not it
+        // states a listener (zenoh's `start_client` bails "No peer specified and
+        // multicast scouting deactivated!"), and a peer or router opens, ALONE
+        // when it has nothing to listen on either, delivering to its own
+        // subscribers. With scouting ON the session would find others through
+        // the group, which this ABI does not do yet; a config that states no
+        // endpoint at all stays refused rather than opening a session that
+        // reaches nothing it was configured to reach.
+        //
+        // R3067 -- a config stating both a listener and a dial is a peer that
+        // does both, and is opened as one: the roles are a set (see
+        // `open_blocking`), where it was refused for want of one drive per role.
+        if connect.is_empty() {
+            let scouting_off = node.as_ref().is_some_and(|node| !node.multicast_scouting);
+            if scouting_off && whatami == WhatAmI::Client {
+                return Z_ENETWORK;
+            }
+            if listen.is_none() && !scouting_off {
+                return Z_EINVAL;
+            }
         }
-        // Both is zenoh's dual-role peer; the core drives one role per session,
-        // so refuse rather than silently dropping the listener.
-        if !connect.is_empty() && listen.is_some() {
-            return Z_EINVAL;
-        }
-        // Checked after the two refusals above so a config that states no
-        // endpoint keeps answering what it always did.
+        // Checked after the refusals above so a config that states no endpoint
+        // keeps answering what it always did.
         let Some(phase) = phase else {
             return Z_EINVAL;
         };

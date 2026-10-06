@@ -698,6 +698,19 @@ pub trait FaceForwarder {
         false
     }
 
+    /// R3067 -- whether the forwarder ALREADY holds a face to the peer `zid`
+    /// that this loop does not hold: a link the node's DIAL role made.
+    ///
+    /// The loop's own dedup ([`dedups_faces_by_zid`](Self::dedups_faces_by_zid))
+    /// sees only the faces it holds, and a node that both listens and dials
+    /// meets the same peer through two roles whenever the two dial each other.
+    /// Asked at the same point and under the same rule, so the second link to a
+    /// node is refused wherever it came from. Default `false`: a node whose
+    /// forwarder is the only holder of faces has nothing the loop cannot see.
+    fn holds_peer(&self, _zid: &[u8]) -> bool {
+        false
+    }
+
     /// R311y219b (transport-multilink) — a SECOND+ physical link aggregated onto a
     /// peer's logical session (`join_link`) is NOT `register`ed as its own face (it
     /// shares the primary's), so its inbound events reach [`forward`](Self::forward)
@@ -2426,7 +2439,7 @@ where
                         // EVERY node; wz scopes it to the forwarders that need it.
                         if forwarder.dedups_faces_by_zid() {
                             if let Some(z) = &face.peer_zid {
-                                if holds_zid(&faces, z) {
+                                if holds_zid(&faces, z) || forwarder.holds_peer(z) {
                                     log::debug!(
                                         "dropping redundant face {} to an already-held peer",
                                         id.0

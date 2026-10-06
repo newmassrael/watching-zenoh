@@ -974,7 +974,12 @@ HOST_GATED_CI_TARGETS: dict[str, str] = {
 # receiver over a client storage and the real library's sender as the foreign judge
 # (`api-compat-c zenoh-c->wz partial`, the same class and lane). Measured by
 # `scripts/audit-crossimpl-proof.sh`.
-FOREIGN_ADJUDICATOR_LINKS = 1008
+# R3067 -- 1008 -> 1011, RISING by three, each a new `wz-proves` line in
+# `zenoh_c_open_roles_twice_and_diff.rs`: which endpoints a config states decides whether `z_open`
+# answers and with which code, a node that listens and dials is reached from both sides, and two
+# peers that dial each other keep one link (each `api-compat-c zenoh-c->wz partial`, the class and
+# lane the R3064 legs already declare). Measured by `scripts/audit-crossimpl-proof.sh`.
+FOREIGN_ADJUDICATOR_LINKS = 1011
 
 # ── Execution disclosure ────────────────────────────────────────────────────────
 #

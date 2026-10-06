@@ -37,8 +37,8 @@ use wz_runtime_tokio::session_glue::{
 };
 use wz_runtime_tokio::session_open::{
     bind_endpoint_with_config, dial_endpoint, initiate_and_open_session_with_offer,
-    offer_for_connect, AcceptConfig, DialConfig, OpenedSession, OpenedSessionParts, SessionOffer,
-    DEFAULT_OPEN_TICK_MS,
+    offer_for_connect, AcceptConfig, BoundListener, DialConfig, OpenedSession, OpenedSessionParts,
+    SessionOffer, DEFAULT_OPEN_TICK_MS,
 };
 use wz_runtime_tokio::startup_phase::{
     drive_connect_phase, drive_phase, endpoint_policy, endpoint_schedule, PhaseArm, PhaseBudget,
@@ -752,8 +752,14 @@ async fn shutdown_future(shutdown: Arc<Notify>, stop: Arc<AtomicBool>) {
 /// the registry, then pump it until `z_close`. `tx` unblocks `z_open` once the
 /// handshake has settled — pico's blocking client open — unless `phase` says
 /// the open does not wait for its peer, in which case it unblocks first.
+///
+/// R3067 -- `listen` is the session's own listener, for a session that also
+/// dials. A peer or router accepts on it beside its dials; a client binds it
+/// and serves nothing on it (see where the client branch holds it), which is
+/// what the real library does with one stated beside a `connect`.
 async fn drive_dial(
     endpoints: Vec<String>,
+    listen: Option<String>,
     whatami: WhatAmI,
     tls: CapiTlsConfig,
     phase: DialPhase,
@@ -815,10 +821,64 @@ async fn drive_dial(
     // allows connecting to a single endpoint", `DEFAULT_CONFIG.json5`); a peer
     // or router through `connect_peers_multiply_links`, which connects to EVERY
     // endpoint it can, each with its own failure policy. See [`drive_peer`].
+    //
+    // R3067 -- the listener, when the session has one, is bound BEFORE the first
+    // dial and for either role, as upstream's `start_client` and `start_peer`
+    // both bind their listeners before they connect; a bind that fails fails
+    // the open, because the caller asked for a listener.
+    let listen = match listen {
+        Some(endpoint) => match bind_listener(&endpoint, &tls, &zid, tx_queue).await {
+            Some(listening) => Some(ListenLeg {
+                listening,
+                offer,
+                clock,
+            }),
+            None => {
+                let _ = tx.send(false);
+                return;
+            }
+        },
+        None => None,
+    };
     if whatami != WhatAmI::Client {
-        drive_peer(endpoints, phase, dialer, shared, tx, shutdown, stop, gate).await;
+        drive_peer(
+            endpoints, listen, phase, dialer, shared, tx, shutdown, stop, gate,
+        )
+        .await;
         return;
     }
+    // A client's listener is BOUND and serves nobody. Measured on the real
+    // library: a client stated with `listen` and `connect` opens, its port is
+    // taken, and a peer that dials it reaches nothing and is reached by
+    // nothing (the sample each side publishes never arrives at the other) -- the
+    // client's routing owns exactly one face, the link it dialled
+    // (`zenoh/src/net/routing/hat/client/mod.rs` @
+    // `debug_assert_eq!(self.owned_faces(ctx.tables).count(), 1);`). So the
+    // listener is held for the session's life and no accept loop runs on it.
+    let _bound_and_unserved = listen;
+    drive_client(
+        endpoints, scheduled, phase, dialer, shared, tx, shutdown, stop, gate,
+    )
+    .await;
+}
+
+/// A client's drive: connect to ONE endpoint of the list, hold the one session,
+/// and re-dial it when it is lost.
+///
+/// R3067 -- the body `drive_dial` held inline; it moved here unchanged when the
+/// dial gained a listener to bind before it.
+#[allow(clippy::too_many_arguments)]
+async fn drive_client(
+    endpoints: Vec<String>,
+    scheduled: Vec<(String, RetryPolicy)>,
+    phase: DialPhase,
+    dialer: Arc<Dialer>,
+    shared: Arc<SharedSession>,
+    tx: mpsc::Sender<bool>,
+    shutdown: Arc<Notify>,
+    stop: Arc<AtomicBool>,
+    gate: Arc<ReadGate>,
+) {
     let attempt = |endpoint: &str, _attempt: u32| {
         let dialer = dialer.clone();
         let endpoint = endpoint.to_owned();
@@ -907,6 +967,10 @@ async fn drive_dial(
 /// per-endpoint faces run the same body: the ordering arguments below are the
 /// whole of its correctness, and a second copy would be a second place for
 /// them to rot.
+///
+/// R3067 -- `false` when the registry did not admit the face because the node it
+/// links to is already held by another: the link is closed and `on_up` has not
+/// run. `true` when the face was held and has since ended.
 async fn drive_face(
     face: u64,
     session: OpenedSession,
@@ -914,7 +978,7 @@ async fn drive_face(
     closing: impl std::future::Future<Output = ()>,
     on_up: impl FnOnce(),
     gate: &ReadGate,
-) {
+) -> bool {
     // R2455 — an `OpenedSession` dismantles ONLY through `into_parts`, which is
     // what carries the writer handle out by name rather than letting it fall
     // out of a capture (`OpenedSession`'s `Drop` impl states the rule). This
@@ -927,7 +991,22 @@ async fn drive_face(
         clock,
         ..
     } = session.into_parts();
-    shared.face_up(face, &actions);
+    // R3067 -- a node this session already has a face to is not given a second
+    // one ([`SharedSession::face_up`]). The link is closed the way every face's
+    // is, through the drain, and `on_up` does not run: the open was not
+    // released by a face that is not held.
+    if !shared.face_up(face, &actions) {
+        OpenedSession {
+            engine,
+            actions,
+            inbound,
+            writer_handle,
+            clock,
+        }
+        .drain_to_close()
+        .await;
+        return false;
+    }
     on_up();
     // A session opened without its read task reads nothing until it is started
     // (see [`ReadGate`]). The open above is done and was announced; this is the
@@ -1047,6 +1126,7 @@ async fn drive_face(
     }
     .drain_to_close()
     .await;
+    true
 }
 
 /// The PEER connect: upstream's `connect_peers_multiply_links`
@@ -1069,12 +1149,20 @@ async fn drive_face(
 ///
 /// Each connected endpoint gets its OWN face, drive, drain and re-dial — the
 /// face ids are `DIAL_FACE_ID + i`, which cannot meet the accept loop's ids
-/// because a session dials or listens, never both. The faces run on a
-/// `LocalSet`, because a session's drive futures are not `Send`, and on this
-/// task, so none of them can outlive the session's runtime.
+/// (see [`DIAL_FACE_ID`]). The faces run on a `LocalSet`, because a session's
+/// drive futures are not `Send`, and on this task, so none of them can outlive
+/// the session's runtime.
+///
+/// R3067 -- `listen` is the session's own listener, when it has one: a peer
+/// that is both a listener and a dialler, which zenoh starts when a config
+/// states `listen` and `connect` together. Upstream binds the listeners first
+/// and connects after, and so does this: the accept loop is a local task beside
+/// the dial faces, running from before the first dial, so a peer that dials
+/// this one while it is still walking its own connect list is accepted.
 #[allow(clippy::too_many_arguments)]
 async fn drive_peer(
     endpoints: Vec<String>,
+    listen: Option<ListenLeg>,
     phase: DialPhase,
     dialer: Arc<Dialer>,
     shared: Arc<SharedSession>,
@@ -1089,6 +1177,9 @@ async fn drive_peer(
     local
         .run_until(async {
             let mut faces: Vec<tokio::task::JoinHandle<()>> = Vec::new();
+            if let Some(leg) = listen {
+                faces.push(spawn_accept_leg(leg, &shared, &gate, closing_rx.clone()));
+            }
             let deadline = phase
                 .policy
                 .budget
@@ -1502,23 +1593,61 @@ fn dial_config(tls: &CapiTlsConfig, endpoint: &str) -> std::io::Result<DialConfi
     Ok(cfg)
 }
 
-/// The `listen` role: bind, unblock `z_open` immediately, then hold N
-/// concurrent inbound peers until `z_close` — pico's non-blocking listener.
-async fn drive_listen(endpoint: String, tls: CapiTlsConfig, ctx: DriveContext) {
-    let DriveContext {
-        zid,
-        shared,
-        tx,
-        shutdown,
-        stop,
-        clock,
-        tx_queue,
+/// A bound `listen` endpoint, and the parameters its accept loop mints the
+/// sessions it accepts from: everything the `listen` role has decided before
+/// it announces anything to the caller.
+struct Listening {
+    listener: BoundListener,
+    params: SessionInitParams,
+}
+
+/// A bound listener together with what [`accept_faces`] needs beside it, as one
+/// leg of a session that also dials. See [`drive_peer`].
+struct ListenLeg {
+    listening: Listening,
+    offer: SessionOffer,
+    clock: TokioTime,
+}
+
+/// Run `leg`'s accept loop as a local task, until `closing` is set. Called on a
+/// `LocalSet`, because the accept loop's drive futures are not `Send`.
+fn spawn_accept_leg(
+    leg: ListenLeg,
+    shared: &Arc<SharedSession>,
+    gate: &Arc<ReadGate>,
+    mut closing: tokio::sync::watch::Receiver<bool>,
+) -> tokio::task::JoinHandle<()> {
+    let ListenLeg {
+        listening,
         offer,
-        gate,
-    } = ctx;
-    // Everything that can fail the open runs BEFORE the success signal below,
-    // so a failure is reported to the C caller rather than silently killing a
-    // listener it was told had opened.
+        clock,
+    } = leg;
+    let shared = shared.clone();
+    let gate = gate.clone();
+    tokio::task::spawn_local(async move {
+        accept_faces(listening, offer, clock, shared, &gate, async move {
+            let _ = closing.wait_for(|c| *c).await;
+        })
+        .await;
+    })
+}
+
+/// Bind the session's `listen` endpoint. `None` is an open failure, which the
+/// caller reports.
+///
+/// R3067 -- split out of the listen role so a session that also dials binds
+/// its listener the same way, and first, as upstream does
+/// (`zenoh/src/net/runtime/orchestrator.rs` @
+/// `self.bind_listeners(&listeners).await?;` before `self.connect_peers`).
+async fn bind_listener(
+    endpoint: &str,
+    tls: &CapiTlsConfig,
+    zid: &[u8],
+    tx_queue: TxQueueConf,
+) -> Option<Listening> {
+    // Everything that can fail the open runs BEFORE the success signal the
+    // caller sends, so a failure is reported to the C caller rather than
+    // silently killing a listener it was told had opened.
     // R311y406 / R311y534 — thread the LISTEN server cert (native
     // Z_CONFIG_TLS_LISTEN_* keys, path or inline base64) into the bind's
     // AcceptConfig, so a `z_open(listen="tls/..")` or `z_open(listen="quic/..")`
@@ -1526,20 +1655,10 @@ async fn drive_listen(endpoint: String, tls: CapiTlsConfig, ctx: DriveContext) {
     // cert-absence reject). Each backend's slot is filled only when its feature
     // is compiled in; without it that scheme surfaces `Unsupported` at bind
     // regardless -- see `listen_accept_config`.
-    let accept_cfg = match listen_accept_config(&tls) {
-        Ok(cfg) => cfg,
-        Err(_) => {
-            let _ = tx.send(false);
-            return;
-        }
-    };
-    let listener = match bind_endpoint_with_config(&endpoint, &accept_cfg).await {
-        Ok(listener) => listener,
-        Err(_) => {
-            let _ = tx.send(false);
-            return;
-        }
-    };
+    let accept_cfg = listen_accept_config(tls).ok()?;
+    let listener = bind_endpoint_with_config(endpoint, &accept_cfg)
+        .await
+        .ok()?;
     // CALLER fail-fast (mesh accept loop): pico's z_open(listen) holds N
     // concurrent inbound peers off ONE listener, so a NON-mesh-capable acceptor
     // (one that could not feed a multi-accept loop) is rejected here -- z_open
@@ -1559,17 +1678,67 @@ async fn drive_listen(endpoint: String, tls: CapiTlsConfig, ctx: DriveContext) {
     // channel to a caller is `tx.send(bool)`, which says opened-or-not and has no
     // room for an advisory -- so the guard is gone rather than turned into an
     // empty block dressed as one.
-    // R311y820 — drawn HERE, above the `tx.send(true)` below, and the placement
-    // is the point: after that send the C caller has already been told the open
-    // succeeded, so an entropy failure could only be reported as "no peer ever
-    // connects". Built before the bind is announced, it is an ordinary open
-    // failure like the two above.
-    let params = match init_params(WhatAmI::Peer, zid.to_vec(), tx_queue) {
-        Ok(p) => p,
-        Err(_) => {
-            let _ = tx.send(false);
-            return;
-        }
+    // R311y820 — drawn HERE, above the `tx.send(true)` the caller sends, and the
+    // placement is the point: after that send the C caller has already been told
+    // the open succeeded, so an entropy failure could only be reported as "no
+    // peer ever connects". Built before the bind is announced, it is an ordinary
+    // open failure like the two above.
+    let params = init_params(WhatAmI::Peer, zid.to_vec(), tx_queue).ok()?;
+    Some(Listening { listener, params })
+}
+
+/// Accept on a bound listener until `shutdown`, holding every accepted peer as
+/// its own face.
+///
+/// The accept loop holds every accepted peer as its own face and drives them
+/// all on this one task; `CApiForwarder` lands each in the registry and
+/// dispatches its inbound events into that face's own session. Shutdown is
+/// a future the loop races, so a `z_close` with NO peer ever connected
+/// unwinds a pending `accept()` cleanly.
+async fn accept_faces(
+    listening: Listening,
+    offer: SessionOffer,
+    clock: TokioTime,
+    shared: Arc<SharedSession>,
+    gate: &ReadGate,
+    shutdown: impl Future<Output = ()>,
+) {
+    // pico accepts in a task of its executor, so a listener opened without the
+    // read task is BOUND and accepts nobody until it is started: a peer that
+    // dials meanwhile waits in the backlog, and is served once the task starts.
+    gate.wait_running().await;
+    let forwarder = CApiForwarder::new(shared);
+    let Listening { listener, params } = listening;
+    let _summary = accept_loop_offering(
+        listener,
+        params,
+        offer,
+        clock,
+        DEFAULT_OPEN_TICK_MS,
+        shutdown,
+        |_event| {},
+        &forwarder,
+    )
+    .await;
+}
+
+/// The `listen` role: bind, unblock `z_open` immediately, then hold N
+/// concurrent inbound peers until `z_close` — pico's non-blocking listener.
+async fn drive_listen(endpoint: String, tls: CapiTlsConfig, ctx: DriveContext) {
+    let DriveContext {
+        zid,
+        shared,
+        tx,
+        shutdown,
+        stop,
+        clock,
+        tx_queue,
+        offer,
+        gate,
+    } = ctx;
+    let Some(listening) = bind_listener(&endpoint, &tls, &zid, tx_queue).await else {
+        let _ = tx.send(false);
+        return;
     };
     // The bind is the WHOLE of pico's `z_open(listen)`: it binds + listens,
     // spawns an async accept task, and returns with zero peers and no error.
@@ -1580,34 +1749,47 @@ async fn drive_listen(endpoint: String, tls: CapiTlsConfig, ctx: DriveContext) {
     if gate.announce_open(&tx) {
         return;
     }
-    // pico accepts in a task of its executor, so a listener opened without the
-    // read task is BOUND and accepts nobody until it is started: a peer that
-    // dials meanwhile waits in the backlog, and is served once the task starts.
-    gate.wait_running().await;
-
-    // The accept loop holds every accepted peer as its own face and drives them
-    // all on this one task; `CApiForwarder` lands each in the registry and
-    // dispatches its inbound events into that face's own session. Shutdown is
-    // a future the loop races, so a `z_close` with NO peer ever connected
-    // unwinds a pending `accept()` cleanly.
     let local_shared = shared.clone();
-    let forwarder = CApiForwarder::new(shared);
     // R311y557 — the LISTEN role is where the local plane matters most: a
     // listener is unblocked by the BIND, so every put it makes before its first
     // peer connects had nowhere to deliver in-process. The drain rides this
     // task's `select!` for the same one-task reason `drive_dial` does.
     tokio::select! {
-        _summary = accept_loop_offering(
-            listener,
-            params,
+        _ = accept_faces(
+            listening,
             offer,
             clock,
-            DEFAULT_OPEN_TICK_MS,
+            shared,
+            &gate,
             shutdown_future(shutdown, stop),
-            |_event| {},
-            &forwarder,
-        ) => { let _ = _summary; }
+        ) => {}
         _ = local_shared.drive_local_plane() => {}
+    }
+}
+
+/// A session with no endpoint at all: the open is the whole of it, and what the
+/// session does is deliver to itself.
+///
+/// R3067 -- zenoh starts a peer or router that has nothing to listen on,
+/// nothing to connect to and no scouting without complaint: it is alone, and
+/// its own publishers and subscribers still meet (measured on the real library,
+/// `open` answers 0 and a same-session subscriber is delivered). Before this a
+/// config like that was refused, which no program written for zenoh-c expects.
+async fn drive_idle(ctx: DriveContext) {
+    let DriveContext {
+        shared,
+        tx,
+        shutdown,
+        stop,
+        gate,
+        ..
+    } = ctx;
+    if gate.announce_open(&tx) {
+        return;
+    }
+    tokio::select! {
+        _ = shared.drive_local_plane() => {}
+        _ = shutdown_future(shutdown, stop) => {}
     }
 }
 
@@ -1680,6 +1862,12 @@ impl OpenStance {
 /// Open a session: spawn the drive thread and wait for the role's open
 /// outcome. For `connect` that is the settled handshake; for `listen` it is
 /// only the bind.
+///
+/// R3067 -- the roles are a SET: `connect` and `listen` together are a peer
+/// that dials and accepts (its listener bound first, then its dials, the open
+/// outcome that of the dials), and neither is a session that delivers only to
+/// itself. A client stated with both binds its listener and serves nothing on
+/// it, which is what the real library opens it as.
 ///
 /// `dial_phase` decides how long the `connect` role keeps trying before it
 /// reports the failure; the `listen` role does not read it. `stance` is what the
@@ -1773,14 +1961,18 @@ pub fn open_blocking(
                 gate: drive_gate,
                 inner: Box::pin(async move {
                     match (connect.is_empty(), listen) {
-                        (false, _) => {
-                            drive_dial(connect, dial_whatami, tls, dial_phase, ctx).await;
+                        (false, listen) => {
+                            drive_dial(connect, listen, dial_whatami, tls, dial_phase, ctx).await;
                         }
                         (true, Some(endpoint)) => {
                             drive_listen(endpoint, tls, ctx).await;
                         }
+                        // R3067 -- no endpoint: a session alone, as zenoh starts one.
+                        // Whether a config MAY open without one is the calling ABI's
+                        // decision (a client may not, and a peer that scouts reaches
+                        // others through it), so it is asked there, not here.
                         (true, None) => {
-                            let _ = ctx.tx.send(false);
+                            drive_idle(ctx).await;
                         }
                     }
                 }),

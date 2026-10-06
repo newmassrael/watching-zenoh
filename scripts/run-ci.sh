@@ -19974,6 +19974,34 @@ layer_c1cc_api_compat_c() {
         --test-threads=1 \
         --exact a_receiver_over_a_client_storage_reads_what_the_real_sender_puts_on_wz_and_libzenohc \
         || return 1
+    # R3067 -- the ROLES of a session: what `z_open` makes of the endpoints a config states. A
+    # peer or router with none opens alone (wz answered -1), a client with none, or with only a
+    # listener, fails with -4 (wz answered -1 and opened the listener), a node that listens and
+    # dials is reached from both sides (wz refused it), a client's listener serves nobody, and two
+    # peers that dial each other keep one link (wz delivered every sample twice). Multicast
+    # scouting is off in every row; with it on and no endpoint the real library opens and this
+    # ABI refuses, which is the gap left. Needs only the oracle, not the SHM arm.
+    _runci_guarded_test \
+        "C1cc a_session_opens_on_the_endpoints_its_config_states_identically_on_wz_and_libzenohc" 1 \
+        cargo test -p wz-integration-tests \
+        --test zenoh_c_open_roles_twice_and_diff -- --ignored --quiet \
+        --test-threads=1 \
+        --exact a_session_opens_on_the_endpoints_its_config_states_identically_on_wz_and_libzenohc \
+        || return 1
+    _runci_guarded_test \
+        "C1cc a_node_that_listens_and_dials_is_reached_from_both_sides_identically_on_wz_and_libzenohc" 1 \
+        cargo test -p wz-integration-tests \
+        --test zenoh_c_open_roles_twice_and_diff -- --ignored --quiet \
+        --test-threads=1 \
+        --exact a_node_that_listens_and_dials_is_reached_from_both_sides_identically_on_wz_and_libzenohc \
+        || return 1
+    _runci_guarded_test \
+        "C1cc two_peers_that_dial_each_other_keep_one_link_identically_on_wz_and_libzenohc" 1 \
+        cargo test -p wz-integration-tests \
+        --test zenoh_c_open_roles_twice_and_diff -- --ignored --quiet \
+        --test-threads=1 \
+        --exact two_peers_that_dial_each_other_keep_one_link_identically_on_wz_and_libzenohc \
+        || return 1
     _runci_guarded_test \
         "C1cc an_advanced_subscriber_of_the_publishers_own_session_hears_it_on_wz_and_libzenohc" 1 \
         cargo test -p wz-integration-tests \
