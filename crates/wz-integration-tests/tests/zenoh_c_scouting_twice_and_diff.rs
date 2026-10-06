@@ -120,7 +120,10 @@ int main(int argc, char** argv) {
     snprintf(buf, sizeof buf, "\"%s\"", mode);
     insert(&config, Z_CONFIG_MODE_KEY, buf);
     snprintf(buf, sizeof buf, "\"%s\"", group);
-    insert(&config, Z_CONFIG_MULTICAST_IPV4_ADDRESS_KEY, buf);
+    /* The key as the config document spells it, as the other probes of this tree do: the
+       header's macro for it is a name wz does not carry, and a probe that spelled it would
+       read as a claim that it does. */
+    insert(&config, "scouting/multicast/address", buf);
     insert(&config, Z_CONFIG_SCOUTING_DELAY_KEY, delay);
     insert(&config, Z_CONFIG_SCOUTING_TIMEOUT_KEY, timeout);
     if (lport) {
