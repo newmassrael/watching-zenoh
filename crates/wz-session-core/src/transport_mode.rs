@@ -139,6 +139,11 @@ pub struct SessionOffer {
     /// upstream maps SHM on the lean path in both directions
     /// (`unicast/lowlatency/tx.rs:33`, `rx.rs:40`).
     pub shm: bool,
+    /// R3065 -- the shared-memory protocols this session's READER can resolve, which its auth
+    /// segment lists for a peer's sender to read. Meaningful only with [`Self::shm`]. The default
+    /// is POSIX alone, which is what every session listed before the list was the reader's.
+    #[cfg(feature = "session-extshm")]
+    pub shm_protocols: crate::extshm::ShmProtocolList,
     /// session-extqos (R311y506) — the link's QoS METADATA (priority band +
     /// reliability class), zenoh's endpoint `prio=` / `rel=` metadata read into
     /// `State::QoS { .. }` at `StateOpen::new` / `StateAccept::new`.
@@ -162,6 +167,8 @@ impl SessionOffer {
             mode: TransportMode::Universal,
             compression: false,
             shm: false,
+            #[cfg(feature = "session-extshm")]
+            shm_protocols: crate::extshm::ShmProtocolList::POSIX_ONLY,
             #[cfg(feature = "session-extqos")]
             qos_link: None,
         }
@@ -215,6 +222,15 @@ impl SessionOffer {
         self
     }
 
+    /// R3065 -- list `protocols` as the ones this session's reader can resolve, in place of the
+    /// default POSIX alone. See [`Self::shm_protocols`].
+    #[cfg(feature = "session-extshm")]
+    #[must_use]
+    pub const fn with_shm_protocols(mut self, protocols: crate::extshm::ShmProtocolList) -> Self {
+        self.shm_protocols = protocols;
+        self
+    }
+
     /// session-extqos — declare this link's QoS priority band / reliability
     /// class, switching the QoS ext from the presence-only UNIT form to the z64
     /// `QoSLink`. Pair it with [`TransportMode::Qos`]: the metadata refines a
@@ -235,6 +251,63 @@ mod tests {
     fn the_default_offer_is_the_zero_offer() {
         assert_eq!(SessionOffer::default(), SessionOffer::universal());
         assert_eq!(TransportMode::default(), TransportMode::Universal);
+    }
+
+    /// R3065 -- a protocol list keeps each id once, in the order given, and refuses what the
+    /// segment has no slot for. Two lists are equal when they name the same ids: the slots past
+    /// the length are not part of the value.
+    #[cfg(feature = "session-extshm")]
+    #[test]
+    fn a_protocol_list_keeps_each_id_once_in_order_and_refuses_what_does_not_fit() {
+        use crate::extshm::{ShmProtocolList, TooManyShmProtocols, SHM_PROTOCOL_SLOTS};
+
+        let list = ShmProtocolList::new(&[100500, 0, 100500, 7]).expect("fits");
+        assert_eq!(
+            list.as_slice(),
+            [100500, 0, 7],
+            "a repeated id is kept once"
+        );
+        assert_eq!(
+            ShmProtocolList::new(&[0]).unwrap(),
+            ShmProtocolList::POSIX_ONLY
+        );
+        assert_ne!(
+            ShmProtocolList::new(&[0, 1]).unwrap(),
+            ShmProtocolList::new(&[1, 0]).unwrap(),
+            "the order is part of the value"
+        );
+
+        let full: alloc::vec::Vec<u32> = (0..SHM_PROTOCOL_SLOTS as u32).collect();
+        assert_eq!(
+            ShmProtocolList::new(&full)
+                .expect("exactly the slots")
+                .as_slice()
+                .len(),
+            SHM_PROTOCOL_SLOTS
+        );
+        let over: alloc::vec::Vec<u32> = (0..=SHM_PROTOCOL_SLOTS as u32).collect();
+        assert_eq!(
+            ShmProtocolList::new(&over),
+            Err(TooManyShmProtocols {
+                asked: SHM_PROTOCOL_SLOTS + 1
+            })
+        );
+    }
+
+    /// R3065 -- an offer lists POSIX alone until it is given its reader's list, so a session that
+    /// never asked advertises what every session advertised before the list was the reader's.
+    #[cfg(feature = "session-extshm")]
+    #[test]
+    fn an_offer_lists_posix_alone_until_given_its_readers_list() {
+        use crate::extshm::ShmProtocolList;
+
+        assert_eq!(SessionOffer::universal().shm_protocols.as_slice(), [0]);
+        let mine = ShmProtocolList::new(&[0, 100500]).unwrap();
+        let offer = SessionOffer::universal()
+            .with_shm(true)
+            .with_shm_protocols(mine);
+        assert_eq!(offer.shm_protocols.as_slice(), [0, 100500]);
+        assert_ne!(offer, SessionOffer::universal().with_shm(true));
     }
 
     /// The whole point of the type: selecting a mode REPLACES, so no builder

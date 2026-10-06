@@ -1390,7 +1390,71 @@ pub struct SharedSession {
     /// timestamping reached none of them: the key was read by the config reader and ignored by
     /// the node.
     node_hlc: NodeHlc,
+    /// R3065 -- the shared-memory reader this node was opened over, installed on the plane and on
+    /// every face session for the same reason the clock is one: a descriptor arrives on whichever
+    /// session the peer's face is, and each must read it through the node's own clients.
+    shm_clients: OpenShmClients,
 }
+
+/// R3065 -- the shared-memory reader's clients a session is opened over: a set the node's
+/// storage resolved into, or `None` for the default reader (POSIX alone), which every session
+/// had before the C ABI could be given one. Without the SHM feature there is no reader to
+/// configure and the type is a unit struct that carries nothing.
+#[cfg(feature = "transport-shm")]
+pub type OpenShmClients = Option<Arc<wz_runtime_tokio::shm_clients::ShmClientSet>>;
+/// See the SHM-feature definition above.
+#[cfg(not(feature = "transport-shm"))]
+#[derive(Clone, Copy, Debug)]
+pub struct OpenShmClients;
+
+/// The reader a session has when it was not given one: the default (POSIX alone). One name for
+/// both builds, because the type is an `Option` in one and a unit struct in the other and neither
+/// spells "none" the same way.
+#[cfg(feature = "transport-shm")]
+pub const fn no_shm_clients() -> OpenShmClients {
+    None
+}
+
+/// See the SHM-feature definition above.
+#[cfg(not(feature = "transport-shm"))]
+pub const fn no_shm_clients() -> OpenShmClients {
+    OpenShmClients
+}
+
+/// R3065 -- what a node gives every session of its registry: ONE clock and ONE shared-memory
+/// reader, so the plane and the faces are a single node however many of them there are.
+#[derive(Clone)]
+pub struct SessionResources {
+    /// The node clock; see [`SharedSession`]'s field.
+    pub node_hlc: NodeHlc,
+    /// The shared-memory reader's clients; see [`OpenShmClients`].
+    pub shm_clients: OpenShmClients,
+}
+
+impl Default for SessionResources {
+    /// No clock and the default reader: what a node was before it could be given either.
+    fn default() -> Self {
+        Self {
+            node_hlc: NodeHlc::disabled(),
+            shm_clients: no_shm_clients(),
+        }
+    }
+}
+
+/// Give `session` the node's shared-memory reader when it has one of its own; without one the
+/// session keeps the default POSIX reader every session is built with.
+#[cfg(feature = "transport-shm")]
+fn install_shm_reader(session: &TokioSession, clients: &OpenShmClients) {
+    if let Some(clients) = clients {
+        session.set_shm_resolver(Box::new(
+            wz_runtime_tokio::shm_clients::ShmClientResolver::new(Arc::clone(clients)),
+        ));
+    }
+}
+
+/// Without the SHM feature there is no reader to install.
+#[cfg(not(feature = "transport-shm"))]
+fn install_shm_reader(_session: &TokioSession, _clients: &OpenShmClients) {}
 
 impl SharedSession {
     /// `zid` is this session's own 16-byte identity — the same one the faces put
@@ -1421,7 +1485,7 @@ impl SharedSession {
         clock: TokioTime,
         zid: Vec<u8>,
     ) -> Result<Self, wz_runtime_tokio::session_glue::EntropyUnavailable> {
-        Self::new_with_node_clock(clock, zid, NodeHlc::disabled())
+        Self::new_with_resources(clock, zid, SessionResources::default())
     }
 
     /// [`Self::new`] for a node that holds the clock `node_hlc` (R3064): the plane and every face
@@ -1432,6 +1496,28 @@ impl SharedSession {
         zid: Vec<u8>,
         node_hlc: NodeHlc,
     ) -> Result<Self, wz_runtime_tokio::session_glue::EntropyUnavailable> {
+        Self::new_with_resources(
+            clock,
+            zid,
+            SessionResources {
+                node_hlc,
+                ..SessionResources::default()
+            },
+        )
+    }
+
+    /// [`Self::new`] for a node with the `resources` it was opened over (R3065): the plane and
+    /// every face session made later are given the clock and the shared-memory reader in them, so
+    /// the node is ONE node, however many sessions it grows.
+    pub fn new_with_resources(
+        clock: TokioTime,
+        zid: Vec<u8>,
+        resources: SessionResources,
+    ) -> Result<Self, wz_runtime_tokio::session_glue::EntropyUnavailable> {
+        let SessionResources {
+            node_hlc,
+            shm_clients,
+        } = resources;
         let driver: Arc<dyn BoxedLinkDriver + Send + Sync> = Arc::new(InertLinkDriver);
         // `WhatAmI::Peer`: the plane never handshakes, so the role is inert on
         // the wire, and Peer is what a session that both publishes and answers
@@ -1460,6 +1546,9 @@ impl SharedSession {
             .with_node_clock(node_hlc.clone())
             .with_local_delivery_drain(LocalDeliveryDrain::DriveTask)
             .with_local_stage_wake(Arc::clone(&local_wake));
+        // R3065 -- a node opened over a client storage reads what its OWN peers send through it,
+        // the plane included (a local get answered by a peer's queryable is read here).
+        install_shm_reader(&local, &shm_clients);
         // R2580 — the plane's face-shaped entry. Its `session` is a CLONE of
         // the field above rather than a move: the two name one session, and the
         // field stays where it is because `local_session` / `drive_local_plane`
@@ -1500,6 +1589,7 @@ impl SharedSession {
             local,
             local_wake,
             node_hlc,
+            shm_clients,
         })
     }
 
@@ -1579,6 +1669,8 @@ impl SharedSession {
         let session = TokioSession::new(actions.clone(), observer, Arc::new(self.clock))
             .with_node_clock(self.node_hlc.clone())
             .with_local_delivery_drain(LocalDeliveryDrain::DriveTask);
+        // R3065 -- the face reads what its peer sends through the node's own clients.
+        install_shm_reader(&session, &self.shm_clients);
 
         let mut guard = self.lock();
         // Keyexpr aliases replay FIRST, before the subscriber and queryable

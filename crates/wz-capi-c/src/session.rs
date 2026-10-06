@@ -13,6 +13,7 @@ use std::ffi::c_void;
 use wz_capi_core::drive::{
     open_blocking, CapiTlsConfig, ConfiguredZid, DialPhase, OpenError, OpenStance, SessionState,
 };
+use wz_capi_core::faces::{no_shm_clients, OpenShmClients};
 use wz_runtime_tokio::node_clock::TimestampingEnabled;
 use wz_runtime_tokio::retry_period::RetryPolicy;
 use wz_runtime_tokio::session_glue::{TxQueueConf, WhatAmI};
@@ -184,7 +185,22 @@ pub unsafe extern "C" fn z_open(
     config: *mut z_moved_config_t,
     _options: *const c_void,
 ) -> ZResult {
-    guarded(|| {
+    // SAFETY: the caller's contract, delegated.
+    guarded(|| unsafe { open_session(this_, config, no_shm_clients()) })
+}
+
+/// The open `z_open` and `z_open_with_custom_shm_clients` both are: the same config, the same
+/// refusals and the same session, over `shm_clients` as its shared-memory reader (R3065). The
+/// default is the reader every session had before this crate could be given one, POSIX alone.
+///
+/// # Safety
+/// As [`z_open`].
+pub(crate) unsafe fn open_session(
+    this_: *mut z_owned_session_t,
+    config: *mut z_moved_config_t,
+    shm_clients: OpenShmClients,
+) -> ZResult {
+    {
         if this_.is_null() || config.is_null() {
             return Z_ENULL;
         }
@@ -275,21 +291,36 @@ pub unsafe extern "C" fn z_open(
         // struct, which is why the parameter is typed rather than a pair of
         // `None`s that only ever meant "no quic cert".
         // zenoh's own bounded queue and waits: this ABI stands for zenoh-c.
+        let stance = OpenStance {
+            tx_queue: TxQueueConf::default(),
+            offer,
+            zid,
+            // zenoh-c has no switch for a session's read task: its runtime
+            // drives the session from the open.
+            start_read_task: true,
+            timestamping,
+            shm_clients,
+        };
+        // R3065 -- a session opened over a client storage advertises the protocols of THAT
+        // reader: the stance takes both from the one set, so the list a peer's sender reads is
+        // never wider than what the session resolves.
+        #[cfg(feature = "zenoh-c-shared-memory")]
+        let stance = match stance.shm_clients.clone() {
+            Some(set) => match stance.with_shm_clients(set) {
+                Ok(stance) => stance,
+                // More protocols than an auth segment has slots for: upstream's
+                // `AuthUnicast::new` refuses it, which fails the open.
+                Err(_) => return Z_ENETWORK,
+            },
+            None => stance,
+        };
         match open_blocking(
             connect,
             listen,
             CapiTlsConfig::default(),
             whatami,
             phase,
-            OpenStance {
-                tx_queue: TxQueueConf::default(),
-                offer,
-                zid,
-                // zenoh-c has no switch for a session's read task: its runtime
-                // drives the session from the open.
-                start_read_task: true,
-                timestamping,
-            },
+            stance,
         ) {
             Ok(state) => {
                 // R2957 — the session's own shared-memory provider, as its
@@ -313,7 +344,7 @@ pub unsafe extern "C" fn z_open(
             // session could not be established" is Z_ENETWORK.
             Err(OpenError::DriveFailed) => Z_ENETWORK,
         }
-    })
+    }
 }
 
 /// Close a session (zenoh-c `z_close`): stop the drive loop and join its thread.

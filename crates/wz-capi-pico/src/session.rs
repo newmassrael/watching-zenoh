@@ -338,6 +338,9 @@ pub unsafe extern "C" fn z_open(
                 // device's, `crate::advanced_plane`). The shipped map is what every
                 // session of this registry was given before the field existed.
                 timestamping: wz_runtime_tokio::node_clock::TimestampingEnabled::default(),
+                // pico has no client storage: its sessions read shared memory through the
+                // default reader, as every session did before the field existed.
+                shm_clients: wz_capi_core::faces::no_shm_clients(),
             },
         ) {
             Ok(state) => {

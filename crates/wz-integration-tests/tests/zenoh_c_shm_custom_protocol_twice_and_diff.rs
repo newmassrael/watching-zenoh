@@ -2,8 +2,9 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
 
 //! §5.27 `api-compat-c` -- what a SENDER does with a chunk of a shared-memory protocol its
-//! receiver may not be able to read, on wz's cdylib as on the real `libzenohc.so`: one C program,
-//! compiled once, linked twice, its receivers' output diffed.
+//! receiver may not be able to read, and what a RECEIVER opened over a client storage reads, on
+//! wz's cdylib as on the real `libzenohc.so`: one C program per role, compiled once, linked twice,
+//! the receivers' output diffed.
 //!
 //! ## Why this exists
 //!
@@ -28,16 +29,23 @@
 //!
 //! ## What is compared
 //!
-//! For each receiver storage, the samples the receiver prints, for a sender that puts chunks and
-//! one that puts plain bytes (the control: the label follows the payload). The reference sender's
-//! rows are the oracle and are asserted FIRST, so a reference that delivered nothing, or that
-//! sent a descriptor where it should have sent bytes, makes the equality below say nothing.
+//! For each of five receiver storages (none, the default, the global one, the default beside a
+//! client of the program's own, and that client alone, which cannot read POSIX memory) and each of
+//! three payloads (a chunk of the custom provider, a chunk of the default provider, plain bytes
+//! as the control: the label follows the payload), the rows the receiver prints: what each of
+//! three puts, three gets carrying a value and one reply arrived as. The real library's rows are
+//! the oracle and are asserted FIRST, against the rule that a chunk arrives as shared memory only
+//! where the storage holds a client for its protocol, so a reference that delivered nothing, or
+//! that sent a descriptor where it should have sent bytes, makes the equality say nothing.
 //!
-//! ## Not here
+//! ## The two halves
 //!
-//! The receivers run on the real library on both rows: wz has no `z_open_with_custom_shm_clients`
-//! (R3065 measured it: a receiver using it does not link), and the receive side is the round
-//! that follows. This file is the SEND half.
+//! - **The sender half** (R3065): wz's sender against the real library's receivers.
+//! - **The receive half** (R3066): the real library's sender against wz's receivers, the program
+//!   of which did not link before, because `z_open_with_custom_shm_clients` and
+//!   `z_ref_shm_client_storage_global` did not exist. A wz receiver must resolve through the
+//!   storage's clients AND publish the storage's protocols, or the real sender sends it bytes it
+//!   could have read or descriptors it cannot.
 
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
@@ -49,7 +57,8 @@ use wz_integration_tests::common::{
 };
 
 /// A sender whose provider is a custom backend over a POSIX object it creates, under protocol
-/// 100500. Arguments: the endpoint to dial, the key, the object name, and `chunk` or `bytes`.
+/// 100500. Arguments: the endpoint to dial, the key, the object name, and `chunk` (the custom
+/// provider's), `posix` (the default provider's) or `bytes`.
 const SENDER: &str = r#"#define _GNU_SOURCE
 #include <assert.h>
 #include <fcntl.h>
@@ -148,7 +157,8 @@ int main(int argc, char** argv) {
     const char* endpoint = argv[1];
     const char* key = argv[2];
     const char* name = argv[3];
-    int as_chunk = strcmp(argv[4], "chunk") == 0;
+    int posix = strcmp(argv[4], "posix") == 0;
+    int as_chunk = strcmp(argv[4], "chunk") == 0 || posix;
     g_as_chunk = as_chunk;
 
     int fd = shm_open(name, O_CREAT | O_RDWR, 0600);
@@ -164,7 +174,13 @@ int main(int argc, char** argv) {
     zc_context_t context = {&ctx, &delete_fn};
     zc_shm_provider_backend_callbacks_t callbacks = {&alloc_fn, &free_fn, &defragment_fn,
                                                      &available_fn, &layout_for_fn, &id_fn};
-    z_shm_provider_new(&g_provider, context, callbacks);
+    if (posix) {
+        /* the default provider: chunks of the POSIX protocol, which a storage built without the
+         * default client set cannot read */
+        z_shm_provider_default_new(&g_provider, 4096);
+    } else {
+        z_shm_provider_new(&g_provider, context, callbacks);
+    }
     if (!z_internal_check(g_provider)) { printf("provider failed\n"); return 4; }
 
     z_owned_config_t config;
@@ -474,13 +490,31 @@ fn exchange(sender: &Built, receiver: &Built, mode: &str, kind: &str, n: usize) 
     let mut rows: Vec<String> = printed
         .into_iter()
         .filter(|l| l.starts_with("sample:") || l.starts_with("query:") || l.starts_with("reply:"))
+        .map(|row| {
+            if kind == "posix" {
+                without_text(row)
+            } else {
+                row
+            }
+        })
         .collect();
     rows.sort();
     rows
 }
 
-/// THE GATE: a chunk of a custom protocol is delivered to EVERY receiver, as shared memory to one
-/// whose storage holds a client for the protocol and as bytes to one whose does not, by wz's
+/// `row` without its ` text=` field. The default provider's chunks are compared by the kind of
+/// buffer and its length alone: MEASURED, the REAL library's own rows for them carry an empty text
+/// in all but one of twenty-one samples and `custom-1` in that one, so the text is not a thing two
+/// runs of the same library agree on, let alone two libraries. The kind and the length are.
+fn without_text(row: String) -> String {
+    match row.find(" text=") {
+        Some(at) => row[..at].to_owned(),
+        None => row,
+    }
+}
+
+/// THE GATE, the sender half: a chunk is delivered to EVERY receiver, as shared memory to one
+/// whose storage holds a client for its protocol and as bytes to one whose does not, by wz's
 /// sender as by the real library's.
 // wz-proves: api-compat-c zenoh-c->wz partial
 #[test]
@@ -527,9 +561,8 @@ fn a_chunk_of_a_custom_protocol_is_sent_as_bytes_to_a_receiver_that_cannot_read_
     .unwrap_or_else(|d| {
         panic!("§5.27 api-compat-c: the sender does NOT link against wz's cdylib\n{d}")
     });
-    // The receivers are the REFERENCE's on both rows: the receiving half belongs to the round
-    // after R3065 (the carry of its ledger entry), and a receiver that is not wz's is the
-    // foreign judge of what the sender put on the wire.
+    // The receivers are the REFERENCE's on both rows: a receiver that is not wz's is the foreign
+    // judge of what the sender put on the wire. The receiving half is the next test.
     let receiver = compile(
         "custom_receiver",
         RECEIVER,
@@ -540,56 +573,171 @@ fn a_chunk_of_a_custom_protocol_is_sent_as_bytes_to_a_receiver_that_cannot_read_
     )
     .unwrap_or_else(|d| panic!("the receiver does not link against the REAL libzenohc.so\n{d}"));
 
-    let modes = ["custom", "default", "plain"];
-    let kinds = ["chunk", "bytes"];
-    let cases: Vec<(usize, &str, &str)> = modes
+    let cases = every_case();
+    let oracle = run_all(&sender_ref, &receiver, &cases, 0);
+    let wz = run_all(&sender_wz, &receiver, &cases, cases.len());
+    assert_matches_the_oracle(&cases, &oracle, &wz, "sender");
+}
+
+/// The receiver storages and sender kinds every exchange of this file is run over, as `(mode,
+/// kind)`: five storages the receiver can open with, and the three payloads the sender can put.
+fn every_case() -> Vec<(&'static str, &'static str)> {
+    let modes = ["custom", "customonly", "default", "global", "plain"];
+    let kinds = ["chunk", "posix", "bytes"];
+    modes
         .iter()
         .flat_map(|m| kinds.iter().map(move |k| (*m, *k)))
-        .enumerate()
-        .map(|(i, (m, k))| (i, m, k))
-        .collect();
+        .collect()
+}
 
-    // Every exchange has its own port and object, so the twelve run side by side.
-    let (oracle, wz): (Vec<_>, Vec<_>) = std::thread::scope(|scope| {
-        let handles: Vec<_> = cases
-            .iter()
-            .map(|(i, mode, kind)| {
-                let (sender_ref, sender_wz, receiver) = (&sender_ref, &sender_wz, &receiver);
-                scope.spawn(move || {
-                    (
-                        exchange(sender_ref, receiver, mode, kind, 2 * i),
-                        exchange(sender_wz, receiver, mode, kind, 2 * i + 1),
-                    )
+/// How many exchanges run side by side. Each is two processes with a runtime of their own, so
+/// "all of them at once" is a load and not a speed-up.
+const WIDTH: usize = 10;
+
+/// Run every case once, `WIDTH` at a time, and return each exchange's rows in case order. Every
+/// exchange has its own port and shared-memory object, so they cannot meet each other; `base`
+/// keeps the objects of separate calls apart.
+fn run_all(
+    sender: &Built,
+    receiver: &Built,
+    cases: &[(&'static str, &'static str)],
+    base: usize,
+) -> Vec<Vec<String>> {
+    let mut out: Vec<Vec<String>> = Vec::with_capacity(cases.len());
+    for (batch, group) in cases.chunks(WIDTH).enumerate() {
+        let rows: Vec<Vec<String>> = std::thread::scope(|scope| {
+            let handles: Vec<_> = group
+                .iter()
+                .enumerate()
+                .map(|(i, (mode, kind))| {
+                    let n = base + batch * WIDTH + i;
+                    scope.spawn(move || exchange(sender, receiver, mode, kind, n))
                 })
-            })
-            .collect();
-        handles
-            .into_iter()
-            .map(|h| h.join().expect("an exchange panicked"))
-            .unzip()
-    });
+                .collect();
+            handles
+                .into_iter()
+                .map(|h| h.join().expect("an exchange panicked"))
+                .collect()
+        });
+        out.extend(rows);
+    }
+    out
+}
 
-    for (((_, mode, kind), ref_rows), wz_rows) in cases.iter().zip(&oracle).zip(&wz) {
-        // The ORACLE first: what the real sender does is the rule this leg compares against.
+/// What the REAL library does with a payload, which is the rule both tests compare wz to: shared
+/// memory reaches a receiver only if its storage holds a client for the payload's protocol. The
+/// custom provider's chunks are protocol 100500, held by the `custom` and `customonly` storages;
+/// the default provider's are POSIX, held by every storage but `customonly`; bytes are never
+/// shared memory.
+fn expected_shm(mode: &str, kind: &str) -> &'static str {
+    let held = match kind {
+        "chunk" => matches!(mode, "custom" | "customonly"),
+        "posix" => mode != "customonly",
+        _ => false,
+    };
+    if held {
+        "shm=yes"
+    } else {
+        "shm=no"
+    }
+}
+
+/// Assert the real library's rows are the rule, FIRST, and that wz's equal them. `side` names
+/// which half was wz's.
+fn assert_matches_the_oracle(
+    cases: &[(&'static str, &'static str)],
+    oracle: &[Vec<String>],
+    wz: &[Vec<String>],
+    side: &str,
+) {
+    for (((mode, kind), ref_rows), wz_rows) in cases.iter().zip(oracle).zip(wz) {
         // Three puts, three gets carrying a value, and the one reply to the receiver's get.
         assert_eq!(
             ref_rows.len(),
             7,
-            "the real sender's {kind} messages did not all reach a `{mode}` receiver: {ref_rows:?}"
+            "the real {side}'s {kind} messages did not all reach a `{mode}` receiver: {ref_rows:?}"
         );
-        let expected_shm = if *kind == "chunk" && *mode == "custom" {
-            "shm=yes"
-        } else {
-            "shm=no"
-        };
+        let expected = expected_shm(mode, kind);
         assert!(
-            ref_rows.iter().all(|r| r.contains(expected_shm)),
-            "the real sender's {kind} put to a `{mode}` receiver was not {expected_shm}: {ref_rows:?}"
+            ref_rows.iter().all(|r| r.contains(expected)),
+            "the real library's {kind} messages with a `{mode}` receiver were not {expected}: \
+             {ref_rows:?}"
         );
         assert_eq!(
             wz_rows, ref_rows,
-            "§5.27 api-compat-c: wz's sender and libzenohc's delivered a {kind} put to a `{mode}` \
-             receiver differently.\n--- wz ---\n{wz_rows:#?}\n--- libzenohc ---\n{ref_rows:#?}"
+            "§5.27 api-compat-c: with wz as the {side}, a {kind} put to a `{mode}` receiver was \
+             delivered differently from libzenohc.\n--- wz ---\n{wz_rows:#?}\n--- libzenohc \
+             ---\n{ref_rows:#?}"
         );
     }
+}
+
+/// THE GATE, the other half: a receiver OPENED OVER A CLIENT STORAGE reads what the real library's
+/// sender puts, exactly as the real library's receiver does: as shared memory when its storage
+/// holds a client for the payload's protocol, as bytes when it does not, and the sender's own
+/// choice between the two is made off the list the receiver publishes, so a wz receiver that
+/// listed the wrong protocols would be sent bytes it could have read or descriptors it cannot.
+///
+/// Both receivers are the same C program; only the library differs. The five storages are the
+/// five ways a program can open: none, the default, the global one, the default beside a client of
+/// its own, and a client of its own alone, which cannot read POSIX memory.
+// wz-proves: api-compat-c zenoh-c->wz partial
+#[test]
+#[ignore = "reads a zenoh-c oracle; run by run-ci Layer C1cc (which builds the matching \
+            ABI arm this needs)"]
+fn a_receiver_over_a_client_storage_reads_what_the_real_sender_puts_on_wz_and_libzenohc() {
+    let Some(include) = oracle_or_note() else {
+        return;
+    };
+    if needs_the_shm_oracle(&include) {
+        eprintln!(
+            "skip: this zenoh-c oracle is built without Z_FEATURE_SHARED_MEMORY and \
+             Z_FEATURE_UNSTABLE_API, where the custom provider and client this reads are not \
+             declared."
+        );
+        return;
+    }
+    assert_zenoh_c_arm_pairing(&include);
+    let work = tempfile::tempdir().expect("tempdir for the compiled programs");
+    let reference = zenoh_c_shared_library().expect("the oracle resolved above");
+    let ref_libdir = reference.parent().expect("libzenohc.so has a parent");
+    let wz_lib = wz_capi_c_cdylib();
+    let wz_libdir = wz_lib.parent().expect("cdylib has a parent");
+
+    let sender = compile(
+        "custom_sender",
+        SENDER,
+        &include,
+        work.path(),
+        ref_libdir,
+        "zenohc",
+    )
+    .unwrap_or_else(|d| panic!("the sender does not link against the REAL libzenohc.so\n{d}"));
+    let receiver_ref = compile(
+        "custom_receiver",
+        RECEIVER,
+        &include,
+        work.path(),
+        ref_libdir,
+        "zenohc",
+    )
+    .unwrap_or_else(|d| panic!("the receiver does not link against the REAL libzenohc.so\n{d}"));
+    // THIS is the program that did not link before R3065: it names
+    // `z_open_with_custom_shm_clients` and `z_ref_shm_client_storage_global`.
+    let receiver_wz = compile(
+        "custom_receiver",
+        RECEIVER,
+        &include,
+        work.path(),
+        wz_libdir,
+        "wz_capi_c",
+    )
+    .unwrap_or_else(|d| {
+        panic!("§5.27 api-compat-c: the receiver does NOT link against wz's cdylib\n{d}")
+    });
+
+    let cases = every_case();
+    let oracle = run_all(&sender, &receiver_ref, &cases, 0);
+    let wz = run_all(&sender, &receiver_wz, &cases, cases.len());
+    assert_matches_the_oracle(&cases, &oracle, &wz, "receiver");
 }

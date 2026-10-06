@@ -4781,8 +4781,13 @@ fn install_shm_authenticator(
 ) -> Result<(), OpenError> {
     #[cfg(feature = "session-extshm")]
     if offer.shm {
-        let auth = crate::shm_auth_segment::PosixShmAuthenticator::new()
-            .map_err(OpenError::ShmAuthSegment)?;
+        // R3065 -- the segment lists the protocols the session's READER can resolve, which the
+        // offer carries, so a session opened over a client storage is sent descriptors of its
+        // clients' protocols and a session that never asked is sent POSIX alone, as before.
+        let auth = crate::shm_auth_segment::PosixShmAuthenticator::with_protocols(
+            offer.shm_protocols.as_slice(),
+        )
+        .map_err(OpenError::ShmAuthSegment)?;
         actions.install_shm_auth(Box::new(auth));
     }
     Ok(())

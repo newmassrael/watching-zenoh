@@ -104,7 +104,9 @@ const COUNTER_SLOTS: usize = 762 + 2048;
 /// protocol array, 1048 (the table in the module docs).
 const COUNTERS_OFFSET: usize = PROTOCOLS_OFFSET + PROTOCOL_SLOTS * core::mem::size_of::<u32>();
 
-/// The one protocol wz's segment advertises. Written into `protocols[0]` with
+/// The one protocol the segment of wz's DEFAULT reader advertises (R3065: a reader built from a
+/// client storage lists that storage's protocols instead, see [`ShmAuthSegment::create_listing`]).
+/// Written into `protocols[0]` with
 /// `id_count = 1`; upstream's `PartnerShmConfig::supports_protocol`
 /// (`common/shm/interop.rs`, `link_partner_segment.protocols().contains`) reads
 /// it when it decides whether wz can be SENT an SHM buffer, so an empty list
@@ -182,15 +184,35 @@ impl ShmAuthSegment {
     /// per upstream — 1.5.0 negated it, 1.10.0 does not (R2240), and a peer
     /// reading the negated form echoes a value that can never validate.
     pub fn create(challenge: u64) -> io::Result<Self> {
+        Self::create_listing(challenge, &WZ_PROTOCOLS)
+    }
+
+    /// R3065 -- [`Self::create`] listing `protocols`, the ones this node's READER can resolve,
+    /// where `create` lists the one wz's default reader has (POSIX). The list is what a peer's
+    /// sender reads to decide whether this node can be sent a buffer's descriptor, so it must be
+    /// the reader's own and never a wider one: a protocol listed here that the reader cannot
+    /// resolve is a descriptor dropped on arrival.
+    ///
+    /// `InvalidInput` when there are more ids than the segment has slots.
+    pub fn create_listing(challenge: u64, protocols: &[u32]) -> io::Result<Self> {
+        if protocols.len() > PROTOCOL_SLOTS {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!(
+                    "{} protocols do not fit an auth segment of {PROTOCOL_SLOTS} slots",
+                    protocols.len()
+                ),
+            ));
+        }
         let mut segment = OwnedSegment::create(SEGMENT_BYTES, || u64::from(next_candidate_id()))?;
         let map = segment.bytes_mut();
-        write_u64(map, LEN_INDEX, WZ_PROTOCOLS.len() as u64);
+        write_u64(map, LEN_INDEX, protocols.len() as u64);
         // VERBATIM, per the module doc. 1.5.0 stored `!challenge` and 1.10.0
         // does not; a peer reading the inverted form echoes a value that can
         // never match.
         write_u64(map, CHALLENGE_INDEX, challenge);
         write_u64(map, VERSION_INDEX, SHM_VERSION);
-        for (i, p) in WZ_PROTOCOLS.iter().enumerate() {
+        for (i, p) in protocols.iter().enumerate() {
             write_u32_at(map, PROTOCOLS_OFFSET + i * core::mem::size_of::<u32>(), *p);
         }
         segment.flush()?;
@@ -357,11 +379,16 @@ impl PosixShmAuthenticator {
     /// must not be able to guess without mapping the segment, so a predictable
     /// one would make the whole exchange decorative.
     pub fn new() -> io::Result<Self> {
+        Self::with_protocols(&WZ_PROTOCOLS)
+    }
+
+    /// R3065 -- [`Self::new`] for a node whose reader resolves `protocols` and not POSIX alone.
+    pub fn with_protocols(protocols: &[u32]) -> io::Result<Self> {
         let mut bytes = [0u8; 8];
         getrandom::getrandom(&mut bytes)
             .map_err(|e| io::Error::other(format!("getrandom: {e}")))?;
         Ok(Self {
-            segment: ShmAuthSegment::create(u64::from_ne_bytes(bytes))?,
+            segment: ShmAuthSegment::create_listing(u64::from_ne_bytes(bytes), protocols)?,
         })
     }
 }
@@ -518,6 +545,27 @@ mod tests {
             open_peer_protocols(seg.id()),
             Some(vec![POSIX_PROTOCOL_ID]),
             "the one protocol the segment declares"
+        );
+    }
+
+    /// R3065 -- a segment lists the protocols it was created with, which is how a node whose
+    /// reader has a client beyond POSIX is sent that protocol's descriptors, and refuses a list
+    /// longer than its slots rather than writing past them.
+    #[test]
+    fn a_segment_lists_the_protocols_it_was_created_with() {
+        let seg = ShmAuthSegment::create_listing(9, &[POSIX_PROTOCOL_ID, 100500]).expect("create");
+        assert_eq!(
+            open_peer_protocols(seg.id()),
+            Some(vec![POSIX_PROTOCOL_ID, 100500]),
+            "the ids, in the order given"
+        );
+        let too_many: Vec<u32> = (0..=PROTOCOL_SLOTS as u32).collect();
+        assert_eq!(
+            ShmAuthSegment::create_listing(9, &too_many)
+                .err()
+                .map(|e| e.kind()),
+            Some(io::ErrorKind::InvalidInput),
+            "a list longer than the array is refused, not truncated"
         );
     }
 

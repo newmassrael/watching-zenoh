@@ -134,6 +134,7 @@ use crate::shm_backend::{
     AllocError, AllocatedChunk, ChunkDescriptor, LayoutAllocError, LayoutError, MemoryLayout,
     PtrInSegment, ShmProviderBackend,
 };
+use crate::shm_clients::{ShmClientSet, ShmDataSegment};
 use crate::shm_posix_backend::PosixShmProviderBackend;
 use crate::shm_watchdog::{confirmator, Confirmed, WatchdogBit};
 
@@ -1335,6 +1336,9 @@ pub(crate) fn validate_tick() {
 pub struct ChunkHold {
     metadata: Arc<PeerSegmentRw>,
     descriptor: ShmDescriptor,
+    /// R3065 -- the reader's clients, when it holds a set of its own. `None` is the default
+    /// reader, which resolves POSIX alone and allocates nothing for the privilege.
+    clients: Option<Arc<ShmClientSet>>,
     /// Declared after `metadata` on purpose: the bit it confirms is in that
     /// mapping, and the confirmator keeps its own reference to the mapping, so
     /// either order is sound; this one only reads as the order they are made in.
@@ -1352,6 +1356,17 @@ impl ChunkHold {
     /// generation is not the descriptor's: that reference is not this receiver's
     /// to give back, so nothing is touched.
     pub fn link(descriptor: &ShmDescriptor) -> Option<Self> {
+        Self::link_with(descriptor, None)
+    }
+
+    /// R3065 -- [`Self::link`] for a reader that holds a set of clients: the chunk is mapped
+    /// through the client its header's protocol names, and a protocol the set holds none for is
+    /// refused, as it is by upstream's reader. Everything else is `link`'s.
+    pub fn link_through(descriptor: &ShmDescriptor, clients: &Arc<ShmClientSet>) -> Option<Self> {
+        Self::link_with(descriptor, Some(Arc::clone(clients)))
+    }
+
+    fn link_with(descriptor: &ShmDescriptor, clients: Option<Arc<ShmClientSet>>) -> Option<Self> {
         let metadata = peer_metadata(descriptor.metadata_id)?;
         let header = metadata_of_rw(&metadata)?
             .headers
@@ -1364,6 +1379,7 @@ impl ChunkHold {
         Some(Self {
             metadata,
             descriptor: *descriptor,
+            clients,
             _confirmed: confirmed,
         })
     }
@@ -1391,23 +1407,46 @@ impl ChunkHold {
     /// `None` when the chunk is not valid, names a protocol this node does not
     /// speak, claims more than its length, its data segment will not open, or the
     /// window does not lie inside the segment.
-    fn window(&self) -> Option<(PeerSegment, std::ops::Range<usize>, u64)> {
+    fn window(&self) -> Option<(ChunkData, std::ops::Range<usize>)> {
         let header = self.header()?;
-        if header.watchdog_invalidated.load(Ordering::Acquire)
-            || header.protocol.load(Ordering::Relaxed) != POSIX_PROTOCOL_ID
-        {
+        if header.watchdog_invalidated.load(Ordering::Acquire) {
             return None;
         }
+        let protocol = header.protocol.load(Ordering::Relaxed);
         let data_len = self.descriptor.data_len as usize;
         let chunk = header.chunk.load(Ordering::Relaxed) as usize;
         if data_len > header.len.load(Ordering::Relaxed) {
             return None;
         }
-        let segment = u64::from(header.segment.load(Ordering::Relaxed));
-        let data = PeerSegment::open(segment).ok()?;
-        let end = chunk.checked_add(data_len)?;
-        data.bytes().get(chunk..end)?;
-        Some((data, chunk..end, segment))
+        let segment_id = header.segment.load(Ordering::Relaxed);
+        // POSIX is the built-in client and keeps its own mapping, which also serves the writable
+        // second mapping; a reader built without it cannot resolve POSIX memory at all.
+        let resolves_posix = self
+            .clients
+            .as_ref()
+            .map_or(true, |clients| clients.resolves_posix());
+        if protocol == POSIX_PROTOCOL_ID && resolves_posix {
+            let segment = u64::from(segment_id);
+            let data = PeerSegment::open(segment).ok()?;
+            let end = chunk.checked_add(data_len)?;
+            data.bytes().get(chunk..end)?;
+            return Some((ChunkData::Posix { data, segment }, chunk..end));
+        }
+        // Any other protocol is read through the client the reader holds for it, or refused when
+        // it holds none. The default reader holds none, so it refuses every protocol but POSIX.
+        let segment = self.clients.as_ref()?.mount(protocol, segment_id)?;
+        let ptr = segment.map(u32::try_from(chunk).ok()?);
+        if ptr.is_null() {
+            return None;
+        }
+        Some((
+            ChunkData::Foreign {
+                _segment: segment,
+                ptr,
+                len: data_len,
+            },
+            0..data_len,
+        ))
     }
 
     /// Whether this hold is the ONLY reference to the chunk: the count in the slot's
@@ -1431,7 +1470,7 @@ impl ChunkHold {
     /// into an owned buffer), or `None` when the chunk has no readable window (see
     /// `window`).
     pub fn read(&self) -> Option<Vec<u8>> {
-        let (data, window, _) = self.window()?;
+        let (data, window) = self.window()?;
         Some(data.bytes()[window].to_vec())
     }
 
@@ -1445,13 +1484,12 @@ impl ChunkHold {
     /// `None` when the chunk has no readable window, and then `self` drops here, so the
     /// reference goes back on that way out as it does for a copy.
     pub fn into_shared(self) -> Option<RxBytes> {
-        let (data, window, segment) = self.window()?;
+        let (data, window) = self.window()?;
         let len = window.len();
         let storage: Arc<dyn RxStorage> = Arc::new(SharedChunk {
             data,
             writable: OnceLock::new(),
             window,
-            segment,
             hold: self,
         });
         RxBytes::shared(storage, 0..len)
@@ -1466,15 +1504,49 @@ impl ChunkHold {
 /// mappings go first, so nothing can read the page after the sender is free to
 /// reuse it, and the hold goes last and gives the reference back.
 struct SharedChunk {
-    data: PeerSegment,
-    /// The segment mapped WRITABLE, made the first time a host asks for a pointer
+    data: ChunkData,
+    /// The POSIX segment mapped WRITABLE, made the first time a host asks for a pointer
     /// it may write through (R3052) and not before: a payload that is only read
-    /// never needs it, and `None` is a segment that would not map writable.
+    /// never needs it, and `None` is a segment that would not map writable. A chunk of a
+    /// client's protocol has no second mapping: its client's pointer is the writable one.
     writable: OnceLock<Option<PeerSegmentRw>>,
     window: std::ops::Range<usize>,
-    /// The id of the data segment, to map it a second time writable.
-    segment: u64,
     hold: ChunkHold,
+}
+
+/// R3065 -- where a received chunk's bytes are: a POSIX segment this module maps, or a segment a
+/// CLIENT of another protocol attached.
+enum ChunkData {
+    /// The chunk's data segment mapped read-only, and its id, to map it a second time writable.
+    Posix { data: PeerSegment, segment: u64 },
+    /// The chunk at `ptr` in a segment the reader's client for the chunk's protocol attached. The
+    /// segment is held for as long as the chunk is, which is what keeps `ptr` valid.
+    Foreign {
+        _segment: Arc<dyn ShmDataSegment>,
+        ptr: *mut u8,
+        len: usize,
+    },
+}
+
+// SAFETY: `ptr` is an address inside `_segment`, which the value owns, and the client contract
+// ([`ShmDataSegment::map`]) keeps it valid while the segment is alive. The bytes it names are
+// shared memory read by any holder of the chunk, which is what the type is for.
+unsafe impl Send for ChunkData {}
+// SAFETY: as above; nothing in the value is mutated through a shared reference.
+unsafe impl Sync for ChunkData {}
+
+impl ChunkData {
+    /// The bytes of the whole segment mapping for POSIX, and of the chunk alone for a client's.
+    fn bytes(&self) -> &[u8] {
+        match self {
+            ChunkData::Posix { data, .. } => data.bytes(),
+            // SAFETY: `ptr` names `len` bytes of `_segment`, which `self` holds alive; the length
+            // is the descriptor's, which the header's own length bounds (`window` checked it).
+            ChunkData::Foreign { ptr, len, .. } => unsafe {
+                std::slice::from_raw_parts(*ptr as *const u8, *len)
+            },
+        }
+    }
 }
 
 impl RxStorage for SharedChunk {
@@ -1493,9 +1565,14 @@ impl ShmChunkView for SharedChunk {
     }
 
     fn writable_ptr(&self) -> Option<*mut u8> {
+        let segment = match &self.data {
+            ChunkData::Posix { segment, .. } => *segment,
+            // The client mapped the chunk through a pointer it owns the write side of.
+            ChunkData::Foreign { ptr, .. } => return Some(*ptr),
+        };
         let mapped = self
             .writable
-            .get_or_init(|| PeerSegmentRw::open(self.segment).ok())
+            .get_or_init(|| PeerSegmentRw::open(segment).ok())
             .as_ref()?;
         if mapped.len() < self.window.end {
             return None;
@@ -2215,6 +2292,152 @@ mod tests {
 
     fn layout(size: usize) -> MemoryLayout {
         MemoryLayout::of_size(size).expect("a layout")
+    }
+
+    /// R3065 -- a backend that relabels a POSIX pool with a protocol of its own: its chunks lie
+    /// where POSIX chunks lie and their headers say `id`, so only a client for `id` reads them.
+    struct Relabelled {
+        inner: PosixShmProviderBackend,
+        id: u32,
+    }
+
+    impl ShmProviderBackend for Relabelled {
+        fn id(&self) -> u32 {
+            self.id
+        }
+        fn alloc(&self, layout: &MemoryLayout) -> Result<AllocatedChunk, AllocError> {
+            self.inner.alloc(layout)
+        }
+        fn free(&self, chunk: &crate::shm_backend::ChunkDescriptor) {
+            self.inner.free(chunk);
+        }
+        fn defragment(&self) -> usize {
+            self.inner.defragment()
+        }
+        fn available(&self) -> usize {
+            self.inner.available()
+        }
+        fn layout_for(&self, layout: MemoryLayout) -> Result<MemoryLayout, LayoutError> {
+            self.inner.layout_for(layout)
+        }
+    }
+
+    /// The client for [`Relabelled`]'s protocol: it attaches the POSIX segment by id, and counts.
+    struct RelabelledClient {
+        id: u32,
+        attaches: AtomicUsize,
+    }
+
+    struct MappedSegment(PeerSegment);
+
+    impl ShmDataSegment for MappedSegment {
+        fn map(&self, chunk: u32) -> *mut u8 {
+            self.0.bytes().as_ptr().wrapping_add(chunk as usize) as *mut u8
+        }
+    }
+
+    impl crate::shm_clients::ShmDataClient for RelabelledClient {
+        fn protocol(&self) -> u32 {
+            self.id
+        }
+        fn attach(&self, segment: u32) -> Option<Arc<dyn ShmDataSegment>> {
+            self.attaches.fetch_add(1, Ordering::SeqCst);
+            let mapped = PeerSegment::open(u64::from(segment)).ok()?;
+            Some(Arc::new(MappedSegment(mapped)))
+        }
+    }
+
+    /// R3065 -- THE READER READS A CHUNK THROUGH THE CLIENT ITS HEADER'S PROTOCOL NAMES, and only
+    /// that: the default reader refuses a protocol it holds no client for, a set that holds the
+    /// client reads the chunk as bytes AND as the page itself, the segment is attached once for
+    /// every buffer of it, and a set built without the built-in POSIX client cannot read POSIX.
+    #[test]
+    fn a_chunk_of_another_protocol_is_read_through_its_client_and_only_through_it() {
+        use crate::shm_clients::{ShmClientResolver, ShmClientSet};
+
+        const PROTOCOL: u32 = 100500;
+        let provider = ShmProvider::new(Arc::new(Relabelled {
+            inner: PosixShmProviderBackend::new(&layout(4096)).expect("a pool"),
+            id: PROTOCOL,
+        }));
+        let chunk = |text: &[u8]| {
+            let mut payload = provider
+                .alloc(layout(64), &AllocPolicy::JustAlloc)
+                .expect("a chunk of the relabelled pool");
+            payload.write(text);
+            let descriptor = sent(&payload);
+            (payload, descriptor)
+        };
+        let client = Arc::new(RelabelledClient {
+            id: PROTOCOL,
+            attaches: AtomicUsize::new(0),
+        });
+        let with_client = Arc::new(
+            ShmClientSet::new(
+                true,
+                [client.clone() as Arc<dyn crate::shm_clients::ShmDataClient>],
+            )
+            .expect("a client beside POSIX"),
+        );
+        let reader = ShmClientResolver::new(with_client);
+
+        // The default reader holds no client for the protocol: it refuses, and gives the
+        // reference back, as it does for a protocol it does not speak.
+        let (_kept_a, refused) = chunk(b"refused by the default reader");
+        assert!(
+            PosixShmResolver.resolve(&refused).is_none(),
+            "the default reader resolves POSIX alone"
+        );
+
+        // A set that holds the client reads the bytes ...
+        let (_kept_b, copied) = chunk(b"read through the client");
+        let copy = reader.resolve(&copied).expect("the client's protocol");
+        assert_eq!(
+            copy.len(),
+            64,
+            "the chunk is the 64 bytes that were allocated"
+        );
+        assert!(copy.starts_with(b"read through the client"));
+        // ... and hands the page up where it lies, keeping the hold with it.
+        let (_kept_c, shared) = chunk(b"the page itself");
+        let bytes = reader.resolve_shared(&shared).expect("shared bytes");
+        assert_eq!(bytes.as_slice().len(), 64);
+        assert!(bytes.as_slice().starts_with(b"the page itself"));
+        assert!(
+            bytes.shm_chunk().is_some(),
+            "a chunk of a client's protocol is delivered as a buffer of shared memory"
+        );
+        assert_eq!(
+            client.attaches.load(Ordering::SeqCst),
+            1,
+            "the pool's one segment is attached once however many buffers are read from it"
+        );
+
+        // A set holding POSIX alone refuses the protocol it holds no client for.
+        let (_kept_d, other) = chunk(b"no client for this");
+        let posix_only = ShmClientResolver::new(Arc::new(ShmClientSet::posix_only()));
+        assert!(posix_only.resolve(&other).is_none());
+
+        // A set built WITHOUT the built-in POSIX client cannot read POSIX memory, and a set
+        // with it can.
+        let mut plain = ShmBackedPayload::alloc(5).expect("a POSIX chunk");
+        plain.write(b"posix");
+        let (posix_without, posix_with) = (sent(&plain), sent(&plain));
+        let custom_only = ShmClientResolver::new(Arc::new(
+            ShmClientSet::new(
+                false,
+                [client.clone() as Arc<dyn crate::shm_clients::ShmDataClient>],
+            )
+            .expect("a set without POSIX"),
+        ));
+        assert!(
+            custom_only.resolve(&posix_without).is_none(),
+            "a reader built without the default client set cannot read POSIX memory"
+        );
+        assert_eq!(
+            reader.resolve(&posix_with).expect("POSIX is in the set"),
+            b"posix"
+        );
     }
 
     /// A chunk that fills a 4096-byte pool: the allocator spends about a kilobyte of the

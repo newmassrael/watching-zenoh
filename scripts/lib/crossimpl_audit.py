@@ -970,7 +970,11 @@ HOST_GATED_CI_TARGETS: dict[str, str] = {
 # receivers are the real library's and whose sender is the program linked against each arm
 # (`api-compat-c zenoh-c->wz partial`, the class the R3064 legs already declare against the same
 # lane, so no new execution lane is owed). Measured by `scripts/audit-crossimpl-proof.sh`.
-FOREIGN_ADJUDICATOR_LINKS = 1007
+# R3066 -- 1007 -> 1008, RISING by one: the receiving half of the same differential, with wz as the
+# receiver over a client storage and the real library's sender as the foreign judge
+# (`api-compat-c zenoh-c->wz partial`, the same class and lane). Measured by
+# `scripts/audit-crossimpl-proof.sh`.
+FOREIGN_ADJUDICATOR_LINKS = 1008
 
 # ── Execution disclosure ────────────────────────────────────────────────────────
 #

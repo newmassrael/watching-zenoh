@@ -68,6 +68,10 @@ transport-qos = ["wz-runtime-tokio/transport-qos"]
 # which is `transport-shm`-gated upstream. It feeds the SHM arm's twentieth
 # transport byte, which upstream adds only when `Z_FEATURE_SHARED_MEMORY` is set.
 transport-shm = ["wz-runtime-tokio/transport-shm"]
+# R3065 -- the SHM establishment, for a host that gives its sessions a reader of its own: the
+# session's offer lists the protocols that reader resolves in the segment it publishes
+# (`OpenStance::with_shm_clients`). The zenoh-c arm that has client storages turns it on.
+session-extshm = ["transport-shm", "wz-runtime-tokio/session-extshm"]
 
 [dependencies]
 # OS entropy for the per-session zid, as zenoh-pico does at `z_open`

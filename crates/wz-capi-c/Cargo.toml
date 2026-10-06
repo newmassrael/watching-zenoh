@@ -139,7 +139,7 @@ zenoh-c-no-unstable-api = []
 # dependency below: the transport snapshot reads `is_shm` from the session's actions only
 # when it is built, so `z_transport_is_shm` read `false` for every session whatever it had
 # negotiated; and the model's SHM publish (`publish_shm_all`) exists only when it is.
-zenoh-c-shared-memory = ["dep:libc", "wz-runtime-tokio/session-extshm", "wz-capi-core/transport-shm"]
+zenoh-c-shared-memory = ["dep:libc", "wz-runtime-tokio/session-extshm", "wz-capi-core/session-extshm"]
 
 [dependencies]
 # R2299 — `mmap`/`munmap` for the SHM client registry's POSIX attach. Optional:

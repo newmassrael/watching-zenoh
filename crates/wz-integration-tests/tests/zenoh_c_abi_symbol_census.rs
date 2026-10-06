@@ -350,7 +350,14 @@ const BASELINES: &[(&str, usize, &str, &str)] = &[
     // `z_open_with_custom_shm_clients` and `z_ref_shm_client_storage_global`:
     // they choose the clients a session READS shared memory through, and wz's
     // receive path for an SHM payload waits on open-debt item 823.
-    ("unstable-shm", 2, "1.10.1", "C1cc"),
+    // R3066 lowered this 2 -> 0 by building the two couplings: a session is opened over a
+    // client storage (`z_open_with_custom_shm_clients`) or over the process's global one
+    // (`z_ref_shm_client_storage_global`), and that storage's clients are the session's reader
+    // and the list its auth segment advertises. MEASURED by this file's own assertion ("the gap
+    // on the 'unstable-shm' arm is now 0"), and witnessed against libzenohc by
+    // `zenoh_c_shm_custom_protocol_twice_and_diff`, whose receiver is the program that did not
+    // link before: five storages, three payload kinds, the real library's rows.
+    ("unstable-shm", 0, "1.10.1", "C1cc"),
     // R311y614 — the two arms that had NO oracle on any machine, and therefore
     // no row: the gate hard-FAILED on them rather than guessing a ceiling from
     // a neighbour. `scripts/install-zenoh-c-arm.sh` builds any of the four, so

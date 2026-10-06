@@ -213,6 +213,90 @@ pub const SHM_ZBUF_EXT_HEADER: u8 = SHM_ESTABLISHMENT_EXT_ID | crate::ext_header
 #[cfg(feature = "session-extshm")]
 pub const SHM_PRIORITY_BANDS: usize = crate::qos::Priority::NUM;
 
+/// R3065 -- how many protocol ids an auth segment can list: the length of the `protocols`
+/// array in upstream's `ShmTransportMetadata`
+/// (`io/zenoh-transport/src/unicast/establishment/ext/shm/segment.rs` @ `protocols: [ProtocolID; 256],`).
+#[cfg(feature = "session-extshm")]
+pub const SHM_PROTOCOL_SLOTS: usize = 256;
+
+/// R3065 -- more protocols than an auth segment has slots for.
+#[cfg(feature = "session-extshm")]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct TooManyShmProtocols {
+    /// How many distinct ids were asked for.
+    pub asked: usize,
+}
+
+/// R3065 -- the shared-memory protocols a session's READER can resolve a buffer of: what its auth
+/// segment lists, and so what a peer's sender is allowed to send it as a descriptor (see
+/// [`ShmAuthenticator::open_peer_protocols`]). `0` is upstream's POSIX protocol.
+///
+/// A fixed array and not a `Vec` because it travels in [`crate::transport_mode::SessionOffer`],
+/// which is `Copy` and is copied through every open path, dial, accept, peer and redial alike:
+/// carrying the list THERE is what makes every path advertise the list of the session's own
+/// reader, where a separate argument would have to be threaded through each of them. The capacity
+/// is the wire's own (256), so no storage a peer could express is refused here that upstream takes.
+#[cfg(feature = "session-extshm")]
+#[derive(Clone, Copy, Debug)]
+pub struct ShmProtocolList {
+    len: u16,
+    ids: [u32; SHM_PROTOCOL_SLOTS],
+}
+
+#[cfg(feature = "session-extshm")]
+impl ShmProtocolList {
+    /// The default reader's list: POSIX, and nothing else.
+    pub const POSIX_ONLY: Self = Self {
+        len: 1,
+        ids: [0; SHM_PROTOCOL_SLOTS],
+    };
+
+    /// The list of exactly `ids`, in the order given, a repeated id kept once. `Err` when there
+    /// are more distinct ids than the segment has slots.
+    pub fn new(ids: &[u32]) -> Result<Self, TooManyShmProtocols> {
+        let mut list = Self {
+            len: 0,
+            ids: [0; SHM_PROTOCOL_SLOTS],
+        };
+        for &id in ids {
+            if list.as_slice().contains(&id) {
+                continue;
+            }
+            let slot = usize::from(list.len);
+            if slot == SHM_PROTOCOL_SLOTS {
+                return Err(TooManyShmProtocols { asked: ids.len() });
+            }
+            list.ids[slot] = id;
+            list.len += 1;
+        }
+        Ok(list)
+    }
+
+    /// The ids, in order.
+    pub fn as_slice(&self) -> &[u32] {
+        &self.ids[..usize::from(self.len)]
+    }
+}
+
+#[cfg(feature = "session-extshm")]
+impl Default for ShmProtocolList {
+    fn default() -> Self {
+        Self::POSIX_ONLY
+    }
+}
+
+/// Equal when they list the same ids in the same order: the slots past `len` are not part of the
+/// value, and a derived comparison would read them.
+#[cfg(feature = "session-extshm")]
+impl PartialEq for ShmProtocolList {
+    fn eq(&self, other: &Self) -> bool {
+        self.as_slice() == other.as_slice()
+    }
+}
+
+#[cfg(feature = "session-extshm")]
+impl Eq for ShmProtocolList {}
+
 /// zenoh's `HandoffCounterIds` (`HandoffConfig<ShmCounterID>`) — the SHM
 /// back-pressure counter block that 1.10.0 added to BOTH Open-phase messages.
 ///

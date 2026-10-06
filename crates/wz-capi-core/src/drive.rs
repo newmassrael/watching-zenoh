@@ -45,7 +45,7 @@ use wz_runtime_tokio::startup_phase::{
     PhasePolicy,
 };
 
-use crate::faces::{CApiForwarder, SharedSession, DIAL_FACE_ID};
+use crate::faces::{CApiForwarder, OpenShmClients, SessionResources, SharedSession, DIAL_FACE_ID};
 
 /// How the dial half of an open treats an attempt that fails — zenoh's
 /// `connect/timeout_ms` and `connect/exit_on_failure` ([`PhasePolicy`]) with the
@@ -1654,6 +1654,27 @@ pub struct OpenStance {
     /// this field existed. The session builds ONE clock from it, for the role it dials as, and
     /// every session of the node shares that clock.
     pub timestamping: TimestampingEnabled,
+    /// R3065 -- the shared-memory reader this session was opened over: the clients its node's
+    /// storage resolved into, or `None` for the default reader (POSIX alone). It reaches the
+    /// registry, which gives it to the plane and to every face session. The list its auth segment
+    /// advertises is [`Self::offer`]'s, and the two are set together by [`Self::with_shm_clients`]
+    /// so that a node never lists a protocol its reader cannot resolve.
+    pub shm_clients: OpenShmClients,
+}
+
+#[cfg(feature = "session-extshm")]
+impl OpenStance {
+    /// This stance for a session opened over the client `set`: the reader is the set, and the
+    /// protocols the offer advertises are exactly the set's. `Err` when the set names more
+    /// protocols than an auth segment has slots for.
+    pub fn with_shm_clients(
+        mut self,
+        set: Arc<wz_runtime_tokio::shm_clients::ShmClientSet>,
+    ) -> Result<Self, wz_runtime_tokio::shm_clients::TooManyShmProtocols> {
+        self.offer = self.offer.with_shm_protocols(set.advertised()?);
+        self.shm_clients = Some(set);
+        Ok(self)
+    }
 }
 
 /// Open a session: spawn the drive thread and wait for the role's open
@@ -1677,6 +1698,7 @@ pub fn open_blocking(
         zid,
         start_read_task,
         timestamping,
+        shm_clients,
     } = stance;
     let clock = TokioTime::new();
     // Fixed here, on the CALLING thread, so `SessionState` can hand it to
@@ -1691,8 +1713,15 @@ pub fn open_blocking(
     // R311y820 — one line below the mint, and fallible for the same reason:
     // both need OS entropy and neither has an honest constant to fall back to.
     let shared = Arc::new(
-        SharedSession::new_with_node_clock(clock, wire_zid.clone(), node_hlc)
-            .map_err(|_| OpenError::DriveFailed)?,
+        SharedSession::new_with_resources(
+            clock,
+            wire_zid.clone(),
+            SessionResources {
+                node_hlc,
+                shm_clients,
+            },
+        )
+        .map_err(|_| OpenError::DriveFailed)?,
     );
     let shutdown = Arc::new(Notify::new());
     let stop = Arc::new(AtomicBool::new(false));

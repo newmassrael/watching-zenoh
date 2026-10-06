@@ -6684,7 +6684,11 @@ layer_c1af_cargo_test_shm() {
     # owns its payload and gives its reference back unless it is committed
     # (`an_owned_reservation_is_returned_unless_it_is_committed`); reddened by a drop that
     # stops returning it.
-    _runci_guarded_test C1af 38 cargo test -p wz-runtime-tokio --features session-extshm,transport-unicast,transport-link-tcp --lib shm_provider --quiet \
+    # R3066 -- 38 -> 39, MEASURED: a chunk of another protocol is read through the client its
+    # header's protocol names, and only through it
+    # (`a_chunk_of_another_protocol_is_read_through_its_client_and_only_through_it`); reddened by
+    # the reader refusing every protocol but POSIX again.
+    _runci_guarded_test C1af 39 cargo test -p wz-runtime-tokio --features session-extshm,transport-unicast,transport-link-tcp --lib shm_provider --quiet \
         || return 1
     # R3056 -- the provider's two new modules, which the filter above does not select:
     # `shm_backend` (the value types an allocation speaks in, 4 tests) and
@@ -19949,15 +19953,26 @@ layer_c1cc_api_compat_c() {
         || return 1
     # R3065 -- what a SENDER does with a chunk of a shared-memory protocol its receiver may not
     # be able to read: a custom provider's chunks, put, sent as a get's value and replied, to a
-    # receiver whose storage holds a client for the protocol (shared memory) and to two whose
-    # does not, the default storage and none (bytes, as the real sender sends them; wz delivered
-    # nothing). Needs the SHM arm.
+    # receiver whose storage holds a client for the protocol (shared memory) and to those whose
+    # does not (bytes, as the real sender sends them; wz delivered nothing). Needs the SHM arm.
     _runci_guarded_test \
         "C1cc a_chunk_of_a_custom_protocol_is_sent_as_bytes_to_a_receiver_that_cannot_read_it_on_wz_and_libzenohc" 1 \
         cargo test -p wz-integration-tests \
         --test zenoh_c_shm_custom_protocol_twice_and_diff -- --ignored --quiet \
         --test-threads=1 \
         --exact a_chunk_of_a_custom_protocol_is_sent_as_bytes_to_a_receiver_that_cannot_read_it_on_wz_and_libzenohc \
+        || return 1
+    # R3066 -- the other half, with wz as the RECEIVER: a session opened over a client storage
+    # (`z_open_with_custom_shm_clients`, `z_ref_shm_client_storage_global`, the two symbols that did
+    # not exist) reads what the real library's sender puts it, through the storage's clients, and
+    # publishes the storage's protocols so the sender chooses descriptor or bytes as it does for the
+    # real receiver. Five storages by three payloads, the real library's rows as the oracle.
+    _runci_guarded_test \
+        "C1cc a_receiver_over_a_client_storage_reads_what_the_real_sender_puts_on_wz_and_libzenohc" 1 \
+        cargo test -p wz-integration-tests \
+        --test zenoh_c_shm_custom_protocol_twice_and_diff -- --ignored --quiet \
+        --test-threads=1 \
+        --exact a_receiver_over_a_client_storage_reads_what_the_real_sender_puts_on_wz_and_libzenohc \
         || return 1
     _runci_guarded_test \
         "C1cc an_advanced_subscriber_of_the_publishers_own_session_hears_it_on_wz_and_libzenohc" 1 \
