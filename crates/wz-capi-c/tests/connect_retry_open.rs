@@ -83,6 +83,19 @@ fn host_refusal_time(port: u16) -> Duration {
 unsafe fn open_with(entries: &[(&str, String)]) -> (i8, z_owned_session_t) {
     let mut cfg: z_owned_config_t = std::mem::zeroed();
     assert_eq!(z_config_default(&mut cfg), Z_OK);
+    // Multicast scouting off unless a leg states otherwise, as zenoh's own tests state it: a
+    // session that scouts connects to every zenoh node on the default group, and these are to
+    // dial the ports they are given.
+    let off_key = CString::new("scouting/multicast/enabled").unwrap();
+    let off_value = CString::new("false").unwrap();
+    assert_eq!(
+        zc_config_insert_json5(
+            z_config_loan_mut(&mut cfg),
+            off_key.as_ptr(),
+            off_value.as_ptr()
+        ),
+        Z_OK
+    );
     for (key, value) in entries {
         let key = CString::new(*key).unwrap();
         let value = CString::new(value.as_str()).unwrap();

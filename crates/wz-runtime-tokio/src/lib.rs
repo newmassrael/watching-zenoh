@@ -1180,12 +1180,23 @@ pub mod scouting_responder;
 // for; `scouting_glue` resolves ONE locator for a one-shot session and
 // `scouting_responder` answers without dialling, so neither of them is this.
 //
-// Gated on `scouting-active` (it scouts) AND `routing-peer` (it posts a
-// `DialIntent`, which only the peer mesh loop drains, and it reads the
-// `AutoConnect` policy out of the routing-graph crate that feature pulls). A
-// build with the first and not the second could scout but would have nowhere to
-// send an intent, so composing it there would be the half-a-pair shape.
-#[cfg(all(feature = "scouting-active", feature = "routing-peer"))]
+// Gated on `scouting-active` (it scouts), `routing-accept` (it posts a
+// `DialIntent`, a type the accept loop owns) and the routing-graph crate (it
+// reads the `AutoConnect` policy out of it), which `routing-peer` pulls and so
+// does `zenoh-config`. A build with the first and neither of the others could
+// scout but would have nowhere to send an intent, so composing it there would be
+// the half-a-pair shape.
+//
+// R3070 -- `zenoh-config` joined `routing-peer` as a way to have the graph crate,
+// because a host that is not the peer mesh loop drains the intents too: the C ABI
+// dials what its session finds, face by face, on its own drive task. It stated
+// `routing-peer` as the only owner of the intent before it had a second one, and
+// the module needs nothing of that feature but the dependency it brings.
+#[cfg(all(
+    feature = "scouting-active",
+    feature = "routing-accept",
+    any(feature = "routing-peer", feature = "zenoh-config")
+))]
 pub mod scouting_autoconnect;
 
 // R2570 — the MULTI-PEER arm of static mode: a static deploy brought up as a

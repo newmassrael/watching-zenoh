@@ -1918,6 +1918,10 @@ int main(int argc, char **argv) {
     zc_init_log_from_env_or("error");
     z_owned_config_t config;
     z_config_default(&config);
+    /* Scouting off unless an argument says otherwise, as zenoh's own tests state it: a session
+       that scouts connects to every zenoh node on the default group, and this one is to talk
+       to the endpoint it is given. */
+    zc_config_insert_json5(z_loan_mut(config), Z_CONFIG_MULTICAST_SCOUTING_KEY, "false");
     parse_zenoh_common_args(argc, argv, &config);
     // The keyexpr is the LAST argument, so no option-table plumbing is needed
     // beyond upstream's own.
@@ -2163,6 +2167,10 @@ int main(int argc, char **argv) {
     zc_init_log_from_env_or("error");
     z_owned_config_t config;
     z_config_default(&config);
+    /* Scouting off unless an argument says otherwise, as zenoh's own tests state it: a session
+       that scouts connects to every zenoh node on the default group, and this one is to talk
+       to the endpoint it is given. */
+    zc_config_insert_json5(z_loan_mut(config), Z_CONFIG_MULTICAST_SCOUTING_KEY, "false");
     parse_zenoh_common_args(argc, argv, &config);
     const char *keyexpr = argv[argc - 1];
 

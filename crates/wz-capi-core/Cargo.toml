@@ -146,7 +146,15 @@ wz-runtime-tokio = { path = "../wz-runtime-tokio", features = [
     "ext-pubsub-sample-miss-detection",
     "ext-pubsub-group-membership",
     "time-hlc",
+    # R3070 -- the autoconnect loop and the config types it reads. `zenoh-config` is what lets
+    # `scouting_autoconnect` build here without `routing-peer` (see the module's gate): this
+    # crate drains the intents itself, on its drive task, and wants the dial and not the mesh.
+    "zenoh-config",
 ] }
+# R3070 -- the autoconnect POLICY (`AutoConnect`, its per-target strategies) a session that
+# scouts is built with, named here because the plan a host hands this crate carries it. A pure
+# host crate, already in the graph through `zenoh-config` above.
+wz-routing-graph = { path = "../wz-routing-graph" }
 # R311y529 — the `TimeSource` trait, so this crate can read the clock it already
 # holds (`SharedSession::now_monotonic_ms`, which `z_timestamp_new` stamps
 # from). Already in the graph via wz-runtime-tokio; named here because a trait

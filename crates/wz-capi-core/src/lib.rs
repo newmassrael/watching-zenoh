@@ -61,3 +61,4 @@ pub mod faces;
 pub mod group;
 pub mod listeners;
 pub mod scouting;
+pub mod scouting_node;

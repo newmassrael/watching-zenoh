@@ -27,7 +27,7 @@ use wz_capi_c::bytes::z_bytes_copy_from_str;
 use wz_capi_c::config::{z_config_default, z_config_loan_mut, zc_config_insert_json5};
 use wz_capi_c::keyexpr::{z_view_keyexpr_from_str, z_view_keyexpr_loan};
 use wz_capi_c::put::z_put;
-use wz_capi_c::result::{Z_EINVAL, Z_ENETWORK, Z_OK};
+use wz_capi_c::result::{Z_ENETWORK, Z_OK};
 use wz_capi_c::session::{z_close, z_open, z_session_drop, z_session_loan, z_session_loan_mut};
 use wz_capi_c::sub::{z_closure_sample, z_declare_subscriber};
 use wz_runtime_tokio_test_support::free_port;
@@ -201,15 +201,67 @@ fn a_client_with_nothing_to_dial_fails_its_open_listener_or_not() {
     }
 }
 
-/// The half this ABI does not do: with multicast scouting ON (zenoh's default) and no endpoint,
-/// the real library opens a session that finds its peers through the group. This one refuses the
-/// open rather than hand back a session that reaches nothing it was configured to reach, and
-/// when scouting is built this is the leg that changes.
+/// A group no other test or node on this host scouts on, so a session that scouts here meets
+/// nobody it was not started to meet.
+const PRIVATE_GROUP: &str = "\"224.0.0.231:7479\"";
+
+/// With multicast scouting ON (zenoh's default) and no endpoint, a peer opens: it scouts the group
+/// for the open's start window, finds nobody, and is a session alone, as the real library's is
+/// (measured: `open=0` after the scouting delay). It was refused for want of scouting.
 #[test]
-fn a_config_with_scouting_on_and_no_endpoint_is_still_refused() {
+fn a_peer_that_scouts_and_finds_nobody_opens_after_its_scouting_delay() {
+    let started = Instant::now();
     // SAFETY: fresh config and session.
-    let (rc, session) = unsafe { open_with(&[("mode", String::from("\"peer\""))]) };
-    assert_eq!(rc, Z_EINVAL);
+    let (rc, session) = unsafe {
+        open_with(&[
+            ("mode", String::from("\"peer\"")),
+            ("scouting/multicast/address", String::from(PRIVATE_GROUP)),
+            ("scouting/delay", String::from("300")),
+        ])
+    };
+    let waited = started.elapsed();
+    assert_eq!(
+        rc, Z_OK,
+        "a peer with nothing to dial and nobody to find opens"
+    );
+    assert!(
+        waited >= Duration::from_millis(250),
+        "the open returned after {waited:?}, before its scouting delay: it did not wait for anyone"
+    );
+    // SAFETY: the session is live; `ctx` is freed after it closes.
+    let (hits, ctx) = unsafe { count_samples(&session) };
+    // SAFETY: the session is live.
+    assert!(
+        unsafe { put_until_it_arrives(&session, &hits) },
+        "a peer alone did not deliver to its own subscriber"
+    );
+    // SAFETY: the session is live and owned here.
+    unsafe {
+        close_session(session);
+        drop(Box::from_raw(ctx));
+    }
+}
+
+/// A client with nothing to dial scouts for the first node it can open to, and fails its open
+/// when `scouting/timeout` passes with none (measured on the real library: `-4` after the
+/// timeout, 3 s by default).
+#[test]
+fn a_client_that_scouts_and_finds_nobody_fails_after_its_timeout() {
+    let started = Instant::now();
+    // SAFETY: fresh config and session.
+    let (rc, session) = unsafe {
+        open_with(&[
+            ("mode", String::from("\"client\"")),
+            ("scouting/multicast/address", String::from(PRIVATE_GROUP)),
+            ("scouting/timeout", String::from("400")),
+        ])
+    };
+    let waited = started.elapsed();
+    assert_eq!(rc, Z_ENETWORK);
+    assert!(
+        waited >= Duration::from_millis(350) && waited < Duration::from_secs(5),
+        "the search was bounded by 400 ms and the open gave up after {waited:?}"
+    );
     // SAFETY: a gravestone drops as a no-op.
     unsafe { close_session(session) };
 }

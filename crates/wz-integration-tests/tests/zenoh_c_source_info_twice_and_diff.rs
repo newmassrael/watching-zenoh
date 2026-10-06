@@ -81,6 +81,9 @@ int main(int argc, char **argv) {
 
     z_owned_config_t config;
     z_config_default(&config);
+    /* Scouting off, as zenoh's own tests state it: a session that scouts connects to every
+       zenoh node on the default group, and this one is to talk to the endpoint it is given. */
+    zc_config_insert_json5(z_config_loan_mut(&config), "scouting/multicast/enabled", "false");
     if (zc_config_insert_json5(z_config_loan_mut(&config), "mode", "\"peer\"") != 0) {
         printf("config.mode=FAILED\n"); return 1;
     }

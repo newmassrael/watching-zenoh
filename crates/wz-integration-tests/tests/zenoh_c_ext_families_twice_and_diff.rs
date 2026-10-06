@@ -105,6 +105,9 @@ int main(int argc, char **argv) {
 
     z_owned_config_t config;
     z_config_default(&config);
+    /* Scouting off, as zenoh's own tests state it: a session that scouts connects to every
+       zenoh node on the default group, and this one is to talk to the endpoint it is given. */
+    zc_config_insert_json5(z_loan_mut(config), Z_CONFIG_MULTICAST_SCOUTING_KEY, "false");
     zc_config_insert_json5(z_loan_mut(config), Z_CONFIG_MODE_KEY, "\"peer\"");
     /* A JSON5 ARRAY, as upstream's own examples write it. The first draft passed
        argv[1] bare; that is not a JSON5 value, both parsers refused it, and only

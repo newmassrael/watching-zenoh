@@ -45,13 +45,16 @@
 //!
 //! ## The shape both ABIs accept, measured rather than assumed
 //!
-//! wz's `z_open` REFUSES a config with neither endpoint (`wz-capi-c`'s
-//! `session.rs` says so in as many words: a scouting open is not implemented)
-//! and refuses listen+connect together, while zenoh-c opens all three. The
-//! probe therefore sets exactly ONE listen endpoint, and the differential runs
-//! on the INTERSECTION of the two ABIs rather than on the oracle's superset.
-//! A probe written to the oracle's tolerance would fail on wz for a reason that
-//! is not the claim.
+//! This file was written when wz's `z_open` refused a config with neither
+//! endpoint and a config with listen and connect together, while zenoh-c opened
+//! all three; the probe therefore sets exactly ONE listen endpoint and
+//! multicast scouting off, so that no session here looks for or is looked for by
+//! anything outside it. Both refusals are gone (R3067 built the roles, R3070
+//! scouting), and the shape is kept because it is the one the claim needs: a
+//! session that finds nobody and is found by nobody, where the verdict being
+//! graded is the SESSION-LOCAL one. The role and scouting rows have files of
+//! their own (`zenoh_c_open_roles_twice_and_diff`,
+//! `zenoh_c_scouting_twice_and_diff`).
 
 use std::path::{Path, PathBuf};
 use std::process::Command;

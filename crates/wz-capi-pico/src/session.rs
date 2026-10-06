@@ -344,6 +344,8 @@ pub unsafe extern "C" fn z_open(
                 // pico runs a callback only from its background executor, so a delivery the
                 // session makes to itself is staged and run there, never inside the call.
                 local_delivery: wz_runtime_tokio::session::LocalDeliveryDrain::DriveTask,
+                // pico scouts when a program calls `z_scout`, never inside `z_open`.
+                scouting: None,
             },
         ) {
             Ok(state) => {

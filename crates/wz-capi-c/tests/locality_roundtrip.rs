@@ -78,6 +78,18 @@ unsafe fn open_role(port: u16, key: &str) -> z_owned_session_t {
     let value = CString::new(format!("[\"tcp/127.0.0.1:{port}\"]")).unwrap();
     let mut cfg: z_owned_config_t = std::mem::zeroed();
     assert_eq!(z_config_default(&mut cfg), Z_OK);
+    // Multicast scouting off, as zenoh's own tests state it: a session that scouts connects to
+    // every zenoh node on the default group, and this one is to talk to the port it is given.
+    let off_key = CString::new("scouting/multicast/enabled").unwrap();
+    let off_value = CString::new("false").unwrap();
+    assert_eq!(
+        zc_config_insert_json5(
+            z_config_loan_mut(&mut cfg),
+            off_key.as_ptr(),
+            off_value.as_ptr()
+        ),
+        Z_OK
+    );
     assert_eq!(
         zc_config_insert_json5(z_config_loan_mut(&mut cfg), key.as_ptr(), value.as_ptr()),
         Z_OK

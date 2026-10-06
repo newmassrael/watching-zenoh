@@ -2806,6 +2806,7 @@ version = "0.1.0"
 dependencies = [
  "libc",
  "tempfile",
+ "tokio",
  "wz-capi-core",
  "wz-cdylib-build",
  "wz-runtime-tokio",
@@ -2819,6 +2820,7 @@ dependencies = [
  "getrandom 0.2.17",
  "tokio",
  "wz-codecs",
+ "wz-routing-graph",
  "wz-runtime-core",
  "wz-runtime-tokio",
 ]

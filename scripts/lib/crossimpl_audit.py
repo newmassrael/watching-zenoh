@@ -983,7 +983,13 @@ HOST_GATED_CI_TARGETS: dict[str, str] = {
 # order in which the callbacks of a delivery a session makes to itself run against the calls
 # that cause them (`api-compat-c zenoh-c->wz partial`, the class and lane R3067 declared).
 # Measured by `scripts/audit-crossimpl-proof.sh`.
-FOREIGN_ADJUDICATOR_LINKS = 1012
+# R3070 -- 1012 -> 1016, RISING by four, each a new `wz-proves` line in
+# `zenoh_c_scouting_twice_and_diff.rs`: a node with no endpoint finds a router by scouting, a node
+# that scouts and finds nobody opens or fails as the real one does, two default peers find each
+# other, and a peer with a live endpoint opens at once though it scouts (each
+# `api-compat-c zenoh-c->wz partial`, the class and lane R3067 and R3069 declared). Measured by
+# `scripts/audit-crossimpl-proof.sh`.
+FOREIGN_ADJUDICATOR_LINKS = 1016
 
 # ── Execution disclosure ────────────────────────────────────────────────────────
 #

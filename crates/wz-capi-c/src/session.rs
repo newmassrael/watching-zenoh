@@ -14,6 +14,7 @@ use wz_capi_core::drive::{
     open_blocking, CapiTlsConfig, ConfiguredZid, DialPhase, OpenError, OpenStance, SessionState,
 };
 use wz_capi_core::faces::{no_shm_clients, OpenShmClients};
+use wz_capi_core::scouting_node::ScoutingPlan;
 use wz_runtime_tokio::node_clock::TimestampingEnabled;
 use wz_runtime_tokio::retry_period::RetryPolicy;
 use wz_runtime_tokio::session::LocalDeliveryDrain;
@@ -267,27 +268,35 @@ pub(crate) unsafe fn open_session(
             Err(QosWithLowlatency) => return Z_ENETWORK,
         };
 
-        // A config that states no endpoint to DIAL. Measured on the real library,
-        // with multicast scouting off: a client fails its open whether or not it
-        // states a listener (zenoh's `start_client` bails "No peer specified and
-        // multicast scouting deactivated!"), and a peer or router opens, ALONE
-        // when it has nothing to listen on either, delivering to its own
-        // subscribers. With scouting ON the session would find others through
-        // the group, which this ABI does not do yet; a config that states no
-        // endpoint at all stays refused rather than opening a session that
-        // reaches nothing it was configured to reach.
+        // What the session does with multicast scouting: look for the nodes it should connect to
+        // when its config says to. A group the config names that this host cannot scout on is
+        // refused here, as zenoh refuses an address it cannot parse.
         //
-        // R3067 -- a config stating both a listener and a dial is a peer that
-        // does both, and is opened as one: the roles are a set (see
-        // `open_blocking`), where it was refused for want of one drive per role.
-        if connect.is_empty() {
-            let scouting_off = node.as_ref().is_some_and(|node| !node.multicast_scouting);
-            if scouting_off && whatami == WhatAmI::Client {
-                return Z_ENETWORK;
-            }
-            if listen.is_none() && !scouting_off {
-                return Z_EINVAL;
-            }
+        // R3070 -- before this a config that left scouting on and stated no endpoint was refused,
+        // which is every config a program writes without `-e`.
+        let scouting = match node
+            .as_ref()
+            .map(|node| ScoutingPlan::resolve(node, whatami))
+            .transpose()
+        {
+            Ok(plan) => plan.flatten(),
+            Err(_) => return Z_EINVAL,
+        };
+
+        // A config that states no endpoint to DIAL. Measured on the real library: a client with
+        // nothing to dial and nothing to scout for fails its open whether or not it states a
+        // listener (zenoh's `start_client` bails "No peer specified and multicast scouting
+        // deactivated!"), and a peer or router opens, ALONE when it has nothing to listen on
+        // either, delivering to its own subscribers. A client that does scout looks for the first
+        // node it can open to and fails after `scouting/timeout` if there is none.
+        //
+        // R3067 -- a config stating both a listener and a dial is a peer that does both, and is
+        // opened as one: the roles are a set (see `open_blocking`).
+        if connect.is_empty()
+            && whatami == WhatAmI::Client
+            && !scouting.as_ref().is_some_and(ScoutingPlan::scouts)
+        {
+            return Z_ENETWORK;
         }
         // Checked after the refusals above so a config that states no endpoint
         // keeps answering what it always did.
@@ -320,6 +329,7 @@ pub(crate) unsafe fn open_session(
             // peer; a C program written for zenoh-c already tolerates both, and one that puts and
             // then reads what its callback set relies on the first.
             local_delivery: LocalDeliveryDrain::Caller,
+            scouting,
         };
         // R3065 -- a session opened over a client storage advertises the protocols of THAT
         // reader: the stance takes both from the one set, so the list a peer's sender reads is

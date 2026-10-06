@@ -26,7 +26,7 @@ use std::time::Duration;
 
 use tokio::sync::Notify;
 
-use wz_runtime_tokio::accept_loop::accept_loop_offering;
+use wz_runtime_tokio::accept_loop::{accept_loop_offering, DialIntent};
 use wz_runtime_tokio::node_clock::{NodeHlc, TimestampingEnabled};
 use wz_runtime_tokio::retry_period::RetryPolicy;
 use wz_runtime_tokio::runtime_impl::TokioTime;
@@ -47,6 +47,7 @@ use wz_runtime_tokio::startup_phase::{
 };
 
 use crate::faces::{CApiForwarder, OpenShmClients, SessionResources, SharedSession, DIAL_FACE_ID};
+use crate::scouting_node::{ScoutLink, ScoutingPlan};
 
 /// How the dial half of an open treats an attempt that fails — zenoh's
 /// `connect/timeout_ms` and `connect/exit_on_failure` ([`PhasePolicy`]) with the
@@ -103,6 +104,9 @@ struct Dialer {
     /// [`open_blocking`].
     offer: SessionOffer,
     clock: TokioTime,
+    /// R3070 -- the trust material every dial is built from, kept so a locator the session
+    /// FINDS (one no `dial_cfgs` entry was built for) is dialled the way a configured one is.
+    tls: CapiTlsConfig,
 }
 
 impl Dialer {
@@ -117,6 +121,24 @@ impl Dialer {
             .find(|(e, _)| e == endpoint)
             .map(|(_, cfg)| cfg)
             .ok_or(())?;
+        self.open_with(endpoint, dial_cfg).await
+    }
+
+    /// Dial a locator the session found by scouting and open a session to `expected`, the node
+    /// that answered from it. Upstream's `open_transport_unicast_with_zid`: a link that opens to
+    /// another node than the Hello named is not the connection that was wanted, and is closed.
+    async fn open_scouted(&self, locator: &str, expected: &[u8]) -> Result<OpenedSession, ()> {
+        let dial_cfg = dial_config(&self.tls, locator).map_err(|_| ())?;
+        let session = self.open_with(locator, &dial_cfg).await?;
+        if session.peer_zid().as_deref() == Some(expected) {
+            Ok(session)
+        } else {
+            session.drain_to_close().await;
+            Err(())
+        }
+    }
+
+    async fn open_with(&self, endpoint: &str, dial_cfg: &DialConfig) -> Result<OpenedSession, ()> {
         // The endpoint's own QoS band rides the node's offer, as upstream's
         // opener reads it off the endpoint it dials.
         let offer = offer_for_connect(self.offer, endpoint).map_err(|_| ())?;
@@ -738,6 +760,9 @@ struct DriveContext {
     /// Whether the session's drive is being run. Shared with [`SessionState`],
     /// which is what a C program starts and stops it through.
     gate: Arc<ReadGate>,
+    /// R3070 -- what the session does with multicast scouting, when it scouts at all: see
+    /// [`OpenStance::scouting`].
+    scouting: Option<ScoutingPlan>,
 }
 
 /// The shutdown signal both roles race their drive against. See
@@ -776,6 +801,7 @@ async fn drive_dial(
         tx_queue,
         offer,
         gate,
+        scouting,
     } = ctx;
     // R311y534 — the dial config is BUILT from the caller's TLS material rather
     // than defaulted. Everything that can fail it runs before the handshake, so a
@@ -815,6 +841,7 @@ async fn drive_dial(
         params,
         offer,
         clock,
+        tls: tls.clone(),
     });
     // R2950 — the two ROLES connect differently upstream, and each is built
     // here as upstream builds it. A client connects through
@@ -842,8 +869,13 @@ async fn drive_dial(
         None => None,
     };
     if whatami != WhatAmI::Client {
+        // R3070 -- a peer or router that scouts also dials what it finds, beside the endpoints
+        // it was told, as upstream's `start_peer` starts its scouting after its connects.
+        let scouting = scouting
+            .filter(ScoutingPlan::scouts)
+            .map(|plan| (plan, zid.clone()));
         drive_peer(
-            endpoints, listen, phase, dialer, shared, tx, shutdown, stop, gate,
+            endpoints, listen, scouting, phase, dialer, shared, tx, shutdown, stop, gate,
         )
         .await;
         return;
@@ -857,10 +889,60 @@ async fn drive_dial(
     // `debug_assert_eq!(self.owned_faces(ctx.tables).count(), 1);`). So the
     // listener is held for the session's life and no accept loop runs on it.
     let _bound_and_unserved = listen;
+    // R3070 -- a client with no endpoint of its own scouts for the first node it can open a
+    // session to (upstream's `connect_first`); one with an endpoint dials only that.
+    let scouting = scouting
+        .filter(ScoutingPlan::scouts)
+        .filter(|_| endpoints.is_empty())
+        .map(|plan| (plan, zid.clone()));
     drive_client(
-        endpoints, scheduled, phase, dialer, shared, tx, shutdown, stop, gate,
+        endpoints, scheduled, scouting, phase, dialer, shared, tx, shutdown, stop, gate,
     )
     .await;
+}
+
+/// A client with nothing to dial: scout the group and open a session to the first node that
+/// answers and can be opened to, within the plan's timeout.
+///
+/// Upstream's `connect_first`: every Hello with a locator is tried (`connect`), the first node
+/// that connects ends the search, and a search that outlives `scouting/timeout` fails the open.
+/// The scouting stops when this returns, as upstream's does: a client does not autoconnect to a
+/// second node.
+async fn connect_first(
+    plan: &ScoutingPlan,
+    zid: &[u8],
+    dialer: &Dialer,
+) -> Result<OpenedSession, ()> {
+    // A bind that fails fails the open, as upstream's `connect_first` is reached only after its
+    // multicast bind succeeded.
+    let link = ScoutLink::bind(plan).await.map_err(|_| ())?;
+    let (intents_tx, mut intents) = tokio::sync::mpsc::unbounded_channel();
+    let scouting = link.autoconnect(plan, zid, &intents_tx);
+    tokio::pin!(scouting);
+    let deadline = tokio::time::sleep(plan.timeout);
+    tokio::pin!(deadline);
+    loop {
+        tokio::select! {
+            Some(intent) = intents.recv() => {
+                if let Some(session) = dial_scouted(dialer, &intent).await {
+                    return Ok(session);
+                }
+            }
+            _ = &mut scouting => return Err(()),
+            _ = &mut deadline => return Err(()),
+        }
+    }
+}
+
+/// Open a session to the node `intent` names, through the first of its locators that opens to
+/// that node, as upstream's `connect` walks them.
+async fn dial_scouted(dialer: &Dialer, intent: &DialIntent) -> Option<OpenedSession> {
+    for locator in &intent.locators {
+        if let Ok(session) = dialer.open_scouted(locator, &intent.zid).await {
+            return Some(session);
+        }
+    }
+    None
 }
 
 /// A client's drive: connect to ONE endpoint of the list, hold the one session,
@@ -872,6 +954,7 @@ async fn drive_dial(
 async fn drive_client(
     endpoints: Vec<String>,
     scheduled: Vec<(String, RetryPolicy)>,
+    scouting: Option<(ScoutingPlan, Vec<u8>)>,
     phase: DialPhase,
     dialer: Arc<Dialer>,
     shared: Arc<SharedSession>,
@@ -900,9 +983,20 @@ async fn drive_client(
     // schedules, the first to open winning. A client that did not connect fails
     // its open: upstream's client connect never reads `exit_on_failure`
     // (R2942 correcting R2936, which released a client too).
-    let mut session = match drive_connect_phase(phase.policy.budget, &scheduled, &attempt).await {
+    //
+    // R3070 -- with nothing configured to dial and scouting on, the first connection is a
+    // scouted one instead (`connect_first`), and nothing is re-dialled behind it: `rescheduled`
+    // is empty because `endpoints` is, so a lost link ends the session as it would on the real
+    // library, which scouts for no second node.
+    let first = match &scouting {
+        Some((plan, zid)) => connect_first(plan, zid, &dialer).await.map_err(|_| ()),
+        None => drive_connect_phase(phase.policy.budget, &scheduled, &attempt)
+            .await
+            .map_err(|_| ()),
+    };
+    let mut session = match first {
         Ok(opened) => opened,
-        Err(_) => {
+        Err(()) => {
             let _ = tx.send(false);
             return;
         }
@@ -1162,10 +1256,17 @@ async fn drive_face(
 /// and connects after, and so does this: the accept loop is a local task beside
 /// the dial faces, running from before the first dial, so a peer that dials
 /// this one while it is still walking its own connect list is accepted.
+///
+/// R3070 -- `scouting` is the plan and the wire zid of a peer that also looks for others on the
+/// multicast group: scouting starts after the connects, as upstream's `start_peer` runs
+/// `start_scout` after `connect_peers`, a group that cannot be joined fails the open, and the
+/// open's start window waits for the first scouted connection as well as for the endpoints it
+/// was told.
 #[allow(clippy::too_many_arguments)]
 async fn drive_peer(
     endpoints: Vec<String>,
     listen: Option<ListenLeg>,
+    scouting: Option<(ScoutingPlan, Vec<u8>)>,
     phase: DialPhase,
     dialer: Arc<Dialer>,
     shared: Arc<SharedSession>,
@@ -1248,6 +1349,44 @@ async fn drive_peer(
                     }
                 }
             }
+            if !failed {
+                if let Some((plan, zid)) = scouting {
+                    match ScoutLink::bind(&plan).await {
+                        Ok(link) => {
+                            let (intents_tx, intents) = tokio::sync::mpsc::unbounded_channel();
+                            // The open waits for a scouted connection only when it was told
+                            // nothing to connect to: with endpoints, the window is theirs.
+                            // Measured: a peer whose live endpoint connected opens in 10 ms on
+                            // the real library whether or not it scouts, and one with none
+                            // waits out `scouting/delay` for the first node it finds.
+                            let waits_for_scouted = endpoints.is_empty();
+                            if waits_for_scouted {
+                                window.expect_one();
+                            }
+                            let mut scout_closing = closing_rx.clone();
+                            let scout_zid = zid.clone();
+                            faces.push(tokio::task::spawn_local(async move {
+                                tokio::select! {
+                                    _ = link.autoconnect(&plan, &scout_zid, &intents_tx) => {}
+                                    _ = scout_closing.wait_for(|c| *c) => {}
+                                }
+                            }));
+                            faces.push(tokio::task::spawn_local(scouted_connector(ScoutedPeers {
+                                intents,
+                                own_zid: zid,
+                                first_face: DIAL_FACE_ID + endpoints.len() as u64,
+                                dialer: dialer.clone(),
+                                shared: shared.clone(),
+                                gate: gate.clone(),
+                                window: window.clone(),
+                                releases_window: waits_for_scouted,
+                                closing: closing_rx.clone(),
+                            })));
+                        }
+                        Err(_) => failed = true,
+                    }
+                }
+            }
             if failed {
                 let _ = closing_tx.send(true);
                 for face in faces {
@@ -1280,6 +1419,123 @@ async fn drive_peer(
             }
         })
         .await;
+}
+
+/// What the task that dials the nodes a peer's scouting finds is given.
+struct ScoutedPeers {
+    intents: tokio::sync::mpsc::UnboundedReceiver<DialIntent>,
+    /// This node's own wire zid: its own Scout can come back through the group.
+    own_zid: Vec<u8>,
+    /// The first face id of the nodes found, after the ones the configured endpoints use.
+    first_face: u64,
+    dialer: Arc<Dialer>,
+    shared: Arc<SharedSession>,
+    gate: Arc<ReadGate>,
+    window: Arc<StartWindow>,
+    /// Whether the open is waiting on this connector: the first node it connects to releases
+    /// `window`. `false` when the session has endpoints of its own, whose window it is.
+    releases_window: bool,
+    closing: tokio::sync::watch::Receiver<bool>,
+}
+
+/// Dial each node the session's scouting admits, on a face of its own, until the session closes.
+///
+/// R3070 -- upstream's `connect_peer`, which `autoconnect_all` calls for every Hello of every
+/// window: a node this session already holds a face to, or is already dialling, is not dialled
+/// again, and one whose face was lost is dialled the next time it answers. That is the whole of
+/// the recovery for a scouted link, so a face that ends is not re-dialled here.
+async fn scouted_connector(peers: ScoutedPeers) {
+    let ScoutedPeers {
+        mut intents,
+        own_zid,
+        first_face,
+        dialer,
+        shared,
+        gate,
+        window,
+        releases_window,
+        mut closing,
+    } = peers;
+    let dialing: std::rc::Rc<std::cell::RefCell<std::collections::BTreeSet<Vec<u8>>>> =
+        std::rc::Rc::default();
+    // Already "announced" when the open is not waiting: `one_connected` lowers a count that
+    // `expect_one` raised, and lowering one nobody raised would wrap it.
+    let announced = std::rc::Rc::new(std::cell::Cell::new(!releases_window));
+    let mut next_face = first_face;
+    let mut legs: Vec<tokio::task::JoinHandle<()>> = Vec::new();
+    // Each leg waits on its own copy of the signal; the loop's own is borrowed by the wait below.
+    let leg_closing = closing.clone();
+    loop {
+        tokio::select! {
+            intent = intents.recv() => {
+                let Some(intent) = intent else { break };
+                if intent.zid == own_zid
+                    || shared.holds_peer(&intent.zid)
+                    || dialing.borrow().contains(&intent.zid)
+                {
+                    continue;
+                }
+                dialing.borrow_mut().insert(intent.zid.clone());
+                let face = next_face;
+                next_face += 1;
+                legs.retain(|leg| !leg.is_finished());
+                legs.push(tokio::task::spawn_local(scouted_leg(
+                    face,
+                    intent,
+                    dialer.clone(),
+                    shared.clone(),
+                    gate.clone(),
+                    window.clone(),
+                    leg_closing.clone(),
+                    dialing.clone(),
+                    announced.clone(),
+                )));
+            }
+            _ = closing.wait_for(|c| *c) => break,
+        }
+    }
+    for leg in legs {
+        let _ = leg.await;
+    }
+}
+
+/// One scouted node's face: dial it, then drive the face until the session closes or the link
+/// ends. The first scouted connection of the session releases the open's start window.
+#[allow(clippy::too_many_arguments)]
+async fn scouted_leg(
+    face: u64,
+    intent: DialIntent,
+    dialer: Arc<Dialer>,
+    shared: Arc<SharedSession>,
+    gate: Arc<ReadGate>,
+    window: Arc<StartWindow>,
+    mut closing: tokio::sync::watch::Receiver<bool>,
+    dialing: std::rc::Rc<std::cell::RefCell<std::collections::BTreeSet<Vec<u8>>>>,
+    announced: std::rc::Rc<std::cell::Cell<bool>>,
+) {
+    let mut ended = closing.clone();
+    let opened = tokio::select! {
+        opened = dial_scouted(&dialer, &intent) => opened,
+        _ = ended.wait_for(|c| *c) => None,
+    };
+    dialing.borrow_mut().remove(&intent.zid);
+    let Some(session) = opened else {
+        return;
+    };
+    if !announced.replace(true) {
+        window.one_connected();
+    }
+    drive_face(
+        face,
+        session,
+        &shared,
+        async move {
+            let _ = closing.wait_for(|c| *c).await;
+        },
+        || {},
+        &gate,
+    )
+    .await;
 }
 
 /// `fut`, bounded by `deadline` when there is one.
@@ -1738,6 +1994,8 @@ async fn drive_listen(endpoint: String, tls: CapiTlsConfig, ctx: DriveContext) {
         tx_queue,
         offer,
         gate,
+        // A listener that is not also a dialler scouts for nobody: see `open_blocking`'s routing.
+        scouting: _,
     } = ctx;
     let Some(listening) = bind_listener(&endpoint, &tls, &zid, tx_queue).await else {
         let _ = tx.send(false);
@@ -1849,6 +2107,12 @@ pub struct OpenStance {
     /// [`SessionResources::local_delivery`]. zenoh-pico's ABI says [`LocalDeliveryDrain::DriveTask`]
     /// and zenoh-c's says [`LocalDeliveryDrain::Caller`].
     pub local_delivery: LocalDeliveryDrain,
+    /// R3070 -- what the session does with multicast scouting, or `None` for a session that does
+    /// not scout: zenoh-pico's ABI, whose scouting is a call a program makes, and a config that
+    /// turned it off. A peer or router that has a plan dials what it finds beside its endpoints;
+    /// a client with no endpoint scouts for the first node it can open to. A plan whose matcher
+    /// is empty (a router's default) looks for nobody and is the same as `None`.
+    pub scouting: Option<ScoutingPlan>,
 }
 
 #[cfg(feature = "session-extshm")]
@@ -1895,6 +2159,7 @@ pub fn open_blocking(
         timestamping,
         shm_clients,
         local_delivery,
+        scouting,
     } = stance;
     let clock = TokioTime::new();
     // Fixed here, on the CALLING thread, so `SessionState` can hand it to
@@ -1963,13 +2228,18 @@ pub fn open_blocking(
                 tx_queue,
                 offer,
                 gate: drive_gate.clone(),
+                scouting,
             };
+            // R3070 -- a session that scouts for nodes to connect to dials them with the dial
+            // role, whether or not it was also told an endpoint, so the plan decides the route
+            // alongside the endpoints: a router's empty one scouts for nobody and routes as before.
+            let scouts = ctx.scouting.as_ref().is_some_and(ScoutingPlan::scouts);
             // Polled only while the read task may run ([`Pausable`]): a stopped
             // task is a session nobody is driving, which is what pico's is.
             rt.block_on(Pausable {
                 gate: drive_gate,
                 inner: Box::pin(async move {
-                    match (connect.is_empty(), listen) {
+                    match (connect.is_empty() && !scouts, listen) {
                         (false, listen) => {
                             drive_dial(connect, listen, dial_whatami, tls, dial_phase, ctx).await;
                         }

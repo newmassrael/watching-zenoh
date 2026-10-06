@@ -101,7 +101,18 @@ fn run_arm(program: &Path, libdir: &Path, keyexpr: &str, payload: &str, arm: &st
     }
 
     let out = Command::new(program)
-        .args(["-e", &format!("tcp/{addr}"), "-k", keyexpr, "-p", payload])
+        // `--no-multicast-scouting`: an example is a peer unless told otherwise, and a peer that
+        // scouts connects to every zenoh node on the default group, where this one is to talk to
+        // the endpoint it is given.
+        .args([
+            "-e",
+            &format!("tcp/{addr}"),
+            "-k",
+            keyexpr,
+            "-p",
+            payload,
+            "--no-multicast-scouting",
+        ])
         .env("LD_LIBRARY_PATH", libdir)
         .output()
         .unwrap_or_else(|e| panic!("failed to run the {arm} program: {e}"));

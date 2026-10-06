@@ -20015,6 +20015,43 @@ layer_c1cc_api_compat_c() {
         --test-threads=1 \
         --exact a_delivery_a_session_makes_to_itself_runs_inside_the_call_on_wz_and_libzenohc \
         || return 1
+    # R3070 -- a session that SCOUTS: `z_open` of a config that states no endpoint and leaves
+    # multicast scouting on, which every shipped example does without `-e` and which wz refused.
+    # Four legs on a multicast group of their own each: a peer and a client with no endpoint
+    # find a router and open in about ten milliseconds, a lone peer opens after `scouting/delay`
+    # and a lone client fails with -4 after `scouting/timeout`, two default peers find each other
+    # in either start order, and a peer whose configured endpoint is live opens at once though it
+    # scouts (a first draft added a scouting window beside the endpoint and took 508 ms where the
+    # real library takes 10). The responder half is not built: wz finds, it is not yet found.
+    # Needs only the oracle, not the SHM arm.
+    _runci_guarded_test \
+        "C1cc a_node_with_no_endpoint_finds_a_router_by_scouting_identically_on_wz_and_libzenohc" 1 \
+        cargo test -p wz-integration-tests \
+        --test zenoh_c_scouting_twice_and_diff -- --ignored --quiet \
+        --test-threads=1 \
+        --exact a_node_with_no_endpoint_finds_a_router_by_scouting_identically_on_wz_and_libzenohc \
+        || return 1
+    _runci_guarded_test \
+        "C1cc a_node_that_scouts_and_finds_nobody_opens_or_fails_identically_on_wz_and_libzenohc" 1 \
+        cargo test -p wz-integration-tests \
+        --test zenoh_c_scouting_twice_and_diff -- --ignored --quiet \
+        --test-threads=1 \
+        --exact a_node_that_scouts_and_finds_nobody_opens_or_fails_identically_on_wz_and_libzenohc \
+        || return 1
+    _runci_guarded_test \
+        "C1cc two_peers_that_scout_find_each_other_identically_on_wz_and_libzenohc" 1 \
+        cargo test -p wz-integration-tests \
+        --test zenoh_c_scouting_twice_and_diff -- --ignored --quiet \
+        --test-threads=1 \
+        --exact two_peers_that_scout_find_each_other_identically_on_wz_and_libzenohc \
+        || return 1
+    _runci_guarded_test \
+        "C1cc a_peer_with_a_live_endpoint_opens_at_once_though_it_scouts_on_wz_and_libzenohc" 1 \
+        cargo test -p wz-integration-tests \
+        --test zenoh_c_scouting_twice_and_diff -- --ignored --quiet \
+        --test-threads=1 \
+        --exact a_peer_with_a_live_endpoint_opens_at_once_though_it_scouts_on_wz_and_libzenohc \
+        || return 1
     _runci_guarded_test \
         "C1cc an_advanced_subscriber_of_the_publishers_own_session_hears_it_on_wz_and_libzenohc" 1 \
         cargo test -p wz-integration-tests \
