@@ -21,7 +21,7 @@
 //! that reads exactly like one that measured and fit unless it is refused.
 //!
 //! The arithmetic is here, with no kernel call, so it is tested on a host. The
-//! one call that reads the kernel is [`crate::glue::main_stack_usage`].
+//! one call that reads the kernel is [`crate::glue::stack_usage`].
 
 use alloc::format;
 use alloc::string::String;
