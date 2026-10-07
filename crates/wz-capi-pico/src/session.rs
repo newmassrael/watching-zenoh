@@ -310,7 +310,8 @@ pub unsafe extern "C" fn z_open(
         };
         match open_blocking(
             connect.into_iter().collect(),
-            listen,
+            // pico's config carries ONE listen locator, so the set is that one or none.
+            listen.into_iter().collect(),
             tls,
             dial_whatami,
             // R2948 — pico re-opens a lost client session by default
@@ -352,6 +353,8 @@ pub unsafe extern "C" fn z_open(
                 initial_interest: false,
                 // zenoh-pico has no gossip: its peers are introduced by scouting alone.
                 gossip: None,
+                // Its one listener's bind failing has always failed the open.
+                listen_exit_on_failure: true,
             },
         ) {
             Ok(state) => {

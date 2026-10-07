@@ -20152,6 +20152,34 @@ layer_c1cc_api_compat_c() {
         --test-threads=1 \
         --exact a_gossip_target_that_names_clients_fails_the_open_identically_on_wz_and_libzenohc \
         || return 1
+    # R3076 -- `listen/endpoints` is a SET. A peer that states two endpoints is reached at both
+    # (a leaf of each, scouting off, so a leaf has no way to the hub but the endpoint it was
+    # given); a bind that cannot be made fails the open with -4 by default and under an explicit
+    # `true`, whichever endpoint it is; under `listen/exit_on_failure: false` the taken endpoints
+    # are skipped, the free one still accepts, and a hub whose every endpoint is taken opens. A
+    # peer that states two loopback listeners also answers a Scout with both, in the stated order
+    # (the Hello row above). Needs only the oracle, not the SHM arm.
+    _runci_guarded_test \
+        "C1cc a_peer_that_states_two_listeners_is_reached_at_both_identically_on_wz_and_libzenohc" 1 \
+        cargo test -p wz-integration-tests \
+        --test zenoh_c_scouting_twice_and_diff -- --ignored --quiet \
+        --test-threads=1 \
+        --exact a_peer_that_states_two_listeners_is_reached_at_both_identically_on_wz_and_libzenohc \
+        || return 1
+    _runci_guarded_test \
+        "C1cc a_listener_that_cannot_bind_fails_the_open_identically_on_wz_and_libzenohc" 1 \
+        cargo test -p wz-integration-tests \
+        --test zenoh_c_scouting_twice_and_diff -- --ignored --quiet \
+        --test-threads=1 \
+        --exact a_listener_that_cannot_bind_fails_the_open_identically_on_wz_and_libzenohc \
+        || return 1
+    _runci_guarded_test \
+        "C1cc a_listener_that_cannot_bind_is_skipped_when_told_to_identically_on_wz_and_libzenohc" 1 \
+        cargo test -p wz-integration-tests \
+        --test zenoh_c_scouting_twice_and_diff -- --ignored --quiet \
+        --test-threads=1 \
+        --exact a_listener_that_cannot_bind_is_skipped_when_told_to_identically_on_wz_and_libzenohc \
+        || return 1
     _runci_guarded_test \
         "C1cc an_advanced_subscriber_of_the_publishers_own_session_hears_it_on_wz_and_libzenohc" 1 \
         cargo test -p wz-integration-tests \

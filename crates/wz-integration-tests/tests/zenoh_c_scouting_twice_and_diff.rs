@@ -40,6 +40,7 @@
 //! one of its own.
 
 use std::io::{BufRead, BufReader, Lines};
+use std::net::TcpListener;
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdout, Command, Stdio};
 use std::sync::atomic::{AtomicU16, Ordering};
@@ -160,6 +161,10 @@ int main(int argc, char** argv) {
     if (getenv("GOSSIP_TARGET")) insert(&config, "scouting/gossip/target", getenv("GOSSIP_TARGET"));
     if (getenv("GOSSIP_STRATEGY")) insert(&config, "scouting/gossip/autoconnect_strategy", getenv("GOSSIP_STRATEGY"));
     if (getenv("NODE_ID")) insert(&config, "id", getenv("NODE_ID"));
+    /* The whole `listen/endpoints` list as the json5 array the row writes, and `listen/exit_on_failure`:
+       what a row sets when it needs more than the one listener the arguments can state. */
+    if (getenv("LISTEN_ENDPOINTS")) insert(&config, Z_CONFIG_LISTEN_KEY, getenv("LISTEN_ENDPOINTS"));
+    if (getenv("LISTEN_EXIT")) insert(&config, "listen/exit_on_failure", getenv("LISTEN_EXIT"));
     if (lport) {
         const char* host = getenv("LISTEN_HOST") ? getenv("LISTEN_HOST") : "127.0.0.1";
         snprintf(buf, sizeof buf, "[\"tcp/%s:%d\"]", host, lport);
@@ -809,6 +814,9 @@ enum Shape {
     /// A peer whose config STATES an empty `listen/endpoints`: it binds nothing, and its Hello
     /// names nothing.
     PeerListenStatedEmpty,
+    /// A peer whose config states TWO listeners on loopback addresses of their own: its Hello names
+    /// both, in the order the config states them (R3076).
+    PeerOnTwoListeners,
     /// A client connected to a peer, with a listener of its own: its Hello names the listener.
     ClientConnectedWithAListener,
     /// A client connected to a peer, with no listener: it answers with no locator.
@@ -822,7 +830,7 @@ impl Shape {
     /// The role mask the asker names.
     fn what(self) -> u8 {
         match self {
-            Shape::PeerOnLoopback | Shape::PeerToldNotToAnswer => 7,
+            Shape::PeerOnLoopback | Shape::PeerToldNotToAnswer | Shape::PeerOnTwoListeners => 7,
             Shape::PeerOnTheWildcard | Shape::PeerWithNoListener | Shape::PeerListenStatedEmpty => {
                 2
             }
@@ -862,19 +870,31 @@ fn hellos_of(built: &Built, reference: &Built, probe: &Built, shape: Shape) -> V
         | Shape::PeerOnTheWildcard
         | Shape::PeerToldNotToAnswer
         | Shape::PeerWithNoListener
-        | Shape::PeerListenStatedEmpty => {
-            let env: &[(&str, &str)] = match shape {
-                Shape::PeerOnTheWildcard => &[("LISTEN_HOST", "0.0.0.0")],
-                Shape::PeerToldNotToAnswer => &[("SCOUT_LISTEN", "false")],
-                Shape::PeerListenStatedEmpty => &[("LISTEN_EMPTY", "1")],
-                _ => &[],
+        | Shape::PeerListenStatedEmpty
+        | Shape::PeerOnTwoListeners => {
+            // The two listeners' addresses differ in HOST, so that the order the Hello names them
+            // in is a thing the row can tell (the probe's output has its ports made the same).
+            let two = format!(
+                "[\"tcp/127.0.0.1:{}\",\"tcp/127.0.0.2:{}\"]",
+                free_port(),
+                free_port()
+            );
+            let env: Vec<(&str, &str)> = match shape {
+                Shape::PeerOnTheWildcard => vec![("LISTEN_HOST", "0.0.0.0")],
+                Shape::PeerToldNotToAnswer => vec![("SCOUT_LISTEN", "false")],
+                Shape::PeerListenStatedEmpty => vec![("LISTEN_EMPTY", "1")],
+                Shape::PeerOnTwoListeners => vec![("LISTEN_ENDPOINTS", two.as_str())],
+                _ => vec![],
             };
-            // Two shapes state no port: the first binds its own, the second binds nothing.
+            // Three shapes state no port of their own: two bind what a peer binds or nothing, and
+            // the third states its listeners whole.
             let listen = match shape {
-                Shape::PeerWithNoListener | Shape::PeerListenStatedEmpty => 0,
+                Shape::PeerWithNoListener
+                | Shape::PeerListenStatedEmpty
+                | Shape::PeerOnTwoListeners => 0,
                 _ => free_port(),
             };
-            let mut node = Node::start_with(built, &spec("peer", listen, 0), env);
+            let mut node = Node::start_with(built, &spec("peer", listen, 0), &env);
             let opened = node.opened();
             let found = hellos(probe, &group, shape.what());
             node.finish(opened);
@@ -944,11 +964,15 @@ fn a_node_answers_a_scout_with_the_hello_the_real_library_sends_on_wz_and_libzen
     let loopback_client = ["hello whatami=client locators=[tcp/127.0.0.1:PORT]"];
     let no_locator_client = ["hello whatami=client locators=[]"];
     let no_locator_peer = ["hello whatami=peer locators=[]"];
+    let two_listeners_peer =
+        ["hello whatami=peer locators=[tcp/127.0.0.1:PORT, tcp/127.0.0.2:PORT]"];
     for (shape, expected) in [
         (Shape::PeerOnLoopback, Some(&loopback_peer[..])),
         (Shape::PeerOnTheWildcard, None),
         (Shape::PeerWithNoListener, None),
         (Shape::PeerListenStatedEmpty, Some(&no_locator_peer[..])),
+        // R3076 -- both listeners, first the one the config states first.
+        (Shape::PeerOnTwoListeners, Some(&two_listeners_peer[..])),
         (Shape::PeerToldNotToAnswer, Some(&[][..])),
         (
             Shape::ClientConnectedWithAListener,
@@ -1604,5 +1628,308 @@ fn a_gossip_target_that_names_clients_fails_the_open_identically_on_wz_and_libze
             "§5.27 api-compat-c: a wz peer's open under the gossip target `{target}` is not the \
              real library's"
         );
+    }
+}
+
+// ---------------------------------------------------------------------------------------------
+// The listen set: every endpoint a node states is bound, and a bind that fails is the open's
+// failure unless the config says to go on. R3076.
+// ---------------------------------------------------------------------------------------------
+
+/// A port picked and released at once, for an endpoint a row states and then binds itself.
+fn a_free_port() -> u16 {
+    let reservation = PortReservation::pick();
+    let port = reservation.port();
+    drop(reservation);
+    port
+}
+
+/// The endpoints of a `listen/endpoints` list on loopback, as the json5 array the node program
+/// takes.
+fn loopback_endpoints(ports: &[u16]) -> String {
+    let each: Vec<String> = ports
+        .iter()
+        .map(|port| format!("\"tcp/127.0.0.1:{port}\""))
+        .collect();
+    format!("[{}]", each.join(","))
+}
+
+/// A hub built as `hub` that states `listen` and whatever else `hub_extra` sets, and one leaf of
+/// `leaf` for each port in `leaf_ports`, each connecting to its port and listening on nothing.
+/// Scouting is off, so a leaf reaches the hub only by the endpoint it was given. The outcomes come
+/// back hub first, then the leaves in the order of their ports, tagged `B`, `C`.
+fn hub_and_leaves(
+    hub: &Built,
+    leaf: &Built,
+    key: &str,
+    listen: &str,
+    hub_extra: &[(&str, &str)],
+    leaf_ports: &[u16],
+) -> Vec<Outcome> {
+    let group = next_group();
+    let spec = |tag, secs, connect| Spec {
+        mode: "peer",
+        listen: 0,
+        connect,
+        key,
+        secs,
+        tag,
+        group: &group,
+        delay_ms: 500,
+        timeout_ms: 3000,
+    };
+    let mut hub_env = vec![
+        ("SCOUTING_OFF", "1"),
+        ("PEERS_MID", "1"),
+        ("LISTEN_ENDPOINTS", listen),
+    ];
+    hub_env.extend_from_slice(hub_extra);
+    let hub_secs = if leaf_ports.is_empty() { 2 } else { 6 };
+    let mut hub = Node::start_with(hub, &spec("A", hub_secs, 0), &hub_env);
+    let hub_open = hub.opened();
+    let leaves: Vec<(Node, String)> = leaf_ports
+        .iter()
+        .zip(["B", "C"])
+        .map(|(port, tag)| {
+            let mut node = Node::start_with(
+                leaf,
+                &spec(tag, 4, *port),
+                &[
+                    ("SCOUTING_OFF", "1"),
+                    ("PEERS_MID", "1"),
+                    ("LISTEN_EMPTY", "1"),
+                ],
+            );
+            let open = node.opened();
+            (node, open)
+        })
+        .collect();
+    let mut outcomes = vec![hub.finish(hub_open)];
+    outcomes.extend(leaves.into_iter().map(|(node, open)| node.finish(open)));
+    outcomes
+}
+
+/// What `z_open` returned on a peer that states `listen` and `extra`, as the row's `open=<rc>`.
+fn open_code_of(built: &Built, key: &str, listen: &str, extra: &[(&str, &str)]) -> String {
+    let group = next_group();
+    let mut env = vec![("SCOUTING_OFF", "1"), ("LISTEN_ENDPOINTS", listen)];
+    env.extend_from_slice(extra);
+    let mut node = Node::start_with(
+        built,
+        &Spec {
+            mode: "peer",
+            listen: 0,
+            connect: 0,
+            key,
+            secs: 1,
+            tag: "Y",
+            group: &group,
+            delay_ms: 500,
+            timeout_ms: 3000,
+        },
+        &env,
+    );
+    let open = node.opened();
+    let outcome = node.finish(open);
+    outcome
+        .row
+        .split(" | ")
+        .next()
+        .unwrap_or_default()
+        .to_owned()
+}
+
+/// THE GATE, the listen set: a peer that states two endpoints is reached at BOTH.
+///
+/// One leaf connects to each endpoint, with scouting off and no listener of its own, so a leaf
+/// that is not told where the hub is has no way to it. The hub holds both links, and each leaf
+/// holds one and hears the hub and itself and not the other leaf, which neither can dial: on the
+/// real library, and on wz only if every endpoint of the list is bound and not only the first.
+// wz-proves: api-compat-c zenoh-c->wz partial
+#[test]
+#[ignore = "reads a zenoh-c oracle; run by run-ci Layer C1cc (which builds the matching \
+            ABI arm this needs)"]
+fn a_peer_that_states_two_listeners_is_reached_at_both_identically_on_wz_and_libzenohc() {
+    let Some(programs) = programs() else {
+        return;
+    };
+    for (n, (name, hub)) in [
+        ("the real library", &programs.reference),
+        ("wz", &programs.wz),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let ports = [a_free_port(), a_free_port()];
+        let key = format!("wz/listen-set/reach/{n}");
+        let rows = hub_and_leaves(
+            hub,
+            &programs.reference,
+            &key,
+            &loopback_endpoints(&ports),
+            &[],
+            &ports,
+        );
+        let rows: Vec<&str> = rows.iter().map(|outcome| outcome.row.as_str()).collect();
+        assert_eq!(
+            rows,
+            APART,
+            "{}",
+            if n == 0 {
+                "the REAL library's rows for a peer with two listeners are not what this file \
+                 expects"
+                    .to_owned()
+            } else {
+                format!(
+                    "§5.27 api-compat-c: a {name} peer that states two listeners is not reached \
+                     at both, as the real library is"
+                )
+            }
+        );
+    }
+}
+
+/// THE GATE, `listen/exit_on_failure`: an endpoint that cannot be bound fails the open, `-4`, by
+/// default and when the key says `true`, whichever of the endpoints it is and whatever is bound
+/// before it, on the real library and on wz.
+// wz-proves: api-compat-c zenoh-c->wz partial
+#[test]
+#[ignore = "reads a zenoh-c oracle; run by run-ci Layer C1cc (which builds the matching \
+            ABI arm this needs)"]
+fn a_listener_that_cannot_bind_fails_the_open_identically_on_wz_and_libzenohc() {
+    let Some(programs) = programs() else {
+        return;
+    };
+    let taken = TcpListener::bind("127.0.0.1:0").expect("a port to hold");
+    let taken_port = taken.local_addr().expect("the held port").port();
+    let also_taken = TcpListener::bind("127.0.0.1:0").expect("a second port to hold");
+    let also_taken_port = also_taken.local_addr().expect("the held port").port();
+    let free = a_free_port();
+    let rows: [(&str, String, &[(&str, &str)], &str); 5] = [
+        (
+            "the taken endpoint second, by default",
+            loopback_endpoints(&[free, taken_port]),
+            &[],
+            "open=-4",
+        ),
+        (
+            "the taken endpoint first, by default",
+            loopback_endpoints(&[taken_port, free]),
+            &[],
+            "open=-4",
+        ),
+        (
+            "every endpoint taken, by default",
+            loopback_endpoints(&[taken_port, also_taken_port]),
+            &[],
+            "open=-4",
+        ),
+        (
+            "the taken endpoint second, the key `true`",
+            loopback_endpoints(&[free, taken_port]),
+            &[("LISTEN_EXIT", "true")],
+            "open=-4",
+        ),
+        (
+            "a free endpoint alone, by default",
+            loopback_endpoints(&[free]),
+            &[],
+            "open=0",
+        ),
+    ];
+    for (n, (what, listen, extra, want)) in rows.into_iter().enumerate() {
+        let key = format!("wz/listen-set/exit/{n}");
+        let real = open_code_of(&programs.reference, &key, &listen, extra);
+        assert_eq!(
+            real, want,
+            "the REAL library's open with {what} is not what this file expects"
+        );
+        let wz = open_code_of(&programs.wz, &key, &listen, extra);
+        assert_eq!(
+            wz, want,
+            "§5.27 api-compat-c: a wz peer's open with {what} is not the real library's"
+        );
+    }
+}
+
+/// THE GATE, `listen/exit_on_failure: false`: the endpoints that cannot be bound are skipped, the
+/// open succeeds, and the ones that could be bound accept, on the real library and on wz.
+///
+/// A leaf of the free endpoint reaches the hub whichever side of the list the taken endpoint is
+/// on, and a hub whose every endpoint is taken opens and listens on nothing.
+// wz-proves: api-compat-c zenoh-c->wz partial
+#[test]
+#[ignore = "reads a zenoh-c oracle; run by run-ci Layer C1cc (which builds the matching \
+            ABI arm this needs)"]
+fn a_listener_that_cannot_bind_is_skipped_when_told_to_identically_on_wz_and_libzenohc() {
+    let Some(programs) = programs() else {
+        return;
+    };
+    let taken = TcpListener::bind("127.0.0.1:0").expect("a port to hold");
+    let taken_port = taken.local_addr().expect("the held port").port();
+    let also_taken = TcpListener::bind("127.0.0.1:0").expect("a second port to hold");
+    let also_taken_port = also_taken.local_addr().expect("the held port").port();
+    let off = [("LISTEN_EXIT", "false")];
+    let one_leaf = [
+        "open=0 | declare=0 senders=A,B dups=0 peers=1",
+        "open=0 | declare=0 senders=A,B dups=0 peers=1",
+    ];
+    let alone = ["open=0 | declare=0 senders=A dups=0 peers=0"];
+    for (n, (hub_name, hub)) in [
+        ("the real library", &programs.reference),
+        ("wz", &programs.wz),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let free = a_free_port();
+        let rows: [(&str, Vec<u16>, &[u16], &[&str]); 3] = [
+            (
+                "the taken endpoint second",
+                vec![free, taken_port],
+                &[free],
+                &one_leaf,
+            ),
+            (
+                "the taken endpoint first",
+                vec![taken_port, free],
+                &[free],
+                &one_leaf,
+            ),
+            (
+                "every endpoint taken",
+                vec![taken_port, also_taken_port],
+                &[],
+                &alone,
+            ),
+        ];
+        for (m, (what, ports, leaves, want)) in rows.into_iter().enumerate() {
+            let key = format!("wz/listen-set/skip/{n}/{m}");
+            let got = hub_and_leaves(
+                hub,
+                &programs.reference,
+                &key,
+                &loopback_endpoints(&ports),
+                &off,
+                leaves,
+            );
+            let got: Vec<&str> = got.iter().map(|outcome| outcome.row.as_str()).collect();
+            assert_eq!(
+                got,
+                want,
+                "{}",
+                if n == 0 {
+                    format!(
+                        "the REAL library's rows with {what}, `listen/exit_on_failure: false`, \
+                         are not what this file expects"
+                    )
+                } else {
+                    format!(
+                        "§5.27 api-compat-c: a {hub_name} peer with {what} and \
+                         `listen/exit_on_failure: false` is not what the real library is"
+                    )
+                }
+            );
+        }
     }
 }

@@ -346,6 +346,27 @@ impl Advertised {
             remote: locators(true),
         }
     }
+
+    /// The locators of every listener of a session, in the order the listeners were bound.
+    ///
+    /// R3076 -- a node that listens on several endpoints is reached at all of them, and its Hello
+    /// and its gossip entry name them all. MEASURED on the real library with two tcp endpoints:
+    /// the Hello lists both, in the order the config states them. A locator two listeners both
+    /// expand to is listed once, as a set of locators would hold it.
+    pub fn of_all(bound: &[&BoundListener]) -> Self {
+        let mut all = Self::none();
+        for listener in bound {
+            let one = Self::of(listener);
+            for (into, from) in [(&mut all.local, one.local), (&mut all.remote, one.remote)] {
+                for locator in from {
+                    if !into.contains(&locator) {
+                        into.push(locator);
+                    }
+                }
+            }
+        }
+        all
+    }
 }
 
 /// A session's scouting responder, answering until it is dropped.

@@ -185,21 +185,32 @@ fn read_node(cfg: &ConfigState, whatami: WhatAmI) -> Option<ZenohConfigIngest> {
 /// finder nothing to dial. A key the config NAMES suppresses the default, as an explicitly empty
 /// list does on the real library, and so does a mode table that names no row for this role. A
 /// client has no default, and its absence is the instruction.
-fn listen_endpoint(
+///
+/// R3076 -- EVERY endpoint the config states, in its order, and not the first of them: the real
+/// library binds each (MEASURED with two tcp endpoints, a client connected to either is accepted,
+/// and wz bound only the first). A key stated as a mode table is the row for this node's role,
+/// which the reader resolved; a table with no row for it states nothing for it.
+fn listen_endpoints(
     cfg: &ConfigState,
     ingest: Option<&ZenohConfigIngest>,
     whatami: WhatAmI,
-) -> Option<String> {
-    if let Some(stated) = cfg.first(LISTEN_KEY) {
-        return Some(stated.to_owned());
+) -> Vec<String> {
+    let stated: Vec<String> = cfg.all(LISTEN_KEY).into_iter().map(str::to_owned).collect();
+    if !stated.is_empty() {
+        return stated;
     }
-    let stated = ingest.is_some_and(|ingest| {
-        ingest.named.contains(&LISTEN_KEY) || ingest.stated_for_other_modes.contains(&LISTEN_KEY)
-    });
-    if stated {
-        return None;
+    if let Some(ingest) = ingest {
+        if ingest.named.contains(&LISTEN_KEY) {
+            return ingest.config.listen.clone();
+        }
+        if ingest.stated_for_other_modes.contains(&LISTEN_KEY) {
+            return Vec::new();
+        }
     }
-    default_listen_endpoint(whatami).map(str::to_owned)
+    default_listen_endpoint(whatami)
+        .map(str::to_owned)
+        .into_iter()
+        .collect()
 }
 
 /// Construct and open a session, consuming the moved config (zenoh-c `z_open`).
@@ -252,7 +263,13 @@ pub(crate) unsafe fn open_session(
             .collect();
         let whatami = dial_whatami(cfg);
         let ingest = read_node(cfg, whatami);
-        let listen = listen_endpoint(cfg, ingest.as_ref(), whatami);
+        let listen = listen_endpoints(cfg, ingest.as_ref(), whatami);
+        // R3076 -- whether an endpoint that cannot be bound fails the open: `listen/exit_on_failure`
+        // for this node's role, true when the document says nothing, as upstream's default is.
+        let listen_exit_on_failure = ingest
+            .as_ref()
+            .and_then(|ingest| ingest.config.listen_exit_on_failure)
+            .unwrap_or(true);
         // R3064 -- the clock map the document means. Read off the ingest and not the node
         // config, because only the ingest knows whether the key was NAMED: the field reads
         // `false` for a document that never mentioned it, and a router's own default is on.
@@ -385,6 +402,7 @@ pub(crate) unsafe fn open_session(
             // they are, and dials the nodes it is told of, which is how two peers that each
             // reached a third meet. R3075 -- under the policy its config states.
             gossip,
+            listen_exit_on_failure,
         };
         // R3065 -- a session opened over a client storage advertises the protocols of THAT
         // reader: the stance takes both from the one set, so the list a peer's sender reads is

@@ -4108,11 +4108,30 @@ fn queryable_options(complete: bool, allowed_origin: Locality) -> QueryableOptio
 /// from the C thread.
 pub struct CApiForwarder {
     shared: Arc<SharedSession>,
+    /// R3076 -- added to every face id this forwarder is handed, so the faces of the session's
+    /// several listeners stay apart in the registry: each accept loop numbers the faces it
+    /// accepts from zero. `0` for the one listener a session had until then.
+    base: u64,
 }
 
+/// R3076 -- how far apart the face ids of two listeners of one session are. An accept loop's own
+/// ids are small and it counts them upward; `1 << 40` of room is more faces than a listener will
+/// ever accept, and 2^22 listeners fit below [`DIAL_FACE_ID`].
+const LISTENER_FACE_STRIDE: u64 = 1 << 40;
+
 impl CApiForwarder {
+    /// The forwarder of the session's FIRST (and, for most sessions, only) listener.
     pub fn new(shared: Arc<SharedSession>) -> Self {
-        Self { shared }
+        Self::listening(shared, 0)
+    }
+
+    /// The forwarder of the session's listener number `index`, in the order they were bound: its
+    /// faces are numbered in a range of their own.
+    pub fn listening(shared: Arc<SharedSession>, index: u64) -> Self {
+        Self {
+            shared,
+            base: index * LISTENER_FACE_STRIDE,
+        }
     }
 }
 
@@ -4122,7 +4141,7 @@ impl FaceForwarder for CApiForwarder {
         // is a single task, so nothing came up between the question and this call
         // that the loop did not see. A refusal here would be a face the loop holds
         // and the registry does not, which is why the question is asked there.
-        let admitted = self.shared.face_up(id.0, actions);
+        let admitted = self.shared.face_up(id.0 + self.base, actions);
         debug_assert!(
             admitted,
             "the accept loop admitted a face the registry refuses"
@@ -4140,11 +4159,11 @@ impl FaceForwarder for CApiForwarder {
     }
 
     fn deregister(&self, id: FaceId) {
-        self.shared.face_down(id.0);
+        self.shared.face_down(id.0 + self.base);
     }
 
     fn forward(&self, id: FaceId, event: IterationEvent<'_>) {
-        self.shared.dispatch(id.0, event);
+        self.shared.dispatch(id.0 + self.base, event);
     }
 
     /// Arm this face's drive loop on its earliest pending `z_get` deadline, so
@@ -4155,7 +4174,7 @@ impl FaceForwarder for CApiForwarder {
     /// definition traffic-free — so nothing else would wake the loop and a
     /// `timeout_ms = 100` get would report its final 33x late.
     fn next_extra_deadline_ms(&self, id: FaceId) -> Option<u64> {
-        self.shared.next_reply_deadline_ms(id.0)
+        self.shared.next_reply_deadline_ms(id.0 + self.base)
     }
 
     /// Let a C-thread `z_get` wake this face's drive loop so it re-arms on the
@@ -4163,7 +4182,7 @@ impl FaceForwarder for CApiForwarder {
     /// be re-read at the loop's next wake — the keepalive one, ~3333 ms away —
     /// and every get issued into an idle session would be that late.
     fn deadline_revised(&self, id: FaceId) -> Option<Arc<tokio::sync::Notify>> {
-        self.shared.deadline_revised(id.0)
+        self.shared.deadline_revised(id.0 + self.base)
     }
 }
 

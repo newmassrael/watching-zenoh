@@ -1008,7 +1008,12 @@ HOST_GATED_CI_TARGETS: dict[str, str] = {
 # gossip introduces no one, a node's autoconnect and target decide whom it dials and tells, the
 # strategy decides which end dials, and a target that names `client` fails the open (each
 # `api-compat-c zenoh-c->wz partial`). Measured by `scripts/audit-crossimpl-proof.sh`.
-FOREIGN_ADJUDICATOR_LINKS = 1025
+# R3076 -- 1025 -> 1028, RISING by three, each a new `wz-proves` line in
+# `zenoh_c_scouting_twice_and_diff.rs` for a session's `listen` as a set: a peer that states two
+# listeners is reached at both, a listener that cannot bind fails the open, and one that cannot bind
+# is skipped when the config says to (each `api-compat-c zenoh-c->wz partial`). Measured by
+# `scripts/audit-crossimpl-proof.sh`.
+FOREIGN_ADJUDICATOR_LINKS = 1028
 
 # ── Execution disclosure ────────────────────────────────────────────────────────
 #
