@@ -51,6 +51,23 @@ elseif(CONFIG_WZ_NET_BACKEND_LWIP_MAC)
       message(FATAL_ERROR "wz: CONFIG_WZ_MAC_CYT4BF needs a pin routing (CONFIG_WZ_CYT4BF_PINS_*).")
     endif()
     list(APPEND backend_undefined wz_board_eth_pins_init wz_board_entropy_fill)
+    # The SPI probe: the PDL's SCB SPI and clock drivers are compiled by Zephyr's own
+    # HAL module once CONFIG_USE_INFINEON_SPI is on (the probe's Kconfig selects it),
+    # so only this image's thin driver and the board's pin routing are added here.
+    if(CONFIG_WZ_T2G_SPI_PROBE)
+      list(APPEND backend_feature spi-probe)
+      target_sources(app PRIVATE src/scb_spi.c)
+      if(CONFIG_WZ_CYT4BF_PINS_T2G_LITE)
+        target_sources(app PRIVATE boards/kit_t2g_b_h_lite/mikrobus_spi_pins.c)
+      else()
+        message(FATAL_ERROR "wz: CONFIG_WZ_T2G_SPI_PROBE needs a pin routing (CONFIG_WZ_CYT4BF_PINS_*).")
+      endif()
+      list(APPEND backend_undefined
+        wz_board_spi_pins_init wz_scb_spi_clock_claim wz_scb_spi_start wz_scb_spi_exchange)
+      set(spi_probe_env WZ_SPI_PROBE_HZ=${CONFIG_WZ_SPI_PROBE_HZ})
+    else()
+      set(spi_probe_env "")
+    endif()
   else()
     message(FATAL_ERROR "wz: the lwIP backend needs a MAC (CONFIG_WZ_MAC_*).")
   endif()
@@ -80,6 +97,7 @@ elseif(CONFIG_WZ_NET_BACKEND_LWIP_MAC)
   list(APPEND backend_env
     WZ_LWIP_PORT=${CMAKE_CURRENT_SOURCE_DIR}/lwip-port
     ${mac_env}
+    ${spi_probe_env}
     WZ_STATIC_IPV4=${CONFIG_WZ_STATIC_IPV4}
     WZ_STATIC_NETMASK=${CONFIG_WZ_STATIC_NETMASK}
     WZ_STATIC_GATEWAY=${CONFIG_WZ_STATIC_GATEWAY}

@@ -50,6 +50,8 @@ mod mac_cyt4bf;
 mod net_lwip;
 #[cfg(feature = "net-zephyr-sockets")]
 mod net_zephyr;
+#[cfg(feature = "spi-probe")]
+mod spi_cyt4bf;
 // The allocator over the kernel heap (`CONFIG_HEAP_MEM_POOL_SIZE` in prj.conf),
 // the critical section over the kernel IRQ lock and the panic handler.
 wz::runtime_zephyr::zephyr_image!();
@@ -214,6 +216,53 @@ compile_error!(
     "the lwIP backend needs a MAC: CMakeLists.txt turns on the `mac-*` feature of CONFIG_WZ_MAC_*"
 );
 
+#[cfg(all(feature = "spi-probe", not(feature = "mac-cyt4bf")))]
+compile_error!("the SPI probe is the CYT4BF kit's: it needs the `mac-cyt4bf` feature's board");
+
+/// Read the TC6 identity registers of whatever is plugged into the kit's MikroBUS
+/// socket and log them. Read-only: two control reads, `OA_ID` (the interface
+/// version) and `OA_PHYID` (the PHY's vendor, model and revision), which every TC6
+/// device has at the same addresses, so this works on a chip nothing here knows.
+///
+/// What a lab does with it: plug the expansion board in, flash this, and read the
+/// two lines. A device that answers gives its identity; one that does not gives
+/// the way it did not (a read of all zeros or all ones is a bus nobody drives, a
+/// header echo that does not match is a device that is not speaking the interface).
+/// Either is a fact about the board that no document had to supply.
+///
+/// SPI mode 0 and eight-bit elements are how Zephyr's own TC6 chip driver opens its
+/// device (it passes only the word size, so no clock polarity or phase flag), and
+/// the rate is `CONFIG_WZ_SPI_PROBE_HZ`, which is a probe's, kept well under any
+/// TC6 chip's limit: this reads an identity and moves no frame.
+#[cfg(feature = "spi-probe")]
+fn probe_tc6() {
+    use wz::runtime_zephyr::u32_from_build;
+    use wz_oa_tc6::proto::std_reg;
+    use wz_oa_tc6::{ChunkSize, Tc6};
+    use wz_spi_scb::SpiMode;
+
+    const PROBE_HZ: u32 = u32_from_build!("WZ_SPI_PROBE_HZ");
+
+    let (spi, rate) = match spi_cyt4bf::open(SpiMode::Mode0, PROBE_HZ) {
+        Ok(opened) => opened,
+        Err(why) => {
+            log(why);
+            return;
+        }
+    };
+    log_line(format!(
+        "wz: spi probe: SCB3, mode 0, {} Hz (divider {}, oversample {})",
+        rate.achieved_hz, rate.divider, rate.oversample
+    ));
+    let mut tc6 = Tc6::new(spi, ChunkSize::B64);
+    for (name, reg) in [("OA_ID", std_reg::ID), ("OA_PHYID", std_reg::PHYID)] {
+        match tc6.reg_read(reg) {
+            Ok(value) => log_line(format!("wz: spi probe: {name} = {value:#010x}")),
+            Err(why) => log_line(format!("wz: spi probe: {name} not read: {why:?}")),
+        }
+    }
+}
+
 /// Bring the board's network up and run the node over it.
 #[cfg(feature = "net-zephyr-sockets")]
 fn start() -> i32 {
@@ -283,6 +332,10 @@ fn start() -> i32 {
             "drawn at this boot"
         }
     ));
+    // What is on the MikroBUS socket, read before the network is started: a probe
+    // that logs and returns, which is why it needs no link and no clock.
+    #[cfg(feature = "spi-probe")]
+    probe_tc6();
     let mac = match mac_cyt4bf::open(station, ref_clock, LINK_WAIT_MS) {
         Ok(mac) => mac,
         Err(why) => {

@@ -43,6 +43,10 @@ net-zephyr-sockets = []
 net-lwip-mac = ["wz/session-lwip"]
 # The MAC (`CONFIG_WZ_MAC_*`): the Infineon CYT4BF family's ETH0.
 mac-cyt4bf = ["dep:wz-eth-mac-cyt4bf"]
+# Read the TC6 identity registers over the SCB master on the kit's MikroBUS socket
+# at boot and log them (`CONFIG_WZ_T2G_SPI_PROBE`): what a lab runs to learn which
+# chip an expansion board carries, and the first evidence an SPI master would give.
+spi-probe = ["dep:wz-oa-tc6", "dep:wz-spi-scb"]
 
 [dependencies]
 # critical-section IMPL provider: the staticlib root defines it over Zephyr's
@@ -77,7 +81,12 @@ wz-session-mcu = { path = "../../../crates/wz-session-mcu", features = [
 ] }
 # The chip's MAC driver, a crate of its own that depends on the trait tier alone:
 # only the `mac-*` feature the board selects pulls one in.
-wz-eth-mac-cyt4bf = { path = "../../../crates/wz-eth-mac-cyt4bf", optional = true }# The types the facade does not re-export (SessionInitParams, SigningKey,
+wz-eth-mac-cyt4bf = { path = "../../../crates/wz-eth-mac-cyt4bf", optional = true }
+# The SPI probe's two halves: the TC6 protocol, and the rules of the SCB master it
+# runs over. Only `CONFIG_WZ_T2G_SPI_PROBE` pulls them in.
+wz-oa-tc6 = { path = "../../../crates/wz-oa-tc6", optional = true }
+wz-spi-scb = { path = "../../../crates/wz-spi-scb", optional = true }
+# The types the facade does not re-export (SessionInitParams, SigningKey,
 # SessionTimeouts, the entropy trait); features arrive through the facade.
 wz-session-core = { path = "../../../crates/wz-session-core", default-features = false, features = [
     "alloc",

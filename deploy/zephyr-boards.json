@@ -37,11 +37,22 @@
     },
     {
       "board": "kit_t2g_b_h_lite/cyt4bf8cds/m7_0",
+      "link": "mikrobus-spi-probe",
+      "app": "zephyr-admin-node",
+      "network": "lwip-mac",
+      "rust_target": "thumbv7em-none-eabi",
+      "grade": "BUILT",
+      "witness": {"lane": "Qzb"},
+      "conf_overlay": ["overlays/t2g_spi_probe.conf"],
+      "note": "The image with the SPI probe: SCB3 opened as a master on the MikroBUS socket (through the PDL; the pinned Zephyr's own SPI binding is unusable on this chip) and the two TC6 identity registers read and logged at boot. It is built, not run. Nothing is plugged into the socket on a kit as shipped, so what this row will say on silicon is what an expansion board answers, and that is the first record a lab files."
+    },
+    {
+      "board": "kit_t2g_b_h_lite/cyt4bf8cds/m7_0",
       "link": "10base-t1s",
       "app": "zephyr-admin-node",
       "network": "lwip-mac",
       "grade": "DECLARED",
-      "note": "The TC6 protocol crate (wz-oa-tc6) and its SPI seam exist and are host-tested. Not yet built into an image: no chip crate (the chip is not chosen), and no SPI master drives this board's SCB3 (the pinned Zephyr's Infineon SPI binding requires `interrupts` where CAT1C nodes carry `system-interrupts`, so its driver is not usable on this chip)."
+      "note": "Chip not identified, and an expansion board rather than a device of the kit: the Lite user guide names no 10BASE-T1S part (its one Ethernet is the DP83825I on RMII), and its MikroBUS socket, where the board plugs in, is not populated by default. What exists: the TC6 protocol crate (wz-oa-tc6) and its SPI seam, host-tested; the SCB master's rules (wz-spi-scb), host-tested; the master itself and the identity probe, built (the row above). What does not: a chip crate, which waits for the chip's name, and the probe is how a lab learns it."
     }
   ]
 }

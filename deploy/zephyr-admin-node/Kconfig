@@ -173,6 +173,39 @@ config WZ_CYT4BF_PINS_T2G_LITE
 
 endchoice
 
+config WZ_T2G_SPI_PROBE
+	bool "Read the TC6 identity registers on the MikroBUS socket at boot"
+	depends on WZ_CYT4BF_PINS_T2G_LITE
+	select USE_INFINEON_SPI
+	help
+	  Opens SCB3 as an SPI master on the kit's MikroBUS socket, reads the two TC6
+	  identity registers (OA_ID and OA_PHYID, at the same addresses on every TC6
+	  device) and logs them, then carries on starting the network. It is how a lab
+	  learns which chip an expansion board carries without a datasheet, and the
+	  first thing that would show the SPI master working on silicon.
+
+	  Nothing is written to the device and no frame is moved. SPI mode 0, eight-bit
+	  elements, as Zephyr's TC6 chip driver opens its device.
+
+config WZ_SPI_PROBE_HZ
+	int "SPI rate of the probe, in hertz"
+	depends on WZ_T2G_SPI_PROBE
+	default 1000000
+	help
+	  The highest rate the probe asks for; the block gives the highest it can make
+	  that does not exceed it, and the log line says what it gave. This is well
+	  under any TC6 chip's limit on purpose: the probe reads an identity.
+
+config WZ_SCB_SPI_TIMEOUT_MS
+	int "How long one SPI exchange may take, in milliseconds"
+	depends on WZ_T2G_SPI_PROBE
+	default 100
+	help
+	  A bound on a wait for the block, so a block that never answers fails the
+	  exchange instead of hanging the node. It is a safety net, not a protocol
+	  timing: no exchange of at most 128 bytes at any rate this build asks for takes
+	  a sizable fraction of it.
+
 endif # WZ_MAC_CYT4BF
 
 endif # WZ_NET_BACKEND_LWIP_MAC

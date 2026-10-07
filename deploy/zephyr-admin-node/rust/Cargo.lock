@@ -769,6 +769,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "wz-oa-tc6"
+version = "0.1.0"
+dependencies = [
+ "wz-runtime-core",
+]
+
+[[package]]
 name = "wz-runtime-coop"
 version = "0.1.0"
 dependencies = [
@@ -850,6 +857,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "wz-spi-scb"
+version = "0.1.0"
+dependencies = [
+ "wz-runtime-core",
+]
+
+[[package]]
 name = "wz-zephyr-admin-node"
 version = "0.1.0"
 dependencies = [
@@ -857,8 +871,10 @@ dependencies = [
  "portable-atomic",
  "wz",
  "wz-eth-mac-cyt4bf",
+ "wz-oa-tc6",
  "wz-session-core",
  "wz-session-mcu",
+ "wz-spi-scb",
 ]
 
 [[package]]
