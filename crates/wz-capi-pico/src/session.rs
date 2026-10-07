@@ -346,6 +346,10 @@ pub unsafe extern "C" fn z_open(
                 local_delivery: wz_runtime_tokio::session::LocalDeliveryDrain::DriveTask,
                 // pico scouts when a program calls `z_scout`, never inside `z_open`.
                 scouting: None,
+                // zenoh-pico ends its push to an ACCEPTED peer with that Final and sends none to
+                // a node it dialled; this ABI does not model the difference, so it keeps the
+                // behaviour it had (see `SessionResources::initial_interest`).
+                initial_interest: false,
             },
         ) {
             Ok(state) => {

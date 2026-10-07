@@ -216,6 +216,41 @@ pub fn region_and_bound_of(
     }
 }
 
+/// The interest id a node's peer hat acts as if a new face had sent it
+/// (`zenoh/src/net/routing/hat/peer/mod.rs` @ `pub(crate) const INITIAL_INTEREST_ID: u32 = 0;`).
+///
+/// Nothing is sent: upstream's own comment is that "while no interest is sent on the network,
+/// peers act as if they received an interest `CurrentFuture` with id `0` and send back a
+/// `DeclareFinal` with interest id `0`". That `DeclareFinal` is what the other end's open waits
+/// for (`open/return_conditions/declares`, and the peer connector it terminates), and zenoh-pico
+/// ends its push to an accepted peer with the same message
+/// (`vendor/zenoh-pico/src/session/interest.c` @
+/// `_Z_RETURN_IF_ERR(_z_interest_send_declare_final(zn, 0, peer));`).
+pub const INITIAL_INTEREST_ID: u64 = 0;
+
+/// Whether a node of role `mode` ends the declarations it sends a new face with the
+/// `DeclareFinal` of [`INITIAL_INTEREST_ID`]: upstream's
+/// `let do_initial_interest = ctx.src_face.region.bound().is_north() && ctx.src_face.remote_bound.is_north();`
+/// (`zenoh/src/net/routing/hat/peer/mod.rs` @ `let do_initial_interest =`), in the PEER hat only,
+/// so a router's north hat and a client's never do, whatever the pair.
+///
+/// "Mutually north-bound" is [`region_and_bound_of`] answering `(North, North)`, which for an
+/// `Auto`-preset node is exactly a peer meeting a peer: a peer meeting a router lands north but
+/// the router's bound toward it is south (a router holds peers in a south region), and a peer
+/// meeting a client holds it in a south region. Every other pair is pull mode, where the face
+/// asks with an Interest it puts on the wire and is answered to that.
+pub fn sends_initial_interest_final(
+    mode: WhatAmI,
+    remote: WhatAmI,
+    remote_bound: Option<Bound>,
+) -> bool {
+    mode == WhatAmI::Peer
+        && matches!(
+            region_and_bound_of(mode, remote, remote_bound),
+            Some((Region::North, Bound::North))
+        )
+}
+
 /// The `sessions[].region` string upstream writes: the region, or
 /// `"unknown"` where it cannot be computed
 /// (`zenoh/src/net/runtime/adminspace.rs`
@@ -406,5 +441,26 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// R3073 -- the initial interest is the PEER hat's, and only between two north-bound nodes.
+    /// Written as the whole table of nine pairs for each of the three bounds a remote can
+    /// announce, so a pair that gained the message by accident is a failing row and not a
+    /// silent addition.
+    #[test]
+    fn only_a_peer_meeting_a_north_bound_peer_ends_its_declarations_with_the_final() {
+        for mode in [Router, Peer, Client] {
+            for remote in [Router, Peer, Client] {
+                for bound in [None, Some(Bound::North), Some(Bound::South)] {
+                    let want = mode == Peer && remote == Peer && bound != Some(Bound::South);
+                    assert_eq!(
+                        sends_initial_interest_final(mode, remote, bound),
+                        want,
+                        "{mode:?} meeting {remote:?} announcing {bound:?}"
+                    );
+                }
+            }
+        }
+        assert_eq!(INITIAL_INTEREST_ID, 0, "upstream's `INITIAL_INTEREST_ID`");
     }
 }

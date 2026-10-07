@@ -1011,11 +1011,11 @@ fn real_finds(
 /// THE GATE, being dialled: a real node that is told nothing finds a node that listens, by
 /// scouting, connects to the locator in its Hello, and the two hear each other.
 ///
-/// A real CLIENT's open is bounded as the real library's is, which is what scouting is for. A real
-/// PEER's open against a wz node is NOT bounded here: it waits out `scouting/delay` for a start
-/// condition a wz peer does not yet satisfy, whether it was found by scouting or dialled at an
-/// endpoint (measured both ways, 506 ms against 10 ms with a real node on the other end), which
-/// is the gossip introduction a wz peer does not speak and is not this row's claim.
+/// A real node's open is bounded as the real library's is, client and peer alike: that is what
+/// scouting is for. (A real PEER's open against a wz node ran out `scouting/delay` before R3073,
+/// 506 ms against 10, because the wz node did not end what it sent with the initial interest's
+/// Final; the row that isolates that is
+/// `a_real_peer_that_dials_a_node_opens_at_once_identically_on_wz_and_libzenohc`.)
 // wz-proves: api-compat-c zenoh-c->wz partial
 #[test]
 #[ignore = "reads a zenoh-c oracle; run by run-ci Layer C1cc (which builds the matching \
@@ -1052,14 +1052,98 @@ fn a_real_node_that_scouts_finds_a_listening_node_identically_on_wz_and_libzenoh
             "§5.27 api-compat-c: a real {mode} that scouts does not find and hear a wz node \
              (listener stated: {stated}) the way it does a real one"
         );
-        if mode == "client" {
-            assert!(
-                oracle_finder.open_ms < 400 && wz_finder.open_ms < 400,
-                "a real client's open took {} ms against a wz node (the real node's: {} ms): \
-                 scouting is what makes it short",
-                wz_finder.open_ms,
-                oracle_finder.open_ms
-            );
-        }
+        // A real node's open against a wz node is as short as against a real one, client and peer
+        // alike. A peer's is not short because it was found: it is short because the wz node ends
+        // what it sends with the initial interest's Final (R3073), which is what a zenoh peer's
+        // open waits for, and before that it ran out `scouting/delay` (506 ms against 10).
+        assert!(
+            oracle_finder.open_ms < 400 && wz_finder.open_ms < 400,
+            "a real {mode}'s open took {} ms against a wz node (the real node's: {} ms)",
+            wz_finder.open_ms,
+            oracle_finder.open_ms
+        );
     }
+}
+
+/// A real peer that DIALS a node at an endpoint it is told, `connect` stated and scouting on, opens
+/// at once and the two hear each other, whichever library the node is.
+///
+/// The row that isolates the Final: nothing was scouted, so the only thing between the real
+/// peer's open and its return is what the other end sends it on connecting. Against a real peer
+/// that is ten milliseconds (MEASURED 10, 11 and 20 on three runs) and against a wz peer, before
+/// R3073, 506: the real library's own log says why, "Scouting delay elapsed before start
+/// conditions are met", where against a real peer it says "Terminating peer connector" on the
+/// `declare_final{interest_id=0}` it received.
+// wz-proves: api-compat-c zenoh-c->wz partial
+#[test]
+#[ignore = "reads a zenoh-c oracle; run by run-ci Layer C1cc (which builds the matching \
+            ABI arm this needs)"]
+fn a_real_peer_that_dials_a_node_opens_at_once_identically_on_wz_and_libzenohc() {
+    let Some(programs) = programs() else {
+        return;
+    };
+    let expect = "open=0 | declare=0 senders=F,Y dups=0";
+    let run = |built: &Built, key: &str| -> (Outcome, Outcome) {
+        let group = next_group();
+        let reservation = PortReservation::pick();
+        let port = reservation.port();
+        drop(reservation);
+        let mut found = Node::start(
+            built,
+            &Spec {
+                mode: "peer",
+                listen: port,
+                connect: 0,
+                key,
+                secs: 6,
+                tag: "F",
+                group: &group,
+                delay_ms: 500,
+                timeout_ms: 3000,
+            },
+        );
+        let found_open = found.opened();
+        let mut dialler = Node::start(
+            &programs.reference,
+            &Spec {
+                mode: "peer",
+                listen: 0,
+                connect: port,
+                key,
+                secs: 3,
+                tag: "Y",
+                group: &group,
+                delay_ms: 500,
+                timeout_ms: 3000,
+            },
+        );
+        let dialler_open = dialler.opened();
+        (dialler.finish(dialler_open), found.finish(found_open))
+    };
+    let (oracle_dialler, oracle_found) = run(&programs.reference, "wz/scouting/dial/0");
+    assert_eq!(
+        (oracle_dialler.row.as_str(), oracle_found.row.as_str()),
+        (expect, expect),
+        "the REAL library's rows for a peer that dials a real peer are not what this file expects"
+    );
+    assert!(
+        oracle_dialler.open_ms < 400,
+        "the real peer's open against a real peer took {} ms",
+        oracle_dialler.open_ms
+    );
+    let (wz_dialler, wz_found) = run(&programs.wz, "wz/scouting/dial/1");
+    assert_eq!(
+        (wz_dialler.row.as_str(), wz_found.row.as_str()),
+        (expect, expect),
+        "§5.27 api-compat-c: a real peer that dials a wz peer does not hear it the way it hears a \
+         real one"
+    );
+    assert!(
+        wz_dialler.open_ms < 400,
+        "a real peer's open against a wz peer took {} ms (against a real peer: {} ms): the wz peer \
+         did not end its declarations with the initial interest's Final, so the open ran out \
+         `scouting/delay`",
+        wz_dialler.open_ms,
+        oracle_dialler.open_ms
+    );
 }

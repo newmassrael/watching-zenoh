@@ -20087,6 +20087,17 @@ layer_c1cc_api_compat_c() {
         --test-threads=1 \
         --exact a_real_node_that_scouts_finds_a_listening_node_identically_on_wz_and_libzenohc \
         || return 1
+    # R3073 -- a real peer that DIALS a node at an endpoint opens at once, whichever library the
+    # node is. The row that isolates the initial interest's Final: nothing was scouted, so what
+    # ends the open is what the other end sends on connecting. 10 ms against a real peer and,
+    # before the wz peer sent it, 506 against a wz one.
+    _runci_guarded_test \
+        "C1cc a_real_peer_that_dials_a_node_opens_at_once_identically_on_wz_and_libzenohc" 1 \
+        cargo test -p wz-integration-tests \
+        --test zenoh_c_scouting_twice_and_diff -- --ignored --quiet \
+        --test-threads=1 \
+        --exact a_real_peer_that_dials_a_node_opens_at_once_identically_on_wz_and_libzenohc \
+        || return 1
     _runci_guarded_test \
         "C1cc an_advanced_subscriber_of_the_publishers_own_session_hears_it_on_wz_and_libzenohc" 1 \
         cargo test -p wz-integration-tests \

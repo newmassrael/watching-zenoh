@@ -1437,6 +1437,7 @@ async fn drive_peer(
                                 }
                             }));
                             faces.push(tokio::task::spawn_local(scouted_connector(ScoutedPeers {
+                                configured: endpoints.clone(),
                                 intents,
                                 own_zid: zid,
                                 first_face: DIAL_FACE_ID + endpoints.len() as u64,
@@ -1486,8 +1487,45 @@ async fn drive_peer(
         .await;
 }
 
+/// The locator an endpoint names: the endpoint without its `#` configuration tail, as upstream's
+/// `EndPoint::to_locator` drops it (`commons/zenoh-protocol/src/core/endpoint.rs` @
+/// `pub const CONFIG_SEPARATOR: char = '#';`). The `?` metadata stays, so two endpoints that
+/// differ in it are two locators.
+fn endpoint_locator(endpoint: &str) -> &str {
+    endpoint
+        .split_once('#')
+        .map_or(endpoint, |(locator, _)| locator)
+}
+
+/// The locators of a scouted node that scouting may dial: those that are not one of the endpoints
+/// the config STATES to connect to. Upstream filters its scouted locators against the configured
+/// `connect/endpoints` and ignores the node when none is left ("Already connecting to locators of
+/// {zid} (connect configuration). Ignore.", `zenoh/src/net/runtime/orchestrator.rs` @
+/// `.filter(|l| !configured_locators.contains(l))`), because those endpoints have a schedule of
+/// their own that is already connecting to that node.
+///
+/// MEASURED on this tree before it had the filter: a peer that stated `connect` to a real peer
+/// and scouted dialled the same node twice, the real peer admits one link per node and refused
+/// the second, and when the refused one was the stated endpoint (3 runs in 30, the scouted dial
+/// having answered first) the endpoint went back to its retry schedule and the open ran out
+/// `scouting/delay`, 513 ms against 25. Compared as strings, as upstream compares `Locator`s, so
+/// a name and the address it resolves to are two locators there and here.
+fn scouted_locators_to_dial(configured: &[String], scouted: &[String]) -> Vec<String> {
+    scouted
+        .iter()
+        .filter(|locator| {
+            !configured
+                .iter()
+                .any(|endpoint| endpoint_locator(endpoint) == locator.as_str())
+        })
+        .cloned()
+        .collect()
+}
+
 /// What the task that dials the nodes a peer's scouting finds is given.
 struct ScoutedPeers {
+    /// The endpoints the config states to connect to: scouting does not dial their locators.
+    configured: Vec<String>,
     intents: tokio::sync::mpsc::UnboundedReceiver<DialIntent>,
     /// This node's own wire zid: its own Scout can come back through the group.
     own_zid: Vec<u8>,
@@ -1511,6 +1549,7 @@ struct ScoutedPeers {
 /// the recovery for a scouted link, so a face that ends is not re-dialled here.
 async fn scouted_connector(peers: ScoutedPeers) {
     let ScoutedPeers {
+        configured,
         mut intents,
         own_zid,
         first_face,
@@ -1533,11 +1572,16 @@ async fn scouted_connector(peers: ScoutedPeers) {
     loop {
         tokio::select! {
             intent = intents.recv() => {
-                let Some(intent) = intent else { break };
+                let Some(mut intent) = intent else { break };
                 if intent.zid == own_zid
                     || shared.holds_peer(&intent.zid)
                     || dialing.borrow().contains(&intent.zid)
                 {
+                    continue;
+                }
+                // A node the config states an endpoint of is the endpoint's to connect to.
+                intent.locators = scouted_locators_to_dial(&configured, &intent.locators);
+                if intent.locators.is_empty() {
                     continue;
                 }
                 dialing.borrow_mut().insert(intent.zid.clone());
@@ -2198,6 +2242,10 @@ pub struct OpenStance {
     /// a client with no endpoint scouts for the first node it can open to. A plan whose matcher
     /// is empty (a router's default) looks for nobody and is the same as `None`.
     pub scouting: Option<ScoutingPlan>,
+    /// R3073 -- whether a face this node reaches as a north-bound peer is ended with the
+    /// `DeclareFinal` of the initial interest; see [`SessionResources::initial_interest`].
+    /// zenoh-c's ABI says `true`, and zenoh-pico's `false`.
+    pub initial_interest: bool,
 }
 
 #[cfg(feature = "session-extshm")]
@@ -2245,6 +2293,7 @@ pub fn open_blocking(
         shm_clients,
         local_delivery,
         scouting,
+        initial_interest,
     } = stance;
     let clock = TokioTime::new();
     // Fixed here, on the CALLING thread, so `SessionState` can hand it to
@@ -2266,6 +2315,7 @@ pub fn open_blocking(
                 node_hlc,
                 shm_clients,
                 local_delivery,
+                initial_interest,
             },
         )
         .map_err(|_| OpenError::DriveFailed)?,
@@ -2756,5 +2806,59 @@ mod tests {
             inner: Box::pin(async {}),
         });
         stop_within_five_seconds(&gate);
+    }
+
+    fn strings(list: &[&str]) -> Vec<String> {
+        list.iter().map(|text| (*text).to_owned()).collect()
+    }
+
+    /// R3073 -- scouting does not dial a locator the config states as an endpoint, and keeps the
+    /// rest of the node's locators: the stated endpoint has a schedule of its own, and a second
+    /// link to the same node is refused by it (one link per node), which sent the endpoint back to
+    /// its retry schedule and the open through `scouting/delay`.
+    #[test]
+    fn scouting_does_not_dial_a_locator_the_config_states() {
+        let configured = strings(&["tcp/127.0.0.1:7447"]);
+        // Only the stated one: nothing is left, and the node is ignored.
+        assert!(
+            scouted_locators_to_dial(&configured, &strings(&["tcp/127.0.0.1:7447"])).is_empty()
+        );
+        // Another of the node's locators stays a way in.
+        assert_eq!(
+            scouted_locators_to_dial(
+                &configured,
+                &strings(&["tcp/127.0.0.1:7447", "tcp/10.0.0.7:7447"])
+            ),
+            strings(&["tcp/10.0.0.7:7447"])
+        );
+        // Nothing stated: nothing is removed.
+        assert_eq!(
+            scouted_locators_to_dial(&[], &strings(&["tcp/127.0.0.1:7447"])),
+            strings(&["tcp/127.0.0.1:7447"])
+        );
+    }
+
+    /// An endpoint's `#` configuration tail is not part of its locator, and its `?` metadata is:
+    /// upstream's `to_locator` drops the first and keeps the second, and a scouted locator has
+    /// no tail to begin with.
+    #[test]
+    fn an_endpoints_tail_is_not_its_locator_and_its_metadata_is() {
+        assert_eq!(endpoint_locator("tcp/127.0.0.1:7447"), "tcp/127.0.0.1:7447");
+        assert_eq!(
+            endpoint_locator("tcp/127.0.0.1:7447#iface=lo"),
+            "tcp/127.0.0.1:7447"
+        );
+        assert_eq!(
+            endpoint_locator("udp/127.0.0.1:7447?rel=1#iface=lo"),
+            "udp/127.0.0.1:7447?rel=1"
+        );
+        let with_tail = strings(&["tcp/127.0.0.1:7447#retry_period_init_ms=100"]);
+        assert!(scouted_locators_to_dial(&with_tail, &strings(&["tcp/127.0.0.1:7447"])).is_empty());
+        // Metadata makes it another locator: the reliable and unreliable links of one address.
+        let reliable = strings(&["udp/127.0.0.1:7447?rel=1"]);
+        assert_eq!(
+            scouted_locators_to_dial(&reliable, &strings(&["udp/127.0.0.1:7447"])),
+            strings(&["udp/127.0.0.1:7447"])
+        );
     }
 }

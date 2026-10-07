@@ -2667,6 +2667,53 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
         &self.transport
     }
 
+    /// R3073 -- end the declarations this session just replayed to a NEW face with the
+    /// `DeclareFinal` of the initial interest, when the peer hat does: upstream's peer acts as if
+    /// a face it meets as a north-bound peer had asked for everything with an interest of id 0,
+    /// answers with what it holds and ends it with that Final
+    /// (`zenoh/src/net/routing/hat/peer/mod.rs` @ `let do_initial_interest =`), and the other
+    /// end's open does not return before it has it (it waits out `scouting/delay` instead, and
+    /// logs "Scouting delay elapsed before start conditions are met").
+    ///
+    /// The decision is [`wz_session_core::extbound::sends_initial_interest_final`] over this
+    /// node's role, the role the handshake told it the remote has and the bound the remote
+    /// announced on its Open, all read off the session's own link; a remote whose role never
+    /// arrived is not met as a peer. Returns whether the Final went out. Call it LAST, after the
+    /// session's declarations have been replayed, so the Final ends them and does not precede
+    /// them.
+    ///
+    /// Always present and `false` in a build with neither `liveliness-token` nor
+    /// `declare-subscriber`, which are the two features that compile the sender: such a build
+    /// has no declaration to end, and a caller (the C ABI's registry) cannot name those features.
+    pub fn send_initial_interest_final(&self) -> bool {
+        #[cfg(any(feature = "liveliness-token", feature = "declare-subscriber"))]
+        {
+            use wz_session_core::extbound::{sends_initial_interest_final, INITIAL_INTEREST_ID};
+            use wz_session_core::response_sink::DeclareReplySink;
+
+            let actions = self.actions();
+            let Some(remote) = actions
+                .peer_whatami_wire()
+                .and_then(wz_codecs::whatami::WhatAmI::from_wire)
+            else {
+                return false;
+            };
+            if !sends_initial_interest_final(
+                actions.params.whatami,
+                remote,
+                actions.peer_remote_bound(),
+            ) {
+                return false;
+            }
+            actions.send_declare_final_reply(INITIAL_INTEREST_ID);
+            true
+        }
+        #[cfg(not(any(feature = "liveliness-token", feature = "declare-subscriber")))]
+        {
+            false
+        }
+    }
+
     /// R2815 — this session's own zenoh id, upstream's `session.zid()`
     /// (`zenoh/src/api/session.rs` @ `pub fn zid(&self) -> ZenohId {`).
     ///

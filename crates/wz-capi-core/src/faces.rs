@@ -1411,6 +1411,9 @@ pub struct SharedSession {
     /// every face session for the same reason the clock is one: a descriptor arrives on whichever
     /// session the peer's face is, and each must read it through the node's own clients.
     shm_clients: OpenShmClients,
+    /// R3073 -- whether a face this node reaches as a peer is ended with the initial interest's
+    /// `DeclareFinal`; see [`SessionResources::initial_interest`].
+    initial_interest: bool,
 }
 
 /// R3065 -- the shared-memory reader's clients a session is opened over: a set the node's
@@ -1453,16 +1456,28 @@ pub struct SessionResources {
     /// inside the call that caused it ([`LocalDeliveryDrain::Caller`]). It governs the local
     /// plane; a face session's loopback is always `Locality::Remote`, so it has none.
     pub local_delivery: LocalDeliveryDrain,
+    /// R3073 -- whether the node ends the declarations it replays to a new face with the
+    /// `DeclareFinal` of the INITIAL interest (id 0), which is what a zenoh peer's open waits for
+    /// before it returns: without it that open runs out `scouting/delay` (500 ms, against about
+    /// ten when the other end is a zenoh peer) and says so in its log ("Scouting delay elapsed
+    /// before start conditions are met"). The calling ABI chooses, as it does for the drain:
+    /// zenoh-c's peer hat sends it to a peer it meets as a north-bound peer
+    /// (`wz_session_core::extbound::sends_initial_interest_final`); zenoh-pico's session ends
+    /// its push to an ACCEPTED peer the same way and sends nothing to one it dialled, a
+    /// difference this crate does not model, so the pico ABI says `false` and keeps the
+    /// behaviour it had.
+    pub initial_interest: bool,
 }
 
 impl Default for SessionResources {
-    /// No clock, the default reader and the executor's thread for a local delivery: what a node
-    /// was before it could be given any of them.
+    /// No clock, the default reader and the executor's thread for a local delivery, and no
+    /// initial interest: what a node was before it could be given any of them.
     fn default() -> Self {
         Self {
             node_hlc: NodeHlc::disabled(),
             shm_clients: no_shm_clients(),
             local_delivery: LocalDeliveryDrain::DriveTask,
+            initial_interest: false,
         }
     }
 }
@@ -1544,6 +1559,7 @@ impl SharedSession {
             node_hlc,
             shm_clients,
             local_delivery,
+            initial_interest,
         } = resources;
         let driver: Arc<dyn BoxedLinkDriver + Send + Sync> = Arc::new(InertLinkDriver);
         // `WhatAmI::Peer`: the plane never handshakes, so the role is inert on
@@ -1619,6 +1635,7 @@ impl SharedSession {
             local_wake,
             node_hlc,
             shm_clients,
+            initial_interest,
         })
     }
 
@@ -1869,6 +1886,13 @@ impl SharedSession {
             ) {
                 adv_pubs.insert(entry.id, pub_);
             }
+        }
+        // R3073 -- the LAST line of the replay: a peer this node meets as a north-bound peer is
+        // told that what it has been sent is everything this node held, which is the message its
+        // open waits for. Per face, under the lock the replays above ran under, so it cannot
+        // precede a declaration this face is owed from the registry.
+        if self.initial_interest {
+            let _ = session.send_initial_interest_final();
         }
         // The advanced subscribers are NOT replayed here. Each declares a
         // sequence of entities, and a host that declares keys takes this lock to

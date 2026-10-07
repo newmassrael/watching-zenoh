@@ -356,6 +356,9 @@ pub(crate) unsafe fn open_session(
             // then reads what its callback set relies on the first.
             local_delivery: LocalDeliveryDrain::Caller,
             scouting,
+            // R3073 -- zenoh-c's peer ends what it sends a new peer with the initial interest's
+            // Final, and the open of a zenoh peer that dials this one waits for it.
+            initial_interest: true,
         };
         // R3065 -- a session opened over a client storage advertises the protocols of THAT
         // reader: the stance takes both from the one set, so the list a peer's sender reads is
