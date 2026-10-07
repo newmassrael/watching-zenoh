@@ -430,6 +430,25 @@ router-connect-reconcile,transport-link-tcp,transport-unicast|session_lifecycle_
         transport-keepalive,\
         transport-multicast\
         |"
+    # R3075 — the MCU session shell, split out of the row above with its tests.
+    # Seventeen of its twenty tests are feature-gated (the admin node and its host
+    # and status documents need both adminspace features, the application layer
+    # needs the Put arm and the queryable chain), and the first census after the
+    # split found NO leg running them: the row above counts only what stayed in
+    # the lwIP crate. `test-support` is the in-memory network, whose own tests run
+    # at default features and which a sibling's tests turn on.
+    "wz-session-mcu|hook|\
+        adminspace-core,\
+        adminspace-write,\
+        codec-push,\
+        codec-response,\
+        codec-response-final,\
+        liveliness-token,\
+        pubsub-put,\
+        query-queryable,\
+        test-support,\
+        transport-keepalive\
+        |"
     # ── R2156 (item 543): wz-ap-demo's SECOND leg, and the HANDOFF ──────
     #
     # The row above runs the config surface at ONE feature, because the guard it
