@@ -2587,7 +2587,14 @@ PIN_NO_SYMBOL = 0
 # Hello differential, the two Layer M rows, and the group the roles file gave each test.
 # `transport-shm` is not touched and is still PARTIAL beside it. READ off the census's own FAIL
 # line, `wz citations: 210 against a pin of 202`, for the reason the R3062 note gives.
-PIN_WZ_CITATIONS = 210
+#
+# R3073 -- 210 -> 217, one atom. `api-compat-c`'s reason gains the UPDATE that a peer ends what it
+# replays to a new peer with the initial interest's Final: it names the pure rule and its id, the
+# runtime session's sender, the resource flag the two ABIs set differently, the scouting filter
+# against the configured endpoints, and the dial row that isolates the Final. `transport-shm` is
+# not touched and is still PARTIAL beside it. READ off the census's own FAIL line,
+# `wz citations: 217 against a pin of 210`, for the reason the R3062 note gives.
+PIN_WZ_CITATIONS = 217
 # R2626 — 44 -> 42, and this one is worth a sentence because it HELD through
 # every earlier retirement in this run (R2612, R2622). `time-hlc`'s reason is the
 # first retiree carrying AMBIGUOUS citations of its own: its oldest clauses cite
