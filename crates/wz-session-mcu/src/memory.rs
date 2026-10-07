@@ -69,11 +69,37 @@ impl MemoryNetwork {
         peer: Option<UdpPeer>,
     ) -> Result<Rc<MemoryEnd>, LinkOpenError> {
         let mut queues = self.queues.borrow_mut();
-        let key = (local.addr, local.port);
-        if queues.contains_key(&key) {
+        if queues.contains_key(&(local.addr, local.port)) {
             return Err(LinkOpenError::Exhausted);
         }
-        queues.insert(key, VecDeque::new());
+        Ok(self.claim(&mut queues, local, peer))
+    }
+
+    /// Bind an end on `addr` at a port nobody holds, taken from the ephemeral
+    /// range, sending to `peer`. The port is found and claimed under one borrow of
+    /// the network, so no value that could go stale between the two is ever
+    /// handed out: what comes back is an end that already owns its port.
+    pub fn bind_ephemeral(
+        self: &Rc<Self>,
+        addr: [u8; 4],
+        peer: Option<UdpPeer>,
+    ) -> Result<Rc<MemoryEnd>, LinkOpenError> {
+        let mut queues = self.queues.borrow_mut();
+        let port = self
+            .next_unclaimed_port(&queues, addr)
+            .ok_or(LinkOpenError::Exhausted)?;
+        Ok(self.claim(&mut queues, UdpPeer { addr, port }, peer))
+    }
+
+    /// Register `local`'s queue and build the end that owns it. The caller has
+    /// checked, under the borrow it passes in, that nothing is bound there.
+    fn claim(
+        self: &Rc<Self>,
+        queues: &mut Queues,
+        local: UdpPeer,
+        peer: Option<UdpPeer>,
+    ) -> Rc<MemoryEnd> {
+        queues.insert((local.addr, local.port), VecDeque::new());
         let end = MemoryEnd {
             net: self.clone(),
             local,
@@ -83,12 +109,13 @@ impl MemoryNetwork {
         if let Some(peer) = peer {
             end.note_endpoints(peer);
         }
-        Ok(Rc::new(end))
+        Rc::new(end)
     }
 
-    /// An unused port on `addr`, from the ephemeral range.
-    fn free_port(&self, addr: [u8; 4]) -> Option<u16> {
-        let queues = self.queues.borrow();
+    /// The next port on `addr`, from the ephemeral range, that `queues` does not
+    /// hold. Only [`Self::bind_ephemeral`] calls it, with the borrow it then
+    /// claims under.
+    fn next_unclaimed_port(&self, queues: &Queues, addr: [u8; 4]) -> Option<u16> {
         for _ in 0..=u16::MAX - FIRST_EPHEMERAL_PORT {
             let port = self.next_ephemeral.get();
             self.next_ephemeral.set(if port == u16::MAX {
@@ -246,17 +273,7 @@ impl SessionLinks for MemoryLinks {
     }
 
     fn open_initiator(&self, peer: UdpPeer) -> Result<OpenedLink<Self::Pump>, LinkOpenError> {
-        let port = self
-            .net
-            .free_port(self.host)
-            .ok_or(LinkOpenError::Exhausted)?;
-        let end = self.net.bind(
-            UdpPeer {
-                addr: self.host,
-                port,
-            },
-            Some(peer),
-        )?;
+        let end = self.net.bind_ephemeral(self.host, Some(peer))?;
         Ok(Self::opened(end))
     }
 }
