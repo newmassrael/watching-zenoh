@@ -10852,17 +10852,18 @@ layer_c1r_mcu_multicast_e2e() {
 # tested here the day it is excluded there. The three with dedicated lanes run
 # again at their defaults, which is the price of not keeping a second list.
 #
-# Guarded for the one member no other lane reaches: its lib holds 8 tests
+# Guarded for the one member no other lane reaches: its lib holds 12 tests
 # (3 at R2948, plus the three const-parse tests the board-argument macros
-# brought at R3075, plus the two station-address tests of the same round), and
-# a cfg slip that emptied them would still exit 0.
+# brought at R3075, plus the two station-address tests and the four stack
+# measurement tests of the same round), and a cfg slip that emptied them would
+# still exit 0.
 layer_c1ns_nostd_members_isolated() {
     local nostd
     nostd="$(python3 scripts/lib/nostd_workspace_members.py)" || return 1
     for member in $nostd; do
         (cd crates && cargo test -p "$member" --quiet) || return 1
     done
-    _runci_guarded_test "C1ns zephyr lib" 8 \
+    _runci_guarded_test "C1ns zephyr lib" 12 \
         cargo test -p wz-runtime-zephyr --lib --quiet || return 1
 }
 
@@ -20989,6 +20990,37 @@ print("ok" if doc is not None and ('"$1"') else doc)' 2>&1
         fi
     fi
 
+    # R3075 — a firmware that measures its own stack says so on its console
+    # (`stack: peak N of M bytes`, once for each new peak), and this lane refuses a
+    # peak that leaves less than a quarter of the stack free. The reason is the
+    # one every other lane that measures one gives: a stack that runs out does not
+    # fault at its own end, it overwrites the memory below it, and the machine dies
+    # later with a register file that names none of it. The admin node's did, with
+    # a 16 KiB stack it needed 20,012 bytes of, and this lane said only that a GET
+    # came back empty. A quarter, and not the 256 bytes the single-run MCU deploys
+    # allow themselves, because this node's depth follows what its peers send and
+    # this scenario is not every thing they can send. A console with NO such line
+    # is a failure too: a node that stopped measuring reads exactly like one that
+    # measured and fit.
+    if [[ -n "${_QA_STACK_VERDICT:-}" ]]; then
+        sleep 1 # the node samples a few times a second; let it see the last peak
+        local stack_line peak size
+        stack_line="$(awk '/^stack: peak /{l=$0} END{print l}' "$dir/qemu.log")"
+        if [[ "$stack_line" =~ ^stack:\ peak\ ([0-9]+)\ of\ ([0-9]+)\ bytes ]]; then
+            peak="${BASH_REMATCH[1]}"
+            size="${BASH_REMATCH[2]}"
+            if (( peak * 4 <= size * 3 )); then
+                echo "  ${label}.7 the main stack kept a quarter free: ${stack_line} — OK"
+            else
+                echo "  ${label}.7 the main stack FAIL: ${stack_line} leaves under a quarter free" >&2
+                fail=1
+            fi
+        else
+            echo "  ${label}.7 the main stack FAIL: the node printed no \`stack: peak N of M bytes\` line" >&2
+            fail=1
+        fi
+    fi
+
     kill "${pids[@]}" 2>/dev/null
     wait "${pids[@]}" 2>/dev/null
     if [[ "$fail" -ne 0 ]]; then
@@ -21227,7 +21259,8 @@ layer_qza_zephyr_admin_node_vs_zenohd() {
     fi
 
     local mac=52:54:00:aa:bb:cc zid=ccbbaa005452 fail=0
-    _qa_scenario Qza "$zid" \
+    # This firmware measures its own stack; the scenario holds it to a margin.
+    _QA_STACK_VERDICT=1 _qa_scenario Qza "$zid" \
         "^ZEPHYR-WZ-ADMIN READY $zid udp/10\\.0\\.2\\.15:7447[[:space:]]*\$" \
         qemu-system-arm -cpu cortex-m3 -machine mps2-an385 -nographic -monitor none \
         -nic "user,model=lan9118,mac=$mac,hostfwd=udp:127.0.0.1:$_QA_FWD_PORT-10.0.2.15:7447" \

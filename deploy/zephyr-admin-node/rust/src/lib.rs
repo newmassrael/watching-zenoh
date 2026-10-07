@@ -32,7 +32,8 @@ use alloc::vec::Vec;
 use wz::runtime_coop::session_drive::SessionLinks;
 use wz::runtime_coop::session_runtime::new_session_actions;
 use wz::runtime_coop::{ClockSource, CoopLocalSet, CoopRuntime, CoopTime};
-use wz::runtime_zephyr::glue::{log, log_line, yield_ms};
+use wz::runtime_zephyr::glue::{log, log_line, stack_usage, yield_ms};
+use wz::runtime_zephyr::stack::StackWatch;
 use wz::runtime_zephyr::{ZephyrClock, ZephyrEntropy};
 use wz_session_core::entropy::EntropySource;
 use wz_session_core::session_init_params::SessionInitParams;
@@ -55,6 +56,11 @@ mod spi_cyt4bf;
 // The allocator over the kernel heap (`CONFIG_HEAP_MEM_POOL_SIZE` in prj.conf),
 // the critical section over the kernel IRQ lock and the panic handler.
 wz::runtime_zephyr::zephyr_image!();
+
+/// How often the node reads its stack's high-water mark. The read walks the whole
+/// stack, so it is made a few times a second and not on every pass of the loop;
+/// the mark persists, so a peak between two reads is not lost.
+const STACK_CHECK_MS: u64 = 250;
 
 /// The board's `CONFIG_SYS_CLOCK_TICKS_PER_SEC`, as this build was configured:
 /// the `ZephyrClock` timebase.
@@ -171,10 +177,21 @@ fn run<N: NodeNet>(mut net: N) -> i32 {
 
     let mut reported = 0;
     let mut generation = None;
+    // The node is the stack's only tenant, so its own reading of it is the one that
+    // counts: a line when the peak grows, which a lane reads the last of.
+    let mut stack = StackWatch::new();
+    let mut next_stack_check_ms = 0u64;
     loop {
         local.run_until_idle();
         net.pump();
-        node.tick(clock.now_us() / 1000);
+        let now_ms = clock.now_us() / 1000;
+        node.tick(now_ms);
+        if now_ms >= next_stack_check_ms {
+            next_stack_check_ms = now_ms + STACK_CHECK_MS;
+            if let Some(line) = stack.observe(stack_usage()) {
+                log_line(line);
+            }
+        }
 
         let (written, endpoints) = CONTROL.endpoints();
         if generation != Some(written) {

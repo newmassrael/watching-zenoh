@@ -30,6 +30,11 @@ extern "C" {
     fn wz_irq_lock() -> u32;
     /// `irq_unlock(key)`: restores the IRQ state `wz_irq_lock` saved.
     fn wz_irq_unlock(key: u32);
+    /// The calling thread's stack: write its size and its never-touched bytes
+    /// through the two pointers and return 0, or return nonzero when the kernel's
+    /// configuration does not measure stacks (`k_thread_stack_space_get` needs
+    /// `CONFIG_INIT_STACKS` and `CONFIG_THREAD_STACK_INFO`).
+    fn wz_stack_usage(size: *mut u32, unused: *mut u32) -> i32;
 }
 
 /// Print a static C string on the board's console.
@@ -84,6 +89,21 @@ pub fn irq_lock() -> u32 {
 pub unsafe fn irq_unlock(key: u32) {
     // SAFETY: the caller holds the contract above.
     unsafe { wz_irq_unlock(key) };
+}
+
+/// The calling thread's stack as the kernel measures it, or `None` when the
+/// kernel's configuration does not (see `wz_stack_usage`). The node runs on one thread,
+/// so the thread that calls this is the one whose stack is the node's budget.
+///
+/// Walks the stack looking for the paint the kernel laid down at creation, so it
+/// costs time in proportion to the stack's size; ask for it every few hundred
+/// milliseconds and not every pass of a loop.
+pub fn stack_usage() -> Option<crate::stack::StackUsage> {
+    let (mut size, mut unused) = (0u32, 0u32);
+    // SAFETY: both pointers are to live locals, and the hook writes one `u32`
+    // through each and only reads the calling thread's own descriptor.
+    let rc = unsafe { wz_stack_usage(&mut size, &mut unused) };
+    (rc == 0).then_some(crate::stack::StackUsage { size, unused })
 }
 
 /// What a panic does on this profile: log it, then halt with the CPU yielded

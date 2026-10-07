@@ -74,6 +74,32 @@ void wz_irq_unlock(unsigned int key)
 	irq_unlock(key);
 }
 
+/* The calling thread's stack: its size, and the bytes at its far end that were never
+ * written. The kernel can say so only when it painted the stack at creation
+ * (CONFIG_INIT_STACKS) and kept the stack's bounds (CONFIG_THREAD_STACK_INFO); a
+ * kernel built without either answers nonzero, and the Rust side reports nothing,
+ * which a lane that expects the measurement refuses. A stack that runs out does not
+ * fault at its own end, it overwrites the memory below it, so this number is the
+ * only warning an image gets. */
+int wz_stack_usage(uint32_t *size, uint32_t *unused)
+{
+#if defined(CONFIG_INIT_STACKS) && defined(CONFIG_THREAD_STACK_INFO)
+	size_t not_touched = 0;
+	k_tid_t self = k_current_get();
+
+	if (k_thread_stack_space_get(self, &not_touched) != 0) {
+		return -1;
+	}
+	*size = (uint32_t)self->stack_info.size;
+	*unused = (uint32_t)not_touched;
+	return 0;
+#else
+	(void)size;
+	(void)unused;
+	return -1;
+#endif
+}
+
 /* ---- the board's random source ----
  *
  * `wzApplicationGetRandom` is what `wz_runtime_zephyr::ZephyrEntropy` calls, and

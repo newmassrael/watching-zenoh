@@ -57,6 +57,7 @@ extern crate std;
 pub mod glue;
 pub mod links;
 pub mod net;
+pub mod stack;
 
 pub use links::ZephyrLinks;
 
