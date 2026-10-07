@@ -33,7 +33,8 @@
       "network": "lwip-mac",
       "rust_target": "thumbv7em-none-eabi",
       "grade": "BUILT",
-      "witness": {"lane": "Qzb"}
+      "witness": {"lane": "Qzb"},
+      "note": "The image is for the M7_0 core, and on this chip only the CM0+ core starts by itself: Zephyr's board documentation says CM7_0 runs only when a CM0+ application enables it (Cy_SysEnableCM7). The clock tree is the CM0+ image's job too: Zephyr's clock driver on the M7 returns without configuring it (drivers/clock_control/clock_control_infineon.c). wz ships no CM0+ image. On a bench kit whose existing CM0+ image started CM7_0 without configuring the clocks, the M7 ran at about 8 MHz where the build assumes 350 MHz, so the kernel's clock ran about 44 times slow (measured: 229 ticks per second against the configured 10000, a cycle counter at 8.02 MHz), and the first boot printed nothing past the probe for 100 seconds of wall time, which was about 2 seconds of kernel time. The link path has not yet been seen to run to its end."
     },
     {
       "board": "kit_t2g_b_h_lite/cyt4bf8cds/m7_0",
@@ -44,7 +45,7 @@
       "grade": "BUILT",
       "witness": {"lane": "Qzb"},
       "conf_overlay": ["overlays/t2g_spi_probe.conf"],
-      "note": "The image with the SPI probe: SCB3 opened as a master on the MikroBUS socket (through the PDL; the pinned Zephyr's own SPI binding is unusable on this chip) and the two TC6 identity registers read and logged at boot. It is built, not run. Nothing is plugged into the socket on a kit as shipped, so what this row will say on silicon is what an expansion board answers, and that is the first record a lab files."
+      "note": "The image with the SPI probe: SCB3 opened as a master on the MikroBUS socket (through the PDL; the pinned Zephyr's own SPI binding is unusable on this chip) and the identity registers read and logged at boot: the two standard TC6 ones (OA_ID, OA_PHYID) and the LAN8650/1's own DEVID, which the standard ones cannot replace. A lab ran the first two on a bench kit with a 10BASE-T1S click plugged in and reported OA_ID 0x00000011 and OA_PHYID 0x0007c1b4, at two boots. The lab gave the first 16 hex digits of the image's sha256, no verdict grammar exists for this row yet, and the DEVID read did not exist, so the row stays BUILT. What that image did after those lines is on the RMII row. Nothing is plugged into the socket on a kit as shipped."
     },
     {
       "board": "kit_t2g_b_h_lite/cyt4bf8cds/m7_0",
@@ -52,7 +53,7 @@
       "app": "zephyr-admin-node",
       "network": "lwip-mac",
       "grade": "DECLARED",
-      "note": "Chip not identified, and an expansion board rather than a device of the kit: the Lite user guide names no 10BASE-T1S part (its one Ethernet is the DP83825I on RMII), and its MikroBUS socket, where the board plugs in, is not populated by default. What exists: the TC6 protocol crate (wz-oa-tc6) and its SPI seam, host-tested; the SCB master's rules (wz-spi-scb), host-tested; the master itself and the identity probe, built (the row above). What does not: a chip crate, which waits for the chip's name, and the probe is how a lab learns it."
+      "note": "An expansion board rather than a device of the kit: the Lite user guide names no 10BASE-T1S part (its one Ethernet is the DP83825I on RMII), and its MikroBUS socket, where the board plugs in, is not populated by default. The chip's family is known from what it answered: OA_PHYID model 0x1B is the LAN8650/1 integrated PHY in Microchip's data sheet. Its product (8650 or 8651) and silicon revision are not: OA_PHYID reflects the PHY block only (errata item s1) and read revision 4, which the data sheet revisions read for this (DS60001734C and F) list nowhere: they give 3, for both B0 and B1. DEVID names both, and the probe above now reads it. What exists: the TC6 protocol crate (wz-oa-tc6) and its SPI seam, host-tested; the SCB master's rules (wz-spi-scb), host-tested; the master itself and the identity probe, built. What does not: a chip crate, which must refuse a revision whose configuration is not documented rather than apply another revision's."
     }
   ]
 }
