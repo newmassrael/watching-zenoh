@@ -222,8 +222,9 @@ pub fn region_and_bound_of(
 /// Nothing is sent: upstream's own comment is that "while no interest is sent on the network,
 /// peers act as if they received an interest `CurrentFuture` with id `0` and send back a
 /// `DeclareFinal` with interest id `0`". That `DeclareFinal` is what the other end's open waits
-/// for (`open/return_conditions/declares`, and the peer connector it terminates), and zenoh-pico
-/// ends its push to an accepted peer with the same message
+/// for: a zenoh peer's open holds until the peer connector this message terminates has done so,
+/// which wz does not do for its own open (it does not wait on the node it dialled), and
+/// zenoh-pico ends its push to an accepted peer with the same message
 /// (`vendor/zenoh-pico/src/session/interest.c` @
 /// `_Z_RETURN_IF_ERR(_z_interest_send_declare_final(zn, 0, peer));`).
 pub const INITIAL_INTEREST_ID: u64 = 0;
