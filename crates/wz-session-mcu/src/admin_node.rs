@@ -454,6 +454,24 @@ mod tests {
                 "@/b1b1b1b1/peer/config/connect/endpoints",
                 br#"["udp/10.0.0.1:7522"]"#,
             )));
+        // The tick that dials is not the tick that establishes: the session is
+        // spawned and has not run, so nothing has been declared on it, and the
+        // node keeps no record that would stop it declaring once it has.
+        node.tick(0);
+        std::assert!(
+            node.manager
+                .sessions()
+                .all(|(_, session)| !session.actions().is_established()),
+            "the dialled session has not run yet"
+        );
+        std::assert!(
+            node.manager.sessions().count() == 1,
+            "the write made the node dial"
+        );
+        std::assert!(
+            node.declared.is_empty(),
+            "nothing is declared on a session that is not established"
+        );
         for _ in 0..64 {
             local.run_until_idle();
             node.tick(0);
