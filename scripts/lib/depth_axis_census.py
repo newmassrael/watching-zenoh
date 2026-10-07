@@ -2594,7 +2594,15 @@ PIN_NO_SYMBOL = 0
 # against the configured endpoints, and the dial row that isolates the Final. `transport-shm` is
 # not touched and is still PARTIAL beside it. READ off the census's own FAIL line,
 # `wz citations: 217 against a pin of 210`, for the reason the R3062 note gives.
-PIN_WZ_CITATIONS = 217
+#
+# R3074 -- 217 -> 224, one atom. `api-compat-c`'s reason gains the UPDATE that a session gossips:
+# it names the pure rules and the lock around them, the registry's field that holds the plane, the
+# drive thread's stack, and the three rows that witness it (the differential row, its control, and
+# the one that reads wz alone). `transport-shm` is not touched and is still PARTIAL beside it.
+# READ off the census's own FAIL line, `wz citations: 224 against a pin of 217`, for the reason
+# the R3062 note gives; it read 221 while the two new files were not yet tracked, because a
+# citation counts only when it resolves to a TRACKED wz file, and 224 once they were.
+PIN_WZ_CITATIONS = 224
 # R2626 — 44 -> 42, and this one is worth a sentence because it HELD through
 # every earlier retirement in this run (R2612, R2622). `time-hlc`'s reason is the
 # first retiree carrying AMBIGUOUS citations of its own: its oldest clauses cite

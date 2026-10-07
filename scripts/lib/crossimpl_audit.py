@@ -998,7 +998,12 @@ HOST_GATED_CI_TARGETS: dict[str, str] = {
 # `zenoh_c_scouting_twice_and_diff.rs`, a real peer that DIALS a wz peer at an endpoint opens at
 # once as it does a real one (`api-compat-c zenoh-c->wz partial`). Measured by
 # `scripts/audit-crossimpl-proof.sh`.
-FOREIGN_ADJUDICATOR_LINKS = 1019
+# R3074 -- 1019 -> 1021, RISING by two, each a new `wz-proves` line in
+# `zenoh_c_scouting_twice_and_diff.rs` for gossip: two leaves of a hub are introduced to each other
+# as they are by the real library (five placements of the two libraries), and the control, leaves
+# with no listener that nobody introduces (each `api-compat-c zenoh-c->wz partial`). Measured by
+# `scripts/audit-crossimpl-proof.sh`.
+FOREIGN_ADJUDICATOR_LINKS = 1021
 
 # ── Execution disclosure ────────────────────────────────────────────────────────
 #
