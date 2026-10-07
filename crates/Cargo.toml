@@ -233,6 +233,11 @@ members = [
     # only, host-tested against a model of the chip; the chip-specific crate that
     # sits on it waits for a chip to be chosen.
     "wz-oa-tc6",
+    # The rules of an SPI master built on an Infineon SCB block (rate arithmetic,
+    # the shape of an exchange) and the `SpiTransfer` adapter that enforces them,
+    # with the registers left to the board. The other half of what a TC6 chip
+    # needs besides the protocol above; trait tier only, host-tested.
+    "wz-spi-scb",
     # Stage 5 (R311it) — the no_std SSOT for synthetic session handshake
     # wire bytes (craft_initsyn/opensyn/initack/frame). De-duplicates the
     # copies that were in the three wz-runtime-tokio session-FSM test files

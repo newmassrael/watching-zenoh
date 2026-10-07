@@ -3319,6 +3319,13 @@ name = "wz-session-wire-fixtures"
 version = "0.1.0"
 
 [[package]]
+name = "wz-spi-scb"
+version = "0.1.0"
+dependencies = [
+ "wz-runtime-core",
+]
+
+[[package]]
 name = "wz-statechart-bridge"
 version = "0.1.0"
 dependencies = [

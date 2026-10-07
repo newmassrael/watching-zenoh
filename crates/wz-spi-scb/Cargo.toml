@@ -1,0 +1,44 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later OR LicenseRef-watching-zenoh-Commercial
+# SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
+#
+# wz-spi-scb — the rules of an SPI master built on an Infineon SCB block, and the
+# `SpiTransfer` it presents, with the registers left to the board.
+#
+# A `#![no_std]` library, dependency-free but for the trait tier. It holds what is
+# true of the block whatever board it sits on and is therefore testable on a
+# host: how a clock rate becomes a divider and an oversample factor (the block's
+# data rate is its clock over the oversample factor, 4 to 16, and the clock is the
+# peripheral clock over a divider), what an exchange may be (one chip-select
+# assertion, full duplex, and no longer than the block's FIFO, because a transfer
+# that outruns the FIFO would release chip select in the middle of it), and the
+# `SpiTransfer` adapter that enforces both before the hardware is touched.
+#
+# What it does NOT hold is the hardware: pin routing, the peripheral clock and
+# the FIFO itself are the board's, behind the `ScbMaster` trait. The Zephyr image
+# that drives the CYT4BF's SCB3 implements it over the PDL.
+#
+# CLAIM: BUILT. The host tests check the arithmetic and the rules against models;
+# nothing here has been on a block's clock or a chip's chip select.
+
+[package]
+name = "wz-spi-scb"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+readme.workspace = true
+publish = false
+description = "SPI master rules for an Infineon SCB block: rate arithmetic, exchange limits and a SpiTransfer adapter, registers left to the board."
+
+[lib]
+name = "wz_spi_scb"
+path = "src/lib.rs"
+
+[dependencies]
+# The `SpiTransfer` seam. No other wz crate.
+wz-runtime-core = { path = "../wz-runtime-core" }
+
+[lints]
+workspace = true
