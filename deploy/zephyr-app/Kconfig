@@ -1,0 +1,8 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later OR LicenseRef-watching-zenoh-Commercial
+# SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
+
+mainmenu "wz Zephyr acceptor-session e2e"
+
+rsource "../zephyr-common/Kconfig.wz"
+
+source "Kconfig.zephyr"

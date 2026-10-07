@@ -1,0 +1,25 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later OR LicenseRef-watching-zenoh-Commercial
+# SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
+#
+# The Kconfig symbols every wz Zephyr application shares. An application's own
+# `Kconfig` sources this file, then Zephyr's (`source "Kconfig.zephyr"`).
+
+menu "wz Zephyr profile"
+
+config WZ_ENTROPY_BOARD_HOOK
+	bool "The board supplies its own entropy source"
+	help
+	  The session draws its cookie nonces and its cookie-signing key through
+	  `wzApplicationGetRandom`, which deploy/zephyr-common/wz_board_hooks.c answers
+	  from Zephyr's entropy device when the build has one.
+
+	  Select this on a board whose true random number generator is not a Zephyr
+	  entropy driver: the board's own source file then defines
+	  `int wz_board_entropy_fill(void *buf, size_t len)`, which fills the buffer
+	  from the hardware TRNG and returns 0, or a non-zero value when it cannot. It
+	  must fail rather than return what the buffer held.
+
+	  Never a way to silence the build on a board that has no source: a board
+	  with neither this nor an entropy driver does not compile, by design.
+
+endmenu

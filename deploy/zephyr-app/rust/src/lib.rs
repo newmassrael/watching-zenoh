@@ -2,7 +2,8 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
 //
 //! zephyr-app (Rust staticlib) — LAYER-2 Zephyr **cooperative single-task
-//! profile** e2e on QEMU `mps2/an385` (Cortex-M3).
+//! profile** acceptor-session e2e; the lane's reference board is QEMU
+//! `mps2/an385` (Cortex-M3), and nothing here names it.
 //!
 //! Path B (the chosen Zephyr integration shape, FreeRTOS-consistent): Zephyr is
 //! the kernel only; the Zephyr **main thread** hosts the wz-runtime-coop
@@ -11,8 +12,9 @@
 //! single-thread mode (`Z_FEATURE_MULTI_THREAD=0`). The C `main()` (src/main.c)
 //! calls [`wz_app_main`]; this crate is linked into the Zephyr image as a
 //! staticlib, with the kernel and POSIX symbols resolved at the image link
-//! (forced kept by the CMakeLists.txt `--undefined` contract, since the Zephyr
-//! libraries are scanned before librustlib.a).
+//! (forced kept by the `--undefined` contract in
+//! `deploy/zephyr-common/wz_zephyr_board.cmake`, since the Zephyr libraries are
+//! scanned before librustlib.a).
 //!
 //! R2917 — the workload is a zenoh SESSION over Zephyr's own sockets: the
 //! acceptor handshake to `Established` against a reactive peer, with the
@@ -33,16 +35,13 @@ extern crate alloc;
 use alloc::rc::Rc;
 use alloc::vec;
 use alloc::vec::Vec;
-use core::ffi::{c_char, CStr};
-use core::panic::PanicInfo;
-
-use critical_section::RawRestoreState;
 
 // R311y32 — the Zephyr profile seams arrive through the wz facade's
 // `platform-zephyr` gate (this deploy is the consumer that proves it), not a
 // direct wz-runtime-zephyr dep — mirroring mcu-freertos-demo's wz::runtime_freertos.
+use wz::runtime_zephyr::glue::{log, log_line};
 use wz::runtime_zephyr::net::{ZephyrUdpDriver, ZephyrUdpSocket};
-use wz::runtime_zephyr::{ZephyrAllocator, ZephyrClock, ZephyrEntropy, ZephyrEpoch};
+use wz::runtime_zephyr::{ZephyrClock, ZephyrEntropy, ZephyrEpoch};
 use wz_mcu_session_acceptor::{
     run_acceptor_e2e_on, AcceptorE2eOutcome, AcceptorTopology, DataMode, PEER_PORT, SESSION_PORT,
 };
@@ -52,75 +51,24 @@ use wz_session_core::link::BoxedLinkDriver;
 /// 2020-01-01T00:00:00Z: an epoch reading below this is not the time.
 const EARLIEST_PLAUSIBLE_UNIX_SECS: u64 = 1_577_836_800;
 
-/// Every Rust allocation (the session bundle, the executor, the socket link's
-/// receive buffer) routes through the Zephyr kernel heap. The deploy's
-/// prj.conf sets `CONFIG_HEAP_MEM_POOL_SIZE`.
-#[global_allocator]
-static ALLOC: ZephyrAllocator = ZephyrAllocator;
+// The allocator over the kernel heap (`CONFIG_HEAP_MEM_POOL_SIZE` in prj.conf),
+// the critical section over the kernel IRQ lock and the panic handler: the glue
+// every wz Zephyr image carries, written once in the profile crate.
+wz::runtime_zephyr::zephyr_image!();
 
-/// `CONFIG_SYS_CLOCK_TICKS_PER_SEC` pinned in prj.conf. The `ZephyrClock`
-/// timebase; 100 Hz = 10 ms tick resolution.
-const TICK_HZ: u32 = 100;
+/// The board's `CONFIG_SYS_CLOCK_TICKS_PER_SEC`, as this build was configured:
+/// the `ZephyrClock` timebase. Read from the Zephyr build, never typed here, so
+/// a board whose kernel ticks at another rate gets a clock that agrees with it.
+const TICK_HZ: u32 = wz::runtime_zephyr::tick_hz_from_build!();
 /// The loopback address both endpoints bind to.
 const LOOPBACK: [u8; 4] = [127, 0, 0, 1];
 
 extern "C" {
-    /// `printk("%s\n", msg)` — variadic printk is wrapped C-side (src/main.c)
-    /// so the Rust FFI target is a plain non-variadic symbol.
-    fn wz_log(msg: *const c_char);
-    /// `k_msleep(ms)` — `k_msleep` is `static inline` in the Zephyr headers
-    /// (no link symbol), so it too is wrapped C-side. The socket link's
-    /// `service` yields through it, and so does the panic handler.
-    fn wz_yield_ms(ms: i32);
-    /// `irq_lock()` — returns the prior IRQ key; wrapped C-side (the Zephyr
-    /// `irq_lock` macro expands to `arch_irq_lock()`, an inline, on this UP SoC).
-    fn wz_irq_lock() -> u32;
-    /// `irq_unlock(key)` — restores the IRQ state `wz_irq_lock` saved.
-    fn wz_irq_unlock(key: u32);
     /// R2918 — how many times the board's random hook served `ZephyrEntropy`
-    /// (src/main.c), printed with the verdict so a PASS also shows the session
-    /// drew its secrets through the seam rather than around it.
+    /// (deploy/zephyr-common/wz_board_hooks.c), printed with the verdict so a
+    /// PASS also shows the session drew its secrets through the seam rather than
+    /// around it.
     fn wz_random_draws() -> u32;
-}
-
-/// Log a formatted line via the Zephyr printk seam.
-fn log_line(line: alloc::string::String) {
-    let mut bytes = line.into_bytes();
-    bytes.push(0);
-    // SAFETY: `bytes` is nul-terminated and outlives the call; `wz_log` only
-    // reads it (printk %s).
-    unsafe { wz_log(bytes.as_ptr() as *const c_char) };
-}
-
-/// Zephyr-native `critical_section` impl backing wz-runtime-coop's
-/// `critical_section::Mutex` (the executor task pool / timer queue) and
-/// portable-atomic's `AtomicU64` fallback. It routes to the kernel's
-/// `irq_lock`/`irq_unlock` (BASEPRI/PRIMASK save+restore, which nests correctly
-/// and restores the *prior* IRQ state) via the C seam. It is defined in the
-/// staticlib ROOT crate so its `#[no_mangle] _critical_section_1_0_*` symbols
-/// are always bundled into the archive (rustc drops a dependency's impl object
-/// from a staticlib because the impl is reached only through those extern
-/// symbols, not the Rust call graph). `restore-state-u32` makes
-/// `RawRestoreState` the kernel IRQ key.
-struct ZephyrCriticalSection;
-critical_section::set_impl!(ZephyrCriticalSection);
-
-unsafe impl critical_section::Impl for ZephyrCriticalSection {
-    unsafe fn acquire() -> RawRestoreState {
-        wz_irq_lock()
-    }
-
-    unsafe fn release(key: RawRestoreState) {
-        wz_irq_unlock(key);
-    }
-}
-
-/// Log a static C string via the Zephyr printk seam.
-#[inline]
-fn log(msg: &CStr) {
-    // SAFETY: `msg` is a valid nul-terminated C string with 'static lifetime;
-    // `wz_log` only reads it (printk %s).
-    unsafe { wz_log(msg.as_ptr()) };
 }
 
 /// The e2e's two endpoints on Zephyr's net stack: the acceptor's socket link
@@ -251,17 +199,5 @@ pub extern "C" fn wz_app_main() -> i32 {
             log(c"wz: FAIL - no time since the epoch is available");
             1
         }
-    }
-}
-
-/// no_std panic handler — log + halt (yielding, not busy-spinning). The CI
-/// verdict is the presence of the `ZEPHYR-WZ PASS` sentinel under a timeout, so
-/// a halted (never-PASS) image correctly reads as FAIL.
-#[panic_handler]
-fn panic(_info: &PanicInfo) -> ! {
-    log(c"wz: PANIC");
-    loop {
-        // SAFETY: standard FFI; yields rather than pinning the QEMU CPU at 100%.
-        unsafe { wz_yield_ms(100) };
     }
 }
