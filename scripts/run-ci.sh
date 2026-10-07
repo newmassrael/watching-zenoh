@@ -10852,16 +10852,17 @@ layer_c1r_mcu_multicast_e2e() {
 # tested here the day it is excluded there. The three with dedicated lanes run
 # again at their defaults, which is the price of not keeping a second list.
 #
-# Guarded for the one member no other lane reaches: its lib holds 6 tests
+# Guarded for the one member no other lane reaches: its lib holds 8 tests
 # (3 at R2948, plus the three const-parse tests the board-argument macros
-# brought at R3075), and a cfg slip that emptied them would still exit 0.
+# brought at R3075, plus the two station-address tests of the same round), and
+# a cfg slip that emptied them would still exit 0.
 layer_c1ns_nostd_members_isolated() {
     local nostd
     nostd="$(python3 scripts/lib/nostd_workspace_members.py)" || return 1
     for member in $nostd; do
         (cd crates && cargo test -p "$member" --quiet) || return 1
     done
-    _runci_guarded_test "C1ns zephyr lib" 6 \
+    _runci_guarded_test "C1ns zephyr lib" 8 \
         cargo test -p wz-runtime-zephyr --lib --quiet || return 1
 }
 
