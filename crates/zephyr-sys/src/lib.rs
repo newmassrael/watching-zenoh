@@ -28,8 +28,8 @@
 ///
 /// The same rule as the kernel symbols above: these are REAL functions, not
 /// the `zsock_*` names, which are `__syscall` wrappers whose link symbol
-/// depends on `CONFIG_USERSPACE`. `socket` / `bind` / `sendto` / `recvfrom`
-/// are defined in `subsys/portability/posix/options/net.c`
+/// depends on `CONFIG_USERSPACE`. `socket` / `bind` / `getsockname` / `sendto`
+/// / `recvfrom` are defined in `subsys/portability/posix/options/net.c`
 /// (`CONFIG_POSIX_NETWORKING`); `poll` / `close` in `device_io.c`
 /// (`CONFIG_POSIX_DEVICE_IO`).
 ///
@@ -74,6 +74,10 @@ pub mod socket {
     extern "C" {
         pub fn socket(family: c_int, kind: c_int, proto: c_int) -> c_int;
         pub fn bind(sock: c_int, addr: *const SockaddrIn, addrlen: SockLen) -> c_int;
+        /// The address a socket is bound to. For a bind on port 0 this is where
+        /// the stack's choice of port is read back (`options/net.c`, like the
+        /// rest of the group).
+        pub fn getsockname(sock: c_int, addr: *mut SockaddrIn, addrlen: *mut SockLen) -> c_int;
         pub fn sendto(
             sock: c_int,
             buf: *const c_void,

@@ -33,8 +33,8 @@ use wz_session_core::link::{
 };
 use wz_session_core::reliability::Reliability;
 use zephyr_sys::socket::{
-    bind, close, poll, recvfrom, sendto, socket, PollFd, SockLen, SockaddrIn, AF_INET, IPPROTO_UDP,
-    POLLIN, SOCK_DGRAM,
+    bind, close, getsockname, poll, recvfrom, sendto, socket, PollFd, SockLen, SockaddrIn, AF_INET,
+    IPPROTO_UDP, POLLIN, SOCK_DGRAM,
 };
 
 extern "C" {
@@ -42,6 +42,67 @@ extern "C" {
     /// supplies it as a real symbol; the deploy's cooperative loop yields
     /// through the same seam.
     fn wz_yield_ms(ms: i32);
+
+    /// The board's own IPv4 address on the interface the sessions run on: write
+    /// its four octets, most significant first, to `out[0..4]` and return 1, or
+    /// return 0 while it has none (a DHCP lease not yet granted, a link not up).
+    /// A board serves it from the net stack's interface, so the address is
+    /// whatever the interface really holds, never a constant of the firmware.
+    fn wzApplicationGetIpv4Address(out: *mut u8) -> i32;
+
+    /// The node's zenoh id: write up to `cap` bytes to `out` and return how many
+    /// (1 to 16), or return 0 when the board has no identity to give. A board
+    /// serves it from the link-layer address of the interface its sessions run
+    /// on, which is unique per NIC and the same on every boot.
+    fn wzApplicationGetZid(out: *mut u8, cap: usize) -> usize;
+}
+
+/// The longest zenoh id: 16 bytes.
+pub const ZID_MAX: usize = 16;
+
+/// How often [`await_board_ipv4`] asks the board again.
+const ADDRESS_POLL_MS: u32 = 100;
+
+/// The board's IPv4 address, if its interface has one now.
+///
+/// The board answering 1 with 0.0.0.0 is read as no address: an unspecified
+/// address is what a bound-to-nothing interface reports, and a link that names
+/// itself `udp/0.0.0.0:<port>` is not one a peer can reach.
+pub fn board_ipv4() -> Option<[u8; 4]> {
+    let mut octets = [0u8; 4];
+    // SAFETY: the hook writes four bytes through a pointer to a live local.
+    let have = unsafe { wzApplicationGetIpv4Address(octets.as_mut_ptr()) };
+    (have == 1 && octets != [0; 4]).then_some(octets)
+}
+
+/// The node's zenoh id as the board gives it, 1 to [`ZID_MAX`] bytes, or `None`
+/// when it has none. Never a constant of the firmware: two boards running the
+/// same image must not claim the same id on one network.
+pub fn board_zid() -> Option<Vec<u8>> {
+    let mut id = [0u8; ZID_MAX];
+    // SAFETY: the hook writes at most `ZID_MAX` bytes through a pointer to a
+    // live local of that size, and returns how many.
+    let len = unsafe { wzApplicationGetZid(id.as_mut_ptr(), ZID_MAX) };
+    (1..=ZID_MAX).contains(&len).then(|| id[..len].to_vec())
+}
+
+/// Wait up to `budget_ms` for the board to have an IPv4 address, yielding to the
+/// net stack between asks, and return it. `None` is a board that never got one
+/// (no DHCP server answered, no link): the caller reports that, since a node
+/// with no address has nothing to listen on and no locator to advertise.
+pub fn await_board_ipv4(budget_ms: u32) -> Option<[u8; 4]> {
+    let mut waited = 0;
+    loop {
+        if let Some(address) = board_ipv4() {
+            return Some(address);
+        }
+        if waited >= budget_ms {
+            return None;
+        }
+        // SAFETY: the board's `k_msleep` seam; blocks this thread for the poll.
+        unsafe { wz_yield_ms(ADDRESS_POLL_MS as i32) };
+        waited += ADDRESS_POLL_MS;
+    }
 }
 
 /// The largest UDP payload the session receives in one datagram — the
@@ -57,6 +118,12 @@ pub enum ZephyrNetError {
     Socket(c_int),
     /// `bind` returned this.
     Bind(c_int),
+    /// `getsockname` returned this when the port a bind on port 0 was given
+    /// was read back.
+    SockName(c_int),
+    /// A bind on port 0 succeeded and the stack reported port 0 all the same,
+    /// so there is no port for the link's locator to name.
+    NoPortChosen,
     /// `sendto` took this many bytes (negative: refused) of a datagram.
     Send(isize),
     /// `poll` returned this.
@@ -67,7 +134,8 @@ pub enum ZephyrNetError {
 
 /// One IPv4 UDP socket on Zephyr's net stack, bound to an explicit local
 /// address — the address the link's locator names, as zenoh-pico listens on
-/// `udp/<ip>:<port>`.
+/// `udp/<ip>:<port>`. A bind on port 0 lets the stack choose, and
+/// [`ZephyrUdpSocket::local`] then names the port it chose, never the 0.
 pub struct ZephyrUdpSocket {
     fd: c_int,
     local: ([u8; 4], u16),
@@ -82,7 +150,8 @@ fn sockaddr(addr: [u8; 4], port: u16) -> SockaddrIn {
 }
 
 impl ZephyrUdpSocket {
-    /// Open a UDP socket and bind it to `addr:port`.
+    /// Open a UDP socket and bind it to `addr:port`; port 0 has the stack
+    /// choose one, as a dialling link needs.
     pub fn bind(addr: [u8; 4], port: u16) -> Result<Self, ZephyrNetError> {
         // SAFETY: plain FFI with value arguments.
         let fd = unsafe { socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP) };
@@ -90,7 +159,7 @@ impl ZephyrUdpSocket {
             return Err(ZephyrNetError::Socket(fd));
         }
         // Owned from here, so an early return closes it.
-        let this = Self {
+        let mut this = Self {
             fd,
             local: (addr, port),
         };
@@ -100,7 +169,28 @@ impl ZephyrUdpSocket {
         if rc != 0 {
             return Err(ZephyrNetError::Bind(rc));
         }
+        if port == 0 {
+            // The locators the link reports and the source every reply comes
+            // from name this port; keeping the 0 that was asked for would
+            // render `udp/<ip>:0` for a link that has a real one.
+            this.local.1 = this.chosen_port()?;
+        }
         Ok(this)
+    }
+
+    /// The port the stack bound this socket to.
+    fn chosen_port(&self) -> Result<u16, ZephyrNetError> {
+        let mut name = SockaddrIn::default();
+        let mut len = size_of::<SockaddrIn>() as SockLen;
+        // SAFETY: `name` and `len` are live and writable, `len` is `name`'s size.
+        let rc = unsafe { getsockname(self.fd, &mut name, &mut len) };
+        if rc != 0 {
+            return Err(ZephyrNetError::SockName(rc));
+        }
+        match u16::from_be(name.sin_port) {
+            0 => Err(ZephyrNetError::NoPortChosen),
+            port => Ok(port),
+        }
     }
 
     /// The `(address, port)` this socket is bound to.
@@ -215,20 +305,42 @@ pub struct ZephyrUdpDriver {
 impl ZephyrUdpDriver {
     /// An acceptor's link: no peer until the first datagram names one.
     pub fn acceptor(socket: ZephyrUdpSocket) -> Self {
-        Self::with_peer(socket, None)
+        Self::acceptor_with_capacity(socket, UDP_RX_CAPACITY)
     }
 
     /// An initiator's link: replies and first sends go to `peer`.
     pub fn initiator(socket: ZephyrUdpSocket, peer: ([u8; 4], u16)) -> Self {
-        Self::with_peer(socket, Some(peer))
+        Self::initiator_with_capacity(socket, peer, UDP_RX_CAPACITY)
     }
 
-    fn with_peer(socket: ZephyrUdpSocket, peer: Option<([u8; 4], u16)>) -> Self {
+    /// An acceptor's link whose receive buffer holds `rx_capacity` bytes: what a
+    /// node that runs several links at once sizes to the batch it negotiates,
+    /// rather than to the largest datagram UDP can carry ([`UDP_RX_CAPACITY`]).
+    /// A datagram longer than that is truncated by the stack, which the session
+    /// reads as a bad frame.
+    pub fn acceptor_with_capacity(socket: ZephyrUdpSocket, rx_capacity: usize) -> Self {
+        Self::with_peer(socket, None, rx_capacity)
+    }
+
+    /// [`ZephyrUdpDriver::initiator`] with a receive buffer of `rx_capacity` bytes.
+    pub fn initiator_with_capacity(
+        socket: ZephyrUdpSocket,
+        peer: ([u8; 4], u16),
+        rx_capacity: usize,
+    ) -> Self {
+        Self::with_peer(socket, Some(peer), rx_capacity)
+    }
+
+    fn with_peer(
+        socket: ZephyrUdpSocket,
+        peer: Option<([u8; 4], u16)>,
+        rx_capacity: usize,
+    ) -> Self {
         let driver = Self {
             socket,
             peer: Cell::new(None),
             endpoints: OnceCell::new(),
-            rx_buf: RefCell::new(vec![0u8; UDP_RX_CAPACITY]),
+            rx_buf: RefCell::new(vec![0u8; rx_capacity]),
             rx_error: Cell::new(None),
         };
         if let Some(peer) = peer {

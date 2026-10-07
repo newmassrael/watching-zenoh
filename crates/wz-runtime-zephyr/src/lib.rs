@@ -27,7 +27,10 @@
 //!    and the session's link over them. Networking used to reuse `NO_SYS`
 //!    lwIP via `wz-link-lwip`, as the bare-metal and FreeRTOS profiles do,
 //!    which has no netif over Zephyr's drivers; zenoh-pico's Zephyr port
-//!    uses Zephyr's sockets, and so does this profile now.
+//!    uses Zephyr's sockets, and so does this profile now. [`links`] is the same
+//!    sockets as the session shell's `SessionLinks` seam (`ZephyrLinks`: an
+//!    accepting link and a dialling one), which is what lets a node that
+//!    listens and dials, the admin node, run over them.
 //! 4. R2918 — [`ZephyrEntropy`], the session core's `EntropySource`, over the
 //!    board hook `wzApplicationGetRandom`, which a board serves from its RNG
 //!    (`sys_rand_get`, the call zenoh-pico's Zephyr port makes).
@@ -46,7 +49,64 @@
 
 extern crate alloc;
 
+// The host witnesses at the foot of this file panic-test a const parser, which
+// needs the standard library's unwinding. Never part of a production build.
+#[cfg(test)]
+extern crate std;
+
+pub mod glue;
+pub mod links;
 pub mod net;
+
+pub use links::ZephyrLinks;
+
+/// A Zephyr firmware's image glue, written once in its crate root: the global
+/// allocator over the kernel heap, a `critical_section` implementation over the
+/// kernel's IRQ lock, and the panic handler ([`glue::halt_after_panic`]).
+///
+/// The `critical_section` implementation is expanded INTO the firmware's crate
+/// because it has to be there: a staticlib bundles its root crate's
+/// `#[no_mangle]` symbols but drops a dependency's implementation object, which
+/// is reached only through the extern `_critical_section_1_0_*` symbols and never
+/// through the Rust call graph. The firmware therefore depends on
+/// `critical-section` with `restore-state-u32` (the kernel's IRQ key is a
+/// `u32`), as this macro's expansion names it.
+///
+/// ```ignore
+/// wz_runtime_zephyr::zephyr_image!();
+/// ```
+#[macro_export]
+macro_rules! zephyr_image {
+    () => {
+        // Every Rust allocation (the session bundle, the executor, the socket
+        // links' receive buffers) goes through the Zephyr kernel heap, which the
+        // firmware's prj.conf sizes with `CONFIG_HEAP_MEM_POOL_SIZE`.
+        #[global_allocator]
+        static WZ_ZEPHYR_ALLOCATOR: $crate::ZephyrAllocator = $crate::ZephyrAllocator;
+
+        struct WzZephyrCriticalSection;
+        critical_section::set_impl!(WzZephyrCriticalSection);
+
+        // SAFETY: `irq_lock` / `irq_unlock` save and restore the CPU's prior IRQ
+        // state, which nests correctly and is exactly the contract
+        // `critical_section::Impl` asks for; the key is the `u32` it returns.
+        unsafe impl critical_section::Impl for WzZephyrCriticalSection {
+            unsafe fn acquire() -> critical_section::RawRestoreState {
+                $crate::glue::irq_lock()
+            }
+
+            unsafe fn release(key: critical_section::RawRestoreState) {
+                // SAFETY: `key` came from the matching `acquire` above.
+                unsafe { $crate::glue::irq_unlock(key) };
+            }
+        }
+
+        #[panic_handler]
+        fn wz_zephyr_panic(_info: &core::panic::PanicInfo) -> ! {
+            $crate::glue::halt_after_panic()
+        }
+    };
+}
 
 use core::alloc::{GlobalAlloc, Layout};
 use core::ffi::c_void;
@@ -79,6 +139,188 @@ impl<const TICK_HZ: u32> ClockSource for ZephyrClock<TICK_HZ> {
         let ticks = unsafe { sys_clock_tick_get() } as u64;
         ticks * 1_000_000 / TICK_HZ as u64
     }
+}
+
+/// The kernel's tick rate as a build produced it, from the decimal text
+/// `WZ_TICKS_PER_SEC` carries. [`ZephyrClock`]'s rate is a type parameter, so a
+/// firmware must write it down at compile time, and a constant typed into the
+/// firmware is right only while it agrees with the board's
+/// `CONFIG_SYS_CLOCK_TICKS_PER_SEC`: the clock then runs fast or slow with every
+/// timeout scaled by the error and nothing failing. The board's build hands the
+/// Kconfig value to cargo in that variable, and [`tick_hz_from_build!`] reads it
+/// here, so there is one number and it is the kernel's.
+///
+/// A value that is not a positive decimal fitting `u32` stops the compile: no
+/// rate is a worse answer than a wrong one.
+pub const fn parse_tick_hz(text: &str) -> u32 {
+    let digits = text.as_bytes();
+    assert!(!digits.is_empty(), "WZ_TICKS_PER_SEC is empty");
+    let mut value: u64 = 0;
+    let mut at = 0;
+    while at < digits.len() {
+        let digit = digits[at];
+        assert!(
+            digit.is_ascii_digit(),
+            "WZ_TICKS_PER_SEC is not a decimal number"
+        );
+        value = value * 10 + (digit - b'0') as u64;
+        assert!(
+            value <= u32::MAX as u64,
+            "WZ_TICKS_PER_SEC does not fit u32"
+        );
+        at += 1;
+    }
+    assert!(value > 0, "WZ_TICKS_PER_SEC is zero");
+    value as u32
+}
+
+/// The tick rate this firmware was built for: `CONFIG_SYS_CLOCK_TICKS_PER_SEC`
+/// of the Zephyr build that compiled it, as `deploy/zephyr-common` passes it in
+/// `WZ_TICKS_PER_SEC`. The variable is read where the macro is USED, so the
+/// firmware crate's own compile sees it and cargo reruns that compile when it
+/// changes; a build that does not set it fails to compile.
+///
+/// ```ignore
+/// const TICK_HZ: u32 = wz_runtime_zephyr::tick_hz_from_build!();
+/// let clock = wz_runtime_zephyr::ZephyrClock::<TICK_HZ>;
+/// ```
+#[macro_export]
+macro_rules! tick_hz_from_build {
+    () => {
+        $crate::parse_tick_hz(env!(
+            "WZ_TICKS_PER_SEC",
+            "WZ_TICKS_PER_SEC is not set: build through the board's west build, \
+             which passes CONFIG_SYS_CLOCK_TICKS_PER_SEC"
+        ))
+    };
+}
+
+/// A decimal `u32` (zero allowed), readable at compile time, for the plain integer
+/// values a board states in Kconfig (a divider, a wait in milliseconds): the same
+/// arrangement as [`parse_tick_hz`] without its refusal of zero, which is a
+/// rate-specific rule.
+pub const fn parse_u32(text: &str) -> u32 {
+    let digits = text.as_bytes();
+    assert!(!digits.is_empty(), "a build integer is empty");
+    let mut value: u64 = 0;
+    let mut at = 0;
+    while at < digits.len() {
+        let digit = digits[at];
+        assert!(
+            digit.is_ascii_digit(),
+            "a build integer is not a decimal number"
+        );
+        value = value * 10 + (digit - b'0') as u64;
+        assert!(value <= u32::MAX as u64, "a build integer does not fit u32");
+        at += 1;
+    }
+    value as u32
+}
+
+/// The integer the board's build named in environment variable `$name`, at
+/// compile time. A build that does not set it fails to compile.
+#[macro_export]
+macro_rules! u32_from_build {
+    ($name:literal) => {
+        $crate::parse_u32(env!(
+            $name,
+            concat!($name, " is not set: build through the board's west build")
+        ))
+    };
+}
+
+/// A dotted IPv4 address (`"10.0.0.2"`) as its four octets, readable at compile
+/// time, for the build-configuration values a board states in Kconfig and the
+/// board's build hands to cargo in an environment variable. The same arrangement
+/// as [`parse_tick_hz`]: the address is the board's configuration's, not a
+/// constant of the firmware, and a value that is not a valid address stops the
+/// compile.
+pub const fn parse_ipv4(text: &str) -> [u8; 4] {
+    let bytes = text.as_bytes();
+    let mut octets = [0u8; 4];
+    let mut index = 0;
+    let mut value: u32 = 0;
+    let mut digits = 0;
+    let mut at = 0;
+    while at < bytes.len() {
+        let c = bytes[at];
+        if c == b'.' {
+            assert!(digits > 0, "an IPv4 octet is empty");
+            assert!(index < 3, "an IPv4 address has four octets");
+            octets[index] = value as u8;
+            index += 1;
+            value = 0;
+            digits = 0;
+        } else {
+            assert!(c.is_ascii_digit(), "an IPv4 address is digits and dots");
+            value = value * 10 + (c - b'0') as u32;
+            assert!(value <= 255, "an IPv4 octet is above 255");
+            digits += 1;
+        }
+        at += 1;
+    }
+    assert!(digits > 0, "an IPv4 octet is empty");
+    assert!(index == 3, "an IPv4 address has four octets");
+    octets[3] = value as u8;
+    octets
+}
+
+/// A MAC address (`"02:00:5e:00:00:01"`) as its six bytes, readable at compile
+/// time: two hex digits per byte, colon separated.
+pub const fn parse_mac(text: &str) -> [u8; 6] {
+    let bytes = text.as_bytes();
+    assert!(
+        bytes.len() == 17,
+        "a MAC address is six colon-separated hex bytes"
+    );
+    let mut mac = [0u8; 6];
+    let mut i = 0;
+    while i < 6 {
+        let at = i * 3;
+        mac[i] = (hex_digit(bytes[at]) << 4) | hex_digit(bytes[at + 1]);
+        if i < 5 {
+            assert!(bytes[at + 2] == b':', "MAC bytes are separated by colons");
+        }
+        i += 1;
+    }
+    mac
+}
+
+const fn hex_digit(c: u8) -> u8 {
+    match c {
+        b'0'..=b'9' => c - b'0',
+        b'a'..=b'f' => c - b'a' + 10,
+        b'A'..=b'F' => c - b'A' + 10,
+        _ => panic!("a MAC address is hex digits"),
+    }
+}
+
+/// The IPv4 address the board's build named in environment variable `$name`, as
+/// four octets, at compile time. A build that does not set it fails to compile.
+///
+/// ```ignore
+/// const ADDRESS: [u8; 4] = wz_runtime_zephyr::ipv4_from_build!("WZ_STATIC_IPV4");
+/// ```
+#[macro_export]
+macro_rules! ipv4_from_build {
+    ($name:literal) => {
+        $crate::parse_ipv4(env!(
+            $name,
+            concat!($name, " is not set: build through the board's west build")
+        ))
+    };
+}
+
+/// The MAC address the board's build named in environment variable `$name`, as
+/// six bytes, at compile time. A build that does not set it fails to compile.
+#[macro_export]
+macro_rules! mac_from_build {
+    ($name:literal) => {
+        $crate::parse_mac(env!(
+            $name,
+            concat!($name, " is not set: build through the board's west build")
+        ))
+    };
 }
 
 /// The Zephyr profile's runtime: the wz-runtime-coop cooperative executor (the
@@ -254,6 +496,73 @@ mod tests {
             *nanos = EPOCH_NANOS.load(Ordering::SeqCst);
         }
         EPOCH_RC.load(Ordering::SeqCst)
+    }
+
+    /// The rate a build hands over is read as the number it spells, in a const
+    /// context (the firmware writes it as a type parameter), and anything that is
+    /// not a positive decimal fitting `u32` is refused rather than guessed.
+    #[test]
+    fn a_build_tick_rate_is_read_exactly_and_a_bad_one_is_refused() {
+        const HUNDRED: u32 = parse_tick_hz("100");
+        assert_eq!(HUNDRED, 100);
+        assert_eq!(parse_tick_hz("1000"), 1000);
+        assert_eq!(parse_tick_hz("4294967295"), u32::MAX);
+        for bad in ["", "0", "10 0", "1e2", "-5", "4294967296", "0x64"] {
+            let refused = std::panic::catch_unwind(|| parse_tick_hz(bad)).is_err();
+            assert!(refused, "{bad:?} must not be accepted as a tick rate");
+        }
+    }
+
+    #[test]
+    fn a_build_integer_is_read_exactly_and_zero_is_allowed() {
+        const WAIT: u32 = parse_u32("5000");
+        assert_eq!(WAIT, 5000);
+        assert_eq!(parse_u32("0"), 0, "unlike a tick rate, zero is a value");
+        assert_eq!(parse_u32("4294967295"), u32::MAX);
+        for bad in ["", "-1", "1 0", "0x10", "4294967296", "1.5"] {
+            let refused = std::panic::catch_unwind(|| parse_u32(bad)).is_err();
+            assert!(refused, "{bad:?} must not be accepted as an integer");
+        }
+    }
+
+    /// The address and the MAC a board's build names are read at compile time as
+    /// the numbers they spell, and anything that is not one is refused.
+    #[test]
+    fn a_build_address_and_mac_are_read_exactly_and_a_bad_one_is_refused() {
+        const ADDRESS: [u8; 4] = parse_ipv4("10.0.2.15");
+        assert_eq!(ADDRESS, [10, 0, 2, 15]);
+        assert_eq!(parse_ipv4("255.255.255.0"), [255, 255, 255, 0]);
+        assert_eq!(parse_ipv4("0.0.0.0"), [0, 0, 0, 0]);
+        for bad in [
+            "",
+            "1.2.3",
+            "1.2.3.4.5",
+            "1..2.3",
+            "256.1.1.1",
+            "a.b.c.d",
+            "1.2.3.",
+            ".1.2.3",
+        ] {
+            let refused = std::panic::catch_unwind(|| parse_ipv4(bad)).is_err();
+            assert!(refused, "{bad:?} must not be accepted as an address");
+        }
+
+        const MAC: [u8; 6] = parse_mac("02:00:5e:00:00:01");
+        assert_eq!(MAC, [0x02, 0x00, 0x5e, 0x00, 0x00, 0x01]);
+        assert_eq!(
+            parse_mac("FF:aa:Bb:00:10:0F"),
+            [0xFF, 0xAA, 0xBB, 0x00, 0x10, 0x0F]
+        );
+        for bad in [
+            "",
+            "02:00:5e:00:00",
+            "02-00-5e-00-00-01",
+            "02:00:5e:00:00:0g",
+            "02:00:5e:00:00:001",
+        ] {
+            let refused = std::panic::catch_unwind(|| parse_mac(bad)).is_err();
+            assert!(refused, "{bad:?} must not be accepted as a MAC");
+        }
     }
 
     #[test]
