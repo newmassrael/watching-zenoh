@@ -1253,7 +1253,7 @@ fn trio_with(
 
 /// The libraries of a trio's three nodes, as the row's placements name them: the real library
 /// first, then wz in one place and in all of them.
-fn placements<'a>(programs: &'a Programs) -> [(&'static str, [&'a Built; 3]); 5] {
+fn placements(programs: &Programs) -> [(&'static str, [&Built; 3]); 5] {
     let (r, w) = (&programs.reference, &programs.wz);
     [
         ("the real library everywhere", [r, r, r]),

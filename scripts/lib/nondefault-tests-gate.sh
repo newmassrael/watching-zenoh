@@ -532,6 +532,7 @@ router-connect-reconcile,transport-link-tcp,transport-unicast|session_lifecycle_
         router-connect-reconcile,\
         router-multicast-faces,\
         routing-accept,\
+        routing-gossip,\
         routing-interceptor-hotreload,\
         routing-interest-pending-gc,\
         routing-namespace,\
