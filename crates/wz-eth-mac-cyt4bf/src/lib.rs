@@ -505,7 +505,7 @@ impl<B: Board, const RX: usize, const TX: usize> Cyt4bfMac<B, RX, TX> {
         }
     }
 
-    /// Re-read the link every [`LINK_POLL_MS`] and bring the MAC in step with it.
+    /// Re-read the link every `LINK_POLL_MS` and bring the MAC in step with it.
     /// A firmware calls this from its main loop with a millisecond clock; between
     /// polls it costs nothing. Does nothing until a PHY has been found.
     pub fn service_link(&mut self, now_ms: u64) -> LinkEvent {
