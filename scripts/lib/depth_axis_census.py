@@ -2580,7 +2580,14 @@ PIN_NO_SYMBOL = 0
 # listening drop-ins do not scout. `transport-shm` is not touched and is still PARTIAL beside it.
 # READ off the census's own FAIL line, `wz citations: 202 against a pin of 188`, for the reason
 # the R3062 note gives.
-PIN_WZ_CITATIONS = 202
+#
+# R3072 -- 202 -> 210, one atom. `api-compat-c`'s reason gains the UPDATE that a session that
+# states no listener binds the one its role binds by default: it names the config's own default
+# table, the function that reads the endpoint a session listens on, the stated-empty shape of the
+# Hello differential, the two Layer M rows, and the group the roles file gave each test.
+# `transport-shm` is not touched and is still PARTIAL beside it. READ off the census's own FAIL
+# line, `wz citations: 210 against a pin of 202`, for the reason the R3062 note gives.
+PIN_WZ_CITATIONS = 210
 # R2626 — 44 -> 42, and this one is worth a sentence because it HELD through
 # every earlier retirement in this run (R2612, R2622). `time-hlc`'s reason is the
 # first retiree carrying AMBIGUOUS citations of its own: its oldest clauses cite
