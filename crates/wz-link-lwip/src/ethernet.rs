@@ -24,7 +24,7 @@ use core::cell::RefCell;
 use core::ffi::c_void;
 use core::ptr::NonNull;
 
-use lwip_sys::{netif, wz_ethif_add, wz_ethif_input};
+use lwip_sys::{netif, wz_ethif_add, wz_ethif_input, wz_ethif_is_default};
 
 use crate::LwipLink;
 
@@ -52,6 +52,12 @@ pub struct Ipv4Config {
     /// Its network mask.
     pub netmask: [u8; 4],
     /// The default gateway; `[0, 0, 0, 0]` for none.
+    ///
+    /// This is also what decides the DEFAULT ROUTE, which a node with more than
+    /// one interface must not leave to the order they were added in: the first
+    /// interface added with a gateway becomes the default route and a later one
+    /// never moves it, and an interface with none is on-link only and is never
+    /// the default route.
     pub gateway: [u8; 4],
 }
 
@@ -89,8 +95,15 @@ unsafe extern "C" fn transmit_trampoline<M: EthernetMac>(
 }
 
 impl<M: EthernetMac + 'static> EthernetIf<M> {
-    /// Add `mac` to lwIP as an Ethernet interface with `ip`, bring it and
-    /// its carrier up, and make it the default route.
+    /// Add `mac` to lwIP as an Ethernet interface with `ip`, and bring it and
+    /// its carrier up. It becomes the default route only if it has a gateway
+    /// and nothing else holds the route (see [`Ipv4Config::gateway`]).
+    ///
+    /// A node may add as many interfaces as the shim's table holds, two in the
+    /// default build, which is what a board with an onboard Ethernet and a
+    /// 10BASE-T1S MAC-PHY needs. A socket bound on `0.0.0.0` hears every one of
+    /// them, and a send leaves by the interface whose network holds the
+    /// destination.
     ///
     /// Takes the link as the witness that lwIP is initialised. The MAC is
     /// moved into storage that lives for the rest of the program, because
@@ -145,6 +158,13 @@ impl<M: EthernetMac + 'static> EthernetIf<M> {
     pub fn with_mac<R>(&self, f: impl FnOnce(&mut M) -> R) -> R {
         f(&mut self.shared.mac.borrow_mut())
     }
+
+    /// Whether this interface is lwIP's default route, which is where a send
+    /// to a destination on no interface's network goes.
+    pub fn is_default_route(&self) -> bool {
+        // SAFETY: the netif is lwIP's for the program's lifetime.
+        unsafe { wz_ethif_is_default(self.netif.as_ptr()) != 0 }
+    }
 }
 
 #[cfg(test)]
@@ -164,10 +184,35 @@ mod tests {
         inbox: Rc<RefCell<VecDeque<Vec<u8>>>>,
     }
 
-    const NODE_MAC: [u8; 6] = [0x02, 0, 0, 0, 0, 0x0a];
-    const FAR_MAC: [u8; 6] = [0x02, 0, 0, 0, 0, 0x0b];
-    const NODE_IP: [u8; 4] = [10, 9, 0, 1];
-    const FAR_IP: [u8; 4] = [10, 9, 0, 2];
+    /// One cable's two ends: the node's interface and the far host on it.
+    #[derive(Clone, Copy)]
+    struct Net {
+        node_mac: [u8; 6],
+        node_ip: [u8; 4],
+        far_mac: [u8; 6],
+        far_ip: [u8; 4],
+    }
+
+    /// The first network, which the single-interface test uses.
+    const NET_A: Net = Net {
+        node_mac: [0x02, 0, 0, 0, 0, 0x0a],
+        node_ip: [10, 9, 0, 1],
+        far_mac: [0x02, 0, 0, 0, 0, 0x0b],
+        far_ip: [10, 9, 0, 2],
+    };
+    /// A second, on another subnet and with other MACs: what a node with two
+    /// links (an onboard Ethernet and a 10BASE-T1S MAC-PHY, say) is attached to.
+    const NET_B: Net = Net {
+        node_mac: [0x02, 0, 0, 0, 0, 0x1a],
+        node_ip: [10, 9, 1, 1],
+        far_mac: [0x02, 0, 0, 0, 0, 0x1b],
+        far_ip: [10, 9, 1, 2],
+    };
+
+    const NODE_MAC: [u8; 6] = NET_A.node_mac;
+    const FAR_MAC: [u8; 6] = NET_A.far_mac;
+    const NODE_IP: [u8; 4] = NET_A.node_ip;
+    const FAR_IP: [u8; 4] = NET_A.far_ip;
 
     fn ipv4_checksum(header: &[u8]) -> u16 {
         let mut sum: u32 = header
@@ -180,35 +225,40 @@ mod tests {
         !(sum as u16)
     }
 
-    /// The far host's ARP reply: `FAR_IP` is at `FAR_MAC`.
-    fn arp_reply() -> Vec<u8> {
+    /// The far host's ARP reply on `net`: its address is at its MAC.
+    fn arp_reply_on(net: Net) -> Vec<u8> {
         let mut f = Vec::new();
-        f.extend_from_slice(&NODE_MAC);
-        f.extend_from_slice(&FAR_MAC);
+        f.extend_from_slice(&net.node_mac);
+        f.extend_from_slice(&net.far_mac);
         f.extend_from_slice(&[0x08, 0x06, 0x00, 0x01, 0x08, 0x00, 6, 4, 0x00, 0x02]);
-        f.extend_from_slice(&FAR_MAC);
-        f.extend_from_slice(&FAR_IP);
-        f.extend_from_slice(&NODE_MAC);
-        f.extend_from_slice(&NODE_IP);
+        f.extend_from_slice(&net.far_mac);
+        f.extend_from_slice(&net.far_ip);
+        f.extend_from_slice(&net.node_mac);
+        f.extend_from_slice(&net.node_ip);
         f
     }
 
-    /// A UDP datagram from the far host, `FAR_IP:src` to `NODE_IP:dst`,
-    /// with no UDP checksum (zero, which IPv4 allows).
-    fn udp_frame(src: u16, dst: u16, payload: &[u8]) -> Vec<u8> {
+    /// The far host's ARP reply: `FAR_IP` is at `FAR_MAC`.
+    fn arp_reply() -> Vec<u8> {
+        arp_reply_on(NET_A)
+    }
+
+    /// A UDP datagram from the far host on `net`, `far_ip:src` to
+    /// `node_ip:dst`, with no UDP checksum (zero, which IPv4 allows).
+    fn udp_frame_on(net: Net, src: u16, dst: u16, payload: &[u8]) -> Vec<u8> {
         let udp_len = 8 + payload.len() as u16;
         let total = 20 + udp_len;
         let mut ip = Vec::new();
         ip.extend_from_slice(&[0x45, 0x00]);
         ip.extend_from_slice(&total.to_be_bytes());
         ip.extend_from_slice(&[0, 0, 0, 0, 64, 17, 0, 0]);
-        ip.extend_from_slice(&FAR_IP);
-        ip.extend_from_slice(&NODE_IP);
+        ip.extend_from_slice(&net.far_ip);
+        ip.extend_from_slice(&net.node_ip);
         let sum = ipv4_checksum(&ip);
         ip[10..12].copy_from_slice(&sum.to_be_bytes());
         let mut f = Vec::new();
-        f.extend_from_slice(&NODE_MAC);
-        f.extend_from_slice(&FAR_MAC);
+        f.extend_from_slice(&net.node_mac);
+        f.extend_from_slice(&net.far_mac);
         f.extend_from_slice(&[0x08, 0x00]);
         f.extend_from_slice(&ip);
         f.extend_from_slice(&src.to_be_bytes());
@@ -217,6 +267,11 @@ mod tests {
         f.extend_from_slice(&[0, 0]);
         f.extend_from_slice(payload);
         f
+    }
+
+    /// A UDP datagram from the far host: `FAR_IP:src` to `NODE_IP:dst`.
+    fn udp_frame(src: u16, dst: u16, payload: &[u8]) -> Vec<u8> {
+        udp_frame_on(NET_A, src, dst, payload)
     }
 
     /// The UDP destination port and payload of an IPv4/UDP frame, if it is one.
@@ -301,5 +356,141 @@ mod tests {
         node.poll();
         let got = socket.try_recv().expect("the datagram came in");
         std::assert_eq!(got.data.as_slice(), b"in");
+    }
+
+    type Cable = Rc<RefCell<VecDeque<Vec<u8>>>>;
+
+    /// An interface on `net` with `gateway`, and the test's two ends of its
+    /// cable: what the node sent, and what the far host sends in.
+    fn node_on(
+        link: &LwipLink,
+        net: Net,
+        gateway: [u8; 4],
+    ) -> (EthernetIf<CableEnd>, Cable, Cable) {
+        let out: Cable = Rc::new(RefCell::new(VecDeque::new()));
+        let inbox: Cable = Rc::new(RefCell::new(VecDeque::new()));
+        let iface = EthernetIf::add(
+            link,
+            CableEnd {
+                address: net.node_mac,
+                outbox: out.clone(),
+                inbox: inbox.clone(),
+            },
+            Ipv4Config {
+                address: net.node_ip,
+                netmask: [255, 255, 255, 0],
+                gateway,
+            },
+        )
+        .expect("interface");
+        (iface, out, inbox)
+    }
+
+    /// THE FIRST INTERFACE WITH A GATEWAY IS THE DEFAULT ROUTE, AND A LATER ONE
+    /// NEVER TAKES IT.
+    ///
+    /// Every interface used to become the default route as it was added, which is
+    /// harmless with one and with two lets the second take the route from the
+    /// first: whichever was added last won, whatever gateways they had. A node
+    /// with an onboard Ethernet and a second link has exactly that order to get
+    /// wrong, and "the route moved because of the order of two calls" is not a
+    /// thing a firmware can see.
+    #[test]
+    fn the_first_interface_with_a_gateway_is_the_default_route_and_no_later_one_takes_it() {
+        let (_serial, link) = crate::lwip_test_link();
+        let (first, _, _) = node_on(&link, NET_A, [10, 9, 0, 254]);
+        let (second, _, _) = node_on(&link, NET_B, [10, 9, 1, 254]);
+        std::assert!(
+            first.is_default_route(),
+            "the first with a gateway holds it"
+        );
+        std::assert!(
+            !second.is_default_route(),
+            "the second did not take it, with a gateway of its own"
+        );
+    }
+
+    /// An interface with no gateway is on-link only: it is never the default
+    /// route, and it does not stop a later interface that has a gateway from
+    /// being it.
+    #[test]
+    fn an_interface_without_a_gateway_is_never_the_default_route() {
+        let (_serial, link) = crate::lwip_test_link();
+        let (on_link, _, _) = node_on(&link, NET_A, [0, 0, 0, 0]);
+        std::assert!(!on_link.is_default_route(), "no gateway, no default route");
+        let (routed, _, _) = node_on(&link, NET_B, [10, 9, 1, 254]);
+        std::assert!(
+            routed.is_default_route(),
+            "the route nothing held goes to the interface that has a gateway"
+        );
+        std::assert!(!on_link.is_default_route());
+    }
+
+    /// TWO INTERFACES EACH CARRY THEIR OWN NETWORK'S TRAFFIC, AND ONE SOCKET
+    /// HEARS BOTH.
+    ///
+    /// The node a board with two links is: a datagram for the far host on one
+    /// network asks that cable and no other, and a frame arriving on either
+    /// cable reaches the one socket bound on `0.0.0.0`. Judged at the frame
+    /// level on both cables, so an interface that sent the datagram out of the
+    /// wrong cable is seen on the wrong cable.
+    #[test]
+    fn two_interfaces_carry_their_own_networks_and_one_socket_hears_both() {
+        let (_serial, link) = crate::lwip_test_link();
+        let (mut a, out_a, in_a) = node_on(&link, NET_A, [0, 0, 0, 0]);
+        let (mut b, out_b, in_b) = node_on(&link, NET_B, [0, 0, 0, 0]);
+        let mut socket = bind_session_rx(&link, 7612).expect("bind");
+        out_a.borrow_mut().clear();
+        out_b.borrow_mut().clear();
+
+        // Out to the second network: its cable asks, the first stays quiet.
+        socket
+            .send_to(crate::ipv4_addr_from_octets(NET_B.far_ip), 7611, b"to-b")
+            .expect("send");
+        std::assert!(
+            out_a.borrow().is_empty(),
+            "nothing for network B on cable A"
+        );
+        let request = out_b.borrow_mut().pop_front().expect("ARP on cable B");
+        std::assert_eq!(&request[12..14], &[0x08, 0x06], "ARP");
+        std::assert_eq!(&request[38..42], &NET_B.far_ip, "for B's far host");
+        in_b.borrow_mut().push_back(arp_reply_on(NET_B));
+        std::assert_eq!(b.poll(), 1);
+        let sent = out_b
+            .borrow_mut()
+            .pop_front()
+            .expect("the datagram left on B");
+        std::assert_eq!(&sent[0..6], &NET_B.far_mac, "to the MAC B's reply named");
+        std::assert_eq!(udp_of(&sent), Some((7611, &b"to-b"[..])));
+        std::assert!(out_a.borrow().is_empty(), "and cable A still heard nothing");
+
+        // Out to the first network: now it is A's cable that asks.
+        socket
+            .send_to(crate::ipv4_addr_from_octets(NET_A.far_ip), 7611, b"to-a")
+            .expect("send");
+        let request = out_a.borrow_mut().pop_front().expect("ARP on cable A");
+        std::assert_eq!(&request[38..42], &NET_A.far_ip, "for A's far host");
+        std::assert!(
+            out_b.borrow().is_empty(),
+            "nothing for network A on cable B"
+        );
+        in_a.borrow_mut().push_back(arp_reply_on(NET_A));
+        std::assert_eq!(a.poll(), 1);
+        let sent = out_a
+            .borrow_mut()
+            .pop_front()
+            .expect("the datagram left on A");
+        std::assert_eq!(udp_of(&sent), Some((7611, &b"to-a"[..])));
+
+        // In: a datagram on either cable reaches the one socket.
+        std::assert!(socket.try_recv().is_none(), "CONTROL: nothing in yet");
+        in_a.borrow_mut()
+            .push_back(udp_frame_on(NET_A, 7611, 7612, b"via-a"));
+        a.poll();
+        std::assert_eq!(socket.try_recv().expect("via A").data.as_slice(), b"via-a");
+        in_b.borrow_mut()
+            .push_back(udp_frame_on(NET_B, 7611, 7612, b"via-b"));
+        b.poll();
+        std::assert_eq!(socket.try_recv().expect("via B").data.as_slice(), b"via-b");
     }
 }

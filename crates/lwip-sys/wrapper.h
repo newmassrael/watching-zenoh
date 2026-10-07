@@ -38,6 +38,9 @@ typedef int (*wz_ethif_tx_fn)(void *ctx, const u8_t *frame, u16_t len);
 struct netif *wz_ethif_add(const u8_t *mac, u32_t ip, u32_t mask, u32_t gw,
                            wz_ethif_tx_fn tx, void *ctx);
 int wz_ethif_input(struct netif *n, const u8_t *frame, u16_t len);
+/* Whether `n` is the default route, and the test harness's reset of the table. */
+int wz_ethif_is_default(const struct netif *n);
+void wz_ethif_remove_all(void);
 
 /* R2841 — a link's two ends: the routed source address, the bound port. */
 u32_t wz_lwip_route_src(u32_t dst);

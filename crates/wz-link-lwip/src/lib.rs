@@ -241,6 +241,12 @@ pub fn lwip_test_link() -> (std::sync::MutexGuard<'static, ()>, LwipLink) {
         // lwIP's static loop_netif, valid for the process lifetime.
         unsafe { ip4_set_default_multicast_netif(netif_get_loopif()) };
     });
+    // The Ethernet shim keeps a table of the interfaces it added and the default
+    // route, both process-global like the rest of lwIP's state, and an interface
+    // added by an earlier test would still be in it. Each test starts from none.
+    // SAFETY: the guard above serializes every lwIP-touching test, so nothing is
+    // using an interface while it is taken out; a firmware never calls this.
+    unsafe { lwip_sys::wz_ethif_remove_all() };
     (
         guard,
         LwipLink {

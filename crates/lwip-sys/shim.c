@@ -170,9 +170,17 @@ static err_t wz_ethif_init(struct netif *n) {
 }
 
 /* Add an Ethernet netif with address `ip` / `mask` / `gw` (lwIP-native, i.e.
- * network-byte-order words), bring it and its carrier up, and make it the
- * default route. `tx(ctx, ..)` sends each frame. NULL when the table is full
- * or lwIP refuses the interface. */
+ * network-byte-order words) and bring it and its carrier up. `tx(ctx, ..)`
+ * sends each frame. NULL when the table is full or lwIP refuses the interface.
+ *
+ * THE DEFAULT ROUTE is a statement about a gateway, so only an interface that
+ * HAS one can be it, and only while nothing else is: the first interface added
+ * with a non-zero `gw` becomes the default route and a later one never moves
+ * it. This used to make EVERY added interface the default, which with a single
+ * interface is the same thing and with two let the second silently take the
+ * route from the first -- the one that was added last winning, whatever
+ * gateways they had. An interface with `gw == 0` is on-link only and is never
+ * the default route. */
 struct netif *wz_ethif_add(const u8_t *mac, u32_t ip, u32_t mask, u32_t gw,
                            wz_ethif_tx_fn tx, void *ctx) {
     if (wz_ethif_count >= WZ_ETHIF_MAX || tx == NULL) {
@@ -190,10 +198,32 @@ struct netif *wz_ethif_add(const u8_t *mac, u32_t ip, u32_t mask, u32_t gw,
         return NULL;
     }
     wz_ethif_count++;
-    netif_set_default(&e->netif);
+    if (gw != 0 && netif_default == NULL) {
+        netif_set_default(&e->netif);
+    }
     netif_set_up(&e->netif);
     netif_set_link_up(&e->netif);
     return &e->netif;
+}
+
+/* Whether `n` is the default route. */
+int wz_ethif_is_default(const struct netif *n) {
+    return n != NULL && n == netif_default;
+}
+
+/* Take every Ethernet netif this shim added back out of lwIP and empty the
+ * table, so the next `wz_ethif_add` starts from nothing.
+ *
+ * For a test harness, which shares one lwIP across many tests in a process and
+ * would otherwise find the table (two entries) and the default route left by
+ * whichever test ran first. A firmware never calls it: an interface added to a
+ * running node lives as long as the node. */
+void wz_ethif_remove_all(void) {
+    for (int i = 0; i < wz_ethif_count; i++) {
+        netif_set_down(&wz_ethifs[i].netif);
+        netif_remove(&wz_ethifs[i].netif);
+    }
+    wz_ethif_count = 0;
 }
 
 /* Hand one received frame (no FCS) to `n`. Non-zero when lwIP took it; zero
@@ -225,5 +255,12 @@ int wz_ethif_input(struct netif *n, const u8_t *frame, u16_t len) {
     (void)n; (void)frame; (void)len;
     return 0;
 }
+
+int wz_ethif_is_default(const struct netif *n) {
+    (void)n;
+    return 0;
+}
+
+void wz_ethif_remove_all(void) {}
 
 #endif

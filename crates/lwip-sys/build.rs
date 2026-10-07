@@ -307,6 +307,8 @@ fn main() {
         // lwIP's `ethernetif` template are C, the MAC driver is Rust.
         .allowlist_function("wz_ethif_add")
         .allowlist_function("wz_ethif_input")
+        .allowlist_function("wz_ethif_is_default")
+        .allowlist_function("wz_ethif_remove_all")
         // R2841 — a link's routed source address and bound port (`shim.c`).
         .allowlist_function("wz_lwip_route_src")
         .allowlist_function("wz_lwip_udp_local_port")
