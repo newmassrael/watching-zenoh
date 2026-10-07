@@ -89,15 +89,42 @@ config WZ_MAC_CYT4BF
 
 endchoice
 
+choice WZ_MAC_SOURCE
+	prompt "Where the station address comes from"
+	default WZ_MAC_SOURCE_RANDOM
+	help
+	  The MAC answers to this address and the node's zenoh id is derived from it.
+	  The address is not read off the board: this chip has no MAC EEPROM, and the
+	  HAL this tree carries has no per-unit identifier for it (the unique-id call
+	  is the M4, M33 and M55 parts', and the CYT4BF's flash block names only its
+	  silicon type). So there is no default VALUE, because a value every build
+	  shares is one that two boards on a network would both answer to, as frames
+	  and as zenoh ids.
+
+config WZ_MAC_SOURCE_RANDOM
+	bool "A random address, made at every boot"
+	help
+	  A locally administered unicast address drawn from the board's entropy source
+	  each time the node starts. Two boards do not collide, to within the chance of
+	  two 46-bit draws agreeing; neither the address nor the zenoh id derived from
+	  it survives a reboot.
+
+config WZ_MAC_SOURCE_EXPLICIT
+	bool "The address in CONFIG_WZ_MAC_ADDRESS"
+	help
+	  A fixed address, which survives reboots. It has to be given, and it has to
+	  differ per board. The MAC crate refuses a group or all-zero address when the
+	  node starts, and the build refuses an empty one.
+
+endchoice
+
 config WZ_MAC_ADDRESS
 	string "Station (MAC) address"
-	default "02:00:5e:00:00:01"
+	depends on WZ_MAC_SOURCE_EXPLICIT
 	help
-	  The address the MAC answers to, and the node's zenoh id is derived from it.
-	  This chip has no MAC EEPROM and Zephyr offers no unique-id source for it, so
-	  the address is a Kconfig value: a locally administered one by default, and
-	  TWO BOARDS WITH THE SAME VALUE ON ONE NETWORK COLLIDE, as both their frames
-	  and their zenoh ids. Set it per board.
+	  Six hexadecimal bytes separated by colons, for example "02:00:5e:12:34:56". A
+	  locally administered address has bit 1 of its first byte set; a group address
+	  has bit 0 set and is refused.
 
 config WZ_STATIC_IPV4
 	string "IPv4 address"

@@ -29,6 +29,7 @@ use alloc::rc::Rc;
 use alloc::string::String;
 use alloc::vec::Vec;
 
+use wz::runtime_coop::session_drive::SessionLinks;
 use wz::runtime_coop::session_runtime::new_session_actions;
 use wz::runtime_coop::{ClockSource, CoopLocalSet, CoopRuntime, CoopTime};
 use wz::runtime_zephyr::glue::{log, log_line, yield_ms};
@@ -42,14 +43,13 @@ use wz_session_core::WhatAmI;
 use wz_session_mcu::admin_host::ConnectControl;
 use wz_session_mcu::admin_node::AdminNode;
 use wz_session_mcu::admin_status::{NodeIdentity, NodeStatus};
-use wz::runtime_coop::session_drive::SessionLinks;
 
-#[cfg(feature = "net-zephyr-sockets")]
-mod net_zephyr;
-#[cfg(feature = "net-lwip-mac")]
-mod net_lwip;
 #[cfg(feature = "mac-cyt4bf")]
 mod mac_cyt4bf;
+#[cfg(feature = "net-lwip-mac")]
+mod net_lwip;
+#[cfg(feature = "net-zephyr-sockets")]
+mod net_zephyr;
 // The allocator over the kernel heap (`CONFIG_HEAP_MEM_POOL_SIZE` in prj.conf),
 // the critical section over the kernel IRQ lock and the panic handler.
 wz::runtime_zephyr::zephyr_image!();
@@ -177,7 +177,9 @@ fn run<N: NodeNet>(mut net: N) -> i32 {
         let (written, endpoints) = CONTROL.endpoints();
         if generation != Some(written) {
             generation = Some(written);
-            log_line(format!("zephyr-admin-node: connect/endpoints = {endpoints:?}"));
+            log_line(format!(
+                "zephyr-admin-node: connect/endpoints = {endpoints:?}"
+            ));
         }
         let sessions = STATUS.sessions();
         if sessions.len() != reported {
@@ -208,7 +210,9 @@ compile_error!(
 );
 
 #[cfg(all(feature = "net-lwip-mac", not(feature = "mac-cyt4bf")))]
-compile_error!("the lwIP backend needs a MAC: CMakeLists.txt turns on the `mac-*` feature of CONFIG_WZ_MAC_*");
+compile_error!(
+    "the lwIP backend needs a MAC: CMakeLists.txt turns on the `mac-*` feature of CONFIG_WZ_MAC_*"
+);
 
 /// Bring the board's network up and run the node over it.
 #[cfg(feature = "net-zephyr-sockets")]
@@ -228,10 +232,17 @@ fn start() -> i32 {
 #[cfg(all(feature = "net-lwip-mac", feature = "mac-cyt4bf"))]
 fn start() -> i32 {
     use net_lwip::{Addressing, LwipMacNet};
-    use wz::runtime_zephyr::{ipv4_from_build, mac_from_build, u32_from_build};
+    use wz::runtime_zephyr::{ipv4_from_build, parse_mac, random_station_address, u32_from_build};
     use wz_eth_mac_cyt4bf::RefClock;
 
-    const MAC: [u8; 6] = mac_from_build!("WZ_MAC_ADDRESS");
+    // The address this build was given for this board, when it was given one
+    // (CONFIG_WZ_MAC_SOURCE_EXPLICIT). A build that was not draws one at every
+    // start: there is no value it falls back to, because one every build shares is
+    // one two boards on a network would both answer to.
+    const GIVEN_MAC: Option<[u8; 6]> = match option_env!("WZ_MAC_ADDRESS") {
+        Some(text) => Some(parse_mac(text)),
+        None => None,
+    };
     const ADDRESSING: Addressing = Addressing {
         address: ipv4_from_build!("WZ_STATIC_IPV4"),
         netmask: ipv4_from_build!("WZ_STATIC_NETMASK"),
@@ -248,7 +259,31 @@ fn start() -> i32 {
             divider: divider.min(u16::MAX as u32) as u16,
         },
     };
-    let mac = match mac_cyt4bf::open(MAC, ref_clock, LINK_WAIT_MS) {
+    let station = match GIVEN_MAC {
+        Some(given) => given,
+        None => match random_station_address(&mut ZephyrEntropy) {
+            Ok(drawn) => drawn,
+            Err(_) => {
+                log(c"wz: FAIL - the board's entropy source could not make a station address");
+                return 1;
+            }
+        },
+    };
+    log_line(format!(
+        "wz: station address {:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x} ({})",
+        station[0],
+        station[1],
+        station[2],
+        station[3],
+        station[4],
+        station[5],
+        if GIVEN_MAC.is_some() {
+            "given"
+        } else {
+            "drawn at this boot"
+        }
+    ));
+    let mac = match mac_cyt4bf::open(station, ref_clock, LINK_WAIT_MS) {
         Ok(mac) => mac,
         Err(why) => {
             log(why);

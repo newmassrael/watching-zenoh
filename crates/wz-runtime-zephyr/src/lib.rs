@@ -295,6 +295,28 @@ const fn hex_digit(c: u8) -> u8 {
     }
 }
 
+/// An address a board has no assigned value for, made from `entropy`: six
+/// random bytes with the group bit CLEAR (a unicast address, which is what an
+/// interface answers to) and the locally administered bit SET (an address
+/// nobody was assigned, which is what one a firmware makes for itself must be).
+/// That leaves 46 random bits, so two boards on one network agree with a chance
+/// of about one in 7e13.
+///
+/// A failed draw is returned, never turned into an address: a station address
+/// made of whatever the buffer held would be the same one on every board.
+pub fn random_station_address<E: wz_session_core::entropy::EntropySource>(
+    entropy: &mut E,
+) -> Result<[u8; 6], wz_session_core::entropy::EntropyUnavailable> {
+    /// Set on a group (multicast or broadcast) address; an interface never has one.
+    const GROUP: u8 = 0x01;
+    /// Set on an address that was not assigned by the interface's manufacturer.
+    const LOCALLY_ADMINISTERED: u8 = 0x02;
+    let mut mac = [0u8; 6];
+    entropy.try_fill_bytes(&mut mac)?;
+    mac[0] = (mac[0] & !GROUP) | LOCALLY_ADMINISTERED;
+    Ok(mac)
+}
+
 /// The IPv4 address the board's build named in environment variable `$name`, as
 /// four octets, at compile time. A build that does not set it fails to compile.
 ///
@@ -635,5 +657,59 @@ mod tests {
             "a board that does not know the date says so"
         );
         EPOCH_RC.store(1, Ordering::SeqCst);
+    }
+
+    /// A source that fills with `byte`, then `byte + 1`, and so on, per call.
+    struct Steps(u8);
+
+    impl EntropySource for Steps {
+        fn try_fill_bytes(&mut self, buf: &mut [u8]) -> Result<(), EntropyUnavailable> {
+            buf.fill(self.0);
+            self.0 = self.0.wrapping_add(1);
+            Ok(())
+        }
+    }
+
+    /// A source that cannot draw, and leaves the buffer as it found it.
+    struct Dry;
+
+    impl EntropySource for Dry {
+        fn try_fill_bytes(&mut self, _buf: &mut [u8]) -> Result<(), EntropyUnavailable> {
+            Err(EntropyUnavailable)
+        }
+    }
+
+    /// Whatever the draw was, the address is one an interface can answer to and
+    /// nobody was assigned: the group bit is clear and the local bit is set, and
+    /// the other forty-six bits are the draw's own.
+    #[test]
+    fn a_made_up_station_address_is_unicast_and_locally_administered() {
+        for byte in [0x00u8, 0x01, 0x02, 0x03, 0xFC, 0xFD, 0xFE, 0xFF] {
+            let mac = random_station_address(&mut Steps(byte)).expect("the draw succeeds");
+            assert_eq!(mac[0] & 0x01, 0, "{byte:#04x}: not a group address");
+            assert_eq!(mac[0] & 0x02, 0x02, "{byte:#04x}: locally administered");
+            assert_eq!(
+                mac[0] & !0x03,
+                byte & !0x03,
+                "{byte:#04x}: the other six bits of the first octet are the draw's"
+            );
+            assert_eq!(mac[1..], [byte; 5], "the rest is the draw untouched");
+        }
+    }
+
+    /// Two draws are two addresses, which is the whole of why the address is
+    /// drawn and not typed; and a source that cannot draw gives no address
+    /// rather than the zeroes it left in the buffer.
+    #[test]
+    fn two_draws_make_two_addresses_and_a_dry_source_makes_none() {
+        let mut source = Steps(0x10);
+        let first = random_station_address(&mut source).unwrap();
+        let second = random_station_address(&mut source).unwrap();
+        assert_ne!(first, second);
+        assert_eq!(
+            random_station_address(&mut Dry),
+            Err(EntropyUnavailable),
+            "a failed draw is not an address"
+        );
     }
 }

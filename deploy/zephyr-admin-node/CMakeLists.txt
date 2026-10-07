@@ -64,9 +64,22 @@ elseif(CONFIG_WZ_NET_BACKEND_LWIP_MAC)
   else()
     set(ref_clock_divider 0)
   endif()
+  # The station address is either given (the build then hands it over, and the
+  # Rust side reads it as a constant) or drawn at boot (the build hands over
+  # nothing, and the Rust side draws). There is no value a build falls back to: one
+  # every build shares is one two boards on a network would both answer to.
+  if(CONFIG_WZ_MAC_SOURCE_EXPLICIT)
+    if("${CONFIG_WZ_MAC_ADDRESS}" STREQUAL "")
+      message(FATAL_ERROR "wz: CONFIG_WZ_MAC_SOURCE_EXPLICIT needs CONFIG_WZ_MAC_ADDRESS, "
+                          "an address of its own for this board.")
+    endif()
+    set(mac_env WZ_MAC_ADDRESS=${CONFIG_WZ_MAC_ADDRESS})
+  else()
+    set(mac_env "")
+  endif()
   list(APPEND backend_env
     WZ_LWIP_PORT=${CMAKE_CURRENT_SOURCE_DIR}/lwip-port
-    WZ_MAC_ADDRESS=${CONFIG_WZ_MAC_ADDRESS}
+    ${mac_env}
     WZ_STATIC_IPV4=${CONFIG_WZ_STATIC_IPV4}
     WZ_STATIC_NETMASK=${CONFIG_WZ_STATIC_NETMASK}
     WZ_STATIC_GATEWAY=${CONFIG_WZ_STATIC_GATEWAY}

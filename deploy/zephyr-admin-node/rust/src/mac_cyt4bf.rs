@@ -77,7 +77,9 @@ impl BoardMac for T2gMac {
     fn service(&mut self, now_ms: u64) {
         match self.inner.service_link(now_ms) {
             LinkEvent::Steady => {}
-            LinkEvent::Up(mode) => log_line(format!("zephyr-admin-node: link up, {}", describe(mode))),
+            LinkEvent::Up(mode) => {
+                log_line(format!("zephyr-admin-node: link up, {}", describe(mode)))
+            }
             LinkEvent::Down => log(c"zephyr-admin-node: link down"),
         }
     }
@@ -119,7 +121,9 @@ pub fn open(
     let mut config = Config::new(mac_address);
     config.ref_clock = ref_clock;
     let mut inner = Cyt4bfMac::new(board, area, &config).map_err(|e| match e {
-        wz_eth_mac_cyt4bf::InitError::InvalidMac => c"wz: FAIL - the MAC address is multicast or zero",
+        wz_eth_mac_cyt4bf::InitError::InvalidMac => {
+            c"wz: FAIL - the MAC address is multicast or zero"
+        }
         wz_eth_mac_cyt4bf::InitError::InvalidRefDivider => {
             c"wz: FAIL - the reference clock divider is outside 1 to 256"
         }
@@ -127,7 +131,9 @@ pub fn open(
     })?;
     match inner.bring_up_link(link_wait_ms.saturating_mul(1000)) {
         Ok(mode) => log_line(format!("zephyr-admin-node: link up, {}", describe(mode))),
-        Err(LinkError::NoLink) => log(c"zephyr-admin-node: no link yet; the node starts and waits for one"),
+        Err(LinkError::NoLink) => {
+            log(c"zephyr-admin-node: no link yet; the node starts and waits for one")
+        }
         Err(LinkError::NoPhy) => return Err(c"wz: FAIL - no PHY answered on the management bus"),
         Err(LinkError::ResetTimeout) => return Err(c"wz: FAIL - the PHY did not finish its reset"),
         Err(LinkError::Mdio(_)) => return Err(c"wz: FAIL - the management port never went idle"),
