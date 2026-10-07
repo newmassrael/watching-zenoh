@@ -20157,8 +20157,9 @@ layer_c1cc_api_compat_c() {
     # given); a bind that cannot be made fails the open with -4 by default and under an explicit
     # `true`, whichever endpoint it is; under `listen/exit_on_failure: false` the taken endpoints
     # are skipped, the free one still accepts, and a hub whose every endpoint is taken opens. A
-    # peer that states two loopback listeners also answers a Scout with both, in the stated order
-    # (the Hello row above). Needs only the oracle, not the SHM arm.
+    # peer that states two loopback listeners also answers a Scout with both, compared as a set
+    # because the real library names them in a hash order that differs from run to run (the Hello
+    # row above). Needs only the oracle, not the SHM arm.
     _runci_guarded_test \
         "C1cc a_peer_that_states_two_listeners_is_reached_at_both_identically_on_wz_and_libzenohc" 1 \
         cargo test -p wz-integration-tests \

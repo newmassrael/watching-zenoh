@@ -766,7 +766,13 @@ const ASK_TIMEOUT_MS: &str = "1500";
 /// 2 peer, 4 client), with each locator's PORT replaced by `PORT`, sorted and without
 /// repetition. Every interface a node is reachable by answers the asker's Scout once, so the same
 /// line comes back more than once; the SET is the answer.
-fn hellos(probe: &Built, group: &str, what: u8) -> Vec<String> {
+///
+/// `sort_each` sorts the locators WITHIN a line as well. A node's several listeners of one
+/// protocol are kept in a hash map upstream (`ListenersUnicastIP`), so the order its Hello names
+/// them in is a hash order, and the real library names the same two listeners in either order from
+/// one run to the next. A row that reads such a node compares them as a set. The order within a
+/// line stays a thing the other rows compare, as it is for the addresses of one wildcard listener.
+fn hellos(probe: &Built, group: &str, what: u8, sort_each: bool) -> Vec<String> {
     let output = Command::new(&probe.exe)
         .args([group, &what.to_string(), ASK_TIMEOUT_MS])
         .env("LD_LIBRARY_PATH", &probe.libdir)
@@ -781,7 +787,7 @@ fn hellos(probe: &Built, group: &str, what: u8) -> Vec<String> {
                 .split_once("locators=[")
                 .expect("a hello line carries its locators");
             let list = list.trim_end_matches(']');
-            let ported: Vec<String> = list
+            let mut ported: Vec<String> = list
                 .split(", ")
                 .filter(|locator| !locator.is_empty())
                 .map(|locator| match locator.rsplit_once(':') {
@@ -789,6 +795,9 @@ fn hellos(probe: &Built, group: &str, what: u8) -> Vec<String> {
                     None => locator.to_owned(),
                 })
                 .collect();
+            if sort_each {
+                ported.sort();
+            }
             format!("{head}locators=[{}]", ported.join(", "))
         })
         .collect();
@@ -815,7 +824,9 @@ enum Shape {
     /// names nothing.
     PeerListenStatedEmpty,
     /// A peer whose config states TWO listeners on loopback addresses of their own: its Hello names
-    /// both, in the order the config states them (R3076).
+    /// both. The ORDER is not part of the answer: upstream keeps a protocol's listeners in a hash
+    /// map, and the real library names the same two in either order from one run to the next
+    /// (observed both), so this row compares the locators as a set (R3076, corrected R3077).
     PeerOnTwoListeners,
     /// A client connected to a peer, with a listener of its own: its Hello names the listener.
     ClientConnectedWithAListener,
@@ -896,7 +907,12 @@ fn hellos_of(built: &Built, reference: &Built, probe: &Built, shape: Shape) -> V
             };
             let mut node = Node::start_with(built, &spec("peer", listen, 0), &env);
             let opened = node.opened();
-            let found = hellos(probe, &group, shape.what());
+            let found = hellos(
+                probe,
+                &group,
+                shape.what(),
+                matches!(shape, Shape::PeerOnTwoListeners),
+            );
             node.finish(opened);
             found
         }
@@ -918,7 +934,7 @@ fn hellos_of(built: &Built, reference: &Built, probe: &Built, shape: Shape) -> V
             };
             let mut node = Node::start(built, &spec("client", listen, peer_port));
             let opened = node.opened();
-            let found = hellos(probe, &group, shape.what());
+            let found = hellos(probe, &group, shape.what(), false);
             node.finish(opened);
             peer.finish(peer_opened);
             found
@@ -928,7 +944,7 @@ fn hellos_of(built: &Built, reference: &Built, probe: &Built, shape: Shape) -> V
             // and the asker comes in the middle of it.
             let mut node = Node::start(built, &spec("client", free_port(), 0));
             std::thread::sleep(std::time::Duration::from_millis(1200));
-            let found = hellos(probe, &group, shape.what());
+            let found = hellos(probe, &group, shape.what(), false);
             let opened = node.opened();
             assert!(
                 opened.starts_with("open=-4"),
@@ -971,7 +987,7 @@ fn a_node_answers_a_scout_with_the_hello_the_real_library_sends_on_wz_and_libzen
         (Shape::PeerOnTheWildcard, None),
         (Shape::PeerWithNoListener, None),
         (Shape::PeerListenStatedEmpty, Some(&no_locator_peer[..])),
-        // R3076 -- both listeners, first the one the config states first.
+        // R3076 -- both listeners, as a set: the order the Hello names them in is a hash order.
         (Shape::PeerOnTwoListeners, Some(&two_listeners_peer[..])),
         (Shape::PeerToldNotToAnswer, Some(&[][..])),
         (

@@ -351,7 +351,9 @@ impl Advertised {
     ///
     /// R3076 -- a node that listens on several endpoints is reached at all of them, and its Hello
     /// and its gossip entry name them all. MEASURED on the real library with two tcp endpoints:
-    /// the Hello lists both, in the order the config states them. A locator two listeners both
+    /// the Hello lists both, in an order that is not the config's (upstream keeps a protocol's
+    /// listeners in a hash map, and the real library names the same two in either order from one
+    /// run to the next), so a reader compares the locators as a set. A locator two listeners both
     /// expand to is listed once, as a set of locators would hold it.
     pub fn of_all(bound: &[&BoundListener]) -> Self {
         let mut all = Self::none();
