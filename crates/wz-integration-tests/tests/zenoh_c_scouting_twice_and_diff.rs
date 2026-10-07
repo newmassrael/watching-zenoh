@@ -1789,6 +1789,24 @@ fn a_peer_that_states_two_listeners_is_reached_at_both_identically_on_wz_and_lib
     }
 }
 
+/// One row of the table of opens: what `z_open` returns for a peer that states `listen` and the
+/// settings `extra` (the node program's environment), as the row `open=<rc>`.
+struct OpenRow<'a> {
+    what: &'a str,
+    listen: String,
+    extra: &'a [(&'a str, &'a str)],
+    want: &'a str,
+}
+
+/// One row of the table of skips: the ports a hub states as its `listen`, the ports a leaf is
+/// started for (one leaf for each), and the rows the hub and then each leaf print.
+struct SkipRow<'a> {
+    what: &'a str,
+    ports: Vec<u16>,
+    leaves: &'a [u16],
+    want: &'a [&'a str],
+}
+
 /// THE GATE, `listen/exit_on_failure`: an endpoint that cannot be bound fails the open, `-4`, by
 /// default and when the key says `true`, whichever of the endpoints it is and whatever is bound
 /// before it, on the real library and on wz.
@@ -1805,46 +1823,47 @@ fn a_listener_that_cannot_bind_fails_the_open_identically_on_wz_and_libzenohc() 
     let also_taken = TcpListener::bind("127.0.0.1:0").expect("a second port to hold");
     let also_taken_port = also_taken.local_addr().expect("the held port").port();
     let free = a_free_port();
-    let rows: [(&str, String, &[(&str, &str)], &str); 5] = [
-        (
-            "the taken endpoint second, by default",
-            loopback_endpoints(&[free, taken_port]),
-            &[],
-            "open=-4",
-        ),
-        (
-            "the taken endpoint first, by default",
-            loopback_endpoints(&[taken_port, free]),
-            &[],
-            "open=-4",
-        ),
-        (
-            "every endpoint taken, by default",
-            loopback_endpoints(&[taken_port, also_taken_port]),
-            &[],
-            "open=-4",
-        ),
-        (
-            "the taken endpoint second, the key `true`",
-            loopback_endpoints(&[free, taken_port]),
-            &[("LISTEN_EXIT", "true")],
-            "open=-4",
-        ),
-        (
-            "a free endpoint alone, by default",
-            loopback_endpoints(&[free]),
-            &[],
-            "open=0",
-        ),
+    let rows = [
+        OpenRow {
+            what: "the taken endpoint second, by default",
+            listen: loopback_endpoints(&[free, taken_port]),
+            extra: &[],
+            want: "open=-4",
+        },
+        OpenRow {
+            what: "the taken endpoint first, by default",
+            listen: loopback_endpoints(&[taken_port, free]),
+            extra: &[],
+            want: "open=-4",
+        },
+        OpenRow {
+            what: "every endpoint taken, by default",
+            listen: loopback_endpoints(&[taken_port, also_taken_port]),
+            extra: &[],
+            want: "open=-4",
+        },
+        OpenRow {
+            what: "the taken endpoint second, the key `true`",
+            listen: loopback_endpoints(&[free, taken_port]),
+            extra: &[("LISTEN_EXIT", "true")],
+            want: "open=-4",
+        },
+        OpenRow {
+            what: "a free endpoint alone, by default",
+            listen: loopback_endpoints(&[free]),
+            extra: &[],
+            want: "open=0",
+        },
     ];
-    for (n, (what, listen, extra, want)) in rows.into_iter().enumerate() {
+    for (n, row) in rows.iter().enumerate() {
+        let (what, want) = (row.what, row.want);
         let key = format!("wz/listen-set/exit/{n}");
-        let real = open_code_of(&programs.reference, &key, &listen, extra);
+        let real = open_code_of(&programs.reference, &key, &row.listen, row.extra);
         assert_eq!(
             real, want,
             "the REAL library's open with {what} is not what this file expects"
         );
-        let wz = open_code_of(&programs.wz, &key, &listen, extra);
+        let wz = open_code_of(&programs.wz, &key, &row.listen, row.extra);
         assert_eq!(
             wz, want,
             "§5.27 api-compat-c: a wz peer's open with {what} is not the real library's"
@@ -1883,35 +1902,36 @@ fn a_listener_that_cannot_bind_is_skipped_when_told_to_identically_on_wz_and_lib
     .enumerate()
     {
         let free = a_free_port();
-        let rows: [(&str, Vec<u16>, &[u16], &[&str]); 3] = [
-            (
-                "the taken endpoint second",
-                vec![free, taken_port],
-                &[free],
-                &one_leaf,
-            ),
-            (
-                "the taken endpoint first",
-                vec![taken_port, free],
-                &[free],
-                &one_leaf,
-            ),
-            (
-                "every endpoint taken",
-                vec![taken_port, also_taken_port],
-                &[],
-                &alone,
-            ),
+        let rows = [
+            SkipRow {
+                what: "the taken endpoint second",
+                ports: vec![free, taken_port],
+                leaves: &[free],
+                want: &one_leaf,
+            },
+            SkipRow {
+                what: "the taken endpoint first",
+                ports: vec![taken_port, free],
+                leaves: &[free],
+                want: &one_leaf,
+            },
+            SkipRow {
+                what: "every endpoint taken",
+                ports: vec![taken_port, also_taken_port],
+                leaves: &[],
+                want: &alone,
+            },
         ];
-        for (m, (what, ports, leaves, want)) in rows.into_iter().enumerate() {
+        for (m, row) in rows.iter().enumerate() {
+            let (what, want) = (row.what, row.want);
             let key = format!("wz/listen-set/skip/{n}/{m}");
             let got = hub_and_leaves(
                 hub,
                 &programs.reference,
                 &key,
-                &loopback_endpoints(&ports),
+                &loopback_endpoints(&row.ports),
                 &off,
-                leaves,
+                row.leaves,
             );
             let got: Vec<&str> = got.iter().map(|outcome| outcome.row.as_str()).collect();
             assert_eq!(
