@@ -359,9 +359,10 @@ pub(crate) unsafe fn open_session(
             // R3073 -- zenoh-c's peer ends what it sends a new peer with the initial interest's
             // Final, and the open of a zenoh peer that dials this one waits for it.
             initial_interest: true,
-            // R3074 -- and zenoh-c's peer gossips by default (`scouting/gossip/enabled`): it
-            // tells a node it meets which nodes it knows and where they are, and dials the nodes
-            // it is told of, which is how two peers that each reached a third meet.
+            // R3074 -- and zenoh-c's peer gossips by default, its config's gossip switch being on
+            // unless it says otherwise (which this ABI does not read yet): it tells a node it
+            // meets which nodes it knows and where they are, and dials the nodes it is told of,
+            // which is how two peers that each reached a third meet.
             gossip: true,
         };
         // R3065 -- a session opened over a client storage advertises the protocols of THAT

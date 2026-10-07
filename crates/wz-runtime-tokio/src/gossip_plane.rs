@@ -4,8 +4,8 @@
 //! The gossip plane of a peer: how two nodes that each hold a link to a third come to dial
 //! each other.
 //!
-//! zenoh's peer runs it by default (`scouting/gossip/enabled`, on) and it is the whole of what
-//! introduces peers when multicast scouting reaches nobody: a node that opens a link tells the
+//! zenoh's peer runs it by default, its config's gossip switch being on, and it is the whole of
+//! what introduces peers when multicast scouting reaches nobody: a node that opens a link tells the
 //! node at the far end every node it knows and where each can be reached, and passes on what it
 //! learns of a neighbour to the others it holds (`zenoh/src/net/protocol/gossip.rs` @
 //! `pub(crate) fn add_link(`). A node that learns of a peer it has no link to, and whose role its

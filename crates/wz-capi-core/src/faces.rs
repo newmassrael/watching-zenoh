@@ -1472,8 +1472,8 @@ pub struct SessionResources {
     /// behaviour it had.
     pub initial_interest: bool,
     /// R3074 -- whether the node gossips: it tells a face it meets which nodes it knows and
-    /// where they are, and dials the nodes it is told of. zenoh's peer does by default
-    /// (`scouting/gossip/enabled`), and it is what makes two peers that each reached a third
+    /// where they are, and dials the nodes it is told of. zenoh's peer does by default, its
+    /// config's gossip switch being on, and it is what makes two peers that each reached a third
     /// reach each other when no scouting finds them. `None` for a node that does not, which is
     /// zenoh-pico's ABI (its peers are introduced by scouting alone) and any role that is a
     /// client.
