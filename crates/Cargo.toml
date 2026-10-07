@@ -177,6 +177,13 @@ members = [
     "zephyr-sys",
     "wz-runtime-zephyr",
     "wz-link-lwip",
+    # The MCU session shell that is written once for every network stack (no_std
+    # lib; the application layer, the admin node, the connection manager and the
+    # dialer, generic over the `SessionLinks` seam). It depends on no link crate,
+    # so unlike wz-session-lwip it needs no lwIP port to build and test, but it
+    # forces wz-session-core/no_std the same way, so the workspace `cargo test`
+    # lanes (C1/C2) `--exclude` it and an isolated host lane (C1m) runs it.
+    "wz-session-mcu",
     "wz-session-lwip",
     # Stage 5 — the MCU acceptor session e2e scenario SSOT (no_std lib;
     # run_acceptor_e2e<C> shared verbatim by the host integration test

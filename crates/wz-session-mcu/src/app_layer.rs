@@ -3,18 +3,18 @@
 
 //! R2827 — the MCU session with its application layer attached.
 //!
-//! [`crate::session_drive`] decodes every inbound frame and hands the batch to
-//! its caller's `on_event`, and stops there. Until this module nothing in the
-//! MCU stack took it further in production: the only caller counted frames,
-//! and the application-layer dispatch (`ApplicationLayerObserver`, the one the
-//! AP runs) was reached on the MCU only from tests. A Push therefore had no
-//! subscriber to land on and a query no queryable to answer it, however the
+//! `wz_runtime_coop::session_drive` decodes every inbound frame and hands the
+//! batch to its caller's `on_event`, and stops there. Until this module nothing
+//! in the MCU stack took it further in production: the only caller counted
+//! frames, and the application-layer dispatch (`ApplicationLayerObserver`, the
+//! one the AP runs) was reached on the MCU only from tests. A Push therefore had
+//! no subscriber to land on and a query no queryable to answer it, however the
 //! firmware was written.
 //!
-//! [`crate::app_layer::dispatch_to`] is that missing step, as an `on_event` value both session
-//! drivers take ([`crate::session_drive::run_session`] and
-//! [`crate::session_drive::spawn_session`]): every iteration's event goes to
-//! the observer, and whatever the observer staged — replies and their finals,
+//! [`crate::app_layer::dispatch_to`] is that missing step, as an `on_event` value
+//! both session drivers take (`wz_runtime_coop::session_drive::run_session` and
+//! `wz_runtime_coop::session_drive::spawn_session`): every iteration's event goes
+//! to the observer, and whatever the observer staged — replies and their finals,
 //! declare replies — goes out through the SAME session's action bundle, which
 //! is what the AP's `observer.dispatch(event, &actions)` does.
 //!
@@ -64,8 +64,7 @@ mod tests {
     use wz_codecs::request::{Request, RequestVariant};
     use wz_codecs::wireexpr::{Wireexpr, WireexprVariant};
     use wz_codecs::wireexpr_nonlocal::WireexprNonlocal;
-    use wz_link_lwip::ipv4_addr_loopback;
-    use wz_link_lwip::rx_sockets::bind_session_rx;
+    use wz_runtime_coop::session_drive::{SessionDatagramLink, UdpPeer};
     use wz_session_core::driver_loop::DriverLoopOutcome;
     use wz_session_core::link::BoxedLinkDriver;
     use wz_session_core::network_message::NetworkMessage;
@@ -73,7 +72,7 @@ mod tests {
     use wz_session_core::signing_key::SigningKey;
     use wz_session_core::WhatAmI;
 
-    use crate::driver::{LwipUdpDriver, SharedSessionSocket};
+    use crate::memory::MemoryNetwork;
 
     #[derive(Clone, Default)]
     struct FrozenClock;
@@ -120,8 +119,8 @@ mod tests {
         }
     }
 
-    /// The whole seam on a real lwIP link: a Push reaches the subscriber the
-    /// firmware registered, and a query's reply leaves on the session's own
+    /// The whole seam on a link between two ends: a Push reaches the subscriber
+    /// the firmware registered, and a query's reply leaves on the session's own
     /// link. The CONTROL is the same event with no registration: nothing
     /// fires, and the reply's payload is not on the wire. Something IS sent
     /// then — an unanswered query is still terminated with a ResponseFinal,
@@ -129,20 +128,17 @@ mod tests {
     /// not the number of datagrams.
     #[test]
     fn a_push_reaches_its_subscriber_and_a_reply_leaves_on_the_session() {
-        let (_serial, link) = wz_link_lwip::lwip_test_link();
-        let (node_port, peer_port): (u16, u16) = (7471, 7472);
-        let node_socket: SharedSessionSocket = Rc::new(RefCell::new(
-            bind_session_rx(&link, node_port).expect("bind node socket"),
-        ));
-        let peer_socket: SharedSessionSocket = Rc::new(RefCell::new(
-            bind_session_rx(&link, peer_port).expect("bind peer socket"),
-        ));
-        let driver = Rc::new(LwipUdpDriver::new(
-            node_socket,
-            ipv4_addr_loopback(),
-            peer_port,
-        ));
-        let peer = LwipUdpDriver::new(peer_socket, ipv4_addr_loopback(), node_port);
+        let net = MemoryNetwork::new();
+        let node_at = UdpPeer {
+            addr: [10, 0, 0, 1],
+            port: 7471,
+        };
+        let peer_at = UdpPeer {
+            addr: [10, 0, 0, 2],
+            port: 7472,
+        };
+        let driver = net.bind(node_at, Some(peer_at)).expect("bind node end");
+        let peer = net.bind(peer_at, Some(node_at)).expect("bind peer end");
 
         let runtime = CoopRuntime::new(FrozenClock);
         let clock = CoopTime::new(&runtime);
@@ -180,11 +176,9 @@ mod tests {
         };
         // Whether any datagram the peer received carries the reply payload.
         let peer_saw_pong = || {
-            link.poll_loopback();
-            link.check_timeouts();
             let mut seen = false;
-            while let Some(dg) = peer.try_recv() {
-                seen |= dg.data.windows(4).any(|w| w == b"pong");
+            while let Some(frame) = peer.try_recv() {
+                seen |= frame.bytes.windows(4).any(|w| w == b"pong");
             }
             seen
         };

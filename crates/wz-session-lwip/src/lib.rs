@@ -46,31 +46,24 @@ extern crate alloc;
 #[cfg(test)]
 extern crate std;
 
-// R2827 — the application layer attached to the session drive: the `on_event`
-// that dispatches to an `ApplicationLayerObserver` and drains through the
-// session's own actions.
-pub mod app_layer;
-// R2828 (§5.23 `adminspace-write`) — the node hosts upstream's
-// `connect/endpoints` config write on that application layer.
-#[cfg(feature = "adminspace-write")]
-pub mod admin_host;
-// R2830 — the node keeps a session with every endpoint the control names and
-// re-dials on upstream's retry schedule; the dialling is behind a trait.
-#[cfg(feature = "adminspace-write")]
-pub mod connect_manager;
-// R2831 — the lwIP dialer: a written `udp/<ipv4>:<port>` becomes an initiator
-// session on the firmware's task set.
-#[cfg(feature = "adminspace-write")]
-pub mod lwip_dialer;
-// R2829 (§5.23 `adminspace-core`) — the node answers upstream's admin GET
-// through the shared answerer, on the same application layer.
-#[cfg(feature = "adminspace-core")]
-pub mod admin_status;
-// R2837 — the node a host reaches and reconfigures at runtime: listen, the
-// write subscriber, the status queryable and the dial manager, ticked as one.
+// The session shell that is written once for every network stack — the
+// application layer (R2827), the connect-endpoints host (R2828), the connection
+// manager (R2830), the dialer (R2831), the admin GET answerer (R2829) and the
+// admin node (R2837) — lives in `wz-session-mcu` and is re-exported here under
+// the paths it always had, so a firmware that names `wz_session_lwip::admin_node`
+// still does. Only the lwIP half stays in this crate: the driver, the links that
+// open it, the multicast drive loop.
 #[cfg(all(feature = "adminspace-core", feature = "adminspace-write"))]
-pub mod admin_node;
+pub use wz_session_mcu::admin_node;
+#[cfg(feature = "adminspace-core")]
+pub use wz_session_mcu::admin_status;
+pub use wz_session_mcu::app_layer;
+#[cfg(feature = "adminspace-write")]
+pub use wz_session_mcu::{admin_host, connect_manager, dial};
 pub mod driver;
+// The lwIP stack's links, as the shell's `SessionLinks` seam: a socket bound on
+// a port for an acceptor, on a free port for an initiator.
+pub mod links;
 // R311lt — the MCU multicast drive loop (no_std mirror of the AP
 // wz-runtime-tokio multicast_glue), gated on the transport-multicast capability.
 #[cfg(feature = "transport-multicast")]
@@ -78,6 +71,7 @@ pub mod multicast_drive;
 pub mod session_drive;
 
 pub use driver::LwipUdpDriver;
+pub use links::LwipLinks;
 pub use session_drive::{
     run_session, session_task, spawn_session, LwipSessionLink, SessionDriveConfig, SessionPump,
     SessionRole,

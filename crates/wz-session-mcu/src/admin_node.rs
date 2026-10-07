@@ -6,8 +6,8 @@
 //!
 //! The pieces are the earlier rounds': the config-write subscriber
 //! (`crate::admin_host`), the admin GET queryable (`crate::admin_status`),
-//! the connection manager and its lwIP dialer (`crate::connect_manager`,
-//! `crate::lwip_dialer`). [`crate::admin_node::AdminNode`] wires them to one
+//! the connection manager and its dialer (`crate::connect_manager`,
+//! `crate::dial`). [`crate::admin_node::AdminNode`] wires them to one
 //! application-layer observer and adds the half none of them had: a session
 //! a host can reach the node on in the first place.
 //!
@@ -26,8 +26,17 @@
 //!   stock zenohd connected to the node holds a live session and still
 //!   routes nothing to it. That is what the first run against one showed.
 //!
-//! A firmware's loop is then: run the task set, poll its Ethernet interface,
-//! pump the link's timers, and `tick` the node with the time.
+//! ## Over whichever network stack the board has
+//!
+//! The node was written on lwIP and named for it. What it needs from the stack
+//! is two things: a link that accepts on a port, and a link that dials an
+//! address. Both are [`SessionLinks`], so the node is generic over `L` and a
+//! board's network is a type parameter: lwIP's, Zephyr's sockets, or the
+//! in-memory network its tests run on. The node's own code names none of them.
+//!
+//! A firmware's loop is then: run the task set, service its network (poll its
+//! Ethernet interface, pump the stack's timers: the stack's business, done
+//! beside this), and `tick` the node with the time.
 
 use alloc::boxed::Box;
 use alloc::rc::Rc;
@@ -35,12 +44,12 @@ use alloc::string::String;
 use alloc::vec::Vec;
 use core::cell::RefCell;
 
+use wz_runtime_coop::session_drive::{
+    spawn_session, OpenedLink, SessionDriveConfig, SessionLinks, SessionRole,
+};
+use wz_runtime_coop::{ClockSource, CoopLocalJoinHandle, CoopLocalSet, CoopTime};
 use wz_session_core::admin_config_space::write_config_space_pattern;
 use wz_session_core::adminspace::admin_queryable_key;
-
-use wz_link_lwip::rx_sockets::bind_session_rx;
-use wz_link_lwip::LwipLink;
-use wz_runtime_coop::{ClockSource, CoopLocalJoinHandle, CoopLocalSet, CoopTime};
 use wz_session_core::driver_loop::DriverOutcome;
 use wz_session_core::link::BoxedLinkDriver;
 use wz_session_core::observer::ApplicationLayerObserver;
@@ -53,25 +62,24 @@ use crate::admin_status::{
 };
 use crate::app_layer::dispatch_to;
 use crate::connect_manager::{ConnectManager, SlotState};
-use crate::driver::{LwipUdpDriver, SharedSessionSocket};
-use crate::lwip_dialer::{admin_session_of, EventSink, LwipUdpDialer, McuActions};
-use crate::session_drive::{spawn_session, SessionDriveConfig, SessionRole};
+use crate::dial::{admin_session_of, EventSink, McuActions, UdpDialer};
 
 /// Builds the sink each dialled session reports to.
 type DialSink<C> = Box<dyn FnMut(&Rc<McuActions<C>>) -> EventSink>;
 
 /// An MCU node a host can reach, and reconfigure, at runtime.
-pub struct AdminNode<'a, C, P, A>
+pub struct AdminNode<'a, L, C, P, A>
 where
+    L: SessionLinks,
     C: ClockSource + 'static,
     P: FnMut() -> SessionInitParams,
     A: FnMut(Rc<dyn BoxedLinkDriver>) -> Rc<McuActions<C>>,
 {
     local: &'a CoopLocalSet<C>,
-    link: Rc<LwipLink>,
+    links: Rc<L>,
     observer: Rc<RefCell<ApplicationLayerObserver>>,
     status: &'static NodeStatus,
-    manager: ConnectManager<LwipUdpDialer<'a, C, P, DialSink<C>>>,
+    manager: ConnectManager<UdpDialer<'a, L, C, P, DialSink<C>>>,
     listen_port: u16,
     timeouts: SessionTimeouts,
     accept: A,
@@ -102,23 +110,24 @@ fn declare_admin<C: ClockSource + 'static>(
             .is_ok()
 }
 
-impl<'a, C, P, A> AdminNode<'a, C, P, A>
+impl<'a, L, C, P, A> AdminNode<'a, L, C, P, A>
 where
+    L: SessionLinks,
     C: ClockSource + 'static,
     P: FnMut() -> SessionInitParams,
     A: FnMut(Rc<dyn BoxedLinkDriver>) -> Rc<McuActions<C>>,
 {
     /// A node that listens on `listen_port`, answers as `identity`, applies
-    /// writes to `control` and reports through `status`.
+    /// writes to `control` and reports through `status`, over the network `links`.
     ///
     /// `dial_params` gives each dialled session its parameters. `accept`
-    /// builds the action bundle of each acceptor session over the driver it
+    /// builds the action bundle of each acceptor session over the sink it
     /// is given; an acceptor mints cookies, so this is where a board installs
     /// its entropy source (`wz_runtime_coop::session_runtime::new_session_actions`).
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         local: &'a CoopLocalSet<C>,
-        link: Rc<LwipLink>,
+        links: Rc<L>,
         control: &'static ConnectControl,
         status: &'static NodeStatus,
         identity: NodeIdentity,
@@ -141,10 +150,10 @@ where
         let on_event: DialSink<C> = Box::new(move |actions| {
             Box::new(dispatch_to(dial_observer.clone(), actions.clone())) as EventSink
         });
-        let dialer = LwipUdpDialer::new(local, link.clone(), timeouts, dial_params, on_event);
+        let dialer = UdpDialer::new(local, links.clone(), timeouts, dial_params, on_event);
         Self {
             local,
-            link,
+            links,
             observer,
             status,
             manager: ConnectManager::new(control, dialer),
@@ -248,17 +257,13 @@ where
     }
 
     fn listen(&mut self) -> Option<(CoopLocalJoinHandle<DriverOutcome>, Rc<McuActions<C>>)> {
-        let socket = bind_session_rx(&self.link, self.listen_port).ok()?;
-        let socket: SharedSessionSocket = Rc::new(RefCell::new(socket));
-        // The peer is whoever speaks first; the driver learns it on receive.
-        let driver = Rc::new(LwipUdpDriver::new(socket, 0, 0));
-        let sink: Rc<dyn BoxedLinkDriver> = driver.clone();
+        // The peer is whoever speaks first; the link learns it on receive.
+        let OpenedLink { sink, pump } = self.links.open_acceptor(self.listen_port).ok()?;
         let actions = (self.accept)(sink);
         let on_event = dispatch_to(self.observer.clone(), actions.clone());
         let handle = spawn_session(
             self.local,
-            self.link.clone(),
-            driver,
+            pump,
             actions.clone(),
             CoopTime::new(self.local.runtime()),
             SessionDriveConfig {
@@ -286,6 +291,8 @@ mod tests {
     use wz_session_core::driver_loop::{DriverLoopOutcome, IterationEvent};
     use wz_session_core::network_message::NetworkMessage;
     use wz_session_core::zid_hex::zid_to_zenoh_hex;
+
+    use crate::memory::{MemoryLinks, MemoryNetwork};
 
     #[derive(Clone, Default)]
     struct FrozenClock;
@@ -353,28 +360,32 @@ mod tests {
         }
     }
 
-    /// The node composed end to end over lwIP loopback: a `connect/endpoints`
-    /// write arriving on the node's observer makes it dial the endpoint, the
-    /// peer there completes the handshake, and the node then reports that
-    /// session — the zid of the peer it reached — as its GET's `sessions`.
-    /// The CONTROL is the same node before the write: it listens, reports no
-    /// session, and dials nothing.
+    /// The node composed end to end over a network of in-memory ends: a
+    /// `connect/endpoints` write arriving on the node's observer makes it dial
+    /// the endpoint, the peer there completes the handshake, and the node then
+    /// reports that session — the zid of the peer it reached — as its GET's
+    /// `sessions`. The CONTROL is the same node before the write: it listens,
+    /// reports no session, and dials nothing.
+    ///
+    /// The network is not any stack's: this is what the node does on every
+    /// network, and the stack-specific witnesses (lwIP's, Zephyr's) show only
+    /// that each stack's links satisfy the seam this runs through.
     #[test]
     fn a_written_endpoint_is_dialled_and_reported_by_the_node() {
         static CONTROL: ConnectControl = ConnectControl::new(true);
         static STATUS: NodeStatus = NodeStatus::new(true);
 
-        let (_serial, link) = wz_link_lwip::lwip_test_link();
-        let link = Rc::new(link);
+        let net = MemoryNetwork::new();
+        let node_links = Rc::new(MemoryLinks::new(net.clone(), [10, 0, 0, 2]));
+        let far_links = MemoryLinks::new(net.clone(), [10, 0, 0, 1]);
         let runtime = CoopRuntime::new(FrozenClock);
         let local = CoopLocalSet::new(&runtime);
 
         // The peer the write will name: a plain acceptor on 7522.
-        let far_socket: SharedSessionSocket = Rc::new(RefCell::new(
-            bind_session_rx(&link, 7522).expect("bind far peer"),
-        ));
-        let far_driver = Rc::new(LwipUdpDriver::new(far_socket, 0, 0));
-        let far_sink: Rc<dyn BoxedLinkDriver> = far_driver.clone();
+        let OpenedLink {
+            sink: far_sink,
+            pump: far_pump,
+        } = far_links.open_acceptor(7522).expect("bind far peer");
         let far_actions =
             new_session_actions(far_sink, params(0xc3), CoopTime::new(&runtime), Counting(9));
         // R2838 — what the peer is told: every Declare the node sends it.
@@ -382,8 +393,7 @@ mod tests {
         let seen = declares.clone();
         let _far = spawn_session(
             &local,
-            link.clone(),
-            far_driver,
+            far_pump,
             far_actions.clone(),
             CoopTime::new(&runtime),
             SessionDriveConfig {
@@ -407,14 +417,14 @@ mod tests {
         let accept_runtime = runtime.clone();
         let mut node = AdminNode::new(
             &local,
-            link.clone(),
+            node_links,
             &CONTROL,
             &STATUS,
             NodeIdentity {
                 zid_hex: String::from("b1b1b1b1"),
                 whatami: "peer",
                 version: String::from("wz-test"),
-                locators: vec![String::from("udp/127.0.0.1:7521")],
+                locators: vec![String::from("udp/10.0.0.2:7521")],
             },
             7521,
             SessionTimeouts::spec_defaults(),
@@ -442,7 +452,7 @@ mod tests {
             .borrow_mut()
             .dispatch_event(IterationEvent::Poll(&put(
                 "@/b1b1b1b1/peer/config/connect/endpoints",
-                br#"["udp/127.0.0.1:7522"]"#,
+                br#"["udp/10.0.0.1:7522"]"#,
             )));
         for _ in 0..64 {
             local.run_until_idle();
@@ -459,7 +469,7 @@ mod tests {
         std::assert_eq!(
             STATUS.endpoints(),
             [EndpointStatus {
-                endpoint: String::from("udp/127.0.0.1:7522"),
+                endpoint: String::from("udp/10.0.0.1:7522"),
                 status: DialStatus::Live { established: true },
             }]
         );
@@ -471,5 +481,190 @@ mod tests {
             node.tick(0);
         }
         std::assert_eq!(declares.get(), 2, "one queryable and one subscriber");
+    }
+
+    /// When the accepted session ends the node listens again, on the same port,
+    /// as a NEW session: a host that goes away and comes back finds it. The
+    /// listener is the half of the node a stack opens (`open_acceptor`), so this
+    /// is the witness that the node lets go of the ended session's link before it
+    /// asks the stack for the port again, which a network that refuses a second
+    /// bind (this one does, as a real socket does) would otherwise turn into a
+    /// node that never listens twice.
+    #[test]
+    fn the_node_listens_again_when_the_accepted_session_ends() {
+        static CONTROL: ConnectControl = ConnectControl::new(true);
+        static STATUS: NodeStatus = NodeStatus::new(true);
+
+        let net = MemoryNetwork::new();
+        let node_links = Rc::new(MemoryLinks::new(net.clone(), [10, 0, 0, 2]));
+        let runtime = CoopRuntime::new(FrozenClock);
+        let local = CoopLocalSet::new(&runtime);
+        let accept_runtime = runtime.clone();
+        let mut node = AdminNode::new(
+            &local,
+            node_links,
+            &CONTROL,
+            &STATUS,
+            NodeIdentity {
+                zid_hex: String::from("b2b2b2b2"),
+                whatami: "peer",
+                version: String::from("wz-test"),
+                locators: vec![String::from("udp/10.0.0.2:7531")],
+            },
+            7531,
+            SessionTimeouts::spec_defaults(),
+            || params(0xb2),
+            move |sink| {
+                new_session_actions(
+                    sink,
+                    params(0xb2),
+                    CoopTime::new(&accept_runtime),
+                    Counting(1),
+                )
+            },
+        );
+        let listen_at = wz_runtime_coop::session_drive::UdpPeer {
+            addr: [10, 0, 0, 2],
+            port: 7531,
+        };
+        node.tick(0);
+        // Weak: it does not hold the session's link (and so its port), and it
+        // keeps the allocation, so the ended session's address cannot be handed
+        // to its successor and make "a new session" read as "the same one".
+        let first = Rc::downgrade(node.acceptor().expect("listening"));
+        std::assert!(
+            net.bind(listen_at, None).is_err(),
+            "the listener holds the port"
+        );
+
+        // The accepted session ends (a host went away). `abort` marks it
+        // finished at once but the executor drops its body, and the link with
+        // it, only on its next sweep: a tick in between finds the port still
+        // held, and the node must retry rather than give up.
+        node.acceptor.as_ref().expect("listening").0.abort();
+        node.tick(1);
+        std::assert!(
+            node.acceptor().is_none(),
+            "the port is held until the executor drops the ended session"
+        );
+
+        // The firmware loop runs the executor, then ticks: now the port is
+        // free, and the node listens again with a session of its own.
+        local.run_until_idle();
+        node.tick(2);
+        let second = node.acceptor().expect("listening again");
+        std::assert!(
+            first.upgrade().is_none(),
+            "the ended session is gone, neither the node nor the executor holds it"
+        );
+        std::assert!(
+            !core::ptr::eq(first.as_ptr(), Rc::as_ptr(second)),
+            "a new session, not the ended one"
+        );
+        std::assert!(
+            net.bind(listen_at, None).is_err(),
+            "and it holds the port again"
+        );
+    }
+
+    /// The order a firmware loop really has: the executor runs, then the node
+    /// ticks. A session that ended is already dropped by the executor by then, so
+    /// the node's own hold on the session's link is all that is left on the port,
+    /// and the node must let it go and listen again within the SAME tick. What it
+    /// had declared on the ended session is forgotten with it, not kept for the
+    /// life of the firmware.
+    #[test]
+    fn the_node_listens_again_at_once_when_the_executor_has_already_dropped_the_session() {
+        static CONTROL: ConnectControl = ConnectControl::new(true);
+        static STATUS: NodeStatus = NodeStatus::new(true);
+
+        let net = MemoryNetwork::new();
+        let node_links = Rc::new(MemoryLinks::new(net.clone(), [10, 0, 0, 2]));
+        let host_links = MemoryLinks::new(net.clone(), [10, 0, 0, 1]);
+        let runtime = CoopRuntime::new(FrozenClock);
+        let local = CoopLocalSet::new(&runtime);
+        let accept_runtime = runtime.clone();
+        let mut node = AdminNode::new(
+            &local,
+            node_links,
+            &CONTROL,
+            &STATUS,
+            NodeIdentity {
+                zid_hex: String::from("b3b3b3b3"),
+                whatami: "peer",
+                version: String::from("wz-test"),
+                locators: vec![String::from("udp/10.0.0.2:7541")],
+            },
+            7541,
+            SessionTimeouts::spec_defaults(),
+            || params(0xb3),
+            move |sink| {
+                new_session_actions(
+                    sink,
+                    params(0xb3),
+                    CoopTime::new(&accept_runtime),
+                    Counting(1),
+                )
+            },
+        );
+        node.tick(0);
+
+        // A host reaches the node and the handshake completes.
+        let OpenedLink { sink, pump } = host_links
+            .open_initiator(wz_runtime_coop::session_drive::UdpPeer {
+                addr: [10, 0, 0, 2],
+                port: 7541,
+            })
+            .expect("host link");
+        let host_actions =
+            McuActions::<FrozenClock>::new_generic(sink, params(0xc1), CoopTime::new(&runtime));
+        let _host = spawn_session(
+            &local,
+            pump,
+            host_actions.clone(),
+            CoopTime::new(&runtime),
+            SessionDriveConfig {
+                timeouts: SessionTimeouts::spec_defaults(),
+                role: SessionRole::Initiator,
+                max_iters: None,
+            },
+            |_| {},
+        );
+        for _ in 0..64 {
+            local.run_until_idle();
+            node.tick(0);
+            if !node.declared.is_empty() {
+                break;
+            }
+        }
+        std::assert!(host_actions.is_established(), "the host holds the session");
+        std::assert_eq!(
+            node.declared.len(),
+            1,
+            "the admin interests went out on the accepted session"
+        );
+        let first = Rc::downgrade(node.acceptor().expect("accepted"));
+
+        // The session ends and the executor drops it before the node looks.
+        node.acceptor.as_ref().expect("accepted").0.abort();
+        local.run_until_idle();
+        node.tick(1);
+
+        let second = node
+            .acceptor()
+            .expect("listening again on the tick that found the session ended");
+        std::assert!(
+            first.upgrade().is_none(),
+            "the ended session is gone, neither the node nor the executor holds it"
+        );
+        std::assert!(
+            !core::ptr::eq(first.as_ptr(), Rc::as_ptr(second)),
+            "a new session, not the ended one"
+        );
+        std::assert!(!second.is_established(), "and nobody has reached it yet");
+        std::assert!(
+            node.declared.is_empty(),
+            "what was declared on the ended session is forgotten with it"
+        );
     }
 }

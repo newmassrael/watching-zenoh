@@ -1,0 +1,100 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later OR LicenseRef-watching-zenoh-Commercial
+# SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
+#
+# wz-session-mcu — the MCU session shell that is written ONCE for every network
+# stack: the application layer a session is driven with, the admin node a host
+# reconfigures at runtime (its write subscriber, its status queryable, its dial
+# manager), and the dialer that opens a written endpoint as a session.
+#
+# It was `wz-session-lwip`'s, and named for lwIP, because lwIP was the only stack
+# the MCU profile had. What it needs of a stack is two things — a link that
+# accepts on a port and a link that dials an address — and both are the
+# `SessionLinks` seam in `wz-runtime-coop`, next to the `SessionDatagramLink`
+# seam the shared drive loop already takes (R2915). So the shell is generic over
+# the stack, and lwIP and Zephyr's sockets each supply their links; a board is
+# not asked to carry the lwIP crate to run an admin node over some other stack.
+#
+# Deliberately depends on NO link crate. The runtime tier is link-agnostic and so
+# is this one; the lwIP-specific half (`LwipUdpDriver`, `LwipLinks`, the
+# multicast drive loop) stays in `wz-session-lwip`, which depends on this crate
+# and re-exports it under its old paths.
+
+[package]
+name = "wz-session-mcu"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+readme.workspace = true
+publish = false
+description = "MCU session shell over any network stack: application layer, admin node, connection manager and dialer, generic over the SessionLinks seam."
+
+[lib]
+name = "wz_session_mcu"
+path = "src/lib.rs"
+
+[features]
+default = []
+
+# Exposes the in-memory network the shell's own tests run on, for a sibling
+# crate that wants a stack-neutral peer. Never in a production build.
+test-support = []
+
+transport-keepalive = [
+    "wz-session-core/transport-keepalive",
+    "wz-runtime-coop/transport-keepalive",
+]
+codec-push = ["wz-session-core/codec-push"]
+codec-response = ["wz-session-core/codec-response"]
+codec-response-final = ["wz-session-core/codec-response-final"]
+liveliness-token = ["wz-session-core/liveliness-token"]
+query-queryable = ["wz-session-core/query-queryable"]
+pubsub-put = ["wz-session-core/pubsub-put"]
+adminspace-write = [
+    "wz-session-core/adminspace-write",
+    "pubsub-put",
+    "wz-session-core/pubsub-delete",
+    "wz-session-core/session-unicast-open",
+    "wz-session-core/session-unicast-accept",
+    "wz-session-core/codec-init-body",
+    "wz-session-core/codec-open-body",
+    # R2838 — a router forwards a PUT only to a face that DECLARED a matching
+    # subscriber, so the node declares `<root>/config/**` on every session,
+    # as upstream's admin space does. Measured against a stock zenohd: the
+    # write never arrived until it did.
+    "wz-session-core/declare-subscriber",
+]
+adminspace-core = [
+    "wz-session-core/adminspace-core",
+    "query-queryable",
+    "codec-response",
+    "codec-response-final",
+    # R2838 — and the same for the GET: the node declares `<root>/**` as a
+    # queryable on every session, or a router has nowhere to route it.
+    "wz-session-core/declare-queryable",
+]
+
+[dependencies]
+# The cooperative runtime: CoopRuntime<C> + CoopTime<C>, the local task set the
+# sessions are spawned on, and the `SessionLinks` / `SessionDatagramLink` seams.
+wz-runtime-coop = { path = "../wz-runtime-coop", features = ["alloc", "session-unicast"] }
+# Runtime-agnostic session SSOT: the action bundle, the engine-free FSM, the
+# admin answerers. no_std selects the heapless engine; alloc the bundle.
+wz-session-core = { path = "../wz-session-core", default-features = false, features = ["alloc", "session-unicast", "no_std"] }
+# R2828 — `admin_host::ConnectControl` locks with the same IRQ-disabling Mutex
+# the cooperative runtime uses. No impl feature here: the firmware (or the std
+# impl in dev-dependencies, for host tests) supplies it at link time.
+critical-section = "1"
+
+[dev-dependencies]
+# critical-section's std impl backs CoopRuntime's critical_section::Mutex and the
+# portable-atomic polyfill on the host test path.
+critical-section = { version = "1", features = ["std"] }
+# Builds the Push / Request records the shell's tests feed the observer.
+# Dev-only: the library names no wz_codecs type.
+wz-codecs = { path = "../wz-codecs", default-features = false }
+
+[lints]
+workspace = true

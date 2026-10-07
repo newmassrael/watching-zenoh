@@ -39,7 +39,7 @@ use wz_session_core::drive::{
     new_session_engine,
 };
 use wz_session_core::driver_loop::{DriverOutcome, IterationEvent};
-use wz_session_core::link::{LinkEvent, RxFrame};
+use wz_session_core::link::{BoxedLinkDriver, LinkEvent, RxFrame};
 use wz_session_core::session_actions::SessionLinkActions;
 use wz_session_core::session_fsm_unicast::SessionFsmUnicastEvent;
 use wz_session_core::session_timeouts::{HandshakeDeadlineTracker, SessionTimeouts};
@@ -85,6 +85,56 @@ impl<T: SessionDatagramLink + ?Sized> SessionDatagramLink for Rc<T> {
     fn try_recv(&self) -> Option<RxFrame> {
         (**self).try_recv()
     }
+}
+
+/// An IPv4 UDP peer as its four octets and a port: what a dial names, written
+/// in no network stack's address word.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct UdpPeer {
+    /// The address, most significant octet first.
+    pub addr: [u8; 4],
+    /// The UDP port.
+    pub port: u16,
+}
+
+/// Why a stack could not open a link.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LinkOpenError {
+    /// The stack has no socket, port or buffer left to give. Worth trying
+    /// again later, which is why a dial that meets it is retried.
+    Exhausted,
+}
+
+/// The two halves of one session link, as a stack opens them: the outbound half
+/// the session's action bundle sends through and the inbound half the drive loop
+/// pumps. One object often is both (Zephyr's socket driver); lwIP's are two
+/// (its stack handle, pumped, and its UDP driver, read).
+pub struct OpenedLink<P> {
+    /// What the session's actions send through.
+    pub sink: Rc<dyn BoxedLinkDriver>,
+    /// What the drive loop services and takes datagrams from.
+    pub pump: P,
+}
+
+/// What a network stack gives a session shell that is written once for all of
+/// them: the means to open the two ends of a UDP session link.
+///
+/// This is the seam a node that LISTENS and DIALS needs, where
+/// [`SessionDatagramLink`] is the seam a loop that DRIVES one link needs. The
+/// admin node is the first user: it accepts one session on a port and dials
+/// whatever endpoints a host writes, and neither is any stack's business but the
+/// socket under it.
+pub trait SessionLinks {
+    /// What the drive loop pumps for a link this stack opened.
+    type Pump: SessionDatagramLink + 'static;
+
+    /// A link that accepts: bound on `port`, with no peer until the first
+    /// datagram names one.
+    fn open_acceptor(&self, port: u16) -> Result<OpenedLink<Self::Pump>, LinkOpenError>;
+
+    /// A link that dials `peer`: bound on a port the stack picks, with replies
+    /// and first sends going to `peer`.
+    fn open_initiator(&self, peer: UdpPeer) -> Result<OpenedLink<Self::Pump>, LinkOpenError>;
 }
 
 /// The handshake role to activate the FSM with before the loop starts.

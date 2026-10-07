@@ -96,6 +96,7 @@ loopif-multicast = ["wz-link-lwip/loopif-multicast"]
 transport-keepalive = [
     "wz-session-core/transport-keepalive",
     "wz-runtime-coop/transport-keepalive",
+    "wz-session-mcu/transport-keepalive",
 ]
 
 # R311lt — MCU multicast transport drive loop (`run_multicast_session`): the
@@ -118,7 +119,7 @@ transport-multicast = [
 # T_MID_FRAME via the shared multicast_tx_emit SSOT. Orthogonal to
 # transport-multicast (which is RX / JOIN / lease only); a publishing multicast
 # node enables both.
-codec-push = ["wz-session-core/codec-push"]
+codec-push = ["wz-session-core/codec-push", "wz-session-mcu/codec-push"]
 # R311lz — the remaining multicast TX body codecs, forwarding the matching
 # wz-session-core features so the drive loop's `next_tx` seam reaches every arm
 # of the shared multicast_tx_emit SSOT, not just Push (the loop's TX gate is the
@@ -134,9 +135,12 @@ codec-push = ["wz-session-core/codec-push"]
 # DeclareReplySink construction into the shared wz-session-core
 # multicast_reply_sink SSOT, so this crate names no wz_codecs type and forwards
 # wz-session-core only (the wz-codecs direct dep R311mb needed is gone).
-codec-response = ["wz-session-core/codec-response"]
-codec-response-final = ["wz-session-core/codec-response-final"]
-liveliness-token = ["wz-session-core/liveliness-token"]
+codec-response = ["wz-session-core/codec-response", "wz-session-mcu/codec-response"]
+codec-response-final = [
+    "wz-session-core/codec-response-final",
+    "wz-session-mcu/codec-response-final",
+]
+liveliness-token = ["wz-session-core/liveliness-token", "wz-session-mcu/liveliness-token"]
 # R311mb — the queryable observer-staging registry: forwards the wz-session-core
 # query-queryable capability (the QueryableRegistry on the ApplicationLayerObserver
 # + codec-request for inbound Query decode + codec-response). With it on, an MCU
@@ -144,18 +148,18 @@ liveliness-token = ["wz-session-core/liveliness-token"]
 # and MulticastReplyQueue (ResponseSink) drains onto the next_tx seam. Pair with
 # codec-response + codec-response-final to emit the full Response + ResponseFinal
 # chain.
-query-queryable = ["wz-session-core/query-queryable"]
+query-queryable = ["wz-session-core/query-queryable", "wz-session-mcu/query-queryable"]
 # R2827 — the Put arm of the subscriber dispatch, forwarded so a unicast MCU
 # node's `app_layer::dispatch_to` delivers a Push to the subscribers it
 # registered (the observer fires a subscriber only under pubsub-put or
 # pubsub-delete).
-pubsub-put = ["wz-session-core/pubsub-put"]
+pubsub-put = ["wz-session-core/pubsub-put", "wz-session-mcu/pubsub-put"]
 # R2828 (§5.23) — the node hosts upstream's `connect/endpoints` config write
 # (`admin_host`). A write arrives as a PUT and a removal as a DEL, so both
 # sample kinds must reach the subscriber: pubsub-put and pubsub-delete.
 #
 # R2831 — and a node that accepts an endpoint list must be able to DIAL it
-# (`lwip_dialer`), so the initiator half of the handshake rides here: the
+# (`wz_session_mcu::dial`), so the initiator half of the handshake rides here: the
 # InitSyn / OpenSyn emitters are compiled only under session-unicast-open with
 # the Init and Open body codecs. Without them the dialer would spawn sessions
 # that never put a byte on the wire.
@@ -166,6 +170,7 @@ pubsub-put = ["wz-session-core/pubsub-put"]
 # accept nothing, silently.
 adminspace-write = [
     "wz-session-core/adminspace-write",
+    "wz-session-mcu/adminspace-write",
     "pubsub-put",
     "wz-session-core/pubsub-delete",
     "wz-session-core/session-unicast-open",
@@ -183,6 +188,7 @@ adminspace-write = [
 # answerer. It needs a queryable and the full reply chain.
 adminspace-core = [
     "wz-session-core/adminspace-core",
+    "wz-session-mcu/adminspace-core",
     "query-queryable",
     "codec-response",
     "codec-response-final",
@@ -200,6 +206,11 @@ wz-runtime-coop = { path = "../wz-runtime-coop", features = ["alloc", "session-u
 # §5.C link tier: LwipUdpSocket / SessionRxSocket / bind_session_rx /
 # LwipLink. Empty without lwip_real_build (host/WZ_LWIP_PORT only).
 wz-link-lwip = { path = "../wz-link-lwip" }
+# The session shell that is written once for every network stack: application
+# layer, admin node, connection manager and dialer. It was this crate's, and is
+# re-exported from here under its old paths; what stays here is lwIP's half of
+# it (`LwipUdpDriver`, `LwipLinks`, the multicast drive loop).
+wz-session-mcu = { path = "../wz-session-mcu" }
 # Runtime-agnostic session SSOT: the action bundle, the engine-free FSM,
 # the shared drive-loop primitives. no_std selects the heapless engine;
 # alloc the Vec/String/Arc-backed bundle.

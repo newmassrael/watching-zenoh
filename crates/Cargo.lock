@@ -3287,6 +3287,17 @@ dependencies = [
  "wz-runtime-coop",
  "wz-runtime-core",
  "wz-session-core",
+ "wz-session-mcu",
+]
+
+[[package]]
+name = "wz-session-mcu"
+version = "0.1.0"
+dependencies = [
+ "critical-section",
+ "wz-codecs",
+ "wz-runtime-coop",
+ "wz-session-core",
 ]
 
 [[package]]

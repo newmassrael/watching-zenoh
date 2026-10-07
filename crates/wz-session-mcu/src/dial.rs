@@ -5,13 +5,18 @@
 //! `udp/<ipv4>:<port>` endpoint in the connection control a live session.
 //!
 //! [`crate::connect_manager::ConnectManager`] decides WHEN to dial; this
-//! module is the [`crate::connect_manager::Dialer`] that does it on lwIP. A
-//! dial binds a fresh session socket on an ephemeral port, points a
-//! [`crate::driver::LwipUdpDriver`] at the endpoint, and spawns an INITIATOR
-//! session onto the firmware's local task set with
-//! [`crate::session_drive::spawn_session`] — the same call a deploy `main()`
-//! writes for its one configured peer, so a written endpoint and a compiled-in
-//! one are the same kind of session.
+//! module is the [`crate::connect_manager::Dialer`] that does it. A dial asks
+//! the network stack, through [`SessionLinks`], for a link towards the endpoint
+//! and spawns an INITIATOR session onto the firmware's local task set with
+//! `wz_runtime_coop::session_drive::spawn_session` — the same call a deploy
+//! `main()` writes for its one configured peer, so a written endpoint and a
+//! compiled-in one are the same kind of session.
+//!
+//! R2835-era this was written on lwIP and named for it. Nothing in it is lwIP's
+//! but the four lines that open a socket, so the socket is now the stack's
+//! ([`SessionLinks::open_initiator`]) and the rest is written once: a board whose
+//! network is Zephyr's sockets dials a written endpoint with the same code a
+//! board on lwIP does.
 //!
 //! ## What this build can dial
 //!
@@ -34,21 +39,19 @@
 
 use alloc::boxed::Box;
 use alloc::rc::Rc;
-use core::cell::RefCell;
 
-use wz_link_lwip::rx_sockets::bind_session_rx;
-use wz_link_lwip::{ipv4_addr_from_octets, LwipLink};
+use wz_runtime_coop::session_drive::{
+    spawn_session, LinkOpenError, OpenedLink, SessionDriveConfig, SessionLinks, SessionRole,
+    UdpPeer,
+};
 use wz_runtime_coop::{ClockSource, CoopLocalJoinHandle, CoopLocalSet, CoopRuntime, CoopTime};
 use wz_session_core::close_reason::CloseReason;
 use wz_session_core::driver_loop::{DriverOutcome, IterationEvent};
-use wz_session_core::link::BoxedLinkDriver;
 use wz_session_core::session_actions::SessionLinkActions;
 use wz_session_core::session_init_params::SessionInitParams;
 use wz_session_core::session_timeouts::SessionTimeouts;
 
 use crate::connect_manager::{DialFailed, DialRefused, Dialer, Ended};
-use crate::driver::{LwipUdpDriver, SharedSessionSocket};
-use crate::session_drive::{spawn_session, SessionDriveConfig, SessionRole};
 
 /// The action bundle of one MCU session.
 pub type McuActions<C> = SessionLinkActions<CoopRuntime<C>, CoopTime<C>>;
@@ -57,8 +60,8 @@ pub type McuActions<C> = SessionLinkActions<CoopRuntime<C>, CoopTime<C>>;
 /// `crate::app_layer::dispatch_to` over the node's observer.
 pub type EventSink = Box<dyn FnMut(IterationEvent<'_>)>;
 
-/// Read `udp/<a.b.c.d>:<port>` into lwIP's address word and a port.
-pub fn parse_udp_endpoint(endpoint: &str) -> Result<(u32, u16), DialRefused> {
+/// Read `udp/<a.b.c.d>:<port>` into the peer it names.
+pub fn parse_udp_endpoint(endpoint: &str) -> Result<UdpPeer, DialRefused> {
     let rest = endpoint
         .strip_prefix("udp/")
         .ok_or(DialRefused::Unsupported)?;
@@ -70,9 +73,9 @@ pub fn parse_udp_endpoint(endpoint: &str) -> Result<(u32, u16), DialRefused> {
     if port == 0 {
         return Err(DialRefused::BadAddress);
     }
-    let mut octets = [0u8; 4];
+    let mut addr = [0u8; 4];
     let mut parts = host.split('.');
-    for octet in &mut octets {
+    for octet in &mut addr {
         *octet = parts
             .next()
             .and_then(digits)
@@ -81,7 +84,7 @@ pub fn parse_udp_endpoint(endpoint: &str) -> Result<(u32, u16), DialRefused> {
     if parts.next().is_some() {
         return Err(DialRefused::BadAddress);
     }
-    Ok((ipv4_addr_from_octets(octets), port))
+    Ok(UdpPeer { addr, port })
 }
 
 /// Decimal digits only: `str::parse` would also take a leading `+`.
@@ -93,16 +96,23 @@ fn digits<T: core::str::FromStr>(text: &str) -> Option<T> {
 }
 
 /// A session this dialer started.
-pub struct LwipUdpSession<C: ClockSource + 'static> {
+pub struct UdpSession<C: ClockSource + 'static> {
     handle: CoopLocalJoinHandle<DriverOutcome>,
     actions: Rc<McuActions<C>>,
     established: bool,
 }
 
-impl<C: ClockSource + 'static> LwipUdpSession<C> {
+impl<C: ClockSource + 'static> UdpSession<C> {
     /// The session's action bundle, to publish or declare through.
     pub fn actions(&self) -> &Rc<McuActions<C>> {
         &self.actions
+    }
+
+    /// End the session's task now, without a Close on the wire. A test that
+    /// must see a session end uses it; the manager hangs up through the
+    /// [`Dialer`], which tells an established peer first.
+    pub fn abort(&self) {
+        self.handle.abort();
     }
 
     /// R2834 (§5.23 `adminspace-core`) — this session as a `sessions[]` entry
@@ -125,9 +135,8 @@ impl<C: ClockSource + 'static> LwipUdpSession<C> {
 }
 
 /// R2837 — any MCU session as a `sessions[]` entry, dialled or accepted:
-/// `None` until it is established. What
-/// `LwipUdpSession::admin_session` reports, for a session this dialer did not
-/// start (the node's acceptor).
+/// `None` until it is established. What `UdpSession::admin_session` reports,
+/// for a session this dialer did not start (the node's acceptor).
 #[cfg(feature = "adminspace-core")]
 pub fn admin_session_of<C: ClockSource + 'static>(
     actions: &McuActions<C>,
@@ -153,43 +162,46 @@ pub fn admin_session_of<C: ClockSource + 'static>(
     )
 }
 
-/// Dials UDP endpoints as initiator sessions on the firmware's task set.
+/// Dials UDP endpoints as initiator sessions on the firmware's task set, over
+/// whichever network stack `L` is.
 ///
 /// `params` is asked for a fresh [`SessionInitParams`] per dial, so each
 /// session can carry its own initial sequence number and cookie; `on_event`
 /// is asked for the sink each new session reports to.
-pub struct LwipUdpDialer<'a, C, P, E>
+pub struct UdpDialer<'a, L, C, P, E>
 where
+    L: SessionLinks,
     C: ClockSource + 'static,
     P: FnMut() -> SessionInitParams,
     E: FnMut(&Rc<McuActions<C>>) -> EventSink,
 {
     local: &'a CoopLocalSet<C>,
-    link: Rc<LwipLink>,
+    links: Rc<L>,
     timeouts: SessionTimeouts,
     max_iters: Option<usize>,
     params: P,
     on_event: E,
 }
 
-impl<'a, C, P, E> LwipUdpDialer<'a, C, P, E>
+impl<'a, L, C, P, E> UdpDialer<'a, L, C, P, E>
 where
+    L: SessionLinks,
     C: ClockSource + 'static,
     P: FnMut() -> SessionInitParams,
     E: FnMut(&Rc<McuActions<C>>) -> EventSink,
 {
-    /// A dialer spawning onto `local`, over `link`, with the handshake
+    /// A dialer spawning onto `local`, over `links`, with the handshake
     /// deadlines `timeouts`.
     pub fn new(
         local: &'a CoopLocalSet<C>,
-        link: Rc<LwipLink>,
+        links: Rc<L>,
         timeouts: SessionTimeouts,
         params: P,
         on_event: E,
     ) -> Self {
         Self {
             local,
-            link,
+            links,
             timeouts,
             max_iters: None,
             params,
@@ -204,28 +216,29 @@ where
     }
 }
 
-impl<'a, C, P, E> Dialer for LwipUdpDialer<'a, C, P, E>
+impl<'a, L, C, P, E> Dialer for UdpDialer<'a, L, C, P, E>
 where
+    L: SessionLinks,
     C: ClockSource + 'static,
     P: FnMut() -> SessionInitParams,
     E: FnMut(&Rc<McuActions<C>>) -> EventSink,
 {
-    type Session = LwipUdpSession<C>;
+    type Session = UdpSession<C>;
 
     fn dial(&mut self, endpoint: &str) -> Result<Self::Session, DialFailed> {
-        let (addr, port) = parse_udp_endpoint(endpoint).map_err(DialFailed::Refused)?;
-        // Port 0: lwIP picks a free local port, one per session.
-        let socket = bind_session_rx(&self.link, 0).map_err(|_| DialFailed::Exhausted)?;
-        let socket: SharedSessionSocket = Rc::new(RefCell::new(socket));
-        let driver = Rc::new(LwipUdpDriver::new(socket, addr, port));
-        let sink: Rc<dyn BoxedLinkDriver> = driver.clone();
+        let peer = parse_udp_endpoint(endpoint).map_err(DialFailed::Refused)?;
+        // The stack picks the local port, one per session, and may have none
+        // left to give: that is a failed attempt of this outage, not a refusal.
+        let OpenedLink { sink, pump } = self
+            .links
+            .open_initiator(peer)
+            .map_err(|LinkOpenError::Exhausted| DialFailed::Exhausted)?;
         let runtime = self.local.runtime();
         let actions = McuActions::<C>::new_generic(sink, (self.params)(), CoopTime::new(runtime));
         let on_event = (self.on_event)(&actions);
         let handle = spawn_session(
             self.local,
-            self.link.clone(),
-            driver,
+            pump,
             actions.clone(),
             CoopTime::new(runtime),
             SessionDriveConfig {
@@ -235,7 +248,7 @@ where
             },
             on_event,
         );
-        Ok(LwipUdpSession {
+        Ok(UdpSession {
             handle,
             actions,
             established: false,
@@ -268,7 +281,10 @@ mod tests {
     use super::*;
     use alloc::vec;
 
-    use wz_link_lwip::ipv4_addr_loopback;
+    use crate::memory::{MemoryLinks, MemoryNetwork};
+
+    const NODE: [u8; 4] = [10, 0, 0, 2];
+    const FAR: [u8; 4] = [10, 0, 0, 1];
 
     #[derive(Clone, Default)]
     struct FrozenClock;
@@ -316,8 +332,13 @@ mod tests {
 
     #[test]
     fn only_udp_to_an_ipv4_address_is_dialable() {
-        let lo = ipv4_addr_loopback();
-        std::assert_eq!(parse_udp_endpoint("udp/127.0.0.1:7447"), Ok((lo, 7447)));
+        std::assert_eq!(
+            parse_udp_endpoint("udp/127.0.0.1:7447"),
+            Ok(UdpPeer {
+                addr: [127, 0, 0, 1],
+                port: 7447
+            })
+        );
         for (text, why) in [
             ("tcp/127.0.0.1:7447", DialRefused::Unsupported),
             ("udp/127.0.0.1:7447#iface=eth0", DialRefused::Unsupported),
@@ -335,23 +356,23 @@ mod tests {
     }
 
     /// A dial opens a real session towards the endpoint: an acceptor on the
-    /// same lwIP loopback completes the handshake with it, and once the
-    /// session's task ends it reads as ended AFTER establishing. The control
-    /// is a dial nobody answers, which ends BEFORE establishing.
+    /// same network completes the handshake with it, and once the session's
+    /// task ends it reads as ended AFTER establishing. The control is a dial
+    /// nobody answers, which ends BEFORE establishing.
     #[test]
     fn a_dialled_endpoint_becomes_an_established_session() {
-        let (_serial, link) = wz_link_lwip::lwip_test_link();
-        let link = Rc::new(link);
+        let net = MemoryNetwork::new();
+        // The acceptor's host and the dialling node's are two hosts on one net.
+        let far = Rc::new(MemoryLinks::new(net.clone(), FAR));
+        let near = Rc::new(MemoryLinks::new(net.clone(), NODE));
         let runtime = CoopRuntime::new(FrozenClock);
         let local = CoopLocalSet::new(&runtime);
 
         // The acceptor the dial will reach.
-        let acceptor_port: u16 = 7494;
-        let acceptor_socket: SharedSessionSocket = Rc::new(RefCell::new(
-            bind_session_rx(&link, acceptor_port).expect("bind acceptor"),
-        ));
-        let acceptor_driver = Rc::new(LwipUdpDriver::new(acceptor_socket, 0, 0));
-        let acceptor_sink: Rc<dyn BoxedLinkDriver> = acceptor_driver.clone();
+        let OpenedLink {
+            sink: acceptor_sink,
+            pump: acceptor_pump,
+        } = far.open_acceptor(7494).expect("bind acceptor");
         // An acceptor mints its cookie from a per-handshake nonce and refuses
         // to mint without an entropy source, so it is built through the seam
         // a board uses.
@@ -363,8 +384,7 @@ mod tests {
         );
         let _acceptor = spawn_session(
             &local,
-            link.clone(),
-            acceptor_driver,
+            acceptor_pump,
             acceptor_actions.clone(),
             CoopTime::new(&runtime),
             SessionDriveConfig {
@@ -375,14 +395,14 @@ mod tests {
             |_| {},
         );
 
-        let mut dialer = LwipUdpDialer::new(
+        let mut dialer = UdpDialer::new(
             &local,
-            link.clone(),
+            near.clone(),
             SessionTimeouts::spec_defaults(),
             || params(0xb1),
             quiet,
         );
-        let mut session = dialer.dial("udp/127.0.0.1:7494").expect("dialable");
+        let mut session = dialer.dial("udp/10.0.0.1:7494").expect("dialable");
         for _ in 0..64 {
             local.run_until_idle();
             if session.actions().is_established() {
@@ -410,34 +430,34 @@ mod tests {
             std::assert_eq!(entry.whatami.as_deref(), Some("peer"));
             std::assert_eq!(entry.links.len(), 1, "one UDP link");
             // R2841 — the link's ends, as upstream renders them: the dialled
-            // side's dst is the endpoint it was given; its src is the routed
-            // address and the port lwIP chose.
-            std::assert_eq!(entry.links[0].dst, "udp/127.0.0.1:7494");
+            // side's dst is the endpoint it was given; its src is the address
+            // the node is on and the port the stack chose.
+            std::assert_eq!(entry.links[0].dst, "udp/10.0.0.1:7494");
             std::assert!(
-                entry.links[0].src.starts_with("udp/127.0.0.1:")
+                entry.links[0].src.starts_with("udp/10.0.0.2:")
                     && !entry.links[0].src.ends_with(":0"),
                 "src {:?}",
                 entry.links[0].src
             );
             // ... and the accepting side names the same link from its end.
             let accepted = admin_session_of(&acceptor_actions).expect("established");
-            std::assert_eq!(accepted.links[0].src, "udp/127.0.0.1:7494");
+            std::assert_eq!(accepted.links[0].src, "udp/10.0.0.1:7494");
             std::assert_eq!(accepted.links[0].dst, entry.links[0].src);
         }
 
-        session.handle.abort();
+        session.abort();
         std::assert_eq!(dialer.ended(&mut session), Some(Ended::AfterEstablished));
 
         // CONTROL: nobody listens on 7495, and the capped session ends first.
-        let mut unanswered = LwipUdpDialer::new(
+        let mut unanswered = UdpDialer::new(
             &local,
-            link.clone(),
+            near.clone(),
             SessionTimeouts::spec_defaults(),
             || params(0xc1),
             quiet,
         )
         .with_max_iters(8);
-        let mut lost = unanswered.dial("udp/127.0.0.1:7495").expect("dialable");
+        let mut lost = unanswered.dial("udp/10.0.0.1:7495").expect("dialable");
         // R2834 — CONTROL: a session nobody answered is not reported.
         #[cfg(feature = "adminspace-core")]
         std::assert!(lost.admin_session().is_none());
@@ -448,6 +468,40 @@ mod tests {
 
         std::assert!(matches!(
             unanswered.dial("tcp/127.0.0.1:7447"),
+            Err(DialFailed::Refused(DialRefused::Unsupported))
+        ));
+    }
+
+    /// A stack with no link left to give is a failed attempt of the outage, not
+    /// a refusal: the manager waits and tries again.
+    #[test]
+    fn a_stack_with_no_link_left_makes_the_dial_exhausted_and_not_refused() {
+        struct NoLinks;
+        impl SessionLinks for NoLinks {
+            type Pump = Rc<crate::memory::MemoryEnd>;
+            fn open_acceptor(&self, _: u16) -> Result<OpenedLink<Self::Pump>, LinkOpenError> {
+                Err(LinkOpenError::Exhausted)
+            }
+            fn open_initiator(&self, _: UdpPeer) -> Result<OpenedLink<Self::Pump>, LinkOpenError> {
+                Err(LinkOpenError::Exhausted)
+            }
+        }
+        let runtime = CoopRuntime::new(FrozenClock);
+        let local = CoopLocalSet::new(&runtime);
+        let mut dialer = UdpDialer::new(
+            &local,
+            Rc::new(NoLinks),
+            SessionTimeouts::spec_defaults(),
+            || params(0xd1),
+            quiet,
+        );
+        std::assert!(matches!(
+            dialer.dial("udp/10.0.0.1:7494"),
+            Err(DialFailed::Exhausted)
+        ));
+        // And what is refused is refused before the stack is asked.
+        std::assert!(matches!(
+            dialer.dial("tcp/10.0.0.1:7494"),
             Err(DialFailed::Refused(DialRefused::Unsupported))
         ));
     }

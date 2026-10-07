@@ -38,6 +38,7 @@ use wz::runtime_coop::{ClockSource, CoopLocalSet, CoopRuntime, CoopTime};
 use wz::session_lwip::admin_host::ConnectControl;
 use wz::session_lwip::admin_node::AdminNode;
 use wz::session_lwip::admin_status::{NodeIdentity, NodeStatus};
+use wz::session_lwip::LwipLinks;
 use wz_mcu_clock::SystickClock;
 use wz_session_core::entropy::{EntropySource, EntropyUnavailable};
 use wz_session_core::session_init_params::SessionInitParams;
@@ -178,7 +179,7 @@ fn main() -> ! {
     let accept_runtime = runtime.clone();
     let mut node = AdminNode::new(
         &local,
-        link.clone(),
+        Rc::new(LwipLinks::new(link.clone())),
         &CONTROL,
         &STATUS,
         NodeIdentity {

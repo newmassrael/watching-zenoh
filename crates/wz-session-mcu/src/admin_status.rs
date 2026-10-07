@@ -297,8 +297,7 @@ mod tests {
     use wz_codecs::request::{Request, RequestVariant};
     use wz_codecs::wireexpr::{Wireexpr, WireexprVariant};
     use wz_codecs::wireexpr_nonlocal::WireexprNonlocal;
-    use wz_link_lwip::ipv4_addr_loopback;
-    use wz_link_lwip::rx_sockets::bind_session_rx;
+    use wz_runtime_coop::session_drive::{SessionDatagramLink, UdpPeer};
     use wz_runtime_coop::{ClockSource, CoopRuntime, CoopTime};
     use wz_session_core::driver_loop::{DriverLoopOutcome, IterationEvent};
     use wz_session_core::link::BoxedLinkDriver;
@@ -309,7 +308,7 @@ mod tests {
     use wz_session_core::WhatAmI;
 
     use crate::app_layer::dispatch_to;
-    use crate::driver::{LwipUdpDriver, SharedSessionSocket};
+    use crate::memory::MemoryNetwork;
 
     #[derive(Clone, Default)]
     struct FrozenClock;
@@ -398,8 +397,8 @@ mod tests {
         }
     }
 
-    /// The node answers upstream's admin GET on a real lwIP link with the
-    /// shared answerer: the root leg carries `sessions` and the peer the status
+    /// The node answers upstream's admin GET over a link with the shared
+    /// answerer: the root leg carries `sessions` and the peer the status
     /// holds, the `config` leg carries what the config view wrote, and a denied
     /// read puts neither on the wire. The CONTROL is the same GET before the
     /// queryable exists.
@@ -409,20 +408,17 @@ mod tests {
         static CONFIG: FixedConfig = FixedConfig;
         static WRITES_OFF: WritesOff = WritesOff;
 
-        let (_serial, link) = wz_link_lwip::lwip_test_link();
-        let (node_port, peer_port): (u16, u16) = (7481, 7482);
-        let node_socket: SharedSessionSocket = Rc::new(RefCell::new(
-            bind_session_rx(&link, node_port).expect("bind node socket"),
-        ));
-        let peer_socket: SharedSessionSocket = Rc::new(RefCell::new(
-            bind_session_rx(&link, peer_port).expect("bind peer socket"),
-        ));
-        let driver = Rc::new(LwipUdpDriver::new(
-            node_socket,
-            ipv4_addr_loopback(),
-            peer_port,
-        ));
-        let peer = LwipUdpDriver::new(peer_socket, ipv4_addr_loopback(), node_port);
+        let net = MemoryNetwork::new();
+        let node_at = UdpPeer {
+            addr: [10, 0, 0, 1],
+            port: 7481,
+        };
+        let peer_at = UdpPeer {
+            addr: [10, 0, 0, 2],
+            port: 7482,
+        };
+        let driver = net.bind(node_at, Some(peer_at)).expect("bind node end");
+        let peer = net.bind(peer_at, Some(node_at)).expect("bind peer end");
         let runtime = CoopRuntime::new(FrozenClock);
         let clock = CoopTime::new(&runtime);
         let sink: Rc<dyn BoxedLinkDriver> = driver.clone();
@@ -449,11 +445,9 @@ mod tests {
 
         // Whether any datagram the peer received carries `needle`.
         let wire_has = |needle: &[u8]| {
-            link.poll_loopback();
-            link.check_timeouts();
             let mut seen = false;
-            while let Some(dg) = peer.try_recv() {
-                seen |= dg.data.windows(needle.len()).any(|w| w == needle);
+            while let Some(frame) = peer.try_recv() {
+                seen |= frame.bytes.windows(needle.len()).any(|w| w == needle);
             }
             seen
         };
