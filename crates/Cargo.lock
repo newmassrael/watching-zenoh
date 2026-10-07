@@ -2980,6 +2980,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "wz-eth-mac-lan9118"
+version = "0.1.0"
+dependencies = [
+ "wz-runtime-core",
+]
+
+[[package]]
 name = "wz-host-interop-tests"
 version = "0.1.0"
 dependencies = [

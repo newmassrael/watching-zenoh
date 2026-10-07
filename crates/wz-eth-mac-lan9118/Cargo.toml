@@ -1,0 +1,41 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later OR LicenseRef-watching-zenoh-Commercial
+# SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
+#
+# wz-eth-mac-lan9118 — the SMSC LAN9118 Ethernet MAC, as a
+# `wz_runtime_core::EthernetMac`.
+#
+# A `#![no_std]` library owning ONE chip's driver: the register-level bring-up
+# and the FIFO packing for the controller on Arm's MPS2 boards, which is what
+# QEMU's `mps2-an385` / `an386` / `an500` / `an511` machines emulate. It lived
+# in `wz-link-lwip` until a second chip made that placement wrong: a driver
+# for another part has no business depending on the crate that builds lwIP's C
+# sources, and a firmware drives one chip.
+#
+# Deliberately depends on NOTHING but the trait-skeleton tier. That tier is
+# dependency-free itself, so this crate builds on the host (the packing is
+# tested there, against a transcription of the model's own reassembly) and on
+# every MCU target, and a chip crate added beside it inherits the same shape:
+# one crate per chip, each reaching the seam and not the stack.
+
+[package]
+name = "wz-eth-mac-lan9118"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+readme.workspace = true
+publish = false
+description = "SMSC LAN9118 Ethernet MAC driver (MPS2 boards, QEMU mps2-*), an EthernetMac for the wz network stacks."
+
+[lib]
+name = "wz_eth_mac_lan9118"
+path = "src/lib.rs"
+
+[dependencies]
+# The `EthernetMac` seam. No other wz crate: see the header.
+wz-runtime-core = { path = "../wz-runtime-core" }
+
+[lints]
+workspace = true

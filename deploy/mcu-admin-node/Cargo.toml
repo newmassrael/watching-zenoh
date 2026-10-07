@@ -5,7 +5,7 @@
 # zenoh host reconfigures at runtime.
 #
 # Boots a wz MCU node on real Ethernet frames: the LAN9118 the mps2 machines
-# carry (`wz_link_lwip::lan9118`) under an lwIP Ethernet netif
+# carry (`wz_eth_mac_lan9118`) under an lwIP Ethernet netif
 # (`wz_link_lwip::ethernet`), at QEMU user networking's guest address
 # 10.0.2.15. It runs `wz_session_lwip::admin_node::AdminNode`: it listens on
 # udp/10.0.2.15:7447, answers upstream's admin GET under its own zid, and
@@ -40,6 +40,10 @@ cortex-m-semihosting = "0.5"
 panic-semihosting = { version = "0.6", features = ["exit"] }
 embedded-alloc = "0.6"
 wz-mcu-clock = { path = "../../crates/wz-mcu-clock" }
+# The chip's driver, a crate of its own since the `EthernetMac` seam moved to the
+# dependency-free trait tier: it depends on that tier and on nothing else, so
+# naming it here adds the one chip this firmware drives and no other.
+wz-eth-mac-lan9118 = { path = "../../crates/wz-eth-mac-lan9118" }
 # The composable-framework route every deploy takes: the facade's features
 # unify onto the one wz-session-core the session shell is built against.
 # keepalive and close keep the zenoh host's lease and teardown honest.

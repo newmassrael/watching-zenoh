@@ -28,25 +28,13 @@ use lwip_sys::{netif, wz_ethif_add, wz_ethif_input};
 
 use crate::LwipLink;
 
-/// The longest frame the netif sends or accepts, without the FCS: a 14-byte
-/// header and a 1500-byte MTU. The same bound `shim.c` holds its transmit
-/// buffer to.
-pub const FRAME_MAX: usize = 1514;
-
-/// An Ethernet MAC: the part of a NIC driver lwIP needs.
-pub trait EthernetMac {
-    /// The station address this MAC answers to.
-    fn mac_address(&self) -> [u8; 6];
-
-    /// Put one whole frame (header and payload, no FCS) on the wire. `false`
-    /// when it could not be sent; lwIP counts it as an interface error.
-    fn transmit(&mut self, frame: &[u8]) -> bool;
-
-    /// Take the next received frame (no FCS) into `buf` and return its
-    /// length, or `None` when nothing is waiting. A frame longer than `buf`
-    /// is dropped whole rather than truncated.
-    fn receive(&mut self, buf: &mut [u8]) -> Option<usize>;
-}
+/// The MAC seam and the frame bound, which moved to the dependency-free trait
+/// tier so that a chip's driver can implement the seam without depending on
+/// this crate (which builds lwIP's C sources). Re-exported here so the path a
+/// firmware already names, `ethernet::EthernetMac`, stays one.
+///
+/// `FRAME_MAX` is the bound `shim.c` holds its transmit buffer to.
+pub use wz_runtime_core::eth_mac::{EthernetMac, FRAME_MAX};
 
 /// Why an interface could not be added.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

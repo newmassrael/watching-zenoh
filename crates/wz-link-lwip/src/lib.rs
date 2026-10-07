@@ -191,9 +191,10 @@ pub mod rx_ring;
 /// node reaches anything outside its own process through.
 pub mod ethernet;
 
-/// R2836 — the SMSC LAN9118 MAC on Arm's MPS2 boards and QEMU's `mps2-*`
-/// machines, as an Ethernet MAC for [`ethernet`].
-pub mod lan9118;
+// The SMSC LAN9118 MAC (R2836) is no longer a module here: a chip's driver is a
+// crate of its own, `wz-eth-mac-lan9118`, that implements the `EthernetMac`
+// seam from the dependency-free trait tier. A firmware that drives that chip
+// depends on it directly, next to this crate.
 
 // R311lu — also under `test-support` so the exposed `lwip_test_link` harness
 // (which uses `std::sync` for its Once / Mutex) compiles for sibling crates'

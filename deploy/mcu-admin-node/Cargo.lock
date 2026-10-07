@@ -424,6 +424,7 @@ dependencies = [
  "embedded-alloc",
  "panic-semihosting",
  "wz",
+ "wz-eth-mac-lan9118",
  "wz-mcu-clock",
  "wz-session-core",
 ]
@@ -973,6 +974,13 @@ version = "0.1.0"
 dependencies = [
  "sce-forge-runtime",
  "sce-portable-bytes",
+]
+
+[[package]]
+name = "wz-eth-mac-lan9118"
+version = "0.1.0"
+dependencies = [
+ "wz-runtime-core",
 ]
 
 [[package]]

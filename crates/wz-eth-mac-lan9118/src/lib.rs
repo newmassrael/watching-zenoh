@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
 
 //! R2836 — an SMSC LAN9118 Ethernet MAC, as an
-//! [`crate::ethernet::EthernetMac`].
+//! [`wz_runtime_core::EthernetMac`].
 //!
 //! The LAN9118 is the Ethernet controller on Arm's MPS2 boards, and so on
 //! QEMU's `mps2-an385` / `an386` / `an500` / `an511` machines, which is what
@@ -20,12 +20,24 @@
 //!   counts the FCS; the data FIFO then holds that many bytes, rounded up to
 //!   whole words, and the FCS is dropped here.
 //!
-//! The packing is split into [`crate::lan9118::tx_words`] and
-//! [`crate::lan9118::rx_unpack`], which touch no
+//! The packing is split into [`tx_words`] and [`rx_unpack`], which touch no
 //! register, so they are tested against a transcription of the model's own
 //! reassembly and packing without a board.
+//!
+//! This crate was `wz_link_lwip::lan9118` until the seam it implements moved
+//! to the dependency-free trait tier, so that the next chip's driver does not
+//! have to depend on the crate that builds lwIP's C sources. Nothing about the
+//! chip changed in the move.
 
-use crate::ethernet::EthernetMac;
+#![no_std]
+#![deny(missing_docs)]
+
+#[cfg(test)]
+extern crate alloc;
+#[cfg(test)]
+extern crate std;
+
+use wz_runtime_core::EthernetMac;
 
 /// The LAN9118's base on QEMU's `mps2-an385`, `an386` and `an511`.
 pub const MPS2_BASE: usize = 0x4020_0000;
