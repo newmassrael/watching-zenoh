@@ -20098,6 +20098,26 @@ layer_c1cc_api_compat_c() {
         --test-threads=1 \
         --exact a_real_peer_that_dials_a_node_opens_at_once_identically_on_wz_and_libzenohc \
         || return 1
+    # R3074 -- gossip: two peers that each connected to a third come to dial each other. A hub and
+    # two leaves with multicast scouting OFF, so the only thing that can introduce the leaves is
+    # what the hub tells them. One leaf has a listener and the other has none, so exactly one dial
+    # is made (two that both listen cross-dial, and the real library loses that race itself, twice
+    # in twelve runs); the control has no listener on either leaf and nobody meets. Five
+    # placements each: the real library everywhere, a wz hub, a wz leaf of each kind, wz everywhere.
+    _runci_guarded_test \
+        "C1cc two_leaves_of_a_hub_are_introduced_identically_on_wz_and_libzenohc" 1 \
+        cargo test -p wz-integration-tests \
+        --test zenoh_c_scouting_twice_and_diff -- --ignored --quiet \
+        --test-threads=1 \
+        --exact two_leaves_of_a_hub_are_introduced_identically_on_wz_and_libzenohc \
+        || return 1
+    _runci_guarded_test \
+        "C1cc leaves_that_cannot_be_dialled_are_not_introduced_identically_on_wz_and_libzenohc" 1 \
+        cargo test -p wz-integration-tests \
+        --test zenoh_c_scouting_twice_and_diff -- --ignored --quiet \
+        --test-threads=1 \
+        --exact leaves_that_cannot_be_dialled_are_not_introduced_identically_on_wz_and_libzenohc \
+        || return 1
     _runci_guarded_test \
         "C1cc an_advanced_subscriber_of_the_publishers_own_session_hears_it_on_wz_and_libzenohc" 1 \
         cargo test -p wz-integration-tests \

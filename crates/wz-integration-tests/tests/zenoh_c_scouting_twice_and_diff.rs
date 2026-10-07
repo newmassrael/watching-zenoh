@@ -13,6 +13,10 @@
 //! Scout asks for its role, read by the real library's `z_scout`, and whether a real node that is
 //! told nothing finds it and connects.
 //!
+//! A third (R3074) is GOSSIP: how two peers that each connected to a third come to dial each
+//! other, with multicast scouting off so that nothing else can introduce them. Its rows are at the
+//! end of the file.
+//!
 //! ## What was measured before anything was built
 //!
 //! One C program linked to each library, on a multicast group of its own so it meets only the
@@ -105,6 +109,18 @@ static void insert(z_owned_config_t* c, const char* k, const char* v) {
     zc_config_insert_json5(z_loan_mut(*c), k, v);
 }
 
+/* How many peers the session holds a link to, read the way `z_info_peers_zid` lists them. */
+static int g_zids = 0;
+static void count_zid(const z_id_t* id, void* arg) { (void)id; (void)arg; g_zids++; }
+static void noop_drop(void* arg) { (void)arg; }
+static int peers_of(const z_loaned_session_t* session) {
+    z_owned_closure_zid_t cb;
+    z_closure(&cb, count_zid, noop_drop, NULL);
+    g_zids = 0;
+    z_info_peers_zid(session, z_move(cb));
+    return g_zids;
+}
+
 int main(int argc, char** argv) {
     setvbuf(stdout, NULL, _IONBF, 0);
     if (argc < 10) return 2;
@@ -135,6 +151,8 @@ int main(int argc, char** argv) {
     if (getenv("SCOUT_LISTEN")) insert(&config, "scouting/multicast/listen", getenv("SCOUT_LISTEN"));
     /* A listen list the config STATES, empty: it suppresses the listener a peer binds by default. */
     if (getenv("LISTEN_EMPTY")) insert(&config, "listen/endpoints", "[]");
+    /* Multicast scouting off, for the rows that ask what gossip alone introduces. */
+    if (getenv("SCOUTING_OFF")) insert(&config, "scouting/multicast/enabled", "false");
     if (lport) {
         const char* host = getenv("LISTEN_HOST") ? getenv("LISTEN_HOST") : "127.0.0.1";
         snprintf(buf, sizeof buf, "[\"tcp/%s:%d\"]", host, lport);
@@ -161,7 +179,11 @@ int main(int argc, char** argv) {
     z_owned_subscriber_t sub;
     int drc = z_declare_subscriber(z_loan(s), &sub, z_loan(ke), z_move(cb), NULL);
 
+    /* Read half way through the window and not at its end: at the end the nodes are closing, and
+       a node that closes first takes its links with it before the others count them. */
+    int peers_mid = -1;
     for (int seq = 0; seq < secs * 5; seq++) {
+        if (seq == secs * 5 / 2) peers_mid = peers_of(z_loan(s));
         char body[40];
         snprintf(body, sizeof body, "%s:%d", tag, seq);
         z_owned_bytes_t payload;
@@ -175,7 +197,9 @@ int main(int argc, char** argv) {
     qsort(g_senders, (size_t)g_senders_n, sizeof g_senders[0], by_name);
     printf("declare=%d senders=", drc);
     for (int i = 0; i < g_senders_n; i++) printf("%s%s", i ? "," : "", g_senders[i]);
-    printf(" dups=%d\n", g_dups);
+    printf(" dups=%d", g_dups);
+    if (getenv("PEERS_MID")) printf(" peers=%d", peers_mid);
+    printf("\n");
     pthread_mutex_unlock(&g_mu);
     z_drop(z_move(sub));
     z_drop(z_move(s));
@@ -1146,4 +1170,155 @@ fn a_real_peer_that_dials_a_node_opens_at_once_identically_on_wz_and_libzenohc()
         wz_dialler.open_ms,
         oracle_dialler.open_ms
     );
+}
+
+// ---------------------------------------------------------------------------------------------
+// Gossip: two peers that each reached a third come to dial each other. R3074.
+// ---------------------------------------------------------------------------------------------
+
+/// A hub and two leaves, multicast scouting OFF on all three: the hub listens, each leaf connects
+/// to the hub and to nothing else, and each leaf's listener is its own (`listener` says whether it
+/// has one). What can introduce the leaves to each other is gossip, and only that: with
+/// scouting off nothing else tells them the other exists.
+///
+/// Each node publishes and subscribes on `key`; `senders` is who a node heard, and a leaf hears the
+/// other leaf only through a link of their own, because a peer does not route what it hears from
+/// one peer to another. `peers` is how many peers each node held a link to half way through its
+/// window.
+///
+/// The outcomes come back as `[hub, b, c]`.
+fn trio(
+    hub: &Built,
+    b: &Built,
+    c: &Built,
+    key: &str,
+    b_listens: bool,
+    c_listens: bool,
+) -> [Outcome; 3] {
+    let group = next_group();
+    let reservation = PortReservation::pick();
+    let port = reservation.port();
+    drop(reservation);
+    let spec = |tag, secs, listen, connect| Spec {
+        mode: "peer",
+        listen,
+        connect,
+        key,
+        secs,
+        tag,
+        group: &group,
+        delay_ms: 500,
+        timeout_ms: 3000,
+    };
+    let env = [("SCOUTING_OFF", "1"), ("PEERS_MID", "1")];
+    let leaf_env = |listens: bool| -> Vec<(&str, &str)> {
+        let mut env = env.to_vec();
+        if !listens {
+            env.push(("LISTEN_EMPTY", "1"));
+        }
+        env
+    };
+    let mut hub = Node::start_with(hub, &spec("A", 6, port, 0), &env);
+    let hub_open = hub.opened();
+    let mut b = Node::start_with(b, &spec("B", 4, 0, port), &leaf_env(b_listens));
+    let b_open = b.opened();
+    let mut c = Node::start_with(c, &spec("C", 4, 0, port), &leaf_env(c_listens));
+    let c_open = c.opened();
+    [hub.finish(hub_open), b.finish(b_open), c.finish(c_open)]
+}
+
+/// The libraries of a trio's three nodes, as the row's placements name them: the real library
+/// first, then wz in one place and in all of them.
+fn placements<'a>(programs: &'a Programs) -> [(&'static str, [&'a Built; 3]); 5] {
+    let (r, w) = (&programs.reference, &programs.wz);
+    [
+        ("the real library everywhere", [r, r, r]),
+        ("a wz hub", [w, r, r]),
+        ("a wz leaf B", [r, w, r]),
+        ("a wz leaf C", [r, r, w]),
+        ("wz everywhere", [w, w, w]),
+    ]
+}
+
+/// THE GATE, gossip: two leaves of a hub are introduced to each other, and one dials the other.
+///
+/// A leaf that has a listener tells the hub where it is when it connects, and the hub tells the
+/// other leaf, which dials it. Here only one leaf (B) can be dialled, so only one dial is made
+/// and the two never dial each other at once, which the real library does not resolve either: two
+/// leaves that BOTH listen are introduced to each other twice, and MEASURED over twelve runs on the
+/// real library and on wz alike, nine ended connected, one ended with a link one leaf could not
+/// use and two ended with none. That race is upstream's own and is not what this row compares.
+///
+/// Every node holds two peers and hears all three senders, whichever library any one of them is:
+/// the hub's introduction is read by a leaf of the other library, and a leaf of one library
+/// dials a leaf of the other.
+// wz-proves: api-compat-c zenoh-c->wz partial
+#[test]
+#[ignore = "reads a zenoh-c oracle; run by run-ci Layer C1cc (which builds the matching \
+            ABI arm this needs)"]
+fn two_leaves_of_a_hub_are_introduced_identically_on_wz_and_libzenohc() {
+    let Some(programs) = programs() else {
+        return;
+    };
+    let expect = "open=0 | declare=0 senders=A,B,C dups=0 peers=2";
+    for (n, (name, [hub, b, c])) in placements(&programs).into_iter().enumerate() {
+        let key = format!("wz/gossip/introduced/{n}");
+        let rows = trio(hub, b, c, &key, true, false);
+        let rows = rows.map(|outcome| outcome.row);
+        let got = rows.each_ref().map(String::as_str);
+        let message = if n == 0 {
+            "the REAL library's rows for two leaves of a hub, one of them dialable, are not what \
+             this file expects"
+                .to_owned()
+        } else {
+            format!(
+                "§5.27 api-compat-c: two leaves of a hub are not introduced the way they are by \
+                 the real library ({name}); the rows are the hub's, then the dialable leaf's and \
+                 the leaf with no listener's"
+            )
+        };
+        assert_eq!(got, [expect; 3], "{message}");
+    }
+}
+
+/// THE CONTROL of the row above: leaves with no listener are not introduced.
+///
+/// Neither can be dialled, so neither is told of the other as a node to dial, and with scouting
+/// off nothing else introduces them: each hears the hub and itself and no one else, and holds one
+/// peer. It is what makes the row above a measurement of the introduction and not of some other
+/// path between the leaves, on the real library and on wz both.
+// wz-proves: api-compat-c zenoh-c->wz partial
+#[test]
+#[ignore = "reads a zenoh-c oracle; run by run-ci Layer C1cc (which builds the matching \
+            ABI arm this needs)"]
+fn leaves_that_cannot_be_dialled_are_not_introduced_identically_on_wz_and_libzenohc() {
+    let Some(programs) = programs() else {
+        return;
+    };
+    let expect = [
+        "open=0 | declare=0 senders=A,B,C dups=0 peers=2",
+        "open=0 | declare=0 senders=A,B dups=0 peers=1",
+        "open=0 | declare=0 senders=A,C dups=0 peers=1",
+    ];
+    for (n, (name, [hub, b, c])) in placements(&programs).into_iter().enumerate() {
+        let key = format!("wz/gossip/not-introduced/{n}");
+        let rows = trio(hub, b, c, &key, false, false);
+        let rows = rows.map(|outcome| outcome.row);
+        let got = rows.each_ref().map(String::as_str);
+        assert_eq!(
+            got,
+            expect,
+            "{}",
+            if n == 0 {
+                "the REAL library's rows for two leaves with no listener are not what this file \
+                 expects"
+                    .to_owned()
+            } else {
+                format!(
+                    "§5.27 api-compat-c: leaves with no listener meet ({name}), which the real \
+                     library does not let them do with nobody to tell them where each other is"
+                )
+            }
+        );
+    }
 }

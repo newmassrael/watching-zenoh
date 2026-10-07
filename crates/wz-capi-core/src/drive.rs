@@ -26,7 +26,9 @@ use std::time::Duration;
 
 use tokio::sync::Notify;
 
-use wz_runtime_tokio::accept_loop::{accept_loop_offering, DialIntent};
+use wz_runtime_tokio::accept_loop::{
+    accept_loop_offering, DialIntent, DialIntentReceiver, DialIntentSender,
+};
 use wz_runtime_tokio::node_clock::{NodeHlc, TimestampingEnabled};
 use wz_runtime_tokio::retry_period::RetryPolicy;
 use wz_runtime_tokio::runtime_impl::TokioTime;
@@ -46,7 +48,9 @@ use wz_runtime_tokio::startup_phase::{
     PhasePolicy,
 };
 
-use crate::faces::{CApiForwarder, OpenShmClients, SessionResources, SharedSession, DIAL_FACE_ID};
+use crate::faces::{
+    CApiForwarder, GossipSetup, OpenShmClients, SessionResources, SharedSession, DIAL_FACE_ID,
+};
 use crate::scouting_node::{bind_responder, Advertised, Responder, ScoutLink, ScoutingPlan};
 
 /// How the dial half of an open treats an attempt that fails — zenoh's
@@ -763,6 +767,13 @@ struct DriveContext {
     /// R3070 -- what the session does with multicast scouting, when it scouts at all: see
     /// [`OpenStance::scouting`].
     scouting: Option<ScoutingPlan>,
+    /// R3074 -- where the nodes a peer is told of are posted to be dialled, and the end the
+    /// connector reads them from. Scouting posts the nodes a Hello names and the gossip plane
+    /// (which holds a sender of its own, in the registry) posts the nodes a list names, so one
+    /// task dials both and the two cannot dial the same node twice.
+    dials: (DialIntentSender, DialIntentReceiver),
+    /// Whether the session gossips, as [`OpenStance::gossip`] says and its role allows.
+    gossiping: bool,
 }
 
 /// The shutdown signal both roles race their drive against. See
@@ -802,6 +813,8 @@ async fn drive_dial(
         offer,
         gate,
         scouting,
+        dials,
+        gossiping,
     } = ctx;
     // R311y534 — the dial config is BUILT from the caller's TLS material rather
     // than defaulted. Everything that can fail it runs before the handshake, so a
@@ -868,6 +881,17 @@ async fn drive_dial(
         },
         None => None,
     };
+    // R3074 -- where gossip tells a neighbour this node can be dialled: the locators the
+    // listener ACTUALLY got, without the loopback ones, as upstream's `get_locators_noloopback`
+    // lists them. Set before the first face can come up, so the first list a neighbour is sent
+    // carries them. A node with no listener tells none, and is introduced to nobody as a node to
+    // dial, though it dials what it is told of.
+    if gossiping {
+        let advertised = listen.as_ref().map_or_else(Advertised::none, |leg| {
+            Advertised::of(&leg.listening.listener)
+        });
+        shared.set_gossip_locators(advertised.remote);
+    }
     // R3071 -- findable once its listener is bound, for either role: a client's
     // bound-and-unserved listener is advertised too (measured: a real client with a listener
     // answers a Scout naming it, and one with none answers with no locators at all).
@@ -891,11 +915,13 @@ async fn drive_dial(
         // R3070 -- a peer or router that scouts also dials what it finds, beside the endpoints
         // R3070 -- a peer or router that scouts also dials what it finds, beside the endpoints
         // it was told, as upstream's `start_peer` starts its scouting after its connects.
-        let scouting = scouting
-            .filter(ScoutingPlan::scouts)
-            .map(|plan| (plan, zid.clone()));
+        let scouting = scouting.filter(ScoutingPlan::scouts);
+        // R3074 -- and what it is told of, by a Hello or by a list, is dialled by one task.
+        // A node that neither scouts nor gossips is told of nobody and needs none.
+        let dials = (scouting.is_some() || gossiping).then_some(dials);
         drive_peer(
-            endpoints, listen, scouting, phase, dialer, shared, tx, shutdown, stop, gate,
+            endpoints, listen, scouting, zid, dials, phase, dialer, shared, tx, shutdown, stop,
+            gate,
         )
         .await;
         return;
@@ -1322,16 +1348,22 @@ async fn drive_face(
 /// the dial faces, running from before the first dial, so a peer that dials
 /// this one while it is still walking its own connect list is accepted.
 ///
-/// R3070 -- `scouting` is the plan and the wire zid of a peer that also looks for others on the
-/// multicast group: scouting starts after the connects, as upstream's `start_peer` runs
-/// `start_scout` after `connect_peers`, a group that cannot be joined fails the open, and the
-/// open's start window waits for the first scouted connection as well as for the endpoints it
-/// was told.
+/// R3070 -- `scouting` is the plan of a peer that also looks for others on the multicast group:
+/// scouting starts after the connects, as upstream's `start_peer` runs `start_scout` after
+/// `connect_peers`, a group that cannot be joined fails the open, and the open's start window
+/// waits for the first scouted connection as well as for the endpoints it was told.
+///
+/// R3074 -- `dials` is the channel the nodes this peer is told of are posted on, and `zid` is
+/// its own wire zid, which a node told of must not be. It is `Some` for a peer that scouts or
+/// gossips, and one connector reads it for both, so a node scouting and gossip both name is
+/// dialled once.
 #[allow(clippy::too_many_arguments)]
 async fn drive_peer(
     endpoints: Vec<String>,
     listen: Option<ListenLeg>,
-    scouting: Option<(ScoutingPlan, Vec<u8>)>,
+    scouting: Option<ScoutingPlan>,
+    zid: Vec<u8>,
+    dials: Option<(DialIntentSender, DialIntentReceiver)>,
     phase: DialPhase,
     dialer: Arc<Dialer>,
     shared: Arc<SharedSession>,
@@ -1415,42 +1447,49 @@ async fn drive_peer(
                 }
             }
             if !failed {
-                if let Some((plan, zid)) = scouting {
+                // The group is joined before anything is started, so a group that cannot be
+                // joined fails the open with no task of this half running.
+                let mut scout = None;
+                if let Some(plan) = scouting {
                     match ScoutLink::bind(&plan).await {
-                        Ok(link) => {
-                            let (intents_tx, intents) = tokio::sync::mpsc::unbounded_channel();
-                            // The open waits for a scouted connection only when it was told
-                            // nothing to connect to: with endpoints, the window is theirs.
-                            // Measured: a peer whose live endpoint connected opens in 10 ms on
-                            // the real library whether or not it scouts, and one with none
-                            // waits out `scouting/delay` for the first node it finds.
-                            let waits_for_scouted = endpoints.is_empty();
-                            if waits_for_scouted {
-                                window.expect_one();
-                            }
-                            let mut scout_closing = closing_rx.clone();
-                            let scout_zid = zid.clone();
-                            faces.push(tokio::task::spawn_local(async move {
-                                tokio::select! {
-                                    _ = link.autoconnect(&plan, &scout_zid, &intents_tx) => {}
-                                    _ = scout_closing.wait_for(|c| *c) => {}
-                                }
-                            }));
-                            faces.push(tokio::task::spawn_local(scouted_connector(ScoutedPeers {
-                                configured: endpoints.clone(),
-                                intents,
-                                own_zid: zid,
-                                first_face: DIAL_FACE_ID + endpoints.len() as u64,
-                                dialer: dialer.clone(),
-                                shared: shared.clone(),
-                                gate: gate.clone(),
-                                window: window.clone(),
-                                releases_window: waits_for_scouted,
-                                closing: closing_rx.clone(),
-                            })));
-                        }
+                        Ok(link) => scout = Some((plan, link)),
                         Err(_) => failed = true,
                     }
+                }
+                if let (false, Some((intents_tx, intents))) = (failed, dials) {
+                    // The open waits for a scouted connection only when it was told
+                    // nothing to connect to: with endpoints, the window is theirs.
+                    // Measured: a peer whose live endpoint connected opens in 10 ms on
+                    // the real library whether or not it scouts, and one with none
+                    // waits out `scouting/delay` for the first node it finds. A node that
+                    // does not scout has no such window: what gossip tells it of is dialled
+                    // when it is told, and the open does not wait for it.
+                    let waits_for_scouted = scout.is_some() && endpoints.is_empty();
+                    if waits_for_scouted {
+                        window.expect_one();
+                    }
+                    if let Some((plan, link)) = scout {
+                        let mut scout_closing = closing_rx.clone();
+                        let scout_zid = zid.clone();
+                        faces.push(tokio::task::spawn_local(async move {
+                            tokio::select! {
+                                _ = link.autoconnect(&plan, &scout_zid, &intents_tx) => {}
+                                _ = scout_closing.wait_for(|c| *c) => {}
+                            }
+                        }));
+                    }
+                    faces.push(tokio::task::spawn_local(scouted_connector(ScoutedPeers {
+                        configured: endpoints.clone(),
+                        intents,
+                        own_zid: zid,
+                        first_face: DIAL_FACE_ID + endpoints.len() as u64,
+                        dialer: dialer.clone(),
+                        shared: shared.clone(),
+                        gate: gate.clone(),
+                        window: window.clone(),
+                        releases_window: waits_for_scouted,
+                        closing: closing_rx.clone(),
+                    })));
                 }
             }
             if failed {
@@ -2106,6 +2145,10 @@ async fn drive_listen(endpoint: String, tls: CapiTlsConfig, whatami: WhatAmI, ct
         // A listener that is not also a dialler scouts for nobody (see `open_blocking`'s
         // routing), and is still FOUND when its plan answers.
         scouting,
+        // And gossips to nobody: a listener that gossips is routed to the dial role, which is
+        // the one that dials what it is told of.
+        dials: _,
+        gossiping: _,
     } = ctx;
     let Some(listening) = bind_listener(&endpoint, &tls, &zid, tx_queue).await else {
         let _ = tx.send(false);
@@ -2246,6 +2289,12 @@ pub struct OpenStance {
     /// `DeclareFinal` of the initial interest; see [`SessionResources::initial_interest`].
     /// zenoh-c's ABI says `true`, and zenoh-pico's `false`.
     pub initial_interest: bool,
+    /// R3074 -- whether a peer or router session gossips: it tells a face it meets which nodes
+    /// it knows and where they are, and dials the nodes it is told of
+    /// ([`SessionResources::gossip`]). zenoh-c's ABI says `true`, as its peers do by default,
+    /// and zenoh-pico's `false`: its peers are introduced by scouting alone. A client never
+    /// gossips whatever this says.
+    pub gossip: bool,
 }
 
 #[cfg(feature = "session-extshm")]
@@ -2262,6 +2311,23 @@ impl OpenStance {
         Ok(self)
     }
 }
+
+/// The stack, in bytes, of the thread a session's drive runs on.
+///
+/// The thread's stack is the one thing about it the host chooses and not the platform: a thread
+/// spawned with no size gets 2 MiB (Linux and macOS) or 1 MiB (Windows), and everything the
+/// session does on it, accepting a face, running its handshake, taking in what it sends and
+/// answering it, is polled on that stack. An unoptimised build gives those futures frames of
+/// tens of KiB each, and a topology list a node is told of (gossip, R3074) is built and read
+/// through bounded containers the codec holds inline, which is a frame of its own on top of
+/// them. MEASURED on Linux, debug, with the three C ABI crates built together (so that one
+/// feature set serves them all): with every listening peer gossiping, 2 MiB aborts with
+/// `thread 'wz-capi-drive' has overflowed its stack` in eight test binaries and 3 MiB passes,
+/// where the same tests pass at 2 MiB with the node told not to gossip. Windows' debug codegen spends more per frame
+/// than Linux's, which is why the demo, which polls the same futures on a thread of its own,
+/// states 16 MiB for every host (`DEMO_STACK_BYTES`), and so does this: the budget is the
+/// session's, the same on every host, and the pages are reserved and not touched until used.
+const DRIVE_THREAD_STACK_BYTES: usize = 16 * 1024 * 1024;
 
 /// Open a session: spawn the drive thread and wait for the role's open
 /// outcome. For `connect` that is the settled handshake; for `listen` it is
@@ -2294,8 +2360,14 @@ pub fn open_blocking(
         local_delivery,
         scouting,
         initial_interest,
+        gossip,
     } = stance;
     let clock = TokioTime::new();
+    // R3074 -- where the nodes a peer is told of are posted. Made here because both ends are
+    // needed before the drive thread starts: the registry's plane holds the sender, and the
+    // role that dials holds the receiver.
+    let (dial_tx, dial_rx) = tokio::sync::mpsc::unbounded_channel();
+    let gossiping = gossip && dial_whatami != WhatAmI::Client;
     // Fixed here, on the CALLING thread, so `SessionState` can hand it to
     // `z_info_zid` and the INIT cannot disagree with it — see the field doc.
     let (zid, wire_zid) = session_zids(zid).ok_or(OpenError::DriveFailed)?;
@@ -2316,6 +2388,10 @@ pub fn open_blocking(
                 shm_clients,
                 local_delivery,
                 initial_interest,
+                gossip: gossiping.then(|| GossipSetup {
+                    whatami: dial_whatami,
+                    dials: dial_tx.clone(),
+                }),
             },
         )
         .map_err(|_| OpenError::DriveFailed)?,
@@ -2340,6 +2416,7 @@ pub fn open_blocking(
     // Terminal); per-session isolation lets each session drive its own links.
     let handle = std::thread::Builder::new()
         .name("wz-capi-drive".to_owned())
+        .stack_size(DRIVE_THREAD_STACK_BYTES)
         .spawn(move || {
             let rt = match tokio::runtime::Builder::new_multi_thread()
                 .worker_threads(2)
@@ -2364,17 +2441,26 @@ pub fn open_blocking(
                 offer,
                 gate: drive_gate.clone(),
                 scouting,
+                dials: (dial_tx, dial_rx),
+                gossiping,
             };
             // R3070 -- a session that scouts for nodes to connect to dials them with the dial
             // role, whether or not it was also told an endpoint, so the plan decides the route
             // alongside the endpoints: a router's empty one scouts for nobody and routes as before.
             let scouts = ctx.scouting.as_ref().is_some_and(ScoutingPlan::scouts);
+            // R3074 -- and a listener that gossips is a peer that dials what it is told of, so
+            // it takes the dial role as one that scouts does. A session that gossips with no
+            // listener and nothing to connect to has nobody to be told of by, and stays alone.
+            let gossips_with_a_listener = ctx.gossiping && listen.is_some();
             // Polled only while the read task may run ([`Pausable`]): a stopped
             // task is a session nobody is driving, which is what pico's is.
             rt.block_on(Pausable {
                 gate: drive_gate,
                 inner: Box::pin(async move {
-                    match (connect.is_empty() && !scouts, listen) {
+                    match (
+                        connect.is_empty() && !scouts && !gossips_with_a_listener,
+                        listen,
+                    ) {
                         (false, listen) => {
                             drive_dial(connect, listen, dial_whatami, tls, dial_phase, ctx).await;
                         }

@@ -1199,6 +1199,14 @@ pub mod scouting_responder;
 ))]
 pub mod scouting_autoconnect;
 
+// R3074 -- the gossip plane: how two peers that each hold a link to a third come to dial each
+// other, over the graph crate's single-hop gossip and nothing of the routing mesh around it.
+// Its own feature, and not `routing-peer`, because a host that only wants to be introduced
+// should not carry the data and query plane that feature pulls; the dials it posts are the
+// `routing-accept` module's `DialIntent`s, which the same feature names.
+#[cfg(feature = "routing-gossip")]
+pub mod gossip_plane;
+
 // R2570 — the MULTI-PEER arm of static mode: a static deploy brought up as a
 // whole peer face set rather than as one session. pico dispatches a static
 // deploy on the node's mode and gives a PEER every configured locator (the

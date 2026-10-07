@@ -155,6 +155,11 @@ wz-runtime-tokio = { path = "../wz-runtime-tokio", features = [
     # `scouting_autoconnect` build here without `routing-peer` (see the module's gate): this
     # crate drains the intents itself, on its drive task, and wants the dial and not the mesh.
     "zenoh-config",
+    # R3074 -- the gossip plane: a session that is told of a node by one it holds a link to
+    # dials it, which is how two peers that each reached a third come to meet when multicast
+    # scouting reaches nobody. The rules a session needs for that and none of the routing mesh
+    # (see the runtime's feature of the same name).
+    "routing-gossip",
 ] }
 # R3070 -- the autoconnect POLICY (`AutoConnect`, its per-target strategies) a session that
 # scouts is built with, named here because the plan a host hands this crate carries it. A pure

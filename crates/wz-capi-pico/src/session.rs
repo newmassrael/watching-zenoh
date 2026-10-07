@@ -350,6 +350,8 @@ pub unsafe extern "C" fn z_open(
                 // a node it dialled; this ABI does not model the difference, so it keeps the
                 // behaviour it had (see `SessionResources::initial_interest`).
                 initial_interest: false,
+                // zenoh-pico has no gossip: its peers are introduced by scouting alone.
+                gossip: false,
             },
         ) {
             Ok(state) => {

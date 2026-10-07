@@ -69,7 +69,7 @@ use std::sync::{Arc, Mutex as StdMutex, MutexGuard};
 use tokio::sync::Notify;
 
 use crate::group::{retire_copies, FaceGroup, GroupAggregate, GroupError, GroupId};
-use wz_runtime_tokio::accept_loop::{FaceForwarder, FaceId};
+use wz_runtime_tokio::accept_loop::{DialIntentSender, FaceForwarder, FaceId};
 use wz_runtime_tokio::advanced_publisher::{
     AdvancedPublisher, AdvancedPublisherError, AdvancedPublisherOptions,
 };
@@ -77,6 +77,7 @@ use wz_runtime_tokio::advanced_subscriber::{
     AdvancedSubscriber, AdvancedSubscriberOptions, DeclarationForms, EntityForm, Miss,
 };
 use wz_runtime_tokio::declare::LivelinessSample;
+use wz_runtime_tokio::gossip_plane::{FaceIdentity, GossipPlane, Outbound};
 use wz_runtime_tokio::group::Member;
 use wz_runtime_tokio::locality::Locality;
 use wz_runtime_tokio::node_clock::NodeHlc;
@@ -93,8 +94,8 @@ use wz_runtime_tokio::session::{
     LivelinessOptions, LivelinessSubscriber, LivelinessSubscriberOptions, LivelinessToken,
 };
 use wz_runtime_tokio::session_glue::{
-    new_session_actions, BoxedLinkDriver, IterationEvent, LinkKind, LinkSendOutcome,
-    SessionLinkActions,
+    new_session_actions, BoxedLinkDriver, DriverLoopOutcome, IterationEvent, LinkKind,
+    LinkSendOutcome, SessionLinkActions, WhatAmI,
 };
 use wz_runtime_tokio::sink::SampleView;
 use wz_runtime_tokio::sync::Mutex as WzMutex;
@@ -1414,6 +1415,9 @@ pub struct SharedSession {
     /// R3073 -- whether a face this node reaches as a peer is ended with the initial interest's
     /// `DeclareFinal`; see [`SessionResources::initial_interest`].
     initial_interest: bool,
+    /// R3074 -- the gossip plane, for a node that gossips: what introduces the nodes that
+    /// each hold a face to this one. See [`SessionResources::gossip`].
+    gossip: Option<Arc<GossipPlane>>,
 }
 
 /// R3065 -- the shared-memory reader's clients a session is opened over: a set the node's
@@ -1467,17 +1471,34 @@ pub struct SessionResources {
     /// difference this crate does not model, so the pico ABI says `false` and keeps the
     /// behaviour it had.
     pub initial_interest: bool,
+    /// R3074 -- whether the node gossips: it tells a face it meets which nodes it knows and
+    /// where they are, and dials the nodes it is told of. zenoh's peer does by default
+    /// (`scouting/gossip/enabled`), and it is what makes two peers that each reached a third
+    /// reach each other when no scouting finds them. `None` for a node that does not, which is
+    /// zenoh-pico's ABI (its peers are introduced by scouting alone) and any role that is a
+    /// client.
+    pub gossip: Option<GossipSetup>,
+}
+
+/// What a node that gossips is given: the role it gossips as, and where the nodes it learns of
+/// are posted to be dialled. The drive role drains the other end of the channel, since dialling
+/// is its work and not the registry's.
+#[derive(Clone)]
+pub struct GossipSetup {
+    pub whatami: WhatAmI,
+    pub dials: DialIntentSender,
 }
 
 impl Default for SessionResources {
-    /// No clock, the default reader and the executor's thread for a local delivery, and no
-    /// initial interest: what a node was before it could be given any of them.
+    /// No clock, the default reader and the executor's thread for a local delivery, no
+    /// initial interest and no gossip: what a node was before it could be given any of them.
     fn default() -> Self {
         Self {
             node_hlc: NodeHlc::disabled(),
             shm_clients: no_shm_clients(),
             local_delivery: LocalDeliveryDrain::DriveTask,
             initial_interest: false,
+            gossip: None,
         }
     }
 }
@@ -1560,7 +1581,14 @@ impl SharedSession {
             shm_clients,
             local_delivery,
             initial_interest,
+            gossip,
         } = resources;
+        // Built over the node's own wire zid, before `zid` is moved into the plane's params.
+        // A zid the graph cannot hold (empty or all zero) leaves the node not gossiping rather
+        // than failing the open: the session's own zid is random and never is one.
+        let gossip = gossip
+            .and_then(|setup| GossipPlane::new(&zid, setup.whatami, setup.dials))
+            .map(Arc::new);
         let driver: Arc<dyn BoxedLinkDriver + Send + Sync> = Arc::new(InertLinkDriver);
         // `WhatAmI::Peer`: the plane never handshakes, so the role is inert on
         // the wire, and Peer is what a session that both publishes and answers
@@ -1636,7 +1664,39 @@ impl SharedSession {
             node_hlc,
             shm_clients,
             initial_interest,
+            gossip,
         })
+    }
+
+    /// Where this node can be reached, for the entries gossip sends about it: the locators of
+    /// its listener, as a neighbour would dial them. Called once the listener is bound and
+    /// before the first face comes up, so the first list a neighbour is sent carries them. A
+    /// node that does not gossip ignores it.
+    pub fn set_gossip_locators(&self, locators: Vec<String>) {
+        if let Some(gossip) = &self.gossip {
+            gossip.set_self_locators(locators);
+        }
+    }
+
+    /// Send what the gossip plane answered, each message on the face it names. `new_face` is
+    /// the face a caller holds the registry lock for and has not inserted yet, with its actions;
+    /// every other face is looked up in `faces`.
+    fn send_gossip(
+        faces: &BTreeMap<u64, FaceEntry>,
+        new_face: Option<(u64, &Arc<SessionLinkActions>)>,
+        outbound: Vec<Outbound>,
+    ) {
+        for out in outbound {
+            let actions = match new_face {
+                Some((id, actions)) if id == out.face => Some(actions),
+                _ => faces.get(&out.face).map(|face| face.session.actions()),
+            };
+            // Best-effort per face, as every replay in `face_up`: a face that is ending drops
+            // it, and the next list it would have carried supersedes it.
+            if let Some(actions) = actions {
+                let _ = actions.send_network_message(out.into_message(), true, false);
+            }
+        }
     }
 
     /// The local plane's session — what the ABI shims issue the LOCAL leg of a
@@ -1887,6 +1947,15 @@ impl SharedSession {
                 adv_pubs.insert(entry.id, pub_);
             }
         }
+        // R3074 -- gossip: the new face is told every node this one knows and where each can be
+        // reached, and the faces that hear of a new link are told this one is up. Sent from
+        // here, with the face's identity read off its handshake (this runs past a completed
+        // one), so a face that was refused above is never announced. The plane takes its own
+        // lock for the decision and returns, so what is sent here is sent under this lock only.
+        if let Some(gossip) = &self.gossip {
+            let outbound = gossip.face_up(id, &FaceIdentity::of(actions));
+            Self::send_gossip(&guard.faces, Some((id, actions)), outbound);
+        }
         // R3073 -- the LAST line of the replay: a peer this node meets as a north-bound peer is
         // told that what it has been sent is everything this node held, which is the message its
         // open waits for. Per face, under the lock the replays above ran under, so it cannot
@@ -2041,6 +2110,11 @@ impl SharedSession {
     /// all came from THIS face. That per-face scoping is what lets pico's
     /// single-session "flush everything" transcribe without attribution.
     pub fn face_down(&self, id: u64) {
+        // R3074 -- the node at the far end leaves the gossip graph with its face, so a node that
+        // returns is told of as a new one. Upstream's gossip tells nobody that a link went.
+        if let Some(gossip) = &self.gossip {
+            gossip.face_down(id);
+        }
         // Drop OUTSIDE the lock: dropping the entry drops its subscribers,
         // and the last one may release the final `Arc<CClosure>` and run the
         // C `drop(context)`.
@@ -2194,6 +2268,21 @@ impl SharedSession {
         // the lock released.
         let session = self.lock().faces.get(&id).map(|face| face.session.clone());
         if let Some(session) = session {
+            // R3074 -- a topology list that arrived on this face is gossip's, and what it
+            // answers (a node to be told of, a list to pass on) is sent on the faces it names.
+            // The plane decides under its own lock and returns, so this holds no lock across a
+            // send; the registry's is taken for the lookup of each target alone.
+            if let (
+                Some(gossip),
+                IterationEvent::Poll(DriverLoopOutcome::FramePayload { messages, .. }),
+            ) = (&self.gossip, &event)
+            {
+                let outbound = gossip.inbound(id, messages);
+                if !outbound.is_empty() {
+                    let faces = self.lock();
+                    Self::send_gossip(&faces.faces, None, outbound);
+                }
+            }
             session.dispatch_iteration_event(event);
             session.sweep_expired_queries();
             // R311y533 — the LIVELINESS-GET table has the same deadline

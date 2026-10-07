@@ -1323,6 +1323,21 @@ config-mutate-runtime = ["routing-peer"]
 # over wz-codecs (plus petgraph), so this adds no cycle, and no footprint preset
 # carries `zenoh-config` — measured, not assumed.
 zenoh-config = ["dep:wz-routing-graph"]
+# R3074 -- the gossip plane (`gossip_plane`): how two peers that each hold a link to a third come
+# to dial each other, which is what zenoh's peer does by default when multicast scouting
+# reaches nobody. It is the rules a session needs to be introduced, over the graph crate's own
+# single-hop gossip, and not the routing mesh the demo's `routing-peer` forwarder is: that
+# feature pulls the whole data and query plane, and a host that only wants to be introduced
+# should not carry it. `routing-accept` is for `DialIntent`, the dial a host drains;
+# `codec-push` is the send path a topology message rides (`dispatch_oam` is co-gated on it and
+# `codec-linkstate`, and without it a gossip message is refused at the send with no word).
+routing-gossip = [
+    "zenoh-config",
+    "routing-accept",
+    "codec-push",
+    "wz-codecs/codec-linkstate",
+    "wz-session-core/codec-linkstate",
+]
 # R311y579 (G9) — `transport-link-raweth`: the raweth (L2) link. Forwards to
 # wz-session-core's framing half and pulls `dep:libc` for the AF_PACKET socket
 # (`socket`/`ioctl(SIOCGIFINDEX)`/`bind`/`recvfrom`), the same reason
