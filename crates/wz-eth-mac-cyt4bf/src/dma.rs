@@ -65,6 +65,30 @@ impl<const RX: usize, const TX: usize> DmaArea<RX, TX> {
     }
 }
 
+impl<const RX: usize, const TX: usize> DmaArea<RX, TX> {
+    /// Write the whole area to zero, a 32-bit word at a time.
+    ///
+    /// The zeroes [`new`](Self::new) builds are what the program image says the
+    /// area holds, and the image says it only if the loader applies it. Zephyr's
+    /// `.nocache` section, where a firmware puts this area, is `NOLOAD`
+    /// (`arch/common/nocache.ld`): the image's contents are not applied and the
+    /// RAM holds whatever it held at reset. On RAM with ECC that is also words
+    /// nothing has written, which carry no valid check bits, and a DMA read of one
+    /// can fail on the bus. So the driver writes the area itself before the
+    /// controller is told where it is. Whole words, because a store narrower than
+    /// a word to such RAM reads the rest of the word first.
+    pub(crate) fn clear(&mut self) {
+        let words = core::mem::size_of::<Self>() / 4;
+        let base = self as *mut Self as *mut u32;
+        for i in 0..words {
+            // SAFETY: `i < size_of::<Self>() / 4` words of this area, which the
+            // `&mut self` owns, and the struct is 4-byte aligned (`align(32)`) with
+            // a size that is a multiple of 4 (every field is).
+            unsafe { base.add(i).write_volatile(0) };
+        }
+    }
+}
+
 impl<const RX: usize, const TX: usize> Default for DmaArea<RX, TX> {
     fn default() -> Self {
         Self::new()

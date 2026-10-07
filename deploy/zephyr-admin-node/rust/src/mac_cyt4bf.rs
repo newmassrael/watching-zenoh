@@ -46,6 +46,10 @@ const TX_SLOTS: usize = 4;
 /// MPU setup marks non-cacheable when `CONFIG_NOCACHE_MEMORY` is on, the way the
 /// STM32 Ethernet driver places its rings. It must be in system SRAM (the default
 /// RAM region): the DMA master cannot reach DTCM.
+///
+/// The section is `NOLOAD` (`arch/common/nocache.ld`): the zeroes `DmaArea::new`
+/// builds here are not applied at boot, and the RAM holds what it held at reset.
+/// The driver therefore writes the whole area itself before it uses it.
 #[link_section = ".nocache"]
 static mut DMA: DmaArea<RX_SLOTS, TX_SLOTS> = DmaArea::new();
 

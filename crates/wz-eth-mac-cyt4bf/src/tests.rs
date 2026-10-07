@@ -892,3 +892,31 @@ fn servicing_the_link_before_a_phy_is_known_does_nothing() {
     assert_eq!(mac.service_link(10_000), LinkEvent::Steady);
     assert_eq!(model.borrow().log.len(), before, "no register was touched");
 }
+
+/// The area a firmware puts in Zephyr's `.nocache` section starts with whatever
+/// the RAM held at reset, not with the zeroes `DmaArea::new` builds: the section is
+/// `NOLOAD`. The driver writes the area itself, so nothing the RAM held reaches the
+/// controller. On the board, a read by the transmit DMA of a word nothing had
+/// written stopped it with an AMBA error.
+#[test]
+fn the_dma_area_is_written_by_the_driver_and_not_trusted_to_the_loader() {
+    const STALE: u32 = 0xDEAD_BEEF;
+    let area: &'static mut Area = Box::leak(Box::new(DmaArea::new()));
+    let words = core::mem::size_of::<Area>() / 4;
+    let base = area as *mut Area as *mut u32;
+    for i in 0..words {
+        // SAFETY: `i < words` of the area this test just allocated and owns.
+        unsafe { base.add(i).write(STALE) };
+    }
+    let model = Rc::new(RefCell::new(Model::new(base as usize)));
+    let _mac = Cyt4bfMac::new(Gem(model), area, &Config::new(MAC)).expect("a valid configuration");
+
+    let stale = (0..words)
+        // SAFETY: as above; the driver owns the area but this test only reads it.
+        .filter(|&i| unsafe { base.add(i).read() } == STALE)
+        .count();
+    assert_eq!(
+        stale, 0,
+        "{stale} of {words} words of the area still hold what the RAM held at reset"
+    );
+}

@@ -256,6 +256,9 @@ impl<B: Board, const RX: usize, const TX: usize> Cyt4bfMac<B, RX, TX> {
         if config.mac_address[0] & 1 != 0 || config.mac_address == [0; 6] {
             return Err(InitError::InvalidMac);
         }
+        // The area is written before anything else is done with it, whatever the
+        // image or the loader did or did not put there.
+        area.clear();
         let ref_clock_bits = match config.ref_clock {
             RefClock::External => 0,
             RefClock::InternalPll { divider } => {
