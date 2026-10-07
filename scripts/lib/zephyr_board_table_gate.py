@@ -59,6 +59,18 @@ than off the row's own say-so.
      testing. A conf that sets it may belong only to DECLARED or QEMU rows: a
      BUILT or HARDWARE row that carries it is a board shipping a vulnerability
      under the name of support.
+  9. COMPANIONS. Some boards run more than one image, and a row's image
+     does not run without the others: on a T2G chip the M7 core's image runs
+     only if the CM0+ core's image has brought the clock tree up and started it.
+     The first boot of an M7 image on a kit whose CM0+ image did neither ran at a
+     44th of its speed and printed nothing for minutes. `companions` lists those
+     images (board, app, `starts` = the row board they start, grade, witness), a
+     row names what it needs in `requires`, and the gate refuses a row that
+     requires an image the table does not list, or lists below the row's own
+     grade: a row's claim goes no higher than the lowest grade of what it runs
+     with. A companion is graded DECLARED or BUILT; it has no HARDWARE record
+     format of its own yet, so a row that requires one cannot be HARDWARE, and
+     the lab's record for the row is what extends it.
 
 ## Why it reads run-ci.sh and ci.yml as text
 
@@ -91,6 +103,8 @@ NETWORKS = ("zephyr-sockets", "lwip-mac")
 HARDWARE_RECORD = ("record", "image_sha256", "verdict", "date", "by")
 BUILD_LANE = "Qzb"
 FIXTURE_ENTROPY = "CONFIG_TEST_RANDOM_GENERATOR=y"
+COMPANION_KEYS = ("board", "app", "starts", "grade")
+COMPANION_GRADES = ("DECLARED", "BUILT")
 
 
 def conf_name(board: str) -> str:
@@ -132,6 +146,82 @@ def kconfig_backends(root: Path, app: str) -> set[str]:
 def conf_backends(text: str) -> set[str]:
     found = re.findall(r"^CONFIG_WZ_NET_BACKEND_([A-Z0-9_]+)=y", text, re.M)
     return {name.lower().replace("_", "-") for name in found}
+
+
+def check_companions(
+    table: dict, root: Path, rows: list, lanes: dict[str, str], hosted: set[str]
+) -> list[str]:
+    """The findings about `companions` and the rows' `requires` (module item 9)."""
+    companions = table.get("companions", [])
+    if not isinstance(companions, list):
+        return [f"{TABLE}: companions must be a list"]
+    out: list[str] = []
+    good_rows = [r for r in rows if isinstance(r, dict)]
+    row_boards = {r["board"] for r in good_rows if r.get("board")}
+    listed: list[dict] = []
+    seen: set[tuple[str, str]] = set()
+    for n, c in enumerate(companions):
+        if not isinstance(c, dict):
+            out.append(f"companion {n}: not an object")
+            continue
+        label = f"companion {n} ({c.get('board')} / {c.get('app')})"
+        missing = [k for k in COMPANION_KEYS if not c.get(k)]
+        if missing:
+            out.append(f"{label}: missing {missing}")
+            continue
+        if (c["board"], c["app"]) in seen:
+            out.append(f"{label}: the (board, app) pair is not unique")
+        seen.add((c["board"], c["app"]))
+        if not (root / "deploy" / c["app"] / "CMakeLists.txt").is_file():
+            out.append(f"{label}: deploy/{c['app']}/CMakeLists.txt does not exist")
+        if c["starts"] not in row_boards:
+            out.append(
+                f"{label}: starts {c['starts']!r}, which no row of {TABLE} is for -- "
+                f"a companion of an image nobody grades"
+            )
+        grade, witness = c["grade"], c.get("witness")
+        if grade not in COMPANION_GRADES:
+            out.append(
+                f"{label}: grade {grade!r} is not one of {COMPANION_GRADES}; a companion "
+                f"has no hardware record format of its own yet"
+            )
+            continue
+        listed.append(c)
+        if grade == "DECLARED":
+            if witness:
+                out.append(f"{label}: DECLARED carries a witness, which the grade does not make")
+            continue
+        if not isinstance(witness, dict) or witness.get("lane") != BUILD_LANE:
+            out.append(f"{label}: BUILT's witness lane must be {BUILD_LANE}")
+        if BUILD_LANE not in lanes:
+            out.append(f"{label}: Layer {BUILD_LANE} is not registered in {RUN_CI}")
+        if BUILD_LANE not in hosted:
+            out.append(f"{label}: no hosted job in {CI_YML} runs --layer {BUILD_LANE}")
+    for row in good_rows:
+        needs = row.get("requires", [])
+        label = f"row ({row.get('board')} / {row.get('link')})"
+        if not isinstance(needs, list):
+            out.append(f"{label}: requires must be a list")
+            continue
+        for app in needs:
+            comp = next(
+                (c for c in listed if c["app"] == app and c["starts"] == row.get("board")), None
+            )
+            if comp is None:
+                out.append(
+                    f"{label}: requires {app!r}, which no companion in {TABLE} starts for "
+                    f"{row.get('board')}"
+                )
+            elif (
+                row.get("grade") in GRADES
+                and GRADES.index(comp["grade"]) < GRADES.index(row["grade"])
+            ):
+                out.append(
+                    f"{label}: is {row['grade']} but requires {app!r}, which is only "
+                    f"{comp['grade']} -- a row's claim goes no higher than the lowest grade "
+                    f"of what it runs with"
+                )
+    return out
 
 
 def check(table: dict, root: Path = ROOT) -> list[str]:
@@ -289,12 +379,18 @@ def check(table: dict, root: Path = ROOT) -> list[str]:
                         f"row {row['board']} / {row['link']}: network lwip-mac but "
                         f"deploy/{app}/boards/{name} does not select CONFIG_WZ_NET_BACKEND_LWIP_MAC=y"
                     )
+    out.extend(check_companions(table, root, rows, lanes, hosted))
     return out
 
 
 def build_rows(table: dict) -> list[dict]:
     """The rows Layer Qzb builds: BUILT and HARDWARE."""
     return [r for r in table["rows"] if r.get("grade") in ("BUILT", "HARDWARE")]
+
+
+def build_companions(table: dict) -> list[dict]:
+    """The companions Layer Qzb builds beside the rows: the BUILT ones."""
+    return [c for c in table.get("companions", []) if c.get("grade") == "BUILT"]
 
 
 # ---------------------------------------------------------------------------
@@ -334,11 +430,17 @@ def _good_table() -> dict:
                 "board": "real/board", "link": "rmii", "app": "adm",
                 "network": "lwip-mac", "rust_target": "thumbv7em-none-eabihf",
                 "grade": "BUILT", "witness": {"lane": "Qzb"},
-                "conf_overlay": ["extra.conf"],
+                "conf_overlay": ["extra.conf"], "requires": ["launch"],
             },
             {
                 "board": "other/board", "link": "t1s", "app": "adm",
                 "network": "lwip-mac", "grade": "DECLARED",
+            },
+        ],
+        "companions": [
+            {
+                "board": "real/board-m0p", "app": "launch", "starts": "real/board",
+                "grade": "BUILT", "witness": {"lane": "Qzb"},
             },
         ],
     }
@@ -358,6 +460,8 @@ def _tree(tmp: Path, store_entries: dict | None = None) -> Path:
     )
     (app / "boards/real_board.conf").write_text("CONFIG_WZ_NET_BACKEND_LWIP_MAC=y\n")
     (app / "extra.conf").write_text("CONFIG_X=y\n")
+    (tmp / "deploy/launch").mkdir(parents=True)
+    (tmp / "deploy/launch/CMakeLists.txt").write_text("project(y)\n")
     (tmp / "docs/.atomic").mkdir(parents=True)
     (tmp / "docs/.atomic/workspace.atomic.json").write_text(
         json.dumps({"changelog_entries": store_entries or {}})
@@ -435,8 +539,34 @@ def selftest() -> int:
 
     expect("lwip-mac without its backend selected", _good_table(), "does not select", no_backend)
 
+    def lose_companion_app(root: Path) -> None:
+        (root / "deploy/launch/CMakeLists.txt").unlink()
+
+    expect("a companion whose app is absent", _good_table(), "does not exist", lose_companion_app)
+    t = _good_table(); t["companions"][0]["starts"] = "nowhere/board"
+    expect("a companion that starts no graded image", t, "which no row")
+    t = _good_table(); t["companions"][0]["witness"] = {"lane": "Qz"}
+    expect("a BUILT companion witnessed by another lane", t, "witness lane must be")
+    t = _good_table(); t["companions"][0]["grade"] = "HARDWARE"
+    expect("a companion graded HARDWARE", t, "is not one of")
+    t = _good_table(); t["companions"] = {}
+    expect("companions that are not a list", t, "must be a list")
+    t = _good_table(); t["companions"] = []
+    expect("a row that requires an unlisted companion", t, "which no companion")
+    t = _good_table(); t["companions"][0]["grade"] = "DECLARED"; t["companions"][0].pop("witness")
+    expect("a row above its companion's grade", t, "lowest grade of what it runs with")
+    t = _good_table(); t["rows"][1]["requires"] = "launch"
+    expect("requires that is not a list", t, "requires must be a list")
+    t = _good_table(); t["companions"][0]["witness"] = {"lane": "Qzb"}; t["companions"][0]["grade"] = "DECLARED"
+    expect("a witness on a DECLARED companion", t, "carries a witness")
+    t = _good_table(); t["companions"].append(dict(t["companions"][0]))
+    expect("a duplicate companion", t, "not unique")
+
+    # The HARDWARE arms are read on rows that require nothing, so that they test
+    # the record and not the companion rule; the rule has its own case below.
     hw = _good_table()
     hw["rows"][1]["grade"] = "HARDWARE"
+    hw["rows"][1].pop("requires")
     hw["rows"][1]["witness"] = {
         "record": "Round 9", "image_sha256": "ab", "verdict": "ZEPHYR-WZ-ADMIN READY",
         "date": "2026-10-07", "by": "lab",
@@ -445,8 +575,14 @@ def selftest() -> int:
     expect("HARDWARE whose entry exists", hw, None, entries={"Round 9": {}})
     hw2 = _good_table()
     hw2["rows"][1]["grade"] = "HARDWARE"
+    hw2["rows"][1].pop("requires")
     hw2["rows"][1]["witness"] = {"record": "Round 9"}
     expect("HARDWARE with a partial record", hw2, "lacks", entries={"Round 9": {}})
+    hw3 = dict(hw)
+    hw3["rows"] = [dict(r) for r in hw["rows"]]
+    hw3["rows"][1]["requires"] = ["launch"]
+    expect("a HARDWARE row above its BUILT companion", hw3, "lowest grade of what it runs with",
+           entries={"Round 9": {}})
 
     if failures:
         print("zephyr-board-table: SELFTEST FAIL")
@@ -472,10 +608,19 @@ def main(argv: list[str]) -> int:
             for line in findings:
                 print(f"zephyr-board-table: {line}", file=sys.stderr)
             return 1
+        # Six tab-separated fields: board, app, Rust target, link, the row board a
+        # companion starts, overlay. A field with nothing to say is `-`, because
+        # the reader's `read` folds a run of tabs into one separator and an empty
+        # middle field would shift the rest left; only the last may be empty.
         for r in build_rows(table):
             print("\t".join([
-                r["board"], r["app"], r["rust_target"], r["link"],
+                r["board"], r["app"], r["rust_target"], r["link"], "-",
                 ";".join(r.get("conf_overlay", [])),
+            ]))
+        for c in build_companions(table):
+            print("\t".join([
+                c["board"], c["app"], "-", "companion", c["starts"],
+                ";".join(c.get("conf_overlay", [])),
             ]))
         return 0
     if argv[1:]:

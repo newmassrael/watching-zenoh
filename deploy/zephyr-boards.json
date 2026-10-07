@@ -4,7 +4,8 @@
     "The boards wz's Zephyr images are built for, one row per BOARD x LINK x APP, and how far each row is WITNESSED. This file is the one place that says so; deploy/zephyr-*/boards/*.conf are the per-board settings it names, and scripts/lib/zephyr_board_table_gate.py reads both.",
     "A claim goes no higher than the LOWEST grade its evidence reaches. DECLARED: the board is a target, nothing was built. BUILT: hosted CI builds the image for this row (Layer Qzb) and nothing has run it. QEMU: the image boots on an emulated machine and a lane reads a verdict from it (witness.lane). HARDWARE: someone ran it on the board and a ledger entry records what ran (image hash, verdict sentence, date, who).",
     "HARDWARE needs a lab. wz publishes the image and the verdict-sentence grammar; whoever owns the board runs it and files the record. Until that record exists in the store the row stays at BUILT, however likely it looks.",
-    "A board's RMII and its 10BASE-T1S port are different rows: they are different links with different drivers, and one can be witnessed while the other is not."
+    "A board's RMII and its 10BASE-T1S port are different rows: they are different links with different drivers, and one can be witnessed while the other is not.",
+    "A board that runs more than one image lists the others under companions, and a row names what it needs in requires: a row's claim goes no higher than the lowest grade of what it runs with."
   ],
   "grades": ["DECLARED", "BUILT", "QEMU", "HARDWARE"],
   "rows": [
@@ -34,7 +35,8 @@
       "rust_target": "thumbv7em-none-eabi",
       "grade": "BUILT",
       "witness": {"lane": "Qzb"},
-      "note": "The image is for the M7_0 core, and on this chip only the CM0+ core starts by itself: Zephyr's board documentation says CM7_0 runs only when a CM0+ application enables it (Cy_SysEnableCM7). The clock tree is the CM0+ image's job too: Zephyr's clock driver on the M7 returns without configuring it (drivers/clock_control/clock_control_infineon.c). wz ships no CM0+ image. On a bench kit whose existing CM0+ image started CM7_0 without configuring the clocks, the M7 ran at about 8 MHz where the build assumes 350 MHz, so the kernel's clock ran about 44 times slow (measured: 229 ticks per second against the configured 10000, a cycle counter at 8.02 MHz), and the first boot printed nothing past the probe for 100 seconds of wall time, which was about 2 seconds of kernel time. The link path has not yet been seen to run to its end."
+      "requires": ["zephyr-cm0p-launcher"],
+      "note": "The image is for the M7_0 core, and on this chip only the CM0+ core starts by itself: Zephyr's board documentation says CM7_0 runs only when a CM0+ application enables it (Cy_SysEnableCM7). The clock tree is the CM0+ image's job too: Zephyr's clock driver on the M7 returns without configuring it (drivers/clock_control/clock_control_infineon.c). The CM0+ image wz builds for this is the companion listed below. On a bench kit whose existing CM0+ image started CM7_0 without configuring the clocks, the M7 ran at about 8 MHz where the build assumes 350 MHz, so the kernel's clock ran about 44 times slow (measured: 229 ticks per second against the configured 10000, a cycle counter at 8.02 MHz), and the first boot printed nothing past the probe for 100 seconds of wall time, which was about 2 seconds of kernel time. The link path has not yet been seen to run to its end."
     },
     {
       "board": "kit_t2g_b_h_lite/cyt4bf8cds/m7_0",
@@ -44,6 +46,7 @@
       "rust_target": "thumbv7em-none-eabi",
       "grade": "BUILT",
       "witness": {"lane": "Qzb"},
+      "requires": ["zephyr-cm0p-launcher"],
       "conf_overlay": ["overlays/t2g_spi_probe.conf"],
       "note": "The image with the SPI probe: SCB3 opened as a master on the MikroBUS socket (through the PDL; the pinned Zephyr's own SPI binding is unusable on this chip) and the identity registers read and logged at boot: the two standard TC6 ones (OA_ID, OA_PHYID) and the LAN8650/1's own DEVID, which the standard ones cannot replace. A lab ran the first two on a bench kit with a 10BASE-T1S click plugged in and reported OA_ID 0x00000011 and OA_PHYID 0x0007c1b4, at two boots. The lab gave the first 16 hex digits of the image's sha256, no verdict grammar exists for this row yet, and the DEVID read did not exist, so the row stays BUILT. What that image did after those lines is on the RMII row. Nothing is plugged into the socket on a kit as shipped."
     },
@@ -54,6 +57,16 @@
       "network": "lwip-mac",
       "grade": "DECLARED",
       "note": "An expansion board rather than a device of the kit: the Lite user guide names no 10BASE-T1S part (its one Ethernet is the DP83825I on RMII), and its MikroBUS socket, where the board plugs in, is not populated by default. The chip's family is known from what it answered: OA_PHYID model 0x1B is the LAN8650/1 integrated PHY in Microchip's data sheet. Its product (8650 or 8651) and silicon revision are not: OA_PHYID reflects the PHY block only (errata item s1) and read revision 4, which the data sheet revisions read for this (DS60001734C and F) list nowhere: they give 3, for both B0 and B1. DEVID names both, and the probe above now reads it. What exists: the TC6 protocol crate (wz-oa-tc6) and its SPI seam, host-tested; the SCB master's rules (wz-spi-scb), host-tested; the master itself and the identity probe, built. What does not: a chip crate, which must refuse a revision whose configuration is not documented rather than apply another revision's."
+    }
+  ],
+  "companions": [
+    {
+      "board": "kit_t2g_b_h_lite/cyt4bf8cds/m0p",
+      "app": "zephyr-cm0p-launcher",
+      "starts": "kit_t2g_b_h_lite/cyt4bf8cds/m7_0",
+      "grade": "BUILT",
+      "witness": {"lane": "Qzb"},
+      "note": "The image the kit's CM0+ core runs so that the M7_0 image runs at the speed it was built for: Zephyr's own clock driver brings the clock tree up from the board's devicetree in a CM0+ build, and the launcher then starts CM7_0 at the start of the M7_0 flash partition, which the launcher reads from the same devicetree node the M7_0 image is linked at. It is built, never run on a chip, and it replaces whatever CM0+ image the kit carried."
     }
   ]
 }

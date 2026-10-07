@@ -21113,7 +21113,8 @@ _qz_toolchain() {
     _QZ_BASE="${WZ_ZEPHYR_BASE:-$HOME/zephyrproject/zephyr}"
     installed="$(rustup target list --installed 2>/dev/null)"
 
-    if ! grep -q "^${triple}$" <<< "$installed"; then
+    # `-` is an image with no Rust in it (a companion's): no target to need.
+    if [[ "$triple" != "-" ]] && ! grep -q "^${triple}$" <<< "$installed"; then
         _qz_unavailable "rustup target ${triple} absent" && return 10 || return 1
     fi
     if [[ "$needs" == "qemu" ]] && ! command -v qemu-system-arm >/dev/null 2>&1; then
@@ -21285,8 +21286,48 @@ layer_qza_zephyr_admin_node_vs_zenohd() {
 # the build says what it used, and a drift between them is a lane that would
 # pass on a toolchain nobody provisioned.
 #
+# The table's companions (the CM0+ image a T2G row's M7 image runs with) are built
+# too, after the rows, from the same reader. They carry no Rust, so the Rust-target
+# check does not apply to them; what applies instead is the seam between the two
+# images, below.
+#
 # An EMPTY population is a FAIL, not a pass: with no BUILT row there is nothing
 # for the grade to stand on.
+
+# The address an image's vector table sits at, as `0x…`, read from its ELF with
+# the nm its own build used (the cross toolchain's, named in the CMake cache).
+# awk does not stop early: a reader that exits before nm has finished writing
+# fails the pipeline under pipefail for a reason that is not the image's.
+_qzb_vector_table() {
+    local build_dir="$1" nm
+    nm="$(grep -m1 '^CMAKE_NM:' "$build_dir/CMakeCache.txt" | cut -d= -f2)"
+    [[ -x "$nm" ]] || return 1
+    "$nm" "$build_dir/zephyr/zephyr.elf" | awk '$3 == "_vector_table" { print "0x" $1 }'
+}
+
+# A companion starts another image, and the two must agree on where it is. The
+# launcher says, in its own build, where it will start it (`wz: CM7_0 vectors
+# 0x…`, from the devicetree); the started image's ELF says where its vector table
+# is. Each is right by its own reading, which is the shape of defect neither
+# build shows alone: a launcher that starts a core at an address nothing is at.
+_qzb_companion_seam() {
+    local west_log="$1" image_board="$2" image_vectors="$3" said
+    said="$(sed -n 's/.*wz: CM7_0 vectors \(0x[0-9A-Fa-f]*\)[[:space:]]*$/\1/p' "$west_log" | sed -n 1p)"
+    if [[ -z "$said" ]]; then
+        echo "  Qzb FAIL — the companion's build did not say where it starts $image_board (no 'wz: CM7_0 vectors' line)" >&2
+        return 1
+    fi
+    if [[ -z "$image_vectors" ]]; then
+        echo "  Qzb FAIL — no built image of $image_board to compare the companion's address with" >&2
+        return 1
+    fi
+    if (( said != image_vectors )); then
+        echo "  Qzb FAIL — the companion starts $image_board at $said but that image's vector table is linked at $image_vectors" >&2
+        return 1
+    fi
+    echo "  Qzb seam: the companion and the $image_board image agree on $said"
+}
+
 layer_qzb_zephyr_board_matrix() {
     local rows rc
     rows="$(python3 scripts/lib/zephyr_board_table_gate.py --build-rows)" \
@@ -21294,17 +21335,18 @@ layer_qzb_zephyr_board_matrix() {
     [[ -n "$rows" ]] \
         || { echo "  Qzb FAIL — the table has no BUILT or HARDWARE row; a lane with no population is not a pass" >&2; return 1; }
 
-    local board app triple link overlay
+    local board app triple link starts overlay
     # Every toolchain first: a lane that builds half the table and then SKIPs
     # has said nothing about the other half.
-    while IFS=$'\t' read -r board app triple link overlay; do
+    while IFS=$'\t' read -r board app triple link starts overlay; do
         _qz_toolchain "$triple" && rc=0 || rc=$?
         [[ "$rc" -eq 10 ]] && return 0
         [[ "$rc" -ne 0 ]] && return 1
     done <<< "$rows"
 
-    local n=0 fail=0 build_dir west_log extra
-    while IFS=$'\t' read -r board app triple link overlay; do
+    local n=0 fail=0 build_dir west_log extra vectors
+    local -A vector_of=()
+    while IFS=$'\t' read -r board app triple link starts overlay; do
         n=$((n + 1))
         build_dir="$(mktemp -d)/zbuild"
         west_log="${RUNCI_LOG_DIR:-crates/target/run-ci-logs}/qzb-$n-west-build.log"
@@ -21312,14 +21354,26 @@ layer_qzb_zephyr_board_matrix() {
         [[ -n "$overlay" ]] && extra=(-- "-DEXTRA_CONF_FILE=$overlay")
         if ! _qz_west_build Qzb "deploy/$app" "$board" "$build_dir" "qzb-$n-west-build.log" "${extra[@]}"; then
             fail=1
-        elif ! grep -qE "wz: Rust target ${triple}\$" "$west_log"; then
+        elif [[ "$triple" != "-" ]] && ! grep -qE "wz: Rust target ${triple}\$" "$west_log"; then
             echo "  Qzb FAIL — $board built with a Rust target other than the table's $triple" >&2
             grep -E "wz: Rust target" "$west_log" >&2
             fail=1
         elif [[ ! -f "$build_dir/zephyr/zephyr.elf" ]]; then
             echo "  Qzb FAIL — $board / $app produced no zephyr.elf" >&2
             fail=1
+        elif [[ "$link" == "companion" ]]; then
+            _qzb_companion_seam "$west_log" "$starts" "${vector_of[$starts]:-}" || fail=1
+            echo "  Qzb $board / $link / $app BUILT"
         else
+            # The first image of a board names where its vector table is; a second
+            # image of the same board that puts it elsewhere is a table row built
+            # for a different layout than the first.
+            vectors="$(_qzb_vector_table "$build_dir")"
+            if [[ -n "${vector_of[$board]:-}" && -n "$vectors" ]] && (( vectors != ${vector_of[$board]} )); then
+                echo "  Qzb FAIL — $board / $link has its vector table at $vectors, another image of the board at ${vector_of[$board]}" >&2
+                fail=1
+            fi
+            [[ -n "$vectors" ]] && vector_of[$board]="$vectors"
             echo "  Qzb $board / $link / $app BUILT ($triple)"
         fi
         rm -rf "$(dirname "$build_dir")"
