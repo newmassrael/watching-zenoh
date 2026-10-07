@@ -1,0 +1,95 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later OR LicenseRef-watching-zenoh-Commercial
+# SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
+#
+# zephyr-admin-node/rust — the wz Rust STATICLIB of the Zephyr admin-node
+# firmware, linked into the Zephyr image by the parent CMakeLists.txt (Path B:
+# Zephyr is the kernel; ONE Zephyr thread hosts the wz cooperative executor).
+# Cargo only emits `libwz_zephyr_admin_node.a` with the kernel symbols
+# undefined; west/cmake compiles the kernel and does the final image link.
+#
+# What it is: a wz node a zenoh host reconfigures at runtime. It listens for a
+# session, answers upstream's admin GET under its own zid, and applies a write
+# on `connect/endpoints` by dialling what it names. The same node the QEMU
+# lwIP firmware (deploy/mcu-admin-node) is, over a network stack the BOARD
+# chooses; the node (`wz-session-mcu`) is the same crate in both.
+#
+# Standalone workspace (the empty `[workspace]` table) so cargo does not pull it
+# into crates/Cargo.toml's member build, where a thumb target is not the host.
+
+[workspace]
+
+[package]
+name = "wz-zephyr-admin-node"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.85"
+license = "AGPL-3.0-or-later OR LicenseRef-watching-zenoh-Commercial"
+authors = ["newmassrael"]
+publish = false
+description = "wz Rust staticlib for the Zephyr admin-node firmware: a node a zenoh host reconfigures through its admin space, over the board's network stack."
+
+[lib]
+name = "wz_zephyr_admin_node"
+path = "src/lib.rs"
+crate-type = ["staticlib"]
+
+[features]
+# The network stack the board's Kconfig chose (`CONFIG_WZ_NET_BACKEND_*`);
+# deploy/zephyr-admin-node/CMakeLists.txt turns exactly one on.
+net-zephyr-sockets = []
+# lwIP polled from the node's loop, over a wz Ethernet MAC crate. The facade's
+# `session-lwip` brings lwIP's links and the real lwIP build, which needs
+# WZ_LWIP_PORT in the build's environment (the CMake sets it).
+net-lwip-mac = ["wz/session-lwip"]
+# The MAC (`CONFIG_WZ_MAC_*`): the Infineon CYT4BF family's ETH0.
+mac-cyt4bf = ["dep:wz-eth-mac-cyt4bf"]
+
+[dependencies]
+# critical-section IMPL provider: the staticlib root defines it over Zephyr's
+# irq_lock (`wz_runtime_zephyr::zephyr_image!`), so the key is the kernel's
+# `unsigned int`.
+critical-section = { version = "1", features = ["restore-state-u32"] }
+# AtomicU64 is not native on thumbv7m: the coop timer queue and the clock route
+# it through the fallback + critical-section, matching wz-runtime-coop.
+portable-atomic = { version = "1", default-features = false, features = ["fallback", "critical-section"] }
+
+# The composable-framework route every deploy takes: the facade's features unify
+# onto the one wz-session-core the session shell is built against. `runtime-coop`
+# is the executor; `platform-zephyr` the Zephyr profile seams (clock, allocator,
+# sockets, links, glue). keepalive and close keep the zenoh host's lease and
+# teardown honest.
+wz = { path = "../../../crates/wz", default-features = false, features = [
+    "runtime-coop",
+    "platform-zephyr",
+    "adminspace-core",
+    "adminspace-write",
+    "codec-frame",
+    "codec-keep-alive",
+    "codec-close",
+    "transport-keepalive",
+] }
+# The session shell: application layer, admin node, connection manager, dialer,
+# generic over the stack's `SessionLinks`. Names no link crate.
+wz-session-mcu = { path = "../../../crates/wz-session-mcu", features = [
+    "adminspace-core",
+    "adminspace-write",
+    "transport-keepalive",
+] }
+# The chip's MAC driver, a crate of its own that depends on the trait tier alone:
+# only the `mac-*` feature the board selects pulls one in.
+wz-eth-mac-cyt4bf = { path = "../../../crates/wz-eth-mac-cyt4bf", optional = true }# The types the facade does not re-export (SessionInitParams, SigningKey,
+# SessionTimeouts, the entropy trait); features arrive through the facade.
+wz-session-core = { path = "../../../crates/wz-session-core", default-features = false, features = [
+    "alloc",
+    "session-unicast",
+    "no_std",
+] }
+
+[profile.release]
+codegen-units = 1
+opt-level = "s"
+lto = true
+panic = "abort"
+
+[profile.dev]
+panic = "abort"

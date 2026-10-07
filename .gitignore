@@ -64,6 +64,10 @@ deploy/mcu-admin-node/target/
 # staticlib (Path-B boot e2e; Layer Qz). Its target/ is the cargo cross
 # output (the west build dir lives outside the repo). Same target/ policy.
 deploy/zephyr-app/rust/target/
+# R3075 — deploy/zephyr-admin-node/rust is the second standalone Zephyr-profile
+# staticlib (the admin node). Same target/ policy; the Zephyr build dir lives
+# outside the repo.
+deploy/zephyr-admin-node/rust/target/
 # R311y22 — xtask is the sixth standalone workspace (the codegen SSOT
 # that regenerates out/**; pulls sce-build/libxml2, kept out of the main
 # build). Same target/ policy. Its Cargo.lock IS committed (reproducible

@@ -1,0 +1,153 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later OR LicenseRef-watching-zenoh-Commercial
+# SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
+
+mainmenu "wz Zephyr admin node"
+
+rsource "../zephyr-common/Kconfig.wz"
+
+choice WZ_NET_BACKEND
+	prompt "Network stack the admin node runs over"
+	default WZ_NET_BACKEND_ZEPHYR_SOCKETS
+	help
+	  The node is the same on every board; what differs is the stack under it,
+	  which the board's Ethernet driver decides.
+
+config WZ_NET_BACKEND_ZEPHYR_SOCKETS
+	bool "Zephyr's own network stack and BSD sockets"
+	help
+	  For a board whose Ethernet, Wi-Fi or modem Zephyr drives. The interface, its
+	  address (DHCP or Kconfig) and its link-layer identity are Zephyr's.
+
+config WZ_NET_BACKEND_LWIP_MAC
+	bool "lwIP over an Ethernet MAC the wz crates drive"
+	help
+	  For a board whose Ethernet controller Zephyr has no driver for. Zephyr is the
+	  kernel only (threads, clock, heap, console): the network is lwIP, polled from
+	  the node's loop, over a wz `EthernetMac` crate for the chip. The interface
+	  address and the MAC address are the board's Kconfig, since no Zephyr
+	  interface exists to ask.
+
+endchoice
+
+# What the Zephyr-sockets backend needs of Zephyr is stated HERE, as defaults of
+# the symbols it needs, rather than as lines in prj.conf: the other backend then
+# does not inherit a network stack it does not use, and a board conf never has to
+# turn a stack off to avoid one. Nothing here is a QEMU setting.
+if WZ_NET_BACKEND_ZEPHYR_SOCKETS
+
+config NETWORKING
+	default y
+
+config NET_IPV4
+	default y
+
+config NET_IPV6
+	default n
+
+config NET_UDP
+	default y
+
+config NET_TCP
+	default n
+
+config NET_L2_ETHERNET
+	default y
+
+config NET_MAX_CONTEXTS
+	default 8
+
+config POSIX_NETWORKING
+	default y
+
+config POSIX_DEVICE_IO
+	default y
+
+config NET_CONFIG_SETTINGS
+	default y
+
+config NET_CONFIG_NEED_IPV4
+	default y
+
+config NET_DHCPV4
+	default y
+
+endif # WZ_NET_BACKEND_ZEPHYR_SOCKETS
+
+if WZ_NET_BACKEND_LWIP_MAC
+
+choice WZ_MAC
+	prompt "The Ethernet MAC"
+
+config WZ_MAC_CYT4BF
+	bool "Infineon CYT4BF (T2G) ETH0, RMII"
+	depends on SOC_FAMILY_INFINEON_CAT1C
+	select WZ_ENTROPY_BOARD_HOOK
+	help
+	  The MXETH block of the CYT4BF family (a Cadence GEM) through
+	  `wz-eth-mac-cyt4bf`, with the PHY on its RMII port. The random source is the
+	  chip's own TRNG in the CRYPTO block, through the board hook.
+
+endchoice
+
+config WZ_MAC_ADDRESS
+	string "Station (MAC) address"
+	default "02:00:5e:00:00:01"
+	help
+	  The address the MAC answers to, and the node's zenoh id is derived from it.
+	  This chip has no MAC EEPROM and Zephyr offers no unique-id source for it, so
+	  the address is a Kconfig value: a locally administered one by default, and
+	  TWO BOARDS WITH THE SAME VALUE ON ONE NETWORK COLLIDE, as both their frames
+	  and their zenoh ids. Set it per board.
+
+config WZ_STATIC_IPV4
+	string "IPv4 address"
+	default "192.168.100.10"
+	help
+	  The address the node listens on and advertises. There is no DHCP client in
+	  this backend.
+
+config WZ_STATIC_NETMASK
+	string "IPv4 netmask"
+	default "255.255.255.0"
+
+config WZ_STATIC_GATEWAY
+	string "IPv4 gateway (0.0.0.0 for none)"
+	default "0.0.0.0"
+
+config WZ_LINK_WAIT_MS
+	int "How long to wait for the link at boot, in milliseconds"
+	default 5000
+	help
+	  The node starts without a link once this passes, and picks the link up when it
+	  appears.
+
+if WZ_MAC_CYT4BF
+
+config WZ_CYT4BF_REF_CLOCK_INTERNAL
+	bool "The MAC supplies the RMII reference clock (internal PLL)"
+	help
+	  Leave off when the PHY drives REF_CLK, as it does on a board whose PHY has its
+	  own crystal and a 50 MHz output.
+
+config WZ_CYT4BF_REF_CLOCK_DIVIDER
+	int "Divider of the internal reference clock (1 to 256)"
+	default 1
+	depends on WZ_CYT4BF_REF_CLOCK_INTERNAL
+
+choice WZ_CYT4BF_PINS
+	prompt "ETH0 pin routing"
+
+config WZ_CYT4BF_PINS_T2G_LITE
+	bool "KIT_T2G-B-H_LITE (176-pin package, DP83825I over RMII)"
+	help
+	  REF_CLK P18_0, TX_EN P18_1, TXD0/1 P18_4/P18_5, RXD0/1 P19_0/P19_1, CRS_DV
+	  P21_5, MDIO P3_0, MDC P3_1: the 176-pin package's ETH0 functions, which the
+	  PDL's pin table lists, on the pins that kit's schematic uses.
+
+endchoice
+
+endif # WZ_MAC_CYT4BF
+
+endif # WZ_NET_BACKEND_LWIP_MAC
+
+source "Kconfig.zephyr"
