@@ -3075,6 +3075,13 @@ name = "wz-mcu-stack"
 version = "0.1.0"
 
 [[package]]
+name = "wz-oa-tc6"
+version = "0.1.0"
+dependencies = [
+ "wz-runtime-core",
+]
+
+[[package]]
 name = "wz-packet-fixtures"
 version = "0.1.0"
 

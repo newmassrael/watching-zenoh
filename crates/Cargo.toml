@@ -228,6 +228,11 @@ members = [
     # no emulator carries the block, so its tests run against a model written from
     # the documents the driver was.
     "wz-eth-mac-cyt4bf",
+    # The OPEN Alliance 10BASE-T1x (TC6) MAC-PHY serial interface: the protocol
+    # every such chip shares, over the SPI seam, as an `EthernetMac`. Trait tier
+    # only, host-tested against a model of the chip; the chip-specific crate that
+    # sits on it waits for a chip to be chosen.
+    "wz-oa-tc6",
     # Stage 5 (R311it) — the no_std SSOT for synthetic session handshake
     # wire bytes (craft_initsyn/opensyn/initack/frame). De-duplicates the
     # copies that were in the three wz-runtime-tokio session-FSM test files

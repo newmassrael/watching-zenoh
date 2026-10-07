@@ -1,0 +1,48 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later OR LicenseRef-watching-zenoh-Commercial
+# SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
+#
+# wz-oa-tc6 — the OPEN Alliance 10BASE-T1x MAC-PHY serial interface (TC6), the
+# protocol and nothing of any chip.
+#
+# A `#![no_std]` library: control transactions (register read and write, with the
+# header parity and the optional protected mode), data chunk exchanges (header and
+# footer, transmit credits, receive chunk counts) and the chunking of an Ethernet
+# frame each way, over the `SpiTransfer` seam, presented as an `EthernetMac`.
+#
+# It is the part every TC6 MAC-PHY shares. What differs per chip (identity
+# registers, errata fixups, the MAC address registers, the PLCA setup, the reset
+# line) is a chip crate on top of this one, written once a chip is chosen: Zephyr
+# draws the same line between `oa_tc6.c` (the protocol) and `eth_lan865x.c` (the
+# chip), and the protocol here was written from the same two sources that line
+# describes: the OPEN Alliance interface as `oa_tc6.h` / `oa_tc6.c` lay it out
+# (Zephyr, Apache-2.0, read as a reference; no code copied).
+#
+# Deliberately depends on NOTHING but the trait-skeleton tier, which holds both
+# seams it stands between (`SpiTransfer` below it, `EthernetMac` above it).
+#
+# CLAIM: BUILT. No emulator models a TC6 MAC-PHY, so the host tests drive the
+# driver against a model of the chip written from the same reading; they check
+# the framing, the parity, the credits and the chunking, not the chip.
+
+[package]
+name = "wz-oa-tc6"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+readme.workspace = true
+publish = false
+description = "OPEN Alliance 10BASE-T1x TC6 MAC-PHY protocol over an SPI seam, an EthernetMac for the wz network stacks."
+
+[lib]
+name = "wz_oa_tc6"
+path = "src/lib.rs"
+
+[dependencies]
+# The `SpiTransfer` and `EthernetMac` seams. No other wz crate: see the header.
+wz-runtime-core = { path = "../wz-runtime-core" }
+
+[lints]
+workspace = true

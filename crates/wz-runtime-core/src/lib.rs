@@ -60,13 +60,14 @@
 //!   (concrete impls land alongside real callers, not as premature
 //!   trait declarations).
 //!
-//!   Two link-side SEAMS live here regardless, and the sentence above is
+//!   Three link-side SEAMS live here regardless, and the sentence above is
 //!   about the first thing and not about them: [`RxSlots`] (R2737, the
-//!   receive-slot view over a buffer-pool emit) and [`EthernetMac`] (the part
-//!   of a NIC driver a network stack needs). Each is a trait with a real
+//!   receive-slot view over a buffer-pool emit), [`EthernetMac`] (the part
+//!   of a NIC driver a network stack needs) and [`SpiTransfer`] (the SPI
+//!   master a MAC-PHY chip's driver stands on). Each is a trait with a real
 //!   caller and a real implementation on each side of it, placed here because
 //!   the crates on its two sides must reach it without reaching each other;
-//!   neither is the SCE-generated link surface this paragraph keeps out.
+//!   none is the SCE-generated link surface this paragraph keeps out.
 //!
 //! ## Mechanical MCU cross-compile gate (R311ak / R311am / R311ao)
 //!
@@ -115,6 +116,7 @@ pub mod error;
 pub mod eth_mac;
 pub mod runtime;
 pub mod rx_slots;
+pub mod spi;
 pub mod time;
 
 pub use allocator::Allocator;
@@ -122,4 +124,5 @@ pub use error::RuntimeError;
 pub use eth_mac::EthernetMac;
 pub use runtime::Runtime;
 pub use rx_slots::RxSlots;
+pub use spi::SpiTransfer;
 pub use time::{TimeSource, TimeoutElapsed};
