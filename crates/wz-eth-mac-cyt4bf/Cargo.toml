@@ -1,0 +1,45 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later OR LicenseRef-watching-zenoh-Commercial
+# SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
+#
+# wz-eth-mac-cyt4bf — the Ethernet MAC of Infineon's CYT4BF (T2G body, high)
+# family, as a `wz_runtime_core::EthernetMac`.
+#
+# A `#![no_std]` library owning ONE chip family's driver: the `MXETH` block, a
+# Cadence GEM behind a small wrapper, driven in polling mode with a descriptor
+# ring each way. Written from the register map and the programming order in
+# Infineon's PDL (release-v3.23.0: `cy_ethif.c` and its Cadence core driver,
+# `cyip_eth.h`; Apache-2.0), read as a reference. No PDL source is copied, and
+# the PDL is not linked: this crate is Rust, for the seam, so that the ring logic
+# it adds is tested on the host against a model of the controller.
+#
+# Deliberately depends on NOTHING but the trait-skeleton tier, like every chip
+# crate beside it (`wz-eth-mac-lan9118`): one crate per chip, each reaching the
+# seam and not the stack.
+#
+# CLAIM: this driver is BUILT, never HARDWARE. QEMU has no CYT4BF, so nothing
+# here has run on silicon; the host tests prove the ring and the register
+# programming against a model written from the same documents, which is a check
+# of the code against its own reading and not of the reading against the chip.
+
+[package]
+name = "wz-eth-mac-cyt4bf"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+readme.workspace = true
+publish = false
+description = "Infineon CYT4BF (T2G) Ethernet MAC driver (MXETH, Cadence GEM), an EthernetMac for the wz network stacks."
+
+[lib]
+name = "wz_eth_mac_cyt4bf"
+path = "src/lib.rs"
+
+[dependencies]
+# The `EthernetMac` seam. No other wz crate: see the header.
+wz-runtime-core = { path = "../wz-runtime-core" }
+
+[lints]
+workspace = true

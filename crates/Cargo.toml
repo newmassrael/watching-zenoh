@@ -222,6 +222,12 @@ members = [
     # firmware that drives it does not also build lwIP's C sources for the chip's
     # sake.
     "wz-eth-mac-lan9118",
+    # The Ethernet MAC of Infineon's CYT4BF (T2G) family: a Cadence GEM behind a
+    # wrapper, polled, one descriptor ring each way. Same shape as the LAN9118
+    # beside it (trait tier only, host-tested), and BUILT rather than HARDWARE:
+    # no emulator carries the block, so its tests run against a model written from
+    # the documents the driver was.
+    "wz-eth-mac-cyt4bf",
     # Stage 5 (R311it) — the no_std SSOT for synthetic session handshake
     # wire bytes (craft_initsyn/opensyn/initack/frame). De-duplicates the
     # copies that were in the three wz-runtime-tokio session-FSM test files
