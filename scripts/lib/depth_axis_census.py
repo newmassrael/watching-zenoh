@@ -2609,7 +2609,14 @@ PIN_NO_SYMBOL = 0
 # witness the keys. `transport-shm` is not touched and is still PARTIAL beside it. READ off the
 # census's own FAIL line, `wz citations: 233 against a pin of 224`, for the reason the R3062 note
 # gives.
-PIN_WZ_CITATIONS = 233
+#
+# R3076 -- 233 -> 241, one atom. `api-compat-c`'s reason gains the UPDATE that a C session binds
+# every endpoint its `listen` states: it names the function that reads the endpoints, the bind step
+# and the per-listener range of face ids, the locator list a Hello and a gossip entry carry, and the
+# four rows that witness it (the three differential rows and the one that reads wz alone).
+# `transport-shm` is not touched and is still PARTIAL beside it. READ off the census's own FAIL
+# line, `wz citations: 241 against a pin of 233`, for the reason the R3062 note gives.
+PIN_WZ_CITATIONS = 241
 # R2626 — 44 -> 42, and this one is worth a sentence because it HELD through
 # every earlier retirement in this run (R2612, R2622). `time-hlc`'s reason is the
 # first retiree carrying AMBIGUOUS citations of its own: its oldest clauses cite
