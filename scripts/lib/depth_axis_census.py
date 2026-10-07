@@ -2602,7 +2602,14 @@ PIN_NO_SYMBOL = 0
 # READ off the census's own FAIL line, `wz citations: 224 against a pin of 217`, for the reason
 # the R3062 note gives; it read 221 while the two new files were not yet tracked, because a
 # citation counts only when it resolves to a TRACKED wz file, and 224 once they were.
-PIN_WZ_CITATIONS = 224
+#
+# R3075 -- 224 -> 233, one atom. `api-compat-c`'s reason gains the UPDATE that a C session reads
+# the four gossip keys it acts on: it names the config reader's list of keys a C session acts on,
+# the policy type and the stance field that carries it, and the four differential rows that
+# witness the keys. `transport-shm` is not touched and is still PARTIAL beside it. READ off the
+# census's own FAIL line, `wz citations: 233 against a pin of 224`, for the reason the R3062 note
+# gives.
+PIN_WZ_CITATIONS = 233
 # R2626 — 44 -> 42, and this one is worth a sentence because it HELD through
 # every earlier retirement in this run (R2612, R2622). `time-hlc`'s reason is the
 # first retiree carrying AMBIGUOUS citations of its own: its oldest clauses cite
