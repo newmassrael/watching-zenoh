@@ -85,10 +85,26 @@ extern "C" {
 
 /* No capture time for this sample.
  *
- * The SAME NUMBER as WZ_DISSECT_NO_TIMESTAMP, so wz_dissect_record.ts_ns can
- * be fed straight in. The agreement is pinned by a test in this library, not
- * by this comment. Do not read it as zero: a sample with no reading is not a
- * sample captured at the epoch. */
+ * The SAME NUMBER as WZ_DISSECT_NO_TIMESTAMP, and that is ALL that is the same:
+ * the UNITS DIFFER. A captured_at_millis entry is MILLISECONDS since the Unix
+ * epoch; wz_dissect_record.ts_ns is NANOSECONDS since it. So a record's ts_ns is
+ * not fed straight in, only its "no reading" is. Convert a real reading by
+ * dividing by 1000000 and truncating, which is the rule wz_dissect's own clock
+ * applies when it narrows a pushed ts_ns (a record's ts_ns is already that
+ * millisecond widened back, so for a record the division is exact), and pass the
+ * sentinel through UNDIVIDED:
+ *
+ *     ms = (ts_ns == WZ_DISSECT_NO_TIMESTAMP) ? WZ_REPLAY_NO_TIMESTAMP
+ *                                             : ts_ns / 1000000u;
+ *
+ * Dividing the sentinel gives 18446744073709, which reads as a real instant (the
+ * year 2554) and not as "no reading", so a plan paced over it is measured
+ * against a time that never happened. Neither slip is refused: a ts_ns passed
+ * as if it were milliseconds is a legal, enormous reading, and the delays come
+ * out a million times too long. The sentinel's agreement is pinned by a test in
+ * this library, and so is the conversion above, not this comment. Do not read
+ * the sentinel as zero: a sample with no reading is not a sample captured at the
+ * epoch. */
 #define WZ_REPLAY_NO_TIMESTAMP UINT64_MAX
 /* No ceiling — the spelling of "unbounded" for max_gap_millis and
  * max_total_millis alike. A ceiling of UINT64_MAX ms is one nothing reaches,
@@ -172,6 +188,30 @@ typedef struct wz_replay_emission {
 } wz_replay_emission;
 
 /* ------------------------------------------------------------------ doors */
+
+/* THE REVISION AS A MACRO, beside the function that reports it. wz_dissect.h
+ * and wz_capi_c.h carry the same pair; this header carried the function alone, so
+ * a consumer of these doors had one shape available and it was a number of its
+ * own.
+ *
+ * The macro is what you COMPILED against; the function is what you are RUNNING
+ * against. They differ only when a build is linked to a library it was not
+ * compiled for -- a prebuilt library handed in from elsewhere, with this header
+ * taken from a different checkout -- which is the one failure a header cannot
+ * detect on its own:
+ *
+ *     if (wz_replay_abi_version() != WZ_REPLAY_ABI_REVISION) { ... }
+ *
+ * A consumer's own copy of the number answers "is this the revision I adopted"
+ * and never "is this the library my header describes", and it goes stale with no
+ * signal when the library moves.
+ *
+ * Adding the macro does NOT move the revision. A define is compiled in, not
+ * linked, and the revision moves for a symbol, a vocabulary constant or the
+ * memory rule. It moves WITH the function and never on its own:
+ * capi_replay_abi_pin.py reads this define, loads the library, calls the
+ * function, and refuses when the two disagree. */
+#define WZ_REPLAY_ABI_REVISION 1
 
 /* The ABI revision this build implements. Moves when a symbol, a vocabulary
  * constant, or the memory rule changes. */

@@ -88,10 +88,12 @@ fn mutate(kind: c_int, operand: u64, seed: u64, payload: &[u8]) -> (c_int, Vec<u
 /// THE SENTINEL A CONSUMER FEEDS IN IS THE ONE THE READ HALF HANDS OUT.
 ///
 /// The consumer report asked for "the sentinel `wz_dissect_record` already
-/// uses", and the whole value of answering that is that a caller can pass
-/// `wz_dissect_record.ts_ns` straight in. Two libraries agreeing on a number is
-/// exactly the kind of fact that stops being true quietly, so it is measured
-/// against the other crate rather than asserted in a comment beside a literal.
+/// uses", so that "no reading" is one number across the two libraries. Two
+/// libraries agreeing on a number is exactly the kind of fact that stops being
+/// true quietly, so it is measured against the other crate rather than asserted
+/// in a comment beside a literal. It is the SENTINEL that agrees and nothing
+/// else: the units of a real reading differ, see
+/// `a_dissect_records_clock_converts_to_the_plans_unit`.
 ///
 /// `wz-capi-dissect` is a DEV-dependency and must stay one: this library does
 /// not link the read half, and a real dependency would make a consumer that
@@ -101,8 +103,187 @@ fn the_no_timestamp_sentinel_is_the_dissect_one() {
     assert_eq!(
         WZ_REPLAY_NO_TIMESTAMP,
         wz_capi_dissect::WZ_DISSECT_NO_TIMESTAMP,
-        "a consumer feeds wz_dissect_record.ts_ns straight into \
-         wz_replay_plan_delays; the two sentinels must be one number"
+        "a record that carries no reading must come out of the conversion as \
+         the plan's `no reading`; the two sentinels must be one number"
+    );
+}
+
+/// `ts_ns` of each record a live dissection hands out for these pushes, in the
+/// order it hands them out. One flow, one keepalive per push, so a push is a
+/// record.
+fn dissect_record_clocks(pushes: &[u64]) -> Vec<u64> {
+    // Ethernet, IPv4, UDP 7447 -> 7447, a one-byte KeepAlive. The header checksums
+    // are left at zero: the reader counts a bad one and decodes the message
+    // anyway, and what is measured here is the clock.
+    let keepalive = [0x04u8];
+    let mut udp = Vec::new();
+    udp.extend_from_slice(&7447u16.to_be_bytes());
+    udp.extend_from_slice(&7447u16.to_be_bytes());
+    udp.extend_from_slice(&((8 + keepalive.len()) as u16).to_be_bytes());
+    udp.extend_from_slice(&0u16.to_be_bytes());
+    udp.extend_from_slice(&keepalive);
+    let mut ip = vec![0x45u8, 0];
+    ip.extend_from_slice(&((20 + udp.len()) as u16).to_be_bytes());
+    ip.extend_from_slice(&[0, 0, 0, 0, 64, 17, 0, 0, 10, 0, 0, 1, 10, 0, 0, 2]);
+    ip.extend_from_slice(&udp);
+    let mut frame = vec![0u8; 12];
+    frame.extend_from_slice(&[0x08, 0x00]);
+    frame.extend_from_slice(&ip);
+    while frame.len() < 60 {
+        frame.push(0);
+    }
+
+    let mut handle: *mut wz_capi_dissect::live::LiveDissection = core::ptr::null_mut();
+    assert_eq!(
+        unsafe {
+            wz_capi_dissect::wz_dissect_live_open(
+                wz_capi_dissect::WZ_DISSECT_LIMITS_NONE,
+                &mut handle,
+            )
+        },
+        wz_capi_dissect::WZ_DISSECT_OK
+    );
+    for ts_ns in pushes {
+        assert_eq!(
+            unsafe {
+                wz_capi_dissect::wz_dissect_live_push(
+                    handle,
+                    1, // LINKTYPE_ETHERNET
+                    *ts_ns,
+                    frame.as_ptr(),
+                    frame.len(),
+                )
+            },
+            wz_capi_dissect::WZ_DISSECT_OK
+        );
+    }
+    // SAFETY: an all-zero record is a valid bit pattern for every field.
+    let mut records =
+        vec![unsafe { core::mem::zeroed::<wz_capi_dissect::WzDissectRecord>() }; pushes.len() + 4];
+    let mut written = 0usize;
+    assert_eq!(
+        unsafe {
+            wz_capi_dissect::wz_dissect_live_drain(
+                handle,
+                records.as_mut_ptr(),
+                records.len(),
+                &mut written,
+            )
+        },
+        wz_capi_dissect::WZ_DISSECT_OK
+    );
+    unsafe { wz_capi_dissect::wz_dissect_live_close(handle) };
+    assert_eq!(written, pushes.len(), "one record per push");
+    records[..written].iter().map(|r| r.ts_ns).collect()
+}
+
+/// The conversion the header states, written once so the tests use one spelling.
+fn plan_millis(ts_ns: u64) -> u64 {
+    if ts_ns == wz_capi_dissect::WZ_DISSECT_NO_TIMESTAMP {
+        WZ_REPLAY_NO_TIMESTAMP
+    } else {
+        ts_ns / 1_000_000
+    }
+}
+
+/// A DISSECT RECORD'S CLOCK IS NANOSECONDS AND THE PLAN'S IS MILLISECONDS, and
+/// the conversion the header states is the one that paces the capture.
+///
+/// The consumer asked whether `wz_dissect_record.ts_ns` "can be fed straight
+/// in", and it cannot: only the sentinel is shared. This drives the whole road --
+/// real nanosecond pushes through the read half, the record's own `ts_ns` back
+/// out, the header's division, the plan -- and asserts the intervals the pushes
+/// were spaced by (1500 ms and 250 ms, with sub-millisecond tails the narrowing
+/// drops) come out as the delays. The first push carries no clock, so its
+/// record reports the sentinel and the next sample has no anchor to measure
+/// from.
+#[test]
+fn a_dissect_records_clock_converts_to_the_plans_unit() {
+    let t0: u64 = 1_700_000_000_123_456_789;
+    let t1 = t0 + 1_500_400_000;
+    let t2 = t1 + 250_000_000;
+    let clocks = dissect_record_clocks(&[wz_capi_dissect::WZ_DISSECT_NO_TIMESTAMP, t0, t1, t2]);
+    assert_eq!(clocks[0], wz_capi_dissect::WZ_DISSECT_NO_TIMESTAMP);
+    assert!(
+        clocks[1..].iter().all(|c| c % 1_000_000 == 0),
+        "a record's clock is a whole millisecond widened back, so the division \
+         is exact: {clocks:?}"
+    );
+
+    let millis: Vec<u64> = clocks.iter().map(|c| plan_millis(*c)).collect();
+    assert_eq!(
+        millis,
+        [
+            WZ_REPLAY_NO_TIMESTAMP,
+            1_700_000_000_123,
+            1_700_000_001_623,
+            1_700_000_001_873
+        ]
+    );
+    let (code, out, _) = pace(
+        WZ_REPLAY_TIMING_CAPTURE,
+        100,
+        1.0,
+        WZ_REPLAY_NO_CEILING,
+        WZ_REPLAY_NO_CEILING,
+        Some(millis.as_slice()),
+    );
+    assert_eq!(code, WZ_REPLAY_OK);
+    assert_eq!(out[1].source, WZ_REPLAY_SOURCE_UNMEASURABLE);
+    assert_eq!(
+        (out[2].delay_millis, out[2].source),
+        (1_500, WZ_REPLAY_SOURCE_MEASURED)
+    );
+    assert_eq!(
+        (out[3].delay_millis, out[3].source),
+        (250, WZ_REPLAY_SOURCE_MEASURED)
+    );
+}
+
+/// THE TWO SLIPS THE HEADER NAMES ARE NOT REFUSED, which is why it names them.
+///
+/// A record's `ts_ns` passed as milliseconds is a legal, enormous reading: the
+/// plan answers with a delay a million times too long and `WZ_REPLAY_OK`. The
+/// sentinel divided like any other value is an instant in the year 2554, which a
+/// plan measures against and calls MEASURED. Both come back as success, so
+/// nothing but the header stands between a consumer and either.
+#[test]
+fn the_two_unit_slips_are_accepted_silently() {
+    let t0: u64 = 1_700_000_000_123_456_789;
+    let clocks = dissect_record_clocks(&[t0, t0 + 1_500_400_000]);
+
+    let (code, out, _) = pace(
+        WZ_REPLAY_TIMING_CAPTURE,
+        100,
+        1.0,
+        WZ_REPLAY_NO_CEILING,
+        WZ_REPLAY_NO_CEILING,
+        Some(clocks.as_slice()),
+    );
+    assert_eq!(
+        code, WZ_REPLAY_OK,
+        "nanoseconds read as milliseconds is not refused"
+    );
+    assert_eq!(
+        out[1].delay_millis, 1_500_000_000,
+        "1500 ms read as 1500000000 ms"
+    );
+
+    let divided_sentinel = WZ_REPLAY_NO_TIMESTAMP / 1_000_000;
+    assert_ne!(divided_sentinel, WZ_REPLAY_NO_TIMESTAMP);
+    let (code, out, _) = pace(
+        WZ_REPLAY_TIMING_CAPTURE,
+        100,
+        1.0,
+        WZ_REPLAY_NO_CEILING,
+        WZ_REPLAY_NO_CEILING,
+        Some(&[divided_sentinel, 1_700_000_000_123]),
+    );
+    assert_eq!(code, WZ_REPLAY_OK);
+    assert_eq!(
+        out[1].source, WZ_REPLAY_SOURCE_MEASURED,
+        "a divided sentinel is read as a real instant, so the sample after it \
+         is measured against the year 2554 and not reported unmeasurable"
     );
 }
 
@@ -686,6 +867,31 @@ fn the_emission_layout_is_reported_by_the_artifact() {
 #[test]
 fn the_abi_version_is_the_declared_one() {
     assert_eq!(wz_replay_abi_version(), WZ_REPLAY_ABI_VERSION);
+}
+
+/// THE HEADER'S REVISION MACRO IS THE REVISION THE LIBRARY REPORTS.
+///
+/// What a consumer COMPILED against is the define and what it RUNS against is
+/// the function, and the two are one number until a header is taken from a
+/// different checkout than the library. `capi_replay_abi_pin.py` holds the same
+/// equality against the built artifact; this holds it where a header edit is
+/// made, before any artifact exists. The define is read off its `#define` line,
+/// not found anywhere in the file, because the header discusses the macro in
+/// prose and a prose mention with a number after it is not a definition.
+#[test]
+fn the_headers_revision_macro_is_the_one_the_library_reports() {
+    let header = include_str!("../include/wz_replay.h");
+    let defined: Vec<c_int> = header
+        .lines()
+        .filter_map(|line| line.strip_prefix("#define WZ_REPLAY_ABI_REVISION "))
+        .map(|n| n.trim().parse().expect("the define is a plain integer"))
+        .collect();
+    assert_eq!(
+        defined,
+        [wz_replay_abi_version()],
+        "the header must define WZ_REPLAY_ABI_REVISION exactly once, as the \
+         number wz_replay_abi_version reports"
+    );
 }
 
 /// EVERY VOCABULARY CONSTANT IS DISTINCT WITHIN ITS OWN FAMILY.

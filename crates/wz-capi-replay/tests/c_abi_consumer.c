@@ -224,8 +224,12 @@ static int check_mutation(void)
 int main(void)
 {
     int32_t version = wz_replay_abi_version();
-    if (version < 1) {
-        printf("  C1cj FAIL: abi version %d\n", version);
+    /* The comparison the header tells a consumer to make: what this unit was
+     * compiled against, against what it is linked to. It replaces `version < 1`,
+     * which could not tell a library one revision ahead from the right one. */
+    if (version != WZ_REPLAY_ABI_REVISION) {
+        printf("  C1cj FAIL: abi version %d, header says %d\n", version,
+               (int)WZ_REPLAY_ABI_REVISION);
         return 1;
     }
     if (check_layout()) {

@@ -55,12 +55,26 @@ in `wz-capi-replay/src/lib.rs` must be `#define`d in the header, and every
 the half that catches the dissect defect directly, and it needs no prefix
 declaration in either direction.
 
-One constant is answered by a FUNCTION rather than a `#define`, and it is
-recognised structurally rather than listed: a constant whose lowercased name is
-an exported function in the header (`WZ_REPLAY_ABI_VERSION` /
-`wz_replay_abi_version`) is one a consumer must ASK the artifact for. Baking a
-revision into a header is precisely what that function exists to prevent, so it
-is not an exemption -- it is the rule that the header must not answer it.
+One constant is answered by a FUNCTION, and it is recognised structurally
+rather than listed: a constant whose lowercased name is an exported function in
+the header (`WZ_REPLAY_ABI_VERSION` / `wz_replay_abi_version`) is one a consumer
+must ASK the artifact for, so it is not `#define`d under its own name.
+
+That rule used to end with "and the header must not answer it", on the argument
+that a revision baked into a header is a revision that can disagree with the
+library shipping beside it. A consumer then reported the opposite cost: with the
+function alone, the only number it could compare against was one it kept
+itself, and `wz_dissect.h` had already paid for that exact shape (R2775). The
+two numbers answer different questions -- what a build was COMPILED against and
+what it is RUNNING against -- and a header cannot answer the second, so the
+header answers the first. So the header now carries the function's constant a
+second time, as the macro twin spelled `..._REVISION`
+(`WZ_REPLAY_ABI_REVISION`), and this gate DEMANDS it, in the same structural
+way: for every constant a function answers, the twin must be `#define`d, and it
+is the one `#define` allowed without a `pub const` of its own. That the twin
+and the function agree on the NUMBER is not this gate's to say -- it reads
+source text, and the number is an artifact's -- so `capi_replay_abi_pin.py`
+reads the define and calls the function and refuses when they differ.
 
 ## Why not parse Rust properly
 
@@ -231,18 +245,33 @@ def main() -> int:
             f"derived NO `#define WZ_REPLAY_*` from {HEADER}. Population of "
             "zero is a failure."
         )
+    # A constant a FUNCTION answers has a macro twin in the header, spelled
+    # `..._REVISION`. Derived from the same structural test that exempts the
+    # constant itself, so a second such function would owe a twin too.
+    twins = {
+        name[: -len("_VERSION")] + "_REVISION"
+        for name in consts
+        if name.lower() in functions and name.endswith("_VERSION")
+    }
     for name in sorted(consts - defines):
         if name.lower() in functions:
-            # Answered by the artifact rather than by the header, which is what
-            # that function is for -- a revision baked into a header is a
-            # revision that can disagree with the library shipping beside it.
+            # Asked of the artifact by function; the header carries its twin,
+            # which is demanded just below.
             continue
         problems.append(
             f"{ABI.name} exports `{name}` and {HEADER.name} does not define "
             "it. The header is what a linking product reads, and it is the "
             "only one of the two that ships."
         )
-    for name in sorted(defines - consts):
+    for name in sorted(twins - defines):
+        problems.append(
+            f"{ABI.name} has a constant a function answers and {HEADER.name} "
+            f"does not define its macro twin `{name}`. Without it a consumer "
+            "can ask only what it is RUNNING against and has to keep its own "
+            "copy of the number to compare with, which goes stale with no "
+            "signal."
+        )
+    for name in sorted(defines - consts - twins):
         problems.append(
             f"{HEADER.name} defines `{name}` and {ABI.name} has no such "
             "`pub const`. A header constant with nothing behind it is one a "

@@ -12191,6 +12191,11 @@ layer_c1cj_replay_c_abi() {
     command -v nm >/dev/null 2>&1 || {
         echo "  C1cj FAIL: nm is absent, so the ABI symbol set cannot be read"; return 1; }
     python3 scripts/lib/capi_replay_abi_pin.py || return 1
+    # The gate now reads WZ_REPLAY_ABI_REVISION out of the header as well, and
+    # the header names that macro in prose. The selftest holds the reader to the
+    # DEFINE, so a prose mention can never answer for it; run here beside the
+    # gate it guards, the way capi_abi_pin's selftest runs beside its own.
+    python3 scripts/lib/capi_replay_abi_pin.py --selftest >/dev/null || return 1
 }
 
 layer_c1bo_dissect_c_abi() {

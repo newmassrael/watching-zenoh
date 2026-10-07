@@ -62,11 +62,13 @@ wz-replay = { path = "../wz-replay", default-features = false }
 # The READ half, as a DEV-dependency and never a real one.
 #
 # `WZ_REPLAY_NO_TIMESTAMP` must be the same number as `WZ_DISSECT_NO_TIMESTAMP`,
-# because a consumer feeding `wz_dissect_record.ts_ns` straight into
-# `wz_replay_plan_delays` is the case the downstream report asked for. Two
-# libraries agreeing on a constant is exactly the kind of fact that stops being
-# true quietly, so the agreement is MEASURED against that crate rather than
-# asserted in a comment beside a literal.
+# because a consumer carrying a `wz_dissect_record` clock into
+# `wz_replay_plan_delays` is the case the downstream report asked for, and "no
+# reading" has to survive the crossing as one number. (Only the sentinel is
+# shared: a record's `ts_ns` is nanoseconds and the plan's unit is milliseconds.)
+# Two libraries agreeing on a constant is exactly the kind of fact that stops
+# being true quietly, so the agreement is MEASURED against that crate rather
+# than asserted in a comment beside a literal, and so is the conversion.
 #
 # A real dependency would make a consumer that only paces a plan carry a
 # dissector, which is the separation this crate's own header argues for.

@@ -59,6 +59,12 @@ use wz_replay::{Mutation, Pacing, Schedule, ScheduleError, Timing, TimingSource}
 /// file as well — see `scripts/lib/capi_replay_abi_pin.py`, which reads it by
 /// LOADING the cdylib and calling this function rather than by finding a
 /// literal near it.
+///
+/// The header carries the same number as the macro `WZ_REPLAY_ABI_REVISION`,
+/// which is what a consumer COMPILED against, beside the function that reports
+/// what it is RUNNING against. The macro has no constant of its own here: it is
+/// this one, spelled for a preprocessor, and the pin gate refuses when the
+/// loaded library and the header's define disagree.
 pub const WZ_REPLAY_ABI_VERSION: c_int = 1;
 
 /// Success.
@@ -97,12 +103,18 @@ pub const WZ_REPLAY_ERR_BUFFER_TOO_SMALL: c_int = -7;
 
 /// No capture time for this sample.
 ///
-/// Deliberately the same value as `WZ_DISSECT_NO_TIMESTAMP`, because a consumer
-/// feeding `wz_dissect_record.ts_ns` straight into [`wz_replay_plan_delays`] is
-/// the case this door was asked for. The agreement is PINNED by a test rather
-/// than asserted here — see `the_no_timestamp_sentinel_is_the_dissect_one` —
-/// since a comment claiming two numbers are equal is exactly the kind of claim
-/// that stops being true.
+/// Deliberately the same value as `WZ_DISSECT_NO_TIMESTAMP`, so that "this
+/// sample has no reading" is one number across the two libraries. The agreement
+/// is PINNED by a test rather than asserted here — see
+/// `the_no_timestamp_sentinel_is_the_dissect_one` — since a comment claiming two
+/// numbers are equal is exactly the kind of claim that stops being true.
+///
+/// THE SENTINEL IS ALL THAT IS THE SAME. `captured_at_millis` is milliseconds
+/// since the epoch and `wz_dissect_record.ts_ns` is nanoseconds since it, so a
+/// record's reading is divided by 1_000_000 on its way in and the sentinel is
+/// passed through undivided (`u64::MAX / 1_000_000` is a reading in the year
+/// 2554, not an absence). `a_dissect_records_clock_converts_to_the_plans_unit`
+/// drives that conversion through both libraries.
 ///
 /// It is not a magic reading: a capture time of `u64::MAX` milliseconds since
 /// the epoch is 584 million years away.

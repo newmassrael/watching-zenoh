@@ -36,6 +36,15 @@ author just edited is pinning the edit rather than checking it:
     loaded library, sized first and read second, so this file never holds a
     copy of the count.
 
+One thing IS read from source text, and it is the exception that proves the
+rule: the header's `WZ_REPLAY_ABI_REVISION`. It is not read to be pinned. It is
+read to be HELD AGAINST the revision the loaded library reports, because that
+agreement is the whole claim the macro makes -- what a build was compiled
+against is what it is running against -- and no compiler checks it. The define
+is read off its `#define` line and not found anywhere in the file, since the
+header names the macro in prose and a prose mention with a number after it
+would otherwise answer for the define; `--selftest` holds that case red.
+
 ## Both directions fail
 
 `EXPECTED_*` below is the pin. Drift in any of the three reds and names what
@@ -77,6 +86,39 @@ EXPECTED_SYMBOLS = {
 EXPECTED_LAYOUT = (16, 8, 0, 8, 12)
 
 CDYLIB = pathlib.Path("crates/target/release/libwz_capi_replay.so")
+HEADER = pathlib.Path("crates/wz-capi-replay/include/wz_replay.h")
+
+
+def header_revision(text: str) -> int | None:
+    """`WZ_REPLAY_ABI_REVISION` as the C preprocessor would see it, or None.
+
+    Anchored to a `#define` line, for the reason in the module doc: the header
+    explains the macro in prose, with the comparison it is for written out, and
+    a search for the token would be answered by that prose.
+    """
+    m = re.search(r"^#define\s+WZ_REPLAY_ABI_REVISION\s+(-?\d+)\s*$", text, re.M)
+    return int(m.group(1)) if m else None
+
+
+def selftest() -> int:
+    """The define is read; a prose mention with a number after it is NOT."""
+    cases = [
+        ("#define WZ_REPLAY_ABI_REVISION 7\n", 7),
+        (" * compare it against WZ_REPLAY_ABI_REVISION 3 before reading\n", None),
+        ("/* no revision here */\n", None),
+        (" * WZ_REPLAY_ABI_REVISION 4\n#define WZ_REPLAY_ABI_REVISION 9\n", 9),
+    ]
+    for text, want in cases:
+        got = header_revision(text)
+        if got != want:
+            print(
+                f"capi-replay-abi-pin: selftest FAIL -- {text!r} read as {got}, "
+                f"expected {want}",
+                file=sys.stderr,
+            )
+            return 1
+    print("capi-replay-abi-pin: selftest OK")
+    return 0
 
 
 def exported(cdylib: pathlib.Path) -> set[str]:
@@ -146,7 +188,27 @@ def main() -> int:
     version = revision(lib)
     reported = layout(lib)
 
+    # The header half of the pair, held against the loaded library. A missing
+    # define is named on its own rather than hidden behind another finding.
+    header_text = HEADER.read_text(errors="replace") if HEADER.is_file() else ""
+    compiled = header_revision(header_text)
+
     problems: list[str] = []
+    if compiled is None:
+        problems.append(
+            f"  - {HEADER} defines no WZ_REPLAY_ABI_REVISION. A consumer can then "
+            "ask only what it is RUNNING against, never what it COMPILED "
+            "against, and keeps its own copy of the number -- the copy that "
+            "goes stale with no signal."
+        )
+    elif compiled != version:
+        problems.append(
+            f"  - the header says WZ_REPLAY_ABI_REVISION is {compiled} and the "
+            f"built library answers {version}. A consumer that compares the two, "
+            "as the header tells it to, would refuse a correct build; one that "
+            "does not would read this library through a header describing "
+            "another. They move together or not at all."
+        )
     for name in sorted(EXPECTED_SYMBOLS - symbols):
         problems.append(f"  - PIN NAMES `{name}` and the artifact does not export it")
     for name in sorted(symbols - EXPECTED_SYMBOLS):
@@ -184,4 +246,12 @@ def main() -> int:
 
 
 if __name__ == "__main__":
+    if sys.argv[1:] == ["--selftest"]:
+        sys.exit(selftest())
+    if sys.argv[1:]:
+        print(
+            f"usage: {pathlib.Path(__file__).name} [--selftest]",
+            file=sys.stderr,
+        )
+        sys.exit(2)
     sys.exit(main())

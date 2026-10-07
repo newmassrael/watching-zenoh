@@ -197,6 +197,23 @@ DEFERRED: dict[str, str] = {
         "the failure `binary_freshness_lint.py` exists to count. Hosted Layer "
         "C1bo owns it, and builds the cdylib immediately before calling it."
     ),
+    "capi_replay_abi_pin.py": (
+        "Round 3074 -- it JOINED this population in that round, the way "
+        "`capi_abi_pin.py` did in R2775: it used to read only the BUILT "
+        "`libwz_capi_replay.so`, and Round 3074 made it read the tracked header "
+        "too, for the `WZ_REPLAY_ABI_REVISION` define it holds equal to the "
+        "library. Its subject is the pair, and one half of the pair is the "
+        "release cdylib, which it refuses to grade without. The hook builds no "
+        "cdylib, so wiring it here would either red every push or grade "
+        "whatever stale artifact `crates/target` happened to hold. What the "
+        "hook DOES run is the half that needs no artifact: "
+        "`capi_replay_vocabulary.py`, gate 2v, demands the macro's presence "
+        "and that it is the only define without a constant of its own, so a "
+        "push cannot drop the define. The number it holds equal to the "
+        "library is graded by hosted Layer C1cj, which builds the cdylib "
+        "immediately before calling this and also compiles a C consumer that "
+        "compares the two."
+    ),
     "capi_c_abi_pin.py": (
         "its subject is the BUILT `libwz_capi_c.so`, one per cargo profile, "
         "and it refuses to grade without them (0.04s to say so). The hook "
