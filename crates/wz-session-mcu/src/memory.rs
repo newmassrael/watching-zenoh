@@ -41,10 +41,13 @@ struct Waiting {
 /// The first port an initiator is given, the start of the ephemeral range.
 const FIRST_EPHEMERAL_PORT: u16 = 49152;
 
+/// The datagrams waiting at each bound end, by the address and port it is bound on.
+type Queues = BTreeMap<([u8; 4], u16), VecDeque<Waiting>>;
+
 /// A network of in-memory ends. Shared by `Rc`: every end holds the network it
 /// was bound on.
 pub struct MemoryNetwork {
-    queues: RefCell<BTreeMap<([u8; 4], u16), VecDeque<Waiting>>>,
+    queues: RefCell<Queues>,
     next_ephemeral: Cell<u16>,
 }
 
