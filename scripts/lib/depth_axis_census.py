@@ -2616,7 +2616,13 @@ PIN_NO_SYMBOL = 0
 # four rows that witness it (the three differential rows and the one that reads wz alone).
 # `transport-shm` is not touched and is still PARTIAL beside it. READ off the census's own FAIL
 # line, `wz citations: 241 against a pin of 233`, for the reason the R3062 note gives.
-PIN_WZ_CITATIONS = 241
+#
+# R3077 -- 241 -> 242, one atom. `api-compat-c`'s reason gains the CORRECTION that a Hello's locators
+# are not in the config's order: it names the differential test's reader of Hello lines, which now
+# sorts the locators of a node with several listeners. `transport-shm` is not touched and is still
+# PARTIAL beside it. READ off the census's own FAIL line, `wz citations: 242 against a pin of 241`,
+# for the reason the R3062 note gives.
+PIN_WZ_CITATIONS = 242
 # R2626 — 44 -> 42, and this one is worth a sentence because it HELD through
 # every earlier retirement in this run (R2612, R2622). `time-hlc`'s reason is the
 # first retiree carrying AMBIGUOUS citations of its own: its oldest clauses cite
