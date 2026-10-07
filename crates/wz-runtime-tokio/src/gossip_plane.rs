@@ -51,6 +51,7 @@ use wz_session_core::network_message::NetworkMessage;
 use wz_session_core::session_actions::SessionLinkActions;
 
 use crate::accept_loop::{DialIntent, DialIntentOrigin, DialIntentSender};
+use crate::zenoh_config::ZenohNodeConfig;
 
 /// The roles a node of role `whatami` gossips to: `scouting/gossip/target`'s shipped default
 /// (`commons/zenoh-config/src/defaults.rs` @ `pub mod gossip {`), a router or a peer for a
@@ -69,6 +70,70 @@ pub const fn default_autoconnect(whatami: WhatAmI) -> WhatAmIMatcher {
     match whatami {
         WhatAmI::Router => WhatAmIMatcher::empty(),
         WhatAmI::Peer | WhatAmI::Client => WhatAmIMatcher::empty().router().peer().client(),
+    }
+}
+
+/// How a node gossips: whom it sends topology to, whom it dials when gossip names a node, and the
+/// tie-break applied to that dial. The three values `scouting/gossip/{target,autoconnect,
+/// autoconnect_strategy}` give a node of one role; whether the node gossips at all is the
+/// caller's (`scouting/gossip/enabled`), and is answered by holding a plane or not.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct GossipPolicy {
+    /// The roles a face may be sent topology as. A face of another role is held and told
+    /// nothing, though what it sends is still taken in.
+    pub target: WhatAmIMatcher,
+    /// The roles dialled when gossip names them.
+    pub autoconnect: WhatAmIMatcher,
+    /// The tie-break per role dialled.
+    pub strategies: AutoConnectStrategies,
+}
+
+/// A config's gossip target names `client`, which upstream refuses when the node opens
+/// (`"client" is not allowed as gossip target`): a client is a leaf and is never sent topology.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct GossipTargetNamesClient;
+
+impl core::fmt::Display for GossipTargetNamesClient {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str("\"client\" is not allowed as gossip target")
+    }
+}
+
+impl GossipPolicy {
+    /// zenoh's shipped policy for a node of role `whatami`: the three defaults above.
+    pub fn shipped(whatami: WhatAmI) -> Self {
+        Self {
+            target: default_target(whatami),
+            autoconnect: default_autoconnect(whatami),
+            strategies: AutoConnectStrategies::default(),
+        }
+    }
+
+    /// The policy `config` states for a node of role `whatami`, or `None` when it says gossip is
+    /// off. A key the document does not state takes its shipped value, and a stated empty set
+    /// is kept as the instruction it is. A target that names `client` is refused, as the real
+    /// library refuses to open a session with one.
+    pub fn resolve(
+        config: &ZenohNodeConfig,
+        whatami: WhatAmI,
+    ) -> Result<Option<Self>, GossipTargetNamesClient> {
+        if config.scout_gossip_enabled == Some(false) {
+            return Ok(None);
+        }
+        let shipped = Self::shipped(whatami);
+        let policy = Self {
+            target: config.scout_gossip_target.unwrap_or(shipped.target),
+            autoconnect: config
+                .scout_gossip_autoconnect
+                .unwrap_or(shipped.autoconnect),
+            strategies: config
+                .scout_gossip_autoconnect_strategy
+                .unwrap_or(shipped.strategies),
+        };
+        if policy.target.matches(WhatAmI::Client) {
+            return Err(GossipTargetNamesClient);
+        }
+        Ok(Some(policy))
     }
 }
 
@@ -153,6 +218,11 @@ impl GossipCore {
     ///
     /// `None` when `self_zid` is not a zid the graph can hold (empty, or all zero).
     pub fn new(self_zid: &[u8], whatami: WhatAmI) -> Option<Self> {
+        Self::with_policy(self_zid, whatami, GossipPolicy::shipped(whatami))
+    }
+
+    /// [`Self::new`] under a policy a config stated, in place of the shipped one.
+    pub fn with_policy(self_zid: &[u8], whatami: WhatAmI, policy: GossipPolicy) -> Option<Self> {
         let zid = Zid::try_from(self_zid).ok()?;
         let mut net = LinkstateNetwork::new(zid, whatami);
         // zenoh's peer mode is gossip (`routing.peer.mode` = "peer_to_peer"): the graph's own
@@ -160,12 +230,8 @@ impl GossipCore {
         net.set_full_linkstate(false);
         Some(Self {
             net,
-            target: default_target(whatami),
-            autoconnect: AutoConnect::with_strategies(
-                zid,
-                default_autoconnect(whatami),
-                AutoConnectStrategies::default(),
-            ),
+            target: policy.target,
+            autoconnect: AutoConnect::with_strategies(zid, policy.autoconnect, policy.strategies),
             faces: BTreeMap::new(),
         })
     }
@@ -349,8 +415,18 @@ impl GossipPlane {
     /// A plane for a node with `self_zid` and role `whatami`, posting its dials to `dials`.
     /// `None` when `self_zid` is not one the graph can hold.
     pub fn new(self_zid: &[u8], whatami: WhatAmI, dials: DialIntentSender) -> Option<Self> {
+        Self::with_policy(self_zid, whatami, GossipPolicy::shipped(whatami), dials)
+    }
+
+    /// [`Self::new`] under a policy a config stated.
+    pub fn with_policy(
+        self_zid: &[u8],
+        whatami: WhatAmI,
+        policy: GossipPolicy,
+        dials: DialIntentSender,
+    ) -> Option<Self> {
         Some(Self {
-            core: Mutex::new(GossipCore::new(self_zid, whatami)?),
+            core: Mutex::new(GossipCore::with_policy(self_zid, whatami, policy)?),
             dials,
         })
     }
@@ -459,7 +535,19 @@ mod tests {
         /// A node of wire role `wire`, reachable at `locator` when it has one.
         fn node(&mut self, id: u8, wire: u8, locator: Option<&str>) -> usize {
             let whatami = WhatAmI::from_wire(wire).expect("a role");
-            let mut core = GossipCore::new(&zid(id), whatami).expect("a zid");
+            self.node_with(id, wire, locator, GossipPolicy::shipped(whatami))
+        }
+
+        /// [`Self::node`] under a policy of its own.
+        fn node_with(
+            &mut self,
+            id: u8,
+            wire: u8,
+            locator: Option<&str>,
+            policy: GossipPolicy,
+        ) -> usize {
+            let whatami = WhatAmI::from_wire(wire).expect("a role");
+            let mut core = GossipCore::with_policy(&zid(id), whatami, policy).expect("a zid");
             if let Some(locator) = locator {
                 core.set_self_locators(vec![locator.to_owned()]);
             }
@@ -746,5 +834,156 @@ mod tests {
         assert_eq!(identity(&zid(2), WIRE_CLIENT).whatami(), WhatAmI::Client);
         assert_eq!(identity(&zid(2), 3).whatami(), WhatAmI::Peer);
         assert_eq!(FaceIdentity::default().whatami(), WhatAmI::Peer);
+    }
+
+    /// The shipped policy is zenoh's, per role: a router or a peer gossips to routers and peers
+    /// and a client to nobody; a router dials nobody and a peer or a client every role.
+    #[test]
+    fn the_shipped_policy_is_zenohs_for_each_role() {
+        let rp = WhatAmIMatcher::empty().router().peer();
+        let all = WhatAmIMatcher::empty().router().peer().client();
+        for (role, target, autoconnect) in [
+            (WhatAmI::Router, rp, WhatAmIMatcher::empty()),
+            (WhatAmI::Peer, rp, all),
+            (WhatAmI::Client, WhatAmIMatcher::empty(), all),
+        ] {
+            let policy = GossipPolicy::shipped(role);
+            assert_eq!(policy.target, target, "{role:?}");
+            assert_eq!(policy.autoconnect, autoconnect, "{role:?}");
+            assert_eq!(policy.strategies, AutoConnectStrategies::default());
+        }
+    }
+
+    /// A config that turns gossip off resolves to no policy, whatever else it states; one that
+    /// states nothing resolves to the shipped policy; one that states a key replaces that key
+    /// alone, a stated empty set staying the instruction "nobody".
+    #[test]
+    fn a_config_resolves_to_the_policy_it_states_key_by_key() {
+        let mut config = ZenohNodeConfig::default();
+        assert_eq!(
+            GossipPolicy::resolve(&config, WhatAmI::Peer),
+            Ok(Some(GossipPolicy::shipped(WhatAmI::Peer))),
+            "an unstated config is zenoh's defaults"
+        );
+
+        config.scout_gossip_autoconnect = Some(WhatAmIMatcher::empty());
+        config.scout_gossip_autoconnect_strategy = Some(AutoConnectStrategies::Unique(
+            wz_routing_graph::AutoConnectStrategy::GreaterZid,
+        ));
+        let policy = GossipPolicy::resolve(&config, WhatAmI::Peer)
+            .expect("no client in the target")
+            .expect("gossip is on");
+        assert_eq!(
+            policy.autoconnect,
+            WhatAmIMatcher::empty(),
+            "stated empty is nobody"
+        );
+        assert_eq!(
+            policy.strategies,
+            AutoConnectStrategies::Unique(wz_routing_graph::AutoConnectStrategy::GreaterZid)
+        );
+        assert_eq!(
+            policy.target,
+            GossipPolicy::shipped(WhatAmI::Peer).target,
+            "the key not stated keeps its shipped value"
+        );
+
+        config.scout_gossip_enabled = Some(false);
+        assert_eq!(
+            GossipPolicy::resolve(&config, WhatAmI::Peer),
+            Ok(None),
+            "off is off, whatever else is stated"
+        );
+        config.scout_gossip_enabled = Some(true);
+        assert!(GossipPolicy::resolve(&config, WhatAmI::Peer).is_ok_and(|p| p.is_some()));
+    }
+
+    /// A target that names `client` is refused, as the real library refuses to open one; a
+    /// target that names no client, however narrow, is not.
+    #[test]
+    fn a_target_that_names_clients_is_refused() {
+        let resolved = |target: WhatAmIMatcher| {
+            let config = ZenohNodeConfig {
+                scout_gossip_target: Some(target),
+                ..ZenohNodeConfig::default()
+            };
+            GossipPolicy::resolve(&config, WhatAmI::Peer)
+        };
+        assert_eq!(
+            resolved(WhatAmIMatcher::empty().peer().client()),
+            Err(GossipTargetNamesClient)
+        );
+        assert!(resolved(WhatAmIMatcher::empty().router()).is_ok());
+        assert!(
+            resolved(WhatAmIMatcher::empty()).is_ok(),
+            "tell nobody is an instruction a node may be given"
+        );
+    }
+
+    /// A target that excludes the roles a node meets sends them nothing, so a hub with it
+    /// introduces no one; the hub still takes in what its leaves send.
+    #[test]
+    fn an_empty_target_sends_nothing_and_introduces_no_one() {
+        let mut mesh = Mesh::new();
+        let silent = GossipPolicy {
+            target: WhatAmIMatcher::empty(),
+            ..GossipPolicy::shipped(WhatAmI::Peer)
+        };
+        let a = mesh.node_with(1, WIRE_PEER, Some("tcp/10.0.0.1:7447"), silent);
+        let b = mesh.node(2, WIRE_PEER, Some("tcp/10.0.0.2:7447"));
+        let c = mesh.node(3, WIRE_PEER, Some("tcp/10.0.0.3:7447"));
+        mesh.link(b, a);
+        mesh.link(c, a);
+        assert!(
+            mesh.dials_of(b).iter().all(|d| d.zid != zid(3)),
+            "B is not told of C by a hub that tells nobody"
+        );
+        assert!(mesh.dials_of(c).iter().all(|d| d.zid != zid(2)));
+    }
+
+    /// An autoconnect that admits nobody dials nobody it is told of, and the others still do.
+    #[test]
+    fn an_empty_autoconnect_dials_nobody() {
+        let mut mesh = Mesh::new();
+        let a = mesh.node(1, WIRE_PEER, Some("tcp/10.0.0.1:7447"));
+        let deaf = GossipPolicy {
+            autoconnect: WhatAmIMatcher::empty(),
+            ..GossipPolicy::shipped(WhatAmI::Peer)
+        };
+        let b = mesh.node_with(2, WIRE_PEER, Some("tcp/10.0.0.2:7447"), deaf);
+        let c = mesh.node(3, WIRE_PEER, Some("tcp/10.0.0.3:7447"));
+        mesh.link(b, a);
+        mesh.link(c, a);
+        assert!(mesh.dials_of(b).is_empty(), "B's policy admits no role");
+        assert!(
+            mesh.dials_of(c).iter().any(|d| d.zid == zid(2)),
+            "C, under the shipped policy, still dials B"
+        );
+    }
+
+    /// Under `greater-zid` only the node whose zid is the greater dials: of two nodes that are
+    /// told of each other, one dials and the other does not.
+    #[test]
+    fn a_greater_zid_strategy_dials_from_the_greater_end_only() {
+        let greater = GossipPolicy {
+            strategies: AutoConnectStrategies::Unique(
+                wz_routing_graph::AutoConnectStrategy::GreaterZid,
+            ),
+            ..GossipPolicy::shipped(WhatAmI::Peer)
+        };
+        let mut mesh = Mesh::new();
+        let a = mesh.node(1, WIRE_PEER, Some("tcp/10.0.0.1:7447"));
+        let b = mesh.node_with(2, WIRE_PEER, Some("tcp/10.0.0.2:7447"), greater);
+        let c = mesh.node_with(3, WIRE_PEER, Some("tcp/10.0.0.3:7447"), greater);
+        mesh.link(b, a);
+        mesh.link(c, a);
+        assert!(
+            mesh.dials_of(c).iter().any(|d| d.zid == zid(2)),
+            "C (zid 3) is the greater and dials B (zid 2)"
+        );
+        assert!(
+            mesh.dials_of(b).iter().all(|d| d.zid != zid(3)),
+            "B (zid 2) is the lesser and does not dial C"
+        );
     }
 }

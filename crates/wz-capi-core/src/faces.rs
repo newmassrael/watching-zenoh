@@ -77,7 +77,7 @@ use wz_runtime_tokio::advanced_subscriber::{
     AdvancedSubscriber, AdvancedSubscriberOptions, DeclarationForms, EntityForm, Miss,
 };
 use wz_runtime_tokio::declare::LivelinessSample;
-use wz_runtime_tokio::gossip_plane::{FaceIdentity, GossipPlane, Outbound};
+use wz_runtime_tokio::gossip_plane::{FaceIdentity, GossipPlane, GossipPolicy, Outbound};
 use wz_runtime_tokio::group::Member;
 use wz_runtime_tokio::locality::Locality;
 use wz_runtime_tokio::node_clock::NodeHlc;
@@ -1480,12 +1480,13 @@ pub struct SessionResources {
     pub gossip: Option<GossipSetup>,
 }
 
-/// What a node that gossips is given: the role it gossips as, and where the nodes it learns of
-/// are posted to be dialled. The drive role drains the other end of the channel, since dialling
-/// is its work and not the registry's.
+/// What a node that gossips is given: the role it gossips as, how it gossips (whom it tells, whom
+/// it dials), and where the nodes it learns of are posted to be dialled. The drive role drains
+/// the other end of the channel, since dialling is its work and not the registry's.
 #[derive(Clone)]
 pub struct GossipSetup {
     pub whatami: WhatAmI,
+    pub policy: GossipPolicy,
     pub dials: DialIntentSender,
 }
 
@@ -1587,7 +1588,9 @@ impl SharedSession {
         // A zid the graph cannot hold (empty or all zero) leaves the node not gossiping rather
         // than failing the open: the session's own zid is random and never is one.
         let gossip = gossip
-            .and_then(|setup| GossipPlane::new(&zid, setup.whatami, setup.dials))
+            .and_then(|setup| {
+                GossipPlane::with_policy(&zid, setup.whatami, setup.policy, setup.dials)
+            })
             .map(Arc::new);
         let driver: Arc<dyn BoxedLinkDriver + Send + Sync> = Arc::new(InertLinkDriver);
         // `WhatAmI::Peer`: the plane never handshakes, so the role is inert on

@@ -40,7 +40,7 @@ use wz_capi_c::bytes::z_bytes_copy_from_str;
 use wz_capi_c::config::{z_config_default, z_config_loan_mut, zc_config_insert_json5};
 use wz_capi_c::keyexpr::{z_view_keyexpr_from_str, z_view_keyexpr_loan};
 use wz_capi_c::put::z_put;
-use wz_capi_c::result::Z_OK;
+use wz_capi_c::result::{Z_ENETWORK, Z_OK};
 use wz_capi_c::session::{z_close, z_open, z_session_drop, z_session_loan, z_session_loan_mut};
 use wz_capi_c::sub::{z_closure_sample, z_declare_subscriber};
 use wz_runtime_tokio_test_support::free_port;
@@ -141,13 +141,21 @@ unsafe fn put_until_it_arrives(
 /// (the default one a peer binds); the other leaf, which publishes, never has.
 ///
 /// Returns whether a sample the publishing leaf put reached the subscribing one within `within`.
-unsafe fn leaves_meet(key: &str, b_listens: bool, within: Duration) -> bool {
+unsafe fn leaves_meet(
+    key: &str,
+    b_listens: bool,
+    hub_extra: &[(&str, &str)],
+    within: Duration,
+) -> bool {
     let port = free_port();
-    let (rc, hub) = open_with(&[
+    // What else the hub's config states: the gossip keys a row sets on it.
+    let mut hub_entries = vec![
         ("mode", String::from("\"peer\"")),
         ("scouting/multicast/enabled", String::from("false")),
         ("listen/endpoints", format!("[\"tcp/127.0.0.1:{port}\"]")),
-    ]);
+    ];
+    hub_entries.extend(hub_extra.iter().map(|(k, v)| (*k, (*v).to_owned())));
+    let (rc, hub) = open_with(&hub_entries);
     assert_eq!(rc, Z_OK, "the hub opens");
 
     let mut leaf_entries = vec![
@@ -190,6 +198,7 @@ fn a_leaf_with_a_listener_is_introduced_to_a_leaf_that_has_none() {
         leaves_meet(
             "wz/gossip/introduces/listening",
             true,
+            &[],
             Duration::from_secs(10),
         )
     };
@@ -207,11 +216,90 @@ fn a_leaf_with_a_listener_is_introduced_to_a_leaf_that_has_none() {
 #[test]
 fn leaves_that_cannot_be_dialled_are_not_introduced() {
     // SAFETY: fresh configs and sessions, each closed before the function returns.
-    let arrived =
-        unsafe { leaves_meet("wz/gossip/introduces/silent", false, Duration::from_secs(3)) };
+    let arrived = unsafe {
+        leaves_meet(
+            "wz/gossip/introduces/silent",
+            false,
+            &[],
+            Duration::from_secs(3),
+        )
+    };
     assert!(
         !arrived,
         "a sample reached a leaf that no one could have dialled and that was told of no one \
          else: it came by a path that is not gossip"
     );
+}
+
+/// A hub whose config turns gossip off introduces no one, though the leaf that listens CAN be
+/// dialled: the same shape as the row above that meets, with one key on the hub, so the key is
+/// what the leaves' apartness is read from. Unix only, for the reason the meeting row is: on a
+/// host with no `getifaddrs` the leaf advertises nothing, and this row would hold for that.
+#[cfg(unix)]
+#[test]
+fn a_hub_told_not_to_gossip_introduces_no_one() {
+    // SAFETY: fresh configs and sessions, each closed before the function returns.
+    let arrived = unsafe {
+        leaves_meet(
+            "wz/gossip/introduces/hub-off",
+            true,
+            &[("scouting/gossip/enabled", "false")],
+            Duration::from_secs(3),
+        )
+    };
+    assert!(
+        !arrived,
+        "the hub's config says gossip is off and the leaves met anyway: the key is read and \
+         not obeyed"
+    );
+}
+
+/// A hub whose gossip target is empty tells no one and so introduces no one, though it takes in
+/// what its leaves send; the same shape again with a different key on the hub.
+#[cfg(unix)]
+#[test]
+fn a_hub_that_tells_nobody_introduces_no_one() {
+    // SAFETY: fresh configs and sessions, each closed before the function returns.
+    let arrived = unsafe {
+        leaves_meet(
+            "wz/gossip/introduces/hub-target-empty",
+            true,
+            &[("scouting/gossip/target", "{router:[],peer:[]}")],
+            Duration::from_secs(3),
+        )
+    };
+    assert!(
+        !arrived,
+        "the hub's gossip target is empty and the leaves met anyway: the key is read and not \
+         obeyed"
+    );
+}
+
+/// A gossip target that names `client` fails the open, as the real library's does (`-4`,
+/// `"client" is not allowed as gossip target`), and one that names only routers and peers, or no
+/// one, does not.
+#[test]
+fn a_gossip_target_that_names_clients_fails_the_open() {
+    for (target, opens) in [
+        (r#"{peer:["client"]}"#, false),
+        (r#"{router:["router"],peer:["router","client"]}"#, false),
+        (r#"{peer:["router","peer"]}"#, true),
+        ("{peer:[]}", true),
+    ] {
+        // SAFETY: a fresh config and session, closed before the loop turns.
+        let (rc, session) = unsafe {
+            open_with(&[
+                ("mode", String::from("\"peer\"")),
+                ("scouting/multicast/enabled", String::from("false")),
+                ("scouting/gossip/target", target.to_owned()),
+            ])
+        };
+        if opens {
+            assert_eq!(rc, Z_OK, "a target `{target}` opens a session");
+            // SAFETY: the session just opened.
+            unsafe { close_session(session) };
+        } else {
+            assert_eq!(rc, Z_ENETWORK, "a target `{target}` fails the open with -4");
+        }
+    }
 }

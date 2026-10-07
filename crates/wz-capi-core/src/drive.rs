@@ -29,6 +29,7 @@ use tokio::sync::Notify;
 use wz_runtime_tokio::accept_loop::{
     accept_loop_offering, DialIntent, DialIntentReceiver, DialIntentSender,
 };
+use wz_runtime_tokio::gossip_plane::GossipPolicy;
 use wz_runtime_tokio::node_clock::{NodeHlc, TimestampingEnabled};
 use wz_runtime_tokio::retry_period::RetryPolicy;
 use wz_runtime_tokio::runtime_impl::TokioTime;
@@ -2289,12 +2290,13 @@ pub struct OpenStance {
     /// `DeclareFinal` of the initial interest; see [`SessionResources::initial_interest`].
     /// zenoh-c's ABI says `true`, and zenoh-pico's `false`.
     pub initial_interest: bool,
-    /// R3074 -- whether a peer or router session gossips: it tells a face it meets which nodes
-    /// it knows and where they are, and dials the nodes it is told of
-    /// ([`SessionResources::gossip`]). zenoh-c's ABI says `true`, as its peers do by default,
-    /// and zenoh-pico's `false`: its peers are introduced by scouting alone. A client never
-    /// gossips whatever this says.
-    pub gossip: bool,
+    /// R3074 -- how a peer or router session gossips, or `None` for one that does not: it tells
+    /// a face it meets which nodes it knows and where they are, and dials the nodes it is told
+    /// of ([`SessionResources::gossip`]). zenoh-c's ABI resolves it from its config (R3075: the
+    /// four `scouting/gossip` keys a C session reads), which is zenoh's shipped policy when the
+    /// config says nothing and `None` when it turns gossip off; zenoh-pico's says `None`, its
+    /// peers being introduced by scouting alone. A client never gossips whatever this says.
+    pub gossip: Option<GossipPolicy>,
 }
 
 #[cfg(feature = "session-extshm")]
@@ -2367,7 +2369,8 @@ pub fn open_blocking(
     // needed before the drive thread starts: the registry's plane holds the sender, and the
     // role that dials holds the receiver.
     let (dial_tx, dial_rx) = tokio::sync::mpsc::unbounded_channel();
-    let gossiping = gossip && dial_whatami != WhatAmI::Client;
+    let gossip = gossip.filter(|_| dial_whatami != WhatAmI::Client);
+    let gossiping = gossip.is_some();
     // Fixed here, on the CALLING thread, so `SessionState` can hand it to
     // `z_info_zid` and the INIT cannot disagree with it — see the field doc.
     let (zid, wire_zid) = session_zids(zid).ok_or(OpenError::DriveFailed)?;
@@ -2388,8 +2391,9 @@ pub fn open_blocking(
                 shm_clients,
                 local_delivery,
                 initial_interest,
-                gossip: gossiping.then(|| GossipSetup {
+                gossip: gossip.map(|policy| GossipSetup {
                     whatami: dial_whatami,
+                    policy,
                     dials: dial_tx.clone(),
                 }),
             },

@@ -153,6 +153,13 @@ int main(int argc, char** argv) {
     if (getenv("LISTEN_EMPTY")) insert(&config, "listen/endpoints", "[]");
     /* Multicast scouting off, for the rows that ask what gossip alone introduces. */
     if (getenv("SCOUTING_OFF")) insert(&config, "scouting/multicast/enabled", "false");
+    /* The gossip keys a row sets on ONE node of a trio, each as the json5 value the key takes,
+       and the node's own id (the tie-break `greater-zid` compares). */
+    if (getenv("GOSSIP_ENABLED")) insert(&config, "scouting/gossip/enabled", getenv("GOSSIP_ENABLED"));
+    if (getenv("GOSSIP_AUTOCONNECT")) insert(&config, "scouting/gossip/autoconnect", getenv("GOSSIP_AUTOCONNECT"));
+    if (getenv("GOSSIP_TARGET")) insert(&config, "scouting/gossip/target", getenv("GOSSIP_TARGET"));
+    if (getenv("GOSSIP_STRATEGY")) insert(&config, "scouting/gossip/autoconnect_strategy", getenv("GOSSIP_STRATEGY"));
+    if (getenv("NODE_ID")) insert(&config, "id", getenv("NODE_ID"));
     if (lport) {
         const char* host = getenv("LISTEN_HOST") ? getenv("LISTEN_HOST") : "127.0.0.1";
         snprintf(buf, sizeof buf, "[\"tcp/%s:%d\"]", host, lport);
@@ -1195,6 +1202,21 @@ fn trio(
     b_listens: bool,
     c_listens: bool,
 ) -> [Outcome; 3] {
+    trio_with([hub, b, c], [&[], &[], &[]], key, b_listens, c_listens)
+}
+
+/// [`trio`] with environment of its own for each of the three nodes (`[hub, b, c]`), which is how
+/// a gossip key is set on ONE of them: the node program turns `GOSSIP_ENABLED`,
+/// `GOSSIP_AUTOCONNECT`, `GOSSIP_TARGET`, `GOSSIP_STRATEGY` and `NODE_ID` into the config key
+/// each names.
+fn trio_with(
+    libs: [&Built; 3],
+    extra: [&[(&'static str, &'static str)]; 3],
+    key: &str,
+    b_listens: bool,
+    c_listens: bool,
+) -> [Outcome; 3] {
+    let [hub, b, c] = libs;
     let group = next_group();
     let reservation = PortReservation::pick();
     let port = reservation.port();
@@ -1210,19 +1232,21 @@ fn trio(
         delay_ms: 500,
         timeout_ms: 3000,
     };
-    let env = [("SCOUTING_OFF", "1"), ("PEERS_MID", "1")];
-    let leaf_env = |listens: bool| -> Vec<(&str, &str)> {
-        let mut env = env.to_vec();
+    let env_of = |listens: bool,
+                  own: &[(&'static str, &'static str)]|
+     -> Vec<(&'static str, &'static str)> {
+        let mut env = vec![("SCOUTING_OFF", "1"), ("PEERS_MID", "1")];
         if !listens {
             env.push(("LISTEN_EMPTY", "1"));
         }
+        env.extend_from_slice(own);
         env
     };
-    let mut hub = Node::start_with(hub, &spec("A", 6, port, 0), &env);
+    let mut hub = Node::start_with(hub, &spec("A", 6, port, 0), &env_of(true, extra[0]));
     let hub_open = hub.opened();
-    let mut b = Node::start_with(b, &spec("B", 4, 0, port), &leaf_env(b_listens));
+    let mut b = Node::start_with(b, &spec("B", 4, 0, port), &env_of(b_listens, extra[1]));
     let b_open = b.opened();
-    let mut c = Node::start_with(c, &spec("C", 4, 0, port), &leaf_env(c_listens));
+    let mut c = Node::start_with(c, &spec("C", 4, 0, port), &env_of(c_listens, extra[2]));
     let c_open = c.opened();
     [hub.finish(hub_open), b.finish(b_open), c.finish(c_open)]
 }
@@ -1319,6 +1343,266 @@ fn leaves_that_cannot_be_dialled_are_not_introduced_identically_on_wz_and_libzen
                      library does not let them do with nobody to tell them where each other is"
                 )
             }
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------------------------
+// The gossip keys: what a C session does with them. R3075.
+// ---------------------------------------------------------------------------------------------
+
+/// One node's environment, as the node program reads it: a gossip key's json5 value, or an id.
+type NodeEnv = &'static [(&'static str, &'static str)];
+
+/// What a trio prints when the two leaves met, all three holding two peers and hearing all three
+/// senders, and when they did not: each leaf heard the hub and itself and holds one peer.
+const MET: [&str; 3] = [
+    "open=0 | declare=0 senders=A,B,C dups=0 peers=2",
+    "open=0 | declare=0 senders=A,B,C dups=0 peers=2",
+    "open=0 | declare=0 senders=A,B,C dups=0 peers=2",
+];
+const APART: [&str; 3] = [
+    "open=0 | declare=0 senders=A,B,C dups=0 peers=2",
+    "open=0 | declare=0 senders=A,B dups=0 peers=1",
+    "open=0 | declare=0 senders=A,C dups=0 peers=1",
+];
+
+/// One setting of a gossip key on one node of a trio (`env` is `[hub, b, c]`), and whether the
+/// leaves still meet under it. Leaf B has a listener and leaf C has none, so the only dial there
+/// can be is C's to B, which is what a key on C changes and a key on B or the hub changes by
+/// what it lets them tell C.
+struct Setting {
+    what: &'static str,
+    env: [NodeEnv; 3],
+    met: bool,
+}
+
+/// Every setting is run twice, the real library on all three nodes first and asserted against what
+/// MEASURED on it, then with the node that carries the key on wz and the other two real. A setting
+/// that is red on the first run is a wrong measurement and says so; one that is red on the second
+/// is a wz node that does not read the key the way the real library does.
+fn run_settings(programs: &Programs, family: &str, settings: &[Setting]) {
+    for (n, setting) in settings.iter().enumerate() {
+        let key = format!("wz/gossip/keys/{family}/{n}");
+        let expect = if setting.met { MET } else { APART };
+        let (r, w) = (&programs.reference, &programs.wz);
+        let real = trio_with([r, r, r], setting.env, &key, true, false);
+        let real = real.map(|outcome| outcome.row);
+        assert_eq!(
+            real.each_ref().map(String::as_str),
+            expect,
+            "the REAL library's rows for `{}` are not what this file expects",
+            setting.what
+        );
+        // The node under test is the one that carries the setting; a setting on two nodes (the
+        // strategy rows give B and C an id each) puts both of them on wz.
+        let libs = [0usize, 1, 2].map(|i| if setting.env[i].is_empty() { r } else { w });
+        let got = trio_with(libs, setting.env, &format!("{key}/wz"), true, false);
+        let got = got.map(|outcome| outcome.row);
+        assert_eq!(
+            got.each_ref().map(String::as_str),
+            expect,
+            "§5.27 api-compat-c: with `{}` on a wz node the leaves do not do what they do on the \
+             real library; the rows are the hub's, then the dialable leaf's and the other's",
+            setting.what
+        );
+    }
+}
+
+const OFF: NodeEnv = &[("GOSSIP_ENABLED", "false")];
+const NO_AUTOCONNECT: NodeEnv = &[("GOSSIP_AUTOCONNECT", "{router:[],peer:[],client:[]}")];
+const NO_TARGET: NodeEnv = &[("GOSSIP_TARGET", "{router:[],peer:[]}")];
+
+/// THE GATE, `scouting/gossip/enabled`: a node told not to gossip sends no topology and takes in
+/// none, so with it off on the hub, on the leaf that listens or on the leaf that dials, the leaves
+/// are not introduced.
+// wz-proves: api-compat-c zenoh-c->wz partial
+#[test]
+#[ignore = "reads a zenoh-c oracle; run by run-ci Layer C1cc (which builds the matching \
+            ABI arm this needs)"]
+fn a_node_told_not_to_gossip_introduces_no_one_identically_on_wz_and_libzenohc() {
+    let Some(programs) = programs() else {
+        return;
+    };
+    run_settings(
+        &programs,
+        "enabled",
+        &[
+            Setting {
+                what: "gossip off on the hub",
+                env: [OFF, &[], &[]],
+                met: false,
+            },
+            Setting {
+                what: "gossip off on the leaf that listens",
+                env: [&[], OFF, &[]],
+                met: false,
+            },
+            Setting {
+                what: "gossip off on the leaf that dials",
+                env: [&[], &[], OFF],
+                met: false,
+            },
+        ],
+    );
+}
+
+/// THE GATE, `scouting/gossip/autoconnect` and `target`: the first is whom a node DIALS when it is
+/// told of one and the second whom it TELLS. A leaf that dials nobody does not meet the other; a
+/// hub or a listening leaf that dials nobody changes nothing, since neither had a dial to make; a
+/// hub or a listening leaf that tells nobody introduces no one, and a dialling leaf that tells
+/// nobody still hears of the other and dials it.
+// wz-proves: api-compat-c zenoh-c->wz partial
+#[test]
+#[ignore = "reads a zenoh-c oracle; run by run-ci Layer C1cc (which builds the matching \
+            ABI arm this needs)"]
+fn a_nodes_autoconnect_and_target_decide_whom_it_dials_and_tells_identically_on_wz_and_libzenohc() {
+    let Some(programs) = programs() else {
+        return;
+    };
+    run_settings(
+        &programs,
+        "reach",
+        &[
+            Setting {
+                what: "autoconnect empty on the leaf that dials",
+                env: [&[], &[], NO_AUTOCONNECT],
+                met: false,
+            },
+            Setting {
+                what: "autoconnect empty on the hub",
+                env: [NO_AUTOCONNECT, &[], &[]],
+                met: true,
+            },
+            Setting {
+                what: "autoconnect empty on the leaf that listens",
+                env: [&[], NO_AUTOCONNECT, &[]],
+                met: true,
+            },
+            Setting {
+                what: "target empty on the hub",
+                env: [NO_TARGET, &[], &[]],
+                met: false,
+            },
+            Setting {
+                what: "target empty on the leaf that listens",
+                env: [&[], NO_TARGET, &[]],
+                met: false,
+            },
+            Setting {
+                what: "target empty on the leaf that dials",
+                env: [&[], &[], NO_TARGET],
+                met: true,
+            },
+        ],
+    );
+}
+
+/// THE GATE, `scouting/gossip/autoconnect_strategy`: under `greater-zid` only the node whose id
+/// is the greater dials, so the leaf that dials reaches the other when its id is the greater and
+/// does not when it is the lesser; `always` dials either way.
+// wz-proves: api-compat-c zenoh-c->wz partial
+#[test]
+#[ignore = "reads a zenoh-c oracle; run by run-ci Layer C1cc (which builds the matching \
+            ABI arm this needs)"]
+fn the_autoconnect_strategy_decides_which_end_dials_identically_on_wz_and_libzenohc() {
+    let Some(programs) = programs() else {
+        return;
+    };
+    const GREATER: &str = "{router:\"greater-zid\",peer:\"greater-zid\",client:\"greater-zid\"}";
+    const ALWAYS: &str = "{router:\"always\",peer:\"always\",client:\"always\"}";
+    run_settings(
+        &programs,
+        "strategy",
+        &[
+            Setting {
+                what: "greater-zid, the dialling leaf's id the greater",
+                env: [
+                    &[],
+                    &[("NODE_ID", "\"2\"")],
+                    &[("NODE_ID", "\"3\""), ("GOSSIP_STRATEGY", GREATER)],
+                ],
+                met: true,
+            },
+            Setting {
+                what: "greater-zid, the dialling leaf's id the lesser",
+                env: [
+                    &[],
+                    &[("NODE_ID", "\"3\"")],
+                    &[("NODE_ID", "\"2\""), ("GOSSIP_STRATEGY", GREATER)],
+                ],
+                met: false,
+            },
+            Setting {
+                what: "always, the dialling leaf's id the lesser",
+                env: [
+                    &[],
+                    &[("NODE_ID", "\"3\"")],
+                    &[("NODE_ID", "\"2\""), ("GOSSIP_STRATEGY", ALWAYS)],
+                ],
+                met: true,
+            },
+        ],
+    );
+}
+
+/// THE GATE, a target that names `client`: the open of a peer whose gossip target includes the
+/// role is REFUSED, `-4`, by the real library (`"client" is not allowed as gossip target`), and by
+/// wz; a target that names only routers and peers opens, as does one that is empty.
+// wz-proves: api-compat-c zenoh-c->wz partial
+#[test]
+#[ignore = "reads a zenoh-c oracle; run by run-ci Layer C1cc (which builds the matching \
+            ABI arm this needs)"]
+fn a_gossip_target_that_names_clients_fails_the_open_identically_on_wz_and_libzenohc() {
+    let Some(programs) = programs() else {
+        return;
+    };
+    let open_of = |built: &Built, key: &str, target: &'static str| -> String {
+        let group = next_group();
+        let mut node = Node::start_with(
+            built,
+            &Spec {
+                mode: "peer",
+                listen: 0,
+                connect: 0,
+                key,
+                secs: 1,
+                tag: "Y",
+                group: &group,
+                delay_ms: 500,
+                timeout_ms: 3000,
+            },
+            &[("SCOUTING_OFF", "1"), ("GOSSIP_TARGET", target)],
+        );
+        let open = node.opened();
+        let outcome = node.finish(open);
+        outcome
+            .row
+            .split(" | ")
+            .next()
+            .unwrap_or_default()
+            .to_owned()
+    };
+    for (n, (target, want)) in [
+        (r#"{peer:["client"]}"#, "open=-4"),
+        (r#"{router:["router"],peer:["router","client"]}"#, "open=-4"),
+        (r#"{peer:["router","peer"]}"#, "open=0"),
+        ("{peer:[]}", "open=0"),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let key = format!("wz/gossip/target-client/{n}");
+        let real = open_of(&programs.reference, &key, target);
+        assert_eq!(
+            real, want,
+            "the REAL library's open under the target `{target}` is not what this file expects"
+        );
+        let wz = open_of(&programs.wz, &key, target);
+        assert_eq!(
+            wz, want,
+            "§5.27 api-compat-c: a wz peer's open under the gossip target `{target}` is not the \
+             real library's"
         );
     }
 }

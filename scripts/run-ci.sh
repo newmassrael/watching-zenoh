@@ -20118,6 +20118,40 @@ layer_c1cc_api_compat_c() {
         --test-threads=1 \
         --exact leaves_that_cannot_be_dialled_are_not_introduced_identically_on_wz_and_libzenohc \
         || return 1
+    # R3075 -- the gossip keys a C session reads: `scouting/gossip/enabled`, `target`,
+    # `autoconnect` and `autoconnect_strategy`, each set on ONE node of the same hub-and-two-leaves
+    # trio, the real library on all three first and asserted against what MEASURED on it, then the
+    # node that carries the key on wz. Twelve settings in three rows (gossip off on each of the
+    # three nodes; an empty autoconnect and an empty target on each; the strategy under both
+    # orderings of the two ids), and the open that a target naming `client` must fail with -4.
+    _runci_guarded_test \
+        "C1cc a_node_told_not_to_gossip_introduces_no_one_identically_on_wz_and_libzenohc" 1 \
+        cargo test -p wz-integration-tests \
+        --test zenoh_c_scouting_twice_and_diff -- --ignored --quiet \
+        --test-threads=1 \
+        --exact a_node_told_not_to_gossip_introduces_no_one_identically_on_wz_and_libzenohc \
+        || return 1
+    _runci_guarded_test \
+        "C1cc a_nodes_autoconnect_and_target_decide_whom_it_dials_and_tells_identically_on_wz_and_libzenohc" 1 \
+        cargo test -p wz-integration-tests \
+        --test zenoh_c_scouting_twice_and_diff -- --ignored --quiet \
+        --test-threads=1 \
+        --exact a_nodes_autoconnect_and_target_decide_whom_it_dials_and_tells_identically_on_wz_and_libzenohc \
+        || return 1
+    _runci_guarded_test \
+        "C1cc the_autoconnect_strategy_decides_which_end_dials_identically_on_wz_and_libzenohc" 1 \
+        cargo test -p wz-integration-tests \
+        --test zenoh_c_scouting_twice_and_diff -- --ignored --quiet \
+        --test-threads=1 \
+        --exact the_autoconnect_strategy_decides_which_end_dials_identically_on_wz_and_libzenohc \
+        || return 1
+    _runci_guarded_test \
+        "C1cc a_gossip_target_that_names_clients_fails_the_open_identically_on_wz_and_libzenohc" 1 \
+        cargo test -p wz-integration-tests \
+        --test zenoh_c_scouting_twice_and_diff -- --ignored --quiet \
+        --test-threads=1 \
+        --exact a_gossip_target_that_names_clients_fails_the_open_identically_on_wz_and_libzenohc \
+        || return 1
     _runci_guarded_test \
         "C1cc an_advanced_subscriber_of_the_publishers_own_session_hears_it_on_wz_and_libzenohc" 1 \
         cargo test -p wz-integration-tests \

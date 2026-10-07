@@ -351,7 +351,7 @@ pub unsafe extern "C" fn z_open(
                 // behaviour it had (see `SessionResources::initial_interest`).
                 initial_interest: false,
                 // zenoh-pico has no gossip: its peers are introduced by scouting alone.
-                gossip: false,
+                gossip: None,
             },
         ) {
             Ok(state) => {

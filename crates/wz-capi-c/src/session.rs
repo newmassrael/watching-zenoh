@@ -15,6 +15,7 @@ use wz_capi_core::drive::{
 };
 use wz_capi_core::faces::{no_shm_clients, OpenShmClients};
 use wz_capi_core::scouting_node::ScoutingPlan;
+use wz_runtime_tokio::gossip_plane::GossipPolicy;
 use wz_runtime_tokio::node_clock::TimestampingEnabled;
 use wz_runtime_tokio::retry_period::RetryPolicy;
 use wz_runtime_tokio::session::LocalDeliveryDrain;
@@ -309,6 +310,26 @@ pub(crate) unsafe fn open_session(
             Err(_) => return Z_EINVAL,
         };
 
+        // How the session gossips, from the four `scouting/gossip` keys a C session reads, or
+        // nothing when its config turns gossip off. A client has no gossip to configure (it is
+        // no peer hat), so its rows are not read. A config whose target for this node's role
+        // names `client` fails the OPEN, as the real library's does with `-4`
+        // (`"client" is not allowed as gossip target`); it is not a config the reader refuses.
+        //
+        // R3075 -- before this the session gossiped under the shipped policy whatever the
+        // config said.
+        let gossip = if whatami == WhatAmI::Client {
+            None
+        } else {
+            match node.as_ref().map_or_else(
+                || Ok(Some(GossipPolicy::shipped(whatami))),
+                |node| GossipPolicy::resolve(node, whatami),
+            ) {
+                Ok(policy) => policy,
+                Err(_) => return Z_ENETWORK,
+            }
+        };
+
         // A config that states no endpoint to DIAL. Measured on the real library: a client with
         // nothing to dial and nothing to scout for fails its open whether or not it states a
         // listener (zenoh's `start_client` bails "No peer specified and multicast scouting
@@ -360,10 +381,10 @@ pub(crate) unsafe fn open_session(
             // Final, and the open of a zenoh peer that dials this one waits for it.
             initial_interest: true,
             // R3074 -- and zenoh-c's peer gossips by default, its config's gossip switch being on
-            // unless it says otherwise (which this ABI does not read yet): it tells a node it
-            // meets which nodes it knows and where they are, and dials the nodes it is told of,
-            // which is how two peers that each reached a third meet.
-            gossip: true,
+            // unless it says otherwise: it tells a node it meets which nodes it knows and where
+            // they are, and dials the nodes it is told of, which is how two peers that each
+            // reached a third meet. R3075 -- under the policy its config states.
+            gossip,
         };
         // R3065 -- a session opened over a client storage advertises the protocols of THAT
         // reader: the stance takes both from the one set, so the list a peer's sender reads is
