@@ -338,6 +338,10 @@ mod tests {
         let mut bus = Bus::with_phy(1);
         bus.regs[reg::ANLPAR as usize] = ABILITY_100_FULL | ABILITY_10_FULL;
         assert_eq!(negotiated(&mut bus, 1), Ok(None), "no link yet");
+        assert_eq!(
+            bus.reads, 2,
+            "the status was read twice and nothing past it while there is no link"
+        );
         bus.link = true;
         assert_eq!(
             negotiated(&mut bus, 1),
@@ -345,6 +349,11 @@ mod tests {
                 speed_100: true,
                 full_duplex: true
             }))
+        );
+        assert_eq!(
+            bus.reads,
+            2 + 4,
+            "with a link it also read our abilities and the partner's"
         );
     }
 
@@ -363,6 +372,14 @@ mod tests {
             })),
             "the second read is the present state"
         );
+        assert!(
+            !bus.latched_down,
+            "the first status read consumed the latch the double was told to hold"
+        );
+        assert_eq!(
+            bus.reads, 4,
+            "two status reads, then our abilities and the partner's"
+        );
     }
 
     #[test]
@@ -371,6 +388,10 @@ mod tests {
         bus.link = true;
         bus.regs[reg::ANLPAR as usize] = 0;
         assert_eq!(negotiated(&mut bus, 1), Err(LinkError::UnresolvedMode));
+        assert_eq!(
+            bus.reads, 4,
+            "it read both abilities before it refused, so the refusal is the code's own"
+        );
     }
 
     #[test]
