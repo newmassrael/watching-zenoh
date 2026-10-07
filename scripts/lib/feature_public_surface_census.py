@@ -407,6 +407,21 @@ OFF_AXIS: dict[str, tuple[str, frozenset[str]]] = {
             }
         ),
     ),
+    # R3075 — the MCU session shell, split out of `wz-session-lwip` so a board
+    # on another network stack does not carry lwIP. It brings its features with
+    # it: `adminspace-write` and `adminspace-core` gate the node's `pub mod`s
+    # exactly as they gated them in the lwIP crate (which now forwards both),
+    # and `test-support` exposes the in-memory network for a sibling crate's
+    # tests. Its consumers are that crate and MCU firmware images built with a
+    # fixed feature set, not a library a Rust caller adds a feature to and then
+    # reaches into. Held to `AXIS_REACHABLE` below, not to prose: the axis has
+    # not been extended to this package, which is a decision about
+    # `feature_gate_diagnostic` and not a sentence about this crate.
+    "wz-session-mcu": (
+        "the MCU session shell; its consumers are the lwip session crate and "
+        "MCU firmware images built with a fixed feature set",
+        frozenset({"adminspace-core", "adminspace-write", "test-support"}),
+    ),
     "wz-tls-record": (
         "`publish = false`, and the only workspace edge that turns `fixtures` "
         "on is a `dev-dependency`; no feature definition anywhere in this "
@@ -722,6 +737,11 @@ AXIS_REACHABLE: dict[str, frozenset[str]] = {
     # at all. None is a simple crate-root item, so none is a shape the
     # derivation could have named.
     "wz-link-lwip": frozenset({"buffer-pool-session-rx-slim", "test-support"}),
+    # R3075 — the MCU session shell. Its row is the same three features the
+    # derivation either names (a crate-root `pub mod`) or reads as compound
+    # (`any(test, feature = ..)`, `all(core, write)`), which is the second
+    # clause's subject; the row is excused only while that stays true.
+    "wz-session-mcu": frozenset({"adminspace-core", "adminspace-write", "test-support"}),
     "wz-runtime-core": frozenset({"alloc"}),
     "wz": frozenset(
         {
