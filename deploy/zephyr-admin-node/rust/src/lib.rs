@@ -66,6 +66,14 @@ const STACK_CHECK_MS: u64 = 250;
 /// the `ZephyrClock` timebase.
 const TICK_HZ: u32 = wz::runtime_zephyr::tick_hz_from_build!();
 
+/// Milliseconds since boot by the kernel's own tick count. Stage lines carry it so
+/// that a bench can set it against a wall clock, which is the one check of the
+/// board's time base that needs no instrument.
+#[cfg(feature = "mac-cyt4bf")]
+fn uptime_ms() -> u64 {
+    ZephyrClock::<TICK_HZ>.now_us() / 1000
+}
+
 /// The port the node listens on: zenoh's default.
 const LISTEN_PORT: u16 = 7447;
 
@@ -236,15 +244,24 @@ compile_error!(
 #[cfg(all(feature = "spi-probe", not(feature = "mac-cyt4bf")))]
 compile_error!("the SPI probe is the CYT4BF kit's: it needs the `mac-cyt4bf` feature's board");
 
-/// Read the TC6 identity registers of whatever is plugged into the kit's MikroBUS
-/// socket and log them. Read-only: two control reads, `OA_ID` (the interface
-/// version) and `OA_PHYID` (the PHY's vendor, model and revision), which every TC6
-/// device has at the same addresses, so this works on a chip nothing here knows.
+/// Read the identity registers of whatever is plugged into the kit's MikroBUS
+/// socket and log them. Read-only: three control reads. `OA_ID` (the interface
+/// version) and `OA_PHYID` (the PHY's vendor, model and revision) are the standard
+/// registers every TC6 device has at the same addresses, so those two work on a
+/// chip nothing here knows.
+///
+/// The third, `DEVID`, is the LAN8650/1's own and means nothing on another chip
+/// (the line says only what was read). It is there because `OA_PHYID` cannot do
+/// the job it appears to: on the LAN8650/1 it reflects the integrated PHY's
+/// clause 22 ID, so it names neither the product nor its silicon revision (the
+/// errata, item s1). The register that does is `DEVID`, memory map selector 10,
+/// address 0x0094: `MODEL` in bits 19:4 (0x8650 is the LAN8650, 0x8651 the
+/// LAN8651) and `REV` in bits 3:0 (1 is product revision B0, 2 is B1).
 ///
 /// What a lab does with it: plug the expansion board in, flash this, and read the
-/// two lines. A device that answers gives its identity; one that does not gives
-/// the way it did not (a read of all zeros or all ones is a bus nobody drives, a
-/// header echo that does not match is a device that is not speaking the interface).
+/// lines. A device that answers gives its identity; one that does not gives the way
+/// it did not (a read of all zeros or all ones is a bus nobody drives, a header
+/// echo that does not match is a device that is not speaking the interface).
 /// Either is a fact about the board that no document had to supply.
 ///
 /// SPI mode 0 and eight-bit elements are how Zephyr's own TC6 chip driver opens its
@@ -254,11 +271,15 @@ compile_error!("the SPI probe is the CYT4BF kit's: it needs the `mac-cyt4bf` fea
 #[cfg(feature = "spi-probe")]
 fn probe_tc6() {
     use wz::runtime_zephyr::u32_from_build;
-    use wz_oa_tc6::proto::std_reg;
+    use wz_oa_tc6::proto::{std_reg, Reg};
     use wz_oa_tc6::{ChunkSize, Tc6};
     use wz_spi_scb::SpiMode;
 
     const PROBE_HZ: u32 = u32_from_build!("WZ_SPI_PROBE_HZ");
+    /// `DEVID` of the LAN8650/1 (data sheet DS60001734, register description
+    /// "Device Identification"; errata DS80001075 item s1 names the address and
+    /// the memory map selector).
+    const LAN865X_DEVID: Reg = Reg::new(10, 0x0094);
 
     let (spi, rate) = match spi_cyt4bf::open(SpiMode::Mode0, PROBE_HZ) {
         Ok(opened) => opened,
@@ -278,6 +299,18 @@ fn probe_tc6() {
             Err(why) => log_line(format!("wz: spi probe: {name} not read: {why:?}")),
         }
     }
+    match tc6.reg_read(LAN865X_DEVID) {
+        Ok(value) => log_line(format!(
+            "wz: spi probe: DEVID = {value:#010x} (MODEL {:#06x}, REV {})",
+            (value >> 4) & 0xFFFF,
+            value & 0xF
+        )),
+        Err(why) => log_line(format!("wz: spi probe: DEVID not read: {why:?}")),
+    }
+    log_line(format!(
+        "wz: spi probe: done (kernel uptime {} ms)",
+        uptime_ms()
+    ));
 }
 
 /// Bring the board's network up and run the node over it.

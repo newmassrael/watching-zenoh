@@ -9,8 +9,12 @@
 //! link changes. The pins' routing and drive settings are C (the PDL's GPIO
 //! driver, in `boards/<board>/`), run before the MAC is touched.
 //!
-//! Claim: this path is BUILT. No emulator carries the block, so nothing here has
-//! run on a CYT4BF.
+//! Claim: this path is BUILT. No emulator carries the block. The first boot on a
+//! CYT4BF printed its station address and the probe's lines and then nothing for
+//! 100 seconds, with the core running and idle and no fault, so how far this path
+//! gets there is not yet known: the stage lines below, each with the kernel's own
+//! uptime, are what says. A bench reads them beside a wall clock; the two agree
+//! only if the kernel's time base is what the build assumed.
 
 use alloc::format;
 use core::ffi::CStr;
@@ -94,6 +98,17 @@ fn describe(mode: LinkMode) -> &'static str {
     }
 }
 
+/// One console line saying which step of the bring-up is starting or has ended,
+/// with the kernel's uptime. The uptime is the point: it is the kernel's own count
+/// of how long boot has taken, so a bench that timestamps the console sees at once
+/// whether the kernel's second is the wall clock's second.
+fn stage(what: &str) {
+    log_line(format!(
+        "wz: eth0: {what} (kernel uptime {} ms)",
+        crate::uptime_ms()
+    ));
+}
+
 /// Bring ETH0 up: pins, MAC, PHY, and a link if one comes within `link_wait_ms`.
 ///
 /// A missing link is NOT a failure: the node starts and the loop's link service
@@ -104,6 +119,7 @@ pub fn open(
     ref_clock: RefClock,
     link_wait_ms: u32,
 ) -> Result<T2gMac, &'static CStr> {
+    stage("routing ETH0's pins");
     // SAFETY: the board's pin routing function, with no arguments.
     if unsafe { wz_board_eth_pins_init() } != 0 {
         return Err(c"wz: FAIL - the board could not route ETH0's pins");
@@ -129,7 +145,12 @@ pub fn open(
         }
         wz_eth_mac_cyt4bf::InitError::RingTooSmall => c"wz: FAIL - a descriptor ring is too small",
     })?;
-    match inner.bring_up_link(link_wait_ms.saturating_mul(1000)) {
+    stage(&format!(
+        "MAC initialised; finding the PHY, then waiting up to {link_wait_ms} ms for a link"
+    ));
+    let outcome = inner.bring_up_link(link_wait_ms.saturating_mul(1000));
+    stage("link bring-up returned");
+    match outcome {
         Ok(mode) => log_line(format!("zephyr-admin-node: link up, {}", describe(mode))),
         Err(LinkError::NoLink) => {
             log(c"zephyr-admin-node: no link yet; the node starts and waits for one")
