@@ -3260,6 +3260,7 @@ jobs:
         with:
           workspaces: |
             deploy/zephyr-app/rust -> target
+            deploy/zephyr-admin-node/rust -> target
 
       - name: Layer Qz — Zephyr west build + QEMU boot e2e
         # The lane sources ~/zephyrproject/.venv itself for the west build; the
@@ -3273,6 +3274,180 @@ jobs:
           # shellcheck source=/dev/null  # provisioned by the venv step above
           . ~/zephyrproject/.venv/bin/activate
           bash scripts/run-ci.sh --layer Qz
+
+      - name: Layer Qzb — every BUILT board of the Zephyr table builds
+        # R3075. The rows of deploy/zephyr-boards.json graded BUILT or HARDWARE,
+        # each `west build`t for its own board. Nothing boots: a board with no
+        # emulator can only be built, and that is exactly what BUILT claims.
+        # WZ_QZ_REQUIRE=1 for the reason Layer Qz arms it.
+        env:
+          WZ_QZ_REQUIRE: "1"
+        run: |
+          # shellcheck source=/dev/null  # provisioned by the venv step above
+          . ~/zephyrproject/.venv/bin/activate
+          bash scripts/run-ci.sh --layer Qzb
+
+  # R3075 — the Zephyr ADMIN NODE under a stock zenohd (Layer
+  # Qza). `zephyr-mcu` above has the Zephyr toolchain and no zenohd; `cross-mcu`
+  # has QEMU and zenohd and no Zephyr; this job takes the Zephyr provisioning
+  # `zephyr-mcu` carries (the SAME cache key, so whichever job runs first warms
+  # it for the other) and the zenohd `interop` publishes, as `cross-mcu` does.
+  # Lane logic stays in scripts/run-ci.sh (R65b SSOT).
+  #
+  # The provisioning steps are a COPY of `zephyr-mcu`'s, not a shared composite
+  # action: Layer U (`upstream_release_distance.py`) derives the Zephyr pin from
+  # the `ZEPHYR_REF` env literal and the `git clone` + `checkout "$ZEPHYR_REF"`
+  # beside it in THIS file, and a composite action would move both out of its
+  # sight. The two env literals are required to agree by that same reading.
+  zephyr-admin:
+    name: Zephyr admin node vs a stock zenohd (Layer Qza)
+    runs-on: ubuntu-22.04
+    timeout-minutes: 60
+    # AFTER `interop`, for the reason `cross-mcu` is: the zenohd oracle is a run
+    # artifact that job publishes mid-job. `!cancelled()` so an interop red does
+    # not take down the Zephyr build with it; the download step then fails, which
+    # is the truth (there is no oracle) rather than a stale restore.
+    needs: [interop]
+    if: ${{ !cancelled() }}
+    env:
+      # The same pair `zephyr-mcu` pins (see its comment); Layer U requires the
+      # two literals to agree.
+      ZEPHYR_REF: daad7c59b8ebd8db8d08c2749802ac74f971eb2a
+      ZEPHYR_SDK_VERSION: "1.0.1"
+    steps:
+      - name: Checkout (with submodules)
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Restore apt archives (R311y882 — keep the mirror off the path)
+        # See `zephyr-mcu`: the apt archive cache is keyed per JOB, restored and
+        # saved as separate steps, and the save runs `always()`.
+        id: apt-archives
+        uses: actions/cache/restore@v4
+        with:
+          path: ~/.cache/wz-apt
+          key: apt-${{ runner.os }}-${{ github.job }}-${{ hashFiles('.github/workflows/ci.yml') }}
+          restore-keys: |
+            apt-${{ runner.os }}-${{ github.job }}-
+
+      - name: Install system dependencies
+        # The set `zephyr-mcu` installs: cmake/ninja/dtc drive west, libclang and
+        # clang serve the wz *-sys build scripts, gcc-arm-none-eabi + newlib are
+        # the cross cc the facade's lwip-sys edge looks for, qemu-system-arm boots
+        # the image, xz-utils unpacks the SDK tarballs.
+        run: |
+          bash scripts/lib/apt-install.sh \
+            cmake ninja-build device-tree-compiler \
+            libclang-dev clang pkg-config \
+            gcc-arm-none-eabi libnewlib-arm-none-eabi \
+            qemu-system-arm xz-utils
+
+      - name: Save apt archives
+        if: always() && env.WZ_APT_CACHE_DIRTY == 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: ~/.cache/wz-apt
+          key: ${{ steps.apt-archives.outputs.cache-primary-key }}-${{ github.run_id }}
+
+      - name: Install Rust toolchain + thumb targets (pinned by rust-toolchain.toml)
+        run: rustup show
+
+      - name: Set up Python 3.12 (Zephyr main requires >= 3.12)
+        id: setuppy
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Restore Zephyr workspace + SDK cache
+        # The key `zephyr-mcu` uses, character for character: it names every
+        # input the cached tree depends on, the resolved Python among them.
+        id: zephyr-cache
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            ~/zephyrproject
+            ~/zephyr-sdk-${{ env.ZEPHYR_SDK_VERSION }}
+            ~/.cmake/packages/Zephyr-sdk
+          key: zephyr-${{ env.ZEPHYR_REF }}-sdk-${{ env.ZEPHYR_SDK_VERSION }}-py${{ steps.setuppy.outputs.python-version }}-v4
+
+      - name: Provision Zephyr (west + pinned source + SDK)
+        if: steps.zephyr-cache.outputs.cache-hit != 'true'
+        # See `zephyr-mcu` for why the SDK install is authenticated and why a warm
+        # cache skips this step.
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          python3.12 -m venv ~/zephyrproject/.venv
+          # shellcheck source=/dev/null  # created by the venv line above
+          . ~/zephyrproject/.venv/bin/activate
+          python -m pip install --upgrade pip
+          pip install west tqdm
+          git clone --filter=blob:none https://github.com/zephyrproject-rtos/zephyr ~/zephyrproject/zephyr
+          git -C ~/zephyrproject/zephyr fetch --filter=blob:none origin "$ZEPHYR_REF"
+          git -C ~/zephyrproject/zephyr checkout "$ZEPHYR_REF"
+          cd ~/zephyrproject
+          west init -l zephyr
+          west update --narrow -o=--depth=1
+          west zephyr-export
+          pip install -r zephyr/scripts/requirements-base.txt
+          west sdk install -t arm-zephyr-eabi \
+            --personal-access-token "$GITHUB_TOKEN"
+          west list
+
+      - name: Verify Zephyr provisioning (catch a partial cache / failed provision)
+        # RUN the venv's tools; do not stat them (R311y892).
+        run: |
+          set -e
+          ~/zephyrproject/.venv/bin/python --version
+          ~/zephyrproject/.venv/bin/west --version
+          test -d ~/zephyrproject/zephyr/boards
+          test -d ~/.cmake/packages/Zephyr-sdk
+          find ~/zephyr-sdk-"${ZEPHYR_SDK_VERSION}" -name arm-zephyr-eabi-gcc -type f \
+            | grep -q . || { echo "arm-zephyr-eabi toolchain missing in SDK"; exit 1; }
+          echo "Zephyr provisioning verified (venv RUNS + zephyr tree + SDK arm toolchain)."
+
+      - name: Save Zephyr workspace + SDK cache
+        if: success() && steps.zephyr-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            ~/zephyrproject
+            ~/zephyr-sdk-${{ env.ZEPHYR_SDK_VERSION }}
+            ~/.cmake/packages/Zephyr-sdk
+          key: zephyr-${{ env.ZEPHYR_REF }}-sdk-${{ env.ZEPHYR_SDK_VERSION }}-py${{ steps.setuppy.outputs.python-version }}-v4
+
+      - name: Cache Cargo registry + build artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            deploy/zephyr-admin-node/rust -> target
+
+      - name: Download the zenohd oracle (the interop job's run artifact)
+        # The carrier `cross-mcu` takes: the run artifact, not a cache entry.
+        # When `interop` never reached its publish step there is nothing to
+        # download and this step fails, which is the truth.
+        uses: actions/download-artifact@v4
+        with:
+          name: zenohd-oracle
+          path: ${{ runner.temp }}
+
+      - name: Unpack zenohd
+        run: tar -xf "$RUNNER_TEMP/zenohd-oracle.tar"
+
+      - name: Layer Qza — a stock zenohd reconfigures the Zephyr admin node
+        # Both flags: WZ_QZ_REQUIRE for the Zephyr toolchain and QEMU, WZ_QA_REQUIRE
+        # for zenohd and its REST plugin. This job provisions all of them, so a
+        # missing one is a regression, not a SKIP. The pin gate first: a restored
+        # oracle is graded before anything is concluded from it.
+        env:
+          WZ_QZ_REQUIRE: "1"
+          WZ_QA_REQUIRE: "1"
+        run: |
+          python3 scripts/lib/oracle_pin_gate.py --check
+          # shellcheck source=/dev/null  # provisioned by the venv step above
+          . ~/zephyrproject/.venv/bin/activate
+          bash scripts/run-ci.sh --layer Qza
 
   # R311y11 — macOS + Windows NATIVE portability check of the wz AP stack.
   # The Linux `ci` job above cannot catch target_os-routed regressions: the

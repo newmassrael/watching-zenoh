@@ -217,9 +217,12 @@ BUDGET = {
     # ratchet is what made the removal compulsory rather than optional: with
     # the arm in and the row still at 3, this gate went red in the OTHER
     # direction and named the number to write.
-    # `west build` -- a shell command of the Zephyr toolchain. Two bare words,
-    # so the EXPRESSION arm refuses it by shape and no arm owns it yet.
-    "apt_package_census.py": 1,
+    # R3075 — `apt_package_census.py` LEFT this table. Its one citation was
+    # `west build`, a shell command of the Zephyr toolchain, two bare words that
+    # the EXPRESSION arm refused by shape. The gate MEASURED 0 unresolved against
+    # the budget of 1 once the `zephyr-admin` job joined that file's Zephyr rows,
+    # and named the number to write; no arm was added, so this is the ratchet
+    # turning on a measurement and not an arm that resolves the shape.
     # R2216 — `discard_site_lint.py` LEFT this table: `#[must_use] Discarded`
     # and its sibling are Rust EXPRESSIONS, and the arm that decomposes one
     # into identifiers resolves both.

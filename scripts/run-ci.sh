@@ -3368,6 +3368,12 @@ layer_c0_test_discipline() {
     # every Layer E/Z leg. The gate derives the members from the workflows.
     python3 scripts/lib/workflow_cache_save_gate.py --selftest || return 1
     python3 scripts/lib/workflow_cache_save_gate.py || return 1
+    # R3075 — the Zephyr board table and what its grades may claim. The refusal
+    # arms run first on fixtures; the real table is then read against the
+    # per-board settings, this file's lanes and the hosted jobs. Layer Qzb builds
+    # exactly the rows this gate says are BUILT or HARDWARE.
+    python3 scripts/lib/zephyr_board_table_gate.py --selftest || return 1
+    python3 scripts/lib/zephyr_board_table_gate.py || return 1
     # R2162 (unregistered open-debt item 199) — the upstream zenoh CAPABILITY
     # FEATURE surface as a denominator. Item 199 recorded "18 of 19 have a wz
     # atom" as a hand measurement and nothing re-derived it afterwards, so a
@@ -10532,9 +10538,35 @@ layer_c1q_multicast_glue() {
 # unconditional like the module's other two, so it lands in all thirteen. Each
 # new value is the one `guarded_count_gate.py --range` PRINTED for that leg.
 layer_c1m_session_lwip() {
-    _runci_guarded_test "C1m default" 3 \
+    # R3075 — the stack-neutral shell (`wz-session-mcu`) holds the application
+    # layer, the admin node, the connection manager and the dialer, and the
+    # tests that exercise them on the in-memory `SessionLinks` network. They
+    # moved out of `wz-session-lwip` with the code, so the legs below that name
+    # the lwIP crate count only what stayed (the three session_drive tests, the
+    # lwIP links tests and the multicast drive). Each shell leg mirrors the
+    # feature set of the lwIP leg it replaces; every number is the one its own
+    # run PRINTED: shell 3 / 4 / 12 / 5 / 20, lwIP 4 / 4 / 4 / 5 / 4 / 5 below.
+    # The in-memory network's three tests run in every shell leg (one of them
+    # new), and the admin node's two in the last alone (it needs both adminspace
+    # features). The lwIP links' bind test runs in every lwIP leg,
+    # which is why the multicast legs moved by one with it; its handshake test
+    # runs a real session, so it exists only where the write surface compiles the
+    # handshake in (`adminspace-write`).
+    _runci_guarded_test "C1m mcu default" 3 \
+        cargo test -p wz-session-mcu --quiet || return 1
+    _runci_guarded_test "C1m mcu unicast app layer" 4 \
+        cargo test -p wz-session-mcu \
+        --features query-queryable,codec-response,codec-response-final,pubsub-put \
+        --quiet || return 1
+    _runci_guarded_test "C1m mcu adminspace-write" 12 \
+        cargo test -p wz-session-mcu --features adminspace-write --quiet || return 1
+    _runci_guarded_test "C1m mcu adminspace-core" 5 \
+        cargo test -p wz-session-mcu --features adminspace-core --quiet || return 1
+    _runci_guarded_test "C1m mcu adminspace read+write" 20 \
+        cargo test -p wz-session-mcu --features adminspace-core,adminspace-write --quiet || return 1
+    _runci_guarded_test "C1m default" 4 \
         cargo test -p wz-session-lwip --quiet || return 1
-    _runci_guarded_test "C1m reassembly" 3 \
+    _runci_guarded_test "C1m reassembly" 4 \
         cargo test -p wz-session-lwip --features reassembly --quiet || return 1
     # R2827 — the UNICAST application layer: `app_layer::dispatch_to` wires the
     # session drive's events into the observer and drains replies through the
@@ -10543,6 +10575,8 @@ layer_c1m_session_lwip() {
     # below are all multicast). 3 = the two unconditional session_drive tests
     # + `a_push_reaches_its_subscriber_and_a_reply_leaves_on_the_session`,
     # the number this command PRINTED.
+    # R3075 4 -> 4: the application-layer test moved to the shell crate and the
+    # lwIP links' bind test arrived, beside the three session_drive tests.
     _runci_guarded_test "C1m unicast app layer" 4 \
         cargo test -p wz-session-lwip \
         --features query-queryable,codec-response,codec-response-final,pubsub-put \
@@ -10556,7 +10590,10 @@ layer_c1m_session_lwip() {
     # R2831 6 -> 9: the exhausted-dial wait, and `lwip_dialer`'s two (what is
     # dialable, and a dial that completes a real loopback handshake).
     # R2841 9 -> 10: a group of one is dialled, a group of several refused.
-    _runci_guarded_test "C1m adminspace-write" 11 \
+    # R3075 11 -> 5: the admin host, connection manager and dialer tests moved
+    # to the shell crate; the three session_drive tests stay and the lwIP links'
+    # two tests (the bind, and the handshake) arrived.
+    _runci_guarded_test "C1m adminspace-write" 5 \
         cargo test -p wz-session-lwip --features adminspace-write --quiet || return 1
     # R2829 — the node ANSWERS upstream's admin GET (`admin_status`) through
     # the shared `answer_admin_query`. Alone: 2 + the lwIP GET test = 3. With
@@ -10564,7 +10601,9 @@ layer_c1m_session_lwip() {
     # pubsub-put) + `admin_host`'s two, one of which reads the control back
     # as the `config` leg's view = 6. Both numbers PRINTED by the command.
     # R2846 3 -> 4: the `status/connect` document test.
-    _runci_guarded_test "C1m adminspace-core" 5 \
+    # R3075 5 -> 4: the admin status and host tests moved to the shell crate,
+    # leaving the three session_drive tests and the lwIP links' bind test.
+    _runci_guarded_test "C1m adminspace-core" 4 \
         cargo test -p wz-session-lwip --features adminspace-core --quiet || return 1
     # R2830 6 -> 9: the same three `connect_manager` tests.
     # R2831 9 -> 12: the same three R2831 tests.
@@ -10572,7 +10611,9 @@ layer_c1m_session_lwip() {
     # R2841 13 -> 14: the same group test.
     # R2846 14 -> 16: the `status/connect` document test and the last-write
     # verdict test.
-    _runci_guarded_test "C1m adminspace read+write" 17 \
+    # R3075 17 -> 5: everything but the three session_drive tests and the lwIP
+    # links' two moved to the shell crate.
+    _runci_guarded_test "C1m adminspace read+write" 5 \
         cargo test -p wz-session-lwip --features adminspace-core,adminspace-write --quiet || return 1
     # R2390 (transport-multicast) — each `transport-multicast` leg moved by TWO:
     # the MCU loop's link-loss arm brought a witness test and an ordering test,
@@ -10590,26 +10631,39 @@ layer_c1m_session_lwip() {
     # derivation: all nine legs were RUN and each number here is the one its own
     # run PRINTED (2/2/10/11/12/11/14/10/12). That distinction is the paragraph
     # below's whole subject, and it is cheap to honour — nine runs, ~8 minutes.
-    _runci_guarded_test "C1m multicast" 11 \
+    #
+    # R3075 moved the same seven by ONE: the lwIP links' bind test carries no
+    # feature gate, so it runs in every lwIP leg. All eighteen legs of this lane
+    # were RUN and each number here is the one its own run PRINTED
+    # (12/13/14/13/16/12/14).
+    _runci_guarded_test "C1m multicast" 12 \
         cargo test -p wz-session-lwip --features transport-multicast --quiet || return 1
-    _runci_guarded_test "C1m multicast+push" 12 \
+    _runci_guarded_test "C1m multicast+push" 13 \
         cargo test -p wz-session-lwip --features transport-multicast,codec-push --quiet || return 1
-    _runci_guarded_test "C1m multicast+liveliness" 13 \
+    _runci_guarded_test "C1m multicast+liveliness" 14 \
         cargo test -p wz-session-lwip --features transport-multicast,liveliness-token --quiet || return 1
-    _runci_guarded_test "C1m multicast+queryable" 12 \
+    _runci_guarded_test "C1m multicast+queryable" 13 \
         cargo test -p wz-session-lwip \
         --features transport-multicast,query-queryable,codec-response,codec-response-final \
         --quiet || return 1
-    _runci_guarded_test "C1m multicast maximal" 15 \
+    _runci_guarded_test "C1m multicast maximal" 16 \
         cargo test -p wz-session-lwip \
         --features transport-multicast,codec-push,codec-response,codec-response-final,liveliness-token,query-queryable \
         --quiet || return 1
-    _runci_guarded_test "C1m multicast+reassembly" 11 \
+    _runci_guarded_test "C1m multicast+reassembly" 12 \
         cargo test -p wz-session-lwip --features transport-multicast,reassembly --quiet || return 1
-    _runci_guarded_test "C1m multicast+fragmentation" 13 \
+    _runci_guarded_test "C1m multicast+fragmentation" 14 \
         cargo test -p wz-session-lwip \
         --features transport-multicast,transport-fragmentation,codec-push --quiet || return 1
     (cd crates \
+        && cargo clippy -p wz-session-mcu --all-targets --quiet -- -D warnings \
+        && cargo clippy -p wz-session-mcu --all-targets \
+            --features query-queryable,codec-response,codec-response-final,pubsub-put \
+            --quiet -- -D warnings \
+        && cargo clippy -p wz-session-mcu --all-targets --features adminspace-write --quiet -- -D warnings \
+        && cargo clippy -p wz-session-mcu --all-targets --features adminspace-core --quiet -- -D warnings \
+        && cargo clippy -p wz-session-mcu --all-targets \
+            --features adminspace-core,adminspace-write --quiet -- -D warnings \
         && cargo clippy -p wz-session-lwip --all-targets --quiet -- -D warnings \
         && cargo clippy -p wz-session-lwip --all-targets --features reassembly --quiet -- -D warnings \
         && cargo clippy -p wz-session-lwip --all-targets \
@@ -10798,15 +10852,16 @@ layer_c1r_mcu_multicast_e2e() {
 # tested here the day it is excluded there. The three with dedicated lanes run
 # again at their defaults, which is the price of not keeping a second list.
 #
-# Guarded for the one member no other lane reaches: its lib holds 3 tests
-# (measured R2948), and a cfg slip that emptied them would still exit 0.
+# Guarded for the one member no other lane reaches: its lib holds 6 tests
+# (3 at R2948, plus the three const-parse tests the board-argument macros
+# brought at R3075), and a cfg slip that emptied them would still exit 0.
 layer_c1ns_nostd_members_isolated() {
     local nostd
     nostd="$(python3 scripts/lib/nostd_workspace_members.py)" || return 1
     for member in $nostd; do
         (cd crates && cargo test -p "$member" --quiet) || return 1
     done
-    _runci_guarded_test "C1ns zephyr lib" 3 \
+    _runci_guarded_test "C1ns zephyr lib" 6 \
         cargo test -p wz-runtime-zephyr --lib --quiet || return 1
 }
 
@@ -20759,37 +20814,66 @@ _qa_unavailable() {
     return 0
 }
 
-layer_qa_mcu_admin_node_vs_zenohd() {
-    local zenohd="${WZ_ZENOHD_BIN:-$PWD/target/zenohd/zenohd}"
-    local target=thumbv7m-none-eabi
-    local fw="deploy/mcu-admin-node/target/$target/release/mcu-admin-node"
-    local node=1000055434d7a77
-    local fwd_port=17447 b_port=17448 rest_port=17800
-    local tool
-    for tool in qemu-system-arm arm-none-eabi-gcc curl python3; do
+# R3075 — the scenario is the SAME for every firmware that is a wz admin node on
+# QEMU's mps2 Ethernet: only how the image is built and booted differs. It was
+# the body of Layer Qa; Layer Qza (the Zephyr admin node) runs it too, so what a
+# stock zenohd is shown of the two firmwares cannot drift apart.
+#
+# The ports are shared because a caller's QEMU command has to name the forward.
+_QA_FWD_PORT=17447
+_QA_B_PORT=17448
+_QA_REST_PORT=17800
+
+# _qa_zenohd_prereqs <label>: what the scenario needs besides the firmware.
+# Returns 0 when everything is there, 10 when a prerequisite is absent and the
+# lane SKIPs (green), 1 when it is absent where it is required.
+_qa_zenohd_prereqs() {
+    local label="$1" zenohd="${WZ_ZENOHD_BIN:-$PWD/target/zenohd/zenohd}" tool
+    for tool in qemu-system-arm curl python3; do
         command -v "$tool" >/dev/null 2>&1 \
-            || { _qa_unavailable "Qa" "$tool not on PATH"; return $?; }
+            || { _qa_unavailable "$label" "$tool not on PATH" && return 10 || return 1; }
     done
     [[ -x "$zenohd" ]] \
-        || { _qa_unavailable "Qa" "zenohd not at $zenohd"; return $?; }
+        || { _qa_unavailable "$label" "zenohd not at $zenohd" && return 10 || return 1; }
     [[ -f "$(dirname "$zenohd")/libzenoh_plugin_rest.so" ]] \
-        || { _qa_unavailable "Qa" "the REST plugin is not beside zenohd"; return $?; }
-    rustup target list --installed | grep -qx "$target" \
-        || { _qa_unavailable "Qa" "rustup target $target absent"; return $?; }
+        || { _qa_unavailable "$label" "the REST plugin is not beside zenohd" && return 10 || return 1; }
+    return 0
+}
 
-    WZ_LWIP_PORT="$(realpath crates/lwip-sys/port/cross-test)" cargo build --release \
-        --manifest-path deploy/mcu-admin-node/Cargo.toml --target "$target" --quiet \
-        || { echo "  Qa build mcu-admin-node FAIL" >&2; return 1; }
-    echo "  Qa build mcu-admin-node $target OK"
-
+# _qa_scenario <label> <node zid hex> <ready regex, or -> <qemu command...>
+#
+# Boots the node with the given QEMU command, then runs steps 2-5 above and the
+# `status/connect` legs against it. <ready regex> is an extended regex a line of
+# the QEMU console must match before the host talks to the node (a firmware that
+# prints its own zid and locator asserts both here); `-` skips the wait for a
+# firmware that prints nothing.
+_qa_scenario() {
+    local label="$1" node="$2" ready="$3"
+    shift 3
+    local zenohd="${WZ_ZENOHD_BIN:-$PWD/target/zenohd/zenohd}"
+    local fwd_port="$_QA_FWD_PORT" b_port="$_QA_B_PORT" rest_port="$_QA_REST_PORT"
     local dir
     dir="$(mktemp -d)"
     local pids=()
-    qemu-system-arm -M mps2-an385 -cpu cortex-m3 -nographic -monitor none -serial none \
-        -semihosting-config enable=on,target=native \
-        -nic "user,model=lan9118,hostfwd=udp:127.0.0.1:$fwd_port-10.0.2.15:7447" \
-        -kernel "$fw" >"$dir/qemu.log" 2>&1 &
+    "$@" >"$dir/qemu.log" 2>&1 &
     pids+=($!)
+    if [[ "$ready" != "-" ]]; then
+        local seen=0 _
+        for _ in $(seq 1 600); do
+            if grep -qE "$ready" "$dir/qemu.log" 2>/dev/null; then seen=1; break; fi
+            kill -0 "${pids[0]}" 2>/dev/null || break
+            sleep 0.1
+        done
+        if [[ "$seen" -ne 1 ]]; then
+            echo "  ${label}.0 the node never printed its READY line (/$ready/)" >&2
+            echo "  --- qemu" >&2; cat "$dir/qemu.log" >&2
+            kill "${pids[@]}" 2>/dev/null
+            wait "${pids[@]}" 2>/dev/null
+            rm -rf "$dir"
+            return 1
+        fi
+        echo "  ${label}.0 the node's console says who and where it is — OK"
+    fi
     "$zenohd" --no-multicast-scouting -l "udp/127.0.0.1:$b_port" \
         --cfg='id:"bbbbbbbbbbbbbbbb"' >"$dir/zenohd-b.log" 2>&1 &
     pids+=($!)
@@ -20824,24 +20908,24 @@ print(" ".join(peers))'
 
     local fail=0 got
     if got="$(_qa_await "aaaaaaaaaaaaaaaa")"; then
-        echo "  Qa.1 GET before the write: the node reports A only — OK"
+        echo "  ${label}.1 GET before the write: the node reports A only — OK"
     else
-        echo "  Qa.1 GET before the write FAIL: sessions [$got], want [A]" >&2
+        echo "  ${label}.1 GET before the write FAIL: sessions [$got], want [A]" >&2
         fail=1
     fi
     if [[ "$fail" -eq 0 ]]; then
         curl -s -m 5 -X PUT -H 'content-type: application/json' \
             -d "[\"udp/10.0.2.2:$b_port\"]" "$rest/config/connect/endpoints" >/dev/null
         if got="$(_qa_await "aaaaaaaaaaaaaaaa bbbbbbbbbbbbbbbb")"; then
-            echo "  Qa.2 PUT connect/endpoints: the node dialled B, GET reports A and B — OK"
+            echo "  ${label}.2 PUT connect/endpoints: the node dialled B, GET reports A and B — OK"
         else
-            echo "  Qa.2 PUT connect/endpoints FAIL: sessions [$got], want [A B]" >&2
+            echo "  ${label}.2 PUT connect/endpoints FAIL: sessions [$got], want [A B]" >&2
             fail=1
         fi
         if curl -s -m 5 "$rest/config" | grep -qF "udp/10.0.2.2:$b_port"; then
-            echo "  Qa.3 GET config names the written list — OK"
+            echo "  ${label}.3 GET config names the written list — OK"
         else
-            echo "  Qa.3 GET config FAIL: the written endpoint is not in it" >&2
+            echo "  ${label}.3 GET config FAIL: the written endpoint is not in it" >&2
             fail=1
         fi
         # R2841 — every session names its link's two ends as upstream does,
@@ -20859,9 +20943,9 @@ for r in json.load(sys.stdin):
                 accepted = link.get("src")
 print("ok" if not bad and accepted == "udp/10.0.2.15:7447" else f"bad={bad} accepted_src={accepted}")' 2>&1)"
         if [[ "$links" == "ok" ]]; then
-            echo "  Qa.4 every session names its link src/dst; A reached udp/10.0.2.15:7447 — OK"
+            echo "  ${label}.4 every session names its link src/dst; A reached udp/10.0.2.15:7447 — OK"
         else
-            echo "  Qa.4 link src/dst FAIL: $links" >&2
+            echo "  ${label}.4 link src/dst FAIL: $links" >&2
             fail=1
         fi
         # R2846 — the node's own account of the write, at the wz key
@@ -20880,9 +20964,9 @@ print("ok" if doc is not None and ('"$1"') else doc)' 2>&1
         # R2851 — `seq` 1: Qa.2's PUT is the first write the node got.
         st="$(_qa_status 'doc["last_write"] == {"seq": 1, "verdict": "replace"} and doc["endpoints"] == [{"endpoint": "udp/10.0.2.2:'"$b_port"'", "state": "live", "established": True}]')"
         if [[ "$st" == "ok" ]]; then
-            echo "  Qa.5 status/connect: the write was replaced, B is live and established — OK"
+            echo "  ${label}.5 status/connect: the write was replaced, B is live and established — OK"
         else
-            echo "  Qa.5 status/connect FAIL: $st" >&2
+            echo "  ${label}.5 status/connect FAIL: $st" >&2
             fail=1
         fi
         # A group of two locators is one transport over two links, which the
@@ -20897,9 +20981,9 @@ print("ok" if doc is not None and ('"$1"') else doc)' 2>&1
             sleep 1
         done
         if [[ "$st" == "ok" ]]; then
-            echo "  Qa.6 a group of two is refused, and status/connect says multi_link_group — OK"
+            echo "  ${label}.6 a group of two is refused, and status/connect says multi_link_group — OK"
         else
-            echo "  Qa.6 status/connect after a group write FAIL: $st" >&2
+            echo "  ${label}.6 status/connect after a group write FAIL: $st" >&2
             fail=1
         fi
     fi
@@ -20913,6 +20997,31 @@ print("ok" if doc is not None and ('"$1"') else doc)' 2>&1
     fi
     rm -rf "$dir"
     return "$fail"
+}
+
+# Layer Qa itself: the bare-metal lwIP firmware under the scenario.
+layer_qa_mcu_admin_node_vs_zenohd() {
+    local target=thumbv7m-none-eabi
+    local fw="deploy/mcu-admin-node/target/$target/release/mcu-admin-node"
+    local rc
+    command -v arm-none-eabi-gcc >/dev/null 2>&1 \
+        || { _qa_unavailable "Qa" "arm-none-eabi-gcc not on PATH"; return $?; }
+    _qa_zenohd_prereqs Qa && rc=0 || rc=$?
+    [[ "$rc" -eq 10 ]] && return 0
+    [[ "$rc" -ne 0 ]] && return 1
+    rustup target list --installed | grep -qx "$target" \
+        || { _qa_unavailable "Qa" "rustup target $target absent"; return $?; }
+
+    WZ_LWIP_PORT="$(realpath crates/lwip-sys/port/cross-test)" cargo build --release \
+        --manifest-path deploy/mcu-admin-node/Cargo.toml --target "$target" --quiet \
+        || { echo "  Qa build mcu-admin-node FAIL" >&2; return 1; }
+    echo "  Qa build mcu-admin-node $target OK"
+
+    _qa_scenario Qa 1000055434d7a77 - \
+        qemu-system-arm -M mps2-an385 -cpu cortex-m3 -nographic -monitor none -serial none \
+        -semihosting-config enable=on,target=native \
+        -nic "user,model=lan9118,hostfwd=udp:127.0.0.1:$_QA_FWD_PORT-10.0.2.15:7447" \
+        -kernel "$fw"
 }
 
 # ─── Layer Qz — Zephyr cooperative profile west build + QEMU boot e2e ───
@@ -20960,58 +21069,80 @@ _qz_unavailable() {
     return 0
 }
 
-layer_qz_zephyr_boot() {
-    local venv="${WZ_ZEPHYR_VENV:-$HOME/zephyrproject/.venv}"
-    local zbase="${WZ_ZEPHYR_BASE:-$HOME/zephyrproject/zephyr}"
-    local installed
+# R3075 — the Zephyr prerequisites every west lane shares (Qz, Qza, Qzb). Sets
+# _QZ_VENV and _QZ_BASE. `$1` is the Rust target the board's image needs; `$2`
+# is `qemu` when the lane also boots the image. Returns 0 when everything is
+# there, 10 when something is absent and the lane SKIPs (green), 1 when it is
+# absent where it is required (WZ_QZ_REQUIRE).
+_qz_toolchain() {
+    local triple="$1" needs="${2:-}" installed
+    _QZ_VENV="${WZ_ZEPHYR_VENV:-$HOME/zephyrproject/.venv}"
+    _QZ_BASE="${WZ_ZEPHYR_BASE:-$HOME/zephyrproject/zephyr}"
     installed="$(rustup target list --installed 2>/dev/null)"
 
-    if ! grep -q "^thumbv7m-none-eabi$" <<< "$installed"; then
-        _qz_unavailable "rustup target thumbv7m-none-eabi absent"; return $?
+    if ! grep -q "^${triple}$" <<< "$installed"; then
+        _qz_unavailable "rustup target ${triple} absent" && return 10 || return 1
     fi
-    if ! command -v qemu-system-arm >/dev/null 2>&1; then
-        _qz_unavailable "qemu-system-arm not on PATH"; return $?
+    if [[ "$needs" == "qemu" ]] && ! command -v qemu-system-arm >/dev/null 2>&1; then
+        _qz_unavailable "qemu-system-arm not on PATH" && return 10 || return 1
     fi
     # R2916 — no arm-none-eabi-gcc prerequisite any more: it was lwip-sys's
-    # cross cc, and this image no longer builds lwIP.
-    if [[ ! -f "$venv/bin/activate" ]]; then
-        _qz_unavailable "Zephyr venv absent: $venv — set WZ_ZEPHYR_VENV"; return $?
+    # cross cc, and the Zephyr-socket images do not build lwIP.
+    if [[ ! -f "$_QZ_VENV/bin/activate" ]]; then
+        _qz_unavailable "Zephyr venv absent: $_QZ_VENV — set WZ_ZEPHYR_VENV" && return 10 || return 1
     fi
-    if [[ ! -d "$zbase" ]]; then
-        _qz_unavailable "ZEPHYR_BASE absent: $zbase — set WZ_ZEPHYR_BASE"; return $?
+    if [[ ! -d "$_QZ_BASE" ]]; then
+        _qz_unavailable "ZEPHYR_BASE absent: $_QZ_BASE — set WZ_ZEPHYR_BASE" && return 10 || return 1
     fi
-    if ! command -v west >/dev/null 2>&1 && [[ ! -x "$venv/bin/west" ]]; then
-        _qz_unavailable "west not on PATH nor in the venv"; return $?
+    if ! command -v west >/dev/null 2>&1 && [[ ! -x "$_QZ_VENV/bin/west" ]]; then
+        _qz_unavailable "west not on PATH nor in the venv" && return 10 || return 1
     fi
+    return 0
+}
+
+# _qz_west_build <label> <app dir> <board> <build dir> <log name> [west args...]
+#
+# west build in a subshell so the venv activate + ZEPHYR_BASE export do not
+# leak into the rest of run-ci. Needs _qz_toolchain to have run.
+#
+# R311y889 (open-debt item 362) — THE BUILD'S OUTPUT IS KEPT. This discarded
+# both streams, so hosted run 32314626012 recorded a 0-second
+# `Qz build deploy/zephyr-app (west) FAIL` and NOTHING ELSE: the cause could not
+# be read from the log at all, and diagnosing it meant provisioning Zephyr by
+# hand. A gate whose red carries no evidence costs a whole round to reproduce,
+# which is the price this line was quietly charging.
+_qz_west_build() {
+    local label="$1" app="$2" board="$3" build_dir="$4" log_name="$5"
+    shift 5
+    local west_log="${RUNCI_LOG_DIR:-crates/target/run-ci-logs}/$log_name"
+    mkdir -p "$(dirname "$west_log")"
+    if (
+        # shellcheck disable=SC1091
+        source "$_QZ_VENV/bin/activate" 2>/dev/null
+        export ZEPHYR_BASE="$_QZ_BASE"
+        west build -b "$board" -d "$build_dir" "$app" "$@" >"$west_log" 2>&1
+    ); then
+        echo "  $label build $app (west, $board) OK"
+        return 0
+    fi
+    echo "  $label build $app (west) FAIL" >&2
+    echo "  ── the build's last 60 line(s) ──" >&2
+    tail -60 "$west_log" >&2
+    echo "  ── full log: $west_log ──" >&2
+    return 1
+}
+
+layer_qz_zephyr_boot() {
+    local rc
+    _qz_toolchain thumbv7m-none-eabi qemu && rc=0 || rc=$?
+    [[ "$rc" -eq 10 ]] && return 0
+    [[ "$rc" -ne 0 ]] && return 1
 
     local build_dir elf qlog qpid fail=0
     build_dir="$(mktemp -d)/zbuild"
     elf="$build_dir/zephyr/zephyr.elf"
 
-    # west build in a subshell so the venv activate + ZEPHYR_BASE export do not
-    # leak into the rest of run-ci. cargo (invoked by the CMakeLists.txt) pins
-    # CC_thumbv7m_none_eabi=arm-none-eabi-gcc + WZ_LWIP_PORT itself.
-    #
-    # R311y889 (open-debt item 362) — THE BUILD'S OUTPUT IS KEPT. This
-    # discarded both streams, so hosted run 32314626012 recorded a 0-second
-    # `Qz build deploy/zephyr-app (west) FAIL` and NOTHING ELSE: the cause could
-    # not be read from the log at all, and diagnosing it meant provisioning
-    # Zephyr by hand. A gate whose red carries no evidence costs a whole round
-    # to reproduce, which is the price this line was quietly charging.
-    local west_log="${RUNCI_LOG_DIR:-crates/target/run-ci-logs}/qz-west-build.log"
-    mkdir -p "$(dirname "$west_log")"
-    if (
-        # shellcheck disable=SC1091
-        source "$venv/bin/activate" 2>/dev/null
-        export ZEPHYR_BASE="$zbase"
-        west build -b mps2/an385 -d "$build_dir" deploy/zephyr-app >"$west_log" 2>&1
-    ); then
-        echo "  Qz build deploy/zephyr-app (west, mps2/an385) OK"
-    else
-        echo "  Qz build deploy/zephyr-app (west) FAIL" >&2
-        echo "  ── the build's last 60 line(s) ──" >&2
-        tail -60 "$west_log" >&2
-        echo "  ── full log: $west_log ──" >&2
+    if ! _qz_west_build Qz deploy/zephyr-app mps2/an385 "$build_dir" qz-west-build.log; then
         rm -rf "$(dirname "$build_dir")"
         return 1
     fi
@@ -21054,6 +21185,111 @@ layer_qz_zephyr_boot() {
     fi
     rm -f "$qlog"
     rm -rf "$(dirname "$build_dir")"
+    return "$fail"
+}
+
+# ─── Layer Qza — a stock zenohd reconfigures the ZEPHYR admin node ───
+#
+# R3075. The node Layer Qa shows a stock zenohd, as a Zephyr
+# application: `deploy/zephyr-admin-node` built by `west build -b mps2/an385`
+# and booted on QEMU with the same user networking, so the image's network is
+# Zephyr's own Ethernet driver (the SMSC911x on the board's devicetree node),
+# Zephyr's own stack and its BSD sockets, where Qa's is a wz lwIP netif over the
+# wz LAN9118 driver. The scenario is `_qa_scenario`, shared: whatever zenohd is
+# shown of one firmware it is shown of the other.
+#
+# The node's identity is not a constant of the firmware: the zid is derived from
+# the NIC's MAC and the address is what the interface holds, both read by the
+# image at run time. The lane therefore PINS the MAC (`-nic ...,mac=`) and asserts
+# the READY line the image prints carries the zid and locator that MAC and QEMU's
+# user networking imply: `52:54:00:aa:bb:cc` is zid bytes 52 54 00 aa bb cc, which
+# zenoh renders little-endian with the leading zeros dropped, `ccbbaa005452`.
+#
+# Needs both lanes' prerequisites: the Zephyr toolchain (WZ_QZ_REQUIRE) and a
+# stock zenohd with its REST plugin (WZ_QA_REQUIRE). The hosted `zephyr-admin`
+# job provisions both and arms both.
+layer_qza_zephyr_admin_node_vs_zenohd() {
+    local rc
+    _qz_toolchain thumbv7m-none-eabi qemu && rc=0 || rc=$?
+    [[ "$rc" -eq 10 ]] && return 0
+    [[ "$rc" -ne 0 ]] && return 1
+    _qa_zenohd_prereqs Qza && rc=0 || rc=$?
+    [[ "$rc" -eq 10 ]] && return 0
+    [[ "$rc" -ne 0 ]] && return 1
+
+    local build_dir elf
+    build_dir="$(mktemp -d)/zbuild"
+    elf="$build_dir/zephyr/zephyr.elf"
+    if ! _qz_west_build Qza deploy/zephyr-admin-node mps2/an385 "$build_dir" qza-west-build.log; then
+        rm -rf "$(dirname "$build_dir")"
+        return 1
+    fi
+
+    local mac=52:54:00:aa:bb:cc zid=ccbbaa005452 fail=0
+    _qa_scenario Qza "$zid" \
+        "^ZEPHYR-WZ-ADMIN READY $zid udp/10\\.0\\.2\\.15:7447[[:space:]]*\$" \
+        qemu-system-arm -cpu cortex-m3 -machine mps2-an385 -nographic -monitor none \
+        -nic "user,model=lan9118,mac=$mac,hostfwd=udp:127.0.0.1:$_QA_FWD_PORT-10.0.2.15:7447" \
+        -kernel "$elf" || fail=1
+    rm -rf "$(dirname "$build_dir")"
+    return "$fail"
+}
+
+# ─── Layer Qzb — every BUILT board of the Zephyr table builds ───
+#
+# R3075. `deploy/zephyr-boards.json` grades each (board, link, app) row, and BUILT
+# is a claim about EVIDENCE: this lane is the evidence. It asks
+# `zephyr_board_table_gate.py --build-rows` which rows are BUILT or HARDWARE (the
+# gate and the lane cannot disagree about the population) and `west build`s each
+# for ITS board, with the row's extra settings. It boots nothing: QEMU rows have
+# their own lanes (Qz, Qza), and a board with no emulator can only be built.
+#
+# Two things are required of each build beyond "it linked". The image exists,
+# and the Rust target the build DERIVED from the board's Kconfig
+# (`wz: Rust target <triple>`, printed by wz_zephyr_board.cmake) equals the
+# `rust_target` the table states: the table says what toolchain the board needs,
+# the build says what it used, and a drift between them is a lane that would
+# pass on a toolchain nobody provisioned.
+#
+# An EMPTY population is a FAIL, not a pass: with no BUILT row there is nothing
+# for the grade to stand on.
+layer_qzb_zephyr_board_matrix() {
+    local rows rc
+    rows="$(python3 scripts/lib/zephyr_board_table_gate.py --build-rows)" \
+        || { echo "  Qzb FAIL — the board table could not be read (its gate says why above)" >&2; return 1; }
+    [[ -n "$rows" ]] \
+        || { echo "  Qzb FAIL — the table has no BUILT or HARDWARE row; a lane with no population is not a pass" >&2; return 1; }
+
+    local board app triple link overlay
+    # Every toolchain first: a lane that builds half the table and then SKIPs
+    # has said nothing about the other half.
+    while IFS=$'\t' read -r board app triple link overlay; do
+        _qz_toolchain "$triple" && rc=0 || rc=$?
+        [[ "$rc" -eq 10 ]] && return 0
+        [[ "$rc" -ne 0 ]] && return 1
+    done <<< "$rows"
+
+    local n=0 fail=0 build_dir west_log extra
+    while IFS=$'\t' read -r board app triple link overlay; do
+        n=$((n + 1))
+        build_dir="$(mktemp -d)/zbuild"
+        west_log="${RUNCI_LOG_DIR:-crates/target/run-ci-logs}/qzb-$n-west-build.log"
+        extra=()
+        [[ -n "$overlay" ]] && extra=(-- "-DEXTRA_CONF_FILE=$overlay")
+        if ! _qz_west_build Qzb "deploy/$app" "$board" "$build_dir" "qzb-$n-west-build.log" "${extra[@]}"; then
+            fail=1
+        elif ! grep -qE "wz: Rust target ${triple}\$" "$west_log"; then
+            echo "  Qzb FAIL — $board built with a Rust target other than the table's $triple" >&2
+            grep -E "wz: Rust target" "$west_log" >&2
+            fail=1
+        elif [[ ! -f "$build_dir/zephyr/zephyr.elf" ]]; then
+            echo "  Qzb FAIL — $board / $app produced no zephyr.elf" >&2
+            fail=1
+        else
+            echo "  Qzb $board / $link / $app BUILT ($triple)"
+        fi
+        rm -rf "$(dirname "$build_dir")"
+    done <<< "$rows"
     return "$fail"
 }
 
@@ -21219,6 +21455,8 @@ run_layer G layer_g_cross_compile_cortex_m || overall=1
 run_layer Q layer_q_qemu_mcu_e2e || overall=1
 run_layer Qa layer_qa_mcu_admin_node_vs_zenohd || overall=1
 run_layer Qz layer_qz_zephyr_boot || overall=1
+run_layer Qza layer_qza_zephyr_admin_node_vs_zenohd || overall=1
+run_layer Qzb layer_qzb_zephyr_board_matrix || overall=1
 run_layer M layer_m_scouting_multicast || overall=1
 run_layer Z layer_z_zenohd_interop || overall=1
 # R311y841 — beside Z rather than beside E5: its oracle is the zenoh core

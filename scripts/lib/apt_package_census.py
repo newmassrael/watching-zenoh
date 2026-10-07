@@ -228,6 +228,7 @@ _add(
         "interop",
         "cross-mcu",
         "zephyr-mcu",
+        "zephyr-admin",
         "feature-gates",
         # R2778 — four lanes peeled off `feature-gates` for its budget (C1j,
         # C1z, C1bl, C1bi), none reaching `zenoh-pico-sys` or
@@ -266,6 +267,7 @@ _add(
         "interop",
         "cross-mcu",
         "zephyr-mcu",
+        "zephyr-admin",
         "feature-gates",
         # R2778 — four lanes peeled off `feature-gates` for its budget (C1j,
         # C1z, C1bl, C1bi), none reaching `zenoh-pico-sys` or
@@ -386,26 +388,26 @@ _add(
     "Zephyr's own west/CMake build, invoked BY west rather than by a command "
     "this tree writes, so the derivation cannot see it. Declared by name in "
     "DECLARED_OUTSIDE_CARGO.",
-    ["zephyr-mcu"],
+    ["zephyr-mcu", "zephyr-admin"],
 )
-_add("ninja-build", "Zephyr's west build generator.", ["zephyr-mcu"])
-_add("device-tree-compiler", "Zephyr devicetree.", ["zephyr-mcu"])
-_add("xz-utils", "unpacking the Zephyr SDK tarball.", ["zephyr-mcu"])
+_add("ninja-build", "Zephyr's west build generator.", ["zephyr-mcu", "zephyr-admin"])
+_add("device-tree-compiler", "Zephyr devicetree.", ["zephyr-mcu", "zephyr-admin"])
+_add("xz-utils", "unpacking the Zephyr SDK tarball.", ["zephyr-mcu", "zephyr-admin"])
 _add(
     "gcc-arm-none-eabi",
     "the bare-metal ARM toolchain the cross-compile and MCU boot lanes link "
     "with.",
-    ["cross-mcu", "zephyr-mcu"],
+    ["cross-mcu", "zephyr-mcu", "zephyr-admin"],
 )
 _add(
     "libnewlib-arm-none-eabi",
     "newlib for that toolchain.",
-    ["cross-mcu", "zephyr-mcu"],
+    ["cross-mcu", "zephyr-mcu", "zephyr-admin"],
 )
 _add(
     "qemu-system-arm",
     "the MCU boot lanes' emulator (Layer Q / the Zephyr boot).",
-    ["cross-mcu", "zephyr-mcu"],
+    ["cross-mcu", "zephyr-mcu", "zephyr-admin"],
 )
 # R2104 (open-debt item 522) — this row used to name three jobs, on the reason
 # that libxml was built "from a checkout rather than the image's copy" on those
@@ -447,6 +449,7 @@ _add(
         "interop",
         "cross-mcu",
         "zephyr-mcu",
+        "zephyr-admin",
         "feature-gates",
         # R2778 — four lanes peeled off `feature-gates` for its budget (C1j,
         # C1z, C1bl, C1bi), none reaching `zenoh-pico-sys` or
@@ -508,6 +511,7 @@ CMAKE_CRATES = ("zenoh-pico-sys", "wz-integration-tests")
 # value is the caller, so a reader can go and check.
 DECLARED_OUTSIDE_CARGO = {
     "zephyr-mcu": "`west build` drives Zephyr's own CMake build system",
+    "zephyr-admin": "`west build` drives Zephyr's own CMake build system",
 }
 
 
