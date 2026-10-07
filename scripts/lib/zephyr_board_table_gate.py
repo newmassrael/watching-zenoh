@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: AGPL-3.0-or-later OR LicenseRef-watching-zenoh-Commercial
 # SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
-"""R3075 (no register item) -- the Zephyr BOARD TABLE and what its grades may claim.
+"""R3082 (no register item) -- the Zephyr BOARD TABLE and what its grades may claim.
 
 The debt it answers for, open-debt item 867 (and 864, which makes a board an
 argument), lives in the operator's agent-memory register, which has no store

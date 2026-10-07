@@ -877,7 +877,7 @@ round_fed_gates=(
     # reads them on every push.
     "json_integer_cell_gate.py --selftest"
     "json_integer_cell_gate.py"
-    # R3075 — the Zephyr board table (`deploy/zephyr-boards.json`) and what each
+    # R3082 — the Zephyr board table (`deploy/zephyr-boards.json`) and what each
     # grade may claim. It reads the table, the per-board settings files,
     # `run-ci.sh` and `ci.yml`, so a round that touches any of them feeds it. A
     # board that sets the predictable test entropy generator while claiming

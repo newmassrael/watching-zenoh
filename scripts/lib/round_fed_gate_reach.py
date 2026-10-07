@@ -198,9 +198,9 @@ DEFERRED: dict[str, str] = {
         "C1bo owns it, and builds the cdylib immediately before calling it."
     ),
     "capi_replay_abi_pin.py": (
-        "Round 3074 -- it JOINED this population in that round, the way "
+        "Round 3078 -- it JOINED this population in that round, the way "
         "`capi_abi_pin.py` did in R2775: it used to read only the BUILT "
-        "`libwz_capi_replay.so`, and Round 3074 made it read the tracked header "
+        "`libwz_capi_replay.so`, and Round 3078 made it read the tracked header "
         "too, for the `WZ_REPLAY_ABI_REVISION` define it holds equal to the "
         "library. Its subject is the pair, and one half of the pair is the "
         "release cdylib, which it refuses to grade without. The hook builds no "

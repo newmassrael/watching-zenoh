@@ -430,7 +430,7 @@ router-connect-reconcile,transport-link-tcp,transport-unicast|session_lifecycle_
         transport-keepalive,\
         transport-multicast\
         |"
-    # R3075 — the MCU session shell, split out of the row above with its tests.
+    # R3080 — the MCU session shell, split out of the row above with its tests.
     # Seventeen of its twenty tests are feature-gated (the admin node and its host
     # and status documents need both adminspace features, the application layer
     # needs the Put arm and the queryable chain), and the first census after the

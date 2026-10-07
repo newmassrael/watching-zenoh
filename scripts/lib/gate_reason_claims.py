@@ -217,7 +217,7 @@ BUDGET = {
     # ratchet is what made the removal compulsory rather than optional: with
     # the arm in and the row still at 3, this gate went red in the OTHER
     # direction and named the number to write.
-    # R3075 — `apt_package_census.py` LEFT this table. Its one citation was
+    # R3081 — `apt_package_census.py` LEFT this table. Its one citation was
     # `west build`, a shell command of the Zephyr toolchain, two bare words that
     # the EXPRESSION arm refused by shape. The gate MEASURED 0 unresolved against
     # the budget of 1 once the `zephyr-admin` job joined that file's Zephyr rows,

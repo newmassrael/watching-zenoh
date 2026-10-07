@@ -3276,7 +3276,7 @@ jobs:
           bash scripts/run-ci.sh --layer Qz
 
       - name: Layer Qzb — every BUILT board of the Zephyr table builds
-        # R3075. The rows of deploy/zephyr-boards.json graded BUILT or HARDWARE,
+        # R3082. The rows of deploy/zephyr-boards.json graded BUILT or HARDWARE,
         # each `west build`t for its own board. Nothing boots: a board with no
         # emulator can only be built, and that is exactly what BUILT claims.
         # WZ_QZ_REQUIRE=1 for the reason Layer Qz arms it.
@@ -3287,7 +3287,7 @@ jobs:
           . ~/zephyrproject/.venv/bin/activate
           bash scripts/run-ci.sh --layer Qzb
 
-  # R3075 — the Zephyr ADMIN NODE under a stock zenohd (Layer
+  # R3081 — the Zephyr ADMIN NODE under a stock zenohd (Layer
   # Qza). `zephyr-mcu` above has the Zephyr toolchain and no zenohd; `cross-mcu`
   # has QEMU and zenohd and no Zephyr; this job takes the Zephyr provisioning
   # `zephyr-mcu` carries (the SAME cache key, so whichever job runs first warms

@@ -3368,7 +3368,7 @@ layer_c0_test_discipline() {
     # every Layer E/Z leg. The gate derives the members from the workflows.
     python3 scripts/lib/workflow_cache_save_gate.py --selftest || return 1
     python3 scripts/lib/workflow_cache_save_gate.py || return 1
-    # R3075 — the Zephyr board table and what its grades may claim. The refusal
+    # R3082 — the Zephyr board table and what its grades may claim. The refusal
     # arms run first on fixtures; the real table is then read against the
     # per-board settings, this file's lanes and the hosted jobs. Layer Qzb builds
     # exactly the rows this gate says are BUILT or HARDWARE.
@@ -10538,7 +10538,7 @@ layer_c1q_multicast_glue() {
 # unconditional like the module's other two, so it lands in all thirteen. Each
 # new value is the one `guarded_count_gate.py --range` PRINTED for that leg.
 layer_c1m_session_lwip() {
-    # R3075 — the stack-neutral shell (`wz-session-mcu`) holds the application
+    # R3080 — the stack-neutral shell (`wz-session-mcu`) holds the application
     # layer, the admin node, the connection manager and the dialer, and the
     # tests that exercise them on the in-memory `SessionLinks` network. They
     # moved out of `wz-session-lwip` with the code, so the legs below that name
@@ -10575,7 +10575,7 @@ layer_c1m_session_lwip() {
     # below are all multicast). 3 = the two unconditional session_drive tests
     # + `a_push_reaches_its_subscriber_and_a_reply_leaves_on_the_session`,
     # the number this command PRINTED.
-    # R3075 4 -> 4: the application-layer test moved to the shell crate and the
+    # R3080 4 -> 4: the application-layer test moved to the shell crate and the
     # lwIP links' bind test arrived, beside the three session_drive tests.
     _runci_guarded_test "C1m unicast app layer" 4 \
         cargo test -p wz-session-lwip \
@@ -10590,7 +10590,7 @@ layer_c1m_session_lwip() {
     # R2831 6 -> 9: the exhausted-dial wait, and `lwip_dialer`'s two (what is
     # dialable, and a dial that completes a real loopback handshake).
     # R2841 9 -> 10: a group of one is dialled, a group of several refused.
-    # R3075 11 -> 5: the admin host, connection manager and dialer tests moved
+    # R3080 11 -> 5: the admin host, connection manager and dialer tests moved
     # to the shell crate; the three session_drive tests stay and the lwIP links'
     # two tests (the bind, and the handshake) arrived.
     _runci_guarded_test "C1m adminspace-write" 5 \
@@ -10601,7 +10601,7 @@ layer_c1m_session_lwip() {
     # pubsub-put) + `admin_host`'s two, one of which reads the control back
     # as the `config` leg's view = 6. Both numbers PRINTED by the command.
     # R2846 3 -> 4: the `status/connect` document test.
-    # R3075 5 -> 4: the admin status and host tests moved to the shell crate,
+    # R3080 5 -> 4: the admin status and host tests moved to the shell crate,
     # leaving the three session_drive tests and the lwIP links' bind test.
     _runci_guarded_test "C1m adminspace-core" 4 \
         cargo test -p wz-session-lwip --features adminspace-core --quiet || return 1
@@ -10611,7 +10611,7 @@ layer_c1m_session_lwip() {
     # R2841 13 -> 14: the same group test.
     # R2846 14 -> 16: the `status/connect` document test and the last-write
     # verdict test.
-    # R3075 17 -> 5: everything but the three session_drive tests and the lwIP
+    # R3080 17 -> 5: everything but the three session_drive tests and the lwIP
     # links' two moved to the shell crate.
     _runci_guarded_test "C1m adminspace read+write" 5 \
         cargo test -p wz-session-lwip --features adminspace-core,adminspace-write --quiet || return 1
@@ -10632,7 +10632,7 @@ layer_c1m_session_lwip() {
     # run PRINTED (2/2/10/11/12/11/14/10/12). That distinction is the paragraph
     # below's whole subject, and it is cheap to honour — nine runs, ~8 minutes.
     #
-    # R3075 moved the same seven by ONE: the lwIP links' bind test carries no
+    # R3080 moved the same seven by ONE: the lwIP links' bind test carries no
     # feature gate, so it runs in every lwIP leg. All eighteen legs of this lane
     # were RUN and each number here is the one its own run PRINTED
     # (12/13/14/13/16/12/14).
@@ -10854,7 +10854,7 @@ layer_c1r_mcu_multicast_e2e() {
 #
 # Guarded for the one member no other lane reaches: its lib holds 12 tests
 # (3 at R2948, plus the three const-parse tests the board-argument macros
-# brought at R3075, plus the two station-address tests and the four stack
+# brought at R3081, plus the two station-address tests and the four stack
 # measurement tests of the same round), and a cfg slip that emptied them would
 # still exit 0.
 layer_c1ns_nostd_members_isolated() {
@@ -20816,7 +20816,7 @@ _qa_unavailable() {
     return 0
 }
 
-# R3075 — the scenario is the SAME for every firmware that is a wz admin node on
+# R3081 — the scenario is the SAME for every firmware that is a wz admin node on
 # QEMU's mps2 Ethernet: only how the image is built and booted differs. It was
 # the body of Layer Qa; Layer Qza (the Zephyr admin node) runs it too, so what a
 # stock zenohd is shown of the two firmwares cannot drift apart.
@@ -20990,7 +20990,7 @@ print("ok" if doc is not None and ('"$1"') else doc)' 2>&1
         fi
     fi
 
-    # R3075 — a firmware that measures its own stack says so on its console
+    # R3081 — a firmware that measures its own stack says so on its console
     # (`stack: peak N of M bytes`, once for each new peak), and this lane refuses a
     # peak that leaves less than a quarter of the stack free. The reason is the
     # one every other lane that measures one gives: a stack that runs out does not
@@ -21102,7 +21102,7 @@ _qz_unavailable() {
     return 0
 }
 
-# R3075 — the Zephyr prerequisites every west lane shares (Qz, Qza, Qzb). Sets
+# R3081 — the Zephyr prerequisites every west lane shares (Qz, Qza, Qzb). Sets
 # _QZ_VENV and _QZ_BASE. `$1` is the Rust target the board's image needs; `$2`
 # is `qemu` when the lane also boots the image. Returns 0 when everything is
 # there, 10 when something is absent and the lane SKIPs (green), 1 when it is
@@ -21223,7 +21223,7 @@ layer_qz_zephyr_boot() {
 
 # ─── Layer Qza — a stock zenohd reconfigures the ZEPHYR admin node ───
 #
-# R3075. The node Layer Qa shows a stock zenohd, as a Zephyr
+# R3081. The node Layer Qa shows a stock zenohd, as a Zephyr
 # application: `deploy/zephyr-admin-node` built by `west build -b mps2/an385`
 # and booted on QEMU with the same user networking, so the image's network is
 # Zephyr's own Ethernet driver (the SMSC911x on the board's devicetree node),
@@ -21271,7 +21271,7 @@ layer_qza_zephyr_admin_node_vs_zenohd() {
 
 # ─── Layer Qzb — every BUILT board of the Zephyr table builds ───
 #
-# R3075. `deploy/zephyr-boards.json` grades each (board, link, app) row, and BUILT
+# R3082. `deploy/zephyr-boards.json` grades each (board, link, app) row, and BUILT
 # is a claim about EVIDENCE: this lane is the evidence. It asks
 # `zephyr_board_table_gate.py --build-rows` which rows are BUILT or HARDWARE (the
 # gate and the lane cannot disagree about the population) and `west build`s each

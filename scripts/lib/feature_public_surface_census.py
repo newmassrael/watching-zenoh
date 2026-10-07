@@ -407,7 +407,7 @@ OFF_AXIS: dict[str, tuple[str, frozenset[str]]] = {
             }
         ),
     ),
-    # R3075 — the MCU session shell, split out of `wz-session-lwip` so a board
+    # R3080 — the MCU session shell, split out of `wz-session-lwip` so a board
     # on another network stack does not carry lwIP. It brings its features with
     # it: `adminspace-write` and `adminspace-core` gate the node's `pub mod`s
     # exactly as they gated them in the lwIP crate (which now forwards both),
@@ -737,7 +737,7 @@ AXIS_REACHABLE: dict[str, frozenset[str]] = {
     # at all. None is a simple crate-root item, so none is a shape the
     # derivation could have named.
     "wz-link-lwip": frozenset({"buffer-pool-session-rx-slim", "test-support"}),
-    # R3075 — the MCU session shell. Its row is the same three features the
+    # R3080 — the MCU session shell. Its row is the same three features the
     # derivation either names (a crate-root `pub mod`) or reads as compound
     # (`any(test, feature = ..)`, `all(core, write)`), which is the second
     # clause's subject; the row is excused only while that stays true.
