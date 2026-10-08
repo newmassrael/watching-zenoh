@@ -86,7 +86,8 @@ use std::time::Duration;
 use wz_integration_tests::common::{
     compile_zenoh_c_example, graceful_terminate, read_captured, wait_for_substring,
     wait_for_tcp_accept_alive, wz_ap_demo_binary, wz_capi_c_cdylib, zenoh_c_oracle,
-    zenoh_pico_cli_binary, zenoh_shm_example_binary, ChildGuard, PortReservation,
+    zenoh_c_shared_library, zenoh_pico_cli_binary, zenoh_shm_example_binary, ChildGuard,
+    PortReservation,
 };
 
 /// How long a listener gets to bind and accept.
@@ -2686,4 +2687,280 @@ fn a_chunk_put_through_an_advanced_publisher_reaches_a_real_z_sub_shm_as_shared_
             "`{mode}`: the key upstream's z_sub_shm saw is not the advanced publisher's: {wz_tags:?}"
         );
     }
+}
+
+/// R3124 -- the PUBLISHER of the leg below: upstream's `z_pub_shm.c`, changed in the one place
+/// the leg is about. It allocates TWO buffers of its provider, fills them with different
+/// bytes, appends the second to the first (`z_bytes_writer_append`, which "allows to create a
+/// linear view on different memory regions without copy") and puts the result, so the Put
+/// upstream puts on the wire is one payload of two shared-memory slices.
+const TWO_SHM_PUBLISHER_C: &str = r#"
+#include <stdio.h>
+#include <string.h>
+
+#include "parse_args.h"
+#include "zenoh.h"
+
+#define KEYEXPR "demo/example/two-shm"
+
+int main(int argc, char** argv) {
+    zc_init_log_from_env_or("error");
+    z_owned_config_t config;
+    parse_zenoh_common_args(argc, argv, &config);
+
+    z_owned_session_t s;
+    if (z_open(&s, z_move(config), NULL) < 0) {
+        printf("Unable to open session!\n");
+        return -1;
+    }
+    z_owned_publisher_t pub;
+    z_view_keyexpr_t ke;
+    z_view_keyexpr_from_str(&ke, KEYEXPR);
+    if (z_declare_publisher(z_loan(s), &pub, z_loan(ke), NULL) < 0) {
+        printf("Unable to declare Publisher!\n");
+        return -1;
+    }
+
+    z_owned_shm_provider_t provider;
+    z_shm_provider_default_new(&provider, 8192);
+
+    for (int idx = 0; 1; ++idx) {
+        z_sleep_s(1);
+        z_buf_layout_alloc_result_t first;
+        z_buf_layout_alloc_result_t second;
+        z_shm_provider_alloc_gc_defrag_blocking(&first, z_loan(provider), 512);
+        z_shm_provider_alloc_gc_defrag_blocking(&second, z_loan(provider), 256);
+        if (first.status != ZC_BUF_LAYOUT_ALLOC_STATUS_OK ||
+            second.status != ZC_BUF_LAYOUT_ALLOC_STATUS_OK) {
+            printf("Unexpected failure during SHM buffer allocation...\n");
+            break;
+        }
+        memset(z_shm_mut_data_mut(z_loan_mut(first.buf)), 'a', 512);
+        memset(z_shm_mut_data_mut(z_loan_mut(second.buf)), 'b', 256);
+
+        z_owned_bytes_t one;
+        z_owned_bytes_t two;
+        z_bytes_from_shm_mut(&one, z_move(first.buf));
+        z_bytes_from_shm_mut(&two, z_move(second.buf));
+
+        z_owned_bytes_writer_t writer;
+        z_bytes_writer_empty(&writer);
+        z_bytes_writer_append(z_loan_mut(writer), z_move(one));
+        z_bytes_writer_append(z_loan_mut(writer), z_move(two));
+        z_owned_bytes_t payload;
+        z_bytes_writer_finish(z_move(writer), &payload);
+
+        z_publisher_put_options_t options;
+        z_publisher_put_options_default(&options);
+        printf("Putting two shared-memory slices (%d)...\n", idx);
+        z_publisher_put(z_loan(pub), z_move(payload), &options);
+    }
+    z_drop(z_move(pub));
+    z_drop(z_move(s));
+    z_drop(z_move(provider));
+    return 0;
+}
+"#;
+
+/// R3124 -- the SUBSCRIBER of the leg below, compiled once and linked at both arms: upstream's
+/// `z_sub_shm.c` with the one thing it prints changed. For each sample it walks the payload's
+/// slices with the iterator upstream's own `z_bytes.c` example uses, and prints how many there
+/// are, the first byte and length of each, the payload's length, and whether the payload as a
+/// whole is one shared-memory buffer (`z_bytes_as_mut_loaned_shm`, which upstream answers only
+/// for a payload of exactly one shared-memory slice).
+const SLICE_COUNTING_SUBSCRIBER_C: &str = r#"
+#include <stdio.h>
+#include <string.h>
+
+#include "parse_args.h"
+#include "zenoh.h"
+
+#define DEFAULT_KEYEXPR "demo/example/**"
+
+void data_handler(z_loaned_sample_t* sample, void* arg) {
+    const z_loaned_bytes_t* payload = z_sample_payload(sample);
+    z_bytes_slice_iterator_t it = z_bytes_get_slice_iterator(payload);
+    z_view_slice_t slice;
+    char described[512];
+    described[0] = 0;
+    int count = 0;
+    while (z_bytes_slice_iterator_next(&it, &slice)) {
+        const z_loaned_slice_t* s = z_view_slice_loan(&slice);
+        char one[64];
+        snprintf(one, sizeof one, " s%d=%c*%d", count,
+                 z_slice_len(s) ? ((const char*)z_slice_data(s))[0] : '-', (int)z_slice_len(s));
+        strncat(described, one, sizeof described - strlen(described) - 1);
+        count++;
+    }
+    int as_shm = 0;
+#if defined(Z_FEATURE_SHARED_MEMORY) && defined(Z_FEATURE_UNSTABLE_API)
+    z_loaned_shm_t* shm = NULL;
+    if (z_bytes_as_mut_loaned_shm(z_sample_payload_mut(sample), &shm) == Z_OK) {
+        as_shm = 1;
+    }
+#endif
+    printf(">> slices=%d len=%d as_shm=%d%s\n", count, (int)z_bytes_len(payload), as_shm,
+           described);
+    fflush(stdout);
+}
+
+int main(int argc, char** argv) {
+    zc_init_log_from_env_or("error");
+    z_owned_config_t config;
+    char* keyexpr = (char*)DEFAULT_KEYEXPR;
+    _Z_PARSE_ARG(keyexpr, "k", "key", (char*), (char*)DEFAULT_KEYEXPR);
+    parse_zenoh_common_args(argc, argv, &config);
+
+    z_view_keyexpr_t ke;
+    z_view_keyexpr_from_str(&ke, keyexpr);
+    z_owned_session_t s;
+    if (z_open(&s, z_move(config), NULL) < 0) {
+        printf("Unable to open session!\n");
+        return -1;
+    }
+    z_owned_closure_sample_t callback;
+    z_closure(&callback, data_handler, NULL, NULL);
+    z_owned_subscriber_t sub;
+    if (z_declare_subscriber(z_loan(s), &sub, z_loan(ke), z_move(callback), NULL) < 0) {
+        printf("Unable to declare subscriber.\n");
+        return -1;
+    }
+    printf("Enter 'q' to quit...\n");
+    char c = 0;
+    while (c != 'q') {
+        c = getchar();
+        if (c == -1) {
+            z_sleep_s(1);
+        }
+    }
+    z_drop(z_move(sub));
+    z_drop(z_move(s));
+    return 0;
+}
+"#;
+
+/// The `>> slices=...` lines of a capture, each once and in the order first seen: a continuous
+/// publisher puts the same payload every second, and the arms attach at different points of it.
+fn slice_reports(log: &str) -> Vec<String> {
+    let mut seen: Vec<String> = Vec::new();
+    for line in log
+        .lines()
+        .map(str::trim)
+        .filter(|l| l.starts_with(">> slices="))
+    {
+        if !seen.iter().any(|s| s == line) {
+            seen.push(line.to_owned());
+        }
+    }
+    seen
+}
+
+/// LEG 15 (R3124) -- a PUT OF TWO SHARED-MEMORY SLICES that the real library puts on the wire
+/// reaches wz's C ABI as TWO SLICES, as it reaches the real library's own subscriber.
+///
+/// The publisher is C linked at upstream's `libzenohc` on both arms (the sender is upstream's in
+/// every run); the subscriber is ONE compiled source linked twice, so the only thing that differs
+/// between the two runs is which implementation received the Put and answered the slice
+/// iterator. The reference arm is the control for the whole leg: if it reports anything but two
+/// slices, upstream joined them before sending or the oracle is not what this leg assumes, and
+/// the comparison says nothing about wz. Before R3124 wz joined the slices of a Put when it
+/// arrived and reported one.
+// wz-proves: transport-shm zenoh-c->wz
+#[test]
+#[ignore = "compiles two C programs with cc against the shared-memory zenoh-c oracle; run-ci \
+            Layer C1cc drives it"]
+fn upstream_two_shared_memory_slices_reach_wz_capi_c_as_two_slices_as_on_libzenohc() {
+    let Some((include, _libdir, examples)) = oracle_or_note() else {
+        return;
+    };
+    // The real library, through the registered resolver: the audit reads which implementation a
+    // claim is witnessed against from the resolver a test NAMES.
+    let libdir_ref = zenoh_c_shared_library()
+        .expect("the zenoh-c shared library the oracle above resolved")
+        .parent()
+        .expect("the library has a directory")
+        .to_path_buf();
+    let dir = tempfile::tempdir().expect("tempdir for the probes");
+    let src_dir = dir.path().join("src");
+    std::fs::create_dir_all(&src_dir).expect("source directory");
+    std::fs::copy(examples.join("parse_args.h"), src_dir.join("parse_args.h"))
+        .expect("upstream's parse_args.h");
+    std::fs::write(src_dir.join("wz_pub_two_shm.c"), TWO_SHM_PUBLISHER_C)
+        .expect("publisher source");
+    std::fs::write(src_dir.join("wz_sub_slices.c"), SLICE_COUNTING_SUBSCRIBER_C)
+        .expect("subscriber source");
+
+    let (publisher, _publisher_libdir) = arm_binary(
+        "wz_pub_two_shm",
+        Arm::Reference,
+        dir.path(),
+        &include,
+        &src_dir,
+        &libdir_ref,
+    );
+    let (on_ref, libdir_r) = arm_binary(
+        "wz_sub_slices",
+        Arm::Reference,
+        dir.path(),
+        &include,
+        &src_dir,
+        &libdir_ref,
+    );
+    let (on_wz, libdir_wz) = arm_binary(
+        "wz_sub_slices",
+        Arm::Wz,
+        dir.path(),
+        &include,
+        &src_dir,
+        &libdir_ref,
+    );
+
+    let args = |endpoint: &str| {
+        vec![
+            "-m".to_string(),
+            "peer".to_string(),
+            "-e".to_string(),
+            endpoint.to_string(),
+            "--no-multicast-scouting".to_string(),
+        ]
+    };
+    let settle = Duration::from_millis(2500);
+    let drive = |program: &Path, libdir: &Path, arm: Arm| {
+        drive_subscriber_against(
+            program,
+            libdir,
+            arm,
+            "demo/example/two-shm",
+            &publisher,
+            "libzenohc publisher of two shared-memory slices",
+            args,
+            settle,
+        )
+    };
+    let ref_log = drive(&on_ref, &libdir_r, Arm::Reference);
+    let wz_log = drive(&on_wz, &libdir_wz, Arm::Wz);
+
+    let (wz_reports, ref_reports) = (slice_reports(&wz_log), slice_reports(&ref_log));
+    assert!(
+        !ref_reports.is_empty()
+            && ref_reports
+                .iter()
+                .all(|line| line.starts_with(">> slices=2 len=768 ")),
+        "the reference arm did not report one payload of two slices of 512 and 256 bytes: \
+         {ref_reports:?}, so upstream did not send two slices, or the oracle is not what this \
+         leg assumes, and the comparison below says nothing about wz\n--- reference ---\n{ref_log}"
+    );
+    assert!(
+        ref_reports
+            .iter()
+            .all(|line| line.ends_with(" s0=a*512 s1=b*256")),
+        "the reference arm's slices are not the two buffers in the order they were appended: \
+         {ref_reports:?}"
+    );
+    assert_eq!(
+        wz_reports, ref_reports,
+        "the two arms of the SAME compiled subscriber disagree about the slices of a payload \
+         the real library sent as two shared-memory slices. wz: {wz_reports:?}; the real \
+         libzenohc: {ref_reports:?}.\n--- wz ---\n{wz_log}\n--- reference ---\n{ref_log}"
+    );
 }

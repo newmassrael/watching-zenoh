@@ -1047,7 +1047,12 @@ HOST_GATED_CI_TARGETS: dict[str, str] = {
 # chunk is still delivered after its owner let go and the validator's window passed, because wz
 # now keeps it confirmed until the reader acknowledges it (`transport-shm wz->zenoh`). The control
 # against upstream's own publisher carries `none`. Measured by `scripts/audit-crossimpl-proof.sh`.
-FOREIGN_ADJUDICATOR_LINKS = 1040
+# R3124 -- 1040 -> 1041, RISING by one: a new leg in `zenoh_c_shm_and_advanced_on_wz_capi_c.rs`,
+# the real `libzenohc` puts a payload of two shared-memory slices on the wire and wz's C ABI
+# reports it as two slices, as the same compiled subscriber linked at `libzenohc` does
+# (`transport-shm zenoh-c->wz`, the library through its registered resolver). The reference arm
+# is the control and carries no claim of its own. Measured by `scripts/audit-crossimpl-proof.sh`.
+FOREIGN_ADJUDICATOR_LINKS = 1041
 
 # ── Execution disclosure ────────────────────────────────────────────────────────
 #

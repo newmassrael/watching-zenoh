@@ -20504,7 +20504,8 @@ layer_c1cc_api_compat_c() {
         a_c_queryable_reply_that_is_a_chunk_reaches_a_real_z_get_shm_as_shared_memory_on_wz_capi_c \
         a_c_getter_is_handed_a_real_z_queryable_shm_reply_as_shared_memory_on_wz_capi_c \
         a_chunk_put_through_an_advanced_publisher_reaches_a_real_z_sub_shm_as_shared_memory_on_wz_capi_c \
-        a_cache_only_advanced_publisher_reaches_a_real_z_sub_shm_on_wz_capi_c; do
+        a_cache_only_advanced_publisher_reaches_a_real_z_sub_shm_on_wz_capi_c \
+        upstream_two_shared_memory_slices_reach_wz_capi_c_as_two_slices_as_on_libzenohc; do
         _runci_guarded_test "C1cc $leg" 1 \
             cargo test -p wz-integration-tests \
             --test zenoh_c_shm_and_advanced_on_wz_capi_c -- --ignored --quiet --test-threads=1 \
