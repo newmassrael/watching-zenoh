@@ -85,6 +85,11 @@ pub const NWCFG_MDC_DIV_POS: u32 = 18;
 /// correctly only when it agrees with the width the design was built with
 /// ([`DESIGNCFG_DEBUG1`]). Its reset value is the design's own width, so a write
 /// of the whole register that does not name it replaces the width with zero.
+///
+/// The PDL's own driver programs 64 bits for this family: `cy_ethif.c` takes
+/// `CEDI_DMA_BUS_WIDTH_64` when `ETH_AXI_MASTER_PRESENT` is 1, `edd_int.h` makes
+/// that 1 for a device header that does not define it, and the CYT4BF headers do
+/// not (only two other families' do).
 pub const NWCFG_DATA_BUS_WIDTH_POS: u32 = 21;
 /// The mask of `NETWORK_CONFIG.DATA_BUS_WIDTH`.
 pub const NWCFG_DATA_BUS_WIDTH_MASK: u32 = 0b11 << NWCFG_DATA_BUS_WIDTH_POS;

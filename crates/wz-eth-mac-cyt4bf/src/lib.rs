@@ -26,11 +26,13 @@
 //!
 //! ## What is claimed
 //!
-//! BUILT. No emulator models this block, so nothing here has run on a CYT4BF; the
-//! host tests drive the driver against a model of the controller written from the
-//! same documents it was written from, which checks the ring logic and the order
-//! of register programming, not the documents. The driver says so in its own
-//! manifest and the board table grades its rows accordingly.
+//! BUILT. No emulator models this block. A bench kit has run the driver since, and
+//! that run found the bus-width defect below, but no ledger record grades it above
+//! BUILT. The host tests drive the driver against a model of the controller written
+//! from the same documents it was written from, and started from the register
+//! values that kit read, which checks the ring logic and the order of register
+//! programming, not the documents. The driver says so in its own manifest and the
+//! board table grades its rows accordingly.
 //!
 //! ## The DMA data bus width is the hardware's statement
 //!
