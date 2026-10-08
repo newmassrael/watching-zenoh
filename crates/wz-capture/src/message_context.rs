@@ -239,49 +239,126 @@ mod tests {
     }
 
     /// The reader is the other half of the writer, so it is held to the writer's
-    /// OUTPUT and not to a literal this file wrote: every phase, every
-    /// capability combination, as `fields_json` really emits them.
+    /// OUTPUT and not to a literal this file wrote: contexts the fold really
+    /// produced, as `fields_json` emits them.
+    ///
+    /// `FlowContext`'s capability cells are private to the fold, so there is no
+    /// way to fabricate a negotiated one here and no wish for one: each session
+    /// is driven through real Init, Open and Close messages, for every
+    /// combination of the three unit offers each side can make (LowLatency,
+    /// Compression, QoS), at each stage a flow can be read in. The expected
+    /// value is derived twice: from the offers (negotiated means both sides
+    /// offered it) and from the fold's own accessor, and the reader has to equal
+    /// both.
     #[test]
     fn it_reads_back_what_the_field_document_writes() {
-        use wz_session_core::passive::{FlowContext, SessionPhase};
+        use alloc::collections::BTreeSet;
+        use alloc::format;
+        use alloc::vec;
+        use alloc::vec::Vec;
+        use wz_session_core::passive::{Direction, PassiveSession, SessionPhase};
 
+        // The unit extensions an Init can offer, in the order of the bits of an
+        // offer mask: LowLatency (id 5), Compression (id 6), QoS (id 1).
+        const OFFERS: [u8; 3] = [0x05, 0x06, 0x01];
+        let framed = |body: &[u8]| {
+            let mut wire = (body.len() as u16).to_le_bytes().to_vec();
+            wire.extend_from_slice(body);
+            wire
+        };
+        // An Init: header (Z when it carries a chain), version, a one-byte-zid
+        // cbyte, the zid, an empty cookie when it is the acknowledgement, then
+        // the chain with the continuation bit on all but the last entry.
+        let init = |ack: bool, offered: u8| {
+            let ids: Vec<u8> = OFFERS
+                .iter()
+                .enumerate()
+                .filter(|(bit, _)| offered & (1 << bit) != 0)
+                .map(|(_, id)| *id)
+                .collect();
+            let z = if ids.is_empty() { 0 } else { 0x80 };
+            let mut body = if ack {
+                vec![0x21 | z, 9, 2, 2, 0]
+            } else {
+                vec![0x01 | z, 9, 2, 1]
+            };
+            for (i, id) in ids.iter().enumerate() {
+                body.push(if i + 1 < ids.len() { id | 0x80 } else { *id });
+            }
+            framed(&body)
+        };
+        let drive = |session: &mut PassiveSession, direction: Direction, wire: &[u8]| {
+            session.push(direction, wire);
+            session
+                .next_frame(direction)
+                .expect("a message the fixture wrote");
+        };
+        let after_inits = |a: u8, b: u8| {
+            let mut session = PassiveSession::new();
+            drive(&mut session, Direction::A, &init(false, a));
+            drive(&mut session, Direction::B, &init(true, b));
+            session
+        };
+
+        let mut seen = BTreeSet::new();
         let mut checked = 0usize;
-        for phase in [
-            SessionPhase::Unseen,
-            SessionPhase::HalfInit,
-            SessionPhase::InitComplete,
-            SessionPhase::Established,
-            SessionPhase::Closed,
-        ] {
-            for lowlatency in [false, true] {
-                for compression in [false, true] {
-                    for qos in [false, true] {
-                        let context = FlowContext {
-                            phase,
-                            lowlatency,
-                            compression,
-                            qos,
-                            patch: Some(1),
-                            ..FlowContext::default()
-                        };
-                        let mut written = String::new();
-                        crate::fields_json::push_context(&context, &mut written);
-                        let object = written
-                            .strip_prefix(",\"context\":")
-                            .unwrap_or_else(|| panic!("the writer's shape moved: {written}"));
-                        let expected = MessageContext {
-                            lowlatency: context.negotiated().then_some(lowlatency),
-                        };
-                        assert_eq!(
-                            read_flow_context(object),
-                            Ok(expected),
-                            "{phase:?} lowlatency={lowlatency}: {object}"
-                        );
-                        checked += 1;
-                    }
-                }
+        let mut check = |session: &PassiveSession, expected: Option<bool>, stage: &str| {
+            let context = session.context();
+            assert_eq!(context.lowlatency(), expected, "{stage}: the fold itself");
+            let mut written = String::new();
+            crate::fields_json::push_context(&context, &mut written);
+            let object = written
+                .strip_prefix(",\"context\":")
+                .unwrap_or_else(|| panic!("the writer's shape moved: {written}"));
+            assert_eq!(
+                read_flow_context(object),
+                Ok(MessageContext {
+                    lowlatency: expected
+                }),
+                "{stage}: {object}"
+            );
+            seen.insert(expected);
+            checked += 1;
+        };
+
+        check(&PassiveSession::new(), None, "nothing seen");
+        // A flow that begins at its Close is Closed and negotiated nothing, which
+        // a phase-keyed reading of the document would get wrong.
+        let mut closed_alone = PassiveSession::new();
+        drive(&mut closed_alone, Direction::A, &framed(&[0x03, 1]));
+        assert_eq!(closed_alone.context().phase, SessionPhase::Closed);
+        check(&closed_alone, None, "a Close and nothing before it");
+
+        for a in 0u8..8 {
+            for b in 0u8..8 {
+                let agreed = Some(a & 1 != 0 && b & 1 != 0);
+                let stage = |what: &str| format!("A offers {a:03b}, B offers {b:03b}, {what}");
+
+                let mut one_init = PassiveSession::new();
+                drive(&mut one_init, Direction::A, &init(false, a));
+                check(&one_init, None, &stage("one Init"));
+
+                check(&after_inits(a, b), agreed, &stage("both Inits"));
+
+                let mut opened = after_inits(a, b);
+                drive(&mut opened, Direction::A, &framed(&[0x02, 10, 0, 0]));
+                drive(&mut opened, Direction::B, &framed(&[0x22, 10, 0]));
+                assert_eq!(opened.context().phase, SessionPhase::Established);
+                check(&opened, agreed, &stage("established"));
+
+                // The capabilities survive a Close: the phase moves, the
+                // negotiation is a fact about what was SEEN.
+                let mut closed = after_inits(a, b);
+                drive(&mut closed, Direction::A, &framed(&[0x03, 1]));
+                assert_eq!(closed.context().phase, SessionPhase::Closed);
+                check(&closed, agreed, &stage("closed after the Inits"));
             }
         }
-        assert_eq!(checked, 5 * 2 * 2 * 2, "the matrix must have run in full");
+        assert_eq!(checked, 2 + 64 * 4, "the matrix must have run in full");
+        assert_eq!(
+            seen,
+            BTreeSet::from([None, Some(false), Some(true)]),
+            "the matrix must reach every answer, or it checked nothing"
+        );
     }
 }

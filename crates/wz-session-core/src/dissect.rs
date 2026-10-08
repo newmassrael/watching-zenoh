@@ -3863,11 +3863,52 @@ pub fn dissect_message(
 #[cfg(test)]
 mod message_context_tests {
     use super::*;
-    use crate::passive::{Direction, FlowContext, SessionPhase};
+    use crate::passive::{Direction, FlowContext, PassiveSession};
 
     const LEAN: MessageContext = MessageContext {
         lowlatency: Some(true),
     };
+
+    /// The context of a session that really negotiated LowLatency, read off the
+    /// fold after it was driven through the handshake: `FlowContext`'s
+    /// capability cells are private to the fold, and the context a caller holds
+    /// is the one the fold produced, so the test builds no other kind.
+    ///
+    /// Both Inits offer LowLatency (extension id 5, a unit); with `opened` the
+    /// two Opens follow, which is what puts each direction on the bare framing.
+    /// The wire bytes are laid out from the transport layout: an Init is a
+    /// header, a version, a one-byte-zid `cbyte` and the extension chain, an
+    /// InitAck adds an empty cookie, an Open is a header, a lease and an initial
+    /// sequence number.
+    fn session_context(opened: bool) -> FlowContext {
+        let framed = |body: &[u8]| {
+            let mut wire = (body.len() as u16).to_le_bytes().to_vec();
+            wire.extend_from_slice(body);
+            wire
+        };
+        let mut session = PassiveSession::new();
+        session.push(Direction::A, &framed(&[0x81, 9, 2, 1, 0x05]));
+        session.push(Direction::B, &framed(&[0xA1, 9, 2, 2, 0, 0x05]));
+        let mut order = alloc::vec![Direction::A, Direction::B];
+        if opened {
+            session.push(Direction::A, &framed(&[0x02, 10, 0, 0]));
+            session.push(Direction::B, &framed(&[0x22, 10, 0]));
+            order.extend([Direction::A, Direction::B]);
+        }
+        for direction in order {
+            session
+                .next_frame(direction)
+                .expect("a handshake frame the fixture wrote");
+        }
+        let context = session.context();
+        assert_eq!(context.lowlatency(), Some(true), "both Inits offered it");
+        assert_eq!(
+            context.lowlatency_active(Direction::A) && context.lowlatency_active(Direction::B),
+            opened,
+            "bare framing is in force once, and only once, both Opens went by"
+        );
+        context
+    }
 
     /// 64 bytes with `first` in front: long enough that every walker reaches its
     /// own name rather than running out of body, and zero behind it so the walk
@@ -4052,12 +4093,7 @@ mod message_context_tests {
     /// and this derives it over every byte rather than asserting the sentence.
     #[test]
     fn the_single_message_reader_parts_from_the_fold_only_where_its_doc_says() {
-        let lean = FlowContext {
-            phase: SessionPhase::Established,
-            lowlatency: true,
-            open_seen: [true, true],
-            ..FlowContext::default()
-        };
+        let lean = session_context(true);
         let mut parted = alloc::collections::BTreeSet::new();
         for header in 0u8..=255 {
             let mid = header & 0x1F;
@@ -4097,14 +4133,14 @@ mod message_context_tests {
             );
         }
 
-        // A direction that has not sent its Open reads nothing bare: the fold's
-        // answer is `false` for every byte, which is the position information
-        // the single-message reader has no way to be given.
-        let before_open = FlowContext {
-            open_seen: [false, false],
-            ..lean
-        };
-        assert!((0u8..=255).all(|h| !before_open.reads_bare_network(Direction::A, h)));
+        // A session whose Inits are folded and whose Opens have not gone by
+        // reads nothing bare: the fold's answer is `false` for every byte, which
+        // is the position information the single-message reader has no way to be
+        // given.
+        let before_open = session_context(false);
+        for direction in [Direction::A, Direction::B] {
+            assert!((0u8..=255).all(|h| !before_open.reads_bare_network(direction, h)));
+        }
     }
 }
 
