@@ -2390,8 +2390,8 @@ pub fn walk_err(c: &mut SpanCursor<'_>) -> Result<Vec<Field>, CodecError> {
 /// not a divergence introduced here.
 fn walk_put_or_del_body(c: &mut SpanCursor<'_>) -> Result<Field, CodecError> {
     match c.peek_u8()? & 0x1F {
-        2 => c.nested("del", walk_msg_del),
-        _ => c.nested("put", walk_msg_put),
+        2 => c.nested(BodyName::Del.name(), walk_msg_del),
+        _ => c.nested(BodyName::Put.name(), walk_msg_put),
     }
 }
 
@@ -2451,9 +2451,9 @@ pub fn walk_request(c: &mut SpanCursor<'_>) -> Result<Vec<Field>, CodecError> {
     }
     // Query is the codec's default arm here, not MsgPut.
     out.push(match c.peek_u8()? & 0x1F {
-        1 => c.nested("put", walk_msg_put)?,
-        2 => c.nested("del", walk_msg_del)?,
-        _ => c.nested("query", walk_query)?,
+        1 => c.nested(BodyName::Put.name(), walk_msg_put)?,
+        2 => c.nested(BodyName::Del.name(), walk_msg_del)?,
+        _ => c.nested(BodyName::Query.name(), walk_query)?,
     });
     Ok(out)
 }
@@ -2484,8 +2484,8 @@ pub fn walk_response(c: &mut SpanCursor<'_>) -> Result<Vec<Field>, CodecError> {
         })?);
     }
     out.push(match c.peek_u8()? & 0x1F {
-        5 => c.nested("err", walk_err)?,
-        _ => c.nested("reply", walk_reply)?,
+        5 => c.nested(BodyName::Err.name(), walk_err)?,
+        _ => c.nested(BodyName::Reply.name(), walk_reply)?,
     });
     Ok(out)
 }
@@ -2678,11 +2678,11 @@ fn walk_declare_body(c: &mut SpanCursor<'_>) -> Result<Field, CodecError> {
     }
 
     match c.peek_u8()? & 0x1F {
-        0 => c.nested("decl_kexpr", |c| id_and_keyexpr(c, false)),
-        1 => c.nested("undecl_kexpr", |c| id_and_exts(c, false)),
-        2 => c.nested("decl_subscriber", |c| id_and_keyexpr(c, true)),
-        3 => c.nested("undecl_subscriber", |c| id_and_exts(c, true)),
-        4 => c.nested("decl_queryable", |c| {
+        0 => c.nested(BodyName::DeclKexpr.name(), |c| id_and_keyexpr(c, false)),
+        1 => c.nested(BodyName::UndeclKexpr.name(), |c| id_and_exts(c, false)),
+        2 => c.nested(BodyName::DeclSubscriber.name(), |c| id_and_keyexpr(c, true)),
+        3 => c.nested(BodyName::UndeclSubscriber.name(), |c| id_and_exts(c, true)),
+        4 => c.nested(BodyName::DeclQueryable.name(), |c| {
             let mut out = id_and_keyexpr(c, true)?;
             // The queryable body is the one decl arm carrying its own ext
             // chain; its Z bit is the header bit already recorded above.
@@ -2703,12 +2703,12 @@ fn walk_declare_body(c: &mut SpanCursor<'_>) -> Result<Field, CodecError> {
             }
             Ok(out)
         }),
-        5 => c.nested("undecl_queryable", |c| id_and_exts(c, true)),
-        6 => c.nested("decl_token", |c| id_and_keyexpr(c, true)),
-        7 => c.nested("undecl_token", |c| id_and_exts(c, true)),
+        5 => c.nested(BodyName::UndeclQueryable.name(), |c| id_and_exts(c, true)),
+        6 => c.nested(BodyName::DeclToken.name(), |c| id_and_keyexpr(c, true)),
+        7 => c.nested(BodyName::UndeclToken.name(), |c| id_and_exts(c, true)),
         // DECL_FINAL (0x1A) and the codec's default arm, which is also
         // DECL_FINAL: a lone header byte.
-        _ => c.nested("decl_final", |c| {
+        _ => c.nested(BodyName::DeclFinal.name(), |c| {
             let (header, header_field) = c.u8("header")?;
             let carrier = header_field.span;
             Ok(alloc::vec![
@@ -3360,6 +3360,175 @@ impl MessageName {
             cursor = v.next();
         }
         None
+    }
+}
+
+/// Every BODY a network message carries, as ONE closed vocabulary joined to
+/// the tree.
+///
+/// A network message is an envelope around a body: a `Push` around a `put` or a
+/// `del`, a `Declare` around one of nine declarations, a `Request` around a
+/// `query` (or a `put`/`del`), a `Response` around a `reply` or an `err`. The
+/// walkers name the body's branch of the tree through this type, and
+/// [`Field::body`] reads the name back off the tree, so the branch a walker
+/// builds, the word a document prints and the vocabulary a consumer is handed
+/// cannot spell one body three ways. It is [`MessageName`]'s rule for the level
+/// below.
+///
+/// The word is the BRANCH's name and nothing finer. A `Response` names `reply`,
+/// and the `put` or `del` that reply carries is a branch of the `reply` branch,
+/// not a second answer here.
+///
+/// # What is not a body
+///
+/// The other direct branches of a message (`keyexpr`, `extensions`, an
+/// `Interest`'s restriction `body`) are not bodies: none of them carries the
+/// message's own MID, and [`Field::body`] is defined by that. An `Interest` has
+/// no body in this sense, and neither has any transport message.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum BodyName {
+    /// A `MsgPut` (zenoh MID 0x01), carried by a `Push`, a `Request` or a `Reply`.
+    Put,
+    /// A `MsgDel` (zenoh MID 0x02), carried by a `Push`, a `Request` or a `Reply`.
+    Del,
+    /// A `Query` (zenoh MID 0x03), carried by a `Request`.
+    Query,
+    /// A `Reply` (zenoh MID 0x04), carried by a `Response`.
+    Reply,
+    /// An `Err` (zenoh MID 0x05), carried by a `Response`.
+    Err,
+    /// `DeclareKeyExpr`, carried by a `Declare`.
+    DeclKexpr,
+    /// `UndeclareKeyExpr`, carried by a `Declare`.
+    UndeclKexpr,
+    /// `DeclareSubscriber`, carried by a `Declare`.
+    DeclSubscriber,
+    /// `UndeclareSubscriber`, carried by a `Declare`.
+    UndeclSubscriber,
+    /// `DeclareQueryable`, carried by a `Declare`.
+    DeclQueryable,
+    /// `UndeclareQueryable`, carried by a `Declare`.
+    UndeclQueryable,
+    /// `DeclareToken`, carried by a `Declare`.
+    DeclToken,
+    /// `UndeclareToken`, carried by a `Declare`.
+    UndeclToken,
+    /// `DeclareFinal`, carried by a `Declare`: a lone header byte, and the one
+    /// declaration that names no key.
+    DeclFinal,
+}
+
+impl BodyName {
+    /// The first variant of the walk, so a caller can start one without naming
+    /// a member.
+    const FIRST: Self = Self::Put;
+
+    /// The word the tree's branch, the field document and the declared
+    /// vocabulary all print for this body.
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Put => "put",
+            Self::Del => "del",
+            Self::Query => "query",
+            Self::Reply => "reply",
+            Self::Err => "err",
+            Self::DeclKexpr => "decl_kexpr",
+            Self::UndeclKexpr => "undecl_kexpr",
+            Self::DeclSubscriber => "decl_subscriber",
+            Self::UndeclSubscriber => "undecl_subscriber",
+            Self::DeclQueryable => "decl_queryable",
+            Self::UndeclQueryable => "undecl_queryable",
+            Self::DeclToken => "decl_token",
+            Self::UndeclToken => "undecl_token",
+            Self::DeclFinal => "decl_final",
+        }
+    }
+
+    /// The next body in the walk, so [`Self::all`] visits every arm without a
+    /// list. Exhaustive: a variant added later does not compile until it has a
+    /// successor.
+    const fn next(self) -> Option<Self> {
+        Some(match self {
+            Self::Put => Self::Del,
+            Self::Del => Self::Query,
+            Self::Query => Self::Reply,
+            Self::Reply => Self::Err,
+            Self::Err => Self::DeclKexpr,
+            Self::DeclKexpr => Self::UndeclKexpr,
+            Self::UndeclKexpr => Self::DeclSubscriber,
+            Self::DeclSubscriber => Self::UndeclSubscriber,
+            Self::UndeclSubscriber => Self::DeclQueryable,
+            Self::DeclQueryable => Self::UndeclQueryable,
+            Self::UndeclQueryable => Self::DeclToken,
+            Self::DeclToken => Self::UndeclToken,
+            Self::UndeclToken => Self::DeclFinal,
+            Self::DeclFinal => return None,
+        })
+    }
+
+    /// Every body, walked.
+    pub fn all() -> Vec<Self> {
+        let mut out = Vec::new();
+        let mut cursor = Some(Self::FIRST);
+        while let Some(v) = cursor {
+            out.push(v);
+            cursor = v.next();
+        }
+        out
+    }
+
+    /// Every word [`Self::name`] can return, in walk order.
+    ///
+    /// The population `wz-capture`'s `doc_revision` declares the `fields.body`
+    /// family from.
+    pub fn names() -> Vec<&'static str> {
+        Self::all().iter().map(|b| b.name()).collect()
+    }
+
+    /// The body this WORD names, or `None` for a word that is not one.
+    ///
+    /// Allocation-free, because the caller is a tree walk asking it per branch.
+    pub fn named(word: &str) -> Option<Self> {
+        let mut cursor = Some(Self::FIRST);
+        while let Some(v) = cursor {
+            if v.name() == word {
+                return Some(v);
+            }
+            cursor = v.next();
+        }
+        None
+    }
+}
+
+impl Field {
+    /// The body this network message carries: the direct branch of this node
+    /// that carries the message's OWN `mid`, named through [`BodyName`]. `None`
+    /// for a node with no such branch.
+    ///
+    /// Every body walker opens with its header byte and records the MID under it
+    /// (`mid`), and nothing else a message nests does: the key expression, the
+    /// extension chain and an `Interest`'s restriction are branches too, and none
+    /// of them has a `mid`. So the rule is the tree's own shape and not a list of
+    /// which messages carry which bodies, and a message with no body (a `Frame`,
+    /// a `ResponseFinal`, an `Interest`) answers `None` without being named.
+    ///
+    /// ⚠ A branch that carries a `mid` and whose name is not a [`BodyName`] also
+    /// answers `None`. That cannot happen while the walkers name their bodies
+    /// through the type, and a test over every body the codecs can build holds
+    /// it there.
+    pub fn body(&self) -> Option<BodyName> {
+        let FieldValue::Nested(children) = &self.value else {
+            return None;
+        };
+        children
+            .iter()
+            .find(|branch| {
+                matches!(
+                    &branch.value,
+                    FieldValue::Nested(inner) if inner.iter().any(|f| f.name == "mid")
+                )
+            })
+            .and_then(|branch| BodyName::named(&branch.name))
     }
 }
 
@@ -4276,6 +4445,131 @@ fn push_json(field: &Field, out: &mut String) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// THE BODY VOCABULARY IS THE ONE THE ENVELOPE WALKERS PRODUCE, over the
+    /// whole domain of a body's MID, and `Field::body` reads every one of them.
+    ///
+    /// # The population
+    ///
+    /// A body's first byte holds its MID in five bits, so the population is all
+    /// thirty-two values behind each of the four envelopes that carry a body
+    /// (`Push`, `Request`, `Response`, `Declare`), asked of the real walker and
+    /// answered by whatever its dispatch does with the byte, including its
+    /// default arms. That is a second opinion on [`BodyName`]: the walkers
+    /// build their branches through the type, and this holds that no walker
+    /// reaches a branch the type does not name, and that no variant of the type
+    /// is one nothing builds.
+    ///
+    /// The bytes after the two are zeros, which decode as zero-valued zints and
+    /// zero-length slices: the cheapest complete body each walker accepts.
+    #[test]
+    fn the_body_vocabulary_is_the_one_the_envelope_walkers_produce() {
+        use wz_codecs::wire_const;
+        let mut reached: Vec<&'static str> = Vec::new();
+        // `(envelope MID, offset of the body's first byte)`: a one-byte header,
+        // then the ids and the id-only key expression of that envelope, which
+        // are one zero byte each.
+        for (envelope, body_at) in [
+            (wire_const::N_MID_PUSH, 2usize),
+            (wire_const::N_MID_REQUEST, 3),
+            (wire_const::N_MID_RESPONSE, 3),
+            (wire_const::N_MID_DECLARE, 1),
+        ] {
+            for sub in 0u8..32 {
+                let mut bytes = alloc::vec![0u8; 64];
+                bytes[0] = envelope;
+                bytes[body_at] = sub;
+                let mut c = SpanCursor::with_base(&bytes, 0);
+                let field = walk_network_record(&mut c)
+                    .unwrap_or_else(|e| {
+                        panic!("envelope {envelope:#04x}, body mid {sub:#04x} did not walk: {e:?}")
+                    })
+                    .expect("the envelope's own MID is a network message");
+                let body = field.body().unwrap_or_else(|| {
+                    panic!(
+                        "envelope {envelope:#04x}, body mid {sub:#04x}: no branch that \
+                         carries a mid is named by `BodyName`: {field:?}"
+                    )
+                });
+                reached.push(body.name());
+            }
+        }
+        reached.sort_unstable();
+        reached.dedup();
+        let mut vocabulary = BodyName::names();
+        vocabulary.sort_unstable();
+        assert_eq!(
+            reached, vocabulary,
+            "the walkers build exactly the branches `BodyName` names"
+        );
+    }
+
+    /// `Field::body` is the branch that carries the message's OWN `mid`, and
+    /// nothing else a message nests.
+    ///
+    /// The tree is built by hand so each clause has its own subject: a key
+    /// expression and an extension chain beside the body (nested, no `mid`),
+    /// then a message with only those, then a branch that carries a `mid` under
+    /// a name the vocabulary does not hold.
+    #[test]
+    fn a_message_names_the_branch_that_carries_its_own_mid() {
+        let at = Span { start: 0, end: 1 };
+        let header = flag("z", at, false);
+        let mid = bits("mid", at, 1);
+        let branch = |name: &'static str, with_mid: bool| {
+            let mut inner = alloc::vec![header.clone()];
+            if with_mid {
+                inner.push(mid.clone());
+            }
+            group(name, 0, 1, inner)
+        };
+        let message = |branches: Vec<Field>| group("Push", 0, 1, branches);
+
+        let both = message(alloc::vec![
+            branch("keyexpr", false),
+            branch("extensions", false),
+            branch("del", true),
+        ]);
+        assert_eq!(both.body(), Some(BodyName::Del));
+
+        let none = message(alloc::vec![
+            branch("keyexpr", false),
+            branch("extensions", false),
+        ]);
+        assert_eq!(
+            none.body(),
+            None,
+            "a message with no such branch has no body"
+        );
+
+        let unnamed = message(alloc::vec![branch("keyexpr", false), branch("other", true)]);
+        assert_eq!(
+            unnamed.body(),
+            None,
+            "a branch with a mid under a name the vocabulary lacks is not named"
+        );
+
+        assert_eq!(
+            bits("mid", at, 1).body(),
+            None,
+            "a leaf has no branches to carry a body"
+        );
+    }
+
+    /// Every word of the body vocabulary names itself back, and none repeats.
+    #[test]
+    fn every_body_word_names_itself_back_and_none_repeats() {
+        for body in BodyName::all() {
+            assert_eq!(BodyName::named(body.name()), Some(body), "{}", body.name());
+        }
+        let mut names = BodyName::names();
+        let words = names.len();
+        names.sort_unstable();
+        names.dedup();
+        assert_eq!(names.len(), words, "a word is spelled by two bodies");
+        assert_eq!(BodyName::named("body"), None);
+        assert_eq!(BodyName::named("keyexpr"), None);
+    }
 
     /// R2223 (open-debt item 573) — THE MESSAGE VOCABULARY IS DERIVED FROM THE
     /// DISPATCHERS OVER THE WHOLE MID DOMAIN, never read off a list.
