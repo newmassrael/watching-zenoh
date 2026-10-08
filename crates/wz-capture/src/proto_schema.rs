@@ -69,8 +69,9 @@
 //! path `protoc` would be given after `-I`). Only the root file and what it
 //! imports, transitively, are read; a file in the list nothing imports is
 //! ignored, and so is any problem in it. The well-known types
-//! (`google/protobuf/timestamp.proto` and the rest) are NOT built in: a schema
-//! that imports one needs it in the list, like any other file.
+//! (`google/protobuf/timestamp.proto` and the rest) are NOT part of this
+//! library: a schema that imports one needs it in the list, like any other
+//! file.
 //!
 //! The root message is named by its full name including the package
 //! (`pkg.Outer`, or `Outer` when there is none). It is looked up among the
@@ -78,8 +79,8 @@
 //!
 //! ## What is refused, and why
 //!
-//! Every refusal is a [`ProtoDiagnostic`] naming a file, a line and a column,
-//! except the ones that are not about a place in a file.
+//! Every refusal is a [`crate::proto_schema::ProtoDiagnostic`] naming a file, a
+//! line and a column, except the ones that are not about a place in a file.
 //!
 //! * `group` fields and `extend` blocks: stated at their keyword. A group is
 //!   written with the deprecated group wire types, which the payload reader
@@ -113,8 +114,9 @@
 //! The work is linear in the text read, except the expansion, which is bounded
 //! three ways and refuses past each: messages may be nested
 //! `MAX_MESSAGE_NESTING` (31, `protoc`'s own limit) levels in the text, imports
-//! [`MAX_IMPORT_DEPTH`] files deep, a field path [`MAX_PATH_DEPTH`] messages
-//! deep, and the output [`MAX_DECLARATIONS`] lines. The last matters because a
+//! [`crate::proto_schema::MAX_IMPORT_DEPTH`] files deep, a field path
+//! [`crate::proto_schema::MAX_PATH_DEPTH`] messages deep, and the output
+//! [`crate::proto_schema::MAX_DECLARATIONS`] lines. The last matters because a
 //! schema with no cycle can still expand exponentially: a message that holds
 //! two of a message that holds two of another, ten times over, is a thousand
 //! paths from a ten-line file.

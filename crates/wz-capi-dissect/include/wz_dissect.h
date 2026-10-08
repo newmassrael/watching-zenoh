@@ -1665,8 +1665,9 @@ typedef struct wz_dissect_proto_file {
  * after -I). An import that is not in the list is a diagnostic. Only the root
  * file and what it imports, transitively, are read: a file in the list that
  * nothing imports is never opened and a problem in it is never reported. The
- * well-known types (google/protobuf/timestamp.proto and the rest) are NOT built
- * in; a schema that imports one needs it in the list like any other file.
+ * well-known types (google/protobuf/timestamp.proto and the rest) are NOT part
+ * of this library; a schema that imports one needs it in the list like any
+ * other file.
  *
  * `key_pattern` is a key expression AS ITS AUTHOR MEANS IT, not declaration
  * text. The characters that dialect reserves (backslash, colon, equals sign and
