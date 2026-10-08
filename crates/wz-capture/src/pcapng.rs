@@ -238,6 +238,10 @@ pub struct Packet {
     /// it is the one fact a follower of a growing container could not have
     /// agreed with [`parse`] about — the follower has no "afterwards".
     pub ts_millis: Option<u64>,
+    /// [`Self::ts_ticks`] through the same `if_tsresol`, in NANOSECONDS: the
+    /// digits [`Self::ts_millis`] drops. That field is this one divided by a
+    /// million, rounded down, and `None` exactly when this one is.
+    pub ts_nanos: Option<u64>,
     /// Bytes actually stored.
     pub data: Vec<u8>,
     /// Length the packet had on the wire.
@@ -265,21 +269,42 @@ impl Packet {
     pub fn resolve_ts_millis(&self, iface: &Interface) -> Option<u64> {
         ticks_to_millis(self.ts_ticks, iface)
     }
+
+    /// [`Self::resolve_ts_millis`], in nanoseconds.
+    pub fn resolve_ts_nanos(&self, iface: &Interface) -> Option<u64> {
+        ticks_to_nanos(self.ts_ticks, iface)
+    }
 }
 
-/// The one conversion from a block's raw tick count to epoch milliseconds,
+/// The one conversion from a block's raw tick count to epoch NANOSECONDS,
 /// shared by the owned [`Packet`] and the borrowed [`PacketRef`] so the two
 /// cannot resolve `if_tsresol` two ways.
+///
+/// Exact for every resolution: the tick count times a billion over the ticks
+/// per second, in 128 bits, so a resolution finer than a nanosecond is divided
+/// down and a coarser one is multiplied up without the intermediate
+/// overflowing and without the divisor being rounded first. (Rounding the
+/// divisor first is what the millisecond conversion did, and it is wrong for a
+/// base-2 resolution, whose ticks per second are not a multiple of a thousand:
+/// `if_tsresol` 0x80 | 20 is 1 048 576 ticks a second, divided by 1 000 to
+/// 1 048, which reads one second of ticks as 1 000.5 ms and drifts by half a
+/// millisecond for every second since the epoch.)
+/// A result past `u64` -- a corrupt file -- saturates at the top, the failure
+/// that cannot be mistaken for a plausible instant.
+fn ticks_to_nanos(ts_ticks: Option<u64>, iface: &Interface) -> Option<u64> {
+    const NANOS_PER_SEC: u128 = 1_000_000_000;
+    let ticks = u128::from(ts_ticks?);
+    let per_sec = u128::from(iface.ticks_per_second()).max(1);
+    Some(u64::try_from(ticks * NANOS_PER_SEC / per_sec).unwrap_or(u64::MAX))
+}
+
+/// The millisecond reading of [`ticks_to_nanos`]: that value divided by a
+/// million, rounded down, so the two readings of one packet cannot name
+/// different instants. For every DECIMAL resolution this is the value the
+/// conversion has always given; a base-2 resolution is now exact where it was
+/// off by half a millisecond for every second since the epoch.
 fn ticks_to_millis(ts_ticks: Option<u64>, iface: &Interface) -> Option<u64> {
-    let ticks = ts_ticks?;
-    let per_sec = iface.ticks_per_second();
-    Some(if per_sec >= 1_000 {
-        // Finer than a millisecond (the usual case: micro or nano).
-        ticks / (per_sec / 1_000)
-    } else {
-        // Coarser: milliseconds per tick, so multiply.
-        ticks * (1_000 / per_sec.max(1))
-    })
+    ticks_to_nanos(ts_ticks, iface).map(|ns| ns / 1_000_000)
 }
 
 /// One captured packet whose bytes are BORROWED from the container.
@@ -306,6 +331,9 @@ pub struct PacketRef<'a> {
     /// [`Self::ts_ticks`] already put through the recording interface's
     /// `if_tsresol`, at the moment the block was read.
     pub ts_millis: Option<u64>,
+    /// The same instant in nanoseconds; [`Self::ts_millis`] is this divided by
+    /// a million, rounded down.
+    pub ts_nanos: Option<u64>,
     /// Bytes actually stored, link header included.
     pub data: &'a [u8],
     /// Length the packet had on the wire.
@@ -332,6 +360,7 @@ impl<'a> PacketRef<'a> {
             link_type: iface.link_type,
             ts_ticks,
             ts_millis: ticks_to_millis(ts_ticks, iface),
+            ts_nanos: ticks_to_nanos(ts_ticks, iface),
             data,
             orig_len,
         }
@@ -348,6 +377,7 @@ impl<'a> PacketRef<'a> {
             link_type: self.link_type,
             ts_ticks: self.ts_ticks,
             ts_millis: self.ts_millis,
+            ts_nanos: self.ts_nanos,
             data: self.data.to_vec(),
             orig_len: self.orig_len,
         }
@@ -469,6 +499,11 @@ impl PcapngFile {
     /// answer the file's own reader would give.
     pub fn ts_millis(&self, packet: &Packet) -> Option<u64> {
         packet.ts_millis
+    }
+
+    /// [`Self::ts_millis`], in nanoseconds.
+    pub fn ts_nanos(&self, packet: &Packet) -> Option<u64> {
+        packet.ts_nanos
     }
 }
 
@@ -1502,6 +1537,35 @@ mod tests {
         let file = write(&[(1, 0x80 | 20)], &[(0, 1 << 20, &[0xAA])]);
         let parsed = parse(&file).expect("parse");
         assert_eq!(parsed.ts_millis(&parsed.packets[0]), Some(1_000));
+    }
+
+    /// A base-2 resolution is exact at a real epoch instant, in both readings.
+    ///
+    /// The test above reads ONE second of ticks, where the old conversion (ticks
+    /// over `per_sec / 1000`, which is 1 048 for 2^20) is off by half a
+    /// millisecond and floors back to the right answer. At 1.7e9 seconds the same
+    /// error is 9.4e8 seconds, and only an instant that large can see it. The
+    /// expected values are arithmetic on the number the file was written from.
+    #[test]
+    fn a_base_2_resolution_is_exact_at_a_real_epoch_instant() {
+        const SECS: u64 = 1_700_000_000;
+        // 123_456 ticks of 2^-20 s is 117.7 ms; 117_737_548.8 ns, floored.
+        let frac_ticks = 123_456u64;
+        let ticks = (SECS << 20) + frac_ticks;
+        let file = write(&[(1, 0x80 | 20)], &[(0, ticks, &[0xAA])]);
+        let parsed = parse(&file).expect("parse");
+        let want_ns = SECS * 1_000_000_000 + frac_ticks * 1_000_000_000 / (1 << 20);
+        assert_eq!(parsed.packets[0].ts_nanos, Some(want_ns));
+        assert_eq!(parsed.ts_nanos(&parsed.packets[0]), Some(want_ns));
+        assert_eq!(
+            parsed.ts_millis(&parsed.packets[0]),
+            Some(want_ns / 1_000_000)
+        );
+        assert_eq!(
+            parsed.ts_millis(&parsed.packets[0]),
+            Some(SECS * 1_000 + 117),
+            "the instant is 117 ms past the whole second"
+        );
     }
 
     /// R311y715 (§C G6) — and the resolution a file does NOT declare.

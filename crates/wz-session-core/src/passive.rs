@@ -78,6 +78,16 @@ pub const PREFIX_WIDTH_LOWLATENCY: usize = 4;
 /// corrupt capture ask for a ~4 GiB buffer.
 pub const MAX_FRAME_PAYLOAD: usize = u16::MAX as usize;
 
+/// Nanoseconds in one millisecond: the factor between the observer's clock,
+/// which is kept in NANOSECONDS, and the millisecond reading of it that every
+/// older field and key goes on speaking.
+///
+/// A millisecond reading is always the nanosecond one divided by this, rounded
+/// DOWN, so the two cannot name different instants. Rounding down is also what
+/// the pcap readers already did when the clock was milliseconds only, which is
+/// why moving the clock to nanoseconds moved no millisecond value.
+pub const NANOS_PER_MILLI: u64 = 1_000_000;
+
 /// Which half of a session a byte stream carries.
 ///
 /// Named for neither a role nor an address, because the tracker needs neither:
@@ -306,7 +316,14 @@ pub struct HalfFacts {
     /// in the observer's milliseconds. A record counts whether it decoded or
     /// not, because traffic that cannot be read is still traffic. `None` while
     /// nothing was read with a clock, which is a different fact from `Some(0)`.
+    ///
+    /// The instant is the record's own: [`PassiveFrame::observed_at_ns`] of that
+    /// record, divided down.
     pub last_seen_ms: Option<u64>,
+    /// The same instant as [`Self::last_seen_ms`] to the nanosecond: that field
+    /// is this one divided by [`NANOS_PER_MILLI`], rounded down, and it is
+    /// `None` exactly when this one is.
+    pub last_seen_ns: Option<u64>,
     /// Whether this direction carried a `Close`. Whichever scope it asked for:
     /// the frame's own row says which.
     pub close_seen: bool,
@@ -655,6 +672,25 @@ impl Anchor {
     }
 }
 
+/// What the caller of the framing walk knows about where a unit came from: its
+/// coordinate, the width of the length prefix it was framed with, and when its
+/// bytes were captured.
+///
+/// One argument rather than three because they are one fact about one unit, and
+/// the walk's signature was at clippy's bound before the third arrived. The
+/// bound was right: a coordinate, a prefix width and a clock reading that travel
+/// together cannot be handed to the walk from two different units.
+struct UnitSource<'a> {
+    /// Where the unit sits, and in which space.
+    anchor: Anchor,
+    /// The bytes of length prefix ahead of the unit's body, `0` for a datagram.
+    prefix_width: usize,
+    /// When a byte was captured, asked by how far it stands from the unit's
+    /// FIRST byte (the length prefix of a stream unit; a datagram has none, and
+    /// its answer is the same everywhere). `None` where the caller cannot say.
+    instant_of: &'a dyn Fn(usize) -> Option<u64>,
+}
+
 /// One decoded transport message plus where it sat in its direction's stream.
 #[derive(Debug)]
 pub struct PassiveFrame {
@@ -819,7 +855,47 @@ pub struct PassiveFrame {
     /// beside the responder it is not, and no arithmetic here can tell the two
     /// apart. A latency computed from these is a latency AT THE VANTAGE POINT,
     /// which is the honest claim and the only one a passive reader can make.
+    ///
+    /// # Which bytes, and which instant of them
+    ///
+    /// The instant of the packet that carried the record's FIRST byte, the byte
+    /// its row's `first_byte` names (`stream_offset + prefix_width +
+    /// unit_offset` on a byte stream), and no other. It is not the instant the
+    /// record was completed, and it is not the instant this reader got round to
+    /// decoding it: a record that spans two packets reports the first one's
+    /// instant, and a record decoded long after its packet (it waited behind a
+    /// hole in the byte stream, or for the end of the capture) reports the
+    /// instant it was captured at. Two messages of one batch can therefore
+    /// differ, when the batch crosses a packet boundary between them.
+    ///
+    /// A message whose bytes are not on the wire (it was decompressed out of an
+    /// lz4 batch, and its row has no `first_byte`) takes the instant of its
+    /// batch's first byte.
+    ///
+    /// A byte stream states the instants through
+    /// [`PassiveSession::next_frame_with`]. A source that does not (plain
+    /// [`PassiveSession::next_frame`], and the datagram entry points, where the
+    /// datagram IS the packet) gets the observer's own clock as of the call,
+    /// which is the instant of the last byte it was pushed.
+    ///
+    /// This is the millisecond reading of [`Self::observed_at_ns`]: that value
+    /// divided by [`NANOS_PER_MILLI`], rounded down, and `None` exactly when it
+    /// is.
     pub observed_at_ms: Option<u64>,
+    /// The same instant as [`Self::observed_at_ms`], to the nanosecond the
+    /// capture recorded it at (a classic pcap's microsecond digits are carried,
+    /// a nanosecond file's all nine).
+    ///
+    /// # Why both exist
+    ///
+    /// The clock was kept in milliseconds until the sub-millisecond digits of a
+    /// capture's timestamps became something a consumer measured with: a
+    /// round trip of 0.575 ms read as 1 ms, because two truncated readings were
+    /// subtracted. Every older consumer reads the millisecond field and
+    /// keeps the value it always had; a consumer that wants the digits reads
+    /// this one. They are one fact, written in one place, and a test holds them
+    /// together.
+    pub observed_at_ns: Option<u64>,
     /// R311y611 — flag bits this header set that its own MID does not define.
     ///
     /// Zero for every conforming sender, and that is the point: reserved bits
@@ -1275,7 +1351,11 @@ pub struct PassiveSession {
     /// confident `0 ms` round trip. `None` makes "this observer was never told
     /// the time" a fact a consumer has to handle rather than a plausible
     /// measurement it cannot detect.
-    observed_at: Option<u64>,
+    ///
+    /// Kept in NANOSECONDS, and the millisecond reading every older accessor
+    /// returns is this divided by [`NANOS_PER_MILLI`]. One stored value rather
+    /// than a pair, so the two readings cannot drift apart.
+    observed_at_ns: Option<u64>,
     /// R3054 — the lease each direction's SENDER announced in its own `Open`, in
     /// milliseconds, `None` until that direction's `Open` was read.
     ///
@@ -1284,9 +1364,9 @@ pub struct PassiveSession {
     /// whether a direction has gone quiet is the one its sender announced.
     lease_ms: [Option<u64>; 2],
     /// R3054 — the capture instant of the last message record this direction
-    /// produced, in the observer's milliseconds, `None` while nothing with a
-    /// clock was read. See [`HalfFacts::last_seen_ms`].
-    last_seen_ms: [Option<u64>; 2],
+    /// produced, `None` while nothing with a clock was read. See
+    /// [`HalfFacts::last_seen_ns`]; the millisecond reading is derived from it.
+    last_seen_ns: [Option<u64>; 2],
     /// R3054 — whether this direction carried a `Close`.
     close_seen: [bool; 2],
     /// R311y609 (C12) — last SN seen per `[direction][conduit]`, where the
@@ -1457,9 +1537,9 @@ impl Default for PassiveSession {
                 // patch level.
                 ReassemblyDispatcher::new(ReassemblyConfig::new(PASSIVE_CHAIN_QUOTA, u64::MAX))
             }),
-            observed_at: None,
+            observed_at_ns: None,
             lease_ms: [None; 2],
-            last_seen_ms: [None; 2],
+            last_seen_ns: [None; 2],
             close_seen: [false; 2],
             #[cfg(feature = "codec-frame")]
             sn_last: [[None; SN_CONDUITS]; 2],
@@ -1575,15 +1655,42 @@ impl PassiveSession {
     /// one instant they can be counted; see
     /// [`crate::reassembly_dispatch::ReassemblyDispatcher::sweep_counting`].
     pub fn observe_at_counting(&mut self, now_ms: u64) -> ChainLoss {
-        self.observed_at = Some(now_ms);
+        // The sweep is handed the caller's own millisecond rather than the
+        // value read back out of the nanosecond clock: the two are equal for
+        // every real instant, and only differ where the multiplication
+        // saturates, which is a clock nobody has.
+        self.advance_clock(now_ms.saturating_mul(NANOS_PER_MILLI), now_ms)
+    }
+
+    /// The same, for a source that knows its instants to the NANOSECOND.
+    ///
+    /// The clock then keeps all of them, and every frame the observer produces
+    /// carries them in [`PassiveFrame::observed_at_ns`]. Reassembly deadlines
+    /// are still counted in whole milliseconds, because that is the unit they
+    /// are configured in; the sweep is handed this instant rounded down.
+    pub fn observe_at_nanos(&mut self, now_ns: u64) -> usize {
+        self.observe_at_nanos_counting(now_ns).chains
+    }
+
+    /// [`Self::observe_at_nanos`], reporting the bytes that went with the
+    /// chains as well as their number, as [`Self::observe_at_counting`] does.
+    pub fn observe_at_nanos_counting(&mut self, now_ns: u64) -> ChainLoss {
+        self.advance_clock(now_ns, now_ns / NANOS_PER_MILLI)
+    }
+
+    /// The one place the observation clock moves. `sweep_ms` is the instant the
+    /// reassembly deadlines are judged against.
+    fn advance_clock(&mut self, now_ns: u64, sweep_ms: u64) -> ChainLoss {
+        self.observed_at_ns = Some(now_ns);
         #[cfg(feature = "reassembly")]
         {
-            let mut loss = self.reasm[0].sweep_counting(now_ms);
-            loss.absorb(self.reasm[1].sweep_counting(now_ms));
+            let mut loss = self.reasm[0].sweep_counting(sweep_ms);
+            loss.absorb(self.reasm[1].sweep_counting(sweep_ms));
             loss
         }
         #[cfg(not(feature = "reassembly"))]
         {
+            let _ = sweep_ms;
             ChainLoss::default()
         }
     }
@@ -1635,13 +1742,19 @@ impl PassiveSession {
     /// IS the pre-clock value. A consumer that must tell "never told" from
     /// "told, at zero" reads [`Self::observed_at`] instead.
     pub fn now_ms(&self) -> u64 {
-        self.observed_at.unwrap_or(0)
+        self.observed_at().unwrap_or(0)
     }
 
-    /// R311y615 (§1.1f) — the observation instant, or `None` when this observer
-    /// was never given one.
+    /// R311y615 (§1.1f) — the observation instant in milliseconds, or `None`
+    /// when this observer was never given one.
     pub fn observed_at(&self) -> Option<u64> {
-        self.observed_at
+        self.observed_at_ns.map(|ns| ns / NANOS_PER_MILLI)
+    }
+
+    /// The observation instant to the nanosecond, or `None` when this observer
+    /// was never given one. [`Self::observed_at`] is this divided down.
+    pub fn observed_at_nanos(&self) -> Option<u64> {
+        self.observed_at_ns
     }
 
     /// The current inferred context. Read it BESIDE a frame rather than after
@@ -1706,6 +1819,34 @@ impl PassiveSession {
     /// read. Every caller already loops until [`PassiveStall`], so this widens
     /// what those loops see without any of them changing.
     pub fn next_frame(&mut self, direction: Direction) -> Result<PassiveFrame, PassiveStall> {
+        self.next_frame_with(direction, &|_| None)
+    }
+
+    /// [`Self::next_frame`], with the instants of the bytes supplied by the
+    /// source that holds them.
+    ///
+    /// `instant_of` answers, for an offset in this direction's stream (the
+    /// coordinate [`PassiveFrame::stream_offset`] is written in), the capture
+    /// instant in nanoseconds of the packet that carried the byte there, or
+    /// `None` when the source cannot say. Each frame is stamped with the answer
+    /// for ITS FIRST BYTE -- the byte its row names, `stream_offset +
+    /// prefix_width + unit_offset` (see [`PassiveFrame::observed_at_ns`]); where
+    /// there is none, with the observer's own clock, which is what plain
+    /// `next_frame` has always done.
+    ///
+    /// # Why the observer cannot work it out for itself
+    ///
+    /// It is handed bytes, not packets. The clock it holds is the instant of the
+    /// LAST packet pushed, and a byte stream decodes later than it arrives
+    /// whenever a segment waits behind a hole or for a late neighbour: stamped
+    /// with that clock, a record read at the end of the capture reports the end
+    /// of the capture, however early its packet was. The source is the layer
+    /// that knows which packet carried which byte, so it says.
+    pub fn next_frame_with(
+        &mut self,
+        direction: Direction,
+        instant_of: &dyn Fn(usize) -> Option<u64>,
+    ) -> Result<PassiveFrame, PassiveStall> {
         if let Some(frame) = self.pending[usize::from(direction == Direction::B)].pop_front() {
             return Ok(frame);
         }
@@ -1776,6 +1917,12 @@ impl PassiveSession {
         stream.buf.drain(..width + payload_len);
         stream.consumed += width + payload_len;
         let resync = stream.pending_resync.take();
+        // A message's instant is that of ITS first byte, which the walk names as
+        // an offset from the unit's first byte (the length prefix, at
+        // `stream_offset`). The observer's own clock stands in only where the
+        // source could not say.
+        let clock = self.observed_at_ns;
+        let at = |from_unit_start: usize| instant_of(stream_offset + from_unit_start).or(clock);
 
         // A byte STREAM is a unicast link by construction — zenoh has no
         // multicast stream transport — so `inadmissible_on_link` cannot arise
@@ -1784,10 +1931,14 @@ impl PassiveSession {
             .decode_framing_unit(
                 direction,
                 &body,
-                // The one caller that counts BYTES: `stream.consumed` is where
-                // this unit's length prefix stood in the direction's stream.
-                Anchor::bytes(stream_offset),
-                width,
+                UnitSource {
+                    // The one caller that counts BYTES: `stream.consumed` is
+                    // where this unit's length prefix stood in the direction's
+                    // stream.
+                    anchor: Anchor::bytes(stream_offset),
+                    prefix_width: width,
+                    instant_of: &at,
+                },
                 LinkHandshake::Present,
                 resync,
             )
@@ -1848,26 +1999,50 @@ impl PassiveSession {
     /// what the caller counted, and the two agree only for as long as no link
     /// arrives that frames without a prefix over a stream. A caller that knows
     /// which number it handed in is the only party that does.
+    ///
+    /// `source.instant_of` is how the walk learns when a message was captured:
+    /// it is asked, for a byte, how far that byte stands from the unit's FIRST
+    /// byte, and answers the capture instant in nanoseconds of the packet that
+    /// carried it. Each message is stamped with the answer for ITS first byte
+    /// ([`PassiveFrame::observed_at_ns`]). The caller supplies it, because only
+    /// the caller knows which packet a byte came from; where it knows nothing it
+    /// answers with the observer's own clock.
     fn decode_framing_unit(
         &mut self,
         direction: Direction,
         bytes: &[u8],
-        anchor: Anchor,
-        prefix_width: usize,
+        source: UnitSource<'_>,
         handshake: LinkHandshake,
         mut resync: Option<StreamResync>,
     ) -> Vec<PassiveFrame> {
+        let UnitSource {
+            anchor,
+            prefix_width,
+            instant_of,
+        } = source;
         let Anchor {
             offset,
             space: offset_space,
         } = anchor;
+        // The unit's own first byte, past the prefix: the instant of a unit
+        // that is not read message by message (one that failed to decompress,
+        // and the lz4 arm below, whose messages sit in a buffer this reader made
+        // and have no byte on the wire to ask about).
+        let unit_instant = instant_of(prefix_width);
         // R3054 — every unit that reaches this walk produces at least one
-        // record, decodable or not, so this is the one place a direction's
-        // last-seen instant is written. It is `None` until the observer was
-        // given a clock, and an observer that has one never loses it, so there
-        // is no earlier reading for a clockless unit to erase.
+        // record, decodable or not, so this is where a direction's last-seen
+        // instant is written. It is `None` until the observer was given a
+        // clock, and an observer that has one never loses it, so there is no
+        // earlier reading for a clockless unit to erase.
+        //
+        // The record's own instant, which for a unit that waited behind a hole
+        // is the instant of its packet and not of the moment it was read. The
+        // LATEST such instant: records of one direction come out in stream
+        // order, and a segment captured out of order can put an earlier packet
+        // behind a later one, which must not make the direction look to have
+        // fallen silent.
         let seat = usize::from(direction == Direction::B);
-        self.last_seen_ms[seat] = self.observed_at;
+        self.note_last_seen(seat, unit_instant);
         // The ceiling is on what the WIRE carried, so it is judged on these
         // bytes and not on anything decompressed out of them.
         let exceeds_negotiated_batch = self.exceeds_batch(bytes.len());
@@ -1913,7 +2088,8 @@ impl PassiveSession {
                         #[cfg(feature = "codec-frame")]
                         sn_verdict: None,
                         resync: resync.take(),
-                        observed_at_ms: self.observed_at,
+                        observed_at_ms: unit_instant.map(|ns| ns / NANOS_PER_MILLI),
+                        observed_at_ns: unit_instant,
                         reserved_header_bits: 0,
                         decompressed: None,
                     }];
@@ -2014,6 +2190,17 @@ impl PassiveSession {
             } else {
                 None
             };
+            // THIS message's instant: the packet that carried ITS first byte,
+            // the byte its row's `first_byte` names. A batch can span packets,
+            // so the unit's front is not enough; a decompressed message sits in
+            // a buffer this reader made and has no wire byte to ask about, so it
+            // takes the unit's.
+            let instant = if decompressed {
+                unit_instant
+            } else {
+                instant_of(prefix_width + pos)
+            };
+            self.note_last_seen(seat, instant);
             out.push(PassiveFrame {
                 direction,
                 stream_offset: offset,
@@ -2032,7 +2219,8 @@ impl PassiveSession {
                 #[cfg(feature = "codec-frame")]
                 sn_verdict,
                 resync: resync.take(),
-                observed_at_ms: self.observed_at,
+                observed_at_ms: instant.map(|ns| ns / NANOS_PER_MILLI),
+                observed_at_ns: instant,
                 reserved_header_bits: reserved,
                 decompressed: own,
             });
@@ -2049,6 +2237,21 @@ impl PassiveSession {
             pos += consumed;
         }
         out
+    }
+
+    /// Record that `seat`'s direction produced a record captured at `instant`.
+    ///
+    /// Keeps the LATEST instant: one direction's records come out in stream
+    /// order, and a segment captured out of order can put an earlier packet
+    /// behind a later one, which must not make the direction look to have
+    /// fallen silent. `None` leaves what is held, since an observer that has a
+    /// clock never loses it and a clockless record has no earlier reading to
+    /// erase.
+    fn note_last_seen(&mut self, seat: usize, instant: Option<u64>) {
+        self.last_seen_ns[seat] = match (self.last_seen_ns[seat], instant) {
+            (Some(held), Some(this)) => Some(held.max(this)),
+            (held, this) => this.or(held),
+        };
     }
 
     /// R311y631 (§1.2b) — bytes of a framing unit no decoded message accounts
@@ -2079,7 +2282,8 @@ impl PassiveSession {
         let seat = usize::from(direction == Direction::B);
         HalfFacts {
             lease_ms: self.lease_ms[seat],
-            last_seen_ms: self.last_seen_ms[seat],
+            last_seen_ms: self.last_seen_ns[seat].map(|ns| ns / NANOS_PER_MILLI),
+            last_seen_ns: self.last_seen_ns[seat],
             close_seen: self.close_seen[seat],
         }
     }
@@ -2299,6 +2503,25 @@ impl PassiveSession {
         offset: usize,
         handshake: LinkHandshake,
     ) -> Vec<PassiveFrame> {
+        self.next_datagram_at(direction, bytes, offset, handshake, self.observed_at_ns)
+    }
+
+    /// [`Self::next_datagram_on`], with the capture instant of the unit stated
+    /// by the caller, in nanoseconds, instead of read off the observer's clock.
+    ///
+    /// For a source whose units are not delivered in the packet that carried
+    /// them: a WebSocket message is read out of a byte stream, and the packet of
+    /// its first byte is known to the layer that reassembled the stream and to
+    /// no one else. The datagram links pass the observer's clock, which for
+    /// them IS the packet's instant.
+    pub fn next_datagram_at(
+        &mut self,
+        direction: Direction,
+        bytes: &[u8],
+        offset: usize,
+        handshake: LinkHandshake,
+        instant: Option<u64>,
+    ) -> Vec<PassiveFrame> {
         // `prefix_width` 0 rather than one of the two stream widths: a datagram
         // has no prefix, and reporting 2 here would be a measurement of
         // nothing. `resync` `None`: a datagram link has no framing to lose, so
@@ -2318,7 +2541,19 @@ impl PassiveSession {
         // it a second time, from a match over its message lists, and the serial
         // line was labelled with the answer the OTHER caller of this function
         // deserved.
-        self.decode_framing_unit(direction, bytes, Anchor::packet(offset), 0, handshake, None)
+        self.decode_framing_unit(
+            direction,
+            bytes,
+            UnitSource {
+                anchor: Anchor::packet(offset),
+                prefix_width: 0,
+                // One instant for the whole unit: a datagram IS one packet, and
+                // a ws message's first byte was resolved by the caller.
+                instant_of: &|_| instant,
+            },
+            handshake,
+            None,
+        )
     }
 
     /// R311y585 (A5) — did this frame's wire length break the negotiated
@@ -2337,6 +2572,13 @@ impl PassiveSession {
     /// load-bearing in exactly one place and it is a real capture: the Open
     /// that establishes a compressed session is itself uncompressed, and the
     /// first frame after it is not.
+    ///
+    /// A fragment chain is timed by the OBSERVER's clock and not by the
+    /// message's own instant ([`PassiveFrame::observed_at_ns`]): the deadline
+    /// sweep that expires chains runs on that clock, and a chain's age has to be
+    /// measured on the clock that does the expiring. What a record SAYS about
+    /// when it was captured and when this reader judges a chain stale are two
+    /// questions, and only the first was ever wrong.
     #[cfg(feature = "codec-frame")]
     fn decode_carried(
         &mut self,
@@ -2378,6 +2620,9 @@ impl PassiveSession {
                 };
                 let markers_on = self.context.fragmentation_markers();
                 let idx = usize::from(direction == Direction::B);
+                // Read BEFORE the router is borrowed: the clock and the router
+                // are both fields of `self`.
+                let now_ms = self.now_ms();
                 let router = &mut self.reasm[idx];
                 router.set_fragmentation_markers(markers_on);
                 let mut joined: Option<Vec<u8>> = None;
@@ -2401,7 +2646,7 @@ impl PassiveSession {
                     // and a deadline armed at 0 against the default
                     // `u64::MAX` window is unreachable — so this is the
                     // previous behaviour until someone supplies a clock.
-                    self.observed_at.unwrap_or(0),
+                    now_ms,
                     |bytes| joined = Some(bytes.to_vec()),
                 );
                 match joined {
@@ -2951,6 +3196,7 @@ mod tests {
             HalfFacts {
                 lease_ms: Some(10_000),
                 last_seen_ms: Some(2_000),
+                last_seen_ns: Some(2_000_000_000),
                 close_seen: false
             }
         );
@@ -2959,6 +3205,7 @@ mod tests {
             HalfFacts {
                 lease_ms: Some(20_000),
                 last_seen_ms: Some(2_500),
+                last_seen_ns: Some(2_500_000_000),
                 close_seen: false
             }
         );
@@ -2972,6 +3219,7 @@ mod tests {
             HalfFacts {
                 lease_ms: Some(10_000),
                 last_seen_ms: Some(2_000),
+                last_seen_ns: Some(2_000_000_000),
                 close_seen: false
             },
             "the other direction's half is untouched by a Close"
@@ -2981,6 +3229,7 @@ mod tests {
             HalfFacts {
                 lease_ms: Some(20_000),
                 last_seen_ms: Some(9_000),
+                last_seen_ns: Some(9_000_000_000),
                 close_seen: true
             }
         );
@@ -3003,6 +3252,161 @@ mod tests {
         s.next_frame(Direction::B).expect("init ack");
         assert_eq!(s.half(Direction::B).last_seen_ms, Some(700));
         assert_eq!(s.half(Direction::A).last_seen_ms, None);
+    }
+
+    /// A unit is stamped with the instant its SOURCE says its first byte was
+    /// captured at, and not with the observer's clock, which is wherever the
+    /// last pushed packet left it.
+    ///
+    /// The observer's clock is set LATE on purpose (9 s) and the source's answer
+    /// early (1.23 s): a stamp taken from the clock reads 9 s and fails here,
+    /// which is the whole of claim A in one unit. The offset the source is asked
+    /// about is asserted too, because an answer to the wrong byte would pass a
+    /// test that ignored the question.
+    #[test]
+    fn a_unit_is_stamped_with_its_first_bytes_instant_and_not_the_observers_clock() {
+        let mut s = PassiveSession::new();
+        s.observe_at_nanos(9_000_000_123);
+        let unit = framed(&init_wire(false, Vec::new()), 2);
+        s.push(Direction::A, &unit);
+        let asked = core::cell::Cell::new(usize::MAX);
+        let f = s
+            .next_frame_with(Direction::A, &|offset| {
+                asked.set(offset);
+                Some(1_234_567_891)
+            })
+            .expect("init syn");
+        assert_eq!(
+            asked.get(),
+            PREFIX_WIDTH_UNIVERSAL,
+            "asked about the message's first byte: past the length prefix, at the unit's start"
+        );
+        assert_eq!(f.observed_at_ns, Some(1_234_567_891));
+        assert_eq!(
+            f.observed_at_ms,
+            Some(1_234),
+            "the millisecond reading, rounded down"
+        );
+        assert_eq!(s.half(Direction::A).last_seen_ns, Some(1_234_567_891));
+        assert_eq!(s.half(Direction::A).last_seen_ms, Some(1_234));
+        assert_eq!(
+            s.observed_at_nanos(),
+            Some(9_000_000_123),
+            "reading a unit's instant off the source does not move the observer's clock"
+        );
+
+        // The CONTROL: the same unit through plain `next_frame` takes the
+        // observer's clock, as it always has.
+        let mut plain = PassiveSession::new();
+        plain.observe_at_nanos(9_000_000_123);
+        plain.push(Direction::A, &unit);
+        let g = plain.next_frame(Direction::A).expect("init syn");
+        assert_eq!(g.observed_at_ns, Some(9_000_000_123));
+        assert_eq!(g.observed_at_ms, Some(9_000));
+    }
+
+    /// Two messages of ONE batch are each stamped by their own first byte: the
+    /// source is asked about the second message's offset, and a batch that
+    /// crosses a packet boundary between its messages reports two instants.
+    /// The answer here is a function of the offset alone, so a stamp taken once
+    /// per unit gives both messages the first's and fails.
+    #[test]
+    fn each_message_of_a_batch_is_stamped_by_its_own_first_byte() {
+        let mut s = PassiveSession::new();
+        let keepalive = crate::wire_const::T_MID_KEEP_ALIVE;
+        s.push(Direction::A, &framed(&[keepalive, keepalive], 2));
+        let at = |offset: usize| Some(offset as u64 * 1_000);
+        let first = s.next_frame_with(Direction::A, &at).expect("first");
+        let second = s.next_frame_with(Direction::A, &at).expect("second");
+        assert_eq!((first.batch_index, second.batch_index), (0, 1));
+        assert_eq!(
+            (first.observed_at_ns, second.observed_at_ns),
+            (Some(2_000), Some(3_000)),
+            "past a two-byte prefix, at byte 0 and byte 1 of the unit's body"
+        );
+        assert_eq!(
+            s.half(Direction::A).last_seen_ns,
+            Some(3_000),
+            "the direction was last heard from at its latest record"
+        );
+    }
+
+    /// Where the source cannot say, the observer's clock stands in; where
+    /// neither can, the frame has no instant. And a direction's last-seen
+    /// instant is the LATEST its records carried, so a record captured out of
+    /// order does not make the direction look to have gone quiet.
+    #[test]
+    fn a_source_with_no_answer_falls_back_and_last_seen_keeps_the_latest() {
+        let mut s = PassiveSession::new();
+        s.push(Direction::A, &framed(&init_wire(false, Vec::new()), 2));
+        let none = s
+            .next_frame_with(Direction::A, &|_| None)
+            .expect("init syn");
+        assert_eq!(
+            (none.observed_at_ns, none.observed_at_ms),
+            (None, None),
+            "no source answer and no clock: no instant"
+        );
+
+        s.observe_at_nanos(5_000_000_000);
+        s.push(Direction::A, &framed(&open_wire_leased(false, 10_000), 2));
+        let fallback = s
+            .next_frame_with(Direction::A, &|_| None)
+            .expect("open syn");
+        assert_eq!(fallback.observed_at_ns, Some(5_000_000_000));
+
+        // A later unit whose packet was captured EARLIER than the last one.
+        s.push(Direction::A, &framed(&close_wire(), 2));
+        let late = s
+            .next_frame_with(Direction::A, &|_| Some(7_000_000_000))
+            .expect("close");
+        assert_eq!(late.observed_at_ns, Some(7_000_000_000));
+        s.push(Direction::A, &framed(&close_wire(), 2));
+        let early = s
+            .next_frame_with(Direction::A, &|_| Some(6_000_000_000))
+            .expect("close again");
+        assert_eq!(early.observed_at_ns, Some(6_000_000_000));
+        assert_eq!(
+            s.half(Direction::A).last_seen_ns,
+            Some(7_000_000_000),
+            "the latest instant any record carried, not the last record's"
+        );
+    }
+
+    /// The millisecond reading is the nanosecond one divided down, for every
+    /// frame and every entry point -- one stored value, two spellings -- and the
+    /// millisecond entry point widens without moving a value.
+    #[test]
+    fn the_millisecond_clock_is_the_nanosecond_one_rounded_down() {
+        for ns in [
+            0u64,
+            999_999,
+            1_000_000,
+            1_999_999,
+            1_700_000_000_123_456_789,
+        ] {
+            let mut s = PassiveSession::new();
+            s.observe_at_nanos(ns);
+            s.push(Direction::A, &framed(&init_wire(false, Vec::new()), 2));
+            let f = s.next_frame(Direction::A).expect("init syn");
+            assert_eq!(f.observed_at_ns, Some(ns));
+            assert_eq!(f.observed_at_ms, Some(ns / 1_000_000), "ns = {ns}");
+            assert_eq!(s.observed_at(), Some(ns / 1_000_000));
+            assert_eq!(s.observed_at_nanos(), Some(ns));
+            let half = s.half(Direction::A);
+            assert_eq!(half.last_seen_ns, Some(ns));
+            assert_eq!(half.last_seen_ms, Some(ns / 1_000_000));
+        }
+
+        let mut by_ms = PassiveSession::new();
+        by_ms.observe_at(1_234);
+        assert_eq!(by_ms.observed_at(), Some(1_234));
+        assert_eq!(
+            by_ms.observed_at_nanos(),
+            Some(1_234_000_000),
+            "the millisecond entry point keeps no digits it was not given"
+        );
+        assert_eq!(PassiveSession::new().observed_at_nanos(), None);
     }
 
     fn unit_ext(id: u8) -> ExtEntryOwned {

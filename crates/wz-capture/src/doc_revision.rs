@@ -775,6 +775,61 @@ pub const DOCUMENT_HISTORY: &[DocumentShape] = &[
         planes: CENSUS_R6_PLANES,
         carries: CENSUS_R15_CARRIES,
     },
+    // A LATENCY IS KEPT TO THE NANOSECOND, AND A RECORD BEHIND A HOLE IS TIMED BY
+    // ITS OWN PACKET.
+    //
+    // FOUR KEYS ARRIVE and nothing retires: `min_ns`, `max_ns`, `mean_ns` and
+    // `total_ns`, on every latency object the exchange plane writes (`first_reply`
+    // and `completion`, in each row and in the totals), beside the four `*_ms`
+    // keys that were there. They are the same samples measured without the
+    // truncation the `*_ms` figures carry: an interval was the difference of its
+    // two ends' MILLISECOND readings, each end truncated before the subtraction,
+    // so a round trip of 0.575 ms read 1 ms when it straddled a millisecond
+    // boundary and 0 ms when it did not, and a mean over such intervals was a
+    // mean of whole numbers each wrong by up to a millisecond. `mean_ns` is the
+    // mean of the unrounded intervals (`total_ns` over `count`, truncated to a
+    // whole nanosecond).
+    //
+    // THE `*_ms` KEYS KEEP THEIR MEANING AND THEIR VALUES. A `*_ms` key is
+    // milliseconds, each end truncated, exactly as before; nothing here changes
+    // a unit under an old name. A consumer wanting the unrounded figure reads the
+    // `*_ns` sibling, and one that does not is unaffected. The selector terms
+    // `first_reply`, `completion`, `time` and `elapsed` are millisecond terms and
+    // are judged on the millisecond readings, as they were.
+    //
+    // THE INTEGER RULE. The four `*_ns` cells follow the rule of revision 16 and
+    // fields 23: a bare number up to 2^53 - 1 and the same digits in a string
+    // above it. `total_ns` is a SUM, and 2^53 nanoseconds is 104 days of summed
+    // latency, which a long capture of many exchanges reaches; the minimum, the
+    // maximum and the mean are an interval or an average of them and do not, but
+    // they take the same door so that one cell never reads as a number in one
+    // document and a string in the next. `null` still means nothing was sampled
+    // (a minimum, a maximum or a mean), and `total_ns` is `0` then, as `total_ms`
+    // is. The `*_ms` cells stay bare numbers: a millisecond span is a count of
+    // what the capture holds.
+    //
+    // ⚠ AND VALUES MOVE under keys that do not, in the class revisions 8 and 9
+    // set the precedent for. A record decoded from bytes that waited behind a
+    // hole in a TCP stream carried the instant of the capture's END (the
+    // observer's clock when the hole was given up on), not its own packet's, so
+    // an exchange whose request, reply or close sat behind a hole measured its
+    // latency against the wrong clock, by as much as the capture is long, and the
+    // `time` and `elapsed` terms judged those records at it. A record now carries
+    // the instant of the packet that carried its first byte, and every figure
+    // above follows. A capture with no hole, and none whose segments arrived out
+    // of order, reads as it did.
+    //
+    // A consumer pinned to 16 loses nothing: the four keys are additions an
+    // object-by-name reader does not see.
+    DocumentShape {
+        document: CENSUS,
+        revision: 17,
+        keys: CENSUS_R17_KEYS,
+        retiring: &[],
+        families: CENSUS_R15_FAMILIES,
+        planes: CENSUS_R6_PLANES,
+        carries: CENSUS_R15_CARRIES,
+    },
     DocumentShape {
         document: FIELDS,
         revision: 1,
@@ -1648,6 +1703,60 @@ pub const DOCUMENT_HISTORY: &[DocumentShape] = &[
         planes: &[],
         carries: FIELDS_R28_CARRIES,
     },
+    // A RECORD'S TIME IS ITS OWN PACKET'S, TO THE NANOSECOND, AND A FLOW'S ROWS
+    // COME OUT IN CAPTURE ORDER.
+    //
+    // NO KEY NAME MOVES and nothing retires: this row reads revision 30's tables
+    // unchanged. What moves is VALUES under stationary keys and the ORDER of the
+    // rows, the class revisions 17, 18, 21, 26, 27 and 30 set the precedent for.
+    // So, as for those, THIS ROW IS THE WHOLE NOTICE a consumer gets, and it
+    // names the cells.
+    //
+    // 1. `halves[].last_seen_ts_ns` is the instant of the packet that carried
+    // the first byte of the last record that direction produced, and carries every
+    // nanosecond digit the capture recorded. It was the observer's clock when the
+    // record was decoded truncated to the millisecond and widened back, so it ended
+    // in six zeros, and for a record that had waited behind a hole in a TCP stream
+    // it was the instant the capture ended. A classic pcap's microsecond digits
+    // appear now; a file with no hole whose clock is whole milliseconds reads as it
+    // did.
+    //
+    // 2. The `selected` word of a row under a selector with a `time`, `elapsed`
+    // or `delay` term is judged on the same instant, so a row behind a hole that
+    // was judged at the capture's end is judged at its own packet.
+    //
+    // 3. THE ORDER OF A STREAM FLOW'S `messages` is capture order: the packet
+    // that carried each row's first byte (`first_byte.packet`), then its place in
+    // that packet. It was the order the session decoded the messages in, which is
+    // the order their last bytes arrived in, and the two parted whenever a message
+    // completed after one that began later: a unit spanning packets completes after
+    // a unit of the other direction that sat wholly inside one of them, and the
+    // bytes behind a hole are decoded when it is stepped over. The key is total
+    // (no two rows of a flow share a packet and a place), so the order is
+    // deterministic. A datagram flow's rows were always in capture order, the
+    // scouting rows still follow its transport rows, and the flows are still
+    // listed stream flows first and then datagram flows. `shown` and `omitted`
+    // count from the front of this order, so a ceiling holds back the rows the
+    // capture took last.
+    //
+    // What does NOT move: `seq`, which is the order the handle first issued a row
+    // in and promises no position, the four join coordinates, and the chain
+    // identities, which are folded in decode order as the router saw the
+    // fragments.
+    //
+    // A consumer pinned to 30 loses nothing but a reading it could not rely on: it
+    // may now rely on a row's place. A consumer that stored rows by position in
+    // `messages` must not carry that position across a revision; one that stored
+    // them by their coordinates is unaffected.
+    DocumentShape {
+        document: FIELDS,
+        revision: 31,
+        keys: FIELDS_R31_KEYS,
+        retiring: &[],
+        families: FIELDS_R20_FAMILIES,
+        planes: &[],
+        carries: FIELDS_R28_CARRIES,
+    },
     DocumentShape {
         document: SUMMARY,
         revision: 1,
@@ -2000,6 +2109,27 @@ pub const DOCUMENT_HISTORY: &[DocumentShape] = &[
         planes: &[],
         carries: SELECTION_R1_CARRIES,
     },
+    // THE SAME MOVE AS FIELDS REVISION 31, ON THE DOCUMENT THAT HOLDS ONLY THE
+    // VERDICTS.
+    //
+    // No key arrives, no word is added, nothing retires. Two things move, both
+    // written by the code the field document uses, so the two documents cannot
+    // part: a stream flow's rows come out in CAPTURE order (the packet that
+    // carried each row's first byte, then its place in that packet) instead of
+    // the order the session decoded them in, and a row's `selected` word under a
+    // selector with a `time`, `elapsed` or `delay` term is judged at the instant
+    // of the row's own packet instead of the instant of the capture's end for a
+    // record that waited behind a hole. A datagram flow's rows were always in
+    // capture order. See [`SELECTION_R3_KEYS`].
+    DocumentShape {
+        document: SELECTION,
+        revision: 3,
+        keys: SELECTION_R3_KEYS,
+        retiring: &[],
+        families: SELECTION_R1_FAMILIES,
+        planes: &[],
+        carries: SELECTION_R1_CARRIES,
+    },
     // What a live handle still holds, beside the ceilings that bound it.
     //
     // A document of its own because it answers a question no other document's
@@ -2028,6 +2158,28 @@ pub const DOCUMENT_HISTORY: &[DocumentShape] = &[
         document: RETENTION,
         revision: 2,
         keys: RETENTION_R2_KEYS,
+        retiring: &[],
+        families: &[],
+        planes: &[],
+        carries: &[],
+    },
+    // THE INSTANT KEEPS ITS NANOSECONDS.
+    //
+    // NO KEY NAME MOVES and nothing retires. `oldest_ts_ns` was a whole number of
+    // milliseconds widened to nanoseconds (it ended in six zeros) and is now the
+    // capture's own instant with every digit it recorded, the figure a drained
+    // record's `ts_ns` carries, so the two compare as the capture's own
+    // timestamps and not as two roundings of them. It is also the instant of the
+    // packet that carried the oldest retained message's FIRST byte: a message
+    // decoded from bytes that waited behind a hole in a TCP stream used to be
+    // stamped with the instant the capture ended, which made an old message look
+    // new. The JSON type and the integer rule are revision 2's, and `null` still
+    // means no retained message has a clock. This row is the whole notice (see
+    // fields revision 31).
+    DocumentShape {
+        document: RETENTION,
+        revision: 3,
+        keys: RETENTION_R3_KEYS,
         retiring: &[],
         families: &[],
         planes: &[],
@@ -8726,6 +8878,14 @@ pub const SELECTION_R1_CARRIES: &[KeyCarries] = &[
 /// the defect, and a cached `unjudged` against such a row is stale.
 pub const SELECTION_R2_KEYS: &[&str] = SELECTION_R1_KEYS;
 
+/// The selection document's key set at revision 3: revision 2's, by name.
+///
+/// IDENTICAL, and aliased for the reason revision 2 is. What moved is the ORDER
+/// of a stream flow's rows (decode order to capture order) and the instant a
+/// clock term judges a row at, neither of which is a key; the number is the
+/// whole notice and the row says which rows.
+pub const SELECTION_R3_KEYS: &[&str] = SELECTION_R2_KEYS;
+
 /// The retention document's key set at revision 1.
 ///
 /// The envelope, the `held` group with its nested `fullest_window`, and the
@@ -8767,6 +8927,13 @@ pub const RETENTION_R1_KEYS: &[&str] = &[
 /// The revision moved the JSON type of one value (`oldest_ts_ns`: a number or
 /// null, now a number, a string or null), not a key; see the row.
 pub const RETENTION_R2_KEYS: &[&str] = RETENTION_R1_KEYS;
+
+/// The retention document's key set at revision 3: revision 2's, by name.
+///
+/// The revision moved the PRECISION of one value (`oldest_ts_ns`: whole
+/// milliseconds, now every nanosecond the capture recorded), not a key and not
+/// its type; see the row.
+pub const RETENTION_R3_KEYS: &[&str] = RETENTION_R2_KEYS;
 
 /// The health document's key set at revision 1: the envelope, the summary's
 /// whole `health` object, and `flows_seen`.
@@ -9355,6 +9522,16 @@ pub const FIELDS_R28_KEYS: &[&str] = &[
 /// is the whole notice, and the row says which cells.
 pub const FIELDS_R30_KEYS: &[&str] = FIELDS_R28_KEYS;
 
+/// The field document's key set at revision 31: revision 30's, by name.
+///
+/// IDENTICAL, and aliased for [`FIELDS_R27_KEYS`]' reason. What moved is the
+/// VALUE of `halves[].last_seen_ts_ns` (the packet's own instant, with its
+/// nanoseconds), the `selected` word under a clock term for a row behind a hole,
+/// and the ORDER of a stream flow's `messages`. No axis in this module can
+/// express any of the three; the revision number is the whole notice, and the
+/// row says which cells.
+pub const FIELDS_R31_KEYS: &[&str] = FIELDS_R30_KEYS;
+
 /// What each field-document family's WORD decides at revision 28 — revision 20's,
 /// with `state` changed: see [`PAYLOAD_STATE_CARRIES_R28`]. Written out in full,
 /// because a slice cannot be spliced in a `const` and an alias would make the
@@ -9500,6 +9677,190 @@ pub const FIELDS_R29_KEYS: &[&str] = FIELDS_R28_KEYS;
 /// The revision moved the JSON type of the wire-sourced `id` values (a number,
 /// now a number or a string), not a key; see the row.
 pub const CENSUS_R16_KEYS: &[&str] = CENSUS_R15_KEYS;
+
+/// The census document's key set at revision 17: revision 16's and the four
+/// nanosecond siblings of the latency object's `*_ms` figures, `max_ns`,
+/// `mean_ns`, `min_ns` and `total_ns`.
+///
+/// MEASURED, like every set here: `the_census_documents_key_set_is_pinned` prints
+/// what the document emits, and the four keys are what that printout gained.
+/// Written out in full and not as an extension of [`CENSUS_R16_KEYS`] because a
+/// `const` cannot concatenate two slices, and a pin that was built by
+/// concatenation would no longer say what the set is.
+pub const CENSUS_R17_KEYS: &[&str] = &[
+    "a",
+    "a_to_b",
+    "aborted_capacity_overflow",
+    "aborted_out_of_order",
+    "aborted_sender_dropped",
+    "aborted_superseded",
+    "addr",
+    "admissible",
+    "aggregate",
+    "anchor_intervals",
+    "anchors_exact",
+    "answers",
+    "answers_in_scope",
+    "asked_at",
+    "asker",
+    "asks",
+    "at",
+    "at_most_bytes",
+    "attributed_bytes",
+    "b",
+    "b_to_a",
+    "begun",
+    "by_kind",
+    "bytes",
+    "cancelled_at",
+    "caps",
+    "cause",
+    "children",
+    "closed_at",
+    "completed",
+    "completion",
+    "consistent",
+    "continued",
+    "contradictions",
+    "count",
+    "declaration",
+    "declarations",
+    "declared",
+    "declared_at",
+    "declarer",
+    "declarer_zid",
+    "dels",
+    "descriptors",
+    "document",
+    "dropped_by_limits",
+    "elsewhere",
+    "errs",
+    "evidence",
+    "exchanges",
+    "family",
+    "first",
+    "first_anchor",
+    "first_reply",
+    "flow",
+    "flows",
+    "fragment_chains",
+    "frames",
+    "frames_per_flow",
+    "gaps",
+    "halted_batches",
+    "hello",
+    "high",
+    "id",
+    "inadmissible",
+    "init",
+    "interests",
+    "join",
+    "judged",
+    "keyexpr",
+    "keyexprs",
+    "keys",
+    "kind",
+    "last",
+    "last_anchor",
+    "link",
+    "links",
+    "liveliness_token",
+    "locators",
+    "low",
+    "matched",
+    "max_flows_per_table",
+    "max_ms",
+    "max_ns",
+    "max_scout_askers",
+    "mean_ms",
+    "mean_ns",
+    "messages",
+    "min_ms",
+    "min_ns",
+    "mismatched",
+    "mode",
+    "name",
+    "narrowed_by_selector",
+    "nodes",
+    "non_monotonic",
+    "not_as_declared",
+    "offset_space",
+    "orphan_answers",
+    "orphan_responses",
+    "orphan_withdrawals",
+    "payload_bytes",
+    "payload_bytes_ceiling",
+    "payloads",
+    "planes",
+    "port",
+    "prefix",
+    "puts",
+    "queries",
+    "queryable",
+    "queryables",
+    "reason",
+    "records",
+    "references",
+    "refused_missing_start_marker",
+    "refused_peer_quota",
+    "refused_pool_exhausted",
+    "rejected",
+    "replies",
+    "requests",
+    "restricted",
+    "revision",
+    "rows",
+    "scout",
+    "scout_askers",
+    "scouting",
+    "selection",
+    "share_bp",
+    "silent",
+    "skipped",
+    "skipped_packets",
+    "solicited_by",
+    "source_ahead_of_observer",
+    "space",
+    "stream_bytes",
+    "stream_bytes_per_direction",
+    "subscriber",
+    "subscribers",
+    "subtrees",
+    "tokens",
+    "total_ms",
+    "total_ns",
+    "total_payload_bytes",
+    "totals",
+    "unanswered",
+    "unattributed_bytes",
+    "unattributed_records",
+    "unattributed_requests",
+    "unclaimed",
+    "unclaimed_exact",
+    "unclosed",
+    "undecidable",
+    "undecided",
+    "undeclarations",
+    "undecompressible_batches",
+    "unjudged_answers",
+    "unknown_ids",
+    "unlocatable_records",
+    "unmeasured_payloads",
+    "unparsed_bytes",
+    "unread",
+    "unresolvable_fragments",
+    "unresolved",
+    "unresolved_declarations",
+    "unresolved_records",
+    "unsized_payloads",
+    "unstamped",
+    "walked_records",
+    "whatami",
+    "why",
+    "wire_bytes",
+    "withdrawn_at",
+    "zid",
+];
 
 /// The summary document's key set at revision 5: revision 4's, by name.
 ///
@@ -10869,7 +11230,13 @@ mod tests {
             // To 16 when the wire-sourced `id` values became a number or a
             // string: the JSON type moved under stationary keys, which no axis
             // here can see, so this entry is the notice.
-            (CENSUS, 16u32),
+            // To 17 when every latency object gained `min_ns`, `max_ns`,
+            // `mean_ns` and `total_ns`, the same samples without the
+            // truncation of each end to its millisecond: four keys, no word
+            // moves and nothing retires; and a record behind a hole in a TCP
+            // stream began to be timed by its own packet, which moves values
+            // under stationary keys.
+            (CENSUS, 17u32),
             // R2175 (open-debt item 552) — the field document moved to 2 when
             // its PAYLOAD PLANE joined the pin (fifteen keys revision 1 had
             // never covered) and its first three value families were declared.
@@ -10964,7 +11331,12 @@ mod tests {
             // node (the wire has no M bit there) and the row that carries the
             // declaration began to resolve its scope the way the table binds it:
             // a node and values under stationary keys, so this entry is the notice.
-            (FIELDS, 30),
+            // To 31 when a record's time became its own packet's, to the
+            // nanosecond (`halves[].last_seen_ts_ns`, and the instant a clock
+            // term judges a row at), and a stream flow's `messages` came out in
+            // capture order: values and an order under stationary keys, so this
+            // entry is the notice.
+            (FIELDS, 31),
             // R2121 (open-debt item 460) — the summary moved to 2 when it
             // gained `inert_counters`; R2122 (item 238) to 3 when its
             // `framing` group stopped disagreeing with the capture report's.
@@ -10997,11 +11369,16 @@ mod tests {
             // The selector's verdict over the field document's rows.
             // To 2 on the same move as fields 27: the word on a `Request`, a
             // `ResponseFinal` and a del row stopped being `unjudged`.
-            (SELECTION, 2),
+            // To 3 on the same move as fields 31: a stream flow's rows came out
+            // in capture order and a clock term judged a row at its own
+            // packet's instant.
+            (SELECTION, 3),
             // What a live handle holds, beside its ceilings.
             // To 2 when `oldest_ts_ns` became a number, a string or null: a
             // nanosecond clock is past 2^53.
-            (RETENTION, 2),
+            // To 3 when `oldest_ts_ns` kept its nanoseconds: it was a whole
+            // number of milliseconds widened.
+            (RETENTION, 3),
             // What a live handle has lost or doubted: the summary's `health`
             // object and the count of flows its stream counters are over.
             // To 2 when it gained `datagram_sequence`, the sequence group over

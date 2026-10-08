@@ -906,8 +906,22 @@ fn push_chains(c: &crate::agg::FragmentChains, out: &mut String) {
     );
 }
 
+/// One latency distribution: its `count`, then every figure twice.
+///
+/// The `*_ms` keys come first and are what they have always been -- whole
+/// milliseconds, each interval being the difference of its two ends' MILLISECOND
+/// readings -- so a 0.575 ms round trip is a `1` or a `0` there depending on
+/// where the millisecond boundary fell. The `*_ns` keys that follow are the
+/// same samples as the difference of the two ends' nanosecond readings, with
+/// nothing truncated, and a mean taken from them is the mean of the intervals.
+/// They follow the integer rule every 64-bit clock cell here follows: a bare
+/// number up to 2^53 - 1 and a string of the same digits above it.
+///
+/// `pub(crate)` so [`crate::report`] writes the same object by the same
+/// function: it had its own copy, and two writers of one object is how its
+/// keys would have come apart.
 #[cfg(feature = "network-codecs")]
-fn push_latency(l: &crate::exchange::LatencySamples, out: &mut String) {
+pub(crate) fn push_latency(l: &crate::exchange::LatencySamples, out: &mut String) {
     let _ = write!(out, "{{\"count\":{}", l.count());
     for (key, value) in [
         ("min_ms", l.min_ms()),
@@ -925,7 +939,21 @@ fn push_latency(l: &crate::exchange::LatencySamples, out: &mut String) {
             }
         }
     }
-    let _ = write!(out, ",\"total_ms\":{}}}", l.total_ms());
+    let _ = write!(out, ",\"total_ms\":{}", l.total_ms());
+    for (key, value) in [
+        ("min_ns", l.min_ns()),
+        ("max_ns", l.max_ns()),
+        ("mean_ns", l.mean_ns()),
+    ] {
+        let _ = write!(out, ",\"{key}\":");
+        match value {
+            Some(v) => u64_into(v, out),
+            None => out.push_str("null"),
+        }
+    }
+    out.push_str(",\"total_ns\":");
+    u64_into(l.total_ns(), out);
+    out.push('}');
 }
 
 /// R311y855 — `pub(crate)` so [`crate::fields_json`] renders a flow key the

@@ -21,6 +21,22 @@
 //! coordinates are the SAME ones, and the rows are the field document's rows in
 //! the same order, with the two differences stated below.
 //!
+//! # The order of the rows
+//!
+//! Rows are grouped by flow, stream flows first and then datagram flows, each
+//! flow's scouting rows after its transport rows. Within a stream flow they are
+//! in CAPTURE order since revision 3: the packet that carried the row's first
+//! byte, then its place in that packet, which is
+//! [`crate::FlowDissection::capture_order`] and is the order the field document
+//! writes the same flow's `messages` in. It was the order the session decoded
+//! the messages in before, which is the order their last bytes arrived in, and
+//! the two parted whenever a message completed after one that began later. A
+//! datagram flow's rows were always in capture order: a datagram is one packet.
+//!
+//! The key is total, so the order is deterministic and never depends on how many
+//! `drain` calls the rows' records arrived in or on any hashing: no two rows of
+//! a flow share a packet and a place.
+//!
 //! # Where its rows differ from the field document's
 //!
 //! Both are the field document's limitation and not this one's.
@@ -147,7 +163,12 @@ pub fn selection_json_where_coordinated(
     for (i, flow) in d.flows().iter().enumerate() {
         let list = lists.stream.get(i).copied();
         let list_id = list.and_then(|l| coordinates.list_id(l));
-        for frame in &flow.frames {
+        // CAPTURE order, the field document's own: see
+        // `FlowDissection::capture_order`. One function orders the rows of both
+        // documents, so "the same rows in the same order" is a property of the
+        // code and not of two walks agreeing.
+        for position in flow.capture_order() {
+            let frame = &flow.frames[position];
             let verdict = match (verdicts.as_ref(), list) {
                 (Some(census), Some(list)) => Some(row_verdict_of(census, list, frame)),
                 _ => None,

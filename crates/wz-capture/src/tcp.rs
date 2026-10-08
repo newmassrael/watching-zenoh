@@ -49,6 +49,30 @@ pub struct OffsetRun {
     /// position inside the packet is not, and a reader highlighting it would
     /// have to re-derive the overlap this assembler already resolved.
     pub segment_offset: usize,
+    /// The capture instant of that packet, in nanoseconds, as the caller stated
+    /// it ([`StreamAssembler::push_at`]); `None` when it stated none.
+    ///
+    /// Recorded here, with the packet, because this map is the one place that
+    /// still knows which packet a byte came from once the bytes are a stream:
+    /// a record read out of the stream asks it for the instant of its first
+    /// byte, and the answer is the same packet [`StreamAssembler::origin_of_offset`]
+    /// names for that byte, by construction.
+    pub at_ns: Option<u64>,
+}
+
+/// A segment held ahead of the stream, waiting for the bytes before it.
+#[derive(Debug)]
+struct HeldSegment {
+    seq: u32,
+    packet_index: usize,
+    payload: Vec<u8>,
+    /// [`StreamAssembler::segments_pushed`] at the moment it was held — the
+    /// clock the gap's patience is measured on.
+    held_at: usize,
+    /// The capture instant of its packet, kept for the run it will become: a
+    /// segment released by a hole being filled, or stepped over, is stamped with
+    /// the instant it was captured at and not the instant it was released.
+    at_ns: Option<u64>,
 }
 
 /// What a reassembler did with one segment. Reported rather than swallowed:
@@ -113,11 +137,11 @@ pub struct StreamAssembler {
     runs: Vec<OffsetRun>,
     /// Segments ahead of `next_seq`, kept until the gap before them fills.
     ///
-    /// The trailing `usize` is [`Self::segments_pushed`] AT THE MOMENT THE
-    /// SEGMENT WAS HELD — the clock the gap's patience is measured on
-    /// (R311y609). A wall clock would not do: a capture is replayed, not
-    /// lived, and a file read at 100x must reach the same verdict.
-    pending: Vec<(u32, usize, Vec<u8>, usize)>,
+    /// Each carries [`Self::segments_pushed`] AT THE MOMENT IT WAS HELD — the
+    /// clock the gap's patience is measured on (R311y609). A wall clock would
+    /// not do: a capture is replayed, not lived, and a file read at 100x must
+    /// reach the same verdict.
+    pending: Vec<HeldSegment>,
     fin_seen: bool,
     rst_seen: bool,
     /// R311y597 — segments carrying ONLY bytes already delivered.
@@ -268,7 +292,7 @@ impl StreamAssembler {
     fn lowest_pending(&self, next: u32) -> Option<u32> {
         self.pending
             .iter()
-            .map(|(seq, ..)| *seq)
+            .map(|held| held.seq)
             .filter(|seq| seq.wrapping_sub(next) as i32 > 0)
             .min_by_key(|seq| seq.wrapping_sub(next))
     }
@@ -376,8 +400,41 @@ impl StreamAssembler {
             })
     }
 
-    /// Feed one segment belonging to THIS direction.
+    /// The capture instant, in nanoseconds, of the packet that carried the byte
+    /// at `stream_offset` -- the instant [`Self::push_at`] was given with it.
+    ///
+    /// `None` where [`Self::origin_of_offset`] has no packet to name (the byte
+    /// was trimmed, or is not in the stream) and where the caller stated no
+    /// instant. It reads the SAME run the packet lookup reads, so the packet a
+    /// row names and the instant its record carries cannot come from two
+    /// different runs.
+    pub fn instant_of_offset(&self, stream_offset: usize) -> Option<u64> {
+        if stream_offset < self.discarded {
+            return None;
+        }
+        let idx = self
+            .runs
+            .partition_point(|r| r.stream_offset + r.len <= stream_offset);
+        self.runs
+            .get(idx)
+            .filter(|r| stream_offset >= r.stream_offset)
+            .and_then(|r| r.at_ns)
+    }
+
+    /// Feed one segment belonging to THIS direction, stating no instant for it.
     pub fn push(&mut self, seg: &Segment) -> SegmentOutcome {
+        self.push_at(seg, None)
+    }
+
+    /// Feed one segment belonging to THIS direction, with the capture instant of
+    /// its packet in nanoseconds.
+    ///
+    /// The instant travels with the segment's bytes wherever they wait: a
+    /// segment held ahead of a hole keeps it, and the run it becomes -- when the
+    /// hole fills, or is stepped over on patience or at the end of the capture --
+    /// carries the instant it was CAPTURED at, however much later it is
+    /// delivered. See [`Self::instant_of_offset`].
+    pub fn push_at(&mut self, seg: &Segment, at_ns: Option<u64>) -> SegmentOutcome {
         if seg.rst {
             self.rst_seen = true;
         }
@@ -408,7 +465,7 @@ impl StreamAssembler {
             }
         };
 
-        let outcome = self.absorb(next, seg.seq, &seg.payload, seg.packet_index);
+        let outcome = self.absorb(next, seg.seq, &seg.payload, seg.packet_index, at_ns);
         match outcome {
             SegmentOutcome::Duplicate => self.retransmits += 1,
             SegmentOutcome::HeldOutOfOrder => self.out_of_order += 1,
@@ -439,8 +496,8 @@ impl StreamAssembler {
         let oldest_wait = self
             .pending
             .iter()
-            .filter(|(seq, ..)| seq.wrapping_sub(next) as i32 > 0)
-            .map(|(.., held_at)| *held_at)
+            .filter(|held| held.seq.wrapping_sub(next) as i32 > 0)
+            .map(|held| held.held_at)
             .min();
         let Some(held_at) = oldest_wait else {
             return;
@@ -484,6 +541,7 @@ impl StreamAssembler {
         seq: u32,
         payload: &[u8],
         packet_index: usize,
+        at_ns: Option<u64>,
     ) -> SegmentOutcome {
         // Sequence-space distance, wrapping: how far this segment starts
         // AHEAD of what the stream expects. Read as a signed delta so a
@@ -491,8 +549,13 @@ impl StreamAssembler {
         // segment 4 GiB ahead, which cannot occur on a real flow.
         let delta = seq.wrapping_sub(next) as i32;
         if delta > 0 {
-            self.pending
-                .push((seq, packet_index, payload.to_vec(), self.segments_pushed));
+            self.pending.push(HeldSegment {
+                seq,
+                packet_index,
+                payload: payload.to_vec(),
+                held_at: self.segments_pushed,
+                at_ns,
+            });
             return SegmentOutcome::HeldOutOfOrder;
         }
         // delta <= 0: the segment starts at or before what we expect.
@@ -518,6 +581,7 @@ impl StreamAssembler {
             len: fresh.len(),
             packet_index,
             segment_offset: already,
+            at_ns,
         });
         self.next_seq = Some(next.wrapping_add(fresh.len() as u32));
         SegmentOutcome::Appended {
@@ -533,16 +597,16 @@ impl StreamAssembler {
                 Some(n) => n,
                 None => return,
             };
-            let found = self.pending.iter().position(|(seq, _, payload, _)| {
-                let delta = seq.wrapping_sub(next) as i32;
+            let found = self.pending.iter().position(|held| {
+                let delta = held.seq.wrapping_sub(next) as i32;
                 // Contiguous or overlapping-from-behind, and carrying at
                 // least one byte the stream has not seen.
-                delta <= 0 && ((-delta) as usize) < payload.len()
+                delta <= 0 && ((-delta) as usize) < held.payload.len()
             });
             match found {
                 Some(i) => {
-                    let (seq, packet_index, payload, _) = self.pending.remove(i);
-                    self.absorb(next, seq, &payload, packet_index);
+                    let held = self.pending.remove(i);
+                    self.absorb(next, held.seq, &held.payload, held.packet_index, held.at_ns);
                 }
                 None => return,
             }

@@ -114,15 +114,19 @@ pub const NO_TIMESTAMP: u64 = u64::MAX;
 #[repr(C)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct WzDissectRecord {
-    /// The reader's clock AS OF this message, in nanoseconds, or
-    /// [`NO_TIMESTAMP`] if it was never set.
+    /// When this message was CAPTURED, in nanoseconds: the instant of the packet
+    /// that carried its first byte, or [`NO_TIMESTAMP`] if no clock was ever
+    /// set.
     ///
     /// Two things a consumer has to know, and they look alike:
     ///
-    /// * the clock is in MILLISECONDS, so the value is the nanosecond reading
-    ///   that was pushed, truncated to the millisecond it fell in and widened
-    ///   back. Narrowing at the boundary rather than in the caller keeps ONE
-    ///   rounding rule in the system;
+    /// * it is the capture's own time for the message, to the nanosecond that
+    ///   was pushed, and NOT the clock as of the moment this reader decoded it:
+    ///   a message decoded from bytes that waited behind a hole carries its own
+    ///   packet's instant and not the instant the capture ended. It was that
+    ///   decoding-time clock truncated to the millisecond until field-document
+    ///   revision 31, and a consumer that divides by a million sees what it
+    ///   always saw;
     /// * a push carrying [`NO_TIMESTAMP`] leaves the clock WHERE IT STOOD, so a
     ///   record can carry the instant of an earlier packet. That is a different
     ///   fact from having no clock at all, and only the second reports the
@@ -465,15 +469,18 @@ impl LiveDissection {
     /// observer's clock where it is — the honest answer, and the behaviour
     /// `push_packet` has always had for a caller with nothing to say about
     /// time.
+    ///
+    /// The reading goes in whole: every nanosecond digit the caller's clock
+    /// gave comes back out on the records this packet's messages produce.
     pub fn push(&mut self, link_type: u32, ts_ns: u64, bytes: &[u8]) {
-        let ts_millis = if ts_ns == NO_TIMESTAMP {
+        let ts_nanos = if ts_ns == NO_TIMESTAMP {
             None
         } else {
-            Some(ts_ns / 1_000_000)
+            Some(ts_ns)
         };
         let at = self.dissection.next_packet_index();
         self.dissection
-            .push_packet_at(link_type, at, ts_millis, bytes);
+            .push_packet_at_nanos(link_type, at, ts_nanos, bytes);
     }
 
     /// The packet index the NEXT push will anchor its messages to, which on a
@@ -1022,14 +1029,13 @@ fn record_of(
         flags |= FLAG_AFTER_RESYNC;
     }
     WzDissectRecord {
-        ts_ns: match frame.observed_at_ms {
-            // Widened back from the millisecond clock this reader keeps. The
-            // caller's sub-millisecond digits are gone and the record says so
-            // by carrying a whole number of milliseconds, which is a better
-            // answer than a precision this reader never had. The one widening
-            // rule is `millis_as_ns`, shared with the retention document's
-            // `oldest_ts_ns` so the two compare directly.
-            Some(ms) => wz_capture::retention_json::millis_as_ns(ms),
+        ts_ns: match frame.observed_at_ns {
+            // The instant of the packet that carried the message's first
+            // byte, to the nanosecond the caller's clock gave it. It is the
+            // same figure the retention document's `oldest_ts_ns` and a flow's
+            // `halves[*].last_seen_ts_ns` are read from, so the three compare
+            // directly.
+            Some(ns) => ns,
             None => NO_TIMESTAMP,
         },
         flow_id,
@@ -1261,8 +1267,8 @@ fn advance(
 /// admissible messages, a resync of framing), and a scouting message has none.
 fn record_of_scouting(datagram: &ScoutingDatagram, flow_id: u64, list_id: u64) -> WzDissectRecord {
     WzDissectRecord {
-        ts_ns: match datagram.observed_at_ms {
-            Some(ms) => wz_capture::retention_json::millis_as_ns(ms),
+        ts_ns: match datagram.observed_at_ns {
+            Some(ns) => ns,
             None => NO_TIMESTAMP,
         },
         flow_id,

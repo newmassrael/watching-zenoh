@@ -2176,13 +2176,16 @@ pub unsafe extern "C" fn wz_dissect_live_open(
 /// own clock is then left where it is, which is the honest answer and what
 /// every message decoded from that packet will report.
 ///
-/// # The clock is MILLISECONDS, and the argument is not
+/// # The clock keeps the NANOSECOND, and the packet's own instant is what it keeps
 ///
-/// This reader keeps time in milliseconds (`PassiveFrame::observed_at_ms`), so
-/// a nanosecond reading is truncated to the millisecond it falls in and comes
-/// back as that millisecond. The argument is nanoseconds because that is what a
-/// tap's own clock hands it, and doing the narrowing HERE keeps one rounding
-/// rule in the system instead of one per consumer.
+/// This reader keeps time in nanoseconds (`PassiveFrame::observed_at_ns`), and
+/// every millisecond figure is that divided by a million, rounded down. The
+/// reading comes back, to the digit, on the records the packet's messages
+/// produce, as the instant of the packet that carried each message's FIRST byte:
+/// a message decoded later, from bytes that waited behind a hole in a TCP
+/// stream, still carries the instant of the packet it began in. Pass the instant
+/// the packet was CAPTURED at, which is what a tap's own clock hands it, and
+/// not the instant of this call.
 ///
 /// # The packet index
 ///
@@ -3074,8 +3077,9 @@ pub unsafe extern "C" fn wz_dissect_live_selection(
 ///
 /// The capture instant of the oldest retained message or scouting datagram, in
 /// the unit and on the clock a drained record's `ts_ns` uses, so the two
-/// compare directly; `null` when nothing held has a clock, which is a different
-/// fact from a clock reading zero.
+/// compare directly, to the nanosecond (retention revision 3; it was a whole
+/// number of milliseconds before); `null` when nothing held has a clock, which
+/// is a different fact from a clock reading zero.
 ///
 /// # A READ, and the handle is `const` to say so
 ///
@@ -11795,6 +11799,49 @@ mod tests {
              which is a different fact from having no clock"
         );
         unsafe { wz_dissect_live_close(stalled) };
+    }
+
+    /// THE CONSUMER'S TWO CLAIMS, THROUGH THE ABI: a record is timed by its own
+    /// packet to the nanosecond, including one that waited behind a hole.
+    ///
+    /// Ten one-byte-body units (a framed KeepAlive is three bytes), the second
+    /// lost, each pushed at an instant that is a whole number of neither
+    /// milliseconds nor microseconds and is past 2^53, as a real clock's is. The
+    /// handle is then ended, which is what releases the bytes that waited. Every
+    /// record carries the instant its own packet was pushed at, to the digit;
+    /// before the change the nine behind the hole all read the instant of the
+    /// last push, truncated to the millisecond.
+    #[test]
+    fn a_record_behind_a_hole_carries_its_packets_nanosecond_through_the_abi() {
+        let at = |packet: u64| 1_700_000_000_123_456_789u64 + packet * 1_000_003;
+        let unit = [1u8, 0, KEEPALIVE[0]];
+        let handle = open_live(WZ_DISSECT_LIMITS_NONE).expect("NONE is a preset");
+        let mut seq = 1000u32;
+        let mut pushed = Vec::new();
+        for i in 0..10u64 {
+            if i != 1 {
+                push_live(handle, at(pushed.len() as u64), &tcp_packet(seq, &unit));
+                pushed.push(at(pushed.len() as u64));
+            }
+            seq += unit.len() as u32;
+        }
+        unsafe { wz_dissect_live_end(handle) };
+
+        let mut records = drain_live(handle, 32);
+        assert_eq!(records.len(), pushed.len(), "one record per surviving unit");
+        records.sort_by_key(|r| r.anchor);
+        let stamps: Vec<u64> = records.iter().map(|r| r.ts_ns).collect();
+        assert_eq!(
+            stamps, pushed,
+            "each record is timed by the packet of its own first byte, and keeps \
+             every digit it was pushed with"
+        );
+        assert!(
+            stamps.iter().any(|ns| ns % 1_000_000 != 0),
+            "the fixture's instants are not whole milliseconds, so a truncating \
+             stamp would differ"
+        );
+        unsafe { wz_dissect_live_close(handle) };
     }
 
     /// R2102 — A CEILING THAT TRIMS BEFORE THE DRAIN IS COUNTED, NOT HIDDEN.

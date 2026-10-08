@@ -299,6 +299,11 @@ mod proto_schema_tests;
 /// that.
 #[cfg(test)]
 mod raweth_capture_fixture;
+/// What a record's time is and how finely it is kept: the stamp a record behind
+/// a hole in a byte stream takes, and the nanosecond clock beside the
+/// millisecond one.
+#[cfg(test)]
+mod record_clock_tests;
 /// R311y615 (§1.1f) — the EXPORT plane: the analysis tables rendered for
 /// something that is not a Rust caller, with their loss counters structurally
 /// attached.
@@ -334,6 +339,7 @@ use wz_session_core::parse_error::InboundParseError;
 // what it was already holding. A public API that returns types it does not
 // export makes its callers re-derive the dependency graph; this is the same
 // reasoning that re-exported `messages` above.
+use wz_session_core::passive::NANOS_PER_MILLI;
 pub use wz_session_core::passive::{
     Direction, FlowContext, PassiveFrame, PassiveSession, PassiveStall,
 };
@@ -1071,6 +1077,7 @@ impl DatagramDissection {
         HalfObservation {
             lease_ms: facts.lease_ms,
             last_seen_ms: facts.last_seen_ms,
+            last_seen_ns: facts.last_seen_ns,
             close_seen: facts.close_seen,
             fin_seen: None,
             rst_seen: None,
@@ -1225,6 +1232,10 @@ pub struct ScoutingDatagram {
     /// consumer merging the two lists on time compares one clock with itself.
     /// `None` for a source with no clock, exactly as for a frame.
     pub observed_at_ms: Option<u64>,
+    /// The same instant to the nanosecond, as
+    /// [`PassiveFrame::observed_at_ns`] is for a frame: `observed_at_ms` is this
+    /// divided by a million, rounded down, and `None` exactly when it is.
+    pub observed_at_ns: Option<u64>,
     /// The datagram payload's length in bytes. A scouting message
     /// is never batched, so the payload IS its framing unit; the record door
     /// reports it as the unit length, as it does for a transport datagram.
@@ -1459,6 +1470,23 @@ fn idx_direction(index: usize) -> Direction {
     } else {
         Direction::B
     }
+}
+
+/// The capture instant a decrypted frame is timed by: the instant of the packet
+/// that carried the record its first byte came out of.
+///
+/// `spans` is the list [`remap_decrypted_offsets`] reads, and `instants` is, for
+/// each span in the same order, the instant of the packet holding that record's
+/// first byte. The span is chosen by the rule the remap uses -- the last one
+/// starting at or before the plaintext offset -- so the instant a frame carries
+/// and the packet its remapped offset names are the same record's.
+fn instant_of_plaintext(
+    spans: &[(usize, usize)],
+    instants: &[Option<u64>],
+    plain_offset: usize,
+) -> Option<u64> {
+    let after = spans.partition_point(|(plain_at, _)| *plain_at <= plain_offset);
+    instants.get(after.checked_sub(1)?).copied().flatten()
 }
 
 /// R311y661 (§1.2a) — rewrite decrypted frames' offsets from PLAINTEXT space
@@ -1921,6 +1949,58 @@ impl FlowDissection {
         frame.stream_offset + frame.prefix_width + frame.unit_offset
     }
 
+    /// The positions of this flow's messages in CAPTURE ORDER: the order of the
+    /// packets that carried their first bytes, and within one packet the order
+    /// of the bytes.
+    ///
+    /// # Why the list is not already in this order
+    ///
+    /// [`Self::frames`] is in the order the session DECODED the messages, which
+    /// is the order their last bytes arrived in. The two orders part whenever a
+    /// message completes after one that began later: a unit that spans packets
+    /// completes after a unit of the other direction that sat wholly inside one
+    /// of them, a segment captured ahead of its predecessor is held until the
+    /// predecessor comes, and the bytes behind a hole are decoded when the hole
+    /// is stepped over or the capture ends. A consumer reading the rows for what
+    /// the capture saw, in the order it saw it, wants the second order.
+    ///
+    /// # The key, and its tiebreak
+    ///
+    /// `(packet, position)`: the packet holding the message's first byte (the
+    /// one its row's `first_byte.packet` names), then its place in this list.
+    /// Two messages of one packet are one direction's bytes and so were decoded
+    /// in byte order, which makes the list position the byte position, and the
+    /// key is TOTAL: no two messages share a position. A message whose first
+    /// byte no packet can be named for (the run map was trimmed, or the stream
+    /// is not the capture's own bytes) takes the packet of the last message
+    /// before it in the list that had one, which keeps it beside its neighbours
+    /// and never invents a position for it. The same precedent
+    /// [`Dissection::message_frames_in_capture_order`] sets, and the same
+    /// answer for a capture where nothing needs reordering: the identity.
+    ///
+    /// A message decompressed out of an lz4 batch has no byte of its own on the
+    /// wire and is placed by its batch's first byte.
+    ///
+    /// The positions are indexes into [`Self::frames`] as it stands, which move
+    /// when a ceiling trims the list.
+    pub fn capture_order(&self) -> Vec<usize> {
+        let mut keyed: Vec<(usize, usize)> = Vec::with_capacity(self.frames.len());
+        let mut last = 0usize;
+        for (position, frame) in self.frames.iter().enumerate() {
+            let first_byte = if frame.decompressed.is_some() {
+                frame.stream_offset + frame.prefix_width
+            } else {
+                Self::message_at(frame)
+            };
+            last = self.packet_for(frame.direction, first_byte).unwrap_or(last);
+            keyed.push((last, position));
+        }
+        // Total, so unstable is deterministic. Already sorted is the common
+        // case and costs one pass.
+        keyed.sort_unstable();
+        keyed.into_iter().map(|(_, position)| position).collect()
+    }
+
     /// The bytes ONE message of this flow was decoded from, sliced out of the
     /// retained stream.
     ///
@@ -2019,6 +2099,7 @@ impl FlowDissection {
         HalfObservation {
             lease_ms: facts.lease_ms,
             last_seen_ms: facts.last_seen_ms,
+            last_seen_ns: facts.last_seen_ns,
             close_seen: facts.close_seen,
             fin_seen: tcp.then(|| assembler.fin_seen()),
             rst_seen: tcp.then(|| assembler.rst_seen()),
@@ -2562,34 +2643,113 @@ impl FlowDissection {
             // zenoh's ws link reports `is_streamed() == false`, which is why
             // this side calls the datagram entry point at all; the same call
             // now yields every transport message the frame carried.
-            let batch = self.session.next_datagram(direction, &payload, offset);
+            //
+            // And the message is timed by the packet that carried its first
+            // frame's first byte -- the offset it is anchored at -- for the
+            // reason a stream record is: it is decoded when the stream has
+            // delivered it, which can be long after that packet.
+            let instant = self
+                .assembler(direction)
+                .instant_of_offset(offset)
+                .or(self.session.observed_at_nanos());
+            let batch = self.session.next_datagram_at(
+                direction,
+                &payload,
+                offset,
+                wz_session_core::passive::LinkHandshake::Present,
+                instant,
+            );
             self.frames.append(batch);
         }
     }
 
+    /// Feed bytes the assembler delivered into the session, and take every
+    /// message they complete.
+    ///
+    /// Each message is stamped with the capture instant of the packet that
+    /// carried its FIRST byte, read off the assembler's run map by the offset
+    /// the message is anchored at -- the same lookup, in the same map, that
+    /// names the packet a row says it began in. See
+    /// [`PassiveFrame::observed_at_ns`] for the rule and
+    /// [`PassiveSession::next_frame_with`] for why the session cannot do this
+    /// itself.
     fn feed_stream(&mut self, direction: Direction, bytes: &[u8]) {
-        // R311y709 — reaches a decoder. This is also the entry point decrypted
-        // PLAINTEXT arrives at, which is why `unfed` saturates: a TLS flow
-        // recovers ciphertext and feeds the smaller thing inside it.
-        self.residue.fed += bytes.len() as u64;
-        self.session.push(direction, bytes);
-        loop {
-            let mut progressed = false;
-            for dir in [Direction::A, Direction::B] {
-                loop {
-                    match self.session.next_frame(dir) {
-                        Ok(frame) => {
-                            self.frames.push(frame);
-                            progressed = true;
-                        }
-                        Err(PassiveStall::NeedMoreBytes) => break,
-                        Err(PassiveStall::Desynchronised { .. }) => break,
+        let Self {
+            session,
+            frames,
+            residue,
+            low_to_high,
+            high_to_low,
+            ..
+        } = self;
+        stream_into_session(
+            session,
+            frames,
+            residue,
+            direction,
+            bytes,
+            &|dir, offset| match dir {
+                Direction::A => low_to_high.instant_of_offset(offset),
+                Direction::B => high_to_low.instant_of_offset(offset),
+            },
+        );
+    }
+
+    /// [`Self::feed_stream`] for bytes that are not the assembler's: the
+    /// plaintext a TLS flow decrypted into, whose offsets are a different space
+    /// from the TCP stream's. `instant_of` resolves an offset in THAT space.
+    fn feed_decrypted_stream(
+        &mut self,
+        direction: Direction,
+        bytes: &[u8],
+        instant_of: &dyn Fn(Direction, usize) -> Option<u64>,
+    ) {
+        let Self {
+            session,
+            frames,
+            residue,
+            ..
+        } = self;
+        stream_into_session(session, frames, residue, direction, bytes, instant_of);
+    }
+}
+
+/// The body both stream feeds share: push the bytes, then drain every frame
+/// either direction can now yield until a pass yields none.
+///
+/// A function over the three fields it touches rather than a method, so a
+/// caller can hand it a `instant_of` that borrows the flow's assemblers while
+/// the session is borrowed mutably -- two disjoint fields of one struct that a
+/// method taking `&mut self` could not show the borrow checker are disjoint.
+fn stream_into_session(
+    session: &mut PassiveSession,
+    frames: &mut messages::MessageList,
+    residue: &mut ByteResidue,
+    direction: Direction,
+    bytes: &[u8],
+    instant_of: &dyn Fn(Direction, usize) -> Option<u64>,
+) {
+    // R311y709 — reaches a decoder. This is also the entry point decrypted
+    // PLAINTEXT arrives at, which is why `unfed` saturates: a TLS flow
+    // recovers ciphertext and feeds the smaller thing inside it.
+    residue.fed += bytes.len() as u64;
+    session.push(direction, bytes);
+    loop {
+        let mut progressed = false;
+        for dir in [Direction::A, Direction::B] {
+            loop {
+                match session.next_frame_with(dir, &|offset| instant_of(dir, offset)) {
+                    Ok(frame) => {
+                        frames.push(frame);
+                        progressed = true;
                     }
+                    Err(PassiveStall::NeedMoreBytes) => break,
+                    Err(PassiveStall::Desynchronised { .. }) => break,
                 }
             }
-            if !progressed {
-                return;
-            }
+        }
+        if !progressed {
+            return;
         }
     }
 }
@@ -3251,6 +3411,9 @@ pub struct HalfObservation {
     /// in the observer's milliseconds; `None` while nothing was read with a
     /// clock.
     pub last_seen_ms: Option<u64>,
+    /// The same instant to the nanosecond: `last_seen_ms` is this divided by a
+    /// million, rounded down, and it is `None` exactly when this is.
+    pub last_seen_ns: Option<u64>,
     /// Whether this direction carried a `Close`.
     pub close_seen: bool,
     /// Whether a FIN was observed on this direction. `None` where the flow is
@@ -3987,7 +4150,7 @@ impl Dissection {
     /// that list means. The difference is that the bytes are no longer gone —
     /// they are in the table, and the packet that completes the datagram is
     /// the one that produces frames.
-    fn push_fragment(&mut self, piece: link::IpFragment, ts_millis: Option<u64>) {
+    fn push_fragment(&mut self, piece: link::IpFragment, ts_nanos: Option<u64>) {
         // R311y863 — a LOOP, because completing one datagram can yield a piece
         // of ANOTHER. A reassembled carrier is walked into by
         // `transport_from_ip`, and what it finds inside may itself be a
@@ -4006,7 +4169,12 @@ impl Dissection {
             // the headers the reassembler consumed, and neither can be
             // recovered once the table holds only the body.
             let tunnel_checksum = piece.checksums.tunnel;
-            let Some(done) = self.fragments.push(piece, ts_millis) else {
+            // The fragment table's deadlines are whole milliseconds, like the
+            // reassembly window, so it is handed the millisecond reading.
+            let Some(done) = self
+                .fragments
+                .push(piece, ts_nanos.map(|ns| ns / NANOS_PER_MILLI))
+            else {
                 self.note_skip(packet_index, SkipReason::IpFragmentPending);
                 return;
             };
@@ -4048,12 +4216,17 @@ impl Dissection {
                 // R311y608 — `Udp` unconditionally, and it is not a shortcut:
                 // a raweth frame is recognised BEFORE the IP walk and never has
                 // an IP header to be fragmented.
+                //
+                // The instant is the COMPLETING piece's, which is also the
+                // packet `done.packet_index` places the datagram at: a datagram
+                // reassembled from pieces is positioned and timed by the one
+                // packet at which a reader could first have seen it whole.
                 Ok(Transport::Udp(d) | Transport::RawEth(d)) => {
-                    self.push_datagram(d, ts_millis, DatagramLink::Udp);
+                    self.push_datagram(d, ts_nanos, DatagramLink::Udp);
                     return;
                 }
                 Ok(Transport::Tcp(s)) => {
-                    self.push_segment(s, ts_millis);
+                    self.push_segment(s, ts_nanos);
                     return;
                 }
                 Ok(Transport::IpFragment(inner)) => {
@@ -4823,12 +4996,36 @@ impl Dissection {
             if refusal.is_none() {
                 summary.decrypted += 1;
             }
+            // The instant each opened record's packet was captured at, resolved
+            // while the assembler is still in hand and BEFORE any frame exists:
+            // the plaintext is a different byte space from the TCP stream's, so
+            // the assembler's run map cannot be asked about a plaintext offset,
+            // only about the stream offset of the record it came out of. Both
+            // directions, because feeding one can release frames of the other
+            // (its context may only now be complete), and those are timed in
+            // the OTHER direction's plaintext.
+            let record_instants: [Vec<Option<u64>>; 2] = core::array::from_fn(|index| {
+                spans[index]
+                    .iter()
+                    .map(|(_, stream_offset)| {
+                        flow.assembler(idx_direction(index))
+                            .instant_of_offset(*stream_offset)
+                    })
+                    .collect()
+            });
             for index in 0..2usize {
                 if plaintext[index].is_empty() {
                     continue;
                 }
                 let before = flow.frames.len();
-                flow.feed_stream(idx_direction(index), &plaintext[index]);
+                flow.feed_decrypted_stream(
+                    idx_direction(index),
+                    &plaintext[index],
+                    &|dir, plain_offset| {
+                        let seat = dir_index(dir);
+                        instant_of_plaintext(&spans[seat], &record_instants[seat], plain_offset)
+                    },
+                );
                 // R311y678 — OFFERED here: after the session has framed the
                 // plaintext and BEFORE the remap below rewrites those frames'
                 // coordinates into ciphertext space.
@@ -5314,6 +5511,26 @@ impl Dissection {
         self.push_packet_on(link_type, packet_index, 0, ts_millis, bytes)
     }
 
+    /// [`Self::push_packet_at`] for a source that knows its instants to the
+    /// NANOSECOND.
+    ///
+    /// `ts_nanos` is the capture instant since the Unix epoch, and every digit of
+    /// it is kept: a record's [`wz_session_core::passive::PassiveFrame::observed_at_ns`]
+    /// reads back what was given here, and the millisecond reading of the same
+    /// frame is that divided by a million, rounded down -- which is what the
+    /// millisecond entry point has always been handed, so a source switching
+    /// from one to the other moves no millisecond value. `None` leaves the
+    /// clock where it is, as it does there.
+    pub fn push_packet_at_nanos(
+        &mut self,
+        link_type: u32,
+        packet_index: usize,
+        ts_nanos: Option<u64>,
+        bytes: &[u8],
+    ) {
+        self.push_packet_on_nanos(link_type, packet_index, 0, ts_nanos, bytes)
+    }
+
     /// R311y720 (§D M3) — [`Self::push_packet_at`], naming the capture
     /// INTERFACE the packet arrived on.
     ///
@@ -5329,6 +5546,25 @@ impl Dissection {
         packet_index: usize,
         interface_id: u32,
         ts_millis: Option<u64>,
+        bytes: &[u8],
+    ) {
+        self.push_packet_on_nanos(
+            link_type,
+            packet_index,
+            interface_id,
+            ts_millis.map(|ms| ms.saturating_mul(NANOS_PER_MILLI)),
+            bytes,
+        )
+    }
+
+    /// [`Self::push_packet_on`] for a source that knows its instants to the
+    /// nanosecond; see [`Self::push_packet_at_nanos`].
+    pub fn push_packet_on_nanos(
+        &mut self,
+        link_type: u32,
+        packet_index: usize,
+        interface_id: u32,
+        ts_nanos: Option<u64>,
         bytes: &[u8],
     ) {
         // R2171 (item 547) — FIRST, and on every path: the serial branch below
@@ -5348,10 +5584,10 @@ impl Dissection {
         // `serial`'s `declaring_a_readable_link_type_as_serial_takes_its_\
         // decapsulation_away` is what holds this order down.
         if self.declared_serial_linktypes.contains(&link_type) {
-            self.push_serial(interface_id, packet_index, ts_millis, bytes);
+            self.push_serial(interface_id, packet_index, ts_nanos, bytes);
             return;
         }
-        self.push_packet_inner(link_type, packet_index, ts_millis, bytes)
+        self.push_packet_inner(link_type, packet_index, ts_nanos, bytes)
     }
 
     /// R311y720 (§D M3) — one read of a declared serial line.
@@ -5373,7 +5609,7 @@ impl Dissection {
         &mut self,
         interface_id: u32,
         packet_index: usize,
-        ts_millis: Option<u64>,
+        ts_nanos: Option<u64>,
         bytes: &[u8],
     ) {
         let limit = self.limits.serial_frames_before_attribution;
@@ -5402,7 +5638,7 @@ impl Dissection {
         if settled {
             self.decode_pending_serial();
         }
-        let _ = ts_millis;
+        let _ = ts_nanos;
     }
 
     /// R311y722 — decode whatever the line is holding, under the mapping it has
@@ -5452,7 +5688,7 @@ impl Dissection {
         &mut self,
         link_type: u32,
         packet_index: usize,
-        ts_millis: Option<u64>,
+        ts_nanos: Option<u64>,
         bytes: &[u8],
     ) {
         // R311y638 (§1.1r) — recorded BEFORE decapsulation, so a packet this
@@ -5461,7 +5697,11 @@ impl Dissection {
         // R311y638 (§1.1r) — recorded BEFORE decapsulation, so a packet this
         // reader cannot decode still counts as part of the capture's timeline.
         // It is the capture that started, not the zenoh traffic in it.
-        if let Some(ts) = ts_millis {
+        //
+        // In MILLISECONDS still: `elapsed` is a millisecond term, and the origin
+        // is the millisecond the earliest packet fell in, which is what the
+        // clock gave before it counted nanoseconds.
+        if let Some(ts) = ts_nanos.map(|ns| ns / NANOS_PER_MILLI) {
             self.capture_origin_ms = Some(match self.capture_origin_ms {
                 Some(earliest) => earliest.min(ts),
                 None => ts,
@@ -5483,11 +5723,11 @@ impl Dissection {
             // [`link_handshake`]), and its `Endpoint` is a MAC that no address
             // rule downstream can read.
             Ok(Transport::Udp(d)) => {
-                self.push_datagram(d, ts_millis, DatagramLink::Udp);
+                self.push_datagram(d, ts_nanos, DatagramLink::Udp);
                 return;
             }
             Ok(Transport::RawEth(d)) => {
-                self.push_datagram(d, ts_millis, DatagramLink::RawEth);
+                self.push_datagram(d, ts_nanos, DatagramLink::RawEth);
                 return;
             }
             // R311y603 — a vsock record is a piece of a BYTE STREAM, so it goes
@@ -5495,7 +5735,7 @@ impl Dissection {
             // number, which `push_vsock` synthesises from the flow's own running
             // byte count.
             Ok(Transport::Vsock(r)) => {
-                self.push_vsock(r, ts_millis);
+                self.push_vsock(r, ts_nanos);
                 return;
             }
             // R311y606 — a piece of a fragmented datagram. The table is the
@@ -5504,7 +5744,7 @@ impl Dissection {
             // transport strip a whole datagram takes, so nothing downstream
             // learns that this one arrived in pieces.
             Ok(Transport::IpFragment(f)) => {
-                self.push_fragment(f, ts_millis);
+                self.push_fragment(f, ts_nanos);
                 return;
             }
             Err(reason) => {
@@ -5512,7 +5752,7 @@ impl Dissection {
                 return;
             }
         };
-        self.push_segment(segment, ts_millis);
+        self.push_segment(segment, ts_nanos);
     }
 
     /// Feed one TCP segment to its flow's assembler and the observer behind it.
@@ -5521,7 +5761,7 @@ impl Dissection {
     /// by fragment reassembly takes the identical path. Duplicating it was the
     /// alternative, and the duplicate would have been the copy that forgot the
     /// `retained_from` rebase below.
-    fn push_segment(&mut self, segment: link::Segment, ts_millis: Option<u64>) {
+    fn push_segment(&mut self, segment: link::Segment, ts_nanos: Option<u64>) {
         let packet_index = segment.packet_index;
         self.tally_checksums(&segment.checksums);
         let idx = match self.flows.iter().position(|f| f.flow == segment.flow) {
@@ -5540,7 +5780,7 @@ impl Dissection {
         // `reassembly`; its second is `PassiveFrame::observed_at_ms`, which
         // every build has. A build without `reassembly` sweeps nothing and
         // still stamps its frames.
-        self.advance_clock(idx, ts_millis, FlowKind::Stream);
+        self.advance_clock(idx, ts_nanos, FlowKind::Stream);
         let flow = &mut self.flows[idx];
         // Item 252 — recorded for every segment, a pure ACK included: a
         // keepalive that arrived through a different carrier is exactly as much
@@ -5552,17 +5792,25 @@ impl Dissection {
         } else {
             Direction::B
         };
+        // The instant the segment's bytes will be known by: THIS packet's, or
+        // where the packet carried none, the flow's clock as it stands (sticky,
+        // for the reason `the_capture_clock_is_sticky_and_an_unstamped_packet_\
+        // inherits_it` states). Read AFTER the clock moved, so a stamped packet
+        // gives its own.
+        let at_ns = flow.session.observed_at_nanos();
         let before = flow.assembler(direction).len();
         match direction {
-            Direction::A => flow.low_to_high.push(&segment),
-            Direction::B => flow.high_to_low.push(&segment),
+            Direction::A => flow.low_to_high.push_at(&segment, at_ns),
+            Direction::B => flow.high_to_low.push_at(&segment, at_ns),
         };
         flow.deliver_from(direction, before);
         flow.last_activity = packet_index;
         // R311y713 (§B4) — and the CAPTURE INSTANT beside the file position.
         // `or` and not assignment: a source that stamps some packets and not
         // others must not un-know a time it was told.
-        flow.last_seen_ms = ts_millis.or(flow.last_seen_ms);
+        flow.last_seen_ms = ts_nanos
+            .map(|ns| ns / NANOS_PER_MILLI)
+            .or(flow.last_seen_ms);
         self.enforce_flow_limits(idx);
         self.evict_flows_beyond_cap();
     }
@@ -5576,8 +5824,8 @@ impl Dissection {
     /// expiry tally is not. A build without `reassembly` has no chains, so
     /// `observe_at` answers `0` and there is no counter to fold it into — but
     /// the frames it stamps are exactly as stamped as a full build's.
-    fn advance_clock(&mut self, idx: usize, ts_millis: Option<u64>, kind: FlowKind) {
-        let Some(ms) = ts_millis else {
+    fn advance_clock(&mut self, idx: usize, ts_nanos: Option<u64>, kind: FlowKind) {
+        let Some(ns) = ts_nanos else {
             return;
         };
         // R311y713 (§B6/§B7) — the sweep reports what it dropped, and the flow
@@ -5586,12 +5834,14 @@ impl Dissection {
         // the sweep is the only place that knows.
         let expired = match kind {
             FlowKind::Stream => {
-                let loss = self.flows[idx].session.observe_at_counting(ms);
+                let loss = self.flows[idx].session.observe_at_nanos_counting(ns);
                 self.flows[idx].chain_loss.absorb(loss);
                 loss
             }
             FlowKind::Datagram => {
-                let loss = self.datagram_flows[idx].session.observe_at_counting(ms);
+                let loss = self.datagram_flows[idx]
+                    .session
+                    .observe_at_nanos_counting(ns);
                 self.datagram_flows[idx].chain_loss.absorb(loss);
                 loss
             }
@@ -5686,7 +5936,7 @@ impl Dissection {
     /// far. Retransmission and reordering repair are dead weight on this path
     /// rather than wrong — there is nothing to repair — and the offset map they
     /// come with is the reason to use them anyway.
-    fn push_vsock(&mut self, record: link::VsockRecord, ts_millis: Option<u64>) {
+    fn push_vsock(&mut self, record: link::VsockRecord, ts_nanos: Option<u64>) {
         let idx = match self.flows.iter().position(|f| f.flow == record.flow) {
             Some(i) => i,
             None => {
@@ -5703,7 +5953,7 @@ impl Dissection {
         } else {
             Direction::B
         };
-        self.advance_clock(idx, ts_millis, FlowKind::Stream);
+        self.advance_clock(idx, ts_nanos, FlowKind::Stream);
         let flow = &mut self.flows[idx];
 
         let d = dir_index(direction);
@@ -5739,14 +5989,17 @@ impl Dissection {
             // if that ever stops being true this line is where it shows.
             tunnel: link::Tunnel::none(),
         };
+        let at_ns = flow.session.observed_at_nanos();
         let before = flow.assembler(direction).len();
         match direction {
-            Direction::A => flow.low_to_high.push(&segment),
-            Direction::B => flow.high_to_low.push(&segment),
+            Direction::A => flow.low_to_high.push_at(&segment, at_ns),
+            Direction::B => flow.high_to_low.push_at(&segment, at_ns),
         };
         flow.deliver_from(direction, before);
         flow.last_activity = record.packet_index;
-        flow.last_seen_ms = ts_millis.or(flow.last_seen_ms);
+        flow.last_seen_ms = ts_nanos
+            .map(|ns| ns / NANOS_PER_MILLI)
+            .or(flow.last_seen_ms);
         // Counted on this path too, even though both verdicts are `None` here:
         // a path that skipped the tally would make the six buckets disagree
         // about how many packets the dissection saw.
@@ -5768,7 +6021,7 @@ impl Dissection {
     ///
     /// No buffering and no reassembly, because there is nothing to reassemble
     /// — which is exactly why this is four lines and the TCP path is not.
-    fn push_datagram(&mut self, d: link::Datagram, ts_millis: Option<u64>, link: DatagramLink) {
+    fn push_datagram(&mut self, d: link::Datagram, ts_nanos: Option<u64>, link: DatagramLink) {
         self.tally_checksums(&d.checksums);
         let idx = match self.datagram_flows.iter().position(|f| f.flow == d.flow) {
             Some(i) => i,
@@ -5798,10 +6051,12 @@ impl Dissection {
                 .observed_scout_from(d.source(), self.limits.max_scout_askers);
             self.drops.scout_askers += evicted;
         }
-        self.advance_clock(idx, ts_millis, FlowKind::Datagram);
+        self.advance_clock(idx, ts_nanos, FlowKind::Datagram);
         let flow = &mut self.datagram_flows[idx];
         flow.last_activity = d.packet_index;
-        flow.last_seen_ms = ts_millis.or(flow.last_seen_ms);
+        flow.last_seen_ms = ts_nanos
+            .map(|ns| ns / NANOS_PER_MILLI)
+            .or(flow.last_seen_ms);
         // Item 252 — recorded for EVERY datagram, including one that turns out
         // to be QUIC or scouting. How a packet arrived is a fact about the
         // wire, and gating it on what the payload decoded to would report the
@@ -5889,6 +6144,7 @@ impl Dissection {
                 // The clock was advanced for this datagram above, before the
                 // flow borrow; a transport frame on this flow reads the same.
                 observed_at_ms: flow.session.observed_at(),
+                observed_at_ns: flow.session.observed_at_nanos(),
                 unit_len: d.payload.len(),
             });
             // R311y651 (§4.4) — bounded by the SAME limit the frame list is,
@@ -6088,10 +6344,10 @@ impl Dissection {
         // afterwards would have let that datagram through the zenoh decoder.
         out.declared_quic_ports = quic_udp_ports.to_vec();
         for packet in &file.packets {
-            out.push_packet_at(
+            out.push_packet_at_nanos(
                 file.link_type,
                 packet.index,
-                Some(packet.ts_millis(file.timestamp_unit)),
+                Some(packet.ts_nanos(file.timestamp_unit)),
                 &packet.data,
             );
         }
@@ -6161,11 +6417,11 @@ impl Dissection {
             // R311y720 — the INTERFACE travels with the packet. Only the serial
             // path reads it, and it is the one fact in the file that stands in
             // for which wire of a two-wire line the bytes came off.
-            out.push_packet_on(
+            out.push_packet_on_nanos(
                 packet.link_type,
                 packet.index,
                 packet.interface_id,
-                file.ts_millis(packet),
+                file.ts_nanos(packet),
                 &packet.data,
             );
         }
@@ -6358,11 +6614,11 @@ impl Dissection {
                         // R311y720 — the INTERFACE travels with the packet. A
                         // classic pcap has one, numbered 0, which is also what
                         // `push_packet_at` passes.
-                        dissection.push_packet_on(
+                        dissection.push_packet_on_nanos(
                             f.link_type,
                             f.index,
                             f.interface_id,
-                            f.ts_millis,
+                            f.ts_nanos,
                             f.data,
                         );
                     }
@@ -6514,6 +6770,7 @@ impl CaptureCursor {
                                 interface_id: p.interface_id,
                                 link_type: p.link_type,
                                 ts_millis: p.ts_millis,
+                                ts_nanos: p.ts_nanos,
                                 data: p.data,
                                 orig_len: p.orig_len,
                             }))
@@ -6547,6 +6804,7 @@ impl CaptureCursor {
                             interface_id: 0,
                             link_type,
                             ts_millis: Some(p.ts_millis(unit)),
+                            ts_nanos: Some(p.ts_nanos(unit)),
                             data: p.data,
                             orig_len: p.orig_len,
                         }))
@@ -6582,6 +6840,9 @@ pub struct CapturedFrame<'a> {
     /// The capture time in epoch milliseconds, or `None` for a pcapng block
     /// that carried no time.
     pub ts_millis: Option<u64>,
+    /// The same instant in epoch nanoseconds, every digit the container
+    /// carried; [`Self::ts_millis`] is this divided by a million, rounded down.
+    pub ts_nanos: Option<u64>,
     /// The bytes the capture stored, LINK HEADER INCLUDED — the coordinate
     /// space a field row's `frame_offset` indexes. Shorter than `orig_len` when
     /// the capture ran with a snaplen.
@@ -13113,6 +13374,27 @@ mod datagram_tests {
         };
         assert_eq!(p.ts_millis(crate::pcap::TimestampUnit::Microseconds), 8_500);
         assert_eq!(p.ts_millis(crate::pcap::TimestampUnit::Nanoseconds), 7_001);
+        // And the nanosecond reading, which keeps every digit the file had: the
+        // same fraction is 1.5 s of microseconds and 1.5 ms of nanoseconds.
+        assert_eq!(
+            p.ts_nanos(crate::pcap::TimestampUnit::Microseconds),
+            8_500_000_000
+        );
+        assert_eq!(
+            p.ts_nanos(crate::pcap::TimestampUnit::Nanoseconds),
+            7_001_500_000
+        );
+        // The largest the two fields can hold is under 2^63 nanoseconds, so the
+        // widening cannot overflow whatever a corrupt file declares.
+        let latest = crate::pcap::Packet {
+            ts_secs: u32::MAX,
+            ts_frac: u32::MAX,
+            ..p
+        };
+        assert_eq!(
+            latest.ts_nanos(crate::pcap::TimestampUnit::Microseconds),
+            4_294_971_589_967_295_000
+        );
     }
 
     /// A UDP datagram reaches a datagram flow and is decoded there, and it
@@ -13426,6 +13708,41 @@ mod ws_flow_tests {
             reasons,
             alloc::vec![crate::report::VerdictReason::WsDesyncs],
             "the WebSocket desync is the whole of this verdict"
+        );
+    }
+
+    /// A ws message is timed by the packet that carried the first byte of its
+    /// FRAME, and not by the packet that completed it.
+    ///
+    /// The first message's frame is cut between packets 1 and 2, so it completes
+    /// in packet 2 with the observer's clock at packet 2's instant; the stamp is
+    /// packet 1's. The second message sits wholly in packet 3.
+    #[test]
+    fn a_websocket_message_is_stamped_by_the_packet_of_its_first_byte() {
+        let instant = |packet: usize| 1_700_000_000_000_000_000u64 + packet as u64 * 1_234_567;
+        let first = zenoh_ws_frame(1);
+        let (head, tail) = first.split_at(2);
+        let upgrade = b"GET / HTTP/1.1\r\nHost: h\r\nUpgrade: websocket\r\n\r\n";
+        let mut seq = 1000u32;
+        let mut d = Dissection::new();
+        let parts: [&[u8]; 4] = [upgrade, head, tail, &zenoh_ws_frame(2)];
+        for (packet, bytes) in parts.iter().enumerate() {
+            d.push_packet_at_nanos(
+                LINKTYPE_ETHERNET,
+                packet,
+                Some(instant(packet)),
+                &tcp_packet(1111, 7447, seq, bytes),
+            );
+            seq += bytes.len() as u32;
+        }
+
+        let flow = &d.flows()[0];
+        assert!(flow.framing().is_websocket());
+        let stamps: Vec<Option<u64>> = flow.frames.iter().map(|f| f.observed_at_ns).collect();
+        assert_eq!(
+            stamps,
+            [Some(instant(1)), Some(instant(3))],
+            "the first message began in packet 1 and completed in packet 2"
         );
     }
 
@@ -15496,6 +15813,55 @@ mod tls_flow_tests {
             resolved,
             alloc::vec![Some(1), Some(2), Some(3)],
             "a decrypted frame must attribute to the packet that carried it"
+        );
+    }
+
+    /// A decrypted frame is timed by the packet that carried the RECORD it came
+    /// out of, not by the instant the opener ran.
+    ///
+    /// Decryption happens after the capture, so the observer's clock stands at
+    /// the capture's end when the plaintext is fed, and a stamp taken from it
+    /// would put every decrypted frame there. The three records are captured at
+    /// distinct instants and the fixture's clock is left at the last one: only
+    /// the first two can tell the two stamps apart.
+    #[test]
+    fn a_decrypted_frame_is_stamped_by_the_packet_of_its_record() {
+        let random = [7u8; 32];
+        let records: Vec<Vec<u8>> = (0..3u8)
+            .map(|i| protected(crate::tls::CT_APPLICATION_DATA, &framed_unit(i)))
+            .collect();
+        let mut d = Dissection::new();
+        let mut seq = 1000u32;
+        let instant = |packet: usize| 1_700_000_000_000_000_000u64 + packet as u64 * 1_234_567;
+        let mut wire: Vec<Vec<u8>> = alloc::vec![hello_with_random(&random)];
+        wire.extend(records);
+        for (packet, bytes) in wire.iter().enumerate() {
+            d.push_packet_at_nanos(
+                LINKTYPE_ETHERNET,
+                packet,
+                Some(instant(packet)),
+                &tcp_packet(1111, 7447, seq, bytes),
+            );
+            seq += bytes.len() as u32;
+        }
+        d.finish();
+        d.decrypt_with(&mut FakeOpener::new());
+
+        let stamps: Vec<Option<u64>> = d.flows()[0]
+            .frames
+            .iter()
+            .map(|f| f.observed_at_ns)
+            .collect();
+        assert_eq!(
+            stamps,
+            [Some(instant(1)), Some(instant(2)), Some(instant(3))],
+            "records in packets 1, 2 and 3: the hello's packet 0 is not a frame"
+        );
+        assert_eq!(
+            d.flows()[0].session.observed_at_nanos(),
+            Some(instant(3)),
+            "the observer's clock stands at the last packet, which is what a \
+             stamp taken at decode time would have read for every frame"
         );
     }
 

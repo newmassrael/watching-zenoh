@@ -2198,8 +2198,14 @@ int main(void) {
      * by IP. One key and one word set, a passenger; nothing retires.
      * 16: a counter that can pass 2^53 - 1 is a decimal string beyond that
      * line and a bare number up to it (`json::u64_into`), so a consumer
-     * whose JSON reader holds a double reads no wrong digit. */
-    revisioned[0].revision = 16;
+     * whose JSON reader holds a double reads no wrong digit.
+     * 17: every latency object gains `min_ns`, `max_ns`, `mean_ns` and
+     * `total_ns`, the same samples as the `*_ms` figures measured without
+     * truncating each end to its millisecond; four keys arrive, nothing
+     * retires, and the `*_ns` cells take the integer line. A record behind a
+     * hole in a TCP stream is timed by its own packet and no longer by the
+     * capture's end, which moves values under stationary keys. */
+    revisioned[0].revision = 17;
     revisioned[0].doc = NULL;
     rc = wz_dissect_pcap_census(pcap, sizeof pcap, &revisioned[0].doc);
     CHECK(rc == WZ_DISSECT_OK, "census rc=%d", rc);
@@ -2338,8 +2344,15 @@ int main(void) {
      * 30: a `DeclareKeyExpr`'s key expression carries no `mapping` node (its
      * header has no M bit), and the `carried` entry of a `Declare` resolves a
      * non-zero scope the way the table binds it. A node and values move under
-     * stationary keys; no key name moves; nothing retires. */
-    revisioned[2].revision = 30;
+     * stationary keys; no key name moves; nothing retires.
+     * 31: `halves[].last_seen_ts_ns` is the instant of the packet that carried
+     * the first byte of the direction's last record, with every nanosecond the
+     * capture recorded; a clock term judges a row at that instant; and a
+     * stream flow's `messages` come out in capture order (the packet of each
+     * row's first byte, then its place in it) where they came out in the order
+     * the session decoded them. Values and an order move under stationary
+     * keys; no key name moves; nothing retires. */
+    revisioned[2].revision = 31;
     revisioned[2].doc = NULL;
     rc = wz_dissect_pcap_fields(pcap, sizeof pcap, 0, &revisioned[2].doc);
     CHECK(rc == WZ_DISSECT_OK, "fields rc=%d", rc);
@@ -2360,8 +2373,11 @@ int main(void) {
      * empty handle still answers, which is the cheapest way to hold the
      * document's opening to the revision this consumer was written against. */
     revisioned[4].name = "retention";
-    /* 2: the retention counters follow the integer line (see the census). */
-    revisioned[4].revision = 2;
+    /* 2: the retention counters follow the integer line (see the census).
+     * 3: `oldest_ts_ns` keeps every nanosecond the capture recorded and is
+     * the instant of the packet that carried the oldest message's first
+     * byte; a precision and a value move under a stationary key. */
+    revisioned[4].revision = 3;
     revisioned[4].doc = NULL;
     {
         wz_dissect_live *retained = NULL;

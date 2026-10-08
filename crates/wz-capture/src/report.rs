@@ -2809,16 +2809,13 @@ fn exchanges_json(e: &crate::exchange::ExchangeTable, s: &mut String) {
 ///
 /// `null` rather than `0`, and rather than omitting the key: an absent key
 /// makes a consumer guess, and a zero makes it wrong.
+///
+/// Written by the census document's own function, because this was a second
+/// copy of it: the object has a millisecond reading and a nanosecond one of each
+/// figure, and two writers of it are two places to forget the second.
 #[cfg(feature = "network-codecs")]
 fn latency_json(l: &crate::exchange::LatencySamples, s: &mut String) {
-    s.push_str(&format!(
-        "{{\"count\":{},\"min_ms\":{},\"max_ms\":{},\"mean_ms\":{},\"total_ms\":{}}}",
-        l.count(),
-        opt_u64(l.min_ms()),
-        opt_u64(l.max_ms()),
-        opt_u64(l.mean_ms()),
-        l.total_ms()
-    ));
+    crate::census_json::push_latency(l, s);
 }
 
 /// R311y617 — the payload census as JSON, gap object structural like the rest.
@@ -5547,7 +5544,7 @@ mod tests {
         let r = CaptureReport::of(&d).with_exchanges(&exchanges);
         let json = r.to_json();
         assert!(
-            json.contains("\"completion\":{\"count\":0,\"min_ms\":null,\"max_ms\":null,\"mean_ms\":null,\"total_ms\":0}"),
+            json.contains("\"completion\":{\"count\":0,\"min_ms\":null,\"max_ms\":null,\"mean_ms\":null,\"total_ms\":0,\"min_ns\":null,\"max_ns\":null,\"mean_ns\":null,\"total_ns\":0}"),
             "{json}"
         );
         assert!(
@@ -5599,8 +5596,8 @@ mod tests {
             "the page states the mean WITH the population it is of: {text}"
         );
         assert!(
-            json.contains("\"completion\":{\"count\":2,\"min_ms\":20,\"max_ms\":40,\"mean_ms\":30,\"total_ms\":60}"),
-            "and the export states the same five figures: {json}"
+            json.contains("\"completion\":{\"count\":2,\"min_ms\":20,\"max_ms\":40,\"mean_ms\":30,\"total_ms\":60,\"min_ns\":20000000,\"max_ns\":40000000,\"mean_ns\":30000000,\"total_ns\":60000000}"),
+            "and the export states the same figures, each in milliseconds and in nanoseconds: {json}"
         );
     }
 

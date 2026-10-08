@@ -81,7 +81,7 @@ use alloc::string::String;
 use alloc::vec::Vec;
 
 use wz_session_core::network_message::{BatchParse, NetworkMessage};
-use wz_session_core::passive::{Carried, Direction, PassiveFrame};
+use wz_session_core::passive::{Carried, Direction, PassiveFrame, NANOS_PER_MILLI};
 
 use crate::agg::{KeyexprSpaces, ThroughputGaps};
 use crate::filter::{Filter, OutcomeView, RecordView, Selection, Truth};
@@ -93,21 +93,46 @@ fn dir_index(d: Direction) -> usize {
     }
 }
 
+/// One measured interval, in the two readings a distribution keeps of it.
+///
+/// `ms` is the difference of the two ends' MILLISECOND readings and `ns` the
+/// difference of their nanosecond ones. They are not the same interval rounded:
+/// each end is truncated to its millisecond before the subtraction, so a
+/// 0.575 ms round trip reads `ms == 1` when it straddles a millisecond boundary
+/// and `ms == 0` when it does not, and `ns == 575_000` either way. The `ms`
+/// reading is kept because it is the one every older key reports, and it is
+/// the one a `first_reply` / `completion` selector term is judged on; the `ns`
+/// reading is the one a mean should be taken from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Interval {
+    ms: u64,
+    ns: u64,
+}
+
 /// A latency distribution, accumulated without keeping every sample.
 ///
 /// `min` / `max` are `Option` rather than sentinel-initialised: a `0` floor on
 /// an empty set is a number a reader can print, and printing it would claim a
 /// measurement that was never taken.
+///
+/// Every figure is kept twice, in whole milliseconds and in nanoseconds, and the
+/// two share one `count`: the millisecond figures are what they always were
+/// (each end truncated, then subtracted -- see [`Interval`]) and the nanosecond
+/// ones are the same samples measured without that truncation.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub struct LatencySamples {
     count: usize,
     min_ms: Option<u64>,
     max_ms: Option<u64>,
     total_ms: u64,
+    min_ns: Option<u64>,
+    max_ns: Option<u64>,
+    total_ns: u64,
 }
 
 impl LatencySamples {
-    fn add(&mut self, ms: u64) {
+    fn add(&mut self, interval: Interval) {
+        let Interval { ms, ns } = interval;
         self.count += 1;
         self.min_ms = Some(match self.min_ms {
             Some(m) => m.min(ms),
@@ -118,6 +143,18 @@ impl LatencySamples {
             None => ms,
         });
         self.total_ms += ms;
+        self.min_ns = Some(match self.min_ns {
+            Some(m) => m.min(ns),
+            None => ns,
+        });
+        self.max_ns = Some(match self.max_ns {
+            Some(m) => m.max(ns),
+            None => ns,
+        });
+        // Saturating: a sum of nanoseconds reaches `u64` after 584 years of
+        // summed latency, which is a capture with corrupt timestamps and not a
+        // long one, and a sum that wrapped would read as a short latency.
+        self.total_ns = self.total_ns.saturating_add(ns);
     }
 
     fn merge(&mut self, other: &Self) {
@@ -126,11 +163,20 @@ impl LatencySamples {
         }
         self.count += other.count;
         self.total_ms += other.total_ms;
+        self.total_ns = self.total_ns.saturating_add(other.total_ns);
         self.min_ms = match (self.min_ms, other.min_ms) {
             (Some(a), Some(b)) => Some(a.min(b)),
             (a, b) => a.or(b),
         };
         self.max_ms = match (self.max_ms, other.max_ms) {
+            (Some(a), Some(b)) => Some(a.max(b)),
+            (a, b) => a.or(b),
+        };
+        self.min_ns = match (self.min_ns, other.min_ns) {
+            (Some(a), Some(b)) => Some(a.min(b)),
+            (a, b) => a.or(b),
+        };
+        self.max_ns = match (self.max_ns, other.max_ns) {
             (Some(a), Some(b)) => Some(a.max(b)),
             (a, b) => a.or(b),
         };
@@ -161,6 +207,35 @@ impl LatencySamples {
     /// a different granularity, and the one a merge is built on.
     pub fn total_ms(&self) -> u64 {
         self.total_ms
+    }
+
+    /// The shortest interval in nanoseconds, or `None` when nothing was
+    /// sampled. The same sample [`Self::min_ms`] reports, without the
+    /// truncation of each end to its millisecond.
+    pub fn min_ns(&self) -> Option<u64> {
+        self.min_ns
+    }
+
+    /// The longest interval in nanoseconds, or `None` when nothing was sampled.
+    pub fn max_ns(&self) -> Option<u64> {
+        self.max_ns
+    }
+
+    /// The arithmetic mean in nanoseconds, truncated to a whole nanosecond, or
+    /// `None` when nothing was sampled.
+    ///
+    /// Taken from the unrounded intervals: the mean of 0.379 ms and 0.575 ms is
+    /// 0.477 ms here, where [`Self::mean_ms`] -- a mean of intervals that were
+    /// each rounded by their ends' truncation -- reads 0 or 1.
+    pub fn mean_ns(&self) -> Option<u64> {
+        (self.count > 0).then(|| self.total_ns / self.count as u64)
+    }
+
+    /// Every interval summed, in nanoseconds: the figure a caller divides by
+    /// [`Self::count`] to get a mean at any granularity it likes. Saturates at
+    /// the top of `u64` rather than wrapping.
+    pub fn total_ns(&self) -> u64 {
+        self.total_ns
     }
 
     /// `true` when no interval was ever measurable.
@@ -285,9 +360,13 @@ pub struct OpenExchange {
     /// `None` when the request carries a payload this build cannot size — a
     /// `Query` whose value rides its ext chain (R311y637, §1.1w).
     payload_bytes: Option<u64>,
-    requested_at: Option<u64>,
+    /// The capture instant of the request, in nanoseconds: the packet that
+    /// carried its first byte. Every instant this plane holds is in nanoseconds
+    /// and is divided down only where a millisecond is wanted, so the two
+    /// readings of one exchange cannot come from two clocks.
+    requested_at_ns: Option<u64>,
     /// R311y641 (§1.1n) — the REQUEST's byte offset within its framing unit,
-    /// taken at the same instant `requested_at` is. An exchange is a pair of
+    /// taken at the same instant `requested_at_ns` is. An exchange is a pair of
     /// records and only one of them can anchor the axis; the request is the one
     /// `time` and `elapsed` already name, so a selector cannot end up with two
     /// terms pointing at opposite ends of the same exchange.
@@ -298,7 +377,7 @@ pub struct OpenExchange {
     /// be written onto it when the exchange is judged. See
     /// [`ExchangeTable::row_verdict`].
     row: crate::payload::RowKey,
-    first_reply_at: Option<u64>,
+    first_reply_at_ns: Option<u64>,
     replies: usize,
     errs: usize,
 }
@@ -310,9 +389,9 @@ pub struct OpenExchange {
 /// caller reading the signature would have to guess which nesting was which.
 #[derive(Debug, Clone, Copy)]
 enum Ending {
-    /// A `ResponseFinal` closed it, at this capture instant, and was carried by
-    /// this message row. `at` is `None` when the frame that carried the close had
-    /// no timestamp.
+    /// A `ResponseFinal` closed it, at this capture instant in nanoseconds, and
+    /// was carried by this message row. `at` is `None` when the frame that
+    /// carried the close had no timestamp.
     Closed {
         at: Option<u64>,
         row: crate::payload::RowKey,
@@ -524,7 +603,7 @@ impl ExchangeTable {
     ) {
         let list = ctx.list();
         let direction = frame.direction;
-        let at = frame.observed_at_ms;
+        let at = frame.observed_at_ns;
         match message {
             NetworkMessage::Declare(d) => spaces.absorb(direction, d),
             NetworkMessage::Request(r) => {
@@ -550,7 +629,7 @@ impl ExchangeTable {
                     zid: ctx.zid(direction).map(<[u8]>::to_vec),
                     kind,
                     payload_bytes,
-                    requested_at: at,
+                    requested_at_ns: at,
                     requested_unit_offset: crate::agg::record_unit_offset(frame, span),
                     requested_delay_ms: crate::agg::source_delay_ms(
                         frame.observed_at_ms,
@@ -558,7 +637,7 @@ impl ExchangeTable {
                     )
                     .unwrap_or(None),
                     row: crate::payload::RowKey::of(list, frame),
-                    first_reply_at: None,
+                    first_reply_at_ns: None,
                     replies: 0,
                     errs: 0,
                 };
@@ -582,8 +661,8 @@ impl ExchangeTable {
                     ResponseOwnedVariant::CodecZenohErr(_) => entry.errs += 1,
                     _ => entry.replies += 1,
                 }
-                if entry.first_reply_at.is_none() {
-                    entry.first_reply_at = at;
+                if entry.first_reply_at_ns.is_none() {
+                    entry.first_reply_at_ns = at;
                 }
             }
             NetworkMessage::ResponseFinal(f) => {
@@ -630,11 +709,22 @@ impl ExchangeTable {
             Ending::Unclosed => None,
         };
         let closed = matches!(ending, Ending::Closed { .. });
+        let requested_at_ms = entry.requested_at_ns.map(|ns| ns / NANOS_PER_MILLI);
 
         let mut unstamped = false;
         let mut backwards = false;
+        // The verdict on direction is taken on the MILLISECOND readings, as it
+        // always was: an exchange is `backwards` when its later end reads an
+        // earlier millisecond than its earlier end, and the counters that say so
+        // keep counting exactly that. The nanosecond reading is then the
+        // difference of the same two instants, floored at zero -- so a reply
+        // stamped a few hundred microseconds BEFORE its request inside one
+        // millisecond is still a 0 ms sample, as it always was, and a 0 ns one.
         let mut measure = |from: Option<u64>, to: Option<u64>| match (from, to) {
-            (Some(f), Some(t)) if t >= f => Some(t - f),
+            (Some(f), Some(t)) if t / NANOS_PER_MILLI >= f / NANOS_PER_MILLI => Some(Interval {
+                ms: t / NANOS_PER_MILLI - f / NANOS_PER_MILLI,
+                ns: t.saturating_sub(f),
+            }),
             (Some(_), Some(_)) => {
                 backwards = true;
                 None
@@ -650,12 +740,12 @@ impl ExchangeTable {
         // empty query answer look like a timestamp problem.
         let saw_reply = entry.replies + entry.errs > 0;
         let first = if saw_reply {
-            measure(entry.requested_at, entry.first_reply_at)
+            measure(entry.requested_at_ns, entry.first_reply_at_ns)
         } else {
             None
         };
         let total = if closed {
-            measure(entry.requested_at, closed_at)
+            measure(entry.requested_at_ns, closed_at)
         } else {
             None
         };
@@ -678,16 +768,18 @@ impl ExchangeTable {
             // this plane most often holds -- and that is the honest answer
             // rather than the close's delay standing in for the request's.
             source_delay_ms: entry.requested_delay_ms,
-            observed_at_ms: entry.requested_at,
+            observed_at_ms: requested_at_ms,
             // R311y638 (§1.1r) — relative to the CAPTURE and taken at the same
             // instant `time` is, so the two fields cannot name different
             // moments of one exchange.
-            elapsed_ms: crate::agg::elapsed_since(self.capture_origin_ms, entry.requested_at),
+            elapsed_ms: crate::agg::elapsed_since(self.capture_origin_ms, requested_at_ms),
             outcome: Some(OutcomeView {
                 replies: entry.replies as u64,
                 errs: entry.errs as u64,
-                first_reply_ms: first,
-                completion_ms: total,
+                // The selector terms are millisecond terms, so they are judged
+                // on the millisecond reading of each interval.
+                first_reply_ms: first.map(|i| i.ms),
+                completion_ms: total.map(|i| i.ms),
                 closed,
             }),
         };
@@ -735,11 +827,11 @@ impl ExchangeTable {
         if backwards {
             self.gaps.non_monotonic += 1;
         }
-        if let Some(ms) = first {
-            self.first_reply.add(ms);
+        if let Some(interval) = first {
+            self.first_reply.add(interval);
         }
-        if let Some(ms) = total {
-            self.completion.add(ms);
+        if let Some(interval) = total {
+            self.completion.add(interval);
         }
 
         let Some(keyexpr) = entry.keyexpr else {
@@ -752,11 +844,11 @@ impl ExchangeTable {
         row.completed += 1;
         row.replies += entry.replies;
         row.errs += entry.errs;
-        if let Some(ms) = first {
-            row.first_reply.add(ms);
+        if let Some(interval) = first {
+            row.first_reply.add(interval);
         }
-        if let Some(ms) = total {
-            row.completion.add(ms);
+        if let Some(interval) = total {
+            row.completion.add(interval);
         }
     }
 

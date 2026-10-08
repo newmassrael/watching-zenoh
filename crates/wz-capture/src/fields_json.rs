@@ -783,19 +783,48 @@ fn push_stream_flow(
     // The produced-index of the OLDEST message still held, so a row's
     // sequence number is looked up by an index a front trim does not move.
     let first_produced = flow.frames.produced() - flow.frames.len() as u64;
+    // PASS ONE, in LIST order, which is the order the session decoded the
+    // messages in and so the only order its folds are valid in: the chain fold
+    // follows the router's outcomes as they came, and a row's keyexpr scope is
+    // the packet its frame was decoded at, inherited down the list where the run
+    // map cannot name one.
+    //
+    // Everything a row needs from the folds is taken HERE and written NEXT, in
+    // capture order below. Folding and writing in one walk was right while the
+    // two orders were one, and they stop being one the first time a unit
+    // completes after a unit that began later (it spans packets, or a segment
+    // arrived out of order, or a hole was stepped over).
+    //
+    // AFTER the chain fold and BEFORE anything is written: a row the cursor
+    // passes over still has to advance the fold, or a completing row behind it
+    // is numbered as if its chain had never begun. The keyexpr table needs no
+    // such care -- it is filled up front from every list, and the packet a row
+    // resolves AT is set per row. Only the WRITING is skipped.
+    let mut folded: Vec<FoldedRow> = Vec::with_capacity(flow.frames.len());
     for (position, frame) in flow.frames.iter().enumerate() {
         last_packet = flow
             .packet_for(frame.direction, frame.stream_offset)
             .unwrap_or(last_packet);
-        spaces.at_packet(last_packet);
-        // Folded ahead of the cap, for the reason `ChainIds` gives.
-        let session_row = chains.observe(frame);
-        // AFTER the chain fold and BEFORE anything is written: a row the cursor
-        // passes over still has to advance the fold, or a completing row behind
-        // it is numbered as if its chain had never begun. The keyexpr table
-        // needs no such care -- it is filled up front from every list, and the
-        // packet a row resolves AT is set per row. Only the WRITING is skipped.
-        let seq = tags.frame_seq(first_produced + position as u64);
+        folded.push(FoldedRow {
+            packet: last_packet,
+            // Folded ahead of the cap, for the reason `ChainIds` gives.
+            session: chains.observe(frame),
+            seq: tags.frame_seq(first_produced + position as u64),
+        });
+    }
+    // PASS TWO, in CAPTURE order: the order of the packets that carried each
+    // message's first byte. See `FlowDissection::capture_order` for the rule and
+    // its tiebreak. The cap counts rows from the FRONT of this order, so the rows
+    // a ceiling holds back are the last ones the capture took.
+    for position in flow.capture_order() {
+        let frame = &flow.frames[position];
+        let FoldedRow {
+            packet,
+            session: session_row,
+            seq,
+        } = &folded[position];
+        let seq = *seq;
+        spaces.at_packet(*packet);
         if tags.passed_by_cursor(seq) {
             if let Some(d) = declarations {
                 d.note_unwalked();
@@ -856,7 +885,7 @@ fn push_stream_flow(
                 out,
             ),
         }
-        push_session_row(&session_row, out);
+        push_session_row(session_row, out);
         push_first_byte(
             // A decompressed message's coordinate indexes the reader's own
             // buffer, not the stream, so it names no packet byte.
@@ -1831,6 +1860,17 @@ struct SessionRow {
     chain: Option<ChainRow>,
 }
 
+/// What a stream row takes from the walk in LIST order, held until the row is
+/// written in capture order.
+struct FoldedRow {
+    /// The packet the row's keyexpr scope resolves at.
+    packet: usize,
+    /// The session verdicts the folds gave the frame.
+    session: SessionRow,
+    /// The sequence number the handle issued the row, when it numbers rows.
+    seq: Option<u64>,
+}
+
 /// The SN half of [`SessionRow`].
 struct SnRow {
     verdict: SnVerdictWord,
@@ -2473,8 +2513,8 @@ fn push_halves(a: &crate::HalfObservation, b: &crate::HalfObservation, out: &mut
             None => out.push_str("null"),
         }
         out.push_str(",\"last_seen_ts_ns\":");
-        match half.last_seen_ms {
-            Some(ms) => u64_into(crate::retention_json::millis_as_ns(ms), out),
+        match half.last_seen_ns {
+            Some(ns) => u64_into(ns, out),
             None => out.push_str("null"),
         }
         let _ = write!(

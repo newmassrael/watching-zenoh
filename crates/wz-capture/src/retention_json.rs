@@ -65,6 +65,12 @@
 //! a source with no clock, or nothing held yet — which is a different fact from
 //! a clock reading zero.
 //!
+//! Since retention revision 3 the instant carries every digit the capture
+//! recorded. It was a whole number of milliseconds widened to nanoseconds
+//! before, and a record's `ts_ns` was too, so the two agreed by being rounded
+//! alike; they now agree by being the same figure unrounded, and a consumer
+//! comparing them is comparing the capture's own timestamps.
+//!
 //! # Not in it
 //!
 //! `scout_askers`: the set that ceiling bounds is private to the scouting
@@ -75,18 +81,9 @@
 use alloc::string::String;
 use core::fmt::Write as _;
 
-use crate::Dissection;
+use wz_session_core::passive::NANOS_PER_MILLI;
 
-/// A retained-message instant widened to the unit a drained record carries.
-///
-/// The one place the millisecond clock this reader keeps becomes nanoseconds:
-/// the record door and this document both call it, so a consumer comparing
-/// `oldest_ts_ns` with a record's `ts_ns` is comparing numbers rounded by one
-/// rule. The caller's sub-millisecond digits were never kept, and the value
-/// says so by being a whole number of milliseconds.
-pub fn millis_as_ns(ms: u64) -> u64 {
-    ms.saturating_mul(1_000_000)
-}
+use crate::Dissection;
 
 /// What one [`Dissection`] holds at the moment it was measured.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -116,6 +113,10 @@ pub struct Retention {
     /// The earliest capture instant among retained messages, in this reader's
     /// milliseconds; `None` when none has a clock.
     pub oldest_ms: Option<u64>,
+    /// The same instant to the nanosecond: [`Self::oldest_ms`] is this divided
+    /// by a million, rounded down, and `None` exactly when it is. This is the
+    /// figure the document's `oldest_ts_ns` carries.
+    pub oldest_ns: Option<u64>,
 }
 
 impl Retention {
@@ -130,13 +131,17 @@ impl Retention {
         let oldest_of_frames = d
             .message_lists_with_origin()
             .flat_map(|(_, _, list)| list.iter())
-            .filter_map(|frame| frame.observed_at_ms)
+            .filter_map(|frame| frame.observed_at_ns)
             .min();
         let scouting_lists = || d.datagram_flows().iter().map(|flow| &flow.scouting);
         let scouting: usize = scouting_lists().map(|list| list.len()).sum();
         let oldest_of_scouting = scouting_lists()
             .flat_map(|list| list.iter())
-            .filter_map(|datagram| datagram.observed_at_ms)
+            .filter_map(|datagram| datagram.observed_at_ns)
+            .min();
+        let oldest_ns = [oldest_of_frames, oldest_of_scouting]
+            .into_iter()
+            .flatten()
             .min();
 
         // Each scope against the ceiling that bounds it. A stream flow's list
@@ -178,10 +183,8 @@ impl Retention {
             datagram_flows: d.datagram_flows().len(),
             fullest_window_messages,
             fullest_window_stream_bytes: directions().max().unwrap_or(0),
-            oldest_ms: [oldest_of_frames, oldest_of_scouting]
-                .into_iter()
-                .flatten()
-                .min(),
+            oldest_ms: oldest_ns.map(|ns| ns / NANOS_PER_MILLI),
+            oldest_ns,
         }
     }
 }
@@ -217,8 +220,8 @@ pub fn retention_json(d: &Dissection) -> String {
     // reader on doubles cannot hold, and under 2^63. Written through the shared
     // `u64` door, so it is a number while it is exact and a string once it is
     // not, by the same rule as a protocol field's value.
-    match held.oldest_ms {
-        Some(ms) => wz_session_core::json::u64_into(millis_as_ns(ms), &mut out),
+    match held.oldest_ns {
+        Some(ns) => wz_session_core::json::u64_into(ns, &mut out),
         None => out.push_str("null"),
     }
     out.push_str("},\"dropped_by_limits\":");
@@ -275,7 +278,7 @@ mod tests {
         let doc = retention_json(&Dissection::new());
         assert_eq!(
             doc,
-            "{\"document\":{\"name\":\"retention\",\"revision\":2},\
+            "{\"document\":{\"name\":\"retention\",\"revision\":3},\
              \"held\":{\"frames\":0,\"scouting\":0,\"serial_frames\":0,\"skipped\":0,\
              \"stream_bytes\":0,\"stream_flows\":0,\"datagram_flows\":0,\
              \"fullest_window\":{\"messages\":0,\"stream_bytes\":0},\"oldest_ts_ns\":null},\
@@ -549,7 +552,7 @@ mod tests {
             doc.contains("\"oldest_ts_ns\":\"1700000000000000000\"}"),
             "a real-clock instant is the digits in a string: {doc}"
         );
-        assert!(doc.contains("\"revision\":2"), "{doc}");
+        assert!(doc.contains("\"revision\":3"), "{doc}");
 
         // The last millisecond that stays a number: 9_007_199_254 ms is 9.007e15 ns
         // and under the line; one more is over it.

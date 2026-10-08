@@ -421,6 +421,55 @@
  * application data. The range is derived from the message's bytes and does not
  * change in an issued row.
  *
+ * AND WHEN A RECORD WAS CAPTURED, AND IN WHAT ORDER ROWS COME, at
+ * field-document revision 31, selection-document revision 3, census revision 17
+ * and retention revision 3.
+ *
+ * A RECORD'S TIME is the capture time of the packet that carried its FIRST BYTE:
+ * the byte its row's `first_byte` names (on a byte stream, `message_at`). It is
+ * not when the record was completed and not when this library got round to
+ * decoding it. A record that spans two packets reports the first packet's
+ * instant; a record decoded from bytes that waited behind a hole in a TCP stream
+ * (until the hole filled, or was stepped over, or the capture ended) reports the
+ * instant it was captured at, and not the instant the capture ended, which is
+ * what every such record reported until revision 31. Two messages of one batch
+ * differ only when the batch crosses a packet boundary between them. A record
+ * whose bytes were decompressed out of an lz4 batch has no byte of its own on
+ * the wire and takes its batch's instant. A datagram is one packet. A record
+ * that begins in the bytes a hole took is never produced: the hole is announced
+ * to the reader, which drops what it holds on the near side and scans for a
+ * boundary, so no record's first byte is ever in a hole.
+ *
+ * THE CLOCK KEEPS THE NANOSECOND. What a push gave is what comes back, to the
+ * digit: a classic pcap's microsecond fraction is carried (its nanosecond digits
+ * are zero because the file never had them), a pcapng's `if_tsresol` is applied
+ * exactly, and wz_dissect_live_push takes nanoseconds and keeps them. Every
+ * figure that was in milliseconds is that divided by one million, rounded down,
+ * so the two readings of one instant never differ: a `time` or `elapsed` term
+ * and every `*_ms` key are milliseconds and keep their values; `ts_ns`,
+ * `last_seen_ts_ns` and `oldest_ts_ns` are nanoseconds and now carry the digits
+ * they used to drop (they ended in six zeros). `halves[].last_seen_ts_ns` is the
+ * instant of the LATEST record the direction produced, so a record captured out
+ * of order does not make a direction look to have gone quiet.
+ *
+ * THE ORDER OF ROWS, for a stream flow, is CAPTURE order: ascending by the
+ * packet that holds the row's first byte (`first_byte.packet`), then by the
+ * row's place in that packet. It was the order the session decoded the messages
+ * in, which is the order their last bytes arrived in; the two parted whenever a
+ * message completed after one that began later, as a unit spanning packets does
+ * after a unit of the other direction that sat wholly inside one of them. The key
+ * is total -- no two rows of a flow share a packet and a place -- so the order is
+ * deterministic and does not depend on how many calls the rows arrived in. A row
+ * whose first byte no packet can be named for takes the packet of the row before
+ * it that had one, which keeps it beside its neighbours. A datagram flow's rows
+ * were always in capture order, a flow's scouting rows follow its transport
+ * rows, and flows are listed stream flows first, then datagram flows; the
+ * packet is global to the capture, so rows of different flows merge on it. The
+ * selection document's rows are the field document's, in the same order, and a
+ * `max_messages_shown_per_flow` ceiling keeps the first rows of this order. `seq`
+ * is NOT in this order: it is the order the handle first issued a row in, and
+ * promises no position.
+ *
  * AND WHICH TABLE A KEY EXPRESSION'S ID INDEXES, at field-document revision 30.
  *
  * A key expression on the wire is `(id, suffix)`, and the id means nothing
@@ -582,7 +631,10 @@
  * documents take the rule from their first revision: a field of seven or eight
  * bytes can pass the line and one of six or fewer cannot, and the width is the
  * profile's, so a consumer knows from its own profile which cells to ask
- * about); and to
+ * about); to the `min_ns`, `max_ns`, `mean_ns` and `total_ns` of a census
+ * latency object (keys that exist from census revision 17 and take the rule
+ * from their first appearance: `total_ns` is a SUM, and 2^53 nanoseconds is 104
+ * days of summed latency, which a long capture of many exchanges reaches); and to
  * `oldest_ts_ns` in the retention document. It does NOT apply to counts,
  * offsets, sizes and millisecond spans this library measures: those count
  * things the host holds, and stay bare numbers. Revisions: fields 23, census
@@ -761,7 +813,8 @@
  *     direction's sender announced in its own `Open`, in milliseconds, and
  *     `null` until that `Open` was read; it is the figure that judges THIS
  *     direction going quiet. `last_seen_ts_ns` is the capture instant of the
- *     last message record the direction produced, decodable or not, in the unit
+ *     last message record the direction produced, decodable or not (the latest
+ *     instant any of its records carried, from revision 31), in the unit
  *     and on the clock a drained record's `ts_ns` uses; `null` when nothing was
  *     read with a clock, a different fact from 0. `close_seen` is whether the
  *     direction carried a `Close`, whichever scope the Close asked for (the
@@ -825,7 +878,7 @@
  *
  * SO THE DOCUMENT CARRIES THE LIST. Its envelope reads
  *
- *     {"document":{"name":"census","revision":16,
+ *     {"document":{"name":"census","revision":17,
  *                  "planes":["exchanges","interests","keyexprs","nodes",
  *                            "payloads"]}, ...}
  *
@@ -871,11 +924,11 @@
  *
  * Every family in `value_families` now carries a `carries` axis:
  *
- *     {"name":"fields","revision":30,"key":"kind","values":[...],
+ *     {"name":"fields","revision":31,"key":"kind","values":[...],
  *      "carries":[{"word":"bits","shapes":[["end","name","start","value"]]},
  *                 {"word":"opaque","shapes":[["end","name","start"]]}, ...]}
  *
- *     {"name":"census","revision":16,"key":"mode","values":[...],
+ *     {"name":"census","revision":17,"key":"mode","values":[...],
  *      "carries":null}
  *
  * `null` is a VALUE here and not an absence: it says the word is a PASSENGER --
@@ -1871,6 +1924,31 @@ int wz_dissect_pcap_fields_limited(const unsigned char *bytes, size_t len,
  * decide on those two rows, as they do in the census's exchange plane. On any
  * other row they are `undecided`, because a push has no outcome.
  *
+ * THE UNIT OF A TIME TERM IS THE MILLISECOND, and stays it (see "WHEN A RECORD
+ * WAS CAPTURED" above): `time`, `elapsed`, `delay`, `first_reply` and
+ * `completion` compare against whole milliseconds, each end of an interval
+ * truncated to its millisecond before the subtraction, so a term does not read a
+ * record's sub-millisecond digits. The census exchange plane's latency objects
+ * carry the unrounded figures beside the millisecond ones:
+ *
+ *     "first_reply":{"count":N,
+ *                    "min_ms":N|null,"max_ms":N|null,"mean_ms":N|null,"total_ms":N,
+ *                    "min_ns":N|null,"max_ns":N|null,"mean_ns":N|null,"total_ns":N}
+ *
+ * since census revision 17, and the same for `completion`, in every row and in
+ * the totals. The `*_ms` keys are what they were. The `*_ns` keys are the SAME
+ * samples measured as the difference of the two ends' nanosecond readings, with
+ * nothing truncated, so a round trip of 0.575 ms is `575000` in `total_ns`
+ * wherever in a millisecond it fell, where `total_ms` is 1 or 0 by where it
+ * fell. `mean_ns` is `total_ns` over `count`, truncated to a whole nanosecond,
+ * and is the mean to take: a mean of `*_ms` figures is a mean of whole numbers
+ * each wrong by up to a millisecond. They are `null` (and `total_ns` is 0) when
+ * nothing was sampled, exactly as the `*_ms` keys are, and they follow the
+ * integer rule above. An interval whose reply is stamped before its request
+ * inside one millisecond is a 0 ms sample and a 0 ns one; one whose reply reads
+ * an EARLIER millisecond than its request is not sampled and is counted in
+ * `gaps.non_monotonic`, as it was.
+ *
  * THE TWO PLANES AGREE. For any selector, on a capture where each row carries
  * one record, the number of `yes` Request rows is the census exchange plane's
  * `requests` and the number of `yes` ResponseFinal rows is its `completed`.
@@ -2406,7 +2484,7 @@ int wz_dissect_e2e_open(const char *profile_json, const unsigned char *frame,
  *
  * R2175 -- the document is at REVISION 3, and the fourth key is `value_families`:
  *
- *     "value_families":[{"name":"fields","revision":30,"key":"state",
+ *     "value_families":[{"name":"fields","revision":31,"key":"state",
  *                        "values":["decoded","encoding_mismatch",…]}, …]
  *
  * every key in every document whose VALUE this build draws from a closed set,
@@ -2603,19 +2681,26 @@ typedef struct wz_dissect_live wz_dissect_live;
  * tolerate an unknown one, so a layout change is a new struct and a new
  * door, never a new meaning for this one. */
 typedef struct wz_dissect_record {
-    /* This reader's clock AS OF this message, in nanoseconds, or
-     * WZ_DISSECT_NO_TIMESTAMP if it was never set.
+    /* When this message was CAPTURED, in nanoseconds: the instant of the packet
+     * that carried its first byte (the byte its field row's `first_byte`
+     * names), or WZ_DISSECT_NO_TIMESTAMP if no clock was ever set. Three
+     * things, and the first two look alike:
      *
-     * Two things that look alike and are not:
-     *
-     *   - the clock is MILLISECONDS, so what comes back is the nanosecond
-     *     value you pushed, truncated to the millisecond it fell in and
-     *     widened again. The narrowing happens at the boundary rather than
-     *     in your code so there is one rounding rule in the system;
+     *   - it is the capture's own time for the message, to the nanosecond you
+     *     pushed it at (a classic pcap's microsecond fraction, widened). It is
+     *     NOT the clock as of the moment this reader decoded the message: a
+     *     message decoded from bytes that waited behind a hole in a TCP stream
+     *     carries the instant of ITS packet, and not the instant the capture
+     *     ended. Until field-document revision 31 this field held that
+     *     decoding-time clock truncated to the millisecond it fell in, so it
+     *     ended in six zeros; it keeps every digit now, and a consumer that
+     *     divided it by a million sees what it always saw;
      *   - a push carrying WZ_DISSECT_NO_TIMESTAMP leaves the clock WHERE IT
      *     STOOD, so a record can carry the instant of an earlier packet.
      *     That is a different fact from having no clock, and only the
-     *     second reports the sentinel. */
+     *     second reports the sentinel;
+     *   - sort on it for time order, and read wz_dissect_live_drain for what
+     *     equal values mean. */
     uint64_t ts_ns;
     /* The CONVERSATION: a number this handle assigns each flow it sees, from
      * zero, in order of first appearance. Stable for the life of the handle,
@@ -2681,8 +2766,12 @@ int wz_dissect_live_open(int limits, wz_dissect_live **out);
 /* Feed one captured packet. `link_type` is its pcap link type -- the same
  * numbering wz_dissect_readable_surfaces reports.
  *
- * `ts_ns` is when the packet was captured, or WZ_DISSECT_NO_TIMESTAMP; see
- * the record's own field for what this reader does with it.
+ * `ts_ns` is when the packet was captured, in nanoseconds since the epoch of
+ * your clock, or WZ_DISSECT_NO_TIMESTAMP. Every digit is kept: it comes back on
+ * the records the packet's messages produce, unrounded (see the record's own
+ * field). Pass the instant the packet was captured at and not the instant you
+ * call this, since a message waiting behind a hole is timed by the packet that
+ * carried its first byte, long after you pushed it.
  *
  * A packet on a link this build does not decode is COUNTED as skipped and
  * returns WZ_DISSECT_OK. A tap sees whatever the interface gives it, and a
@@ -2774,6 +2863,30 @@ int wz_dissect_live_follow(wz_dissect_live *h, const unsigned char *bytes,
  * `ts_ns` if you need that -- a live reader cannot do it for you without
  * holding messages back until nothing older can arrive, and on a link that
  * moment never comes.
+ *
+ * WHAT EQUAL `ts_ns` MEANS, AND THE TIEBREAK. `ts_ns` is the capture instant of
+ * the packet that carried the message's first byte and keeps the nanosecond, so
+ * two messages share one only when they share a packet or when a source stamped
+ * two packets alike (a coarse clock). Use a STABLE sort, and the order of equal
+ * values is this:
+ *
+ *   - within one list_id, the order the list decoded them in. For two
+ *     messages of one packet that is the byte order of the packet, and for a
+ *     datagram list `(anchor, batch_index)` is that order and is comparable
+ *     (a datagram's anchor is its packet index);
+ *   - between lists, the order they were drained in, which is deterministic for
+ *     a given handle and call pattern but is NOT capture order: a capture
+ *     drained in steps of one packet and the same capture drained once may place
+ *     equal-`ts_ns` messages of different lists differently, and no order is
+ *     claimed between them.
+ *
+ * A message that completes after one that began later (a unit spanning packets)
+ * is listed after it but carries the earlier `ts_ns`, so a list's `ts_ns` is not
+ * monotone along it, and the sort is what puts it right. The order that is
+ * CAPTURE order for every row, ties included, is the field document's: a
+ * stream flow's rows come out by the packet of each row's first byte and then
+ * their place in it, and a row and a record join on `(list_id, direction,
+ * anchor, batch_index)`.
  *
  * @bound cap buffer-capacity -- it is the size of YOUR array. This library
  * imposes nothing by it and discards nothing for it: what does not fit
@@ -3237,7 +3350,11 @@ int wz_dissect_live_fields_since(wz_dissect_live *h,
  * THE VERDICT IS THE SAME ONE. Each row's word is decided by the same function
  * the field document's is, the coordinates are the same numbers with the same
  * meanings (a record and its row join on equal list_id, direction, anchor and
- * batch_index), and the rows are the field document's rows in its order. What
+ * batch_index), and the rows are the field document's rows in its order: a
+ * stream flow's rows by the capture time of their first byte, as that document
+ * writes them (since selection revision 3; before it, the order the session
+ * decoded them in), a flow's scouting rows after its transport rows, stream
+ * flows before datagram flows. What
  * `kind == query` (and every other selector) says of a Request, a ResponseFinal,
  * a Push or a Response row, and which rows stay `unjudged`, is written under
  * wz_dissect_pcap_fields_where_limited and holds here word for word. Two
@@ -3334,8 +3451,10 @@ int wz_dissect_live_selection(wz_dissect_live *h, const char *selector,
  *
  * oldest_ts_ns is the capture instant of the oldest retained message or
  * scouting datagram, in the unit and on the clock a drained record's ts_ns
- * uses, so the two compare directly: it is a whole number of milliseconds,
- * widened, for the reason wz_dissect_record.ts_ns gives. It is the MINIMUM
+ * uses, so the two compare directly: the same figure, with every nanosecond
+ * the capture recorded (retention revision 3; it was a whole number of
+ * milliseconds, widened, before), for the reason wz_dissect_record.ts_ns gives.
+ * It is the MINIMUM
  * over everything held and not the head of each list, because a capture merged
  * from two taps can put a later message ahead of an earlier one and "how far
  * back can I read" asks for the earliest instant. It is null when nothing held

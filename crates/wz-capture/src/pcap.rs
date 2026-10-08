@@ -119,6 +119,17 @@ impl Packet {
     pub fn ts_millis(&self, unit: TimestampUnit) -> u64 {
         millis_of(self.ts_secs, self.ts_frac, unit)
     }
+
+    /// This packet's capture time in NANOSECONDS since the Unix epoch: every
+    /// digit the record carries, where [`Self::ts_millis`] keeps only the
+    /// millisecond they fall in.
+    ///
+    /// A microsecond file's fraction is widened (its nanosecond digits are
+    /// zero because the file never had them); a nanosecond file's is kept
+    /// whole. [`Self::ts_millis`] is this divided by a million, rounded down.
+    pub fn ts_nanos(&self, unit: TimestampUnit) -> u64 {
+        nanos_of(self.ts_secs, self.ts_frac, unit)
+    }
 }
 
 /// The one conversion from a record's `(seconds, fraction)` pair to epoch
@@ -130,6 +141,17 @@ fn millis_of(ts_secs: u32, ts_frac: u32, unit: TimestampUnit) -> u64 {
         TimestampUnit::Nanoseconds => u64::from(ts_frac) / 1_000_000,
     };
     u64::from(ts_secs) * 1_000 + sub_ms
+}
+
+/// The nanosecond twin of [`millis_of`], for the same two types and the same
+/// reason. `u32` seconds and a `u32` fraction cannot overflow a `u64` of
+/// nanoseconds: the largest sum is under 4.3e18 + 4.3e12.
+fn nanos_of(ts_secs: u32, ts_frac: u32, unit: TimestampUnit) -> u64 {
+    let sub_ns = match unit {
+        TimestampUnit::Microseconds => u64::from(ts_frac) * 1_000,
+        TimestampUnit::Nanoseconds => u64::from(ts_frac),
+    };
+    u64::from(ts_secs) * 1_000_000_000 + sub_ns
 }
 
 /// One captured packet whose bytes are BORROWED from the container.
@@ -162,6 +184,11 @@ impl PacketRef<'_> {
     /// This packet's capture time in milliseconds, as [`Packet::ts_millis`].
     pub fn ts_millis(&self, unit: TimestampUnit) -> u64 {
         millis_of(self.ts_secs, self.ts_frac, unit)
+    }
+
+    /// This packet's capture time in nanoseconds, as [`Packet::ts_nanos`].
+    pub fn ts_nanos(&self, unit: TimestampUnit) -> u64 {
+        nanos_of(self.ts_secs, self.ts_frac, unit)
     }
 
     /// The same packet with its bytes copied out of the container.
