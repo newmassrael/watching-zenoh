@@ -1494,6 +1494,108 @@ impl ChunkHold {
         });
         RxBytes::shared(storage, 0..len)
     }
+
+    /// The chunk as a buffer that can be sent on: [`Self::into_shared`]'s storage, kept as the
+    /// chunk and not narrowed to a range of its bytes. `None` when the chunk has no readable
+    /// window, and then `self` drops here and the reference goes back, as it does there.
+    fn into_chunk(self) -> Option<SharedChunk> {
+        let (data, window) = self.window()?;
+        Some(SharedChunk {
+            data,
+            writable: OnceLock::new(),
+            window,
+            hold: self,
+        })
+    }
+
+    /// One more reference to the chunk, taken for a receiver this node is about to send the
+    /// descriptor to: upstream's `inc_ref_count`, which serializing a buffer's descriptor does
+    /// (`commons/zenoh-codec/src/core/zbuf.rs` @ `unsafe { shmb.inc_ref_count() };`). The hold's
+    /// own reference is not touched. `false` when the header is gone (the provider's metadata
+    /// segment no longer maps), and then no reference was taken.
+    fn take_reference(&self) -> bool {
+        match self.header() {
+            Some(header) => {
+                header.refcount.fetch_add(1, Ordering::SeqCst);
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// Give back a reference [`Self::take_reference`] took and no receiver was sent.
+    fn return_reference(&self) {
+        if let Some(header) = self.header() {
+            release_reference(header);
+        }
+    }
+
+    /// The shared-memory protocol the chunk's own header names: the one a peer must list to be
+    /// sent its descriptor.
+    fn protocol(&self) -> u32 {
+        self.header().map_or(POSIX_PROTOCOL_ID, |header| {
+            header.protocol.load(Ordering::Relaxed)
+        })
+    }
+}
+
+/// A chunk a peer sent, held to be sent ON (see [`ShmResolver::hold`]): what a router keeps of a
+/// message while it routes it. The bytes are the page the chunk lies on, the protocol is the one
+/// its header names, and a reservation is a reference taken on the chunk's header for one more
+/// receiver, on top of the reference the hold itself carries.
+impl ShmSendBuffer for SharedChunk {
+    fn bytes(&self) -> &[u8] {
+        &self.data.bytes()[self.window.clone()]
+    }
+
+    fn protocol(&self) -> u32 {
+        self.hold.protocol()
+    }
+
+    /// `None`: a forwarder does not deliver the chunk to a subscriber of its own, and a view
+    /// would be a second hold on a chunk this value already holds.
+    fn receiver_view(&self) -> Option<RxBytes> {
+        None
+    }
+
+    fn reserve_for_receiver(self: Arc<Self>) -> Box<dyn ShmReservation> {
+        let taken = self.hold.take_reference();
+        Box::new(ForwardedReference {
+            chunk: self,
+            taken,
+            committed: false,
+        })
+    }
+}
+
+/// The reference [`SharedChunk::reserve_for_receiver`] took for one more receiver, and the
+/// descriptor that names it. The same contract as [`OwnedWireReference`]: given back unless
+/// [`ShmReservation::commit`] says the frame left. It owns the chunk, so it may outlive the
+/// handle it was taken from, and the chunk is not released while a reservation is outstanding.
+struct ForwardedReference {
+    chunk: Arc<SharedChunk>,
+    /// Whether a reference was taken at all; a header that would not map takes none, and
+    /// gives none back.
+    taken: bool,
+    committed: bool,
+}
+
+impl ShmReservation for ForwardedReference {
+    fn descriptor(&self) -> ShmDescriptor {
+        self.chunk.hold.descriptor
+    }
+
+    fn commit(mut self: Box<Self>) {
+        self.committed = true;
+    }
+}
+
+impl Drop for ForwardedReference {
+    fn drop(&mut self) {
+        if self.taken && !self.committed {
+            self.chunk.hold.return_reference();
+        }
+    }
 }
 
 /// The storage a received shared-memory payload is a range of: a chunk's data
@@ -1623,6 +1725,14 @@ impl ShmResolver for PosixShmResolver {
     /// back when the last range of them drops (see [`ChunkHold::into_shared`]).
     fn resolve_shared(&self, descriptor: &ShmDescriptor) -> Option<RxBytes> {
         ChunkHold::link(descriptor)?.into_shared()
+    }
+
+    /// The chunk held to be sent on: the reference the descriptor carried is the handle's, and
+    /// goes back when the last clone of the handle drops; a reservation taken from it is one
+    /// more (see the `ShmSendBuffer` of the received chunk).
+    fn hold(&self, descriptor: &ShmDescriptor) -> Option<wz_session_core::extshm::ShmSendHandle> {
+        let chunk = ChunkHold::link(descriptor)?.into_chunk()?;
+        Some(wz_session_core::extshm::ShmSendHandle::new(Arc::new(chunk)))
     }
 }
 

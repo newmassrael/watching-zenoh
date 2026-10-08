@@ -390,6 +390,19 @@ pub struct LinkstateForwarder {
     /// the end-to-end proof that mesh data forwarding reached it (the data
     /// counterpart of `ingested`).
     data_seen: Cell<usize>,
+    /// transport-shm -- what this forwarder holds of the message it is routing: the chunk each
+    /// shared-memory slice of it names, from the moment it is received until it has been routed
+    /// (see [`crate::shm_relay`]). The peer twin of the router's.
+    #[cfg(feature = "transport-shm")]
+    shm_relay: crate::shm_relay::ShmRelay,
+    /// transport-shm -- messages received with a descriptor this forwarder did not route
+    /// because the face they arrived on never negotiated shared memory.
+    #[cfg(feature = "transport-shm")]
+    shm_unnegotiated_dropped: Cell<usize>,
+    /// transport-shm -- sends this forwarder did not make because a descriptor in the message
+    /// names a chunk it holds nothing for; one per face the message was meant for.
+    #[cfg(feature = "transport-shm")]
+    shm_relay_dropped: Cell<usize>,
     /// Total unsolicited FUTURE `DeclareSubscriber` pushes emitted (R311y158) — a
     /// NEW subscription told to a CLIENT face whose stored FUTURE interest predated
     /// it ([`push_future_subscription`](Self::push_future_subscription)), the
@@ -1128,6 +1141,12 @@ impl LinkstateForwarder {
             faces: RefCell::new(HashMap::new()),
             ingested: Cell::new(0),
             data_seen: Cell::new(0),
+            #[cfg(feature = "transport-shm")]
+            shm_relay: crate::shm_relay::ShmRelay::posix(),
+            #[cfg(feature = "transport-shm")]
+            shm_unnegotiated_dropped: Cell::new(0),
+            #[cfg(feature = "transport-shm")]
+            shm_relay_dropped: Cell::new(0),
             future_pushes: Cell::new(0),
             future_qabl_pushes: Cell::new(0),
             subs: RefCell::new(LinkstatepeerInterest::new()),
@@ -1826,6 +1845,20 @@ impl LinkstateForwarder {
         self.data_seen.get()
     }
 
+    /// transport-shm -- messages received with a descriptor this forwarder did not route
+    /// because the face they came in on never negotiated shared memory.
+    #[cfg(feature = "transport-shm")]
+    pub fn shm_unnegotiated_dropped(&self) -> usize {
+        self.shm_unnegotiated_dropped.get()
+    }
+
+    /// transport-shm -- sends this forwarder did not make because a descriptor in the message
+    /// names a chunk it holds nothing for.
+    #[cfg(feature = "transport-shm")]
+    pub fn shm_relay_dropped(&self) -> usize {
+        self.shm_relay_dropped.get()
+    }
+
     /// Total unsolicited FUTURE `DeclareSubscriber` pushes emitted (R311y158) — the
     /// peer-tier twin of the router's `future_pushes_seen`. A `>0` value proves this
     /// peer told a CLIENT face a subscription it learned AFTER that face's FUTURE
@@ -2012,16 +2045,69 @@ impl LinkstateForwarder {
                 // a per-face send failure (link gone mid-fan-out) is skipped,
                 // not fatal to the rest — the face's own driver surfaces its
                 // teardown via deregister.
-                if state
-                    .actions
-                    .send_network_message_qos(msg, reliable, express, priority)
-                    .is_ok()
-                {
+                if self.send_to_face_actions(&state.actions, msg, reliable, express, priority) {
                     sent += 1;
                 }
             }
         }
         Ok(sent)
+    }
+
+    /// transport-shm -- open the pass that holds the chunks of a Push this forwarder is about to
+    /// route (see [`crate::shm_relay`]), acknowledging each of its shared-memory slices to the
+    /// face that sent them. `None` is a Push that arrived on a face that never negotiated shared
+    /// memory, which is counted and not routed.
+    #[cfg(feature = "transport-shm")]
+    fn open_shm_relay_pass(
+        &self,
+        inbound: FaceId,
+        push: &PushOwned,
+    ) -> Option<crate::shm_relay::RelayPass<'_>> {
+        let actions = self
+            .faces
+            .borrow()
+            .get(&inbound)
+            .map(|state| Arc::clone(&state.actions));
+        let pass = self.shm_relay.open_inbound(actions.as_deref(), push);
+        if pass.is_none() {
+            self.shm_unnegotiated_dropped
+                .set(self.shm_unnegotiated_dropped.get() + 1);
+        }
+        pass
+    }
+
+    /// The one send to one face that every egress of this forwarder goes through, so a message
+    /// with a shared-memory descriptor in it is mapped for the peer it is sent to (see
+    /// [`crate::shm_relay`]). Whether the message was sent.
+    fn send_to_face_actions(
+        &self,
+        actions: &SessionLinkActions,
+        msg: NetworkMessage,
+        reliable: bool,
+        express: bool,
+        priority: Priority,
+    ) -> bool {
+        #[cfg(feature = "transport-shm")]
+        {
+            use crate::shm_relay::RelaySend;
+            match self
+                .shm_relay
+                .send(actions, msg, reliable, express, priority)
+            {
+                RelaySend::Sent => true,
+                RelaySend::Dropped => {
+                    self.shm_relay_dropped.set(self.shm_relay_dropped.get() + 1);
+                    false
+                }
+                RelaySend::Failed => false,
+            }
+        }
+        #[cfg(not(feature = "transport-shm"))]
+        {
+            actions
+                .send_network_message_qos(msg, reliable, express, priority)
+                .is_ok()
+        }
     }
 
     /// Flood self's GAINED-link event (the [`register`](FaceForwarder::register)
@@ -7766,6 +7852,15 @@ impl FaceForwarder for LinkstateForwarder {
                 // tree (loop-free), excluding the inbound face.
                 NetworkMessage::Push(push) => {
                     self.data_seen.set(self.data_seen.get() + 1);
+                    // transport-shm -- hold the chunk of every shared-memory slice this Push
+                    // carries for as long as it is routed, FIRST: a Put the stamp or the routing
+                    // then drops still arrived with a reference that is owed back, and the
+                    // pass's drop is what gives it. A Push from a face that never negotiated
+                    // shared memory is not routed at all.
+                    #[cfg(feature = "transport-shm")]
+                    let Some(_held) = self.open_shm_relay_pass(id, push) else {
+                        continue;
+                    };
                     // R2892 — ONE stamp for every destination of this Put, the
                     // mesh fan-out, the local subscribers, the client subscribers
                     // and the client re-inject alike. It used to sit inside

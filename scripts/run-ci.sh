@@ -17061,7 +17061,14 @@ layer_z_zenohd_interop() {
     # value to `z_queryable_shm`), plus the raw control of the subscriber leg. FOUR
     # must report, so a dropped `#[ignore]` or a rename cannot select zero tests and
     # pass.
-    _runci_guarded_test Z 4 cargo test -p wz-integration-tests \
+    # The file's last section turns the table: the router is `wz-ap-demo --router-hat --shm`
+    # and `zenohd` is the control. FIVE more -- three legs against wz (one reader, two
+    # readers, a reader without shared memory) and the two-reader and bytes legs against
+    # `zenohd` -- so NINE must report. The demo is rebuilt with `router-hat-router`
+    # beside `session-extshm` for them: the build above carries the capability and
+    # not the run-mode, and `--router-hat` is refused by a demo without it.
+    (cd crates && cargo build -p wz-ap-demo --features router-hat-router,session-extshm --quiet) || return 1
+    _runci_guarded_test Z 9 cargo test -p wz-integration-tests \
         --test wz_shm_router_zenohd_interop -- --ignored --quiet --test-threads=1 || return 1
     # Restore the lane's OWN demo build: the `session-extshm` build above wrote over
     # the same `--bin` path (R311y269 — cargo uplifts every feature variant of one

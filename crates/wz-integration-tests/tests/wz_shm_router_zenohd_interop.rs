@@ -25,7 +25,12 @@
 //!   [ wz getter, value in SHM ] --> zenohd (shared memory) --> zenoh z_queryable_shm
 //! ```
 //!
-//! Requires `ZENOHD_SHM=1 scripts/build-zenohd.sh`. SKIPs where the oracle is
+//! The last section of the file turns the table: wz is the router (`wz-ap-demo --router-hat
+//! --shm`), upstream's applications are its clients, and the same legs run against `zenohd` as
+//! the control.
+//!
+//! Requires `ZENOHD_SHM=1 scripts/build-zenohd.sh`, and for the wz-router legs a
+//! `wz-ap-demo` built with `router-hat-router,session-extshm`. SKIPs where the oracle is
 //! absent: hosted CI does not provision a source build for it.
 
 use std::process::{Command, Stdio};
@@ -34,8 +39,8 @@ use std::sync::{Arc, Mutex as StdMutex};
 use std::time::Duration;
 
 use wz_integration_tests::common::{
-    read_captured, wait_for_substring, zenoh_shm_example_binary, zenohd_shm_binary, ChildGuard,
-    PortReservation, ZENOHD_LISTENER_LINE,
+    read_captured, spawn_on_ephemeral_port, wait_for_substring, wz_ap_demo_binary,
+    zenoh_shm_example_binary, zenohd_shm_binary, ChildGuard, PortReservation, ZENOHD_LISTENER_LINE,
 };
 use wz_runtime_tokio::observer::ApplicationLayerObserver;
 use wz_runtime_tokio::runtime_impl::TokioTime;
@@ -632,4 +637,339 @@ async fn zenohd_shm_router_relays_a_wz_getters_query_value_to_a_queryable_throug
         run.queryable_log,
         run.router_log
     );
+}
+
+// ---------------------------------------------------------------------------------------------
+// wz AS the router
+//
+// Every leg above puts upstream's `zenohd` between the ends. The legs below put the router the
+// workspace builds there (`wz-ap-demo --router-hat --shm`), with upstream's own applications as its
+// clients, and run the SAME leg against `zenohd` as the control: what the assertions grade is
+// shown to hold for the real router before it is held against wz.
+//
+// A router does not own the chunk a publisher sends it. The descriptor carries ONE reference taken
+// for the router as its receiver; the router sends the message on, and upstream's router takes a
+// reference of its own for each link it sends a descriptor on and the bytes to a link whose peer
+// cannot read the chunk. Two things are therefore invisible to a leg with a single reader of
+// shared memory behind the router and are what these legs are for:
+//
+//   * two readers: a router that sends the descriptor on as it came sends a reference nobody
+//     took, and the second release wraps upstream's `fetch_sub`, so the publisher's pool never
+//     gets the chunk back. It shows as a publisher that stops after as many puts as its pool
+//     has chunks (here a 1 MiB pool and 120 000-byte chunks: eight);
+//   * a reader without shared memory: it is sent the bytes, and a router that sent it the
+//     descriptor hands it a few bytes of struct as the payload while the label it prints is still
+//     the ordinary one, which is why these legs read the PAYLOAD and not only the label.
+
+/// Which program is the router the three upstream applications are clients of.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RouterKind {
+    /// Upstream's shared-memory `zenohd`.
+    Zenohd,
+    /// The router this workspace builds.
+    Wz,
+}
+
+/// Start the router of `kind`, listening on a port of its own, or `None` where the oracle is
+/// absent.
+fn spawn_router_of(kind: RouterKind) -> Option<Router> {
+    match kind {
+        RouterKind::Zenohd => Some(spawn_router(&zenohd_shm_binary()?)),
+        RouterKind::Wz => {
+            let (guard, log, port) = spawn_on_ephemeral_port(
+                &wz_ap_demo_binary(),
+                &["--router-hat", "127.0.0.1:0", "--shm"],
+                "router-hat: listening on 127.0.0.1:",
+                "wz-ap-demo --router-hat --shm",
+                tempfile::tempfile().expect("capture"),
+            );
+            Some(Router {
+                port,
+                log,
+                _guard: guard,
+            })
+        }
+    }
+}
+
+/// A subscriber behind the router: able to read shared memory, or not.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Reader {
+    SharedMemory,
+    BytesOnly,
+}
+
+/// The size of a chunk in the legs that count chunks, and what a chunk is made of.
+const CHUNK_BYTES: usize = 120_000;
+
+/// What `z_sub_shm` printed for one sample: its payload and the label after it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Printed {
+    payload: String,
+    label: String,
+}
+
+/// The samples a `z_sub_shm` log holds, in order. A sample prints as
+/// `>> [Subscriber] Received PUT ('<key>': '<payload>') <label>`.
+fn printed_samples(log: &str) -> Vec<Printed> {
+    log.lines()
+        .filter(|line| line.contains("Received PUT ("))
+        .filter_map(|line| {
+            let start = line.find("': '")? + 4;
+            let end = line.rfind("') ")?;
+            Some(Printed {
+                payload: line.get(start..end)?.to_string(),
+                label: line.get(end + 3..)?.trim().to_string(),
+            })
+        })
+        .collect()
+}
+
+/// What a run of one publisher and several subscribers behind a router produced.
+struct RelayRun {
+    /// How many puts the publisher made.
+    puts: usize,
+    /// What each subscriber printed, in the order the subscribers were started.
+    printed: Vec<Vec<Printed>>,
+    publisher_log: String,
+    router_log: String,
+}
+
+/// Run `z_pub_shm`, putting `payload_len` bytes at a time (the example's own text when `0`), and
+/// one `z_sub_shm` per entry of `readers`, as clients of the router of `kind`, until the publisher
+/// has put `until_puts` times or `give_up` has passed. `None` where an oracle is absent.
+fn publisher_through_router(
+    kind: RouterKind,
+    readers: &[Reader],
+    payload_len: usize,
+    until_puts: usize,
+    give_up: Duration,
+) -> Option<RelayRun> {
+    let (Some(z_pub), Some(z_sub)) = (
+        zenoh_shm_example_binary("z_pub_shm"),
+        zenoh_shm_example_binary("z_sub_shm"),
+    ) else {
+        eprintln!(
+            "SKIP: no z_pub_shm or z_sub_shm at target/zenohd-shm \
+             (run `ZENOHD_SHM=1 scripts/build-zenohd.sh`)"
+        );
+        return None;
+    };
+    let mut router = spawn_router_of(kind)?;
+    let mut subscribers = Vec::new();
+    for (index, reader) in readers.iter().enumerate() {
+        let mut args: Vec<String> = vec![
+            "-m".into(),
+            "client".into(),
+            "-e".into(),
+            format!("tcp/127.0.0.1:{}", router.port),
+            "-k".into(),
+            "demo/example/**".into(),
+        ];
+        if *reader == Reader::BytesOnly {
+            // `spawn_zenoh` always passes `--enable-shm`; a later `--cfg` overrides it.
+            args.extend([
+                "--cfg".into(),
+                "transport/shared_memory/enabled:false".into(),
+            ]);
+        }
+        let (guard, mut log) = spawn_zenoh(&z_sub, &format!("z_sub_shm #{index}"), &args);
+        wait_for_substring(&mut log, "Press CTRL-C to quit", Duration::from_secs(20))
+            .unwrap_or_else(|e| panic!("z_sub_shm #{index} never became ready: {e}"));
+        subscribers.push((guard, log));
+    }
+    // A subscriber's declaration has to reach the router before a put is routed to it.
+    std::thread::sleep(Duration::from_millis(1000));
+    let mut args: Vec<String> = vec![
+        "-m".into(),
+        "client".into(),
+        "-e".into(),
+        format!("tcp/127.0.0.1:{}", router.port),
+    ];
+    if payload_len > 0 {
+        args.extend(["-p".into(), "x".repeat(payload_len)]);
+    }
+    let (_publisher, mut publisher_log) = spawn_zenoh(&z_pub, "z_pub_shm", &args);
+    let deadline = std::time::Instant::now() + give_up;
+    let puts = |log: &mut std::fs::File| read_captured(log).matches("Put SHM Data").count();
+    while std::time::Instant::now() < deadline && puts(&mut publisher_log) < until_puts {
+        std::thread::sleep(Duration::from_millis(250));
+    }
+    // The last put has to reach the readers.
+    std::thread::sleep(Duration::from_millis(1500));
+    let put_count = puts(&mut publisher_log);
+    let printed = subscribers
+        .iter_mut()
+        .map(|(_, log)| printed_samples(&read_captured(log)))
+        .collect();
+    Some(RelayRun {
+        puts: put_count,
+        printed,
+        publisher_log: read_captured(&mut publisher_log),
+        router_log: read_captured(&mut router.log),
+    })
+}
+
+/// A publisher behind a router with ONE reader of shared memory: the payload arrives, as a
+/// shared-memory buffer, and is the publisher's.
+fn assert_one_reader_gets_the_chunk(kind: RouterKind) {
+    let Some(run) =
+        publisher_through_router(kind, &[Reader::SharedMemory], 0, 3, Duration::from_secs(40))
+    else {
+        return;
+    };
+    let printed = &run.printed[0];
+    assert!(
+        printed.len() >= 3,
+        "the subscriber printed {} of the three samples:\n--- z_pub_shm ---\n{}\n--- router ---\n{}",
+        printed.len(),
+        run.publisher_log,
+        run.router_log
+    );
+    for sample in printed {
+        assert!(
+            sample.payload.ends_with("Pub from Rust SHM!"),
+            "a sample was not the publisher's text: {sample:?}"
+        );
+        assert!(
+            sample.label.starts_with("[SHM ("),
+            "the subscriber was not handed a shared-memory buffer: {sample:?}\n--- router ---\n{}",
+            run.router_log
+        );
+    }
+}
+
+/// A publisher whose pool holds EIGHT chunks, behind a router with TWO readers of shared memory:
+/// both readers get every chunk, and the publisher goes on past the eighth put, which it can only
+/// do if the chunks come back to its pool, which they do only if each reader released a reference
+/// the router took for it.
+fn assert_two_readers_return_the_chunks(kind: RouterKind) {
+    const WANTED: usize = 12;
+    let Some(run) = publisher_through_router(
+        kind,
+        &[Reader::SharedMemory, Reader::SharedMemory],
+        CHUNK_BYTES,
+        WANTED,
+        Duration::from_secs(60),
+    ) else {
+        return;
+    };
+    assert!(
+        run.puts >= WANTED,
+        "the publisher stopped after {} puts, and a pool of eight chunks stops there when no \
+         chunk comes home:\n--- z_pub_shm ---\n{}\n--- router ---\n{}",
+        run.puts,
+        run.publisher_log,
+        run.router_log
+    );
+    for (index, printed) in run.printed.iter().enumerate() {
+        assert!(
+            printed.len() >= WANTED - 1,
+            "reader {index} printed {} of the {WANTED} chunks",
+            printed.len()
+        );
+        for sample in printed {
+            assert!(
+                sample.label.starts_with("[SHM ("),
+                "reader {index} was not handed a shared-memory buffer: {:?}",
+                sample.label
+            );
+        }
+    }
+}
+
+/// A publisher behind a router with a reader of shared memory and a reader without: the second is
+/// sent the chunk's BYTES, whole and in order, and prints them as ordinary bytes.
+fn assert_a_reader_without_shared_memory_gets_the_bytes(kind: RouterKind) {
+    const WANTED: usize = 3;
+    let Some(run) = publisher_through_router(
+        kind,
+        &[Reader::SharedMemory, Reader::BytesOnly],
+        CHUNK_BYTES,
+        WANTED,
+        Duration::from_secs(40),
+    ) else {
+        return;
+    };
+    let (shared, bytes) = (&run.printed[0], &run.printed[1]);
+    assert!(
+        shared.len() >= WANTED && bytes.len() >= WANTED,
+        "the readers printed {} and {} of {WANTED} samples:\n--- z_pub_shm ---\n{}\n--- router ---\n{}",
+        shared.len(),
+        bytes.len(),
+        run.publisher_log,
+        run.router_log
+    );
+    for sample in shared.iter().take(WANTED) {
+        assert!(
+            sample.label.starts_with("[SHM ("),
+            "the reader of shared memory was not handed a buffer: {:?}",
+            sample.label
+        );
+    }
+    for (index, sample) in bytes.iter().enumerate().take(WANTED) {
+        let prefix = format!("[{index:4}] ");
+        assert_eq!(
+            sample.label, "[RAW]",
+            "a reader without shared memory was handed something other than bytes"
+        );
+        assert_eq!(
+            sample.payload.len(),
+            prefix.len() + CHUNK_BYTES,
+            "sample {index} is not the publisher's {CHUNK_BYTES} bytes: it is {} long and begins \
+             {:?}; a router that sends such a reader the descriptor hands it a few bytes of \
+             struct\n--- router ---\n{}",
+            sample.payload.len(),
+            sample.payload.chars().take(48).collect::<String>(),
+            run.router_log
+        );
+        assert!(
+            sample.payload.starts_with(&prefix)
+                && sample.payload[prefix.len()..].bytes().all(|b| b == b'x'),
+            "sample {index} is not the publisher's text"
+        );
+    }
+}
+
+/// wz as the router, one reader of shared memory behind it.
+// wz-proves: transport-shm zenoh->wz
+// wz-proves: transport-shm wz->zenoh
+#[test]
+#[ignore = "binary-dep e2e (ZENOHD_SHM=1 build-zenohd.sh: z_pub_shm + z_sub_shm; wz-ap-demo --features router-hat-router,session-extshm); Layer Z runs via --ignored"]
+fn wz_router_relays_a_zenoh_publishers_chunk_to_a_reader_of_shared_memory() {
+    assert_one_reader_gets_the_chunk(RouterKind::Wz);
+}
+
+/// wz as the router, two readers of shared memory behind it: every chunk goes home.
+// wz-proves: transport-shm zenoh->wz
+// wz-proves: transport-shm wz->zenoh
+#[test]
+#[ignore = "binary-dep e2e (ZENOHD_SHM=1 build-zenohd.sh: z_pub_shm + z_sub_shm; wz-ap-demo --features router-hat-router,session-extshm); Layer Z runs via --ignored"]
+fn wz_router_with_two_readers_of_shared_memory_gives_the_publishers_chunks_back() {
+    assert_two_readers_return_the_chunks(RouterKind::Wz);
+}
+
+/// Control for the leg above: upstream's router, the same publisher and readers.
+// wz-proves: none -- the control of the two-reader leg: upstream's own router, so the chunk count the leg asks for is shown to be what a router that follows the protocol gives
+#[test]
+#[ignore = "binary-dep e2e (ZENOHD_SHM=1 build-zenohd.sh: zenohd + z_pub_shm + z_sub_shm); Layer Z runs via --ignored"]
+fn zenohd_with_two_readers_of_shared_memory_gives_the_publishers_chunks_back() {
+    assert_two_readers_return_the_chunks(RouterKind::Zenohd);
+}
+
+/// wz as the router, a reader of shared memory and a reader without: the second is sent the bytes.
+// wz-proves: transport-shm zenoh->wz
+// wz-proves: transport-shm wz->zenoh
+#[test]
+#[ignore = "binary-dep e2e (ZENOHD_SHM=1 build-zenohd.sh: z_pub_shm + z_sub_shm; wz-ap-demo --features router-hat-router,session-extshm); Layer Z runs via --ignored"]
+fn wz_router_sends_a_reader_without_shared_memory_the_chunks_bytes() {
+    assert_a_reader_without_shared_memory_gets_the_bytes(RouterKind::Wz);
+}
+
+/// Control for the leg above: upstream's router, the same publisher and readers.
+// wz-proves: none -- the control of the bytes leg: upstream's own router, so what the leg reads off the second reader is shown to be what a router that follows the protocol sends it
+#[test]
+#[ignore = "binary-dep e2e (ZENOHD_SHM=1 build-zenohd.sh: zenohd + z_pub_shm + z_sub_shm); Layer Z runs via --ignored"]
+fn zenohd_sends_a_reader_without_shared_memory_the_chunks_bytes() {
+    assert_a_reader_without_shared_memory_gets_the_bytes(RouterKind::Zenohd);
 }

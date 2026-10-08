@@ -370,6 +370,142 @@ pub fn collect_wire_payload(
     }
 }
 
+/// What a node that FORWARDS a Put makes of one shared-memory slice of it, for one peer.
+#[cfg(feature = "transport-shm")]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Relayed {
+    /// The peer reads shared memory: the slice stays a descriptor, and these are its serialized
+    /// bytes. They are the descriptor of the reference taken for THIS peer, which is the received
+    /// one only when the chunk is the same.
+    Descriptor(Vec<u8>),
+    /// The peer cannot read the chunk: the slice becomes these payload bytes.
+    Bytes(Vec<u8>),
+}
+
+/// Why a Put could not be forwarded to a peer.
+#[cfg(feature = "transport-shm")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RelayFault {
+    /// A shared-memory slice the forwarder holds no chunk for (stale, foreign, or never held).
+    /// Upstream drops such a message at the receiving transport; nothing is sent in its place.
+    Unrelayable,
+    /// A slice of a kind this node does not know.
+    UnknownKind(u8),
+    /// The forwarded payload does not fit the storage of the wire profile.
+    Unrepresentable,
+}
+
+/// Re-express the shared-memory slices of a Put for ONE peer, in place: upstream's
+/// `map_to_partner` (`io/zenoh-transport/src/common/shm/interop.rs` @ `fn map_to_partner<`),
+/// which a router runs on every message for every link it sends it on.
+///
+/// `decide` is offered the descriptor bytes of EACH shared-memory slice, in order, exactly once,
+/// whatever became of the slices before it (see `walk_slices` for why: a decision may take a
+/// reference, and a slice that is never offered is a reference nobody gives back). It answers
+/// [`Relayed::Descriptor`] to send the slice on as a descriptor and [`Relayed::Bytes`] to send
+/// what the chunk holds, and `None` for a slice it holds nothing for, which fails the whole Put
+/// and leaves it untouched.
+///
+/// When no shared-memory slice is left, the Put is not sliced any more and is rewritten as the
+/// plain layout (a length and bytes) with the marker out of its extension chain: a peer that
+/// cannot read shared memory is never sent the marker, because its reader would take the first
+/// bytes of the payload for a count of slices. The chain keeps its other entries, with the
+/// continuation flags renormalised over what is left, and a chain that is empty is absent and
+/// takes the Put header's `Z` flag with it.
+#[cfg(feature = "transport-shm")]
+pub fn relay_shm_slices(
+    put: &mut MsgPutOwned<crate::wire::WireStorage>,
+    mut decide: impl FnMut(&[u8]) -> Option<Relayed>,
+) -> Result<(), RelayFault> {
+    let Some(slices) = put.slices.as_ref() else {
+        return Ok(());
+    };
+    let mut remade: Vec<(u8, Vec<u8>)> = Vec::new();
+    let mut fault = None;
+    for slice in SceList::as_slice(slices) {
+        let bytes = SceByteBuf::as_slice(&slice.bytes);
+        match slice_kind(slice.kind) {
+            SLICE_KIND_RAW => remade.push((SLICE_KIND_RAW, bytes.to_vec())),
+            SLICE_KIND_SHM_PTR => match decide(bytes) {
+                Some(Relayed::Descriptor(descriptor)) => {
+                    remade.push((SLICE_KIND_SHM_PTR, descriptor));
+                }
+                Some(Relayed::Bytes(payload)) => remade.push((SLICE_KIND_RAW, payload)),
+                None => {
+                    fault.get_or_insert(RelayFault::Unrelayable);
+                }
+            },
+            other => {
+                fault.get_or_insert(RelayFault::UnknownKind(other));
+            }
+        }
+    }
+    if let Some(fault) = fault {
+        return Err(fault);
+    }
+    let unrepresentable = |_| RelayFault::Unrepresentable;
+    if remade.iter().any(|(kind, _)| *kind == SLICE_KIND_SHM_PTR) {
+        type Slices = <crate::wire::WireStorage as CodecStorage>::List<
+            ZbufSliceOwned<crate::wire::WireStorage>,
+            4,
+        >;
+        let mut list = <Slices as SceList<_>>::empty();
+        for (kind, bytes) in &remade {
+            list.try_push(ZbufSliceOwned {
+                kind: u32::from(*kind),
+                len: bytes.len() as u64,
+                bytes: crate::wire::wire_bytes(bytes).map_err(unrepresentable)?,
+            })
+            .map_err(unrepresentable)?;
+        }
+        put.slice_count = Some(remade.len() as u32);
+        put.slices = Some(list);
+        return Ok(());
+    }
+    let joined: Vec<u8> = remade.into_iter().flat_map(|(_, bytes)| bytes).collect();
+    put.payload_len = Some(joined.len() as u64);
+    put.payload = Some(crate::wire::wire_bytes(&joined).map_err(unrepresentable)?);
+    put.slice_count = None;
+    put.slices = None;
+    remove_shm_marker(put).map_err(unrepresentable)
+}
+
+/// Take the shared-memory marker out of a Put's extension chain, renormalise the continuation
+/// flags over the entries that are left, and drop the chain, and the header's `Z` flag, when
+/// nothing is left. A Put without the marker is left as it is.
+#[cfg(feature = "transport-shm")]
+fn remove_shm_marker(put: &mut MsgPutOwned<crate::wire::WireStorage>) -> Result<(), CodecError> {
+    let Some(chain) = put.extensions.as_ref() else {
+        return Ok(());
+    };
+    let marker =
+        crate::ext_header::ext_eid(crate::extshm::SHM_BODY_EXT_ID | crate::ext_header::EXT_FLAG_M);
+    let mut kept: Vec<_> = SceList::as_slice(chain)
+        .iter()
+        .filter(|entry| crate::ext_header::ext_eid(entry.header) != marker)
+        .cloned()
+        .collect();
+    if kept.len() == SceList::as_slice(chain).len() {
+        return Ok(());
+    }
+    if kept.is_empty() {
+        put.extensions = None;
+        put.header &= !crate::ext_header::EXT_FLAG_Z;
+        return Ok(());
+    }
+    crate::ext_nodeid::apply_chain_z_bits(&mut kept);
+    type Chain = <crate::wire::WireStorage as CodecStorage>::List<
+        wz_codecs::ext_entry::ExtEntryOwned<crate::wire::WireStorage>,
+        16,
+    >;
+    let mut list = <Chain as SceList<_>>::empty();
+    for entry in kept {
+        list.try_push(entry)?;
+    }
+    put.extensions = Some(list);
+    Ok(())
+}
+
 /// The priority band a received message was sent at, as the index of the handoff
 /// counter a shared-memory sender names for it: the QoS extension's low three bits,
 /// and the default priority when the message carries none, which is how upstream
@@ -660,5 +796,213 @@ mod tests {
             0,
             "a descriptor that does not parse has no length to report"
         );
+    }
+}
+
+// The relay rewrites the Put of the wire profile, so these build it in that storage.
+#[cfg(all(test, feature = "transport-shm"))]
+mod relay_tests {
+    use super::*;
+    use crate::wire::WireStorage;
+    use alloc::vec;
+    use wz_codecs::ext_entry::{ExtEntryOwned, ExtEntryOwnedVariant};
+    use wz_codecs::ext_unit::ExtUnit;
+
+    type Chain = <WireStorage as CodecStorage>::List<ExtEntryOwned<WireStorage>, 16>;
+
+    fn slice(kind: u8, bytes: &[u8]) -> ZbufSliceOwned<WireStorage> {
+        ZbufSliceOwned {
+            kind: u32::from(kind),
+            len: bytes.len() as u64,
+            bytes: crate::wire::wire_bytes(bytes).expect("fits"),
+        }
+    }
+
+    /// A Put as a router receives one: sliced, with the marker the only entry of its chain.
+    fn received(slices: &[(u8, &[u8])]) -> MsgPutOwned<WireStorage> {
+        let mut put = shm::<WireStorage>(slices[0].1).expect("one slice fits");
+        let list = put.slices.as_mut().expect("populated");
+        // `shm` made the first slice SHM_PTR; make it what the caller said.
+        *list = <<WireStorage as CodecStorage>::List<ZbufSliceOwned<WireStorage>, 4> as SceList<
+            _,
+        >>::empty();
+        for (kind, bytes) in slices {
+            list.try_push(slice(*kind, bytes)).expect("a slice fits");
+        }
+        put.slice_count = Some(slices.len() as u32);
+        put.header |= 0x80;
+        let mut chain = <Chain as SceList<_>>::empty();
+        chain
+            .try_push(crate::extshm::encode_shm_marker_ext())
+            .expect("fits");
+        put.extensions = Some(chain);
+        put
+    }
+
+    fn sliced(put: &MsgPutOwned<WireStorage>) -> Vec<(u8, Vec<u8>)> {
+        match layout(put) {
+            PutPayload::Sliced(slices) => slices
+                .iter()
+                .map(|s| (slice_kind(s.kind), SceByteBuf::as_slice(&s.bytes).to_vec()))
+                .collect(),
+            PutPayload::Inline(_) => panic!("the Put is not sliced"),
+        }
+    }
+
+    #[test]
+    fn a_descriptor_kept_leaves_the_put_sliced_and_marked() {
+        let mut put = received(&[(SLICE_KIND_SHM_PTR, &[1, 2, 3])]);
+        relay_shm_slices(&mut put, |descriptor| {
+            assert_eq!(descriptor, [1, 2, 3], "the slice is offered as it came");
+            Some(Relayed::Descriptor(vec![9, 9]))
+        })
+        .expect("relayed");
+        assert_eq!(
+            sliced(&put),
+            [(SLICE_KIND_SHM_PTR, vec![9, 9])],
+            "the descriptor of the reference taken for THIS peer"
+        );
+        assert!(crate::extshm::body_has_shm_marker(SceList::as_slice(
+            put.extensions.as_ref().expect("the chain stays")
+        )));
+        assert_ne!(put.header & 0x80, 0, "the chain still needs its Z flag");
+        assert_eq!(
+            put.slices.as_ref().map(|s| SceList::as_slice(s)[0].len),
+            Some(2)
+        );
+    }
+
+    #[test]
+    fn bytes_for_the_only_slice_make_the_plain_layout_without_the_marker() {
+        let mut put = received(&[(SLICE_KIND_SHM_PTR, &[1, 2, 3])]);
+        relay_shm_slices(&mut put, |_| Some(Relayed::Bytes(b"payload".to_vec()))).expect("relayed");
+        assert!(!is_sliced(&put), "no shared-memory slice is left");
+        assert_eq!(inline_bytes(&put), Some(&b"payload"[..]));
+        assert_eq!(put.payload_len, Some(7));
+        assert_eq!(put.slice_count, None);
+        assert!(put.extensions.is_none(), "an empty chain is an absent one");
+        assert_eq!(put.header & 0x80, 0, "and it takes the Z flag with it");
+        assert_eq!(
+            put,
+            inline::<WireStorage>(b"payload").expect("inline fits"),
+            "exactly the Put the plain builder makes, field for field"
+        );
+    }
+
+    #[test]
+    fn the_other_extensions_survive_with_the_continuation_flag_renormalised() {
+        let mut put = received(&[(SLICE_KIND_SHM_PTR, &[1])]);
+        let other = ExtEntryOwned::<WireStorage> {
+            header: 0x04 | crate::ext_header::EXT_FLAG_Z,
+            body: ExtEntryOwnedVariant::CodecZenohExtUnit(ExtUnit::default()),
+        };
+        let mut chain = <Chain as SceList<_>>::empty();
+        chain.try_push(other).expect("fits");
+        chain
+            .try_push(crate::extshm::encode_shm_marker_ext())
+            .expect("fits");
+        put.extensions = Some(chain);
+        relay_shm_slices(&mut put, |_| Some(Relayed::Bytes(vec![7]))).expect("relayed");
+        let left = SceList::as_slice(put.extensions.as_ref().expect("one entry is left"));
+        assert_eq!(left.len(), 1);
+        assert_eq!(
+            left[0].header, 0x04,
+            "the entry that is now last ends the chain: its continuation flag is gone"
+        );
+        assert_ne!(
+            put.header & 0x80,
+            0,
+            "a chain that remains keeps the Z flag"
+        );
+        assert!(!crate::extshm::body_has_shm_marker(left));
+    }
+
+    #[test]
+    fn slices_that_become_bytes_join_in_order_around_a_raw_one() {
+        let mut put = received(&[
+            (SLICE_KIND_SHM_PTR, &[1]),
+            (SLICE_KIND_RAW, b"hi"),
+            (SLICE_KIND_SHM_PTR, &[2]),
+        ]);
+        relay_shm_slices(&mut put, |d| {
+            Some(Relayed::Bytes(if d == [1] {
+                b"A".to_vec()
+            } else {
+                b"B".to_vec()
+            }))
+        })
+        .expect("relayed");
+        assert_eq!(inline_bytes(&put), Some(&b"AhiB"[..]));
+    }
+
+    #[test]
+    fn one_kept_and_one_sent_as_bytes_stays_sliced_with_a_raw_slice() {
+        let mut put = received(&[(SLICE_KIND_SHM_PTR, &[1]), (SLICE_KIND_SHM_PTR, &[2])]);
+        relay_shm_slices(&mut put, |d| {
+            Some(if d == [1] {
+                Relayed::Descriptor(vec![8])
+            } else {
+                Relayed::Bytes(b"raw".to_vec())
+            })
+        })
+        .expect("relayed");
+        assert_eq!(
+            sliced(&put),
+            [
+                (SLICE_KIND_SHM_PTR, vec![8]),
+                (SLICE_KIND_RAW, b"raw".to_vec())
+            ]
+        );
+        assert_eq!(put.slice_count, Some(2));
+        assert!(crate::extshm::body_has_shm_marker(SceList::as_slice(
+            put.extensions
+                .as_ref()
+                .expect("a descriptor is left, so is the marker")
+        )));
+    }
+
+    /// A slice the forwarder holds nothing for fails the whole Put and leaves it as it was, and
+    /// every slice behind it is still offered, because a decision may take a reference.
+    #[test]
+    fn a_refused_slice_fails_the_put_untouched_and_every_slice_is_offered() {
+        let mut put = received(&[
+            (SLICE_KIND_SHM_PTR, &[1]),
+            (SLICE_KIND_SHM_PTR, &[2]),
+            (SLICE_KIND_SHM_PTR, &[3]),
+        ]);
+        let before = put.clone();
+        let mut offered = Vec::new();
+        let result = relay_shm_slices(&mut put, |d| {
+            offered.push(d.to_vec());
+            (d != [1]).then(|| Relayed::Bytes(vec![0]))
+        });
+        assert_eq!(result, Err(RelayFault::Unrelayable));
+        assert_eq!(offered, [vec![1], vec![2], vec![3]]);
+        assert_eq!(put, before, "nothing was rewritten");
+    }
+
+    #[test]
+    fn an_unknown_kind_fails_the_put_and_the_slice_behind_it_is_still_offered() {
+        let mut put = received(&[(7, &[]), (SLICE_KIND_SHM_PTR, &[2])]);
+        let before = put.clone();
+        let mut offered = Vec::new();
+        let result = relay_shm_slices(&mut put, |d| {
+            offered.push(d.to_vec());
+            Some(Relayed::Bytes(vec![0]))
+        });
+        assert_eq!(result, Err(RelayFault::UnknownKind(7)));
+        assert_eq!(offered, [vec![2]]);
+        assert_eq!(put, before);
+    }
+
+    #[test]
+    fn an_inline_put_is_offered_to_no_one() {
+        let mut put = inline::<WireStorage>(b"abc").expect("inline fits");
+        let before = put.clone();
+        relay_shm_slices(&mut put, |_| {
+            panic!("an inline Put has no slice to decide on")
+        })
+        .expect("nothing to do");
+        assert_eq!(put, before);
     }
 }

@@ -1900,6 +1900,23 @@ pub struct RouterForwarder {
     /// does, so a router RECEIVES pushes it correctly declines to relay, and "not
     /// relayed" is a question only this count answers.
     data_sent: Cell<usize>,
+    /// transport-shm -- what this router holds of the message it is routing: the chunk each
+    /// shared-memory slice of it names, from the moment it is received until it has been routed
+    /// (see [`crate::shm_relay`]). A router that sent a received descriptor on as it came would
+    /// send a reference nobody took.
+    #[cfg(feature = "transport-shm")]
+    shm_relay: crate::shm_relay::ShmRelay,
+    /// transport-shm -- messages this router received with a descriptor it did not route, because
+    /// the face they arrived on never negotiated shared memory. Upstream maps a descriptor only
+    /// for a link that did, and a router that opened a segment a stranger named would map
+    /// whatever it was pointed at.
+    #[cfg(feature = "transport-shm")]
+    shm_unnegotiated_dropped: Cell<usize>,
+    /// transport-shm -- messages this router did NOT send to a face because a descriptor in them
+    /// names a chunk it holds nothing for (a stale or foreign segment). Upstream drops such a
+    /// message when it is received; one send is counted per face it was meant for.
+    #[cfg(feature = "transport-shm")]
+    shm_relay_dropped: Cell<usize>,
     /// The double-delivery guard witness: the number of local-client deliveries a
     /// router DEFERRED because it does not carry the peer-source Push north
     /// (R2879: the crossing filter, until then the master gate) — the peer-source
@@ -2175,6 +2192,12 @@ impl RouterForwarder {
             ingested: Cell::new(0),
             data_seen: Cell::new(0),
             data_sent: Cell::new(0),
+            #[cfg(feature = "transport-shm")]
+            shm_relay: crate::shm_relay::ShmRelay::posix(),
+            #[cfg(feature = "transport-shm")]
+            shm_unnegotiated_dropped: Cell::new(0),
+            #[cfg(feature = "transport-shm")]
+            shm_relay_dropped: Cell::new(0),
             deferred_client_delivery: Cell::new(0),
             #[cfg(feature = "router-multicast-faces")]
             mcast_ingress_federated: Cell::new(0),
@@ -2456,6 +2479,78 @@ impl RouterForwarder {
     fn note_sent(&self, was_push: bool) {
         if was_push {
             self.data_sent.set(self.data_sent.get() + 1);
+        }
+    }
+
+    /// transport-shm -- messages received with a descriptor this router did not route because
+    /// the face they came in on never negotiated shared memory.
+    #[cfg(feature = "transport-shm")]
+    pub fn shm_unnegotiated_dropped(&self) -> usize {
+        self.shm_unnegotiated_dropped.get()
+    }
+
+    /// transport-shm -- sends this router did not make because a descriptor in the message names
+    /// a chunk it holds nothing for.
+    #[cfg(feature = "transport-shm")]
+    pub fn shm_relay_dropped(&self) -> usize {
+        self.shm_relay_dropped.get()
+    }
+
+    /// transport-shm -- open the pass that holds the chunks of a Push this router is about to
+    /// route (see [`crate::shm_relay`]), acknowledging each of its shared-memory slices to the
+    /// face that sent them. `None` is a Push that arrived on a face that never negotiated shared
+    /// memory, which is counted and not routed; the multicast ingress is such a face, since it
+    /// negotiates nothing.
+    #[cfg(feature = "transport-shm")]
+    fn open_shm_relay_pass(
+        &self,
+        inbound: FaceId,
+        push: &PushOwned,
+    ) -> Option<crate::shm_relay::RelayPass<'_>> {
+        let actions = self
+            .faces
+            .borrow()
+            .get(&inbound)
+            .map(|state| Arc::clone(&state.actions));
+        let pass = self.shm_relay.open_inbound(actions.as_deref(), push);
+        if pass.is_none() {
+            self.shm_unnegotiated_dropped
+                .set(self.shm_unnegotiated_dropped.get() + 1);
+        }
+        pass
+    }
+
+    /// The one send to one face that every router egress goes through, so a message with a
+    /// shared-memory descriptor in it is mapped for the peer it is sent to (see
+    /// [`crate::shm_relay`]). Whether the message was sent.
+    fn send_to_face_actions(
+        &self,
+        actions: &SessionLinkActions,
+        msg: NetworkMessage,
+        reliable: bool,
+        express: bool,
+        priority: Priority,
+    ) -> bool {
+        #[cfg(feature = "transport-shm")]
+        {
+            use crate::shm_relay::RelaySend;
+            match self
+                .shm_relay
+                .send(actions, msg, reliable, express, priority)
+            {
+                RelaySend::Sent => true,
+                RelaySend::Dropped => {
+                    self.shm_relay_dropped.set(self.shm_relay_dropped.get() + 1);
+                    false
+                }
+                RelaySend::Failed => false,
+            }
+        }
+        #[cfg(not(feature = "transport-shm"))]
+        {
+            actions
+                .send_network_message_qos(msg, reliable, express, priority)
+                .is_ok()
         }
     }
 
@@ -3028,11 +3123,7 @@ impl RouterForwarder {
                     continue;
                 }
                 let was_push = matches!(msg, NetworkMessage::Push(_));
-                if state
-                    .actions
-                    .send_network_message_qos(msg, reliable, express, priority)
-                    .is_ok()
-                {
+                if self.send_to_face_actions(&state.actions, msg, reliable, express, priority) {
                     sent += 1;
                     self.note_sent(was_push);
                 }
@@ -4505,6 +4596,15 @@ impl RouterForwarder {
         push: &PushOwned,
         inbound_is_mcast: bool,
     ) {
+        // transport-shm -- hold the chunk of every shared-memory slice the Push carries for as
+        // long as it is routed, FIRST: a Push routing then drops (an alias that does not resolve,
+        // no interested subscriber) still arrived with a reference that is owed back, and the
+        // pass's drop is what gives it. A Push from a link that never negotiated shared memory
+        // is not routed at all.
+        #[cfg(feature = "transport-shm")]
+        let Some(_held) = self.open_shm_relay_pass(inbound, push) else {
+            return;
+        };
         let Some(keyexpr) = self.resolve_inbound_keyexpr(inbound, push) else {
             return;
         };
@@ -4736,6 +4836,19 @@ impl RouterForwarder {
         // `compute_self_publish_forward`); a literal push is forwarded verbatim.
         let Ok(carrier) = reliteralize_push(push, keyexpr) else {
             return;
+        };
+        // transport-shm -- a multicast group negotiates nothing, so no member of it can read a
+        // chunk: a Push that names one goes out as the chunk's bytes, from the pass `route_push`
+        // holds. The descriptor it arrived with would be a few bytes of struct as every member's
+        // payload.
+        #[cfg(feature = "transport-shm")]
+        let carrier = {
+            let mut carrier = carrier;
+            if self.shm_relay.into_plain_bytes(&mut carrier).is_err() {
+                self.shm_relay_dropped.set(self.shm_relay_dropped.get() + 1);
+                return;
+            }
+            carrier
         };
         for group in groups.iter() {
             // Fire-and-forget: a group with no room or no link drops it, the
@@ -7269,10 +7382,8 @@ impl RouterForwarder {
             return false;
         }
         let was_push = matches!(msg, NetworkMessage::Push(_));
-        let sent = state
-            .actions
-            .send_network_message(msg, reliable, false)
-            .is_ok();
+        let sent =
+            self.send_to_face_actions(&state.actions, msg, reliable, false, Priority::DEFAULT);
         if sent {
             self.note_sent(was_push);
         }

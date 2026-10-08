@@ -563,6 +563,38 @@ pub trait ShmResolver {
     fn resolve_shared(&self, descriptor: &ShmDescriptor) -> Option<crate::link::RxBytes> {
         self.resolve(descriptor).map(crate::link::RxBytes::from)
     }
+
+    /// The chunk a received descriptor names, held as a buffer a message can be sent from AGAIN:
+    /// what a node that forwards a message keeps of it while it routes, as upstream's router
+    /// keeps the mapped buffer of the message it relays
+    /// (`io/zenoh-transport/src/common/shm/interop.rs` @ `pub fn map_zmsg_to_shmbuf(`).
+    ///
+    /// The contract on the reference is [`Self::resolve_shared`]'s: the descriptor carried one
+    /// reference taken for this receiver, the handle owns it, and it goes back exactly once, when
+    /// the last clone of the handle drops. Every reservation taken from the handle
+    /// ([`ShmSendHandle::reserve_for_receiver`]) is a reference of its own on top of it, so a
+    /// relay to N peers leaves the chunk with N references and the handle's drop gives back the
+    /// one it was sent.
+    ///
+    /// `None` when the descriptor cannot be held (a stale or foreign segment, a protocol this
+    /// node does not read) and for a resolver that cannot relay, which is the default.
+    fn hold(&self, descriptor: &ShmDescriptor) -> Option<ShmSendHandle> {
+        let _ = descriptor;
+        None
+    }
+}
+
+/// The chunks a forwarding node holds while it routes ONE message, as the faces it routes to
+/// see them.
+///
+/// A face that is handed a message whose payload is a descriptor asks this for the chunk the
+/// descriptor names, and then sends it as the descriptor with a reference of its own if its peer
+/// can read shared memory, or as the bytes if it cannot. Nothing is held outside a routing pass,
+/// so a descriptor that reaches a face with no pass open is answered `None` and its message is
+/// not sent.
+pub trait ShmRelayHolds: Send + Sync {
+    /// The chunk `descriptor` names, if the pass in progress holds it.
+    fn held(&self, descriptor: &ShmDescriptor) -> Option<ShmSendHandle>;
 }
 
 /// R3062 -- the SENDING end of a shared-memory payload: a buffer some owner of a segment holds,
@@ -1285,6 +1317,19 @@ impl ShmAuthDispatch {
         }
         self.handoff_changed = false;
         Some(self.handoff.take())
+    }
+
+    /// Acknowledge ONE received shared-memory slice of priority `band` through the handoff this
+    /// dispatch still holds, and do nothing when it holds none.
+    ///
+    /// A forwarder is the caller: it has no registry to take the handoff
+    /// ([`Self::take_handoff_update`] moves it out, so there is one holder), and the slices it
+    /// routes are still owed their acknowledgement. When a registry HAS taken it the dispatch
+    /// holds none, and this writes nothing, so a slice is never acknowledged twice.
+    pub fn acknowledge(&self, band: usize) {
+        if let Some(handoff) = self.handoff.as_deref() {
+            handoff.on_rx(band);
+        }
     }
 
     /// Whether an authenticator is installed — i.e. whether this node can take

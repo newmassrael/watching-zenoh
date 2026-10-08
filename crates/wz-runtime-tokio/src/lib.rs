@@ -1701,6 +1701,11 @@ pub mod shm_provider;
 // names. Its docs are inside the module, for the reason the note on `shm_backend` gives.
 #[cfg(feature = "transport-shm")]
 pub mod shm_clients;
+// What a node that forwards a message holds while it routes it: the chunks of its
+// shared-memory slices. Its docs are inside the module, for the reason the note on
+// `shm_backend` gives.
+#[cfg(feature = "transport-shm")]
+pub mod shm_relay;
 /// R3039 -- the shared-memory watchdog: holders confirm a chunk's liveness
 /// bit and its provider validates it, upstream's two periodic halves. Gated
 /// with the provider it serves.

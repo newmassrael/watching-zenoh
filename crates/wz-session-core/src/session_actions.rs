@@ -5563,6 +5563,89 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         }
     }
 
+    /// transport-shm -- acknowledge one shared-memory slice this peer sent, of priority `band`,
+    /// through the handoff the session still holds (see
+    /// [`ShmAuthDispatch::acknowledge`](crate::extshm::ShmAuthDispatch::acknowledge)): what a
+    /// forwarder owes the sender of each slice it routes, which a node with a registry pays when
+    /// the registry reads the slice. Nothing is written when the session holds no handoff.
+    #[cfg(feature = "session-extshm")]
+    pub fn acknowledge_shm_slice(&self, band: usize) {
+        R::with_mutex_mut(&self.shm_auth, |d| d.acknowledge(band));
+    }
+
+    /// transport-shm -- send a message a FORWARDER received to THIS peer, with the shared-memory
+    /// slices of its payload mapped for what this peer can read: upstream's `map_zmsg_to_partner`,
+    /// which a router runs on a message for every link it sends it on
+    /// (`io/zenoh-transport/src/unicast/universal/tx.rs` @
+    /// `crate::common::shm::interop::map_zmsg_to_partner(`).
+    ///
+    /// The forwarder received the message with a descriptor in it and holds the chunk the
+    /// descriptor names (`holds`). A peer that negotiated shared memory and reads the chunk's
+    /// protocol is sent a descriptor, with a reference of its own taken for it and kept only if
+    /// the frame was handed to the link
+    /// ([`ShmReservation::commit`](crate::extshm::ShmReservation::commit)); any other peer is sent the
+    /// bytes, in the plain layout and without the marker. The received descriptor is never sent on
+    /// as it came: it carries one reference, and a peer that releases a reference nobody took for
+    /// it leaves the chunk's count short, which is a pool that never gets the chunk back.
+    ///
+    /// A message with no shared-memory slice is sent as [`Self::send_network_message_qos`] sends
+    /// it. `Ok(false)` is a message that was NOT sent because a descriptor in it names a chunk the
+    /// forwarder holds nothing for (a stale or foreign one, or none held at all): upstream drops
+    /// such a message at the receiving transport, and nothing goes out in its place.
+    ///
+    /// Only a forwarder calls this. A session that sends its OWN buffer has already taken the
+    /// reference for the descriptor it builds, and goes through
+    /// [`Self::send_network_message_qos`].
+    #[cfg(all(feature = "transport-shm", feature = "codec-push"))]
+    pub fn send_network_message_relayed(
+        &self,
+        mut msg: crate::network_message::NetworkMessage,
+        reliable: bool,
+        express: bool,
+        priority: Priority,
+        holds: &dyn crate::extshm::ShmRelayHolds,
+    ) -> Result<bool, SendWireError> {
+        let mut reservations = Vec::new();
+        if let crate::network_message::NetworkMessage::Push(push) = &mut msg {
+            if let crate::wire::PushOwnedVariant::CodecZenohMsgPut(put) = &mut push.body {
+                match self.relay_put_to_this_peer(put, holds) {
+                    Ok(taken) => reservations = taken,
+                    Err(_) => return Ok(false),
+                }
+            }
+        }
+        // A send that fails drops `reservations` with the `?`, which gives every reference back.
+        self.send_network_message_qos(msg, reliable, express, priority)?;
+        for reservation in reservations {
+            reservation.commit();
+        }
+        Ok(true)
+    }
+
+    /// The mapping [`Self::send_network_message_relayed`] makes of one Put, returning the
+    /// references it took for this peer. The references go back when the returned list drops,
+    /// and on every failure path they already have.
+    #[cfg(all(feature = "transport-shm", feature = "codec-push"))]
+    fn relay_put_to_this_peer(
+        &self,
+        put: &mut wz_codecs::msg_put::MsgPutOwned<crate::wire::WireStorage>,
+        holds: &dyn crate::extshm::ShmRelayHolds,
+    ) -> Result<Vec<Box<dyn crate::extshm::ShmReservation>>, crate::put_payload::RelayFault> {
+        let mut reservations: Vec<Box<dyn crate::extshm::ShmReservation>> = Vec::new();
+        crate::put_payload::relay_shm_slices(put, |descriptor| {
+            let held = holds.held(&crate::extshm::decode_shm_descriptor(descriptor)?)?;
+            Some(if self.shm_admits(held.protocol()) {
+                let reservation = held.reserve_for_receiver();
+                let bytes = crate::extshm::encode_shm_descriptor(&reservation.descriptor());
+                reservations.push(reservation);
+                crate::put_payload::Relayed::Descriptor(bytes)
+            } else {
+                crate::put_payload::Relayed::Bytes(held.bytes().to_vec())
+            })
+        })?;
+        Ok(reservations)
+    }
+
     /// session-extcompression — the AP layer's "this deploy offers compression
     /// toward this peer" config, set once at bring-up BEFORE the handshake drives
     /// (the wz analogue of zenoh `config.unicast.is_compression`). Seeds

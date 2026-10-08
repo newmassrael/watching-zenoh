@@ -1029,7 +1029,13 @@ HOST_GATED_CI_TARGETS: dict[str, str] = {
 # `zenoh_c_scouting_twice_and_diff.rs`, a listener a hub bound late is gossiped to a node that dials
 # only the hub's neighbour, as it is on the real library (`api-compat-c zenoh-c->wz partial`).
 # Measured by `scripts/audit-crossimpl-proof.sh`.
-FOREIGN_ADJUDICATOR_LINKS = 1032
+# R3099 -- 1032 -> 1035, RISING by three, each a new test in `wz_shm_router_zenohd_interop.rs`:
+# with wz as the ROUTER, a zenoh publisher's chunk reaches a reader of shared memory, goes home
+# to the publisher's pool when two readers hold it, and reaches a reader without shared memory as
+# its bytes, each against upstream's own `z_pub_shm` and `z_sub_shm` (`transport-shm zenoh->wz`
+# and `transport-shm wz->zenoh`, which a test that names both counts once). The two controls
+# against upstream's router carry `none`. Measured by `scripts/audit-crossimpl-proof.sh`.
+FOREIGN_ADJUDICATOR_LINKS = 1035
 
 # ── Execution disclosure ────────────────────────────────────────────────────────
 #
