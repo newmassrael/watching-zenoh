@@ -1195,7 +1195,13 @@ CITATION = re.compile(r"\b((?:[A-Za-z0-9_.-]+/)*[A-Za-z0-9_.-]+\.(?:rs|c|h))(?::
 # platform identity has no cargo-feature symbol for this derivation to own, which is
 # the honest record of what they were. READ off the census's own FAIL line,
 # `no-symbol: 0 against a pin of 2`; `reached` and `unreached` hold at 3 and 0.
-PIN_REACHED = 3
+# R3124 -- REACHED 3 -> 2. `transport-shm` leaves PARTIAL for COMPLETE: a payload
+# of several slices keeps them apart, the last residual its reason named, is
+# built and measured against the real libzenohc. It was a reached PARTIAL atom
+# (its crate tests and its interop files name its symbols), so it leaves the
+# census with its grade. UNREACHED and NO_SYMBOL hold at 0 and 0. READ off the
+# census's own FAIL line, `reached: 2 against a pin of 3`.
+PIN_REACHED = 2
 PIN_UNREACHED = 0
 PIN_NO_SYMBOL = 0
 # R2534 — 346 -> 347. The atom is `adminspace-metrics` and the citation is the
@@ -2707,7 +2713,14 @@ PIN_NO_SYMBOL = 0
 # that a slice is acknowledged to the peer of the link it arrived on. `api-compat-c` is not
 # touched and is still PARTIAL beside it. READ off the census's own FAIL line, `wz citations: 295
 # against a pin of 289`.
-PIN_WZ_CITATIONS = 295
+#
+# R3124 -- 295 -> 216, DOWNWARD, one atom. `transport-shm` leaves PARTIAL for
+# COMPLETE and takes its citations out of the census with it, the R3124 update's
+# own among them: the update is appended in the same commit that grades the
+# atom, so none of its anchors is ever counted here. `api-compat-c` and
+# `runtime-zero-copy` are not touched and are the two PARTIAL atoms left. READ
+# off the census's own FAIL line, `wz citations: 216 against a pin of 295`.
+PIN_WZ_CITATIONS = 216
 # R2626 — 44 -> 42, and this one is worth a sentence because it HELD through
 # every earlier retirement in this run (R2612, R2622). `time-hlc`'s reason is the
 # first retiree carrying AMBIGUOUS citations of its own: its oldest clauses cite
@@ -2781,7 +2794,11 @@ PIN_WZ_CITATIONS = 295
 # citations -- its older clauses cite `get.rs`, `session.rs`, `query.rs` and
 # `lib.rs` by bare name. READ off the census's own FAIL line, `ambiguous
 # citations: 2 against a pin of 8`.
-PIN_AMBIGUOUS = 2
+# R3124 -- 2 -> 0. `transport-shm` departs (COMPLETE) carrying the TWO ambiguous
+# citations that remained: the two PARTIAL atoms left cite none, which is what
+# the census now reads. READ off the census's own FAIL line, `ambiguous
+# citations: 0 against a pin of 2`.
+PIN_AMBIGUOUS = 0
 
 
 class Fatal(Exception):
