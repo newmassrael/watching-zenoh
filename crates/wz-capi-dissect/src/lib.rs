@@ -1272,11 +1272,27 @@ pub unsafe extern "C" fn wz_dissect_pcap_fields_limited(
 ///   makes the row a match; all misses make it a miss.
 /// * `"undecided"` — records were judged and this capture does not carry what
 ///   deciding needs (an unresolved keyexpr, an absent clock).
-/// * `"unjudged"` — the row carries nothing the record plane judges at all: a
-///   handshake, a keepalive, a declaration.
+/// * `"unjudged"` — the row carries no record a selector can speak of: `Init`,
+///   `Open`, `Close`, `KeepAlive`, `Declare` and `Interest`, which carry no
+///   kind, no keyexpr and no payload, and a `ResponseFinal` whose request the
+///   capture does not hold. The word is the same under every selector.
 ///
 /// A caller chasing "why did my selector miss this" must be able to tell the
 /// last two apart, because only `"undecided"` is about the selector.
+///
+/// # What a row's `kind` is
+///
+/// The kind of what the row carries, from the one classifier every plane uses:
+/// a `Push` is `put` or `del`; a `Request` is its body's kind, which is `query`
+/// for every request an upstream peer sends; a `Response` is `reply` (whatever
+/// the reply carries) or `err`. A `ResponseFinal` has no kind of its own and
+/// FOLLOWS ITS EXCHANGE: it closes the request with the same request id and
+/// answers every selector as that request does. A request and its close are
+/// judged as the exchange they are, so the outcome terms (`replies`, `closed`,
+/// `completion`) decide on those two rows, and for any selector the number of
+/// `yes` request rows is the census exchange plane's `requests` and of `yes`
+/// closes its `completed`, on a capture where each row carries one record.
+/// `wz_dissect.h` carries the full paragraph.
 ///
 /// # Safety
 /// `bytes` must point to at least `len` readable bytes, `selector` and
@@ -2786,10 +2802,13 @@ pub unsafe extern "C" fn wz_dissect_live_fields_since(
 /// before it was retired in favour of this library's.
 ///
 /// This door writes those five values per row and the ceilings that made the
-/// list short, as the document `selection` at revision one. The verdict is the
-/// same one, from the same function, and the rows are the field document's rows
-/// in its order; `wz_capture::selection_json` states the two places they
-/// differ, both of which are the field document's limitation.
+/// list short, as the document `selection` (its revision is on the envelope).
+/// The verdict is the same one, from the same function, and the rows are the
+/// field document's rows in its order; `wz_capture::selection_json` states the
+/// two places they differ, both of which are the field document's limitation.
+/// What a selector says of a `Request`, a `ResponseFinal` and every other row is
+/// written under [`wz_dissect_pcap_fields_where_limited`] and holds here
+/// word for word.
 ///
 /// # What it does not take
 ///
@@ -9639,6 +9658,222 @@ mod tests {
         assert_eq!(rows.len(), 1, "the datagram's row: {doc}");
         assert_eq!(rows[0].4, "\"unjudged\"", "{doc}");
         assert_eq!(drain_live(handle, 8).len(), 1, "and the drain is untouched");
+        unsafe { wz_dissect_live_close(handle) };
+    }
+
+    /// `(requests, completed)` of the census's exchange plane.
+    fn exchange_totals(census: &str) -> (usize, usize) {
+        let digits = |text: &str| -> usize {
+            text.chars()
+                .take_while(char::is_ascii_digit)
+                .collect::<String>()
+                .parse()
+                .expect("a count")
+        };
+        census
+            .match_indices("\"requests\":")
+            .find_map(|(at, key)| {
+                let tail = &census[at + key.len()..];
+                let requests = digits(tail);
+                let rest = tail[requests.to_string().len()..].strip_prefix(",\"completed\":")?;
+                Some((requests, digits(rest)))
+            })
+            .expect("the exchange plane's totals")
+    }
+
+    /// A transport message, bare, length-prefixed for a stream link.
+    fn framed_transport(wire: &[u8]) -> Vec<u8> {
+        let mut out = (wire.len() as u16).to_le_bytes().to_vec();
+        out.extend_from_slice(wire);
+        out
+    }
+
+    /// A TCP capture holding every kind of row a selector is asked about: both
+    /// handshake messages, a keepalive, a declaration, an interest, a put, a del,
+    /// three queries, two replies, four closes (one of them for a request the
+    /// capture never held) and a `Close`.
+    ///
+    /// Each network record sits in a frame of its own, so a row is one record.
+    fn selector_capture() -> Vec<u8> {
+        let request = |rid: u64| {
+            wz_codecs::request::Request {
+                header: wz_codecs::request::Request::default().header
+                    | wz_codecs::wire_const::FLAG_N_N,
+                rid,
+                keyexpr: literal("demo/q"),
+                body: wz_codecs::request::RequestVariant::CodecZenohQuery(
+                    wz_codecs::query::Query::default(),
+                ),
+                ..Default::default()
+            }
+            .encode_to_vec()
+        };
+        let reply = |request_id: u64| {
+            wz_codecs::response::Response {
+                header: wz_codecs::response::Response::default().header
+                    | wz_codecs::wire_const::FLAG_N_N,
+                request_id,
+                keyexpr: literal("demo/q"),
+                body: wz_codecs::response::ResponseVariant::CodecZenohReply(
+                    wz_codecs::reply::Reply {
+                        body: wz_codecs::reply::ReplyVariant::CodecZenohMsgPut(
+                            wz_codecs::msg_put::MsgPut {
+                                payload_len: Some(1),
+                                payload: Some(b"r"),
+                                ..Default::default()
+                            },
+                        ),
+                        ..Default::default()
+                    },
+                ),
+                ..Default::default()
+            }
+            .encode_to_vec()
+        };
+        let close_of = |request_id: u64| {
+            wz_codecs::response_final::ResponseFinal {
+                request_id,
+                ..Default::default()
+            }
+            .encode_to_vec()
+        };
+        let push = |body: wz_codecs::push::PushVariant<'static>| {
+            wz_codecs::push::Push {
+                header: wz_codecs::push::Push::default().header | wz_codecs::wire_const::FLAG_N_N,
+                keyexpr: literal("demo/temp"),
+                body,
+                ..Default::default()
+            }
+            .encode_to_vec()
+        };
+        let put = push(wz_codecs::push::PushVariant::CodecZenohMsgPut(
+            wz_codecs::msg_put::MsgPut {
+                payload_len: Some(5),
+                payload: Some(b"hello"),
+                ..Default::default()
+            },
+        ));
+        let del = push(wz_codecs::push::PushVariant::CodecZenohMsgDel(
+            wz_codecs::msg_del::MsgDel::default(),
+        ));
+        let declare =
+            wz_session_core::declare_build::build_declare_subscriber(1, 0, Some("demo/**"))
+                .expect("the production subscriber builder")
+                .try_as_borrowed()
+                .expect("re-borrow")
+                .encode_to_vec();
+        let interest = wz_session_core::interest_build::build_interest_subscribers(
+            9,
+            true,
+            false,
+            0,
+            Some("demo/**"),
+        )
+        .expect("the production interest builder")
+        .try_as_borrowed()
+        .expect("re-borrow")
+        .encode_to_vec();
+
+        let mut low_to_high = framed_init(&ZID_A);
+        low_to_high.extend_from_slice(&framed_transport(&[
+            wz_session_core::wire_const::T_MID_KEEP_ALIVE,
+        ]));
+        for (sn, record) in [
+            declare,
+            put,
+            del,
+            request(7),
+            request(8),
+            request(9),
+            interest,
+        ]
+        .iter()
+        .enumerate()
+        {
+            low_to_high.extend_from_slice(&framed_frame(sn as u8, record));
+        }
+        low_to_high.extend_from_slice(&framed_transport(&[
+            wz_session_core::wire_const::T_MID_CLOSE,
+            0x01,
+        ]));
+        let mut high_to_low = framed_init(&ZID_B);
+        for (sn, record) in [
+            reply(7),
+            close_of(7),
+            reply(8),
+            close_of(8),
+            close_of(9),
+            close_of(99),
+        ]
+        .iter()
+        .enumerate()
+        {
+            high_to_low.extend_from_slice(&framed_frame(sn as u8, record));
+        }
+        let a = tcp_packet(1000, &low_to_high);
+        let b = tcp_packet_reverse(2000, &high_to_low);
+        wz_capture::pcap::write(1, &[(0, 0, a.as_slice()), (0, 9_000, b.as_slice())])
+    }
+
+    /// THE ROWS AND THE CENSUS COUNT THE SAME QUERIES, through the doors a C
+    /// caller has.
+    ///
+    /// The consumer's defect, end to end: `wz_dissect_pcap_census_where` counted
+    /// the queries a capture held and `wz_dissect_live_selection` said `unjudged`
+    /// of every one of their rows. On this capture, for each of three selectors
+    /// the `yes` rows are the exchange plane's `requests` and `completed` plus the
+    /// pushes of that kind, and nothing is `undecided`.
+    ///
+    /// The orphan close (`99`), the two handshake messages, the keepalive, the
+    /// declaration, the interest and the `Close` are the rows no selector speaks
+    /// of, and they are the same seven under all three.
+    #[test]
+    fn the_rows_and_the_census_count_the_same_queries_through_the_c_doors() {
+        let capture = selector_capture();
+        let handle = replay(&capture, WZ_DISSECT_LIMITS_NONE).expect("the replay opens");
+        let mut unjudged_rows = Vec::new();
+        for (selector, pushes_of_the_kind) in
+            [("kind == query", 0), ("kind == put", 1), ("kind == del", 1)]
+        {
+            let doc = live_selection(handle, selector).expect("the door answers");
+            let word = |w: &str| {
+                doc.matches(format!("\"selected\":\"{w}\"").as_str())
+                    .count()
+            };
+            let census = call_census_where(&capture, selector).expect("the census answers");
+            let (requests, completed) = exchange_totals(&census);
+
+            assert_eq!(
+                word("yes"),
+                requests + completed + pushes_of_the_kind,
+                "{selector}: yes rows against the exchange plane's requests {requests} and \
+                 completed {completed}: {doc}"
+            );
+            assert_eq!(word("undecided"), 0, "{selector}: {doc}");
+            // The field document, through its own door, says the same word on the
+            // same row: one function decides it for both.
+            let field = live_fields_under(handle, &capture, selector);
+            assert_eq!(
+                coordinate_rows(&field),
+                coordinate_rows(&doc),
+                "{selector}: the field document and the verdict document disagree"
+            );
+            unjudged_rows.push(word("unjudged"));
+            if selector == "kind == query" {
+                assert_eq!((requests, completed), (3, 3), "{census}");
+                assert_eq!(word("yes"), 6, "{doc}");
+                assert_eq!(
+                    word("no"),
+                    4,
+                    "the put, the del and the two replies are judged and are not queries: {doc}"
+                );
+            }
+        }
+        assert_eq!(
+            unjudged_rows,
+            [7, 7, 7],
+            "the rows no selector speaks of are the same under every one"
+        );
         unsafe { wz_dissect_live_close(handle) };
     }
 
