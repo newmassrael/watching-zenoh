@@ -1299,13 +1299,62 @@ fn peer_metadata(id: u16) -> Option<Arc<PeerSegmentRw>> {
     Some(segment)
 }
 
+/// The data segments this process has mounted as a reader, by id, so a receiver maps a pool's
+/// segment once and not once per payload: upstream mounts a data segment the first time a
+/// descriptor names it and keeps it for the reader's life
+/// (`commons/zenoh-shm/src/reader.rs` @ `// fastest path: try to get access to already mounted SHM segment`).
+fn peer_data_cache() -> &'static Mutex<HashMap<u64, Arc<PeerSegment>>> {
+    static CACHE: OnceLock<Mutex<HashMap<u64, Arc<PeerSegment>>>> = OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// How many times this process has mapped a data segment since it started. A diagnostic, like
+/// [`reference_state`]: the witness that a segment is mapped once for the chunks it serves and
+/// not once per chunk is this count staying at the number of segments.
+static DATA_SEGMENT_MAPS: AtomicUsize = AtomicUsize::new(0);
+
+/// The number of data segment mappings this process has made since it started.
+pub fn data_segment_maps() -> usize {
+    DATA_SEGMENT_MAPS.load(Ordering::SeqCst)
+}
+
+/// The data segment named `id`, mapped read-only, from the cache when its entry is still the
+/// object the name names. The same trust as [`peer_metadata`]: a mapping of an object the name no
+/// longer names would serve a dead pool's bytes as a live chunk's.
+fn peer_data(id: u64) -> Option<Arc<PeerSegment>> {
+    let mut cache = peer_data_cache().lock().ok()?;
+    if let Some(segment) = cache.get(&id) {
+        if segment.is_current() {
+            return Some(segment.clone());
+        }
+        cache.remove(&id);
+    }
+    let segment = Arc::new(PeerSegment::open(id).ok()?);
+    DATA_SEGMENT_MAPS.fetch_add(1, Ordering::SeqCst);
+    cache.insert(id, segment.clone());
+    Some(segment)
+}
+
 /// Let go of cached mappings whose segment no longer exists, so a provider that
 /// exited does not stay mapped and locked in this process until it does. Run by
 /// the watchdog thread; a hold in use keeps its own reference to its mapping.
-pub(crate) fn sweep_peer_metadata() {
+/// Metadata segments and data segments alike.
+pub(crate) fn sweep_peer_segments() {
     if let Ok(mut cache) = peer_metadata_cache().lock() {
         cache.retain(|_, segment| segment.is_current());
     }
+    if let Ok(mut cache) = peer_data_cache().lock() {
+        cache.retain(|_, segment| segment.is_current());
+    }
+}
+
+/// Whether the reader's cache holds the data segment named `id`. A diagnostic for the sweep's
+/// witness.
+#[cfg(test)]
+fn is_cached_data_segment(id: u64) -> bool {
+    peer_data_cache()
+        .lock()
+        .is_ok_and(|cache| cache.contains_key(&id))
 }
 
 /// One validation pass over what this process provides: the watchdog thread's
@@ -1427,7 +1476,7 @@ impl ChunkHold {
             .map_or(true, |clients| clients.resolves_posix());
         if protocol == POSIX_PROTOCOL_ID && resolves_posix {
             let segment = u64::from(segment_id);
-            let data = PeerSegment::open(segment).ok()?;
+            let data = peer_data(segment)?;
             let end = chunk.checked_add(data_len)?;
             data.bytes().get(chunk..end)?;
             return Some((ChunkData::Posix { data, segment }, chunk..end));
@@ -1603,8 +1652,11 @@ impl Drop for ForwardedReference {
 /// range of it drops.
 ///
 /// The fields drop in the order they are declared and the order is the point: the
-/// mappings go first, so nothing can read the page after the sender is free to
-/// reuse it, and the hold goes last and gives the reference back.
+/// handle on the mapping goes first, so nothing can read the page after the sender is
+/// free to reuse it, and the hold goes last and gives the reference back. The mapping
+/// itself may outlive the chunk, in the reader's cache of data segments; no bytes can
+/// be reached through it once the chunk is gone, because a range of the page is only
+/// ever handed out by the chunk that owns the handle.
 struct SharedChunk {
     data: ChunkData,
     /// The POSIX segment mapped WRITABLE, made the first time a host asks for a pointer
@@ -1619,8 +1671,12 @@ struct SharedChunk {
 /// R3065 -- where a received chunk's bytes are: a POSIX segment this module maps, or a segment a
 /// CLIENT of another protocol attached.
 enum ChunkData {
-    /// The chunk's data segment mapped read-only, and its id, to map it a second time writable.
-    Posix { data: PeerSegment, segment: u64 },
+    /// The chunk's data segment mapped read-only, shared with every other chunk of the same
+    /// segment through the reader's cache, and its id, to map it a second time writable.
+    Posix {
+        data: Arc<PeerSegment>,
+        segment: u64,
+    },
     /// The chunk at `ptr` in a segment the reader's client for the chunk's protocol attached. The
     /// segment is held for as long as the chunk is, which is what keeps `ptr` valid.
     Foreign {
@@ -2596,6 +2652,89 @@ mod tests {
         let read_b = PosixShmResolver.resolve(&db).expect("read b");
         assert!(read_a.iter().all(|&byte| byte == 0xA1));
         assert!(read_b.iter().all(|&byte| byte == 0xB2));
+    }
+
+    /// A receiver maps a pool's data segment ONCE for the chunks it serves, as upstream's reader
+    /// does, and not once per payload: two chunks of one pool, held at the same moment, are read
+    /// through the same mapping.
+    #[test]
+    fn two_chunks_of_one_pool_are_read_through_one_mapping() {
+        let provider = ShmProvider::pool(&layout(4096)).expect("a pool");
+        let mut a = provider
+            .alloc(layout(1024), &AllocPolicy::JustAlloc)
+            .expect("first chunk");
+        let mut b = provider
+            .alloc(layout(1024), &AllocPolicy::JustAlloc)
+            .expect("second chunk");
+        a.write(&[0xA1; 1024]);
+        b.write(&[0xB2; 1024]);
+        let (da, db) = (sent(&a), sent(&b));
+
+        let (first, _) = ChunkHold::link(&da)
+            .expect("link the first")
+            .window()
+            .expect("window of the first");
+        let (second, _) = ChunkHold::link(&db)
+            .expect("link the second")
+            .window()
+            .expect("window of the second");
+        let (ChunkData::Posix { data: first, .. }, ChunkData::Posix { data: second, .. }) =
+            (first, second)
+        else {
+            panic!("a POSIX chunk is read through a POSIX mapping");
+        };
+        assert!(
+            Arc::ptr_eq(&first, &second),
+            "the second chunk was read through a mapping of its own, not the one the first made"
+        );
+    }
+
+    /// The reader's cache is trusted only while a segment's name names the object it mapped: a
+    /// segment made again under the same id is mapped again, and the stale mapping is not served.
+    #[test]
+    fn a_cached_data_segment_is_not_served_after_its_name_names_another_object() {
+        let owner = OwnedSegment::create(64, || u64::from(next_candidate_id())).expect("create");
+        let id = owner.id();
+        let first = peer_data(id).expect("the owner's segment maps");
+        let again = peer_data(id).expect("and maps again");
+        assert!(
+            Arc::ptr_eq(&first, &again),
+            "the second ask is served from the cache"
+        );
+
+        drop(owner);
+        std::fs::write(crate::posix_shm::segment_path(id), [0u8; 64])
+            .expect("make another segment of that id");
+        let other = peer_data(id).expect("the new object maps");
+        assert!(
+            !Arc::ptr_eq(&first, &other),
+            "the cache served the mapping of an object the name no longer names"
+        );
+        std::fs::remove_file(crate::posix_shm::segment_path(id)).expect("clean up");
+    }
+
+    /// A mapping whose segment is gone is let go by the sweep, so a pool that exited does not stay
+    /// mapped and locked in a reader that outlives it.
+    #[test]
+    fn the_sweep_lets_go_of_a_data_segment_that_no_longer_exists() {
+        let owner = OwnedSegment::create(64, || u64::from(next_candidate_id())).expect("create");
+        let id = owner.id();
+        let held = peer_data(id).expect("the owner's segment maps");
+        assert!(is_cached_data_segment(id));
+
+        sweep_peer_segments();
+        assert!(
+            is_cached_data_segment(id),
+            "a segment that still exists is kept"
+        );
+
+        drop(owner);
+        sweep_peer_segments();
+        assert!(
+            !is_cached_data_segment(id),
+            "a segment its owner unlinked stays mapped and locked in the reader"
+        );
+        drop(held);
     }
 
     /// A chunk goes back to the pool when its holders have let go AND the provider is asked

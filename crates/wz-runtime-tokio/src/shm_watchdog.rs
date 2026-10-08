@@ -229,7 +229,7 @@ fn run() {
         tick += 1;
         if tick % validate_every == 0 {
             crate::shm_provider::validate_tick();
-            crate::shm_provider::sweep_peer_metadata();
+            crate::shm_provider::sweep_peer_segments();
         }
     }
 }

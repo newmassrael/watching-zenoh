@@ -6697,7 +6697,17 @@ layer_c1af_cargo_test_shm() {
     # header's protocol names, and only through it
     # (`a_chunk_of_another_protocol_is_read_through_its_client_and_only_through_it`); reddened by
     # the reader refusing every protocol but POSIX again.
-    _runci_guarded_test C1af 39 cargo test -p wz-runtime-tokio --features session-extshm,transport-unicast,transport-link-tcp --lib shm_provider --quiet \
+    # R3106 -- 39 -> 42, MEASURED by running this exact command: the three tests of the
+    # reader's cache of data segments (two chunks of one pool are read through one mapping; a
+    # cached mapping is not served once its name names another object; the sweep lets go of a
+    # segment that no longer exists), each reddened by its own mutation.
+    _runci_guarded_test C1af 42 cargo test -p wz-runtime-tokio --features session-extshm,transport-unicast,transport-link-tcp --lib shm_provider --quiet \
+        || return 1
+    # R3106 -- the segment module's own tests (`posix_shm`), which no lane counted: the cleanup
+    # that removes a segment no one holds and keeps one a process holds, and whether a mapping may
+    # still be trusted while its name names its object, for the writable mapping of a metadata
+    # segment and for the read-only one of a data segment. THREE.
+    _runci_guarded_test C1af 3 cargo test -p wz-runtime-tokio --features session-extshm,transport-unicast,transport-link-tcp --lib posix_shm --quiet \
         || return 1
     # R3056 -- the provider's two new modules, which the filter above does not select:
     # `shm_backend` (the value types an allocation speaks in, 4 tests) and

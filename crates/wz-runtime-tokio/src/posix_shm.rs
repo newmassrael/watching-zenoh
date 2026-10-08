@@ -290,6 +290,11 @@ impl Drop for OwnedSegment {
 /// A segment ANOTHER process created, opened by id and mapped read-only.
 pub struct PeerSegment {
     map: Mmap,
+    id: u64,
+    /// Which object this mapping is of: the device and inode the open file had. A segment name
+    /// can be reused after its owner exits, so a holder that keeps the mapping for reuse asks
+    /// [`Self::is_current`] before it trusts one.
+    identity: (u64, u64),
     _file: File,
 }
 
@@ -298,22 +303,41 @@ impl PeerSegment {
     /// not exist or cannot be locked or mapped: to a caller that is "this peer
     /// holds no such segment", which is an ordinary outcome of shared memory.
     pub fn open(id: u64) -> io::Result<Self> {
+        use std::os::unix::fs::MetadataExt;
+
         let file = OpenOptions::new()
             .read(true)
             .write(true)
             .open(segment_path(id))?;
         lock_shared(&file)?;
+        let meta = file.metadata()?;
         // SAFETY: a read-only view of a peer-owned mapping. The peer may write
         // it concurrently, which is the shared-memory contract; every reader of
         // this view reads fields whose torn value fails a comparison rather
         // than being unsound.
         let map = unsafe { MmapOptions::new().map(&file)? };
-        Ok(Self { map, _file: file })
+        Ok(Self {
+            map,
+            id,
+            identity: (meta.dev(), meta.ino()),
+            _file: file,
+        })
     }
 
     /// The segment's bytes.
     pub fn bytes(&self) -> &[u8] {
         &self.map
+    }
+
+    /// Whether the name this segment was opened by still names the same object: false once its
+    /// owner has unlinked it, or unlinked it and another process has made a new segment under
+    /// the same id. The twin of [`PeerSegmentRw::is_current`].
+    pub fn is_current(&self) -> bool {
+        use std::os::unix::fs::MetadataExt;
+
+        std::fs::metadata(segment_path(self.id))
+            .map(|m| (m.dev(), m.ino()) == self.identity)
+            .unwrap_or(false)
     }
 }
 
@@ -456,6 +480,28 @@ mod tests {
         assert!(!peer.is_current(), "the owner unlinked it");
 
         // The same id, made again: a different object under the same name.
+        std::fs::write(segment_path(id), [0u8; 64]).expect("make another segment of that id");
+        assert!(
+            !peer.is_current(),
+            "the name now names a different inode, so the mapping is of a dead object"
+        );
+        std::fs::remove_file(segment_path(id)).expect("clean up");
+    }
+
+    /// The read-only mapping of a DATA segment is trusted on the same terms as the writable one of
+    /// a metadata segment: while its name names its object, and not after the owner unlinks it or
+    /// another segment is made under the same id.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_read_only_mapping_is_current_only_while_its_name_names_its_object() {
+        let owner = OwnedSegment::create(64, || u64::from(next_candidate_id())).expect("create");
+        let id = owner.id();
+        let peer = PeerSegment::open(id).expect("open read-only");
+        assert!(peer.is_current(), "the owner still holds the segment");
+
+        drop(owner);
+        assert!(!peer.is_current(), "the owner unlinked it");
+
         std::fs::write(segment_path(id), [0u8; 64]).expect("make another segment of that id");
         assert!(
             !peer.is_current(),
