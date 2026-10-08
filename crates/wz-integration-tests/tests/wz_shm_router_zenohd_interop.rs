@@ -39,8 +39,9 @@ use std::sync::{Arc, Mutex as StdMutex};
 use std::time::Duration;
 
 use wz_integration_tests::common::{
-    read_captured, spawn_on_ephemeral_port, wait_for_substring, wz_ap_demo_binary,
-    zenoh_shm_example_binary, zenohd_shm_binary, ChildGuard, PortReservation, ZENOHD_LISTENER_LINE,
+    assert_demo_binary_newer_than_sources, read_captured, spawn_on_ephemeral_port,
+    wait_for_substring, wz_ap_demo_binary, zenoh_shm_example_binary, zenohd_shm_binary, ChildGuard,
+    PortReservation, ZENOHD_LISTENER_LINE,
 };
 use wz_runtime_tokio::observer::ApplicationLayerObserver;
 use wz_runtime_tokio::runtime_impl::TokioTime;
@@ -676,8 +677,14 @@ fn spawn_router_of(kind: RouterKind) -> Option<Router> {
     match kind {
         RouterKind::Zenohd => Some(spawn_router(&zenohd_shm_binary()?)),
         RouterKind::Wz => {
+            let demo = wz_ap_demo_binary();
+            // The demo prints the same feature banner whether or not it carries the relay under
+            // test, so a router built before the relay landed would read as "wz does not relay a
+            // chunk" and send the diagnosis somewhere else. Every wz-router leg spawns through
+            // here, so the one check covers them all.
+            assert_demo_binary_newer_than_sources(&demo);
             let (guard, log, port) = spawn_on_ephemeral_port(
-                &wz_ap_demo_binary(),
+                &demo,
                 &["--router-hat", "127.0.0.1:0", "--shm"],
                 "router-hat: listening on 127.0.0.1:",
                 "wz-ap-demo --router-hat --shm",
