@@ -148,6 +148,14 @@ pub fn open(
             c"wz: FAIL - the reference clock divider is outside 1 to 256"
         }
         wz_eth_mac_cyt4bf::InitError::RingTooSmall => c"wz: FAIL - a descriptor ring is too small",
+        wz_eth_mac_cyt4bf::InitError::UnknownDmaBusWidth(field) => {
+            // The static message cannot carry the value, and the value is what a
+            // bench needs to see.
+            log_line(format!(
+                "wz: eth0: DESIGNCFG_DEBUG1 DMA_BUS_WIDTH reads {field}; the driver knows 1, 2 and 4"
+            ));
+            c"wz: FAIL - the MAC's DMA bus width is not one this driver knows"
+        }
     })?;
     stage(&format!(
         "MAC initialised; finding the PHY, then waiting up to {link_wait_ms} ms for a link"

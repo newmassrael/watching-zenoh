@@ -31,6 +31,20 @@
 //! of register programming, not the documents. The driver says so in its own
 //! manifest and the board table grades its rows accordingly.
 //!
+//! ## The DMA data bus width is the hardware's statement
+//!
+//! `NETWORK_CONFIG.DATA_BUS_WIDTH` has to agree with the width the block was
+//! built with, which `DESIGNCFG_DEBUG1.DMA_BUS_WIDTH` states. The driver reads the
+//! second and programs the first from it, and refuses a design value that is not
+//! 1, 2 or 4 ([`InitError::UnknownDmaBusWidth`]). It does not assume a width: the
+//! configuration register is written whole, and a field it does not name is
+//! written as zero (32 bits), which on a 64-bit design stopped the transmit DMA
+//! with an AMBA error at the first frame and made the receive DMA keep every other
+//! 32-bit word. A CYT4BF8CEE kit read the design field as 2 (64 bits), and both
+//! defects vanished with the field set to 1. That is the ONE width seen on silicon:
+//! 32 and 128 bits follow from the same encodings (the PDL's Cadence core driver,
+//! `cedi.h` and `edd.c`) and are untested on this chip.
+//!
 //! ## Provenance
 //!
 //! The register map and the order of the bring-up come from Infineon's PDL
@@ -189,6 +203,31 @@ pub enum InitError {
     InvalidRefDivider,
     /// A ring needs at least two slots.
     RingTooSmall,
+    /// `DESIGNCFG_DEBUG1.DMA_BUS_WIDTH` holds something other than 1, 2 or 4, the
+    /// three one-hot widths (32, 64 and 128 bits). The value is carried. The DMA
+    /// moves data correctly only when the bus width it is told agrees with the
+    /// design, and a value that names no width cannot be turned into one: a
+    /// block that does not answer (all ones) reads this way too.
+    UnknownDmaBusWidth(u32),
+}
+
+/// The `NETWORK_CONFIG.DATA_BUS_WIDTH` value that agrees with the DMA bus width a
+/// `DESIGNCFG_DEBUG1` value states, or the error naming what it held.
+///
+/// The two registers encode the width differently: the design register is one-hot
+/// (1, 2, 4 for 32, 64, 128 bits) and the configuration field counts (0, 1, 2).
+/// The 64-bit case, design 2 and field 1, was MEASURED on a CYT4BF8CEE kit. The
+/// 32-bit and 128-bit cases follow from the same two encodings, as the PDL's
+/// Cadence core driver states them (`cedi.h`, `edd.c`), and have not been seen
+/// on this chip.
+fn data_bus_width_field(design_debug1: u32) -> Result<u32, InitError> {
+    let design = (design_debug1 >> DESIGN_DMA_BUS_WIDTH_POS) & DESIGN_DMA_BUS_WIDTH_MASK;
+    match design {
+        DESIGN_BUS_32 => Ok(NWCFG_BUS_32),
+        DESIGN_BUS_64 => Ok(NWCFG_BUS_64),
+        DESIGN_BUS_128 => Ok(NWCFG_BUS_128),
+        other => Err(InitError::UnknownDmaBusWidth(other)),
+    }
 }
 
 /// Whether the link is known to be up.
@@ -275,6 +314,12 @@ impl<B: Board, const RX: usize, const TX: usize> Cyt4bfMac<B, RX, TX> {
         board.write(CTL, mode);
         board.write(CTL, mode | CTL_ENABLED);
 
+        // 1b. The DMA data bus width is the design's, and the design states it in
+        //     a register that answers once the block is enabled. It is read before
+        //     any GEM register is written, so a design this driver cannot name
+        //     leaves the controller exactly as it was found.
+        let bus_width = data_bus_width_field(board.read(DESIGNCFG_DEBUG1))?;
+
         let mut mac = Self {
             board,
             area: NonNull::from(area),
@@ -292,12 +337,17 @@ impl<B: Board, const RX: usize, const TX: usize> Cyt4bfMac<B, RX, TX> {
         mac.board.write(NETWORK_CONTROL, 0);
 
         // 3. The network configuration: 100 Mbps full duplex until negotiation
-        //    says otherwise, 1536-byte frames, FCS stripped, 32-bit bus, and the
-        //    multicast hash filter on when every multicast frame is wanted.
+        //    says otherwise, 1536-byte frames, FCS stripped, the DMA bus width the
+        //    design stated, and the multicast hash filter on when every multicast
+        //    frame is wanted. The register is written whole, so the bus width is
+        //    named here: left out, it is written as zero (32 bits), which on a
+        //    64-bit design stopped the transmit DMA with an AMBA error and made the
+        //    receive DMA keep every other word.
         let mut netcfg = NWCFG_SPEED_100
             | NWCFG_FULL_DUPLEX
             | NWCFG_RECEIVE_1536
             | NWCFG_FCS_REMOVE
+            | (bus_width << NWCFG_DATA_BUS_WIDTH_POS)
             | ((config.mdc_div as u32) << NWCFG_MDC_DIV_POS);
         if config.accept_all_multicast {
             netcfg |= NWCFG_MULTICAST_HASH_ENABLE;

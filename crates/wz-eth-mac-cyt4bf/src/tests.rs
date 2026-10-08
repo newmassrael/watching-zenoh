@@ -18,7 +18,9 @@ use crate::dma::Slot;
 use std::boxed::Box;
 use std::cell::RefCell;
 use std::collections::HashMap;
+use std::format;
 use std::rc::Rc;
+use std::string::String;
 use std::vec;
 use std::vec::Vec;
 use wz_runtime_core::EthernetMac;
@@ -29,6 +31,25 @@ const TX: usize = 3;
 type Area = DmaArea<RX, TX>;
 const MAC: [u8; 6] = [0x02, 0x11, 0x22, 0x33, 0x44, 0x55];
 
+/// The GEM registers sit above this offset and answer only once the wrapper is
+/// enabled (`CTL.ENABLED`).
+const GEM: usize = 0x1000;
+
+/// `DESIGNCFG_DEBUG5` (`cyip_eth.h`, offset `0x1290`): its bits 11:10 are the reset
+/// default of `NETWORK_CONFIG.DATA_BUS_WIDTH`.
+const DESIGNCFG_DEBUG5: usize = 0x1290;
+
+/// What ETH0 of a CYT4BF8CEE kit read after its wrapper was enabled and before any
+/// driver code ran, as the lab measured it. These are values read off one kit, not
+/// data-sheet facts, and the model starts from them so that a register the driver
+/// writes WHOLE shows which fields it replaced without naming them.
+const RESET_NETWORK_CONFIG: u32 = 0x002c_0000;
+const RESET_DMA_CONFIG: u32 = 0x0018_0704;
+/// `DMA_BUS_WIDTH` (bits 27:25) reads 2 on that kit: 64 bits.
+const RESET_DESIGNCFG_DEBUG1: u32 = 0x0450_8503;
+/// Its bits 11:10 read 1 on that kit, the reset value of `NETWORK_CONFIG`'s field.
+const RESET_DESIGNCFG_DEBUG5: u32 = 0x518e_3744;
+
 /// A PHY on the management bus, and the controller in front of it.
 struct Model {
     start: usize,
@@ -38,6 +59,10 @@ struct Model {
     tx_halted: bool,
     wire: Vec<Vec<u8>>,
     log: Vec<(usize, u32)>,
+    /// What the board's own behaviour, or the driver's use of it, got wrong.
+    violations: Vec<String>,
+    /// How many register writes had been made when the design register was read.
+    design_read_after_writes: Option<usize>,
     delays_us: u32,
     // controller behaviour switches
     hold_tx: bool,
@@ -61,14 +86,22 @@ impl Model {
         phy_regs[2] = 0x2000;
         phy_regs[3] = 0x1234;
         phy_regs[4] = 0x01E0; // ANAR: 10 half/full, 100 half/full
+        let regs = HashMap::from([
+            (NETWORK_CONFIG, RESET_NETWORK_CONFIG),
+            (DMA_CONFIG, RESET_DMA_CONFIG),
+            (DESIGNCFG_DEBUG1, RESET_DESIGNCFG_DEBUG1),
+            (DESIGNCFG_DEBUG5, RESET_DESIGNCFG_DEBUG5),
+        ]);
         Self {
             start,
-            regs: HashMap::new(),
+            regs,
             tx_idx: 0,
             rx_idx: 0,
             tx_halted: false,
             wire: Vec::new(),
             log: Vec::new(),
+            violations: Vec::new(),
+            design_read_after_writes: None,
             delays_us: 0,
             hold_tx: false,
             fail_next_tx: false,
@@ -115,8 +148,88 @@ impl Model {
         *self.regs.get(&off).unwrap_or(&0)
     }
 
+    /// A GEM register is touched: it answers only once the wrapper is enabled.
+    fn gem_answers(&mut self, off: usize, what: &str) -> bool {
+        let answers = off < GEM || self.reg(CTL) & CTL_ENABLED != 0;
+        if !answers {
+            self.violations
+                .push(format!("{what} of {off:#x} before the wrapper was enabled"));
+        }
+        answers
+    }
+
+    /// The `NETWORK_CONFIG.DATA_BUS_WIDTH` value that agrees with the width the
+    /// design register states, or `None` for a design value that names no width.
+    /// Written out from the PDL's encodings (design: 1, 2, 4 are 32, 64, 128 bits;
+    /// field: 0, 1, 2), not from the driver's constants, so the model is an
+    /// independent reading.
+    fn design_field(&self) -> Option<u32> {
+        match (self.reg(DESIGNCFG_DEBUG1) >> 25) & 7 {
+            1 => Some(0),
+            2 => Some(1),
+            4 => Some(2),
+            _ => None,
+        }
+    }
+
+    fn configured_field(&self) -> u32 {
+        (self.reg(NETWORK_CONFIG) >> 21) & 3
+    }
+
+    fn width_agrees(&self) -> bool {
+        self.design_field() == Some(self.configured_field())
+    }
+
+    /// Set the design register's `DMA_BUS_WIDTH` field to `value`, whatever it is.
+    fn set_design_bus_width(&mut self, value: u32) {
+        let design = self.reg(DESIGNCFG_DEBUG1) & !(7 << 25);
+        self.regs
+            .insert(DESIGNCFG_DEBUG1, design | ((value & 7) << 25));
+    }
+
+    /// The board's rule: the DMA moves data correctly only while the bus width it
+    /// is configured with agrees with the design. Checked wherever either side of
+    /// the agreement or the DMA's enable changes.
+    fn check_width(&mut self, after: &str) {
+        let running = self.reg(NETWORK_CONTROL) & (NWCTRL_ENABLE_RECEIVE | NWCTRL_ENABLE_TRANSMIT);
+        if running != 0 && !self.width_agrees() {
+            let (design, field) = (self.design_field(), self.configured_field());
+            self.violations.push(format!(
+                "{after}: the DMA is enabled with bus width field {field} but the design \
+                 register asks for {design:?}"
+            ));
+        }
+    }
+
+    /// What the receive DMA stored when the design bus was wider than the field
+    /// said, as measured: frame words 1, 3, 5, ... landed at buffer words 0, 2, 4,
+    /// ... and the words between them were zero. A field WIDER than the design was
+    /// not measured, so it is not given a behaviour here beyond the violation.
+    fn as_the_board_stored(&self, frame: &[u8]) -> Vec<u8> {
+        let wider_design = self
+            .design_field()
+            .is_some_and(|d| d > self.configured_field());
+        if self.width_agrees() || !wider_design {
+            return frame.to_vec();
+        }
+        let mut stored = vec![0u8; frame.len()];
+        for word in (1..frame.len().div_ceil(4)).step_by(2) {
+            let from = word * 4..(word * 4 + 4).min(frame.len());
+            let to = (word - 1) * 4;
+            stored[to..to + from.len()].copy_from_slice(&frame[from]);
+        }
+        stored
+    }
+
     fn read(&mut self, off: usize) -> u32 {
+        if !self.gem_answers(off, "read") {
+            return 0;
+        }
         match off {
+            DESIGNCFG_DEBUG1 => {
+                self.design_read_after_writes.get_or_insert(self.log.len());
+                self.reg(off)
+            }
             NETWORK_STATUS => {
                 if self.mdio_stuck {
                     0
@@ -134,12 +247,20 @@ impl Model {
 
     fn write(&mut self, off: usize, v: u32) {
         self.log.push((off, v));
+        if !self.gem_answers(off, "write") {
+            return;
+        }
         match off {
             NETWORK_CONTROL => {
                 self.regs.insert(off, v & !NWCTRL_TX_START);
+                self.check_width("NETWORK_CONTROL written");
                 if v & NWCTRL_TX_START != 0 && v & NWCTRL_ENABLE_TRANSMIT != 0 {
                     self.run_tx();
                 }
+            }
+            NETWORK_CONFIG => {
+                self.regs.insert(off, v);
+                self.check_width("NETWORK_CONFIG written");
             }
             TRANSMIT_STATUS | RECEIVE_STATUS => {
                 let cur = self.reg(off);
@@ -221,6 +342,15 @@ impl Model {
                 self.tx_halted = true;
                 return;
             }
+            if !self.width_agrees() {
+                // As measured: a descriptor was consumed by a DMA whose bus width
+                // disagreed with the design, and the first frame ended in an AMBA
+                // error.
+                let st = self.reg(TRANSMIT_STATUS) | TXSR_AMBA_ERROR;
+                self.regs.insert(TRANSMIT_STATUS, st);
+                self.tx_halted = true;
+                return;
+            }
             if self.hold_tx {
                 return;
             }
@@ -262,8 +392,9 @@ impl Model {
             return false;
         }
         let buf = self.ptr(w0 & RXD_ADDR_MASK);
+        let stored = self.as_the_board_stored(frame);
         // SAFETY: the buffer is `BUF_LEN` bytes and the tests inject less.
-        unsafe { std::ptr::copy_nonoverlapping(frame.as_ptr(), buf, frame.len()) };
+        unsafe { std::ptr::copy_nonoverlapping(stored.as_ptr(), buf, stored.len()) };
         d.set_word1(frame.len() as u32 | RXD_SOF | RXD_EOF);
         d.set_word0(w0 | RXD_USED);
         let st = self.reg(RECEIVE_STATUS) | RXSR_FRAME_RECEIVED;
@@ -303,18 +434,34 @@ impl Board for Gem {
     }
 }
 
-fn rig_with<const R: usize, const T: usize>(
+/// The driver over a model that `setup` has shaped before `new` runs.
+fn rig_on<const R: usize, const T: usize>(
     config: &Config,
+    setup: impl FnOnce(&mut Model),
 ) -> (Result<Cyt4bfMac<Gem, R, T>, InitError>, Rc<RefCell<Model>>) {
     let area: &'static mut DmaArea<R, T> = Box::leak(Box::new(DmaArea::new()));
     let start = &mut *area as *mut DmaArea<R, T> as usize;
-    let model = Rc::new(RefCell::new(Model::new(start)));
+    let mut model = Model::new(start);
+    setup(&mut model);
+    let model = Rc::new(RefCell::new(model));
     (Cyt4bfMac::new(Gem(model.clone()), area, config), model)
+}
+
+fn rig_with<const R: usize, const T: usize>(
+    config: &Config,
+) -> (Result<Cyt4bfMac<Gem, R, T>, InitError>, Rc<RefCell<Model>>) {
+    rig_on(config, |_| {})
 }
 
 fn rig() -> (Cyt4bfMac<Gem, RX, TX>, Rc<RefCell<Model>>) {
     let (mac, model) = rig_with::<RX, TX>(&Config::new(MAC));
-    (mac.expect("a valid configuration"), model)
+    let mac = mac.expect("a valid configuration");
+    assert_eq!(
+        model.borrow().violations,
+        Vec::<String>::new(),
+        "bringing the block up broke a rule of the board"
+    );
+    (mac, model)
 }
 
 fn position(log: &[(usize, u32)], off: usize, nth: usize) -> usize {
@@ -784,6 +931,12 @@ fn the_link_comes_up_through_a_scanned_phy_and_the_mac_takes_the_negotiated_mode
         "the other fields were kept"
     );
     assert_ne!(cfg & NWCFG_FCS_REMOVE, 0);
+    assert_eq!(
+        (cfg >> NWCFG_DATA_BUS_WIDTH_POS) & 3,
+        1,
+        "the DMA bus width the design asked for survived the reconfiguration"
+    );
+    assert_eq!(m.violations, Vec::<String>::new());
     assert_eq!(m.bad_frames, 0);
     assert_eq!(
         m.reg(NETWORK_CONTROL),
@@ -882,7 +1035,15 @@ fn the_link_is_re_read_on_a_schedule_and_the_mac_follows_a_change() {
     // And back.
     model.borrow_mut().phy_link = true;
     assert_eq!(mac.service_link(1250), LinkEvent::Up(up));
-    assert!(mac.transmit(&frame(3, 64)), "sending resumes with the link");
+    let resumed = frame(3, 64);
+    assert!(mac.transmit(&resumed), "sending resumes with the link");
+    let m = model.borrow();
+    assert_eq!(
+        m.wire.last(),
+        Some(&resumed),
+        "and the frame leaves: the DMA agrees with the design after every reconfiguration"
+    );
+    assert_eq!(m.violations, Vec::<String>::new());
 }
 
 #[test]
@@ -919,4 +1080,210 @@ fn the_dma_area_is_written_by_the_driver_and_not_trusted_to_the_loader() {
         stale, 0,
         "{stale} of {words} words of the area still hold what the RAM held at reset"
     );
+}
+
+// ---- the DMA data bus width is the hardware's statement -------------------------
+//
+// On a CYT4BF8CEE kit the design register read 2 (64 bits), the configuration
+// register's field was written 0 (32 bits) by a whole-register write that did not
+// name it, the first transmit ended in an AMBA error and the receive DMA kept every
+// other word. The model encodes that rule (see `Model::check_width`).
+
+/// The width pairs the driver must produce: the design register's field and the
+/// `NETWORK_CONFIG` encoding that agrees with it. Only the middle row was seen on a
+/// kit; the others follow the PDL's two encodings.
+const WIDTHS: [(u32, u32); 3] = [(1, 0), (2, 1), (4, 2)];
+
+#[test]
+fn the_bus_width_field_is_programmed_from_the_design_register() {
+    for (design, field) in WIDTHS {
+        let (mac, model) = rig_on::<RX, TX>(&Config::new(MAC), |m| m.set_design_bus_width(design));
+        let mut mac = mac.unwrap_or_else(|e| panic!("design {design}: {e:?}"));
+        assert_eq!(
+            model.borrow().configured_field(),
+            field,
+            "design register {design}"
+        );
+        assert_eq!(model.borrow().violations, Vec::<String>::new());
+
+        // And the data moves whole, which is what the disagreement broke: a frame
+        // of 98 bytes is 24 whole words and a half word.
+        let sent = frame(0x30, 98);
+        assert!(mac.transmit(&sent));
+        assert_eq!(
+            model.borrow().wire,
+            vec![sent],
+            "design {design}: the transmit DMA ended in an error"
+        );
+        let arriving = frame(0x70, 98);
+        assert!(model.borrow_mut().inject_rx(&arriving));
+        let mut buf = [0u8; 256];
+        let got = mac.receive(&mut buf).expect("the frame is waiting");
+        assert_eq!(&buf[..got], &arriving[..], "design {design}");
+    }
+}
+
+#[test]
+fn the_design_register_is_read_once_the_block_is_enabled_and_before_any_gem_register() {
+    let (mac, model) = rig_with::<RX, TX>(&Config::new(MAC));
+    let _mac = mac.unwrap();
+    let m = model.borrow();
+    assert_eq!(
+        m.design_read_after_writes,
+        Some(2),
+        "after the two writes of CTL (the mode, then enabled) and before the first GEM register"
+    );
+    assert_eq!(m.log[1].0, CTL);
+    assert_ne!(m.log[1].1 & CTL_ENABLED, 0);
+    assert_eq!(m.violations, Vec::<String>::new());
+}
+
+#[test]
+fn the_bus_width_is_in_the_configuration_before_receive_and_transmit_are_enabled() {
+    let (mac, model) = rig_with::<RX, TX>(&Config::new(MAC));
+    let _mac = mac.unwrap();
+    let m = model.borrow();
+    let configured = position(&m.log, NETWORK_CONFIG, 0);
+    let enabled = m
+        .log
+        .iter()
+        .position(|&(off, value)| {
+            off == NETWORK_CONTROL && value & (NWCTRL_ENABLE_RECEIVE | NWCTRL_ENABLE_TRANSMIT) != 0
+        })
+        .expect("receive and transmit are enabled");
+    assert!(
+        configured < enabled,
+        "the configuration is written before the DMA is let go"
+    );
+    assert_eq!(
+        (m.log[configured].1 >> NWCFG_DATA_BUS_WIDTH_POS) & 3,
+        1,
+        "64 bits is 1 in the field's encoding, and it is in that first write"
+    );
+    assert_eq!(m.violations, Vec::<String>::new());
+}
+
+#[test]
+fn a_design_bus_width_that_names_no_width_is_refused_and_nothing_is_programmed() {
+    // 0 is a bus nobody built; 3, 5, 6 and 7 are not one-hot. The driver does not
+    // pick the nearest width.
+    for design in [0u32, 3, 5, 6, 7] {
+        let (mac, model) = rig_on::<RX, TX>(&Config::new(MAC), |m| m.set_design_bus_width(design));
+        assert_eq!(
+            mac.err(),
+            Some(InitError::UnknownDmaBusWidth(design)),
+            "design register {design}"
+        );
+        let m = model.borrow();
+        let programmed: Vec<_> = m.log.iter().filter(|&&(off, _)| off >= GEM).collect();
+        assert!(
+            programmed.is_empty(),
+            "design {design}: GEM registers written: {programmed:x?}"
+        );
+        assert_eq!(m.violations, Vec::<String>::new());
+    }
+
+    // A block that does not answer reads all ones, which is 7 in the field.
+    let (mac, _) = rig_on::<RX, TX>(&Config::new(MAC), |m| {
+        m.regs.insert(DESIGNCFG_DEBUG1, u32::MAX);
+    });
+    assert_eq!(mac.err(), Some(InitError::UnknownDmaBusWidth(7)));
+}
+
+/// The bits of `after` that differ from `reset` and are not in `named`.
+fn unnamed_changes(reset: u32, after: u32, named: u32) -> u32 {
+    (reset ^ after) & !named
+}
+
+/// The two registers `new` writes whole, against the values the kit held before
+/// the driver ran: what differs from them is what the driver named. A field the
+/// driver forgets keeps its reset value only if it is written back as it was, so a
+/// nameless overwrite of ANY field, not just the bus width, shows here.
+#[test]
+fn new_replaces_only_the_fields_it_names_in_the_registers_it_writes_whole() {
+    let mut multicast_refused = Config::new(MAC);
+    multicast_refused.accept_all_multicast = false;
+    multicast_refused.mdc_div = MdcDiv::By64;
+    // INCR4 is the kit's reset burst: naming it changes nothing.
+    multicast_refused.dma_burst = DmaBurst::Incr4;
+    let mut wide_burst = Config::new(MAC);
+    wide_burst.dma_burst = DmaBurst::Incr16;
+    wide_burst.mdc_div = MdcDiv::By32;
+
+    // `NETWORK_CONFIG`'s reset value for the bus width is the design's default, read
+    // from `DESIGNCFG_DEBUG5` bits 11:10 on that kit.
+    let reset_field = (RESET_DESIGNCFG_DEBUG5 >> 10) & 3;
+    assert_eq!(reset_field, 1, "the measured default is 64 bits");
+    assert_eq!(
+        (RESET_NETWORK_CONFIG >> 21) & 3,
+        reset_field,
+        "and it is what NETWORK_CONFIG held"
+    );
+
+    for config in [Config::new(MAC), multicast_refused, wide_burst] {
+        for (design, field) in WIDTHS {
+            let (mac, model) = rig_on::<RX, TX>(&config, |m| m.set_design_bus_width(design));
+            let _mac = mac.unwrap();
+            let m = model.borrow();
+
+            // NETWORK_CONFIG: speed, duplex, frame size, FCS, the MDC divider and
+            // (on request) the multicast hash are the driver's; the bus width is the
+            // design's, and differs from the reset value only when the design does.
+            let mdc_mask = 7 << NWCFG_MDC_DIV_POS;
+            let mut named = NWCFG_SPEED_100
+                | NWCFG_FULL_DUPLEX
+                | NWCFG_RECEIVE_1536
+                | NWCFG_FCS_REMOVE
+                | mdc_mask;
+            if config.accept_all_multicast {
+                named |= NWCFG_MULTICAST_HASH_ENABLE;
+            }
+            if field != reset_field {
+                named |= 3 << NWCFG_DATA_BUS_WIDTH_POS;
+            }
+            let netcfg = m.reg(NETWORK_CONFIG);
+            let stray = unnamed_changes(RESET_NETWORK_CONFIG, netcfg, named);
+            assert_eq!(
+                stray, 0,
+                "design {design}: NETWORK_CONFIG {netcfg:#010x} changed bits {stray:#010x} of the \
+                 reset {RESET_NETWORK_CONFIG:#010x} that no field names"
+            );
+            let mut expected = (RESET_NETWORK_CONFIG
+                & !(named
+                    | mdc_mask
+                    | (3 << NWCFG_DATA_BUS_WIDTH_POS)
+                    | NWCFG_MULTICAST_HASH_ENABLE))
+                | NWCFG_SPEED_100
+                | NWCFG_FULL_DUPLEX
+                | NWCFG_RECEIVE_1536
+                | NWCFG_FCS_REMOVE
+                | ((config.mdc_div as u32) << NWCFG_MDC_DIV_POS)
+                | (field << NWCFG_DATA_BUS_WIDTH_POS);
+            if config.accept_all_multicast {
+                expected |= NWCFG_MULTICAST_HASH_ENABLE;
+            }
+            assert_eq!(
+                netcfg, expected,
+                "design {design}: the named fields' values"
+            );
+
+            // DMA_CONFIG: the burst length and discard-on-error are the driver's.
+            let burst_mask = 0x1F << DMACFG_AMBA_BURST_POS;
+            let named = burst_mask | DMACFG_FORCE_DISCARD_ON_ERR;
+            let dmacfg = m.reg(DMA_CONFIG);
+            let stray = unnamed_changes(RESET_DMA_CONFIG, dmacfg, named);
+            assert_eq!(
+                stray, 0,
+                "design {design}: DMA_CONFIG {dmacfg:#010x} changed bits {stray:#010x} of the \
+                 reset {RESET_DMA_CONFIG:#010x} that no field names"
+            );
+            assert_eq!(
+                dmacfg,
+                (RESET_DMA_CONFIG & !named)
+                    | ((config.dma_burst as u32) << DMACFG_AMBA_BURST_POS)
+                    | DMACFG_FORCE_DISCARD_ON_ERR,
+                "design {design}: the named fields' values"
+            );
+        }
+    }
 }

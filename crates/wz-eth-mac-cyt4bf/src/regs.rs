@@ -50,6 +50,9 @@ pub const TRANSMIT_Q1_PTR: usize = 0x1440;
 pub const TRANSMIT_Q2_PTR: usize = 0x1444;
 pub const RECEIVE_Q1_PTR: usize = 0x1480;
 pub const RECEIVE_Q2_PTR: usize = 0x1484;
+/// Read-only: how the block was built (`cyip_eth.h`: `DESIGNCFG_DEBUG1` at
+/// `0x00001280`). The driver reads the DMA data bus width from it.
+pub const DESIGNCFG_DEBUG1: usize = 0x1280;
 
 // ---- NETWORK_CONTROL -----------------------------------------------------
 
@@ -75,8 +78,40 @@ pub const NWCFG_RECEIVE_1536: u32 = 1 << 8;
 pub const NWCFG_FCS_REMOVE: u32 = 1 << 17;
 /// MDC clock divider position; the field is three bits wide.
 pub const NWCFG_MDC_DIV_POS: u32 = 18;
-/// Data bus width: 0 is 32 bits, which is this block's AHB master.
+/// `NETWORK_CONFIG.DATA_BUS_WIDTH` position; the field is two bits wide
+/// (`cyip_eth.h`: `ETH_NETWORK_CONFIG_DATA_BUS_WIDTH_Pos` 21, mask `0x600000`).
+///
+/// The field says how wide the DMA's data bus is driven, and the DMA moves data
+/// correctly only when it agrees with the width the design was built with
+/// ([`DESIGNCFG_DEBUG1`]). Its reset value is the design's own width, so a write
+/// of the whole register that does not name it replaces the width with zero.
 pub const NWCFG_DATA_BUS_WIDTH_POS: u32 = 21;
+/// The mask of `NETWORK_CONFIG.DATA_BUS_WIDTH`.
+pub const NWCFG_DATA_BUS_WIDTH_MASK: u32 = 0b11 << NWCFG_DATA_BUS_WIDTH_POS;
+/// `NETWORK_CONFIG.DATA_BUS_WIDTH` values, from the PDL's Cadence core driver
+/// (`cedi.h`, `CEDI_BusWidth`: 32 is 0, 64 is 1, 128 is 2) and its register write
+/// (`edd.c`, `EMAC_REGS__NETWORK_CONFIG__DATA_BUS_WIDTH__MODIFY`).
+pub const NWCFG_BUS_32: u32 = 0;
+pub const NWCFG_BUS_64: u32 = 1;
+pub const NWCFG_BUS_128: u32 = 2;
+
+// ---- DESIGNCFG_DEBUG1 ----------------------------------------------------
+
+/// `DESIGNCFG_DEBUG1.DMA_BUS_WIDTH` position: the width of the DMA data bus the
+/// block was built with (`cyip_eth.h`: `ETH_DESIGNCFG_DEBUG1_DMA_BUS_WIDTH_Pos`
+/// 25, mask `0xE000000`, so three bits).
+pub const DESIGN_DMA_BUS_WIDTH_POS: u32 = 25;
+/// The field's mask once shifted down.
+pub const DESIGN_DMA_BUS_WIDTH_MASK: u32 = 0x7;
+/// The field's encoding is one-hot: 1 is 32 bits, 2 is 64, 4 is 128. The PDL's
+/// Cadence core driver compares it that way (`edd.c`: `(1 << config->dmaBusWidth)
+/// > hwCfg.dma_bus_width` refuses a requested width the design lacks).
+///
+/// MEASURED on a CYT4BF8CEE kit: the field read 2. The other two follow the same
+/// one-hot reading and have NOT been seen on this chip.
+pub const DESIGN_BUS_32: u32 = 1;
+pub const DESIGN_BUS_64: u32 = 2;
+pub const DESIGN_BUS_128: u32 = 4;
 
 // ---- NETWORK_STATUS ------------------------------------------------------
 
