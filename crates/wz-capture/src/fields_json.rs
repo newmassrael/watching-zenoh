@@ -8847,6 +8847,36 @@ mod tests {
         }
     }
 
+    /// A row whose key does not resolve still names its payload.
+    ///
+    /// The case an editor opening a capture that began after the declarations is
+    /// in: the key is `null` with its cause, and the bytes are exactly where
+    /// they would have been. The summary needs the key to be nowhere.
+    #[cfg(feature = "network-codecs")]
+    #[test]
+    fn a_row_whose_key_does_not_resolve_still_names_its_payload() {
+        let json = encoding_id("application/json");
+        let record = crate::payload::tests_support::push_declaring_aliased(7, json, br#"{"a":1}"#);
+        let (d, file, lengths) = one_frame_per_record(&[record]);
+        let doc = fields_json(&d, &file, None, None);
+        let entry = objects_holding(&doc, "keyexpr_id")
+            .into_iter()
+            .find(|entry| raw(entry, "message") == "\"Push\"")
+            .unwrap_or_else(|| panic!("no Push entry: {doc}"));
+        assert_eq!(raw(&entry, "keyexpr"), "null", "{entry:?}");
+        assert_eq!(raw(&entry, "keyexpr_id"), "7", "{entry:?}");
+        assert_eq!(
+            raw(&entry, "payload"),
+            alloc::format!(
+                "{{\"start\":{},\"end\":{},\"encoding\":\"application/json\",\
+                 \"shm_descriptor\":false}}",
+                lengths[0] - 7,
+                lengths[0]
+            ),
+            "{doc}"
+        );
+    }
+
     /// THE RULE A ROW NAMES IS THE RULE THE DIAGNOSIS NUMBERS, in either order of
     /// two overlapping rules.
     ///
