@@ -2139,8 +2139,13 @@ int main(void) {
      * referenced). One new key name; no word moves; nothing retires.
      * 25: a flow gains `halves`, one entry per direction (`a`, then `b`) with
      * `lease_ms`, `last_seen_ts_ns`, `close_seen`, `fin_seen` and `rst_seen`.
-     * Six new key names; no word moves; nothing retires. */
-    revisioned[2].revision = 25;
+     * Six new key names; no word moves; nothing retires.
+     * 26: a flow whose handshake was never observed no longer reads as
+     * negotiated: `context.negotiated` is `true` once BOTH Inits were seen and
+     * the three capabilities are `null` before that, where a flow that began at
+     * its `Close` said `true` for all four. VALUES move under stationary keys;
+     * no key name moves; nothing retires. */
+    revisioned[2].revision = 26;
     revisioned[2].doc = NULL;
     rc = wz_dissect_pcap_fields(pcap, sizeof pcap, 0, &revisioned[2].doc);
     CHECK(rc == WZ_DISSECT_OK, "fields rc=%d", rc);

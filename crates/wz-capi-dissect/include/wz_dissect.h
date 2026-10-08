@@ -592,6 +592,42 @@
  *     `phase` is one of `unseen`, `half_init`, `init_complete`,
  *     `established`, `closed`.
  *
+ *     Since field-document revision 26 -- WHAT `negotiated` MEANS, and what a
+ *     flow that did not see its handshake says. `negotiated` is `true` once
+ *     BOTH Inits of the handshake were observed, the InitSyn and the InitAck,
+ *     one in each direction; it stays `true` through the `Open` exchange and
+ *     through a `Close`, and it is `true` at `init_complete`, before any
+ *     `Open`. The Init exchange is what fixes the session's parameters: the
+ *     three capabilities, the patch level and the size parameters. The `Open`
+ *     exchange carries none of them, so the Open adds nothing to a negotiation
+ *     and its absence withholds nothing from one.
+ *
+ *     `negotiated` is `false` for a flow whose handshake was not observed: a
+ *     capture that begins at or after the Open (a `Close` alone, Frames and
+ *     Fragments then a `Close`), and a capture that saw one Init and then
+ *     nothing or a `Close`. `phase` is no evidence of a negotiation: it says
+ *     where the session IS, and `closed` is what a `Close` makes it from any
+ *     state, so `"phase":"closed"` with `"negotiated":false` is the ordinary
+ *     reading of a flow that began at its `Close`.
+ *
+ *     `lowlatency`, `compression` and `qos` are `null` whenever `negotiated`
+ *     is `false`. When it is `true`, each is `true` only if BOTH sides offered
+ *     it, and `false` otherwise: `null` is "not known", a different answer
+ *     from `false`. `sn_mask` and `batch_size` are the InitAck's answer and
+ *     are `null` until one was observed. `patch` and `version` are what the
+ *     Inits seen announced: with one Init seen they are that Init's
+ *     announcement and not yet the session's agreement, and `negotiated` says
+ *     whether both were seen. A cell that does not follow from an observed
+ *     message is `null`, never a default.
+ *
+ *     The values that moved at revision 26: a flow that began at its `Close`,
+ *     or joined after the handshake and ended in one, or saw one Init and a
+ *     `Close`, used to read `"negotiated":true` with the capabilities the
+ *     fold starts from (`true`), and now reads `false` and `null`. A flow
+ *     whose Init pair was seen reads as it always did. How messages are READ
+ *     did not move: a flow joined mid-session decodes its Frames, and its
+ *     Fragments as `fragment_without_resolution`, exactly as before.
+ *
  * @values fields phase
  *
  * Also per FLOW, beside `context`, and since field-document revision 25 --
@@ -718,7 +754,7 @@
  *
  * Every family in `value_families` now carries a `carries` axis:
  *
- *     {"name":"fields","revision":25,"key":"kind","values":[...],
+ *     {"name":"fields","revision":26,"key":"kind","values":[...],
  *      "carries":[{"word":"bits","shapes":[["end","name","start","value"]]},
  *                 {"word":"opaque","shapes":[["end","name","start"]]}, ...]}
  *
@@ -1996,7 +2032,7 @@ int wz_dissect_e2e_open(const char *profile_json, const unsigned char *frame,
  *
  * R2175 -- the document is at REVISION 3, and the fourth key is `value_families`:
  *
- *     "value_families":[{"name":"fields","revision":25,"key":"state",
+ *     "value_families":[{"name":"fields","revision":26,"key":"state",
  *                        "values":["decoded","encoding_mismatch",…]}, …]
  *
  * every key in every document whose VALUE this build draws from a closed set,

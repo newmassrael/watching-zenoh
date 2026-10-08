@@ -124,21 +124,64 @@ pub enum SessionPhase {
     Established,
     /// A Close was seen. Later bytes on this session are not decodable as
     /// part of it.
+    ///
+    /// Where the session IS, and nothing about what was SEEN of its
+    /// handshake: a `Close` moves the phase here from any other, including
+    /// `Unseen`, so a flow that begins at its `Close` is `Closed` and was
+    /// never negotiated. [`FlowContext::negotiated`] is the question this
+    /// variant cannot answer.
     Closed,
 }
 
 /// The parameters an observer infers from watching a handshake — the shape a
 /// participant would have been configured with.
+///
+/// # What is known, and from when
+///
+/// Every cell is a fact the observer READ or a conclusion drawn from facts it
+/// read, and before the message that settles it was seen it is unknown: `None`,
+/// never the starting value of the fold that will later produce it. A flow that
+/// begins after its handshake, at a `Close` or at any later message, has
+/// therefore negotiated nothing, whatever [`Self::phase`] has moved to.
+///
+/// | cell | known once | value |
+/// |---|---|---|
+/// | [`Self::negotiated()`] | both Inits are seen | stays set; a `Close` does not clear it |
+/// | [`Self::lowlatency()`], [`Self::compression()`], [`Self::qos()`] | both Inits are seen | the `&=` of the two offers |
+/// | [`Self::caps`], so [`Self::sn_mask()`] and [`Self::batch_size()`] | the InitAck is seen | the acceptor's answer |
+/// | [`Self::patch`] | any Init is seen | the `min` of the announcements seen; the session's once negotiated |
+/// | [`Self::version`] | any Init is seen | the InitAck's, else the InitSyn's |
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct FlowContext {
     /// How far the session has progressed.
+    ///
+    /// Where the session IS, not what the observer SAW: a flow whose first
+    /// message is a `Close` is `Closed` with no Init behind it. A negotiation
+    /// is read off [`Self::negotiated`], never off this field.
     pub phase: SessionPhase,
-    /// `LowLatency` (`0x5`) offered by BOTH sides. Once a direction has
-    /// carried its own `Open`, THAT direction's stream prefix is 4 bytes —
-    /// see [`Self::open_seen`] for why the answer is not session-wide.
-    pub lowlatency: bool,
+    /// Which directions have carried their own Init, indexed the way
+    /// [`Self::open_seen`] is (`A` = 0, `B` = 1). The first Init of a direction
+    /// wins: a retransmission is not folded twice.
+    ///
+    /// The fact [`Self::negotiated`] is read off, and it lives on the CONTEXT
+    /// for the reason `open_seen` does. It used to be a private guard on the
+    /// session while `negotiated` was read off the PHASE, which cannot carry
+    /// it: a `Close` overwrites the phase from any state, so a session that
+    /// closed after a full handshake and one that closed having shown nothing
+    /// were the same value, and both answered `true`.
+    pub init_seen: [bool; 2],
+    /// `LowLatency` (`0x5`) offered by BOTH sides, as the running `&=` of the
+    /// Inits folded so far. Read through [`Self::lowlatency()`], which is
+    /// `None` until the fold is complete: the identity element of an `&=` is
+    /// `true`, and a reader that took it for an answer reported a capability
+    /// nobody agreed to.
+    ///
+    /// Once a direction has carried its own `Open`, THAT direction's stream
+    /// prefix is 4 bytes — see [`Self::open_seen`] for why the answer is not
+    /// session-wide.
+    lowlatency: bool,
     /// Which directions have carried their own `Open`, indexed the way
-    /// `init_seen` is (`A` = 0, `B` = 1).
+    /// [`Self::init_seen`] is (`A` = 0, `B` = 1).
     ///
     /// R2789 (open debt 812) — the reframing is PER DIRECTION and this is the
     /// field that makes it askable. Each side switches what it SENDS once it
@@ -149,21 +192,31 @@ pub struct FlowContext {
     /// reported a 15-payload lean capture whose field document held 3, and the
     /// witness reproduces it as `OversizeLength { claimed_len: 2418147332 }`.
     ///
-    /// It lives on the CONTEXT rather than beside `init_seen` on the session
-    /// because it is not only a fold guard: it is state a reader of a frame
-    /// needs in order to ask the width question at all.
+    /// It lives on the CONTEXT rather than on the session because it is not
+    /// only a fold guard: it is state a reader of a frame needs in order to ask
+    /// the width question at all.
     pub open_seen: [bool; 2],
-    /// `Compression` (`0x6`) offered by BOTH sides. Once established, frame
-    /// bodies are lz4-wrapped batches.
-    pub compression: bool,
-    /// `QoS` (`0x1`) offered by BOTH sides — whether a non-DEFAULT `ext_qos`
-    /// priority on a Frame or Fragment is meaningful.
-    pub qos: bool,
+    /// `Compression` (`0x6`) offered by BOTH sides, as the running `&=`; read
+    /// through [`Self::compression()`]. Once established, frame bodies are
+    /// lz4-wrapped batches.
+    compression: bool,
+    /// `QoS` (`0x1`) offered by BOTH sides, as the running `&=`; read through
+    /// [`Self::qos()`]. Whether a non-DEFAULT `ext_qos` priority on a Frame or
+    /// Fragment is meaningful.
+    qos: bool,
     /// The `min` of both sides' `0x7` announcements, `None` until at least one
     /// Init has been seen. `Some(0)` and `None` are DIFFERENT: the first says
     /// a peer announced no patch extension, the second that no Init was
     /// observed at all — a distinction that matters to a reader which attached
     /// mid-session.
+    ///
+    /// With ONE Init seen this is that Init's announcement, which is an offer
+    /// and not yet the session's level: the InitAck carries
+    /// `min(acceptor, initiator)` and the initiator adopts it
+    /// (`io/zenoh-transport/src/unicast/establishment/ext/patch.rs` @ `Ok(min(PatchType::CURRENT, state.patch))`
+    /// and `state.patch = other_ext;`). With both seen the `min` of the two
+    /// equals the ack's, so this is the session's level from
+    /// [`Self::negotiated`] on.
     pub patch: Option<u8>,
     /// Whether an `Auth` (`0x3`) extension rode either Init. An observer that
     /// sees one knows a decode failure downstream may be authentication, not
@@ -249,10 +302,14 @@ impl Default for FlowContext {
     fn default() -> Self {
         Self {
             phase: SessionPhase::Unseen,
+            // The shape of `open_seen` below, not of the `&=` folds: a direction
+            // has carried its Init or it has not.
+            init_seen: [false; 2],
             // Every capability starts TRUE and is ANDed down by each Init
             // observed, mirroring zenoh's `state.is_x &= other_ext.is_some()`.
-            // The `phase` guard below is what keeps an un-negotiated `true`
-            // from ever being READ as a negotiated one.
+            // The fields are private and `negotiated()` gates every accessor,
+            // which is what keeps this identity element from ever being READ as
+            // a negotiated `true`.
             lowlatency: true,
             // NOT the `true`-then-AND-down shape above: a direction has
             // carried an Open or it has not, and nothing observed later can
@@ -352,15 +409,68 @@ impl FlowContext {
             && self.open_seen[usize::from(direction == Direction::B)]
     }
 
-    /// Whether the Init exchange completed, i.e. whether the capability
-    /// fields are a NEGOTIATION rather than a partial fold. Reading
-    /// `lowlatency` before this is reading the identity element of an `&=`,
-    /// not an answer.
+    /// Whether the observer SAW the handshake that fixes the session's
+    /// parameters: an Init in each direction. From then on the capabilities are
+    /// a NEGOTIATION rather than a partial fold.
+    ///
+    /// # Why the Init pair and not the phase
+    ///
+    /// The Init exchange is what settles every capability. Each side computes
+    /// `is_x &= other_ext.is_some()` on the Init it receives and the acceptor
+    /// sends the result in its InitAck, and the patch level is the `min` the
+    /// InitAck carries:
+    ///
+    /// `io/zenoh-transport/src/unicast/establishment/ext/lowlatency.rs` @ `state.is_lowlatency &= other_ext.is_some();`
+    /// `io/zenoh-transport/src/unicast/establishment/ext/compression.rs` @ `state.is_compression &= other_ext.is_some();`
+    /// `io/zenoh-transport/src/unicast/establishment/ext/patch.rs` @ `Ok(min(PatchType::CURRENT, state.patch))`
+    ///
+    /// The `Open` exchange settles none of them: for lowlatency, compression
+    /// and QoS the open messages carry no extension, and there is no patch
+    /// extension in Open at all.
+    ///
+    /// `io/zenoh-transport/src/unicast/establishment/ext/lowlatency.rs` @ `Ok(None)`
+    /// `io/zenoh-transport/src/unicast/establishment/ext/compression.rs` @ `Ok(None)`
+    /// `io/zenoh-transport/src/unicast/establishment/ext/qos.rs` @ `Ok(None)`
+    /// `io/zenoh-transport/src/unicast/establishment/ext/patch.rs` @ `unimplemented!("There is no patch extension in OPEN")`
+    ///
+    /// So this is `true` after the second Init and `phase` says how far the
+    /// session got from there (`InitComplete` when no `Open` was seen).
+    ///
+    /// # What it is NOT
+    ///
+    /// It is not read off [`Self::phase`], because the phase is where the
+    /// session IS and a `Close` overwrites it from any state: a flow that
+    /// begins at its `Close` is `Closed` and negotiated nothing, and a flow
+    /// that joined after its handshake is the same whatever it carried next.
+    /// Both used to answer `true`, with every capability reading as the
+    /// starting `true` of the fold. It is not retracted by a `Close` either:
+    /// a session that closed after its Init pair was negotiated.
+    ///
+    /// Reading a capability before this holds is reading the identity element
+    /// of an `&=`, not an answer, so [`Self::lowlatency()`],
+    /// [`Self::compression()`] and [`Self::qos()`] say `None` until it does.
     pub fn negotiated(&self) -> bool {
-        matches!(
-            self.phase,
-            SessionPhase::InitComplete | SessionPhase::Established | SessionPhase::Closed
-        )
+        self.init_seen[0] && self.init_seen[1]
+    }
+
+    /// `LowLatency` (`0x5`) negotiated for the session — offered by BOTH sides —
+    /// or `None` while the Init pair has not been seen ([`Self::negotiated`]).
+    /// Not "in force": that is [`Self::lowlatency_active`], per direction.
+    pub fn lowlatency(&self) -> Option<bool> {
+        self.negotiated().then_some(self.lowlatency)
+    }
+
+    /// `Compression` (`0x6`) negotiated for the session — offered by BOTH
+    /// sides — or `None` while the Init pair has not been seen. Whether a
+    /// direction's batches carry the header is [`Self::batch_header_active`].
+    pub fn compression(&self) -> Option<bool> {
+        self.negotiated().then_some(self.compression)
+    }
+
+    /// `QoS` (`0x1`) negotiated for the session — offered by BOTH sides — or
+    /// `None` while the Init pair has not been seen.
+    pub fn qos(&self) -> Option<bool> {
+        self.negotiated().then_some(self.qos)
     }
 
     /// zenoh `PatchType::has_fragmentation_markers` over the negotiated level
@@ -398,9 +508,9 @@ impl FlowContext {
     }
 
     /// Fold ONE side's Init ext chain in. Idempotent per direction is the
-    /// CALLER's business — [`PassiveSession`] tracks which directions have
-    /// been folded so a retransmitted Init cannot double-AND a capability
-    /// back on.
+    /// CALLER's business — [`PassiveSession`] records which directions have
+    /// been folded in [`Self::init_seen`] so a retransmitted Init cannot
+    /// double-AND a capability back on.
     fn fold_init(&mut self, extensions: &[ExtEntryOwned]) {
         self.lowlatency &= has_est_ext(extensions, est_ext::LOWLATENCY);
         self.compression &= has_est_ext(extensions, est_ext::COMPRESSION);
@@ -1103,11 +1213,6 @@ pub struct PassiveSession {
     /// pass over data that has been walked anyway.
     #[cfg(all(feature = "dissect", feature = "codec-declare"))]
     keyexprs: crate::passive_keyexpr::KeyexprTables,
-    /// Which directions have contributed an Init. A retransmission (a capture
-    /// with duplicates, a TCP retransmit the reassembler let through) must not
-    /// fold twice: `&=` is idempotent but `min` on the patch level is only
-    /// idempotent for the same value, and the phase transition is not.
-    init_seen: [bool; 2],
     /// R311y594 — the OBSERVATION instant, in the same milliseconds
     /// [`ReassemblyConfig::reassembly_timeout_ms`] is expressed in.
     ///
@@ -1286,8 +1391,7 @@ impl core::fmt::Debug for PassiveSession {
         let mut d = f.debug_struct("PassiveSession");
         d.field("context", &self.context)
             .field("a", &self.a)
-            .field("b", &self.b)
-            .field("init_seen", &self.init_seen);
+            .field("b", &self.b);
         #[cfg(feature = "reassembly")]
         d.field(
             "open_chains",
@@ -1306,7 +1410,6 @@ impl Default for PassiveSession {
             context: FlowContext::default(),
             a: DirectionStream::default(),
             b: DirectionStream::default(),
-            init_seen: [false; 2],
             #[cfg(all(feature = "dissect", feature = "codec-declare"))]
             keyexprs: crate::passive_keyexpr::KeyexprTables::new(),
             #[cfg(feature = "reassembly")]
@@ -2337,7 +2440,10 @@ impl PassiveSession {
     /// Init folds the capabilities (once per direction). Open advances to
     /// Established — and only from `InitComplete`, so a capture that starts
     /// mid-session and sees an Open with no Inits does NOT claim a
-    /// negotiation it never observed. Close ends the session.
+    /// negotiation it never observed. Close ends the session, and settles
+    /// nothing about the negotiation: it moves the phase and leaves
+    /// [`FlowContext::init_seen`] as it found it, so a flow that begins at its
+    /// Close reads `Closed` and `negotiated() == false`.
     fn fold(&mut self, direction: Direction, frame: &InboundFrame) {
         match frame {
             InboundFrame::Init {
@@ -2347,10 +2453,10 @@ impl PassiveSession {
                 ..
             } => {
                 let idx = usize::from(direction == Direction::B);
-                if self.init_seen[idx] {
+                if self.context.init_seen[idx] {
                     return;
                 }
-                self.init_seen[idx] = true;
+                self.context.init_seen[idx] = true;
                 self.context.fold_init(extensions);
                 self.context.fold_version(*is_ack, body.version);
                 // R311y583 (A5) — the ACK's size parameters ARE the session's.
@@ -2360,7 +2466,7 @@ impl PassiveSession {
                     self.context.caps =
                         Some(PeerInitCaps::from_init_body(body.sn_res, body.batch_size));
                 }
-                self.context.phase = if self.init_seen[0] && self.init_seen[1] {
+                self.context.phase = if self.context.negotiated() {
                     SessionPhase::InitComplete
                 } else {
                     SessionPhase::HalfInit
@@ -2909,7 +3015,7 @@ mod tests {
 
         let f = s.next_frame(Direction::B).expect("InitAck");
         assert_eq!(f.context.phase, SessionPhase::InitComplete);
-        assert!(f.context.lowlatency, "both sides offered 0x5");
+        assert_eq!(f.context.lowlatency(), Some(true), "both sides offered 0x5");
         assert!(
             !f.context.lowlatency_active(Direction::A),
             "negotiated is not yet IN FORCE — the Open still rides the 2-byte prefix"
@@ -3292,7 +3398,11 @@ mod tests {
             }
             let ctx = s.context();
             assert_eq!(ctx.phase, SessionPhase::Established);
-            assert!(!ctx.lowlatency, "an AND over a missing offer is false");
+            assert_eq!(
+                ctx.lowlatency(),
+                Some(false),
+                "an AND over a missing offer is false"
+            );
             assert_eq!(ctx.prefix_width(Direction::A), PREFIX_WIDTH_UNIVERSAL);
         }
     }
@@ -3336,6 +3446,302 @@ mod tests {
         let _ = s.next_frame(Direction::A);
         assert_eq!(s.context().phase, SessionPhase::HalfInit);
         assert!(!s.context().negotiated());
+    }
+
+    /// Nothing is known of a context's handshake cells: no negotiation, three
+    /// unknown capabilities, no patch level, no size parameters, no version.
+    fn assert_nothing_negotiated(ctx: &FlowContext) {
+        assert!(!ctx.negotiated(), "{ctx:?}");
+        assert_eq!(
+            (ctx.lowlatency(), ctx.compression(), ctx.qos()),
+            (None, None, None),
+            "an unknown capability is unknown, not the starting value of the fold: {ctx:?}"
+        );
+        assert_eq!(ctx.patch, None, "{ctx:?}");
+        assert_eq!(ctx.sn_mask(), None, "{ctx:?}");
+        assert_eq!(ctx.batch_size(), None, "{ctx:?}");
+        assert_eq!(ctx.version, None, "{ctx:?}");
+    }
+
+    /// A FLOW THAT BEGINS AT ITS CLOSE NEGOTIATED NOTHING, from either end.
+    ///
+    /// The `Close` moves the phase to `Closed` from `Unseen`, and the phase is
+    /// where the session IS: before the fix `negotiated()` was read off it, so
+    /// this flow answered `true` and every capability read as the `true` the
+    /// fold starts from.
+    #[test]
+    fn a_flow_that_begins_at_its_close_negotiated_nothing() {
+        for direction in [Direction::A, Direction::B] {
+            let mut s = PassiveSession::new();
+            s.push(direction, &framed(&close_wire(), 2));
+            let f = s.next_frame(direction).expect("the Close decodes");
+            assert!(
+                matches!(f.frame, Ok(InboundFrame::Close { .. })),
+                "{:?}",
+                f.frame
+            );
+            let ctx = s.context();
+            assert_eq!(ctx.phase, SessionPhase::Closed);
+            assert_nothing_negotiated(&ctx);
+            assert_eq!(f.context, ctx, "the frame carries the context as of itself");
+            assert!(s.half(direction).close_seen);
+        }
+    }
+
+    /// A SESSION JOINED AFTER ITS HANDSHAKE stays un-negotiated through to its
+    /// `Close`, and its messages are read exactly as they were.
+    ///
+    /// The second half is the one a fix to the reported value could break: the
+    /// Frame is a batch under the universal framing, and a Fragment is read as
+    /// `FragmentWithoutResolution` because no InitAck gave the ring a size.
+    #[test]
+    fn a_session_joined_after_its_handshake_stays_unnegotiated_to_its_close() {
+        let mut s = PassiveSession::new();
+        s.push(Direction::A, &framed(&open_wire(false), 2));
+        s.push(Direction::A, &framed(&frame_wire(0, &oam_record(7)), 2));
+        #[cfg(feature = "reassembly")]
+        s.push(Direction::B, &framed(&fragment_wire(3, true, &[0xAB]), 2));
+        s.push(Direction::B, &framed(&close_wire(), 2));
+
+        let open = s.next_frame(Direction::A).expect("the Open decodes");
+        assert!(matches!(open.frame, Ok(InboundFrame::Open { .. })));
+        assert_nothing_negotiated(&s.context());
+        assert_eq!(s.context().phase, SessionPhase::Unseen);
+
+        let frame = s.next_frame(Direction::A).expect("the Frame decodes");
+        match frame.carried {
+            Carried::Batch(b) => assert_eq!(b.messages.len(), 1, "read as a plain batch"),
+            other => panic!("expected a decoded batch, got {other:?}"),
+        }
+        #[cfg(feature = "reassembly")]
+        {
+            let fragment = s.next_frame(Direction::B).expect("the Fragment decodes");
+            assert!(
+                matches!(fragment.carried, Carried::FragmentWithoutResolution),
+                "{:?}",
+                fragment.carried
+            );
+        }
+        let close = s.next_frame(Direction::B).expect("the Close decodes");
+        assert!(matches!(close.frame, Ok(InboundFrame::Close { .. })));
+        assert_eq!(s.context().phase, SessionPhase::Closed);
+        assert_nothing_negotiated(&s.context());
+    }
+
+    /// ONE INIT SETTLES NOTHING, and neither does a `Close` after it.
+    ///
+    /// The InitSyn is an offer; the session's value is the `&=` of both offers,
+    /// so a context holding one Init has a phase and the facts that Init
+    /// announced (`version`, `patch`) and no capability.
+    #[test]
+    fn one_init_negotiates_nothing_and_a_close_after_it_settles_nothing() {
+        let offered = || vec![unit_ext(est_ext::QOS), unit_ext(est_ext::COMPRESSION)];
+        let mut s = PassiveSession::new();
+        s.push(Direction::A, &framed(&init_wire(false, offered()), 2));
+        s.next_frame(Direction::A).expect("the InitSyn decodes");
+        let ctx = s.context();
+        assert_eq!(ctx.phase, SessionPhase::HalfInit);
+        assert!(!ctx.negotiated());
+        assert_eq!(
+            (ctx.lowlatency(), ctx.compression(), ctx.qos()),
+            (None, None, None)
+        );
+        assert_eq!(
+            ctx.version,
+            Some(0x09),
+            "what the one Init announced is kept"
+        );
+        assert_eq!(ctx.patch, Some(0));
+
+        s.push(Direction::B, &framed(&close_wire(), 2));
+        s.next_frame(Direction::B).expect("the Close decodes");
+        let ctx = s.context();
+        assert_eq!(ctx.phase, SessionPhase::Closed);
+        assert!(!ctx.negotiated(), "a Close does not complete a handshake");
+        assert_eq!(
+            (ctx.lowlatency(), ctx.compression(), ctx.qos()),
+            (None, None, None)
+        );
+        assert_eq!(ctx.version, Some(0x09));
+    }
+
+    /// THE INIT PAIR IS THE NEGOTIATION. With no `Open` ever seen the context is
+    /// `InitComplete` and every capability is the `&=` of the two offers, and a
+    /// `Close` afterwards retracts none of it.
+    ///
+    /// The offers differ per capability and per side, so that a value taken from
+    /// either Init alone is wrong for at least one of the three: A offers QoS
+    /// and compression, B offers QoS and lowlatency.
+    #[test]
+    fn an_init_pair_without_an_open_is_negotiated_and_a_close_keeps_it() {
+        let mut s = PassiveSession::new();
+        s.push(
+            Direction::A,
+            &framed(
+                &init_wire(
+                    false,
+                    vec![unit_ext(est_ext::QOS), unit_ext(est_ext::COMPRESSION)],
+                ),
+                2,
+            ),
+        );
+        s.push(
+            Direction::B,
+            &framed(
+                &init_wire(
+                    true,
+                    vec![unit_ext(est_ext::QOS), unit_ext(est_ext::LOWLATENCY)],
+                ),
+                2,
+            ),
+        );
+        s.next_frame(Direction::A).expect("the InitSyn decodes");
+        s.next_frame(Direction::B).expect("the InitAck decodes");
+        let settled = |ctx: &FlowContext| {
+            assert!(ctx.negotiated(), "{ctx:?}");
+            assert_eq!(
+                (ctx.lowlatency(), ctx.compression(), ctx.qos()),
+                (Some(false), Some(false), Some(true)),
+                "{ctx:?}"
+            );
+            assert!(ctx.sn_mask().is_some(), "the InitAck gave the ring a size");
+        };
+        let ctx = s.context();
+        assert_eq!(ctx.phase, SessionPhase::InitComplete);
+        settled(&ctx);
+
+        s.push(Direction::A, &framed(&close_wire(), 2));
+        s.next_frame(Direction::A).expect("the Close decodes");
+        let ctx = s.context();
+        assert_eq!(ctx.phase, SessionPhase::Closed);
+        settled(&ctx);
+    }
+
+    /// EACH CAPABILITY IS THE `&=` OF BOTH OFFERS, for each of the three, in
+    /// all four combinations of who offered.
+    #[test]
+    fn each_capability_is_agreed_only_when_both_sides_offered_it() {
+        type Reading = fn(&FlowContext) -> Option<bool>;
+        let capabilities: [(u8, Reading); 3] = [
+            (est_ext::LOWLATENCY, FlowContext::lowlatency as Reading),
+            (est_ext::COMPRESSION, FlowContext::compression as Reading),
+            (est_ext::QOS, FlowContext::qos as Reading),
+        ];
+        for (id, read) in capabilities {
+            for (a_offers, b_offers) in [(false, false), (true, false), (false, true), (true, true)]
+            {
+                let offer = |on: bool| if on { vec![unit_ext(id)] } else { vec![] };
+                let mut s = PassiveSession::new();
+                s.push(Direction::A, &framed(&init_wire(false, offer(a_offers)), 2));
+                s.push(Direction::B, &framed(&init_wire(true, offer(b_offers)), 2));
+                s.next_frame(Direction::A).expect("the InitSyn decodes");
+                s.next_frame(Direction::B).expect("the InitAck decodes");
+                assert_eq!(
+                    read(&s.context()),
+                    Some(a_offers && b_offers),
+                    "capability {id:#x} offered by A: {a_offers}, by B: {b_offers}"
+                );
+            }
+        }
+    }
+
+    /// THE NEGOTIATION IS THE INIT PAIR WHATEVER ELSE HAPPENED, and no read of
+    /// the stream moved with it.
+    ///
+    /// Every sequence of up to five of the six handshake events (an Init and an
+    /// Open from the initiator, the same two from the acceptor, a Close from
+    /// each) is folded, and after every event:
+    ///
+    /// * `negotiated()` holds exactly when both Inits were folded;
+    /// * an Established session is negotiated, which is why the decoder's
+    ///   `negotiated() &&` guards never decided anything their `phase` guards
+    ///   did not;
+    /// * the two predicates the stream reader asks (`lowlatency_active`,
+    ///   `batch_header_active`) equal what the PHASE-based `negotiated` they
+    ///   were written against gives for the same state. This is the "reads as
+    ///   before" half: the reported value moved, the decisions did not.
+    #[test]
+    fn the_negotiation_is_the_init_pair_and_no_stream_read_moved_with_it() {
+        let offered = || {
+            vec![
+                unit_ext(est_ext::LOWLATENCY),
+                unit_ext(est_ext::COMPRESSION),
+                unit_ext(est_ext::QOS),
+            ]
+        };
+        let events: [(Direction, InboundFrame); 6] = [
+            (
+                Direction::A,
+                parse_inbound(&init_wire(false, offered())).expect("InitSyn"),
+            ),
+            (
+                Direction::B,
+                parse_inbound(&init_wire(true, offered())).expect("InitAck"),
+            ),
+            (
+                Direction::A,
+                parse_inbound(&open_wire(false)).expect("OpenSyn"),
+            ),
+            (
+                Direction::B,
+                parse_inbound(&open_wire(true)).expect("OpenAck"),
+            ),
+            (Direction::A, parse_inbound(&close_wire()).expect("Close")),
+            (Direction::B, parse_inbound(&close_wire()).expect("Close")),
+        ];
+        // The phase-based answer these predicates were written against.
+        let phase_negotiated = |phase: SessionPhase| {
+            matches!(
+                phase,
+                SessionPhase::InitComplete | SessionPhase::Established | SessionPhase::Closed
+            )
+        };
+        let mut checked = 0usize;
+        let mut closed_without_the_pair = 0usize;
+        // Mixed-radix counter over `events.len()` symbols, lengths 1..=5.
+        for length in 1..=5u32 {
+            for code in 0..(events.len() as u32).pow(length) {
+                let mut s = PassiveSession::new();
+                let mut inits = [false; 2];
+                let mut rest = code;
+                for _ in 0..length {
+                    let (direction, frame) = &events[(rest % events.len() as u32) as usize];
+                    rest /= events.len() as u32;
+                    if matches!(frame, InboundFrame::Init { .. }) {
+                        inits[usize::from(*direction == Direction::B)] = true;
+                    }
+                    s.fold(*direction, frame);
+                    let ctx = s.context();
+                    assert_eq!(ctx.negotiated(), inits[0] && inits[1], "{ctx:?}");
+                    if ctx.phase == SessionPhase::Established {
+                        assert!(ctx.negotiated(), "{ctx:?}");
+                    }
+                    if ctx.phase == SessionPhase::Closed && !ctx.negotiated() {
+                        closed_without_the_pair += 1;
+                    }
+                    for d in [Direction::A, Direction::B] {
+                        let seat = usize::from(d == Direction::B);
+                        let was_active = phase_negotiated(ctx.phase)
+                            && ctx.lowlatency
+                            && ctx.phase == SessionPhase::Established
+                            && ctx.open_seen[seat];
+                        assert_eq!(ctx.lowlatency_active(d), was_active, "{ctx:?}");
+                        let was_headed = phase_negotiated(ctx.phase)
+                            && ctx.compression
+                            && !ctx.lowlatency
+                            && ctx.phase == SessionPhase::Established
+                            && ctx.open_seen[seat];
+                        assert_eq!(ctx.batch_header_active(d), was_headed, "{ctx:?}");
+                    }
+                    checked += 1;
+                }
+            }
+        }
+        assert!(checked > 10_000, "the sweep must be a sweep: {checked}");
+        assert!(
+            closed_without_the_pair > 0,
+            "the sweep must reach the state whose reported value moved"
+        );
     }
 
     /// The oversize-prefix guard, exercised on the ONLY path that can reach

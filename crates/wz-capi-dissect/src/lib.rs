@@ -8943,6 +8943,68 @@ mod tests {
         doc
     }
 
+    /// A FLOW WHOSE HANDSHAKE WAS NEVER SEEN DOES NOT READ AS NEGOTIATED, at
+    /// the door the consumer filed it on and at the live handle's twin.
+    ///
+    /// One packet, one `Close`, from either end. The flow is `closed` because
+    /// a Close was read, and `negotiated` is `false` with `null` capabilities
+    /// because no Init was: before the fix both doors said `true` for all four,
+    /// beside a `null` version. The Close and the Inits are laid by hand, as
+    /// `framed_init` is, so the header's reading of the wire is not the
+    /// builder's own. Close is `T_MID_CLOSE` (0x03) with the S flag (0x20) and
+    /// reason 0; the InitSyn is `T_MID_INIT` (0x01) and the InitAck sets the A
+    /// flag (0x20) and carries the empty cookie that flag gates.
+    ///
+    /// The control is the Init pair alone: it is negotiated at `init_complete`
+    /// with no Open, and reads the same at both doors.
+    #[test]
+    fn a_flow_that_never_saw_its_handshake_reads_as_unnegotiated_at_both_doors() {
+        let stream_unit = |message: &[u8]| {
+            let mut out = (message.len() as u16).to_le_bytes().to_vec();
+            out.extend_from_slice(message);
+            out
+        };
+        let context_of = |doc: &str| -> String {
+            let at = doc.find("\"context\":").expect("a flow carries a context") + 10;
+            doc[at..=at + doc[at..].find('}').expect("the object closes")].to_string()
+        };
+        let pcap_of = |packets: &[Vec<u8>]| {
+            let rows: Vec<(u32, u32, &[u8])> = packets
+                .iter()
+                .enumerate()
+                .map(|(i, p)| (0u32, (i as u32) * 1_000, p.as_slice()))
+                .collect();
+            wz_capture::pcap::write(1, &rows)
+        };
+        let both_doors = |file: &[u8]| {
+            let whole = call_fields(file, 0).expect("the whole-document door");
+            let handle = replay(file, WZ_DISSECT_LIMITS_NONE).expect("the replay opens");
+            let live = live_fields(handle, file);
+            unsafe { wz_dissect_live_close(handle) };
+            (context_of(&whole), context_of(&live))
+        };
+
+        let close = stream_unit(&[0x03 | 0x20, 0x00]);
+        let never_negotiated = "{\"phase\":\"closed\",\"negotiated\":false,\"lowlatency\":null,\
+             \"compression\":null,\"qos\":null,\"patch\":null,\"sn_mask\":null,\
+             \"batch_size\":null,\"version\":null}";
+        for packet in [tcp_packet(1_000, &close), tcp_packet_reverse(5_000, &close)] {
+            let (whole, live) = both_doors(&pcap_of(&[packet]));
+            assert_eq!(whole, never_negotiated, "the whole-document door");
+            assert_eq!(live, never_negotiated, "the live handle");
+        }
+
+        let syn = stream_unit(&[0x01, 0x09, 0x31, 0xAA, 0xAA, 0xAA, 0xAA]);
+        let ack = stream_unit(&[0x21, 0x09, 0x31, 0xBB, 0xBB, 0xBB, 0xBB, 0x00]);
+        let pair = pcap_of(&[tcp_packet(1_000, &syn), tcp_packet_reverse(5_000, &ack)]);
+        let negotiated = "{\"phase\":\"init_complete\",\"negotiated\":true,\"lowlatency\":false,\
+             \"compression\":false,\"qos\":false,\"patch\":0,\"sn_mask\":268435455,\
+             \"batch_size\":65535,\"version\":9}";
+        let (whole, live) = both_doors(&pair);
+        assert_eq!(whole, negotiated, "the whole-document door");
+        assert_eq!(live, negotiated, "the live handle");
+    }
+
     /// EVERY DRAINED RECORD JOINS EXACTLY ONE ROW, on a capture
     /// the order-based join could not line up.
     ///

@@ -1443,6 +1443,48 @@ pub const DOCUMENT_HISTORY: &[DocumentShape] = &[
         planes: &[],
         carries: FIELDS_R20_CARRIES,
     },
+    // A FLOW WHOSE HANDSHAKE WAS NEVER SEEN NO LONGER READS AS NEGOTIATED.
+    //
+    // NO KEY NAME MOVES and nothing retires: this row reads revision 25's
+    // tables unchanged, and what moves is VALUES under stationary keys, the
+    // class revisions 17, 18 and 21 set the precedent for. So, as for those,
+    // THIS ROW IS THE WHOLE NOTICE a consumer gets.
+    //
+    // The cells are the flow's `context.negotiated`, `context.lowlatency`,
+    // `context.compression` and `context.qos`. `negotiated` was read off the
+    // session's phase, and a `Close` sets the phase to `closed` from any state,
+    // so a flow that BEGAN at its `Close` (nothing was read of its handshake),
+    // one that joined after the handshake and ended in a `Close`, and one that
+    // saw a single Init and then a `Close` all said `negotiated: true`, and the
+    // three capabilities said what the `&=` fold held: `true` where no Init was
+    // read, the one Init's offers where one was. That is the fold's starting
+    // value or half of its input, presented as an agreement. Now `negotiated` is
+    // `true` exactly when BOTH Inits were observed (and stays so through the
+    // `Open` and a `Close`), and the capabilities are `null` otherwise.
+    //
+    // The consequence for a consumer that read the old values: a `true` from
+    // a flow whose `version` was `null` was never an answer, and is now `null`
+    // beside `negotiated: false`. A flow whose Init pair was seen reads as it
+    // always did, byte for byte, which the control test holds.
+    //
+    // HOW MESSAGES ARE READ DID NOT MOVE. The observer's framing and batch
+    // decisions are asked per direction of an ESTABLISHED session, which is
+    // negotiated by construction, so no decode branch ever read the value
+    // that changed; a session joined mid-way still decodes its Frames, and its
+    // Fragments as `fragment_without_resolution`, as before.
+    //
+    // A consumer pinned to 25 loses nothing it could use: the only cells that
+    // differ are ones that were wrong. What it may now rely on is that a
+    // `null` capability beside `negotiated: false` means "not observed".
+    DocumentShape {
+        document: FIELDS,
+        revision: 26,
+        keys: FIELDS_R25_KEYS,
+        retiring: &[],
+        families: FIELDS_R20_FAMILIES,
+        planes: &[],
+        carries: FIELDS_R20_CARRIES,
+    },
     DocumentShape {
         document: SUMMARY,
         revision: 1,
@@ -10256,7 +10298,11 @@ mod tests {
             // sender announced, the instant of its last record, whether it
             // carried a `Close`, and the TCP FIN and RST. Six keys, no word
             // moves and nothing retires.
-            (FIELDS, 25),
+            // To 26 when a flow whose handshake was never observed stopped
+            // reading as negotiated: values under `context.negotiated` and the
+            // three capabilities moved from a fabricated `true` to `false` and
+            // `null`. No key moves, so this entry is the notice.
+            (FIELDS, 26),
             // R2121 (open-debt item 460) — the summary moved to 2 when it
             // gained `inert_counters`; R2122 (item 238) to 3 when its
             // `framing` group stopped disagreeing with the capture report's.

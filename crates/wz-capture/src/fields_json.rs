@@ -2293,6 +2293,16 @@ fn push_mac(mac: &[u8; 6], out: &mut String) {
     }
 }
 
+/// A boolean that may be unknown, in the document's spelling: `null` is
+/// "not known", a different answer from `false`.
+fn tri_state(v: Option<bool>) -> &'static str {
+    match v {
+        Some(true) => "true",
+        Some(false) => "false",
+        None => "null",
+    }
+}
+
 /// The flow's observation CONTEXT: what the handshake it watched
 /// negotiated, as of the end of the flow.
 ///
@@ -2302,6 +2312,13 @@ fn push_mac(mac: &[u8; 6], out: &mut String) {
 /// Init, so reading one before both Inits were seen reads the identity element
 /// of an `&=`. That is why `lowlatency`, `compression` and `qos` are `null`
 /// until `negotiated` is `true` rather than a `true` nobody agreed to.
+///
+/// `negotiated` is the session's own answer to "was the Init pair seen", and it
+/// is NOT `phase`: the phase is where the session is, and a `Close` moves it to
+/// `closed` from any state. A flow that begins at its `Close`, or joined after
+/// the handshake and ended in one, is `closed` with `negotiated: false` and
+/// three `null` capabilities; a session whose Inits were seen keeps the answer
+/// they gave through its `Open` and its `Close`.
 ///
 /// `sn_mask` is the ring the SN verdicts on this flow were judged at, `null`
 /// until an `InitAck` (or `Join`) was observed — and `null` is then why every
@@ -2315,27 +2332,16 @@ fn push_mac(mac: &[u8; 6], out: &mut String) {
 /// back to that row. See [`wz_session_core::passive::FlowContext::version`] for
 /// why the acceptor's word is preferred.
 fn push_context(context: &wz_session_core::passive::FlowContext, out: &mut String) {
-    let negotiated = context.negotiated();
-    let agreed = |v: bool| {
-        if negotiated {
-            if v {
-                "true"
-            } else {
-                "false"
-            }
-        } else {
-            "null"
-        }
-    };
     out.push_str(",\"context\":{\"phase\":");
     escape_into(phase_word(context.phase).name(), out);
     let _ = write!(
         out,
-        ",\"negotiated\":{negotiated},\"lowlatency\":{},\"compression\":{},\"qos\":{},\
+        ",\"negotiated\":{},\"lowlatency\":{},\"compression\":{},\"qos\":{},\
          \"patch\":",
-        agreed(context.lowlatency),
-        agreed(context.compression),
-        agreed(context.qos),
+        context.negotiated(),
+        tri_state(context.lowlatency()),
+        tri_state(context.compression()),
+        tri_state(context.qos()),
     );
     match context.patch {
         Some(p) => {
@@ -2395,11 +2401,6 @@ fn push_context(context: &wz_session_core::passive::FlowContext, out: &mut Strin
 /// digits above it, and `last_seen_ts_ns` is past that on a real clock.
 fn push_halves(a: &crate::HalfObservation, b: &crate::HalfObservation, out: &mut String) {
     use wz_session_core::json::u64_into;
-    let flag = |v: Option<bool>| match v {
-        Some(true) => "true",
-        Some(false) => "false",
-        None => "null",
-    };
     out.push_str(",\"halves\":[");
     for (i, (direction, half)) in [(Direction::A, a), (Direction::B, b)]
         .into_iter()
@@ -2424,8 +2425,8 @@ fn push_halves(a: &crate::HalfObservation, b: &crate::HalfObservation, out: &mut
             out,
             ",\"close_seen\":{},\"fin_seen\":{},\"rst_seen\":{}}}",
             half.close_seen,
-            flag(half.fin_seen),
-            flag(half.rst_seen)
+            tri_state(half.fin_seen),
+            tri_state(half.rst_seen)
         );
     }
     out.push(']');
@@ -4600,13 +4601,11 @@ mod tests {
         assert_eq!(phases.len(), PhaseWord::names().len());
         for phase in phases {
             let mut out = String::new();
-            push_context(
-                &FlowContext {
-                    phase,
-                    ..FlowContext::default()
-                },
-                &mut out,
-            );
+            // Field by field: the capabilities are private to the session's
+            // crate, so a struct-update literal cannot be written here.
+            let mut context = FlowContext::default();
+            context.phase = phase;
+            push_context(&context, &mut out);
             arms.push(out);
         }
         let mut out = String::new();
@@ -4861,6 +4860,336 @@ mod tests {
                  {unseen_doc}"
             );
         }
+    }
+
+    /// The establishment extension chain that OFFERS each capability in `ids`,
+    /// one unit entry per id, built from the ext codec's own types.
+    ///
+    /// The continuation `Z` bit is set on every entry but the last, as
+    /// `marker_chain` in the crate's datagram tests does and for the same
+    /// reason: the chain serialiser is private to the crate below.
+    fn capability_offers(ids: &[u8]) -> Vec<u8> {
+        let mut out = Vec::new();
+        for (i, id) in ids.iter().enumerate() {
+            let entry: wz_codecs::ext_entry::ExtEntryOwned = wz_codecs::ext_entry::ExtEntryOwned {
+                header: *id,
+                body: wz_codecs::ext_entry::ExtEntryOwnedVariant::CodecZenohExtUnit(
+                    wz_codecs::ext_unit::ExtUnit::default(),
+                ),
+            };
+            let mut bytes = entry.as_borrowed().encode_to_vec();
+            if i + 1 < ids.len() {
+                bytes[0] |= wz_session_core::ext_header::EXT_FLAG_Z;
+            }
+            out.extend_from_slice(&bytes);
+        }
+        out
+    }
+
+    /// One session-scope `Close` with reason 0, the shape a peer writes when it
+    /// ends a session: header `T_MID_CLOSE` with the S flag, then the reason.
+    fn close_message() -> Vec<u8> {
+        let mut wire = alloc::vec![
+            wz_session_core::wire_const::T_MID_CLOSE | wz_codecs::wire_const::FLAG_T_CLOSE_S
+        ];
+        wire.extend_from_slice(&wz_codecs::close::Close { reason: 0 }.encode_to_vec());
+        wire
+    }
+
+    /// One TCP stream flow as the dissection and the pcap FILE: each step is a
+    /// transport message and the end that sent it (`true` is the low address),
+    /// carried behind zenoh's two-byte stream length.
+    fn tcp_stream_capture(steps: &[(bool, Vec<u8>)]) -> (Dissection, Vec<u8>) {
+        use crate::datagram_tests::tcp_packet_reverse;
+
+        let (mut seq_low, mut seq_high) = (1_000u32, 5_000u32);
+        let mut packets: Vec<Vec<u8>> = Vec::new();
+        for (from_low, message) in steps {
+            let mut payload = (message.len() as u16).to_le_bytes().to_vec();
+            payload.extend_from_slice(message);
+            if *from_low {
+                packets.push(tcp_packet(seq_low, &payload));
+                seq_low += payload.len() as u32;
+            } else {
+                packets.push(tcp_packet_reverse(seq_high, &payload));
+                seq_high += payload.len() as u32;
+            }
+        }
+        let mut d = Dissection::new();
+        let mut rows: Vec<(u32, u32, &[u8])> = Vec::new();
+        for (i, packet) in packets.iter().enumerate() {
+            d.push_packet(LINKTYPE_ETHERNET, i, packet);
+            rows.push((0, (i as u32) * 1_000, packet.as_slice()));
+        }
+        let file = crate::pcap::write(LINKTYPE_ETHERNET, &rows);
+        (d, file)
+    }
+
+    /// The `context` object of each flow in `doc`, exactly as written. The
+    /// object has no nested object, so the first `}` ends it.
+    fn context_objects(doc: &str) -> Vec<&str> {
+        const KEY: &str = "\"context\":";
+        doc.match_indices(KEY)
+            .map(|(at, _)| {
+                let rest = &doc[at + KEY.len()..];
+                &rest[..=rest.find('}').expect("a context object closes")]
+            })
+            .collect()
+    }
+
+    /// `(name, carried_state)` of each row of `doc`, in the order written.
+    ///
+    /// A row starts at its `message_at` key. The row's own `name` is the first
+    /// one after it, ahead of the tree whose entries also carry a `name`.
+    fn rows(doc: &str) -> Vec<(&str, &str)> {
+        fn after<'a>(text: &'a str, key: &str) -> &'a str {
+            let at = text.find(key).expect("a row carries the key") + key.len();
+            &text[at..at + text[at..].find('"').expect("a string closes")]
+        }
+        doc.split("\"message_at\":")
+            .skip(1)
+            .map(|row| {
+                (
+                    after(row, "\"name\":\""),
+                    after(row, "\"carried_state\":\""),
+                )
+            })
+            .collect()
+    }
+
+    /// What `context` says of a flow whose handshake was never seen and which
+    /// ended in a `Close`: the session is over, nothing was negotiated, and
+    /// every cell the handshake would have settled is unknown.
+    const CLOSED_WITHOUT_A_HANDSHAKE: &str = "{\"phase\":\"closed\",\"negotiated\":false,\
+         \"lowlatency\":null,\"compression\":null,\"qos\":null,\"patch\":null,\
+         \"sn_mask\":null,\"batch_size\":null,\"version\":null}";
+
+    /// A FLOW THAT BEGINS AT A CLOSE NEGOTIATED NOTHING, in either direction.
+    ///
+    /// The capture is one packet, one `Close`. `phase` is `closed` because a
+    /// Close was read; `negotiated` is `false` and the three capabilities are
+    /// `null` because no Init was. Before the fix the `Close` moved the phase
+    /// to `closed`, and `negotiated` was read off the phase: it said `true`,
+    /// and the capabilities took the starting value of the `&=` fold, `true`.
+    #[test]
+    fn a_flow_that_begins_at_a_close_negotiated_nothing_in_either_direction() {
+        for from_low in [true, false] {
+            let (d, file) = tcp_stream_capture(&[(from_low, close_message())]);
+            let doc = fields_json(&d, &file, None, None);
+            assert_eq!(
+                context_objects(&doc),
+                alloc::vec![CLOSED_WITHOUT_A_HANDSHAKE],
+                "the Close came from the {} end: {doc}",
+                if from_low { "low" } else { "high" }
+            );
+            assert_eq!(rows(&doc), alloc::vec![("Close", "nothing")], "{doc}");
+        }
+    }
+
+    /// A CAPTURE THAT JOINED AFTER THE HANDSHAKE and ended in a `Close` reports
+    /// no negotiation either, AND READS ITS MESSAGES EXACTLY AS BEFORE.
+    ///
+    /// Two halves, because only the first moved. The context is the reported
+    /// half: no Init was seen, so `negotiated` is `false` and the capabilities
+    /// are `null` even though the session closed. The messages are the read
+    /// half: the Frames and Fragments of a session joined mid-way decode under
+    /// the universal framing and an unknown resolution, as they did, and the
+    /// second assertion is what holds that line (a Fragment read before an
+    /// InitAck is `fragment_without_resolution`, never a guess at a mask).
+    #[test]
+    fn a_capture_joined_after_the_handshake_reports_no_negotiation_and_reads_as_before() {
+        let frame = |sn: u8| {
+            let mut wire = alloc::vec![
+                wz_session_core::wire_const::T_MID_FRAME
+                    | wz_session_core::wire_const::FLAG_T_FRAME_R,
+                sn,
+            ];
+            wire.extend_from_slice(&[0x1F, 0x00, 0x00, 0x00]);
+            wire
+        };
+        let fragment = |sn: u8, more: bool| {
+            alloc::vec![
+                wz_session_core::wire_const::T_MID_FRAGMENT
+                    | wz_codecs::wire_const::FLAG_T_FRAGMENT_R
+                    | if more {
+                        wz_codecs::wire_const::FLAG_T_FRAGMENT_M
+                    } else {
+                        0
+                    },
+                sn,
+                0xAB,
+                0xCD,
+            ]
+        };
+        let (d, file) = tcp_stream_capture(&[
+            (true, frame(0)),
+            (false, frame(0)),
+            (true, fragment(1, true)),
+            (true, fragment(2, false)),
+            (
+                true,
+                alloc::vec![wz_session_core::wire_const::T_MID_KEEP_ALIVE],
+            ),
+            (false, close_message()),
+            (true, close_message()),
+        ]);
+        let doc = fields_json(&d, &file, None, None);
+
+        assert_eq!(
+            context_objects(&doc),
+            alloc::vec![CLOSED_WITHOUT_A_HANDSHAKE],
+            "{doc}"
+        );
+        // In capture order. Both fragments say they were read without a
+        // resolution; the Frames and the rest read as they always did.
+        assert_eq!(
+            rows(&doc),
+            alloc::vec![
+                ("Frame", "batch"),
+                ("Frame", "batch"),
+                ("Fragment", "fragment_without_resolution"),
+                ("Fragment", "fragment_without_resolution"),
+                ("KeepAlive", "nothing"),
+                ("Close", "nothing"),
+                ("Close", "nothing"),
+            ],
+            "{doc}"
+        );
+    }
+
+    /// The four handshake messages of one session, from the low end and back:
+    /// `A` offers QoS and compression, `B` offers QoS and lowlatency, so the
+    /// three capabilities take three DIFFERENT outcomes under the `&=` fold
+    /// (`qos` agreed, `lowlatency` and `compression` each offered by one side
+    /// only). A reader that took them from either Init alone gets one of the
+    /// two wrong.
+    fn asymmetric_handshake() -> [(bool, Vec<u8>); 4] {
+        use crate::datagram_tests::{init_datagram, open_datagram};
+        use wz_session_core::ext_header::establishment_ext_id as ext;
+
+        [
+            (
+                true,
+                init_datagram(false, &capability_offers(&[ext::QOS, ext::COMPRESSION])),
+            ),
+            (
+                false,
+                init_datagram(true, &capability_offers(&[ext::QOS, ext::LOWLATENCY])),
+            ),
+            (true, open_datagram(false)),
+            (false, open_datagram(true)),
+        ]
+    }
+
+    /// ONE INIT NEGOTIATES NOTHING, and a `Close` after it does not change that.
+    ///
+    /// The session's capabilities are the `&=` of BOTH Inits' offers, so an
+    /// InitSyn alone leaves them unsettled: `half_init`, `negotiated: false`,
+    /// `null`. What the one Init did announce stays reported (`version`,
+    /// `patch`). A `Close` that follows moves the phase and settles nothing.
+    #[test]
+    fn one_init_alone_negotiates_nothing_and_a_close_after_it_settles_nothing() {
+        let [syn, ..] = asymmetric_handshake();
+        let (d, file) = tcp_stream_capture(core::slice::from_ref(&syn));
+        let doc = fields_json(&d, &file, None, None);
+        assert_eq!(
+            context_objects(&doc),
+            alloc::vec![
+                "{\"phase\":\"half_init\",\"negotiated\":false,\"lowlatency\":null,\
+                 \"compression\":null,\"qos\":null,\"patch\":0,\"sn_mask\":null,\
+                 \"batch_size\":null,\"version\":9}"
+            ],
+            "{doc}"
+        );
+
+        let (d, file) = tcp_stream_capture(&[syn, (false, close_message())]);
+        let doc = fields_json(&d, &file, None, None);
+        assert_eq!(
+            context_objects(&doc),
+            alloc::vec![
+                "{\"phase\":\"closed\",\"negotiated\":false,\"lowlatency\":null,\
+                 \"compression\":null,\"qos\":null,\"patch\":0,\"sn_mask\":null,\
+                 \"batch_size\":null,\"version\":9}"
+            ],
+            "{doc}"
+        );
+    }
+
+    /// THE INIT EXCHANGE IS THE NEGOTIATION. Both Inits seen settles every
+    /// cell the context reports, with no `Open` yet, and a `Close` afterwards
+    /// retracts none of it.
+    ///
+    /// This is the sentence the header carries, pinned on the partial
+    /// handshake: `negotiated` is `true` from the second Init on, `phase` says
+    /// how far the session got (`init_complete`, then `closed`), and the three
+    /// capabilities are the `&=` of the two offers.
+    #[test]
+    fn an_init_pair_without_an_open_is_negotiated_and_a_close_after_it_keeps_it() {
+        let [syn, ack, ..] = asymmetric_handshake();
+        let settled = "\"negotiated\":true,\"lowlatency\":false,\"compression\":false,\
+             \"qos\":true,\"patch\":0,\"sn_mask\":268435455,\"batch_size\":65535,\
+             \"version\":9}";
+
+        let (d, file) = tcp_stream_capture(&[syn.clone(), ack.clone()]);
+        let doc = fields_json(&d, &file, None, None);
+        assert_eq!(
+            context_objects(&doc),
+            alloc::vec![alloc::format!("{{\"phase\":\"init_complete\",{settled}")],
+            "{doc}"
+        );
+
+        let (d, file) = tcp_stream_capture(&[syn, ack, (true, close_message())]);
+        let doc = fields_json(&d, &file, None, None);
+        assert_eq!(
+            context_objects(&doc),
+            alloc::vec![alloc::format!("{{\"phase\":\"closed\",{settled}")],
+            "{doc}"
+        );
+    }
+
+    /// THE CONTROL: a session captured from its start reports what it always
+    /// did, through the `Close` that ends it.
+    ///
+    /// The expected text was taken from the library BEFORE the negotiation fix,
+    /// so a fix that moved a cell it was not asked to move fails here and not
+    /// in a consumer. Both a handshake with no offers (the shape of a stock
+    /// capture) and the asymmetric one are held.
+    #[test]
+    fn a_session_captured_from_its_start_reports_its_negotiation_through_the_close() {
+        use crate::datagram_tests::{init_datagram, open_datagram};
+
+        let plain = alloc::vec![
+            (true, init_datagram(false, &[])),
+            (false, init_datagram(true, &[])),
+            (true, open_datagram(false)),
+            (false, open_datagram(true)),
+            (false, close_message()),
+        ];
+        let (d, file) = tcp_stream_capture(&plain);
+        let doc = fields_json(&d, &file, None, None);
+        assert_eq!(
+            context_objects(&doc),
+            alloc::vec![
+                "{\"phase\":\"closed\",\"negotiated\":true,\"lowlatency\":false,\
+                 \"compression\":false,\"qos\":false,\"patch\":0,\"sn_mask\":268435455,\
+                 \"batch_size\":65535,\"version\":9}"
+            ],
+            "{doc}"
+        );
+
+        let mut asymmetric = asymmetric_handshake().to_vec();
+        asymmetric.push((false, close_message()));
+        let (d, file) = tcp_stream_capture(&asymmetric);
+        let doc = fields_json(&d, &file, None, None);
+        assert_eq!(
+            context_objects(&doc),
+            alloc::vec![
+                "{\"phase\":\"closed\",\"negotiated\":true,\"lowlatency\":false,\
+                 \"compression\":false,\"qos\":true,\"patch\":0,\"sn_mask\":268435455,\
+                 \"batch_size\":65535,\"version\":9}"
+            ],
+            "{doc}"
+        );
     }
 
     /// R3054 — EACH DIRECTION OF A TCP FLOW REPORTS WHAT ITS SENDER HAS DONE.
