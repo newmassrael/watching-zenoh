@@ -967,6 +967,30 @@ pub(crate) mod test_support {
         }
     }
 
+    /// R3124 -- a resolver that lends a DIFFERENT storage to each descriptor it is asked about, in
+    /// the order it was given them, so a test of a payload of several slices reads that each
+    /// slice is the page of its own descriptor and in its place.
+    #[cfg(feature = "rx-shared-bytes")]
+    pub(crate) struct LendsEach(pub(crate) Mutex<alloc::collections::VecDeque<Arc<Vec<u8>>>>);
+
+    #[cfg(feature = "rx-shared-bytes")]
+    impl ShmResolver for LendsEach {
+        fn resolve(&self, _descriptor: &ShmDescriptor) -> Option<Vec<u8>> {
+            self.0
+                .lock()
+                .expect("storages")
+                .pop_front()
+                .map(|storage| storage.to_vec())
+        }
+
+        fn resolve_shared(&self, _descriptor: &ShmDescriptor) -> Option<crate::link::RxBytes> {
+            let storage = self.0.lock().expect("storages").pop_front()?;
+            let len = storage.len();
+            let storage: Arc<dyn crate::link::RxStorage> = storage;
+            crate::link::RxBytes::shared(storage, 0..len)
+        }
+    }
+
     /// A resolver that resolves and COUNTS the descriptors it is asked about, so a
     /// test reads how many slices were read, which is how many references were
     /// given back to the sender.

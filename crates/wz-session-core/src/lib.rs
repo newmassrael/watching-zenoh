@@ -38,7 +38,12 @@ extern crate alloc;
 // AP-only, so it is NEVER built on a bare-metal target — every MCU / default
 // build stays strictly `#![no_std]`, and the Layer G cross-compile (feature-off)
 // proves it.
-#[cfg(any(test, feature = "transport-multilink"))]
+//
+// R3124 — and `rx-shared-bytes`, for the same reason and with the same bound: it is enabled
+// by the std `TokioRuntime` crate alone (`wz-runtime-tokio/Cargo.toml`), and a payload of
+// several slices that stay apart (`link.rs` @ `struct SlicedStorage {`) joins them once, the
+// first time a reader asks for one run, behind a `std::sync::OnceLock`.
+#[cfg(any(test, feature = "transport-multilink", feature = "rx-shared-bytes"))]
 extern crate std;
 
 // R311y211 (reconnect×multilink coherence slice-1) — the y205

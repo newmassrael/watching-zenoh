@@ -113,12 +113,19 @@ impl BytesState {
         Self::of(Payload::Owned(payload))
     }
 
-    /// A payload that is ONE slice, whatever holds it.
+    /// A payload as it arrived: ONE slice, whatever holds it, unless what holds it is a list of
+    /// slices kept apart (R3124), whose boundaries are those slices'.
     pub(crate) fn of(payload: Payload) -> Self {
-        let bounds = if payload.is_empty() {
-            Vec::new()
-        } else {
-            vec![payload.len()]
+        let bounds = match &payload {
+            Payload::Shared(bytes) => bytes
+                .slices()
+                .scan(0usize, |end, slice| {
+                    *end += slice.len();
+                    Some(*end)
+                })
+                .collect(),
+            _ if payload.is_empty() => Vec::new(),
+            _ => vec![payload.len()],
         };
         Self::from_parts(payload, bounds)
     }
@@ -137,7 +144,16 @@ impl BytesState {
     }
 
     /// The `index`-th slice, or `None` past the end.
+    ///
+    /// R3124 -- of a payload that arrived as several slices kept apart it is the slice itself,
+    /// the page it lies in, as upstream's `z_bytes_slice_iterator` walks the slices of a
+    /// `ZBytes`; reading the payload as one run is what joins them.
     pub(crate) fn slice(&self, index: usize) -> Option<&[u8]> {
+        if let Payload::Shared(bytes) = &self.payload {
+            if bytes.slice_count() > 1 {
+                return bytes.slices().nth(index);
+            }
+        }
         let end = *self.bounds.get(index)?;
         let start = if index == 0 {
             0
@@ -1435,6 +1451,63 @@ pub unsafe extern "C" fn z_internal_bytes_writer_null(
     if !this_.is_null() {
         // SAFETY: the caller's contract.
         unsafe { *this_ = crate::abi::z_owned_bytes_writer_t::null_value() };
+    }
+}
+
+/// R3124 -- a payload that arrived as several slices kept apart is several slices to the C
+/// iterator, each the page it lies in, as upstream's `z_bytes_slice_iterator` walks a `ZBytes`
+/// built from a `ZBuf`.
+#[cfg(test)]
+mod received_slices_tests {
+    use super::*;
+    use std::sync::Arc;
+    use wz_runtime_tokio::{RxBytes, RxStorage};
+
+    struct Page(Vec<u8>);
+
+    impl RxStorage for Page {
+        fn as_slice(&self) -> &[u8] {
+            &self.0
+        }
+    }
+
+    fn page(bytes: &[u8]) -> (Arc<dyn RxStorage>, RxBytes) {
+        let storage: Arc<dyn RxStorage> = Arc::new(Page(bytes.to_vec()));
+        let whole = RxBytes::shared(storage.clone(), 0..bytes.len()).expect("the whole page");
+        (storage, whole)
+    }
+
+    #[test]
+    fn a_payload_of_two_received_slices_iterates_as_two_pages() {
+        let (first, a) = page(b"abc");
+        let (second, b) = page(b"de");
+        let state = BytesState::of(Payload::Shared(RxBytes::sliced(vec![a, b])));
+
+        assert_eq!(state.bounds, [3, 5], "two slices, ending where each ends");
+        assert_eq!(
+            state.slice(0).expect("a first slice").as_ptr(),
+            first.as_slice().as_ptr(),
+            "the first slice IS its page"
+        );
+        assert_eq!(
+            state.slice(1).expect("a second slice").as_ptr(),
+            second.as_slice().as_ptr(),
+            "and so is the second"
+        );
+        assert!(state.slice(2).is_none(), "there are two");
+        assert_eq!(&*state.payload, b"abcde", "read as one run, the two joined");
+    }
+
+    #[test]
+    fn a_payload_of_one_received_slice_is_one_slice() {
+        let (storage, one) = page(b"abc");
+        let state = BytesState::of(Payload::Shared(one));
+        assert_eq!(state.bounds, [3]);
+        assert_eq!(
+            state.slice(0).expect("the slice").as_ptr(),
+            storage.as_slice().as_ptr()
+        );
+        assert!(state.slice(1).is_none());
     }
 }
 

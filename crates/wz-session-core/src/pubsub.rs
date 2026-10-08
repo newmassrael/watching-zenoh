@@ -4526,6 +4526,83 @@ mod tests {
         );
     }
 
+    /// A shared-memory Put for `demo/shm` whose payload is TWO shared-memory buffers.
+    #[cfg(all(feature = "transport-shm", feature = "pubsub-put"))]
+    fn shm_push_of_two_buffers() -> PushOwned {
+        use sce_forge_runtime::codec::SceList;
+
+        let mut push = shm_push(None);
+        let second = crate::extshm::ShmDescriptor {
+            data_len: 5,
+            metadata_id: 0x13,
+            metadata_index: 0x35,
+            generation: 0,
+        };
+        let second = crate::put_payload::shm_slices::<crate::wire::WireStorage>(
+            &crate::extshm::encode_shm_descriptor(&second),
+        )
+        .expect("one slice for the second buffer");
+        let crate::wire::PushOwnedVariant::CodecZenohMsgPut(put) = &mut push.body else {
+            panic!("a Put");
+        };
+        let slices = put.slices.as_mut().expect("the sliced layout");
+        for slice in SceList::as_slice(&second) {
+            slices.try_push(slice.clone()).expect("a second slice fits");
+        }
+        put.slice_count = Some(2);
+        push
+    }
+
+    /// R3124 -- A PUT OF TWO SHARED-MEMORY BUFFERS IS DELIVERED AS THE TWO BUFFERS. The addresses
+    /// are the witness, as for one buffer: the subscriber is handed a payload whose slices start
+    /// where the two storages the resolver lent start, in the order the Put named them, which a
+    /// join of the two cannot be made to do. Read as one run the payload is the two joined.
+    #[cfg(all(
+        feature = "transport-shm",
+        feature = "pubsub-put",
+        feature = "rx-shared-bytes"
+    ))]
+    #[test]
+    fn a_put_of_two_shm_buffers_is_delivered_as_the_two_storages_the_resolver_lent() {
+        let first = Arc::new(b"seven b".to_vec());
+        let second = Arc::new(b"five!".to_vec());
+        let seen: Arc<std::sync::Mutex<Vec<(usize, usize)>>> = Arc::default();
+        let joined: Arc<std::sync::Mutex<Vec<u8>>> = Arc::default();
+        let mut registry = SubscriberRegistry::<BoxedSink>::new();
+        let (slices_seen, joined_seen) = (seen.clone(), joined.clone());
+        registry.register("demo/shm", move |sample| {
+            let payload = sample.payload_shared().expect("a shared payload");
+            *slices_seen.lock().expect("seen") = payload
+                .slices()
+                .map(|slice| (slice.as_ptr() as usize, slice.len()))
+                .collect();
+            *joined_seen.lock().expect("joined") = sample.payload().to_vec();
+        });
+        registry.set_shm_negotiated(true);
+        registry.set_shm_resolver(Box::new(crate::extshm::test_support::LendsEach(
+            std::sync::Mutex::new([first.clone(), second.clone()].into()),
+        )));
+
+        registry.dispatch(
+            &NetworkMessage::Push(Box::new(shm_push_of_two_buffers())),
+            Reliability::Reliable,
+        );
+
+        assert_eq!(
+            *seen.lock().expect("seen"),
+            [
+                (first.as_ptr() as usize, first.len()),
+                (second.as_ptr() as usize, second.len())
+            ],
+            "two slices, each the storage the resolver lent for its descriptor, in order"
+        );
+        assert_eq!(
+            *joined.lock().expect("joined"),
+            b"seven bfive!",
+            "and read as one run, the two joined"
+        );
+    }
+
     /// R3040 -- a session that never negotiated shared memory acknowledges
     /// nothing: the Put is refused before any slice is read, so no counter of a
     /// peer this node has no agreement with is written.

@@ -1064,6 +1064,48 @@ pub trait RxStorage: Send + Sync {
     fn shm_chunk(&self) -> Option<&dyn ShmChunkView> {
         None
     }
+
+    /// R3124 -- the slices of a storage that is a LIST of them, kept apart: upstream's `ZBuf`
+    /// (`commons/zenoh-buffers/src/zbuf.rs` @ `pub struct ZBuf {`), whose slices a reader can
+    /// walk without joining them. `None` for every storage that is one contiguous run, which
+    /// is why this is provided and not required. [`Self::as_slice`] of a list is the slices
+    /// joined, made once when first asked for, so a reader that walks the slices never pays
+    /// for the join.
+    fn parts(&self) -> Option<&[RxBytes]> {
+        None
+    }
+}
+
+/// R3124 -- the storage of a payload of several slices that stay apart.
+///
+/// Upstream keeps the slices of a payload in a `ZBuf` and joins them only when a reader asks for
+/// contiguous bytes (`zenoh/src/api/bytes.rs` @ `pub fn to_bytes(&self) -> Cow<'_, [u8]> {`,
+/// which borrows when there is one slice and joins when there are more). A payload of several
+/// shared-memory slices was joined here when it arrived, a copy of every page it named, which
+/// the application that reads each slice on its own never needed. The slices are kept as they
+/// came, each a range of the storage it lies in, and the joined run is made the first time
+/// something reads the payload as one.
+#[cfg(feature = "rx-shared-bytes")]
+struct SlicedStorage {
+    parts: Vec<RxBytes>,
+    joined: std::sync::OnceLock<Vec<u8>>,
+}
+
+#[cfg(feature = "rx-shared-bytes")]
+impl RxStorage for SlicedStorage {
+    fn as_slice(&self) -> &[u8] {
+        self.joined.get_or_init(|| {
+            let mut run = Vec::with_capacity(self.parts.iter().map(|part| part.len()).sum());
+            for part in &self.parts {
+                run.extend_from_slice(part.as_slice());
+            }
+            run
+        })
+    }
+
+    fn parts(&self) -> Option<&[RxBytes]> {
+        Some(&self.parts)
+    }
 }
 
 /// What a host's buffer plane needs to know of a payload that is a chunk of shared
@@ -1257,6 +1299,89 @@ impl RxBytes {
         })
     }
 
+    /// R3124 -- a payload of `parts`, kept apart: upstream's `ZBuf` of several `ZSlice`s. Each
+    /// part stays what it is, a range of the storage it lies in, so a payload of several
+    /// shared-memory slices is the pages and not a copy of them; reading the payload as one run
+    /// ([`Self::as_slice`]) joins the parts the first time, once.
+    ///
+    /// One part is that part, and none is the empty payload: a list of fewer than two is not a
+    /// list. A part that is itself a list is spread into this one, so a list is flat. Off
+    /// `rx-shared-bytes` there is no storage to keep apart and the parts are joined.
+    pub fn sliced(parts: Vec<RxBytes>) -> Self {
+        #[cfg(feature = "rx-shared-bytes")]
+        {
+            let mut flat = Vec::with_capacity(parts.len());
+            for part in parts {
+                if let Some(inner) = part.whole_parts() {
+                    flat.extend(inner.iter().cloned());
+                } else if !part.is_empty() {
+                    flat.push(part);
+                }
+            }
+            match flat.len() {
+                0 => Self(RxRepr::Owned(Vec::new())),
+                1 => flat.remove(0),
+                _ => {
+                    let end = flat.iter().map(|part| part.len()).sum();
+                    Self(RxRepr::Shared {
+                        storage: alloc::sync::Arc::new(SlicedStorage {
+                            parts: flat,
+                            joined: std::sync::OnceLock::new(),
+                        }),
+                        start: 0,
+                        end,
+                    })
+                }
+            }
+        }
+        #[cfg(not(feature = "rx-shared-bytes"))]
+        {
+            let mut run = Vec::new();
+            for part in &parts {
+                run.extend_from_slice(part.as_slice());
+            }
+            Self(RxRepr::Owned(run))
+        }
+    }
+
+    /// R3124 -- how many slices the payload is: more than one only for a payload built by
+    /// [`Self::sliced`] from several, and only while it is whole (a range taken of it is one
+    /// run); none for an empty payload.
+    pub fn slice_count(&self) -> usize {
+        self.slices().count()
+    }
+
+    /// R3124 -- the slices of the payload, in order: upstream's `ZBytes::slices`
+    /// (`zenoh/src/api/bytes.rs` @ `pub fn slices(&self) -> ZBytesSliceIterator<'_> {`). One slice,
+    /// the whole payload, unless it was built from several, whose pages are read where they are.
+    pub fn slices(&self) -> RxSlices<'_> {
+        #[cfg(feature = "rx-shared-bytes")]
+        if let Some(parts) = self.whole_parts() {
+            return RxSlices(RxSlicesRepr::Parts(parts.iter()));
+        }
+        // An empty payload has no slices, as upstream's `ZBuf` holds none for it
+        // (`zbuf.rs` @ `pub fn push_zslice(&mut self, zslice: ZSlice) {` drops an empty one).
+        RxSlices(RxSlicesRepr::One(
+            Some(self.as_slice()).filter(|run| !run.is_empty()),
+        ))
+    }
+
+    /// The parts of a payload built by [`Self::sliced`], while the payload is the whole of them:
+    /// a range taken of it (`subslice`) is a run of the joined bytes and has none.
+    #[cfg(feature = "rx-shared-bytes")]
+    fn whole_parts(&self) -> Option<&[RxBytes]> {
+        let RxRepr::Shared {
+            storage,
+            start: 0,
+            end,
+        } = &self.0
+        else {
+            return None;
+        };
+        let parts = storage.parts()?;
+        (parts.iter().map(|part| part.len()).sum::<usize>() == *end).then_some(parts)
+    }
+
     /// The bytes as an owned `Vec`: moved out when owned, copied when lent.
     pub fn into_vec(self) -> Vec<u8> {
         match self.0 {
@@ -1270,6 +1395,29 @@ impl RxBytes {
 impl From<Vec<u8>> for RxBytes {
     fn from(bytes: Vec<u8>) -> Self {
         Self(RxRepr::Owned(bytes))
+    }
+}
+
+/// R3124 -- the slices of a payload in order ([`RxBytes::slices`]): a view of each, where it lies.
+pub struct RxSlices<'a>(RxSlicesRepr<'a>);
+
+enum RxSlicesRepr<'a> {
+    /// The payload was built from several slices.
+    #[cfg(feature = "rx-shared-bytes")]
+    Parts(core::slice::Iter<'a, RxBytes>),
+    /// The payload is one run, handed out once.
+    One(Option<&'a [u8]>),
+}
+
+impl<'a> Iterator for RxSlices<'a> {
+    type Item = &'a [u8];
+
+    fn next(&mut self) -> Option<&'a [u8]> {
+        match &mut self.0 {
+            #[cfg(feature = "rx-shared-bytes")]
+            RxSlicesRepr::Parts(parts) => parts.next().map(RxBytes::as_slice),
+            RxSlicesRepr::One(one) => one.take(),
+        }
     }
 }
 
@@ -1448,6 +1596,125 @@ pub enum LostCause {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A storage standing for a page a payload lies in.
+    #[cfg(feature = "rx-shared-bytes")]
+    struct Page(alloc::vec::Vec<u8>);
+
+    #[cfg(feature = "rx-shared-bytes")]
+    impl RxStorage for Page {
+        fn as_slice(&self) -> &[u8] {
+            &self.0
+        }
+    }
+
+    /// A payload of the pages `a` and `b`, kept apart, and the pages themselves.
+    #[cfg(feature = "rx-shared-bytes")]
+    fn two_pages() -> (
+        RxBytes,
+        alloc::sync::Arc<dyn RxStorage>,
+        alloc::sync::Arc<dyn RxStorage>,
+    ) {
+        use alloc::sync::Arc;
+        let first: Arc<dyn RxStorage> = Arc::new(Page(alloc::vec![1, 2, 3]));
+        let second: Arc<dyn RxStorage> = Arc::new(Page(alloc::vec![4, 5]));
+        let payload = RxBytes::sliced(alloc::vec![
+            RxBytes::shared(first.clone(), 0..3).expect("the whole page"),
+            RxBytes::shared(second.clone(), 0..2).expect("the whole page"),
+        ]);
+        (payload, first, second)
+    }
+
+    /// R3124 -- THE POINT. A payload of two slices is the two slices: each is read where it
+    /// lies, at the address of the page it is a range of, and nothing was copied to make the
+    /// payload. Upstream's `ZBytes::slices` walks a `ZBuf` the same way.
+    #[cfg(feature = "rx-shared-bytes")]
+    #[test]
+    fn a_payload_of_two_slices_reads_each_where_it_lies() {
+        let (payload, first, second) = two_pages();
+        assert_eq!(payload.slice_count(), 2);
+        let slices: alloc::vec::Vec<&[u8]> = payload.slices().collect();
+        assert_eq!(slices[0], &[1, 2, 3]);
+        assert_eq!(slices[1], &[4, 5]);
+        assert_eq!(
+            slices[0].as_ptr(),
+            first.as_slice().as_ptr(),
+            "the first slice IS its page"
+        );
+        assert_eq!(
+            slices[1].as_ptr(),
+            second.as_slice().as_ptr(),
+            "and so is the second"
+        );
+    }
+
+    /// R3124 -- read as one run the payload is the slices joined, in order, and the join is
+    /// made once: every later read is the same bytes at the same address, as the storage
+    /// contract asks, and the slices are still the pages after it.
+    #[cfg(feature = "rx-shared-bytes")]
+    #[test]
+    fn a_payload_of_two_slices_joins_once_when_read_as_one_run() {
+        let (payload, first, _second) = two_pages();
+        assert_eq!(payload.len(), 5);
+        assert_eq!(payload.as_slice(), &[1, 2, 3, 4, 5]);
+        assert_eq!(
+            payload.as_slice().as_ptr(),
+            payload.as_slice().as_ptr(),
+            "asked twice, the same run"
+        );
+        assert_ne!(
+            payload.as_slice().as_ptr(),
+            first.as_slice().as_ptr(),
+            "the run is a join and not the first page"
+        );
+        assert_eq!(
+            payload.slices().next().expect("a slice").as_ptr(),
+            first.as_slice().as_ptr(),
+            "while the slices are still the pages"
+        );
+    }
+
+    /// R3124 -- a clone shares the slices as a clone of one slice shares its storage, and a range
+    /// taken of the payload is a run of the joined bytes, which has no slices of its own.
+    #[cfg(feature = "rx-shared-bytes")]
+    #[test]
+    fn a_clone_shares_the_slices_and_a_range_of_it_is_one_run() {
+        let (payload, first, _second) = two_pages();
+        let copy = payload.clone();
+        assert_eq!(copy.slice_count(), 2);
+        assert_eq!(
+            copy.slices().next().expect("a slice").as_ptr(),
+            first.as_slice().as_ptr(),
+            "the clone's slice is the same page"
+        );
+        let middle = payload.subslice(2..4).expect("inside the payload");
+        assert_eq!(middle.as_slice(), &[3, 4]);
+        assert_eq!(middle.slice_count(), 1, "a range is one run");
+    }
+
+    /// R3124 -- fewer than two parts is not a list: one part is that part, none is the empty
+    /// payload, an empty part is not a slice (upstream's `ZBuf::push_zslice` ignores one), and a
+    /// part that is a list is spread into the list it joins.
+    #[cfg(feature = "rx-shared-bytes")]
+    #[test]
+    fn fewer_than_two_parts_is_not_a_list_and_a_list_is_flat() {
+        let (payload, first, _second) = two_pages();
+        assert_eq!(RxBytes::sliced(alloc::vec![]).slice_count(), 0);
+        assert!(RxBytes::sliced(alloc::vec![]).is_empty());
+        let one = RxBytes::sliced(alloc::vec![
+            RxBytes::from(alloc::vec::Vec::new()),
+            RxBytes::shared(first.clone(), 0..3).expect("the whole page"),
+        ]);
+        assert_eq!(one.slice_count(), 1, "the empty part is not a slice");
+        assert_eq!(
+            one.as_slice().as_ptr(),
+            first.as_slice().as_ptr(),
+            "and the one left is the page itself"
+        );
+        let nested = RxBytes::sliced(alloc::vec![payload, RxBytes::from(alloc::vec![6])]);
+        assert_eq!(nested.slice_count(), 3, "the list inside is spread");
+        assert_eq!(nested.as_slice(), &[1, 2, 3, 4, 5, 6]);
+    }
 
     /// R2971 — a shared range is refused when the storage does not hold it,
     /// as upstream's `ZSlice::subslice` answers `None`, and otherwise reads
