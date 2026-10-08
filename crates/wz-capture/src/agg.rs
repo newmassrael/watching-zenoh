@@ -2477,6 +2477,12 @@ pub fn aggregate_grouped(
     filter: &Filter,
     grouping: &crate::node::SessionGrouping,
 ) -> ThroughputTable {
+    // A `zid` prefix in the selector is read against THIS capture's zids before
+    // any record is judged: the grouping already holds the node census, and the
+    // same selector can be a unique prefix here and an ambiguous one in the
+    // next capture. See `Filter::resolved_against`.
+    let resolved = filter.resolved_against(grouping.named_zids());
+    let filter = resolved.filter();
     let mut table = ThroughputTable::new();
     // R311y638 (§1.1r) — the origin comes from the DISSECTION, which is the
     // only thing that has seen every packet. Set before the first fold, so no

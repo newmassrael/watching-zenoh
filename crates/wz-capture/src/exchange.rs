@@ -1034,6 +1034,10 @@ pub fn exchanges_grouped(
     filter: &Filter,
     grouping: &crate::node::SessionGrouping,
 ) -> ExchangeTable {
+    // The selector's `zid` terms are read against THIS capture's zids first;
+    // see `crate::agg::aggregate_grouped`.
+    let resolved = filter.resolved_against(grouping.named_zids());
+    let filter = resolved.filter();
     let mut table = ExchangeTable::new();
     table.capture_origin_ms = dissection.capture_origin_ms();
     let mut spaces = KeyexprSpaces::new();

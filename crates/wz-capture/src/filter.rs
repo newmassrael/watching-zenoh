@@ -43,18 +43,24 @@
 //! | field | values | operators | undecidable when |
 //! |---|---|---|---|
 //! | `key` | a keyexpr pattern (`demo/**`) | `==` `!=` | the reference did not resolve |
-//! | `dir` | `a` / `b` | `==` `!=` | never |
+//! | `dir` | `a` / `b`, either case | `==` `!=` | never |
 //! | `kind` | `put` `del` `query` `reply` `err` | `==` `!=` | never |
 //! | `bytes` | an integer | `==` `!=` `<` `<=` `>` `>=` | the record carries a payload this build cannot size |
 //! | `time` | an integer, ms | `==` `!=` `<` `<=` `>` `>=` | the capture carried no clock |
 //! | `elapsed` | an integer, ms since the capture began | `==` `!=` `<` `<=` `>` `>=` | no clock, or the plane was not told the origin |
 //! | `offset` | an integer, bytes into the framing unit | `==` `!=` `<` `<=` `>` `>=` | never — every record was walked out of a unit |
 //! | `delay` | an integer, ms from the source's stamp to arrival | `==` `!=` `<` `<=` `>` `>=` | no source clock, no arrival clock, or the source's clock is ahead |
+//! | `zid` | the zid the record's sender announced, in zenoh's spelling, either case: all of it, or a prefix of eight or more digits | `==` `!=` | this capture never saw the sender name itself, or the value is a prefix that begins more than one zid of the capture |
 //! | `replies` | an integer | `==` `!=` `<` `<=` `>` `>=` | the plane does not correlate exchanges |
 //! | `errs` | an integer | `==` `!=` `<` `<=` `>` `>=` | as above |
 //! | `first_reply` | an integer, ms | `==` `!=` `<` `<=` `>` `>=` | as above, or nothing answered, or no clock |
 //! | `completion` | an integer, ms | `==` `!=` `<` `<=` `>` `>=` | as above, or it never closed |
-//! | `closed` | `yes` / `no` | `==` `!=` | the plane does not correlate exchanges |
+//! | `closed` | `yes` / `no`, or `y` / `n` | `==` `!=` | the plane does not correlate exchanges |
+//!
+//! The table is the language's field list as it is WRITTEN. The list the
+//! parser reads and the one an unknown-field refusal prints are one
+//! declaration (`selector_fields!`), and a test holds this table to it by
+//! offering the parser every name here.
 //!
 //! ## R311y636 (§1.1v) — the last five are about the OUTCOME, not the request
 //!
@@ -135,6 +141,46 @@
 //! A filter language for zenoh traffic that did not speak zenoh's keyexpr
 //! dialect would be a second dialect a reader has to learn, and it would
 //! disagree with the router about `**` at exactly the interesting cases.
+//!
+//! ## A zid may be written as a PREFIX, and the CAPTURE decides what it names
+//!
+//! A reader takes a zid from a list that prints its first eight digits, so
+//! `zid == cbf383be` has to mean something. The value is compared with the
+//! zids the capture NAMES (the nodes of [`crate::node::NodeCensus`]), through
+//! [`crate::filter::Filter::resolved_against`], by four rules.
+//!
+//! * A value of [`crate::filter::ZID_PREFIX_MIN_DIGITS`] (eight) or more digits that is
+//!   a prefix of EXACTLY ONE of the capture's zids names that zid, and the
+//!   selector then judges as if the whole zid had been written. A value of
+//!   fewer digits is a whole value and is judged as the language always
+//!   judged it: it names the zid it spells in full, or none.
+//! * The prefix is compared with the zid's WRITTEN SPELLING, the one every
+//!   document prints. Zenoh drops one leading zero nibble when it prints a
+//!   zid, so a node whose top byte is below `0x10` is shown without it and the
+//!   digits a reader copies are the first digits of THAT text, not of the
+//!   zero-padded 32-digit form. Either case is read.
+//! * A value that spells one of the capture's zids IN FULL names it, whatever
+//!   else it is a prefix of. `a1a1a1a1` is the whole id of a node of four
+//!   bytes and the first eight digits of another's, and the reader who typed
+//!   all of a node's id has named that node: the comparison with a whole value
+//!   keeps the behaviour it had.
+//! * A prefix that begins TWO OR MORE of the capture's zids is AMBIGUOUS, and
+//!   an ambiguous selector JUDGES NOTHING in that capture. `no` would be false
+//!   (the reader may have meant either node, and each has records), so every
+//!   record is [`crate::filter::Truth::Unknown`] and the selector as a whole is unjudged, not
+//!   only the term: the terms around it do not rescue it. The refusal, with
+//!   the candidates, is reported beside the verdict
+//!   ([`crate::filter::ResolvedFilter::ambiguities`]).
+//!
+//! The judgement is per CAPTURE: the same text can be ambiguous in one capture
+//! and unique in another, because the zids it is compared with are the ones
+//! that capture names. A prefix that begins no zid names nothing, and is judged
+//! as a whole value that no node announced.
+//!
+//! It is applied by the whole-capture entry points (they hold the node census),
+//! the same shape as the capture origin `elapsed` needs. A caller folding
+//! frames by hand has not said which zids the capture names, so for it a value
+//! is only ever a whole value.
 //!
 //! ## Wildcards are a feature, and their absence is a REFUSAL
 //!
@@ -397,6 +443,75 @@ impl Op {
     }
 }
 
+/// THE SELECTOR'S FIELDS, declared once.
+///
+/// The parser reads a field's name through [`Field::from_name`] and the
+/// unknown-field refusal prints [`Field::ALL`], both out of this one list, so a
+/// field cannot be accepted and go unnamed, or be named and refused. They were
+/// three hand-written lists (the parser's `match`, the name table a value error
+/// reads, and the refusal's sentence) and `zid` was in the first two and not the
+/// third, which is the disagreement this replaces.
+///
+/// A macro rather than a table beside an enum, because the two halves have to
+/// be written together: an enum variant with no row would be a field no text can
+/// name, and a row with no variant a name the parser cannot act on.
+macro_rules! selector_fields {
+    ($($variant:ident => $name:literal,)+) => {
+        /// A field of the selector language, as the parser reads it.
+        #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+        enum Field {
+            $($variant,)+
+        }
+
+        impl Field {
+            /// Every field, in the order the refusal lists them.
+            const ALL: &'static [Field] = &[$(Field::$variant,)+];
+
+            /// The word a selector writes for this field.
+            const fn name(self) -> &'static str {
+                match self {
+                    $(Field::$variant => $name,)+
+                }
+            }
+        }
+    };
+}
+
+selector_fields! {
+    Key => "key",
+    Dir => "dir",
+    Kind => "kind",
+    Bytes => "bytes",
+    Time => "time",
+    Elapsed => "elapsed",
+    Offset => "offset",
+    Delay => "delay",
+    Zid => "zid",
+    Replies => "replies",
+    Errs => "errs",
+    FirstReply => "first_reply",
+    Completion => "completion",
+    Closed => "closed",
+}
+
+impl Field {
+    /// The field a selector's word names, or `None` for a word the language
+    /// does not have. The ONLY way text becomes a field.
+    fn from_name(word: &str) -> Option<Self> {
+        Self::ALL.iter().copied().find(|f| f.name() == word)
+    }
+}
+
+/// The names of every field of the selector language, in the order the
+/// unknown-field refusal prints them.
+///
+/// For a consumer that holds its own copy of the vocabulary (a header comment,
+/// a completion list) to be held to the language by a test, and the walk the
+/// refusal's sentence is built from, so the two cannot differ.
+pub fn field_names() -> Vec<&'static str> {
+    Field::ALL.iter().map(|f| f.name()).collect()
+}
+
 /// One comparison, already validated against its field's admissible operators.
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum Term {
@@ -412,8 +527,19 @@ enum Term {
     /// so `a1a1a1a1` and `A1A1A1A1` are one term rather than two that never
     /// match each other. The record side is bytes already; making the written
     /// side bytes too is what puts the two on one axis.
+    ///
+    /// The text is kept as well, because what a value NAMES depends on the
+    /// capture it is judged in: [`Filter::resolved_against`] reads it as a
+    /// prefix of the capture's zids and replaces `want` by the zid it names.
+    /// `written` is lower case, the case [`zid_to_zenoh_hex`] prints, and
+    /// `span` is the byte range of the value token in the selector, which is
+    /// where an ambiguity points.
+    ///
+    /// [`zid_to_zenoh_hex`]: wz_session_core::zid_hex::zid_to_zenoh_hex
     Zid {
         want: Vec<u8>,
+        written: String,
+        span: (usize, usize),
         negated: bool,
     },
     Dir {
@@ -509,7 +635,7 @@ impl Term {
             // that padded it with trailing zero bytes prints as the same text
             // (`zid_to_zenoh_hex` zero-pads to 16), so it must select the same
             // node rather than a second one that reads alike.
-            Self::Zid { want, negated } => match record.zid {
+            Self::Zid { want, negated, .. } => match record.zid {
                 None => Truth::Unknown,
                 Some(seen) => Truth::of(
                     (wz_session_core::zid_hex::canonical_zid(seen) == want.as_slice()) != *negated,
@@ -652,6 +778,11 @@ fn parse_zid(value: &str, at: usize) -> Result<Vec<u8>, FilterError> {
 enum Node {
     /// The empty filter — every record matches, nothing is undecidable.
     Any,
+    /// A selector with a zid prefix that begins more than one zid of the
+    /// capture it was resolved against: it judges NOTHING there. Built only by
+    /// [`Filter::resolved_against`], never by the parser, so a selector as typed
+    /// is never this.
+    Ambiguous,
     Or(Vec<Node>),
     And(Vec<Node>),
     Not(alloc::boxed::Box<Node>),
@@ -662,6 +793,10 @@ impl Node {
     fn eval(&self, record: &RecordView<'_>) -> Truth {
         match self {
             Self::Any => Truth::Yes,
+            // `no` from a selector whose meaning is not settled would be a
+            // measurement of nothing, so the answer is the one that says the
+            // record was not judged.
+            Self::Ambiguous => Truth::Unknown,
             Self::Term(t) => t.eval(record),
             Self::Not(inner) => inner.eval(record).not(),
             // Kleene conjunction: one decided `No` settles it whatever the rest
@@ -748,6 +883,7 @@ impl Filter {
         let mut parser = Parser {
             tokens: &tokens,
             at: 0,
+            end: source.len(),
         };
         let root = parser.expression()?;
         if let Some(tok) = parser.peek() {
@@ -762,6 +898,234 @@ impl Filter {
     /// Decide one record.
     pub fn matches(&self, record: &RecordView<'_>) -> Truth {
         self.root.eval(record)
+    }
+
+    /// Read this selector against the zids ONE capture names, and say what its
+    /// `zid` terms mean there.
+    ///
+    /// `zids` are the capture's nodes, in the order the capture first named
+    /// them (a duplicate, or a spelling of one zid with trailing zero bytes, is
+    /// one zid). The rules are the module's, under "A zid may be written as a
+    /// PREFIX": a value of [`ZID_PREFIX_MIN_DIGITS`] or more digits that begins
+    /// exactly one of them names it, one that spells one in full names that one,
+    /// and one that begins two or more is ambiguous.
+    ///
+    /// The result is a NEW filter and `self` is untouched: a selector is text a
+    /// reader typed and compiled once, and it may be judged against more than
+    /// one capture, with a different answer in each.
+    pub fn resolved_against<Z: AsRef<[u8]>>(&self, zids: &[Z]) -> ResolvedFilter {
+        let named = NamedZids::of(zids);
+        let mut ambiguities = Vec::new();
+        let root = self.root.resolved(&named, &mut ambiguities);
+        // An ambiguous term does not leave the REST of the selector standing:
+        // `no` from the other terms would be a verdict on a question that was
+        // not settled, so the whole filter judges nothing.
+        let root = if ambiguities.is_empty() {
+            root
+        } else {
+            Node::Ambiguous
+        };
+        ResolvedFilter {
+            filter: Filter { root },
+            ambiguities,
+        }
+    }
+}
+
+/// Fewest digits of a zid a selector's value may have to be read as a PREFIX.
+///
+/// Eight is what the capture's flow list prints of a zid, which is where the
+/// digits come from. Below it a value is a whole zid and nothing else: seven
+/// digits are a prefix of too many ids to be a name, and a short value that
+/// happened to begin one node would change meaning when a second node joined
+/// the capture.
+pub const ZID_PREFIX_MIN_DIGITS: usize = 8;
+
+/// A selector read against the zids of one capture: the filter to judge with,
+/// and the terms that could not be read.
+///
+/// See [`Filter::resolved_against`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolvedFilter {
+    filter: Filter,
+    ambiguities: Vec<ZidAmbiguity>,
+}
+
+impl ResolvedFilter {
+    /// The filter to judge this capture's records with.
+    ///
+    /// Every `zid` term names the zid it was resolved to. When
+    /// [`Self::is_ambiguous`] it is a filter that judges NOTHING: every record
+    /// is [`Truth::Unknown`].
+    pub fn filter(&self) -> &Filter {
+        &self.filter
+    }
+
+    /// `true` when a `zid` term began more than one of the capture's zids.
+    pub fn is_ambiguous(&self) -> bool {
+        !self.ambiguities.is_empty()
+    }
+
+    /// The terms that began more than one zid, in the order the selector writes
+    /// them. Empty for a selector that is not ambiguous in this capture.
+    pub fn ambiguities(&self) -> &[ZidAmbiguity] {
+        &self.ambiguities
+    }
+
+    /// [`Self::ambiguities`], owned.
+    pub fn into_ambiguities(self) -> Vec<ZidAmbiguity> {
+        self.ambiguities
+    }
+}
+
+/// One `zid` term whose value begins more than one zid of the capture.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ZidAmbiguity {
+    /// Byte offset of the value's first byte in the selector, the unit
+    /// [`FilterError::at`] and [`LexedToken::start`] use.
+    pub start: usize,
+    /// Byte offset one past the value's last byte, as [`LexedToken::end`]. A
+    /// quoted value's span includes both quotes, as its token's does.
+    pub end: usize,
+    /// The digits typed, lower case, which is how the documents print a zid.
+    pub prefix: String,
+    /// The zids of the capture the prefix begins, in the spelling the
+    /// documents print and the order the capture first named them. Two or more.
+    pub candidates: Vec<String>,
+}
+
+/// The `ambiguous_zid_prefixes` key a document that judged a selector writes
+/// when it was ambiguous in the capture, with its leading comma, and NOTHING
+/// when it was not: an absent key is how a document says there is no such
+/// thing to report, and an empty array would say it looked and found none.
+///
+/// ONE writer for every document that carries the report, so the census and the
+/// selection document cannot differ in the shape of what they say.
+pub fn push_ambiguous_zid_prefixes(ambiguities: &[ZidAmbiguity], out: &mut String) {
+    if ambiguities.is_empty() {
+        return;
+    }
+    out.push_str(",\"ambiguous_zid_prefixes\":[");
+    for (i, a) in ambiguities.iter().enumerate() {
+        if i > 0 {
+            out.push(',');
+        }
+        let _ = fmt::Write::write_fmt(
+            out,
+            format_args!("{{\"start\":{},\"end\":{},\"prefix\":", a.start, a.end),
+        );
+        wz_session_core::json::escape_into(&a.prefix, out);
+        out.push_str(",\"candidates\":[");
+        for (j, candidate) in a.candidates.iter().enumerate() {
+            if j > 0 {
+                out.push(',');
+            }
+            wz_session_core::json::escape_into(candidate, out);
+        }
+        out.push_str("]}");
+    }
+    out.push(']');
+}
+
+/// The zids ONE capture names, each beside the spelling the documents print.
+struct NamedZids {
+    /// `(canonical wire bytes, written spelling)`, one per distinct spelling, in
+    /// the order the capture named them.
+    entries: Vec<(Vec<u8>, String)>,
+}
+
+/// What a `zid` term's value names in one capture.
+enum ZidResolution {
+    /// The value is judged as written: it spells a zid in full, or it is too
+    /// short to be a prefix, or it begins none.
+    AsWritten,
+    /// The value is a prefix that begins exactly one zid.
+    Names(Vec<u8>),
+    /// The value is a prefix that begins several: their spellings.
+    Ambiguous(Vec<String>),
+}
+
+impl NamedZids {
+    fn of<Z: AsRef<[u8]>>(zids: &[Z]) -> Self {
+        let mut entries: Vec<(Vec<u8>, String)> = Vec::new();
+        for zid in zids {
+            let canonical = wz_session_core::zid_hex::canonical_zid(zid.as_ref());
+            // Two byte strings that print alike are ONE zid to zenoh (the
+            // printed form zero-pads to 16 bytes), so they are one here.
+            let spelling = wz_session_core::zid_hex::zid_to_zenoh_hex(canonical);
+            if !entries.iter().any(|(_, seen)| *seen == spelling) {
+                entries.push((canonical.to_vec(), spelling));
+            }
+        }
+        Self { entries }
+    }
+
+    /// `want` is the value parsed as a whole zid and `written` the digits it
+    /// was typed with, lower case.
+    fn resolve(&self, want: &[u8], written: &str) -> ZidResolution {
+        // A whole value is checked FIRST, and it wins over any prefix reading:
+        // the reader who typed every digit of a zid named it, and a selector
+        // that did so before prefixes existed must keep its meaning.
+        if self.entries.iter().any(|(zid, _)| zid == want) || written.len() < ZID_PREFIX_MIN_DIGITS
+        {
+            return ZidResolution::AsWritten;
+        }
+        // Against the SPELLING, which has dropped its leading zero nibble, and
+        // not against the zero-padded 32-digit form the same id has.
+        let begins: Vec<&(Vec<u8>, String)> = self
+            .entries
+            .iter()
+            .filter(|(_, spelling)| spelling.starts_with(written))
+            .collect();
+        match begins.as_slice() {
+            [] => ZidResolution::AsWritten,
+            [(zid, _)] => ZidResolution::Names(zid.clone()),
+            several => ZidResolution::Ambiguous(
+                several
+                    .iter()
+                    .map(|(_, spelling)| spelling.clone())
+                    .collect(),
+            ),
+        }
+    }
+}
+
+impl Node {
+    /// This tree with every `zid` term read against `named`, and the ones that
+    /// could not be read recorded in `found`, left to right as the selector
+    /// writes them.
+    fn resolved(&self, named: &NamedZids, found: &mut Vec<ZidAmbiguity>) -> Node {
+        match self {
+            Self::Any => Self::Any,
+            Self::Ambiguous => Self::Ambiguous,
+            Self::Or(nodes) => Self::Or(nodes.iter().map(|n| n.resolved(named, found)).collect()),
+            Self::And(nodes) => Self::And(nodes.iter().map(|n| n.resolved(named, found)).collect()),
+            Self::Not(inner) => Self::Not(alloc::boxed::Box::new(inner.resolved(named, found))),
+            Self::Term(Term::Zid {
+                want,
+                written,
+                span,
+                negated,
+            }) => match named.resolve(want, written) {
+                ZidResolution::AsWritten => self.clone(),
+                ZidResolution::Names(zid) => Self::Term(Term::Zid {
+                    want: zid,
+                    written: written.clone(),
+                    span: *span,
+                    negated: *negated,
+                }),
+                ZidResolution::Ambiguous(candidates) => {
+                    found.push(ZidAmbiguity {
+                        start: span.0,
+                        end: span.1,
+                        prefix: written.clone(),
+                        candidates,
+                    });
+                    self.clone()
+                }
+            },
+            Self::Term(_) => self.clone(),
+        }
     }
 }
 
@@ -812,7 +1176,13 @@ impl Selection {
 /// reprinting the whole selector and leaving the reader to find it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FilterError {
-    /// Byte offset into the source where the problem is.
+    /// Byte offset into the source where the problem is, from `0` to the
+    /// source's byte length inclusive.
+    ///
+    /// Every kind but one points AT the byte that is wrong. The exception is
+    /// [`FilterErrorKind::UnexpectedEnd`]: the input ran out, so what is wrong
+    /// is not a byte of it, and the position is the source's byte length, just
+    /// past the last byte, where the next character belongs.
     pub at: usize,
     /// What went wrong.
     pub kind: FilterErrorKind,
@@ -836,7 +1206,8 @@ pub enum FilterErrorKind {
     },
     /// An integer that did not parse, or overflowed `u64`.
     NotAnInteger(String),
-    /// The selector ended in the middle of something.
+    /// The selector ended in the middle of something. Its position is the
+    /// source's byte length: see [`FilterError::at`].
     UnexpectedEnd,
     /// An operator was expected and something else was found.
     ExpectedOperator,
@@ -857,13 +1228,18 @@ impl fmt::Display for FilterError {
         match &self.kind {
             FilterErrorKind::UnexpectedChar(c) => write!(f, "unexpected character {c:?}"),
             FilterErrorKind::UnterminatedQuote => write!(f, "unterminated quoted value"),
-            FilterErrorKind::UnknownField(name) => write!(
-                f,
-                "unknown field {name:?} (known: key, dir, kind, bytes, time, \
-                 elapsed, offset, delay, replies, errs, first_reply, \
-                 completion, \
-                 closed)"
-            ),
+            // The candidates are the table the parser reads, walked, and not a
+            // sentence kept beside it: see `selector_fields!`.
+            FilterErrorKind::UnknownField(name) => {
+                write!(f, "unknown field {name:?} (known: ")?;
+                for (i, field) in Field::ALL.iter().enumerate() {
+                    if i > 0 {
+                        f.write_str(", ")?;
+                    }
+                    f.write_str(field.name())?;
+                }
+                f.write_str(")")
+            }
             FilterErrorKind::UnknownValue { field, value } => {
                 write!(f, "{field} does not admit the value {value:?}")
             }
@@ -997,7 +1373,9 @@ pub struct LexedToken {
 ///
 /// `{envelope,"ok":true,"tokens":[…]}`, or
 /// `{envelope,"ok":false,"at":N,"message":"…","tokens":[…]}` with `at` a BYTE
-/// offset. The tokens close both branches; see [`tokens`].
+/// offset: the byte that is wrong, or for a selector that ends unfinished its
+/// byte length (see [`FilterError::at`]). The tokens close both branches, and
+/// their spans do not depend on where the refusal is; see [`tokens`].
 pub fn diagnose_json(expr: &str) -> String {
     let mut out = String::from("{");
     crate::doc_revision::envelope_into(crate::doc_revision::SELECTOR_DIAGNOSE, &mut out);
@@ -1243,6 +1621,8 @@ fn lex_into(source: &str, tokens: &mut Vec<Token>) -> Result<(), FilterError> {
 struct Parser<'a> {
     tokens: &'a [Token],
     at: usize,
+    /// The byte length of the source: where an input that ran out is refused.
+    end: usize,
 }
 
 impl<'a> Parser<'a> {
@@ -1258,8 +1638,16 @@ impl<'a> Parser<'a> {
         t
     }
 
+    /// Where an input that RAN OUT is refused: just past its last byte.
+    ///
+    /// The start of the last token is where the thing the reader was typing
+    /// began, and `UnexpectedEnd` is not about that thing. It says the selector
+    /// stopped before it was finished, so the place that is wrong is the place
+    /// the next character belongs. That is the byte length of the whole input,
+    /// trailing whitespace included: the reader typed it, and the next
+    /// character goes after it.
     fn end_offset(&self) -> usize {
-        self.tokens.last().map(|t| t.at).unwrap_or(0)
+        self.end
     }
 
     fn expression(&mut self) -> Result<Node, FilterError> {
@@ -1365,17 +1753,17 @@ impl<'a> Parser<'a> {
             }
         };
 
-        let (value_at, value) = match self.next() {
+        let (value_at, value_end, value) = match self.next() {
             Some(Token {
                 at,
+                end,
                 kind: TokenKind::Word(w) | TokenKind::Quoted(w),
-                ..
-            }) => (*at, w.clone()),
+            }) => (*at, *end, w.clone()),
             Some(t) => {
                 return Err(FilterError {
                     at: t.at,
                     kind: FilterErrorKind::UnknownValue {
-                        field: static_field_name(&field).unwrap_or("value"),
+                        field: Field::from_name(&field).map_or("value", Field::name),
                         value: describe_token(&t.kind),
                     },
                 })
@@ -1388,9 +1776,19 @@ impl<'a> Parser<'a> {
             }
         };
 
-        let term = match field.as_str() {
-            "key" => {
-                let negated = equality_negation(op, "key", op_at)?;
+        // The ONE place text becomes a field: a word the table does not hold is
+        // refused here, so the `match` below can only ever see a field the
+        // refusal's list names. An arm added to it for a word the table lacks
+        // would be unreachable rather than a field the message omits.
+        let Some(known) = Field::from_name(&field) else {
+            return Err(FilterError {
+                at: field_at,
+                kind: FilterErrorKind::UnknownField(field),
+            });
+        };
+        let term = match known {
+            Field::Key => {
+                let negated = equality_negation(op, known.name(), op_at)?;
                 Term::Key {
                     chunks: compile_pattern(&value, value_at)?,
                     negated,
@@ -1408,15 +1806,22 @@ impl<'a> Parser<'a> {
             // "these characters" is ZENOH'S spelling now, and was the
             // wire order until a consumer found the census and the zenohd log
             // naming one node two ways. See `parse_zid` for what changed.
-            "zid" => {
-                let negated = equality_negation(op, "zid", op_at)?;
+            //
+            // The value is kept as the digits typed (lower case) beside the
+            // bytes it parses to, because a value of eight digits or more may
+            // be a PREFIX, and which zid a prefix names is the capture's to
+            // say: see `Filter::resolved_against`.
+            Field::Zid => {
+                let negated = equality_negation(op, known.name(), op_at)?;
                 Term::Zid {
                     want: parse_zid(&value, value_at)?,
+                    written: value.to_ascii_lowercase(),
+                    span: (value_at, value_end),
                     negated,
                 }
             }
-            "dir" => {
-                let negated = equality_negation(op, "dir", op_at)?;
+            Field::Dir => {
+                let negated = equality_negation(op, known.name(), op_at)?;
                 let want = match value.as_str() {
                     "a" | "A" => Direction::A,
                     "b" | "B" => Direction::B,
@@ -1424,7 +1829,7 @@ impl<'a> Parser<'a> {
                         return Err(FilterError {
                             at: value_at,
                             kind: FilterErrorKind::UnknownValue {
-                                field: "dir",
+                                field: known.name(),
                                 value,
                             },
                         })
@@ -1432,55 +1837,55 @@ impl<'a> Parser<'a> {
                 };
                 Term::Dir { want, negated }
             }
-            "kind" => {
-                let negated = equality_negation(op, "kind", op_at)?;
+            Field::Kind => {
+                let negated = equality_negation(op, known.name(), op_at)?;
                 let want = RecordKind::parse(&value).ok_or(FilterError {
                     at: value_at,
                     kind: FilterErrorKind::UnknownValue {
-                        field: "kind",
+                        field: known.name(),
                         value: value.clone(),
                     },
                 })?;
                 Term::Kind { want, negated }
             }
-            "bytes" => Term::Bytes {
+            Field::Bytes => Term::Bytes {
                 op,
                 value: integer(&value, value_at)?,
             },
-            "time" => Term::Time {
+            Field::Time => Term::Time {
                 op,
                 value: integer(&value, value_at)?,
             },
-            "elapsed" => Term::Elapsed {
+            Field::Elapsed => Term::Elapsed {
                 op,
                 value: integer(&value, value_at)?,
             },
-            "offset" => Term::Offset {
+            Field::Offset => Term::Offset {
                 op,
                 value: integer(&value, value_at)?,
             },
-            "delay" => Term::Delay {
+            Field::Delay => Term::Delay {
                 op,
                 value: integer(&value, value_at)?,
             },
-            "replies" => Term::Replies {
+            Field::Replies => Term::Replies {
                 op,
                 value: integer(&value, value_at)?,
             },
-            "errs" => Term::Errs {
+            Field::Errs => Term::Errs {
                 op,
                 value: integer(&value, value_at)?,
             },
-            "first_reply" => Term::FirstReply {
+            Field::FirstReply => Term::FirstReply {
                 op,
                 value: integer(&value, value_at)?,
             },
-            "completion" => Term::Completion {
+            Field::Completion => Term::Completion {
                 op,
                 value: integer(&value, value_at)?,
             },
-            "closed" => {
-                let negated = equality_negation(op, "closed", op_at)?;
+            Field::Closed => {
+                let negated = equality_negation(op, known.name(), op_at)?;
                 // `yes` / `no` and not `true` / `false`: the reader is asking
                 // about what the capture showed, and this crate's own vocabulary
                 // for a three-valued answer already spends `true`. A bare
@@ -1493,19 +1898,13 @@ impl<'a> Parser<'a> {
                         return Err(FilterError {
                             at: value_at,
                             kind: FilterErrorKind::UnknownValue {
-                                field: "closed",
+                                field: known.name(),
                                 value,
                             },
                         })
                     }
                 };
                 Term::Closed { want, negated }
-            }
-            _ => {
-                return Err(FilterError {
-                    at: field_at,
-                    kind: FilterErrorKind::UnknownField(field),
-                })
             }
         };
         Ok(Node::Term(term))
@@ -1562,27 +1961,6 @@ fn describe_token(kind: &TokenKind) -> String {
         TokenKind::Open => "(".to_string(),
         TokenKind::Close => ")".to_string(),
     }
-}
-
-fn static_field_name(field: &str) -> Option<&'static str> {
-    Some(match field {
-        "key" => "key",
-        // R2757 (open debt 790) — the node axis.
-        "zid" => "zid",
-        "dir" => "dir",
-        "kind" => "kind",
-        "bytes" => "bytes",
-        "time" => "time",
-        "elapsed" => "elapsed",
-        "offset" => "offset",
-        "delay" => "delay",
-        "replies" => "replies",
-        "errs" => "errs",
-        "first_reply" => "first_reply",
-        "completion" => "completion",
-        "closed" => "closed",
-        _ => return None,
-    })
 }
 
 #[cfg(test)]
@@ -2535,5 +2913,264 @@ mod tests {
         // A PARSE failure is not a lexical one: every token is there.
         assert_eq!(tokens("key ==").len(), 2);
         assert!(tokens("").is_empty());
+    }
+
+    /// AN UNFINISHED SELECTOR IS REFUSED AT ITS END, not at the start of the
+    /// last thing typed.
+    ///
+    /// `UnexpectedEnd` says the selector ended and needs more, so the place it
+    /// points at is where the next character goes: the byte length of the
+    /// input. It used to report where the LAST TOKEN began, so `demo` was
+    /// refused at byte 0 and a caret drawn from `at` sat on a word that was
+    /// complete. Whitespace after the last token counts, because the input
+    /// ended after it and the next character goes after it too.
+    ///
+    /// The rows are one per place the parser can run out: a field with no
+    /// operator, an operator with no value, a connective with nothing after
+    /// it, a `not` with nothing to negate, and a group that is still open. The
+    /// last row ends in text whose byte length differs from its character
+    /// count, so a position counted in characters is a different number there.
+    #[test]
+    fn an_unfinished_selector_is_refused_at_the_end_of_its_input() {
+        for (source, at) in [
+            ("demo", 4),
+            ("kind", 4),
+            ("kind ==", 7),
+            ("kind == ", 8),
+            ("  kind ==  ", 11),
+            ("bytes >", 7),
+            ("key == a and", 12),
+            ("key == a or ", 12),
+            ("not", 3),
+            ("not ", 4),
+            ("(bytes > 1 and", 14),
+            ("zid ==", 6),
+            ("key == 로봇 and", "key == 로봇 and".len()),
+        ] {
+            // The table's own number is the byte length, so a row typed wrong
+            // is a red here and not a position the test then agrees with.
+            assert_eq!(at, source.len(), "{source:?}: the row's number");
+            let err = Filter::parse(source).expect_err(source);
+            assert_eq!(err.kind, FilterErrorKind::UnexpectedEnd, "{source:?}");
+            assert_eq!(
+                err.at, at,
+                "{source:?}: the selector ended, so the position is the byte \
+                 length of the input and not where its last token began"
+            );
+            assert!(
+                alloc::format!("{err}").starts_with(&alloc::format!("at byte {at}: ")),
+                "{source:?}: the rendering carries the same position"
+            );
+        }
+    }
+
+    /// Every refusal that is NOT an end of input keeps the position it had.
+    ///
+    /// The position of `UnexpectedEnd` moved and nothing else did, and that is
+    /// a claim only a table of EXACT positions can hold: the other test in this
+    /// file asserts `at <= len`, which a position moved to the end would also
+    /// satisfy. Each row names the byte a caret belongs on.
+    #[test]
+    fn a_refusal_that_is_not_an_end_of_input_keeps_its_position() {
+        for (source, kind, at) in [
+            (
+                "frob == 1",
+                FilterErrorKind::UnknownField("frob".to_string()),
+                0,
+            ),
+            (
+                "bytes > 1 and frob == 1",
+                FilterErrorKind::UnknownField("frob".to_string()),
+                14,
+            ),
+            (
+                "kind == frobnicate",
+                FilterErrorKind::UnknownValue {
+                    field: "kind",
+                    value: "frobnicate".to_string(),
+                },
+                8,
+            ),
+            (
+                "key >= demo",
+                FilterErrorKind::OperatorNotAdmitted {
+                    field: "key",
+                    op: ">=",
+                },
+                4,
+            ),
+            (
+                "bytes > many",
+                FilterErrorKind::NotAnInteger("many".to_string()),
+                8,
+            ),
+            ("(bytes > 1", FilterErrorKind::UnclosedGroup, 0),
+            (
+                "bytes > 1 and (kind == put",
+                FilterErrorKind::UnclosedGroup,
+                14,
+            ),
+            ("bytes > 1)", FilterErrorKind::TrailingInput, 9),
+            ("key == \"open", FilterErrorKind::UnterminatedQuote, 7),
+            ("bytes = 1", FilterErrorKind::UnexpectedChar('='), 6),
+            ("bytes 1", FilterErrorKind::ExpectedOperator, 6),
+        ] {
+            let err = Filter::parse(source).expect_err(source);
+            assert_eq!(err.kind, kind, "{source:?}");
+            assert_eq!(err.at, at, "{source:?}");
+        }
+    }
+
+    /// The diagnosis document reports the end position and leaves the token
+    /// spans alone.
+    ///
+    /// `at` is one number and the tokens are `{start, end}` pairs in the same
+    /// unit, so a consumer reading both sees a refusal that points just past
+    /// the last token, which is what "the selector needs more" looks like. The
+    /// token list is the lexer's and the lexer did not change: `demo` is still
+    /// one word spanning `0..4`.
+    #[test]
+    fn the_diagnosis_places_an_unfinished_selector_past_its_last_token() {
+        let doc = diagnose_json("demo");
+        assert!(doc.contains("\"ok\":false,\"at\":4,"), "{doc}");
+        assert!(
+            doc.ends_with(",\"tokens\":[{\"start\":0,\"end\":4,\"kind\":\"word\"}]}"),
+            "the token span is the lexer's and did not move: {doc}"
+        );
+        let doc = diagnose_json("kind == ");
+        assert!(doc.contains("\"at\":8,"), "{doc}");
+        assert!(
+            doc.ends_with(
+                ",\"tokens\":[{\"start\":0,\"end\":4,\"kind\":\"word\"},\
+                 {\"start\":5,\"end\":7,\"kind\":\"operator\"}]}"
+            ),
+            "{doc}"
+        );
+    }
+
+    /// The names the unknown-field refusal lists, read back out of its
+    /// message.
+    fn fields_the_refusal_names() -> Vec<String> {
+        let message = Filter::parse("no_such_field == 1")
+            .expect_err("an unknown field is refused")
+            .to_string();
+        let list = message
+            .split("(known: ")
+            .nth(1)
+            .and_then(|rest| rest.strip_suffix(')'))
+            .unwrap_or_else(|| panic!("the refusal lists its candidates: {message:?}"));
+        list.split(", ").map(str::to_string).collect()
+    }
+
+    /// The fields the module's own table documents, read out of this file's
+    /// header: the first cell of each row of the first table.
+    fn fields_the_module_documents() -> Vec<String> {
+        const SOURCE: &str = include_str!("filter.rs");
+        SOURCE
+            .lines()
+            .take_while(|line| !line.starts_with("use "))
+            .filter(|line| line.starts_with("//! | `"))
+            .filter_map(|line| line.strip_prefix("//! | `")?.split('`').next())
+            .map(str::to_string)
+            .collect()
+    }
+
+    /// THE REFUSAL NAMES THE FIELDS THE PARSER ACCEPTS, AND NOTHING ELSE.
+    ///
+    /// A reader who typed a field the language does not have is told what it
+    /// does have, and that sentence was a hand-written list beside the parser's
+    /// own match: `zid` was accepted by the parser and missing from the
+    /// message, so the one place that answers "what can I write" disagreed with
+    /// the grammar.
+    ///
+    /// The set the parser accepts is MEASURED, by offering it names and asking
+    /// whether it refuses each as an unknown field, and not read off the table
+    /// the message is built from: a message and a table that agree with each
+    /// other say nothing about a parser that moved. The names offered are every
+    /// name either hand-written list carries (this module's own documentation
+    /// table and the refusal itself) plus decoys a reader would plausibly try,
+    /// so a field added to the parser alone, or to the message alone, changes
+    /// one side of the comparison and not the other.
+    #[test]
+    fn the_unknown_field_refusal_names_exactly_the_fields_the_parser_accepts() {
+        let named = fields_the_refusal_names();
+        let documented = fields_the_module_documents();
+        assert!(
+            documented.len() >= 13 && named.len() >= 13,
+            "anti-vacuity: both lists were read: {documented:?} {named:?}"
+        );
+
+        let mut offered: Vec<String> = named.iter().chain(documented.iter()).cloned().collect();
+        offered.extend(
+            [
+                // The fields a consumer lists from its own use of the language,
+                // which is where the omission was first seen: neither of the
+                // two lists above carried `zid`, so a corpus built from them
+                // alone could not have offered it.
+                "key",
+                "kind",
+                "zid",
+                "bytes",
+                "elapsed",
+                "latency",
+                "size",
+                "topic",
+                "node",
+                "sender",
+                "source",
+                "dst",
+                "rate",
+                "count",
+                "len",
+                "length",
+                "name",
+                "id",
+                "seq",
+                "ts",
+                "timestamp",
+                "qos",
+                "priority",
+                "Key",
+                "KEY",
+                "zid2",
+                "keyexpr",
+                "payload",
+                "reply",
+                "err",
+                "closed_at",
+            ]
+            .map(str::to_string),
+        );
+        offered.sort();
+        offered.dedup();
+
+        let mut accepted: Vec<String> = offered
+            .iter()
+            .filter(|name| {
+                !matches!(
+                    Filter::parse(&alloc::format!("{name} == 1")),
+                    Err(FilterError {
+                        kind: FilterErrorKind::UnknownField(_),
+                        ..
+                    })
+                )
+            })
+            .cloned()
+            .collect();
+        accepted.sort();
+        let mut named_sorted = named.clone();
+        named_sorted.sort();
+        assert_eq!(
+            accepted, named_sorted,
+            "the parser accepts {accepted:?} and the refusal names {named_sorted:?}"
+        );
+
+        let mut documented_sorted = documented.clone();
+        documented_sorted.sort();
+        assert_eq!(
+            accepted, documented_sorted,
+            "the parser accepts {accepted:?} and this module's table documents \
+             {documented_sorted:?}"
+        );
     }
 }

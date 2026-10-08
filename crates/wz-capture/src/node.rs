@@ -836,6 +836,15 @@ pub struct SessionGrouping {
     /// node from. The owner answers "which id space"; this answers "whose", and
     /// they are different questions that happen to be keyed alike.
     zids_by_list: alloc::collections::BTreeMap<usize, [alloc::vec::Vec<u8>; 2]>,
+    /// Every zid the capture NAMES, in the order the node census first met
+    /// them: the set a selector's zid prefix is read against.
+    ///
+    /// Not the zids of [`Self::zids_by_list`], which are the ones a RECORD can
+    /// carry. A node that only said HELLO, or whose flow had no second
+    /// handshake, is on the node plane a reader copies a prefix from, so a
+    /// prefix that begins it and another node is ambiguous whether or not the
+    /// capture holds a record the first one sent.
+    named: alloc::vec::Vec<alloc::vec::Vec<u8>>,
     /// How many distinct sessions the links named.
     sessions: usize,
 }
@@ -889,7 +898,21 @@ impl SessionGrouping {
             sessions: sessions.len(),
             by_list,
             zids_by_list,
+            named: census.nodes().iter().map(|n| n.zid.clone()).collect(),
         }
+    }
+
+    /// Every zid the capture names, in the order its node census first met
+    /// them.
+    ///
+    /// What a `zid` term of a selector is read against
+    /// ([`crate::filter::Filter::resolved_against`]): a prefix is judged among
+    /// THESE, so the same selector can mean one node here and be ambiguous in
+    /// another capture. Empty for a grouping that holds no census, which is the
+    /// honest answer for a caller that has none, and leaves every value judged
+    /// as written.
+    pub fn named_zids(&self) -> &[alloc::vec::Vec<u8>] {
+        &self.named
     }
 
     /// The two owners for one message list.

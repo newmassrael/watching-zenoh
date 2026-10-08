@@ -946,7 +946,7 @@
  *
  * SO THE DOCUMENT CARRIES THE LIST. Its envelope reads
  *
- *     {"document":{"name":"census","revision":18,
+ *     {"document":{"name":"census","revision":19,
  *                  "planes":["exchanges","interests","keyexprs","nodes",
  *                            "payloads"]}, ...}
  *
@@ -996,7 +996,7 @@
  *      "carries":[{"word":"bits","shapes":[["end","name","start","value"]]},
  *                 {"word":"opaque","shapes":[["end","name","start"]]}, ...]}
  *
- *     {"name":"census","revision":18,"key":"mode","values":[...],
+ *     {"name":"census","revision":19,"key":"mode","values":[...],
  *      "carries":null}
  *
  * `null` is a VALUE here and not an absence: it says the word is a PASSENGER --
@@ -1597,6 +1597,80 @@ int wz_dissect_pcap_census(const unsigned char *bytes, size_t len, char **out);
 int wz_dissect_pcap_census_bounded(const unsigned char *bytes, size_t len,
                                    char **out);
 
+/* THE SELECTOR LANGUAGE -- its fields, and how a `zid` value is read.
+ *
+ * Every door that takes a selector takes this language, and
+ * wz_dissect_selector_diagnose says where a text goes wrong. A term is
+ * `field op value`; terms join with and / or / not and parentheses. These are
+ * the fields, written once, in the order an unknown field's refusal lists them.
+ * That list is built from the table the parser reads, so the refusal cannot
+ * name a field the parser refuses or omit one it accepts, and a test holds
+ * this table to the same one:
+ *
+ *   key          a keyexpr pattern                           == !=
+ *   dir          a or b, either case                         == !=
+ *   kind         put del query reply err                     == !=
+ *   bytes        an integer                                  == != < <= > >=
+ *   time         an integer, ms                              == != < <= > >=
+ *   elapsed      an integer, ms since the capture began      == != < <= > >=
+ *   offset       an integer, bytes into the framing unit     == != < <= > >=
+ *   delay        an integer, ms from the source's stamp      == != < <= > >=
+ *   zid          the sender's zid, or a prefix of it         == !=
+ *   replies      an integer                                  == != < <= > >=
+ *   errs         an integer                                  == != < <= > >=
+ *   first_reply  an integer, ms                              == != < <= > >=
+ *   completion   an integer, ms                              == != < <= > >=
+ *   closed       yes or no (y or n)                          == !=
+ *
+ * `zid` is read against THE CAPTURE the selector is judged in. A value of
+ * eight or more hexadecimal digits that does not spell, in full, a zid that
+ * capture names is read as a PREFIX:
+ *
+ *     - the digits are compared with the zid's WRITTEN SPELLING, the one every
+ *       document prints: zenoh's, the little-endian id read as a u128. Zenoh
+ *       drops one leading zero nibble when it prints a zid, so a node whose top
+ *       byte is below 0x10 is written without that zero, and the digits to copy
+ *       are the first of THAT text and not of its 32-digit padded form. Either
+ *       case is read;
+ *     - a prefix that begins exactly ONE zid the capture names selects as if
+ *       that zid had been written whole. A value that spells a zid of the
+ *       capture in FULL names it whatever else it is a prefix of, so a selector
+ *       written before prefixes existed keeps its meaning;
+ *     - a value of fewer than eight digits is a whole zid and nothing else,
+ *       exactly as before;
+ *     - a prefix that begins TWO OR MORE zids of the capture is AMBIGUOUS.
+ *
+ * AMBIGUOUS means the reader may have meant either node, so no row can be
+ * called a miss: the selector judges NOTHING in that capture, and the terms
+ * beside the ambiguous one do not rescue it. In the selection document every
+ * row reads `unjudged`; in the census every plane that narrows counts its
+ * records `undecided`. The refusal reaches the consumer in the same document,
+ * as a top-level key that is ABSENT whenever nothing was ambiguous:
+ *
+ *     "ambiguous_zid_prefixes":[{"start":7,"end":15,"prefix":"cbf383be",
+ *                                "candidates":["cbf383be...","cbf383be..."]}]
+ *
+ * one object per ambiguous term, in the order the selector writes them.
+ * `start` and `end` are the BYTE span of the value in the selector (a quoted
+ * value's span includes its quotes), the unit of the verdict's `at` and token
+ * spans, so a caret lands on the term. `prefix` is the digits typed, in lower
+ * case. `candidates` are the zids it begins, in the spelling the documents
+ * print and in the order the capture first named them, which is the order of
+ * its nodes plane. The key is on the census document from revision 19 and on
+ * the selection document from revision 4.
+ *
+ * THE UNIT OF THE JUDGEMENT IS THE CAPTURE. The same selector can be ambiguous
+ * in one capture and name one node in another, because the zids a prefix is
+ * compared with are the ones that capture names. A live handle's capture is
+ * what it has read so far, so a prefix that names one node now can become
+ * ambiguous when a second node with the same leading digits joins, and the
+ * question is asked again each time a document is rendered.
+ *
+ * The field document (wz_dissect_pcap_fields_where_limited and
+ * wz_dissect_live_fields_where) reads each row `unjudged` under an ambiguous
+ * prefix as well and does not carry the key: ask the selection or the census
+ * door which prefix was ambiguous. */
+
 /* R311y854 (ABI 4) — the same census, NARROWED by a selector in wz's own
  * filter language: `field op value` terms (key == robot/pose, kind == query,
  * bytes > 100, delay >= 10, ...) joined with and / or / not and parentheses.
@@ -1660,6 +1734,16 @@ int wz_dissect_pcap_census_where_limited(const unsigned char *bytes, size_t len,
  * offset into the selector. A refused selector is a successful DIAGNOSIS,
  * not an error, which is why the memory rule is untouched: OK means a string
  * you own, an error means none.
+ *
+ * `at` is the byte that is wrong, with ONE exception. A selector that ENDS
+ * UNFINISHED (`demo`, `kind ==`, `kind == `) is refused at its byte LENGTH,
+ * just past its last byte, which is where the next character belongs: 4, 7 and
+ * 8 for those three. So 0 <= at <= the selector's byte length, and the
+ * `tokens` spans below are unchanged by it: `demo` is still one word spanning
+ * 0 to 4. From verdict revision 3; before it the position was the byte where
+ * the LAST TOKEN began (`demo` was 0), and a caret drawn from it sat on a word
+ * that was complete. When the refusal is an unknown field, its `message` lists
+ * the fields of THE SELECTOR LANGUAGE above, `zid` included.
  *
  * The useful moment to ask "is this valid, and if not where" is while the
  * expression is being typed -- before there is a capture to run it against,
@@ -2011,10 +2095,15 @@ int wz_dissect_pcap_fields_limited(const unsigned char *bytes, size_t len,
  *                 Open, Close, KeepAlive, Declare and Interest, which carry no
  *                 kind, no keyexpr and no payload, so the word is the same
  *                 under every selector; and a ResponseFinal whose request the
- *                 capture does not hold.
+ *                 capture does not hold; and EVERY row, whatever it carries,
+ *                 when the selector is AMBIGUOUS in this capture (see THE
+ *                 SELECTOR LANGUAGE): a `zid` prefix that begins two or more
+ *                 of its zids has no meaning to judge a row by.
  *
  * A caller asking "why did my selector miss this" must be able to tell the
- * last two apart, because only "undecided" is about the selector.
+ * last two apart, because only "undecided" is about the selector. The one
+ * `unjudged` that is about the selector too is the ambiguous one, and the
+ * selection document names it in `ambiguous_zid_prefixes`.
  *
  * WHAT A ROW'S `kind` IS (since field-document revision 27 and
  * selection-document revision 2; before them the rows named below read
@@ -3505,6 +3594,13 @@ int wz_dissect_live_fields_since(wz_dissect_live *h,
  * and no `max_messages_shown_per_flow`, which trims trees this document does
  * not render. The limit preset is the handle's, chosen at open; a row the walk
  * never reached is ABSENT rather than unmatched, and dropped_by_limits says so.
+ *
+ * UNDER A `zid` PREFIX THAT IS AMBIGUOUS in what this handle holds (see THE
+ * SELECTOR LANGUAGE) every row reads `unjudged` and the document carries
+ * `ambiguous_zid_prefixes` beside `rows`, from selection revision 4: which
+ * term, the prefix, and the zids it begins. The key is absent when the
+ * selector was judged, and the judgement is of the capture as it stands: ask
+ * again after the handle has read more.
  *
  * `h` is not const, for the reason wz_dissect_live_fields_where gives: a list
  * not drained yet has no id, so the ids are settled first by the reconciliation

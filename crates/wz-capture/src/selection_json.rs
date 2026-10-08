@@ -93,6 +93,29 @@
 //! `completed`. See [`crate::fields_json`]'s `RowJudgement` for who judges which
 //! record.
 //!
+//! # A selector whose `zid` prefix is AMBIGUOUS in this capture
+//!
+//! A `zid` term may be written as a prefix of eight digits or more
+//! ([`crate::filter`] has the rules), and which zid it names is a fact about the
+//! capture it is judged in. When the prefix begins TWO OR MORE of the zids this
+//! capture names, the selector has no meaning here and `no` would be false, so
+//! it judges nothing: every row reads `unjudged`, and the document says why in
+//! `ambiguous_zid_prefixes`, one object per ambiguous term in the order the
+//! selector writes them:
+//!
+//! ```text
+//! "ambiguous_zid_prefixes":[{"start":7,"end":15,"prefix":"cbf383be",
+//!                            "candidates":["cbf383be…","cbf383be…"]}]
+//! ```
+//!
+//! `start` and `end` are the byte span of the value in the selector (a quoted
+//! value's includes its quotes), the unit the selector verdict's `at` and token
+//! spans use. `prefix` is the digits typed, in lower case. `candidates` are the
+//! zids it begins, in the spelling the documents print and the order the
+//! capture first named them. The key is ABSENT for a selector that was judged,
+//! and the unit of the judgement is the CAPTURE: the same selector can be
+//! ambiguous in one and unique in another.
+//!
 //! # The ceilings
 //!
 //! `dropped_by_limits` is the SAME group the field document and the census
@@ -227,7 +250,15 @@ pub fn selection_json_where_coordinated(
         }
     }
 
-    out.push_str("],\"dropped_by_limits\":");
+    out.push(']');
+    // WHY every row above reads `unjudged`, when it does: a `zid` prefix of the
+    // selector began more than one zid of THIS capture. The key is absent for a
+    // selector that was judged, and for a document with no selector.
+    crate::filter::push_ambiguous_zid_prefixes(
+        verdicts.as_ref().map_or(&[], |v| v.ambiguities()),
+        &mut out,
+    );
+    out.push_str(",\"dropped_by_limits\":");
     out.push_str(&crate::report::dropped_by_limits_json(d));
     out.push('}');
     out

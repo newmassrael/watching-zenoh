@@ -2356,6 +2356,76 @@ pub const DOCUMENT_HISTORY: &[DocumentShape] = &[
         planes: &[],
         carries: &[],
     },
+    // THE END OF AN UNFINISHED SELECTOR, AND THE FIELD LIST OF ITS REFUSAL.
+    //
+    // NO KEY NAME MOVES and no word is added, so this row is the whole notice
+    // of two VALUES that moved under stationary keys, which no axis of this
+    // table can express.
+    //
+    // * `at` of a refusal that says the selector ends unfinished is now the BYTE
+    //   LENGTH of the selector, just past its last byte: `demo` is 4, `kind ==`
+    //   is 7 and `kind == ` is 8. It was the byte where the last token began
+    //   (`demo` was 0), which put a caret on a word that was complete. Every
+    //   other refusal's `at` is where it was, and the `tokens` spans did not
+    //   move: `demo` is still one word spanning 0..4.
+    // * `message` of an unknown-field refusal now lists `zid`, which the parser
+    //   accepted and the sentence did not name, and is built from the parser's
+    //   own field table. A consumer that matched the old sentence as text
+    //   finds a field more in it.
+    DocumentShape {
+        document: SELECTOR_DIAGNOSE,
+        revision: 3,
+        keys: SELECTOR_DIAGNOSE_R3_KEYS,
+        retiring: &[],
+        families: SELECTOR_DIAGNOSE_R2_FAMILIES,
+        planes: &[],
+        carries: SELECTOR_DIAGNOSE_R2_CARRIES,
+    },
+    // A `zid` PREFIX IS READ AGAINST THE CAPTURE, and an ambiguous one is
+    // reported on the verdict document.
+    //
+    // A `zid` term may now be a prefix of eight digits or more of the zid it
+    // names (`crate::filter` has the rules). FIVE KEYS ARRIVE, all inside one
+    // new top-level array: `ambiguous_zid_prefixes`, and per object `start`,
+    // `end`, `prefix` and `candidates`. The array is ABSENT unless a prefix
+    // began two or more of the zids THIS capture names, and then every row
+    // reads `unjudged`: a word already in `selected`'s vocabulary, so the
+    // family and the carries rows below are revision 1's, unchanged.
+    //
+    // ⚠ A VALUE MOVED UNDER A STATIONARY KEY as well. A selector whose `zid`
+    // value is eight digits or more and is the prefix of one node used to read
+    // `no` on every row (it was taken for a whole four-byte zid no node
+    // announced) and now reads the node's own rows `yes`; an ambiguous one used
+    // to read `no` and now reads `unjudged`. A cached verdict from revision 3
+    // under such a selector is stale.
+    DocumentShape {
+        document: SELECTION,
+        revision: 4,
+        keys: SELECTION_R4_KEYS,
+        retiring: &[],
+        families: SELECTION_R1_FAMILIES,
+        planes: &[],
+        carries: SELECTION_R1_CARRIES,
+    },
+    // THE SAME MOVE ON THE CENSUS: a `zid` prefix is read against the capture
+    // and an ambiguous one is reported.
+    //
+    // The five keys of selection revision 4, in the same shape and from the same
+    // writer: `ambiguous_zid_prefixes` at the top level, absent unless a
+    // selector's prefix began two or more of the capture's zids, and then every
+    // narrowed plane counts its records `undecided` (`selection.undecided` is
+    // all of them, and `matched` and `rejected` are 0). A value moved too: a
+    // prefix that names one node used to select nothing and now selects that
+    // node's records, in every plane that narrows.
+    DocumentShape {
+        document: CENSUS,
+        revision: 19,
+        keys: CENSUS_R19_KEYS,
+        retiring: &[],
+        families: CENSUS_R15_FAMILIES,
+        planes: CENSUS_R6_PLANES,
+        carries: CENSUS_R15_CARRIES,
+    },
 ];
 
 // The key sets below are MEASURED, never transcribed: each was printed by the
@@ -8714,6 +8784,14 @@ pub const SELECTOR_DIAGNOSE_R2_KEYS: &[&str] = &[
     "at", "document", "end", "kind", "message", "name", "ok", "revision", "start", "tokens",
 ];
 
+/// The selector verdict's key set at revision 3: revision 2's, by name.
+///
+/// IDENTICAL, and aliased for [`CENSUS_R13_KEYS`]' reason: two values moved under
+/// stationary keys (`at` of an unfinished selector, `message` of an unknown
+/// field) and no key arrived or left, so the revision number is the whole
+/// notice, written on the [`DocumentShape`] row.
+pub const SELECTOR_DIAGNOSE_R3_KEYS: &[&str] = SELECTOR_DIAGNOSE_R2_KEYS;
+
 /// What a token's `kind` says at selector-verdict revision 2 — the words of
 /// [`crate::filter::TokenClass`].
 pub const TOKEN_CLASS_R2: &[&str] = &[
@@ -9016,6 +9094,44 @@ pub const SELECTION_R2_KEYS: &[&str] = SELECTION_R1_KEYS;
 /// clock term judges a row at, neither of which is a key; the number is the
 /// whole notice and the row says which rows.
 pub const SELECTION_R3_KEYS: &[&str] = SELECTION_R2_KEYS;
+
+/// The selection document's key set at revision 4: revision 3's PLUS the five
+/// keys of the ambiguity report.
+///
+/// `ambiguous_zid_prefixes` is the top-level array, present only when a
+/// selector's `zid` prefix began two or more of the capture's zids; `start`,
+/// `end`, `prefix` and `candidates` are what each of its objects carries. An
+/// ADDITION, so revision 3 has nothing to retire. Spelled out rather than aliased
+/// for [`CENSUS_R15_KEYS`]' reason: the set moved.
+pub const SELECTION_R4_KEYS: &[&str] = &[
+    "ambiguous_zid_prefixes",
+    "anchor",
+    "batch_index",
+    "candidates",
+    "caps",
+    "direction",
+    "document",
+    "dropped_by_limits",
+    "end",
+    "flows",
+    "frames",
+    "frames_per_flow",
+    "list_id",
+    "max_flows_per_table",
+    "max_scout_askers",
+    "name",
+    "prefix",
+    "revision",
+    "rows",
+    "scout_askers",
+    "scouting",
+    "selected",
+    "skipped",
+    "skipped_packets",
+    "start",
+    "stream_bytes",
+    "stream_bytes_per_direction",
+];
 
 /// The retention document's key set at revision 1.
 ///
@@ -10240,6 +10356,195 @@ pub const CENSUS_R18_KEYS: &[&str] = &[
     "solicited_by",
     "source_ahead_of_observer",
     "space",
+    "stream_bytes",
+    "stream_bytes_per_direction",
+    "subscriber",
+    "subscribers",
+    "subtrees",
+    "tokens",
+    "total_ms",
+    "total_ns",
+    "total_payload_bytes",
+    "totals",
+    "unanswered",
+    "unattributed_bytes",
+    "unattributed_records",
+    "unattributed_requests",
+    "unclaimed",
+    "unclaimed_exact",
+    "unclosed",
+    "undecidable",
+    "undecided",
+    "undeclarations",
+    "undecompressible_batches",
+    "unjudged_answers",
+    "unknown_ids",
+    "unlocatable_records",
+    "unmeasured_payloads",
+    "unparsed_bytes",
+    "unread",
+    "unresolvable_fragments",
+    "unresolved",
+    "unresolved_declarations",
+    "unresolved_records",
+    "unsized_payloads",
+    "unstamped",
+    "walked_records",
+    "whatami",
+    "why",
+    "wire_bytes",
+    "withdrawn_at",
+    "zid",
+];
+
+/// The census document's key set at revision 19: revision 18's PLUS the keys of
+/// the ambiguity report.
+///
+/// `ambiguous_zid_prefixes` is the top-level array, present only when a
+/// selector's `zid` prefix began two or more of the capture's zids; `start`,
+/// `end`, `prefix` and `candidates` are what each of its objects carries
+/// (`prefix` was already a key, of the keyexpr subtrees, and is one set
+/// member). An ADDITION, so revision 18 has nothing to retire. Spelled out
+/// rather than aliased, for [`CENSUS_R18_KEYS`]' reason: the set moved.
+pub const CENSUS_R19_KEYS: &[&str] = &[
+    "a",
+    "a_to_b",
+    "aborted_capacity_overflow",
+    "aborted_out_of_order",
+    "aborted_sender_dropped",
+    "aborted_superseded",
+    "aborted_unresolvable",
+    "addr",
+    "admissible",
+    "aggregate",
+    "ambiguous_zid_prefixes",
+    "anchor_intervals",
+    "anchors_exact",
+    "answers",
+    "answers_in_scope",
+    "asked_at",
+    "asker",
+    "asks",
+    "at",
+    "at_most_bytes",
+    "attributed_bytes",
+    "b",
+    "b_to_a",
+    "begun",
+    "by_kind",
+    "bytes",
+    "cancelled_at",
+    "candidates",
+    "caps",
+    "cause",
+    "children",
+    "closed_at",
+    "completed",
+    "completion",
+    "consistent",
+    "continued",
+    "contradictions",
+    "count",
+    "declaration",
+    "declarations",
+    "declared",
+    "declared_at",
+    "declarer",
+    "declarer_zid",
+    "dels",
+    "descriptors",
+    "document",
+    "dropped_by_limits",
+    "elsewhere",
+    "end",
+    "errs",
+    "evidence",
+    "exchanges",
+    "family",
+    "first",
+    "first_anchor",
+    "first_reply",
+    "flow",
+    "flows",
+    "fragment_chains",
+    "frames",
+    "frames_per_flow",
+    "gaps",
+    "halted_batches",
+    "hello",
+    "high",
+    "id",
+    "inadmissible",
+    "init",
+    "interests",
+    "join",
+    "judged",
+    "keyexpr",
+    "keyexprs",
+    "keys",
+    "kind",
+    "last",
+    "last_anchor",
+    "link",
+    "links",
+    "liveliness_token",
+    "locators",
+    "low",
+    "matched",
+    "max_flows_per_table",
+    "max_ms",
+    "max_ns",
+    "max_scout_askers",
+    "mean_ms",
+    "mean_ns",
+    "messages",
+    "min_ms",
+    "min_ns",
+    "mismatched",
+    "mode",
+    "name",
+    "narrowed_by_selector",
+    "nodes",
+    "non_monotonic",
+    "not_as_declared",
+    "offset_space",
+    "orphan_answers",
+    "orphan_responses",
+    "orphan_withdrawals",
+    "payload_bytes",
+    "payload_bytes_ceiling",
+    "payloads",
+    "planes",
+    "port",
+    "prefix",
+    "puts",
+    "queries",
+    "queryable",
+    "queryables",
+    "reason",
+    "records",
+    "references",
+    "refused_missing_start_marker",
+    "refused_peer_quota",
+    "refused_pool_exhausted",
+    "rejected",
+    "replies",
+    "requests",
+    "restricted",
+    "revision",
+    "rows",
+    "scout",
+    "scout_askers",
+    "scouting",
+    "selection",
+    "share_bp",
+    "silent",
+    "skipped",
+    "skipped_packets",
+    "solicited_by",
+    "source_ahead_of_observer",
+    "space",
+    "start",
     "stream_bytes",
     "stream_bytes_per_direction",
     "subscriber",
@@ -11856,7 +12161,11 @@ mod tests {
             // To 18 when a flow with no InitAck had its chains followed:
             // `fragment_chains` gained `aborted_unresolvable`, and the
             // counts of such a flow moved under stationary keys.
-            (CENSUS, 18u32),
+            // To 19 when a narrowed census gained `ambiguous_zid_prefixes`
+            // (five keys, absent unless a selector's `zid` prefix began two or
+            // more of the capture's zids) and a prefix that names one node
+            // began to select that node's records.
+            (CENSUS, 19u32),
             // R2175 (open-debt item 552) — the field document moved to 2 when
             // its PAYLOAD PLANE joined the pin (fifteen keys revision 1 had
             // never covered) and its first three value families were declared.
@@ -11982,7 +12291,10 @@ mod tests {
             // formats this build can decode without a declaration.
             (READABLE_SURFACES, 5),
             // To 2 when the verdict gained the lexer's `tokens`.
-            (SELECTOR_DIAGNOSE, 2),
+            // To 3 when the position of an unfinished selector moved to its
+            // byte length and an unknown field's candidates gained `zid`: two
+            // values under stationary keys, so this entry is the notice.
+            (SELECTOR_DIAGNOSE, 3),
             // To 2 when the success branch named the kind each line was read
             // as and a refused key named its chunk, byte and reason.
             (DECLARATIONS_DIAGNOSE, 2),
@@ -11998,7 +12310,10 @@ mod tests {
             // To 3 on the same move as fields 31: a stream flow's rows came out
             // in capture order and a clock term judged a row at its own
             // packet's instant.
-            (SELECTION, 3),
+            // To 4 when it gained `ambiguous_zid_prefixes` (five keys, absent
+            // unless a selector's `zid` prefix began two or more of the
+            // capture's zids, and then every row reads `unjudged`).
+            (SELECTION, 4),
             // What a live handle holds, beside its ceilings.
             // To 2 when `oldest_ts_ns` became a number, a string or null: a
             // nanosecond clock is past 2^53.

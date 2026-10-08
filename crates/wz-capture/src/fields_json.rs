@@ -2813,8 +2813,29 @@ fn push_selected(selection: Option<RowSelection<'_>>, frame: &PassiveFrame, out:
 /// Every other row (`Init`, `Open`, `Close`, `KeepAlive`, `Declare`,
 /// `Interest`, a `ResponseFinal` whose request the capture never carried) has no
 /// verdict in either plane and reads `unjudged`.
+///
+/// # A selector that is AMBIGUOUS in this capture judges no row
+///
+/// A `zid` prefix that begins two or more of the capture's zids has no
+/// meaning here, and `no` from it would be false: the reader may have meant
+/// either node. So the walk is not made, every row reads `unjudged`, and the
+/// refusal travels with the verdict (`ambiguities`) for the document to write. `unjudged` and not `undecided` because the second says the
+/// capture lacked a fact a decision needed, and the fact missing here is the
+/// reader's: which node they meant.
 #[cfg(feature = "network-codecs")]
 pub(crate) struct RowJudgement {
+    /// What the two planes made of the selector, or `None` when it was
+    /// ambiguous in this capture and no walk was made. One value and not two
+    /// `Option`s: the planes are judged together or not at all.
+    walk: Option<PlaneVerdicts>,
+    /// The `zid` terms that began more than one of the capture's zids. Empty
+    /// exactly when `walk` is `Some`.
+    ambiguities: Vec<crate::filter::ZidAmbiguity>,
+}
+
+/// The two planes' verdicts, over one selector, over one capture.
+#[cfg(feature = "network-codecs")]
+struct PlaneVerdicts {
     payloads: crate::payload::PayloadCensus,
     exchanges: crate::exchange::ExchangeTable,
 }
@@ -2826,10 +2847,26 @@ impl RowJudgement {
         filter: &crate::filter::Filter,
         grouping: &crate::node::SessionGrouping,
     ) -> Self {
-        Self {
-            payloads: crate::payload::payloads_grouped(d, filter, grouping),
-            exchanges: crate::exchange::exchanges_grouped(d, filter, grouping),
+        let resolved = filter.resolved_against(grouping.named_zids());
+        if resolved.is_ambiguous() {
+            return Self {
+                walk: None,
+                ambiguities: resolved.into_ambiguities(),
+            };
         }
+        Self {
+            walk: Some(PlaneVerdicts {
+                payloads: crate::payload::payloads_grouped(d, filter, grouping),
+                exchanges: crate::exchange::exchanges_grouped(d, filter, grouping),
+            }),
+            ambiguities: Vec::new(),
+        }
+    }
+
+    /// The `zid` terms that began more than one of the capture's zids: empty
+    /// for a selector that was judged.
+    pub(crate) fn ambiguities(&self) -> &[crate::filter::ZidAmbiguity] {
+        &self.ambiguities
     }
 
     /// The row's answer folded over the records either plane judged on it, or
@@ -2842,8 +2879,12 @@ impl RowJudgement {
                 .iter()
                 .copied()
         }
+        let PlaneVerdicts {
+            payloads,
+            exchanges,
+        } = self.walk.as_ref()?;
         crate::payload::fold_records(
-            records(self.payloads.row_verdict(key)).chain(records(self.exchanges.row_verdict(key))),
+            records(payloads.row_verdict(key)).chain(records(exchanges.row_verdict(key))),
         )
     }
 }

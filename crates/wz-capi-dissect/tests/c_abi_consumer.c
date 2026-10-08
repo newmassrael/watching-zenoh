@@ -1924,10 +1924,12 @@ int main(void) {
     CHECK(rc == WZ_DISSECT_OK, "diagnose rc=%d", rc);
     /* Revision 2 closes with the lexer's tokens, byte spans into
      * the selector above, so a consumer colours the selector off this walk.
+     * Revision 3 moves the position of an unfinished selector to its byte
+     * length and lists `zid` among an unknown field's candidates.
      * (Not quoted here: its double star followed by a slash would open a
      * nested comment, which -Werror=comment refuses.) */
     CHECK(strcmp(verdict,
-                 "{\"document\":{\"name\":\"selector_diagnose\",\"revision\":2},"
+                 "{\"document\":{\"name\":\"selector_diagnose\",\"revision\":3},"
                  "\"ok\":true,\"tokens\":["
                  "{\"start\":0,\"end\":3,\"kind\":\"word\"},"
                  "{\"start\":4,\"end\":6,\"kind\":\"operator\"},"
@@ -2210,8 +2212,11 @@ int main(void) {
      * a chain and no longer every fragment, its `fragment_chains` counts the
      * chains and the messages they reassembled reach the keyexpr, exchange and
      * payload planes. `fragment_chains` gains `aborted_unresolvable`; counts
-     * move under stationary keys; nothing retires. */
-    revisioned[0].revision = 18;
+     * move under stationary keys; nothing retires.
+     * 19: a narrowed census gains `ambiguous_zid_prefixes`, present only when
+     * a selector's `zid` prefix began two or more of the capture's zids; and
+     * a prefix that names one node now selects that node's records. */
+    revisioned[0].revision = 19;
     revisioned[0].doc = NULL;
     rc = wz_dissect_pcap_census(pcap, sizeof pcap, &revisioned[0].doc);
     CHECK(rc == WZ_DISSECT_OK, "census rc=%d", rc);

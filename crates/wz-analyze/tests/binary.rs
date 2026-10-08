@@ -2214,6 +2214,133 @@ fn a_selector_narrows_the_census_planes_and_says_what_it_left_out() {
     );
 }
 
+/// A `--select` whose `zid` is a PREFIX is read against the nodes of the capture
+/// it is run on, and a prefix that begins two of them is NAMED, not silently
+/// counted undecided.
+///
+/// The capture holds four nodes in two conversations, each side naming itself
+/// and then publishing one record. Two zids share their first eight digits, so
+/// that prefix is ambiguous here and the other two are unique by theirs. The
+/// control is the half of the claim that keeps the refusal honest: a unique
+/// prefix selects its node's record, exactly as the whole zid does, and says
+/// nothing about ambiguity.
+///
+/// Both renderings carry the fact, the way `quic_unselected` does: the sentence
+/// a person reads, and the census document's own `ambiguous_zid_prefixes` key
+/// for the program that branches on it.
+#[test]
+fn an_ambiguous_zid_prefix_is_named_by_the_command_line_and_judges_nothing() {
+    const TWIN_A: &str = "cbf383be1111111122222222aaaaaaaa";
+    const TWIN_B: &str = "cbf383be3333333344444444bbbbbbbb";
+    const LONE_A: &str = "1234abcd9999999900000000eeeeeeee";
+    const LONE_B: &str = "fedcba98aaaaaaaa11111111ffffffff";
+
+    let init = |spelled: &str| -> Vec<u8> {
+        let zid =
+            wz_session_core::zid_hex::zenoh_hex_to_zid(spelled).expect("a spelling zenoh takes");
+        let mut wire = vec![
+            wz_session_core::wire_const::T_MID_INIT,
+            0x09,
+            (((zid.len() as u8) - 1) << 4) | 0x02,
+        ];
+        wire.extend_from_slice(&zid);
+        wire
+    };
+    let record = |payload: &'static [u8]| -> Vec<u8> {
+        let mut frame = vec![wz_session_core::wire_const::T_MID_FRAME, 0x00];
+        frame.extend_from_slice(
+            &wz_codecs::push::Push {
+                header: wz_codecs::push::Push::default().header | wz_codecs::wire_const::FLAG_N_N,
+                keyexpr: keyexpr("demo/p"),
+                body: wz_codecs::push::PushVariant::CodecZenohMsgPut(wz_codecs::msg_put::MsgPut {
+                    payload_len: Some(payload.len() as u64),
+                    payload: Some(payload),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            }
+            .encode_to_vec(),
+        );
+        frame
+    };
+    let packets = [
+        udp_packet([10, 0, 0, 1], [10, 0, 0, 2], 43210, 7447, &init(TWIN_A)),
+        udp_packet([10, 0, 0, 2], [10, 0, 0, 1], 7447, 43210, &init(LONE_A)),
+        udp_packet([10, 0, 0, 3], [10, 0, 0, 4], 43211, 7447, &init(TWIN_B)),
+        udp_packet([10, 0, 0, 4], [10, 0, 0, 3], 7447, 43211, &init(LONE_B)),
+        udp_packet([10, 0, 0, 1], [10, 0, 0, 2], 43210, 7447, &record(b"a")),
+        udp_packet([10, 0, 0, 2], [10, 0, 0, 1], 7447, 43210, &record(b"bb")),
+        udp_packet([10, 0, 0, 3], [10, 0, 0, 4], 43211, 7447, &record(b"ccc")),
+        udp_packet([10, 0, 0, 4], [10, 0, 0, 3], 7447, 43211, &record(b"dddd")),
+    ];
+    let rows: Vec<(u32, u32, &[u8])> = packets
+        .iter()
+        .enumerate()
+        .map(|(i, p)| (1, i as u32 * 10_000, p.as_slice()))
+        .collect();
+    let scratch = Scratch::new("select-zid-prefix");
+    let capture = scratch.write(
+        "zid-prefix.pcap",
+        &wz_capture::pcap::write(wz_capture::link::LINKTYPE_ETHERNET, &rows),
+    );
+    let run = |args: &[&str]| {
+        String::from_utf8_lossy(
+            &Command::new(env!("CARGO_BIN_EXE_wz-analyze"))
+                .arg(&capture)
+                .args(args)
+                .output()
+                .expect("runs")
+                .stdout,
+        )
+        .into_owned()
+    };
+
+    // The control first: a unique prefix selects the one node's record, and the
+    // whole zid selects the same.
+    for selector in ["zid == 1234abcd", &format!("zid == {LONE_A}")] {
+        let text = run(&["--census", "--select", selector]);
+        assert!(
+            text.contains("selection: 1 matched, 3 rejected, 0 UNDECIDED"),
+            "{selector}: a unique prefix selects its node: {text}"
+        );
+        assert!(
+            !text.contains("--select: the zid prefix"),
+            "{selector}: and a selector that was judged has nothing to refuse: {text}"
+        );
+    }
+
+    let text = run(&["--census", "--select", "zid == cbf383be"]);
+    assert!(
+        text.contains("selection: 0 matched, 0 rejected, 4 UNDECIDED"),
+        "an ambiguous prefix judges nothing: {text}"
+    );
+    assert!(
+        text.contains(&format!(
+            "--select: the zid prefix cbf383be (bytes 7..15 of the selector) begins 2 nodes of \
+             this capture ({TWIN_A}, {TWIN_B})"
+        )),
+        "and the report says which term, and which nodes: {text}"
+    );
+
+    let json = run(&["--json", "--census", "--select", "zid == cbf383be"]);
+    let parsed: serde_json::Value = serde_json::from_str(&json).expect("one valid document");
+    assert_eq!(
+        parsed["ambiguous_zid_prefixes"],
+        serde_json::json!([{
+            "start": 7,
+            "end": 15,
+            "prefix": "cbf383be",
+            "candidates": [TWIN_A, TWIN_B],
+        }])
+    );
+    let control = run(&["--json", "--census", "--select", "zid == 1234abcd"]);
+    let parsed: serde_json::Value = serde_json::from_str(&control).expect("one valid document");
+    assert!(
+        parsed.get("ambiguous_zid_prefixes").is_none(),
+        "the key is absent for a selector that was judged: {control}"
+    );
+}
+
 /// R311y674 (§1.2a) — a selector that does not parse is refused, with the
 /// PARSER's own reason.
 ///

@@ -534,12 +534,16 @@ OPTIONS:
                       matches. Terms are `field op value`:
                         key == demo/**        dir == a       kind == query
                         bytes > 100           time < 5000    delay >= 10
-                      joined with and / or / not and parentheses. The report
-                      says how many records matched, how many were rejected,
-                      and how many are UNDECIDED -- a keyexpr whose declaration
-                      went past before the tap started cannot be judged, and
-                      counting it as a non-match would make a short total look
-                      whole
+                        zid == cbf383be
+                      joined with and / or / not and parentheses. A zid is
+                      written as the nodes plane prints it, whole or as a
+                      prefix of eight digits or more; a prefix that begins two
+                      nodes of the capture is named in the report and judges
+                      nothing. The report says how many records matched, how
+                      many were rejected, and how many are UNDECIDED -- a
+                      keyexpr whose declaration went past before the tap
+                      started cannot be judged, and counting it as a non-match
+                      would make a short total look whole
     --bounded         read the capture under the live-tap ceilings instead of
                       unbounded -- the same preset the C ABI's
                       wz_dissect_pcap_summary_bounded uses. Without it the
@@ -1420,6 +1424,18 @@ pub fn analyze_dissection(
     // selected ones -- the same silence R311y667 closed for the planes that CAN
     // answer a selector and could not judge some of their records.
     let quic_unselected = select.is_some() && !quic_flows.is_empty();
+    // A `zid` prefix of the selector that begins more than one node of THIS
+    // capture has no meaning in it, and the planes above counted every record
+    // undecided without saying why. The census door reports the same refusal in
+    // the same shape, read against the same node census; see
+    // `wz_capture::filter::Filter::resolved_against`.
+    let ambiguous_prefixes = select
+        .map(|filter| {
+            filter
+                .resolved_against(wz_capture::node::session_grouping(&dissection).named_zids())
+                .into_ambiguities()
+        })
+        .unwrap_or_default();
     let mut report = CaptureReport::of(&dissection);
     report = report.with_quic_decryption(&quic);
     if let Some(table) = &throughput {
@@ -1492,6 +1508,7 @@ pub fn analyze_dissection(
                      reader has decoded none of theirs\n",
                 );
             }
+            rendered.push_str(&ambiguous_prefix_lines(&ambiguous_prefixes));
             if per_field {
                 rendered.push_str("fields:\n");
                 rendered.push_str(&field_lines(
@@ -1541,6 +1558,9 @@ pub fn analyze_dissection(
             // whether their selector reached these flows must not have to parse
             // the sentence a person reads.
             rendered.push_str(&format!(",\"quic_unselected\":{quic_unselected}"));
+            // The census document's own key, from the same writer: absent unless
+            // a prefix of the selector began more than one node of the capture.
+            wz_capture::filter::push_ambiguous_zid_prefixes(&ambiguous_prefixes, &mut rendered);
             if per_field {
                 rendered.push(',');
                 rendered.push_str(&field_lines(
@@ -1928,6 +1948,31 @@ fn quic_pass(
         .map(|s| s.undecoded_bytes() as usize)
         .sum();
     (summary, flows)
+}
+
+/// What a `--select` with an AMBIGUOUS `zid` prefix did, as the sentence a
+/// person reads: which term, and which nodes of this capture it begins.
+///
+/// Silent for a selector that was judged, so a run that asked nothing ambiguous
+/// is not shown a refusal it did not earn. The JSON rendering of the same fact
+/// is the census document's `ambiguous_zid_prefixes` key, from the same writer;
+/// this is its reading order, with the byte span in the selector so the term can
+/// be found by counting.
+fn ambiguous_prefix_lines(ambiguous: &[wz_capture::filter::ZidAmbiguity]) -> String {
+    let mut out = String::new();
+    for a in ambiguous {
+        out.push_str(&format!(
+            "  --select: the zid prefix {} (bytes {}..{} of the selector) begins {} nodes of \
+             this capture ({}) -- the selector judges nothing here, so every record the planes \
+             folded is undecided; write more of the zid\n",
+            a.prefix,
+            a.start,
+            a.end,
+            a.candidates.len(),
+            a.candidates.join(", "),
+        ));
+    }
+    out
 }
 
 /// R311y698 (§1.2a) — the per-flow QUIC detail, in whichever format.

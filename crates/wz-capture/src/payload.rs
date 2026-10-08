@@ -1596,6 +1596,10 @@ pub fn payloads_grouped(
     filter: &crate::filter::Filter,
     grouping: &crate::node::SessionGrouping,
 ) -> PayloadCensus {
+    // The selector's `zid` terms are read against THIS capture's zids first;
+    // see `crate::agg::aggregate_grouped`.
+    let resolved = filter.resolved_against(grouping.named_zids());
+    let filter = resolved.filter();
     let mut census = PayloadCensus::new();
     census.capture_origin_ms = dissection.capture_origin_ms();
     let mut spaces = crate::agg::KeyexprSpaces::new();

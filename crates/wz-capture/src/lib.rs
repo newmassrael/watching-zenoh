@@ -314,6 +314,14 @@ pub mod report;
 /// Ungated, like [`report`] whose ceilings group it embeds: it counts lists
 /// every build has and walks no tree.
 pub mod retention_json;
+/// The selector's `zid` term over captures that name several zids: a prefix is
+/// judged against the zids THE CAPTURE holds, which no other fixture can say.
+///
+/// Gated on `network-codecs` because the records it builds are `Push`es the
+/// planes decode, and its two document tests on `dissect` as well, beside the
+/// document they read.
+#[cfg(all(test, feature = "network-codecs"))]
+mod selector_zid_tests;
 pub mod serial;
 pub mod tcp;
 /// R311y648 (§1.2a) — RECOGNISING TLS, and deliberately not decrypting it.

@@ -3816,6 +3816,130 @@ mod tests {
         );
     }
 
+    /// THE HEADER'S SELECTOR LANGUAGE IS THE LANGUAGE THE PARSER READS: the
+    /// fields, in the order the unknown-field refusal prints them, and the
+    /// comparisons each one admits.
+    ///
+    /// The header carries one table of the selector's fields and a consumer
+    /// builds its own box, completion list or colouring from it. A table in a
+    /// comment is a copy, and the parser's own field list had already drifted
+    /// from the sentence its refusal printed (`zid` was accepted and not named),
+    /// so the header is measured against the parser the way the refusal is.
+    ///
+    /// The names are compared with `field_names()`, the list the refusal is
+    /// built from, and then every row is PROBED: each comparison the row lists
+    /// must parse and each it does not list must be refused as not admitted, over
+    /// a value that is well formed for that field, so a row whose operators
+    /// drifted from the parser's is a red here and not a consumer's surprise.
+    /// The words the closed vocabularies take (`dir`, `kind`, `closed`) are
+    /// probed the same way, in both directions.
+    #[test]
+    fn the_headers_selector_language_is_the_language_the_parser_reads() {
+        use wz_capture::filter::{Filter, FilterErrorKind};
+
+        const HEADER: &str = include_str!("../include/wz_dissect.h");
+        let start = HEADER
+            .find("THE SELECTOR LANGUAGE --")
+            .expect("the header states the selector language");
+        let block = &HEADER[start..];
+        let block = &block[..block.find("*/").expect("the comment closes")];
+
+        // A row is ` *   <name>  <description>  <comparisons>`: three spaces
+        // after the comment margin and a lower-case name. Every other line of
+        // the block is indented otherwise, and the pin below says so by finding
+        // exactly the parser's own count.
+        let rows: Vec<(&str, &str)> = block
+            .lines()
+            .filter_map(|line| {
+                let rest = line.strip_prefix(" *   ")?;
+                let name_len = rest
+                    .chars()
+                    .take_while(|c| c.is_ascii_lowercase() || *c == '_')
+                    .count();
+                (name_len > 0 && rest[name_len..].starts_with("  "))
+                    .then(|| (&rest[..name_len], rest[name_len..].trim()))
+            })
+            .collect();
+
+        let names: Vec<&str> = rows.iter().map(|(name, _)| *name).collect();
+        assert_eq!(
+            names,
+            wz_capture::filter::field_names(),
+            "the header's table lists the parser's fields, in the refusal's order"
+        );
+
+        // A value that is well formed for each field, so a refusal below can
+        // only be about the comparison.
+        let sample = |field: &str| match field {
+            "key" => "demo",
+            "zid" => "a1a1a1a1",
+            "dir" => "a",
+            "kind" => "put",
+            "closed" => "yes",
+            _ => "1",
+        };
+        for (field, description) in &rows {
+            let listed: Vec<&str> = description
+                .split_whitespace()
+                .filter(|word| ["==", "!=", "<", "<=", ">", ">="].contains(word))
+                .collect();
+            assert!(
+                listed == ["==", "!="] || listed == ["==", "!=", "<", "<=", ">", ">="],
+                "{field}: the row lists the comparisons {listed:?}"
+            );
+            for op in ["==", "!=", "<", "<=", ">", ">="] {
+                let parsed = Filter::parse(&format!("{field} {op} {}", sample(field)));
+                let admitted = match &parsed {
+                    Ok(_) => true,
+                    Err(e) => !matches!(e.kind, FilterErrorKind::OperatorNotAdmitted { .. }),
+                };
+                assert_eq!(
+                    admitted,
+                    listed.contains(&op),
+                    "{field} {op}: the header lists {listed:?} and the parser answered {parsed:?}"
+                );
+            }
+        }
+
+        // The words of the closed vocabularies: each one the header names is
+        // accepted, and one it does not name is refused.
+        let words: [(&str, &[&str], &str); 3] = [
+            ("dir", &["a", "b", "A", "B"], "c"),
+            (
+                "kind",
+                &["put", "del", "query", "reply", "err"],
+                "frobnicate",
+            ),
+            ("closed", &["yes", "no", "y", "n"], "maybe"),
+        ];
+        for (field, accepted, refused) in words {
+            let description = rows
+                .iter()
+                .find(|(name, _)| *name == field)
+                .expect("the field has a row")
+                .1;
+            for word in accepted {
+                assert!(
+                    Filter::parse(&format!("{field} == {word}")).is_ok(),
+                    "{field} == {word}: the parser refuses a word this probe names"
+                );
+                // The header names each word in some case: `dir` says
+                // "either case" for `a` and `b`, and `closed` names `y`/`n`.
+                assert!(
+                    description
+                        .to_ascii_lowercase()
+                        .split(|c: char| !c.is_ascii_alphanumeric())
+                        .any(|w| w == word.to_ascii_lowercase()),
+                    "{field}: the header's row does not name {word}: {description}"
+                );
+            }
+            assert!(
+                Filter::parse(&format!("{field} == {refused}")).is_err(),
+                "{field} == {refused}: a word outside the vocabulary is refused"
+            );
+        }
+    }
+
     /// ITEM 281 — AND SO DOES THIS CRATE'S OWN RUSTDOC, which is the THIRD
     /// copy of that vocabulary and the one nothing measured.
     ///
@@ -6182,10 +6306,12 @@ mod tests {
         // R2100 (open-debt item 509) — the verdict now OPENS with its own
         // revision, so a consumer can tell this shape from the next one.
         // Revision 2 closes with the lexer's tokens, byte spans
-        // into `key == demo/**`.
+        // into `key == demo/**`. Revision 3 moved the position of an
+        // unfinished selector and the candidates of an unknown field, and
+        // neither is on this success branch.
         assert_eq!(
             verdict,
-            "{\"document\":{\"name\":\"selector_diagnose\",\"revision\":2},\"ok\":true,\
+            "{\"document\":{\"name\":\"selector_diagnose\",\"revision\":3},\"ok\":true,\
              \"tokens\":[{\"start\":0,\"end\":3,\"kind\":\"word\"},\
              {\"start\":4,\"end\":6,\"kind\":\"operator\"},\
              {\"start\":7,\"end\":14,\"kind\":\"word\"}]}"
@@ -6205,7 +6331,7 @@ mod tests {
         unsafe { wz_dissect_string_free(out) };
         assert!(
             verdict.starts_with(
-                "{\"document\":{\"name\":\"selector_diagnose\",\"revision\":2},\"ok\":false,\"at\":"
+                "{\"document\":{\"name\":\"selector_diagnose\",\"revision\":3},\"ok\":false,\"at\":"
             ),
             "the verdict must carry a position: {verdict}"
         );
@@ -9748,12 +9874,128 @@ mod tests {
     fn selection_documents() -> Vec<String> {
         let capture = verdict_capture();
         let handle = replay(&capture, WZ_DISSECT_LIMITS_NONE).expect("the replay opens");
-        let docs = vec![
+        let mut docs = vec![
             live_selection(handle, "bytes >= 0").expect("a selector that asks"),
             live_selection(handle, "").expect("an empty selector"),
         ];
         unsafe { wz_dissect_live_close(handle) };
+        // The third shape: a `zid` prefix that begins two nodes of the capture,
+        // which is the only one that carries `ambiguous_zid_prefixes`. The key is
+        // absent from the two above, so a population without this one would leave
+        // the five keys of selection revision 3 declared and never rendered.
+        let capture = zid_prefix_capture();
+        let handle = replay(&capture, WZ_DISSECT_LIMITS_NONE).expect("the replay opens");
+        docs.push(live_selection(handle, "zid == cbf383be").expect("an ambiguous selector"));
+        unsafe { wz_dissect_live_close(handle) };
         docs
+    }
+
+    /// Two spellings of zids that share their first eight digits, and two that
+    /// do not: what a prefix selector is ambiguous over.
+    const PREFIX_TWIN_A: &str = "cbf383be1111111122222222aaaaaaaa";
+    const PREFIX_TWIN_B: &str = "cbf383be3333333344444444bbbbbbbb";
+    const PREFIX_LONE_A: &str = "1234abcd9999999900000000eeeeeeee";
+    const PREFIX_LONE_B: &str = "fedcba98aaaaaaaa11111111ffffffff";
+
+    /// A capture holding four nodes, in two UDP conversations, each side naming
+    /// itself with an INIT: two of the zids share `cbf383be`, so that prefix is
+    /// ambiguous in it, and the other two are each unique by their first eight
+    /// digits.
+    ///
+    /// The INIT is built the way `wz-capture`'s own fixtures build it (the
+    /// header byte, the version, the zid-length byte with `whatami` peer, then
+    /// the zid), and the zids are written as the documents print them and turned
+    /// into wire bytes by the repository's own inverse, so the capture agrees
+    /// with the notation under test rather than with a hand-laid byte order.
+    fn zid_prefix_capture() -> Vec<u8> {
+        let init = |spelled: &str| {
+            let zid = wz_session_core::zid_hex::zenoh_hex_to_zid(spelled)
+                .expect("a spelling zenoh accepts");
+            let mut wire = vec![
+                wz_session_core::wire_const::T_MID_INIT,
+                0x09,
+                (((zid.len() as u8) - 1) << 4) | 0x02,
+            ];
+            wire.extend_from_slice(&zid);
+            wire
+        };
+        let packets = [
+            udp_packet(
+                [10, 0, 0, 1],
+                43210,
+                [10, 0, 0, 2],
+                7447,
+                &init(PREFIX_TWIN_A),
+            ),
+            udp_packet(
+                [10, 0, 0, 2],
+                7447,
+                [10, 0, 0, 1],
+                43210,
+                &init(PREFIX_LONE_A),
+            ),
+            udp_packet(
+                [10, 0, 0, 3],
+                43211,
+                [10, 0, 0, 4],
+                7447,
+                &init(PREFIX_TWIN_B),
+            ),
+            udp_packet(
+                [10, 0, 0, 4],
+                7447,
+                [10, 0, 0, 3],
+                43211,
+                &init(PREFIX_LONE_B),
+            ),
+        ];
+        let rows: Vec<(u32, u32, &[u8])> = packets
+            .iter()
+            .enumerate()
+            .map(|(i, p)| (i as u32, 0, p.as_slice()))
+            .collect();
+        wz_capture::pcap::write(1, &rows)
+    }
+
+    /// A `zid` PREFIX IS READ AGAINST THE CAPTURE BY THE DOORS THAT TAKE A
+    /// SELECTOR, and an ambiguous one is reported where the consumer reads.
+    ///
+    /// The live selection door and the narrowed census door are asked the same
+    /// selector over a capture in which `cbf383be` begins two nodes: each
+    /// carries the refusal, byte for byte the same object, with the term's span
+    /// in the selector, the prefix and BOTH candidates in the spelling the
+    /// documents print. The control is the other half of the claim: a prefix
+    /// that begins one node, and the whole zid of that node, are the same
+    /// selector to every door and carry no such key, so the key's absence means
+    /// "judged" and not "not asked".
+    #[test]
+    fn a_zid_prefix_is_read_against_the_capture_by_the_doors_that_take_a_selector() {
+        let capture = zid_prefix_capture();
+        let refusal = format!(
+            ",\"ambiguous_zid_prefixes\":[{{\"start\":7,\"end\":15,\"prefix\":\"cbf383be\",\
+             \"candidates\":[\"{PREFIX_TWIN_A}\",\"{PREFIX_TWIN_B}\"]}}]"
+        );
+
+        let handle = replay(&capture, WZ_DISSECT_LIMITS_NONE).expect("the replay opens");
+        let live = live_selection(handle, "zid == cbf383be").expect("a selector that compiles");
+        assert!(live.contains(&refusal), "{live}");
+        let by_prefix = live_selection(handle, "zid == 1234abcd").expect("compiles");
+        let by_whole =
+            live_selection(handle, &format!("zid == {PREFIX_LONE_A}")).expect("compiles");
+        assert_eq!(by_prefix, by_whole, "a unique prefix is the whole zid");
+        assert!(!by_prefix.contains("ambiguous"), "{by_prefix}");
+        unsafe { wz_dissect_live_close(handle) };
+
+        let census = call_census_where(&capture, "zid == cbf383be").expect("compiles");
+        assert!(census.contains(&refusal), "{census}");
+        let census_by_prefix = call_census_where(&capture, "zid == 1234abcd").expect("compiles");
+        let census_by_whole =
+            call_census_where(&capture, &format!("zid == {PREFIX_LONE_A}")).expect("compiles");
+        assert_eq!(census_by_prefix, census_by_whole);
+        assert!(
+            !census_by_prefix.contains("ambiguous"),
+            "{census_by_prefix}"
+        );
     }
 
     /// `wz_dissect_live_retention`, the way C calls it, with the refusal code

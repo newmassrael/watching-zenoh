@@ -137,6 +137,17 @@ pub fn census_json(d: &crate::Dissection) -> String {
 /// beside the rows rather than derived: a keyexpr whose declaration went past
 /// before the tap started cannot be judged against `key == demo/**`, and
 /// counting it as a non-match would make a short total look whole.
+///
+/// # A `zid` prefix that begins more than one node
+///
+/// A `zid` term may be written as a prefix of eight digits or more, and which
+/// node it names is a fact about THIS capture: [`crate::filter`] has the rules.
+/// A prefix that begins two or more of the nodes the capture names has no
+/// meaning in it, so the selector judges nothing. Every plane that narrows
+/// counts its records `undecided`, and the document carries
+/// `ambiguous_zid_prefixes` beside them: one object per ambiguous term, with its
+/// byte span in the selector, the prefix typed and the candidate zids in the
+/// spelling `nodes` prints. The key is ABSENT for a selector that was judged.
 pub fn census_json_where(d: &crate::Dissection, filter: &crate::filter::Filter) -> String {
     // R2100 (open-debt item 509) — the document's OWN revision, first key, so
     // a consumer reads it without walking the body. Until this round a key
@@ -181,6 +192,12 @@ pub fn census_json_where(d: &crate::Dissection, filter: &crate::filter::Filter) 
     ));
     #[cfg(not(feature = "network-codecs"))]
     out.push_str("null");
+    // WHY every narrowed plane above counts its records undecided, when it
+    // does: a `zid` prefix of the selector began more than one of the zids THIS
+    // capture names. Read against the same node census the planes took their
+    // grouping from, so the report and the planes cannot disagree about which
+    // zids the capture holds. The key is absent for a selector that was judged.
+    push_selector_ambiguities(filter, &nodes, &mut out);
     // R311y885 — WHAT THE WALK UNDER THESE PLANES LOST, so a bounded census is
     // not silent about its bound.
     //
@@ -197,6 +214,20 @@ pub fn census_json_where(d: &crate::Dissection, filter: &crate::filter::Filter) 
     out.push_str(&crate::report::dropped_by_limits_json(d));
     out.push('}');
     out
+}
+
+/// The `ambiguous_zid_prefixes` key for `filter` over the capture `nodes` was
+/// read from, or nothing.
+///
+/// A `zid` term written as a prefix is judged against the zids the capture
+/// names, and a prefix that begins two or more of them judges nothing; the
+/// document says so beside the planes it left undecided, in the shape the
+/// selection document uses ([`crate::filter::push_ambiguous_zid_prefixes`] is
+/// the one writer of both).
+fn push_selector_ambiguities(filter: &crate::filter::Filter, nodes: &NodeCensus, out: &mut String) {
+    let grouping = crate::node::SessionGrouping::of(nodes);
+    let resolved = filter.resolved_against(grouping.named_zids());
+    crate::filter::push_ambiguous_zid_prefixes(resolved.ambiguities(), out);
 }
 
 /// The INTEREST plane: who declared what, and what their declarations cover.
@@ -2229,6 +2260,21 @@ pub(crate) mod fed_tests {
             &crate::filter::Filter::any(),
         );
         let mut seen = json_keys(&doc);
+        // The ONE document that carries `ambiguous_zid_prefixes`: a selector
+        // whose `zid` prefix begins two nodes of the capture. The key is absent
+        // from every other document, so a population without this one would
+        // leave the five keys the revision declares unmeasured and the pin
+        // would be a claim about a shape nothing renders.
+        let ambiguous = census_json_where(
+            &crate::selector_zid_tests::twins_and_two_others(),
+            &crate::filter::Filter::parse(crate::selector_zid_tests::AMBIGUOUS_SELECTOR)
+                .expect("the selector parses"),
+        );
+        assert!(
+            ambiguous.contains("\"ambiguous_zid_prefixes\""),
+            "the population must hold the document the key arrives in: {ambiguous}"
+        );
+        seen.extend(json_keys(&ambiguous));
         seen.sort_unstable();
         seen.dedup();
         // R2100 (open-debt item 509) — the set MOVED to
