@@ -345,16 +345,23 @@ mod tests {
     /// The elapsed readings must be MONOTONIC and consistent with each other:
     /// microseconds >= milliseconds >= seconds after truncating division. A clock
     /// that ran backwards, or one whose divisors were transposed, fails here.
+    ///
+    /// The three are separate samples of a clock that keeps going, so they are read COARSEST
+    /// FIRST: a coarser reading taken earlier can never exceed a finer one taken later. Read the
+    /// other way round, a millisecond boundary falling between two calls makes the later, coarser
+    /// reading the larger, and the inequality fails on a busy host with nothing wrong (it did on a
+    /// macOS runner: `us (34999) must dominate ms (35)`; measured, the finer-first order breaks
+    /// for about one pair in three hundred and the coarser-first order for none).
     #[test]
     fn the_three_elapsed_readings_agree_on_one_interval() {
         let start = z_clock_now();
         std::thread::sleep(std::time::Duration::from_millis(20));
         // SAFETY: `start` is a live local.
-        let (us, ms, s) = unsafe {
+        let (s, ms, us) = unsafe {
             (
-                z_clock_elapsed_us(&start),
-                z_clock_elapsed_ms(&start),
                 z_clock_elapsed_s(&start),
+                z_clock_elapsed_ms(&start),
+                z_clock_elapsed_us(&start),
             )
         };
         assert!(ms >= 20, "20 ms of sleep must be visible, saw {ms} ms");
