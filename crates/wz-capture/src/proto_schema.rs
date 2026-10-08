@@ -761,7 +761,9 @@ impl<'a> Linker<'_, 'a> {
         Ok(sym)
     }
 
-    /// The error for a symbol defined in a file `file` does not import.
+    /// Whether `file` may name `sym`: its own symbols, its direct imports' and
+    /// what they re-export. Otherwise the error `protoc` gives for a symbol
+    /// defined in a file that `file` does not import.
     fn require_import(
         &self,
         file: usize,
