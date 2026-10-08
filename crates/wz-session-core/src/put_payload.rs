@@ -420,9 +420,36 @@ pub fn relay_shm_slices(
     let Some(slices) = put.slices.as_ref() else {
         return Ok(());
     };
+    let remade = remake_slices(SceList::as_slice(slices), &mut decide)?;
+    let unrepresentable = |_| RelayFault::Unrepresentable;
+    if has_shared_slice(&remade) {
+        put.slice_count = Some(remade.len() as u32);
+        put.slices = Some(slice_list(&remade)?);
+        return Ok(());
+    }
+    let joined = join_slices(remade);
+    put.payload_len = Some(joined.len() as u64);
+    put.payload = Some(crate::wire::wire_bytes(&joined).map_err(unrepresentable)?);
+    put.slice_count = None;
+    put.slices = None;
+    remove_shm_marker(put).map_err(unrepresentable)
+}
+
+/// The slices of a list that is being forwarded to one peer, each as the kind and bytes it is
+/// sent as. The walk both a Put's payload and a query's value go through, so the two cannot
+/// disagree about what a slice is owed.
+///
+/// EVERY shared-memory slice is offered to `decide`, in order, once, whatever became of the slices
+/// before it, because a decision may take a reference and a slice that is never offered is a
+/// reference nobody gives back.
+#[cfg(feature = "transport-shm")]
+pub(crate) fn remake_slices(
+    slices: &[ZbufSliceOwned<crate::wire::WireStorage>],
+    mut decide: impl FnMut(&[u8]) -> Option<Relayed>,
+) -> Result<Vec<(u8, Vec<u8>)>, RelayFault> {
     let mut remade: Vec<(u8, Vec<u8>)> = Vec::new();
     let mut fault = None;
-    for slice in SceList::as_slice(slices) {
+    for slice in slices {
         let bytes = SceByteBuf::as_slice(&slice.bytes);
         match slice_kind(slice.kind) {
             SLICE_KIND_RAW => remade.push((SLICE_KIND_RAW, bytes.to_vec())),
@@ -440,34 +467,65 @@ pub fn relay_shm_slices(
             }
         }
     }
-    if let Some(fault) = fault {
-        return Err(fault);
+    match fault {
+        Some(fault) => Err(fault),
+        None => Ok(remade),
     }
+}
+
+/// Whether any slice of `remade` is still a descriptor, which is whether the list stays sliced.
+#[cfg(feature = "transport-shm")]
+pub(crate) fn has_shared_slice(remade: &[(u8, Vec<u8>)]) -> bool {
+    remade.iter().any(|(kind, _)| *kind == SLICE_KIND_SHM_PTR)
+}
+
+/// The bytes of a list that no longer holds a descriptor, joined in order.
+#[cfg(feature = "transport-shm")]
+pub(crate) fn join_slices(remade: Vec<(u8, Vec<u8>)>) -> Vec<u8> {
+    remade.into_iter().flat_map(|(_, bytes)| bytes).collect()
+}
+
+/// `remade` as the wire profile's list of slices.
+#[cfg(feature = "transport-shm")]
+pub(crate) fn slice_list(
+    remade: &[(u8, Vec<u8>)],
+) -> Result<
+    <crate::wire::WireStorage as CodecStorage>::List<ZbufSliceOwned<crate::wire::WireStorage>, 4>,
+    RelayFault,
+> {
+    type Slices = <crate::wire::WireStorage as CodecStorage>::List<
+        ZbufSliceOwned<crate::wire::WireStorage>,
+        4,
+    >;
     let unrepresentable = |_| RelayFault::Unrepresentable;
-    if remade.iter().any(|(kind, _)| *kind == SLICE_KIND_SHM_PTR) {
-        type Slices = <crate::wire::WireStorage as CodecStorage>::List<
-            ZbufSliceOwned<crate::wire::WireStorage>,
-            4,
-        >;
-        let mut list = <Slices as SceList<_>>::empty();
-        for (kind, bytes) in &remade {
-            list.try_push(ZbufSliceOwned {
-                kind: u32::from(*kind),
-                len: bytes.len() as u64,
-                bytes: crate::wire::wire_bytes(bytes).map_err(unrepresentable)?,
-            })
-            .map_err(unrepresentable)?;
-        }
-        put.slice_count = Some(remade.len() as u32);
-        put.slices = Some(list);
-        return Ok(());
+    let mut list = <Slices as SceList<_>>::empty();
+    for (kind, bytes) in remade {
+        list.try_push(ZbufSliceOwned {
+            kind: u32::from(*kind),
+            len: bytes.len() as u64,
+            bytes: crate::wire::wire_bytes(bytes).map_err(unrepresentable)?,
+        })
+        .map_err(unrepresentable)?;
     }
-    let joined: Vec<u8> = remade.into_iter().flat_map(|(_, bytes)| bytes).collect();
-    put.payload_len = Some(joined.len() as u64);
-    put.payload = Some(crate::wire::wire_bytes(&joined).map_err(unrepresentable)?);
-    put.slice_count = None;
-    put.slices = None;
-    remove_shm_marker(put).map_err(unrepresentable)
+    Ok(list)
+}
+
+/// The serialized descriptor of every shared-memory slice of a Put's payload, in order. Empty for
+/// a Put that carries none, which is nearly every Put.
+pub fn shm_descriptors<S: CodecStorage>(put: &MsgPutOwned<S>) -> Vec<&[u8]> {
+    match layout(put) {
+        PutPayload::Inline(_) => Vec::new(),
+        PutPayload::Sliced(slices) => shm_descriptors_of(slices),
+    }
+}
+
+/// The serialized descriptor of every shared-memory slice of a list of slices, in order.
+pub fn shm_descriptors_of<S: CodecStorage>(slices: &[ZbufSliceOwned<S>]) -> Vec<&[u8]> {
+    slices
+        .iter()
+        .filter(|slice| slice_kind(slice.kind) == SLICE_KIND_SHM_PTR)
+        .map(|slice| SceByteBuf::as_slice(&slice.bytes))
+        .collect()
 }
 
 /// Take the shared-memory marker out of a Put's extension chain, renormalise the continuation
