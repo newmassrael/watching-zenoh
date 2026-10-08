@@ -2656,7 +2656,14 @@ PIN_NO_SYMBOL = 0
 # witnesses the two readers. `api-compat-c` is not touched and is still PARTIAL beside it. READ off
 # the census's own FAIL line, `wz citations: 264 against a pin of 259`, for the reason the R3062
 # note gives.
-PIN_WZ_CITATIONS = 264
+#
+# R3103 -- 264 -> 270, one atom. `transport-shm`'s reason gains the UPDATE that a router holds the
+# chunk of the value of a query and of a reply it routes and sends each link what its peer can
+# read: it names the relay's message type, the session core's one decision per slice, the two
+# rewrites and the codec's error reply that has no sliced layout. `api-compat-c` is not touched and
+# is still PARTIAL beside it. READ off the census's own FAIL line, `wz citations: 270 against a pin
+# of 264`, for the reason the R3062 note gives.
+PIN_WZ_CITATIONS = 270
 # R2626 — 44 -> 42, and this one is worth a sentence because it HELD through
 # every earlier retirement in this run (R2612, R2622). `time-hlc`'s reason is the
 # first retiree carrying AMBIGUOUS citations of its own: its oldest clauses cite
