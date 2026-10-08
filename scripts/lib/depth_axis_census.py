@@ -2698,7 +2698,16 @@ PIN_NO_SYMBOL = 0
 # routed on, and the runtime test that a publish through the real entry is counted on the link it
 # leaves on. `api-compat-c` is not touched and is still PARTIAL beside it. READ off the census's
 # own FAIL line, `wz citations: 289 against a pin of 284`.
-PIN_WZ_CITATIONS = 289
+#
+# R3123 -- 289 -> 295, one atom. `transport-shm`'s reason gains the UPDATE that the receive handoff
+# belongs to a link and corrects how R3122 described the sending half: it names the link's slot
+# that keeps the handoff its peer's Open message opened, what the Open handlers hand back, the
+# session's field that holds the slot, the forwarder's mark of the joined link a message arrived
+# on, the point where a joined link is registered with its own session, and the forwarder test
+# that a slice is acknowledged to the peer of the link it arrived on. `api-compat-c` is not
+# touched and is still PARTIAL beside it. READ off the census's own FAIL line, `wz citations: 295
+# against a pin of 289`.
+PIN_WZ_CITATIONS = 295
 # R2626 — 44 -> 42, and this one is worth a sentence because it HELD through
 # every earlier retirement in this run (R2612, R2622). `time-hlc`'s reason is the
 # first retiree carrying AMBIGUOUS citations of its own: its oldest clauses cite
