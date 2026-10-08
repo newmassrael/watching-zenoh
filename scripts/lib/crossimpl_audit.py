@@ -1017,7 +1017,11 @@ HOST_GATED_CI_TARGETS: dict[str, str] = {
 # `zenoh_c_scouting_twice_and_diff.rs` for the bind phase's budget and retry, a bind that fails is
 # tried again inside its budget as the real library does it (`api-compat-c zenoh-c->wz partial`).
 # Measured by `scripts/audit-crossimpl-proof.sh`.
-FOREIGN_ADJUDICATOR_LINKS = 1029
+# R3090 -- 1029 -> 1030, RISING by one: a new `wz-proves` line in
+# `pico_listen_and_connect_twice_and_diff.rs`, a pico config that states `listen` and `connect`
+# together listens and dials as the real zenoh-pico does (`api-compat-pico wz->pico partial`).
+# Measured by `scripts/audit-crossimpl-proof.sh`.
+FOREIGN_ADJUDICATOR_LINKS = 1030
 
 # ── Execution disclosure ────────────────────────────────────────────────────────
 #

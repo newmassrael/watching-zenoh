@@ -286,15 +286,18 @@ pub unsafe extern "C" fn z_open(
         if connect.is_none() && listen.is_none() {
             return crate::result::Z_ERR_INVALID;
         }
-        // A config carrying BOTH connect and listen is pico's dual-role
-        // listen-and-dial peer (`session.c:99-108` appends the connect
-        // endpoints after forcing the listen endpoint to PEER mode). That
-        // hybrid — an N-face accept listener AND a dial face on one runtime —
-        // is a follow-up; reject it explicitly rather than SILENTLY dropping
-        // the listener (which is what picking one arm would do).
-        if connect.is_some() && listen.is_some() {
-            return crate::result::Z_ERR_INVALID;
-        }
+        // A config carrying BOTH connect and listen is pico's dual-role listen-and-dial peer:
+        // `_z_locators_by_config` refuses the pair only in a build without unicast peers and
+        // otherwise forces the mode to peer for any listen config and goes on
+        // (`vendor/zenoh-pico/src/net/session.c` @ `static z_result_t _z_locators_by_config(`).
+        // The core runs it (a listener bound before the dial, an accept loop beside the dial
+        // face), so it is not refused. Until R3090 it was, with `Z_ERR_INVALID`, and the comment
+        // called it a follow-up.
+        let dial_whatami = if listen.is_some() {
+            WhatAmI::Peer
+        } else {
+            dial_whatami
+        };
 
         // This ABI stays on one attempt: the retry the zenoh-c open gained reads
         // zenoh's `connect/retry` and `connect/timeout_ms`, which are zenoh-c
