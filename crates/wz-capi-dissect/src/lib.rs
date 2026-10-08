@@ -1513,6 +1513,8 @@ pub unsafe extern "C" fn wz_dissect_declarations_from_proto(
     // SAFETY: caller contract above.
     let entries = unsafe { core::slice::from_raw_parts(files, file_count) };
     let mut given: Vec<wz_capture::proto_schema::ProtoFile<'_>> = Vec::with_capacity(file_count);
+    // A set, so the duplicate check is not quadratic in the number of files.
+    let mut names: std::collections::BTreeSet<&str> = std::collections::BTreeSet::new();
     for entry in entries {
         if entry.name.is_null() || (entry.text.is_null() && entry.text_len != 0) {
             return WZ_DISSECT_ERR_INVALID_ARG;
@@ -1527,7 +1529,7 @@ pub unsafe extern "C" fn wz_dissect_declarations_from_proto(
             // SAFETY: caller contract above; non-null was checked just now.
             unsafe { core::slice::from_raw_parts(entry.text, entry.text_len) }
         };
-        if given.iter().any(|f| f.name == name) {
+        if !names.insert(name) {
             return WZ_DISSECT_ERR_INVALID_ARG;
         }
         given.push(wz_capture::proto_schema::ProtoFile { name, text });
