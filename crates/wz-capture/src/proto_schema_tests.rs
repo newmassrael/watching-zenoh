@@ -703,6 +703,48 @@ fn import_public_re_exports_and_only_import_public_does() {
 }
 
 #[test]
+fn a_public_import_is_re_exported_along_a_whole_chain_but_only_as_far_as_it_is_public() {
+    let leaf = "syntax = \"proto3\";\nmessage Leaf { int32 x = 1; }\n";
+    let user = "syntax = \"proto3\";\nimport \"top.proto\";\nmessage U { Leaf l = 1; }\n";
+    // top -> (public) mid -> (public) leaf: two public hops, and `U` sees `Leaf`.
+    declare(
+        "U",
+        &[
+            ("a.proto", user),
+            (
+                "top.proto",
+                "syntax = \"proto3\";\nimport public \"mid.proto\";\n",
+            ),
+            (
+                "mid.proto",
+                "syntax = \"proto3\";\nimport public \"leaf.proto\";\n",
+            ),
+            ("leaf.proto", leaf),
+        ],
+    )
+    .expect("two public hops are followed");
+    // Break the chain at its second hop: the plain import stops the re-export.
+    let d = declare(
+        "U",
+        &[
+            ("a.proto", user),
+            (
+                "top.proto",
+                "syntax = \"proto3\";\nimport public \"mid.proto\";\n",
+            ),
+            (
+                "mid.proto",
+                "syntax = \"proto3\";\nimport \"leaf.proto\";\n",
+            ),
+            ("leaf.proto", leaf),
+        ],
+    )
+    .expect_err("a plain import in the chain ends the re-export");
+    assert_eq!((d.file.as_deref(), d.line), (Some("a.proto"), Some(3)));
+    assert!(d.reason.contains("not imported by \"a.proto\""), "{d}");
+}
+
+#[test]
 fn a_root_message_may_live_in_an_imported_file() {
     let text = declare(
         "leaf.Leaf",
