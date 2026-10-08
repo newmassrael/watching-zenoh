@@ -84,8 +84,8 @@ use wz_runtime_tokio::session_open::{
 };
 use wz_runtime_tokio::shm_backend::{AllocAlignment, MemoryLayout};
 use wz_runtime_tokio::shm_provider::{
-    chunk_position, is_invalidated, reference_state, AllocPolicy, ChunkHold, PosixShmResolver,
-    ReferenceState, ShmBackedPayload, ShmProvider,
+    chunk_position, data_segment_maps, is_invalidated, reference_state, AllocPolicy, ChunkHold,
+    PosixShmResolver, ReferenceState, ShmBackedPayload, ShmProvider,
 };
 use wz_runtime_tokio::sync::Mutex;
 use wz_runtime_tokio_test_support::zenoh_interop_session_init_params;
@@ -122,9 +122,19 @@ struct CountingResolver {
     /// Every descriptor the registry asked about, so a leg can read the OTHER
     /// side's bookkeeping for each chunk afterwards.
     seen: Arc<StdMutex<Vec<ShmDescriptor>>>,
+    /// The data segment each descriptor's chunk lies in, read off zenoh's own header BEFORE the
+    /// chunk is resolved, while the slot is certainly still the descriptor's.
+    segments: Arc<StdMutex<std::collections::BTreeSet<u32>>>,
 }
 
 impl CountingResolver {
+    /// Note the data segment a descriptor's chunk lies in.
+    fn note_segment(&self, descriptor: &ShmDescriptor) {
+        if let Some((segment, _chunk)) = chunk_position(descriptor) {
+            self.segments.lock().expect("segments").insert(segment);
+        }
+    }
+
     /// Note one descriptor and whether it resolved.
     fn count<T>(&self, descriptor: &ShmDescriptor, resolved: &Option<T>) {
         self.seen.lock().expect("seen").push(*descriptor);
@@ -139,6 +149,7 @@ impl CountingResolver {
 
 impl ShmResolver for CountingResolver {
     fn resolve(&self, descriptor: &ShmDescriptor) -> Option<Vec<u8>> {
+        self.note_segment(descriptor);
         let bytes = self.inner.resolve(descriptor);
         self.count(descriptor, &bytes);
         bytes
@@ -149,6 +160,7 @@ impl ShmResolver for CountingResolver {
     /// leg reads back off zenoh's headers are given back by the drop of the
     /// delivered sample and not by a copy having been made (R3050).
     fn resolve_shared(&self, descriptor: &ShmDescriptor) -> Option<RxBytes> {
+        self.note_segment(descriptor);
         let bytes = self.inner.resolve_shared(descriptor);
         self.count(descriptor, &bytes);
         bytes
@@ -311,6 +323,11 @@ struct ZenohToWz {
     /// chunk of the sample the application kept was given back once that sample was
     /// dropped.
     kept_given_back: Option<bool>,
+    /// How many data segments the wz side mapped while the run lasted.
+    data_segment_maps: usize,
+    /// How many distinct data segments the chunks the resolver was handed lie in, read off
+    /// zenoh's own headers.
+    segments_served: usize,
     /// Everything the publisher printed.
     zenoh_log: String,
 }
@@ -331,6 +348,7 @@ async fn zenoh_publishes_to_wz_in(offer_shm: bool, mode: RunMode) -> Option<Zeno
         );
         return None;
     };
+    let maps_before = data_segment_maps();
     let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
     let port = listener.local_addr().expect("local addr").port();
     let (_guard, mut zenoh_log) = spawn_zenoh(
@@ -392,6 +410,7 @@ async fn zenoh_publishes_to_wz_in(offer_shm: bool, mode: RunMode) -> Option<Zeno
     let refused = Arc::new(AtomicUsize::new(0));
     let seen: Arc<StdMutex<Vec<ShmDescriptor>>> = Arc::default();
     let held: Arc<StdMutex<Option<ChunkHold>>> = Arc::default();
+    let segments: Arc<StdMutex<std::collections::BTreeSet<u32>>> = Arc::default();
     match mode {
         RunMode::Resolving | RunMode::RetainedSample => {
             session.set_shm_resolver(Box::new(CountingResolver {
@@ -399,6 +418,7 @@ async fn zenoh_publishes_to_wz_in(offer_shm: bool, mode: RunMode) -> Option<Zeno
                 resolved: resolved.clone(),
                 refused: refused.clone(),
                 seen: seen.clone(),
+                segments: segments.clone(),
             }))
         }
         RunMode::WatchdogProbe => session.set_shm_resolver(Box::new(HoldingResolver {
@@ -533,6 +553,7 @@ async fn zenoh_publishes_to_wz_in(offer_shm: bool, mode: RunMode) -> Option<Zeno
         }
         kept_given_back = Some(back);
     }
+    let segments_served = segments.lock().expect("segments").len();
     Some(ZenohToWz {
         negotiated,
         received,
@@ -542,6 +563,8 @@ async fn zenoh_publishes_to_wz_in(offer_shm: bool, mode: RunMode) -> Option<Zeno
         uninvalidated,
         watchdog,
         kept_given_back,
+        data_segment_maps: data_segment_maps().saturating_sub(maps_before),
+        segments_served,
         zenoh_log: read_captured(&mut zenoh_log),
     })
 }
@@ -616,6 +639,18 @@ async fn zenohd_shm_publisher_payload_reaches_a_wz_subscriber_through_shared_mem
     assert_eq!(
         run.refused, 0,
         "the resolver refused descriptors zenoh's provider wrote:\n{}",
+        run.zenoh_log
+    );
+    // THE MAPPING, read off zenoh's own headers for how many segments its chunks lie in. A reader
+    // mounts a data segment once and serves every chunk of it from that mapping, as upstream's does
+    // (`commons/zenoh-shm/src/reader.rs` @ `// fastest path: try to get access to already mounted SHM segment`);
+    // one that maps again for each payload made as many mappings as samples.
+    assert!(
+        run.segments_served >= 1 && run.data_segment_maps <= run.segments_served,
+        "{} data segment mapping(s) for {} sample(s) lying in {} segment(s) of zenoh's:\n{}",
+        run.data_segment_maps,
+        run.resolved,
+        run.segments_served,
         run.zenoh_log
     );
     assert!(
