@@ -239,7 +239,7 @@ ALLOWED = [
         "one parse; nothing captured is in it",
     ),
     # The `.proto` reader (`proto_schema`) reads TEXT a caller handed over and
-    # holds no capture, so none of its three removals discards evidence. Each is
+    # holds no capture, so none of its four removals discards evidence. Each is
     # a work list that lives inside one call.
     (
         "wz-capture/proto_parse.rs",
@@ -261,6 +261,13 @@ ALLOWED = [
         "the expansion's stack of messages being walked: a message leaving it "
         "because its fields are written, which is what lets a cycle be told "
         "from a message used twice; a work list inside one call",
+    ),
+    (
+        "wz-capture/proto_schema.rs",
+        "while let Some(msg) = pending.pop() {",
+        "the reach walk's work list: a message leaving it because it is now "
+        "being visited, and it is recorded in the walk's result on the next "
+        "lines; a work list inside one call",
     ),
     (
         "wz-capture/frag.rs",
