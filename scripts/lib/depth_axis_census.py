@@ -2675,7 +2675,15 @@ PIN_NO_SYMBOL = 0
 # gone, and the interop leg that counts the mappings against zenoh's own headers. `api-compat-c`
 # is not touched and is still PARTIAL beside it. READ off the census's own FAIL line, `wz
 # citations: 275 against a pin of 271`.
-PIN_WZ_CITATIONS = 275
+#
+# R3110 -- 275 -> 280, one atom. `transport-shm`'s reason gains the UPDATE that wz as a sender
+# declares counters and keeps every chunk it sends confirmed until the peer acknowledges it: it
+# names the sender's handoff trait, the session core's transaction around a message that carries a
+# buffer, the runtime's confirmation of a sent chunk, the watchdog tick's poll of the counters, and
+# the interop leg that reads the late reader's delivery and the release against zenoh's own
+# subscriber. `api-compat-c` is not touched and is still PARTIAL beside it. READ off the census's
+# own FAIL line, `wz citations: 280 against a pin of 275`.
+PIN_WZ_CITATIONS = 280
 # R2626 — 44 -> 42, and this one is worth a sentence because it HELD through
 # every earlier retirement in this run (R2612, R2622). `time-hlc`'s reason is the
 # first retiree carrying AMBIGUOUS citations of its own: its oldest clauses cite
