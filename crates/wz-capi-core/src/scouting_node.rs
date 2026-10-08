@@ -68,7 +68,7 @@ const SCOUT_MAX_PERIOD_MS: u64 = 8_000;
 const HARVEST_PERIOD: Duration = Duration::from_millis(20);
 
 /// `scouting/multicast/address`'s default group and port.
-const GROUP_DEFAULT: Ipv4Addr = Ipv4Addr::new(224, 0, 0, 224);
+const GROUP_DEFAULT: IpAddr = IpAddr::V4(Ipv4Addr::new(224, 0, 0, 224));
 const PORT_DEFAULT: u16 = 7446;
 /// `scouting/delay` and `scouting/timeout` defaults, in milliseconds.
 const DELAY_DEFAULT_MS: u64 = 500;
@@ -91,8 +91,8 @@ fn default_autoconnect(whatami: wz_runtime_tokio::session_glue::WhatAmI) -> What
 /// config resolves them, so this crate holds no reading of its own.
 #[derive(Clone, Debug)]
 pub struct ScoutingPlan {
-    /// The group scouts go to: `scouting/multicast/address`.
-    pub group: Ipv4Addr,
+    /// The group scouts go to: `scouting/multicast/address`, of either family.
+    pub group: IpAddr,
     /// Its port.
     pub port: u16,
     /// `scouting/multicast/interface`, `None` for upstream's `"auto"`.
@@ -118,9 +118,8 @@ pub struct ScoutingPlan {
 /// The group a config named is not one this node can scout on.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ScoutingConfigError {
-    /// `scouting/multicast/address` is not `<ipv4>:<port>`. An IPv6 group is a real zenoh value
-    /// and is not one this host joins yet, so it is refused by name and not scouted on as a
-    /// different group.
+    /// `scouting/multicast/address` is not a socket address (`<ipv4>:<port>` or
+    /// `[<ipv6>]:<port>`), so it is refused by name and not scouted on as a different group.
     Address(String),
 }
 
@@ -148,8 +147,8 @@ impl ScoutingPlan {
         let (group, port) = match node.scout_multicast_address.as_deref() {
             None => (GROUP_DEFAULT, PORT_DEFAULT),
             Some(text) => match text.parse::<std::net::SocketAddr>() {
-                Ok(std::net::SocketAddr::V4(addr)) => (*addr.ip(), addr.port()),
-                _ => return Err(ScoutingConfigError::Address(text.to_owned())),
+                Ok(addr) => (addr.ip(), addr.port()),
+                Err(_) => return Err(ScoutingConfigError::Address(text.to_owned())),
             },
         };
         let matcher = node
@@ -196,13 +195,13 @@ pub struct ScoutLink {
 impl ScoutLink {
     /// Join `plan`'s group and bind its ask sockets.
     pub async fn bind(plan: &ScoutingPlan) -> io::Result<Self> {
-        let group = IpAddr::V4(plan.group);
+        let group = plan.group;
         let config = McastSocketConfig {
             iface: plan.interface.as_deref(),
             ttl: plan.ttl,
             ..McastSocketConfig::default()
         };
-        let group_socket = UdpDriver::bind_multicast(group, plan.port, config).await?;
+        let group_socket = UdpDriver::bind_scouting_group(group, plan.port, config).await?;
         // Where the Scout leaves from: every interface that can carry multicast when the
         // config names none, and the named one's own addresses when it does, as upstream's
         // `get_interfaces` resolves them.
@@ -447,7 +446,7 @@ pub async fn bind_responder(
         ttl: plan.ttl,
         ..McastSocketConfig::default()
     };
-    let group_socket = UdpDriver::bind_multicast(IpAddr::V4(plan.group), plan.port, config).await?;
+    let group_socket = UdpDriver::bind_scouting_group(plan.group, plan.port, config).await?;
     let replies = match plan.interface.as_deref() {
         Some(iface) => wz_runtime_tokio::link_interfaces::unicast_addresses_of_interface(iface)
             .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, format!("{e:?}")))?
@@ -466,8 +465,10 @@ pub async fn bind_responder(
     // interface already joined or gone is skipped, as upstream warns and goes on.
     if plan.interface.is_none() {
         for iface in &replies {
-            if let IpAddr::V4(iface) = iface {
-                let _ = group_socket.join_multicast_v4_on(plan.group, *iface);
+            // Upstream joins an IPv4 group on each interface address and an IPv6 group once, on
+            // interface 0 (`bind_mcast_port`), which the bind above already did.
+            if let (IpAddr::V4(group), IpAddr::V4(iface)) = (plan.group, iface) {
+                let _ = group_socket.join_multicast_v4_on(group, *iface);
             }
         }
     }
@@ -527,7 +528,7 @@ mod tests {
             let plan = resolved(&node, role);
             assert_eq!(
                 (plan.group, plan.port),
-                (Ipv4Addr::new(224, 0, 0, 224), 7446)
+                (IpAddr::V4(Ipv4Addr::new(224, 0, 0, 224)), 7446)
             );
             assert_eq!(plan.interface, None);
             assert_eq!(plan.ttl, None);
@@ -568,7 +569,7 @@ mod tests {
         );
         assert_eq!(
             (plan.group, plan.port),
-            (Ipv4Addr::new(224, 0, 0, 231), 7511)
+            (IpAddr::V4(Ipv4Addr::new(224, 0, 0, 231)), 7511)
         );
         assert_eq!(plan.interface.as_deref(), Some("lo"));
         assert_eq!(plan.ttl, Some(3));
@@ -589,7 +590,19 @@ mod tests {
         assert!(!resolved(&node, Role::Client).scouts());
     }
 
-    /// With multicast scouting off there is no plan, and a group this host cannot scout on is
+    /// An IPv6 group is a plan like any other: the family is the group's, and the port follows it.
+    #[test]
+    fn an_ipv6_group_resolves_to_a_plan() {
+        let mut node = ZenohNodeConfig::default();
+        node.scout_multicast_address = Some(String::from("[ff05::231]:7511"));
+        let plan = resolved(&node, Role::Peer);
+        assert_eq!(
+            (plan.group, plan.port),
+            (IpAddr::from([0xff05, 0, 0, 0, 0, 0, 0, 0x231]), 7511)
+        );
+    }
+
+    /// With multicast scouting off there is no plan, and a group that is not a socket address is
     /// refused by name and not replaced by another.
     #[test]
     fn scouting_off_is_no_plan_and_an_unusable_group_is_refused() {
@@ -600,12 +613,12 @@ mod tests {
             .is_none());
 
         node.multicast_scouting = true;
-        for text in ["not-an-address", "224.0.0.224", "[ff02::1]:7446"] {
+        for text in ["not-an-address", "224.0.0.224", "ff02::1:7446"] {
             node.scout_multicast_address = Some(text.to_owned());
             assert_eq!(
                 ScoutingPlan::resolve(&node, Role::Peer).err(),
                 Some(ScoutingConfigError::Address(text.to_owned())),
-                "`{text}` is not an IPv4 group and port"
+                "`{text}` is not a group and port"
             );
         }
     }

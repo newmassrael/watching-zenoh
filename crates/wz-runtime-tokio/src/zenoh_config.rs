@@ -6204,7 +6204,7 @@ impl ZenohNodeConfig {
         // failure mode of accepting `"224.0.0.224"` (no port) is a node that
         // starts, reports the key honoured, and joins nothing.
         if let Some(v) = want_string(&doc, "scouting/multicast/address", "an <ip>:<port> socket")? {
-            if v.parse::<std::net::SocketAddrV4>().is_err() {
+            if v.parse::<std::net::SocketAddr>().is_err() {
                 return Err(ConfigIngestError::WrongType {
                     path: "scouting/multicast/address",
                     expected: "an <ip>:<port> socket",
@@ -7433,6 +7433,20 @@ mod tests {
             ok.config.scout_multicast_address.as_deref(),
             Some("224.0.0.99:7999")
         );
+        // R3125 -- and a bracketed IPv6 socket parses as upstream's `SocketAddr` does; an
+        // unbracketed one is no socket.
+        let v6 = ZenohNodeConfig::from_json5(
+            r#"{ "scouting": { "multicast": { "address": "[ff05::231]:7999" } } }"#,
+        )
+        .unwrap();
+        assert_eq!(
+            v6.config.scout_multicast_address.as_deref(),
+            Some("[ff05::231]:7999")
+        );
+        assert!(ZenohNodeConfig::from_json5(
+            r#"{ "scouting": { "multicast": { "address": "ff05::231:7999" } } }"#,
+        )
+        .is_err());
     }
 
     /// Every entry of [`HONOURED_CONFIG_KEYS`] is genuinely READ.

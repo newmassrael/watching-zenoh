@@ -2355,3 +2355,79 @@ fn a_listener_bound_late_is_gossiped_to_a_node_that_dials_its_neighbour_on_wz_an
         );
     }
 }
+
+// ---------------------------------------------------------------------------------------------
+// An IPv6 scouting group. R3125.
+// ---------------------------------------------------------------------------------------------
+
+/// Two peers of `y` and `reference` on `group`, the tested one first, each publishing for eight
+/// seconds.
+fn two_peers_on(y: &Built, reference: &Built, key: &str, group: &str) -> (Outcome, Outcome) {
+    let mut a = Node::start(y, &peer_spec(key, "Y", group));
+    let open_a = a.opened();
+    let mut b = Node::start(reference, &peer_spec(key, "X", group));
+    let open_b = b.opened();
+    (a.finish(open_a), b.finish(open_b))
+}
+
+/// An IPv6 scouting group, on the four scopes an IPv6 group can have. Measured on the real
+/// library, whose default interface list holds IPv4 addresses ALONE
+/// (`commons/zenoh-util/src/net/mod.rs` @ `if ipaddr.is_ipv4() {`), so the Scout leaves from
+/// sockets that cannot send to an IPv6 group:
+///
+/// - a LINK-LOCAL group (`ff02::`, `ff12::`) fails the open: upstream binds the scouting socket to
+///   the group address itself on unix, and Linux refuses to bind a link-local multicast address
+///   that carries no scope id;
+/// - a wider group (`ff05::`, `ff0e::`) opens, and the two peers never find each other: each
+///   opens after `scouting/delay` and hears only itself.
+///
+/// The real library's rows are asserted first. A host with no IPv6 fails every one of these opens,
+/// and the wz arm must then fail them too, which is why wz is compared to the real rows and not
+/// to a table of its own.
+// wz-proves: api-compat-c zenoh-c->wz partial
+#[test]
+#[ignore = "reads a zenoh-c oracle; run by run-ci Layer C1cc (which builds the matching \
+            ABI arm this needs)"]
+fn a_node_scouting_on_an_ipv6_group_behaves_identically_on_wz_and_libzenohc() {
+    let Some(programs) = programs() else {
+        return;
+    };
+    for (n, (group, link_local)) in [
+        ("[ff02::231]:7601", true),
+        ("[ff12::231]:7602", true),
+        ("[ff05::231]:7603", false),
+        ("[ff0e::231]:7604", false),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let key = format!("wz/scouting/v6/{n}");
+        let (oracle_y, oracle_x) =
+            two_peers_on(&programs.reference, &programs.reference, &key, group);
+        let refused = "open=-4";
+        if link_local {
+            assert_eq!(
+                (oracle_y.row.as_str(), oracle_x.row.as_str()),
+                (refused, refused),
+                "the REAL library's rows for two peers on the link-local group {group} are not \
+                 what this file expects"
+            );
+        } else {
+            for (row, tag) in [(&oracle_y.row, "Y"), (&oracle_x.row, "X")] {
+                let alone = format!("open=0 | declare=0 senders={tag} dups=0");
+                assert!(
+                    *row == alone || row == refused,
+                    "the REAL library's row for a peer on {group} is neither opened-and-alone nor \
+                     refused (a host with no IPv6): {row}"
+                );
+            }
+        }
+        let (wz_y, wz_x) = two_peers_on(&programs.wz, &programs.reference, &key, group);
+        assert_eq!(
+            (wz_y.row.as_str(), wz_x.row.as_str()),
+            (oracle_y.row.as_str(), oracle_x.row.as_str()),
+            "§5.27 api-compat-c: a wz peer (first) and a real peer on the IPv6 group {group} do \
+             not end as two real peers do"
+        );
+    }
+}

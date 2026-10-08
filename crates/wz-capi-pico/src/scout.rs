@@ -1119,7 +1119,7 @@ fn run_scout(
     budget_ms: u64,
     mut on_hello: impl FnMut(&mut HelloState),
 ) -> usize {
-    wz_capi_core::scouting::run_scout(group, port, what, zid, budget_ms, |hello| {
+    wz_capi_core::scouting::run_scout(group.into(), port, what, zid, budget_ms, |hello| {
         let whatami = hello.whatami.map_or(0, |w| u32::from(w.to_api()));
         let mut state = HelloState::new(
             z_id_t::from_wire(&hello.zid),

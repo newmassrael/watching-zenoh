@@ -40,7 +40,7 @@
 //! arrival order (the list is built by prepending). A per-Hello, arrival-order
 //! delivery would be nicer and would still be a divergence.
 
-use std::net::Ipv4Addr;
+use std::net::{IpAddr, SocketAddr};
 
 use wz_runtime_tokio::scouting_glue::ScoutedHello;
 
@@ -61,11 +61,12 @@ pub const SCOUT_CYCLE_MS: u64 = 1000;
 /// The scouting drive-loop tick.
 pub const SCOUT_TICK_MS: u64 = 50;
 
-/// Parse a `udp/ADDR:PORT` multicast locator.
-pub fn parse_multicast_locator(locator: &str) -> Option<(Ipv4Addr, u16)> {
+/// Parse a `udp/ADDR:PORT` multicast locator. An IPv6 group is bracketed, as a socket address
+/// writes it (`udp/[ff05::231]:7446`).
+pub fn parse_multicast_locator(locator: &str) -> Option<(IpAddr, u16)> {
     let rest = locator.strip_prefix("udp/")?;
-    let (addr, port) = rest.rsplit_once(':')?;
-    Some((addr.parse().ok()?, port.parse().ok()?))
+    let addr: SocketAddr = rest.parse().ok()?;
+    Some((addr.ip(), addr.port()))
 }
 
 /// A fresh random zid for a scout that has none configured.
@@ -118,7 +119,7 @@ fn deliver_in_upstream_order(
 /// error: both ABIs' `z_scout` reports success and simply finds nothing, which
 /// is also what a scout onto a group with no responders does.
 pub fn run_scout(
-    group: Ipv4Addr,
+    group: IpAddr,
     port: u16,
     what: u8,
     zid: Vec<u8>,
@@ -145,7 +146,7 @@ pub fn run_scout(
         // `None`: the scouting group is deliberately NOT interface-narrowed — a
         // discovery beacon must reach every interface a peer could answer on.
         let Ok(group_socket) =
-            UdpDriver::bind_multicast(group, port, McastSocketConfig::default()).await
+            UdpDriver::bind_scouting_group(group, port, McastSocketConfig::default()).await
         else {
             return Vec::new();
         };
@@ -158,7 +159,7 @@ pub fn run_scout(
         // cannot pin offers nothing and the group socket asks alone, which is
         // the pre-R2611 behaviour kept as a floor.
         let locals = scout_interface_addresses().unwrap_or_default();
-        let (ask, refused) = bind_scout_sockets(group.into(), port, &locals, None).await;
+        let (ask, refused) = bind_scout_sockets(group, port, &locals, None).await;
         // The shape `over` returns is REPORTED by `over` itself, at the one
         // place that knows it — this crate carries no logger, and a value
         // dropped here would make "the survey found nothing" and "the Scout
@@ -204,11 +205,17 @@ mod tests {
     fn the_multicast_locator_grammar_is_exact() {
         assert_eq!(
             parse_multicast_locator(MULTICAST_LOCATOR_DEFAULT),
-            Some((Ipv4Addr::new(224, 0, 0, 224), 7446))
+            Some((IpAddr::from([224, 0, 0, 224]), 7446))
         );
         assert!(parse_multicast_locator("tcp/224.0.0.224:7446").is_none());
         assert!(parse_multicast_locator("udp/224.0.0.224").is_none());
         assert!(parse_multicast_locator("").is_none());
+        // An IPv6 group is bracketed, and an unbracketed one is not a socket address.
+        assert_eq!(
+            parse_multicast_locator("udp/[ff05::231]:7446"),
+            Some((IpAddr::from([0xff05, 0, 0, 0, 0, 0, 0, 0x231]), 7446))
+        );
+        assert!(parse_multicast_locator("udp/ff05::231:7446").is_none());
     }
 
     /// A scout with no configured id announces a fresh sixteen-byte one. Reading

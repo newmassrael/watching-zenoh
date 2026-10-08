@@ -2941,6 +2941,39 @@ impl UdpDriver {
         port: u16,
         cfg: McastSocketConfig<'_>,
     ) -> io::Result<Self> {
+        Self::bind_multicast_at(group.into(), port, cfg, McastRxBind::Wildcard).await
+    }
+
+    /// R3125 -- the socket a node SCOUTS and ANSWERS on: [`Self::bind_multicast`] bound to the
+    /// GROUP ADDRESS and not to the family wildcard, as upstream's scouting socket is on unix
+    /// (`zenoh/src/net/runtime/orchestrator.rs` @ `sockaddr.ip()`, "See UNIX Network
+    /// Programmping p.212").
+    ///
+    /// The two differ in what they take. A socket bound to the group receives only datagrams
+    /// addressed to it, and the kernel refuses to bind an IPv6 link-local group (`ff02::`,
+    /// `ff12::`) that carries no scope id, so a node configured on one fails its open, as the
+    /// real library's does. A multicast LINK ([`Self::bind_multicast`]) binds the wildcard on
+    /// purpose, as upstream's `mcast_sock` does, and is unchanged.
+    #[cfg(any(feature = "scouting-active", feature = "scouting-responder"))]
+    pub async fn bind_scouting_group(
+        group: impl Into<std::net::IpAddr>,
+        port: u16,
+        cfg: McastSocketConfig<'_>,
+    ) -> io::Result<Self> {
+        Self::bind_multicast_at(group.into(), port, cfg, McastRxBind::Group).await
+    }
+
+    #[cfg(any(
+        feature = "scouting-active",
+        feature = "scouting-responder",
+        feature = "transport-multicast"
+    ))]
+    async fn bind_multicast_at(
+        group: std::net::IpAddr,
+        port: u16,
+        cfg: McastSocketConfig<'_>,
+        rx_bind: McastRxBind,
+    ) -> io::Result<Self> {
         use socket2::{Protocol, Socket, Type};
 
         // Resolve BEFORE touching the socket, so a bad `#iface=` fails without
@@ -2948,7 +2981,7 @@ impl UdpDriver {
         // `#join=` groups resolve here too, for the same reason: a typo in the
         // third of four groups must not leave two memberships installed and the
         // caller believing it has four.
-        let plan = McastPlan::resolve(group.into(), &cfg, JoinsRead::Yes)?;
+        let plan = McastPlan::resolve(group, &cfg, JoinsRead::Yes)?;
 
         // Step 1: REUSEADDR + REUSEPORT must be set before bind, and
         // tokio's UdpSocket exposes no pre-bind setsockopt hook, so the
@@ -2972,7 +3005,7 @@ impl UdpDriver {
         // Independent of the bind address (the wildcard below) — the multicast
         // interface chooses the egress path, not the local name.
         plan.pin_egress(&raw)?;
-        raw.bind(&plan.wildcard(port).into())?;
+        raw.bind(&plan.rx_bind_addr(port, rx_bind).into())?;
 
         // Steps 3-4, still on the socket2 handle: tokio wraps neither the v6
         // hop limit nor the v6 egress interface, so doing every step here keeps
@@ -3735,6 +3768,24 @@ enum JoinsRead {
     No,
 }
 
+/// R3125 -- what a joined multicast socket binds locally.
+#[cfg(all(
+    feature = "transport-link-udp",
+    any(
+        feature = "scouting-active",
+        feature = "scouting-responder",
+        feature = "transport-multicast"
+    )
+))]
+#[derive(Clone, Copy)]
+enum McastRxBind {
+    /// The family wildcard: what a multicast LINK reads on (upstream's `mcast_sock`).
+    Wildcard,
+    /// The group address itself: what a SCOUTING socket reads on, on unix.
+    #[cfg(any(feature = "scouting-active", feature = "scouting-responder"))]
+    Group,
+}
+
 /// R2584 — a multicast group and its locator config, resolved for the group's
 /// address FAMILY before any socket exists.
 ///
@@ -3837,6 +3888,25 @@ impl McastPlan {
         match self {
             Self::V4 { .. } => SocketAddr::from((std::net::Ipv4Addr::UNSPECIFIED, port)),
             Self::V6 { .. } => SocketAddr::from((std::net::Ipv6Addr::UNSPECIFIED, port)),
+        }
+    }
+
+    /// R3125 -- the local address a joined socket binds: the wildcard, or the group itself where
+    /// the caller reads on it and the platform lets a socket be bound to one. Windows binds the
+    /// IPv4 wildcard whatever the family, as upstream does
+    /// (`zenoh/src/net/runtime/orchestrator.rs` @ `std::net::Ipv4Addr::UNSPECIFIED.into()`), and
+    /// that is the one bind a Windows socket can use to receive a group.
+    fn rx_bind_addr(&self, port: u16, rx_bind: McastRxBind) -> SocketAddr {
+        match rx_bind {
+            McastRxBind::Wildcard => self.wildcard(port),
+            #[cfg(any(feature = "scouting-active", feature = "scouting-responder"))]
+            McastRxBind::Group => {
+                if cfg!(unix) {
+                    self.peer(port)
+                } else {
+                    SocketAddr::from((std::net::Ipv4Addr::UNSPECIFIED, port))
+                }
+            }
         }
     }
 

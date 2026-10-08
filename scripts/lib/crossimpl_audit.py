@@ -1052,7 +1052,12 @@ HOST_GATED_CI_TARGETS: dict[str, str] = {
 # reports it as two slices, as the same compiled subscriber linked at `libzenohc` does
 # (`transport-shm zenoh-c->wz`, the library through its registered resolver). The reference arm
 # is the control and carries no claim of its own. Measured by `scripts/audit-crossimpl-proof.sh`.
-FOREIGN_ADJUDICATOR_LINKS = 1041
+# R3125 -- 1041 -> 1042, RISING by one: a new row in `zenoh_c_scouting_twice_and_diff.rs`
+# (`api-compat-c zenoh-c->wz`) that runs one C program linked at the real `libzenohc` and at wz's
+# C ABI on an IPv6 scouting group of each of the four scopes and compares them: a link-local group
+# fails the open on both, a wider one opens and finds nobody on both. The real library's rows are
+# asserted first. Measured by `scripts/audit-crossimpl-proof.sh`.
+FOREIGN_ADJUDICATOR_LINKS = 1042
 
 # ── Execution disclosure ────────────────────────────────────────────────────────
 #

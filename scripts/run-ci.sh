@@ -20392,6 +20392,19 @@ layer_c1cc_api_compat_c() {
         --test-threads=1 \
         --exact a_listener_bound_late_is_gossiped_to_a_node_that_dials_its_neighbour_on_wz_and_libzenohc \
         || return 1
+    # R3125 -- an IPv6 scouting group, on the four scopes one can have. The real library fails the
+    # open on a link-local group (the kernel refuses to bind a link-local multicast address that
+    # carries no scope id; upstream binds the scouting socket to the group itself) and opens on a
+    # wider one but finds nobody (its default interface list holds IPv4 addresses alone). wz was
+    # refused by the config parser, then opened on a link-local group because it bound the
+    # wildcard; the group-address bind is `UdpDriver::bind_scouting_group`.
+    _runci_guarded_test \
+        "C1cc a_node_scouting_on_an_ipv6_group_behaves_identically_on_wz_and_libzenohc" 1 \
+        cargo test -p wz-integration-tests \
+        --test zenoh_c_scouting_twice_and_diff -- --ignored --quiet \
+        --test-threads=1 \
+        --exact a_node_scouting_on_an_ipv6_group_behaves_identically_on_wz_and_libzenohc \
+        || return 1
     _runci_guarded_test \
         "C1cc an_advanced_subscriber_of_the_publishers_own_session_hears_it_on_wz_and_libzenohc" 1 \
         cargo test -p wz-integration-tests \
