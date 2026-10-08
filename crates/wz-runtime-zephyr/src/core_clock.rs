@@ -26,12 +26,11 @@ use alloc::string::String;
 /// thousand of the assumed clock, in either direction.
 ///
 /// The reading is arithmetic on register values (a PLL's multiplier and dividers),
-/// so it can differ from the assumed clock by the rounding of those dividers and
-/// not by much more. 2 percent is wide enough for that and narrow enough to catch
-/// every way a clock tree is actually wrong: a tree never brought up reads tens of
-/// times too slow, and the smallest step of a wrong divider is a factor of two.
-/// A core that is 2 percent off times nothing this image does by more than 2
-/// percent, which is below the margin of every bound it keeps.
+/// so it can differ from the assumed clock by the rounding of that arithmetic, which
+/// is far below 2 percent. The failures this check exists for are far above it: a
+/// tree that was never brought up reads about 44 times too slow, and a root divider
+/// one step off at the small values these trees use (1 to 3) is a third or more.
+/// The figure is a decision about those two margins, not a measurement of a bench.
 pub const TOLERANCE_PERMILLE: u32 = 20;
 
 /// What a reading of the core clock says about the image's assumption.

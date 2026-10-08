@@ -11,10 +11,13 @@
 //!
 //! Claim: this path is BUILT. No emulator carries the block. The first boot on a
 //! CYT4BF printed its station address and the probe's lines and then nothing for
-//! 100 seconds, with the core running and idle and no fault, so how far this path
-//! gets there is not yet known: the stage lines below, each with the kernel's own
-//! uptime, are what says. A bench reads them beside a wall clock; the two agree
-//! only if the kernel's time base is what the build assumed.
+//! 100 seconds, with the core running and idle and no fault: the M7 ran at the 8 MHz
+//! oscillator where 350 MHz was built in, so every wait lasted about 44 times what
+//! it was told. The image now checks the core clock before it waits for anything
+//! (`wz_runtime_zephyr::core_clock`), and the MAC driver bounds its waits on the
+//! kernel clock instead of counting the waits it asked for. The stage lines below,
+//! each with the kernel's own uptime, stay: a bench reads them beside a wall clock,
+//! and the two agree only if the kernel's time base is what the build assumed.
 
 use alloc::format;
 use core::ffi::CStr;
