@@ -82,10 +82,12 @@ config WZ_MAC_CYT4BF
 	bool "Infineon CYT4BF (T2G) ETH0, RMII"
 	depends on SOC_FAMILY_INFINEON_CAT1C
 	select WZ_ENTROPY_BOARD_HOOK
+	select WZ_CORE_CLOCK_BOARD_HOOK
 	help
 	  The MXETH block of the CYT4BF family (a Cadence GEM) through
 	  `wz-eth-mac-cyt4bf`, with the PHY on its RMII port. The random source is the
-	  chip's own TRNG in the CRYPTO block, through the board hook.
+	  chip's own TRNG in the CRYPTO block, through the board hook, and the core
+	  clock the image checks at boot is read from the clock registers the same way.
 
 endchoice
 

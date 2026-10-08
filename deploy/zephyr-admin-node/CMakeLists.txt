@@ -45,6 +45,10 @@ elseif(CONFIG_WZ_NET_BACKEND_LWIP_MAC)
       src/trng_cat1c.c
       ${pdl_src}/cy_crypto_core_trng.c
       ${pdl_src}/cy_crypto_core_hw.c)
+    # The core clock the image checks at boot is read from the clock registers
+    # (CONFIG_WZ_CORE_CLOCK_BOARD_HOOK, selected by CONFIG_WZ_MAC_CYT4BF) through the
+    # PDL's sysclk driver, which Zephyr's HAL module already compiles for this family.
+    target_sources(app PRIVATE src/clock_cat1c.c)
     if(CONFIG_WZ_CYT4BF_PINS_T2G_LITE)
       target_sources(app PRIVATE boards/kit_t2g_b_h_lite/eth0_rmii_pins.c)
     else()

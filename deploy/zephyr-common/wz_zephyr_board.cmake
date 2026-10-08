@@ -15,7 +15,11 @@
 #   tick rate            CONFIG_SYS_CLOCK_TICKS_PER_SEC, handed to cargo as
 #                        WZ_TICKS_PER_SEC; the firmware's clock type reads it
 #                        (`wz_runtime_zephyr::tick_hz_from_build!`).
-#   random source        the board's entropy device, or the QEMU test generator on
+#   core clock           CONFIG_SYS_CLOCK_HW_CYCLES_PER_SEC, the clock every tick and
+#                        busy wait is derived from, handed to cargo as
+#                        WZ_CORE_CLOCK_HZ so that an image can compare it with the
+#                        clock the board reports (`wz_runtime_zephyr::core_clock`).
+#   random source       the board's entropy device, or the QEMU test generator on
 #                        a QEMU board only (wz_board_hooks.c refuses the rest).
 #   wall clock           set at boot from this build's own instant.
 #
@@ -116,6 +120,7 @@ function(wz_zephyr_rust_app)
     BYPRODUCTS ${rust_lib}
     COMMAND ${CMAKE_COMMAND} -E env
             WZ_TICKS_PER_SEC=${CONFIG_SYS_CLOCK_TICKS_PER_SEC}
+            WZ_CORE_CLOCK_HZ=${CONFIG_SYS_CLOCK_HW_CYCLES_PER_SEC}
             ${WZ_CARGO_ENV}
             cargo build --release --target ${rust_target}
             --manifest-path ${WZ_RUST_DIR}/Cargo.toml ${cargo_features}

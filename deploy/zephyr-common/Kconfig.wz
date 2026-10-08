@@ -22,4 +22,20 @@ config WZ_ENTROPY_BOARD_HOOK
 	  Never a way to silence the build on a board that has no source: a board
 	  with neither this nor an entropy driver does not compile, by design.
 
+config WZ_CORE_CLOCK_BOARD_HOOK
+	bool "The board reads its core clock from the chip's registers"
+	help
+	  An image is built for one core clock (CONFIG_SYS_CLOCK_HW_CYCLES_PER_SEC) and
+	  nothing in the kernel checks that the silicon runs at it. On a chip whose
+	  clock tree another core must bring up, a core that was started without that
+	  runs at the oscillator and every wait lasts many times what it was asked to.
+
+	  Select this on a board that can read the clock it really runs at: the board's
+	  own source file then defines `uint32_t wz_board_core_clock_hz(void)`, which
+	  returns that clock in hertz from the registers, or 0 when it cannot tell. The
+	  image compares it with the clock it assumes before it waits for anything.
+
+	  A board without this answers 0 to the image and is not checked, which is what
+	  every emulated board does.
+
 endmenu

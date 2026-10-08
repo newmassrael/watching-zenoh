@@ -32,7 +32,8 @@ use alloc::vec::Vec;
 use wz::runtime_coop::session_drive::SessionLinks;
 use wz::runtime_coop::session_runtime::new_session_actions;
 use wz::runtime_coop::{ClockSource, CoopLocalSet, CoopRuntime, CoopTime};
-use wz::runtime_zephyr::glue::{log, log_line, stack_usage, yield_ms};
+use wz::runtime_zephyr::core_clock::{assess_core_clock, CoreClockOutcome};
+use wz::runtime_zephyr::glue::{core_clock_hz, log, log_line, stack_usage, yield_ms};
 use wz::runtime_zephyr::stack::StackWatch;
 use wz::runtime_zephyr::{ZephyrClock, ZephyrEntropy};
 use wz_session_core::entropy::EntropySource;
@@ -65,6 +66,12 @@ const STACK_CHECK_MS: u64 = 250;
 /// The board's `CONFIG_SYS_CLOCK_TICKS_PER_SEC`, as this build was configured:
 /// the `ZephyrClock` timebase.
 const TICK_HZ: u32 = wz::runtime_zephyr::tick_hz_from_build!();
+
+/// The core clock this image was built for: the board's
+/// `CONFIG_SYS_CLOCK_HW_CYCLES_PER_SEC`, from which the kernel derives every tick and
+/// every busy wait, as the board's build handed it to cargo. Whether the core really
+/// runs at it is checked at boot (`check_core_clock`).
+const IMAGE_CORE_CLOCK_HZ: u32 = wz::runtime_zephyr::u32_from_build!("WZ_CORE_CLOCK_HZ");
 
 /// Milliseconds since boot by the kernel's own tick count. Stage lines carry it so
 /// that a bench can set it against a wall clock, which is the one check of the
@@ -401,9 +408,41 @@ fn start() -> i32 {
     run(net)
 }
 
+/// What `wz_app_main` returns when the core does not run at the clock the image
+/// was built for.
+const CORE_CLOCK_MISMATCH: i32 = 3;
+
+/// Does the core run at the clock the image assumes? Logs what it found, and returns
+/// the code to stop with when it does not.
+///
+/// This is the first thing the node does, before anything that waits: a core that
+/// runs at 8 MHz where 350 MHz was assumed (a CM0+ image that started the M7 without
+/// bringing the clock tree up) makes every wait last tens of times what it was asked
+/// to, and the node then prints nothing for minutes. A board that cannot read its
+/// clock says nothing here, so the console of an emulated board is unchanged.
+fn check_core_clock() -> Option<i32> {
+    // The CYT4BF's hook reads clock registers, so a reading of nothing is news there;
+    // elsewhere it is the ordinary answer.
+    let board_reads_clock = cfg!(feature = "mac-cyt4bf");
+    match assess_core_clock(core_clock_hz(), IMAGE_CORE_CLOCK_HZ, board_reads_clock) {
+        CoreClockOutcome::Silent => None,
+        CoreClockOutcome::Report(line) => {
+            log_line(line);
+            None
+        }
+        CoreClockOutcome::Stop(line) => {
+            log_line(line);
+            Some(CORE_CLOCK_MISMATCH)
+        }
+    }
+}
+
 /// Entry point the Zephyr C `main()` calls. Returns nonzero only when the node
 /// could not start; a running node never returns.
 #[no_mangle]
 pub extern "C" fn wz_app_main() -> i32 {
+    if let Some(stop) = check_core_clock() {
+        return stop;
+    }
     start()
 }

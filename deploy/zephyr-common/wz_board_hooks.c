@@ -100,6 +100,29 @@ int wz_stack_usage(uint32_t *size, uint32_t *unused)
 #endif
 }
 
+/* The clock the core really runs at, in hertz, or 0 when this board cannot tell.
+ *
+ * An image is built for one core clock (CONFIG_SYS_CLOCK_HW_CYCLES_PER_SEC) and the
+ * kernel derives every tick and every busy wait from it without ever asking the
+ * silicon. A board that can read the clock from its registers says so with
+ * CONFIG_WZ_CORE_CLOCK_BOARD_HOOK and answers in `wz_board_core_clock_hz`; the image
+ * compares the two before it waits for anything (wz_runtime_zephyr::core_clock). The
+ * QEMU boards have no clock to read and answer 0, which the image takes as "not
+ * checked", so their consoles are what they were. */
+#if defined(CONFIG_WZ_CORE_CLOCK_BOARD_HOOK)
+extern uint32_t wz_board_core_clock_hz(void);
+
+uint32_t wz_core_clock_hz(void)
+{
+	return wz_board_core_clock_hz();
+}
+#else
+uint32_t wz_core_clock_hz(void)
+{
+	return 0;
+}
+#endif
+
 /* ---- the board's random source ----
  *
  * `wzApplicationGetRandom` is what `wz_runtime_zephyr::ZephyrEntropy` calls, and
