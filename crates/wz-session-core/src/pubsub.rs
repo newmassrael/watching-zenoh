@@ -4527,7 +4527,14 @@ mod tests {
     }
 
     /// A shared-memory Put for `demo/shm` whose payload is TWO shared-memory buffers.
-    #[cfg(all(feature = "transport-shm", feature = "pubsub-put"))]
+    ///
+    /// Gated on its one caller's features and not wider: a build with shared memory and no
+    /// shared bytes would carry it as dead code, which `-D warnings` rejects.
+    #[cfg(all(
+        feature = "transport-shm",
+        feature = "pubsub-put",
+        feature = "rx-shared-bytes"
+    ))]
     fn shm_push_of_two_buffers() -> PushOwned {
         use sce_forge_runtime::codec::SceList;
 
