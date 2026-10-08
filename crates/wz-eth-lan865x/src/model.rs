@@ -34,6 +34,8 @@ const NCR_RXEN: u32 = 1 << 2;
 const NCFGR_RFCS: u32 = 1 << 17;
 const NCFGR_MTIHEN: u32 = 1 << 6;
 const NCFGR_NBC: u32 = 1 << 5;
+const PLCA_STS_PST: u32 = 1 << 15;
+const STS1_PSTC: u32 = 1 << 11;
 
 /// What the model puts after a received frame when `RFCS` is clear (DS60001734F
 /// 5.2: by default the FCS is passed to the host). Its value is the model's.
@@ -165,6 +167,38 @@ impl Chip {
     pub(crate) fn reset(&mut self) {
         self.load_reset_values();
         self.set(std_reg::STATUS0, std_reg::STATUS0_RESETC);
+    }
+
+    /// A reset of the integrated PHY alone (`BASIC_CONTROL.SW_RESET`): the PHY's
+    /// registers (MMS 2 to 4) go to their reset values and `RESETC` is set, while
+    /// the MAC and the OPEN Alliance registers, `SYNC` included, are kept
+    /// (DS60001734F 4.1.1.3: "will reset only the internal PHY, not the entire
+    /// device"). The data sheet's Figure 4-1 lists this reset among those that
+    /// clear `SYNC`; this is the other reading of the two, the one `SYNC` stays
+    /// set under.
+    pub(crate) fn reset_phy_only(&mut self) {
+        self.regs.retain(|&(mms, _), _| !(2..=4).contains(&mms));
+        self.regs.insert((4, 0xCA02), 0x0000_08FF);
+        self.regs.insert((4, 0x0087), 0x0000_80C3);
+        let status0 = self.get(std_reg::STATUS0);
+        self.set(std_reg::STATUS0, status0 | std_reg::STATUS0_RESETC);
+    }
+
+    /// The PHY reports PLCA active or not. A change sets `STS1.PSTC` (DS60001734F
+    /// 11.5.2).
+    pub(crate) fn set_plca_active(&mut self, active: bool) {
+        let before = self.get(Reg::new(4, 0xCA03)) & PLCA_STS_PST != 0;
+        self.set(Reg::new(4, 0xCA03), if active { PLCA_STS_PST } else { 0 });
+        if before != active {
+            let sts1 = self.get(Reg::new(4, 0x0018));
+            self.set(Reg::new(4, 0x0018), sts1 | STS1_PSTC);
+        }
+    }
+
+    /// Set Status 1 flags, as the PHY would on an event.
+    pub(crate) fn raise_sts1(&mut self, bits: u32) {
+        let sts1 = self.get(Reg::new(4, 0x0018));
+        self.set(Reg::new(4, 0x0018), sts1 | bits);
     }
 
     // ---- the network side ---------------------------------------------------

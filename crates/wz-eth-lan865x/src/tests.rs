@@ -69,6 +69,11 @@ fn opened(config: &Config) -> Lan865xMac<Chip> {
     open_chip(chip(), config).unwrap()
 }
 
+fn serviced(mac: &mut Lan865xMac<Chip>) -> Result<ServiceReport, OpenError<()>> {
+    let clock = Cell::new(0u64);
+    mac.service(|us| clock.set(clock.get() + u64::from(us)), || clock.get())
+}
+
 /// The chip lent to `open`, so a test can look at it after `open` has failed and
 /// dropped its SPI master.
 struct ByRef<'a>(&'a mut Chip);
@@ -763,4 +768,270 @@ fn a_quiet_interrupt_line_costs_no_exchange() {
     let mut buf = [0u8; 64];
     assert_eq!(mac.receive(&mut buf), None);
     assert_eq!(mac.chip().transfers, before);
+}
+
+// ---- service: PLCA ------------------------------------------------------------
+
+#[test]
+fn servicing_a_part_without_plca_is_one_footer_exchange() {
+    let mut mac = opened(&config());
+    let accesses = mac.chip().accesses.len();
+    let transfers = mac.chip().transfers;
+    assert_eq!(serviced(&mut mac), Ok(ServiceReport::default()));
+    assert_eq!(mac.chip().transfers, transfers + 1);
+    assert_eq!(
+        mac.chip().accesses.len(),
+        accesses,
+        "no register was touched"
+    );
+}
+
+#[test]
+fn the_first_service_after_a_bring_up_puts_collision_detection_in_step_with_plca() {
+    // PLCA never came up (PLCA_STS.PST is 0 and has not changed, so there is no
+    // PSTC): the bring-up left collision detection off, and AN1760 Figure 1 would
+    // never act. The part is in CSMA/CD, which wants collision detection on.
+    let mut mac = opened(&follower());
+    assert_eq!(mac.chip().get(Reg::new(4, 0x0087)), 0x00C3);
+    let before = mac.chip().accesses.len();
+    assert_eq!(serviced(&mut mac), Ok(ServiceReport::default()));
+    assert_eq!(
+        &mac.chip().accesses[before..],
+        &[
+            r(4, 0x0018),
+            r(4, 0xCA03),
+            r(4, 0x0087),
+            w(4, 0x0087, 0x80C3)
+        ]
+    );
+    assert_eq!(mac.chip().get(Reg::new(4, 0x0087)), 0x80C3);
+
+    // Settled: with nothing changed, a call is a read of Status 1 and nothing more.
+    let before = mac.chip().accesses.len();
+    assert_eq!(serviced(&mut mac), Ok(ServiceReport::default()));
+    assert_eq!(&mac.chip().accesses[before..], &[r(4, 0x0018)]);
+}
+
+#[test]
+fn collision_detection_follows_plca_down_and_up_again() {
+    // AN1760 Figure 1: PSTC set, then PST 1 disables collision detection (CDEN
+    // clear) and PST 0 enables it (CDEN set). 0x80C3 has CDEN; 0x00C3 has not.
+    let mut mac = opened(&follower());
+    serviced(&mut mac).unwrap();
+
+    mac.chip().set_plca_active(true);
+    let before = mac.chip().accesses.len();
+    let report = serviced(&mut mac).unwrap();
+    assert_eq!(report.phy_status, 0x0800, "PSTC, bit 11 of Status 1");
+    assert_eq!(
+        &mac.chip().accesses[before..],
+        &[
+            r(4, 0x0018),
+            r(4, 0xCA03),
+            r(4, 0x0087),
+            w(4, 0x0087, 0x00C3)
+        ]
+    );
+    assert_eq!(mac.chip().get(Reg::new(4, 0x0087)), 0x00C3);
+
+    mac.chip().set_plca_active(false);
+    serviced(&mut mac).unwrap();
+    assert_eq!(mac.chip().get(Reg::new(4, 0x0087)), 0x80C3, "fallen back");
+
+    mac.chip().set_plca_active(true);
+    serviced(&mut mac).unwrap();
+    assert_eq!(mac.chip().get(Reg::new(4, 0x0087)), 0x00C3, "active again");
+}
+
+#[test]
+fn the_phy_status_flags_are_handed_to_the_board_and_cleared() {
+    // Errata s5: a coordinator that hears another coordinator's BEACON sets
+    // UNEXPB (Status 1 bit 5), and the work-around is the station management's.
+    let c = Config {
+        plca: Plca::Node { id: 0, count: 4 },
+        ..config()
+    };
+    let mut mac = opened(&c);
+    serviced(&mut mac).unwrap();
+    mac.chip().raise_sts1(1 << 5);
+    let report = serviced(&mut mac).unwrap();
+    assert_eq!(report.phy_status, 0x0020);
+    assert_eq!(report.phy_status & regs::sts1::UNEXPB, regs::sts1::UNEXPB);
+    assert_eq!(serviced(&mut mac).unwrap().phy_status, 0, "read to clear");
+}
+
+#[test]
+fn a_status_change_seen_but_not_acted_on_is_not_lost() {
+    // Status 1 is read to clear, so a failure after that read must not forget the
+    // change it announced.
+    let mut mac = opened(&follower());
+    serviced(&mut mac).unwrap();
+    mac.chip().set_plca_active(true);
+    serviced(&mut mac).unwrap();
+
+    mac.chip().set_plca_active(false);
+    // The call's exchanges: the footer, Status 1, then PLCA_STS, which fails.
+    let fail = mac.chip().transfers + 2;
+    mac.chip().fail_at = Some(fail);
+    assert_eq!(serviced(&mut mac), Err(OpenError::Bus(BusError::Spi(()))));
+    assert_eq!(
+        mac.chip().get(Reg::new(4, 0x0087)),
+        0x00C3,
+        "not yet acted on"
+    );
+
+    let report = serviced(&mut mac).unwrap();
+    assert_eq!(
+        report.phy_status, 0,
+        "Status 1 was cleared by the failed call"
+    );
+    assert_eq!(mac.chip().get(Reg::new(4, 0x0087)), 0x80C3, "acted on now");
+}
+
+// ---- service: a reset ---------------------------------------------------------
+
+fn frame_to(da: [u8; 6]) -> Vec<u8> {
+    let mut f = da.to_vec();
+    f.extend_from_slice(&[0x02, 0, 0, 0, 0, 9, 0x08, 0x00, 1, 2, 3, 4, 5, 6, 7, 8]);
+    f
+}
+
+#[test]
+fn a_part_that_was_reset_is_configured_again_by_service() {
+    let c = Config {
+        accept_all_multicast: true,
+        ..follower()
+    };
+    let mut mac = opened(&c);
+    serviced(&mut mac).unwrap();
+    let first = log(&mut mac);
+
+    // A brown-out: registers back to their reset values, SYNC clear.
+    mac.chip().reset();
+    assert!(!mac.chip().synced());
+    let frame = vec![0xAB; 60];
+    assert!(!mac.transmit(&frame), "an unconfigured part sends nothing");
+    assert_eq!(mac.errors(), 1);
+
+    let before = mac.chip().accesses.len();
+    let report = serviced(&mut mac).unwrap();
+    assert!(report.reconfigured);
+    assert_eq!(mac.chip().resets, 2);
+    let second = mac.chip().accesses[before..].to_vec();
+    assert_eq!(
+        &second[..first.len() - 4],
+        &first[..first.len() - 4],
+        "the whole bring-up again, access for access"
+    );
+
+    // Everything the bring-up sets is set again.
+    assert!(mac.chip().synced());
+    assert_eq!(mac.chip().get(Reg::new(1, 0x0000)), 0x0C);
+    assert_eq!(mac.chip().get(Reg::new(1, 0x0001)), 0x000A_0040);
+    assert!(mac.chip().address1_active());
+    assert_eq!(mac.chip().address1(), MAC);
+    assert_eq!(mac.chip().get(Reg::new(4, 0xCA02)), 0x0005);
+    assert_eq!(mac.chip().get(Reg::new(4, 0xCA01)), 0x8000);
+    assert_eq!(mac.chip().get(Reg::new(4, 0x0084)), 0x24E3);
+
+    // And it works.
+    assert!(mac.transmit(&frame));
+    assert_eq!(mac.chip().wire, vec![frame]);
+    let incoming = frame_to([0x01, 0x00, 0x5E, 0x00, 0x00, 0xFB]);
+    assert!(mac.chip().network_frame(&incoming));
+    let mut out = [0u8; 256];
+    let got = mac.receive(&mut out).expect("a frame");
+    assert_eq!(&out[..got], &incoming[..]);
+
+    // Once: the next call finds nothing to do.
+    let resets = mac.chip().resets;
+    assert!(!serviced(&mut mac).unwrap().reconfigured);
+    assert_eq!(mac.chip().resets, resets);
+}
+
+#[test]
+fn a_reset_of_the_phy_alone_is_found_by_its_reset_flag() {
+    // SYNC stays set, so every exchange works; only RESETC says the PHY's vendor
+    // configuration is gone (DS60001734F 4.1.1.3: reset the entire device).
+    let mut mac = opened(&follower());
+    serviced(&mut mac).unwrap();
+    mac.chip().reset_phy_only();
+    assert!(mac.chip().synced());
+    assert_eq!(mac.chip().get(Reg::new(4, 0xCA02)), 0x08FF, "PLCA is gone");
+
+    let report = serviced(&mut mac).unwrap();
+    assert!(report.reconfigured);
+    assert_eq!(report.status0 & 1 << 6, 1 << 6, "RESETC");
+    assert_eq!(mac.chip().resets, 2, "the entire device was reset");
+    assert_eq!(mac.chip().get(Reg::new(4, 0xCA02)), 0x0005);
+    assert_eq!(mac.chip().get(Reg::new(4, 0xCA01)), 0x8000);
+
+    // The flag was consumed: no second bring-up.
+    assert!(!serviced(&mut mac).unwrap().reconfigured);
+    assert_eq!(mac.chip().resets, 2);
+}
+
+#[test]
+fn a_reset_flag_the_transmit_path_collected_is_not_lost() {
+    let mut mac = opened(&follower());
+    serviced(&mut mac).unwrap();
+    mac.chip().reset_phy_only();
+    // The footer announces the status, and the send clears it, keeping the bits
+    // for the chip crate (`Tc6::take_events`).
+    assert!(mac.transmit(&[0xAB; 60]));
+    assert_eq!(
+        mac.chip().get(Reg::new(0, 0x0008)),
+        0,
+        "cleared by the send"
+    );
+    let report = serviced(&mut mac).unwrap();
+    assert!(report.reconfigured);
+    assert_eq!(mac.chip().resets, 2);
+}
+
+#[test]
+fn a_bring_up_that_failed_before_it_wrote_anything_is_still_owed() {
+    // After a PHY-only reset the footers look healthy (SYNC set, nothing pending
+    // once RESETC is cleared), so a bring-up that fails on its first access would
+    // be forgotten unless it is remembered.
+    let mut mac = opened(&follower());
+    serviced(&mut mac).unwrap();
+    mac.chip().reset_phy_only();
+    // The call's exchanges: the footer, STATUS0 read and clear, STATUS1 read, then
+    // DEVID, which fails.
+    let fail = mac.chip().transfers + 4;
+    mac.chip().fail_at = Some(fail);
+    assert_eq!(serviced(&mut mac), Err(OpenError::Bus(BusError::Spi(()))));
+    assert_eq!(mac.chip().resets, 1);
+
+    let report = serviced(&mut mac).unwrap();
+    assert!(report.reconfigured, "the owed bring-up ran");
+    assert_eq!(mac.chip().resets, 2);
+    assert_eq!(mac.chip().get(Reg::new(4, 0xCA02)), 0x0005);
+}
+
+#[test]
+fn a_bring_up_that_fails_part_way_is_retried_by_the_next_call() {
+    let mut mac = opened(&config());
+    mac.chip().reset();
+    // The footer says NotSynced; the bring-up's DEVID read is the next exchange.
+    let fail = mac.chip().transfers + 1;
+    mac.chip().fail_at = Some(fail);
+    assert_eq!(serviced(&mut mac), Err(OpenError::Bus(BusError::Spi(()))));
+    assert!(!mac.chip().synced());
+
+    assert!(serviced(&mut mac).unwrap().reconfigured);
+    assert!(mac.chip().synced());
+}
+
+#[test]
+fn a_reset_that_leaves_a_different_part_is_refused_not_driven() {
+    let mut mac = opened(&config());
+    mac.chip().reset();
+    mac.chip().devid = devid(0x8652, 1);
+    assert_eq!(
+        serviced(&mut mac),
+        Err(OpenError::Identity(IdentityError::UnknownModel(0x8652)))
+    );
+    assert!(!mac.chip().synced());
 }

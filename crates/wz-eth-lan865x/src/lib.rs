@@ -14,7 +14,10 @@
 //!   cannot say; errata item s1);
 //! * [`open`]: reset the part, run the vendor's configuration sequence, set up
 //!   PLCA, program the MAC address and filters, and declare the configuration
-//!   done.
+//!   done;
+//! * [`Lan865xMac::service`]: the housekeeping after that, which keeps collision
+//!   detection in step with PLCA and notices that the part was reset, in which
+//!   case it runs the whole sequence again.
 //!
 //! ## The bring-up, in order
 //!
@@ -58,7 +61,41 @@
 //! * The interrupt line (`IRQ_N`), if it is wired: hand its level to
 //!   [`Lan865xMac::set_interrupt_probe`]. Nothing here depends on it.
 //! * The SPI master, its mode and clock, and the monotonic clock and delay that
-//!   `open` takes as closures.
+//!   `open` and `service` take as closures.
+//!
+//! ## After a reset
+//!
+//! A reset clears the part's configuration, and the part is useless until it is
+//! configured again. [`Lan865xMac::service`] notices two kinds and, for either,
+//! runs the whole bring-up again, identity check included. This is the "re-open
+//! behaviour"; it needs the delay and clock, so they are arguments of `service`
+//! and not state.
+//!
+//! * The footer loses `SYNC`. A reset clears `OA_CONFIG0.SYNC`, which every
+//!   footer reports (DS60001734F Figure 4-1), and every data exchange then fails
+//!   with `Error::NotSynced`: `transmit` and `receive` fail and are counted
+//!   ([`Lan865xMac::errors`]) until `service` has run, and `service` sees the same
+//!   error on its own footer exchange. `Tc6::take_events` cannot carry this
+//!   news, because the exchange fails before the status registers are read.
+//! * `RESETC` is reported. A reset of the PHY alone (`BASIC_CONTROL.SW_RESET`)
+//!   resets "only the internal PHY, not the entire device", and the data sheet says
+//!   to reset the entire device when the host sees `RESETC` after one
+//!   (DS60001734F 4.1.1.3). The data sheet is not consistent about whether that
+//!   reset also clears `SYNC` (its Figure 4-1 lists it among the sources that do),
+//!   so both signals are read: if `SYNC` stays set the exchanges succeed, the
+//!   PHY's vendor configuration is gone, and `RESETC` is the only sign. `service`
+//!   clears the status the footer announces and reads `Tc6::take_events`, which
+//!   includes what the transmit and receive paths collected.
+//!
+//! Once a reset is seen the bring-up is owed until it succeeds, so a failure
+//! part-way (or before the part's first write) is retried by the next call.
+//!
+//! `service` also polls the PHY's Status 1 register when PLCA is on. The PHY's
+//! interrupts are masked after a reset (DS60001734F 7.1) and this crate leaves
+//! them masked: unmasking one would raise `PHYINT` and with it the footer's
+//! extended-status flag until Status 1 is read, so the flag would be paid for on
+//! every exchange of a host that serviced late. The cost of the poll is one
+//! control transaction per call; the caller sets the cadence.
 //!
 //! ## Errata taken into account (DS80001075F)
 //!
@@ -72,9 +109,9 @@
 //!   the host puts the end of one frame and the start of the next in one chunk:
 //!   `Tc6::send_frame` never does, every frame starts a chunk of its own.
 //! * s5, a coordinator that hears another coordinator's BEACON stops transmitting:
-//!   the work-around is the station management's, and nothing here watches for
-//!   it. The sign is [`regs::sts1::UNEXPB`] in the PHY's Status 1 register; this
-//!   crate does not choose a follower ID on the board's behalf.
+//!   the work-around is the station management's. `service` returns the Status 1
+//!   bits it read ([`regs::sts1::UNEXPB`]) so that it can act; this crate does not
+//!   choose a follower ID on the board's behalf.
 //! * s6 and s8 concern `SLPCTL0` and `PLCA_TOTMR`, neither of which is written.
 //!
 //! Not done, on purpose: the optional SQI configuration, burst mode, sleep and
@@ -112,7 +149,8 @@ pub use identity::{identify, Identity, IdentityError, Product, Revision};
 
 use regs::{
     CDCTL0, CDCTL0_CDEN, DEVID, MAC_HRB, MAC_HRT, MAC_NCFGR, MAC_NCR, MAC_SAB1, MAC_SAT1,
-    NCFGR_MTIHEN, NCFGR_RFCS, NCR_RXEN, NCR_TXEN, PLCA_CTRL0, PLCA_CTRL0_EN, PLCA_CTRL1,
+    NCFGR_MTIHEN, NCFGR_RFCS, NCR_RXEN, NCR_TXEN, PLCA_CTRL0, PLCA_CTRL0_EN, PLCA_CTRL1, PLCA_STS,
+    PLCA_STS_PST, STS1,
 };
 use wz_oa_tc6::proto::std_reg;
 use wz_oa_tc6::{ChunkSize, Error, Tc6, Tc6Mac};
@@ -130,7 +168,7 @@ use wz_runtime_core::{EthernetMac, SpiTransfer};
 /// there is one.
 const RESET_BUDGET_MS: u32 = 100;
 
-/// Why [`open`] failed.
+/// Why [`open`] or [`Lan865xMac::service`] failed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OpenError<E> {
     /// The config was refused; no bus traffic took place.
@@ -163,11 +201,26 @@ impl<E> From<Error<E>> for OpenError<E> {
     }
 }
 
+/// What one [`Lan865xMac::service`] call found and did.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ServiceReport {
+    /// The part had been reset and the whole bring-up ran again.
+    pub reconfigured: bool,
+    /// The `OA_STATUS0` bits cleared since the last call (`Tc6::take_events`),
+    /// which is where the transmit-protocol, buffer-overflow and header errors
+    /// show. `RESETC` is among them when a reset was found that way.
+    pub status0: u32,
+    /// The PHY Status 1 flags this call read, and with the read cleared (see
+    /// [`regs::sts1`]). Zero when PLCA is off, where the register is not read.
+    pub phy_status: u16,
+}
+
 /// Run the bring-up on a reset-state or unconfigured part. See the crate
 /// documentation for the order and its reasons.
 ///
-/// It always starts by resetting, so a failure part-way leaves a part whose
-/// `CONFIG0.SYNC` is clear.
+/// It is the same code for the first open and for a re-open after a reset, and it
+/// always starts by resetting, so a failure part-way leaves a part whose
+/// `CONFIG0.SYNC` is clear, which the next `service` call finds and retries.
 fn configure<S: SpiTransfer>(
     tc6: &mut Tc6<S>,
     config: &Config,
@@ -229,6 +282,14 @@ fn configure_mac<S: SpiTransfer>(tc6: &mut Tc6<S>, config: &Config) -> Result<()
 pub struct Lan865xMac<S: SpiTransfer> {
     mac: Tc6Mac<S>,
     identity: Identity,
+    config: Config,
+    /// Whether the collision-detect setting is known to match PLCA's state: it is
+    /// not after a (re)configuration, which leaves collision detection off while
+    /// PLCA has not yet come up, and not after a Status 1 read that saw the
+    /// change but did not finish acting on it.
+    plca_reconciled: bool,
+    /// A reset was seen and the bring-up has not yet succeeded since.
+    reconfigure_owed: bool,
 }
 
 /// Open the part: validate `config`, identify the part, reset it, configure it
@@ -257,6 +318,9 @@ pub fn open<S: SpiTransfer>(
     Ok(Lan865xMac {
         mac: Tc6Mac::new(tc6, config.mac_address),
         identity,
+        config: *config,
+        plca_reconciled: false,
+        reconfigure_owed: false,
     })
 }
 
@@ -276,6 +340,77 @@ impl<S: SpiTransfer> Lan865xMac<S> {
     /// to say); see `Tc6::set_interrupt_probe`.
     pub fn set_interrupt_probe(&mut self, probe: fn() -> bool) {
         self.mac.tc6_mut().set_interrupt_probe(probe);
+    }
+
+    /// Housekeeping. Call it regularly; the cadence is the caller's.
+    ///
+    /// 1. One footer exchange, and the status it announces is cleared. A footer
+    ///    without `SYNC`, or a `RESETC` among the status bits collected (here or
+    ///    by `transmit` and `receive`), means the part was reset and holds no
+    ///    configuration: the whole bring-up runs again (`delay_us` and `now_us`
+    ///    are for that, as in [`open`]) and the report says so. If it fails the
+    ///    next call tries again; the status bits of a call that failed are lost
+    ///    with its error.
+    /// 2. With PLCA on, one control read of Status 1. When it says the PLCA status
+    ///    changed, and on the first call after any bring-up, PLCA's state is read
+    ///    and collision detection set to match: off while PLCA is active, on
+    ///    while it has fallen back to CSMA/CD (AN1760, "Managing Collision
+    ///    Detection", Figure 1).
+    ///
+    /// The first-call reconcile goes beyond Figure 1, which acts on a change only.
+    /// The bring-up turns collision detection off (AN1760 Table 3) while PLCA, off
+    /// at reset, has not yet come up; if it never does there is no change to act
+    /// on, and the node would run CSMA/CD with collision detection disabled.
+    pub fn service(
+        &mut self,
+        delay_us: impl FnMut(u32),
+        now_us: impl FnMut() -> u64,
+    ) -> Result<ServiceReport, OpenError<S::Error>> {
+        let mut report = ServiceReport::default();
+        let tc6 = self.mac.tc6_mut();
+        match tc6.read_status() {
+            Ok(footer) => {
+                if footer.extended_status() {
+                    tc6.clear_extended_status()?;
+                }
+            }
+            Err(Error::NotSynced) => self.reconfigure_owed = true,
+            Err(other) => return Err(other.into()),
+        }
+        report.status0 = tc6.take_events();
+        if report.status0 & std_reg::STATUS0_RESETC != 0 {
+            self.reconfigure_owed = true;
+        }
+        if self.reconfigure_owed {
+            self.identity = configure(tc6, &self.config, delay_us, now_us)?;
+            self.reconfigure_owed = false;
+            self.plca_reconciled = false;
+            report.reconfigured = true;
+        }
+        if matches!(self.config.plca, Plca::Node { .. }) {
+            report.phy_status = self.follow_plca()?;
+        }
+        Ok(report)
+    }
+
+    /// AN1760 Figure 1, plus the first-call reconcile described at
+    /// [`service`](Self::service). Returns the Status 1 flags it read.
+    fn follow_plca(&mut self) -> Result<u16, Error<S::Error>> {
+        let tc6 = self.mac.tc6_mut();
+        // Status 1 is read-to-clear, so the change has to be remembered before
+        // anything below can fail: a failure after this read would otherwise lose
+        // it for good.
+        let sts1 = (tc6.reg_read(STS1)? & 0xFFFF) as u16;
+        if sts1 & regs::sts1::PSTC != 0 {
+            self.plca_reconciled = false;
+        }
+        if !self.plca_reconciled {
+            let active = tc6.reg_read(PLCA_STS)? & PLCA_STS_PST != 0;
+            let cden = if active { 0 } else { CDCTL0_CDEN };
+            tc6.reg_modify(CDCTL0, CDCTL0_CDEN, cden)?;
+            self.plca_reconciled = true;
+        }
+        Ok(sts1)
     }
 
     /// The part, with the interface borrowed for a test.
