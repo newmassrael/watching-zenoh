@@ -2690,7 +2690,15 @@ PIN_NO_SYMBOL = 0
 # session declares counters over a stream link and none over a datagram link, and the runtime's
 # own auth segment per session. `api-compat-c` is not touched and is still PARTIAL beside it. READ
 # off the census's own FAIL line, `wz citations: 284 against a pin of 280`.
-PIN_WZ_CITATIONS = 284
+#
+# R3122 -- 284 -> 289, one atom. `transport-shm`'s reason gains the UPDATE that the sender's handoff
+# belongs to a link and a message is counted on the link it leaves on: it names the link's field
+# that keeps the handoff, the declaration an Open message hands back with its extension, the
+# authenticator's lease of a handoff, the session's one definition of the priority a message is
+# routed on, and the runtime test that a publish through the real entry is counted on the link it
+# leaves on. `api-compat-c` is not touched and is still PARTIAL beside it. READ off the census's
+# own FAIL line, `wz citations: 289 against a pin of 284`.
+PIN_WZ_CITATIONS = 289
 # R2626 — 44 -> 42, and this one is worth a sentence because it HELD through
 # every earlier retirement in this run (R2612, R2622). `time-hlc`'s reason is the
 # first retiree carrying AMBIGUOUS citations of its own: its oldest clauses cite
