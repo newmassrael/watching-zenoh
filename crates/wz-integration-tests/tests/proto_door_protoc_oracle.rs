@@ -65,6 +65,30 @@
 //! packages, so the flag is a statement about the machine rather than a gamble.
 //! A skip prints `ok` and reads as agreement, which is the thing being kept
 //! from happening.
+//!
+//! ## The judge is MEASURED, because `protoc` is not one program
+//!
+//! The first corpus was written against protoc 3.21.12 and went red on the
+//! hosted runner, which has 3.12.4 (Ubuntu 22.04): that release refuses a
+//! proto3 `optional` field unless `--experimental_allow_proto3_optional` is
+//! given, and compiles messages nested 32 deep where 3.21 stops at 31. Both
+//! facts had been written into the corpus as literals, so the corpus described
+//! one build of the judge and not the judge. Every fact of that kind is now
+//! probed from the `protoc` that runs ([`Judge`]): whether it needs the flag
+//! (and the flag is passed when it does), and the deepest nesting it compiles,
+//! for messages and for groups. A case about depth is decided from the probe
+//! ([`depth_expect`]): where the door refuses what this `protoc` accepts it is a
+//! deliberate refusal, where both refuse it is an agreement. The door's own
+//! bound is 31 (`MAX_MESSAGE_NESTING`, `protoc` 3.21's limit) whatever `protoc`
+//! is installed, and a control holds that number to the door.
+//!
+//! `WZ_PROTOC_BIN` names the `protoc` to judge with, and the `descriptor.proto`
+//! fed to the door is the one beside it (`<bin>/../include`, where a package
+//! unpacked with `dpkg -x` puts it), then the installed ones. To reproduce a
+//! runner without installing anything: unpack its `protobuf-compiler`,
+//! `libprotoc` and `libprotobuf-dev` `.deb` files into a directory, then run
+//! this test with `WZ_PROTOC_BIN=<dir>/usr/bin/protoc` and
+//! `LD_LIBRARY_PATH=<dir>/usr/lib/x86_64-linux-gnu`.
 // NO CROSS-IMPL PROOF DECLARATION HERE, for the reason the tcpdump adjudicator
 // next to it gives: `protoc` is a foreign TOOL and not a zenoh implementation,
 // so this file contributes nothing to the cross-implementation accounting.
@@ -84,8 +108,51 @@ const KEY: &str = "demo/sensor";
 
 // ---- the judge ---------------------------------------------------------------
 
-/// `protoc`, or `None` with the reason it cannot judge.
-fn protoc() -> Result<PathBuf, String> {
+/// The deepest nesting the judge is asked about. A `protoc` that compiles this
+/// many levels is reported as having no limit below it, which is all the corpus
+/// needs to know.
+const DEPTH_CAP: usize = 128;
+
+/// How deeply the door lets messages, and groups, be written inside one
+/// another: `MAX_MESSAGE_NESTING` in the reader, which is `protoc` 3.21's own
+/// limit. Older releases accept more (3.12.4 does), so this is a fact about the
+/// DOOR, held to the door by `the_door_reads_the_nesting_this_file_says_it_does`,
+/// and what `protoc` does at these depths is the judge's to say.
+const DOOR_NESTING: usize = 31;
+
+/// The `protoc` that judges, with the facts about it that differ between
+/// releases, each MEASURED from it (see the module documentation).
+struct Judge {
+    bin: PathBuf,
+    /// `protoc --version`, for the log: a red from a runner has to say whose
+    /// opinion it was.
+    version: String,
+    /// Whether it refuses a proto3 `optional` field unless told
+    /// `--experimental_allow_proto3_optional`.
+    needs_proto3_optional_flag: bool,
+    /// The deepest `nested(n)` it compiles, up to [`DEPTH_CAP`].
+    deepest_message: usize,
+    /// The deepest `grouped(n)` it compiles, up to [`DEPTH_CAP`].
+    deepest_group: usize,
+}
+
+impl Judge {
+    /// Flags every compilation takes for this `protoc`.
+    fn flags(&self) -> &'static [&'static str] {
+        if self.needs_proto3_optional_flag {
+            &["--experimental_allow_proto3_optional"]
+        } else {
+            &[]
+        }
+    }
+
+    fn compile(&self, dir: &Path, root: &str) -> Result<Compiled, String> {
+        compile(&self.bin, self.flags(), dir, root)
+    }
+}
+
+/// `protoc` and what it says its version is, or why it cannot judge.
+fn protoc() -> Result<(PathBuf, String), String> {
     let bin = std::env::var("WZ_PROTOC_BIN").unwrap_or_else(|_| "protoc".to_string());
     let probe = Command::new(&bin)
         .arg("--version")
@@ -94,7 +161,107 @@ fn protoc() -> Result<PathBuf, String> {
     if !probe.status.success() {
         return Err(format!("`{bin} --version` failed"));
     }
-    Ok(PathBuf::from(bin))
+    let version = String::from_utf8_lossy(&probe.stdout).trim().to_string();
+    Ok((PathBuf::from(bin), version))
+}
+
+/// Whether a `protoc` needs `--experimental_allow_proto3_optional`, from what it
+/// said about a schema with an `optional` proto3 field compiled WITHOUT the flag.
+///
+/// Read from the answer and not from the version number: a release that takes
+/// the field says nothing about the flag, one that does not names it (protoc
+/// 3.12.4: "This file contains proto3 optional fields, but
+/// --experimental_allow_proto3_optional was not set."), and anything else is a
+/// refusal this function has no business explaining away.
+fn proto3_optional_flag_needed(without_the_flag: &Compiled) -> Result<bool, String> {
+    if without_the_flag.ok {
+        Ok(false)
+    } else if without_the_flag
+        .stderr
+        .contains("experimental_allow_proto3_optional")
+    {
+        Ok(true)
+    } else {
+        Err(format!(
+            "protoc refused a proto3 `optional` field for a reason that is not the missing flag: {}",
+            without_the_flag.stderr
+        ))
+    }
+}
+
+/// The largest `n` in `0..=cap` with `compiles(n)`, for a `compiles` that holds
+/// up to some depth and fails beyond it (a nesting limit). Zero means not even
+/// one level. Found by bisection, so a probe costs a handful of `protoc` runs.
+fn deepest(
+    cap: usize,
+    compiles: &mut dyn FnMut(usize) -> Result<bool, String>,
+) -> Result<usize, String> {
+    let (mut low, mut high) = (0, cap);
+    while low < high {
+        let mid = (low + high).div_ceil(2);
+        if compiles(mid)? {
+            low = mid;
+        } else {
+            high = mid - 1;
+        }
+    }
+    Ok(low)
+}
+
+/// Whether `protoc` compiles `text` as one file, with `flags`.
+fn compiles(protoc: &Path, flags: &[&str], text: &str) -> Result<bool, String> {
+    let dir = tempfile::tempdir().map_err(|e| e.to_string())?;
+    std::fs::write(dir.path().join("probe.proto"), text).map_err(|e| e.to_string())?;
+    Ok(run_compiler(protoc, flags, dir.path(), "probe.proto")?.ok)
+}
+
+/// Measure the `protoc` at `bin`: the facts about it that differ between
+/// releases, so that no corpus case has to know which release it is.
+fn measure_judge(bin: PathBuf, version: String) -> Result<Judge, String> {
+    let dir = tempfile::tempdir().map_err(|e| e.to_string())?;
+    let optional = "syntax = \"proto3\";\nmessage P { optional int32 a = 1; }\n";
+    std::fs::write(dir.path().join("probe.proto"), optional).map_err(|e| e.to_string())?;
+    let needs_proto3_optional_flag =
+        proto3_optional_flag_needed(&run_compiler(&bin, &[], dir.path(), "probe.proto")?)?;
+    let probe = Judge {
+        bin,
+        version,
+        needs_proto3_optional_flag,
+        deepest_message: 0,
+        deepest_group: 0,
+    };
+    // The plain schema, which also proves `--decode` can read descriptor.proto.
+    std::fs::write(
+        dir.path().join("probe.proto"),
+        "syntax = \"proto3\";\nmessage P { int32 a = 1; }\n",
+    )
+    .map_err(|e| e.to_string())?;
+    let plain = probe.compile(dir.path(), "probe.proto")?;
+    if plain.descriptor_text.is_none() {
+        return Err(format!("protoc refused the probe schema: {}", plain.stderr));
+    }
+    let (bin, flags) = (probe.bin.clone(), probe.flags());
+    let depth_of = |schema: fn(usize) -> String| -> Result<usize, String> {
+        let found = deepest(DEPTH_CAP, &mut |n| compiles(&bin, flags, &schema(n)))?;
+        // The search assumes a limit; hold it to what it found. A `protoc` whose
+        // answer is not monotone would otherwise be judged by an accident of the
+        // bisection.
+        if found > 0 && !compiles(&bin, flags, &schema(found))? {
+            return Err(format!("protoc refuses the {found} levels the probe found"));
+        }
+        if found < DEPTH_CAP && compiles(&bin, flags, &schema(found + 1))? {
+            return Err(format!(
+                "protoc compiles {} levels past the {found} the probe found",
+                found + 1
+            ));
+        }
+        Ok(found)
+    };
+    Ok(Judge {
+        deepest_message: depth_of(nested)?,
+        deepest_group: depth_of(grouped)?,
+        ..probe
+    })
 }
 
 /// What `protoc` made of one schema directory.
@@ -105,23 +272,38 @@ struct Compiled {
     descriptor_text: Option<String>,
 }
 
-fn compile(protoc: &Path, dir: &Path, root: &str) -> Result<Compiled, String> {
+/// Run `protoc` on `root` and report whether it accepted the schema and what it
+/// said. Nothing is read back: this is the question "does it compile", and it is
+/// the only one a depth probe can ask, because `protoc --decode` has a recursion
+/// limit of its own ("Failed to parse input" in 3.12.4 past about 100 levels)
+/// that the descriptor set of a deeply nested schema can exceed although the
+/// schema compiled.
+fn run_compiler(protoc: &Path, flags: &[&str], dir: &Path, root: &str) -> Result<Compiled, String> {
     let out = dir.join("out.pb");
     let run = Command::new(protoc)
+        .args(flags)
         .arg(format!("--proto_path={}", dir.display()))
         .arg(format!("--descriptor_set_out={}", out.display()))
         .arg("--include_imports")
         .arg(root)
         .output()
         .map_err(|e| format!("protoc did not run: {e}"))?;
-    let stderr = String::from_utf8_lossy(&run.stderr).into_owned();
-    if !run.status.success() {
-        return Ok(Compiled {
-            ok: false,
-            stderr,
-            descriptor_text: None,
-        });
+    Ok(Compiled {
+        ok: run.status.success(),
+        stderr: String::from_utf8_lossy(&run.stderr).into_owned(),
+        descriptor_text: None,
+    })
+}
+
+/// [`run_compiler`], and when the schema compiled, its descriptor set read back
+/// in `protoc --decode`'s text form.
+fn compile(protoc: &Path, flags: &[&str], dir: &Path, root: &str) -> Result<Compiled, String> {
+    let out = dir.join("out.pb");
+    let ran = run_compiler(protoc, flags, dir, root)?;
+    if !ran.ok {
+        return Ok(ran);
     }
+    let stderr = ran.stderr;
     let decode = Command::new(protoc)
         .arg("--decode=google.protobuf.FileDescriptorSet")
         .arg("google/protobuf/descriptor.proto")
@@ -130,8 +312,9 @@ fn compile(protoc: &Path, dir: &Path, root: &str) -> Result<Compiled, String> {
         .map_err(|e| format!("protoc --decode did not run: {e}"))?;
     if !decode.status.success() {
         return Err(format!(
-            "`protoc --decode` could not read google/protobuf/descriptor.proto \
-             (it ships in libprotobuf-dev, as /usr/include/google/protobuf/descriptor.proto): {}",
+            "`protoc --decode` failed: it needs google/protobuf/descriptor.proto (shipped in \
+             libprotobuf-dev, beside the binary or under /usr/include) and a descriptor set \
+             within its own recursion limit: {}",
             String::from_utf8_lossy(&decode.stderr)
         ));
     }
@@ -733,7 +916,39 @@ const STANDIN_FILES: [(&str, &str); 3] = [
     ),
 ];
 
-fn corpus() -> Vec<Case> {
+/// The two schemas whose depth is the question: written inside one another.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Nesting {
+    Messages,
+    Groups,
+}
+
+/// How a schema written `depth` levels deep is judged, from what each side does
+/// with it. The door reads up to [`DOOR_NESTING`] levels; `protoc` reads up to
+/// `protoc_deepest`, which is the probe's answer and differs between releases
+/// (31 for 3.21.12, more for 3.12.4). Nothing here is a statement about one
+/// release:
+///
+/// * both read it: messages agree, and a group is refused on purpose, because
+///   the message that holds it is the root;
+/// * only the door refuses it, for the depth: a deliberate refusal;
+/// * only `protoc` refuses it: a non-validation (it is not a validator);
+/// * both refuse it: an agreement about the blame.
+fn depth_expect(shape: Nesting, depth: usize, protoc_deepest: usize) -> Expect {
+    let protoc_compiles = depth <= protoc_deepest;
+    let door_reads = depth <= DOOR_NESTING;
+    match (shape, protoc_compiles, door_reads) {
+        (Nesting::Messages, true, true) => Expect::Agree,
+        (Nesting::Messages, false, true) => Expect::DoorAccepts("M0"),
+        (Nesting::Groups, true, true) => {
+            Expect::DoorRefuses("M0", "group fields are not supported")
+        }
+        (_, true, false) => Expect::DoorRefuses("M0", "nested more than"),
+        (_, false, _) => Expect::BothRefuse,
+    }
+}
+
+fn corpus(judge: &Judge) -> Vec<Case> {
     use Expect::*;
     let mut cases = vec![
         // ---- schemas protoc compiles and the door must declare identically ----
@@ -999,11 +1214,12 @@ fn corpus() -> Vec<Case> {
             ],
         ),
         one("a chain twenty messages long", Agree, &chain(20)),
-        // protoc's own nesting limit, from the inside: 31 levels compile.
+        // The door's nesting bound from the inside: its 31st level. What protoc
+        // does at that depth is measured, not written here.
         one(
-            "messages written 31 deep, the most protoc compiles",
-            Agree,
-            &nested(31),
+            "messages written 31 deep, the door's last level",
+            depth_expect(Nesting::Messages, DOOR_NESTING, judge.deepest_message),
+            &nested(DOOR_NESTING),
         ),
         one("a message with three hundred fields", Agree, &{
             let mut s = String::from("syntax = \"proto3\";\nmessage Wide {\n");
@@ -1259,12 +1475,13 @@ fn corpus() -> Vec<Case> {
             BothRefuse,
             "syntax = \"proto3\";\nfoo bar;\nmessage M {}\n",
         ),
-        // ... and from the outside: the 32nd level is refused by both, and
-        // protoc names no line for it.
+        // ... and from the outside: the door's 32nd level is refused. protoc 3.21
+        // refuses it too and names no line for it; protoc 3.12.4 compiles it,
+        // and then it is a deliberate refusal.
         one(
-            "messages written 32 deep, one past protoc's limit",
-            BothRefuse,
-            &nested(32),
+            "messages written 32 deep, the door's first refusal",
+            depth_expect(Nesting::Messages, DOOR_NESTING + 1, judge.deepest_message),
+            &nested(DOOR_NESTING + 1),
         ),
         one(
             "an option missing its semicolon",
@@ -1475,12 +1692,14 @@ fn corpus() -> Vec<Case> {
             BothRefuse,
             "syntax = \"proto2\";\nmessage M {\n  optional group G = 1 {\n    optional int32 x = 1\n  }\n}\n",
         ),
-        // The group's body is a message to the nesting limit: 31 levels compile
-        // (see the deliberate refusals below), the 32nd is refused.
+        // The group's body is a message to the nesting limit, so a group chain
+        // is refused for its depth one level past the door's bound, and for the
+        // group itself at the bound; which of these protoc agrees with is its
+        // own limit, measured.
         one(
-            "groups written 32 deep, one past protoc's limit",
-            BothRefuse,
-            &grouped(32),
+            "groups written 32 deep, the door's first refusal",
+            depth_expect(Nesting::Groups, DOOR_NESTING + 1, judge.deepest_group),
+            &grouped(DOOR_NESTING + 1),
         ),
         // ---- what protoc compiles and the door refuses, on purpose -----------
         one(
@@ -1511,9 +1730,9 @@ fn corpus() -> Vec<Case> {
             "syntax = \"proto2\";\nmessage R {\n  oneof o {\n    group G = 1 { optional int32 x = 1; }\n    int32 y = 2;\n  }\n}\n",
         ),
         one(
-            "groups written 31 deep, the most protoc compiles",
-            DoorRefuses("M0", "group fields are not supported"),
-            &grouped(31),
+            "groups written 31 deep, the door's last level",
+            depth_expect(Nesting::Groups, DOOR_NESTING, judge.deepest_group),
+            &grouped(DOOR_NESTING),
         ),
         case(
             "an extend reached through a field",
@@ -1631,13 +1850,37 @@ fn corpus() -> Vec<Case> {
     cases
 }
 
-/// Where `descriptor.proto` is installed: the Debian package `libprotobuf-dev`
-/// (the one the armed lane installs, and the comment on the skip rule names) and
-/// a local protobuf install.
+/// Where `descriptor.proto` is installed when it is not beside the judge: the
+/// Debian package `libprotobuf-dev` (the one the armed lane installs, and the
+/// comment on the skip rule names) and a local protobuf install.
 const DESCRIPTOR_PROTO: &[&str] = &[
     "/usr/include/google/protobuf/descriptor.proto",
     "/usr/local/include/google/protobuf/descriptor.proto",
 ];
+
+/// The `descriptor.proto` of the judge's own release, as text: the one beside
+/// its binary (`<bin>/../include`, where `protoc` itself looks first for its
+/// imports and for `--decode`, and where a package unpacked with `dpkg -x`
+/// puts it), else an installed one. The two must be the same file or the cases
+/// that feed it to the door would describe a different release than the one
+/// judging them.
+fn descriptor_proto_text(judge: &Judge) -> Result<String, String> {
+    let beside = judge
+        .bin
+        .parent()
+        .map(|dir| dir.join("../include/google/protobuf/descriptor.proto"));
+    let fixed = DESCRIPTOR_PROTO.iter().map(PathBuf::from);
+    beside
+        .into_iter()
+        .chain(fixed)
+        .find_map(|path| std::fs::read_to_string(path).ok())
+        .ok_or_else(|| {
+            format!(
+                "no descriptor.proto beside {} or at any of {DESCRIPTOR_PROTO:?}",
+                judge.bin.display()
+            )
+        })
+}
 
 /// The cases that feed the REAL `google/protobuf/descriptor.proto` to the door
 /// as one file of the schema, beside the options file of [`STANDIN_FILES`]
@@ -1647,12 +1890,9 @@ const DESCRIPTOR_PROTO: &[&str] = &[
 /// They are built apart from [`corpus`] because the text is read from the
 /// machine, and a machine without it is the skip the armed lane turns into a
 /// failure. `Err` says why there is no such file.
-fn descriptor_cases() -> Result<Vec<Case>, String> {
+fn descriptor_cases(judge: &Judge) -> Result<Vec<Case>, String> {
     use Expect::*;
-    let descriptor = DESCRIPTOR_PROTO
-        .iter()
-        .find_map(|path| std::fs::read_to_string(path).ok())
-        .ok_or_else(|| format!("no descriptor.proto at any of {DESCRIPTOR_PROTO:?}"))?;
+    let descriptor = descriptor_proto_text(judge)?;
     // The schema uses the option the options file adds, which protoc can check
     // only against the real file: an option's extendee must declare
     // `uninterpreted_option`, which the stand-in does not.
@@ -1717,21 +1957,9 @@ fn the_proto_door_agrees_with_protoc_over_the_corpus() {
     // A missing `protoc`, or one that cannot read its own `descriptor.proto`
     // (`/usr/include/google/protobuf/descriptor.proto`, from libprotobuf-dev),
     // is a SKIP and not a pass -- and an armed lane turns it into a failure.
-    let judge = protoc().and_then(|p| {
-        let dir = tempfile::tempdir().map_err(|e| e.to_string())?;
-        std::fs::write(
-            dir.path().join("probe.proto"),
-            "syntax = \"proto3\";\nmessage P { int32 a = 1; }\n",
-        )
-        .map_err(|e| e.to_string())?;
-        let probe = compile(&p, dir.path(), "probe.proto")?;
-        if probe.descriptor_text.is_none() {
-            return Err(format!("protoc refused the probe schema: {}", probe.stderr));
-        }
-        Ok(p)
-    });
-    let protoc = match judge {
-        Ok(p) => p,
+    let judge = protoc().and_then(|(bin, version)| measure_judge(bin, version));
+    let judge = match judge {
+        Ok(j) => j,
         Err(why) => {
             if required {
                 panic!(
@@ -1749,8 +1977,8 @@ fn the_proto_door_agrees_with_protoc_over_the_corpus() {
 
     let mut disagreements: Vec<String> = Vec::new();
     let (mut schemas, mut roots, mut blamed, mut purposeful, mut unchecked) = (0, 0, 0, 0, 0);
-    let mut corpus = corpus();
-    let from_descriptor = match descriptor_cases() {
+    let mut corpus = corpus(&judge);
+    let from_descriptor = match descriptor_cases(&judge) {
         Ok(cases) => {
             let n = cases.len();
             corpus.extend(cases);
@@ -1779,7 +2007,7 @@ fn the_proto_door_agrees_with_protoc_over_the_corpus() {
         let dir = tempfile::tempdir().expect("tempdir for the schemas");
         write_case(dir.path(), case);
         let root_file = &case.files[0].0;
-        let compiled = match compile(&protoc, dir.path(), root_file) {
+        let compiled = match judge.compile(dir.path(), root_file) {
             Ok(c) => c,
             Err(e) => panic!("{}: {e}", case.name),
         };
@@ -1897,6 +2125,20 @@ fn the_proto_door_agrees_with_protoc_over_the_corpus() {
          {blamed} refusal(s) blamed on the same file and line, {purposeful} deliberate \
          refusal(s), {unchecked} non-validation(s); {from_descriptor} case(s) feed the real \
          descriptor.proto"
+    );
+    // WHOSE OPINION IT WAS, and the facts measured from it that the corpus was
+    // decided by -- on the line a red run is read from.
+    eprintln!(
+        "judge: {}; proto3 optional {}; deepest nesting compiled: {} message level(s), \
+         {} group level(s) (cap {DEPTH_CAP}); the door reads {DOOR_NESTING}",
+        judge.version,
+        if judge.needs_proto3_optional_flag {
+            "needs --experimental_allow_proto3_optional"
+        } else {
+            "needs no flag"
+        },
+        judge.deepest_message,
+        judge.deepest_group,
     );
     assert!(
         schemas >= 20 && roots >= 40 && blamed >= 40 && purposeful >= 8 && unchecked >= 3,
@@ -2094,16 +2336,191 @@ fn the_error_reader_picks_the_blame_protoc_means() {
     );
 }
 
+/// A judge that was not measured, for the controls: one that nests `deepest`
+/// levels of either kind and needs no flag.
+fn assumed_judge(deepest: usize) -> Judge {
+    Judge {
+        bin: PathBuf::from("protoc"),
+        version: "assumed".to_string(),
+        needs_proto3_optional_flag: false,
+        deepest_message: deepest,
+        deepest_group: deepest,
+    }
+}
+
 #[test]
 fn the_corpus_names_each_case_once_and_covers_each_arm() {
-    let corpus = corpus();
-    let count = |f: fn(&Expect) -> bool| corpus.iter().filter(|c| f(&c.expect)).count();
-    assert!(count(|e| matches!(e, Expect::Agree)) >= 20);
-    assert!(count(|e| matches!(e, Expect::AgreeFrom(_))) >= 6);
-    assert!(count(|e| matches!(e, Expect::BothRefuse)) >= 40);
-    assert!(count(|e| matches!(e, Expect::DoorRefuses(..))) >= 8);
-    assert!(count(|e| matches!(e, Expect::DoorAccepts(_))) >= 3);
-    for case in &corpus {
-        assert!(!case.files.is_empty(), "{} has no file", case.name);
+    // The corpus is decided by the judge, so it is held to its arms and to unique
+    // names for a judge that stops at the door's depth (protoc 3.21) and for one
+    // that goes far past it (protoc 3.12.4).
+    for deepest in [DOOR_NESTING, DEPTH_CAP] {
+        let corpus = corpus(&assumed_judge(deepest));
+        let count = |f: fn(&Expect) -> bool| corpus.iter().filter(|c| f(&c.expect)).count();
+        assert!(count(|e| matches!(e, Expect::Agree)) >= 20);
+        assert!(count(|e| matches!(e, Expect::AgreeFrom(_))) >= 6);
+        assert!(count(|e| matches!(e, Expect::BothRefuse)) >= 40);
+        assert!(count(|e| matches!(e, Expect::DoorRefuses(..))) >= 8);
+        assert!(count(|e| matches!(e, Expect::DoorAccepts(_))) >= 3);
+        let mut names: Vec<&str> = corpus.iter().map(|c| c.name.as_str()).collect();
+        names.sort_unstable();
+        let before = names.len();
+        names.dedup();
+        assert_eq!(before, names.len(), "two corpus cases share a name");
+        for case in &corpus {
+            assert!(!case.files.is_empty(), "{} has no file", case.name);
+        }
     }
+}
+
+/// THE DEPTH PROBE FINDS THE LIMIT IT IS HANDED, whatever it is. A probe that
+/// answered one fixed number would be right on the release it was written
+/// against and wrong on every other, which is how the hosted run went red.
+#[test]
+fn the_depth_probe_finds_the_deepest_level_a_judge_compiles() {
+    for limit in [0, 1, 2, 31, 32, 33, 100, DEPTH_CAP - 1, DEPTH_CAP] {
+        let mut asked = 0;
+        let found = deepest(DEPTH_CAP, &mut |n| {
+            asked += 1;
+            Ok(n <= limit)
+        })
+        .expect("a probe over a plain predicate");
+        assert_eq!(found, limit, "a judge that stops after {limit} levels");
+        // Bisection: a handful of runs, never one per level.
+        assert!(asked <= 8, "{asked} compilations to find {limit}");
+    }
+    // No limit below the cap is reported as the cap.
+    assert_eq!(deepest(DEPTH_CAP, &mut |_| Ok(true)), Ok(DEPTH_CAP));
+    // An infrastructure failure is the probe's failure, not a depth.
+    assert_eq!(
+        deepest(DEPTH_CAP, &mut |_| Err("no protoc".to_string())),
+        Err("no protoc".to_string())
+    );
+}
+
+/// THE PROTO3-OPTIONAL FLAG IS DECIDED BY WHAT PROTOC SAYS, not by which
+/// release it is. The refusal text is protoc 3.12.4's own, as the hosted run
+/// printed it.
+#[test]
+fn the_proto3_optional_flag_follows_what_protoc_says_without_it() {
+    let said = |ok, stderr: &str| Compiled {
+        ok,
+        stderr: stderr.to_string(),
+        descriptor_text: None,
+    };
+    assert_eq!(proto3_optional_flag_needed(&said(true, "")), Ok(false));
+    assert_eq!(
+        proto3_optional_flag_needed(&said(
+            false,
+            "a.proto: This file contains proto3 optional fields, but \
+             --experimental_allow_proto3_optional was not set.\n"
+        )),
+        Ok(true)
+    );
+    // Any other refusal is not the flag's business.
+    let other = proto3_optional_flag_needed(&said(false, "a.proto:2:1: Expected \";\".\n"));
+    assert!(other.is_err(), "{other:?}");
+}
+
+/// THE DESCRIPTOR FED TO THE DOOR IS THE JUDGE'S OWN: the file beside the
+/// binary wins over an installed one, so a `protoc` unpacked from a package is
+/// judged with the `descriptor.proto` of its release and not of the machine's.
+#[test]
+fn the_descriptor_proto_beside_the_judge_is_the_one_fed_to_the_door() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let include = dir.path().join("usr/include/google/protobuf");
+    std::fs::create_dir_all(&include).expect("create the include directory");
+    std::fs::write(include.join("descriptor.proto"), "// the judge's own\n").expect("write it");
+    let mut judge = assumed_judge(DOOR_NESTING);
+    judge.bin = dir.path().join("usr/bin/protoc");
+    assert_eq!(
+        descriptor_proto_text(&judge).as_deref(),
+        Ok("// the judge's own\n")
+    );
+    // With nothing beside it the installed one is used, or the answer says where
+    // it looked; either way it is not the file of the judge above.
+    judge.bin = dir.path().join("elsewhere/bin/protoc");
+    match descriptor_proto_text(&judge) {
+        Ok(text) => assert_ne!(text, "// the judge's own\n"),
+        Err(why) => assert!(why.contains("no descriptor.proto beside"), "{why}"),
+    }
+}
+
+/// THE DEPTH CASES ARE DECIDED BY THE JUDGE'S LIMIT AND THE DOOR'S, never by a
+/// number written into the corpus: the whole table, for a judge that stops
+/// before the door, at it, past it and far past it.
+#[test]
+fn a_depth_case_is_decided_by_what_each_side_reads() {
+    use Nesting::*;
+    let kind = |e: &Expect| match e {
+        Expect::Agree => "agree".to_string(),
+        Expect::BothRefuse => "both refuse".to_string(),
+        Expect::DoorAccepts(_) => "door accepts".to_string(),
+        Expect::DoorRefuses(_, reason) => format!("door refuses: {reason}"),
+        Expect::AgreeFrom(_) => "agree from".to_string(),
+    };
+    let door = DOOR_NESTING;
+    // protoc 3.21: stops at the door's depth.
+    assert_eq!(kind(&depth_expect(Messages, door, door)), "agree");
+    assert_eq!(kind(&depth_expect(Messages, door + 1, door)), "both refuse");
+    assert_eq!(
+        kind(&depth_expect(Groups, door, door)),
+        "door refuses: group fields are not supported"
+    );
+    assert_eq!(kind(&depth_expect(Groups, door + 1, door)), "both refuse");
+    // protoc 3.12.4: reads past the door's depth, so the door's refusal is its own.
+    assert_eq!(kind(&depth_expect(Messages, door, 100)), "agree");
+    assert_eq!(
+        kind(&depth_expect(Messages, door + 1, 100)),
+        "door refuses: nested more than"
+    );
+    assert_eq!(
+        kind(&depth_expect(Groups, door + 1, 100)),
+        "door refuses: nested more than"
+    );
+    // A protoc that stops BEFORE the door's depth refuses what the door reads.
+    assert_eq!(
+        kind(&depth_expect(Messages, door, door - 1)),
+        "door accepts"
+    );
+    assert_eq!(kind(&depth_expect(Groups, door, door - 1)), "both refuse");
+    // The corpus carries the table: the same four cases, different expectations.
+    let name = "messages written 32 deep, the door's first refusal";
+    let expect_of = |deepest| {
+        corpus(&assumed_judge(deepest))
+            .into_iter()
+            .find(|c| c.name == name)
+            .map(|c| kind(&c.expect))
+    };
+    assert_eq!(expect_of(door).as_deref(), Some("both refuse"));
+    assert_eq!(
+        expect_of(DEPTH_CAP).as_deref(),
+        Some("door refuses: nested more than")
+    );
+}
+
+/// THE DOOR'S OWN BOUND IS THE ONE THIS FILE SAYS: 31 levels read, the 32nd
+/// refused, for messages and for groups. Without protoc, so the number the
+/// depth cases are built around cannot drift from the door unseen.
+#[test]
+fn the_door_reads_the_nesting_this_file_says_it_does() {
+    let files = |text: String| vec![("a.proto".to_string(), text)];
+    let door = call_door("M0", &files(nested(DOOR_NESTING)));
+    assert!(door.ok, "{}", door.reason);
+    let door = call_door("M0", &files(nested(DOOR_NESTING + 1)));
+    assert!(
+        !door.ok && door.reason.contains("nested more than"),
+        "{door:?}"
+    );
+    // A group chain reads to the same depth, and is then refused for the group
+    // it holds; one level past it, for the depth.
+    let door = call_door("M0", &files(grouped(DOOR_NESTING)));
+    assert!(
+        !door.ok && door.reason.contains("group fields are not supported"),
+        "{door:?}"
+    );
+    let door = call_door("M0", &files(grouped(DOOR_NESTING + 1)));
+    assert!(
+        !door.ok && door.reason.contains("nested more than"),
+        "{door:?}"
+    );
 }
