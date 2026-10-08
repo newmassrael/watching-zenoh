@@ -20,13 +20,16 @@ use alloc::format;
 use core::ffi::CStr;
 use core::sync::atomic::{AtomicBool, Ordering};
 
+use wz::runtime_coop::ClockSource;
 use wz::runtime_core::EthernetMac;
 use wz::runtime_zephyr::glue::{delay_us, log, log_line};
+use wz::runtime_zephyr::ZephyrClock;
 use wz_eth_mac_cyt4bf::{
     Config, Cyt4bfBoard, Cyt4bfMac, DmaArea, LinkError, LinkEvent, LinkMode, RefClock,
 };
 
 use crate::net_lwip::BoardMac;
+use crate::TICK_HZ;
 
 /// ETH0's register base: `ETH0_BASE` in the PDL's device header, the same address
 /// on every CYT4BF part (the `CYT4BF8CDS` the Zephyr board names and the
@@ -60,6 +63,16 @@ extern "C" {
     /// Route and configure ETH0's pins for RMII (boards/<board>/*.c). 0 on
     /// success.
     fn wz_board_eth_pins_init() -> i32;
+}
+
+/// The clock every wait of the driver is bounded by: the kernel's monotonic tick
+/// count, in microseconds (`ZephyrClock`, the same clock the node's own timers
+/// run on). Its resolution is one kernel tick, so a bound ends up to a tick late
+/// and never early. It is the kernel's own time: a bound on it is as long in wall
+/// time as the kernel's tick is, which is why the image checks the core clock
+/// before anything waits.
+fn now_us() -> u64 {
+    ZephyrClock::<TICK_HZ>.now_us()
 }
 
 /// The MAC, as the lwIP backend holds it.
@@ -136,8 +149,9 @@ pub fn open(
     let area: &'static mut DmaArea<RX_SLOTS, TX_SLOTS> =
         unsafe { &mut *core::ptr::addr_of_mut!(DMA) };
     // SAFETY: ETH0_BASE is the MXETH block of every CYT4BF part, used by nothing
-    // else in this image, and `delay_us` waits at least what it is told.
-    let board = unsafe { Cyt4bfBoard::new(ETH0_BASE, delay_us) };
+    // else in this image, `delay_us` waits at least what it is told, and the
+    // kernel's tick count never goes backwards.
+    let board = unsafe { Cyt4bfBoard::new(ETH0_BASE, delay_us, now_us) };
     let mut config = Config::new(mac_address);
     config.ref_clock = ref_clock;
     let mut inner = Cyt4bfMac::new(board, area, &config).map_err(|e| match e {

@@ -63,7 +63,14 @@ struct Model {
     violations: Vec<String>,
     /// How many register writes had been made when the design register was read.
     design_read_after_writes: Option<usize>,
+    /// The sum of the waits asked for, and how many were asked.
     delays_us: u32,
+    delay_calls: u32,
+    /// The board's monotonic clock: a wait of `us` advances it by `stretch * us`,
+    /// as a board whose time base runs slow, or whose wait lasts longer than it
+    /// promised, does.
+    clock_us: u64,
+    delay_stretch: u64,
     // controller behaviour switches
     hold_tx: bool,
     fail_next_tx: bool,
@@ -75,6 +82,8 @@ struct Model {
     mdio_busy_polls: u32,
     mdio_busy_left: u32,
     mdio_stuck: bool,
+    /// The management port reads busy until the clock reaches this.
+    mdio_busy_until_us: u64,
     mdio_data: u16,
     bad_frames: u32,
     phys_touched: Vec<u8>,
@@ -103,6 +112,9 @@ impl Model {
             violations: Vec::new(),
             design_read_after_writes: None,
             delays_us: 0,
+            delay_calls: 0,
+            clock_us: 0,
+            delay_stretch: 1,
             hold_tx: false,
             fail_next_tx: false,
             phy_addr: 1,
@@ -112,6 +124,7 @@ impl Model {
             mdio_busy_polls: 2,
             mdio_busy_left: 0,
             mdio_stuck: false,
+            mdio_busy_until_us: 0,
             mdio_data: 0,
             bad_frames: 0,
             phys_touched: Vec::new(),
@@ -231,7 +244,7 @@ impl Model {
                 self.reg(off)
             }
             NETWORK_STATUS => {
-                if self.mdio_stuck {
+                if self.mdio_stuck || self.clock_us < self.mdio_busy_until_us {
                     0
                 } else if self.mdio_busy_left > 0 {
                     self.mdio_busy_left -= 1;
@@ -430,7 +443,15 @@ impl Board for Gem {
     }
 
     fn delay_us(&mut self, us: u32) {
-        self.0.borrow_mut().delays_us += us;
+        let mut m = self.0.borrow_mut();
+        m.delays_us += us;
+        m.delay_calls += 1;
+        let elapsed = m.delay_stretch * u64::from(us);
+        m.clock_us += elapsed;
+    }
+
+    fn now_us(&mut self) -> u64 {
+        self.0.borrow().clock_us
     }
 }
 
@@ -895,6 +916,88 @@ fn a_management_port_that_never_goes_idle_times_out_instead_of_hanging() {
     model.borrow_mut().mdio_stuck = true;
     assert_eq!(mac.mdio_read(1, 2), Err(MdioError::Timeout));
     assert!(model.borrow().delays_us >= MDIO_BUDGET_US);
+}
+
+/// Every bound is measured on the board's clock, not counted in the waits asked
+/// for. A wait promises AT LEAST its length: the first boot of a CYT4BF image ran
+/// its core at 8 MHz where 350 MHz was assumed and every wait took about 44 times
+/// what it was told, so a budget counted in waits lasted 44 times its length.
+const SLOW: u64 = 44;
+
+#[test]
+fn the_management_port_budget_is_the_clocks_not_the_number_of_waits_asked_for() {
+    use phy::Mdio;
+    let (mut mac, model) = rig();
+    {
+        let mut m = model.borrow_mut();
+        m.mdio_stuck = true;
+        m.delay_stretch = SLOW;
+    }
+    let (clock0, asks0) = {
+        let m = model.borrow();
+        (m.clock_us, m.delay_calls)
+    };
+    assert_eq!(mac.mdio_read(1, 2), Err(MdioError::Timeout));
+
+    let m = model.borrow();
+    let step = SLOW * u64::from(MDIO_POLL_US);
+    let budget = u64::from(MDIO_BUDGET_US);
+    let spent = m.clock_us - clock0;
+    assert_eq!(
+        u64::from(m.delay_calls - asks0),
+        budget.div_ceil(step),
+        "the clock ended the wait; counting the asks would have made {}",
+        budget / u64::from(MDIO_POLL_US)
+    );
+    assert!(
+        spent >= budget && spent < budget + step,
+        "it ended within one wait of the budget: {spent} us"
+    );
+}
+
+#[test]
+fn a_management_port_that_goes_idle_during_a_wait_that_overran_is_not_a_timeout() {
+    use phy::Mdio;
+    let (mut mac, model) = rig();
+    {
+        let mut m = model.borrow_mut();
+        m.delay_stretch = SLOW;
+        m.mdio_busy_polls = 0;
+        // Past the budget, inside the wait that crosses it.
+        m.mdio_busy_until_us = m.clock_us + u64::from(MDIO_BUDGET_US) + 100;
+    }
+    assert_eq!(
+        mac.mdio_read(1, phy::reg::PHYIDR1),
+        Ok(0x2000),
+        "the port is looked at once more after the wait that overran"
+    );
+    assert!(model.borrow().clock_us > u64::from(MDIO_BUDGET_US));
+}
+
+#[test]
+fn the_link_budget_of_bring_up_is_the_clocks_not_the_number_of_waits_asked_for() {
+    let mut config = Config::new(MAC);
+    config.phy_address = Some(1);
+    let (mac, model) = rig_with::<RX, TX>(&config);
+    let mut mac = mac.unwrap();
+    model.borrow_mut().delay_stretch = SLOW;
+    let budget = 1_000_000u32;
+
+    assert_eq!(mac.bring_up_link(budget), Err(LinkError::NoLink));
+
+    let m = model.borrow();
+    assert!(
+        m.clock_us >= u64::from(budget),
+        "it waited out the budget: {} us",
+        m.clock_us
+    );
+    // Counted in waits of 10 ms, 1 s is a hundred of them, each 44 times as long
+    // here: more than a minute. On the clock it is a few seconds.
+    assert!(
+        m.clock_us < 3 * u64::from(budget),
+        "the budget ended on the clock, not on a count: {} us",
+        m.clock_us
+    );
 }
 
 #[test]

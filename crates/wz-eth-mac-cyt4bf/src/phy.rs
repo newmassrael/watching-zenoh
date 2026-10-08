@@ -45,14 +45,21 @@ impl From<MdioError> for LinkError {
     }
 }
 
-/// The management bus the PHY sits on, and a way to wait.
+/// The management bus the PHY sits on, a way to wait, and a clock to bound the
+/// waiting by.
 pub trait Mdio {
     /// Read register `reg` of the PHY at `phy`.
     fn mdio_read(&mut self, phy: u8, reg: u8) -> Result<u16, MdioError>;
     /// Write `value` to register `reg` of the PHY at `phy`.
     fn mdio_write(&mut self, phy: u8, reg: u8, value: u16) -> Result<(), MdioError>;
-    /// Wait about `us` microseconds.
+    /// Wait AT LEAST `us` microseconds. It promises no upper bound: a wait on a
+    /// slow time base lasts many times what was asked, and each management access
+    /// between two waits takes time of its own.
     fn delay_us(&mut self, us: u32);
+    /// Microseconds on a monotonic clock, from any fixed instant. Every budget in
+    /// this module is the difference of two readings of it; the waits are only how
+    /// the module spends the time between looks.
+    fn now_us(&mut self) -> u64;
 }
 
 /// The standard clause 22 registers.
@@ -128,18 +135,26 @@ pub fn find<M: Mdio>(bus: &mut M) -> Result<Option<u8>, MdioError> {
     Ok(None)
 }
 
-/// Software-reset the PHY and wait for the bit to clear.
+/// Software-reset the PHY and wait for the bit to clear, for at most
+/// `RESET_BUDGET_US` by the bus's clock.
+///
+/// The budget is time that passed, not the sum of the waits asked for: each look
+/// at the PHY is a management access that costs time of its own, and a wait lasts
+/// at least what it was told, so a count of waits is shorter than the time spent.
+/// The register is read once more after a wait that overran, so a late look is
+/// never a false timeout.
 pub fn reset<M: Mdio>(bus: &mut M, phy: u8) -> Result<(), LinkError> {
     bus.mdio_write(phy, reg::BMCR, BMCR_RESET)?;
-    let mut waited = 0;
-    while waited < RESET_BUDGET_US {
+    let started = bus.now_us();
+    loop {
         bus.delay_us(RESET_POLL_US);
-        waited += RESET_POLL_US;
         if bus.mdio_read(phy, reg::BMCR)? & BMCR_RESET == 0 {
             return Ok(());
         }
+        if bus.now_us().saturating_sub(started) >= u64::from(RESET_BUDGET_US) {
+            return Err(LinkError::ResetTimeout);
+        }
     }
-    Err(LinkError::ResetTimeout)
 }
 
 /// Enable auto-negotiation and restart it.
@@ -165,18 +180,18 @@ pub fn negotiated<M: Mdio>(bus: &mut M, phy: u8) -> Result<Option<LinkMode>, Lin
         .ok_or(LinkError::UnresolvedMode)
 }
 
-/// Wait up to `budget_us` for negotiation to bring a link up.
+/// Wait up to `budget_us`, by the bus's clock, for negotiation to bring a link up.
+/// A link that is already up needs no time at all, whatever the budget.
 pub fn wait_for_link<M: Mdio>(bus: &mut M, phy: u8, budget_us: u32) -> Result<LinkMode, LinkError> {
-    let mut waited = 0;
+    let started = bus.now_us();
     loop {
         if let Some(mode) = negotiated(bus, phy)? {
             return Ok(mode);
         }
-        if waited >= budget_us {
+        if bus.now_us().saturating_sub(started) >= u64::from(budget_us) {
             return Err(LinkError::NoLink);
         }
         bus.delay_us(NEGOTIATION_POLL_US);
-        waited += NEGOTIATION_POLL_US;
     }
 }
 
@@ -192,7 +207,22 @@ mod tests {
         latched_down: bool,
         link: bool,
         resets_to_clear: u32,
+        /// The sum of the waits asked for.
         waited_us: u32,
+        /// How many waits were asked for.
+        asks: u32,
+        /// The monotonic clock: a wait of `us` advances it by `stretch * us`, which
+        /// is what a board does whose time base runs slow, or whose wait lasts
+        /// longer than it promised.
+        clock_us: u64,
+        stretch: u64,
+        /// What one management access costs in time, over and above the waits.
+        access_us: u64,
+        /// BMCR reads with the reset bit set until the clock reaches this.
+        reset_busy_until_us: u64,
+        /// The link is up from this reading of the clock on, as well as while
+        /// `link` is set.
+        link_from_us: u64,
         reads: u32,
     }
 
@@ -210,6 +240,12 @@ mod tests {
                 link: false,
                 resets_to_clear: 0,
                 waited_us: 0,
+                asks: 0,
+                clock_us: 0,
+                stretch: 1,
+                access_us: 0,
+                reset_busy_until_us: 0,
+                link_from_us: u64::MAX,
                 reads: 0,
             }
         }
@@ -224,6 +260,7 @@ mod tests {
     impl Mdio for Bus {
         fn mdio_read(&mut self, phy: u8, reg_no: u8) -> Result<u16, MdioError> {
             self.reads += 1;
+            self.clock_us += self.access_us;
             if self.phy != Some(phy) {
                 return Ok(0xFFFF);
             }
@@ -232,9 +269,11 @@ mod tests {
                     self.resets_to_clear -= 1;
                     BMCR_RESET
                 }
+                reg::BMCR if self.clock_us < self.reset_busy_until_us => BMCR_RESET,
                 reg::BMSR => {
                     let mut v = 0;
-                    if self.link && !self.latched_down {
+                    let up = self.link || self.clock_us >= self.link_from_us;
+                    if up && !self.latched_down {
                         v |= BMSR_LINK_UP | BMSR_AUTONEG_COMPLETE;
                     }
                     // Reading BMSR clears the latch: the next read is current.
@@ -261,6 +300,12 @@ mod tests {
 
         fn delay_us(&mut self, us: u32) {
             self.waited_us += us;
+            self.asks += 1;
+            self.clock_us += self.stretch * u64::from(us);
+        }
+
+        fn now_us(&mut self) -> u64 {
+            self.clock_us
         }
     }
 
@@ -410,6 +455,97 @@ mod tests {
                 full_duplex: false
             }),
             "a link already up needs no wait"
+        );
+    }
+
+    /// The budgets below are measured on the clock, not counted in the waits asked
+    /// for. A wait promises AT LEAST its length: on a board whose time base runs slow
+    /// it lasts many times that (the first boot of a CYT4BF image ran its core at
+    /// 8 MHz where 350 MHz was assumed, and every wait took about 44 times what it
+    /// was told), and each management access costs time of its own between two
+    /// waits. A count of the waits asked for ends the budget far too late.
+    const SLOW: u64 = 44;
+
+    #[test]
+    fn a_reset_budget_is_the_clocks_not_the_number_of_waits_asked_for() {
+        let mut stuck = Bus::with_phy(1);
+        stuck.resets_to_clear = u32::MAX;
+        stuck.stretch = SLOW;
+        assert_eq!(reset(&mut stuck, 1), Err(LinkError::ResetTimeout));
+
+        let step = SLOW * u64::from(RESET_POLL_US);
+        let budget = u64::from(RESET_BUDGET_US);
+        assert_eq!(
+            u64::from(stuck.asks),
+            budget.div_ceil(step),
+            "the clock ended the wait; counting the asks would have made {}",
+            budget / u64::from(RESET_POLL_US)
+        );
+        assert!(
+            stuck.clock_us >= budget && stuck.clock_us < budget + step,
+            "it ended within one wait of the budget: {} us",
+            stuck.clock_us
+        );
+    }
+
+    #[test]
+    fn the_time_a_management_access_takes_counts_against_the_reset_budget() {
+        let mut stuck = Bus::with_phy(1);
+        stuck.resets_to_clear = u32::MAX;
+        // The settle time the driver itself puts after every read.
+        stuck.access_us = 800;
+        assert_eq!(reset(&mut stuck, 1), Err(LinkError::ResetTimeout));
+
+        let per_look = u64::from(RESET_POLL_US) + stuck.access_us;
+        let budget = u64::from(RESET_BUDGET_US);
+        assert_eq!(
+            u64::from(stuck.asks),
+            budget.div_ceil(per_look),
+            "a look costs its wait and its access, so fewer looks fit than waits would"
+        );
+        assert!(stuck.clock_us >= budget && stuck.clock_us < budget + per_look);
+    }
+
+    #[test]
+    fn a_reset_that_finishes_during_a_wait_that_overran_is_not_a_timeout() {
+        let mut bus = Bus::with_phy(1);
+        bus.stretch = SLOW;
+        // Past the budget, inside the wait that crosses it.
+        bus.reset_busy_until_us = u64::from(RESET_BUDGET_US) + 20_000;
+        assert_eq!(
+            reset(&mut bus, 1),
+            Ok(()),
+            "the PHY is looked at once more after the wait that overran"
+        );
+        assert!(bus.clock_us > u64::from(RESET_BUDGET_US));
+    }
+
+    #[test]
+    fn a_link_budget_is_the_clocks_not_the_number_of_waits_asked_for() {
+        let mut bus = Bus::with_phy(1);
+        bus.stretch = SLOW;
+        assert_eq!(wait_for_link(&mut bus, 1, 100_000), Err(LinkError::NoLink));
+        assert_eq!(
+            bus.asks, 1,
+            "one wait of 10 ms lasts 440 ms here, past the 100 ms budget; counting the asks would have made 10"
+        );
+        assert!(bus.clock_us >= 100_000);
+    }
+
+    #[test]
+    fn a_link_that_comes_up_during_a_wait_that_overran_is_not_a_timeout() {
+        let mut bus = Bus::with_phy(1);
+        bus.stretch = SLOW;
+        bus.regs[reg::ANLPAR as usize] = ABILITY_100_FULL;
+        // Up while the first wait is running, which ends past the budget.
+        bus.link_from_us = 200_000;
+        assert_eq!(
+            wait_for_link(&mut bus, 1, 100_000),
+            Ok(LinkMode {
+                speed_100: true,
+                full_duplex: true
+            }),
+            "the link is looked at once more after the wait that overran"
         );
     }
 

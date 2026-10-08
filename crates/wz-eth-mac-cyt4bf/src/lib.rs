@@ -17,11 +17,12 @@
 //!
 //! The driver programs the MAC, the DMA and the rings, speaks clause 22 to the PHY
 //! and applies what negotiation resolved. The BOARD supplies everything that is
-//! wiring or clocking: the register base, the way to wait, where the DMA area
-//! lives and how addresses look to a bus master ([`Board`]), the pins' HSIOM and
-//! drive settings, which reference clock the PHY gives, and the PHY's reset line.
-//! Nothing here names a board, a PHY part or a PHY address: the address is found
-//! by scanning, or given.
+//! wiring or clocking: the register base, the way to wait and the monotonic clock
+//! every wait is bounded by (a wait promises only "at least", so no bound counts
+//! waits), where the DMA area lives and how addresses look to a bus master
+//! ([`Board`]), the pins' HSIOM and drive settings, which reference clock the PHY
+//! gives, and the PHY's reset line. Nothing here names a board, a PHY part or a
+//! PHY address: the address is found by scanning, or given.
 //!
 //! ## What is claimed
 //!
@@ -84,25 +85,37 @@ pub trait Board {
     /// Drop the cache lines covering `[ptr, ptr + len)`, before the CPU reads what
     /// the controller wrote. A no-op for non-cacheable memory.
     fn invalidate(&mut self, _ptr: *const u8, _len: usize) {}
-    /// Wait about `us` microseconds.
+    /// Wait AT LEAST `us` microseconds. A wait promises no upper bound, and on a
+    /// board whose time base runs slow it lasts many times what was asked, so the
+    /// driver never adds up the waits it asked for to measure how long it has
+    /// waited: that is [`now_us`](Self::now_us)'s job.
     fn delay_us(&mut self, us: u32);
+    /// Microseconds on a monotonic clock: never decreasing, counted from any fixed
+    /// instant. Every bound in this driver (the management port going idle, the
+    /// PHY's reset, the link coming up) is the difference of two readings of it,
+    /// and [`delay_us`](Self::delay_us) is only how the driver waits between
+    /// looks. A clock coarser than a microsecond makes a bound end up to one step
+    /// late and never early.
+    fn now_us(&mut self) -> u64;
 }
 
 /// The board of a running chip: volatile MMIO at `base`, identity bus addresses,
-/// no cache maintenance (the area lives in non-cacheable memory), a delay the
-/// firmware provides.
+/// no cache maintenance (the area lives in non-cacheable memory), a delay and a
+/// monotonic clock the firmware provides.
 pub struct Cyt4bfBoard {
     base: usize,
     delay: fn(u32),
+    now: fn() -> u64,
 }
 
 impl Cyt4bfBoard {
     /// # Safety
     /// `base` must be the address of an `MXETH` block (ETH0 is `0x4048_0000` on
-    /// the CYT4BF), exclusively this driver's, and `delay` must wait at least the
-    /// microseconds it is given.
-    pub const unsafe fn new(base: usize, delay: fn(u32)) -> Self {
-        Self { base, delay }
+    /// the CYT4BF), exclusively this driver's, `delay` must wait at least the
+    /// microseconds it is given, and `now` must return microseconds on a clock
+    /// that never goes backwards.
+    pub const unsafe fn new(base: usize, delay: fn(u32), now: fn() -> u64) -> Self {
+        Self { base, delay, now }
     }
 }
 
@@ -123,6 +136,10 @@ impl Board for Cyt4bfBoard {
 
     fn delay_us(&mut self, us: u32) {
         (self.delay)(us);
+    }
+
+    fn now_us(&mut self) -> u64 {
+        (self.now)()
     }
 }
 
@@ -251,8 +268,10 @@ pub enum LinkEvent {
     Down,
 }
 
-/// The management port was idle-polled this long before giving up.
+/// The management port was idle-polled this long, on the board's clock, before
+/// giving up.
 const MDIO_BUDGET_US: u32 = 10_000;
+/// How long the driver waits between two looks at the management port.
 const MDIO_POLL_US: u32 = 10;
 /// Kept from the PDL: the shift register reports idle before read data settles.
 const MDIO_READ_SETTLE_US: u32 = 800;
@@ -513,14 +532,16 @@ impl<B: Board, const RX: usize, const TX: usize> Cyt4bfMac<B, RX, TX> {
 
     // ---- management port (MDIO) -------------------------------------------
 
+    /// Wait for the management shift register to go idle, for at most
+    /// `MDIO_BUDGET_US` by the board's clock. The port is looked at once more
+    /// after a wait that overran, so a late look is never a false timeout.
     fn mdio_wait_idle(&mut self) -> Result<(), MdioError> {
-        let mut waited = 0;
+        let started = self.board.now_us();
         while self.board.read(NETWORK_STATUS) & NWSR_MAN_DONE == 0 {
-            if waited >= MDIO_BUDGET_US {
+            if self.board.now_us().saturating_sub(started) >= u64::from(MDIO_BUDGET_US) {
                 return Err(MdioError::Timeout);
             }
             self.board.delay_us(MDIO_POLL_US);
-            waited += MDIO_POLL_US;
         }
         Ok(())
     }
@@ -537,7 +558,9 @@ impl<B: Board, const RX: usize, const TX: usize> Cyt4bfMac<B, RX, TX> {
     // ---- link ---------------------------------------------------------------
 
     /// Find the PHY, reset it, negotiate, wait up to `budget_us` for a link, and
-    /// set the MAC's speed and duplex to what was agreed.
+    /// set the MAC's speed and duplex to what was agreed. The budget is time on
+    /// the board's clock ([`Board::now_us`]), measured from the start of the wait
+    /// for the link, not the sum of the waits asked of the board.
     pub fn bring_up_link(&mut self, budget_us: u32) -> Result<LinkMode, LinkError> {
         let phy = match self.phy {
             Some(addr) => addr,
@@ -644,6 +667,10 @@ impl<B: Board, const RX: usize, const TX: usize> phy::Mdio for Cyt4bfMac<B, RX, 
 
     fn delay_us(&mut self, us: u32) {
         self.board.delay_us(us);
+    }
+
+    fn now_us(&mut self) -> u64 {
+        self.board.now_us()
     }
 }
 
