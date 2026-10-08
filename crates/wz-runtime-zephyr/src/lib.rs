@@ -54,6 +54,7 @@ extern crate alloc;
 #[cfg(test)]
 extern crate std;
 
+pub mod core_clock;
 pub mod glue;
 pub mod links;
 pub mod net;

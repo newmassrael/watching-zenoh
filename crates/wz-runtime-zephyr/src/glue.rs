@@ -35,6 +35,9 @@ extern "C" {
     /// configuration does not measure stacks (`k_thread_stack_space_get` needs
     /// `CONFIG_INIT_STACKS` and `CONFIG_THREAD_STACK_INFO`).
     fn wz_stack_usage(size: *mut u32, unused: *mut u32) -> i32;
+    /// The core's clock in hertz as the chip's registers say it is, or 0 when the
+    /// board cannot know (an emulator, a board with no hook for it).
+    fn wz_core_clock_hz() -> u32;
 }
 
 /// Print a static C string on the board's console.
@@ -104,6 +107,16 @@ pub fn stack_usage() -> Option<crate::stack::StackUsage> {
     // through each and only reads the calling thread's own descriptor.
     let rc = unsafe { wz_stack_usage(&mut size, &mut unused) };
     (rc == 0).then_some(crate::stack::StackUsage { size, unused })
+}
+
+/// The clock the core runs at, in hertz, read from the chip's registers by the
+/// board's hook, or 0 when the board cannot know. It is the board's REAL clock and
+/// not the one the image was built for (that is `CONFIG_SYS_CLOCK_HW_CYCLES_PER_SEC`,
+/// which the kernel assumes without checking): [`crate::core_clock`] compares the
+/// two.
+pub fn core_clock_hz() -> u32 {
+    // SAFETY: the board's hook takes no argument and only reads clock registers.
+    unsafe { wz_core_clock_hz() }
 }
 
 /// What a panic does on this profile: log it, then halt with the CPU yielded
