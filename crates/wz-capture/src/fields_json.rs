@@ -5351,6 +5351,147 @@ mod tests {
         );
     }
 
+    /// How one Init carries its QoS offer: not at all, as upstream's unit
+    /// `QoS`, or as its z64 `QoSLink` with a body.
+    #[derive(Clone, Copy)]
+    enum QosOffer {
+        Absent,
+        Unit,
+        Link(u64),
+    }
+
+    /// One Init datagram carrying `offer`, the entry built out of the ext
+    /// codec's own types at the id `wz-session-core` names (the one-entry chain
+    /// needs no continuation bit).
+    fn init_offering(is_ack: bool, offer: QosOffer) -> Vec<u8> {
+        use crate::datagram_tests::init_datagram;
+        use wz_session_core::ext_header::{establishment_ext_id as ext, EXT_ENC_Z64};
+
+        let chain = match offer {
+            QosOffer::Absent => Vec::new(),
+            QosOffer::Unit => capability_offers(&[ext::QOS]),
+            QosOffer::Link(value) => {
+                let entry: wz_codecs::ext_entry::ExtEntryOwned =
+                    wz_codecs::ext_entry::ExtEntryOwned {
+                        header: ext::QOS | EXT_ENC_Z64,
+                        body: wz_codecs::ext_entry::ExtEntryOwnedVariant::CodecZenohExtZint(
+                            wz_codecs::ext_zint::ExtZint { value },
+                        ),
+                    };
+                entry.as_borrowed().encode_to_vec()
+            }
+        };
+        init_datagram(is_ack, &chain)
+    }
+
+    /// The flow's `context` object for a handshake whose Inits carry `syn` and
+    /// `ack`, with nothing after the Init pair.
+    fn context_of_inits(syn: QosOffer, ack: QosOffer) -> String {
+        let (d, file) = tcp_stream_capture(&[
+            (true, init_offering(false, syn)),
+            (false, init_offering(true, ack)),
+        ]);
+        let doc = fields_json(&d, &file, None, None);
+        let contexts = context_objects(&doc);
+        assert_eq!(contexts.len(), 1, "{doc}");
+        contexts[0].to_string()
+    }
+
+    /// A `QoSLink` body with a band: RealTime(1) to DataHigh(4), the tag bit 1
+    /// and the bytes at shifts 3 and 11, which is what upstream's `to_u64`
+    /// writes for an endpoint carrying `prio=1-4`.
+    const BAND_BODY: u64 = 0b010 | (1 << 3) | (4 << 11);
+
+    /// A SESSION WHOSE INITS CARRY QOS AS THE Z64 `QoSLink` READS `qos: true`.
+    ///
+    /// Upstream sends the z64 form when the endpoint has `prio=` or `rel=`
+    /// metadata, and an acceptor answers a unit offer with the z64 form when it
+    /// has metadata of its own. The fold counted only the unit form, so a
+    /// session that negotiated QoS read `negotiated: true` beside `qos: false`.
+    /// All four pairings of the two forms are the same session.
+    ///
+    /// The control is the unit pair, whose text was taken from the library
+    /// BEFORE the fix: a fix that moved a cell it was not asked to move fails
+    /// there.
+    #[test]
+    fn a_session_whose_inits_carry_qos_in_either_form_reads_qos_true() {
+        let qos_agreed = "{\"phase\":\"init_complete\",\"negotiated\":true,\
+             \"lowlatency\":false,\"compression\":false,\"qos\":true,\"patch\":0,\
+             \"sn_mask\":268435455,\"batch_size\":65535,\"version\":9}";
+        for (syn, ack, shape) in [
+            (QosOffer::Unit, QosOffer::Unit, "unit / unit (the control)"),
+            (
+                QosOffer::Link(BAND_BODY),
+                QosOffer::Link(BAND_BODY),
+                "QoSLink / QoSLink",
+            ),
+            (QosOffer::Unit, QosOffer::Link(BAND_BODY), "unit / QoSLink"),
+            (QosOffer::Link(BAND_BODY), QosOffer::Unit, "QoSLink / unit"),
+        ] {
+            assert_eq!(context_of_inits(syn, ack), qos_agreed, "{shape}");
+        }
+    }
+
+    /// WHAT A `QoSLink` OFFERS IS ITS BODY, not its header. Upstream reads a
+    /// body of `0` as `NoQoS`, so a session whose `QoSLink` says that reads
+    /// `qos: false`; and an offer from only one side, in either form, is not an
+    /// agreement.
+    #[test]
+    fn a_qoslink_with_the_no_qos_body_and_a_one_sided_offer_read_qos_false() {
+        let qos_not_agreed = "{\"phase\":\"init_complete\",\"negotiated\":true,\
+             \"lowlatency\":false,\"compression\":false,\"qos\":false,\"patch\":0,\
+             \"sn_mask\":268435455,\"batch_size\":65535,\"version\":9}";
+        for (syn, ack, shape) in [
+            (
+                QosOffer::Link(0),
+                QosOffer::Link(0),
+                "QoSLink of body 0 on both",
+            ),
+            (
+                QosOffer::Link(BAND_BODY),
+                QosOffer::Link(0),
+                "ack says NoQoS",
+            ),
+            (
+                QosOffer::Link(0),
+                QosOffer::Link(BAND_BODY),
+                "syn says NoQoS",
+            ),
+            (
+                QosOffer::Link(BAND_BODY),
+                QosOffer::Absent,
+                "QoSLink / none",
+            ),
+            (
+                QosOffer::Absent,
+                QosOffer::Link(BAND_BODY),
+                "none / QoSLink",
+            ),
+            (QosOffer::Unit, QosOffer::Absent, "unit / none"),
+            (QosOffer::Absent, QosOffer::Unit, "none / unit"),
+        ] {
+            assert_eq!(context_of_inits(syn, ack), qos_not_agreed, "{shape}");
+        }
+    }
+
+    /// ONE INIT SETTLES NOTHING WHATEVER FORM IT OFFERS: with only the InitSyn
+    /// seen, `qos` is `null` for a `QoSLink` as for the unit form.
+    #[test]
+    fn one_init_offering_a_qoslink_leaves_qos_unknown() {
+        let (d, file) =
+            tcp_stream_capture(&[(true, init_offering(false, QosOffer::Link(BAND_BODY)))]);
+        let doc = fields_json(&d, &file, None, None);
+        assert_eq!(
+            context_objects(&doc),
+            alloc::vec![
+                "{\"phase\":\"half_init\",\"negotiated\":false,\"lowlatency\":null,\
+                 \"compression\":null,\"qos\":null,\"patch\":0,\"sn_mask\":null,\
+                 \"batch_size\":null,\"version\":9}"
+            ],
+            "{doc}"
+        );
+    }
+
     /// R3054 — EACH DIRECTION OF A TCP FLOW REPORTS WHAT ITS SENDER HAS DONE.
     ///
     /// The two directions are driven APART on purpose: different leases in

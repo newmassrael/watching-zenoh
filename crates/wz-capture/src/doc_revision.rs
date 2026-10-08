@@ -1567,6 +1567,44 @@ pub const DOCUMENT_HISTORY: &[DocumentShape] = &[
         planes: &[],
         carries: FIELDS_R28_CARRIES,
     },
+    // A SESSION WHOSE INITS OFFER QOS AS THE Z64 `QoSLink` READS `qos: true`.
+    //
+    // NO AXIS MOVES and nothing retires: this row reads the key set and the
+    // carries axis of the revision before it, and what moves is a VALUE under a
+    // stationary key, the class revisions 26 and 27 set the precedent for. So,
+    // as for those, THIS ROW IS THE WHOLE NOTICE a consumer gets.
+    //
+    // The cell is the flow's `context.qos`. Upstream offers QoS on an Init in
+    // one of two forms: a unit extension, and a z64 one (`QoSLink`) that an
+    // endpoint with `prio=` or `rel=` metadata sends, and that an acceptor sends
+    // back when its merged state keeps a band or a class. The library counted
+    // only the unit form, so a session whose Inits both carried the z64 form read
+    // `negotiated: true` beside `qos: false`, although upstream sets QoS for it.
+    // Now `qos` is `true` when BOTH Inits offer QoS, each in either form and in
+    // any combination of the two forms.
+    //
+    // A `QoSLink` offers QoS by its BODY, not by its header: a body of 0 is
+    // upstream's `NoQoS`, and the cell reads `false` for it. A chain upstream
+    // refuses (both forms at once, a body that is no state, a priority above 7)
+    // offers nothing and reads `false` as well.
+    //
+    // A flow whose Inits both carry the unit form, one that carries none, and
+    // one whose Init pair was not seen (`qos` is `null`) read as they always did,
+    // byte for byte, which the control test holds. How messages are READ did not
+    // move: no decode branch asks this cell.
+    //
+    // A consumer pinned to an earlier revision loses nothing it could use: the
+    // only cells that differ are ones that were wrong. A `qos: false` it cached
+    // against a flow whose Inits carried a `QoSLink` must be read again.
+    DocumentShape {
+        document: FIELDS,
+        revision: 31,
+        keys: FIELDS_R31_KEYS,
+        retiring: &[],
+        families: FIELDS_R20_FAMILIES,
+        planes: &[],
+        carries: FIELDS_R28_CARRIES,
+    },
     DocumentShape {
         document: SUMMARY,
         revision: 1,
@@ -9394,6 +9432,16 @@ pub const PAYLOAD_STATE_CARRIES_R28: &[WordCarries] = &[
     },
 ];
 
+/// The field document's key set at revision 31: revision 28's, by name
+/// (revisions 29 and 30 are not on this branch).
+///
+/// IDENTICAL, and aliased for [`FIELDS_R27_KEYS`]' reason. What moved is the
+/// VALUE `context.qos` takes on a flow whose Inits offered QoS in the z64
+/// `QoSLink` form, which no axis in this module can express: the key is the
+/// same and so is its JSON type. The revision number is the whole notice, and
+/// the row says which flows.
+pub const FIELDS_R31_KEYS: &[&str] = FIELDS_R28_KEYS;
+
 /// The census document's key set at revision 16: revision 15's, by name.
 ///
 /// The revision moved the JSON type of the wire-sourced `id` values (a number,
@@ -10856,7 +10904,10 @@ mod tests {
             // To 28 when a carried message named its payload slot, a decode
             // named the rule that won, and a decoded field named its nesting:
             // eight keys, no word moves and nothing retires.
-            (FIELDS, 28),
+            // To 31 when `context.qos` began to read `true` for a session whose
+            // Inits offered QoS as the z64 `QoSLink`: a value moved under a
+            // stationary key, so this entry is the notice.
+            (FIELDS, 31),
             // R2121 (open-debt item 460) — the summary moved to 2 when it
             // gained `inert_counters`; R2122 (item 238) to 3 when its
             // `framing` group stopped disagreeing with the capture report's.

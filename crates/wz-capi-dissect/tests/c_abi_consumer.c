@@ -2330,8 +2330,12 @@ int main(void) {
      * encoding the sample carried, and whether the range is an SHM
      * descriptor; `null` for a message with no slot), a decode names the rule
      * that won as `matched_rule`, and each decoded field gains `depth` and
-     * `parent`. Eight new key names; no word moves; nothing retires. */
-    revisioned[2].revision = 28;
+     * `parent`. Eight new key names; no word moves; nothing retires.
+     * 31: `context.qos` reads `true` for a session whose Inits offered QoS as
+     * the z64 `QoSLink`, which it read `false`; a `QoSLink` of body 0 is
+     * upstream's NoQoS and reads `false`. A value moved under a stationary
+     * key. */
+    revisioned[2].revision = 31;
     revisioned[2].doc = NULL;
     rc = wz_dissect_pcap_fields(pcap, sizeof pcap, 0, &revisioned[2].doc);
     CHECK(rc == WZ_DISSECT_OK, "fields rc=%d", rc);

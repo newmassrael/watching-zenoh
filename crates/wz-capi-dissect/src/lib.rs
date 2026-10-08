@@ -9383,6 +9383,97 @@ mod tests {
         assert_eq!(live, negotiated, "the live handle");
     }
 
+    /// A SESSION WHOSE INITS OFFER QOS AS THE Z64 `QoSLink` READS `qos: true`,
+    /// at the whole-document door and at the live handle's twin, and a
+    /// `QoSLink` of body 0 does not.
+    ///
+    /// The Inits are laid by hand, as in the test above, so the header's
+    /// reading of the wire is not the builder's own. The Z flag (0x80) says an
+    /// extension chain follows; the chain is one entry. The unit QoS is the
+    /// header 0x01 alone; the `QoSLink` is the header 0x21 (id 1, z64) and its
+    /// body as a VLE. The body is a band, RealTime to DataHigh, which Zenoh
+    /// writes for an endpoint with `prio=1-4`: `0b010 | (1 << 3) | (4 << 11)` =
+    /// 8202, the VLE bytes 0x8A 0x40. The InitAck's A flag (0x20) gates its
+    /// empty cookie, which sits before the chain.
+    ///
+    /// The control is the unit pair, which read `qos: true` before and reads it
+    /// still.
+    #[test]
+    fn a_session_offering_qos_as_a_qoslink_reads_qos_true_at_both_doors() {
+        let stream_unit = |message: &[u8]| {
+            let mut out = (message.len() as u16).to_le_bytes().to_vec();
+            out.extend_from_slice(message);
+            out
+        };
+        let context_of = |doc: &str| -> String {
+            let at = doc.find("\"context\":").expect("a flow carries a context") + 10;
+            doc[at..=at + doc[at..].find('}').expect("the object closes")].to_string()
+        };
+        let both_doors = |syn_ext: &[u8], ack_ext: &[u8]| {
+            // The Z flag is set only when a chain follows.
+            let z = |chain: &[u8]| if chain.is_empty() { 0x00 } else { 0x80 };
+            let mut syn = vec![0x01 | z(syn_ext), 0x09, 0x31, 0xAA, 0xAA, 0xAA, 0xAA];
+            syn.extend_from_slice(syn_ext);
+            let mut ack = vec![
+                0x01 | 0x20 | z(ack_ext),
+                0x09,
+                0x31,
+                0xBB,
+                0xBB,
+                0xBB,
+                0xBB,
+                0x00,
+            ];
+            ack.extend_from_slice(ack_ext);
+            let packets = [
+                tcp_packet(1_000, &stream_unit(&syn)),
+                tcp_packet_reverse(5_000, &stream_unit(&ack)),
+            ];
+            let rows: Vec<(u32, u32, &[u8])> = packets
+                .iter()
+                .enumerate()
+                .map(|(i, p)| (0u32, (i as u32) * 1_000, p.as_slice()))
+                .collect();
+            let file = wz_capture::pcap::write(1, &rows);
+            let whole = call_fields(&file, 0).expect("the whole-document door");
+            let handle = replay(&file, WZ_DISSECT_LIMITS_NONE).expect("the replay opens");
+            let live = live_fields(handle, &file);
+            unsafe { wz_dissect_live_close(handle) };
+            (context_of(&whole), context_of(&live))
+        };
+        let context = |qos: bool| {
+            format!(
+                "{{\"phase\":\"init_complete\",\"negotiated\":true,\"lowlatency\":false,\
+                 \"compression\":false,\"qos\":{qos},\"patch\":0,\"sn_mask\":268435455,\
+                 \"batch_size\":65535,\"version\":9}}"
+            )
+        };
+        let unit: &[u8] = &[0x01];
+        let band: &[u8] = &[0x21, 0x8A, 0x40];
+        // A band and a class, `prio=2-5;rel=1`: `0b110 | (2 << 3) | (5 << 11) |
+        // (1 << 19)` = 534550, the VLE bytes 0x96 0xD0 0x20.
+        let band_and_class: &[u8] = &[0x21, 0x96, 0xD0, 0x20];
+        let no_qos: &[u8] = &[0x21, 0x00];
+        for (syn, ack, qos, shape) in [
+            (unit, unit, true, "unit / unit (the control)"),
+            (band, band, true, "QoSLink / QoSLink"),
+            (
+                band_and_class,
+                band_and_class,
+                true,
+                "QoSLink with a band and a class on both",
+            ),
+            (unit, band, true, "unit / QoSLink"),
+            (band, unit, true, "QoSLink / unit"),
+            (no_qos, no_qos, false, "QoSLink of body 0 on both"),
+            (band, &[], false, "QoSLink / none"),
+        ] {
+            let (whole, live) = both_doors(syn, ack);
+            assert_eq!(whole, context(qos), "the whole-document door, {shape}");
+            assert_eq!(live, context(qos), "the live handle, {shape}");
+        }
+    }
+
     /// EVERY DRAINED RECORD JOINS EXACTLY ONE ROW, on a capture
     /// the order-based join could not line up.
     ///
