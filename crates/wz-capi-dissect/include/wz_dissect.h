@@ -1736,8 +1736,9 @@ typedef struct wz_dissect_proto_file {
  * reasons above would fail it too.
  *
  * BOUNDS, all of them refusals and none of them silent truncations: messages
- * written inside one another 32 deep, imports 64 files deep, a field path 64
- * messages deep, and a result of 16384 lines. The last is not decoration: a
+ * written inside one another 31 deep (protoc's own limit: it compiles 31 and
+ * refuses 32), imports 64 files deep, a field path 64 messages deep, and a
+ * result of 16384 lines. The last is not decoration: a
  * schema with no cycle can still expand exponentially, because a message that
  * holds two of a message that holds two of another, twenty times over, is a
  * million paths from a twenty-line file. Work is otherwise linear in the text.

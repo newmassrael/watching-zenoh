@@ -112,7 +112,7 @@
 //!
 //! The work is linear in the text read, except the expansion, which is bounded
 //! three ways and refuses past each: messages may be nested
-//! `MAX_MESSAGE_NESTING` (32) levels in the text, imports
+//! `MAX_MESSAGE_NESTING` (31, `protoc`'s own limit) levels in the text, imports
 //! [`MAX_IMPORT_DEPTH`] files deep, a field path [`MAX_PATH_DEPTH`] messages
 //! deep, and the output [`MAX_DECLARATIONS`] lines. The last matters because a
 //! schema with no cycle can still expand exponentially: a message that holds
