@@ -2622,7 +2622,15 @@ PIN_NO_SYMBOL = 0
 # sorts the locators of a node with several listeners. `transport-shm` is not touched and is still
 # PARTIAL beside it. READ off the census's own FAIL line, `wz citations: 242 against a pin of 241`,
 # for the reason the R3062 note gives.
-PIN_WZ_CITATIONS = 242
+#
+# R3089 -- 242 -> 251, one atom. `api-compat-c`'s reason gains the UPDATE that a C session retries a
+# bind inside its listen budget and names a listener that bound late in its Hello: it names the
+# runtime's bind-phase driver and its background loop, the C ABI's phase type and its reader, the
+# holder of the endpoints left to the background, the responder's shared handle and the identity's
+# extension, and the two rows that witness it (the differential row and the one that reads wz
+# alone). `transport-shm` is not touched and is still PARTIAL beside it. READ off the census's own
+# FAIL line, `wz citations: 251 against a pin of 242`, for the reason the R3062 note gives.
+PIN_WZ_CITATIONS = 251
 # R2626 — 44 -> 42, and this one is worth a sentence because it HELD through
 # every earlier retirement in this run (R2612, R2622). `time-hlc`'s reason is the
 # first retiree carrying AMBIGUOUS citations of its own: its oldest clauses cite
