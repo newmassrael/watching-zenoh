@@ -360,6 +360,171 @@ pub fn attach_query_value_shm(
     Ok(())
 }
 
+/// The value of a Query, if its extension chain holds one as a list of slices: the entry and the
+/// slices. A value that is a run of bytes, or a Query without one, answers `None`.
+#[cfg(all(feature = "codec-request", feature = "transport-shm"))]
+fn sliced_query_value(
+    query: &crate::wire::parts::QueryOwned,
+) -> Option<(
+    usize,
+    &[wz_codecs::zbuf_slice::ZbufSliceOwned<crate::wire::WireStorage>],
+)> {
+    use crate::ext_header::body_ext_id;
+    use crate::wire::parts::QueryExtEntryOwnedVariant;
+    use sce_forge_runtime::codec::SceList;
+
+    let chain = query.extensions.as_ref()?;
+    SceList::as_slice(chain)
+        .iter()
+        .enumerate()
+        .find_map(|(index, ext)| match &ext.body {
+            QueryExtEntryOwnedVariant::CodecZenohQueryValueZbuf(value)
+                if ext.ext_id() == body_ext_id::QUERY_BODY =>
+            {
+                value
+                    .slices
+                    .as_ref()
+                    .map(|slices| (index, SceList::as_slice(slices)))
+            }
+            _ => None,
+        })
+}
+
+/// transport-shm -- the serialized descriptor of every shared-memory slice of a Query's value, in
+/// order. Empty for a Query whose value is bytes or absent, which is nearly every Query.
+#[cfg(all(feature = "codec-request", feature = "transport-shm"))]
+pub fn query_value_shm_descriptors(query: &crate::wire::parts::QueryOwned) -> Vec<&[u8]> {
+    sliced_query_value(query)
+        .map(|(_, slices)| crate::put_payload::shm_descriptors_of(slices))
+        .unwrap_or_default()
+}
+
+/// transport-shm -- re-express the shared-memory slices of a Query's VALUE for ONE peer, in place:
+/// the query twin of [`crate::put_payload::relay_shm_slices`], and upstream's `map_to_partner`
+/// run on the value of a `Request` (`io/zenoh-transport/src/common/shm/interop.rs` @
+/// `fn map_to_partner<`, which `map_zmsg_to_partner` applies to a query's `ext_body`).
+///
+/// `decide` is offered the descriptor bytes of EACH shared-memory slice, in order, exactly once,
+/// and answers [`Relayed::Descriptor`](crate::put_payload::Relayed::Descriptor) to keep the slice
+/// a descriptor, [`Relayed::Bytes`](crate::put_payload::Relayed::Bytes) to send what the chunk
+/// holds, or `None` for a slice it holds nothing for, which fails the whole Query and leaves it
+/// untouched.
+///
+/// The length the value declares is not touched while a descriptor is left: it counts the
+/// LOGICAL length of each slice (see [`attach_query_value_shm`]), a descriptor of the chunk and
+/// the bytes of the same chunk have the same one, and so the number the sender wrote is the
+/// number of the rewritten value.
+///
+/// When no shared-memory slice is left the value is a run of bytes again: the entry becomes the
+/// plain value (`encoding || payload`), the marker leaves the chain, the continuation flags are
+/// renormalised over what is left, and an empty chain is absent and takes the header's `Z` flag
+/// with it. A peer that cannot read shared memory is never sent the marker, because its reader
+/// would take the first bytes of the value for a count of slices.
+#[cfg(all(feature = "codec-request", feature = "transport-shm"))]
+pub fn relay_query_value_shm(
+    query: &mut crate::wire::parts::QueryOwned,
+    decide: impl FnMut(&[u8]) -> Option<crate::put_payload::Relayed>,
+) -> Result<(), crate::put_payload::RelayFault> {
+    use crate::ext_header::{body_ext_id, EXT_ENC_ZBUF, EXT_FLAG_Z};
+    use crate::put_payload::{
+        has_shared_slice, join_slices, remake_slices, slice_list, RelayFault,
+    };
+    use crate::wire::parts::{QueryExtEntryOwned, QueryExtEntryOwnedVariant};
+    use sce_forge_runtime::codec::SceList;
+    use wz_codecs::query_value_zbuf::QueryValueZbufOwned;
+
+    let Some((index, slices)) = sliced_query_value(query) else {
+        return Ok(());
+    };
+    let remade = remake_slices(slices, decide)?;
+    let unrepresentable = |_| RelayFault::Unrepresentable;
+    let chain = query
+        .extensions
+        .as_ref()
+        .ok_or(RelayFault::Unrepresentable)?;
+    let entries = SceList::as_slice(chain);
+    let QueryExtEntryOwnedVariant::CodecZenohQueryValueZbuf(value) = &entries[index].body else {
+        return Err(RelayFault::Unrepresentable);
+    };
+
+    let mut kept: Vec<QueryExtEntryOwned> = Vec::new();
+    if has_shared_slice(&remade) {
+        let mut value = value.clone();
+        value.slice_count = Some(remade.len() as u32);
+        value.slices = Some(slice_list(&remade)?);
+        for (position, ext) in entries.iter().enumerate() {
+            let mut ext = ext.clone();
+            if position == index {
+                ext.body = QueryExtEntryOwnedVariant::CodecZenohQueryValueZbuf(value.clone());
+            }
+            kept.push(ext);
+        }
+        // No entry came or went, so the continuation flags are as they were.
+        query.extensions = Some(query_chain(kept)?);
+        return Ok(());
+    }
+
+    // No descriptor is left: the value is the encoding and the bytes of the slices, as a peer that
+    // reads no shared memory reads it.
+    let mut body = value
+        .encoding
+        .as_ref()
+        .map(|encoding| encoding.as_borrowed().encode_to_vec())
+        .ok_or(RelayFault::Unrepresentable)?;
+    body.extend(join_slices(remade));
+    let plain = QueryExtEntryOwned {
+        header: EXT_ENC_ZBUF | body_ext_id::QUERY_BODY,
+        body: QueryExtEntryOwnedVariant::CodecZenohQueryValueZbuf(QueryValueZbufOwned {
+            value_len: body.len() as u64,
+            value: Some(crate::wire::wire_bytes(&body).map_err(unrepresentable)?),
+            encoding: None,
+            slice_count: None,
+            slices: None,
+        }),
+    };
+    for (position, ext) in entries.iter().enumerate() {
+        if position == index {
+            kept.push(plain.clone());
+        } else if ext.ext_id() != body_ext_id::QUERY_SHM {
+            kept.push(ext.clone());
+        }
+    }
+    let last = kept.len() - 1;
+    for (position, ext) in kept.iter_mut().enumerate() {
+        ext.header = if position == last {
+            ext.header & !EXT_FLAG_Z
+        } else {
+            ext.header | EXT_FLAG_Z
+        };
+    }
+    query.extensions = Some(query_chain(kept)?);
+    Ok(())
+}
+
+/// `entries` as the extension chain of a wire-profile Query.
+#[cfg(all(feature = "codec-request", feature = "transport-shm"))]
+fn query_chain(
+    entries: Vec<crate::wire::parts::QueryExtEntryOwned>,
+) -> Result<
+    <crate::wire::WireStorage as sce_forge_runtime::codec::CodecStorage>::List<
+        crate::wire::parts::QueryExtEntryOwned,
+        16,
+    >,
+    crate::put_payload::RelayFault,
+> {
+    use sce_forge_runtime::codec::SceList;
+
+    let mut list = <<crate::wire::WireStorage as sce_forge_runtime::codec::CodecStorage>::List<
+        crate::wire::parts::QueryExtEntryOwned,
+        16,
+    > as SceList<_>>::empty();
+    for ext in entries {
+        list.try_push(ext)
+            .map_err(|_| crate::put_payload::RelayFault::Unrepresentable)?;
+    }
+    Ok(list)
+}
+
 /// R121j-2a — fluent builder for `Request(Query)` that composes the
 /// layered options exposed individually by R121j-1a/1b/1c/1d/1e
 /// (consolidation / parameters / Query-attachment / Request-timeout
@@ -2737,6 +2902,155 @@ mod shm_value_build_tests {
         expected.extend_from_slice(&encoding.to_codec().encode_to_vec());
         expected.extend_from_slice(&UPSTREAMS_VALUE[5..]);
         assert!(wire.ends_with(&expected), "{wire:02x?}");
+    }
+
+    // ---- the value of a Query a FORWARDER sends on ---------------------------------------------
+
+    /// The descriptor of the reference a forwarder takes for ONE receiver: the same buffer, named
+    /// by the reservation and not by the sender's descriptor.
+    const FOR_A_RECEIVER: ShmDescriptor = ShmDescriptor {
+        data_len: 1024,
+        metadata_id: 7,
+        metadata_index: 3,
+        generation: 2,
+    };
+
+    fn relayed_descriptor(
+        query: &mut crate::wire::parts::QueryOwned,
+        descriptor: ShmDescriptor,
+    ) -> usize {
+        let mut offered = 0;
+        relay_query_value_shm(query, |_| {
+            offered += 1;
+            Some(crate::put_payload::Relayed::Descriptor(
+                crate::extshm::encode_shm_descriptor(&descriptor),
+            ))
+        })
+        .expect("relayed");
+        offered
+    }
+
+    /// A value sent on as a descriptor is the value the forwarder's own reference names, and
+    /// nothing else of the Query moves: it is the Query that value would have been built with, byte
+    /// for byte, declared length included.
+    #[test]
+    fn a_value_relayed_as_a_descriptor_is_the_query_built_with_that_descriptor() {
+        let mut request = build_request_query(1, 0, Some("demo/example/**")).unwrap();
+        attach_query_value_shm(query_of(&mut request), &default_encoding(), &DESCRIPTOR).unwrap();
+        let offered = relayed_descriptor(query_of(&mut request), FOR_A_RECEIVER);
+        assert_eq!(offered, 1, "the one shared-memory slice is offered once");
+
+        let mut expected = build_request_query(1, 0, Some("demo/example/**")).unwrap();
+        attach_query_value_shm(
+            query_of(&mut expected),
+            &default_encoding(),
+            &FOR_A_RECEIVER,
+        )
+        .unwrap();
+        assert_eq!(request.wire(), expected.wire());
+    }
+
+    /// A value sent on as bytes is the PLAIN value, the one a peer that reads no shared memory
+    /// reads: the marker is gone, the entry is the encoding and the bytes, and the Query is the one
+    /// a plain value would have been built with, byte for byte.
+    #[cfg(feature = "query-value")]
+    #[test]
+    fn a_value_relayed_as_bytes_is_the_plain_value_a_peer_without_shared_memory_reads() {
+        let chunk = alloc::vec![0x5au8; 1024];
+        let mut request = build_request_query(1, 0, Some("demo/example/**")).unwrap();
+        attach_query_value_shm(query_of(&mut request), &default_encoding(), &DESCRIPTOR).unwrap();
+        relay_query_value_shm(query_of(&mut request), |_| {
+            Some(crate::put_payload::Relayed::Bytes(chunk.clone()))
+        })
+        .expect("relayed");
+
+        let expected = RequestQueryBuilder::new(1, 0, Some("demo/example/**"))
+            .query_value(&chunk, default_encoding())
+            .build()
+            .unwrap();
+        assert_eq!(request.wire(), expected.wire());
+        assert_eq!(
+            query_value_shm_descriptors(query_of(&mut request)).len(),
+            0,
+            "no descriptor is left"
+        );
+    }
+
+    /// The same, with an attachment in the chain and an encoding that carries a schema: the
+    /// attachment stays and is flagged last, the value goes in front of it as a plain value does,
+    /// and the schema is written once, in front of the bytes.
+    #[cfg(feature = "query-value")]
+    #[test]
+    fn the_rest_of_the_chain_and_the_encoding_survive_a_value_relayed_as_bytes() {
+        let encoding = EncodingHint {
+            packed_id: 0x0B, // id 5, schema flag set
+            schema: Some("json".into()),
+        };
+        let chunk = alloc::vec![0x21u8; 1024];
+        let mut request = RequestQueryBuilder::new(1, 0, Some("k"))
+            .query_attachment(b"hi")
+            .build()
+            .unwrap();
+        attach_query_value_shm(query_of(&mut request), &encoding, &DESCRIPTOR).unwrap();
+        relay_query_value_shm(query_of(&mut request), |_| {
+            Some(crate::put_payload::Relayed::Bytes(chunk.clone()))
+        })
+        .expect("relayed");
+
+        let expected = RequestQueryBuilder::new(1, 0, Some("k"))
+            .query_attachment(b"hi")
+            .query_value(&chunk, encoding)
+            .build()
+            .unwrap();
+        assert_eq!(request.wire(), expected.wire());
+    }
+
+    /// A slice the forwarder holds nothing for fails the Query and leaves it as it was: nothing is
+    /// sent in its place.
+    #[test]
+    fn a_value_with_a_slice_nobody_holds_is_refused_and_unchanged() {
+        let mut request = build_request_query(1, 0, Some("k")).unwrap();
+        attach_query_value_shm(query_of(&mut request), &default_encoding(), &DESCRIPTOR).unwrap();
+        let before = request.wire();
+        let refused = relay_query_value_shm(query_of(&mut request), |_| None);
+        assert_eq!(refused, Err(crate::put_payload::RelayFault::Unrelayable));
+        assert_eq!(request.wire(), before);
+    }
+
+    /// A Query with no value, and a Query whose value is bytes, are not touched and ask nobody:
+    /// nearly every Query is one of the two.
+    #[cfg(feature = "query-value")]
+    #[test]
+    fn a_query_with_no_shared_memory_in_it_is_left_alone_and_asks_nobody() {
+        let ask_nobody = |_: &[u8]| -> Option<crate::put_payload::Relayed> {
+            panic!("no slice of shared memory was named")
+        };
+        let mut bare = build_request_query(1, 0, Some("k")).unwrap();
+        let before = bare.wire();
+        relay_query_value_shm(query_of(&mut bare), ask_nobody).expect("relayed");
+        assert_eq!(bare.wire(), before);
+
+        let mut plain = RequestQueryBuilder::new(1, 0, Some("k"))
+            .query_value(b"plain", default_encoding())
+            .build()
+            .unwrap();
+        let before = plain.wire();
+        relay_query_value_shm(query_of(&mut plain), ask_nobody).expect("relayed");
+        assert_eq!(plain.wire(), before);
+    }
+
+    /// The descriptors a forwarder holds a chunk for are the slices of the value, in order.
+    #[test]
+    fn the_descriptors_of_a_value_are_those_of_its_slices() {
+        let mut request = build_request_query(1, 0, Some("k")).unwrap();
+        assert!(query_value_shm_descriptors(query_of(&mut request)).is_empty());
+        attach_query_value_shm(query_of(&mut request), &default_encoding(), &DESCRIPTOR).unwrap();
+        let descriptors = query_value_shm_descriptors(query_of(&mut request));
+        assert_eq!(descriptors.len(), 1);
+        assert_eq!(
+            crate::extshm::decode_shm_descriptor(descriptors[0]),
+            Some(DESCRIPTOR)
+        );
     }
 
     /// A Query that already carries a value is refused and left as it was: two

@@ -6609,7 +6609,10 @@ layer_c1af_cargo_test_shm() {
     # `session-extshm` brings `transport-shm` and `codec-push` with it on this leg as well.
     # R3065 -- 41 -> 44, MEASURED by running this exact command, for the reason the note on the
     # leg above gives: the same three tests of the establishment's protocol list.
-    _runci_guarded_test C1af 44 cargo test -p wz-session-core --features session-extshm,dissect --lib shm --quiet \
+    # R3103 -- 44 -> 49, MEASURED by running this exact command: the five tests of
+    # `response_build::shm_relay_tests`, which have `shm` in their path and sit behind
+    # `codec-response`, which `dissect` brings and the leg above does not (it stays at 33).
+    _runci_guarded_test C1af 49 cargo test -p wz-session-core --features session-extshm,dissect --lib shm --quiet \
         || return 1
     # Round 2037, open-debt item 330 — THE TRANSPORT-OAM BATCH WALK, which no
     # lane in this file was running.
@@ -6703,6 +6706,14 @@ layer_c1af_cargo_test_shm() {
     # R3058 -- 15 -> 16, MEASURED: the three claims a pool makes of a chunk before it takes
     # it on, each checked on its own.
     _runci_guarded_test C1af 16 cargo test -p wz-runtime-tokio --features session-extshm,transport-unicast,transport-link-tcp --lib --quiet -- shm_backend shm_posix_backend \
+        || return 1
+    # R3103 -- the relay a router holds a chunk with (`shm_relay`), which no lane counted: its
+    # tests count the references of a REAL chunk through a routing pass, and a pass that never
+    # let go or a reservation that took none is the defect they redden, so a test that stopped
+    # being selected would stop reddening it. FIFTEEN: ten for a Push and five for the value of
+    # a query and the payload of a reply, which sit behind `codec-request` and `codec-response`,
+    # so this leg carries both.
+    _runci_guarded_test C1af 15 cargo test -p wz-runtime-tokio --features session-extshm,transport-unicast,transport-link-tcp,codec-request,codec-response --lib shm_relay --quiet \
         || return 1
     # R311y507 — 2 -> 5. The target gained the challenge-response over a real
     # driven handshake plus the two half-mix arms (a ONE-SIDED authenticator must

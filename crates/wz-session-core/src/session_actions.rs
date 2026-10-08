@@ -5579,6 +5579,11 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// (`io/zenoh-transport/src/unicast/universal/tx.rs` @
     /// `crate::common::shm::interop::map_zmsg_to_partner(`).
     ///
+    /// Three kinds of message carry a buffer and are mapped the same way, as upstream maps them
+    /// with the one function: the payload of a Push's Put, the value of a Request's Query and the
+    /// payload of a Response's Reply. A Del, an error reply and every other message go as they are:
+    /// an error reply's payload is a length and bytes with no sliced layout to name a buffer in.
+    ///
     /// The forwarder received the message with a descriptor in it and holds the chunk the
     /// descriptor names (`holds`). A peer that negotiated shared memory and reads the chunk's
     /// protocol is sent a descriptor, with a reference of its own taken for it and kept only if
@@ -5605,14 +5610,41 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         priority: Priority,
         holds: &dyn crate::extshm::ShmRelayHolds,
     ) -> Result<bool, SendWireError> {
+        use crate::network_message::NetworkMessage;
         let mut reservations = Vec::new();
-        if let crate::network_message::NetworkMessage::Push(push) = &mut msg {
-            if let crate::wire::PushOwnedVariant::CodecZenohMsgPut(put) = &mut push.body {
-                match self.relay_put_to_this_peer(put, holds) {
-                    Ok(taken) => reservations = taken,
-                    Err(_) => return Ok(false),
+        // Upstream maps the shared-memory buffers of every message kind that carries one with
+        // the same function: a Put's payload, the value of a query and the payload of a reply.
+        let mapped = match &mut msg {
+            NetworkMessage::Push(push) => match &mut push.body {
+                crate::wire::PushOwnedVariant::CodecZenohMsgPut(put) => {
+                    crate::put_payload::relay_shm_slices(
+                        put,
+                        self.relayed_slice(holds, &mut reservations),
+                    )
                 }
-            }
+                _ => Ok(()),
+            },
+            #[cfg(feature = "codec-request")]
+            NetworkMessage::Request(request) => match &mut request.body {
+                crate::wire::RequestOwnedVariant::CodecZenohQuery(query) => {
+                    crate::request_build::relay_query_value_shm(
+                        query,
+                        self.relayed_slice(holds, &mut reservations),
+                    )
+                }
+                _ => Ok(()),
+            },
+            #[cfg(feature = "codec-response")]
+            NetworkMessage::Response(response) => crate::response_build::relay_response_shm(
+                response,
+                self.relayed_slice(holds, &mut reservations),
+            ),
+            _ => Ok(()),
+        };
+        // A message that cannot be mapped is dropped, and `reservations` goes with it, which
+        // gives every reference taken for the slices before the one that failed back.
+        if mapped.is_err() {
+            return Ok(false);
         }
         // A send that fails drops `reservations` with the `?`, which gives every reference back.
         self.send_network_message_qos(msg, reliable, express, priority)?;
@@ -5622,17 +5654,19 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         Ok(true)
     }
 
-    /// The mapping [`Self::send_network_message_relayed`] makes of one Put, returning the
-    /// references it took for this peer. The references go back when the returned list drops,
-    /// and on every failure path they already have.
+    /// What [`Self::send_network_message_relayed`] makes of ONE shared-memory slice of a message,
+    /// whichever kind of message it is: the decision the rewrite of a Put, of the value of a query
+    /// and of a reply all ask for. A peer that negotiated shared memory and reads the chunk's
+    /// protocol is sent a descriptor with a reference of its own, pushed on `reservations`, which
+    /// go back when that list drops and are kept only once the frame left; any other peer is sent
+    /// what the chunk holds. `None` is a slice `holds` holds nothing for.
     #[cfg(all(feature = "transport-shm", feature = "codec-push"))]
-    fn relay_put_to_this_peer(
-        &self,
-        put: &mut wz_codecs::msg_put::MsgPutOwned<crate::wire::WireStorage>,
-        holds: &dyn crate::extshm::ShmRelayHolds,
-    ) -> Result<Vec<Box<dyn crate::extshm::ShmReservation>>, crate::put_payload::RelayFault> {
-        let mut reservations: Vec<Box<dyn crate::extshm::ShmReservation>> = Vec::new();
-        crate::put_payload::relay_shm_slices(put, |descriptor| {
+    fn relayed_slice<'a>(
+        &'a self,
+        holds: &'a dyn crate::extshm::ShmRelayHolds,
+        reservations: &'a mut Vec<Box<dyn crate::extshm::ShmReservation>>,
+    ) -> impl FnMut(&[u8]) -> Option<crate::put_payload::Relayed> + 'a {
+        move |descriptor| {
             let held = holds.held(&crate::extshm::decode_shm_descriptor(descriptor)?)?;
             Some(if self.shm_admits(held.protocol()) {
                 let reservation = held.reserve_for_receiver();
@@ -5642,8 +5676,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             } else {
                 crate::put_payload::Relayed::Bytes(held.bytes().to_vec())
             })
-        })?;
-        Ok(reservations)
+        }
     }
 
     /// session-extcompression — the AP layer's "this deploy offers compression

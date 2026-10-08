@@ -2063,12 +2063,26 @@ impl LinkstateForwarder {
         inbound: FaceId,
         push: &PushOwned,
     ) -> Option<crate::shm_relay::RelayPass<'_>> {
+        self.open_shm_relay_message(inbound, crate::shm_relay::Routed::Push(push))
+    }
+
+    /// [`Self::open_shm_relay_pass`] for a message of any kind this forwarder routes: the value
+    /// of a query and the payload of a reply are held, acknowledged and refused on a face that
+    /// never negotiated shared memory exactly as a Put's payload is.
+    #[cfg(feature = "transport-shm")]
+    fn open_shm_relay_message(
+        &self,
+        inbound: FaceId,
+        message: crate::shm_relay::Routed<'_>,
+    ) -> Option<crate::shm_relay::RelayPass<'_>> {
         let actions = self
             .faces
             .borrow()
             .get(&inbound)
             .map(|state| Arc::clone(&state.actions));
-        let pass = self.shm_relay.open_inbound(actions.as_deref(), push);
+        let pass = self
+            .shm_relay
+            .open_inbound_message(actions.as_deref(), message);
         if pass.is_none() {
             self.shm_unnegotiated_dropped
                 .set(self.shm_unnegotiated_dropped.get() + 1);
@@ -2397,6 +2411,15 @@ impl LinkstateForwarder {
     /// ([`finish_unrouted_request`](Self::finish_unrouted_request)), zenoh
     /// `route_query`'s unknown-scope / empty-route finals.
     fn forward_request(&self, inbound: FaceId, reliable: bool, request: &RequestOwned) {
+        // transport-shm -- hold the chunk of every shared-memory slice the query's value carries
+        // for as long as the Query is routed, FIRST and for the reason `forward_push` gives. A
+        // Query from a link that never negotiated shared memory is not routed at all.
+        #[cfg(feature = "transport-shm")]
+        let Some(_held) =
+            self.open_shm_relay_message(inbound, crate::shm_relay::Routed::Request(request))
+        else {
+            return;
+        };
         // The inbound face's zid + graph link AND the RESOLVED keyexpr, one
         // scoped borrow (released before any send re-borrows `faces`).
         let resolved = {
@@ -2741,6 +2764,15 @@ impl LinkstateForwarder {
     /// `query.src_face`. An unknown qid (no pending query — finalized / timed out /
     /// never sent) drops silently.
     fn forward_response(&self, inbound: FaceId, reliable: bool, response: &ResponseOwned) {
+        // transport-shm -- hold the chunk of every shared-memory slice the reply carries for as
+        // long as it is routed back, FIRST and for the reason `forward_push` gives. A reply from
+        // a link that never negotiated shared memory is not routed at all.
+        #[cfg(feature = "transport-shm")]
+        let Some(_held) =
+            self.open_shm_relay_message(inbound, crate::shm_relay::Routed::Response(response))
+        else {
+            return;
+        };
         // Resolve the reply keyexpr against the inbound (forward-outbound) face's
         // alias table — scoped borrow (an unresolvable alias drops the Response;
         // the closing final still terminates the querier). A keyexpr-LESS reply

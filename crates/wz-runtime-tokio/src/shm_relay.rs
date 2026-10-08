@@ -32,12 +32,67 @@ use wz_session_core::extshm::{
     decode_shm_descriptor, ShmDescriptor, ShmRelayHolds, ShmResolver, ShmSendHandle,
 };
 use wz_session_core::network_message::NetworkMessage;
-use wz_session_core::put_payload::{layout, slice_kind, PutPayload, SLICE_KIND_SHM_PTR};
 use wz_session_core::qos::Priority;
 use wz_session_core::wire::{PushOwned, PushOwnedVariant};
 
 use crate::session_glue::SessionLinkActions;
 use crate::shm_provider::PosixShmResolver;
+
+/// A message a forwarder routes whose payload may be a buffer of shared memory: the payload of a
+/// Push, the value of a Request's query and the payload of a Response's reply. Upstream maps all
+/// three with one function, so a forwarder holds and sends all three the same way.
+#[derive(Clone, Copy)]
+pub enum Routed<'a> {
+    /// A Push whose body is a Put.
+    Push(&'a PushOwned),
+    /// A Request whose body is a Query with a value.
+    #[cfg(feature = "codec-request")]
+    Request(&'a wz_session_core::wire::RequestOwned),
+    /// A Response whose body is a reply with a Put.
+    #[cfg(feature = "codec-response")]
+    Response(&'a wz_session_core::wire::ResponseOwned),
+}
+
+impl<'a> Routed<'a> {
+    /// The serialized descriptor of every shared-memory slice of the message, in order. Empty for
+    /// a message that carries none, which is nearly every message.
+    pub fn shm_slices(&self) -> Vec<&'a [u8]> {
+        match *self {
+            Routed::Push(push) => match &push.body {
+                PushOwnedVariant::CodecZenohMsgPut(put) => {
+                    wz_session_core::put_payload::shm_descriptors(put)
+                }
+                _ => Vec::new(),
+            },
+            #[cfg(feature = "codec-request")]
+            Routed::Request(request) => match &request.body {
+                wz_session_core::wire::RequestOwnedVariant::CodecZenohQuery(query) => {
+                    wz_session_core::request_build::query_value_shm_descriptors(query)
+                }
+                _ => Vec::new(),
+            },
+            #[cfg(feature = "codec-response")]
+            Routed::Response(response) => {
+                wz_session_core::response_build::response_shm_descriptors(response)
+            }
+        }
+    }
+
+    /// The extension chain the message's QoS is read from, which names the band its slices are
+    /// acknowledged at.
+    #[cfg(feature = "session-extshm")]
+    fn extensions(
+        &self,
+    ) -> &'a [wz_codecs::ext_entry::ExtEntryOwned<wz_session_core::wire::WireStorage>] {
+        match *self {
+            Routed::Push(push) => push.extensions.as_deref().unwrap_or(&[]),
+            #[cfg(feature = "codec-request")]
+            Routed::Request(request) => request.extensions.as_deref().unwrap_or(&[]),
+            #[cfg(feature = "codec-response")]
+            Routed::Response(response) => response.extensions.as_deref().unwrap_or(&[]),
+        }
+    }
+}
 
 /// The chunks a forwarder holds for the message it is routing, and the means of holding them.
 pub struct ShmRelay {
@@ -63,17 +118,7 @@ impl ShmRelay {
     /// The serialized descriptor of every shared-memory slice of `push`'s payload, in order. Empty
     /// for a message that carries none, which is nearly every message.
     pub fn shm_slices(push: &PushOwned) -> Vec<&[u8]> {
-        let PushOwnedVariant::CodecZenohMsgPut(put) = &push.body else {
-            return Vec::new();
-        };
-        match layout(put) {
-            PutPayload::Inline(_) => Vec::new(),
-            PutPayload::Sliced(slices) => slices
-                .iter()
-                .filter(|slice| slice_kind(slice.kind) == SLICE_KIND_SHM_PTR)
-                .map(|slice| sce_forge_runtime::codec::SceByteBuf::as_slice(&slice.bytes))
-                .collect(),
-        }
+        Routed::Push(push).shm_slices()
     }
 
     /// Open a routing pass for `push`: hold the chunk each of its shared-memory slices names.
@@ -90,7 +135,16 @@ impl ShmRelay {
     /// in the pass, and a face that is asked for it is answered `None`, which is how the message
     /// comes to be dropped and not sent on as bytes of a descriptor.
     pub fn open(&self, push: &PushOwned, may_hold: impl FnOnce() -> bool) -> Option<RelayPass<'_>> {
-        let slices = Self::shm_slices(push);
+        self.open_message(Routed::Push(push), may_hold)
+    }
+
+    /// [`Self::open`] for a message of any kind a forwarder routes.
+    pub fn open_message(
+        &self,
+        message: Routed<'_>,
+        may_hold: impl FnOnce() -> bool,
+    ) -> Option<RelayPass<'_>> {
+        let slices = message.shm_slices();
         if slices.is_empty() {
             return Some(RelayPass {
                 relay: self,
@@ -171,12 +225,24 @@ impl ShmRelay {
         actions: Option<&SessionLinkActions>,
         push: &PushOwned,
     ) -> Option<RelayPass<'_>> {
-        let pass = self.open(push, || actions.is_some_and(|actions| actions.is_shm()))?;
+        self.open_inbound_message(actions, Routed::Push(push))
+    }
+
+    /// [`Self::open_inbound`] for a message of any kind a forwarder routes: a Request whose query
+    /// carries its value in shared memory and a Response whose reply carries its payload there
+    /// are owed the same hold and the same acknowledgements as a Push, because upstream maps the
+    /// buffers of every one of them as it receives them
+    /// (`io/zenoh-transport/src/common/shm/interop.rs` @ `pub fn map_zmsg_to_shmbuf(`).
+    pub fn open_inbound_message(
+        &self,
+        actions: Option<&SessionLinkActions>,
+        message: Routed<'_>,
+    ) -> Option<RelayPass<'_>> {
+        let pass =
+            self.open_message(message, || actions.is_some_and(|actions| actions.is_shm()))?;
         #[cfg(feature = "session-extshm")]
         if let Some(actions) = actions {
-            let band = wz_session_core::put_payload::priority_band(
-                push.extensions.as_deref().unwrap_or(&[]),
-            );
+            let band = wz_session_core::put_payload::priority_band(message.extensions());
             for _ in 0..pass.slices() {
                 actions.acknowledge_shm_slice(band);
             }
@@ -470,6 +536,173 @@ mod tests {
             "the message is refused"
         );
         assert!(relay.held(&descriptor).is_none(), "no chunk was held");
+        assert_eq!(held_count(&descriptor), 1, "nothing was touched");
+    }
+
+    // ---- the value of a query and the payload of a reply ---------------------------------------
+
+    /// A chunk sent the way a getter sends one: a reference taken for the receiver, the owner then
+    /// letting go of its own, so the one reference left is the receiver's.
+    fn a_chunk_in_flight(len: usize) -> ShmDescriptor {
+        let payload = ShmBackedPayload::alloc(len).expect("alloc");
+        let wire = payload.wire_reference();
+        let descriptor = wire.descriptor();
+        wire.commit();
+        drop(payload);
+        descriptor
+    }
+
+    /// A Request whose query carries `descriptor` as its value.
+    #[cfg(feature = "codec-request")]
+    fn a_query_with_the_value(descriptor: &ShmDescriptor) -> wz_session_core::wire::RequestOwned {
+        let mut request =
+            wz_session_core::request_build::build_request_query(1, 0, Some("demo/relay"))
+                .expect("a Query");
+        let wz_session_core::wire::RequestOwnedVariant::CodecZenohQuery(query) = &mut request.body
+        else {
+            panic!("a Query body");
+        };
+        let encoding = wz_session_core::sample::EncodingHint {
+            packed_id: 0,
+            schema: None,
+        };
+        wz_session_core::request_build::attach_query_value_shm(query, &encoding, descriptor)
+            .expect("a value that names the chunk");
+        request
+    }
+
+    /// A Response whose reply carries `descriptor` as its payload.
+    #[cfg(feature = "codec-response")]
+    fn a_reply_with_the_payload(
+        descriptor: &ShmDescriptor,
+    ) -> wz_session_core::wire::ResponseOwned {
+        wz_session_core::response_build::ResponseReplyBuilder::new(5, 0, Some("demo/relay"), &[])
+            .shm_descriptor(*descriptor)
+            .build()
+            .expect("a reply that names the chunk")
+    }
+
+    /// THE ACCOUNT, for any kind of message: the descriptor carries one reference, the pass takes
+    /// it over, a reservation per receiver adds one, and after the pass the count is the number of
+    /// receivers; when each releases it, the chunk is back at zero for its provider to collect.
+    fn assert_a_message_relayed_to_two_receivers_ends_with_exactly_two_references(
+        descriptor: ShmDescriptor,
+        message: Routed<'_>,
+    ) {
+        assert_eq!(held_count(&descriptor), 1, "the descriptor's own reference");
+        let relay = ShmRelay::posix();
+        let pass = relay.open_message(message, || true).expect("opened");
+        assert_eq!(pass.slices(), 1, "one chunk, one slice");
+        assert_eq!(
+            held_count(&descriptor),
+            1,
+            "holding a chunk takes nothing from it"
+        );
+        let chunk = relay.held(&descriptor).expect("held");
+        let first = chunk.reserve_for_receiver();
+        let second = chunk.reserve_for_receiver();
+        assert_eq!(held_count(&descriptor), 3, "one reference per reservation");
+        first.commit();
+        second.commit();
+        drop(chunk);
+        drop(pass);
+        assert_eq!(
+            held_count(&descriptor),
+            2,
+            "the pass gave back the reference the message arrived with; each receiver owns one"
+        );
+        for _ in 0..2 {
+            assert!(crate::shm_provider::PosixShmResolver
+                .resolve(&descriptor)
+                .is_some());
+        }
+        assert_eq!(held_count(&descriptor), 0, "both receivers released theirs");
+    }
+
+    /// A query whose value is a chunk is held while it is routed and let go after.
+    #[cfg(feature = "codec-request")]
+    #[test]
+    fn the_chunk_of_a_query_value_is_held_exactly_while_its_pass_lives() {
+        let descriptor = a_chunk_in_flight(64);
+        let request = a_query_with_the_value(&descriptor);
+        let relay = ShmRelay::posix();
+        {
+            let _pass = relay
+                .open_message(Routed::Request(&request), || true)
+                .expect("opened");
+            assert!(
+                relay.held(&descriptor).is_some(),
+                "the pass holds the chunk"
+            );
+        }
+        assert!(relay.held(&descriptor).is_none(), "the pass has ended");
+        assert_eq!(held_count(&descriptor), 0, "and the reference went back");
+    }
+
+    /// A query value relayed to two receivers is two references and no more.
+    #[cfg(feature = "codec-request")]
+    #[test]
+    fn a_query_value_relayed_to_two_receivers_ends_with_exactly_two_references() {
+        let descriptor = a_chunk_in_flight(64);
+        let request = a_query_with_the_value(&descriptor);
+        assert_a_message_relayed_to_two_receivers_ends_with_exactly_two_references(
+            descriptor,
+            Routed::Request(&request),
+        );
+    }
+
+    /// A reply whose payload is a chunk is held while it is routed and let go after.
+    #[cfg(feature = "codec-response")]
+    #[test]
+    fn the_chunk_of_a_reply_is_held_exactly_while_its_pass_lives() {
+        let descriptor = a_chunk_in_flight(64);
+        let response = a_reply_with_the_payload(&descriptor);
+        let relay = ShmRelay::posix();
+        {
+            let _pass = relay
+                .open_message(Routed::Response(&response), || true)
+                .expect("opened");
+            assert!(
+                relay.held(&descriptor).is_some(),
+                "the pass holds the chunk"
+            );
+        }
+        assert!(relay.held(&descriptor).is_none(), "the pass has ended");
+        assert_eq!(held_count(&descriptor), 0, "and the reference went back");
+    }
+
+    /// A reply relayed to two receivers is two references and no more.
+    #[cfg(feature = "codec-response")]
+    #[test]
+    fn a_reply_relayed_to_two_receivers_ends_with_exactly_two_references() {
+        let descriptor = a_chunk_in_flight(64);
+        let response = a_reply_with_the_payload(&descriptor);
+        assert_a_message_relayed_to_two_receivers_ends_with_exactly_two_references(
+            descriptor,
+            Routed::Response(&response),
+        );
+    }
+
+    /// A query or a reply from a link that never negotiated shared memory is refused before
+    /// anything is opened, as a Put is: the chunk is not held and its reference stays where it was.
+    #[cfg(all(feature = "codec-request", feature = "codec-response"))]
+    #[test]
+    fn a_query_or_a_reply_from_a_link_that_never_negotiated_opens_nothing() {
+        let relay = ShmRelay::posix();
+        let descriptor = a_chunk_in_flight(64);
+        let request = a_query_with_the_value(&descriptor);
+        assert!(relay
+            .open_message(Routed::Request(&request), || false)
+            .is_none());
+        assert!(relay.held(&descriptor).is_none());
+        assert_eq!(held_count(&descriptor), 1, "nothing was touched");
+
+        let descriptor = a_chunk_in_flight(64);
+        let response = a_reply_with_the_payload(&descriptor);
+        assert!(relay
+            .open_message(Routed::Response(&response), || false)
+            .is_none());
+        assert!(relay.held(&descriptor).is_none());
         assert_eq!(held_count(&descriptor), 1, "nothing was touched");
     }
 

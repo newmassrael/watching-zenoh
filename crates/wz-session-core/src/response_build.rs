@@ -140,6 +140,51 @@ pub fn relay_response(
     Ok(out)
 }
 
+/// The Put a Response carries as a reply, if it carries one: a reply that is a Put holds the
+/// payload, and a Del and an error reply hold none the shared-memory layout can reach (an error
+/// reply's payload is a length and bytes only, with no sliced layout to hold a descriptor).
+#[cfg(all(feature = "codec-response", feature = "transport-shm"))]
+fn reply_put(
+    response: &ResponseOwned,
+) -> Option<&wz_codecs::msg_put::MsgPutOwned<crate::wire::WireStorage>> {
+    match &response.body {
+        ResponseOwnedVariant::CodecZenohReply(reply) => match &reply.body {
+            ReplyOwnedVariant::CodecZenohMsgPut(put) => Some(put),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+/// transport-shm -- the serialized descriptor of every shared-memory slice of a reply's payload,
+/// in order. Empty for a Response that carries none, which is nearly every Response.
+#[cfg(all(feature = "codec-response", feature = "transport-shm"))]
+pub fn response_shm_descriptors(response: &ResponseOwned) -> Vec<&[u8]> {
+    reply_put(response)
+        .map(crate::put_payload::shm_descriptors)
+        .unwrap_or_default()
+}
+
+/// transport-shm -- re-express the shared-memory slices of a reply's payload for ONE peer, in
+/// place: [`crate::put_payload::relay_shm_slices`] on the Put the reply is, which is what
+/// upstream's `map_to_partner` runs on a `Reply` (`io/zenoh-transport/src/common/shm/interop.rs`
+/// @ `fn map_to_partner<`). A Response that is not a reply with a Put is left as it is.
+#[cfg(all(feature = "codec-response", feature = "transport-shm"))]
+pub fn relay_response_shm(
+    response: &mut ResponseOwned,
+    decide: impl FnMut(&[u8]) -> Option<crate::put_payload::Relayed>,
+) -> Result<(), crate::put_payload::RelayFault> {
+    match &mut response.body {
+        ResponseOwnedVariant::CodecZenohReply(reply) => match &mut reply.body {
+            ReplyOwnedVariant::CodecZenohMsgPut(put) => {
+                crate::put_payload::relay_shm_slices(put, decide)
+            }
+            _ => Ok(()),
+        },
+        _ => Ok(()),
+    }
+}
+
 #[cfg(feature = "codec-response")]
 pub fn build_response_reply_literal(
     request_id: u64,
@@ -2877,6 +2922,115 @@ mod tests {
         assert_eq!(
             relayed.keyexpr, err.keyexpr,
             "the empty keyexpr passes through"
+        );
+    }
+}
+
+// The payload of a reply a FORWARDER sends on. A module of its own because the main `mod tests`
+// gate knows no shared memory.
+#[cfg(all(test, feature = "codec-response", feature = "transport-shm"))]
+mod shm_relay_tests {
+    use super::*;
+    use crate::extshm::ShmDescriptor;
+    use crate::put_payload::{RelayFault, Relayed};
+    use wz_codecs_test_support::TestWire;
+
+    const DESCRIPTOR: ShmDescriptor = ShmDescriptor {
+        data_len: 1024,
+        metadata_id: 20338,
+        metadata_index: 0,
+        generation: 0,
+    };
+
+    /// The descriptor of the reference a forwarder takes for ONE receiver.
+    const FOR_A_RECEIVER: ShmDescriptor = ShmDescriptor {
+        data_len: 1024,
+        metadata_id: 7,
+        metadata_index: 3,
+        generation: 2,
+    };
+
+    fn a_reply_in_shared_memory(descriptor: ShmDescriptor) -> ResponseOwned {
+        ResponseReplyBuilder::new(5, 0, Some("demo/q"), &[])
+            .shm_descriptor(descriptor)
+            .build()
+            .expect("a reply that carries a descriptor")
+    }
+
+    /// A reply sent on as a descriptor is the reply built with the forwarder's own descriptor, byte
+    /// for byte.
+    #[test]
+    fn a_reply_relayed_as_a_descriptor_is_the_reply_built_with_that_descriptor() {
+        let mut reply = a_reply_in_shared_memory(DESCRIPTOR);
+        let mut offered = 0;
+        relay_response_shm(&mut reply, |_| {
+            offered += 1;
+            Some(Relayed::Descriptor(crate::extshm::encode_shm_descriptor(
+                &FOR_A_RECEIVER,
+            )))
+        })
+        .expect("relayed");
+        assert_eq!(offered, 1, "the one shared-memory slice is offered once");
+        assert_eq!(
+            reply.wire(),
+            a_reply_in_shared_memory(FOR_A_RECEIVER).wire()
+        );
+    }
+
+    /// A reply sent on as bytes is the plain reply a peer that reads no shared memory reads: the
+    /// marker is gone and the payload is the chunk's bytes, as the reply built from them.
+    #[test]
+    fn a_reply_relayed_as_bytes_is_the_plain_reply_a_peer_without_shared_memory_reads() {
+        let chunk = alloc::vec![0x33u8; 1024];
+        let mut reply = a_reply_in_shared_memory(DESCRIPTOR);
+        relay_response_shm(&mut reply, |_| Some(Relayed::Bytes(chunk.clone()))).expect("relayed");
+        let expected = ResponseReplyBuilder::new(5, 0, Some("demo/q"), &chunk)
+            .build()
+            .expect("a plain reply");
+        assert_eq!(reply.wire(), expected.wire());
+        assert!(response_shm_descriptors(&reply).is_empty());
+    }
+
+    /// A slice the forwarder holds nothing for fails the reply and leaves it as it was.
+    #[test]
+    fn a_reply_with_a_slice_nobody_holds_is_refused_and_unchanged() {
+        let mut reply = a_reply_in_shared_memory(DESCRIPTOR);
+        let before = reply.wire();
+        assert_eq!(
+            relay_response_shm(&mut reply, |_| None),
+            Err(RelayFault::Unrelayable)
+        );
+        assert_eq!(reply.wire(), before);
+    }
+
+    /// A reply with no shared memory in it, a Del and an error reply are not touched and ask
+    /// nobody. An error reply could not carry a descriptor: its payload is a length and bytes, with
+    /// no sliced layout to name a buffer in.
+    #[test]
+    fn a_response_with_no_shared_memory_in_it_is_left_alone_and_asks_nobody() {
+        let ask_nobody = |_: &[u8]| -> Option<Relayed> { panic!("no slice of shared memory") };
+        for mut response in [
+            ResponseReplyBuilder::new(5, 0, Some("demo/q"), b"plain")
+                .build()
+                .expect("a plain reply"),
+            build_response_err_literal(5, "demo/q", b"refused").expect("an error reply"),
+        ] {
+            let before = response.wire();
+            relay_response_shm(&mut response, ask_nobody).expect("relayed");
+            assert_eq!(response.wire(), before);
+            assert!(response_shm_descriptors(&response).is_empty());
+        }
+    }
+
+    /// The descriptors a forwarder holds a chunk for are the slices of the reply, in order.
+    #[test]
+    fn the_descriptors_of_a_reply_are_those_of_its_slices() {
+        let reply = a_reply_in_shared_memory(DESCRIPTOR);
+        let descriptors = response_shm_descriptors(&reply);
+        assert_eq!(descriptors.len(), 1);
+        assert_eq!(
+            crate::extshm::decode_shm_descriptor(descriptors[0]),
+            Some(DESCRIPTOR)
         );
     }
 }
