@@ -11,7 +11,8 @@
 #
 # It is the part every TC6 MAC-PHY shares. What differs per chip (identity
 # registers, errata fixups, the MAC address registers, the PLCA setup, the reset
-# line) is a chip crate on top of this one, written once a chip is chosen: Zephyr
+# line) is a chip crate on top of this one (the first is `wz-eth-lan865x`, for the
+# Microchip LAN8650/1, which the chip on the T2G kit's expansion board is): Zephyr
 # draws the same line between `oa_tc6.c` (the protocol) and `eth_lan865x.c` (the
 # chip), and the protocol here was written from the same two sources that line
 # describes: the OPEN Alliance interface as `oa_tc6.h` / `oa_tc6.c` lay it out

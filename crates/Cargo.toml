@@ -231,7 +231,7 @@ members = [
     # The OPEN Alliance 10BASE-T1x (TC6) MAC-PHY serial interface: the protocol
     # every such chip shares, over the SPI seam, as an `EthernetMac`. Trait tier
     # only, host-tested against a model of the chip; the chip-specific crate that
-    # sits on it waits for a chip to be chosen.
+    # sits on it is `wz-eth-lan865x`, below.
     "wz-oa-tc6",
     # The Microchip LAN8650/LAN8651 on top of that interface: identity, the vendor
     # configuration sequence the application note prescribes after every reset,
