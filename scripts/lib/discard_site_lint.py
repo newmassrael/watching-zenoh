@@ -238,6 +238,30 @@ ALLOWED = [
         "the expression parser's own operand stack, built and consumed inside "
         "one parse; nothing captured is in it",
     ),
+    # The `.proto` reader (`proto_schema`) reads TEXT a caller handed over and
+    # holds no capture, so none of its three removals discards evidence. Each is
+    # a work list that lives inside one call.
+    (
+        "wz-capture/proto_parse.rs",
+        "match self.ahead.pop_front() {",
+        "the `.proto` parser's token lookahead: a token leaving the buffer "
+        "because the parser that peeked it now consumes it; built and drained "
+        "inside one parse, and nothing captured is in it",
+    ),
+    (
+        "wz-capture/proto_schema.rs",
+        "chain.pop();",
+        "the import chain of one schema load: a file leaving the chain because "
+        "it is finished, which is what lets a later import see a cycle only "
+        "when it is one; a work list inside one call",
+    ),
+    (
+        "wz-capture/proto_schema.rs",
+        "stack.pop();",
+        "the expansion's stack of messages being walked: a message leaving it "
+        "because its fields are written, which is what lets a cycle be told "
+        "from a message used twice; a work list inside one call",
+    ),
     (
         "wz-capture/frag.rs",
         'let done = self.pending.remove(&key).expect("present");',
