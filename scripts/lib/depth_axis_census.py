@@ -2649,7 +2649,14 @@ PIN_NO_SYMBOL = 0
 # whose mutation turns the row red. `transport-shm` is not touched and is still PARTIAL beside it.
 # READ off the census's own FAIL line, `wz citations: 259 against a pin of 257`, for the reason the
 # R3062 note gives.
-PIN_WZ_CITATIONS = 259
+#
+# R3099 -- 259 -> 264, one atom. `transport-shm`'s reason gains the UPDATE that a router holds the
+# chunk of a Put it routes and sends each link what its peer can read: it names the relay, the
+# resolver's hold, the face's relayed send, the rewrite of the Put's slices and the leg that
+# witnesses the two readers. `api-compat-c` is not touched and is still PARTIAL beside it. READ off
+# the census's own FAIL line, `wz citations: 264 against a pin of 259`, for the reason the R3062
+# note gives.
+PIN_WZ_CITATIONS = 264
 # R2626 — 44 -> 42, and this one is worth a sentence because it HELD through
 # every earlier retirement in this run (R2612, R2622). `time-hlc`'s reason is the
 # first retiree carrying AMBIGUOUS citations of its own: its oldest clauses cite
