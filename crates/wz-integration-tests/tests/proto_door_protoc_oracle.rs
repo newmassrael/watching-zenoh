@@ -2429,6 +2429,9 @@ fn the_descriptor_proto_beside_the_judge_is_the_one_fed_to_the_door() {
     let dir = tempfile::tempdir().expect("tempdir");
     let include = dir.path().join("usr/include/google/protobuf");
     std::fs::create_dir_all(&include).expect("create the include directory");
+    // The binary's directory exists, as it does for a real package: `..` is only
+    // resolved through a directory that is there.
+    std::fs::create_dir_all(dir.path().join("usr/bin")).expect("create the bin directory");
     std::fs::write(include.join("descriptor.proto"), "// the judge's own\n").expect("write it");
     let mut judge = assumed_judge(DOOR_NESTING);
     judge.bin = dir.path().join("usr/bin/protoc");
