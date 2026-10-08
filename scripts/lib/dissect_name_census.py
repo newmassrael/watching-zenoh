@@ -101,8 +101,11 @@ OWN_VOCABULARY = {
     "table lookup, which is why it renders as `label` rather than `text`. Absent "
     "rather than guessed when the carrier declares no such extension -- a chain is "
     "where a later-vintage peer puts what this build has never heard of",
-    "mapping": "zenoh-protocol's `WireExpr::mapping`; wz's codec encodes it as the "
-    "local/nonlocal variant TAG rather than as a field",
+    "mapping": "zenoh-protocol's `WireExpr::mapping`, which the wire carries as the "
+    "M bit of the header holding the key expression (1 the sender's ids, 0 the "
+    "receiver's); wz's codec encodes it as the local/nonlocal variant TAG rather "
+    "than as a field. ABSENT on a `DeclareKeyExpr`, whose header has no M bit to "
+    "read it from",
     "has_schema": "the packed encoding's bit 0, surfaced as a flag",
     "zid_len_m1": "the zid length is stored minus one; the raw field is named for what "
     "it holds rather than for what it means",

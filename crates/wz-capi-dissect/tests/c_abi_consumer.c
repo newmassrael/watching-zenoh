@@ -2334,8 +2334,12 @@ int main(void) {
      * 29: `context.qos` reads `true` for a session whose Inits offered QoS as
      * the z64 `QoSLink`, which it read `false`; a `QoSLink` of body 0 is
      * upstream's NoQoS and reads `false`. A value moved under a stationary
-     * key. */
-    revisioned[2].revision = 29;
+     * key.
+     * 30: a `DeclareKeyExpr`'s key expression carries no `mapping` node (its
+     * header has no M bit), and the `carried` entry of a `Declare` resolves a
+     * non-zero scope the way the table binds it. A node and values move under
+     * stationary keys; no key name moves; nothing retires. */
+    revisioned[2].revision = 30;
     revisioned[2].doc = NULL;
     rc = wz_dissect_pcap_fields(pcap, sizeof pcap, 0, &revisioned[2].doc);
     CHECK(rc == WZ_DISSECT_OK, "fields rc=%d", rc);

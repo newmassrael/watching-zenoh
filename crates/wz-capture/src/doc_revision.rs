@@ -1605,6 +1605,49 @@ pub const DOCUMENT_HISTORY: &[DocumentShape] = &[
         planes: &[],
         carries: FIELDS_R28_CARRIES,
     },
+    // A DECLARED KEY EXPRESSION CARRIES NO `mapping`, AND ITS ROW IS RESOLVED THE
+    // WAY ITS DECLARATION IS BOUND.
+    //
+    // NO KEY NAME MOVES and nothing retires: this row reads revision 28's tables
+    // unchanged, and what moves is one node of the field tree and VALUES under
+    // stationary keys, the class revisions 17, 18, 21, 26 and 27 set the precedent
+    // for. So, as for those, THIS ROW IS THE WHOLE NOTICE a consumer gets.
+    //
+    // Both cells are about a `DeclareKeyExpr`, the one message whose key expression
+    // has no M bit to say which table its scope indexes (bit 6 of its header is
+    // reserved).
+    //
+    // THE TREE. The `keyexpr` node under `decl_kexpr` held a `mapping` of `1`
+    // beside an `m` of `0`. The `1` was the generated decoder's literal arm, which
+    // is pico's reading; zenoh's reads the same bytes as the receiver's table, and
+    // neither writes the field, so it was a decoder's constant presented as a
+    // measurement. The node is absent now. Every key expression that does sit
+    // under an M bit keeps `mapping` as that bit, unchanged, and the `m` flag on a
+    // `DeclareKeyExpr` stays as the raw value of the reserved bit.
+    //
+    // THE ROW. A `carried` entry that names a `Declare` took its `keyexpr` from that
+    // node, so it read a non-zero scope in the declarer's own table only. The
+    // table that binds the id the declaration mints reads the scope out of
+    // whichever side knows it, and binds nothing when both do under different
+    // literals. The row now follows the same rule, so it can no longer name a key
+    // the table refused to bind, nor stay `null` for a scope that only the other
+    // side held. Both upstream implementations declare with scope 0, where the
+    // rule does not arise, so a real capture reads the same.
+    //
+    // A consumer pinned to 28 loses nothing it could use. A `mapping` of 1 under
+    // `decl_kexpr` was never a wire fact. A `null` it cached against a `Declare`
+    // entry with a non-zero scope may now be a literal, and a literal it cached
+    // where the two tables disagreed is now `null`, which is what a reference to
+    // the id that declaration would have minted had been reading all along.
+    DocumentShape {
+        document: FIELDS,
+        revision: 30,
+        keys: FIELDS_R30_KEYS,
+        retiring: &[],
+        families: FIELDS_R20_FAMILIES,
+        planes: &[],
+        carries: FIELDS_R28_CARRIES,
+    },
     DocumentShape {
         document: SUMMARY,
         revision: 1,
@@ -9301,6 +9344,17 @@ pub const FIELDS_R28_KEYS: &[&str] = &[
     "wrong",
 ];
 
+/// The field document's key set at revision 30: revision 28's, by name.
+///
+/// IDENTICAL, and aliased for [`FIELDS_R27_KEYS`]' reason: a second hand-written
+/// copy of these names would be a claim that the two are the same, checked by
+/// nobody, where the alias is that fact. What moved is a NODE of the field tree
+/// (a `mapping` under a `DeclareKeyExpr`'s key expression, which is a tree node
+/// and not a key of this document's own shape) and the VALUE a `carried` entry's
+/// `keyexpr` takes for a declaration with a non-zero scope. The revision number
+/// is the whole notice, and the row says which cells.
+pub const FIELDS_R30_KEYS: &[&str] = FIELDS_R28_KEYS;
+
 /// What each field-document family's WORD decides at revision 28 — revision 20's,
 /// with `state` changed: see [`PAYLOAD_STATE_CARRIES_R28`]. Written out in full,
 /// because a slice cannot be spliced in a `const` and an alias would make the
@@ -10907,6 +10961,11 @@ mod tests {
             // Inits offered QoS as the z64 `QoSLink`: a value moved under a
             // stationary key, so this entry is the notice.
             (FIELDS, 29),
+            // To 30 when a `DeclareKeyExpr`'s key expression lost its `mapping`
+            // node (the wire has no M bit there) and the row that carries the
+            // declaration began to resolve its scope the way the table binds it:
+            // a node and values under stationary keys, so this entry is the notice.
+            (FIELDS, 30),
             // R2121 (open-debt item 460) — the summary moved to 2 when it
             // gained `inert_counters`; R2122 (item 238) to 3 when its
             // `framing` group stopped disagreeing with the capture report's.

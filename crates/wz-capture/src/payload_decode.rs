@@ -1319,27 +1319,41 @@ pub fn subtree_keyexpr_outcome(
     if field.name == "keyexpr" {
         if let FieldValue::Nested(parts) = &field.value {
             let mut id = 0u64;
-            let mut mapping = 0u64;
+            let mut mapping: Option<u64> = None;
             let mut suffix: Option<&str> = None;
             for part in parts {
                 match (part.name.as_ref(), &part.value) {
                     ("id", FieldValue::Uint(v)) => id = *v,
-                    ("mapping", FieldValue::Bits(v)) => mapping = *v,
+                    ("mapping", FieldValue::Bits(v)) => mapping = Some(*v),
                     ("suffix", FieldValue::Text(text)) => suffix = Some(text),
                     _ => {}
                 }
             }
-            // The `M` bit names the table: 1 is the SENDER's space, which for a
-            // message travelling this way is this direction's own, and 0 is the
-            // receiver's. `KeyexprSpaces::resolve` derives the same choice from
-            // the codec variant; this derives it from the bit the walk records,
-            // and both hand the same question to one resolver.
-            let space = if mapping == 1 {
-                at.direction
-            } else {
-                at.direction.peer()
+            let resolved = match mapping {
+                // The `M` bit names the table: 1 is the SENDER's space, which
+                // for a message travelling this way is this direction's own,
+                // and 0 is the receiver's. `KeyexprSpaces::resolve` derives the
+                // same choice from the codec variant; this derives it from the
+                // bit the walk records, and both hand the same question to one
+                // resolver.
+                Some(bit) => {
+                    let space = if bit == 1 {
+                        at.direction
+                    } else {
+                        at.direction.peer()
+                    };
+                    at.spaces.resolve_parts(space, id, suffix)
+                }
+                // No `mapping` node: the walk records one only where the
+                // header has an M bit, and this is the key expression a
+                // `DeclareKeyExpr` DECLARES, whose scope the wire does not
+                // place. It resolves the way the table binds that declaration,
+                // so a row and the references to the id it mints cannot
+                // disagree. Defaulting to `0` here would have read the
+                // receiver's table alone.
+                None => at.spaces.resolve_declared_parts(at.direction, id, suffix),
             };
-            return match at.spaces.resolve_parts(space, id, suffix) {
+            return match resolved {
                 Ok(keyexpr) if !keyexpr.is_empty() => Some(Ok(keyexpr)),
                 // Resolved to NOTHING: `id == 0` with no suffix names no
                 // keyexpr, so there is no reference here to explain. The

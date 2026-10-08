@@ -873,6 +873,24 @@ impl KeyexprSpaces {
         body: &WireexprOwnedVariant<S>,
     ) -> Result<String, (Direction, u64)> {
         let (id, suffix) = wz_session_core::wireexpr_resolve::id_and_suffix(body);
+        self.resolve_declared_parts(direction, id, suffix)
+    }
+
+    /// The same resolution of a declared keyexpr, from the PARTS a reader has
+    /// when it holds a walked field tree rather than a decoded message.
+    ///
+    /// A field-tree reader derives the table of an ordinary key expression from
+    /// the `mapping` node the walk records ([`Self::resolve_parts`]). A
+    /// `DeclareKeyExpr` has no M bit, so its tree has no such node, and that is
+    /// the reader's cue to come here instead: the rule is the one above, written
+    /// once, so the row that carries a declaration cannot name a different key
+    /// from the table the same declaration binds. `direction` is the declarer's.
+    pub fn resolve_declared_parts(
+        &self,
+        direction: Direction,
+        id: u64,
+        suffix: Option<&str>,
+    ) -> Result<String, (Direction, u64)> {
         if id == 0 {
             return Ok(suffix.unwrap_or("").to_string());
         }

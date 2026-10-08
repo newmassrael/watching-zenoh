@@ -421,6 +421,73 @@
  * application data. The range is derived from the message's bytes and does not
  * change in an issued row.
  *
+ * AND WHICH TABLE A KEY EXPRESSION'S ID INDEXES, at field-document revision 30.
+ *
+ * A key expression on the wire is `(id, suffix)`, and the id means nothing
+ * until you know whose table it indexes. zenoh puts that choice in ONE BIT of
+ * the header of the message that carries the key: M set names the ids the
+ * SENDER declared, M clear the ids the RECEIVER declared. The field tree
+ * records it under a `keyexpr` node:
+ *
+ *     `mapping`   `1` when the M bit is set (the sender's table), `0` when it
+ *                 is clear (the receiver's)
+ *
+ * It is the bit as written -- not a name, and not inverted -- and the `m` flag
+ * on the same header is that bit read as a flag. It is present on Push,
+ * Request, Response and the subscriber, queryable and token declarations,
+ * whose headers have the bit, and on the `wire_expr` extension of an
+ * undeclaration, which carries it in its own flags byte.
+ *
+ * ⚠ A DeclareKeyExpr HAS NO M BIT. Bit 6 of its header is reserved, so its
+ * `keyexpr` node holds `id`, `suffix_len` and `suffix` and NO `mapping`: the
+ * wire does not say which table the scope of a declared key expression
+ * indexes, and the two upstream implementations answer it differently (zenoh
+ * reads it as the receiver's, zenoh-pico as the sender's), so any value there
+ * would be a decoder's choice reported as a measurement. Until revision 30 the
+ * tree carried `mapping: 1` on it, beside `m: false`. The `m` flag stays on a
+ * DeclareKeyExpr as the raw value of the reserved bit, which a conforming
+ * sender leaves clear and which means nothing.
+ *
+ * The `keyexpr` a `carried` entry reports for a DeclareKeyExpr is the key it
+ * declares, with a non-zero scope resolved out of WHICHEVER table knows that
+ * id -- the sender's or the receiver's -- and `null` when neither does, or
+ * when both do under different literals. That is the rule that binds the id
+ * the declaration mints, so the row and every later reference to the id
+ * agree. Both upstream implementations declare with scope 0, where none of
+ * this arises. Until revision 30 the row read the scope in the declarer's
+ * table only: `null` for a scope that only the other side held, and a literal
+ * for one that both held differently.
+ *
+ * ⚠ ONE KEY EXPRESSION IS NOT YET HELD TO THIS: the restricted key of an
+ * Interest. Its options byte has an M bit like the messages above, but its
+ * `mapping` reads `1` whatever that bit holds, so do not take the value there
+ * as the wire's.
+ *
+ * WHICH HALF IS `a`. Wherever a document or a record says `direction` -- a
+ * row's, a record's, a `halves` entry's, a conduit's, a selector's `dir` -- the
+ * two words are the two halves of a flow and nothing more:
+ *
+ *     `a`  the half that travels from `flow.low` to `flow.high`
+ *     `b`  the half that travels from `flow.high` to `flow.low`
+ *
+ * `low` is the lesser of the flow's two endpoints, comparing the address bytes
+ * as the capture stores them (a vsock context id is stored little-endian, so
+ * its lowest byte decides first) and then the port, so the pair is the same
+ * whichever packet was read first and a half keeps its word for the whole of
+ * its flow. THE WORD IS A FACT ABOUT THE ENDPOINTS AND NOT ABOUT WHO OPENED THE
+ * CONNECTION. A router on port 7447 and a client on a high port of the same
+ * host give `a` to the ROUTER's half; a client bound below the router's port,
+ * or sitting on a lower address, gives it to the client's. This header used to
+ * call it
+ * "conventionally the initiator", which is true of one arrangement of ports
+ * and false of its mirror: nothing in the library ever assigned it by role.
+ *
+ * To learn who played which role, read the handshake: an `Init` whose `a`
+ * flag is clear is the initiator's InitSyn and one whose flag is set is the
+ * acceptor's InitAck, so the half that sent each is the half that played that
+ * role. The rule above holds for the `tcp`, `udp`, `raweth` and `vsock` flows
+ * these documents render (a serial line is rendered by none of them).
+ *
  * ⚠ AN EMPTY `carried` IS A STATEMENT. A transport MID this build does not name
  * walks as the `Unknown` group -- the row says so under `name` -- and gets no
  * entry here, because `Unknown` is not a message and putting it in this
@@ -804,7 +871,7 @@
  *
  * Every family in `value_families` now carries a `carries` axis:
  *
- *     {"name":"fields","revision":29,"key":"kind","values":[...],
+ *     {"name":"fields","revision":30,"key":"kind","values":[...],
  *      "carries":[{"word":"bits","shapes":[["end","name","start","value"]]},
  *                 {"word":"opaque","shapes":[["end","name","start"]]}, ...]}
  *
@@ -2339,7 +2406,7 @@ int wz_dissect_e2e_open(const char *profile_json, const unsigned char *frame,
  *
  * R2175 -- the document is at REVISION 3, and the fourth key is `value_families`:
  *
- *     "value_families":[{"name":"fields","revision":29,"key":"state",
+ *     "value_families":[{"name":"fields","revision":30,"key":"state",
  *                        "values":["decoded","encoding_mismatch",…]}, …]
  *
  * every key in every document whose VALUE this build draws from a closed set,
@@ -2584,7 +2651,9 @@ typedef struct wz_dissect_record {
     uint32_t batch_index;
     /* Byte offset of this message within its framing unit. */
     uint32_t unit_offset;
-    /* 0 = direction A (conventionally the initiator), 1 = B. */
+    /* 0 = direction A, the half that travels from the flow's lower endpoint to
+     * its higher one; 1 = B, the other half. Not a role: the initiator's half
+     * is A or B according to which end sorts lower. See "WHICH HALF IS `a`". */
     uint8_t direction;
     /* WZ_DISSECT_ANCHOR_*. */
     uint8_t anchor_space;

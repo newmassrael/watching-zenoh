@@ -332,8 +332,11 @@ impl FieldValue {
 ///   lookup, which is why it is a [`Label`](FieldValue::Label) rather than
 ///   [`Text`](FieldValue::Text), and why it is ABSENT rather than guessed when the
 ///   carrier declares no such extension
-/// * `mapping` — zenoh-protocol's `WireExpr::mapping`; wz's codec encodes it as
-///   the local/nonlocal variant TAG rather than as a field
+/// * `mapping` — zenoh-protocol's `WireExpr::mapping`, which the wire carries as
+///   the M bit of the header holding the key expression (1 the sender's ids, 0
+///   the receiver's); wz's codec encodes it as the local/nonlocal variant TAG
+///   rather than as a field. ABSENT on a `DeclareKeyExpr`, whose header has no M
+///   bit to read it from
 /// * `has_schema` — the packed encoding's bit 0, surfaced as a flag
 /// * `zid_len_m1` — the zid length is stored minus one, and the name says what
 ///   the bytes hold rather than what they mean
@@ -2143,15 +2146,30 @@ pub fn walk_encoding(c: &mut SpanCursor<'_>) -> Result<Vec<Field>, CodecError> {
 /// `Wireexpr` — a VLE mapping id, plus a length-prefixed suffix when the
 /// parent's N flag is set. The local and nonlocal variants have identical
 /// layouts and differ only in which mapping table the id resolves against,
-/// so `tag` is recorded as a field rather than duplicated as a second walker.
-pub fn walk_wireexpr(c: &mut SpanCursor<'_>, n: u8, tag: u8) -> Result<Vec<Field>, CodecError> {
+/// so `mapping` is recorded as a field rather than duplicated as a second
+/// walker.
+///
+/// `mapping` is the M bit of the header that carries the key expression
+/// (1 names the ids the sender declared, 0 the ids the receiver declared), and
+/// it is `None` where that header has no such bit: the walker then records no
+/// `mapping` node at all. A `DeclareKeyExpr` is the one case — bit 6 of its
+/// header is reserved — and filling the node from the codec's literal arm
+/// would report a decoder's choice as something read off the wire.
+pub fn walk_wireexpr(
+    c: &mut SpanCursor<'_>,
+    n: u8,
+    mapping: Option<u8>,
+) -> Result<Vec<Field>, CodecError> {
     let (_, id) = c.vle_u64("id")?;
-    let mapping = Field {
-        name: "mapping".into(),
-        span: id.span,
-        value: FieldValue::Bits(tag as u64),
-    };
-    let mut out = alloc::vec![id, mapping];
+    let span = id.span;
+    let mut out = alloc::vec![id];
+    if let Some(bit) = mapping {
+        out.push(Field {
+            name: "mapping".into(),
+            span,
+            value: FieldValue::Bits(bit as u64),
+        });
+    }
     if (n & 0x01) != 0 {
         let (len, len_field) = c.vle_u64("suffix_len")?;
         out.push(len_field);
@@ -2392,7 +2410,7 @@ pub fn walk_push(c: &mut SpanCursor<'_>) -> Result<Vec<Field>, CodecError> {
         flag("m", carrier, m != 0),
         flag("z", carrier, (header & 0x80) != 0),
     ];
-    out.push(c.nested("keyexpr", |c| walk_wireexpr(c, n, m))?);
+    out.push(c.nested("keyexpr", |c| walk_wireexpr(c, n, Some(m)))?);
     if (header & 0x80) != 0 {
         out.push(c.nested("extensions", |c| {
             walk_ext_chain_z(
@@ -2421,7 +2439,7 @@ pub fn walk_request(c: &mut SpanCursor<'_>) -> Result<Vec<Field>, CodecError> {
     ];
     let (_, rid) = c.vle_u64("rid")?;
     out.push(rid);
-    out.push(c.nested("keyexpr", |c| walk_wireexpr(c, n, m))?);
+    out.push(c.nested("keyexpr", |c| walk_wireexpr(c, n, Some(m)))?);
     if (header & 0x80) != 0 {
         out.push(c.nested("extensions", |c| {
             walk_ext_chain_z(
@@ -2455,7 +2473,7 @@ pub fn walk_response(c: &mut SpanCursor<'_>) -> Result<Vec<Field>, CodecError> {
     ];
     let (_, rid) = c.vle_u64("request_id")?;
     out.push(rid);
-    out.push(c.nested("keyexpr", |c| walk_wireexpr(c, n, m))?);
+    out.push(c.nested("keyexpr", |c| walk_wireexpr(c, n, Some(m)))?);
     if (header & 0x80) != 0 {
         out.push(c.nested("extensions", |c| {
             walk_ext_chain_z(
@@ -2510,7 +2528,13 @@ pub fn walk_interest_body(c: &mut SpanCursor<'_>) -> Result<Vec<Field>, CodecErr
     ];
     if (header & 0x10) != 0 {
         let n = (header >> 5) & 0x1;
-        out.push(c.nested("keyexpr", move |c| walk_wireexpr(c, n, 0x1))?);
+        // ⚠ NOT YET THE WIRE'S BIT. This options byte has an M bit (bit 6, which
+        // upstream names `InterestOptions::MAPPING`) and the generated
+        // `interest_body` decoder ignores it, passing the `WireexprLocal` arm as
+        // a literal; the planes that resolve an Interest's restricted key read
+        // that arm, so reading the bit here alone would make this document
+        // disagree with them. The header states the exception.
+        out.push(c.nested("keyexpr", move |c| walk_wireexpr(c, n, Some(0x1)))?);
     }
     Ok(out)
 }
@@ -2602,25 +2626,28 @@ pub fn walk_oam(c: &mut SpanCursor<'_>) -> Result<Vec<Field>, CodecError> {
 /// same plus an ext chain (DECL_QUERYABLE), header + id (+ ext chain)
 /// (UNDECL_*), and a bare header (DECL_FINAL).
 fn walk_declare_body(c: &mut SpanCursor<'_>) -> Result<Field, CodecError> {
-    /// header + VLE id + a wireexpr whose mapping tag the caller fixes.
-    fn id_and_keyexpr(
-        c: &mut SpanCursor<'_>,
-        fixed_mapping: Option<u8>,
-    ) -> Result<Vec<Field>, CodecError> {
+    /// header + VLE id + a wireexpr. `has_m_bit` says whether bit 6 of the
+    /// header IS this body's M flag, which names the table the key expression's
+    /// scope indexes: the subscriber, queryable and token declarations have it,
+    /// and a `DeclareKeyExpr` does not (the bit is reserved there), so for that
+    /// one the key expression gets no `mapping` node and the `m` flag is the
+    /// raw value of the reserved bit.
+    fn id_and_keyexpr(c: &mut SpanCursor<'_>, has_m_bit: bool) -> Result<Vec<Field>, CodecError> {
         let (header, header_field) = c.u8("header")?;
         let carrier = header_field.span;
         let n = (header >> 5) & 0x1;
-        let m = fixed_mapping.unwrap_or((header >> 6) & 0x1);
+        let m = (header >> 6) & 0x1;
         let mut out = alloc::vec![
             header_field,
             bits("mid", carrier, (header & 0x1F) as u64),
             flag("n", carrier, n != 0),
-            flag("m", carrier, ((header >> 6) & 0x1) != 0),
+            flag("m", carrier, m != 0),
             flag("z", carrier, (header & 0x80) != 0),
         ];
         let (_, id) = c.vle_u64("id")?;
         out.push(id);
-        out.push(c.nested("keyexpr", move |c| walk_wireexpr(c, n, m))?);
+        let mapping = has_m_bit.then_some(m);
+        out.push(c.nested("keyexpr", move |c| walk_wireexpr(c, n, mapping))?);
         Ok(out)
     }
 
@@ -2651,12 +2678,12 @@ fn walk_declare_body(c: &mut SpanCursor<'_>) -> Result<Field, CodecError> {
     }
 
     match c.peek_u8()? & 0x1F {
-        0 => c.nested("decl_kexpr", |c| id_and_keyexpr(c, Some(0x1))),
+        0 => c.nested("decl_kexpr", |c| id_and_keyexpr(c, false)),
         1 => c.nested("undecl_kexpr", |c| id_and_exts(c, false)),
-        2 => c.nested("decl_subscriber", |c| id_and_keyexpr(c, None)),
+        2 => c.nested("decl_subscriber", |c| id_and_keyexpr(c, true)),
         3 => c.nested("undecl_subscriber", |c| id_and_exts(c, true)),
         4 => c.nested("decl_queryable", |c| {
-            let mut out = id_and_keyexpr(c, None)?;
+            let mut out = id_and_keyexpr(c, true)?;
             // The queryable body is the one decl arm carrying its own ext
             // chain; its Z bit is the header bit already recorded above.
             if let Some(Field {
@@ -2677,7 +2704,7 @@ fn walk_declare_body(c: &mut SpanCursor<'_>) -> Result<Field, CodecError> {
             Ok(out)
         }),
         5 => c.nested("undecl_queryable", |c| id_and_exts(c, true)),
-        6 => c.nested("decl_token", |c| id_and_keyexpr(c, None)),
+        6 => c.nested("decl_token", |c| id_and_keyexpr(c, true)),
         7 => c.nested("undecl_token", |c| id_and_exts(c, true)),
         // DECL_FINAL (0x1A) and the codec's default arm, which is also
         // DECL_FINAL: a lone header byte.
@@ -6332,6 +6359,221 @@ mod tests {
             assert!(
                 f.find(must_have).is_some(),
                 "sub-MID {sub_mid} did not surface {must_have}: {f:?}"
+            );
+        }
+    }
+
+    /// Whether the generated codec decoded this declaration's key expression
+    /// into its `WireexprLocal` arm, which is the arm the codec files an `M=1`
+    /// reference under.
+    fn declared_arm_is_local(declare: &wz_codecs::declare::Declare<'_>) -> bool {
+        use wz_codecs::declare::DeclareVariant as V;
+        let keyexpr = match &declare.body {
+            V::CodecZenohDeclKexpr(b) => &b.keyexpr,
+            V::CodecZenohDeclSubscriber(b) => &b.keyexpr,
+            V::CodecZenohDeclQueryable(b) => &b.keyexpr,
+            V::CodecZenohDeclToken(b) => &b.keyexpr,
+            other => panic!("not a declaration that names a key expression: {other:?}"),
+        };
+        matches!(
+            keyexpr.body,
+            wz_codecs::wireexpr::WireexprVariant::WireexprLocal(_)
+        )
+    }
+
+    /// `mapping` IS THE M BIT OF THE HEADER THAT CARRIES THE KEY EXPRESSION, on
+    /// every message that has one, and it is the arm the generated codec files
+    /// the same bytes under.
+    ///
+    /// Upstream reads a set M as `Mapping::Sender`, the ids the sender declared,
+    /// and a clear one as `Mapping::Receiver`, the ids the receiver declared
+    /// (`commons/zenoh-codec/src/network/push.rs` @ `wire_expr.mapping = if imsg::has_flag(self.header, flag::M) {`,
+    /// and the flag's own definition,
+    /// `commons/zenoh-protocol/src/network/push.rs` @ `if M==1 then key expr mapping is the one declared by the sender, else it is the one declared by the receiver`).
+    /// This tree's codec files an `M=1` reference under `WireexprLocal` (the
+    /// sender's own ids), so the value the walk records is `1` for it and `0`
+    /// for `WireexprNonlocal`. The bit is not inverted anywhere on that path:
+    /// each row below reads the same bytes three ways, the header bit it set,
+    /// the walker's node, and the codec's arm, and they have to agree for both
+    /// settings of the bit. The Push, Request and Response rows are the
+    /// network messages; the three declarations are the ones whose header has
+    /// the bit (`commons/zenoh-codec/src/network/declare.rs` @ `wire_expr.mapping = if imsg::has_flag(self.header, subscriber::flag::M) {`).
+    #[test]
+    fn mapping_is_the_m_bit_of_the_header_that_carries_the_key_expression() {
+        use wz_codecs::wireexpr::WireexprVariant;
+        let is_local = |w: &wz_codecs::wireexpr::Wireexpr<'_>| {
+            matches!(w.body, WireexprVariant::WireexprLocal(_))
+        };
+        for m in 0u8..=1 {
+            let want = u64::from(m);
+
+            let push = concat(&[
+                alloc::vec![0x1Du8 | 0x20 | (m << 6)],
+                wireexpr(7, Some("k")),
+                msg_put(None, None, &[], b"x"),
+            ]);
+            let f = agree(
+                "Push",
+                &push,
+                |b| {
+                    let mut c = SceCursor::new(b);
+                    let p = wz_codecs::push::Push::decode(&mut c).expect("codec rejected");
+                    assert_eq!(is_local(&p.keyexpr), m == 1, "Push M={m}: the codec's arm");
+                    b.len() - c.remaining()
+                },
+                walk_push,
+            );
+            assert_eq!(bits_of(&f, "mapping"), want, "Push M={m}");
+
+            let request = concat(&[
+                alloc::vec![0x1Cu8 | 0x20 | (m << 6)],
+                vle(9),
+                wireexpr(7, Some("k")),
+                concat(&[
+                    alloc::vec![0x03u8 | 0x20 | 0x40],
+                    alloc::vec![0x02u8],
+                    vle(1),
+                    b"p".to_vec(),
+                ]),
+            ]);
+            let f = agree(
+                "Request",
+                &request,
+                |b| {
+                    let mut c = SceCursor::new(b);
+                    let r = wz_codecs::request::Request::decode(&mut c).expect("codec rejected");
+                    assert_eq!(
+                        is_local(&r.keyexpr),
+                        m == 1,
+                        "Request M={m}: the codec's arm"
+                    );
+                    b.len() - c.remaining()
+                },
+                walk_request,
+            );
+            assert_eq!(bits_of(&f, "mapping"), want, "Request M={m}");
+
+            let response = concat(&[
+                alloc::vec![0x1Bu8 | 0x20 | (m << 6)],
+                vle(77),
+                wireexpr(7, Some("k")),
+                concat(&[
+                    alloc::vec![0x04u8 | 0x20],
+                    alloc::vec![0x01u8],
+                    msg_put(None, None, &[], b"v"),
+                ]),
+            ]);
+            let f = agree(
+                "Response",
+                &response,
+                |b| {
+                    let mut c = SceCursor::new(b);
+                    let r = wz_codecs::response::Response::decode(&mut c).expect("codec rejected");
+                    assert_eq!(
+                        is_local(&r.keyexpr),
+                        m == 1,
+                        "Response M={m}: the codec's arm"
+                    );
+                    b.len() - c.remaining()
+                },
+                walk_response,
+            );
+            assert_eq!(bits_of(&f, "mapping"), want, "Response M={m}");
+
+            for (sub_mid, name) in [(2u8, "subscriber"), (4, "queryable"), (6, "token")] {
+                let bytes = concat(&[
+                    alloc::vec![0x1Eu8 | 0x20],
+                    vle(99),
+                    alloc::vec![sub_mid | 0x20 | (m << 6)],
+                    vle(5),
+                    wireexpr(7, Some("k")),
+                ]);
+                let f = agree(
+                    "Declare",
+                    &bytes,
+                    |b| {
+                        let mut c = SceCursor::new(b);
+                        let d =
+                            wz_codecs::declare::Declare::decode(&mut c).expect("codec rejected");
+                        assert_eq!(
+                            declared_arm_is_local(&d),
+                            m == 1,
+                            "decl_{name} M={m}: the codec's arm"
+                        );
+                        b.len() - c.remaining()
+                    },
+                    walk_declare,
+                );
+                assert_eq!(bits_of(&f, "mapping"), want, "decl_{name} M={m}");
+                assert_eq!(
+                    f.find("m").map(|f| f.value.clone()),
+                    Some(FieldValue::Flag(m == 1)),
+                    "decl_{name}: the `m` flag beside it reads the same bit"
+                );
+            }
+        }
+    }
+
+    /// A DECLARED KEY EXPRESSION HAS NO `mapping`, because the wire has no bit
+    /// to read one from.
+    ///
+    /// Bit 6 of a `DeclareKeyExpr` header is reserved, and the flag module of
+    /// that message holds only N and Z
+    /// (`commons/zenoh-protocol/src/network/declare.rs` @ `// pub const X: u8 = 1 << 6; // 0x40 Reserved`).
+    /// Upstream's `WireExpr` codec drops the field on the way out
+    /// (`commons/zenoh-codec/src/core/wire_expr.rs` @ `mapping: _,`) and puts
+    /// the default back on the way in
+    /// (`commons/zenoh-codec/src/core/wire_expr.rs` @ `mapping: Mapping::DEFAULT,`),
+    /// which is `Receiver`
+    /// (`commons/zenoh-protocol/src/network/mod.rs` @ `pub const DEFAULT: Self = Self::Receiver;`).
+    /// This tree's generated decoder instead passes the `WireexprLocal` arm as
+    /// a literal, so the codec answers `Local` for every `DeclareKeyExpr`
+    /// whatever bit 6 holds, and the walker used to copy that into a
+    /// `mapping` node of value 1 beside an `m` node of value 0. The two
+    /// upstreams disagree about the constant and neither puts it on the wire,
+    /// so the node would have been a decoder's choice reported as a
+    /// measurement; it is absent now.
+    ///
+    /// The `m` flag stays, as the raw value of the reserved bit: a conforming
+    /// sender leaves it clear, and a capture that sets it is worth seeing. Both
+    /// settings are walked, and both must give the same tree shape.
+    #[test]
+    fn a_declared_key_expression_carries_no_mapping_because_the_wire_has_none() {
+        for bit6 in 0u8..=1 {
+            let bytes = concat(&[
+                alloc::vec![0x1Eu8 | 0x20],
+                vle(99),
+                // MID 0 (DeclareKeyExpr), N set, and the reserved bit 6 as given.
+                alloc::vec![0x00u8 | 0x20 | (bit6 << 6)],
+                vle(1),
+                wireexpr(7, Some("k")),
+            ]);
+            let f = agree(
+                "Declare",
+                &bytes,
+                |b| {
+                    let mut c = SceCursor::new(b);
+                    let d = wz_codecs::declare::Declare::decode(&mut c).expect("codec rejected");
+                    assert!(
+                        declared_arm_is_local(&d),
+                        "bit 6 = {bit6}: the generated decoder pins `Local` for a \
+                         DeclareKeyExpr, which is why its arm cannot be reported"
+                    );
+                    b.len() - c.remaining()
+                },
+                walk_declare,
+            );
+            let keyexpr = f.find("keyexpr").expect("the declared key expression");
+            assert!(
+                keyexpr.find("mapping").is_none(),
+                "bit 6 = {bit6}: no node may stand for a mapping the wire does not carry: {keyexpr:?}"
+            );
+            assert_eq!(uint(keyexpr, "id"), 7, "the scope id is still walked");
+            assert_eq!(text(keyexpr, "suffix"), "k", "and so is the suffix");
+            assert_eq!(
+                f.find("m").map(|f| f.value.clone()),
+                Some(FieldValue::Flag(bit6 == 1)),
+                "the `m` flag is the raw reserved bit"
             );
         }
     }

@@ -9168,4 +9168,509 @@ mod tests {
             "no network message was without one: {doc}"
         );
     }
+
+    /// The `mapping` of a key expression, and the half `a` of a flow: what the
+    /// document says of each, graded against captures built here.
+    mod mapping_and_direction {
+        use super::*;
+        use crate::datagram_tests::{frame_carrying, init_datagram, push, sender_space};
+        use crate::node::tests::init_wire;
+        use wz_codecs::wireexpr::{Wireexpr, WireexprVariant};
+        use wz_codecs::wireexpr_nonlocal::WireexprNonlocal;
+        use wz_session_core::json5::{self, Json5Value};
+
+        const LOW: [u8; 4] = [10, 0, 0, 1];
+        const HIGH: [u8; 4] = [10, 0, 0, 2];
+        const ZID_LOW: &[u8] = &[0xA1, 0xA1, 0xA1, 0xA1];
+        const ZID_HIGH: &[u8] = &[0xB2, 0xB2, 0xB2, 0xB2];
+
+        /// `M=0`: the id lives in the RECEIVER's space.
+        fn receiver_space(id: u64, suffix: Option<&'static str>) -> Wireexpr<'static> {
+            Wireexpr {
+                body: WireexprVariant::WireexprNonlocal(WireexprNonlocal {
+                    id,
+                    suffix_len: suffix.map(|s| s.len() as u64),
+                    suffix,
+                }),
+            }
+        }
+
+        /// A `DeclareKeyExpr` binding `id` to `scope` + `suffix`. The header
+        /// carries N and nothing else: this message has no M bit to set.
+        fn declare_kexpr(id: u64, scope: u64, suffix: &'static str) -> Vec<u8> {
+            wz_codecs::declare::Declare {
+                body: wz_codecs::declare::DeclareVariant::CodecZenohDeclKexpr(
+                    wz_codecs::decl_kexpr::DeclKexpr {
+                        header: wz_session_core::wire_const::D_MID_KEXPR
+                            | wz_session_core::wire_const::FLAG_D_N,
+                        id,
+                        keyexpr: sender_space(scope, Some(suffix)),
+                        extensions: None,
+                    },
+                ),
+                ..Default::default()
+            }
+            .encode_to_vec()
+        }
+
+        /// One datagram: `from_low` says which end of the flow sent it.
+        fn datagram(from_low: bool, message: &[u8]) -> Vec<u8> {
+            if from_low {
+                udp_packet(LOW, 43210, HIGH, 7447, message)
+            } else {
+                udp_packet(HIGH, 7447, LOW, 43210, message)
+            }
+        }
+
+        /// A pcapng file of `packets`, 100 microseconds apart.
+        fn file_of(packets: &[Vec<u8>]) -> Vec<u8> {
+            let refs: Vec<(u32, u64, &[u8])> = packets
+                .iter()
+                .enumerate()
+                .map(|(i, p)| (0u32, 1_000_000 + i as u64 * 100, p.as_slice()))
+                .collect();
+            crate::pcapng::write(&[(LINKTYPE_ETHERNET, 6)], &refs)
+        }
+
+        /// A session whose two sides both declare key expressions, then
+        /// reference them, as records after the two Inits. THE SAME ID NUMBER
+        /// IS BOUND ON BOTH SIDES, to different literals, which is what makes
+        /// the `M` bit matter at all: a capture where only one side declares
+        /// cannot tell the two spaces apart.
+        ///
+        /// Records, in capture order (the expectations below are indexed by
+        /// this order):
+        ///
+        /// ```text
+        ///  0 low   declare 5  = x/space
+        ///  1 high  declare 5  = y/space
+        ///  2 low   declare 20 = x/only            (high has no 20)
+        ///  3 high  declare 21 = <20>/leaf         (scope 20: low's space only)
+        ///  4 low   declare 30 = <5>/amb           (scope 5: both spaces, differing)
+        ///  5 low   push <5>      M=1
+        ///  6 low   push <5>      M=0
+        ///  7 high  push <5>      M=1
+        ///  8 high  push <5>      M=0
+        ///  9 high  push <21>     M=1
+        /// 10 low   push <30>     M=1
+        /// 11 low   push <5>/n    M=1
+        /// ```
+        fn two_sided_session() -> (Dissection, Vec<u8>) {
+            let records: Vec<(bool, Vec<u8>)> = vec![
+                (true, declare_kexpr(5, 0, "x/space")),
+                (false, declare_kexpr(5, 0, "y/space")),
+                (true, declare_kexpr(20, 0, "x/only")),
+                (false, declare_kexpr(21, 20, "/leaf")),
+                (true, declare_kexpr(30, 5, "/amb")),
+                (true, push(sender_space(5, None), b"a")),
+                (true, push(receiver_space(5, None), b"b")),
+                (false, push(sender_space(5, None), b"c")),
+                (false, push(receiver_space(5, None), b"d")),
+                (false, push(sender_space(21, None), b"e")),
+                (true, push(sender_space(30, None), b"f")),
+                (true, push(sender_space(5, Some("/n")), b"g")),
+            ];
+            let mut packets: Vec<Vec<u8>> = vec![
+                datagram(true, &init_wire(ZID_LOW)),
+                datagram(false, &init_wire(ZID_HIGH)),
+            ];
+            for (from_low, record) in &records {
+                packets.push(datagram(*from_low, &frame_carrying(record)));
+            }
+            let capture = file_of(&packets);
+            let d = Dissection::from_capture(&capture).expect("the capture reads");
+            (d, capture)
+        }
+
+        fn parsed(doc: &str) -> Json5Value {
+            json5::parse(doc).unwrap_or_else(|e| panic!("the document is not JSON: {e:?}\n{doc}"))
+        }
+
+        /// Every object of `v`, at any depth, whose `name` is `name`.
+        fn nodes_named<'a>(v: &'a Json5Value, name: &str, out: &mut Vec<&'a Json5Value>) {
+            match v {
+                Json5Value::Object(entries) => {
+                    if matches!(v.get("name"), Some(Json5Value::String(n)) if n == name) {
+                        out.push(v);
+                    }
+                    for (_, child) in entries {
+                        nodes_named(child, name, out);
+                    }
+                }
+                Json5Value::Array(items) => {
+                    for child in items {
+                        nodes_named(child, name, out);
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        /// The child of a walked `nested` node that is called `name`.
+        fn child<'a>(node: &'a Json5Value, name: &str) -> Option<&'a Json5Value> {
+            let Some(Json5Value::Array(items)) = node.get("fields") else {
+                return None;
+            };
+            items
+                .iter()
+                .find(|c| matches!(c.get("name"), Some(Json5Value::String(n)) if n == name))
+        }
+
+        fn text_of(v: Option<&Json5Value>) -> Option<String> {
+            match v {
+                Some(Json5Value::String(s)) => Some(s.clone()),
+                _ => None,
+            }
+        }
+
+        /// `(message, keyexpr, keyexpr_cause)` of every `carried` entry that
+        /// names a `Declare` or a `Push`, in document order. The Frame entries
+        /// that wrap them name no key and are left out.
+        fn carried_keys(doc: &str) -> Vec<(String, Option<String>, Option<String>)> {
+            fn walk(v: &Json5Value, out: &mut Vec<(String, Option<String>, Option<String>)>) {
+                match v {
+                    Json5Value::Object(entries) => {
+                        if let (Some(Json5Value::String(m)), Some(key)) =
+                            (v.get("message"), v.get("keyexpr"))
+                        {
+                            if m == "Declare" || m == "Push" {
+                                out.push((
+                                    m.clone(),
+                                    text_of(Some(key)),
+                                    text_of(v.get("keyexpr_cause")),
+                                ));
+                            }
+                        }
+                        for (_, child) in entries {
+                            walk(child, out);
+                        }
+                    }
+                    Json5Value::Array(items) => {
+                        for child in items {
+                            walk(child, out);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            let mut out = Vec::new();
+            walk(&parsed(doc), &mut out);
+            out
+        }
+
+        /// A DECLARED KEY EXPRESSION HAS NO `mapping` IN THE DOCUMENT, and the
+        /// key expressions that do carry an M bit report it as the bit.
+        ///
+        /// The pushes alternate the bit and the senders, and the values
+        /// recorded are the bits as written: `1`, `0`, `1`, `0`, then `1` for
+        /// the three that follow. Before the repair the five declarations
+        /// carried a `mapping` of `1` beside an `m` of `0`.
+        #[test]
+        fn the_document_reports_a_mapping_only_where_the_wire_carries_one() {
+            let (d, capture) = two_sided_session();
+            let doc = fields_json(&d, &capture, None, None);
+            let root = parsed(&doc);
+
+            let mut declarations = Vec::new();
+            nodes_named(&root, "decl_kexpr", &mut declarations);
+            assert_eq!(declarations.len(), 5, "five declarations were sent: {doc}");
+            for declaration in declarations {
+                let keyexpr = child(declaration, "keyexpr").expect("the declared key expression");
+                assert!(
+                    child(keyexpr, "mapping").is_none(),
+                    "a DeclareKeyExpr has no M bit, so its key expression has no \
+                     `mapping`: {keyexpr:?}"
+                );
+                assert!(child(keyexpr, "id").is_some(), "the scope id is walked");
+            }
+
+            let mut pushes = Vec::new();
+            nodes_named(&root, "Push", &mut pushes);
+            let mappings: Vec<String> = pushes
+                .iter()
+                .map(|push| {
+                    let keyexpr = child(push, "keyexpr").expect("the push's key expression");
+                    match child(keyexpr, "mapping").and_then(|m| m.get("value")) {
+                        Some(Json5Value::Number(n)) => n.clone(),
+                        other => panic!("a push carries its M bit as `mapping`: {other:?}"),
+                    }
+                })
+                .collect();
+            assert_eq!(
+                mappings,
+                ["1", "0", "1", "0", "1", "1", "1"],
+                "the M bit of each of the seven pushes, in capture order"
+            );
+        }
+
+        /// A KEY EXPRESSION IS RESOLVED THE SAME WAY BY THE ROW THAT DECLARES
+        /// IT AND BY THE REFERENCES THAT FOLLOW, for a session where both
+        /// sides declare ids.
+        ///
+        /// The pushes pin the M bit's effect: an `M=1` scope is the sender's
+        /// table, an `M=0` scope the receiver's, and the same number `5` reads
+        /// `x/space` or `y/space` accordingly, in both directions.
+        ///
+        /// The declarations pin the part that was wrong. A `DeclareKeyExpr`'s
+        /// scope names a space the wire does not say, so the table binds it
+        /// through `KeyexprSpaces::resolve_declared_parts`: out of whichever
+        /// side knows the id, and not at all when both do under different
+        /// literals. The row that CARRIES the declaration used to read the
+        /// scope in the declarer's own table only, from the `mapping` of `1`
+        /// the walker invented for it, so it disagreed with the binding in
+        /// both directions: it named no key for record 3, whose scope only the
+        /// other side holds, although push 9 then resolves through the id that
+        /// declaration bound; and it named `x/space/amb` for record 4, a key
+        /// the table refused to bind, so push 10 correctly finds nothing for
+        /// the id the declaration was about.
+        #[test]
+        fn a_declaration_row_resolves_its_scope_the_way_the_table_binds_it() {
+            let (d, capture) = two_sided_session();
+            let doc = fields_json(&d, &capture, None, None);
+            let keys = carried_keys(&doc);
+            let got: Vec<(&str, Option<&str>)> = keys
+                .iter()
+                .map(|(m, k, _)| (m.as_str(), k.as_deref()))
+                .collect();
+            assert_eq!(
+                got,
+                [
+                    ("Declare", Some("x/space")),
+                    ("Declare", Some("y/space")),
+                    ("Declare", Some("x/only")),
+                    ("Declare", Some("x/only/leaf")),
+                    ("Declare", None),
+                    ("Push", Some("x/space")),
+                    ("Push", Some("y/space")),
+                    ("Push", Some("y/space")),
+                    ("Push", Some("x/space")),
+                    ("Push", Some("x/only/leaf")),
+                    ("Push", None),
+                    ("Push", Some("x/space/n")),
+                ],
+                "the key each record travelled under, in capture order: {doc}"
+            );
+            for (index, (message, key, cause)) in keys.iter().enumerate() {
+                assert_eq!(
+                    key.is_none(),
+                    cause.is_some(),
+                    "record {index} ({message}): a cause comes with exactly the \
+                     keys that did not resolve"
+                );
+            }
+            assert_eq!(
+                keys[10].2.as_deref(),
+                Some("no_declaration"),
+                "nothing bound id 30, because its declaration was refused"
+            );
+        }
+
+        /// One side's InitSyn then the other's InitAck, and one Push each way
+        /// so that a selector, which judges records, has something to judge.
+        fn handshake_and_pushes(client: ([u8; 4], u16), server: ([u8; 4], u16)) -> Vec<u8> {
+            let from = |sender: ([u8; 4], u16), receiver: ([u8; 4], u16), message: &[u8]| {
+                udp_packet(sender.0, sender.1, receiver.0, receiver.1, message)
+            };
+            file_of(&[
+                from(client, server, &init_datagram(false, &[])),
+                from(server, client, &init_datagram(true, &[])),
+                from(
+                    client,
+                    server,
+                    &frame_carrying(&push(sender_space(0, Some("c2s")), b"x")),
+                ),
+                from(
+                    server,
+                    client,
+                    &frame_carrying(&push(sender_space(0, Some("s2c")), b"y")),
+                ),
+            ])
+        }
+
+        /// `(name, direction, selected)` of each message row of `doc`.
+        fn direction_rows(doc: &str) -> Vec<(String, String, Option<String>)> {
+            fn walk(v: &Json5Value, out: &mut Vec<(String, String, Option<String>)>) {
+                match v {
+                    Json5Value::Object(entries) => {
+                        if let (
+                            Some(Json5Value::String(name)),
+                            Some(Json5Value::String(direction)),
+                            Some(_),
+                        ) = (v.get("name"), v.get("direction"), v.get("offset_space"))
+                        {
+                            out.push((name.clone(), direction.clone(), text_of(v.get("selected"))));
+                        }
+                        for (_, child) in entries {
+                            walk(child, out);
+                        }
+                    }
+                    Json5Value::Array(items) => {
+                        for child in items {
+                            walk(child, out);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            let mut out = Vec::new();
+            walk(&parsed(doc), &mut out);
+            out
+        }
+
+        /// The first flow object of `v`: the one holding `low` and `high`.
+        fn first_flow(v: &Json5Value) -> Option<&Json5Value> {
+            match v {
+                Json5Value::Object(entries) => {
+                    if v.get("low").is_some() && v.get("high").is_some() {
+                        return Some(v);
+                    }
+                    entries.iter().find_map(|(_, c)| first_flow(c))
+                }
+                Json5Value::Array(items) => items.iter().find_map(first_flow),
+                _ => None,
+            }
+        }
+
+        /// `(addr, port)` of the first flow's `low` and `high` endpoints.
+        fn flow_ends(doc: &str) -> [(String, String); 2] {
+            let root = parsed(doc);
+            let flow = first_flow(&root).expect("the document names a flow");
+            let end = |which: &str| {
+                let scalar = |key: &str| match flow.get(&alloc::format!("{which}/{key}")) {
+                    Some(Json5Value::String(s)) => s.clone(),
+                    Some(Json5Value::Number(n)) => n.clone(),
+                    other => panic!("{which}.{key} is not a scalar: {other:?}"),
+                };
+                (scalar("addr"), scalar("port"))
+            };
+            [end("low"), end("high")]
+        }
+
+        fn endpoint_text(addr: [u8; 4], port: u16) -> (String, String) {
+            (
+                alloc::format!("{}.{}.{}.{}", addr[0], addr[1], addr[2], addr[3]),
+                port.to_string(),
+            )
+        }
+
+        /// DIRECTION `a` IS THE HALF THAT TRAVELS FROM `flow.low` TO
+        /// `flow.high`, AND NOT THE INITIATOR'S.
+        ///
+        /// The endpoints are ordered by address and then by port
+        /// (`FlowKey::new`), the same for every packet of a connection, so the
+        /// direction is known from the first one and never depends on who
+        /// dialled. The four rows differ in which end of the connection sorts
+        /// lower: the acceptor on the lower port of one address (the shape of a
+        /// router on `7447` and a client on an ephemeral port, which makes `a`
+        /// the ACCEPTOR's half), the client on the lower port, and then two
+        /// where the ADDRESS decides against the port. `dir == a` selects the
+        /// same half.
+        #[test]
+        fn direction_a_is_the_half_from_the_lower_endpoint_whoever_dialled() {
+            // (client, server, is the client the lower endpoint?)
+            let cases: [(([u8; 4], u16), ([u8; 4], u16), bool); 4] = [
+                (([10, 0, 0, 2], 50000), ([10, 0, 0, 2], 7447), false),
+                (([10, 0, 0, 2], 5000), ([10, 0, 0, 2], 7447), true),
+                (([10, 0, 0, 1], 50000), ([10, 0, 0, 9], 7447), true),
+                (([10, 0, 0, 9], 50000), ([10, 0, 0, 1], 7447), false),
+            ];
+            for (client, server, client_is_low) in cases {
+                let label = alloc::format!("client {client:?}, server {server:?}");
+                let capture = handshake_and_pushes(client, server);
+                let d = Dissection::from_capture(&capture).expect("the capture reads");
+                let doc = fields_json(&d, &capture, None, None);
+
+                let [low, high] = flow_ends(&doc);
+                let (c, s) = (
+                    endpoint_text(client.0, client.1),
+                    endpoint_text(server.0, server.1),
+                );
+                assert_eq!(
+                    (&low, &high),
+                    if client_is_low { (&c, &s) } else { (&s, &c) },
+                    "{label}: the lower endpoint, by address and then port"
+                );
+
+                // Rows are InitSyn, InitAck, then the two pushes' Frames.
+                let rows = direction_rows(&doc);
+                let words: Vec<(&str, &str)> = rows
+                    .iter()
+                    .map(|(n, dir, _)| (n.as_str(), dir.as_str()))
+                    .collect();
+                let (client_half, server_half) = if client_is_low {
+                    ("a", "b")
+                } else {
+                    ("b", "a")
+                };
+                assert_eq!(
+                    words,
+                    [
+                        ("Init", client_half),
+                        ("Init", server_half),
+                        ("Frame", client_half),
+                        ("Frame", server_half),
+                    ],
+                    "{label}: the InitSyn is the client's and the InitAck the server's, \
+                     and each row's half is the direction of its sender: {doc}"
+                );
+
+                // The selector's word agrees with the row's: `dir == a` picks
+                // the rows of that half, and judges the two records only.
+                let filter = crate::filter::Filter::parse("dir == a").expect("parses");
+                let judged = fields_json_where(&d, &capture, None, None, &filter);
+                let verdicts: Vec<(String, Option<String>)> = direction_rows(&judged)
+                    .into_iter()
+                    .filter(|(name, _, _)| name == "Frame")
+                    .map(|(_, dir, selected)| (dir, selected))
+                    .collect();
+                let yes_no = |yes: bool| Some(if yes { "yes" } else { "no" }.to_string());
+                assert_eq!(
+                    verdicts,
+                    [
+                        (client_half.to_string(), yes_no(client_is_low)),
+                        (server_half.to_string(), yes_no(!client_is_low)),
+                    ],
+                    "{label}: `dir == a` over the two pushes: {judged}"
+                );
+            }
+        }
+
+        /// THE SAME HOLDS ON A TCP STREAM, where the flow is built from
+        /// segments rather than datagrams.
+        ///
+        /// `tcp_stream_capture` fixes the endpoints (its low end is the
+        /// `10.0.0.1:1111` side) and takes the sender of each message, so the
+        /// two runs differ only in which END speaks the InitSyn. In the first
+        /// the low end dials and `a` is the initiator's half; in the second the
+        /// high end dials and `a` is the acceptor's, which is the case the
+        /// word "initiator" got wrong.
+        #[test]
+        fn direction_a_on_a_tcp_stream_is_also_the_lower_endpoints() {
+            for dialler_is_low in [true, false] {
+                let (d, file) = tcp_stream_capture(&[
+                    (dialler_is_low, init_datagram(false, &[])),
+                    (!dialler_is_low, init_datagram(true, &[])),
+                ]);
+                let doc = fields_json(&d, &file, None, None);
+                let words: Vec<(String, String)> = direction_rows(&doc)
+                    .into_iter()
+                    .map(|(n, dir, _)| (n, dir))
+                    .collect();
+                let (syn_half, ack_half) = if dialler_is_low {
+                    ("a", "b")
+                } else {
+                    ("b", "a")
+                };
+                assert_eq!(
+                    words,
+                    [
+                        ("Init".to_string(), syn_half.to_string()),
+                        ("Init".to_string(), ack_half.to_string()),
+                    ],
+                    "the InitSyn came from the {} end: {doc}",
+                    if dialler_is_low { "low" } else { "high" }
+                );
+            }
+        }
+    }
 }
