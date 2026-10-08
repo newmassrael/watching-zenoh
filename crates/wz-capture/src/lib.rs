@@ -243,6 +243,21 @@ pub mod payload_decode;
 mod payload_described;
 pub mod pcap;
 pub mod pcapng;
+/// The `.proto` tokenizer behind [`proto_schema`], private for the reason
+/// [`payload_builtin`] is.
+mod proto_lex;
+/// The `.proto` parser behind [`proto_schema`]: the part of the syntax tree the
+/// declaration door needs, and the refusals that are syntax.
+mod proto_parse;
+/// `.proto` schema text turned into DECLARATION text: the field names a
+/// protobuf payload's wire format does not carry, in the dialect
+/// [`payload::formats::FormatMap`] already installs.
+///
+/// Ungated and dependency-free like the rest of this crate: a reader of text,
+/// with no capture and no codec in it.
+pub mod proto_schema;
+#[cfg(test)]
+mod proto_schema_tests;
 /// R2451 (open-debt item 699) — the oracle over `captures/`, the sample
 /// captures a C-ABI-only consumer reads because it has no way to produce them.
 ///

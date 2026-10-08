@@ -2602,7 +2602,7 @@ pub mod formats {
     /// matters in a scope, `#` matters at the head of a line") and a reader
     /// would then have to know which field it is looking at to know what a
     /// backslash meant.
-    fn escape_field(s: &str) -> String {
+    pub(crate) fn escape_field(s: &str) -> String {
         let mut out = String::with_capacity(s.len());
         for c in s.chars() {
             if c == ESCAPE || c == ':' || c == '=' || c == DEFINE {
