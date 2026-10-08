@@ -1705,6 +1705,7 @@ typedef struct wz_dissect_proto_file {
  * as protoc reads it); package; import and import public; message, nested up
  * to the bound below; enum (its names, to resolve types); oneof; map; the
  * labels; reserved ranges and names; extensions ranges (read and ignored);
+ * group fields and extend blocks (see the next paragraph for when they matter);
  * comments and string literals with their escapes. Option
  * statements, [bracketed] options and service blocks are skipped with their own
  * grammar, so a mistake in one is reported at the token that is wrong and does
@@ -1712,12 +1713,21 @@ typedef struct wz_dissect_proto_file {
  *
  * WHAT IS REFUSED, each with a reason, a file, a line and a column.
  *
- *   - group fields and extend blocks, import weak and editions. A group is
- *     written with the deprecated group wire types, which the payload reader
- *     stops at; an extension's fields are declared outside the message they
- *     extend, so their names could not be attached to it. They are refused
- *     even in a file that only the root file imports and the root message never
- *     reaches, because the reader does not know that until it has read it.
+ *   - import weak and editions, in any file that is read.
+ *   - a group field or an extend block, but ONLY WHERE THE ROOT MESSAGE REACHES
+ *     IT. The declarations come from the root message and every message
+ *     reachable from it through field types (a map's value type included). A
+ *     group is written with the deprecated group wire types, which the payload
+ *     reader stops at, and it names a field of the message that holds it; an
+ *     extension's fields are declared outside the message they extend, so their
+ *     names could not be attached to it. So a group is refused when the message
+ *     that holds it is one of those, and an extend block when the message it
+ *     extends is, and the refusal names the group or extend keyword's file,
+ *     line and column. Anywhere else the block is read for its syntax and
+ *     changes nothing: a schema may import a public options file whose extend
+ *     blocks add options to google.protobuf.FieldOptions, because no payload is
+ *     a FieldOptions. The extended message is looked up as protoc looks it up,
+ *     and one that cannot be found is an error here too.
  *   - a recursive message: one whose tree contains itself. Its fields would
  *     need a declaration at every depth, so the cycle is named
  *     (pkg.A -> pkg.B -> pkg.A) and refused, not expanded to a depth nobody chose.
@@ -1731,10 +1741,16 @@ typedef struct wz_dissect_proto_file {
  *
  * The first problem found is the only one reported, in the order protoc meets
  * them: a syntax error before a semantic one, an imported file before the file
- * that imports it. THIS IS NOT A VALIDATOR: an enum protoc would refuse for its
- * numbering is accepted here, and so are JSON name collisions and option values.
- * A file accepted here can still fail protoc; a file refused here for one of the
- * reasons above would fail it too.
+ * that imports it. A group or extend block the root message reaches comes
+ * after all of those, because which messages the root reaches is known only
+ * once every file is read and the root is found, and before the refusals the
+ * expansion itself makes (a recursive message, a path too deep, too many
+ * lines); of several, the one in the message the expansion visits first is
+ * named. THIS IS NOT A VALIDATOR: an enum protoc would refuse for its numbering
+ * is accepted here, and so are JSON name collisions and option values, and the
+ * fields of an extend block are read for their syntax alone (their numbers,
+ * names and types are not judged). A file accepted here can still fail protoc;
+ * a file refused here for one of the reasons above would fail it too.
  *
  * BOUNDS, all of them refusals and none of them silent truncations: messages
  * written inside one another 31 deep (protoc's own limit: it compiles 31 and

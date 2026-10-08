@@ -7354,6 +7354,49 @@ mod tests {
         );
     }
 
+    /// A SCHEMA THAT IMPORTS A PUBLIC OPTIONS FILE IS DECLARED THROUGH THE ABI.
+    /// Such a file `extend`s `google.protobuf.FieldOptions` to add options, a
+    /// message no payload is, and the door used to refuse the `extend` in any
+    /// file it read -- so every schema that imported one was unusable. The
+    /// refusal now belongs to the ROOT: the same files declared from a message
+    /// that does not reach the extended one, and refused, in the options file and
+    /// at the `extend` keyword, from the extended message itself.
+    #[test]
+    fn an_extend_is_refused_only_for_a_root_that_reaches_the_extended_message() {
+        let app = "syntax = \"proto3\";\npackage app;\nimport \"fieldopts/options.proto\";\n\
+                   message Sensor {\n  int32 id = 1;\n  string label = 2 [(fieldopts.opts).max_size = 16];\n}\n";
+        let options = "syntax = \"proto2\";\npackage fieldopts;\nimport \"google/protobuf/descriptor.proto\";\n\
+                       message Options {\n  optional int32 max_size = 1;\n  optional bool fixed = 2;\n}\n\
+                       extend google.protobuf.FieldOptions {\n  optional Options opts = 1010;\n}\n";
+        let descriptor = "syntax = \"proto2\";\npackage google.protobuf;\n\
+                          message FieldOptions {\n  optional bool packed = 2;\n  extensions 1000 to max;\n}\n";
+        let files: [(&str, &[u8]); 3] = [
+            ("app.proto", app.as_bytes()),
+            ("fieldopts/options.proto", options.as_bytes()),
+            ("google/protobuf/descriptor.proto", descriptor.as_bytes()),
+        ];
+
+        let doc =
+            call_from_proto("demo/sensor", "app.Sensor", &files, 0).expect("the door answers");
+        assert!(doc.contains("\"ok\":true"), "{doc}");
+        assert_eq!(
+            json_string(&doc, "declarations"),
+            "demo/sensor=protobuf\ndemo/sensor:1=id\ndemo/sensor:2=label\n"
+        );
+
+        let doc = call_from_proto("demo/sensor", "google.protobuf.FieldOptions", &files, 0)
+            .expect("the door answers");
+        assert!(doc.contains("\"ok\":false"), "{doc}");
+        assert_eq!(json_string(&doc, "file"), "fieldopts/options.proto");
+        assert_eq!(
+            (json_count(&doc, "line"), json_count(&doc, "column")),
+            (8, 1)
+        );
+        let reason = json_string(&doc, "reason");
+        assert!(reason.contains("`extend` is not supported"), "{reason}");
+        assert!(reason.contains("google.protobuf.FieldOptions"), "{reason}");
+    }
+
     /// A KEY PATTERN IS A KEY EXPRESSION, NOT DECLARATION TEXT, and the door
     /// quotes what the dialect reserves -- including a quote character, which
     /// must also survive the JSON string it is returned in.
