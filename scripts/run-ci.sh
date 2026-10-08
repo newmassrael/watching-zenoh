@@ -17078,8 +17078,13 @@ layer_z_zenohd_interop() {
     # `zenohd` -- so NINE must report. The demo is rebuilt with `router-hat-router`
     # beside `session-extshm` for them: the build above carries the capability and
     # not the run-mode, and `--router-hat` is refused by a demo without it.
+    # R3103 -- 9 -> 17, MEASURED by running the file: the QUERY through the router, with
+    # `z_get_shm` and `z_queryable_shm` as the clients. Four legs, each against wz and against
+    # `zenohd` as the control: a queryable of shared memory is handed the value as a buffer,
+    # two of them asked with `ALL` each are, a queryable without shared memory is handed it as
+    # bytes, and a getter without shared memory is handed the reply as bytes.
     (cd crates && cargo build -p wz-ap-demo --features router-hat-router,session-extshm --quiet) || return 1
-    _runci_guarded_test Z 9 cargo test -p wz-integration-tests \
+    _runci_guarded_test Z 17 cargo test -p wz-integration-tests \
         --test wz_shm_router_zenohd_interop -- --ignored --quiet --test-threads=1 || return 1
     # Restore the lane's OWN demo build: the `session-extshm` build above wrote over
     # the same `--bin` path (R311y269 — cargo uplifts every feature variant of one

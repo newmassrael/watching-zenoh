@@ -1035,7 +1035,14 @@ HOST_GATED_CI_TARGETS: dict[str, str] = {
 # its bytes, each against upstream's own `z_pub_shm` and `z_sub_shm` (`transport-shm zenoh->wz`
 # and `transport-shm wz->zenoh`, which a test that names both counts once). The two controls
 # against upstream's router carry `none`. Measured by `scripts/audit-crossimpl-proof.sh`.
-FOREIGN_ADJUDICATOR_LINKS = 1035
+# R3103 -- 1035 -> 1039, RISING by four, each a new test in `wz_shm_router_zenohd_interop.rs`:
+# with wz as the ROUTER, the value of a query reaches a queryable of shared memory as a buffer
+# and two of them as a buffer each, reaches a queryable without shared memory as its bytes, and
+# the reply of a queryable of shared memory reaches a getter without shared memory as its bytes,
+# each against upstream's own `z_get_shm` and `z_queryable_shm` (`transport-shm zenoh->wz` and
+# `transport-shm wz->zenoh`, which a test that names both counts once). The four controls against
+# upstream's router carry `none`. Measured by `scripts/audit-crossimpl-proof.sh`.
+FOREIGN_ADJUDICATOR_LINKS = 1039
 
 # ── Execution disclosure ────────────────────────────────────────────────────────
 #

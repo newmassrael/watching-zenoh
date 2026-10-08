@@ -980,3 +980,368 @@ fn wz_router_sends_a_reader_without_shared_memory_the_chunks_bytes() {
 fn zenohd_sends_a_reader_without_shared_memory_the_chunks_bytes() {
     assert_a_reader_without_shared_memory_gets_the_bytes(RouterKind::Zenohd);
 }
+
+// ---------------------------------------------------------------------------------------------
+// A QUERY through a router
+//
+// The legs above route a Put. Upstream's router maps the shared-memory buffers of EVERY message it
+// routes with the same function (`io/zenoh-transport/src/common/shm/interop.rs` @
+// `pub fn map_zmsg_to_shmbuf(` on the way in, `pub fn map_zmsg_to_partner<` on the way out), and
+// the value of a query and the payload of a reply are such buffers. These legs put a query through
+// the router of each kind with upstream's own `z_get_shm` and `z_queryable_shm` as its clients:
+//
+//   * a queryable of shared memory is handed the value as a buffer, and the getter the reply as one;
+//   * a queryable WITHOUT shared memory is handed the value as its bytes, which `z_queryable_shm`
+//     prints with the label RAW and the text the getter sent;
+//   * a getter WITHOUT shared memory is handed the reply as its bytes, which `z_get_shm` cannot
+//     show (it prints a fixed line for a reply that is not a buffer), so that getter is wz's.
+//
+// The second and third are the legs that tell a router that maps from one that sends a descriptor
+// on as it came: a receiver that cannot read the chunk is handed a few bytes of struct as its
+// value while the label still reads RAW.
+
+/// The key `z_queryable_shm` declares by default, and so the selector `z_get_shm` asks.
+const QUERY_KEY: &str = "demo/example/zenoh-rs-queryable";
+
+/// What `z_get_shm` sends as the value of its query.
+const QUERY_VALUE: &str = "A value sent through a router, whole";
+
+/// What `z_queryable_shm` replies with by default, at the front of a 1024-byte buffer.
+const REPLY_TEXT: &str = "Queryable from Rust SHM!";
+
+/// The bytes `z_queryable_shm` allocates for a reply: the text is copied to the front of this many.
+const REPLY_BYTES: usize = 1024;
+
+/// What the programs on both sides of a router printed for one query.
+struct QueryRun {
+    /// What each queryable printed, in the order they were started.
+    queryable_logs: Vec<String>,
+    getter_log: String,
+    router_log: String,
+}
+
+/// Start `z_queryable_shm` as a client of `router`, with shared memory or without, and wait until it
+/// has declared.
+fn queryable_behind(router: &Router, reader: Reader) -> Option<(ChildGuard, std::fs::File)> {
+    let z_queryable = zenoh_shm_example_binary("z_queryable_shm")?;
+    let mut args: Vec<String> = vec![
+        "-m".into(),
+        "client".into(),
+        "-e".into(),
+        format!("tcp/127.0.0.1:{}", router.port),
+    ];
+    if reader == Reader::BytesOnly {
+        // `spawn_zenoh` always passes `--enable-shm`; a later `--cfg` overrides it.
+        args.extend([
+            "--cfg".into(),
+            "transport/shared_memory/enabled:false".into(),
+        ]);
+    }
+    let (guard, mut log) = spawn_zenoh(&z_queryable, "z_queryable_shm", &args);
+    wait_for_substring(&mut log, "Press CTRL-C to quit", Duration::from_secs(20))
+        .unwrap_or_else(|e| panic!("z_queryable_shm never became ready: {e}"));
+    // The declaration has to reach the router before a query is routed to it.
+    std::thread::sleep(Duration::from_millis(1000));
+    Some((guard, log))
+}
+
+/// Run `z_get_shm`, whose value is a buffer of shared memory, against the queryables behind the
+/// router of `kind`, asking `target` of them (`BEST_MATCHING` reaches one, `ALL` reaches each).
+/// `None` where an oracle is absent.
+fn zenoh_getter_through_router(
+    kind: RouterKind,
+    queryables: &[Reader],
+    target: &str,
+) -> Option<QueryRun> {
+    let (Some(z_get), Some(_)) = (
+        zenoh_shm_example_binary("z_get_shm"),
+        zenoh_shm_example_binary("z_queryable_shm"),
+    ) else {
+        eprintln!(
+            "SKIP: no z_get_shm or z_queryable_shm at target/zenohd-shm \
+             (run `ZENOHD_SHM=1 scripts/build-zenohd.sh`)"
+        );
+        return None;
+    };
+    let mut router = spawn_router_of(kind)?;
+    let mut behind_router = Vec::new();
+    for queryable in queryables {
+        behind_router.push(queryable_behind(&router, *queryable)?);
+    }
+    let (_getter, mut getter_log) = spawn_zenoh(
+        &z_get,
+        "z_get_shm",
+        &[
+            "-m".into(),
+            "client".into(),
+            "-e".into(),
+            format!("tcp/127.0.0.1:{}", router.port),
+            "-s".into(),
+            QUERY_KEY.into(),
+            "-t".into(),
+            target.into(),
+            "-o".into(),
+            "8000".into(),
+            QUERY_VALUE.into(),
+        ],
+    );
+    // A getter that is handed no reply prints nothing more, and says so by the wait running out.
+    let _ = wait_for_substring(&mut getter_log, ">> Received (", Duration::from_secs(15));
+    std::thread::sleep(Duration::from_millis(1000));
+    Some(QueryRun {
+        queryable_logs: behind_router
+            .iter_mut()
+            .map(|(_, log)| read_captured(log))
+            .collect(),
+        getter_log: read_captured(&mut getter_log),
+        router_log: read_captured(&mut router.log),
+    })
+}
+
+/// Whether `z_queryable_shm` printed the query it was asked with the getter's text at the front of
+/// the value and `label` after it. `z_get_shm` sends a 1024-byte buffer and writes its text to the
+/// front, so the value the queryable prints is that text followed by zero bytes, and the front and
+/// the label are what its line can be asked for.
+fn queryable_printed_the_value(log: &str, label: &str) -> bool {
+    let front = format!(">> [Queryable] Received Query ('{QUERY_KEY}': '{QUERY_VALUE}");
+    let back = format!("') [{label}]");
+    log.lines()
+        .any(|line| line.starts_with(&front) && line.ends_with(&back))
+}
+
+/// A queryable of shared memory behind a router is handed the getter's value as a buffer of shared
+/// memory, and the getter is handed the queryable's reply as one.
+fn assert_a_queryable_of_shared_memory_is_handed_the_value_as_a_chunk(kind: RouterKind) {
+    let Some(run) = zenoh_getter_through_router(kind, &[Reader::SharedMemory], "BEST_MATCHING")
+    else {
+        return;
+    };
+    assert!(
+        queryable_printed_the_value(&run.queryable_logs[0], "SHM"),
+        "the queryable was not handed the getter's value as a buffer of shared memory:\n--- \
+         z_queryable_shm ---\n{}\n--- z_get_shm ---\n{}\n--- router ---\n{}",
+        run.queryable_logs[0],
+        run.getter_log,
+        run.router_log
+    );
+    let reply = format!(">> Received ('{QUERY_KEY}': '{REPLY_TEXT}");
+    assert!(
+        run.getter_log.contains(&reply),
+        "the getter, which can read shared memory, was not handed the queryable's reply as a \
+         buffer:\n--- z_get_shm ---\n{}\n--- z_queryable_shm ---\n{}\n--- router ---\n{}",
+        run.getter_log,
+        run.queryable_logs[0],
+        run.router_log
+    );
+}
+
+/// TWO queryables of shared memory behind a router, asked with the target `ALL`: each is handed the
+/// getter's value as a buffer of shared memory, and the reply the getter is handed is a buffer. The
+/// router sends the value to two links, which is a reference of its own for each.
+fn assert_two_queryables_of_shared_memory_are_each_handed_the_value_as_a_chunk(kind: RouterKind) {
+    let Some(run) =
+        zenoh_getter_through_router(kind, &[Reader::SharedMemory, Reader::SharedMemory], "ALL")
+    else {
+        return;
+    };
+    for (index, log) in run.queryable_logs.iter().enumerate() {
+        assert!(
+            queryable_printed_the_value(log, "SHM"),
+            "queryable {index} was not handed the getter's value as a buffer of shared memory:\n--- \
+             z_queryable_shm ---\n{log}\n--- z_get_shm ---\n{}\n--- router ---\n{}",
+            run.getter_log,
+            run.router_log
+        );
+    }
+    // The two queryables answer under one key, and a getter that does not ask otherwise
+    // consolidates replies by key, so its output holds one reply, and upstream's router shows the
+    // same: what is asked of it is that the reply it is handed is a buffer.
+    let reply = format!(">> Received ('{QUERY_KEY}': '{REPLY_TEXT}");
+    assert!(
+        run.getter_log.contains(&reply),
+        "the getter was not handed a reply as a buffer:\n--- z_get_shm ---\n{}\n--- router ---\n{}",
+        run.getter_log,
+        run.router_log
+    );
+}
+
+/// A queryable without shared memory behind a router is handed the getter's value as its BYTES, and
+/// prints the text the getter sent.
+fn assert_a_queryable_without_shared_memory_is_handed_the_value_as_bytes(kind: RouterKind) {
+    let Some(run) = zenoh_getter_through_router(kind, &[Reader::BytesOnly], "BEST_MATCHING") else {
+        return;
+    };
+    assert!(
+        queryable_printed_the_value(&run.queryable_logs[0], "RAW"),
+        "a queryable without shared memory was not handed the getter's value as its bytes; a \
+         router that sends it the descriptor hands it a few bytes of struct under the same \
+         label:\n--- z_queryable_shm ---\n{}\n--- z_get_shm ---\n{}\n--- router ---\n{}",
+        run.queryable_logs[0],
+        run.getter_log,
+        run.router_log
+    );
+    assert!(
+        run.getter_log.contains(">> Received ("),
+        "the getter was handed no reply:\n--- z_get_shm ---\n{}\n--- router ---\n{}",
+        run.getter_log,
+        run.router_log
+    );
+}
+
+/// What a wz getter that offered NO shared memory was handed by the queryable behind a router.
+async fn wz_getter_without_shared_memory_behind(
+    kind: RouterKind,
+) -> Option<(Vec<Vec<u8>>, String)> {
+    if zenoh_shm_example_binary("z_queryable_shm").is_none() {
+        eprintln!(
+            "SKIP: no z_queryable_shm at target/zenohd-shm (run `ZENOHD_SHM=1 scripts/build-zenohd.sh`)"
+        );
+        return None;
+    }
+    let mut router = spawn_router_of(kind)?;
+    let (_queryable, queryable_log) = queryable_behind(&router, Reader::SharedMemory)?;
+    let (mut opened, negotiated) = wz_dials_router(&mut router, 0x07, false).await;
+    assert!(
+        !negotiated,
+        "a session that offered no shared memory negotiated it, so the reply it is handed is not \
+         the control of this leg"
+    );
+    let session = TokioSession::new(
+        opened.actions.clone(),
+        Arc::new(Mutex::new(ApplicationLayerObserver::new())),
+        Arc::new(opened.clock),
+    );
+    let timeouts = SessionTimeouts::spec_defaults();
+    let drive = drive_session_until_terminal(
+        &mut opened.inbound,
+        &opened.actions,
+        &mut opened.engine,
+        None,
+        &opened.clock,
+        &timeouts,
+        |event| session.dispatch_iteration_event(event),
+    );
+    let replies: Arc<StdMutex<Vec<Vec<u8>>>> = Arc::default();
+    let mut drive_log = queryable_log.try_clone().expect("dup");
+    let scenario = async {
+        // The queryable's declaration may still be on its way to the router, so ask again until a
+        // reply arrives.
+        for _ in 0..40 {
+            let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+            session
+                .query(
+                    QUERY_KEY,
+                    QueryOptions::default(),
+                    move |reply| {
+                        let _ = tx.send(reply.payload().to_vec());
+                    },
+                    |_| {},
+                )
+                .expect("query");
+            if let Ok(Some(payload)) =
+                tokio::time::timeout(Duration::from_millis(1000), rx.recv()).await
+            {
+                replies.lock().expect("replies").push(payload);
+                break;
+            }
+        }
+    };
+    tokio::select! {
+        outcome = drive => panic!(
+            "the wz drive loop ended before the scenario did ({outcome:?}):\n{}",
+            read_captured(&mut drive_log)
+        ),
+        () = scenario => {},
+    }
+    let replies = replies.lock().expect("replies").clone();
+    Some((replies, read_captured(&mut router.log)))
+}
+
+/// A getter without shared memory behind a router is handed the queryable's reply as its BYTES: the
+/// 1024 bytes of the buffer the queryable allocated, with its text at the front.
+async fn assert_a_getter_without_shared_memory_is_handed_the_reply_as_bytes(kind: RouterKind) {
+    let Some((replies, router_log)) = wz_getter_without_shared_memory_behind(kind).await else {
+        return;
+    };
+    assert!(
+        !replies.is_empty(),
+        "the queryable answered no query:\n--- router ---\n{router_log}"
+    );
+    let reply = &replies[0];
+    assert!(
+        reply.len() == REPLY_BYTES && reply.starts_with(REPLY_TEXT.as_bytes()),
+        "a getter without shared memory was not handed the queryable's reply as its bytes: it is \
+         {} bytes long and begins {:?}; a router that sends it the descriptor hands it a few bytes \
+         of struct\n--- router ---\n{router_log}",
+        reply.len(),
+        String::from_utf8_lossy(&reply[..reply.len().min(48)])
+    );
+}
+
+/// wz as the router, a queryable of shared memory behind it.
+// wz-proves: transport-shm zenoh->wz
+// wz-proves: transport-shm wz->zenoh
+#[test]
+#[ignore = "binary-dep e2e (ZENOHD_SHM=1 build-zenohd.sh: z_get_shm + z_queryable_shm; wz-ap-demo --features router-hat-router,session-extshm); Layer Z runs via --ignored"]
+fn wz_router_hands_a_queryable_of_shared_memory_the_getters_value_as_a_chunk() {
+    assert_a_queryable_of_shared_memory_is_handed_the_value_as_a_chunk(RouterKind::Wz);
+}
+
+/// Control for the leg above: upstream's router, the same getter and queryable.
+// wz-proves: none -- the control of the chunk leg: upstream's own router, so the labels the leg asks for are shown to be what a router that follows the protocol gives
+#[test]
+#[ignore = "binary-dep e2e (ZENOHD_SHM=1 build-zenohd.sh: zenohd + z_get_shm + z_queryable_shm); Layer Z runs via --ignored"]
+fn zenohd_hands_a_queryable_of_shared_memory_the_getters_value_as_a_chunk() {
+    assert_a_queryable_of_shared_memory_is_handed_the_value_as_a_chunk(RouterKind::Zenohd);
+}
+
+/// wz as the router, two queryables of shared memory behind it, asked with `ALL`.
+// wz-proves: transport-shm zenoh->wz
+// wz-proves: transport-shm wz->zenoh
+#[test]
+#[ignore = "binary-dep e2e (ZENOHD_SHM=1 build-zenohd.sh: z_get_shm + z_queryable_shm; wz-ap-demo --features router-hat-router,session-extshm); Layer Z runs via --ignored"]
+fn wz_router_hands_two_queryables_of_shared_memory_the_getters_value_as_a_chunk_each() {
+    assert_two_queryables_of_shared_memory_are_each_handed_the_value_as_a_chunk(RouterKind::Wz);
+}
+
+/// Control for the leg above: upstream's router, the same getter and queryables.
+// wz-proves: none -- the control of the two-queryable leg: upstream's own router, so the labels and the two replies the leg asks for are shown to be what a router that follows the protocol gives
+#[test]
+#[ignore = "binary-dep e2e (ZENOHD_SHM=1 build-zenohd.sh: zenohd + z_get_shm + z_queryable_shm); Layer Z runs via --ignored"]
+fn zenohd_hands_two_queryables_of_shared_memory_the_getters_value_as_a_chunk_each() {
+    assert_two_queryables_of_shared_memory_are_each_handed_the_value_as_a_chunk(RouterKind::Zenohd);
+}
+
+/// wz as the router, a queryable without shared memory behind it: the value is sent as bytes.
+// wz-proves: transport-shm zenoh->wz
+// wz-proves: transport-shm wz->zenoh
+#[test]
+#[ignore = "binary-dep e2e (ZENOHD_SHM=1 build-zenohd.sh: z_get_shm + z_queryable_shm; wz-ap-demo --features router-hat-router,session-extshm); Layer Z runs via --ignored"]
+fn wz_router_sends_a_queryable_without_shared_memory_the_values_bytes() {
+    assert_a_queryable_without_shared_memory_is_handed_the_value_as_bytes(RouterKind::Wz);
+}
+
+/// Control for the leg above: upstream's router, the same getter and queryable.
+// wz-proves: none -- the control of the bytes leg: upstream's own router, so the text the leg reads off the queryable is shown to be what a router that follows the protocol sends it
+#[test]
+#[ignore = "binary-dep e2e (ZENOHD_SHM=1 build-zenohd.sh: zenohd + z_get_shm + z_queryable_shm); Layer Z runs via --ignored"]
+fn zenohd_sends_a_queryable_without_shared_memory_the_values_bytes() {
+    assert_a_queryable_without_shared_memory_is_handed_the_value_as_bytes(RouterKind::Zenohd);
+}
+
+/// wz as the router, a getter without shared memory: the reply is sent as bytes.
+// wz-proves: transport-shm zenoh->wz
+// wz-proves: transport-shm wz->zenoh
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "binary-dep e2e (ZENOHD_SHM=1 build-zenohd.sh: z_queryable_shm; wz-ap-demo --features router-hat-router,session-extshm); Layer Z runs via --ignored"]
+async fn wz_router_sends_a_getter_without_shared_memory_the_replys_bytes() {
+    assert_a_getter_without_shared_memory_is_handed_the_reply_as_bytes(RouterKind::Wz).await;
+}
+
+/// Control for the leg above: upstream's router, the same queryable and a wz getter.
+// wz-proves: none -- the control of the reply bytes leg: upstream's own router, so the 1024 bytes the leg asks for are shown to be what a router that follows the protocol sends
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "binary-dep e2e (ZENOHD_SHM=1 build-zenohd.sh: zenohd + z_queryable_shm); Layer Z runs via --ignored"]
+async fn zenohd_sends_a_getter_without_shared_memory_the_replys_bytes() {
+    assert_a_getter_without_shared_memory_is_handed_the_reply_as_bytes(RouterKind::Zenohd).await;
+}
