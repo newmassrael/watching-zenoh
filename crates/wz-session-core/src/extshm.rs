@@ -520,7 +520,13 @@ pub trait ShmAuthenticator {
     /// operates none, which declares the counter block as `Disabled` and keeps nothing: the node
     /// then delivers to a receiver that attaches within the validator's window and to no later
     /// one.
-    fn tx_handoff(&self) -> Option<alloc::sync::Arc<dyn ShmTxHandoff>> {
+    ///
+    /// R3122 -- a LEASE, taken once for each link that declares counters, and not one the session
+    /// shares: upstream's handoff belongs to a link (`LinkShmHandoffConfig` holds a transmit and a
+    /// receive channel per link), so a second link of a session leases counters of its own, and
+    /// what one link is owed is neither forgotten nor confused by the other's establishment. The
+    /// counters are zero when leased and go back to the authenticator when the handoff drops.
+    fn lease_tx_handoff(&self) -> Option<alloc::sync::Arc<dyn ShmTxHandoff>> {
         None
     }
 
@@ -744,10 +750,6 @@ pub trait ShmTxHandoff: Send + Sync {
     /// messages declare.
     fn counters(&self) -> [u16; SHM_PRIORITY_BANDS];
 
-    /// Forget everything a previous peer was owed and zero the counters: a new establishment is
-    /// a new peer, and a count left from the last would never come down.
-    fn reset(&self);
-
     /// Open a transaction for ONE message of priority `band`.
     fn begin(&self, band: usize) -> alloc::boxed::Box<dyn ShmTxTransaction>;
 }
@@ -766,6 +768,19 @@ pub trait ShmTxTransaction: Send {
 
     /// The message left: keep what was taken until the peer acknowledges it.
     fn commit(self: alloc::boxed::Box<Self>);
+}
+
+/// R3122 -- what a node's Open message of the shared-memory establishment is: the extension to
+/// put on the wire, and the handoff leased to declare counters in it. The handoff is the LINK's:
+/// the link that sends the message keeps it and opens its transactions on it, so each link of a
+/// session is owed what it sent and no more. `tx` is `None` when the message declared the block
+/// `Disabled`, and then the link keeps nothing against any peer.
+#[cfg(feature = "session-extshm")]
+pub struct ShmOpenDeclaration {
+    /// The `open::ext::Shm` entry, ready for the Open message's extension chain.
+    pub ext: ExtEntryOwned,
+    /// The sender's handoff whose counters `ext` names, when it names any.
+    pub tx: Option<alloc::sync::Arc<dyn ShmTxHandoff>>,
 }
 
 /// Test double for the SENDING side (R3062): a buffer a message can be sent from, that counts the
@@ -1252,12 +1267,6 @@ pub struct ShmAuthDispatch {
     /// being a new one OR the loss of the last. The holder that acts on it takes
     /// it once per establishment rather than asking every message.
     handoff_changed: bool,
-    /// R3111 -- whether this establishment declared the sender's counters (`PerPriority`) and
-    /// not `Disabled`. Only a declared block is lowered by the peer, so only a declared block may
-    /// be counted and kept against: a node that kept chunks against a block it declared
-    /// `Disabled` would hold them until the session ends, for nobody lowers a counter it was
-    /// never told of. Written by the Open messages, which take `&self`.
-    tx_declared: core::cell::Cell<bool>,
 }
 
 #[cfg(feature = "session-extshm")]
@@ -1293,7 +1302,6 @@ impl ShmAuthDispatch {
             peer_protocols: None,
             handoff: None,
             handoff_changed: false,
-            tx_declared: core::cell::Cell::new(false),
         }
     }
 
@@ -1308,7 +1316,6 @@ impl ShmAuthDispatch {
             peer_protocols: None,
             handoff: None,
             handoff_changed: false,
-            tx_declared: core::cell::Cell::new(false),
         }
     }
 
@@ -1320,8 +1327,6 @@ impl ShmAuthDispatch {
         self.peer_segment = None;
         self.peer_protocols = None;
         self.set_handoff(None);
-        // R3111 -- the counters declared to the last peer are not declared to this one.
-        self.tx_declared.set(false);
     }
 
     /// R3065 -- record the peer's segment with the challenge read out of it, and the protocol
@@ -1475,13 +1480,15 @@ impl ShmAuthDispatch {
     /// R3111 -- `reliable` is whether the link the message leaves on is reliable, as upstream
     /// passes it (`io/zenoh-transport/src/unicast/establishment/open.rs` @
     /// `.send_open_syn(link.link.is_reliable().into())`).
-    pub fn send_open_syn(&self, reliable: bool) -> Option<ExtEntryOwned> {
+    ///
+    /// R3122 -- the handoff the message's counters belong to comes back with it
+    /// ([`ShmOpenDeclaration`]), for the link that sends the message to keep.
+    pub fn send_open_syn(&self, reliable: bool) -> Option<ShmOpenDeclaration> {
         self.authenticator.as_ref()?;
-        encode_shm_zbuf_ext(&encode_shm_open_syn_body(
-            self.peer_challenge?,
-            self.declared_counters(reliable),
-        ))
-        .ok()
+        let (counters, tx) = self.declared_counters(reliable);
+        let ext =
+            encode_shm_zbuf_ext(&encode_shm_open_syn_body(self.peer_challenge?, counters)).ok()?;
+        Some(ShmOpenDeclaration { ext, tx })
     }
 
     /// R3110 -- the counter block this node names in an Open message: its own transmit counters
@@ -1492,35 +1499,28 @@ impl ShmAuthDispatch {
     /// @ `Reliability::BestEffort => Self::Disabled,`): a datagram that is lost is never
     /// acknowledged, so a counter declared on such a link is never lowered and the chunk kept
     /// against it would be kept until the session ends. Nothing is leased to a link that gets
-    /// none, and [`Self::tx_handoff`] then answers `None`.
+    /// none.
     ///
-    /// Declaring them zeroes them and forgets what a previous peer was owed, because the block
-    /// is the start of an establishment and the peer it is declared to is a new one.
-    fn declared_counters(&self, reliable: bool) -> ShmHandoffCounters {
+    /// R3122 -- the counters are LEASED for this declaration (zero, and the handoff empty), and
+    /// the handoff is returned with them to the link that sends the message. A session that
+    /// declares again, on another link or on a new establishment of this one, leases again and
+    /// leaves every earlier lease to the link that holds it.
+    fn declared_counters(
+        &self,
+        reliable: bool,
+    ) -> (
+        ShmHandoffCounters,
+        Option<alloc::sync::Arc<dyn ShmTxHandoff>>,
+    ) {
         let handoff = self
             .authenticator
             .as_ref()
             .filter(|_| reliable)
-            .and_then(|a| a.tx_handoff());
-        self.tx_declared.set(handoff.is_some());
+            .and_then(|a| a.lease_tx_handoff());
         match handoff {
-            Some(tx) => {
-                tx.reset();
-                ShmHandoffCounters::PerPriority(tx.counters())
-            }
-            None => ShmHandoffCounters::Disabled,
+            Some(tx) => (ShmHandoffCounters::PerPriority(tx.counters()), Some(tx)),
+            None => (ShmHandoffCounters::Disabled, None),
         }
-    }
-
-    /// R3110 -- this node's handoff as a sender, for the send path to open a transaction on.
-    ///
-    /// R3111 -- `Some` only while the last Open message this node sent DECLARED the counters:
-    /// before it, and after one that declared `Disabled`, there is no peer to lower them.
-    pub fn tx_handoff(&self) -> Option<alloc::sync::Arc<dyn ShmTxHandoff>> {
-        if !self.tx_declared.get() {
-            return None;
-        }
-        self.authenticator.as_ref()?.tx_handoff()
     }
 
     /// Step 4a, ACCEPTOR: check the initiator echoed OUR challenge. zenoh
@@ -1564,12 +1564,17 @@ impl ShmAuthDispatch {
     /// R3111 -- `reliable` is whether the link is reliable, as upstream passes it
     /// (`io/zenoh-transport/src/unicast/establishment/accept.rs` @
     /// `.send_open_ack(self.link.link.is_reliable().into())`).
-    pub fn send_open_ack(&self, negotiated: bool, reliable: bool) -> Option<ExtEntryOwned> {
+    ///
+    /// R3122 -- the handoff the counters belong to comes back with the extension, as the
+    /// initiator's does.
+    pub fn send_open_ack(&self, negotiated: bool, reliable: bool) -> Option<ShmOpenDeclaration> {
         self.authenticator.as_ref()?;
         if !negotiated {
             return None;
         }
-        encode_shm_zbuf_ext(&encode_shm_open_ack_body(self.declared_counters(reliable))).ok()
+        let (counters, tx) = self.declared_counters(reliable);
+        let ext = encode_shm_zbuf_ext(&encode_shm_open_ack_body(counters)).ok()?;
+        Some(ShmOpenDeclaration { ext, tx })
     }
 
     /// Step 4c, INITIATOR: the acceptor's OpenAck.
@@ -1962,10 +1967,17 @@ mod tests {
             // The initiator's InitAck result is not the verdict: it only says
             // it could map bob's segment. Its own flag is set at OpenAck.
             let _ = alice.recv_init_ack(&init_ack);
-            let open_syn: alloc::vec::Vec<_> = alice.send_open_syn(true).into_iter().collect();
+            let open_syn: alloc::vec::Vec<_> = alice
+                .send_open_syn(true)
+                .into_iter()
+                .map(|declaration| declaration.ext)
+                .collect();
             let bob_ok = bob.recv_open_syn(&open_syn);
-            let open_ack: alloc::vec::Vec<_> =
-                bob.send_open_ack(bob_ok, true).into_iter().collect();
+            let open_ack: alloc::vec::Vec<_> = bob
+                .send_open_ack(bob_ok, true)
+                .into_iter()
+                .map(|declaration| declaration.ext)
+                .collect();
             (alice.recv_open_ack(&open_ack), bob_ok)
         }
 
@@ -2265,28 +2277,23 @@ mod tests {
         /// so a block read from the wrong side cannot pass.
         const LEASED: [u16; SHM_PRIORITY_BANDS] = [900, 901, 902, 903, 904, 905, 906, 907];
 
-        /// A transmit handoff that names [`LEASED`] and counts the times it was reset.
-        struct LeasedHandoff {
-            resets: Arc<Mutex<usize>>,
-        }
+        /// A transmit handoff that names [`LEASED`].
+        struct LeasedHandoff;
 
         impl ShmTxHandoff for LeasedHandoff {
             fn counters(&self) -> [u16; SHM_PRIORITY_BANDS] {
                 LEASED
-            }
-            fn reset(&self) {
-                *self.resets.lock().expect("resets") += 1;
             }
             fn begin(&self, _band: usize) -> Box<dyn ShmTxTransaction> {
                 unreachable!("these tests declare counters and send nothing")
             }
         }
 
-        /// A [`FakeAuth`] that operates a handoff as a sender.
+        /// A [`FakeAuth`] that operates a handoff as a sender and counts the handoffs it leased.
         #[derive(Clone)]
         struct TxAuth {
             inner: FakeAuth,
-            resets: Arc<Mutex<usize>>,
+            leases: Arc<Mutex<usize>>,
         }
 
         impl ShmAuthenticator for TxAuth {
@@ -2299,10 +2306,9 @@ mod tests {
             fn open_peer_challenge(&self, segment_id: u32) -> Option<u64> {
                 self.inner.open_peer_challenge(segment_id)
             }
-            fn tx_handoff(&self) -> Option<Arc<dyn ShmTxHandoff>> {
-                Some(Arc::new(LeasedHandoff {
-                    resets: self.resets.clone(),
-                }))
+            fn lease_tx_handoff(&self) -> Option<Arc<dyn ShmTxHandoff>> {
+                *self.leases.lock().expect("leases") += 1;
+                Some(Arc::new(LeasedHandoff))
             }
         }
 
@@ -2311,66 +2317,64 @@ mod tests {
             challenge: u64,
             peer: (u32, u64),
         ) -> (ShmAuthDispatch, Arc<Mutex<usize>>) {
-            let resets = Arc::new(Mutex::new(0));
+            let leases = Arc::new(Mutex::new(0));
             let auth = TxAuth {
                 inner: FakeAuth {
                     id,
                     challenge,
                     visible: vec![peer],
                 },
-                resets: resets.clone(),
+                leases: leases.clone(),
             };
-            (ShmAuthDispatch::install(Box::new(auth)), resets)
+            (ShmAuthDispatch::install(Box::new(auth)), leases)
         }
 
         /// R3110 -- THE INITIATOR'S OPEN SYN names the counters its authenticator leased, in band
-        /// order, and zeroes them first: the block is the start of an establishment with a new
-        /// peer.
+        /// order. R3122 -- and hands the handoff they belong to back with the extension, for the
+        /// link that sends the message to keep.
         #[test]
         fn an_open_syn_declares_the_counters_the_authenticator_leased() {
-            let (mut alice, resets) = tx_node(ALICE_ID, ALICE_CHALLENGE, (BOB_ID, BOB_CHALLENGE));
+            let (mut alice, leases) = tx_node(ALICE_ID, ALICE_CHALLENGE, (BOB_ID, BOB_CHALLENGE));
             let (mut bob, _, _) = handoff_node(BOB_ID, BOB_CHALLENGE, (ALICE_ID, ALICE_CHALLENGE));
             let init_syn: vec::Vec<_> = alice.send_init_syn().into_iter().collect();
             bob.recv_init_syn(&init_syn).expect("well-formed InitSyn");
             let init_ack: vec::Vec<_> = bob.send_init_ack().into_iter().collect();
             assert!(alice.recv_init_ack(&init_ack));
 
-            assert!(
-                alice.tx_handoff().is_none(),
-                "nothing is declared before an Open message, so nothing is kept against"
+            assert_eq!(
+                *leases.lock().expect("leases"),
+                0,
+                "nothing is leased before an Open message"
             );
-            let open_syn = alice
+            let declaration = alice
                 .send_open_syn(true)
                 .expect("the initiator sends an OpenSyn");
-            let body = peer_shm_zbuf_body(core::slice::from_ref(&open_syn)).expect("a body");
+            let body = peer_shm_zbuf_body(core::slice::from_ref(&declaration.ext)).expect("a body");
             let (challenge, counters) = decode_shm_open_syn_body(body).expect("a counter block");
             assert_eq!(challenge, BOB_CHALLENGE, "the echo is unchanged");
             assert_eq!(counters, ShmHandoffCounters::PerPriority(LEASED));
+            assert_eq!(*leases.lock().expect("leases"), 1, "one lease");
             assert_eq!(
-                *resets.lock().expect("resets"),
-                1,
-                "and the counters were zeroed once"
-            );
-            assert!(
-                alice.tx_handoff().is_some(),
-                "and the send path may keep against them"
+                declaration.tx.expect("the handoff comes back").counters(),
+                LEASED,
+                "and it is the one whose counters the message names"
             );
         }
 
         /// R3110 -- THE ACCEPTOR'S OPEN ACK names them too.
         #[test]
         fn an_open_ack_declares_the_counters_the_authenticator_leased() {
-            let (bob, resets) = tx_node(BOB_ID, BOB_CHALLENGE, (ALICE_ID, ALICE_CHALLENGE));
-            let open_ack = bob
+            let (bob, leases) = tx_node(BOB_ID, BOB_CHALLENGE, (ALICE_ID, ALICE_CHALLENGE));
+            let declaration = bob
                 .send_open_ack(true, true)
                 .expect("the acceptor acknowledges");
-            let body = peer_shm_zbuf_body(core::slice::from_ref(&open_ack)).expect("a body");
+            let body = peer_shm_zbuf_body(core::slice::from_ref(&declaration.ext)).expect("a body");
             assert_eq!(
                 decode_shm_open_ack_body(body),
                 Some(ShmHandoffCounters::PerPriority(LEASED))
             );
-            assert_eq!(*resets.lock().expect("resets"), 1);
-            assert!(bob.tx_handoff().is_some());
+            assert_eq!(*leases.lock().expect("leases"), 1);
+            assert!(declaration.tx.is_some());
         }
 
         /// R3111 -- ON A LINK THAT IS NOT RELIABLE both Open messages declare the block
@@ -2380,49 +2384,52 @@ mod tests {
         /// best-effort link.
         #[test]
         fn a_link_that_is_not_reliable_declares_the_counter_block_disabled_and_keeps_nothing() {
-            let (mut alice, alice_resets) =
+            let (mut alice, alice_leases) =
                 tx_node(ALICE_ID, ALICE_CHALLENGE, (BOB_ID, BOB_CHALLENGE));
             let (mut bob, _, _) = handoff_node(BOB_ID, BOB_CHALLENGE, (ALICE_ID, ALICE_CHALLENGE));
             let init_syn: vec::Vec<_> = alice.send_init_syn().into_iter().collect();
             bob.recv_init_syn(&init_syn).expect("well-formed InitSyn");
             let init_ack: vec::Vec<_> = bob.send_init_ack().into_iter().collect();
             assert!(alice.recv_init_ack(&init_ack));
-            let open_syn = alice
+            let declaration = alice
                 .send_open_syn(false)
                 .expect("the initiator still sends an OpenSyn");
-            let body = peer_shm_zbuf_body(core::slice::from_ref(&open_syn)).expect("a body");
+            let body = peer_shm_zbuf_body(core::slice::from_ref(&declaration.ext)).expect("a body");
             let (challenge, counters) = decode_shm_open_syn_body(body).expect("a counter block");
             assert_eq!(challenge, BOB_CHALLENGE, "the echo is unchanged");
             assert_eq!(counters, ShmHandoffCounters::Disabled);
-            assert_eq!(*alice_resets.lock().expect("resets"), 0, "nothing zeroed");
-            assert!(alice.tx_handoff().is_none(), "and nothing kept against");
+            assert_eq!(*alice_leases.lock().expect("leases"), 0, "nothing leased");
+            assert!(declaration.tx.is_none(), "and no handoff to keep against");
 
-            let (acceptor, acceptor_resets) =
+            let (acceptor, acceptor_leases) =
                 tx_node(BOB_ID, BOB_CHALLENGE, (ALICE_ID, ALICE_CHALLENGE));
-            let open_ack = acceptor
+            let declaration = acceptor
                 .send_open_ack(true, false)
                 .expect("the acceptor still acknowledges");
-            let body = peer_shm_zbuf_body(core::slice::from_ref(&open_ack)).expect("a body");
+            let body = peer_shm_zbuf_body(core::slice::from_ref(&declaration.ext)).expect("a body");
             assert_eq!(
                 decode_shm_open_ack_body(body),
                 Some(ShmHandoffCounters::Disabled)
             );
-            assert_eq!(*acceptor_resets.lock().expect("resets"), 0);
-            assert!(acceptor.tx_handoff().is_none());
+            assert_eq!(*acceptor_leases.lock().expect("leases"), 0);
+            assert!(declaration.tx.is_none());
         }
 
-        /// R3111 -- the declaration is per establishment, and the last one decides what the send
-        /// path may keep against: counters declared and then a block declared `Disabled` on a
-        /// link that is not reliable withdraw the handoff, or chunks would be kept against
-        /// counters the peer was never told of.
+        /// R3122 -- EACH OPEN MESSAGE LEASES A HANDOFF OF ITS OWN. A session whose second link
+        /// declares counters is given a second handoff and the first is left to the link that
+        /// holds it: upstream's handoff belongs to a link, so the counters of the first link's
+        /// peer are never zeroed or taken over by the second link's establishment.
         #[test]
-        fn a_declaration_of_disabled_withdraws_the_handoff_a_declaration_of_counters_gave() {
-            let (node, _) = tx_node(BOB_ID, BOB_CHALLENGE, (ALICE_ID, ALICE_CHALLENGE));
-            assert!(node.tx_handoff().is_none(), "nothing is declared yet");
-            node.send_open_ack(true, true).expect("a reliable link");
-            assert!(node.tx_handoff().is_some());
-            node.send_open_ack(true, false).expect("a link that is not");
-            assert!(node.tx_handoff().is_none());
+        fn each_open_message_leases_a_handoff_of_its_own() {
+            let (node, leases) = tx_node(BOB_ID, BOB_CHALLENGE, (ALICE_ID, ALICE_CHALLENGE));
+            let first = node.send_open_ack(true, true).expect("the first link");
+            let second = node.send_open_ack(true, true).expect("the second link");
+            assert_eq!(*leases.lock().expect("leases"), 2, "two leases");
+            let (first, second) = (first.tx.expect("first"), second.tx.expect("second"));
+            assert!(
+                !Arc::ptr_eq(&first, &second),
+                "two handoffs, not one shared"
+            );
         }
 
         /// R3110 -- an authenticator that operates no handoff declares the block `Disabled`, which
@@ -2430,15 +2437,15 @@ mod tests {
         #[test]
         fn an_authenticator_without_a_handoff_declares_the_counter_block_disabled() {
             let (bob, _, _) = handoff_node(BOB_ID, BOB_CHALLENGE, (ALICE_ID, ALICE_CHALLENGE));
-            let open_ack = bob
+            let declaration = bob
                 .send_open_ack(true, true)
                 .expect("the acceptor acknowledges");
-            let body = peer_shm_zbuf_body(core::slice::from_ref(&open_ack)).expect("a body");
+            let body = peer_shm_zbuf_body(core::slice::from_ref(&declaration.ext)).expect("a body");
             assert_eq!(
                 decode_shm_open_ack_body(body),
                 Some(ShmHandoffCounters::Disabled)
             );
-            assert!(bob.tx_handoff().is_none());
+            assert!(declaration.tx.is_none());
         }
 
         /// R3040 -- a NEW establishment withdraws the old handoff: the registry is
@@ -2592,7 +2599,7 @@ mod tests {
                 bob.send_open_ack(false, true).is_none(),
                 "not negotiated, no ack"
             );
-            let ack = bob.send_open_ack(true, true).expect("negotiated");
+            let ack = bob.send_open_ack(true, true).expect("negotiated").ext;
             assert!(alice.recv_open_ack(core::slice::from_ref(&ack)));
             assert!(!alice.recv_open_ack(&[]), "absence is not agreement");
             // A PerPrio block cut one byte short: present, right header, and

@@ -517,21 +517,6 @@ impl ShmTxHandoff for PosixTxHandoff {
         self.inner.ids
     }
 
-    fn reset(&self) {
-        for (band, queue) in self.inner.queues.iter().enumerate() {
-            let forgotten: Vec<_> = queue
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .drain(..)
-                .collect();
-            drop(forgotten);
-            self.inner
-                .segment
-                .counter(self.inner.ids[band])
-                .store(0, Ordering::SeqCst);
-        }
-    }
-
     fn begin(&self, band: usize) -> Box<dyn ShmTxTransaction> {
         Box::new(PosixTxTransaction {
             inner: Arc::clone(&self.inner),
@@ -587,9 +572,6 @@ impl Drop for PosixTxTransaction {
 /// segment plus the ability to open a peer's.
 pub struct PosixShmAuthenticator {
     segment: Arc<ShmAuthSegment>,
-    /// R3110 -- the counters this session leased as a sender, or `None` when the segment had none
-    /// to give, which declares the counter block `Disabled`.
-    tx: Option<Arc<PosixTxHandoff>>,
 }
 
 impl PosixShmAuthenticator {
@@ -612,8 +594,7 @@ impl PosixShmAuthenticator {
             u64::from_ne_bytes(bytes),
             protocols,
         )?);
-        let tx = PosixTxHandoff::new(Arc::clone(&segment)).map(Arc::new);
-        Ok(Self { segment, tx })
+        Ok(Self { segment })
     }
 }
 
@@ -643,10 +624,13 @@ impl ShmAuthenticator for PosixShmAuthenticator {
             .map(|handoff| Box::new(handoff) as Box<dyn ShmHandoff>)
     }
 
-    fn tx_handoff(&self) -> Option<Arc<dyn ShmTxHandoff>> {
-        self.tx
-            .as_ref()
-            .map(|tx| Arc::clone(tx) as Arc<dyn ShmTxHandoff>)
+    /// R3122 -- a band of counters leased from this node's segment for ONE link, `None` when the
+    /// segment has none left to give, which declares the counter block `Disabled`. The segment
+    /// is the session's own, so the pool serves every link the session ever opens; the lease goes
+    /// back when the link lets go of the handoff.
+    fn lease_tx_handoff(&self) -> Option<Arc<dyn ShmTxHandoff>> {
+        PosixTxHandoff::new(Arc::clone(&self.segment))
+            .map(|tx| Arc::new(tx) as Arc<dyn ShmTxHandoff>)
     }
 }
 
@@ -1174,23 +1158,41 @@ mod tests {
         );
     }
 
-    /// A new establishment is a new peer: what the last was owed is forgotten and the counters are
-    /// zero again, so a count the last peer never lowered cannot hold this one's chunks.
+    /// R3122 -- a handoff belongs to a link, and a link that lets go of it (a later establishment
+    /// replaced it, or the link was dropped) lets go of every chunk it kept and returns its
+    /// counters to the segment: a count its peer never lowered cannot hold the chunks of a later
+    /// peer, whose lease starts at zero.
     #[test]
-    fn declaring_the_counters_again_forgets_what_the_last_peer_was_owed() {
+    fn a_handoff_that_is_let_go_of_lets_go_of_what_it_kept_and_returns_its_counters() {
         let (segment, tx) = a_handoff();
-        let counter = segment.counter(tx.counters()[5]);
+        let ids = tx.counters();
         let payload = crate::shm_provider::ShmBackedPayload::alloc(16).expect("alloc");
         let (_, chunk) = sent_descriptor(&payload);
         let mut transaction = tx.begin(5);
         transaction.on_tx(&chunk);
         transaction.commit();
-        assert_eq!(counter.load(Ordering::SeqCst), 1);
+        assert_eq!(segment.counter(ids[5]).load(Ordering::SeqCst), 1);
         assert_eq!(tx.inner.queues[5].lock().expect("queue").len(), 1);
 
-        tx.reset();
-        assert_eq!(counter.load(Ordering::SeqCst), 0);
-        assert!(tx.inner.queues[5].lock().expect("queue").is_empty());
+        // What the handoff kept lives in its inner state; when that is gone so is every entry of
+        // its queues, each of which holds a chunk confirmed.
+        let inner = Arc::downgrade(&tx.inner);
+        drop(tx);
+        assert!(
+            inner.upgrade().is_none(),
+            "nothing else holds what the handoff kept"
+        );
+        let later = PosixTxHandoff::new(Arc::clone(&segment)).expect("a band is free");
+        assert_eq!(
+            later.counters(),
+            ids,
+            "the counters it returned are leased next"
+        );
+        assert_eq!(
+            segment.counter(ids[5]).load(Ordering::SeqCst),
+            0,
+            "and start at zero however the last peer left them"
+        );
     }
 
     /// R3111 -- what a session declares in its OpenAck is decided by the link it will leave on,
@@ -1222,6 +1224,232 @@ mod tests {
                 "a {kind:?} link declared {counters:?}"
             );
         }
+    }
+
+    /// R3122 -- a SECOND LINK of a session opening must leave alone the chunks the first link is
+    /// still owed. Upstream's handoff belongs to a link (`LinkShmHandoffConfig` holds one
+    /// transmit channel and one receive channel per link), so the second link's establishment
+    /// leases counters of its own and the first keeps what it has. Before R3122 both links
+    /// shared the session's one handoff, and the second link's Open message declared its
+    /// counters again, which zeroed them and forgot what the first link was owed.
+    #[cfg(feature = "transport-multilink")]
+    #[test]
+    fn a_second_link_opening_leaves_the_chunks_the_first_link_is_owed_alone() {
+        use crate::multilink::{join_link, JoinOutcome};
+        use crate::runtime_impl::TokioRuntime;
+        use wz_runtime_core::Runtime;
+        use wz_session_core::link::LinkKind;
+
+        let (primary, _) = crate::test_fixtures::recording_actions_over(LinkKind::Tcp);
+        let (secondary, _) = crate::test_fixtures::recording_actions_over(LinkKind::Tcp);
+        let key = vec![0x0Au8, 0x0B, 0x0C, 0x0D];
+        TokioRuntime::with_mutex_mut(&primary.core.multilink_pubkey, |s| *s = Some(key.clone()));
+        TokioRuntime::with_mutex_mut(&secondary.core.multilink_pubkey, |s| *s = Some(key));
+        let JoinOutcome::Joined(second_link) = join_link(&primary, &secondary, 2) else {
+            panic!("the second link joins the shared core");
+        };
+        let authenticator = PosixShmAuthenticator::new().expect("create an authenticator");
+        let segment = Arc::clone(&authenticator.segment);
+        primary.install_shm_auth(Box::new(authenticator));
+        primary.set_shm_offer(true);
+        primary.negotiate_shm_against_peer(true);
+
+        primary
+            .shm_send_open_ack()
+            .expect("the first link's Open declares the counters");
+        let first = TokioRuntime::with_mutex_mut(&primary.link.shm_tx, |slot| slot.clone())
+            .expect("the first link keeps the handoff its Open declared");
+        let payload = crate::shm_provider::ShmBackedPayload::alloc(16).expect("alloc");
+        let (_, chunk) = sent_descriptor(&payload);
+        let mut transaction = first.begin(0);
+        transaction.on_tx(&chunk);
+        transaction.commit();
+        let counter = segment.counter(first.counters()[0]);
+        assert_eq!(
+            counter.load(Ordering::SeqCst),
+            1,
+            "the chunk is owed by the first link's peer"
+        );
+
+        second_link
+            .shm_send_open_ack()
+            .expect("the second link's Open");
+        assert_eq!(
+            counter.load(Ordering::SeqCst),
+            1,
+            "and the second link's Open does not zero what the first link's peer was told of"
+        );
+        let second = TokioRuntime::with_mutex_mut(&second_link.link.shm_tx, |slot| slot.clone())
+            .expect("the second link keeps a handoff of its own");
+        assert_ne!(
+            first.counters(),
+            second.counters(),
+            "with counters of its own, which the first link's peer does not lower"
+        );
+        assert_eq!(
+            TokioRuntime::with_mutex_mut(&primary.link.shm_tx, |slot| slot
+                .as_ref()
+                .map(|kept| kept.counters())),
+            Some(first.counters()),
+            "while the first link still holds the counters its peer was told of"
+        );
+    }
+
+    /// R3122 -- a link that sends an Open message again (a new establishment on it) keeps the new
+    /// handoff and lets go of the old: its counters go back to the segment and what it kept is
+    /// released, because the peer they were declared to is gone.
+    #[test]
+    fn a_link_that_opens_again_lets_go_of_the_handoff_it_kept() {
+        use crate::runtime_impl::TokioRuntime;
+        use wz_runtime_core::Runtime;
+        use wz_session_core::link::LinkKind;
+
+        let (actions, _) = crate::test_fixtures::recording_actions_over(LinkKind::Tcp);
+        actions.install_shm_auth(Box::new(
+            PosixShmAuthenticator::new().expect("create an authenticator"),
+        ));
+        actions.set_shm_offer(true);
+        actions.negotiate_shm_against_peer(true);
+
+        actions.shm_send_open_ack().expect("the first Open");
+        let first = TokioRuntime::with_mutex_mut(&actions.link.shm_tx, |slot| slot.clone())
+            .expect("the link keeps a handoff");
+        let first_counters = first.counters();
+        let watching_first = Arc::downgrade(&first);
+        drop(first);
+        assert!(
+            watching_first.upgrade().is_some(),
+            "the link still holds it"
+        );
+
+        actions.shm_send_open_ack().expect("the second Open");
+        assert!(
+            watching_first.upgrade().is_none(),
+            "the second Open replaced it, and nothing else held it"
+        );
+        let second = TokioRuntime::with_mutex_mut(&actions.link.shm_tx, |slot| slot.clone())
+            .expect("and the link keeps the new one");
+        assert_ne!(
+            second.counters(),
+            first_counters,
+            "which was leased while the old one was still held, so it has counters of its own"
+        );
+    }
+
+    /// R3122 -- the links of a session may differ in reliability, and each declares by its own:
+    /// a stream link keeps a handoff and a datagram link joined to the same session keeps none,
+    /// where before R3122 the last Open message decided for both.
+    #[cfg(feature = "transport-multilink")]
+    #[test]
+    fn the_links_of_a_session_declare_by_their_own_reliability() {
+        use crate::multilink::{join_link, JoinOutcome};
+        use crate::runtime_impl::TokioRuntime;
+        use wz_runtime_core::Runtime;
+        use wz_session_core::link::LinkKind;
+
+        let (primary, _) = crate::test_fixtures::recording_actions_over(LinkKind::Tcp);
+        let (secondary, _) = crate::test_fixtures::recording_actions_over(LinkKind::Udp);
+        let key = vec![0x0Au8, 0x0B, 0x0C, 0x0D];
+        TokioRuntime::with_mutex_mut(&primary.core.multilink_pubkey, |s| *s = Some(key.clone()));
+        TokioRuntime::with_mutex_mut(&secondary.core.multilink_pubkey, |s| *s = Some(key));
+        let JoinOutcome::Joined(datagram_link) = join_link(&primary, &secondary, 2) else {
+            panic!("the second link joins the shared core");
+        };
+        primary.install_shm_auth(Box::new(
+            PosixShmAuthenticator::new().expect("create an authenticator"),
+        ));
+        primary.set_shm_offer(true);
+        primary.negotiate_shm_against_peer(true);
+
+        primary.shm_send_open_ack().expect("the stream link's Open");
+        datagram_link
+            .shm_send_open_ack()
+            .expect("the datagram link's Open");
+        assert!(
+            TokioRuntime::with_mutex_mut(&primary.link.shm_tx, |slot| slot.is_some()),
+            "the stream link keeps a handoff"
+        );
+        assert!(
+            TokioRuntime::with_mutex_mut(&datagram_link.link.shm_tx, |slot| slot.is_none()),
+            "and the datagram link joined to the same session keeps none"
+        );
+    }
+
+    /// R3122 -- THE TRANSACTION OPENS ON THE LINK THE MESSAGE LEAVES ON, through the real publish.
+    /// One session holds a stream link and a datagram link; a reliable publish takes the stream
+    /// link and counts its slice against that link's counters, and a best-effort publish takes the
+    /// datagram link, which keeps no handoff, and counts against nothing: the counters the stream
+    /// link's peer was told of are not touched by a message that never went to it.
+    #[cfg(all(feature = "transport-multilink", feature = "codec-push"))]
+    #[test]
+    fn a_shared_memory_publish_is_counted_on_the_link_it_leaves_on() {
+        use crate::multilink::{join_link, JoinOutcome};
+        use crate::observer::ApplicationLayerObserver;
+        use crate::runtime_impl::{TokioRuntime, TokioTime};
+        use crate::session::{PublishOptions, TokioSession};
+        use wz_runtime_core::Runtime;
+        use wz_session_core::link::LinkKind;
+        use wz_session_core::reliability::Reliability;
+
+        let (stream, stream_driver) = crate::test_fixtures::recording_actions_over(LinkKind::Tcp);
+        let (datagram, datagram_driver) =
+            crate::test_fixtures::recording_actions_over(LinkKind::Udp);
+        let key = vec![0x0Au8, 0x0B, 0x0C, 0x0D];
+        TokioRuntime::with_mutex_mut(&stream.core.multilink_pubkey, |s| *s = Some(key.clone()));
+        TokioRuntime::with_mutex_mut(&datagram.core.multilink_pubkey, |s| *s = Some(key));
+        let JoinOutcome::Joined(datagram_link) = join_link(&stream, &datagram, 2) else {
+            panic!("the datagram link joins the shared core");
+        };
+        TokioRuntime::with_mutex_mut(&stream.link.transport_available, |g| *g = true);
+        TokioRuntime::with_mutex_mut(&datagram_link.link.transport_available, |g| *g = true);
+
+        let authenticator = PosixShmAuthenticator::new().expect("create an authenticator");
+        let segment = Arc::clone(&authenticator.segment);
+        stream.install_shm_auth(Box::new(authenticator));
+        stream.set_shm_offer(true);
+        stream.negotiate_shm_against_peer(true);
+        stream.shm_send_open_ack().expect("the stream link's Open");
+        datagram_link
+            .shm_send_open_ack()
+            .expect("the datagram link's Open");
+        let ids = TokioRuntime::with_mutex_mut(&stream.link.shm_tx, |slot| slot.clone())
+            .expect("the stream link keeps a handoff")
+            .counters();
+        let owed = || -> u32 {
+            ids.iter()
+                .map(|&id| segment.counter(id).load(Ordering::SeqCst))
+                .sum()
+        };
+
+        let observer = Arc::new(Mutex::new(ApplicationLayerObserver::new()));
+        let session = TokioSession::new(stream.clone(), observer, Arc::new(TokioTime::new()));
+        let payload = crate::shm_provider::ShmBackedPayload::alloc(16).expect("alloc");
+
+        session
+            .publish_shm("home/stream", &payload, PublishOptions::default())
+            .expect("a reliable publish");
+        assert_eq!(stream_driver.frame_count(), 1, "it left on the stream link");
+        assert_eq!(datagram_driver.frame_count(), 0);
+        assert_eq!(owed(), 1, "and its slice is owed by the stream link's peer");
+
+        session
+            .publish_shm(
+                "home/datagram",
+                &payload,
+                PublishOptions::default().with_reliability(Reliability::BestEffort),
+            )
+            .expect("a best-effort publish");
+        assert_eq!(
+            datagram_driver.frame_count(),
+            1,
+            "it left on the datagram link"
+        );
+        assert_eq!(stream_driver.frame_count(), 1);
+        assert_eq!(
+            owed(),
+            1,
+            "and is owed by nobody: the stream link's peer was never sent it"
+        );
     }
 
     /// THE POINT, on a real chunk and the real validator. Its owner lets go the moment it is sent;

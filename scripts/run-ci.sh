@@ -6733,7 +6733,17 @@ layer_c1af_cargo_test_shm() {
     # valid until its peer acknowledges. TWENTY-TWO.
     # R3111 -- 22 -> 23, MEASURED by running this exact command: the test that a session declares
     # counters on a stream link and none on a datagram link, read off the driver's kind.
-    _runci_guarded_test C1af 23 cargo test -p wz-runtime-tokio --features session-extshm,transport-unicast,transport-link-tcp --lib shm_auth_segment --quiet \
+    # R3122 -- 23 -> 24, MEASURED by running this exact command: the test that a link which
+    # opens again lets go of the handoff it kept (the test that a handoff let go of returns its
+    # counters replaced one that forgot a previous peer's debt, and does not move the count).
+    _runci_guarded_test C1af 24 cargo test -p wz-runtime-tokio --features session-extshm,transport-unicast,transport-link-tcp --lib shm_auth_segment --quiet \
+        || return 1
+    # R3122 -- the same module WITH MULTILINK, which the leg above does not carry and so does not
+    # select three tests: a second link of a session leases counters of its own and leaves the
+    # first link's alone, the links of one session declare by their own reliability, and a
+    # shared-memory publish is counted on the link it leaves on, read through the real publish.
+    # TWENTY-SEVEN, MEASURED by running this exact command (the 24 above and the three).
+    _runci_guarded_test C1af 27 cargo test -p wz-runtime-tokio --features session-extshm,transport-multilink,transport-unicast,transport-link-tcp,transport-qos,codec-push,codec-close --lib shm_auth_segment --quiet \
         || return 1
     # R3056 -- the provider's two new modules, which the filter above does not select:
     # `shm_backend` (the value types an allocation speaks in, 4 tests) and
@@ -6763,10 +6773,16 @@ layer_c1af_cargo_test_shm() {
     # (io/zenoh-transport/src/unicast/universal/rx.rs:50-51).
     _runci_guarded_test C1af 6 cargo test -p wz-runtime-tokio --features session-extshm,transport-unicast,transport-link-tcp --test shm_e2e --quiet \
         || return 1
+    # R3122 -- the last two clippy runs are builds the lines before them do not reach: the runtime
+    # with multilink, where the three tests of the leg above compile, and the core with the
+    # extension and a codec that carries no buffer, where R3111's wrapper once named a function
+    # that was not there.
     (cd crates \
         && cargo clippy -p wz-runtime-tokio --all-targets --features session-extshm,transport-unicast,transport-link-tcp --quiet -- -D warnings \
         && cargo clippy -p wz-session-core --no-default-features --features transport-shm --quiet -- -D warnings \
-        && cargo clippy -p wz-session-core --no-default-features --features session-extshm --quiet -- -D warnings)
+        && cargo clippy -p wz-session-core --no-default-features --features session-extshm --quiet -- -D warnings \
+        && cargo clippy -p wz-runtime-tokio --all-targets --features session-extshm,transport-multilink,transport-unicast,transport-link-tcp,transport-qos,codec-push,codec-close --quiet -- -D warnings \
+        && cargo clippy -p wz-session-core --no-default-features --features session-extshm,codec-declare --quiet -- -D warnings)
 }
 
 # ─── Layer C1ag — transport-advanced COMPOSITION + R311xr review remediation ─

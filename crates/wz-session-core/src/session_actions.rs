@@ -1593,6 +1593,16 @@ pub struct LinkState<R: SessionRuntime> {
     /// partition and means nothing in another.
     #[cfg(feature = "transport-stats")]
     pub stats_slot: R::Mutex<Option<crate::stats_registry::LinkSlot>>,
+    /// R3122 (session-extshm) -- this link's handoff as a SENDER: the counters its Open message
+    /// declared to its peer and the chunks kept confirmed against them, or `None` when the
+    /// message declared the block `Disabled` (a link that is not reliable, an authenticator that
+    /// operates none) or has not been sent. It belongs to the LINK, as upstream's does
+    /// (`io/zenoh-transport/src/common/shm/interop.rs` @ `pub struct LinkShmHandoffConfig {`): a
+    /// second link of a session declares counters of its own, and what one link is owed is
+    /// neither forgotten nor confused by the other's establishment. Replaced by every Open
+    /// message the link sends, which drops the previous lease and returns its counters.
+    #[cfg(feature = "session-extshm")]
+    pub shm_tx: R::Mutex<Option<alloc::sync::Arc<dyn crate::extshm::ShmTxHandoff>>>,
 }
 
 /// R311y217 (transport-multilink + transport-qos) — the inclusive QoS-priority
@@ -2192,6 +2202,8 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                 priority_range: R::new_mutex(None),
                 #[cfg(feature = "transport-stats")]
                 stats_slot: R::new_mutex(stats_slot),
+                #[cfg(feature = "session-extshm")]
+                shm_tx: R::new_mutex(None),
             }),
             core: R::share(SessionCore {
                 #[cfg(feature = "transport-stats")]
@@ -5838,7 +5850,24 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     #[cfg(feature = "session-extshm")]
     pub fn shm_send_open_syn(&self) -> Option<ExtEntryOwned> {
         let reliable = self.link.is_reliable_by_protocol();
-        R::with_mutex_mut(&self.shm_auth, |d| d.send_open_syn(reliable))
+        let declaration = R::with_mutex_mut(&self.shm_auth, |d| d.send_open_syn(reliable))?;
+        Some(self.keep_declared_handoff(declaration))
+    }
+
+    /// R3122 -- the link that sends an Open message keeps the handoff whose counters the
+    /// message declared, in place of the one it kept for an earlier establishment (which drops,
+    /// and returns its counters), and the extension goes on to the wire.
+    #[cfg(feature = "session-extshm")]
+    fn keep_declared_handoff(
+        &self,
+        declaration: crate::extshm::ShmOpenDeclaration,
+    ) -> ExtEntryOwned {
+        let crate::extshm::ShmOpenDeclaration { ext, tx } = declaration;
+        let previous = R::with_mutex_mut(&self.link.shm_tx, |slot| core::mem::replace(slot, tx));
+        // Dropped after the lock is released: a handoff that drops gives its counters back and
+        // lets go of every chunk it kept.
+        drop(previous);
+        ext
     }
 
     /// Step 4a (ACCEPTOR) — the initiator's echo of OUR challenge. This is where
@@ -5861,7 +5890,9 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     pub fn shm_send_open_ack(&self) -> Option<ExtEntryOwned> {
         let negotiated = self.is_shm();
         let reliable = self.link.is_reliable_by_protocol();
-        R::with_mutex_mut(&self.shm_auth, |d| d.send_open_ack(negotiated, reliable))
+        let declaration =
+            R::with_mutex_mut(&self.shm_auth, |d| d.send_open_ack(negotiated, reliable))?;
+        Some(self.keep_declared_handoff(declaration))
     }
 
     /// Step 4c (INITIATOR) — the acceptor's confirmation, which is where the
@@ -6368,6 +6399,38 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         )
     }
 
+    /// R311y215 (transport-qos) / R3122 -- the EFFECTIVE priority a message is routed on: the
+    /// caller's when this session negotiated QoS, else forced to DEFAULT (a non-QoS session has
+    /// one conduit and writes no ext_qos). Without `transport-qos` the priority passes straight
+    /// through. One definition for the dispatch below, which picks the link on it, and for the
+    /// sender's handoff, which must pick the SAME link to open its transaction on.
+    #[cfg(any(
+        feature = "codec-push",
+        feature = "codec-request",
+        feature = "codec-response",
+        feature = "codec-response-final",
+        feature = "declare-keyexpr",
+        feature = "declare-subscriber",
+        feature = "declare-queryable",
+        feature = "declare-token",
+        feature = "declare-interest",
+        feature = "liveliness-token",
+    ))]
+    fn conduit_priority(&self, priority: Priority) -> Priority {
+        #[cfg(feature = "transport-qos")]
+        {
+            if self.is_qos() {
+                priority
+            } else {
+                Priority::DEFAULT
+            }
+        }
+        #[cfg(not(feature = "transport-qos"))]
+        {
+            priority
+        }
+    }
+
     /// [`Self::dispatch_network_message`] at a given [`DispatchStage`]: a
     /// block-first message's background push re-enters here as `Scheduled`
     /// ([`Self::run_block_first_job`]), which is neither observed again nor
@@ -6444,12 +6507,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         // mint and (when != DEFAULT) the ext_qos the Frame carries. When
         // `transport-qos` does not compile, `priority` passes straight to the
         // single-conduit mint (ignored) — no cfg-skew.
-        #[cfg(feature = "transport-qos")]
-        let priority = if self.is_qos() {
-            priority
-        } else {
-            Priority::DEFAULT
-        };
+        let priority = self.conduit_priority(priority);
         // R311y215 — the ext_qos this Frame/Fragment carries: `Some` ONLY for a
         // non-DEFAULT priority (zenoh writes `ext_qos` iff `!= DEFAULT`, so a
         // DEFAULT frame stays byte-identical to a pre-QoS frame). Computed once
@@ -7290,7 +7348,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                 feature = "codec-response"
             )
         ))]
-        let transaction = self.open_shm_tx(&msg);
+        let transaction = self.open_shm_tx(&msg, reliable, priority);
         let sent = self.send_network_message_qos_dispatch(msg, reliable, express, priority);
         #[cfg(all(
             feature = "session-extshm",
@@ -7311,9 +7369,16 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     }
 
     /// R3110 -- the sender's handoff transaction for `msg`, with every shared-memory slice of it
-    /// declared, or `None` when the session did not negotiate shared memory, operates no handoff,
-    /// or the message carries no such slice. The three kinds of message that carry a buffer are
-    /// those upstream maps: the payload of a Put, the value of a query and the payload of a reply.
+    /// declared, or `None` when the session did not negotiate shared memory, the link the message
+    /// leaves on keeps no handoff, or the message carries no such slice. The three kinds of
+    /// message that carry a buffer are those upstream maps: the payload of a Put, the value of a
+    /// query and the payload of a reply.
+    ///
+    /// R3122 -- the handoff is the LINK's, and the link is the one the dispatch behind
+    /// [`Self::send_network_message_qos`] will pick: `with_conduit_link` on the same
+    /// `(reliability, priority)` key, the priority being the one each kind of message routes on.
+    /// A datagram link keeps none (its Open declared the block `Disabled`), so a message the
+    /// session routes there is counted against nothing.
     #[cfg(all(
         feature = "session-extshm",
         any(
@@ -7325,18 +7390,22 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     fn open_shm_tx(
         &self,
         msg: &crate::network_message::NetworkMessage,
+        reliable: bool,
+        push_priority: Priority,
     ) -> Option<alloc::boxed::Box<dyn crate::extshm::ShmTxTransaction>> {
         use crate::network_message::NetworkMessage;
 
-        let (descriptors, extensions): (
+        let (descriptors, extensions, route): (
             alloc::vec::Vec<&[u8]>,
             &[wz_codecs::ext_entry::ExtEntryOwned<crate::wire::WireStorage>],
+            Priority,
         ) = match msg {
             #[cfg(feature = "codec-push")]
             NetworkMessage::Push(push) => match &push.body {
                 crate::wire::PushOwnedVariant::CodecZenohMsgPut(put) => (
                     crate::put_payload::shm_descriptors(put),
                     push.extensions.as_deref().unwrap_or(&[]),
+                    push_priority,
                 ),
                 _ => return None,
             },
@@ -7345,6 +7414,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                 crate::wire::RequestOwnedVariant::CodecZenohQuery(query) => (
                     crate::request_build::query_value_shm_descriptors(query),
                     request.extensions.as_deref().unwrap_or(&[]),
+                    Self::REQUEST_ROUTE_PRIORITY,
                 ),
                 _ => return None,
             },
@@ -7352,13 +7422,20 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             NetworkMessage::Response(response) => (
                 crate::response_build::response_shm_descriptors(response),
                 response.extensions.as_deref().unwrap_or(&[]),
+                crate::declare_ext_qos::read_response_qos(response).priority(),
             ),
             _ => return None,
         };
+        #[cfg(not(feature = "codec-push"))]
+        let _ = push_priority;
         if descriptors.is_empty() || !self.is_shm() {
             return None;
         }
-        let handoff = R::with_mutex_mut(&self.shm_auth, |d| d.tx_handoff())?;
+        let handoff = self.with_conduit_link(
+            Reliability::from_reliable_bool(reliable),
+            self.conduit_priority(route),
+            |link| R::with_mutex_mut(&link.shm_tx, |slot| slot.clone()),
+        )?;
         let mut transaction = handoff.begin(crate::put_payload::priority_band(extensions));
         for descriptor in descriptors {
             transaction.on_tx(descriptor);
@@ -7614,6 +7691,12 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         )
     }
 
+    /// R3122 -- the priority a Request is ROUTED on: the data plane, zenoh's default
+    /// `Priority::Data`. One definition for the dispatch below and for the sender's handoff, which
+    /// must open its transaction on the link the dispatch will pick.
+    #[cfg(feature = "codec-request")]
+    const REQUEST_ROUTE_PRIORITY: Priority = Priority::DEFAULT;
+
     /// See [`Self::dispatch_push`].
     #[cfg(feature = "codec-request")]
     fn dispatch_request(
@@ -7624,7 +7707,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         let class = self.outbound_request_class(&request);
         self.dispatch_network_message(
             // Request/Response = the data plane; zenoh default `Priority::Data`.
-            Priority::DEFAULT,
+            Self::REQUEST_ROUTE_PRIORITY,
             reliable,
             crate::declare_ext_qos::read_request_qos(&request),
             wz_codecs::request::Request::MAX_ENCODED_BYTES,
