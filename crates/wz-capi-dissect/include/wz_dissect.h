@@ -1749,8 +1749,12 @@ typedef struct wz_dissect_proto_file {
  * named. THIS IS NOT A VALIDATOR: an enum protoc would refuse for its numbering
  * is accepted here, and so are JSON name collisions and option values, and the
  * fields of an extend block are read for their syntax alone (their numbers,
- * names and types are not judged). A file accepted here can still fail protoc;
- * a file refused here for one of the reasons above would fail it too.
+ * names and types are not judged). A file accepted here can still fail protoc.
+ * A file refused here fails protoc too, EXCEPT for the refusals that are about
+ * what can be declared and not about the schema being wrong: a group or extend
+ * block the root reaches, import weak, a recursive message and the bounds
+ * below are all accepted by protoc, and so are editions by a protoc new enough
+ * to read them.
  *
  * BOUNDS, all of them refusals and none of them silent truncations: messages
  * written inside one another 31 deep (protoc's own limit: it compiles 31 and
