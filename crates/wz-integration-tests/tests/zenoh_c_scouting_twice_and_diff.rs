@@ -2237,3 +2237,121 @@ fn a_bind_that_fails_is_tried_again_inside_its_budget_identically_on_wz_and_libz
         }
     }
 }
+
+/// A hub whose only listener binds in the BACKGROUND, a node B that dials the hub once it has and
+/// also listens, and a node C that dials B alone, all three with scouting off. The three nodes are
+/// returned as `[hub, b, c]`.
+///
+/// The hub's port is taken by this test and let go 0.7 s after the hub starts; the hub's listener
+/// is bound at its first retry, about 1 s in, B starts at 1.5 s and C at 2.8 s. C knows no address
+/// but B's, so it can reach the hub only if B tells it where the hub is: B was told by the hub, at
+/// its own bootstrap, and the address the hub tells is one of the listeners it holds then.
+fn late_hub_line(hub: &Built, b: &Built, c: &Built, key: &str) -> [Outcome; 3] {
+    let group = next_group();
+    let (port_hub, port_b) = (a_free_port(), a_free_port());
+    let taken = TcpListener::bind(("127.0.0.1", port_hub)).expect("the port is free to take");
+    let hub_listens = loopback_endpoints(&[port_hub]);
+    let started = std::time::Instant::now();
+    let released = std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_millis(700));
+        drop(taken);
+    });
+    let spec = |tag, secs, listen, connect| Spec {
+        mode: "peer",
+        listen,
+        connect,
+        key,
+        secs,
+        tag,
+        group: &group,
+        delay_ms: 500,
+        timeout_ms: 3000,
+    };
+    let wait_until = |at_ms: u64| {
+        let at = std::time::Duration::from_millis(at_ms);
+        std::thread::sleep(at.saturating_sub(started.elapsed()));
+    };
+    let mut hub_node = Node::start_with(
+        hub,
+        &spec("A", 9, 0, 0),
+        &[
+            ("SCOUTING_OFF", "1"),
+            ("PEERS_MID", "1"),
+            ("LISTEN_ENDPOINTS", hub_listens.as_str()),
+            ("LISTEN_TIMEOUT", "-1"),
+            ("LISTEN_EXIT", "false"),
+        ],
+    );
+    let hub_open = hub_node.opened();
+    wait_until(1500);
+    let mut b_node = Node::start_with(
+        b,
+        &spec("B", 7, port_b, port_hub),
+        &[("SCOUTING_OFF", "1"), ("PEERS_MID", "1")],
+    );
+    let b_open = b_node.opened();
+    wait_until(2800);
+    let mut c_node = Node::start_with(
+        c,
+        &spec("C", 5, 0, port_b),
+        &[
+            ("SCOUTING_OFF", "1"),
+            ("PEERS_MID", "1"),
+            ("LISTEN_EMPTY", "1"),
+        ],
+    );
+    let c_open = c_node.opened();
+    let outcomes = [
+        hub_node.finish(hub_open),
+        b_node.finish(b_open),
+        c_node.finish(c_open),
+    ];
+    released.join().expect("the thread that lets the port go");
+    outcomes
+}
+
+/// THE GATE, gossip of a listener bound late: a node that dials a hub only after the hub's
+/// background bind is told where the hub is, and tells it on to a node that dials it, so a third
+/// node reaches the hub by an address it was never given.
+///
+/// Every node ends up holding two peers and hearing all three senders: C dialled B alone and
+/// found the hub from B's gossip. The row asserts the real library's rows first, and then the
+/// same line with a wz hub, the node whose listener binds late.
+// wz-proves: api-compat-c zenoh-c->wz partial
+#[test]
+#[ignore = "reads a zenoh-c oracle; run by run-ci Layer C1cc (which builds the matching \
+            ABI arm this needs)"]
+fn a_listener_bound_late_is_gossiped_to_a_node_that_dials_its_neighbour_on_wz_and_libzenohc() {
+    let Some(programs) = programs() else {
+        return;
+    };
+    let (r, w) = (&programs.reference, &programs.wz);
+    for (n, (name, [hub, b, c])) in [
+        ("the real library everywhere", [r, r, r]),
+        ("a wz hub", [w, r, r]),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let key = format!("wz/gossip/late-hub/{n}");
+        let rows = late_hub_line(hub, b, c, &key).map(|outcome| outcome.row);
+        let got = rows.each_ref().map(String::as_str);
+        assert_eq!(
+            got,
+            MET,
+            "{}",
+            if n == 0 {
+                String::from(
+                    "the REAL library's rows for a hub whose listener binds late are not what \
+                     this file expects",
+                )
+            } else {
+                format!(
+                    "§5.27 api-compat-c: a node that dials the neighbour of a hub whose listener \
+                     bound late does not find the hub, as it does on the real library ({name}); \
+                     the rows are the hub's, then B's and C's"
+                )
+            }
+        );
+    }
+}

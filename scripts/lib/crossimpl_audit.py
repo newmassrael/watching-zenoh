@@ -1025,7 +1025,11 @@ HOST_GATED_CI_TARGETS: dict[str, str] = {
 # `pico_initial_interest_twice_and_diff.rs`, a zenoh peer that dials a pico listener is told by the
 # listener that it has sent everything it holds, as by the real zenoh-pico (`api-compat-pico
 # wz->pico partial`). Measured by `scripts/audit-crossimpl-proof.sh`.
-FOREIGN_ADJUDICATOR_LINKS = 1031
+# R3096 -- 1031 -> 1032, RISING by one: a new `wz-proves` line in
+# `zenoh_c_scouting_twice_and_diff.rs`, a listener a hub bound late is gossiped to a node that dials
+# only the hub's neighbour, as it is on the real library (`api-compat-c zenoh-c->wz partial`).
+# Measured by `scripts/audit-crossimpl-proof.sh`.
+FOREIGN_ADJUDICATOR_LINKS = 1032
 
 # ── Execution disclosure ────────────────────────────────────────────────────────
 #
