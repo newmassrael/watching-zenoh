@@ -77,6 +77,7 @@ pub mod doc_revision;
 // would be merged, and the module's relative links would then be resolved from
 // this scope instead of from the module.
 pub mod e2e_crc;
+pub mod e2e_judge;
 /// R311y615 (§1.1f) — the second ANALYSIS plane: Query/Reply exchanges and
 /// their latency at the tap.
 ///
