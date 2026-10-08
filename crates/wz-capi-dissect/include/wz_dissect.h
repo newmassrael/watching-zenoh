@@ -1382,7 +1382,59 @@ int wz_dissect_transport_message_in(const char *context_json,
  * Deliberately a summary: a capture holds an unbounded number of messages
  * and one string carrying all of them is a shape that works for a test and
  * fails for a session. Walk the flows, then expand the messages you want
- * with wz_dissect_transport_message. */
+ * with wz_dissect_transport_message.
+ *
+ * (summary revision 6) CHECKSUMS, in `health.streams`. Each packet's checksums
+ * are counted on three axes: `ip_checksum_*` (the IPv4 header),
+ * `transport_checksum_*` (the TCP or UDP checksum) and `tunnel_checksum_*` (a
+ * GRE carrier's). Every axis has `valid`, `invalid` and `absent`; the transport
+ * axis has a FOURTH key, `transport_checksum_partial`. `absent` means there was
+ * nothing to judge: IPv6 has no header checksum, and a UDP datagram over IPv4
+ * whose field is zero declined to compute one (RFC 768). The counts are
+ * reported and never acted on: a packet that fails still yields its messages.
+ *
+ * PARTIAL IS A TRANSPORT SEGMENT WHOSE FULL VERIFICATION FAILED AND WHOSE
+ * CHECKSUM FIELD EQUALS ITS OWN PSEUDO-HEADER SUM, FOLDED TO 16 BITS AND NOT
+ * COMPLEMENTED -- the sum of the source and destination addresses, the
+ * protocol and the segment length (RFC 793 for IPv4, RFC 8200 section 8.1 for
+ * IPv6). That is the value a sending host leaves in the field when its network
+ * card is to finish the checksum, so a capture taken on the sending host
+ * (loopback, or any interface whose card does the checksums) holds it in nearly
+ * every segment that host sent. The rule is the same for IPv4 and IPv6, for TCP
+ * and UDP, and for a segment inside a tunnel.
+ *
+ * `partial` MEANS NOT VERIFIABLE AT CAPTURE TIME, AND NOTHING ELSE. It is not
+ * "good": a segment damaged after the stack wrote the field carries the same
+ * value as one that left intact, and no reader of the capture can tell them
+ * apart, so it is never counted `valid`. It is not "bad" either, so it is never
+ * counted `invalid`, and it is not `absent`. `transport_checksum_invalid`
+ * therefore counts only a failing segment whose field is some OTHER value --
+ * the evidence of a damaged or forged segment -- and a capture that held real
+ * corruption still counts it there. A segment whose genuine checksum happens to
+ * equal that sum verifies and is `valid`: the full verification is tried first.
+ * A field that is zero, a complemented sum, or a sum over a length other than
+ * the one the capture holds is not recognised and reads `invalid`; in
+ * particular a segment cut short by a snap length reads `invalid`, as before.
+ * Only the Linux loopback shape over IPv4 and TCP has been seen in a real
+ * capture; the other families follow the same rule and are tested on built
+ * packets.
+ *
+ * `health.uncorroborated_layers` names the layers on which nothing verified. A
+ * LAYER IS UNCORROBORATED WHEN NO CHECKSUM ON IT VERIFIED (`valid` is 0) AND AT
+ * LEAST ONE WAS JUDGED, either failed (`invalid`) or `partial`; `absent` counts
+ * on neither side. So a capture of a host's own transmit path, in which every
+ * segment is `partial`, names `transport`: nothing on it corroborates a
+ * payload, which is as true of it as of a capture whose every segment failed.
+ * `partial` segments add nothing to `valid` and take nothing from `invalid`, so
+ * a layer is judged by its verified and its failing segments as it was before
+ * the state existed. The live handle's health document (wz_dissect_live_health)
+ * and the command-line report read this one rule and cannot disagree.
+ *
+ * The revision moved because `transport_checksum_partial` arrived and because
+ * `transport_checksum_invalid` stopped counting what is now `partial`. A
+ * consumer that read `invalid` as "this reader could not verify it" adds the
+ * two. A capture that held no such segment reads exactly as before, with a zero
+ * under the new key. */
 int wz_dissect_pcap_summary(const unsigned char *bytes, size_t len, char **out);
 
 /* R311y748 (ABI 2) — the same summary, read under BOUNDED memory.
@@ -3519,6 +3571,16 @@ int wz_dissect_live_retention(const wz_dissect_live *h, char **out);
  * up to 2^53 - 1, the same digits in a string above it). A READ of counters: the
  * cost follows the number of live datagram flows, not the number of rows they
  * hold.
+ *
+ * (health revision 3) `health.streams` carries `transport_checksum_partial`, and
+ * `transport_checksum_invalid` no longer counts a segment whose checksum field
+ * is exactly its own folded pseudo-header sum -- what a host's own transmit path
+ * shows before its network card finishes the checksum. A live tap on the host's
+ * own interface sees those in nearly every segment it sends, which is why this
+ * door moved with the summary. The rule, what `partial` does and does not
+ * claim, and the rule for `uncorroborated_layers` are the summary's (see
+ * wz_dissect_pcap_summary, revision 6) and are the same here: one emitter
+ * writes both.
  *
  * A READ, and `h` is const to say so: the counters are read where they sit, no
  * record is handed out and no id is settled, so the next

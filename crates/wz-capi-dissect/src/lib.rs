@@ -878,6 +878,18 @@ pub unsafe extern "C" fn wz_dissect_transport_message_in(
 /// the same shape plus siblings — which is the compatibility the module doc
 /// promises and the reason [`wz_dissect_abi_version`] does not move.
 ///
+/// # Checksums (summary revision 6)
+///
+/// `health.streams` counts a packet's checksums as `valid`, `invalid` and
+/// `absent` on three axes, and the transport axis has a fourth key,
+/// `transport_checksum_partial`: a TCP or UDP segment whose full verification
+/// failed and whose field equals its own pseudo-header sum folded to 16 bits and
+/// not complemented, which is what a sending host leaves for its network card to
+/// finish. It means NOT VERIFIABLE AT CAPTURE TIME, never good and never bad, so
+/// it is counted in none of the other three. `uncorroborated_layers` names a
+/// layer on which no checksum verified and at least one was judged, failed or
+/// partial. The full contract is the header's, at `wz_dissect_pcap_summary`.
+///
 /// # Safety
 /// `bytes` must point to at least `len` readable bytes and `out` must be a
 /// writable pointer to a `*mut c_char`. Neither may be null.
@@ -3132,6 +3144,13 @@ pub unsafe extern "C" fn wz_dissect_live_retention(
 /// counters a datagram loss rate is taken from without TCP frames in the
 /// denominator.
 ///
+/// `health.streams.transport_checksum_partial` (revision 3) counts the TCP and
+/// UDP segments the sender's transmit offload left unfinished, and
+/// `transport_checksum_invalid` no longer counts them. A tap on a host's own
+/// interface sees them in nearly every segment it sends. The rule, and the rule
+/// for `uncorroborated_layers`, are the summary's: see
+/// `wz_dissect_pcap_summary` in `wz_dissect.h` (summary revision 6).
+///
 /// # A READ, and the handle is `const` to say so
 ///
 /// Nothing is handed out and no id is settled, so the next
@@ -4810,6 +4829,75 @@ mod tests {
             "both axes must have VERIFIED something, or this proves only that \
              nothing was checked: {json}"
         );
+    }
+
+    /// A capture taken on the SENDING host crosses the ABI as `partial` and not
+    /// as `invalid`, and the summary door and a live handle fed the same
+    /// packets say the same thing about it.
+    ///
+    /// Four TCP segments whose checksum field is what a host's stack leaves for
+    /// its network card to finish, laid by the fixtures crate, which shares no
+    /// code with the reader. The two documents are compared on the whole
+    /// checksum group and on `uncorroborated_layers`, because the claim is that
+    /// one emitter writes both and that the layer is still named: nothing on it
+    /// verified.
+    #[test]
+    fn an_offloaded_capture_reads_partial_through_the_summary_and_the_live_handle() {
+        let keepalive = [1u8, 0, wz_session_core::wire_const::T_MID_KEEP_ALIVE];
+        let packets: Vec<Vec<u8>> = (0..4u32)
+            .map(|i| {
+                let mut p = tcp_packet(1000 + 3 * i, &keepalive);
+                wz_packet_fixtures::fill_offload_checksum(
+                    &[10, 0, 0, 1],
+                    &[10, 0, 0, 2],
+                    6,
+                    &mut p[14 + 20..14 + 20 + 20 + keepalive.len()],
+                );
+                p
+            })
+            .collect();
+        let records: Vec<(u32, u32, &[u8])> = packets
+            .iter()
+            .enumerate()
+            .map(|(i, p)| (0, 1_000 * (i as u32 + 1), p.as_slice()))
+            .collect();
+        let summary = call_summary(&wz_capture::pcap::write(1, &records)).expect("reads");
+
+        let handle = open_live(WZ_DISSECT_LIMITS_NONE).expect("the preset opens");
+        for (i, p) in packets.iter().enumerate() {
+            push_live(handle, 1_000_000 * (i as u64 + 1), p);
+        }
+        let live = live_health(handle).expect("the handle answers");
+        unsafe { wz_dissect_live_close(handle) };
+
+        // The checksum group, from the first key of the IP axis to the last of
+        // the tunnel's.
+        let group = |doc: &str| {
+            let from = doc.find("\"ip_checksum_valid\"").expect("the group opens");
+            let to = from
+                + doc[from..]
+                    .find("\"tunnel_checksum_absent\":")
+                    .expect("the group ends");
+            doc[from..to].to_string()
+        };
+        assert!(
+            group(&summary).contains(
+                "\"transport_checksum_valid\":0,\"transport_checksum_invalid\":0,\
+                 \"transport_checksum_absent\":0,\"transport_checksum_partial\":4,"
+            ),
+            "every segment is unfinished, and none is a failure: {summary}"
+        );
+        assert_eq!(
+            group(&summary),
+            group(&live),
+            "one emitter writes both documents"
+        );
+        for (door, doc) in [("summary", &summary), ("live health", &live)] {
+            assert!(
+                doc.contains("\"uncorroborated_layers\":[\"transport\"]"),
+                "{door}: nothing on the layer verified, so it is named: {doc}"
+            );
+        }
     }
 
     /// R311y885 — and the bounded census is still a CENSUS: every plane key is

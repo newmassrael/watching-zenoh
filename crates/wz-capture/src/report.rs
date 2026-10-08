@@ -431,8 +431,13 @@ pub enum VerdictReason {
     PayloadGaps,
     /// Payloads a selector could not judge either way.
     PayloadUndecided,
-    /// Every checksum this reader could verify on a layer FAILED, so nothing
-    /// corroborates the headers the rows were built from.
+    /// No transport checksum verified, and at least one was judged: each one
+    /// either failed or was left unfinished by the sender's transmit offload
+    /// (`partial`). Nothing corroborates the payloads the rows were built from.
+    ///
+    /// The same rule, from the same function, as the `transport` entry of
+    /// `health.uncorroborated_layers`; see
+    /// [`crate::DissectionHealth::uncorroborated_layers`].
     ChecksumsUncorroborated,
 }
 
@@ -657,14 +662,23 @@ impl<'a> CaptureReport<'a> {
         // `packets_skipped` — a reason true of almost everything took the exit
         // code with it.
         //
-        // The rule is therefore: this reader verified at least one checksum on
-        // this layer and NOT ONE of them passed. That is a floor claim rather
-        // than a corruption claim, which is what this enumeration is for: with
+        // The rule is therefore: NOT ONE checksum on this layer verified, and
+        // at least one was judged. That is a floor claim rather than a
+        // corruption claim, which is what this enumeration is for: with
         // nothing corroborating the headers, the rows built from them cannot be
         // trusted to be all the rows. `absent` is deliberately not counted on
         // either side — IPv6 has no header checksum and a zero UDP checksum is
         // the sender declining (RFC 768), and a capture of either is not
         // uncorroborated, it is unchecked.
+        //
+        // A `partial` segment is a JUDGED one that did not verify: the sender's
+        // transmit offload left its checksum unfinished, so nothing about its
+        // payload was corroborated. A layer of nothing else is therefore
+        // uncorroborated exactly as it was when those segments were counted
+        // `invalid`; what moved is that the failure counts no longer carry them.
+        // The condition lives in `DissectionHealth::transport_uncorroborated`,
+        // which the health document's `uncorroborated_layers` reads too, so the
+        // two surfaces cannot read one capture differently.
         //
         // WHY THE TRANSPORT LAYER AND NOT THE IP HEADER. The IPv4 header
         // checksum covers the HEADER only, is recomputed at every hop, and does
@@ -676,8 +690,7 @@ impl<'a> CaptureReport<'a> {
         // Reachable only because R311y884 also fixed the fixtures: the packet
         // builders wrote a ZERO checksum, so the corpus sat entirely in the
         // invalid bucket and no rule about it could be written at all.
-        let h = self.dissection.health();
-        if h.transport_checksum_invalid > 0 && h.transport_checksum_valid == 0 {
+        if self.dissection.health().transport_uncorroborated() {
             out.push(VerdictReason::ChecksumsUncorroborated);
         }
         if self.dissection.drops().any() {
@@ -1007,6 +1020,11 @@ impl<'a> CaptureReport<'a> {
             // Round 2014 (item 261) — this summary carries the INVALID counts
             // only, which is the shape it has always had: absence is not news
             // and corruption is. A corrupt carrier is corruption.
+            //
+            // A segment the sender's transmit offload left unfinished is NOT
+            // counted in `transport_checksum_invalid` above: it is `partial`,
+            // which only the health document carries, because it says nothing
+            // about the wire either way.
             health.tunnel_checksum_invalid
         ));
         // R311y648 (§1.2a) — STRUCTURAL, like `skips` below: present with zeroes
@@ -3627,7 +3645,7 @@ pub fn health_json(d: &crate::Dissection) -> String {
          \"streams\":{{\"retransmits\":{},\"out_of_order\":{},\"partial_overlaps\":{},\
          \"ip_checksum_valid\":{},\"ip_checksum_invalid\":{},\"ip_checksum_absent\":{},\
          \"transport_checksum_valid\":{},\"transport_checksum_invalid\":{},\
-         \"transport_checksum_absent\":{},\
+         \"transport_checksum_absent\":{},\"transport_checksum_partial\":{},\
          \"tunnel_checksum_valid\":{},\"tunnel_checksum_invalid\":{},\
          \"tunnel_checksum_absent\":{}}}",
         f.pieces,
@@ -3658,6 +3676,10 @@ pub fn health_json(d: &crate::Dissection) -> String {
         h.transport_checksum_valid,
         h.transport_checksum_invalid,
         h.transport_checksum_absent,
+        // The fourth state of the transport axis, beside the three it is not:
+        // a segment the sender's offload left unfinished. Always rendered, so a
+        // consumer never reads its absence as "no offloaded packets".
+        h.transport_checksum_partial,
         // Round 2014 (item 261) — the machine half of the third triple, in the
         // order `health_text` prints it. Both renderings read the same
         // accessors in the same order; neither is free to omit one.
@@ -3782,7 +3804,7 @@ pub fn health_text(d: &crate::Dissection) -> String {
     ));
     s.push_str(&format!(
         "  checksums: ip {} valid / {} invalid / {} absent, \
-         transport {} valid / {} invalid / {} absent, \
+         transport {} valid / {} invalid / {} absent / {} partial, \
          tunnel {} valid / {} invalid / {} absent\n",
         h.ip_checksum_valid,
         h.ip_checksum_invalid,
@@ -3790,6 +3812,10 @@ pub fn health_text(d: &crate::Dissection) -> String {
         h.transport_checksum_valid,
         h.transport_checksum_invalid,
         h.transport_checksum_absent,
+        // `partial` follows the transport triple on the same line, in the order
+        // `health_json` writes it: not verifiable at capture time, because the
+        // sender's transmit offload had not finished the checksum.
+        h.transport_checksum_partial,
         // Round 2014 (item 261) — the third triple, on the SAME line as the
         // two it joins. A separate line would have let a reader scanning for
         // "checksums" find the old answer and stop.
@@ -3808,10 +3834,12 @@ pub fn health_text(d: &crate::Dissection) -> String {
     let uncorroborated = h.uncorroborated_layers();
     if !uncorroborated.is_empty() {
         s.push_str(&format!(
-            "    NOT CORROBORATED: {} -- this reader verified a checksum on \
-             that layer and none passed. An `ip` axis alone usually means a \
-             device on the path rewrote the headers; `transport` means the \
-             payload the rows are built from is unvouched for\n",
+            "    NOT CORROBORATED: {} -- no checksum on that layer verified; \
+             each one either failed or, on the transport axis, was left \
+             unfinished by the sender's transmit offload (`partial`). An `ip` \
+             axis alone usually means a device on the path rewrote the \
+             headers; `transport` means the payload the rows are built from is \
+             unvouched for\n",
             uncorroborated.join(", ")
         ));
     }
@@ -4471,7 +4499,9 @@ mod tests {
 
         // THE CONTROL, and the reason the rule is not `invalid > 0`: the same
         // corrupt packet beside a good one is a capture whose reader demonstrably
-        // verifies checksums, which is what a transmit-offload capture looks like.
+        // verifies checksums. (A transmit-offload capture is not this shape any
+        // more: its unfinished segments are `partial`, not `invalid`, and the
+        // tests below cover them.)
         let mut offload = Dissection::new();
         offload.push_packet(LINKTYPE_ETHERNET, 0, &corrupt);
         offload.push_packet(
@@ -4491,6 +4521,257 @@ mod tests {
             "one bad checksum among good ones is offload, not a floor: {}",
             control.to_text()
         );
+    }
+
+    /// The packet `tcp_packet` builds, with its TCP checksum field replaced by
+    /// what a SENDING host leaves for its network card to finish: the folded,
+    /// not complemented, pseudo-header sum. `payload_len` is the TCP payload the
+    /// packet was built with, because the frame is padded to 60 bytes and the
+    /// pad is outside the segment.
+    fn offloaded(mut pkt: alloc::vec::Vec<u8>, payload_len: usize) -> alloc::vec::Vec<u8> {
+        wz_packet_fixtures::fill_offload_checksum(
+            &[10, 0, 0, 1],
+            &[10, 0, 0, 2],
+            6,
+            &mut pkt[14 + 20..14 + 20 + 20 + payload_len],
+        );
+        pkt
+    }
+
+    /// A dissection fed `packets` in order, as packets 0, 1, 2 and so on.
+    fn capture_of(packets: &[alloc::vec::Vec<u8>]) -> crate::Dissection {
+        let mut d = crate::Dissection::new();
+        for (index, packet) in packets.iter().enumerate() {
+            d.push_packet(crate::link::LINKTYPE_ETHERNET, index, packet);
+        }
+        d.finish();
+        d
+    }
+
+    /// THE DEFECT, read off the report: a capture taken on the sending host is
+    /// `partial` on every surface and `invalid` on none.
+    ///
+    /// Four offloaded segments and nothing else. Before the state existed this
+    /// capture read `transport_checksum_invalid: 4`, an `uncorroborated_layers`
+    /// of `["transport"]` and a `checksums_uncorroborated` reason, all of it
+    /// reached through failures that were not failures. The layer is STILL
+    /// uncorroborated, because nothing on it verified; what must change is only
+    /// that the failure counts no longer carry it.
+    #[test]
+    fn a_capture_of_offloaded_segments_reads_partial_and_never_invalid() {
+        use crate::datagram_tests::{framed_keepalive, tcp_packet};
+        let ka = framed_keepalive();
+        let packets: alloc::vec::Vec<_> = (0..4u32)
+            .map(|i| offloaded(tcp_packet(1000 + 3 * i, &ka), ka.len()))
+            .collect();
+        let d = capture_of(&packets);
+        let h = d.health();
+        assert_eq!(
+            (
+                h.transport_checksum_valid,
+                h.transport_checksum_invalid,
+                h.transport_checksum_absent,
+                h.transport_checksum_partial
+            ),
+            (0, 0, 0, 4),
+            "{h:?}"
+        );
+        assert!(
+            !h.any_checksum_invalid(),
+            "an unfinished checksum is not evidence of corruption: {h:?}"
+        );
+
+        let json = health_json(&d);
+        assert!(
+            json.contains(
+                "\"transport_checksum_valid\":0,\"transport_checksum_invalid\":0,\
+                 \"transport_checksum_absent\":0,\"transport_checksum_partial\":4,"
+            ),
+            "{json}"
+        );
+        let text = health_text(&d);
+        assert!(
+            text.contains("transport 0 valid / 0 invalid / 0 absent / 4 partial"),
+            "the page carries the fourth state beside the three: {text}"
+        );
+
+        // Nothing verified, so the layer is named, by the one rule and on every
+        // surface: the document, the page, and the verdict's reason.
+        assert_eq!(h.uncorroborated_layers(), alloc::vec!["transport"], "{h:?}");
+        assert!(
+            json.contains("\"uncorroborated_layers\":[\"transport\"]"),
+            "{json}"
+        );
+        assert!(text.contains("NOT CORROBORATED: transport"), "{text}");
+        let report = CaptureReport::of(&d);
+        assert_eq!(
+            report.reasons(),
+            alloc::vec![VerdictReason::ChecksumsUncorroborated],
+            "{}",
+            report.to_text()
+        );
+        // The command line's own count of failures stays at what failed.
+        let report_json = report.to_json();
+        assert!(
+            report_json.contains("\"transport_checksum_invalid\":0"),
+            "{report_json}"
+        );
+        // The live handle's document embeds the same object byte for byte.
+        assert!(health_document_json(&d).contains(&json));
+    }
+
+    /// Each packet lands in ONE bucket, and `partial` is not one of the other
+    /// three: three offloaded, one verifying, one corrupt and one UDP datagram
+    /// whose zero field declined a checksum.
+    ///
+    /// The verified segment is what makes the capture corroborated, so the
+    /// layer is not named and the verdict does not fire. The corrupt one is
+    /// still counted `invalid`: a capture that held real corruption keeps
+    /// saying so beside the unfinished ones.
+    #[test]
+    fn partial_is_one_bucket_of_four_and_a_verified_segment_corroborates_the_layer() {
+        use crate::datagram_tests::{framed_keepalive, tcp_packet};
+        let ka = framed_keepalive();
+        let mut packets: alloc::vec::Vec<_> = (0..3u32)
+            .map(|i| offloaded(tcp_packet(1000 + 3 * i, &ka), ka.len()))
+            .collect();
+        packets.push(tcp_packet(1009, &ka));
+        let mut corrupt = tcp_packet(1012, &ka);
+        corrupt[14 + 20 + 16] ^= 0xFF;
+        packets.push(corrupt);
+        packets.push(eth(&ipv4_packet(
+            17,
+            [10, 0, 0, 1],
+            [10, 0, 0, 2],
+            &zenoh_udp(4),
+        )));
+        let d = capture_of(&packets);
+        let h = d.health();
+        assert_eq!(
+            (
+                h.transport_checksum_valid,
+                h.transport_checksum_invalid,
+                h.transport_checksum_absent,
+                h.transport_checksum_partial
+            ),
+            (1, 1, 1, 3),
+            "{h:?}"
+        );
+        assert_eq!(
+            h.transport_checksum_valid
+                + h.transport_checksum_invalid
+                + h.transport_checksum_absent
+                + h.transport_checksum_partial,
+            packets.len(),
+            "every packet is counted once"
+        );
+        assert!(h.any_checksum_invalid(), "the corrupt one still shows");
+        assert!(
+            h.uncorroborated_layers().is_empty(),
+            "one verified segment corroborates the layer: {h:?}"
+        );
+        assert_eq!(CaptureReport::of(&d).reasons(), alloc::vec![]);
+    }
+
+    /// A layer of real failures AND unfinished segments, with nothing verified,
+    /// is named: the unfinished ones add nothing to `valid` and take nothing
+    /// from `invalid`, so the failures decide exactly as they did before the
+    /// state existed.
+    #[test]
+    fn real_failures_beside_partial_segments_are_still_judged_by_the_failures() {
+        use crate::datagram_tests::{framed_keepalive, tcp_packet};
+        let ka = framed_keepalive();
+        let mut corrupt = tcp_packet(1003, &ka);
+        corrupt[14 + 20 + 16] ^= 0xFF;
+        let d = capture_of(&[offloaded(tcp_packet(1000, &ka), ka.len()), corrupt]);
+        let h = d.health();
+        assert_eq!(
+            (
+                h.transport_checksum_valid,
+                h.transport_checksum_invalid,
+                h.transport_checksum_partial
+            ),
+            (0, 1, 1),
+            "{h:?}"
+        );
+        assert_eq!(h.uncorroborated_layers(), alloc::vec!["transport"], "{h:?}");
+        assert_eq!(
+            CaptureReport::of(&d).reasons(),
+            alloc::vec![VerdictReason::ChecksumsUncorroborated]
+        );
+    }
+
+    /// An offloaded UDP datagram that arrives as IP FRAGMENTS is judged where
+    /// the whole datagram first exists, by the same rule, and lands in the same
+    /// bucket as the unfragmented one.
+    #[test]
+    fn a_reassembled_offloaded_datagram_is_counted_partial() {
+        let mut udp = zenoh_udp(40);
+        wz_packet_fixtures::fill_offload_checksum(&[10, 0, 0, 1], &[10, 0, 0, 2], 17, &mut udp);
+        let mut d = crate::Dissection::new();
+        push_fragmented_carrier(&mut d, 17, 0x4321, 0, &udp);
+        d.finish();
+        let h = d.health();
+        assert_eq!(
+            (
+                h.transport_checksum_valid,
+                h.transport_checksum_invalid,
+                h.transport_checksum_partial
+            ),
+            (0, 0, 1),
+            "{h:?}"
+        );
+    }
+
+    /// THE CONTROL: a capture that held no offloaded segment reads exactly as it
+    /// did before the state existed, with a zero under the new key.
+    ///
+    /// The two `streams` objects below were printed by this module's own
+    /// builders on the tree BEFORE the state was added, and the new key is the
+    /// only difference from them. They are pinned as text because the claim is
+    /// about bytes: a counter that moved, a key that changed position or a value
+    /// that gained a digit would pass a containment check.
+    #[test]
+    fn a_capture_without_an_offloaded_segment_reads_as_it_did_with_a_zero_added() {
+        use crate::datagram_tests::{framed_keepalive, tcp_packet};
+        let ka = framed_keepalive();
+        let clean = capture_of(&[
+            tcp_packet(1000, &ka),
+            tcp_packet(1000 + ka.len() as u32, &ka),
+        ]);
+        assert_eq!(
+            streams_object(&health_json(&clean)),
+            "\"streams\":{\"retransmits\":0,\"out_of_order\":0,\"partial_overlaps\":0,\
+             \"ip_checksum_valid\":2,\"ip_checksum_invalid\":0,\"ip_checksum_absent\":0,\
+             \"transport_checksum_valid\":2,\"transport_checksum_invalid\":0,\
+             \"transport_checksum_absent\":0,\"transport_checksum_partial\":0,\
+             \"tunnel_checksum_valid\":0,\"tunnel_checksum_invalid\":0,\
+             \"tunnel_checksum_absent\":2}"
+        );
+        assert!(health_json(&clean).ends_with("\"uncorroborated_layers\":[]}"));
+
+        let mut corrupt = tcp_packet(1000, &ka);
+        corrupt[14 + 20 + 16] ^= 0xFF;
+        let bad = capture_of(&[corrupt]);
+        assert_eq!(
+            streams_object(&health_json(&bad)),
+            "\"streams\":{\"retransmits\":0,\"out_of_order\":0,\"partial_overlaps\":0,\
+             \"ip_checksum_valid\":1,\"ip_checksum_invalid\":0,\"ip_checksum_absent\":0,\
+             \"transport_checksum_valid\":0,\"transport_checksum_invalid\":1,\
+             \"transport_checksum_absent\":0,\"transport_checksum_partial\":0,\
+             \"tunnel_checksum_valid\":0,\"tunnel_checksum_invalid\":0,\
+             \"tunnel_checksum_absent\":1}"
+        );
+        assert!(health_json(&bad).ends_with("\"uncorroborated_layers\":[\"transport\"]}"));
+    }
+
+    /// The `"streams":{...}` member of a health document, braces included.
+    fn streams_object(doc: &str) -> &str {
+        let start = doc
+            .find("\"streams\":{")
+            .expect("a health document has streams");
+        let end = start + doc[start..].find('}').expect("the object closes") + 1;
+        &doc[start..end]
     }
 
     /// R311y715 (§C G1) — a WIRE-ACCOUNTED loss reaches the verdict.

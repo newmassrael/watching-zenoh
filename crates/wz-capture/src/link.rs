@@ -845,12 +845,35 @@ impl FlowKey {
 /// ## Why it reports instead of dropping, which is not timidity
 ///
 /// A NIC computes TX checksums in hardware, so a capture taken on the SENDING
-/// host routinely sees zeroed or stale fields — the packet is fine and the
-/// checksum has not been filled in yet. Dropping on a bad checksum would make
-/// a loopback or same-host capture disappear almost entirely, which is exactly
-/// the case a developer captures most. Wireshark defaults its own validation
-/// off for this reason. The verdict is therefore evidence a reader can weigh,
-/// not a gate this crate applies on their behalf.
+/// host routinely sees a field the card has not finished — the packet is fine
+/// and the checksum has not been completed yet. Dropping on a bad checksum
+/// would make a loopback or same-host capture disappear almost entirely, which
+/// is exactly the case a developer captures most. Wireshark defaults its own
+/// validation off for this reason. The verdict is therefore evidence a reader
+/// can weigh, not a gate this crate applies on their behalf.
+///
+/// # What the unfinished field holds
+///
+/// Not zero and not stale, which is what this comment said until real Linux
+/// loopback captures were measured. The stack leaves in the field the
+/// pseudo-header sum, folded to 16 bits and NOT complemented, and the card adds
+/// the segment to it. Eleven captures taken on the loopback interface held
+/// 2 044 TCP and UDP segments, checked against an independent RFC 1071 sum:
+/// 2 035 failed the full verification, every one of them with a field equal to
+/// that folded sum and none with any other value. The value is a function of
+/// the headers alone, so it can be recognised, and
+/// [`TransportChecksum::Partial`] is the verdict that names it.
+///
+/// Only the Linux loopback shape over IPv4 and TCP was seen in a real capture.
+/// The kernel source that writes the IPv6 TCP field was read in the kernel
+/// headers at `include/net/ip6_checksum.h` (`__tcp_v6_send_check`:
+/// `th->check = ~tcp_v6_check(skb->len, saddr, daddr, 0)`, and `tcp_v6_check`
+/// returns the complemented fold, so the field is the fold itself). The IPv4
+/// TCP writer is a `.c` file that was not at hand, and its convention is known
+/// from the captures above; no UDP segment was seen offloaded and the UDP
+/// writers were not at hand either. UDP, IPv6 and the tunnelled inner level go
+/// through the same function here because the mechanism is the same; their
+/// bytes are covered by built packets only.
 ///
 /// This crate's own fixtures write zero checksums, and they keep working
 /// precisely because nothing acts on the verdict.
@@ -863,8 +886,8 @@ pub struct Checksums {
     /// The TCP or UDP checksum. `None` when a UDP datagram over IPv4 carried
     /// zero, which is the sender explicitly DECLINING to compute one
     /// (RFC 768) rather than getting it wrong. Over IPv6 zero is illegal and
-    /// reports `Some(false)`.
-    pub transport: Option<bool>,
+    /// reports [`TransportChecksum::Invalid`].
+    pub transport: Option<TransportChecksum>,
     /// Round 2014 (item 261) — the CARRIER's own checksum, folded across every
     /// GRE header in the chain that carried one.
     ///
@@ -892,9 +915,45 @@ pub struct Checksums {
 impl Checksums {
     /// `true` when a checksum was present and did not verify — the only state
     /// that is evidence of corruption rather than of absence.
+    ///
+    /// A [`TransportChecksum::Partial`] is NOT one: the transmit path left it
+    /// unfinished, which says nothing about the wire either way.
     pub fn any_invalid(&self) -> bool {
-        self.ip == Some(false) || self.transport == Some(false) || self.tunnel == Some(false)
+        self.ip == Some(false)
+            || self.transport == Some(TransportChecksum::Invalid)
+            || self.tunnel == Some(false)
     }
+}
+
+/// What a TCP or UDP checksum said, when it said anything.
+///
+/// A THIRD verdict beside valid and invalid, and it exists because the two
+/// cannot honestly describe a packet captured on the sending host. The field of
+/// such a packet is neither correct nor wrong: the card has not run yet, so it
+/// holds the sum the card starts from. Counting it `Invalid` made every
+/// loopback capture read as entirely corrupt; counting it `Valid` would claim
+/// the payload was verified when nothing about the payload was.
+///
+/// A packet that carries no checksum at all (a UDP datagram over IPv4 with a
+/// zero field) has no verdict and is `None` in [`Checksums::transport`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TransportChecksum {
+    /// The one's complement sum over the pseudo-header and the whole segment
+    /// came out right.
+    Valid,
+    /// It did not, and the field is not what a transmit offload leaves. This is
+    /// the verdict that is evidence of a damaged or forged segment.
+    Invalid,
+    /// It did not come out right, and the field holds exactly the folded
+    /// pseudo-header sum of this packet: what the sending host leaves for its
+    /// card to finish.
+    ///
+    /// NOT VERIFIABLE AT CAPTURE TIME, which is a different statement from
+    /// good. A segment damaged after the stack stamped it carries the same
+    /// field, and so does one that left intact, so this verdict cannot tell
+    /// them apart and does not try. It is counted on its own and never as
+    /// `Valid` or `Invalid`.
+    Partial,
 }
 
 /// One TCP segment lifted out of a captured packet.
@@ -2093,7 +2152,7 @@ pub fn reassembled_transport_checksum(
     dst: &Endpoint,
     proto: u8,
     payload: &[u8],
-) -> Option<bool> {
+) -> Option<TransportChecksum> {
     transport_checksum(src, dst, proto, payload)
 }
 
@@ -2161,10 +2220,20 @@ fn ones_complement(bytes: &[u8], seed: u32) -> u16 {
     if let [last] = chunks.remainder() {
         sum += u32::from(u16::from_be_bytes([*last, 0]));
     }
+    !fold_carries(sum)
+}
+
+/// A 32-bit running sum folded to 16 bits by adding the carries back in
+/// (RFC 1071 §1), WITHOUT the final complement.
+///
+/// Split out of [`ones_complement`] because two readers need the fold and only
+/// one of them wants it inverted: the checksum field is the inverted fold, and
+/// the value a transmit offload leaves in it is the fold itself.
+fn fold_carries(mut sum: u32) -> u16 {
     while (sum >> 16) != 0 {
         sum = (sum & 0xFFFF) + (sum >> 16);
     }
-    !(sum as u16)
+    sum as u16
 }
 
 /// The IPv4 header checksum, verified over the header as captured.
@@ -2177,8 +2246,35 @@ fn ipv4_header_ok(header: &[u8]) -> bool {
 /// `None` means the sender declined: a UDP datagram over IPv4 whose field is
 /// zero carried no checksum at all (RFC 768), which is legal and is NOT a
 /// failure. Over IPv6 the checksum is mandatory, so zero there is a real
-/// `Some(false)`.
-fn transport_checksum(src: &Endpoint, dst: &Endpoint, proto: u8, body: &[u8]) -> Option<bool> {
+/// [`TransportChecksum::Invalid`].
+///
+/// # Three verdicts, decided in this order
+///
+/// 1. The full sum verifies: `Valid`.
+/// 2. It does not, and the field EQUALS the pseudo-header sum folded to 16
+///    bits and not complemented: `Partial`. That is the value a sending host
+///    leaves for its card to finish, and it is a function of the addresses, the
+///    protocol and the length alone.
+/// 3. Anything else that fails: `Invalid`.
+///
+/// The order matters only at one point, and it is the point of the function: a
+/// segment whose genuine checksum happens to equal the folded pseudo-header sum
+/// verifies, so step 1 claims it before step 2 can call it unfinished. Step 2
+/// reads the field, never the payload, so it cannot tell a segment that left
+/// intact from one damaged afterwards; that is why its verdict says "not
+/// verifiable" and not "good".
+///
+/// The pseudo-header is built here once for both questions. For IPv6 it is the
+/// layout of RFC 8200 §8.1 (the 32-bit upper-layer length and the next header,
+/// which is the upper-layer protocol after the extension chain), for IPv4 that
+/// of RFC 793; the word sum below covers both because the address length
+/// differs and nothing else does.
+fn transport_checksum(
+    src: &Endpoint,
+    dst: &Endpoint,
+    proto: u8,
+    body: &[u8],
+) -> Option<TransportChecksum> {
     // The field sits at offset 16 in TCP and 6 in UDP.
     let field_at = if proto == IP_PROTO_TCP { 16 } else { 6 };
     if body.len() < field_at + 2 {
@@ -2200,7 +2296,13 @@ fn transport_checksum(src: &Endpoint, dst: &Endpoint, proto: u8, body: &[u8]) ->
     seed += u32::from(proto as u16);
     seed += (len >> 16) & 0xFFFF;
     seed += len & 0xFFFF;
-    Some(ones_complement(body, seed) == 0)
+    Some(if ones_complement(body, seed) == 0 {
+        TransportChecksum::Valid
+    } else if field == fold_carries(seed) {
+        TransportChecksum::Partial
+    } else {
+        TransportChecksum::Invalid
+    })
 }
 
 /// A raweth (L2) frame, or `None` if this is not one.
@@ -3648,7 +3750,11 @@ mod tests {
     fn a_correctly_checksummed_packet_verifies() {
         let c = checksums_of(&GOOD_CHECKSUM_PKT);
         assert_eq!(c.ip, Some(true), "the IPv4 header checksum must verify");
-        assert_eq!(c.transport, Some(true), "the UDP checksum must verify");
+        assert_eq!(
+            c.transport,
+            Some(TransportChecksum::Valid),
+            "the UDP checksum must verify"
+        );
         assert!(!c.any_invalid());
     }
 
@@ -3661,7 +3767,11 @@ mod tests {
         body[44] ^= 0xFF;
         let c = checksums_of(&body);
         assert_eq!(c.ip, Some(true), "the IP header was not touched");
-        assert_eq!(c.transport, Some(false), "a flipped payload byte must show");
+        assert_eq!(
+            c.transport,
+            Some(TransportChecksum::Invalid),
+            "a flipped payload byte must show"
+        );
         assert!(c.any_invalid());
 
         // The IP TTL is covered by the IP checksum and is NOT in the UDP
@@ -3670,7 +3780,11 @@ mod tests {
         ttl[22] ^= 0xFF;
         let c = checksums_of(&ttl);
         assert_eq!(c.ip, Some(false), "a flipped TTL must show");
-        assert_eq!(c.transport, Some(true), "the UDP body was not touched");
+        assert_eq!(
+            c.transport,
+            Some(TransportChecksum::Valid),
+            "the UDP body was not touched"
+        );
     }
 
     /// A UDP datagram over IPv4 with a ZERO checksum declined to compute one
@@ -3716,6 +3830,313 @@ mod tests {
             }
             other => panic!("expected a raweth datagram, got {other:?}"),
         }
+    }
+
+    // ---- transmit offload: the partial checksum ----------------------------
+    //
+    // A capture taken on the SENDING host sees a segment before its network
+    // card has finished the checksum, and the field then holds the pseudo-header
+    // sum folded to 16 bits and not complemented. Every expected value in this
+    // section is laid by `wz_packet_fixtures`, which shares no code with the
+    // reader's sum, and the two literals are worked by hand in the comments.
+
+    /// What the transport checksum of the TCP segment or UDP datagram in `pkt`
+    /// said.
+    #[track_caller]
+    fn transport_verdict(pkt: &[u8]) -> Option<TransportChecksum> {
+        match decapsulate(LINKTYPE_ETHERNET, 0, pkt) {
+            Ok(Transport::Tcp(s)) => s.checksums.transport,
+            Ok(Transport::Udp(d)) => d.checksums.transport,
+            other => panic!("expected a TCP segment or a datagram, got {other:?}"),
+        }
+    }
+
+    /// An IPv4 packet whose HEADER checksum is real, so that the transport
+    /// verdict is the only thing in play.
+    fn ipv4_datagram(src: [u8; 4], dst: [u8; 4], proto: u8, body: &[u8]) -> Vec<u8> {
+        let mut ip = vec![0x45u8, 0];
+        ip.extend_from_slice(&((20 + body.len()) as u16).to_be_bytes());
+        ip.extend_from_slice(&[0, 0, 0, 0, 64, proto, 0, 0]);
+        ip.extend_from_slice(&src);
+        ip.extend_from_slice(&dst);
+        wz_packet_fixtures::fill_ipv4_checksum(&mut ip);
+        ip.extend_from_slice(body);
+        ip
+    }
+
+    fn eth_wrap_ipv4(ip: &[u8]) -> Vec<u8> {
+        let mut eth = vec![0u8; 12];
+        eth.extend_from_slice(&ETHERTYPE_IPV4.to_be_bytes());
+        eth.extend_from_slice(ip);
+        eth
+    }
+
+    /// THE DEFECT, in the four shapes a consumer measured it, laid with this
+    /// crate's own builders.
+    ///
+    /// Loopback `127.0.0.1` to itself, protocol 6, a 63-byte segment: the
+    /// pseudo-header sum is `0x7f00 + 0x0001 + 0x7f00 + 0x0001 + 0x0006 +
+    /// 0x003f = 0xfe47`, which needs no folding. A is the segment as the
+    /// sending host leaves it, B the same segment with its full checksum, C is
+    /// B with a payload byte flipped and D is A with one flipped.
+    ///
+    /// D is `Partial` and that is the contract and not a leak in it: the field
+    /// of an offloaded segment cannot vouch for the payload, so a segment
+    /// damaged after the stack wrote the field is indistinguishable from one
+    /// that left intact, and the verdict says only that nothing was verified.
+    #[test]
+    fn a_segment_left_for_the_nic_to_finish_reads_partial_and_not_invalid() {
+        let lo = [127, 0, 0, 1];
+        let seg = tcp_body(50_000, 7447, 1000, 0x18, &[0x5A; 43]);
+        assert_eq!(seg.len(), 63, "the hand-worked sum is for length 63");
+        let read = |seg: &[u8]| {
+            transport_verdict(&eth_wrap_ipv4(&ipv4_datagram(lo, lo, IP_PROTO_TCP, seg)))
+        };
+
+        let mut a = seg.clone();
+        wz_packet_fixtures::fill_offload_checksum(&lo, &lo, IP_PROTO_TCP, &mut a);
+        assert_eq!(
+            [a[16], a[17]],
+            [0xfe, 0x47],
+            "the offload field is the sum worked by hand above"
+        );
+        assert_eq!(read(&a), Some(TransportChecksum::Partial), "A");
+
+        let mut b = seg.clone();
+        wz_packet_fixtures::fill_tcp_checksum(lo, lo, &mut b);
+        assert_ne!(
+            [b[16], b[17]],
+            [0xfe, 0x47],
+            "B must be a FULL checksum, or A and B are one case"
+        );
+        assert_eq!(read(&b), Some(TransportChecksum::Valid), "B");
+
+        let mut c = b.clone();
+        c[62] ^= 0x01;
+        assert_eq!(read(&c), Some(TransportChecksum::Invalid), "C");
+
+        let mut d = a.clone();
+        d[62] ^= 0x01;
+        assert_eq!(
+            read(&d),
+            Some(TransportChecksum::Partial),
+            "D: indistinguishable from A, which is why the verdict is `not \
+             verifiable` and never `good`"
+        );
+    }
+
+    /// A failing field that is NOT the offload form stays `Invalid`, in each
+    /// way it can miss.
+    ///
+    /// Zero is what an unfinished fixture writes. The complement is what a
+    /// reader comparing against the wrong polarity would take for the offload
+    /// form. One off is the nearest miss. The addresses are chosen so that the
+    /// pseudo-header sum overflows 16 bits, which makes the carry's fold
+    /// visible: the sum with its carry dropped is one short of the folded one,
+    /// so a reader that truncated instead of folding would fail the control
+    /// and accept that last case.
+    #[test]
+    fn a_failing_field_that_is_not_the_offload_form_stays_invalid() {
+        let (src, dst) = ([192, 168, 1, 2], [192, 168, 1, 3]);
+        let seg = tcp_body(50_000, 7447, 1000, 0x18, b"zenoh");
+        let mut offload = seg.clone();
+        wz_packet_fixtures::fill_offload_checksum(&src, &dst, IP_PROTO_TCP, &mut offload);
+        let sum = u16::from_be_bytes([offload[16], offload[17]]);
+        let read = |field: u16| {
+            let mut s = seg.clone();
+            s[16..18].copy_from_slice(&field.to_be_bytes());
+            transport_verdict(&eth_wrap_ipv4(&ipv4_datagram(src, dst, IP_PROTO_TCP, &s)))
+        };
+        assert_eq!(read(sum), Some(TransportChecksum::Partial), "the control");
+        assert_eq!(read(0), Some(TransportChecksum::Invalid), "zero");
+        assert_eq!(read(!sum), Some(TransportChecksum::Invalid), "complemented");
+        assert_eq!(read(sum ^ 1), Some(TransportChecksum::Invalid), "one off");
+        assert_eq!(
+            read(sum.wrapping_sub(1)),
+            Some(TransportChecksum::Invalid),
+            "the sum with its carry dropped"
+        );
+    }
+
+    /// The order of the two questions: the full verification is asked FIRST.
+    ///
+    /// A segment whose genuine checksum happens to equal its own folded
+    /// pseudo-header sum verifies, and calling it unfinished would throw away a
+    /// real verification. The payload is searched for rather than chosen, so
+    /// the case exists whatever the addresses are.
+    #[test]
+    fn a_segment_whose_real_checksum_equals_the_pseudo_header_sum_is_valid() {
+        let (src, dst) = ([10, 0, 0, 1], [10, 0, 0, 2]);
+        let mut found = false;
+        for word in 0..=u16::MAX {
+            let mut full = tcp_body(50_000, 7447, 1000, 0x18, &word.to_be_bytes());
+            let mut partial = full.clone();
+            wz_packet_fixtures::fill_tcp_checksum(src, dst, &mut full);
+            wz_packet_fixtures::fill_offload_checksum(&src, &dst, IP_PROTO_TCP, &mut partial);
+            if full[16..18] != partial[16..18] {
+                continue;
+            }
+            found = true;
+            assert_eq!(
+                transport_verdict(&eth_wrap_ipv4(&ipv4_datagram(
+                    src,
+                    dst,
+                    IP_PROTO_TCP,
+                    &full
+                ))),
+                Some(TransportChecksum::Valid),
+                "payload word {word:#06x}: a checksum that verifies is valid \
+                 even when it equals the offload form"
+            );
+            break;
+        }
+        assert!(found, "no payload word made the two sums coincide");
+    }
+
+    /// A header-only RST that verifies is `Valid`: the stack finishes the
+    /// checksum of a reset in software, so it is the one segment on a loopback
+    /// capture that really verifies.
+    #[test]
+    fn a_zero_length_reset_that_verifies_is_valid() {
+        let (src, dst) = ([127, 0, 0, 1], [127, 0, 0, 1]);
+        let mut rst = tcp_body(50_000, 7447, 1000, 0x04, &[]);
+        assert_eq!(rst.len(), 20, "a header and no payload");
+        wz_packet_fixtures::fill_tcp_checksum(src, dst, &mut rst);
+        assert_eq!(
+            transport_verdict(&eth_wrap_ipv4(&ipv4_datagram(src, dst, IP_PROTO_TCP, &rst))),
+            Some(TransportChecksum::Valid)
+        );
+    }
+
+    /// The same rule over every family the function serves: UDP over IPv4,
+    /// TCP and UDP over IPv6. Only Linux loopback IPv4 TCP was seen in a real
+    /// capture, so these are built packets and the claim is that the rule is
+    /// one rule, not that every card does it.
+    ///
+    /// The IPv4 addresses are chosen so that their sum overflows 16 bits: with
+    /// `127.0.0.1` a reader that kept only the low 16 bits of the sum would be
+    /// right by accident. The IPv6 pair pins the 128-bit pseudo-header: a TCP
+    /// header and no payload under `fe80::1` and `fe80::2` sums to `0xfd1e`,
+    /// worked in the fixtures crate.
+    #[test]
+    fn the_offload_form_is_recognised_over_udp_and_over_ipv6() {
+        let (src, dst) = ([192, 168, 1, 2], [192, 168, 1, 3]);
+        let udp = udp_body(7447, 40000, b"scout");
+
+        let mut p = udp.clone();
+        wz_packet_fixtures::fill_offload_checksum(&src, &dst, IP_PROTO_UDP, &mut p);
+        assert_eq!(
+            transport_verdict(&eth_wrap_ipv4(&ipv4_datagram(src, dst, IP_PROTO_UDP, &p))),
+            Some(TransportChecksum::Partial),
+            "UDP over IPv4, offloaded"
+        );
+        let mut f = udp.clone();
+        wz_packet_fixtures::fill_udp_checksum(src, dst, &mut f);
+        assert_eq!(
+            transport_verdict(&eth_wrap_ipv4(&ipv4_datagram(src, dst, IP_PROTO_UDP, &f))),
+            Some(TransportChecksum::Valid),
+            "UDP over IPv4, finished"
+        );
+        assert_eq!(
+            transport_verdict(&eth_wrap_ipv4(&ipv4_datagram(src, dst, IP_PROTO_UDP, &udp))),
+            None,
+            "UDP over IPv4 with a zero field declined to compute one: absent, \
+             and the offload rule must not touch it"
+        );
+
+        // TCP over IPv6: `0xfd1e` for a bare header, by hand.
+        let mut tcp6 = tcp_body(50_000, 7447, 1000, 0x10, &[]);
+        wz_packet_fixtures::fill_offload_checksum(&V6_A, &V6_B, IP_PROTO_TCP, &mut tcp6);
+        assert_eq!([tcp6[16], tcp6[17]], [0xfd, 0x1e]);
+        assert_eq!(
+            transport_verdict(&eth_ipv6(V6_A, V6_B, IP_PROTO_TCP, &tcp6)),
+            Some(TransportChecksum::Partial),
+            "TCP over IPv6, offloaded"
+        );
+
+        // UDP over IPv6, and the zero rule that stays IPv4's: a zero field is
+        // illegal over IPv6, so it is a failure and not an absence, and it is
+        // not the offload form either.
+        let udp6 = udp_body(7447, 7447, b"scout");
+        let mut p6 = udp6.clone();
+        wz_packet_fixtures::fill_offload_checksum(&V6_A, &V6_B, IP_PROTO_UDP, &mut p6);
+        assert_eq!(
+            transport_verdict(&eth_ipv6(V6_A, V6_B, IP_PROTO_UDP, &p6)),
+            Some(TransportChecksum::Partial),
+            "UDP over IPv6, offloaded"
+        );
+        assert_eq!(
+            transport_verdict(&eth_ipv6(V6_A, V6_B, IP_PROTO_UDP, &udp6)),
+            Some(TransportChecksum::Invalid),
+            "a zero UDP field over IPv6 is wrong, not declined"
+        );
+        // And the pseudo-header is the IPv6 one: the same segment under a
+        // destination whose last byte differs no longer matches.
+        let mut other = V6_B;
+        other[15] ^= 0x10;
+        assert_eq!(
+            transport_verdict(&eth_ipv6(V6_A, other, IP_PROTO_UDP, &p6)),
+            Some(TransportChecksum::Invalid),
+            "the field belongs to the addresses it was stamped for"
+        );
+    }
+
+    /// The tunnel's INNER segment is judged against the INNER addresses, and a
+    /// reassembled datagram by the same function.
+    ///
+    /// The carrier here is IPv4-in-IPv4 on `10.0.0.1` and `10.0.0.2`. A field
+    /// stamped for the carrier's addresses is therefore not the inner
+    /// segment's offload form, so it reads `Invalid`; one stamped for the inner
+    /// addresses reads `Partial`.
+    #[test]
+    fn the_inner_segment_of_a_tunnel_and_a_reassembled_datagram_follow_the_same_rule() {
+        let (src, dst) = ([192, 168, 0, 1], [192, 168, 0, 2]);
+        let inner = |stamped_for: ([u8; 4], [u8; 4])| {
+            let mut seg = tcp_body(50_000, 7447, 1000, 0x10, b"hi");
+            wz_packet_fixtures::fill_offload_checksum(
+                &stamped_for.0,
+                &stamped_for.1,
+                IP_PROTO_TCP,
+                &mut seg,
+            );
+            let ip = ipv4_datagram(src, dst, IP_PROTO_TCP, &seg);
+            transport_verdict(&eth_ipv4_carrier(IP_PROTO_IPV4_IN_IP, &ip))
+        };
+        assert_eq!(inner((src, dst)), Some(TransportChecksum::Partial));
+        assert_eq!(
+            inner(([10, 0, 0, 1], [10, 0, 0, 2])),
+            Some(TransportChecksum::Invalid),
+            "a field stamped for the carrier's addresses is not the inner \
+             segment's offload form"
+        );
+
+        // `reassembled_transport_checksum` is the door the fragment table uses.
+        let (s, d) = (Endpoint::new(&src, 0), Endpoint::new(&dst, 0));
+        let mut udp = udp_body(7447, 40000, &[7u8; 3000]);
+        wz_packet_fixtures::fill_offload_checksum(&src, &dst, IP_PROTO_UDP, &mut udp);
+        assert_eq!(
+            reassembled_transport_checksum(&s, &d, IP_PROTO_UDP, &udp),
+            Some(TransportChecksum::Partial)
+        );
+        wz_packet_fixtures::fill_udp_checksum(src, dst, &mut udp);
+        assert_eq!(
+            reassembled_transport_checksum(&s, &d, IP_PROTO_UDP, &udp),
+            Some(TransportChecksum::Valid)
+        );
+    }
+
+    /// `any_invalid` is the question "is there evidence of corruption", and an
+    /// unfinished checksum is not.
+    #[test]
+    fn a_partial_checksum_is_not_evidence_of_corruption() {
+        let with = |transport| Checksums {
+            ip: Some(true),
+            transport,
+            tunnel: None,
+        };
+        assert!(!with(Some(TransportChecksum::Partial)).any_invalid());
+        assert!(!with(Some(TransportChecksum::Valid)).any_invalid());
+        assert!(with(Some(TransportChecksum::Invalid)).any_invalid());
     }
 
     // ---- R311y597: raweth (L2) ---------------------------------------------

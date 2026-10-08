@@ -625,6 +625,83 @@ fn the_fixtures_this_file_builds_are_checksum_clean() {
     );
 }
 
+/// A capture taken on the SENDING host, through the binary: its segments are
+/// `partial`, none is `invalid`, and the layer is still named uncorroborated.
+///
+/// The checksum field of each segment is what a host's stack leaves for its
+/// network card to finish, the folded and not complemented pseudo-header sum,
+/// laid by the fixtures crate and not by the reader. The text page, the
+/// machine document and the verdict are asked together because they are three
+/// renderings of one rule, and an agreement between two of them would not show
+/// the third drifting.
+#[test]
+fn an_offloaded_capture_reads_partial_and_never_invalid_through_the_binary() {
+    let scratch = Scratch::new("offload");
+    let keepalive = [1u8, 0, wz_session_core::wire_const::T_MID_KEEP_ALIVE];
+    let packets: Vec<Vec<u8>> = (0..4u32)
+        .map(|i| {
+            let mut p = tcp_packet(1000 + 3 * i, &keepalive);
+            wz_packet_fixtures::fill_offload_checksum(
+                &[10, 0, 0, 1],
+                &[10, 0, 0, 2],
+                6,
+                &mut p[14 + 20..14 + 20 + 20 + keepalive.len()],
+            );
+            p
+        })
+        .collect();
+    let records: Vec<(u32, u32, &[u8])> = packets
+        .iter()
+        .enumerate()
+        .map(|(i, p)| (0, 1_000 * (i as u32 + 1), p.as_slice()))
+        .collect();
+    let capture = scratch.write(
+        "offload.pcap",
+        &wz_capture::pcap::write(wz_capture::link::LINKTYPE_ETHERNET, &records),
+    );
+
+    let json = Command::new(env!("CARGO_BIN_EXE_wz-analyze"))
+        .arg(&capture)
+        .arg("--health")
+        .arg("--json")
+        .output()
+        .expect("the binary runs");
+    let json = String::from_utf8_lossy(&json.stdout).into_owned();
+    assert!(
+        json.contains(
+            "\"transport_checksum_valid\":0,\"transport_checksum_invalid\":0,\
+             \"transport_checksum_absent\":0,\"transport_checksum_partial\":4,"
+        ),
+        "four segments, every one unfinished: {json}"
+    );
+    assert!(
+        json.contains("\"uncorroborated_layers\":[\"transport\"]"),
+        "nothing on the layer verified, so it is named: {json}"
+    );
+    // The report's own failure count is the count of failures, and none failed.
+    assert!(
+        json.contains("\"transport_checksum_invalid\":0")
+            && !json.contains("\"transport_checksum_invalid\":4"),
+        "{json}"
+    );
+    assert!(
+        json.contains("checksums_uncorroborated"),
+        "the verdict reads the same rule as the document: {json}"
+    );
+
+    let text = Command::new(env!("CARGO_BIN_EXE_wz-analyze"))
+        .arg(&capture)
+        .arg("--health")
+        .output()
+        .expect("the binary runs");
+    let text = String::from_utf8_lossy(&text.stdout).into_owned();
+    assert!(
+        text.contains("transport 0 valid / 0 invalid / 0 absent / 4 partial"),
+        "the page carries the fourth state: {text}"
+    );
+    assert!(text.contains("NOT CORROBORATED: transport"), "{text}");
+}
+
 /// R311y664 — the exit codes are three states and not two.
 ///
 /// 0 is a capture this reader saw whole, 1 is one it did not, and 2 is the TOOL

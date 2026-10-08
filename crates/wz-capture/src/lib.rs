@@ -3443,11 +3443,18 @@ pub struct HalfObservation {
 /// available misuse and the reason it is said here rather than left implied.
 ///
 /// **It does not fold absence into failure.** A checksum has THREE states, not
-/// two: verified, present-and-wrong, and absent. A NIC computes TX checksums in
-/// hardware, so a capture taken on the sending host routinely shows zeroed
-/// fields for perfectly good packets, and a UDP datagram over IPv4 may decline
-/// to carry one at all (RFC 768). Collapsing absent into invalid would make
-/// every loopback capture — the one a developer takes most — look corrupt.
+/// two: verified, present-and-wrong, and absent. A UDP datagram over IPv4 may
+/// decline to carry one at all (RFC 768), and collapsing absent into invalid
+/// would make every capture of such a link look corrupt.
+///
+/// **It does not fold an unfinished checksum into failure either.** A NIC
+/// computes TX checksums in hardware, so a capture taken on the sending host
+/// shows, for perfectly good packets, the sum the card starts from and not the
+/// checksum. The transport axis therefore has a FOURTH state, `partial`: the
+/// segment did not verify and its field is exactly the folded pseudo-header sum
+/// (see [`link::TransportChecksum`]). It is counted on its own and is never an
+/// `invalid` and never a `valid`. Before it existed every loopback capture — the
+/// one a developer takes most — read as entirely corrupt.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct DissectionHealth {
     /// Segments the assembler judged already-delivered, over every flow and
@@ -3467,11 +3474,24 @@ pub struct DissectionHealth {
     pub ip_checksum_absent: usize,
     /// TCP / UDP checksums that verified.
     pub transport_checksum_valid: usize,
-    /// TCP / UDP checksums that were present and did NOT verify.
+    /// TCP / UDP checksums that were present and did NOT verify, and whose
+    /// field is not what a transmit offload leaves. The state that is evidence
+    /// of a damaged segment; an offloaded one is `transport_checksum_partial`.
     pub transport_checksum_invalid: usize,
     /// Packets whose transport checksum was absent — a UDP-over-IPv4 zero
     /// (the sender declining, RFC 768) or a layer that has none.
     pub transport_checksum_absent: usize,
+    /// TCP / UDP segments that did not verify and whose field holds exactly
+    /// their own pseudo-header sum, folded to 16 bits and not complemented:
+    /// what a sending host leaves for its network card to finish.
+    ///
+    /// NOT VERIFIABLE AT CAPTURE TIME, which is a different statement from
+    /// verified. A segment damaged after the stack stamped it carries the same
+    /// field as one that left intact, so this counter cannot say the payloads
+    /// were good and does not. It is counted in none of `valid`, `invalid` and
+    /// `absent`, and a layer made only of these is uncorroborated (see
+    /// [`Self::uncorroborated_layers`]).
+    pub transport_checksum_partial: usize,
     /// Round 2014 (item 261) — GRE carrier checksums that verified.
     pub tunnel_checksum_valid: usize,
     /// Carrier checksums that were present and did NOT verify.
@@ -3518,15 +3538,32 @@ impl DissectionHealth {
     /// So this is a FINDING and not a verdict: an axis with no corroboration is
     /// worth a sentence beside the numbers, and worth nothing in the exit code.
     ///
-    /// # Why `invalid > 0 && valid == 0` rather than `invalid > 0`
+    /// # The rule, in one sentence
+    ///
+    /// A layer is uncorroborated when no checksum on it verified and at least
+    /// one was judged, either failed (`invalid`) or left unfinished by transmit
+    /// offload (`partial`); `absent` is counted on neither side.
+    ///
+    /// # Why `valid == 0` and not `invalid > 0` alone
     ///
     /// Checksum offload. A host capturing its own transmit path sees the field
-    /// before the NIC fills it, so a few wrong ones are ordinary; a layer where
-    /// nothing at all verified is the shape that says the evidence is missing
-    /// rather than the wire being bad. `absent` is counted on neither side —
-    /// IPv6 has no header checksum and a zero UDP checksum is the sender
-    /// declining (RFC 768), and a capture of either is not uncorroborated, it
-    /// is unchecked.
+    /// before the NIC fills it, so a few unfinished ones beside verified ones
+    /// are ordinary; a layer where nothing at all verified is the shape that
+    /// says the evidence is missing rather than the wire being bad. `absent` is
+    /// counted on neither side — IPv6 has no header checksum and a zero UDP
+    /// checksum is the sender declining (RFC 768), and a capture of either is
+    /// not uncorroborated, it is unchecked.
+    ///
+    /// # Why `partial` counts on the judged side
+    ///
+    /// A capture of a host's own loopback is the case this finding was written
+    /// for, and every segment in it is `partial`: nothing on the layer verified
+    /// and the statement "the evidence is missing" is exactly as true as when
+    /// those segments were counted `invalid`, which is what this reader did
+    /// until `partial` existed. What changed is only that the failure counts no
+    /// longer carry them. A layer with real failures AND unfinished segments
+    /// is judged by the failures and the verified ones as before: the unfinished
+    /// ones add nothing to `valid` and take nothing from `invalid`.
     ///
     /// Named layers rather than a bool, because the three send a reader to
     /// three different places: an IP axis usually means a rewriting device on
@@ -3534,16 +3571,32 @@ impl DissectionHealth {
     /// tunnel axis means the carrier is.
     pub fn uncorroborated_layers(&self) -> alloc::vec::Vec<&'static str> {
         let mut out = alloc::vec::Vec::new();
-        if self.ip_checksum_invalid > 0 && self.ip_checksum_valid == 0 {
+        // The IP and tunnel verdicts have no `partial` state: only the
+        // transport checksum is left unfinished by an offload.
+        if layer_uncorroborated(self.ip_checksum_valid, self.ip_checksum_invalid, 0) {
             out.push("ip");
         }
-        if self.transport_checksum_invalid > 0 && self.transport_checksum_valid == 0 {
+        if self.transport_uncorroborated() {
             out.push("transport");
         }
-        if self.tunnel_checksum_invalid > 0 && self.tunnel_checksum_valid == 0 {
+        if layer_uncorroborated(self.tunnel_checksum_valid, self.tunnel_checksum_invalid, 0) {
             out.push("tunnel");
         }
         out
+    }
+
+    /// Whether the transport layer is one of [`Self::uncorroborated_layers`].
+    ///
+    /// The completeness verdict reads this and not the list, and the list reads
+    /// it too, so the command line's `checksums_uncorroborated` reason and the
+    /// live handle's `uncorroborated_layers` key are one rule written once and
+    /// cannot disagree about a capture.
+    pub(crate) fn transport_uncorroborated(&self) -> bool {
+        layer_uncorroborated(
+            self.transport_checksum_valid,
+            self.transport_checksum_invalid,
+            self.transport_checksum_partial,
+        )
     }
 
     pub fn any_checksum_invalid(&self) -> bool {
@@ -3555,6 +3608,12 @@ impl DissectionHealth {
             // page while the one-line answer still said the capture was sound.
             || self.tunnel_checksum_invalid > 0
     }
+}
+
+/// One layer's uncorroborated rule over its counts: nothing verified, and
+/// something was judged. See [`DissectionHealth::uncorroborated_layers`].
+const fn layer_uncorroborated(valid: usize, invalid: usize, partial: usize) -> bool {
+    valid == 0 && (invalid > 0 || partial > 0)
 }
 
 /// The per-direction stream counters, summed. Kept as a type so an evicted
@@ -3790,7 +3849,12 @@ pub struct Dissection {
     /// third triple, on the same valid / invalid / absent shape as the two
     /// above it. Widened rather than given a separate pair of counters so that
     /// `tally_checksums` stays one function and cannot fall out of step.
-    checksums: [usize; 9],
+    ///
+    /// TEN since the transport axis gained `partial`. The slots are, in order:
+    /// ip valid / invalid / absent, transport valid / invalid / absent /
+    /// partial, tunnel valid / invalid / absent. `partial` sits with its own
+    /// axis and not at the end, so the three groups stay contiguous.
+    checksums: [usize; 10],
     /// R311y713 (§B1) — everything the flows that have LEFT are still owed.
     ///
     /// One value where R311y605 / R311y610 / R311y650 / R311y656 / R311y666
@@ -3942,7 +4006,7 @@ impl Default for Dissection {
             serial_session: new_session(DissectionLimits::default().reassembly_window_ms),
             limits: DissectionLimits::default(),
             drops: DissectionDrops::default(),
-            checksums: [0; 9],
+            checksums: [0; 10],
             carry: exit::ExitCarry::default(),
             fragments: frag::FragmentTable::default(),
             #[cfg(feature = "reassembly")]
@@ -4127,9 +4191,10 @@ impl Dissection {
             transport_checksum_valid: self.checksums[3],
             transport_checksum_invalid: self.checksums[4],
             transport_checksum_absent: self.checksums[5],
-            tunnel_checksum_valid: self.checksums[6],
-            tunnel_checksum_invalid: self.checksums[7],
-            tunnel_checksum_absent: self.checksums[8],
+            transport_checksum_partial: self.checksums[6],
+            tunnel_checksum_valid: self.checksums[7],
+            tunnel_checksum_invalid: self.checksums[8],
+            tunnel_checksum_absent: self.checksums[9],
             packets_skipped: self.skipped.len() + self.drops.skipped,
             // R311y746 (debt-carry-N11) — `self.drops()` and NOT the raw field.
             // `drops()` composes `flows` from the retirement count (R311y713
@@ -4414,9 +4479,13 @@ impl Dissection {
             None => 2,
         }] += 1;
         self.checksums[match c.transport {
-            Some(true) => 3,
-            Some(false) => 4,
+            Some(link::TransportChecksum::Valid) => 3,
+            Some(link::TransportChecksum::Invalid) => 4,
             None => 5,
+            // Its own slot, and it must not share one: a partial counted as
+            // `invalid` is the defect this state exists to end, and counted as
+            // `valid` it would claim a payload was verified that never was.
+            Some(link::TransportChecksum::Partial) => 6,
         }] += 1;
         // Round 2014 (item 261) — the CARRIER's verdict, tallied in the same
         // breath as the two above it. `absent` is the answer for every
@@ -4424,9 +4493,9 @@ impl Dissection {
         // point: an absent verdict is now a REPORTED absence rather than a
         // judgement nobody made.
         self.checksums[match c.tunnel {
-            Some(true) => 6,
-            Some(false) => 7,
-            None => 8,
+            Some(true) => 7,
+            Some(false) => 8,
+            None => 9,
         }] += 1;
     }
 

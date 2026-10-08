@@ -2222,8 +2222,12 @@ int main(void) {
      * ran the crate tests, and left this at 1, which only this lane can see.
      * R2630 (item 745) -- 4: the health object's `dropped_by_limits` gains
      * `scouting`, a key `datagram_flows[]` rows already carried undeclared.
-     * 5: the summary's counters follow the integer line (see the census). */
-    revisioned[1].revision = 5;
+     * 5: the summary's counters follow the integer line (see the census).
+     * 6: the transport checksum gained a fourth state, `partial`: the key
+     * `transport_checksum_partial` arrives under `health.streams`, and
+     * `transport_checksum_invalid` stops counting a segment the sender's
+     * transmit offload left unfinished. */
+    revisioned[1].revision = 6;
     revisioned[1].doc = NULL;
     rc = wz_dissect_pcap_summary(pcap, sizeof pcap, &revisioned[1].doc);
     CHECK(rc == WZ_DISSECT_OK, "summary rc=%d", rc);
@@ -2390,7 +2394,9 @@ int main(void) {
     /* (ABI 24) -- the health document, from an empty handle for the same
      * reason: an empty handle still answers. */
     revisioned[5].name = "health";
-    revisioned[5].revision = 2;
+    /* 2 when it gained `datagram_sequence`; 3 on the summary's move to 6, the
+     * same `health` object. */
+    revisioned[5].revision = 3;
     revisioned[5].doc = NULL;
     {
         wz_dissect_live *healthy = NULL;

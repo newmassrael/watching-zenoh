@@ -1842,6 +1842,37 @@ pub const DOCUMENT_HISTORY: &[DocumentShape] = &[
         planes: &[],
         carries: &[],
     },
+    // A TRANSPORT CHECKSUM THE SENDER'S OFFLOAD LEFT UNFINISHED HAS ITS OWN
+    // COUNT.
+    //
+    // ONE KEY ARRIVES, `transport_checksum_partial`, in the `health.streams`
+    // group beside `transport_checksum_{valid,invalid,absent}`. Nothing retires
+    // and no word moves.
+    //
+    // Two existing keys CHANGE MEANING in the same breath, and this table has no
+    // axis that can say so, which is why the row is the whole notice (see
+    // fields revision 23 for the precedent): `transport_checksum_invalid` no
+    // longer counts a segment whose field is exactly its own folded
+    // pseudo-header sum, which is what a host capturing its own transmit path
+    // sees before the network card finishes the checksum. Such a segment is
+    // `partial`. A consumer that read `invalid` as "the payload is damaged"
+    // read every loopback capture as entirely damaged; one that read it as
+    // "this reader could not verify it" now finds those under `partial` and
+    // must add the two. `valid` never counts a partial. A capture that held no
+    // such segment reads exactly as it did, with a zero under the new key.
+    //
+    // `health.uncorroborated_layers` keeps its meaning (nothing on the layer
+    // verified) and a layer made only of partials is named in it, as it was
+    // when those segments were counted invalid.
+    DocumentShape {
+        document: SUMMARY,
+        revision: 6,
+        keys: SUMMARY_R6_KEYS,
+        retiring: &[],
+        families: &[],
+        planes: &[],
+        carries: &[],
+    },
     DocumentShape {
         document: READABLE_SURFACES,
         revision: 1,
@@ -2220,6 +2251,22 @@ pub const DOCUMENT_HISTORY: &[DocumentShape] = &[
         document: HEALTH,
         revision: 2,
         keys: HEALTH_R2_KEYS,
+        retiring: &[],
+        families: &[],
+        planes: &[],
+        carries: &[],
+    },
+    // THE SAME TRANSPORT-CHECKSUM CHANGE AS SUMMARY REVISION 6, because the
+    // `health` key of this document is the summary's `health` object byte for
+    // byte: one key arrives, `transport_checksum_partial`, and
+    // `transport_checksum_invalid` stops counting a segment the sender's
+    // transmit offload left unfinished. A live handle on a host's own interface
+    // is where that segment is commonest, so a consumer of this door reads it
+    // first. See the summary row for what a reader must do with the two keys.
+    DocumentShape {
+        document: HEALTH,
+        revision: 3,
+        keys: HEALTH_R3_KEYS,
         retiring: &[],
         families: &[],
         planes: &[],
@@ -9869,6 +9916,204 @@ pub const CENSUS_R17_KEYS: &[&str] = &[
 /// sequence group's `missing`), not a key; see the row.
 pub const SUMMARY_R5_KEYS: &[&str] = SUMMARY_R4_KEYS;
 
+/// The summary document's key set at revision 6: revision 4's (and so 5's)
+/// PLUS `transport_checksum_partial`.
+///
+/// Written out rather than aliased, on the rule revision 7 set for a key that
+/// arrives: the set gains the one name and no other. The whole set is listed so
+/// a removal stays visible against the revision before it.
+///
+/// MEASURED off the document by the pin test in `wz-capi-dissect`, which is the
+/// one that crosses the ABI, and pasted back; see the note above
+/// `CENSUS_R1_KEYS`.
+pub const SUMMARY_R6_KEYS: &[&str] = &[
+    "bytes_absent",
+    "caps",
+    "capture_reported_drops",
+    "completed",
+    "datagram_flows",
+    "desyncs",
+    "document",
+    "dropped_by_limits",
+    "duplicates",
+    "encapsulation_depth_bound",
+    "encapsulation_too_deep",
+    "encapsulations",
+    "evicted",
+    "expired",
+    "flows",
+    "fragments",
+    "frames",
+    "frames_per_flow",
+    "framing",
+    "gap_bytes_missing",
+    "gaps",
+    "gaps_forced",
+    "gre_payload",
+    "gre_payloads",
+    "health",
+    "held",
+    "inert_counters",
+    "ip_checksum_absent",
+    "ip_checksum_invalid",
+    "ip_checksum_valid",
+    "ip_fragment_pending",
+    "ipv4_fragment",
+    "ipv6_extension_chain",
+    "ipv6_fragment",
+    "link_types",
+    "malformed",
+    "max_flows_per_table",
+    "max_scout_askers",
+    "missing",
+    "name",
+    "not_ip",
+    "not_this_protocol",
+    "not_transport",
+    "not_transport_protos",
+    "open",
+    "out_of_order",
+    "out_of_window",
+    "overlapping",
+    "partial_overlaps",
+    "pieces",
+    "recoveries",
+    "reserved_headers",
+    "resync_skipped_bytes",
+    "retransmits",
+    "revision",
+    "scout_askers",
+    "scouting",
+    "sequence",
+    "skipped",
+    "skipped_packets",
+    "skips",
+    "stream_bytes",
+    "stream_bytes_per_direction",
+    "streams",
+    "tcp_flows",
+    "too_deep_protos",
+    "total",
+    "transport_checksum_absent",
+    "transport_checksum_invalid",
+    "transport_checksum_partial",
+    "transport_checksum_valid",
+    "truncated",
+    "tunnel_checksum_absent",
+    "tunnel_checksum_invalid",
+    "tunnel_checksum_valid",
+    "unaccounted_batch_bytes",
+    "uncorroborated_layers",
+    "undefined_mandatory_exts",
+    "unfinished",
+    "unfinished_bytes",
+    "unsupported_link_type",
+    "unwalked_encapsulation",
+    "vsock_non_payload",
+    "without_resolution",
+    "ws_desyncs",
+    "ws_recoveries",
+    "ws_resync_skipped_bytes",
+];
+
+/// The health document's key set at revision 3: revision 2's PLUS
+/// `transport_checksum_partial`.
+///
+/// Written out rather than aliased, for the reason [`SUMMARY_R6_KEYS`] gives.
+/// MEASURED off the document by the pin test in `wz-capi-dissect`; see the note
+/// above `CENSUS_R1_KEYS`.
+pub const HEALTH_R3_KEYS: &[&str] = &[
+    "bytes_absent",
+    "caps",
+    "capture_reported_drops",
+    "completed",
+    "datagram",
+    "datagram_sequence",
+    "desyncs",
+    "document",
+    "dropped_by_limits",
+    "duplicates",
+    "encapsulation_depth_bound",
+    "encapsulation_too_deep",
+    "encapsulations",
+    "evicted",
+    "expired",
+    "flows",
+    "flows_seen",
+    "fragments",
+    "frames",
+    "frames_per_flow",
+    "framing",
+    "gap_bytes_missing",
+    "gaps",
+    "gaps_forced",
+    "gre_payload",
+    "gre_payloads",
+    "health",
+    "held",
+    "inert_counters",
+    "ip_checksum_absent",
+    "ip_checksum_invalid",
+    "ip_checksum_valid",
+    "ip_fragment_pending",
+    "ipv4_fragment",
+    "ipv6_extension_chain",
+    "ipv6_fragment",
+    "link_types",
+    "malformed",
+    "max_flows_per_table",
+    "max_scout_askers",
+    "missing",
+    "name",
+    "not_ip",
+    "not_this_protocol",
+    "not_transport",
+    "not_transport_protos",
+    "open",
+    "out_of_order",
+    "out_of_window",
+    "overlapping",
+    "partial_overlaps",
+    "pieces",
+    "recoveries",
+    "reserved_headers",
+    "resync_skipped_bytes",
+    "retransmits",
+    "revision",
+    "scout_askers",
+    "scouting",
+    "sequence",
+    "skipped",
+    "skipped_packets",
+    "skips",
+    "stream",
+    "stream_bytes",
+    "stream_bytes_per_direction",
+    "streams",
+    "too_deep_protos",
+    "total",
+    "transport_checksum_absent",
+    "transport_checksum_invalid",
+    "transport_checksum_partial",
+    "transport_checksum_valid",
+    "truncated",
+    "tunnel_checksum_absent",
+    "tunnel_checksum_invalid",
+    "tunnel_checksum_valid",
+    "unaccounted_batch_bytes",
+    "uncorroborated_layers",
+    "undefined_mandatory_exts",
+    "unfinished",
+    "unfinished_bytes",
+    "unsupported_link_type",
+    "unwalked_encapsulation",
+    "vsock_non_payload",
+    "without_resolution",
+    "ws_desyncs",
+    "ws_recoveries",
+    "ws_resync_skipped_bytes",
+];
+
 /// The three keys the envelope itself contributes to every document.
 ///
 /// Named rather than repeated into six tables: they are the same three keys
@@ -11346,7 +11591,10 @@ mod tests {
             // To 5 when the wire-sourced `u64` values (interest and request
             // ids, `solicited_by`, the sequence gap sum) became a number or a
             // string: the JSON type moved under stationary keys.
-            (SUMMARY, 5),
+            // To 6 when the transport checksum gained a fourth state: one key,
+            // `transport_checksum_partial`, and `transport_checksum_invalid`
+            // stopped counting a segment the sender's offload left unfinished.
+            (SUMMARY, 6),
             // R2175 (open-debt item 552) — to 3 when it gained
             // `value_families`, the catalogue of every switchable key's words.
             // R2184 (item 556) — to 4 when the `value_families` rows gained
@@ -11383,7 +11631,8 @@ mod tests {
             // object and the count of flows its stream counters are over.
             // To 2 when it gained `datagram_sequence`, the sequence group over
             // the datagram links alone.
-            (HEALTH, 2),
+            // To 3 on the summary's move to 6: the same `health` object.
+            (HEALTH, 3),
         ] {
             named.push(name);
             assert_eq!(revision(name), Some(expected), "{name}");
