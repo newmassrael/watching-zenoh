@@ -54,12 +54,15 @@
 //!
 //! The judgment is three booleans, as a consumer reports them, plus
 //! [`CounterReason`], which tells a repetition from an out-of-range step for
-//! analysis. A fourth field, [`Judgment::since_previous_valid_ms`], is
-//! INFORMATION ONLY and changes the meaning of none of the booleans: it is the
-//! silence, in milliseconds, between the previous valid reception and this
-//! reception (or poll), taken before this reception could move anything, and it
-//! is `None` when there was no previous valid reception. It is what lets a
-//! consumer still show "this valid frame came after 1500 ms of silence" beside
+//! analysis. A fourth field, [`Judgment::silence_ms`], is INFORMATION ONLY and
+//! changes the meaning of none of the booleans: it is the silence before this
+//! reception (or poll), in milliseconds, measured from the instant a timeout is
+//! judged against while nothing has moved it, that is from the last valid
+//! reception, or before any valid reception from the armed instant (see
+//! below), to this reception's instant, and taken before this reception could
+//! move anything. It is `None` only when neither a valid reception nor an armed
+//! instant exists. It exists to explain the timeout boolean, and it is what lets
+//! a consumer still show "this valid frame came after 1500 ms of silence" beside
 //! a timeout that is false. A consumer that reports only the booleans loses
 //! nothing else.
 //!
@@ -76,9 +79,11 @@
 //! twice keeps the EARLIER instant: a second start event must not push the
 //! deadline out. Arming a stream that already has a valid reception changes
 //! nothing, because its own history is the reference. Without `arm`, a stream
-//! that never received is never judged. The information field stays `None` for
-//! an armed stream with no valid reception, because there is no previous valid
-//! reception to measure from; the caller who armed it knows the instant.
+//! that never received is never judged. The silence field is measured from the
+//! armed instant while there is no valid reception, so a timeout that is true
+//! beside it is never unexplained: a CRC error 2000 ms after `arm` reports a
+//! timeout and a silence of 2000, and so does a poll. The first valid frame
+//! reports the silence it ended, and from then on the history is the reference.
 //!
 //! # A clock that goes backwards counts as no time passed
 //!
@@ -115,11 +120,13 @@ pub struct Judgment {
     pub timeout_error: bool,
     /// What `counter_error` was; [`CounterReason::None`] whenever it is false.
     pub counter_reason: CounterReason,
-    /// INFORMATION ONLY: the milliseconds between the previous valid reception
-    /// and this reception or poll, taken before this reception moved anything;
-    /// `None` when there was no previous valid reception. It changes the
-    /// meaning of none of the booleans.
-    pub since_previous_valid_ms: Option<u64>,
+    /// The silence before this reception or poll, in milliseconds, from the
+    /// instant the timeout is judged against while nothing has moved it: the
+    /// last valid reception, or before any valid reception the armed instant.
+    /// Taken before this reception moved anything; `None` only when neither
+    /// exists. INFORMATION ONLY: it explains the timeout boolean and changes
+    /// the meaning of none of the booleans.
+    pub silence_ms: Option<u64>,
 }
 
 /// What a judge is configured with.
@@ -211,17 +218,21 @@ impl Judge {
         width_mask((self.config.counter_bytes * 8) as u8)
     }
 
-    /// Whether the silence at `now_ms` exceeds the limit, measured from the
-    /// last valid reception, or from the armed instant while there is none.
-    fn timed_out(&self, now_ms: u64) -> bool {
+    /// The silence at `now_ms`, in milliseconds: from the last valid
+    /// reception, or before any valid reception from the armed instant; `None`
+    /// when neither exists. One measurement serves the timeout and the
+    /// information field, so a timeout is never reported beside a silence that
+    /// does not explain it.
+    fn silence(&self, now_ms: u64) -> Option<u64> {
         self.last_valid_ms
             .or(self.armed_ms)
-            .is_some_and(|from| now_ms.saturating_sub(from) > self.config.timeout_ms)
+            .map(|from| now_ms.saturating_sub(from))
     }
 
-    /// The information field: the silence since the previous valid reception.
-    fn since_previous_valid(&self, now_ms: u64) -> Option<u64> {
-        self.last_valid_ms.map(|last| now_ms.saturating_sub(last))
+    /// Whether the silence at `now_ms` exceeds the limit.
+    fn timed_out(&self, now_ms: u64) -> bool {
+        self.silence(now_ms)
+            .is_some_and(|silence| silence > self.config.timeout_ms)
     }
 
     /// Judge one received frame: whether its CRC matched, the counter it
@@ -244,7 +255,7 @@ impl Judge {
             });
         }
         // Taken before this frame can move anything: information only.
-        let since_previous_valid_ms = self.since_previous_valid(now_ms);
+        let silence_ms = self.silence(now_ms);
 
         if !crc_ok {
             // Nothing moved, so the silence is judged against the previous
@@ -254,7 +265,7 @@ impl Judge {
                 counter_error: false,
                 timeout_error: self.timed_out(now_ms),
                 counter_reason: CounterReason::None,
-                since_previous_valid_ms,
+                silence_ms,
             });
         }
 
@@ -283,7 +294,7 @@ impl Judge {
             counter_error: reason != CounterReason::None,
             timeout_error: self.timed_out(now_ms),
             counter_reason: reason,
-            since_previous_valid_ms,
+            silence_ms,
         })
     }
 
@@ -295,7 +306,7 @@ impl Judge {
             counter_error: false,
             timeout_error: self.timed_out(now_ms),
             counter_reason: CounterReason::None,
-            since_previous_valid_ms: self.since_previous_valid(now_ms),
+            silence_ms: self.silence(now_ms),
         }
     }
 }
@@ -321,7 +332,7 @@ mod tests {
             counter_error: false,
             timeout_error: false,
             counter_reason: CounterReason::None,
-            since_previous_valid_ms: None,
+            silence_ms: None,
         }
     }
 
@@ -334,7 +345,7 @@ mod tests {
     /// four verdicts compare against [`fine`] without restating the silence.
     fn rx(j: &mut Judge, crc_ok: bool, counter: u64, now: u64) -> Judgment {
         Judgment {
-            since_previous_valid_ms: None,
+            silence_ms: None,
             ..rx_full(j, crc_ok, counter, now)
         }
     }
@@ -523,7 +534,7 @@ mod tests {
             v,
             Judgment {
                 timeout_error: true,
-                since_previous_valid_ms: Some(LIMIT + 1),
+                silence_ms: Some(LIMIT + 1),
                 ..fine()
             }
         );
@@ -542,7 +553,7 @@ mod tests {
         assert_eq!(
             v,
             Judgment {
-                since_previous_valid_ms: Some(1500),
+                silence_ms: Some(1500),
                 ..fine()
             }
         );
@@ -561,7 +572,7 @@ mod tests {
             Judgment {
                 counter_error: true,
                 counter_reason: CounterReason::OutOfRange,
-                since_previous_valid_ms: Some(3000),
+                silence_ms: Some(3000),
                 ..fine()
             }
         );
@@ -580,7 +591,7 @@ mod tests {
             Judgment {
                 crc_error: true,
                 timeout_error: true,
-                since_previous_valid_ms: Some(2000),
+                silence_ms: Some(2000),
                 ..fine()
             }
         );
@@ -598,7 +609,7 @@ mod tests {
                 counter_error: true,
                 timeout_error: true,
                 counter_reason: CounterReason::Repeat,
-                since_previous_valid_ms: Some(1500),
+                silence_ms: Some(1500),
                 ..fine()
             }
         );
@@ -611,7 +622,7 @@ mod tests {
     fn the_silence_before_a_reception_is_reported_on_every_kind_of_reception() {
         // No previous valid reception: nothing to report, whatever the kind.
         let mut j = judge(2);
-        assert_eq!(rx_full(&mut j, false, 1, 700).since_previous_valid_ms, None);
+        assert_eq!(rx_full(&mut j, false, 1, 700).silence_ms, None);
         assert_eq!(
             rx_full(&mut j, true, 1, 800),
             fine(),
@@ -623,7 +634,7 @@ mod tests {
         // repetition below move nothing, so the 450 is from the frame at 250.
         let mut j = judge(2);
         rx(&mut j, true, 1, 100);
-        let silence = |v: Judgment| v.since_previous_valid_ms;
+        let silence = |v: Judgment| v.silence_ms;
         assert_eq!(silence(rx_full(&mut j, true, 2, 250)), Some(150), "fine");
         assert_eq!(
             silence(rx_full(&mut j, false, 3, 400)),
@@ -642,6 +653,21 @@ mod tests {
         );
         // And a poll reports the silence it is judging.
         assert_eq!(silence(j.poll(900)), Some(200));
+
+        // Before any valid reception the silence is measured from the armed
+        // instant, so a timeout is never reported beside nothing; without
+        // `arm` there is nothing to measure from.
+        let mut j = judge(2);
+        j.arm(100);
+        assert_eq!(
+            silence(rx_full(&mut j, false, 1, 400)),
+            Some(300),
+            "CRC error before any valid frame"
+        );
+        assert_eq!(silence(j.poll(450)), Some(350), "poll");
+        let mut j = judge(2);
+        assert_eq!(silence(rx_full(&mut j, false, 1, 400)), None, "no arm");
+        assert_eq!(silence(j.poll(450)), None, "no arm, poll");
     }
 
     #[test]
@@ -657,12 +683,15 @@ mod tests {
             (false, 41, 9000),
         ];
         let (mut a, mut b) = (judge(2), judge(2));
+        // Both streams armed, so the field is present from the first frame.
+        a.arm(0);
+        b.arm(0);
         for (crc_ok, counter, now) in script {
             let full = rx_full(&mut a, crc_ok, counter, now);
             let blank = rx(&mut b, crc_ok, counter, now);
             assert_eq!(
                 Judgment {
-                    since_previous_valid_ms: None,
+                    silence_ms: None,
                     ..full
                 },
                 blank
@@ -693,11 +722,11 @@ mod tests {
         // 32-bit subtraction would read this as a gap of about 4.29e9 ms.
         let v = j.poll(0);
         assert!(!v.timeout_error);
-        assert_eq!(v.since_previous_valid_ms, Some(0), "no time passed");
+        assert_eq!(v.silence_ms, Some(0), "no time passed");
         // A CRC error is judged against the same instant, so it agrees.
         let v = rx_full(&mut j, false, 2, 5);
         assert!(v.crc_error && !v.timeout_error);
-        assert_eq!(v.since_previous_valid_ms, Some(0));
+        assert_eq!(v.silence_ms, Some(0));
         assert!(!rx(&mut j, true, 2, 5).timeout_error);
     }
 
@@ -714,9 +743,20 @@ mod tests {
             "equal to the limit is not over it"
         );
         assert!(j.poll(1000 + 1500).timeout_error, "+1500 is over it");
-        // No valid-reception history was made: the information stays absent
-        // and the counter baseline is still unset.
-        assert_eq!(j.poll(1000 + 1500).since_previous_valid_ms, None);
+        // The silence is reported beside the timeout it explains, measured from
+        // the armed instant ...
+        let v = j.poll(1000 + 1500);
+        assert_eq!(
+            v,
+            Judgment {
+                timeout_error: true,
+                silence_ms: Some(1500),
+                ..fine()
+            }
+        );
+        assert_eq!(j.poll(1000 + 500).silence_ms, Some(500));
+        // ... and no valid-reception history was made: the counter baseline is
+        // still unset.
         assert_eq!((j.baseline(), j.last_valid_ms()), (None, None));
         assert_eq!(j.armed_ms(), Some(1000));
     }
@@ -737,17 +777,27 @@ mod tests {
             j.poll(1500).timeout_error,
             "the silence timed out while it lasted"
         );
-        // The first frame still sets the baseline without a counter error.
+        // The first frame still sets the baseline without a counter error, and
+        // it reports the silence it ended, measured from the armed instant.
         let v = rx_full(&mut j, true, 0x1234, 1500);
-        assert_eq!(v, fine(), "no timeout, no counter error, no information");
+        assert_eq!(
+            v,
+            Judgment {
+                silence_ms: Some(1500),
+                ..fine()
+            },
+            "no timeout, no counter error, the silence it ended"
+        );
         assert_eq!(
             (j.baseline(), j.last_valid_ms()),
             (Some(0x1234), Some(1500))
         );
         assert_eq!(j.armed_ms(), None, "replaced");
-        // From now on the stream's own history is the reference.
-        assert!(!j.poll(1500 + LIMIT).timeout_error);
-        assert!(j.poll(1500 + LIMIT + 1).timeout_error);
+        // From now on the stream's own history is the reference, for the
+        // timeout and for the field alike.
+        assert_eq!(rx_full(&mut j, true, 0x1235, 1700).silence_ms, Some(200));
+        assert!(!j.poll(1700 + LIMIT).timeout_error);
+        assert!(j.poll(1700 + LIMIT + 1).timeout_error);
     }
 
     #[test]
@@ -760,6 +810,7 @@ mod tests {
             Judgment {
                 crc_error: true,
                 timeout_error: true,
+                silence_ms: Some(2000),
                 ..fine()
             }
         );
@@ -771,10 +822,14 @@ mod tests {
         // Inside the limit the same error is not a timeout.
         let mut j = judge(2);
         j.arm(0);
-        assert!(!rx(&mut j, false, 7, 500).timeout_error);
+        let v = rx_full(&mut j, false, 7, 500);
+        assert!(!v.timeout_error);
+        assert_eq!(v.silence_ms, Some(500));
         // Without arm there is nothing to measure from.
         let mut j = judge(2);
-        assert!(!rx(&mut j, false, 7, 5000).timeout_error);
+        let v = rx_full(&mut j, false, 7, 5000);
+        assert!(!v.timeout_error);
+        assert_eq!(v.silence_ms, None);
     }
 
     #[test]
