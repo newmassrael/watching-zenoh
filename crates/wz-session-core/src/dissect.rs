@@ -6544,7 +6544,7 @@ mod tests {
                 alloc::vec![0x1Eu8 | 0x20],
                 vle(99),
                 // MID 0 (DeclareKeyExpr), N set, and the reserved bit 6 as given.
-                alloc::vec![0x00u8 | 0x20 | (bit6 << 6)],
+                alloc::vec![0x20u8 | (bit6 << 6)],
                 vle(1),
                 wireexpr(7, Some("k")),
             ]);

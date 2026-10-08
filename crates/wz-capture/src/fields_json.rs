@@ -9607,8 +9607,9 @@ mod tests {
         /// same half.
         #[test]
         fn direction_a_is_the_half_from_the_lower_endpoint_whoever_dialled() {
+            type Endpoint = ([u8; 4], u16);
             // (client, server, is the client the lower endpoint?)
-            let cases: [(([u8; 4], u16), ([u8; 4], u16), bool); 4] = [
+            let cases: [(Endpoint, Endpoint, bool); 4] = [
                 (([10, 0, 0, 2], 50000), ([10, 0, 0, 2], 7447), false),
                 (([10, 0, 0, 2], 5000), ([10, 0, 0, 2], 7447), true),
                 (([10, 0, 0, 1], 50000), ([10, 0, 0, 9], 7447), true),
