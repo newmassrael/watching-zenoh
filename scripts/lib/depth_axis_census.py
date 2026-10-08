@@ -2683,7 +2683,14 @@ PIN_NO_SYMBOL = 0
 # the interop leg that reads the late reader's delivery and the release against zenoh's own
 # subscriber. `api-compat-c` is not touched and is still PARTIAL beside it. READ off the census's
 # own FAIL line, `wz citations: 280 against a pin of 275`.
-PIN_WZ_CITATIONS = 280
+#
+# R3111 -- 280 -> 284, one atom. `transport-shm`'s reason gains the UPDATE that a link that is not
+# reliable is declared no counters: it names the core's declaration of the counter block, the
+# session's reading of the link's reliability off its driver, the auth segment's test that one
+# session declares counters over a stream link and none over a datagram link, and the runtime's
+# own auth segment per session. `api-compat-c` is not touched and is still PARTIAL beside it. READ
+# off the census's own FAIL line, `wz citations: 284 against a pin of 280`.
+PIN_WZ_CITATIONS = 284
 # R2626 — 44 -> 42, and this one is worth a sentence because it HELD through
 # every earlier retirement in this run (R2612, R2622). `time-hlc`'s reason is the
 # first retiree carrying AMBIGUOUS citations of its own: its oldest clauses cite
