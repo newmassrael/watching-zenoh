@@ -4704,6 +4704,42 @@ mod tests {
         );
     }
 
+    /// A SINGLE unfinished segment, with nothing else judged, is already enough:
+    /// the rule's threshold on `partial` is one, as it is for `invalid`.
+    ///
+    /// The four-segment capture above and the `(0, 1, 1)` one beside it both
+    /// satisfy a rule that wanted TWO partials, the first because four is more
+    /// than two and the second because its failure carries the layer on its own.
+    /// Only a capture holding exactly one partial and no failure tells the two
+    /// rules apart, and it is the shape of a short capture taken on the sending
+    /// host. Without it the threshold behind `ChecksumsUncorroborated` moved a
+    /// step and no test noticed (Layer C0mut, `partial > 1`).
+    #[test]
+    fn one_offloaded_segment_alone_leaves_the_layer_uncorroborated() {
+        use crate::datagram_tests::{framed_keepalive, tcp_packet};
+        let ka = framed_keepalive();
+        let d = capture_of(&[offloaded(tcp_packet(1000, &ka), ka.len())]);
+        let h = d.health();
+        assert_eq!(
+            (
+                h.transport_checksum_valid,
+                h.transport_checksum_invalid,
+                h.transport_checksum_absent,
+                h.transport_checksum_partial
+            ),
+            (0, 0, 0, 1),
+            "{h:?}"
+        );
+        assert_eq!(h.uncorroborated_layers(), alloc::vec!["transport"], "{h:?}");
+        let report = CaptureReport::of(&d);
+        assert_eq!(
+            report.reasons(),
+            alloc::vec![VerdictReason::ChecksumsUncorroborated],
+            "{}",
+            report.to_text()
+        );
+    }
+
     /// An offloaded UDP datagram that arrives as IP FRAGMENTS is judged where
     /// the whole datagram first exists, by the same rule, and lands in the same
     /// bucket as the unfragmented one.
