@@ -1756,6 +1756,24 @@ impl<R: SessionRuntime> LinkState<R> {
                 })
         })
     }
+
+    /// R3111 -- whether this link is reliable BY ITS PROTOCOL, which is the fact upstream hands
+    /// the shared-memory extension's Open messages (`io/zenoh-transport/src/unicast/establishment/open.rs`
+    /// @ `.send_open_syn(link.link.is_reliable().into())`) and not the class a multilink session
+    /// declared for it, so it is read off the driver's
+    /// [`LinkSubject::kind`](crate::link::LinkSubject::kind) as `reliability` reads it and does
+    /// not consult that declaration.
+    ///
+    /// A driver that names no kind, which is a test double, answers `false`: declaring counters on
+    /// a link nothing can be sure lowers them keeps chunks until the session ends, and declaring
+    /// none costs only the case of a late reader, so the unknown is the one that cannot leak.
+    #[cfg(feature = "session-extshm")]
+    fn is_reliable_by_protocol(&self) -> bool {
+        self.link_driver()
+            .link_subject()
+            .and_then(|s| s.kind)
+            .is_some_and(|kind| kind.is_reliable())
+    }
 }
 
 /// R311il / R311y205 — the runtime-agnostic session action bundle one logical
@@ -5819,7 +5837,8 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// we read out of the acceptor's segment.
     #[cfg(feature = "session-extshm")]
     pub fn shm_send_open_syn(&self) -> Option<ExtEntryOwned> {
-        R::with_mutex_mut(&self.shm_auth, |d| d.send_open_syn())
+        let reliable = self.link.is_reliable_by_protocol();
+        R::with_mutex_mut(&self.shm_auth, |d| d.send_open_syn(reliable))
     }
 
     /// Step 4a (ACCEPTOR) — the initiator's echo of OUR challenge. This is where
@@ -5841,7 +5860,8 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     #[cfg(feature = "session-extshm")]
     pub fn shm_send_open_ack(&self) -> Option<ExtEntryOwned> {
         let negotiated = self.is_shm();
-        R::with_mutex_mut(&self.shm_auth, |d| d.send_open_ack(negotiated))
+        let reliable = self.link.is_reliable_by_protocol();
+        R::with_mutex_mut(&self.shm_auth, |d| d.send_open_ack(negotiated, reliable))
     }
 
     /// Step 4c (INITIATOR) — the acceptor's confirmation, which is where the

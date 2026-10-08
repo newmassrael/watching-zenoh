@@ -1193,6 +1193,37 @@ mod tests {
         assert!(tx.inner.queues[5].lock().expect("queue").is_empty());
     }
 
+    /// R3111 -- what a session declares in its OpenAck is decided by the link it will leave on,
+    /// read off the driver: counters on a stream and none on a datagram link, whose lost message
+    /// no peer would ever acknowledge. The same session, the same authenticator, only the kind of
+    /// link differs.
+    #[test]
+    fn a_session_declares_counters_on_a_stream_link_and_none_on_a_datagram_link() {
+        use wz_session_core::extshm::{
+            decode_shm_open_ack_body, peer_shm_zbuf_body, ShmHandoffCounters,
+        };
+        use wz_session_core::link::LinkKind;
+
+        for (kind, declares) in [(LinkKind::Tcp, true), (LinkKind::Udp, false)] {
+            let (actions, _driver) = crate::test_fixtures::recording_actions_over(kind);
+            actions.install_shm_auth(Box::new(
+                PosixShmAuthenticator::new().expect("create an authenticator"),
+            ));
+            actions.set_shm_offer(true);
+            actions.negotiate_shm_against_peer(true);
+            let ack = actions
+                .shm_send_open_ack()
+                .expect("negotiated, so the acceptor acknowledges");
+            let body = peer_shm_zbuf_body(core::slice::from_ref(&ack)).expect("a body");
+            let counters = decode_shm_open_ack_body(body).expect("a counter block");
+            assert_eq!(
+                matches!(counters, ShmHandoffCounters::PerPriority(_)),
+                declares,
+                "a {kind:?} link declared {counters:?}"
+            );
+        }
+    }
+
     /// THE POINT, on a real chunk and the real validator. Its owner lets go the moment it is sent;
     /// from then on only the sender's handoff keeps its watchdog bit confirmed. Four validator
     /// windows later it is still valid, because nobody has acknowledged it; once the peer lowers

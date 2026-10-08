@@ -147,12 +147,16 @@ impl BoxedLinkDriver for RecordingLinkDriver {
 
 /// R2943 — [`recording_actions`] over a recorder that stands for a link of
 /// `kind`, so egress selection sees that link's intrinsic reliability class.
-/// Gated like its sole consumer, `multilink`'s `joined_qos_pair`.
-#[cfg(all(
-    feature = "transport-multilink",
-    feature = "transport-qos",
-    feature = "codec-push",
-    feature = "codec-close"
+/// Gated like its consumers: `multilink`'s `joined_qos_pair`, and (R3111) the auth segment's
+/// test of what a session declares on a link of each kind.
+#[cfg(any(
+    all(
+        feature = "transport-multilink",
+        feature = "transport-qos",
+        feature = "codec-push",
+        feature = "codec-close"
+    ),
+    feature = "session-extshm"
 ))]
 pub(crate) fn recording_actions_over(
     kind: wz_session_core::link::LinkKind,

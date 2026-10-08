@@ -6561,7 +6561,10 @@ layer_c1af_cargo_test_shm() {
     # establishment's Open messages declare as a sender (the initiator's OpenSyn and the
     # acceptor's OpenAck name the counters the authenticator leased, and an authenticator that
     # operates none declares the block Disabled), which have `shm` in their path.
-    _runci_guarded_test C1af 36 cargo test -p wz-session-core --features session-extshm,codec-push --lib shm --quiet \
+    # R3111 -- 36 -> 38, MEASURED by running this exact command: the two tests of what the Open
+    # messages declare on a link that is not reliable (both messages declare Disabled and lease
+    # nothing, and a declaration of Disabled withdraws the handoff an earlier one gave).
+    _runci_guarded_test C1af 38 cargo test -p wz-session-core --features session-extshm,codec-push --lib shm --quiet \
         || return 1
     # R311y894 — the establishment SHM surface WITH THE DISSECTOR ON, which no
     # lane had. `dissect` and `session-extshm` are disjoint feature sets: the
@@ -6618,7 +6621,9 @@ layer_c1af_cargo_test_shm() {
     # `codec-response`, which `dissect` brings and the leg above does not (it stays at 33).
     # R3110 -- 49 -> 52, MEASURED by running this exact command: the same three tests of the
     # Open messages as the leg above, which `session-extshm` brings here too.
-    _runci_guarded_test C1af 52 cargo test -p wz-session-core --features session-extshm,dissect --lib shm --quiet \
+    # R3111 -- 52 -> 54, MEASURED by running this exact command: the two tests of what the Open
+    # messages declare on a link that is not reliable, as the leg above counts them.
+    _runci_guarded_test C1af 54 cargo test -p wz-session-core --features session-extshm,dissect --lib shm --quiet \
         || return 1
     # Round 2037, open-debt item 330 — THE TRANSPORT-OAM BATCH WALK, which no
     # lane in this file was running.
@@ -6719,7 +6724,9 @@ layer_c1af_cargo_test_shm() {
     # challenge, the protocol list and the receiver's handoff (16), and the node as a SENDER (6)
     # -- the counters it leases, what it counts, what it gives back and the chunk it keeps
     # valid until its peer acknowledges. TWENTY-TWO.
-    _runci_guarded_test C1af 22 cargo test -p wz-runtime-tokio --features session-extshm,transport-unicast,transport-link-tcp --lib shm_auth_segment --quiet \
+    # R3111 -- 22 -> 23, MEASURED by running this exact command: the test that a session declares
+    # counters on a stream link and none on a datagram link, read off the driver's kind.
+    _runci_guarded_test C1af 23 cargo test -p wz-runtime-tokio --features session-extshm,transport-unicast,transport-link-tcp --lib shm_auth_segment --quiet \
         || return 1
     # R3056 -- the provider's two new modules, which the filter above does not select:
     # `shm_backend` (the value types an allocation speaks in, 4 tests) and
