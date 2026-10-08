@@ -116,6 +116,58 @@ pub fn fill_udp_checksum(src: [u8; 4], dst: [u8; 4], udp: &mut [u8]) {
     }
 }
 
+/// Leave in a TCP or UDP segment's checksum field what a SENDING host leaves
+/// there when its network card is to finish the checksum: the pseudo-header sum
+/// folded to 16 bits and NOT complemented.
+///
+/// A capture taken on the sending host sees the packet before the card has run,
+/// so the field is that partial value and the segment does not verify. Linux
+/// writes it as `~tcp_v6_check(skb->len, saddr, daddr, 0)`
+/// (`include/net/ip6_checksum.h`, `__tcp_v6_send_check`), and `tcp_v6_check` is
+/// the complemented fold, so the field is the sum itself. This function lays the
+/// same value from RFC 793 / RFC 8200 §8.1's own pseudo-header, byte by byte,
+/// and shares nothing with the reader's sum.
+///
+/// `src` and `dst` are both 4 bytes (IPv4) or both 16 (IPv6); `proto` is 6 (TCP)
+/// or 17 (UDP), which also decides where the field sits. `seg` is the whole
+/// segment, as in [`fill_tcp_checksum`]; whatever the field held is ignored,
+/// because the pseudo-header sum does not cover it.
+///
+/// # Panics
+/// On an address pair of any other shape or a protocol other than 6 and 17: a
+/// fixture asking for those has a bug this should not paper over.
+pub fn fill_offload_checksum(src: &[u8], dst: &[u8], proto: u8, seg: &mut [u8]) {
+    assert!(
+        (src.len() == 4 || src.len() == 16) && src.len() == dst.len(),
+        "addresses must be both IPv4 or both IPv6: {} and {} byte(s)",
+        src.len(),
+        dst.len()
+    );
+    assert!(proto == 6 || proto == 17, "TCP or UDP only: {proto}");
+    let at = if proto == 6 { 16 } else { 6 };
+    let mut pseudo = [0u8; 40];
+    let n = if src.len() == 4 {
+        // RFC 793 "Specification": source, destination, zero, protocol, length.
+        pseudo[..4].copy_from_slice(src);
+        pseudo[4..8].copy_from_slice(dst);
+        pseudo[9] = proto;
+        pseudo[10..12].copy_from_slice(&(seg.len() as u16).to_be_bytes());
+        12
+    } else {
+        // RFC 8200 §8.1: source, destination, the upper-layer length as 32
+        // bits, then three zero bytes and the next header.
+        pseudo[..16].copy_from_slice(src);
+        pseudo[16..32].copy_from_slice(dst);
+        pseudo[32..36].copy_from_slice(&(seg.len() as u32).to_be_bytes());
+        pseudo[39] = proto;
+        40
+    };
+    // `ones_complement` returns the COMPLEMENT of the folded sum, and the field
+    // holds the sum itself, so it is inverted back.
+    let folded = !ones_complement(&[&pseudo[..n]]);
+    seg[at..at + 2].copy_from_slice(&folded.to_be_bytes());
+}
+
 /// R311y888 (open-debt item 364) — rewrite an Ethernet/IPv4/TCP frame's SOURCE
 /// PORT and refill the sum that rewrite invalidates.
 ///
@@ -270,6 +322,60 @@ mod tests {
             }
         }
         assert!(found, "no payload in the search space summed to zero");
+    }
+
+    /// The offload field is the folded pseudo-header sum itself, against sums
+    /// worked by hand from the RFC layouts and written here as literals.
+    ///
+    /// IPv4: `127.0.0.1` to itself, protocol 6, length 63 is
+    /// `0x7f00 + 0x0001 + 0x7f00 + 0x0001 + 0x0006 + 0x003f = 0xfe47`, which fits
+    /// in 16 bits. IPv6: `fe80::1` to `fe80::2`, protocol 6, length 20 is
+    /// `0xfe80 + 0x0001 + 0xfe80 + 0x0002 + 0x0014 + 0x0006 = 0x1fd1d`, which
+    /// folds to `0xfd1e`. Neither is the complement, so a fill that inverted its
+    /// answer, as a full checksum does, fails both.
+    #[test]
+    fn an_offload_field_is_the_folded_pseudo_header_sum_and_not_its_complement() {
+        let mut v4 = [0u8; 63];
+        fill_offload_checksum(&[127, 0, 0, 1], &[127, 0, 0, 1], 6, &mut v4);
+        assert_eq!([v4[16], v4[17]], [0xfe, 0x47]);
+
+        let mut v6 = [0u8; 20];
+        let a = [0xfe, 0x80, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x01];
+        let b = [0xfe, 0x80, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x02];
+        fill_offload_checksum(&a, &b, 6, &mut v6);
+        assert_eq!([v6[16], v6[17]], [0xfd, 0x1e]);
+    }
+
+    /// The carry out of bit 15 is FOLDED back in, not dropped.
+    ///
+    /// `192.168.1.2` to `192.168.1.3`, protocol 6, length 20 is
+    /// `0xc0a8 + 0x0102 + 0xc0a8 + 0x0103 + 0x0006 + 0x0014 = 0x1836f`, so the
+    /// field is `0x836f + 1 = 0x8370`. A fill that kept the low 16 bits writes
+    /// `0x836f`, one short, which no address pair that stays under 0x10000 can
+    /// tell from the right answer.
+    #[test]
+    fn an_offload_field_folds_the_carry_back_in() {
+        let mut seg = [0u8; 20];
+        fill_offload_checksum(&[192, 168, 1, 2], &[192, 168, 1, 3], 6, &mut seg);
+        assert_eq!([seg[16], seg[17]], [0x83, 0x70]);
+    }
+
+    /// A UDP field sits at offset 6, and the segment under it does not verify
+    /// once the field is the partial sum: that is the property a reader tells it
+    /// by, so the fixture must have it.
+    #[test]
+    fn an_offload_udp_field_sits_at_offset_6_and_the_segment_does_not_verify() {
+        let mut seg = udp_datagram(&[1, 2]);
+        fill_offload_checksum(&[10, 0, 0, 1], &[10, 0, 0, 2], 17, &mut seg);
+        // Length 10: 0x0a00 + 0x0001 + 0x0a00 + 0x0002 + 0x0011 + 0x000a = 0x141e.
+        assert_eq!([seg[6], seg[7]], [0x14, 0x1e]);
+        let len = (seg.len() as u16).to_be_bytes();
+        let pseudo = [10u8, 0, 0, 1, 10, 0, 0, 2, 0, 17, len[0], len[1]];
+        assert_ne!(
+            ones_complement(&[&pseudo[..], &seg]),
+            0,
+            "an offload segment is not a verifying one"
+        );
     }
 
     /// R311y888 — the port rewrite leaves the frame VERIFYING, and it is the
