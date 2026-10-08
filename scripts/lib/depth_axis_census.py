@@ -2637,7 +2637,13 @@ PIN_NO_SYMBOL = 0
 # witness the first, and the clock test the second. `transport-shm` is not touched and is still
 # PARTIAL beside it. READ off the census's own FAIL line, `wz citations: 255 against a pin of 251`,
 # for the reason the R3062 note gives.
-PIN_WZ_CITATIONS = 255
+#
+# R3093 -- 255 -> 257, one atom. `api-compat-c`'s reason gains the UPDATE that a pico listener ends
+# what it replays with the Final of the initial interest, so a zenoh peer that dials it is not left
+# to wait out `scouting/delay`: it names the pico ABI's stance flag and the one differential row that
+# witnesses it. `transport-shm` is not touched and is still PARTIAL beside it. READ off the census's
+# own FAIL line, `wz citations: 257 against a pin of 255`, for the reason the R3062 note gives.
+PIN_WZ_CITATIONS = 257
 # R2626 — 44 -> 42, and this one is worth a sentence because it HELD through
 # every earlier retirement in this run (R2612, R2622). `time-hlc`'s reason is the
 # first retiree carrying AMBIGUOUS citations of its own: its oldest clauses cite
