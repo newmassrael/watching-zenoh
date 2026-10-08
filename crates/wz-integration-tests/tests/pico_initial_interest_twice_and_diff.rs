@@ -23,10 +23,14 @@
 //! reason: with the shipped one the real pico's slow accept sometimes lost the race on a loaded
 //! host (measured, the first run of this row), and a reference that is racy grades nothing.
 //!
-//! ## The oracle is a build product
+//! ## The oracle is a build product, and this row belongs to the lane that provisions it
 //!
 //! `libzenohpico.so` and the zenoh-c library come from `scripts/build-zenoh-pico-cli.sh` and the
-//! zenoh-c build. Absence is a hard FAIL rather than a skip.
+//! zenoh-c build. The dialler is a real zenoh-c peer, so the row is owned by Layer C1cc, whose job
+//! provisions that oracle and fails instead of skipping when it is absent (`WZ_C1CC_REQUIRE`).
+//! Layer E, where the row first stood, runs in a job that provisions no zenoh-c: an absence that
+//! FAILED the row there graded the job and not the listener. Layer E's `--ignored` sweep still
+//! reaches the row, and where the oracle is absent it skips with a note, as the `zenoh_c_*` rows do.
 
 use std::fs::File;
 use std::path::{Path, PathBuf};
@@ -194,13 +198,19 @@ fn run_arm(listener: &Path, dialler: &Path, dialler_libdir: &Path, arm: &str) ->
 // wz-proves: api-compat-pico wz->pico partial
 #[test]
 #[ignore = "cc-compiles a pico listener against both libraries and dials each with a real \
-            zenoh-c peer; run by run-ci Layer E"]
+            zenoh-c peer; run by run-ci Layer C1cc (whose job provisions the zenoh-c oracle)"]
 fn a_zenoh_peer_that_dials_a_pico_listener_is_not_left_waiting_on_wz_and_zenoh_pico() {
     let dir = tempfile::tempdir().expect("tempdir");
     // The dialler links the real zenoh-c library alone, so the pairing of its header with wz's
     // zenoh-c cdylib, which other rows check, is not a fact this row depends on.
-    let (zc_include, _libdir, _examples) = zenoh_c_oracle()
-        .expect("the zenoh-c oracle is a build product; absence is a hard FAIL for this row");
+    let Some((zc_include, _libdir, _examples)) = zenoh_c_oracle() else {
+        eprintln!(
+            "skip: the zenoh-c ORACLE is absent. This row needs zenoh-c's headers, libzenohc.so \
+             and its examples (default prefix ~/.local, override WZ_ZENOH_C_PREFIX). \
+             Layer C1cc with WZ_C1CC_REQUIRE=1 fails instead of skipping."
+        );
+        return;
+    };
     let zc_lib = zenoh_c_shared_library().expect("the zenoh-c shared library");
     let zc_libdir = zc_lib
         .parent()

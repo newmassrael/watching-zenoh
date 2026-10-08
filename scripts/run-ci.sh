@@ -20371,6 +20371,20 @@ layer_c1cc_api_compat_c() {
             --test zenoh_c_capi_c_pico_interop -- --ignored --quiet --test-threads=1 \
             --exact "$leg" || return 1
     done
+    # R3100 — a zenoh peer that dials a pico LISTENER, the listener compiled once
+    # against the real zenoh-pico and once against `wz-capi-pico`. It stood in
+    # Layer E first, and Layer E runs in the `e2e-demo` job, which provisions no
+    # zenoh-c: the dialler is a real zenoh-c peer, so the row failed there for an
+    # oracle its job never had (run 37737894987, job 113186640039). This job
+    # provisions the oracle and the precheck above turns an absent one into a
+    # failure. The pico cdylib is built here under the rule the demo is: never
+    # SKIP (or crash) on a wz artifact we can just build.
+    (cd crates && cargo build -p wz-capi-pico --quiet) || return 1
+    _runci_guarded_test "C1cc a pico listener ends what it replays" 1 \
+        cargo test -p wz-integration-tests \
+        --test pico_initial_interest_twice_and_diff -- --ignored --quiet --test-threads=1 \
+        --exact a_zenoh_peer_that_dials_a_pico_listener_is_not_left_waiting_on_wz_and_zenoh_pico \
+        || return 1
     # R2281 (open-debt item 617) — the SHARED-MEMORY legs, which lived on Layer
     # C1ce while that lane was believed to hold the only SHM header. It does not
     # and never did: `install-zenoh-c.sh` unpacks upstream's published archive
