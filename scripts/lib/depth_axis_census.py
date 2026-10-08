@@ -2630,7 +2630,14 @@ PIN_NO_SYMBOL = 0
 # extension, and the two rows that witness it (the differential row and the one that reads wz
 # alone). `transport-shm` is not touched and is still PARTIAL beside it. READ off the census's own
 # FAIL line, `wz citations: 251 against a pin of 242`, for the reason the R3062 note gives.
-PIN_WZ_CITATIONS = 251
+#
+# R3090 -- 251 -> 255, one atom. `api-compat-c`'s reason gains the UPDATE that the pico ABI opens a
+# config which states `listen` and `connect` together, and that a timing flake of the C ABI's clock
+# test is repaid: it names the pico ABI's open, the differential row and the test on wz alone that
+# witness the first, and the clock test the second. `transport-shm` is not touched and is still
+# PARTIAL beside it. READ off the census's own FAIL line, `wz citations: 255 against a pin of 251`,
+# for the reason the R3062 note gives.
+PIN_WZ_CITATIONS = 255
 # R2626 — 44 -> 42, and this one is worth a sentence because it HELD through
 # every earlier retirement in this run (R2612, R2622). `time-hlc`'s reason is the
 # first retiree carrying AMBIGUOUS citations of its own: its oldest clauses cite
