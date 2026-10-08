@@ -117,7 +117,7 @@ struct Interval {
 ///
 /// Every figure is kept twice, in whole milliseconds and in nanoseconds, and the
 /// two share one `count`: the millisecond figures are what they always were
-/// (each end truncated, then subtracted -- see [`Interval`]) and the nanosecond
+/// (each end truncated, then subtracted, as `Interval` records) and the nanosecond
 /// ones are the same samples measured without that truncation.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub struct LatencySamples {

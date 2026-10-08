@@ -277,7 +277,7 @@ ALLOWED = [
     ),
     (
         "wz-capture/tcp.rs",
-        "let (seq, packet_index, payload, _) = self.pending.remove(i);",
+        "let held = self.pending.remove(i);",
         "a held segment being DELIVERED into the stream now that the bytes "
         "before it have arrived; it leaves the pending list because it is no "
         "longer pending",

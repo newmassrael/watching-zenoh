@@ -106,6 +106,7 @@ class Cell:
 
 _ID_HEADER = "the `id` and `solicited_by` values the census and the summary write"
 _HALVES_HEADER = "the `lease_ms` and `last_seen_ts_ns` of a flow's `halves`"
+_LATENCY_HEADER = "the `min_ns`, `max_ns`, `mean_ns` and `total_ns` of a census latency object"
 #: The protected-frame documents take the rule from their first revision. The
 #: field cells are written by ONE helper both documents share, so they are
 #: declared once, under `e2e_wrap`, and the `e2e_open` row names them as well.
@@ -142,6 +143,19 @@ CELLS: dict[tuple[str, str], tuple[Cell, ...]] = {
     ),
     ("crates/wz-capture/src/census_json.rs", "keyexprs_json"): (
         Cell("census", "an unresolved alias's id", _ID_HEADER, "an unresolved alias's `id`"),
+    ),
+    # One cell per CALL, and `push_latency` loops three of its four nanosecond
+    # figures through one call, so the loop is declared once and `total_ns`
+    # (a SUM, the one a long capture can carry past the line) once.
+    ("crates/wz-capture/src/census_json.rs", "push_latency"): (
+        Cell(
+            "census",
+            "a latency's min_ns, max_ns and mean_ns",
+            _LATENCY_HEADER,
+            "`min_ns`, `max_ns`, `mean_ns` and `total_ns`",
+            born=17,
+        ),
+        Cell("census", "a latency's total_ns", _LATENCY_HEADER, "`total_ns` is a SUM", born=17),
     ),
     ("crates/wz-capture/src/report.rs", "capture_json"): (
         Cell("summary", "an interest's id", _ID_HEADER, "the `id` and `solicited_by` of an interest"),
