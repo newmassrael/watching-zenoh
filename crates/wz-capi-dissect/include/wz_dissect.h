@@ -71,7 +71,7 @@
  * here would only ever be a copy. (The envelope carries one more key for a
  * document that declares planes -- see R2180 below.) The names are "census",
  * "fields", "summary", "readable_surfaces", "selector_diagnose",
- * "declarations_diagnose", "declarations_from_proto", "selection", "retention" and "health" — one per door group, because a consumer calls the
+ * "declarations_diagnose", "declarations_from_proto", "e2e_wrap", "e2e_open", "selection", "retention" and "health" — one per door group, because a consumer calls the
  * door it wants and a single library-wide number would tell a reader of the
  * census that a document it never calls had moved.
  *
@@ -477,11 +477,18 @@
  * and takes the rule from its first appearance); to the `lease_ms` and
  * `last_seen_ts_ns` of a flow's `halves` (keys that exist from field document
  * 25 and take the rule from their first appearance: the lease is a wire
- * field's value and the instant is a clock's); and to
+ * field's value and the instant is a clock's); to the `raw` and `value` of an
+ * `e2e_wrap` or `e2e_open` field and the `value` of each of its `parts`, to
+ * the `crc_computed` and `length_field` of an `e2e_wrap` or `e2e_open`
+ * document and to the `length_expected` of an `e2e_open` document (those
+ * documents take the rule from their first revision: a field of seven or eight
+ * bytes can pass the line and one of six or fewer cannot, and the width is the
+ * profile's, so a consumer knows from its own profile which cells to ask
+ * about); and to
  * `oldest_ts_ns` in the retention document. It does NOT apply to counts,
  * offsets, sizes and millisecond spans this library measures: those count
  * things the host holds, and stay bare numbers. Revisions: fields 23, census
- * 16, summary 5, retention 2.
+ * 16, summary 5, retention 2, e2e_wrap 1, e2e_open 1.
  * The gap total saturates at the top of `u64` instead of wrapping.
  *
  * @values fields carried_state

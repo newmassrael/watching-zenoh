@@ -80,7 +80,14 @@ DOC_REVISION = "crates/wz-capture/src/doc_revision.rs"
 
 #: The revision at which each document took the rule, in the order the header's
 #: `Revisions:` sentence names them.
-RULE_REVISION: dict[str, int] = {"fields": 23, "census": 16, "summary": 5, "retention": 2}
+RULE_REVISION: dict[str, int] = {
+    "fields": 23,
+    "census": 16,
+    "summary": 5,
+    "retention": 2,
+    "e2e_wrap": 1,
+    "e2e_open": 1,
+}
 
 
 @dataclass(frozen=True)
@@ -99,6 +106,11 @@ class Cell:
 
 _ID_HEADER = "the `id` and `solicited_by` values the census and the summary write"
 _HALVES_HEADER = "the `lease_ms` and `last_seen_ts_ns` of a flow's `halves`"
+#: The protected-frame documents take the rule from their first revision. The
+#: field cells are written by ONE helper both documents share, so they are
+#: declared once, under `e2e_wrap`, and the `e2e_open` row names them as well.
+_E2E_FIELD_HEADER = "the `raw` and `value` of an `e2e_wrap` or `e2e_open` field and the `value` of each of its `parts`"
+_E2E_DOCUMENT_HEADER = "the `crc_computed` and `length_field` of an `e2e_wrap` or `e2e_open` document"
 
 #: (file, enclosing fn) -> the cells that function writes through a door, one per call.
 CELLS: dict[tuple[str, str], tuple[Cell, ...]] = {
@@ -144,6 +156,25 @@ CELLS: dict[tuple[str, str], tuple[Cell, ...]] = {
     ),
     ("crates/wz-capture/src/retention_json.rs", "retention_json"): (
         Cell("retention", "oldest_ts_ns", "`oldest_ts_ns` in the retention document", "`oldest_ts_ns`"),
+    ),
+    ("crates/wz-capture/src/e2e_json.rs", "push_fields"): (
+        Cell("e2e_wrap", "a field's raw", _E2E_FIELD_HEADER, "a field's `raw`"),
+        Cell("e2e_wrap", "a field's value", _E2E_FIELD_HEADER, "a field's `value`"),
+        Cell("e2e_wrap", "a part's value", _E2E_FIELD_HEADER, "a part's `value`"),
+    ),
+    ("crates/wz-capture/src/e2e_json.rs", "wrap_document"): (
+        Cell("e2e_wrap", "crc_computed", _E2E_DOCUMENT_HEADER, "`crc_computed`"),
+        Cell("e2e_wrap", "length_field", _E2E_DOCUMENT_HEADER, "`length_field`"),
+    ),
+    ("crates/wz-capture/src/e2e_json.rs", "open_document"): (
+        Cell("e2e_open", "crc_computed", _E2E_DOCUMENT_HEADER, "`crc_computed`"),
+        Cell("e2e_open", "length_field", _E2E_DOCUMENT_HEADER, "`length_field`"),
+        Cell(
+            "e2e_open",
+            "length_expected",
+            "the `length_expected` of an `e2e_open` document",
+            "`length_expected`",
+        ),
     ),
 }
 
@@ -324,7 +355,13 @@ def header_findings(header: str, cells: Iterable[Cell], rule: Mapping[str, int])
 
 
 def _const_for(doc_revision: str) -> dict[str, str]:
-    return {m.group(2): m.group(1) for m in re.finditer(r'pub const ([A-Z_]+): &str = "([a-z_]+)";', doc_revision)}
+    # Digits are part of a name (`e2e_wrap`): a class that stopped at letters and
+    # underscores would have no constant for such a document and report its row
+    # as missing.
+    return {
+        m.group(2): m.group(1)
+        for m in re.finditer(r'pub const ([A-Z0-9_]+): &str = "([a-z0-9_]+)";', doc_revision)
+    }
 
 
 def row_comment(doc_revision: str, document: str, revision: int) -> str | None:

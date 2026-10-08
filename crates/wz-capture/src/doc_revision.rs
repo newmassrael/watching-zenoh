@@ -1661,6 +1661,45 @@ pub const DOCUMENT_HISTORY: &[DocumentShape] = &[
         planes: &[],
         carries: &[],
     },
+    // What building a protected frame under a caller-supplied profile did, or
+    // why it refused.
+    //
+    // Its two branches share the envelope and `ok`. The refusal names the text
+    // it is about by the KEY that locates the place (`profile_path`,
+    // `profile_offset`, `values_path`, `values_offset`) instead of by a word,
+    // so the document declares no value family, and it OMITS a position that
+    // does not apply rather than writing `null`, which is reserved for a plane
+    // this build cannot feed.
+    //
+    // It takes the integer rule from its first revision, for the cells that can
+    // reach 2^53: a field's `raw` and a field's `value`, a part's `value`, the
+    // `crc_computed` and the `length_field`. A 7- or 8-byte field, or a 64-bit
+    // CRC, is a number below the line and a string of digits beyond it.
+    DocumentShape {
+        document: E2E_WRAP,
+        revision: 1,
+        keys: E2E_WRAP_R1_KEYS,
+        retiring: &[],
+        families: &[],
+        planes: &[],
+        carries: &[],
+    },
+    // What opening a protected frame under a caller-supplied profile found, or
+    // why it refused: the same two-branch shape as `e2e_wrap`, with the CRC
+    // verdict and the three length facts in place of the written values.
+    //
+    // It takes the integer rule from its first revision too: a field's `raw`
+    // and a field's `value`, a part's `value`, the `crc_computed`, the
+    // `length_field` it read and the `length_expected` the profile's rule gives.
+    DocumentShape {
+        document: E2E_OPEN,
+        revision: 1,
+        keys: E2E_OPEN_R1_KEYS,
+        retiring: &[],
+        families: &[],
+        planes: &[],
+        carries: &[],
+    },
     // The selector's verdict over the field document's rows, with none
     // of what the field document renders beside it.
     //
@@ -1778,6 +1817,12 @@ pub const DECLARATIONS_DIAGNOSE: &str = "declarations_diagnose";
 /// The declarations a `.proto` schema comes to, or why it was refused
 /// (`wz_dissect_declarations_from_proto`).
 pub const DECLARATIONS_FROM_PROTO: &str = "declarations_from_proto";
+/// A protected frame built under a profile, or why it was refused
+/// (`wz_dissect_e2e_wrap`).
+pub const E2E_WRAP: &str = "e2e_wrap";
+/// A protected frame read under a profile, or why it was refused
+/// (`wz_dissect_e2e_open`).
+pub const E2E_OPEN: &str = "e2e_open";
 /// A selector's verdict over the field document's rows, and nothing else
 /// (`wz_dissect_live_selection`).
 pub const SELECTION: &str = "selection";
@@ -8151,6 +8196,66 @@ pub const DECLARATIONS_FROM_PROTO_R1_KEYS: &[&str] = &[
     "revision",
 ];
 
+/// The `e2e_wrap` document's key set at revision 1, over BOTH branches: the
+/// built frame with every step it took, and the refusal with whichever
+/// position keys apply.
+pub const E2E_WRAP_R1_KEYS: &[&str] = &[
+    "bytes",
+    "crc_computed",
+    "crc_fed",
+    "document",
+    "fields",
+    "frame",
+    "hex",
+    "item",
+    "length_field",
+    "message",
+    "name",
+    "offset",
+    "ok",
+    "parts",
+    "payload_bytes",
+    "payload_offset",
+    "profile",
+    "profile_offset",
+    "profile_path",
+    "raw",
+    "reason",
+    "revision",
+    "value",
+    "values_offset",
+    "values_path",
+];
+
+/// The `e2e_open` document's key set at revision 1, over BOTH branches.
+pub const E2E_OPEN_R1_KEYS: &[&str] = &[
+    "bytes",
+    "crc_computed",
+    "crc_fed",
+    "crc_ok",
+    "document",
+    "fields",
+    "hex",
+    "item",
+    "length_expected",
+    "length_field",
+    "length_matches_frame",
+    "message",
+    "name",
+    "offset",
+    "ok",
+    "parts",
+    "payload_bytes",
+    "payload_offset",
+    "profile",
+    "profile_offset",
+    "profile_path",
+    "raw",
+    "reason",
+    "revision",
+    "value",
+];
+
 /// The selection document's key set at revision 1, over EVERY shape a row and
 /// the document take — the coordinates present or absent, `selected` present or
 /// absent.
@@ -10174,6 +10279,9 @@ mod tests {
             (SELECTOR_DIAGNOSE, 2),
             (DECLARATIONS_DIAGNOSE, 1),
             (DECLARATIONS_FROM_PROTO, 1),
+            // A protected frame built and read under a caller's profile.
+            (E2E_WRAP, 1),
+            (E2E_OPEN, 1),
             // The selector's verdict over the field document's rows.
             (SELECTION, 1),
             // What a live handle holds, beside its ceilings.

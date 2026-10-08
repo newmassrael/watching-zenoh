@@ -67,7 +67,7 @@ def newest_revisions() -> dict[str, int]:
     """
     src = SSOT.read_text(encoding="utf-8")
     names = dict(
-        re.findall(r"^pub const ([A-Z_]+): &str = \"([a-z_]+)\";", src, re.M)
+        re.findall(r"^pub const ([A-Z0-9_]+): &str = \"([a-z0-9_]+)\";", src, re.M)
     )
     start = src.find("pub const DOCUMENT_HISTORY: &[DocumentShape] = &[")
     if start < 0:
@@ -80,7 +80,7 @@ def newest_revisions() -> dict[str, int]:
     newest: dict[str, int] = {}
     document = None
     for line in block.splitlines():
-        got = re.match(r"\s+document: ([A-Z_]+),\s*$", line)
+        got = re.match(r"\s+document: ([A-Z0-9_]+),\s*$", line)
         if got:
             document = got.group(1)
             continue
@@ -100,7 +100,7 @@ def consumer_pins() -> dict[str, int]:
     names = dict(
         (int(i), n)
         for i, n in re.findall(
-            r"revisioned\[(\d+)\]\.name\s*=\s*\"([a-z_]+)\";", src
+            r"revisioned\[(\d+)\]\.name\s*=\s*\"([a-z0-9_]+)\";", src
         )
     )
     revs = dict(
@@ -148,10 +148,15 @@ def selftest() -> int:
     ssot = (
         'pub const CENSUS: &str = "census";\n'
         'pub const FIELDS: &str = "fields";\n'
+        # A name with digits in it, in both the constant and the string: the
+        # readers once matched letters and underscores only, so a document named
+        # like this was skipped on BOTH sides and its pin was never compared.
+        'pub const E2E_X: &str = "e2e_x";\n'
         "pub const DOCUMENT_HISTORY: &[DocumentShape] = &[\n"
         "    DocumentShape {\n        document: CENSUS,\n        revision: 1,\n    },\n"
         "    DocumentShape {\n        document: CENSUS,\n        revision: 3,\n    },\n"
         "    DocumentShape {\n        document: FIELDS,\n        revision: 2,\n    },\n"
+        "    DocumentShape {\n        document: E2E_X,\n        revision: 5,\n    },\n"
         "];\n"
         # AFTER the array, and it must not raise the ceiling: the per-family
         # `Shape` rows carry the same word, and a sweep over the file rather
@@ -161,6 +166,7 @@ def selftest() -> int:
     consumer_ok = (
         '    revisioned[0].name = "census";\n    revisioned[0].revision = 3;\n'
         '    revisioned[1].name = "fields";\n    revisioned[1].revision = 2;\n'
+        '    revisioned[3].name = "e2e_x";\n    revisioned[3].revision = 5;\n'
     )
     cases: list[tuple[str, str, str, int]] = [
         ("the clean fixture agrees", ssot, consumer_ok, 0),
@@ -174,6 +180,12 @@ def selftest() -> int:
             "EVERY stale pin is reported, not only the first",
             ssot,
             consumer_ok.replace("= 3", "= 1").replace("[1].revision = 2", "[1].revision = 1"),
+            1,
+        ),
+        (
+            "a stale pin on a document whose name has digits is refused",
+            ssot,
+            consumer_ok.replace("revisioned[3].revision = 5", "revisioned[3].revision = 4"),
             1,
         ),
         ("an empty consumer is refused, not passed", ssot, "", 1),
@@ -210,8 +222,9 @@ def selftest() -> int:
         return 1
     print(
         f"doc-revision-consumer-pin: selftest ok -- {len(cases)} case(s): a clean "
-        f"pair, a stale pin, TWO stale pins reported together, an empty consumer, "
-        f"an empty history, and a document the SSOT does not declare"
+        f"pair, a stale pin, TWO stale pins reported together, a stale pin on a "
+        f"document whose name has digits, an empty consumer, an empty history, and "
+        f"a document the SSOT does not declare"
     )
     return 0
 
