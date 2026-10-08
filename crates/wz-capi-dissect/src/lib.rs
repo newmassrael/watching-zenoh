@@ -71,7 +71,7 @@ use core::ffi::{c_char, c_int};
 use std::ffi::CString;
 
 use wz_capture::Dissection;
-use wz_session_core::dissect::{dissect_transport_message, to_json};
+use wz_session_core::dissect::{dissect_message, dissect_transport_message, to_json};
 
 pub mod live;
 
@@ -335,6 +335,7 @@ pub extern "C" fn wz_dissect_abi_version() -> c_int {
     // 24, for `wz_dissect_live_health`.
     // 25, for `wz_dissect_declarations_from_proto`.
     // 26, for `wz_dissect_e2e_wrap` and `wz_dissect_e2e_open`.
+    // 27, for `wz_dissect_transport_message_in`.
     WZ_DISSECT_ABI_REVISION
 }
 
@@ -352,7 +353,7 @@ pub extern "C" fn wz_dissect_abi_version() -> c_int {
 /// It lives AFTER the function rather than above it on purpose: an item placed
 /// between a doc comment and the item it documents takes that doc, which is
 /// the doc-ownership defect the C1bz budget records.
-pub const WZ_DISSECT_ABI_REVISION: c_int = 26;
+pub const WZ_DISSECT_ABI_REVISION: c_int = 27;
 
 /// R2108 (open-debt item 525) — THE RECORD'S LAYOUT, reported by the artifact.
 ///
@@ -711,6 +712,12 @@ pub unsafe extern "C" fn wz_dissect_string_free(s: *mut c_char) {
 /// offset within a capture and the spans read as capture offsets directly,
 /// pass 0 and they are message-relative. The walker never mixes the two.
 ///
+/// This door reads a message with NO session. A bare network message of a
+/// session that negotiated LowLatency (every data message after its handshake)
+/// is therefore a MID the transport space does not name and reads as `Unknown`;
+/// hand such a message, with the flow's `context`, to
+/// [`wz_dissect_transport_message_in`].
+///
 /// On success writes an owned C string to `out` and returns
 /// [`WZ_DISSECT_OK`]. The caller owns it and must release it with
 /// [`wz_dissect_string_free`].
@@ -735,6 +742,110 @@ pub unsafe extern "C" fn wz_dissect_transport_message(
             let json = to_json(&field);
             write_string(json, out)
         }
+        Err(_) => WZ_DISSECT_ERR_DECODE,
+    }
+}
+
+/// Dissect ONE message in the light of the session it came out of, returning
+/// its field tree as JSON.
+///
+/// # The gap this closes
+///
+/// [`wz_dissect_transport_message`] has no session, and that is its contract.
+/// It is wrong for exactly one kind of message. On a session that negotiated
+/// LowLatency there is no `Frame` around the data, so the first byte of a
+/// message after the handshake is a NETWORK header; read as a transport header
+/// it is a MID the transport space does not name, and the answer is the
+/// `Unknown` group: `header`, `mid`, `z` and the rest of the message as one
+/// `body`. That is accurate and it is not usable, because the keyexpr, the put
+/// and the payload are then one blob. Init, Open, KeepAlive and Close read
+/// without a session, and so do the `Frame` and `Fragment` messages of a
+/// session that did not negotiate LowLatency. The session's field document
+/// reads the same bytes in full, because it knows the context. This door takes
+/// the context and gives the same answer.
+///
+/// `context_json` is the `context` object of one flow of the field document,
+/// as that document writes it, NUL-terminated UTF-8:
+/// `{"phase":"closed","negotiated":true,"lowlatency":true,...}`.
+///
+/// # What it reads from the context, and what it does not
+///
+/// Two keys: `negotiated` (a boolean) and `lowlatency` (a boolean or `null`).
+/// Both must be present and of that type. Every other key is ignored whatever
+/// its value or type, so a context that has grown a key, or retyped one this
+/// door does not use, still opens; `compression`, `qos`, `patch`, `sn_mask`,
+/// `batch_size`, `version` and `phase` change nothing about how a MESSAGE reads
+/// (compression wraps a whole batch, and this door is handed one message that
+/// is already out of its batch; the others judge a message and do not decide
+/// which bytes belong to which field).
+///
+/// * `negotiated: true, lowlatency: true`: a message whose first byte is a
+///   network MID (the low five bits `0x19..=0x1F`: `Interest`, `ResponseFinal`,
+///   `Response`, `Request`, `Push`, `Declare`, `Oam`) is read as the network
+///   message it is, with its whole field tree. Any other first byte is read as
+///   a transport message, which is how `Init`, `Open`, `Close` and `KeepAlive`
+///   read from the same context as the data. The MID alone decides, because
+///   the two MID spaces do not overlap.
+/// * `lowlatency: false`, or `null`, or `negotiated: false` (a `true` beside
+///   it is not an agreement): UNKNOWN to this door, and the reading is
+///   [`wz_dissect_transport_message`]'s, byte for byte. A capability nobody
+///   agreed is not assumed.
+///
+/// # What the answer is
+///
+/// The same node [`wz_dissect_transport_message`] returns, and for a message
+/// the session document walked it is identical to that row's `fields`: names,
+/// kinds, values and spans, the spans in `base`'s coordinate. A message of a
+/// lowlatency session after its handshake is one unit holding ONE message: a
+/// network message followed by more bytes is `WZ_DISSECT_ERR_DECODE`, the
+/// decline the document gives that row, and not a prefix rendered as a message.
+///
+/// It parts from the document in one place, and says so. A first byte in
+/// NEITHER MID space, or a transport MID that no lowlatency link carries after
+/// its handshake (`Frame`, `Fragment`, `Join`, `Oam`), is read as a transport
+/// message here, as the context-free door reads it; the document, which knows
+/// the message came after its direction's `Open`, declines such a row. A single
+/// message carries no `Open` to be after.
+///
+/// # Errors
+///
+/// A null `context_json`, `bytes` or `out` is [`WZ_DISSECT_ERR_INVALID_ARG`],
+/// and so is a context that is not UTF-8, not JSON, not an object, or whose
+/// `negotiated` or `lowlatency` is absent or of another type: a context is
+/// produced by code (the field document writes it), so a malformed one is the
+/// caller's bug and not text an operator typed, which is what separates it from
+/// `WZ_DISSECT_ERR_SELECTOR`. Bytes that do not decode are
+/// [`WZ_DISSECT_ERR_DECODE`]. Neither hands back a string.
+///
+/// The ABI revision moves for this symbol; the memory rule does not: the string
+/// is released with [`wz_dissect_string_free`].
+///
+/// # Safety
+/// `context_json` must point to a NUL-terminated string, `bytes` to at least
+/// `len` readable bytes, and `out` must be a writable pointer to a
+/// `*mut c_char`. None may be null.
+#[no_mangle]
+pub unsafe extern "C" fn wz_dissect_transport_message_in(
+    context_json: *const c_char,
+    bytes: *const u8,
+    len: usize,
+    base: usize,
+    out: *mut *mut c_char,
+) -> c_int {
+    if context_json.is_null() || bytes.is_null() || out.is_null() {
+        return WZ_DISSECT_ERR_INVALID_ARG;
+    }
+    // SAFETY: caller contract above.
+    let Ok(text) = (unsafe { std::ffi::CStr::from_ptr(context_json) }).to_str() else {
+        return WZ_DISSECT_ERR_INVALID_ARG;
+    };
+    let Ok(context) = wz_capture::message_context::read_flow_context(text) else {
+        return WZ_DISSECT_ERR_INVALID_ARG;
+    };
+    // SAFETY: caller contract above.
+    let input = unsafe { core::slice::from_raw_parts(bytes, len) };
+    match dissect_message(input, base, context) {
+        Ok(field) => write_string(to_json(&field), out),
         Err(_) => WZ_DISSECT_ERR_DECODE,
     }
 }
@@ -3192,6 +3303,10 @@ fn write_string(s: String, out: *mut *mut c_char) -> c_int {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `wz_dissect_transport_message_in` against the session document, in its
+    /// own file: the door's oracle is a whole built session and not a unit.
+    mod message_in;
 
     /// R311y873 — THE HEADER NAMES EVERY `payload_decode` STATE THE LIBRARY
     /// CAN EMIT.
@@ -6324,7 +6439,11 @@ mod tests {
         // frame built and read under a profile the caller passes as JSON. Two
         // symbols and no struct; both write a document released by
         // `wz_dissect_string_free`, and nothing is held between calls.
-        assert_eq!(wz_dissect_abi_version(), 26);
+        // 27, for `wz_dissect_transport_message_in`: one message read in the
+        // light of its session's context. One symbol, a `char*` released by
+        // `wz_dissect_string_free`; the memory rule and the record layout stay
+        // put.
+        assert_eq!(wz_dissect_abi_version(), 27);
     }
 
     /// R311y913 (unregistered item 435) — THE LINKED SURFACE CAN SAY WHAT IT

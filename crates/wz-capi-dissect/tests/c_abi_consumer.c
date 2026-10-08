@@ -1351,6 +1351,137 @@ static int check_e2e_doors(void) {
     return 0;
 }
 
+/* (ABI 27) -- ONE message, read in the light of its session's context.
+ *
+ * The messages are the smallest complete ones of two network MIDs, laid out
+ * byte by byte from the wire layout: a ResponseFinal is a header and a VLE
+ * request id, a Push is a header, a keyexpr id and a Put body that is a header
+ * and an empty payload. The context text is what a consumer copies out of a
+ * flow of the field document. */
+static int check_message_in_door(void) {
+    static const unsigned char response_final[2] = {0x1A, 0x07};
+    static const unsigned char push[4] = {0x1D, 0x00, 0x01, 0x00};
+    static const unsigned char keepalive[1] = {0x04};
+    static const unsigned char two_messages[3] = {0x1A, 0x07, 0xEE};
+    static const char lean[] =
+        "{\"phase\":\"closed\",\"negotiated\":true,\"lowlatency\":true,"
+        "\"compression\":false,\"qos\":false,\"patch\":1,\"sn_mask\":268435455,"
+        "\"batch_size\":256,\"version\":9}";
+    char *json = NULL;
+    int rc;
+
+    /* The context turns a bare network message into the message it is. */
+    rc = wz_dissect_transport_message_in(lean, response_final,
+                                         sizeof response_final, 0, &json);
+    CHECK(rc == WZ_DISSECT_OK && json != NULL, "lean ResponseFinal rc=%d", rc);
+    CHECK(strstr(json, "\"name\":\"ResponseFinal\"") != NULL &&
+              strstr(json, "\"name\":\"request_id\",\"start\":1,\"end\":2,"
+                           "\"kind\":\"uint\",\"value\":7") != NULL,
+          "a lowlatency ResponseFinal must be read in full: %s", json);
+    wz_dissect_string_free(json);
+
+    json = NULL;
+    rc = wz_dissect_transport_message_in(lean, push, sizeof push, 0, &json);
+    CHECK(rc == WZ_DISSECT_OK && json != NULL, "lean Push rc=%d", rc);
+    CHECK(strstr(json, "\"name\":\"Push\"") != NULL &&
+              strstr(json, "\"name\":\"put\"") != NULL,
+          "a lowlatency Push must carry its put: %s", json);
+    wz_dissect_string_free(json);
+
+    /* The same bytes through the door with no session are the gap this door
+     * closes, and they stay so: that door is unchanged. */
+    json = NULL;
+    rc = wz_dissect_transport_message(push, sizeof push, 0, &json);
+    CHECK(rc == WZ_DISSECT_OK && strstr(json, "\"name\":\"Unknown\"") != NULL,
+          "the context-free door reads a bare Push as Unknown: rc=%d", rc);
+    wz_dissect_string_free(json);
+
+    /* A capability nobody agreed is not assumed: lowlatency false, null, or
+     * not negotiated reads exactly as the context-free door does. */
+    {
+        static const char *const unknown[] = {
+            "{\"negotiated\":true,\"lowlatency\":false}",
+            "{\"negotiated\":true,\"lowlatency\":null}",
+            "{\"negotiated\":false,\"lowlatency\":null}",
+            "{\"negotiated\":false,\"lowlatency\":true}",
+        };
+        size_t i;
+        for (i = 0; i < sizeof unknown / sizeof unknown[0]; i++) {
+            char *blind = NULL;
+            json = NULL;
+            rc = wz_dissect_transport_message_in(unknown[i], push, sizeof push,
+                                                 0, &json);
+            CHECK(rc == WZ_DISSECT_OK, "context %s rc=%d", unknown[i], rc);
+            rc = wz_dissect_transport_message(push, sizeof push, 0, &blind);
+            CHECK(rc == WZ_DISSECT_OK && strcmp(json, blind) == 0,
+                  "context %s must read as the context-free door: %s vs %s",
+                  unknown[i], json, blind);
+            wz_dissect_string_free(json);
+            wz_dissect_string_free(blind);
+        }
+    }
+
+    /* The messages that carry no network header read the same from the same
+     * context, so one context serves a whole flow. */
+    json = NULL;
+    rc = wz_dissect_transport_message_in(lean, keepalive, sizeof keepalive, 0,
+                                         &json);
+    CHECK(rc == WZ_DISSECT_OK && strstr(json, "\"name\":\"KeepAlive\"") != NULL,
+          "a KeepAlive reads from the lowlatency context too: rc=%d", rc);
+    wz_dissect_string_free(json);
+
+    /* Spans are in `base`'s coordinate. */
+    json = NULL;
+    rc = wz_dissect_transport_message_in(lean, response_final,
+                                         sizeof response_final, 1000, &json);
+    CHECK(rc == WZ_DISSECT_OK &&
+              strstr(json, "\"name\":\"ResponseFinal\",\"start\":1000,"
+                           "\"end\":1002") != NULL,
+          "spans must follow base: rc=%d", rc);
+    wz_dissect_string_free(json);
+
+    /* Bytes that are not one message do not decode, and hand back no string. */
+    json = NULL;
+    rc = wz_dissect_transport_message_in(lean, two_messages,
+                                         sizeof two_messages, 0, &json);
+    CHECK(rc == WZ_DISSECT_ERR_DECODE && json == NULL,
+          "a network message with a tail rc=%d", rc);
+    rc = wz_dissect_transport_message_in(lean, response_final, 0, 0, &json);
+    CHECK(rc == WZ_DISSECT_ERR_DECODE && json == NULL, "empty bytes rc=%d", rc);
+
+    /* A context that is not the object the field document writes is the
+     * caller's bug: the argument error, with no string handed back. */
+    {
+        static const char *const bad[] = {
+            "",
+            "not json",
+            "[]",
+            "{}",
+            "{\"negotiated\":true}",
+            "{\"lowlatency\":true}",
+            "{\"negotiated\":\"yes\",\"lowlatency\":true}",
+            "{\"negotiated\":true,\"lowlatency\":1}",
+        };
+        size_t i;
+        for (i = 0; i < sizeof bad / sizeof bad[0]; i++) {
+            json = NULL;
+            rc = wz_dissect_transport_message_in(bad[i], push, sizeof push, 0,
+                                                 &json);
+            CHECK(rc == WZ_DISSECT_ERR_INVALID_ARG && json == NULL,
+                  "context %s rc=%d", bad[i], rc);
+        }
+    }
+
+    /* Nulls are refused before anything is dereferenced. */
+    rc = wz_dissect_transport_message_in(NULL, push, sizeof push, 0, &json);
+    CHECK(rc == WZ_DISSECT_ERR_INVALID_ARG, "null context rc=%d", rc);
+    rc = wz_dissect_transport_message_in(lean, NULL, 0, 0, &json);
+    CHECK(rc == WZ_DISSECT_ERR_INVALID_ARG, "null bytes rc=%d", rc);
+    rc = wz_dissect_transport_message_in(lean, push, sizeof push, 0, NULL);
+    CHECK(rc == WZ_DISSECT_ERR_INVALID_ARG, "null out rc=%d", rc);
+    return 0;
+}
+
 int main(void) {
     /* The symbol/memory-contract revision. A consumer refuses a library whose
      * memory rules moved; this asserts the value the header was written for. */
@@ -2334,6 +2465,12 @@ int main(void) {
     /* (ABI 26) -- and a protected frame built and opened under a profile the
      * consumer passes as text, so it never carries the arithmetic itself. */
     if (check_e2e_doors() != 0) {
+        return 1;
+    }
+
+    /* (ABI 27) -- and ONE message read in the light of the session it came
+     * out of, so a lowlatency session's data is not a blob of `Unknown`. */
+    if (check_message_in_door() != 0) {
         return 1;
     }
 

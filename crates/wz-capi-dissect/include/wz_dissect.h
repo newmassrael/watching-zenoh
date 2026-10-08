@@ -910,7 +910,8 @@
  * wz_dissect_transport_message is the one door with no such revision, and
  * deliberately: its document is a FIELD TREE whose keys are the walkers' own
  * names, generated per protocol element, so there is no fixed key set for a
- * revision to be about.
+ * revision to be about. wz_dissect_transport_message_in returns the same tree
+ * and has none for the same reason.
  *
  * The live door emits no document at all, so it is outside this scheme
  * rather than an omission from it. A field read by OFFSET cannot be read by
@@ -1107,7 +1108,7 @@ extern "C" {
  * calls the function, and refuses when the two disagree.
  *
  * @unknown ABI not-an-enumeration */
-#define WZ_DISSECT_ABI_REVISION 26
+#define WZ_DISSECT_ABI_REVISION 27
 
 /* Symbol/memory-contract revision. Not a JSON-shape revision. This is the
  * revision the LOADED library reports; the block above says why it exists
@@ -1119,9 +1120,93 @@ void wz_dissect_string_free(char *s);
 
 /* Dissect ONE transport message. `base` is the coordinate spans are
  * reported in: pass the message's offset within a capture for capture
- * offsets, or 0 for message-relative ones. */
+ * offsets, or 0 for message-relative ones.
+ *
+ * This door reads a message with NO session. A bare network message of a
+ * session that negotiated LowLatency -- every data message after its
+ * handshake -- is therefore a MID the transport space does not name, and reads
+ * as `Unknown`; hand such a message, with its flow's `context`, to
+ * wz_dissect_transport_message_in below. */
 int wz_dissect_transport_message(const unsigned char *bytes, size_t len,
                                  size_t base, char **out);
+
+/* ABI 27 -- ONE message, read in the light of the session it came out of.
+ *
+ * THE GAP. wz_dissect_transport_message has no session, and that is its
+ * contract. It is wrong for exactly one kind of message. On a session that
+ * negotiated LowLatency there is no Frame around the data, so the first byte of
+ * a message after the handshake is a NETWORK header; read as a transport header
+ * it is a MID the transport space does not name, and the answer is the
+ * `Unknown` group: `header`, `mid`, `z` and the rest of the message as one
+ * `body`. That is accurate and it is not usable, because the keyexpr, the put
+ * and the payload are then one blob. Init, Open, KeepAlive and Close read
+ * without a session, and so do the Frame and Fragment messages of a session
+ * that did not negotiate LowLatency. The session's field document reads the
+ * same bytes in full, because it knows the context. This door takes the context
+ * and gives the same answer.
+ *
+ * `context_json` is the `context` object of one flow of the field document
+ * (wz_dissect_pcap_fields and its siblings), as that document writes it,
+ * NUL-terminated UTF-8:
+ *
+ *     {"phase":"closed","negotiated":true,"lowlatency":true,...}
+ *
+ * WHAT IT READS FROM THE CONTEXT. Two keys: `negotiated` (a boolean) and
+ * `lowlatency` (a boolean or null). Both must be present and of that type.
+ * Every other key is ignored whatever its value or type, so a context that has
+ * grown a key, or retyped one this door does not use, still opens.
+ *
+ *   negotiated true, lowlatency true
+ *       A message whose first byte is a NETWORK MID (the low five bits are
+ *       0x19 to 0x1F: Interest, ResponseFinal, Response, Request, Push, Declare,
+ *       Oam) is read as the network message it is, with its whole field tree.
+ *       Any other first byte is read as a transport message, which is how Init,
+ *       Open, Close and KeepAlive read from the same context as the data. The
+ *       MID alone decides: the transport and network MID spaces do not overlap.
+ *
+ *   lowlatency false or null, or negotiated false
+ *       UNKNOWN to this door, and the reading is wz_dissect_transport_message's,
+ *       byte for byte. A capability nobody agreed is not assumed, so a `true`
+ *       beside `negotiated: false` -- what a half-seen handshake would fold to
+ *       -- is not an agreement.
+ *
+ * WHAT THE OTHER KEYS DO TO A MESSAGE: NOTHING. `compression` wraps a whole
+ * BATCH (a batch header byte, then lz4 when its bit 0 is set), and this door is
+ * handed one message that is already out of its batch: it opens no batch, and a
+ * batch header is not part of a message. `qos`, `patch`, `sn_mask`,
+ * `batch_size`, `version` and `phase` judge a message (a priority is
+ * meaningful, a size was exceeded, a number has a gap); none of them decides
+ * which bytes belong to which field.
+ *
+ * WHAT THE ANSWER IS. The same node wz_dissect_transport_message returns, and
+ * for a message the session document walked it is identical to that row's
+ * `fields`: names, kinds, values and spans, the spans in `base`'s coordinate.
+ * A message of a lowlatency session after its handshake is one unit holding ONE
+ * message, so a network message followed by more bytes is
+ * WZ_DISSECT_ERR_DECODE -- the decline the document gives that row -- and not a
+ * prefix rendered as a message.
+ *
+ * WHERE IT PARTS FROM THE DOCUMENT. A first byte in NEITHER MID space, or a
+ * transport MID that no lowlatency link carries after its handshake (Frame,
+ * Fragment, Join, Oam), is read as a transport message here, as the
+ * context-free door reads it. The document knows the message came after its
+ * direction's Open and declines such a row; a single message carries no Open to
+ * be after.
+ *
+ * ERRORS. A null `context_json`, `bytes` or `out` is WZ_DISSECT_ERR_INVALID_ARG,
+ * and so is a context that is not UTF-8, not JSON, not an object, or whose
+ * `negotiated` or `lowlatency` is absent or of another type. A context is
+ * produced by code -- the field document writes it -- so a malformed one is the
+ * caller's bug and not text an operator typed, which is what separates it from
+ * WZ_DISSECT_ERR_SELECTOR. Bytes that do not decode are WZ_DISSECT_ERR_DECODE.
+ * Neither hands back a string.
+ *
+ * Like wz_dissect_transport_message it has no document revision: the answer is
+ * a FIELD TREE, not a fixed key set. The memory rule is the usual one: release
+ * the string with wz_dissect_string_free. */
+int wz_dissect_transport_message_in(const char *context_json,
+                                    const unsigned char *bytes, size_t len,
+                                    size_t base, char **out);
 
 /* Dissect a classic pcap file held in memory, returning a per-flow SUMMARY.
  * Deliberately a summary: a capture holds an unbounded number of messages

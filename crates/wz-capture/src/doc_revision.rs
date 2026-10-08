@@ -65,6 +65,9 @@
 //! are the walkers' own field names, generated per protocol element, so there
 //! is no fixed key set to pin and "the shape moved" is not a statement about
 //! it. The walkers' naming contract is a different one and belongs with them.
+//! `wz_dissect_transport_message_in` returns the same tree and is out of scope
+//! for the same reason: what the session context decides is WHICH walker reads
+//! a message, never the shape a walker emits.
 
 use alloc::string::String;
 use alloc::vec::Vec;

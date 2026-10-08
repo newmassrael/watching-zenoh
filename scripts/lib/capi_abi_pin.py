@@ -50,7 +50,7 @@ import subprocess
 import sys
 
 # The pinned pair. Edit BOTH halves deliberately -- see the module doc.
-EXPECTED_VERSION = 26
+EXPECTED_VERSION = 27
 
 # R2108 (open-debt item 525) -- THE RECORD'S LAYOUT, pinned HERE and read from
 # the artifact through `wz_dissect_record_layout`.
@@ -292,6 +292,14 @@ EXPECTED_SYMBOLS = {
     "wz_dissect_selector_diagnose",
     "wz_dissect_string_free",
     "wz_dissect_transport_message",
+    # (ABI 27) -- ONE message read in the light of its session's `context`
+    # object: on a LowLatency session the data after the handshake is bare
+    # network messages, which the context-free door above reads as `Unknown`.
+    # The memory rule does not move: a `char*` released by
+    # `wz_dissect_string_free`, and the context crosses as NUL-terminated text
+    # the CALLER holds. It is its own symbol and not an argument of the door
+    # above, whose published signature a consumer already links.
+    "wz_dissect_transport_message_in",
 }
 
 CDYLIB = pathlib.Path("crates/target/release/libwz_capi_dissect.so")

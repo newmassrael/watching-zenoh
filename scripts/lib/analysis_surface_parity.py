@@ -381,6 +381,20 @@ ONLY_CAPI = {
         "CALLER holds. Two different questions rather than one missing flag.",
         (5,),
     ),
+    # Filed in the round that added the symbol, which is where this table's
+    # own header says the answering belongs.
+    "one message's field tree, read in the light of its session": (
+        "wz_dissect_transport_message_in",
+        "DELIBERATE, on the row above's reasoning with one thing more. The "
+        "command line reads a capture whole and renders every row in the light "
+        "of the session it folded, so it never holds a message apart from its "
+        "session. A linking consumer does: it keeps a row's bytes and the "
+        "flow's `context` object and wants the tree again without re-reading "
+        "the capture. Without the context a lowlatency session's data reads as "
+        "`Unknown`, which is why the context crosses with the bytes; only the "
+        "ABI has a caller holding both.",
+        (),
+    ),
     "diagnosing a selector without a capture": (
         "wz_dissect_selector_diagnose",
         "DELIBERATE. It answers 'is this expression valid, and if not where' while "
