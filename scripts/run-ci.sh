@@ -12776,6 +12776,26 @@ layer_c1bn_passive_dissection_features() {
         echo "  C1bn FAIL: the IP protocol furniture split did not run"
         echo "$out"; return 1; }
 
+    # The `.proto` door (`wz_dissect_declarations_from_proto`), judged by
+    # `protoc`, ARMED.
+    #
+    # The door's own tests were written by the person who wrote the reader, so
+    # they agree with that person's idea of protobuf. `protoc` compiles a corpus
+    # of schemas and the door must declare the tree its descriptor implies from
+    # every message, and must refuse a broken schema on the file and line
+    # `protoc` blames. The test SKIPS where `protoc` (or the `descriptor.proto`
+    # that ships in libprotobuf-dev) is absent, which is right for a developer's
+    # machine and wrong for a lane, because a skip prints `ok` and reads as
+    # agreement. `WZ_PROTOC_REQUIRE=1` turns absence into a failure, and this
+    # job installs both packages so the flag is a statement rather than a gamble.
+    # Five tests: the adjudicator and the four controls that keep its comparison
+    # from being one that cannot fail.
+    out="$(cd crates && WZ_PROTOC_REQUIRE=1 cargo test -p wz-integration-tests \
+        --test proto_door_protoc_oracle --quiet 2>&1)" || { echo "$out"; return 1; }
+    grep -qE '^test result: ok\. 5 passed' <<<"$out" || {
+        echo "  C1bn FAIL: the .proto door oracle did not run"
+        echo "$out"; return 1; }
+
     # R2118 (open-debt item 507) — what a deadline SAYS when the process it
     # spawned stalls, asserted where nothing has to be provisioned.
     #

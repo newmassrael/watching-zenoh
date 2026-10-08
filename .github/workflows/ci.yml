@@ -1697,9 +1697,17 @@ jobs:
           # Priority: important and so already on the image; named anyway,
           # because "the image happens to carry it" is not a thing this file
           # states and the leg arms on its absence.
+          # `protobuf-compiler` and `libprotobuf-dev` — `protoc` is the ADJUDICATOR
+          # for the `.proto` door (`wz_dissect_declarations_from_proto`): it
+          # compiles a corpus of schemas and the door must declare what its
+          # descriptor implies and blame the line it blames. Layer C1bn runs that
+          # test with `WZ_PROTOC_REQUIRE=1`, so both have to be here: Debian ships
+          # the compiler in one package and the `descriptor.proto` it needs to
+          # print a descriptor (/usr/include/google/protobuf/descriptor.proto) in
+          # the other, and a runner with only the first would skip.
           bash scripts/lib/apt-install.sh libsnappy-dev liblz4-dev libzstd-dev zlib1g-dev libbz2-dev \
             cmake libclang-dev clang perl pkg-config tcpdump \
-            libpcap-dev netbase
+            libpcap-dev netbase protobuf-compiler libprotobuf-dev
 
       - name: Save apt archives
         if: always() && env.WZ_APT_CACHE_DIRTY == 'true'

@@ -121,6 +121,16 @@ ROWS: dict[str, tuple[str, tuple[tuple[str, str], ...]]] = {
         "ip_protocol_opinion_split.rs",
         (("file", "/etc/protocols"), ("program", "tcpdump")),
     ),
+    # The `.proto` door judged by `protoc`. Two oracles because Debian splits
+    # them: the compiler is `protobuf-compiler` and the `descriptor.proto` it
+    # needs to print a descriptor is in `libprotobuf-dev`.
+    "WZ_PROTOC_REQUIRE": (
+        "proto_door_protoc_oracle.rs",
+        (
+            ("program", "protoc"),
+            ("file", "/usr/include/google/protobuf/descriptor.proto"),
+        ),
+    ),
 }
 
 KINDS = ("file", "program")

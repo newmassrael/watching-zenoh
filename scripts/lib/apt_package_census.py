@@ -366,6 +366,28 @@ _add(
     "absence reds instead of skipping.",
     ["dissect"],
 )
+# The ADJUDICATOR for the `.proto` door (`wz_dissect_declarations_from_proto`):
+# `protoc` compiles a corpus of schemas and the door must declare what each
+# descriptor implies and blame the file and line `protoc` blames. Layer C1bn
+# runs `proto_door_protoc_oracle` with `WZ_PROTOC_REQUIRE=1`, so the tool has to
+# be on that job. Two packages because Debian splits them: the compiler, and the
+# `descriptor.proto` it needs in order to print a descriptor. ONE job, the same
+# one as `tcpdump` above and for the same reason: it is where the
+# default-feature dissection tests live.
+_add(
+    "protobuf-compiler",
+    "protoc, the adjudicator Layer C1bn holds the .proto door against; armed "
+    "with WZ_PROTOC_REQUIRE so its absence reds instead of skipping.",
+    ["dissect"],
+)
+_add(
+    "libprotobuf-dev",
+    "/usr/include/google/protobuf/descriptor.proto, which `protoc --decode` "
+    "needs to print the descriptor Layer C1bn compares the .proto door "
+    "against; armed with WZ_PROTOC_REQUIRE so its absence reds instead of "
+    "skipping.",
+    ["dissect"],
+)
 # The `cmake` rows are DERIVED below as well as listed here; the list is what
 # makes an unjustified site fail by name, the derivation is what stops this
 # reason from being believed after the tree stops supporting it.
