@@ -6745,6 +6745,13 @@ layer_c1af_cargo_test_shm() {
     # TWENTY-SEVEN, MEASURED by running this exact command (the 24 above and the three).
     _runci_guarded_test C1af 27 cargo test -p wz-runtime-tokio --features session-extshm,transport-multilink,transport-unicast,transport-link-tcp,transport-qos,codec-push,codec-close --lib shm_auth_segment --quiet \
         || return 1
+    # R3123 -- the routing peer's forwarder with a link joined to its first face, which compiles
+    # only with the routing peer, the extension, multilink and the push codec together and so is
+    # in no other leg: a slice that arrives on the joined link is acknowledged to the joined
+    # link's peer and not to the first link's, and a new establishment on a link withdraws that
+    # link's handoff and leaves the other's alone. TWO, MEASURED by running this exact command.
+    _runci_guarded_test C1af 2 cargo test -p wz-runtime-tokio --features routing-peer,session-extshm,transport-multilink,transport-unicast,transport-link-tcp,transport-qos,codec-push,codec-close --lib shm_joined_tests --quiet \
+        || return 1
     # R3056 -- the provider's two new modules, which the filter above does not select:
     # `shm_backend` (the value types an allocation speaks in, 4 tests) and
     # `shm_posix_backend` (the pool, 11 tests). Counted so a dropped or renamed test cannot
@@ -6782,6 +6789,7 @@ layer_c1af_cargo_test_shm() {
         && cargo clippy -p wz-session-core --no-default-features --features transport-shm --quiet -- -D warnings \
         && cargo clippy -p wz-session-core --no-default-features --features session-extshm --quiet -- -D warnings \
         && cargo clippy -p wz-runtime-tokio --all-targets --features session-extshm,transport-multilink,transport-unicast,transport-link-tcp,transport-qos,codec-push,codec-close --quiet -- -D warnings \
+        && cargo clippy -p wz-runtime-tokio --all-targets --features routing-peer,session-extshm,transport-multilink,transport-unicast,transport-link-tcp,transport-qos,codec-push,codec-close --quiet -- -D warnings \
         && cargo clippy -p wz-session-core --no-default-features --features session-extshm,codec-declare --quiet -- -D warnings)
 }
 

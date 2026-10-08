@@ -668,7 +668,17 @@ pub struct LinkstateForwarder {
     /// [`register_joined`](FaceForwarder::register_joined) at the loop's JOIN,
     /// cleared by [`deregister_joined`](FaceForwarder::deregister_joined) on the
     /// joined link's death.
-    joined_faces: RefCell<HashMap<FaceId, FaceId>>,
+    ///
+    /// R3123 -- and the joined link's own session actions, kept with the primary's id: the
+    /// shared-memory slices that arrive on the joined link are acknowledged through THIS link's
+    /// handoff (`SessionLinkActions::acknowledge_shm_slice`), whose counters are the ones the
+    /// joined link's peer named, and not through the primary face's.
+    joined_faces: RefCell<HashMap<FaceId, JoinedFace>>,
+    /// R3123 -- the session actions of the JOINED link the message being forwarded arrived on,
+    /// for the span of one [`forward`](FaceForwarder::forward) call, or `None` when it arrived on
+    /// a face of its own. The relay opens its pass on it, so a slice is acknowledged to the peer
+    /// of the link it came in on. `RefCell` by the single-task contract.
+    receiving_link: RefCell<Option<Arc<SessionLinkActions>>>,
     /// D2c — a spanning-tree recompute is pending (the coalescing flag). The
     /// topology-change handlers ([`forward`](FaceForwarder::forward)'s inbound
     /// link-state, [`deregister`](FaceForwarder::deregister)'s face loss) SET this
@@ -1178,6 +1188,7 @@ impl LinkstateForwarder {
             query_redelivery: RefCell::new(VecDeque::new()),
             forward_depth: Cell::new(0),
             joined_faces: RefCell::new(HashMap::new()),
+            receiving_link: RefCell::new(None),
             trees_dirty: Cell::new(false),
             trees_delay,
             recomputes: Cell::new(0),
@@ -1698,6 +1709,39 @@ impl crate::interceptor::InterceptorSink for LinkstateForwarder {
     }
 }
 
+/// R3123 -- a joined aggregated link: the session's PRIMARY registered face its inbound is routed
+/// against, and the link's own session actions, which its shared-memory slices are acknowledged
+/// through.
+struct JoinedFace {
+    primary: FaceId,
+    actions: Arc<SessionLinkActions>,
+}
+
+/// R3123 -- marks, for the span of one [`forward`](FaceForwarder::forward) call, the joined link
+/// the message arrived on, and puts back what was marked before when it ends: `forward` is
+/// re-entered by a local subscriber that publishes in its handler, and the inner call is on a
+/// face of its own.
+struct ReceivingLink<'a> {
+    slot: &'a RefCell<Option<Arc<SessionLinkActions>>>,
+    previous: Option<Arc<SessionLinkActions>>,
+}
+
+impl<'a> ReceivingLink<'a> {
+    fn enter(
+        slot: &'a RefCell<Option<Arc<SessionLinkActions>>>,
+        link: Option<Arc<SessionLinkActions>>,
+    ) -> Self {
+        let previous = slot.replace(link);
+        Self { slot, previous }
+    }
+}
+
+impl Drop for ReceivingLink<'_> {
+    fn drop(&mut self) {
+        self.slot.replace(self.previous.take());
+    }
+}
+
 impl LinkstateForwarder {
     /// R311y219b — map a JOINED aggregated link's own FaceId to the session's PRIMARY
     /// registered face (via [`joined_faces`](Self#structfield.joined_faces)); returns
@@ -1705,7 +1749,10 @@ impl LinkstateForwarder {
     /// the map). Called once at the top of [`forward`](FaceForwarder::forward) so the
     /// joined link's inbound is served against the primary's face table.
     fn resolve_joined_face(&self, id: FaceId) -> FaceId {
-        self.joined_faces.borrow().get(&id).copied().unwrap_or(id)
+        self.joined_faces
+            .borrow()
+            .get(&id)
+            .map_or(id, |joined| joined.primary)
     }
 
     /// A decoded topology `LinkStateList` arrived on `face`: ingest it against
@@ -2075,11 +2122,16 @@ impl LinkstateForwarder {
         inbound: FaceId,
         message: crate::shm_relay::Routed<'_>,
     ) -> Option<crate::shm_relay::RelayPass<'_>> {
-        let actions = self
-            .faces
-            .borrow()
-            .get(&inbound)
-            .map(|state| Arc::clone(&state.actions));
+        // R3123 -- the session of the link the message arrived on: a joined link's own, else the
+        // face's. A slice is acknowledged through the handoff of THAT link, because its peer is
+        // the one that named the counters.
+        let arrived_on = self.receiving_link.borrow().clone();
+        let actions = arrived_on.or_else(|| {
+            self.faces
+                .borrow()
+                .get(&inbound)
+                .map(|state| Arc::clone(&state.actions))
+        });
         let pass = self
             .shm_relay
             .open_inbound_message(actions.as_deref(), message);
@@ -7791,8 +7843,22 @@ impl FaceForwarder for LinkstateForwarder {
     /// self-flood / graph change: the joined link is NOT a new routing neighbour
     /// (the primary already IS the graph link to this peer), only a second physical
     /// carrier for the same session.
-    fn register_joined(&self, joined_id: FaceId, primary_id: FaceId) {
-        self.joined_faces.borrow_mut().insert(joined_id, primary_id);
+    ///
+    /// R3123 -- `actions` is the joined link's own session handle, kept so the shared-memory
+    /// slices that arrive on it are acknowledged to the joined link's peer.
+    fn register_joined(
+        &self,
+        joined_id: FaceId,
+        primary_id: FaceId,
+        actions: &Arc<SessionLinkActions>,
+    ) {
+        self.joined_faces.borrow_mut().insert(
+            joined_id,
+            JoinedFace {
+                primary: primary_id,
+                actions: Arc::clone(actions),
+            },
+        );
     }
 
     /// R311y219b — the joined link died: forget its id -> primary mapping.
@@ -7823,6 +7889,14 @@ impl FaceForwarder for LinkstateForwarder {
         // collide because a faithful peer mints DeclareKeyexpr mapping ids per-SESSION
         // (both links share one session), not per-link; literal keyexprs (id 0) are
         // table-independent regardless.
+        // R3123 -- and the joined link's own session, taken BEFORE the id is resolved away, so
+        // the shared-memory slices of a message that arrived on it are acknowledged to its peer.
+        let arrived_on = self
+            .joined_faces
+            .borrow()
+            .get(&id)
+            .map(|joined| Arc::clone(&joined.actions));
+        let _arrival = ReceivingLink::enter(&self.receiving_link, arrived_on);
         let id = self.resolve_joined_face(id);
         // #3-c (R311y167) — track re-entrancy so the self-echo drain runs ONCE, at
         // the outermost `forward`. A local subscriber handler that re-drives a Put
@@ -8097,6 +8171,15 @@ impl FaceForwarder for LinkstateForwarder {
         self.forward_depth.set(self.forward_depth.get() - 1);
     }
 }
+
+/// R3123 -- what a joined link's shared-memory slices are acknowledged through.
+#[cfg(all(
+    test,
+    feature = "session-extshm",
+    feature = "transport-multilink",
+    feature = "codec-push"
+))]
+mod shm_joined_tests;
 
 #[cfg(test)]
 mod tests {
@@ -12686,7 +12769,8 @@ mod tests {
 
         // AFTER register_joined(1 -> 0): the SAME Put resolves to the primary face
         // and is delivered to the local subscriber (the fix).
-        fwd.register_joined(FaceId(1), FaceId(0));
+        let (joined, _joined_sink) = peer_face(zid(0x0A));
+        fwd.register_joined(FaceId(1), FaceId(0), &joined);
         fwd.forward(FaceId(1), IterationEvent::Poll(&put()));
         assert_eq!(
             delivered.borrow().as_slice(),

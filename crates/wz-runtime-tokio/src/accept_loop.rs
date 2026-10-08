@@ -725,7 +725,17 @@ pub trait FaceForwarder {
     /// (the routing peer/router) needs the mapping; the hold-only [`NoOpForwarder`]
     /// and observation-only test forwarders ignore it (and keep observing per
     /// physical link, so per-link witnesses are unaffected).
-    fn register_joined(&self, _joined_id: FaceId, _primary_id: FaceId) {}
+    ///
+    /// R3123 -- `_actions` is the joined link's own session handle: what a forwarder
+    /// acknowledges the shared-memory slices that arrive on that link through, since the
+    /// counters they are owed are the ones the joined link's peer named.
+    fn register_joined(
+        &self,
+        _joined_id: FaceId,
+        _primary_id: FaceId,
+        _actions: &Arc<SessionLinkActions>,
+    ) {
+    }
 
     /// The joined link left the aggregate (its own death): drop the joined->primary
     /// mapping so a later [`FaceId`] reuse cannot mis-resolve. Default no-op.
@@ -2358,7 +2368,7 @@ where
                                             // delivers its data/control instead of
                                             // dropping it at the faces.get gate. A
                                             // no-op for observation-only forwarders.
-                                            forwarder.register_joined(id, primary_id);
+                                            forwarder.register_joined(id, primary_id, &joined);
                                             // Drop its dial-address index — a joined
                                             // link is not a standalone reconnectable
                                             // dial (no-op for an accepted link).

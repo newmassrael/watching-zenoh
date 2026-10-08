@@ -1259,14 +1259,91 @@ pub struct ShmAuthDispatch {
     /// from), and an unknown list admits every protocol, which is what a session did before the
     /// list was read.
     peer_protocols: Option<Vec<u32>>,
-    /// R3040 -- the means of acknowledging the peer's shared-memory slices, opened
-    /// from the counter block in its Open message. `None` when the peer named no
-    /// counters, named bad ones, or this node's authenticator cannot write them.
+}
+
+/// R3123 -- the means of acknowledging the shared-memory slices a LINK's peer sends, opened from
+/// the counter block in the peer's Open message. It belongs to the LINK, as upstream's does
+/// (`io/zenoh-transport/src/common/shm/interop.rs` @ `pub struct LinkShmHandoffConfig {` holds
+/// the receive channel beside the transmit one): the counters a peer names are its own, and a
+/// slice is acknowledged to the peer of the link it arrived on, whatever other links the
+/// session has. Empty when the peer named no counters, named bad ones, or this node's
+/// authenticator cannot write them.
+///
+/// Before R3123 the session's one dispatch held it, and the link that opened last won.
+#[cfg(feature = "session-extshm")]
+#[derive(Default)]
+pub struct ShmRxSlot {
     handoff: Option<alloc::boxed::Box<dyn ShmHandoff>>,
-    /// Whether `handoff` has changed since the registry last took it, a change
-    /// being a new one OR the loss of the last. The holder that acts on it takes
-    /// it once per establishment rather than asking every message.
-    handoff_changed: bool,
+    /// Whether `handoff` has changed since the registry last took it, a change being a new one OR
+    /// the loss of the last. The holder that acts on it takes it once per establishment rather
+    /// than asking every message.
+    changed: bool,
+}
+
+/// What an Open message does to a link's [`ShmRxSlot`]: `None` leaves it alone (the message was
+/// refused), `Some` replaces what it holds with the handoff opened from the peer's counters, or
+/// with none when the peer named none that could be opened.
+#[cfg(feature = "session-extshm")]
+pub type ShmRxChange = Option<Option<alloc::boxed::Box<dyn ShmHandoff>>>;
+
+#[cfg(feature = "session-extshm")]
+impl ShmRxSlot {
+    /// Replace the handoff, a new one or the loss of the last. A new establishment withdraws the
+    /// old one first, so a registry never writes the counters of a peer this link has moved on
+    /// from.
+    pub fn set(&mut self, handoff: Option<alloc::boxed::Box<dyn ShmHandoff>>) {
+        self.handoff = handoff;
+        self.changed = true;
+    }
+
+    /// Apply what an Open message decided ([`ShmRxChange`]).
+    pub fn apply(&mut self, change: ShmRxChange) {
+        if let Some(handoff) = change {
+            self.set(handoff);
+        }
+    }
+
+    /// R3040 -- what changed in the acknowledging handoff since the last call.
+    ///
+    /// `None` when nothing changed. `Some(Some(h))` is a new handoff, to be put where the received
+    /// slices are counted, and `Some(None)` is the loss of the old one, to be taken away from
+    /// there, so a registry never keeps writing the counters of a peer this link has moved on
+    /// from. Taking it moves the handoff out: there is one holder.
+    pub fn take_update(&mut self) -> Option<Option<alloc::boxed::Box<dyn ShmHandoff>>> {
+        if !self.changed {
+            return None;
+        }
+        self.changed = false;
+        Some(self.handoff.take())
+    }
+
+    /// Acknowledge ONE received shared-memory slice of priority `band` through the handoff this
+    /// link still holds, and do nothing when it holds none.
+    ///
+    /// A forwarder is the caller: it has no registry to take the handoff
+    /// ([`Self::take_update`] moves it out, so there is one holder), and the slices it routes are
+    /// still owed their acknowledgement. When a registry HAS taken it the link holds none, and
+    /// this writes nothing, so a slice is never acknowledged twice.
+    pub fn acknowledge(&self, band: usize) {
+        if let Some(handoff) = self.handoff.as_deref() {
+            handoff.on_rx(band);
+        }
+    }
+
+    /// Whether a handoff is held.
+    pub fn is_open(&self) -> bool {
+        self.handoff.is_some()
+    }
+}
+
+/// R3123 -- what [`ShmAuthDispatch::recv_open_syn`] and [`ShmAuthDispatch::recv_open_ack`]
+/// decided: whether the exchange completed, and what the link's [`ShmRxSlot`] becomes.
+#[cfg(feature = "session-extshm")]
+pub struct ShmOpenReceived {
+    /// The message checked out.
+    pub accepted: bool,
+    /// What to do with the slot of the link the message arrived on.
+    pub rx: ShmRxChange,
 }
 
 #[cfg(feature = "session-extshm")]
@@ -1284,7 +1361,6 @@ impl core::fmt::Debug for ShmAuthDispatch {
         f.debug_struct("ShmAuthDispatch")
             .field("installed", &self.authenticator.is_some())
             .field("peer_challenge_known", &self.peer_challenge.is_some())
-            .field("handoff_open", &self.handoff.is_some())
             .finish()
     }
 }
@@ -1300,8 +1376,6 @@ impl ShmAuthDispatch {
             peer_challenge: None,
             peer_segment: None,
             peer_protocols: None,
-            handoff: None,
-            handoff_changed: false,
         }
     }
 
@@ -1314,19 +1388,17 @@ impl ShmAuthDispatch {
             peer_challenge: None,
             peer_segment: None,
             peer_protocols: None,
-            handoff: None,
-            handoff_changed: false,
         }
     }
 
-    /// R3040 -- forget the peer's segment and any handoff opened from it: a new
-    /// establishment is a new peer, and an acknowledgement written to the last
-    /// one's counters would corrupt a segment that is no longer in play.
+    /// R3040 -- forget the peer's segment: a new establishment is a new peer. The handoff opened
+    /// from it is withdrawn from the link's [`ShmRxSlot`] by the caller (R3123: the slot is the
+    /// link's, not this dispatch's), because an acknowledgement written to the last peer's
+    /// counters would corrupt a segment that is no longer in play.
     fn forget_peer(&mut self) {
         self.peer_challenge = None;
         self.peer_segment = None;
         self.peer_protocols = None;
-        self.set_handoff(None);
     }
 
     /// R3065 -- record the peer's segment with the challenge read out of it, and the protocol
@@ -1350,51 +1422,19 @@ impl ShmAuthDispatch {
             .map_or(true, |list| list.contains(&protocol))
     }
 
-    fn set_handoff(&mut self, handoff: Option<alloc::boxed::Box<dyn ShmHandoff>>) {
-        self.handoff = handoff;
-        self.handoff_changed = true;
-    }
-
     /// R3040 -- open the handoff for the counter block the peer named, once the
     /// peer's segment is known. A block that names no counters (`Disabled`, which
     /// is what upstream sends for a best-effort link) opens none.
-    fn open_handoff(&mut self, counters: ShmHandoffCounters) {
+    fn open_handoff(
+        &self,
+        counters: ShmHandoffCounters,
+    ) -> Option<alloc::boxed::Box<dyn ShmHandoff>> {
         let ShmHandoffCounters::PerPriority(ids) = counters else {
-            self.set_handoff(None);
-            return;
+            return None;
         };
-        let handoff = match (self.authenticator.as_ref(), self.peer_segment) {
+        match (self.authenticator.as_ref(), self.peer_segment) {
             (Some(a), Some(segment)) => a.open_peer_handoff(segment, &ids),
             _ => None,
-        };
-        self.set_handoff(handoff);
-    }
-
-    /// R3040 -- what changed in the acknowledging handoff since the last call.
-    ///
-    /// `None` when nothing changed. `Some(Some(h))` is a new handoff, to be put
-    /// where the received slices are counted, and `Some(None)` is the loss of the
-    /// old one, to be taken away from there, so a registry never keeps writing the
-    /// counters of a peer this session has moved on from. Taking it moves the
-    /// handoff out: there is one holder.
-    pub fn take_handoff_update(&mut self) -> Option<Option<alloc::boxed::Box<dyn ShmHandoff>>> {
-        if !self.handoff_changed {
-            return None;
-        }
-        self.handoff_changed = false;
-        Some(self.handoff.take())
-    }
-
-    /// Acknowledge ONE received shared-memory slice of priority `band` through the handoff this
-    /// dispatch still holds, and do nothing when it holds none.
-    ///
-    /// A forwarder is the caller: it has no registry to take the handoff
-    /// ([`Self::take_handoff_update`] moves it out, so there is one holder), and the slices it
-    /// routes are still owed their acknowledgement. When a registry HAS taken it the dispatch
-    /// holds none, and this writes nothing, so a slice is never acknowledged twice.
-    pub fn acknowledge(&self, band: usize) {
-        if let Some(handoff) = self.handoff.as_deref() {
-            handoff.on_rx(band);
         }
     }
 
@@ -1536,21 +1576,31 @@ impl ShmAuthDispatch {
     /// shared-memory slice it receives, so once the echo of our challenge has
     /// checked out the handoff is opened from it. A peer that failed the echo gets
     /// none: nothing it names is written.
-    pub fn recv_open_syn(&mut self, extensions: &[ExtEntryOwned]) -> bool {
+    ///
+    /// R3123 -- the handoff comes back in the result, for the LINK the message arrived on to keep
+    /// ([`ShmRxSlot`]), and is not kept here: this dispatch is the session's, shared by every
+    /// link of it.
+    pub fn recv_open_syn(&mut self, extensions: &[ExtEntryOwned]) -> ShmOpenReceived {
+        let refused = ShmOpenReceived {
+            accepted: false,
+            rx: None,
+        };
         let Some(a) = self.authenticator.as_ref() else {
-            return false;
+            return refused;
         };
         let Some(body) = peer_shm_zbuf_body(extensions) else {
-            return false;
+            return refused;
         };
         let Some((bob_challenge, counters)) = decode_shm_open_syn_body(body) else {
-            return false;
+            return refused;
         };
         if bob_challenge != a.local_challenge() {
-            return false;
+            return refused;
         }
-        self.open_handoff(counters);
-        true
+        ShmOpenReceived {
+            accepted: true,
+            rx: Some(self.open_handoff(counters)),
+        }
     }
 
     /// Step 4b, ACCEPTOR: send our counter block. zenoh `send_open_ack`.
@@ -1598,18 +1648,26 @@ impl ShmAuthDispatch {
     /// R3040 -- the counter block it carries is the acceptor's transmit counters,
     /// and the handoff is opened from it, in the acceptor's segment that
     /// `recv_init_ack` already mapped and checked.
-    pub fn recv_open_ack(&mut self, extensions: &[ExtEntryOwned]) -> bool {
+    ///
+    /// R3123 -- the handoff comes back in the result, as [`Self::recv_open_syn`]'s does.
+    pub fn recv_open_ack(&mut self, extensions: &[ExtEntryOwned]) -> ShmOpenReceived {
+        let refused = ShmOpenReceived {
+            accepted: false,
+            rx: None,
+        };
         if self.authenticator.is_none() {
-            return false;
+            return refused;
         }
         let Some(body) = peer_shm_zbuf_body(extensions) else {
-            return false;
+            return refused;
         };
         let Some(counters) = decode_shm_open_ack_body(body) else {
-            return false;
+            return refused;
         };
-        self.open_handoff(counters);
-        true
+        ShmOpenReceived {
+            accepted: true,
+            rx: Some(self.open_handoff(counters)),
+        }
     }
 }
 
@@ -1972,13 +2030,21 @@ mod tests {
                 .into_iter()
                 .map(|declaration| declaration.ext)
                 .collect();
-            let bob_ok = bob.recv_open_syn(&open_syn);
+            let bob_ok = bob.recv_open_syn(&open_syn).accepted;
             let open_ack: alloc::vec::Vec<_> = bob
                 .send_open_ack(bob_ok, true)
                 .into_iter()
                 .map(|declaration| declaration.ext)
                 .collect();
-            (alice.recv_open_ack(&open_ack), bob_ok)
+            (alice.recv_open_ack(&open_ack).accepted, bob_ok)
+        }
+
+        /// R3123 -- the handoff an Open message opens is kept by the LINK it arrived on, so a test
+        /// that drives a bare dispatch keeps a slot for it, as a session keeps its link's. Apply
+        /// what the message decided to `rx` and say whether it was accepted.
+        fn received(rx: &mut ShmRxSlot, message: ShmOpenReceived) -> bool {
+            rx.apply(message.rx);
+            message.accepted
         }
 
         use std::sync::{Arc, Mutex};
@@ -2190,20 +2256,21 @@ mod tests {
             ))
             .expect("fits");
 
-            assert!(bob.recv_open_syn(&[open_syn]));
+            let mut rx = ShmRxSlot::default();
+            assert!(received(&mut rx, bob.recv_open_syn(&[open_syn])));
             assert_eq!(
                 *opened.lock().expect("opened"),
                 [(ALICE_ID, COUNTERS)],
                 "the initiator's segment, and the ids it named, in band order"
             );
 
-            let update = bob.take_handoff_update();
+            let update = rx.take_update();
             let handoff = update
                 .expect("a handoff changed")
                 .expect("and it is a new handoff");
             handoff.on_rx(5);
             assert_eq!(*bands.lock().expect("bands"), [5], "it is the one opened");
-            assert!(bob.take_handoff_update().is_none(), "taken once");
+            assert!(rx.take_update().is_none(), "taken once");
         }
 
         /// R3040 -- an echo of the WRONG challenge opens nothing: the peer has not
@@ -2218,7 +2285,7 @@ mod tests {
                 ShmHandoffCounters::PerPriority(COUNTERS),
             ))
             .expect("fits");
-            assert!(!bob.recv_open_syn(&[forged]));
+            assert!(!bob.recv_open_syn(&[forged]).accepted);
             assert!(opened.lock().expect("opened").is_empty());
         }
 
@@ -2234,10 +2301,14 @@ mod tests {
                 ShmHandoffCounters::Disabled,
             ))
             .expect("fits");
-            assert!(bob.recv_open_syn(&[open_syn]), "the proof still stands");
+            let mut rx = ShmRxSlot::default();
+            assert!(
+                received(&mut rx, bob.recv_open_syn(&[open_syn])),
+                "the proof still stands"
+            );
             assert!(opened.lock().expect("opened").is_empty());
             assert_eq!(
-                bob.take_handoff_update().map(|u| u.is_none()),
+                rx.take_update().map(|u| u.is_none()),
                 Some(true),
                 "and the registry is told there is none"
             );
@@ -2260,11 +2331,12 @@ mod tests {
                 ShmHandoffCounters::PerPriority(COUNTERS),
             ))
             .expect("fits");
-            assert!(alice.recv_open_ack(&[open_ack]));
+            let mut rx = ShmRxSlot::default();
+            assert!(received(&mut rx, alice.recv_open_ack(&[open_ack])));
             assert_eq!(*opened.lock().expect("opened"), [(BOB_ID, COUNTERS)]);
 
-            let handoff = alice
-                .take_handoff_update()
+            let handoff = rx
+                .take_update()
                 .expect("a handoff changed")
                 .expect("and it is a new handoff");
             handoff.on_rx(2);
@@ -2449,10 +2521,16 @@ mod tests {
         }
 
         /// R3040 -- a NEW establishment withdraws the old handoff: the registry is
-        /// told it has none, so it cannot write the counters of a peer the session
+        /// told it has none, so it cannot write the counters of a peer the link
         /// has moved on from.
+        ///
+        /// R3123 -- the withdrawal is the LINK's: a session's hook for the InitSyn or the InitAck
+        /// applies `set(None)` to the slot of the link the establishment is on (witnessed with
+        /// real hooks by `a_new_establishment_on_a_link_withdraws_its_handoff`), and this pins
+        /// what the slot does with it: the loss is reported ONCE, and a slot told of a refused
+        /// message keeps what it held.
         #[test]
-        fn a_new_establishment_withdraws_the_old_handoff() {
+        fn a_withdrawn_handoff_is_reported_once_and_a_refused_message_changes_nothing() {
             let (mut bob, _opened, _bands) =
                 handoff_node(BOB_ID, BOB_CHALLENGE, (ALICE_ID, ALICE_CHALLENGE));
             accept_init_syn(&mut bob);
@@ -2461,14 +2539,25 @@ mod tests {
                 ShmHandoffCounters::PerPriority(COUNTERS),
             ))
             .expect("fits");
-            assert!(bob.recv_open_syn(&[open_syn]));
-            assert!(matches!(bob.take_handoff_update(), Some(Some(_))));
+            let mut rx = ShmRxSlot::default();
+            assert!(received(&mut rx, bob.recv_open_syn(&[open_syn])));
+            assert!(rx.is_open());
 
-            accept_init_syn(&mut bob);
+            let forged = encode_shm_zbuf_ext(&encode_shm_open_syn_body(
+                BOB_CHALLENGE ^ 1,
+                ShmHandoffCounters::PerPriority(COUNTERS),
+            ))
+            .expect("fits");
+            assert!(!received(&mut rx, bob.recv_open_syn(&[forged])));
+            assert!(rx.is_open(), "a refused message leaves the handoff alone");
+            assert!(matches!(rx.take_update(), Some(Some(_))));
+
+            rx.set(None);
             assert!(
-                matches!(bob.take_handoff_update(), Some(None)),
-                "the next peer starts with no handoff, and the registry hears it"
+                matches!(rx.take_update(), Some(None)),
+                "the loss is reported"
             );
+            assert!(rx.take_update().is_none(), "once");
         }
 
         /// R3040 -- an authenticator that cannot open a peer's counters (the
@@ -2486,12 +2575,13 @@ mod tests {
                 ShmHandoffCounters::PerPriority(COUNTERS),
             ))
             .expect("fits");
+            let mut rx = ShmRxSlot::default();
             assert!(
-                bob.recv_open_syn(&[open_syn]),
+                received(&mut rx, bob.recv_open_syn(&[open_syn])),
                 "the session still negotiates"
             );
             assert!(
-                matches!(bob.take_handoff_update(), Some(None)),
+                matches!(rx.take_update(), Some(None)),
                 "with no handoff to acknowledge through"
             );
         }
@@ -2573,10 +2663,11 @@ mod tests {
             // And the acceptor side refuses a forged OpenSyn the same way.
             let (_, mut bob) = pair();
             assert!(
-                !bob.recv_open_syn(&[open_syn_ext(BOB_CHALLENGE ^ 1)]),
+                !bob.recv_open_syn(&[open_syn_ext(BOB_CHALLENGE ^ 1)])
+                    .accepted,
                 "a wrong echo on OpenSyn must not negotiate"
             );
-            assert!(bob.recv_open_syn(&[open_syn_ext(BOB_CHALLENGE)]));
+            assert!(bob.recv_open_syn(&[open_syn_ext(BOB_CHALLENGE)]).accepted);
         }
 
         /// The acceptor's ack is a COUNTER BLOCK, and the initiator accepts a
@@ -2600,18 +2691,21 @@ mod tests {
                 "not negotiated, no ack"
             );
             let ack = bob.send_open_ack(true, true).expect("negotiated").ext;
-            assert!(alice.recv_open_ack(core::slice::from_ref(&ack)));
-            assert!(!alice.recv_open_ack(&[]), "absence is not agreement");
+            assert!(alice.recv_open_ack(core::slice::from_ref(&ack)).accepted);
+            assert!(
+                !alice.recv_open_ack(&[]).accepted,
+                "absence is not agreement"
+            );
             // A PerPrio block cut one byte short: present, right header, and
             // still refused.
             let full = encode_shm_open_ack_body(ShmHandoffCounters::PerPriority([1; 8]));
             let truncated = encode_shm_zbuf_ext(&full[..full.len() - 1]).expect("fits");
-            assert!(!alice.recv_open_ack(&[truncated]));
+            assert!(!alice.recv_open_ack(&[truncated]).accepted);
             // ...and the 1.5.0 ack, a bare z64 `1`, no longer parses as one:
             // its body is a single byte that the counter reader sees as a
             // PerPrio status with no block behind it.
             let legacy = encode_shm_zbuf_ext(&[0x01]).expect("fits");
-            assert!(!alice.recv_open_ack(&[legacy]));
+            assert!(!alice.recv_open_ack(&[legacy]).accepted);
         }
 
         /// A node with no authenticator emits NOTHING and negotiates nothing —

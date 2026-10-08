@@ -1603,6 +1603,13 @@ pub struct LinkState<R: SessionRuntime> {
     /// message the link sends, which drops the previous lease and returns its counters.
     #[cfg(feature = "session-extshm")]
     pub shm_tx: R::Mutex<Option<alloc::sync::Arc<dyn crate::extshm::ShmTxHandoff>>>,
+    /// R3123 (session-extshm) -- this link's handoff as a RECEIVER: the means of acknowledging the
+    /// shared-memory slices its peer sends, opened from the counters the peer named in the Open
+    /// message of THIS link. The other half of what [`Self::shm_tx`] is, and for the same reason:
+    /// the peer of a joined link names counters of its own, and a slice that arrives on the
+    /// joined link is owed to that peer, not to the peer of the session's first link.
+    #[cfg(feature = "session-extshm")]
+    pub shm_rx: R::Mutex<crate::extshm::ShmRxSlot>,
 }
 
 /// R311y217 (transport-multilink + transport-qos) — the inclusive QoS-priority
@@ -2204,6 +2211,8 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                 stats_slot: R::new_mutex(stats_slot),
                 #[cfg(feature = "session-extshm")]
                 shm_tx: R::new_mutex(None),
+                #[cfg(feature = "session-extshm")]
+                shm_rx: R::new_mutex(crate::extshm::ShmRxSlot::default()),
             }),
             core: R::share(SessionCore {
                 #[cfg(feature = "transport-stats")]
@@ -5594,13 +5603,16 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     }
 
     /// transport-shm -- acknowledge one shared-memory slice this peer sent, of priority `band`,
-    /// through the handoff the session still holds (see
-    /// [`ShmAuthDispatch::acknowledge`](crate::extshm::ShmAuthDispatch::acknowledge)): what a
-    /// forwarder owes the sender of each slice it routes, which a node with a registry pays when
-    /// the registry reads the slice. Nothing is written when the session holds no handoff.
+    /// through the handoff THIS LINK still holds (see
+    /// [`ShmRxSlot::acknowledge`](crate::extshm::ShmRxSlot::acknowledge)): what a forwarder owes
+    /// the sender of each slice it routes, which a node with a registry pays when the registry
+    /// reads the slice. Nothing is written when the link holds no handoff.
     #[cfg(feature = "session-extshm")]
     pub fn acknowledge_shm_slice(&self, band: usize) {
-        R::with_mutex_mut(&self.shm_auth, |d| d.acknowledge(band));
+        // R3123 -- through the handoff of THIS link: the counters a slice is owed are the ones
+        // the peer of the link it arrived on named, and the session's other links have peers of
+        // their own.
+        R::with_mutex_mut(&self.link.shm_rx, |slot| slot.acknowledge(band));
     }
 
     /// transport-shm -- send a message a FORWARDER received to THIS peer, with the shared-memory
@@ -5818,7 +5830,18 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         &self,
         extensions: &[ExtEntryOwned],
     ) -> Result<(), crate::extshm::ShmAuthError> {
-        R::with_mutex_mut(&self.shm_auth, |d| d.recv_init_syn(extensions))
+        let received = R::with_mutex_mut(&self.shm_auth, |d| d.recv_init_syn(extensions));
+        // R3123 -- a new establishment is a new peer: this link lets go of the handoff it opened
+        // from the last one, so nothing is written to counters that are no longer in play.
+        self.withdraw_shm_rx();
+        received
+    }
+
+    /// R3123 -- withdraw the handoff this LINK opened from its last peer. Reported once to
+    /// whoever takes the update, so a registry stops writing those counters.
+    #[cfg(feature = "session-extshm")]
+    fn withdraw_shm_rx(&self) {
+        R::with_mutex_mut(&self.link.shm_rx, |slot| slot.set(None));
     }
 
     /// Step 2b (ACCEPTOR) — echo the initiator's challenge plus our segment id.
@@ -5840,6 +5863,8 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         let (installed, proved) = R::with_mutex_mut(&self.shm_auth, |d| {
             (d.is_installed(), d.recv_init_ack(extensions))
         });
+        // R3123 -- the same withdrawal as the acceptor's InitSyn: a new establishment.
+        self.withdraw_shm_rx();
         if installed && !proved {
             R::with_mutex_mut(&self.is_shm, |s| *s = false);
         }
@@ -5876,10 +5901,12 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// authenticator turns the capability flag into a proof-gated one.
     #[cfg(feature = "session-extshm")]
     pub fn shm_recv_open_syn(&self, extensions: &[ExtEntryOwned]) {
-        let (installed, proved) = R::with_mutex_mut(&self.shm_auth, |d| {
+        let (installed, received) = R::with_mutex_mut(&self.shm_auth, |d| {
             (d.is_installed(), d.recv_open_syn(extensions))
         });
-        if installed && !proved {
+        // R3123 -- the handoff opened from the counters the peer named is kept by THIS link.
+        R::with_mutex_mut(&self.link.shm_rx, |slot| slot.apply(received.rx));
+        if installed && !received.accepted {
             R::with_mutex_mut(&self.is_shm, |s| *s = false);
         }
     }
@@ -5899,10 +5926,12 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// OPEN side's `is_shm` is decided (zenoh `recv_open_ack`).
     #[cfg(feature = "session-extshm")]
     pub fn shm_recv_open_ack(&self, extensions: &[ExtEntryOwned]) {
-        let (installed, confirmed) = R::with_mutex_mut(&self.shm_auth, |d| {
+        let (installed, received) = R::with_mutex_mut(&self.shm_auth, |d| {
             (d.is_installed(), d.recv_open_ack(extensions))
         });
-        if installed && !confirmed {
+        // R3123 -- kept by THIS link, as the acceptor's is.
+        R::with_mutex_mut(&self.link.shm_rx, |slot| slot.apply(received.rx));
+        if installed && !received.accepted {
             R::with_mutex_mut(&self.is_shm, |s| *s = false);
         }
     }
@@ -5917,7 +5946,8 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     pub fn shm_take_handoff_update(
         &self,
     ) -> Option<Option<alloc::boxed::Box<dyn crate::extshm::ShmHandoff>>> {
-        R::with_mutex_mut(&self.shm_auth, |d| d.take_handoff_update())
+        // R3123 -- this link's, whichever link of the session asks.
+        R::with_mutex_mut(&self.link.shm_rx, |slot| slot.take_update())
     }
 
     pub fn trace_snapshot(&self) -> ActionTrace {

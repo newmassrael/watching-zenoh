@@ -120,7 +120,12 @@ impl FaceForwarder for CapturingForwarder {
         self.state.lock().unwrap().deregistered += 1;
     }
 
-    fn register_joined(&self, joined_id: FaceId, primary_id: FaceId) {
+    fn register_joined(
+        &self,
+        joined_id: FaceId,
+        primary_id: FaceId,
+        _actions: &Arc<SessionLinkActions>,
+    ) {
         self.state
             .lock()
             .unwrap()
