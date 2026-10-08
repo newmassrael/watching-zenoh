@@ -25,7 +25,28 @@
  * M7_0 flash, both cores' devicetrees include it, and the M7_0 image is linked at
  * the same node, so the two cannot disagree.
  *
- * Claim: this is BUILT. It has not run on a chip.
+ * This image prints NOTHING. The kit's console is SCB0 (the devicetree's uart0) and
+ * the M7_0 image it starts owns it: two cores must not share one UART, and on the
+ * first run, when both did, the M7 started while this core was still printing its
+ * banner and the banner came out cut and garbled. prj.conf therefore turns the
+ * console, printk and the serial driver off (the serial driver would configure SCB0
+ * and its pins at boot whether or not anything printed). What this image has to
+ * say it says in `wz_launcher_status`, a word in its RAM that a debugger reads:
+ *
+ *   0  running: the image has not reached a verdict (or never got to one)
+ *   1  CM7_0 started
+ *   2  no M7_0 image was found at the start of its flash partition
+ *   3  CM7_0 did not take its power mode within the limit
+ *
+ * It is zero from reset because the image's RAM is zeroed before main() runs. Its
+ * address is in the image's symbol table (`nm zephyr.elf`, name
+ * `wz_launcher_status`) and in the linker map. The M7_0 image gives the evidence a
+ * console can carry: once it runs it logs the core clock it measured
+ * (`wz: core clock N Hz (the image assumes M Hz)`), which is the proof that the
+ * clock tree this image brought up is the one the M7 was built for.
+ *
+ * Claim: this is BUILT. A bench kit has run it and the M7_0 image measured the clock
+ * it was built for, but no ledger record exists, so the grade stays BUILT.
  */
 
 #include <errno.h>
@@ -34,9 +55,17 @@
 
 #include <zephyr/devicetree.h>
 #include <zephyr/kernel.h>
-#include <zephyr/sys/printk.h>
 
 #include <soc.h>
+
+/* The launcher's one output, for a debugger. Not static and not in a header: the
+ * name is the contract (see the codes in the comment above). */
+#define WZ_LAUNCHER_RUNNING        0u
+#define WZ_LAUNCHER_STARTED        1u
+#define WZ_LAUNCHER_NO_IMAGE       2u
+#define WZ_LAUNCHER_POWER_TIMEOUT  3u
+
+volatile uint32_t wz_launcher_status = WZ_LAUNCHER_RUNNING;
 
 /* Where the M7_0 image's vector table is: the start of its flash partition. */
 #define CM7_0_VECTORS ((uint32_t)DT_REG_ADDR(DT_NODELABEL(flash_m7_0)))
@@ -114,21 +143,18 @@ static bool image_present(uint32_t vectors)
 
 int main(void)
 {
-	printk("wz: CM0+ launcher: this core runs at %u Hz\n", (unsigned int)SystemCoreClock);
-
 	if (!image_present(CM7_0_VECTORS)) {
-		printk("wz: CM0+ launcher: no M7_0 image at 0x%08x, so it is not started\n",
-		       (unsigned int)CM7_0_VECTORS);
+		/* Not started: a core pointed at erased flash faults on its first fetch. */
+		wz_launcher_status = WZ_LAUNCHER_NO_IMAGE;
 		return 0;
 	}
 
 	const int rc = start_cm7_0(CM7_0_VECTORS);
 
 	if (rc != 0) {
-		printk("wz: FAIL - CM7_0 did not take its power mode within %u us (%d)\n",
-		       PWR_DONE_LIMIT_US, rc);
+		wz_launcher_status = WZ_LAUNCHER_POWER_TIMEOUT;
 		return rc;
 	}
-	printk("wz: CM0+ launcher: CM7_0 started at 0x%08x\n", (unsigned int)CM7_0_VECTORS);
+	wz_launcher_status = WZ_LAUNCHER_STARTED;
 	return 0;
 }
