@@ -2668,7 +2668,14 @@ PIN_NO_SYMBOL = 0
 # reply out of its open clauses, and it names the error reply's codec once more, which is the one
 # citation the census counts. `api-compat-c` is not touched and is still PARTIAL beside it. READ
 # off the census's own FAIL line, `wz citations: 271 against a pin of 270`.
-PIN_WZ_CITATIONS = 271
+#
+# R3106 -- 271 -> 275, one atom. `transport-shm`'s reason gains the UPDATE that a receiver maps a
+# pool's data segment once: it names the reader's cache of data segments, the rule that a mapping
+# is trusted only while its name names its object, the sweep that lets go of a segment that is
+# gone, and the interop leg that counts the mappings against zenoh's own headers. `api-compat-c`
+# is not touched and is still PARTIAL beside it. READ off the census's own FAIL line, `wz
+# citations: 275 against a pin of 271`.
+PIN_WZ_CITATIONS = 275
 # R2626 — 44 -> 42, and this one is worth a sentence because it HELD through
 # every earlier retirement in this run (R2612, R2622). `time-hlc`'s reason is the
 # first retiree carrying AMBIGUOUS citations of its own: its oldest clauses cite
