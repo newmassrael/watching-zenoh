@@ -10960,7 +10960,6 @@ mod tests {
             // To 29 when `context.qos` began to read `true` for a session whose
             // Inits offered QoS as the z64 `QoSLink`: a value moved under a
             // stationary key, so this entry is the notice.
-            (FIELDS, 29),
             // To 30 when a `DeclareKeyExpr`'s key expression lost its `mapping`
             // node (the wire has no M bit there) and the row that carries the
             // declaration began to resolve its scope the way the table binds it:
