@@ -121,6 +121,15 @@
 //! crate says and a second vocabulary for one axis is a second thing to get
 //! wrong.
 //!
+//! What the two words name is an ordering of endpoints and not a role: `a` is
+//! the half that travels from a flow's lesser `(address, port)` endpoint
+//! (`FlowKey::low`) to its greater, `b` the other. `dir == a` therefore picks
+//! the ACCEPTOR's records whenever the acceptor sorts lower, which is the usual
+//! shape of a router on a small port and a client on an ephemeral one, and the
+//! initiator's when it does not. The language has no term for a role; a reader
+//! that needs one reads it off the handshake, where the Init whose `a` flag is
+//! clear is the initiator's.
+//!
 //! `key` matching is zenoh's own — `keyexpr_pattern_matches`, the matcher the
 //! subscriber and queryable registries use — rather than a glob written here.
 //! A filter language for zenoh traffic that did not speak zenoh's keyexpr

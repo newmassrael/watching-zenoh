@@ -80,13 +80,23 @@ pub const MAX_FRAME_PAYLOAD: usize = u16::MAX as usize;
 
 /// Which half of a session a byte stream carries.
 ///
-/// Named for the ROLE rather than for an address, because a capture may not
-/// tell you which side dialled. The tracker never needs to know: it folds the
-/// two directions symmetrically.
+/// Named for neither a role nor an address, because the tracker needs neither:
+/// it folds the two directions symmetrically, and whoever hands it the bytes
+/// says which half they are.
+///
+/// What the capture layer says is an ORDERING OF ENDPOINTS and not a role.
+/// `wz-capture` gives `A` to the half that travels from the lesser
+/// `(address, port)` endpoint of a connection to the greater one, which is
+/// known from the first packet and never depends on who dialled. So `A` is the
+/// acceptor's half whenever the acceptor sorts lower (a router on a small port
+/// and a client on an ephemeral one, on one host), and the initiator's when it
+/// does not. A serial line has no addresses; there the capture layer gives `A`
+/// to the initiator's interface where a handshake frame was captured.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Direction {
-    /// The half whose first Init this observer saw. Conventionally the
-    /// initiator, but the tracker does not depend on it.
+    /// The half the caller names first: for a captured connection, the one
+    /// travelling from its lesser endpoint to its greater. The initiator is the
+    /// half that sends the `Init` whose `a` flag is clear, whichever word that is.
     A,
     /// The other half.
     B,

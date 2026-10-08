@@ -164,7 +164,10 @@ pub struct WzDissectRecord {
     pub batch_index: u32,
     /// Byte offset of this message within its framing unit.
     pub unit_offset: u32,
-    /// 0 = direction A (conventionally the initiator), 1 = B.
+    /// 0 = direction A, the half that travels from the flow's lower endpoint to
+    /// its higher one; 1 = B, the other half. Not a role: the initiator's half
+    /// is A or B according to which end sorts lower. The header states the rule
+    /// under "WHICH HALF IS `a`".
     pub direction: u8,
     /// 0 = [`Self::anchor`] is a packet index, 1 = a byte offset within one
     /// direction of this list's stream. They are small numbers either way and
