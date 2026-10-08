@@ -36,10 +36,16 @@
 //!   below pin).
 //!
 //! Three kinds of case are not "agree", and each is listed rather than hidden:
-//! what `protoc` compiles and the door refuses ON PURPOSE (a group, an `extend`,
-//! a recursive message, a size bound), what `protoc` refuses and the door does
-//! not check because it is not a validator (an enum's numbering), and the one
-//! error `protoc` reports without a line (a reserved number).
+//! what `protoc` compiles and the door refuses ON PURPOSE (a group or an
+//! `extend` the root message reaches, a recursive message, a size bound), what
+//! `protoc` refuses and the door does not check because it is not a validator (an
+//! enum's numbering, the fields of an `extend` block), and the one error `protoc`
+//! reports without a line (a reserved number).
+//!
+//! A schema with an `extend` or a `group` is judged from named roots and not
+//! from every message it defines: whether the door refuses depends on which
+//! messages the root reaches, so a case lists the roots it means (`AgreeFrom`)
+//! and the roots that must be refused are cases of their own.
 //!
 //! ## The comparison is itself held to a control
 //!
@@ -595,6 +601,10 @@ fn compare_refusal(blame: &(String, Option<usize>), door: &Door) -> Option<Strin
 enum Expect {
     /// `protoc` compiles it and the door declares the same tree from every root.
     Agree,
+    /// `protoc` compiles it and the door declares the same tree from these
+    /// roots (full names, package included, no leading dot) -- the cases whose
+    /// schema holds an `extend` or a `group`, where the door refuses some roots.
+    AgreeFrom(&'static [&'static str]),
     /// `protoc` refuses it and the door blames the same file and line.
     BothRefuse,
     /// `protoc` compiles it and the door refuses, on purpose, for this reason.
@@ -646,6 +656,82 @@ fn nested(levels: usize) -> String {
     }
     s
 }
+
+/// A schema of `levels` messages written inside one another, the first a
+/// message and every other a group of the one before.
+fn grouped(levels: usize) -> String {
+    let mut s = String::from("syntax = \"proto2\";\nmessage M0 {\n");
+    for i in 1..levels {
+        s.push_str(&format!("optional group G{i} = 1 {{\n"));
+    }
+    for _ in 0..levels {
+        s.push_str("}\n");
+    }
+    s
+}
+
+/// `Base` takes extensions; `M` holds an `extend` of it and is not itself
+/// extended; `Other` reaches `M`. From `M` or `Other` the door reaches nothing
+/// extended, and from `Base` it does.
+const EXTEND_IN_A_MESSAGE: &str =
+    "syntax = \"proto2\";\nmessage Base {\n  optional int32 a = 1;\n  extensions 100 to 199;\n}\n\
+    message M {\n  optional int32 m = 1;\n  extend Base {\n    optional int32 x = 100;\n  }\n}\n\
+    message Other {\n  optional M inner = 1;\n}\n";
+
+/// A message `Holder` with a group `G`, and three roots: `Root` reaches
+/// neither, `Reaches` reaches `Holder`, and `Uses` reaches only the group's
+/// message `Holder.G`.
+const GROUPS: &str = "syntax = \"proto2\";\n\
+    message Root {\n  optional int32 a = 1;\n}\n\
+    message Holder {\n  optional int32 b = 1;\n  optional group G = 2 {\n    optional int32 x = 1;\n  }\n}\n\
+    message Reaches {\n  optional Holder h = 1;\n}\n\
+    message Uses {\n  optional Holder.G g = 1;\n}\n";
+
+/// `b.Base` takes extensions, `ext.proto` extends it, and the root file reads
+/// both and holds it four ways: through a field, a nested message's field, a
+/// map's value, and not at all (`Unrelated`).
+const REACH_FILES: [(&str, &str); 3] = [
+    (
+        "app.proto",
+        "syntax = \"proto2\";\npackage app;\nimport \"base.proto\";\nimport \"ext.proto\";\n\
+         message Direct { optional b.Base base = 1; }\n\
+         message Unrelated { optional int32 n = 1; }\n\
+         message ViaNested { optional Mid mid = 1; message Mid { repeated b.Base bases = 1; } }\n\
+         message ViaMap { map<string, b.Base> by_name = 1; }\n",
+    ),
+    (
+        "base.proto",
+        "syntax = \"proto2\";\npackage b;\nmessage Base {\n  optional int32 a = 1;\n  extensions 100 to 199;\n}\n",
+    ),
+    (
+        "ext.proto",
+        "syntax = \"proto2\";\nimport \"base.proto\";\n\nextend b.Base {\n  optional int32 x = 100;\n}\n",
+    ),
+];
+
+/// The shape of the schema that exposed the defect: a root file that imports a
+/// public options file, which imports `descriptor.proto` and adds an option to
+/// `google.protobuf.FieldOptions` with an `extend`. `descriptor.proto` here is a
+/// stand-in that holds only what the extend needs; the real one is used by
+/// [`descriptor_cases`].
+const STANDIN_FILES: [(&str, &str); 3] = [
+    (
+        "app.proto",
+        "syntax = \"proto3\";\npackage app;\nimport \"fieldopts/options.proto\";\n\
+         message Sensor {\n  int32 id = 1;\n  Meta meta = 2;\n  message Meta { string unit = 1; }\n}\n",
+    ),
+    (
+        "fieldopts/options.proto",
+        "syntax = \"proto2\";\npackage fieldopts;\nimport \"google/protobuf/descriptor.proto\";\n\
+         message Options {\n  optional int32 max_size = 1;\n  optional bool fixed = 2;\n}\n\
+         extend google.protobuf.FieldOptions {\n  optional Options opts = 1010;\n}\n",
+    ),
+    (
+        "google/protobuf/descriptor.proto",
+        "syntax = \"proto2\";\npackage google.protobuf;\nmessage FieldOptions {\n  optional bool packed = 2;\n  \
+         extensions 1000 to max;\n}\n",
+    ),
+];
 
 fn corpus() -> Vec<Case> {
     use Expect::*;
@@ -927,6 +1013,56 @@ fn corpus() -> Vec<Case> {
             s.push_str("}\n");
             s
         }),
+        // ---- an extend or a group the root never reaches: protoc compiles it and
+        // ---- the door declares the tree its descriptor implies -----------------
+        case(
+            "an options file extending a descriptor message, imported and never reached",
+            AgreeFrom(&["app.Sensor", "fieldopts.Options"]),
+            &STANDIN_FILES,
+        ),
+        one(
+            "an extend written inside a message, from roots that do not reach the extended one",
+            AgreeFrom(&["M", "Other"]),
+            EXTEND_IN_A_MESSAGE,
+        ),
+        case(
+            "an extend whose extended message the root does not reach",
+            AgreeFrom(&["app.Unrelated"]),
+            &REACH_FILES,
+        ),
+        one(
+            "a group in a message the root does not reach, and the group's own message",
+            AgreeFrom(&["Root", "Uses", "Holder.G"]),
+            GROUPS,
+        ),
+        one(
+            "a group declared by an extension",
+            AgreeFrom(&["Root", "G"]),
+            "syntax = \"proto2\";\nmessage Base {\n  optional int32 a = 1;\n  extensions 100 to 199;\n}\n\
+             extend Base {\n  optional group G = 100 {\n    optional int32 q = 1;\n  }\n}\n\
+             message Root { optional G g = 1; }\n",
+        ),
+        one(
+            "an extendee found from the innermost scope that has its name",
+            AgreeFrom(&["RootTop"]),
+            "syntax = \"proto2\";\n\
+             message Inner { optional int32 top = 1; extensions 100 to 199; }\n\
+             message Outer {\n  message Inner { optional int32 deep = 1; extensions 100 to 199; }\n  extend Inner { optional int32 x = 100; }\n}\n\
+             message RootTop { optional Inner i = 1; }\n",
+        ),
+        case(
+            "an extend block in proto3, where no label is needed",
+            AgreeFrom(&["M"]),
+            &[
+                (
+                    "app.proto",
+                    "syntax = \"proto3\";\nimport \"google/protobuf/descriptor.proto\";\n\
+                     message M { int32 a = 1; }\n\
+                     extend google.protobuf.FieldOptions {\n  string tag = 50000;\n  optional int32 level = 50001;\n  repeated int32 levels = 50002;\n}\n",
+                ),
+                STANDIN_FILES[2],
+            ],
+        ),
         // ---- schemas protoc refuses and the door must blame on the same line --
         one(
             "a missing semicolon",
@@ -1240,6 +1376,112 @@ fn corpus() -> Vec<Case> {
                 ),
             ],
         ),
+        // ---- extend and group are read for their syntax, so a mistake in one is
+        // ---- blamed where protoc blames it, whatever the root reaches ---------
+        one(
+            "an empty extend block",
+            BothRefuse,
+            "syntax = \"proto2\";\nmessage Base { extensions 100 to 199; }\nextend Base {\n}\n",
+        ),
+        one(
+            "an extend block's field missing its semicolon",
+            BothRefuse,
+            "syntax = \"proto2\";\nmessage Base { extensions 100 to 199; }\nextend Base {\n  optional int32 x = 100\n}\n",
+        ),
+        one(
+            "a stray semicolon in an extend block",
+            BothRefuse,
+            "syntax = \"proto2\";\nmessage Base { extensions 100 to 199; }\nextend Base {\n  optional int32 x = 100;\n  ;\n}\n",
+        ),
+        one(
+            "an extend block with no label in proto2",
+            BothRefuse,
+            "syntax = \"proto2\";\nmessage Base { extensions 100 to 199; }\nextend Base {\n  int32 x = 100;\n}\n",
+        ),
+        one(
+            "an extend of a scalar type",
+            BothRefuse,
+            "syntax = \"proto2\";\nextend int32 {\n  optional int32 x = 100;\n}\n",
+        ),
+        one(
+            "a map in an extend block",
+            BothRefuse,
+            "syntax = \"proto2\";\nmessage Base { extensions 100 to 199; }\nextend Base {\n  map<string, int32> m = 100;\n}\n",
+        ),
+        one(
+            "an extend block never closed",
+            BothRefuse,
+            "syntax = \"proto2\";\nmessage Base { extensions 100 to 199; }\nextend Base {\n  optional int32 x = 100;\n",
+        ),
+        one(
+            "an extendee that is not defined, written on its own line",
+            BothRefuse,
+            "syntax = \"proto2\";\nmessage M { optional int32 a = 1; }\nextend\n    Missing.Name {\n  optional int32 x = 100;\n}\n",
+        ),
+        one(
+            "an absolute extendee that is not defined",
+            BothRefuse,
+            "syntax = \"proto2\";\nmessage M { optional int32 a = 1; }\nextend .nowhere.T {\n  optional int32 x = 100;\n}\n",
+        ),
+        one(
+            "an extendee that is an enum",
+            BothRefuse,
+            "syntax = \"proto2\";\nenum E { Z = 0; }\nmessage M { optional int32 a = 1; }\nextend E {\n  optional int32 x = 100;\n}\n",
+        ),
+        one(
+            "an extendee found as a field first",
+            BothRefuse,
+            "syntax = \"proto2\";\nmessage Base { extensions 100 to 199; }\nmessage M {\n  optional int32 Base = 1;\n  extend Base { optional int32 x = 100; }\n}\n",
+        ),
+        case(
+            "an extendee defined in a file that is imported only by an import",
+            BothRefuse,
+            &[
+                (
+                    "a.proto",
+                    "syntax = \"proto2\";\nimport \"mid.proto\";\nmessage M { optional int32 a = 1; }\nextend b.Base {\n  optional int32 x = 100;\n}\n",
+                ),
+                ("mid.proto", "syntax = \"proto2\";\nimport \"base.proto\";\n"),
+                REACH_FILES[1],
+            ],
+        ),
+        one(
+            "a group in proto3",
+            BothRefuse,
+            "syntax = \"proto3\";\nmessage M {\n  optional group G = 1 { }\n}\n",
+        ),
+        one(
+            "a group with a lower case name",
+            BothRefuse,
+            "syntax = \"proto2\";\nmessage M {\n  optional group g = 1 { }\n}\n",
+        ),
+        one(
+            "a group with no body",
+            BothRefuse,
+            "syntax = \"proto2\";\nmessage M {\n  optional group G = 1;\n}\n",
+        ),
+        one(
+            "a group with no label in proto2",
+            BothRefuse,
+            "syntax = \"proto2\";\nmessage M {\n  group G = 1 { }\n}\n",
+        ),
+        one(
+            "a group whose field name clashes with another field",
+            BothRefuse,
+            "syntax = \"proto2\";\nmessage M {\n  optional group Gr = 1 { optional int32 x = 1; }\n  optional int32 gr = 2;\n}\n",
+        ),
+        one(
+            "a syntax error inside a group's body",
+            BothRefuse,
+            "syntax = \"proto2\";\nmessage M {\n  optional group G = 1 {\n    optional int32 x = 1\n  }\n}\n",
+        ),
+        // The group's body is a message to the nesting limit: 31 levels compile
+        // (see the deliberate refusals below), the 32nd is refused.
+        one(
+            "groups written 32 deep, one past protoc's limit",
+            BothRefuse,
+            &grouped(32),
+        ),
         // ---- what protoc compiles and the door refuses, on purpose -----------
         one(
             "a group",
@@ -1251,10 +1493,63 @@ fn corpus() -> Vec<Case> {
             DoorRefuses("M", "`extend` is not supported"),
             "syntax = \"proto2\";\nmessage M {\n  optional int32 a = 1;\n  extensions 100 to 199;\n}\nextend M {\n  optional int32 x = 100;\n}\n",
         ),
+        // The extended message, as the root: written inside another message,
+        // the block extends `Base` and not the message it sits in.
         one(
-            "an extend block inside a message",
-            DoorRefuses("M", "`extend` is not supported"),
-            "syntax = \"proto2\";\nmessage Base {\n  optional int32 a = 1;\n  extensions 100 to 199;\n}\nmessage M {\n  extend Base {\n    optional int32 x = 100;\n  }\n}\n",
+            "an extend block inside a message, from the message it extends",
+            DoorRefuses("Base", "`extend` is not supported"),
+            EXTEND_IN_A_MESSAGE,
+        ),
+        one(
+            "a group reached through a field",
+            DoorRefuses("Reaches", "group fields are not supported"),
+            GROUPS,
+        ),
+        one(
+            "a group in a oneof",
+            DoorRefuses("R", "group fields are not supported"),
+            "syntax = \"proto2\";\nmessage R {\n  oneof o {\n    group G = 1 { optional int32 x = 1; }\n    int32 y = 2;\n  }\n}\n",
+        ),
+        one(
+            "groups written 31 deep, the most protoc compiles",
+            DoorRefuses("M0", "group fields are not supported"),
+            &grouped(31),
+        ),
+        case(
+            "an extend reached through a field",
+            DoorRefuses("app.Direct", "`extend` is not supported"),
+            &REACH_FILES,
+        ),
+        case(
+            "an extend reached through a nested message's field",
+            DoorRefuses("app.ViaNested", "`extend` is not supported"),
+            &REACH_FILES,
+        ),
+        case(
+            "an extend reached through a map's value",
+            DoorRefuses("app.ViaMap", "`extend` is not supported"),
+            &REACH_FILES,
+        ),
+        case(
+            "an extend whose extendee is visible through a public import chain",
+            DoorRefuses("app.Direct", "`extend` is not supported"),
+            &[
+                REACH_FILES[0],
+                REACH_FILES[1],
+                (
+                    "ext.proto",
+                    "syntax = \"proto2\";\nimport \"front.proto\";\n\nextend b.Base {\n  optional int32 x = 100;\n}\n",
+                ),
+                (
+                    "front.proto",
+                    "syntax = \"proto2\";\nimport public \"base.proto\";\n",
+                ),
+            ],
+        ),
+        case(
+            "an options file's extend, from the message it extends",
+            DoorRefuses("google.protobuf.FieldOptions", "`extend` is not supported"),
+            &STANDIN_FILES,
         ),
         case(
             "a weak import",
@@ -1314,6 +1609,17 @@ fn corpus() -> Vec<Case> {
             DoorAccepts("M"),
             "syntax = \"proto2\";\nmessage M {\n  extensions 10 to 20;\n  optional int32 x = 15;\n}\n",
         ),
+        // The fields of an extend block are read for their syntax and not judged.
+        one(
+            "an extension number outside every extension range",
+            DoorAccepts("M"),
+            "syntax = \"proto3\";\nmessage M { int32 a = 1; }\nmessage Base { }\nextend Base { string foo = 50000; }\n",
+        ),
+        one(
+            "an extension field of a type that is not defined",
+            DoorAccepts("M"),
+            "syntax = \"proto2\";\nmessage M { optional int32 a = 1; }\nmessage Base { extensions 100 to 199; }\nextend Base { optional Missing m = 100; }\n",
+        ),
     ];
     // protoc refuses a reserved number without naming a line, which is the one
     // class where there is a file and no line to compare.
@@ -1323,6 +1629,68 @@ fn corpus() -> Vec<Case> {
         "syntax = \"proto3\";\nmessage M {\n  reserved 2, 5 to 7;\n  int32 a = 6;\n}\n",
     ));
     cases
+}
+
+/// Where `descriptor.proto` is installed: the Debian package `libprotobuf-dev`
+/// (the one the armed lane installs, and the comment on the skip rule names) and
+/// a local protobuf install.
+const DESCRIPTOR_PROTO: &[&str] = &[
+    "/usr/include/google/protobuf/descriptor.proto",
+    "/usr/local/include/google/protobuf/descriptor.proto",
+];
+
+/// The cases that feed the REAL `google/protobuf/descriptor.proto` to the door
+/// as one file of the schema, beside the options file of [`STANDIN_FILES`]
+/// extending its `FieldOptions` -- the shape of the schema that exposed the
+/// defect, with the file an actual schema imports.
+///
+/// They are built apart from [`corpus`] because the text is read from the
+/// machine, and a machine without it is the skip the armed lane turns into a
+/// failure. `Err` says why there is no such file.
+fn descriptor_cases() -> Result<Vec<Case>, String> {
+    use Expect::*;
+    let descriptor = DESCRIPTOR_PROTO
+        .iter()
+        .find_map(|path| std::fs::read_to_string(path).ok())
+        .ok_or_else(|| format!("no descriptor.proto at any of {DESCRIPTOR_PROTO:?}"))?;
+    // The schema uses the option the options file adds, which protoc can check
+    // only against the real file: an option's extendee must declare
+    // `uninterpreted_option`, which the stand-in does not.
+    let app = "syntax = \"proto3\";\npackage app;\nimport \"fieldopts/options.proto\";\n\
+               message Sensor {\n  int32 id = 1;\n  string label = 2 [(fieldopts.opts).max_size = 16];\n  \
+               Meta meta = 3;\n  message Meta { string unit = 1; }\n}\n";
+    let files = [
+        ("app.proto", app),
+        STANDIN_FILES[1],
+        ("google/protobuf/descriptor.proto", descriptor.as_str()),
+    ];
+    Ok(vec![
+        case(
+            "the real descriptor.proto and an options file extending its FieldOptions, from roots that do not reach it",
+            AgreeFrom(&[
+                "app.Sensor",
+                "fieldopts.Options",
+                "google.protobuf.UninterpretedOption",
+                "google.protobuf.SourceCodeInfo",
+                "google.protobuf.GeneratedCodeInfo",
+                "google.protobuf.EnumDescriptorProto",
+                "google.protobuf.ServiceDescriptorProto",
+                "google.protobuf.FileOptions",
+                "google.protobuf.DescriptorProto.ExtensionRange",
+            ]),
+            &files,
+        ),
+        case(
+            "the real descriptor.proto, from the root that holds a FieldOptions",
+            DoorRefuses("google.protobuf.FieldDescriptorProto", "`extend` is not supported"),
+            &files,
+        ),
+        case(
+            "the real descriptor.proto, from the whole descriptor set",
+            DoorRefuses("google.protobuf.FileDescriptorSet", "`extend` is not supported"),
+            &files,
+        ),
+    ])
 }
 
 // ---- the run -----------------------------------------------------------------
@@ -1381,7 +1749,26 @@ fn the_proto_door_agrees_with_protoc_over_the_corpus() {
 
     let mut disagreements: Vec<String> = Vec::new();
     let (mut schemas, mut roots, mut blamed, mut purposeful, mut unchecked) = (0, 0, 0, 0, 0);
-    let corpus = corpus();
+    let mut corpus = corpus();
+    let from_descriptor = match descriptor_cases() {
+        Ok(cases) => {
+            let n = cases.len();
+            corpus.extend(cases);
+            n
+        }
+        Err(why) if required => panic!(
+            "WZ_PROTOC_REQUIRE is set and the real descriptor.proto cannot be read: {why}. \
+             The cases that feed it to the door are the ones that reproduce the defect with \
+             the file a real schema imports"
+        ),
+        Err(why) => {
+            eprintln!(
+                "skip: {why}; the cases that feed the real descriptor.proto to the door did not \
+                 run, and WZ_PROTOC_REQUIRE=1 makes that a failure"
+            );
+            0
+        }
+    };
     let mut names: Vec<&str> = corpus.iter().map(|c| c.name.as_str()).collect();
     names.sort_unstable();
     let before = names.len();
@@ -1399,7 +1786,7 @@ fn the_proto_door_agrees_with_protoc_over_the_corpus() {
         let say = |what: String| format!("[{}] {what}", case.name);
 
         match &case.expect {
-            Expect::Agree => {
+            Expect::Agree | Expect::AgreeFrom(_) => {
                 let Some(text) = &compiled.descriptor_text else {
                     disagreements.push(say(format!(
                         "the corpus is wrong: protoc refused a schema marked Agree:\n{}",
@@ -1409,13 +1796,26 @@ fn the_proto_door_agrees_with_protoc_over_the_corpus() {
                 };
                 let set = read_text(text).expect("protoc's own output reads");
                 let msgs = collect(&set);
-                // Every message the schema defines, nested ones and ones in
-                // imported files included, as a root.
-                let candidates: Vec<&String> = msgs
-                    .iter()
-                    .filter(|(_, m)| !m.map_entry && !m.file.starts_with("google/"))
-                    .map(|(name, _)| name)
-                    .collect();
+                let named: Vec<String> = match &case.expect {
+                    Expect::AgreeFrom(roots) => roots.iter().map(|r| format!(".{r}")).collect(),
+                    _ => Vec::new(),
+                };
+                if let Some(missing) = named.iter().find(|r| !msgs.contains_key(*r)) {
+                    disagreements.push(say(format!(
+                        "the corpus is wrong: {missing} is not a message protoc compiled"
+                    )));
+                    continue;
+                }
+                // The roots a case names, or else every message the schema
+                // defines, nested ones and ones in imported files included.
+                let candidates: Vec<&String> = if named.is_empty() {
+                    msgs.iter()
+                        .filter(|(_, m)| !m.map_entry && !m.file.starts_with("google/"))
+                        .map(|(name, _)| name)
+                        .collect()
+                } else {
+                    named.iter().collect()
+                };
                 assert!(
                     !candidates.is_empty(),
                     "{}: no message to compare",
@@ -1495,11 +1895,16 @@ fn the_proto_door_agrees_with_protoc_over_the_corpus() {
     eprintln!(
         "proto door vs protoc: {schemas} compiled schema(s) / {roots} root(s) compared, \
          {blamed} refusal(s) blamed on the same file and line, {purposeful} deliberate \
-         refusal(s), {unchecked} non-validation(s)"
+         refusal(s), {unchecked} non-validation(s); {from_descriptor} case(s) feed the real \
+         descriptor.proto"
     );
     assert!(
         schemas >= 20 && roots >= 40 && blamed >= 40 && purposeful >= 8 && unchecked >= 3,
         "the corpus no longer exercises each arm: {schemas}/{roots}/{blamed}/{purposeful}/{unchecked}"
+    );
+    assert!(
+        !required || from_descriptor >= 3,
+        "an armed run must have fed the real descriptor.proto to the door: {from_descriptor}"
     );
     assert!(
         disagreements.is_empty(),
@@ -1694,6 +2099,7 @@ fn the_corpus_names_each_case_once_and_covers_each_arm() {
     let corpus = corpus();
     let count = |f: fn(&Expect) -> bool| corpus.iter().filter(|c| f(&c.expect)).count();
     assert!(count(|e| matches!(e, Expect::Agree)) >= 20);
+    assert!(count(|e| matches!(e, Expect::AgreeFrom(_))) >= 6);
     assert!(count(|e| matches!(e, Expect::BothRefuse)) >= 40);
     assert!(count(|e| matches!(e, Expect::DoorRefuses(..))) >= 8);
     assert!(count(|e| matches!(e, Expect::DoorAccepts(_))) >= 3);
