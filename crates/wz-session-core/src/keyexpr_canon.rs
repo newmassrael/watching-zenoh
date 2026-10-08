@@ -1488,6 +1488,15 @@ mod tests {
     /// alphabet that can reach every arm (`a`, `*`, `$`, `/`, `#`, `?`), 335,923
     /// of them, and holds the two questions to the same answer on each. A
     /// disagreement on any text means the move changed what the drop-in accepts.
+    ///
+    /// ⚠ The number of texts accepted, 239, is not this test's own: the same
+    /// texts were put once to a real `libzenohc` built from zenoh-c 1.10.1
+    /// (`z_view_keyexpr_from_str`, the constructor the drop-in stands in for) and
+    /// it accepted 239 and the SAME 239, none more and none fewer. That run
+    /// cannot be repeated from this tree, since the oracle is machine-local, so
+    /// it is recorded here as the number the assertion below holds this
+    /// validator to. A change that moves it has moved away from upstream, or
+    /// upstream moved and the pin with it.
     #[test]
     fn the_validator_accepts_exactly_the_texts_that_are_their_own_zenoh_c_canonical_form() {
         const ALPHABET: [u8; 6] = *b"a*$/#?";
@@ -1525,10 +1534,7 @@ mod tests {
         }
         assert_eq!(walked, 335_923, "the walk covers the whole space");
         // A comparison that accepted nothing, or everything, would pass for the
-        // wrong reason.
-        assert!(
-            accepted > 100 && accepted < walked / 2,
-            "accepted {accepted} of {walked}"
-        );
+        // wrong reason; this is the number the real library accepts.
+        assert_eq!(accepted, 239, "of {walked}");
     }
 }
