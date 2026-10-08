@@ -1841,6 +1841,56 @@ pub const DOCUMENT_HISTORY: &[DocumentShape] = &[
         planes: &[],
         carries: FIELDS_R28_CARRIES,
     },
+    // EVERY `carried` ENTRY NAMES THE BODY ITS MESSAGE CARRIES.
+    //
+    // Revision 33 ADDS one key, `body`, and retires nothing. It arrives on EVERY
+    // entry of a `carried` array and of an `above_transport.carried` array,
+    // right after `message`. `message` is the OUTER message (`Push`, `Declare`,
+    // `Request`, `Response`); the body it carries was a branch of the row's tree
+    // and nowhere in the entry, so an entry for a body that names no key could
+    // not be told from any other entry of its message without reading the tree.
+    //
+    // THE VALUE is the name of the direct branch of the message's own tree node
+    // that carries the message's own `mid`, and nothing finer. It is one of the
+    // fourteen words of the new `body` family: `put`, `del`, `query`, `reply`,
+    // `err`, and the nine declarations (`decl_kexpr`, `undecl_kexpr`,
+    // `decl_subscriber`, `undecl_subscriber`, `decl_queryable`,
+    // `undecl_queryable`, `decl_token`, `undecl_token`, `decl_final`). A
+    // `Response` says `reply` (or `err`), and the `put` or `del` a reply carries
+    // stays a branch of the `reply` branch, which this key does not descend into.
+    // A `Request` says `query`, or `put` or `del` where it carries one.
+    //
+    // `null` for a message with no such branch: every transport message, a
+    // `ResponseFinal`, an `Oam`, and an `Interest`, whose only direct branch is
+    // its restriction. The key is on EVERY entry, as `keyexpr` and `payload`
+    // are: a reader cannot tell a build that stopped reporting bodies from a
+    // message that has none out of an absence. It is also why `message` stays a
+    // PASSENGER in the `carries` axis: were the key absent for a bodiless
+    // message, the message word would decide whether the key arrives and the
+    // axis would have to call `message` a discriminant, which it has never been.
+    //
+    // PER ENTRY, so a `Frame` that batches several messages gives each its own
+    // answer, and the same in both lists. The words are the ones the tree's
+    // branches are built with, so the entry, the tree and the declared family
+    // cannot spell a body two ways.
+    //
+    // The new family is a PASSENGER: no word of it brings or withholds another
+    // key. Nothing else moves, and every document this change does not name is
+    // byte-identical.
+    //
+    // A consumer pinned to 32 loses nothing: this is an addition to an object it
+    // reads by name. A consumer that takes the key as fixed once stored should
+    // know it is derived from the message's own bytes, as `start` and `end` are,
+    // so it is not among the cells a live handle may rewrite.
+    DocumentShape {
+        document: FIELDS,
+        revision: 33,
+        keys: FIELDS_R33_KEYS,
+        retiring: &[],
+        families: FIELDS_R33_FAMILIES,
+        planes: &[],
+        carries: FIELDS_R33_CARRIES,
+    },
     DocumentShape {
         document: SUMMARY,
         revision: 1,
@@ -9883,6 +9933,317 @@ pub const FIELDS_R32_FAMILIES: &[ValueFamily] = &[
     },
 ];
 
+/// What `carried[].body` says at revision 33: the name of the body a network
+/// message carries, which is the name of the branch of its tree that carries the
+/// message's own `mid`.
+///
+/// Sorted, as every family is. The words are the walkers' own
+/// (`wz_session_core::dissect::BodyName`), and `the_declared_value_families_match_the_librarys_own_vocabularies`
+/// holds this list to that type's walk. `reply` is the branch of a `Response`;
+/// the `put`, `del` or `err` it may carry is a branch of it and not a second
+/// answer.
+pub const BODY_R33: &[&str] = &[
+    "decl_final",
+    "decl_kexpr",
+    "decl_queryable",
+    "decl_subscriber",
+    "decl_token",
+    "del",
+    "err",
+    "put",
+    "query",
+    "reply",
+    "undecl_kexpr",
+    "undecl_queryable",
+    "undecl_subscriber",
+    "undecl_token",
+];
+
+/// The field document's key set at revision 33: revision 32's PLUS `body`.
+///
+/// Written out rather than aliased, on the rule revision 7 set for a key that
+/// arrives.
+///
+/// MEASURED: `the_field_documents_key_set_is_pinned` prints what the document
+/// emits and this is that printout.
+pub const FIELDS_R33_KEYS: &[&str] = &[
+    "abandoned_at_end",
+    "abandoned_on_eviction",
+    "above_transport",
+    "addr",
+    "after_seq",
+    "anchor",
+    "batch_index",
+    "batch_size",
+    "body",
+    "caps",
+    "capture_reread",
+    "carried",
+    "carried_state",
+    "chain",
+    "chain_id",
+    "close_seen",
+    "compression",
+    "conduit",
+    "context",
+    "datagram_flows",
+    "declaration_checked",
+    "declared",
+    "depth",
+    "descriptor_bytes",
+    "despite_encoding",
+    "direction",
+    "document",
+    "dropped_by_limits",
+    "dst",
+    "encoding",
+    "end",
+    "example",
+    "expired_chains",
+    "family",
+    "fields",
+    "fin_seen",
+    "first_byte",
+    "flow",
+    "flows",
+    "format",
+    "frame_offset",
+    "frames",
+    "frames_per_flow",
+    "halves",
+    "high",
+    "index",
+    "keyexpr",
+    "keyexpr_cause",
+    "keyexpr_id",
+    "kind",
+    "l2",
+    "last_seen_ts_ns",
+    "lease_ms",
+    "length",
+    "link",
+    "list_id",
+    "low",
+    "lowlatency",
+    "matched_rule",
+    "max_flows_per_table",
+    "max_scout_askers",
+    "message",
+    "message_at",
+    "messages",
+    "missing",
+    "name",
+    "negotiated",
+    "note",
+    "offset_space",
+    "omitted",
+    "outcome",
+    "packet",
+    "parent",
+    "patch",
+    "path",
+    "pattern",
+    "payload",
+    "payload_decode",
+    "payload_mapping",
+    "payload_mapping_counts_exact",
+    "payload_offset",
+    "payload_refusals",
+    "phase",
+    "port",
+    "priority",
+    "qos",
+    "reason",
+    "reassembly",
+    "reliable",
+    "revision",
+    "rst_seen",
+    "samples",
+    "scout_askers",
+    "scouting",
+    "selected",
+    "seq",
+    "shm_descriptor",
+    "shown",
+    "skipped",
+    "skipped_packets",
+    "sn",
+    "sn_mask",
+    "src",
+    "start",
+    "state",
+    "stream_bytes",
+    "stream_bytes_per_direction",
+    "stream_flows",
+    "through_seq",
+    "under",
+    "value",
+    "verdict",
+    "version",
+    "why",
+    "window",
+    "wrong",
+];
+
+/// The value families the field document declares at revision 33 — revision 32's
+/// PLUS `body`, read from [`BODY_R33`]. Written out in full, for the reason
+/// [`ValueFamily::values`] gives: a list that read the earlier one would widen
+/// with it, and then the revision would never have to move.
+pub const FIELDS_R33_FAMILIES: &[ValueFamily] = &[
+    ValueFamily {
+        key: "body",
+        values: BODY_R33,
+    },
+    ValueFamily {
+        key: "carried_state",
+        values: CARRIED_STATE_R12,
+    },
+    ValueFamily {
+        key: "direction",
+        values: DIRECTION_FIELDS_R2,
+    },
+    ValueFamily {
+        key: "family",
+        values: ADDR_FAMILY_R15,
+    },
+    ValueFamily {
+        key: "keyexpr_cause",
+        values: UNRESOLVED_CAUSE_R11,
+    },
+    ValueFamily {
+        key: "kind",
+        values: FIELD_VALUE_KIND_R17,
+    },
+    ValueFamily {
+        key: "link",
+        values: LINK_KIND_R7,
+    },
+    ValueFamily {
+        key: "message",
+        values: MESSAGE_R10,
+    },
+    ValueFamily {
+        key: "offset_space",
+        values: ANCHOR_SPACE_FIELDS_R2,
+    },
+    ValueFamily {
+        key: "outcome",
+        values: CHAIN_OUTCOME_R14,
+    },
+    ValueFamily {
+        key: "phase",
+        values: SESSION_PHASE_R14,
+    },
+    ValueFamily {
+        key: "priority",
+        values: PRIORITY_R14,
+    },
+    ValueFamily {
+        key: "reason",
+        values: CHAIN_REASON_R32,
+    },
+    ValueFamily {
+        key: "selected",
+        values: SELECTED_R13,
+    },
+    ValueFamily {
+        key: "state",
+        values: PAYLOAD_STATE_R2,
+    },
+    ValueFamily {
+        key: "under",
+        values: REFUSED_UNDER_R2,
+    },
+    ValueFamily {
+        key: "verdict",
+        values: SN_VERDICT_R14,
+    },
+    ValueFamily {
+        key: "wrong",
+        values: MISBOUND_R2,
+    },
+];
+
+/// What each field-document family's WORD decides at revision 33 — revision 28's
+/// PLUS `body`, a PASSENGER: no word of it brings or withholds another key,
+/// because every entry has the same keys whatever body it names (or none).
+/// Written out in full, because a slice cannot be spliced in a `const` and an
+/// alias would make the revision follow its predecessor.
+pub const FIELDS_R33_CARRIES: &[KeyCarries] = &[
+    KeyCarries {
+        key: "body",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "carried_state",
+        shape: CarriesShape::Discriminant(CARRIED_STATE_CARRIES_R12),
+    },
+    KeyCarries {
+        key: "direction",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "family",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "keyexpr_cause",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "kind",
+        shape: CarriesShape::Discriminant(FIELD_VALUE_KIND_CARRIES_R17),
+    },
+    KeyCarries {
+        key: "link",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "message",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "offset_space",
+        shape: CarriesShape::Discriminant(FIELD_OFFSET_SPACE_CARRIES_R19),
+    },
+    KeyCarries {
+        key: "outcome",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "phase",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "priority",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "reason",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "selected",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "state",
+        shape: CarriesShape::Discriminant(PAYLOAD_STATE_CARRIES_R28),
+    },
+    KeyCarries {
+        key: "under",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "verdict",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "wrong",
+        shape: CarriesShape::Passenger,
+    },
+];
+
 /// What each field-document family's WORD decides at revision 28 — revision 20's,
 /// with `state` changed: see [`PAYLOAD_STATE_CARRIES_R28`]. Written out in full,
 /// because a slice cannot be spliced in a `const` and an alias would make the
@@ -12268,7 +12629,9 @@ mod tests {
             // To 32 when a flow with no InitAck had its fragment chains
             // followed: values under stationary keys, and `chain.reason`
             // gained the word `unresolvable`.
-            (FIELDS, 32),
+            // To 33 when every `carried` entry gained `body`, the name of the
+            // body its message carries: a key and a `body` family.
+            (FIELDS, 33),
             // R2121 (open-debt item 460) — the summary moved to 2 when it
             // gained `inert_counters`; R2122 (item 238) to 3 when its
             // `framing` group stopped disagreeing with the capture report's.

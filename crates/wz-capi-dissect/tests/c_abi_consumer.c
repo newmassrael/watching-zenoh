@@ -2373,8 +2373,13 @@ int main(void) {
      * `fragment_without_resolution` with `chain` `null`; a step only the ring
      * could judge ends the chain with `chain.reason` `unresolvable`, a new word
      * of the `reason` family. `sn.verdict` is unchanged. Values move under
-     * stationary keys; no key name moves; nothing retires. */
-    revisioned[2].revision = 32;
+     * stationary keys; no key name moves; nothing retires.
+     * 33: every `carried` entry gains `body`, right after `message`: the name of
+     * the branch of the message's tree that carries its own `mid` (`put`,
+     * `del`, `query`, `reply`, `err` or one of the nine declarations), `null`
+     * for a message with none. A key arrives and a `body` family is declared;
+     * nothing retires. */
+    revisioned[2].revision = 33;
     revisioned[2].doc = NULL;
     rc = wz_dissect_pcap_fields(pcap, sizeof pcap, 0, &revisioned[2].doc);
     CHECK(rc == WZ_DISSECT_OK, "fields rc=%d", rc);

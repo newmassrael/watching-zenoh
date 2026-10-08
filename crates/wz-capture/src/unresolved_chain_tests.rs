@@ -523,7 +523,7 @@ fn closed_chains_of_consecutive_fragments_reassemble_with_no_handshake_in_the_ca
         for close in (0..85).filter(|i| i % ROBOT_FRAGMENTS == ROBOT_FRAGMENTS - 1) {
             assert!(
                 above[close].contains(&format!(
-                    "\"message\":\"Push\",\"start\":0,\"end\":{ROBOT_MESSAGE_LEN},\"keyexpr\":\"{ROBOT_KEY}\""
+                    "\"message\":\"Push\",\"body\":\"put\",\"start\":0,\"end\":{ROBOT_MESSAGE_LEN},\"keyexpr\":\"{ROBOT_KEY}\""
                 )),
                 "{link:?}: row {close}: {}",
                 above[close]

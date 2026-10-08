@@ -421,6 +421,53 @@
  * application data. The range is derived from the message's bytes and does not
  * change in an issued row.
  *
+ * AND WHICH BODY THE MESSAGE CARRIES, at field-document revision 33.
+ *
+ *     `body`  the name of the body the message carries, or `null`
+ *
+ * It follows `message` on every entry of `carried` and of
+ * `above_transport.carried`. `message` is the OUTER message; the body it
+ * carries is what tells two entries of one message apart,
+ * above all a declaration that names no key (`decl_final`,
+ * `undecl_subscriber`), which no other key of the entry distinguishes. Until
+ * revision 33 the body was a branch of the row's `fields` tree and nowhere in
+ * the entry.
+ *
+ * The value is the NAME of the direct branch of the message's own node of the
+ * `fields` tree that carries the message's own `mid` -- the same word the tree
+ * prints, since the tree is built with the vocabulary this key is declared
+ * from, not a second table beside it. Every message that has a body says one of
+ * these:
+ *
+ *     `Push`       `put`, `del`
+ *     `Request`    `query`, and `put` or `del` where the request carries one
+ *     `Response`   `reply`, `err`
+ *     `Declare`    `decl_kexpr`, `undecl_kexpr`, `decl_subscriber`,
+ *                  `undecl_subscriber`, `decl_queryable`, `undecl_queryable`,
+ *                  `decl_token`, `undecl_token`, `decl_final`
+ *
+ * THE NAME IS THE BRANCH'S AND NOTHING FINER. A `Response` that carries a reply
+ * says `reply`; the `put` or `del` that reply carries is a branch of the
+ * `reply` branch, and this key does not look into it. The branch an `Interest`
+ * nests under the name `body` in the tree (its restriction) is not a body in
+ * this sense, because it carries no `mid`.
+ *
+ * `null` for a message with no such branch: every transport message (a
+ * `Frame`, a `Fragment`, an `Init`, an `Open`, a `KeepAlive`, a `Close`, a
+ * `Join`, a `Scout`, a `Hello`), a `ResponseFinal`, an `Oam`, and an
+ * `Interest`. The key is on EVERY entry, as `keyexpr` and `payload` are, so a
+ * `null` here says the message has no body and cannot be a build that stopped
+ * reporting one; a document of revision 32 or earlier has no `body` key at all,
+ * and the revision tells that apart. Nor does the message word decide whether
+ * the key arrives: `message` stays a passenger in the `carries` axis below.
+ *
+ * PER ENTRY, so a `Frame` that batches a `Declare` and an `Interest` gives each
+ * of them its own answer, and the same in both lists. The entry of the `Frame`
+ * itself says `null`. No existing key moves, and the word is derived from the
+ * message's bytes, so it does not change in an issued row.
+ *
+ * @values fields body
+ *
  * AND WHEN A RECORD WAS CAPTURED, AND IN WHAT ORDER ROWS COME, at
  * field-document revision 31, selection-document revision 3, census revision 17
  * and retention revision 3.
@@ -992,7 +1039,7 @@
  *
  * Every family in `value_families` now carries a `carries` axis:
  *
- *     {"name":"fields","revision":32,"key":"kind","values":[...],
+ *     {"name":"fields","revision":33,"key":"kind","values":[...],
  *      "carries":[{"word":"bits","shapes":[["end","name","start","value"]]},
  *                 {"word":"opaque","shapes":[["end","name","start"]]}, ...]}
  *
@@ -1021,6 +1068,7 @@
  * @carries census link passenger
  * @carries census mode passenger
  * @carries census offset_space passenger
+ * @carries fields body passenger
  * @carries fields carried_state discriminant
  * @carries fields direction passenger
  * @carries fields family passenger
@@ -2693,7 +2741,7 @@ int wz_dissect_e2e_open(const char *profile_json, const unsigned char *frame,
  *
  * R2175 -- the document is at REVISION 3, and the fourth key is `value_families`:
  *
- *     "value_families":[{"name":"fields","revision":32,"key":"state",
+ *     "value_families":[{"name":"fields","revision":33,"key":"state",
  *                        "values":["decoded","encoding_mismatch",…]}, …]
  *
  * every key in every document whose VALUE this build draws from a closed set,

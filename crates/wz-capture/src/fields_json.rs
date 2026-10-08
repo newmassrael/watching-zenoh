@@ -1493,6 +1493,39 @@ fn push_payload_block(
 /// A TRANSPORT message's own entry says `null`, as it names no key: what a `Frame`
 /// carries is each batched record's, and a `Fragment`'s `payload` is a piece of a
 /// batch and not application data.
+///
+/// # Revision 33 — AND WHICH BODY THE MESSAGE CARRIES
+///
+/// `body` follows `message`, on every entry. `message` is
+/// the OUTER message (`Push`, `Declare`, `Request`, `Response`); the body it
+/// carries (`put`, `del`, `decl_subscriber`, `decl_final`, `query`, `reply`) was
+/// a branch of the row's tree and nowhere in the entry, so an entry for a body
+/// that names no key (`decl_final`, `undecl_subscriber`) could not be told from
+/// any other `Declare` without reading the tree.
+///
+/// The value is the name of the direct branch of the message's own tree node
+/// that carries the message's own `mid`, and nothing finer: a `Response` says
+/// `reply` (or `err`), and the `put`, `del` or `err` a reply carries stays a
+/// branch of the `reply` branch. The names are `BodyName`'s (in
+/// `wz_session_core::dissect`), which the walkers build the branches with, so
+/// the entry, the tree and the declared `body` family cannot spell one body
+/// three ways.
+///
+/// `null` for a message with no such branch: every transport message, a
+/// `ResponseFinal`, an `Oam`, and an `Interest`, whose only direct branch is its
+/// restriction (a `body` of the TREE that is not a kind of message). The key is
+/// on EVERY entry, which is the rule `keyexpr`, `keyexpr_cause`, `keyexpr_id`
+/// and `payload` already keep and for the reason `keyexpr` gives: a reader
+/// cannot tell "this build stopped reporting it" from "this message has none"
+/// out of an absence. It is also what keeps `message` a passenger in the
+/// declared `carries` axis: were the key absent for a bodiless message, the
+/// message word would decide whether it arrives, and every consumer that was
+/// told `message` decides nothing would be wrong.
+///
+/// Per ENTRY, for the reason `keyexpr` is: a `Frame` that batches a `Declare`
+/// and an `Interest` gives each its own answer. It is written by [`push_body`]
+/// in both lists, the row's `carried` and a completed chain's
+/// `above_transport.carried`, and no existing key moves.
 fn push_carried(
     bytes: &[u8],
     field: &wz_session_core::dissect::Field,
@@ -1504,7 +1537,7 @@ fn push_carried(
     out.push_str(",\"carried\":[");
     let mut first = true;
     let mut entry = |word: &str,
-                     span: &wz_session_core::dissect::Span,
+                     node: &wz_session_core::dissect::Field,
                      keyexpr: Option<Result<String, crate::payload_decode::UnresolvedRef>>,
                      payload: Option<crate::payload_decode::PayloadSlot>,
                      out: &mut String| {
@@ -1514,10 +1547,11 @@ fn push_carried(
         first = false;
         out.push_str("{\"message\":");
         escape_into(word, out);
+        push_body(node, out);
         let _ = write!(
             out,
             ",\"start\":{},\"end\":{},\"keyexpr\":",
-            span.start, span.end
+            node.span.start, node.span.end
         );
         match &keyexpr {
             Some(Ok(keyexpr)) => escape_into(keyexpr, out),
@@ -1540,7 +1574,7 @@ fn push_carried(
         } else {
             None
         };
-        entry(message.name(), &field.span, keyexpr, None, out);
+        entry(message.name(), field, keyexpr, None, out);
     }
     for record in records {
         let word = bytes
@@ -1549,7 +1583,7 @@ fn push_carried(
             .map_or(record.name.as_ref(), |m| m.name());
         entry(
             word,
-            &record.span,
+            record,
             crate::payload_decode::subtree_keyexpr_outcome(record, at),
             crate::payload_decode::payload_slot(record),
             out,
@@ -1583,6 +1617,29 @@ fn push_payload_slot(slot: Option<&crate::payload_decode::PayloadSlot>, out: &mu
     out.push_str(",\"shm_descriptor\":");
     out.push_str(if slot.shm_descriptor { "true" } else { "false" });
     out.push('}');
+}
+
+/// The `body` key of one `carried` entry, after its `message`: the name of the
+/// body the message carries, or `null`.
+///
+/// One body for the two places an entry is written, as [`push_keyexpr_miss`] is
+/// for the keys beside it, so a row's list and a chain's list cannot name a body
+/// two ways. The word is `Field::body`'s, which reads it off the entry's own
+/// tree: the direct branch that carries the message's own MID.
+///
+/// `null` and not an absent key for a message that has no such branch, on the
+/// rule every other key of the entry follows ([`push_carried`] states it): the
+/// entry is emitted STRUCTURALLY, an inapplicable companion arrives as `null`,
+/// and `message` stays a passenger. An absent key would make the message word
+/// decide which keys arrive, which turns `message` into a discriminant in the
+/// document's declared `carries` axis and so changes what every consumer was
+/// told about it.
+fn push_body(node: &wz_session_core::dissect::Field, out: &mut String) {
+    out.push_str(",\"body\":");
+    match node.body() {
+        Some(body) => escape_into(body.name(), out),
+        None => out.push_str("null"),
+    }
 }
 
 /// The `keyexpr_cause` and `keyexpr_id` keys of one `carried` entry, after its
@@ -1813,6 +1870,7 @@ fn push_above_transport(
                 .map_or(record.name.as_ref(), |m| m.name());
             out.push_str("{\"message\":");
             escape_into(word, out);
+            push_body(record, out);
             let _ = write!(
                 out,
                 ",\"start\":{},\"end\":{},\"keyexpr\":",
@@ -6439,7 +6497,7 @@ mod tests {
         // against a rename and against each other and against NOTHING a
         // consumer could read.
         let mut failures: Vec<String> = Vec::new();
-        let live: [(&str, &str, Vec<&'static str>); 29] = [
+        let live: [(&str, &str, Vec<&'static str>); 30] = [
             // The session's per-frame verdicts, each held to the
             // walk its emitter's exhaustive match is bound to.
             (rev::FIELDS, "verdict", SnVerdictWord::names()),
@@ -6501,6 +6559,14 @@ mod tests {
                 rev::FIELDS,
                 "message",
                 wz_session_core::dissect::MessageName::names(),
+            ),
+            // Revision 33 — the body a network message carries. The walk is the
+            // type the walkers build the tree's branches with, so a branch a
+            // walker names that this list lacks cannot be built.
+            (
+                rev::FIELDS,
+                "body",
+                wz_session_core::dissect::BodyName::names(),
             ),
             (rev::FIELDS, "state", PayloadDecoding::STATES.to_vec()),
             // R2706 — the session's verdict words. The walk is the successor
@@ -8534,7 +8600,8 @@ mod tests {
 
         for word in ["Scout", "Hello"] {
             let row = alloc::format!("\"name\":\"{word}\",\"fields\":");
-            let entry = alloc::format!("\"carried\":[{{\"message\":\"{word}\",\"start\":0,");
+            let entry =
+                alloc::format!("\"carried\":[{{\"message\":\"{word}\",\"body\":null,\"start\":0,");
             assert_eq!(
                 (out.matches(&row).count(), out.matches(&entry).count()),
                 (1, 1),
@@ -9261,6 +9328,335 @@ mod tests {
             empty_network > 0,
             "no network message was without one: {doc}"
         );
+    }
+
+    /// One network record per BODY the codecs can carry, with the message that
+    /// carries it and the body name the `carried` entry is expected to give.
+    ///
+    /// The names are written here as literals, on purpose: they are the
+    /// expectation, and the library's own vocabulary is what is graded against
+    /// them. Every record is built by its own codec, as `network_census` is, so
+    /// the population is the wire's and not a byte string somebody typed. The
+    /// messages that have no body (`ResponseFinal`, an `Interest` with or
+    /// without its restriction, an `Oam`) are in the list too, because the
+    /// claim includes the `null`.
+    ///
+    /// Gated as its one caller is, which needs the reassembled-chain fixture too.
+    #[cfg(all(feature = "reassembly", feature = "network-codecs"))]
+    fn body_population() -> Vec<(&'static str, Option<&'static str>, Vec<u8>)> {
+        use crate::datagram_tests::{push, sender_space};
+        use wz_codecs::declare::{Declare, DeclareVariant};
+        use wz_codecs::reply::{Reply, ReplyVariant};
+        use wz_codecs::request::{Request, RequestVariant};
+        use wz_codecs::response::{Response, ResponseVariant};
+        use wz_codecs::wire_const::FLAG_N_N;
+
+        let literal = |suffix: &'static str| sender_space(0, Some(suffix));
+        let declare = |body: DeclareVariant<'static>| {
+            Declare {
+                body,
+                ..Default::default()
+            }
+            .encode_to_vec()
+        };
+        let empty_put = || wz_codecs::msg_put::MsgPut {
+            payload_len: Some(0),
+            payload: Some(&[]),
+            ..Default::default()
+        };
+        let request = |body: RequestVariant<'static>| {
+            Request {
+                header: Request::default().header | FLAG_N_N,
+                rid: 1,
+                keyexpr: literal("demo/request"),
+                body,
+                ..Default::default()
+            }
+            .encode_to_vec()
+        };
+        let response = |body: ResponseVariant<'static>| {
+            Response {
+                header: Response::default().header | FLAG_N_N,
+                request_id: 1,
+                keyexpr: literal("demo/response"),
+                body,
+                ..Default::default()
+            }
+            .encode_to_vec()
+        };
+        let reply = |body: ReplyVariant<'static>| {
+            ResponseVariant::CodecZenohReply(Reply {
+                body,
+                ..Default::default()
+            })
+        };
+        // The id and its key are arbitrary: only the BODY is graded, and a
+        // declaration whose key does not resolve is a body all the same.
+        let key = || sender_space(7, None);
+        vec![
+            ("Push", Some("put"), push(literal("demo/put"), b"v")),
+            ("Push", Some("del"), push_del("demo/del")),
+            (
+                "Declare",
+                Some("decl_kexpr"),
+                declare(DeclareVariant::CodecZenohDeclKexpr(
+                    wz_codecs::decl_kexpr::DeclKexpr {
+                        header: wz_session_core::wire_const::D_MID_KEXPR
+                            | wz_session_core::wire_const::FLAG_D_N,
+                        id: 7,
+                        keyexpr: literal("demo/kexpr"),
+                        extensions: None,
+                    },
+                )),
+            ),
+            (
+                "Declare",
+                Some("undecl_kexpr"),
+                declare(DeclareVariant::CodecZenohUndeclKexpr(
+                    wz_codecs::undecl_kexpr::UndeclKexpr {
+                        id: 7,
+                        ..Default::default()
+                    },
+                )),
+            ),
+            (
+                "Declare",
+                Some("decl_subscriber"),
+                declare(DeclareVariant::CodecZenohDeclSubscriber(
+                    wz_codecs::decl_subscriber::DeclSubscriber {
+                        id: 7,
+                        keyexpr: key(),
+                        ..Default::default()
+                    },
+                )),
+            ),
+            (
+                "Declare",
+                Some("undecl_subscriber"),
+                declare(DeclareVariant::CodecZenohUndeclSubscriber(
+                    wz_codecs::undecl_subscriber::UndeclSubscriber {
+                        id: 7,
+                        ..Default::default()
+                    },
+                )),
+            ),
+            (
+                "Declare",
+                Some("decl_queryable"),
+                declare(DeclareVariant::CodecZenohDeclQueryable(
+                    wz_codecs::decl_queryable::DeclQueryable {
+                        id: 7,
+                        keyexpr: key(),
+                        ..Default::default()
+                    },
+                )),
+            ),
+            (
+                "Declare",
+                Some("undecl_queryable"),
+                declare(DeclareVariant::CodecZenohUndeclQueryable(
+                    wz_codecs::undecl_queryable::UndeclQueryable {
+                        id: 7,
+                        ..Default::default()
+                    },
+                )),
+            ),
+            (
+                "Declare",
+                Some("decl_token"),
+                declare(DeclareVariant::CodecZenohDeclToken(
+                    wz_codecs::decl_token::DeclToken {
+                        id: 7,
+                        keyexpr: key(),
+                        ..Default::default()
+                    },
+                )),
+            ),
+            (
+                "Declare",
+                Some("undecl_token"),
+                declare(DeclareVariant::CodecZenohUndeclToken(
+                    wz_codecs::undecl_token::UndeclToken {
+                        id: 7,
+                        ..Default::default()
+                    },
+                )),
+            ),
+            (
+                "Declare",
+                Some("decl_final"),
+                declare(DeclareVariant::CodecZenohDeclFinal(
+                    wz_codecs::decl_final::DeclFinal::default(),
+                )),
+            ),
+            (
+                "Request",
+                Some("query"),
+                request(RequestVariant::CodecZenohQuery(
+                    wz_codecs::query::Query::default(),
+                )),
+            ),
+            (
+                "Request",
+                Some("put"),
+                request(RequestVariant::CodecZenohMsgPut(empty_put())),
+            ),
+            (
+                "Response",
+                Some("reply"),
+                response(reply(ReplyVariant::CodecZenohMsgPut(empty_put()))),
+            ),
+            (
+                "Response",
+                Some("reply"),
+                response(reply(ReplyVariant::CodecZenohMsgDel(
+                    wz_codecs::msg_del::MsgDel::default(),
+                ))),
+            ),
+            (
+                "Response",
+                Some("err"),
+                response(ResponseVariant::CodecZenohErr(wz_codecs::err::Err {
+                    payload_len: 2,
+                    payload: b"no",
+                    ..Default::default()
+                })),
+            ),
+            (
+                "ResponseFinal",
+                None,
+                wz_codecs::response_final::ResponseFinal {
+                    request_id: 1,
+                    ..Default::default()
+                }
+                .encode_to_vec(),
+            ),
+            (
+                "Interest",
+                None,
+                wz_codecs::interest::Interest {
+                    interest_id: 1,
+                    body: None,
+                    ..Default::default()
+                }
+                .encode_to_vec(),
+            ),
+            (
+                "Interest",
+                None,
+                wz_session_core::interest_build::build_interest_subscribers(
+                    2,
+                    true,
+                    false,
+                    0,
+                    Some("demo/**"),
+                )
+                .expect("the production interest builder")
+                .try_as_borrowed()
+                .expect("re-borrow")
+                .encode_to_vec(),
+            ),
+            ("Oam", None, wz_codecs::oam::Oam::default().encode_to_vec()),
+        ]
+    }
+
+    /// `(message, body)` of every network-message `carried` entry of `doc`, in
+    /// document order, `None` for a `null` body. Every entry must carry the key,
+    /// and the entry of a TRANSPORT message is checked in passing: its body is
+    /// `null`, whatever it carries.
+    #[cfg(all(feature = "reassembly", feature = "network-codecs"))]
+    fn network_entries(doc: &str) -> Vec<(String, Option<String>)> {
+        let network = [
+            "Push",
+            "Request",
+            "Response",
+            "ResponseFinal",
+            "Interest",
+            "Declare",
+            "Oam",
+        ];
+        let mut out = Vec::new();
+        for entry in objects_holding(doc, "keyexpr_id") {
+            let message = raw(&entry, "message").trim_matches('"').to_string();
+            let body = match raw(&entry, "body") {
+                "null" => None,
+                word => Some(word.trim_matches('"').to_string()),
+            };
+            if network.contains(&message.as_str()) {
+                out.push((message, body));
+            } else {
+                assert_eq!(
+                    body, None,
+                    "a transport message names no body of its own: {entry:?}"
+                );
+            }
+        }
+        out
+    }
+
+    /// EVERY `carried` ENTRY NAMES THE BODY ITS MESSAGE CARRIES, PER ENTRY, IN
+    /// BOTH LISTS.
+    ///
+    /// # What it was
+    ///
+    /// An entry named the outer message (`Push`, `Declare`, `Request`) and the
+    /// body it carries (`put`, `decl_final`, `query`) was a branch of the tree
+    /// only. A `Declare` whose body has no key (`decl_final`,
+    /// `undecl_subscriber`) could not be told from any other `Declare` without
+    /// walking the tree of the row it came from.
+    ///
+    /// # The population
+    ///
+    /// One record per body the codecs can carry (see [`body_population`]), in
+    /// three arrangements: each in a frame of its own, all in ONE frame (so a
+    /// single `Frame` has to give each of its items its own answer), and all in
+    /// a fragment chain (so the second list, `above_transport.carried`, gives
+    /// the same answers). The expectation is the same list each time.
+    #[cfg(all(feature = "reassembly", feature = "network-codecs"))]
+    #[test]
+    fn every_carried_entry_names_the_body_it_carries() {
+        let population = body_population();
+        let expected: Vec<(String, Option<String>)> = population
+            .iter()
+            .map(|(message, body, _)| (message.to_string(), body.map(str::to_string)))
+            .collect();
+        assert!(
+            expected.iter().filter(|(_, body)| body.is_some()).count() == 16
+                && expected.iter().filter(|(_, body)| body.is_none()).count() == 4,
+            "the population must hold both the bodies and the bodiless messages: {expected:?}"
+        );
+        // The population reaches EVERY word of the vocabulary, or the equality
+        // below would leave a word nobody built.
+        let mut reached: Vec<&str> = population.iter().filter_map(|(_, body, _)| *body).collect();
+        reached.sort_unstable();
+        reached.dedup();
+        let mut vocabulary = wz_session_core::dissect::BodyName::names();
+        vocabulary.sort_unstable();
+        assert_eq!(
+            reached, vocabulary,
+            "the fixtures must build every body the library can name"
+        );
+        let records: Vec<Vec<u8>> = population.into_iter().map(|(_, _, bytes)| bytes).collect();
+
+        // One frame per record: every entry is the only item of its row.
+        let (d, file, _) = one_frame_per_record(&records);
+        let doc = fields_json(&d, &file, None, None);
+        assert_eq!(network_entries(&doc), expected, "one frame each: {doc}");
+
+        // All of them in one frame: one row, many items, one answer EACH.
+        let batch = records.concat();
+        let (d, file) = crate::datagram_tests::contiguous_record_dissection_with_file(&batch);
+        let doc = fields_json(&d, &file, None, None);
+        assert_eq!(network_entries(&doc), expected, "one frame: {doc}");
+
+        // The same records behind a fragment chain: the second list.
+        let (d, file) = crate::datagram_tests::reassembled_record_dissection_with_file(&batch);
+        let doc = fields_json(&d, &file, None, None);
+        assert!(
+            doc.contains("\"carried_state\":\"reassembled\""),
+            "the chain must complete, or the second list is not the subject: {doc}"
+        );
+        assert_eq!(network_entries(&doc), expected, "a chain: {doc}");
     }
 
     /// The `mapping` of a key expression, and the half `a` of a flow: what the
