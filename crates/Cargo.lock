@@ -2980,6 +2980,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "wz-eth-lan865x"
+version = "0.1.0"
+dependencies = [
+ "wz-oa-tc6",
+ "wz-runtime-core",
+]
+
+[[package]]
 name = "wz-eth-mac-cyt4bf"
 version = "0.1.0"
 dependencies = [

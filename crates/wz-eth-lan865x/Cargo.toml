@@ -1,0 +1,47 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later OR LicenseRef-watching-zenoh-Commercial
+# SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
+#
+# wz-eth-lan865x — the Microchip LAN8650 / LAN8651 10BASE-T1S MAC-PHY, as a
+# `wz_runtime_core::EthernetMac`.
+#
+# A `#![no_std]` library owning ONE chip family's bring-up: reading the identity
+# registers, the configuration sequence the vendor application note prescribes
+# after every reset, the MAC address and filter registers, the PLCA setup of the
+# multidrop bus, and the housekeeping that keeps the collision-detect setting in
+# step with PLCA. The OPEN Alliance TC6 protocol itself (control transactions,
+# data chunks, framing) is `wz-oa-tc6`, which this crate sits on; the board owns
+# the reset line and the interrupt pin.
+#
+# Depends on `wz-oa-tc6` and the trait-skeleton tier it stands on, and on nothing
+# else, so it builds on the host and on every MCU target.
+#
+# CLAIM: BUILT. No emulator models this chip, so the host tests drive the crate
+# against a register-level model of the chip written from the data sheet
+# (DS60001734F), the configuration application note (AN1760, DS60001760G) and the
+# errata sheet (DS80001075F). They check the crate against the documents, not
+# against a chip; it has never run on one.
+
+[package]
+name = "wz-eth-lan865x"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+readme.workspace = true
+publish = false
+description = "Microchip LAN8650/LAN8651 10BASE-T1S MAC-PHY bring-up over the OPEN Alliance TC6 interface, an EthernetMac for the wz network stacks."
+
+[lib]
+name = "wz_eth_lan865x"
+path = "src/lib.rs"
+
+[dependencies]
+# The OPEN Alliance TC6 protocol this chip speaks.
+wz-oa-tc6 = { path = "../wz-oa-tc6" }
+# The `SpiTransfer` and `EthernetMac` seams.
+wz-runtime-core = { path = "../wz-runtime-core" }
+
+[lints]
+workspace = true

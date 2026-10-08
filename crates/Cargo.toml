@@ -233,6 +233,12 @@ members = [
     # only, host-tested against a model of the chip; the chip-specific crate that
     # sits on it waits for a chip to be chosen.
     "wz-oa-tc6",
+    # The Microchip LAN8650/LAN8651 on top of that interface: identity, the vendor
+    # configuration sequence the application note prescribes after every reset,
+    # PLCA, the MAC address and filters, and the service that notices a reset. The
+    # chip-specific half the protocol crate leaves open; trait tier plus
+    # `wz-oa-tc6` only, host-tested against a register-level model of the chip.
+    "wz-eth-lan865x",
     # The rules of an SPI master built on an Infineon SCB block (rate arithmetic,
     # the shape of an exchange) and the `SpiTransfer` adapter that enforces them,
     # with the registers left to the board. The other half of what a TC6 chip
