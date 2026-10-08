@@ -754,7 +754,7 @@
  *
  * Every family in `value_families` now carries a `carries` axis:
  *
- *     {"name":"fields","revision":26,"key":"kind","values":[...],
+ *     {"name":"fields","revision":27,"key":"kind","values":[...],
  *      "carries":[{"word":"bits","shapes":[["end","name","start","value"]]},
  *                 {"word":"opaque","shapes":[["end","name","start"]]}, ...]}
  *
@@ -1601,11 +1601,48 @@ int wz_dissect_pcap_fields_limited(const unsigned char *bytes, size_t len,
  *   `undecided`   records were judged and this capture does not carry what
  *                 deciding needs -- a keyexpr that never bound, an absent
  *                 clock.
- *   `unjudged`    the row carries nothing the record plane judges at all: a
- *                 handshake, a keepalive, a declaration.
+ *   `unjudged`    the row carries no record a selector can speak of: Init,
+ *                 Open, Close, KeepAlive, Declare and Interest, which carry no
+ *                 kind, no keyexpr and no payload, so the word is the same
+ *                 under every selector; and a ResponseFinal whose request the
+ *                 capture does not hold.
  *
  * A caller asking "why did my selector miss this" must be able to tell the
  * last two apart, because only "undecided" is about the selector.
+ *
+ * WHAT A ROW'S `kind` IS (since field-document revision 27 and
+ * selection-document revision 2; before them the rows named below read
+ * `unjudged` under every selector). The selector's kind words are put, del,
+ * query, reply and err, and a row's kind is the kind of what it carries:
+ *
+ *   Push           put or del, by its body.
+ *   Request        its body's kind. Upstream Zenoh's request body is a query
+ *                  and nothing else, so this is `query`; a Request this
+ *                  library decodes with a put or a del body, which no peer
+ *                  sends, takes that kind.
+ *   Response       `reply` when it carries a Reply, WHATEVER the reply carries
+ *                  (a reply carrying a put is `reply`, not `put`; ask
+ *                  `kind == reply and bytes > 0` for the ones with a payload),
+ *                  and `err` when it carries an Err.
+ *   ResponseFinal  no kind of its own: it FOLLOWS ITS EXCHANGE. It closes the
+ *                  Request with the same request id and answers every selector
+ *                  as that Request does: `kind == query` is `yes` and
+ *                  `kind == put` is `no` when the request was a query, and
+ *                  every record term (key, dir, zid, bytes, time, elapsed,
+ *                  offset, delay) is the request's, not the close's.
+ *                  When the capture does not hold the request (it began
+ *                  mid-exchange) the row is `unjudged`, never `no`.
+ *
+ * A Request and its ResponseFinal are judged as the EXCHANGE they are, once, at
+ * its close: the outcome terms (replies, errs, first_reply, completion, closed)
+ * decide on those two rows, as they do in the census's exchange plane. On any
+ * other row they are `undecided`, because a push has no outcome.
+ *
+ * THE TWO PLANES AGREE. For any selector, on a capture where each row carries
+ * one record, the number of `yes` Request rows is the census exchange plane's
+ * `requests` and the number of `yes` ResponseFinal rows is its `completed`.
+ * Those are different counts and the rows keep them apart: an exchange the
+ * capture never saw close has its Request row and no close row.
  *
  * AN EMPTY SELECTOR IS THE IDENTITY, as it is for every census door: it
  * selects everything and asks nothing, so the document that comes back is the
@@ -2032,7 +2069,7 @@ int wz_dissect_e2e_open(const char *profile_json, const unsigned char *frame,
  *
  * R2175 -- the document is at REVISION 3, and the fourth key is `value_families`:
  *
- *     "value_families":[{"name":"fields","revision":26,"key":"state",
+ *     "value_families":[{"name":"fields","revision":27,"key":"state",
  *                        "values":["decoded","encoding_mismatch",…]}, …]
  *
  * every key in every document whose VALUE this build draws from a closed set,
@@ -2861,7 +2898,10 @@ int wz_dissect_live_fields_since(wz_dissect_live *h,
  * THE VERDICT IS THE SAME ONE. Each row's word is decided by the same function
  * the field document's is, the coordinates are the same numbers with the same
  * meanings (a record and its row join on equal list_id, direction, anchor and
- * batch_index), and the rows are the field document's rows in its order. Two
+ * batch_index), and the rows are the field document's rows in its order. What
+ * `kind == query` (and every other selector) says of a Request, a ResponseFinal,
+ * a Push or a Response row, and which rows stay `unjudged`, is written under
+ * wz_dissect_pcap_fields_where_limited and holds here word for word. Two
  * differences, and both are that document's limitation and not this one's:
  *
  *   - The field document renders a datagram row only when it can re-read the

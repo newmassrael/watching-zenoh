@@ -1061,17 +1061,45 @@ impl RowVerdict {
 
     /// The row's answer, or `None` when no record on it was judged.
     pub fn folded(&self) -> Option<crate::filter::Truth> {
-        use crate::filter::Truth;
-        if self.records.is_empty() {
-            return None;
+        fold_records(self.records.iter().copied())
+    }
+
+    /// One more record's answer for this row.
+    ///
+    /// `pub(crate)` for the plane that judges the exchanges: a row can carry a
+    /// `Request` and a `Push` in one batch, and each plane records the records it
+    /// owns into the SAME type so the fold stays one function.
+    pub(crate) fn record(&mut self, truth: crate::filter::Truth) {
+        self.records.push(truth);
+    }
+}
+
+/// The row fold over any number of records: any `Yes` makes the row yes, all
+/// `No` makes it no, anything else is undecided, and no record at all is `None`.
+///
+/// One function for [`RowVerdict::folded`] and for a row whose records were
+/// judged by TWO planes (`crate::fields_json::RowJudgement`), so the rule the
+/// consumer set is written once and a row cannot fold one way in a document
+/// built from one plane and another way in a document built from two.
+#[cfg(feature = "network-codecs")]
+pub(crate) fn fold_records(
+    records: impl IntoIterator<Item = crate::filter::Truth>,
+) -> Option<crate::filter::Truth> {
+    use crate::filter::Truth;
+    let mut judged = false;
+    let mut every_no = true;
+    for truth in records {
+        match truth {
+            Truth::Yes => return Some(Truth::Yes),
+            Truth::No => {}
+            Truth::Unknown => every_no = false,
         }
-        if self.records.contains(&Truth::Yes) {
-            return Some(Truth::Yes);
-        }
-        if self.records.iter().all(|t| *t == Truth::No) {
-            return Some(Truth::No);
-        }
-        Some(Truth::Unknown)
+        judged = true;
+    }
+    match (judged, every_no) {
+        (false, _) => None,
+        (true, true) => Some(Truth::No),
+        (true, false) => Some(Truth::Unknown),
     }
 }
 
@@ -1098,6 +1126,15 @@ pub struct PayloadCensus {
     /// pays for this map. The alternatives were worse — a mode flag gives one
     /// type two behaviours a reader has to know about, and a separate walk is
     /// the second spelling above.
+    ///
+    /// # Which records it holds
+    ///
+    /// Every record [`crate::agg::classify`] gives a kind except a `Request`:
+    /// a `Push`, and a `Response` carrying a `Reply` or an `Err`, whether or not
+    /// the record has a payload. A `Request` and the `ResponseFinal` that closes
+    /// it are one exchange, judged once by [`crate::exchange::ExchangeTable`],
+    /// which holds the rows of both. A document that wants every row reads the two
+    /// together (`crate::fields_json::RowJudgement`).
     row_verdicts: alloc::collections::BTreeMap<RowKey, RowVerdict>,
     rows: alloc::collections::BTreeMap<String, EncodingRow>,
     contradictions: Vec<Contradiction>,
@@ -1152,8 +1189,13 @@ impl PayloadCensus {
     ///
     /// ⚠ THAT `None` IS A THIRD ABSENCE, beneath the two
     /// [`RowVerdict::folded`] already separates. A row the walk never reached
-    /// carried nothing this plane judges at all — a handshake, a keepalive —
-    /// and saying "undecided" about it would claim a question was asked.
+    /// carried nothing this plane judges at all — a handshake, a keepalive, a
+    /// declaration, a `Close` — and saying "undecided" about it would claim a
+    /// question was asked.
+    ///
+    /// A row whose only records are a `Request` or a `ResponseFinal` is `None`
+    /// here as well, for a different reason: those are the exchange plane's
+    /// ([`crate::exchange::ExchangeTable::row_verdict`]).
     pub fn row_verdict(&self, key: &RowKey) -> Option<&RowVerdict> {
         self.row_verdicts.get(key)
     }
@@ -1286,19 +1328,26 @@ impl PayloadCensus {
             spaces.absorb(direction, d);
             return;
         }
-        let Some((keyexpr_body, declared, bytes, shm)) = carried_payload(message) else {
-            return;
-        };
-        let keyexpr = spaces.resolve(direction, keyexpr_body).ok();
-        // R311y618 — asked after resolution and before the bytes are inspected.
         // The kind comes from the throughput plane's classifier, so a payload
         // that arrived inside a `Response` answers `kind == reply` here exactly
         // as it does there; deriving it locally is the second spelling that
         // would let the two planes disagree about one record.
-        let (kind, payload_bytes) = match crate::agg::classify(message) {
-            Some((_, counts, kind)) => (kind, crate::agg::sized_payload(&counts)),
-            None => (crate::filter::RecordKind::Put, Some(0)),
+        let Some((keyexpr_body, counts, kind)) = crate::agg::classify(message) else {
+            return;
         };
+        let payload = carried_payload(message);
+        // A `Request` is half of an EXCHANGE, and the exchange plane judges it
+        // together with the `ResponseFinal` that closes it, because only that
+        // plane knows how the exchange turned out. What this plane keeps of a
+        // `Request` is its payload, when it carries one; a `Query` or a `Del`
+        // has none, so there is nothing here for it.
+        let judges_row = !matches!(message, NetworkMessage::Request(_));
+        if !judges_row && payload.is_none() {
+            return;
+        }
+        let keyexpr = spaces.resolve(direction, keyexpr_body).ok();
+        let payload_bytes = crate::agg::sized_payload(&counts);
+        // R311y618 — asked after resolution and before the bytes are inspected.
         let truth = filter.matches(&crate::filter::RecordView {
             direction,
             keyexpr: keyexpr.as_deref(),
@@ -1323,18 +1372,29 @@ impl PayloadCensus {
             // rather than false.
             outcome: None,
         });
+        // R2765 (open debt 788) — recorded ABOVE the `Yes` early return below,
+        // which is the whole of the correctness here. Below it only `Yes`
+        // records would ever be seen, so every row would fold to `Yes` and a
+        // verdict that says yes to everything is not a selection.
+        //
+        // And ABOVE the payload test as well. This was recorded only for a
+        // record that carried a payload, so a `Push` carrying a `Del` and a
+        // `Reply` carrying one never had a row verdict, and every selector said
+        // `unjudged` of rows whose kind this very classifier names: the
+        // `unjudged` word is for a row that carries no record at all.
+        if judges_row {
+            self.row_verdicts
+                .entry(RowKey::of(ctx.list(), frame))
+                .or_default()
+                .record(truth);
+        }
+        // The tally below counts PAYLOADS, as it always has: a record with no
+        // payload is a row to judge and not a payload to count, and the
+        // census documents that carry this tally keep their numbers.
+        let Some((_, declared, bytes, shm)) = payload else {
+            return;
+        };
         self.selection.record(truth);
-        // R2765 (open debt 788) — recorded BESIDE the selection tally and
-        // ABOVE the early return, which is the whole of the correctness here.
-        // Below it only `Yes` records would ever be seen, so every row would
-        // fold to `Yes` and a verdict that says yes to everything is not a
-        // selection. The counter one line up is kept on the same side of that
-        // return for the same reason.
-        self.row_verdicts
-            .entry(RowKey::of(ctx.list(), frame))
-            .or_default()
-            .records
-            .push(truth);
         if truth != crate::filter::Truth::Yes {
             return;
         }
@@ -3359,6 +3419,74 @@ mod census_tests {
     const ID_JSON: u16 = 5;
     const ID_TEXT: u16 = 4;
     const ID_OCTETS: u16 = 3;
+
+    /// THE ROW FOLD, in its four cases, and the one it must not confuse: no record
+    /// at all is `None`, and a record that could not be decided is `Unknown`.
+    #[test]
+    fn the_row_fold_separates_no_record_from_an_undecided_one() {
+        use crate::filter::Truth::{No, Unknown, Yes};
+        assert_eq!(fold_records([]), None);
+        assert_eq!(fold_records([No, No]), Some(No));
+        assert_eq!(fold_records([No, Unknown]), Some(Unknown));
+        assert_eq!(fold_records([Unknown]), Some(Unknown));
+        assert_eq!(fold_records([No, Unknown, Yes]), Some(Yes));
+        assert_eq!(fold_records([Yes, No]), Some(Yes));
+    }
+
+    /// THIS PLANE HOLDS THE ROW OF EVERY RECORD BUT A REQUEST, whether or not the
+    /// record has a payload, and counts PAYLOADS exactly as it always has.
+    ///
+    /// The six records are a put, a del, a query, a request carrying a put, a
+    /// reply carrying a put, and a close. A row verdict is held for the first
+    /// two and the reply: the del has no payload and used to have no row, the
+    /// request and the close are the exchange plane's. The tally stays three,
+    /// the put, the request's put and the reply: the census documents carry it
+    /// and none of them moves.
+    #[test]
+    fn the_payload_plane_holds_every_row_but_a_requests_and_counts_only_payloads() {
+        let del = wz_codecs::push::Push {
+            header: wz_codecs::push::Push::default().header | wz_codecs::wire_const::FLAG_N_N,
+            keyexpr: fx::sender_space(0, Some("t/del")),
+            body: wz_codecs::push::PushVariant::CodecZenohMsgDel(
+                wz_codecs::msg_del::MsgDel::default(),
+            ),
+            ..Default::default()
+        }
+        .encode_to_vec();
+        let stamped: Vec<(bool, Option<u64>, Vec<u8>)> = alloc::vec![
+            (true, Some(1), push_declaring("t/put", ID_JSON, b"{}")),
+            (true, Some(1), del),
+            (
+                true,
+                Some(1),
+                fx::request_query(7, fx::sender_space(0, Some("t/q")))
+            ),
+            (
+                true,
+                Some(1),
+                fx::request_put(8, fx::sender_space(0, Some("t/p")), b"v")
+            ),
+            (
+                false,
+                Some(1),
+                fx::response_reply(8, fx::sender_space(0, Some("t/p")), b"r")
+            ),
+            (false, Some(1), fx::response_final(8)),
+        ];
+        let d = fx::dissect(&stamped);
+        let census = payloads_where(&d, &crate::filter::Filter::any());
+        let held: Vec<bool> = d
+            .message_frames_in_capture_order()
+            .into_iter()
+            .map(|(_, list, _, frame)| census.row_verdict(&RowKey::of(list, frame)).is_some())
+            .collect();
+        assert_eq!(held, [true, true, false, false, true, false]);
+        assert_eq!(
+            census.selection().seen(),
+            3,
+            "a payload plane counts payloads: the put, the request's put and the reply"
+        );
+    }
 
     /// ANTI-VACUITY: the fixture really does put a DECLARED encoding on the
     /// wire and the decoder really reads it back. Without this leg every

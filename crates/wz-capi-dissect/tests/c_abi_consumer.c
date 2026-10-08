@@ -2144,8 +2144,11 @@ int main(void) {
      * negotiated: `context.negotiated` is `true` once BOTH Inits were seen and
      * the three capabilities are `null` before that, where a flow that began at
      * its `Close` said `true` for all four. VALUES move under stationary keys;
-     * no key name moves; nothing retires. */
-    revisioned[2].revision = 26;
+     * no key name moves; nothing retires.
+     * 27: a `selected` cell reads the selector's word on a `Request`, a
+     * `ResponseFinal` and a del in a `Push` or a `Reply`, rows that read
+     * `unjudged` under every selector. A value moved under stationary keys. */
+    revisioned[2].revision = 27;
     revisioned[2].doc = NULL;
     rc = wz_dissect_pcap_fields(pcap, sizeof pcap, 0, &revisioned[2].doc);
     CHECK(rc == WZ_DISSECT_OK, "fields rc=%d", rc);

@@ -68,6 +68,13 @@
 //! request, because the selector cannot be asked until the outcome exists. The
 //! BOUND is unchanged — it was already "one entry per `Request` in the window",
 //! and a filtered run simply reaches it where an unfiltered run always did.
+//!
+//! The table keeps one more thing, and it outlives the call: what the selector
+//! said of the message rows that are an exchange's ends
+//! ([`crate::exchange::ExchangeTable::row_verdict`]). That is at most one entry
+//! per `Request` and one per `ResponseFinal` in the same window, so it is bounded
+//! by the same frames and the same ceiling, and a census that wants totals only
+//! carries it as the payload plane carries its own row verdicts.
 
 use alloc::collections::BTreeMap;
 use alloc::string::String;
@@ -287,6 +294,10 @@ pub struct OpenExchange {
     requested_unit_offset: Option<u64>,
     /// R311y644 (§1.1p) — the REQUEST's source-to-observer delay, if it had one.
     requested_delay_ms: Option<u64>,
+    /// The message row that carried the `Request`, so the exchange's verdict can
+    /// be written onto it when the exchange is judged. See
+    /// [`ExchangeTable::row_verdict`].
+    row: crate::payload::RowKey,
     first_reply_at: Option<u64>,
     replies: usize,
     errs: usize,
@@ -299,9 +310,13 @@ pub struct OpenExchange {
 /// caller reading the signature would have to guess which nesting was which.
 #[derive(Debug, Clone, Copy)]
 enum Ending {
-    /// A `ResponseFinal` closed it, at this capture instant. `None` inside when
-    /// the frame that carried the close had no timestamp.
-    Closed(Option<u64>),
+    /// A `ResponseFinal` closed it, at this capture instant, and was carried by
+    /// this message row. `at` is `None` when the frame that carried the close had
+    /// no timestamp.
+    Closed {
+        at: Option<u64>,
+        row: crate::payload::RowKey,
+    },
     /// The capture never showed a close: the flow's frames ran out, or the rid
     /// was reused before one arrived.
     Unclosed,
@@ -321,6 +336,13 @@ pub struct ExchangeTable {
     gaps: ExchangeGaps,
     unread: ThroughputGaps,
     selection: Selection,
+    /// What the selector said of each message ROW that is one end of an
+    /// exchange: the row that carried its `Request`, and the row that carried the
+    /// `ResponseFinal` that closed it. Both are given the exchange's verdict.
+    ///
+    /// Not merged by [`Self::merge`]: a row key names a row of ONE capture's
+    /// lists, and the same key in another capture is another row.
+    row_verdicts: BTreeMap<crate::payload::RowKey, crate::payload::RowVerdict>,
     /// R311y638 (§1.1r) — where the capture began, for the `elapsed` term. Set
     /// only by [`exchanges_where`], the entry point that has the whole capture.
     capture_origin_ms: Option<u64>,
@@ -535,6 +557,7 @@ impl ExchangeTable {
                         crate::agg::source_timestamp(message),
                     )
                     .unwrap_or(None),
+                    row: crate::payload::RowKey::of(list, frame),
                     first_reply_at: None,
                     replies: 0,
                     errs: 0,
@@ -569,7 +592,8 @@ impl ExchangeTable {
                     self.gaps.orphan_responses += 1;
                     return;
                 };
-                self.finish(entry, Ending::Closed(at), filter);
+                let row = crate::payload::RowKey::of(list, frame);
+                self.finish(entry, Ending::Closed { at, row }, filter);
             }
             _ => {}
         }
@@ -602,10 +626,10 @@ impl ExchangeTable {
     /// unclosed one is not missing a timestamp — it is missing a close.
     fn finish(&mut self, entry: OpenExchange, ending: Ending, filter: &Filter) {
         let closed_at = match ending {
-            Ending::Closed(at) => at,
+            Ending::Closed { at, .. } => at,
             Ending::Unclosed => None,
         };
-        let closed = matches!(ending, Ending::Closed(_));
+        let closed = matches!(ending, Ending::Closed { .. });
 
         let mut unstamped = false;
         let mut backwards = false;
@@ -669,6 +693,20 @@ impl ExchangeTable {
         };
         let truth = filter.matches(&view);
         self.selection.record(truth);
+        // The exchange's one verdict is also the verdict of the two message rows
+        // that are its ends. Written BEFORE the early return, for the reason
+        // `crate::payload` records its own rows above its: below it only `Yes`
+        // would ever be seen, and every end of every exchange would read `yes`.
+        //
+        // The close's row exists only for an exchange that was closed, and a
+        // close the capture never saw leaves the request's row the only one.
+        self.row_verdicts
+            .entry(entry.row)
+            .or_default()
+            .record(truth);
+        if let Ending::Closed { row, .. } = ending {
+            self.row_verdicts.entry(row).or_default().record(truth);
+        }
         if truth != Truth::Yes {
             return;
         }
@@ -802,6 +840,35 @@ impl ExchangeTable {
     /// this accessor says which.
     pub fn selection(&self) -> Selection {
         self.selection
+    }
+
+    /// What the selector said of one message ROW that is an end of an exchange,
+    /// or `None` for a row that is neither the `Request` of one nor the
+    /// `ResponseFinal` that closed one.
+    ///
+    /// # A row of this plane is judged as the EXCHANGE it belongs to
+    ///
+    /// The `Request` row and the `ResponseFinal` row of one exchange get the
+    /// same answer, and it is the answer [`Self::selection`] counted: the one
+    /// verdict taken at the close, over the request's own fields and the
+    /// exchange's outcome. So a `ResponseFinal`, which carries no keyexpr, no
+    /// kind and no payload of its own, answers `kind == query` as the request it
+    /// terminates would, and `kind == put` `no` when that request was a query.
+    /// The number of `yes` request rows is [`Self::requests`], and the number of
+    /// `yes` close rows is [`Self::completed`], for any selector, on a capture
+    /// where each row carries one record.
+    ///
+    /// ⚠ THAT `None` IS NOT "NO". A `ResponseFinal` whose `Request` the capture
+    /// never carried is an orphan ([`ExchangeGaps::orphan_responses`]): nothing
+    /// was asked of it, so it has no row verdict, and a selector's `unjudged`
+    /// is the true word. Answering `no` would claim the exchange had been seen
+    /// and rejected.
+    ///
+    /// Only the rows of `Request` and `ResponseFinal` records are here. A
+    /// `Response` is judged as the record it is, by [`crate::payload`], and
+    /// `kind == reply` / `kind == err` are its kinds.
+    pub fn row_verdict(&self, key: &crate::payload::RowKey) -> Option<&crate::payload::RowVerdict> {
+        self.row_verdicts.get(key)
     }
 
     /// Merge another table's rows and totals into this one.
@@ -950,7 +1017,7 @@ pub(crate) mod tests {
         }
     }
 
-    fn has_suffix(keyexpr: &Wireexpr<'static>) -> bool {
+    pub(crate) fn has_suffix(keyexpr: &Wireexpr<'static>) -> bool {
         match &keyexpr.body {
             WireexprVariant::WireexprLocal(a) => a.suffix.is_some(),
             WireexprVariant::WireexprNonlocal(a) => a.suffix.is_some(),
@@ -1056,7 +1123,7 @@ pub(crate) mod tests {
     }
 
     /// `DeclKexpr`: bind `id` to `suffix` in the SENDER's space.
-    fn declare_kexpr(id: u64, suffix: &'static str) -> Vec<u8> {
+    pub(crate) fn declare_kexpr(id: u64, suffix: &'static str) -> Vec<u8> {
         wz_codecs::declare::Declare {
             body: wz_codecs::declare::DeclareVariant::CodecZenohDeclKexpr(
                 wz_codecs::decl_kexpr::DeclKexpr {

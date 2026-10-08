@@ -1485,6 +1485,33 @@ pub const DOCUMENT_HISTORY: &[DocumentShape] = &[
         planes: &[],
         carries: FIELDS_R20_CARRIES,
     },
+    // A ROW'S `selected` WORD IS DECIDED FOR RECORDS IT USED TO LEAVE `unjudged`.
+    //
+    // NO AXIS MOVES. Every key, the four words of `selected`, and what each word
+    // carries beside it are revision 26's, which are revision 25's, and the
+    // number is the whole notice for a VALUE moving under stationary keys, the
+    // class census revisions 8 and 9 and revisions 9 and 26 of this document were
+    // written for.
+    //
+    // Under a selector, a row carrying a `Request`, a `ResponseFinal`, a `Push`
+    // that carries a del, or a `Reply` that carries a del read `unjudged` for
+    // EVERY selector, because the verdict was a by-product of the walk that
+    // inspects payloads and these have none to inspect. They now read the word
+    // the selector gives them: a `Request` and the `ResponseFinal` that closes it
+    // are judged as the exchange they are, a `Push` and a `Response` as the
+    // record they are. A consumer pinned to 26 that cached `unjudged` against such
+    // a row must read it again; a row that carries no record, or a
+    // `ResponseFinal` whose request the capture never held, still reads
+    // `unjudged`.
+    DocumentShape {
+        document: FIELDS,
+        revision: 27,
+        keys: FIELDS_R27_KEYS,
+        retiring: &[],
+        families: FIELDS_R20_FAMILIES,
+        planes: &[],
+        carries: FIELDS_R20_CARRIES,
+    },
     DocumentShape {
         document: SUMMARY,
         revision: 1,
@@ -1757,6 +1784,24 @@ pub const DOCUMENT_HISTORY: &[DocumentShape] = &[
         document: SELECTION,
         revision: 1,
         keys: SELECTION_R1_KEYS,
+        retiring: &[],
+        families: SELECTION_R1_FAMILIES,
+        planes: &[],
+        carries: SELECTION_R1_CARRIES,
+    },
+    // THE SAME MOVE AS FIELDS REVISION 27, ON THE DOCUMENT THAT HOLDS ONLY THE
+    // VERDICTS.
+    //
+    // Both documents write the word one function decides, so the rows that read
+    // `unjudged` under every selector (a `Request`, a `ResponseFinal`, a del
+    // carried by a `Push` or a `Reply`) read the selector's answer in both, at
+    // the same revision. No key arrives, no word is added, nothing retires: see
+    // [`SELECTION_R2_KEYS`] for the paragraph a value that moved under a
+    // stationary key is written down in.
+    DocumentShape {
+        document: SELECTION,
+        revision: 2,
+        keys: SELECTION_R2_KEYS,
         retiring: &[],
         families: SELECTION_R1_FAMILIES,
         planes: &[],
@@ -8368,6 +8413,22 @@ pub const SELECTION_R1_CARRIES: &[KeyCarries] = &[
     },
 ];
 
+/// The selection document's key set at revision 2: revision 1's, by name.
+///
+/// IDENTICAL, and aliased for [`CENSUS_R2_KEYS`]' reason. ⚠ A VALUE MOVED
+/// WITHOUT ITS KEY: a row that carries a `Request`, a `ResponseFinal`, or a del
+/// inside a `Push` or a `Reply` read `unjudged` under every selector and now
+/// reads the selector's answer. `selected` draws from the same four words
+/// ([`SELECTION_SELECTED_R1`]) and is a passenger as before, so the
+/// vocabulary pin, the carries axis and the key set all read the same at both
+/// revisions, and the number is the whole notice a consumer gets.
+///
+/// What a consumer pinned to revision 1 should do about it: nothing that was
+/// right at revision 1 becomes wrong, but a count of `yes` rows under
+/// `kind == query` that read zero on a capture with queries in it was reading
+/// the defect, and a cached `unjudged` against such a row is stale.
+pub const SELECTION_R2_KEYS: &[&str] = SELECTION_R1_KEYS;
+
 /// The retention document's key set at revision 1.
 ///
 /// The envelope, the `held` group with its nested `fullest_window`, and the
@@ -8846,6 +8907,18 @@ pub const FIELDS_R25_KEYS: &[&str] = &[
     "window",
     "wrong",
 ];
+
+/// The field document's key set at revision 27: revision 25's, by name (revision
+/// 26 read the same set).
+///
+/// IDENTICAL, and aliased for [`CENSUS_R2_KEYS`]' reason: a second hand-written
+/// copy of these names would be a claim that the two are the same, checked by
+/// nobody, where the alias is that fact. What moved is the VALUE a `selected`
+/// cell takes on rows that used to read `unjudged` under every selector, which
+/// no axis in this module can express: the key is the same, the four words are
+/// the same, and so is what each word carries. The revision number is the whole
+/// notice, as it was for [`CENSUS_R9_KEYS`], and the row says which rows.
+pub const FIELDS_R27_KEYS: &[&str] = FIELDS_R25_KEYS;
 
 /// The census document's key set at revision 16: revision 15's, by name.
 ///
@@ -10302,7 +10375,11 @@ mod tests {
             // reading as negotiated: values under `context.negotiated` and the
             // three capabilities moved from a fabricated `true` to `false` and
             // `null`. No key moves, so this entry is the notice.
-            (FIELDS, 26),
+            // To 27 when a `selected` cell began to carry the selector's word on
+            // rows that read `unjudged` under every selector (a `Request`, a
+            // `ResponseFinal`, a del in a `Push` or a `Reply`): the value moved
+            // under stationary keys, so this entry is the notice.
+            (FIELDS, 27),
             // R2121 (open-debt item 460) — the summary moved to 2 when it
             // gained `inert_counters`; R2122 (item 238) to 3 when its
             // `framing` group stopped disagreeing with the capture report's.
@@ -10329,7 +10406,9 @@ mod tests {
             (E2E_WRAP, 1),
             (E2E_OPEN, 1),
             // The selector's verdict over the field document's rows.
-            (SELECTION, 1),
+            // To 2 on the same move as fields 27: the word on a `Request`, a
+            // `ResponseFinal` and a del row stopped being `unjudged`.
+            (SELECTION, 2),
             // What a live handle holds, beside its ceilings.
             // To 2 when `oldest_ts_ns` became a number, a string or null: a
             // nanosecond clock is past 2^53.

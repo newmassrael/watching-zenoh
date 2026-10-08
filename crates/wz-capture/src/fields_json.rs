@@ -161,15 +161,15 @@ pub fn fields_json_where(
 /// The walk that judges the rows, or nothing when no question was
 /// asked.
 ///
-/// One function for both renderers that take a selector, so the rule that an
+/// One function for every renderer that takes a selector, so the rule that an
 /// empty selector is the identity is written in one place and cannot be kept
 /// by one of them and forgotten by the other.
-fn judged_by(
+pub(crate) fn judged_by(
     d: &crate::Dissection,
     filter: &crate::filter::Filter,
     grouping: &crate::node::SessionGrouping,
-) -> Option<crate::payload::PayloadCensus> {
-    (!filter.is_any()).then(|| crate::payload::payloads_grouped(d, filter, grouping))
+) -> Option<RowJudgement> {
+    (!filter.is_any()).then(|| RowJudgement::of(d, filter, grouping))
 }
 
 /// The selector's document, with each row carrying the
@@ -449,7 +449,7 @@ pub fn fields_json_grouped(
 /// door writes.
 #[derive(Default)]
 struct RowAttachments<'a> {
-    verdicts: Option<&'a crate::payload::PayloadCensus>,
+    verdicts: Option<&'a RowJudgement>,
     coordinates: Option<&'a dyn RowCoordinates>,
     since: Option<Since>,
 }
@@ -2532,7 +2532,7 @@ fn message_at(frame: &PassiveFrame) -> usize {
 #[derive(Clone, Copy)]
 struct RowSelection<'a> {
     list: usize,
-    census: &'a crate::payload::PayloadCensus,
+    judged: &'a RowJudgement,
 }
 
 impl<'a> RowSelection<'a> {
@@ -2543,10 +2543,10 @@ impl<'a> RowSelection<'a> {
     /// which lists it shows. Such a flow's rows cannot be looked up, so the
     /// honest answer is the same one a document with no selector gives, and
     /// this is the one place that decision is made.
-    fn of(census: Option<&'a crate::payload::PayloadCensus>, list: Option<usize>) -> Option<Self> {
+    fn of(judged: Option<&'a RowJudgement>, list: Option<usize>) -> Option<Self> {
         Some(Self {
             list: list?,
-            census: census?,
+            judged: judged?,
         })
     }
 }
@@ -2652,22 +2652,96 @@ fn push_coordinates(
 /// - **`"yes"` / `"no"`** — the fold decided, from records that were judged.
 /// - **`"undecided"`** — records were judged and the capture does not carry
 ///   what deciding needs.
-/// - **`"unjudged"`** — this row carried nothing the record plane judges: a
-///   handshake, a keepalive, a frame whose batch it could not read. Rendering
-///   that as `"undecided"` would claim a question was asked here.
+/// - **`"unjudged"`** — this row carried no record a selector can speak of: an
+///   `Init`, `Open`, `Close`, `KeepAlive`, `Declare` or `Interest`, a
+///   `ResponseFinal` whose request the capture never held, a frame whose batch
+///   it could not read. Rendering that as `"undecided"` would claim a question
+///   was asked here. (A `Request`, a `ResponseFinal` that has its request, a
+///   `Push` carrying a del and a `Reply` carrying one are NOT in this list:
+///   [`RowJudgement`] says which plane judges each.)
 ///
 /// ⚠ THE LAST TWO ARE THE POINT. Folding them into one null is what lets a
 /// reader mistake a gap in the capture for a measured exclusion, which is the
 /// failure this axis was asked for in the first place.
 #[cfg(feature = "network-codecs")]
 fn push_selected(selection: Option<RowSelection<'_>>, frame: &PassiveFrame, out: &mut String) {
-    let Some(RowSelection { list, census }) = selection else {
+    let Some(RowSelection { list, judged }) = selection else {
         return;
     };
-    row_verdict_of(census, list, frame).push(out);
+    row_verdict_of(judged, list, frame).push(out);
 }
 
-/// The verdict for ONE row, asked of the walk that judged it.
+/// What a selector said about the ROWS of a capture, read off the two planes
+/// that judge a row's records.
+///
+/// # Why a row needs two planes, and which record belongs to which
+///
+/// The row verdict was first a by-product of the payload plane's walk, and that
+/// plane sees only records that carry bytes to inspect. So a `Request` whose body
+/// is a `Query`, a `Push` carrying a `Del`, and a `ResponseFinal` were never
+/// visited, and the word `unjudged`, which means "this row carries no record the
+/// selector speaks of", was written on rows whose kind the selector grammar
+/// names. A consumer counting `kind == query` got zero `yes` rows from a capture
+/// the exchange plane counted seven queries in.
+///
+/// The fix is not a second classification. A record is judged by the plane
+/// whose UNIT it is, and the other plane reads that answer:
+///
+/// - a `Push`, and a `Response` carrying a `Reply` or an `Err`, are judged as
+///   RECORDS by [`crate::payload`], with or without a payload. `kind` is their
+///   own: `put`, `del`, `reply`, `err`. A reply carrying a put is `reply`, as
+///   the grammar has it everywhere (`kind == reply and bytes > 0` picks its
+///   payload).
+/// - a `Request` and the `ResponseFinal` that closes it are one EXCHANGE, judged
+///   once by [`crate::exchange`] at the close. Both rows carry that verdict, so a
+///   `ResponseFinal`, which names no kind and no keyexpr itself, follows the
+///   exchange it terminates for every selector, and the outcome terms
+///   (`replies`, `closed`, `completion`) decide on the rows where an outcome
+///   exists.
+///
+/// Both planes classify with `crate::agg::classify` and judge with the same
+/// compiled filter, so no row is asked a different question by one door than by
+/// the other.
+///
+/// Every other row (`Init`, `Open`, `Close`, `KeepAlive`, `Declare`,
+/// `Interest`, a `ResponseFinal` whose request the capture never carried) has no
+/// verdict in either plane and reads `unjudged`.
+#[cfg(feature = "network-codecs")]
+pub(crate) struct RowJudgement {
+    payloads: crate::payload::PayloadCensus,
+    exchanges: crate::exchange::ExchangeTable,
+}
+
+#[cfg(feature = "network-codecs")]
+impl RowJudgement {
+    fn of(
+        d: &crate::Dissection,
+        filter: &crate::filter::Filter,
+        grouping: &crate::node::SessionGrouping,
+    ) -> Self {
+        Self {
+            payloads: crate::payload::payloads_grouped(d, filter, grouping),
+            exchanges: crate::exchange::exchanges_grouped(d, filter, grouping),
+        }
+    }
+
+    /// The row's answer folded over the records either plane judged on it, or
+    /// `None` when neither judged one.
+    fn folded(&self, key: &crate::payload::RowKey) -> Option<crate::filter::Truth> {
+        fn records(
+            row: Option<&crate::payload::RowVerdict>,
+        ) -> impl Iterator<Item = crate::filter::Truth> + '_ {
+            row.map_or(&[][..], crate::payload::RowVerdict::records)
+                .iter()
+                .copied()
+        }
+        crate::payload::fold_records(
+            records(self.payloads.row_verdict(key)).chain(records(self.exchanges.row_verdict(key))),
+        )
+    }
+}
+
+/// The verdict for ONE row, asked of the planes that judged it.
 ///
 /// Hoisted out of `push_selected` when the verdict-only document arrived, and
 /// for the reason that document exists at all: two renderers reading the same
@@ -2677,13 +2751,13 @@ fn push_selected(selection: Option<RowSelection<'_>>, frame: &PassiveFrame, out:
 /// its own half.
 #[cfg(feature = "network-codecs")]
 pub(crate) fn row_verdict_of(
-    census: &crate::payload::PayloadCensus,
+    judged: &RowJudgement,
     list: usize,
     frame: &PassiveFrame,
 ) -> RowVerdict {
     use crate::filter::Truth;
     let key = crate::payload::RowKey::of(list, frame);
-    match census.row_verdict(&key).and_then(|v| v.folded()) {
+    match judged.folded(&key) {
         Some(Truth::Yes) => RowVerdict::Yes,
         Some(Truth::No) => RowVerdict::No,
         Some(Truth::Unknown) => RowVerdict::Undecided,
@@ -2707,7 +2781,7 @@ pub enum RowVerdict {
     No,
     /// Records were judged and the capture does not carry what deciding needs.
     Undecided,
-    /// The row carries nothing the record plane judges.
+    /// The row carries no record a selector can speak of.
     Unjudged,
 }
 
@@ -3432,6 +3506,11 @@ mod tests {
             let (d, file) = crate::datagram_tests::midsession_fragment_dissection_with_file();
             out.push(("midsession", d, file));
         }
+        // Exchanges of every kind and their closes, a push carrying a del, a reply
+        // carrying one, an orphan close and the whole transport: the rows the
+        // verdict contract is written about.
+        let (d, file) = crate::selection_json::tests::mixed_session_with_file();
+        out.push(("mixed", d, file));
         out
     }
 
@@ -3458,7 +3537,14 @@ mod tests {
         let mut compared = 0usize;
         let mut exact = 0usize;
         for (name, d, file) in verdict_fixtures() {
-            for source in ["bytes > 6", "bytes >= 0", "key == demo/temp", "kind == put"] {
+            for source in [
+                "bytes > 6",
+                "bytes >= 0",
+                "key == demo/temp",
+                "kind == put",
+                "kind == query",
+                "not kind == put",
+            ] {
                 let filter = crate::filter::Filter::parse(source).expect("parses");
                 let full = fields_json_where_coordinated(
                     &d,

@@ -83,6 +83,18 @@
 //! Answering `no` would have produced an empty table indistinguishable from a
 //! capture with no unanswered queries in it.
 //!
+//! ## The row documents ask two planes, and say which one answered
+//!
+//! The selection and field documents write the selector's word on each message
+//! row, and a row's records are judged by the plane whose unit they are. A
+//! `Request` and the `ResponseFinal` that closes it are an exchange, judged by
+//! the exchange plane, so the outcome terms decide on those two rows and a
+//! `ResponseFinal` answers every field as the request it closes does. A `Push`
+//! and a `Response` are records, judged by the payload plane, where the outcome
+//! terms are `undecided` as above. `kind` is the record's own on every row:
+//! `kind == reply` picks a `Response` carrying a `Reply` whatever the reply
+//! carries.
+//!
 //! ## R311y638 (§1.1r) — `elapsed` is the one a person can actually type
 //!
 //! `time` is the capture clock in absolute milliseconds, which is the right
