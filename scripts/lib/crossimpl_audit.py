@@ -1042,7 +1042,12 @@ HOST_GATED_CI_TARGETS: dict[str, str] = {
 # each against upstream's own `z_get_shm` and `z_queryable_shm` (`transport-shm zenoh->wz` and
 # `transport-shm wz->zenoh`, which a test that names both counts once). The four controls against
 # upstream's router carry `none`. Measured by `scripts/audit-crossimpl-proof.sh`.
-FOREIGN_ADJUDICATOR_LINKS = 1039
+# R3110 -- 1039 -> 1040, RISING by one: a new test in `wz_shm_payload_zenohd_interop.rs`, wz as
+# the SENDER of a buffer of shared memory to upstream's own `z_sub_shm` that reads it late: the
+# chunk is still delivered after its owner let go and the validator's window passed, because wz
+# now keeps it confirmed until the reader acknowledges it (`transport-shm wz->zenoh`). The control
+# against upstream's own publisher carries `none`. Measured by `scripts/audit-crossimpl-proof.sh`.
+FOREIGN_ADJUDICATOR_LINKS = 1040
 
 # ── Execution disclosure ────────────────────────────────────────────────────────
 #

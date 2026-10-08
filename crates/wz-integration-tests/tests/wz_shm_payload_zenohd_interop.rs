@@ -84,8 +84,8 @@ use wz_runtime_tokio::session_open::{
 };
 use wz_runtime_tokio::shm_backend::{AllocAlignment, MemoryLayout};
 use wz_runtime_tokio::shm_provider::{
-    chunk_position, data_segment_maps, is_invalidated, reference_state, AllocPolicy, ChunkHold,
-    PosixShmResolver, ReferenceState, ShmBackedPayload, ShmProvider,
+    chunk_position, confirmed_chunks, data_segment_maps, is_invalidated, reference_state,
+    AllocPolicy, ChunkHold, PosixShmResolver, ReferenceState, ShmBackedPayload, ShmProvider,
 };
 use wz_runtime_tokio::sync::Mutex;
 use wz_runtime_tokio_test_support::zenoh_interop_session_init_params;
@@ -846,8 +846,8 @@ struct WzToZenoh {
 }
 
 /// A scenario run against a wz session that has dialled a listening `z_sub_shm`: it is
-/// handed the session and a handle on the subscriber's capture, and returns whatever
-/// it measured.
+/// handed the session, a handle on the subscriber's capture and the subscriber's process
+/// id, and returns whatever it measured.
 type ZSubScenario<'a, T> = std::pin::Pin<Box<dyn std::future::Future<Output = T> + 'a>>;
 
 /// Start upstream's `z_sub_shm` listening, dial it from a wz session with SHM offered,
@@ -859,11 +859,11 @@ type ZSubScenario<'a, T> = std::pin::Pin<Box<dyn std::future::Future<Output = T>
 /// bookkeeping is its scenario.
 async fn against_z_sub_shm<T, F>(scenario: F) -> (String, T)
 where
-    F: for<'a> FnOnce(&'a TokioSession, std::fs::File) -> ZSubScenario<'a, T>,
+    F: for<'a> FnOnce(&'a TokioSession, std::fs::File, u32) -> ZSubScenario<'a, T>,
 {
     let z_sub = zenoh_shm_example_binary("z_sub_shm").expect("checked by the caller");
     let port = PortReservation::pick();
-    let (_guard, mut zenoh_log) = spawn_zenoh(
+    let (mut guard, mut zenoh_log) = spawn_zenoh(
         &z_sub,
         "z_sub_shm",
         &[
@@ -925,7 +925,8 @@ where
 
     let probe_log = zenoh_log.try_clone().expect("dup");
     let mut drive_log = zenoh_log.try_clone().expect("dup");
-    let scenario = scenario(&session, probe_log);
+    let subscriber_pid = guard.child_mut().id();
+    let scenario = scenario(&session, probe_log, subscriber_pid);
     let measured = tokio::select! {
         outcome = drive => panic!(
             "the wz drive loop ended before the scenario did ({outcome:?}):\n{}",
@@ -941,7 +942,7 @@ where
 async fn wz_publishes_to_zenoh_subscriber(owner: Owner, key: &str, text: &str) -> WzToZenoh {
     let key = key.to_string();
     let bytes = text.as_bytes().to_vec();
-    let (printed, chunk_came_home) = against_z_sub_shm(|session, probe_log| {
+    let (printed, chunk_came_home) = against_z_sub_shm(|session, probe_log, _subscriber| {
         Box::pin(async move {
             // Let the session settle, then publish through shared memory.
             tokio::time::sleep(Duration::from_millis(500)).await;
@@ -1076,6 +1077,186 @@ async fn wz_shm_payload_its_owner_let_go_of_at_once_is_still_readable_by_a_zenoh
     );
 }
 
+/// Send `name` (`STOP` or `CONT`) to the process `pid`.
+fn signal(pid: u32, name: &str) {
+    let status = std::process::Command::new("kill")
+        .arg(format!("-{name}"))
+        .arg(pid.to_string())
+        .status()
+        .expect("run kill");
+    assert!(status.success(), "kill -{name} {pid} failed");
+}
+
+/// Leg 6 -- A SUBSCRIBER THAT READS LATE. The owner of a chunk lets go of it the moment it has
+/// been sent, and the subscriber it was sent to cannot read for a second (a stopped process: the
+/// frame waits in its socket), a time in which zenoh's validator, which invalidates a chunk
+/// nobody confirmed for a whole 100 ms window, would have run ten times.
+///
+/// Between the owner letting go and the receiver attaching, something has to keep the chunk's
+/// watchdog bit confirmed. Upstream's sender does: it keeps a hard reference to each buffer it
+/// sends and the bit stays confirmed until the receiver lowers the sender's handoff counter
+/// (`io/zenoh-transport/src/unicast/establishment/ext/shm/handoff.rs` @
+/// `pub fn on_rx(&self, priority: Priority) {`). wz declares no counters, which is the clause
+/// the atom has carried since Round 3052 as `no counters declared by wz as a sender`. Whether it
+/// matters is a question about what the subscriber is handed when it is thawed, and it is asked
+/// here of upstream's own subscriber, with wz's header read beside it for whether wz's own
+/// validator invalidated the chunk during the freeze.
+// wz-proves: transport-shm wz->zenoh
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "binary-dep e2e (ZENOHD_SHM=1 build-zenohd.sh: z_sub_shm); Layer Z runs via --ignored"]
+async fn wz_shm_payload_sent_to_a_subscriber_that_reads_late_is_still_delivered_as_shared_memory() {
+    if zenoh_shm_example_binary("z_sub_shm").is_none() {
+        eprintln!(
+            "SKIP: no z_sub_shm at target/zenohd-shm (run `ZENOHD_SHM=1 scripts/build-zenohd.sh`)"
+        );
+        return;
+    }
+    let key = "demo/example/wz-late";
+    let text = "payload-for-a-reader-that-is-late";
+    let bytes = text.as_bytes().to_vec();
+    let (printed, (invalidated_while_frozen, released_after_acknowledgement)) =
+        against_z_sub_shm(|session, probe_log, subscriber| {
+            Box::pin(async move {
+                tokio::time::sleep(Duration::from_millis(500)).await;
+                let confirmed_before = confirmed_chunks();
+                signal(subscriber, "STOP");
+                let mut payload = ShmBackedPayload::alloc(bytes.len()).expect("alloc a payload");
+                payload.write(&bytes);
+                let descriptor = payload.descriptor();
+                session
+                    .publish_shm(key, &payload, PublishOptions::put())
+                    .expect("publish_shm");
+                drop(payload);
+                tokio::time::sleep(Duration::from_millis(1000)).await;
+                let invalidated = is_invalidated(&descriptor);
+                signal(subscriber, "CONT");
+                let mut probe_log = probe_log;
+                for _ in 0..200 {
+                    if read_captured(&mut probe_log).contains("Received") {
+                        break;
+                    }
+                    tokio::time::sleep(Duration::from_millis(50)).await;
+                }
+                // THE OTHER HALF. What wz kept confirmed for the late reader has to be let go of
+                // once the reader has acknowledged: a confirmation that outlived its
+                // acknowledgement would hold the chunk valid for as long as the session lives,
+                // and would go on confirming the slot after the chunk was collected and the slot
+                // given to another. zenoh's receiver lowered the counter when it mapped the chunk,
+                // so within the poll's interval the number of chunks wz keeps confirmed is back
+                // to what it was before the send.
+                let mut released = false;
+                for _ in 0..80 {
+                    if confirmed_chunks() <= confirmed_before {
+                        released = true;
+                        break;
+                    }
+                    tokio::time::sleep(Duration::from_millis(50)).await;
+                }
+                (invalidated, released)
+            })
+        })
+        .await;
+    assert!(
+        printed.contains(&format!("('{key}': '{text}') {ZENOH_SAW_SHM}")),
+        "the subscriber, thawed after a second, was not handed the chunk as shared memory \
+         (wz's own header read the chunk invalidated while it was frozen: \
+         {invalidated_while_frozen:?}):\n{printed}"
+    );
+    assert!(
+        released_after_acknowledgement,
+        "the chunk was delivered, and acknowledged by zenoh's receiver, but wz still held it \
+         confirmed four seconds later: the confirmation outlived the acknowledgement:\n{printed}"
+    );
+}
+
+/// Control for leg 6 -- the same freeze between two programs of upstream's: `z_pub_shm` puts, the
+/// subscriber it puts to is stopped for a second and a half, and then thawed. If upstream's own
+/// sender were not able to keep a chunk valid for a reader that is late, leg 6 would be asking wz
+/// for something upstream does not do. It does: every put is delivered as shared memory and the
+/// subscriber never reports a buffer it found invalidated.
+// wz-proves: none -- the control of the late reader leg: upstream's own publisher and subscriber, so the delivery the leg asks of wz is shown to be what a sender that keeps its handoff counters gives
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "binary-dep e2e (ZENOHD_SHM=1 build-zenohd.sh: z_pub_shm + z_sub_shm); Layer Z runs via --ignored"]
+async fn zenohd_shm_payload_sent_to_a_subscriber_that_reads_late_is_still_delivered_as_shared_memory(
+) {
+    let (Some(z_pub), Some(z_sub)) = (
+        zenoh_shm_example_binary("z_pub_shm"),
+        zenoh_shm_example_binary("z_sub_shm"),
+    ) else {
+        eprintln!(
+            "SKIP: no z_pub_shm or z_sub_shm at target/zenohd-shm \
+             (run `ZENOHD_SHM=1 scripts/build-zenohd.sh`)"
+        );
+        return;
+    };
+    let port = PortReservation::pick();
+    let listen_port = port.port();
+    let (mut subscriber, mut sub_log) = spawn_zenoh(
+        &z_sub,
+        "z_sub_shm",
+        &[
+            "-m".into(),
+            "peer".into(),
+            "-l".into(),
+            format!("tcp/127.0.0.1:{listen_port}"),
+            "-k".into(),
+            "demo/example/**".into(),
+        ],
+    );
+    wait_for_substring(
+        &mut sub_log,
+        "Press CTRL-C to quit",
+        Duration::from_secs(20),
+    )
+    .unwrap_or_else(|e| panic!("z_sub_shm never became ready: {e}"));
+    drop(port);
+    let (_publisher, mut pub_log) = spawn_zenoh(
+        &z_pub,
+        "z_pub_shm",
+        &[
+            "-m".into(),
+            "peer".into(),
+            "-e".into(),
+            format!("tcp/127.0.0.1:{listen_port}"),
+        ],
+    );
+    // The first sample proves the two are connected and exchanging shared memory.
+    wait_for_substring(&mut sub_log, "Received PUT (", Duration::from_secs(20))
+        .unwrap_or_else(|e| panic!("the subscriber was never handed a sample: {e}"));
+    let before = read_captured(&mut pub_log).matches("Put SHM Data").count();
+
+    let pid = subscriber.child_mut().id();
+    signal(pid, "STOP");
+    tokio::time::sleep(Duration::from_millis(1500)).await;
+    let during = read_captured(&mut pub_log).matches("Put SHM Data").count();
+    signal(pid, "CONT");
+    tokio::time::sleep(Duration::from_millis(2500)).await;
+
+    let sub_text = read_captured(&mut sub_log);
+    let received = sub_text.matches("Received PUT (").count();
+    let puts = read_captured(&mut pub_log).matches("Put SHM Data").count();
+    assert!(
+        during > before,
+        "the publisher put nothing while the subscriber was stopped ({before} before, {during} \
+         during), so the freeze measured nothing:\n{}",
+        read_captured(&mut pub_log)
+    );
+    assert!(
+        !sub_text.contains("Buffer is invalidated"),
+        "upstream's own subscriber found a buffer invalidated after being stopped, so upstream's \
+         sender does not keep a chunk valid for a late reader and leg 6 asks too much:\n{sub_text}"
+    );
+    assert!(
+        received >= during,
+        "{received} sample(s) were delivered after {during} puts had been made by the time the \
+         subscriber was thawed:\n{sub_text}"
+    );
+    assert!(
+        puts >= received,
+        "more samples ({received}) than puts ({puts}): the counts are not of the same thing"
+    );
+}
+
 /// What the pool leg measured on wz's side.
 struct PoolRun {
     /// Where each chunk's own header says it lies: (segment id, offset).
@@ -1133,7 +1314,7 @@ async fn wz_shm_pool_chunks_at_two_offsets_reach_a_zenohd_shm_subscriber_and_the
     assert!(texts.iter().all(|text| text.len() == CHUNK));
     let eight = AllocAlignment::ALIGN_8_BYTES;
     let sent_texts = texts.clone();
-    let (printed, run) = against_z_sub_shm(|session, probe_log| {
+    let (printed, run) = against_z_sub_shm(|session, probe_log, _subscriber| {
         Box::pin(async move {
             tokio::time::sleep(Duration::from_millis(500)).await;
             let provider =

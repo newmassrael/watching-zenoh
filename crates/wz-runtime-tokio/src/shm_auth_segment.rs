@@ -72,10 +72,17 @@
 //! pool for it to guard, and taking a lock it never releases meaningfully would
 //! make wz's segments look invalid to a peer.
 
+use std::collections::VecDeque;
 use std::io;
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, OnceLock, Weak};
 
-use wz_session_core::extshm::{ShmAuthenticator, ShmHandoff, SHM_PRIORITY_BANDS};
+use wz_session_core::extshm::{
+    decode_shm_descriptor, ShmAuthenticator, ShmHandoff, ShmTxHandoff, ShmTxTransaction,
+    SHM_PRIORITY_BANDS,
+};
+
+use crate::shm_watchdog::Confirmed;
 
 /// zenoh `SHM_VERSION` (`commons/zenoh-shm/src/version.rs`, the `SHM_VERSION`
 /// constant). A peer whose segment carries a different value is treated as
@@ -176,6 +183,10 @@ fn write_u32_at(map: &mut [u8], offset: usize, value: u32) {
 pub struct ShmAuthSegment {
     segment: OwnedSegment,
     challenge: u64,
+    /// R3110 -- the counters of the segment nobody has leased, first in first out, as upstream's
+    /// transmit segment keeps them (`io/zenoh-transport/src/unicast/establishment/ext/shm/segment.rs` @
+    /// `available_shm_counters: Arc<std::sync::Mutex<VecDeque<ShmCounterID>>>,`).
+    free_counters: Mutex<VecDeque<u16>>,
 }
 
 impl ShmAuthSegment {
@@ -216,7 +227,61 @@ impl ShmAuthSegment {
             write_u32_at(map, PROTOCOLS_OFFSET + i * core::mem::size_of::<u32>(), *p);
         }
         segment.flush()?;
-        Ok(Self { segment, challenge })
+        Ok(Self {
+            segment,
+            challenge,
+            free_counters: Mutex::new((0..COUNTER_SLOTS as u16).collect()),
+        })
+    }
+
+    /// The counter `id` names, as an atomic every process that maps this object shares.
+    ///
+    /// # Panics
+    ///
+    /// When `id` is past the array; an id comes only from [`Self::lease_counters`].
+    fn counter(&self, id: u16) -> &AtomicU32 {
+        assert!(
+            usize::from(id) < COUNTER_SLOTS,
+            "counter {id} is past the {COUNTER_SLOTS} the segment holds"
+        );
+        // SAFETY: `id < COUNTER_SLOTS` and the mapping holds `SEGMENT_BYTES`, so the four bytes at
+        // `COUNTERS_OFFSET + 4 * id` are inside it; the offset is a multiple of four from a
+        // page-aligned base, so the pointer is aligned for an `AtomicU32`; and the mapping lives
+        // as long as `self.segment`, which the returned borrow cannot outlive.
+        unsafe {
+            &*self
+                .segment
+                .base()
+                .add(COUNTERS_OFFSET + usize::from(id) * core::mem::size_of::<u32>())
+                .cast::<AtomicU32>()
+        }
+    }
+
+    /// Lease one counter per priority band and zero them, as upstream's
+    /// `ShmTXCounterLease::new` does (`io/zenoh-transport/src/unicast/establishment/ext/shm/segment.rs`
+    /// @ `// Reset counter to 0 when lease is created`). `None` when fewer than a band's worth are
+    /// free, which upstream reports as `No available SHM counters` and treats as no handoff.
+    fn lease_counters(&self) -> Option<[u16; SHM_PRIORITY_BANDS]> {
+        let mut free = self.free_counters.lock().unwrap_or_else(|e| e.into_inner());
+        if free.len() < SHM_PRIORITY_BANDS {
+            return None;
+        }
+        let mut ids = [0u16; SHM_PRIORITY_BANDS];
+        for id in &mut ids {
+            *id = free.pop_front()?;
+            self.counter(*id).store(0, Ordering::SeqCst);
+        }
+        Some(ids)
+    }
+
+    /// Give leased counters back, to the FRONT of the free list, as upstream's lease does when it
+    /// drops (`io/zenoh-transport/src/unicast/establishment/ext/shm/segment.rs` @
+    /// `zlock!(self.segment.available_shm_counters).push_front(self.counter_index);`).
+    fn return_counters(&self, ids: &[u16; SHM_PRIORITY_BANDS]) {
+        let mut free = self.free_counters.lock().unwrap_or_else(|e| e.into_inner());
+        for &id in ids.iter().rev() {
+            free.push_front(id);
+        }
     }
 
     /// This segment's id — the value that goes on the wire. The auth id is a
@@ -365,10 +430,166 @@ impl ShmHandoff for PeerHandoff {
     }
 }
 
+/// What a node that SENDS shared memory keeps of one peer's counters (R3110), shared between the
+/// handoff the session sends through and the poll that lets chunks go.
+struct TxInner {
+    segment: Arc<ShmAuthSegment>,
+    /// The counter this node leased for each priority band, named in its Open messages.
+    ids: [u16; SHM_PRIORITY_BANDS],
+    /// For each band, the chunks sent and not yet acknowledged, oldest first, each kept confirmed
+    /// by its entry. An entry is `None` for a slice whose chunk this node could not keep
+    /// confirmed: the slice was counted, because the peer will lower the counter for it.
+    queues: [Mutex<VecDeque<Option<Confirmed>>>; SHM_PRIORITY_BANDS],
+}
+
+impl TxInner {
+    /// Let go of the oldest `queue.len() - counter` chunks of each band: the receiver has lowered
+    /// the counter by one per slice it mapped, so the chunks beyond what the counter still counts
+    /// are the acknowledged ones, as upstream's reactor computes it
+    /// (`io/zenoh-transport/src/unicast/establishment/ext/shm/handoff.rs` @
+    /// `let to_pop = self.handoffs_len.load(SeqCst) as isize - self.counter.counter() as isize;`).
+    fn poll(&self) {
+        for (band, queue) in self.queues.iter().enumerate() {
+            let counter = self.segment.counter(self.ids[band]).load(Ordering::Relaxed) as usize;
+            // Dropping a `Confirmed` takes the confirmator's lock, so the entries are taken out
+            // under the queue's lock and dropped after it.
+            let acknowledged: Vec<_> = {
+                let mut queue = queue.lock().unwrap_or_else(|e| e.into_inner());
+                let n = queue.len().saturating_sub(counter);
+                queue.drain(..n).collect()
+            };
+            drop(acknowledged);
+        }
+    }
+}
+
+impl Drop for TxInner {
+    fn drop(&mut self) {
+        self.segment.return_counters(&self.ids);
+    }
+}
+
+/// The transmit handoffs this process operates, so one thread can poll them all: upstream's
+/// `GLOBAL_HANDOFF_REACTOR`. A handoff leaves when its session lets go of it.
+fn tx_registry() -> &'static Mutex<Vec<Weak<TxInner>>> {
+    static REGISTRY: OnceLock<Mutex<Vec<Weak<TxInner>>>> = OnceLock::new();
+    REGISTRY.get_or_init(|| Mutex::new(Vec::new()))
+}
+
+/// One poll of every transmit handoff of the process: run by the watchdog thread on the validator's
+/// clock, which is the interval upstream's reactor sleeps.
+pub(crate) fn poll_tx_handoffs() {
+    let live: Vec<Arc<TxInner>> = {
+        let mut registry = tx_registry().lock().unwrap_or_else(|e| e.into_inner());
+        registry.retain(|handoff| handoff.strong_count() > 0);
+        registry.iter().filter_map(Weak::upgrade).collect()
+    };
+    for handoff in live {
+        handoff.poll();
+    }
+}
+
+/// This node's handoff as a SENDER: eight counters leased from its auth segment, one per priority
+/// band, and the chunks it keeps confirmed against them (R3110).
+pub struct PosixTxHandoff {
+    inner: Arc<TxInner>,
+}
+
+impl PosixTxHandoff {
+    /// Lease a band's worth of counters from `segment`. `None` when the segment has none to give.
+    fn new(segment: Arc<ShmAuthSegment>) -> Option<Self> {
+        let ids = segment.lease_counters()?;
+        let inner = Arc::new(TxInner {
+            segment,
+            ids,
+            queues: std::array::from_fn(|_| Mutex::new(VecDeque::new())),
+        });
+        tx_registry()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .push(Arc::downgrade(&inner));
+        Some(Self { inner })
+    }
+}
+
+impl ShmTxHandoff for PosixTxHandoff {
+    fn counters(&self) -> [u16; SHM_PRIORITY_BANDS] {
+        self.inner.ids
+    }
+
+    fn reset(&self) {
+        for (band, queue) in self.inner.queues.iter().enumerate() {
+            let forgotten: Vec<_> = queue
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .drain(..)
+                .collect();
+            drop(forgotten);
+            self.inner
+                .segment
+                .counter(self.inner.ids[band])
+                .store(0, Ordering::SeqCst);
+        }
+    }
+
+    fn begin(&self, band: usize) -> Box<dyn ShmTxTransaction> {
+        Box::new(PosixTxTransaction {
+            inner: Arc::clone(&self.inner),
+            band: band.min(SHM_PRIORITY_BANDS - 1),
+            held: Vec::new(),
+            committed: false,
+        })
+    }
+}
+
+/// One message's slices, declared to the counter of its band and kept confirmed.
+struct PosixTxTransaction {
+    inner: Arc<TxInner>,
+    band: usize,
+    held: Vec<Option<Confirmed>>,
+    committed: bool,
+}
+
+impl ShmTxTransaction for PosixTxTransaction {
+    fn on_tx(&mut self, descriptor: &[u8]) {
+        let confirmed = decode_shm_descriptor(descriptor)
+            .and_then(|descriptor| crate::shm_provider::confirm_sent_chunk(&descriptor));
+        self.inner
+            .segment
+            .counter(self.inner.ids[self.band])
+            .fetch_add(1, Ordering::SeqCst);
+        self.held.push(confirmed);
+    }
+
+    fn commit(mut self: Box<Self>) {
+        self.committed = true;
+        let held = std::mem::take(&mut self.held);
+        self.inner.queues[self.band]
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .extend(held);
+    }
+}
+
+impl Drop for PosixTxTransaction {
+    fn drop(&mut self) {
+        if !self.committed && !self.held.is_empty() {
+            // The message did not leave: no peer will lower the counter for these slices.
+            self.inner
+                .segment
+                .counter(self.inner.ids[self.band])
+                .fetch_sub(self.held.len() as u32, Ordering::SeqCst);
+        }
+    }
+}
+
 /// The [`ShmAuthenticator`] a session is handed at bring-up: this node's own
 /// segment plus the ability to open a peer's.
 pub struct PosixShmAuthenticator {
-    segment: ShmAuthSegment,
+    segment: Arc<ShmAuthSegment>,
+    /// R3110 -- the counters this session leased as a sender, or `None` when the segment had none
+    /// to give, which declares the counter block `Disabled`.
+    tx: Option<Arc<PosixTxHandoff>>,
 }
 
 impl PosixShmAuthenticator {
@@ -387,9 +608,12 @@ impl PosixShmAuthenticator {
         let mut bytes = [0u8; 8];
         getrandom::getrandom(&mut bytes)
             .map_err(|e| io::Error::other(format!("getrandom: {e}")))?;
-        Ok(Self {
-            segment: ShmAuthSegment::create_listing(u64::from_ne_bytes(bytes), protocols)?,
-        })
+        let segment = Arc::new(ShmAuthSegment::create_listing(
+            u64::from_ne_bytes(bytes),
+            protocols,
+        )?);
+        let tx = PosixTxHandoff::new(Arc::clone(&segment)).map(Arc::new);
+        Ok(Self { segment, tx })
     }
 }
 
@@ -417,6 +641,12 @@ impl ShmAuthenticator for PosixShmAuthenticator {
     ) -> Option<Box<dyn ShmHandoff>> {
         PeerHandoff::open(peer_segment, counters)
             .map(|handoff| Box::new(handoff) as Box<dyn ShmHandoff>)
+    }
+
+    fn tx_handoff(&self) -> Option<Arc<dyn ShmTxHandoff>> {
+        self.tx
+            .as_ref()
+            .map(|tx| Arc::clone(tx) as Arc<dyn ShmTxHandoff>)
     }
 }
 
@@ -805,6 +1035,202 @@ mod tests {
             b.local_challenge(),
             "distinct challenges — a shared or counter-derived one would make \
              the exchange decorative"
+        );
+    }
+
+    // ---- the node as a SENDER (R3110) ------------------------------------------------------
+
+    /// A segment and a transmit handoff leased from it.
+    fn a_handoff() -> (Arc<ShmAuthSegment>, PosixTxHandoff) {
+        let segment = Arc::new(ShmAuthSegment::create(7).expect("create a segment"));
+        let tx = PosixTxHandoff::new(Arc::clone(&segment)).expect("a band of counters is free");
+        (segment, tx)
+    }
+
+    /// The serialized descriptor of a chunk a receiver is about to be sent: the reference is taken
+    /// for it, as production takes it when it serializes the descriptor.
+    fn sent_descriptor(
+        payload: &crate::shm_provider::ShmBackedPayload,
+    ) -> (wz_session_core::extshm::ShmDescriptor, Vec<u8>) {
+        let wire = payload.wire_reference();
+        let descriptor = wire.descriptor();
+        wire.commit();
+        let bytes = wz_session_core::extshm::encode_shm_descriptor(&descriptor);
+        (descriptor, bytes)
+    }
+
+    /// A handoff leases one counter per band, each distinct and zero however it was left, and its
+    /// counters are the next to be leased once it lets go of them.
+    #[test]
+    fn a_handoff_leases_a_band_of_distinct_zeroed_counters_and_returns_them() {
+        let segment = Arc::new(ShmAuthSegment::create(7).expect("create a segment"));
+        // Leave dirt in the counters a lease will draw, which a lease must zero.
+        for id in 0..(2 * SHM_PRIORITY_BANDS as u16) {
+            segment.counter(id).store(99, Ordering::SeqCst);
+        }
+        let first = PosixTxHandoff::new(Arc::clone(&segment)).expect("first lease");
+        let second = PosixTxHandoff::new(Arc::clone(&segment)).expect("second lease");
+        let (a, b) = (first.counters(), second.counters());
+        let all: std::collections::BTreeSet<u16> = a.iter().chain(b.iter()).copied().collect();
+        assert_eq!(all.len(), 2 * SHM_PRIORITY_BANDS, "no counter leased twice");
+        assert!(
+            a.iter()
+                .chain(b.iter())
+                .all(|&id| segment.counter(id).load(Ordering::SeqCst) == 0),
+            "a lease zeroes what the last holder left"
+        );
+
+        drop(first);
+        let third = PosixTxHandoff::new(Arc::clone(&segment)).expect("third lease");
+        let mut reused = third.counters();
+        let mut returned = a;
+        reused.sort_unstable();
+        returned.sort_unstable();
+        assert_eq!(
+            reused, returned,
+            "the counters a handoff let go of are the next leased"
+        );
+    }
+
+    /// The segment holds counters for 351 sessions of eight bands and no more: the 352nd is told
+    /// there are none, which declares the counter block `Disabled`, and a lease that is let go of
+    /// serves it.
+    #[test]
+    fn the_counters_serve_351_sessions_and_then_none() {
+        let segment = Arc::new(ShmAuthSegment::create(7).expect("create a segment"));
+        let mut held: Vec<PosixTxHandoff> = (0..COUNTER_SLOTS / SHM_PRIORITY_BANDS)
+            .map(|_| PosixTxHandoff::new(Arc::clone(&segment)).expect("a band is free"))
+            .collect();
+        assert_eq!(held.len(), 351);
+        assert!(
+            PosixTxHandoff::new(Arc::clone(&segment)).is_none(),
+            "the segment has no band left to lease"
+        );
+        held.pop();
+        assert!(
+            PosixTxHandoff::new(Arc::clone(&segment)).is_some(),
+            "a session that ended gives its counters back"
+        );
+    }
+
+    /// EVERY slice of a message that left is counted against its band's counter, a chunk this node
+    /// can keep confirmed and one it cannot alike, and a peer that lowers the counter once per
+    /// slice brings it back to zero: a slice that was sent and not counted would take a peer's
+    /// decrement below zero.
+    #[test]
+    fn every_slice_is_counted_and_the_peers_acknowledgements_bring_it_back() {
+        let (segment, tx) = a_handoff();
+        let counter = segment.counter(tx.counters()[3]);
+        let payload = crate::shm_provider::ShmBackedPayload::alloc(16).expect("alloc");
+        let (_, chunk) = sent_descriptor(&payload);
+
+        let mut transaction = tx.begin(3);
+        transaction.on_tx(&chunk);
+        // A descriptor that does not parse names no chunk to keep, and is still a slice sent.
+        transaction.on_tx(&[0xff, 0xff]);
+        assert_eq!(
+            counter.load(Ordering::SeqCst),
+            2,
+            "both slices are declared"
+        );
+        transaction.commit();
+        assert_eq!(
+            counter.load(Ordering::SeqCst),
+            2,
+            "committing counts nothing more"
+        );
+        assert_eq!(
+            segment.counter(tx.counters()[2]).load(Ordering::SeqCst),
+            0,
+            "another band's counter is not touched"
+        );
+
+        counter.fetch_sub(2, Ordering::SeqCst);
+        assert_eq!(counter.load(Ordering::SeqCst), 0);
+    }
+
+    /// A message that did not leave is given back: nothing is counted against a peer that will
+    /// never lower the counter for it, and nothing is kept confirmed.
+    #[test]
+    fn a_message_that_did_not_leave_is_given_back() {
+        let (segment, tx) = a_handoff();
+        let counter = segment.counter(tx.counters()[0]);
+        let payload = crate::shm_provider::ShmBackedPayload::alloc(16).expect("alloc");
+        let (_, chunk) = sent_descriptor(&payload);
+        {
+            let mut transaction = tx.begin(0);
+            transaction.on_tx(&chunk);
+            assert_eq!(counter.load(Ordering::SeqCst), 1);
+            // Dropped without being committed: the send failed.
+        }
+        assert_eq!(
+            counter.load(Ordering::SeqCst),
+            0,
+            "the count was given back"
+        );
+        assert!(
+            tx.inner.queues[0].lock().expect("queue").is_empty(),
+            "and nothing is kept for a message that never left"
+        );
+    }
+
+    /// A new establishment is a new peer: what the last was owed is forgotten and the counters are
+    /// zero again, so a count the last peer never lowered cannot hold this one's chunks.
+    #[test]
+    fn declaring_the_counters_again_forgets_what_the_last_peer_was_owed() {
+        let (segment, tx) = a_handoff();
+        let counter = segment.counter(tx.counters()[5]);
+        let payload = crate::shm_provider::ShmBackedPayload::alloc(16).expect("alloc");
+        let (_, chunk) = sent_descriptor(&payload);
+        let mut transaction = tx.begin(5);
+        transaction.on_tx(&chunk);
+        transaction.commit();
+        assert_eq!(counter.load(Ordering::SeqCst), 1);
+        assert_eq!(tx.inner.queues[5].lock().expect("queue").len(), 1);
+
+        tx.reset();
+        assert_eq!(counter.load(Ordering::SeqCst), 0);
+        assert!(tx.inner.queues[5].lock().expect("queue").is_empty());
+    }
+
+    /// THE POINT, on a real chunk and the real validator. Its owner lets go the moment it is sent;
+    /// from then on only the sender's handoff keeps its watchdog bit confirmed. Four validator
+    /// windows later it is still valid, because nobody has acknowledged it; once the peer lowers
+    /// the counter and the poll runs it is let go of, and the validator invalidates it.
+    #[test]
+    fn a_chunk_stays_valid_until_the_peer_acknowledges_it_and_not_after() {
+        let (segment, tx) = a_handoff();
+        let payload = crate::shm_provider::ShmBackedPayload::alloc(16).expect("alloc");
+        let (descriptor, chunk) = sent_descriptor(&payload);
+        let mut transaction = tx.begin(3);
+        transaction.on_tx(&chunk);
+        transaction.commit();
+        drop(payload);
+
+        std::thread::sleep(std::time::Duration::from_millis(500));
+        poll_tx_handoffs();
+        assert_eq!(
+            crate::shm_provider::is_invalidated(&descriptor),
+            Some(false),
+            "the sender let a chunk lapse that its peer had not yet acknowledged"
+        );
+
+        segment
+            .counter(tx.counters()[3])
+            .fetch_sub(1, Ordering::SeqCst);
+        poll_tx_handoffs();
+        let mut invalidated = false;
+        for _ in 0..40 {
+            if crate::shm_provider::is_invalidated(&descriptor) == Some(true) {
+                invalidated = true;
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        assert!(
+            invalidated,
+            "the confirmation outlived the acknowledgement: the chunk is still valid two seconds \
+             after the peer lowered the counter"
         );
     }
 }

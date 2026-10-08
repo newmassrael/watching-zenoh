@@ -165,8 +165,8 @@ impl Confirmator {
         }
     }
 
-    /// How many distinct bits are being confirmed. For tests.
-    #[cfg(test)]
+    /// How many distinct bits are being confirmed. A diagnostic: the witness that what a sender
+    /// kept confirmed for a receiver is let go of once the receiver has acknowledged it.
     pub(crate) fn held(&self) -> usize {
         self.tracked.lock().map(|t| t.len()).unwrap_or(0)
     }
@@ -230,6 +230,8 @@ fn run() {
         if tick % validate_every == 0 {
             crate::shm_provider::validate_tick();
             crate::shm_provider::sweep_peer_segments();
+            #[cfg(feature = "session-extshm")]
+            crate::shm_auth_segment::poll_tx_handoffs();
         }
     }
 }

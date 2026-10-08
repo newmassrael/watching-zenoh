@@ -6557,7 +6557,11 @@ layer_c1af_cargo_test_shm() {
     # establishment's protocol list (`extshm::tests::fsm::each_role_reads_the_list_of_the_segment_it_maps`,
     # `an_unreadable_list_admits_every_protocol`, `a_new_establishment_forgets_the_last_peers_list`),
     # which have `shm` in their path and sit behind `session-extshm`, which this leg carries.
-    _runci_guarded_test C1af 33 cargo test -p wz-session-core --features session-extshm,codec-push --lib shm --quiet \
+    # R3110 -- 33 -> 36, MEASURED by running this exact command: the three tests of what the
+    # establishment's Open messages declare as a sender (the initiator's OpenSyn and the
+    # acceptor's OpenAck name the counters the authenticator leased, and an authenticator that
+    # operates none declares the block Disabled), which have `shm` in their path.
+    _runci_guarded_test C1af 36 cargo test -p wz-session-core --features session-extshm,codec-push --lib shm --quiet \
         || return 1
     # R311y894 — the establishment SHM surface WITH THE DISSECTOR ON, which no
     # lane had. `dissect` and `session-extshm` are disjoint feature sets: the
@@ -6612,7 +6616,9 @@ layer_c1af_cargo_test_shm() {
     # R3103 -- 44 -> 49, MEASURED by running this exact command: the five tests of
     # `response_build::shm_relay_tests`, which have `shm` in their path and sit behind
     # `codec-response`, which `dissect` brings and the leg above does not (it stays at 33).
-    _runci_guarded_test C1af 49 cargo test -p wz-session-core --features session-extshm,dissect --lib shm --quiet \
+    # R3110 -- 49 -> 52, MEASURED by running this exact command: the same three tests of the
+    # Open messages as the leg above, which `session-extshm` brings here too.
+    _runci_guarded_test C1af 52 cargo test -p wz-session-core --features session-extshm,dissect --lib shm --quiet \
         || return 1
     # Round 2037, open-debt item 330 — THE TRANSPORT-OAM BATCH WALK, which no
     # lane in this file was running.
@@ -6708,6 +6714,12 @@ layer_c1af_cargo_test_shm() {
     # still be trusted while its name names its object, for the writable mapping of a metadata
     # segment and for the read-only one of a data segment. THREE.
     _runci_guarded_test C1af 3 cargo test -p wz-runtime-tokio --features session-extshm,transport-unicast,transport-link-tcp --lib posix_shm --quiet \
+        || return 1
+    # R3110 -- the auth segment's own tests (`shm_auth_segment`), which no lane counted: the
+    # challenge, the protocol list and the receiver's handoff (16), and the node as a SENDER (6)
+    # -- the counters it leases, what it counts, what it gives back and the chunk it keeps
+    # valid until its peer acknowledges. TWENTY-TWO.
+    _runci_guarded_test C1af 22 cargo test -p wz-runtime-tokio --features session-extshm,transport-unicast,transport-link-tcp --lib shm_auth_segment --quiet \
         || return 1
     # R3056 -- the provider's two new modules, which the filter above does not select:
     # `shm_backend` (the value types an allocation speaks in, 4 tests) and
@@ -11894,6 +11906,12 @@ layer_c1bz_docs_resolve() {
     # module and function docs that linked it privately now link that. None of
     # the 40 errors `cargo doc -p wz-capi-c --no-deps --all-features` printed at
     # 6335a542 falls on a line the round added.
+    # R3110 -- wz-session-core 512 -> 510, by removal, diffed rather than counted:
+    # the public `send_network_message_qos` became the seam that opens the sender's
+    # handoff transaction, and the doc that linked the private `dispatch_push` and
+    # `dispatch_network_message` went with the body to the private function behind
+    # it. The sorted `error` lines of this lane's command at `af03a4cd` (512) and on
+    # the tree (510) differ by exactly those two, and none added.
     budget="
         wz:2
         wz-ap-demo:25
@@ -11905,7 +11923,7 @@ layer_c1bz_docs_resolve() {
         wz-routing-graph:5
         wz-runtime-coop:12
         wz-runtime-tokio:485
-        wz-session-core:512
+        wz-session-core:510
         wz-session-lwip:4
         wz-switchboard-codegen:8
         zenoh-pico-sys:3
@@ -17057,7 +17075,12 @@ layer_z_zenohd_interop() {
     # publishes both, upstream's subscriber must print each chunk's own bytes, and the
     # provider must take both home once it has let go), the first leg in which a chunk
     # lies at an offset other than 0 of its segment.
-    _runci_guarded_test Z 7 cargo test -p wz-integration-tests \
+    # R3110 -- 7 -> 9, MEASURED by running the file: the late reader leg (upstream's subscriber
+    # is stopped, wz sends and its owner lets go at once, and the subscriber is thawed after a
+    # second: the chunk must still be delivered as shared memory, and what wz kept confirmed for
+    # it must be let go of once it has acknowledged) and its control between two programs of
+    # upstream's.
+    _runci_guarded_test Z 9 cargo test -p wz-integration-tests \
         --test wz_shm_payload_zenohd_interop -- --ignored --quiet --test-threads=1 || return 1
     # R3042 -- the QUERY plane of the same oracle: a reply through shared memory
     # (upstream's `z_queryable_shm`, asked past the size of its ten-chunk pool, which

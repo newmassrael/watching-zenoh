@@ -1348,6 +1348,35 @@ pub(crate) fn sweep_peer_segments() {
     }
 }
 
+/// R3110 -- keep the chunk `descriptor` names CONFIRMED, as the hard reference a sender keeps of a
+/// buffer it has sent does (`io/zenoh-transport/src/unicast/establishment/ext/shm/handoff.rs` @
+/// `pub struct TxHandoff {`): the watchdog bit of the chunk's slot is held confirmed until the
+/// returned handle drops, and nothing else about the chunk is touched, the reference count
+/// included. Without it nothing confirms a chunk between its owner letting go and its receiver
+/// attaching, and the validator invalidates it within one window.
+///
+/// `None` when the metadata segment cannot be opened or the slot is another generation's: that
+/// chunk is gone, and there is nothing to keep.
+#[cfg(feature = "session-extshm")]
+pub(crate) fn confirm_sent_chunk(descriptor: &ShmDescriptor) -> Option<Confirmed> {
+    let metadata = peer_metadata(descriptor.metadata_id)?;
+    let header = metadata_of_rw(&metadata)?
+        .headers
+        .get(descriptor.metadata_index as usize)?;
+    if header.generation.load(Ordering::SeqCst) != descriptor.generation {
+        return None;
+    }
+    peer_bit(&metadata, descriptor.metadata_index).map(|bit| confirmator().add(bit))
+}
+
+/// How many chunks this process is keeping confirmed right now: the watchdog bits it holds, an
+/// owner's, a receiver's and a sender's kept for a receiver that has not yet acknowledged. A
+/// diagnostic, like [`data_segment_maps`]: the witness that a confirmation kept for a receiver is
+/// let go of once the receiver acknowledges is this count returning to where it started.
+pub fn confirmed_chunks() -> usize {
+    confirmator().held()
+}
+
 /// Whether the reader's cache holds the data segment named `id`. A diagnostic for the sweep's
 /// witness.
 #[cfg(test)]
