@@ -708,10 +708,15 @@ fn receive_clears_extended_status_the_footer_announces() {
 fn a_soft_reset_waits_for_completion_clears_it_and_forgets_protection() {
     let mut t = tc6();
     t.set_protected(true).unwrap();
-    let mut waited = 0u32;
+    let clock = std::cell::Cell::new(0u64);
     // The model raises RESETC at once; the driver still waits one tick first.
-    t.soft_reset(|us| waited += us, 10).unwrap();
-    assert!(waited >= 1_000);
+    t.soft_reset(
+        |us| clock.set(clock.get() + u64::from(us)),
+        || clock.get(),
+        10,
+    )
+    .unwrap();
+    assert!(clock.get() >= 1_000, "it waited a tick before it looked");
     assert!(!t.protected, "the device is unconfigured after a reset");
     assert_eq!(
         t.spi_mut().reg(std_reg::STATUS0) & std_reg::STATUS0_RESETC,
@@ -731,9 +736,55 @@ fn a_soft_reset_waits_for_completion_clears_it_and_forgets_protection() {
         }
     }
     let mut mute = Tc6::new(Mute(Chip::new()), ChunkSize::B64);
-    let mut ticks = 0;
-    assert_eq!(mute.soft_reset(|_| ticks += 1, 5), Err(Error::ResetTimeout));
-    assert_eq!(ticks, 5);
+    let clock = std::cell::Cell::new(0u64);
+    let mut asks = 0;
+    assert_eq!(
+        mute.soft_reset(
+            |us| {
+                asks += 1;
+                clock.set(clock.get() + u64::from(us));
+            },
+            || clock.get(),
+            5,
+        ),
+        Err(Error::ResetTimeout)
+    );
+    assert_eq!(
+        asks, 5,
+        "five waits of a millisecond use up five milliseconds"
+    );
+}
+
+/// The budget is measured on the clock, not counted in the waits asked for. A wait
+/// is a promise of AT LEAST its length, and on a board whose time base runs slow it
+/// takes far longer: this wait costs ten times what it was told, so a 5 ms budget
+/// is gone after the first. Counting the asks would have let it run five times.
+#[test]
+fn a_reset_budget_is_the_clocks_not_the_number_of_waits_asked_for() {
+    struct Mute(Chip);
+    impl SpiTransfer for Mute {
+        type Error = ();
+        fn transfer(&mut self, tx: &[u8], rx: &mut [u8]) -> Result<(), ()> {
+            self.0.transfer(tx, rx)?;
+            self.0.regs.insert((0, 0x008), 0);
+            Ok(())
+        }
+    }
+    let mut mute = Tc6::new(Mute(Chip::new()), ChunkSize::B64);
+    let clock = std::cell::Cell::new(0u64);
+    let mut asks = 0;
+    assert_eq!(
+        mute.soft_reset(
+            |us| {
+                asks += 1;
+                clock.set(clock.get() + 10 * u64::from(us));
+            },
+            || clock.get(),
+            5,
+        ),
+        Err(Error::ResetTimeout)
+    );
+    assert_eq!(asks, 1, "the clock, not the count of asks, ended the wait");
 }
 
 #[test]

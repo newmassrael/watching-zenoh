@@ -234,9 +234,15 @@ impl<S: SpiTransfer> Tc6<S> {
     /// `delay_us` waits; the reset has completed when `STATUS0.RESETC` is set, and
     /// that bit is cleared by writing it back. The device is unconfigured after a
     /// reset, protected mode included, so this side forgets it too.
+    ///
+    /// The budget is the time `now_us` says has passed, not the sum of the waits
+    /// asked of `delay_us`: a wait promises at least what it is told, and a board
+    /// whose clock runs slow takes far longer than it asked for, so counting the
+    /// asks would let a budget of 100 ms last minutes.
     pub fn soft_reset(
         &mut self,
         mut delay_us: impl FnMut(u32),
+        mut now_us: impl FnMut() -> u64,
         budget_ms: u32,
     ) -> Result<(), Error<S::Error>> {
         // The write that resets the device is a transaction in the mode the device
@@ -244,14 +250,18 @@ impl<S: SpiTransfer> Tc6<S> {
         self.reg_write(std_reg::RESET, std_reg::RESET_SWRESET)?;
         self.protected = false;
         self.status = Status::default();
-        for _ in 0..budget_ms {
+        let started = now_us();
+        let budget_us = u64::from(budget_ms) * 1_000;
+        loop {
             delay_us(1_000);
             let status0 = self.reg_read(std_reg::STATUS0)?;
             if status0 & std_reg::STATUS0_RESETC != 0 {
                 return self.reg_write(std_reg::STATUS0, status0);
             }
+            if now_us().saturating_sub(started) >= budget_us {
+                return Err(Error::ResetTimeout);
+            }
         }
-        Err(Error::ResetTimeout)
     }
 
     /// Declare the configuration done (`CONFIG0.SYNC`) and select the receive mode
