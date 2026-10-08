@@ -5533,7 +5533,14 @@ layer_c1bb_cargo_test_qos() {
     # `locator::tests::ip_leaf_keeps_the_endpoints_qos_metadata_as_written`
     # (R2945, `74498494`) carries `qos` in its name and that range did not move
     # this guard — the R2779 shape a fourth time.
-    _runci_guarded_test C1bb 29 cargo test -p wz-session-core --features transport-qos,transport-fragmentation,transport-batching,reassembly,session-multicast --lib qos --quiet \
+    #
+    # 29 -> 35, READ off the command, which printed 35. Six are the QoS offer
+    # reading, which this lane's subject owns: the new ungated module
+    # `extqos_offer` (five tests, matched by the module's own name) and
+    # `extqos::tests::peer_offer_absent_for_a_qoslink_of_body_zero`. The
+    # passive-fold and `session-extqos` cases that carry `qos` in their names
+    # are not compiled by this feature set, so they add nothing here.
+    _runci_guarded_test C1bb 35 cargo test -p wz-session-core --features transport-qos,transport-fragmentation,transport-batching,reassembly,session-multicast --lib qos --quiet \
         || return 1
     (cd crates \
         && cargo clippy -p wz-session-core --all-targets --features transport-qos,transport-fragmentation,transport-batching,reassembly,session-multicast --quiet -- -D warnings \

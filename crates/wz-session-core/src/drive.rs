@@ -523,7 +523,9 @@ fn dispatch_unit<R: SessionRuntime, T: TimeSource>(
                 // offer on every admitted Init frame (zenoh "both sides
                 // QoS or NoQoS", both recv_init_syn and recv_init_ack),
                 // BEFORE the InitAck reflect. `peer_offered_qos` accepts
-                // the unit OR the z64 QoSLink form at id 0x1.
+                // the unit OR the z64 QoSLink form at id 0x1, and reads a
+                // QoSLink by its body: a body of 0 is NoQoS, as upstream
+                // reads it.
                 #[cfg(all(feature = "transport-qos", feature = "codec-init-body"))]
                 if let InboundFrame::Init { extensions, .. } = &frame {
                     actions.negotiate_qos_against_peer(crate::extqos::peer_offered_qos(extensions));

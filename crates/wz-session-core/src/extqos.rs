@@ -12,7 +12,8 @@
 //!   - `pub type QoSLink = zextz64!(0x1, false)` — the z64 form a peer with
 //!     `#priorities=` / `#reliability=` endpoint metadata sends (the packed
 //!     priority-range + reliability), NEVER alongside the unit.
-//! Both mean `is_qos = true`; only the absence of BOTH is `NoQoS`
+//! Both mean `is_qos = true` unless the `QoSLink` body says otherwise: a body of
+//! `0` is `NoQoS`, as is the absence of BOTH forms
 //! (`io/zenoh-transport/src/unicast/establishment/ext/qos.rs`
 //! @ `fn try_from_exts`). The capability is negotiated by AND of both sides — if
 //! EITHER peer is `NoQoS` the result is `NoQoS` (the `else { NoQoS }` arm in
@@ -26,17 +27,19 @@
 //! structural. Under `--no-default-features` the z64 half is compiled out with
 //! `session-extqos` and the unit form is all there is.
 //!
-//! wz DECODE tolerates BOTH:
-//! [`peer_offered_qos`] matches ext id `0x1` regardless of the encoding nibble
-//! (`ext_id() = header & 0x0F` masks ENC_Z64 `0x20` and the M bit off), so a
-//! priority-configured zenohd advertising `QoSLink` is correctly read as
-//! `is_qos = true` and its z64 body is length-skipped by the generic
+//! wz DECODE reads BOTH, the way upstream does, through `crate::extqos_offer`
+//! (ungated, because the passive observer reads the same chains in builds that
+//! have no QoS feature): [`peer_offered_qos`] is true for the unit form and for a
+//! `QoSLink` whose body is not `NoQoS`, so a priority-configured zenohd
+//! advertising `QoSLink` is read as `is_qos = true`, a body of `0` is read as
+//! `NoQoS`, and the z64 body is length-skipped by the generic
 //! `crate::ext_chain::decode_ext_chain` (no Init ext-chain desync). With only
 //! `transport-qos` on, that is the whole of it and `is_qos` decides just
 //! "per-priority conduits: `Priority::NUM` vs 1". `session-extqos` adds the
 //! BODY's meaning: `qos_state_try_from_u64` reads the band and the reliability
-//! bit out of it, the two merges below enforce the directional containment, and
-//! `SessionLinkActions::apply_negotiated_qos_to_link` pushes the negotiated
+//! bit out of it (from the same `crate::extqos_offer` reading, so the tag rule
+//! is written once), the two merges below enforce the directional containment,
+//! and `SessionLinkActions::apply_negotiated_qos_to_link` pushes the negotiated
 //! outcome onto the link inputs `select_link` reads (R311y514).
 //!
 //! This module is the WIRE SHAPE and the negotiation ALGEBRA — the
@@ -60,7 +63,9 @@
 
 use wz_codecs::ext_entry::ExtEntryOwned;
 
-use crate::unit_ext::{chain_has_ext_eid, encode_unit_ext};
+#[cfg(feature = "session-extqos")]
+use crate::extqos_offer::priority_try_from_wire;
+use crate::unit_ext::encode_unit_ext;
 
 /// Z_EXT_QOS ext id on the Init establishment message — zenoh
 /// `commons/zenoh-protocol/src/transport/init.rs`
@@ -86,17 +91,24 @@ pub fn encode_qos_ext() -> ExtEntryOwned {
 
 /// Project the peer's QoS capability from an establishment ext chain: `true`
 /// iff the chain carries EITHER `zextunit!(0x1)` (header `0x01`) or
-/// `zextz64!(0x1)` (`QoSLink`, header `0x21`). The merge side
-/// (`SessionLinkActions::negotiate_qos_against_peer`) ANDs this against the local
-/// offer, reproducing zenoh's "both sides QoS or NoQoS" (`is_qos &= peer_offered`).
+/// `zextz64!(0x1)` (`QoSLink`, header `0x21`) with a body that is not upstream's
+/// `NoQoS`. The merge side (`SessionLinkActions::negotiate_qos_against_peer`)
+/// ANDs this against the local offer, reproducing zenoh's "both sides QoS or
+/// NoQoS" (`is_qos &= peer_offered`).
 ///
-/// R311y505 — the two forms are now named EXPLICITLY. They used to be accepted as
+/// This is `crate::extqos_offer::offers_qos`, the one reading the passive
+/// observer's fold uses too. A `QoSLink` of body `0` is NOT an offer, and a
+/// chain upstream refuses (both forms, an invalid body) offers nothing; under
+/// `session-extqos` the same refusal then aborts the handshake
+/// (`peer_qos_ext_state`).
+///
+/// R311y505 — the two forms are named EXPLICITLY. They used to be accepted as
 /// a side effect of matching on the 4-bit id field alone, which is a different
 /// claim: it accepts anything at id 0x1 in any encoding, present or future. Here
 /// the acceptance is deliberate and bounded, because zenoh's QoS genuinely IS a
 /// dual ext whose two forms both mean "this peer does QoS"
 /// (`commons/zenoh-protocol/src/transport/init.rs`
-/// @ `pub type QoS = zextunit!(0x1, false)`, unit XOR z64 with superset/subset
+/// @ `pub type QoS = zextunit!(0x1, false);`, unit XOR z64 with superset/subset
 /// containment).
 ///
 /// That reasoning does NOT generalise, which is why the loose match had to go:
@@ -105,8 +117,7 @@ pub fn encode_qos_ext() -> ExtEntryOwned {
 /// that had issued a challenge wz cannot answer (measured against a real
 /// `zenohd --features shared-memory`).
 pub fn peer_offered_qos(extensions: &[ExtEntryOwned]) -> bool {
-    chain_has_ext_eid(extensions, QOS_EXT_ID)
-        || chain_has_ext_eid(extensions, QOS_EXT_ID | crate::ext_header::EXT_ENC_Z64)
+    crate::extqos_offer::offers_qos(extensions)
 }
 
 // ---------------------------------------------------------------------------
@@ -190,6 +201,19 @@ pub enum PeerQos {
     QoS(QosLinkState),
 }
 
+#[cfg(feature = "session-extqos")]
+impl PeerQos {
+    /// The peer's state as `crate::extqos_offer` read it, projected onto the
+    /// link types: the band becomes a `LinkPriorityRange`, which orders its
+    /// bounds.
+    fn from_state(state: crate::accept_state::QosAcceptState) -> Self {
+        match state {
+            crate::accept_state::QosAcceptState::NoQos => PeerQos::NoQoS,
+            qos => PeerQos::QoS(QosLinkState::from_qos_accept_state(qos)),
+        }
+    }
+}
+
 /// Why a `QoSLink` negotiation was refused. Each variant is one of zenoh's own
 /// `zerror!` bail-outs in `establishment/ext/qos.rs`; every one of them aborts
 /// the handshake upstream, so wz tears the session down rather than silently
@@ -219,6 +243,16 @@ pub enum QosLinkError {
     /// does not parse: upstream's `State::new` reads both with `?`, so the
     /// establishment is refused before a byte is sent.
     InvalidEndpointMetadata,
+}
+
+#[cfg(feature = "session-extqos")]
+impl From<crate::extqos_offer::QosOfferError> for QosLinkError {
+    fn from(refusal: crate::extqos_offer::QosOfferError) -> Self {
+        match refusal {
+            crate::extqos_offer::QosOfferError::BothForms => QosLinkError::BothForms,
+            crate::extqos_offer::QosOfferError::InvalidValue => QosLinkError::InvalidValue,
+        }
+    }
 }
 
 /// R2944 — the link's QoS metadata as its endpoint declares it: the wz mirror
@@ -304,52 +338,18 @@ pub fn qos_state_to_u64(state: &QosLinkState) -> u64 {
     value
 }
 
-/// Strict wire-byte -> [`Priority`](crate::qos::Priority): `None` above 7.
-///
-/// Deliberately NOT [`crate::qos::Priority::from_wire`], which CLAMPS an
-/// out-of-range byte to DEFAULT. Clamping is right on the Frame path (a 3-bit
-/// field cannot overflow, so the arm is unreachable there), but here the field
-/// is a full BYTE and zenoh rejects an out-of-range one outright
-/// (`Priority::try_from(..)?` inside `try_from_u64`). Clamping would silently
-/// negotiate a band the peer never offered.
-#[cfg(feature = "session-extqos")]
-fn priority_try_from_wire(byte: u8) -> Option<crate::qos::Priority> {
-    (byte < crate::qos::Priority::NUM as u8).then(|| crate::qos::Priority::from_wire(byte))
-}
-
 /// Unpack a `QoSLink` z64 body — the inverse of [`qos_state_to_u64`] and a
 /// mirror of zenoh `State::try_from_u64`, INCLUDING its reject arm (a value
 /// whose tag bits are neither `0b000`, `0b001`, nor tag-carrying is an error,
 /// not a tolerated unknown).
+///
+/// The tag rule is written once, in `crate::extqos_offer`, which the observer's
+/// fold reads through as well; this projects its answer onto the link types.
 #[cfg(feature = "session-extqos")]
 pub fn qos_state_try_from_u64(value: u64) -> Result<PeerQos, QosLinkError> {
-    match value {
-        0b000_u64 => Ok(PeerQos::NoQoS),
-        0b001_u64 => Ok(PeerQos::QoS(QosLinkState::default())),
-        value if value & 0b110_u64 != 0 => {
-            let tag = value & 0b111_u64;
-            let priorities = if tag & 0b010_u64 != 0 {
-                let start = priority_try_from_wire(((value >> 3) & 0xff) as u8)
-                    .ok_or(QosLinkError::InvalidValue)?;
-                let end = priority_try_from_wire(((value >> (3 + 8)) & 0xff) as u8)
-                    .ok_or(QosLinkError::InvalidValue)?;
-                Some(crate::session_actions::LinkPriorityRange::new(start, end))
-            } else {
-                None
-            };
-            let reliability = if tag & 0b100_u64 != 0 {
-                let bit = ((value >> (3 + 8 + 8)) & 0x1) as u8 == 1;
-                Some(crate::reliability::Reliability::from_reliable_bool(bit))
-            } else {
-                None
-            };
-            Ok(PeerQos::QoS(QosLinkState {
-                priorities,
-                reliability,
-            }))
-        }
-        _ => Err(QosLinkError::InvalidValue),
-    }
+    Ok(PeerQos::from_state(
+        crate::extqos_offer::state_from_link_body(value)?,
+    ))
 }
 
 /// Build the `QoSLink` ext entry (`zextz64!(0x1)`, header `0x21`) carrying
@@ -380,25 +380,12 @@ pub fn encode_qos_ext_for(state: &QosLinkState) -> ExtEntryOwned {
 
 /// Project an inbound Init ext chain into the peer's QoS establishment state —
 /// zenoh `State::try_from_exts`. Both forms present is the one hard error;
-/// neither present is `NoQoS`.
+/// neither present is `NoQoS`, and so is a `QoSLink` of body `0`.
 #[cfg(feature = "session-extqos")]
 pub fn peer_qos_ext_state(extensions: &[ExtEntryOwned]) -> Result<PeerQos, QosLinkError> {
-    use wz_codecs::ext_entry::ExtEntryOwnedVariant;
-    let unit = chain_has_ext_eid(extensions, QOS_EXT_ID);
-    let link = extensions
-        .iter()
-        .find(|e| crate::ext_header::ext_eid(e.header) == QOS_LINK_EXT_HEADER);
-    match (unit, link) {
-        (true, Some(_)) => Err(QosLinkError::BothForms),
-        (true, None) => Ok(PeerQos::QoS(QosLinkState::default())),
-        (false, Some(entry)) => match &entry.body {
-            ExtEntryOwnedVariant::CodecZenohExtZint(z) => qos_state_try_from_u64(z.value),
-            // The header says Z64 but the decoded body is not a zint: a
-            // malformed entry, not a capability offer.
-            _ => Err(QosLinkError::InvalidValue),
-        },
-        (false, None) => Ok(PeerQos::NoQoS),
-    }
+    Ok(PeerQos::from_state(crate::extqos_offer::state_from_exts(
+        extensions,
+    )?))
 }
 
 /// The shared half of both merges: reliability must MATCH when both sides
@@ -497,20 +484,36 @@ mod tests {
     /// RANK-2 faithfulness: a priority-configured zenohd sends `QoSLink` (a z64
     /// at id 0x1, header `0x21` = id 0x1 | ENC_Z64 0x20), NOT the unit.
     /// `peer_offered_qos` must STILL read it as QoS (else wz mis-negotiates
-    /// NoQoS against a QoS peer). Only the presence at id 0x1 is under test
-    /// here; the body's range meaning is `session-extqos`'s and is covered by
-    /// the `qos_link` cases below.
+    /// NoQoS against a QoS peer). The body here is a band (RealTime..=DataHigh,
+    /// `0b010 | (1 << 3) | (4 << 11)`), what upstream writes for an endpoint with
+    /// `prio=1-4`; what a body of `0` means is the next test's.
     #[test]
     fn peer_offer_detected_for_the_z64_qoslink_form() {
         let qos_link = ExtEntryOwned {
             header: 0x21, // id 0x1 | ENC_Z64 (0x20)
-            body: ExtEntryOwnedVariant::CodecZenohExtZint(ExtZint::default()),
+            body: ExtEntryOwnedVariant::CodecZenohExtZint(ExtZint {
+                value: 0b010 | (1 << 3) | (4 << 11),
+            }),
         };
         assert_eq!(qos_link.ext_id(), QOS_EXT_ID, "the low nibble is the id");
         assert!(
             peer_offered_qos(&[qos_link]),
             "QoSLink (z64) at id 0x1 is is_qos=true, same as the unit form"
         );
+    }
+
+    /// A `QoSLink` OF BODY `0` IS NOT AN OFFER, though its header is the z64
+    /// one: upstream's `try_from_u64` reads `0` as `NoQoS`. This test used to
+    /// pin the opposite (it built the entry from `ExtZint::default()` and
+    /// asserted `true`), which made a participant keep `is_qos` on against a
+    /// peer upstream would have read as having none.
+    #[test]
+    fn peer_offer_absent_for_a_qoslink_of_body_zero() {
+        let qos_link = ExtEntryOwned {
+            header: 0x21,
+            body: ExtEntryOwnedVariant::CodecZenohExtZint(ExtZint::default()),
+        };
+        assert!(!peer_offered_qos(&[qos_link]));
     }
 
     /// An empty chain, or one carrying only a FOREIGN establishment ext (a 0x05
@@ -755,6 +758,46 @@ mod tests {
                 peer_qos_ext_state(&[encode_qos_ext(), encode_qos_link_ext(0b001)]),
                 Err(QosLinkError::BothForms)
             );
+
+            // A body of 0 is upstream's NoQoS, and a reserved tag is refused.
+            assert_eq!(
+                peer_qos_ext_state(&[encode_qos_link_ext(0)]),
+                Ok(PeerQos::NoQoS)
+            );
+            assert_eq!(
+                peer_qos_ext_state(&[encode_qos_link_ext(0b1000)]),
+                Err(QosLinkError::InvalidValue)
+            );
+        }
+
+        /// THE TWO READINGS OF A CHAIN AGREE: whether a chain offers QoS
+        /// (`peer_offered_qos`, which the `&=` merge ANDs) is whether its state
+        /// is QoS (`peer_qos_ext_state`, which the band merge reads). They were
+        /// two copies of the rule and disagreed on a `QoSLink` of body `0`,
+        /// where the first kept `is_qos` on and the second reported `NoQoS`.
+        #[test]
+        fn the_offer_and_the_state_agree_on_every_chain() {
+            let band_body = qos_state_to_u64(&state(
+                Some(band(Priority::RealTime, Priority::DataHigh)),
+                None,
+            ));
+            let chains: [alloc::vec::Vec<ExtEntryOwned>; 8] = [
+                alloc::vec![],
+                alloc::vec![encode_qos_ext()],
+                alloc::vec![encode_qos_link_ext(band_body)],
+                alloc::vec![encode_qos_link_ext(0b001)],
+                alloc::vec![encode_qos_link_ext(0)],
+                alloc::vec![encode_qos_link_ext(0b1000)],
+                alloc::vec![encode_qos_ext(), encode_qos_link_ext(band_body)],
+                alloc::vec![encode_unit_ext(0x05)],
+            ];
+            for chain in &chains {
+                assert_eq!(
+                    peer_offered_qos(chain),
+                    matches!(peer_qos_ext_state(chain), Ok(PeerQos::QoS(_))),
+                    "chain {chain:?}"
+                );
+            }
         }
 
         /// ACCEPTOR containment (zenoh `recv_init_syn`): the initiator's band

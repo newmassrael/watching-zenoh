@@ -1087,6 +1087,14 @@ pub mod passive_keyexpr;
 /// for honouring the markers without refusing every patch-0 peer's chains.
 pub mod extpatch;
 
+/// What an Init ext chain OFFERS for QoS, read the way upstream reads it: the
+/// unit `QoS`, the z64 `QoSLink` and the `QoSLink` body that says "no QoS". It
+/// is the one question a session's `qos` is the `&=` of. UNGATED, unlike
+/// `extqos`, which sends and negotiates: the passive observer folds both Inits
+/// of a handshake in a build that selects no QoS feature, and `extqos` reads
+/// through this module so that the two cannot disagree.
+pub mod extqos_offer;
+
 /// SSOT for the `0x8` REGION-NAME establishment ext — a node's region
 /// identity, announced on Init and read off the peer's. The pin GREW this
 /// extension (it is absent from the 1.5.0 establishment `ext/` tree), and

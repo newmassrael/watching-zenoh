@@ -203,6 +203,10 @@ pub struct FlowContext {
     /// `QoS` (`0x1`) offered by BOTH sides, as the running `&=`; read through
     /// [`Self::qos()`]. Whether a non-DEFAULT `ext_qos` priority on a Frame or
     /// Fragment is meaningful.
+    ///
+    /// An Init offers QoS in either of upstream's two forms, the unit `QoS` or
+    /// the z64 `QoSLink`, and a `QoSLink` offers it by its BODY: a body of `0` is
+    /// upstream's `NoQoS` ([`crate::extqos_offer`] holds the whole rule).
     qos: bool,
     /// The `min` of both sides' `0x7` announcements, `None` until at least one
     /// Init has been seen. `Some(0)` and `None` are DIFFERENT: the first says
@@ -485,8 +489,10 @@ impl FlowContext {
         self.negotiated().then_some(self.compression)
     }
 
-    /// `QoS` (`0x1`) negotiated for the session — offered by BOTH sides — or
-    /// `None` while the Init pair has not been seen.
+    /// `QoS` (`0x1`) negotiated for the session — offered by BOTH sides, each in
+    /// either of upstream's forms (the unit `QoS` or a `QoSLink` whose body is
+    /// not `NoQoS`; see [`crate::extqos_offer`]) — or `None` while the Init pair
+    /// has not been seen.
     pub fn qos(&self) -> Option<bool> {
         self.negotiated().then_some(self.qos)
     }
@@ -532,7 +538,7 @@ impl FlowContext {
     fn fold_init(&mut self, extensions: &[ExtEntryOwned]) {
         self.lowlatency &= has_est_ext(extensions, est_ext::LOWLATENCY);
         self.compression &= has_est_ext(extensions, est_ext::COMPRESSION);
-        self.qos &= has_est_ext(extensions, est_ext::QOS);
+        self.qos &= crate::extqos_offer::offers_qos(extensions);
         self.auth_offered |= has_any_ext_id(extensions, est_ext::AUTH);
         self.shm_offered |= has_any_ext_id(extensions, est_ext::SHM);
         self.multilink_offered |= has_any_ext_id(extensions, est_ext::MULTILINK);
@@ -2998,6 +3004,17 @@ mod tests {
         }
     }
 
+    /// The z64 `QoSLink` (`zextz64!(0x1, false)`, header `0x21`) carrying
+    /// `value` as its body.
+    fn qos_link_ext(value: u64) -> ExtEntryOwned {
+        ExtEntryOwned {
+            header: est_ext::QOS | crate::ext_header::EXT_ENC_Z64,
+            body: wz_codecs::ext_entry::ExtEntryOwnedVariant::CodecZenohExtZint(
+                wz_codecs::ext_zint::ExtZint { value },
+            ),
+        }
+    }
+
     /// THE reframing case, which no wz-to-wz fixture reaches: a session that
     /// negotiates `LowLatency` on both Inits switches its stream prefix from
     /// 2 bytes to 4 AT ESTABLISHED — not at Init.
@@ -3656,6 +3673,130 @@ mod tests {
                     "capability {id:#x} offered by A: {a_offers}, by B: {b_offers}"
                 );
             }
+        }
+    }
+
+    /// A QoS offer as an Init chain can carry it: absent, in upstream's unit
+    /// form, or in its z64 `QoSLink` form with each kind of body, plus the two
+    /// shapes upstream refuses. Each variant names the chain it builds.
+    #[derive(Clone, Copy, Debug)]
+    enum QosOffer {
+        Nothing,
+        Unit,
+        /// `QoSLink`, a band (RealTime..=DataHigh), what upstream writes for an
+        /// endpoint with `prio=`: `0b010 | (1 << 3) | (4 << 11)`.
+        LinkBand,
+        /// `QoSLink`, a class alone (reliable), an endpoint with `rel=`:
+        /// `0b100 | (1 << 19)`.
+        LinkClass,
+        /// `QoSLink`, body `1`: QoS with neither, which upstream's reader
+        /// accepts and its writer never produces.
+        LinkBare,
+        /// `QoSLink`, body `0`: upstream's `NoQoS`.
+        LinkZero,
+        /// `QoSLink`, a tag upstream has no state for.
+        LinkReserved,
+        /// `QoSLink`, a band whose start priority is 9.
+        LinkBadPriority,
+        /// Both forms on one chain.
+        BothForms,
+    }
+
+    impl QosOffer {
+        const ALL: [QosOffer; 9] = [
+            QosOffer::Nothing,
+            QosOffer::Unit,
+            QosOffer::LinkBand,
+            QosOffer::LinkClass,
+            QosOffer::LinkBare,
+            QosOffer::LinkZero,
+            QosOffer::LinkReserved,
+            QosOffer::LinkBadPriority,
+            QosOffer::BothForms,
+        ];
+
+        fn chain(self) -> Vec<ExtEntryOwned> {
+            match self {
+                QosOffer::Nothing => vec![],
+                QosOffer::Unit => vec![unit_ext(est_ext::QOS)],
+                QosOffer::LinkBand => vec![qos_link_ext(0b010 | (1 << 3) | (4 << 11))],
+                QosOffer::LinkClass => vec![qos_link_ext(0b100 | (1 << 19))],
+                QosOffer::LinkBare => vec![qos_link_ext(1)],
+                QosOffer::LinkZero => vec![qos_link_ext(0)],
+                QosOffer::LinkReserved => vec![qos_link_ext(0b1000)],
+                QosOffer::LinkBadPriority => vec![qos_link_ext(0b010 | (9 << 3))],
+                QosOffer::BothForms => vec![
+                    unit_ext(est_ext::QOS),
+                    qos_link_ext(0b010 | (1 << 3) | (4 << 11)),
+                ],
+            }
+        }
+
+        /// Whether upstream's reader takes this chain for QoS, written from its
+        /// `try_from_exts` / `try_from_u64` and not from the code under test: a
+        /// unit entry, and a `QoSLink` whose body is `1` or carries a band or a
+        /// class, are QoS; no entry and a body of `0` are `NoQoS`; the rest
+        /// make the handshake fail and offer nothing.
+        fn upstream_reads_as_qos(self) -> bool {
+            matches!(
+                self,
+                QosOffer::Unit | QosOffer::LinkBand | QosOffer::LinkClass | QosOffer::LinkBare
+            )
+        }
+    }
+
+    /// A SESSION'S `qos` IS THE `&=` OF WHAT BOTH INITS OFFER, in either form
+    /// and in every combination of forms.
+    ///
+    /// The unit form was the only one counted: a session whose Inits both
+    /// carried the z64 `QoSLink` read `qos: false` beside `negotiated: true`,
+    /// although upstream sets `is_qos` for it. Every ordered pair of the nine
+    /// chains is folded, so a fold that counts one form only, one DIRECTION
+    /// only, or reads a `QoSLink` by its header and not its body, is wrong for
+    /// at least one pair. The oracle is upstream's table, written on
+    /// [`QosOffer::upstream_reads_as_qos`].
+    #[test]
+    fn qos_is_agreed_when_both_inits_offer_it_whatever_the_form() {
+        let mut agreed = 0usize;
+        for a in QosOffer::ALL {
+            for b in QosOffer::ALL {
+                let mut s = PassiveSession::new();
+                s.push(Direction::A, &framed(&init_wire(false, a.chain()), 2));
+                s.push(Direction::B, &framed(&init_wire(true, b.chain()), 2));
+                s.next_frame(Direction::A).expect("the InitSyn decodes");
+                s.next_frame(Direction::B).expect("the InitAck decodes");
+                let expected = a.upstream_reads_as_qos() && b.upstream_reads_as_qos();
+                assert_eq!(
+                    s.context().qos(),
+                    Some(expected),
+                    "InitSyn offers {a:?}, InitAck offers {b:?}"
+                );
+                agreed += usize::from(expected);
+            }
+        }
+        assert_eq!(
+            agreed,
+            4 * 4,
+            "four offers upstream reads as QoS on each side, so the table is not vacuous"
+        );
+    }
+
+    /// A `QoSLink` OFFER SETTLES NOTHING UNTIL THE OTHER INIT IS SEEN, as the
+    /// unit form does: the capability stays unknown, not `false`.
+    #[test]
+    fn a_qoslink_offer_alone_negotiates_nothing() {
+        for direction in [Direction::A, Direction::B] {
+            let mut s = PassiveSession::new();
+            s.push(
+                direction,
+                &framed(
+                    &init_wire(direction == Direction::B, QosOffer::LinkBand.chain()),
+                    2,
+                ),
+            );
+            s.next_frame(direction).expect("the Init decodes");
+            assert!(!s.context().negotiated());
+            assert_eq!(s.context().qos(), None, "{direction:?}");
         }
     }
 
