@@ -1180,6 +1180,177 @@ static int check_proto_door(void) {
     return 0;
 }
 
+/* (ABI 26) -- THE PROTECTED-FRAME DOORS, driven from C the way a consumer that
+ * both produces and analyses such frames will: the profile is text it holds,
+ * the frame crosses as bytes, and a refusal is a verdict with a place in a
+ * text. The Rust side owns the arithmetic (the CRC, the order it is fed, the
+ * masks); this owns that the symbols, the verdicts and the memory rule cross
+ * the boundary as the header says.
+ *
+ * The profile is a synthetic one. Its numbers are chosen to make the sums easy
+ * to check by hand and are not any protocol's. */
+static const char e2e_profile[] =
+    "{\"name\":\"c-demo\","
+    " \"fields\":["
+    "  {\"name\":\"crc\",\"bytes\":2},"
+    "  {\"name\":\"length\",\"bytes\":1},"
+    "  {\"name\":\"counter\",\"bytes\":1},"
+    "  {\"name\":\"ident\",\"bytes\":2,\"xor\":\"0x00FF\","
+    "   \"split\":[{\"name\":\"hi\",\"lsb\":8,\"width\":8},"
+    "              {\"name\":\"lo\",\"lsb\":0,\"width\":8}]}],"
+    " \"crc\":{\"field\":\"crc\",\"width\":16,\"poly\":\"0x1021\","
+    "   \"init\":\"0xFFFF\",\"refin\":false,\"refout\":false,\"xorout\":0,"
+    "   \"cover\":[\"length\",\"ident\",\"@payload\",\"counter\"]},"
+    " \"length\":{\"field\":\"length\",\"counts\":\"frame\"},"
+    " \"counter\":{\"field\":\"counter\",\"max_gap\":4,\"timeout_ms\":100}}";
+
+/* The two lowercase hex digits at `s` as a byte. */
+static unsigned char hex_pair(const char *s) {
+    unsigned char out = 0;
+    int i;
+    for (i = 0; i < 2; i++) {
+        char c = s[i];
+        out = (unsigned char)(out << 4);
+        out |= (unsigned char)(c >= 'a' ? c - 'a' + 10 : c - '0');
+    }
+    return out;
+}
+
+static int check_e2e_doors(void) {
+    static const unsigned char body[] = {0xDE, 0xAD, 0xBE};
+    unsigned char frame[16];
+    char *doc = NULL;
+    const char *at;
+    size_t frame_len = 0;
+    int rc;
+
+    rc = wz_dissect_e2e_wrap(e2e_profile,
+                             "{\"counter\":7,\"ident\":{\"hi\":1,\"lo\":2}}",
+                             body, sizeof body, &doc);
+    CHECK(rc == WZ_DISSECT_OK, "e2e_wrap rc=%d", rc);
+    CHECK(doc != NULL, "OK came back with no string");
+    CHECK(strstr(doc, "\"ok\":true") != NULL, "a valid frame was refused: %s",
+          doc);
+    /* Header: crc 2, length 1, counter 1, ident 2 = 6 bytes, then 3 body
+     * bytes. The length counts the frame (9), and the ident is 0x0102 XOR
+     * 0x00FF = 0x01FD on the wire. */
+    CHECK(strstr(doc, "\"payload_offset\":6,\"payload_bytes\":3") != NULL,
+          "unexpected extent: %s", doc);
+    CHECK(strstr(doc, "\"length_field\":9") != NULL, "unexpected length: %s",
+          doc);
+    CHECK(strstr(doc, "{\"name\":\"ident\",\"offset\":4,\"bytes\":2,"
+                      "\"raw\":509,\"value\":258,"
+                      "\"parts\":[{\"name\":\"hi\",\"value\":1},"
+                      "{\"name\":\"lo\",\"value\":2}]}") != NULL,
+          "the xor must be applied after the parts are joined: %s", doc);
+    CHECK(strstr(doc, "\"crc_fed\":[{\"item\":\"length\",\"bytes\":1,"
+                      "\"hex\":\"09\"},{\"item\":\"ident\",\"bytes\":2,"
+                      "\"hex\":\"01fd\"},{\"item\":\"@payload\",\"bytes\":3},"
+                      "{\"item\":\"counter\",\"bytes\":1,\"hex\":\"07\"}]") !=
+              NULL,
+          "the CRC must be fed in the profile's order: %s", doc);
+    CHECK(strstr(doc, "null") == NULL, "no key is ever null: %s", doc);
+
+    /* Take the frame out of the document as the consumer would, and open it. */
+    at = strstr(doc, "\"frame\":\"");
+    CHECK(at != NULL, "no frame in the document: %s", doc);
+    at += strlen("\"frame\":\"");
+    while (at[frame_len * 2] != '"' && frame_len < sizeof frame) {
+        frame[frame_len] = hex_pair(at + frame_len * 2);
+        frame_len++;
+    }
+    CHECK(frame_len == 9, "the frame is %zu bytes", frame_len);
+    wz_dissect_string_free(doc);
+
+    doc = NULL;
+    rc = wz_dissect_e2e_open(e2e_profile, frame, frame_len, &doc);
+    CHECK(rc == WZ_DISSECT_OK, "e2e_open rc=%d", rc);
+    CHECK(strstr(doc, "\"crc_ok\":true") != NULL, "the frame must verify: %s",
+          doc);
+    CHECK(strstr(doc, "\"length_field\":9,\"length_expected\":9,"
+                      "\"length_matches_frame\":true") != NULL,
+          "unexpected length facts: %s", doc);
+    wz_dissect_string_free(doc);
+
+    /* One flipped bit in the body is a CRC failure and not a length one. */
+    frame[frame_len - 1] ^= 0x01;
+    doc = NULL;
+    rc = wz_dissect_e2e_open(e2e_profile, frame, frame_len, &doc);
+    CHECK(rc == WZ_DISSECT_OK, "damaged frame rc=%d", rc);
+    CHECK(strstr(doc, "\"crc_ok\":false") != NULL &&
+              strstr(doc, "\"length_matches_frame\":true") != NULL,
+          "damage must be a CRC fact only: %s", doc);
+    wz_dissect_string_free(doc);
+
+    /* A profile with no fields is refused at its root, by a path. */
+    doc = NULL;
+    rc = wz_dissect_e2e_open("{\"name\":\"x\"}", frame, frame_len, &doc);
+    CHECK(rc == WZ_DISSECT_OK, "refused profile rc=%d", rc);
+    CHECK(strstr(doc, "\"ok\":false") != NULL &&
+              strstr(doc, "\"profile_path\":\"\"") != NULL &&
+              strstr(doc, "\"message\":\"profile: ") != NULL,
+          "a profile with no fields must be blamed at its root: %s", doc);
+    CHECK(strstr(doc, "null") == NULL, "no key is ever null: %s", doc);
+    wz_dissect_string_free(doc);
+
+    /* A value that does not fit is refused, never truncated. */
+    doc = NULL;
+    rc = wz_dissect_e2e_wrap(e2e_profile,
+                             "{\"counter\":7,\"ident\":{\"hi\":256,\"lo\":2}}",
+                             body, sizeof body, &doc);
+    CHECK(rc == WZ_DISSECT_OK, "overflowing value rc=%d", rc);
+    CHECK(strstr(doc, "\"ok\":false") != NULL &&
+              strstr(doc, "\"values_path\":\"/ident/hi\"") != NULL,
+          "an overflowing part must be blamed at its path: %s", doc);
+    wz_dissect_string_free(doc);
+
+    /* An empty body may be a null pointer of length zero. */
+    doc = NULL;
+    rc = wz_dissect_e2e_wrap(e2e_profile,
+                             "{\"counter\":7,\"ident\":{\"hi\":1,\"lo\":2}}",
+                             NULL, 0, &doc);
+    CHECK(rc == WZ_DISSECT_OK && doc != NULL &&
+              strstr(doc, "\"payload_bytes\":0") != NULL,
+          "an empty body: rc=%d", rc);
+    wz_dissect_string_free(doc);
+
+    /* A frame shorter than the header is a verdict. */
+    doc = NULL;
+    rc = wz_dissect_e2e_open(e2e_profile, frame, 5, &doc);
+    CHECK(rc == WZ_DISSECT_OK && doc != NULL &&
+              strstr(doc, "\"ok\":false") != NULL &&
+              strstr(doc, "the frame is 5 bytes and the header alone is 6") !=
+                  NULL,
+          "a short frame: rc=%d", rc);
+    wz_dissect_string_free(doc);
+
+    /* Caller bugs are the argument error, with no string handed back. */
+    doc = NULL;
+    rc = wz_dissect_e2e_wrap(NULL, "{}", body, sizeof body, &doc);
+    CHECK(rc == WZ_DISSECT_ERR_INVALID_ARG && doc == NULL,
+          "a null profile rc=%d", rc);
+    rc = wz_dissect_e2e_wrap(e2e_profile, NULL, body, sizeof body, &doc);
+    CHECK(rc == WZ_DISSECT_ERR_INVALID_ARG && doc == NULL,
+          "null values rc=%d", rc);
+    rc = wz_dissect_e2e_wrap(e2e_profile, "{}", NULL, 3, &doc);
+    CHECK(rc == WZ_DISSECT_ERR_INVALID_ARG && doc == NULL,
+          "a null body with a length rc=%d", rc);
+    rc = wz_dissect_e2e_wrap(e2e_profile, "{}", body, sizeof body, NULL);
+    CHECK(rc == WZ_DISSECT_ERR_INVALID_ARG, "a null out rc=%d", rc);
+    rc = wz_dissect_e2e_open(NULL, frame, frame_len, &doc);
+    CHECK(rc == WZ_DISSECT_ERR_INVALID_ARG && doc == NULL,
+          "open: a null profile rc=%d", rc);
+    rc = wz_dissect_e2e_open(e2e_profile, NULL, 3, &doc);
+    CHECK(rc == WZ_DISSECT_ERR_INVALID_ARG && doc == NULL,
+          "open: a null frame with a length rc=%d", rc);
+    rc = wz_dissect_e2e_open(e2e_profile, frame, frame_len, NULL);
+    CHECK(rc == WZ_DISSECT_ERR_INVALID_ARG, "open: a null out rc=%d", rc);
+    rc = wz_dissect_e2e_open("{\"name\":\"\xff\"}", frame, frame_len, &doc);
+    CHECK(rc == WZ_DISSECT_ERR_INVALID_ARG && doc == NULL,
+          "a profile that is not UTF-8 rc=%d", rc);
+    return 0;
+}
+
 int main(void) {
     /* The symbol/memory-contract revision. A consumer refuses a library whose
      * memory rules moved; this asserts the value the header was written for. */
@@ -1763,7 +1934,7 @@ int main(void) {
         const char *name;
         unsigned revision;
         char *doc;
-    } revisioned[7];
+    } revisioned[9];
     revisioned[0].name = "census";
     /* R2119 (open-debt item 455) -- 2: the census announced `first_packet`'s
      * retirement beside its successor `first_anchor`.
@@ -2031,6 +2202,26 @@ int main(void) {
                                                 &revisioned[6].doc);
         CHECK(rc == WZ_DISSECT_OK, "from_proto document rc=%d", rc);
     }
+    /* (ABI 26) -- the two protected-frame documents. 1: the first revision a
+     * consumer could read. Each is built from the smallest profile there is,
+     * which is the cheapest way to hold the document's opening to the revision
+     * this consumer was written against. */
+    revisioned[7].name = "e2e_wrap";
+    revisioned[7].revision = 1;
+    revisioned[7].doc = NULL;
+    rc = wz_dissect_e2e_wrap(e2e_profile,
+                             "{\"counter\":1,\"ident\":{\"hi\":0,\"lo\":0}}",
+                             NULL, 0, &revisioned[7].doc);
+    CHECK(rc == WZ_DISSECT_OK, "e2e_wrap document rc=%d", rc);
+    revisioned[8].name = "e2e_open";
+    revisioned[8].revision = 1;
+    revisioned[8].doc = NULL;
+    {
+        static const unsigned char header_only[6] = {0, 0, 6, 1, 0, 255};
+        rc = wz_dissect_e2e_open(e2e_profile, header_only, sizeof header_only,
+                                 &revisioned[8].doc);
+        CHECK(rc == WZ_DISSECT_OK, "e2e_open document rc=%d", rc);
+    }
 
     /* R2182 -- THE ENVELOPE MAY CARRY MORE AFTER THE REVISION, and this loop
      * used to forbid it by ending the expected prefix with `}`.
@@ -2129,6 +2320,12 @@ int main(void) {
     /* (ABI 25) -- and a .proto schema turned into the declarations the doors
      * above take, so a consumer offering "add from file" never reads .proto. */
     if (check_proto_door() != 0) {
+        return 1;
+    }
+
+    /* (ABI 26) -- and a protected frame built and opened under a profile the
+     * consumer passes as text, so it never carries the arithmetic itself. */
+    if (check_e2e_doors() != 0) {
         return 1;
     }
 

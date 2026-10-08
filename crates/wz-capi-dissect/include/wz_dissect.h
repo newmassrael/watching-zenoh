@@ -1071,7 +1071,7 @@ extern "C" {
  * calls the function, and refuses when the two disagree.
  *
  * @unknown ABI not-an-enumeration */
-#define WZ_DISSECT_ABI_REVISION 25
+#define WZ_DISSECT_ABI_REVISION 26
 
 /* Symbol/memory-contract revision. Not a JSON-shape revision. This is the
  * revision the LOADED library reports; the block above says why it exists
@@ -1812,6 +1812,166 @@ int wz_dissect_declarations_from_proto(const char *key_pattern,
                                        const wz_dissect_proto_file *files,
                                        size_t file_count, size_t root_file,
                                        char **out);
+
+/* (ABI 26) -- A PROTECTED FRAME BUILT AND OPENED UNDER A PROFILE YOU DESCRIBE:
+ * the mechanism of an end-to-end protection header, with none of anyone's
+ * constants in it.
+ *
+ * WHY IT IS HERE AND NOT IN YOUR PROGRAM. A payload can travel behind a
+ * protection header: a length, an identifier, a CRC, a message cell and a
+ * counter, in an order and at widths that differ from one deployment to the
+ * next, with a CRC taken over some of those fields and the body in an order the
+ * profile fixes and that is generally NOT the wire order. A program that
+ * produces such frames and also analyses them, each with its own copy of the
+ * arithmetic, holds two readers of one format, and two readers disagree exactly
+ * where a format is unusual: which fields the CRC covers, in which order and
+ * byte order, and whether a mask is applied before the bits are cut out of a
+ * field or after. These two doors are the one writer and the one reader.
+ *
+ * WZ OWNS THE MECHANISM, YOU OWN THE CONSTANTS. Nothing about any one protocol
+ * is built in. A PROFILE is a JSON text you pass on every call: the header's
+ * fields in wire order, the masks and bit ranges, the CRC's six parameters and
+ * the order it is fed, and how the length is counted. The doors keep no state
+ * between calls, so the profile is chosen per call and two profiles can be in
+ * use at once. The only constants this library carries are published CRC
+ * definitions, in its tests.
+ *
+ * THE PROFILE (the masks here are an example's, not any protocol's).
+ *
+ *     {"name":"demo",
+ *      "fields":[
+ *        {"name":"crc","bytes":4},
+ *        {"name":"length","bytes":2},
+ *        {"name":"counter","bytes":2},
+ *        {"name":"ident","bytes":4,"xor":"0x0F0F0F0F",
+ *         "split":[{"name":"domain","lsb":24,"width":8},
+ *                  {"name":"version","lsb":16,"width":8},
+ *                  {"name":"msg","lsb":0,"width":16}]}],
+ *      "crc":{"field":"crc","width":32,"poly":"0xF4ACFB13","init":"0xFFFFFFFF",
+ *             "refin":true,"refout":true,"xorout":"0xFFFFFFFF",
+ *             "cover":["length","ident","@payload","counter"]},
+ *      "length":{"field":"length","counts":"frame"},
+ *      "counter":{"field":"counter","max_gap":10,"timeout_ms":1000}}
+ *
+ *   - A field is a big-endian unsigned integer of 1 to 8 bytes, laid out in the
+ *     order written with no gaps. `xor` (optional) is XORed into it on the
+ *     wire. `split` (optional) names bit ranges of its LOGICAL value, `lsb`
+ *     counting from the least significant bit. Building ORs the parts at their
+ *     `lsb`, then XORs, then writes; opening reads, XORs, then splits. A part
+ *     value that does not fit its `width` is refused, never truncated.
+ *   - `crc.cover` is the FEEDING ORDER: field names, and "@payload" for the
+ *     body. Each covered field is fed as it stands ON THE WIRE (after `xor`),
+ *     at its own width, big-endian. The CRC field is never covered and there is
+ *     no zero-fill step. `width` is 8, 16, 32 or 64; the CRC field may be wider
+ *     than the CRC (zero-extended) but not narrower. The six parameters are the
+ *     catalogue's (Cook, "Catalogue of parametrised CRC algorithms"), and none
+ *     of them has a default.
+ *   - `length.counts` is "frame" (header plus body) or "frame_minus" with
+ *     `"fields":[...]` (header plus body less the widths of the listed fields).
+ *     Which of the two a sender used is not on the wire.
+ *   - `counter` names the field a receiver judges, the largest forward step it
+ *     accepts and the silence it tolerates. The doors below do not judge; see
+ *     WHAT THIS DOES NOT DO.
+ *   - The CRC, length and counter fields carry no `xor` and no `split`, and are
+ *     three different fields.
+ *
+ * Integers in a profile or a values text are JSON numbers (plain decimal) or
+ * strings (decimal, or 0x and hex digits), so a 64-bit value survives a reader
+ * that holds numbers as doubles. The text is read by the library's one JSON
+ * reader, which reads JSON5, and so admits what JSON5 admits (comments,
+ * trailing commas, single-quoted strings, unquoted keys); every key and value is
+ * then checked strictly. An unknown key, a key written twice, a width that does
+ * not fit, overlapping parts, a cover that names no field, an unsupported CRC
+ * width and every other malformed shape is refused. So is nesting deeper than 8
+ * levels (a profile needs five): the reader recurses once per level, and a text
+ * a person chose must not be able to exhaust the stack of the program that
+ * linked this library.
+ *
+ * wz_dissect_e2e_wrap -- the frame for one set of values.
+ *
+ * `values_json` supplies every field the mechanism does not compute, the
+ * counter included: an object keyed by field name, each a number or, for a
+ * split field, an object of numbers keyed by part name. The CRC and the length
+ * are computed, and supplying either is refused. `payload` is the body, already
+ * serialized by you; it may be NULL only when `payload_len` is 0.
+ *
+ *     {"counter":258,"ident":{"domain":3,"version":7,"msg":4660}}
+ *
+ * The verdict, with every step so a caller can check the arithmetic:
+ *
+ *     {"document":{"name":"e2e_wrap","revision":1},"ok":true,"profile":"demo",
+ *      "frame":"76a31259001001020c081d3bdeadbeef",
+ *      "payload_offset":12,"payload_bytes":4,
+ *      "fields":[{"name":"crc","offset":0,"bytes":4,"raw":1990398553,"value":1990398553},
+ *                {"name":"length","offset":4,"bytes":2,"raw":16,"value":16},
+ *                {"name":"counter","offset":6,"bytes":2,"raw":258,"value":258},
+ *                {"name":"ident","offset":8,"bytes":4,"raw":201858363,"value":50795060,
+ *                 "parts":[{"name":"domain","value":3},{"name":"version","value":7},
+ *                          {"name":"msg","value":4660}]}],
+ *      "crc_computed":1990398553,
+ *      "crc_fed":[{"item":"length","bytes":2,"hex":"0010"},
+ *                 {"item":"ident","bytes":4,"hex":"0c081d3b"},
+ *                 {"item":"@payload","bytes":4},
+ *                 {"item":"counter","bytes":2,"hex":"0102"}],
+ *      "length_field":16}
+ *
+ * `frame` is the header and the body as lowercase hex. A field's `raw` is the
+ * integer on the wire and its `value` the logical value its parts are cut from
+ * (`raw` with the `xor` undone). `crc_fed` is what went into the CRC, in order,
+ * with the bytes of every header field; the body is counted, not repeated.
+ *
+ * wz_dissect_e2e_open -- what a received frame says.
+ *
+ *     {"document":{"name":"e2e_open","revision":1},"ok":true,"profile":"demo",
+ *      "payload_offset":12,"payload_bytes":4,
+ *      "fields":[ ...as above... ],
+ *      "crc_ok":true,"crc_computed":1990398553,"crc_fed":[ ...as above... ],
+ *      "length_field":16,"length_expected":16,"length_matches_frame":true}
+ *
+ * The body is whatever follows the header; its extent is never taken from the
+ * length field. THE LENGTH IS INFORMATION, SEPARATE FROM THE CRC VERDICT:
+ * `length_field` is what the field holds, `length_expected` what the profile's
+ * rule gives for this frame, and `length_matches_frame` whether they agree. The
+ * CRC is taken over the length field as it stands on the wire, never over a
+ * length recomputed from the frame, so a sender that counts the length by
+ * another rule than your profile's still produces frames whose CRC verifies and
+ * shows only as `length_matches_frame` false, while damage shows as `crc_ok`
+ * false, with the length facts clean unless the length field itself was hit.
+ * The pair tells "the sender counts differently" from "bytes were damaged".
+ * `crc_ok` compares the CRC field, whole, with the recomputed value.
+ *
+ * WHAT THIS DOES NOT DO. It does not judge a SEQUENCE of frames (the counter's
+ * step, a repetition, the silence between valid frames): that needs state per
+ * stream, and which streams a deployment has is yours to decide. The counter is
+ * in `fields`, with `crc_ok` beside it, which is what a judge reads. It does
+ * not serialize the body, and it does not know which profile a given topic
+ * uses: you pass the profile.
+ *
+ * THE FAILURE MODES are the ones every document door here keeps. A text this
+ * library was handed and refused is a successful DIAGNOSIS: both doors return
+ * WZ_DISSECT_OK and write
+ *
+ *     {"document":{...},"ok":false,"profile_path":"/crc/field",
+ *      "reason":"...","message":"profile /crc/field: ..."}
+ *
+ * The text that was refused is named by the key that locates the place:
+ * `profile_path` (an RFC 6901 JSON pointer; "" is the document itself) or
+ * `profile_offset` (a byte offset, when the text is not JSON at all) for the
+ * profile, and `values_path` or `values_offset` for the values. A refusal that
+ * is about no text -- a body too long for the length field, a frame shorter than
+ * the header -- carries neither. The key is ABSENT where it does not apply and
+ * never null: a top-level null is what this library reserves for a plane it
+ * cannot feed. `message` is the one-line form.
+ *
+ * Returns WZ_DISSECT_ERR_INVALID_ARG, and no string, for a caller bug: a null
+ * `profile_json`, `values_json` or `out`, a null `payload` or `frame` with a
+ * non-zero length, or text that is not UTF-8. The memory rule does not move: the
+ * verdict is a `char*` released by wz_dissect_string_free. */
+int wz_dissect_e2e_wrap(const char *profile_json, const char *values_json,
+                        const unsigned char *payload, size_t payload_len,
+                        char **out);
+int wz_dissect_e2e_open(const char *profile_json, const unsigned char *frame,
+                        size_t frame_len, char **out);
 
 /* R311y913 (ABI 9) — what this build can READ, without a capture.
  *

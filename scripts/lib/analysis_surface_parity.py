@@ -409,6 +409,28 @@ ONLY_CAPI = {
         "no code that reads the language.",
         (),
     ),
+    "a protected frame built under a described profile": (
+        "wz_dissect_e2e_wrap",
+        "DELIBERATE for now. The door exists because a consumer that LINKS this "
+        "library and produces frames behind an end-to-end protection header must "
+        "not carry the CRC arithmetic, the feeding order or the mask-then-split "
+        "rule itself: a second copy of them is a second opinion about what a "
+        "valid frame is. The profile is data the caller passes on every call, so "
+        "nothing about any one protocol is built in. The command line has no "
+        "flag that builds a frame, and the mechanism behind the door "
+        "(`wz_capture::e2e_frame`) is ungated, so a flag would add no code that "
+        "computes a CRC.",
+        (),
+    ),
+    "a protected frame opened under a described profile": (
+        "wz_dissect_e2e_open",
+        "DELIBERATE for now, on the argument the row above makes for the reading "
+        "half. A command line that analysed a capture would reach this through "
+        "the payload seam (a profile registered once and chosen per key "
+        "pattern), which is a later step; until it exists the door is how a "
+        "linking consumer reads one frame it holds.",
+        (),
+    ),
     "the ABI revision": (
         "wz_dissect_abi_version",
         "Not an analysis capability -- it is how a consumer refuses a library whose "

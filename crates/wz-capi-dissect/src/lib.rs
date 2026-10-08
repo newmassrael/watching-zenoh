@@ -334,6 +334,7 @@ pub extern "C" fn wz_dissect_abi_version() -> c_int {
     // 23, for `wz_dissect_live_retention`.
     // 24, for `wz_dissect_live_health`.
     // 25, for `wz_dissect_declarations_from_proto`.
+    // 26, for `wz_dissect_e2e_wrap` and `wz_dissect_e2e_open`.
     WZ_DISSECT_ABI_REVISION
 }
 
@@ -351,7 +352,7 @@ pub extern "C" fn wz_dissect_abi_version() -> c_int {
 /// It lives AFTER the function rather than above it on purpose: an item placed
 /// between a doc comment and the item it documents takes that doc, which is
 /// the doc-ownership defect the C1bz budget records.
-pub const WZ_DISSECT_ABI_REVISION: c_int = 25;
+pub const WZ_DISSECT_ABI_REVISION: c_int = 26;
 
 /// R2108 (open-debt item 525) — THE RECORD'S LAYOUT, reported by the artifact.
 ///
@@ -1580,6 +1581,136 @@ fn proto_verdict(
             s
         }
     }
+}
+
+/// A PROTECTED FRAME BUILT UNDER A PROFILE THE CALLER DESCRIBES: an end-to-end
+/// protection header in front of a payload, with the CRC, the length and every
+/// field computed here.
+///
+/// # Why this is a door
+///
+/// A program that produces such frames and also analyses them, each with its own
+/// copy of the arithmetic, holds two readers of one format, and two readers
+/// disagree where a format is unusual: which fields the CRC covers, in which
+/// order, whether a mask is applied before the bits are cut out of a field or
+/// after. [`wz_capture::e2e_frame`] is the one writer and the one reader;
+/// `wz_capture::e2e_profile` documents the profile, which is JSON the caller
+/// passes on every call. Nothing about any one protocol is built in, and no
+/// state survives a call, so the profile is chosen per call.
+///
+/// # Arguments
+///
+/// * `profile_json` -- the profile, NUL-terminated UTF-8.
+/// * `values_json` -- the value of every field the mechanism does not compute
+///   (the counter included), NUL-terminated UTF-8: an object keyed by field
+///   name, each a number or, for a split field, an object of numbers by part
+///   name. The CRC and the length are computed; supplying either is refused.
+/// * `payload`, `payload_len` -- the body, already serialized by the caller.
+///   `payload` may be null only when `payload_len` is zero.
+///
+/// # Result
+///
+/// [`WZ_DISSECT_OK`] with a verdict, for any arguments that are well formed.
+/// The `e2e_wrap` document carries the frame as hex and every value computed on
+/// the way (fields, parts, the CRC and what it was fed, the length), or
+/// `{"ok":false,...}` with the reason and the place in whichever text was
+/// refused (`profile_path`, `profile_offset`, `values_path` or `values_offset`,
+/// absent where they do not apply and never `null`). A text that is refused is
+/// a successful DIAGNOSIS, for the reason [`wz_dissect_declarations_diagnose`]
+/// gives: OK means a string, an error means none.
+///
+/// # Errors
+///
+/// [`WZ_DISSECT_ERR_INVALID_ARG`] for a null `profile_json`, `values_json` or
+/// `out`, a null `payload` with a non-zero length, or text that is not UTF-8:
+/// all of them the caller's own bug and not text a person typed.
+///
+/// # Safety
+/// `profile_json` and `values_json` must be NUL-terminated C strings; `payload`
+/// must be readable for `payload_len` bytes; `out` must be a writable pointer to
+/// a `*mut c_char`.
+#[no_mangle]
+pub unsafe extern "C" fn wz_dissect_e2e_wrap(
+    profile_json: *const c_char,
+    values_json: *const c_char,
+    payload: *const u8,
+    payload_len: usize,
+    out: *mut *mut c_char,
+) -> c_int {
+    if profile_json.is_null()
+        || values_json.is_null()
+        || out.is_null()
+        || (payload.is_null() && payload_len != 0)
+    {
+        return WZ_DISSECT_ERR_INVALID_ARG;
+    }
+    // SAFETY: caller contract above.
+    let (Ok(profile), Ok(values)) = (
+        unsafe { std::ffi::CStr::from_ptr(profile_json) }.to_str(),
+        unsafe { std::ffi::CStr::from_ptr(values_json) }.to_str(),
+    ) else {
+        return WZ_DISSECT_ERR_INVALID_ARG;
+    };
+    let payload: &[u8] = if payload_len == 0 {
+        &[]
+    } else {
+        // SAFETY: caller contract above; non-null was checked just now.
+        unsafe { core::slice::from_raw_parts(payload, payload_len) }
+    };
+    write_string(
+        wz_capture::e2e_json::wrap_document(profile, values, payload),
+        out,
+    )
+}
+
+/// A PROTECTED FRAME READ UNDER A PROFILE THE CALLER DESCRIBES: every field, the
+/// parts it splits into, whether the CRC matches, and three facts about the
+/// length that are information and not part of the CRC verdict.
+///
+/// The counterpart of [`wz_dissect_e2e_wrap`], with the same profile text and
+/// the same conventions. The `e2e_open` document carries `crc_ok`,
+/// `crc_computed` and what was fed to it, the payload offset and size (the
+/// frame less the header: never taken from the length field), and
+/// `length_field`, `length_expected` and `length_matches_frame`. The CRC is
+/// taken over the length field as it stands on the wire, so a sender that
+/// counts the length by another rule shows only in the length facts, and damage
+/// shows in `crc_ok`.
+///
+/// It does not judge a SEQUENCE of frames (counter step, repetition, silence):
+/// that needs state per stream, and the library type that holds it
+/// (`wz_capture::e2e_judge::Judge`) is not behind a handle. The counter is in
+/// `fields`, with `crc_ok` beside it, which is what a judge reads.
+///
+/// # Errors
+///
+/// [`WZ_DISSECT_ERR_INVALID_ARG`] for a null `profile_json` or `out`, a null
+/// `frame` with a non-zero length, or a profile that is not UTF-8. A frame
+/// shorter than the header is a verdict, not an error.
+///
+/// # Safety
+/// `profile_json` must be a NUL-terminated C string; `frame` must be readable
+/// for `frame_len` bytes; `out` must be a writable pointer to a `*mut c_char`.
+#[no_mangle]
+pub unsafe extern "C" fn wz_dissect_e2e_open(
+    profile_json: *const c_char,
+    frame: *const u8,
+    frame_len: usize,
+    out: *mut *mut c_char,
+) -> c_int {
+    if profile_json.is_null() || out.is_null() || (frame.is_null() && frame_len != 0) {
+        return WZ_DISSECT_ERR_INVALID_ARG;
+    }
+    // SAFETY: caller contract above.
+    let Ok(profile) = (unsafe { std::ffi::CStr::from_ptr(profile_json) }).to_str() else {
+        return WZ_DISSECT_ERR_INVALID_ARG;
+    };
+    let frame: &[u8] = if frame_len == 0 {
+        &[]
+    } else {
+        // SAFETY: caller contract above; non-null was checked just now.
+        unsafe { core::slice::from_raw_parts(frame, frame_len) }
+    };
+    write_string(wz_capture::e2e_json::open_document(profile, frame), out)
 }
 
 /// R311y854 — the census NARROWED by a selector, wz's own filter language.
@@ -6170,7 +6301,11 @@ mod tests {
         // (`wz_dissect_proto_file`); the memory rule is the one every document
         // door keeps -- a `char*` released by `wz_dissect_string_free` -- and no
         // callback runs, since the files cross as bytes the caller already read.
-        assert_eq!(wz_dissect_abi_version(), 25);
+        // 26, for `wz_dissect_e2e_wrap` and `wz_dissect_e2e_open`: a protected
+        // frame built and read under a profile the caller passes as JSON. Two
+        // symbols and no struct; both write a document released by
+        // `wz_dissect_string_free`, and nothing is held between calls.
+        assert_eq!(wz_dissect_abi_version(), 26);
     }
 
     /// R311y913 (unregistered item 435) — THE LINKED SURFACE CAN SAY WHAT IT
@@ -6757,6 +6892,11 @@ mod tests {
             // file, a whole file, and an argument. The key set differs by
             // branch, so a pin over one would leave the others' keys unwatched.
             (rev::DECLARATIONS_FROM_PROTO, from_proto_documents()),
+            // Every shape the two protected-frame doors write, for the same
+            // reason: the refusal names its text by whichever position key
+            // applies, so each branch has keys the others lack.
+            (rev::E2E_WRAP, e2e_wrap_documents()),
+            (rev::E2E_OPEN, e2e_open_documents()),
             // Built by a door that takes a handle, so it comes from one.
             (rev::SELECTION, selection_documents()),
             (rev::RETENTION, retention_documents()),
@@ -6896,6 +7036,15 @@ mod tests {
                     .next()
                     .expect("a document"),
             ),
+            // Declares no plane either.
+            (
+                rev::E2E_WRAP,
+                e2e_wrap_documents().into_iter().next().expect("a document"),
+            ),
+            (
+                rev::E2E_OPEN,
+                e2e_open_documents().into_iter().next().expect("a document"),
+            ),
             // Declares no plane, so it contributes no `@planes` marker,
             // and being in this table is what makes that a checked fact.
             (
@@ -7034,6 +7183,10 @@ mod tests {
             // All four shapes: the failure branch OMITS its position keys and
             // must never write a `null` in their place.
             (rev::DECLARATIONS_FROM_PROTO, from_proto_documents()),
+            // Every refusal shape of the protected-frame doors, for the same
+            // reason: no position key is ever written as `null`.
+            (rev::E2E_WRAP, e2e_wrap_documents()),
+            (rev::E2E_OPEN, e2e_open_documents()),
             // Both shapes, for the reason `selection_documents` gives.
             (rev::SELECTION, selection_documents()),
             // With a clock and without, for the reason `retention_documents` gives.
@@ -7692,6 +7845,371 @@ mod tests {
             core::mem::offset_of!(WzDissectProtoFile, text_len),
             2 * word
         );
+    }
+
+    /// The profile every protected-frame door test below uses: synthetic, small
+    /// enough to check by hand, with an `xor`, a `split` and the CRC in the
+    /// middle of the header.
+    const E2E_PROFILE: &str = r#"{
+      "name": "abi-demo",
+      "fields": [
+        {"name": "kind", "bytes": 1},
+        {"name": "crc", "bytes": 2},
+        {"name": "counter", "bytes": 1},
+        {"name": "length", "bytes": 2},
+        {"name": "ident", "bytes": 2, "xor": "0x00FF",
+         "split": [{"name": "hi", "lsb": 8, "width": 8}, {"name": "lo", "lsb": 0, "width": 8}]}
+      ],
+      "crc": {"field": "crc", "width": 16, "poly": "0x1021", "init": "0xFFFF",
+              "refin": false, "refout": false, "xorout": 0,
+              "cover": ["kind", "ident", "@payload", "counter", "length"]},
+      "length": {"field": "length", "counts": "frame"},
+      "counter": {"field": "counter", "max_gap": 4, "timeout_ms": 100}
+    }"#;
+    const E2E_VALUES: &str = r#"{"kind": 3, "counter": 7, "ident": {"hi": 1, "lo": 2}}"#;
+
+    /// Drive `wz_dissect_e2e_wrap` the way C does. An empty body is handed over
+    /// as a null pointer of length zero, which the header permits.
+    fn call_e2e_wrap(profile: &str, values: &str, payload: &[u8]) -> Result<String, c_int> {
+        let profile = CString::new(profile).expect("no interior NUL");
+        let values = CString::new(values).expect("no interior NUL");
+        let mut out: *mut c_char = core::ptr::null_mut();
+        let rc = unsafe {
+            wz_dissect_e2e_wrap(
+                profile.as_ptr(),
+                values.as_ptr(),
+                if payload.is_empty() {
+                    core::ptr::null()
+                } else {
+                    payload.as_ptr()
+                },
+                payload.len(),
+                &mut out,
+            )
+        };
+        take_document(rc, out)
+    }
+
+    /// Drive `wz_dissect_e2e_open` the way C does.
+    fn call_e2e_open(profile: &str, frame: &[u8]) -> Result<String, c_int> {
+        let profile = CString::new(profile).expect("no interior NUL");
+        let mut out: *mut c_char = core::ptr::null_mut();
+        let rc = unsafe {
+            wz_dissect_e2e_open(
+                profile.as_ptr(),
+                if frame.is_empty() {
+                    core::ptr::null()
+                } else {
+                    frame.as_ptr()
+                },
+                frame.len(),
+                &mut out,
+            )
+        };
+        take_document(rc, out)
+    }
+
+    /// The document a door wrote, freed; or the refusal code, after asserting
+    /// that no string came back with it.
+    fn take_document(rc: c_int, out: *mut c_char) -> Result<String, c_int> {
+        if rc != WZ_DISSECT_OK {
+            assert!(out.is_null(), "an error must not hand back a string");
+            return Err(rc);
+        }
+        assert!(!out.is_null(), "OK must come with a string");
+        let s = unsafe { std::ffi::CStr::from_ptr(out) }
+            .to_str()
+            .expect("utf8")
+            .to_string();
+        unsafe { wz_dissect_string_free(out) };
+        Ok(s)
+    }
+
+    /// The `"frame":"..."` of a wrap document, as bytes.
+    fn e2e_frame_of(doc: &str) -> Vec<u8> {
+        let hex = json_string(doc, "frame");
+        (0..hex.len() / 2)
+            .map(|i| u8::from_str_radix(&hex[2 * i..2 * i + 2], 16).expect("hex"))
+            .collect()
+    }
+
+    /// One document of each shape the `e2e_wrap` door writes: the success, a
+    /// profile that is not JSON, one that is not a profile, values that are not
+    /// JSON, a value that does not fit, and a body that does not fit. The first
+    /// is the success, for the callers that need only one.
+    fn e2e_wrap_documents() -> Vec<String> {
+        let long = vec![0u8; 70_000];
+        vec![
+            call_e2e_wrap(E2E_PROFILE, E2E_VALUES, b"\x01\x02\x03").expect("answers"),
+            call_e2e_wrap("{\"name\":", E2E_VALUES, b"").expect("answers"),
+            call_e2e_wrap("{}", E2E_VALUES, b"").expect("answers"),
+            call_e2e_wrap(E2E_PROFILE, "{\"kind\":", b"").expect("answers"),
+            call_e2e_wrap(E2E_PROFILE, r#"{"kind": 300}"#, b"").expect("answers"),
+            call_e2e_wrap(E2E_PROFILE, E2E_VALUES, &long).expect("answers"),
+        ]
+    }
+
+    /// The same for `e2e_open`: the success, a profile that is not JSON, one
+    /// that is not a profile, and a frame shorter than the header.
+    fn e2e_open_documents() -> Vec<String> {
+        let wrapped = call_e2e_wrap(E2E_PROFILE, E2E_VALUES, b"\x01\x02\x03").expect("answers");
+        vec![
+            call_e2e_open(E2E_PROFILE, &e2e_frame_of(&wrapped)).expect("answers"),
+            call_e2e_open("{\"name\":", b"").expect("answers"),
+            call_e2e_open("{}", b"").expect("answers"),
+            call_e2e_open(E2E_PROFILE, b"\x01\x02").expect("answers"),
+        ]
+    }
+
+    /// A FRAME WRAPPED THROUGH THE ABI OPENS BACK THROUGH IT, with every step
+    /// the document reports checkable by hand.
+    #[test]
+    fn a_wrapped_frame_opens_back_through_the_abi() {
+        let doc = call_e2e_wrap(E2E_PROFILE, E2E_VALUES, b"\x01\x02\x03").expect("answers");
+        assert!(
+            doc.starts_with(&format!(
+                "{{{},\"ok\":true,\"profile\":\"abi-demo\",",
+                wz_capture::doc_revision::envelope(wz_capture::doc_revision::E2E_WRAP)
+            )),
+            "{doc}"
+        );
+        // Header: kind 1 + crc 2 + counter 1 + length 2 + ident 2 = 8 bytes.
+        assert!(
+            doc.contains("\"payload_offset\":8,\"payload_bytes\":3"),
+            "{doc}"
+        );
+        assert_eq!(json_count(&doc, "length_field"), 11, "{doc}");
+        // The ident is 0x0102 under an xor of 0x00FF: 0x01FD on the wire.
+        assert!(
+            doc.contains(
+                "{\"name\":\"ident\",\"offset\":6,\"bytes\":2,\"raw\":509,\"value\":258,\
+                 \"parts\":[{\"name\":\"hi\",\"value\":1},{\"name\":\"lo\",\"value\":2}]}"
+            ),
+            "{doc}"
+        );
+        assert!(
+            doc.contains(
+                "\"crc_fed\":[{\"item\":\"kind\",\"bytes\":1,\"hex\":\"03\"},\
+                 {\"item\":\"ident\",\"bytes\":2,\"hex\":\"01fd\"},\
+                 {\"item\":\"@payload\",\"bytes\":3},\
+                 {\"item\":\"counter\",\"bytes\":1,\"hex\":\"07\"},\
+                 {\"item\":\"length\",\"bytes\":2,\"hex\":\"000b\"}]"
+            ),
+            "{doc}"
+        );
+        let frame = e2e_frame_of(&doc);
+        assert_eq!(frame.len(), 11);
+        assert_eq!(
+            &frame[8..],
+            b"\x01\x02\x03",
+            "the body follows the header untouched"
+        );
+
+        let opened = call_e2e_open(E2E_PROFILE, &frame).expect("answers");
+        assert!(
+            opened.starts_with(&format!(
+                "{{{},\"ok\":true,",
+                wz_capture::doc_revision::envelope(wz_capture::doc_revision::E2E_OPEN)
+            )),
+            "{opened}"
+        );
+        assert!(opened.contains("\"crc_ok\":true"), "{opened}");
+        assert!(
+            opened.contains(
+                "\"length_field\":11,\"length_expected\":11,\"length_matches_frame\":true"
+            ),
+            "{opened}"
+        );
+        assert_eq!(
+            json_count(&opened, "crc_computed"),
+            json_count(&doc, "crc_computed"),
+            "both doors compute the same CRC"
+        );
+
+        // One flipped bit in the body is a CRC fact and not a length one.
+        let mut damaged = frame;
+        let last = damaged.len() - 1;
+        damaged[last] ^= 1;
+        let opened = call_e2e_open(E2E_PROFILE, &damaged).expect("answers");
+        assert!(opened.contains("\"crc_ok\":false"), "{opened}");
+        assert!(opened.contains("\"length_matches_frame\":true"), "{opened}");
+    }
+
+    /// THE DOORS KEEP NO STATE BETWEEN CALLS: a profile is chosen per call, and
+    /// another profile used in between changes nothing.
+    #[test]
+    fn the_e2e_doors_are_stateless_across_profiles() {
+        let other = E2E_PROFILE
+            .replace("\"xor\": \"0x00FF\"", "\"xor\": \"0x0F0F\"")
+            .replace("abi-demo", "other");
+        let first = call_e2e_wrap(E2E_PROFILE, E2E_VALUES, b"abc").expect("answers");
+        let second = call_e2e_wrap(&other, E2E_VALUES, b"abc").expect("answers");
+        let third = call_e2e_wrap(E2E_PROFILE, E2E_VALUES, b"abc").expect("answers");
+        assert_eq!(first, third, "the same call gives the same answer");
+        assert_ne!(
+            e2e_frame_of(&first),
+            e2e_frame_of(&second),
+            "another profile gives another frame"
+        );
+        // The first frame read under the other profile: the CRC is taken over
+        // the wire bytes, so it still verifies, and the field reads through the
+        // other mask (0x01FD XOR 0x0F0F = 0x0EF2 = 3826).
+        let reread = call_e2e_open(&other, &e2e_frame_of(&first)).expect("answers");
+        assert!(reread.contains("\"crc_ok\":true"), "{reread}");
+        assert!(reread.contains("\"raw\":509,\"value\":3826"), "{reread}");
+    }
+
+    /// A TEXT THE DOORS REFUSE IS A SUCCESSFUL DIAGNOSIS that names the place by
+    /// the key that locates it, and the keys that do not apply are ABSENT.
+    #[test]
+    fn a_refused_e2e_text_is_a_diagnosis_with_a_place() {
+        let docs = e2e_wrap_documents();
+        let not_json = &docs[1];
+        assert!(
+            not_json.contains("\"ok\":false,\"profile_offset\":"),
+            "{not_json}"
+        );
+        assert!(!not_json.contains("profile_path"), "{not_json}");
+
+        let not_a_profile = &docs[2];
+        assert!(
+            not_a_profile.contains("\"ok\":false,\"profile_path\":\"\",\"reason\":"),
+            "{not_a_profile}"
+        );
+        assert!(
+            json_string(not_a_profile, "message").starts_with("profile: "),
+            "{not_a_profile}"
+        );
+
+        let values_not_json = &docs[3];
+        assert!(
+            values_not_json.contains("\"values_offset\":"),
+            "{values_not_json}"
+        );
+        assert!(!values_not_json.contains("profile_"), "{values_not_json}");
+
+        let overflow = &docs[4];
+        assert!(overflow.contains("\"values_path\":\"/kind\""), "{overflow}");
+        assert_eq!(
+            json_string(overflow, "message"),
+            format!("values /kind: {}", json_string(overflow, "reason"))
+        );
+
+        let too_long = &docs[5];
+        assert!(
+            !too_long.contains("_path") && !too_long.contains("_offset"),
+            "a refusal about no text names no text: {too_long}"
+        );
+        assert!(
+            json_string(too_long, "reason").contains("does not fit the 2-byte length field"),
+            "{too_long}"
+        );
+
+        let opens = e2e_open_documents();
+        assert_eq!(
+            json_string(&opens[3], "reason"),
+            "the frame is 2 bytes and the header alone is 8"
+        );
+        for doc in docs.iter().chain(&opens) {
+            assert!(!doc.contains("null"), "no key is ever null: {doc}");
+        }
+    }
+
+    /// EVERY CALLER BUG IS `INVALID_ARG` AND HANDS BACK NO STRING.
+    #[test]
+    fn e2e_caller_bugs_are_invalid_arg_and_hand_back_no_string() {
+        let profile = CString::new(E2E_PROFILE).expect("no NUL");
+        let values = CString::new(E2E_VALUES).expect("no NUL");
+        let body = [1u8, 2, 3];
+        let bad_utf8 = CString::new(vec![b'{', 0xff]).expect("no NUL");
+        let null = core::ptr::null::<c_char>();
+
+        let wrap = |profile: *const c_char,
+                    values: *const c_char,
+                    payload: *const u8,
+                    len: usize,
+                    with_out: bool| {
+            let mut out: *mut c_char = core::ptr::null_mut();
+            let rc = unsafe {
+                wz_dissect_e2e_wrap(
+                    profile,
+                    values,
+                    payload,
+                    len,
+                    if with_out {
+                        &mut out
+                    } else {
+                        core::ptr::null_mut()
+                    },
+                )
+            };
+            assert!(out.is_null(), "an error must not hand back a string");
+            rc
+        };
+        // The control: the same arguments, well formed, are accepted.
+        let mut ok_out: *mut c_char = core::ptr::null_mut();
+        let rc = unsafe {
+            wz_dissect_e2e_wrap(
+                profile.as_ptr(),
+                values.as_ptr(),
+                body.as_ptr(),
+                3,
+                &mut ok_out,
+            )
+        };
+        assert_eq!(rc, WZ_DISSECT_OK);
+        unsafe { wz_dissect_string_free(ok_out) };
+
+        let (p, v, b) = (profile.as_ptr(), values.as_ptr(), body.as_ptr());
+        for (what, rc) in [
+            ("null profile", wrap(null, v, b, 3, true)),
+            ("null values", wrap(p, null, b, 3, true)),
+            (
+                "null body with a length",
+                wrap(p, v, core::ptr::null(), 3, true),
+            ),
+            ("null out", wrap(p, v, b, 3, false)),
+            ("profile not UTF-8", wrap(bad_utf8.as_ptr(), v, b, 3, true)),
+            ("values not UTF-8", wrap(p, bad_utf8.as_ptr(), b, 3, true)),
+        ] {
+            assert_eq!(rc, WZ_DISSECT_ERR_INVALID_ARG, "{what}");
+        }
+
+        let frame = [0u8; 12];
+        let open = |profile: *const c_char, frame: *const u8, len: usize, with_out: bool| {
+            let mut out: *mut c_char = core::ptr::null_mut();
+            let rc = unsafe {
+                wz_dissect_e2e_open(
+                    profile,
+                    frame,
+                    len,
+                    if with_out {
+                        &mut out
+                    } else {
+                        core::ptr::null_mut()
+                    },
+                )
+            };
+            assert!(out.is_null(), "an error must not hand back a string");
+            rc
+        };
+        for (what, rc) in [
+            ("open: null profile", open(null, frame.as_ptr(), 12, true)),
+            (
+                "open: null frame with a length",
+                open(p, core::ptr::null(), 12, true),
+            ),
+            ("open: null out", open(p, frame.as_ptr(), 12, false)),
+            (
+                "open: profile not UTF-8",
+                open(bad_utf8.as_ptr(), frame.as_ptr(), 12, true),
+            ),
+        ] {
+            assert_eq!(rc, WZ_DISSECT_ERR_INVALID_ARG, "{what}");
+        }
+        // An empty frame may be a null pointer of length zero, and is a verdict.
+        let doc = call_e2e_open(E2E_PROFILE, b"").expect("answers");
+        assert!(doc.contains("\"ok\":false"), "{doc}");
     }
 
     /// Drive the declaration diagnostic the way C does.

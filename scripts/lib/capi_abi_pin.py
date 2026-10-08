@@ -50,7 +50,7 @@ import subprocess
 import sys
 
 # The pinned pair. Edit BOTH halves deliberately -- see the module doc.
-EXPECTED_VERSION = 25
+EXPECTED_VERSION = 26
 
 # R2108 (open-debt item 525) -- THE RECORD'S LAYOUT, pinned HERE and read from
 # the artifact through `wz_dissect_record_layout`.
@@ -263,6 +263,15 @@ EXPECTED_SYMBOLS = {
     # callback runs. It is its own symbol and not a mode of the diagnostic door
     # above, which says whether lines install and hands nothing back.
     "wz_dissect_declarations_from_proto",
+    # (ABI 26) -- a protected frame BUILT and OPENED under a profile the caller
+    # passes as JSON on every call, so a consumer that produces such frames and
+    # also analyses them never holds a second copy of the CRC arithmetic, the
+    # feeding order or the mask-then-split rule. Two symbols and no struct. The
+    # memory rule does not move: each verdict is a `char*` released by
+    # `wz_dissect_string_free`, the body and the frame cross as bytes the CALLER
+    # holds, nothing is retained between calls, and no callback runs.
+    "wz_dissect_e2e_wrap",
+    "wz_dissect_e2e_open",
     # R311y851 — the four analysis planes' door. Both halves moved together,
     # which is the whole of what this gate asks.
     "wz_dissect_pcap_census",
