@@ -7233,6 +7233,119 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         self.send_network_message_qos(msg, reliable, express, Priority::DEFAULT)
     }
 
+    /// The one seam every network message leaves a session through.
+    ///
+    /// R3110 -- a message that carries a buffer of shared memory is sent inside a transaction of
+    /// this node's handoff as a sender (see [`crate::extshm::ShmTxHandoff`]): each shared-memory
+    /// slice is counted and its chunk kept confirmed before the message is built, and what was
+    /// taken is kept until the peer acknowledges it when the message left and given back when it
+    /// did not. A message with no such slice, which is nearly every message, opens nothing.
+    ///
+    /// `priority` and `express` are what they are for the dispatch arms behind it: the Push arm
+    /// reads `priority`, a Request and a Response read the priority off their own QoS extension,
+    /// and `express` drains the open batch window after a Push.
+    #[cfg(any(
+        feature = "codec-push",
+        feature = "codec-request",
+        feature = "codec-declare",
+        feature = "declare-interest",
+        feature = "codec-linkstate",
+        feature = "codec-response",
+        feature = "codec-response-final"
+    ))]
+    pub fn send_network_message_qos(
+        &self,
+        msg: crate::network_message::NetworkMessage,
+        reliable: bool,
+        express: bool,
+        priority: Priority,
+    ) -> Result<(), SendWireError> {
+        // The same gate as `open_shm_tx`: a build with no codec that can carry a buffer of
+        // shared memory has no message to open a transaction for.
+        #[cfg(all(
+            feature = "session-extshm",
+            any(
+                feature = "codec-push",
+                feature = "codec-request",
+                feature = "codec-response"
+            )
+        ))]
+        let transaction = self.open_shm_tx(&msg);
+        let sent = self.send_network_message_qos_dispatch(msg, reliable, express, priority);
+        #[cfg(all(
+            feature = "session-extshm",
+            any(
+                feature = "codec-push",
+                feature = "codec-request",
+                feature = "codec-response"
+            )
+        ))]
+        if let Some(transaction) = transaction {
+            // A transaction that is not committed gives back what it took when it drops, which
+            // is what a message that did not leave is owed.
+            if sent.is_ok() {
+                transaction.commit();
+            }
+        }
+        sent
+    }
+
+    /// R3110 -- the sender's handoff transaction for `msg`, with every shared-memory slice of it
+    /// declared, or `None` when the session did not negotiate shared memory, operates no handoff,
+    /// or the message carries no such slice. The three kinds of message that carry a buffer are
+    /// those upstream maps: the payload of a Put, the value of a query and the payload of a reply.
+    #[cfg(all(
+        feature = "session-extshm",
+        any(
+            feature = "codec-push",
+            feature = "codec-request",
+            feature = "codec-response"
+        )
+    ))]
+    fn open_shm_tx(
+        &self,
+        msg: &crate::network_message::NetworkMessage,
+    ) -> Option<alloc::boxed::Box<dyn crate::extshm::ShmTxTransaction>> {
+        use crate::network_message::NetworkMessage;
+
+        let (descriptors, extensions): (
+            alloc::vec::Vec<&[u8]>,
+            &[wz_codecs::ext_entry::ExtEntryOwned<crate::wire::WireStorage>],
+        ) = match msg {
+            #[cfg(feature = "codec-push")]
+            NetworkMessage::Push(push) => match &push.body {
+                crate::wire::PushOwnedVariant::CodecZenohMsgPut(put) => (
+                    crate::put_payload::shm_descriptors(put),
+                    push.extensions.as_deref().unwrap_or(&[]),
+                ),
+                _ => return None,
+            },
+            #[cfg(feature = "codec-request")]
+            NetworkMessage::Request(request) => match &request.body {
+                crate::wire::RequestOwnedVariant::CodecZenohQuery(query) => (
+                    crate::request_build::query_value_shm_descriptors(query),
+                    request.extensions.as_deref().unwrap_or(&[]),
+                ),
+                _ => return None,
+            },
+            #[cfg(feature = "codec-response")]
+            NetworkMessage::Response(response) => (
+                crate::response_build::response_shm_descriptors(response),
+                response.extensions.as_deref().unwrap_or(&[]),
+            ),
+            _ => return None,
+        };
+        if descriptors.is_empty() || !self.is_shm() {
+            return None;
+        }
+        let handoff = R::with_mutex_mut(&self.shm_auth, |d| d.tx_handoff())?;
+        let mut transaction = handoff.begin(crate::put_payload::priority_band(extensions));
+        for descriptor in descriptors {
+            transaction.on_tx(descriptor);
+        }
+        Some(transaction)
+    }
+
     /// R311y220 — the priority-carrying twin of [`Self::send_network_message`]: the
     /// data-plane Push arm routes `priority` to [`Self::dispatch_push`] (the app's
     /// chosen QoS band, which `select_link` pins to one aggregated link) instead of
@@ -7254,7 +7367,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         feature = "codec-response",
         feature = "codec-response-final"
     ))]
-    pub fn send_network_message_qos(
+    fn send_network_message_qos_dispatch(
         &self,
         msg: crate::network_message::NetworkMessage,
         reliable: bool,
