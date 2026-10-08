@@ -912,12 +912,16 @@ fn group_extend_weak_import_and_editions_are_refused_with_their_line() {
         (d.file.as_deref(), d.line, d.column),
         (Some("a.proto"), Some(3), Some(12))
     );
-    assert!(d.reason.contains("group"), "{d}");
+    assert!(d.reason.contains("group fields are not supported"), "{d}");
     let d = refused(
         "M",
         "syntax = \"proto2\";\nmessage M {\n  optional int32 a = 1;\n  extensions 100 to 199;\n}\nextend M {\n  optional int32 x = 100;\n}\n",
     );
-    assert_eq!(d.line, Some(6));
+    assert_eq!(
+        (d.file.as_deref(), d.line, d.column),
+        (Some("a.proto"), Some(6), Some(1)),
+        "blamed at the `extend` keyword"
+    );
     assert!(d.reason.contains("`extend`"), "{d}");
     let d = declare(
         "M",
@@ -1017,6 +1021,472 @@ fn a_byte_order_mark_and_crlf_line_ends_are_read() {
         "\u{feff}syntax = \"proto3\";\r\nmessage M {\r\n  Foo a = 1;\r\n}\r\n",
     );
     assert_eq!((d.line, d.column), (Some(3), Some(3)));
+}
+
+// ---- `extend` and `group`: refused only where the root reaches them ----------
+
+/// A stand-in for the descriptor file, named as the real one is: a message that
+/// options are added to, which no payload is.
+const DESCRIPTOR: (&str, &str) = (
+    "google/protobuf/descriptor.proto",
+    "syntax = \"proto2\";\npackage google.protobuf;\nmessage FieldOptions {\n  \
+     optional bool packed = 2;\n  extensions 1000 to max;\n}\n",
+);
+
+/// The extend block of [`OPTIONS`], so a test can take it out.
+const OPTIONS_EXTEND: &str =
+    "extend google.protobuf.FieldOptions {\n  optional Options opts = 1010;\n}\n";
+
+/// A public options file: a message of its own and an `extend` of the
+/// descriptor's, adding it as a message-typed option.
+const OPTIONS: (&str, &str) = (
+    "fieldopts/options.proto",
+    "syntax = \"proto2\";\npackage fieldopts;\nimport \"google/protobuf/descriptor.proto\";\n\
+     message Options {\n  optional int32 max_size = 1;\n  optional bool fixed = 2;\n}\n\
+     extend google.protobuf.FieldOptions {\n  optional Options opts = 1010;\n}\n",
+);
+
+/// A schema that imports [`OPTIONS`] and uses the option it adds.
+const SENSOR: (&str, &str) = (
+    "app/sensor.proto",
+    "syntax = \"proto3\";\npackage app;\nimport \"fieldopts/options.proto\";\n\
+     message Sensor {\n  int32 id = 1;\n  string label = 2 [(fieldopts.opts).max_size = 16];\n  \
+     Meta meta = 3;\n  message Meta { string unit = 1; }\n}\n",
+);
+
+#[test]
+fn an_options_file_that_extends_a_descriptor_message_is_read_and_changes_nothing() {
+    // THE DEFECT: a public options file's `extend google.protobuf.FieldOptions`
+    // was refused in a file the root message never reaches, so every schema
+    // that imported one was unusable.
+    let with = declare("app.Sensor", &[SENSOR, OPTIONS, DESCRIPTOR]).expect("declares");
+    assert_eq!(
+        lines(&with),
+        [
+            "demo/sensor=protobuf",
+            "demo/sensor:1=id",
+            "demo/sensor:2=label",
+            "demo/sensor:3=meta",
+            "demo/sensor:3.1=unit",
+        ]
+    );
+    // And it is exactly what the same schema declares with the block taken out.
+    let bare = OPTIONS.1.replace(OPTIONS_EXTEND, "");
+    assert_ne!(bare, OPTIONS.1, "the block must have been there");
+    let without = declare(
+        "app.Sensor",
+        &[
+            SENSOR,
+            ("fieldopts/options.proto", bare.as_str()),
+            DESCRIPTOR,
+        ],
+    )
+    .expect("declares");
+    assert_eq!(with, without);
+}
+
+/// Three files: a message `b.Base` that takes extensions, a file that extends
+/// it (the `extend` keyword at line 4, column 1) and a root file that reads both.
+const BASE: (&str, &str) = (
+    "base.proto",
+    "syntax = \"proto2\";\npackage b;\nmessage Base {\n  optional int32 a = 1;\n  extensions 100 to 199;\n}\n",
+);
+const EXTENDER: (&str, &str) = (
+    "ext.proto",
+    "syntax = \"proto2\";\nimport \"base.proto\";\n\nextend b.Base {\n  optional int32 x = 100;\n}\n",
+);
+const REACHERS: (&str, &str) = (
+    "app.proto",
+    "syntax = \"proto2\";\npackage app;\nimport \"base.proto\";\nimport \"ext.proto\";\n\
+     message Direct { optional b.Base base = 1; }\n\
+     message Unrelated { optional int32 n = 1; }\n\
+     message ViaNested { optional Mid mid = 1; message Mid { repeated b.Base bases = 1; } }\n\
+     message ViaMap { map<string, b.Base> by_name = 1; }\n",
+);
+
+#[test]
+fn an_extend_is_refused_for_every_route_by_which_the_root_reaches_the_extended_message() {
+    // The extended message is the root, a field's message, a nested field's, and
+    // a map's value: the four ways the expansion arrives at a message.
+    for (root, how) in [
+        ("b.Base", "which is the root message"),
+        ("app.Direct", "which the root message `app.Direct` reaches"),
+        (
+            "app.ViaNested",
+            "which the root message `app.ViaNested` reaches",
+        ),
+        ("app.ViaMap", "which the root message `app.ViaMap` reaches"),
+    ] {
+        let d = declare(root, &[REACHERS, BASE, EXTENDER]).expect_err(root);
+        assert_eq!(
+            (d.file.as_deref(), d.line, d.column),
+            (Some("ext.proto"), Some(4), Some(1)),
+            "{root}: blamed at the `extend` keyword, in the file that holds it: {d}"
+        );
+        assert!(
+            d.reason.contains("`extend` is not supported"),
+            "{root}: {d}"
+        );
+        assert!(d.reason.contains("it extends `b.Base`"), "{root}: {d}");
+        assert!(d.reason.contains(how), "{root}: {d}");
+    }
+}
+
+#[test]
+fn the_same_files_are_declared_from_a_root_that_does_not_reach_the_extended_message() {
+    // The refusal belongs to the ROOT and not to the schema: the files that
+    // refuse `app.Direct` declare `app.Unrelated`.
+    let text = declare("app.Unrelated", &[REACHERS, BASE, EXTENDER]).expect("declares");
+    assert_eq!(lines(&text), ["demo/sensor=protobuf", "demo/sensor:1=n"]);
+}
+
+#[test]
+fn an_extendee_visible_only_through_a_public_import_chain_is_still_the_extended_message() {
+    // `ext.proto` sees `b.Base` through `front.proto`, which imports it PUBLIC,
+    // so the extend resolves, the root reaches the message, and it is refused.
+    let extender = "syntax = \"proto2\";\nimport \"front.proto\";\n\nextend b.Base {\n  optional int32 x = 100;\n}\n";
+    let front = "syntax = \"proto2\";\nimport public \"base.proto\";\n";
+    let d = declare(
+        "app.Direct",
+        &[
+            REACHERS,
+            BASE,
+            ("ext.proto", extender),
+            ("front.proto", front),
+        ],
+    )
+    .expect_err("refused");
+    assert_eq!(
+        (d.file.as_deref(), d.line, d.column),
+        (Some("ext.proto"), Some(4), Some(1)),
+        "{d}"
+    );
+    assert!(d.reason.contains("`extend` is not supported"), "{d}");
+    // A plain import ends the re-export, and the extendee is not defined for
+    // that file as far as `protoc` is concerned: an error at the extendee, even
+    // from a root that reaches nothing.
+    let front_plain = "syntax = \"proto2\";\nimport \"base.proto\";\n";
+    for root in ["app.Direct", "app.Unrelated"] {
+        let d = declare(
+            root,
+            &[
+                REACHERS,
+                BASE,
+                ("ext.proto", extender),
+                ("front.proto", front_plain),
+            ],
+        )
+        .expect_err("refused");
+        assert_eq!(
+            (d.file.as_deref(), d.line, d.column),
+            (Some("ext.proto"), Some(4), Some(8)),
+            "{root}: {d}"
+        );
+        assert!(
+            d.reason.contains("not imported by \"ext.proto\""),
+            "{root}: {d}"
+        );
+    }
+}
+
+#[test]
+fn an_extendee_that_does_not_resolve_is_an_error_wherever_the_root_is() {
+    let file = |extend: &str| {
+        format!(
+            "syntax = \"proto2\";\nenum E {{ Z = 0; }}\nmessage M {{\n  optional int32 Base = 1;\n  \
+             {extend}\n}}\nmessage Base {{ extensions 100 to 199; }}\nmessage Other {{ optional int32 o = 1; }}\n"
+        )
+    };
+    // Each is blamed at the extendee name, whatever the root reaches.
+    for (extend, reason) in [
+        // Not defined at all, written over two lines to show the name is blamed
+        // and not the keyword.
+        (
+            "extend\n    Missing.Name { optional int32 x = 100; }",
+            "\"Missing.Name\" is not defined",
+        ),
+        (
+            "extend .Missing { optional int32 x = 100; }",
+            "\".Missing\" is not defined",
+        ),
+        // An enum is a symbol and not a message.
+        (
+            "extend E { optional int32 x = 100; }",
+            "\"E\" is not a message type",
+        ),
+        // `protoc` finds the field `Base` of `M` first, and a field is not a
+        // message: it does not go on to the message of the same name outside.
+        (
+            "extend Base { optional int32 x = 100; }",
+            "\"Base\" is not a message type",
+        ),
+    ] {
+        for root in ["M", "Other"] {
+            let d = declare(root, &[("a.proto", file(extend).as_str())]).expect_err(extend);
+            assert_eq!(d.file.as_deref(), Some("a.proto"), "{extend}: {d}");
+            assert!(d.reason.contains(reason), "{extend}: {d}");
+            let (line, col) = if extend.starts_with("extend\n") {
+                (6, 5)
+            } else {
+                // After `  extend `; the dot of `.Missing` is part of the name.
+                (5, 10)
+            };
+            assert_eq!((d.line, d.column), (Some(line), Some(col)), "{extend}: {d}");
+        }
+    }
+}
+
+#[test]
+fn an_extendee_is_looked_up_from_the_innermost_scope_that_has_its_name() {
+    // `Inner` inside `Outer` means `Outer.Inner`, as it does for a field's type;
+    // the top-level `Inner` is a different message. The extend is on the NESTED
+    // one, so a root reaching the nested one is refused and a root reaching the
+    // top-level one is not.
+    let schema = "syntax = \"proto2\";\n\
+        message Inner { optional int32 top = 1; extensions 100 to 199; }\n\
+        message Outer {\n  \
+          message Inner { optional int32 deep = 1; extensions 100 to 199; }\n  \
+          extend Inner { optional int32 x = 100; }\n\
+        }\n\
+        message RootTop { optional Inner i = 1; }\n\
+        message RootDeep { optional Outer.Inner i = 1; }\n";
+    let text = ok("RootTop", schema);
+    assert_eq!(
+        lines(&text),
+        [
+            "demo/sensor=protobuf",
+            "demo/sensor:1=i",
+            "demo/sensor:1.1=top"
+        ]
+    );
+    let d = refused("RootDeep", schema);
+    assert_eq!((d.line, d.column), (Some(5), Some(3)), "{d}");
+    assert!(d.reason.contains("it extends `Outer.Inner`"), "{d}");
+}
+
+/// A message `Holder` with a group `G` (the `group` keyword at line 7, column
+/// 12), one root that reaches `Holder`, one that does not, and one that reaches
+/// only the group's message.
+const GROUPS: &str = "syntax = \"proto2\";\n\
+    message Root {\n  optional int32 a = 1;\n}\n\
+    message Holder {\n  optional int32 b = 1;\n  optional group G = 2 {\n    optional int32 x = 1;\n  }\n}\n\
+    message Reaches {\n  optional Holder h = 1;\n}\n\
+    message Uses {\n  optional Holder.G g = 1;\n}\n";
+
+#[test]
+fn a_group_is_refused_where_the_message_that_holds_it_is_reached_and_read_elsewhere() {
+    // Not reached: declared as if the group were not there.
+    let text = ok("Root", GROUPS);
+    assert_eq!(lines(&text), ["demo/sensor=protobuf", "demo/sensor:1=a"]);
+    // The holder as the root, and the holder through a field.
+    for (root, how) in [
+        ("Holder", "which is the root message"),
+        ("Reaches", "which the root message `Reaches` reaches"),
+    ] {
+        let d = refused(root, GROUPS);
+        assert_eq!(
+            (d.file.as_deref(), d.line, d.column),
+            (Some("a.proto"), Some(7), Some(12)),
+            "{root}: blamed at the `group` keyword: {d}"
+        );
+        assert!(
+            d.reason.contains("group fields are not supported"),
+            "{root}: {d}"
+        );
+        assert!(
+            d.reason.contains("the group `G` is a field of `Holder`"),
+            "{root}: {d}"
+        );
+        assert!(d.reason.contains(how), "{root}: {d}");
+    }
+}
+
+#[test]
+fn the_message_of_a_group_is_an_ordinary_message_for_a_root_that_reaches_only_it() {
+    // `Uses` reaches `Holder.G` and not `Holder`: the group is a field of
+    // `Holder` and of nothing else, so nothing here is a group field.
+    let text = ok("Uses", GROUPS);
+    assert_eq!(
+        lines(&text),
+        [
+            "demo/sensor=protobuf",
+            "demo/sensor:1=g",
+            "demo/sensor:1.1=x"
+        ]
+    );
+}
+
+#[test]
+fn a_group_in_a_oneof_or_in_a_group_is_refused_at_the_first_message_the_expansion_visits() {
+    let d = refused(
+        "R",
+        "syntax = \"proto2\";\nmessage R {\n  oneof o {\n    group G = 1 { optional int32 x = 1; }\n    int32 y = 2;\n  }\n}\n",
+    );
+    assert_eq!((d.line, d.column), (Some(4), Some(5)), "{d}");
+    assert!(d.reason.contains("the group `G` is a field of `R`"), "{d}");
+    // `A` holds `B`, and `R` holds `A`: `R` is visited first, so `A` is named.
+    let d = refused(
+        "R",
+        "syntax = \"proto2\";\nmessage R {\n  optional group A = 1 {\n    optional group B = 2 { optional int32 z = 1; }\n  }\n}\n",
+    );
+    assert_eq!((d.line, d.column), (Some(3), Some(12)), "{d}");
+    assert!(d.reason.contains("the group `A` is a field of `R`"), "{d}");
+}
+
+#[test]
+fn a_group_in_an_extend_block_is_a_message_and_not_a_field_of_the_extended_message() {
+    let schema = "syntax = \"proto2\";\n\
+        message Base {\n  optional int32 a = 1;\n  extensions 100 to 199;\n}\n\
+        extend Base {\n  optional group G = 100 {\n    optional int32 q = 1;\n  }\n}\n\
+        message Root { optional G g = 1; }\n\
+        message ReachesBase { optional Base b = 1; }\n";
+    // The group's message is declared in the scope of the block, so `Root` can
+    // name it, and its fields come out as an ordinary message's do.
+    let text = ok("Root", schema);
+    assert_eq!(
+        lines(&text),
+        [
+            "demo/sensor=protobuf",
+            "demo/sensor:1=g",
+            "demo/sensor:1.1=q"
+        ]
+    );
+    // A root that reaches `Base` is refused for the `extend` and for no group:
+    // the group belongs to the extension field, which `Base` does not hold.
+    let d = refused("ReachesBase", schema);
+    assert_eq!((d.line, d.column), (Some(6), Some(1)), "{d}");
+    assert!(d.reason.contains("`extend` is not supported"), "{d}");
+}
+
+#[test]
+fn the_first_message_the_expansion_visits_is_the_one_named_not_the_first_one_written() {
+    let schema = |fields: &str| {
+        format!(
+            "syntax = \"proto2\";\n\
+             message A {{ optional int32 a = 1; extensions 100 to 199; }}\n\
+             message B {{ optional int32 b = 1; extensions 100 to 199; }}\n\
+             extend B {{ optional int32 x = 100; }}\n\
+             extend A {{ optional int32 y = 100; }}\n\
+             message Root {{ {fields} }}\n"
+        )
+    };
+    // `extend B` is written first (line 4) and `extend A` second (line 5).
+    let d = refused("Root", &schema("optional A a = 1; optional B b = 2;"));
+    assert_eq!(d.line, Some(5), "A is visited first: {d}");
+    assert!(d.reason.contains("it extends `A`"), "{d}");
+    let d = refused("Root", &schema("optional B b = 1; optional A a = 2;"));
+    assert_eq!(d.line, Some(4), "B is visited first: {d}");
+    assert!(d.reason.contains("it extends `B`"), "{d}");
+}
+
+#[test]
+fn a_syntax_error_in_an_extend_block_is_blamed_on_its_line_before_any_semantic_problem() {
+    // Line 2 is a semantic problem (an undefined type); line 4 is a missing
+    // `;` inside an extend block of a message nothing reaches. The syntax error
+    // is the one `protoc` reports, and the one reported here.
+    let d = refused(
+        "M",
+        "syntax = \"proto2\";\nmessage M { optional Missing m = 1; }\nmessage Base { extensions 100 to 199; }\n\
+         extend Base { optional int32 x = 100 }\n",
+    );
+    assert_eq!(d.line, Some(4), "{d}");
+    assert!(d.reason.contains("expected `;`"), "{d}");
+    // The same block, well formed, leaves the semantic problem to be reported.
+    let d = refused(
+        "M",
+        "syntax = \"proto2\";\nmessage M { optional Missing m = 1; }\nmessage Base { extensions 100 to 199; }\n\
+         extend Base { optional int32 x = 100; }\n",
+    );
+    assert_eq!(d.line, Some(2), "{d}");
+    assert!(d.reason.contains("\"Missing\" is not defined"), "{d}");
+}
+
+#[test]
+fn a_reached_extend_comes_after_every_semantic_problem_in_the_schema() {
+    // The root is extended, and a message it never reaches has an undefined
+    // type further down: the undefined type is reported, because the reach is
+    // decided only once the whole schema has linked.
+    let d = refused(
+        "Base",
+        "syntax = \"proto2\";\nmessage Base { optional int32 a = 1; extensions 100 to 199; }\n\
+         extend Base { optional int32 x = 100; }\nmessage Other { optional Missing m = 1; }\n",
+    );
+    assert_eq!(d.line, Some(4), "{d}");
+    assert!(d.reason.contains("\"Missing\" is not defined"), "{d}");
+}
+
+#[test]
+fn a_reached_extend_comes_before_the_refusals_the_expansion_itself_makes() {
+    // A message that holds itself, and is extended: the extend is reported, and
+    // without it the cycle is.
+    let node = |extend: &str| {
+        format!(
+            "syntax = \"proto2\";\nmessage Node {{ optional Node next = 1; extensions 100 to 199; }}\n{extend}"
+        )
+    };
+    let d = refused("Node", &node("extend Node { optional int32 x = 100; }\n"));
+    assert!(d.reason.contains("`extend` is not supported"), "{d}");
+    let d = refused("Node", &node(""));
+    assert!(d.reason.contains("contains itself"), "{d}");
+
+    // A schema too large to expand, whose last message is extended: the same.
+    let big = |extend: &str| {
+        let mut schema = String::from("syntax = \"proto2\";\n");
+        for i in 0..20 {
+            schema.push_str(&format!(
+                "message M{i} {{ optional M{n} a = 1; optional M{n} b = 2; }}\n",
+                n = i + 1
+            ));
+        }
+        schema.push_str("message M20 { optional int32 leaf = 1; extensions 100 to 199; }\n");
+        schema.push_str(extend);
+        schema
+    };
+    let d = refused("M0", &big("extend M20 { optional int32 x = 100; }\n"));
+    assert!(d.reason.contains("`extend` is not supported"), "{d}");
+    let d = refused("M0", &big(""));
+    assert!(
+        d.reason
+            .contains(&format!("more than {MAX_DECLARATIONS} declarations")),
+        "{d}"
+    );
+}
+
+#[test]
+fn the_reach_of_a_very_long_chain_is_found_without_recursing_through_it() {
+    // A hundred thousand distinct messages, each holding the next, the last one
+    // extended. The expansion would stop at MAX_PATH_DEPTH; the reach has no such
+    // bound and must not use the stack for it.
+    let links = 100_000;
+    let mut schema = String::from("syntax = \"proto2\";\n");
+    for i in 0..links {
+        schema.push_str(&format!(
+            "message M{i} {{ optional M{n} next = 1; }}\n",
+            n = i + 1
+        ));
+    }
+    schema.push_str(&format!(
+        "message M{links} {{ optional int32 leaf = 1; extensions 100 to 199; }}\n\
+         extend M{links} {{ optional int32 x = 100; }}\n"
+    ));
+    let d = refused("M0", &schema);
+    assert!(d.reason.contains("`extend` is not supported"), "{d}");
+    assert!(d.reason.contains(&format!("it extends `M{links}`")), "{d}");
+}
+
+#[test]
+fn the_fields_of_an_extend_block_are_read_for_syntax_and_not_judged() {
+    // `protoc` refuses all three: an undefined type, field number zero and a
+    // number outside the extended message's extension range. This reader reads
+    // the block for its syntax only, which the module documentation states, and
+    // this test pins so that changing it is a decision.
+    let text = ok(
+        "M",
+        "syntax = \"proto2\";\nmessage M { optional int32 a = 1; }\n\
+         message Base { extensions 100 to 199; }\n\
+         extend Base { optional Missing m = 5; optional int32 z = 0; optional int32 y = 7; }\n",
+    );
+    assert_eq!(lines(&text), ["demo/sensor=protobuf", "demo/sensor:1=a"]);
 }
 
 // ---- the key pattern ---------------------------------------------------------

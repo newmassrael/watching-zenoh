@@ -82,11 +82,25 @@
 //! Every refusal is a [`crate::proto_schema::ProtoDiagnostic`] naming a file, a
 //! line and a column, except the ones that are not about a place in a file.
 //!
-//! * `group` fields and `extend` blocks: stated at their keyword. A group is
-//!   written with the deprecated group wire types, which the payload reader
-//!   stops at; an extension's fields are declared outside the message they
-//!   extend, so this reader could not attach their names to it. `import weak`
-//!   and editions likewise.
+//! * `import weak` and editions, stated at their keyword in any file that is
+//!   read: a weak import is a dependency a build may leave out, so the names it
+//!   would declare cannot be relied on, and an edition is a dialect this reader
+//!   does not have.
+//! * A `group` field or an `extend` block, but only where the root message
+//!   reaches it. The declarations come from the EXPANSION: the root message and
+//!   every message reachable from it through field types, a map's value type
+//!   included. A group is written with the deprecated group wire types, which
+//!   the payload reader stops at, and it names a field of the message that
+//!   holds it; an extension's fields are declared outside the message they
+//!   extend, so this reader could not attach their names to it. Either one is
+//!   therefore refused when the message it holds or extends is one the expansion
+//!   visits, stated at the `group` or `extend` keyword in the file it is written
+//!   in. Anywhere else it is read for its syntax and changes nothing, which is
+//!   what lets a schema import a public options file whose `extend` blocks add
+//!   options to `google.protobuf.FieldOptions`, a message no payload is. The
+//!   extended message is looked up the way `protoc` looks it up (innermost
+//!   scope first, no turning back, imports and public re-exports respected), and
+//!   one that cannot be found is an error here as it is there.
 //! * A recursive message: one whose tree contains itself. The declaration for a
 //!   field at path `1.1.1.1...` has no end, so the cycle is named and refused
 //!   rather than expanded to some depth nobody chose.
@@ -99,15 +113,26 @@
 //!
 //! The first problem found is the only one reported, in the order `protoc`
 //! meets them: a syntax error before a semantic one, an imported file before
-//! the file that imports it.
+//! the file that imports it. A `group` or an `extend` the root reaches comes
+//! AFTER all of those, because which messages the root reaches is known only
+//! once every file is read and linked and the root is found; and it comes
+//! BEFORE the refusals the expansion itself makes (a recursive message, a path
+//! too deep, too many lines), because it is decided from the messages reached
+//! and not from the lines written, so a schema too large to expand is not
+//! allowed to hide it. When several are reached, the one in the message the
+//! expansion visits first is named, and within one message the first found
+//! while the files were read.
 //!
 //! ### What it does not check
 //!
 //! This is not a validator. Enum bodies are read for their names only, so an
 //! enum `protoc` would refuse for its numbering is accepted here; JSON name
-//! collisions, option values and `extensions` ranges are not judged. A file
-//! accepted here can still fail `protoc`; a file refused here for one of the
-//! reasons above would be refused by it too.
+//! collisions, option values and `extensions` ranges are not judged. The fields
+//! of an `extend` block are read for their syntax and nothing else: their
+//! numbers, names and types are not judged, and neither is whether a number
+//! lies in an extension range of the message extended. A file accepted here can
+//! still fail `protoc`; a file refused here for one of the reasons above would
+//! be refused by it too.
 //!
 //! ## Bounds
 //!
@@ -130,7 +155,8 @@ use core::fmt;
 use crate::payload::formats::{escape_field, FormatMap};
 use crate::proto_lex::{Pos, SyntaxError};
 use crate::proto_parse::{
-    parse_file, EnumDecl, FieldType, FileAst, ImportKind, MapValue, MessageDecl, MAX_FIELD_NUMBER,
+    parse_file, EnumDecl, ExtendDecl, FieldType, FileAst, ImportKind, MapValue, MessageDecl,
+    TypeName, MAX_FIELD_NUMBER,
 };
 
 /// The most lines a result may hold, the rule line included.
@@ -314,6 +340,7 @@ pub fn declarations_from_proto(
     linker.load(root_file, &mut Vec::new())?;
 
     let root = linker.root_message(root_message, root_file)?;
+    linker.refuse_what_the_root_reaches(root)?;
     let mut out = Emitter {
         key: escape_field(key_pattern),
         text: String::new(),
@@ -373,6 +400,17 @@ impl Kind {
     }
 }
 
+/// What a looked-up name may turn out to be.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Want {
+    /// A message or an enum, `protoc`'s LOOKUP_TYPES: a field's type. A symbol
+    /// of the right name that is not a type is stepped over.
+    Type,
+    /// Any symbol, `protoc`'s LOOKUP_ALL: an extendee. The first symbol of the
+    /// right name is the answer, and the caller says what is wrong with it.
+    Any,
+}
+
 #[derive(Clone, Copy, Debug)]
 struct Symbol {
     kind: Kind,
@@ -384,6 +422,29 @@ struct Msg {
     full_name: String,
     file: usize,
     fields: Vec<Fld>,
+    /// What in the text keeps this message from being declared, should the
+    /// expansion visit it, in the order the linker met them.
+    blockers: Vec<Blocker>,
+}
+
+/// A `group` or an `extend` that makes a message undeclarable, and where it is.
+///
+/// Recorded when the schema is linked and judged only once the root is known:
+/// the same text is harmless to a root that never reaches the message and fatal
+/// to one that does.
+struct Blocker {
+    /// The file the keyword is written in.
+    file: usize,
+    /// The `group` or `extend` keyword.
+    pos: Pos,
+    kind: BlockerKind,
+}
+
+enum BlockerKind {
+    /// The message holds a group of this name, which is a field of it.
+    Group(String),
+    /// Some `extend` block extends the message.
+    Extend,
 }
 
 /// What the expansion does with a field after its own line.
@@ -567,6 +628,7 @@ impl<'a> Linker<'_, 'a> {
             full_name: full.clone(),
             file,
             fields: Vec::new(),
+            blockers: Vec::new(),
         });
         self.declare(full.clone(), Kind::Message(idx), file, m.name.pos)?;
         for o in &m.oneofs {
@@ -623,6 +685,11 @@ impl<'a> Linker<'_, 'a> {
         for m in &ast.messages {
             self.link_message(&package, m, file)?;
         }
+        // After the messages, as `protoc` cross-links a file's own extensions
+        // after its messages.
+        for e in &ast.extends {
+            self.link_extend(&package, e, file)?;
+        }
         Ok(())
     }
 
@@ -632,14 +699,14 @@ impl<'a> Linker<'_, 'a> {
         self.symbols.get(name).copied()
     }
 
-    /// The symbol a type name written inside `relative_to` refers to, with its
-    /// full name -- `protoc`'s own search (`DescriptorBuilder::LookupSymbol`):
+    /// The symbol a name written inside `relative_to` refers to, with its full
+    /// name -- `protoc`'s own search (`DescriptorBuilder::LookupSymbol`):
     /// the first part of the name is looked for in the enclosing scopes from
     /// the innermost out, the first scope that has it wins, and the rest of a
     /// dotted name is then looked for inside what was found, with no turning
-    /// back. A symbol of the right name that is not something a name can
-    /// descend into, or not a type where one is needed, is stepped over.
-    fn lookup(&self, name: &str, relative_to: &str) -> Option<(String, Symbol)> {
+    /// back. A symbol of the right name that a name cannot descend into is
+    /// stepped over, and so, under [`Want::Type`], is one that is not a type.
+    fn lookup(&self, name: &str, relative_to: &str, want: Want) -> Option<(String, Symbol)> {
         if let Some(absolute) = name.strip_prefix('.') {
             return self.find(absolute).map(|s| (String::from(absolute), s));
         }
@@ -660,7 +727,7 @@ impl<'a> Linker<'_, 'a> {
                     let full = format!("{candidate}{}", &name[first_len..]);
                     return self.find(&full).map(|s| (full, s));
                 }
-            } else if sym.kind.is_type() {
+            } else if want == Want::Any || sym.kind.is_type() {
                 return Some((candidate, sym));
             }
         }
@@ -676,7 +743,7 @@ impl<'a> Linker<'_, 'a> {
         pos: Pos,
     ) -> Result<Symbol, ProtoDiagnostic> {
         let here = self.name_of(file);
-        let Some((_, sym)) = self.lookup(text, field_full) else {
+        let Some((_, sym)) = self.lookup(text, field_full, Want::Type) else {
             return Err(ProtoDiagnostic::at(
                 here,
                 pos,
@@ -690,18 +757,84 @@ impl<'a> Linker<'_, 'a> {
                 format!("\"{text}\" is not a type"),
             ));
         }
-        if !self.visible[file].contains(&sym.file) {
+        self.require_import(file, sym, text, pos)?;
+        Ok(sym)
+    }
+
+    /// The error for a symbol defined in a file `file` does not import.
+    fn require_import(
+        &self,
+        file: usize,
+        sym: Symbol,
+        text: &str,
+        pos: Pos,
+    ) -> Result<(), ProtoDiagnostic> {
+        if self.visible[file].contains(&sym.file) {
+            return Ok(());
+        }
+        let here = self.name_of(file);
+        Err(ProtoDiagnostic::at(
+            here,
+            pos,
+            format!(
+                "\"{text}\" seems to be defined in \"{}\", which is not imported by \
+                 \"{here}\"; to use it here, add the import",
+                self.name_of(sym.file)
+            ),
+        ))
+    }
+
+    /// The message an `extend` block extends, looked up from `relative_to`, the
+    /// full name its first extension field would have.
+    ///
+    /// `protoc` looks an extendee up with LOOKUP_ALL, not the LOOKUP_TYPES a
+    /// field's type gets: the first symbol of the right name is the answer even
+    /// when it is not a type. MEASURED, protoc 3.21.12: an `extend Base` written
+    /// in a message that has a FIELD called `Base` says `"Base" is not a message
+    /// type`, where a field of type `Base` there would have found the message.
+    /// Nothing is checked about the extension fields themselves (see the module
+    /// documentation), so the answer is only the message.
+    fn resolve_extendee(
+        &self,
+        file: usize,
+        relative_to: &str,
+        extendee: &TypeName,
+    ) -> Result<usize, ProtoDiagnostic> {
+        let here = self.name_of(file);
+        let text = extendee.text.as_str();
+        let Some((_, sym)) = self.lookup(text, relative_to, Want::Any) else {
             return Err(ProtoDiagnostic::at(
                 here,
-                pos,
-                format!(
-                    "\"{text}\" seems to be defined in \"{}\", which is not imported by \
-                     \"{here}\"; to use it here, add the import",
-                    self.name_of(sym.file)
-                ),
+                extendee.pos,
+                format!("\"{text}\" is not defined"),
             ));
-        }
-        Ok(sym)
+        };
+        let Kind::Message(message) = sym.kind else {
+            return Err(ProtoDiagnostic::at(
+                here,
+                extendee.pos,
+                format!("\"{text}\" is not a message type"),
+            ));
+        };
+        self.require_import(file, sym, text, extendee.pos)?;
+        Ok(message)
+    }
+
+    /// Record that `e` extends a message, so a root that reaches the message
+    /// can be refused, and refuse an extendee that does not resolve now.
+    fn link_extend(
+        &mut self,
+        scope: &str,
+        e: &ExtendDecl,
+        file: usize,
+    ) -> Result<(), ProtoDiagnostic> {
+        let target = self.resolve_extendee(file, &join(scope, &e.first_field), &e.extendee)?;
+        self.msgs[target].blockers.push(Blocker {
+            file,
+            pos: e.pos,
+            kind: BlockerKind::Extend,
+        });
+        Ok(())
     }
 
     fn link_message(
@@ -783,6 +916,26 @@ impl<'a> Linker<'_, 'a> {
                         _ => (Target::Leaf, t.pos),
                     }
                 }
+                FieldType::Group(group) => {
+                    // The parser put the group's message beside this field, so
+                    // it is the symbol of that name in this message's scope.
+                    let Some(Symbol {
+                        kind: Kind::Message(target),
+                        ..
+                    }) = self.find(&join(&full, group))
+                    else {
+                        return Err(ProtoDiagnostic::in_file(
+                            here,
+                            "internal: group message not registered",
+                        ));
+                    };
+                    self.msgs[idx].blockers.push(Blocker {
+                        file,
+                        pos: f.ty_pos,
+                        kind: BlockerKind::Group(group.clone()),
+                    });
+                    (Target::Message(target), f.ty_pos)
+                }
                 FieldType::Map(map) => {
                     if let Some(reason) = &map.key_error {
                         return Err(ProtoDiagnostic::at(here, f.ty_pos, reason.clone()));
@@ -810,6 +963,11 @@ impl<'a> Linker<'_, 'a> {
 
         for n in &m.nested {
             self.link_message(&full, n, file)?;
+        }
+        // After the fields and the nested messages, as `protoc` cross-links a
+        // message's own extensions after both.
+        for e in &m.extends {
+            self.link_extend(&full, e, file)?;
         }
         Ok(())
     }
@@ -845,6 +1003,76 @@ impl<'a> Linker<'_, 'a> {
                 ),
             )),
         }
+    }
+
+    /// The messages the expansion from `root` visits, each once, in the order
+    /// it first reaches them (a field's message before the next field's, the
+    /// way [`Self::expand`] writes them).
+    ///
+    /// Found with a work list and not by recursion: a chain of distinct
+    /// messages can be as long as the schema, and this runs before the expansion
+    /// whose depth bound would stop a recursive walk.
+    fn reached_from(&self, root: usize) -> Vec<usize> {
+        let mut seen = alloc::vec![false; self.msgs.len()];
+        let mut order = Vec::new();
+        let mut pending = alloc::vec![root];
+        while let Some(msg) = pending.pop() {
+            if core::mem::replace(&mut seen[msg], true) {
+                continue;
+            }
+            order.push(msg);
+            // Reversed, so the first field's message is the next one popped.
+            for f in self.msgs[msg].fields.iter().rev() {
+                match f.target {
+                    Target::Message(inner) | Target::Map(Some(inner)) => pending.push(inner),
+                    Target::Leaf | Target::Map(None) => {}
+                }
+            }
+        }
+        order
+    }
+
+    /// Refuse a `group` or an `extend` that touches a message the expansion
+    /// from `root` visits.
+    ///
+    /// Both are read wherever they are written, because the reader cannot know
+    /// before it has the root whether they matter; this is where it finds out.
+    /// A group is a field of the message that holds it, and an extension is
+    /// declared outside the message it extends, so a declaration for either
+    /// message would have to leave a field out or invent a path for it.
+    fn refuse_what_the_root_reaches(&self, root: usize) -> Result<(), ProtoDiagnostic> {
+        let root_name = self.msgs[root].full_name.as_str();
+        for msg in self.reached_from(root) {
+            let held = &self.msgs[msg];
+            let Some(blocker) = held.blockers.first() else {
+                continue;
+            };
+            let reaches = if msg == root {
+                String::from("is the root message")
+            } else {
+                format!("the root message `{root_name}` reaches")
+            };
+            let reason = match &blocker.kind {
+                BlockerKind::Group(group) => format!(
+                    "group fields are not supported: the group `{group}` is a field of `{}`, \
+                     which {reaches}; a group is written on the wire with the deprecated \
+                     start-group / end-group markers, which the payload reader does not decode",
+                    held.full_name
+                ),
+                BlockerKind::Extend => format!(
+                    "`extend` is not supported: it extends `{}`, which {reaches}; an \
+                     extension's fields are declared outside the message they extend, so this \
+                     reader could not attach their names to it",
+                    held.full_name
+                ),
+            };
+            return Err(ProtoDiagnostic::at(
+                self.name_of(blocker.file),
+                blocker.pos,
+                reason,
+            ));
+        }
+        Ok(())
     }
 
     /// Write the lines of `msg`'s fields under `prefix`, recursing into message
