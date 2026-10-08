@@ -353,8 +353,8 @@ pub unsafe extern "C" fn z_open(
                 initial_interest: false,
                 // zenoh-pico has no gossip: its peers are introduced by scouting alone.
                 gossip: None,
-                // Its one listener's bind failing has always failed the open.
-                listen_exit_on_failure: true,
+                // Its one listener's bind failing has always failed the open, at the first attempt.
+                listen_phase: wz_capi_core::drive::ListenPhase::SHIPPED,
             },
         ) {
             Ok(state) => {

@@ -165,6 +165,9 @@ int main(int argc, char** argv) {
        what a row sets when it needs more than the one listener the arguments can state. */
     if (getenv("LISTEN_ENDPOINTS")) insert(&config, Z_CONFIG_LISTEN_KEY, getenv("LISTEN_ENDPOINTS"));
     if (getenv("LISTEN_EXIT")) insert(&config, "listen/exit_on_failure", getenv("LISTEN_EXIT"));
+    /* The bind phase's budget in milliseconds and its retry block as the json5 object it takes. */
+    if (getenv("LISTEN_TIMEOUT")) insert(&config, "listen/timeout_ms", getenv("LISTEN_TIMEOUT"));
+    if (getenv("LISTEN_RETRY")) insert(&config, "listen/retry", getenv("LISTEN_RETRY"));
     if (lport) {
         const char* host = getenv("LISTEN_HOST") ? getenv("LISTEN_HOST") : "127.0.0.1";
         snprintf(buf, sizeof buf, "[\"tcp/%s:%d\"]", host, lport);
@@ -773,8 +776,21 @@ const ASK_TIMEOUT_MS: &str = "1500";
 /// one run to the next. A row that reads such a node compares them as a set. The order within a
 /// line stays a thing the other rows compare, as it is for the addresses of one wildcard listener.
 fn hellos(probe: &Built, group: &str, what: u8, sort_each: bool) -> Vec<String> {
+    hellos_within(probe, group, what, sort_each, ASK_TIMEOUT_MS)
+}
+
+/// [`hellos`] with a window of its own, in milliseconds. A row that asks twice to tell what a
+/// node says before an event from what it says after keeps each window short, so that neither
+/// reaches across the event.
+fn hellos_within(
+    probe: &Built,
+    group: &str,
+    what: u8,
+    sort_each: bool,
+    window_ms: &str,
+) -> Vec<String> {
     let output = Command::new(&probe.exe)
-        .args([group, &what.to_string(), ASK_TIMEOUT_MS])
+        .args([group, &what.to_string(), window_ms])
         .env("LD_LIBRARY_PATH", &probe.libdir)
         .stderr(Stdio::null())
         .output()
@@ -828,6 +844,10 @@ enum Shape {
     /// map, and the real library names the same two in either order from one run to the next
     /// (observed both), so this row compares the locators as a set (R3076, corrected R3077).
     PeerOnTwoListeners,
+    /// A peer whose only listener binds in the BACKGROUND, a port that is taken when it opens and
+    /// let go 0.7 s later (`listen/timeout_ms: -1` with `listen/exit_on_failure: false`): asked
+    /// before the bind its Hello names nothing, and asked after it names the listener (R3089).
+    PeerBoundLate,
     /// A client connected to a peer, with a listener of its own: its Hello names the listener.
     ClientConnectedWithAListener,
     /// A client connected to a peer, with no listener: it answers with no locator.
@@ -842,9 +862,10 @@ impl Shape {
     fn what(self) -> u8 {
         match self {
             Shape::PeerOnLoopback | Shape::PeerToldNotToAnswer | Shape::PeerOnTwoListeners => 7,
-            Shape::PeerOnTheWildcard | Shape::PeerWithNoListener | Shape::PeerListenStatedEmpty => {
-                2
-            }
+            Shape::PeerOnTheWildcard
+            | Shape::PeerWithNoListener
+            | Shape::PeerListenStatedEmpty
+            | Shape::PeerBoundLate => 2,
             Shape::ClientConnectedWithAListener
             | Shape::ClientConnectedWithNone
             | Shape::ClientStillSearching => 4,
@@ -916,6 +937,43 @@ fn hellos_of(built: &Built, reference: &Built, probe: &Built, shape: Shape) -> V
             node.finish(opened);
             found
         }
+        Shape::PeerBoundLate => {
+            // The one port is taken by this test and let go by a thread of its own 0.7 s after
+            // the node starts; the node retries it every second from the start, so it binds at
+            // about 1 s. Asked at about 0.6 s and again at 2.5 s, both with a short window, the
+            // node is read before the bind and after it, and the two answers are one set.
+            let port = free_port();
+            let taken = TcpListener::bind(("127.0.0.1", port)).expect("the port is free to take");
+            let listen = format!("[\"tcp/127.0.0.1:{port}\"]");
+            let started = std::time::Instant::now();
+            let released = std::thread::spawn(move || {
+                std::thread::sleep(std::time::Duration::from_millis(700));
+                drop(taken);
+            });
+            let mut node = Node::start_with(
+                built,
+                &spec("peer", 0, 0),
+                &[
+                    ("LISTEN_ENDPOINTS", listen.as_str()),
+                    ("LISTEN_TIMEOUT", "-1"),
+                    ("LISTEN_EXIT", "false"),
+                ],
+            );
+            let opened = node.opened();
+            let wait_until = |at_ms: u64| {
+                let at = std::time::Duration::from_millis(at_ms);
+                std::thread::sleep(at.saturating_sub(started.elapsed()));
+            };
+            wait_until(600);
+            let mut found = hellos_within(probe, &group, shape.what(), false, "400");
+            wait_until(2500);
+            found.extend(hellos_within(probe, &group, shape.what(), false, "400"));
+            found.sort();
+            found.dedup();
+            node.finish(opened);
+            released.join().expect("the thread that lets the port go");
+            found
+        }
         Shape::ClientConnectedWithAListener | Shape::ClientConnectedWithNone => {
             // The peer the client connects to is the real library's, so the only thing that
             // differs between the two rows of a pair is the client.
@@ -982,6 +1040,11 @@ fn a_node_answers_a_scout_with_the_hello_the_real_library_sends_on_wz_and_libzen
     let no_locator_peer = ["hello whatami=peer locators=[]"];
     let two_listeners_peer =
         ["hello whatami=peer locators=[tcp/127.0.0.1:PORT, tcp/127.0.0.2:PORT]"];
+    // R3089 -- before the background bind it names nothing, after it the listener.
+    let bound_late_peer = [
+        "hello whatami=peer locators=[]",
+        "hello whatami=peer locators=[tcp/127.0.0.1:PORT]",
+    ];
     for (shape, expected) in [
         (Shape::PeerOnLoopback, Some(&loopback_peer[..])),
         (Shape::PeerOnTheWildcard, None),
@@ -989,6 +1052,7 @@ fn a_node_answers_a_scout_with_the_hello_the_real_library_sends_on_wz_and_libzen
         (Shape::PeerListenStatedEmpty, Some(&no_locator_peer[..])),
         // R3076 -- both listeners, as a set: the order the Hello names them in is a hash order.
         (Shape::PeerOnTwoListeners, Some(&two_listeners_peer[..])),
+        (Shape::PeerBoundLate, Some(&bound_late_peer[..])),
         (Shape::PeerToldNotToAnswer, Some(&[][..])),
         (
             Shape::ClientConnectedWithAListener,
@@ -1965,6 +2029,210 @@ fn a_listener_that_cannot_bind_is_skipped_when_told_to_identically_on_wz_and_lib
                          `listen/exit_on_failure: false` is not what the real library is"
                     )
                 }
+            );
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------------------------
+// The bind phase: how long and how often an endpoint that cannot be bound is tried. R3089.
+// ---------------------------------------------------------------------------------------------
+
+/// One row of the table of bind budgets: what is done to the one port a peer states as its
+/// listener, the settings the peer is given, and what the open and the listener do.
+struct BudgetRow<'a> {
+    what: &'a str,
+    /// How long after the node starts the port is let go, or `None` for a port that stays taken.
+    freed_after_ms: Option<u64>,
+    extra: &'a [(&'a str, &'a str)],
+    /// The bounds `z_open` returns inside, in milliseconds, whichever library it is.
+    open_within_ms: (u64, u64),
+    /// What the node prints, then what a leaf started well after the port is let go prints, or
+    /// `None` for a row that starts no leaf.
+    hub: &'a str,
+    leaf: Option<&'a str>,
+}
+
+/// The node and its leaf, as [`BudgetRow`] sets them up. The port is taken by this test and let go
+/// by a thread of its own at the instant the row names, counted from the node's start; a leaf
+/// connects to the port 1.7 s in, after the real library's first retry (1 s) has bound it.
+fn budget_run(
+    hub: &Built,
+    leaf: &Built,
+    key: &str,
+    row: &BudgetRow<'_>,
+) -> (Outcome, Option<Outcome>) {
+    let group = next_group();
+    let port = a_free_port();
+    let taken = TcpListener::bind(("127.0.0.1", port)).expect("the port is free to take");
+    let listen = loopback_endpoints(&[port]);
+    let mut env = vec![
+        ("SCOUTING_OFF", "1"),
+        ("PEERS_MID", "1"),
+        ("LISTEN_ENDPOINTS", listen.as_str()),
+    ];
+    env.extend_from_slice(row.extra);
+    let started = std::time::Instant::now();
+    let (held, released) = match row.freed_after_ms {
+        Some(after) => (
+            None,
+            Some(std::thread::spawn(move || {
+                std::thread::sleep(std::time::Duration::from_millis(after));
+                drop(taken);
+            })),
+        ),
+        None => (Some(taken), None),
+    };
+    let spec = |tag, secs, connect| Spec {
+        mode: "peer",
+        listen: 0,
+        connect,
+        key,
+        secs,
+        tag,
+        group: &group,
+        delay_ms: 500,
+        timeout_ms: 3000,
+    };
+    let mut node = Node::start_with(
+        hub,
+        &spec("A", if row.leaf.is_some() { 6 } else { 2 }, 0),
+        &env,
+    );
+    let opened = node.opened();
+    let started_leaf = row.leaf.map(|_| {
+        let wait = std::time::Duration::from_millis(1700).saturating_sub(started.elapsed());
+        std::thread::sleep(wait);
+        let mut leaf_node = Node::start_with(
+            leaf,
+            &spec("B", 3, port),
+            &[
+                ("SCOUTING_OFF", "1"),
+                ("PEERS_MID", "1"),
+                ("LISTEN_EMPTY", "1"),
+            ],
+        );
+        let leaf_opened = leaf_node.opened();
+        (leaf_node, leaf_opened)
+    });
+    let hub_outcome = node.finish(opened);
+    let leaf_outcome = started_leaf.map(|(leaf_node, opened)| leaf_node.finish(opened));
+    if let Some(thread) = released {
+        thread.join().expect("the thread that lets the port go");
+    }
+    drop(held);
+    (hub_outcome, leaf_outcome)
+}
+
+/// THE GATE, the bind phase: an endpoint that cannot be bound is tried again, on the `listen/retry`
+/// schedule, when `listen/timeout_ms` is not zero.
+///
+/// With `exit_on_failure` true (the default) the open is HELD UP until the endpoint binds, and
+/// fails with -4 when the budget is spent first; with it false the open returns at once and the
+/// endpoint is bound in the background, to be reached once it is. A budget of zero, the shipped
+/// default, tries once. MEASURED on the real library: a port let go 0.7 s in is bound at the first
+/// retry, 1 s, and the open returns then, or, with a retry schedule of 200 ms doubling, at 1.4 s.
+// wz-proves: api-compat-c zenoh-c->wz partial
+#[test]
+#[ignore = "reads a zenoh-c oracle; run by run-ci Layer C1cc (which builds the matching \
+            ABI arm this needs)"]
+fn a_bind_that_fails_is_tried_again_inside_its_budget_identically_on_wz_and_libzenohc() {
+    let Some(programs) = programs() else {
+        return;
+    };
+    const ALONE: &str = "open=0 | declare=0 senders=A dups=0 peers=0";
+    const REACHED: &str = "open=0 | declare=0 senders=A,B dups=0 peers=1";
+    const QUICK: &[(&str, &str)] = &[(
+        "LISTEN_RETRY",
+        "{period_init_ms:200,period_max_ms:2000,period_increase_factor:2}",
+    )];
+    let rows = [
+        BudgetRow {
+            what: "a port let go at 0.7 s, a budget of 3 s, the default schedule",
+            freed_after_ms: Some(700),
+            extra: &[("LISTEN_TIMEOUT", "3000")],
+            open_within_ms: (900, 2500),
+            hub: ALONE,
+            leaf: None,
+        },
+        BudgetRow {
+            what: "a port that stays taken, a budget of 0.6 s",
+            freed_after_ms: None,
+            extra: &[("LISTEN_TIMEOUT", "600")],
+            open_within_ms: (500, 1500),
+            hub: "open=-4",
+            leaf: None,
+        },
+        BudgetRow {
+            what: "a port that stays taken, a budget of 0.6 s, exit_on_failure false",
+            freed_after_ms: None,
+            extra: &[("LISTEN_TIMEOUT", "600"), ("LISTEN_EXIT", "false")],
+            open_within_ms: (0, 500),
+            hub: ALONE,
+            leaf: None,
+        },
+        BudgetRow {
+            what: "a port let go at 0.7 s, no bound on the budget, exit_on_failure false",
+            freed_after_ms: Some(700),
+            extra: &[("LISTEN_TIMEOUT", "-1"), ("LISTEN_EXIT", "false")],
+            open_within_ms: (0, 500),
+            hub: REACHED,
+            leaf: Some(REACHED),
+        },
+        BudgetRow {
+            what: "a port let go at 0.7 s, no bound on the budget, exit_on_failure true",
+            freed_after_ms: Some(700),
+            extra: &[("LISTEN_TIMEOUT", "-1")],
+            open_within_ms: (900, 2500),
+            hub: REACHED,
+            leaf: Some(REACHED),
+        },
+        BudgetRow {
+            what: "a port let go at 0.7 s, a budget of 5 s, a schedule of 200 ms doubling",
+            freed_after_ms: Some(700),
+            extra: &[("LISTEN_TIMEOUT", "5000"), QUICK[0]],
+            open_within_ms: (1250, 1900),
+            hub: ALONE,
+            leaf: None,
+        },
+        BudgetRow {
+            what: "a port let go at 0.7 s and the shipped budget of zero",
+            freed_after_ms: Some(700),
+            extra: &[],
+            open_within_ms: (0, 500),
+            hub: "open=-4",
+            leaf: None,
+        },
+    ];
+    for (n, row) in rows.iter().enumerate() {
+        for (library, hub, is_real) in [
+            ("the real library", &programs.reference, true),
+            ("wz", &programs.wz, false),
+        ] {
+            let key = format!("wz/listen-set/budget/{n}/{}", u8::from(is_real));
+            let (hub_outcome, leaf_outcome) = budget_run(hub, &programs.reference, &key, row);
+            let who = if is_real {
+                String::from("the REAL library's")
+            } else {
+                format!("§5.27 api-compat-c: a {library} peer's")
+            };
+            assert_eq!(
+                hub_outcome.row, row.hub,
+                "{who} node with {} is not what this file expects",
+                row.what
+            );
+            let (lowest, highest) = row.open_within_ms;
+            assert!(
+                (lowest..=highest).contains(&hub_outcome.open_ms),
+                "{who} open took {} ms with {}, outside {lowest}..={highest}",
+                hub_outcome.open_ms,
+                row.what
+            );
+            assert_eq!(
+                leaf_outcome.as_ref().map(|outcome| outcome.row.as_str()),
+                row.leaf,
+                "{who} leaf, started after the port was let go, with {}",
+                row.what
             );
         }
     }

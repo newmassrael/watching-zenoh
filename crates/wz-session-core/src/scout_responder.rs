@@ -197,6 +197,31 @@ impl ResponderIdentity {
         self
     }
 
+    /// R3089 -- this identity with the locators of listeners that were bound AFTER it was made,
+    /// each list appended in the order given and without repeating one it already holds: `local`
+    /// to the full list and `remote` to the list for an asker on another host.
+    ///
+    /// A node whose listener binds in the background (`listen/timeout_ms` with
+    /// `listen/exit_on_failure: false`) answers a Scout with no locator until it has bound, and
+    /// with the new one after, as upstream's does: it reads the locators its transport manager
+    /// holds each time it answers (`zenoh/src/net/runtime/orchestrator.rs` @
+    /// `fn get_hello_locators(&self, peer: &SocketAddr) -> Vec<Locator> {`). An identity with no
+    /// separate list for another host keeps none until `remote` adds one, and that list then
+    /// starts from the full one it was the same as.
+    #[must_use]
+    pub fn with_extra_locators(&self, local: &[String], remote: &[String]) -> Self {
+        let mut extended = self.clone();
+        append_new(&mut extended.locators, local);
+        if let Some(noloopback) = extended.locators_noloopback.as_mut() {
+            append_new(noloopback, remote);
+        } else if !remote.is_empty() {
+            let mut noloopback = self.locators.clone();
+            append_new(&mut noloopback, remote);
+            extended.locators_noloopback = Some(noloopback);
+        }
+        extended
+    }
+
     /// The list a Hello to `asker` carries: the one without loopback addresses for an asker that
     /// is not on this host, and the full one for a loopback asker and for one whose address is not
     /// known (the pure decision may have none to look at).
@@ -438,6 +463,15 @@ fn hello_datagram_with(identity: &ResponderIdentity, advertised: &[String]) -> V
     datagram
 }
 
+/// Append each of `more` that `list` does not already hold, in the order given.
+fn append_new(list: &mut Vec<String>, more: &[String]) {
+    for locator in more {
+        if !list.contains(locator) {
+            list.push(locator.clone());
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -486,6 +520,57 @@ mod tests {
             ScoutDecision::Answer(bytes) => bytes,
             ScoutDecision::Ignored(why) => panic!("expected a Hello, got Ignored({why:?})"),
         }
+    }
+
+    /// R3089 -- locators of listeners bound after the identity was made are appended to both
+    /// lists, in the order given and once each; the identity it came from is not changed.
+    #[test]
+    fn locators_added_later_extend_both_lists_without_repeating() {
+        let base = identity(WhatAmI::Peer, OUR_ZID, &["tcp/10.0.0.1:1"])
+            .with_noloopback_locators(vec!["tcp/10.0.0.1:1".to_string()]);
+        let more = vec!["tcp/10.0.0.1:2".to_string(), "tcp/10.0.0.1:1".to_string()];
+        let extended = base.with_extra_locators(&more, &more);
+        assert_eq!(extended.locators(), ["tcp/10.0.0.1:1", "tcp/10.0.0.1:2"]);
+        let neighbour = Some("192.168.0.9".parse().expect("an address"));
+        assert_eq!(
+            extended.locators_for(neighbour),
+            ["tcp/10.0.0.1:1", "tcp/10.0.0.1:2"]
+        );
+        assert_eq!(base.locators(), ["tcp/10.0.0.1:1"], "the original is kept");
+    }
+
+    /// R3089 -- the full list and the list for another host are extended separately: a locator
+    /// only a process on this host can use is added to the first and not to the second.
+    #[test]
+    fn a_loopback_locator_added_later_is_not_offered_to_a_neighbour() {
+        let base = identity(WhatAmI::Peer, OUR_ZID, &[]).with_noloopback_locators(Vec::new());
+        let extended = base.with_extra_locators(&["tcp/127.0.0.1:7".to_string()], &[]);
+        let neighbour = Some("192.168.0.9".parse().expect("an address"));
+        let beside = Some("127.0.0.1".parse().expect("an address"));
+        assert_eq!(extended.locators_for(beside), ["tcp/127.0.0.1:7"]);
+        assert!(extended.locators_for(neighbour).is_empty());
+    }
+
+    /// R3089 -- an identity that kept ONE list for everyone starts a second from the first when
+    /// a later locator is meant for another host as well, and stays with one when it is not.
+    #[test]
+    fn an_identity_with_one_list_grows_a_second_only_when_it_has_to() {
+        let base = identity(WhatAmI::Peer, OUR_ZID, &["tcp/10.0.0.1:1"]);
+        let local_only = base.with_extra_locators(&["tcp/127.0.0.1:7".to_string()], &[]);
+        let neighbour = Some("192.168.0.9".parse().expect("an address"));
+        assert_eq!(
+            local_only.locators_for(neighbour),
+            ["tcp/10.0.0.1:1", "tcp/127.0.0.1:7"],
+            "with no second list everyone is answered with the one list"
+        );
+        let both = base.with_extra_locators(
+            &["tcp/10.0.0.1:2".to_string()],
+            &["tcp/10.0.0.1:2".to_string()],
+        );
+        assert_eq!(
+            both.locators_for(neighbour),
+            ["tcp/10.0.0.1:1", "tcp/10.0.0.1:2"]
+        );
     }
 
     /// R3071 -- the Hello an asker is answered with carries the list that asker is owed: the full

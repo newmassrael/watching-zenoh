@@ -20243,6 +20243,19 @@ layer_c1cc_api_compat_c() {
         --test-threads=1 \
         --exact a_listener_that_cannot_bind_is_skipped_when_told_to_identically_on_wz_and_libzenohc \
         || return 1
+    # R3089 -- the bind phase's budget and retry. With a `listen/timeout_ms` that is not zero an
+    # endpoint that cannot be bound is tried again on the `listen/retry` schedule: held up inside
+    # the open until it binds (a port let go 0.7 s in is bound at the 1 s retry, or at 1.4 s on a
+    # 200 ms doubling schedule), failing with -4 at the budget when it stays taken, or, with
+    # `exit_on_failure` false, left to the background while the open returns at once and a leaf
+    # started later is accepted. Seven settings, the real library's row asserted first.
+    _runci_guarded_test \
+        "C1cc a_bind_that_fails_is_tried_again_inside_its_budget_identically_on_wz_and_libzenohc" 1 \
+        cargo test -p wz-integration-tests \
+        --test zenoh_c_scouting_twice_and_diff -- --ignored --quiet \
+        --test-threads=1 \
+        --exact a_bind_that_fails_is_tried_again_inside_its_budget_identically_on_wz_and_libzenohc \
+        || return 1
     _runci_guarded_test \
         "C1cc an_advanced_subscriber_of_the_publishers_own_session_hears_it_on_wz_and_libzenohc" 1 \
         cargo test -p wz-integration-tests \

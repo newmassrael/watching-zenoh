@@ -1013,7 +1013,11 @@ HOST_GATED_CI_TARGETS: dict[str, str] = {
 # listeners is reached at both, a listener that cannot bind fails the open, and one that cannot bind
 # is skipped when the config says to (each `api-compat-c zenoh-c->wz partial`). Measured by
 # `scripts/audit-crossimpl-proof.sh`.
-FOREIGN_ADJUDICATOR_LINKS = 1028
+# R3089 -- 1028 -> 1029, RISING by one: a new `wz-proves` line in
+# `zenoh_c_scouting_twice_and_diff.rs` for the bind phase's budget and retry, a bind that fails is
+# tried again inside its budget as the real library does it (`api-compat-c zenoh-c->wz partial`).
+# Measured by `scripts/audit-crossimpl-proof.sh`.
+FOREIGN_ADJUDICATOR_LINKS = 1029
 
 # ── Execution disclosure ────────────────────────────────────────────────────────
 #

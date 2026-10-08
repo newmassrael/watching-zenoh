@@ -45,14 +45,16 @@ use wz_runtime_tokio::session_open::{
     SessionOffer, DEFAULT_OPEN_TICK_MS,
 };
 use wz_runtime_tokio::startup_phase::{
-    drive_connect_phase, drive_phase, endpoint_policy, endpoint_schedule, PhaseArm, PhaseBudget,
-    PhasePolicy,
+    drive_bind_phase, drive_connect_phase, drive_phase, endpoint_policy, endpoint_schedule,
+    retry_until_bound, PhaseArm, PhaseBudget, PhasePolicy,
 };
 
 use crate::faces::{
     CApiForwarder, GossipSetup, OpenShmClients, SessionResources, SharedSession, DIAL_FACE_ID,
 };
-use crate::scouting_node::{bind_responder, Advertised, Responder, ScoutLink, ScoutingPlan};
+use crate::scouting_node::{
+    bind_responder, Advertised, LateLocators, Responder, ScoutLink, ScoutingPlan,
+};
 
 /// How the dial half of an open treats an attempt that fails — zenoh's
 /// `connect/timeout_ms` and `connect/exit_on_failure` ([`PhasePolicy`]) with the
@@ -95,6 +97,29 @@ impl DialPhase {
         schedule: RetryPolicy::ZENOH_DEFAULT,
         redial: None,
         start_window: None,
+    };
+}
+
+/// How the bind half of an open treats an endpoint that cannot be bound -- zenoh's
+/// `listen/timeout_ms` and `listen/exit_on_failure` ([`PhasePolicy`]) with the `listen/retry`
+/// schedule that paces it ([`RetryPolicy`]), already resolved for the role the session plays.
+///
+/// R3089 -- the bind twin of [`DialPhase`], and run by the runtime's own transcription of
+/// upstream's `bind_listeners` ([`drive_bind_phase`]), so a C open cannot drift from the node's.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ListenPhase {
+    /// `listen/timeout_ms` + `listen/exit_on_failure`.
+    pub policy: PhasePolicy,
+    /// `listen/retry`.
+    pub schedule: RetryPolicy,
+}
+
+impl ListenPhase {
+    /// What upstream ships for every role: one attempt per endpoint, and a failure fails the
+    /// open. What every open here did before the listen keys were read.
+    pub const SHIPPED: Self = Self {
+        policy: PhasePolicy::LISTEN_DEFAULT,
+        schedule: RetryPolicy::ZENOH_DEFAULT,
     };
 }
 
@@ -775,9 +800,9 @@ struct DriveContext {
     dials: (DialIntentSender, DialIntentReceiver),
     /// Whether the session gossips, as [`OpenStance::gossip`] says and its role allows.
     gossiping: bool,
-    /// R3076 -- whether an endpoint of `listen` that cannot be bound fails the open; see
-    /// [`OpenStance::listen_exit_on_failure`].
-    listen_exit_on_failure: bool,
+    /// R3076 -- what an endpoint of `listen` that cannot be bound does to the open, and R3089 --
+    /// how long and how often it is tried; see [`OpenStance::listen_phase`].
+    listen_phase: ListenPhase,
 }
 
 /// The shutdown signal both roles race their drive against. See
@@ -819,7 +844,7 @@ async fn drive_dial(
         scouting,
         dials,
         gossiping,
-        listen_exit_on_failure,
+        listen_phase,
     } = ctx;
     // R311y534 — the dial config is BUILT from the caller's TLS material rather
     // than defaulted. Everything that can fail it runs before the handshake, so a
@@ -874,36 +899,41 @@ async fn drive_dial(
     // the open, because the caller asked for a listener.
     //
     // R3076 -- every endpoint the config states, in its order, under `listen/exit_on_failure`.
-    let listen = match bind_listeners(
-        &listen,
-        listen_exit_on_failure,
-        &tls,
-        &zid,
-        tx_queue,
-        offer,
-        clock,
-    )
-    .await
-    {
-        Some(legs) => legs,
-        None => {
-            let _ = tx.send(false);
-            return;
-        }
-    };
+    // R3089 -- and under the budget and the retry of `listen/timeout_ms` and `listen/retry`.
+    let BoundListeners { legs: listen, late } =
+        match bind_listeners(&listen, listen_phase, &tls, &zid, tx_queue, offer, clock).await {
+            Some(bound) => bound,
+            None => {
+                let _ = tx.send(false);
+                return;
+            }
+        };
     // R3074 -- where gossip tells a neighbour this node can be dialled: the locators the
     // listeners ACTUALLY got, without the loopback ones, as upstream's `get_locators_noloopback`
     // lists them. Set before the first face can come up, so the first list a neighbour is sent
     // carries them. A node with no listener tells none, and is introduced to nobody as a node to
     // dial, though it dials what it is told of.
     let listeners: Vec<&BoundListener> = listen.iter().map(|leg| &leg.listening.listener).collect();
-    if gossiping {
-        shared.set_gossip_locators(Advertised::of_all(&listeners).remote);
-    }
+    // R3089 -- and the listeners that bind later add theirs to this list when they do.
+    let late = if gossiping {
+        let bound_before = Advertised::of_all(&listeners).remote;
+        shared.set_gossip_locators(bound_before.clone());
+        late.gossiping(bound_before)
+    } else {
+        late
+    };
     // R3071 -- findable once its listener is bound, for either role: a client's
     // bound-and-unserved listener is advertised too (measured: a real client with a listener
     // answers a Scout naming it, and one with none answers with no locators at all).
-    let responder = match bound_responder(scouting.as_ref(), whatami, &zid, &listeners).await {
+    let responder = match bound_responder(
+        scouting.as_ref(),
+        whatami,
+        &zid,
+        &listeners,
+        late.locators(),
+    )
+    .await
+    {
         Ok(responder) => responder,
         Err(()) => {
             let _ = tx.send(false);
@@ -921,8 +951,8 @@ async fn drive_dial(
         // A node that neither scouts nor gossips is told of nobody and needs none.
         let dials = (scouting.is_some() || gossiping).then_some(dials);
         drive_peer(
-            endpoints, listen, scouting, zid, dials, phase, dialer, shared, tx, shutdown, stop,
-            gate,
+            endpoints, listen, late, scouting, zid, dials, phase, dialer, shared, tx, shutdown,
+            stop, gate,
         )
         .await;
         return;
@@ -949,20 +979,23 @@ async fn drive_dial(
     } else {
         (responder.map(Responder::start), None)
     };
-    drive_client(
-        endpoints,
-        scheduled,
-        scouting,
-        after_connecting,
-        phase,
-        dialer,
-        shared,
-        tx,
-        shutdown,
-        stop,
-        gate,
-    )
-    .await;
+    // R3089 -- a listener of a client that is bound after the open is held as the others are.
+    tokio::select! {
+        _ = drive_client(
+            endpoints,
+            scheduled,
+            scouting,
+            after_connecting,
+            phase,
+            dialer,
+            shared,
+            tx,
+            shutdown,
+            stop,
+            gate,
+        ) => {}
+        _ = late.hold() => {}
+    }
 }
 
 /// R3071 -- bind the responder that makes the session FINDABLE when its plan says it answers a
@@ -979,11 +1012,12 @@ async fn bound_responder(
     whatami: WhatAmI,
     zid: &[u8],
     listeners: &[&BoundListener],
+    late: LateLocators,
 ) -> Result<Option<Responder>, ()> {
     let Some(plan) = plan else {
         return Ok(None);
     };
-    bind_responder(plan, whatami, zid, Advertised::of_all(listeners))
+    bind_responder(plan, whatami, zid, Advertised::of_all(listeners), late)
         .await
         .map_err(|_| ())
 }
@@ -1361,6 +1395,7 @@ async fn drive_face(
 async fn drive_peer(
     endpoints: Vec<String>,
     listen: Vec<ListenLeg>,
+    late: LateBinds,
     scouting: Option<ScoutingPlan>,
     zid: Vec<u8>,
     dials: Option<(DialIntentSender, DialIntentReceiver)>,
@@ -1378,15 +1413,12 @@ async fn drive_peer(
     local
         .run_until(async {
             let mut faces: Vec<tokio::task::JoinHandle<()>> = Vec::new();
-            for (index, leg) in listen.into_iter().enumerate() {
-                faces.push(spawn_accept_leg(
-                    leg,
-                    index as u64,
-                    &shared,
-                    &gate,
-                    closing_rx.clone(),
-                ));
+            for leg in listen {
+                faces.push(spawn_accept_leg(leg, &shared, &gate, closing_rx.clone()));
             }
+            // R3089 -- and the listeners whose bind goes on in the background, each served from
+            // the moment it binds.
+            faces.extend(late.spawn(&shared, &gate, &closing_rx));
             let deadline = phase
                 .policy
                 .budget
@@ -2020,15 +2052,16 @@ struct ListenLeg {
     listening: Listening,
     offer: SessionOffer,
     clock: TokioTime,
+    /// The endpoint's place in the `listen` list, which is what keeps the faces of two
+    /// listeners apart (see [`accept_faces`]). The place it was STATED at, and not the order the
+    /// binds finished in, so an endpoint bound late keeps its own range.
+    index: u64,
 }
 
 /// Run `leg`'s accept loop as a local task, until `closing` is set. Called on a
-/// `LocalSet`, because the accept loop's drive futures are not `Send`. `index` is the leg's
-/// place among the session's listeners, which is what keeps the faces of two listeners apart
-/// (see [`accept_faces`]).
+/// `LocalSet`, because the accept loop's drive futures are not `Send`.
 fn spawn_accept_leg(
     leg: ListenLeg,
-    index: u64,
     shared: &Arc<SharedSession>,
     gate: &Arc<ReadGate>,
     mut closing: tokio::sync::watch::Receiver<bool>,
@@ -2037,6 +2070,7 @@ fn spawn_accept_leg(
         listening,
         offer,
         clock,
+        index,
     } = leg;
     let shared = shared.clone();
     let gate = gate.clone();
@@ -2048,7 +2082,186 @@ fn spawn_accept_leg(
     })
 }
 
-/// Bind every endpoint a session's `listen` states, in the order the config states them.
+/// An endpoint of `listen` the bind phase left to the background: still to be bound, on its own
+/// schedule, while the session is already open.
+struct PendingBind {
+    /// The endpoint's place in the `listen` list; see [`ListenLeg::index`].
+    index: u64,
+    endpoint: String,
+    schedule: RetryPolicy,
+}
+
+/// What [`bind_listeners`] made of a `listen` list: the legs bound before the open went on, and
+/// the endpoints still being bound after it.
+struct BoundListeners {
+    legs: Vec<ListenLeg>,
+    /// R3089 -- bound by [`LateBinds::spawn`] once a role is running them.
+    late: LateBinds,
+}
+
+/// R3089 -- the endpoints of `listen` that bind after the open has returned, with what binding
+/// them needs: upstream's `spawn_add_listener`, run by the role that serves the faces.
+///
+/// A listener bound this way is served from the moment it binds, and told to a neighbour from
+/// then on: the next Hello names it, and so does the next list gossip sends (MEASURED on the real
+/// library: a Scout asked before the bind is answered with no locator and one asked after it with
+/// the new one). A neighbour that already holds the list gossip sent before is not sent a new one.
+struct LateBinds {
+    pending: Vec<PendingBind>,
+    tls: CapiTlsConfig,
+    zid: Vec<u8>,
+    tx_queue: TxQueueConf,
+    offer: SessionOffer,
+    clock: TokioTime,
+    /// Where each listener that binds late is told to the scouting responder; the responder reads
+    /// the same handle ([`bound_responder`]).
+    locators: LateLocators,
+    /// The locators gossip tells for the listeners bound before the open returned, when the
+    /// session gossips: a listener bound late adds its own to them.
+    gossiped: Option<Vec<String>>,
+}
+
+impl LateBinds {
+    /// Tell the scouting responder, and the gossip plane when the session has one, the locators of
+    /// a listener that has just bound.
+    fn advertise(
+        locators: &LateLocators,
+        gossiped: &Option<Vec<String>>,
+        shared: &SharedSession,
+        listener: &BoundListener,
+    ) {
+        let bound = Advertised::of(listener);
+        locators.add(&bound.local, &bound.remote);
+        if let Some(base) = gossiped {
+            let mut all = base.clone();
+            for locator in locators.snapshot().1 {
+                if !all.contains(&locator) {
+                    all.push(locator);
+                }
+            }
+            shared.set_gossip_locators(all);
+        }
+    }
+
+    /// The handle the responder of this session reads the locators of its late listeners from.
+    fn locators(&self) -> LateLocators {
+        self.locators.clone()
+    }
+
+    /// Gossip the locators of the listeners bound before the open returned, and those bound later
+    /// after them.
+    fn gossiping(mut self, bound_before: Vec<String>) -> Self {
+        self.gossiped = Some(bound_before);
+        self
+    }
+
+    /// Bind each pending endpoint, on its schedule, as a local task that serves its faces from the
+    /// moment it binds, until `closing` is set. Called on a `LocalSet`, like [`spawn_accept_leg`].
+    fn spawn(
+        self,
+        shared: &Arc<SharedSession>,
+        gate: &Arc<ReadGate>,
+        closing: &tokio::sync::watch::Receiver<bool>,
+    ) -> Vec<tokio::task::JoinHandle<()>> {
+        let LateBinds {
+            pending,
+            tls,
+            zid,
+            tx_queue,
+            offer,
+            clock,
+            locators,
+            gossiped,
+        } = self;
+        pending
+            .into_iter()
+            .map(|pending| {
+                let (tls, zid) = (tls.clone(), zid.clone());
+                let (shared, gate) = (shared.clone(), gate.clone());
+                let (locators, gossiped) = (locators.clone(), gossiped.clone());
+                let mut closing = closing.clone();
+                tokio::task::spawn_local(async move {
+                    let bound = retry_until_bound(pending.schedule, |_| {
+                        bind_one(&pending.endpoint, &tls, &zid, tx_queue)
+                    });
+                    let listening = tokio::select! {
+                        listening = bound => listening,
+                        _ = closing.wait_for(|c| *c) => return,
+                    };
+                    LateBinds::advertise(&locators, &gossiped, &shared, &listening.listener);
+                    accept_faces(
+                        listening,
+                        offer,
+                        clock,
+                        shared,
+                        pending.index,
+                        &gate,
+                        async move {
+                            let _ = closing.wait_for(|c| *c).await;
+                        },
+                    )
+                    .await;
+                })
+            })
+            .collect()
+    }
+
+    /// Bind each pending endpoint and HOLD it for as long as this future is polled, serving no
+    /// face: a client's listener is bound and serves nobody (see where the client role holds its
+    /// own). Never completes.
+    async fn hold(self) {
+        let LateBinds {
+            pending,
+            tls,
+            zid,
+            tx_queue,
+            locators,
+            ..
+        } = self;
+        let local = tokio::task::LocalSet::new();
+        local
+            .run_until(async {
+                let held: Vec<_> = pending
+                    .into_iter()
+                    .map(|pending| {
+                        let (tls, zid) = (tls.clone(), zid.clone());
+                        let locators = locators.clone();
+                        tokio::task::spawn_local(async move {
+                            let listening = retry_until_bound(pending.schedule, |_| {
+                                bind_one(&pending.endpoint, &tls, &zid, tx_queue)
+                            })
+                            .await;
+                            // A client that answers a Scout names its listener as it binds.
+                            let bound = Advertised::of(&listening.listener);
+                            locators.add(&bound.local, &bound.remote);
+                            std::future::pending::<()>().await;
+                        })
+                    })
+                    .collect();
+                for task in held {
+                    let _ = task.await;
+                }
+                // Nothing pending is nothing to hold, and the caller races this against the
+                // role it holds for: it must not be the one that ends.
+                std::future::pending::<()>().await;
+            })
+            .await;
+    }
+}
+
+/// One attempt to bind `endpoint`, as the runtime's phase drivers ask for it: the listener, or
+/// nothing.
+async fn bind_one(
+    endpoint: &str,
+    tls: &CapiTlsConfig,
+    zid: &[u8],
+    tx_queue: TxQueueConf,
+) -> Result<Listening, ()> {
+    bind_listener(endpoint, tls, zid, tx_queue).await.ok_or(())
+}
+
+/// Bind the endpoints a session's `listen` states, in the order the config states them, under the
+/// policy and the schedule of its bind phase.
 ///
 /// R3076 -- upstream's `bind_listeners_impl` (`zenoh/src/net/runtime/orchestrator.rs` @
 /// `async fn bind_listeners_impl(&self, listeners: &[EndPoint]) -> ZResult<()> {`) binds each in
@@ -2058,30 +2271,63 @@ fn spawn_accept_leg(
 /// opens with -4 though the first bound, and `exit_on_failure: false` opens with 0 whichever
 /// endpoint is taken, the node then listening on the others and, with all taken, on nothing.
 ///
+/// R3089 -- and the budget and the retry the real library gives a bind that fails, which
+/// [`drive_bind_phase`] transcribes: with a `listen/timeout_ms` that is not zero, an endpoint that
+/// cannot be bound is tried again on the `listen/retry` schedule, holding the open up until it
+/// binds or the budget is spent (MEASURED: a port freed 700 ms in is bound at 1000 ms and the
+/// open returns then; a port that stays taken fails the open with -4 at the budget), or, when
+/// `exit_on_failure` is false, tried in the background while the open returns at once (MEASURED:
+/// 2 ms, and the port answers a connect once it is freed).
+///
 /// `None` is an open failure, which the caller reports. The legs come back in the order that
-/// they were bound, and that order is what names their face ids.
+/// they were bound; each carries the place its endpoint was stated at, and that is what names its
+/// face ids.
 async fn bind_listeners(
     endpoints: &[String],
-    exit_on_failure: bool,
+    phase: ListenPhase,
     tls: &CapiTlsConfig,
     zid: &[u8],
     tx_queue: TxQueueConf,
     offer: SessionOffer,
     clock: TokioTime,
-) -> Option<Vec<ListenLeg>> {
-    let mut legs = Vec::with_capacity(endpoints.len());
-    for endpoint in endpoints {
-        match bind_listener(endpoint, tls, zid, tx_queue).await {
-            Some(listening) => legs.push(ListenLeg {
-                listening,
-                offer,
-                clock,
-            }),
-            None if exit_on_failure => return None,
-            None => {}
-        }
-    }
-    Some(legs)
+) -> Option<BoundListeners> {
+    let outcome = drive_bind_phase(phase.policy, phase.schedule, endpoints, |position, _| {
+        bind_one(&endpoints[position], tls, zid, tx_queue)
+    })
+    .await
+    .ok()?;
+    let legs = outcome
+        .bound
+        .into_iter()
+        .map(|(position, listening)| ListenLeg {
+            listening,
+            offer,
+            clock,
+            index: position as u64,
+        })
+        .collect();
+    let pending = outcome
+        .background
+        .into_iter()
+        .map(|(position, schedule)| PendingBind {
+            index: position as u64,
+            endpoint: endpoints[position].clone(),
+            schedule,
+        })
+        .collect();
+    Some(BoundListeners {
+        legs,
+        late: LateBinds {
+            pending,
+            tls: tls.clone(),
+            zid: zid.to_vec(),
+            tx_queue,
+            offer,
+            clock,
+            locators: LateLocators::default(),
+            gossiped: None,
+        },
+    })
 }
 
 /// Bind the session's `listen` endpoint. `None` is an open failure, which the
@@ -2208,24 +2454,24 @@ async fn drive_listen(
         // the one that dials what it is told of.
         dials: _,
         gossiping: _,
-        listen_exit_on_failure,
+        listen_phase,
     } = ctx;
-    let Some(legs) = bind_listeners(
-        &endpoints,
-        listen_exit_on_failure,
-        &tls,
-        &zid,
-        tx_queue,
-        offer,
-        clock,
-    )
-    .await
+    let Some(BoundListeners { legs, late }) =
+        bind_listeners(&endpoints, listen_phase, &tls, &zid, tx_queue, offer, clock).await
     else {
         let _ = tx.send(false);
         return;
     };
     let listeners: Vec<&BoundListener> = legs.iter().map(|leg| &leg.listening.listener).collect();
-    let _findable = match bound_responder(scouting.as_ref(), whatami, &zid, &listeners).await {
+    let _findable = match bound_responder(
+        scouting.as_ref(),
+        whatami,
+        &zid,
+        &listeners,
+        late.locators(),
+    )
+    .await
+    {
         Ok(responder) => responder.map(Responder::start),
         Err(()) => {
             let _ = tx.send(false);
@@ -2245,13 +2491,12 @@ async fn drive_listen(
     let local = tokio::task::LocalSet::new();
     local
         .run_until(async {
-            let accepts: Vec<_> = legs
+            let mut accepts: Vec<_> = legs
                 .into_iter()
-                .enumerate()
-                .map(|(index, leg)| {
-                    spawn_accept_leg(leg, index as u64, &shared, &gate, closing_rx.clone())
-                })
+                .map(|leg| spawn_accept_leg(leg, &shared, &gate, closing_rx.clone()))
                 .collect();
+            // R3089 -- and the listeners whose bind goes on in the background.
+            accepts.extend(late.spawn(&shared, &gate, &closing_rx));
             // R311y557 — the LISTEN role is where the local plane matters most: a
             // listener is unblocked by the BIND, so every put it makes before its first
             // peer connects had nowhere to deliver in-process. The drain rides this
@@ -2289,7 +2534,15 @@ async fn drive_idle(whatami: WhatAmI, ctx: DriveContext) {
     } = ctx;
     // R3071 -- a session with no listener is still findable when it answers a Scout: it says
     // what it is and that it has nowhere to be dialled, as upstream's does for `listen: []`.
-    let _findable = match bound_responder(scouting.as_ref(), whatami, &zid, &[]).await {
+    let _findable = match bound_responder(
+        scouting.as_ref(),
+        whatami,
+        &zid,
+        &[],
+        LateLocators::default(),
+    )
+    .await
+    {
         Ok(responder) => responder.map(Responder::start),
         Err(()) => {
             let _ = tx.send(false);
@@ -2375,12 +2628,13 @@ pub struct OpenStance {
     /// config says nothing and `None` when it turns gossip off; zenoh-pico's says `None`, its
     /// peers being introduced by scouting alone. A client never gossips whatever this says.
     pub gossip: Option<GossipPolicy>,
-    /// R3076 -- whether an endpoint of `listen` that cannot be bound fails the open, which is
+    /// R3076 -- what an endpoint of `listen` that cannot be bound does to the open, which is
     /// upstream's `listen/exit_on_failure` and its default (`true`): with `false` that endpoint
-    /// is skipped and the session listens on the others, or on nothing. zenoh-c's ABI reads it
-    /// from its config; zenoh-pico's says `true`, its listener being one endpoint whose failure
-    /// has always failed the open.
-    pub listen_exit_on_failure: bool,
+    /// is skipped and the session listens on the others, or on nothing. R3089 -- and with
+    /// `listen/timeout_ms` and `listen/retry` how long and how often it is tried first. zenoh-c's
+    /// ABI reads them from its config; zenoh-pico's says [`ListenPhase::SHIPPED`], its listener
+    /// being one endpoint whose failure has always failed the open at the first attempt.
+    pub listen_phase: ListenPhase,
 }
 
 #[cfg(feature = "session-extshm")]
@@ -2447,7 +2701,7 @@ pub fn open_blocking(
         scouting,
         initial_interest,
         gossip,
-        listen_exit_on_failure,
+        listen_phase,
     } = stance;
     let clock = TokioTime::new();
     // R3074 -- where the nodes a peer is told of are posted. Made here because both ends are
@@ -2532,7 +2786,7 @@ pub fn open_blocking(
                 scouting,
                 dials: (dial_tx, dial_rx),
                 gossiping,
-                listen_exit_on_failure,
+                listen_phase,
             };
             // R3070 -- a session that scouts for nodes to connect to dials them with the dial
             // role, whether or not it was also told an endpoint, so the plan decides the route

@@ -132,6 +132,71 @@ pub enum ReplySource {
     Group,
 }
 
+/// R3089 -- the locators of listeners that bind AFTER a responder has started answering, handed to
+/// it as they bind.
+///
+/// A node whose listener binds in the background (`listen/timeout_ms` with
+/// `listen/exit_on_failure: false`) is findable before it has bound, with no locator, and tells the
+/// locator of the new listener to the next asker once it has: upstream reads the locators its
+/// transport manager holds each time it answers, so a listener added later is in the next Hello.
+/// The two lists are the ones a Hello carries (`ResponderIdentity::with_extra_locators`), and the
+/// handle is cloned between the host that binds and the responder that answers.
+#[derive(Debug, Clone, Default)]
+pub struct LateLocators {
+    inner: std::sync::Arc<std::sync::Mutex<LateLists>>,
+}
+
+#[derive(Debug, Default)]
+struct LateLists {
+    local: Vec<String>,
+    remote: Vec<String>,
+    /// Bumped by every [`LateLocators::add`], so a reader tells a new list from the one it holds.
+    version: u64,
+}
+
+impl LateLocators {
+    /// Add the locators of a listener that has just bound: `local` to the full list and `remote`
+    /// to the list for an asker on another host. A locator already held is not repeated.
+    pub fn add(&self, local: &[String], remote: &[String]) {
+        let mut guard = self.lists();
+        let lists = &mut *guard;
+        for (into, from) in [(&mut lists.local, local), (&mut lists.remote, remote)] {
+            for locator in from {
+                if !into.contains(locator) {
+                    into.push(locator.clone());
+                }
+            }
+        }
+        lists.version += 1;
+    }
+
+    /// The `(full, other-host)` lists held so far.
+    pub fn snapshot(&self) -> (Vec<String>, Vec<String>) {
+        let lists = self.lists();
+        (lists.local.clone(), lists.remote.clone())
+    }
+
+    /// The lists and their version when something was added since `seen`.
+    fn changed_since(&self, seen: u64) -> Option<(u64, Vec<String>, Vec<String>)> {
+        let lists = self.lists();
+        (lists.version != seen).then(|| (lists.version, lists.local.clone(), lists.remote.clone()))
+    }
+
+    fn lists(&self) -> std::sync::MutexGuard<'_, LateLists> {
+        self.inner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+}
+
+/// Where a responder reads the locators added after it started, and how far it has read.
+struct LateFeed {
+    /// The identity as it was made, which every refresh starts from.
+    base: ResponderIdentity,
+    source: LateLocators,
+    seen: u64,
+}
+
 /// A node's answering half: one group socket, the unicast sockets a reply may
 /// leave from, and the identity it answers with.
 pub struct ScoutingResponder {
@@ -142,6 +207,9 @@ pub struct ScoutingResponder {
     reply: Vec<(UdpDriver, SocketAddr)>,
     reply_ips: Vec<IpAddr>,
     identity: ResponderIdentity,
+    /// R3089 -- the locators of listeners bound after the responder started, when it was given
+    /// a source of them.
+    late: Option<LateFeed>,
     answered: u64,
     ignored: u64,
 }
@@ -192,8 +260,31 @@ impl ScoutingResponder {
             reply,
             reply_ips,
             identity,
+            late: None,
             answered: 0,
             ignored: 0,
+        }
+    }
+
+    /// R3089 -- answer with the locators of listeners bound after this responder started, as
+    /// `source` is given them, in addition to the ones the identity was made with.
+    #[must_use]
+    pub fn with_late_locators(mut self, source: LateLocators) -> Self {
+        self.late = Some(LateFeed {
+            base: self.identity.clone(),
+            source,
+            seen: 0,
+        });
+        self
+    }
+
+    /// Read what was added to the late locators since the last answer, and answer with it.
+    fn refresh_identity(&mut self) {
+        if let Some(feed) = self.late.as_mut() {
+            if let Some((version, local, remote)) = feed.source.changed_since(feed.seen) {
+                feed.seen = version;
+                self.identity = feed.base.with_extra_locators(&local, &remote);
+            }
         }
     }
 
@@ -247,6 +338,8 @@ impl ScoutingResponder {
                 }
             }
         };
+        // R3089 -- and the locators of listeners bound since the last answer are in it.
+        self.refresh_identity();
         // R3071 -- the Hello carries the locator list its asker is owed, so the asker's address
         // is read before the decision and not after it.
         match answer_scout_from(&self.identity, &rx.bytes, rx.src.map(|src| src.ip())) {
@@ -327,5 +420,38 @@ where
         if let ResponderStep::LinkLost { cause } = step {
             return cause;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn strings(list: &[&str]) -> Vec<String> {
+        list.iter().map(|s| (*s).to_owned()).collect()
+    }
+
+    /// R3089 -- a handle shared between the host that binds and the responder that answers: what
+    /// one adds the other reads, a locator is held once, and a reader that has read a version is
+    /// told of nothing until the next add.
+    #[test]
+    fn late_locators_are_shared_deduplicated_and_versioned() {
+        let host = LateLocators::default();
+        let responder_side = host.clone();
+        assert_eq!(responder_side.changed_since(0), None, "nothing added yet");
+
+        host.add(&strings(&["tcp/127.0.0.1:1"]), &strings(&[]));
+        host.add(
+            &strings(&["tcp/127.0.0.1:1", "tcp/10.0.0.1:2"]),
+            &strings(&["tcp/10.0.0.1:2"]),
+        );
+        let (version, local, remote) = responder_side
+            .changed_since(0)
+            .expect("two adds since the start");
+        assert_eq!(version, 2);
+        assert_eq!(local, ["tcp/127.0.0.1:1", "tcp/10.0.0.1:2"]);
+        assert_eq!(remote, ["tcp/10.0.0.1:2"]);
+        assert_eq!(responder_side.changed_since(version), None, "all read");
+        assert_eq!(host.snapshot(), (local, remote));
     }
 }

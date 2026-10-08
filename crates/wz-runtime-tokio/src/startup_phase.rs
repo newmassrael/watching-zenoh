@@ -348,6 +348,159 @@ where
     })
 }
 
+/// What a BIND phase did with the endpoints it was given: the three things upstream's
+/// `bind_listeners` does with one, kept apart so the host can act on each.
+#[derive(Debug)]
+pub struct BindOutcome<T, E> {
+    /// Bound before the phase returned: the endpoint's place in the list, and what binding it
+    /// gave.
+    pub bound: Vec<(usize, T)>,
+    /// Handed to the host to keep trying after the phase has returned (upstream's
+    /// `spawn_add_listener`): the endpoint's place in the list and the schedule it retries on.
+    /// The host binds each with [`retry_until_bound`] on its own executor.
+    pub background: Vec<(usize, RetryPolicy)>,
+    /// Stepped over: the endpoint's place in the list and why its one attempt failed. The node
+    /// comes up without them.
+    pub skipped: Vec<(usize, E)>,
+}
+
+/// Run a whole BIND phase over `endpoints` — upstream's `bind_listeners` and
+/// `bind_listeners_impl` (`zenoh/src/net/runtime/orchestrator.rs` @
+/// `async fn bind_listeners(&self, listeners: &[EndPoint]) -> ZResult<()> {`).
+///
+/// Each endpoint takes the arm its own policy and schedule select ([`PhasePolicy::arm`]), in the
+/// order the list states them:
+///
+/// - [`PhaseArm::OnceThenFail`]: one attempt, and a failure ends the phase;
+/// - [`PhaseArm::OnceThenSkip`]: one attempt, and a failure steps over the endpoint;
+/// - [`PhaseArm::RetryThenFail`]: attempts on the schedule until one binds, holding the phase up;
+/// - [`PhaseArm::RetryInBackground`]: no attempt here at all; the endpoint is returned in
+///   [`BindOutcome::background`] for the host to bind after the phase.
+///
+/// A phase with a bounded budget is cut off at it, wherever it is: an endpoint still being bound
+/// then ends the phase with a failure that `exit_on_failure` does not soften (upstream's
+/// `tokio::time::timeout` returns `Err` whatever the policy says). And inside such a phase an
+/// endpoint whose single attempt failed is stepped over EVEN when its policy says the failure is
+/// fatal, because upstream drops the result of the wrapped future (`.ok()`); it is reachable only
+/// by an endpoint whose own schedule has no first wait.
+///
+/// The budget is applied to each await as the REMAINING time, as [`drive_phase`] applies it, so
+/// the endpoints bound before the cut-off are not lost to a future that was dropped.
+///
+/// `attempt(position, n)` is called with the endpoint's place in the list and the 1-based number
+/// of the attempt.
+pub async fn drive_bind_phase<T, E, F, Fut>(
+    policy: PhasePolicy,
+    schedule: RetryPolicy,
+    endpoints: &[String],
+    attempt: F,
+) -> Result<BindOutcome<T, E>, PhaseFailed<E>>
+where
+    F: Fn(usize, u32) -> Fut,
+    Fut: std::future::Future<Output = Result<T, E>>,
+{
+    let mut outcome = BindOutcome {
+        bound: Vec::new(),
+        background: Vec::new(),
+        skipped: Vec::new(),
+    };
+    let deadline = policy
+        .budget
+        .deadline()
+        .map(|d| tokio::time::Instant::now() + d);
+    let swallows_a_failure = deadline.is_some();
+    let mut attempts: u32 = 0;
+    let mut last: Option<E> = None;
+    for (position, endpoint) in endpoints.iter().enumerate() {
+        let own_policy = endpoint_policy(policy, endpoint);
+        let own_schedule = endpoint_schedule(schedule, endpoint);
+        let arm = own_policy.arm(own_schedule);
+        if arm == PhaseArm::RetryInBackground {
+            outcome.background.push((position, own_schedule));
+            continue;
+        }
+        let mut period = own_schedule.period();
+        let mut n: u32 = 0;
+        loop {
+            n += 1;
+            attempts += 1;
+            let step = attempt(position, n);
+            let result = match deadline {
+                Some(at) => match tokio::time::timeout_at(at, step).await {
+                    Ok(result) => result,
+                    Err(_) => {
+                        return Err(PhaseFailed {
+                            last,
+                            attempts,
+                            ends_startup: true,
+                        })
+                    }
+                },
+                None => step.await,
+            };
+            match result {
+                Ok(value) => {
+                    outcome.bound.push((position, value));
+                    break;
+                }
+                Err(e) if arm.retries() => {
+                    last = Some(e);
+                    let wait = Duration::from_millis(period.next_ms());
+                    match deadline {
+                        Some(at) if tokio::time::Instant::now() + wait >= at => {
+                            tokio::time::sleep_until(at).await;
+                            return Err(PhaseFailed {
+                                last,
+                                attempts,
+                                ends_startup: true,
+                            });
+                        }
+                        _ => tokio::time::sleep(wait).await,
+                    }
+                }
+                Err(e) => {
+                    if arm.ends_startup() && !swallows_a_failure {
+                        return Err(PhaseFailed {
+                            last: Some(e),
+                            attempts,
+                            ends_startup: true,
+                        });
+                    }
+                    outcome.skipped.push((position, e));
+                    break;
+                }
+            }
+        }
+    }
+    Ok(outcome)
+}
+
+/// Bind one endpoint without end — upstream's `add_listener_retry` (`zenoh/src/net/runtime/
+/// orchestrator.rs` @ `async fn add_listener_retry(`): attempt, and on a failure wait the
+/// schedule's next period and attempt again, until one succeeds.
+///
+/// What a host runs for each endpoint [`drive_bind_phase`] returned in
+/// [`BindOutcome::background`], on an executor of its own, and drops with the session. It never
+/// returns on a schedule that never succeeds, so the host's shutdown is what ends it.
+///
+/// `schedule` must wait between attempts ([`PhasePolicy::arm`] selects the background arm only
+/// for a schedule whose first wait is not zero), or this is a hot loop.
+pub async fn retry_until_bound<T, E, F, Fut>(schedule: RetryPolicy, mut attempt: F) -> T
+where
+    F: FnMut(u32) -> Fut,
+    Fut: std::future::Future<Output = Result<T, E>>,
+{
+    let mut period = schedule.period();
+    let mut n: u32 = 0;
+    loop {
+        n += 1;
+        if let Ok(value) = attempt(n).await {
+            return value;
+        }
+        tokio::time::sleep(Duration::from_millis(period.next_ms())).await;
+    }
+}
+
 /// One endpoint's retry schedule: the global `connect/retry` with the
 /// endpoint's own `#retry_period_*` tail layered on top, as upstream resolves
 /// it (`commons/zenoh-config/src/connection_retry.rs` @ `pub fn get_retry_config(`).
@@ -838,5 +991,197 @@ mod tests {
             layered.period_increase_factor, global.period_increase_factor,
             "a field the tail is silent about keeps the global value"
         );
+    }
+
+    fn two_endpoints() -> Vec<String> {
+        vec![
+            String::from("tcp/127.0.0.1:1"),
+            String::from("tcp/127.0.0.1:2"),
+        ]
+    }
+
+    /// R3089 -- a bind phase over a list binds each endpoint, in the list's order, and reports
+    /// where each stood in it.
+    #[tokio::test]
+    async fn a_bind_phase_binds_every_endpoint_in_the_order_stated() {
+        let out = drive_bind_phase(
+            PhasePolicy::LISTEN_DEFAULT,
+            RetryPolicy::ZENOH_DEFAULT,
+            &two_endpoints(),
+            |position, _| async move { Ok::<usize, String>(position * 10) },
+        )
+        .await
+        .expect("every endpoint binds");
+        assert_eq!(out.bound, vec![(0, 0), (1, 10)]);
+        assert!(out.background.is_empty() && out.skipped.is_empty());
+    }
+
+    /// R3089 -- the shipped default is one attempt and a failure that ends the phase, whichever
+    /// endpoint it is and with the cause kept; an earlier endpoint that bound does not save it.
+    #[tokio::test]
+    async fn a_failing_endpoint_ends_a_phase_that_binds_once() {
+        let failed = drive_bind_phase(
+            PhasePolicy::LISTEN_DEFAULT,
+            RetryPolicy::ZENOH_DEFAULT,
+            &two_endpoints(),
+            |position, n| async move {
+                if position == 1 {
+                    Err(format!("taken #{n}"))
+                } else {
+                    Ok(())
+                }
+            },
+        )
+        .await
+        .expect_err("the second endpoint is taken");
+        assert_eq!(failed.attempts, 2);
+        assert_eq!(failed.last.as_deref(), Some("taken #1"));
+        assert!(failed.ends_startup);
+    }
+
+    /// R3089 -- with `exit_on_failure` false and no budget the failing endpoint is stepped over,
+    /// even when every endpoint fails.
+    #[tokio::test]
+    async fn a_failing_endpoint_is_stepped_over_when_the_phase_may_carry_on() {
+        let policy = PhasePolicy {
+            exit_on_failure: false,
+            ..PhasePolicy::LISTEN_DEFAULT
+        };
+        let out = drive_bind_phase(
+            policy,
+            RetryPolicy::ZENOH_DEFAULT,
+            &two_endpoints(),
+            |_, n| async move { Err::<(), String>(format!("taken #{n}")) },
+        )
+        .await
+        .expect("a phase that may carry on does not fail");
+        assert!(out.bound.is_empty() && out.background.is_empty());
+        assert_eq!(
+            out.skipped,
+            vec![(0, String::from("taken #1")), (1, String::from("taken #1"))]
+        );
+    }
+
+    /// R3089 -- with a budget and `exit_on_failure` true the phase is HELD UP until the endpoint
+    /// binds, on the schedule's cadence: a port freed after three attempts is bound at the
+    /// fourth, and the phase has taken three waits.
+    #[tokio::test(start_paused = true)]
+    async fn a_retrying_endpoint_holds_the_phase_up_until_it_binds() {
+        let policy = PhasePolicy {
+            budget: PhaseBudget::from_ms(5000),
+            exit_on_failure: true,
+        };
+        let started = tokio::time::Instant::now();
+        let out = drive_bind_phase(
+            policy,
+            RetryPolicy::constant(200),
+            &two_endpoints()[..1],
+            |_, n| async move {
+                if n < 4 {
+                    Err(format!("taken #{n}"))
+                } else {
+                    Ok(n)
+                }
+            },
+        )
+        .await
+        .expect("it binds inside the budget");
+        assert_eq!(out.bound, vec![(0, 4)]);
+        assert_eq!(started.elapsed(), Duration::from_millis(600));
+    }
+
+    /// R3089 -- a budget that is spent ends the phase at the budget and the cause of the last
+    /// attempt survives. Only an endpoint that holds the phase up can be cut off, and one does
+    /// when the phase says `exit_on_failure` or when the endpoint's own tail says it for itself.
+    #[tokio::test(start_paused = true)]
+    async fn a_spent_budget_ends_the_phase_at_the_budget() {
+        for (endpoint, exit_on_failure) in [
+            ("tcp/127.0.0.1:1", true),
+            ("tcp/127.0.0.1:1#exit_on_failure=true", false),
+        ] {
+            let policy = PhasePolicy {
+                budget: PhaseBudget::from_ms(1000),
+                exit_on_failure,
+            };
+            let started = tokio::time::Instant::now();
+            let failed = drive_bind_phase(
+                policy,
+                RetryPolicy::constant(200),
+                &[endpoint.to_owned()],
+                |_, n| async move { Err::<(), String>(format!("taken #{n}")) },
+            )
+            .await
+            .expect_err("nothing ever binds");
+            assert!(failed.last.is_some(), "the last cause survives: {endpoint}");
+            assert!(failed.ends_startup);
+            assert_eq!(started.elapsed(), Duration::from_millis(1000), "{endpoint}");
+        }
+    }
+
+    /// R3089 -- a budget with `exit_on_failure` false makes no attempt in the phase: the endpoint
+    /// is returned for the host to bind later, with the schedule it retries on, and the phase
+    /// returns at once.
+    #[tokio::test(start_paused = true)]
+    async fn a_background_endpoint_is_handed_back_not_attempted() {
+        let policy = PhasePolicy {
+            budget: PhaseBudget::UNBOUNDED,
+            exit_on_failure: false,
+        };
+        let started = tokio::time::Instant::now();
+        let out = drive_bind_phase(
+            policy,
+            RetryPolicy::constant(200),
+            &two_endpoints(),
+            |_, _| async { panic!("a background endpoint is not attempted by the phase") },
+        )
+        .await
+        .map(|out: BindOutcome<(), String>| out)
+        .expect("it returns");
+        assert_eq!(
+            out.background,
+            vec![
+                (0, RetryPolicy::constant(200)),
+                (1, RetryPolicy::constant(200))
+            ]
+        );
+        assert!(out.bound.is_empty() && out.skipped.is_empty());
+        assert_eq!(started.elapsed(), Duration::ZERO);
+    }
+
+    /// R3089 -- inside a bounded phase an endpoint whose single attempt fails is stepped over
+    /// though its policy says the failure is fatal, as upstream drops the result of the future
+    /// the budget wraps. Reached by an endpoint with no first wait, which retries nowhere.
+    #[tokio::test(start_paused = true)]
+    async fn inside_a_bounded_phase_a_single_attempt_failure_is_not_fatal() {
+        let policy = PhasePolicy {
+            budget: PhaseBudget::from_ms(5000),
+            exit_on_failure: true,
+        };
+        let out = drive_bind_phase(
+            policy,
+            RetryPolicy::ZENOH_DEFAULT,
+            &[String::from("tcp/127.0.0.1:1#retry_period_init_ms=0")],
+            |_, n| async move { Err::<(), String>(format!("taken #{n}")) },
+        )
+        .await
+        .expect("upstream drops the failure");
+        assert_eq!(out.skipped, vec![(0, String::from("taken #1"))]);
+    }
+
+    /// R3089 -- the background loop tries at once, waits the schedule and tries again, until the
+    /// endpoint binds, and no longer.
+    #[tokio::test(start_paused = true)]
+    async fn a_background_bind_retries_on_the_schedule_until_it_binds() {
+        let started = tokio::time::Instant::now();
+        let bound = retry_until_bound(RetryPolicy::constant(200), |n| async move {
+            if n < 3 {
+                Err("taken")
+            } else {
+                Ok(n)
+            }
+        })
+        .await;
+        assert_eq!(bound, 3);
+        assert_eq!(started.elapsed(), Duration::from_millis(400));
     }
 }

@@ -263,3 +263,117 @@ fn a_table_of_listeners_binds_the_row_of_the_sessions_role() {
         );
     }
 }
+
+// ---------------------------------------------------------------------------------------------
+// The bind phase's budget and retry. R3089.
+//
+// A retry schedule of 100 ms doubling to 400 keeps these rows fast; the real library's shipped
+// 1 s schedule is compared with in `zenoh_c_scouting_twice_and_diff.rs`.
+// ---------------------------------------------------------------------------------------------
+
+const QUICK_RETRY: &str = "{period_init_ms:100,period_max_ms:400,period_increase_factor:2}";
+
+/// Let go of `taken` after `after` on a thread of its own.
+fn let_go_after(taken: TcpListener, after: Duration) -> std::thread::JoinHandle<()> {
+    std::thread::spawn(move || {
+        std::thread::sleep(after);
+        drop(taken);
+    })
+}
+
+/// With a budget the open is HELD UP until the endpoint binds: a port let go 0.3 s in is bound by
+/// a retry, the open returns after it was let go and not before, and a leaf is accepted.
+#[test]
+fn an_endpoint_that_is_taken_is_waited_for_inside_its_budget() {
+    let port = free_port();
+    let released = let_go_after(hold(port), Duration::from_millis(300));
+    // SAFETY: fresh configs and sessions, each closed before the function returns.
+    unsafe {
+        let started = Instant::now();
+        let (rc, hub) = open_with(&hub_entries(
+            endpoints(&[port]),
+            &[("listen/timeout_ms", "3000"), ("listen/retry", QUICK_RETRY)],
+        ));
+        let took = started.elapsed();
+        assert_eq!(rc, Z_OK, "the open waits for the port instead of failing");
+        assert!(
+            took >= Duration::from_millis(250) && took < Duration::from_millis(2500),
+            "the open returned after {took:?}, not when the port was let go"
+        );
+        let arrived = leaf_reaches(&hub, port, "wz/listen-budget/waited");
+        close_session(hub);
+        released.join().expect("the thread that lets the port go");
+        assert!(arrived, "the endpoint that was bound by a retry accepts");
+    }
+}
+
+/// A port that stays taken fails the open with -4, at the budget and not before it.
+#[test]
+fn an_endpoint_that_stays_taken_fails_the_open_at_its_budget() {
+    let port = free_port();
+    let _taken = hold(port);
+    let started = Instant::now();
+    // SAFETY: a fresh config; no session opens.
+    let (rc, _) = unsafe {
+        open_with(&hub_entries(
+            endpoints(&[port]),
+            &[("listen/timeout_ms", "500"), ("listen/retry", QUICK_RETRY)],
+        ))
+    };
+    let took = started.elapsed();
+    assert_eq!(rc, Z_ENETWORK, "the open fails when the budget is spent");
+    assert!(
+        took >= Duration::from_millis(450) && took < Duration::from_millis(2500),
+        "the open failed after {took:?}, which is not its budget of 500 ms"
+    );
+}
+
+/// With `exit_on_failure` false the open returns AT ONCE and the endpoint is bound in the
+/// background: a leaf is accepted once the port has been let go and the retry has bound it.
+#[test]
+fn an_endpoint_is_bound_in_the_background_when_exit_on_failure_is_false() {
+    let port = free_port();
+    let released = let_go_after(hold(port), Duration::from_millis(300));
+    // SAFETY: fresh configs and sessions, each closed before the function returns.
+    unsafe {
+        let started = Instant::now();
+        let (rc, hub) = open_with(&hub_entries(
+            endpoints(&[port]),
+            &[
+                ("listen/timeout_ms", "-1"),
+                ("listen/exit_on_failure", "false"),
+                ("listen/retry", QUICK_RETRY),
+            ],
+        ));
+        let took = started.elapsed();
+        assert_eq!(rc, Z_OK, "the open does not wait for a background bind");
+        assert!(
+            took < Duration::from_millis(250),
+            "the open returned after {took:?}, so it waited for the port"
+        );
+        let arrived = leaf_reaches(&hub, port, "wz/listen-budget/background");
+        close_session(hub);
+        released.join().expect("the thread that lets the port go");
+        assert!(
+            arrived,
+            "the endpoint that was left to the background never bound"
+        );
+    }
+}
+
+/// The shipped budget of zero tries once: a port let go a moment after the open began is too late.
+#[test]
+fn the_shipped_budget_of_zero_tries_once() {
+    let port = free_port();
+    let released = let_go_after(hold(port), Duration::from_millis(300));
+    let started = Instant::now();
+    // SAFETY: a fresh config; no session opens.
+    let (rc, _) = unsafe { open_with(&hub_entries(endpoints(&[port]), &[])) };
+    let took = started.elapsed();
+    released.join().expect("the thread that lets the port go");
+    assert_eq!(rc, Z_ENETWORK, "one attempt, and a taken port fails it");
+    assert!(
+        took < Duration::from_millis(250),
+        "the open took {took:?}, so it did not try once and stop"
+    );
+}

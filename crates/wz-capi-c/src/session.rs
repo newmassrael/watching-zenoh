@@ -11,7 +11,8 @@
 use std::ffi::c_void;
 
 use wz_capi_core::drive::{
-    open_blocking, CapiTlsConfig, ConfiguredZid, DialPhase, OpenError, OpenStance, SessionState,
+    open_blocking, CapiTlsConfig, ConfiguredZid, DialPhase, ListenPhase, OpenError, OpenStance,
+    SessionState,
 };
 use wz_capi_core::faces::{no_shm_clients, OpenShmClients};
 use wz_capi_core::scouting_node::ScoutingPlan;
@@ -96,6 +97,25 @@ fn dial_phase(node: &ZenohNodeConfig, whatami: WhatAmI) -> DialPhase {
             .open_connect_scouted
             .unwrap_or(true)
             .then(|| std::time::Duration::from_millis(node.scouting_delay_ms.unwrap_or(500))),
+    }
+}
+
+/// How a session's bind phase treats an endpoint it cannot bind: `listen/timeout_ms` and
+/// `listen/exit_on_failure` over upstream's listen defaults, which are the same for every role
+/// (no retry, and a failure fails the open), paced by `listen/retry`.
+///
+/// R3089 -- the bind twin of [`dial_phase`], read from the same document. R3076 read only the
+/// exit value; the budget and the schedule were read by the node config and used by no C session.
+fn listen_phase_of(node: &ZenohNodeConfig) -> ListenPhase {
+    let default = PhasePolicy::LISTEN_DEFAULT;
+    ListenPhase {
+        policy: PhasePolicy {
+            budget: node.listen_timeout_ms.unwrap_or(default.budget),
+            exit_on_failure: node
+                .listen_exit_on_failure
+                .unwrap_or(default.exit_on_failure),
+        },
+        schedule: node.listen_retry.unwrap_or(RetryPolicy::ZENOH_DEFAULT),
     }
 }
 
@@ -264,12 +284,6 @@ pub(crate) unsafe fn open_session(
         let whatami = dial_whatami(cfg);
         let ingest = read_node(cfg, whatami);
         let listen = listen_endpoints(cfg, ingest.as_ref(), whatami);
-        // R3076 -- whether an endpoint that cannot be bound fails the open: `listen/exit_on_failure`
-        // for this node's role, true when the document says nothing, as upstream's default is.
-        let listen_exit_on_failure = ingest
-            .as_ref()
-            .and_then(|ingest| ingest.config.listen_exit_on_failure)
-            .unwrap_or(true);
         // R3064 -- the clock map the document means. Read off the ingest and not the node
         // config, because only the ingest knows whether the key was NAMED: the field reads
         // `false` for a document that never mentioned it, and a router's own default is on.
@@ -279,6 +293,10 @@ pub(crate) unsafe fn open_session(
         );
         let node = ingest.map(|ingest| ingest.config);
         let phase = node.as_ref().map(|node| dial_phase(node, whatami));
+        // R3076 -- what an endpoint that cannot be bound does to the open (`listen/exit_on_failure`
+        // for this node's role, true when the document says nothing, as upstream's default is),
+        // and R3089 -- how long and how often it is tried (`listen/timeout_ms`, `listen/retry`).
+        let listen_phase = node.as_ref().map_or(ListenPhase::SHIPPED, listen_phase_of);
         let handle = unsafe { (*config)._this.handle };
         // SAFETY: a live `Box<ConfigState>` this crate leaked; consumed here.
         drop(unsafe { Box::from_raw(handle as *mut ConfigState) });
@@ -402,7 +420,7 @@ pub(crate) unsafe fn open_session(
             // they are, and dials the nodes it is told of, which is how two peers that each
             // reached a third meet. R3075 -- under the policy its config states.
             gossip,
-            listen_exit_on_failure,
+            listen_phase,
         };
         // R3065 -- a session opened over a client storage advertises the protocols of THAT
         // reader: the stance takes both from the one set, so the list a peer's sender reads is

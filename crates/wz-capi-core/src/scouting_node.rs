@@ -49,6 +49,7 @@ use wz_runtime_tokio::scouting_fanout::{
 use wz_runtime_tokio::scouting_glue::{
     drive_scouting_until_resolved, new_scouting_engine, ScoutOutcome, ScoutParams, ScoutingActions,
 };
+pub use wz_runtime_tokio::scouting_responder::LateLocators;
 use wz_runtime_tokio::scouting_responder::{
     bind_reply_sockets, serve, ResponderIdentity, ScoutingResponder,
 };
@@ -424,11 +425,15 @@ impl Responder {
 /// The Hello leaves from the unicast socket nearest the asker, as upstream's does
 /// (`orchestrator.rs` @ `fn get_best_match<'a>(`): one per interface that can carry multicast
 /// when the config names none, and the named interface's own addresses when it does.
+///
+/// R3089 -- `late` is where the listeners that bind after the responder started are told to it:
+/// the next Hello names each, as it names the ones bound before.
 pub async fn bind_responder(
     plan: &ScoutingPlan,
     whatami: wz_runtime_tokio::session_glue::WhatAmI,
     zid: &[u8],
     advertised: Advertised,
+    late: LateLocators,
 ) -> io::Result<Option<Responder>> {
     if !plan.answers {
         return Ok(None);
@@ -470,7 +475,8 @@ pub async fn bind_responder(
     // election runs on the sockets that bound.
     let reply_sockets = bind_reply_sockets(&replies).await.0;
     Ok(Some(Responder {
-        inner: ScoutingResponder::with_reply_sockets(group_socket, identity, reply_sockets),
+        inner: ScoutingResponder::with_reply_sockets(group_socket, identity, reply_sockets)
+            .with_late_locators(late),
     }))
 }
 
