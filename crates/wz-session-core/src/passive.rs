@@ -361,6 +361,24 @@ impl FlowContext {
             && self.open_seen[usize::from(direction == Direction::B)]
     }
 
+    /// Is a message whose first byte is `header`, sent by `direction`, a BARE
+    /// NETWORK message: no `Frame` around it, the byte a network header?
+    ///
+    /// On a lean link every message but `Close` and `KeepAlive` is one, which is
+    /// upstream's own dispatch
+    /// (`commons/zenoh-codec/src/transport/mod.rs` @ `id::KEEP_ALIVE => TransportBodyLowLatency::KeepAlive(codec.read(&mut *reader)?),`).
+    /// It is a method so the fold and the single-message reader
+    /// (`dissect::dissect_message`) can be held against ONE statement of the
+    /// rule: the second cannot ask about a direction or an `Open`, and a test
+    /// pins exactly where the two answers part.
+    pub fn reads_bare_network(&self, direction: Direction, header: u8) -> bool {
+        self.lowlatency_active(direction)
+            && !matches!(
+                header & 0x1f,
+                wz_codecs::wire_const::T_MID_CLOSE | wz_codecs::wire_const::T_MID_KEEP_ALIVE
+            )
+    }
+
     /// Every batch `direction` sends from here on begins with a
     /// one-byte `BatchHeader`, whose bit 0 says whether the rest of the batch
     /// is lz4.
@@ -1897,11 +1915,7 @@ impl PassiveSession {
             // message. Read off THIS message's header, so a batch's second
             // message is judged as well as its first — the stream path's
             // credible-header gate gets to see only the first.
-            let lean_network = self.context.lowlatency_active(direction)
-                && !matches!(
-                    rest[0] & 0x1f,
-                    wz_codecs::wire_const::T_MID_CLOSE | wz_codecs::wire_const::T_MID_KEEP_ALIVE
-                );
+            let lean_network = self.context.reads_bare_network(direction, rest[0]);
             // Transport flags have no meaning on a bare network header.
             let reserved = rest
                 .first()

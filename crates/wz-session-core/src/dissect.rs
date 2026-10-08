@@ -3712,6 +3712,402 @@ pub fn dissect_transport_message(bytes: &[u8], base: usize) -> Result<Field, Cod
     Ok(group(name, start, c.offset(), out))
 }
 
+/// Read ONE bare network message: the first byte is a network header and no
+/// `Frame` envelope stands around it.
+///
+/// This is the reader a lowlatency session's data messages go through. It is
+/// ONE function for both consumers: the field document's rows (`wz-capture`'s
+/// `MidSpace::Network`) and [`dissect_message`], so a message cannot read one
+/// way in a session's document and another when a caller hands it over by
+/// itself.
+///
+/// `Ok(None)` is [`walk_network_record`]'s "not a network MID of mine" and is
+/// not an error, on the rule that function states. A message that walks and
+/// leaves bytes behind is [`MessageReadError::TrailingBytes`]: the session
+/// reader hands a lowlatency unit over whole as ONE message, so a remainder
+/// means the span was not one message, and rendering the prefix as a message
+/// while dropping the tail is the confident-wrong-answer failure again.
+///
+/// Upstream's sender writes one message per unit
+/// (`io/zenoh-transport/src/unicast/lowlatency/link.rs` @ `send_with_link(`), so
+/// the remainder does not arise from a conforming peer, although its receiver
+/// would read several out of one unit
+/// (`io/zenoh-transport/src/unicast/lowlatency/rx.rs` @ `while reader.can_read() {`).
+/// Splitting a unit into messages is the session reader's decision and is not
+/// made here: a second splitter would be a second opinion about where one
+/// message ends.
+pub fn dissect_network_message(
+    bytes: &[u8],
+    base: usize,
+) -> Result<Option<Field>, MessageReadError> {
+    let mut cursor = SpanCursor::with_base(bytes, base);
+    let field = walk_network_record(&mut cursor).map_err(MessageReadError::Codec)?;
+    if field.is_some() && cursor.remaining() != 0 {
+        return Err(MessageReadError::TrailingBytes {
+            remaining: cursor.remaining(),
+        });
+    }
+    Ok(field)
+}
+
+/// Why [`dissect_network_message`] or [`dissect_message`] declined bytes.
+///
+/// `non_exhaustive` so a refusal learned later is an addition and not a break.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum MessageReadError {
+    /// The walk itself failed: the bytes end inside a field, a length does not
+    /// fit, and so on. The same error [`dissect_transport_message`] returns.
+    Codec(CodecError),
+    /// A bare network message walked to its end with `remaining` bytes left
+    /// over.
+    TrailingBytes {
+        /// How many bytes follow the message.
+        remaining: usize,
+    },
+    /// The vocabulary names this MID as a network message and the network
+    /// walker declined it. The two are held to the same MID set by
+    /// `the_message_vocabulary_is_the_one_the_dispatchers_produce`, so this is
+    /// the answer for a build where they have come apart, given instead of the
+    /// transport reading, which for these bytes would be the wrong one.
+    NetworkMidNotWalked {
+        /// The 5-bit MID.
+        mid: u8,
+    },
+}
+
+/// What a reader that is handed ONE message, with no stream or batch around
+/// it, is told about the session the message came out of.
+///
+/// # Why a message needs this at all
+///
+/// A session's field document reads a message in the light of its framing: on
+/// a lowlatency link there is no `Frame`, so the unit's first byte is a
+/// network header, and the same byte read as a transport header is a MID the
+/// transport space does not name (`Unknown`). Upstream's lowlatency reader
+/// dispatches on the first byte this way, `KEEP_ALIVE` and `CLOSE` as
+/// transport messages and everything else as a network message
+/// (`commons/zenoh-codec/src/transport/mod.rs` @ `id::KEEP_ALIVE => TransportBodyLowLatency::KeepAlive(codec.read(&mut *reader)?),`).
+/// [`dissect_transport_message`] has no session and so cannot make that
+/// choice; this is how a caller who holds the session's facts gives them.
+///
+/// # Only what changes how a MESSAGE reads is here
+///
+/// `compression` wraps a whole BATCH (a one-byte batch header, then lz4), and
+/// what a message reader is handed has already been taken out of its batch.
+/// `qos`, `patch` and the sizes judge a message; none of them changes which
+/// bytes belong to which field. Adding one here would claim an effect it does
+/// not have, so a capability enters this type when reading starts to depend on
+/// it and not before.
+///
+/// `Default` is the context-free reading: nothing is known.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct MessageContext {
+    /// Whether the session carries its post-handshake messages bare.
+    ///
+    /// `Some(true)`: LowLatency was negotiated, so a message whose first byte
+    /// is a network MID is read as a network message. `Some(false)`: it was
+    /// negotiated away. `None`: not known (no Init pair was seen, or the
+    /// caller does not say). The last two read exactly as
+    /// [`dissect_transport_message`] does, which is the only reading that does
+    /// not claim a fact the caller did not give.
+    pub lowlatency: Option<bool>,
+}
+
+/// Read ONE message in the light of its session's [`MessageContext`].
+///
+/// With no lowlatency the answer is [`dissect_transport_message`]'s, byte for
+/// byte. With it, a first byte in the NETWORK MID space is read by
+/// [`dissect_network_message`] and every other first byte by the transport
+/// reader, which is how `Init`, `Open`, `Close` and `KeepAlive` stay readable
+/// from the same context as the data.
+///
+/// # Why the MID alone decides, and not the position in the session
+///
+/// The session fold asks more: a direction reads bare only after its OWN
+/// `Open`, and the question is asked per direction. A single message carries
+/// neither, and the context a caller holds is the flow's value at the END of
+/// the capture. What makes the MID enough is that the two spaces do not
+/// overlap. Transport MIDs are `0x00..=0x07` and network ones `0x19..=0x1F`,
+/// and upstream marks it as load-bearing
+/// (`commons/zenoh-protocol/src/transport/mod.rs` @ `// WARNING: it's crucial that these IDs do NOT collide with the IDs`),
+/// so on a lowlatency session a first byte in one space cannot be a message of
+/// the other. Messages the session would read the same way in both places
+/// agree byte for byte, and the cross-check test holds that against a real
+/// session's document.
+///
+/// # Where this deliberately differs from the fold
+///
+/// A first byte in NEITHER space (`0x08..=0x18`), or a transport MID that no
+/// lowlatency link carries after its handshake (`Frame`, `Fragment`, `Join`,
+/// `Oam`), is read by the transport reader here. The fold, which knows the
+/// message came after the direction's `Open`, declines such a row. Here there
+/// is no `Open` to be after, and the transport reading is the one the
+/// context-free door gives for the same bytes.
+pub fn dissect_message(
+    bytes: &[u8],
+    base: usize,
+    context: MessageContext,
+) -> Result<Field, MessageReadError> {
+    if context.lowlatency == Some(true) {
+        if let Some(mid) = bytes.first().map(|b| b & 0x1F) {
+            if MessageName::of_network(mid).is_some() {
+                return dissect_network_message(bytes, base)?
+                    .ok_or(MessageReadError::NetworkMidNotWalked { mid });
+            }
+        }
+    }
+    dissect_transport_message(bytes, base).map_err(MessageReadError::Codec)
+}
+
+#[cfg(test)]
+mod message_context_tests {
+    use super::*;
+    use crate::passive::{Direction, FlowContext, SessionPhase};
+
+    const LEAN: MessageContext = MessageContext {
+        lowlatency: Some(true),
+    };
+
+    /// 64 bytes with `first` in front: long enough that every walker reaches its
+    /// own name rather than running out of body, and zero behind it so the walk
+    /// is the cheapest complete one each arm accepts.
+    fn starting_with(first: u8) -> Vec<u8> {
+        let mut bytes = alloc::vec![0u8; 64];
+        bytes[0] = first;
+        bytes
+    }
+
+    /// `field` with every span moved `by` bytes on, so a reading at one base can
+    /// be held against the reading at another without trusting either.
+    fn shifted(field: &Field, by: usize) -> Field {
+        Field {
+            name: field.name.clone(),
+            span: Span {
+                start: field.span.start + by,
+                end: field.span.end + by,
+            },
+            value: match &field.value {
+                FieldValue::Nested(children) => {
+                    FieldValue::Nested(children.iter().map(|child| shifted(child, by)).collect())
+                }
+                other => other.clone(),
+            },
+        }
+    }
+
+    /// The smallest complete message of each of three network MIDs, laid out
+    /// byte by byte from the wire layout and not through a walker.
+    ///
+    /// `ResponseFinal` is a header and a VLE request id; `Push` a header, a
+    /// keyexpr id with no suffix, and a Put body that is a header and an empty
+    /// payload; `Request` a header, a VLE request id, a keyexpr id, and a Query
+    /// body that is a bare header.
+    fn small_network_messages() -> [(&'static str, Vec<u8>); 3] {
+        [
+            ("ResponseFinal", alloc::vec![0x1A, 0x07]),
+            ("Push", alloc::vec![0x1D, 0x00, 0x01, 0x00]),
+            ("Request", alloc::vec![0x1C, 0x05, 0x00, 0x03]),
+        ]
+    }
+
+    #[test]
+    fn a_lowlatency_context_reads_a_network_message_by_name() {
+        for (name, bytes) in small_network_messages() {
+            let read = dissect_message(&bytes, 0, LEAN)
+                .unwrap_or_else(|why| panic!("{name} was declined: {why:?}"));
+            assert_eq!(read.name, name, "{bytes:02x?}");
+            assert_eq!(
+                read.span,
+                Span {
+                    start: 0,
+                    end: bytes.len()
+                },
+                "the message spans its own bytes"
+            );
+            // And the context-free reading of the same bytes is the failure
+            // this reader exists for: a MID the transport space does not name.
+            let blind = dissect_transport_message(&bytes, 0).expect("the transport reader walks");
+            assert_eq!(blind.name, "Unknown", "{name}");
+        }
+    }
+
+    #[test]
+    fn without_lowlatency_every_first_byte_reads_as_the_transport_reader_reads_it() {
+        for context in [
+            MessageContext::default(),
+            MessageContext {
+                lowlatency: Some(false),
+            },
+        ] {
+            for first in 0u8..=255 {
+                let bytes = starting_with(first);
+                assert_eq!(
+                    dissect_message(&bytes, 3, context),
+                    dissect_transport_message(&bytes, 3).map_err(MessageReadError::Codec),
+                    "first byte {first:#04x}, {context:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn with_lowlatency_the_mid_space_decides_the_reader() {
+        for first in 0u8..=255 {
+            let bytes = starting_with(first);
+            let mid = first & 0x1F;
+            let read = dissect_message(&bytes, 0, LEAN);
+            if let Some(network) = MessageName::of_network(mid) {
+                // A network MID is NEVER handed to the transport reader: the
+                // zero body leaves bytes behind and is declined for them, and
+                // the one thing it must not be is an `Unknown` group.
+                match read {
+                    Ok(field) => assert_eq!(field.name, network.name(), "{first:#04x}"),
+                    Err(MessageReadError::TrailingBytes { remaining }) => {
+                        assert!(remaining > 0, "{first:#04x}")
+                    }
+                    Err(MessageReadError::Codec(_)) => {}
+                    other => panic!("{first:#04x} was read as {other:?}"),
+                }
+            } else {
+                assert_eq!(
+                    read,
+                    dissect_transport_message(&bytes, 0).map_err(MessageReadError::Codec),
+                    "{first:#04x}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn the_handshake_and_housekeeping_messages_read_the_same_in_a_lowlatency_context() {
+        // Init, Open, Close and KeepAlive: the messages of a lowlatency
+        // session a caller hands over from the SAME context as its data.
+        for (name, bytes) in [
+            ("Init", alloc::vec![0x01u8, 9, 2, 1]),
+            ("Open", alloc::vec![0x22u8, 10, 0]),
+            ("Close", alloc::vec![0x03u8, 1]),
+            ("KeepAlive", alloc::vec![0x04u8]),
+        ] {
+            let with = dissect_message(&bytes, 0, LEAN).expect(name);
+            let without = dissect_transport_message(&bytes, 0).expect(name);
+            assert_eq!(with.name, name);
+            assert_eq!(with, without, "{name}");
+        }
+    }
+
+    #[test]
+    fn every_span_follows_the_base() {
+        for (name, bytes) in small_network_messages() {
+            let at_zero = dissect_message(&bytes, 0, LEAN).expect(name);
+            let at_1000 = dissect_message(&bytes, 1000, LEAN).expect(name);
+            assert_eq!(at_1000, shifted(&at_zero, 1000), "{name}");
+            assert_ne!(at_1000, at_zero, "{name}: the base did nothing");
+        }
+    }
+
+    #[test]
+    fn a_network_message_with_bytes_after_it_is_declined_not_truncated() {
+        let (_, mut bytes) = small_network_messages()[0].clone();
+        bytes.push(0xEE);
+        assert_eq!(
+            dissect_message(&bytes, 0, LEAN),
+            Err(MessageReadError::TrailingBytes { remaining: 1 })
+        );
+        // Context-free, the same bytes are an unnamed transport MID and are
+        // read to their end: the decline belongs to the network reading.
+        let blind = dissect_message(&bytes, 0, MessageContext::default()).expect("walks");
+        assert_eq!(blind.name, "Unknown");
+        assert_eq!(blind.span.end, bytes.len());
+    }
+
+    #[test]
+    fn no_bytes_is_a_codec_failure_in_every_context() {
+        for context in [
+            MessageContext::default(),
+            MessageContext {
+                lowlatency: Some(false),
+            },
+            LEAN,
+        ] {
+            assert!(
+                matches!(
+                    dissect_message(&[], 0, context),
+                    Err(MessageReadError::Codec(_))
+                ),
+                "{context:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_network_reader_declines_a_byte_outside_the_network_space() {
+        assert_eq!(dissect_network_message(&[0x04], 0), Ok(None));
+    }
+
+    /// THE ONE PLACE THE TWO READERS ARE HELD TO EACH OTHER. The session fold
+    /// asks `FlowContext::reads_bare_network` per direction and per `Open`;
+    /// [`dissect_message`] cannot, so it asks which MID space the byte is in.
+    /// The doc of [`dissect_message`] claims exactly where the answers part,
+    /// and this derives it over every byte rather than asserting the sentence.
+    #[test]
+    fn the_single_message_reader_parts_from_the_fold_only_where_its_doc_says() {
+        let lean = FlowContext {
+            phase: SessionPhase::Established,
+            lowlatency: true,
+            open_seen: [true, true],
+            ..FlowContext::default()
+        };
+        let mut parted = alloc::collections::BTreeSet::new();
+        for header in 0u8..=255 {
+            let mid = header & 0x1F;
+            let fold = lean.reads_bare_network(Direction::A, header);
+            assert_eq!(
+                fold,
+                lean.reads_bare_network(Direction::B, header),
+                "both directions are past their Open"
+            );
+            let reader = MessageName::of_network(mid).is_some();
+            assert!(
+                !reader || fold,
+                "{header:#04x}: the single-message reader would read bare a byte the fold \
+                 reads as a transport message"
+            );
+            if fold && !reader {
+                parted.insert(mid);
+            }
+        }
+        // Init and Open, which a caller hands over beside the data; Oam, Frame,
+        // Fragment and Join, which no lowlatency link carries after its
+        // handshake; and every MID in neither space. Written out, not derived.
+        let documented: alloc::collections::BTreeSet<u8> = [0u8, 1, 2, 5, 6, 7]
+            .into_iter()
+            .chain(0x08..=0x18)
+            .collect();
+        assert_eq!(parted, documented);
+
+        // And where they part, the single-message reader gives the transport
+        // reading, which is what its doc promises.
+        for mid in &documented {
+            let bytes = starting_with(*mid);
+            assert_eq!(
+                dissect_message(&bytes, 0, LEAN),
+                dissect_transport_message(&bytes, 0).map_err(MessageReadError::Codec),
+                "{mid:#04x}"
+            );
+        }
+
+        // A direction that has not sent its Open reads nothing bare: the fold's
+        // answer is `false` for every byte, which is the position information
+        // the single-message reader has no way to be given.
+        let before_open = FlowContext {
+            open_seen: [false, false],
+            ..lean
+        };
+        assert!((0u8..=255).all(|h| !before_open.reads_bare_network(Direction::A, h)));
+    }
+}
+
 // ── Rendering ────────────────────────────────────────────────────────
 
 /// Render a dissection as JSON, with NO serde dependency.

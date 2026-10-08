@@ -147,6 +147,13 @@ pub mod fixtures;
 /// test), so nothing that used this plane loses it.
 #[cfg(feature = "network-codecs")]
 pub mod interest;
+/// The reader of a flow's `context` object, which [`fields_json`] writes: what a
+/// caller that holds that object tells a single-message reader about the
+/// session the message came out of.
+///
+/// Gated on `dissect` with its writer, and for the same reason.
+#[cfg(feature = "dissect")]
+pub mod message_context;
 /// R311y714 (§1.1f) — the capture read as NODES: zids, their roles, and the
 /// links where both ends named themselves. The one plane whose unit is not a
 /// flow.

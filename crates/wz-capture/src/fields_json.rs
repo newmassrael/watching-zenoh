@@ -2331,7 +2331,7 @@ fn tri_state(v: Option<bool>) -> &'static str {
 /// message could read it, so a header drawn from the flow's context had to go
 /// back to that row. See [`wz_session_core::passive::FlowContext::version`] for
 /// why the acceptor's word is preferred.
-fn push_context(context: &wz_session_core::passive::FlowContext, out: &mut String) {
+pub(crate) fn push_context(context: &wz_session_core::passive::FlowContext, out: &mut String) {
     out.push_str(",\"context\":{\"phase\":");
     escape_into(phase_word(context.phase).name(), out);
     let _ = write!(
@@ -2901,14 +2901,21 @@ impl MidSpace {
             Self::Transport => wz_session_core::dissect::dissect_transport_message(bytes, 0)
                 .map(Some)
                 .map_err(rendered),
+            // The reader is `dissect_network_message`, the one function the
+            // single-message door also calls, so a lean row and the same bytes
+            // handed over with their session's context cannot read apart.
             Self::Network => {
-                let mut cursor = wz_session_core::dissect::SpanCursor::new(bytes);
-                let field =
-                    wz_session_core::dissect::walk_network_record(&mut cursor).map_err(rendered)?;
-                if field.is_some() && cursor.remaining() != 0 {
-                    return Err("trailing bytes after a lowlatency network message".to_string());
-                }
-                Ok(field)
+                use wz_session_core::dissect::MessageReadError;
+                wz_session_core::dissect::dissect_network_message(bytes, 0).map_err(|err| {
+                    match err {
+                        // The wording this document has always carried.
+                        MessageReadError::TrailingBytes { .. } => {
+                            "trailing bytes after a lowlatency network message".to_string()
+                        }
+                        MessageReadError::Codec(err) => rendered(err),
+                        other => rendered(other),
+                    }
+                })
             }
             Self::Scouting => {
                 wz_session_core::dissect::dissect_scouting_message(bytes, 0).map_err(rendered)
