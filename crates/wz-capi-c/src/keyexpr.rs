@@ -465,20 +465,23 @@ pub unsafe extern "C" fn z_keyexpr_from_substr_autocanonize(
     })
 }
 
-/// `Ok` iff `text` is a non-empty, CANONICAL keyexpr.
+/// `Ok` iff `text` is a key expression: non-empty and CANONICAL.
 ///
-/// The verdict is "canonizing it changes nothing", not a second grammar walk:
-/// one implementation of the grammar means the constructors and
-/// [`z_keyexpr_is_canon`] cannot disagree about what they accept.
+/// The verdict is `wz_runtime_tokio::keyexpr_canon::validate_keyexpr`, the
+/// one validator the payload-declaration reader and the dissection library's
+/// pattern door ask as well, so the constructors, [`z_keyexpr_is_canon`] and a
+/// declaration cannot disagree about what a key expression is. It replaced
+/// "canonizing it changes nothing", which gave the same answers (a test in
+/// that module walks every text of up to seven bytes over the alphabet that
+/// reaches each arm and holds the two to each other) but could say nothing
+/// about WHERE a text fails, and a second reader of the grammar next to it was
+/// how the declaration door came to accept six patterns this one refuses.
+///
+/// Every refusal is `Z_EINVAL`, as before: upstream answers `-1` for each way
+/// a keyexpr can be wrong, and a drop-in comparing against it would break on a
+/// finer code.
 fn require_canonical(text: &str) -> Result<(), ZResult> {
-    if text.is_empty() {
-        return Err(Z_EINVAL);
-    }
-    match canonize(text) {
-        Ok(canon) if canon == text => Ok(()),
-        Ok(_) => Err(Z_EINVAL),
-        Err(code) => Err(code),
-    }
+    wz_runtime_tokio::keyexpr_canon::validate_keyexpr(text).map_err(|_| Z_EINVAL)
 }
 
 /// Canonize a keyexpr IN PLACE (zenoh-c `z_keyexpr_canonize`).
@@ -558,12 +561,11 @@ pub unsafe extern "C" fn z_keyexpr_is_canon(start: *const c_char, len: usize) ->
         let Some(text) = (unsafe { substr(start, len) }) else {
             return if start.is_null() { Z_ENULL } else { Z_EPARSE };
         };
-        match canonize(text) {
-            Ok(canon) if canon == text => Z_OK,
-            // A VALID but non-canonical keyexpr and an ungrammatical one both
-            // answer `-1` upstream; measured, and the reason `canonize` maps
-            // every typed error onto the same code.
-            Ok(_) => Z_EINVAL,
+        // A VALID but non-canonical keyexpr and an ungrammatical one both
+        // answer `-1` upstream; measured, and the reason `require_canonical`
+        // maps every refusal onto the same code.
+        match require_canonical(text) {
+            Ok(()) => Z_OK,
             Err(code) => code,
         }
     })

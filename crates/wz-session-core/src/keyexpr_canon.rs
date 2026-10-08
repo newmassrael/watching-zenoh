@@ -417,6 +417,253 @@ fn analyze_chunk(chunk: &str) -> Result<ChunkShape, KeyexprCanonError> {
 }
 
 // ──────────────────────────────────────────────────────────────────
+// The VALIDATOR — "is this text a key expression", and where it is not.
+//
+// Everything above answers "what is the canonical form of this text".
+// What a caller holding a key expression somebody TYPED needs is the
+// other question, and before this section three places answered it
+// three ways: the C drop-in compared the canonical form to the text,
+// the payload-declaration reader refused an empty pattern and a
+// leading or trailing `/` and nothing else, and nothing in between
+// agreed. They split on `demo//pose`, `a?b`, `**x`, `a*b`,
+// `demo/**/**` and `demo/$*/pose`, so an editor built on the second
+// was told a pattern was fine that the first refuses.
+// ──────────────────────────────────────────────────────────────────
+
+/// Why a text is not a key expression, in upstream's own eight words.
+///
+/// The set is the one `zenoh-keyexpr` refuses with, enumerated at
+/// `commons/zenoh-keyexpr/src/key_expr/borrowed.rs` @ `enum KeyExprError {`,
+/// so a reason here names the same rule the reference library would have
+/// named. It is deliberately NOT [`KeyexprCanonError`]: that type is the
+/// zenoh-pico canonizer's status vocabulary, in which `**/*`, `**/**` and a
+/// lone `$*` are not refusals at all but REWRITES, so it has no word for
+/// them. A validator answers the question the other way round: those three
+/// are exactly the shapes that are not canonical and so are not key
+/// expressions.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum KeyexprFault {
+    /// A `/`-delimited chunk is empty: `a//b`, a leading `/`, a trailing `/`,
+    /// or the empty text.
+    EmptyChunk,
+    /// A `*` that is not a whole `*` or `**` chunk and does not follow `$`:
+    /// `a*b`, `*a`, `**a`.
+    StarInChunk,
+    /// `**/*`. The canonical spelling is `*/**`.
+    SingleStarAfterDoubleStar,
+    /// `**/**`. The canonical spelling is `**`.
+    DoubleStarAfterDoubleStar,
+    /// A chunk that is nothing but `$*`. The canonical spelling is `*`.
+    LoneDollarStar,
+    /// A `$` right after a completed `$*`: `a$*$b`, `a$*$*b`.
+    DollarAfterDollar,
+    /// A `#` or a `?`, which are not allowed anywhere in a key expression.
+    SharpOrQuestionMark,
+    /// A `$` that is not the start of a `$*`: `a$`, `$b`.
+    UnboundDollar,
+}
+
+impl KeyexprFault {
+    /// Every fault, so a consumer's vocabulary and a test's walk of it are
+    /// the same list rather than two.
+    pub const ALL: [Self; 8] = [
+        Self::EmptyChunk,
+        Self::StarInChunk,
+        Self::SingleStarAfterDoubleStar,
+        Self::DoubleStarAfterDoubleStar,
+        Self::LoneDollarStar,
+        Self::DollarAfterDollar,
+        Self::SharpOrQuestionMark,
+        Self::UnboundDollar,
+    ];
+
+    /// The word a machine reads. Snake case, stable, one per fault.
+    pub const fn word(self) -> &'static str {
+        match self {
+            Self::EmptyChunk => "empty_chunk",
+            Self::StarInChunk => "star_in_chunk",
+            Self::SingleStarAfterDoubleStar => "single_star_after_double_star",
+            Self::DoubleStarAfterDoubleStar => "double_star_after_double_star",
+            Self::LoneDollarStar => "lone_dollar_star",
+            Self::DollarAfterDollar => "dollar_after_dollar",
+            Self::SharpOrQuestionMark => "sharp_or_question_mark",
+            Self::UnboundDollar => "unbound_dollar",
+        }
+    }
+
+    /// The sentence a person reads.
+    ///
+    /// Written here and not copied from upstream's messages, because upstream's
+    /// message for a lone `$*` is the empty-chunk message pasted
+    /// (`commons/zenoh-keyexpr/src/key_expr/borrowed.rs` @
+    /// `Self::LoneDollarStar => anyhow!(`), which tells the author of
+    /// `demo/$*/pose` that a chunk of theirs is empty. The other seven say what
+    /// upstream's say.
+    pub const fn sentence(self) -> &'static str {
+        match self {
+            Self::EmptyChunk => {
+                "empty chunk: `//`, a leading `/` and a trailing `/` are not allowed"
+            }
+            Self::StarInChunk => "`*` may only be a whole chunk (`*` or `**`) or follow a `$`",
+            Self::SingleStarAfterDoubleStar => "`**/*` must be written `*/**`",
+            Self::DoubleStarAfterDoubleStar => "`**/**` must be written `**`",
+            Self::LoneDollarStar => "a chunk that is only `$*` must be written `*`",
+            Self::DollarAfterDollar => "`$` is not allowed after `$*`; `$*$*` must be written `$*`",
+            Self::SharpOrQuestionMark => "`#` and `?` are not allowed in a key expression",
+            Self::UnboundDollar => "`$` is only allowed as `$*`",
+        }
+    }
+}
+
+/// The first place a text stops being a key expression.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct KeyexprRefusal {
+    /// The `/`-delimited chunk the fault is in, counted from 0. For a trailing
+    /// `/` it is the empty chunk after it.
+    pub chunk: usize,
+    /// The BYTE offset into the text: the offending byte for a character fault,
+    /// the chunk's first byte for a fault in the chunk's shape, and the text's
+    /// length for a trailing `/`, where there is no byte to point at.
+    pub offset: usize,
+    /// Which rule.
+    pub fault: KeyexprFault,
+}
+
+impl fmt::Display for KeyexprRefusal {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "chunk {}, byte {}: {}",
+            self.chunk,
+            self.offset,
+            self.fault.sentence()
+        )
+    }
+}
+
+impl core::error::Error for KeyexprRefusal {}
+
+/// Is `text` a key expression, and if not, where does it first stop being one.
+///
+/// "Key expression" means CANONICAL, as it does for the reference library:
+/// `zenoh-keyexpr` validates in canon form and a text that merely canonizes is
+/// refused (`commons/zenoh-keyexpr/src/key_expr/borrowed.rs` @
+/// `impl<'a> TryFrom<&'a str> for &'a keyexpr {`). This is that validator
+/// restated, check for check and arm for arm, with the one change that it
+/// counts the chunk and the byte so a refusal can say where.
+///
+/// Where a text has several faults the EARLIEST by position is reported, which
+/// is the one a caret belongs under. Upstream reports a trailing `/` before it
+/// reads the first byte, so on a text with two faults the two may name
+/// different ones; the verdict, accepted or refused, is the same for every
+/// text, and the test that holds that walks every text over a small alphabet.
+///
+/// The wildcards `*`, `**` and `$*` are all legal: this validates key
+/// EXPRESSIONS, which is what a subscription or a declaration pattern is, and
+/// not literal keys.
+///
+/// No allocation, so it is usable on every profile this module is.
+///
+/// ```
+/// use wz_session_core::keyexpr_canon::{validate_keyexpr, KeyexprFault};
+///
+/// assert!(validate_keyexpr("demo/**").is_ok());
+/// assert!(validate_keyexpr("a/*/**").is_ok());
+///
+/// let refusal = validate_keyexpr("demo//pose").unwrap_err();
+/// assert_eq!((refusal.chunk, refusal.offset), (1, 5));
+/// assert_eq!(refusal.fault, KeyexprFault::EmptyChunk);
+///
+/// // Not canonical, so not a key expression: `**/*` is spelled `*/**`.
+/// assert_eq!(
+///     validate_keyexpr("a/**/*").unwrap_err().fault,
+///     KeyexprFault::SingleStarAfterDoubleStar
+/// );
+/// ```
+pub fn validate_keyexpr(text: &str) -> Result<(), KeyexprRefusal> {
+    use KeyexprFault as Fault;
+    let bytes = text.as_bytes();
+    // The chunk being read, and the index of its first byte.
+    let mut chunk = 0usize;
+    let mut chunk_start = 0usize;
+    let mut i = 0usize;
+    let refuse = |chunk: usize, offset: usize, fault: KeyexprFault| {
+        Err(KeyexprRefusal {
+            chunk,
+            offset,
+            fault,
+        })
+    };
+    while i < bytes.len() {
+        match bytes[i] {
+            // `/` closes the chunk; at the start of one it closes an empty one.
+            b'/' if i == chunk_start => return refuse(chunk, i, Fault::EmptyChunk),
+            b'/' => {
+                i += 1;
+                chunk_start = i;
+                chunk += 1;
+            }
+            // A `*` after a `$` is consumed together with it by the `$` arm,
+            // so one that arrives here mid-chunk has nothing to bind to.
+            b'*' if i != chunk_start => return refuse(chunk, i, Fault::StarInChunk),
+            // A `*` at the start of a chunk must be the whole chunk, `*` or
+            // `**`, and a `**` may not be followed by a chunk that is `*` or
+            // `**` (those are spelled `*/**` and `**`).
+            b'*' => match bytes.get(i + 1) {
+                None => break,
+                Some(&b'/') => {
+                    i += 2;
+                    chunk_start = i;
+                    chunk += 1;
+                }
+                Some(&b'*') => match bytes.get(i + 2) {
+                    None => break,
+                    Some(&b'/') if bytes.get(i + 3) == Some(&b'*') => {
+                        // The chunk after `**/` starts with a `*`; which of
+                        // three faults it is depends on what follows it.
+                        let fault = match (bytes.get(i + 4), bytes.get(i + 5)) {
+                            (None | Some(&b'/'), _) => Fault::SingleStarAfterDoubleStar,
+                            (Some(&b'*'), None | Some(&b'/')) => Fault::DoubleStarAfterDoubleStar,
+                            _ => Fault::StarInChunk,
+                        };
+                        return refuse(chunk + 1, i + 3, fault);
+                    }
+                    Some(&b'/') => {
+                        i += 3;
+                        chunk_start = i;
+                        chunk += 1;
+                    }
+                    Some(_) => return refuse(chunk, i, Fault::StarInChunk),
+                },
+                Some(_) => return refuse(chunk, i, Fault::StarInChunk),
+            },
+            // A `$` must start a `$*`.
+            b'$' if bytes.get(i + 1) != Some(&b'*') => {
+                return refuse(chunk, i, Fault::UnboundDollar)
+            }
+            b'$' => match bytes.get(i + 2) {
+                Some(&b'$') => return refuse(chunk, i + 2, Fault::DollarAfterDollar),
+                // A `$*` that is a whole chunk.
+                Some(&b'/') | None if i == chunk_start => {
+                    return refuse(chunk, chunk_start, Fault::LoneDollarStar)
+                }
+                None => break,
+                Some(_) => i += 2,
+            },
+            b'#' | b'?' => return refuse(chunk, i, Fault::SharpOrQuestionMark),
+            _ => i += 1,
+        }
+    }
+    // The last byte was a `/` (or there are no bytes): the chunk it opens is
+    // empty. Upstream tests this before reading anything; here position decides
+    // which fault comes first.
+    if chunk_start == bytes.len() {
+        return refuse(chunk, bytes.len(), Fault::EmptyChunk);
+    }
+    Ok(())
+}
+
+// ──────────────────────────────────────────────────────────────────
 // R300 — outbound-side gate guarding zenoh-pico bug #3 (SIGABRT)
 //
 // R311gb (Track 2) — this whole section stays `alloc`-gated: it guards
@@ -1077,5 +1324,211 @@ mod tests {
         assert!(!chunk_canonizes_to_star_shape("foo$*"));
         assert!(!chunk_canonizes_to_star_shape("foo$*bar"));
         assert!(!chunk_canonizes_to_star_shape(""));
+    }
+
+    // ── The validator ──
+
+    use KeyexprFault as Fault;
+
+    /// Every case of upstream's own table for `keyexpr::new`, transcribed from
+    /// `commons/zenoh-keyexpr/src/key_expr/borrowed.rs` @
+    /// `fn test_keyexpr_new(key_str: &str, error: impl Into<Option<KeyExprError>>)`
+    /// at the pinned version: the text, and `None` for "accepted" or the fault.
+    /// Each of these has exactly one fault, so position cannot make the
+    /// reason differ from upstream's.
+    const UPSTREAM_CASES: [(&str, Option<Fault>); 22] = [
+        ("", Some(Fault::EmptyChunk)),
+        ("demo/example/test", None),
+        ("demo/*", None),
+        ("demo/**", None),
+        ("demo/*/*/test", None),
+        ("demo/*/**/test", None),
+        ("demo/example$*/test", None),
+        ("demo/example$*-$*/test", None),
+        ("/demo/example/test", Some(Fault::EmptyChunk)),
+        ("demo/example/test/", Some(Fault::EmptyChunk)),
+        ("demo/$*/test", Some(Fault::LoneDollarStar)),
+        ("demo/$*", Some(Fault::LoneDollarStar)),
+        ("demo/example$*", None),
+        ("demo/**/*/test", Some(Fault::SingleStarAfterDoubleStar)),
+        ("demo/**/**/test", Some(Fault::DoubleStarAfterDoubleStar)),
+        ("demo//test", Some(Fault::EmptyChunk)),
+        ("demo/exam*ple/test", Some(Fault::StarInChunk)),
+        ("demo/example$*$/test", Some(Fault::DollarAfterDollar)),
+        ("demo/example$*$*/test", Some(Fault::DollarAfterDollar)),
+        ("demo/example#/test", Some(Fault::SharpOrQuestionMark)),
+        ("demo/example?/test", Some(Fault::SharpOrQuestionMark)),
+        ("demo/$/test", Some(Fault::UnboundDollar)),
+    ];
+
+    #[test]
+    fn the_validator_gives_upstreams_own_verdict_and_reason_on_upstreams_own_cases() {
+        for (text, want) in UPSTREAM_CASES {
+            assert_eq!(
+                validate_keyexpr(text).err().map(|r| r.fault),
+                want,
+                "{text:?}"
+            );
+        }
+    }
+
+    /// The fifteen patterns a consumer put to both the declaration door and the
+    /// C drop-in, with the verdict and the place. The verdicts were measured on
+    /// a `libzenohc` build as well as read off the pinned source; the places are
+    /// this module's own contract (see [`KeyexprRefusal`]).
+    #[test]
+    fn the_fifteen_patterns_a_consumer_measured_are_judged_and_placed() {
+        // (pattern, None for accepted | Some((chunk, offset, fault)))
+        type Place = (usize, usize, Fault);
+        let cases: [(&str, Option<Place>); 15] = [
+            ("demo//pose", Some((1, 5, Fault::EmptyChunk))),
+            ("a?b", Some((0, 1, Fault::SharpOrQuestionMark))),
+            ("**x", Some((0, 0, Fault::StarInChunk))),
+            ("/demo", Some((0, 0, Fault::EmptyChunk))),
+            ("demo/", Some((1, 5, Fault::EmptyChunk))),
+            ("demo/**", None),
+            ("demo/*/pose", None),
+            ("demo/robots/1/pose", None),
+            ("demo/$*/pose", Some((1, 5, Fault::LoneDollarStar))),
+            ("demo/**/**", Some((2, 8, Fault::DoubleStarAfterDoubleStar))),
+            // The four upstream ACCEPTS the consumer asked about by name.
+            ("a/**/b/**", None),
+            ("a/*/**", None),
+            ("**/a", None),
+            ("a$*b", None),
+            // `a*b` is the fifteenth and it is a refusal.
+            ("a*b", Some((0, 1, Fault::StarInChunk))),
+        ];
+        for (text, want) in cases {
+            assert_eq!(
+                validate_keyexpr(text)
+                    .err()
+                    .map(|r| (r.chunk, r.offset, r.fault)),
+                want,
+                "{text:?}"
+            );
+        }
+    }
+
+    /// One text per fault with its chunk and byte, including the cases whose
+    /// place is the least obvious: a fault in a LATER chunk, a `$*` that fills
+    /// a chunk, the chunk after a `**/`, and a trailing `/`.
+    #[test]
+    fn a_refusal_names_the_chunk_and_the_byte() {
+        let cases: [(&str, usize, usize, Fault); 17] = [
+            // After a `*/` and after a `**/`, which each advance the chunk count
+            // by their own arm.
+            ("*/a*b", 1, 3, Fault::StarInChunk),
+            ("**/a*b", 1, 4, Fault::StarInChunk),
+            ("a/b//c", 2, 4, Fault::EmptyChunk),
+            ("a/b/", 2, 4, Fault::EmptyChunk),
+            ("", 0, 0, Fault::EmptyChunk),
+            ("a/b*c", 1, 3, Fault::StarInChunk),
+            ("a/**c", 1, 2, Fault::StarInChunk),
+            ("**/*x", 1, 3, Fault::StarInChunk),
+            ("a/**/*", 2, 5, Fault::SingleStarAfterDoubleStar),
+            ("a/**/*/b", 2, 5, Fault::SingleStarAfterDoubleStar),
+            ("a/**/**/b", 2, 5, Fault::DoubleStarAfterDoubleStar),
+            ("x/$*", 1, 2, Fault::LoneDollarStar),
+            ("x/$*/y", 1, 2, Fault::LoneDollarStar),
+            ("a$*$b", 0, 3, Fault::DollarAfterDollar),
+            ("a/b$*$*c", 1, 5, Fault::DollarAfterDollar),
+            ("a/b#", 1, 3, Fault::SharpOrQuestionMark),
+            ("a/b$c", 1, 3, Fault::UnboundDollar),
+        ];
+        for (text, chunk, offset, fault) in cases {
+            let got = validate_keyexpr(text).expect_err(text);
+            assert_eq!(
+                (got.chunk, got.offset, got.fault),
+                (chunk, offset, fault),
+                "{text:?}"
+            );
+        }
+    }
+
+    /// A text with two faults is placed at the EARLIER one, which is where a
+    /// caret goes, although upstream looks at a trailing `/` first.
+    #[test]
+    fn the_earliest_fault_by_position_is_the_one_reported() {
+        let got = validate_keyexpr("a?/").expect_err("two faults");
+        assert_eq!((got.offset, got.fault), (1, Fault::SharpOrQuestionMark));
+        let got = validate_keyexpr("a*b/c//").expect_err("two faults");
+        assert_eq!((got.offset, got.fault), (1, Fault::StarInChunk));
+    }
+
+    #[test]
+    fn every_fault_has_its_own_word_and_its_own_sentence() {
+        for (i, a) in Fault::ALL.iter().enumerate() {
+            assert!(!a.sentence().is_empty());
+            for b in &Fault::ALL[i + 1..] {
+                assert_ne!(a.word(), b.word());
+                assert_ne!(a.sentence(), b.sentence());
+            }
+        }
+        // And upstream's table reaches all eight: a fault no input produces
+        // would be a word a consumer branches on that nothing ever sends.
+        let mut reached = [false; 8];
+        for (text, _) in UPSTREAM_CASES {
+            if let Err(r) = validate_keyexpr(text) {
+                let at = Fault::ALL
+                    .iter()
+                    .position(|f| *f == r.fault)
+                    .expect("listed");
+                reached[at] = true;
+            }
+        }
+        assert!(reached.iter().all(|r| *r), "{reached:?}");
+    }
+
+    /// THE CONTROL for moving the C drop-in onto this validator: the texts it
+    /// accepted before are the texts accepted now, and no others.
+    ///
+    /// The drop-in used to ask "is the zenoh-c canonical form of this text the
+    /// text itself". This walks EVERY text of up to seven bytes over the
+    /// alphabet that can reach every arm (`a`, `*`, `$`, `/`, `#`, `?`), 335,923
+    /// of them, and holds the two questions to the same answer on each. A
+    /// disagreement on any text means the move changed what the drop-in accepts.
+    #[test]
+    fn the_validator_accepts_exactly_the_texts_that_are_their_own_zenoh_c_canonical_form() {
+        const ALPHABET: [u8; 6] = *b"a*$/#?";
+        let mut buf = [0u8; 7];
+        let mut walked = 0usize;
+        let mut accepted = 0usize;
+        for len in 0..=buf.len() {
+            let mut counter = [0usize; 7];
+            loop {
+                for (slot, digit) in buf[..len].iter_mut().zip(counter) {
+                    *slot = ALPHABET[digit];
+                }
+                let text = core::str::from_utf8(&buf[..len]).expect("ASCII");
+                let canonical = canonize_keyexpr_in(text, KeyexprDialect::ZenohC)
+                    .map(|c| c.as_str() == text)
+                    .unwrap_or(false);
+                let valid = validate_keyexpr(text).is_ok();
+                assert_eq!(valid, canonical, "{text:?}");
+                walked += 1;
+                accepted += usize::from(valid);
+                // Advance the base-6 counter; done when it wraps.
+                let mut at = 0;
+                while at < len {
+                    counter[at] += 1;
+                    if counter[at] < ALPHABET.len() {
+                        break;
+                    }
+                    counter[at] = 0;
+                    at += 1;
+                }
+                if at == len {
+                    break;
+                }
+            }
+        }
+        assert_eq!(walked, 335_923, "the walk covers the whole space");
+        // A comparison that accepted nothing, or everything, would pass for the
+        // wrong reason.
+        assert!(
+            accepted > 100 && accepted < walked / 2,
+            "accepted {accepted} of {walked}"
+        );
     }
 }
