@@ -350,10 +350,12 @@ pub unsafe extern "C" fn z_open(
                 local_delivery: wz_runtime_tokio::session::LocalDeliveryDrain::DriveTask,
                 // pico scouts when a program calls `z_scout`, never inside `z_open`.
                 scouting: None,
-                // zenoh-pico ends its push to an ACCEPTED peer with that Final and sends none to
-                // a node it dialled; this ABI does not model the difference, so it keeps the
-                // behaviour it had (see `SessionResources::initial_interest`).
-                initial_interest: false,
+                // zenoh-pico ends its push to every peer link it adds as a PEER, accepted or
+                // opened, with that Final (`_z_interest_push_declarations_to_peer`), and none in
+                // client mode; the rule the flag turns on only sends from a peer to a peer, which
+                // is the pair a zenoh peer's open waits on. R3093 -- it was `false`, and a zenoh
+                // peer that dialled this ABI's listener waited out `scouting/delay`.
+                initial_interest: true,
                 // zenoh-pico has no gossip: its peers are introduced by scouting alone.
                 gossip: None,
                 // Its one listener's bind failing has always failed the open, at the first attempt.

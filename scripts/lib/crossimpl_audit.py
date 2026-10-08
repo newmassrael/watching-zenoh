@@ -1021,7 +1021,11 @@ HOST_GATED_CI_TARGETS: dict[str, str] = {
 # `pico_listen_and_connect_twice_and_diff.rs`, a pico config that states `listen` and `connect`
 # together listens and dials as the real zenoh-pico does (`api-compat-pico wz->pico partial`).
 # Measured by `scripts/audit-crossimpl-proof.sh`.
-FOREIGN_ADJUDICATOR_LINKS = 1030
+# R3093 -- 1030 -> 1031, RISING by one: a new `wz-proves` line in
+# `pico_initial_interest_twice_and_diff.rs`, a zenoh peer that dials a pico listener is told by the
+# listener that it has sent everything it holds, as by the real zenoh-pico (`api-compat-pico
+# wz->pico partial`). Measured by `scripts/audit-crossimpl-proof.sh`.
+FOREIGN_ADJUDICATOR_LINKS = 1031
 
 # ── Execution disclosure ────────────────────────────────────────────────────────
 #

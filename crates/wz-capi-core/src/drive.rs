@@ -2619,7 +2619,9 @@ pub struct OpenStance {
     pub scouting: Option<ScoutingPlan>,
     /// R3073 -- whether a face this node reaches as a north-bound peer is ended with the
     /// `DeclareFinal` of the initial interest; see [`SessionResources::initial_interest`].
-    /// zenoh-c's ABI says `true`, and zenoh-pico's `false`.
+    /// Both ABIs say `true`: zenoh-c's peer hat sends it to a peer it meets as a north-bound
+    /// peer, and zenoh-pico's session sends it to every peer link it adds as a peer. The rule
+    /// itself only sends from a peer to a peer, so a client session sends none either way.
     pub initial_interest: bool,
     /// R3074 -- how a peer or router session gossips, or `None` for one that does not: it tells
     /// a face it meets which nodes it knows and where they are, and dials the nodes it is told

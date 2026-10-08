@@ -1467,9 +1467,10 @@ pub struct SessionResources {
     /// before start conditions are met"). The calling ABI chooses, as it does for the drain:
     /// zenoh-c's peer hat sends it to a peer it meets as a north-bound peer
     /// (`wz_session_core::extbound::sends_initial_interest_final`); zenoh-pico's session ends
-    /// its push to an ACCEPTED peer the same way and sends nothing to one it dialled, a
-    /// difference this crate does not model, so the pico ABI says `false` and keeps the
-    /// behaviour it had.
+    /// its push to every peer link it adds as a peer, accepted or opened, the same way, and
+    /// sends none in client mode, which that rule already does not either. R3093 -- the pico ABI
+    /// says `true` as well; it said `false` on the belief that pico sends only to an accepted
+    /// peer, and a zenoh peer that dialled its listener waited out `scouting/delay`.
     pub initial_interest: bool,
     /// R3074 -- whether the node gossips: it tells a face it meets which nodes it knows and
     /// where they are, and dials the nodes it is told of. zenoh's peer does by default, its
