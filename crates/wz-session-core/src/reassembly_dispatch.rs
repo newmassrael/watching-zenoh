@@ -22,6 +22,9 @@
 //!   a free (Empty) slot, an in-order continuation to that chain's
 //!   Receiving slot, and aborts a non-consecutive continuation
 //!   (`fragment.ooo`) — strict in-order parity, §2.5 / OQ-W21 option 2.
+//!   The ring that "consecutive" is judged on is the caller's ([`SnRing`]):
+//!   a reader that never saw the handshake passes none, and only a step of
+//!   plain `+1` — consecutive on every ring — is then admitted.
 //! - **The wire `more` bit — the FSM.** `more` is a real per-fragment
 //!   field (`fragment_chunk_schema.scxml`), so the slot FSM guards
 //!   Continue (`more != 0`, stay Receiving) vs Final (`more == 0`,
@@ -177,6 +180,17 @@ pub enum AbortReason {
     /// and are discarded before the new chain begins (zenoh
     /// `guard.defrag.clear()` on `ext_first.is_some()`).
     Superseded,
+    /// A continuation arrived whose SN is not the chain's last SN plus one, and
+    /// the caller does not know the SN ring ([`SnRing::Unknown`]), so the router
+    /// cannot say whether the step is a wrap, a gap or a repeat.
+    ///
+    /// Distinct from [`Self::OutOfOrder`] on purpose: that is the router's
+    /// judgement on a ring it knows, and this is its refusal to judge on one it
+    /// does not. A reader that conflated the two would report a chain as lost
+    /// to a lossy link when all it can say is that it cannot follow it. See
+    /// [`SnRing::admits`] for the rule, and for why only a step of exactly `+1`
+    /// is accepted without the ring.
+    Unresolvable,
 }
 
 /// Why the Router refused a chain-starting fragment before allocating a
@@ -219,6 +233,48 @@ pub enum IngestOutcome {
     Aborted(AbortReason),
     /// The chain-starting fragment was refused before slot allocation.
     Refused(RefuseReason),
+}
+
+/// What the caller knows of the SN ring a chain's continuations are judged on.
+///
+/// "Consecutive" is a statement about a ring: `127 -> 0` is one step on a 7-bit
+/// ring and a jump of `2^28 - 127` on the 28-bit one. A participant negotiated
+/// its ring in the handshake and always knows it. A passive reader that attached
+/// after the handshake read no InitAck, and does not.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SnRing {
+    /// The ring's mask ([`crate::sn::mask_from_res`]) is known. A continuation
+    /// is admitted iff its SN is ring-consecutive to the chain's last
+    /// ([`crate::sn::consecutive`]).
+    Known(u64),
+    /// The ring is not known. A continuation is admitted iff its SN is exactly
+    /// the chain's last plus one as plain integers; anything else ends the chain
+    /// as [`AbortReason::Unresolvable`].
+    Unknown,
+}
+
+impl SnRing {
+    /// Judge the step from a chain's last SN to the next fragment's.
+    ///
+    /// # Why `+1` is accepted without a ring, and nothing else is
+    ///
+    /// A step of exactly one is consecutive on EVERY ring: for any mask of one
+    /// or more bits `(last + 1 - last) & mask` is 1. Accepting it therefore says
+    /// something about all the rings the reader might have missed, and is not a
+    /// guess at one. Any other step is consecutive on some rings and not on
+    /// others (`127 -> 0` is a wrap on the 7-bit ring), or on none (a gap, a
+    /// repeat), and telling which takes the ring. The router does not make the
+    /// finer judgement for the steps that no ring would accept: a chain it cannot
+    /// follow is reported as one it cannot follow, and the reader is not told the
+    /// link was lossy, which is a claim about a ring it never saw.
+    pub fn admits(self, last: u64, next: u64) -> Result<(), AbortReason> {
+        match self {
+            Self::Known(mask) if crate::sn::consecutive(mask, last, next) => Ok(()),
+            Self::Known(_) => Err(AbortReason::OutOfOrder),
+            Self::Unknown if last.checked_add(1) == Some(next) => Ok(()),
+            Self::Unknown => Err(AbortReason::Unresolvable),
+        }
+    }
 }
 
 /// A decoded inbound transport Fragment (`T_MID_FRAGMENT`, MID `0x06`)
@@ -358,8 +414,9 @@ struct Slot<const SLOTS: usize, const CAP: usize, S: ChainStaging<SLOTS, CAP>> {
     /// `None` when free (FSM == Empty).
     key: Option<ChainKey>,
     /// The last in-order SN staged into this chain. A continuation is
-    /// admitted iff it is ring-consecutive to this ([`crate::sn::consecutive`]
-    /// at the caller-passed mask) — the zenoh-pico `_sn_rx_*` tracker shape
+    /// admitted iff it is consecutive to this on the caller's [`SnRing`]
+    /// ([`crate::sn::consecutive`] at the caller-passed mask when the ring is
+    /// known, plain `+1` when it is not) — the zenoh-pico `_sn_rx_*` tracker shape
     /// (rx.c stores the accepted `msg->_sn` and compares
     /// `_z_sn_consecutive` against it), replacing the R311ka F-5 unmasked
     /// `next_sn` `==` that diverged at the ring seam.
@@ -490,10 +547,44 @@ where
     /// reassembly completion `deliver` is called once with the fully
     /// reassembled message bytes (zero-copy from the slot buffer) before
     /// the slot is reclaimed.
+    ///
+    /// The ring is KNOWN here; [`Self::ingest_in_ring`] is the form that can be
+    /// told it is not.
     pub fn ingest<F: FnOnce(&[u8])>(
         &mut self,
         frag: Fragment<'_>,
         sn_mask: u64,
+        now_ms: u64,
+        deliver: F,
+    ) -> IngestOutcome {
+        self.ingest_in_ring(frag, SnRing::Known(sn_mask), now_ms, deliver)
+    }
+
+    /// [`Self::ingest`] over a ring the caller may not know ([`SnRing`]).
+    ///
+    /// The ring decides one thing only: whether a CONTINUATION is the next
+    /// fragment of its chain. Where a chain starts takes no ring (a start is a
+    /// fragment that finds no chain open on its key, or, under the marker rules,
+    /// one carrying `First`), so a chain with no ring is followed from its start
+    /// and, while every step is `+1`, to its close. With [`SnRing::Known`] this
+    /// is exactly [`Self::ingest`].
+    ///
+    /// # What a chain's start is when the markers are not enforced
+    ///
+    /// [`ReassemblyConfig::fragmentation_markers`] arms the `First` rule, and a
+    /// reader that has seen no Init has no patch level to arm it by. Then the
+    /// first fragment seen on a `(peer, reliable, priority)` key with no chain
+    /// open begins one, whatever it carries. A capture that joined mid-chain
+    /// therefore begins a chain at the first fragment it holds, and its close
+    /// delivers a message that does not begin at a message; so does the rest of a
+    /// chain that ended [`AbortReason::Unresolvable`], which "starts fresh" at the
+    /// next fragment. The reader that parses the delivered bytes is what drops
+    /// such a remnant, as it does for a ring-known session that negotiated no
+    /// patch.
+    pub fn ingest_in_ring<F: FnOnce(&[u8])>(
+        &mut self,
+        frag: Fragment<'_>,
+        ring: SnRing,
         now_ms: u64,
         deliver: F,
     ) -> IngestOutcome {
@@ -503,7 +594,7 @@ where
             }
         }
         match self.find_active(frag.peer_key, frag.reliable, frag.priority) {
-            Some(idx) => self.ingest_continuation(idx, frag, sn_mask, deliver),
+            Some(idx) => self.ingest_continuation(idx, frag, ring, deliver),
             None => self.ingest_chain_start(frag, now_ms, deliver),
         }
     }
@@ -743,19 +834,23 @@ where
         &mut self,
         idx: usize,
         frag: Fragment<'_>,
-        sn_mask: u64,
+        ring: SnRing,
         deliver: F,
     ) -> IngestOutcome {
         // Strict in-order (§2.5): a non-consecutive continuation (a
         // duplicate, a gap, or a backward step — all ring distances != 1)
         // aborts the chain via `fragment.ooo`. Ring compare, not `==` on
         // `+1`: a sender minting on the ring wraps `mask -> 0`, where the
-        // unmasked form falsely aborted (R311ka F-5).
-        if !crate::sn::consecutive(sn_mask, self.slots[idx].last_sn, frag.sn) {
+        // unmasked form falsely aborted (R311ka F-5). On a ring the caller does
+        // not know only `+1` is consecutive on every ring, so only that is
+        // admitted, and any other step ends the chain as `Unresolvable` rather
+        // than as the judgement it cannot make; the slot FSM's one abort arm for
+        // "this continuation cannot be admitted" serves both words.
+        if let Err(reason) = ring.admits(self.slots[idx].last_sn, frag.sn) {
             self.slots[idx]
                 .engine
                 .process_event(ReassemblySlotEvent::FragmentOoo);
-            return self.abort(idx, AbortReason::OutOfOrder);
+            return self.abort(idx, reason);
         }
 
         {
@@ -1647,6 +1742,318 @@ mod chain_boundary_marker_tests {
         // ...and they are not silently equal to the pre-existing reasons.
         assert_ne!(
             ReassemblyDropReason::SenderDropped,
+            ReassemblyDropReason::OutOfOrder
+        );
+    }
+}
+
+// ── The router over a ring the caller does not know ([`SnRing::Unknown`]): a
+//    passive reader that attached after the handshake read no InitAck. The ring
+//    decides one thing about a chain, whether a step is consecutive across a
+//    wrap; a step of plain `+1` is consecutive on every ring and is the only one
+//    admitted without it. ──
+#[cfg(test)]
+mod unknown_ring_tests {
+    use super::*;
+    use crate::extfragment::FragmentMarkers;
+    use alloc::vec::Vec;
+
+    const PEER: &[u8] = &[0xAA; 16];
+    /// The three rings the 2-bit `seq_num_res` can name below the widest, each
+    /// as its mask: 7, 14 and 28 bits (`sn::mask_from_res`).
+    const RING_7: u64 = crate::sn::mask_from_res(0x00);
+    const RING_14: u64 = crate::sn::mask_from_res(0x01);
+    const RING_28: u64 = crate::sn::mask_from_res(0x02);
+
+    fn dispatcher<const S: usize, const C: usize>() -> ReassemblyDispatcher<S, C> {
+        ReassemblyDispatcher::new(ReassemblyConfig::new(2, 5_000))
+    }
+
+    fn frag(sn: u64, more: u8, payload: &[u8]) -> Fragment<'_> {
+        Fragment {
+            peer_key: PEER,
+            reliable: true,
+            sn,
+            more,
+            payload,
+            priority: Priority::DEFAULT,
+            markers: FragmentMarkers::NONE,
+        }
+    }
+
+    /// Feed one fragment with no ring, returning what the router made of it and
+    /// what it delivered.
+    fn feed<const S: usize, const C: usize>(
+        d: &mut ReassemblyDispatcher<S, C>,
+        sn: u64,
+        more: u8,
+        payload: &[u8],
+    ) -> (IngestOutcome, Option<Vec<u8>>) {
+        let mut delivered = None;
+        let outcome = d.ingest_in_ring(frag(sn, more, payload), SnRing::Unknown, 0, |m| {
+            delivered = Some(m.to_vec())
+        });
+        (outcome, delivered)
+    }
+
+    /// A chain whose every step is `+1` is followed and delivered, with no ring.
+    /// The sequence numbers are far past what a 7 or 14-bit ring could carry, as
+    /// a real capture's are, so no guessed small ring would have admitted them.
+    #[test]
+    fn a_chain_of_plain_plus_one_steps_reassembles_with_no_ring() {
+        let mut d = dispatcher::<4, 64>();
+        let first = 109_926_136u64;
+        assert_eq!(feed(&mut d, first, 1, b"aaa"), (IngestOutcome::Begun, None));
+        assert_eq!(
+            feed(&mut d, first + 1, 1, b"bbb"),
+            (IngestOutcome::Continued, None)
+        );
+        let (outcome, delivered) = feed(&mut d, first + 2, 0, b"ccc");
+        assert_eq!(outcome, IngestOutcome::Reassembled);
+        assert_eq!(delivered.as_deref(), Some(&b"aaabbbccc"[..]));
+        assert_eq!(d.active_chains(), 0);
+    }
+
+    /// A step that is not `+1` ends the chain as `Unresolvable`: a gap, a repeat,
+    /// a step back, and `127 -> 0`, which is a wrap on one ring and a jump on
+    /// every other. The router does not say which, and says no more than that.
+    ///
+    /// The control is the same steps with the ring known, which are judged:
+    /// `OutOfOrder` for each of these on the default 28-bit ring (the seam of the
+    /// 7-bit ring is a step of `2^28 - 127` there).
+    #[test]
+    fn a_step_that_is_not_plus_one_ends_the_chain_unresolvable_where_a_ring_would_judge_it() {
+        for (last, next) in [(100u64, 102u64), (100, 100), (100, 99), (127, 0)] {
+            let mut d = dispatcher::<4, 64>();
+            assert_eq!(feed(&mut d, last, 1, b"aaa").0, IngestOutcome::Begun);
+            assert_eq!(
+                feed(&mut d, next, 1, b"zzz"),
+                (IngestOutcome::Aborted(AbortReason::Unresolvable), None),
+                "{last} -> {next}"
+            );
+            assert_eq!(d.active_chains(), 0, "{last} -> {next}: the chain is gone");
+
+            let mut known = dispatcher::<4, 64>();
+            known.ingest(frag(last, 1, b"aaa"), RING_28, 0, |_| {});
+            assert_eq!(
+                known.ingest(frag(next, 1, b"zzz"), RING_28, 0, |_| {
+                    panic!("an aborted chain delivers nothing")
+                }),
+                IngestOutcome::Aborted(AbortReason::OutOfOrder),
+                "{last} -> {next} on a ring the router knows"
+            );
+        }
+    }
+
+    /// THE STEP ONLY A RING CAN JUDGE: `127 -> 0` is one step on the 7-bit ring,
+    /// a jump on the 14 and 28-bit ones, and with no ring it is unresolvable. The
+    /// three answers are the whole reason the router refuses to guess.
+    #[test]
+    fn the_seam_of_the_smallest_ring_is_a_step_only_the_ring_can_judge() {
+        let seam = |ring: SnRing| {
+            let mut d = dispatcher::<4, 64>();
+            d.ingest_in_ring(frag(126, 1, b"a"), ring, 0, |_| {});
+            d.ingest_in_ring(frag(127, 1, b"b"), ring, 0, |_| {});
+            d.ingest_in_ring(frag(0, 0, b"c"), ring, 0, |_| {})
+        };
+        assert_eq!(seam(SnRing::Known(RING_7)), IngestOutcome::Reassembled);
+        assert_eq!(
+            seam(SnRing::Known(RING_14)),
+            IngestOutcome::Aborted(AbortReason::OutOfOrder)
+        );
+        assert_eq!(
+            seam(SnRing::Known(RING_28)),
+            IngestOutcome::Aborted(AbortReason::OutOfOrder)
+        );
+        assert_eq!(
+            seam(SnRing::Unknown),
+            IngestOutcome::Aborted(AbortReason::Unresolvable)
+        );
+    }
+
+    /// The largest SN has no successor as an integer, and the router does not
+    /// overflow to find out: `u64::MAX -> 0` is a step it cannot judge.
+    #[test]
+    fn the_step_past_the_largest_sequence_number_is_unresolvable_and_does_not_overflow() {
+        let mut d = dispatcher::<4, 64>();
+        assert_eq!(feed(&mut d, u64::MAX, 1, b"a").0, IngestOutcome::Begun);
+        assert_eq!(
+            feed(&mut d, 0, 1, b"b").0,
+            IngestOutcome::Aborted(AbortReason::Unresolvable)
+        );
+    }
+
+    /// Where the ring IS known the router is exactly what it was: the two entry
+    /// points answer alike, fragment by fragment and byte for byte, over a run
+    /// that holds a clean chain, a gap, a seam and a repeat.
+    #[test]
+    fn a_known_ring_through_the_new_door_is_the_old_door() {
+        let run: [(u64, u8, &[u8]); 9] = [
+            (RING_7 - 1, 1, &b"a"[..]),
+            (RING_7, 1, &b"b"[..]),
+            (0, 0, &b"c"[..]),
+            (5, 1, &b"d"[..]),
+            (7, 1, &b"e"[..]),
+            (8, 0, &b"f"[..]),
+            (20, 1, &b"g"[..]),
+            (20, 1, &b"h"[..]),
+            (21, 0, &b"i"[..]),
+        ];
+        for mask in [RING_7, RING_14, RING_28] {
+            let (mut old, mut new) = (dispatcher::<4, 64>(), dispatcher::<4, 64>());
+            for (sn, more, payload) in run {
+                let (mut got_old, mut got_new): (Option<Vec<u8>>, Option<Vec<u8>>) = (None, None);
+                let a = old.ingest(frag(sn, more, payload), mask, 0, |m| {
+                    got_old = Some(m.to_vec())
+                });
+                let b = new.ingest_in_ring(frag(sn, more, payload), SnRing::Known(mask), 0, |m| {
+                    got_new = Some(m.to_vec())
+                });
+                assert_eq!((a, got_old), (b, got_new), "mask {mask:#x}, sn {sn}");
+            }
+            assert_eq!(old.active_chains(), new.active_chains());
+        }
+    }
+
+    /// A chain's START takes no ring: it is the fragment that finds no chain open
+    /// (the markers are off here), so any sequence number begins one, and a lone
+    /// closing fragment completes in one step, as it does where the ring is known.
+    #[test]
+    fn a_chain_starts_without_a_ring() {
+        let mut d = dispatcher::<4, 64>();
+        assert_eq!(feed(&mut d, 77_777, 1, b"a").0, IngestOutcome::Begun);
+        let mut lone = dispatcher::<4, 64>();
+        let (outcome, delivered) = feed(&mut lone, 5, 0, b"tail");
+        assert_eq!(outcome, IngestOutcome::Reassembled);
+        assert_eq!(delivered.as_deref(), Some(&b"tail"[..]));
+    }
+
+    /// After a chain ends unresolvable its slot is free and the staging is back in
+    /// the arena, and the fragments that follow start fresh: the next fragment
+    /// begins a chain of its own and a whole chain after that completes.
+    ///
+    /// One slot, so a chain that left its slot held, or its FSM parked in
+    /// `Receiving`, could not begin the next.
+    #[test]
+    fn an_unresolvable_ending_releases_the_slot_and_the_next_fragments_start_fresh() {
+        let mut d = dispatcher::<1, 64>();
+        assert_eq!(feed(&mut d, 10, 1, b"aa").0, IngestOutcome::Begun);
+        assert_eq!(
+            feed(&mut d, 12, 1, b"zz").0,
+            IngestOutcome::Aborted(AbortReason::Unresolvable)
+        );
+        assert_eq!(d.active_chains(), 0);
+        assert_eq!(
+            d.staging_available(),
+            1,
+            "the arena has the chain's staging back"
+        );
+        assert_eq!(
+            d.slots[0].engine.get_current_state(),
+            ReassemblySlotState::Empty,
+            "the slot FSM left the chain by a declared transition"
+        );
+        // The fragment after the ending begins a chain of its own, which the
+        // `more` flag then closes: nothing of the broken chain is in it.
+        assert_eq!(feed(&mut d, 13, 1, b"yy").0, IngestOutcome::Begun);
+        let (outcome, delivered) = feed(&mut d, 14, 0, b"xx");
+        assert_eq!(outcome, IngestOutcome::Reassembled);
+        assert_eq!(delivered.as_deref(), Some(&b"yyxx"[..]));
+    }
+
+    /// The marker rules do not need the ring and are unchanged by not having it:
+    /// armed, a headless tail is refused and a `First`-marked chain is followed to
+    /// its close, on a ring the router does not know.
+    #[test]
+    fn the_marker_rules_hold_over_an_unknown_ring() {
+        let first = FragmentMarkers {
+            first: true,
+            dropped: false,
+        };
+        let mut d: ReassemblyDispatcher<4, 64> = ReassemblyDispatcher::new(
+            ReassemblyConfig::new(2, 5_000).with_fragmentation_markers(true),
+        );
+        let mut marked = |sn: u64, more: u8, payload: &'static [u8], markers: FragmentMarkers| {
+            let mut delivered: Option<Vec<u8>> = None;
+            let outcome = d.ingest_in_ring(
+                Fragment {
+                    markers,
+                    ..frag(sn, more, payload)
+                },
+                SnRing::Unknown,
+                0,
+                |m| delivered = Some(m.to_vec()),
+            );
+            (outcome, delivered)
+        };
+        assert_eq!(
+            marked(40, 1, b"tail", FragmentMarkers::NONE).0,
+            IngestOutcome::Refused(RefuseReason::MissingStartMarker)
+        );
+        assert_eq!(marked(50, 1, b"he", first).0, IngestOutcome::Begun);
+        assert_eq!(
+            marked(51, 1, b"ll", FragmentMarkers::NONE).0,
+            IngestOutcome::Continued
+        );
+        let (outcome, delivered) = marked(52, 0, b"o", FragmentMarkers::NONE);
+        assert_eq!(outcome, IngestOutcome::Reassembled);
+        assert_eq!(delivered.as_deref(), Some(&b"hello"[..]));
+    }
+
+    /// Chains on different keys do not disturb one another when the ring is
+    /// unknown, and the step that ends one is judged on that chain's own last
+    /// sequence number.
+    #[test]
+    fn chains_on_different_keys_are_judged_each_on_its_own_last_number() {
+        let mut d = dispatcher::<4, 64>();
+        let on = |priority: Priority, reliable: bool, sn: u64, more: u8| Fragment {
+            reliable,
+            priority,
+            ..frag(sn, more, b"x")
+        };
+        let mut ingest = |f: Fragment<'static>| d.ingest_in_ring(f, SnRing::Unknown, 0, |_| {});
+        // Two chains, interleaved, with unrelated numbering.
+        assert_eq!(
+            ingest(on(Priority::RealTime, true, 10, 1)),
+            IngestOutcome::Begun
+        );
+        assert_eq!(
+            ingest(on(Priority::Background, true, 900, 1)),
+            IngestOutcome::Begun
+        );
+        assert_eq!(
+            ingest(on(Priority::RealTime, true, 11, 1)),
+            IngestOutcome::Continued
+        );
+        // The other key's number is not this chain's last: 12 follows 11 here
+        // whatever the other chain is at.
+        assert_eq!(
+            ingest(on(Priority::Background, true, 901, 1)),
+            IngestOutcome::Continued
+        );
+        assert_eq!(
+            ingest(on(Priority::RealTime, true, 12, 0)),
+            IngestOutcome::Reassembled
+        );
+        // The other chain, still open, is ended by its own gap.
+        assert_eq!(
+            ingest(on(Priority::Background, true, 903, 1)),
+            IngestOutcome::Aborted(AbortReason::Unresolvable)
+        );
+    }
+
+    /// The observer mirror carries the word under its own variant, apart from
+    /// `OutOfOrder`.
+    #[cfg(feature = "alloc")]
+    #[test]
+    fn the_unresolvable_ending_reaches_the_observer_mirror_under_its_own_word() {
+        use crate::driver_loop::ReassemblyDropReason;
+        assert_eq!(
+            ReassemblyDropReason::from_ingest(IngestOutcome::Aborted(AbortReason::Unresolvable)),
+            Some(ReassemblyDropReason::Unresolvable)
+        );
+        assert_ne!(
+            ReassemblyDropReason::Unresolvable,
             ReassemblyDropReason::OutOfOrder
         );
     }

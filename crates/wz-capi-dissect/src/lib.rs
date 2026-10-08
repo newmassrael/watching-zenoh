@@ -9168,6 +9168,50 @@ mod tests {
         unsafe { wz_dissect_live_close(handle) };
     }
 
+    /// THE SAME, FOR A CAPTURE THAT BEGAN AFTER ITS HANDSHAKE.
+    ///
+    /// No InitAck, so the reader does not know the sequence-number ring, and the
+    /// two fragments are consecutive: the chain is followed on its step of plain
+    /// `+1`, and the one record that completes it hands back the joined buffer,
+    /// which is the record that was split. This door answered
+    /// `WZ_DISSECT_ERR_NOT_REASSEMBLED` for both records before, because the
+    /// fragments were never routed to the chain router.
+    #[test]
+    fn the_joined_buffer_comes_back_for_a_chain_whose_handshake_the_capture_missed() {
+        let (pcap, record) = wz_capture::fixtures::completed_chain_capture_after_the_handshake();
+        let mut handle: *mut live::LiveDissection = core::ptr::null_mut();
+        let rc = unsafe {
+            wz_dissect_pcap_replay(
+                pcap.as_ptr(),
+                pcap.len(),
+                WZ_DISSECT_LIMITS_NONE,
+                &mut handle,
+            )
+        };
+        assert_eq!(rc, WZ_DISSECT_OK, "replay rc");
+        let records = drain_live(handle, 64);
+        assert_eq!(records.len(), 2, "the two fragments and nothing else");
+
+        let mut joined: Vec<(usize, Vec<u8>)> = Vec::new();
+        for (i, r) in records.iter().enumerate() {
+            match live_reassembled(handle, r) {
+                Ok(bytes) => joined.push((i, bytes)),
+                Err(rc) => assert_eq!(rc, WZ_DISSECT_ERR_NOT_REASSEMBLED, "record {i}"),
+            }
+        }
+        assert_eq!(
+            joined.len(),
+            1,
+            "exactly one record completed the chain, with no ring to judge it on"
+        );
+        assert_eq!(
+            joined[0],
+            (1, record),
+            "the second fragment completes it, and the join is the record that was split"
+        );
+        unsafe { wz_dissect_live_close(handle) };
+    }
+
     /// R2102 — THE RECORD'S LAYOUT IS THE ONE THE HEADER DECLARES.
     ///
     /// # Why a size assertion is not pedantry here

@@ -238,6 +238,16 @@ ALLOWED = [
         "the expression parser's own operand stack, built and consumed inside "
         "one parse; nothing captured is in it",
     ),
+    # A test builds the packets it feeds, and this line drops one of them ON
+    # PURPOSE to make the gap the test is about: the removal is the fixture, not
+    # a capture's evidence being lost.
+    (
+        "wz-capture/unresolved_chain_tests.rs",
+        "bg.remove(2);",
+        "the test fixture's own fragment list losing its third fragment so the "
+        "chain has the gap the test is about; built and consumed inside one "
+        "test, and nothing captured is in it",
+    ),
     # The `.proto` reader (`proto_schema`) reads TEXT a caller handed over and
     # holds no capture, so none of its four removals discards evidence. Each is
     # a work list that lives inside one call.

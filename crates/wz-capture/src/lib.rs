@@ -325,6 +325,18 @@ pub mod tcp;
 /// workspace's already-pinned crypto — `wz-capture` keeps its zero third-party
 /// dependencies.
 pub mod tls;
+/// A fragment chain read by a reader that never saw the session's InitAck, so
+/// does not know the sequence-number ring: the chains whose every step is `+1`
+/// are reassembled, and a step only a ring could judge ends the chain as
+/// `unresolvable`. Gated on `dissect` for the field document the rows are read
+/// from, on `reassembly` for the router and on `network-codecs` for the `Push`.
+#[cfg(all(
+    test,
+    feature = "reassembly",
+    feature = "network-codecs",
+    feature = "dissect"
+))]
+mod unresolved_chain_tests;
 pub mod ws;
 
 use alloc::collections::BTreeSet;
@@ -7869,7 +7881,7 @@ mod datagram_tests {
     /// the S flag set and `sn_res` as its byte. [`init_datagram`] leaves it out,
     /// which makes the session's window the default (28 bits); a fixture that
     /// needs the widest window has to say so on the wire.
-    fn init_datagram_resolving(is_ack: bool, sn_res: u8) -> Vec<u8> {
+    pub(crate) fn init_datagram_resolving(is_ack: bool, sn_res: u8) -> Vec<u8> {
         let mut flags = wz_codecs::wire_const::FLAG_T_INIT_S;
         if is_ack {
             flags |= wz_codecs::wire_const::FLAG_T_INIT_A;
@@ -7893,7 +7905,7 @@ mod datagram_tests {
 
     /// `v` as zenoh's VLE: seven data bits per byte, the high bit continuing,
     /// and the ninth byte of a 64-bit value carrying eight data bits unmasked.
-    fn vle_bytes(mut v: u64) -> Vec<u8> {
+    pub(crate) fn vle_bytes(mut v: u64) -> Vec<u8> {
         let mut out = Vec::new();
         for _ in 0..8 {
             let low = (v & 0x7F) as u8;
@@ -8050,10 +8062,12 @@ mod datagram_tests {
     ///
     /// The handshake is what separates this from
     /// [`midsession_fragment_dissection`]: with an InitAck observed the session
-    /// has an SN resolution, so the chain is tracked and completes, and the
-    /// reassembled bytes become a real `Carried::Reassembled` batch with real
-    /// records in it. That is the only shape in which a record exists whose
-    /// bytes were never contiguous on the wire.
+    /// has an SN resolution (the ring), so the chain is judged on it and
+    /// completes, and the reassembled bytes become a real `Carried::Reassembled`
+    /// batch with real records in it. That is a shape in which a record exists
+    /// whose bytes were never contiguous on the wire; a capture with no
+    /// handshake reassembles a chain too while its steps are `+1`, and the
+    /// `unresolved_chain_tests` module holds that.
     /// Gated on BOTH features, matching its consumers rather than only the one
     /// it names: the record it splits is a network record, so every test that
     /// drives it is `network-codecs`-gated too, and a fixture gated more widely
@@ -8129,9 +8143,8 @@ mod datagram_tests {
     /// A two-sided handshake, then `from_a` in order, as a dissection AND the
     /// pcap it was written from.
     ///
-    /// The handshake is what gives the session an SN resolution, which is the
-    /// precondition for a chain to be tracked at all — see
-    /// [`reassembled_record_dissection`].
+    /// The handshake is what gives the session an SN resolution, the ring its
+    /// chains are judged on — see [`reassembled_record_dissection`].
     #[cfg(all(feature = "reassembly", feature = "network-codecs"))]
     fn established_session_capture(from_a: Vec<Vec<u8>>) -> (Dissection, Vec<u8>) {
         let mut messages = alloc::vec![
@@ -8170,7 +8183,7 @@ mod datagram_tests {
     /// `PatchType`), and the negotiation is a `min()` over BOTH Inits — so a
     /// fixture that wants the markers honoured has to put this on both.
     #[cfg(feature = "reassembly")]
-    fn patch_offer(level: u64) -> Vec<u8> {
+    pub(crate) fn patch_offer(level: u64) -> Vec<u8> {
         let entry: wz_codecs::ext_entry::ExtEntryOwned = wz_codecs::ext_entry::ExtEntryOwned {
             header: wz_session_core::extpatch::PATCH_EXT_ID
                 | wz_session_core::ext_header::EXT_ENC_Z64,
@@ -8191,7 +8204,7 @@ mod datagram_tests {
     /// `ext_chain::encode_ext_chain` — which owns it for the production
     /// encoders — is `pub(crate)` to the crate one layer down.
     #[cfg(feature = "reassembly")]
-    fn marker_chain(first: bool, dropped: bool) -> Vec<u8> {
+    pub(crate) fn marker_chain(first: bool, dropped: bool) -> Vec<u8> {
         let mut entries: Vec<wz_codecs::ext_entry::ExtEntryOwned> = Vec::new();
         if first {
             entries.push(wz_session_core::extfragment::encode_fragment_first_ext());
@@ -8290,13 +8303,19 @@ mod datagram_tests {
         (d, file)
     }
 
-    /// R311y621 (§1.4i) — a capture that STARTED MID-SESSION: a Fragment and no
-    /// InitAck before it.
+    /// R311y621 (§1.4i) — a capture that STARTED MID-SESSION and then lost a
+    /// fragment: two Fragments and no InitAck before them, numbered 0 and 2.
     ///
-    /// The observer has no SN resolution, so it cannot tell a wraparound from a
-    /// gap and refuses to pick a mask — `Carried::FragmentWithoutResolution`.
-    /// The chain that fragment belonged to never becomes a batch, and the
-    /// planes have to say so rather than report a capture with nothing in it.
+    /// The observer has no SN resolution. The first fragment begins a chain; the
+    /// second is a step of two, which only the ring could judge (a wrap, a gap),
+    /// so the router ends the chain as unresolvable and the fragment that showed
+    /// it is `Carried::FragmentWithoutResolution`. The chain never becomes a
+    /// batch, and the planes have to say so rather than report a capture with
+    /// nothing in it.
+    ///
+    /// Two fragments and not the one this fixture was written with: a chain whose
+    /// steps are all `+1` is followed without the ring and reassembled, so a lone
+    /// fragment no longer reads as unplaceable.
     #[cfg(feature = "reassembly")]
     pub(crate) fn midsession_fragment_dissection() -> Dissection {
         midsession_fragment_dissection_with_file().0
@@ -8309,17 +8328,30 @@ mod datagram_tests {
     /// `carried_state = fragment_without_resolution`.
     #[cfg(feature = "reassembly")]
     pub(crate) fn midsession_fragment_dissection_with_file() -> (Dissection, Vec<u8>) {
-        let mut wire = alloc::vec![
-            wz_session_core::wire_const::T_MID_FRAGMENT
-                | wz_codecs::wire_const::FLAG_T_FRAGMENT_R
-                | wz_codecs::wire_const::FLAG_T_FRAGMENT_M,
-            0x00,
-        ];
-        wire.extend_from_slice(&[0xDE, 0xAD]);
+        let fragment = |sn: u8| {
+            let mut wire = alloc::vec![
+                wz_session_core::wire_const::T_MID_FRAGMENT
+                    | wz_codecs::wire_const::FLAG_T_FRAGMENT_R
+                    | wz_codecs::wire_const::FLAG_T_FRAGMENT_M,
+                sn,
+            ];
+            wire.extend_from_slice(&[0xDE, 0xAD]);
+            wire
+        };
         let mut d = Dissection::new();
-        let packet = udp_packet([10, 0, 0, 1], 43210, [10, 0, 0, 2], 7447, &wire);
-        d.push_packet(LINKTYPE_ETHERNET, 0, &packet);
-        let file = crate::pcap::write(LINKTYPE_ETHERNET, &[(0u32, 0u32, packet.as_slice())]);
+        let packets: Vec<Vec<u8>> = [0u8, 2]
+            .iter()
+            .map(|sn| udp_packet([10, 0, 0, 1], 43210, [10, 0, 0, 2], 7447, &fragment(*sn)))
+            .collect();
+        for (i, packet) in packets.iter().enumerate() {
+            d.push_packet(LINKTYPE_ETHERNET, i, packet);
+        }
+        let refs: Vec<(u32, u32, &[u8])> = packets
+            .iter()
+            .enumerate()
+            .map(|(i, p)| (i as u32, 0u32, p.as_slice()))
+            .collect();
+        let file = crate::pcap::write(LINKTYPE_ETHERNET, &refs);
         (d, file)
     }
 
@@ -8386,10 +8418,14 @@ mod datagram_tests {
     }
 
     /// The same anchor for the mid-session capture: the observer must NAME the
-    /// unresolvable fragment rather than merely fail to reassemble it.
+    /// unresolvable fragment rather than merely fail to reassemble it. The
+    /// fragment before it begins a chain, which is what makes the second one the
+    /// END of a chain and not a fragment nothing was said about.
     #[cfg(feature = "reassembly")]
     #[test]
     fn the_midsession_fixture_yields_a_fragment_with_no_resolution() {
+        use wz_session_core::passive::Carried;
+        use wz_session_core::reassembly_dispatch::IngestOutcome;
         let d = midsession_fragment_dissection();
         let flow = &d.datagram_flows()[0];
         assert!(
@@ -8399,10 +8435,18 @@ mod datagram_tests {
         assert!(
             matches!(
                 flow.frames.first().map(|f| &f.carried),
-                Some(wz_session_core::passive::Carried::FragmentWithoutResolution)
+                Some(Carried::Fragment(IngestOutcome::Begun))
             ),
             "got {:?}",
             flow.frames.first().map(|f| &f.carried)
+        );
+        assert!(
+            matches!(
+                flow.frames.last().map(|f| &f.carried),
+                Some(Carried::FragmentWithoutResolution)
+            ),
+            "got {:?}",
+            flow.frames.last().map(|f| &f.carried)
         );
         assert_eq!(d.health().packets_skipped, 0);
     }
@@ -12668,9 +12712,10 @@ mod datagram_tests {
             reassembly_window_ms: Some(1_000),
             ..DissectionLimits::default()
         });
-        // A handshake, so the session has an SN resolution and the chain is
-        // TRACKED rather than refused -- without it the fragment is
-        // `FragmentWithoutResolution` and nothing ever opens to expire.
+        // A handshake, so the session is an established one and the chain it
+        // opens is read as a participant's would be. (A reader with no InitAck
+        // opens and expires a chain the same way; this test is about the
+        // window, not about that.)
         for (i, (from_low, ts, message)) in [
             (true, 0u64, init_datagram(false, &[])),
             (false, 0, init_datagram(true, &[])),

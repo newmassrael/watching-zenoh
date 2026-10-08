@@ -448,6 +448,13 @@ pub enum ReassemblyDropReason {
     /// observer-vs-participant case: a reader attached to a live flow sees
     /// this for every chain already in progress when it attached.
     MissingStartMarker,
+    /// A continuation's SN was not the chain's last plus one and the router did
+    /// not know the SN ring, so it could not say whether the step was a wrap or
+    /// a loss. Kept apart from [`Self::OutOfOrder`], the judgement on a known
+    /// ring. A session that negotiated its ring never reports this one: it is
+    /// the mirror of the router's own word, which only a reader that missed the
+    /// handshake reaches.
+    Unresolvable,
 }
 
 /// R311y784 / R311y787 — the multicast departure observer surface,
@@ -507,6 +514,9 @@ impl ReassemblyDropReason {
             }
             IngestOutcome::Refused(RefuseReason::MissingStartMarker) => {
                 Some(ReassemblyDropReason::MissingStartMarker)
+            }
+            IngestOutcome::Aborted(AbortReason::Unresolvable) => {
+                Some(ReassemblyDropReason::Unresolvable)
             }
             IngestOutcome::Begun | IngestOutcome::Continued | IngestOutcome::Reassembled => None,
         }

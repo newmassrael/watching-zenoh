@@ -604,6 +604,65 @@
  * so from revision 22 they count these records too: a capture whose only
  * refused samples were reassembled used to write both arrays empty.
  *
+ * AND A FRAGMENT CHAIN READ WITH NO RING, at field-document revision 32 and
+ * census revision 18. A flow whose capture holds no InitAck (`context.sn_mask`
+ * is `null`, ordinarily because the capture began after the handshake) does not
+ * know the size of the sequence-number ring. The ring decides one thing about a
+ * chain: whether the step from one fragment to the next is consecutive across a
+ * wrap. A step of plain `+1` is consecutive on every ring, so the chains of such
+ * a flow are FOLLOWED. Until revision 32 they were not: every Fragment of the
+ * flow read `fragment_without_resolution`, its `chain` was `null` and nothing was
+ * reassembled. The rules are these.
+ *
+ *   - A continuation is accepted when its sequence number is exactly the
+ *     previous fragment's plus one, as plain integers. A fragment of a chain
+ *     that proceeds reads `carried_state: fragment` and a `chain.outcome` of
+ *     `begun` or `continued`; the fragment that closes it reads `reassembled`,
+ *     and its `above_transport.fields` and `above_transport.carried` are those of
+ *     any reassembled message, as on a flow with a ring.
+ *   - A step that is not `+1` is one only the ring could judge: a wrap, a gap
+ *     or a repeat. The chain ENDS. The fragment that showed the step reads
+ *     `carried_state: fragment_without_resolution`, because it could not be
+ *     placed, and its `chain` is `{"outcome":"aborted","reason":"unresolvable",
+ *     "chain_id":N}` with the identity of the chain it ended. `unresolvable` is
+ *     never `out_of_order`: that word is the verdict on a ring the reader
+ *     knows, and a flow carries one or the other. The chain's earlier fragments
+ *     keep what they read when they arrived, and the fragments after the
+ *     ending START FRESH, by the rule below.
+ *   - WHAT A CHAIN'S START IS. The chain boundary markers (the `first` and
+ *     `drop` extensions) are enforced only when the negotiated patch level says
+ *     so, and a flow with no Init has no patch level: they are not enforced.
+ *     A fragment that finds no chain open for its (direction, reliability,
+ *     priority) then begins one, whatever it carries. So a capture that joined in
+ *     the middle of a chain begins a chain at the first fragment it holds, and
+ *     the message its close delivers does not begin at a message; the rest of a
+ *     chain that ended `unresolvable` is the same. Such a close reads
+ *     `reassembled` and its tree is whatever those bytes parse as, which is
+ *     usually a halted batch and no message. Where only the InitSyn was seen the
+ *     patch level is known and the markers ARE enforced: a fragment with no
+ *     `first` that finds no chain open is `refused` with `missing_start_marker`,
+ *     and the ring is still unknown.
+ *   - `sn.verdict` is UNCHANGED and stays `without_resolution`. Following a
+ *     chain says a continuation was the next integer; it does not say the frame
+ *     arrived in order relative to a ring this reader never saw, and no verdict
+ *     is claimed.
+ *   - Where the ring IS known (an InitAck was seen) nothing here applies, and
+ *     the rows read as they did at revision 30.
+ *
+ * The census follows the rows. For a flow with no InitAck, `unresolvable_fragments`
+ * (in `exchanges.unread`, `payloads.gaps`, `keyexprs.gaps` and the throughput
+ * gaps) counts the fragments that ended a chain this way, which are the rows
+ * that read `fragment_without_resolution`, and no longer every fragment of the
+ * flow. `fragment_chains` gains `aborted_unresolvable`, the same endings read as
+ * chains, and its `begun`, `continued` and `completed` count the chains of such a
+ * flow, which they did not. The messages those chains reassembled are in the
+ * keyexpr totals (`puts` and the rest), the exchange plane and the payload plane,
+ * and a selector's `kind == put` is `yes` on the rows that close them. The top
+ * level `reassembly` group counts a chain of such a flow that was still open at
+ * the end. A consumer pinned to an earlier revision that took
+ * `fragment_without_resolution`, or a nonzero `unresolvable_fragments`, to mean
+ * "this flow missed its handshake" must read `context.sn_mask` for that.
+ *
  * ⚠ AN INTEGER A JSON NUMBER WOULD MISREAD IS A STRING (field document 23, and
  * the same rule in the other documents below). A 64-bit integer that this
  * library reads off the wire or off a clock is written as a bare number while
@@ -663,7 +722,9 @@
  *     `verdict` is one of `baseline` (first frame on the conduit),
  *     `continuous`, `gap`, `duplicate`, `out_of_window` (behind, or past the
  *     forward half-window -- a participant drops these, so they are not loss),
- *     or `without_resolution` (no InitAck seen, so the ring is unknown).
+ *     or `without_resolution` (no InitAck seen, so the ring is unknown). That
+ *     word stays on a Fragment whose chain IS followed without the ring (see
+ *     the fragment chain paragraph above): following a chain is not a verdict.
  *     `priority` is one of `Control`, `RealTime`, `InteractiveHigh`,
  *     `InteractiveLow`, `DataHigh`, `Data`, `DataLow`, `Background`.
  *
@@ -677,17 +738,22 @@
  *     in the order chains began). The identity names ROWS; it is NOT a
  *     coordinate into the joined buffer, whose offsets stay off this document.
  *     `reason` is filled for `aborted` and `refused`; `chain_id` is `null` for
- *     `refused`, which allocates no chain. `null` on a Fragment read before any
- *     InitAck (`carried_state: fragment_without_resolution`: no router ran)
- *     and on every non-Fragment row. `superseded` is declared and not emitted
- *     today: the router
+ *     `refused`, which allocates no chain. `null` on every non-Fragment row.
+ *     (Until field-document revision 32 it was also `null` on every Fragment of
+ *     a flow read before any InitAck, where no router ran: the router runs on
+ *     those now, and `carried_state: fragment_without_resolution` is the
+ *     fragment that ended a chain as `unresolvable`.) `superseded` is declared
+ *     and not emitted today: the router
  *     reports a restart as `begun` for the new chain, so the stranded chain
  *     ends WITHOUT a row.
  *
  *     `outcome` is one of `begun`, `continued`, `reassembled`, `aborted`,
  *     `refused`. `reason` is one of `out_of_order`, `capacity_overflow`,
- *     `sender_dropped`, `superseded` (with `aborted`) or `peer_quota`,
- *     `pool_exhausted`, `missing_start_marker` (with `refused`).
+ *     `sender_dropped`, `superseded`, `unresolvable` (with `aborted`) or
+ *     `peer_quota`, `pool_exhausted`, `missing_start_marker` (with `refused`).
+ *     `unresolvable` is the router's refusal to judge a step it has no ring for
+ *     and `out_of_order` its verdict on a ring it knows; a flow carries one or
+ *     the other.
  *
  * @values fields outcome
  * @values fields reason
@@ -775,8 +841,10 @@
  *     `Close`, used to read `"negotiated":true` with the capabilities the
  *     fold starts from (`true`), and now reads `false` and `null`. A flow
  *     whose Init pair was seen reads as it always did. How messages are READ
- *     did not move: a flow joined mid-session decodes its Frames, and its
- *     Fragments as `fragment_without_resolution`, exactly as before.
+ *     did not move at that revision: a flow joined mid-session decodes its
+ *     Frames, and read its Fragments as `fragment_without_resolution`, exactly
+ *     as before. The Fragments moved at revision 32 (see the fragment chain
+ *     paragraph above).
  *
  *     Since field-document revision 29 -- WHAT `qos` MEANS. `qos` is `true`
  *     only if BOTH Inits offered QoS. An Init offers it in either of the two
@@ -878,7 +946,7 @@
  *
  * SO THE DOCUMENT CARRIES THE LIST. Its envelope reads
  *
- *     {"document":{"name":"census","revision":17,
+ *     {"document":{"name":"census","revision":18,
  *                  "planes":["exchanges","interests","keyexprs","nodes",
  *                            "payloads"]}, ...}
  *
@@ -924,11 +992,11 @@
  *
  * Every family in `value_families` now carries a `carries` axis:
  *
- *     {"name":"fields","revision":31,"key":"kind","values":[...],
+ *     {"name":"fields","revision":32,"key":"kind","values":[...],
  *      "carries":[{"word":"bits","shapes":[["end","name","start","value"]]},
  *                 {"word":"opaque","shapes":[["end","name","start"]]}, ...]}
  *
- *     {"name":"census","revision":17,"key":"mode","values":[...],
+ *     {"name":"census","revision":18,"key":"mode","values":[...],
  *      "carries":null}
  *
  * `null` is a VALUE here and not an absence: it says the word is a PASSENGER --
@@ -2536,7 +2604,7 @@ int wz_dissect_e2e_open(const char *profile_json, const unsigned char *frame,
  *
  * R2175 -- the document is at REVISION 3, and the fourth key is `value_families`:
  *
- *     "value_families":[{"name":"fields","revision":31,"key":"state",
+ *     "value_families":[{"name":"fields","revision":32,"key":"state",
  *                        "values":["decoded","encoding_mismatch",…]}, …]
  *
  * every key in every document whose VALUE this build draws from a closed set,

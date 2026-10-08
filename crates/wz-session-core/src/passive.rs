@@ -60,7 +60,8 @@ use crate::parse_error::InboundParseError;
 use crate::peer_init_caps::PeerInitCaps;
 #[cfg(feature = "reassembly")]
 use crate::reassembly_dispatch::{
-    Fragment as ReasmFragment, IngestOutcome, ReassemblyConfig, ReassemblyDispatcher,
+    AbortReason, Fragment as ReasmFragment, IngestOutcome, ReassemblyConfig, ReassemblyDispatcher,
+    SnRing,
 };
 use wz_codecs::ext_entry::ExtEntryOwned;
 
@@ -534,7 +535,9 @@ impl FlowContext {
     /// substitute a default: a mask that is too WIDE reads a legitimate
     /// wraparound as a gap, and one too NARROW reads a gap as a wraparound.
     /// Both produce a reassembly verdict that looks decisive and is not, which
-    /// is why this returns an absence rather than a guess.
+    /// is why this returns an absence rather than a guess. The chain router is
+    /// told the absence (`reassembly_dispatch::SnRing::Unknown`) and follows a
+    /// chain on steps of plain `+1` alone.
     pub fn sn_mask(&self) -> Option<u64> {
         self.caps.map(|c| crate::sn::mask_from_res(c.seq_num_res))
     }
@@ -971,6 +974,12 @@ pub enum SnVerdict {
     /// [`Carried::FragmentWithoutResolution`] is not one: a mask too wide
     /// reads a wraparound as a gap and one too narrow reads a gap as a
     /// wraparound. The ordinary cause is a capture that started mid-session.
+    ///
+    /// It stays the word for a Fragment whose chain IS followed without the
+    /// ring. Following a chain says a continuation was the next integer
+    /// (`reassembly_dispatch::SnRing::Unknown`); it does not say the frame
+    /// arrived in order relative to a ring this reader never saw, which is what
+    /// a verdict is.
     WithoutResolution,
     /// The first frame seen on this conduit — a BASELINE, not a judgement.
     /// A reader that started mid-session cannot know what came before it.
@@ -1114,13 +1123,24 @@ pub enum Carried {
         /// The joined payload — the buffer `batch.spans` index into.
         joined: alloc::vec::Vec<u8>,
     },
-    /// A fragment arrived before this observer saw an InitAck, so the
-    /// session's SN resolution is unknown and no chain can be tracked.
+    /// A fragment that ended its chain because only the session's SN
+    /// resolution could have judged the step to it, and this observer never saw
+    /// an InitAck: the router's [`AbortReason::Unresolvable`], the fragment that
+    /// could not be placed.
     ///
     /// Not a guess with a default mask: a mask that is too wide reads a
     /// wraparound as a gap and one too narrow reads a gap as a wraparound, so
     /// a defaulted verdict would look decisive and be arbitrary. The ordinary
-    /// cause is a capture that started mid-session.
+    /// cause is a capture that started mid-session and then lost a fragment, or
+    /// crossed the seam of its ring.
+    ///
+    /// A fragment of a session with no resolution is NOT this by default. Its
+    /// chain is followed without the ring — a step of plain `+1` is consecutive
+    /// on every ring ([`crate::reassembly_dispatch::SnRing`]) — so the fragments
+    /// of such a chain are [`Self::Fragment`] and its close is
+    /// [`Self::Reassembled`], as on a session whose ring is known. Only the
+    /// fragment that broke the chain is this, and the chain's earlier fragments
+    /// keep the outcomes they were given when they arrived.
     #[cfg(feature = "reassembly")]
     FragmentWithoutResolution,
 }
@@ -2615,9 +2635,15 @@ impl PassiveSession {
                 markers,
                 ..
             } => {
-                let Some(sn_mask) = self.context.sn_mask() else {
-                    return Carried::FragmentWithoutResolution;
-                };
+                // The ring is the InitAck's. Without one the router is told so
+                // and follows a chain on plain `+1` steps, which are consecutive
+                // on every ring; it is never handed a guessed mask (see
+                // [`FlowContext::sn_mask`]). The step it cannot judge ends the
+                // chain as `Unresolvable`, below.
+                let ring = self
+                    .context
+                    .sn_mask()
+                    .map_or(SnRing::Unknown, SnRing::Known);
                 let markers_on = self.context.fragmentation_markers();
                 let idx = usize::from(direction == Direction::B);
                 // Read BEFORE the router is borrowed: the clock and the router
@@ -2629,7 +2655,7 @@ impl PassiveSession {
                 // The peer key is the DIRECTION, one byte, because an observer
                 // holds one router per half-session (see the field docs).
                 let key = [idx as u8];
-                let outcome = router.ingest(
+                let outcome = router.ingest_in_ring(
                     ReasmFragment {
                         peer_key: &key,
                         reliable: *reliable,
@@ -2639,7 +2665,7 @@ impl PassiveSession {
                         priority: *priority,
                         markers: *markers,
                     },
-                    sn_mask,
+                    ring,
                     // R311y594 — the observation instant, which an observer
                     // takes from the capture rather than from the host (see
                     // `now_ms`). Stays 0 for a caller that never advances it,
@@ -2661,6 +2687,11 @@ impl PassiveSession {
                             batch: b,
                             joined: bytes,
                         }
+                    }
+                    // The one outcome that is not a chain's progress or a loss
+                    // the router judged: the fragment it could not place.
+                    None if outcome == IngestOutcome::Aborted(AbortReason::Unresolvable) => {
+                        Carried::FragmentWithoutResolution
                     }
                     None => Carried::Fragment(outcome),
                 }
@@ -3937,8 +3968,9 @@ mod tests {
     /// `Close`, and its messages are read exactly as they were.
     ///
     /// The second half is the one a fix to the reported value could break: the
-    /// Frame is a batch under the universal framing, and a Fragment is read as
-    /// `FragmentWithoutResolution` because no InitAck gave the ring a size.
+    /// Frame is a batch under the universal framing, and a Fragment is routed to
+    /// the chain router with no ring (no InitAck gave it a size), where it begins
+    /// a chain.
     #[test]
     fn a_session_joined_after_its_handshake_stays_unnegotiated_to_its_close() {
         let mut s = PassiveSession::new();
@@ -3962,7 +3994,7 @@ mod tests {
         {
             let fragment = s.next_frame(Direction::B).expect("the Fragment decodes");
             assert!(
-                matches!(fragment.carried, Carried::FragmentWithoutResolution),
+                matches!(fragment.carried, Carried::Fragment(IngestOutcome::Begun)),
                 "{:?}",
                 fragment.carried
             );
@@ -4573,17 +4605,52 @@ mod tests {
     /// is unknown and the observer says so instead of picking a mask. A
     /// defaulted mask reads a wraparound as a gap or the reverse, and either
     /// verdict would look decisive.
+    ///
+    /// The chain router is told the ring is unknown, so a chain is followed on
+    /// steps of plain `+1` and a step it cannot judge ends it: the fragment that
+    /// showed the step is the one `FragmentWithoutResolution`. The sequence-number
+    /// verdict on every one of them stays `without_resolution`.
     #[cfg(feature = "reassembly")]
     #[test]
-    fn a_fragment_without_an_observed_initack_is_named_not_guessed() {
+    fn a_fragment_without_an_observed_initack_is_followed_or_named_never_guessed() {
         let mut s = PassiveSession::new();
         assert_eq!(s.context().sn_mask(), None);
-        s.push(Direction::A, &framed(&fragment_wire(0, true, b"x"), 2));
-        let f = s.next_frame(Direction::A).expect("fragment");
+        for (sn, more) in [(0u64, true), (1, true), (3, true)] {
+            s.push(Direction::A, &framed(&fragment_wire(sn, more, b"x"), 2));
+        }
+        let begun = s.next_frame(Direction::A).expect("fragment");
         assert!(
-            matches!(f.carried, Carried::FragmentWithoutResolution),
+            matches!(begun.carried, Carried::Fragment(IngestOutcome::Begun)),
             "got {:?}",
-            f.carried
+            begun.carried
+        );
+        let continued = s.next_frame(Direction::A).expect("fragment");
+        assert!(
+            matches!(
+                continued.carried,
+                Carried::Fragment(IngestOutcome::Continued)
+            ),
+            "a step of one needs no ring: {:?}",
+            continued.carried
+        );
+        let ended = s.next_frame(Direction::A).expect("fragment");
+        assert!(
+            matches!(ended.carried, Carried::FragmentWithoutResolution),
+            "a step of two is one only a ring could judge: {:?}",
+            ended.carried
+        );
+        for f in [&begun, &continued, &ended] {
+            assert_eq!(
+                f.sn_verdict,
+                Some(SnVerdict::WithoutResolution),
+                "following a chain is not a verdict on the sequence number"
+            );
+        }
+        assert_eq!(s.sn_accounting(Direction::A).without_resolution, 3);
+        assert_eq!(
+            s.context().sn_mask(),
+            None,
+            "and the ring is still not guessed"
         );
     }
 

@@ -2282,7 +2282,7 @@ impl<'a> CaptureReport<'a> {
             let ch = t.chains();
             if !ch.is_quiet() {
                 s.push_str(&format!(
-                    "  CHAINS: {} begun, {} continued, {} completed; aborted {} out-of-order, {} over capacity, {} sender-dropped, {} superseded; refused {} peer-quota, {} pool-exhausted, {} no-start-marker\n",
+                    "  CHAINS: {} begun, {} continued, {} completed; aborted {} out-of-order, {} over capacity, {} sender-dropped, {} superseded, {} unresolvable; refused {} peer-quota, {} pool-exhausted, {} no-start-marker\n",
                     ch.begun,
                     ch.continued,
                     ch.completed,
@@ -2290,6 +2290,7 @@ impl<'a> CaptureReport<'a> {
                     ch.aborted_capacity_overflow,
                     ch.aborted_sender_dropped,
                     ch.aborted_superseded,
+                    ch.aborted_unresolvable,
                     ch.refused_peer_quota,
                     ch.refused_pool_exhausted,
                     ch.refused_missing_start_marker
@@ -2726,6 +2727,7 @@ fn chains_json(c: crate::agg::FragmentChains, s: &mut String) {
         aborted_capacity_overflow,
         aborted_sender_dropped,
         aborted_superseded,
+        aborted_unresolvable,
         refused_peer_quota,
         refused_pool_exhausted,
         refused_missing_start_marker,
@@ -2736,6 +2738,7 @@ fn chains_json(c: crate::agg::FragmentChains, s: &mut String) {
          \"aborted_capacity_overflow\":{aborted_capacity_overflow},\
          \"aborted_sender_dropped\":{aborted_sender_dropped},\
          \"aborted_superseded\":{aborted_superseded},\
+         \"aborted_unresolvable\":{aborted_unresolvable},\
          \"refused_peer_quota\":{refused_peer_quota},\
          \"refused_pool_exhausted\":{refused_pool_exhausted},\
          \"refused_missing_start_marker\":{refused_missing_start_marker}}}"

@@ -2019,6 +2019,11 @@ impl ChainOutcome {
 /// reports a restart as `Begun` for the NEW chain and the stranded one ends
 /// without a row of its own. The word is the router's, and a router that one
 /// day returns it must not reach a consumer under an undeclared word.
+///
+/// `unresolvable` is the router's refusal to judge a step it has no ring for,
+/// and it is not `out_of_order`: that word says the router judged the step on a
+/// ring it knows and found it wrong, and a flow whose handshake the capture
+/// missed has no such ring. The two never appear on one flow.
 #[cfg_attr(not(feature = "reassembly"), allow(dead_code))]
 #[derive(Clone, Copy)]
 enum ChainReason {
@@ -2029,6 +2034,7 @@ enum ChainReason {
     PoolExhausted,
     SenderDropped,
     Superseded,
+    Unresolvable,
 }
 
 impl ChainReason {
@@ -2040,6 +2046,7 @@ impl ChainReason {
             AbortReason::CapacityOverflow => Self::CapacityOverflow,
             AbortReason::SenderDropped => Self::SenderDropped,
             AbortReason::Superseded => Self::Superseded,
+            AbortReason::Unresolvable => Self::Unresolvable,
         }
     }
 
@@ -2062,6 +2069,7 @@ impl ChainReason {
             Self::PoolExhausted => "pool_exhausted",
             Self::SenderDropped => "sender_dropped",
             Self::Superseded => "superseded",
+            Self::Unresolvable => "unresolvable",
         }
     }
 
@@ -2074,7 +2082,8 @@ impl ChainReason {
             Self::PeerQuota => Self::PoolExhausted,
             Self::PoolExhausted => Self::SenderDropped,
             Self::SenderDropped => Self::Superseded,
-            Self::Superseded => return None,
+            Self::Superseded => Self::Unresolvable,
+            Self::Unresolvable => return None,
         })
     }
 
@@ -2138,7 +2147,7 @@ impl ChainIds {
     fn chain_row(&mut self, frame: &PassiveFrame) -> Option<ChainRow> {
         use wz_session_core::inbound::InboundFrame;
         use wz_session_core::passive::Carried;
-        use wz_session_core::reassembly_dispatch::IngestOutcome;
+        use wz_session_core::reassembly_dispatch::{AbortReason, IngestOutcome};
         let Ok(InboundFrame::Fragment {
             reliable, priority, ..
         }) = &frame.frame
@@ -2150,13 +2159,15 @@ impl ChainIds {
             Carried::Fragment(outcome) => *outcome,
             // The joiner handed a payload back on this fragment.
             Carried::Reassembled { .. } => IngestOutcome::Reassembled,
-            // No SN resolution, so no router ran: there is no outcome to name.
+            // The router ran on a flow with no SN resolution and ended the
+            // chain this fragment continued, because only the ring could have
+            // judged the step. The session reports that as a variant of its own
+            // (the fragment could not be placed), so the outcome is named here
+            // rather than carried: it is the one the variant stands for.
+            Carried::FragmentWithoutResolution => IngestOutcome::Aborted(AbortReason::Unresolvable),
             // `Undecompressible` is a whole lz4 batch no message was read out
-            // of, so no fragment reached the router either.
-            Carried::FragmentWithoutResolution
-            | Carried::Undecompressible
-            | Carried::Nothing
-            | Carried::Batch(_) => return None,
+            // of, so no fragment reached the router.
+            Carried::Undecompressible | Carried::Nothing | Carried::Batch(_) => return None,
         };
         Some(match outcome {
             IngestOutcome::Begun => ChainRow {
@@ -5186,15 +5197,17 @@ mod tests {
     }
 
     /// A CAPTURE THAT JOINED AFTER THE HANDSHAKE and ended in a `Close` reports
-    /// no negotiation either, AND READS ITS MESSAGES EXACTLY AS BEFORE.
+    /// no negotiation either, AND READS ITS FRAMES EXACTLY AS BEFORE.
     ///
     /// Two halves, because only the first moved. The context is the reported
     /// half: no Init was seen, so `negotiated` is `false` and the capabilities
     /// are `null` even though the session closed. The messages are the read
-    /// half: the Frames and Fragments of a session joined mid-way decode under
-    /// the universal framing and an unknown resolution, as they did, and the
-    /// second assertion is what holds that line (a Fragment read before an
-    /// InitAck is `fragment_without_resolution`, never a guess at a mask).
+    /// half: the Frames of a session joined mid-way decode under the universal
+    /// framing, as they did, and the second assertion is what holds that line.
+    /// The two Fragments are consecutive, so their chain is followed with no ring
+    /// (never a guess at a mask) and closes: `fragment`, then `reassembled`. They
+    /// read `fragment_without_resolution` before the router was told the ring was
+    /// unknown rather than skipped.
     #[test]
     fn a_capture_joined_after_the_handshake_reports_no_negotiation_and_reads_as_before() {
         let frame = |sn: u8| {
@@ -5239,15 +5252,15 @@ mod tests {
             alloc::vec![CLOSED_WITHOUT_A_HANDSHAKE],
             "{doc}"
         );
-        // In capture order. Both fragments say they were read without a
-        // resolution; the Frames and the rest read as they always did.
+        // In capture order. The Frames and the rest read as they always did; the
+        // chain the two Fragments make is followed and closes.
         assert_eq!(
             rows(&doc),
             alloc::vec![
                 ("Frame", "batch"),
                 ("Frame", "batch"),
-                ("Fragment", "fragment_without_resolution"),
-                ("Fragment", "fragment_without_resolution"),
+                ("Fragment", "fragment"),
+                ("Fragment", "reassembled"),
                 ("KeepAlive", "nothing"),
                 ("Close", "nothing"),
                 ("Close", "nothing"),

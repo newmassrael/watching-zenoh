@@ -8457,9 +8457,10 @@ mod tests {
              honest form -- the byte carries no answer: {blind}"
         );
         assert!(
-            outcome.complete,
-            "and the verdict still says whole, which is exactly why a caller must \
-             be able to correct it"
+            !outcome.complete,
+            "a lone Fragment opens a chain no later fragment closes, and the \
+             verdict says so instead of calling the capture whole: {:?}",
+            outcome.reasons
         );
 
         // THE ROUND: the caller supplies what the capture cannot.

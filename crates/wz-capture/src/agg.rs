@@ -1245,10 +1245,17 @@ pub struct ThroughputGaps {
     /// Counted separately from a halt because the loss is total rather than
     /// partial — the bytes were there and are unreadable.
     pub undecompressible_batches: usize,
-    /// Fragments that arrived before this observer saw an InitAck, so no chain
-    /// could be tracked and their eventual batch never existed
-    /// ([`Carried::FragmentWithoutResolution`]). The ordinary cause is a
-    /// capture that started mid-session.
+    /// Fragments the chain router could not place for want of the SN
+    /// resolution ([`Carried::FragmentWithoutResolution`]): this observer never
+    /// saw an InitAck, and the step from the chain's last fragment to this one
+    /// was not a plain `+1`, which only the ring could have judged. Each is the
+    /// END of one chain, and the staged bytes of that chain never became a batch.
+    ///
+    /// It counts only those fragments. A capture that started mid-session and
+    /// whose chains advance by `+1` reassembles them, and they are not here;
+    /// the chains it did not reassemble are counted once each, at the fragment
+    /// that broke them. [`FragmentChains::aborted_unresolvable`] is the same
+    /// number read as chains.
     pub unresolvable_fragments: usize,
 }
 
@@ -1322,6 +1329,15 @@ pub struct FragmentChains {
     /// Aborted because a `0x2 First` arrived while a chain was already open on
     /// the same key: the sender restarted and the staged prefix is stranded.
     pub aborted_superseded: usize,
+    /// Aborted because a continuation's SN was not the last plus one and this
+    /// observer never saw the InitAck, so it could not say whether the step was
+    /// a wrap or a loss.
+    ///
+    /// Counted apart from [`Self::aborted_out_of_order`] because the two are
+    /// different claims: that one is the router's judgement on a ring it knows,
+    /// and this is its refusal to judge on one it does not. A flow reports one
+    /// or the other and never both.
+    pub aborted_unresolvable: usize,
     /// A chain start was refused because the peer already holds its quota of
     /// open chains.
     pub refused_peer_quota: usize,
@@ -1369,6 +1385,7 @@ impl FragmentChains {
             }
             IngestOutcome::Aborted(AbortReason::SenderDropped) => self.aborted_sender_dropped += 1,
             IngestOutcome::Aborted(AbortReason::Superseded) => self.aborted_superseded += 1,
+            IngestOutcome::Aborted(AbortReason::Unresolvable) => self.aborted_unresolvable += 1,
             IngestOutcome::Refused(RefuseReason::PeerQuota) => self.refused_peer_quota += 1,
             IngestOutcome::Refused(RefuseReason::PoolExhausted) => self.refused_pool_exhausted += 1,
             IngestOutcome::Refused(RefuseReason::MissingStartMarker) => {
@@ -1505,8 +1522,19 @@ impl ThroughputTable {
                 // catch-all so a new `Carried` variant fails to compile here
                 // instead of joining the silent set.
                 Carried::Undecompressible => self.gaps.undecompressible_batches += 1,
+                // The fragment the router could not place for want of the ring
+                // is both: a batch this table lost (the chain it ended never
+                // became one) and the chain's ending, which the chain tally
+                // names by its reason.
                 #[cfg(feature = "reassembly")]
-                Carried::FragmentWithoutResolution => self.gaps.unresolvable_fragments += 1,
+                Carried::FragmentWithoutResolution => {
+                    self.gaps.unresolvable_fragments += 1;
+                    self.chains.fold(
+                        wz_session_core::reassembly_dispatch::IngestOutcome::Aborted(
+                            wz_session_core::reassembly_dispatch::AbortReason::Unresolvable,
+                        ),
+                    );
+                }
                 // `Nothing` is a handshake / keepalive / unfeatured frame and
                 // `Fragment` is a chain still in progress: neither is a batch
                 // this table lost, so neither is a gap.
@@ -4301,9 +4329,11 @@ pub(crate) mod tests {
     ///
     /// The observer saw no InitAck, so it has no SN resolution and refuses to
     /// pick a mask (one too wide reads a wraparound as a gap, one too narrow the
-    /// reverse). The chain never becomes a batch. What must not happen is the
-    /// table staying CLEAN: a reader summing rows from a capture that began in
-    /// the middle would otherwise be told the total is the whole of it.
+    /// reverse). The fixture's chain skips a sequence number, the step only a
+    /// ring could judge (a chain whose steps are all `+1` is followed without
+    /// one), so the chain ends and never becomes a batch. What must not happen
+    /// is the table staying CLEAN: a reader summing rows from a capture that
+    /// began in the middle would otherwise be told the total is the whole of it.
     #[cfg(feature = "reassembly")]
     #[test]
     fn a_fragment_with_no_resolution_is_counted_rather_than_dropped() {

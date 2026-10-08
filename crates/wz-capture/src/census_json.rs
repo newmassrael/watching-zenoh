@@ -889,6 +889,7 @@ fn push_chains(c: &crate::agg::FragmentChains, out: &mut String) {
         aborted_capacity_overflow,
         aborted_sender_dropped,
         aborted_superseded,
+        aborted_unresolvable,
         refused_peer_quota,
         refused_pool_exhausted,
         refused_missing_start_marker,
@@ -900,6 +901,7 @@ fn push_chains(c: &crate::agg::FragmentChains, out: &mut String) {
          \"aborted_capacity_overflow\":{aborted_capacity_overflow},\
          \"aborted_sender_dropped\":{aborted_sender_dropped},\
          \"aborted_superseded\":{aborted_superseded},\
+         \"aborted_unresolvable\":{aborted_unresolvable},\
          \"refused_peer_quota\":{refused_peer_quota},\
          \"refused_pool_exhausted\":{refused_pool_exhausted},\
          \"refused_missing_start_marker\":{refused_missing_start_marker}}}"

@@ -189,14 +189,20 @@ cargo test -p wz-capture --features compression,dissect --lib compressed_capture
 ## `fragmented-push-midsession-and-established.pcap`
 
 One fragmented message, seen twice: in a flow whose handshake the capture
-**missed**, and in a flow whose handshake it holds. It is the specimen of the
-field document's `carried_state: "fragment_without_resolution"`, and its control.
+**missed**, and in a flow whose handshake it holds. It is the specimen of a
+fragment chain read by a reader with no InitAck, and its control.
 
-The word says a Fragment was seen before the reader saw the session's InitAck, so
-the sequence-number resolution is unknown and the reader will not guess a mask (a
-wrap and a gap look the same without it). It is the state of a capture that began
-in the middle of a session. A fragment in a session whose handshake IS in the
-capture reads `fragment` and, when its chain completes, `reassembled`.
+A reader that never saw the session's InitAck does not know the size of the
+sequence-number ring, and will not guess a mask (a wrap and a gap look the same
+without it). The ring decides one thing about a chain, whether a step from one
+fragment to the next is consecutive across a wrap, and a step of plain `+1` is
+consecutive on every ring. So that reader follows a chain whose steps are all
+`+1`, and the message in this file is reassembled in both flows. Only a step it
+cannot judge ends a chain, and the fragment that showed it reads
+`carried_state: "fragment_without_resolution"`; no tracked capture holds one yet,
+and the tests that build them are in
+`crates/wz-capture/src/unresolved_chain_tests.rs`. Before the router was told the
+ring was unknown, flow A read `fragment_without_resolution` on both fragments.
 
 | | |
 |---|---|
@@ -206,22 +212,26 @@ capture reads `fragment` and, when its chain completes, `reassembled`.
 
 | packets | flow | what they are | read as |
 |---|---|---|---|
-| 0, 1 | A: `10.0.0.1:43210` → `10.0.0.2:7447` | the two fragments of the message, no handshake | `fragment_without_resolution`, twice |
+| 0 | A: `10.0.0.1:43210` → `10.0.0.2:7447` | the first fragment of the message, no handshake | `fragment`, sequence verdict `without_resolution` |
+| 1 | A | the second fragment | `reassembled`, its record a `Push`, verdict `without_resolution` |
 | 2–5 | B: `10.0.0.3:43211` ↔ `10.0.0.4:7447` | Init, InitAck, Open, OpenAck | handshake rows |
-| 6 | B | the **same** first fragment, byte for byte | `fragment` |
-| 7 | B | the **same** second fragment, byte for byte | `reassembled`, its record a `Push` |
+| 6 | B | the **same** first fragment, byte for byte | `fragment`, verdict `baseline` |
+| 7 | B | the **same** second fragment, byte for byte | `reassembled`, its record a `Push`, verdict `continuous` |
 
-The two flows differ in exactly one fact, the handshake, which is the condition
-the word names. The message is a literal `Push` of a 120-byte value, cut at its
-middle; the fragments are reliable, the first with the more flag, sequence
-numbers 0 and 1.
+The two flows differ in exactly one fact, the handshake, and in what follows
+from it and nothing else: the sequence-number verdict, which a reader that missed
+the handshake may not claim. The message is a literal `Push` of a 120-byte value,
+cut at its middle; the fragments are reliable, the first with the more flag,
+sequence numbers 0 and 1.
 
 ### What a reader reports on it
 
-* the field document has `fragment_without_resolution` on 2 rows, `fragment` on 1
-  and `reassembled` on 1;
-* the census document's `unresolvable_fragments` is **2**, the number of rows that
-  say `fragment_without_resolution` (it counts frames, not chains).
+* the field document has `fragment` on 2 rows and `reassembled` on 2, and none
+  that say `fragment_without_resolution`;
+* its `sn.verdict` is `without_resolution` on both rows of flow A, and
+  `baseline` then `continuous` on flow B;
+* the census document's `unresolvable_fragments` is **0**, and the keyexpr the
+  message was published on counts **2** puts, one for each flow.
 
 ### Where the bytes came from
 
@@ -237,7 +247,7 @@ container is `wz_capture::pcap::write`. Three tests in
 |---|---|
 | `the_tracked_midsession_capture_is_byte_identical_to_what_wz_emits` | the whole file equals what the encoders emit |
 | `the_tracked_midsession_capture_differs_between_its_flows_only_in_the_handshake` | the two flows carry the same fragment datagrams, flow A holds nothing but them, flow B's four datagrams before them are the handshake, and the two pieces join to the encoded message |
-| `the_tracked_midsession_capture_reaches_the_consumer_surface` | one flow reads `fragment_without_resolution` twice, the other `fragment` then `reassembled` with a `Push`, and the counts above agree |
+| `the_tracked_midsession_capture_reaches_the_consumer_surface` | both flows read `fragment` then `reassembled` with a `Push`, the one with no ring says `without_resolution` and the other reads its own verdicts, and the counts above agree |
 
 ### Regenerating
 

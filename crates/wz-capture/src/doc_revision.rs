@@ -830,6 +830,40 @@ pub const DOCUMENT_HISTORY: &[DocumentShape] = &[
         planes: CENSUS_R6_PLANES,
         carries: CENSUS_R15_CARRIES,
     },
+    // A CAPTURE THAT BEGAN AFTER ITS HANDSHAKE HAS ITS FRAGMENT CHAINS FOLLOWED.
+    //
+    // ONE KEY IS ADDED and nothing retires: `fragment_chains` gains
+    // `aborted_unresolvable`. Families, planes and carries are revision 15's: the
+    // new cell is a count, as its eight siblings are.
+    //
+    // VALUES MOVE UNDER STATIONARY KEYS, for a flow whose InitAck the capture
+    // never held (the ring is unknown, `context.sn_mask` is `null` in the field
+    // document). Such a flow used to hand every Fragment back as unplaceable and
+    // route none to the chain router. Its chains are followed now, on steps of
+    // plain `+1`, which are consecutive on every ring; a step only a ring could
+    // judge ends the chain as `unresolvable`. So for those flows:
+    //
+    //   - `unresolvable_fragments` (in `exchanges.unread`, `payloads.gaps`,
+    //     `keyexprs.gaps` and the throughput gaps) counts the fragments that ENDED
+    //     a chain this way and no longer every fragment of the flow;
+    //   - `fragment_chains.begun`, `continued` and `completed` count the chains,
+    //     which were all zero for the flow;
+    //   - `keyexprs` totals, the exchange plane and the payload plane include the
+    //     messages those chains reassembled, so `puts` and the rest rise by what
+    //     the flow always carried and no plane could see.
+    //
+    // A flow whose InitAck WAS held reads as it did. A consumer pinned to 17 that
+    // cached `unresolvable_fragments` as "every fragment of a flow that missed its
+    // handshake" now holds a figure that is the number of broken chains.
+    DocumentShape {
+        document: CENSUS,
+        revision: 18,
+        keys: CENSUS_R18_KEYS,
+        retiring: &[],
+        families: CENSUS_R15_FAMILIES,
+        planes: CENSUS_R6_PLANES,
+        carries: CENSUS_R15_CARRIES,
+    },
     DocumentShape {
         document: FIELDS,
         revision: 1,
@@ -1754,6 +1788,56 @@ pub const DOCUMENT_HISTORY: &[DocumentShape] = &[
         keys: FIELDS_R31_KEYS,
         retiring: &[],
         families: FIELDS_R20_FAMILIES,
+        planes: &[],
+        carries: FIELDS_R28_CARRIES,
+    },
+    // A FRAGMENT CHAIN IS FOLLOWED ON A FLOW WHOSE HANDSHAKE THE CAPTURE MISSED,
+    // AND ONE NEW WORD SAYS WHEN IT CANNOT BE.
+    //
+    // NO KEY NAME MOVES and nothing retires: this row reads revision 28's key
+    // set, carries and planes unchanged. ONE WORD ENTERS A FAMILY (`reason` gains
+    // `unresolvable`), and VALUES MOVE under stationary keys, the class revisions
+    // 17, 18, 21, 26, 27 and 30 set the precedent for. So, as for those, THIS ROW
+    // IS THE WHOLE NOTICE a consumer gets for the values.
+    //
+    // The flow in question is one whose `context.sn_mask` is `null`: the capture
+    // held no InitAck, so the size of the sequence-number ring is unknown. Such a
+    // flow used to read every Fragment as `carried_state:
+    // fragment_without_resolution` with `chain: null`, and reassembled nothing.
+    // The ring decides only whether a step from one fragment to the next is
+    // consecutive ACROSS A WRAP, and a step of plain `+1` is consecutive on every
+    // ring, so the flow's chains are followed now:
+    //
+    //   - a fragment of a chain that proceeds reads `carried_state: fragment`
+    //     with `chain` `begun` or `continued`, and the closing one `reassembled`,
+    //     its `above_transport.fields` and `carried` read as they do behind a
+    //     handshake;
+    //   - a fragment whose step from the chain's last was not `+1` (a wrap, a
+    //     gap, a repeat: only a ring could tell them apart) ENDS the chain. It
+    //     keeps `carried_state: fragment_without_resolution`, and its `chain` is
+    //     `{outcome: aborted, reason: unresolvable, chain_id: the chain's}`. The
+    //     chain's earlier fragments keep what they read when they arrived, and the
+    //     fragments after the ending start fresh, as the marker rules say: with no
+    //     Init seen the markers are not enforced, so a fragment that finds no chain
+    //     open begins one, whatever it carries;
+    //   - `sn.verdict` is UNCHANGED and stays `without_resolution`: following a
+    //     chain says a continuation was the next integer, and not that it
+    //     arrived in order relative to a ring the reader never saw;
+    //   - `reassembly.abandoned_at_end` and the other counts of that group now
+    //     include the chains of such a flow that were still open.
+    //
+    // A flow whose InitAck WAS held reads as it did, except that the new word is
+    // never one it can produce: a step the ring judges is `out_of_order`.
+    //
+    // A consumer pinned to 31 that took `fragment_without_resolution` to mean
+    // "this flow missed its handshake" must read `context.sn_mask` for that: the
+    // word now says one fragment could not be placed.
+    DocumentShape {
+        document: FIELDS,
+        revision: 32,
+        keys: FIELDS_R32_KEYS,
+        retiring: &[],
+        families: FIELDS_R32_FAMILIES,
         planes: &[],
         carries: FIELDS_R28_CARRIES,
     },
@@ -9579,6 +9663,110 @@ pub const FIELDS_R30_KEYS: &[&str] = FIELDS_R28_KEYS;
 /// row says which cells.
 pub const FIELDS_R31_KEYS: &[&str] = FIELDS_R30_KEYS;
 
+/// The field document's key set at revision 32: revision 31's, by name.
+///
+/// IDENTICAL, and aliased for [`FIELDS_R27_KEYS`]' reason. What moved is one WORD
+/// of the `reason` family ([`CHAIN_REASON_R32`]) and the VALUES a flow without an
+/// InitAck reads under `carried_state`, `chain` and the `above_transport` of a
+/// closing fragment, all under keys this set already holds. The revision number
+/// is the whole notice for the values, and the row says which cells.
+pub const FIELDS_R32_KEYS: &[&str] = FIELDS_R31_KEYS;
+
+/// What `chain.reason` says at revision 32 — revision 14's PLUS `unresolvable`.
+///
+/// The router's `AbortReason` and `RefuseReason` together, since `outcome` beside
+/// it says which. `unresolvable` is the router's refusal to judge a step it has no
+/// ring for, with `aborted`; `out_of_order` stays the judgement on a ring it
+/// knows, and a flow reports one or the other.
+///
+/// ⚠ `superseded` is still declared although no row carries it, for the reason
+/// [`CHAIN_REASON_R14`] gives.
+pub const CHAIN_REASON_R32: &[&str] = &[
+    "capacity_overflow",
+    "missing_start_marker",
+    "out_of_order",
+    "peer_quota",
+    "pool_exhausted",
+    "sender_dropped",
+    "superseded",
+    "unresolvable",
+];
+
+/// The value families the field document declares at revision 32 — revision 20's,
+/// with `reason` read from [`CHAIN_REASON_R32`]. Written out in full, for the
+/// reason [`ValueFamily::values`] gives: a list that read the earlier one would
+/// widen with it, and then the revision would never have to move.
+pub const FIELDS_R32_FAMILIES: &[ValueFamily] = &[
+    ValueFamily {
+        key: "carried_state",
+        values: CARRIED_STATE_R12,
+    },
+    ValueFamily {
+        key: "direction",
+        values: DIRECTION_FIELDS_R2,
+    },
+    ValueFamily {
+        key: "family",
+        values: ADDR_FAMILY_R15,
+    },
+    ValueFamily {
+        key: "keyexpr_cause",
+        values: UNRESOLVED_CAUSE_R11,
+    },
+    ValueFamily {
+        key: "kind",
+        values: FIELD_VALUE_KIND_R17,
+    },
+    ValueFamily {
+        key: "link",
+        values: LINK_KIND_R7,
+    },
+    ValueFamily {
+        key: "message",
+        values: MESSAGE_R10,
+    },
+    ValueFamily {
+        key: "offset_space",
+        values: ANCHOR_SPACE_FIELDS_R2,
+    },
+    ValueFamily {
+        key: "outcome",
+        values: CHAIN_OUTCOME_R14,
+    },
+    ValueFamily {
+        key: "phase",
+        values: SESSION_PHASE_R14,
+    },
+    ValueFamily {
+        key: "priority",
+        values: PRIORITY_R14,
+    },
+    ValueFamily {
+        key: "reason",
+        values: CHAIN_REASON_R32,
+    },
+    ValueFamily {
+        key: "selected",
+        values: SELECTED_R13,
+    },
+    ValueFamily {
+        key: "state",
+        values: PAYLOAD_STATE_R2,
+    },
+    ValueFamily {
+        key: "under",
+        values: REFUSED_UNDER_R2,
+    },
+    ValueFamily {
+        key: "verdict",
+        values: SN_VERDICT_R14,
+    },
+    ValueFamily {
+        key: "wrong",
+        values: MISBOUND_R2,
+    },
+];
+
 /// What each field-document family's WORD decides at revision 28 — revision 20's,
 /// with `state` changed: see [`PAYLOAD_STATE_CARRIES_R28`]. Written out in full,
 /// because a slice cannot be spliced in a `const` and an alias would make the
@@ -9741,6 +9929,190 @@ pub const CENSUS_R17_KEYS: &[&str] = &[
     "aborted_out_of_order",
     "aborted_sender_dropped",
     "aborted_superseded",
+    "addr",
+    "admissible",
+    "aggregate",
+    "anchor_intervals",
+    "anchors_exact",
+    "answers",
+    "answers_in_scope",
+    "asked_at",
+    "asker",
+    "asks",
+    "at",
+    "at_most_bytes",
+    "attributed_bytes",
+    "b",
+    "b_to_a",
+    "begun",
+    "by_kind",
+    "bytes",
+    "cancelled_at",
+    "caps",
+    "cause",
+    "children",
+    "closed_at",
+    "completed",
+    "completion",
+    "consistent",
+    "continued",
+    "contradictions",
+    "count",
+    "declaration",
+    "declarations",
+    "declared",
+    "declared_at",
+    "declarer",
+    "declarer_zid",
+    "dels",
+    "descriptors",
+    "document",
+    "dropped_by_limits",
+    "elsewhere",
+    "errs",
+    "evidence",
+    "exchanges",
+    "family",
+    "first",
+    "first_anchor",
+    "first_reply",
+    "flow",
+    "flows",
+    "fragment_chains",
+    "frames",
+    "frames_per_flow",
+    "gaps",
+    "halted_batches",
+    "hello",
+    "high",
+    "id",
+    "inadmissible",
+    "init",
+    "interests",
+    "join",
+    "judged",
+    "keyexpr",
+    "keyexprs",
+    "keys",
+    "kind",
+    "last",
+    "last_anchor",
+    "link",
+    "links",
+    "liveliness_token",
+    "locators",
+    "low",
+    "matched",
+    "max_flows_per_table",
+    "max_ms",
+    "max_ns",
+    "max_scout_askers",
+    "mean_ms",
+    "mean_ns",
+    "messages",
+    "min_ms",
+    "min_ns",
+    "mismatched",
+    "mode",
+    "name",
+    "narrowed_by_selector",
+    "nodes",
+    "non_monotonic",
+    "not_as_declared",
+    "offset_space",
+    "orphan_answers",
+    "orphan_responses",
+    "orphan_withdrawals",
+    "payload_bytes",
+    "payload_bytes_ceiling",
+    "payloads",
+    "planes",
+    "port",
+    "prefix",
+    "puts",
+    "queries",
+    "queryable",
+    "queryables",
+    "reason",
+    "records",
+    "references",
+    "refused_missing_start_marker",
+    "refused_peer_quota",
+    "refused_pool_exhausted",
+    "rejected",
+    "replies",
+    "requests",
+    "restricted",
+    "revision",
+    "rows",
+    "scout",
+    "scout_askers",
+    "scouting",
+    "selection",
+    "share_bp",
+    "silent",
+    "skipped",
+    "skipped_packets",
+    "solicited_by",
+    "source_ahead_of_observer",
+    "space",
+    "stream_bytes",
+    "stream_bytes_per_direction",
+    "subscriber",
+    "subscribers",
+    "subtrees",
+    "tokens",
+    "total_ms",
+    "total_ns",
+    "total_payload_bytes",
+    "totals",
+    "unanswered",
+    "unattributed_bytes",
+    "unattributed_records",
+    "unattributed_requests",
+    "unclaimed",
+    "unclaimed_exact",
+    "unclosed",
+    "undecidable",
+    "undecided",
+    "undeclarations",
+    "undecompressible_batches",
+    "unjudged_answers",
+    "unknown_ids",
+    "unlocatable_records",
+    "unmeasured_payloads",
+    "unparsed_bytes",
+    "unread",
+    "unresolvable_fragments",
+    "unresolved",
+    "unresolved_declarations",
+    "unresolved_records",
+    "unsized_payloads",
+    "unstamped",
+    "walked_records",
+    "whatami",
+    "why",
+    "wire_bytes",
+    "withdrawn_at",
+    "zid",
+];
+
+/// The census document's key set at revision 18: revision 17's PLUS
+/// `aborted_unresolvable`, in `fragment_chains`. An ADDITION, so revision 17 has
+/// nothing to retire.
+///
+/// Written out rather than aliased, as revisions 15 and 17 were and for their
+/// reason: this set moves, and an alias would claim it did not. It is the key
+/// `fragment_chains` writes for a chain that ended because the sequence-number
+/// ring was not known; see the row for the values that moved beside it.
+pub const CENSUS_R18_KEYS: &[&str] = &[
+    "a",
+    "a_to_b",
+    "aborted_capacity_overflow",
+    "aborted_out_of_order",
+    "aborted_sender_dropped",
+    "aborted_superseded",
+    "aborted_unresolvable",
     "addr",
     "admissible",
     "aggregate",
@@ -11481,7 +11853,10 @@ mod tests {
             // moves and nothing retires; and a record behind a hole in a TCP
             // stream began to be timed by its own packet, which moves values
             // under stationary keys.
-            (CENSUS, 17u32),
+            // To 18 when a flow with no InitAck had its chains followed:
+            // `fragment_chains` gained `aborted_unresolvable`, and the
+            // counts of such a flow moved under stationary keys.
+            (CENSUS, 18u32),
             // R2175 (open-debt item 552) — the field document moved to 2 when
             // its PAYLOAD PLANE joined the pin (fifteen keys revision 1 had
             // never covered) and its first three value families were declared.
@@ -11581,7 +11956,10 @@ mod tests {
             // term judges a row at), and a stream flow's `messages` came out in
             // capture order: values and an order under stationary keys, so this
             // entry is the notice.
-            (FIELDS, 31),
+            // To 32 when a flow with no InitAck had its fragment chains
+            // followed: values under stationary keys, and `chain.reason`
+            // gained the word `unresolvable`.
+            (FIELDS, 32),
             // R2121 (open-debt item 460) — the summary moved to 2 when it
             // gained `inert_counters`; R2122 (item 238) to 3 when its
             // `framing` group stopped disagreeing with the capture report's.

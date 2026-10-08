@@ -529,9 +529,10 @@ pub fn multilink_declaration_behind_a_gap(fill: GapFill, reference_in_a_chain: b
 /// record is handed back so the comparison needs no knowledge of the split.
 ///
 /// The handshake is the whole four-message exchange rather than
-/// `handshake`'s two Inits: a fragment chain is tracked only once an InitAck
-/// has fixed the SN resolution, and without one every fragment reads
-/// `fragment_without_resolution` and nothing is ever joined.
+/// `handshake`'s two Inits: the chain is read on the ring the InitAck fixed,
+/// the way a consumer reads a session whose handshake the capture holds. A
+/// capture with no InitAck follows a chain only on steps of plain `+1`, and
+/// says so in the field document's `context.sn_mask` being `null`.
 pub fn completed_chain_capture() -> (Vec<u8>, Vec<u8>) {
     let record = push(sender_space(0, Some("chain/joined")), &[7u8; 8]);
     (chain_sequence_capture(1), record)
@@ -613,9 +614,29 @@ fn fragment_wire(sn: u8, more: bool, piece: &[u8]) -> Vec<u8> {
 /// chain is two fragments (`begun`, then `reassembled`) with the next chain's
 /// sequence numbers continuing the reliable channel's.
 pub fn chain_sequence_capture(chains: usize) -> Vec<u8> {
+    chains_after(full_handshake(), chains)
+}
+
+/// [`completed_chain_capture`] with the handshake taken off the front: a capture
+/// that began after it, so the reader never sees the InitAck and does not know
+/// the sequence-number ring.
+///
+/// The same record, split the same way across two fragments whose numbers are
+/// consecutive. A reader with no ring follows a chain on steps of plain `+1`, so
+/// the chain completes and the record is joined as it is behind a handshake: the
+/// fixture a consumer grades a mid-session capture against, with the record handed
+/// back so the comparison needs no knowledge of the split.
+pub fn completed_chain_capture_after_the_handshake() -> (Vec<u8>, Vec<u8>) {
+    let record = push(sender_space(0, Some("chain/joined")), &[7u8; 8]);
+    (chains_after(Vec::new(), 1), record)
+}
+
+/// `rows` (the messages a capture holds before its fragments, each with whether
+/// the lower endpoint sent it), then `chains` completed two-fragment chains of
+/// the record [`completed_chain_capture`] carries, as the pcap file.
+fn chains_after(mut rows: Vec<(bool, Vec<u8>)>, chains: usize) -> Vec<u8> {
     let record = push(sender_space(0, Some("chain/joined")), &[7u8; 8]);
     let split = record.len() / 2;
-    let mut rows = full_handshake();
     for chain in 0..chains {
         let sn = (2 * chain) as u8;
         rows.push((true, fragment_wire(sn, true, &record[..split])));

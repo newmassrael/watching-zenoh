@@ -4,28 +4,34 @@
 //! R3012 (open-debt item 809) — the tracked capture of one fragmented message
 //! seen two ways, and the oracle that keeps it a function of the encoders.
 //!
-//! # What the word means, and what a sample has to be
+//! # What a capture that began after the handshake reads, and what a sample has to be
 //!
-//! `carried_state: "fragment_without_resolution"` says a Fragment was seen before
-//! this reader saw the session's InitAck, so the sequence-number resolution is
-//! unknown and the reader will not guess a mask: a wrap and a gap look the same
-//! without it. It is the state of a capture that started in the middle of a
-//! session. It is not "a fragment", and a consumer that has never been shown the
-//! same fragments read WITH a resolution cannot tell the word from the ordinary
-//! `fragment`.
+//! A reader that never saw the session's InitAck does not know the size of the
+//! sequence-number ring, and will not guess a mask: a wrap and a gap look the
+//! same without it. The ring decides one thing about a fragment chain, whether a
+//! step from one fragment to the next is consecutive across a wrap, and a step of
+//! plain `+1` is consecutive on every ring. So that reader follows a chain whose
+//! steps are all `+1` and reassembles it; only a step it cannot judge ends the
+//! chain, with `carried_state: "fragment_without_resolution"` on the fragment that
+//! showed it (the `unresolved_chain_tests` module builds those). Until the router
+//! was told the ring was unknown, this file's flow A read `fragment_without_resolution`
+//! on both fragments, and it was the specimen of that word.
 //!
-//! So the file carries ONE message in two flows, and the fragments are the same
+//! The file carries ONE message in two flows, and the fragments are the same
 //! bytes in both:
 //!
 //! * flow A (`10.0.0.1:43210` to `10.0.0.2:7447`) has the two fragments and no
-//!   handshake at all: both read `fragment_without_resolution`;
+//!   handshake at all: the first reads `fragment` (a chain begun) and the second
+//!   `reassembled`, and the sequence-number verdict on both is
+//!   `without_resolution`, the ring being unknown;
 //! * flow B (`10.0.0.3:43211` to `10.0.0.4:7447`) has the four handshake
 //!   datagrams and then the same two fragments: the first reads `fragment` (a
 //!   chain still open) and the second `reassembled` (the chain completed and its
-//!   message was read).
+//!   message was read), with a verdict read on the ring the InitAck fixed.
 //!
-//! The two flows differ in exactly one fact, the handshake, which is the
-//! condition the word names.
+//! The two flows differ in exactly one fact, the handshake, and in what follows
+//! from it and nothing else: the sequence-number verdict, which a reader that
+//! missed the handshake may not claim.
 //!
 //! # How the bytes are made, and how that is CHECKED
 //!
@@ -249,16 +255,20 @@ fn the_tracked_midsession_capture_differs_between_its_flows_only_in_the_handshak
 }
 
 /// The tracked file reaches the surface a consumer reads, and the same two
-/// fragments come out as the two different states.
+/// fragments read alike in both flows, but for the sequence-number verdict.
 ///
-/// The census's `unresolvable_fragments` counts the fragments that read
-/// `fragment_without_resolution`, and is checked against the field rows' own word
-/// rather than against a number written beside it.
+/// Both flows read a chain begun and then a `Push` reassembled, the flow with no
+/// handshake included. What differs is the ring: the flow with the handshake has
+/// one, and the verdicts on its fragments are read on it, while the flow without
+/// has none and says `without_resolution` on both. No fragment is unplaceable, and
+/// the census's `unresolvable_fragments` agrees with the field rows' own word
+/// rather than with a number written beside it.
 #[cfg(feature = "dissect")]
 #[test]
 fn the_tracked_midsession_capture_reaches_the_consumer_surface() {
     use wz_session_core::network_message::NetworkMessage;
     use wz_session_core::passive::Carried;
+    use wz_session_core::reassembly_dispatch::IngestOutcome;
 
     let d = crate::Dissection::from_capture(TRACKED).expect("the tracked capture dissects");
     let flows = d.datagram_flows();
@@ -267,8 +277,8 @@ fn the_tracked_midsession_capture_reaches_the_consumer_surface() {
         2,
         "two flows: one without a handshake, one with"
     );
-    let mut unresolved_flows = 0;
-    let mut established_flows = 0;
+    let mut flows_without_a_ring = 0;
+    let mut flows_with_a_ring = 0;
     for flow in flows {
         let carried: Vec<&Carried> = flow
             .frames
@@ -277,11 +287,12 @@ fn the_tracked_midsession_capture_reaches_the_consumer_surface() {
             .map(|f| &f.carried)
             .collect();
         match carried.as_slice() {
-            [Carried::FragmentWithoutResolution, Carried::FragmentWithoutResolution] => {
-                unresolved_flows += 1;
-            }
-            [Carried::Fragment(_), Carried::Reassembled { batch, .. }] => {
-                established_flows += 1;
+            [Carried::Fragment(IngestOutcome::Begun), Carried::Reassembled { batch, .. }] => {
+                if flow.session.context().sn_mask().is_some() {
+                    flows_with_a_ring += 1;
+                } else {
+                    flows_without_a_ring += 1;
+                }
                 let messages: Vec<&NetworkMessage> = batch.records().map(|(m, _)| m).collect();
                 assert!(
                     matches!(messages.as_slice(), [NetworkMessage::Push(_)]),
@@ -292,7 +303,7 @@ fn the_tracked_midsession_capture_reaches_the_consumer_surface() {
         }
     }
     assert_eq!(
-        (unresolved_flows, established_flows),
+        (flows_without_a_ring, flows_with_a_ring),
         (1, 1),
         "one flow of each kind"
     );
@@ -308,13 +319,35 @@ fn the_tracked_midsession_capture_reaches_the_consumer_surface() {
             rows("fragment"),
             rows("reassembled")
         ),
-        (2, 1, 1),
+        (0, 2, 2),
         "{doc}"
+    );
+    let verdicts = |word: &str| {
+        doc.matches(&alloc::format!("\"verdict\":\"{word}\""))
+            .count()
+    };
+    assert_eq!(
+        (
+            verdicts("without_resolution"),
+            verdicts("baseline"),
+            verdicts("continuous")
+        ),
+        (2, 1, 1),
+        "the flow with no ring claims no verdict, the flow with one reads its own: {doc}"
     );
 
     let census = crate::census_json::census_json(&d);
     assert!(
-        census.contains("\"unresolvable_fragments\":2"),
-        "the census counts the two fragments the rows name: {census}"
+        census.contains("\"unresolvable_fragments\":0"),
+        "the census counts the fragments the rows name, which are none: {census}"
+    );
+    let puts: usize = crate::agg::aggregate(&d)
+        .rows()
+        .iter()
+        .map(|r| r.totals().puts)
+        .sum();
+    assert_eq!(
+        puts, 2,
+        "both flows carried the Push, the one with no ring too"
     );
 }

@@ -2204,8 +2204,14 @@ int main(void) {
      * truncating each end to its millisecond; four keys arrive, nothing
      * retires, and the `*_ns` cells take the integer line. A record behind a
      * hole in a TCP stream is timed by its own packet and no longer by the
-     * capture's end, which moves values under stationary keys. */
-    revisioned[0].revision = 17;
+     * capture's end, which moves values under stationary keys.
+     * 18: a flow whose capture holds no InitAck has its fragment chains
+     * followed, so its `unresolvable_fragments` counts the fragments that ended
+     * a chain and no longer every fragment, its `fragment_chains` counts the
+     * chains and the messages they reassembled reach the keyexpr, exchange and
+     * payload planes. `fragment_chains` gains `aborted_unresolvable`; counts
+     * move under stationary keys; nothing retires. */
+    revisioned[0].revision = 18;
     revisioned[0].doc = NULL;
     rc = wz_dissect_pcap_census(pcap, sizeof pcap, &revisioned[0].doc);
     CHECK(rc == WZ_DISSECT_OK, "census rc=%d", rc);
@@ -2355,8 +2361,15 @@ int main(void) {
      * stream flow's `messages` come out in capture order (the packet of each
      * row's first byte, then its place in it) where they came out in the order
      * the session decoded them. Values and an order move under stationary
-     * keys; no key name moves; nothing retires. */
-    revisioned[2].revision = 31;
+     * keys; no key name moves; nothing retires.
+     * 32: a flow whose capture holds no InitAck (`context.sn_mask` is `null`)
+     * has its fragment chains followed on steps of plain `+1`: its Fragments
+     * read `fragment` and `reassembled` with a `chain`, where they read
+     * `fragment_without_resolution` with `chain` `null`; a step only the ring
+     * could judge ends the chain with `chain.reason` `unresolvable`, a new word
+     * of the `reason` family. `sn.verdict` is unchanged. Values move under
+     * stationary keys; no key name moves; nothing retires. */
+    revisioned[2].revision = 32;
     revisioned[2].doc = NULL;
     rc = wz_dissect_pcap_fields(pcap, sizeof pcap, 0, &revisioned[2].doc);
     CHECK(rc == WZ_DISSECT_OK, "fields rc=%d", rc);
