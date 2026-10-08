@@ -2824,6 +2824,34 @@ pub(crate) mod tests {
         )
     }
 
+    /// A query whose VALUE ext body is `encoding || payload` with NOTHING between
+    /// the two, which is how upstream writes it.
+    ///
+    /// `commons/zenoh-codec/src/zenoh/mod.rs` @
+    /// `// Don't write the length since it is already included in the header`:
+    /// the ext's own length bounds the payload, and the encoding is followed
+    /// directly by its bytes. `query_value_body` above writes a length between
+    /// them, which the classifier tolerates and the field walker reads as the
+    /// first byte of the payload; a fixture that asks the field walker where the
+    /// payload IS needs the layout that can only put it one place.
+    ///
+    /// `dissect`: the field document's tests are its only caller.
+    #[cfg(feature = "dissect")]
+    pub(crate) fn request_query_valued_as_upstream_writes_it(
+        rid: u64,
+        keyexpr: Wireexpr<'static>,
+        payload: &[u8],
+    ) -> Vec<u8> {
+        let mut body = wz_codecs::encoding::Encoding {
+            packed_id: 0,
+            schema_len: None,
+            schema: None,
+        }
+        .encode_to_vec();
+        body.extend_from_slice(payload);
+        request_query_ext(rid, keyexpr, Some(body))
+    }
+
     pub(crate) fn request_query_truncated(rid: u64, keyexpr: Wireexpr<'static>) -> Vec<u8> {
         use wz_codecs::SceSink;
         let mut body = wz_codecs::encoding::Encoding {

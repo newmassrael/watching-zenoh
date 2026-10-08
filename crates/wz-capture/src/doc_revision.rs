@@ -1515,6 +1515,58 @@ pub const DOCUMENT_HISTORY: &[DocumentShape] = &[
         planes: &[],
         carries: FIELDS_R20_CARRIES,
     },
+    // A MESSAGE SAYS WHAT ITS PAYLOAD IS, THE ROW SAYS WHICH RULE WON, AND A
+    // DECODED FIELD SAYS WHERE IT IS NESTED.
+    //
+    // Revision 28 ADDS eight keys and retires nothing; no word moves in any
+    // family. It is one row for three changes because they answer one consumer
+    // (a payload editor) and none of them could be read from the document before.
+    //
+    // 1. `payload` arrives on EVERY entry of a `carried` array and of an
+    // `above_transport.carried` array, beside `keyexpr`, whatever the caller
+    // declared. It is `null` for a message with no payload slot, and otherwise
+    // `{start, end, encoding, shm_descriptor}`: the slot's byte range in the
+    // entry's own coordinates (the joined buffer's, for a chain's record), the
+    // encoding the sample itself carried spelled as zenoh prints one
+    // (`application/json`, `application/protobuf;pkg.Msg`, `unknown(N)` for an id
+    // this build's table lacks) or `null` when the message carried none, and
+    // whether the range holds an SHM descriptor and so is an address and not
+    // content. Before this a reader that declared no format found the range only
+    // inside the field tree and the encoding only inside its `encoding` group. It
+    // sits on the ENTRY and not the row because a `Frame` batches several
+    // messages that need not share a key or a payload; a transport message's own
+    // entry says `null`.
+    //
+    // 2. `matched_rule` arrives in a `payload_decode` object of four states
+    // (`decoded`, `refused`, `encoding_mismatch`, `no_rule`) and in each entry of
+    // `payload_mapping` and `payload_refusals`: `{index, pattern}`, the rule that
+    // won, or `null` in `no_rule` where none did. `index` counts the FORMAT RULES
+    // from 0 in the order they are tried, which is the order they were declared;
+    // `declarations_diagnose` reports the same number as `rule_index` on the line
+    // that installed the rule. Two overlapping rules of one format gave
+    // byte-identical rows in either order, so a row could not say which won.
+    //
+    // 3. Each entry of `payload_decode.fields` gains `depth` (0 for a top-level
+    // field) and `parent` (the `path` of the field it is nested in, `null` at
+    // depth 0), so a consumer drawing a tree never reads the path grammar.
+    //
+    // THE KEY SET GROWS BY `depth`, `encoding`, `index`, `matched_rule`, `parent`,
+    // `pattern`, `payload` and `shm_descriptor`. The `state` family's companions
+    // change with it: see `PAYLOAD_STATE_CARRIES_R28`.
+    //
+    // A consumer pinned to 27 loses nothing: every change is an addition to an
+    // object it reads by name. `payload` is derived from the message's bytes and
+    // is as fixed as `start` and `end`; `matched_rule` and the field cells sit
+    // under `payload_decode` and move with it (`REVISABLE_ROW_CELLS`).
+    DocumentShape {
+        document: FIELDS,
+        revision: 28,
+        keys: FIELDS_R28_KEYS,
+        retiring: &[],
+        families: FIELDS_R20_FAMILIES,
+        planes: &[],
+        carries: FIELDS_R28_CARRIES,
+    },
     DocumentShape {
         document: SUMMARY,
         revision: 1,
@@ -1713,6 +1765,63 @@ pub const DOCUMENT_HISTORY: &[DocumentShape] = &[
         planes: &[],
         carries: &[],
     },
+    // WHICH KIND EACH LINE WAS READ AS, AND WHERE A KEY STOPS BEING ONE.
+    //
+    // Revision 2 ADDS seven keys and retires nothing.
+    //
+    // The success branch gains `lines`: one object per non-blank line of the
+    // text, in the order of the text, with `line` (the index the failure branch
+    // already uses), `kind` (`format_rule`, `field_name` or `format_definition`)
+    // and, for the two kinds that have a key, `pattern`: the key expression AS
+    // READ, with the dialect's quoting removed. A `format_rule` also carries
+    // `rule_index`, its position among the format rules from 0 in the order they
+    // are tried, which is the `index` of the `matched_rule` a field row reports
+    // when this rule wins. Before this a line was `installed: 1` whichever kind
+    // it was, so `a\=b=protobuf` (a rule about the key `a=b`) and `a:b=protobuf`
+    // (the name `protobuf` for path `b` under `a`) read the same.
+    //
+    // The failure branch gains, when the line's KEY is not a key expression,
+    // `pattern` (the key as read), `chunk`, `offset` and `reason`: the first
+    // place it stops being one, by the validator the C drop-in's constructors ask
+    // as well, in the words of the `keyexpr_diagnose` document. `message` still
+    // carries the sentence. A line refused for any other reason carries none of
+    // the four.
+    //
+    // ⚠ A VALUE MOVES under keys that do not: a key expression the dialect
+    // reader used to accept (`demo//pose`, `a?b`, `**x`, `a*b`, `demo/**/**`,
+    // `demo/$*/pose`) is now refused, and so is a key carrying a bare `:` or
+    // `=`. A text that installed before may not now.
+    //
+    // A consumer pinned to 1 loses nothing it was reading: every change is an
+    // addition, and `installed` is still the count.
+    DocumentShape {
+        document: DECLARATIONS_DIAGNOSE,
+        revision: 2,
+        keys: DECLARATIONS_DIAGNOSE_R2_KEYS,
+        retiring: &[],
+        families: DECLARATIONS_DIAGNOSE_R2_FAMILIES,
+        planes: &[],
+        carries: DECLARATIONS_DIAGNOSE_R2_CARRIES,
+    },
+    // A SINGLE KEY EXPRESSION, JUDGED, WITHOUT BUILDING A DECLARATION LINE.
+    //
+    // A document of its own because it is the verdict of a door of its own
+    // (`wz_dissect_keyexpr_diagnose`), as `selector_diagnose` is for a selector.
+    // `{ok:true}`, or `{ok:false, chunk, offset, reason, message}`: the first
+    // place the text stops being a key expression, counted in `/`-delimited
+    // chunks from 0 and in BYTES, with `reason` drawn from a closed set of
+    // upstream's own eight words. The judgement is the validator every consumer
+    // of a key expression in this library asks, so the verdict here and the
+    // declaration door's and the C drop-in's cannot differ.
+    DocumentShape {
+        document: KEYEXPR_DIAGNOSE,
+        revision: 1,
+        keys: KEYEXPR_DIAGNOSE_R1_KEYS,
+        retiring: &[],
+        families: KEYEXPR_DIAGNOSE_R1_FAMILIES,
+        planes: &[],
+        carries: KEYEXPR_DIAGNOSE_R1_CARRIES,
+    },
     // The declaration text a `.proto` schema comes to, or the place the schema
     // was refused.
     //
@@ -1904,6 +2013,8 @@ pub const READABLE_SURFACES: &str = "readable_surfaces";
 pub const SELECTOR_DIAGNOSE: &str = "selector_diagnose";
 /// A declaration block's verdict (`wz_dissect_declarations_diagnose`).
 pub const DECLARATIONS_DIAGNOSE: &str = "declarations_diagnose";
+/// One key expression's verdict (`wz_dissect_keyexpr_diagnose`).
+pub const KEYEXPR_DIAGNOSE: &str = "keyexpr_diagnose";
 /// The declarations a `.proto` schema comes to, or why it was refused
 /// (`wz_dissect_declarations_from_proto`).
 pub const DECLARATIONS_FROM_PROTO: &str = "declarations_from_proto";
@@ -8269,6 +8380,108 @@ pub const DECLARATIONS_DIAGNOSE_R1_KEYS: &[&str] = &[
     "text",
 ];
 
+/// The declaration verdict's key set at revision 2: revision 1's PLUS `chunk`,
+/// `kind`, `lines`, `offset`, `pattern`, `reason` and `rule_index`, over every
+/// shape the document takes (a success with a line of each kind, a failure at a
+/// key and a failure anywhere else).
+pub const DECLARATIONS_DIAGNOSE_R2_KEYS: &[&str] = &[
+    "chunk",
+    "document",
+    "installed",
+    "kind",
+    "line",
+    "lines",
+    "message",
+    "name",
+    "offset",
+    "ok",
+    "pattern",
+    "reason",
+    "revision",
+    "rule_index",
+    "text",
+];
+
+/// What a `lines[].kind` says at declaration-verdict revision 2: the words of
+/// `DeclarationKind`, spelled out rather than read from it for the reason
+/// [`ValueFamily::values`] gives.
+pub const DECLARATION_KIND_R2: &[&str] = &["field_name", "format_definition", "format_rule"];
+
+/// What a `reason` says at declaration-verdict revision 2, and at
+/// key-expression-verdict revision 1: upstream's eight refusals of a key
+/// expression, in the words of `KeyexprFault::word`. Spelled out rather than
+/// read from it, so the vocabulary cannot widen without a revision.
+pub const KEYEXPR_FAULT_R1: &[&str] = &[
+    "dollar_after_dollar",
+    "double_star_after_double_star",
+    "empty_chunk",
+    "lone_dollar_star",
+    "sharp_or_question_mark",
+    "single_star_after_double_star",
+    "star_in_chunk",
+    "unbound_dollar",
+];
+
+/// The declaration verdict's value families at revision 2.
+pub const DECLARATIONS_DIAGNOSE_R2_FAMILIES: &[ValueFamily] = &[
+    ValueFamily {
+        key: "kind",
+        values: DECLARATION_KIND_R2,
+    },
+    ValueFamily {
+        key: "reason",
+        values: KEYEXPR_FAULT_R1,
+    },
+];
+
+/// What the declaration verdict's words decide at revision 2.
+///
+/// `kind` is a DISCRIMINANT: a line with no key carries no `pattern`, and only a
+/// rule carries `rule_index`. `reason` is a PASSENGER: every one of its eight
+/// words arrives with the same `chunk`, `offset` and `pattern`.
+pub const DECLARATIONS_DIAGNOSE_R2_CARRIES: &[KeyCarries] = &[
+    KeyCarries {
+        key: "kind",
+        shape: CarriesShape::Discriminant(&[
+            WordCarries {
+                word: "field_name",
+                shapes: &[&["line", "pattern"]],
+            },
+            WordCarries {
+                word: "format_definition",
+                shapes: &[&["line"]],
+            },
+            WordCarries {
+                word: "format_rule",
+                shapes: &[&["line", "pattern", "rule_index"]],
+            },
+        ]),
+    },
+    KeyCarries {
+        key: "reason",
+        shape: CarriesShape::Passenger,
+    },
+];
+
+/// The key-expression verdict's key set at revision 1, over BOTH branches:
+/// `{ok:true}` and `{ok:false,chunk,offset,reason,message}`.
+pub const KEYEXPR_DIAGNOSE_R1_KEYS: &[&str] = &[
+    "chunk", "document", "message", "name", "offset", "ok", "reason", "revision",
+];
+
+/// The key-expression verdict's value families at revision 1: the reason.
+pub const KEYEXPR_DIAGNOSE_R1_FAMILIES: &[ValueFamily] = &[ValueFamily {
+    key: "reason",
+    values: KEYEXPR_FAULT_R1,
+}];
+
+/// A `reason` is a PASSENGER: every word arrives with the same `chunk`,
+/// `offset` and `message`.
+pub const KEYEXPR_DIAGNOSE_R1_CARRIES: &[KeyCarries] = &[KeyCarries {
+    key: "reason",
+    shape: CarriesShape::Passenger,
+}];
+
 /// The `.proto` declaration document's key set at revision 1, over BOTH
 /// branches: `{ok:true,declarations,installed}` and
 /// `{ok:false,file,line,column,reason,message}`.
@@ -8922,6 +9135,264 @@ pub const FIELDS_R25_KEYS: &[&str] = &[
 /// the same, and so is what each word carries. The revision number is the whole
 /// notice, as it was for [`CENSUS_R9_KEYS`], and the row says which rows.
 pub const FIELDS_R27_KEYS: &[&str] = FIELDS_R25_KEYS;
+
+/// The field document's key set at revision 28: revision 27's (which are
+/// revision 25's) PLUS `depth`, `encoding`, `index`, `matched_rule`, `parent`,
+/// `pattern`, `payload` and `shm_descriptor`.
+///
+/// Written out rather than aliased, on the rule revision 7 set for a key that
+/// arrives.
+///
+/// MEASURED: `the_field_documents_key_set_is_pinned` prints what the document
+/// emits and this is that printout.
+pub const FIELDS_R28_KEYS: &[&str] = &[
+    "abandoned_at_end",
+    "abandoned_on_eviction",
+    "above_transport",
+    "addr",
+    "after_seq",
+    "anchor",
+    "batch_index",
+    "batch_size",
+    "caps",
+    "capture_reread",
+    "carried",
+    "carried_state",
+    "chain",
+    "chain_id",
+    "close_seen",
+    "compression",
+    "conduit",
+    "context",
+    "datagram_flows",
+    "declaration_checked",
+    "declared",
+    "depth",
+    "descriptor_bytes",
+    "despite_encoding",
+    "direction",
+    "document",
+    "dropped_by_limits",
+    "dst",
+    "encoding",
+    "end",
+    "example",
+    "expired_chains",
+    "family",
+    "fields",
+    "fin_seen",
+    "first_byte",
+    "flow",
+    "flows",
+    "format",
+    "frame_offset",
+    "frames",
+    "frames_per_flow",
+    "halves",
+    "high",
+    "index",
+    "keyexpr",
+    "keyexpr_cause",
+    "keyexpr_id",
+    "kind",
+    "l2",
+    "last_seen_ts_ns",
+    "lease_ms",
+    "length",
+    "link",
+    "list_id",
+    "low",
+    "lowlatency",
+    "matched_rule",
+    "max_flows_per_table",
+    "max_scout_askers",
+    "message",
+    "message_at",
+    "messages",
+    "missing",
+    "name",
+    "negotiated",
+    "note",
+    "offset_space",
+    "omitted",
+    "outcome",
+    "packet",
+    "parent",
+    "patch",
+    "path",
+    "pattern",
+    "payload",
+    "payload_decode",
+    "payload_mapping",
+    "payload_mapping_counts_exact",
+    "payload_offset",
+    "payload_refusals",
+    "phase",
+    "port",
+    "priority",
+    "qos",
+    "reason",
+    "reassembly",
+    "reliable",
+    "revision",
+    "rst_seen",
+    "samples",
+    "scout_askers",
+    "scouting",
+    "selected",
+    "seq",
+    "shm_descriptor",
+    "shown",
+    "skipped",
+    "skipped_packets",
+    "sn",
+    "sn_mask",
+    "src",
+    "start",
+    "state",
+    "stream_bytes",
+    "stream_bytes_per_direction",
+    "stream_flows",
+    "through_seq",
+    "under",
+    "value",
+    "verdict",
+    "version",
+    "why",
+    "window",
+    "wrong",
+];
+
+/// What each field-document family's WORD decides at revision 28 — revision 20's,
+/// with `state` changed: see [`PAYLOAD_STATE_CARRIES_R28`]. Written out in full,
+/// because a slice cannot be spliced in a `const` and an alias would make the
+/// revision follow its predecessor.
+pub const FIELDS_R28_CARRIES: &[KeyCarries] = &[
+    KeyCarries {
+        key: "carried_state",
+        shape: CarriesShape::Discriminant(CARRIED_STATE_CARRIES_R12),
+    },
+    KeyCarries {
+        key: "direction",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "family",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "keyexpr_cause",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "kind",
+        shape: CarriesShape::Discriminant(FIELD_VALUE_KIND_CARRIES_R17),
+    },
+    KeyCarries {
+        key: "link",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "message",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "offset_space",
+        shape: CarriesShape::Discriminant(FIELD_OFFSET_SPACE_CARRIES_R19),
+    },
+    KeyCarries {
+        key: "outcome",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "phase",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "priority",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "reason",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "selected",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "state",
+        shape: CarriesShape::Discriminant(PAYLOAD_STATE_CARRIES_R28),
+    },
+    KeyCarries {
+        key: "under",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "verdict",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "wrong",
+        shape: CarriesShape::Passenger,
+    },
+];
+
+/// Every shape each `payload_decode.state` word's object takes, at
+/// field-document revision 28: revision 4's with `matched_rule` beside the four
+/// words that asked the rules.
+///
+/// `decoded`, `encoding_mismatch` and `refused` carry the rule that won, and
+/// `no_rule` carries `null` there: "no rule won" is the answer that state gives
+/// and it is written where the winner is read from. The four states that never
+/// asked the rules (`keyexpr_unresolved`, `no_payload`, `no_rules`,
+/// `not_on_the_wire`) carry nothing new.
+pub const PAYLOAD_STATE_CARRIES_R28: &[WordCarries] = &[
+    WordCarries {
+        word: "decoded",
+        shapes: &[&[
+            "despite_encoding",
+            "fields",
+            "format",
+            "keyexpr",
+            "matched_rule",
+        ]],
+    },
+    WordCarries {
+        word: "encoding_mismatch",
+        shapes: &[&[
+            "declaration_checked",
+            "declared",
+            "format",
+            "keyexpr",
+            "matched_rule",
+        ]],
+    },
+    WordCarries {
+        word: "keyexpr_unresolved",
+        shapes: &[&[]],
+    },
+    WordCarries {
+        word: "no_payload",
+        shapes: &[&[]],
+    },
+    WordCarries {
+        word: "no_rule",
+        shapes: &[&["keyexpr", "matched_rule"]],
+    },
+    WordCarries {
+        word: "no_rules",
+        shapes: &[&[]],
+    },
+    WordCarries {
+        word: "not_on_the_wire",
+        shapes: &[&["descriptor_bytes"]],
+    },
+    WordCarries {
+        word: "refused",
+        shapes: &[&["format", "keyexpr", "matched_rule", "why"]],
+    },
+];
 
 /// The census document's key set at revision 16: revision 15's, by name.
 ///
@@ -10382,7 +10853,10 @@ mod tests {
             // rows that read `unjudged` under every selector (a `Request`, a
             // `ResponseFinal`, a del in a `Push` or a `Reply`): the value moved
             // under stationary keys, so this entry is the notice.
-            (FIELDS, 27),
+            // To 28 when a carried message named its payload slot, a decode
+            // named the rule that won, and a decoded field named its nesting:
+            // eight keys, no word moves and nothing retires.
+            (FIELDS, 28),
             // R2121 (open-debt item 460) — the summary moved to 2 when it
             // gained `inert_counters`; R2122 (item 238) to 3 when its
             // `framing` group stopped disagreeing with the capture report's.
@@ -10403,7 +10877,11 @@ mod tests {
             (READABLE_SURFACES, 5),
             // To 2 when the verdict gained the lexer's `tokens`.
             (SELECTOR_DIAGNOSE, 2),
-            (DECLARATIONS_DIAGNOSE, 1),
+            // To 2 when the success branch named the kind each line was read
+            // as and a refused key named its chunk, byte and reason.
+            (DECLARATIONS_DIAGNOSE, 2),
+            // The verdict on one key expression.
+            (KEYEXPR_DIAGNOSE, 1),
             (DECLARATIONS_FROM_PROTO, 1),
             // A protected frame built and read under a caller's profile.
             (E2E_WRAP, 1),

@@ -31,7 +31,10 @@ use wz_session_core::dissect::{Field, FieldValue};
 use wz_session_core::passive::Direction;
 
 use crate::agg::KeyexprSpaces;
-use crate::payload::formats::{Declaration, DeclarationId, FormatMap, PayloadField, PayloadFormat};
+use crate::payload::formats::{
+    path_depth, path_parent, Declaration, DeclarationId, FormatMap, MatchedRule, PayloadField,
+    PayloadFormat,
+};
 use crate::payload::Encoding;
 
 /// R311y726 — THE DECLARATIONS IN FORCE FOR ONE RUN, and which of them applied.
@@ -57,7 +60,7 @@ pub struct Declarations<'a> {
     used: RefCell<BTreeSet<DeclarationId>>,
     /// R311y875 — the rules that bound the WRONG thing, tallied by the triple
     /// that identifies one misbinding. See [`Self::misbindings`].
-    misbound: RefCell<alloc::collections::BTreeMap<MisbindingKey, usize>>,
+    misbound: RefCell<alloc::collections::BTreeMap<MisbindingKey, (usize, MatchedRule)>>,
     /// Round 2031 (item 300) — THE THIRD FINDING: a decoder that was actually
     /// applied and then REFUSED the bytes, tallied by the pair that identifies
     /// one refusal plus what the publisher had said.
@@ -66,7 +69,7 @@ pub struct Declarations<'a> {
     /// the other. This answers the case where the decode itself failed, which
     /// went out per message and reached no plane at all — in the listing a
     /// reader bounds precisely because it is that long. See [`Self::refusals`].
-    refused: RefCell<alloc::collections::BTreeMap<RefusalKey, (usize, String)>>,
+    refused: RefCell<alloc::collections::BTreeMap<RefusalKey, (usize, String, MatchedRule)>>,
     /// Round 2026 (item 289) — WHAT THE SECOND SCAN COST: how many payloads
     /// [`crate::payload::inspect`] re-walked, and how many bytes it walked.
     ///
@@ -189,6 +192,28 @@ impl<'a> Declarations<'a> {
     /// The format for this keyexpr, RECORDING that the rule applied.
     pub fn for_keyexpr(&self, keyexpr: &str) -> Option<&'a dyn PayloadFormat> {
         let (id, format) = self.map.for_keyexpr(keyexpr)?;
+        self.record_applied(id);
+        Some(format)
+    }
+
+    /// [`Self::for_keyexpr`], saying WHICH rule won.
+    ///
+    /// The rule comes out of the same comparison that picked the format
+    /// ([`FormatMap::matching_rule`]), and the ledger is marked exactly as
+    /// `for_keyexpr` marks it, so a row that names a rule and the list of
+    /// declarations this run never applied cannot disagree about whether it
+    /// fired.
+    pub fn rule_for_keyexpr(&self, keyexpr: &str) -> Option<(MatchedRule, &'a dyn PayloadFormat)> {
+        // Copied out of `self` so the format keeps the map's lifetime, which a
+        // borrow through `self` would shorten to this call's.
+        let map: &'a FormatMap<'a> = self.map;
+        let matched = map.matching_rule(keyexpr)?;
+        self.record_applied(matched.id);
+        Some((matched.rule, matched.format))
+    }
+
+    /// Mark a rule used.
+    fn record_applied(&self, id: DeclarationId) {
         self.used.borrow_mut().insert(id);
         // R2114 (open-debt item 237) — and the DEFINITION the rule resolved
         // through, where there was one. Marking only the rule was measurably
@@ -199,7 +224,6 @@ impl<'a> Declarations<'a> {
         if let Some(definition) = self.map.definition_of(id) {
             self.used.borrow_mut().insert(definition);
         }
-        Some(format)
     }
 
     /// The declared name for this path, RECORDING that the declaration applied.
@@ -242,6 +266,11 @@ impl<'a> Declarations<'a> {
     /// rule": the subject is the rule, the publisher is noise, and splitting
     /// that row per sender would fragment one finding into several that all say
     /// the same thing about the same rule.
+    ///
+    /// `rule` is the rule that won for `keyexpr`. It is NOT part of the key and
+    /// cannot split a finding: a rule is a function of the key expression (the
+    /// first that covers it), so every sample under one key reports the same
+    /// one. It rides in the value so the finding can say which rule to fix.
     fn record_misbinding(
         &self,
         keyexpr: &str,
@@ -249,13 +278,13 @@ impl<'a> Declarations<'a> {
         declared: &str,
         wrong: Misbound,
         publisher: Option<&str>,
+        rule: &MatchedRule,
     ) {
         let publisher = match wrong {
             Misbound::Publisher => publisher.map(String::from),
             Misbound::Rule => None,
         };
-        *self
-            .misbound
+        self.misbound
             .borrow_mut()
             .entry((
                 String::from(keyexpr),
@@ -264,7 +293,8 @@ impl<'a> Declarations<'a> {
                 wrong,
                 publisher,
             ))
-            .or_insert(0) += 1;
+            .or_insert_with(|| (0, rule.clone()))
+            .0 += 1;
     }
 
     /// Round 2031 (item 300) — one sample a decoder was APPLIED to and refused,
@@ -275,11 +305,18 @@ impl<'a> Declarations<'a> {
     /// under at once. The first reason seen for a key is kept as the example:
     /// deterministic, cheap, and honest about being ONE sample's reason rather
     /// than a summary of them all.
-    fn record_refusal(&self, keyexpr: &str, format: &str, under: RefusedUnder, why: &str) {
+    fn record_refusal(
+        &self,
+        keyexpr: &str,
+        format: &str,
+        under: RefusedUnder,
+        why: &str,
+        rule: &MatchedRule,
+    ) {
         let mut refused = self.refused.borrow_mut();
         let row = refused
             .entry((String::from(keyexpr), String::from(format), under))
-            .or_insert_with(|| (0, String::from(why)));
+            .or_insert_with(|| (0, String::from(why), rule.clone()));
         row.0 += 1;
     }
 
@@ -321,13 +358,16 @@ impl<'a> Declarations<'a> {
             .refused
             .borrow()
             .iter()
-            .map(|((keyexpr, format, under), (samples, example))| Refusal {
-                keyexpr: keyexpr.clone(),
-                format: format.clone(),
-                under: *under,
-                samples: *samples,
-                example: example.clone(),
-            })
+            .map(
+                |((keyexpr, format, under), (samples, example, rule))| Refusal {
+                    keyexpr: keyexpr.clone(),
+                    format: format.clone(),
+                    under: *under,
+                    samples: *samples,
+                    example: example.clone(),
+                    rule: rule.clone(),
+                },
+            )
             .collect();
         found.sort_by(|a, b| {
             b.samples
@@ -388,13 +428,14 @@ impl<'a> Declarations<'a> {
             .borrow()
             .iter()
             .map(
-                |((keyexpr, format, declared, wrong, publisher), samples)| Misbinding {
+                |((keyexpr, format, declared, wrong, publisher), (samples, rule))| Misbinding {
                     keyexpr: keyexpr.clone(),
                     format: format.clone(),
                     declared: declared.clone(),
                     wrong: *wrong,
                     publisher: publisher.clone(),
                     samples: *samples,
+                    rule: rule.clone(),
                 },
             )
             .collect();
@@ -624,6 +665,12 @@ pub struct Misbinding {
     /// How many WALKED samples carried this triple. A lower bound where a
     /// listing bound bit; see [`Declarations::misbindings`].
     pub samples: usize,
+    /// The rule that decided these samples: the one a `Misbound::Rule` finding
+    /// tells the reader to fix, and the one a `Misbound::Publisher` finding
+    /// applied over the label. The same value every row of this finding reports
+    /// as its `payload_decode.matched_rule`, so overlapping rules of one format
+    /// are told apart here as they are on the rows.
+    pub rule: MatchedRule,
 }
 
 impl Misbinding {
@@ -644,6 +691,9 @@ impl Misbinding {
             samples,
             wrong,
             publisher,
+            // The sentence is the one the command line prints, and it names the
+            // flag to go change; which rule is carried beside it, as data.
+            rule: _,
         } = self;
         // R2062 (item 478) — the sender, when this verdict has one to name.
         //
@@ -693,6 +743,9 @@ pub struct Refusal {
     /// need and a tally must not fragment on — which is why it is here and not
     /// in the key.
     pub example: String,
+    /// The rule whose decoder refused: the same value every row of this finding
+    /// reports as its `payload_decode.matched_rule`. See [`Misbinding::rule`].
+    pub rule: MatchedRule,
 }
 
 impl Refusal {
@@ -708,6 +761,8 @@ impl Refusal {
             under,
             samples,
             example,
+            // As for `Misbinding::sentence`: carried beside the sentence.
+            rule: _,
         } = self;
         match under {
             RefusedUnder::Corroborated => alloc::format!(
@@ -739,6 +794,8 @@ pub fn push_refusal(refusal: &Refusal, out: &mut String) {
     escape_into(&refusal.keyexpr, out);
     out.push_str(",\"format\":");
     escape_into(&refusal.format, out);
+    out.push_str(",\"matched_rule\":");
+    push_matched_rule(&refusal.rule, out);
     out.push_str(",\"under\":\"");
     out.push_str(refusal.under.name());
     out.push_str("\",\"samples\":");
@@ -764,6 +821,8 @@ pub fn push_misbinding(misbinding: &Misbinding, out: &mut String) {
     escape_into(&misbinding.keyexpr, out);
     out.push_str(",\"format\":");
     escape_into(&misbinding.format, out);
+    out.push_str(",\"matched_rule\":");
+    push_matched_rule(&misbinding.rule, out);
     out.push_str(",\"declared\":");
     escape_into(&misbinding.declared, out);
     out.push_str(",\"wrong\":\"");
@@ -908,6 +967,8 @@ pub enum PayloadDecoding {
     Decoded {
         /// The key expression the rule was matched against.
         keyexpr: String,
+        /// Which rule won for it. See [`MatchedRule`] for what its index counts.
+        rule: MatchedRule,
         /// The decoder that read it.
         format: String,
         /// The fields, rebased into the message's coordinate space.
@@ -943,6 +1004,8 @@ pub enum PayloadDecoding {
     EncodingMismatch {
         /// The key expression the rule was matched against.
         keyexpr: String,
+        /// Which rule won for it, and was then vetoed by the label.
+        rule: MatchedRule,
         /// The decoder the rule named.
         format: String,
         /// What the publisher said this payload is.
@@ -979,6 +1042,8 @@ pub enum PayloadDecoding {
     Refused {
         /// The key expression the rule was matched against.
         keyexpr: String,
+        /// Which rule won for it, whose decoder then refused.
+        rule: MatchedRule,
         /// The decoder that refused.
         format: String,
         /// What it said.
@@ -1112,17 +1177,20 @@ impl PayloadDecoding {
             Self::KeyexprUnresolved => Self::NoRule(String::new()),
             Self::NoRule(_) => Self::EncodingMismatch {
                 keyexpr: String::new(),
+                rule: Self::placeholder_rule(),
                 format: String::new(),
                 declared: String::new(),
                 checked: false,
             },
             Self::EncodingMismatch { .. } => Self::Refused {
                 keyexpr: String::new(),
+                rule: Self::placeholder_rule(),
                 format: String::new(),
                 why: String::new(),
             },
             Self::Refused { .. } => Self::Decoded {
                 keyexpr: String::new(),
+                rule: Self::placeholder_rule(),
                 format: String::new(),
                 fields: Vec::new(),
                 despite_encoding: None,
@@ -1136,6 +1204,16 @@ impl PayloadDecoding {
             },
             Self::NotOnTheWire { .. } => return None,
         })
+    }
+
+    /// A rule to fill the field of a variant [`Self::next`] builds: the walk is
+    /// about the discriminant, so the data is furniture, as for the strings.
+    #[cfg(test)]
+    fn placeholder_rule() -> MatchedRule {
+        MatchedRule {
+            index: 0,
+            pattern: String::new(),
+        }
     }
 
     /// Every variant, walked rather than listed. The ORDER is not a contract,
@@ -1623,6 +1701,107 @@ pub fn shm_decoding(field: &Field) -> Option<PayloadDecoding> {
     })
 }
 
+/// What one network message says about its payload slot, WHATEVER THE READER
+/// DECLARED.
+///
+/// # The gap this fills
+///
+/// `payload_decode` exists only for a reader that declared a format, and then
+/// only for the first message of the row that has both a resolved key and
+/// payload bytes. A reader that declared nothing had the payload's byte range
+/// in the field tree and nowhere on the row, and the encoding the sample
+/// carried only inside the tree's `encoding` group, so a payload editor had to
+/// walk the tree to find where to put its cursor. This is the row's own
+/// statement, from the same finders `decode_payload` uses, so the two cannot
+/// disagree about where the payload is.
+///
+/// # What it is asked of
+///
+/// ONE network message: a batched record, or a record of a reassembled chain. A
+/// transport message is not asked: a `Frame` batches several and would be
+/// answered with whichever came first, and a `Fragment`'s `payload` is a piece
+/// of a batch and not application data. The row's `carried` array has an entry
+/// for each message, which is where this is written.
+///
+/// # What the slot is
+///
+/// In order: the `payload` bytes of a message that carries them inline; else, for
+/// the layout a message takes when it names shared memory, the `slices` the
+/// payload is split into (the span of the first SHM descriptor among them when
+/// there is one, the span of all the slices otherwise); else a bare
+/// `shm_descriptor`. `None` for a message with no payload slot at all: a
+/// `Del`, a `Query` with no body, a `Declare`, an `Interest`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PayloadSlot {
+    /// The first byte of the slot, in the same coordinate space as the message's
+    /// own span.
+    pub start: usize,
+    /// One past its last byte.
+    pub end: usize,
+    /// The encoding the sample itself carried, spelled the way zenoh prints one
+    /// (`application/json`, or `application/protobuf;pkg.Msg` with a schema),
+    /// or `None` when the message carried none, which on the wire means the
+    /// default `zenoh/bytes`. An id this build's table does not hold is
+    /// `unknown(N)`, as upstream prints it, and is NOT `None`: a publisher said
+    /// something and calling that "nothing" would erase it.
+    pub encoding: Option<String>,
+    /// Whether the slot holds an SHM descriptor, so the data it stands for is
+    /// elsewhere and the range is an address and not content.
+    pub shm_descriptor: bool,
+}
+
+/// [`PayloadSlot`] of one network message, or `None` when it has no slot.
+pub fn payload_slot(message: &Field) -> Option<PayloadSlot> {
+    let (span, shm_descriptor) = if let Some(slices) = subtree_group(message, "slices") {
+        match subtree_shm_descriptor(slices) {
+            Some(descriptor) => (&descriptor.span, true),
+            None => (&slices.span, false),
+        }
+    } else if let Some(payload) = subtree_payload_bytes(message) {
+        (&payload.span, false)
+    } else {
+        let descriptor = subtree_shm_descriptor(message)?;
+        (&descriptor.span, true)
+    };
+    Some(PayloadSlot {
+        start: span.start,
+        end: span.end,
+        encoding: encoding_text(declared_encoding(message)),
+        shm_descriptor,
+    })
+}
+
+/// The first nested GROUP called `name` anywhere under `field`.
+fn subtree_group<'a>(field: &'a Field, name: &str) -> Option<&'a Field> {
+    if field.name == name && matches!(field.value, FieldValue::Nested(_)) {
+        return Some(field);
+    }
+    if let FieldValue::Nested(children) = &field.value {
+        return children.iter().find_map(|c| subtree_group(c, name));
+    }
+    None
+}
+
+/// A declared encoding as zenoh PRINTS one.
+///
+/// Upstream's spelling is `zenoh/src/api/encoding.rs` @
+/// `impl From<&Encoding> for Cow<'static, str> {`: the table name, `;` and the
+/// schema when there is one, and `unknown(N)` for an id the table lacks.
+/// [`Encoding::Absent`] is `None` and not `zenoh/bytes`: the sample carried no
+/// encoding, and that is a different fact from carrying the default.
+fn encoding_text(declared: Encoding<'_>) -> Option<String> {
+    match declared {
+        Encoding::Absent => None,
+        Encoding::Known {
+            name,
+            schema: Some(schema),
+            ..
+        } => Some(alloc::format!("{name};{schema}")),
+        Encoding::Known { name, .. } => Some(String::from(name)),
+        Encoding::Unknown { id } => Some(alloc::format!("unknown({id})")),
+    }
+}
+
 /// Apply the mapping to one walked message.
 pub fn decode_payload(field: &Field, map: &Declarations<'_>, at: KeyexprAt<'_>) -> PayloadDecoding {
     // R2170 (open-debt item 546) — ASKED BEFORE THE RULES, and the ORDER is the
@@ -1658,7 +1837,9 @@ pub fn decode_payload(field: &Field, map: &Declarations<'_>, at: KeyexprAt<'_>) 
     let FieldValue::Bytes(bytes) = &payload.value else {
         return PayloadDecoding::NoPayload;
     };
-    let Some(format) = map.for_keyexpr(&keyexpr) else {
+    // The rule that won comes out of the comparison that picked the format, so
+    // what the row reports and what decoded it cannot be two different rules.
+    let Some((rule, format)) = map.rule_for_keyexpr(&keyexpr) else {
         return PayloadDecoding::NoRule(keyexpr);
     };
     // R311y873 — the sender's claim is checked BEFORE the decoder runs, which
@@ -1693,9 +1874,11 @@ pub fn decode_payload(field: &Field, map: &Declarations<'_>, at: KeyexprAt<'_>) 
                 &declared,
                 Misbound::Rule,
                 at.publisher,
+                &rule,
             );
             return PayloadDecoding::EncodingMismatch {
                 keyexpr,
+                rule,
                 format: String::from(format.name()),
                 declared,
                 checked,
@@ -1708,6 +1891,7 @@ pub fn decode_payload(field: &Field, map: &Declarations<'_>, at: KeyexprAt<'_>) 
                 &declared,
                 Misbound::Publisher,
                 at.publisher,
+                &rule,
             );
             // Round 2031 (item 300) — a refusal AFTER this is the arm where
             // both claims are wrong, and until this round the misbinding above
@@ -1737,6 +1921,7 @@ pub fn decode_payload(field: &Field, map: &Declarations<'_>, at: KeyexprAt<'_>) 
             }
             PayloadDecoding::Decoded {
                 keyexpr,
+                rule,
                 format: format.name().to_string(),
                 fields,
                 despite_encoding,
@@ -1749,9 +1934,10 @@ pub fn decode_payload(field: &Field, map: &Declarations<'_>, at: KeyexprAt<'_>) 
             // went out per message until this round and reached no plane at
             // all, which on a busy topic is one row per sample in a listing a
             // reader bounds precisely because it is that long.
-            map.record_refusal(&keyexpr, format.name(), under, &why);
+            map.record_refusal(&keyexpr, format.name(), under, &why, &rule);
             PayloadDecoding::Refused {
                 keyexpr,
+                rule,
                 format: format.name().to_string(),
                 why,
             }
@@ -1814,10 +2000,14 @@ pub fn push_decoding(decoding: &PayloadDecoding, out: &mut String) {
             open(out);
             out.push_str(",\"keyexpr\":");
             escape_into(keyexpr, out);
-            out.push('}');
+            // `null`, and not an absent key: this is the one state that asked
+            // the rules and got no answer, and "no rule won" is a fact the
+            // consumer is owed in the same place it reads the winner from.
+            out.push_str(",\"matched_rule\":null}");
         }
         PayloadDecoding::EncodingMismatch {
             keyexpr,
+            rule,
             format,
             declared,
             checked,
@@ -1825,6 +2015,8 @@ pub fn push_decoding(decoding: &PayloadDecoding, out: &mut String) {
             open(out);
             out.push_str(",\"keyexpr\":");
             escape_into(keyexpr, out);
+            out.push_str(",\"matched_rule\":");
+            push_matched_rule(rule, out);
             out.push_str(",\"format\":");
             escape_into(format, out);
             out.push_str(",\"declared\":");
@@ -1840,12 +2032,15 @@ pub fn push_decoding(decoding: &PayloadDecoding, out: &mut String) {
         }
         PayloadDecoding::Refused {
             keyexpr,
+            rule,
             format,
             why,
         } => {
             open(out);
             out.push_str(",\"keyexpr\":");
             escape_into(keyexpr, out);
+            out.push_str(",\"matched_rule\":");
+            push_matched_rule(rule, out);
             out.push_str(",\"format\":");
             escape_into(format, out);
             out.push_str(",\"why\":");
@@ -1854,6 +2049,7 @@ pub fn push_decoding(decoding: &PayloadDecoding, out: &mut String) {
         }
         PayloadDecoding::Decoded {
             keyexpr,
+            rule,
             format,
             fields,
             despite_encoding,
@@ -1861,6 +2057,8 @@ pub fn push_decoding(decoding: &PayloadDecoding, out: &mut String) {
             open(out);
             out.push_str(",\"keyexpr\":");
             escape_into(keyexpr, out);
+            out.push_str(",\"matched_rule\":");
+            push_matched_rule(rule, out);
             // R311y874 — present with a `null` rather than absent, R311y720's
             // rule: a consumer must never have to test for a key to learn that
             // a fact is unknown. Here the fact is "was this decoded over the
@@ -1895,6 +2093,17 @@ pub fn push_decoding(decoding: &PayloadDecoding, out: &mut String) {
                 out.push_str(&f.start.to_string());
                 out.push_str(",\"end\":");
                 out.push_str(&f.end.to_string());
+                // How deeply the field is nested and which field it is nested
+                // in, so a consumer drawing a tree never reads the path grammar
+                // to indent one. `parent` is `null` at depth 0, structurally,
+                // on `name`'s rule just above: every entry has the same keys.
+                out.push_str(",\"depth\":");
+                out.push_str(&path_depth(&f.path).to_string());
+                out.push_str(",\"parent\":");
+                match path_parent(&f.path) {
+                    Some(parent) => escape_into(parent, out),
+                    None => out.push_str("null"),
+                }
                 out.push('}');
             }
             out.push_str("]}");
@@ -1902,11 +2111,33 @@ pub fn push_decoding(decoding: &PayloadDecoding, out: &mut String) {
     }
 }
 
+/// The rule that won, as the object every place that names one writes: the
+/// position among the format rules, and the key expression the rule covers.
+///
+/// Written once, so a row's `matched_rule` and the same rule inside a
+/// `payload_mapping` or `payload_refusals` entry cannot be two spellings.
+fn push_matched_rule(rule: &MatchedRule, out: &mut String) {
+    use wz_session_core::json::escape_into;
+    out.push_str("{\"index\":");
+    out.push_str(&rule.index.to_string());
+    out.push_str(",\"pattern\":");
+    escape_into(&rule.pattern, out);
+    out.push('}');
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::payload::formats::FormatMap;
     use alloc::vec;
+
+    /// The rule the fixtures below declare: the first and only `demo/**` one.
+    fn demo_rule() -> MatchedRule {
+        MatchedRule {
+            index: 0,
+            pattern: String::from("demo/**"),
+        }
+    }
 
     /// A walked `MsgPut` on `demo/a` declaring `encoding_id`, carrying `bytes`.
     ///
@@ -2196,6 +2427,7 @@ mod tests {
             decode_payload(&json, &run, at),
             PayloadDecoding::EncodingMismatch {
                 keyexpr: String::from("demo/a"),
+                rule: demo_rule(),
                 format: String::from("protobuf"),
                 declared: String::from("application/json"),
                 // Round 2025 (item 285) — CHECKED. The bytes are JSON and the
@@ -2231,11 +2463,13 @@ mod tests {
         match decode_payload(&sample, &run, at) {
             PayloadDecoding::Decoded {
                 keyexpr,
+                rule,
                 format,
                 fields,
                 despite_encoding,
             } => {
                 assert_eq!(keyexpr, "demo/a");
+                assert_eq!(rule, demo_rule(), "the one rule declared won");
                 assert_eq!(format, "json");
                 assert_eq!(
                     despite_encoding, None,
@@ -2277,6 +2511,7 @@ mod tests {
             decode_payload(&sample, &run, at),
             PayloadDecoding::EncodingMismatch {
                 keyexpr: String::from("demo/a"),
+                rule: demo_rule(),
                 format: String::from("json"),
                 declared: String::from("application/protobuf"),
                 // Round 2025 (item 285) — UNCHECKED, and this leg is where the
@@ -2819,6 +3054,7 @@ mod tests {
             decode_payload(&honest, &run, at),
             PayloadDecoding::EncodingMismatch {
                 keyexpr: String::from("demo/a"),
+                rule: demo_rule(),
                 format: String::from("protobuf"),
                 declared: String::from("application/json"),
                 // Round 2025 (item 285) — CHECKED, and this leg's own sentence
@@ -2883,6 +3119,7 @@ mod tests {
                     // neither verdict carries one and the rows read as before.
                     publisher: None,
                     samples: 2,
+                    rule: demo_rule(),
                 },
                 Misbinding {
                     keyexpr: String::from("demo/a"),
@@ -2891,6 +3128,7 @@ mod tests {
                     wrong: Misbound::Rule,
                     publisher: None,
                     samples: 1,
+                    rule: demo_rule(),
                 },
             ],
             "two samples the label refutes are the PUBLISHER's finding and one \
@@ -3386,11 +3624,13 @@ mod tests {
             PayloadDecoding::NoRule(String::from("demo/\"quoted\"")),
             PayloadDecoding::Refused {
                 keyexpr: String::from("demo/a"),
+                rule: demo_rule(),
                 format: String::from("protobuf"),
                 why: String::from("these bytes are not this format"),
             },
             PayloadDecoding::EncodingMismatch {
                 keyexpr: String::from("demo/\"quoted\""),
+                rule: demo_rule(),
                 format: String::from("protobuf"),
                 declared: String::from("application/json"),
                 checked: true,
@@ -3412,5 +3652,323 @@ mod tests {
             out.contains(r#""demo/\"quoted\"""#),
             "a keyexpr carrying a quote must be escaped: {out}"
         );
+    }
+
+    /// The `matched_rule` a decode of `demo/a` under `rules`, one rule per
+    /// line of `rules`, reports; `None` for a state that carries none.
+    fn rule_that_won(rules: &str, encoding_id: u16, bytes: &[u8]) -> Option<MatchedRule> {
+        let mut map = FormatMap::new();
+        map.declare_all(rules).expect("rules that install");
+        let run = Declarations::new(&map);
+        let spaces = KeyexprSpaces::new();
+        let at = KeyexprAt::new(Direction::A, &spaces);
+        match decode_payload(&put_declaring(encoding_id, bytes), &run, at) {
+            PayloadDecoding::Decoded { rule, .. }
+            | PayloadDecoding::Refused { rule, .. }
+            | PayloadDecoding::EncodingMismatch { rule, .. } => Some(rule),
+            _ => None,
+        }
+    }
+
+    /// THE ROW SAYS WHICH RULE WON, and the order the rules were declared in
+    /// decides it.
+    ///
+    /// Two overlapping rules of ONE format gave byte-identical rows in either
+    /// order, so a consumer could not tell which had decided a row. Here the pair
+    /// sits behind an unrelated rule so neither index is 0 by accident, and is
+    /// declared in both orders: the decoded fields are the same, which is the
+    /// consumer's observation, and the rule is not, which is the fix.
+    #[test]
+    fn overlapping_rules_of_one_format_are_told_apart_by_the_rule_that_won() {
+        let bytes = [0x08, 0x2a];
+        let wide_first = "other/**=protobuf\ndemo/**=protobuf\ndemo/a=protobuf";
+        let exact_first = "other/**=protobuf\ndemo/a=protobuf\ndemo/**=protobuf";
+        assert_eq!(
+            rule_that_won(wide_first, ENC_PROTOBUF, &bytes),
+            Some(MatchedRule {
+                index: 1,
+                pattern: String::from("demo/**")
+            }),
+            "the wide rule was declared first, so it wins, and it is the SECOND rule"
+        );
+        assert_eq!(
+            rule_that_won(exact_first, ENC_PROTOBUF, &bytes),
+            Some(MatchedRule {
+                index: 1,
+                pattern: String::from("demo/a")
+            }),
+            "reversed, the exact rule wins and is also the second rule"
+        );
+        // The observation that made the field necessary: nothing else differs.
+        let render = |rules: &str| {
+            let mut map = FormatMap::new();
+            map.declare_all(rules).expect("rules that install");
+            let run = Declarations::new(&map);
+            let spaces = KeyexprSpaces::new();
+            let at = KeyexprAt::new(Direction::A, &spaces);
+            match decode_payload(&put_declaring(ENC_PROTOBUF, &bytes), &run, at) {
+                PayloadDecoding::Decoded { fields, format, .. } => (format, fields),
+                other => panic!("expected a decode: {other:?}"),
+            }
+        };
+        assert_eq!(
+            render(wide_first),
+            render(exact_first),
+            "the two orders decode alike -- only the rule tells them apart"
+        );
+    }
+
+    /// The rule that won is the one that decoded: the ledger of what was used
+    /// marks the SAME rule the row names, and the one behind it stays unused.
+    #[test]
+    fn the_rule_a_row_names_is_the_rule_the_ledger_marks_used() {
+        let mut map = FormatMap::new();
+        map.declare_all("demo/**=protobuf\ndemo/a=protobuf")
+            .expect("rules that install");
+        let run = Declarations::new(&map);
+        let spaces = KeyexprSpaces::new();
+        let at = KeyexprAt::new(Direction::A, &spaces);
+        let got = decode_payload(&put_declaring(ENC_PROTOBUF, &[0x08, 0x2a]), &run, at);
+        let PayloadDecoding::Decoded { rule, .. } = got else {
+            panic!("expected a decode: {got:?}");
+        };
+        assert_eq!((rule.index, rule.pattern.as_str()), (0, "demo/**"));
+        let unused: Vec<String> = run.unused().into_iter().map(|d| d.text).collect();
+        assert_eq!(
+            unused,
+            ["demo/a=protobuf"],
+            "the shadowed rule is the one this run never applied"
+        );
+    }
+
+    /// A finding names the rule it blames, and it is the rule the rows name.
+    ///
+    /// The tallies key on (topic, format, label), so the rule rides in the
+    /// value. It cannot split a finding, since a rule is a function of the topic;
+    /// what it adds is which of several overlapping rules to go and fix.
+    #[test]
+    fn a_finding_names_the_rule_the_rows_name() {
+        let rules = "other/**=json\ndemo/**=protobuf";
+        let mut map = FormatMap::new();
+        map.declare_all(rules).expect("rules that install");
+        let run = Declarations::new(&map);
+        let spaces = KeyexprSpaces::new();
+        let at = KeyexprAt::new(Direction::A, &spaces);
+
+        // A JSON publisher under the protobuf rule: the label vetoes the rule.
+        let vetoed = decode_payload(&put_declaring(ENC_JSON, br#"{"a":1}"#), &run, at);
+        let PayloadDecoding::EncodingMismatch { rule: row, .. } = vetoed else {
+            panic!("expected a veto: {vetoed:?}");
+        };
+        let found = run.misbindings();
+        assert_eq!(found.len(), 1, "{found:?}");
+        assert_eq!(found[0].rule, row, "the finding blames the row's rule");
+        assert_eq!((row.index, row.pattern.as_str()), (1, "demo/**"));
+        let mut json = String::new();
+        push_misbinding(&found[0], &mut json);
+        assert!(
+            json.contains(r#""matched_rule":{"index":1,"pattern":"demo/**"}"#),
+            "the finding carries it as the rows do: {json}"
+        );
+
+        // A rule whose decoder refuses: the JSON rule over bytes that are not.
+        let rules = "other/**=protobuf\ndemo/**=json";
+        let mut map = FormatMap::new();
+        map.declare_all(rules).expect("rules that install");
+        let run = Declarations::new(&map);
+        let refused = decode_payload(&put_declaring(ENC_ZENOH_BYTES, b"not json"), &run, at);
+        let PayloadDecoding::Refused { rule: row, .. } = refused else {
+            panic!("expected a refusal: {refused:?}");
+        };
+        let found = run.refusals();
+        assert_eq!(found.len(), 1, "{found:?}");
+        assert_eq!(found[0].rule, row);
+        assert_eq!((row.index, row.pattern.as_str()), (1, "demo/**"));
+        let mut json = String::new();
+        push_refusal(&found[0], &mut json);
+        assert!(
+            json.contains(r#""matched_rule":{"index":1,"pattern":"demo/**"}"#),
+            "{json}"
+        );
+    }
+
+    /// `matched_rule` is carried by the four states that asked the rules, as an
+    /// object in three and as `null` in `no_rule`, and by no other.
+    #[test]
+    fn matched_rule_is_carried_by_exactly_the_states_that_asked_the_rules() {
+        for state in PayloadDecoding::all() {
+            let mut out = String::new();
+            push_decoding(&state, &mut out);
+            let asked = matches!(
+                state.state(),
+                "decoded" | "refused" | "encoding_mismatch" | "no_rule"
+            );
+            assert_eq!(
+                out.contains("\"matched_rule\":"),
+                asked,
+                "{}: {out}",
+                state.state()
+            );
+            if state.state() == "no_rule" {
+                assert!(out.contains("\"matched_rule\":null"), "{out}");
+            } else if asked {
+                assert!(out.contains("\"matched_rule\":{\"index\":0"), "{out}");
+            }
+        }
+    }
+
+    /// A payload with a message inside a message, a repeated one, and a map
+    /// entry: `1` a varint, `3` a message holding a varint `1` and a message `2`
+    /// of two varints, `3` again with one varint, and `4` a map entry (key
+    /// string, value varint) as protobuf spells a `map<string, int32>`.
+    ///
+    /// Tags are `field << 3 | 2` for a length-delimited field: `3` is `0x1a`,
+    /// `2` is `0x12`, `4` is `0x22`. The protobuf reader is schemaless and knows
+    /// no maps: an entry is just the repeated message it is encoded as.
+    const NESTED: [u8; 29] = [
+        0x08, 0x07, // 1: varint 7
+        0x1a, 0x08, // 3: message, 8 bytes
+        0x08, 0x01, //   3.1: varint 1
+        0x12, 0x04, //   3.2: message, 4 bytes
+        0x08, 0x05, //     3.2.1: varint 5
+        0x10, 0x06, //     3.2.2: varint 6
+        0x1a, 0x02, // 3 again: message, 2 bytes
+        0x08, 0x09, //   3.1: varint 9
+        0x22, 0x05, // 4: a map entry, 5 bytes
+        0x0a, 0x01, 0x6b, //   4.1: the key "k"
+        0x10, 0x03, //   4.2: the value 3
+        0x2a, 0x04, // 5: message, 4 bytes
+        0x1a, 0x02, //   5.3: message, 2 bytes
+        0x08, 0x01, //     5.3.1: varint 1
+    ];
+
+    /// NESTED PATHS CARRY THEIR DEPTH AND THEIR PARENT, and the consumer never
+    /// reads the path grammar to get either.
+    ///
+    /// The consumer could only test a flat repeated field (`15` thousands of
+    /// times) and so never saw `3.2`. This pins the triple for every row of a
+    /// payload that nests three deep, repeats a message, and carries a map entry.
+    #[test]
+    fn nested_fields_report_their_depth_and_their_parent() {
+        let mut map = FormatMap::new();
+        map.declare("demo/**=protobuf").expect("a rule");
+        let run = Declarations::new(&map);
+        let spaces = KeyexprSpaces::new();
+        let at = KeyexprAt::new(Direction::A, &spaces);
+        let got = decode_payload(&put_declaring(ENC_PROTOBUF, &NESTED), &run, at);
+        let PayloadDecoding::Decoded { fields, .. } = &got else {
+            panic!("expected a decode: {got:?}");
+        };
+        let mut json = String::new();
+        push_decoding(&got, &mut json);
+        let seen: Vec<(&str, usize, Option<&str>)> = fields
+            .iter()
+            .map(|f| (f.path.as_str(), path_depth(&f.path), path_parent(&f.path)))
+            .collect();
+        assert_eq!(
+            seen,
+            [
+                ("1", 0, None),
+                ("3", 0, None),
+                ("3.1", 1, Some("3")),
+                ("3.2", 1, Some("3")),
+                ("3.2.1", 2, Some("3.2")),
+                ("3.2.2", 2, Some("3.2")),
+                ("3", 0, None),
+                ("3.1", 1, Some("3")),
+                ("4", 0, None),
+                ("4.1", 1, Some("4")),
+                ("4.2", 1, Some("4")),
+                ("5", 0, None),
+                ("5.3", 1, Some("5")),
+                ("5.3.1", 2, Some("5.3")),
+            ]
+        );
+        // And the same two cells are in the DOCUMENT, in the entry's own object.
+        assert!(
+            json.contains(
+                r#"{"path":"3.2.1","name":null,"value":"varint 5","start":8,"end":10,"depth":2,"parent":"3.2"}"#
+            ),
+            "{json}"
+        );
+        assert!(
+            json.contains(
+                r#"{"path":"1","name":null,"value":"varint 7","start":0,"end":2,"depth":0,"parent":null}"#
+            ),
+            "{json}"
+        );
+    }
+
+    /// Every field's parent is a row that comes BEFORE it, one level up, for
+    /// every shipped decoder -- so the pair is a tree and not two numbers.
+    ///
+    /// The JSON and CBOR walks write a dotted KEY with a `\` before the dot, and
+    /// reading the separator without that quoting would put `a.b` two levels deep.
+    /// Both are walked here with a key that carries a dot and a backslash.
+    #[test]
+    fn path_depth_and_parent_hold_for_real_json_and_cbor_walks() {
+        use crate::payload::formats::builtin;
+
+        // {"a.b": {"c": [1, 2]}, "d\\e": 1}
+        let json = br#"{"a.b":{"c":[1,2]},"d\\e":1}"#;
+        // {"a.b": [1], "x": {"y": 2}}
+        let cbor: [u8; 13] = [
+            0xa2, // map(2)
+            0x63, b'a', b'.', b'b', // "a.b"
+            0x81, 0x01, // [1]
+            0x61, b'x', // "x"
+            0xa1, 0x61, b'y', 0x02, // {"y": 2}
+        ];
+
+        for (name, bytes) in [("json", &json[..]), ("cbor", &cbor[..])] {
+            let fields = builtin(name)
+                .expect("a shipped format")
+                .decode(bytes)
+                .unwrap_or_else(|e| panic!("{name}: {e}"));
+            assert!(fields.len() >= 5, "{name}: {fields:?}");
+            for (at, f) in fields.iter().enumerate() {
+                let depth = path_depth(&f.path);
+                match path_parent(&f.path) {
+                    None => assert_eq!(depth, 0, "{name} {:?}", f.path),
+                    Some(parent) => {
+                        let up = fields[..at]
+                            .iter()
+                            .rev()
+                            .find(|p| p.path == parent)
+                            .unwrap_or_else(|| {
+                                panic!("{name}: {:?} has no parent row {parent:?}", f.path)
+                            });
+                        assert_eq!(depth, path_depth(&up.path) + 1, "{name} {:?}", f.path);
+                    }
+                }
+            }
+        }
+
+        // The dotted key specifically: one level under the document, not two.
+        let fields = builtin("json").unwrap().decode(&json[..]).unwrap();
+        let dotted = fields
+            .iter()
+            .find(|f| f.path.ends_with("a\\.b"))
+            .expect("the dotted key's row");
+        assert_eq!(path_depth(&dotted.path), 1, "{:?}", dotted.path);
+        assert_eq!(path_parent(&dotted.path), Some("$"), "{:?}", dotted.path);
+    }
+
+    /// The slot a message reports is the one the field finders already use.
+    #[test]
+    fn a_payload_slot_is_the_bytes_the_decode_would_read() {
+        let put = put_declaring(ENC_JSON, br#"{"a":1}"#);
+        let slot = payload_slot(&put).expect("a Put has a payload slot");
+        assert_eq!(slot.encoding.as_deref(), Some("application/json"));
+        assert!(!slot.shm_descriptor);
+        let none = payload_slot(&Field {
+            name: "msg_del".into(),
+            span: wz_session_core::dissect::Span { start: 0, end: 1 },
+            value: FieldValue::Nested(vec![]),
+        });
+        assert_eq!(none, None, "a message with no payload slot has none");
+        let shm = payload_slot(&put_with_shm_descriptor(ENC_JSON, 24)).expect("a descriptor");
+        assert!(shm.shm_descriptor);
+        assert_eq!((shm.start, shm.end), (0, 24));
     }
 }

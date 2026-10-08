@@ -4709,8 +4709,15 @@ fn payload_block(
         PayloadDecoding::NoRule(keyexpr) => {
             format!("    payload: no --payload-format rule covers `{keyexpr}`\n")
         }
+        // `rule: _` on the three states that carry one: the rule that won is a
+        // field of the machine-readable document (`matched_rule`), where a
+        // program joins it to a declaration line by number. This line already
+        // names the keyexpr, the format and the flag, which is what a person
+        // fixing a rule reads, and a rule index on every row would be noise
+        // beside them.
         PayloadDecoding::Refused {
             keyexpr,
+            rule: _,
             format: name,
             why,
         } => format!("    payload `{keyexpr}` as {name}: REFUSED -- {why}\n"),
@@ -4721,6 +4728,7 @@ fn payload_block(
         // said exactly what it sent.
         PayloadDecoding::EncodingMismatch {
             keyexpr,
+            rule: _,
             format: name,
             declared,
             checked,
@@ -4743,6 +4751,7 @@ fn payload_block(
         ),
         PayloadDecoding::Decoded {
             keyexpr,
+            rule: _,
             format: name,
             fields,
             despite_encoding,
@@ -6840,6 +6849,7 @@ mod tests {
         assert!(
             json.contains(
                 "\"payload_mapping\":[{\"keyexpr\":\"demo/a\",\"format\":\"protobuf\",\
+                 \"matched_rule\":{\"index\":0,\"pattern\":\"demo/**\"},\
                  \"declared\":\"application/json\",\"wrong\":\"publisher\",\"samples\":2,"
             ),
             "the JSON arm carries the plane too, most samples first: {json}"
@@ -6847,6 +6857,7 @@ mod tests {
         assert!(
             json.contains(
                 "{\"keyexpr\":\"demo/b\",\"format\":\"protobuf\",\
+                 \"matched_rule\":{\"index\":0,\"pattern\":\"demo/**\"},\
                  \"declared\":\"application/json\",\"wrong\":\"rule\",\"samples\":1,"
             ),
             "and both verdicts: {json}"
@@ -7058,6 +7069,7 @@ mod tests {
         assert!(
             json.contains(
                 "\"payload_refusals\":[{\"keyexpr\":\"demo/a\",\"format\":\"json\",\
+                 \"matched_rule\":{\"index\":0,\"pattern\":\"demo/**\"},\
                  \"under\":\"corroborated\",\"samples\":2,"
             ),
             "the JSON arm carries the plane too, most samples first: {json}"
@@ -7065,6 +7077,7 @@ mod tests {
         assert!(
             json.contains(
                 "{\"keyexpr\":\"demo/b\",\"format\":\"json\",\
+                 \"matched_rule\":{\"index\":0,\"pattern\":\"demo/**\"},\
                  \"under\":\"unclaimed\",\"samples\":1,"
             ),
             "and both claims: {json}"

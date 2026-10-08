@@ -61,6 +61,13 @@ pub mod census_csv;
 /// dependency graph the whole time and had no symbol. One emit beside the
 /// types is what stops a third consumer from inventing a fourth rendering.
 pub mod census_json;
+/// The verdicts on a text somebody typed (a declaration block, one key
+/// expression), rendered beside the revisions that declare them so the gate that
+/// derives each family's walk can render them.
+///
+/// UNGATED: the judgement is the declaration reader and the key-expression
+/// validator, neither of which needs a codec or the field walker.
+pub mod diagnose_json;
 /// R2100 (open-debt item 509) — the REVISION every emitted document carries,
 /// and the history that makes a key rename an expressible edit instead of an
 /// unexpressible break.

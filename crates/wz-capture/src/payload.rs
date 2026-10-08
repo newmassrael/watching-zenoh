@@ -1659,6 +1659,101 @@ pub(crate) mod tests_support {
         .encode_to_vec()
     }
 
+    /// A `Push` under `keyexpr` whose Put carries the encoding the caller
+    /// describes, or NO encoding field at all.
+    ///
+    /// `Some((id, schema))` writes the wire word `(id << 1) | has_schema` and the
+    /// schema after it, so an id the table lacks and a schema-bearing encoding
+    /// are both reachable; `None` clears the `E` bit, which on the wire means the
+    /// default (`zenoh/bytes`) and is a different fact from carrying that name.
+    /// [`push_declaring`] cannot say either.
+    ///
+    /// `dissect`, because the field document's tests are what ask for it; a
+    /// builder no build of this module's own tests calls is dead code there.
+    #[cfg(feature = "dissect")]
+    pub(crate) fn push_with_encoding(
+        keyexpr: &'static str,
+        encoding: Option<(u16, Option<&str>)>,
+        payload: &[u8],
+    ) -> Vec<u8> {
+        let (header, encoding) = match encoding {
+            Some((id, schema)) => (
+                wz_codecs::msg_put::MsgPut::default().header | wz_codecs::wire_const::FLAG_Z_PUT_E,
+                Some(wz_codecs::encoding::Encoding {
+                    packed_id: (u32::from(id) << 1) | u32::from(schema.is_some()),
+                    schema_len: schema.map(|s| s.len() as u64),
+                    schema,
+                }),
+            ),
+            None => (wz_codecs::msg_put::MsgPut::default().header, None),
+        };
+        wz_codecs::push::Push {
+            header: wz_codecs::push::Push::default().header | wz_codecs::wire_const::FLAG_N_N,
+            keyexpr: fx::sender_space(0, Some(keyexpr)),
+            body: wz_codecs::push::PushVariant::CodecZenohMsgPut(wz_codecs::msg_put::MsgPut {
+                header,
+                encoding,
+                payload_len: Some(payload.len() as u64),
+                payload: Some(payload),
+                ..Default::default()
+            }),
+            ..Default::default()
+        }
+        .encode_to_vec()
+    }
+
+    /// A `Push` whose payload travels as SLICES, every one of them plain bytes.
+    ///
+    /// The layout a Put takes when it names shared memory, with no slice that
+    /// actually is: a publisher whose ZBuf is partly shared memory and partly not
+    /// sends the mixed form, and this is its all-inline case. The payload is a
+    /// payload and `payload_decode` has never found it, because the dissector
+    /// names the slots `slices`/`bytes` and not `payload`. `dissect` for the
+    /// reason [`push_with_encoding`] gives.
+    #[cfg(feature = "dissect")]
+    pub(crate) fn push_with_raw_slices(
+        keyexpr: &'static str,
+        encoding_id: u16,
+        parts: &[&[u8]],
+    ) -> Vec<u8> {
+        let marker = wz_codecs::ext_entry::ExtEntry {
+            header: wz_session_core::ext_header::body_ext_id::SHM
+                | wz_session_core::ext_header::EXT_FLAG_M,
+            body: wz_codecs::ext_entry::ExtEntryVariant::CodecZenohExtUnit(
+                wz_codecs::ext_unit::ExtUnit::default(),
+            ),
+        };
+        wz_codecs::push::Push {
+            header: wz_codecs::push::Push::default().header | wz_codecs::wire_const::FLAG_N_N,
+            keyexpr: fx::sender_space(0, Some(keyexpr)),
+            body: wz_codecs::push::PushVariant::CodecZenohMsgPut(wz_codecs::msg_put::MsgPut {
+                header: wz_codecs::msg_put::MsgPut::default().header
+                    | wz_codecs::wire_const::FLAG_Z_PUT_E
+                    | wz_codecs::wire_const::FLAG_Z_PUT_Z,
+                encoding: Some(wz_codecs::encoding::Encoding {
+                    packed_id: u32::from(encoding_id) << 1,
+                    schema_len: None,
+                    schema: None,
+                }),
+                extensions: Some(core::iter::once(marker).collect()),
+                slice_count: Some(parts.len() as u32),
+                slices: Some(
+                    parts
+                        .iter()
+                        .map(|bytes| wz_codecs::zbuf_slice::ZbufSlice {
+                            kind: u32::from(wz_session_core::put_payload::SLICE_KIND_RAW),
+                            len: bytes.len() as u64,
+                            bytes,
+                        })
+                        .collect(),
+                ),
+                ..Default::default()
+            }),
+            ..Default::default()
+        }
+        .encode_to_vec()
+    }
+
     /// R2510 (open-debt item 713) — [`push_declaring`] keyed by an ALIAS rather
     /// than by a literal.
     ///
@@ -2009,31 +2104,41 @@ pub mod formats {
         /// that silently empties an answer; here it would silently leave a
         /// payload undecoded while the reader believes their rule is live.
         WildcardUnsupported(String),
-        /// The pattern is not a key expression.
-        NotAKeyexpr(String),
-        /// R311y923 (item 236) — the pattern IS a key expression, and cannot be
-        /// written in the declaration dialect without changing what the line
-        /// means.
+        /// The pattern is not a key expression, and the first place it stops
+        /// being one.
         ///
-        /// The two spellings are told apart by a `:` in the scope: `a=f` is a
-        /// format rule and `a:p=n` names a field. That is a bet that no pattern
-        /// carries a colon, and the bet was never stated, never asserted, and
-        /// is FALSE -- a colon is an ordinary character in a key expression, and
-        /// this crate's pattern validation refuses an empty pattern and a
-        /// leading or trailing `/` and nothing else. So `demo/temp:c=protobuf`
-        /// was written as a rule and read back as a field name, silently.
+        /// The judgement is [`wz_session_core::keyexpr_canon::validate_keyexpr`],
+        /// the validator the C drop-in's `z_view_keyexpr_from_str` asks as well.
+        /// This variant used to carry the pattern alone because the check behind
+        /// it refused an empty pattern and a leading or trailing `/` and nothing
+        /// else, so it had no place to name; `demo//pose`, `a?b`, `**x`, `a*b`,
+        /// `demo/**/**` and `demo/$*/pose` all installed here and are refused by
+        /// the constructor that every other consumer of a key expression uses.
+        NotAKeyexpr(String, wz_session_core::keyexpr_canon::KeyexprRefusal),
+        /// The KEY of a declaration carries a `:` or an `=` that is not quoted,
+        /// so the line does not say which of its separators it means.
         ///
-        /// Refused by name rather than guessed, which is the rule
-        /// [`crate::filter`] settled for a malformed selector and the rule
-        /// [`Self::WildcardUnsupported`] states one variant up: a reader who is
-        /// told their pattern cannot be declared can rename the topic or
-        /// declare its parent, while a reader whose rule quietly became a field
-        /// name has no way to find out.
+        /// The reader splits a line at the LAST unquoted `=` and then the last
+        /// unquoted `:`, so `a:b:c=x` is the name `x` for path `c` under the
+        /// topic `a:b` -- or it was meant as a rule about `a:b:c`, or a name for
+        /// path `b:c` under `a`. The dialect's writer quotes every reserved
+        /// character in every field (`escape_field`), so a line that leaves one
+        /// bare in the key was not written by it, and a reader who guessed would
+        /// do what R311y923 recorded: install a declaration that means something
+        /// other than what its author typed, silently. `demo/temp\:c=protobuf`
+        /// is the rule about `demo/temp:c`, and says so.
         ///
-        /// What this does NOT do is make such a topic declarable. That needs a
-        /// delimiter no key expression may carry, which changes the dialect
-        /// every existing declaration is written in.
-        PatternNotDeclarable(String),
+        /// Only the KEY is held to it. A path or a name carrying a bare `:` is
+        /// not ambiguous -- the last `:` of the scope has already been taken as
+        /// the one that separates them.
+        UnquotedSeparator {
+            /// The key as the line wrote it, quotes and all.
+            key: String,
+            /// The byte offset of the bare separator within `key`.
+            offset: usize,
+            /// Which separator.
+            separator: char,
+        },
         /// R311y720 (PF4) — a field-name declaration with an empty path or an
         /// empty name.
         ///
@@ -2081,12 +2186,17 @@ pub mod formats {
                     "this build's keyexpr matcher has no wildcards, so the \
                      pattern `{p}` cannot be answered (feature `filter-wildcards`)"
                 ),
-                Self::NotAKeyexpr(p) => write!(f, "`{p}` is not a key expression"),
-                Self::PatternNotDeclarable(p) => write!(
+                Self::NotAKeyexpr(p, why) => write!(f, "`{p}` is not a key expression: {why}"),
+                Self::UnquotedSeparator {
+                    key,
+                    offset,
+                    separator,
+                } => write!(
                     f,
-                    "`{p}` is a key expression but carries the `:` that tells a \
-                     format rule from a field name, so a declaration written \
-                     with it would read back as the other one"
+                    "the key `{key}` carries a `{separator}` at byte {offset} that is not \
+                     quoted, so the line does not say whether it separates the key from \
+                     the rest or belongs to it -- write `\\{separator}` for a key that \
+                     contains one"
                 ),
                 Self::NotADeclaration(line) => write!(
                     f,
@@ -2110,6 +2220,21 @@ pub mod formats {
                         "the layout described for `{name}` is not readable: {why}"
                     )
                 }
+            }
+        }
+    }
+
+    impl FormatMapError {
+        /// The pattern and the place it stopped being a key expression, for the
+        /// refusal that has one, so a surface renders `chunk`, `offset` and
+        /// `reason` from the validator's own answer instead of reading them out
+        /// of [`core::fmt::Display`].
+        pub fn keyexpr_refusal(
+            &self,
+        ) -> Option<(&str, &wz_session_core::keyexpr_canon::KeyexprRefusal)> {
+            match self {
+                Self::NotAKeyexpr(pattern, why) => Some((pattern, why)),
+                _ => None,
             }
         }
     }
@@ -2189,6 +2314,23 @@ pub mod formats {
         FormatDefinition,
     }
 
+    impl DeclarationKind {
+        /// Every kind, so the vocabulary a consumer switches on and a test's
+        /// walk of it are one list.
+        pub const ALL: [Self; 3] = [Self::FormatRule, Self::FieldName, Self::FormatDefinition];
+
+        /// The word a machine reads for this kind: the `kind` of a line in
+        /// `wz_dissect_declarations_diagnose`'s verdict. Exhaustive, so a kind
+        /// added to the enum cannot reach a consumer without one.
+        pub const fn word(self) -> &'static str {
+            match self {
+                Self::FormatRule => "format_rule",
+                Self::FieldName => "field_name",
+                Self::FormatDefinition => "format_definition",
+            }
+        }
+    }
+
     /// R311y726 — one installed declaration, as a reader would have to see it
     /// to be told anything about it.
     ///
@@ -2205,6 +2347,106 @@ pub mod formats {
         pub kind: DeclarationKind,
         /// How the reader wrote it.
         pub text: String,
+    }
+
+    /// The format rule that WON for a key expression, as a reader of a row is
+    /// told it.
+    ///
+    /// # What `index` counts
+    ///
+    /// The position among the FORMAT RULES, from 0, in the order they are tried,
+    /// which is the order they were declared in. Rules are the only declarations
+    /// that compete, so this is the number that answers "which of my overlapping
+    /// rules decided this": a field-name declaration or a format definition
+    /// between two rules in the text does not move it. It is NOT the line
+    /// number of the declaration text, which a map built from calls and not from
+    /// text does not have, and it is NOT [`DeclarationId`], which is one counter
+    /// over rules, names and definitions together and opaque on purpose.
+    /// `wz_dissect_declarations_diagnose` reports it as `rule_index` on each
+    /// rule line, so a consumer joins a row to its line without counting.
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub struct MatchedRule {
+        /// Position among the format rules, from 0, in the order tried.
+        pub index: usize,
+        /// The rule's key expression, as the operator means it: quotes removed,
+        /// the way [`FormatMap::patterns`] hands it back.
+        pub pattern: String,
+    }
+
+    /// The byte offsets of every SEPARATOR in a field path, in order.
+    ///
+    /// The one place the path syntax is read. Every shipped decoder writes the
+    /// same one: segments joined by `.`, and a `.` or a `\` that is part of a
+    /// segment written with a `\` before it (protobuf's `3.2`, the JSON walk's
+    /// `$.a\.b.0`, the CBOR walk's `$.\i7`). The CBOR walk keeps a copy of the
+    /// two characters; `path_depth_and_parent_hold_for_real_json_and_cbor_walks`
+    /// walks documents with dotted keys through both and reads the result back
+    /// through this, which is what holds the copies to each other. A `\` quotes
+    /// the character after it whatever that is, so `\.` is a dot inside a
+    /// segment and the `\i` of `\i7` is read past harmlessly.
+    ///
+    /// Scanned left to right for the reason `rsplit_once_unescaped` gives:
+    /// whether a character is quoted is a fact about what precedes it.
+    fn path_separators(path: &str) -> impl Iterator<Item = usize> + '_ {
+        let mut quoted = false;
+        path.char_indices().filter_map(move |(at, c)| {
+            if quoted {
+                quoted = false;
+                None
+            } else if c == super::JSON_PATH_ESCAPE {
+                quoted = true;
+                None
+            } else {
+                (c == super::JSON_PATH_SEP).then_some(at)
+            }
+        })
+    }
+
+    /// How deeply a decoded field is nested: 0 for a top-level field, 1 for a
+    /// field inside a top-level one, and so on.
+    ///
+    /// Read off the path, in this one place, so a consumer never parses the path
+    /// grammar to indent a tree. A JSON or CBOR document is rooted at `$`, so
+    /// the document's own row is depth 0 and its members depth 1; a protobuf
+    /// message has no root row, so its first-level fields are depth 0. The depth
+    /// of a row is the number of its ancestors that are rows, which is what an
+    /// indented listing draws.
+    pub fn path_depth(path: &str) -> usize {
+        path_separators(path).count()
+    }
+
+    /// The path of the field this one is nested in, or `None` at depth 0.
+    ///
+    /// Everything before the last separator: `3.2.1` is inside `3.2`, and
+    /// `$.a\.b` is inside `$` because its dot is quoted.
+    pub fn path_parent(path: &str) -> Option<&str> {
+        path_separators(path).last().map(|at| &path[..at])
+    }
+
+    /// What [`FormatMap::matching_rule`] found: the rule, the handle the run's
+    /// ledger records, and the format it points at.
+    pub struct RuleMatch<'m> {
+        /// The handle, for a ledger of what was used.
+        pub id: DeclarationId,
+        /// Which rule it was.
+        pub rule: MatchedRule,
+        /// The format the rule points at.
+        pub format: &'m dyn PayloadFormat,
+    }
+
+    /// The checks a key expression meets on its way into a rule or a name, in
+    /// ONE place so the two doors that take one cannot drift.
+    ///
+    /// The judgement is [`wz_session_core::keyexpr_canon::validate_keyexpr`]. It
+    /// is not a copy of it: the C drop-in's constructors ask the same function,
+    /// which is the whole of the owner's decision that wz has one validator.
+    fn require_keyexpr(pattern: &str) -> Result<(), FormatMapError> {
+        wz_session_core::keyexpr_canon::validate_keyexpr(pattern)
+            .map_err(|why| FormatMapError::NotAKeyexpr(pattern.to_owned(), why))?;
+        if pattern.contains('*') && !cfg!(feature = "filter-wildcards") {
+            return Err(FormatMapError::WildcardUnsupported(pattern.to_owned()));
+        }
+        Ok(())
     }
 
     impl<'a> FormatMap<'a> {
@@ -2365,12 +2607,7 @@ pub mod formats {
             pattern: &str,
             target: RuleTarget<'a>,
         ) -> Result<(), FormatMapError> {
-            if pattern.is_empty() || pattern.starts_with('/') || pattern.ends_with('/') {
-                return Err(FormatMapError::NotAKeyexpr(pattern.to_owned()));
-            }
-            if pattern.contains('*') && !cfg!(feature = "filter-wildcards") {
-                return Err(FormatMapError::WildcardUnsupported(pattern.to_owned()));
-            }
+            require_keyexpr(pattern)?;
             // R2111 (open-debt item 462) — the `contains(':')` refusal that
             // stood here is GONE, and its removal is the item. R311y923 added
             // it so a colon-bearing pattern would not install and read back as
@@ -2398,13 +2635,42 @@ pub mod formats {
         /// the map. Callers hold a `&'a FormatMap<'a>`, so at every one of them
         /// the two lifetimes are the same and nothing had to change.
         pub fn for_keyexpr(&self, keyexpr: &str) -> Option<(DeclarationId, &dyn PayloadFormat)> {
-            let at = self.rules.iter().position(|(pattern, _)| {
+            let at = self.first_rule_covering(keyexpr)?;
+            Some((DeclarationId(at), self.target_format(&self.rules[at].1)))
+        }
+
+        /// The rule that WON for this key expression: the first in the order
+        /// they were declared that covers it, with which one it was.
+        ///
+        /// Both this and [`Self::for_keyexpr`] ask `first_rule_covering`, so the
+        /// rule a row reports and the format that decoded it come out of one
+        /// comparison and cannot name different rules. Matching a second time to
+        /// find out which rule fired would be a second opinion on an overlap,
+        /// and an overlap is the only case where the answer matters. The pattern
+        /// is copied here and not in `for_keyexpr`, which sits on the path every
+        /// sample takes and needs only the format.
+        pub fn matching_rule(&self, keyexpr: &str) -> Option<RuleMatch<'_>> {
+            let at = self.first_rule_covering(keyexpr)?;
+            let (pattern, target) = &self.rules[at];
+            Some(RuleMatch {
+                id: DeclarationId(at),
+                rule: MatchedRule {
+                    index: at,
+                    pattern: pattern.clone(),
+                },
+                format: self.target_format(target),
+            })
+        }
+
+        /// The position of the first rule that covers `keyexpr`: the one place
+        /// the first-match-wins rule is applied.
+        fn first_rule_covering(&self, keyexpr: &str) -> Option<usize> {
+            self.rules.iter().position(|(pattern, _)| {
                 // The matcher takes CHUNKS, which is the same split
                 // `filter::compile_pattern` performs for the same function.
                 let chunks: Vec<&str> = pattern.split('/').collect();
                 wz_session_core::keyexpr_match::keyexpr_pattern_matches(&chunks, keyexpr)
-            })?;
-            Some((DeclarationId(at), self.target_format(&self.rules[at].1)))
+            })
         }
 
         /// R2114 (open-debt item 237) — the DEFINITION one rule was resolved
@@ -2469,12 +2735,7 @@ pub mod formats {
             path: &str,
             name: &str,
         ) -> Result<(), FormatMapError> {
-            if pattern.is_empty() || pattern.starts_with('/') || pattern.ends_with('/') {
-                return Err(FormatMapError::NotAKeyexpr(pattern.to_owned()));
-            }
-            if pattern.contains('*') && !cfg!(feature = "filter-wildcards") {
-                return Err(FormatMapError::WildcardUnsupported(pattern.to_owned()));
-            }
+            require_keyexpr(pattern)?;
             // R2111 (item 462) — removed with its twin above, and for the same
             // reason. This door had the identical refusal, so BOTH spellings
             // were shut against a colon-bearing topic.
@@ -2802,6 +3063,20 @@ pub mod formats {
         /// `--payload-format` has made since R311y699, moved here so both
         /// surfaces make it.
         pub fn declare(&mut self, line: &str) -> Result<DeclarationKind, FormatMapError> {
+            self.declare_described(line).map(|read| read.kind)
+        }
+
+        /// [`Self::declare`], answering WHAT THE LINE WAS READ AS and not only
+        /// which kind.
+        ///
+        /// The key as read (quotes removed) and, for a rule, its position among
+        /// the rules. A reader who typed `a\=b=protobuf` and `a:b=protobuf` was
+        /// told `installed: 1` for both and could not learn that the first is a
+        /// rule about the topic `a=b` and the second names a field `b` under
+        /// `a`; this is the answer `wz_dissect_declarations_diagnose` hands back
+        /// per line. `declare` is a projection of it, so there is one reader of
+        /// a line.
+        pub fn declare_described(&mut self, line: &str) -> Result<DeclaredLine, FormatMapError> {
             // R2111 (open-debt item 462) — THE BOUNDARY. `parse_declaration`
             // answers in the TEXT spelling, where the reserved characters are
             // quoted; a `FormatMap` holds patterns as an operator means them.
@@ -2811,29 +3086,56 @@ pub mod formats {
             let unquote = |s: &str| {
                 unescape_field(s).ok_or_else(|| FormatMapError::NotADeclaration(line.to_owned()))
             };
+            // The KEY is read quoted, and a bare separator in it is refused: see
+            // `FormatMapError::UnquotedSeparator`.
+            let key_is_quoted = |key: &str| match bare_separator(key) {
+                Some((offset, separator)) => Err(FormatMapError::UnquotedSeparator {
+                    key: key.to_owned(),
+                    offset,
+                    separator,
+                }),
+                None => Ok(()),
+            };
             match parse_declaration(line)? {
                 DeclarationText::Rule { pattern, format } => {
+                    key_is_quoted(pattern)?;
                     let (pattern, format) = (unquote(pattern)?, unquote(format)?);
+                    // The rule lands at the end, so its position is the count
+                    // before it; a refusal leaves the count where it was.
+                    let index = self.rules.len();
                     // R2114 (open-debt item 237) — resolved by NAME against the
                     // map, which is the only thing that can see a described
                     // format. `builtin` alone stood here, and that is precisely
                     // the door a deployment could not get through.
                     self.insert_named(&pattern, &format)?;
-                    Ok(DeclarationKind::FormatRule)
+                    Ok(DeclaredLine {
+                        kind: DeclarationKind::FormatRule,
+                        pattern: Some(pattern),
+                        rule_index: Some(index),
+                    })
                 }
                 DeclarationText::Definition { name, layout } => {
                     let name = unquote(name)?;
                     self.define(&name, layout)?;
-                    Ok(DeclarationKind::FormatDefinition)
+                    Ok(DeclaredLine {
+                        kind: DeclarationKind::FormatDefinition,
+                        pattern: None,
+                        rule_index: None,
+                    })
                 }
                 DeclarationText::Name {
                     pattern,
                     path,
                     name,
                 } => {
+                    key_is_quoted(pattern)?;
                     let (pattern, path, name) = (unquote(pattern)?, unquote(path)?, unquote(name)?);
                     self.name_field(&pattern, &path, &name)?;
-                    Ok(DeclarationKind::FieldName)
+                    Ok(DeclaredLine {
+                        kind: DeclarationKind::FieldName,
+                        pattern: Some(pattern),
+                        rule_index: None,
+                    })
                 }
             }
         }
@@ -2856,7 +3158,23 @@ pub mod formats {
         /// surfaces -- which is the property `analysis_surface_parity.py`
         /// exists to hold.
         pub fn declare_all(&mut self, text: &str) -> Result<usize, DeclarationError> {
-            let mut installed = 0usize;
+            self.declare_all_described(text).map(|read| read.len())
+        }
+
+        /// [`Self::declare_all`], answering how every installed line was READ,
+        /// in the order of the text.
+        ///
+        /// The order of the TEXT and not of installation: definitions are
+        /// installed first (see above), and a list that followed that would
+        /// hand a consumer the lines in an order it did not send them in. The
+        /// number in each entry is the line's index counting every line of the
+        /// text from 0, blank ones included, which is the number a
+        /// [`DeclarationError`] carries for a refused one.
+        pub fn declare_all_described(
+            &mut self,
+            text: &str,
+        ) -> Result<Vec<(usize, DeclaredLine)>, DeclarationError> {
+            let mut installed = Vec::new();
             for definitions_pass in [true, false] {
                 for (at, line) in text.lines().enumerate() {
                     if line.is_empty() {
@@ -2878,12 +3196,49 @@ pub mod formats {
                     if is_definition != definitions_pass {
                         continue;
                     }
-                    self.declare(line).map_err(bad)?;
-                    installed += 1;
+                    let read = self.declare_described(line).map_err(bad)?;
+                    installed.push((at, read));
                 }
             }
+            installed.sort_by_key(|(at, _)| *at);
             Ok(installed)
         }
+    }
+
+    /// What one installed declaration line was READ as. See
+    /// [`FormatMap::declare_described`].
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub struct DeclaredLine {
+        /// Which kind of declaration the line was.
+        pub kind: DeclarationKind,
+        /// The key expression as read, with its quoting removed. `Some` for a
+        /// rule and for a field name, `None` for a format definition, which has
+        /// no key.
+        pub pattern: Option<String>,
+        /// A rule's position among the format rules, from 0, in the order they
+        /// are tried: the number [`MatchedRule::index`] reports when it wins.
+        /// `Some` for a rule only.
+        pub rule_index: Option<usize>,
+    }
+
+    /// The first `:` or `=` in a KEY, in its quoted form, that is not preceded by
+    /// the quoting backslash, and where.
+    ///
+    /// Scanned left to right for the reason [`rsplit_once_unescaped`] gives: a
+    /// backslash quotes the character after it, so whether a character is quoted
+    /// is a fact about what precedes it.
+    fn bare_separator(written: &str) -> Option<(usize, char)> {
+        let mut quoted = false;
+        for (at, c) in written.char_indices() {
+            if quoted {
+                quoted = false;
+            } else if c == ESCAPE {
+                quoted = true;
+            } else if c == ':' || c == '=' {
+                return Some((at, c));
+            }
+        }
+        None
     }
 }
 
@@ -3076,6 +3431,8 @@ mod format_definition_tests {
 #[cfg(test)]
 mod format_map_tests {
     use super::formats::*;
+    use alloc::borrow::ToOwned;
+    use alloc::string::ToString;
 
     /// A format that claims every byte, so a test can tell WHICH rule fired
     /// without depending on any real decoder.
@@ -3393,11 +3750,123 @@ mod format_map_tests {
             assert!(
                 matches!(
                     map.insert(bad, &marker),
-                    Err(FormatMapError::NotAKeyexpr(_))
+                    Err(FormatMapError::NotAKeyexpr(..))
                 ),
                 "{bad:?} must be refused"
             );
         }
+    }
+
+    /// ONE VALIDATOR: the six patterns the declaration reader used to install
+    /// while the C drop-in's constructor refuses them are refused here, by the
+    /// SAME function, and the refusal says where.
+    ///
+    /// Checked through all three ways a key reaches the map (a rule inserted by
+    /// call, a rule declared in text, a name declared in text), because each had
+    /// its own copy of the old check and any one of them could have kept it.
+    #[cfg(feature = "filter-wildcards")]
+    #[test]
+    fn a_pattern_the_drop_in_refuses_is_refused_by_every_door_into_the_map() {
+        use wz_session_core::keyexpr_canon::{validate_keyexpr, KeyexprFault};
+
+        let marker = Marker("m");
+        for (pattern, fault) in [
+            ("demo//pose", KeyexprFault::EmptyChunk),
+            ("a?b", KeyexprFault::SharpOrQuestionMark),
+            ("**x", KeyexprFault::StarInChunk),
+            ("a*b", KeyexprFault::StarInChunk),
+            ("demo/**/**", KeyexprFault::DoubleStarAfterDoubleStar),
+            ("demo/$*/pose", KeyexprFault::LoneDollarStar),
+        ] {
+            let want = validate_keyexpr(pattern).expect_err("the drop-in refuses it");
+            assert_eq!(want.fault, fault, "{pattern}");
+            let mut map = FormatMap::new();
+            let by_call = map.insert(pattern, &marker).expect_err(pattern);
+            let by_rule = map
+                .declare(&alloc::format!("{pattern}=protobuf"))
+                .expect_err(pattern);
+            let by_name = map
+                .declare(&alloc::format!("{pattern}:1=name"))
+                .expect_err(pattern);
+            for refusal in [by_call, by_rule, by_name] {
+                let (shown, why) = refusal.keyexpr_refusal().unwrap_or_else(|| {
+                    panic!("{pattern}: not a key-expression refusal: {refusal}")
+                });
+                assert_eq!((shown, *why), (pattern, want), "{pattern}");
+            }
+            assert!(map.is_empty(), "{pattern}: nothing may have installed");
+        }
+    }
+
+    /// A refusal's SENTENCE names the chunk, the byte and the reason: it is what
+    /// a person who typed the pattern reads.
+    #[test]
+    fn a_refused_pattern_says_which_chunk_which_byte_and_why() {
+        let marker = Marker("m");
+        let mut map = FormatMap::new();
+        let sentence = map
+            .insert("demo//pose", &marker)
+            .expect_err("an empty chunk")
+            .to_string();
+        assert_eq!(
+            sentence,
+            "`demo//pose` is not a key expression: chunk 1, byte 5: empty chunk: `//`, \
+             a leading `/` and a trailing `/` are not allowed"
+        );
+    }
+
+    /// A key that leaves a `:` or an `=` bare is refused, because the line does
+    /// not say whether that separator is the key's or the dialect's; the quoted
+    /// spelling of the same key installs, and says what it is.
+    #[test]
+    fn a_bare_separator_in_a_key_is_refused_by_name_and_the_quoted_key_installs() {
+        let mut map = FormatMap::new();
+        for (line, key, offset, separator) in [
+            ("a:b:c=x", "a:b", 1, ':'),
+            ("a=b=protobuf", "a=b", 1, '='),
+            ("demo/a:b:1=x", "demo/a:b", 6, ':'),
+            // The backslash is itself quoted, so the colon after it is bare.
+            ("a\\\\:b:1=x", "a\\\\:b", 3, ':'),
+        ] {
+            assert_eq!(
+                map.declare(line),
+                Err(FormatMapError::UnquotedSeparator {
+                    key: key.to_owned(),
+                    offset,
+                    separator
+                }),
+                "{line}"
+            );
+        }
+        assert!(map.is_empty(), "nothing installed from a refused line");
+
+        // The same keys, quoted.
+        let read = map.declare_described("a\\:b:c=x").expect("a quoted key");
+        assert_eq!(read.kind, DeclarationKind::FieldName);
+        assert_eq!(read.pattern.as_deref(), Some("a:b"));
+        let read = map
+            .declare_described("a\\=b=protobuf")
+            .expect("a quoted key");
+        assert_eq!(read.kind, DeclarationKind::FormatRule);
+        assert_eq!(read.pattern.as_deref(), Some("a=b"));
+        // A bare colon in the PATH or the NAME is not ambiguous and is not
+        // refused: the last colon of the scope was already taken as the divider.
+        map.declare("demo/a:1=temp:c").expect("a colon in a name");
+    }
+
+    /// Where a rule lands in the order they are tried is where the map says it
+    /// is, and a refused line does not take a number.
+    #[test]
+    fn a_rule_reports_its_position_among_the_rules_and_a_refusal_takes_none() {
+        let mut map = FormatMap::new();
+        let index = |read: Result<DeclaredLine, FormatMapError>| read.map(|r| r.rule_index);
+        assert_eq!(index(map.declare_described("demo/a=protobuf")), Ok(Some(0)));
+        assert_eq!(index(map.declare_described("demo/a:1=name")), Ok(None));
+        assert!(map.declare_described("demo//b=protobuf").is_err());
+        assert!(map.declare_described("demo/b=nonesuch").is_err());
+        assert_eq!(index(map.declare_described("demo/c=json")), Ok(Some(1)));
+        let won = map.matching_rule("demo/c").expect("covered");
+        assert_eq!((won.rule.index, won.rule.pattern.as_str()), (1, "demo/c"));
     }
 }
 

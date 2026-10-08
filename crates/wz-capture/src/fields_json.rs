@@ -1442,6 +1442,28 @@ fn push_payload_block(
 /// only once the row is selected. The entry is where every row of such a list comes
 /// from, so the id has to arrive here and not be fetched per row. See
 /// [`push_keyexpr_miss`], which writes the three keys from one place.
+///
+/// # Revision 28 — AND WHAT THE MESSAGE SAYS ABOUT ITS PAYLOAD
+///
+/// `payload` follows the key, on every entry, whatever the caller declared. It
+/// is `null` for a message with no payload slot (a `Del`, a `Query` with no body,
+/// a `Declare`, and every transport message), and otherwise the slot's byte range
+/// in the entry's own coordinates, the encoding the sample carried (`null` when it
+/// carried none) and whether the range is an SHM descriptor. See
+/// [`crate::payload_decode::PayloadSlot`] for what the slot is.
+///
+/// WHY THE ENTRY AND NOT THE ROW, which is the placement the consumer that asked
+/// proposed and this document declined, for the reason the key above already gave:
+/// a row is one transport message and a `Frame` batches several network messages
+/// that need not share a key, a payload or an encoding. A row-level summary would
+/// have to name one of them, and the first message with both a key and bytes is
+/// the pairing `keyexpr_and_payload` documents as the defect. The entry is the
+/// smallest object that names ONE message, and its key, its cause and now its
+/// payload are read from it together.
+///
+/// A TRANSPORT message's own entry says `null`, as it names no key: what a `Frame`
+/// carries is each batched record's, and a `Fragment`'s `payload` is a piece of a
+/// batch and not application data.
 fn push_carried(
     bytes: &[u8],
     field: &wz_session_core::dissect::Field,
@@ -1455,6 +1477,7 @@ fn push_carried(
     let mut entry = |word: &str,
                      span: &wz_session_core::dissect::Span,
                      keyexpr: Option<Result<String, crate::payload_decode::UnresolvedRef>>,
+                     payload: Option<crate::payload_decode::PayloadSlot>,
                      out: &mut String| {
         if !first {
             out.push(',');
@@ -1472,6 +1495,7 @@ fn push_carried(
             Some(Err(_)) | None => out.push_str("null"),
         }
         push_keyexpr_miss(keyexpr.as_ref().and_then(|k| k.as_ref().err()), out);
+        push_payload_slot(payload.as_ref(), out);
         out.push('}');
     };
     // The first listing entry is the row itself; subsequent entries are its
@@ -1487,7 +1511,7 @@ fn push_carried(
         } else {
             None
         };
-        entry(message.name(), &field.span, keyexpr, out);
+        entry(message.name(), &field.span, keyexpr, None, out);
     }
     for record in records {
         let word = bytes
@@ -1498,10 +1522,38 @@ fn push_carried(
             word,
             &record.span,
             crate::payload_decode::subtree_keyexpr_outcome(record, at),
+            crate::payload_decode::payload_slot(record),
             out,
         );
     }
     out.push(']');
+}
+
+/// The `payload` key of one `carried` entry: `null`, or the slot's range, its
+/// encoding and whether the range is an SHM descriptor.
+///
+/// One body for the two places an entry is written, as [`push_keyexpr_miss`]
+/// is for the key beside it. `encoding` is `null` when the message carried none
+/// and otherwise a string, so a consumer reading it never confuses "the default"
+/// with "nothing was said"; the two are different facts on the wire.
+fn push_payload_slot(slot: Option<&crate::payload_decode::PayloadSlot>, out: &mut String) {
+    out.push_str(",\"payload\":");
+    let Some(slot) = slot else {
+        out.push_str("null");
+        return;
+    };
+    let _ = write!(
+        out,
+        "{{\"start\":{},\"end\":{},\"encoding\":",
+        slot.start, slot.end
+    );
+    match &slot.encoding {
+        Some(encoding) => escape_into(encoding, out),
+        None => out.push_str("null"),
+    }
+    out.push_str(",\"shm_descriptor\":");
+    out.push_str(if slot.shm_descriptor { "true" } else { "false" });
+    out.push('}');
 }
 
 /// The `keyexpr_cause` and `keyexpr_id` keys of one `carried` entry, after its
@@ -1743,6 +1795,10 @@ fn push_above_transport(
                 _ => out.push_str("null"),
             }
             push_keyexpr_miss(outcome.as_ref().and_then(|o| o.as_ref().err()), out);
+            // Revision 28 — the same `payload` the row's own entries carry, from
+            // the same finder, in the JOINED buffer's coordinates like the
+            // entry's `start` and `end`.
+            push_payload_slot(crate::payload_decode::payload_slot(record).as_ref(), out);
             push_payload_block(record, declarations, at, out);
             out.push('}');
         }
@@ -3034,6 +3090,16 @@ mod tests {
     use crate::Dissection;
 
     use alloc::vec;
+
+    /// A rule to fill the `rule` field of the values the key-set pins render by
+    /// hand: those pins read the KEYS and WORDS a rendering produces, and which
+    /// rule it names is furniture there.
+    fn demo_rule() -> crate::payload::formats::MatchedRule {
+        crate::payload::formats::MatchedRule {
+            index: 0,
+            pattern: String::from("demo/**"),
+        }
+    }
 
     /// R2460 (open-debt item 705) — ACCEPTANCE: THIS DOCUMENT RESOLVES A KEY
     /// DECLARED ON THE PREVIOUS FLOW'S QUIC SUB-LIST.
@@ -5990,6 +6056,7 @@ mod tests {
             push_decoding(
                 &PayloadDecoding::Decoded {
                     keyexpr: String::from("demo/**"),
+                    rule: demo_rule(),
                     format: String::from("json"),
                     fields: alloc::vec![crate::payload::formats::PayloadField {
                         path: String::from("$.a"),
@@ -6021,6 +6088,7 @@ mod tests {
                     under,
                     samples: 1,
                     example: String::from("byte 0"),
+                    rule: demo_rule(),
                 },
                 &mut out,
             );
@@ -6036,6 +6104,7 @@ mod tests {
                     wrong,
                     publisher: None,
                     samples: 1,
+                    rule: demo_rule(),
                 },
                 &mut out,
             );
@@ -6135,7 +6204,7 @@ mod tests {
         // against a rename and against each other and against NOTHING a
         // consumer could read.
         let mut failures: Vec<String> = Vec::new();
-        let live: [(&str, &str, Vec<&'static str>); 26] = [
+        let live: [(&str, &str, Vec<&'static str>); 29] = [
             // The session's per-frame verdicts, each held to the
             // walk its emitter's exhaustive match is bound to.
             (rev::FIELDS, "verdict", SnVerdictWord::names()),
@@ -6230,6 +6299,37 @@ mod tests {
                 rev::SELECTOR_DIAGNOSE,
                 "kind",
                 crate::filter::TokenClass::names(),
+            ),
+            // The declaration verdict's two families and the key-expression
+            // verdict's one. The kinds are `DeclarationKind::word` over its
+            // `ALL`, and the reasons are `KeyexprFault::word` over its `ALL`:
+            // both words are bound to an exhaustive match, and the reason
+            // vocabulary is declared on TWO documents and held to the ONE walk,
+            // which is what keeps the declaration door and the key-expression
+            // door from drifting into two answers about the same eight words.
+            (
+                rev::DECLARATIONS_DIAGNOSE,
+                "kind",
+                crate::payload::formats::DeclarationKind::ALL
+                    .iter()
+                    .map(|k| k.word())
+                    .collect(),
+            ),
+            (
+                rev::DECLARATIONS_DIAGNOSE,
+                "reason",
+                wz_session_core::keyexpr_canon::KeyexprFault::ALL
+                    .iter()
+                    .map(|f| f.word())
+                    .collect(),
+            ),
+            (
+                rev::KEYEXPR_DIAGNOSE,
+                "reason",
+                wz_session_core::keyexpr_canon::KeyexprFault::ALL
+                    .iter()
+                    .map(|f| f.word())
+                    .collect(),
             ),
             // The verdict document's two families, each held to the
             // SAME walk the field document's is. Two declarations of one
@@ -6636,6 +6736,7 @@ mod tests {
                     under,
                     samples: 1,
                     example: String::from("byte 0"),
+                    rule: demo_rule(),
                 },
                 &mut out,
             );
@@ -6651,6 +6752,7 @@ mod tests {
                     wrong,
                     publisher: None,
                     samples: 1,
+                    rule: demo_rule(),
                 },
                 &mut out,
             );
@@ -6801,12 +6903,48 @@ mod tests {
         .into_iter()
         .map(crate::filter::diagnose_json)
         .collect();
+        // The two verdicts on a typed text, over one text per FAULT so every
+        // `reason` word is rendered, and (for the declaration verdict) a success
+        // with a line of each kind so every `kind` word is.
+        //
+        // `("…", "…")` is a key expression that commits exactly that fault.
+        let fault_examples: [(&str, &str); 8] = [
+            ("empty_chunk", "a//b"),
+            ("star_in_chunk", "a*b"),
+            ("single_star_after_double_star", "**/*"),
+            ("double_star_after_double_star", "**/**"),
+            ("lone_dollar_star", "a/$*"),
+            ("dollar_after_dollar", "a$*$b"),
+            ("sharp_or_question_mark", "a?b"),
+            ("unbound_dollar", "a$b"),
+        ];
+        let mut declaration_verdicts: Vec<String> = alloc::vec![
+            crate::diagnose_json::declarations_diagnose_json(
+                "demo/a=protobuf\ndemo/a:1=name\n#profile=a:u8\ndemo/b=profile"
+            ),
+            crate::diagnose_json::declarations_diagnose_json("not a declaration"),
+        ];
+        let mut keyexpr_verdicts: Vec<String> =
+            alloc::vec![crate::diagnose_json::keyexpr_diagnose_json("demo/**")];
+        for (word, example) in fault_examples {
+            let verdict = crate::diagnose_json::keyexpr_diagnose_json(example);
+            // The example commits the fault it is listed under, or the walk of
+            // words below would be measured over the wrong population.
+            assert!(
+                verdict.contains(&alloc::format!("\"reason\":\"{word}\"")),
+                "{example:?} was meant to be `{word}`: {verdict}"
+            );
+            keyexpr_verdicts.push(verdict);
+            declaration_verdicts.push(crate::diagnose_json::declarations_diagnose_json(
+                &alloc::format!("{example}=protobuf"),
+            ));
+        }
         #[cfg(all(feature = "reassembly", feature = "network-codecs"))]
         fields_docs.push(&chain_fields);
         #[cfg(feature = "reassembly")]
         fields_docs.push(&midsession_fields);
         fields_docs.extend(arms.iter());
-        let docs: [(&str, Vec<&String>); 4] = [
+        let docs: [(&str, Vec<&String>); 6] = [
             (rev::FIELDS, fields_docs),
             (
                 rev::CENSUS,
@@ -6814,6 +6952,11 @@ mod tests {
             ),
             (rev::SELECTOR_DIAGNOSE, diagnoses.iter().collect()),
             (rev::SELECTION, verdict_docs.iter().collect()),
+            (
+                rev::DECLARATIONS_DIAGNOSE,
+                declaration_verdicts.iter().collect(),
+            ),
+            (rev::KEYEXPR_DIAGNOSE, keyexpr_verdicts.iter().collect()),
         ];
 
         // ⚠ R2185 — THE DOCUMENTS THIS GATE RENDERS ARE THE DOCUMENTS THAT
@@ -7624,10 +7767,10 @@ mod tests {
         assert!(
             missed.contains(
                 "\"payload_decode\":{\"state\":\"no_rule\",\
-                             \"keyexpr\":\"demo/sensor\"}"
+                             \"keyexpr\":\"demo/sensor\",\"matched_rule\":null}"
             ),
             "a rule that covers no topic here must say so AND name the keyexpr \
-             it was tested against: {missed}"
+             it was tested against, with no rule as the winner: {missed}"
         );
 
         let mut map = FormatMap::new();
@@ -7645,6 +7788,7 @@ mod tests {
         assert!(
             block.starts_with(
                 "\"payload_decode\":{\"state\":\"decoded\",\"keyexpr\":\"demo/sensor\",\
+                 \"matched_rule\":{\"index\":0,\"pattern\":\"demo/sensor\"},\
                  \"despite_encoding\":null,\"format\":\"protobuf\",\"fields\":["
             ),
             "the covering rule must DECODE, naming the topic and the decoder: {block}"
@@ -7680,7 +7824,7 @@ mod tests {
     /// The raw values of every object of `doc` that holds `marker`, read by the
     /// library's own scope walker so a test never reads a nested group as its
     /// parent.
-    #[cfg(all(feature = "reassembly", feature = "network-codecs"))]
+    #[cfg(feature = "network-codecs")]
     fn objects_holding<'a>(doc: &'a str, marker: &str) -> Vec<Vec<(&'a str, &'a str)>> {
         crate::doc_revision::object_scopes(doc)
             .into_iter()
@@ -7688,7 +7832,7 @@ mod tests {
             .collect()
     }
 
-    #[cfg(all(feature = "reassembly", feature = "network-codecs"))]
+    #[cfg(feature = "network-codecs")]
     fn raw<'a>(scope: &[(&'a str, &'a str)], key: &str) -> &'a str {
         scope
             .iter()
@@ -7762,13 +7906,17 @@ mod tests {
             "spans in the joined buffer's coordinates"
         );
         // Placed beside the entry's own key, which is where a reader that
-        // walks `above_transport.carried` looks.
+        // walks `above_transport.carried` looks. The entry's `payload` sits
+        // between the key and the decode, in the JOINED buffer's coordinates,
+        // and says the encoding the sample carried (id 0, named explicitly).
         assert!(
-            chain.contains(
+            chain.contains(&alloc::format!(
                 "\"keyexpr_cause\":null,\"keyexpr_id\":null,\
-                 \"payload_decode\":{\"state\":\"decoded\",\
+                 \"payload\":{{\"start\":{start},\"end\":{end},\
+                 \"encoding\":\"zenoh/bytes\",\"shm_descriptor\":false}},\
+                 \"payload_decode\":{{\"state\":\"decoded\",\
                  \"keyexpr\":\"demo/sensor\""
-            ),
+            )),
             "under the carried entry: {chain}"
         );
     }
@@ -7815,8 +7963,10 @@ mod tests {
 
         assert!(
             chain.contains("\"payload_decode\":{\"state\":\"decoded\",\"keyexpr\":\"demo/a\"")
-                && chain
-                    .contains("\"payload_decode\":{\"state\":\"no_rule\",\"keyexpr\":\"demo/b\"}"),
+                && chain.contains(
+                    "\"payload_decode\":{\"state\":\"no_rule\",\"keyexpr\":\"demo/b\",\
+                     \"matched_rule\":null}"
+                ),
             "each record, in its own state: {chain}"
         );
         // The frame's own block is one block for the whole frame, the first
@@ -7827,7 +7977,7 @@ mod tests {
             "the first record's decode: {twin}"
         );
         assert!(
-            !twin.contains("\"keyexpr\":\"demo/b\",\"despite_encoding\"")
+            !twin.contains("\"keyexpr\":\"demo/b\",\"matched_rule\"")
                 && !twin.contains("\"state\":\"no_rule\",\"keyexpr\":\"demo/b\""),
             "and nothing in the row speaks for the second: {twin}"
         );
@@ -7890,11 +8040,18 @@ mod tests {
         // the claim: the fragment rows' OWN blocks say `keyexpr_unresolved` too,
         // because a Fragment's raw body is the only payload their walk finds, so
         // the bare word appears in rows that are not this record.
+        //
+        // The entry's `payload` is there all the same: a payload slot does not
+        // need a resolved key, which is the case an editor opening a capture
+        // that began after the declarations is in.
+        let (start, end) = (record.len() - 3, record.len());
         assert!(
-            doc.contains(
+            doc.contains(&alloc::format!(
                 "\"keyexpr\":null,\"keyexpr_cause\":\"no_session\",\"keyexpr_id\":7,\
-                 \"payload_decode\":{\"state\":\"keyexpr_unresolved\"}"
-            ),
+                 \"payload\":{{\"start\":{start},\"end\":{end},\
+                 \"encoding\":\"zenoh/bytes\",\"shm_descriptor\":false}},\
+                 \"payload_decode\":{{\"state\":\"keyexpr_unresolved\"}}"
+            )),
             "{doc}"
         );
     }
@@ -8512,6 +8669,332 @@ mod tests {
             out.contains("not_datagram"),
             "a TCP segment where the first read recorded a datagram flow must \
              still be refused, under the name that says what happened: {out}"
+        );
+    }
+
+    /// One transport `Frame` per record, all in one TCP segment: the dissection,
+    /// its capture, and each frame's length (a record rides at the END of its
+    /// frame, so a payload's offsets are measured back from it).
+    #[cfg(feature = "network-codecs")]
+    fn one_frame_per_record(records: &[Vec<u8>]) -> (Dissection, Vec<u8>, Vec<usize>) {
+        let mut framed = Vec::new();
+        let mut lengths = Vec::new();
+        for record in records {
+            let wire = crate::datagram_tests::frame_carrying(record);
+            framed.push(wire.len() as u8);
+            framed.push(0);
+            framed.extend_from_slice(&wire);
+            lengths.push(wire.len());
+        }
+        let packet = tcp_packet(1000, &framed);
+        let mut d = Dissection::new();
+        d.push_packet(LINKTYPE_ETHERNET, 0, &packet);
+        d.finish();
+        let file = crate::pcap::write(1, &[(0, 0, packet.as_slice())]);
+        (d, file, lengths)
+    }
+
+    /// The `carried` entry of `doc` that names `keyexpr`, whole.
+    #[cfg(feature = "network-codecs")]
+    fn entry_named<'a>(doc: &'a str, keyexpr: &str) -> Vec<(&'a str, &'a str)> {
+        let want = alloc::format!("\"{keyexpr}\"");
+        objects_holding(doc, "keyexpr_id")
+            .into_iter()
+            .find(|entry| raw(entry, "keyexpr") == want)
+            .unwrap_or_else(|| panic!("no carried entry for {keyexpr}: {doc}"))
+    }
+
+    /// A `Push` carrying a `MsgDel` under `keyexpr`: a message with a key and no
+    /// payload slot.
+    #[cfg(feature = "network-codecs")]
+    fn push_del(keyexpr: &'static str) -> Vec<u8> {
+        wz_codecs::push::Push {
+            header: wz_codecs::push::Push::default().header | wz_codecs::wire_const::FLAG_N_N,
+            keyexpr: crate::exchange::tests::sender_space(0, Some(keyexpr)),
+            body: wz_codecs::push::PushVariant::CodecZenohMsgDel(
+                wz_codecs::msg_del::MsgDel::default(),
+            ),
+            ..Default::default()
+        }
+        .encode_to_vec()
+    }
+
+    /// The table id of an encoding NAME, so a fixture asks for the encoding it
+    /// means and not for the number it happens to sit at today.
+    #[cfg(feature = "network-codecs")]
+    fn encoding_id(name: &str) -> u16 {
+        wz_codecs::encoding_ids::ENCODING_ID_TO_STR
+            .iter()
+            .position(|n| *n == name)
+            .unwrap_or_else(|| panic!("the table holds no `{name}`")) as u16
+    }
+
+    /// A READER THAT DECLARED NOTHING IS STILL TOLD WHERE EACH MESSAGE'S PAYLOAD
+    /// IS, WHAT ENCODING IT CARRIED, AND WHETHER IT IS ON THE WIRE.
+    ///
+    /// # What it was
+    ///
+    /// A row had `payload_decode` only when a rule matched. With no declaration
+    /// the payload's range was inside the field tree and its encoding inside the
+    /// tree's `encoding` group, so an editor had to walk the tree to find where
+    /// to put its cursor. The population here is every shape the summary has to
+    /// tell apart: an inline payload, a Put with NO encoding field, an encoding
+    /// with a schema, an encoding id the table lacks, an SHM descriptor, a
+    /// payload sent as plain slices, and the messages with no payload slot at all
+    /// (a `Del`, a `Query` without a body); plus a `Query` WITH a body, whose
+    /// payload lives in an extension.
+    ///
+    /// Every range is measured back from the end of the frame its record rides
+    /// at the end of, and every message is one frame of its own, so the offsets
+    /// come from the builders' lengths and not from a second reading of the
+    /// document under test.
+    #[cfg(feature = "network-codecs")]
+    #[test]
+    fn a_reader_that_declared_nothing_is_told_where_every_payload_is() {
+        use crate::exchange::tests as fx;
+        use crate::payload::tests_support as build;
+
+        let json = encoding_id("application/json");
+        let protobuf = encoding_id("application/protobuf");
+        let records: Vec<Vec<u8>> = alloc::vec![
+            build::push_declaring("demo/json", json, br#"{"a":1}"#),
+            build::push_with_encoding("demo/plain", None, b"xyz"),
+            build::push_with_encoding(
+                "demo/schema",
+                Some((protobuf, Some("pkg.Msg"))),
+                b"\x08\x01"
+            ),
+            build::push_with_encoding("demo/odd", Some((60, None)), b"q"),
+            build::push_with_shm_descriptor("demo/shm", json, &[0x01, 0x00, 0x2a]),
+            build::push_with_raw_slices("demo/sliced", json, &[b"ab", b"cde"]),
+            push_del("demo/del"),
+            fx::request_query(7, fx::sender_space(0, Some("demo/query"))),
+            crate::agg::tests::request_query_valued_as_upstream_writes_it(
+                8,
+                fx::sender_space(0, Some("demo/valued")),
+                br#"{"q":1}"#,
+            ),
+        ];
+        let (d, file, lengths) = one_frame_per_record(&records);
+        let doc = fields_json(&d, &file, None, None);
+        assert!(
+            !doc.contains("\"payload_decode\":{\"state\":\"decoded\""),
+            "nothing was declared, so nothing was decoded: {doc}"
+        );
+
+        // (key, the payload as the entry should write it)
+        let tail = |frame: usize, length: usize| (lengths[frame] - length, lengths[frame]);
+        let slot = |range: (usize, usize), encoding: &str, shm: bool| {
+            alloc::format!(
+                "{{\"start\":{},\"end\":{},\"encoding\":{encoding},\"shm_descriptor\":{shm}}}",
+                range.0,
+                range.1
+            )
+        };
+        let want: [(&str, String); 9] = [
+            ("demo/json", slot(tail(0, 7), "\"application/json\"", false)),
+            // No `E` bit: the sample carried NO encoding, which is `null` and
+            // not the default's name.
+            ("demo/plain", slot(tail(1, 3), "null", false)),
+            (
+                "demo/schema",
+                slot(tail(2, 2), "\"application/protobuf;pkg.Msg\"", false),
+            ),
+            // An id past the table's last entry, spelled as upstream spells it.
+            ("demo/odd", slot(tail(3, 1), "\"unknown(60)\"", false)),
+            // The SHM descriptor's own three bytes, flagged as an address.
+            ("demo/shm", slot(tail(4, 3), "\"application/json\"", true)),
+            // Two plain slices of two and three bytes: each element is a kind
+            // byte, a length byte and its bytes, so the group is nine bytes.
+            (
+                "demo/sliced",
+                slot(tail(5, 9), "\"application/json\"", false),
+            ),
+            ("demo/del", String::from("null")),
+            ("demo/query", String::from("null")),
+            // A query's body lives in an extension and has the default encoding
+            // written explicitly (id 0).
+            ("demo/valued", slot(tail(8, 7), "\"zenoh/bytes\"", false)),
+        ];
+        for (key, payload) in &want {
+            let entry = entry_named(&doc, key);
+            assert_eq!(raw(&entry, "payload"), payload.as_str(), "{key}: {doc}");
+        }
+
+        // The control, which is the half that makes the summary a statement
+        // about the MESSAGE: the same capture read by a reader that declared
+        // rules writes the same `payload` on every entry, because it depends on
+        // the bytes and on no declaration.
+        let mut map = crate::payload::formats::FormatMap::new();
+        map.declare("demo/**=protobuf").expect("a rule");
+        let declared = fields_json(&d, &file, None, Some(&Declarations::new(&map)));
+        for (key, _) in &want {
+            assert_eq!(
+                raw(&entry_named(&declared, key), "payload"),
+                raw(&entry_named(&doc, key), "payload"),
+                "{key}: a declaration moved the payload summary"
+            );
+        }
+
+        // And a transport message's own entry names none, whatever it carries.
+        let frames: Vec<_> = objects_holding(&doc, "keyexpr_id")
+            .into_iter()
+            .filter(|entry| raw(entry, "message") == "\"Frame\"")
+            .collect();
+        assert_eq!(frames.len(), records.len(), "one Frame per record: {doc}");
+        for frame in &frames {
+            assert_eq!(raw(frame, "payload"), "null", "{frame:?}");
+        }
+    }
+
+    /// THE RULE A ROW NAMES IS THE RULE THE DIAGNOSIS NUMBERS, in either order of
+    /// two overlapping rules.
+    ///
+    /// The consumer showed that two rules of one format gave byte-identical rows
+    /// in both orders, so a row could not say which had won. Here the same
+    /// capture is read under both orders and the row's `matched_rule` is joined
+    /// to the line that installed it through `declarations_diagnose`'s
+    /// `rule_index`, by equality and with no counting: the join an editor does
+    /// to light up the winning line.
+    #[cfg(feature = "network-codecs")]
+    #[test]
+    fn the_rule_a_row_names_is_the_rule_the_diagnosis_numbers() {
+        use crate::payload::formats::FormatMap;
+
+        let protobuf = encoding_id("application/protobuf");
+        let record = crate::payload::tests_support::push_declaring(
+            "demo/robots/1/pose",
+            protobuf,
+            &[0x08, 0x01],
+        );
+        let (d, file, _) = one_frame_per_record(&[record]);
+        let mut won: Vec<(String, String)> = Vec::new();
+        for (text, winner) in [
+            (
+                "other/**=protobuf\ndemo/**=protobuf\ndemo/robots/1/pose=protobuf",
+                "demo/**",
+            ),
+            (
+                "other/**=protobuf\ndemo/robots/1/pose=protobuf\ndemo/**=protobuf",
+                "demo/robots/1/pose",
+            ),
+        ] {
+            let mut map = FormatMap::new();
+            map.declare_all(text).expect("rules that install");
+            let doc = fields_json(&d, &file, None, Some(&Declarations::new(&map)));
+            let rows: Vec<_> = objects_holding(&doc, "index");
+            assert_eq!(rows.len(), 1, "one decoded row names one rule: {doc}");
+            let (index, pattern) = (raw(&rows[0], "index"), raw(&rows[0], "pattern"));
+            assert_eq!(pattern, alloc::format!("\"{winner}\""), "{text}: {doc}");
+
+            // The diagnosis numbers the same line the same way.
+            let diagnosis = crate::diagnose_json::declarations_diagnose_json(text);
+            let numbered: Vec<_> = objects_holding(&diagnosis, "rule_index")
+                .into_iter()
+                .map(|line| (raw(&line, "pattern"), raw(&line, "rule_index")))
+                .collect();
+            assert!(
+                numbered.contains(&(pattern, index)),
+                "{text}: the row names {pattern} as rule {index} and the diagnosis \
+                 numbers {numbered:?}"
+            );
+            won.push((String::from(pattern), String::from(index)));
+        }
+        // The two orders name DIFFERENT winners, which is the whole of it.
+        assert_ne!(won[0], won[1], "{won:?}");
+    }
+
+    /// A `Frame` that batches two messages gives each its own payload, range and
+    /// encoding: the reason the summary is on the ENTRY and not on the row.
+    ///
+    /// A row-level summary would have to name one of the two, and the first with
+    /// both a key and bytes is the pairing `keyexpr_and_payload` records as the
+    /// defect. The second message's range is the last bytes of the frame and the
+    /// first's ends where the second record begins.
+    #[cfg(all(feature = "reassembly", feature = "network-codecs"))]
+    #[test]
+    fn a_frame_that_batches_two_messages_gives_each_its_own_payload() {
+        use crate::payload::tests_support as build;
+
+        let json = encoding_id("application/json");
+        let first = build::push_declaring("demo/a", json, br#"{"a":1}"#);
+        let second = build::push_with_encoding("demo/b", None, b"zz");
+        let mut batch = first.clone();
+        batch.extend_from_slice(&second);
+        let (d, file) = crate::datagram_tests::contiguous_record_dissection_with_file(&batch);
+        let doc = fields_json(&d, &file, None, None);
+
+        let frame = objects_holding(&doc, "keyexpr_id")
+            .into_iter()
+            .find(|entry| raw(entry, "message") == "\"Frame\"")
+            .expect("the data frame's own entry");
+        let end: usize = raw(&frame, "end").parse().expect("a number");
+        let second_end = end;
+        let first_end = end - second.len();
+        assert_eq!(
+            raw(&entry_named(&doc, "demo/a"), "payload"),
+            alloc::format!(
+                "{{\"start\":{},\"end\":{first_end},\"encoding\":\"application/json\",\
+                 \"shm_descriptor\":false}}",
+                first_end - 7
+            ),
+            "{doc}"
+        );
+        assert_eq!(
+            raw(&entry_named(&doc, "demo/b"), "payload"),
+            alloc::format!(
+                "{{\"start\":{},\"end\":{second_end},\"encoding\":null,\
+                 \"shm_descriptor\":false}}",
+                second_end - 2
+            ),
+            "{doc}"
+        );
+        assert_eq!(raw(&frame, "payload"), "null", "{frame:?}");
+    }
+
+    /// EVERY entry of a capture with every plane writes `payload`, and exactly
+    /// the network messages that carry a body write an object.
+    ///
+    /// The population is the shared every-plane capture, so this holds over
+    /// declarations, interests, queries, replies and the handshake rows the
+    /// builders above do not make. A transport message's entry is `null`.
+    #[cfg(feature = "network-codecs")]
+    #[test]
+    fn every_carried_entry_writes_a_payload_and_only_a_message_with_a_slot_fills_it() {
+        let (d, file) =
+            crate::census_json::fed_tests::every_plane_capture_with_file("demo/temp", None, true);
+        let doc = fields_json(&d, &file, None, None);
+        let network = [
+            "Push",
+            "Request",
+            "Response",
+            "ResponseFinal",
+            "Interest",
+            "Declare",
+            "Oam",
+        ];
+        let entries = objects_holding(&doc, "keyexpr_id");
+        let (mut filled, mut empty_network) = (0usize, 0usize);
+        for entry in &entries {
+            let message = raw(entry, "message").trim_matches('"');
+            let payload = raw(entry, "payload");
+            if !network.contains(&message) {
+                assert_eq!(
+                    payload, "null",
+                    "a transport message names no payload: {entry:?}"
+                );
+            } else if payload == "null" {
+                empty_network += 1;
+            } else {
+                filled += 1;
+                assert!(payload.starts_with("{\"start\":"), "{entry:?}");
+            }
+        }
+        // Both arms have a population, or the loop above passed over nothing.
+        assert!(filled > 0, "no network message carried a payload: {doc}");
+        assert!(
+            empty_network > 0,
+            "no network message was without one: {doc}"
         );
     }
 }
