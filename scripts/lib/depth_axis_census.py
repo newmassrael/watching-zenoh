@@ -2663,7 +2663,12 @@ PIN_NO_SYMBOL = 0
 # rewrites and the codec's error reply that has no sliced layout. `api-compat-c` is not touched and
 # is still PARTIAL beside it. READ off the census's own FAIL line, `wz citations: 270 against a pin
 # of 264`, for the reason the R3062 note gives.
-PIN_WZ_CITATIONS = 270
+#
+# R3104 -- 270 -> 271, one atom. `transport-shm`'s reason gains a CORRECTION that takes the error
+# reply out of its open clauses, and it names the error reply's codec once more, which is the one
+# citation the census counts. `api-compat-c` is not touched and is still PARTIAL beside it. READ
+# off the census's own FAIL line, `wz citations: 271 against a pin of 270`.
+PIN_WZ_CITATIONS = 271
 # R2626 — 44 -> 42, and this one is worth a sentence because it HELD through
 # every earlier retirement in this run (R2612, R2622). `time-hlc`'s reason is the
 # first retiree carrying AMBIGUOUS citations of its own: its oldest clauses cite
