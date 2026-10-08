@@ -18,35 +18,77 @@
 //! decide, and the caller keeps one judge per stream. A capture pipeline that
 //! owns that keying comes later and is deliberately not behind this type.
 //!
-//! # The rules, in the order they apply to a reception
+//! # The rules, in the order they apply to one reception
 //!
-//! 1. A frame whose CRC does not match is a CRC error. It is NOT judged for its
-//!    counter, and it changes no state: neither the counter baseline nor the
-//!    instant of the last valid reception.
-//! 2. Otherwise, if no counter has been accepted yet, this one becomes the
-//!    baseline with no error, whatever its value.
-//! 3. Otherwise the step is `(counter - baseline) mod 2^width`:
+//! The order is the specification's order of steps: the CRC, then the counter
+//! with the state it moves, then the timeout.
+//!
+//! 1. **CRC.** A frame whose CRC does not match is a CRC error. It is NOT
+//!    judged for its counter, and it changes no state: neither the counter
+//!    baseline nor the instant of the last valid reception.
+//! 2. **Counter and state**, for a frame whose CRC is fine. If no counter has
+//!    been accepted yet, this one becomes the baseline with no error, whatever
+//!    its value. Otherwise the step is `(counter - baseline) mod 2^width`:
 //!    * 0 is a REPETITION: counter error, baseline and instant unchanged;
 //!    * 1 to `max_gap` is fine, skipped counters included: baseline and
-//!      instant move;
+//!      instant move to this frame;
 //!    * above `max_gap` is OUT OF RANGE: counter error, but the baseline and
 //!      the instant move to this frame, so one lost run does not condemn every
 //!      frame after it.
-//! 4. The timeout is judged on every reception, and on a [`Judge::poll`] with
-//!    no reception: it is an error when an earlier valid reception exists and
-//!    `now - that instant > timeout_ms`.
+//! 3. **Timeout**, judged LAST, against the last-valid instant as it stands
+//!    after step 2: an error when that instant exists and
+//!    `now - instant > timeout_ms`. Two things follow, and both are contract:
+//!    * **A valid reception clears its own timeout.** A valid frame, fine or
+//!      out of range, has just moved the instant to now, so its timeout is
+//!      false however long the silence before it was. That silence was a
+//!      timeout while it lasted, and [`Judge::poll`] saw it; the frame that
+//!      ends it is not itself late.
+//!    * **A CRC error and a repetition move nothing**, so their timeout is
+//!      judged against the PREVIOUS valid instant: true when the silence
+//!      exceeds the limit.
 //!
-//! # Decisions not forced by the description of the rules
+//! [`Judge::poll`] judges step 3 alone, at an instant when nothing was
+//! received, and changes no state.
 //!
-//! * On a reception the timeout is judged against the instant of the PREVIOUS
-//!   valid reception, before this one moves it. Judged after the move, a frame
-//!   could never arrive late, and the only timeouts left would be the ones
-//!   found by a poll.
-//! * A clock reading earlier than the last valid instant counts as no time
-//!   having passed, never as a wrapped-around huge gap.
-//! * The output is three booleans, as a consumer reports them, plus
-//!   [`CounterReason`], which tells a repetition from an out-of-range step for
-//!   analysis. A consumer that reports only the booleans loses nothing.
+//! # Output
+//!
+//! The judgment is three booleans, as a consumer reports them, plus
+//! [`CounterReason`], which tells a repetition from an out-of-range step for
+//! analysis. A fourth field, [`Judgment::since_previous_valid_ms`], is
+//! INFORMATION ONLY and changes the meaning of none of the booleans: it is the
+//! silence, in milliseconds, between the previous valid reception and this
+//! reception (or poll), taken before this reception could move anything, and it
+//! is `None` when there was no previous valid reception. It is what lets a
+//! consumer still show "this valid frame came after 1500 ms of silence" beside
+//! a timeout that is false. A consumer that reports only the booleans loses
+//! nothing else.
+//!
+//! # A stream that never received can time out
+//!
+//! A receiver that starts a stream's silence clock at stream start, after its
+//! own start delay, can find the stream silent although nothing ever arrived.
+//! [`Judge::arm`] is that act: it sets the instant the silence is measured from
+//! WITHOUT creating a valid-reception history. The counter baseline stays unset
+//! (the first reception still sets it without a counter error),
+//! [`Judge::last_valid_ms`] stays `None`, and [`Judge::poll`] and every CRC
+//! error before the first valid frame are judged against the armed instant. The
+//! first valid reception replaces it, as it replaces any earlier instant. Arming
+//! twice keeps the EARLIER instant: a second start event must not push the
+//! deadline out. Arming a stream that already has a valid reception changes
+//! nothing, because its own history is the reference. Without `arm`, a stream
+//! that never received is never judged. The information field stays `None` for
+//! an armed stream with no valid reception, because there is no previous valid
+//! reception to measure from; the caller who armed it knows the instant.
+//!
+//! # A clock that goes backwards counts as no time passed
+//!
+//! A reading earlier than the instant it is compared with counts as no silence,
+//! never as a wrapped-around huge gap. This is a DELIBERATE difference from a
+//! receiver on a fixed-width device clock, which subtracts as an unsigned
+//! integer and so turns a backwards step into an enormous gap. That is an
+//! artifact of a fixed-width clock; the clock here is a capture's timestamp,
+//! which can step backwards when captures are merged, and a merge must not read
+//! as a timeout.
 
 use crate::e2e_crc::width_mask;
 
@@ -68,10 +110,16 @@ pub struct Judgment {
     pub crc_error: bool,
     /// The counter was a repetition or out of range.
     pub counter_error: bool,
-    /// The silence since the last valid reception exceeded the limit.
+    /// The silence exceeded the limit, judged after this reception's own
+    /// state update (see the module doc): false for every valid reception.
     pub timeout_error: bool,
     /// What `counter_error` was; [`CounterReason::None`] whenever it is false.
     pub counter_reason: CounterReason,
+    /// INFORMATION ONLY: the milliseconds between the previous valid reception
+    /// and this reception or poll, taken before this reception moved anything;
+    /// `None` when there was no previous valid reception. It changes the
+    /// meaning of none of the booleans.
+    pub since_previous_valid_ms: Option<u64>,
 }
 
 /// What a judge is configured with.
@@ -110,6 +158,9 @@ pub struct Judge {
     config: JudgeConfig,
     baseline: Option<u64>,
     last_valid_ms: Option<u64>,
+    /// The instant [`Judge::arm`] set, kept only until the first valid
+    /// reception replaces it.
+    armed_ms: Option<u64>,
 }
 
 impl Judge {
@@ -119,6 +170,24 @@ impl Judge {
             config,
             baseline: None,
             last_valid_ms: None,
+            armed_ms: None,
+        }
+    }
+
+    /// Start the stream's silence clock at `now_ms`, without any reception.
+    ///
+    /// Afterwards [`Judge::poll`], and a CRC error that arrives before any
+    /// valid frame, are judged against this instant, so a stream that never
+    /// received can time out. It creates no valid-reception history: the
+    /// counter baseline and [`Judge::last_valid_ms`] stay `None`, and the first
+    /// valid reception still sets the baseline without a counter error and
+    /// replaces this instant.
+    ///
+    /// Arming twice keeps the earlier instant, and arming a stream that
+    /// already has a valid reception changes nothing.
+    pub fn arm(&mut self, now_ms: u64) {
+        if self.last_valid_ms.is_none() && self.armed_ms.is_none() {
+            self.armed_ms = Some(now_ms);
         }
     }
 
@@ -132,13 +201,27 @@ impl Judge {
         self.last_valid_ms
     }
 
+    /// The instant [`Judge::arm`] set, while no valid reception has replaced
+    /// it; `None` otherwise.
+    pub fn armed_ms(&self) -> Option<u64> {
+        self.armed_ms
+    }
+
     fn counter_mask(&self) -> u64 {
         width_mask((self.config.counter_bytes * 8) as u8)
     }
 
+    /// Whether the silence at `now_ms` exceeds the limit, measured from the
+    /// last valid reception, or from the armed instant while there is none.
     fn timed_out(&self, now_ms: u64) -> bool {
         self.last_valid_ms
-            .is_some_and(|last| now_ms.saturating_sub(last) > self.config.timeout_ms)
+            .or(self.armed_ms)
+            .is_some_and(|from| now_ms.saturating_sub(from) > self.config.timeout_ms)
+    }
+
+    /// The information field: the silence since the previous valid reception.
+    fn since_previous_valid(&self, now_ms: u64) -> Option<u64> {
+        self.last_valid_ms.map(|last| now_ms.saturating_sub(last))
     }
 
     /// Judge one received frame: whether its CRC matched, the counter it
@@ -160,15 +243,18 @@ impl Judge {
                 counter_bytes: self.config.counter_bytes,
             });
         }
-        // Against the previous valid instant, before this frame can move it.
-        let timeout_error = self.timed_out(now_ms);
+        // Taken before this frame can move anything: information only.
+        let since_previous_valid_ms = self.since_previous_valid(now_ms);
 
         if !crc_ok {
+            // Nothing moved, so the silence is judged against the previous
+            // valid instant (or the armed one).
             return Ok(Judgment {
                 crc_error: true,
                 counter_error: false,
-                timeout_error,
+                timeout_error: self.timed_out(now_ms),
                 counter_reason: CounterReason::None,
+                since_previous_valid_ms,
             });
         }
 
@@ -188,12 +274,16 @@ impl Judge {
         if reason != CounterReason::Repeat {
             self.baseline = Some(counter);
             self.last_valid_ms = Some(now_ms);
+            self.armed_ms = None;
         }
+        // The timeout is judged LAST, against the instant as it now stands: a
+        // valid frame has just moved it to now, a repetition has not.
         Ok(Judgment {
             crc_error: false,
             counter_error: reason != CounterReason::None,
-            timeout_error,
+            timeout_error: self.timed_out(now_ms),
             counter_reason: reason,
+            since_previous_valid_ms,
         })
     }
 
@@ -205,6 +295,7 @@ impl Judge {
             counter_error: false,
             timeout_error: self.timed_out(now_ms),
             counter_reason: CounterReason::None,
+            since_previous_valid_ms: self.since_previous_valid(now_ms),
         }
     }
 }
@@ -230,11 +321,22 @@ mod tests {
             counter_error: false,
             timeout_error: false,
             counter_reason: CounterReason::None,
+            since_previous_valid_ms: None,
         }
     }
 
-    fn rx(j: &mut Judge, crc_ok: bool, counter: u64, now: u64) -> Judgment {
+    /// One reception, the whole judgment.
+    fn rx_full(j: &mut Judge, crc_ok: bool, counter: u64, now: u64) -> Judgment {
         j.receive(crc_ok, counter, now).expect("the counter fits")
+    }
+
+    /// One reception with the information field blanked, so the tests of the
+    /// four verdicts compare against [`fine`] without restating the silence.
+    fn rx(j: &mut Judge, crc_ok: bool, counter: u64, now: u64) -> Judgment {
+        Judgment {
+            since_previous_valid_ms: None,
+            ..rx_full(j, crc_ok, counter, now)
+        }
     }
 
     #[test]
@@ -421,6 +523,7 @@ mod tests {
             v,
             Judgment {
                 timeout_error: true,
+                since_previous_valid_ms: Some(LIMIT + 1),
                 ..fine()
             }
         );
@@ -428,20 +531,143 @@ mod tests {
     }
 
     #[test]
-    fn a_late_valid_frame_is_a_timeout_and_then_restarts_the_clock() {
+    fn a_valid_frame_after_a_long_silence_clears_its_own_timeout() {
         let mut j = judge(2);
         rx(&mut j, true, 1, 0);
-        // Judged against the previous valid instant, then moved to this one.
-        let v = rx(&mut j, true, 2, LIMIT + 1);
+        // The silence was a timeout while it lasted, and a poll sees it ...
+        assert!(j.poll(1500).timeout_error);
+        // ... and the frame that ends it is not itself late: the timeout is
+        // judged after the frame has moved the instant to now.
+        let v = rx_full(&mut j, true, 2, 1500);
         assert_eq!(
             v,
             Judgment {
-                timeout_error: true,
+                since_previous_valid_ms: Some(1500),
                 ..fine()
             }
         );
-        assert_eq!(j.last_valid_ms(), Some(LIMIT + 1));
-        assert!(!rx(&mut j, true, 3, LIMIT + 2).timeout_error);
+        assert_eq!(j.last_valid_ms(), Some(1500));
+        assert!(!j.poll(1500 + LIMIT).timeout_error, "the clock restarted");
+        assert!(j.poll(1500 + LIMIT + 1).timeout_error);
+    }
+
+    #[test]
+    fn an_out_of_range_step_after_3000_ms_is_a_counter_error_and_no_timeout() {
+        let mut j = judge(2);
+        rx(&mut j, true, 100, 0);
+        let v = rx_full(&mut j, true, 100 + GAP + 1, 3000);
+        assert_eq!(
+            v,
+            Judgment {
+                counter_error: true,
+                counter_reason: CounterReason::OutOfRange,
+                since_previous_valid_ms: Some(3000),
+                ..fine()
+            }
+        );
+        // It moved the baseline and the instant, so it cleared the silence.
+        assert_eq!(j.last_valid_ms(), Some(3000));
+        assert!(!j.poll(3000 + LIMIT).timeout_error);
+    }
+
+    #[test]
+    fn a_crc_error_after_2000_ms_is_a_timeout_and_changes_no_state() {
+        let mut j = judge(2);
+        rx(&mut j, true, 1, 0);
+        let v = rx_full(&mut j, false, 2, 2000);
+        assert_eq!(
+            v,
+            Judgment {
+                crc_error: true,
+                timeout_error: true,
+                since_previous_valid_ms: Some(2000),
+                ..fine()
+            }
+        );
+        assert_eq!((j.baseline(), j.last_valid_ms()), (Some(1), Some(0)));
+    }
+
+    #[test]
+    fn a_repetition_after_1500_ms_is_a_counter_error_and_a_timeout() {
+        let mut j = judge(2);
+        rx(&mut j, true, 5, 0);
+        let v = rx_full(&mut j, true, 5, 1500);
+        assert_eq!(
+            v,
+            Judgment {
+                counter_error: true,
+                timeout_error: true,
+                counter_reason: CounterReason::Repeat,
+                since_previous_valid_ms: Some(1500),
+                ..fine()
+            }
+        );
+        // Nothing moved, so the silence is still measured from the first frame.
+        assert_eq!((j.baseline(), j.last_valid_ms()), (Some(5), Some(0)));
+        assert!(rx(&mut j, false, 6, 1600).timeout_error);
+    }
+
+    #[test]
+    fn the_silence_before_a_reception_is_reported_on_every_kind_of_reception() {
+        // No previous valid reception: nothing to report, whatever the kind.
+        let mut j = judge(2);
+        assert_eq!(rx_full(&mut j, false, 1, 700).since_previous_valid_ms, None);
+        assert_eq!(
+            rx_full(&mut j, true, 1, 800),
+            fine(),
+            "the first-ever frame"
+        );
+
+        // From a first valid frame on, every kind reports its silence, and it
+        // is measured from the last VALID frame: the CRC error and the
+        // repetition below move nothing, so the 450 is from the frame at 250.
+        let mut j = judge(2);
+        rx(&mut j, true, 1, 100);
+        let silence = |v: Judgment| v.since_previous_valid_ms;
+        assert_eq!(silence(rx_full(&mut j, true, 2, 250)), Some(150), "fine");
+        assert_eq!(
+            silence(rx_full(&mut j, false, 3, 400)),
+            Some(150),
+            "CRC error"
+        );
+        assert_eq!(
+            silence(rx_full(&mut j, true, 2, 500)),
+            Some(250),
+            "repetition"
+        );
+        assert_eq!(
+            silence(rx_full(&mut j, true, 2 + GAP + 1, 700)),
+            Some(450),
+            "out of range"
+        );
+        // And a poll reports the silence it is judging.
+        assert_eq!(silence(j.poll(900)), Some(200));
+    }
+
+    #[test]
+    fn the_information_changes_no_boolean() {
+        // The same stream judged twice, once as it ran and once with the
+        // information removed from every verdict, agrees on all four verdicts.
+        let script: [(bool, u64, u64); 6] = [
+            (true, 1, 0),
+            (true, 2, 1500),
+            (false, 3, 1600),
+            (true, 2, 3200),
+            (true, 40, 3300),
+            (false, 41, 9000),
+        ];
+        let (mut a, mut b) = (judge(2), judge(2));
+        for (crc_ok, counter, now) in script {
+            let full = rx_full(&mut a, crc_ok, counter, now);
+            let blank = rx(&mut b, crc_ok, counter, now);
+            assert_eq!(
+                Judgment {
+                    since_previous_valid_ms: None,
+                    ..full
+                },
+                blank
+            );
+        }
     }
 
     #[test]
@@ -463,8 +689,118 @@ mod tests {
     fn a_clock_that_goes_backwards_counts_as_no_time_passed() {
         let mut j = judge(2);
         rx(&mut j, true, 1, 10_000);
-        assert!(!j.poll(0).timeout_error);
+        // Deliberately not what a fixed-width device clock does: an unsigned
+        // 32-bit subtraction would read this as a gap of about 4.29e9 ms.
+        let v = j.poll(0);
+        assert!(!v.timeout_error);
+        assert_eq!(v.since_previous_valid_ms, Some(0), "no time passed");
+        // A CRC error is judged against the same instant, so it agrees.
+        let v = rx_full(&mut j, false, 2, 5);
+        assert!(v.crc_error && !v.timeout_error);
+        assert_eq!(v.since_previous_valid_ms, Some(0));
         assert!(!rx(&mut j, true, 2, 5).timeout_error);
+    }
+
+    #[test]
+    fn an_armed_stream_that_never_received_times_out_on_poll() {
+        let mut j = judge(2);
+        j.arm(1000);
+        assert!(
+            !j.poll(1000 + 500).timeout_error,
+            "+500 is inside the limit"
+        );
+        assert!(
+            !j.poll(1000 + LIMIT).timeout_error,
+            "equal to the limit is not over it"
+        );
+        assert!(j.poll(1000 + 1500).timeout_error, "+1500 is over it");
+        // No valid-reception history was made: the information stays absent
+        // and the counter baseline is still unset.
+        assert_eq!(j.poll(1000 + 1500).since_previous_valid_ms, None);
+        assert_eq!((j.baseline(), j.last_valid_ms()), (None, None));
+        assert_eq!(j.armed_ms(), Some(1000));
+    }
+
+    #[test]
+    fn without_arm_a_stream_that_never_received_is_never_judged() {
+        let j = judge(2);
+        assert!(!j.poll(0).timeout_error);
+        assert!(!j.poll(u64::MAX).timeout_error);
+        assert_eq!(j.armed_ms(), None);
+    }
+
+    #[test]
+    fn the_first_valid_reception_replaces_the_armed_instant_and_clears_its_timeout() {
+        let mut j = judge(2);
+        j.arm(0);
+        assert!(
+            j.poll(1500).timeout_error,
+            "the silence timed out while it lasted"
+        );
+        // The first frame still sets the baseline without a counter error.
+        let v = rx_full(&mut j, true, 0x1234, 1500);
+        assert_eq!(v, fine(), "no timeout, no counter error, no information");
+        assert_eq!(
+            (j.baseline(), j.last_valid_ms()),
+            (Some(0x1234), Some(1500))
+        );
+        assert_eq!(j.armed_ms(), None, "replaced");
+        // From now on the stream's own history is the reference.
+        assert!(!j.poll(1500 + LIMIT).timeout_error);
+        assert!(j.poll(1500 + LIMIT + 1).timeout_error);
+    }
+
+    #[test]
+    fn a_crc_error_before_any_valid_frame_is_judged_against_the_armed_instant() {
+        let mut j = judge(2);
+        j.arm(0);
+        let v = rx_full(&mut j, false, 7, 2000);
+        assert_eq!(
+            v,
+            Judgment {
+                crc_error: true,
+                timeout_error: true,
+                ..fine()
+            }
+        );
+        // It changed no state: the stream is still armed and unstarted.
+        assert_eq!(
+            (j.baseline(), j.last_valid_ms(), j.armed_ms()),
+            (None, None, Some(0))
+        );
+        // Inside the limit the same error is not a timeout.
+        let mut j = judge(2);
+        j.arm(0);
+        assert!(!rx(&mut j, false, 7, 500).timeout_error);
+        // Without arm there is nothing to measure from.
+        let mut j = judge(2);
+        assert!(!rx(&mut j, false, 7, 5000).timeout_error);
+    }
+
+    #[test]
+    fn arming_twice_keeps_the_earlier_instant() {
+        let mut j = judge(2);
+        j.arm(100);
+        j.arm(900);
+        assert_eq!(j.armed_ms(), Some(100));
+        assert!(
+            j.poll(100 + LIMIT + 1).timeout_error,
+            "measured from the first"
+        );
+        assert!(!j.poll(100 + LIMIT).timeout_error);
+    }
+
+    #[test]
+    fn arming_a_stream_that_already_has_a_valid_reception_changes_nothing() {
+        let mut j = judge(2);
+        rx(&mut j, true, 1, 0);
+        j.arm(5000);
+        assert_eq!(j.armed_ms(), None);
+        assert_eq!(j.last_valid_ms(), Some(0));
+        assert!(
+            j.poll(LIMIT + 1).timeout_error,
+            "still measured from the frame"
+        );
     }
 
     #[test]
