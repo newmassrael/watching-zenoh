@@ -6497,7 +6497,7 @@ mod tests {
         // against a rename and against each other and against NOTHING a
         // consumer could read.
         let mut failures: Vec<String> = Vec::new();
-        let live: [(&str, &str, Vec<&'static str>); 30] = [
+        let live: [(&str, &str, Vec<&'static str>); 31] = [
             // The session's per-frame verdicts, each held to the
             // walk its emitter's exhaustive match is bound to.
             (rev::FIELDS, "verdict", SnVerdictWord::names()),
@@ -6548,6 +6548,10 @@ mod tests {
             // to the one enum walk.
             (rev::FIELDS, "family", crate::link::AddrFamily::names()),
             (rev::CENSUS, "family", crate::link::AddrFamily::names()),
+            // Census revision 20 — which end of a flow a node sent from. The
+            // words are the flow object's own key names; the walk is the enum
+            // the node plane writes them from.
+            (rev::CENSUS, "sender_end", crate::link::FlowEnd::names()),
             // R2223 (open-debt item 573) — the message vocabulary, and the row
             // whose walk is held to something outside itself. The others here
             // are successor chains checked against a derive or against each

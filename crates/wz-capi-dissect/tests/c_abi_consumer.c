@@ -1753,6 +1753,9 @@ int main(void) {
     CHECK(strstr(census, "\"keyexprs\"") != NULL, "no keyexpr plane: %s",
           census);
     CHECK(strstr(census, "\"nodes\"") != NULL, "no node plane: %s", census);
+    /* Census revision 20: the node plane's `ends` array is structural, so a
+     * linking consumer reads it without testing for the key. */
+    CHECK(strstr(census, "\"ends\":[") != NULL, "no ends array: %s", census);
     CHECK(strstr(census, "\"exchanges\"") != NULL, "no query plane: %s", census);
     CHECK(strstr(census, "\"payloads\"") != NULL, "no payload plane: %s",
           census);
@@ -2215,8 +2218,11 @@ int main(void) {
      * move under stationary keys; nothing retires.
      * 19: a narrowed census gains `ambiguous_zid_prefixes`, present only when
      * a selector's `zid` prefix began two or more of the capture's zids; and
-     * a prefix that names one node now selects that node's records. */
-    revisioned[0].revision = 19;
+     * a prefix that names one node now selects that node's records.
+     * 20: the node plane gains `ends[]`, the end of a discovery flow a node
+     * sent from. Three keys (`ends`, `node`, `sender_end`) and one passenger family;
+     * no value moves under an old key. */
+    revisioned[0].revision = 20;
     revisioned[0].doc = NULL;
     rc = wz_dissect_pcap_census(pcap, sizeof pcap, &revisioned[0].doc);
     CHECK(rc == WZ_DISSECT_OK, "census rc=%d", rc);

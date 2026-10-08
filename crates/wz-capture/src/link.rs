@@ -751,6 +751,62 @@ impl AddrFamily {
     }
 }
 
+/// One END of a flow: the endpoint a [`FlowKey`] stores as `low` or as `high`.
+///
+/// The words are the key's own field names, so a reader holding a flow object
+/// indexes it with the word: `flow[end]` is the endpoint. The half of a flow
+/// that is sent FROM the low end is the one the library calls direction `a`
+/// (see [`Segment::from_low`] and [`Datagram::from_low`]), so the sender of an
+/// `a` message sits at [`Self::Low`] and the sender of a `b` message at
+/// [`Self::High`]. No third word exists: a message names the end it was sent
+/// from, never a flow in the abstract.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum FlowEnd {
+    /// The lesser endpoint by `(addr, port)` order: [`FlowKey::low`].
+    Low,
+    /// The greater endpoint: [`FlowKey::high`].
+    High,
+}
+
+impl FlowEnd {
+    /// The end a message travelling from the low endpoint was SENT from when
+    /// `from_low`, and the other end when not. The one place the direction
+    /// letters are translated into the words a flow object is indexed by.
+    pub fn sending(from_low: bool) -> Self {
+        if from_low {
+            FlowEnd::Low
+        } else {
+            FlowEnd::High
+        }
+    }
+
+    /// The word this end is emitted as.
+    pub fn name(self) -> &'static str {
+        match self {
+            FlowEnd::Low => "low",
+            FlowEnd::High => "high",
+        }
+    }
+
+    /// Every end, from an exhaustive match so the array cannot fall behind.
+    ///
+    /// The same mechanism as [`LinkKind::all`].
+    pub fn all() -> [FlowEnd; 2] {
+        let one = |e: FlowEnd| match e {
+            FlowEnd::Low => FlowEnd::Low,
+            FlowEnd::High => FlowEnd::High,
+        };
+        [one(FlowEnd::Low), one(FlowEnd::High)]
+    }
+
+    /// Every word [`Self::name`] can return, sorted, taken from [`Self::all`].
+    pub fn names() -> alloc::vec::Vec<&'static str> {
+        let mut out: alloc::vec::Vec<&'static str> = Self::all().iter().map(|e| e.name()).collect();
+        out.sort_unstable();
+        out
+    }
+}
+
 /// A TCP connection, identified without regard to direction.
 ///
 /// The two endpoints are stored SORTED, so both directions of one connection

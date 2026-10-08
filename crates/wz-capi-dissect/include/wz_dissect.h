@@ -710,6 +710,52 @@
  * `fragment_without_resolution`, or a nonzero `unresolvable_fragments`, to mean
  * "this flow missed its handshake" must read `context.sn_mask` for that.
  *
+ * AND WHICH END OF A DISCOVERY FLOW A NODE SENT FROM, at census revision 20. A
+ * Scout or a Hello is one node speaking to a group or to whoever asked, so the
+ * flow that carries one has no row in the node plane's `links`: that array
+ * lists a flow only where both ends opened a handshake, and every row names
+ * both. The node was under the right flow in `nodes[].flows` and no key said
+ * which END of the flow it was. The node plane now carries a second array
+ * beside `links`:
+ *
+ *     "ends":[{"node":2,"sender_end":"low","flow":{...}},
+ *             {"node":3,"sender_end":"high","flow":{...}}]
+ *
+ *   - A row says: the node `nodes[node]` SENT a message that named it, from the
+ *     `sender_end` of `flow`. `sender_end` is `low` or `high`, the two keys a
+ *     flow object is indexed by, so `flow[sender_end]` is the endpoint it sent
+ *     from. It is not called `end`: that key exists in this document as a
+ *     number (see the ambiguity report), and one name must not carry both.
+ *     Direction `a` is the half sent from the low endpoint (address first, then
+ *     port), so the sender of an `a` message is `low` and the sender of a `b`
+ *     message is `high`: the same halves the field document's `direction`
+ *     names.
+ *   - Three messages seat a sender. A Hello always does, because it always
+ *     names its sender. A Scout does when it carries its optional zid; a Scout
+ *     that leaves the zid out names no node and seats none. A multicast Join
+ *     does. An Init does not: it is half of a handshake, its two ends are what
+ *     `links` is for, and a flow that shows one Init and not the other has no
+ *     row in either array.
+ *   - THE RECEIVING END HAS NO ROW AND NO PLACEHOLDER. No message names it.
+ *     Not the multicast group, which is not a node, and not the asker a Hello
+ *     answers: the Hello went to that address, and nothing in it says a node
+ *     lives there. A consumer asking who is at the other end gets no answer
+ *     from this array, by design, and must not infer one from the flow's
+ *     address.
+ *   - A row is what was seen and not a verdict. Several nodes may be seated at
+ *     one end of a flow (listeners share the scouting port), one node may be
+ *     seated at both ends of one flow, and a flow whose two hosts each answer
+ *     the other holds a row for each sender. There is one row per (node, end,
+ *     flow), in the order they were first met: the Joins of the message lists
+ *     first, then the datagram flows in their table order.
+ *   - The array is always present, and is empty when no message named its
+ *     sender. Every other key reads as it did at revision 19: `links`,
+ *     `nodes[].flows` and the evidence counts do not change. The node plane is
+ *     not narrowed by a selector, so every census door and the live handle
+ *     carry the same array.
+ *
+ * @values census sender_end
+ *
  * ⚠ AN INTEGER A JSON NUMBER WOULD MISREAD IS A STRING (field document 23, and
  * the same rule in the other documents below). A 64-bit integer that this
  * library reads off the wire or off a clock is written as a bare number while
@@ -993,7 +1039,7 @@
  *
  * SO THE DOCUMENT CARRIES THE LIST. Its envelope reads
  *
- *     {"document":{"name":"census","revision":19,
+ *     {"document":{"name":"census","revision":20,
  *                  "planes":["exchanges","interests","keyexprs","nodes",
  *                            "payloads"]}, ...}
  *
@@ -1043,7 +1089,7 @@
  *      "carries":[{"word":"bits","shapes":[["end","name","start","value"]]},
  *                 {"word":"opaque","shapes":[["end","name","start"]]}, ...]}
  *
- *     {"name":"census","revision":19,"key":"mode","values":[...],
+ *     {"name":"census","revision":20,"key":"mode","values":[...],
  *      "carries":null}
  *
  * `null` is a VALUE here and not an absence: it says the word is a PASSENGER --
@@ -1068,6 +1114,7 @@
  * @carries census link passenger
  * @carries census mode passenger
  * @carries census offset_space passenger
+ * @carries census sender_end passenger
  * @carries fields body passenger
  * @carries fields carried_state discriminant
  * @carries fields direction passenger

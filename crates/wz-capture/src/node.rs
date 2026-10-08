@@ -32,6 +32,29 @@
 //! observer that skipped this distinction would report a topology assembled
 //! from messages no participant acted on.
 //!
+//! # What an END is, and why a discovery message can seat one
+//!
+//! A link answers "which node is which end of this flow" for a flow whose two
+//! ends both opened a handshake. A discovery datagram cannot make a link: a
+//! SCOUT or a HELLO is one node speaking to a group or to whoever asked, and
+//! the message does not name its receiver. It does name its SENDER, and the
+//! capture knows which end of the flow that datagram travelled from, so the
+//! census records exactly that much and no more: an
+//! [`ObservedEnd`](crate::node::ObservedEnd) says "this node sent a message that
+//! named it, from this end of this flow".
+//!
+//! The receiving end is NEVER recorded. Not the multicast group, which is no
+//! node, and not the asker a HELLO answers: the HELLO's destination is where
+//! the capture saw it go, and the message does not say a node lives there.
+//! Seating it from the address would be this plane's own stated failure, a
+//! guess presented as a measurement.
+//!
+//! Three messages name a sender and travel on a datagram flow: a HELLO (always),
+//! a SCOUT (only when its optional zid is present) and a multicast JOIN. An INIT
+//! is not among them: it is half of a handshake, its ends are what
+//! [`ObservedLink`](crate::node::ObservedLink) exists for, and a flow that shows
+//! only one INIT has recorded no end, as it never did.
+//!
 //! # Producers
 //!
 //! Both flow tables, and after the decryption pass. `flows()` is the stream
@@ -47,7 +70,7 @@ use alloc::vec::Vec;
 use wz_session_core::inbound::InboundFrame;
 use wz_session_core::passive::{Direction, PassiveFrame};
 
-use crate::link::FlowKey;
+use crate::link::{FlowEnd, FlowKey};
 
 /// How a node came to be known.
 ///
@@ -274,6 +297,25 @@ pub struct ObservedLink {
     pub list: usize,
 }
 
+/// A node seen sending from one end of a flow, where no link says who the ends
+/// are.
+///
+/// One row per (node, end, flow), in the order the walk first met them. Two rows
+/// may name the same end of one flow with different nodes (several listeners
+/// can share the scouting port, so one address and port can speak for more than
+/// one zid), and one node may appear at both ends of one flow (a node that
+/// answers itself from a second socket). The census reports what was seen and
+/// leaves the reading to the consumer, as it does for `evidence`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ObservedEnd {
+    /// Index into [`NodeCensus::nodes`] of the node that sent the message.
+    pub node: usize,
+    /// The end of [`Self::flow`] the message was sent from.
+    pub end: FlowEnd,
+    /// The flow the message travelled on.
+    pub flow: FlowKey,
+}
+
 /// R2456 (open-debt item 701) — WHERE one observation sits, as the three facts
 /// a node's anchor pair needs and nothing else.
 ///
@@ -312,6 +354,8 @@ pub struct NodeCensus {
     list: usize,
     nodes: Vec<ObservedNode>,
     links: Vec<ObservedLink>,
+    /// The ends a discovery message was sent from. See [`ObservedEnd`].
+    ends: Vec<ObservedEnd>,
     /// R311y714 (§1.1f) — unit bytes on a direction whose SENDER this capture
     /// cannot name.
     ///
@@ -337,6 +381,13 @@ impl NodeCensus {
     /// Every link where both ends named themselves.
     pub fn links(&self) -> &[ObservedLink] {
         &self.links
+    }
+
+    /// Every end of a flow a message named its sender at, outside any link.
+    /// See [`ObservedEnd`] for what a row claims, and for what no row claims,
+    /// which is the receiving end.
+    pub fn ends(&self) -> &[ObservedEnd] {
+        &self.ends
     }
 
     /// R311y714 — unit bytes this census could not credit to any node.
@@ -481,6 +532,12 @@ impl NodeCensus {
             if matches!(kind, Named::Init) {
                 ends[dir_index(frame.direction)] = Some(idx);
             }
+            // The announcement still names its SENDER, and the direction it
+            // travelled says which end of the flow that is. The listeners are
+            // not named by it and are not seated: see the module docs.
+            if matches!(kind, Named::Join) {
+                self.record_end(idx, end_sending(frame.direction), flow);
+            }
         }
         if let (Some(a), Some(b)) = (ends[0], ends[1]) {
             if a != b {
@@ -515,7 +572,10 @@ impl NodeCensus {
     ///
     /// No link is recorded here. A HELLO names its sender and a SCOUT names its
     /// asker, and neither states that a session was established — the INIT
-    /// that would is on a different flow.
+    /// that would is on a different flow. What each DOES establish is which end
+    /// of its own flow the sender sat at, and that is recorded as an
+    /// [`ObservedEnd`]: a SCOUT only when it carries the optional zid, because
+    /// an asker that declined to be named has no node to seat.
     ///
     /// # R2456 (open-debt item 701) — this producer names its own space
     ///
@@ -564,6 +624,10 @@ impl NodeCensus {
                 space: self.space_of(crate::AnchorSpace::PacketIndex, Direction::A),
             };
             let idx = self.intern_scouted(&zid, whatami, at, flow);
+            // The message names its sender, and the datagram says which end of
+            // the flow it travelled from. The receiver is not named by either
+            // message and is not seated: see the module docs.
+            self.record_end(idx, end_sending(datagram.direction), flow);
             // R311y714 — the locator list, which only a HELLO carries. Taken
             // from the decoded body rather than from the flow's addresses: see
             // `ObservedNode::locators` for why the two are not the same claim.
@@ -600,6 +664,24 @@ impl NodeCensus {
                 b,
                 flow: *flow,
                 list,
+            });
+        }
+    }
+
+    /// Seat `node` at `end` of `flow`, once.
+    ///
+    /// Deduplicated on the whole triple: a node that scouts every second is one
+    /// row, and the same node at the other end of the same flow is another.
+    fn record_end(&mut self, node: usize, end: FlowEnd, flow: &FlowKey) {
+        let already = self
+            .ends
+            .iter()
+            .any(|e| e.node == node && e.end == end && &e.flow == flow);
+        if !already {
+            self.ends.push(ObservedEnd {
+                node,
+                end,
+                flow: *flow,
             });
         }
     }
@@ -701,6 +783,12 @@ fn dir_index(d: Direction) -> usize {
         Direction::A => 0,
         Direction::B => 1,
     }
+}
+
+/// The end of a flow a message of `d` is sent FROM. Direction `a` is the half
+/// sent from the low endpoint, so its sender is the low end.
+fn end_sending(d: Direction) -> FlowEnd {
+    FlowEnd::sending(matches!(d, Direction::A))
 }
 
 /// The zid a transport message names, if it names one.
@@ -1810,6 +1898,487 @@ pub(crate) mod tests {
         assert!(
             json.contains("\"first_anchor\":2,\"last_anchor\":3,\"anchors_exact\":true"),
             "B was still being named at anchor 3: {json}"
+        );
+    }
+
+    /// A SCOUT built by the SCOUT codec: naming `zid`, or declining to when
+    /// `None`. The zid is optional on the wire (the `I` bit), and a scout that
+    /// leaves it out is a node asking without saying who it is.
+    fn scout_wire(zid: Option<&[u8]>) -> Vec<u8> {
+        let mut scout = wz_codecs::scout::Scout::new();
+        scout.version = 0x09;
+        scout.set_what(0x03);
+        if let Some(z) = zid {
+            scout.set_i(true);
+            scout.set_zid_len_m1((z.len() - 1) as u8);
+            scout.zid = Some(z);
+        }
+        let mut wire = alloc::vec![wz_session_core::wire_const::S_MID_SCOUT];
+        wire.extend_from_slice(&scout.encode_to_vec());
+        wire
+    }
+
+    /// A HELLO built by the HELLO codec: naming `zid` and advertising every
+    /// locator in `locators`. With none, the bare answer a locator-less node
+    /// gives, whose `L` flag is clear.
+    fn hello_wire(zid: &[u8], locators: &[&str]) -> Vec<u8> {
+        use wz_session_core::codec_owned::{owned_bytes, owned_string};
+        let owned: wz_codecs::hello::HelloOwned = wz_codecs::hello::HelloOwned {
+            version: 0x09,
+            cbyte: (((zid.len() as u8) - 1) << 4) | 0x01,
+            zid: owned_bytes(zid).expect("zid"),
+            num_locators: (!locators.is_empty()).then_some(locators.len() as u64),
+            locators: (!locators.is_empty()).then(|| {
+                locators
+                    .iter()
+                    .map(|l| wz_codecs::locator::LocatorOwned {
+                        locator_len: l.len() as u64,
+                        locator: owned_string(l).expect("locator"),
+                    })
+                    .collect()
+            }),
+        };
+        let l = u8::from(!locators.is_empty());
+        let body = owned
+            .try_as_borrowed()
+            .expect("borrowed projection")
+            .encode_to_vec(l);
+        let mut header = wz_session_core::wire_const::S_MID_HELLO;
+        if l != 0 {
+            header |= wz_session_core::wire_const::FLAG_S_HELLO_L;
+        }
+        let mut wire = alloc::vec![header];
+        wire.extend_from_slice(&body);
+        wire
+    }
+
+    /// The datagram flow between two endpoints, whichever of them sorts low.
+    fn flow_of(d: &Dissection, a: (&[u8], u32), b: (&[u8], u32)) -> FlowKey {
+        d.datagram_flows()
+            .iter()
+            .map(|f| f.flow)
+            .find(|f| {
+                let ends = |x: (&[u8], u32), y: (&[u8], u32)| {
+                    f.low.addr() == x.0
+                        && f.low.port == x.1
+                        && f.high.addr() == y.0
+                        && f.high.port == y.1
+                };
+                ends(a, b) || ends(b, a)
+            })
+            .expect("the capture holds a datagram flow between these endpoints")
+    }
+
+    /// The index of the node that carries `zid`.
+    fn index_of(census: &NodeCensus, zid: &[u8]) -> usize {
+        census
+            .nodes()
+            .iter()
+            .position(|n| n.zid == zid)
+            .unwrap_or_else(|| panic!("the capture must name {zid:?}: {:?}", census.nodes()))
+    }
+
+    /// THE CLAIM THIS PLANE WAS MISSING: a Scout and a Hello each say which end
+    /// of their flow their sender sat at, and the receiving end is not said.
+    ///
+    /// The capture is the consumer's shape: a Scout from `:7446` to the group,
+    /// and a Hello from another port on the SAME host to `:7446`. The Hello's
+    /// flow has one address on both ends, so only the port can order it, and the
+    /// sender is the HIGH end (`:42043 > :7446`). The Scout's sender is the LOW
+    /// end of its flow (a unicast host sorts below the group). One word for both
+    /// would pass either flow alone, which is why the two are asserted together.
+    ///
+    /// The list is compared WHOLE: two rows, for the two senders. A row for the
+    /// group or for the asker the Hello answered would be a guess at a receiver
+    /// the messages do not name, and would make the list longer than two.
+    #[test]
+    fn a_scout_and_a_hello_seat_their_senders_at_the_end_each_was_sent_from() {
+        let host = [192, 168, 1, 5];
+        let mut d = Dissection::new();
+        d.push_packet(
+            LINKTYPE_ETHERNET,
+            0,
+            &udp_packet(host, 7446, SCOUT_GROUP, 7446, &scout_wire(Some(&[0x11; 4]))),
+        );
+        d.push_packet(
+            LINKTYPE_ETHERNET,
+            1,
+            &udp_packet(host, 42043, host, 7446, &hello_wire(&[0x22; 4], &[])),
+        );
+        d.finish();
+
+        let census = nodes(&d);
+        assert_eq!(census.nodes().len(), 2, "{:?}", census.nodes());
+        let scout_flow = flow_of(&d, (&host, 7446), (&SCOUT_GROUP, 7446));
+        let hello_flow = flow_of(&d, (&host, 7446), (&host, 42043));
+        assert_eq!(
+            census.ends(),
+            &[
+                ObservedEnd {
+                    node: index_of(&census, &[0x11; 4]),
+                    end: FlowEnd::Low,
+                    flow: scout_flow,
+                },
+                ObservedEnd {
+                    node: index_of(&census, &[0x22; 4]),
+                    end: FlowEnd::High,
+                    flow: hello_flow,
+                },
+            ],
+            "the scout's sender is the low end of its flow and the hello's the \
+             high end of its own; no receiver is seated"
+        );
+        assert!(census.links().is_empty(), "a datagram flow makes no link");
+    }
+
+    /// A SCOUT that declines to be named has no node to seat, and the ONE bit
+    /// that differs between this capture and the one that seats is the `I` flag.
+    #[test]
+    fn a_scout_that_leaves_its_zid_out_seats_nobody() {
+        let ask = |zid: Option<&[u8]>| {
+            let mut d = Dissection::new();
+            d.push_packet(
+                LINKTYPE_ETHERNET,
+                0,
+                &udp_packet([192, 168, 1, 5], 43210, SCOUT_GROUP, 7446, &scout_wire(zid)),
+            );
+            d.finish();
+            nodes(&d)
+        };
+        let anonymous = ask(None);
+        assert!(
+            anonymous.nodes().is_empty() && anonymous.ends().is_empty(),
+            "an asker that did not say who it is names no node: {:?}",
+            anonymous.ends()
+        );
+        let named = ask(Some(&[0x33; 4]));
+        assert_eq!(
+            named.ends().len(),
+            1,
+            "the control differs by the zid alone and must seat: {:?}",
+            named.ends()
+        );
+    }
+
+    /// A HELLO's locator list is what the node ADVERTISES; where it SENT from is
+    /// the flow's. Three locators are one sender at one end, not three rows, and
+    /// none of the advertised addresses becomes an end of any flow.
+    #[test]
+    fn a_hello_with_several_locators_seats_its_sender_once() {
+        let asker = [192, 168, 1, 5];
+        let responder = [192, 168, 1, 9];
+        let mut d = Dissection::new();
+        d.push_packet(
+            LINKTYPE_ETHERNET,
+            0,
+            &udp_packet(
+                asker,
+                43210,
+                SCOUT_GROUP,
+                7446,
+                &scout_wire(Some(&[0x44; 4])),
+            ),
+        );
+        d.push_packet(
+            LINKTYPE_ETHERNET,
+            1,
+            &udp_packet(
+                responder,
+                7447,
+                asker,
+                43210,
+                &hello_wire(
+                    &[0x55; 4],
+                    &[
+                        "udp/10.1.1.1:7447",
+                        "tcp/10.1.1.1:7447",
+                        "tcp/172.16.0.9:7447",
+                    ],
+                ),
+            ),
+        );
+        d.finish();
+
+        let census = nodes(&d);
+        let responder_node = index_of(&census, &[0x55; 4]);
+        assert_eq!(census.nodes()[responder_node].locators.len(), 3);
+        let seats: Vec<&ObservedEnd> = census
+            .ends()
+            .iter()
+            .filter(|e| e.node == responder_node)
+            .collect();
+        assert_eq!(
+            seats,
+            [&ObservedEnd {
+                node: responder_node,
+                end: FlowEnd::High,
+                flow: flow_of(&d, (&asker, 43210), (&responder, 7447)),
+            }],
+            "one sender, one end, whatever it advertises"
+        );
+    }
+
+    /// The IPv6 flow orders its ends by sixteen bytes and not four, and the end
+    /// still comes from the direction the datagram travelled.
+    #[test]
+    fn an_ipv6_discovery_flow_seats_its_sender_at_the_end_it_was_sent_from() {
+        use crate::datagram_tests::udp_packet_v6;
+        let mut asker = [0u8; 16];
+        asker[0] = 0xFE;
+        asker[1] = 0x80;
+        asker[15] = 0x05;
+        let mut responder = asker;
+        responder[15] = 0x09;
+        let mut group = [0u8; 16];
+        group[0] = 0xFF;
+        group[1] = 0x02;
+        group[15] = 0x24;
+        let mut d = Dissection::new();
+        d.push_packet(
+            LINKTYPE_ETHERNET,
+            0,
+            &udp_packet_v6(asker, 43210, group, 7446, &scout_wire(Some(&[0x66; 4]))),
+        );
+        d.push_packet(
+            LINKTYPE_ETHERNET,
+            1,
+            &udp_packet_v6(responder, 7447, asker, 43210, &hello_wire(&[0x77; 4], &[])),
+        );
+        d.finish();
+
+        let census = nodes(&d);
+        assert_eq!(
+            census.ends(),
+            &[
+                ObservedEnd {
+                    node: index_of(&census, &[0x66; 4]),
+                    end: FlowEnd::Low,
+                    flow: flow_of(&d, (&asker, 43210), (&group, 7446)),
+                },
+                ObservedEnd {
+                    node: index_of(&census, &[0x77; 4]),
+                    end: FlowEnd::High,
+                    flow: flow_of(&d, (&asker, 43210), (&responder, 7447)),
+                },
+            ],
+            "{:?}",
+            census.ends()
+        );
+    }
+
+    /// A FLOW SEEN FROM BOTH DIRECTIONS CAN OCCUR, and each sender sits at its
+    /// own end of it.
+    ///
+    /// Two hosts that both scout, and each answer the other's scout: the answers
+    /// travel on ONE flow, the lower host's from the low end and the higher
+    /// host's from the high end. Each end therefore holds a different node, and
+    /// the same node that scouted the group sits at the other end of its own
+    /// scouting flow. Nothing in the census treats the second answer as a
+    /// correction of the first: `links` keeps the latest zid per direction
+    /// because a handshake is one session, and these are announcements.
+    #[test]
+    fn a_flow_seen_from_both_directions_seats_each_sender_at_its_own_end() {
+        let low_host = [192, 168, 1, 5];
+        let high_host = [192, 168, 1, 9];
+        let mut d = Dissection::new();
+        // Both ask first, so each answer is read as an answer (the HELLO and the
+        // transport OPEN share a MID; see `Dissection::datagram_namespace`).
+        d.push_packet(
+            LINKTYPE_ETHERNET,
+            0,
+            &udp_packet(
+                low_host,
+                43210,
+                SCOUT_GROUP,
+                7446,
+                &scout_wire(Some(&[0x01; 4])),
+            ),
+        );
+        d.push_packet(
+            LINKTYPE_ETHERNET,
+            1,
+            &udp_packet(
+                high_host,
+                7447,
+                SCOUT_GROUP,
+                7446,
+                &scout_wire(Some(&[0x02; 4])),
+            ),
+        );
+        d.push_packet(
+            LINKTYPE_ETHERNET,
+            2,
+            &udp_packet(
+                high_host,
+                7447,
+                low_host,
+                43210,
+                &hello_wire(&[0x02; 4], &[]),
+            ),
+        );
+        d.push_packet(
+            LINKTYPE_ETHERNET,
+            3,
+            &udp_packet(
+                low_host,
+                43210,
+                high_host,
+                7447,
+                &hello_wire(&[0x01; 4], &[]),
+            ),
+        );
+        d.finish();
+
+        let census = nodes(&d);
+        let (low_node, high_node) = (index_of(&census, &[0x01; 4]), index_of(&census, &[0x02; 4]));
+        let answers = flow_of(&d, (&low_host, 43210), (&high_host, 7447));
+        let on_answers: Vec<(usize, FlowEnd)> = census
+            .ends()
+            .iter()
+            .filter(|e| e.flow == answers)
+            .map(|e| (e.node, e.end))
+            .collect();
+        assert_eq!(
+            on_answers,
+            [(high_node, FlowEnd::High), (low_node, FlowEnd::Low)],
+            "the answers' flow holds both senders, each at its own end, in the \
+             order the answers arrived: {:?}",
+            census.ends()
+        );
+        assert_eq!(
+            census.ends().len(),
+            4,
+            "and the two scouting flows: {:?}",
+            census.ends()
+        );
+    }
+
+    /// The same sender announcing again at the same end is ONE row; the same
+    /// sender on another flow is another. The ledger is of (node, end, flow).
+    #[test]
+    fn a_sender_that_repeats_itself_is_one_row_per_end_of_each_flow() {
+        let host = [192, 168, 1, 5];
+        let mut d = Dissection::new();
+        for (i, port) in [43210u16, 43210, 43211].into_iter().enumerate() {
+            d.push_packet(
+                LINKTYPE_ETHERNET,
+                i,
+                &udp_packet(host, port, SCOUT_GROUP, 7446, &scout_wire(Some(&[0x88; 4]))),
+            );
+        }
+        d.finish();
+
+        let census = nodes(&d);
+        assert_eq!(census.nodes().len(), 1);
+        assert_eq!(
+            census.ends().len(),
+            2,
+            "three scouts from two sockets are two flows: {:?}",
+            census.ends()
+        );
+    }
+
+    /// A multicast JOIN names its sender, so its sender is seated; the group it
+    /// announced to is not, and a Join whose sender sorts ABOVE the group is the
+    /// high end.
+    ///
+    /// No deployed host sorts above the IPv4 multicast range, so the second
+    /// packet uses an address from the reserved block purely to reach the arm in
+    /// which the direction is `b`: the library orders ends by address bytes and
+    /// does not know what a routable address is. Without it, an always-`low`
+    /// Join path would pass.
+    #[test]
+    fn a_multicast_join_seats_its_sender_and_never_the_group() {
+        let mut d = Dissection::new();
+        d.push_packet(
+            LINKTYPE_ETHERNET,
+            0,
+            &udp_packet(
+                [10, 0, 0, 1],
+                7447,
+                [224, 0, 0, 224],
+                7447,
+                &join_message(&[0xC3; 4]),
+            ),
+        );
+        d.push_packet(
+            LINKTYPE_ETHERNET,
+            1,
+            &udp_packet(
+                [240, 0, 0, 1],
+                7447,
+                [224, 0, 0, 224],
+                7447,
+                &join_message(&[0xD4; 4]),
+            ),
+        );
+        d.finish();
+
+        let census = nodes(&d);
+        assert_eq!(
+            census.ends(),
+            &[
+                ObservedEnd {
+                    node: index_of(&census, &[0xC3; 4]),
+                    end: FlowEnd::Low,
+                    flow: flow_of(&d, (&[10, 0, 0, 1], 7447), (&[224, 0, 0, 224], 7447)),
+                },
+                ObservedEnd {
+                    node: index_of(&census, &[0xD4; 4]),
+                    end: FlowEnd::High,
+                    flow: flow_of(&d, (&[240, 0, 0, 1], 7447), (&[224, 0, 0, 224], 7447)),
+                },
+            ],
+            "{:?}",
+            census.ends()
+        );
+    }
+
+    /// A JOIN on a raweth link seats its sender at the MAC it came from. The
+    /// ends of that flow are six-byte addresses with no ports, and the rule is
+    /// the same one: the half sent from the lower endpoint is `a`, its sender
+    /// the low end. The builder's source MAC (`30:03:..`) sorts below its
+    /// destination (`aa:bb:..`).
+    #[test]
+    fn a_join_on_a_raweth_link_seats_its_sender_at_the_mac_it_came_from() {
+        let mut d = Dissection::new();
+        d.push_packet(
+            LINKTYPE_ETHERNET,
+            0,
+            &raweth_packet(&join_message(&[0xE5; 4])),
+        );
+        d.finish();
+
+        let census = nodes(&d);
+        assert_eq!(census.ends().len(), 1, "{:?}", census.ends());
+        assert_eq!(census.ends()[0].end, FlowEnd::Low, "{:?}", census.ends());
+        assert_eq!(census.ends()[0].flow.link(), crate::link::LinkKind::RawEth);
+    }
+
+    /// THE CONTROL: a unicast handshake seats nothing and its link reads as it
+    /// always did. `ends` is emitted, and empty.
+    #[test]
+    fn a_handshake_makes_a_link_and_no_end() {
+        let mut d = Dissection::new();
+        d.push_packet(
+            LINKTYPE_ETHERNET,
+            0,
+            &tcp_packet(1000, &framed_init(&[0xA1; 4])),
+        );
+        d.push_packet(
+            LINKTYPE_ETHERNET,
+            1,
+            &crate::datagram_tests::tcp_packet_reverse(2000, &framed_init(&[0xB2; 4])),
+        );
+        d.finish();
+
+        let census = nodes(&d);
+        assert_eq!(census.links().len(), 1, "{:?}", census.links());
+        assert!(census.ends().is_empty(), "{:?}", census.ends());
+        let json = crate::census_json::nodes_json(&census);
+        assert!(
+            json.contains("}}],\"ends\":[],\"attributed_bytes\":"),
+            "the array is structural and the links before it are as they were: {json}"
         );
     }
 

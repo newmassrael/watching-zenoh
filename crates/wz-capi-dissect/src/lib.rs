@@ -5585,6 +5585,84 @@ mod tests {
         );
     }
 
+    /// Census revision 20 -- THE END A DISCOVERY MESSAGE WAS SENT FROM CROSSES
+    /// EVERY CENSUS DOOR, with the same row.
+    ///
+    /// # The population
+    ///
+    /// A Scout from `192.168.1.5:43210` to the scouting group and a Hello from
+    /// `192.168.1.9:7447` back to the asker. The scout's flow has the group as
+    /// its high end and the scout's sender is the LOW end; the hello's flow has
+    /// the responder as its high end and the hello's sender is the HIGH end. The
+    /// expected array is a LITERAL, worked out from those addresses, and not
+    /// read back from the emitter: two nodes (scout first), one row each, and no
+    /// row for the group or for the asker, because neither message names them.
+    ///
+    /// # Which doors
+    ///
+    /// All four container combinations and the live handle, the last cut into
+    /// growing prefixes the way a polling consumer feeds it. The live handle is
+    /// the one a consumer draws from while a capture is still arriving, and
+    /// "present in the container document, absent from the handle's" is exactly
+    /// the shape a per-door rendering would leave. The nodes plane is not
+    /// narrowed by a selector, so a narrowed census carries the same array.
+    #[test]
+    fn a_discovery_end_crosses_every_census_door() {
+        let asker = [192, 168, 1, 5];
+        let scout = scout_to_group(asker, 43210);
+        let hello = hello_to([192, 168, 1, 9], asker, 43210);
+        let file =
+            wz_capture::pcap::write(1, &[(0, 0, scout.as_slice()), (0, 9_000, hello.as_slice())]);
+        let end = |low_addr: &str, low_port: u32, high_addr: &str, high_port: u32| {
+            format!(
+                "\"flow\":{{\"low\":{{\"addr\":\"{low_addr}\",\"port\":{low_port},\
+                 \"family\":\"ipv4\"}},\"high\":{{\"addr\":\"{high_addr}\",\
+                 \"port\":{high_port},\"family\":\"ipv4\"}},\"link\":\"udp\"}}"
+            )
+        };
+        let expected = format!(
+            "\"ends\":[{{\"node\":0,\"sender_end\":\"low\",{}}},\
+             {{\"node\":1,\"sender_end\":\"high\",{}}}]",
+            end("192.168.1.5", 43210, "224.0.0.224", 7446),
+            end("192.168.1.5", 43210, "192.168.1.9", 7447),
+        );
+
+        let plain = call_census(&file).expect("the capture reads");
+        assert!(
+            plain.contains(&expected),
+            "the container census must seat both senders:\n  want {expected}\n  in   {plain}"
+        );
+        for (door, doc) in [
+            ("bounded", call_census_bounded(&file).expect("reads")),
+            (
+                "where",
+                call_census_where(&file, "kind == put").expect("reads"),
+            ),
+            (
+                "where_limited",
+                call_census_where_limited(&file, "", WZ_DISSECT_LIMITS_LIVE_TAP).expect("reads"),
+            ),
+            (
+                "live",
+                live_census_of(&file, 8, WZ_DISSECT_LIMITS_NONE, "", true),
+            ),
+            (
+                "live narrowed",
+                live_census_of(&file, 8, WZ_DISSECT_LIMITS_NONE, "kind == put", true),
+            ),
+        ] {
+            assert!(
+                doc.contains(&expected),
+                "the {door} door must carry the same ends:\n  want {expected}\n  in   {doc}"
+            );
+        }
+        assert_eq!(
+            live_census_of(&file, 8, WZ_DISSECT_LIMITS_NONE, "", true),
+            plain,
+            "and the live handle, fed in prefixes, equals the container census"
+        );
+    }
+
     /// Drive the narrowed census the way C does.
     fn call_census_where(bytes: &[u8], selector: &str) -> Result<String, c_int> {
         let sel = std::ffi::CString::new(selector).expect("no interior NUL");

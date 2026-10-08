@@ -2476,6 +2476,50 @@ pub const DOCUMENT_HISTORY: &[DocumentShape] = &[
         planes: CENSUS_R6_PLANES,
         carries: CENSUS_R15_CARRIES,
     },
+    // THE NODE PLANE SAYS WHICH END OF A DISCOVERY FLOW A NODE SENT FROM.
+    //
+    // THREE KEYS ARRIVE and nothing retires: `nodes.ends[]`, a new array beside
+    // `links[]`, whose rows are `{node, sender_end, flow}`. `node` indexes
+    // `nodes.nodes[]`, as `links[].a` and `.b` do. `sender_end` is `low` or
+    // `high`, a closed word a consumer may switch on, so the families axis gains
+    // it; it decides no shape, so the carries axis gains it as a passenger.
+    // `flow` is the flow object every plane writes.
+    //
+    // WHY A NEW ARRAY AND NOT MORE ROWS IN `links[]`: a `links[]` row says both
+    // ends of a flow opened a handshake, and a reader holding one takes `a` and
+    // `b` to be present nodes. A discovery message names its sender and not its
+    // receiver, so a row with one end would have been a `links[]` row a consumer
+    // had to test, and the session grouping is built from `links[]` rows alone.
+    //
+    // WHY THE KEY IS `sender_end` AND NOT `end`: revision 19 already writes
+    // `end`, as a number, in an ambiguity report. One key under two meanings
+    // would put a closed vocabulary on a key a consumer also reads as an offset.
+    //
+    // WHAT A ROW CLAIMS, which is the contract: the node SENT a message that
+    // named it (a Hello, a Scout that carries its optional zid, or a multicast
+    // Join) from that end of that flow. Direction `a` is the half sent from the
+    // low endpoint, so its sender is `low`. The RECEIVING end has no row: no
+    // message names it, and the multicast group is no node. Several nodes may be
+    // seated at one end (listeners share the scouting port), and one node may be
+    // seated at both ends of a flow; every row is a message that was seen. The
+    // array is always present, empty where no message named a sender, so a
+    // consumer never tests for the key.
+    //
+    // NO VALUE MOVES under an old key. `links[]`, `nodes[].flows` and the
+    // evidence counts read exactly as they did at revision 19, and a document
+    // whose capture holds no discovery or Join message differs from revision
+    // 19's only by `"ends":[]` and the number in the envelope. A consumer pinned
+    // to 19 loses nothing: the array is an addition an object-by-name reader
+    // does not see.
+    DocumentShape {
+        document: CENSUS,
+        revision: 20,
+        keys: CENSUS_R20_KEYS,
+        retiring: &[],
+        families: CENSUS_R20_FAMILIES,
+        planes: CENSUS_R6_PLANES,
+        carries: CENSUS_R20_CARRIES,
+    },
 ];
 
 // The key sets below are MEASURED, never transcribed: each was printed by the
@@ -10947,6 +10991,295 @@ pub const CENSUS_R19_KEYS: &[&str] = &[
     "zid",
 ];
 
+/// The census document's key set at revision 20: revision 19's PLUS `ends`,
+/// `node` and `sender_end`, which the node plane's new `ends[]` array writes. An
+/// ADDITION, so revision 19 has nothing to retire.
+///
+/// Written out rather than aliased, for revision 18's reason: this set moves.
+/// `ends` is the array, and `node` and `sender_end` are the keys of each row;
+/// `flow` beside them was already in the set.
+///
+/// ⚠ The row's key is `sender_end` and not `end`. Revision 19 already holds
+/// `end`, as the offset where a `zid` prefix stops in an ambiguity report, and
+/// there it is a number. A family declared on `end` would have been a closed
+/// vocabulary on a key whose other use is a number, and a consumer switching on
+/// the key would have met both under one name.
+pub const CENSUS_R20_KEYS: &[&str] = &[
+    "a",
+    "a_to_b",
+    "aborted_capacity_overflow",
+    "aborted_out_of_order",
+    "aborted_sender_dropped",
+    "aborted_superseded",
+    "aborted_unresolvable",
+    "addr",
+    "admissible",
+    "aggregate",
+    "ambiguous_zid_prefixes",
+    "anchor_intervals",
+    "anchors_exact",
+    "answers",
+    "answers_in_scope",
+    "asked_at",
+    "asker",
+    "asks",
+    "at",
+    "at_most_bytes",
+    "attributed_bytes",
+    "b",
+    "b_to_a",
+    "begun",
+    "by_kind",
+    "bytes",
+    "cancelled_at",
+    "candidates",
+    "caps",
+    "cause",
+    "children",
+    "closed_at",
+    "completed",
+    "completion",
+    "consistent",
+    "continued",
+    "contradictions",
+    "count",
+    "declaration",
+    "declarations",
+    "declared",
+    "declared_at",
+    "declarer",
+    "declarer_zid",
+    "dels",
+    "descriptors",
+    "document",
+    "dropped_by_limits",
+    "elsewhere",
+    "end",
+    "ends",
+    "errs",
+    "evidence",
+    "exchanges",
+    "family",
+    "first",
+    "first_anchor",
+    "first_reply",
+    "flow",
+    "flows",
+    "fragment_chains",
+    "frames",
+    "frames_per_flow",
+    "gaps",
+    "halted_batches",
+    "hello",
+    "high",
+    "id",
+    "inadmissible",
+    "init",
+    "interests",
+    "join",
+    "judged",
+    "keyexpr",
+    "keyexprs",
+    "keys",
+    "kind",
+    "last",
+    "last_anchor",
+    "link",
+    "links",
+    "liveliness_token",
+    "locators",
+    "low",
+    "matched",
+    "max_flows_per_table",
+    "max_ms",
+    "max_ns",
+    "max_scout_askers",
+    "mean_ms",
+    "mean_ns",
+    "messages",
+    "min_ms",
+    "min_ns",
+    "mismatched",
+    "mode",
+    "name",
+    "narrowed_by_selector",
+    "node",
+    "nodes",
+    "non_monotonic",
+    "not_as_declared",
+    "offset_space",
+    "orphan_answers",
+    "orphan_responses",
+    "orphan_withdrawals",
+    "payload_bytes",
+    "payload_bytes_ceiling",
+    "payloads",
+    "planes",
+    "port",
+    "prefix",
+    "puts",
+    "queries",
+    "queryable",
+    "queryables",
+    "reason",
+    "records",
+    "references",
+    "refused_missing_start_marker",
+    "refused_peer_quota",
+    "refused_pool_exhausted",
+    "rejected",
+    "replies",
+    "requests",
+    "restricted",
+    "revision",
+    "rows",
+    "scout",
+    "scout_askers",
+    "scouting",
+    "selection",
+    "sender_end",
+    "share_bp",
+    "silent",
+    "skipped",
+    "skipped_packets",
+    "solicited_by",
+    "source_ahead_of_observer",
+    "space",
+    "start",
+    "stream_bytes",
+    "stream_bytes_per_direction",
+    "subscriber",
+    "subscribers",
+    "subtrees",
+    "tokens",
+    "total_ms",
+    "total_ns",
+    "total_payload_bytes",
+    "totals",
+    "unanswered",
+    "unattributed_bytes",
+    "unattributed_records",
+    "unattributed_requests",
+    "unclaimed",
+    "unclaimed_exact",
+    "unclosed",
+    "undecidable",
+    "undecided",
+    "undeclarations",
+    "undecompressible_batches",
+    "unjudged_answers",
+    "unknown_ids",
+    "unlocatable_records",
+    "unmeasured_payloads",
+    "unparsed_bytes",
+    "unread",
+    "unresolvable_fragments",
+    "unresolved",
+    "unresolved_declarations",
+    "unresolved_records",
+    "unsized_payloads",
+    "unstamped",
+    "walked_records",
+    "whatami",
+    "why",
+    "wire_bytes",
+    "withdrawn_at",
+    "zid",
+];
+
+/// Which end of a flow a node sent from, at census revision 20 — the words
+/// `crate::link::FlowEnd::name` returns, which are the two key names a flow
+/// object is indexed by (`flow[sender_end]` is the endpoint).
+///
+/// SORTED, and joined to `FlowEnd::names` by
+/// `the_declared_value_families_match_the_librarys_own_vocabularies`, so an end
+/// added to the enum cannot ship until a revision declares it.
+pub const FLOW_END_R20: &[&str] = &["high", "low"];
+
+/// The census document's value families at revision 20 — revision 15's PLUS
+/// `sender_end`.
+pub const CENSUS_R20_FAMILIES: &[ValueFamily] = &[
+    ValueFamily {
+        key: "asker",
+        values: DIRECTION_R4,
+    },
+    ValueFamily {
+        key: "cause",
+        values: UNRESOLVED_CAUSE_R11,
+    },
+    ValueFamily {
+        key: "declarer",
+        values: DIRECTION_R4,
+    },
+    ValueFamily {
+        key: "family",
+        values: ADDR_FAMILY_R15,
+    },
+    ValueFamily {
+        key: "kind",
+        values: INTEREST_KIND_R4,
+    },
+    ValueFamily {
+        key: "link",
+        values: LINK_KIND_R7,
+    },
+    ValueFamily {
+        key: "mode",
+        values: INTEREST_MODE_R4,
+    },
+    ValueFamily {
+        key: "offset_space",
+        values: ANCHOR_SPACE_R4,
+    },
+    ValueFamily {
+        key: "sender_end",
+        values: FLOW_END_R20,
+    },
+];
+
+/// What each census family's WORD decides about the keys beside it, at revision
+/// 20 — revision 15's PLUS `sender_end`, a PASSENGER: a row of `ends[]` is
+/// `node` / `sender_end` / `flow` whichever end it names, and the word decides
+/// no shape.
+pub const CENSUS_R20_CARRIES: &[KeyCarries] = &[
+    KeyCarries {
+        key: "asker",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "cause",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "declarer",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "family",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "kind",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "link",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "mode",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "offset_space",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "sender_end",
+        shape: CarriesShape::Passenger,
+    },
+];
+
 /// The summary document's key set at revision 5: revision 4's, by name.
 ///
 /// The revision moved the JSON type of five wire-sourced cells (an interest's
@@ -12526,7 +12859,10 @@ mod tests {
             // (five keys, absent unless a selector's `zid` prefix began two or
             // more of the capture's zids) and a prefix that names one node
             // began to select that node's records.
-            (CENSUS, 19u32),
+            // To 20 when the node plane gained `ends[]`: which end of a
+            // discovery flow a node sent from. Three keys, one family
+            // (`sender_end`, a passenger), and no value moves under an old key.
+            (CENSUS, 20u32),
             // R2175 (open-debt item 552) — the field document moved to 2 when
             // its PAYLOAD PLANE joined the pin (fifteen keys revision 1 had
             // never covered) and its first three value families were declared.

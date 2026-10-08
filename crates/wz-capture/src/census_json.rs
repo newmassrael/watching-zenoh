@@ -534,8 +534,8 @@ fn push_zid(zid: &[u8], out: &mut String) {
     out.push('"');
 }
 
-/// The NODE plane: the capture keyed by zid, and the links where both ends
-/// named themselves.
+/// The NODE plane: the capture keyed by zid, the links where both ends named
+/// themselves, and the ends a discovery message named its sender at.
 pub fn nodes_json(c: &NodeCensus) -> String {
     let mut out = String::from("{\"nodes\":[");
     for (i, node) in c.nodes().iter().enumerate() {
@@ -635,6 +635,28 @@ pub fn nodes_json(c: &NodeCensus) -> String {
         }
         let _ = write!(out, "{{\"a\":{},\"b\":{},\"flow\":", link.a, link.b);
         push_flow(&link.flow, &mut out);
+        out.push('}');
+    }
+    // Census revision 20 — WHICH END OF A FLOW A DISCOVERY MESSAGE WAS SENT
+    // FROM, for the flows `links` cannot speak for. `sender_end` is a flow
+    // object's own key (`low` or `high`), so `flow[sender_end]` is the endpoint
+    // the node sent from. It is not called `end`: revision 19 writes `end` as a
+    // number in the ambiguity report.
+    // STRUCTURAL like `links`: an empty array is the answer "no message named
+    // its sender here", and a consumer never tests for the key. The receiving
+    // end has no row and no placeholder; see `crate::node::ObservedEnd`.
+    out.push_str("],\"ends\":[");
+    for (i, seat) in c.ends().iter().enumerate() {
+        if i > 0 {
+            out.push(',');
+        }
+        let _ = write!(
+            out,
+            "{{\"node\":{},\"sender_end\":\"{}\",\"flow\":",
+            seat.node,
+            seat.end.name()
+        );
+        push_flow(&seat.flow, &mut out);
         out.push('}');
     }
     let _ = write!(
@@ -2255,8 +2277,13 @@ pub(crate) mod fed_tests {
         // The `contradicting` arm is what reaches it, and it brings the
         // contradiction plane's own keys with it — also previously unpinned,
         // for the same reason and now for neither.
+        // Census revision 20 — AND THE FIXTURE CARRIES A SCOUT AND A HELLO. The
+        // locator is what adds them, and they are what put a row in `ends[]`:
+        // without one the array is emitted EMPTY on every run of this test and
+        // the keys of the object inside it (`node`, `sender_end`) reach no axis,
+        // which is the silence the paragraph above measured for `unresolved[]`.
         let doc = census_json_where(
-            &every_plane_capture_with_file("demo/temp", None, true).0,
+            &every_plane_capture_with_file("demo/temp", Some("udp/192.168.1.9:7447"), true).0,
             &crate::filter::Filter::any(),
         );
         let mut seen = json_keys(&doc);
@@ -2305,6 +2332,75 @@ pub(crate) mod fed_tests {
              if a key is going away, announce it in the previous revision's \
              `retiring` first, which is what makes a rename an edit a consumer can \
              follow instead of a break"
+        );
+    }
+
+    /// THE CENSUS DOCUMENT SAYS WHICH END OF A DISCOVERY FLOW A NODE SENT FROM.
+    ///
+    /// # The claim, and where it was measured
+    ///
+    /// A consumer read a Scout and a Hello off one capture and found each zid
+    /// under the right flow in `nodes[].flows`, while `links[]` held nothing for
+    /// either: `links[]` is the only place the document says which END of a
+    /// flow is which node, and it speaks only where both ends opened a
+    /// handshake. So "this end of this datagram flow is node X" had no answer.
+    ///
+    /// # What the fixture is
+    ///
+    /// The shape of that capture, built here from this crate's own datagram
+    /// builders: a SCOUT from `192.168.1.5:43210` to the scouting group, and a
+    /// HELLO from `192.168.1.9:7447` back to the asker. The scout's flow is
+    /// `{low 192.168.1.5:43210, high 224.0.0.224:7446}` and its sender is the
+    /// low end; the hello's flow is `{low 192.168.1.5:43210, high
+    /// 192.168.1.9:7447}` and its sender is the HIGH end. The two senders sit
+    /// at opposite ends on purpose: a build that always wrote one word would
+    /// pass either alone.
+    ///
+    /// The receiving end of each flow (the group, and the asker) is not in the
+    /// document, because neither message names it.
+    #[test]
+    fn a_discovery_datagram_seats_its_sender_at_one_end_of_its_flow() {
+        let (d, _) =
+            every_plane_capture_with_file("demo/temp", Some("udp/192.168.1.9:7447"), false);
+        let census = crate::node::nodes(&d);
+        let doc = nodes_json(&census);
+        let index_of = |zid: &[u8]| {
+            census
+                .nodes()
+                .iter()
+                .position(|n| n.zid == zid)
+                .expect("the capture named this zid")
+        };
+        let flow_text = |low: ([u8; 4], u32), high: ([u8; 4], u32)| {
+            let flow = d
+                .datagram_flows()
+                .iter()
+                .map(|f| f.flow)
+                .find(|f| {
+                    f.low.port == low.1
+                        && f.high.port == high.1
+                        && f.low.addr() == low.0
+                        && f.high.addr() == high.0
+                })
+                .expect("the datagram flow is in the capture");
+            let mut text = String::new();
+            push_flow(&flow, &mut text);
+            text
+        };
+        let scout = alloc::format!(
+            "{{\"node\":{},\"sender_end\":\"low\",\"flow\":{}}}",
+            index_of(&[0x11, 0x22, 0x33, 0x44]),
+            flow_text(([192, 168, 1, 5], 43210), ([224, 0, 0, 224], 7446)),
+        );
+        let hello = alloc::format!(
+            "{{\"node\":{},\"sender_end\":\"high\",\"flow\":{}}}",
+            index_of(&[0x55, 0x66, 0x77, 0x88]),
+            flow_text(([192, 168, 1, 5], 43210), ([192, 168, 1, 9], 7447)),
+        );
+        assert!(
+            doc.contains(&alloc::format!("\"ends\":[{scout},{hello}]")),
+            "the scout's sender is the low end of its flow and the hello's the \
+             high end of its own, and nothing else is seated: {doc}"
         );
     }
 
@@ -3080,8 +3176,21 @@ pub(crate) mod fed_tests {
             "the unresolved alias must have been counted twice, or the \
              `references` key below is unmeasured: {finding}"
         );
+        // Census revision 20 — a THIRD capture, with a scout and a hello in it,
+        // which is the only writer of the keys of an `ends[]` row. The plain
+        // capture is all TCP, so its `ends` array is empty and `node` and `sender_end`
+        // inside a row are conditional on a message that names its sender.
+        let (discovering, _) =
+            every_plane_capture_with_file("demo/temp", Some("udp/192.168.1.9:7447"), false);
+        let seated = census_json_where(&discovering, &crate::filter::Filter::any());
+        assert!(
+            seated.contains(concat!("\"ends", "\":[{")),
+            "the discovering capture must have seated a sender, or the union \
+             below is the plain capture's set again: {seated}"
+        );
         let mut observed = json_keys(&doc);
         observed.extend(json_keys(&finding));
+        observed.extend(json_keys(&seated));
         observed.sort_unstable();
         observed.dedup();
 
