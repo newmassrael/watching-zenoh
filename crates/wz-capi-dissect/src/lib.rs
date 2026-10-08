@@ -333,6 +333,7 @@ pub extern "C" fn wz_dissect_abi_version() -> c_int {
     // 22, for `wz_dissect_live_fields_since`.
     // 23, for `wz_dissect_live_retention`.
     // 24, for `wz_dissect_live_health`.
+    // 25, for `wz_dissect_declarations_from_proto`.
     WZ_DISSECT_ABI_REVISION
 }
 
@@ -350,7 +351,7 @@ pub extern "C" fn wz_dissect_abi_version() -> c_int {
 /// It lives AFTER the function rather than above it on purpose: an item placed
 /// between a doc comment and the item it documents takes that doc, which is
 /// the doc-ownership defect the C1bz budget records.
-pub const WZ_DISSECT_ABI_REVISION: c_int = 24;
+pub const WZ_DISSECT_ABI_REVISION: c_int = 25;
 
 /// R2108 (open-debt item 525) — THE RECORD'S LAYOUT, reported by the artifact.
 ///
@@ -1397,6 +1398,186 @@ pub unsafe extern "C" fn wz_dissect_declarations_diagnose(
         }
     };
     write_string(verdict, out)
+}
+
+/// One file of a `.proto` schema, as [`wz_dissect_declarations_from_proto`] takes
+/// it: the name other files import it by, and its bytes.
+///
+/// The C name is `wz_dissect_proto_file`. The layout is three pointer-sized
+/// fields in this order (24 bytes, 8-aligned on a 64-bit target), and, like the
+/// record, it is fixed once shipped: a change to it is a new struct and a new
+/// door. The header says so in the same words, and
+/// `the_proto_file_layout_is_pinned` and the C consumer's `offsetof` block hold
+/// it.
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct WzDissectProtoFile {
+    /// NUL-terminated UTF-8. The name `import` statements in the other files
+    /// use, matched by exact string equality, and the name a diagnostic carries.
+    pub name: *const c_char,
+    /// The file's bytes, UTF-8, not NUL-terminated. May be null only when
+    /// `text_len` is zero, which is an empty file.
+    pub text: *const u8,
+    /// How many bytes `text` holds.
+    pub text_len: usize,
+}
+
+/// `.proto` SCHEMA TEXT TURNED INTO DECLARATION TEXT, so a consumer that links
+/// this library never parses `.proto` itself.
+///
+/// # Why this is a door
+///
+/// protobuf's wire format carries field numbers and no names, so a payload
+/// decoded under a `protobuf` rule shows `3.2` where the author wrote
+/// `temperature`. The way to give it names is a declaration per field
+/// (`demo/**:3.2=temperature`), installed through the doors that already take
+/// declarations and validated without a capture by
+/// [`wz_dissect_declarations_diagnose`]. A person who owns a `.proto` file
+/// should not type those lines, and a consumer offering them an "add from file"
+/// must not read `.proto` on its own account: that is a second reader of a
+/// language inside the program that links this one, and the two disagree
+/// exactly where the language is unusual. This is the one reader.
+/// [`wz_capture::proto_schema`] documents the language subset, what is refused,
+/// and the bounds; the header carries the same account for a C reader.
+///
+/// # Arguments
+///
+/// * `key_pattern` -- a key expression as its author means it, NUL-terminated.
+///   NOT declaration text: the characters that dialect reserves (`\`, `:`, `=`,
+///   `#`) are quoted for the caller.
+/// * `root_message` -- the full name of the message the payloads carry,
+///   package included, NUL-terminated.
+/// * `files`, `file_count` -- the schema: every file the root file might import,
+///   each a name and its bytes. The caller reads the bytes; nothing here opens a
+///   path, and no callback runs. A file nothing imports is never read.
+/// * `root_file` -- the index in `files` of the file the user chose.
+///
+/// # Result
+///
+/// [`WZ_DISSECT_OK`] with a verdict, for any arguments that are well formed:
+///
+/// ```text
+/// {"document":{"name":"declarations_from_proto","revision":1},
+///  "ok":true,"declarations":"demo/**=protobuf\ndemo/**:1=value\n","installed":2}
+/// {"document":{...},"ok":false,"file":"a.proto","line":3,"column":9,
+///  "reason":"...","message":"a.proto: line 3: ..."}
+/// ```
+///
+/// A schema that is refused is a successful DIAGNOSIS, for the reason
+/// [`wz_dissect_declarations_diagnose`] gives: OK means a string, an error means
+/// none. `file`, `line` and `column` are present together for a place in a
+/// file, `file` alone for a problem with the file as a whole (the root message
+/// is not defined in it), and absent for a problem with an argument (a key
+/// pattern); they are absent and not `null`, because a top-level `null` is what
+/// this ABI reserves for a plane. `message` is the one-line form, `{file}: line
+/// {line}: {reason}`, with the parts that are absent left out.
+///
+/// # Errors
+///
+/// [`WZ_DISSECT_ERR_INVALID_ARG`] for a null pointer, a count of zero, a root
+/// index outside the list, a name or text pointer that is null where it may not
+/// be, two files with one name, or a key pattern, root name or file name that is
+/// not UTF-8: all of them the caller's own bug and not text a person typed.
+///
+/// # Safety
+/// `key_pattern` and `root_message` must be NUL-terminated C strings; `files`
+/// must point to `file_count` readable [`WzDissectProtoFile`] values, each
+/// `name` a NUL-terminated C string and each `text` readable for `text_len`
+/// bytes; `out` must be a writable pointer to a `*mut c_char`. None of `files`,
+/// `key_pattern`, `root_message` and `out` may be null.
+#[no_mangle]
+pub unsafe extern "C" fn wz_dissect_declarations_from_proto(
+    key_pattern: *const c_char,
+    root_message: *const c_char,
+    files: *const WzDissectProtoFile,
+    file_count: usize,
+    root_file: usize,
+    out: *mut *mut c_char,
+) -> c_int {
+    if key_pattern.is_null()
+        || root_message.is_null()
+        || files.is_null()
+        || out.is_null()
+        || file_count == 0
+        || root_file >= file_count
+    {
+        return WZ_DISSECT_ERR_INVALID_ARG;
+    }
+    // SAFETY: caller contract above.
+    let (Ok(key), Ok(root)) = (
+        unsafe { std::ffi::CStr::from_ptr(key_pattern) }.to_str(),
+        unsafe { std::ffi::CStr::from_ptr(root_message) }.to_str(),
+    ) else {
+        return WZ_DISSECT_ERR_INVALID_ARG;
+    };
+    // SAFETY: caller contract above.
+    let entries = unsafe { core::slice::from_raw_parts(files, file_count) };
+    let mut given: Vec<wz_capture::proto_schema::ProtoFile<'_>> = Vec::with_capacity(file_count);
+    for entry in entries {
+        if entry.name.is_null() || (entry.text.is_null() && entry.text_len != 0) {
+            return WZ_DISSECT_ERR_INVALID_ARG;
+        }
+        // SAFETY: caller contract above.
+        let Ok(name) = unsafe { std::ffi::CStr::from_ptr(entry.name) }.to_str() else {
+            return WZ_DISSECT_ERR_INVALID_ARG;
+        };
+        let text: &[u8] = if entry.text_len == 0 {
+            &[]
+        } else {
+            // SAFETY: caller contract above; non-null was checked just now.
+            unsafe { core::slice::from_raw_parts(entry.text, entry.text_len) }
+        };
+        if given.iter().any(|f| f.name == name) {
+            return WZ_DISSECT_ERR_INVALID_ARG;
+        }
+        given.push(wz_capture::proto_schema::ProtoFile { name, text });
+    }
+
+    let result = wz_capture::proto_schema::declarations_from_proto(key, root, &given, root_file);
+    write_string(proto_verdict(&result), out)
+}
+
+/// The `declarations_from_proto` document for one outcome.
+///
+/// The position keys of a refusal are ABSENT where they do not apply and never
+/// `null`: a top-level `null` is what this ABI reserves for a plane the build
+/// cannot feed, and `every_top_level_null_is_a_declared_plane` refuses one
+/// anywhere else. A key that was sometimes `null` for a different reason would
+/// make that rule unreadable.
+fn proto_verdict(
+    result: &Result<
+        wz_capture::proto_schema::ProtoDeclarations,
+        wz_capture::proto_schema::ProtoDiagnostic,
+    >,
+) -> String {
+    let head =
+        wz_capture::doc_revision::envelope(wz_capture::doc_revision::DECLARATIONS_FROM_PROTO);
+    match result {
+        Ok(declared) => {
+            let mut s = format!("{{{head},\"ok\":true,\"declarations\":");
+            wz_session_core::json::escape_into(&declared.text, &mut s);
+            s.push_str(&format!(",\"installed\":{}}}", declared.installed));
+            s
+        }
+        Err(bad) => {
+            let mut s = format!("{{{head},\"ok\":false");
+            if let Some(file) = &bad.file {
+                s.push_str(",\"file\":");
+                wz_session_core::json::escape_into(file, &mut s);
+            }
+            for (position, at) in [("line", bad.line), ("column", bad.column)] {
+                if let Some(n) = at {
+                    s.push_str(&format!(",\"{position}\":{n}"));
+                }
+            }
+            s.push_str(",\"reason\":");
+            wz_session_core::json::escape_into(&bad.reason, &mut s);
+            s.push_str(",\"message\":");
+            wz_session_core::json::escape_into(&bad.to_string(), &mut s);
+            s.push('}');
+            s
+        }
+    }
 }
 
 /// R311y854 — the census NARROWED by a selector, wz's own filter language.
@@ -5982,7 +6163,12 @@ mod tests {
         // 24, for `wz_dissect_live_health`: the summary's `health` object over
         // a live handle, with the count of flows its stream counters are over.
         // One symbol, the same release rule.
-        assert_eq!(wz_dissect_abi_version(), 24);
+        // 25, for `wz_dissect_declarations_from_proto`: `.proto` schema text
+        // turned into declaration text. One symbol and one struct
+        // (`wz_dissect_proto_file`); the memory rule is the one every document
+        // door keeps -- a `char*` released by `wz_dissect_string_free` -- and no
+        // callback runs, since the files cross as bytes the caller already read.
+        assert_eq!(wz_dissect_abi_version(), 25);
     }
 
     /// R311y913 (unregistered item 435) — THE LINKED SURFACE CAN SAY WHAT IT
@@ -6565,6 +6751,10 @@ mod tests {
             (rev::READABLE_SURFACES, vec![call_readable_surfaces()]),
             (rev::SELECTOR_DIAGNOSE, vec![selector_ok, selector_bad]),
             (rev::DECLARATIONS_DIAGNOSE, vec![decl_ok, decl_bad]),
+            // Every shape the `.proto` door writes: the success, a place in a
+            // file, a whole file, and an argument. The key set differs by
+            // branch, so a pin over one would leave the others' keys unwatched.
+            (rev::DECLARATIONS_FROM_PROTO, from_proto_documents()),
             // Built by a door that takes a handle, so it comes from one.
             (rev::SELECTION, selection_documents()),
             (rev::RETENTION, retention_documents()),
@@ -6696,6 +6886,14 @@ mod tests {
             (rev::READABLE_SURFACES, call_readable_surfaces()),
             (rev::SELECTOR_DIAGNOSE, call_selector_diagnose("")),
             (rev::DECLARATIONS_DIAGNOSE, call_declarations_diagnose("")),
+            // Declares no plane either.
+            (
+                rev::DECLARATIONS_FROM_PROTO,
+                from_proto_documents()
+                    .into_iter()
+                    .next()
+                    .expect("a document"),
+            ),
             // Declares no plane, so it contributes no `@planes` marker,
             // and being in this table is what makes that a checked fact.
             (
@@ -6831,6 +7029,9 @@ mod tests {
                     call_declarations_diagnose("not a declaration"),
                 ],
             ),
+            // All four shapes: the failure branch OMITS its position keys and
+            // must never write a `null` in their place.
+            (rev::DECLARATIONS_FROM_PROTO, from_proto_documents()),
             // Both shapes, for the reason `selection_documents` gives.
             (rev::SELECTION, selection_documents()),
             // With a clock and without, for the reason `retention_documents` gives.
@@ -6986,6 +7187,466 @@ mod tests {
             .to_string();
         unsafe { wz_dissect_string_free(out) };
         s
+    }
+
+    /// Drive the `.proto` door the way C does: a list of (name, bytes) and the
+    /// index of the root file. An empty buffer is handed over as a null pointer
+    /// of length zero, which is what the header permits for an empty file.
+    fn call_from_proto(
+        key: &str,
+        root: &str,
+        files: &[(&str, &[u8])],
+        root_file: usize,
+    ) -> Result<String, c_int> {
+        let key = CString::new(key).expect("no interior NUL");
+        let root = CString::new(root).expect("no interior NUL");
+        let names: Vec<CString> = files
+            .iter()
+            .map(|(name, _)| CString::new(*name).expect("no interior NUL"))
+            .collect();
+        let entries: Vec<WzDissectProtoFile> = files
+            .iter()
+            .zip(&names)
+            .map(|((_, text), name)| WzDissectProtoFile {
+                name: name.as_ptr(),
+                text: if text.is_empty() {
+                    core::ptr::null()
+                } else {
+                    text.as_ptr()
+                },
+                text_len: text.len(),
+            })
+            .collect();
+        let mut out: *mut c_char = core::ptr::null_mut();
+        let rc = unsafe {
+            wz_dissect_declarations_from_proto(
+                key.as_ptr(),
+                root.as_ptr(),
+                entries.as_ptr(),
+                entries.len(),
+                root_file,
+                &mut out,
+            )
+        };
+        if rc != WZ_DISSECT_OK {
+            assert!(out.is_null(), "an error must not hand back a string");
+            return Err(rc);
+        }
+        assert!(!out.is_null(), "OK must come with a string");
+        let s = unsafe { std::ffi::CStr::from_ptr(out) }
+            .to_str()
+            .expect("utf8")
+            .to_string();
+        unsafe { wz_dissect_string_free(out) };
+        Ok(s)
+    }
+
+    /// The `.proto` door over ONE file named `a.proto`.
+    fn from_proto_one(key: &str, root: &str, text: &str) -> String {
+        call_from_proto(key, root, &[("a.proto", text.as_bytes())], 0).expect("the door answers")
+    }
+
+    /// The string value of `"key":"..."` in a document, JSON escapes undone.
+    ///
+    /// Enough JSON for this crate's own documents, whose strings use only the
+    /// escapes `wz_session_core::json::escape_into` writes.
+    fn json_string(doc: &str, key: &str) -> String {
+        let marker = format!("\"{key}\":\"");
+        let rest = doc
+            .split_once(marker.as_str())
+            .unwrap_or_else(|| panic!("no {key} in {doc}"))
+            .1;
+        let mut out = String::new();
+        let mut chars = rest.chars();
+        while let Some(c) = chars.next() {
+            match c {
+                '"' => return out,
+                '\\' => match chars.next().expect("an escape has a character") {
+                    'n' => out.push('\n'),
+                    'r' => out.push('\r'),
+                    't' => out.push('\t'),
+                    other => out.push(other),
+                },
+                other => out.push(other),
+            }
+        }
+        panic!("the {key} string never closes in {doc}")
+    }
+
+    /// The integer value of `"key":N` in a document.
+    fn json_count(doc: &str, key: &str) -> usize {
+        let marker = format!("\"{key}\":");
+        doc.split_once(marker.as_str())
+            .unwrap_or_else(|| panic!("no {key} in {doc}"))
+            .1
+            .chars()
+            .take_while(char::is_ascii_digit)
+            .collect::<String>()
+            .parse()
+            .unwrap_or_else(|_| panic!("{key} is not a count in {doc}"))
+    }
+
+    /// One document of each shape the `.proto` door writes: the success, a
+    /// refusal at a place in a file, a refusal of the file as a whole, and a
+    /// refusal of an argument. The first is the success, for the callers that
+    /// need only one.
+    fn from_proto_documents() -> Vec<String> {
+        vec![
+            from_proto_one("demo/sensor", "Reading", READING),
+            from_proto_one("demo/sensor", "Reading", "message Reading { int32 a = 1 }"),
+            from_proto_one("demo/sensor", "Missing", READING),
+            from_proto_one("", "Reading", READING),
+        ]
+    }
+
+    const READING: &str = "syntax = \"proto3\";\n\
+        message Reading {\n\
+          int32 temperature = 1;\n\
+          Meta meta = 2;\n\
+          message Meta { string unit = 1; }\n\
+        }\n";
+
+    /// A `.proto` SCHEMA REACHES THE PAYLOAD READER'S NAMES THROUGH THE ABI,
+    /// with no step in between that this library does not own.
+    ///
+    /// The door's output is fed unchanged to the diagnostic door (it must say
+    /// `ok` and count the same lines) and then to the field document over a
+    /// capture, where field 1 of the payload must come back as `temperature`:
+    /// the same assertion the hand-written declaration makes, reached from a
+    /// schema.
+    #[test]
+    fn a_schema_becomes_declarations_the_existing_doors_accept_unchanged() {
+        let doc = from_proto_one("demo/sensor", "Reading", READING);
+        assert!(
+            doc.starts_with(&format!(
+                "{{{},\"ok\":true,",
+                wz_capture::doc_revision::envelope(
+                    wz_capture::doc_revision::DECLARATIONS_FROM_PROTO
+                )
+            )),
+            "{doc}"
+        );
+        let text = json_string(&doc, "declarations");
+        assert_eq!(
+            text,
+            "demo/sensor=protobuf\ndemo/sensor:1=temperature\ndemo/sensor:2=meta\n\
+             demo/sensor:2.1=unit\n"
+        );
+
+        // The existing validation door says the same about it.
+        let verdict = call_declarations_diagnose(&text);
+        assert!(verdict.contains("\"ok\":true"), "{verdict}");
+        assert_eq!(
+            json_count(&verdict, "installed"),
+            json_count(&doc, "installed"),
+            "the count this door reports is the count the installer reports"
+        );
+        assert_eq!(json_count(&doc, "installed"), 4);
+
+        // And the existing field door names the decoded field with it.
+        let decoded =
+            call_fields_with_payloads(&protobuf_capture(), 0, &text).expect("the capture reads");
+        assert!(
+            decoded.contains("\"path\":\"1\",\"name\":\"temperature\",\"value\":\"varint 150\""),
+            "the name a SCHEMA declared must ride the decoded field: {decoded}"
+        );
+    }
+
+    /// A KEY PATTERN IS A KEY EXPRESSION, NOT DECLARATION TEXT, and the door
+    /// quotes what the dialect reserves -- including a quote character, which
+    /// must also survive the JSON string it is returned in.
+    #[test]
+    fn a_key_pattern_is_quoted_for_the_dialect_and_escaped_for_json() {
+        let doc = from_proto_one("demo/temp:c", "Reading", READING);
+        let text = json_string(&doc, "declarations");
+        assert!(text.starts_with("demo/temp\\:c=protobuf\n"), "{text}");
+        let verdict = call_declarations_diagnose(&text);
+        assert!(verdict.contains("\"ok\":true"), "{verdict}");
+
+        let doc = from_proto_one("demo/\"q\"", "Reading", READING);
+        assert!(doc.contains("\\\"q\\\""), "{doc}");
+        assert!(
+            json_string(&doc, "declarations").starts_with("demo/\"q\"=protobuf\n"),
+            "{doc}"
+        );
+    }
+
+    /// A REFUSED SCHEMA IS A DIAGNOSIS WITH A PLACE IN A FILE: OK, a string, and
+    /// `file`, `line`, `column`, `reason` and the one-line `message`.
+    #[test]
+    fn a_refused_schema_is_a_successful_diagnosis_with_a_place_in_a_file() {
+        let doc = from_proto_one(
+            "demo/sensor",
+            "M",
+            "syntax = \"proto3\";\nmessage M {\n  int32 a = 1\n  int32 b = 2;\n}\n",
+        );
+        assert!(
+            doc.starts_with(&format!(
+                "{{{},\"ok\":false,\"file\":\"a.proto\",\"line\":4,\"column\":3,\"reason\":",
+                wz_capture::doc_revision::envelope(
+                    wz_capture::doc_revision::DECLARATIONS_FROM_PROTO
+                )
+            )),
+            "{doc}"
+        );
+        let reason = json_string(&doc, "reason");
+        assert!(reason.contains("expected `;`"), "{reason}");
+        assert_eq!(
+            json_string(&doc, "message"),
+            format!("a.proto: line 4: {reason}"),
+            "the one-line form is the file, the line and the reason"
+        );
+        assert!(!doc.contains("\"declarations\""), "{doc}");
+    }
+
+    /// A PROBLEM WITH THE FILE AS A WHOLE NAMES THE FILE AND NO LINE; A PROBLEM
+    /// WITH AN ARGUMENT NAMES NEITHER. Absent, never `null`.
+    #[test]
+    fn the_position_keys_are_absent_where_they_do_not_apply() {
+        let whole = from_proto_one("demo/sensor", "Nope", READING);
+        assert!(
+            whole.contains("\"ok\":false,\"file\":\"a.proto\",\"reason\":"),
+            "{whole}"
+        );
+        assert!(
+            !whole.contains("\"line\"") && !whole.contains("\"column\""),
+            "{whole}"
+        );
+        assert_eq!(
+            json_string(&whole, "message"),
+            format!("a.proto: {}", json_string(&whole, "reason"))
+        );
+
+        let argument = from_proto_one("demo/a\nb", "Reading", READING);
+        assert!(argument.contains("\"ok\":false,\"reason\":"), "{argument}");
+        assert!(!argument.contains("\"file\""), "{argument}");
+        assert_eq!(
+            json_string(&argument, "message"),
+            json_string(&argument, "reason")
+        );
+
+        let pattern = from_proto_one("/leading", "Reading", READING);
+        assert!(
+            json_string(&pattern, "reason").contains("cannot be declared"),
+            "{pattern}"
+        );
+        assert!(!pattern.contains("null"), "no key is ever null: {pattern}");
+    }
+
+    /// IMPORTS ARE RESOLVED BY NAME AGAINST THE LIST, through the ABI.
+    #[test]
+    fn imports_are_resolved_by_name_across_the_list() {
+        let root: &[u8] = b"syntax = \"proto3\";\npackage m;\nimport \"common/stamp.proto\";\n\
+            message Root { common.Stamp at = 1; }\n";
+        let stamp: &[u8] = b"syntax = \"proto3\";\npackage common;\n\
+            message Stamp { int64 secs = 1; }\n";
+        let doc = call_from_proto(
+            "k",
+            "m.Root",
+            &[("m/root.proto", root), ("common/stamp.proto", stamp)],
+            0,
+        )
+        .expect("the door answers");
+        assert_eq!(
+            json_string(&doc, "declarations"),
+            "k=protobuf\nk:1=at\nk:1.1=secs\n"
+        );
+
+        // The root file is whichever the caller says, not the first.
+        let doc = call_from_proto(
+            "k",
+            "common.Stamp",
+            &[("m/root.proto", root), ("common/stamp.proto", stamp)],
+            1,
+        )
+        .expect("the door answers");
+        assert_eq!(json_string(&doc, "declarations"), "k=protobuf\nk:1=secs\n");
+
+        // Without the imported file in the list the import is refused at the
+        // import statement, under the importer's own name.
+        let doc =
+            call_from_proto("k", "m.Root", &[("m/root.proto", root)], 0).expect("the door answers");
+        assert!(
+            doc.contains("\"file\":\"m/root.proto\",\"line\":3,\"column\":1"),
+            "{doc}"
+        );
+    }
+
+    /// BYTES THAT ARE NOT UTF-8 ARE A DIAGNOSIS WHEN THE FILE IS READ -- and
+    /// only then -- and an empty file is a null pointer of length zero.
+    #[test]
+    fn file_bytes_are_judged_when_read_and_an_empty_file_may_be_null() {
+        let broken: &[u8] = b"syntax = \"proto3\";\n// \xff\nmessage M {}\n";
+        let doc = call_from_proto("k", "M", &[("a.proto", broken)], 0).expect("answers");
+        assert!(
+            doc.contains("\"file\":\"a.proto\",\"line\":2,\"column\":4"),
+            "{doc}"
+        );
+        assert!(json_string(&doc, "reason").contains("UTF-8"), "{doc}");
+
+        let fine: &[u8] = b"syntax = \"proto3\";\nmessage M { int32 a = 1; }\n";
+        let doc = call_from_proto("k", "M", &[("a.proto", fine), ("unread.proto", broken)], 0)
+            .expect("answers");
+        assert!(
+            doc.contains("\"ok\":true"),
+            "an unread file is not judged: {doc}"
+        );
+
+        // An empty file defines nothing: the root message is not there.
+        let doc = call_from_proto("k", "M", &[("empty.proto", b"")], 0).expect("answers");
+        assert!(
+            doc.contains("\"ok\":false,\"file\":\"empty.proto\",\"reason\":"),
+            "{doc}"
+        );
+    }
+
+    /// EVERY CALLER BUG IS `INVALID_ARG` AND HANDS BACK NO STRING.
+    #[test]
+    fn caller_bugs_are_invalid_arg_and_hand_back_no_string() {
+        let key = CString::new("k").expect("no NUL");
+        let root = CString::new("M").expect("no NUL");
+        let name = CString::new("a.proto").expect("no NUL");
+        let text = b"message M {}";
+        let entry = WzDissectProtoFile {
+            name: name.as_ptr(),
+            text: text.as_ptr(),
+            text_len: text.len(),
+        };
+        let call = |key: *const c_char,
+                    root: *const c_char,
+                    files: *const WzDissectProtoFile,
+                    count: usize,
+                    root_file: usize,
+                    with_out: bool| {
+            let mut out: *mut c_char = core::ptr::null_mut();
+            let rc = unsafe {
+                wz_dissect_declarations_from_proto(
+                    key,
+                    root,
+                    files,
+                    count,
+                    root_file,
+                    if with_out {
+                        &mut out
+                    } else {
+                        core::ptr::null_mut()
+                    },
+                )
+            };
+            assert!(out.is_null(), "an error must not hand back a string");
+            rc
+        };
+        // The control: the same arguments, well formed, are accepted.
+        let mut ok_out: *mut c_char = core::ptr::null_mut();
+        let rc = unsafe {
+            wz_dissect_declarations_from_proto(
+                key.as_ptr(),
+                root.as_ptr(),
+                &entry,
+                1,
+                0,
+                &mut ok_out,
+            )
+        };
+        assert_eq!(rc, WZ_DISSECT_OK);
+        unsafe { wz_dissect_string_free(ok_out) };
+
+        let null = core::ptr::null::<c_char>();
+        assert_eq!(
+            call(null, root.as_ptr(), &entry, 1, 0, true),
+            WZ_DISSECT_ERR_INVALID_ARG
+        );
+        assert_eq!(
+            call(key.as_ptr(), null, &entry, 1, 0, true),
+            WZ_DISSECT_ERR_INVALID_ARG
+        );
+        assert_eq!(
+            call(key.as_ptr(), root.as_ptr(), core::ptr::null(), 1, 0, true),
+            WZ_DISSECT_ERR_INVALID_ARG
+        );
+        assert_eq!(
+            call(key.as_ptr(), root.as_ptr(), &entry, 1, 0, false),
+            WZ_DISSECT_ERR_INVALID_ARG
+        );
+        assert_eq!(
+            call(key.as_ptr(), root.as_ptr(), &entry, 0, 0, true),
+            WZ_DISSECT_ERR_INVALID_ARG,
+            "no files"
+        );
+        assert_eq!(
+            call(key.as_ptr(), root.as_ptr(), &entry, 1, 1, true),
+            WZ_DISSECT_ERR_INVALID_ARG,
+            "a root index outside the list"
+        );
+
+        // A name that is null, a buffer that is null with a length, a file name
+        // and a key that are not UTF-8, and two files with one name.
+        let nameless = WzDissectProtoFile {
+            name: null,
+            ..entry
+        };
+        assert_eq!(
+            call(key.as_ptr(), root.as_ptr(), &nameless, 1, 0, true),
+            WZ_DISSECT_ERR_INVALID_ARG
+        );
+        let hollow = WzDissectProtoFile {
+            text: core::ptr::null(),
+            ..entry
+        };
+        assert_eq!(
+            call(key.as_ptr(), root.as_ptr(), &hollow, 1, 0, true),
+            WZ_DISSECT_ERR_INVALID_ARG
+        );
+        let bad_utf8 = CString::new(vec![b'a', 0xff]).expect("no NUL");
+        let badly_named = WzDissectProtoFile {
+            name: bad_utf8.as_ptr(),
+            ..entry
+        };
+        assert_eq!(
+            call(key.as_ptr(), root.as_ptr(), &badly_named, 1, 0, true),
+            WZ_DISSECT_ERR_INVALID_ARG
+        );
+        assert_eq!(
+            call(bad_utf8.as_ptr(), root.as_ptr(), &entry, 1, 0, true),
+            WZ_DISSECT_ERR_INVALID_ARG
+        );
+        assert_eq!(
+            call(key.as_ptr(), bad_utf8.as_ptr(), &entry, 1, 0, true),
+            WZ_DISSECT_ERR_INVALID_ARG
+        );
+    }
+
+    /// TWO FILES WITH ONE NAME ARE A CALLER BUG: an import is resolved by name,
+    /// so a list in which one name stands for two files has no answer to give.
+    #[test]
+    fn two_files_with_one_name_are_a_caller_bug() {
+        let schema: &[u8] = b"syntax = \"proto3\";\nmessage M { int32 a = 1; }\n";
+        assert_eq!(
+            call_from_proto("k", "M", &[("a.proto", schema), ("a.proto", schema)], 0),
+            Err(WZ_DISSECT_ERR_INVALID_ARG)
+        );
+        // The control: the same two files under two names are accepted.
+        assert!(call_from_proto("k", "M", &[("a.proto", schema), ("b.proto", schema)], 0).is_ok());
+    }
+
+    /// THE FILE STRUCT IS RAW MEMORY A CONSUMER FILLS BY OFFSET, so its layout is
+    /// pinned here and, from the other side of the boundary, in
+    /// `tests/c_abi_consumer.c`.
+    #[test]
+    fn the_proto_file_layout_is_pinned() {
+        let word = core::mem::size_of::<usize>();
+        assert_eq!(core::mem::size_of::<WzDissectProtoFile>(), 3 * word, "size");
+        assert_eq!(
+            core::mem::align_of::<WzDissectProtoFile>(),
+            word,
+            "alignment"
+        );
+        assert_eq!(core::mem::offset_of!(WzDissectProtoFile, name), 0);
+        assert_eq!(core::mem::offset_of!(WzDissectProtoFile, text), word);
+        assert_eq!(
+            core::mem::offset_of!(WzDissectProtoFile, text_len),
+            2 * word
+        );
     }
 
     /// Drive the declaration diagnostic the way C does.

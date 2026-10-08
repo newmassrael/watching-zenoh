@@ -50,7 +50,7 @@ import subprocess
 import sys
 
 # The pinned pair. Edit BOTH halves deliberately -- see the module doc.
-EXPECTED_VERSION = 24
+EXPECTED_VERSION = 25
 
 # R2108 (open-debt item 525) -- THE RECORD'S LAYOUT, pinned HERE and read from
 # the artifact through `wz_dissect_record_layout`.
@@ -253,6 +253,16 @@ EXPECTED_SYMBOLS = {
     # that fails closed on ABSENCE can still be fooled by PRESENCE.
     "wz_dissect_pcap_fields_where_limited",
     "wz_dissect_declarations_diagnose",
+    # (ABI 25) -- `.proto` schema text turned into DECLARATION text, so a
+    # consumer that links this library never parses `.proto` itself: a second
+    # reader of a language inside the program that links this one is a second
+    # opinion about which field is which. The memory rule does not move: the
+    # verdict is a `char*` released by `wz_dissect_string_free`, the files cross
+    # as bytes the CALLER already read (a list of the new
+    # `wz_dissect_proto_file`, three fields, 24 bytes on a 64-bit target), and no
+    # callback runs. It is its own symbol and not a mode of the diagnostic door
+    # above, which says whether lines install and hands nothing back.
+    "wz_dissect_declarations_from_proto",
     # R311y851 — the four analysis planes' door. Both halves moved together,
     # which is the whole of what this gate asks.
     "wz_dissect_pcap_census",

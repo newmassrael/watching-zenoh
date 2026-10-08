@@ -395,6 +395,20 @@ ONLY_CAPI = {
         "running; a UI needs it before there is anything to run.",
         (15,),
     ),
+    "declarations written from a .proto schema": (
+        "wz_dissect_declarations_from_proto",
+        "DELIBERATE for now. The door exists because a consumer that LINKS this "
+        "library and offers an 'add from file' must not read .proto itself: a "
+        "second reader of the language is a second opinion about which field is "
+        "which. The command line has the other half of the pair already -- "
+        "`--payload-name` takes the lines this door produces -- and its operator "
+        "reads a schema with the tools that ship with it, so a flag that took a "
+        ".proto file is a convenience and not a missing capability. It is the "
+        "obvious next flag if an operator asks, and the reader behind the door "
+        "(`wz_capture::proto_schema`) is already ungated, so the flag would add "
+        "no code that reads the language.",
+        (),
+    ),
     "the ABI revision": (
         "wz_dissect_abi_version",
         "Not an analysis capability -- it is how a consumer refuses a library whose "

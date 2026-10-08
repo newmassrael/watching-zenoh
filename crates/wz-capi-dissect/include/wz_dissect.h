@@ -71,7 +71,7 @@
  * here would only ever be a copy. (The envelope carries one more key for a
  * document that declares planes -- see R2180 below.) The names are "census",
  * "fields", "summary", "readable_surfaces", "selector_diagnose",
- * "declarations_diagnose", "selection", "retention" and "health" — one per door group, because a consumer calls the
+ * "declarations_diagnose", "declarations_from_proto", "selection", "retention" and "health" — one per door group, because a consumer calls the
  * door it wants and a single library-wide number would tell a reader of the
  * census that a document it never calls had moved.
  *
@@ -1064,7 +1064,7 @@ extern "C" {
  * calls the function, and refuses when the two disagree.
  *
  * @unknown ABI not-an-enumeration */
-#define WZ_DISSECT_ABI_REVISION 24
+#define WZ_DISSECT_ABI_REVISION 25
 
 /* Symbol/memory-contract revision. Not a JSON-shape revision. This is the
  * revision the LOADED library reports; the block above says why it exists
@@ -1619,6 +1619,169 @@ int wz_dissect_pcap_fields_where_limited(const unsigned char *bytes, size_t len,
  * text a person types. A consumer told only "one of these is bad" makes the
  * operator bisect their own configuration. */
 int wz_dissect_declarations_diagnose(const char *declarations, char **out);
+
+/* One file of the schema wz_dissect_declarations_from_proto reads. 24 bytes on
+ * a 64-bit target, 8-aligned, and like wz_dissect_record it is raw memory a
+ * consumer fills by OFFSET, so a change to it is a new struct and a new door,
+ * never a new meaning for this one. `the_proto_file_layout_is_pinned` in the
+ * Rust crate and an offsetof block in tests/c_abi_consumer.c hold the layout. */
+typedef struct wz_dissect_proto_file {
+    /* NUL-terminated UTF-8: the name the other files import this one by, and
+     * the name a diagnostic carries. Unique within the list. */
+    const char *name;
+    /* The file's bytes, UTF-8, NOT NUL-terminated. May be NULL only when
+     * text_len is zero. */
+    const unsigned char *text;
+    /* How many bytes `text` holds. */
+    size_t text_len;
+} wz_dissect_proto_file;
+
+/* (ABI 25) -- A .proto SCHEMA TURNED INTO DECLARATIONS: the field names a
+ * protobuf payload's wire format does not carry, as the declaration text the
+ * doors above already take.
+ *
+ * WHY IT IS HERE AND NOT IN YOUR PROGRAM. The wire format carries field
+ * numbers and no names, so a payload read under a protobuf rule shows 3.2 where
+ * the author wrote temperature. The names are DECLARED, a line each --
+ *
+ *     demo/temp=protobuf          the rule, first
+ *     demo/temp:3=sensor          field 3 is called sensor
+ *     demo/temp:3.2=celsius       field 2 INSIDE field 3 is called celsius
+ *
+ * A person who owns the .proto file should not type those lines, and a program
+ * that lets them choose the file must not read .proto itself: that is a second
+ * reader of a language inside the process that links this one, and two readers
+ * of one language disagree exactly where it is unusual -- a map, a oneof, an
+ * import. This is the one reader. What comes back is the dialect the doors above
+ * install and wz_dissect_declarations_diagnose validates, and this door runs its
+ * own output through that installer before returning it, so the two cannot
+ * disagree about what a valid declaration is.
+ *
+ * THE FILES CROSS AS BYTES YOU ALREADY READ. Nothing here opens a path, and no
+ * callback runs: `files` is a list of wz_dissect_proto_file, each a name and a
+ * buffer, and `root_file` is the index of the one the user chose. An `import`
+ * is resolved BY NAME against that list, by exact string equality, so give each
+ * file the name the others import it by (the path protoc would have been given
+ * after -I). An import that is not in the list is a diagnostic. Only the root
+ * file and what it imports, transitively, are read: a file in the list that
+ * nothing imports is never opened and a problem in it is never reported. The
+ * well-known types (google/protobuf/timestamp.proto and the rest) are NOT built
+ * in; a schema that imports one needs it in the list like any other file.
+ *
+ * `key_pattern` is a key expression AS ITS AUTHOR MEANS IT, not declaration
+ * text. The characters that dialect reserves (backslash, colon, equals sign and
+ * the hash sign) are quoted for you, so a topic named demo/temp:c needs nothing
+ * special. It must not hold a line break. `root_message` is the message the
+ * payloads carry, by FULL name including the package: pkg.Outer, or Outer when
+ * the file declares no package. It is looked up among the messages of the files
+ * that were read.
+ *
+ * WHAT COMES OUT, in the verdict's `declarations`: the rule line, then one line
+ * per field of the root message in declaration order, each ending in a newline.
+ * A field's path is its NUMBER, and a field whose type is a message is followed
+ * by the lines of that message's fields, their paths the parent's path, a dot
+ * and the field number -- the spelling the payload reader gives a nested field,
+ * because a declaration is matched to a decoded path by equality of text. A
+ * name is the field name as written. A repeated field is one path: the reader
+ * reports every occurrence under it. A oneof's members are ordinary fields. An
+ * enum-typed or scalar field names itself and nothing under it.
+ *
+ * A MAP is declared as the repeated entry message it is on the wire, whose key
+ * is field 1 and whose value is field 2 (google/protobuf/descriptor.proto, the
+ * comment on MessageOptions.map_entry). map<string, Meta> by_tag = 4 emits
+ *
+ *     demo/temp:4=by_tag
+ *     demo/temp:4.1=key
+ *     demo/temp:4.2=value
+ *
+ * and, because the value is a message, the lines of Meta's fields under 4.2.
+ * `key` and `value` are the names protoc gives the entry message's fields.
+ *
+ * Declarations match IN THE ORDER WRITTEN and the first match wins, so text you
+ * append after this door's output cannot override it; put what must win ahead.
+ *
+ * WHAT IS READ: proto2 and proto3 (a file with no syntax statement is proto2,
+ * as protoc reads it); package; import and import public; message, nested up
+ * to the bound below; enum (its names, to resolve types); oneof; map; the
+ * labels; reserved ranges and names; extensions ranges (read and ignored);
+ * comments and string literals with their escapes. Option
+ * statements, [bracketed] options and service blocks are skipped with their own
+ * grammar, so a mistake in one is reported at the token that is wrong and does
+ * not swallow the statements after it.
+ *
+ * WHAT IS REFUSED, each with a reason, a file, a line and a column.
+ *
+ *   - group fields and extend blocks, import weak and editions. A group is
+ *     written with the deprecated group wire types, which the payload reader
+ *     stops at; an extension's fields are declared outside the message they
+ *     extend, so their names could not be attached to it. They are refused
+ *     even in a file that only the root file imports and the root message never
+ *     reaches, because the reader does not know that until it has read it.
+ *   - a recursive message: one whose tree contains itself. Its fields would
+ *     need a declaration at every depth, so the cycle is named
+ *     (pkg.A -> pkg.B -> pkg.A) and refused, not expanded to a depth nobody chose.
+ *   - what protoc itself refuses and this reader needs to be sure of: syntax
+ *     errors, a type that is not defined, one defined in a file the referencing
+ *     file does not import (an import public is followed), a field number of
+ *     zero, above 536870911 or inside 19000 to 19999, a number used twice, a
+ *     reserved number or name, a name defined twice, a map key that is not an
+ *     integral type or string, a label or an extension range where the syntax
+ *     forbids one.
+ *
+ * The first problem found is the only one reported, in the order protoc meets
+ * them: a syntax error before a semantic one, an imported file before the file
+ * that imports it. THIS IS NOT A VALIDATOR: an enum protoc would refuse for its
+ * numbering is accepted here, and so are JSON name collisions and option values.
+ * A file accepted here can still fail protoc; a file refused here for one of the
+ * reasons above would fail it too.
+ *
+ * BOUNDS, all of them refusals and none of them silent truncations: messages
+ * written inside one another 32 deep, imports 64 files deep, a field path 64
+ * messages deep, and a result of 16384 lines. The last is not decoration: a
+ * schema with no cycle can still expand exponentially, because a message that
+ * holds two of a message that holds two of another, twenty times over, is a
+ * million paths from a twenty-line file. Work is otherwise linear in the text.
+ *
+ * THE VERDICT. Returns WZ_DISSECT_OK for any well-formed arguments and writes
+ *
+ *     {"document":{"name":"declarations_from_proto","revision":1},
+ *      "ok":true,"declarations":"demo/temp=protobuf\ndemo/temp:1=value\n",
+ *      "installed":2}
+ *
+ * or
+ *
+ *     {"document":{...},"ok":false,"file":"a.proto","line":3,"column":9,
+ *      "reason":"...","message":"a.proto: line 3: ..."}
+ *
+ * `installed` is the count wz_dissect_declarations_diagnose reports for the
+ * same text. `line` and `column` count from 1 -- they locate a place in a FILE
+ * the way every .proto tool does, where wz_dissect_declarations_diagnose counts
+ * from 0 because it indexes text you typed into a box. A column counts BYTES
+ * from the start of the line, so a tab is one column and a multi-byte
+ * character several. `file`, `line` and `column` are present together for a
+ * place in a file; `file` alone means the problem is the file as a whole (the
+ * root message is not defined in it or in what it imports); none of the three
+ * means it is about an argument (a key pattern the declaration dialect cannot
+ * install, or one holding a line break). They are ABSENT where they do not
+ * apply and never null: a top-level null is what this library reserves for a
+ * plane it cannot feed. `message` is the one-line form,
+ * `{file}: line {line}: {reason}`, with the parts that are absent left out. A
+ * refused schema is a successful DIAGNOSIS, for the reason
+ * wz_dissect_declarations_diagnose gives: OK means a string, an error means
+ * none.
+ *
+ * Returns WZ_DISSECT_ERR_INVALID_ARG, and no string, for a null pointer, a
+ * file_count of zero, a root_file outside the list, a name or buffer pointer
+ * that is null where it may not be (a buffer may be null only when its length
+ * is zero, which is an empty file), two files with one name, or a key pattern,
+ * root name or file name that is not UTF-8. Those are the caller's bug and not
+ * text a person typed; a file whose BYTES are not UTF-8 is a diagnostic, with
+ * the place it stops being UTF-8, and only if the file is read. */
+int wz_dissect_declarations_from_proto(const char *key_pattern,
+                                       const char *root_message,
+                                       const wz_dissect_proto_file *files,
+                                       size_t file_count, size_t root_file,
+                                       char **out);
 
 /* R311y913 (ABI 9) — what this build can READ, without a capture.
  *

@@ -1055,6 +1055,131 @@ static int check_follow_door(void) {
     return 0;
 }
 
+/* (ABI 25) -- THE LAYOUT OF wz_dissect_proto_file, and it runs FIRST in main,
+ * before any call that hands the library one. The struct is raw memory a
+ * consumer fills by offset: a field moved in the header would not fail to
+ * compile, it would make the library read a length as a pointer. Checked ahead
+ * of the first use so the report is a named offset and not a crash. Pointer-
+ * sized fields only, so these hold on a 32-bit target too. */
+static int check_proto_file_layout(void) {
+    CHECK(sizeof(wz_dissect_proto_file) == 3 * sizeof(void *),
+          "proto_file is %zu bytes", sizeof(wz_dissect_proto_file));
+    CHECK(offsetof(wz_dissect_proto_file, name) == 0, "proto_file name offset");
+    CHECK(offsetof(wz_dissect_proto_file, text) == sizeof(void *),
+          "proto_file text offset");
+    CHECK(offsetof(wz_dissect_proto_file, text_len) == 2 * sizeof(void *),
+          "proto_file text_len offset");
+    return 0;
+}
+
+/* (ABI 25) -- THE .proto DOOR, driven from C the way a consumer with an "add
+ * from file" will: the files are bytes it already read, the schema reaches the
+ * existing declaration doors unchanged, and a refusal is a verdict with a
+ * place in a file. The Rust side owns the language (what is read, what is
+ * refused, the bounds); this owns that the struct, the symbol and the verdict
+ * cross the boundary as the header says. */
+static int check_proto_door(void) {
+    char *doc = NULL;
+    char *verdict = NULL;
+    int rc;
+
+    static const char root_text[] =
+        "syntax = \"proto3\";\n"
+        "package m;\n"
+        "import \"common/stamp.proto\";\n"
+        "message Root {\n"
+        "  int32 id = 1;\n"
+        "  common.Stamp at = 2;\n"
+        "  map<string, int32> counts = 3;\n"
+        "}\n";
+    static const char stamp_text[] =
+        "syntax = \"proto3\";\n"
+        "package common;\n"
+        "message Stamp { int64 secs = 1; }\n";
+    wz_dissect_proto_file files[2];
+    files[0].name = "m/root.proto";
+    files[0].text = (const unsigned char *)root_text;
+    files[0].text_len = sizeof root_text - 1;
+    files[1].name = "common/stamp.proto";
+    files[1].text = (const unsigned char *)stamp_text;
+    files[1].text_len = sizeof stamp_text - 1;
+
+    rc = wz_dissect_declarations_from_proto("demo/temp", "m.Root", files, 2, 0,
+                                            &doc);
+    CHECK(rc == WZ_DISSECT_OK, "from_proto rc=%d", rc);
+    CHECK(doc != NULL, "OK came back with no string");
+    CHECK(strstr(doc, "\"ok\":true") != NULL, "a valid schema was refused: %s",
+          doc);
+    /* A map is its repeated entry message: key is field 1, value is field 2. */
+    CHECK(strstr(doc,
+                 "\"declarations\":\"demo/temp=protobuf\\n"
+                 "demo/temp:1=id\\n"
+                 "demo/temp:2=at\\n"
+                 "demo/temp:2.1=secs\\n"
+                 "demo/temp:3=counts\\n"
+                 "demo/temp:3.1=key\\n"
+                 "demo/temp:3.2=value\\n\"") != NULL,
+          "unexpected declarations: %s", doc);
+    CHECK(strstr(doc, "\"installed\":7") != NULL, "unexpected count: %s", doc);
+    wz_dissect_string_free(doc);
+
+    /* What came out goes to the validation door unchanged, and it counts the
+     * same lines. */
+    rc = wz_dissect_declarations_diagnose(
+        "demo/temp=protobuf\ndemo/temp:1=id\ndemo/temp:2=at\n"
+        "demo/temp:2.1=secs\ndemo/temp:3=counts\ndemo/temp:3.1=key\n"
+        "demo/temp:3.2=value\n",
+        &verdict);
+    CHECK(rc == WZ_DISSECT_OK, "diagnose rc=%d", rc);
+    CHECK(strstr(verdict, "\"ok\":true") != NULL &&
+              strstr(verdict, "\"installed\":7") != NULL,
+          "the schema's declarations must install: %s", verdict);
+    wz_dissect_string_free(verdict);
+
+    /* An import the list does not hold is a verdict naming the import. */
+    doc = NULL;
+    rc = wz_dissect_declarations_from_proto("demo/temp", "m.Root", files, 1, 0,
+                                            &doc);
+    CHECK(rc == WZ_DISSECT_OK, "refused schema rc=%d", rc);
+    CHECK(strstr(doc, "\"ok\":false") != NULL &&
+              strstr(doc, "\"file\":\"m/root.proto\",\"line\":3,\"column\":1") !=
+                  NULL &&
+              strstr(doc, "\"message\":\"m/root.proto: line 3: ") != NULL,
+          "a missing import must be blamed at its statement: %s", doc);
+    CHECK(strstr(doc, "null") == NULL, "no key is ever null: %s", doc);
+    wz_dissect_string_free(doc);
+
+    /* A recursive message is refused with the cycle named, not looped on. */
+    {
+        static const char loop_text[] =
+            "syntax = \"proto3\";\nmessage Node { repeated Node kids = 1; }\n";
+        wz_dissect_proto_file loop;
+        loop.name = "loop.proto";
+        loop.text = (const unsigned char *)loop_text;
+        loop.text_len = sizeof loop_text - 1;
+        doc = NULL;
+        rc = wz_dissect_declarations_from_proto("k", "Node", &loop, 1, 0, &doc);
+        CHECK(rc == WZ_DISSECT_OK, "recursive schema rc=%d", rc);
+        CHECK(strstr(doc, "contains itself") != NULL &&
+                  strstr(doc, "Node -> Node") != NULL,
+              "a recursive message must be named: %s", doc);
+        wz_dissect_string_free(doc);
+    }
+
+    /* Caller bugs are the argument error, with no string handed back. */
+    doc = NULL;
+    rc = wz_dissect_declarations_from_proto("k", "m.Root", files, 2, 2, &doc);
+    CHECK(rc == WZ_DISSECT_ERR_INVALID_ARG && doc == NULL,
+          "a root file outside the list rc=%d", rc);
+    rc = wz_dissect_declarations_from_proto("k", "m.Root", NULL, 2, 0, &doc);
+    CHECK(rc == WZ_DISSECT_ERR_INVALID_ARG && doc == NULL,
+          "a null file list rc=%d", rc);
+    rc = wz_dissect_declarations_from_proto("k", "m.Root", files, 0, 0, &doc);
+    CHECK(rc == WZ_DISSECT_ERR_INVALID_ARG && doc == NULL,
+          "an empty file list rc=%d", rc);
+    return 0;
+}
+
 int main(void) {
     /* The symbol/memory-contract revision. A consumer refuses a library whose
      * memory rules moved; this asserts the value the header was written for. */
@@ -1129,6 +1254,11 @@ int main(void) {
     CHECK(wz_dissect_abi_version() == WZ_DISSECT_ABI_REVISION,
           "abi version is %d but this build was compiled against %d",
           wz_dissect_abi_version(), WZ_DISSECT_ABI_REVISION);
+
+    /* Before anything hands the library a wz_dissect_proto_file. */
+    if (check_proto_file_layout() != 0) {
+        return 1;
+    }
 
     /* A KeepAlive: one header byte, the smallest complete transport message,
      * so what is under test is the boundary and not a codec. */
@@ -1633,7 +1763,7 @@ int main(void) {
         const char *name;
         unsigned revision;
         char *doc;
-    } revisioned[6];
+    } revisioned[7];
     revisioned[0].name = "census";
     /* R2119 (open-debt item 455) -- 2: the census announced `first_packet`'s
      * retirement beside its successor `first_anchor`.
@@ -1884,6 +2014,23 @@ int main(void) {
         CHECK(rc == WZ_DISSECT_OK, "health rc=%d", rc);
         wz_dissect_live_close(healthy);
     }
+    /* (ABI 25) -- the .proto door's document. 1: the first revision a consumer
+     * could read. Built from a one-message schema, which is the cheapest way to
+     * hold the document's opening to the revision this consumer was written
+     * against. */
+    revisioned[6].name = "declarations_from_proto";
+    revisioned[6].revision = 1;
+    revisioned[6].doc = NULL;
+    {
+        static const char tiny[] = "syntax = \"proto3\"; message M { int32 a = 1; }";
+        wz_dissect_proto_file one;
+        one.name = "a.proto";
+        one.text = (const unsigned char *)tiny;
+        one.text_len = sizeof tiny - 1;
+        rc = wz_dissect_declarations_from_proto("k", "M", &one, 1, 0,
+                                                &revisioned[6].doc);
+        CHECK(rc == WZ_DISSECT_OK, "from_proto document rc=%d", rc);
+    }
 
     /* R2182 -- THE ENVELOPE MAY CARRY MORE AFTER THE REVISION, and this loop
      * used to forbid it by ending the expected prefix with `}`.
@@ -1976,6 +2123,12 @@ int main(void) {
      * the replay door cannot serve: it hands back a new handle, and a growing
      * capture has no moment at which that is the right answer. */
     if (check_follow_door() != 0) {
+        return 1;
+    }
+
+    /* (ABI 25) -- and a .proto schema turned into the declarations the doors
+     * above take, so a consumer offering "add from file" never reads .proto. */
+    if (check_proto_door() != 0) {
         return 1;
     }
 

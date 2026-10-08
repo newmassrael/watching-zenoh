@@ -1641,6 +1641,26 @@ pub const DOCUMENT_HISTORY: &[DocumentShape] = &[
         planes: &[],
         carries: &[],
     },
+    // The declaration text a `.proto` schema comes to, or the place the schema
+    // was refused.
+    //
+    // A document of its own because it is the OUTPUT of a door and not a verdict
+    // on a text, which is what `declarations_diagnose` is: that one says whether
+    // lines install, this one hands back the lines. Its two branches share the
+    // envelope and `ok`; the rest differ by branch, and the failure branch
+    // OMITS the position keys that do not apply (a whole-file problem has no
+    // line, an argument problem has no file) rather than writing `null`, which
+    // is reserved for a plane this build cannot feed. No value family and no
+    // carried word: every string is free text, and `ok` is a boolean.
+    DocumentShape {
+        document: DECLARATIONS_FROM_PROTO,
+        revision: 1,
+        keys: DECLARATIONS_FROM_PROTO_R1_KEYS,
+        retiring: &[],
+        families: &[],
+        planes: &[],
+        carries: &[],
+    },
     // The selector's verdict over the field document's rows, with none
     // of what the field document renders beside it.
     //
@@ -1755,6 +1775,9 @@ pub const READABLE_SURFACES: &str = "readable_surfaces";
 pub const SELECTOR_DIAGNOSE: &str = "selector_diagnose";
 /// A declaration block's verdict (`wz_dissect_declarations_diagnose`).
 pub const DECLARATIONS_DIAGNOSE: &str = "declarations_diagnose";
+/// The declarations a `.proto` schema comes to, or why it was refused
+/// (`wz_dissect_declarations_from_proto`).
+pub const DECLARATIONS_FROM_PROTO: &str = "declarations_from_proto";
 /// A selector's verdict over the field document's rows, and nothing else
 /// (`wz_dissect_live_selection`).
 pub const SELECTION: &str = "selection";
@@ -8111,6 +8134,23 @@ pub const DECLARATIONS_DIAGNOSE_R1_KEYS: &[&str] = &[
     "text",
 ];
 
+/// The `.proto` declaration document's key set at revision 1, over BOTH
+/// branches: `{ok:true,declarations,installed}` and
+/// `{ok:false,file,line,column,reason,message}`.
+pub const DECLARATIONS_FROM_PROTO_R1_KEYS: &[&str] = &[
+    "column",
+    "declarations",
+    "document",
+    "file",
+    "installed",
+    "line",
+    "message",
+    "name",
+    "ok",
+    "reason",
+    "revision",
+];
+
 /// The selection document's key set at revision 1, over EVERY shape a row and
 /// the document take — the coordinates present or absent, `selected` present or
 /// absent.
@@ -10133,6 +10173,7 @@ mod tests {
             // To 2 when the verdict gained the lexer's `tokens`.
             (SELECTOR_DIAGNOSE, 2),
             (DECLARATIONS_DIAGNOSE, 1),
+            (DECLARATIONS_FROM_PROTO, 1),
             // The selector's verdict over the field document's rows.
             (SELECTION, 1),
             // What a live handle holds, beside its ceilings.
