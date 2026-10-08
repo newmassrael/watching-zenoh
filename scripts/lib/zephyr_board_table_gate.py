@@ -48,7 +48,16 @@ than off the row's own say-so.
      whose body boots the machine the row names (`-machine <m>` or `-M <m>`).
   6. HARDWARE rows carry the whole record AND the ledger entry it cites exists
      in the atomic store. A record with no entry behind it is a claim with no
-     witness, which is exactly what the grade was invented to forbid.
+     witness, which is exactly what the grade was invented to forbid. The
+     record is read against its entry, not only for its presence: the image
+     hash is 64 lowercase hex digits and appears in the entry's text (a hash
+     copied wrongly into the table is a claim about an image nobody ran), the
+     date is a date, and for an app that publishes a verdict grammar
+     (`deploy/<app>/HARDWARE_VERDICT.md`) the entry names every step of it as
+     OK, the first marker after the step's name being the one that counts, so a
+     FAIL in a step cannot be outvoted by an OK later in the entry. An app with
+     a HARDWARE row and no grammar file is refused: there is nothing the record
+     could have satisfied.
   7. Per-board settings (`deploy/<app>/boards/*.conf`) and the table agree both
      ways: every conf belongs to a row of that app (a board configured but not
      declared is a support claim nobody graded), a row that selects a network
@@ -68,9 +77,12 @@ than off the row's own say-so.
      row names what it needs in `requires`, and the gate refuses a row that
      requires an image the table does not list, or lists below the row's own
      grade: a row's claim goes no higher than the lowest grade of what it runs
-     with. A companion is graded DECLARED or BUILT; it has no HARDWARE record
-     format of its own yet, so a row that requires one cannot be HARDWARE, and
-     the lab's record for the row is what extends it.
+     with. A companion is graded DECLARED, BUILT or HARDWARE, and a HARDWARE
+     companion carries the same record keys a row does, read the same way
+     (item 6; the grammar steps are the ROW's, since a companion is not run on
+     its own). A HARDWARE row that requires companions is HARDWARE only together
+     with them, and each cites the SAME ledger entry as the row: what ran was
+     the images together, and one image's record says nothing about the pair.
 
 ## Why it reads run-ci.sh and ci.yml as text
 
@@ -104,7 +116,15 @@ HARDWARE_RECORD = ("record", "image_sha256", "verdict", "date", "by")
 BUILD_LANE = "Qzb"
 FIXTURE_ENTROPY = "CONFIG_TEST_RANDOM_GENERATOR=y"
 COMPANION_KEYS = ("board", "app", "starts", "grade")
-COMPANION_GRADES = ("DECLARED", "BUILT")
+COMPANION_GRADES = ("DECLARED", "BUILT", "HARDWARE")
+GRAMMAR_FILE = "HARDWARE_VERDICT.md"
+SHA256 = re.compile(r"[0-9a-f]{64}")
+DATE = re.compile(r"\d{4}-\d{2}-\d{2}")
+# A step is a line of the grammar file that starts `HW.<n> `. In an entry's
+# text the steps run on in one paragraph, so the split is at each `HW.<n> `.
+STEP_LINE = re.compile(r"^HW\.(\d+) ", re.M)
+STEP_SPLIT = re.compile(r"(?=HW\.\d+ )")
+STEP_MARK = re.compile(r" - OK|FAIL")
 
 
 def conf_name(board: str) -> str:
@@ -148,6 +168,89 @@ def conf_backends(text: str) -> set[str]:
     return {name.lower().replace("_", "-") for name in found}
 
 
+def store_entries(root: Path) -> dict:
+    """The changelog entries of the atomic store at `root`, by id; empty if none."""
+    path = root / STORE
+    if not path.is_file():
+        return {}
+    return json.loads(path.read_text()).get("changelog_entries", {})
+
+
+def grammar_steps(root: Path, app: str) -> list[str] | None:
+    """The step numbers `deploy/<app>/HARDWARE_VERDICT.md` publishes, or `None`
+    when the app publishes no grammar."""
+    path = root / "deploy" / app / GRAMMAR_FILE
+    if not path.is_file():
+        return None
+    return sorted(set(STEP_LINE.findall(path.read_text())), key=int)
+
+
+def step_verdicts(text: str) -> dict[str, bool]:
+    """Step number -> whether the entry's text says that step held.
+
+    A VERDICT SENTENCE is a step's name followed, within the same sentence, by
+    a marker: ` - OK` or `FAIL`. The sentence ends at the first `. ` or line
+    break after the name, so a marker further on (the last step's stretch runs
+    to the end of the entry) cannot speak for a step that was only MENTIONED
+    ("HW.0 to HW.7 held", "HW.4 and HW.5 differ ..."). A step held when it has
+    a sentence that says OK and none that says FAIL: a record that contains
+    both is a record that does not know."""
+    ok: set[str] = set()
+    failed: set[str] = set()
+    for part in STEP_SPLIT.split(text):
+        m = re.match(r"HW\.(\d+) ", part)
+        if not m:
+            continue
+        # `. `, a line break (written `\n` in the entry's JSON) or the end of the
+        # string value the sentence sits in.
+        ends = [i for i in (part.find(". "), part.find("\\n"), part.find('", "'),
+                            part.find('"}')) if i >= 0]
+        sentence = part[: min(ends)] if ends else part
+        mark = STEP_MARK.search(sentence)
+        if mark:
+            (ok if mark.group() == " - OK" else failed).add(m.group(1))
+    return {n: n not in failed for n in ok | failed}
+
+
+def check_record(label: str, witness: dict, root: Path, steps: list[str] | None) -> list[str]:
+    """The findings about one HARDWARE witness (module item 6).
+
+    `steps` are the grammar's step numbers for a ROW's app; `None` for a
+    companion, whose entry is the row's and is read for its steps there."""
+    absent = [k for k in HARDWARE_RECORD if not witness.get(k)]
+    if absent:
+        return [f"{label}: HARDWARE record lacks {absent}"]
+    out: list[str] = []
+    if not SHA256.fullmatch(witness["image_sha256"]):
+        out.append(
+            f"{label}: image_sha256 {witness['image_sha256']!r} is not 64 lowercase hex digits"
+        )
+    if not DATE.fullmatch(witness["date"]):
+        out.append(f"{label}: date {witness['date']!r} is not YYYY-MM-DD")
+    entry = store_entries(root).get(witness["record"])
+    if entry is None:
+        out.append(
+            f"{label}: HARDWARE record {witness['record']!r} is not a "
+            f"changelog entry in the store -- a record with no entry is a "
+            f"claim with no witness"
+        )
+        return out
+    text = json.dumps(entry, ensure_ascii=False)
+    if witness["image_sha256"] not in text:
+        out.append(
+            f"{label}: image_sha256 does not appear in the text of {witness['record']!r} "
+            f"-- the table names an image the record never mentions"
+        )
+    if steps is not None:
+        held = step_verdicts(text)
+        for n in steps:
+            if n not in held:
+                out.append(f"{label}: {witness['record']!r} never names step HW.{n}")
+            elif not held[n]:
+                out.append(f"{label}: {witness['record']!r} does not say HW.{n} held (OK)")
+    return out
+
+
 def check_companions(
     table: dict, root: Path, rows: list, lanes: dict[str, str], hosted: set[str]
 ) -> list[str]:
@@ -181,18 +284,20 @@ def check_companions(
             )
         grade, witness = c["grade"], c.get("witness")
         if grade not in COMPANION_GRADES:
-            out.append(
-                f"{label}: grade {grade!r} is not one of {COMPANION_GRADES}; a companion "
-                f"has no hardware record format of its own yet"
-            )
+            out.append(f"{label}: grade {grade!r} is not one of {COMPANION_GRADES}")
             continue
         listed.append(c)
         if grade == "DECLARED":
             if witness:
                 out.append(f"{label}: DECLARED carries a witness, which the grade does not make")
             continue
-        if not isinstance(witness, dict) or witness.get("lane") != BUILD_LANE:
-            out.append(f"{label}: BUILT's witness lane must be {BUILD_LANE}")
+        if grade == "BUILT":
+            if not isinstance(witness, dict) or witness.get("lane") != BUILD_LANE:
+                out.append(f"{label}: BUILT's witness lane must be {BUILD_LANE}")
+        else:
+            out.extend(
+                check_record(label, witness if isinstance(witness, dict) else {}, root, None)
+            )
         if BUILD_LANE not in lanes:
             out.append(f"{label}: Layer {BUILD_LANE} is not registered in {RUN_CI}")
         if BUILD_LANE not in hosted:
@@ -221,7 +326,19 @@ def check_companions(
                     f"{comp['grade']} -- a row's claim goes no higher than the lowest grade "
                     f"of what it runs with"
                 )
+            elif row.get("grade") == "HARDWARE" and _record_of(comp) != _record_of(row):
+                out.append(
+                    f"{label}: is HARDWARE on {_record_of(row)!r} but requires {app!r}, whose "
+                    f"record is {_record_of(comp)!r} -- what ran was the images together, so "
+                    f"the row and its companions cite the one entry"
+                )
     return out
+
+
+def _record_of(item: dict) -> object:
+    """The ledger entry id a row or companion's HARDWARE witness cites, or `None`."""
+    witness = item.get("witness")
+    return witness.get("record") if isinstance(witness, dict) else None
 
 
 def check(table: dict, root: Path = ROOT) -> list[str]:
@@ -324,20 +441,18 @@ def check(table: dict, root: Path = ROOT) -> list[str]:
                             f"-machine {machine}"
                         )
         if grade == "HARDWARE":
-            absent = [k for k in HARDWARE_RECORD if not witness.get(k)]
-            if absent:
-                out.append(f"{label}: HARDWARE record lacks {absent}")
-            else:
-                store_path = root / STORE
-                entries = {}
-                if store_path.is_file():
-                    entries = json.loads(store_path.read_text()).get("changelog_entries", {})
-                if witness["record"] not in entries:
-                    out.append(
-                        f"{label}: HARDWARE record {witness['record']!r} is not a "
-                        f"changelog entry in the store -- a record with no entry is a "
-                        f"claim with no witness"
-                    )
+            steps = grammar_steps(root, row["app"])
+            if steps is None:
+                out.append(
+                    f"{label}: HARDWARE but deploy/{row['app']}/{GRAMMAR_FILE} does not exist "
+                    f"-- there is no verdict grammar the record could have satisfied"
+                )
+            elif not steps:
+                out.append(
+                    f"deploy/{row['app']}/{GRAMMAR_FILE}: names no step (a line starting "
+                    f"`HW.<n> `), so it grades nothing"
+                )
+            out.extend(check_record(label, witness, root, steps))
 
     # The settings files and the table, both ways.
     apps = sorted({row["app"] for row in rows if isinstance(row, dict) and row.get("app")})
@@ -389,8 +504,8 @@ def build_rows(table: dict) -> list[dict]:
 
 
 def build_companions(table: dict) -> list[dict]:
-    """The companions Layer Qzb builds beside the rows: the BUILT ones."""
-    return [c for c in table.get("companions", []) if c.get("grade") == "BUILT"]
+    """The companions Layer Qzb builds beside the rows: BUILT and HARDWARE, as for rows."""
+    return [c for c in table.get("companions", []) if c.get("grade") in ("BUILT", "HARDWARE")]
 
 
 # ---------------------------------------------------------------------------
@@ -460,6 +575,9 @@ def _tree(tmp: Path, store_entries: dict | None = None) -> Path:
     )
     (app / "boards/real_board.conf").write_text("CONFIG_WZ_NET_BACKEND_LWIP_MAC=y\n")
     (app / "extra.conf").write_text("CONFIG_X=y\n")
+    (app / GRAMMAR_FILE).write_text(
+        "```\nHW.0 the console says who\nHW.1 GET before the write\nHW.2 the stack\n```\n"
+    )
     (tmp / "deploy/launch").mkdir(parents=True)
     (tmp / "deploy/launch/CMakeLists.txt").write_text("project(y)\n")
     (tmp / "docs/.atomic").mkdir(parents=True)
@@ -547,8 +665,8 @@ def selftest() -> int:
     expect("a companion that starts no graded image", t, "which no row")
     t = _good_table(); t["companions"][0]["witness"] = {"lane": "Qz"}
     expect("a BUILT companion witnessed by another lane", t, "witness lane must be")
-    t = _good_table(); t["companions"][0]["grade"] = "HARDWARE"
-    expect("a companion graded HARDWARE", t, "is not one of")
+    t = _good_table(); t["companions"][0]["grade"] = "SUPPORTED"
+    expect("a companion graded outside the scale", t, "is not one of")
     t = _good_table(); t["companions"] = {}
     expect("companions that are not a list", t, "must be a list")
     t = _good_table(); t["companions"] = []
@@ -562,27 +680,78 @@ def selftest() -> int:
     t = _good_table(); t["companions"].append(dict(t["companions"][0]))
     expect("a duplicate companion", t, "not unique")
 
-    # The HARDWARE arms are read on rows that require nothing, so that they test
-    # the record and not the companion rule; the rule has its own case below.
-    hw = _good_table()
-    hw["rows"][1]["grade"] = "HARDWARE"
-    hw["rows"][1].pop("requires")
-    hw["rows"][1]["witness"] = {
-        "record": "Round 9", "image_sha256": "ab", "verdict": "ZEPHYR-WZ-ADMIN READY",
-        "date": "2026-10-07", "by": "lab",
-    }
-    expect("HARDWARE whose entry is absent", hw, "not a changelog entry")
-    expect("HARDWARE whose entry exists", hw, None, entries={"Round 9": {}})
-    hw2 = _good_table()
-    hw2["rows"][1]["grade"] = "HARDWARE"
-    hw2["rows"][1].pop("requires")
-    hw2["rows"][1]["witness"] = {"record": "Round 9"}
-    expect("HARDWARE with a partial record", hw2, "lacks", entries={"Round 9": {}})
-    hw3 = dict(hw)
-    hw3["rows"] = [dict(r) for r in hw["rows"]]
-    hw3["rows"][1]["requires"] = ["launch"]
-    expect("a HARDWARE row above its BUILT companion", hw3, "lowest grade of what it runs with",
-           entries={"Round 9": {}})
+    # HARDWARE. A whole record is a row AND the companion it requires, both
+    # citing one entry that holds each image's hash and every step of the
+    # fixture grammar (HW.0 to HW.2) as OK.
+    app_hash, launch_hash = "ab" * 32, "cd" * 32
+
+    def hardware_table() -> dict:
+        t = _good_table()
+        t["rows"][1]["grade"] = "HARDWARE"
+        t["rows"][1]["witness"] = {
+            "record": "Round 9", "image_sha256": app_hash, "verdict": "HW.0 to HW.2 OK",
+            "date": "2026-10-08", "by": "the lab session",
+        }
+        t["companions"][0]["grade"] = "HARDWARE"
+        t["companions"][0]["witness"] = {
+            "record": "Round 9", "image_sha256": launch_hash, "verdict": "started the image",
+            "date": "2026-10-08", "by": "the lab session",
+        }
+        return t
+
+    def entry(sentences: str | None = None, extra: str = "") -> dict:
+        said = sentences or "HW.0 a - OK. HW.1 b - OK. HW.2 stack: peak 1 of 4 bytes - OK."
+        return {
+            "decision_summary": "The run held, HW.0 to HW.2 all of them.",
+            "verification": f"{said} Images {app_hash} {launch_hash}. {extra}",
+        }
+
+    whole = {"Round 9": entry()}
+    expect("a HARDWARE row with its companion and a whole record", hardware_table(), None,
+           entries=whole)
+    expect("HARDWARE whose entry is absent", hardware_table(), "not a changelog entry")
+    t = hardware_table(); t["companions"][0]["witness"]["record"] = "Round 8"
+    expect("a companion citing another entry", t, "cite the one entry",
+           entries={"Round 9": entry(), "Round 8": entry()})
+    t = hardware_table(); t["companions"][0]["witness"]["image_sha256"] = "ef" * 32
+    expect("a companion hash the record never mentions", t, "does not appear", entries=whole)
+    t = hardware_table(); t["rows"][1]["witness"]["image_sha256"] = "ab"
+    expect("a hash that is not a sha256", t, "64 lowercase hex", entries=whole)
+    t = hardware_table(); t["rows"][1]["witness"]["date"] = "yesterday"
+    expect("a date that is not a date", t, "YYYY-MM-DD", entries=whole)
+    expect("a record missing a step", hardware_table(), "never names step HW.2",
+           entries={"Round 9": entry("HW.0 a - OK. HW.1 b - OK.")})
+    expect("a step the record only mentions", hardware_table(), "never names step HW.1",
+           entries={"Round 9": entry("HW.0 a - OK. HW.2 c - OK. HW.1 was skipped.",
+                                     extra="Another line - OK.")})
+    expect("a step that failed", hardware_table(), "does not say HW.1 held",
+           entries={"Round 9": entry("HW.0 a - OK. HW.1 b FAIL. HW.2 c - OK.")})
+    expect("a step that failed and was later said OK", hardware_table(), "does not say HW.1 held",
+           entries={"Round 9": entry("HW.0 a - OK. HW.1 b FAIL. HW.1 b - OK. HW.2 c - OK.")})
+    expect("a word FAIL in another paragraph fails no step", hardware_table(), None,
+           entries={"Round 9": entry(extra="The check prints a FAIL line when it does not hold.")})
+    t = hardware_table(); t["rows"][1]["witness"] = {"record": "Round 9"}
+    expect("a HARDWARE row with a partial record", t, "lacks", entries=whole)
+    t = hardware_table(); t["companions"][0]["witness"] = {"record": "Round 9"}
+    expect("a HARDWARE companion with a partial record", t, "lacks", entries=whole)
+
+    def lose_grammar(root: Path) -> None:
+        (root / "deploy/adm" / GRAMMAR_FILE).unlink()
+
+    expect("HARDWARE for an app with no grammar", hardware_table(), "no verdict grammar",
+           lose_grammar, entries=whole)
+
+    def empty_grammar(root: Path) -> None:
+        (root / "deploy/adm" / GRAMMAR_FILE).write_text("nothing to grade\n")
+
+    expect("a grammar that names no step", hardware_table(), "names no step", empty_grammar,
+           entries=whole)
+    t = hardware_table(); t["companions"][0]["grade"] = "BUILT"
+    t["companions"][0]["witness"] = {"lane": "Qzb"}
+    expect("a HARDWARE row above its BUILT companion", t, "lowest grade of what it runs with",
+           entries=whole)
+    t = hardware_table(); t["rows"][1]["grade"] = "BUILT"; t["rows"][1]["witness"] = {"lane": "Qzb"}
+    expect("a BUILT row over a HARDWARE companion", t, None, entries=whole)
 
     if failures:
         print("zephyr-board-table: SELFTEST FAIL")
