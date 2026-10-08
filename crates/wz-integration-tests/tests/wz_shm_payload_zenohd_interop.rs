@@ -1104,7 +1104,8 @@ fn signal(pid: u32, name: &str) {
 // wz-proves: transport-shm wz->zenoh
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "binary-dep e2e (ZENOHD_SHM=1 build-zenohd.sh: z_sub_shm); Layer Z runs via --ignored"]
-async fn wz_shm_payload_sent_to_a_subscriber_that_reads_late_is_still_delivered_as_shared_memory() {
+async fn wz_shm_payload_sent_to_a_zenohd_subscriber_that_reads_late_is_still_delivered_as_shared_memory(
+) {
     if zenoh_shm_example_binary("z_sub_shm").is_none() {
         eprintln!(
             "SKIP: no z_sub_shm at target/zenohd-shm (run `ZENOHD_SHM=1 scripts/build-zenohd.sh`)"

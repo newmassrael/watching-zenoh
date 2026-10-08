@@ -166,8 +166,8 @@ const TRANSPORT_MID_MASK: u8 = 0x1F;
 const PREFIX_WIDTH: usize = 2;
 /// Nanoseconds per millisecond — the reader's clock resolution.
 const MS: u64 = 1_000_000;
-/// The sub-millisecond remainder every push carries, so the truncation half of
-/// the timestamp rule is graded and not merely satisfied by round numbers.
+/// The sub-millisecond remainder every push carries, so a reader that narrowed
+/// the clock to milliseconds would be graded and not satisfied by round numbers.
 const SUB_MS_REMAINDER: u64 = 123_456;
 /// Where the pushed clock starts. Arbitrary, and deliberately not zero: zero is
 /// a legal instant and would not tell a real reading from an unset one.
@@ -644,14 +644,14 @@ fn shift(records: &[WzDissectRecord], f: impl Fn(&mut WzDissectRecord)) -> Vec<W
 // impl is witnessed here and claiming an atom would over-report.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "binary-dep e2e (zenohd router); set WZ_ZENOHD_BIN, run via Layer Z / --ignored"]
-async fn the_zenohd_binary_door_reports_the_millisecond_a_push_fell_in() {
+async fn the_zenohd_binary_door_reports_the_instant_a_push_fell_in() {
     let capture = capture_zenohd_session().await;
     let (records, _) = drive_binary_door(&capture.recording);
     assert!(!records.is_empty(), "no records to grade");
 
     let packets = capture.recording.len();
-    let first = BASE_MS * MS;
-    let last = (BASE_MS + packets as u64 - 1) * MS;
+    let first = pushed_ts_ns(0);
+    let last = pushed_ts_ns(packets - 1);
 
     for (i, rec) in records.iter().enumerate() {
         assert_ne!(
@@ -659,21 +659,16 @@ async fn the_zenohd_binary_door_reports_the_millisecond_a_push_fell_in() {
             "record {i} reports NO_TIMESTAMP, but every push carried a clock \
              reading"
         );
-        // The TRUNCATION rule: the sub-millisecond digits this leg deliberately
-        // pushed are gone, and what comes back is a whole millisecond.
+        // The NANOSECOND rule: a record is timed by the packet that carried
+        // its first byte, to the nanosecond, so the sub-millisecond digits this
+        // leg deliberately pushed come back exactly as pushed.
         assert_eq!(
             rec.ts_ns % MS,
-            0,
-            "record {i} carries {} ns, which is not a whole millisecond — the \
-             reader's clock is milliseconds and the narrowing happens at the \
-             boundary",
+            SUB_MS_REMAINDER,
+            "record {i} carries {} ns, which is not an instant this leg \
+             pushed — the reader's clock is nanoseconds and the sub-millisecond \
+             digits are kept, not narrowed away",
             rec.ts_ns
-        );
-        assert_ne!(
-            rec.ts_ns,
-            pushed_ts_ns(0),
-            "record {i} carries the pushed nanosecond VERBATIM, remainder and \
-             all"
         );
         // And inside the window this leg actually pushed. A clock left at zero,
         // or one running on wall time, lands outside.

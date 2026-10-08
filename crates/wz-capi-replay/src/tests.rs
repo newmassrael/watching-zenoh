@@ -193,8 +193,8 @@ fn plan_millis(ts_ns: u64) -> u64 {
 /// in", and it cannot: only the sentinel is shared. This drives the whole road --
 /// real nanosecond pushes through the read half, the record's own `ts_ns` back
 /// out, the header's division, the plan -- and asserts the intervals the pushes
-/// were spaced by (1500 ms and 250 ms, with sub-millisecond tails the narrowing
-/// drops) come out as the delays. The first push carries no clock, so its
+/// were spaced by (1500 ms and 250 ms, with sub-millisecond tails the header's
+/// division drops) come out as the delays. The first push carries no clock, so its
 /// record reports the sentinel and the next sample has no anchor to measure
 /// from.
 #[test]
@@ -204,10 +204,11 @@ fn a_dissect_records_clock_converts_to_the_plans_unit() {
     let t2 = t1 + 250_000_000;
     let clocks = dissect_record_clocks(&[wz_capi_dissect::WZ_DISSECT_NO_TIMESTAMP, t0, t1, t2]);
     assert_eq!(clocks[0], wz_capi_dissect::WZ_DISSECT_NO_TIMESTAMP);
-    assert!(
-        clocks[1..].iter().all(|c| c % 1_000_000 == 0),
-        "a record's clock is a whole millisecond widened back, so the division \
-         is exact: {clocks:?}"
+    assert_eq!(
+        clocks[1..],
+        [t0, t1, t2],
+        "a record's clock is the nanosecond instant of the packet that carried \
+         it, so the header's division is the only narrowing on the road"
     );
 
     let millis: Vec<u64> = clocks.iter().map(|c| plan_millis(*c)).collect();
@@ -265,8 +266,8 @@ fn the_two_unit_slips_are_accepted_silently() {
         "nanoseconds read as milliseconds is not refused"
     );
     assert_eq!(
-        out[1].delay_millis, 1_500_000_000,
-        "1500 ms read as 1500000000 ms"
+        out[1].delay_millis, 1_500_400_000,
+        "1500.4 ms, kept to the nanosecond by the record, read as 1500400000 ms"
     );
 
     let divided_sentinel = WZ_REPLAY_NO_TIMESTAMP / 1_000_000;

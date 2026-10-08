@@ -10279,12 +10279,19 @@ layer_c1l_reassembly() {
     # DERIVED, not guessed: `--list` under this exact feature set enumerates 27, all
     # of them `reassembly_dispatch::` (16 original + 11 new), so the filter did not
     # widen onto foreign tests.
-    _runci_guarded_test C1l 27 cargo test -p wz-session-core --features reassembly --lib reassembly --quiet \
+    #
+    # 27 -> 37: the ten `unknown_ring_tests` joined `reassembly_dispatch` when a
+    # chain began to be followed with no InitAck, and the guard was not moved with
+    # them (run 37823890749: `expected exactly 27 passed`, the run printed 37).
+    # `--list` under this feature set enumerates 37, every one of them
+    # `reassembly_dispatch::` (16 + 11 + 10).
+    _runci_guarded_test C1l 37 cargo test -p wz-session-core --features reassembly --lib reassembly --quiet \
         || return 1
     _runci_guarded_test C1l 4 cargo test -p wz-runtime-tokio --features reassembly --test layer3_reassembly_rx --quiet \
         || return 1
-    # R311y580 — the same eleven, on the sibling feature arm.
-    _runci_guarded_test C1l 27 cargo test -p wz-session-core --features transport-fragmentation --lib reassembly --quiet \
+    # R311y580 — the same eleven, on the sibling feature arm; 27 -> 37 with the
+    # ten above, derived by `--list` under THIS feature set as well.
+    _runci_guarded_test C1l 37 cargo test -p wz-session-core --features transport-fragmentation --lib reassembly --quiet \
         || return 1
     # R2238 (open-debt item 580) — 1 -> 2: the finite-fragment-budget abandon
     # e2e joined this file. MEASURED under THIS feature set (which is not the
