@@ -87,6 +87,13 @@ pub struct DialPhase {
     /// `open/return_conditions/connect_scouted` (`zenoh/src/net/runtime/orchestrator.rs` @
     /// `&& tokio::time::timeout(delay, self.state.start_conditions.notified())`).
     pub start_window: Option<std::time::Duration>,
+    /// R3125 -- how long a ROUTER's open is held after its halves have started: `scouting/delay`,
+    /// slept in full whether or not the router scouts and whatever its connects did, as upstream's
+    /// `start_router` ends (`zenoh/src/net/runtime/orchestrator.rs` @
+    /// `tokio::time::sleep(delay).await;`). A peer's wait is [`Self::start_window`], which ends as
+    /// soon as its start conditions are met; a router has none and waits the delay out. Read only
+    /// for a session that dials as a router; zero for an ABI that has no router role.
+    pub router_hold: std::time::Duration,
 }
 
 impl DialPhase {
@@ -97,6 +104,7 @@ impl DialPhase {
         schedule: RetryPolicy::ZENOH_DEFAULT,
         redial: None,
         start_window: None,
+        router_hold: std::time::Duration::ZERO,
     };
 }
 
@@ -922,9 +930,10 @@ async fn drive_dial(
     } else {
         late
     };
-    // R3071 -- findable once its listener is bound, for either role: a client's
-    // bound-and-unserved listener is advertised too (measured: a real client with a listener
-    // answers a Scout naming it, and one with none answers with no locators at all).
+    // R3071 -- bound once its listener is, for either role: a client's bound-and-unserved
+    // listener is advertised too (measured: a real client with a listener answers a Scout naming
+    // it, and one with none answers with no locators at all). When it STARTS answering is the
+    // role's: a peer or router's after its connect walk (R3125), a client's after it connects.
     let responder = match bound_responder(
         scouting.as_ref(),
         whatami,
@@ -941,18 +950,34 @@ async fn drive_dial(
         }
     };
     if whatami != WhatAmI::Client {
-        // A peer or router answers from the moment it is bound.
-        let _findable = responder.map(Responder::start);
-        // R3070 -- a peer or router that scouts also dials what it finds, beside the endpoints
         // R3070 -- a peer or router that scouts also dials what it finds, beside the endpoints
         // it was told, as upstream's `start_peer` starts its scouting after its connects.
         let scouting = scouting.filter(ScoutingPlan::scouts);
         // R3074 -- and what it is told of, by a Hello or by a list, is dialled by one task.
         // A node that neither scouts nor gossips is told of nobody and needs none.
         let dials = (scouting.is_some() || gossiping).then_some(dials);
+        // R3125 -- and findable only then. The responder is bound and held here, and started by
+        // `drive_peer` once its connect walk has ended: upstream spawns it in `start_scout`, which
+        // `start_peer` and `start_router` both run after `connect_peers`. Started at the bind, as
+        // it was, a peer whose walk is one attempt that the open waits for answered a Scout in
+        // the middle of that attempt.
+        let router_hold = (whatami == WhatAmI::Router).then_some(phase.router_hold);
         drive_peer(
-            endpoints, listen, late, scouting, zid, dials, phase, dialer, shared, tx, shutdown,
-            stop, gate,
+            endpoints,
+            listen,
+            late,
+            scouting,
+            zid,
+            dials,
+            responder,
+            router_hold,
+            phase,
+            dialer,
+            shared,
+            tx,
+            shutdown,
+            stop,
+            gate,
         )
         .await;
         return;
@@ -1391,6 +1416,11 @@ async fn drive_face(
 /// its own wire zid, which a node told of must not be. It is `Some` for a peer that scouts or
 /// gossips, and one connector reads it for both, so a node scouting and gossip both name is
 /// dialled once.
+///
+/// R3125 -- `responder` is the answer to a Scout, bound and not yet started: it starts here, once
+/// the walk has ended and has not failed, where upstream's `start_scout` spawns it. `router_hold`
+/// is `Some` for a router, whose open is held for `scouting/delay` in full after that, where a
+/// peer's ends as soon as its start conditions are met.
 #[allow(clippy::too_many_arguments)]
 async fn drive_peer(
     endpoints: Vec<String>,
@@ -1399,6 +1429,8 @@ async fn drive_peer(
     scouting: Option<ScoutingPlan>,
     zid: Vec<u8>,
     dials: Option<(DialIntentSender, DialIntentReceiver)>,
+    responder: Option<Responder>,
+    router_hold: Option<std::time::Duration>,
     phase: DialPhase,
     dialer: Arc<Dialer>,
     shared: Arc<SharedSession>,
@@ -1484,6 +1516,14 @@ async fn drive_peer(
                     }
                 }
             }
+            // R3125 -- findable from here: the walk is over. A walk that failed leaves the
+            // responder unstarted, as upstream's `connect_peers` returns its error before
+            // `start_scout` runs. Held to the end of this block, which is the session's life.
+            let _findable = if failed {
+                None
+            } else {
+                responder.map(Responder::start)
+            };
             if !failed {
                 // The group is joined before anything is started, so a group that cannot be
                 // joined fails the open with no task of this half running.
@@ -1538,9 +1578,16 @@ async fn drive_peer(
                 let _ = tx.send(false);
                 return;
             }
-            // The start window: the background endpoints, up to the window.
-            if let Some(span) = phase.start_window {
-                window.wait(span).await;
+            match router_hold {
+                // R3125 -- a router sleeps `scouting/delay` out, whatever its connects did and
+                // whether or not it scouts, as upstream's `start_router` ends.
+                Some(hold) => tokio::time::sleep(hold).await,
+                // The start window: the background endpoints, up to the window.
+                None => {
+                    if let Some(span) = phase.start_window {
+                        window.wait(span).await;
+                    }
+                }
             }
             if gate.announce_open(&tx) {
                 let _ = closing_tx.send(true);

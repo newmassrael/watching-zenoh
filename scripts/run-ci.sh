@@ -20392,7 +20392,35 @@ layer_c1cc_api_compat_c() {
         --test-threads=1 \
         --exact a_listener_bound_late_is_gossiped_to_a_node_that_dials_its_neighbour_on_wz_and_libzenohc \
         || return 1
-    # R3125 -- an IPv6 scouting group, on the four scopes one can have. The real library fails the
+    # R3125 -- the order a session starts its halves in, each row measured on the real library
+    # before anything was repaired. A peer whose connect walk is one attempt the open waits for,
+    # against an endpoint that accepts and says nothing for three seconds, answers a Scout only
+    # once the attempt has ended (wz answered in the middle of it); a router's open is held for
+    # `scouting/delay` whether or not it scouts (903 ms against wz's 1); and a client that
+    # scouted its node does not search again when it is lost (the row was green from the first
+    # run, so that item of the atom's list was a gap that was never there).
+    _runci_guarded_test \
+        "C1cc a_peer_answers_a_scout_only_after_its_connect_walk_ends_on_wz_and_libzenohc" 1 \
+        cargo test -p wz-integration-tests \
+        --test zenoh_c_scouting_twice_and_diff -- --ignored --quiet \
+        --test-threads=1 \
+        --exact a_peer_answers_a_scout_only_after_its_connect_walk_ends_on_wz_and_libzenohc \
+        || return 1
+    _runci_guarded_test \
+        "C1cc a_router_holds_its_open_for_scouting_delay_identically_on_wz_and_libzenohc" 1 \
+        cargo test -p wz-integration-tests \
+        --test zenoh_c_scouting_twice_and_diff -- --ignored --quiet \
+        --test-threads=1 \
+        --exact a_router_holds_its_open_for_scouting_delay_identically_on_wz_and_libzenohc \
+        || return 1
+    _runci_guarded_test \
+        "C1cc a_client_that_scouted_its_node_does_not_search_again_when_it_is_lost_on_wz_and_libzenohc" 1 \
+        cargo test -p wz-integration-tests \
+        --test zenoh_c_scouting_twice_and_diff -- --ignored --quiet \
+        --test-threads=1 \
+        --exact a_client_that_scouted_its_node_does_not_search_again_when_it_is_lost_on_wz_and_libzenohc \
+        || return 1
+    # R3126 -- an IPv6 scouting group, on the four scopes one can have. The real library fails the
     # open on a link-local group (the kernel refuses to bind a link-local multicast address that
     # carries no scope id; upstream binds the scouting socket to the group itself) and opens on a
     # wider one but finds nobody (its default interface list holds IPv4 addresses alone). wz was

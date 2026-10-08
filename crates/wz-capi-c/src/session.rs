@@ -97,6 +97,9 @@ fn dial_phase(node: &ZenohNodeConfig, whatami: WhatAmI) -> DialPhase {
             .open_connect_scouted
             .unwrap_or(true)
             .then(|| std::time::Duration::from_millis(node.scouting_delay_ms.unwrap_or(500))),
+        // R3125 -- and a router's open is held for the same delay in full, unconditionally
+        // (`start_router` sleeps it), where a peer's ends when its start conditions are met.
+        router_hold: std::time::Duration::from_millis(node.scouting_delay_ms.unwrap_or(500)),
     }
 }
 

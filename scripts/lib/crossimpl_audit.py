@@ -1052,12 +1052,18 @@ HOST_GATED_CI_TARGETS: dict[str, str] = {
 # reports it as two slices, as the same compiled subscriber linked at `libzenohc` does
 # (`transport-shm zenoh-c->wz`, the library through its registered resolver). The reference arm
 # is the control and carries no claim of its own. Measured by `scripts/audit-crossimpl-proof.sh`.
-# R3125 -- 1041 -> 1042, RISING by one: a new row in `zenoh_c_scouting_twice_and_diff.rs`
-# (`api-compat-c zenoh-c->wz`) that runs one C program linked at the real `libzenohc` and at wz's
-# C ABI on an IPv6 scouting group of each of the four scopes and compares them: a link-local group
-# fails the open on both, a wider one opens and finds nobody on both. The real library's rows are
-# asserted first. Measured by `scripts/audit-crossimpl-proof.sh`.
-FOREIGN_ADJUDICATOR_LINKS = 1042
+# R3125 -- 1041 -> 1044, RISING by three, each a new row in `zenoh_c_scouting_twice_and_diff.rs`
+# that runs one C program linked at the real `libzenohc` and at wz's C ABI and compares them
+# (`api-compat-c zenoh-c->wz`): a peer answers a Scout only once its connect walk has ended, a
+# router's open is held for `scouting/delay`, and a client that scouted its node does not search
+# again when it is lost. The real library's row is asserted first in each. Measured by
+# `scripts/audit-crossimpl-proof.sh`.
+# R3126 -- 1044 -> 1045, RISING by one: a new row in the same file that runs one C program linked
+# at the real `libzenohc` and at wz's C ABI on an IPv6 scouting group of each of the four scopes
+# and compares them: a link-local group fails the open on both, a wider one opens and finds
+# nobody on both. The real library's rows are asserted first. Measured by
+# `scripts/audit-crossimpl-proof.sh`.
+FOREIGN_ADJUDICATOR_LINKS = 1045
 
 # ── Execution disclosure ────────────────────────────────────────────────────────
 #

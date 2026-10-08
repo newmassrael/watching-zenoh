@@ -7433,7 +7433,7 @@ mod tests {
             ok.config.scout_multicast_address.as_deref(),
             Some("224.0.0.99:7999")
         );
-        // R3125 -- and a bracketed IPv6 socket parses as upstream's `SocketAddr` does; an
+        // R3126 -- and a bracketed IPv6 socket parses as upstream's `SocketAddr` does; an
         // unbracketed one is no socket.
         let v6 = ZenohNodeConfig::from_json5(
             r#"{ "scouting": { "multicast": { "address": "[ff05::231]:7999" } } }"#,

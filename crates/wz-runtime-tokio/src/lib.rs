@@ -2944,7 +2944,7 @@ impl UdpDriver {
         Self::bind_multicast_at(group.into(), port, cfg, McastRxBind::Wildcard).await
     }
 
-    /// R3125 -- the socket a node SCOUTS and ANSWERS on: [`Self::bind_multicast`] bound to the
+    /// R3126 -- the socket a node SCOUTS and ANSWERS on: [`Self::bind_multicast`] bound to the
     /// GROUP ADDRESS and not to the family wildcard, as upstream's scouting socket is on unix
     /// (`zenoh/src/net/runtime/orchestrator.rs` @ `sockaddr.ip()`, "See UNIX Network
     /// Programmping p.212").
@@ -3768,7 +3768,7 @@ enum JoinsRead {
     No,
 }
 
-/// R3125 -- what a joined multicast socket binds locally.
+/// R3126 -- what a joined multicast socket binds locally.
 #[cfg(all(
     feature = "transport-link-udp",
     any(
@@ -3891,7 +3891,7 @@ impl McastPlan {
         }
     }
 
-    /// R3125 -- the local address a joined socket binds: the wildcard, or the group itself where
+    /// R3126 -- the local address a joined socket binds: the wildcard, or the group itself where
     /// the caller reads on it and the platform lets a socket be bound to one. Windows binds the
     /// IPv4 wildcard whatever the family, as upstream does
     /// (`zenoh/src/net/runtime/orchestrator.rs` @ `std::net::Ipv4Addr::UNSPECIFIED.into()`), and

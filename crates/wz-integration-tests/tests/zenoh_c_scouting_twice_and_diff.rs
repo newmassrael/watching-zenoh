@@ -168,6 +168,8 @@ int main(int argc, char** argv) {
     /* The bind phase's budget in milliseconds and its retry block as the json5 object it takes. */
     if (getenv("LISTEN_TIMEOUT")) insert(&config, "listen/timeout_ms", getenv("LISTEN_TIMEOUT"));
     if (getenv("LISTEN_RETRY")) insert(&config, "listen/retry", getenv("LISTEN_RETRY"));
+    /* The connect phase's budget in milliseconds: 0 states one attempt that the open waits for. */
+    if (getenv("CONNECT_TIMEOUT")) insert(&config, "connect/timeout_ms", getenv("CONNECT_TIMEOUT"));
     if (lport) {
         const char* host = getenv("LISTEN_HOST") ? getenv("LISTEN_HOST") : "127.0.0.1";
         snprintf(buf, sizeof buf, "[\"tcp/%s:%d\"]", host, lport);
@@ -628,8 +630,20 @@ fn a_peer_with_a_live_endpoint_opens_at_once_though_it_scouts_on_wz_and_libzenoh
 
 /// One node that is told nothing, on a group nobody else is on.
 fn alone(built: &Built, mode: &str, key: &str, delay_ms: u32, timeout_ms: u32) -> Outcome {
+    alone_with(built, mode, key, delay_ms, timeout_ms, &[])
+}
+
+/// [`alone`] with environment variables the node program reads.
+fn alone_with(
+    built: &Built,
+    mode: &str,
+    key: &str,
+    delay_ms: u32,
+    timeout_ms: u32,
+    env: &[(&str, &str)],
+) -> Outcome {
     let group = next_group();
-    let mut node = Node::start(
+    let mut node = Node::start_with(
         built,
         &Spec {
             mode,
@@ -642,6 +656,7 @@ fn alone(built: &Built, mode: &str, key: &str, delay_ms: u32, timeout_ms: u32) -
             delay_ms,
             timeout_ms,
         },
+        env,
     );
     let open = node.opened();
     node.finish(open)
@@ -848,6 +863,11 @@ enum Shape {
     /// let go 0.7 s later (`listen/timeout_ms: -1` with `listen/exit_on_failure: false`): asked
     /// before the bind its Hello names nothing, and asked after it names the listener (R3089).
     PeerBoundLate,
+    /// A peer whose connect walk is held open by an endpoint that accepts and says nothing for
+    /// three seconds (`connect/timeout_ms: 0`, so the walk is one attempt that the open waits
+    /// for): upstream starts its responder only after the walk, so it answers nobody until the
+    /// attempt ends and answers once it has (R3125).
+    PeerWalkingItsConnects,
     /// A client connected to a peer, with a listener of its own: its Hello names the listener.
     ClientConnectedWithAListener,
     /// A client connected to a peer, with no listener: it answers with no locator.
@@ -861,7 +881,10 @@ impl Shape {
     /// The role mask the asker names.
     fn what(self) -> u8 {
         match self {
-            Shape::PeerOnLoopback | Shape::PeerToldNotToAnswer | Shape::PeerOnTwoListeners => 7,
+            Shape::PeerOnLoopback
+            | Shape::PeerToldNotToAnswer
+            | Shape::PeerOnTwoListeners
+            | Shape::PeerWalkingItsConnects => 7,
             Shape::PeerOnTheWildcard
             | Shape::PeerWithNoListener
             | Shape::PeerListenStatedEmpty
@@ -972,6 +995,45 @@ fn hellos_of(built: &Built, reference: &Built, probe: &Built, shape: Shape) -> V
             found.dedup();
             node.finish(opened);
             released.join().expect("the thread that lets the port go");
+            found
+        }
+        Shape::PeerWalkingItsConnects => {
+            // The endpoint is a socket that accepts the peer's connection and holds it silent for
+            // three seconds, then hangs up, so the peer's one attempt is under way from its start
+            // until about the third second. The open returns after that (the attempt, then
+            // `scouting/delay`), so a Scout asked at 0.6 s lands inside the walk and one asked
+            // when the open has returned lands after it. Each answer is kept under the window it
+            // was read in, because the two are one set if they are not told apart.
+            let silent =
+                TcpListener::bind(("127.0.0.1", 0)).expect("a port for the silent endpoint");
+            let silent_port = silent.local_addr().expect("its address").port();
+            let held = std::thread::spawn(move || {
+                let (stream, _) = silent.accept().expect("the peer dials the silent endpoint");
+                std::thread::sleep(std::time::Duration::from_millis(3000));
+                drop(stream);
+            });
+            let started = std::time::Instant::now();
+            let mut node = Node::start_with(
+                built,
+                &spec("peer", free_port(), silent_port),
+                &[("CONNECT_TIMEOUT", "0")],
+            );
+            std::thread::sleep(
+                std::time::Duration::from_millis(600).saturating_sub(started.elapsed()),
+            );
+            let mut found: Vec<String> = hellos_within(probe, &group, shape.what(), false, "400")
+                .into_iter()
+                .map(|line| format!("during the walk: {line}"))
+                .collect();
+            let opened = node.opened();
+            found.extend(
+                hellos_within(probe, &group, shape.what(), false, "400")
+                    .into_iter()
+                    .map(|line| format!("after the walk: {line}")),
+            );
+            node.finish(opened);
+            held.join()
+                .expect("the thread that holds the silent endpoint");
             found
         }
         Shape::ClientConnectedWithAListener | Shape::ClientConnectedWithNone => {
@@ -2357,7 +2419,194 @@ fn a_listener_bound_late_is_gossiped_to_a_node_that_dials_its_neighbour_on_wz_an
 }
 
 // ---------------------------------------------------------------------------------------------
-// An IPv6 scouting group. R3125.
+// The order a session starts its halves in. R3125.
+// ---------------------------------------------------------------------------------------------
+
+/// THE GATE, the order a peer starts in: a peer is findable once its connect walk has ended and
+/// not before.
+///
+/// Upstream's `start_peer` binds the listeners, walks the configured endpoints and only then
+/// starts scouting, which is where the responder is spawned. A walk that is one attempt the open
+/// waits for (`connect/timeout_ms: 0`) against an endpoint that accepts and says nothing keeps the
+/// peer unfindable for as long as the attempt lasts. wz started its responder as soon as the
+/// listener was bound, so the same peer answered a Scout in the middle of its own walk.
+// wz-proves: api-compat-c zenoh-c->wz partial
+#[test]
+#[ignore = "reads a zenoh-c oracle; run by run-ci Layer C1cc (which builds the matching \
+            ABI arm this needs)"]
+fn a_peer_answers_a_scout_only_after_its_connect_walk_ends_on_wz_and_libzenohc() {
+    let Some(programs) = programs() else {
+        return;
+    };
+    let shape = Shape::PeerWalkingItsConnects;
+    let expected = ["after the walk: hello whatami=peer locators=[tcp/127.0.0.1:PORT]"];
+    let oracle = hellos_of(
+        &programs.reference,
+        &programs.reference,
+        &programs.probe,
+        shape,
+    );
+    assert_eq!(
+        oracle, expected,
+        "the REAL library's answers for a peer in the middle of its connect walk are not what \
+         this file expects"
+    );
+    let wz = hellos_of(&programs.wz, &programs.reference, &programs.probe, shape);
+    assert_eq!(
+        wz, oracle,
+        "§5.27 api-compat-c: a wz peer answers a Scout while its connect walk is still under \
+         way, where the real library answers none until the walk has ended"
+    );
+}
+
+/// THE GATE, the order a router starts in: its open returns only after `scouting/delay`, whether
+/// or not it scouts and whether or not it was told an endpoint to wait for.
+///
+/// Upstream's `start_router` ends with an unconditional sleep of the delay. A peer waits that long
+/// for its start conditions and returns at once when they are met; a router waits it out. wz
+/// opened a router at once.
+// wz-proves: api-compat-c zenoh-c->wz partial
+#[test]
+#[ignore = "reads a zenoh-c oracle; run by run-ci Layer C1cc (which builds the matching \
+            ABI arm this needs)"]
+fn a_router_holds_its_open_for_scouting_delay_identically_on_wz_and_libzenohc() {
+    let Some(programs) = programs() else {
+        return;
+    };
+    for (n, env) in [&[][..], &[("SCOUTING_OFF", "1")][..]]
+        .into_iter()
+        .enumerate()
+    {
+        let key = format!("wz/start/router/{n}");
+        let scouts = env.is_empty();
+        let oracle = alone_with(&programs.reference, "router", &key, 900, 3000, env);
+        assert_eq!(
+            oracle.row, ALONE,
+            "the REAL library's row for a lone router (scouting on: {scouts})"
+        );
+        assert!(
+            (850..2_500).contains(&oracle.open_ms),
+            "the real router's open took {} ms with a delay of 900 (scouting on: {scouts})",
+            oracle.open_ms
+        );
+        let wz = alone_with(&programs.wz, "router", &key, 900, 3000, env);
+        assert_eq!(
+            wz.row, oracle.row,
+            "§5.27 api-compat-c: a lone wz router does not answer as the real one does \
+             (scouting on: {scouts})"
+        );
+        assert!(
+            (850..2_500).contains(&wz.open_ms),
+            "a wz router's open took {} ms with a delay of 900 (scouting on: {scouts}); the real \
+             library's took {} ms: it did not hold its open for `scouting/delay`",
+            wz.open_ms,
+            oracle.open_ms
+        );
+    }
+}
+
+/// The client under test finds a real router by scouting and hears it; the router leaves; a second
+/// real router comes up on the same group some seconds later. Returns the client's row.
+fn client_whose_node_is_lost(client: &Built, reference: &Built, key: &str) -> String {
+    let group = next_group();
+    let first_port = {
+        let reservation = PortReservation::pick();
+        reservation.port()
+    };
+    let mut first = Node::start(
+        reference,
+        &Spec {
+            mode: "router",
+            listen: first_port,
+            connect: 0,
+            key,
+            secs: 3,
+            tag: "A",
+            group: &group,
+            delay_ms: 500,
+            timeout_ms: 3000,
+        },
+    );
+    let first_open = first.opened();
+    let mut node = Node::start(
+        client,
+        &Spec {
+            mode: "client",
+            listen: 0,
+            connect: 0,
+            key,
+            secs: 11,
+            tag: "C",
+            group: &group,
+            delay_ms: 500,
+            timeout_ms: 3000,
+        },
+    );
+    let node_open = node.opened();
+    // The first router publishes for three seconds and closes, taking the client's only link.
+    first.finish(first_open);
+    std::thread::sleep(std::time::Duration::from_millis(1500));
+    let second_port = {
+        let reservation = PortReservation::pick();
+        reservation.port()
+    };
+    let mut second = Node::start(
+        reference,
+        &Spec {
+            mode: "router",
+            listen: second_port,
+            connect: 0,
+            key,
+            secs: 3,
+            tag: "B",
+            group: &group,
+            delay_ms: 500,
+            timeout_ms: 3000,
+        },
+    );
+    let second_open = second.opened();
+    let row = node.finish(node_open).row;
+    second.finish(second_open);
+    row
+}
+
+/// THE GATE, a client that scouted its node and lost it: it does not search again.
+///
+/// Upstream re-dials a lost session's CONFIGURED endpoints and no others (`closed_session` reads
+/// `connect/endpoints`), so a client that was handed its node by a Scout has nothing to re-dial and
+/// stays where it is: a router that comes up afterwards, on the same group and answering, is never
+/// connected to. The R3070 note that a client's search being re-run was "measured and not built"
+/// listed it as a gap; this row measures it on the real library and finds the real client does
+/// not do it either.
+// wz-proves: api-compat-c zenoh-c->wz partial
+#[test]
+#[ignore = "reads a zenoh-c oracle; run by run-ci Layer C1cc (which builds the matching \
+            ABI arm this needs)"]
+fn a_client_that_scouted_its_node_does_not_search_again_when_it_is_lost_on_wz_and_libzenohc() {
+    let Some(programs) = programs() else {
+        return;
+    };
+    // The client hears its own samples and the first router's, and never the second router's.
+    let expected = "open=0 | declare=0 senders=A,C dups=0";
+    let oracle = client_whose_node_is_lost(
+        &programs.reference,
+        &programs.reference,
+        "wz/start/client-lost/0",
+    );
+    assert_eq!(
+        oracle, expected,
+        "the REAL library's row for a client that lost the node it scouted"
+    );
+    let wz = client_whose_node_is_lost(&programs.wz, &programs.reference, "wz/start/client-lost/1");
+    assert_eq!(
+        wz, oracle,
+        "§5.27 api-compat-c: a wz client that lost the node it scouted does not behave as the \
+         real one does"
+    );
+}
+
+// ---------------------------------------------------------------------------------------------
+// An IPv6 scouting group. R3126.
 // ---------------------------------------------------------------------------------------------
 
 /// Two peers of `y` and `reference` on `group`, the tested one first, each publishing for eight
