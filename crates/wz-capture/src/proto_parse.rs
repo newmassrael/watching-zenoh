@@ -61,11 +61,15 @@ pub(crate) const MAX_FIELD_NUMBER: u64 = 536_870_911;
 /// over: without a bound, a file of nothing but `message A {` repeated is a
 /// stack overflow in whatever thread called this library.
 ///
-/// 31 is `protoc`'s own limit, so the two refuse the same file: MEASURED with
-/// protoc 3.21.12, a schema of 31 messages nested in one another compiles and
-/// one of 32 is refused with "Reached maximum recursion limit for nested
-/// messages" (and, unusually, without a line). The oracle test in
-/// `wz-integration-tests` holds both sides of that boundary.
+/// 31 is the limit of `protoc` 3.21, so that release and this parser refuse the
+/// same file: MEASURED with protoc 3.21.12, a schema of 31 messages nested in
+/// one another compiles and one of 32 is refused with "Reached maximum
+/// recursion limit for nested messages" (and, unusually, without a line). It is
+/// NOT every release's limit: protoc 3.12.4 compiles at least 128 levels, and
+/// there this parser refuses what that `protoc` accepts. The bound stays 31
+/// whichever `protoc` is installed. The oracle test in `wz-integration-tests`
+/// measures the limit of the `protoc` it runs and holds the door to its own 31
+/// on both sides, as a deliberate refusal where `protoc` is more permissive.
 pub(crate) const MAX_MESSAGE_NESTING: usize = 31;
 
 /// The scalar type keywords. A field of one of these has no structure to name.
