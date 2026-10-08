@@ -600,6 +600,57 @@ PREDICATES = [
         "self.undecided == 0",
         "self.undecided <= 1",
     ),
+    # `DissectionHealth::transport_uncorroborated` -- the guard of
+    # `ChecksumsUncorroborated`. Before the offload fix the leg compared the
+    # counts inline (`invalid > 0 && valid == 0`), so `boundary` reached the
+    # threshold at the guard; the condition now lives one level down, in a
+    # predicate that hands three counters to `layer_uncorroborated`, and
+    # `boundary` finds no `>` in `health().transport_uncorroborated()`.
+    #
+    # Two units, because the rule has two places to be wrong. The ARGUMENTS the
+    # predicate passes: each counter is zeroed in turn, which asks "is there a
+    # capture that only THIS counter tells apart". And the RULE,
+    # `valid == 0 && (invalid > 0 || partial > 0)`: each comparison moved one
+    # step and each connective flipped, which asks the same of the threshold.
+    #
+    # The rule is shared with the `ip` and `tunnel` entries of
+    # `uncorroborated_layers`, so a kill of a rule mutant may come from a test of
+    # the health document rather than of the verdict; the argument mutants are
+    # the transport layer's own and pin THIS leg's inputs.
+    *[
+        (
+            f"DissectionHealth.transport_uncorroborated/{f}",
+            "crates/wz-capture/src/lib.rs",
+            "pub(crate) fn transport_uncorroborated(&self) -> bool {",
+            f"self.transport_checksum_{f}",
+            "0",
+        )
+        for f in ("valid", "invalid", "partial")
+    ],
+    *[
+        (
+            f"layer_uncorroborated/{label}",
+            "crates/wz-capture/src/lib.rs",
+            "const fn layer_uncorroborated(valid: usize, invalid: usize, partial: usize) -> bool {",
+            old,
+            new,
+        )
+        for label, old, new in (
+            ("valid-forgives-one", "valid == 0", "valid <= 1"),
+            ("invalid-needs-two", "invalid > 0", "invalid > 1"),
+            ("partial-needs-two", "partial > 0", "partial > 1"),
+            (
+                "failure-and-partial-both",
+                "(invalid > 0 || partial > 0)",
+                "(invalid > 0 && partial > 0)",
+            ),
+            (
+                "judged-not-required",
+                "valid == 0 && (invalid",
+                "valid == 0 || (invalid",
+            ),
+        )
+    ],
 ]
 
 
@@ -663,6 +714,7 @@ COVERED_TYPES = {
     ("ThroughputGaps", "is_clean"),
     ("ExchangeGaps", "is_clean"),
     ("Selection", "is_decisive"),
+    ("DissectionHealth", "transport_uncorroborated"),
 }
 
 # A no-argument method call. Adapters (`is_some_and(..)`, `map_or(..)`) carry
@@ -742,6 +794,44 @@ def accessor_types(accessor: str) -> set[str]:
     return out
 
 
+# The type an `impl` block is for: `impl T`, `impl<..> T` and `impl Trait for T`.
+IMPL_FOR = re.compile(
+    r"^impl(?:<[^>]*>)?\s+(?:[\w:]+(?:<[^>]*>)?\s+for\s+)?([A-Za-z_]\w*)", re.M
+)
+
+
+def predicate_owners(predicate: str) -> set[str]:
+    """Every type that declares a `&self` method of this name.
+
+    `accessor_types` answers by NAME across the whole tree, so an accessor that
+    two crates spell alike returns both of their types: `health` is
+    `Dissection::health -> DissectionHealth` and also the live handle's
+    `health -> String`. Only the first can own `transport_uncorroborated`, and
+    `String` has no such method for a recipe to mutate. Asking which types
+    declare the predicate is a fact read from the same declarations, with no
+    type inference.
+    """
+    pattern = re.compile(r"\bfn\s+" + re.escape(predicate) + r"\s*\(\s*&self\b")
+    out: set[str] = set()
+    for text in _crate_sources():
+        for hit in pattern.finditer(text):
+            impls = IMPL_FOR.findall(text[: hit.start()])
+            if impls:
+                out.add(impls[-1])
+    return out
+
+
+def narrow_candidates(candidates: set[str], owners: set[str]) -> set[str]:
+    """The accessor's return types that can actually own the predicate.
+
+    CONSERVATIVE in the one direction that matters: when no candidate is a known
+    owner (a trait-provided method, a macro-generated one) nothing is dropped,
+    so a predicate this tool cannot place is still asked about by every type it
+    might have been, exactly as before this narrowing existed.
+    """
+    return (candidates & owners) or candidates
+
+
 def recipe_types() -> set[tuple[str, str]]:
     """`(type, predicate)` for each recipe, read from its `impl` block."""
     out: set[tuple[str, str]] = set()
@@ -773,7 +863,10 @@ def uncovered_calls(pristine: str) -> list[tuple[str, str, str, str]]:
         if len(calls) < 2:
             continue
         accessor, predicate = calls[-2], calls[-1]
-        for ty in accessor_types(accessor) or {f"<unknown:{accessor}>"}:
+        candidates = accessor_types(accessor)
+        if candidates:
+            candidates = narrow_candidates(candidates, predicate_owners(predicate))
+        for ty in candidates or {f"<unknown:{accessor}>"}:
             if (ty, predicate) not in COVERED_TYPES:
                 out.append((g.group("variant"), accessor, ty, predicate))
     return out
@@ -1129,6 +1222,53 @@ def selftest() -> int:
             f"never builds, so nothing tests it"
         )
 
+    # The type-narrowing step, both directions. Narrowing that dropped too much
+    # would let a predicate no recipe mutates walk past as "owned by something
+    # else"; narrowing that dropped too little reports a type that never had the
+    # method, which is the `String` this was written for.
+    narrowing = (
+        (
+            "an accessor two crates spell alike keeps only the type that owns the predicate",
+            {"DissectionHealth", "String"},
+            {"DissectionHealth"},
+            {"DissectionHealth"},
+        ),
+        (
+            "two owners are both kept",
+            {"ExchangeGaps", "ThroughputGaps"},
+            {"ExchangeGaps", "ThroughputGaps"},
+            {"ExchangeGaps", "ThroughputGaps"},
+        ),
+        (
+            "no known owner drops nothing, so an unplaced predicate is still asked",
+            {"A", "B"},
+            set(),
+            {"A", "B"},
+        ),
+        (
+            "an owner outside the candidates drops nothing",
+            {"A", "B"},
+            {"C"},
+            {"A", "B"},
+        ),
+    )
+    for label, candidates, owners, expected in narrowing:
+        got = narrow_candidates(candidates, owners)
+        if got != expected:
+            failures.append(
+                f"  narrowing, {label}: expected {sorted(expected)}, got {sorted(got)}"
+            )
+    for header, ty in (
+        ("impl Plain {", "Plain"),
+        ("impl<'a> Lifetimed<'a> {", "Lifetimed"),
+        ("impl Display for Shown {", "Shown"),
+        ("impl<T: Copy> Marker<T> for Generic<T> {", "Generic"),
+    ):
+        if IMPL_FOR.findall(header) != [ty]:
+            failures.append(
+                f"  impl header `{header}`: expected [{ty!r}], got {IMPL_FOR.findall(header)}"
+            )
+
     if failures:
         print("verdict-leg mutation selftest: FAIL", file=sys.stderr)
         for f in failures:
@@ -1142,7 +1282,8 @@ def selftest() -> int:
         "`mutant` prescribing a restore, `stale-backup` refusing one, and "
         "`orphan` reached from the directory rather than from `PREDICATES`; "
         f"and {len(_spellings)} backup-name spelling(s) in "
-        f"{len(_encoders)} encoder(s), so no guard can read a name nothing writes"
+        f"{len(_encoders)} encoder(s), so no guard can read a name nothing writes; "
+        f"and {len(narrowing)} accessor-type narrowing case(s)"
     )
     return 0
 
