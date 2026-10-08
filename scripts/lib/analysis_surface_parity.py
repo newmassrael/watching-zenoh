@@ -409,6 +409,16 @@ ONLY_CAPI = {
         "running; a UI needs it before there is anything to run.",
         (15,),
     ),
+    "diagnosing one key expression without a capture": (
+        "wz_dissect_keyexpr_diagnose",
+        "DELIBERATE, on the argument the two rows above make, arriving for the "
+        "third text a person types: a pattern is judged WHILE it is typed, and "
+        "the verdict names the chunk, the byte and the reason. The command line "
+        "refuses a bad pattern at parse time through the same validator "
+        "(`FormatMap::declare` asks it) and names the flag, which is the same "
+        "answer delivered by running.",
+        (15,),
+    ),
     "declarations written from a .proto schema": (
         "wz_dissect_declarations_from_proto",
         "DELIBERATE for now. The door exists because a consumer that LINKS this "

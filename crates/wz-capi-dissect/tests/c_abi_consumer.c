@@ -1992,9 +1992,13 @@ int main(void) {
     char *declared = NULL;
     rc = wz_dissect_declarations_diagnose("demo/temp=protobuf", &declared);
     CHECK(rc == WZ_DISSECT_OK, "diagnose rc=%d", rc);
+    /* Revision 2 names the KIND each line was read as, and a rule its position
+     * among the rules: the number a field row's matched_rule.index reports. */
     CHECK(strcmp(declared,
-                 "{\"document\":{\"name\":\"declarations_diagnose\",\"revision\":1},"
-                 "\"ok\":true,\"installed\":1}") == 0,
+                 "{\"document\":{\"name\":\"declarations_diagnose\",\"revision\":2},"
+                 "\"ok\":true,\"installed\":1,\"lines\":[{\"line\":0,"
+                 "\"kind\":\"format_rule\",\"pattern\":\"demo/temp\","
+                 "\"rule_index\":0}]}") == 0,
           "a good declaration text must verify: %s", declared);
     wz_dissect_string_free(declared);
 
@@ -2005,6 +2009,49 @@ int main(void) {
     CHECK(strstr(declared, "\"line\":0") != NULL,
           "the verdict must name the line: %s", declared);
     wz_dissect_string_free(declared);
+
+    /* The same escaped key, quoted and bare: one is a rule about the key a:b,
+     * the other names a field, and the verdict now says which. */
+    declared = NULL;
+    rc = wz_dissect_declarations_diagnose("a\\:b=protobuf\na:b=protobuf", &declared);
+    CHECK(rc == WZ_DISSECT_OK, "diagnose rc=%d", rc);
+    CHECK(strstr(declared, "\"kind\":\"format_rule\",\"pattern\":\"a:b\"") != NULL &&
+              strstr(declared, "\"kind\":\"field_name\",\"pattern\":\"a\"") != NULL,
+          "each line must say the kind it was read as: %s", declared);
+    wz_dissect_string_free(declared);
+
+    /* (ABI 28) One key expression, judged. A pattern the drop-in's constructor
+     * refuses is refused here, and the verdict names the chunk, the byte and the
+     * reason; the declaration door agrees. */
+    {
+        char *key = NULL;
+        rc = wz_dissect_keyexpr_diagnose("demo/**", &key);
+        CHECK(rc == WZ_DISSECT_OK, "keyexpr diagnose rc=%d", rc);
+        CHECK(strcmp(key,
+                     "{\"document\":{\"name\":\"keyexpr_diagnose\",\"revision\":1},"
+                     "\"ok\":true}") == 0,
+              "a key expression must verify: %s", key);
+        wz_dissect_string_free(key);
+
+        key = NULL;
+        rc = wz_dissect_keyexpr_diagnose("demo//pose", &key);
+        CHECK(rc == WZ_DISSECT_OK, "a refusal is a successful diagnosis, rc=%d", rc);
+        CHECK(strstr(key, "\"ok\":false,\"chunk\":1,\"offset\":5,"
+                          "\"reason\":\"empty_chunk\"") != NULL,
+              "the verdict must name the place: %s", key);
+        wz_dissect_string_free(key);
+
+        key = NULL;
+        rc = wz_dissect_declarations_diagnose("demo//pose=protobuf", &key);
+        CHECK(rc == WZ_DISSECT_OK, "diagnose rc=%d", rc);
+        CHECK(strstr(key, "\"chunk\":1,\"offset\":5,\"reason\":\"empty_chunk\"") != NULL,
+              "the declaration door must refuse what the key door refuses, at the "
+              "same place: %s", key);
+        wz_dissect_string_free(key);
+
+        rc = wz_dissect_keyexpr_diagnose(NULL, &key);
+        CHECK(rc == WZ_DISSECT_ERR_INVALID_ARG, "a NULL key is an argument error");
+    }
 
     /* R311y913 (unregistered item 435) -- the library says what it can READ,
      * with no capture. The two lists are the same strings `wz-analyze --help`
@@ -2278,8 +2325,13 @@ int main(void) {
      * no key name moves; nothing retires.
      * 27: a `selected` cell reads the selector's word on a `Request`, a
      * `ResponseFinal` and a del in a `Push` or a `Reply`, rows that read
-     * `unjudged` under every selector. A value moved under stationary keys. */
-    revisioned[2].revision = 27;
+     * `unjudged` under every selector. A value moved under stationary keys.
+     * 28: every `carried` entry gains `payload` (its slot's range, the
+     * encoding the sample carried, and whether the range is an SHM
+     * descriptor; `null` for a message with no slot), a decode names the rule
+     * that won as `matched_rule`, and each decoded field gains `depth` and
+     * `parent`. Eight new key names; no word moves; nothing retires. */
+    revisioned[2].revision = 28;
     revisioned[2].doc = NULL;
     rc = wz_dissect_pcap_fields(pcap, sizeof pcap, 0, &revisioned[2].doc);
     CHECK(rc == WZ_DISSECT_OK, "fields rc=%d", rc);

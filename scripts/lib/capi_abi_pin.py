@@ -50,7 +50,7 @@ import subprocess
 import sys
 
 # The pinned pair. Edit BOTH halves deliberately -- see the module doc.
-EXPECTED_VERSION = 27
+EXPECTED_VERSION = 28
 
 # R2108 (open-debt item 525) -- THE RECORD'S LAYOUT, pinned HERE and read from
 # the artifact through `wz_dissect_record_layout`.
@@ -272,6 +272,15 @@ EXPECTED_SYMBOLS = {
     # holds, nothing is retained between calls, and no callback runs.
     "wz_dissect_e2e_wrap",
     "wz_dissect_e2e_open",
+    # (ABI 28) -- ONE key expression, judged. A consumer asking about a single
+    # pattern had to build a declaration line (`pattern=format`) to reach the
+    # diagnostic door above, which reads a `:` in the pattern as a field-name
+    # separator and, until this revision, accepted six patterns the C drop-in's
+    # constructors refuse. The memory rule does not move: the verdict is a
+    # `char*` released by `wz_dissect_string_free`, and no callback runs. It is
+    # its own symbol and not a mode of the door above, which judges a TEXT of
+    # lines.
+    "wz_dissect_keyexpr_diagnose",
     # R311y851 — the four analysis planes' door. Both halves moved together,
     # which is the whole of what this gate asks.
     "wz_dissect_pcap_census",

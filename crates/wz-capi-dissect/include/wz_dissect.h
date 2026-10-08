@@ -71,7 +71,7 @@
  * here would only ever be a copy. (The envelope carries one more key for a
  * document that declares planes -- see R2180 below.) The names are "census",
  * "fields", "summary", "readable_surfaces", "selector_diagnose",
- * "declarations_diagnose", "declarations_from_proto", "e2e_wrap", "e2e_open", "selection", "retention" and "health" — one per door group, because a consumer calls the
+ * "declarations_diagnose", "keyexpr_diagnose", "declarations_from_proto", "e2e_wrap", "e2e_open", "selection", "retention" and "health" — one per door group, because a consumer calls the
  * door it wants and a single library-wide number would tell a reader of the
  * census that a document it never calls had moved.
  *
@@ -389,6 +389,37 @@
  * A transport message that BATCHES gets `null` here even when the records
  * inside it name keys: those keys belong to the records, each of which has its
  * own entry. One `Frame` can carry several messages that share no key.
+ *
+ * AND WHAT THE MESSAGE SAYS ABOUT ITS PAYLOAD, at field-document revision 28.
+ *
+ *     `payload`  {"start":N,"end":N,"encoding":"...","shm_descriptor":false},
+ *                or `null`
+ *
+ * It follows the key on every entry of `carried` and of
+ * `above_transport.carried`, WHATEVER YOU DECLARED: it needs no format. `null`
+ * means the message has no payload slot at all -- a delete, a query with no
+ * body, a declaration, and every transport message. Otherwise `start` and
+ * `end` are the payload's byte range in the entry's own coordinates (the joined
+ * buffer's, for a record of a reassembled chain), so the bytes are
+ * `[start, end)` of the same buffer the entry's own `start` and `end` index.
+ * `encoding` is the encoding the sample itself carried, spelled as zenoh prints
+ * one -- `application/json`, `application/protobuf;pkg.Msg` with a schema,
+ * `unknown(N)` for an id this build's table does not hold -- and `null` when
+ * the message carried none, which on the wire means the default `zenoh/bytes`;
+ * a sample that names `zenoh/bytes` explicitly says so, and is not `null`.
+ * `shm_descriptor` is true when the range holds an SHM descriptor, an address
+ * and not content: the data it stands for never crossed this wire (compare the
+ * `not_on_the_wire` state below). A payload sent as slices reports the range of
+ * its first descriptor when it has one, and of all its slices otherwise.
+ *
+ * It is on the ENTRY and not on the row because a row is one transport message
+ * and a `Frame` batches several network messages that need not share a key, a
+ * payload or an encoding; the entry is the smallest object that names ONE
+ * message, so its key, its cause and its payload are read from it together. A
+ * transport message's own entry says `null`: what a `Frame` carries is its
+ * records', and a `Fragment`'s bytes are a piece of a batch and not
+ * application data. The range is derived from the message's bytes and does not
+ * change in an issued row.
  *
  * ⚠ AN EMPTY `carried` IS A STATEMENT. A transport MID this build does not name
  * walks as the `Unknown` group -- the row says so under `name` -- and gets no
@@ -754,7 +785,7 @@
  *
  * Every family in `value_families` now carries a `carries` axis:
  *
- *     {"name":"fields","revision":27,"key":"kind","values":[...],
+ *     {"name":"fields","revision":28,"key":"kind","values":[...],
  *      "carries":[{"word":"bits","shapes":[["end","name","start","value"]]},
  *                 {"word":"opaque","shapes":[["end","name","start"]]}, ...]}
  *
@@ -1108,7 +1139,7 @@ extern "C" {
  * calls the function, and refuses when the two disagree.
  *
  * @unknown ABI not-an-enumeration */
-#define WZ_DISSECT_ABI_REVISION 27
+#define WZ_DISSECT_ABI_REVISION 28
 
 /* Symbol/memory-contract revision. Not a JSON-shape revision. This is the
  * revision the LOADED library reports; the block above says why it exists
@@ -1561,6 +1592,37 @@ int wz_dissect_pcap_fields(const unsigned char *bytes, size_t len,
  * consumer that had to test for the key would read its absence as "nothing
  * was overridden", which is the assumption the field exists to stop.
  *
+ * WHICH RULE WON, at field-document revision 28. The states that asked your
+ * rules (`decoded`, `refused`, `encoding_mismatch` and `no_rule`) carry
+ *
+ *     `matched_rule`  {"index":N,"pattern":"..."}, or `null` in `no_rule`
+ *
+ * The rules are tried in the order you declared them and the FIRST that covers
+ * the key wins. `index` is that rule's position among the format rules, from
+ * 0, in that order, and `pattern` is its key expression as you mean it (quotes
+ * removed). It is NOT a line number: a field-name declaration or a format
+ * definition between two rules does not move it. wz_dissect_declarations_diagnose
+ * reports the same number as `rule_index` on the line that installed the rule,
+ * so a row joins to its line by equality. Two overlapping rules of one format
+ * gave byte-identical rows in either order, and a row could not say which had
+ * decided it. `null` in `no_rule` is "no rule won", written where the winner is
+ * read from; the four states that never asked the rules (`keyexpr_unresolved`,
+ * `no_payload`, `not_on_the_wire` and `no_rules`) carry no `matched_rule` at
+ * all. Each entry of `payload_mapping` and `payload_refusals` carries the same
+ * object, so the rule a finding says to fix is named.
+ *
+ * HOW A DECODED FIELD IS NESTED, at the same revision. Each entry of a
+ * `decoded` block's `fields` also carries
+ *
+ *     `depth`   0 for a top-level field, 1 for one inside it, and so on
+ *     `parent`  the `path` of the field it is nested in, or `null` at depth 0
+ *
+ * so a consumer drawing a tree never reads the path grammar to indent one. A
+ * protobuf message has no root row, so its first-level fields are depth 0; a
+ * JSON or CBOR document is rooted at `$`, so the document's own row is depth 0
+ * and its members depth 1. Where a field repeats, every occurrence reports the
+ * same `path` and the same `parent`; the spans tell them apart.
+ *
  * R311y875 -- the document additionally carries `payload_mapping`, a
  * top-level array summarising what your rules MET. Both findings above are
  * per message, and a capture where one mapping is wrong for every sample on a
@@ -1775,15 +1837,119 @@ int wz_dissect_pcap_fields_where_limited(const unsigned char *bytes, size_t len,
  * it, WITHOUT a capture.
  *
  * Always returns WZ_DISSECT_OK for readable text and writes a verdict:
- * {"ok":true,"installed":N}, or
+ * {"ok":true,"installed":N,"lines":[...]}, or
  * {"ok":false,"line":N,"text":"...","message":"..."} where `line` counts
  * every line of the text from 0 -- blank ones included, so the number
  * indexes what you sent.
  *
  * The argument wz_dissect_selector_diagnose makes, arriving for the second
  * text a person types. A consumer told only "one of these is bad" makes the
- * operator bisect their own configuration. */
+ * operator bisect their own configuration.
+ *
+ * WHICH KIND EACH LINE WAS READ AS, at verdict revision 2. `lines` has one
+ * object per non-blank line, in the order of the text:
+ *
+ *     {"line":0,"kind":"format_rule","pattern":"demo/temp","rule_index":0}
+ *     {"line":1,"kind":"field_name","pattern":"demo/temp"}
+ *     {"line":2,"kind":"format_definition"}
+ *
+ * `line` is the index the failure branch uses. `kind` is one of
+ *
+ *     `format_rule`        <keyexpr>=<format>
+ *     `field_name`         <keyexpr>:<path>=<name>
+ *     `format_definition`  #<format>=<layout>
+ *
+ * `pattern` is the key expression AS READ, with the dialect's quoting removed,
+ * and is present for the two kinds that have a key. `rule_index` is present for
+ * a `format_rule` only: its position among the format rules, from 0, in the
+ * order they are tried (first match wins). It is the `index` of the
+ * `matched_rule` a field row reports when that rule decided it, so you join a
+ * row to its line by equality and never by counting; a `field_name` or a
+ * `format_definition` between two rules does not move it.
+ *
+ * `installed` counted every line as one declaration whatever its kind, so
+ * `a\=b=protobuf` (a rule about the key `a=b`) and `a:b=protobuf` (the name
+ * `protobuf` for path `b` under `a`) came back alike. Read `kind`. To write a
+ * rule about a key that contains a `:` or an `=`, quote each with a backslash:
+ * `a\:b=protobuf` is the rule about `a:b`.
+ *
+ * @values declarations_diagnose kind
+ * @carries declarations_diagnose kind discriminant
+ *
+ * A KEY THAT IS NOT A KEY EXPRESSION, at the same revision. The failure also
+ * carries `pattern` (the key as read), `chunk`, `offset` (a BYTE offset into
+ * `pattern`) and `reason`, and `message` is the sentence. They are the keys
+ * wz_dissect_keyexpr_diagnose writes for the same text, because it is the same
+ * judgement: the one the C drop-in's z_view_keyexpr_from_str asks. A pattern
+ * the drop-in refuses is refused here. Six used to install and no longer do:
+ * an empty chunk (demo//pose), a question mark, a double star that is not a
+ * whole chunk, a star in the middle of a chunk, a double-star chunk followed by
+ * another double-star chunk, and a chunk that is only dollar-star. A failure
+ * for any other reason carries none of the four.
+ *
+ * A key with a `:` or an `=` that is NOT quoted is refused as well, because the
+ * line does not say whether that separator is the key's own or the dialect's:
+ * `a:b:c=x` could be a name for `c` under `a:b`, a rule about `a:b:c`, or a name
+ * for `b:c` under `a`. `message` names the separator and its byte. This is a
+ * behaviour change for a text that left a reserved character bare in a key.
+ *
+ * @values declarations_diagnose reason
+ * @carries declarations_diagnose reason passenger */
 int wz_dissect_declarations_diagnose(const char *declarations, char **out);
+
+/* (ABI 28) -- ONE KEY EXPRESSION, JUDGED, without building a declaration line.
+ *
+ * Always returns WZ_DISSECT_OK for readable text and writes a verdict:
+ * {"ok":true}, or
+ * {"ok":false,"chunk":N,"offset":N,"reason":"...","message":"..."} naming the
+ * first place the text stops being a key expression. `chunk` counts the
+ * `/`-delimited chunks from 0, and `offset` is a BYTE offset into the text: the
+ * offending byte for a character, the chunk's first byte for a fault in the
+ * chunk's shape, and the text's length for a trailing `/`, where there is no
+ * byte to point at. Where a text has several faults the EARLIEST by position is
+ * reported. `message` is the sentence a person reads.
+ *
+ * `reason` is one of upstream's own eight refusals, a closed set:
+ *
+ *     `empty_chunk`                    an empty chunk: two slashes in a row, a
+ *                                      leading slash, a trailing slash, or ""
+ *     `star_in_chunk`                  a star that is not a whole chunk (one
+ *                                      star, or two) and does not follow a $
+ *     `single_star_after_double_star`  a double-star chunk followed by a
+ *                                      single-star chunk; write the single
+ *                                      star first
+ *     `double_star_after_double_star`  two double-star chunks in a row; write
+ *                                      one
+ *     `lone_dollar_star`               a chunk that is only dollar-star; write
+ *                                      a single star
+ *     `dollar_after_dollar`            a $ right after a completed dollar-star
+ *     `sharp_or_question_mark`         a # or a ?
+ *     `unbound_dollar`                 a $ that does not start a dollar-star
+ *
+ * THE GRAMMAR IS UPSTREAM'S, and it is canonical form: a text that merely
+ * CANONIZES is not a key expression. A trailing double-star chunk, a single
+ * star before a double star, a leading double star, a double star after a
+ * literal chunk, and a dollar-star inside a chunk (a$*b) are key expressions;
+ * demo//pose, a slash at either end, a?b, a double star glued to a letter, a
+ * star glued to a letter (a*b), two double stars in a row, and a chunk that is
+ * only dollar-star are not. The wildcards are legal, since this judges key
+ * EXPRESSIONS and not literal keys.
+ *
+ * ONE VALIDATOR. The verdict is the function behind the C drop-in's
+ * z_view_keyexpr_from_str and behind the declaration reader, so the three
+ * cannot disagree. wz_dissect_declarations_diagnose used to accept six patterns
+ * the constructor refuses, and an editor built on it told a user their pattern
+ * was fine; feed this the pattern itself and you do not have to build
+ * `pattern=format` to ask, which also reads a `:` in the pattern as a
+ * field-name separator.
+ *
+ * A refusal is a successful DIAGNOSIS, so the memory rule is the one every
+ * document door keeps: OK means a string you own, an error means none. Text
+ * that is not valid UTF-8 is WZ_DISSECT_ERR_INVALID_ARG.
+ *
+ * @values keyexpr_diagnose reason
+ * @carries keyexpr_diagnose reason passenger */
+int wz_dissect_keyexpr_diagnose(const char *keyexpr, char **out);
 
 /* One file of the schema wz_dissect_declarations_from_proto reads. 24 bytes on
  * a 64-bit target, 8-aligned, and like wz_dissect_record it is raw memory a
@@ -2154,7 +2320,7 @@ int wz_dissect_e2e_open(const char *profile_json, const unsigned char *frame,
  *
  * R2175 -- the document is at REVISION 3, and the fourth key is `value_families`:
  *
- *     "value_families":[{"name":"fields","revision":27,"key":"state",
+ *     "value_families":[{"name":"fields","revision":28,"key":"state",
  *                        "values":["decoded","encoding_mismatch",…]}, …]
  *
  * every key in every document whose VALUE this build draws from a closed set,

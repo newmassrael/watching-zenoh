@@ -336,6 +336,8 @@ pub extern "C" fn wz_dissect_abi_version() -> c_int {
     // 25, for `wz_dissect_declarations_from_proto`.
     // 26, for `wz_dissect_e2e_wrap` and `wz_dissect_e2e_open`.
     // 27, for `wz_dissect_transport_message_in`.
+    // 28, for `wz_dissect_keyexpr_diagnose`: one key expression judged without
+    // a declaration line.
     WZ_DISSECT_ABI_REVISION
 }
 
@@ -353,7 +355,7 @@ pub extern "C" fn wz_dissect_abi_version() -> c_int {
 /// It lives AFTER the function rather than above it on purpose: an item placed
 /// between a doc comment and the item it documents takes that doc, which is
 /// the doc-ownership defect the C1bz budget records.
-pub const WZ_DISSECT_ABI_REVISION: c_int = 27;
+pub const WZ_DISSECT_ABI_REVISION: c_int = 28;
 
 /// R2108 (open-debt item 525) — THE RECORD'S LAYOUT, reported by the artifact.
 ///
@@ -1472,10 +1474,36 @@ pub unsafe extern "C" fn wz_dissect_pcap_fields_where_limited(
 /// capture.
 ///
 /// Always returns [`WZ_DISSECT_OK`] for readable text and writes a JSON
-/// verdict: `{"ok":true,"installed":N}`, or
+/// verdict: `{"ok":true,"installed":N,"lines":[…]}`, or
 /// `{"ok":false,"line":N,"text":"…","message":"…"}` where `line` counts every
 /// line of the text from 0 — blank ones included, so the number indexes what
 /// the caller sent.
+///
+/// # Which kind each line was read as (document revision 2)
+///
+/// `lines` has one object per non-blank line, in the order of the text:
+/// `line` (the same index), `kind` (`format_rule`, `field_name` or
+/// `format_definition`) and, for the two kinds that have a key, `pattern`, the
+/// key expression AS READ with the dialect's quoting removed. A `format_rule`
+/// also carries `rule_index`: its position among the format rules, from 0, in
+/// the order they are tried. That is the `index` of the `matched_rule` a field
+/// row reports when this rule wins, so a consumer joins a row to its line by
+/// equality and never by counting.
+///
+/// `installed` counted every line as one declaration whichever kind it was, so
+/// `a\=b=protobuf` (a rule about the key `a=b`) and `a:b=protobuf` (the name
+/// `protobuf` for the path `b` under `a`) reported alike. They no longer do.
+///
+/// # A key that is not a key expression
+///
+/// The verdict is the one `wz_dissect_keyexpr_diagnose` gives and the C
+/// drop-in's constructors agree with: a failure at a key also carries
+/// `pattern` (the key as read), `chunk`, `offset` (a byte offset into
+/// `pattern`) and `reason`, one of upstream's eight. `demo//pose`, `a?b`, `**x`,
+/// `a*b`, `demo/**/**` and `demo/$*/pose` used to install and are now refused.
+/// A key carrying a `:` or an `=` that is not quoted is refused too, with
+/// `message` naming the separator and its byte: write `a\:b` for a key that
+/// contains a colon.
 ///
 /// # Why this is a symbol rather than a richer error code
 ///
@@ -1505,27 +1533,66 @@ pub unsafe extern "C" fn wz_dissect_declarations_diagnose(
         Ok(s) => s,
         Err(_) => return WZ_DISSECT_ERR_INVALID_ARG,
     };
-    let mut map = wz_capture::payload::formats::FormatMap::new();
     // R2100 (open-debt item 509) — the envelope opens BOTH branches, for the
-    // reason the selector verdict above gives.
-    let head = wz_capture::doc_revision::envelope(wz_capture::doc_revision::DECLARATIONS_DIAGNOSE);
-    let verdict = match map.declare_all(text) {
-        Ok(installed) => format!("{{{head},\"ok\":true,\"installed\":{installed}}}"),
-        Err(bad) => {
-            let mut s = format!("{{{head},\"ok\":false,\"line\":");
-            s.push_str(&bad.line.to_string());
-            s.push_str(",\"text\":");
-            // The SAME escaper the rest of this ABI's documents use: the line
-            // is the operator's own text, quoted back so a UI can point at it
-            // without holding the input a second time.
-            wz_session_core::json::escape_into(&bad.text, &mut s);
-            s.push_str(",\"message\":");
-            wz_session_core::json::escape_into(&bad.error.to_string(), &mut s);
-            s.push('}');
-            s
-        }
+    // reason the selector verdict gives. The verdict is rendered in
+    // `wz-capture`, beside the revision that declares it.
+    write_string(
+        wz_capture::diagnose_json::declarations_diagnose_json(text),
+        out,
+    )
+}
+
+/// (ABI 28) ONE key expression, judged, WITHOUT building a declaration line.
+///
+/// Always returns [`WZ_DISSECT_OK`] for readable text and writes a JSON verdict:
+/// `{"ok":true}`, or `{"ok":false,"chunk":N,"offset":N,"reason":"…","message":"…"}`
+/// naming the first place the text stops being a key expression. `chunk` counts
+/// the `/`-delimited chunks from 0 and `offset` is a BYTE offset into `keyexpr`
+/// (for a trailing `/` it is the text's length, where there is no byte to point
+/// at). `reason` is one of upstream's eight refusals, the closed set the header
+/// lists, and `message` is the sentence. Where a text has several faults the
+/// EARLIEST by position is the one reported.
+///
+/// # Which grammar
+///
+/// Upstream's: a key expression is CANONICAL, so `demo//pose`, a leading or
+/// trailing `/`, `a?b`, `**x`, `a*b`, `demo/**/**` and `demo/$*/pose` are
+/// refused, while `demo/**`, `a/*/**`, `**/a`, `a/**/b/**` and `a$*b` are
+/// accepted. The verdict is the same function the C drop-in's
+/// `z_view_keyexpr_from_str` asks and the payload-declaration reader asks, so
+/// the three cannot disagree; the declaration door used to accept six patterns
+/// the constructor refuses, and an editor built on it told a user their
+/// pattern was fine.
+///
+/// # Why it is a symbol rather than a declaration line
+///
+/// `wz_dissect_declarations_diagnose` judges a line, and a consumer asking
+/// about one pattern had to build `pattern=format` to find out, which also
+/// reads a `:` in the pattern as a field-name separator. This asks the pattern
+/// itself.
+///
+/// A refusal is a successful DIAGNOSIS, so the OK/no-string rule is untouched:
+/// the string is owned and freed like every other.
+///
+/// # Safety
+/// `keyexpr` must be a NUL-terminated C string and `out` a writable pointer to a
+/// `*mut c_char`. Neither may be null.
+#[no_mangle]
+pub unsafe extern "C" fn wz_dissect_keyexpr_diagnose(
+    keyexpr: *const c_char,
+    out: *mut *mut c_char,
+) -> c_int {
+    if keyexpr.is_null() || out.is_null() {
+        return WZ_DISSECT_ERR_INVALID_ARG;
+    }
+    // SAFETY: caller contract above.
+    let text = match unsafe { std::ffi::CStr::from_ptr(keyexpr) }.to_str() {
+        Ok(s) => s,
+        Err(_) => return WZ_DISSECT_ERR_INVALID_ARG,
     };
-    write_string(verdict, out)
+    // The envelope opens both branches, for the reason the selector verdict
+    // gives; the verdict is rendered in `wz-capture` beside its revision.
+    write_string(wz_capture::diagnose_json::keyexpr_diagnose_json(text), out)
 }
 
 /// One file of a `.proto` schema, as [`wz_dissect_declarations_from_proto`] takes
@@ -6443,7 +6510,9 @@ mod tests {
         // light of its session's context. One symbol, a `char*` released by
         // `wz_dissect_string_free`; the memory rule and the record layout stay
         // put.
-        assert_eq!(wz_dissect_abi_version(), 27);
+        // 28, for `wz_dissect_keyexpr_diagnose`: one key expression judged,
+        // returning the same owned `char*` verdict as the other diagnose doors.
+        assert_eq!(wz_dissect_abi_version(), 28);
     }
 
     /// R311y913 (unregistered item 435) — THE LINKED SURFACE CAN SAY WHAT IT
@@ -6776,6 +6845,7 @@ mod tests {
         assert!(
             over.contains(
                 "\"payload_decode\":{\"state\":\"decoded\",\"keyexpr\":\"demo/sensor\",\
+                 \"matched_rule\":{\"index\":0,\"pattern\":\"demo/sensor\"},\
                  \"despite_encoding\":\"application/json\""
             ),
             "a label the bytes refute must not hide the data, and the override \
@@ -6794,6 +6864,7 @@ mod tests {
                 // OUT. That corroboration is exactly what the new key
                 // distinguishes from a binary label nothing could weigh.
                 "\"payload_decode\":{\"state\":\"encoding_mismatch\",\"keyexpr\":\"demo/sensor\",\
+                 \"matched_rule\":{\"index\":0,\"pattern\":\"demo/sensor\"},\
                  \"format\":\"protobuf\",\"declared\":\"application/json\",\
                  \"declaration_checked\":true}"
             ),
@@ -6844,6 +6915,7 @@ mod tests {
         assert!(
             doc.contains(
                 "\"payload_mapping\":[{\"keyexpr\":\"demo/sensor\",\"format\":\"protobuf\",\
+                 \"matched_rule\":{\"index\":0,\"pattern\":\"demo/sensor\"},\
                  \"declared\":\"application/json\",\"wrong\":\"publisher\",\"samples\":3,"
             ),
             "three samples whose bytes refute their own label must be counted \
@@ -6853,6 +6925,7 @@ mod tests {
         assert!(
             doc.contains(
                 "{\"keyexpr\":\"demo/sensor\",\"format\":\"protobuf\",\
+                 \"matched_rule\":{\"index\":0,\"pattern\":\"demo/sensor\"},\
                  \"declared\":\"application/json\",\"wrong\":\"rule\",\"samples\":2,"
             ),
             "two samples whose bytes bear their label out must be counted \
@@ -7015,8 +7088,25 @@ mod tests {
         // is the shape of gate that reads green over half a contract.
         let selector_ok = call_selector_diagnose("");
         let selector_bad = call_selector_diagnose("key ==");
-        let decl_ok = call_declarations_diagnose("");
-        let decl_bad = call_declarations_diagnose("not a declaration");
+        // The declaration verdict has THREE shapes, and its keys differ by each:
+        // a success with a line of every kind (`lines`, `kind`, `pattern`,
+        // `rule_index`), a failure anywhere (`line`, `text`, `message`) and a
+        // failure at a KEY (`pattern`, `chunk`, `offset`, `reason`). The empty
+        // text is the success with no lines.
+        let decl_ok = vec![
+            call_declarations_diagnose(""),
+            call_declarations_diagnose("demo/a=protobuf\ndemo/a:1=name\n#profile=a:u8"),
+        ];
+        let decl_bad = vec![
+            call_declarations_diagnose("not a declaration"),
+            call_declarations_diagnose("demo//a=protobuf"),
+        ];
+        let decl: Vec<String> = decl_ok.into_iter().chain(decl_bad).collect();
+        // The key-expression verdict has two: accepted, and refused with a place.
+        let keyexpr = vec![
+            call_keyexpr_diagnose("demo/**"),
+            call_keyexpr_diagnose("a//b"),
+        ];
 
         let documents: Vec<(&str, Vec<String>)> = vec![
             (
@@ -7025,7 +7115,8 @@ mod tests {
             ),
             (rev::READABLE_SURFACES, vec![call_readable_surfaces()]),
             (rev::SELECTOR_DIAGNOSE, vec![selector_ok, selector_bad]),
-            (rev::DECLARATIONS_DIAGNOSE, vec![decl_ok, decl_bad]),
+            (rev::DECLARATIONS_DIAGNOSE, decl),
+            (rev::KEYEXPR_DIAGNOSE, keyexpr),
             // Every shape the `.proto` door writes: the success, a place in a
             // file, a whole file, and an argument. The key set differs by
             // branch, so a pin over one would leave the others' keys unwatched.
@@ -7166,6 +7257,7 @@ mod tests {
             (rev::READABLE_SURFACES, call_readable_surfaces()),
             (rev::SELECTOR_DIAGNOSE, call_selector_diagnose("")),
             (rev::DECLARATIONS_DIAGNOSE, call_declarations_diagnose("")),
+            (rev::KEYEXPR_DIAGNOSE, call_keyexpr_diagnose("demo/**")),
             // Declares no plane either.
             (
                 rev::DECLARATIONS_FROM_PROTO,
@@ -7316,6 +7408,14 @@ mod tests {
                 vec![
                     call_declarations_diagnose(""),
                     call_declarations_diagnose("not a declaration"),
+                    call_declarations_diagnose("demo//a=protobuf"),
+                ],
+            ),
+            (
+                rev::KEYEXPR_DIAGNOSE,
+                vec![
+                    call_keyexpr_diagnose("demo/**"),
+                    call_keyexpr_diagnose("a//b"),
                 ],
             ),
             // All four shapes: the failure branch OMITS its position keys and
@@ -8350,6 +8450,23 @@ mod tests {
         assert!(doc.contains("\"ok\":false"), "{doc}");
     }
 
+    /// Drive the key-expression diagnostic the way C does.
+    fn call_keyexpr_diagnose(keyexpr: &str) -> String {
+        let text = CString::new(keyexpr).expect("no interior NUL");
+        let mut out: *mut c_char = core::ptr::null_mut();
+        let rc = unsafe { wz_dissect_keyexpr_diagnose(text.as_ptr(), &mut out) };
+        assert_eq!(
+            rc, WZ_DISSECT_OK,
+            "a refused key expression is a successful DIAGNOSIS, not an error"
+        );
+        let s = unsafe { std::ffi::CStr::from_ptr(out) }
+            .to_str()
+            .expect("utf8")
+            .to_string();
+        unsafe { wz_dissect_string_free(out) };
+        s
+    }
+
     /// Drive the declaration diagnostic the way C does.
     fn call_declarations_diagnose(declarations: &str) -> String {
         let text = CString::new(declarations).expect("no interior NUL");
@@ -8427,10 +8544,12 @@ mod tests {
         let missed =
             call_fields_with_payloads(&file, 0, "other/topic=protobuf").expect("the capture reads");
         assert!(
-            missed
-                .contains("\"payload_decode\":{\"state\":\"no_rule\",\"keyexpr\":\"demo/sensor\"}"),
+            missed.contains(
+                "\"payload_decode\":{\"state\":\"no_rule\",\"keyexpr\":\"demo/sensor\",\
+                 \"matched_rule\":null}"
+            ),
             "a rule covering no topic here must say so AND name the keyexpr it \
-             was tested against: {missed}"
+             was tested against, with no rule as the winner: {missed}"
         );
 
         let decoded =
@@ -8439,6 +8558,7 @@ mod tests {
         assert!(
             decoded.contains(
                 "\"payload_decode\":{\"state\":\"decoded\",\"keyexpr\":\"demo/sensor\",\
+                 \"matched_rule\":{\"index\":0,\"pattern\":\"demo/sensor\"},\
                  \"despite_encoding\":null,\"format\":\"protobuf\""
             ),
             "the covering rule must fire: {decoded}"
@@ -8489,6 +8609,7 @@ mod tests {
         assert!(
             decoded.contains(
                 "\"payload_decode\":{\"state\":\"decoded\",\"keyexpr\":\"demo/sensor\",\
+                 \"matched_rule\":{\"index\":0,\"pattern\":\"demo/sensor\"},\
                  \"despite_encoding\":null,\"format\":\"cbor\""
             ),
             "the publisher said cbor and the rule says cbor, so it decodes with \
@@ -8561,10 +8682,14 @@ mod tests {
     #[test]
     fn the_declaration_diagnostic_names_the_line_and_needs_no_capture() {
         // R2100 (open-debt item 509) — the verdict opens with its own revision.
-        const HEAD: &str = "{\"document\":{\"name\":\"declarations_diagnose\",\"revision\":1}";
+        const HEAD: &str = "{\"document\":{\"name\":\"declarations_diagnose\",\"revision\":2}";
         assert_eq!(
             call_declarations_diagnose("demo/**=protobuf\ndemo/**:1=temperature"),
-            format!("{HEAD},\"ok\":true,\"installed\":2}}")
+            format!(
+                "{HEAD},\"ok\":true,\"installed\":2,\"lines\":[\
+                 {{\"line\":0,\"kind\":\"format_rule\",\"pattern\":\"demo/**\",\"rule_index\":0}},\
+                 {{\"line\":1,\"kind\":\"field_name\",\"pattern\":\"demo/**\"}}]}}"
+            )
         );
 
         // The SECOND line is the bad one, and the verdict must say so: an index
@@ -8594,6 +8719,121 @@ mod tests {
             "an unknown format must be told apart from a malformed line, and \
              say what IS available: {unknown}"
         );
+    }
+
+    /// (ABI 28) ONE KEY EXPRESSION IS JUDGED, AND THE VERDICT NAMES THE PLACE.
+    ///
+    /// The exact bytes of both branches, so the order of keys is a thing a
+    /// consumer reading the header can rely on, and the offset is the byte the
+    /// header says it is.
+    #[test]
+    fn the_key_expression_door_judges_one_pattern_and_names_the_place() {
+        const HEAD: &str = "{\"document\":{\"name\":\"keyexpr_diagnose\",\"revision\":1}";
+        assert_eq!(
+            call_keyexpr_diagnose("demo/**"),
+            format!("{HEAD},\"ok\":true}}")
+        );
+        assert_eq!(
+            call_keyexpr_diagnose("demo//pose"),
+            format!(
+                "{HEAD},\"ok\":false,\"chunk\":1,\"offset\":5,\"reason\":\"empty_chunk\",\
+                 \"message\":\"chunk 1, byte 5: empty chunk: `//`, a leading `/` and a \
+                 trailing `/` are not allowed\"}}"
+            )
+        );
+        // A fault in the LAST chunk of a longer text, and a trailing `/` whose
+        // offset is the text's length because there is no byte to point at.
+        let later = call_keyexpr_diagnose("a/b/c*d");
+        assert!(
+            later.contains("\"chunk\":2,\"offset\":5,\"reason\":\"star_in_chunk\""),
+            "{later}"
+        );
+        let trailing = call_keyexpr_diagnose("demo/");
+        assert!(
+            trailing.contains("\"chunk\":1,\"offset\":5,\"reason\":\"empty_chunk\""),
+            "{trailing}"
+        );
+        // The empty text is a key expression's emptiest refusal.
+        let empty = call_keyexpr_diagnose("");
+        assert!(
+            empty.contains("\"chunk\":0,\"offset\":0,\"reason\":\"empty_chunk\""),
+            "{empty}"
+        );
+    }
+
+    /// The two doors that take a key expression agree on every one of the
+    /// consumer's fifteen, through the C symbols a consumer calls.
+    ///
+    /// The accepted and refused sets are written out, so the agreement is not two
+    /// doors sharing a wrong answer; and a refusal carries the SAME `chunk`,
+    /// `offset` and `reason` from both, since the invariant that was broken was
+    /// one door accepting what the other refuses.
+    #[test]
+    fn the_two_doors_agree_on_the_consumers_fifteen_patterns() {
+        let accepted = [
+            "demo/**",
+            "demo/*/pose",
+            "demo/robots/1/pose",
+            "a/**/b/**",
+            "a/*/**",
+            "**/a",
+            "a$*b",
+        ];
+        let refused = [
+            "demo//pose",
+            "a?b",
+            "**x",
+            "/demo",
+            "demo/",
+            "demo/$*/pose",
+            "demo/**/**",
+            "a*b",
+        ];
+        let place = |doc: &str| {
+            let key = |k: &str| {
+                doc.split(&format!("\"{k}\":"))
+                    .nth(1)
+                    .and_then(|rest| rest.split([',', '}']).next())
+                    .map(str::to_string)
+            };
+            (key("chunk"), key("offset"), key("reason"))
+        };
+        for pattern in accepted {
+            let direct = call_keyexpr_diagnose(pattern);
+            let line = call_declarations_diagnose(&format!("{pattern}=protobuf"));
+            assert!(direct.contains("\"ok\":true"), "{pattern}: {direct}");
+            assert!(line.contains("\"ok\":true"), "{pattern}: {line}");
+        }
+        for pattern in refused {
+            let direct = call_keyexpr_diagnose(pattern);
+            let line = call_declarations_diagnose(&format!("{pattern}=protobuf"));
+            assert!(direct.contains("\"ok\":false"), "{pattern}: {direct}");
+            assert!(line.contains("\"ok\":false"), "{pattern}: {line}");
+            assert_eq!(place(&direct), place(&line), "{pattern}");
+            assert!(place(&direct).2.is_some(), "{pattern}: {direct}");
+        }
+    }
+
+    /// A NULL argument and text that is not UTF-8 are ARGUMENT errors and hand
+    /// back no string, as every document door's memory rule says.
+    #[test]
+    fn the_key_expression_door_refuses_a_bad_argument_without_a_string() {
+        let mut out: *mut c_char = core::ptr::null_mut();
+        let text = CString::new("demo/a").expect("no NUL");
+        assert_eq!(
+            unsafe { wz_dissect_keyexpr_diagnose(core::ptr::null(), &mut out) },
+            WZ_DISSECT_ERR_INVALID_ARG
+        );
+        assert_eq!(
+            unsafe { wz_dissect_keyexpr_diagnose(text.as_ptr(), core::ptr::null_mut()) },
+            WZ_DISSECT_ERR_INVALID_ARG
+        );
+        let not_utf8 = CString::new(vec![0xff, 0xfe]).expect("no NUL");
+        assert_eq!(
+            unsafe { wz_dissect_keyexpr_diagnose(not_utf8.as_ptr(), &mut out) },
+            WZ_DISSECT_ERR_INVALID_ARG
+        );
+        assert!(out.is_null(), "no string was handed back");
     }
 
     // ── R2102 (ABI 11, open-debt item 524) — the LIVE door ─────────────────
@@ -11023,6 +11263,9 @@ mod tests {
                     "/carried[]/keyexpr_id",
                     "/payload_decode/format",
                     "/payload_decode/keyexpr",
+                    // Revision 28 -- the rule that won starts from the resolved
+                    // key too, so it appears (`null` to an object) with it.
+                    "/payload_decode/matched_rule",
                     "/payload_decode/state",
                     "/payload_decode/why",
                 ]),
@@ -11055,6 +11298,7 @@ mod tests {
                     "/above_transport/carried[]/keyexpr_id",
                     "/above_transport/carried[]/payload_decode/format",
                     "/above_transport/carried[]/payload_decode/keyexpr",
+                    "/above_transport/carried[]/payload_decode/matched_rule",
                     "/above_transport/carried[]/payload_decode/state",
                     "/above_transport/carried[]/payload_decode/why",
                 ]),
