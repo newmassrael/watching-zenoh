@@ -1598,8 +1598,8 @@ pub const DOCUMENT_HISTORY: &[DocumentShape] = &[
     // against a flow whose Inits carried a `QoSLink` must be read again.
     DocumentShape {
         document: FIELDS,
-        revision: 31,
-        keys: FIELDS_R31_KEYS,
+        revision: 29,
+        keys: FIELDS_R29_KEYS,
         retiring: &[],
         families: FIELDS_R20_FAMILIES,
         planes: &[],
@@ -9432,15 +9432,14 @@ pub const PAYLOAD_STATE_CARRIES_R28: &[WordCarries] = &[
     },
 ];
 
-/// The field document's key set at revision 31: revision 28's, by name
-/// (revisions 29 and 30 are not on this branch).
+/// The field document's key set at revision 29: revision 28's, by name.
 ///
 /// IDENTICAL, and aliased for [`FIELDS_R27_KEYS`]' reason. What moved is the
 /// VALUE `context.qos` takes on a flow whose Inits offered QoS in the z64
 /// `QoSLink` form, which no axis in this module can express: the key is the
 /// same and so is its JSON type. The revision number is the whole notice, and
 /// the row says which flows.
-pub const FIELDS_R31_KEYS: &[&str] = FIELDS_R28_KEYS;
+pub const FIELDS_R29_KEYS: &[&str] = FIELDS_R28_KEYS;
 
 /// The census document's key set at revision 16: revision 15's, by name.
 ///
@@ -10904,10 +10903,10 @@ mod tests {
             // To 28 when a carried message named its payload slot, a decode
             // named the rule that won, and a decoded field named its nesting:
             // eight keys, no word moves and nothing retires.
-            // To 31 when `context.qos` began to read `true` for a session whose
+            // To 29 when `context.qos` began to read `true` for a session whose
             // Inits offered QoS as the z64 `QoSLink`: a value moved under a
             // stationary key, so this entry is the notice.
-            (FIELDS, 31),
+            (FIELDS, 29),
             // R2121 (open-debt item 460) — the summary moved to 2 when it
             // gained `inert_counters`; R2122 (item 238) to 3 when its
             // `framing` group stopped disagreeing with the capture report's.

@@ -659,7 +659,7 @@
  *     did not move: a flow joined mid-session decodes its Frames, and its
  *     Fragments as `fragment_without_resolution`, exactly as before.
  *
- *     Since field-document revision 31 -- WHAT `qos` MEANS. `qos` is `true`
+ *     Since field-document revision 29 -- WHAT `qos` MEANS. `qos` is `true`
  *     only if BOTH Inits offered QoS. An Init offers it in either of the two
  *     encodings Zenoh writes, the unit extension (id 1, no body) and the z64
  *     extension on the same id (header 0x21, the one an endpoint with priority
@@ -672,7 +672,7 @@
  *     out ends the handshake before any `Open`, and `qos` still reads what the
  *     two Inits offered.
  *
- *     The values that moved at revision 31: a session whose Inits carried the
+ *     The values that moved at revision 29: a session whose Inits carried the
  *     z64 encoding read `"qos":false` beside `"negotiated":true`, and now
  *     reads `true`. A flow whose Inits both carry the unit encoding, one whose
  *     Inits carry neither, and one whose Init pair was not seen read as they
@@ -804,7 +804,7 @@
  *
  * Every family in `value_families` now carries a `carries` axis:
  *
- *     {"name":"fields","revision":31,"key":"kind","values":[...],
+ *     {"name":"fields","revision":29,"key":"kind","values":[...],
  *      "carries":[{"word":"bits","shapes":[["end","name","start","value"]]},
  *                 {"word":"opaque","shapes":[["end","name","start"]]}, ...]}
  *
@@ -2339,7 +2339,7 @@ int wz_dissect_e2e_open(const char *profile_json, const unsigned char *frame,
  *
  * R2175 -- the document is at REVISION 3, and the fourth key is `value_families`:
  *
- *     "value_families":[{"name":"fields","revision":31,"key":"state",
+ *     "value_families":[{"name":"fields","revision":29,"key":"state",
  *                        "values":["decoded","encoding_mismatch",…]}, …]
  *
  * every key in every document whose VALUE this build draws from a closed set,
