@@ -239,12 +239,18 @@ impl<S: SpiTransfer> Tc6<S> {
     /// asked of `delay_us`: a wait promises at least what it is told, and a board
     /// whose clock runs slow takes far longer than it asked for, so counting the
     /// asks would let a budget of 100 ms last minutes.
+    ///
+    /// A `RESETC` that is already set is cleared first. A device reports `RESETC`
+    /// after its power-on reset and keeps reporting it until the host writes it
+    /// back, so without the clear the wait below would take the old flag for the
+    /// completion of THIS reset and return before the device has finished.
     pub fn soft_reset(
         &mut self,
         mut delay_us: impl FnMut(u32),
         mut now_us: impl FnMut() -> u64,
         budget_ms: u32,
     ) -> Result<(), Error<S::Error>> {
+        self.reg_write(std_reg::STATUS0, std_reg::STATUS0_RESETC)?;
         // The write that resets the device is a transaction in the mode the device
         // is in NOW; it is unconfigured only once the reset has happened.
         self.reg_write(std_reg::RESET, std_reg::RESET_SWRESET)?;

@@ -787,6 +787,46 @@ fn a_reset_budget_is_the_clocks_not_the_number_of_waits_asked_for() {
     assert_eq!(asks, 1, "the clock, not the count of asks, ended the wait");
 }
 
+/// A device reports `RESETC` after its power-on reset and keeps reporting it until
+/// the host writes it back. This one still has that flag set when the host resets
+/// it, and the reset it is then asked for never completes (it takes the write and
+/// does not raise `RESETC` for it). The old flag must not be taken for that reset's
+/// completion: the host clears it first, so the wait ends in the timeout it
+/// deserves, not in a success the device never gave.
+#[test]
+fn a_reset_flag_left_from_power_on_is_not_taken_for_this_resets_completion() {
+    struct StuckReset(Chip);
+    impl SpiTransfer for StuckReset {
+        type Error = ();
+        fn transfer(&mut self, tx: &[u8], rx: &mut [u8]) -> Result<(), ()> {
+            let before = self.0.reg(std_reg::STATUS0);
+            let header = u32::from_be_bytes([tx[0], tx[1], tx[2], tx[3]]);
+            let reset_write = header & (1 << 29) != 0
+                && (header >> 24) & 0xF == 0
+                && (header >> 8) & 0xFFFF == 0x003;
+            self.0.transfer(tx, rx)?;
+            if reset_write {
+                // The model raises RESETC for a reset; this device does not.
+                self.0.regs.insert((0, 0x008), before);
+            }
+            Ok(())
+        }
+    }
+    let mut chip = Chip::new();
+    chip.regs.insert((0, 0x008), std_reg::STATUS0_RESETC);
+    let mut t = Tc6::new(StuckReset(chip), ChunkSize::B64);
+    let clock = std::cell::Cell::new(0u64);
+    assert_eq!(
+        t.soft_reset(
+            |us| clock.set(clock.get() + u64::from(us)),
+            || clock.get(),
+            5,
+        ),
+        Err(Error::ResetTimeout),
+        "the power-on flag was taken for the completion of the reset"
+    );
+}
+
 #[test]
 fn sync_and_zarfe_are_declared_without_disturbing_the_other_config_bits() {
     let mut t = tc6();

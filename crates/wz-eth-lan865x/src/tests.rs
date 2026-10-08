@@ -393,6 +393,8 @@ fn the_edges_of_a_valid_plca_config_are_accepted() {
 fn the_power_on_reset_flag_is_cleared_before_the_soft_reset_is_issued() {
     // Power-on leaves RESETC set until the host clears it (DS60001734F 4.1.1.1),
     // so a reset whose completion is "RESETC is set" needs the old one gone first.
+    // The clear is `Tc6::soft_reset`'s own (wz-oa-tc6 tests it against a device
+    // that never completes a reset); this checks it comes through here in order.
     // The data sheet gives no reset duration, so only the order can be checked.
     let mut mac = opened(&config());
     let log = log(&mut mac);

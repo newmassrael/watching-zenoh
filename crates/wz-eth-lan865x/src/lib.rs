@@ -25,11 +25,12 @@
 //! 2. `DEVID` is read and the part identified, BEFORE anything is written, so a
 //!    wrong or absent part is refused with the bus untouched. A part newer than
 //!    the documents grade is refused unless the config accepts it.
-//! 3. Any `RESETC` left from power-on is cleared, then the part is soft-reset
-//!    (`Tc6::soft_reset`). The clear matters: power-on sets `RESETC` (DS60001734F
-//!    4.1.1.1) and the bit is write-one-to-clear (11.1.6), so it stays set until
-//!    the host clears it, and without the clear the wait for the reset's own
-//!    `RESETC` would be satisfied by the old one.
+//! 3. The part is soft-reset (`Tc6::soft_reset`), which first clears any `RESETC`
+//!    left from power-on: power-on sets `RESETC` (DS60001734F 4.1.1.1) and the bit
+//!    is write-one-to-clear (11.1.6), so it stays set until the host clears it,
+//!    and without the clear the wait for the reset's own `RESETC` would be
+//!    satisfied by the old one. The interface crate does it because every TC6
+//!    device behaves so.
 //! 4. The vendor's configuration (AN1760, DS60001760G): two indirect reads for the
 //!    part's trim offsets, the two parameters computed from them, and the table of
 //!    register writes, in the document's order. The note requires this after
@@ -232,8 +233,6 @@ fn configure<S: SpiTransfer>(
         return Err(OpenError::RevisionNotAccepted(identity));
     }
 
-    // Write one to clear: the power-on RESETC is not the reset's.
-    tc6.reg_write(std_reg::STATUS0, std_reg::STATUS0_RESETC)?;
     tc6.soft_reset(delay_us, now_us, RESET_BUDGET_MS)?;
 
     an1760::apply(tc6)?;
