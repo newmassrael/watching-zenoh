@@ -110,8 +110,23 @@ pub trait QueryView {
     /// Defaults to `None`: a view over loose borrowed bytes has nothing to share, and the
     /// value is copied wherever it is kept, as it always was. Mirrors
     /// [`SampleView::payload_shared`](crate::sink::SampleView::payload_shared).
+    ///
+    /// A value that arrived in a frame the link lent is answered too: it is the range of
+    /// that frame, not a chunk of shared memory, so a caller that needs to know whether it
+    /// is shared MEMORY asks the bytes ([`RxBytes::is_shared_memory`](crate::link::RxBytes::is_shared_memory)).
     #[cfg(feature = "alloc")]
     fn payload_shared(&self) -> Option<&crate::link::RxBytes> {
+        None
+    }
+    /// The attachment as the shareable type the view holds it in, when it holds one: a query
+    /// that arrived in a frame the link lent answers with the range of that frame, so a
+    /// queryable that keeps the query takes a second reference to the storage instead of
+    /// copying the bytes out. [`Self::attachment`] reads the same bytes. The twin of
+    /// [`Self::payload_shared`] and of
+    /// [`SampleView::attachment_shared`](crate::sink::SampleView::attachment_shared);
+    /// defaults to `None` for a view over loose borrowed bytes.
+    #[cfg(feature = "alloc")]
+    fn attachment_shared(&self) -> Option<&crate::link::RxBytes> {
         None
     }
     /// Value encoding extracted from the Query body VALUE ext (id 0x03),
@@ -709,24 +724,28 @@ impl QueryView for BorrowedQuery<'_> {
     }
 }
 
-/// A [`BorrowedQuery`] whose value is held as a shareable [`RxBytes`](crate::link::RxBytes)
-/// (R3061): every accessor is `base`'s, and [`QueryView::payload_shared`] answers with the
-/// value.
+/// A [`BorrowedQuery`] whose value and attachment are held as shareable
+/// [`RxBytes`](crate::link::RxBytes) (R3061; the attachment joined the value when the
+/// receive path stopped copying it): every accessor is `base`'s, and
+/// [`QueryView::payload_shared`] and [`QueryView::attachment_shared`] answer with the two.
+/// Either may be absent: a query can arrive with a value and no attachment, or the reverse.
 ///
-/// A separate type and not a field on [`BorrowedQuery`] because that struct is built as a
-/// literal in a dozen places that have no value to share, and a field would make each of
-/// them say so. `base.payload` must read the SAME bytes as `value`; the dispatcher that
-/// builds this lends `value.as_slice()` for it.
+/// A separate type and not fields on [`BorrowedQuery`] because that struct is built as a
+/// literal in a dozen places that have nothing to share, and a field would make each of
+/// them say so. `base.payload` must read the SAME bytes as `value`, and `base.attachment`
+/// the same as `attachment`; the dispatcher that builds this lends `as_slice()` of each.
 #[cfg(feature = "alloc")]
-pub struct SharedValueQuery<'a> {
-    /// The query, whose `payload` is `value`'s bytes.
+pub struct SharedQuery<'a> {
+    /// The query, whose `payload` is `value`'s bytes and `attachment` is `attachment`'s.
     pub base: BorrowedQuery<'a>,
-    /// The value, shareable.
-    pub value: &'a crate::link::RxBytes,
+    /// The value, shareable, when the view holds it so.
+    pub value: Option<&'a crate::link::RxBytes>,
+    /// The attachment, shareable, when the view holds it so.
+    pub attachment: Option<&'a crate::link::RxBytes>,
 }
 
 #[cfg(feature = "alloc")]
-impl QueryView for SharedValueQuery<'_> {
+impl QueryView for SharedQuery<'_> {
     fn keyexpr(&self) -> &str {
         self.base.keyexpr()
     }
@@ -743,7 +762,10 @@ impl QueryView for SharedValueQuery<'_> {
         self.base.payload()
     }
     fn payload_shared(&self) -> Option<&crate::link::RxBytes> {
-        Some(self.value)
+        self.value
+    }
+    fn attachment_shared(&self) -> Option<&crate::link::RxBytes> {
+        self.attachment
     }
     fn encoding(&self) -> Option<&crate::sample::EncodingHint> {
         self.base.encoding()
@@ -977,17 +999,20 @@ mod tests {
     }
 
     // R3061 -- a view over loose borrowed bytes has nothing to share, and the view that
-    // carries a shareable value answers with it while every other accessor stays the
-    // base's. The pair is one test because each half is the other's control: a default
-    // that answered `Some`, or a wrapper that dropped a field, fails here.
+    // carries a shareable value and attachment answers with them while every other
+    // accessor stays the base's. The pair is one test because each half is the other's
+    // control: a default that answered `Some`, or a wrapper that dropped a field, fails
+    // here. The two buffers are different ones, so an accessor that answered with the
+    // other's cannot pass.
     #[cfg(feature = "alloc")]
     #[test]
-    fn a_shared_value_view_adds_the_buffer_and_changes_nothing_else() {
+    fn a_shared_view_adds_the_buffers_and_changes_nothing_else() {
         let value = crate::link::RxBytes::from(b"abc".to_vec());
+        let attachment = crate::link::RxBytes::from(b"att".to_vec());
         let base = BorrowedQuery {
             keyexpr: "a/b",
             parameters: Some(b"x=1"),
-            attachment: Some(b"att"),
+            attachment: Some(attachment.as_slice()),
             source_info: None,
             payload: Some(value.as_slice()),
             encoding: None,
@@ -996,16 +1021,21 @@ mod tests {
             qos: crate::sample::QosLevel::DEFAULT,
         };
         assert!(
-            base.payload_shared().is_none(),
+            base.payload_shared().is_none() && base.attachment_shared().is_none(),
             "loose borrowed bytes hold nothing shareable"
         );
 
-        let view = SharedValueQuery {
+        let view = SharedQuery {
             base: BorrowedQuery { ..base },
-            value: &value,
+            value: Some(&value),
+            attachment: Some(&attachment),
         };
         let shared = view.payload_shared().expect("the view carries the buffer");
         assert_eq!(shared.as_slice().as_ptr(), value.as_slice().as_ptr());
+        let shared = view
+            .attachment_shared()
+            .expect("the view carries the attachment");
+        assert_eq!(shared.as_slice().as_ptr(), attachment.as_slice().as_ptr());
         assert_eq!(view.payload(), Some(&b"abc"[..]));
         assert_eq!(view.keyexpr(), "a/b");
         assert_eq!(view.parameters(), Some(&b"x=1"[..]));

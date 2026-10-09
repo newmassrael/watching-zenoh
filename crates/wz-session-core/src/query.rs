@@ -302,6 +302,80 @@ fn extract_query_value(query: &QueryOwned) -> Option<(crate::sample::EncodingHin
     }
 }
 
+/// [`extract_query_attachment`] as the shareable value it is held in: the range of
+/// the frame the query arrived in, a second reference to its storage and not a copy.
+///
+/// `None` when there is no attachment, and also when the bytes are not a range of
+/// lent storage (a query built in this process, or decoded with no frame to share),
+/// because there is then nothing to share and the borrowed form reads the same bytes.
+/// Without `rx-shared-bytes` there is no storage to share, and this is always `None`.
+#[cfg(all(feature = "codec-request", feature = "alloc"))]
+fn extract_query_attachment_shared(query: &QueryOwned) -> Option<crate::link::RxBytes> {
+    #[cfg(all(feature = "query-attachment", feature = "rx-shared-bytes"))]
+    {
+        use crate::wire::parts::QueryExtEntryOwnedVariant;
+        for ext in query.extensions.as_deref()? {
+            if ext.ext_id() != crate::attachment::ATTACHMENT_EXT_ID_QUERY {
+                continue;
+            }
+            // The entry `decode_attachment_ext` reads: a plain ZBuf body.
+            if let QueryExtEntryOwnedVariant::CodecZenohQueryValueZbuf(z) = &ext.body {
+                if let Some(value) = &z.value {
+                    let bytes = value.as_rx_bytes();
+                    return bytes.is_shared().then(|| bytes.clone());
+                }
+            }
+        }
+        None
+    }
+    #[cfg(not(all(feature = "query-attachment", feature = "rx-shared-bytes")))]
+    {
+        let _ = query;
+        None
+    }
+}
+
+/// [`extract_query_value`] as the shareable value it is held in: the payload is the
+/// range of the frame the query arrived in that follows the value's encoding, a
+/// second reference to the frame's storage and not a copy.
+///
+/// `None` in the cases [`extract_query_attachment_shared`] is, and also when the
+/// value is not the plain shape (a list of slices after a shared-memory marker is
+/// read through the resolver by the dispatcher, not here).
+#[cfg(all(feature = "codec-request", feature = "alloc"))]
+fn extract_query_value_shared(
+    query: &QueryOwned,
+) -> Option<(crate::sample::EncodingHint, crate::link::RxBytes)> {
+    #[cfg(all(feature = "query-value", feature = "rx-shared-bytes"))]
+    {
+        use crate::wire::parts::QueryExtEntryOwnedVariant;
+        for ext in query.extensions.as_deref()? {
+            if ext.ext_id() != crate::query_value_ext::QUERY_VALUE_EXT_ID {
+                continue;
+            }
+            if let QueryExtEntryOwnedVariant::CodecZenohQueryValueZbuf(z) = &ext.body {
+                if let Some(value) = &z.value {
+                    let whole = value.as_rx_bytes();
+                    if !whole.is_shared() {
+                        return None;
+                    }
+                    // The same split `decode_query_value_ext` makes, so the bytes
+                    // lent and the bytes borrowed are one run.
+                    let (encoding, payload) = crate::encoding::split_value_body(whole.as_slice())?;
+                    let range = sce_forge_runtime::codec::subrange_of(whole.as_slice(), payload)?;
+                    return Some((encoding, whole.subslice(range)?));
+                }
+            }
+        }
+        None
+    }
+    #[cfg(not(all(feature = "query-value", feature = "rx-shared-bytes")))]
+    {
+        let _ = query;
+        None
+    }
+}
+
 /// Stable handle returned by [`QueryableRegistry::register`] so the
 /// caller can later unregister the queryable without re-keying on
 /// the keyexpr pattern (duplicate-pattern queryables are explicitly
@@ -2209,6 +2283,13 @@ impl<C: QuerySink> QueryableRegistry<C> {
             let _ = unswapped_value;
             None::<(crate::sample::EncodingHint, crate::link::RxBytes)>
         };
+        // A plain value that arrived in a frame the link lent is LENT too, as the range of
+        // that frame that follows its encoding, so a queryable that keeps the query takes a
+        // second reference to the storage and not a copy of the bytes. It is the same run
+        // of bytes `plain_value` borrows, so the two readings cannot disagree.
+        let unswapped_value = unswapped_value.or_else(|| extract_query_value_shared(query));
+        // The attachment likewise: the range of the frame, lent beside the value.
+        let attachment_shared = extract_query_attachment_shared(query);
         #[cfg(feature = "query-value")]
         let value_view: Option<(crate::sample::EncodingHint, &[u8])> = match &unswapped_value {
             Some((encoding, bytes)) => Some((encoding.clone(), bytes.as_slice())),
@@ -2275,16 +2356,20 @@ impl<C: QuerySink> QueryableRegistry<C> {
                     is_local: !is_remote,
                     qos,
                 };
-                // R3061 -- a value held as a shareable buffer is lent as one.
-                match unswapped_value.as_ref() {
-                    Some((_, shared)) => queryable.sink.handle(
-                        &crate::query_sink::SharedValueQuery {
+                // R3061 -- a value held as a shareable buffer is lent as one, and so is
+                // an attachment.
+                let lent_value = unswapped_value.as_ref().map(|(_, shared)| shared);
+                if lent_value.is_some() || attachment_shared.is_some() {
+                    queryable.sink.handle(
+                        &crate::query_sink::SharedQuery {
                             base: query_view,
-                            value: shared,
+                            value: lent_value,
+                            attachment: attachment_shared.as_ref(),
                         },
                         &mut responder,
-                    ),
-                    None => queryable.sink.handle(&query_view, &mut responder),
+                    )
+                } else {
+                    queryable.sink.handle(&query_view, &mut responder)
                 }
             }
         }
@@ -3966,6 +4051,186 @@ mod tests {
             *observed.lock().unwrap(),
             "the queryable handler ran and observed the value"
         );
+    }
+
+    /// One accessor pair of a query as a queryable's handler saw it: the bytes and
+    /// the address of the borrowed reading, and the bytes and address of the
+    /// shareable one, `None` where an accessor answered nothing.
+    #[cfg(all(
+        feature = "rx-shared-bytes",
+        feature = "query-value",
+        feature = "query-attachment"
+    ))]
+    #[derive(Debug, Default)]
+    struct Reading {
+        borrowed: Option<(usize, Vec<u8>)>,
+        shared: Option<(usize, Vec<u8>)>,
+    }
+
+    /// What a queryable's handler saw of one dispatched query.
+    #[cfg(all(
+        feature = "rx-shared-bytes",
+        feature = "query-value",
+        feature = "query-attachment"
+    ))]
+    #[derive(Debug, Default)]
+    struct Seen {
+        value: Reading,
+        attachment: Reading,
+    }
+
+    /// Dispatch the one Request in `messages` to a queryable that records [`Seen`].
+    #[cfg(all(
+        feature = "rx-shared-bytes",
+        feature = "query-value",
+        feature = "query-attachment"
+    ))]
+    fn seen_by_a_queryable(messages: &[crate::network_message::NetworkMessage]) -> Seen {
+        let crate::network_message::NetworkMessage::Request(request) = &messages[0] else {
+            panic!("the batch is one Request, got {:?}", messages[0]);
+        };
+        let seen: Arc<Mutex<Option<Seen>>> = Arc::default();
+        let sink = seen.clone();
+        let mut reg = QueryableRegistry::new();
+        reg.register("demo/data", move |q, _responder| {
+            let read = |bytes: Option<&[u8]>| bytes.map(|b| (b.as_ptr() as usize, b.to_vec()));
+            *sink.lock().unwrap() = Some(Seen {
+                value: Reading {
+                    borrowed: read(q.payload()),
+                    shared: read(q.payload_shared().map(|s| s.as_slice())),
+                },
+                attachment: Reading {
+                    borrowed: read(q.attachment()),
+                    shared: read(q.attachment_shared().map(|s| s.as_slice())),
+                },
+            });
+        });
+        let mut replies = Vec::new();
+        let outcome = reg.dispatch_request(request, &HashMap::new(), &mut replies);
+        assert_eq!(outcome.matched, 1, "the demo/data queryable matched");
+        let seen = seen.lock().unwrap().take().expect("the handler ran");
+        seen
+    }
+
+    /// A query decoded out of a lent frame reaches its queryable with the value
+    /// and the attachment as RANGES OF THAT FRAME, on the shareable accessors and
+    /// on the borrowed ones alike (one run of bytes, two readings), so a queryable
+    /// that keeps the query takes a second reference to the frame instead of
+    /// copying them out. Read by address: a copy has the same bytes and another
+    /// address. The control is the same bytes decoded with no frame to share,
+    /// whose shareable accessors answer nothing, so the test cannot pass for a
+    /// reason that has nothing to do with sharing.
+    #[cfg(all(
+        feature = "rx-shared-bytes",
+        feature = "query-value",
+        feature = "query-attachment"
+    ))]
+    #[test]
+    fn a_query_in_a_lent_frame_hands_its_queryable_ranges_of_that_frame() {
+        use crate::link::RxBytes;
+        use crate::network_message::{parse_frame_payload, parse_frame_payload_in};
+        use crate::request_build::RequestQueryBuilder;
+        use crate::sample::EncodingHint;
+
+        let encoding = EncodingHint {
+            packed_id: 0x0B,
+            schema: Some("json".to_string()),
+        };
+        let wire = RequestQueryBuilder::new(9, 0, Some("demo/data"))
+            .query_attachment(b"the-query-attachment")
+            .query_value(b"the-query-value", encoding)
+            .build()
+            .unwrap()
+            .wire();
+
+        let frame = RxBytes::lend(wire.clone());
+        let span = frame.as_slice().as_ptr_range();
+        let messages = parse_frame_payload_in(&frame).expect("the batch parses");
+        let seen = seen_by_a_queryable(&messages);
+        for (what, reading, expected) in [
+            ("value", &seen.value, &b"the-query-value"[..]),
+            ("attachment", &seen.attachment, &b"the-query-attachment"[..]),
+        ] {
+            for (how, got) in [
+                ("borrowed", &reading.borrowed),
+                ("shareable", &reading.shared),
+            ] {
+                let (address, bytes) = got
+                    .as_ref()
+                    .unwrap_or_else(|| panic!("the {how} {what} was delivered"));
+                assert_eq!(bytes, expected, "the {how} {what} reads the bytes sent");
+                assert!(
+                    span.contains(&(*address as *const u8)),
+                    "the {how} {what} must be a range of the frame the link lent, not a copy of it"
+                );
+            }
+            assert_eq!(
+                reading.borrowed.as_ref().map(|r| r.0),
+                reading.shared.as_ref().map(|r| r.0),
+                "the {what}: one run of bytes, two readings"
+            );
+        }
+
+        // The control: no frame to share, so nothing is lent and the borrowed
+        // readings are what a queryable has, as before.
+        let copied = parse_frame_payload(&wire).expect("the batch parses");
+        let seen = seen_by_a_queryable(&copied);
+        assert!(
+            seen.value.borrowed.is_some() && seen.attachment.borrowed.is_some(),
+            "still delivered borrowed"
+        );
+        assert!(
+            seen.value.shared.is_none() && seen.attachment.shared.is_none(),
+            "bytes with no frame behind them are not lent"
+        );
+    }
+
+    /// The two are independent: a query with an attachment and no value lends the
+    /// attachment alone, and one with a value and no attachment lends the value
+    /// alone. Without this a view that lent both whenever it lent either would pass.
+    #[cfg(all(
+        feature = "rx-shared-bytes",
+        feature = "query-value",
+        feature = "query-attachment"
+    ))]
+    #[test]
+    fn a_query_lends_the_value_and_the_attachment_independently() {
+        use crate::link::RxBytes;
+        use crate::network_message::parse_frame_payload_in;
+        use crate::request_build::RequestQueryBuilder;
+        use crate::sample::EncodingHint;
+
+        let only_attachment = RequestQueryBuilder::new(9, 0, Some("demo/data"))
+            .query_attachment(b"alone")
+            .build()
+            .unwrap()
+            .wire();
+        let messages = parse_frame_payload_in(&RxBytes::lend(only_attachment)).unwrap();
+        let seen = seen_by_a_queryable(&messages);
+        assert!(seen.value.borrowed.is_none() && seen.value.shared.is_none());
+        assert_eq!(
+            seen.attachment.shared.as_ref().map(|r| &r.1[..]),
+            Some(&b"alone"[..])
+        );
+
+        let only_value = RequestQueryBuilder::new(9, 0, Some("demo/data"))
+            .query_value(
+                b"alone",
+                EncodingHint {
+                    packed_id: 0,
+                    schema: None,
+                },
+            )
+            .build()
+            .unwrap()
+            .wire();
+        let messages = parse_frame_payload_in(&RxBytes::lend(only_value)).unwrap();
+        let seen = seen_by_a_queryable(&messages);
+        assert_eq!(
+            seen.value.shared.as_ref().map(|r| &r.1[..]),
+            Some(&b"alone"[..])
+        );
+        assert!(seen.attachment.borrowed.is_none() && seen.attachment.shared.is_none());
     }
 
     #[test]

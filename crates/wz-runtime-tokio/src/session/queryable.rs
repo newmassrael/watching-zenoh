@@ -274,12 +274,15 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
                     qos: owned.qos,
                 };
                 // R3061 -- lent as the buffer when the query held it as one.
-                let shared_view = owned.payload_shared.as_ref().map(|value| {
-                    crate::query_sink::SharedValueQuery {
-                        base: crate::query_sink::BorrowedQuery { ..borrowed },
-                        value,
-                    }
-                });
+                let shared_view =
+                    owned
+                        .payload_shared
+                        .as_ref()
+                        .map(|value| crate::query_sink::SharedQuery {
+                            base: crate::query_sink::BorrowedQuery { ..borrowed },
+                            value: Some(value),
+                            attachment: None,
+                        });
                 let view: &dyn QueryView = match &shared_view {
                     Some(shared) => shared,
                     None => &borrowed,
