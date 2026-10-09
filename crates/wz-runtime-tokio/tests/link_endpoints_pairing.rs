@@ -57,14 +57,17 @@
 //
 // R2973 — each arm carries its leg's HOST as well as its feature, for the same
 // reason: a feature that arms the file on a host where its leg cannot run would
-// arm it and run nothing in it. The serial leg opens an `openpty` pair (Unix
-// only). The unixpipe leg's host is every Unix, the one upstream serves the link
-// on (item 851: it read Linux after the pipeline was lowered to `unix`).
+// arm it and run nothing in it. The unixpipe leg's host is every Unix, the one
+// upstream serves the link on (item 851: it read Linux after the pipeline was
+// lowered to `unix`). The serial leg has no host term: its ends are an
+// in-memory pair since item 852, and its `unix` term outlived the `openpty`
+// pair it was for, so a serial-only build on Windows armed nothing here and
+// the serial test below did not exist there although its doc says it runs.
 #![cfg(all(
     feature = "transport-unicast",
     any(
         feature = "transport-link-udp",
-        all(feature = "transport-link-serial", unix),
+        feature = "transport-link-serial",
         all(feature = "transport-link-unixpipe", unix),
         feature = "transport-link-quic-datagram",
     )
