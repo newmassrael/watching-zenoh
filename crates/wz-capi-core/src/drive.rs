@@ -1457,6 +1457,7 @@ async fn drive_peer(
                 .deadline()
                 .map(|d| tokio::time::Instant::now() + d);
             let mut failed = false;
+            let mut registered_faces: Vec<tokio::sync::oneshot::Receiver<()>> = Vec::new();
             for (i, endpoint) in endpoints.iter().enumerate() {
                 let policy = endpoint_policy(phase.policy, endpoint);
                 let schedule = endpoint_schedule(phase.schedule, endpoint);
@@ -1481,7 +1482,13 @@ async fn drive_peer(
                                 break;
                             }
                             Some(Ok(session)) => {
-                                faces.push(tokio::task::spawn_local(leg.run(Some(session), None)))
+                                let (owed, registered) = FaceOwed::awaited_by_the_walk();
+                                registered_faces.push(registered);
+                                faces.push(tokio::task::spawn_local(leg.run(
+                                    Some(session),
+                                    None,
+                                    owed,
+                                )))
                             }
                             Some(Err(())) if arm.ends_startup() => {
                                 failed = true;
@@ -1501,7 +1508,13 @@ async fn drive_peer(
                         );
                         match within(deadline, retried).await {
                             Some(Ok(session)) => {
-                                faces.push(tokio::task::spawn_local(leg.run(Some(session), None)))
+                                let (owed, registered) = FaceOwed::awaited_by_the_walk();
+                                registered_faces.push(registered);
+                                faces.push(tokio::task::spawn_local(leg.run(
+                                    Some(session),
+                                    None,
+                                    owed,
+                                )))
                             }
                             // Unbounded, so only the walk's budget ends it.
                             _ => {
@@ -1512,8 +1525,21 @@ async fn drive_peer(
                     }
                     PhaseArm::RetryInBackground => {
                         window.expect_one();
-                        faces.push(tokio::task::spawn_local(leg.run(None, Some(schedule))));
+                        faces.push(tokio::task::spawn_local(leg.run(
+                            None,
+                            Some(schedule),
+                            FaceOwed::none(),
+                        )));
                     }
+                }
+            }
+            // Every endpoint the walk connected is a face in the registry before the open
+            // is released, so a caller's first call after `z_open` fans over it (see
+            // [`FaceOwed`]). The faces' tasks run while this waits: they are spawned on
+            // this task's own `LocalSet`.
+            if !failed {
+                for registered in registered_faces {
+                    let _ = registered.await;
                 }
             }
             // R3125 -- findable from here: the walk is over. A walk that failed leaves the
@@ -1755,8 +1781,10 @@ async fn scouted_leg(
     let Some(session) = opened else {
         return;
     };
+    // The first scouted connection releases the window, once its face is registered.
+    let mut owed = FaceOwed::none();
     if !announced.replace(true) {
-        window.one_connected();
+        owed.window = Some(window);
     }
     drive_face(
         face,
@@ -1765,10 +1793,11 @@ async fn scouted_leg(
         async move {
             let _ = closing.wait_for(|c| *c).await;
         },
-        || {},
+        || owed.pay(),
         &gate,
     )
     .await;
+    owed.pay();
 }
 
 /// `fut`, bounded by `deadline` when there is one.
@@ -1814,6 +1843,64 @@ impl StartWindow {
     }
 }
 
+/// What an open is owed by one face, paid at the one moment the face can be used: when it
+/// is in the session's registry.
+///
+/// A connected link is not yet a face. [`drive_face`] registers it ([`SharedSession::face_up`])
+/// a task later, and every C call that fans over the registry (`z_get`, a put, a declare)
+/// reads it from the calling thread the instant the open returns. An open released at "the
+/// link connected" therefore let a caller's first `z_get` find no face: it completed at once
+/// with no query on the wire, and the peer's queryable waited for ever. MEASURED on the pico
+/// ABI, roughly one hang in a hundred runs of a two-session get with sixteen running at
+/// once, the registry holding zero faces when the get fanned out. Zenoh-pico adds its peer
+/// inside `z_open`, so that call returns with the peer in place.
+///
+/// Paid by [`drive_face`]'s `on_up`, which runs after the registration, and on drop, which
+/// covers a face the registry refused (a node already held) and a leg that ended before
+/// connecting: neither may keep the open waiting. Paying is idempotent.
+struct FaceOwed {
+    /// The in-walk dial's signal: the walk waits for it before it releases the open.
+    registered: Option<tokio::sync::oneshot::Sender<()>>,
+    /// The start window a background or scouted endpoint is counted in.
+    window: Option<Arc<StartWindow>>,
+}
+
+impl FaceOwed {
+    fn none() -> Self {
+        Self {
+            registered: None,
+            window: None,
+        }
+    }
+
+    /// A debt the open's walk waits on, and the receiver it waits with.
+    fn awaited_by_the_walk() -> (Self, tokio::sync::oneshot::Receiver<()>) {
+        let (registered, paid) = tokio::sync::oneshot::channel();
+        (
+            Self {
+                registered: Some(registered),
+                window: None,
+            },
+            paid,
+        )
+    }
+
+    fn pay(&mut self) {
+        if let Some(registered) = self.registered.take() {
+            let _ = registered.send(());
+        }
+        if let Some(window) = self.window.take() {
+            window.one_connected();
+        }
+    }
+}
+
+impl Drop for FaceOwed {
+    fn drop(&mut self) {
+        self.pay();
+    }
+}
+
 /// One peer endpoint's face for the session's life: connect, drive, drain,
 /// re-dial.
 struct FaceLeg {
@@ -1833,10 +1920,20 @@ impl FaceLeg {
     /// connecting on `schedule` (a background endpoint), until the session
     /// closes. A background endpoint's first connect is what the start window
     /// waits on.
-    async fn run(self, first: Option<OpenedSession>, schedule: Option<RetryPolicy>) {
+    ///
+    /// `owed` is what the open is owed once this leg's FIRST face is registered; a background
+    /// endpoint's is the start window, an in-walk dial's is the walk's own wait.
+    async fn run(
+        self,
+        first: Option<OpenedSession>,
+        schedule: Option<RetryPolicy>,
+        mut owed: FaceOwed,
+    ) {
         let mut session = first;
         let mut connecting = schedule;
-        let mut counts_for_window = session.is_none();
+        if session.is_none() {
+            owed.window = Some(self.window.clone());
+        }
         loop {
             let opened = match session.take() {
                 Some(opened) => opened,
@@ -1862,10 +1959,6 @@ impl FaceLeg {
                     }
                 }
             };
-            if counts_for_window {
-                counts_for_window = false;
-                self.window.one_connected();
-            }
             let mut closing = self.closing.clone();
             drive_face(
                 self.face,
@@ -1874,10 +1967,14 @@ impl FaceLeg {
                 async move {
                     let _ = closing.wait_for(|c| *c).await;
                 },
-                || {},
+                // After the registration, which is what the open is owed (see
+                // [`FaceOwed`]); a face the registry refused never gets here, and is
+                // paid below.
+                || owed.pay(),
                 &self.gate,
             )
             .await;
+            owed.pay();
             // R2948's rule, per face: a face that ended for any reason but
             // `z_close` has lost its link, and upstream re-dials that endpoint
             // (`closed_link` -> `peer_connector_retry`).
@@ -3331,6 +3428,92 @@ mod tests {
         assert_eq!(
             scouted_locators_to_dial(&reliable, &strings(&["udp/127.0.0.1:7447"])),
             strings(&["udp/127.0.0.1:7447"])
+        );
+    }
+
+    /// The stance of a pico-shaped peer, as `wz-capi-pico` opens one.
+    fn peer_stance() -> OpenStance {
+        OpenStance {
+            tx_queue: TxQueueConf::pico(),
+            offer: SessionOffer::universal(),
+            zid: None,
+            start_read_task: true,
+            timestamping: TimestampingEnabled::default(),
+            shm_clients: crate::faces::no_shm_clients(),
+            local_delivery: LocalDeliveryDrain::DriveTask,
+            scouting: None,
+            initial_interest: true,
+            gossip: None,
+            listen_phase: ListenPhase::SHIPPED,
+        }
+    }
+
+    fn open_peer(connect: Vec<String>, listen: Vec<String>) -> Result<SessionState, OpenError> {
+        open_blocking(
+            connect,
+            listen,
+            CapiTlsConfig::default(),
+            WhatAmI::Peer,
+            DialPhase::ONCE,
+            peer_stance(),
+        )
+    }
+
+    /// A caller's first call after `z_open` finds the peer the open dialled.
+    ///
+    /// The open is released when the link has connected, and the face is registered by a
+    /// task of the drive thread a moment after: a `z_get` issued on the calling thread
+    /// straight after the open fans over the registry, found it empty, completed with no
+    /// query on the wire, and the peer's queryable waited for ever. This opens a dialling
+    /// peer against a listening one and reads the registry on the calling thread the
+    /// instant the open returns, over many opens at once; before the open waited for the
+    /// registration it read an empty registry on 1160 of 1200 opens. A C caller's own
+    /// thread starts and its own calls take longer than that read, which is why the hang it
+    /// caused was one run in a hundred and not one in one.
+    #[test]
+    fn an_open_that_dialled_a_peer_returns_with_its_face_in_the_registry() {
+        const THREADS: usize = 8;
+        const ROUNDS_PER_THREAD: usize = 150;
+        let workers: Vec<_> = (0..THREADS)
+            .map(|_| {
+                std::thread::spawn(|| {
+                    let mut empty = 0usize;
+                    for _ in 0..ROUNDS_PER_THREAD {
+                        // A port the listener's own bind chooses would need the listen role to
+                        // report it; this one is picked and let go, and a loser of the race for it
+                        // is retried, which is not what is under test.
+                        let (listener, endpoint) = loop {
+                            let probe = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+                            let endpoint = format!(
+                                "tcp/127.0.0.1:{}",
+                                probe.local_addr().expect("addr").port()
+                            );
+                            drop(probe);
+                            if let Ok(listener) = open_peer(Vec::new(), vec![endpoint.clone()]) {
+                                break (listener, endpoint);
+                            }
+                        };
+                        let dialler =
+                            open_peer(vec![endpoint], Vec::new()).expect("the dial opens");
+                        if dialler.shared.face_sessions_with_wake().is_empty() {
+                            empty += 1;
+                        }
+                        drop(dialler);
+                        drop(listener);
+                    }
+                    empty
+                })
+            })
+            .collect();
+        let empty: usize = workers
+            .into_iter()
+            .map(|worker| worker.join().expect("a worker panicked"))
+            .sum();
+        assert_eq!(
+            empty,
+            0,
+            "{empty} of {} opens returned before the face they dialled was in the registry",
+            THREADS * ROUNDS_PER_THREAD
         );
     }
 }
