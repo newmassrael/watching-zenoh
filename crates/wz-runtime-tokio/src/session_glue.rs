@@ -1636,7 +1636,7 @@ mod tests {
     /// against the same zenoh-pico `_z_close_decode` reference the
     /// FSM-driven Close goes through.
     ///
-    /// Four-vector check across all `CloseReason` variants pins the
+    /// Eight-vector check across all `CloseReason` variants pins the
     /// reason discriminator byte. R311y839 — the header byte is
     /// invariant HERE because `recording_actions()` is a single-link
     /// session, not because the flag is hard-set: `_Z_FLAG_T_CLOSE_S`
@@ -1651,7 +1651,7 @@ mod tests {
     /// `recording_actions()` never drives a handshake, so its session
     /// was never Established. The expected header is therefore the
     /// LINK-scoped one — which is what zenoh puts on every
-    /// pre-Established Close (`unicast/link.rs:103-114`). The four
+    /// pre-Established Close (`unicast/link.rs:103-114`). The
     /// vectors and this test's subject are untouched: the reason
     /// discriminator is what varies here, and the header is pinned so a
     /// silent change to it still has to be written down.
@@ -1662,11 +1662,20 @@ mod tests {
     #[cfg(feature = "codec-close")]
     #[test]
     fn send_close_with_reason_emits_zenoh_pico_compatible_wire_bytes() {
+        // The byte on the wire is upstream's `close::reason` value
+        // (`commons/zenoh-protocol/src/transport/close.rs` @
+        // `pub const UNRESPONSIVE`), written out as a literal: a vector built
+        // from `variant as u8` would pass whatever the enum said, which is how
+        // the old 1/2/3 numbering went unseen (see `close_reason.rs`).
         for (variant, reason_byte) in [
             (CloseReason::Generic, 0u8),
-            (CloseReason::Invalid, 1u8),
-            (CloseReason::Expired, 2u8),
-            (CloseReason::Unresponsive, 3u8),
+            (CloseReason::Unsupported, 1u8),
+            (CloseReason::Invalid, 2u8),
+            (CloseReason::MaxSessions, 3u8),
+            (CloseReason::MaxLinks, 4u8),
+            (CloseReason::Expired, 5u8),
+            (CloseReason::Unresponsive, 6u8),
+            (CloseReason::ConnectionToSelf, 7u8),
         ] {
             // Close is a fixed 2-byte frame (no SN field), so the
             // `recording_actions()` SSOT params are used verbatim.

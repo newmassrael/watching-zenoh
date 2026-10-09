@@ -60,16 +60,17 @@ pub const MULTILINK_EXT_ID: u8 = crate::ext_header::establishment_ext_id::MULTIL
 
 /// zenoh's `close::reason::INVALID` (0x02) — the wire close-reason code for a
 /// link rejected because its captured ephemeral multilink pubkey did NOT match
-/// the logical session's bound identity (config-equality failure). Distinct from
-/// the wz [`CloseReason`](crate::close_reason::CloseReason) enum (whose
-/// `Invalid` discriminant is `1`, a wz-internal value); the aggregation reject
-/// emits the zenoh wire code so a wz↔zenohd link-close is byte-faithful.
-pub const CLOSE_REASON_INVALID: u8 = 0x02;
+/// the logical session's bound identity (config-equality failure). It is the
+/// same byte as [`CloseReason::Invalid`](crate::close_reason::CloseReason) and
+/// is read off that enum so there is one table: the two used to differ (the
+/// enum numbered `Invalid` 1), which is why this constant was spelled apart.
+pub const CLOSE_REASON_INVALID: u8 = crate::close_reason::CloseReason::Invalid as u8;
 
 /// zenoh's `close::reason::MAX_LINKS` (0x04) — the wire close-reason code for a
 /// link rejected because the session already holds `max_links` links (the
-/// aggregation over-limit reject).
-pub const CLOSE_REASON_MAX_LINKS: u8 = 0x04;
+/// aggregation over-limit reject). Read off
+/// [`CloseReason::MaxLinks`](crate::close_reason::CloseReason).
+pub const CLOSE_REASON_MAX_LINKS: u8 = crate::close_reason::CloseReason::MaxLinks as u8;
 
 /// The single-method multilink dispatch — the wz mirror of zenoh's
 /// `MultiLinkFsm` (which drives ONE `AuthPubKeyFsm`). It holds ONE

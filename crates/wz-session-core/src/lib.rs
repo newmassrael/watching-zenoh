@@ -289,8 +289,9 @@ pub mod qos;
 /// `SessionLinkActions::apply_offer` can STAGE, not what the caller can NAME).
 pub mod transport_mode;
 
-/// R311ed — session `CloseReason` discriminator (byte-valued enum
-/// mirroring the session FSM's four close-reason mutators). Pure no_std
+/// R311ed — session `CloseReason` discriminator (byte-valued enum whose
+/// discriminants are upstream's close-reason wire values; the session FSM's
+/// four close-reason mutators set four of them). Pure no_std
 /// + no_alloc; unconditional. Second DP3 leaf lifted from
 /// `wz-runtime-tokio::session_glue`; the Close codec encode stays in the
 /// tokio crate next to the rest of the Close path.

@@ -301,8 +301,11 @@ Transitions out of `Established` (ordered by frequency):
 | Link layer raises `link.lost` | none (link gone; peer will observe via their lease) | `Closed` |
 | TX path exhausts its congestion budget on RELIABLE batch | `UNRESPONSIVE` | `Closed` |
 
-Upstream close reasons (`close.rs:22–29`): `GENERIC, UNSUPPORTED,
-INVALID, MAX_SESSIONS, MAX_LINKS, EXPIRED, UNRESPONSIVE`. `MAX_SESSIONS`
+Upstream close reasons (`commons/zenoh-protocol/src/transport/close.rs`
+@ `pub const UNRESPONSIVE`), whose values `CloseReason` carries as its
+discriminants: `GENERIC` 0, `UNSUPPORTED` 1, `INVALID` 2, `MAX_SESSIONS` 3,
+`MAX_LINKS` 4, `EXPIRED` 5, `UNRESPONSIVE` 6, `CONNECTION_TO_SELF` 7;
+`scripts/lib/close_reason_gate.py` holds the table to the source. `MAX_SESSIONS`
 and `MAX_LINKS` are emitted only by the *acceptor* during handshake
 when per-manager limits are exceeded — so they appear in `Accepting`
 transitions, not in `Established` exits. We surface them as

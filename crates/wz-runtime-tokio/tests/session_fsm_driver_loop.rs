@@ -1057,8 +1057,10 @@ async fn r311y823_init_ack_caps_reject_still_closes_invalid_on_the_wire() {
     );
     assert_eq!(
         sole_close_reason_byte(&recorder),
-        CloseReason::Invalid as u8,
-        "the byte the peer reads must stay INVALID(1)"
+        // The literal, not `Invalid as u8`: this is the byte a stock peer names,
+        // and a cast would agree with whatever the enum happened to say.
+        0x02,
+        "the byte the peer reads must stay INVALID(2), upstream's value"
     );
 }
 
@@ -1088,7 +1090,8 @@ async fn r311y823_malformed_frame_still_closes_invalid_on_the_wire() {
     );
     assert_eq!(
         sole_close_reason_byte(&recorder),
-        CloseReason::Invalid as u8
+        0x02,
+        "INVALID is 2 on upstream's wire"
     );
 }
 

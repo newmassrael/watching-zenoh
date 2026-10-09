@@ -73,11 +73,12 @@ fn zenoh_pico_encode_close(reason: u8) -> Vec<u8> {
 // wz-proves: codec-close codec-parity
 #[test]
 fn layer3_close_byte_compare_canonical_reasons() {
-    // Reasons sourced from zenoh-pico's `_z_close_reason_t` enum at
-    // include/zenoh-pico/protocol/definitions/transport.h. The wire
-    // format encodes any uint8 verbatim, so we sample both defined
-    // codes and arbitrary off-range values to ensure the encoder
-    // does no implicit validation / sentinel mapping.
+    // Reasons 0x00..=0x05 are zenoh-pico's `_Z_CLOSE_*` defines at
+    // include/zenoh-pico/protocol/definitions/transport.h (it names 0x03
+    // MAX_TRANSPORTS); 0x06 and 0x07 are zenoh's own, which pico does not
+    // define. The wire format encodes any uint8 verbatim, so we sample
+    // both defined codes and arbitrary off-range values to ensure the
+    // encoder does no implicit validation / sentinel mapping.
     let corpus = [
         0x00u8, // GENERIC
         0x01,   // UNSUPPORTED
@@ -85,8 +86,8 @@ fn layer3_close_byte_compare_canonical_reasons() {
         0x03,   // MAX_SESSIONS
         0x04,   // MAX_LINKS
         0x05,   // EXPIRED
-        0x06,   // WRITE_ERROR
-        0x07,   // READ_ERROR
+        0x06,   // UNRESPONSIVE (zenoh only)
+        0x07,   // CONNECTION_TO_SELF (zenoh only)
         0x42,   // arbitrary mid-range
         0xFF,   // out-of-defined-range — both encoders must pass through
     ];

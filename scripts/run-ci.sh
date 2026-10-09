@@ -3353,6 +3353,9 @@ layer_c0_test_discipline() {
     # checkout; the grading itself runs `--require` in Layer Z, the lane that
     # provisions the pinned upstream tree.
     python3 scripts/lib/cookie_carrier_gate.py --selftest || return 1
+    # The Close reason byte's gate: refusal arms only (no checkout needed); the
+    # grading against upstream's `close::reason` runs `--require` in Layer Z.
+    python3 scripts/lib/close_reason_gate.py --selftest || return 1
     # R2150 (unregistered open-debt item 539) — the KIND of unhonoured. R2148
     # split `UNHONOURED_UPSTREAM_CONFIG_KEYS` into "wz cannot" and "the reader
     # was never told", and the test guarding that split makes it total,
@@ -16575,6 +16578,12 @@ layer_z_zenohd_interop() {
     # struct names, and this is the lane that can read that struct.
     if ! python3 scripts/lib/cookie_carrier_gate.py --check --require; then
         echo "  Layer Z FAIL: the accept cookie no longer carries every upstream Cookie field" >&2
+        return 1
+    fi
+    # The Close message's reason byte: wz writes `CloseReason as u8`, and a stock
+    # peer names the byte it reads, so the enum has to carry upstream's numbers.
+    if ! python3 scripts/lib/close_reason_gate.py --check --require; then
+        echo "  Layer Z FAIL: a Close reason wz writes is not the one upstream reads" >&2
         return 1
     fi
     # R2080 (open-debt item 503) — the COMPLETENESS audit of the acceptance

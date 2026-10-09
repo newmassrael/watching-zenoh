@@ -4498,11 +4498,11 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// is not in and answer for the wrong session. (Until R311y839 the contrast
     /// this doc drew was with a hard-coded `S=1`; that literal is gone.)
     ///
-    /// The reject reasons use zenoh's close-reason wire
-    /// codes ([`CLOSE_REASON_MAX_LINKS`] / [`CLOSE_REASON_INVALID`]), NOT the wz
-    /// [`CloseReason`] enum (whose discriminants differ), so the frame is
-    /// cross-impl faithful. Emitted on the REJECTED link's own (throwaway) actions
-    /// before it is dropped.
+    /// The reject reasons are zenoh's close-reason wire
+    /// codes ([`CLOSE_REASON_MAX_LINKS`] / [`CLOSE_REASON_INVALID`]), which are
+    /// the [`CloseReason`] discriminants, so the frame is cross-impl faithful.
+    /// Emitted on the REJECTED link's own (throwaway) actions before it is
+    /// dropped.
     #[cfg(all(feature = "transport-multilink", feature = "codec-close"))]
     pub fn send_link_close(&self, reason: u8) {
         let bytes = crate::handshake_encode::encode_close(reason, /*session=*/ false);
