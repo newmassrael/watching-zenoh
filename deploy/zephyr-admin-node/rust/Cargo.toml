@@ -47,6 +47,10 @@ mac-cyt4bf = ["dep:wz-eth-mac-cyt4bf"]
 # at boot and log them (`CONFIG_WZ_T2G_SPI_PROBE`): what a lab runs to learn which
 # chip an expansion board carries, and the first evidence an SPI master would give.
 spi-probe = ["dep:wz-oa-tc6", "dep:wz-spi-scb"]
+# A 10BASE-T1S LAN8650/1 on that socket as the lwIP stack's second interface
+# (`CONFIG_WZ_T1S`): the chip's bring-up over the same SCB master. Not together with
+# the probe, which opens the same block.
+t1s-lan865x = ["dep:wz-eth-lan865x", "dep:wz-spi-scb"]
 
 [dependencies]
 # critical-section IMPL provider: the staticlib root defines it over Zephyr's
@@ -83,9 +87,13 @@ wz-session-mcu = { path = "../../../crates/wz-session-mcu", features = [
 # only the `mac-*` feature the board selects pulls one in.
 wz-eth-mac-cyt4bf = { path = "../../../crates/wz-eth-mac-cyt4bf", optional = true }
 # The SPI probe's two halves: the TC6 protocol, and the rules of the SCB master it
-# runs over. Only `CONFIG_WZ_T2G_SPI_PROBE` pulls them in.
+# runs over. Only `CONFIG_WZ_T2G_SPI_PROBE` pulls the first in; either it or
+# `CONFIG_WZ_T1S` pulls in the second.
 wz-oa-tc6 = { path = "../../../crates/wz-oa-tc6", optional = true }
 wz-spi-scb = { path = "../../../crates/wz-spi-scb", optional = true }
+# The 10BASE-T1S chip's bring-up (the TC6 protocol it sits on comes with it). Only
+# `CONFIG_WZ_T1S` pulls it in.
+wz-eth-lan865x = { path = "../../../crates/wz-eth-lan865x", optional = true }
 # The types the facade does not re-export (SessionInitParams, SigningKey,
 # SessionTimeouts, the entropy trait); features arrive through the facade.
 wz-session-core = { path = "../../../crates/wz-session-core", default-features = false, features = [

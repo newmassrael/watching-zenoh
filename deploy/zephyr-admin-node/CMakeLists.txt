@@ -55,22 +55,46 @@ elseif(CONFIG_WZ_NET_BACKEND_LWIP_MAC)
       message(FATAL_ERROR "wz: CONFIG_WZ_MAC_CYT4BF needs a pin routing (CONFIG_WZ_CYT4BF_PINS_*).")
     endif()
     list(APPEND backend_undefined wz_board_eth_pins_init wz_board_entropy_fill)
-    # The SPI probe: the PDL's SCB SPI and clock drivers are compiled by Zephyr's own
-    # HAL module once CONFIG_USE_INFINEON_SPI is on (the probe's Kconfig selects it),
-    # so only this image's thin driver and the board's pin routing are added here.
-    if(CONFIG_WZ_T2G_SPI_PROBE)
-      list(APPEND backend_feature spi-probe)
+    # The SPI master on the MikroBUS socket, which the SPI probe and the 10BASE-T1S
+    # interface both use, and not together: both open SCB3. The refusal is made here and
+    # not as a Kconfig dependency because an unmet dependency only turns the symbol off
+    # with a warning, and the build would go on without the interface. The PDL's SCB
+    # SPI and clock drivers are compiled by Zephyr's own HAL module once
+    # CONFIG_USE_INFINEON_SPI is on (both select it), so only this image's thin driver
+    # and the board's pin routing are added here.
+    if(CONFIG_WZ_T2G_SPI_PROBE AND CONFIG_WZ_T1S)
+      message(FATAL_ERROR "wz: CONFIG_WZ_T2G_SPI_PROBE and CONFIG_WZ_T1S both open SCB3; "
+                          "a build has one of them (the 10BASE-T1S bring-up reads the chip's "
+                          "identity itself and logs it).")
+    endif()
+    if(CONFIG_WZ_T2G_SPI_PROBE OR CONFIG_WZ_T1S)
       target_sources(app PRIVATE src/scb_spi.c)
       if(CONFIG_WZ_CYT4BF_PINS_T2G_LITE)
         target_sources(app PRIVATE boards/kit_t2g_b_h_lite/mikrobus_spi_pins.c)
       else()
-        message(FATAL_ERROR "wz: CONFIG_WZ_T2G_SPI_PROBE needs a pin routing (CONFIG_WZ_CYT4BF_PINS_*).")
+        message(FATAL_ERROR "wz: the MikroBUS SPI master needs a pin routing (CONFIG_WZ_CYT4BF_PINS_*).")
       endif()
       list(APPEND backend_undefined
         wz_board_spi_pins_init wz_scb_spi_clock_claim wz_scb_spi_start wz_scb_spi_exchange)
+    endif()
+    if(CONFIG_WZ_T2G_SPI_PROBE)
+      list(APPEND backend_feature spi-probe)
       set(spi_probe_env WZ_SPI_PROBE_HZ=${CONFIG_WZ_SPI_PROBE_HZ})
     else()
       set(spi_probe_env "")
+    endif()
+    # The 10BASE-T1S interface: the chip's two control lines as the board routes them,
+    # beside the SPI master above. What it states (addresses, PLCA, rates) is handed to
+    # the Rust side below, after the station address is known.
+    if(CONFIG_WZ_T1S)
+      list(APPEND backend_feature t1s-lan865x)
+      if(CONFIG_WZ_CYT4BF_PINS_T2G_LITE)
+        target_sources(app PRIVATE boards/kit_t2g_b_h_lite/mikrobus_t1s_lines.c)
+      else()
+        message(FATAL_ERROR "wz: CONFIG_WZ_T1S needs a pin routing (CONFIG_WZ_CYT4BF_PINS_*).")
+      endif()
+      list(APPEND backend_undefined
+        wz_board_t1s_lines_init wz_board_t1s_reset_set wz_board_t1s_irq_asserted)
     endif()
   else()
     message(FATAL_ERROR "wz: the lwIP backend needs a MAC (CONFIG_WZ_MAC_*).")
@@ -98,10 +122,88 @@ elseif(CONFIG_WZ_NET_BACKEND_LWIP_MAC)
   else()
     set(mac_env "")
   endif()
+
+  # The 10BASE-T1S interface's values, each one the lab's to state: the build refuses an
+  # empty or impossible one by name instead of handing the Rust side a number nobody
+  # chose. (A Kconfig `int` with no default and no range is empty until it is set; a
+  # range would give it the range's lowest value, which is a default by another name.)
+  set(t1s_env "")
+  if(CONFIG_WZ_T1S)
+    if("${CONFIG_WZ_T1S_IPV4}" STREQUAL "")
+      message(FATAL_ERROR "wz: CONFIG_WZ_T1S needs CONFIG_WZ_T1S_IPV4, an address of its own "
+                          "on the segment (it has no default).")
+    endif()
+    if(CONFIG_WZ_T1S_PLCA)
+      foreach(plca_value IN ITEMS ID COUNT)
+        if(NOT "${CONFIG_WZ_T1S_PLCA_NODE_${plca_value}}" MATCHES "^[0-9]+$")
+          message(FATAL_ERROR "wz: CONFIG_WZ_T1S_PLCA needs CONFIG_WZ_T1S_PLCA_NODE_${plca_value}, "
+                              "a decimal number (it has no default); found "
+                              "'${CONFIG_WZ_T1S_PLCA_NODE_${plca_value}}'.")
+        endif()
+      endforeach()
+      if(CONFIG_WZ_T1S_PLCA_NODE_ID GREATER 254)
+        message(FATAL_ERROR "wz: CONFIG_WZ_T1S_PLCA_NODE_ID is ${CONFIG_WZ_T1S_PLCA_NODE_ID}; "
+                            "0 is the coordinator, 1 to 254 a follower, and 255 means PLCA off "
+                            "(CONFIG_WZ_T1S_PLCA=n asks for that).")
+      endif()
+      if(CONFIG_WZ_T1S_PLCA_NODE_COUNT LESS 1 OR CONFIG_WZ_T1S_PLCA_NODE_COUNT GREATER 255)
+        message(FATAL_ERROR "wz: CONFIG_WZ_T1S_PLCA_NODE_COUNT is ${CONFIG_WZ_T1S_PLCA_NODE_COUNT}; "
+                            "it is 1 to 255.")
+      endif()
+      if(NOT CONFIG_WZ_T1S_PLCA_NODE_ID LESS CONFIG_WZ_T1S_PLCA_NODE_COUNT)
+        message(FATAL_ERROR "wz: CONFIG_WZ_T1S_PLCA_NODE_COUNT (${CONFIG_WZ_T1S_PLCA_NODE_COUNT}) "
+                            "must exceed CONFIG_WZ_T1S_PLCA_NODE_ID (${CONFIG_WZ_T1S_PLCA_NODE_ID}): "
+                            "the node count is the highest id on the segment plus one.")
+      endif()
+      set(t1s_plca_on 1)
+      set(t1s_plca_id ${CONFIG_WZ_T1S_PLCA_NODE_ID})
+      set(t1s_plca_count ${CONFIG_WZ_T1S_PLCA_NODE_COUNT})
+    else()
+      set(t1s_plca_on 0)
+      set(t1s_plca_id 0)
+      set(t1s_plca_count 0)
+    endif()
+    if(CONFIG_WZ_MAC_SOURCE_EXPLICIT)
+      if("${CONFIG_WZ_T1S_MAC_ADDRESS}" STREQUAL "")
+        message(FATAL_ERROR "wz: CONFIG_WZ_MAC_SOURCE_EXPLICIT with CONFIG_WZ_T1S needs "
+                            "CONFIG_WZ_T1S_MAC_ADDRESS, an address of its own for this interface.")
+      endif()
+      string(TOLOWER "${CONFIG_WZ_T1S_MAC_ADDRESS}" t1s_mac_lower)
+      string(TOLOWER "${CONFIG_WZ_MAC_ADDRESS}" rmii_mac_lower)
+      if(t1s_mac_lower STREQUAL rmii_mac_lower)
+        message(FATAL_ERROR "wz: CONFIG_WZ_T1S_MAC_ADDRESS is the onboard port's address "
+                            "(${CONFIG_WZ_MAC_ADDRESS}); two interfaces of one node need two.")
+      endif()
+      list(APPEND t1s_env WZ_T1S_MAC_ADDRESS=${CONFIG_WZ_T1S_MAC_ADDRESS})
+    endif()
+    if(CONFIG_WZ_T1S_RESET_LINE)
+      set(t1s_reset_wait_ms ${CONFIG_WZ_T1S_RESET_WAIT_MS})
+    else()
+      set(t1s_reset_wait_ms 0)
+    endif()
+    if(CONFIG_WZ_T1S_ACCEPT_ALL_MULTICAST)
+      set(t1s_multicast 1)
+    else()
+      set(t1s_multicast 0)
+    endif()
+    list(APPEND t1s_env
+      WZ_T1S_SPI_HZ=${CONFIG_WZ_T1S_SPI_HZ}
+      WZ_T1S_SERVICE_MS=${CONFIG_WZ_T1S_SERVICE_MS}
+      WZ_T1S_RESET_WAIT_MS=${t1s_reset_wait_ms}
+      WZ_T1S_PLCA_ON=${t1s_plca_on}
+      WZ_T1S_PLCA_ID=${t1s_plca_id}
+      WZ_T1S_PLCA_COUNT=${t1s_plca_count}
+      WZ_T1S_MULTICAST=${t1s_multicast}
+      WZ_T1S_IPV4=${CONFIG_WZ_T1S_IPV4}
+      WZ_T1S_NETMASK=${CONFIG_WZ_T1S_NETMASK}
+      WZ_T1S_GATEWAY=${CONFIG_WZ_T1S_GATEWAY})
+  endif()
+
   list(APPEND backend_env
     WZ_LWIP_PORT=${CMAKE_CURRENT_SOURCE_DIR}/lwip-port
     ${mac_env}
     ${spi_probe_env}
+    ${t1s_env}
     WZ_STATIC_IPV4=${CONFIG_WZ_STATIC_IPV4}
     WZ_STATIC_NETMASK=${CONFIG_WZ_STATIC_NETMASK}
     WZ_STATIC_GATEWAY=${CONFIG_WZ_STATIC_GATEWAY}

@@ -48,11 +48,13 @@ use wz_session_mcu::admin_status::{NodeIdentity, NodeStatus};
 
 #[cfg(feature = "mac-cyt4bf")]
 mod mac_cyt4bf;
+#[cfg(feature = "t1s-lan865x")]
+mod mac_lan865x;
 #[cfg(feature = "net-lwip-mac")]
 mod net_lwip;
 #[cfg(feature = "net-zephyr-sockets")]
 mod net_zephyr;
-#[cfg(feature = "spi-probe")]
+#[cfg(any(feature = "spi-probe", feature = "t1s-lan865x"))]
 mod spi_cyt4bf;
 // The allocator over the kernel heap (`CONFIG_HEAP_MEM_POOL_SIZE` in prj.conf),
 // the critical section over the kernel IRQ lock and the panic handler.
@@ -251,6 +253,16 @@ compile_error!(
 #[cfg(all(feature = "spi-probe", not(feature = "mac-cyt4bf")))]
 compile_error!("the SPI probe is the CYT4BF kit's: it needs the `mac-cyt4bf` feature's board");
 
+#[cfg(all(feature = "t1s-lan865x", not(feature = "mac-cyt4bf")))]
+compile_error!(
+    "the 10BASE-T1S interface is the CYT4BF kit's: it needs the `mac-cyt4bf` feature's board"
+);
+
+#[cfg(all(feature = "spi-probe", feature = "t1s-lan865x"))]
+compile_error!(
+    "the SPI probe and the 10BASE-T1S interface both open SCB3: a build has one of them"
+);
+
 /// Read the identity registers of whatever is plugged into the kit's MikroBUS
 /// socket and log them. Read-only: three control reads. `OA_ID` (the interface
 /// version) and `OA_PHYID` (the PHY's vendor, model and revision) are the standard
@@ -332,28 +344,112 @@ fn start() -> i32 {
     }
 }
 
+/// The address the build gave the onboard port's MAC, when it was given one
+/// (CONFIG_WZ_MAC_SOURCE_EXPLICIT). A build that was not draws one at every
+/// start: there is no value it falls back to, because one every build shares is
+/// one two boards on a network would both answer to.
+#[cfg(all(feature = "net-lwip-mac", feature = "mac-cyt4bf"))]
+const GIVEN_MAC: Option<[u8; 6]> = match option_env!("WZ_MAC_ADDRESS") {
+    Some(text) => Some(wz::runtime_zephyr::parse_mac(text)),
+    None => None,
+};
+
+/// The onboard port's addresses, from the board's Kconfig.
+#[cfg(all(feature = "net-lwip-mac", feature = "mac-cyt4bf"))]
+const ADDRESSING: net_lwip::Addressing = net_lwip::Addressing {
+    address: wz::runtime_zephyr::ipv4_from_build!("WZ_STATIC_IPV4"),
+    netmask: wz::runtime_zephyr::ipv4_from_build!("WZ_STATIC_NETMASK"),
+    gateway: wz::runtime_zephyr::ipv4_from_build!("WZ_STATIC_GATEWAY"),
+};
+
+/// The 10BASE-T1S interface as a second port of the node: its station address
+/// (given by the build or drawn, and never the onboard port's), its chip, and its
+/// addresses from the board's Kconfig.
+///
+/// The two interfaces must not sit on one network, and when both addresses are given
+/// they must differ; a build that breaks either does not compile, so the node never
+/// runs with an interface the stack cannot tell from the other.
+#[cfg(all(
+    feature = "net-lwip-mac",
+    feature = "mac-cyt4bf",
+    feature = "t1s-lan865x"
+))]
+fn add_t1s(
+    net: &mut net_lwip::LwipMacNet,
+    onboard_station: [u8; 6],
+) -> Result<(), &'static core::ffi::CStr> {
+    use net_lwip::Addressing;
+    use wz::runtime_zephyr::{
+        ipv4_from_build, ipv4_networks_overlap, mac_addresses_equal, parse_mac,
+        random_station_address,
+    };
+
+    const GIVEN_T1S_MAC: Option<[u8; 6]> = match option_env!("WZ_T1S_MAC_ADDRESS") {
+        Some(text) => Some(parse_mac(text)),
+        None => None,
+    };
+    const T1S_ADDRESSING: Addressing = Addressing {
+        address: ipv4_from_build!("WZ_T1S_IPV4"),
+        netmask: ipv4_from_build!("WZ_T1S_NETMASK"),
+        gateway: ipv4_from_build!("WZ_T1S_GATEWAY"),
+    };
+    const _: () = assert!(
+        !ipv4_networks_overlap(
+            ADDRESSING.address,
+            ADDRESSING.netmask,
+            T1S_ADDRESSING.address,
+            T1S_ADDRESSING.netmask
+        ),
+        "the 10BASE-T1S interface is on the onboard port's network: CONFIG_WZ_T1S_IPV4 and \
+         CONFIG_WZ_STATIC_IPV4 must be on different networks"
+    );
+    const _: () = {
+        if let (Some(onboard), Some(t1s)) = (GIVEN_MAC, GIVEN_T1S_MAC) {
+            assert!(
+                !mac_addresses_equal(onboard, t1s),
+                "the 10BASE-T1S interface has the onboard port's station address"
+            );
+        }
+    };
+
+    let station = match GIVEN_T1S_MAC {
+        Some(given) => given,
+        None => random_station_address(&mut ZephyrEntropy).map_err(|_| {
+            c"wz: FAIL - the board's entropy source could not make the 10BASE-T1S station address"
+        })?,
+    };
+    if mac_addresses_equal(station, onboard_station) {
+        // Two draws of 46 bits agreeing: not a thing to run on, and not one to retry
+        // until it is hidden.
+        return Err(c"wz: FAIL - the 10BASE-T1S station address is the onboard port's");
+    }
+    log_line(format!(
+        "wz: 10BASE-T1S station address {:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x} ({})",
+        station[0],
+        station[1],
+        station[2],
+        station[3],
+        station[4],
+        station[5],
+        if GIVEN_T1S_MAC.is_some() {
+            "given"
+        } else {
+            "drawn at this boot"
+        }
+    ));
+    let mac = mac_lan865x::open(station)?;
+    net.add_port(mac, T1S_ADDRESSING)
+}
+
 /// The lwIP backend over the CYT4BF's ETH0. Every board value comes from the
 /// environment the board's build sets (Kconfig): the addresses, the MAC address,
 /// the reference clock and how long to wait for a link.
 #[cfg(all(feature = "net-lwip-mac", feature = "mac-cyt4bf"))]
 fn start() -> i32 {
-    use net_lwip::{Addressing, LwipMacNet};
-    use wz::runtime_zephyr::{ipv4_from_build, parse_mac, random_station_address, u32_from_build};
+    use net_lwip::LwipMacNet;
+    use wz::runtime_zephyr::{random_station_address, u32_from_build};
     use wz_eth_mac_cyt4bf::RefClock;
 
-    // The address this build was given for this board, when it was given one
-    // (CONFIG_WZ_MAC_SOURCE_EXPLICIT). A build that was not draws one at every
-    // start: there is no value it falls back to, because one every build shares is
-    // one two boards on a network would both answer to.
-    const GIVEN_MAC: Option<[u8; 6]> = match option_env!("WZ_MAC_ADDRESS") {
-        Some(text) => Some(parse_mac(text)),
-        None => None,
-    };
-    const ADDRESSING: Addressing = Addressing {
-        address: ipv4_from_build!("WZ_STATIC_IPV4"),
-        netmask: ipv4_from_build!("WZ_STATIC_NETMASK"),
-        gateway: ipv4_from_build!("WZ_STATIC_GATEWAY"),
-    };
     // 0 says the PHY supplies the reference clock; anything else is the divider of
     // the internal PLL the MAC supplies it from.
     const REF_CLOCK_DIVIDER: u32 = u32_from_build!("WZ_REF_CLOCK_DIVIDER");
@@ -402,6 +498,14 @@ fn start() -> i32 {
     };
     let mut net = LwipMacNet::start();
     if let Err(why) = net.add_port(mac, ADDRESSING) {
+        log(why);
+        return 1;
+    }
+    // The second interface goes in after the onboard one: the node's id is the first
+    // port's station address, and the default route belongs to the first port with a
+    // gateway, so the order is what keeps both from moving when this one is added.
+    #[cfg(feature = "t1s-lan865x")]
+    if let Err(why) = add_t1s(&mut net, station) {
         log(why);
         return 1;
     }

@@ -200,13 +200,154 @@ config WZ_SPI_PROBE_HZ
 
 config WZ_SCB_SPI_TIMEOUT_MS
 	int "How long one SPI exchange may take, in milliseconds"
-	depends on WZ_T2G_SPI_PROBE
+	depends on WZ_T2G_SPI_PROBE || WZ_T1S
 	default 100
 	help
 	  A bound on a wait for the block, so a block that never answers fails the
 	  exchange instead of hanging the node. It is a safety net, not a protocol
 	  timing: no exchange of at most 128 bytes at any rate this build asks for takes
 	  a sizable fraction of it.
+
+config WZ_T1S
+	bool "A 10BASE-T1S LAN8650/1 on the MikroBUS socket, as a second interface"
+	depends on WZ_CYT4BF_PINS_T2G_LITE
+	select USE_INFINEON_SPI
+	help
+	  Adds the Microchip LAN8650/1 MAC-PHY of an expansion board in the kit's
+	  MikroBUS socket to the one lwIP stack, beside the onboard RMII port: SCB3 as
+	  its SPI master, the chip's bring-up (wz-eth-lan865x) and the interface's
+	  address, below. The node then listens on both interfaces and advertises a
+	  locator for each. The onboard port stays the first interface, so the node's
+	  id is its address and the default route is the first interface that has a
+	  gateway.
+
+	  A board is not stated to be in the socket by the kit, which ships with none:
+	  this is for a lab that has plugged one in, and an image built with it stops
+	  with a FAIL line when the socket does not answer as a LAN8650/1.
+
+	  It excludes the SPI probe, and the build refuses the two together: the probe
+	  opens the same SCB, and the bring-up reads the identity register itself and
+	  logs what it found. (A Kconfig dependency would only turn this symbol off
+	  with a warning, and the build would go on without the interface.)
+
+if WZ_T1S
+
+config WZ_T1S_SPI_HZ
+	int "SPI rate, in hertz"
+	default 1000000
+	help
+	  The highest rate asked for; the block gives the highest it can make that does
+	  not exceed it, and the log line says what it gave. The default is the SPI
+	  probe's own default (CONFIG_WZ_SPI_PROBE_HZ), a starting value well under the
+	  chip's limit of 25 MHz (DS60001734F, Table 9-9), not a limit of the node: at
+	  it the SPI clock and not the segment's 10 Mbit/s bounds the throughput. Raise
+	  it once the wiring of the expansion board has been shown to carry a faster
+	  clock.
+
+config WZ_T1S_SERVICE_MS
+	int "How often the chip's housekeeping runs, in milliseconds"
+	default 100
+	help
+	  The housekeeping is one footer exchange and, with PLCA, one register read. It
+	  finds a chip that was reset (and configures it again) and keeps collision
+	  detection in step with PLCA. This is how long a reset or a PLCA change can go
+	  unnoticed; it is not a protocol timing.
+
+config WZ_T1S_RESET_LINE
+	bool "The expansion board wires the chip's RESET_N to the socket's RST pin"
+	help
+	  Only the lab knows what its expansion board connects. When on, the node holds
+	  RST low for 10 microseconds (the data sheet asks for at least 5, DS60001734F
+	  Table 9-8) before it talks to the chip. When off, the pin is not touched and
+	  the chip is reset only by the soft reset the bring-up issues, which is enough
+	  for a chip that reset itself when the board was powered.
+
+config WZ_T1S_RESET_WAIT_MS
+	int "How long to wait for the chip after releasing RST, in milliseconds"
+	depends on WZ_T1S_RESET_LINE
+	default 10
+	help
+	  After a reset the chip asserts IRQ_N to say it is ready (DS60001734F 4.1.2),
+	  but the data sheet gives no time for it, and the one entry of its wake-up
+	  table that would (Table 9-14, SPI valid after power) is empty. 10 ms is the
+	  bound Zephyr's own driver for this chip waits for that signal, so it is a
+	  figure that driver has run with, not the vendor's. With the interrupt line
+	  wired the node waits for the signal and fails at this bound; without it the
+	  node waits this long.
+
+config WZ_T1S_IRQ_LINE
+	bool "The expansion board wires the chip's IRQ_N to the socket's INT pin"
+	help
+	  Only the lab knows what its expansion board connects. When on, the node reads
+	  the pin's level so that a receive costs no SPI exchange while the chip has
+	  nothing to say. When off, every pass of the node's loop asks the chip.
+
+config WZ_T1S_PLCA
+	bool "Use PLCA (physical layer collision avoidance)"
+	default y
+	help
+	  A segment with more than two nodes wants PLCA. Turn it off to run the chip as
+	  it is after a reset, plain CSMA/CD. With it on, the node id and count below
+	  are required and have no default: an id must differ per node, and a value
+	  every build shares would give every node the same one.
+
+config WZ_T1S_PLCA_NODE_ID
+	int "PLCA node id (0 coordinator, 1 to 254 follower)"
+	depends on WZ_T1S_PLCA
+	help
+	  Unique on the segment (DS60001734F 11.5.59). Id 0 is the coordinator, which
+	  sends the periodic BEACON; exactly one node has it. No default: the build
+	  refuses an empty or out-of-range value.
+
+config WZ_T1S_PLCA_NODE_COUNT
+	int "PLCA node count (1 to 255)"
+	depends on WZ_T1S_PLCA
+	help
+	  The number of transmit opportunities in a bus cycle: the highest node id on
+	  the segment plus one (AN1760, DS60001760G). The coordinator writes it to the
+	  chip; a follower's chip ignores it, but it must exceed the follower's own id
+	  for that follower to get a turn (DS60001734F 7.2), and the build checks that.
+	  No default.
+
+config WZ_T1S_ACCEPT_ALL_MULTICAST
+	bool "Accept every multicast frame"
+	default y
+	help
+	  The chip's filter is the same one the onboard MAC's default sets: on, the
+	  node receives the groups zenoh scouting uses. A unicast-only node can turn it
+	  off.
+
+config WZ_T1S_MAC_ADDRESS
+	string "Station (MAC) address of the 10BASE-T1S interface"
+	depends on WZ_MAC_SOURCE_EXPLICIT
+	help
+	  As CONFIG_WZ_MAC_ADDRESS, for this interface: six hexadecimal bytes separated
+	  by colons, unicast, not zero and different from the onboard port's. The
+	  chip's MAC also seeds its CSMA/CD back-off from it, so it is to be unique on
+	  the segment (DS60001734F 6.4.2). With the address drawn at boot (the default
+	  source), a second address is drawn for this interface.
+
+config WZ_T1S_IPV4
+	string "IPv4 address of the 10BASE-T1S interface"
+	help
+	  No default: a segment has several nodes and an address every build shares is
+	  one two of them would both answer to. It must be on a different network from
+	  the onboard port's (the node would not know which interface to send by), and
+	  the build refuses one that is not.
+
+config WZ_T1S_NETMASK
+	string "IPv4 netmask of the 10BASE-T1S interface"
+	default "255.255.255.0"
+
+config WZ_T1S_GATEWAY
+	string "IPv4 gateway of the 10BASE-T1S interface (0.0.0.0 for none)"
+	default "0.0.0.0"
+	help
+	  An interface with a gateway can be the node's default route; the first
+	  interface added that has one is, and the onboard port is added first. With
+	  none, this interface is on-link only and never takes the route.
+
+endif # WZ_T1S
 
 endif # WZ_MAC_CYT4BF
 
