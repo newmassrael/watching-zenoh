@@ -25,6 +25,16 @@
 //! The trait is object safe on purpose: the encoders take `&mut dyn TxBuf`, so
 //! the choice of destination does not multiply their instantiations, and the
 //! MCU profile does not carry a copy of the framing code per buffer type.
+//!
+//! The targets are spelled out in full: this page's text is merged with the
+//! outer doc on `pub mod tx_buf;` and the merged text resolves its relative
+//! links from the crate root, so a bare name would not be found.
+//!
+//! [`TxBuf`]: crate::tx_buf::TxBuf
+//! [`SliceTxBuf`]: crate::tx_buf::SliceTxBuf
+//! [`TxSink`]: crate::tx_buf::TxSink
+//! [`CodecError::BufferOverflow`]: sce_forge_runtime::codec::CodecError::BufferOverflow
+//! [`SceSink`]: sce_forge_runtime::codec::SceSink
 
 use sce_forge_runtime::codec::{CodecError, SceSink};
 

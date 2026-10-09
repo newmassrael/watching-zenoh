@@ -15,6 +15,16 @@
 //! The lease holds a raw pointer, which makes it neither `Send` nor `Sync`:
 //! it lives for one synchronous encode-and-send under the conduit's lock and
 //! is never stored.
+//!
+//! The targets are spelled out in full: this page's text is merged with the
+//! outer doc on `pub mod tx_lease;` and the merged text resolves its relative
+//! links from the crate root, so a bare name would not be found.
+//!
+//! [`TxBuf`]: crate::tx_buf::TxBuf
+//! [`TxLease`]: crate::tx_lease::TxLease
+//! [`TxLease::send`]: crate::tx_lease::TxLease::send
+//! [`BoxedLinkDriver::tx_slot_acquire`]: crate::link::BoxedLinkDriver::tx_slot_acquire
+//! [`BoxedLinkDriver::tx_slot_abort`]: crate::link::BoxedLinkDriver::tx_slot_abort
 
 use core::ptr;
 use core::slice;
