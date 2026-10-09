@@ -264,10 +264,12 @@ fn compile(
     Ok(exe)
 }
 
-fn run_both_arms(include: &Path, ref_libdir: &Path) -> (String, String) {
+/// Compile `probe` once and run it against wz's cdylib and against the real
+/// libzenohc, returning `(wz stdout, reference stdout)`.
+fn run_both_arms(probe: &str, include: &Path, ref_libdir: &Path) -> (String, String) {
     let dir = tempfile::tempdir().expect("tempdir");
     let src = dir.path().join("wz_ext_families.c");
-    std::fs::write(&src, PROBE).expect("write probe");
+    std::fs::write(&src, probe).expect("write probe");
 
     let cdylib = wz_capi_c_cdylib();
     let wz_libdir = cdylib.parent().expect("cdylib parent").to_path_buf();
@@ -354,7 +356,7 @@ fn the_zenoh_ext_families_behave_identically_on_wz_and_libzenohc() {
     let Some((include, ref_libdir)) = oracle_prefix() else {
         return;
     };
-    let (wz_out, ref_out) = run_both_arms(&include, &ref_libdir);
+    let (wz_out, ref_out) = run_both_arms(PROBE, &include, &ref_libdir);
 
     assert_anchored("REFERENCE", &ref_out);
     assert_anchored("wz", &wz_out);
@@ -419,5 +421,353 @@ fn the_zenoh_ext_families_behave_identically_on_wz_and_libzenohc() {
         !wz_out.contains("=one"),
         "wz's cache still holds `one`, the publication a 3-deep ring must have \
          evicted when the fourth arrived — the ring is not bounded.\n{wz_out}"
+    );
+}
+
+/// One program that fills a publication cache and asks it for its contents under
+/// every `_time` selector worth telling apart, printing which publications came
+/// back.
+///
+/// The selectors are built FROM THE CACHED SAMPLES' OWN TIMESTAMPS, read off an
+/// unfiltered reply, so a boundary can sit on a sample's exact nanosecond, one
+/// nanosecond either side of it, or a zone/fraction spelling away from it. A
+/// range written in relative time (`now(-1h)`) could only say "all" or "none"
+/// of samples this fresh; it cannot say which side of a boundary a sample is.
+///
+/// Every case is chosen so that a parser that REJECTED the selector would answer
+/// differently from one that read it: a valid range that holds nothing against
+/// one that does not parse and so filters nothing. That is what makes a pass here
+/// mean "read the same", where a case answering "all" either way would pass for a
+/// parser that read nothing.
+const TIME_RANGE_PROBE: &str = r#"#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <stdint.h>
+#include <time.h>
+#include "zenoh.h"
+
+#define KE "wz/timerange/data"
+#define KE_WILD "wz/timerange/*"
+#define N 4
+
+static const char *BODY[N] = {"p0", "p1", "p2", "p3"};
+
+static void nap_ms(long ms) {
+    struct timespec ts;
+    ts.tv_sec = ms / 1000;
+    ts.tv_nsec = (ms % 1000) * 1000000L;
+    nanosleep(&ts, NULL);
+}
+
+static void put_str(const z_loaned_session_t *s, const char *body) {
+    z_view_keyexpr_t ke;
+    z_view_keyexpr_from_str(&ke, KE);
+    z_owned_bytes_t payload;
+    z_bytes_copy_from_str(&payload, body);
+    z_put_options_t opts;
+    z_put_options_default(&opts);
+    z_result_t rc = z_put(s, z_loan(ke), z_move(payload), &opts);
+    printf("put[%s].rc=%d\n", body, (int)rc);
+}
+
+/* One get. Returns a bitmask of the publications that came back, and when
+   `stamps` is given, the NTP64 word each reply carried. The channel closes on the
+   query's own final, so this drains without a timeout. */
+static unsigned ask(const z_loaned_session_t *s, const char *ke_str, const char *params,
+                    uint64_t stamps[N]) {
+    z_view_keyexpr_t ke;
+    z_view_keyexpr_from_str(&ke, ke_str);
+    z_owned_closure_reply_t closure;
+    z_owned_fifo_handler_reply_t handler;
+    z_fifo_channel_reply_new(&closure, &handler, 16);
+    z_get_options_t gopts;
+    z_get_options_default(&gopts);
+    gopts.consolidation = z_query_consolidation_none();
+    z_result_t rc = z_get(s, z_loan(ke), params, z_move(closure), &gopts);
+    unsigned mask = 0;
+    if (rc < 0) {
+        printf("get.rc=%d\n", (int)rc);
+        z_drop(z_move(handler));
+        return 0;
+    }
+    for (;;) {
+        z_owned_reply_t reply;
+        if (z_recv(z_loan(handler), &reply) != Z_OK) break;
+        if (z_reply_is_ok(z_loan(reply))) {
+            const z_loaned_sample_t *sm = z_reply_ok(z_loan(reply));
+            z_owned_string_t body;
+            z_bytes_to_string(z_sample_payload(sm), &body);
+            for (int i = 0; i < N; i++) {
+                size_t len = strlen(BODY[i]);
+                if (z_string_len(z_loan(body)) == len &&
+                    memcmp(z_string_data(z_loan(body)), BODY[i], len) == 0) {
+                    mask |= 1u << i;
+                    const z_timestamp_t *ts = z_sample_timestamp(sm);
+                    if (ts && stamps) stamps[i] = z_timestamp_ntp64_time(ts);
+                }
+            }
+            z_drop(z_move(body));
+        }
+        z_drop(z_move(reply));
+    }
+    z_drop(z_move(handler));
+    return mask;
+}
+
+static void report(const char *label, unsigned mask) {
+    printf("sel[%s]=", label);
+    int n = 0;
+    for (int i = 0; i < N; i++) {
+        if (mask & (1u << i)) {
+            printf("%s%s", n ? "," : "", BODY[i]);
+            n++;
+        }
+    }
+    if (!n) printf("none");
+    printf("\n");
+}
+
+/* The RFC3339 spelling of the instant an NTP64 word names, shifted by `delta_ns`,
+   to `digits` fractional digits, with `zone` appended. The fraction becomes
+   nanoseconds the way uhlc reads it, rounded UP, so a spelling at 9 digits is
+   the sample's own instant. */
+static void instant(uint64_t ntp, long delta_ns, int digits, const char *zone, char *out,
+                    size_t cap) {
+    uint64_t frac = ntp & 0xFFFFFFFFull;
+    int64_t secs = (int64_t)(ntp >> 32);
+    int64_t nanos = (int64_t)((frac * 1000000000ull + 0xFFFFFFFFull) >> 32) + delta_ns;
+    while (nanos >= 1000000000) { nanos -= 1000000000; secs++; }
+    while (nanos < 0) { nanos += 1000000000; secs--; }
+    time_t t = (time_t)secs;
+    struct tm tm;
+    gmtime_r(&t, &tm);
+    char nine[16];
+    snprintf(nine, sizeof nine, "%09ld", (long)nanos);
+    nine[digits] = 0;
+    if (digits > 0) {
+        snprintf(out, cap, "%04d-%02d-%02dT%02d:%02d:%02d.%s%s", tm.tm_year + 1900,
+                 tm.tm_mon + 1, tm.tm_mday, tm.tm_hour, tm.tm_min, tm.tm_sec, nine, zone);
+    } else {
+        snprintf(out, cap, "%04d-%02d-%02dT%02d:%02d:%02d%s", tm.tm_year + 1900,
+                 tm.tm_mon + 1, tm.tm_mday, tm.tm_hour, tm.tm_min, tm.tm_sec, zone);
+    }
+}
+
+#define SEL(label, ke, ...)                                  \
+    do {                                                     \
+        snprintf(sel, sizeof sel, __VA_ARGS__);              \
+        report(label, ask(loan_s, ke, sel, NULL));           \
+    } while (0)
+
+int main(int argc, char **argv) {
+    if (argc < 2) { fprintf(stderr, "usage: probe <endpoint>\n"); return 2; }
+
+    z_owned_config_t config;
+    z_config_default(&config);
+    zc_config_insert_json5(z_loan_mut(config), Z_CONFIG_MULTICAST_SCOUTING_KEY, "false");
+    zc_config_insert_json5(z_loan_mut(config), Z_CONFIG_MODE_KEY, "\"peer\"");
+    char listen_json[256];
+    snprintf(listen_json, sizeof listen_json, "[\"%s\"]", argv[1]);
+    zc_config_insert_json5(z_loan_mut(config), Z_CONFIG_LISTEN_KEY, listen_json);
+    /* A cache stores TIMESTAMPED samples, so a session that stamps nothing cannot
+       back one (`PublicationCache::new` bails without an HLC). */
+    zc_config_insert_json5(z_loan_mut(config), "timestamping",
+                           "{\"enabled\":{\"router\":true,\"peer\":true,\"client\":true}}");
+    z_owned_session_t s;
+    z_result_t open_rc = z_open(&s, z_move(config), NULL);
+    printf("open.rc=%d\n", (int)open_rc);
+    if (open_rc < 0) { return 1; }
+    const z_loaned_session_t *loan_s = z_loan(s);
+
+    z_view_keyexpr_t ke;
+    z_view_keyexpr_from_str(&ke, KE);
+    ze_publication_cache_options_t copts;
+    ze_publication_cache_options_default(&copts);
+    copts.history = 8;
+    ze_owned_publication_cache_t cache;
+    z_result_t crc = ze_declare_publication_cache(loan_s, &cache, z_loan(ke), &copts);
+    printf("cache.declare.rc=%d\n", (int)crc);
+    if (crc < 0) { return 1; }
+
+    /* Four publications, a few milliseconds apart so their HLC stamps are far
+       enough apart that no spelling below can straddle two of them by accident. */
+    for (int i = 0; i < N; i++) {
+        put_str(loan_s, BODY[i]);
+        nap_ms(4);
+    }
+
+    /* Upstream's cache stores through a background task with no completion signal,
+       so the publications land when they land. Ask until all four are there. */
+    uint64_t stamps[N] = {0, 0, 0, 0};
+    unsigned seen = 0;
+    for (int tries = 0; tries < 500 && seen != 0xFu; tries++) {
+        seen = ask(loan_s, KE, "", stamps);
+        if (seen != 0xFu) nap_ms(10);
+    }
+    printf("settled=%d\n", seen == 0xFu);
+    if (seen != 0xFu) { return 1; }
+    int increasing = 1;
+    for (int i = 0; i + 1 < N; i++) if (!(stamps[i] < stamps[i + 1])) increasing = 0;
+    printf("stamps.increasing=%d\n", increasing);
+
+    char t1[64], t2[64], t1p[64], t1m[64], t1z[64], t1f[64], sel[512];
+    instant(stamps[1], 0, 9, "Z", t1, sizeof t1);
+    instant(stamps[2], 0, 9, "Z", t2, sizeof t2);
+    instant(stamps[1], 1, 9, "Z", t1p, sizeof t1p);
+    instant(stamps[1], -1, 9, "Z", t1m, sizeof t1m);
+    instant(stamps[1], 0, 9, "+00:00", t1z, sizeof t1z);
+    /* Five fractional digits: a spelling that is EARLIER than the sample by up to
+       ten microseconds, so it still holds the sample and drops the one before. */
+    instant(stamps[1], 0, 5, "Z", t1f, sizeof t1f);
+
+    /* ---- a boundary on a sample's own instant, and one nanosecond either side - */
+    SEL("all", KE, "_time=[..]");
+    SEL("from1-in", KE, "_time=[%s..]", t1);
+    SEL("from1-ex", KE, "_time=]%s..]", t1);
+    SEL("to2-in", KE, "_time=[..%s]", t2);
+    SEL("to2-ex", KE, "_time=[..%s[", t2);
+    SEL("span-in", KE, "_time=[%s..%s]", t1, t2);
+    SEL("span-ex", KE, "_time=]%s..%s[", t1, t2);
+    SEL("from1-plus1ns", KE, "_time=[%s..]", t1p);
+    SEL("from1-minus1ns", KE, "_time=[%s..]", t1m);
+    SEL("to1-minus1ns", KE, "_time=[..%s]", t1m);
+    /* ---- the spellings humantime's weak parser accepts ------------------------ */
+    SEL("zone-offset", KE, "_time=[%s..]", t1z);
+    SEL("frac-5-digits", KE, "_time=[%s..]", t1f);
+    SEL("old-date-space", KE, "_time=[..2000-01-01 00:00:00]");
+    SEL("old-date-zoneless", KE, "_time=[..2000-01-01T00:00:00]");
+    SEL("epoch-end", KE, "_time=[..1970-01-01T00:00:00Z]");
+    SEL("year-9999-leap", KE, "_time=[9999-12-31T23:59:60Z..]");
+    /* ---- relative time, every unit -------------------------------------------- */
+    SEL("future-hour", KE, "_time=[now(1h)..]");
+    SEL("plus-sign", KE, "_time=[now(+1h)..]");
+    SEL("past-hour-end", KE, "_time=[..now(-1h)]");
+    SEL("recent-hour", KE, "_time=[now(-1h)..]");
+    SEL("until-hour", KE, "_time=[..now(1h)]");
+    SEL("unit-u", KE, "_time=[..now(-3600000000u)]");
+    SEL("unit-ms", KE, "_time=[..now(-3600000ms)]");
+    SEL("unit-s", KE, "_time=[..now(-3600s)]");
+    SEL("unit-m", KE, "_time=[..now(-60m)]");
+    SEL("unit-h", KE, "_time=[..now(-0.5h)]");
+    SEL("unit-d", KE, "_time=[..now(-1d)]");
+    SEL("unit-w", KE, "_time=[..now(-1w)]");
+    SEL("unit-bare", KE, "_time=[..now(-3600)]");
+    /* An offset no instant can hold is an UNBOUNDED end, not a clamp. */
+    SEL("offset-overflow-end", KE, "_time=[..now(-1e300d)]");
+    SEL("offset-overflow-start", KE, "_time=[now(1e300d)..]");
+    /* ---- values upstream's parser rejects: no filter, every publication ------- */
+    SEL("duration-form", KE, "_time=[%s;1h]", t1);
+    SEL("bogus", KE, "_time=bogus");
+    SEL("too-short", KE, "_time=[..");
+    SEL("date-only", KE, "_time=[..2020-11-05]");
+    SEL("pre-epoch", KE, "_time=[..1969-12-31T23:59:59Z]");
+    SEL("year-10000", KE, "_time=[..10000-01-01T00:00:00Z]");
+    /* ---- where the key sits in the parameter list, and the wildcard branch ---- */
+    SEL("first-key-wins", KE, "_time=[%s..];_time=[..]", t2);
+    SEL("surrounded", KE, "x=1;_time=]%s..];y=2", t2);
+    SEL("wildcard-key", KE_WILD, "_time=[%s..]", t1);
+
+    z_drop(z_move(cache));
+    z_drop(z_move(s));
+    printf("done\n");
+    return 0;
+}
+"#;
+
+/// Lines that must appear on the REFERENCE arm, written from zenoh-util's
+/// `TimeRange` and zenoh-ext's `PublicationCache` rather than copied from a run.
+/// A diff is an equality, and two arms that both ignored `_time` would print the
+/// same four publications for every selector; these are what tell a filter from
+/// its absence.
+const TIME_RANGE_EXPECTED: &[&str] = &[
+    "cache.declare.rc=0",
+    "put[p0].rc=0",
+    "put[p3].rc=0",
+    "settled=1",
+    "stamps.increasing=1",
+    "sel[all]=p0,p1,p2,p3",
+    "sel[from1-in]=p1,p2,p3",
+    "sel[from1-ex]=p2,p3",
+    "sel[to2-in]=p0,p1,p2",
+    "sel[to2-ex]=p0,p1",
+    "sel[span-in]=p1,p2",
+    "sel[span-ex]=none",
+    "sel[from1-plus1ns]=p2,p3",
+    "sel[from1-minus1ns]=p1,p2,p3",
+    "sel[to1-minus1ns]=p0",
+    "sel[zone-offset]=p1,p2,p3",
+    "sel[frac-5-digits]=p1,p2,p3",
+    "sel[old-date-space]=none",
+    "sel[old-date-zoneless]=none",
+    "sel[epoch-end]=none",
+    "sel[year-9999-leap]=none",
+    "sel[future-hour]=none",
+    "sel[plus-sign]=none",
+    "sel[past-hour-end]=none",
+    "sel[recent-hour]=p0,p1,p2,p3",
+    "sel[until-hour]=p0,p1,p2,p3",
+    "sel[unit-u]=none",
+    "sel[unit-ms]=none",
+    "sel[unit-s]=none",
+    "sel[unit-m]=none",
+    "sel[unit-h]=none",
+    "sel[unit-d]=none",
+    "sel[unit-w]=none",
+    "sel[unit-bare]=none",
+    "sel[offset-overflow-end]=p0,p1,p2,p3",
+    "sel[offset-overflow-start]=p0,p1,p2,p3",
+    "sel[duration-form]=p0,p1,p2,p3",
+    "sel[bogus]=p0,p1,p2,p3",
+    "sel[too-short]=p0,p1,p2,p3",
+    "sel[date-only]=p0,p1,p2,p3",
+    "sel[pre-epoch]=p0,p1,p2,p3",
+    "sel[year-10000]=p0,p1,p2,p3",
+    "sel[first-key-wins]=p2,p3",
+    "sel[surrounded]=p3",
+    "sel[wildcard-key]=p1,p2,p3",
+    "done",
+];
+
+/// THE ADJUDICATOR for the publication cache's `_time` filter: every selector
+/// answers the same set on wz's cdylib and on the real `libzenohc.so`.
+///
+/// NOT CLAIMED: a sample with no timestamp (a cache cannot be built without an
+/// HLC, so the C API cannot make one), and a cache answering while the wall
+/// clock moves under a relative bound.
+// wz-proves: api-compat-c wz->zenoh-c partial
+#[test]
+#[ignore = "links the shared-memory zenoh-c oracle; run by run-ci Layer C1ce"]
+fn the_publication_cache_filters_by_the_querys_time_range_identically_on_wz_and_libzenohc() {
+    let Some((include, ref_libdir)) = oracle_prefix() else {
+        return;
+    };
+    let (wz_out, ref_out) = run_both_arms(TIME_RANGE_PROBE, &include, &ref_libdir);
+
+    for (arm, stdout) in [("REFERENCE", &ref_out), ("wz", &wz_out)] {
+        let lines: Vec<&str> = stdout.lines().collect();
+        let missing: Vec<&&str> = TIME_RANGE_EXPECTED
+            .iter()
+            .filter(|w| !lines.contains(w))
+            .collect();
+        assert!(
+            missing.is_empty(),
+            "the {arm} arm answered {} selector(s) differently from what zenoh's own \
+             `TimeRange` and `PublicationCache` say it must.\nmissing: {missing:?}\n\
+             --- stdout ---\n{stdout}",
+            missing.len(),
+        );
+    }
+
+    let wz: Vec<&str> = wz_out.lines().filter(|l| l.starts_with("sel[")).collect();
+    let reference: Vec<&str> = ref_out.lines().filter(|l| l.starts_with("sel[")).collect();
+    assert_eq!(
+        wz, reference,
+        "wz's publication cache and the real libzenohc answer some `_time` selector \
+         differently"
+    );
+    assert!(
+        wz.len() >= 40,
+        "only {} selector line(s) were compared; the probe stopped early:\n{wz_out}",
+        wz.len()
     );
 }

@@ -35,7 +35,7 @@
 //! zenoh's cache applies a `_time` time-range filter in both query branches
 //! (zenoh-ext advanced_cache.rs:264-272, :308-316): a sample is replied only
 //! if its timestamp falls in the query's `_time` range. wz now mirrors this —
-//! [`answer_from_ring`] parses the `_time` selector ([`parse_time_range_ntp64`])
+//! [`answer_from_ring`] parses the `_time` selector ([`TimeRange::parse`])
 //! and drops out-of-range samples. The "now" the relative `now(-age)` bounds
 //! resolve against is [`crate::timestamp_source::wall_clock_ntp64`] read at
 //! query time (the same NTP64 wall-clock base the publisher stamps each cached
@@ -43,25 +43,24 @@
 //! publisher-only node serving a remote history subscriber — it does NOT
 //! require `ext-pubsub-advanced-history` on the cache's node. The `_time`
 //! selector is emitted by the startup HISTORY query (`max_age` ->
-//! `_time=[now(-age)..]`, the advanced-subscriber side). A `_time` form wz does
-//! not parse (an absolute RFC3339 bound, or the `[t;duration]` form) leaves the
-//! range unresolved = unfiltered, so an exotic zenoh-peer form degrades to the
-//! prior over-return rather than wrongly dropping samples (a documented, narrow
-//! interop divergence; the wz↔wz `now(±duration)` form filters exactly).
+//! `_time=[now(-age)..]`, the advanced-subscriber side). Every form zenoh's
+//! grammar accepts is resolved (`now(±d)`, an absolute RFC3339 bound, the
+//! `[t;duration]` form; see [`crate::time_range`]); a value zenoh's parser
+//! rejects is no range at all, so every sample replies, as upstream does.
 
 use std::collections::VecDeque;
-use std::ops::Bound;
 use std::sync::{Arc, Mutex};
+use std::time::SystemTime;
 
 use wz_runtime_core::TimeSource;
 use wz_session_core::link::SessionRuntime;
-use wz_session_core::ntp64::Ntp64;
 use wz_session_core::qos::{CongestionControl, Priority};
 use wz_session_core::query_sink::{QueryView, ReplyMeta, ReplyOut};
 use wz_session_core::sample::{EncodingHint, QosLevel, SampleKind, SourceInfo, TimestampHint};
 
 use crate::session::{Queryable, QueryableError, QueryableOptions, Session, Unicast};
 use crate::session_glue::SessionLinkActions;
+use crate::time_range::{ntp64_to_system_time, TimeRange};
 
 /// One sample retained in the cache ring for recovery / history replies.
 /// `source_info` carries the sample's `(zid, eid, sn)`; the `_sn` range
@@ -489,12 +488,12 @@ fn answer_from_ring(
     let max = param_value(params, "_max").and_then(|v| v.parse::<usize>().ok());
     // R311y98 — the `_time` age filter (zenoh advanced_cache.rs:264-272). A
     // history GET carries `_time=[now(-age)..]`; only samples whose timestamp
-    // lies in the range are replied. Absent OR an unparseable form (absolute
-    // RFC3339, the `[t;dur]` form) leaves this `None` = unfiltered (the
-    // documented over-return), so wz never wrongly drops on a form it cannot
-    // resolve while the wz↔wz `now(±duration)` form filters exactly.
-    let time_range =
-        param_value(params, "_time").and_then(|v| parse_time_range_ntp64(v, now_ntp64));
+    // lies in the range are replied. Absent, or a value zenoh's own parser
+    // rejects, leaves this `None` = unfiltered, which is what upstream does with
+    // a range it cannot read.
+    let time_range = param_value(params, "_time")
+        .and_then(TimeRange::parse)
+        .map(|r| r.resolve_at(ntp64_to_system_time(now_ntp64)));
 
     let mut matched: Vec<&CachedSample> = ring
         .iter()
@@ -614,131 +613,10 @@ fn sample_matches_sn(sample_sn: Option<u32>, range: Option<(Option<u32>, Option<
     }
 }
 
-/// One NTP64 second = `2^32` in the `(unix_secs << 32) | fraction` word, so a
-/// duration in seconds scales to the NTP64 magnitude by `secs * 2^32`. The
-/// `f64` view of the [`Ntp64::FRAC_PER_SEC`] magnitude SSOT, for the
-/// `now(±duration)` offset arithmetic below.
-const NTP64_SECOND: f64 = Ntp64::FRAC_PER_SEC as f64;
-
-/// Whether a sample's NTP64 timestamp satisfies the parsed `_time` range.
-/// No range (absent or unparseable `_time`) matches every sample.
-fn sample_matches_time(sample_time: u64, range: Option<(Bound<u64>, Bound<u64>)>) -> bool {
-    match range {
-        None => true,
-        Some((lo, hi)) => {
-            let lo_ok = match lo {
-                Bound::Included(l) => sample_time >= l,
-                Bound::Excluded(l) => sample_time > l,
-                Bound::Unbounded => true,
-            };
-            let hi_ok = match hi {
-                Bound::Included(h) => sample_time <= h,
-                Bound::Excluded(h) => sample_time < h,
-                Bound::Unbounded => true,
-            };
-            lo_ok && hi_ok
-        }
-    }
-}
-
-/// Parse a `_time` time-range selector into resolved inclusive/exclusive NTP64
-/// bounds, mirroring zenoh's `TimeRange<TimeExpr>` grammar (zenoh-util
-/// time_range.rs:158-211): `[`/`]` opens an inclusive/exclusive start, `]`/`[`
-/// closes an inclusive/exclusive end, `start..end` are the two bounds (empty =
-/// unbounded). Returns `None` (= unfiltered, the documented over-return) for
-/// any form wz does not resolve to a wall-clock instant: an absolute RFC3339
-/// bound or the `[start;duration]` form. The wz history query only ever emits
-/// `[now(-age)..]`, so wz↔wz filters exactly.
-fn parse_time_range_ntp64(val: &str, now_ntp64: u64) -> Option<(Bound<u64>, Bound<u64>)> {
-    let bytes = val.as_bytes();
-    if bytes.len() < 4 {
-        return None;
-    }
-    let incl_start = match bytes[0] {
-        b'[' => true,
-        b']' => false,
-        _ => return None,
-    };
-    let incl_end = match bytes[bytes.len() - 1] {
-        b']' => true,
-        b'[' => false,
-        _ => return None,
-    };
-    let inner = &val[1..val.len() - 1];
-    // Only the `start..end` form (the `[start;duration]` form -> None/unfiltered).
-    let (start, end) = inner.split_once("..")?;
-    Some((
-        parse_time_bound_ntp64(start, incl_start, now_ntp64)?,
-        parse_time_bound_ntp64(end, incl_end, now_ntp64)?,
-    ))
-}
-
-/// Resolve one `_time` bound: empty = unbounded, else a `now(±duration)`
-/// instant carried into an inclusive/exclusive bound.
-fn parse_time_bound_ntp64(s: &str, inclusive: bool, now_ntp64: u64) -> Option<Bound<u64>> {
-    if s.is_empty() {
-        return Some(Bound::Unbounded);
-    }
-    let t = parse_now_expr_ntp64(s, now_ntp64)?;
-    Some(if inclusive {
-        Bound::Included(t)
-    } else {
-        Bound::Excluded(t)
-    })
-}
-
-/// Resolve a `now(±duration)` / `now()` expression to an NTP64 instant against
-/// `now_ntp64`, mirroring zenoh's `TimeExpr::Now` (time_range.rs:344-356). An
-/// absolute (RFC3339) time returns `None` — wz does not carry an absolute
-/// wall-clock parser here, so such a bound leaves the range unfiltered.
-fn parse_now_expr_ntp64(s: &str, now_ntp64: u64) -> Option<u64> {
-    let inner = s.strip_prefix("now(")?.strip_suffix(')')?;
-    if inner.is_empty() {
-        return Some(now_ntp64);
-    }
-    let (negative, dur) = match inner.strip_prefix('-') {
-        Some(rest) => (true, rest),
-        None => (false, inner),
-    };
-    let secs = parse_duration_secs(dur)?;
-    // Resolve the offset in UNSIGNED NTP64 space (saturating). An `i64` cast of
-    // `now_ntp64` would wrap NEGATIVE once unix seconds reach 2^31 (year 2038,
-    // `secs << 32 >= 2^63`): an upper `now()` bound would then collapse to 0 and
-    // WRONGLY DROP every sample. `now_ntp64` is `(unix_secs << 32) | frac`
-    // (~7.6e18 today, not the ~9.2e18 i64 ceiling); the offset is `secs * 2^32`
-    // (f64-exact for realistic durations, `as u64` saturating beyond that).
-    let offset = (secs * NTP64_SECOND) as u64;
-    Some(if negative {
-        now_ntp64.saturating_sub(offset)
-    } else {
-        now_ntp64.saturating_add(offset)
-    })
-}
-
-/// Parse a zenoh duration literal to seconds, mirroring zenoh-util
-/// `parse_duration` (time_range.rs): a bare `<f64>` is seconds; the suffixes
-/// `u` (micros), `ms` (millis), `s`, `m` (minutes), `h`, `d`, `w` scale it.
-fn parse_duration_secs(s: &str) -> Option<f64> {
-    let bytes = s.as_bytes();
-    let n = bytes.len();
-    if n == 0 {
-        return None;
-    }
-    match bytes[n - 1] {
-        b'u' => s[..n - 1].parse::<f64>().ok().map(|u| u * 1e-6),
-        b's' => {
-            if n >= 2 && bytes[n - 2] == b'm' {
-                s[..n - 2].parse::<f64>().ok().map(|ms| ms * 1e-3)
-            } else {
-                s[..n - 1].parse::<f64>().ok()
-            }
-        }
-        b'm' => s[..n - 1].parse::<f64>().ok().map(|m| m * 60.0),
-        b'h' => s[..n - 1].parse::<f64>().ok().map(|h| h * 3600.0),
-        b'd' => s[..n - 1].parse::<f64>().ok().map(|d| d * 86_400.0),
-        b'w' => s[..n - 1].parse::<f64>().ok().map(|w| w * 604_800.0),
-        _ => s.parse::<f64>().ok(),
-    }
+/// Whether a sample's NTP64 timestamp satisfies the resolved `_time` range.
+/// No range (absent, or a value zenoh's parser rejects) matches every sample.
+fn sample_matches_time(sample_time: u64, range: Option<TimeRange<SystemTime>>) -> bool {
+    range.map_or(true, |r| r.contains_ntp64(sample_time))
 }
 
 #[cfg(test)]
@@ -1183,86 +1061,59 @@ mod tests {
         assert!(!sample_matches_sn(None, Some((Some(10), None))));
     }
 
+    /// The cache filter resolves a `_time` value the way the selector's own grammar
+    /// does ([`crate::time_range`] carries the grammar's tests): the wz
+    /// history-query form, an absolute RFC3339 bound and the `[t;duration]` form
+    /// all FILTER now, where the first used to be the only one that did.
     #[test]
-    fn parse_duration_units_match_zenoh() {
-        assert_eq!(parse_duration_secs("30"), Some(30.0)); // bare = seconds
-        assert_eq!(parse_duration_secs("30s"), Some(30.0));
-        assert_eq!(parse_duration_secs("500ms"), Some(0.5));
-        assert_eq!(parse_duration_secs("2m"), Some(120.0));
-        assert_eq!(parse_duration_secs("1h"), Some(3600.0));
-        assert_eq!(parse_duration_secs("1d"), Some(86_400.0));
-        assert_eq!(parse_duration_secs("1w"), Some(604_800.0));
-        assert_eq!(parse_duration_secs("1000u"), Some(1e-3)); // 1000us = 1ms
-        assert_eq!(parse_duration_secs("xs"), None);
-        assert_eq!(parse_duration_secs(""), None);
-    }
-
-    #[test]
-    fn parse_time_range_resolves_now_relative_bounds() {
+    fn the_cache_filter_resolves_every_form_the_grammar_accepts() {
         let now = 1_000u64 << 32; // NTP64 = 1000 wall-clock seconds
-                                  // `[now(-30s)..]` -> [970s, unbounded) — the wz history-query form.
-        assert_eq!(
-            parse_time_range_ntp64("[now(-30s)..]", now),
-            Some((Bound::Included(970u64 << 32), Bound::Unbounded))
-        );
-        // `[now()..]` -> [1000s, unbounded).
-        assert_eq!(
-            parse_time_range_ntp64("[now()..]", now),
-            Some((Bound::Included(now), Bound::Unbounded))
-        );
-        // Closed, exclusive both ends: `]now(-2m)..now(-1m)[`.
-        assert_eq!(
-            parse_time_range_ntp64("]now(-2m)..now(-1m)[", now),
-            Some((Bound::Excluded(880u64 << 32), Bound::Excluded(940u64 << 32)))
-        );
-        // A `now(-age)` that underflows clamps at 0 (never wraps).
-        assert_eq!(
-            parse_time_range_ntp64("[now(-2000s)..]", now),
-            Some((Bound::Included(0), Bound::Unbounded))
-        );
-        // Unparseable / exotic forms -> None (= unfiltered over-return):
-        // an absolute RFC3339 bound, the `[t;dur]` form, and a malformed bracket.
-        assert_eq!(
-            parse_time_range_ntp64("[2024-01-01T00:00:00Z..]", now),
-            None
-        );
-        assert_eq!(parse_time_range_ntp64("[now();1h]", now), None);
-        assert_eq!(parse_time_range_ntp64("now(-30s)", now), None);
-    }
-
-    /// R311y99 (20th-trigger review MED) regression: resolving the `now(±dur)`
-    /// offset must not cast `now_ntp64` through `i64`. Once unix seconds reach
-    /// 2^31 (year 2038) the NTP64 word is `>= 2^63`, so an `i64` cast wraps
-    /// NEGATIVE — an UPPER `now()` bound would then collapse to `Included(0)`
-    /// and the filter would WRONGLY DROP every sample. Unsigned saturating
-    /// resolution keeps the bound a large positive value.
-    #[test]
-    fn parse_time_range_survives_post_2038_now_word() {
-        let now = 1u64 << 63; // unix_secs = 2^31 (year 2038); now word >= 2^63
-        let one_hour = 3600u64 << 32;
-        // `[..now(-1h)]`: an upper-bounded "older than 1h" window. The end must
-        // stay just below `now`, NOT collapse to 0 (the pre-fix i64-wrap bug).
-        let r = parse_time_range_ntp64("[..now(-1h)]", now).expect("parses");
-        assert_eq!(r, (Bound::Unbounded, Bound::Included(now - one_hour)));
-        // A 2h-old sample is inside `[.., now-1h]` — pre-fix (end==0) it was
-        // wrongly dropped; post-fix it passes.
-        assert!(sample_matches_time(now - 2 * one_hour, Some(r)));
-        // A 1-minute-old sample is NEWER than the now-1h cutoff -> excluded.
-        assert!(!sample_matches_time(now - (60u64 << 32), Some(r)));
+        let filter = |selector: &str| {
+            TimeRange::parse(selector).map(|r| r.resolve_at(ntp64_to_system_time(now)))
+        };
+        let at = |secs: u64| secs << 32;
+        // `[now(-30s)..]` keeps 970s and later: the wz history-query form.
+        let recent = filter("[now(-30s)..]");
+        assert!(sample_matches_time(at(970), recent));
+        assert!(sample_matches_time(at(1_000), recent));
+        assert!(!sample_matches_time(at(969), recent));
+        // Exclusive both ends: `]now(-2m)..now(-1m)[` is 880s..940s, ends excluded.
+        let window = filter("]now(-2m)..now(-1m)[");
+        assert!(sample_matches_time(at(881), window));
+        assert!(sample_matches_time(at(939), window));
+        assert!(!sample_matches_time(at(880), window));
+        assert!(!sample_matches_time(at(940), window));
+        // An offset that reaches before the epoch holds everything up to it.
+        assert!(sample_matches_time(at(1), filter("[now(-2000s)..]")));
+        // An absolute bound: 2024-01-01T00:00:00Z is 1704067200s.
+        let absolute = filter("[2024-01-01T00:00:00Z..]");
+        assert!(sample_matches_time(at(1_704_067_200), absolute));
+        assert!(!sample_matches_time(at(1_704_067_199), absolute));
+        // The duration form: one hour from 2024-01-01T00:00:00Z, both ends held.
+        let hour = filter("[2024-01-01T00:00:00Z;1h]");
+        assert!(sample_matches_time(at(1_704_067_200 + 3_600), hour));
+        assert!(!sample_matches_time(at(1_704_067_200 + 3_601), hour));
+        // A value zenoh's parser rejects is no range: every sample replies.
+        for bad in ["now(-30s)", "[now(-30s)]", "[bogus..]", "[;1h]", ""] {
+            let range = filter(bad);
+            assert!(range.is_none(), "{bad:?}");
+            assert!(sample_matches_time(at(1), range), "{bad:?}");
+        }
     }
 
     #[test]
     fn time_filter_includes_and_excludes() {
+        let now = ntp64_to_system_time(100u64 << 32);
         let threshold = 70u64 << 32; // = now(100s) - 30s
                                      // No range -> all.
         assert!(sample_matches_time(60u64 << 32, None));
         // [70s, unbounded): 80s in, 60s out, 70s in (inclusive).
-        let r = Some((Bound::Included(threshold), Bound::Unbounded));
+        let r = TimeRange::parse("[now(-30s)..]").map(|r| r.resolve_at(now));
         assert!(sample_matches_time(80u64 << 32, r));
         assert!(sample_matches_time(threshold, r));
         assert!(!sample_matches_time(60u64 << 32, r));
         // Exclusive lower bound drops the boundary sample.
-        let rex = Some((Bound::Excluded(threshold), Bound::Unbounded));
+        let rex = TimeRange::parse("]now(-30s)..]").map(|r| r.resolve_at(now));
         assert!(!sample_matches_time(threshold, rex));
     }
 

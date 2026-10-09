@@ -20751,6 +20751,17 @@ layer_c1ce_api_compat_c_unstable_oracle() {
         cargo test -p wz-integration-tests \
         --test zenoh_c_ext_families_twice_and_diff -- --ignored --quiet --test-threads=1 \
         --exact the_zenoh_ext_families_behave_identically_on_wz_and_libzenohc || rc=1
+    # R3130 -- the publication cache's `_time` filter. One program fills a cache and
+    # asks it under forty-odd selectors built from the cached samples' own instants,
+    # linked once at the real `libzenohc` and once at wz's C ABI. The real library's
+    # answers are asserted first, from zenoh-util's grammar rather than from a run, so
+    # a pass on both arms is a pass for a cache that FILTERS, not for two that ignore
+    # the selector alike. Red-first: with the filter's `continue` removed 29 of the
+    # selectors answered differently on the wz arm and the real library's did not.
+    WZ_ZENOH_C_PREFIX="$shm" _runci_guarded_test "C1ce publication cache time range" 1 \
+        cargo test -p wz-integration-tests \
+        --test zenoh_c_ext_families_twice_and_diff -- --ignored --quiet --test-threads=1 \
+        --exact the_publication_cache_filters_by_the_querys_time_range_identically_on_wz_and_libzenohc || rc=1
     # REPORTED, never enforced, exactly as C1cc's is.
     WZ_ZENOH_C_PREFIX="$shm" python3 scripts/lib/capi_c_coverage.py || rc=1
 

@@ -266,6 +266,11 @@ pub use wz_session_core::json5;
 // `reply ⊆ query` contract the way zenoh-pico does
 // (`_z_declared_keyexpr_intersects`, `~/zenoh-pico/src/net/primitives.c:438`).
 pub use wz_session_core::keyexpr_match;
+/// The `_time` selector's grammar, resolution and membership test (zenoh-util
+/// `TimeRange`). Unconditional: it is the base `zenoh` crate's own selector
+/// parameter, read by the advanced cache and by the C ABI's publication cache
+/// alike, and neither can be the one that owns it.
+pub mod time_range;
 /// R311y369 — re-exported for the `--namespace` demo affordance
 /// (`OwnedNonWildKeyExpr`). The `keyexpr_prefix` module is `keyexpr-prefix`-gated
 /// in wz-session-core, which `routing-namespace` pulls in, so the re-export

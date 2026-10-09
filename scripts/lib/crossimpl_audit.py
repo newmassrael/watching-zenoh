@@ -1067,7 +1067,12 @@ HOST_GATED_CI_TARGETS: dict[str, str] = {
 # at the real `libzenohc` and at wz's C ABI on an IPv6 group with an IPv6 interface named for it,
 # once per address of the host that can carry one, and compares them. The real library's rows are
 # asserted first. Measured by `scripts/audit-crossimpl-proof.sh`.
-FOREIGN_ADJUDICATOR_LINKS = 1046
+# R3130 -- 1046 -> 1047, RISING by one: a new test in `zenoh_c_ext_families_twice_and_diff.rs` that
+# runs one C program linked at the real `libzenohc` and at wz's C ABI, fills a publication cache
+# and asks it under forty-odd `_time` selectors built from the cached samples' own instants
+# (`api-compat-c zenoh-c->wz`). The real library's answers are asserted first, from zenoh-util's
+# grammar and not from a run. Measured by `scripts/audit-crossimpl-proof.sh`.
+FOREIGN_ADJUDICATOR_LINKS = 1047
 
 # ── Execution disclosure ────────────────────────────────────────────────────────
 #

@@ -49,11 +49,11 @@
 //!   "improving" it — the two differ for a key holding a `$*`, and a difference
 //!   from upstream is the defect this file exists to avoid.
 //!
-//! Upstream additionally filters each reply by the query's `_time` range. wz's
-//! query view does not surface a parsed time range, so that filter is a NAMED
-//! DIVERGENCE recorded in [`PUBLICATION_CACHE_TIME_RANGE_DIVERGENCE`] rather
-//! than a silent omission: wz replies with the whole ring where upstream would
-//! reply with a sub-range.
+//! - Each reply is filtered by the query's `_time` range, and only when the query
+//!   carries a range upstream's parser accepts AND the sample carries a
+//!   timestamp: an unreadable `_time`, or a sample with no timestamp, is not
+//!   filtered. The range is [`wz_runtime_tokio::time_range`], the one reader the
+//!   advanced cache uses too.
 //!
 //! ## `QueryingSubscriber` semantics
 //!
@@ -73,6 +73,9 @@
 use std::collections::{HashMap, VecDeque};
 use std::ffi::c_void;
 use std::sync::{Arc, Mutex};
+use std::time::SystemTime;
+
+use wz_runtime_tokio::time_range::{of_parameters, TimeRange};
 
 use crate::abi::{
     z_loaned_keyexpr_t, z_loaned_query_t, z_loaned_sample_t, z_loaned_session_t, z_moved_bytes_t,
@@ -82,12 +85,6 @@ use crate::ffi::{guard_val, guarded};
 use crate::keyexpr::{keyexpr_str, DeclaredKeyexpr};
 use crate::publisher::{zc_locality_default, zc_locality_t};
 use crate::result::{ZResult, Z_EINVAL, Z_ENULL, Z_OK};
-
-/// The `_time` range filter upstream's publication cache applies to each reply
-/// and wz does not. RECORDED, not silently dropped: a query carrying a `_time`
-/// selector gets the whole ring here and a sub-range upstream.
-pub const PUBLICATION_CACHE_TIME_RANGE_DIVERGENCE: &str =
-    "ze_publication_cache ignores the query's _time range (zenoh-ext replies a sub-range)";
 
 /// Upstream buffers live samples until the declaration-time query completes;
 /// wz forwards both as they arrive. Same SET, unpinned ORDER.
@@ -447,6 +444,8 @@ unsafe extern "C" fn cache_on_query(query: *mut z_loaned_query_t, context: *mut 
         return;
     };
     let query_ke = query_ke.to_owned();
+    // SAFETY: `query` is the loaned query this callback was handed.
+    let time_range = unsafe { query_time_range(query) };
     let rings = core.rings.lock().expect("publication cache ring poisoned");
     // Upstream branches on the LITERAL presence of `*`, not on "is this a
     // pattern" — reproduced rather than improved, because a difference from
@@ -465,10 +464,33 @@ unsafe extern "C" fn cache_on_query(query: *mut z_loaned_query_t, context: *mut 
             continue;
         }
         for sample in queue {
+            // Upstream filters only when the query has a range it can read AND the
+            // sample has a timestamp (`publication_cache.rs:321-325`); a sample
+            // without one is replied to every query.
+            if let (Some(range), Some(timestamp)) = (&time_range, &sample.timestamp) {
+                if !range.contains_ntp64(timestamp._time) {
+                    continue;
+                }
+            }
             // SAFETY: every pointer below is built here and valid for the call.
             unsafe { reply_cached(query, sample) };
         }
     }
+}
+
+/// The `_time` range a query carries, resolved against the moment it is answered.
+///
+/// # Safety
+/// `query` must be a valid loaned query.
+unsafe fn query_time_range(query: *const z_loaned_query_t) -> Option<TimeRange<SystemTime>> {
+    let mut parameters = crate::abi::z_view_string_t::null_value();
+    // SAFETY: the caller's contract; `parameters` is a writable view.
+    unsafe { crate::query::z_query_parameters(query, &mut parameters) };
+    // SAFETY: `parameters` was just written and lives to the end of this call.
+    let loaned = unsafe { crate::string::z_view_string_loan(&parameters) };
+    // SAFETY: as above.
+    let bytes = unsafe { crate::string::loaned_string_bytes(loaned) }?;
+    of_parameters(std::str::from_utf8(bytes).ok()?, SystemTime::now())
 }
 
 /// Reply one cached sample to `query`, reproducing its kind, attachment and
