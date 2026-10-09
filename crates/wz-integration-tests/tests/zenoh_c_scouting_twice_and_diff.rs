@@ -154,6 +154,12 @@ int main(int argc, char** argv) {
     if (getenv("LISTEN_EMPTY")) insert(&config, "listen/endpoints", "[]");
     /* Multicast scouting off, for the rows that ask what gossip alone introduces. */
     if (getenv("SCOUTING_OFF")) insert(&config, "scouting/multicast/enabled", "false");
+    /* The interface the Scout leaves by, as the address literal the key takes: the text of the
+       environment variable is quoted here and not by the row. */
+    if (getenv("SCOUT_IFACE")) {
+        snprintf(buf, sizeof buf, "\"%s\"", getenv("SCOUT_IFACE"));
+        insert(&config, "scouting/multicast/interface", buf);
+    }
     /* The gossip keys a row sets on ONE node of a trio, each as the json5 value the key takes,
        and the node's own id (the tie-break `greater-zid` compares). */
     if (getenv("GOSSIP_ENABLED")) insert(&config, "scouting/gossip/enabled", getenv("GOSSIP_ENABLED"));
@@ -2699,4 +2705,109 @@ fn a_node_scouting_on_an_ipv6_group_behaves_identically_on_wz_and_libzenohc() {
              not end as two real peers do"
         );
     }
+}
+
+/// The addresses of this host that an IPv6 Scout can leave by: an address of an interface that is
+/// up and multicast-capable, read from the kernel's own tables (`/proc/net/if_inet6`, and the
+/// interface flags under `/sys/class/net`) and not from a name the row types. Loopback is not one.
+fn host_ipv6_multicast_addresses() -> Vec<String> {
+    const IFF_UP: u32 = 0x1;
+    const IFF_MULTICAST: u32 = 0x1000;
+    let Ok(table) = std::fs::read_to_string("/proc/net/if_inet6") else {
+        return Vec::new();
+    };
+    let mut found = Vec::new();
+    for line in table.lines() {
+        let fields: Vec<&str> = line.split_whitespace().collect();
+        let [hex, _idx, _plen, scope, _flags, name] = fields[..] else {
+            continue;
+        };
+        if scope == "10" {
+            continue; // host scope: the loopback address
+        }
+        let flags = std::fs::read_to_string(format!("/sys/class/net/{name}/flags"))
+            .ok()
+            .and_then(|t| u32::from_str_radix(t.trim().trim_start_matches("0x"), 16).ok())
+            .unwrap_or(0);
+        if flags & IFF_UP == 0 || flags & IFF_MULTICAST == 0 || hex.len() != 32 {
+            continue;
+        }
+        let groups: Vec<u16> = (0..8)
+            .map(|i| u16::from_str_radix(&hex[i * 4..i * 4 + 4], 16).unwrap_or(0))
+            .collect();
+        let octets: [u16; 8] = groups.try_into().expect("eight groups");
+        found.push(std::net::Ipv6Addr::from(octets).to_string());
+    }
+    found
+}
+
+/// [`two_peers_on`] with the Scout pinned to `iface` by `scouting/multicast/interface`.
+fn two_peers_on_iface(
+    y: &Built,
+    reference: &Built,
+    key: &str,
+    group: &str,
+    iface: &str,
+) -> (Outcome, Outcome) {
+    let env = [("SCOUT_IFACE", iface)];
+    let mut a = Node::start_with(y, &peer_spec(key, "Y", group), &env);
+    let open_a = a.opened();
+    let mut b = Node::start_with(reference, &peer_spec(key, "X", group), &env);
+    let open_b = b.opened();
+    (a.finish(open_a), b.finish(open_b))
+}
+
+/// An IPv6 interface named for an IPv6 group, on every address of this host that can carry one.
+/// Measured on the real library: the interface key takes the address literal as it is, and the
+/// Scout then leaves for the group by that interface, so two peers CAN find each other on an IPv6
+/// group. Whether they do is the host's, because upstream joins an IPv6 group once, on interface 0,
+/// and a Scout sent by another interface is heard only when the two are the same one: on the host
+/// this was written on the two `tailscale0` addresses find each other and the Wi-Fi address does
+/// not, with the same group and the same code. So the real library's rows are taken per address
+/// and the wz arm must end each one the same way, whichever way that is.
+///
+/// A host with no multicast-capable IPv6 interface (a hosted runner may be one) grades NOTHING and
+/// says so; the row prints how many addresses it graded so that a pass over none is not read as a
+/// pass.
+// wz-proves: api-compat-c zenoh-c->wz partial
+#[test]
+#[ignore = "reads a zenoh-c oracle; run by run-ci Layer C1cc (which builds the matching \
+            ABI arm this needs)"]
+fn a_node_scouting_on_an_ipv6_group_by_an_ipv6_interface_behaves_identically_on_wz_and_libzenohc() {
+    let Some(programs) = programs() else {
+        return;
+    };
+    let addresses = host_ipv6_multicast_addresses();
+    for (n, iface) in addresses.iter().enumerate() {
+        let key = format!("wz/scouting/v6iface/{n}");
+        let group = format!("[ff05::232]:{}", 7620 + n);
+        let (oracle_y, oracle_x) = two_peers_on_iface(
+            &programs.reference,
+            &programs.reference,
+            &key,
+            &group,
+            iface,
+        );
+        let met = "open=0 | declare=0 senders=X,Y dups=0";
+        for (row, tag) in [(&oracle_y.row, "Y"), (&oracle_x.row, "X")] {
+            let alone = format!("open=0 | declare=0 senders={tag} dups=0");
+            assert!(
+                row == met || *row == alone,
+                "the REAL library's row for a peer on {group} by {iface} is neither met nor alone: \
+                 {row}"
+            );
+        }
+        let (wz_y, wz_x) =
+            two_peers_on_iface(&programs.wz, &programs.reference, &key, &group, iface);
+        assert_eq!(
+            (wz_y.row.as_str(), wz_x.row.as_str()),
+            (oracle_y.row.as_str(), oracle_x.row.as_str()),
+            "§5.27 api-compat-c: a wz peer (first) and a real peer on the IPv6 group {group} by \
+             the interface {iface} do not end as two real peers do"
+        );
+    }
+    eprintln!(
+        "graded {} IPv6 interface address(es) of this host: {addresses:?}",
+        addresses.len()
+    );
 }

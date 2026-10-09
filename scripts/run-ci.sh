@@ -20433,6 +20433,19 @@ layer_c1cc_api_compat_c() {
         --test-threads=1 \
         --exact a_node_scouting_on_an_ipv6_group_behaves_identically_on_wz_and_libzenohc \
         || return 1
+    # R3127 -- the same group with an IPv6 interface named for it, on every address of the host
+    # that can carry one. The real library takes the address literal as the interface and joins
+    # the group once, on interface 0, so whether its Scout is heard is the host's (two peers find
+    # each other by a `tailscale0` address and not by the Wi-Fi one); the row takes the real
+    # library's rows per address and asks wz to end each the same way. It prints how many
+    # addresses it graded: a host with none (a hosted runner may be one) grades nothing.
+    _runci_guarded_test \
+        "C1cc a_node_scouting_on_an_ipv6_group_by_an_ipv6_interface_behaves_identically_on_wz_and_libzenohc" 1 \
+        cargo test -p wz-integration-tests \
+        --test zenoh_c_scouting_twice_and_diff -- --ignored --quiet \
+        --test-threads=1 \
+        --exact a_node_scouting_on_an_ipv6_group_by_an_ipv6_interface_behaves_identically_on_wz_and_libzenohc \
+        || return 1
     _runci_guarded_test \
         "C1cc an_advanced_subscriber_of_the_publishers_own_session_hears_it_on_wz_and_libzenohc" 1 \
         cargo test -p wz-integration-tests \

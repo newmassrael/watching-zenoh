@@ -182,6 +182,38 @@ impl ScoutingPlan {
     }
 }
 
+/// The interface the GROUP socket is joined on. An IPv4 group is joined on the interface the
+/// config names, and an IPv6 group is joined ONCE, on interface 0 -- the kernel's choice -- whatever
+/// the config names, as upstream's `bind_mcast_port` does
+/// (`zenoh/src/net/runtime/orchestrator.rs` @ `socket.join_multicast_v6(&addr, 0)`). That is why an
+/// IPv6 Scout that leaves by a named interface is heard only when the kernel's choice and that
+/// interface are the same one: it is a property of the host, and wz keeps it.
+fn group_join_interface(plan: &ScoutingPlan) -> Option<&str> {
+    if plan.group.is_ipv6() {
+        None
+    } else {
+        plan.interface.as_deref()
+    }
+}
+
+/// The addresses a Scout leaves by when the config names `interface`. An ADDRESS LITERAL is that
+/// address, of either family, whether or not this host holds it, because upstream's
+/// `get_interfaces` parses the text as an address before it looks for an interface of that name
+/// (`zenoh/src/net/runtime/orchestrator.rs` @ `name.trim().parse::<IpAddr>()`); a NAME is the
+/// IPv4 addresses of the interface it names.
+fn named_interface_addresses(interface: &str) -> io::Result<Vec<IpAddr>> {
+    if let Ok(address) = interface.trim().parse::<IpAddr>() {
+        return Ok(vec![address]);
+    }
+    Ok(
+        wz_runtime_tokio::link_interfaces::unicast_addresses_of_interface(interface)
+            .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, format!("{e:?}")))?
+            .into_iter()
+            .filter(IpAddr::is_ipv4)
+            .collect(),
+    )
+}
+
 /// The scouting sockets of one node, bound: the group joined and a Scout sent from every
 /// interface that can carry one.
 ///
@@ -197,7 +229,7 @@ impl ScoutLink {
     pub async fn bind(plan: &ScoutingPlan) -> io::Result<Self> {
         let group = plan.group;
         let config = McastSocketConfig {
-            iface: plan.interface.as_deref(),
+            iface: group_join_interface(plan),
             ttl: plan.ttl,
             ..McastSocketConfig::default()
         };
@@ -206,11 +238,7 @@ impl ScoutLink {
         // config names none, and the named one's own addresses when it does, as upstream's
         // `get_interfaces` resolves them.
         let locals = match plan.interface.as_deref() {
-            Some(iface) => wz_runtime_tokio::link_interfaces::unicast_addresses_of_interface(iface)
-                .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, format!("{e:?}")))?
-                .into_iter()
-                .filter(IpAddr::is_ipv4)
-                .collect(),
+            Some(iface) => named_interface_addresses(iface)?,
             None => scout_interface_addresses().unwrap_or_default(),
         };
         let (ask, refused) = bind_scout_sockets(group, plan.port, &locals, plan.ttl).await;
@@ -442,17 +470,13 @@ pub async fn bind_responder(
             .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e.to_string()))?
             .with_noloopback_locators(advertised.remote);
     let config = McastSocketConfig {
-        iface: plan.interface.as_deref(),
+        iface: group_join_interface(plan),
         ttl: plan.ttl,
         ..McastSocketConfig::default()
     };
     let group_socket = UdpDriver::bind_scouting_group(plan.group, plan.port, config).await?;
     let replies = match plan.interface.as_deref() {
-        Some(iface) => wz_runtime_tokio::link_interfaces::unicast_addresses_of_interface(iface)
-            .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, format!("{e:?}")))?
-            .into_iter()
-            .filter(IpAddr::is_ipv4)
-            .collect(),
+        Some(iface) => named_interface_addresses(iface)?,
         None => {
             wz_runtime_tokio::link_interfaces::multicast_interface_addresses().unwrap_or_default()
         }
@@ -588,6 +612,37 @@ mod tests {
         let mut node = ZenohNodeConfig::default();
         node.scout_multicast_autoconnect = Some(WhatAmIMatcher::empty());
         assert!(!resolved(&node, Role::Client).scouts());
+    }
+
+    /// An address literal named as the interface is that address, of either family and whether or
+    /// not this host holds it, and an IPv6 group is joined on interface 0 whatever interface is
+    /// named while an IPv4 group is joined on the named one.
+    #[test]
+    fn an_address_literal_is_the_interface_and_an_ipv6_group_is_joined_on_interface_zero() {
+        for text in ["192.0.2.7", "fd7a:115c:a1e0::1", " ::1 "] {
+            let expected: IpAddr = text.trim().parse().expect("a literal");
+            assert_eq!(
+                named_interface_addresses(text).expect("a literal resolves"),
+                vec![expected],
+                "`{text}` is the address it spells"
+            );
+        }
+        let mut node = ZenohNodeConfig::default();
+        node.scout_multicast_interface = Some(String::from("fd7a:115c:a1e0::1"));
+        node.scout_multicast_address = Some(String::from("[ff05::232]:7511"));
+        let v6 = resolved(&node, Role::Peer);
+        assert_eq!(
+            group_join_interface(&v6),
+            None,
+            "an IPv6 group joins on interface 0"
+        );
+        node.scout_multicast_address = Some(String::from("224.0.0.231:7511"));
+        let v4 = resolved(&node, Role::Peer);
+        assert_eq!(
+            group_join_interface(&v4),
+            Some("fd7a:115c:a1e0::1"),
+            "an IPv4 group joins on the interface named"
+        );
     }
 
     /// An IPv6 group is a plan like any other: the family is the group's, and the port follows it.

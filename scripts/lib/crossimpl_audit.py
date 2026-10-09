@@ -1063,7 +1063,11 @@ HOST_GATED_CI_TARGETS: dict[str, str] = {
 # and compares them: a link-local group fails the open on both, a wider one opens and finds
 # nobody on both. The real library's rows are asserted first. Measured by
 # `scripts/audit-crossimpl-proof.sh`.
-FOREIGN_ADJUDICATOR_LINKS = 1045
+# R3127 -- 1045 -> 1046, RISING by one: a new row in the same file that runs one C program linked
+# at the real `libzenohc` and at wz's C ABI on an IPv6 group with an IPv6 interface named for it,
+# once per address of the host that can carry one, and compares them. The real library's rows are
+# asserted first. Measured by `scripts/audit-crossimpl-proof.sh`.
+FOREIGN_ADJUDICATOR_LINKS = 1046
 
 # ── Execution disclosure ────────────────────────────────────────────────────────
 #
