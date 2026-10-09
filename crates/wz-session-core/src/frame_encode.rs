@@ -1076,7 +1076,8 @@ pub fn build_fragment_wire(
 /// a TENTH byte for such a value; the codec this function calls ends a VLE at
 /// nine bytes, the last carrying eight bits (`SceSink::write_vle_u64`, "1-9
 /// wire bytes. Canonical Zenoh ZInt", and upstream's `vle_len` returns 9 for the
-/// top bucket, `commons/zenoh-codec/src/core/zint.rs:23-52`). Every value the
+/// top bucket, `commons/zenoh-codec/src/core/zint.rs` @
+/// `const fn vle_len(x: u64) -> usize {`). Every value the
 /// session TX path can mint is below `2^63` (`sn::mask_from_res(3)`), where the
 /// two agree byte for byte; the test
 /// `build_frame_wire_matches_begin_frame_below_the_widest_ring` holds that,
@@ -1104,7 +1105,8 @@ pub fn build_frame_wire(
     {
         // The codec writes `VLE(sn)` and, with an empty payload, nothing else:
         // the extension has to sit between the two, which is the order the
-        // wire has (`zenoh-codec/src/transport/frame.rs` `FrameHeader` write).
+        // wire has (`commons/zenoh-codec/src/transport/frame.rs` @
+        // `// FrameHeader`, the header write).
         let mut sink = VecSink::new(&mut wire);
         wz_codecs::frame::Frame { sn, payload: &[] }
             .encode(&mut sink)

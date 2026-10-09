@@ -3131,10 +3131,11 @@ int wz_dissect_e2e_open(const char *profile_json, const unsigned char *frame,
  * 8bit holds 0 to 127 (a one-byte VLE at most), 16bit 0 to 16383 (two bytes),
  * 32bit 0 to 268435455 (four) and 64bit 0 to 9223372036854775807 (nine).
  * Upstream spells the same four masks
- * (`io/zenoh-transport/src/common/seq_num.rs:17-20`) and casts the last to its
- * 32-bit sequence number type, so on that ring a peer that is upstream zenoh
- * holds 0 to 4294967295. Without the key any 64-bit value is written: the
- * format has no ring of its own, a handshake sizes it.
+ * (`io/zenoh-transport/src/common/seq_num.rs` @
+ * `const RES_U64: TransportSn = (u64::MAX >> 1) as TransportSn;`) and casts the
+ * last to its 32-bit sequence number type, so on that ring a peer that is
+ * upstream zenoh holds 0 to 4294967295. Without the key any 64-bit value is
+ * written: the format has no ring of its own, a handshake sizes it.
  * WHICH FIELDS CHANGE WIDTH WITH THE RESOLUTION: only these, and only as the
  * VLE of their value does. `sn` of a Frame and of a Fragment and `initial_sn`
  * of an OPEN are VLEs whose width follows their VALUE, and the resolution bounds
@@ -3144,8 +3145,8 @@ int wz_dissect_e2e_open(const char *profile_json, const unsigned char *frame,
  * the request id the other resolution sizes lives in network messages, which
  * this door carries as opaque `payload` bytes. Upstream reads a sequence
  * number as a 32-bit integer and truncates what is wider
- * (`commons/zenoh-codec/src/core/zint.rs:175-200`), so a value past 2^32 - 1 is
- * written as given and read back differently by that peer.
+ * (`commons/zenoh-codec/src/core/zint.rs` @ `uint_impl!(u32);`), so a value
+ * past 2^32 - 1 is written as given and read back differently by that peer.
  *
  * DOES ANY TRANSPORT MESSAGE CARRY AN INTEGRITY FIELD OF ITS OWN? No. Read at
  * the pinned upstream (zenoh 1.10.1), no transport message carries a checksum,
@@ -3153,25 +3154,39 @@ int wz_dissect_e2e_open(const char *profile_json, const unsigned char *frame,
  * sender computes from the rest of the message to let a receiver detect
  * damage. The places a reader might look, and what they are:
  *   - Frame, Fragment, KeepAlive, Close: header, sequence number, extensions
- *     and payload only (`commons/zenoh-protocol/src/transport/{frame,fragment,
- *     keepalive,close}.rs`); their reserved bits are reserved (reported as such
- *     below), not a check.
+ *     and payload only:
+ *     `commons/zenoh-protocol/src/transport/frame.rs` @ `pub struct Frame {`,
+ *     `commons/zenoh-protocol/src/transport/fragment.rs` @ `pub struct Fragment {`,
+ *     `commons/zenoh-protocol/src/transport/close.rs` @ `pub struct Close {` and
+ *     `commons/zenoh-protocol/src/transport/keepalive.rs` @ `pub struct KeepAlive;`.
+ *     Their reserved bits are reserved (reported as such below), not a check.
  *   - The cookie (InitAck, echoed in OpenSyn) is opaque bytes the ACCEPTOR makes
- *     and later checks: it encrypts its own state with a private cipher and
- *     compares a nonce on the echo (`io/zenoh-transport/src/unicast/
- *     establishment/accept.rs:370-407` and `:486-512`). Nothing on the wire
- *     defines it and a caller cannot compute a valid one; to send an accepted
- *     cookie, echo the one a real InitAck carried.
- *   - The Auth extension (id 3, `init.rs:154`, `open.rs:115`) is a challenge
- *     and response. Its usrpwd method carries an HMAC of the password keyed by a
- *     nonce from the peer (`.../ext/auth/usrpwd.rs:325-331`, checked at
- *     `:420-423`) and its pubkey method an RSA-encrypted nonce (`.../ext/auth/
- *     pubkey.rs:260-335`): a proof of identity, not a protection of the
- *     message that carries it. The Shm (id 2, `init.rs:150`) and MultiLink
- *     (id 4) extensions carry challenges of the same kind.
+ *     and later checks: it encrypts its own state with a private cipher
+ *     (`io/zenoh-transport/src/unicast/establishment/accept.rs` @
+ *     `codec.write(&mut writer, &cookie).map_err(|_| {`) and compares a nonce on
+ *     the echo (the same file @ `if input.cookie_nonce != cookie.nonce {`).
+ *     Nothing on the wire defines it and a caller cannot compute a valid one; to
+ *     send an accepted cookie, echo the one a real InitAck carried.
+ *   - The Auth extension (id 3) is a challenge and response
+ *     (`commons/zenoh-protocol/src/transport/init.rs` @
+ *     `pub type Auth = zextzbuf!(0x3, false);`, and
+ *     `commons/zenoh-protocol/src/transport/open.rs` @
+ *     `pub type Auth = zextzbuf!(0x3, false);`). Its usrpwd method carries an HMAC
+ *     of the password keyed by a nonce from the peer
+ *     (`io/zenoh-transport/src/unicast/establishment/ext/auth/usrpwd.rs` @
+ *     `let hmac = hmac::sign(&key, password)`, checked at the same file @
+ *     `if hmac != open_syn.hmac {`) and its pubkey method an RSA-encrypted nonce
+ *     (`io/zenoh-transport/src/unicast/establishment/ext/auth/pubkey.rs` @
+ *     `pub(crate) nonce_encrypted_with_alice_pubkey: Vec<u8>,`): a proof of
+ *     identity, not a protection of the message that carries it. The Shm
+ *     (id 2, `commons/zenoh-protocol/src/transport/init.rs` @
+ *     `pub type Shm = zextzbuf!(0x2, false);`) and MultiLink (id 4) extensions
+ *     carry challenges of the same kind.
  *   - The Compression extension (id 6) negotiates an lz4 block with no
- *     checksum (`io/zenoh-transport/src/common/batch.rs:327-340,451-458`), and
- *     the Patch extension (id 7) is a level.
+ *     checksum (`io/zenoh-transport/src/common/batch.rs` @
+ *     `lz4_flex::block::compress_into(payload, b)`, and the same file @
+ *     `lz4_flex::block::decompress_into(payload, into.as_mut())`), and the Patch
+ *     extension (id 7) is a level.
  * A link may carry a checksum of its own (TCP and UDP do, and a normal socket
  * send cannot forge it); that is the link's, outside every unit this door
  * builds. A consumer that was going to build an integrity case for the
@@ -3182,11 +3197,13 @@ int wz_dissect_e2e_open(const char *profile_json, const unsigned char *frame,
  *   - WZ_DISSECT_FRAMING_DATAGRAM: the message alone. One datagram is one unit
  *     (UDP, multicast).
  *   - WZ_DISSECT_FRAMING_TCP_STREAM: a 16-bit little-endian length, then the
- *     message (`commons/zenoh-protocol/src/transport/mod.rs:36-40`): TCP, TLS,
- *     WebSocket, a QUIC stream. A body over 65535 bytes is refused.
+ *     message (`commons/zenoh-protocol/src/transport/mod.rs` @
+ *     `16 bits (2 bytes) may be prepended to the serialized message`): TCP,
+ *     TLS, WebSocket, a QUIC stream. A body over 65535 bytes is refused.
  *   - WZ_DISSECT_FRAMING_LOWLATENCY_STREAM: a 32-bit little-endian length, then
  *     the message, on a streamed link whose session negotiated LowLatency
- *     (`io/zenoh-transport/src/unicast/lowlatency/link.rs:41-50`).
+ *     (`io/zenoh-transport/src/unicast/lowlatency/link.rs` @
+ *     `len = (buffer.len() - 4) as u32;`).
  *
  * The document carries BOTH the unit (what you write to the socket) and the
  * body (the same message without the prefix), whatever the framing.

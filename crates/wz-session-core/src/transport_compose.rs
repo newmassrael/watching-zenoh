@@ -44,15 +44,24 @@
 //!
 //! # Where the wire facts come from
 //!
-//! Read at the pinned upstream (zenoh 1.10.1), `commons/zenoh-protocol/src/
-//! transport/`: `init.rs:38-95` (INIT header, `A`/`S`/`Z`, `cbyte`, `sn_res`,
-//! `batch_size`, cookie), `open.rs:35-57` (OPEN header, `A`/`T`/`Z`, lease,
-//! initial_sn, cookie on the SYN only), `frame.rs:46-62` and `fragment.rs:
-//! 48-64` (`R`, `M`, `Z`, `sn`, extensions, payload), `close.rs` and
-//! `keepalive.rs` (`S`, and the reserved bits). The stream prefixes are
-//! `transport/mod.rs:36-40` (a 16-bit little-endian length for streamed links)
-//! and `io/zenoh-transport/src/unicast/lowlatency/link.rs:41-50` (a 32-bit
-//! little-endian length once the session is LowLatency).
+//! Read at the pinned upstream (zenoh 1.10.1):
+//!
+//! * INIT header, `A`/`S`/`Z`, `cbyte`, `sn_res`, `batch_size`, cookie:
+//!   `commons/zenoh-protocol/src/transport/init.rs` @ `|zid_len|x|x|wai|`;
+//! * OPEN header, `A`/`T`/`Z`, lease, initial_sn, cookie on the SYN only:
+//!   `commons/zenoh-protocol/src/transport/open.rs` @ `pub struct OpenSyn {`;
+//! * `R`, `M`, `Z`, `sn`, extensions, payload:
+//!   `commons/zenoh-protocol/src/transport/frame.rs` @ `pub struct Frame {` and
+//!   `commons/zenoh-protocol/src/transport/fragment.rs` @ `pub struct Fragment {`;
+//! * `S`, and the reserved bits:
+//!   `commons/zenoh-protocol/src/transport/close.rs` @ `pub struct Close {` and
+//!   `commons/zenoh-protocol/src/transport/keepalive.rs` @ `pub struct KeepAlive;`;
+//! * the stream prefixes, a 16-bit little-endian length for streamed links:
+//!   `commons/zenoh-protocol/src/transport/mod.rs` @
+//!   `16 bits (2 bytes) may be prepended to the serialized message`, and a
+//!   32-bit one once the session is LowLatency:
+//!   `io/zenoh-transport/src/unicast/lowlatency/link.rs` @
+//!   `len = (buffer.len() - 4) as u32;`.
 
 use alloc::vec::Vec;
 
@@ -91,7 +100,8 @@ pub enum ComposeError {
     /// A resolution code above 3: the wire holds two bits per resolution.
     ResolutionCode(u8),
     /// A QoS priority above 7: the transport `QoSType` keeps it in three bits
-    /// (`commons/zenoh-protocol/src/transport/mod.rs:277`).
+    /// (`commons/zenoh-protocol/src/transport/mod.rs` @
+    /// `const P_MASK: u8 = 0b00000111;`).
     Priority(u8),
     /// An extension id above 15: the entry header keeps it in four bits.
     ExtensionId {
@@ -133,15 +143,17 @@ pub enum ComposeError {
 /// The repository's own answer (`sn::mask_from_res`, zenoh-pico
 /// `_z_sn_max`), which is also upstream's: `RES_U8` is `u8::MAX >> 1`, one byte
 /// when encoded, up to `RES_U64`, `u64::MAX >> 1`, nine bytes
-/// (`io/zenoh-transport/src/common/seq_num.rs:17-20`). A code above 3 answers
-/// with the widest ring, as `mask_from_res` does.
+/// (`io/zenoh-transport/src/common/seq_num.rs` @
+/// `const RES_U64: TransportSn = (u64::MAX >> 1) as TransportSn;`). A code above
+/// 3 answers with the widest ring, as `mask_from_res` does.
 pub const fn sn_ring_max(code: u8) -> u64 {
     crate::sn::mask_from_res(code)
 }
 
 /// What the wire stores for `sn_res`: the frame/fragment resolution in bits
 /// 0-1 and the request-id resolution in bits 2-3, the upper nibble reserved and
-/// written zero (`zenoh-protocol/src/transport/init.rs:54`, `x|x|x|x|rid|fsn`).
+/// written zero (`commons/zenoh-protocol/src/transport/init.rs` @
+/// `|x|x|x|x|rid|fsn|`).
 const fn pack_sn_res(frame_sn_code: u8, request_id_code: u8) -> u8 {
     (frame_sn_code & 0x03) | ((request_id_code & 0x03) << 2)
 }
@@ -408,7 +420,7 @@ fn check_priority(priority: Option<u8>) -> Result<Option<Priority>, ComposeError
 
 /// The wire `cbyte`: `whatami` in the low two bits, `zid_len - 1` in the high
 /// nibble, the two bits between them reserved and written zero
-/// (`init.rs:50`, `|zid_len|x|x|wai|`).
+/// (`commons/zenoh-protocol/src/transport/init.rs` @ `|zid_len|x|x|wai|`).
 fn cbyte(whatami: u8, zid_len: usize) -> u8 {
     whatami | (((zid_len as u8) - 1) << 4)
 }
@@ -607,7 +619,8 @@ pub fn compose_fragment(spec: &FragmentSpec<'_>) -> Result<Vec<u8>, ComposeError
 /// The 16-bit prefix is the `StreamEnvelope` codec the streamed links use. The
 /// 32-bit one has no codec: the LowLatency link writes
 /// `(buffer.len() - 4) as u32` little-endian into the first four bytes
-/// (`io/zenoh-transport/src/unicast/lowlatency/link.rs:41-50`), and
+/// (`io/zenoh-transport/src/unicast/lowlatency/link.rs` @
+/// `len = (buffer.len() - 4) as u32;`), and
 /// `wz-runtime-tokio`'s stream driver writes the same four bytes by hand.
 pub fn frame_unit(framing: Framing, body: &[u8]) -> Result<Vec<u8>, ComposeError> {
     if body.len() as u64 > framing.max_body() {

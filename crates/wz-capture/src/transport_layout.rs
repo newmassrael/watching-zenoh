@@ -235,8 +235,8 @@ pub enum LayoutError {
     },
 }
 
-/// `commons/zenoh-protocol/src/common/mod.rs:23-28`: a header's message id is
-/// its low `HEADER_BITS = 5` bits.
+/// `commons/zenoh-protocol/src/common/mod.rs` @ `pub const HEADER_BITS: u8 = 5;`:
+/// a header's message id is its low `HEADER_BITS` bits.
 const MID_MASK: u8 = 0x1F;
 
 #[derive(Clone, Copy, PartialEq, Eq)]

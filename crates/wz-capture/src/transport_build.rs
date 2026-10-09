@@ -76,8 +76,9 @@ pub const MESSAGES: [&str; 8] = [
 ];
 
 /// The words a resolution is written as, indexed by the wire's two-bit code:
-/// upstream's own spelling (`commons/zenoh-protocol/src/core/resolution.rs:
-/// 30-33`), which the dissector's `sn_res_frame_sn` label prints as well.
+/// upstream's own spelling (`commons/zenoh-protocol/src/core/resolution.rs` @
+/// `const S8: &'static str = "8bit";`), which the dissector's `sn_res_frame_sn`
+/// label prints as well.
 pub const RESOLUTION_WORDS: [&str; 4] = ["8bit", "16bit", "32bit", "64bit"];
 
 /// What a build produced.

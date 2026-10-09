@@ -518,8 +518,9 @@ fn the_door_builds_the_bytes_the_independent_oracle_lays() {
 /// held against bytes typed from the upstream header rules: Close is
 /// `[0x20 S | 0x03][reason]`, KeepAlive `[0x04]`, and a Fragment's `First`
 /// marker is the extension header `0x02` (id 2, unit, not mandatory) behind a
-/// header with `Z` set (`close.rs` flags, `keepalive.rs`, `fragment.rs:19-23,
-/// 89-94` at the pinned upstream).
+/// header with `Z` set (flags: `commons/zenoh-protocol/src/transport/close.rs` @
+/// `pub const S: u8 = 1 << 5;`; `commons/zenoh-protocol/src/transport/fragment.rs`
+/// @ `pub type First = zextunit!(0x2, false);`).
 #[test]
 fn the_messages_the_oracle_lacks_are_the_bytes_the_upstream_headers_give() {
     assert_eq!(
@@ -1147,7 +1148,8 @@ fn rows_have_unique_names_and_tile_the_body() {
 /// written out from its definition and not asked of the codec: a VLE takes seven
 /// bits per byte, so `w` bytes hold `2^(7(w-1))` to `2^(7w) - 1`, except that the
 /// ninth byte carries eight bits and ends at the top of a `u64`
-/// (`commons/zenoh-codec/src/core/zint.rs:23-52`). The report must say exactly
+/// (`commons/zenoh-codec/src/core/zint.rs` @ `const fn vle_len(x: u64) -> usize {`).
+/// The report must say exactly
 /// that for a sequence number of each width, and the value at each end must
 /// build to that width while one past the top builds to the next.
 #[test]
@@ -1220,8 +1222,12 @@ fn the_offsets_of_a_frame_follow_the_vle_width_of_its_sn() {
 }
 
 /// The reserved bits are the complement of what the message's fields own, per
-/// message: this is the table the format has (`init.rs:50-54`, `frame.rs:19-21`,
-/// `close.rs`, `keepalive.rs` at the pinned upstream).
+/// message: this is the table the format has (INIT's `cbyte` and `sn_res` in
+/// `commons/zenoh-protocol/src/transport/init.rs` @ `|zid_len|x|x|wai|`, the
+/// header flags in `commons/zenoh-protocol/src/transport/frame.rs` @
+/// `pub const R: u8 = 1 << 5;`, and the reserved bits of Close and KeepAlive in
+/// `commons/zenoh-protocol/src/transport/keepalive.rs` @
+/// `// pub const X: u8 = 1 << 6; // 0x40       Reserved`).
 #[test]
 fn the_reserved_bits_are_what_no_field_of_the_message_owns() {
     let reserved = |json: &str| -> Vec<(String, u8)> {
