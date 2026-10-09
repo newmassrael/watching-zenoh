@@ -48,6 +48,7 @@ use wz_capi_c::result::Z_OK;
 use wz_capi_c::string::{z_string_data, z_string_drop, z_string_len, z_string_loan};
 
 /// zenohd prints its resolved config on this line before doing anything else.
+// barrier-origin: zenohd "Initial conf:" -- `zenohd/src/main.rs` @ `Initial conf:`
 const RESOLVED_CONF_MARKER: &str = "Initial conf:";
 
 /// How long to wait for zenohd to either print its resolved config or exit.

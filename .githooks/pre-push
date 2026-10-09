@@ -1115,6 +1115,12 @@ round_fed_gates=(
     # lane's arming of its door, feeds it. MEASURED: about 8s, a parse with no build.
     "silent_skip_gate.py --selftest"
     "silent_skip_gate.py --check"
+    # R3172 (item 777) — an e2e barrier must not wait on text no producer in the
+    # tree can print. It reads every Rust source, the C sources, the vendored pico
+    # tree and the scripts that patch it, so a round that rewords a line a barrier
+    # waits on feeds it. MEASURED: about 14s, a parse with no build.
+    "barrier_needle_gate.py --selftest"
+    "barrier_needle_gate.py --check"
 )
 # ⚠ The module and its ARGUMENTS are expanded separately, and that too is
 # forced rather than chosen: `scripts/lib/"${cmd[@]}"` attaches the prefix to

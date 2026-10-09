@@ -2695,6 +2695,7 @@ pub mod common {
     /// Measured on the move: 32 lines of zenohd output at that level for a
     /// spawn, against 3 at info, so the capture cost is not a reason to prefer
     /// a line that cannot fire.
+    // barrier-origin: zenohd "Listener added: tcp/127.0.0.1:" -- `zenoh/src/net/runtime/orchestrator.rs` @ `Listener added:`
     pub const ZENOHD_LISTENER_LINE: &str = "Listener added: tcp/127.0.0.1:";
 
     /// zenohd's scout-listener announcement, printed from `bind_mcast_port` once

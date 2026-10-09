@@ -977,6 +977,7 @@ fn zenoh_ext_cache_refuses_a_get_without_anyke() {
     // POLLED, not read once: the refusal is written by the oracle's rx thread as
     // it processes the query, which can trail the querier's own termination.
     // Reading a single snapshot here raced that write and saw an empty log.
+    // barrier-origin: zenoh-ext "does not intersect with query" -- `zenoh/src/api/queryable.rs` @ `does not intersect with query`
     let oracle_log = wait_for_substring(
         &mut oracle_out,
         "does not intersect with query",
@@ -1075,6 +1076,9 @@ fn zenoh_ext_advanced_sub_recovers_a_wz_cache() {
             .spawn()
             .expect("spawn z_advanced_sub"),
     );
+    // `WZCACHE` is the payload this test handed the wz publisher (`.arg("WZCACHE")`
+    // above), and the index is the sample's own: a value the test sent.
+    // barrier-origin: test-payload "] WZCACHE"
     let last = format!("[{:4}] WZCACHE", CACHED_SAMPLES - 1);
     let sub_out =
         wait_for_substring(&mut sub_reader, &last, MARKER_TIMEOUT).unwrap_or_else(|snapshot| {

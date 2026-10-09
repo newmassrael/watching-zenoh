@@ -7965,6 +7965,9 @@ pub(crate) async fn run_storage_host(listen: &str, opts: StorageHostOpts) -> io:
                 // barrier). R2673 rewrote this line and dropped the phrase; the
                 // barrier is hosted-only, so no local gate could see it go. Lead
                 // with the failure and keep the slot state after it.
+                // Open-debt item 777: `scripts/lib/barrier_needle_gate.py` now
+                // grades that barrier's needle against this literal, so
+                // rewording the line reds a push instead of a hosted run.
                 Err(e) => log::warn!(
                     "wz-ap-demo storage-host: plugin load failed, '{declared}' \
                      stays Declared: {e}"

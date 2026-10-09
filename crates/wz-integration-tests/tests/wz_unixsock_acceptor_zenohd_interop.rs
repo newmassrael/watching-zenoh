@@ -107,6 +107,7 @@ fn wz_unixsock_acceptor_receives_pico_put_via_zenohd() {
     // The wz acceptor must be BOUND (its AF_UNIX socket file present) before zenohd
     // dials. `bind_unixsock` binds SYNCHRONOUSLY before the "(unixsock)" listen log,
     // so the log — plus the socket file on disk — is the bound witness.
+    // barrier-producer: crates/wz-runtime-tokio/src/session_open.rs @ "wz accept: listening on {} ({})" for "(unixsock)"
     let listening = wait_for_substring(&mut wz_reader, "(unixsock)", Duration::from_secs(10));
     let bound = listening.is_ok() && Path::new(&sock_path).exists();
 

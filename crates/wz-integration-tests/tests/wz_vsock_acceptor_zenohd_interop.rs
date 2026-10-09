@@ -122,6 +122,7 @@ fn wz_vsock_acceptor_receives_pico_put_via_zenohd() {
     // The wz acceptor must be BOUND before zenohd dials. `bind_vsock` binds
     // SYNCHRONOUSLY before the "(vsock)" listen log, so the log — carrying the
     // ephemeral port — is the bound witness.
+    // barrier-producer: crates/wz-runtime-tokio/src/session_open.rs @ "wz accept: listening on {} ({})" for "(vsock)"
     let listening = wait_for_substring(&mut wz_reader, "(vsock)", Duration::from_secs(10));
     let port = listening
         .as_ref()

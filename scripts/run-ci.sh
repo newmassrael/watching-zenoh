@@ -1822,6 +1822,18 @@ layer_c0_test_discipline() {
     # the tracked Rust corpus and `run-ci.sh`, so the push hook runs it too.
     python3 scripts/lib/silent_skip_gate.py --selftest || return 1
     python3 scripts/lib/silent_skip_gate.py --check || return 1
+    # R3172 (open-debt item 777) — an e2e barrier must not wait on text no producer
+    # in the tree can print. `wz_plugin_dynamic_loading_pico.rs` waited 15s on
+    # `plugin load failed` after a host change reworded the line; the test is
+    # `#[ignore]`d and only a hosted lane runs it, so two hosted runs were the first
+    # evidence. The two crates cannot share the string (`wz-ap-demo` has no lib), so
+    # every needle of `wait_for_substring` and its derived wrappers is graded against
+    # the literals and templates of the non-test sources, the C sources and the
+    # embedded probes; text from a program the tree does not hold is declared where
+    # it is waited for, and a declaration no barrier uses fails. Needs the pico
+    # submodule, which this job checks out.
+    python3 scripts/lib/barrier_needle_gate.py --selftest || return 1
+    python3 scripts/lib/barrier_needle_gate.py --check || return 1
     # R311y606 — the PYTHON-FLOOR lint, FIRST because every check below it is
     # a python script and their answers are only as portable as the interpreter
     # that runs them. R311y605 landed `import tomllib` (stdlib from 3.11) in

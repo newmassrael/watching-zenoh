@@ -366,6 +366,7 @@ fn spawn_zenoh_ext_view_size(
 /// rather than a sleep. Note that "waiting for N members" does NOT contain the
 /// needle, deliberately: only the decision does.
 fn wait_view_verdict(reader: &mut std::fs::File) -> String {
+    // barrier-origin: zenoh-ext "view size of" -- `zenoh-ext/examples/examples/z_view_size.rs` @ `view size of`
     wait_for_substring(reader, "view size of", MARKER_TIMEOUT).unwrap_or_else(|snapshot| {
         panic!(
             "z_view_size printed neither verdict within {MARKER_TIMEOUT:?}; the \

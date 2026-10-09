@@ -1446,6 +1446,10 @@ fn mesh_node_dials_zenohd_over_unixsock(role: &str) -> String {
             .spawn()
             .expect("spawn wz-ap-demo mesh node --connect unixsock"),
     );
+    // The demo's face-up line prints the peer's own rendering, which for a unix
+    // socket client with no pathname is `<anonymous unixsock-stream peer>` -- one
+    // value with spaces in it, so the template is named rather than searched for.
+    // barrier-producer: crates/wz-ap-demo/src/runner.rs @ "face {} UP (peer {}, zid {}) whatami {:?}" for "face 0 UP (peer <anonymous unixsock-stream peer>"
     const NEEDLE: &str = "face 0 UP (peer <anonymous unixsock-stream peer>";
     let face_up = wait_for_substring(&mut reader, NEEDLE, Duration::from_secs(10));
 

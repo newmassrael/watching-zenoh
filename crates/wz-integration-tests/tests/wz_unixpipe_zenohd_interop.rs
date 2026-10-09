@@ -172,6 +172,9 @@ fn wz_acceptor_reaches_established_from_zenohd_over_unixpipe() {
     );
     // Readiness: the wz acceptor logs the bound listen line + creates the request
     // FIFO before any peer dials.
+    // `(unixpipe)` is the transport name the acceptor's "listening on {addr}
+    // ({transport})" line prints after the rendezvous path, a value no literal holds.
+    // barrier-producer: crates/wz-runtime-tokio/src/session_open.rs @ "wz accept: listening on {} ({})" for "(unixpipe)"
     let listening = wait_for_substring(&mut wz_reader, "(unixpipe)", Duration::from_secs(10));
     assert!(
         listening.is_ok() && wait_for_request_fifo(&base, Duration::from_secs(5)),

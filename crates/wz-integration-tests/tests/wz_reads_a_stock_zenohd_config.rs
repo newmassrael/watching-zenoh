@@ -91,6 +91,7 @@ use wz_session_core::lease::lease_from_wire;
 use wz_session_core::zid_hex::zid_to_zenoh_hex;
 
 /// zenohd prints its resolved config on this line before doing anything else.
+// barrier-origin: zenohd "Initial conf:" -- `zenohd/src/main.rs` @ `Initial conf:`
 const RESOLVED_CONF_MARKER: &str = "Initial conf:";
 
 /// zenohd's own line for the thing a DIALLER depends on: the listener is up.
@@ -1263,6 +1264,10 @@ fn the_acceptance_boundary_is_measured_against_zenohd_case_by_case() {
         } else {
             // The REASON first: a refusal for some other cause is what this
             // leg's own first version accepted as proof.
+            // These two reasons are serde's own wording for a type mismatch in a
+            // derived `Deserialize`, so no string in zenoh's sources holds them.
+            // barrier-origin: zenohd "invalid type: map, expected a boolean"
+            // barrier-origin: zenohd "invalid type: map, expected a string"
             wait_for_substring(&mut capture, reason, STARTUP_BUDGET).unwrap_or_else(|e| {
                 panic!(
                     "{label}: zenohd refused (or hung), but never for the stated \

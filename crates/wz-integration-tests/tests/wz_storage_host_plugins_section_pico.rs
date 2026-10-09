@@ -113,6 +113,16 @@ fn pico_put(z_put: &Path, key: &str, value: &str, addr: &str) {
 }
 
 /// Wait for the host's verdict line, or fail naming the step.
+///
+/// The lines it is asked for end `written|deleted <origin> -- storage_manager
+/// plugin running|not running`, where the origin (`over the wire`, `from
+/// --plugins`) and `not running` are values with spaces in them, so the one
+/// template that prints them is named rather than searched for.
+// barrier-producer: crates/wz-ap-demo/src/runner.rs @ "plugins config key {key} {} {origin} — storage_manager plugin {}" for "plugins config key plugins/storage_manager/storages/demo written over the wire — storage_manager plugin running"
+// barrier-producer: crates/wz-ap-demo/src/runner.rs @ "plugins config key {key} {} {origin} — storage_manager plugin {}" for "plugins config key plugins/storage_manager/storages/demo/key_expr written over the wire — storage_manager plugin running"
+// barrier-producer: crates/wz-ap-demo/src/runner.rs @ "plugins config key {key} {} {origin} — storage_manager plugin {}" for "plugins config key plugins/storage_manager/storages written over the wire — storage_manager plugin running"
+// barrier-producer: crates/wz-ap-demo/src/runner.rs @ "plugins config key {key} {} {origin} — storage_manager plugin {}" for "plugins config key plugins written over the wire — storage_manager plugin not running"
+// barrier-producer: crates/wz-ap-demo/src/runner.rs @ "plugins config key {key} {} {origin} — storage_manager plugin {}" for "plugins config key plugins written from --plugins — storage_manager plugin running"
 fn host_says(host: &mut ChildGuard, log: &mut std::fs::File, line: &str, step: &str) {
     if let Err(c) = wait_for_substring(log, line, Duration::from_secs(15)) {
         let _ = host.child_mut().kill();

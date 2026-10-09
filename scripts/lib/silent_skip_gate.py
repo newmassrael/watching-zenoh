@@ -27,9 +27,12 @@ this tree's lanes decide, BEFORE they ask, whether the fixture is there:
 `_z_unavailable`, `_pico_cli_unavailable` and the other `WZ_*_REQUIRE` branches
 turn an absent oracle into a lane failure on the job that provisions it
 (`armed_skip_guard.py` grades that half over the shell). The in-test skip behind
-such a lane is a second line, and it was measured at 50 sites of the integration
-corpus -- all behind a lane preflight. Making them carry a second switch would
-duplicate the lane's and move nothing.
+such a lane is a second line, and it was measured at 72 sites of the integration
+corpus (the count prints every run). Most sit behind a lane preflight; the
+shared-memory `zenohd` legs have no switch at all, because hosted CI never
+provisions their oracle and `run-ci.sh` says so beside Layer Z. Whether such an
+oracle should be provisioned is the lane owner's decision, not this gate's, and a
+second switch on the test would duplicate the lane's and move nothing.
 
 A test with NO `#[ignore]` has no lane in front of it. `cargo test` anywhere runs
 it, the fixture is not owed by anyone, and skipping reads as a pass. That is the
@@ -136,8 +139,11 @@ def match_close(code, open_idx, opener, closer):
 
 
 class Fn:
-    def __init__(self, name, body_open, body_close, option, test, ignored):
+    def __init__(self, name, body_open, body_close, option, test, ignored,
+                 sig_start=0):
         self.name = name
+        # Offset just after `fn <name>`, where the parameter list opens.
+        self.sig_start = sig_start
         self.body_open, self.body_close = body_open, body_close
         self.returns_option, self.is_test, self.ignored = option, test, ignored
         self.skip_sites = []
@@ -179,7 +185,7 @@ def fn_table(code):
                 ignored = True
             tail = tail[:start].rstrip()
         fns.append(Fn(m.group(1), i, close, bool(re.search(r"->\s*Option\b", sig)),
-                      test, ignored))
+                      test, ignored, m.end()))
     return fns
 
 

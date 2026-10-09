@@ -1423,6 +1423,7 @@ fn pico_zinfo_source_on_wz_capi_reports_a_real_zenohd_as_a_router() {
 
     // The ORACLE value: zenohd naming itself. Read from its own log, so the
     // expected string is produced by the foreign process, never by wz.
+    // barrier-origin: zenohd "ZID:" -- `zenoh/src/net/runtime/mod.rs` @ `Using ZID:`
     let router_log = wait_for_substring(&mut router_out, "ZID:", EXCHANGE_TIMEOUT)
         .unwrap_or_else(|captured| panic!("zenohd never printed its ZID:\n{captured}"));
     let expected_zid = canonical_zid_32(&logged_zid(&router_log));
@@ -3129,6 +3130,9 @@ fn pico_zpull_source_on_wz_capi_keeps_the_newest_when_the_ring_overflows() {
     }
 
     // The drain fires at the end of the interval; allow for it plus slack.
+    // `EVICT-4` is the payload of the put with `idx` 4 above (`EVICT-{idx}`), a
+    // value this test sent, not text a program prints.
+    // barrier-origin: test-payload "EVICT-4"
     let captured = wait_for_substring(&mut sub_out, "EVICT-4", Duration::from_secs(30))
         .unwrap_or_else(|captured| {
             panic!(
