@@ -938,6 +938,9 @@ round_fed_gates=(
     "mcast_egress_callers_gate.py"
     "solo_plane_page_lint.py"
     "literal_wire_flag_lint.py"
+    # Item 860's class -- a host reader tells an extension by its identity. Fed by the
+    # crate sources and the codec SCXML a round edits; a text scan, ~3s.
+    "ext_identity_gate.py --check"
     "expired_blocker_lint.py"
     "reason_citation_gate.py"
     # R3171 -- a file a standing atom reason cites moved while its review pin did

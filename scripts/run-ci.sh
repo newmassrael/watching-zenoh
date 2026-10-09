@@ -1883,6 +1883,15 @@ layer_c0_test_discipline() {
     # workspace-wide claim (that sweep is §3.3, its own round). Enforcement
     # MEASURED by restoring one literal, not by observing that the script runs.
     python3 scripts/lib/literal_wire_flag_lint.py || return 1
+    # Open-debt item 860's class — the EXTENSION-IDENTITY gate. Upstream tells a
+    # received extension by its identity (the header without the chain flag);
+    # item 860 and the rounds after it found two codecs and 24 host readers
+    # telling it by the 4-bit id, each taking a look-alike for the declared
+    # extension. Every non-test read of the id must be a classified site, and
+    # no codec chain may name the id. Enforcement MEASURED on the tree before
+    # the reader fixes: all 24 functions red.
+    python3 scripts/lib/ext_identity_gate.py --selftest || return 1
+    python3 scripts/lib/ext_identity_gate.py --check || return 1
     # R311y621 (§7.14) — the SOLO-PLANE-PAGE gate. R311y618 severed one leg of
     # `CaptureReport::is_complete` and all 229 tests stayed green: the pages
     # that should have caught it attached TWO planes, and the other plane
