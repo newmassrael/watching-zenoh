@@ -38,6 +38,7 @@ use alloc::vec::Vec;
 use wz_codecs::whatami::{WhatAmI, WhatAmIMatcher};
 
 use crate::extbound::{Bound, Region};
+use crate::zid_hex::canonical_zid;
 
 /// What a node's south is: the one preset, or a list of subregions
 /// (`commons/zenoh-config/src/gateway.rs` @ `pub enum GatewaySouthConf {`).
@@ -68,7 +69,8 @@ pub struct RegionFilter {
     pub modes: Option<WhatAmIMatcher>,
     /// Interface names; the remote's interfaces must ALL be among them.
     pub interfaces: Option<Vec<String>>,
-    /// The remote's zid, as its wire bytes, must be one of these.
+    /// The remote's zid, as its wire bytes, must be one of these. Compared as
+    /// zids, so a trailing zero byte on either side does not tell two apart.
     pub zids: Option<Vec<Vec<u8>>>,
     /// The remote's announced region name must be one of these.
     pub region_names: Option<Vec<String>>,
@@ -136,10 +138,13 @@ fn matches_filters(filters: Option<&[RegionFilter]>, remote: &RemoteFacts<'_>) -
         return true;
     };
     filters.iter().any(|filter| {
+        // A zid is compared as the pin compares one, as a 16-byte id: trailing
+        // zero bytes are not part of it, so `[1]` and `[1, 0]` are one node.
+        let zid_matches = |zid: &Vec<u8>| canonical_zid(zid) == canonical_zid(remote.zid);
         let value = filter
             .zids
             .as_ref()
-            .map_or(true, |zids| zids.iter().any(|z| z.as_slice() == remote.zid))
+            .map_or(true, |zids| zids.iter().any(zid_matches))
             && filter.interfaces.as_ref().map_or(true, |ifaces| {
                 remote
                     .interfaces
@@ -395,6 +400,21 @@ mod tests {
         assert!(
             passes(&f, &on(&[])),
             "no interface is vacuously all of them"
+        );
+    }
+
+    /// A zid is matched as a zid, not as a byte string: the pin compares two
+    /// `ZenohIdProto`s, each a 16-byte id, so trailing zero bytes on either the
+    /// rule's or the remote's spelling do not make them two nodes.
+    #[test]
+    fn a_zid_matches_whatever_its_trailing_zero_bytes() {
+        let rule = by_zid(&[0x01]);
+        assert!(passes(&rule, &facts(&[0x01, 0x00], Peer)));
+        let padded = by_zid(&[0x01, 0x00, 0x00]);
+        assert!(passes(&padded, &facts(&[0x01], Peer)));
+        assert!(
+            !passes(&rule, &facts(&[0x00, 0x01], Peer)),
+            "a leading zero byte is part of the id"
         );
     }
 
