@@ -16578,6 +16578,26 @@ run: bash scripts/build-zenoh-pico-cli.sh)"
             -- --ignored --test-threads=1 || return 1
     fi
 
+    # One process, two sessions of different transport modes at once (AP): a
+    # client session dialled to zenohd answers its queries while a peer session
+    # joined to the group receives its samples, both drive loops alive to the
+    # end, and the router's death ends A alone. Needs zenohd, not a namespace;
+    # zenohd's readiness probe execs the demo this layer built above.
+    # 1 = what `<this command> --list` printed ("1 test, 0 benchmarks").
+    if [[ ! -x "$m_zenohd" ]]; then
+        if (( m_required )); then
+            echo "  Layer M FAIL: zenohd absent ($m_zenohd) under WZ_M_REQUIRE=1; the" >&2
+            echo "    two-session leg has no router to dial." >&2
+            return 1
+        fi
+        echo "Layer M SKIP client + multicast peer sessions in one process (zenohd not built)"
+    else
+        _runci_guarded_test "M client + multicast peer sessions in one process" 1 \
+            env WZ_ZENOHD_BIN="$m_zenohd" cargo test -p wz-integration-tests \
+            --test wz_client_and_multicast_peer_sessions_in_one_process_zenohd \
+            -- --ignored || return 1
+    fi
+
     # R2854 (`adminspace-metrics`, `transport-stats`) — a router PROCESS serves
     # its multicast group on its admin metrics leg: the group face records into
     # the node registry, and the admin handler reads that same registry. Each
