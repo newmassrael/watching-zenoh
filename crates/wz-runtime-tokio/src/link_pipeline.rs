@@ -779,10 +779,10 @@ mod tests {
     /// Linux only: "a full accept queue drops the SYN" is that kernel's
     /// behaviour, not a socket contract. On macOS a listener with backlog 0
     /// kept completing connections past sixteen and the queue never filled
-    /// (hosted run 37915005371), and Windows answers a full queue with a
-    /// reset. The walk's own logic does not depend on any of that and is held
-    /// on every host by the paused-clock arms above and below, which model the
-    /// silent candidate directly.
+    /// (hosted run 37915005371); no other host's full-queue behaviour has been
+    /// measured, so the arm runs only where it was. The walk's own logic does
+    /// not depend on any of that and is held on every host by the paused-clock
+    /// arms above and below, which model the silent candidate directly.
     #[cfg(target_os = "linux")]
     #[tokio::test]
     async fn a_named_tcp_dial_moves_past_a_candidate_that_drops_its_syn() {
