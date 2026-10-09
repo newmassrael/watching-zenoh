@@ -347,6 +347,16 @@ config WZ_T1S_GATEWAY
 	  interface added that has one is, and the onboard port is added first. With
 	  none, this interface is on-link only and never takes the route.
 
+config WZ_T1S_BUILD_VALUES_ONLY
+	bool "The values of this build were made up for a build"
+	help
+	  Set by overlays/t2g_t1s_build_values.conf and by nothing else: the numbers Layer
+	  Qzb builds with, which describe no segment. With it on, the 10BASE-T1S bring-up
+	  prints a FAIL-style line naming the made-up values before it starts, so that an
+	  image that reached a bench with them says so. The board table's gate keeps the
+	  overlay off any row that claims hardware. Never set it in a lab's own settings:
+	  a lab's values are its own, and leave it off.
+
 endif # WZ_T1S
 
 endif # WZ_MAC_CYT4BF

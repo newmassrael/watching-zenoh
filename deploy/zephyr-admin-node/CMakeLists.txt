@@ -186,7 +186,13 @@ elseif(CONFIG_WZ_NET_BACKEND_LWIP_MAC)
     else()
       set(t1s_multicast 0)
     endif()
+    if(CONFIG_WZ_T1S_BUILD_VALUES_ONLY)
+      set(t1s_build_values 1)
+    else()
+      set(t1s_build_values 0)
+    endif()
     list(APPEND t1s_env
+      WZ_T1S_BUILD_VALUES=${t1s_build_values}
       WZ_T1S_SPI_HZ=${CONFIG_WZ_T1S_SPI_HZ}
       WZ_T1S_SERVICE_MS=${CONFIG_WZ_T1S_SERVICE_MS}
       WZ_T1S_RESET_WAIT_MS=${t1s_reset_wait_ms}

@@ -79,6 +79,10 @@ const SPI_HZ: u32 = u32_from_build!("WZ_T1S_SPI_HZ");
 const SERVICE_MS: u32 = u32_from_build!("WZ_T1S_SERVICE_MS");
 const RESET_WAIT_MS: u32 = u32_from_build!("WZ_T1S_RESET_WAIT_MS");
 
+/// The build was made with `overlays/t2g_t1s_build_values.conf`: its PLCA id, count and
+/// address are numbers made up so that Layer Qzb can build, and describe no segment.
+const BUILD_VALUES_ONLY: bool = u32_from_build!("WZ_T1S_BUILD_VALUES") != 0;
+
 /// The PLCA setting the lab stated. The build has already refused an id above 254, a
 /// count of 0 and a count not above the id; the checks below make the same refusals
 /// part of the compile, so that a build that bypassed CMake does not run on a value
@@ -251,6 +255,15 @@ impl BoardMac for T1sMac {
 /// Bring the chip up as the interface with station address `mac_address`. See the
 /// module documentation for the order.
 pub fn open(mac_address: [u8; 6]) -> Result<T1sMac, &'static CStr> {
+    if BUILD_VALUES_ONLY {
+        // Said once and first, before anything a lab would be reading for: an image
+        // like this has configured a segment with numbers nobody chose.
+        log_line(format!(
+            "wz: FAIL - this image was built with made-up values for a build, not a lab's: \
+             PLCA {PLCA:?} and address {} describe no segment (overlays/t2g_t1s_build_values.conf)",
+            env!("WZ_T1S_IPV4")
+        ));
+    }
     // SAFETY: the board's routing of the pins; no arguments.
     let lines = unsafe { wz_board_t1s_lines_init() };
     log_line(format!(
