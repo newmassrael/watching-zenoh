@@ -344,10 +344,12 @@ on every push, beside the other sets.
 
 * **That a stock zenoh or zenoh-pico node emits these bytes.** The Scout and the
   Hello are wz's own encoders'. zenoh 1.10.1's scouting initiator builds its
-  Scout with `zid: None` (`net/runtime/orchestrator.rs:1010-1014`); this file's
-  Scouts do carry one, because wz's scouting window sets it, and a Scout without
-  a zid seats nobody in `ends`. A capture of the other shape is not here. The
-  version byte `0x09` is zenoh's (`zenoh-protocol` 1.10.1, `src/lib.rs:31`).
+  Scout with `zid: None`
+  (`zenoh/src/net/runtime/orchestrator.rs` @ `let scout: ScoutingMessage = Scout {`);
+  this file's Scouts do carry one, because wz's scouting window sets it, and a
+  Scout without a zid seats nobody in `ends`. A capture of the other shape is not
+  here. The version byte `0x09` is zenoh's
+  (`commons/zenoh-protocol/src/lib.rs` @ `pub const VERSION: u8 = 0x09;`).
 * **An IPv6 scouting address zenoh uses.** zenoh ships no IPv6 default (searched
   in `zenoh-config` and `zenoh` 1.10.1); `ff02::224` is the link-local group the
   crate's IPv6 fixtures already use.
