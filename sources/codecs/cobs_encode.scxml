@@ -38,7 +38,12 @@
 
      Output bound: pico _Z_SERIAL_MAX_COBS_BUF_SIZE = 1516
      (serial_protocol.h:33-34) covers the worst-case stuffing of a
-     1507-byte frame (_Z_SERIAL_MFS_SIZE) plus overhead.
+     1507-byte frame (_Z_SERIAL_MFS_SIZE) plus overhead. An input
+     that stuffs past the bound fails with the capacity error; it is
+     never silently clipped: `n`, `p`, `q` and `k` are uint32 so
+     `len(data)` is not truncated (a uint16 `n` turned an input of
+     65536 + k bytes into a successful encode of its first k bytes).
+     Every `data[...]` read below is guarded by `q < n` / `k < q`.
 
      Reference vectors (canonical COBS; verified byte-equal to pico
      _z_cobs_encode and to SCE's algorithm_cobs_encode exemplar):
@@ -59,13 +64,13 @@
     <sce:return type="bytes" returns-max-size="1516"/>
   </sce:signature>
   <sce:body>
-    <sce:var name="n" type="uint16" init="len(data)"/>
+    <sce:var name="n" type="uint32" init="len(data)"/>
     <sce:var name="out" type="bytes" capacity="1516"/>
-    <sce:var name="p" type="uint16" init="0"/>
+    <sce:var name="p" type="uint32" init="0"/>
     <sce:var name="done" type="bool" init="false"/>
     <sce:while cond="done === false">
       <!-- Scan a group: q advances over up to 254 non-zero bytes from p. -->
-      <sce:var name="q" type="uint16" init="p"/>
+      <sce:var name="q" type="uint32" init="p"/>
       <sce:while cond="(q &lt; n) &amp;&amp; ((q - p) &lt; 254) &amp;&amp; (data[q] !== 0)">
         <sce:assign target="q" expr="q + 1"/>
       </sce:while>
@@ -73,7 +78,7 @@
       <sce:var name="run" type="uint16" init="q - p"/>
       <sce:var name="code" type="uint8" init="run + 1"/>
       <sce:append target="out" expr="code"/>
-      <sce:var name="k" type="uint16" init="p"/>
+      <sce:var name="k" type="uint32" init="p"/>
       <sce:while cond="k &lt; q">
         <sce:append target="out" expr="data[k]"/>
         <sce:assign target="k" expr="k + 1"/>

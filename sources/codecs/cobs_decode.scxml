@@ -12,7 +12,19 @@
      return); requires SCE 9c0356a41.
 
      Mirrors zenoh-pico _z_cobs_decode
-     (vendor/zenoh-pico/src/utils/encoding.c:49-76). Input may or may
+     (vendor/zenoh-pico/src/utils/encoding.c:49-76), INCLUDING its
+     bounds: pico's loop condition `byte < input_end_ptr` is tested
+     before EVERY byte it reads (the code byte and each data byte
+     alike), so a group whose code byte promises more bytes than the
+     input holds simply ends decoding at the end of the input and
+     yields the output produced so far. It never reads past the input.
+     This decoder reproduces that: the inner copy loop is bounded by
+     `i < n` as well as by the group length, so the function is total
+     over every input (any length, any bytes) and cannot index past
+     `data`; the only error is the output-capacity one below, and
+     only on the fixed-capacity (no-alloc) SceBytes profile; the
+     alloc profile grows its buffer and never fails.
+     Input may or may
      not include the trailing 0x00 EOP delimiter: a 0x00 code byte
      terminates decoding (serial.c reads up to the EOP and pico's
      decoder breaks on a 0x00 code), and end-of-input terminates it
@@ -40,6 +52,28 @@
      coincide correctly: the very first group (no predecessor) and a
      full 254-byte group (code 0xFF carries no implicit trailing zero).
 
+     Truncated groups (the code byte promises more than is left):
+     the available bytes are copied and decoding ends, as in pico.
+     Before the inner loop was bounded it indexed `data[i]` with no
+     check against `n` and panicked (index out of bounds) on any
+     such input, e.g. line noise on a serial link.
+
+     One deliberate difference from pico, on input that is not COBS:
+     a 0x00 CODE byte that follows a full 0xFF group. pico's
+     `pos = pos - 1` on a 0x00 code removes the byte it believes is
+     the implicit zero it just wrote, but after a 0xFF group it wrote
+     none, so it drops a real data byte (and on a 0x00 FIRST byte it
+     moves before the output start and returns SIZE_MAX). This
+     decoder emits nothing for a 0x00 code, as its append-only
+     formulation implies. A valid encoder never produces either shape
+     (cobs_encode ends a 0xFF group with a 0x01 group, encoding.c:
+     33-44), and in both cases the frame is rejected by its length /
+     CRC check downstream, in pico and in wz alike.
+
+     Index width: `n` and `i` are uint32 so that `len(data)` is never
+     truncated; a uint16 `n` silently clipped an input of 65536 or
+     more bytes to its length modulo 65536.
+
      Output bound: the destuffed frame is at most pico
      _Z_SERIAL_MFS_SIZE = 1507 (serial_protocol.h:32).
 
@@ -49,6 +83,12 @@
        03 11 22 02 33 -> 11 22 00 33
        02 11 01 01   -> 11 00 00
        04 11 22 33   -> 11 22 33
+     Truncated groups (pico parity, differential-tested):
+       03 11         -> 11          (promised 2, 1 left)
+       05            -> (empty)     (promised 4, none left)
+       02 11 03      -> 11 00       (the zero closing the first group
+                                     is emitted once the next code is
+                                     read; the second group is empty)
 -->
 <scxml xmlns="http://www.w3.org/2005/07/scxml"
        xmlns:sce="http://sce.dev/ext"
@@ -61,9 +101,9 @@
     <sce:return type="bytes" returns-max-size="1507"/>
   </sce:signature>
   <sce:body>
-    <sce:var name="n" type="uint16" init="len(data)"/>
+    <sce:var name="n" type="uint32" init="len(data)"/>
     <sce:var name="out" type="bytes" capacity="1507"/>
-    <sce:var name="i" type="uint16" init="0"/>
+    <sce:var name="i" type="uint32" init="0"/>
     <sce:var name="prev" type="uint16" init="255"/>
     <sce:var name="done" type="bool" init="false"/>
     <sce:while cond="(i &lt; n) &amp;&amp; (done === false)">
@@ -77,7 +117,9 @@
             <sce:append target="out" expr="z"/>
           </sce:if>
           <sce:var name="j" type="uint16" init="1"/>
-          <sce:while cond="j &lt; code">
+          <!-- Bounded by the input as well as by the group length: pico
+               tests `byte < input_end_ptr` before every byte. -->
+          <sce:while cond="(j &lt; code) &amp;&amp; (i &lt; n)">
             <sce:append target="out" expr="data[i]"/>
             <sce:assign target="i" expr="i + 1"/>
             <sce:assign target="j" expr="j + 1"/>

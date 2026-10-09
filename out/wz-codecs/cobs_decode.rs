@@ -1,4 +1,4 @@
-// SCE-MAP: cobs_decode:53 :: _forge_body
+// SCE-MAP: cobs_decode:93 :: _forge_body
 
 // SCE Forge: Auto-generated from Extended SCXML (sce:kind="algorithm")
 // Runtime: none
@@ -13,9 +13,9 @@ use sce_portable_bytes::{SceBytes, CapacityExceeded};
 #[allow(clippy::all)]
 #[allow(unused_assignments)]
 pub fn cobs_decode(data: &[u8]) -> Result<SceBytes<1507>, CapacityExceeded> {
-    let n: u16 = (data).len() as u16;
+    let n: u32 = (data).len() as u32;
     let mut out: SceBytes<1507> = SceBytes::new();
-    let mut i: u16 = 0;
+    let mut i: u32 = 0;
     let mut prev: u16 = 255;
     let mut done: bool = false;
     while i < n && done == false {
@@ -29,7 +29,7 @@ pub fn cobs_decode(data: &[u8]) -> Result<SceBytes<1507>, CapacityExceeded> {
                 out.push(z)?;
             }
             let mut j: u16 = 1;
-            while j < code {
+            while j < code && i < n {
                 out.push(data[(i) as usize])?;
                 i = i + 1;
                 j = j + 1;

@@ -272,3 +272,182 @@ fn cobs_and_crc32_byte_parity_with_pico() {
         );
     }
 }
+
+// ─── cobs_decode on input that is NOT well-formed COBS ───
+//
+// A COBS code byte promises that many bytes follow it, and line noise can
+// promise more than the frame holds. pico tests `byte < input_end_ptr` before
+// every byte it reads, so a truncated group ends decoding with the output so
+// far. The wz decoder is generated from `sources/codecs/cobs_decode.scxml`; it
+// once indexed past the input here and panicked. The two tests below compare
+// it with the compiled pico function on exactly that input class.
+
+/// pico's `_z_cobs_decode` result, or `None` for `SIZE_MAX` (its 0x00-first
+/// underflow). Unlike [`pico_cobs_decode`] this does not feed a `usize::MAX`
+/// to `Vec::truncate`, which would silently keep the whole buffer.
+fn pico_cobs_decode_checked(input: &[u8]) -> Option<Vec<u8>> {
+    let mut out = vec![0u8; input.len() + 64];
+    let ret = unsafe { _z_cobs_decode(input.as_ptr(), input.len(), out.as_mut_ptr()) };
+    if ret == usize::MAX {
+        return None;
+    }
+    out.truncate(ret);
+    Some(out)
+}
+
+/// The one input shape on which wz deliberately differs from pico: a 0x00 CODE
+/// byte right after a full 0xFF group (or as the first byte). pico's
+/// `pos = pos - 1` there removes a real data byte (or moves before the output
+/// start: `SIZE_MAX`), because it had written no implicit zero to remove. A
+/// valid encoder never emits it (`cobs_encode` closes a 0xFF group with 0x01).
+/// Found by walking the groups the way the decoder does, independently of it.
+fn zero_code_after_full_group_or_first(input: &[u8]) -> bool {
+    let mut at = 0usize;
+    let mut previous: Option<u8> = None;
+    while at < input.len() {
+        let code = input[at];
+        if code == 0 {
+            return previous.is_none() || previous == Some(0xFF);
+        }
+        previous = Some(code);
+        at += usize::from(code);
+    }
+    false
+}
+
+fn assert_wz_equals_pico_cobs_decode(input: &[u8]) {
+    let wz = cobs_decode(input).expect("wz cobs_decode (alloc profile grows; short input)");
+    let wz = wz.as_slice();
+    match pico_cobs_decode_checked(input) {
+        None => {
+            assert!(zero_code_after_full_group_or_first(input), "{input:02X?}");
+            assert!(input[0] == 0 && wz.is_empty(), "{input:02X?}");
+        }
+        Some(pico) if zero_code_after_full_group_or_first(input) => {
+            // pico dropped one real data byte that wz keeps.
+            assert!(
+                wz.len() == pico.len() + 1 && wz[..pico.len()] == pico[..],
+                "documented divergence shape broke for {input:02X?}: wz {wz:02X?} pico {pico:02X?}"
+            );
+        }
+        Some(pico) => assert_eq!(wz, &pico[..], "wz and pico disagree for {input:02X?}"),
+    }
+}
+
+/// wz `cobs_decode` equals the real pico C decoder on every input of up to two
+/// bytes and on every input of three to six bytes over an alphabet holding each
+/// boundary code, truncated groups included; the only differences are the
+/// documented 0x00-code ones.
+#[test]
+fn wz_cobs_decode_equals_pico_on_truncated_and_malformed_input() {
+    let mut checked = 0usize;
+    assert_wz_equals_pico_cobs_decode(&[]);
+    for a in 0..=255u8 {
+        assert_wz_equals_pico_cobs_decode(&[a]);
+        for b in 0..=255u8 {
+            assert_wz_equals_pico_cobs_decode(&[a, b]);
+            checked += 1;
+        }
+    }
+    let wide: [u8; 8] = [0x00, 0x01, 0x02, 0x03, 0x04, 0x7F, 0xFE, 0xFF];
+    let narrow: [u8; 5] = [0x00, 0x01, 0x02, 0x05, 0xFF];
+    let mut input = Vec::new();
+    for (alphabet, lengths) in [(&wide[..], 3..=5usize), (&narrow[..], 6..=6usize)] {
+        for len in lengths {
+            for mut n in 0..alphabet.len().pow(len as u32) {
+                input.clear();
+                for _ in 0..len {
+                    input.push(alphabet[n % alphabet.len()]);
+                    n /= alphabet.len();
+                }
+                assert_wz_equals_pico_cobs_decode(&input);
+                checked += 1;
+            }
+        }
+    }
+    // A full group cut short, and truncated tails of long valid encodings.
+    for len in 0..=300usize {
+        let mut cut = vec![0xFF];
+        cut.extend((0..len).map(|i| (i % 250) as u8 + 1));
+        assert_wz_equals_pico_cobs_decode(&cut);
+    }
+    for (_, payload) in corpus() {
+        let encoded = pico_cobs_encode(&payload);
+        for cut in 0..=encoded.len() {
+            assert_wz_equals_pico_cobs_decode(&encoded[..cut]);
+        }
+    }
+    assert!(checked > 100_000, "the sweep shrank: {checked} inputs");
+}
+
+/// pico's verdict on a (possibly damaged) frame: `Some((header, payload))` when
+/// `_z_serial_msg_deserialize` accepts it, `None` when it returns `SIZE_MAX`.
+fn pico_deserialize_checked(wire: &[u8]) -> Option<(u8, Vec<u8>)> {
+    let mut dst = vec![0u8; 70_000];
+    let mut tmp = vec![0u8; wire.len() + 64];
+    let mut header_out: u8 = 0;
+    let ret = unsafe {
+        _z_serial_msg_deserialize(
+            wire.as_ptr(),
+            wire.len(),
+            dst.as_mut_ptr(),
+            dst.len(),
+            &mut header_out,
+            tmp.as_mut_ptr(),
+            tmp.len(),
+        )
+    };
+    if ret == usize::MAX {
+        return None;
+    }
+    dst.truncate(ret);
+    Some((header_out, dst))
+}
+
+/// Frame level: for a valid pico frame cut at every length and with its bytes
+/// overwritten by values that make a code byte promise too much (or end the
+/// frame early), `decode_frame` accepts exactly what the real pico
+/// `_z_serial_msg_deserialize` accepts, with the same header and payload, and
+/// never panics. This is what makes a call-site guard against truncated COBS
+/// groups redundant: the decoder is total and the length/CRC checks that
+/// follow it reject the damaged frame the same way pico does.
+#[test]
+fn wz_decode_frame_verdict_equals_pico_on_damaged_frames() {
+    let mut rejected = 0usize;
+    let mut accepted = 0usize;
+    let mut check = |wire: &[u8]| {
+        let pico = pico_deserialize_checked(wire);
+        let wz = decode_frame(wire).ok().map(|f| (f.header, f.payload));
+        assert_eq!(wz, pico, "verdict differs for wire {wire:02X?}");
+        if pico.is_some() {
+            accepted += 1;
+        } else {
+            rejected += 1;
+        }
+    };
+    for (header, payload) in corpus() {
+        let wire = pico_serialize(header, &payload);
+        // The intact frame is accepted by both.
+        check(&wire);
+        // Every prefix, with and without a re-appended EOP.
+        for cut in 0..wire.len() {
+            check(&wire[..cut]);
+            let mut with_eop = wire[..cut].to_vec();
+            with_eop.push(0x00);
+            check(&with_eop);
+        }
+        // Every position overwritten with the boundary code values.
+        for at in 0..wire.len() {
+            for value in [0x00u8, 0x01, 0x02, 0x7F, 0xFE, 0xFF, wire[at] ^ 0x80] {
+                if value == wire[at] {
+                    continue;
+                }
+                let mut damaged = wire.clone();
+                damaged[at] = value;
+                check(&damaged);
+            }
+        }
+    }
+    assert!(accepted >= 9, "the intact corpus frames must be accepted");
+    assert!(rejected > 10_000, "the damage sweep shrank: {rejected}");
+}

@@ -221,3 +221,175 @@ fn serial_frame_full_pipeline_round_trip() {
     assert_eq!(decoded.payload, payload);
     assert_eq!(decoded.crc32, crc32(payload));
 }
+
+// ─── cobs_decode is total (open-debt: COBS decoder index panic) ───
+//
+// A COBS code byte promises that many bytes follow it. Line noise on a serial
+// link can promise more than the frame holds; the generated decoder used to
+// index `data[i]` for the promise with no bound against the input length and
+// panicked. zenoh-pico's `_z_cobs_decode` tests `byte < input_end_ptr` before
+// every byte, so a truncated group just ends decoding. These tests pin the
+// wz decoder to that behaviour; the comparison against the compiled pico C
+// function is `wz-integration-tests/tests/layer3_serial_framing.rs`.
+
+/// The outcome of the pico `_z_cobs_decode` loop, transcribed from
+/// encoding.c:49-76 (a pointer walk with a `block` down-counter), plus the
+/// one thing the wz decoder deliberately does not copy: a 0x00 CODE byte
+/// removes the last written byte (`pos = pos - 1`), which is the implicit
+/// zero unless the previous group was a full 0xFF group (it wrote none) or
+/// there is no previous group (`pos` moves before the output: SIZE_MAX).
+struct PicoModel {
+    out: Vec<u8>,
+    /// The real data byte a 0x00 code removed (only after a full 0xFF group).
+    dropped_data_byte: Option<u8>,
+    /// A 0x00 FIRST byte: pico's `pos` moves before the output start.
+    underflow: bool,
+}
+
+fn pico_model(input: &[u8]) -> PicoModel {
+    let mut out = Vec::new();
+    let mut code: u8 = 0xFF;
+    let mut block: u8 = 0;
+    let mut at = 0usize;
+    let mut dropped_data_byte = None;
+    let mut underflow = false;
+    while at < input.len() {
+        if block != 0 {
+            out.push(input[at]);
+            at += 1;
+        } else {
+            let previous_code = code;
+            if previous_code != 0xFF {
+                out.push(0);
+            }
+            code = input[at];
+            block = input[at];
+            at += 1;
+            if code == 0 {
+                match out.pop() {
+                    // The byte popped is the implicit zero just written,
+                    // unless the previous group was a full 0xFF one.
+                    Some(b) if previous_code == 0xFF => dropped_data_byte = Some(b),
+                    Some(_) => {}
+                    None => underflow = true,
+                }
+                break;
+            }
+        }
+        block = block.wrapping_sub(1);
+    }
+    PicoModel {
+        out,
+        dropped_data_byte,
+        underflow,
+    }
+}
+
+/// Every wz result equals the pico model, except where the model's 0x00 code
+/// dropped a real data byte, where wz keeps it (the documented difference).
+fn assert_wz_matches_pico_model(input: &[u8]) {
+    let wz = cobs_decode(input)
+        .unwrap_or_else(|_| panic!("capacity exceeded on a short input {input:02X?}"));
+    let model = pico_model(input);
+    let mut expected = model.out;
+    // pico's SIZE_MAX (underflow) has no output at all; wz returns nothing.
+    assert!(!model.underflow || expected.is_empty());
+    if let Some(b) = model.dropped_data_byte {
+        expected.push(b);
+    }
+    assert_eq!(wz.as_slice(), &expected[..], "input {input:02X?}");
+}
+
+#[test]
+fn cobs_decode_truncated_group_vectors_match_pico() {
+    let cases: [(&[u8], &[u8]); 9] = [
+        // promised 2 bytes, 1 left: the available byte is copied
+        (&[0x03, 0x11], &[0x11]),
+        // promised 4 bytes, none left
+        (&[0x05], &[]),
+        // the zero closing group 1 is emitted once group 2's code is read
+        (&[0x02, 0x11, 0x03], &[0x11, 0x00]),
+        (&[0x02, 0x11, 0x03, 0x22], &[0x11, 0x00, 0x22]),
+        // a full group cut short
+        (&[0xFF, 0x01, 0x02], &[0x01, 0x02]),
+        // the EOP is consumed as data when a group promises more than is left
+        (&[0x11, 0x22, 0x33, 0x00], &[0x22, 0x33, 0x00]),
+        // a promise that ends exactly at the input end is not truncated
+        (&[0x03, 0xAA, 0xBB], &[0xAA, 0xBB]),
+        (&[0x03, 0xAA, 0xBB, 0x00], &[0xAA, 0xBB]),
+        // empty input decodes to nothing
+        (&[], &[]),
+    ];
+    for (input, expected) in cases {
+        let got = cobs_decode(input).expect("within capacity");
+        assert_eq!(got.as_slice(), expected, "input {input:02X?}");
+        assert_wz_matches_pico_model(input);
+    }
+}
+
+/// Totality: every input of up to two bytes, and every input of three to six
+/// bytes over an alphabet that holds each boundary code (0x00, small codes,
+/// 0x7F, 0xFE, 0xFF), returns without panicking and agrees with the model.
+#[test]
+fn cobs_decode_is_total_over_short_inputs() {
+    let mut count = 0usize;
+    assert_wz_matches_pico_model(&[]);
+    for a in 0..=255u8 {
+        assert_wz_matches_pico_model(&[a]);
+        for b in 0..=255u8 {
+            assert_wz_matches_pico_model(&[a, b]);
+            count += 1;
+        }
+    }
+    let wide: [u8; 8] = [0x00, 0x01, 0x02, 0x03, 0x04, 0x7F, 0xFE, 0xFF];
+    let mut input = Vec::new();
+    for len in 3..=5usize {
+        for mut n in 0..wide.len().pow(len as u32) {
+            input.clear();
+            for _ in 0..len {
+                input.push(wide[n % wide.len()]);
+                n /= wide.len();
+            }
+            assert_wz_matches_pico_model(&input);
+            count += 1;
+        }
+    }
+    let narrow: [u8; 5] = [0x00, 0x01, 0x02, 0x05, 0xFF];
+    for mut n in 0..narrow.len().pow(6) {
+        input.clear();
+        for _ in 0..6 {
+            input.push(narrow[n % narrow.len()]);
+            n /= narrow.len();
+        }
+        assert_wz_matches_pico_model(&input);
+        count += 1;
+    }
+    assert!(count > 100_000, "the sweep shrank: {count} inputs");
+}
+
+/// The input length is not clipped to 16 bits: an input past 65535 bytes is
+/// processed whole (or refused for capacity), never cut to `len % 65536`, and
+/// neither direction panics. The two `SceBytes` profiles differ here: the
+/// no-alloc profile reports `CapacityExceeded` past its bound, the alloc
+/// profile grows, so the assertion is the profile-independent one -- an `Ok`
+/// result is longer than the clipped length it would have had.
+#[test]
+fn cobs_codec_does_not_clip_the_input_length_to_16_bits() {
+    let long = vec![0x11u8; 65_536 + 3];
+    if let Ok(encoded) = cobs_encode(&long) {
+        // A clipped input (3 bytes) would encode to 4 bytes.
+        assert!(encoded.as_slice().len() > long.len());
+        let decoded = cobs_decode(encoded.as_slice()).expect("decode of an encode");
+        assert_eq!(decoded.as_slice(), &long[..]);
+    }
+    // 0x11 codes promise 16 bytes each: a clipped decode would see 3 bytes.
+    if let Ok(decoded) = cobs_decode(&long) {
+        assert!(decoded.as_slice().len() > 1000);
+    }
+    // A 3-byte tail after 64 KiB must not decode as if it were the whole input.
+    let mut tail = vec![0x01u8; 65_536];
+    tail.extend_from_slice(&[0x03, 0xAA, 0xBB]);
+    if let Ok(decoded) = cobs_decode(&tail) {
+        assert!(decoded.as_slice().len() > 1000);
+    }
+}

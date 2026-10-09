@@ -116,8 +116,7 @@ pub enum SerialFrameError {
     /// The payload exceeds [`SERIAL_MTU`] (encode) or the destuffed
     /// frame exceeds [`SERIAL_MFS`] (decode).
     TooLarge,
-    /// The COBS stuff/destuff step overran its capacity bound, or (decode) a
-    /// block promised more bytes than the frame holds.
+    /// The COBS stuff/destuff step overran its capacity bound.
     Cobs,
     /// The destuffed buffer is too short to hold header + len + crc32,
     /// or the carried length disagrees with the available bytes.
@@ -150,42 +149,23 @@ pub fn encode_frame(header: u8, payload: &[u8]) -> Result<Vec<u8>, SerialFrameEr
     Ok(out)
 }
 
-/// Whether every COBS block in `wire` has all the bytes its code byte promises,
-/// stopping at the first `0x00` code like the decoder does.
-///
-/// ⛔ This is a precondition of the generated `cobs_decode`, not a refinement of it:
-/// that decoder indexes its input by the code byte (`data[i]` for `code - 1` bytes)
-/// with no bound against the input length, so a code that promises more than the
-/// frame holds -- which is what line noise or a half-written frame looks like --
-/// panics with an index out of bounds instead of returning `Err`. The generated file
-/// is not edited here (`out/**` belongs to the code generator), so the malformed
-/// input is refused before it reaches it. A too-short block is a framing error like
-/// a CRC mismatch: [`SerialFrameReader`] drops the frame and resynchronises.
-fn cobs_blocks_fit(wire: &[u8]) -> bool {
-    let mut i = 0;
-    while i < wire.len() {
-        let code = usize::from(wire[i]);
-        if code == 0 {
-            return true;
-        }
-        // The block is the code byte plus `code - 1` data bytes.
-        i += code;
-        if i > wire.len() {
-            return false;
-        }
-    }
-    true
-}
-
 /// Decode one serial on-wire frame (mirror of `_z_serial_msg_deserialize`,
 /// serial.c:70-118). `wire` is the COBS body with an optional trailing
 /// `0x00` EOP (`cobs_decode` stops on the `0x00` code byte, so the EOP is
 /// tolerated). Verifies the carried CRC32 against the payload and rejects
 /// on mismatch.
+///
+/// Total over every byte string. A COBS code byte promises that many bytes
+/// follow it, and line noise or a half-written frame can promise more than the
+/// frame holds. The generated `cobs_decode` handles that exactly like pico's
+/// `_z_cobs_decode` (it bounds every read by the input end, so a truncated
+/// group ends decoding with the bytes so far), and the length and CRC checks
+/// below then reject the shortened frame the way pico's
+/// `_z_serial_msg_deserialize` does -- there is no separate check for it here,
+/// so there is one truth about what a damaged frame is. The comparison with
+/// the compiled pico codec is `wz_decode_frame_verdict_equals_pico_on_damaged_frames`
+/// in `wz-integration-tests`.
 pub fn decode_frame(wire: &[u8]) -> Result<DecodedFrame, SerialFrameError> {
-    if !cobs_blocks_fit(wire) {
-        return Err(SerialFrameError::Cobs);
-    }
     let destuffed = cobs_decode(wire).map_err(|_| SerialFrameError::Cobs)?;
     let frame = destuffed.as_slice();
     if frame.len() > SERIAL_MFS {
@@ -588,19 +568,37 @@ mod tests {
     }
 
     /// A COBS code byte promises that many bytes follow it; line noise can promise
-    /// more than the frame holds. The generated decoder indexes the input by the
-    /// promise, so it must never be handed such a frame: this is the byte string the
-    /// open-debt 795 accept flush meets on a wire with a stale, mangled frame on it.
+    /// more than the frame holds. The decoder is total (it ends the group at the
+    /// input end like pico's), so the shortened frame reaches the length check and
+    /// is rejected there: this is the byte string the open-debt 795 accept flush
+    /// meets on a wire with a stale, mangled frame on it.
     #[test]
     fn a_cobs_block_that_overruns_the_frame_is_rejected_and_the_reader_resyncs() {
         let mut reader = SerialFrameReader::new();
         assert_eq!(
             reader.feed(b"\x11\x22\x33-mangled\x00"),
-            Err(SerialFrameError::Cobs)
+            Err(SerialFrameError::Malformed)
         );
         let good = encode_frame(0x00, &[0x11]).expect("encode");
         let frames = reader.feed(&good).expect("resync");
         assert_eq!(frames[0].payload, vec![0x11]);
+    }
+
+    /// Cutting a valid frame at any byte, with or without the EOP put back,
+    /// never panics and is never accepted: the shortened frame fails the length
+    /// or CRC check. (The same sweep against the real pico codec, and against
+    /// overwritten code bytes, is in `wz-integration-tests`.)
+    #[test]
+    fn every_strict_prefix_of_a_frame_is_rejected_without_panicking() {
+        for payload in [&[][..], &[0x00, 0x11, 0x00][..], &[0xAB; 600][..]] {
+            let wire = encode_frame(0x00, payload).expect("encode");
+            for cut in 0..wire.len() - 1 {
+                assert!(decode_frame(&wire[..cut]).is_err(), "cut {cut}");
+                let mut with_eop = wire[..cut].to_vec();
+                with_eop.push(SERIAL_EOP);
+                assert!(decode_frame(&with_eop).is_err(), "cut {cut} + EOP");
+            }
+        }
     }
 
     #[test]
