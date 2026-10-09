@@ -1072,7 +1072,13 @@ HOST_GATED_CI_TARGETS: dict[str, str] = {
 # and asks it under forty-odd `_time` selectors built from the cached samples' own instants
 # (`api-compat-c zenoh-c->wz`). The real library's answers are asserted first, from zenoh-util's
 # grammar and not from a run. Measured by `scripts/audit-crossimpl-proof.sh`.
-FOREIGN_ADJUDICATOR_LINKS = 1047
+# R3132 -- 1047 -> 1048, RISING by one: a new test in the same file that runs one C program linked
+# at the real `libzenohc` and at wz's C ABI, holds a querying subscriber's query open, publishes
+# two live samples, then answers out of order with a repeated timestamp, a repeat of a live
+# sample's and one with none, and prints what the callback saw and when (`api-compat-c
+# zenoh-c->wz`). The real library's lines are asserted first, from zenoh-ext's merge queue and
+# not from a run. Measured by `scripts/audit-crossimpl-proof.sh`.
+FOREIGN_ADJUDICATOR_LINKS = 1048
 
 # ── Execution disclosure ────────────────────────────────────────────────────────
 #

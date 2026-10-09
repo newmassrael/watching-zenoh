@@ -20762,6 +20762,16 @@ layer_c1ce_api_compat_c_unstable_oracle() {
         cargo test -p wz-integration-tests \
         --test zenoh_c_ext_families_twice_and_diff -- --ignored --quiet --test-threads=1 \
         --exact the_publication_cache_filters_by_the_querys_time_range_identically_on_wz_and_libzenohc || rc=1
+    # R3132 -- the querying subscriber's merge. One program holds the initial query
+    # open from a cloned query, publishes live samples, then answers out of order, and
+    # prints what the callback saw and when. Replies and live samples are parked until
+    # the last query in flight ends, then delivered once per timestamp, oldest first.
+    # Red-first on the library as it was: its callback saw the live samples at once and
+    # in arrival order, and the real library's lines passed in the same run.
+    WZ_ZENOH_C_PREFIX="$shm" _runci_guarded_test "C1ce querying subscriber merge" 1 \
+        cargo test -p wz-integration-tests \
+        --test zenoh_c_ext_families_twice_and_diff -- --ignored --quiet --test-threads=1 \
+        --exact a_querying_subscriber_merges_replies_and_live_samples_identically_on_wz_and_libzenohc || rc=1
     # REPORTED, never enforced, exactly as C1cc's is.
     WZ_ZENOH_C_PREFIX="$shm" python3 scripts/lib/capi_c_coverage.py || rc=1
 

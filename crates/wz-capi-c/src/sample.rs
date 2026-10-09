@@ -812,6 +812,54 @@ pub(crate) unsafe fn escape_sample(src: *const z_loaned_sample_t) -> crate::abi:
     Box::into_raw(boxed) as crate::abi::Handle
 }
 
+/// A sample copied out of a callback and kept, bound at its final address and
+/// owned by whoever holds the value.
+///
+/// [`escape_sample`] is the same copy handed to C as a `z_owned_sample_t`; this is
+/// it for code inside the crate that has to hold a sample past its callback and
+/// give it back to a user closure later, which wants a `z_loaned_sample_t`. The
+/// zenoh-ext querying subscriber is the first such holder: it parks live samples
+/// and replies until the queries in flight have ended.
+#[cfg(not(feature = "zenoh-c-no-unstable-api"))]
+pub(crate) struct EscapedSample(Box<SampleMarshal>);
+
+// SAFETY: the box is owned by this value alone and its cached views point only
+// into itself, so moving the value to another thread moves the whole closed
+// object. Whoever holds one reaches it through one lock at a time.
+#[cfg(not(feature = "zenoh-c-no-unstable-api"))]
+unsafe impl Send for EscapedSample {}
+
+#[cfg(not(feature = "zenoh-c-no-unstable-api"))]
+impl EscapedSample {
+    /// A deep copy of a borrowed sample, or `None` for a null one.
+    ///
+    /// # Safety
+    /// `src` must be null or a pointer this crate handed to a sample callback.
+    pub(crate) unsafe fn copy_of(src: *const z_loaned_sample_t) -> Option<Self> {
+        // SAFETY: the caller's contract.
+        let source = unsafe { marshal(src) }?;
+        let mut copy = Box::new(source.deep_copy());
+        copy.bind();
+        Some(Self(copy))
+    }
+
+    /// The sample's own timestamp, or `None` when it carries none.
+    pub(crate) fn timestamp(&self) -> Option<crate::timestamp::z_timestamp_t> {
+        self.0.timestamp
+    }
+
+    /// Give the sample a timestamp. `z_sample_timestamp` points into the marshal,
+    /// so a caller that reads it afterwards sees this one.
+    pub(crate) fn stamp(&mut self, timestamp: crate::timestamp::z_timestamp_t) {
+        self.0.timestamp = Some(timestamp);
+    }
+
+    /// The borrowed sample a user closure is called with.
+    pub(crate) fn as_loaned(&self) -> *const z_loaned_sample_t {
+        self.0.as_loaned()
+    }
+}
+
 /// Borrow an owned sample (zenoh-c `z_sample_loan`).
 ///
 /// The handle IS the marshal pointer the accessors read, so this reads slot 0

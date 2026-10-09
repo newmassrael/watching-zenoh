@@ -63,12 +63,12 @@
 //! additionally issues a `get` at declaration time and merges the replies into
 //! the same callback. `ze_querying_subscriber_get` issues another one later.
 //!
-//! wz's divergence here is the MERGE WINDOW, and it is named rather than hidden:
-//! upstream buffers live publications until the initial query completes so the
-//! callback sees history before live data. wz forwards both as they arrive. The
-//! set of samples delivered is the same; the ORDER between a historical reply
-//! and a concurrently-arriving live sample is not pinned. See
-//! [`QUERYING_SUBSCRIBER_MERGE_DIVERGENCE`].
+//! What the callback sees is the MERGE, not the arrival order: while any query is in
+//! flight the replies AND the live samples are parked, and when the last one ends
+//! they are delivered together, those without a timestamp first and the rest by
+//! timestamp, one sample per timestamp. That is `crate::fetching`; this file only
+//! declares the subscriber, raises the count of queries in flight before it does,
+//! and hands each query a reply closure that lowers it.
 
 use std::collections::{HashMap, VecDeque};
 use std::ffi::c_void;
@@ -76,6 +76,8 @@ use std::sync::{Arc, Mutex};
 use std::time::SystemTime;
 
 use wz_runtime_tokio::time_range::{of_parameters, TimeRange};
+
+use crate::fetching::Fetching;
 
 use crate::abi::{
     z_loaned_keyexpr_t, z_loaned_query_t, z_loaned_sample_t, z_loaned_session_t, z_moved_bytes_t,
@@ -85,11 +87,6 @@ use crate::ffi::{guard_val, guarded};
 use crate::keyexpr::{keyexpr_str, DeclaredKeyexpr};
 use crate::publisher::{zc_locality_default, zc_locality_t};
 use crate::result::{ZResult, Z_EINVAL, Z_ENULL, Z_OK};
-
-/// Upstream buffers live samples until the declaration-time query completes;
-/// wz forwards both as they arrive. Same SET, unpinned ORDER.
-pub const QUERYING_SUBSCRIBER_MERGE_DIVERGENCE: &str =
-    "ze_querying_subscriber does not buffer live samples behind the initial query";
 
 /// `ze_owned_publication_cache_t` / `ze_loaned_publication_cache_t`
 /// (`zenoh_opaque.h:960-962,989-991`). Unmoved by either feature axis: the type
@@ -862,9 +859,10 @@ pub unsafe extern "C" fn ze_publication_cache_drop(this_: *mut ze_moved_publicat
 /// [`ze_querying_subscriber_get`] needs to issue another query.
 struct QueryingSubState {
     sub: crate::abi::z_owned_subscriber_t,
-    /// The user callback, shared between the live subscriber and every query's
-    /// reply forwarding. `Arc` because both sides call it and neither owns it.
-    user: Arc<crate::sub::CClosure>,
+    /// The user callback and the merge in front of it, shared between the live
+    /// subscriber and every query's reply forwarding. `Arc` because all of them
+    /// reach it and none owns it.
+    fetching: Arc<Fetching>,
     session: *const z_loaned_session_t,
     keyexpr: DeclaredKeyexpr,
 }
@@ -909,10 +907,11 @@ unsafe fn querying_sub_state<'a>(
     Some(unsafe { &*(handle as *const QueryingSubState) })
 }
 
-/// Forward one OK reply's sample into the user's sample callback.
+/// Park one OK reply's sample in the merge. Nothing reaches the user's callback
+/// on arrival; the samples go out when the last query in flight has ended.
 ///
 /// # Safety
-/// Called by the get plane with a valid loaned reply and an `Arc<CClosure>` raw
+/// Called by the get plane with a valid loaned reply and an `Arc<Fetching>` raw
 /// pointer as context.
 unsafe extern "C" fn forward_reply_to_sample(
     reply: *mut crate::abi::z_loaned_reply_t,
@@ -921,9 +920,9 @@ unsafe extern "C" fn forward_reply_to_sample(
     if reply.is_null() || context.is_null() {
         return;
     }
-    // SAFETY: the context is the `Arc<CClosure>` pointer installed below;
+    // SAFETY: the context is the `Arc<Fetching>` pointer installed below;
     // borrowed for this call only.
-    let closure = unsafe { &*(context as *const crate::sub::CClosure) };
+    let fetching = unsafe { &*(context as *const Fetching) };
     // SAFETY: the caller's contract.
     if !unsafe { crate::get::z_reply_is_ok(reply) } {
         return;
@@ -933,45 +932,61 @@ unsafe extern "C" fn forward_reply_to_sample(
     if sample.is_null() {
         return;
     }
-    let Some(call) = closure.call else {
-        return;
-    };
-    let ctx = closure.context.0;
-    // SAFETY: the C callback owns the call; a panic unwinding across the
-    // `extern "C"` boundary is UB, so it is caught here as every other callback
-    // trampoline in this crate does.
-    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| unsafe {
-        call(sample, ctx);
-    }));
+    // SAFETY: a sample this crate's get plane handed to a callback.
+    unsafe { fetching.reply(sample) };
 }
 
-/// Release the `Arc<CClosure>` a reply trampoline context holds.
+/// A query has ended: lower the count of queries in flight, which delivers the
+/// parked samples if it was the last, and release the `Arc<Fetching>` its reply
+/// context holds.
+///
+/// This is the reply closure's `drop`, which the get plane runs once when the
+/// query is over (and on every path that consumes the closure without issuing it),
+/// so it is the one place a `begin_fetch` is paid back.
 ///
 /// # Safety
-/// `context` must come from `Arc::into_raw` on an `Arc<CClosure>`, released once.
-unsafe extern "C" fn reply_context_drop(context: *mut c_void) {
+/// `context` must come from `Arc::into_raw` on an `Arc<Fetching>`, released once.
+unsafe extern "C" fn fetch_context_drop(context: *mut c_void) {
     if context.is_null() {
         return;
     }
     // SAFETY: the caller's contract.
-    drop(unsafe { Arc::from_raw(context as *const crate::sub::CClosure) });
+    let fetching = unsafe { Arc::from_raw(context as *const Fetching) };
+    fetching.end_fetch();
 }
 
-/// Issue one query whose OK replies are forwarded into `user`.
+/// Release the `Arc<Fetching>` the LIVE subscription's closure context holds. It
+/// does not touch the count: a subscription ending is not a query ending.
+///
+/// # Safety
+/// `context` must come from `Arc::into_raw` on an `Arc<Fetching>`, released once.
+unsafe extern "C" fn live_context_drop(context: *mut c_void) {
+    if context.is_null() {
+        return;
+    }
+    // SAFETY: the caller's contract.
+    drop(unsafe { Arc::from_raw(context as *const Fetching) });
+}
+
+/// Issue one query whose OK replies are parked in `fetching`.
+///
+/// The caller has ALREADY called [`Fetching::begin_fetch`]: upstream raises the
+/// count before the live subscriber is declared, not when the query leaves, and
+/// the closure built here pays it back when the query ends, on every path.
 ///
 /// # Safety
 /// `session` and `selector` must be valid; `options` must be null or valid.
 unsafe fn issue_forwarding_get(
     session: *const z_loaned_session_t,
     selector: *const z_loaned_keyexpr_t,
-    user: &Arc<crate::sub::CClosure>,
+    fetching: &Arc<Fetching>,
     options: *mut crate::get::z_get_options_t,
 ) -> ZResult {
     let mut closure = crate::abi::z_owned_closure_reply_t::from_parts(
-        Arc::into_raw(user.clone()) as *mut c_void,
+        Arc::into_raw(fetching.clone()) as *mut c_void,
         Some(forward_reply_to_sample),
     );
-    closure.drop = Some(reply_context_drop);
+    closure.drop = Some(fetch_context_drop);
     let mut moved = crate::abi::z_moved_closure_reply_t { _this: closure };
     // SAFETY: the caller's contract plus the locals built here.
     unsafe { crate::get::z_get(session, selector, std::ptr::null(), &mut moved, options) }
@@ -1004,12 +1019,12 @@ pub unsafe extern "C" fn ze_declare_querying_subscriber(
         // an early return still frees the caller's context.
         // SAFETY: the caller's contract.
         let owned = unsafe { &mut (*callback)._this };
-        let user = Arc::new(crate::sub::CClosure::new(
-            owned.context,
-            owned.call,
-            owned.drop,
-        ));
+        let user = crate::sub::CClosure::new(owned.context, owned.call, owned.drop);
         *owned = z_owned_closure_sample_t::null_value();
+        // The id live samples that carry no timestamp are stamped with.
+        // SAFETY: the caller's contract.
+        let zid = unsafe { crate::zid::z_info_zid(session) }.id;
+        let fetching = Arc::new(Fetching::new(user, zid));
 
         // SAFETY: the caller's contract.
         let Some(ke) = (unsafe { keyexpr_str(key_expr) }) else {
@@ -1017,12 +1032,17 @@ pub unsafe extern "C" fn ze_declare_querying_subscriber(
         };
         let ke = ke.to_owned();
 
+        // Upstream raises the count of queries in flight BEFORE it declares the
+        // subscriber (`register_handler`, then `declare_subscriber`), so a sample
+        // that lands between the two already waits for the initial query.
+        fetching.begin_fetch();
+
         // The LIVE half: an ordinary subscriber carrying the caller's origin.
         let mut sub_closure = z_owned_closure_sample_t::from_parts(
-            Arc::into_raw(user.clone()) as *mut c_void,
+            Arc::into_raw(fetching.clone()) as *mut c_void,
             Some(forward_sample),
         );
-        sub_closure.drop = Some(reply_context_drop);
+        sub_closure.drop = Some(live_context_drop);
         let mut moved_sub_closure = z_moved_closure_sample_t { _this: sub_closure };
         // SAFETY: the default writer assigns the whole struct.
         let mut sub_opts = unsafe {
@@ -1046,12 +1066,14 @@ pub unsafe extern "C" fn ze_declare_querying_subscriber(
             )
         };
         if rc != Z_OK {
+            // No query will pay the count back, so pay it here.
+            fetching.end_fetch();
             return rc;
         }
 
         let mut boxed = Box::new(QueryingSubState {
             sub,
-            user: user.clone(),
+            fetching: fetching.clone(),
             session,
             keyexpr: DeclaredKeyexpr::new(ke),
         });
@@ -1065,31 +1087,27 @@ pub unsafe extern "C" fn ze_declare_querying_subscriber(
         // SAFETY: the pointers are the caller's plus this call's own state.
         let selector = unsafe { querying_selector(options) }.unwrap_or(key_expr);
         let mut get_opts = unsafe { querying_get_options(options) };
-        // SAFETY: as above.
-        let _ = unsafe { issue_forwarding_get(session, selector, &user, &mut get_opts) };
+        // SAFETY: as above. The count was raised before the subscriber was declared,
+        // and the closure built here lowers it when the query ends.
+        let _ = unsafe { issue_forwarding_get(session, selector, &fetching, &mut get_opts) };
         Z_OK
     })
 }
 
-/// Forward a live sample into the shared user closure.
+/// A live sample: the user's callback when no query is in flight, the merge when
+/// one is.
 ///
 /// # Safety
 /// Called by the subscriber plane with a valid loaned sample and an
-/// `Arc<CClosure>` raw pointer as context.
+/// `Arc<Fetching>` raw pointer as context.
 unsafe extern "C" fn forward_sample(sample: *const z_loaned_sample_t, context: *mut c_void) {
     if sample.is_null() || context.is_null() {
         return;
     }
     // SAFETY: as `forward_reply_to_sample`.
-    let closure = unsafe { &*(context as *const crate::sub::CClosure) };
-    let Some(call) = closure.call else {
-        return;
-    };
-    let ctx = closure.context.0;
-    // SAFETY: as `forward_reply_to_sample`.
-    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| unsafe {
-        call(sample, ctx);
-    }));
+    let fetching = unsafe { &*(context as *const Fetching) };
+    // SAFETY: the sample is the one the subscriber plane handed this callback.
+    unsafe { fetching.live(sample) };
 }
 
 /// The query selector an options struct names, or `None` for "the subscriber's
@@ -1208,8 +1226,11 @@ pub unsafe extern "C" fn ze_querying_subscriber_get(
         } else {
             options
         };
+        // Raised before the query leaves, as upstream's `register_handler` does; the
+        // query's reply closure lowers it when the query ends.
+        state.fetching.begin_fetch();
         // SAFETY: the caller's contract plus this state's own session pointer.
-        unsafe { issue_forwarding_get(state.session, target, &state.user, opts) }
+        unsafe { issue_forwarding_get(state.session, target, &state.fetching, opts) }
     })
 }
 

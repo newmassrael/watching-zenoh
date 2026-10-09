@@ -771,3 +771,293 @@ fn the_publication_cache_filters_by_the_querys_time_range_identically_on_wz_and_
         wz.len()
     );
 }
+
+/// One program that holds a querying subscriber's query OPEN while samples arrive,
+/// then answers it, and prints what the subscriber's callback saw and when.
+///
+/// The queryable keeps a CLONE of the query it is handed and answers it from the main
+/// thread later, so the order of events is the program's, not a scheduler's: no
+/// sleep decides which comes first. While the initial query is held open the program
+/// publishes two live samples, checks the callback has seen nothing, then answers with
+/// replies out of order, one repeated timestamp, one reply that repeats a live
+/// sample's timestamp, and one with no timestamp at all. A second round does the
+/// same through `ze_querying_subscriber_get`.
+const MERGE_PROBE: &str = r#"#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <stdint.h>
+#include <time.h>
+#include <pthread.h>
+#include "zenoh.h"
+
+#define KE "wz/merge/data"
+#define MAXLOG 32
+
+static pthread_mutex_t LOCK = PTHREAD_MUTEX_INITIALIZER;
+static char LOG_NAME[MAXLOG][16];
+static int LOG_TS[MAXLOG];
+static int LOG_N = 0;
+
+static z_owned_query_t HELD[4];
+static int HELD_N = 0;
+
+static void nap_ms(long ms) {
+    struct timespec ts;
+    ts.tv_sec = ms / 1000;
+    ts.tv_nsec = (ms % 1000) * 1000000L;
+    nanosleep(&ts, NULL);
+}
+
+static void on_sample(z_loaned_sample_t *sample, void *ctx) {
+    (void)ctx;
+    z_owned_string_t body;
+    z_bytes_to_string(z_sample_payload(sample), &body);
+    pthread_mutex_lock(&LOCK);
+    if (LOG_N < MAXLOG) {
+        size_t n = z_string_len(z_loan(body));
+        if (n > 15) n = 15;
+        memcpy(LOG_NAME[LOG_N], z_string_data(z_loan(body)), n);
+        LOG_NAME[LOG_N][n] = 0;
+        LOG_TS[LOG_N] = z_sample_timestamp(sample) != NULL;
+        LOG_N++;
+    }
+    pthread_mutex_unlock(&LOCK);
+    z_drop(z_move(body));
+}
+
+static void on_query(z_loaned_query_t *query, void *ctx) {
+    (void)ctx;
+    pthread_mutex_lock(&LOCK);
+    if (HELD_N < 4) {
+        z_query_clone(&HELD[HELD_N], query);
+        HELD_N++;
+    }
+    pthread_mutex_unlock(&LOCK);
+}
+
+static int log_count(void) {
+    pthread_mutex_lock(&LOCK);
+    int n = LOG_N;
+    pthread_mutex_unlock(&LOCK);
+    return n;
+}
+
+static int held_count(void) {
+    pthread_mutex_lock(&LOCK);
+    int n = HELD_N;
+    pthread_mutex_unlock(&LOCK);
+    return n;
+}
+
+static void log_clear(void) {
+    pthread_mutex_lock(&LOCK);
+    LOG_N = 0;
+    pthread_mutex_unlock(&LOCK);
+}
+
+/* Poll `f` until it reaches `want` or `ms` pass. The program decides what happens
+   next from what it saw, so a wait is a wait for a fact. */
+static int wait_for(int (*f)(void), int want, int ms) {
+    for (int waited = 0; waited < ms; waited += 5) {
+        if (f() >= want) return 1;
+        nap_ms(5);
+    }
+    return f() >= want;
+}
+
+static void print_round(const char *tag) {
+    pthread_mutex_lock(&LOCK);
+    printf("%s.order=", tag);
+    for (int i = 0; i < LOG_N; i++) printf("%s%s", i ? "," : "", LOG_NAME[i]);
+    if (!LOG_N) printf("none");
+    printf("\n%s.count=%d\n%s.timestamps=", tag, LOG_N, tag);
+    for (int i = 0; i < LOG_N; i++) printf("%s%d", i ? "," : "", LOG_TS[i]);
+    if (!LOG_N) printf("none");
+    printf("\n");
+    pthread_mutex_unlock(&LOCK);
+}
+
+static void put_ts(const z_loaned_session_t *s, const char *body, z_timestamp_t *ts) {
+    z_view_keyexpr_t ke;
+    z_view_keyexpr_from_str(&ke, KE);
+    z_owned_bytes_t payload;
+    z_bytes_copy_from_str(&payload, body);
+    z_put_options_t opts;
+    z_put_options_default(&opts);
+    opts.timestamp = ts;
+    z_result_t rc = z_put(s, z_loan(ke), z_move(payload), &opts);
+    printf("put[%s].rc=%d\n", body, (int)rc);
+}
+
+static void reply_with(const z_loaned_query_t *q, const char *body, z_timestamp_t *ts) {
+    z_view_keyexpr_t ke;
+    z_view_keyexpr_from_str(&ke, KE);
+    z_owned_bytes_t payload;
+    z_bytes_copy_from_str(&payload, body);
+    z_query_reply_options_t ro;
+    z_query_reply_options_default(&ro);
+    ro.timestamp = ts;
+    z_result_t rc = z_query_reply(q, z_loan(ke), z_move(payload), &ro);
+    printf("reply[%s].rc=%d\n", body, (int)rc);
+}
+
+int main(int argc, char **argv) {
+    if (argc < 2) { fprintf(stderr, "usage: probe <endpoint>\n"); return 2; }
+
+    z_owned_config_t config;
+    z_config_default(&config);
+    zc_config_insert_json5(z_loan_mut(config), Z_CONFIG_MULTICAST_SCOUTING_KEY, "false");
+    zc_config_insert_json5(z_loan_mut(config), Z_CONFIG_MODE_KEY, "\"peer\"");
+    char listen_json[256];
+    snprintf(listen_json, sizeof listen_json, "[\"%s\"]", argv[1]);
+    zc_config_insert_json5(z_loan_mut(config), Z_CONFIG_LISTEN_KEY, listen_json);
+    zc_config_insert_json5(z_loan_mut(config), "timestamping",
+                           "{\"enabled\":{\"router\":true,\"peer\":true,\"client\":true}}");
+    z_owned_session_t s;
+    z_result_t open_rc = z_open(&s, z_move(config), NULL);
+    printf("open.rc=%d\n", (int)open_rc);
+    if (open_rc < 0) { return 1; }
+    const z_loaned_session_t *ls = z_loan(s);
+
+    /* Seven stamps in the order they are minted: the replies A < B < C, the live
+       L1 < L2, then the second round's history H2 < live M1. */
+    z_timestamp_t tA, tB, tC, tL1, tL2, tH2, tM1;
+    z_timestamp_t *all[7] = {&tA, &tB, &tC, &tL1, &tL2, &tH2, &tM1};
+    int minted = 1;
+    uint64_t last = 0;
+    for (int i = 0; i < 7; i++) {
+        if (z_timestamp_new(all[i], ls) < 0) minted = 0;
+        uint64_t now = z_timestamp_ntp64_time(all[i]);
+        if (i > 0 && !(last < now)) minted = 0;
+        last = now;
+    }
+    printf("stamps.increasing=%d\n", minted);
+
+    z_view_keyexpr_t ke;
+    z_view_keyexpr_from_str(&ke, KE);
+
+    z_owned_closure_query_t qclosure;
+    z_closure(&qclosure, on_query, NULL, NULL);
+    z_owned_queryable_t qbl;
+    z_result_t brc = z_declare_queryable(ls, &qbl, z_loan(ke), z_move(qclosure), NULL);
+    printf("queryable.rc=%d\n", (int)brc);
+    if (brc < 0) { return 1; }
+
+    z_owned_closure_sample_t sclosure;
+    z_closure(&sclosure, on_sample, NULL, NULL);
+    ze_querying_subscriber_options_t qopts;
+    ze_querying_subscriber_options_default(&qopts);
+    ze_owned_querying_subscriber_t qsub;
+    z_result_t qrc = ze_declare_querying_subscriber(ls, &qsub, z_loan(ke),
+                                                    z_move(sclosure), &qopts);
+    printf("qsub.declare.rc=%d\n", (int)qrc);
+    if (qrc < 0) { return 1; }
+
+    /* ---- round 1: the INITIAL query ------------------------------------------ */
+    printf("phase1.query_held=%d\n", wait_for(held_count, 1, 3000));
+    put_ts(ls, "L1", &tL1);
+    put_ts(ls, "L2", &tL2);
+    nap_ms(200);
+    /* The initial query is still open. A live sample that arrived now is parked. */
+    printf("phase1.before_reply=%d\n", log_count());
+    reply_with(z_loan(HELD[0]), "B", &tB);
+    reply_with(z_loan(HELD[0]), "A", &tA);
+    reply_with(z_loan(HELD[0]), "Adup", &tA);
+    reply_with(z_loan(HELD[0]), "C", &tC);
+    reply_with(z_loan(HELD[0]), "L1dup", &tL1);
+    reply_with(z_loan(HELD[0]), "U", NULL);
+    nap_ms(200);
+    /* Replies are parked as well: the query has not ended, so nothing is out yet. */
+    printf("phase1.before_end=%d\n", log_count());
+    z_drop(z_move(HELD[0]));
+    wait_for(log_count, 6, 3000);
+    nap_ms(200);
+    print_round("phase1");
+
+    /* ---- round 2: a LATER query ---------------------------------------------- */
+    log_clear();
+    z_result_t grc = ze_querying_subscriber_get(ze_querying_subscriber_loan(&qsub),
+                                                z_loan(ke), NULL);
+    printf("qsub.get.rc=%d\n", (int)grc);
+    printf("phase2.query_held=%d\n", wait_for(held_count, 2, 3000));
+    put_ts(ls, "M1", &tM1);
+    nap_ms(200);
+    printf("phase2.before_reply=%d\n", log_count());
+    reply_with(z_loan(HELD[1]), "H2", &tH2);
+    z_drop(z_move(HELD[1]));
+    wait_for(log_count, 2, 3000);
+    nap_ms(200);
+    print_round("phase2");
+
+    z_drop(z_move(qsub));
+    z_drop(z_move(qbl));
+    z_drop(z_move(s));
+    printf("done\n");
+    return 0;
+}
+"#;
+
+/// What the reference arm must print, written from zenoh-ext's `FetchingSubscriber`
+/// (`MergeQueue`, `register_handler`, `RepliesHandler`) rather than copied from a run.
+/// A diff is an equality, and an arm that delivered everything on arrival would print
+/// the same six names in a different order: these lines are the order.
+const MERGE_EXPECTED: &[&str] = &[
+    "stamps.increasing=1",
+    "queryable.rc=0",
+    "qsub.declare.rc=0",
+    // Held open, a live sample waits: nothing reached the callback.
+    "phase1.query_held=1",
+    "phase1.before_reply=0",
+    "reply[B].rc=0",
+    "reply[U].rc=0",
+    // Replies wait too, until the query ends.
+    "phase1.before_end=0",
+    // No timestamp first, then oldest first; the repeated A and the repeat of L1
+    // are the same instant as one already parked, and are not delivered.
+    "phase1.order=U,A,B,C,L1,L2",
+    "phase1.count=6",
+    "phase1.timestamps=0,1,1,1,1,1",
+    "qsub.get.rc=0",
+    "phase2.query_held=1",
+    "phase2.before_reply=0",
+    "phase2.order=H2,M1",
+    "phase2.count=2",
+    "phase2.timestamps=1,1",
+    "done",
+];
+
+/// THE ADJUDICATOR for the querying subscriber's merge: what its callback sees, in what
+/// order and when, is the same on wz's cdylib and on the real `libzenohc.so`.
+///
+/// NOT CLAIMED: a live sample that carries no timestamp (stamped on arrival upstream),
+/// which a single session cannot make because its own puts are stamped; and a query that
+/// ends by timeout rather than by its final.
+// wz-proves: api-compat-c wz->zenoh-c partial
+#[test]
+#[ignore = "links the shared-memory zenoh-c oracle; run by run-ci Layer C1ce"]
+fn a_querying_subscriber_merges_replies_and_live_samples_identically_on_wz_and_libzenohc() {
+    let Some((include, ref_libdir)) = oracle_prefix() else {
+        return;
+    };
+    let (wz_out, ref_out) = run_both_arms(MERGE_PROBE, &include, &ref_libdir);
+
+    for (arm, stdout) in [("REFERENCE", &ref_out), ("wz", &wz_out)] {
+        let lines: Vec<&str> = stdout.lines().collect();
+        let missing: Vec<&&str> = MERGE_EXPECTED
+            .iter()
+            .filter(|w| !lines.contains(w))
+            .collect();
+        assert!(
+            missing.is_empty(),
+            "the {arm} arm did not merge as zenoh-ext's FetchingSubscriber does.\n\
+             missing: {missing:?}\n--- stdout ---\n{stdout}",
+        );
+    }
+    let wz: Vec<&str> = wz_out.lines().collect();
+    let reference: Vec<&str> = ref_out.lines().collect();
+    assert_eq!(
+        wz, reference,
+        "wz's querying subscriber and the real libzenohc's differ in what the callback \
+         saw"
+    );
+}

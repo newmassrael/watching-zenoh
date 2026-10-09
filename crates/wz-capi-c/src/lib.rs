@@ -131,6 +131,10 @@ pub mod session;
 // `#if (defined(Z_FEATURE_SHARED_MEMORY) && defined(Z_FEATURE_UNSTABLE_API))`
 // upstream, so it carries the same two-feature gate. On any other arm its
 // symbols would name types no header declares.
+/// The merge `zenoh_ext`'s querying subscriber makes between its queries' replies and
+/// the live samples that arrive meanwhile. Carries the same gate, for the same reason.
+#[cfg(not(feature = "zenoh-c-no-unstable-api"))]
+mod fetching;
 #[cfg(all(
     feature = "zenoh-c-shared-memory",
     not(feature = "zenoh-c-no-unstable-api")
