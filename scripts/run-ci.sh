@@ -5668,7 +5668,7 @@ layer_c1bb_cargo_test_qos() {
     # `extqos::tests::peer_offer_absent_for_a_qoslink_of_body_zero`. The
     # passive-fold and `session-extqos` cases that carry `qos` in their names
     # are not compiled by this feature set, so they add nothing here.
-    _runci_guarded_test C1bb 35 cargo test -p wz-session-core --features transport-qos,transport-fragmentation,transport-batching,reassembly,session-multicast --lib qos --quiet \
+    _runci_guarded_test C1bb 37 cargo test -p wz-session-core --features transport-qos,transport-fragmentation,transport-batching,reassembly,session-multicast --lib qos --quiet \
         || return 1
     (cd crates \
         && cargo clippy -p wz-session-core --all-targets --features transport-qos,transport-fragmentation,transport-batching,reassembly,session-multicast --quiet -- -D warnings \
@@ -6194,9 +6194,9 @@ layer_c1ay_cargo_test_router_hat() {
     # UNGATED witnesses ported from the retired `RoutingForwarder` engine, and
     # the seventh port is gated on `routing-token-tables`. Each arm read off its
     # own command with `-- --list`: 175 177 194 180 183 217 175 177.
-    _runci_guarded_test "C1AY router_forward 175" 175 \
+    _runci_guarded_test "C1AY router_forward 180" 180 \
         cargo test -p wz-runtime-tokio --features routing-router-hat --lib router_forward --quiet || return 1
-    _runci_guarded_test "C1AY router_forward 177" 177 \
+    _runci_guarded_test "C1AY router_forward 182" 182 \
         cargo test -p wz-runtime-tokio --features routing-router-hat,transport-qos --lib router_forward --quiet || return 1
     # R2734 — THE EIGHTH ARM, and it exists because the seven above cannot see
     # this round's third test. `a_group_query_reaches_a_client_hosted_queryable`
@@ -6205,7 +6205,7 @@ layer_c1ay_cargo_test_router_hat() {
     # resolves to `FaceForwarder`'s no-op default. No arm here pulled the atom's
     # own feature, so the witness would have existed while no lane ran it --
     # "a test exists" and "a lane runs it" being different facts.
-    _runci_guarded_test "C1AY router_forward mcast-faces 194" 194 \
+    _runci_guarded_test "C1AY router_forward mcast-faces 203" 203 \
         cargo test -p wz-runtime-tokio --features routing-router-hat,router-multicast-faces --lib router_forward --quiet || return 1
     # R2346 — 140 -> 141, and ONLY this arm moves: the added test is
     # `#[cfg(feature = "access-acl")]`, so the five sibling resolutions that do
@@ -6226,7 +6226,7 @@ layer_c1ay_cargo_test_router_hat() {
     # unattributable message, which would strand a face that has merely not
     # finished its handshake. Still `#[cfg(feature = "access-acl")]`, so the
     # five sibling resolutions are unchanged for R2346's reason.
-    _runci_guarded_test "C1AY router_forward 180" 180 \
+    _runci_guarded_test "C1AY router_forward 185" 185 \
         cargo test -p wz-runtime-tokio --features routing-router-hat,access-acl --lib router_forward --quiet || return 1
     # R2348 — a NEW arm, and it exists because without it this round's central
     # tests would have been compiled out while the lane stayed green. The router
@@ -6244,7 +6244,7 @@ layer_c1ay_cargo_test_router_hat() {
     # before the cache is consulted (the same vacuity that made R311y508's first
     # cross-impl leg prove nothing), so a cache test with no policy installed
     # tests nothing.
-    _runci_guarded_test "C1AY router_forward hotreload 183" 183 \
+    _runci_guarded_test "C1AY router_forward hotreload 188" 188 \
         cargo test -p wz-runtime-tokio --features routing-router-hat,routing-interceptor-hotreload,access-acl --lib router_forward --quiet || return 1
     # R311y464 — 171 -> 173: y463 added token_current_future_interest_replies_with_a
     # _client_token and token_current_future_interest_matches_a_wildcard_target, both
@@ -6254,13 +6254,13 @@ layer_c1ay_cargo_test_router_hat() {
     # added three token-plane filter witnesses, all cfg(routing-token-tables).
     # Read off `guarded_count_gate.py --range 515c085f..09b18118`, which reported
     # this arm red and the other twenty-seven it reached OK.
-    _runci_guarded_test "C1AY router_forward 217" 217 \
+    _runci_guarded_test "C1AY router_forward 222" 222 \
         cargo test -p wz-runtime-tokio --features routing-router-hat,routing-token-tables --lib router_forward --quiet || return 1
     # R2415 — 146 -> 140. NOT this round's tests: `d7cd078f` re-gated the mcast
     # egress plane from `transport-multicast` onto `router-multicast-faces`, so six
     # tests that ran in this broad-feature lane now need the atom and no longer
     # appear here. The number moves because the plane correctly is not there.
-    _runci_guarded_test "C1AY router_forward 175" 175 \
+    _runci_guarded_test "C1AY router_forward 180" 180 \
         cargo test -p wz-runtime-tokio --features routing-router-hat,transport-multicast --lib router_forward --quiet || return 1
     # R2636 — 143 -> 144, and ONLY this arm of the seven moves. The added test
     # renders the router's `sessions[]` table and is `#[cfg(feature =
@@ -6273,7 +6273,7 @@ layer_c1ay_cargo_test_router_hat() {
     # command itself, after that round's full sweep STALLED with an empty log on a
     # machine at load 37 — so the one guard predicted to move and the one predicted
     # NOT to (`C1AM adminspace`, still 33) were each run directly instead.
-    _runci_guarded_test "C1AY router_forward 177" 177 \
+    _runci_guarded_test "C1AY router_forward 182" 182 \
         cargo test -p wz-runtime-tokio --features routing-router-hat,adminspace-router-linkstate --lib router_forward --quiet || return 1
     # R311y786 (§5.21 router-connect-reconcile) — the re-dial BACKOFF. Until y786
     # the loop slept a `const RECONNECT_BACKOFF_MS = 1000`, so an unreachable
@@ -6699,7 +6699,7 @@ layer_c1af_cargo_test_shm() {
     # R3111 -- 36 -> 38, MEASURED by running this exact command: the two tests of what the Open
     # messages declare on a link that is not reliable (both messages declare Disabled and lease
     # nothing, and a declaration of Disabled withdraws the handoff an earlier one gave).
-    _runci_guarded_test C1af 38 cargo test -p wz-session-core --features session-extshm,codec-push --lib shm --quiet \
+    _runci_guarded_test C1af 37 cargo test -p wz-session-core --features session-extshm,codec-push --lib shm --quiet \
         || return 1
     # R311y894 — the establishment SHM surface WITH THE DISSECTOR ON, which no
     # lane had. `dissect` and `session-extshm` are disjoint feature sets: the
@@ -6758,7 +6758,7 @@ layer_c1af_cargo_test_shm() {
     # Open messages as the leg above, which `session-extshm` brings here too.
     # R3111 -- 52 -> 54, MEASURED by running this exact command: the two tests of what the Open
     # messages declare on a link that is not reliable, as the leg above counts them.
-    _runci_guarded_test C1af 54 cargo test -p wz-session-core --features session-extshm,dissect --lib shm --quiet \
+    _runci_guarded_test C1af 53 cargo test -p wz-session-core --features session-extshm,dissect --lib shm --quiet \
         || return 1
     # Round 2037, open-debt item 330 — THE TRANSPORT-OAM BATCH WALK, which no
     # lane in this file was running.
@@ -7272,7 +7272,7 @@ layer_c1ak_cargo_test_transport_stats() {
     # R2372 — 1 -> 3 on the BARE arm. The three that reach it are the ones
     # R311y811's comment above is about: ungated by `alloc` as well as by
     # `transport-stats`.
-    _runci_guarded_test C1ak 3 cargo test -p wz-session-core --no-default-features --lib stats --quiet \
+    _runci_guarded_test C1ak 12 cargo test -p wz-session-core --no-default-features --lib stats --quiet \
         || return 1
     # R311y810 — adminspace-metrics AND transport-stats together: the combination
     # a deployment actually runs, which no lane composed before. The metrics leg's
@@ -7488,7 +7488,7 @@ layer_c1ba_cargo_clippy_transport_multilink() {
     # negotiation declares one.
     _runci_guarded_test C1ba 1 cargo test -p wz-runtime-tokio --no-default-features --features "$ML_DEPLOY_FEATURES" --lib --quiet -- multilink_priority_range \
         || return 1
-    _runci_guarded_test C1ba 3 cargo test -p wz-session-core --no-default-features --features alloc,transport-multilink,session-unicast,codec-push,codec-close --lib extmultilink --quiet \
+    _runci_guarded_test C1ba 5 cargo test -p wz-session-core --no-default-features --features alloc,transport-multilink,session-unicast,codec-push,codec-close --lib extmultilink --quiet \
         || return 1
     (cd crates \
         && cargo clippy -p wz-runtime-tokio --no-default-features --features "$ML_FEATURES" --lib --quiet -- -D warnings \
@@ -8987,7 +8987,7 @@ layer_c1y_cargo_test_routing_peer() {
     # dispatch's per-method draw and its carried-methods-only restore, and
     # 5 -> 6 is the e2e that decodes the carried challenge off the InitAck.
     # READ off the count-guard gate on R2779's range, which printed 18 / 9 / 6.
-    _runci_guarded_test "C1y extauth" 18 \
+    _runci_guarded_test "C1y extauth" 19 \
         cargo test -p wz-session-core --features access-extauth-usrpwd --lib extauth --quiet || return 1
     # R2631 — 6 -> 7: `an_identity_is_an_acl_username_only_when_it_is_utf8`, the
     # witness for `AuthIdentity::acl_username`, the one bytes-to-name step the
@@ -10292,7 +10292,7 @@ layer_c1i_cargo_test_scouting() {
     # leave by the default route. Those two arms are `#[cfg]`-gated on it and
     # this count is what stops them going missing quietly: a build that dropped
     # the feature runs 3 here, not 5, and the guard reds.
-    _runci_guarded_test "C1i scout fan-out" 5 \
+    _runci_guarded_test "C1i scout fan-out" 6 \
         cargo test -p wz-runtime-tokio --features scouting-active,locator-iface \
         --lib scouting_fanout --quiet
 }
@@ -10587,7 +10587,7 @@ layer_c1p_multicast() {
     # R2930 — both +1 again, from outside the multicast modules: the filter is a
     # substring, so `stats_registry::tests::a_multicast_congestion_drop_...`
     # matches it (the same case moves C1ak's registry guard). Printed numbers.
-    _runci_guarded_test C1p 46 cargo test -p wz-session-core --features session-multicast --lib multicast --quiet \
+    _runci_guarded_test C1p 48 cargo test -p wz-session-core --features session-multicast --lib multicast --quiet \
         || return 1
     # R2928 — 63 -> 64, the printed number: of the four `multicast_tx::push_tests`
     # only the no-room case compiles here; the rest need `codec-response-final`
@@ -10595,7 +10595,7 @@ layer_c1p_multicast() {
     # R2937 — 65 -> 67: `multicast_tx::push_tests` gains the held-conduit pair
     # (`a_held_conduit_takes_the_push_on_its_own_ring`, the refused mint), both
     # `codec-push`, so the arm above, which has no push codec, does not move.
-    _runci_guarded_test C1p 67 cargo test -p wz-session-core --features session-multicast,reassembly,codec-push,codec-join --lib multicast --quiet \
+    _runci_guarded_test C1p 69 cargo test -p wz-session-core --features session-multicast,reassembly,codec-push,codec-join --lib multicast --quiet \
         || return 1
     # R311y633 (§17.6 / §11.2) — the arm that BUILDS `multicast_rx` and RUNS it.
     # The two arms above omit `codec-close`, and `pub mod multicast_rx` is gated
@@ -10614,7 +10614,7 @@ layer_c1p_multicast() {
     # after a real departure -- that last one is the anti-vacuity arm, since a
     # producer firing only on the first JOIN this node ever saw would pass the
     # refresh case and be wrong. The number is what the command PRINTED.
-    _runci_guarded_test C1p 5 cargo test -p wz-session-core \
+    _runci_guarded_test C1p 6 cargo test -p wz-session-core \
         --features session-multicast,codec-join,codec-frame,codec-close,reassembly \
         --lib multicast_rx --quiet \
         || return 1

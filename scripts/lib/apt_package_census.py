@@ -1397,7 +1397,7 @@ BINDGEN_FREE: dict[str, BindgenFree] = {
     "validate-codegen": BindgenFree(
         layers=frozenset({
             "A", "A2", "A3", "A4", "A5",
-            "C0", "C0i", "C0b", "C0g", "C0d", "C0e", "C0f", "U",
+            "C0", "C0s", "C0i", "C0b", "C0g", "C0d", "C0e", "C0f", "U",
         }),
         exempt={
             "install-mnemosyne-cli.sh": (

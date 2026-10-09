@@ -107,8 +107,8 @@ CLASSIFIED: dict[tuple[str, str], tuple[str, str]] = {
     ("crates/wz-session-core/src/auth_dispatch.rs", "find_method_sub_ext"): (
         "upstream-id",
         "the method sub-extensions inside the auth extension are demultiplexed by "
-        "their 4-bit id upstream: io/zenoh-transport/src/unicast/establishment/"
-        "ext/auth/mod.rs @ .position(|x| x.id & iext::ID_MASK == $id)",
+        "their 4-bit id upstream: "
+        "`io/zenoh-transport/src/unicast/establishment/ext/auth/mod.rs` @ `.position(|x| x.id & iext::ID_MASK == $id)`",  # noqa: E501
     ),
     ("crates/wz-session-core/src/dissect.rs", "walk_ext_entry_head"): (
         "renders",

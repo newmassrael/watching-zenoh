@@ -218,7 +218,11 @@ REFUSAL_TOKENS = frozenset({"code", "success"})
 # demo, so the new leg and the file's two older ones left the carried bucket
 # at once. 221 measured, 218 after.
 CARRIED_SUBJECT = 218
-PROBE_ROUTE = 24
+# 24 -> 25 (item 900): `wz_client_and_multicast_peer_sessions_in_one_process_zenohd.rs`
+# reaches `wz-ap-demo` only through `spawn_zenohd*`, whose readiness probe execs
+# it; the sessions under test are in the test process, so the demo is the probe
+# and not the subject, which is what this bucket derives, not a claim written here.
+PROBE_ROUTE = 25
 REFUSAL_ONLY = 8
 
 # THE LIVE POLICY SPLIT, budgeted so it cannot go back to being invisible.

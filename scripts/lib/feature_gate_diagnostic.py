@@ -526,6 +526,12 @@ DEFERRED: dict[str, dict[str, str]] = {
                 "declare-keyexpr",
                 "declare-undeclare",
                 "session-matching",
+                # Round 3171's `transport-tx-lend` gates the buffer seam of
+                # `tx_buf.rs`: both public items it gates are behind an
+                # `all(feature, ..)` attribute, so rustc's note names no
+                # feature for them. (Its two lend attempts on the session are
+                # methods behind the same shape.)
+                "transport-tx-lend",
             )
         },
         **{

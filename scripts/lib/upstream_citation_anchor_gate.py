@@ -667,7 +667,7 @@ ROOTLESS_RESIDUE_BY_SEGMENT: dict[str, int] = {
     "routing": 2,
     "runtime": 1,
     "storages_mgt": 25,
-    "transport": 32,
+    "transport": 31,
     "unicast": 77,
     "universal": 7,
     "zenoh-backend-traits": 8,
@@ -770,7 +770,9 @@ def rootless_undeclared_budget() -> int:
 # R2944 — 733 -> 728, the same five removals as ROOTLESS_UNDECLARED_BUDGET.
 # R2945 — 728 -> 730, the same frozen ack row as ROOTLESS_UNDECLARED_BUDGET.
 # R3042 — 730 -> 728, the same two removals as ROOTLESS_UNDECLARED_BUDGET.
-ROOTLESS_TOTAL_BUDGET = 728
+# Integration of 2026-10-10 — 728 -> 727, the single `transport` occurrence a
+# worker's rewrite gave its root (the per-segment row went 32 -> 31 with it).
+ROOTLESS_TOTAL_BUDGET = 727
 
 #: A LIVE invocation of the RESOLUTION arm. R2242 split this gate in two and,
 #: in doing so, made `--resolve` a flag someone can simply stop passing: delete
