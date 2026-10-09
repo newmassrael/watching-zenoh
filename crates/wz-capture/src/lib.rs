@@ -297,6 +297,9 @@ pub mod pcapng;
 /// Ungated and dependency-free like [`proto_schema`], over the workspace's one
 /// JSON reader.
 pub mod proto_encode;
+/// The verdict document of [`proto_encode`]: the bytes as hex, or the place the
+/// values or the schema were refused.
+pub mod proto_encode_json;
 #[cfg(test)]
 mod proto_encode_tests;
 /// The `.proto` tokenizer behind [`proto_schema`], private for the reason

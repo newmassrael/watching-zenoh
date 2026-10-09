@@ -2296,6 +2296,26 @@ pub const DOCUMENT_HISTORY: &[DocumentShape] = &[
         planes: &[],
         carries: &[],
     },
+    // The protobuf bytes a set of field values comes to under a `.proto`
+    // schema, or why they could not be built.
+    //
+    // Two branches sharing the envelope and `ok`. The refusal names the text it
+    // is about by the KEY that locates the place, as the protected-frame
+    // documents do: `file`, `line` and `column` for the schema,
+    // `values_offset` for values that are not JSON, `values_path` for values
+    // that are JSON and do not fit. A position that does not apply is OMITTED
+    // and never `null`, which is reserved for a plane this build cannot feed.
+    // No value family: every string is free text. No integer cell: the only
+    // number is a byte count this library holds, bounded far below 2^53.
+    DocumentShape {
+        document: PROTO_ENCODE,
+        revision: 1,
+        keys: PROTO_ENCODE_R1_KEYS,
+        retiring: &[],
+        families: &[],
+        planes: &[],
+        carries: &[],
+    },
     // The selector's verdict over the field document's rows, with none
     // of what the field document renders beside it.
     //
@@ -2612,6 +2632,9 @@ pub const E2E_WRAP: &str = "e2e_wrap";
 /// A protected frame read under a profile, or why it was refused
 /// (`wz_dissect_e2e_open`).
 pub const E2E_OPEN: &str = "e2e_open";
+/// The protobuf bytes a set of field values comes to under a `.proto` schema, or
+/// why they could not be built (`wz_dissect_proto_encode`).
+pub const PROTO_ENCODE: &str = "proto_encode";
 /// A selector's verdict over the field document's rows, and nothing else
 /// (`wz_dissect_live_selection`).
 pub const SELECTION: &str = "selection";
@@ -9126,6 +9149,28 @@ pub const E2E_WRAP_R1_KEYS: &[&str] = &[
     "values_path",
 ];
 
+/// The `proto_encode` document's key set at revision 1, over every branch: the
+/// built payload, and the refusal with whichever of the schema's position
+/// (`file`, `line`, `column`) and the values' (`values_offset`, `values_path`,
+/// with `field` and `expected`) apply.
+pub const PROTO_ENCODE_R1_KEYS: &[&str] = &[
+    "column",
+    "document",
+    "expected",
+    "field",
+    "file",
+    "line",
+    "message",
+    "name",
+    "ok",
+    "payload",
+    "payload_bytes",
+    "reason",
+    "revision",
+    "values_offset",
+    "values_path",
+];
+
 /// The `e2e_open` document's key set at revision 1, over BOTH branches.
 pub const E2E_OPEN_R1_KEYS: &[&str] = &[
     "bytes",
@@ -13388,6 +13433,8 @@ mod tests {
             // A protected frame built and read under a caller's profile.
             (E2E_WRAP, 1),
             (E2E_OPEN, 1),
+            // The bytes a set of field values comes to under a `.proto` schema.
+            (PROTO_ENCODE, 1),
             // The selector's verdict over the field document's rows.
             // To 2 on the same move as fields 27: the word on a `Request`, a
             // `ResponseFinal` and a del row stopped being `unjudged`.

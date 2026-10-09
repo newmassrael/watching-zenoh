@@ -71,7 +71,7 @@
  * here would only ever be a copy. (The envelope carries one more key for a
  * document that declares planes -- see R2180 below.) The names are "census",
  * "fields", "summary", "readable_surfaces", "selector_diagnose",
- * "declarations_diagnose", "keyexpr_diagnose", "declarations_from_proto", "e2e_wrap", "e2e_open", "selection", "retention" and "health" — one per door group, because a consumer calls the
+ * "declarations_diagnose", "keyexpr_diagnose", "declarations_from_proto", "e2e_wrap", "e2e_open", "proto_encode", "selection", "retention" and "health" — one per door group, because a consumer calls the
  * door it wants and a single library-wide number would tell a reader of the
  * census that a document it never calls had moved.
  *
@@ -1517,7 +1517,7 @@ extern "C" {
  * calls the function, and refuses when the two disagree.
  *
  * @unknown ABI not-an-enumeration */
-#define WZ_DISSECT_ABI_REVISION 28
+#define WZ_DISSECT_ABI_REVISION 29
 
 /* Symbol/memory-contract revision. Not a JSON-shape revision. This is the
  * revision the LOADED library reports; the block above says why it exists
@@ -2701,6 +2701,163 @@ int wz_dissect_declarations_from_proto(const char *key_pattern,
                                        const wz_dissect_proto_file *files,
                                        size_t file_count, size_t root_file,
                                        char **out);
+
+/* (ABI 29) -- FIELD VALUES, AS JSON, TURNED INTO PROTOBUF WIRE BYTES by the
+ * types a .proto schema gives them: the sending half of
+ * wz_dissect_declarations_from_proto.
+ *
+ * WHY IT IS HERE AND NOT IN YOUR PROGRAM. A program that lets a person fill in
+ * the fields of a message and then sends it needs the bytes. If it builds them
+ * itself it holds a second WRITER of the wire format beside the one reader the
+ * door above feeds, and two writers disagree exactly where the format is
+ * unusual: a sint32 is zigzagged and an int32 is not, a negative int32 is ten
+ * bytes, a proto3 field at its default is absent, a packed field is one
+ * length-delimited run, a map's entries have a fixed order. This is the one
+ * writer.
+ *
+ * THE SCHEMA is the list of files the door above takes -- the same
+ * wz_dissect_proto_file structure, the same reader, the same rules: an import is
+ * matched BY NAME against the list, only the root file and what it imports are
+ * read, nothing opens a path, no callback runs, and the well-known types are
+ * not part of this library. `root_message` is the message to build, by FULL
+ * name including the package (pkg.Outer, or Outer when there is none). What is
+ * refused there for being wrong -- syntax errors, a type that is not defined,
+ * a number used twice -- is refused here with the same diagnostic. What that
+ * door refuses for not being DECLARABLE is not refused here: a recursive
+ * message is fine, because the values are finite, and a group or an extend
+ * block in the schema matters only if the values name it (see WHAT IS REFUSED).
+ *
+ * THE VALUES are one JSON object, `values_json`, in protobuf's JSON mapping --
+ * the form a person, or another tool, is most likely to already hold.
+ *
+ *   - A field is written under its name as the .proto file spells it
+ *     (sensor_id) or under its JSON name, which is that name in lowerCamelCase
+ *     (sensorId) unless the field sets [json_name = "..."]. Naming one field
+ *     twice, in either form, is refused, and so is a key that is no field.
+ *   - A message is an object, a repeated field an array, and a map<K, V> an
+ *     object whose keys are the map keys written as strings ("7", "true").
+ *   - int32, uint32, sint32, fixed32, sfixed32 and the 64-bit kinds are a JSON
+ *     number or a decimal string; the string is how a 64-bit value survives a
+ *     reader that holds numbers as doubles, and the digits are read exactly, so
+ *     18446744073709551615 and 9007199254740993 keep every bit. A number must be
+ *     an integer (1.0 and 1e3 are, 1.5 is not) that fits the type. Only plain
+ *     JSON number grammar is read: 0x10, +1 and 01 are refused.
+ *   - float and double are a number, a decimal string, or one of the strings
+ *     "NaN", "Infinity" and "-Infinity". A finite value that does not fit a
+ *     float is refused, not turned into infinity.
+ *   - bool is true or false. string is a string. bytes is a base64 string, in the
+ *     standard or the URL-safe alphabet (not both in one string), padded or
+ *     not, whose last character carries no bits beyond the data.
+ *   - An enum is the NAME of one of its values or an integer. A proto2 enum is
+ *     closed, so an integer that is none of its values is refused; a proto3 enum
+ *     takes any int32.
+ *   - null means "not set" for a field, and is refused as an array element or a
+ *     map value, where there is nothing to leave out.
+ *
+ * The text is read by the library's one JSON reader, which reads JSON5, so it
+ * admits what JSON5 admits (comments, trailing commas, unquoted keys); a number
+ * is then held to the strict grammar above. Nesting deeper than 64 levels is
+ * refused before the tree is built: the reader recurses once per level, and a
+ * text a person chose must not be able to exhaust the stack of the program that
+ * linked this library. The well-known types (Timestamp, Duration, Any, the
+ * wrappers, Struct) have a special JSON form in that mapping, a string or a
+ * bare value, which this library does not read; such a message is written from
+ * its fields, as an object, and handed the special form the refusal says so.
+ *
+ * THE BYTES.
+ *
+ *   - Fields are written in ascending field NUMBER, whatever the order in the
+ *     file or in the JSON, each once.
+ *   - A proto3 singular field that is not in a oneof, not `optional` and not a
+ *     message is written only when its value is not the default: 0, false, the
+ *     empty string or bytes, the enum value numbered zero, or a float or double
+ *     whose bits are all zero (so -0.0 IS written, as protoc writes it). A field
+ *     with presence is written whenever the JSON gives it: a message field, a
+ *     member of a oneof, an `optional` or `required` field, and every singular
+ *     field of proto2. Two members of one oneof are refused, and so is a
+ *     missing `required` field.
+ *   - A repeated numeric, bool or enum field is one length-delimited run of its
+ *     elements ("packed") in proto3 unless it sets [packed = false], and one tag
+ *     per element in proto2 unless it sets [packed = true]. A repeated string,
+ *     bytes or message field is one tag per element. An empty array writes
+ *     nothing.
+ *   - A map is a repeated field of entry messages whose key is field 1 and whose
+ *     value is field 2, both always written, the entries in ascending key order
+ *     (numeric for integer keys, false before true, byte order for strings), so
+ *     the same values always give the same bytes. A key given twice, whatever
+ *     its spelling ("1" and "1.0" are one key), is refused.
+ *   - int32 and an enum are the varint of the sign-extended value (a negative one
+ *     is ten bytes); sint32 and sint64 are zigzag; fixed32, sfixed32 and float
+ *     are four bytes little-endian, fixed64, sfixed64 and double eight.
+ *
+ * WHAT IS REFUSED, with the place and the type that was expected: a value that
+ * does not fit its field's type; a key that is no field (the reason lists the
+ * fields there are); a field named twice; two members of a oneof; a missing
+ * required field; a null where nothing can be left out; an enum name that is
+ * none of its values. And, where the JSON NAMES them and not where the schema
+ * holds them, a group field (it is delimited by the deprecated start-group and
+ * end-group markers, which the payload reader cannot read back) and an
+ * extension written as "[pkg.ext]" (an extension is no field of the message it
+ * extends). A [json_name] that is not a string, a [packed] that is not true or
+ * false, and [packed = true] on a string, bytes or message field are errors in
+ * the SCHEMA, blamed at the option's value: json_name is judged for every field
+ * of a message the values reach, since it decides which keys that message
+ * answers to, and packed only for a field the values name.
+ *
+ * THE FIRST PROBLEM is the only one reported, in this order: an argument (the
+ * root file index, a duplicate file name), the schema (in the order the door
+ * above gives), the root message, whether the values are JSON, then the values
+ * from the top down in the order they are written.
+ *
+ * BOUNDS, all of them refusals: the message may encode to at most 4194304
+ * bytes (a message or a sub-message that grows past it is refused where it
+ * does, and the work to find out is linear in the text of the schema and of the
+ * values), and the values may nest 64 levels, an object and the array of a
+ * repeated field or the object of a map's entries each counting one.
+ *
+ * THE VERDICT. Returns WZ_DISSECT_OK for any well-formed arguments and writes
+ *
+ *     {"document":{"name":"proto_encode","revision":1},"ok":true,
+ *      "payload":"089601","payload_bytes":3}
+ *
+ * `payload` is the message's wire bytes as lowercase hex and `payload_bytes`
+ * how many bytes that is; an empty message is "payload":"" and 0. A refusal is
+ *
+ *     {"document":{...},"ok":false,"values_path":"/readings/2/celsius",
+ *      "field":"pkg.Reading.celsius","expected":"float: a JSON number, ...",
+ *      "reason":"...","message":"values /readings/2/celsius: ..."}
+ *
+ * and the keys that place it depend on what was refused. The SCHEMA: `file`,
+ * `line` and `column` together for a place in a file, `file` alone for the file
+ * as a whole (the root message is not defined in it), none of the three for an
+ * argument -- the keys, and the counting from 1 and in bytes, are the ones the
+ * door above documents. The values are not JSON: `values_offset`, the byte
+ * reading stopped at. The values are JSON and do not fit: `values_path`, an RFC
+ * 6901 JSON pointer to the place ("" is the whole text; a "/" or "~" in a key is
+ * escaped), with `field`, the full name of the schema field the value was for,
+ * and `expected`, what would have been accepted there, when the value was for a
+ * particular field. Every one of them is ABSENT where it does not apply and
+ * never null: a top-level null is what this library reserves for a plane it
+ * cannot feed. `message` is the one-line form, `{file}: line {line}: {reason}`
+ * for the schema, `values at byte {offset}: the text is not JSON: ...` for text
+ * that is not JSON and `values {values_path}: {reason}` for a value. A refusal
+ * is a successful DIAGNOSIS, for the reason wz_dissect_declarations_diagnose
+ * gives: OK means a string, an error means none.
+ *
+ * This door builds the BODY of a message and nothing around it: a protection
+ * header and its CRC are wz_dissect_e2e_wrap's, which takes the body as bytes.
+ *
+ * Returns WZ_DISSECT_ERR_INVALID_ARG, and no string, for a null pointer, a
+ * file_count of zero, a root_file outside the list, a name or buffer pointer
+ * that is null where it may not be (a buffer may be null only when its length
+ * is zero), two files with one name, or a root name, values text or file name
+ * that is not UTF-8. Those are the caller's bug and not text a person typed.
+ * The memory rule does not move: the verdict is a char* released by
+ * wz_dissect_string_free. */
+int wz_dissect_proto_encode(const char *root_message,
+                            const wz_dissect_proto_file *files,
+                            size_t file_count, size_t root_file,
+                            const char *values_json, char **out);
 
 /* (ABI 26) -- A PROTECTED FRAME BUILT AND OPENED UNDER A PROFILE YOU DESCRIBE:
  * the mechanism of an end-to-end protection header, with none of anyone's

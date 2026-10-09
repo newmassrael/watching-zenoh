@@ -50,7 +50,7 @@ import subprocess
 import sys
 
 # The pinned pair. Edit BOTH halves deliberately -- see the module doc.
-EXPECTED_VERSION = 28
+EXPECTED_VERSION = 29
 
 # R2108 (open-debt item 525) -- THE RECORD'S LAYOUT, pinned HERE and read from
 # the artifact through `wz_dissect_record_layout`.
@@ -281,6 +281,14 @@ EXPECTED_SYMBOLS = {
     # its own symbol and not a mode of the door above, which judges a TEXT of
     # lines.
     "wz_dissect_keyexpr_diagnose",
+    # (ABI 29) -- FIELD VALUES, as JSON, turned into protobuf wire bytes by the
+    # types a `.proto` schema gives them, so a consumer that lets a person fill
+    # in a message never holds a second WRITER of the wire format beside the one
+    # reader. It takes the file list `wz_dissect_declarations_from_proto` takes
+    # (no new struct). The memory rule does not move: the verdict is a `char*`
+    # released by `wz_dissect_string_free`, the files cross as bytes the CALLER
+    # already read, and no callback runs.
+    "wz_dissect_proto_encode",
     # R311y851 — the four analysis planes' door. Both halves moved together,
     # which is the whole of what this gate asks.
     "wz_dissect_pcap_census",

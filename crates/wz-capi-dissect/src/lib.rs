@@ -338,6 +338,8 @@ pub extern "C" fn wz_dissect_abi_version() -> c_int {
     // 27, for `wz_dissect_transport_message_in`.
     // 28, for `wz_dissect_keyexpr_diagnose`: one key expression judged without
     // a declaration line.
+    // 29, for `wz_dissect_proto_encode`: field values, as JSON, turned into
+    // protobuf wire bytes by a `.proto` schema's types.
     WZ_DISSECT_ABI_REVISION
 }
 
@@ -355,7 +357,7 @@ pub extern "C" fn wz_dissect_abi_version() -> c_int {
 /// It lives AFTER the function rather than above it on purpose: an item placed
 /// between a doc comment and the item it documents takes that doc, which is
 /// the doc-ownership defect the C1bz budget records.
-pub const WZ_DISSECT_ABI_REVISION: c_int = 28;
+pub const WZ_DISSECT_ABI_REVISION: c_int = 29;
 
 /// R2108 (open-debt item 525) — THE RECORD'S LAYOUT, reported by the artifact.
 ///
@@ -1727,17 +1729,40 @@ pub unsafe extern "C" fn wz_dissect_declarations_from_proto(
         return WZ_DISSECT_ERR_INVALID_ARG;
     };
     // SAFETY: caller contract above.
+    let given = match unsafe { proto_files(files, file_count) } {
+        Ok(given) => given,
+        Err(rc) => return rc,
+    };
+
+    let result = wz_capture::proto_schema::declarations_from_proto(key, root, &given, root_file);
+    write_string(proto_verdict(&result), out)
+}
+
+/// The caller's list of `.proto` files as the reader takes it, or the status to
+/// return: a name or a buffer that is null where it may not be, a name that is
+/// not UTF-8, two files with one name. Shared by the doors that read a schema,
+/// so they cannot disagree about which lists are the caller's bug.
+///
+/// # Safety
+/// `files` must point to `file_count` readable [`WzDissectProtoFile`] values,
+/// each `name` a NUL-terminated C string and each `text` readable for
+/// `text_len` bytes. `files` must not be null and `file_count` not zero.
+unsafe fn proto_files<'a>(
+    files: *const WzDissectProtoFile,
+    file_count: usize,
+) -> Result<Vec<wz_capture::proto_schema::ProtoFile<'a>>, c_int> {
+    // SAFETY: caller contract above.
     let entries = unsafe { core::slice::from_raw_parts(files, file_count) };
-    let mut given: Vec<wz_capture::proto_schema::ProtoFile<'_>> = Vec::with_capacity(file_count);
+    let mut given: Vec<wz_capture::proto_schema::ProtoFile<'a>> = Vec::with_capacity(file_count);
     // A set, so the duplicate check is not quadratic in the number of files.
     let mut names: std::collections::BTreeSet<&str> = std::collections::BTreeSet::new();
     for entry in entries {
         if entry.name.is_null() || (entry.text.is_null() && entry.text_len != 0) {
-            return WZ_DISSECT_ERR_INVALID_ARG;
+            return Err(WZ_DISSECT_ERR_INVALID_ARG);
         }
         // SAFETY: caller contract above.
         let Ok(name) = unsafe { std::ffi::CStr::from_ptr(entry.name) }.to_str() else {
-            return WZ_DISSECT_ERR_INVALID_ARG;
+            return Err(WZ_DISSECT_ERR_INVALID_ARG);
         };
         let text: &[u8] = if entry.text_len == 0 {
             &[]
@@ -1746,13 +1771,105 @@ pub unsafe extern "C" fn wz_dissect_declarations_from_proto(
             unsafe { core::slice::from_raw_parts(entry.text, entry.text_len) }
         };
         if !names.insert(name) {
-            return WZ_DISSECT_ERR_INVALID_ARG;
+            return Err(WZ_DISSECT_ERR_INVALID_ARG);
         }
         given.push(wz_capture::proto_schema::ProtoFile { name, text });
     }
+    Ok(given)
+}
 
-    let result = wz_capture::proto_schema::declarations_from_proto(key, root, &given, root_file);
-    write_string(proto_verdict(&result), out)
+/// FIELD VALUES, AS JSON, TURNED INTO PROTOBUF WIRE BYTES by the types a
+/// `.proto` schema gives them: the sending half of
+/// [`wz_dissect_declarations_from_proto`].
+///
+/// # Why this is a door
+///
+/// A consumer that lets a person fill in a message and sends it needs the
+/// bytes, and if it builds them itself it holds a second WRITER of the wire
+/// format beside the one reader, and two writers disagree where the format is
+/// unusual: a `sint32` is zigzagged and an `int32` is not, a negative `int32`
+/// is ten bytes, a proto3 field at its default is absent, a packed field is one
+/// length-delimited run. [`wz_capture::proto_encode`] is the one writer, over
+/// the schema reader the declaration door already uses; it documents the JSON
+/// mapping, the bytes, what is refused and the order problems are found in, and
+/// the header carries the same account for a C reader.
+///
+/// # Arguments
+///
+/// * `root_message` -- the full name of the message to build, package included,
+///   NUL-terminated.
+/// * `files`, `file_count`, `root_file` -- the schema, exactly as
+///   [`wz_dissect_declarations_from_proto`] takes it.
+/// * `values_json` -- the field values, NUL-terminated UTF-8: one JSON object in
+///   protobuf's JSON mapping (field names or JSON names, 64-bit integers as
+///   numbers or strings, bytes as base64, enums by name or number).
+///
+/// # Result
+///
+/// [`WZ_DISSECT_OK`] with a verdict, for any arguments that are well formed:
+///
+/// ```text
+/// {"document":{"name":"proto_encode","revision":1},"ok":true,
+///  "payload":"089601","payload_bytes":3}
+/// {"document":{...},"ok":false,"values_path":"/readings/2/celsius",
+///  "field":"pkg.Reading.celsius","expected":"float: ...","reason":"...",
+///  "message":"values /readings/2/celsius: ..."}
+/// ```
+///
+/// A refusal is a successful DIAGNOSIS, for the reason
+/// [`wz_dissect_declarations_diagnose`] gives: OK means a string, an error means
+/// none. The keys that place it are `file`, `line` and `column` (the schema),
+/// `values_offset` (the values are not JSON) or `values_path` (they are, and do
+/// not fit), each absent where it does not apply and never `null`.
+///
+/// # Errors
+///
+/// [`WZ_DISSECT_ERR_INVALID_ARG`] for a null pointer, a count of zero, a root
+/// index outside the list, a name or text pointer that is null where it may
+/// not be, two files with one name, or a root name, values text or file name
+/// that is not UTF-8: all of them the caller's own bug and not text a person
+/// typed.
+///
+/// # Safety
+/// `root_message` and `values_json` must be NUL-terminated C strings; `files`
+/// must point to `file_count` readable [`WzDissectProtoFile`] values, each
+/// `name` a NUL-terminated C string and each `text` readable for `text_len`
+/// bytes; `out` must be a writable pointer to a `*mut c_char`. None of
+/// `root_message`, `files`, `values_json` and `out` may be null.
+#[no_mangle]
+pub unsafe extern "C" fn wz_dissect_proto_encode(
+    root_message: *const c_char,
+    files: *const WzDissectProtoFile,
+    file_count: usize,
+    root_file: usize,
+    values_json: *const c_char,
+    out: *mut *mut c_char,
+) -> c_int {
+    if root_message.is_null()
+        || files.is_null()
+        || values_json.is_null()
+        || out.is_null()
+        || file_count == 0
+        || root_file >= file_count
+    {
+        return WZ_DISSECT_ERR_INVALID_ARG;
+    }
+    // SAFETY: caller contract above.
+    let (Ok(root), Ok(values)) = (
+        unsafe { std::ffi::CStr::from_ptr(root_message) }.to_str(),
+        unsafe { std::ffi::CStr::from_ptr(values_json) }.to_str(),
+    ) else {
+        return WZ_DISSECT_ERR_INVALID_ARG;
+    };
+    // SAFETY: caller contract above.
+    let given = match unsafe { proto_files(files, file_count) } {
+        Ok(given) => given,
+        Err(rc) => return rc,
+    };
+    write_string(
+        wz_capture::proto_encode_json::encode_document(root, &given, root_file, values),
+        out,
+    )
 }
 
 /// The `declarations_from_proto` document for one outcome.
@@ -6817,7 +6934,11 @@ mod tests {
         // put.
         // 28, for `wz_dissect_keyexpr_diagnose`: one key expression judged,
         // returning the same owned `char*` verdict as the other diagnose doors.
-        assert_eq!(wz_dissect_abi_version(), 28);
+        // 29, for `wz_dissect_proto_encode`: field values, as JSON, turned into
+        // protobuf wire bytes by a `.proto` schema's types. One symbol, a
+        // `char*` released by `wz_dissect_string_free`; the struct it takes is
+        // the one `wz_dissect_declarations_from_proto` already has.
+        assert_eq!(wz_dissect_abi_version(), 29);
     }
 
     /// R311y913 (unregistered item 435) — THE LINKED SURFACE CAN SAY WHAT IT
@@ -7159,14 +7280,21 @@ mod tests {
     /// format's bytes, and a decoder run over them would be measuring the
     /// fixture rather than the door.
     fn protobuf_capture() -> Vec<u8> {
+        protobuf_capture_of(&[0x08, 0x96, 0x01])
+    }
+
+    /// [`protobuf_capture`] with the bytes of a message the caller chose, which
+    /// is what the value door is held to: bytes it builds ride a real capture
+    /// to the reader that names them.
+    fn protobuf_capture_of(payload: &[u8]) -> Vec<u8> {
         let put = framed_frame(
             0,
             &wz_codecs::push::Push {
                 header: wz_codecs::push::Push::default().header | wz_codecs::wire_const::FLAG_N_N,
                 keyexpr: literal("demo/sensor"),
                 body: wz_codecs::push::PushVariant::CodecZenohMsgPut(wz_codecs::msg_put::MsgPut {
-                    payload_len: Some(3),
-                    payload: Some(&[0x08, 0x96, 0x01]),
+                    payload_len: Some(payload.len() as u64),
+                    payload: Some(payload),
                     ..Default::default()
                 }),
                 ..Default::default()
@@ -7548,6 +7676,10 @@ mod tests {
             // applies, so each branch has keys the others lack.
             (rev::E2E_WRAP, e2e_wrap_documents()),
             (rev::E2E_OPEN, e2e_open_documents()),
+            // Every shape the value door writes: the refusal names its text by
+            // whichever position key applies, so each branch has keys the
+            // others lack.
+            (rev::PROTO_ENCODE, proto_encode_documents()),
             // Built by a door that takes a handle, so it comes from one.
             (rev::SELECTION, selection_documents()),
             (rev::RETENTION, retention_documents()),
@@ -7696,6 +7828,14 @@ mod tests {
             (
                 rev::E2E_OPEN,
                 e2e_open_documents().into_iter().next().expect("a document"),
+            ),
+            // Declares no plane either.
+            (
+                rev::PROTO_ENCODE,
+                proto_encode_documents()
+                    .into_iter()
+                    .next()
+                    .expect("a document"),
             ),
             // Declares no plane, so it contributes no `@planes` marker,
             // and being in this table is what makes that a checked fact.
@@ -7847,6 +7987,9 @@ mod tests {
             // reason: no position key is ever written as `null`.
             (rev::E2E_WRAP, e2e_wrap_documents()),
             (rev::E2E_OPEN, e2e_open_documents()),
+            // Every refusal shape of the value door, for the same reason: no
+            // position key is ever written as `null`.
+            (rev::PROTO_ENCODE, proto_encode_documents()),
             // Both shapes, for the reason `selection_documents` gives.
             (rev::SELECTION, selection_documents()),
             // With a clock and without, for the reason `retention_documents` gives.
@@ -8485,6 +8628,337 @@ mod tests {
         );
         // The control: the same two files under two names are accepted.
         assert!(call_from_proto("k", "M", &[("a.proto", schema), ("b.proto", schema)], 0).is_ok());
+        // And the value door shares the list with the declaration door, so it
+        // refuses the same lists.
+        assert_eq!(
+            call_proto_encode("M", &[("a.proto", schema), ("a.proto", schema)], 0, "{}"),
+            Err(WZ_DISSECT_ERR_INVALID_ARG)
+        );
+        assert!(
+            call_proto_encode("M", &[("a.proto", schema), ("b.proto", schema)], 0, "{}").is_ok()
+        );
+    }
+
+    /// Drive the value door the way C does: a list of (name, bytes), the index
+    /// of the root file, and the values text.
+    fn call_proto_encode(
+        root: &str,
+        files: &[(&str, &[u8])],
+        root_file: usize,
+        values: &str,
+    ) -> Result<String, c_int> {
+        let root = CString::new(root).expect("no interior NUL");
+        let values = CString::new(values).expect("no interior NUL");
+        let names: Vec<CString> = files
+            .iter()
+            .map(|(name, _)| CString::new(*name).expect("no interior NUL"))
+            .collect();
+        let entries: Vec<WzDissectProtoFile> = files
+            .iter()
+            .zip(&names)
+            .map(|((_, text), name)| WzDissectProtoFile {
+                name: name.as_ptr(),
+                text: if text.is_empty() {
+                    core::ptr::null()
+                } else {
+                    text.as_ptr()
+                },
+                text_len: text.len(),
+            })
+            .collect();
+        let mut out: *mut c_char = core::ptr::null_mut();
+        let rc = unsafe {
+            wz_dissect_proto_encode(
+                root.as_ptr(),
+                entries.as_ptr(),
+                entries.len(),
+                root_file,
+                values.as_ptr(),
+                &mut out,
+            )
+        };
+        if rc != WZ_DISSECT_OK {
+            assert!(out.is_null(), "an error must not hand back a string");
+            return Err(rc);
+        }
+        assert!(!out.is_null(), "OK must come with a string");
+        let s = unsafe { std::ffi::CStr::from_ptr(out) }
+            .to_str()
+            .expect("utf8")
+            .to_string();
+        unsafe { wz_dissect_string_free(out) };
+        Ok(s)
+    }
+
+    /// The value door over ONE file named `a.proto`.
+    fn encode_one(root: &str, text: &str, values: &str) -> String {
+        call_proto_encode(root, &[("a.proto", text.as_bytes())], 0, values)
+            .expect("the door answers")
+    }
+
+    /// The schema the value-door tests use: a scalar, a nested message, a
+    /// repeated field (packed in proto3) and a map.
+    const SENSOR: &str = "syntax = \"proto3\";\n\
+        message Sensor {\n\
+          int32 value = 1;\n\
+          Meta meta = 3;\n\
+          repeated sint32 deltas = 4;\n\
+          map<string, int32> tags = 5;\n\
+          message Meta { string unit = 2; }\n\
+        }\n";
+
+    /// One document of each shape the value door writes through the ABI: the
+    /// built message, a value refused at a pointer (with a field), a key that is
+    /// no field (without one), text that is not JSON, and a refusal at a place
+    /// in a file and of a file as a whole. The first is the success, for the
+    /// callers that need only one. (The argument shape, no file and no position,
+    /// is the reader's answer to a root file outside the list or two files of one
+    /// name, and the C door refuses both as the caller's bug before the reader
+    /// sees them; `wz-capture` pins that branch.)
+    fn proto_encode_documents() -> Vec<String> {
+        vec![
+            encode_one("Sensor", SENSOR, r#"{"value":150}"#),
+            encode_one("Sensor", SENSOR, r#"{"value":"x"}"#),
+            encode_one("Sensor", SENSOR, r#"{"nope":1}"#),
+            encode_one("Sensor", SENSOR, "{"),
+            encode_one("Sensor", "message Sensor { int32 a = 1 }", "{}"),
+            encode_one("Nope", SENSOR, "{}"),
+        ]
+    }
+
+    /// A SET OF FIELD VALUES REACHES THE READER'S NAMES THROUGH THE ABI, with no
+    /// step in between that this library does not own.
+    ///
+    /// The bytes the value door builds ride a real capture and the field
+    /// document decodes them under the declarations the declaration door wrote
+    /// from the same schema, so the name that comes back for each row is the
+    /// name the values were given under. The guide's `150` is the first row.
+    #[test]
+    fn values_become_bytes_the_reader_names_back_through_the_abi() {
+        let doc = encode_one(
+            "Sensor",
+            SENSOR,
+            r#"{"value":150,"meta":{"unit":"C"},"deltas":[-1,1],"tags":{"a":1}}"#,
+        );
+        assert!(
+            doc.starts_with(&format!(
+                "{{{},\"ok\":true,\"payload\":",
+                wz_capture::doc_revision::envelope(wz_capture::doc_revision::PROTO_ENCODE)
+            )),
+            "{doc}"
+        );
+        let hex = json_string(&doc, "payload");
+        // 08 96 01 is the guide's 150; the meta message is field 3 around its
+        // field 2; the packed zigzag run is 22 02 01 02 (-1 and 1 are 1 and 2);
+        // the map entry has its key at 1 and its value at 2.
+        assert_eq!(
+            hex,
+            concat!("089601", "1a03120143", "22020102", "2a050a01611001")
+        );
+        assert_eq!(json_count(&doc, "payload_bytes"), hex.len() / 2);
+
+        let bytes: Vec<u8> = (0..hex.len())
+            .step_by(2)
+            .map(|i| u8::from_str_radix(&hex[i..i + 2], 16).expect("hex"))
+            .collect();
+        let declared = json_string(
+            &from_proto_one("demo/sensor", "Sensor", SENSOR),
+            "declarations",
+        );
+        let decoded =
+            call_fields_with_payloads(&protobuf_capture_of(&bytes), 0, &declared).expect("reads");
+        for (path, name, value) in [
+            ("1", "value", "varint 150"),
+            ("3", "meta", "len 1 field(s)"),
+            ("3.2", "unit", "len \\\"C\\\""),
+            ("4", "deltas", "len 2 byte(s)"),
+            ("5", "tags", "len 2 field(s)"),
+            ("5.1", "key", "len \\\"a\\\""),
+            ("5.2", "value", "varint 1"),
+        ] {
+            assert!(
+                decoded.contains(&format!(
+                    "\"path\":\"{path}\",\"name\":\"{name}\",\"value\":\"{value}\""
+                )),
+                "{path} {name} {value} in {decoded}"
+            );
+        }
+    }
+
+    /// A VALUE THAT DOES NOT FIT IS A DIAGNOSIS WITH A POINTER, THE FIELD AND THE
+    /// TYPE: OK, a string, and `values_path`, `field`, `expected`, `reason` and
+    /// the one-line `message`.
+    #[test]
+    fn a_refused_value_is_a_successful_diagnosis_with_a_pointer() {
+        let doc = encode_one("Sensor", SENSOR, r#"{"meta":{"unit":5}}"#);
+        assert!(
+            doc.starts_with(&format!(
+                "{{{},\"ok\":false,\"values_path\":\"/meta/unit\",\"field\":\"Sensor.Meta.unit\",\
+                 \"expected\":\"string: a JSON string\",\"reason\":",
+                wz_capture::doc_revision::envelope(wz_capture::doc_revision::PROTO_ENCODE)
+            )),
+            "{doc}"
+        );
+        assert_eq!(
+            json_string(&doc, "message"),
+            format!("values /meta/unit: {}", json_string(&doc, "reason"))
+        );
+        assert!(
+            !doc.contains("\"payload\"") && !doc.contains("\"file\""),
+            "{doc}"
+        );
+    }
+
+    /// THE POSITION KEYS OF THE VALUE DOCUMENT ARE ABSENT WHERE THEY DO NOT
+    /// APPLY, never `null`, and exactly one family of them is present.
+    #[test]
+    fn the_position_keys_of_the_value_document_are_absent_where_they_do_not_apply() {
+        let not_json = encode_one("Sensor", SENSOR, r#"{"value":"#);
+        assert!(
+            not_json.contains("\"ok\":false,\"values_offset\":"),
+            "{not_json}"
+        );
+        for absent in ["values_path", "\"file\"", "\"line\"", "\"field\"", "null"] {
+            assert!(!not_json.contains(absent), "{absent} in {not_json}");
+        }
+
+        let schema = encode_one(
+            "Sensor",
+            "syntax = \"proto3\";\nmessage Sensor {\n  int32 a = 1\n  int32 b = 2;\n}\n",
+            "{",
+        );
+        assert!(
+            schema
+                .contains("\"ok\":false,\"file\":\"a.proto\",\"line\":4,\"column\":3,\"reason\":"),
+            "the schema is judged before the values are read: {schema}"
+        );
+        assert!(!schema.contains("values_"), "{schema}");
+
+        let whole = encode_one("Nope", SENSOR, "{}");
+        assert!(
+            whole.contains("\"ok\":false,\"file\":\"a.proto\",\"reason\":"),
+            "{whole}"
+        );
+        assert!(
+            !whole.contains("\"line\"") && !whole.contains("null"),
+            "{whole}"
+        );
+
+        let missing = encode_one("Sensor", SENSOR, r#"{"nope":1}"#);
+        assert!(missing.contains("\"values_path\":\"/nope\""), "{missing}");
+        assert!(
+            !missing.contains("\"field\""),
+            "a key that is no field names no field: {missing}"
+        );
+        assert!(
+            missing.contains("\"expected\":\"one of the fields of"),
+            "{missing}"
+        );
+    }
+
+    /// IMPORTS ARE RESOLVED BY NAME THROUGH THE VALUE DOOR TOO, and the root
+    /// file is whichever the caller says.
+    #[test]
+    fn the_value_door_resolves_imports_by_name_across_the_list() {
+        let root: &[u8] = b"syntax = \"proto3\";\npackage m;\nimport \"common/stamp.proto\";\n\
+            message Root { common.Stamp at = 1; }\n";
+        let stamp: &[u8] = b"syntax = \"proto3\";\npackage common;\n\
+            message Stamp { int64 secs = 1; }\n";
+        let list = [("m/root.proto", root), ("common/stamp.proto", stamp)];
+        let doc = call_proto_encode("m.Root", &list, 0, r#"{"at":{"secs":"9"}}"#)
+            .expect("the door answers");
+        assert_eq!(json_string(&doc, "payload"), "0a020809");
+        let doc =
+            call_proto_encode("common.Stamp", &list, 1, r#"{"secs":9}"#).expect("the door answers");
+        assert_eq!(json_string(&doc, "payload"), "0809");
+
+        let doc = call_proto_encode("m.Root", &list[..1], 0, "{}").expect("the door answers");
+        assert!(
+            doc.contains("\"file\":\"m/root.proto\",\"line\":3,\"column\":1"),
+            "{doc}"
+        );
+    }
+
+    /// EVERY CALLER BUG IS `INVALID_ARG` AND HANDS BACK NO STRING, for the value
+    /// door as for the declaration door.
+    #[test]
+    fn the_value_door_refuses_caller_bugs_with_invalid_arg() {
+        let schema: &[u8] = b"syntax = \"proto3\";\nmessage M { int32 a = 1; }\n";
+        let root = CString::new("M").expect("no NUL");
+        let values = CString::new("{}").expect("no NUL");
+        let entry = WzDissectProtoFile {
+            name: c"a.proto".as_ptr(),
+            text: schema.as_ptr(),
+            text_len: schema.len(),
+        };
+        let call = |root: *const c_char,
+                    files: *const WzDissectProtoFile,
+                    count: usize,
+                    root_file: usize,
+                    values: *const c_char,
+                    with_out: bool| {
+            let mut out: *mut c_char = core::ptr::null_mut();
+            let rc = unsafe {
+                wz_dissect_proto_encode(
+                    root,
+                    files,
+                    count,
+                    root_file,
+                    values,
+                    if with_out {
+                        &mut out
+                    } else {
+                        core::ptr::null_mut()
+                    },
+                )
+            };
+            assert!(out.is_null(), "an error must not hand back a string");
+            rc
+        };
+        let null = core::ptr::null();
+        for (rc, what) in [
+            (call(null, &entry, 1, 0, values.as_ptr(), true), "root"),
+            (
+                call(
+                    root.as_ptr(),
+                    core::ptr::null(),
+                    1,
+                    0,
+                    values.as_ptr(),
+                    true,
+                ),
+                "files",
+            ),
+            (call(root.as_ptr(), &entry, 1, 0, null, true), "values"),
+            (
+                call(root.as_ptr(), &entry, 1, 0, values.as_ptr(), false),
+                "out",
+            ),
+            (
+                call(root.as_ptr(), &entry, 0, 0, values.as_ptr(), true),
+                "no files",
+            ),
+            (
+                call(root.as_ptr(), &entry, 1, 1, values.as_ptr(), true),
+                "a root index outside the list",
+            ),
+        ] {
+            assert_eq!(rc, WZ_DISSECT_ERR_INVALID_ARG, "{what}");
+        }
+        let bad_utf8 = CString::new(vec![b'{', 0xff, b'}']).expect("no NUL");
+        assert_eq!(
+            call(root.as_ptr(), &entry, 1, 0, bad_utf8.as_ptr(), true),
+            WZ_DISSECT_ERR_INVALID_ARG,
+            "values that are not UTF-8 are the caller's bug, not text a person typed"
+        );
+        let hollow = WzDissectProtoFile {
+            text: core::ptr::null(),
+            ..entry
+        };
+        assert_eq!(
+            call(root.as_ptr(), &hollow, 1, 0, values.as_ptr(), true),
+            WZ_DISSECT_ERR_INVALID_ARG
+        );
     }
 
     /// THE FILE STRUCT IS RAW MEMORY A CONSUMER FILLS BY OFFSET, so its layout is

@@ -433,6 +433,18 @@ ONLY_CAPI = {
         "no code that reads the language.",
         (),
     ),
+    "protobuf bytes written from field values under a .proto schema": (
+        "wz_dissect_proto_encode",
+        "DELIBERATE for now. The door exists because a consumer that LINKS this "
+        "library and lets a person fill in a message must not write the wire "
+        "format itself: a second writer beside the one reader is a second "
+        "opinion about what a sint32 or a packed field looks like on the wire. "
+        "The command line sends nothing (it analyses captures), so a flag that "
+        "built a message would have no use in the analysis it runs, and the "
+        "writer behind the door (`wz_capture::proto_encode`) is ungated, so a "
+        "flag would add no code that writes the format.",
+        (),
+    ),
     "a protected frame built under a described profile": (
         "wz_dissect_e2e_wrap",
         "DELIBERATE for now. The door exists because a consumer that LINKS this "

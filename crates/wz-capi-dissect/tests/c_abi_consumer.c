@@ -1180,6 +1180,107 @@ static int check_proto_door(void) {
     return 0;
 }
 
+/* (ABI 29) -- THE VALUE DOOR, driven from C the way a consumer that lets a
+ * person fill in a message will: the schema is the file list the declaration
+ * door takes, the values are the JSON text the person's form produced, the
+ * bytes come back as hex in a document, and a refusal is a verdict with a place
+ * in whichever text was wrong. The Rust side owns the wire format and the JSON
+ * mapping; this owns that the symbol, the shared struct, the verdict and the
+ * memory rule cross the boundary as the header says. */
+static int check_proto_encode_door(void) {
+    char *doc = NULL;
+    int rc;
+
+    static const char root_text[] =
+        "syntax = \"proto3\";\n"
+        "package m;\n"
+        "import \"common/stamp.proto\";\n"
+        "message Root {\n"
+        "  int32 id = 1;\n"
+        "  common.Stamp at = 2;\n"
+        "  map<string, int32> counts = 3;\n"
+        "}\n";
+    static const char stamp_text[] =
+        "syntax = \"proto3\";\n"
+        "package common;\n"
+        "message Stamp { int64 secs = 1; }\n";
+    wz_dissect_proto_file files[2];
+    files[0].name = "m/root.proto";
+    files[0].text = (const unsigned char *)root_text;
+    files[0].text_len = sizeof root_text - 1;
+    files[1].name = "common/stamp.proto";
+    files[1].text = (const unsigned char *)stamp_text;
+    files[1].text_len = sizeof stamp_text - 1;
+
+    /* 08 96 01 is the guide's int32 150; field 2 is the nested stamp (a 64-bit
+     * value given as a string); field 3 is one map entry, key 1 and value 2. */
+    rc = wz_dissect_proto_encode(
+        "m.Root", files, 2, 0,
+        "{\"id\":150,\"at\":{\"secs\":\"7\"},\"counts\":{\"a\":1}}", &doc);
+    CHECK(rc == WZ_DISSECT_OK, "proto_encode rc=%d", rc);
+    CHECK(doc != NULL, "OK came back with no string");
+    CHECK(strstr(doc, "\"ok\":true") != NULL, "a valid message was refused: %s",
+          doc);
+    CHECK(strstr(doc, "\"payload\":\"089601120208071a050a01611001\"") != NULL &&
+              strstr(doc, "\"payload_bytes\":14") != NULL,
+          "unexpected bytes: %s", doc);
+    wz_dissect_string_free(doc);
+
+    /* A value that does not fit is a verdict that names the pointer, the field
+     * and the one-line form. */
+    doc = NULL;
+    rc = wz_dissect_proto_encode("m.Root", files, 2, 0, "{\"id\":\"x\"}", &doc);
+    CHECK(rc == WZ_DISSECT_OK, "refused value rc=%d", rc);
+    CHECK(strstr(doc, "\"ok\":false") != NULL &&
+              strstr(doc, "\"values_path\":\"/id\"") != NULL &&
+              strstr(doc, "\"field\":\"m.Root.id\"") != NULL &&
+              strstr(doc, "\"message\":\"values /id: ") != NULL,
+          "a wrong value must be blamed at its pointer: %s", doc);
+    CHECK(strstr(doc, "null") == NULL, "no key is ever null: %s", doc);
+    wz_dissect_string_free(doc);
+
+    /* Text that is not JSON is blamed at its byte. */
+    doc = NULL;
+    rc = wz_dissect_proto_encode("m.Root", files, 2, 0, "{\"id\":", &doc);
+    CHECK(rc == WZ_DISSECT_OK, "non-JSON rc=%d", rc);
+    CHECK(strstr(doc, "\"values_offset\":") != NULL &&
+              strstr(doc, "\"values_path\"") == NULL,
+          "a text that is not JSON must carry an offset: %s", doc);
+    wz_dissect_string_free(doc);
+
+    /* A schema the list cannot complete is blamed at its statement, as the
+     * declaration door does, before the values are read at all. */
+    doc = NULL;
+    rc = wz_dissect_proto_encode("m.Root", files, 1, 0, "{", &doc);
+    CHECK(rc == WZ_DISSECT_OK, "refused schema rc=%d", rc);
+    CHECK(strstr(doc, "\"file\":\"m/root.proto\",\"line\":3,\"column\":1") !=
+              NULL &&
+              strstr(doc, "\"values_offset\"") == NULL,
+          "a missing import must be blamed at its statement: %s", doc);
+    wz_dissect_string_free(doc);
+
+    /* Caller bugs are the argument error, with no string handed back. */
+    doc = NULL;
+    rc = wz_dissect_proto_encode("m.Root", files, 2, 2, "{}", &doc);
+    CHECK(rc == WZ_DISSECT_ERR_INVALID_ARG && doc == NULL,
+          "a root file outside the list rc=%d", rc);
+    rc = wz_dissect_proto_encode("m.Root", NULL, 2, 0, "{}", &doc);
+    CHECK(rc == WZ_DISSECT_ERR_INVALID_ARG && doc == NULL,
+          "a null file list rc=%d", rc);
+    rc = wz_dissect_proto_encode("m.Root", files, 0, 0, "{}", &doc);
+    CHECK(rc == WZ_DISSECT_ERR_INVALID_ARG && doc == NULL,
+          "an empty file list rc=%d", rc);
+    rc = wz_dissect_proto_encode("m.Root", files, 2, 0, NULL, &doc);
+    CHECK(rc == WZ_DISSECT_ERR_INVALID_ARG && doc == NULL,
+          "null values rc=%d", rc);
+    rc = wz_dissect_proto_encode(NULL, files, 2, 0, "{}", &doc);
+    CHECK(rc == WZ_DISSECT_ERR_INVALID_ARG && doc == NULL,
+          "a null root message rc=%d", rc);
+    rc = wz_dissect_proto_encode("m.Root", files, 2, 0, "{}", NULL);
+    CHECK(rc == WZ_DISSECT_ERR_INVALID_ARG, "a null out rc=%d", rc);
+    return 0;
+}
+
 /* (ABI 26) -- THE PROTECTED-FRAME DOORS, driven from C the way a consumer that
  * both produces and analyses such frames will: the profile is text it holds,
  * the frame crosses as bytes, and a refusal is a verdict with a place in a
@@ -2154,7 +2255,7 @@ int main(void) {
         const char *name;
         unsigned revision;
         char *doc;
-    } revisioned[9];
+    } revisioned[10];
     revisioned[0].name = "census";
     /* R2119 (open-debt item 455) -- 2: the census announced `first_packet`'s
      * retirement beside its successor `first_anchor`.
@@ -2514,6 +2615,22 @@ int main(void) {
                                  &revisioned[8].doc);
         CHECK(rc == WZ_DISSECT_OK, "e2e_open document rc=%d", rc);
     }
+    /* (ABI 29) -- the value door's document. 1: the first revision a consumer
+     * could read. Built from a one-message schema and an empty object, which is
+     * the cheapest way to hold the document's opening to the revision this
+     * consumer was written against. */
+    revisioned[9].name = "proto_encode";
+    revisioned[9].revision = 1;
+    revisioned[9].doc = NULL;
+    {
+        static const char tiny[] = "syntax = \"proto3\"; message M { int32 a = 1; }";
+        wz_dissect_proto_file one;
+        one.name = "a.proto";
+        one.text = (const unsigned char *)tiny;
+        one.text_len = sizeof tiny - 1;
+        rc = wz_dissect_proto_encode("M", &one, 1, 0, "{}", &revisioned[9].doc);
+        CHECK(rc == WZ_DISSECT_OK, "proto_encode document rc=%d", rc);
+    }
 
     /* R2182 -- THE ENVELOPE MAY CARRY MORE AFTER THE REVISION, and this loop
      * used to forbid it by ending the expected prefix with `}`.
@@ -2612,6 +2729,13 @@ int main(void) {
     /* (ABI 25) -- and a .proto schema turned into the declarations the doors
      * above take, so a consumer offering "add from file" never reads .proto. */
     if (check_proto_door() != 0) {
+        return 1;
+    }
+
+    /* (ABI 29) -- and field values, as JSON, turned into the protobuf bytes of
+     * that schema's message, so a consumer that sends never writes the wire
+     * format itself. */
+    if (check_proto_encode_door() != 0) {
         return 1;
     }
 
