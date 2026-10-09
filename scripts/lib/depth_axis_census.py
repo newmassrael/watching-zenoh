@@ -1201,7 +1201,14 @@ CITATION = re.compile(r"\b((?:[A-Za-z0-9_.-]+/)*[A-Za-z0-9_.-]+\.(?:rs|c|h))(?::
 # (its crate tests and its interop files name its symbols), so it leaves the
 # census with its grade. UNREACHED and NO_SYMBOL hold at 0 and 0. READ off the
 # census's own FAIL line, `reached: 2 against a pin of 3`.
-PIN_REACHED = 2
+# R3147 -- REACHED 2 -> 1. `api-compat-c` leaves PARTIAL for COMPLETE: a listener
+# bound to the unspecified address on a Windows host is advertised at the addresses
+# of that host's own adapter table, the last residual its reason named, and it is
+# read on a real Windows runner. It was a reached PARTIAL atom (its crate tests and
+# its differential files name its symbols), so it leaves the census with its grade.
+# `runtime-zero-copy` is the one PARTIAL atom left. UNREACHED and NO_SYMBOL hold at
+# 0 and 0. READ off the census's own FAIL line, `reached: 1 against a pin of 2`.
+PIN_REACHED = 1
 PIN_UNREACHED = 0
 PIN_NO_SYMBOL = 0
 # R2534 — 346 -> 347. The atom is `adminspace-metrics` and the citation is the
@@ -2720,7 +2727,14 @@ PIN_NO_SYMBOL = 0
 # atom, so none of its anchors is ever counted here. `api-compat-c` and
 # `runtime-zero-copy` are not touched and are the two PARTIAL atoms left. READ
 # off the census's own FAIL line, `wz citations: 216 against a pin of 295`.
-PIN_WZ_CITATIONS = 216
+#
+# R3147 -- 216 -> 20, DOWNWARD, one atom. `api-compat-c` leaves PARTIAL for
+# COMPLETE and takes its citations out of the census with it, the closing
+# paragraph of its reason among them: the paragraph is appended in the same
+# commit that grades the atom, so none of its anchors is ever counted here.
+# `runtime-zero-copy` is not touched and is the one PARTIAL atom left. READ off
+# the census's own FAIL line, `wz citations: 20 against a pin of 216`.
+PIN_WZ_CITATIONS = 20
 # R2626 — 44 -> 42, and this one is worth a sentence because it HELD through
 # every earlier retirement in this run (R2612, R2622). `time-hlc`'s reason is the
 # first retiree carrying AMBIGUOUS citations of its own: its oldest clauses cite
