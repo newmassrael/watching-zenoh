@@ -138,6 +138,9 @@ use wz_session_core::json5::{number_as_u64, Json5Value};
 // because upstream types it too; the reader therefore names the enum rather than
 // carrying protocol text it has already validated.
 use wz_session_core::link::InterceptorLink;
+// Item 751 — what `gateway/south` reads into: the partition a node places its
+// remotes by.
+use wz_session_core::region_partition::{RegionFilter, SouthPartition, SouthSubregion};
 use wz_session_core::zid_hex::zenoh_hex_to_zid;
 // R2070b (open-debt item 486) — the topology pass compares endpoints, and the
 // tested parser is the one the dial seam already uses. Writing a second
@@ -4657,6 +4660,194 @@ fn matcher_of(value: &Json5Value, path: &'static str) -> Result<WhatAmIMatcher, 
     Ok(matcher)
 }
 
+/// Item 751 — the path [`gateway_south_of`] reads, and the one every refusal it
+/// raises names.
+const GATEWAY_SOUTH_PATH: &str = "gateway/south";
+
+/// What [`gateway_south_of`] accepts, as a refusal states it.
+const GATEWAY_SOUTH_SHAPE: &str = "\"auto\", or a list of subregions { filters?: \
+     [{ modes?: [router|peer|client], interfaces?: [..], zids?: [..], \
+     region_names?: [..], negated?: bool }] }";
+
+/// Item 751 — the value of `gateway/south`, read into the partition a node
+/// places its remotes by ([`region_of`](wz_session_core::region_partition::region_of)).
+///
+/// The pin deserializes the key with serde (`commons/zenoh-config/src/gateway.rs`
+/// @ `pub enum GatewaySouthConf {`), and this accepts exactly the documents that
+/// does, which were MEASURED against the pinned zenohd rather than read off the
+/// derive, because the derive admits spellings nobody writes on purpose:
+///
+/// * the preset is the string `"auto"`, or `null` (the key's `Option`), or an
+///   object whose one key is `auto` with a `null` value (serde's externally
+///   tagged form of a unit variant, reachable through the untagged enum);
+/// * a subregion is an object whose only key is `filters`, or a one-element
+///   list holding that value (serde's positional form of a struct);
+/// * a filter is an object of the five fields, or a positional list of four or
+///   five of them in declaration order, `negated` being the one that defaults;
+/// * an `Option` field may be `null`; `negated` may be absent but not `null`;
+/// * `interfaces`, `zids` and `region_names` are non-empty when present
+///   (`NEVec`), `modes` may be empty (the empty matcher), and an unknown or
+///   repeated field is refused (`deny_unknown_fields`, and serde's duplicate
+///   field);
+/// * a zid is [`zenoh_hex_to_zid`]'s alphabet, and a region name is
+///   [`RegionName::new`](wz_session_core::extregion::RegionName::new)'s.
+///
+/// Nothing reads the key through this yet: it stays in
+/// [`UNHONOURED_BEYOND_WZ`] until a node acts on every placement the partition
+/// can make, which open-debt item 751 orders after the router's own hats.
+pub fn gateway_south_of(value: &Json5Value) -> Result<SouthPartition, ConfigIngestError> {
+    let refuse = || ConfigIngestError::WrongType {
+        path: GATEWAY_SOUTH_PATH,
+        expected: GATEWAY_SOUTH_SHAPE,
+    };
+    match value {
+        Json5Value::Null => Ok(SouthPartition::Auto),
+        Json5Value::String(preset) if preset == "auto" => Ok(SouthPartition::Auto),
+        Json5Value::Object(fields) if is_the_tagged_auto_preset(fields) => Ok(SouthPartition::Auto),
+        Json5Value::Array(subregions) => subregions
+            .iter()
+            .map(south_subregion_of)
+            .collect::<Result<Vec<_>, _>>()
+            .map(SouthPartition::Custom),
+        _ => Err(refuse()),
+    }
+}
+
+/// `{ auto: null }`: serde's externally tagged spelling of the unit variant, one
+/// key and a `null` value.
+fn is_the_tagged_auto_preset(fields: &[(String, Json5Value)]) -> bool {
+    matches!(fields, [(key, Json5Value::Null)] if key == "auto")
+}
+
+/// One subregion of [`gateway_south_of`]: `{ filters }` or `[filters]`.
+fn south_subregion_of(value: &Json5Value) -> Result<SouthSubregion, ConfigIngestError> {
+    let refuse = || ConfigIngestError::WrongType {
+        path: GATEWAY_SOUTH_PATH,
+        expected: GATEWAY_SOUTH_SHAPE,
+    };
+    let filters = match value {
+        Json5Value::Object(fields) => {
+            let mut filters = None;
+            let mut seen = false;
+            for (key, field) in fields {
+                if key != "filters" || seen {
+                    return Err(refuse());
+                }
+                seen = true;
+                filters = Some(field);
+            }
+            filters
+        }
+        Json5Value::Array(items) => match items.as_slice() {
+            [filters] => Some(filters),
+            _ => return Err(refuse()),
+        },
+        _ => return Err(refuse()),
+    };
+    let filters = match filters {
+        None | Some(Json5Value::Null) => None,
+        Some(Json5Value::Array(items)) => Some(
+            items
+                .iter()
+                .map(region_filter_of)
+                .collect::<Result<Vec<_>, _>>()?,
+        ),
+        Some(_) => return Err(refuse()),
+    };
+    Ok(SouthSubregion { filters })
+}
+
+/// The five fields of a filter in the pin's declaration order, which is the
+/// order its positional form takes them in.
+const REGION_FILTER_FIELDS: [&str; 5] = ["modes", "interfaces", "zids", "region_names", "negated"];
+
+/// One filter of [`gateway_south_of`]: an object of [`REGION_FILTER_FIELDS`], or
+/// a positional list of the first four or all five.
+fn region_filter_of(value: &Json5Value) -> Result<RegionFilter, ConfigIngestError> {
+    let refuse = || ConfigIngestError::WrongType {
+        path: GATEWAY_SOUTH_PATH,
+        expected: GATEWAY_SOUTH_SHAPE,
+    };
+    let named: Vec<(&str, &Json5Value)> = match value {
+        Json5Value::Object(fields) => {
+            let mut named: Vec<(&str, &Json5Value)> = Vec::with_capacity(fields.len());
+            for (key, field) in fields {
+                let Some(name) = REGION_FILTER_FIELDS
+                    .iter()
+                    .find(|name| **name == key.as_str())
+                else {
+                    return Err(refuse());
+                };
+                if named.iter().any(|(seen, _)| seen == name) {
+                    return Err(refuse());
+                }
+                named.push((name, field));
+            }
+            named
+        }
+        Json5Value::Array(items) if items.len() == 4 || items.len() == 5 => {
+            REGION_FILTER_FIELDS.iter().copied().zip(items).collect()
+        }
+        _ => return Err(refuse()),
+    };
+    let mut filter = RegionFilter::default();
+    for (name, field) in named {
+        // `negated` is a plain `bool` with a default: absent is `false`, and
+        // `null` is not a bool. Every other field is an `Option`, so `null` is
+        // its absence.
+        if name == "negated" {
+            let Json5Value::Bool(negated) = field else {
+                return Err(refuse());
+            };
+            filter.negated = *negated;
+            continue;
+        }
+        if matches!(field, Json5Value::Null) {
+            continue;
+        }
+        match name {
+            "modes" => filter.modes = Some(matcher_of(field, GATEWAY_SOUTH_PATH)?),
+            "interfaces" => {
+                let names = string_list_of(field, GATEWAY_SOUTH_PATH, GATEWAY_SOUTH_SHAPE)?;
+                if names.is_empty() {
+                    return Err(refuse());
+                }
+                filter.interfaces = Some(names);
+            }
+            "zids" => {
+                let texts = string_list_of(field, GATEWAY_SOUTH_PATH, GATEWAY_SOUTH_SHAPE)?;
+                if texts.is_empty() {
+                    return Err(refuse());
+                }
+                let mut zids = Vec::with_capacity(texts.len());
+                for text in texts {
+                    let Some(zid) = zenoh_hex_to_zid(&text) else {
+                        return Err(ConfigIngestError::MalformedZid {
+                            path: GATEWAY_SOUTH_PATH,
+                            value: text,
+                        });
+                    };
+                    zids.push(zid);
+                }
+                filter.zids = Some(zids);
+            }
+            "region_names" => {
+                let names = string_list_of(field, GATEWAY_SOUTH_PATH, GATEWAY_SOUTH_SHAPE)?;
+                if names.is_empty()
+                    || names
+                        .iter()
+                        .any(|name| wz_session_core::extregion::RegionName::new(name).is_err())
+                {
+                    return Err(refuse());
+                }
+                filter.region_names = Some(names);
+            }
+            _ => unreachable!("{name} is one of the filter's five fields"),
+        }
+    }
+    Ok(filter)
+}
+
 /// R2651 — one `downsampling[].rules[]` entry: a key expression and the maximum
 /// rate admitted for it.
 ///
@@ -6637,6 +6828,149 @@ fn push_endpoints(endpoints: &[String], out: &mut String) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Item 751 — read one `gateway/south` value the way an operator writes it.
+    fn south(text: &str) -> Result<SouthPartition, ConfigIngestError> {
+        gateway_south_of(&wz_session_core::json5::parse(text).expect("the value is JSON5"))
+    }
+
+    /// Item 751 — the preset, in each spelling the pinned zenohd starts on, and
+    /// the near-misses it refuses.
+    #[test]
+    fn the_south_preset_is_auto_in_the_spellings_upstream_reads() {
+        for text in [r#""auto""#, "null", "{ auto: null }"] {
+            assert_eq!(south(text), Ok(SouthPartition::Auto), "{text}");
+        }
+        for text in [
+            r#""Auto""#,
+            "{}",
+            "{ auto: {} }",
+            "{ auto: [] }",
+            "{ auto: null, x: 1 }",
+            "7",
+        ] {
+            assert!(south(text).is_err(), "{text} is refused upstream");
+        }
+    }
+
+    /// Item 751 — a list of subregions, each filter field read into the value
+    /// the placement compares: roles as a matcher, zids as the wire bytes
+    /// zenoh's hex names, names and interfaces as given.
+    #[test]
+    fn a_south_list_reads_each_field_of_each_filter() {
+        let read = south(
+            r#"[
+                { filters: [ { modes: ["peer", "router"], negated: true } ] },
+                { filters: [ { zids: ["a1b2"] }, { interfaces: ["lo"], region_names: ["east"] } ] },
+                {},
+                { filters: [] },
+            ]"#,
+        )
+        .expect("a valid partition");
+        assert_eq!(
+            read,
+            SouthPartition::Custom(vec![
+                SouthSubregion {
+                    filters: Some(vec![RegionFilter {
+                        modes: Some(WhatAmIMatcher::empty().peer().router()),
+                        negated: true,
+                        ..RegionFilter::default()
+                    }]),
+                },
+                SouthSubregion {
+                    filters: Some(vec![
+                        RegionFilter {
+                            // `a1b2` is the id 0xa1b2, whose wire bytes are
+                            // little-endian.
+                            zids: Some(vec![vec![0xb2, 0xa1]]),
+                            ..RegionFilter::default()
+                        },
+                        RegionFilter {
+                            interfaces: Some(vec!["lo".to_string()]),
+                            region_names: Some(vec!["east".to_string()]),
+                            ..RegionFilter::default()
+                        },
+                    ]),
+                },
+                SouthSubregion { filters: None },
+                SouthSubregion {
+                    filters: Some(vec![]),
+                },
+            ])
+        );
+        assert_eq!(south("[]"), Ok(SouthPartition::Custom(vec![])));
+    }
+
+    /// Item 751 — serde's positional forms, which the pinned zenohd starts on:
+    /// a subregion as `[filters]`, a filter as four or five fields in order.
+    #[test]
+    fn a_south_list_takes_the_positional_forms_serde_takes() {
+        let want = SouthPartition::Custom(vec![SouthSubregion {
+            filters: Some(vec![RegionFilter {
+                modes: Some(WhatAmIMatcher::empty().peer()),
+                ..RegionFilter::default()
+            }]),
+        }]);
+        assert_eq!(
+            south(r#"[ [ [ [["peer"], null, null, null] ] ] ]"#),
+            Ok(want)
+        );
+        assert_eq!(
+            south(r#"[ { filters: [ [["peer"], null, null, null, true] ] } ]"#)
+                .map(|p| matches!(p, SouthPartition::Custom(s) if s[0].filters.as_ref().unwrap()[0].negated)),
+            Ok(true)
+        );
+        for text in [
+            "[ [] ]",
+            "[ [ null, 1 ] ]",
+            r#"[ { filters: [ [ ["peer"], null, null ] ] } ]"#,
+            r#"[ { filters: [ [ ["peer"], null, null, null, true, 1 ] ] } ]"#,
+        ] {
+            assert!(south(text).is_err(), "{text} is refused upstream");
+        }
+    }
+
+    /// Item 751 — every refusal the pinned zenohd was measured to make on this
+    /// key, field by field.
+    #[test]
+    fn a_south_list_refuses_what_upstream_refuses() {
+        for text in [
+            "[ { foo: 1 } ]",
+            "[ null ]",
+            r#"[ { filters: [ { modes: "peer" } ] } ]"#,
+            r#"[ { filters: [ { modes: ["Peer"] } ] } ]"#,
+            "[ { filters: [ { zids: [] } ] } ]",
+            r#"[ { filters: [ { zids: ["ABC"] } ] } ]"#,
+            r#"[ { filters: [ { zids: ["0a"] } ] } ]"#,
+            r#"[ { filters: [ { zids: ["100000000000000000000000000000000"] } ] } ]"#,
+            "[ { filters: [ { interfaces: [] } ] } ]",
+            "[ { filters: [ { interfaces: [1] } ] } ]",
+            "[ { filters: [ { region_names: [] } ] } ]",
+            r#"[ { filters: [ { region_names: [""] } ] } ]"#,
+            r#"[ { filters: [ { region_names: ["aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"] } ] } ]"#,
+            "[ { filters: [ { negated: null } ] } ]",
+            r#"[ { filters: [ { negated: "yes" } ] } ]"#,
+            "[ { filters: [ { bogus: 1 } ] } ]",
+            r#"[ { filters: [ { modes: ["peer"], modes: ["router"] } ] } ]"#,
+            r#"[ { filters: { modes: ["peer"] } } ]"#,
+            "[ { filters: [ null ] } ]",
+            "[ { filters: [], filters: [] } ]",
+        ] {
+            assert!(south(text).is_err(), "{text} is refused upstream");
+        }
+        for text in [
+            "[ { filters: null } ]",
+            "[ { filters: [ {} ] } ]",
+            "[ { filters: [ { modes: [] } ] } ]",
+            r#"[ { filters: [ { zids: ["+1"] } ] } ]"#,
+            r#"[ { filters: [ { zids: ["ffffffffffffffffffffffffffffffff"] } ] } ]"#,
+            r#"[ { filters: [ { interfaces: [""] } ] } ]"#,
+            r#"[ { filters: [ { modes: ["peer", "peer"] } ] } ]"#,
+            "[ { filters: [ { modes: null, interfaces: null, zids: null, region_names: null } ] } ]",
+        ] {
+            assert!(south(text).is_ok(), "{text} is accepted upstream");
+        }
+    }
 
     /// R3064 -- the clock map a document means: the role it names is replaced and the others keep
     /// zenoh's shipped values, and a document that never names the key means the shipped map WHOLE,
