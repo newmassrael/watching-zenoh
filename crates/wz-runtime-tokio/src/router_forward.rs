@@ -383,7 +383,7 @@ use wz_session_core::driver_loop::DriverLoopOutcome;
 use wz_session_core::driver_loop::MulticastPeerId;
 #[cfg(feature = "router-multicast-faces")]
 use wz_session_core::extbound::multicast_region_and_bound_of;
-use wz_session_core::extbound::{region_and_bound_of, Bound, Region};
+use wz_session_core::extbound::{Bound, Region};
 use wz_session_core::keyexpr_match::keyexpr_intersects_target;
 use wz_session_core::linkstate_oam::{
     build_linkstate_oam_owned, try_parse_linkstate_oam, LinkstateOam,
@@ -419,7 +419,10 @@ use crate::linkstate_forward::{
     ClientRoutes, ClientSubStore, DataRoutes, LocalQueryHandler, LocalQueryView, LocalQueryable,
     LocalSubscriber, LocalSubscriberHandler, QueryCandidate, QueryRoutes,
 };
-use crate::routing_region::{hat_kind, GatewayView, HatKind, InterRegionFilter, RegionMap};
+use crate::routing_region::{
+    hat_kind, regions_of, GatewayView, HatKind, InterRegionFilter, RegionMap,
+};
+use wz_session_core::region_partition::{region_of, RemoteFacts, SouthPartition};
 // R2393 — the host-subscriber dispatch's sample types, the same ones the peer
 // plane's `dispatch_local_subscribers` builds from.
 use wz_session_core::sample_kind::SampleKind;
@@ -450,8 +453,12 @@ use wz_session_core::wire::{PushOwned, PushOwnedVariant, RequestOwned, ResponseO
 /// @ `(_, WhatAmI::Router) => {`). Its net is `routers_net`.
 const ROUTERS_REGION: Region = Region::North;
 
-/// The region the pin's PEER hat serves on a router node, the default peer
-/// subregion south of it. Its net is `linkstatepeers_net`.
+/// The region the pin's PEER hat serves on a router node on the `auto` preset,
+/// the default peer subregion south of it. Item 751 — a custom partition has one
+/// such region per subregion, so production code asks the hat table
+/// ([`is_peer_hat`]) which regions are peers' and this names the default one for
+/// the tests.
+#[cfg(test)]
 const PEERS_REGION: Region = Region::default_south(WhatAmI::Peer);
 
 /// The region a router's CLIENTS land in, which a broker hat serves. It has no
@@ -468,7 +475,7 @@ const CLIENTS_REGION: Region = Region::default_south(WhatAmI::Client);
 
 /// The region a multicast group member's traffic comes from on a router node:
 /// the pin's `compute_multicast_region_of` for a peer member, which is the
-/// south peer region ([`PEERS_REGION`]) the unicast peers are in too
+/// south peer region (`PEERS_REGION`) the unicast peers are in too
 /// (`zenoh/src/net/runtime/region.rs` @ `pub(crate) fn compute_multicast_region_of(`).
 #[cfg(feature = "router-multicast-faces")]
 fn mcast_ingress_region() -> Region {
@@ -1064,6 +1071,16 @@ fn region_table<T>(map: &RegionMap<Rc<T>>, region: Region) -> &Rc<T> {
         .unwrap_or_else(|| unreachable!("{region} is not a mesh region of a router"))
 }
 
+/// Every table a view holds for a region the pin's PEER hat serves, in region
+/// order: one on the `auto` preset, one per subregion on a custom partition.
+#[cfg(feature = "adminspace-introspection-handlers")]
+fn peer_region_tables<T>(map: &RegionMap<Rc<T>>) -> Vec<&Rc<T>> {
+    map.iter()
+        .filter(|(region, _)| is_peer_hat(*region))
+        .map(|(_, table)| table)
+        .collect()
+}
+
 /// The region a router places a face in, as the pin computes it when the
 /// transport opens (`zenoh/src/net/runtime/mod.rs`
 /// @ `compute_region_of(`, through [`region_and_bound_of`](wz_session_core::extbound::region_and_bound_of)):
@@ -1083,8 +1100,13 @@ fn region_table<T>(map: &RegionMap<Rc<T>>, region: Region) -> &Rc<T> {
 /// The one face that classifies differently is a remote that announces we are
 /// SOUTH of it. The pin puts that face in `North` whatever its mode, and so
 /// does this.
+///
+/// Item 751 — [`RouterForwarder::place_face`] is the production reader now, for a
+/// router on the `auto` preset and on a custom partition alike; this keeps the
+/// `auto` table in the tests' hands.
+#[cfg(test)]
 fn face_region(whatami: WhatAmI, remote_bound: Option<Bound>) -> Region {
-    region_and_bound_of(WhatAmI::Router, whatami, remote_bound)
+    wz_session_core::extbound::region_and_bound_of(WhatAmI::Router, whatami, remote_bound)
         .map(|(region, _)| region)
         .unwrap_or_else(|| unreachable!("a router's Auto table places every remote"))
 }
@@ -1616,9 +1638,10 @@ impl RouterDeclarationsView {
     /// what it knows about declarations is what its neighbours told it.
     pub fn subscribers(&self) -> Vec<(String, wz_session_core::adminspace::AdminSources)> {
         let clients = client_keyexprs(&self.client_subs, |by_id| by_id.values().cloned().collect());
+        let peers = peer_region_tables(&self.subs);
         self.bucket_by_tier(
             &region_table(&self.subs, ROUTERS_REGION).borrow(),
-            &region_table(&self.subs, PEERS_REGION).borrow(),
+            &peers.iter().map(|table| table.borrow()).collect::<Vec<_>>(),
             &clients,
         )
     }
@@ -1631,9 +1654,10 @@ impl RouterDeclarationsView {
         let clients = client_keyexprs(&self.client_qabls, |by_id| {
             by_id.values().map(|(keyexpr, _)| keyexpr.clone()).collect()
         });
+        let peers = peer_region_tables(&self.qabls);
         self.bucket_by_tier(
             &region_table(&self.qabls, ROUTERS_REGION).borrow(),
-            &region_table(&self.qabls, PEERS_REGION).borrow(),
+            &peers.iter().map(|table| table.borrow()).collect::<Vec<_>>(),
             &clients,
         )
     }
@@ -1668,9 +1692,10 @@ impl RouterDeclarationsView {
         let clients = client_keyexprs(&self.client_tokens, |by_id| {
             by_id.values().cloned().collect()
         });
+        let peers = peer_region_tables(&self.tokens);
         self.bucket_by_tier(
             &region_table(&self.tokens, ROUTERS_REGION).borrow(),
-            &region_table(&self.tokens, PEERS_REGION).borrow(),
+            &peers.iter().map(|table| table.borrow()).collect::<Vec<_>>(),
             &clients,
         )
     }
@@ -1681,7 +1706,7 @@ impl RouterDeclarationsView {
     fn bucket_by_tier<A, B>(
         &self,
         routers: &LinkstatepeerInterest<A>,
-        peers: &LinkstatepeerInterest<B>,
+        peers: &[std::cell::Ref<'_, LinkstatepeerInterest<B>>],
         clients: &HashMap<FaceId, HashSet<String>>,
     ) -> Vec<(String, wz_session_core::adminspace::AdminSources)>
     where
@@ -1704,12 +1729,16 @@ impl RouterDeclarationsView {
                 .routers
                 .push(zid_to_zenoh_hex(zid.as_slice()));
         }
-        for (keyexpr, zid, _) in peers.entries() {
-            by_key
-                .entry(keyexpr)
-                .or_insert_with(empty)
-                .peers
-                .push(zid_to_zenoh_hex(zid.as_slice()));
+        // Every peer region's table fills the one `peers` bucket, as the pin's
+        // peer hats each fill theirs and the dispatcher merges them per resource.
+        for table in peers {
+            for (keyexpr, zid, _) in table.entries() {
+                by_key
+                    .entry(keyexpr)
+                    .or_insert_with(empty)
+                    .peers
+                    .push(zid_to_zenoh_hex(zid.as_slice()));
+            }
         }
         let faces = self.faces.borrow();
         for (face, keys) in clients.iter() {
@@ -1759,6 +1788,11 @@ pub struct RouterForwarder {
     /// `South { 0, Client }` and `Local` — reached through
     /// [`broker_hat`](Self::broker_hat).
     hats: RegionMap<Hat>,
+    /// How this router's south is partitioned into subregions, and so which
+    /// regions [`hats`](Self::hats) holds and which one each face lands in
+    /// ([`RouterForwarder::with_south_partition`]). `Auto` is the pin's preset
+    /// and every router's default.
+    partition: SouthPartition,
     /// Held faces keyed by id, each carrying its send seam, its tier, and (once
     /// its zid is known) its graph link. One id-keyed map across BOTH tiers
     /// (the `RouterFaceState.tier` says which net), so the flood can scope to a
@@ -2184,6 +2218,65 @@ impl RouterForwarder {
         self
     }
 
+    /// Partition this router's south into subregions by rule (`gateway/south` as a
+    /// list), where a router left alone is on the `auto` preset.
+    ///
+    /// The pin builds one hat per region of the partition, three per subregion
+    /// (client, peer, router), and places each remote by the rules
+    /// (`zenoh/src/net/routing/gateway.rs` @ `GatewaySouthConf::Custom(subregions) => {`).
+    /// This builds the same hats and places each face by [`region_of`]. A remote the
+    /// rules place in a subregion's ROUTER region is refused, because a router
+    /// hat serving a south region is not built (see
+    /// [`refuses_face`](FaceForwarder::refuses_face)).
+    ///
+    /// Call it before any face registers: the hats a registered face joined are
+    /// the ones it keeps.
+    pub fn with_south_partition(mut self, partition: SouthPartition) -> Self {
+        assert!(
+            self.faces.borrow().is_empty(),
+            "a router's south is partitioned before any face registers"
+        );
+        let self_zid = *self.routers_net().borrow().self_zid();
+        self.hats = regions_of(WhatAmI::Router, &partition)
+            .into_iter()
+            .map(|region| (region, Hat::for_region(region, self_zid)))
+            .collect();
+        self.partition = partition;
+        self
+    }
+
+    /// The region the rules put the remote behind `actions` in and the remote's
+    /// bound, or why they cannot: the pin's `compute_region_of` over the remote's
+    /// zid, role, region name and the interfaces of its link, and the bound it
+    /// announced. On the `auto` preset no rule reads the remote's facts and this
+    /// is the two modes and the announced bound alone, which is
+    /// [`region_and_bound_of`](wz_session_core::extbound::region_and_bound_of) (a
+    /// router places every remote there).
+    fn place_face(
+        &self,
+        actions: &SessionLinkActions,
+    ) -> Result<(Region, Bound), wz_session_core::region_partition::RegionError> {
+        let whatami = peer_whatami_routing(actions);
+        let remote_bound = actions.peer_remote_bound();
+        let zid = peer_zid_routing(actions);
+        let region_name = actions.peer_region();
+        // A link whose interfaces could not be read is read as having none, as
+        // the pin reads a failed lookup (`vec![]`): a filter on interfaces then
+        // matches it, which is `all` over nothing.
+        let interfaces: Vec<&str> = actions
+            .link_subject()
+            .and_then(|subject| subject.interfaces.as_deref())
+            .map(|names| names.iter().map(String::as_str).collect())
+            .unwrap_or_default();
+        let facts = RemoteFacts {
+            zid: zid.as_ref().map(Zid::as_slice).unwrap_or(&[]),
+            whatami,
+            region_name: region_name.as_ref().map(|name| name.as_str()),
+            interfaces: &interfaces,
+        };
+        region_of(WhatAmI::Router, &self.partition, &facts, remote_bound)
+    }
+
     /// As [`new`](Self::new), but with an INJECTED monotonic clock — the dependency
     /// injection a deterministic pending-query-timeout test uses to advance "now"
     /// across a deadline (the router twin of
@@ -2205,10 +2298,11 @@ impl RouterForwarder {
         timestamping: crate::node_clock::TimestampingEnabled,
     ) -> Self {
         Self {
-            hats: crate::routing_region::auto_regions(WhatAmI::Router)
+            hats: regions_of(WhatAmI::Router, &SouthPartition::Auto)
                 .into_iter()
                 .map(|region| (region, Hat::for_region(region, self_zid)))
                 .collect(),
+            partition: SouthPartition::Auto,
             // R311y450 — this router's §5.18 clock, over the SAME `WhatAmI::Router`
             // both nets above are seeded with, so the timestamping gate cannot
             // disagree with the role. Router is the one role zenoh's shipped map
@@ -2359,10 +2453,9 @@ impl RouterForwarder {
     /// mesh E2Es red with a gossip router and link-state peers. The router
     /// mesh keeps full link-state either way; that is the router hat's.
     pub fn set_peer_region_full_linkstate(&self, enabled: bool) {
-        self.mesh(PEERS_REGION)
-            .net
-            .borrow_mut()
-            .set_full_linkstate(enabled);
+        for net in self.peers_nets() {
+            net.borrow_mut().set_full_linkstate(enabled);
+        }
     }
 
     /// R2639 — emit a [`DialIntent`] for each node this ingest DISCOVERED that
@@ -2497,7 +2590,8 @@ impl RouterForwarder {
     /// N connected peers reads `1 + N` once converged (the E2E convergence
     /// witness the ACTIVATION harness asserts on).
     pub fn linkstatepeers_net_node_count(&self) -> usize {
-        self.linkstatepeers_net().borrow().node_count()
+        self.first_peers_net()
+            .map_or(0, |net| net.borrow().node_count())
     }
 
     /// Total link-state lists ingested across both nets — the control-plane
@@ -3095,10 +3189,28 @@ impl RouterForwarder {
         &self.mesh(ROUTERS_REGION).net
     }
 
-    /// The peers region's graph, which this router still runs full link-state
-    /// over (item 751 step 8 moves it to the pin's gossip semantics).
+    /// The graph of every region the pin's PEER hat serves, in region order: one
+    /// on the `auto` preset, one per subregion of a custom partition, none for a
+    /// partition with no subregion.
+    fn peers_nets(&self) -> impl Iterator<Item = &Rc<RefCell<LinkstateNetwork>>> {
+        self.hats
+            .iter()
+            .filter(|(region, _)| is_peer_hat(*region))
+            .filter_map(|(_, hat)| hat.mesh().map(|mesh| &mesh.net))
+    }
+
+    /// The first peers region's graph, which the admin views and the stats read.
+    /// `None` when the partition has no subregion.
+    fn first_peers_net(&self) -> Option<&Rc<RefCell<LinkstateNetwork>>> {
+        self.peers_nets().next()
+    }
+
+    /// The default peers region's graph, for the tests that stand a router up on
+    /// the `auto` preset.
+    #[cfg(test)]
     fn linkstatepeers_net(&self) -> &Rc<RefCell<LinkstateNetwork>> {
-        &self.mesh(PEERS_REGION).net
+        self.first_peers_net()
+            .expect("the auto preset has a peers region")
     }
 
     /// Send to each held face of `tier` the message `build` produces for it,
@@ -5106,18 +5218,25 @@ impl RouterForwarder {
         keyexpr: &str,
         (src_zid, fwd_zid): (Option<&Zid>, Option<&Zid>),
     ) {
-        let target_tier = match inbound_tier {
-            PEERS_REGION => ROUTERS_REGION,
-            ROUTERS_REGION => PEERS_REGION,
-            _ => return, // a client's mesh path is C3b, not a bridge
-        };
-        // The cross leg re-injects the RECEIVED mesh frame into the target mesh (self
-        // tree root, node_id 0) via the shared self-publish-into-tier seam, PRESERVING
-        // the received band (R311y224) — a mesh source can be QoS-negotiated, so the
-        // bridged copy must carry the same priority the within-tier copy does.
-        self.self_publish_into_tier(target_tier, reliable, priority, push, keyexpr, |dst| {
-            self.crosses(inbound_tier, target_tier, src_zid, fwd_zid, Some(dst))
-        });
+        if is_leaf(inbound_tier) {
+            return; // a client's mesh path is C3b, not a bridge
+        }
+        // Every OTHER mesh region is a target: the router mesh from a peer region,
+        // and from either every peer region, which on a custom partition are
+        // several (the pin's hats each offer a Put to their own faces when it came
+        // from another region). The cross leg re-injects the RECEIVED mesh frame
+        // into the target mesh (self tree root, node_id 0) via the shared
+        // self-publish-into-tier seam, PRESERVING the received band (R311y224) — a
+        // mesh source can be QoS-negotiated, so the bridged copy must carry the
+        // same priority the within-tier copy does.
+        for target_tier in self.mesh_regions() {
+            if target_tier == inbound_tier {
+                continue;
+            }
+            self.self_publish_into_tier(target_tier, reliable, priority, push, keyexpr, |dst| {
+                self.crosses(inbound_tier, target_tier, src_zid, fwd_zid, Some(dst))
+            });
+        }
     }
 
     /// Route a data `Push` WITHIN its inbound tier's mesh (C1) — the router twin
@@ -5349,7 +5468,7 @@ impl RouterForwarder {
         // face's alias table by the [`route_push`](Self::route_push) head — a
         // downstream mesh peer shares no alias table, so the re-injection carries
         // the literal.
-        for tier in [ROUTERS_REGION, PEERS_REGION] {
+        for tier in self.mesh_regions() {
             // R2879 (open-debt item 751, step 5) — each leg is admitted by the
             // inter-region filter, as every data egress is. A client region is
             // served by a broker hat, which has no gateway view, so both legs
@@ -6559,7 +6678,16 @@ impl RouterForwarder {
     /// (`linkstatepeers_net`) — the adminspace host's `linkstate/peers` render seam.
     #[cfg(feature = "adminspace-router-linkstate")]
     pub fn peers_net_view(&self) -> LinkstateNetView {
-        LinkstateNetView::new(Rc::clone(self.linkstatepeers_net()))
+        // A partition with no subregion has no peers region; its view is an
+        // empty graph holding only this node.
+        LinkstateNetView::new(self.first_peers_net().map(Rc::clone).unwrap_or_else(|| {
+            let self_zid = *self.routers_net().borrow().self_zid();
+            Rc::new(RefCell::new(LinkstateNetwork::new_in_region(
+                self_zid,
+                WhatAmI::Router,
+                true,
+            )))
+        }))
     }
 
     /// Self-dispatch a routed GET whose only match is a queryable HOSTED BY THIS
@@ -6773,7 +6901,8 @@ impl RouterForwarder {
         // Query is answered from this router's clients only by the router that
         // carries it into the router mesh, since every other one receives that
         // carried copy back as a ROUTER source and serves it then.
-        let blocks: Vec<MeshQueryBlock> = [ROUTERS_REGION, PEERS_REGION]
+        let blocks: Vec<MeshQueryBlock> = self
+            .mesh_regions()
             .into_iter()
             .filter_map(|bt| self.mesh_query_block(bt, tier, within, inbound_zid, self_zid, member))
             .collect();
@@ -6918,9 +7047,7 @@ impl RouterForwarder {
         self_zid: Zid,
         member: Option<Zid>,
     ) -> Option<MeshQueryBlock> {
-        if block_tier != ROUTERS_REGION && block_tier != PEERS_REGION {
-            return None;
-        }
+        self.mesh_hat(block_tier)?;
         if src_tier == block_tier {
             // Within-tier: route along the querier's tree (its resolved source +
             // psid), excluding its own inbound neighbour. `within` is `None` when
@@ -7649,7 +7776,16 @@ impl FaceForwarder for RouterForwarder {
         // a routing zid joins the matching net; a Client face — or one whose
         // zid never surfaced — is HELD without a graph link (it routes nothing).
         let whatami = peer_whatami_routing(actions);
-        let tier = face_region(whatami, actions.peer_remote_bound());
+        // A face the rules cannot place was refused by `refuses_face` before it got
+        // here; a caller that registers one anyway holds it in the `Local` region,
+        // which routes nothing to or from a transport.
+        let (tier, remote_is_gateway) = match self.place_face(actions) {
+            Ok((region, bound)) => (region, bound.is_south()),
+            Err(why) => {
+                log::warn!("router forward: held a face the rules cannot place: {why}");
+                (Region::Local, false)
+            }
+        };
         let added = match self.plane(tier) {
             Some((net, _dirty)) => {
                 // OBLIGATION-3 self-zid parity: a face whose routing zid IS self's
@@ -7673,12 +7809,6 @@ impl FaceForwarder for RouterForwarder {
                         let neighbour_was_new = net.get_node(&neighbour).is_none();
                         // R2894b — the far end's bound on the link, from the
                         // same computation the region above came from.
-                        let remote_is_gateway = region_and_bound_of(
-                            WhatAmI::Router,
-                            whatami,
-                            actions.peer_remote_bound(),
-                        )
-                        .is_some_and(|(_, bound)| bound.is_south());
                         let link = net.add_link_bound(neighbour, whatami, remote_is_gateway);
                         (link, neighbour, neighbour_was_new)
                     })
@@ -7925,6 +8055,27 @@ impl FaceForwarder for RouterForwarder {
     /// without a surfaced zid is simply never deduped — consistent.
     fn dedups_faces_by_zid(&self) -> bool {
         true
+    }
+
+    /// Item 751 -- the pin refuses a remote its region rules cannot place. This
+    /// router additionally refuses one they place in a subregion's ROUTER
+    /// region, which it does not serve yet: such a region's net needs the router
+    /// hat's own mesh semantics, and a stock node announces the boundary to it
+    /// through the `RemoteBound` extension that wz does not send.
+    fn refuses_face(&self, actions: &Arc<SessionLinkActions>) -> Option<String> {
+        match self.place_face(actions) {
+            Err(why) => Some(why.to_string()),
+            Ok((
+                Region::South {
+                    mode: WhatAmI::Router,
+                    id,
+                },
+                _,
+            )) => Some(format!(
+                "the rules place it in router subregion {id}, which this router does not serve"
+            )),
+            Ok(_) => None,
+        }
     }
 
     /// Route a Push RECEIVED on the multicast INGRESS face (the single
@@ -11022,6 +11173,208 @@ mod tests {
             1,
             "the router-net leg delivers too, though R2 is the larger gateway"
         );
+    }
+
+    // ── item 751: a router whose south is partitioned into subregions ──
+
+    /// Subregion 0 holds the peers 0xAA and 0xA2, subregion 1 the peer 0xBB, and
+    /// subregion 2 every client. A remote none of them matches is placed north,
+    /// which a router refuses for a peer or a client.
+    fn partitioned_router() -> RouterForwarder {
+        use wz_codecs::whatami::WhatAmIMatcher;
+        use wz_session_core::region_partition::{RegionFilter, SouthSubregion};
+        let by_zids = |zids: &[u8]| SouthSubregion {
+            filters: Some(vec![RegionFilter {
+                zids: Some(zids.iter().map(|b| zid(*b).as_slice().to_vec()).collect()),
+                ..RegionFilter::default()
+            }]),
+        };
+        let clients = SouthSubregion {
+            filters: Some(vec![RegionFilter {
+                modes: Some(WhatAmIMatcher::empty().client()),
+                ..RegionFilter::default()
+            }]),
+        };
+        RouterForwarder::new(zid(0x01)).with_south_partition(SouthPartition::Custom(vec![
+            by_zids(&[0xAA, 0xA2]),
+            by_zids(&[0xBB]),
+            clients,
+        ]))
+    }
+
+    const SUB0_PEERS: Region = Region::South {
+        id: 0,
+        mode: WhatAmI::Peer,
+    };
+    const SUB1_PEERS: Region = Region::South {
+        id: 1,
+        mode: WhatAmI::Peer,
+    };
+    const SUB2_CLIENTS: Region = Region::South {
+        id: 2,
+        mode: WhatAmI::Client,
+    };
+
+    /// A router's hats follow its partition, and each face lands in the region the
+    /// rules put it in.
+    #[test]
+    fn a_partitioned_router_places_each_face_in_its_subregion() {
+        let fwd = partitioned_router();
+        for region in [SUB0_PEERS, SUB1_PEERS, SUB2_CLIENTS] {
+            assert!(fwd.hats.get(&region).is_some(), "{region} has a hat");
+        }
+        let (a, _s) = face(zid(0xAA), WIRE_PEER);
+        let (b, _s) = face(zid(0xBB), WIRE_PEER);
+        let (c, _s) = face(zid(0xCC), WIRE_CLIENT);
+        fwd.register(FaceId(0), &a);
+        fwd.register(FaceId(1), &b);
+        fwd.register(FaceId(2), &c);
+        let tier = |id| fwd.faces.borrow()[&FaceId(id)].tier;
+        assert_eq!(tier(0), SUB0_PEERS);
+        assert_eq!(tier(1), SUB1_PEERS);
+        assert_eq!(tier(2), SUB2_CLIENTS);
+    }
+
+    /// The pin refuses a remote its rules cannot place, and so does the router.
+    #[test]
+    fn a_partitioned_router_refuses_a_face_its_rules_cannot_place() {
+        let fwd = partitioned_router();
+        let refusal = |peer: Zid, wire| {
+            let (actions, _sink) = face(peer, wire);
+            fwd.refuses_face(&actions)
+        };
+        assert_eq!(refusal(zid(0xAA), WIRE_PEER), None, "placed in subregion 0");
+        let unmatched = refusal(zid(0xDD), WIRE_PEER).expect("a peer no rule matches");
+        assert!(
+            unmatched.contains("conflicts with custom configuration"),
+            "the pin's words: {unmatched}"
+        );
+        // A router no rule matches stays north, where the auto table puts it.
+        assert_eq!(refusal(zid(0xEE), WIRE_ROUTER), None);
+        // A rule that matches everyone puts a router remote in a ROUTER subregion,
+        // which this router does not serve yet.
+        let open =
+            RouterForwarder::new(zid(0x01)).with_south_partition(SouthPartition::Custom(vec![
+                wz_session_core::region_partition::SouthSubregion::default(),
+            ]));
+        let (actions, _sink) = face(zid(0xEE), WIRE_ROUTER);
+        assert!(
+            open.refuses_face(&actions)
+                .expect("a router remote in a router subregion")
+                .contains("router subregion"),
+            "this router does not serve a south router region yet"
+        );
+        let (actions, _sink) = face(zid(0xEE), WIRE_PEER);
+        assert_eq!(open.refuses_face(&actions), None, "a peer there is served");
+        // A router on the auto preset refuses nobody.
+        let auto = RouterForwarder::new(zid(0x01));
+        let (actions, _sink) = face(zid(0xDD), WIRE_PEER);
+        assert_eq!(auto.refuses_face(&actions), None);
+    }
+
+    /// A Put crosses between two peer subregions and not within one, as the pin's
+    /// peer hat sends to its own faces only what came from another region
+    /// (`zenoh/src/net/routing/hat/peer/pubsub.rs` @ `if ctx.subs.is_some() && self.region() != *src_region {`).
+    /// A client of a third subregion receives it too. zenohd shows the same
+    /// delivery for two peer subregions, and none on the `auto` preset where the
+    /// two peers share a region.
+    #[test]
+    fn a_push_crosses_between_peer_subregions_and_not_within_one() {
+        let fwd = partitioned_router();
+        let (a, _sink_a) = face(zid(0xAA), WIRE_PEER); // publisher, subregion 0
+        let (a2, sink_a2) = face(zid(0xA2), WIRE_PEER); // subscriber, subregion 0
+        let (b, sink_b) = face(zid(0xBB), WIRE_PEER); // subscriber, subregion 1
+        let (c, sink_c) = face(zid(0xCC), WIRE_CLIENT); // subscriber, subregion 2
+        fwd.register(FaceId(0), &a);
+        fwd.register(FaceId(1), &a2);
+        fwd.register(FaceId(2), &b);
+        fwd.register(FaceId(3), &c);
+        advertise_link_back(&fwd, FaceId(0), 0x01, 0xAA, 5);
+        advertise_link_back(&fwd, FaceId(1), 0x01, 0xA2, 5);
+        advertise_link_back(&fwd, FaceId(2), 0x01, 0xBB, 5);
+        fwd.tick();
+        for id in [1, 2, 3] {
+            forward_one(&fwd, FaceId(id), declare_sub("demo/data"));
+        }
+        sink_a2.reset();
+        sink_b.reset();
+        sink_c.reset();
+
+        let push =
+            wz_session_core::push_build::build_push_literal("demo/data", b"z").expect("push");
+        forward_one(&fwd, FaceId(0), NetworkMessage::Push(Box::new(push)));
+
+        assert_eq!(
+            sink_b.frame_count(),
+            1,
+            "the other peer subregion receives it"
+        );
+        assert_eq!(sink_c.frame_count(), 1, "the client subregion receives it");
+        assert_eq!(
+            sink_a2.frame_count(),
+            0,
+            "a peer of the publisher's own subregion does not: they are one region"
+        );
+    }
+
+    /// The query twin: a Query reaches the queryable of another peer subregion and
+    /// not one of its own (`zenoh/src/net/routing/hat/peer/queries.rs` @
+    /// `if self.region() != *src_region {`). `All` is the target, so a queryable
+    /// the route reached is not hidden behind a BestMatching winner.
+    #[test]
+    fn a_query_crosses_between_peer_subregions_and_not_within_one() {
+        let fwd = partitioned_router();
+        let (a, _sink_a) = face(zid(0xAA), WIRE_PEER);
+        let (a2, sink_a2) = face(zid(0xA2), WIRE_PEER);
+        let (b, sink_b) = face(zid(0xBB), WIRE_PEER);
+        fwd.register(FaceId(0), &a);
+        fwd.register(FaceId(1), &a2);
+        fwd.register(FaceId(2), &b);
+        advertise_link_back(&fwd, FaceId(0), 0x01, 0xAA, 5);
+        advertise_link_back(&fwd, FaceId(1), 0x01, 0xA2, 5);
+        advertise_link_back(&fwd, FaceId(2), 0x01, 0xBB, 5);
+        fwd.tick();
+        forward_one(&fwd, FaceId(1), declare_qabl("demo/q", false));
+        forward_one(&fwd, FaceId(2), declare_qabl("demo/q", false));
+        sink_a2.reset();
+        sink_b.reset();
+
+        forward_one(
+            &fwd,
+            FaceId(0),
+            request_with_target(3, "demo/q", QueryTarget::All),
+        );
+
+        assert_eq!(
+            sink_b.frame_count(),
+            1,
+            "the other peer subregion's queryable"
+        );
+        assert_eq!(
+            sink_a2.frame_count(),
+            0,
+            "not one of the asker's own subregion"
+        );
+    }
+
+    /// The `auto` preset puts both peers in the one region, which is the control
+    /// of the two tests above: the same publisher and subscriber reach nothing.
+    #[test]
+    fn on_the_auto_preset_two_peers_are_one_region_and_a_push_does_not_cross() {
+        let fwd = RouterForwarder::new(zid(0x01));
+        let (a, _sink_a) = face(zid(0xAA), WIRE_PEER);
+        let (b, sink_b) = face(zid(0xBB), WIRE_PEER);
+        fwd.register(FaceId(0), &a);
+        fwd.register(FaceId(1), &b);
+        advertise_link_back(&fwd, FaceId(0), 0x01, 0xAA, 5);
+        advertise_link_back(&fwd, FaceId(1), 0x01, 0xBB, 5);
+        fwd.tick();
+        forward_one(&fwd, FaceId(1), declare_sub("demo/data"));
+        sink_b.reset();
+        let push =
+            wz_session_core::push_build::build_push_literal("demo/data", b"z").expect("push");
+        forward_one(&fwd, FaceId(0), NetworkMessage::Push(Box::new(push)));
+        assert_eq!(sink_b.frame_count(), 0);
     }
 
     /// The mesh a multicast-ingress test stands up: a unicast PEER P that holds a

@@ -24,6 +24,7 @@
 //! hat serves each one.
 
 use wz_session_core::extbound::{Bound, Region};
+use wz_session_core::region_partition::SouthPartition;
 use wz_session_core::WhatAmI;
 
 /// A map from [`Region`] to `D`, as the pin's `RegionMap`
@@ -169,6 +170,31 @@ pub fn auto_regions(mode: WhatAmI) -> Vec<Region> {
     }
     regions.push(Region::Local);
     regions
+}
+
+/// The regions a node of `mode` builds a hat for under `partition`, in the pin's
+/// order (`zenoh/src/net/routing/gateway.rs`
+/// @ `for mode in [WhatAmI::Client, WhatAmI::Peer, WhatAmI::Router] {`).
+///
+/// The `auto` preset is [`auto_regions`]. A custom partition builds, for each
+/// subregion in order, one region per mode of the remote it may hold, and so
+/// three per subregion whatever the node's own mode: `North` first, then
+/// `South { id, mode }` for each `id` and each of client, peer, router, then
+/// `Local`.
+pub fn regions_of(mode: WhatAmI, partition: &SouthPartition) -> Vec<Region> {
+    match partition {
+        SouthPartition::Auto => auto_regions(mode),
+        SouthPartition::Custom(subregions) => {
+            let mut regions = vec![Region::North];
+            for id in 0..subregions.len() {
+                for mode in [WhatAmI::Client, WhatAmI::Peer, WhatAmI::Router] {
+                    regions.push(Region::South { id, mode });
+                }
+            }
+            regions.push(Region::Local);
+            regions
+        }
+    }
 }
 
 /// The four hats the pin ships (`zenoh/src/net/routing/hat/`: `broker`,
@@ -355,6 +381,38 @@ mod tests {
             [Region::North, Region::default_south(Client), Region::Local]
         );
         assert_eq!(auto_regions(Client), [Region::North, Region::Local]);
+    }
+
+    /// The regions of a custom partition, as zenohd logged them for a router with
+    /// two subregions: `regions=[North, South { id: 0, mode: Client }, South { id: 0,
+    /// mode: Peer }, South { id: 0, mode: Router }, South { id: 1, mode: Client },
+    /// South { id: 1, mode: Peer }, South { id: 1, mode: Router }, Local]`. The
+    /// `auto` preset is unchanged, and a node's own mode does not change a custom
+    /// partition's regions.
+    #[test]
+    fn a_custom_partition_builds_three_regions_per_subregion() {
+        use wz_session_core::region_partition::SouthSubregion;
+        let two = SouthPartition::Custom(vec![SouthSubregion::default(); 2]);
+        let want: Vec<Region> = [Region::North]
+            .into_iter()
+            .chain(
+                (0..2).flat_map(|id| [Client, Peer, Router].map(|mode| Region::South { id, mode })),
+            )
+            .chain([Region::Local])
+            .collect();
+        for mode in [Router, Peer, Client] {
+            assert_eq!(regions_of(mode, &two), want, "{mode:?}");
+            assert_eq!(
+                regions_of(mode, &SouthPartition::Auto),
+                auto_regions(mode),
+                "{mode:?}"
+            );
+        }
+        assert_eq!(
+            regions_of(Router, &SouthPartition::Custom(vec![])),
+            [Region::North, Region::Local],
+            "no subregion: only the north and the in-process region"
+        );
     }
 
     /// Every hat an Auto node builds, and the hat the pin gives it: a router

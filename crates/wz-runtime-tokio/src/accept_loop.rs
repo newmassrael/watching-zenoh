@@ -717,6 +717,19 @@ pub trait FaceForwarder {
         false
     }
 
+    /// Item 751 -- whether the forwarder REFUSES the session `actions` opened, and
+    /// why. The loop drops a refused face before it is held, as it drops one over
+    /// `max_sessions`, and reports it as a [`AcceptEvent::FaceRefused`].
+    ///
+    /// The pin refuses a remote its region rules cannot place: `compute_region_of`
+    /// answers an error ("North-north ... configuration (invalid)", "Remote's auto
+    /// preset conflicts with custom configuration") and the transport is never
+    /// built (`zenoh/src/net/runtime/mod.rs` @ `compute_region_of(`). Default
+    /// `None`: a forwarder that places no remote refuses none.
+    fn refuses_face(&self, _actions: &Arc<SessionLinkActions>) -> Option<String> {
+        None
+    }
+
     /// R3067 -- whether the forwarder ALREADY holds a face to the peer `zid`
     /// that this loop does not hold: a link the node's DIAL role made.
     ///
@@ -2513,6 +2526,20 @@ where
                             #[cfg(feature = "router-connect-reconcile")]
                             dialed_targets.remove(&id);
                             summary.refused_over_max_sessions += 1;
+                            on_event(&AcceptEvent::FaceRefused {
+                                id,
+                                peer_zid: face.peer_zid.clone(),
+                                held: faces.len(),
+                            });
+                            continue;
+                        }
+                        // Item 751 -- a remote the forwarder's region rules cannot
+                        // place is refused here, before it is held, as the pin
+                        // refuses it when the transport opens.
+                        if let Some(why) = forwarder.refuses_face(&opened.actions) {
+                            log::warn!("refusing face {} -- {why}", id.0);
+                            #[cfg(feature = "router-connect-reconcile")]
+                            dialed_targets.remove(&id);
                             on_event(&AcceptEvent::FaceRefused {
                                 id,
                                 peer_zid: face.peer_zid.clone(),
