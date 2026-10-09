@@ -775,6 +775,15 @@ mod tests {
     ///
     /// Real time, because the wait is on the kernel and not on a timer the
     /// runtime can fast-forward; the bound makes it three seconds.
+    ///
+    /// Linux only: "a full accept queue drops the SYN" is that kernel's
+    /// behaviour, not a socket contract. On macOS a listener with backlog 0
+    /// kept completing connections past sixteen and the queue never filled
+    /// (hosted run 37915005371), and Windows answers a full queue with a
+    /// reset. The walk's own logic does not depend on any of that and is held
+    /// on every host by the paused-clock arms above and below, which model the
+    /// silent candidate directly.
+    #[cfg(target_os = "linux")]
     #[tokio::test]
     async fn a_named_tcp_dial_moves_past_a_candidate_that_drops_its_syn() {
         let socket = TcpSocket::new_v4().expect("socket");
