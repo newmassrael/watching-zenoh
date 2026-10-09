@@ -157,7 +157,6 @@ import shlex
 import subprocess
 import sys
 import time
-import tomllib
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -804,6 +803,197 @@ def module_path_prefix(rel):
     return "::".join(parts) + "::"
 
 
+# ── reading a Cargo manifest without `tomllib` ───────────────────────────
+#
+# `tomllib` is stdlib from python 3.11 and the hosted floor is 3.10 (the lint in
+# `python_floor_lint.py` refuses the import, after it killed Layer C0 once).
+# `cargo metadata` is the sanctioned reader, but it reads the manifest ON DISK,
+# and this gate needs the manifest as it was at the range's BASE. So this is a
+# reader for the subset a Cargo.toml uses: tables, arrays of tables, dotted
+# keys, strings (basic, literal, multi-line), arrays, inline tables, booleans and
+# numbers. It refuses what it does not read (a date, a stray token) by returning
+# None, and every caller turns a refusal into "this edit cannot be bounded",
+# which selects the whole package: the direction a parser failure must err in.
+
+
+class ManifestSyntax(Exception):
+    pass
+
+
+class _Toml:
+    BARE = re.compile(r"[A-Za-z0-9_-]+")
+    SCALAR = re.compile(r"[^\s,\]}#]+")
+    ESCAPES = {"n": "\n", "t": "\t", "r": "\r", '"': '"', "\\": "\\", "b": "\b", "f": "\f"}
+
+    def __init__(self, text):
+        self.s = text
+        self.i = 0
+
+    def err(self, why):
+        raise ManifestSyntax(f"{why} at offset {self.i}")
+
+    def peek(self):
+        return self.s[self.i : self.i + 1]
+
+    def ws(self, newlines=True):
+        s = self.s
+        while self.i < len(s):
+            c = s[self.i]
+            if c in " \t\r" or (newlines and c == "\n"):
+                self.i += 1
+            elif c == "#":
+                while self.i < len(s) and s[self.i] != "\n":
+                    self.i += 1
+            else:
+                break
+
+    def key(self):
+        parts = []
+        while True:
+            self.ws(False)
+            if self.peek() in ('"', "'"):
+                parts.append(self.string())
+            else:
+                m = self.BARE.match(self.s, self.i)
+                if not m:
+                    self.err("expected a key")
+                parts.append(m.group(0))
+                self.i = m.end()
+            self.ws(False)
+            if self.peek() == ".":
+                self.i += 1
+                continue
+            return parts
+
+    def string(self):
+        s = self.s
+        q = s[self.i]
+        if s.startswith(q * 3, self.i):
+            end = s.find(q * 3, self.i + 3)
+            if end < 0:
+                self.err("unterminated multi-line string")
+            body = s[self.i + 3 : end]
+            self.i = end + 3
+            return body[1:] if body.startswith("\n") else body
+        self.i += 1
+        out = []
+        while True:
+            if self.i >= len(s) or s[self.i] == "\n":
+                self.err("unterminated string")
+            c = s[self.i]
+            if c == q:
+                self.i += 1
+                return "".join(out)
+            if c == "\\" and q == '"':
+                esc = s[self.i + 1 : self.i + 2]
+                if esc not in self.ESCAPES:
+                    self.err("unsupported escape")
+                out.append(self.ESCAPES[esc])
+                self.i += 2
+                continue
+            out.append(c)
+            self.i += 1
+
+    def value(self):
+        self.ws(False)
+        c = self.peek()
+        if c in ('"', "'"):
+            return self.string()
+        if c == "[":
+            self.i += 1
+            arr = []
+            while True:
+                self.ws()
+                if self.peek() == "]":
+                    self.i += 1
+                    return arr
+                arr.append(self.value())
+                self.ws()
+                if self.peek() == ",":
+                    self.i += 1
+        if c == "{":
+            self.i += 1
+            tbl = {}
+            while True:
+                self.ws()
+                if self.peek() == "}":
+                    self.i += 1
+                    return tbl
+                path = self.key()
+                self.ws(False)
+                if self.peek() != "=":
+                    self.err("expected =")
+                self.i += 1
+                _put(tbl, path, self.value())
+                self.ws()
+                if self.peek() == ",":
+                    self.i += 1
+        m = self.SCALAR.match(self.s, self.i)
+        if not m:
+            self.err("expected a value")
+        raw = m.group(0)
+        self.i = m.end()
+        if raw in ("true", "false"):
+            return raw == "true"
+        for conv in (int, float):
+            try:
+                return conv(raw.replace("_", ""))
+            except ValueError:
+                pass
+        self.err(f"unsupported value `{raw}`")
+
+
+def _put(tbl, path, val):
+    for p in path[:-1]:
+        nxt = tbl.setdefault(p, {})
+        tbl = nxt[-1] if isinstance(nxt, list) else nxt
+    tbl[path[-1]] = val
+
+
+def parse_manifest(text):
+    """The manifest as nested dicts and lists, or `None` when this reader does
+    not understand it (callers then treat the manifest as opaque)."""
+    try:
+        p = _Toml(text)
+        doc, cur = {}, None
+        cur = doc
+        while True:
+            p.ws()
+            if p.i >= len(p.s):
+                return doc
+            if p.s.startswith("[[", p.i):
+                p.i += 2
+                path = p.key()
+                if not p.s.startswith("]]", p.i):
+                    p.err("expected ]]")
+                p.i += 2
+                parent = doc
+                for k in path[:-1]:
+                    parent = parent.setdefault(k, {})
+                    parent = parent[-1] if isinstance(parent, list) else parent
+                cur = {}
+                parent.setdefault(path[-1], []).append(cur)
+            elif p.peek() == "[":
+                p.i += 1
+                path = p.key()
+                if p.peek() != "]":
+                    p.err("expected ]")
+                p.i += 1
+                cur = doc
+                for k in path:
+                    cur = cur.setdefault(k, {})
+                    cur = cur[-1] if isinstance(cur, list) else cur
+            else:
+                path = p.key()
+                p.ws(False)
+                if p.peek() != "=":
+                    p.err("expected =")
+                p.i += 1
+                _put(cur, path, p.value())
+    except (ManifestSyntax, IndexError, TypeError, AttributeError):
+        return None
+
+
 # What a manifest edit can move. A guard's test set depends on the features its
 # build turns on, so a `Cargo.toml` edit reaches a guard when it changes a feature
 # the guard's build activates (directly, through `default`, or through another
@@ -834,10 +1024,8 @@ def _dep_tables(doc):
 def manifest_effect(old_text, new_text):
     """The feature names a manifest edit changes the meaning of, or `None` when
     the edit cannot be bounded to features."""
-    try:
-        old = tomllib.loads(old_text)
-        new = tomllib.loads(new_text)
-    except tomllib.TOMLDecodeError:
+    old, new = parse_manifest(old_text), parse_manifest(new_text)
+    if old is None or new is None:
         return None
     if old == new:
         return set()
@@ -946,10 +1134,10 @@ def manifest_reaches(g, effect, old_text, new_text):
         return False
     tables = []
     for text in (old_text, new_text):
-        try:
-            tables.append(tomllib.loads(text).get("features") or {})
-        except tomllib.TOMLDecodeError:
+        doc = parse_manifest(text)
+        if doc is None:
             return True
+        tables.append(doc.get("features") or {})
     active = build_features(g, tables)
     return True if active is None else bool(active & effect)
 
@@ -1495,11 +1683,15 @@ DEP_TABLES = ("dependencies", "dev-dependencies", "build-dependencies")
 
 def _manifest_deps(manifest_path):
     """Names a Cargo manifest depends on, across every dependency table and the
-    target-specific ones. A rename (`package = "..."`) contributes both names."""
+    target-specific ones. A rename (`package = "..."`) contributes both names.
+    `None` when the manifest cannot be read, which the caller takes as "every
+    workspace crate"."""
     try:
-        doc = tomllib.loads(manifest_path.read_text())
-    except (OSError, tomllib.TOMLDecodeError, UnicodeDecodeError):
-        return set()
+        doc = parse_manifest(manifest_path.read_text())
+    except (OSError, UnicodeDecodeError):
+        return None
+    if doc is None:
+        return None
     names = set()
 
     def take(table):
@@ -1526,7 +1718,8 @@ def crate_closure(d, manifest_names, root=None):
         if cur in seen:
             continue
         seen.add(cur)
-        for name in _manifest_deps(root / cur / "Cargo.toml"):
+        deps = _manifest_deps(root / cur / "Cargo.toml")
+        for name in by_name if deps is None else deps:
             dep = by_name.get(name)
             if dep and dep not in seen:
                 todo.append(dep)
@@ -2911,6 +3104,27 @@ def selftest_787(arm):
             "queued behind cargo's lock it becomes a deadlock the pusher reads as a slow push",
         )
 
+    doc = parse_manifest(
+        '# c\n[package]\nname = "a"  # tail\n[features]\ndefault = [\n  "x", # one\n  "y",\n]\n'
+        'x = []\n[target.\'cfg(unix)\'.dependencies]\nlibc = { version = "0.2", optional = true }\n'
+        '[[test]]\nname = "t"\n[[test]]\nname = "u"\n[dependencies.serde]\nversion = "1"\n'
+    )
+    arm(
+        "parse_manifest: tables, multi-line arrays, quoted target keys, arrays of tables, comments",
+        doc is not None
+        and doc["features"]["default"] == ["x", "y"]
+        and doc["target"]["cfg(unix)"]["dependencies"]["libc"]["optional"] is True
+        and [t["name"] for t in doc["test"]] == ["t", "u"]
+        and doc["dependencies"]["serde"]["version"] == "1"
+        and doc["package"]["name"] == "a",
+        "tomllib is not on the python floor, and a wrong parse selects the wrong guards",
+    )
+    arm(
+        "CONTROL: parse_manifest refuses what it cannot read, so callers fall back to the whole package",
+        parse_manifest("x = 1979-05-27\n") is None
+        and manifest_effect("x = 1979-05-27\n", "[package]\nname = 'a'\n") is None,
+        "a guessed parse would bound an edit it did not understand",
+    )
     arm(
         "shape_lines: a doc comment SHOWING an attribute is not one; a doc-test fence is",
         shape_lines("/// #[test]\nfn f() {}\n") == ("fn f() {}",)
