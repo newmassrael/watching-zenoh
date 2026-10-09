@@ -51,6 +51,7 @@ use std::net::{Ipv4Addr, UdpSocket};
 use std::process::{Command, Stdio};
 use std::time::Duration;
 
+use wz_integration_tests::bounded::BoundedChild as _;
 use wz_integration_tests::common::{
     assert_demo_binary_newer_than_sources, read_captured, read_multicast_ttl_v4, wz_ap_demo_binary,
     zenohd_binary, ChildGuard, NetnsPair,
@@ -95,7 +96,9 @@ fn spawn_reader(netns: &NetnsPair, group: Ipv4Addr, port: u16) -> std::process::
 
 /// The reader's verdict: `Some(ttl)` read, `None` nothing arrived in budget.
 fn reader_result(reader: std::process::Child) -> Option<u8> {
-    let out = reader.wait_with_output().expect("wait for the TTL reader");
+    let out = reader
+        .wait_with_output_bounded()
+        .expect("wait for the TTL reader");
     let stdout = String::from_utf8_lossy(&out.stdout);
     let payload = stdout
         .split_once(READER_MARKER)

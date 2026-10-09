@@ -43,6 +43,7 @@
 use std::process::{Command, Stdio};
 use std::time::Duration;
 
+use wz_integration_tests::bounded::BoundedStatus as _;
 use wz_integration_tests::common::{
     read_captured, wait_for_substring, wz_ap_demo_binary, zenoh_pico_cli_binary, ChildGuard,
     PortReservation,
@@ -114,7 +115,7 @@ fn ap_demo_round_trip_against_zenoh_pico_z_put() {
             "-m",
             "client",
         ])
-        .status();
+        .status_bounded();
 
     // Two-stage wait: first the conservative `accepted peer` line
     // (proves the TCP wire-up reached the FSM entry), then the

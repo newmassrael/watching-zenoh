@@ -57,7 +57,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::Duration;
 
-use wz_integration_tests::bounded::BoundedOutput as _;
+use wz_integration_tests::bounded::{BoundedOutput as _, BoundedStatus as _};
 use wz_integration_tests::common::{
     compile_zenoh_c_example, graceful_terminate, read_captured, run_query_until_answered,
     spawn_zenohd, wait_for_substring, wait_for_tcp_accept_alive, wz_capi_c_cdylib, zenoh_c_oracle,
@@ -200,7 +200,7 @@ fn upstream_z_sub_on_wz_capi_c_receives_from_a_real_pico_zput() {
         .args(["-e", &endpoint, "-m", "client", "-k", key, "-v", payload])
         .stdout(Stdio::from(put_writer))
         .stderr(Stdio::from(put_out.try_clone().expect("dup stderr handle")))
-        .status()
+        .status_bounded()
         .expect("run the real zenoh-pico z_put");
     assert!(
         put.success(),
@@ -574,7 +574,7 @@ fn upstream_z_sub_on_wz_capi_c_renders_a_pico_attachment_through_zenohd() {
         ])
         .stdout(Stdio::from(pub_writer))
         .stderr(Stdio::from(pub_out.try_clone().expect("dup stderr handle")))
-        .status()
+        .status_bounded()
         .expect("run the real zenoh-pico z_pub_attachment");
     assert!(
         publisher.success(),
@@ -1345,7 +1345,7 @@ fn upstream_z_pull_on_wz_capi_c_pulls_a_real_pico_sample_out_of_a_ring() {
         .args(["-e", &endpoint, "-m", "client", "-k", key, "-v", payload])
         .stdout(Stdio::from(put_writer))
         .stderr(Stdio::from(put_out.try_clone().expect("dup stderr handle")))
-        .status()
+        .status_bounded()
         .expect("run the real zenoh-pico z_put");
     assert!(
         put.success(),

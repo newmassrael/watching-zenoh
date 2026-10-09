@@ -37,7 +37,7 @@ pub mod common {
     /// a second answer to "which end wrote this segment", and every leg that
     /// rebuilds a wire would then have to pick one. The two harness halves stay
     /// one vocabulary.
-    use crate::bounded::BoundedOutput;
+    use crate::bounded::{BoundedOutput, BoundedStatus};
     use crate::wire_tap::{Recording, Side};
 
     fn port_lock() -> &'static Mutex<()> {
@@ -6316,7 +6316,7 @@ pub mod common {
         let _ = std::process::Command::new("kill")
             .arg("-TERM")
             .arg(&pid)
-            .status();
+            .status_bounded();
         let start = Instant::now();
         while start.elapsed() < timeout {
             match child.try_wait() {
@@ -6958,7 +6958,7 @@ pub mod common {
                     let _ = Command::new("sudo")
                         .args(["-n", "kill", "-KILL"])
                         .args(&pids)
-                        .status();
+                        .status_bounded();
                 }
             }
             let tag = self.ns.trim_start_matches("wzns").to_string();
@@ -6968,13 +6968,14 @@ pub mod common {
                 .arg("netns-topology")
                 .arg(project_root().join("scripts/lib/netns-topology.sh"))
                 .arg(tag)
-                .status();
+                .status_bounded();
         }
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use super::bounded::{BoundedChild as _, BoundedStatus as _};
     use super::common::{
         cargo_tree_of_demo, configured_zid_value, demo_newest_source, face_zid_value,
         has_zid_shape, hello_zid_value, line_with, parse_build_features, parse_igmp_devices,
@@ -7352,7 +7353,7 @@ mod tests {
         Command::new("kill")
             .arg("-0")
             .arg(pid.to_string())
-            .status()
+            .status_bounded()
             .expect("spawn kill -0")
             .success()
     }
@@ -7692,7 +7693,7 @@ mod tests {
             |captured| captured.contains("NEVER").then_some(()),
         );
         let elapsed = started.elapsed();
-        let _ = child.wait();
+        let _ = child.wait_bounded();
 
         let err = outcome.expect_err("a dead child cannot produce the needle");
         assert!(

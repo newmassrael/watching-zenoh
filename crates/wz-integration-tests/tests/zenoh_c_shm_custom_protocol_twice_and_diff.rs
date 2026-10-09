@@ -51,7 +51,7 @@ use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
-use wz_integration_tests::bounded::BoundedOutput as _;
+use wz_integration_tests::bounded::{BoundedChild as _, BoundedOutput as _};
 use wz_integration_tests::common::{
     assert_zenoh_c_arm_pairing, compile_zenoh_c_example, wz_capi_c_cdylib, zenoh_c_oracle,
     zenoh_c_shared_library, PortReservation,
@@ -485,7 +485,7 @@ fn exchange(sender: &Built, receiver: &Built, mode: &str, kind: &str, n: usize) 
     );
     // The rest of what the receiver prints, to its end.
     printed.extend(lines.map(|line| line.expect("read the receiver's stdout")));
-    receiver_child.wait().expect("the receiver ends");
+    receiver_child.wait_bounded().expect("the receiver ends");
     // The three kinds of message the receiver prints arrive on their own threads, so the rows
     // are compared sorted: what is compared is WHAT arrived and as which kind of buffer.
     let mut rows: Vec<String> = printed

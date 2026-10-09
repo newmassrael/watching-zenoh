@@ -65,6 +65,7 @@ use std::path::Path;
 use std::process::{Command, Stdio};
 use std::time::Duration;
 
+use wz_integration_tests::bounded::BoundedChild as _;
 use wz_integration_tests::common::{
     read_captured, wait_for_substring, wz_ap_demo_binary, zenoh_pico_cli_binary, ChildGuard,
     PortReservation,
@@ -108,12 +109,12 @@ fn pico_get_output(z_get: &Path, keyexpr: &str, addr: &str) -> String {
         Ok(c) => c,
         Err(c) => {
             let _ = g_child.child_mut().kill();
-            let _ = g_child.child_mut().wait();
+            let _ = g_child.child_mut().wait_bounded();
             panic!("pico z_get never saw the terminating Final within 15s\n--- z_get ---\n{c}");
         }
     };
     let _ = g_child.child_mut().kill();
-    let _ = g_child.child_mut().wait();
+    let _ = g_child.child_mut().wait_bounded();
     out
 }
 
@@ -177,7 +178,7 @@ fn pico_put(z_put: &Path, key: &str, value: &str, addr: &str) {
             .spawn()
             .expect("spawn z_put"),
     );
-    let _ = child.child_mut().wait();
+    let _ = child.child_mut().wait_bounded();
 }
 
 // wz-proves: adminspace-config-hotreload wz->pico
@@ -227,7 +228,7 @@ fn wz_storage_host_config_hotreload_state_flip_via_pico() {
         Ok(c) => c,
         Err(c) => {
             let _ = h_child.child_mut().kill();
-            let _ = h_child.child_mut().wait();
+            let _ = h_child.child_mut().wait_bounded();
             panic!("storage host never became ready within 5s\n--- host ---\n{c}");
         }
     };
@@ -264,7 +265,7 @@ fn wz_storage_host_config_hotreload_state_flip_via_pico() {
     );
     if let Err(c) = spawned {
         let _ = h_child.child_mut().kill();
-        let _ = h_child.child_mut().wait();
+        let _ = h_child.child_mut().wait_bounded();
         panic!(
             "storage host never applied the pico storage-add within 15s — the \
              config-hotreload add_storage did not run on a pico-encoded PUT\n--- host ---\n{c}"
@@ -319,7 +320,7 @@ fn wz_storage_host_config_hotreload_state_flip_via_pico() {
     );
     if let Err(c) = despawned {
         let _ = h_child.child_mut().kill();
-        let _ = h_child.child_mut().wait();
+        let _ = h_child.child_mut().wait_bounded();
         panic!(
             "storage host never applied the pico storage-del within 15s — the \
              config-hotreload remove_storage did not run on a pico-encoded PUT\n--- host ---\n{c}"
@@ -343,7 +344,7 @@ fn wz_storage_host_config_hotreload_state_flip_via_pico() {
     );
 
     let _ = h_child.child_mut().kill();
-    let _ = h_child.child_mut().wait();
+    let _ = h_child.child_mut().wait_bounded();
     // Surface the host log on a post-mortem failure hunt (unused on the green path).
     let _ = read_captured(&mut h_reader);
 }

@@ -110,7 +110,7 @@ use std::ffi::{c_char, CStr, CString};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use wz_integration_tests::bounded::{BoundedOutput as _, CHILD_RUN_BOUND};
+use wz_integration_tests::bounded::{BoundedChild as _, BoundedOutput as _, CHILD_RUN_BOUND};
 
 use wz_capi_dissect::{
     wz_dissect_declarations_diagnose, wz_dissect_declarations_from_proto, wz_dissect_proto_encode,
@@ -3013,7 +3013,7 @@ fn protoc_encode(
         .write_all(text.as_bytes())
         .map_err(|e| format!("write the text format: {e}"))?;
     let out = child
-        .wait_with_output()
+        .wait_with_output_bounded()
         .map_err(|e| format!("protoc did not finish: {e}"))?;
     if out.status.success() {
         Ok(out.stdout)
@@ -3048,7 +3048,7 @@ fn protoc_decode(
         .write_all(bytes)
         .map_err(|e| format!("write the bytes: {e}"))?;
     let out = child
-        .wait_with_output()
+        .wait_with_output_bounded()
         .map_err(|e| format!("protoc did not finish: {e}"))?;
     if out.status.success() {
         Ok(String::from_utf8_lossy(&out.stdout).into_owned())

@@ -45,7 +45,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdout, Command, Stdio};
 use std::sync::atomic::{AtomicU16, Ordering};
 
-use wz_integration_tests::bounded::BoundedOutput as _;
+use wz_integration_tests::bounded::{BoundedChild as _, BoundedOutput as _};
 use wz_integration_tests::common::{
     assert_zenoh_c_arm_pairing, compile_zenoh_c_example, wz_capi_c_cdylib, zenoh_c_oracle,
     zenoh_c_shared_library, PortReservation,
@@ -462,7 +462,7 @@ impl Node {
             .by_ref()
             .map(|line| line.expect("read the node's stdout"))
             .collect();
-        self.child.wait().expect("the node ends");
+        self.child.wait_bounded().expect("the node ends");
         Outcome {
             row: std::iter::once(open.to_owned())
                 .chain(rest)

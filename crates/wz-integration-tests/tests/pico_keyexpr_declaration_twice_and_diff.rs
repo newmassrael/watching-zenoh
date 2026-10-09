@@ -45,7 +45,7 @@ use std::time::Duration;
 use wz_capture::Dissection;
 use wz_codecs::declare::DeclareOwnedVariant;
 use wz_codecs::wireexpr::{WireexprOwned, WireexprOwnedVariant};
-use wz_integration_tests::bounded::BoundedOutput as _;
+use wz_integration_tests::bounded::{BoundedOutput as _, BoundedStatus as _};
 use wz_integration_tests::common::{
     assert_demo_binary_newer_than_sources, graceful_terminate, read_captured,
     spawn_on_ephemeral_port, wz_ap_demo_binary, wz_capi_pico_cdylib, zenoh_pico_include_dirs,
@@ -1108,7 +1108,7 @@ fn record_arm(
         .arg(format!("tcp/127.0.0.1:{proxy_port}"))
         .stdout(capture.try_clone().expect("dup stdout handle"))
         .stderr(capture.try_clone().expect("dup stderr handle"))
-        .status()
+        .status_bounded()
         .unwrap_or_else(|e| panic!("{arm}: failed to run the driver: {e}"));
     assert!(
         status.success(),

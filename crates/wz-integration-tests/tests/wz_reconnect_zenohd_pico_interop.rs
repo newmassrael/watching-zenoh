@@ -43,6 +43,7 @@
 use std::process::{Command, Stdio};
 use std::time::Duration;
 
+use wz_integration_tests::bounded::BoundedStatus as _;
 use wz_integration_tests::common::{
     graceful_terminate, read_captured, spawn_zenohd, wait_for_substring, wz_ap_demo_binary,
     zenoh_pico_cli_binary, ChildGuard, PortReservation,
@@ -78,7 +79,7 @@ fn pico_put(port: u16, key: &str, value: &str) -> bool {
         ])
         .stdout(Stdio::null())
         .stderr(Stdio::null())
-        .status()
+        .status_bounded()
         .map(|s| s.success())
         .unwrap_or(false)
 }

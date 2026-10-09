@@ -61,6 +61,7 @@ use std::fs::File;
 use std::process::{Command, Stdio};
 use std::time::Duration;
 
+use wz_integration_tests::bounded::BoundedChild as _;
 use wz_integration_tests::common::{
     graceful_terminate, listen_port, read_captured, wait_for_substring, wz_ap_demo_binary,
     zenoh_pico_cli_binary, ChildGuard,
@@ -90,7 +91,7 @@ fn spawn_peer(label: &str, args: &[&str]) -> (ChildGuard, File, u16) {
     )
     .unwrap_or_else(|c| {
         let _ = guard.child_mut().kill();
-        let _ = guard.child_mut().wait();
+        let _ = guard.child_mut().wait_bounded();
         panic!(
             "{label} did not bind within 5s (is the binary built with \
                      --features routing-peer?)\n--- {label} stderr ---\n{c}"
@@ -121,7 +122,7 @@ fn pico_z_put(key: &str, value: &str, addr: &str) {
             .spawn()
             .expect("spawn z_put"),
     );
-    let _ = child.child_mut().wait();
+    let _ = child.child_mut().wait_bounded();
 }
 
 /// Drive pico's `z_liveliness` CLI: declare a token on `key`, hold it one
@@ -146,7 +147,7 @@ fn pico_z_liveliness(key: &str, addr: &str) {
             .spawn()
             .expect("spawn z_liveliness"),
     );
-    let _ = child.child_mut().wait();
+    let _ = child.child_mut().wait_bounded();
 }
 
 /// Drive pico's `z_get_liveliness` CLI in the BACKGROUND — ONE token-carrying
@@ -202,7 +203,7 @@ fn wz_peer_acl_denies_pico_liveliness_token_and_get() {
     let mut allowed_get = pico_z_get_liveliness_bg("public/**", &addr);
     std::thread::sleep(Duration::from_secs(2));
     let _ = allowed_get.child_mut().kill();
-    let _ = allowed_get.child_mut().wait();
+    let _ = allowed_get.child_mut().wait_bounded();
 
     // ── THE ATOM, one denied kind at a time so each barrier is attributable.
     // The token costs TWO drops: the DeclareToken at session open and the
@@ -223,7 +224,7 @@ fn wz_peer_acl_denies_pico_liveliness_token_and_get() {
         Duration::from_secs(15),
     );
     let _ = denied_get.child_mut().kill();
-    let _ = denied_get.child_mut().wait();
+    let _ = denied_get.child_mut().wait_bounded();
 
     graceful_terminate(peer_guard.child_mut(), Duration::from_secs(5));
     let captured = read_captured(&mut peer_reader);

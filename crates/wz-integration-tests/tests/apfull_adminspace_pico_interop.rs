@@ -109,6 +109,7 @@
 use std::process::{Command, Stdio};
 use std::time::Duration;
 
+use wz_integration_tests::bounded::BoundedChild as _;
 use wz_integration_tests::common::{
     read_captured, wait_for_substring, wz_ap_demo_binary, wz_e2e_admin_probe_binary,
     zenoh_pico_cli_binary, ChildGuard, PortReservation,
@@ -148,7 +149,7 @@ fn probe_body(addr: &str, selector: &str) -> Vec<String> {
     )
     .unwrap_or_else(|c| panic!("the probe never finished its GET\n--- probe ---\n{c}"));
     let _ = child.child_mut().kill();
-    let _ = child.child_mut().wait();
+    let _ = child.child_mut().wait_bounded();
     assert!(
         out.contains(&format!("STEP 1 GET '{selector}' FINAL replies=1")),
         "the probe's GET is answered exactly once\n--- probe ---\n{out}"
@@ -255,7 +256,7 @@ fn spawn_apfull(args: &[&str], ready: &str, role: &str) -> (ChildGuard, std::fs:
         Ok(c) => c,
         Err(c) => {
             let _ = child.child_mut().kill();
-            let _ = child.child_mut().wait();
+            let _ = child.child_mut().wait_bounded();
             panic!("the wz-ap-demo ({role}) never printed its BUILD FEATURES line within 5s, so which feature set this binary carries is unknown\n--- {role} ---\n{c}");
         }
     };
@@ -265,7 +266,7 @@ fn spawn_apfull(args: &[&str], ready: &str, role: &str) -> (ChildGuard, std::fs:
         Ok(c) => c,
         Err(c) => {
             let _ = child.child_mut().kill();
-            let _ = child.child_mut().wait();
+            let _ = child.child_mut().wait_bounded();
             panic!("the AP-full demo ({role}) never logged `{ready}` within 15s\n--- {role} ---\n{banner}{c}");
         }
     };
@@ -346,7 +347,7 @@ fn pico_get(keyexpr: &str, addr: &str) -> Result<String, String> {
         Duration::from_secs(15),
     );
     let _ = child.child_mut().kill();
-    let _ = child.child_mut().wait();
+    let _ = child.child_mut().wait_bounded();
     done
 }
 
@@ -372,7 +373,7 @@ fn pico_put_key(key: &str, value: &str, addr: &str) {
             .spawn()
             .expect("spawn z_put"),
     );
-    let _ = child.child_mut().wait();
+    let _ = child.child_mut().wait_bounded();
 }
 
 /// The BODY pico decoded for `key`, which is NOT the header line.
@@ -440,7 +441,7 @@ fn apfull_adminspace_plane_decoded_by_a_real_pico_z_get() {
     // the metrics block below for why this one leg has a wz decoder.
     let metrics_lines = probe_body(&addr, &format!("{root}/metrics"));
     let _ = host.child_mut().kill();
-    let _ = host.child_mut().wait();
+    let _ = host.child_mut().wait_bounded();
 
     // ── adminspace-core — the node record ───────────────────────────
     //
@@ -630,7 +631,7 @@ fn apfull_adminspace_read_gate_denies_every_leg_to_a_real_pico_z_get() {
         panic!("pico z_get never saw the terminating Final within 15s\n--- z_get ---\n{c}\n--- host ---\n{h}")
     });
     let _ = host.child_mut().kill();
-    let _ = host.child_mut().wait();
+    let _ = host.child_mut().wait_bounded();
 
     // Not a wait-for-absence: the transcript above is captured up to pico's
     // POSITIVE terminating edge, so the round-trip provably completed. Every leg
@@ -690,7 +691,7 @@ fn apfull_adminspace_write_applied_and_observed_by_a_real_pico() {
     );
     if let Err(c) = applied {
         let _ = host.child_mut().kill();
-        let _ = host.child_mut().wait();
+        let _ = host.child_mut().wait_bounded();
         panic!("the AP-full host never applied pico's config write within 15s\n--- host ---\n{c}");
     }
 
@@ -699,7 +700,7 @@ fn apfull_adminspace_write_applied_and_observed_by_a_real_pico() {
         panic!("pico z_get (after) never saw the terminating Final\n--- z_get ---\n{c}\n--- host ---\n{h}")
     });
     let _ = host.child_mut().kill();
-    let _ = host.child_mut().wait();
+    let _ = host.child_mut().wait_bounded();
 
     // THE COMPOSITION CLAIM: the foreign implementation reads back its own write.
     assert_eq!(
@@ -751,7 +752,7 @@ fn apfull_adminspace_write_gate_refuses_an_unpermitted_pico_put() {
         Ok(c) => c,
         Err(c) => {
             let _ = host.child_mut().kill();
-            let _ = host.child_mut().wait();
+            let _ = host.child_mut().wait_bounded();
             panic!("the permissions.write gate never fired on pico's Put within 15s\n--- host ---\n{c}");
         }
     };
@@ -765,7 +766,7 @@ fn apfull_adminspace_write_gate_refuses_an_unpermitted_pico_put() {
         panic!("pico z_get (after) never saw the terminating Final\n--- z_get ---\n{c}\n--- host ---\n{h}")
     });
     let _ = host.child_mut().kill();
-    let _ = host.child_mut().wait();
+    let _ = host.child_mut().wait_bounded();
 
     // Observed ON THE WIRE by the implementation that attempted the write — a
     // stricter witness than reading wz's refusal out of wz's own log.
@@ -861,9 +862,9 @@ fn apfull_router_hat_linkstate_decoded_by_a_real_pico_z_get() {
         panic!("pico z_get never saw the terminating Final within 15s\n--- z_get ---\n{c}\n--- R1 ---\n{a}\n--- R2 ---\n{b}")
     });
     let _ = r1.child_mut().kill();
-    let _ = r1.child_mut().wait();
+    let _ = r1.child_mut().wait_bounded();
     let _ = r2.child_mut().kill();
-    let _ = r2.child_mut().wait();
+    let _ = r2.child_mut().wait_bounded();
 
     // The routers-net DOT, naming BOTH live zids — runtime values, so no static
     // fixture satisfies it.
@@ -951,7 +952,7 @@ fn apfull_storage_host_hotreload_state_flip_seen_by_a_real_pico() {
         Duration::from_secs(15),
     ) {
         let _ = host.child_mut().kill();
-        let _ = host.child_mut().wait();
+        let _ = host.child_mut().wait_bounded();
         panic!("the AP-full storage host never applied pico's storage-add within 15s\n--- host ---\n{c}");
     }
 
@@ -972,7 +973,7 @@ fn apfull_storage_host_hotreload_state_flip_seen_by_a_real_pico() {
         Duration::from_secs(15),
     ) {
         let _ = host.child_mut().kill();
-        let _ = host.child_mut().wait();
+        let _ = host.child_mut().wait_bounded();
         panic!("the AP-full storage host never applied pico's storage-del within 15s\n--- host ---\n{c}");
     }
 
@@ -981,7 +982,7 @@ fn apfull_storage_host_hotreload_state_flip_seen_by_a_real_pico() {
         panic!("pico z_get (after del) never saw the terminating Final\n--- z_get ---\n{c}\n--- host ---\n{h}")
     });
     let _ = host.child_mut().kill();
-    let _ = host.child_mut().wait();
+    let _ = host.child_mut().wait_bounded();
     assert_eq!(
         state_of(&removed, "after storage-del"),
         "Loaded",

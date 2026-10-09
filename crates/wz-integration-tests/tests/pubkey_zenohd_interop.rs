@@ -57,6 +57,7 @@ use std::time::Duration;
 
 use tempfile::NamedTempFile;
 
+use wz_integration_tests::bounded::BoundedStatus as _;
 use wz_integration_tests::common::{
     graceful_terminate, read_captured, wait_for_tcp_accept_alive, zenohd_binary, ChildGuard,
     PortReservation, ZENOHD_TCP_ACCEPT_BUDGET,
@@ -109,7 +110,7 @@ fn generate_zenohd_pkcs1_keypair() -> (NamedTempFile, NamedTempFile) {
         .arg("2048")
         .stdout(Stdio::from(gen_out.try_clone().expect("dup stdout handle")))
         .stderr(Stdio::from(gen_out.try_clone().expect("dup stderr handle")))
-        .status()
+        .status_bounded()
         .expect("run openssl genrsa (is openssl on PATH?)");
     assert!(
         gen.success(),
@@ -127,7 +128,7 @@ fn generate_zenohd_pkcs1_keypair() -> (NamedTempFile, NamedTempFile) {
         .arg(pub_pem.path())
         .stdout(Stdio::from(pub_out.try_clone().expect("dup stdout handle")))
         .stderr(Stdio::from(pub_out.try_clone().expect("dup stderr handle")))
-        .status()
+        .status_bounded()
         .expect("run openssl rsa -RSAPublicKey_out");
     assert!(
         pubgen.success(),

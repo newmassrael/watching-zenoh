@@ -72,6 +72,7 @@ use std::path::Path;
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
+use wz_integration_tests::bounded::BoundedChild as _;
 use wz_integration_tests::common::{
     read_captured, wait_for_substring, wz_ap_demo_binary, zenoh_pico_cli_binary, ChildGuard,
     PortReservation,
@@ -244,7 +245,7 @@ fn spawn_storage_host_with(
         Ok(c) => c,
         Err(c) => {
             let _ = child.child_mut().kill();
-            let _ = child.child_mut().wait();
+            let _ = child.child_mut().wait_bounded();
             panic!(
                 "the wz-ap-demo ({role}) never printed its BUILD FEATURES line \
                  within 5s, so which feature set this binary carries is \
@@ -262,7 +263,7 @@ fn spawn_storage_host_with(
         Ok(c) => c,
         Err(c) => {
             let _ = child.child_mut().kill();
-            let _ = child.child_mut().wait();
+            let _ = child.child_mut().wait_bounded();
             panic!(
                 "the storage host ({role}) never became ready within 15s\n--- {role} \
                  ---\n{banner}{c}"
@@ -310,7 +311,7 @@ fn pico_put(z_put: &Path, key: &str, value: &str, addr: &str) {
             .spawn()
             .expect("spawn z_put"),
     );
-    let _ = child.child_mut().wait();
+    let _ = child.child_mut().wait_bounded();
 }
 
 /// Run a fresh one-shot pico `z_get` on `key` and return its stdout up to the
@@ -341,12 +342,12 @@ fn pico_get(z_get: &Path, key: &str, addr: &str) -> String {
         Ok(c) => c,
         Err(c) => {
             let _ = child.child_mut().kill();
-            let _ = child.child_mut().wait();
+            let _ = child.child_mut().wait_bounded();
             panic!("pico z_get never saw the terminating Final within 15s\n--- z_get ---\n{c}");
         }
     };
     let _ = child.child_mut().kill();
-    let _ = child.child_mut().wait();
+    let _ = child.child_mut().wait_bounded();
     out
 }
 
@@ -502,7 +503,7 @@ fn apfull_storage_plane_survives_a_host_restart_on_a_durable_volume() {
     pico_adds_storage(&z_put, &mut host, &addr);
     pico_writes_sample(&z_put, &mut host, &addr);
     let _ = host.child.child_mut().kill();
-    let _ = host.child.child_mut().wait();
+    let _ = host.child.child_mut().wait_bounded();
     let first_log = read_captured(&mut host.log);
 
     // ── second host: same directory, new process, empty manager ──
@@ -567,7 +568,7 @@ fn apfull_storage_plane_is_volatile_across_a_restart_without_the_durable_volume(
          durability\n--- z_get ---\n{live}"
     );
     let _ = host.child.child_mut().kill();
-    let _ = host.child.child_mut().wait();
+    let _ = host.child.child_mut().wait_bounded();
 
     let port2 = PortReservation::pick();
     let addr2 = format!("127.0.0.1:{}", port2.port());

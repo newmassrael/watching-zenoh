@@ -91,6 +91,7 @@ use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
 use wz_capture::Dissection;
+use wz_integration_tests::bounded::BoundedStatus as _;
 use wz_integration_tests::common::{
     wait_for_substring, wait_for_tcp_accept_alive, zenoh_pico_cli_binary, zenohd_binary,
     ChildGuard, PortReservation, ZENOHD_TCP_ACCEPT_BUDGET,
@@ -322,7 +323,7 @@ fn the_timestamp_walker_reads_what_a_stock_zenohd_stamped() {
             ])
             .stdout(Stdio::null())
             .stderr(Stdio::null())
-            .status()
+            .status_bounded()
             .expect("run z_put");
         assert!(put.success(), "z_put exited {put:?}");
         delivered = wait_for_substring(&mut sub_reader, PAYLOAD, PUT_ATTEMPT_BUDGET);

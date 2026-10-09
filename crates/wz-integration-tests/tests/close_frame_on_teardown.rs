@@ -56,6 +56,7 @@ use std::process::{Command, Stdio};
 use std::sync::mpsc;
 use std::time::Duration;
 
+use wz_integration_tests::bounded::BoundedStatus as _;
 use wz_integration_tests::common::{
     graceful_terminate, read_captured, spawn_counting_relay, spawn_on_ephemeral_port,
     wait_for_substring, wz_ap_demo_binary, zenoh_pico_cli_binary, ChildGuard, RelayFault,
@@ -143,7 +144,7 @@ fn who_sends_a_session_close_at_teardown() {
         ])
         .stdout(Stdio::from(capture.try_clone().expect("dup stdout handle")))
         .stderr(Stdio::from(capture.try_clone().expect("dup stderr handle")))
-        .status()
+        .status_bounded()
         .expect("spawn zenoh-pico z_put");
     assert!(
         status.success(),

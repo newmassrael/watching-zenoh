@@ -17,13 +17,22 @@
 //! the child's whole process group is killed, and the test fails by name with what
 //! the child had printed and, on Linux, what each of its threads was waiting in, so
 //! a stall reads as a finding about one program and not as a job that ran out of
-//! time.
+//! time. [`BoundedStatus`] does the same for `status`, and [`BoundedChild`] for a
+//! child somebody else started (`wait`, `wait_with_output`).
+//!
+//! A program that prints into a pipe loses its buffered lines when it is killed, and
+//! the stall that most needs its output read is the one that shows none, so
+//! [`BoundedOutput`] launches the child through `stdbuf -oL -eL` where the host has
+//! one. `stdbuf` replaces itself with the program, so the pid, the process group and
+//! the threads read from `/proc` are the program's own. `status` runs are not wrapped:
+//! their streams are the caller's, which cannot be read back to be copied.
 //!
 //! The census test at the end of this file keeps the population closed: a raw
-//! `.output()` in this crate's tests is a test whose child can outlive it.
+//! `.output()`, `.status()`, `.wait_with_output()` or `.wait()` (one no kill precedes)
+//! in this crate's tests is a test whose child can outlive it.
 
 use std::io::{self, Read};
-use std::process::{Command, Output, Stdio};
+use std::process::{Child, Command, ExitStatus, Output, Stdio};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
@@ -76,7 +85,15 @@ impl BoundedOutput for Command {
     /// caller nothing.
     fn output_within_stdin(&mut self, bound: Duration, stdin: Stdio) -> io::Result<Output> {
         let program = self.get_program().to_string_lossy().into_owned();
-        self.stdin(stdin)
+        // A program that prints into a pipe keeps its lines in a buffer of its own, and a
+        // program that is killed loses them: the stall that most needs its output read is
+        // the one that shows none. Launched through `stdbuf` where there is one, its lines
+        // leave as they are printed. `stdbuf` replaces itself with the program (same pid,
+        // same process group), so what is killed and what is read are the program's.
+        let mut wrapped = line_buffered(self);
+        let command = wrapped.as_mut().unwrap_or(self);
+        command
+            .stdin(stdin)
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
         // The child leads a process group of its own, so that what it started goes
@@ -84,48 +101,235 @@ impl BoundedOutput for Command {
         #[cfg(unix)]
         {
             use std::os::unix::process::CommandExt;
-            self.process_group(0);
+            command.process_group(0);
         }
-        let mut child = self.spawn()?;
+        let mut child = command.spawn()?;
         let pid = child.id();
         let stdout = drain(child.stdout.take().expect("stdout was piped"));
         let stderr = drain(child.stderr.take().expect("stderr was piped"));
 
-        let started = Instant::now();
-        loop {
-            if let Some(status) = child.try_wait()? {
-                return Ok(Output {
-                    status,
-                    stdout: stdout.finish(READER_GRACE),
-                    stderr: stderr.finish(READER_GRACE),
-                });
+        match wait_until(&mut child, bound)? {
+            Some(status) => Ok(Output {
+                status,
+                stdout: stdout.finish(READER_GRACE),
+                stderr: stderr.finish(READER_GRACE),
+            }),
+            None => {
+                let threads = kill_and_read_threads(&mut child);
+                let out = stdout.finish(Duration::from_secs(1));
+                let err = stderr.finish(Duration::from_secs(1));
+                stalled(&program, pid, bound, &threads, Some((&out, &err)))
             }
-            if started.elapsed() >= bound {
-                break;
-            }
-            thread::sleep(POLL);
         }
-
-        // Read what the threads were waiting in BEFORE the kill: after it there is
-        // nothing left to read.
-        let threads = threads_of(pid);
-        kill_group(pid);
-        let _ = child.kill();
-        let _ = child.wait();
-        let out = String::from_utf8_lossy(&stdout.finish(Duration::from_secs(1))).into_owned();
-        let err = String::from_utf8_lossy(&stderr.finish(Duration::from_secs(1))).into_owned();
-        panic!(
-            "`{program}` (pid {pid}) did not finish within {bound:?}, so it was killed. \
-             A child that waits for a message that never comes is the finding; the bound \
-             only keeps it from holding the test, and the machine's port reservation, \
-             until a job's own timeout.\n\
-             --- its threads when the bound ran out ---\n{threads}\n\
-             --- its stdout so far ---\n{out}\n\
-             --- its stderr so far ---\n{err}\n\
-             (a C program's stdout is block-buffered into a pipe, so a line it printed \
-             and did not flush is not shown)"
-        );
     }
+}
+
+/// `Command::status` with a deadline.
+///
+/// The command's standard streams are left as the caller set them: a caller that
+/// sends a child's output to a capture file keeps doing so, and a stalled child's
+/// output is then in that file and not in the failure.
+pub trait BoundedStatus {
+    /// [`Self::status_within`] with [`CHILD_RUN_BOUND`].
+    fn status_bounded(&mut self) -> io::Result<ExitStatus>;
+
+    /// Run the command to its end and return its exit status, or kill its process group
+    /// at `bound` and fail the test by name.
+    fn status_within(&mut self, bound: Duration) -> io::Result<ExitStatus>;
+}
+
+impl BoundedStatus for Command {
+    fn status_bounded(&mut self) -> io::Result<ExitStatus> {
+        self.status_within(CHILD_RUN_BOUND)
+    }
+
+    fn status_within(&mut self, bound: Duration) -> io::Result<ExitStatus> {
+        let program = self.get_program().to_string_lossy().into_owned();
+        #[cfg(unix)]
+        {
+            use std::os::unix::process::CommandExt;
+            self.process_group(0);
+        }
+        let mut child = self.spawn()?;
+        let pid = child.id();
+        match wait_until(&mut child, bound)? {
+            Some(status) => Ok(status),
+            None => {
+                let threads = kill_and_read_threads(&mut child);
+                stalled(&program, pid, bound, &threads, None)
+            }
+        }
+    }
+}
+
+/// A child process that was started elsewhere (a long-lived counterparty, a reader in a
+/// namespace) and is now waited for.
+pub trait BoundedChild {
+    /// [`Self::wait_within`] with [`CHILD_RUN_BOUND`].
+    fn wait_bounded(&mut self) -> io::Result<ExitStatus>;
+
+    /// Wait for the child to end by itself; at `bound` kill it and fail the test by name.
+    /// A wait that follows a kill needs none of this, and the census says so. The result
+    /// is `Child::wait`'s: `Err` only when the child could not be polled.
+    fn wait_within(&mut self, bound: Duration) -> io::Result<ExitStatus>;
+
+    /// [`Self::wait_with_output_within`] with [`CHILD_RUN_BOUND`].
+    fn wait_with_output_bounded(self) -> io::Result<Output>;
+
+    /// `Child::wait_with_output` with a deadline: the piped streams are read while the
+    /// child runs, and at `bound` the child is killed and the test fails by name with
+    /// what it had written.
+    fn wait_with_output_within(self, bound: Duration) -> io::Result<Output>;
+}
+
+impl BoundedChild for Child {
+    fn wait_bounded(&mut self) -> io::Result<ExitStatus> {
+        self.wait_within(CHILD_RUN_BOUND)
+    }
+
+    fn wait_within(&mut self, bound: Duration) -> io::Result<ExitStatus> {
+        let pid = self.id();
+        match wait_until(self, bound)? {
+            Some(status) => Ok(status),
+            None => {
+                let threads = kill_and_read_threads(self);
+                stalled("a child process", pid, bound, &threads, None)
+            }
+        }
+    }
+
+    fn wait_with_output_bounded(self) -> io::Result<Output> {
+        self.wait_with_output_within(CHILD_RUN_BOUND)
+    }
+
+    fn wait_with_output_within(mut self, bound: Duration) -> io::Result<Output> {
+        let pid = self.id();
+        // Closed first, as `wait_with_output` does: a child that reads its input would
+        // otherwise wait for a writer that is waiting for it.
+        drop(self.stdin.take());
+        let stdout = self.stdout.take().map(drain);
+        let stderr = self.stderr.take().map(drain);
+        let finish =
+            |drain: Option<Drain>, grace| drain.map(|d| d.finish(grace)).unwrap_or_default();
+        match wait_until(&mut self, bound)? {
+            Some(status) => Ok(Output {
+                status,
+                stdout: finish(stdout, READER_GRACE),
+                stderr: finish(stderr, READER_GRACE),
+            }),
+            None => {
+                let threads = kill_and_read_threads(&mut self);
+                let out = finish(stdout, Duration::from_secs(1));
+                let err = finish(stderr, Duration::from_secs(1));
+                stalled("a child process", pid, bound, &threads, Some((&out, &err)))
+            }
+        }
+    }
+}
+
+/// Poll `child` until it has ended (`Some`) or `bound` has passed (`None`).
+fn wait_until(child: &mut Child, bound: Duration) -> io::Result<Option<ExitStatus>> {
+    let started = Instant::now();
+    loop {
+        if let Some(status) = child.try_wait()? {
+            return Ok(Some(status));
+        }
+        if started.elapsed() >= bound {
+            return Ok(None);
+        }
+        thread::sleep(POLL);
+    }
+}
+
+/// What each thread of the stalled child was waiting in, read BEFORE the kill (after it
+/// there is nothing left to read), and then the kill: its whole process group, which
+/// is the child's own for the runners that made it a group leader and reaches nothing
+/// else for one that did not, and the child itself either way.
+fn kill_and_read_threads(child: &mut Child) -> String {
+    let threads = threads_of(child.id());
+    kill_group(child.id());
+    let _ = child.kill();
+    let _ = child.wait();
+    threads
+}
+
+/// The failure of a child that did not end within its bound.
+fn stalled(
+    program: &str,
+    pid: u32,
+    bound: Duration,
+    threads: &str,
+    output: Option<(&[u8], &[u8])>,
+) -> ! {
+    let streams = match output {
+        Some((out, err)) => format!(
+            "--- its stdout so far ---\n{}\n--- its stderr so far ---\n{}\n\
+             (run through stdbuf where the host has one, so its lines are not held back by \
+             its own buffer; a host without it shows only what the program flushed)",
+            String::from_utf8_lossy(out),
+            String::from_utf8_lossy(err)
+        ),
+        None => "(its output went where the caller sent it, not here)".to_owned(),
+    };
+    panic!(
+        "`{program}` (pid {pid}) did not finish within {bound:?}, so it was killed. \
+         A child that waits for a message that never comes is the finding; the bound \
+         only keeps it from holding the test, and the machine's port reservation, \
+         until a job's own timeout.\n\
+         --- its threads when the bound ran out ---\n{threads}\n{streams}"
+    );
+}
+
+/// `command` launched through `stdbuf -oL -eL`, or `None` where the host has no
+/// `stdbuf` (macOS and Windows do not) or the command is already one.
+///
+/// The copy carries the program, its arguments, its working directory and every
+/// environment change that can be read back from the original. Its standard streams
+/// are the caller's to set: the original's cannot be read back, which is why only the
+/// runners that set their own use this.
+fn line_buffered(command: &Command) -> Option<Command> {
+    let stdbuf = find_on_path("stdbuf")?;
+    if command.get_program() == stdbuf.as_os_str() || command.get_program() == "stdbuf" {
+        return None;
+    }
+    let mut wrapped = Command::new(stdbuf);
+    wrapped
+        .args(["-oL", "-eL"])
+        .arg(command.get_program())
+        .args(command.get_args());
+    for (key, value) in command.get_envs() {
+        match value {
+            Some(value) => wrapped.env(key, value),
+            None => wrapped.env_remove(key),
+        };
+    }
+    if let Some(dir) = command.get_current_dir() {
+        wrapped.current_dir(dir);
+    }
+    Some(wrapped)
+}
+
+/// The first executable file called `name` on `PATH`.
+fn find_on_path(name: &str) -> Option<std::path::PathBuf> {
+    #[cfg(unix)]
+    use std::os::unix::fs::PermissionsExt;
+    let path = std::env::var_os("PATH")?;
+    std::env::split_paths(&path)
+        .map(|dir| dir.join(name))
+        .find(|candidate| {
+            candidate.is_file() && {
+                #[cfg(unix)]
+                {
+                    candidate
+                        .metadata()
+                        .is_ok_and(|meta| meta.permissions().mode() & 0o111 != 0)
+                }
+                #[cfg(not(unix))]
+                {
+                    true
+                }
+            }
+        })
 }
 
 /// A pipe being read on a thread of its own, into a buffer that can be read before
@@ -309,6 +513,119 @@ mod tests {
             started.elapsed()
         );
     }
+
+    /// A status that comes back is the child's own, and the streams the caller
+    /// configured are the ones the child writes to.
+    #[test]
+    fn a_status_that_ends_is_returned_and_the_callers_streams_are_kept() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let capture = dir.path().join("out");
+        let status = sh("printf kept; exit 7")
+            .stdout(std::fs::File::create(&capture).expect("capture file"))
+            .status_bounded()
+            .expect("sh starts");
+        assert_eq!(status.code(), Some(7));
+        assert_eq!(std::fs::read(&capture).expect("capture"), b"kept");
+    }
+
+    #[test]
+    fn a_status_that_does_not_end_is_killed_and_named() {
+        let message = panic_message(|| {
+            let _ = sh("exec sleep 600").status_within(Duration::from_millis(300));
+        });
+        assert!(message.contains("did not finish within 300ms"), "{message}");
+        assert!(is_gone(pid_in(&message)), "the child outlived the bound");
+    }
+
+    /// The waits on a child somebody else started: the end by itself, the end at the
+    /// bound, and the piped streams read while it runs.
+    #[test]
+    fn a_wait_on_a_started_child_has_the_same_three_endings() {
+        let mut quick = sh("exit 4").spawn().expect("sh starts");
+        assert_eq!(quick.wait_bounded().expect("wait").code(), Some(4));
+
+        let loud = sh("head -c 300000 /dev/zero; printf done >&2")
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("sh starts");
+        let out = loud.wait_with_output_bounded().expect("read and wait");
+        assert_eq!(out.stdout.len(), 300_000);
+        assert_eq!(out.stderr, b"done");
+
+        let message = panic_message(|| {
+            let mut stuck = sh("exec sleep 600").spawn().expect("sh starts");
+            let _ = stuck.wait_within(Duration::from_millis(300));
+        });
+        assert!(message.contains("did not finish within 300ms"), "{message}");
+        assert!(is_gone(pid_in(&message)), "the child outlived the bound");
+
+        let message = panic_message(|| {
+            let stuck = sh("printf partial; exec sleep 600")
+                .stdout(Stdio::piped())
+                .spawn()
+                .expect("sh starts");
+            let _ = stuck.wait_with_output_within(Duration::from_millis(300));
+        });
+        assert!(message.contains("partial"), "its output so far: {message}");
+    }
+
+    /// A killed C program shows what it printed.
+    ///
+    /// A program that prints into a pipe keeps its lines in a buffer of its own, and the
+    /// kill that ends a stalled one takes the buffer with it: the failure then names a
+    /// child that said nothing. This is the probe shape the differentials run, a compiled C
+    /// program that prints a line and then waits, and its line is in the failure because the
+    /// runner launches it through `stdbuf`. The control is the same program started
+    /// directly, which loses the line, so the assertion cannot pass on a program that
+    /// flushes anyway. Skipped, loudly, where the host has no `cc` or no `stdbuf`.
+    #[test]
+    fn a_killed_c_program_shows_the_line_it_printed_before_it_stalled() {
+        if find_on_path("stdbuf").is_none() || find_on_path("cc").is_none() {
+            eprintln!(
+                "skip: this host has no stdbuf or no cc, so there is no line-buffering to show"
+            );
+            return;
+        }
+        let dir = tempfile::tempdir().expect("tempdir");
+        let src = dir.path().join("stall.c");
+        std::fs::write(
+            &src,
+            "#include <stdio.h>\n#include <unistd.h>\n\
+             int main(void) { printf(\"printed-before-the-stall\\n\"); sleep(600); return 0; }\n",
+        )
+        .expect("write the program");
+        let exe = dir.path().join("stall");
+        let built = Command::new("cc")
+            .arg(&src)
+            .arg("-o")
+            .arg(&exe)
+            .output_bounded()
+            .expect("cc starts");
+        assert!(built.status.success(), "cc failed: {built:?}");
+
+        let message = panic_message(|| {
+            let _ = Command::new(&exe).output_within(Duration::from_millis(500));
+        });
+        assert!(
+            message.contains("printed-before-the-stall"),
+            "the killed program's line is in the failure: {message}"
+        );
+
+        // The control: the same program, started directly, loses its buffered line.
+        let mut direct = Command::new(&exe)
+            .stdout(Stdio::piped())
+            .spawn()
+            .expect("start the program directly");
+        std::thread::sleep(Duration::from_millis(300));
+        direct.kill().expect("kill it");
+        let out = direct.wait_with_output().expect("collect what it wrote");
+        assert!(
+            out.stdout.is_empty(),
+            "the control must lose the line, or the assertion above proves nothing: {:?}",
+            String::from_utf8_lossy(&out.stdout)
+        );
+    }
 }
 
 /// The population, derived from the sources: no test of this crate runs a child with
@@ -337,17 +654,40 @@ mod census {
         }
     }
 
-    /// The lines of `source` that call `.output()` on a command, with the comment
-    /// part of a line left out so a sentence that names the call is not one.
-    fn bare_output_calls(source: &str) -> Vec<usize> {
-        let mut lines = Vec::new();
-        for (index, line) in source.lines().enumerate() {
-            let code = line.split("//").next().unwrap_or("");
-            if code.contains(".output()") {
-                lines.push(index + 1);
+    /// How many lines before a `.wait()` a kill may stand for the wait to be one that
+    /// follows it. A wait after a kill returns when the kernel has delivered the signal,
+    /// and needs no bound; the window is the distance the tests in this crate keep between
+    /// the two (the longest is a comment block of a few lines).
+    const KILL_WINDOW: usize = 8;
+
+    /// The calls on a child with no end in `source`: `.output()`, `.status()`,
+    /// `.wait_with_output()`, and a `.wait()` with no kill in the lines before it. Each as
+    /// (line number, what), with the comment part of a line left out so a sentence that
+    /// names a call is not one. A wait that follows a kill is not one: the child it waits
+    /// for has been told to go.
+    fn unbounded_child_calls(source: &str) -> Vec<(usize, &'static str)> {
+        let lines: Vec<&str> = source
+            .lines()
+            .map(|line| line.split("//").next().unwrap_or(""))
+            .collect();
+        let mut found = Vec::new();
+        for (index, code) in lines.iter().enumerate() {
+            for call in [".output()", ".status()", ".wait_with_output()"] {
+                if code.contains(call) {
+                    found.push((index + 1, call));
+                }
+            }
+            if code.contains(".wait()") {
+                let from = index.saturating_sub(KILL_WINDOW);
+                let killed = lines[from..=index]
+                    .iter()
+                    .any(|l| l.contains("kill") || l.contains("graceful_terminate"));
+                if !killed {
+                    found.push((index + 1, ".wait()"));
+                }
             }
         }
-        lines
+        found
     }
 
     #[test]
@@ -367,17 +707,19 @@ mod census {
                 continue;
             }
             let source = std::fs::read_to_string(&file).expect("a source file reads");
-            for line in bare_output_calls(&source) {
+            for (line, call) in unbounded_child_calls(&source) {
                 offenders.push(format!(
-                    "{}:{line}",
+                    "{}:{line}  {call}",
                     file.strip_prefix(&root).unwrap_or(&file).display()
                 ));
             }
         }
         assert!(
             offenders.is_empty(),
-            "a bare `.output()` waits for its child for as long as the child lives; use \
-             `output_bounded()` (`wz_integration_tests::bounded::BoundedOutput`):\n  {}",
+            "a bare `.output()`, `.status()`, `.wait_with_output()` or `.wait()` (one no \
+             kill precedes) waits for its child for as long as the child lives; use \
+             `output_bounded()`, `status_bounded()`, `wait_with_output_bounded()` or \
+             `wait_bounded()` (`wz_integration_tests::bounded`):\n  {}",
             offenders.join("\n  ")
         );
     }
@@ -390,6 +732,29 @@ mod census {
                       let b = c\n    .output()\n    .expect(\"x\");\n\
                       // a bare .output() in a comment\n\
                       let d = c.output_bounded();\n";
-        assert_eq!(bare_output_calls(source), vec![1, 3]);
+        assert_eq!(
+            unbounded_child_calls(source),
+            vec![(1, ".output()"), (3, ".output()")]
+        );
+    }
+
+    /// The four forms, and the one exception: a wait with a kill before it is not a wait
+    /// for a child that decides when to end.
+    #[test]
+    fn the_census_counts_each_wait_and_spares_the_one_after_a_kill() {
+        let source = "let s = cmd.status();\n\
+                      let o = child.wait_with_output();\n\
+                      let w = child.wait();\n\
+                      child.kill();\n\
+                      let after = child.wait();\n\
+                      let bounded = child.wait_bounded();\n\
+                      let s2 = cmd.status_bounded();\n";
+        assert_eq!(
+            unbounded_child_calls(source),
+            vec![(1, ".status()"), (2, ".wait_with_output()"), (3, ".wait()")]
+        );
+        // A kill further back than the window stands for nothing.
+        let far = format!("child.kill();\n{}let w = child.wait();\n", "\n".repeat(9));
+        assert_eq!(unbounded_child_calls(&far), vec![(11, ".wait()")]);
     }
 }

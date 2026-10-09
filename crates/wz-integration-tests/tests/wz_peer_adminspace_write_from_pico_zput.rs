@@ -60,6 +60,7 @@
 use std::process::{Command, Stdio};
 use std::time::Duration;
 
+use wz_integration_tests::bounded::BoundedChild as _;
 use wz_integration_tests::common::{
     read_captured, wait_for_substring, wz_ap_demo_binary, zenoh_pico_cli_binary, ChildGuard,
     PortReservation,
@@ -128,7 +129,7 @@ fn spawn_write_host_with_acl(
         Ok(c) => c,
         Err(c) => {
             let _ = child.child_mut().kill();
-            let _ = child.child_mut().wait();
+            let _ = child.child_mut().wait_bounded();
             panic!("peer A never registered its config-write host within 5s\n--- A ---\n{c}");
         }
     };
@@ -169,7 +170,7 @@ fn pico_put_acl_deny(root: &str, addr: &str) {
             .spawn()
             .expect("spawn z_put"),
     );
-    let _ = child.child_mut().wait();
+    let _ = child.child_mut().wait_bounded();
 }
 
 // wz-proves: none -- the GRANT arm that makes the deny arm's rejection meaningful; it claims no atom of its own because it passes with adminspace-write compiled OUT (an unguarded write path applies anyway) and its "config reconfigured" log fires even with config-mutate-runtime OFF (reconfigure_interceptors STORES unconditionally; only the sink re-drive is cfg-gated), so it witnesses the config-write PLUMBING, not either gate
@@ -186,7 +187,7 @@ fn wz_peer_admin_config_write_applied_from_pico_z_put() {
         Duration::from_secs(15),
     );
     let _ = a_child.child_mut().kill();
-    let _ = a_child.child_mut().wait();
+    let _ = a_child.child_mut().wait_bounded();
     if let Err(c) = applied {
         panic!(
             "peer A never applied the config write pico PUT within 15s — wz's admin \
@@ -215,7 +216,7 @@ fn wz_peer_admin_config_write_denied_from_pico_z_put_without_permit() {
         Ok(c) => c,
         Err(c) => {
             let _ = a_child.child_mut().kill();
-            let _ = a_child.child_mut().wait();
+            let _ = a_child.child_mut().wait_bounded();
             panic!(
                 "peer A never rejected the un-permitted config write within 15s — the \
                  permissions.write gate did not fire on a Put encoded by zenoh-pico\n--- A ---\n{c}"
@@ -223,7 +224,7 @@ fn wz_peer_admin_config_write_denied_from_pico_z_put_without_permit() {
         }
     };
     let _ = a_child.child_mut().kill();
-    let _ = a_child.child_mut().wait();
+    let _ = a_child.child_mut().wait_bounded();
 
     // The rejection names the key pico wrote, so it cannot be some other write.
     assert!(
@@ -324,9 +325,9 @@ fn wz_peer_config_write_from_pico_flips_the_live_verdict_for_a_real_pico_publish
 
     let kill_all = |a: &mut ChildGuard, p: &mut ChildGuard| {
         let _ = p.child_mut().kill();
-        let _ = p.child_mut().wait();
+        let _ = p.child_mut().wait_bounded();
         let _ = a.child_mut().kill();
-        let _ = a.child_mut().wait();
+        let _ = a.child_mut().wait_bounded();
     };
 
     // Barrier 1 — the ADMIT edge.

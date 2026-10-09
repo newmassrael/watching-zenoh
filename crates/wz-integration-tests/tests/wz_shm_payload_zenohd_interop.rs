@@ -71,6 +71,7 @@ use std::sync::{Arc, Mutex as StdMutex};
 use std::time::Duration;
 
 use tokio::net::TcpListener;
+use wz_integration_tests::bounded::BoundedStatus as _;
 use wz_integration_tests::common::{
     read_captured, wait_for_substring, zenoh_shm_example_binary, ChildGuard, PortReservation,
 };
@@ -1082,7 +1083,7 @@ fn signal(pid: u32, name: &str) {
     let status = std::process::Command::new("kill")
         .arg(format!("-{name}"))
         .arg(pid.to_string())
-        .status()
+        .status_bounded()
         .expect("run kill");
     assert!(status.success(), "kill -{name} {pid} failed");
 }

@@ -42,6 +42,7 @@ use std::io::{BufRead, BufReader, Lines};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdout, Command, Stdio};
 
+use wz_integration_tests::bounded::BoundedChild as _;
 use wz_integration_tests::common::{
     assert_zenoh_c_arm_pairing, compile_zenoh_c_example, wz_capi_c_cdylib, zenoh_c_oracle,
     zenoh_c_shared_library, PortReservation,
@@ -302,7 +303,7 @@ impl Node {
             .by_ref()
             .map(|line| line.expect("read the node's stdout"))
             .collect();
-        self.child.wait().expect("the node ends");
+        self.child.wait_bounded().expect("the node ends");
         rest
     }
 }

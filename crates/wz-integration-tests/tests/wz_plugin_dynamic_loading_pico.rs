@@ -66,6 +66,7 @@ use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::time::Duration;
 
+use wz_integration_tests::bounded::BoundedChild as _;
 use wz_integration_tests::common::{
     assert_demo_binary_newer_than_sources, project_root, read_captured, wait_for_substring,
     wz_ap_demo_binary, zenoh_pico_cli_binary, ChildGuard, PortReservation,
@@ -126,7 +127,7 @@ fn spawn_plugin_host(
         Ok(c) => c,
         Err(c) => {
             let _ = child.child_mut().kill();
-            let _ = child.child_mut().wait();
+            let _ = child.child_mut().wait_bounded();
             panic!(
                 "the wz-ap-demo ({role}) never printed its BUILD FEATURES line\n--- host ---\n{c}"
             );
@@ -151,7 +152,7 @@ fn spawn_plugin_host(
         Ok(c) => c,
         Err(c) => {
             let _ = child.child_mut().kill();
-            let _ = child.child_mut().wait();
+            let _ = child.child_mut().wait_bounded();
             panic!("the storage host ({role}) never registered its admin surface\n--- host ---\n{banner}{c}");
         }
     };
@@ -198,7 +199,7 @@ fn pico_get_plugins(root: &str, addr: &str) -> Result<String, String> {
         Duration::from_secs(15),
     );
     let _ = child.child_mut().kill();
-    let _ = child.child_mut().wait();
+    let _ = child.child_mut().wait_bounded();
     done
 }
 
@@ -255,7 +256,7 @@ fn wz_plugin_dlopened_is_read_by_a_real_pico_beside_the_static_one() {
         Duration::from_secs(15),
     ) {
         let _ = host.child_mut().kill();
-        let _ = host.child_mut().wait();
+        let _ = host.child_mut().wait_bounded();
         panic!("the host never started the plugin within 15s\n--- host ---\n{c}");
     }
 
@@ -264,7 +265,7 @@ fn wz_plugin_dlopened_is_read_by_a_real_pico_beside_the_static_one() {
         panic!("pico z_get never saw the terminating Final\n--- z_get ---\n{c}\n--- host ---\n{h}")
     });
     let _ = host.child_mut().kill();
-    let _ = host.child_mut().wait();
+    let _ = host.child_mut().wait_bounded();
 
     // ── the DYNAMIC record: a real filesystem path and a Started state ──
     let dynamic = out
@@ -326,7 +327,7 @@ fn wz_plugin_non_plugin_shared_object_is_refused_and_the_node_survives() {
     if let Err(c) = wait_for_substring(&mut host_log, "plugin load failed", Duration::from_secs(15))
     {
         let _ = host.child_mut().kill();
-        let _ = host.child_mut().wait();
+        let _ = host.child_mut().wait_bounded();
         panic!("the host never reported the refusal within 15s — it either loaded a non-plugin or said nothing\n--- host ---\n{c}");
     }
 
@@ -338,7 +339,7 @@ fn wz_plugin_non_plugin_shared_object_is_refused_and_the_node_survives() {
         panic!("the node stopped serving after refusing a plugin\n--- z_get ---\n{c}\n--- host ---\n{h}")
     });
     let _ = host.child_mut().kill();
-    let _ = host.child_mut().wait();
+    let _ = host.child_mut().wait_bounded();
 
     assert!(
         out.contains(&format!("('{root}/plugins/storage_manager':")),
@@ -398,14 +399,14 @@ fn pico_put(key: &str, value: &str, addr: &str) {
             .spawn()
             .expect("spawn z_put"),
     );
-    let _ = child.child_mut().wait();
+    let _ = child.child_mut().wait_bounded();
 }
 
 /// Wait for the host's own verdict line, or fail with the host log.
 fn host_says(host: &mut ChildGuard, log: &mut std::fs::File, line: &str, step: &str) {
     if let Err(c) = wait_for_substring(log, line, Duration::from_secs(15)) {
         let _ = host.child_mut().kill();
-        let _ = host.child_mut().wait();
+        let _ = host.child_mut().wait_bounded();
         panic!("{step}: the host never said `{line}` within 15s\n--- host ---\n{c}");
     }
 }
@@ -506,7 +507,7 @@ fn wz_plugin_config_write_starts_and_stops_a_library_plugin_via_pico() {
     host_says(&mut host, &mut host_log, "Running plugins: []", "stop");
     let stopped = get(&mut host_log);
     let _ = host.child_mut().kill();
-    let _ = host.child_mut().wait();
+    let _ = host.child_mut().wait_bounded();
     let rec = record(&stopped, &root, "wz_example")
         .unwrap_or_else(|| panic!("a stopped library stays visible\n--- z_get ---\n{stopped}"));
     assert!(

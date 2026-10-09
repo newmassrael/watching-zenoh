@@ -60,6 +60,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
+use wz_integration_tests::bounded::BoundedChild as _;
 use wz_integration_tests::common::{
     project_root, read_captured, wait_for_substring, wz_ap_demo_binary, zenoh_pico_cli_binary,
     ChildGuard, PortReservation,
@@ -221,7 +222,7 @@ impl StorageHost {
 
     fn kill(&mut self) {
         let _ = self.child.child_mut().kill();
-        let _ = self.child.child_mut().wait();
+        let _ = self.child.child_mut().wait_bounded();
     }
 }
 
@@ -272,7 +273,7 @@ fn spawn_storage_host(addr: &str, volume: VolumeArg<'_>, role: &str) -> StorageH
         Ok(c) => c,
         Err(c) => {
             let _ = child.child_mut().kill();
-            let _ = child.child_mut().wait();
+            let _ = child.child_mut().wait_bounded();
             panic!(
                 "the wz-ap-demo ({role}) never printed its BUILD FEATURES line within \
                  5s, so which feature set this binary carries is unknown\n--- {role} \
@@ -290,7 +291,7 @@ fn spawn_storage_host(addr: &str, volume: VolumeArg<'_>, role: &str) -> StorageH
         Ok(c) => c,
         Err(c) => {
             let _ = child.child_mut().kill();
-            let _ = child.child_mut().wait();
+            let _ = child.child_mut().wait_bounded();
             panic!(
                 "the storage host ({role}) never became ready within 15s\n--- {role} \
                  ---\n{banner}{c}"
@@ -337,7 +338,7 @@ fn pico_put(z_put: &Path, key: &str, value: &str, addr: &str) {
             .spawn()
             .expect("spawn z_put"),
     );
-    let _ = child.child_mut().wait();
+    let _ = child.child_mut().wait_bounded();
 }
 
 /// Run a fresh one-shot pico `z_get` on `key` and return its stdout up to the
@@ -368,12 +369,12 @@ fn pico_get(z_get: &Path, key: &str, addr: &str) -> String {
         Ok(c) => c,
         Err(c) => {
             let _ = child.child_mut().kill();
-            let _ = child.child_mut().wait();
+            let _ = child.child_mut().wait_bounded();
             panic!("pico z_get never saw the terminating Final within 15s\n--- z_get ---\n{c}");
         }
     };
     let _ = child.child_mut().kill();
-    let _ = child.child_mut().wait();
+    let _ = child.child_mut().wait_bounded();
     out
 }
 

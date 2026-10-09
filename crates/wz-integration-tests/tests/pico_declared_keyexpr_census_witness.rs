@@ -70,6 +70,7 @@ use std::time::Duration;
 
 use wz_capture::agg::aggregate;
 use wz_capture::Dissection;
+use wz_integration_tests::bounded::BoundedStatus as _;
 use wz_integration_tests::common::{
     assert_demo_binary_newer_than_sources, graceful_terminate, read_captured,
     spawn_on_ephemeral_port, wait_for_substring, wz_ap_demo_binary, zenoh_pico_cli_binary,
@@ -124,7 +125,7 @@ fn record_a_declaring_put() -> Vec<(Side, Vec<u8>)> {
         ])
         .stdout(capture.try_clone().expect("clone capture"))
         .stderr(capture.try_clone().expect("clone capture"))
-        .status()
+        .status_bounded()
         .expect("spawn zenoh-pico z_put");
     assert!(
         put.success(),

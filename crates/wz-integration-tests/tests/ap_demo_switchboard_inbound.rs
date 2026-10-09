@@ -38,6 +38,7 @@
 use std::process::{Command, Stdio};
 use std::time::Duration;
 
+use wz_integration_tests::bounded::BoundedStatus as _;
 use wz_integration_tests::common::{
     read_captured, wait_for_substring, wz_ap_demo_binary, zenoh_pico_cli_binary, ChildGuard,
     PortReservation,
@@ -104,7 +105,7 @@ fn switchboard_value_path_against_zenoh_pico_z_put() {
             "-m",
             "client",
         ])
-        .status();
+        .status_bounded();
 
     // Hard gate: the switchboard value row must have fired AND driven the app
     // machine to Hot. A missing line means the handshake, the keyexpr

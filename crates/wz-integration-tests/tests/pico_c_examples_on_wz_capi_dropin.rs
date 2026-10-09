@@ -95,7 +95,7 @@ use std::collections::BTreeSet;
 use std::process::{Command, Stdio};
 use std::time::Duration;
 
-use wz_integration_tests::bounded::BoundedOutput as _;
+use wz_integration_tests::bounded::{BoundedChild as _, BoundedOutput as _, BoundedStatus as _};
 use wz_integration_tests::common::{
     compile_pico_example_against_wz_capi, compile_pico_example_against_wz_capi_with_includes,
     devices_holding_group, graceful_terminate, project_root, read_captured,
@@ -223,7 +223,7 @@ fn bounded_exit(
         Err(why) => {
             let captured = read_captured(capture);
             let _ = child.kill();
-            let _ = child.wait();
+            let _ = child.wait_bounded();
             panic!(
                 "{label} did not exit within {EXIT_TIMEOUT:?} — {why}. It waits on \
                  its counterparty, so this is the shape of a reply that never came.\n\
@@ -269,7 +269,7 @@ fn run_zinfo(dropin: &std::path::Path, endpoint: &str) -> String {
     let _ = Command::new("kill")
         .arg("-INT")
         .arg(child.child_mut().id().to_string())
-        .status();
+        .status_bounded();
     let status = match wait_for_exit(child.child_mut(), EXIT_TIMEOUT) {
         Ok(status) => status,
         Err(why) => panic!(
@@ -354,7 +354,7 @@ fn pico_zsub_source_on_wz_capi_receives_from_real_pico_zput() {
         .args(["-e", &endpoint, "-m", "client", "-k", key, "-v", payload])
         .stdout(Stdio::from(put_writer))
         .stderr(Stdio::from(put_out.try_clone().expect("dup stderr handle")))
-        .status()
+        .status_bounded()
         .expect("run the real zenoh-pico z_put");
     assert!(
         put.success(),
@@ -503,7 +503,7 @@ fn pico_zqueryable_source_on_wz_capi_answers_real_pico_zget() {
     // notification comes after it.
     let get = get_child
         .child_mut()
-        .wait()
+        .wait_bounded()
         .expect("wait on the real pico z_get");
     assert!(get.success(), "real zenoh-pico z_get exited {get:?}");
 
@@ -635,7 +635,7 @@ fn pico_zput_source_on_wz_capi_declares_and_reaches_real_pico_zsub() {
         .args(["-e", &endpoint, "-m", "client", "-k", key, "-v", payload])
         .stdout(Stdio::from(put_writer))
         .stderr(Stdio::from(put_err))
-        .status()
+        .status_bounded()
         .expect("run the compiled z_put drop-in");
     // A non-zero exit is itself a finding: upstream returns -1 when
     // `z_declare_keyexpr` fails, so this catches a declaration that never
@@ -909,7 +909,7 @@ fn pico_zliveliness_source_on_wz_capi_is_seen_alive_then_dropped_by_real_pico() 
         .stderr(Stdio::from(
             holder_out.try_clone().expect("dup stderr handle"),
         ))
-        .status()
+        .status_bounded()
         .expect("run the compiled z_liveliness drop-in");
     assert!(token.success(), "z_liveliness.c on wz exited {token:?}");
 
@@ -1030,7 +1030,7 @@ fn pico_zsubliveliness_source_on_wz_capi_sees_real_pico_token_come_and_go() {
         .stderr(Stdio::from(
             holder_out.try_clone().expect("dup stderr handle"),
         ))
-        .status()
+        .status_bounded()
         .expect("run the real zenoh-pico z_liveliness");
     assert!(
         token.success(),
@@ -1159,7 +1159,7 @@ fn pico_zget_source_on_wz_capi_queries_real_pico_zqueryable() {
     });
     let get = get_child
         .child_mut()
-        .wait()
+        .wait_bounded()
         .expect("wait on upstream z_get.c");
     assert!(
         get.success(),
@@ -1287,7 +1287,7 @@ fn pico_zpub_source_on_wz_capi_is_told_about_a_real_pico_zsub_arriving_and_leavi
         ])
         .stdout(Stdio::from(sub_writer))
         .stderr(Stdio::from(sub_out.try_clone().expect("dup stderr handle")))
-        .status()
+        .status_bounded()
         .expect("run the real zenoh-pico z_sub");
     assert!(
         sub.success(),
@@ -1956,7 +1956,7 @@ fn pico_zgetlat_source_on_wz_capi_round_trips_through_real_pico_zqueryable() {
         ])
         .stdout(Stdio::from(lat_writer))
         .stderr(Stdio::from(lat_out.try_clone().expect("dup stderr handle")))
-        .status()
+        .status_bounded()
         .expect("run the compiled z_get_lat drop-in");
     let printed = read_captured(&mut lat_out);
     assert!(
@@ -2081,7 +2081,7 @@ fn pico_zpubattachment_source_on_wz_capi_is_fully_decoded_by_real_pico() {
         .args(["-e", &endpoint, "-m", "client", "-n", "2"])
         .stdout(Stdio::from(pub_out.try_clone().expect("dup stdout handle")))
         .stderr(Stdio::from(pub_out.try_clone().expect("dup stderr handle")))
-        .status()
+        .status_bounded()
         .expect("run the compiled z_pub_attachment drop-in");
     assert!(
         publisher.success(),
@@ -2225,7 +2225,7 @@ fn pico_zsub_source_on_wz_capi_receives_from_a_real_pico_declared_publisher() {
         .args(["-e", &endpoint, "-m", "client", "-k", key, "-n", "4"])
         .stdout(Stdio::from(pub_writer))
         .stderr(Stdio::from(pub_out.try_clone().expect("dup stderr handle")))
-        .status()
+        .status_bounded()
         .expect("run the real zenoh-pico z_pub");
     assert!(
         published.success(),
@@ -2519,7 +2519,7 @@ fn pico_zscout_source_on_wz_capi_matches_the_real_pico_against_a_zenohd() {
     let devices_after = scouting_devices();
 
     let _ = zenohd.child_mut().kill();
-    let _ = zenohd.child_mut().wait();
+    let _ = zenohd.child_mut().wait_bounded();
 
     let oracle_line = hello_line_for_port(&oracle_printed, port).unwrap_or_else(|| {
         panic!(
@@ -2661,9 +2661,9 @@ fn pico_zscout_source_on_wz_capi_reports_every_zenohd_on_the_group() {
     let devices_after = scouting_devices();
 
     let _ = router_a.child_mut().kill();
-    let _ = router_a.child_mut().wait();
+    let _ = router_a.child_mut().wait_bounded();
     let _ = router_b.child_mut().kill();
-    let _ = router_b.child_mut().wait();
+    let _ = router_b.child_mut().wait_bounded();
 
     for port in [port_a, port_b] {
         if hello_line_for_port(&oracle_printed, port).is_none() {
@@ -2795,7 +2795,7 @@ fn pico_zsubchannel_source_on_wz_capi_receives_through_a_fifo_channel() {
         .args(["-e", &endpoint, "-m", "client", "-k", key, "-v", payload])
         .stdout(Stdio::from(put_writer))
         .stderr(Stdio::from(put_out.try_clone().expect("dup stderr handle")))
-        .status()
+        .status_bounded()
         .expect("run the real zenoh-pico z_put");
     assert!(
         put.success(),
@@ -2922,7 +2922,7 @@ fn pico_zqueryablechannel_source_on_wz_capi_answers_real_pico_zget_after_the_dis
     });
     let get = get_child
         .child_mut()
-        .wait()
+        .wait_bounded()
         .expect("wait on the real pico z_get");
     assert!(
         get.success(),
@@ -3229,7 +3229,7 @@ fn pico_zpull_source_on_wz_capi_keeps_the_newest_when_the_ring_overflows() {
             .args(["-e", &endpoint, "-m", "client", "-k", key, "-v", &payload])
             .stdout(Stdio::from(put_out.try_clone().expect("dup stdout handle")))
             .stderr(Stdio::from(put_out.try_clone().expect("dup stderr handle")))
-            .status()
+            .status_bounded()
             .expect("run the real zenoh-pico z_put");
         assert!(
             put.success(),
@@ -4201,7 +4201,7 @@ fn pico_zsubst_source_on_wz_capi_receives_from_real_pico_zput() {
         .args(["-e", &endpoint, "-m", "client", "-k", key, "-v", payload])
         .stdout(Stdio::from(put_writer))
         .stderr(Stdio::from(put_out.try_clone().expect("dup stderr handle")))
-        .status()
+        .status_bounded()
         .expect("run the real zenoh-pico z_put");
     assert!(
         put.success(),

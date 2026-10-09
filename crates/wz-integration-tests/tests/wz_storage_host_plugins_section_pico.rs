@@ -44,6 +44,7 @@ use std::path::Path;
 use std::process::{Command, Stdio};
 use std::time::Duration;
 
+use wz_integration_tests::bounded::BoundedChild as _;
 use wz_integration_tests::common::{
     assert_demo_binary_newer_than_sources, read_captured, wait_for_substring, wz_ap_demo_binary,
     zenoh_pico_cli_binary, ChildGuard, PortReservation,
@@ -71,7 +72,7 @@ fn pico_get_output(z_get: &Path, keyexpr: &str, addr: &str) -> String {
         Duration::from_secs(15),
     );
     let _ = g_child.child_mut().kill();
-    let _ = g_child.child_mut().wait();
+    let _ = g_child.child_mut().wait_bounded();
     match done {
         Ok(c) => c,
         Err(c) => {
@@ -109,7 +110,7 @@ fn pico_put(z_put: &Path, key: &str, value: &str, addr: &str) {
             .spawn()
             .expect("spawn z_put"),
     );
-    let _ = child.child_mut().wait();
+    let _ = child.child_mut().wait_bounded();
 }
 
 /// Wait for the host's verdict line, or fail naming the step.
@@ -126,7 +127,7 @@ fn pico_put(z_put: &Path, key: &str, value: &str, addr: &str) {
 fn host_says(host: &mut ChildGuard, log: &mut std::fs::File, line: &str, step: &str) {
     if let Err(c) = wait_for_substring(log, line, Duration::from_secs(15)) {
         let _ = host.child_mut().kill();
-        let _ = host.child_mut().wait();
+        let _ = host.child_mut().wait_bounded();
         panic!("step {step}: the host never said `{line}` within 15s\n--- host ---\n{c}");
     }
 }
@@ -170,7 +171,7 @@ fn wz_storage_host_plugins_section_drives_the_storage_manager_via_pico() {
         Ok(c) => c,
         Err(c) => {
             let _ = host.child_mut().kill();
-            let _ = host.child_mut().wait();
+            let _ = host.child_mut().wait_bounded();
             panic!("storage host never became ready within 5s\n--- host ---\n{c}");
         }
     };
@@ -292,7 +293,7 @@ fn wz_storage_host_plugins_section_drives_the_storage_manager_via_pico() {
     );
 
     let _ = host.child_mut().kill();
-    let _ = host.child_mut().wait();
+    let _ = host.child_mut().wait_bounded();
     let _ = read_captured(&mut h_reader);
 }
 
@@ -357,7 +358,7 @@ fn wz_storage_host_plugins_section_from_a_config_file_serves_via_pico() {
         Ok(c) => c,
         Err(c) => {
             let _ = host.child_mut().kill();
-            let _ = host.child_mut().wait();
+            let _ = host.child_mut().wait_bounded();
             panic!("storage host never became ready within 5s\n--- host ---\n{c}");
         }
     };
@@ -395,6 +396,6 @@ fn wz_storage_host_plugins_section_from_a_config_file_serves_via_pico() {
     );
 
     let _ = host.child_mut().kill();
-    let _ = host.child_mut().wait();
+    let _ = host.child_mut().wait_bounded();
     let _ = read_captured(&mut h_reader);
 }

@@ -84,6 +84,7 @@ use std::fs::File;
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
+use wz_integration_tests::bounded::BoundedStatus as _;
 use wz_integration_tests::common::{
     graceful_terminate, listen_port, read_captured, wait_for_exit, wait_for_substring,
     wz_ap_demo_binary, zenoh_pico_cli_binary, ChildGuard,
@@ -186,7 +187,7 @@ impl Peer {
         let status = Command::new("kill")
             .arg(sig)
             .arg(&pid)
-            .status()
+            .status_bounded()
             .expect("kill(1) is available");
         assert!(status.success(), "kill {sig} {pid} failed");
     }

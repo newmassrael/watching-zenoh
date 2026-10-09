@@ -49,6 +49,7 @@ use std::fs::File;
 use std::process::{Command, Stdio};
 use std::time::Duration;
 
+use wz_integration_tests::bounded::BoundedChild as _;
 use wz_integration_tests::common::{
     graceful_terminate, listen_port, read_captured, wait_for_substring, wz_ap_demo_binary,
     zenoh_pico_cli_binary, ChildGuard,
@@ -94,7 +95,7 @@ fn spawn_peer(label: &str, args: &[&str]) -> (ChildGuard, File, u16) {
     )
     .unwrap_or_else(|c| {
         let _ = guard.child_mut().kill();
-        let _ = guard.child_mut().wait();
+        let _ = guard.child_mut().wait_bounded();
         panic!(
             "{label} did not bind within 5s (is the binary built with \
              --features routing-peer?)\n--- {label} stderr ---\n{c}"
@@ -121,7 +122,7 @@ fn pico_publish(cli: &str, key: &str, value: &str, addr: &str, extra: &[&str]) {
             .spawn()
             .unwrap_or_else(|e| panic!("spawn {cli}: {e}")),
     );
-    let _ = child.child_mut().wait();
+    let _ = child.child_mut().wait_bounded();
 }
 
 /// leg (R311y451) — a pico Put whose payload FITS the wz peer's low-pass budget

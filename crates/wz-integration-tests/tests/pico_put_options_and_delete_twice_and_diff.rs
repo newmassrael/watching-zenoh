@@ -51,7 +51,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::Duration;
 
-use wz_integration_tests::bounded::BoundedOutput as _;
+use wz_integration_tests::bounded::{BoundedOutput as _, BoundedStatus as _};
 use wz_integration_tests::common::{
     read_captured, wait_for_substring, wz_capi_pico_cdylib, zenoh_pico_cli_binary,
     zenoh_pico_include_dirs, zenoh_pico_library_dir, ChildGuard, PortReservation,
@@ -210,7 +210,7 @@ fn run_arm(driver: &Path, keyexpr: &str, arm: &str) -> String {
         .args([keyexpr, &listen])
         .stdout(Stdio::from(capture.try_clone().expect("dup stdout handle")))
         .stderr(Stdio::from(capture.try_clone().expect("dup stderr handle")))
-        .status()
+        .status_bounded()
         .unwrap_or_else(|e| panic!("{arm}: failed to run the driver: {e}"));
     assert!(
         status.success(),

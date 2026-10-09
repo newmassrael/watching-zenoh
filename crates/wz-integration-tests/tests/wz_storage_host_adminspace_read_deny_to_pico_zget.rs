@@ -50,6 +50,7 @@ use std::path::Path;
 use std::process::{Command, Stdio};
 use std::time::Duration;
 
+use wz_integration_tests::bounded::BoundedChild as _;
 use wz_integration_tests::common::{
     assert_demo_binary_newer_than_sources, read_captured, wait_for_substring, wz_ap_demo_binary,
     zenoh_pico_cli_binary, ChildGuard, PortReservation,
@@ -89,12 +90,12 @@ fn pico_get_output(z_get: &Path, keyexpr: &str, addr: &str) -> String {
         Ok(c) => c,
         Err(c) => {
             let _ = g_child.child_mut().kill();
-            let _ = g_child.child_mut().wait();
+            let _ = g_child.child_mut().wait_bounded();
             panic!("pico z_get never saw the terminating Final within 15s\n--- z_get ---\n{c}");
         }
     };
     let _ = g_child.child_mut().kill();
-    let _ = g_child.child_mut().wait();
+    let _ = g_child.child_mut().wait_bounded();
     out
 }
 
@@ -119,7 +120,7 @@ fn pico_put(z_put: &Path, key: &str, value: &str, addr: &str) {
             .spawn()
             .expect("spawn z_put"),
     );
-    let _ = child.child_mut().wait();
+    let _ = child.child_mut().wait_bounded();
 }
 
 /// Whether pico decoded any admin reply under `root`. pico prints one
@@ -176,7 +177,7 @@ fn wz_storage_host_adminspace_read_deny_seen_by_pico_z_get() {
         Ok(c) => c,
         Err(c) => {
             let _ = h_child.child_mut().kill();
-            let _ = h_child.child_mut().wait();
+            let _ = h_child.child_mut().wait_bounded();
             panic!("storage host never registered its admin host within 5s\n--- host ---\n{c}");
         }
     };
@@ -236,7 +237,7 @@ fn wz_storage_host_adminspace_read_deny_seen_by_pico_z_get() {
         Ok(c) => c,
         Err(c) => {
             let _ = g_child.child_mut().kill();
-            let _ = g_child.child_mut().wait();
+            let _ = g_child.child_mut().wait_bounded();
             let h_log = read_captured(&mut h_reader);
             panic!(
                 "pico z_get never saw the terminating Final within 15s\n--- z_get ---\n{c}\n\
@@ -245,9 +246,9 @@ fn wz_storage_host_adminspace_read_deny_seen_by_pico_z_get() {
         }
     };
     let _ = g_child.child_mut().kill();
-    let _ = g_child.child_mut().wait();
+    let _ = g_child.child_mut().wait_bounded();
     let _ = h_child.child_mut().kill();
-    let _ = h_child.child_mut().wait();
+    let _ = h_child.child_mut().wait_bounded();
 
     // ── adminspace-read DENY: the reply set is empty (Final only) ───
     //
@@ -359,7 +360,7 @@ fn wz_storage_host_adminspace_read_permit_flips_over_the_wire() {
         Ok(c) => c,
         Err(c) => {
             let _ = h_child.child_mut().kill();
-            let _ = h_child.child_mut().wait();
+            let _ = h_child.child_mut().wait_bounded();
             panic!("storage host never registered its admin host within 5s\n--- host ---\n{c}");
         }
     };
@@ -412,7 +413,7 @@ fn wz_storage_host_adminspace_read_permit_flips_over_the_wire() {
         Ok(c) => c,
         Err(c) => {
             let _ = h_child.child_mut().kill();
-            let _ = h_child.child_mut().wait();
+            let _ = h_child.child_mut().wait_bounded();
             panic!("the host never applied the admin-read revoke\n--- host ---\n{c}");
         }
     };
@@ -437,12 +438,12 @@ fn wz_storage_host_adminspace_read_permit_flips_over_the_wire() {
         Duration::from_secs(10),
     ) {
         let _ = h_child.child_mut().kill();
-        let _ = h_child.child_mut().wait();
+        let _ = h_child.child_mut().wait_bounded();
         panic!("the host never applied the admin-read re-grant\n--- host ---\n{c}");
     }
     let regranted = pico_get_output(&z_get, &format!("{root}/**"), &addr);
     let _ = h_child.child_mut().kill();
-    let _ = h_child.child_mut().wait();
+    let _ = h_child.child_mut().wait_bounded();
     assert!(
         pico_replied_under(&regranted, &root),
         "the permit must come BACK; a gate that latches to deny locks an operator \
@@ -507,7 +508,7 @@ fn wz_storage_host_refuses_a_config_write_without_the_permit() {
         Ok(c) => c,
         Err(c) => {
             let _ = h_child.child_mut().kill();
-            let _ = h_child.child_mut().wait();
+            let _ = h_child.child_mut().wait_bounded();
             panic!("storage host never registered its admin host within 5s\n--- host ---\n{c}");
         }
     };
@@ -544,7 +545,7 @@ fn wz_storage_host_refuses_a_config_write_without_the_permit() {
         Duration::from_secs(10),
     ) {
         let _ = h_child.child_mut().kill();
-        let _ = h_child.child_mut().wait();
+        let _ = h_child.child_mut().wait_bounded();
         panic!("the host never reported the denied config-write\n--- host ---\n{c}");
     }
     let h_log = read_captured(&mut h_reader);
@@ -557,7 +558,7 @@ fn wz_storage_host_refuses_a_config_write_without_the_permit() {
     // move" looks like to a client.
     let after = pico_get_output(&z_get, &format!("{root}/**"), &addr);
     let _ = h_child.child_mut().kill();
-    let _ = h_child.child_mut().wait();
+    let _ = h_child.child_mut().wait_bounded();
     assert!(
         pico_replied_under(&after, &root),
         "the refused write must leave the read permit where it was\n--- z_get ---\n{after}"

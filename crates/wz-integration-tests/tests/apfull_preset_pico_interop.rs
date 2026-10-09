@@ -66,6 +66,7 @@
 use std::process::{Command, Stdio};
 use std::time::Duration;
 
+use wz_integration_tests::bounded::BoundedStatus as _;
 use wz_integration_tests::common::{
     graceful_terminate, read_captured, spawn_on_ephemeral_port, spawn_publishing_zpub,
     spawn_subscribed_zsub, wait_for_substring, wz_ap_demo_binary, zenoh_pico_cli_binary,
@@ -120,7 +121,7 @@ fn apfull_preset_acceptor_round_trips_with_a_real_pico_z_put() {
         ])
         .stdout(Stdio::from(capture.try_clone().expect("dup stdout handle")))
         .stderr(Stdio::from(capture.try_clone().expect("dup stderr handle")))
-        .status()
+        .status_bounded()
         .expect("spawn zenoh-pico z_put");
     assert!(
         put.success(),
