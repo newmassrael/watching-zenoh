@@ -2045,10 +2045,12 @@ impl SharedSession {
             // R2814 — the seeded form: this is a replay of a subscriber the C
             // program already holds, so its miss listener exists before the
             // face's startup history GET can report anything.
+            // The REMOTE side only, as a subscriber declared while the face was up gets:
+            // the plane's own GET is the session's half (see `declare_advanced_subscriber`).
             if let Ok(sub) = AdvancedSubscriber::declare_with_options_and_miss_listener(
                 &replay_session,
                 keyexpr,
-                options,
+                options.with_get_locality(Locality::Remote),
                 on_sample,
                 on_miss,
             ) {
@@ -3798,7 +3800,16 @@ impl SharedSession {
                 }
                 // Cloned per face: the loop declares one subscriber on each,
                 // and the options are no longer `Copy` (R311y826).
-                _ => options.clone(),
+                //
+                // A face's GETs go to the REMOTE side only. The real library has one
+                // subscriber whose one startup GET reaches the session's own cache and
+                // every peer's once; here the plane's GET (above) is the session's
+                // half, so a face that also reached the copy of that cache it holds
+                // answered the same history a second time. MEASURED against the real
+                // library: a subscriber with history beside its publisher, with one
+                // link up, heard each of three cached samples twice, and the same
+                // subscriber on the far side of the link heard them once.
+                _ => options.clone().with_get_locality(Locality::Remote),
             };
             // R2814 — seeded for the same reason as the replay in `face_up`.
             if let Ok(sub) = AdvancedSubscriber::declare_with_options_and_miss_listener(

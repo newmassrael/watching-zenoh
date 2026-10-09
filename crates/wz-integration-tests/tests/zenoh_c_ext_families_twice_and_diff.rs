@@ -1061,3 +1061,224 @@ fn a_querying_subscriber_merges_replies_and_live_samples_identically_on_wz_and_l
          saw"
     );
 }
+
+/// One program, two sessions in one process joined by a link, an advanced publisher
+/// with a cache and an advanced subscriber with history on each side of the link.
+/// It prints how many times each subscriber's callback ran and for which samples.
+///
+/// A C session in wz is a plane plus one wz session per link, and an advanced
+/// subscriber is declared on each. The plane's startup history GET is pinned to the
+/// session; a face's is not, and whether a face's GET reaches that face's own copies
+/// of the cache and answers a second time is the question: the real library has ONE
+/// subscriber and one cache, so it hears each cached sample once. The link is what
+/// makes a face exist, so the link is the variable and the count is the answer.
+const FACE_PROBE: &str = r#"#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <stdint.h>
+#include <time.h>
+#include <pthread.h>
+#include "zenoh.h"
+
+#define KE "wz/face/data"
+#define MAXLOG 32
+
+static pthread_mutex_t LOCK = PTHREAD_MUTEX_INITIALIZER;
+static char NAMES_1[MAXLOG][16];
+static char NAMES_2[MAXLOG][16];
+static int N_1 = 0;
+static int N_2 = 0;
+
+static void nap_ms(long ms) {
+    struct timespec ts;
+    ts.tv_sec = ms / 1000;
+    ts.tv_nsec = (ms % 1000) * 1000000L;
+    nanosleep(&ts, NULL);
+}
+
+static void record(char names[MAXLOG][16], int *n, z_loaned_sample_t *sample) {
+    z_owned_string_t body;
+    z_bytes_to_string(z_sample_payload(sample), &body);
+    pthread_mutex_lock(&LOCK);
+    if (*n < MAXLOG) {
+        size_t len = z_string_len(z_loan(body));
+        if (len > 15) len = 15;
+        memcpy(names[*n], z_string_data(z_loan(body)), len);
+        names[*n][len] = 0;
+        (*n)++;
+    }
+    pthread_mutex_unlock(&LOCK);
+    z_drop(z_move(body));
+}
+
+static void on_sample_1(z_loaned_sample_t *sample, void *ctx) { (void)ctx; record(NAMES_1, &N_1, sample); }
+static void on_sample_2(z_loaned_sample_t *sample, void *ctx) { (void)ctx; record(NAMES_2, &N_2, sample); }
+
+static void on_peer(const z_id_t *id, void *ctx) {
+    (void)id;
+    (*(int *)ctx)++;
+}
+
+static int peers_of(const z_loaned_session_t *s) {
+    int n = 0;
+    z_owned_closure_zid_t closure;
+    z_closure(&closure, on_peer, NULL, &n);
+    z_info_peers_zid(s, z_move(closure));
+    return n;
+}
+
+static int by_name(const void *a, const void *b) { return strcmp((const char *)a, (const char *)b); }
+
+static void report(const char *tag, char names[MAXLOG][16], int n) {
+    pthread_mutex_lock(&LOCK);
+    qsort(names, (size_t)n, 16, by_name);
+    printf("%s.count=%d\n%s.names=", tag, n, tag);
+    for (int i = 0; i < n; i++) printf("%s%s", i ? "," : "", names[i]);
+    if (!n) printf("none");
+    printf("\n");
+    pthread_mutex_unlock(&LOCK);
+}
+
+static z_result_t open_peer(z_owned_session_t *s, const char *key, const char *endpoint) {
+    z_owned_config_t config;
+    z_config_default(&config);
+    zc_config_insert_json5(z_loan_mut(config), Z_CONFIG_MULTICAST_SCOUTING_KEY, "false");
+    zc_config_insert_json5(z_loan_mut(config), Z_CONFIG_MODE_KEY, "\"peer\"");
+    char json[256];
+    snprintf(json, sizeof json, "[\"%s\"]", endpoint);
+    zc_config_insert_json5(z_loan_mut(config), key, json);
+    zc_config_insert_json5(z_loan_mut(config), "timestamping",
+                           "{\"enabled\":{\"router\":true,\"peer\":true,\"client\":true}}");
+    return z_open(s, z_move(config), NULL);
+}
+
+int main(int argc, char **argv) {
+    if (argc < 2) { fprintf(stderr, "usage: probe <endpoint>\n"); return 2; }
+
+    z_owned_session_t s1, s2;
+    z_result_t rc1 = open_peer(&s1, Z_CONFIG_LISTEN_KEY, argv[1]);
+    printf("open1.rc=%d\n", (int)rc1);
+    if (rc1 < 0) { return 1; }
+    z_result_t rc2 = open_peer(&s2, Z_CONFIG_CONNECT_KEY, argv[1]);
+    printf("open2.rc=%d\n", (int)rc2);
+    if (rc2 < 0) { return 1; }
+    const z_loaned_session_t *l1 = z_loan(s1);
+    const z_loaned_session_t *l2 = z_loan(s2);
+
+    /* The link is the variable: wait for it from BOTH ends before anything is declared. */
+    int up = 0;
+    for (int waited = 0; waited < 8000 && !up; waited += 20) {
+        up = peers_of(l1) >= 1 && peers_of(l2) >= 1;
+        if (!up) nap_ms(20);
+    }
+    printf("link.up=%d\n", up);
+    if (!up) { return 1; }
+
+    z_view_keyexpr_t ke;
+    z_view_keyexpr_from_str(&ke, KE);
+
+    ze_advanced_publisher_options_t popts;
+    ze_advanced_publisher_options_default(&popts);
+    ze_advanced_publisher_cache_options_default(&popts.cache);
+    popts.cache.max_samples = 8;
+    ze_owned_advanced_publisher_t pub;
+    z_result_t prc = ze_declare_advanced_publisher(l1, &pub, z_loan(ke), &popts);
+    printf("pub.rc=%d\n", (int)prc);
+    if (prc < 0) { return 1; }
+
+    const char *bodies[3] = {"p1", "p2", "p3"};
+    for (int i = 0; i < 3; i++) {
+        z_owned_bytes_t payload;
+        z_bytes_copy_from_str(&payload, bodies[i]);
+        ze_advanced_publisher_put_options_t put_opts;
+        ze_advanced_publisher_put_options_default(&put_opts);
+        z_result_t rc = ze_advanced_publisher_put(ze_advanced_publisher_loan(&pub), z_move(payload), &put_opts);
+        printf("put[%s].rc=%d\n", bodies[i], (int)rc);
+    }
+    nap_ms(300);
+
+    /* A subscriber with history on the publisher's own side of the link ... */
+    ze_advanced_subscriber_options_t sopts1;
+    ze_advanced_subscriber_options_default(&sopts1);
+    ze_advanced_subscriber_history_options_default(&sopts1.history);
+    z_owned_closure_sample_t c1;
+    z_closure(&c1, on_sample_1, NULL, NULL);
+    ze_owned_advanced_subscriber_t sub1;
+    z_result_t src1 = ze_declare_advanced_subscriber(l1, &sub1, z_loan(ke), z_move(c1), &sopts1);
+    printf("sub1.rc=%d\n", (int)src1);
+
+    /* ... and one on the other side, whose history GET crosses the link. */
+    ze_advanced_subscriber_options_t sopts2;
+    ze_advanced_subscriber_options_default(&sopts2);
+    ze_advanced_subscriber_history_options_default(&sopts2.history);
+    z_owned_closure_sample_t c2;
+    z_closure(&c2, on_sample_2, NULL, NULL);
+    ze_owned_advanced_subscriber_t sub2;
+    z_result_t src2 = ze_declare_advanced_subscriber(l2, &sub2, z_loan(ke), z_move(c2), &sopts2);
+    printf("sub2.rc=%d\n", (int)src2);
+
+    /* History arrives by a GET that completes on its own; give both time to finish and
+       then to show a late duplicate if there is one. */
+    nap_ms(2500);
+    report("s1.history", NAMES_1, N_1);
+    report("s2.history", NAMES_2, N_2);
+
+    z_drop(z_move(sub1));
+    z_drop(z_move(sub2));
+    z_drop(z_move(pub));
+    z_drop(z_move(s2));
+    z_drop(z_move(s1));
+    printf("done\n");
+    return 0;
+}
+"#;
+
+/// What the reference arm must print: a cached sample is heard ONCE by each
+/// subscriber, whichever side of the link it sits on.
+const FACE_EXPECTED: &[&str] = &[
+    "open1.rc=0",
+    "open2.rc=0",
+    "link.up=1",
+    "pub.rc=0",
+    "put[p3].rc=0",
+    "sub1.rc=0",
+    "sub2.rc=0",
+    "s1.history.count=3",
+    "s1.history.names=p1,p2,p3",
+    "s2.history.count=3",
+    "s2.history.names=p1,p2,p3",
+    "done",
+];
+
+/// THE ADJUDICATOR for the face session's history destination: with a link up, a
+/// subscriber with history hears each cached sample as many times on wz's cdylib as on
+/// the real `libzenohc.so`.
+// wz-proves: api-compat-c wz->zenoh-c partial
+#[test]
+#[ignore = "links the shared-memory zenoh-c oracle; run by run-ci Layer C1ce"]
+fn a_history_subscriber_hears_each_cached_sample_once_with_a_link_up_on_wz_and_libzenohc() {
+    let Some((include, ref_libdir)) = oracle_prefix() else {
+        return;
+    };
+    let (wz_out, ref_out) = run_both_arms(FACE_PROBE, &include, &ref_libdir);
+
+    for (arm, stdout) in [("REFERENCE", &ref_out), ("wz", &wz_out)] {
+        let lines: Vec<&str> = stdout.lines().collect();
+        let missing: Vec<&&str> = FACE_EXPECTED
+            .iter()
+            .filter(|w| !lines.contains(w))
+            .collect();
+        assert!(
+            missing.is_empty(),
+            "the {arm} arm did not hear the cache once per subscriber.\n\
+             missing: {missing:?}\n--- stdout ---\n{stdout}",
+        );
+    }
+    let wz: Vec<&str> = wz_out.lines().collect();
+    let reference: Vec<&str> = ref_out.lines().collect();
+    assert_eq!(
+        wz, reference,
+        "wz's history subscribers and the real libzenohc's hear the cache a different \
+         number of times"
+    );
+}

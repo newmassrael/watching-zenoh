@@ -20772,6 +20772,17 @@ layer_c1ce_api_compat_c_unstable_oracle() {
         cargo test -p wz-integration-tests \
         --test zenoh_c_ext_families_twice_and_diff -- --ignored --quiet --test-threads=1 \
         --exact a_querying_subscriber_merges_replies_and_live_samples_identically_on_wz_and_libzenohc || rc=1
+    # R3134 -- a face session's history destination. Two sessions of one library joined by a
+    # link, an advanced publisher with a cache and a subscriber with history on each side,
+    # and a count of how often each callback ran. A C session here is a plane plus one wz
+    # session per link, a subscriber is declared on each, and the faces' startup GETs
+    # reached their own copies of the cache. Red-first: before the change the subscriber
+    # beside the publisher heard each of three cached samples twice, the one across the
+    # link once, and the real library's arm, checked first, heard each once on both.
+    WZ_ZENOH_C_PREFIX="$shm" _runci_guarded_test "C1ce history over a link" 1 \
+        cargo test -p wz-integration-tests \
+        --test zenoh_c_ext_families_twice_and_diff -- --ignored --quiet --test-threads=1 \
+        --exact a_history_subscriber_hears_each_cached_sample_once_with_a_link_up_on_wz_and_libzenohc || rc=1
     # REPORTED, never enforced, exactly as C1cc's is.
     WZ_ZENOH_C_PREFIX="$shm" python3 scripts/lib/capi_c_coverage.py || rc=1
 
