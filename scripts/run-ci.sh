@@ -20078,6 +20078,15 @@ layer_c1cc_api_compat_c() {
         --test zenoh_c_config_document_oracle -- --ignored --quiet --test-threads=1 \
         --exact a_config_document_written_by_either_implementation_is_read_by_the_other \
         || return 1
+    # Open-debt item 854 — the same binary's locator witness: a refused document
+    # must name the member it refused, so a red above reads as a key and not as
+    # a bare return code.
+    _runci_guarded_test \
+        "C1cc a_refused_config_document_names_the_member_that_was_refused" 1 \
+        cargo test -p wz-integration-tests \
+        --test zenoh_c_config_document_oracle -- --ignored --quiet --test-threads=1 \
+        --exact a_refused_config_document_names_the_member_that_was_refused \
+        || return 1
     # R311y564 — the DROP-IN CENSUS, the question the corpus report cannot ask.
     # `capi_c_coverage.py` above counts upstream EXAMPLES that link (29 of 29);
     # this counts SYMBOLS the real library defines and wz does not (180 of 568 at

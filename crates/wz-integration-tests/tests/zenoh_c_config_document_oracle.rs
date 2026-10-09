@@ -307,6 +307,302 @@ impl Arm {
     }
 }
 
+/// A config document read down to its members: an object is a branch, and
+/// everything else (a string, a number, `null`, an array, an empty object) is a
+/// leaf kept as the TEXT it was written with, so a leaf is replayed to a
+/// library exactly as its writer spelt it and never re-rendered here.
+#[derive(Debug, PartialEq, Eq)]
+enum Node {
+    /// Each member as its key AS WRITTEN (quotes included) and its value.
+    Object(Vec<(String, Node)>),
+    Leaf(String),
+}
+
+/// A cursor over a JSON document's text. Both libraries write JSON, so this
+/// reads JSON and nothing wider: it exists to LOCATE a member, not to judge it.
+struct Scan<'a> {
+    text: &'a str,
+    at: usize,
+}
+
+impl<'a> Scan<'a> {
+    fn peek(&self) -> Option<u8> {
+        self.text.as_bytes().get(self.at).copied()
+    }
+
+    fn skip_space(&mut self) {
+        while self.peek().is_some_and(|b| b.is_ascii_whitespace()) {
+            self.at += 1;
+        }
+    }
+
+    fn expect(&mut self, want: u8) -> Result<(), String> {
+        self.skip_space();
+        if self.peek() == Some(want) {
+            self.at += 1;
+            Ok(())
+        } else {
+            Err(format!(
+                "expected `{}` at byte {}",
+                char::from(want),
+                self.at
+            ))
+        }
+    }
+
+    /// A string, quotes included, from the opening `"` to the closing one.
+    fn string(&mut self) -> Result<&'a str, String> {
+        let start = self.at;
+        if self.peek() != Some(b'"') {
+            return Err(format!("expected a string at byte {start}"));
+        }
+        self.at += 1;
+        while let Some(b) = self.peek() {
+            self.at += if b == b'\\' { 2 } else { 1 };
+            if b == b'"' {
+                return Ok(&self.text[start..self.at]);
+            }
+        }
+        Err(format!("the string at byte {start} is not closed"))
+    }
+
+    /// An array, brackets included. Strings are stepped over whole so a `]`
+    /// inside one does not end the array.
+    fn array(&mut self) -> Result<&'a str, String> {
+        let start = self.at;
+        let mut depth = 0usize;
+        while let Some(b) = self.peek() {
+            if b == b'"' {
+                self.string()?;
+                continue;
+            }
+            match b {
+                b'[' => depth += 1,
+                b']' => depth = depth.saturating_sub(1),
+                _ => {}
+            }
+            self.at += 1;
+            if depth == 0 {
+                return Ok(&self.text[start..self.at]);
+            }
+        }
+        Err(format!("the array at byte {start} is not closed"))
+    }
+
+    fn scalar(&mut self) -> Result<&'a str, String> {
+        let start = self.at;
+        while self
+            .peek()
+            .is_some_and(|b| !b.is_ascii_whitespace() && !matches!(b, b',' | b'}' | b']'))
+        {
+            self.at += 1;
+        }
+        if self.at == start {
+            Err(format!("expected a value at byte {start}"))
+        } else {
+            Ok(&self.text[start..self.at])
+        }
+    }
+
+    fn node(&mut self) -> Result<Node, String> {
+        self.skip_space();
+        match self.peek() {
+            Some(b'{') => {
+                self.at += 1;
+                let mut members = Vec::new();
+                self.skip_space();
+                if self.peek() == Some(b'}') {
+                    self.at += 1;
+                    return Ok(Node::Object(members));
+                }
+                loop {
+                    self.skip_space();
+                    let key = self.string()?.to_owned();
+                    self.expect(b':')?;
+                    members.push((key, self.node()?));
+                    self.skip_space();
+                    match self.peek() {
+                        Some(b',') => self.at += 1,
+                        Some(b'}') => {
+                            self.at += 1;
+                            return Ok(Node::Object(members));
+                        }
+                        _ => return Err(format!("expected `,` or `}}` at byte {}", self.at)),
+                    }
+                }
+            }
+            Some(b'"') => Ok(Node::Leaf(self.string()?.to_owned())),
+            Some(b'[') => Ok(Node::Leaf(self.array()?.to_owned())),
+            _ => Ok(Node::Leaf(self.scalar()?.to_owned())),
+        }
+    }
+}
+
+/// Every leaf of `document` as `(keys from the root, leaf text)`. An EMPTY
+/// object is a leaf too: a library that refuses `{}` at some path refuses a
+/// member, and dropping it here would hide that member.
+fn leaves_of(document: &str) -> Result<Vec<(Vec<String>, String)>, String> {
+    fn walk(node: &Node, path: &mut Vec<String>, out: &mut Vec<(Vec<String>, String)>) {
+        match node {
+            Node::Object(members) if !members.is_empty() => {
+                for (key, child) in members {
+                    path.push(key.clone());
+                    walk(child, path, out);
+                    path.pop();
+                }
+            }
+            Node::Object(_) => out.push((path.clone(), String::from("{}"))),
+            Node::Leaf(text) => out.push((path.clone(), text.clone())),
+        }
+    }
+    let mut scan = Scan {
+        text: document,
+        at: 0,
+    };
+    let root = scan.node()?;
+    scan.skip_space();
+    if scan.at != document.len() {
+        return Err(format!("trailing text at byte {}", scan.at));
+    }
+    let mut out = Vec::new();
+    walk(&root, &mut Vec::new(), &mut out);
+    Ok(out)
+}
+
+/// The document that carries ONE leaf, nested under its keys: the keys `"a"`,
+/// `"b"` and the leaf `1` make `{"a":{"b":1}}`.
+fn document_of_one_leaf(path: &[String], leaf: &str) -> String {
+    path.iter()
+        .rev()
+        .fold(leaf.to_owned(), |inner, key| format!("{{{key}:{inner}}}"))
+}
+
+/// A leaf's path as a config key: `connect/endpoints`.
+fn key_of(path: &[String]) -> String {
+    path.iter()
+        .map(|k| k.trim_matches('"'))
+        .collect::<Vec<_>>()
+        .join("/")
+}
+
+/// WHICH members of `document` a library refuses, per reader door.
+///
+/// The doors answer with a bare return code. `Z_EPARSE` for a whole document
+/// says that SOMETHING in it was refused and not what, which is how open-debt
+/// item 854 was first read: five directions lost, no key named, and the cause
+/// (`"id": null`) found only by measuring the reference's default document with
+/// a separate program. So when a door refuses, the document is split into its
+/// leaves and each leaf is offered ALONE to the same library, and the report
+/// names the ones that are refused alone.
+///
+/// A leaf accepted alone is not thereby innocent of a refusal that needs two
+/// members; the report says when no single leaf is refused, so a combination
+/// is not mistaken for nothing.
+fn refused_leaves_by_door(
+    arm: &Arm,
+    document: &str,
+    scratch: &Path,
+) -> Result<BTreeMap<&'static str, Vec<String>>, String> {
+    let mut refused: BTreeMap<&'static str, Vec<String>> = PROBE_READER_DOORS
+        .iter()
+        .map(|door| (*door, Vec::new()))
+        .collect();
+    for (index, (path, leaf)) in leaves_of(document)?.iter().enumerate() {
+        let file = scratch.join(format!("{}-leaf-{index}.json5", arm.name));
+        std::fs::write(&file, document_of_one_leaf(path, leaf))
+            .map_err(|why| format!("write {}: {why}", file.display()))?;
+        let out = arm.run(&["read", file.to_str().expect("utf-8 path")]);
+        for door in PROBE_READER_DOORS {
+            let rc = out.get(&format!("{door}.rc")).map(String::as_str);
+            if rc != Some("0") {
+                refused
+                    .get_mut(door)
+                    .expect("every door was seeded")
+                    .push(format!(
+                        "{} = {leaf} (rc {})",
+                        key_of(path),
+                        rc.unwrap_or("<no line>")
+                    ));
+            }
+        }
+    }
+    Ok(refused)
+}
+
+/// What to append to a door's refusal line so the reader sees WHICH member.
+fn refusal_detail(
+    split: &Result<BTreeMap<&'static str, Vec<String>>, String>,
+    door: &str,
+) -> String {
+    match split {
+        Ok(by_door) => match by_door.get(door).map(Vec::as_slice) {
+            Some([]) | None => String::from(
+                "no single member is refused alone: the refusal needs a combination of members, \
+                 or the document as a whole",
+            ),
+            Some(members) => format!("refused alone: {}", members.join("; ")),
+        },
+        Err(why) => format!("the document could not be split into members: {why}"),
+    }
+}
+
+// wz-proves: none -- a unit test of this file's own document splitter, no library involved
+#[test]
+fn a_document_is_split_into_the_members_a_library_could_refuse() {
+    let document = r#"{
+        "id": null,
+        "mode": "cli{ent\"]",
+        "connect": {"endpoints": ["tcp/a:1", "tcp/b:2]"], "timeout_ms": {"router": -1}},
+        "gateway": {"south": null},
+        "plugins": {}
+    }"#;
+    let leaves: Vec<(String, String)> = leaves_of(document)
+        .expect("the document splits")
+        .iter()
+        .map(|(path, leaf)| (key_of(path), leaf.clone()))
+        .collect();
+    let want: Vec<(String, String)> = [
+        ("id", "null"),
+        ("mode", r#""cli{ent\"]""#),
+        ("connect/endpoints", r#"["tcp/a:1", "tcp/b:2]"]"#),
+        ("connect/timeout_ms/router", "-1"),
+        ("gateway/south", "null"),
+        ("plugins", "{}"),
+    ]
+    .iter()
+    .map(|(k, v)| ((*k).to_owned(), (*v).to_owned()))
+    .collect();
+    assert_eq!(
+        leaves, want,
+        "a bracket or brace inside a string ends nothing"
+    );
+}
+
+// wz-proves: none -- a unit test of this file's own document splitter, no library involved
+#[test]
+fn one_leaf_is_replayed_nested_under_its_keys_as_it_was_written() {
+    let path = vec![String::from("\"connect\""), String::from("\"endpoints\"")];
+    let one = document_of_one_leaf(&path, "[\"tcp/a:1\"]");
+    assert_eq!(one, r#"{"connect":{"endpoints":["tcp/a:1"]}}"#);
+    let again = leaves_of(&one).expect("the one-leaf document splits");
+    assert_eq!(again, vec![(path, String::from("[\"tcp/a:1\"]"))]);
+    assert_eq!(document_of_one_leaf(&[], "null"), "null");
+}
+
+// wz-proves: none -- a unit test of this file's own document splitter, no library involved
+#[test]
+fn a_document_that_is_not_json_is_refused_by_name_rather_than_split_wrongly() {
+    for bad in [
+        "{\"a\": }",
+        "{\"a\" 1}",
+        "{\"a\": [1, 2}",
+        "{\"a\": 1} trailing",
+        "{\"a\": \"open",
+    ] {
+        assert!(leaves_of(bad).is_err(), "{bad:?} is not a document");
+    }
+}
+
 /// Every `Z_CONFIG_*` key upstream's own header defines.
 fn corpus(include: &Path) -> Vec<String> {
     let header = include.join("zenoh_constants.h");
@@ -674,14 +970,23 @@ fn a_config_document_written_by_either_implementation_is_read_by_the_other() {
             } else {
                 &expect_ref
             };
+            // Split the document into members only when a door refuses it, and
+            // once for the pair rather than once per door.
+            let mut split = None;
             for door in PROBE_READER_DOORS {
                 let rc = out.get(&format!("{door}.rc")).map(String::as_str);
                 if rc != Some("0") {
+                    let split = split.get_or_insert_with(|| {
+                        let text = std::fs::read_to_string(&documents[writer.name])
+                            .expect("the writer's document");
+                        refused_leaves_by_door(reader, &text, dir.path())
+                    });
                     failures.push(format!(
-                        "  {}'s document -> {}'s {door}: rc {}",
+                        "  {}'s document -> {}'s {door}: rc {}; {}",
                         writer.name,
                         reader.name,
-                        rc.unwrap_or("<no line>")
+                        rc.unwrap_or("<no line>"),
+                        refusal_detail(split, door)
                     ));
                     continue;
                 }
@@ -788,4 +1093,68 @@ fn a_config_document_written_by_either_implementation_is_read_by_the_other() {
         shape_failures.join("\n"),
         declined_upstream.len(),
     );
+}
+
+/// Open-debt item 854: a refused document must name the member it refused.
+///
+/// The four-direction test above reports a door's return code. When the
+/// reference library refused a document in a hosted run the report was five
+/// lines of `rc -2`, and the member responsible (`"id": null`) was found only
+/// by writing a second program. This plants ONE refused member in a document of
+/// otherwise accepted ones, against the REAL libzenohc, and holds the report's
+/// locator to naming exactly that member at every reader door.
+// wz-proves: none -- it grades this file's refusal locator against the real library, and claims no wz atom
+#[test]
+#[ignore = "reads the installed zenoh-c oracle; run by run-ci Layer C1cc"]
+fn a_refused_config_document_names_the_member_that_was_refused() {
+    let Some(include) = oracle_or_note() else {
+        return;
+    };
+    let dir = tempfile::tempdir().expect("tempdir for the compiled probes");
+    let [wz, reference] = build_arms(&include, dir.path());
+
+    let planted = r#"{"scouting": {"timeout": 3000}, "mode": "not-a-mode", "connect": {"endpoints": ["tcp/127.0.0.1:17447"]}}"#;
+    let file = dir.path().join("planted.json5");
+    std::fs::write(&file, planted).expect("write the planted document");
+    let whole = reference.run(&["read", file.to_str().expect("utf-8 path")]);
+    for door in PROBE_READER_DOORS {
+        assert_ne!(
+            whole.get(&format!("{door}.rc")).map(String::as_str),
+            Some("0"),
+            "the premise failed: the real libzenohc's {door} accepted a document with \
+             `\"mode\": \"not-a-mode\"`, so there is no refusal to locate"
+        );
+    }
+
+    let named = refused_leaves_by_door(&reference, planted, dir.path()).expect("the split");
+    for door in PROBE_READER_DOORS {
+        let members = &named[door];
+        assert_eq!(
+            members.len(),
+            1,
+            "{door}: exactly the planted member is refused alone, got {members:?}"
+        );
+        assert!(
+            members[0].starts_with("mode = \"not-a-mode\""),
+            "{door}: the refused member is named as its key and value, got {:?}",
+            members[0]
+        );
+    }
+
+    // The wz arm is held to the same locator whenever it refuses the whole
+    // document; whether it SHOULD refuse is the four-direction test's subject.
+    let on_wz = wz.run(&["read", file.to_str().expect("utf-8 path")]);
+    let named_wz = refused_leaves_by_door(&wz, planted, dir.path()).expect("the split");
+    for door in PROBE_READER_DOORS {
+        if on_wz.get(&format!("{door}.rc")).map(String::as_str) != Some("0") {
+            assert!(
+                named_wz[door]
+                    .iter()
+                    .any(|m| m.starts_with("mode = \"not-a-mode\"")),
+                "wz's {door} refused the whole document and the locator did not name \
+                 `mode`: {:?}",
+                named_wz[door]
+            );
+        }
+    }
 }
