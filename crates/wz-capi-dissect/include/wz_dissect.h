@@ -2740,17 +2740,22 @@ int wz_dissect_declarations_from_proto(const char *key_pattern,
  *     number or a decimal string; the string is how a 64-bit value survives a
  *     reader that holds numbers as doubles, and the digits are read exactly, so
  *     18446744073709551615 and 9007199254740993 keep every bit. A number must be
- *     an integer (1.0 and 1e3 are, 1.5 is not) that fits the type. Only plain
- *     JSON number grammar is read: 0x10, +1 and 01 are refused.
+ *     an integer (1.0 and 1e3 are, 1.5 is not) that fits the type, and only plain
+ *     JSON number grammar is read for it: 0x10, +1 and 01 are refused as
+ *     numbers. A string is digits with an optional sign ("-5", "007") and
+ *     nothing else; "1.0" and "1e3" are refused, as protobuf's own parser
+ *     refuses them, and so is a minus sign in a string for an unsigned type,
+ *     even on a zero ("-0").
  *   - float and double are a number, a decimal string, or one of the strings
  *     "NaN", "Infinity" and "-Infinity". A finite value that does not fit a
  *     float is refused, not turned into infinity.
  *   - bool is true or false. string is a string. bytes is a base64 string, in the
  *     standard or the URL-safe alphabet (not both in one string), padded or
  *     not, whose last character carries no bits beyond the data.
- *   - An enum is the NAME of one of its values or an integer. A proto2 enum is
- *     closed, so an integer that is none of its values is refused; a proto3 enum
- *     takes any int32.
+ *   - An enum is the NAME of one of its values or an integer (a JSON number, or
+ *     a string of digits, which a name cannot be). A proto2 enum is closed, so an
+ *     integer that is none of its values is refused; a proto3 enum takes any
+ *     int32.
  *   - null means "not set" for a field, and is refused as an array element or a
  *     map value, where there is nothing to leave out.
  *
@@ -2784,8 +2789,9 @@ int wz_dissect_declarations_from_proto(const char *key_pattern,
  *   - A map is a repeated field of entry messages whose key is field 1 and whose
  *     value is field 2, both always written, the entries in ascending key order
  *     (numeric for integer keys, false before true, byte order for strings), so
- *     the same values always give the same bytes. A key given twice, whatever
- *     its spelling ("1" and "1.0" are one key), is refused.
+ *     the same values always give the same bytes. An integer key is a string of
+ *     digits with an optional sign, and a key given twice, whatever its
+ *     spelling ("1", "+1" and "01" are one key), is refused.
  *   - int32 and an enum are the varint of the sign-extended value (a negative one
  *     is ten bytes); sint32 and sint64 are zigzag; fixed32, sfixed32 and float
  *     are four bytes little-endian, fixed64, sfixed64 and double eight.
@@ -2803,6 +2809,18 @@ int wz_dissect_declarations_from_proto(const char *key_pattern,
  * the SCHEMA, blamed at the option's value: json_name is judged for every field
  * of a message the values reach, since it decides which keys that message
  * answers to, and packed only for a field the values name.
+ *
+ * WHERE IT DIFFERS FROM libprotobuf's OWN JSON PARSER, measured against
+ * JsonToBinaryString of libprotobuf 3.21.12: where both accept a text they
+ * agree on the message, and where they differ this door says no and that parser
+ * makes something up. A bool given as a string ("true", and also "True" and
+ * "yes"), a scalar for a repeated field (it wraps one), a null array element
+ * (it drops it) and a null map value (it writes the default) are refused here;
+ * so are a field or a map key given twice (it writes both), a float string
+ * that is not JSON number grammar (".5", "1.", "+1.5", "0x10": it reads them as
+ * strtod does) and an integer for a closed proto2 enum that none of its values
+ * has. The other way round, this door admits JSON5 (comments, single quotes,
+ * unquoted keys), which that parser refuses.
  *
  * THE FIRST PROBLEM is the only one reported, in this order: an argument (the
  * root file index, a duplicate file name), the schema (in the order the door

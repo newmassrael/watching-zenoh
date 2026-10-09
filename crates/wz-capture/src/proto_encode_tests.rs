@@ -374,9 +374,30 @@ fn bool_keys_are_false_then_true_and_message_values_are_nested() {
 #[test]
 fn a_map_key_given_twice_in_any_spelling_is_refused() {
     let schema = m(P3, "map<int32, int32> m = 1;");
-    let e = value_error("M", &schema, r#"{"m":{"1":1,"1.0":2}}"#);
-    assert_eq!(e.path, "/m/1.0");
-    assert!(e.reason.contains("given twice"), "{}", e.reason);
+    // Three spellings of one key: the digits, a zero before them, a sign.
+    for twin in ["01", "+1", "0001"] {
+        let values = format!(r#"{{"m":{{"1":1,"{twin}":2}}}}"#);
+        let e = value_error("M", &schema, &values);
+        assert_eq!(e.path, format!("/m/{twin}"));
+        assert!(e.reason.contains("given twice"), "{}", e.reason);
+    }
+}
+
+#[test]
+fn an_integer_map_key_is_digits_with_a_sign_and_not_a_fraction_or_an_exponent() {
+    let schema = m(P3, "map<int32, int32> m = 1;\nmap<uint32, int32> u = 2;");
+    assert_eq!(
+        enc("M", &schema, r#"{"m":{"-3":1}}"#),
+        "0a0d08fdffffffffffffffff011001"
+    );
+    for key in ["1.0", "1e3", " 1", "0x1", "-", "+", ""] {
+        let values = format!(r#"{{"m":{{"{key}":1}}}}"#);
+        let e = value_error("M", &schema, &values);
+        assert_eq!(e.path, format!("/m/{key}"), "{key:?}");
+    }
+    // An unsigned key takes no minus sign.
+    let e = value_error("M", &schema, r#"{"u":{"-0":1}}"#);
+    assert!(e.reason.contains("no minus sign"), "{}", e.reason);
 }
 
 #[test]
@@ -422,17 +443,42 @@ fn an_unknown_enum_name_is_refused_and_a_proto3_unknown_number_is_not() {
         .unwrap_or("")
         .contains("ZERO, ONE, NEG"));
     assert_eq!(enc("M", &schema, r#"{"e":7}"#), "0807");
-    // An enum value is a number or a name, not a string of digits.
-    let e = value_error("M", &schema, r#"{"e":"1"}"#);
-    assert!(e.reason.contains("not a value of the enum"), "{}", e.reason);
+}
+
+#[test]
+fn a_string_of_digits_is_a_number_to_an_enum_because_a_name_cannot_be_one() {
+    let schema = format!("{P3}{ENUMS}message M {{ E e = 1; }}");
+    assert_eq!(enc("M", &schema, r#"{"e":"1"}"#), "0801");
+    assert_eq!(enc("M", &schema, r#"{"e":"-1"}"#), "08ffffffffffffffffff01");
+    assert_eq!(enc("M", &schema, r#"{"e":"7"}"#), "0807");
+    // Anything else that is not a name is refused as one.
+    for text in ["1.0", "x1", "", " 1", "1e0"] {
+        let values = format!(r#"{{"e":"{text}"}}"#);
+        let e = value_error("M", &schema, &values);
+        assert!(
+            e.reason.contains("not a value of the enum"),
+            "{text:?}: {}",
+            e.reason
+        );
+    }
+    // A digit string past int32 is a number out of range, not a misspelt name.
+    let e = value_error("M", &schema, r#"{"e":"2147483648"}"#);
+    assert!(e.reason.contains("out of range for int32"), "{}", e.reason);
 }
 
 #[test]
 fn a_proto2_enum_is_closed() {
     let schema = format!("{P2}{ENUMS}message M {{ optional E e = 1; }}");
     assert_eq!(enc("M", &schema, r#"{"e":1}"#), "0801");
-    let e = value_error("M", &schema, r#"{"e":7}"#);
-    assert!(e.reason.contains("closed"), "{}", e.reason);
+    for values in [r#"{"e":7}"#, r#"{"e":"7"}"#] {
+        let e = value_error("M", &schema, values);
+        assert!(e.reason.contains("closed"), "{values}: {}", e.reason);
+    }
+    // A name is always one of the values.
+    assert_eq!(
+        enc("M", &schema, r#"{"e":"NEG"}"#),
+        "08ffffffffffffffffff01"
+    );
 }
 
 // ---- integers, floats, strings, bytes --------------------------------------
@@ -465,7 +511,7 @@ fn an_integer_may_be_written_with_an_exponent_or_a_zero_fraction_but_not_rounded
     let schema = m(P3, "int32 a = 1;");
     assert_eq!(enc("M", &schema, r#"{"a":1e3}"#), "08e807");
     assert_eq!(enc("M", &schema, r#"{"a":2.0}"#), "0802");
-    assert_eq!(enc("M", &schema, r#"{"a":"1.50e1"}"#), "080f");
+    assert_eq!(enc("M", &schema, r#"{"a":1.50e1}"#), "080f");
     assert_eq!(enc("M", &schema, r#"{"a":-0}"#), "");
     let e = value_error("M", &schema, r#"{"a":1.5}"#);
     assert_eq!(e.path, "/a");
@@ -515,9 +561,14 @@ fn a_value_that_is_not_a_plain_number_is_refused_not_guessed() {
         r#"{"a":"0x10"}"#,
         r#"{"a":0x10}"#,
         r#"{"a":+1}"#,
-        r#"{"a":"+1"}"#,
+        r#"{"a":01}"#,
         r#"{"a":" 1"}"#,
-        r#"{"a":"01"}"#,
+        r#"{"a":"1.0"}"#,
+        r#"{"a":"1e3"}"#,
+        r#"{"a":"1.50e1"}"#,
+        r#"{"a":"-"}"#,
+        r#"{"a":"1 "}"#,
+        r#"{"a":"1_0"}"#,
     ] {
         let e = value_error("M", &schema, values);
         assert_eq!(e.path, "/a", "{values}");
@@ -526,6 +577,54 @@ fn a_value_that_is_not_a_plain_number_is_refused_not_guessed() {
             "{values}"
         );
     }
+}
+
+#[test]
+fn a_string_of_digits_may_carry_a_sign_and_leading_zeros_where_a_number_may_not() {
+    let schema = m(P3, "int32 a = 1; uint64 b = 2;");
+    assert_eq!(enc("M", &schema, r#"{"a":"+7"}"#), "0807");
+    assert_eq!(enc("M", &schema, r#"{"a":"007"}"#), "0807");
+    assert_eq!(
+        enc("M", &schema, r#"{"a":"-007"}"#),
+        "08f9ffffffffffffffff01"
+    );
+    assert_eq!(
+        enc("M", &schema, r#"{"b":"+18446744073709551615"}"#),
+        "10ffffffffffffffffff01"
+    );
+    assert_eq!(
+        enc(
+            "M",
+            &schema,
+            r#"{"b":"0000000000000000000000000000000000000000007"}"#
+        ),
+        "1007"
+    );
+    // The leading zeros are not significant digits, so they cannot push a small
+    // number out of range; a long run of significant digits is out of range.
+    let e = value_error(
+        "M",
+        &schema,
+        r#"{"b":"1000000000000000000000000000000000"}"#,
+    );
+    assert!(e.reason.contains("out of range"), "{}", e.reason);
+}
+
+#[test]
+fn a_string_for_an_unsigned_type_takes_no_minus_sign_not_even_on_a_zero() {
+    let schema = m(P3, "uint32 a = 1; fixed64 b = 2; int32 c = 3;");
+    for values in [
+        r#"{"a":"-0"}"#,
+        r#"{"b":"-0"}"#,
+        r#"{"a":-1}"#,
+        r#"{"a":"-1"}"#,
+    ] {
+        let e = value_error("M", &schema, values);
+        assert!(e.reason.contains("out of range"), "{values}: {}", e.reason);
+    }
+    // A JSON number -0 is the number zero, and a signed type takes "-0".
+    assert_eq!(enc("M", &schema, r#"{"a":-0}"#), "");
+    assert_eq!(enc("M", &schema, r#"{"c":"-0"}"#), "");
 }
 
 #[test]
@@ -572,6 +671,8 @@ fn bytes_that_are_not_canonical_base64_are_refused() {
         ("AAE==", "padding"),
         ("AA=", "padding"),
         ("AA E", "not a base64 character"),
+        ("AQ\\n==", "not a base64 character"),
+        ("AQI!", "not a base64 character"),
         ("+_", "mixed"),
         ("AAF=", "beyond the data"),
         ("=AAA", "not a base64 character"),
@@ -659,7 +760,8 @@ fn a_value_error_names_the_json_pointer_the_field_and_the_type() {
     assert!(e.expected.as_deref().unwrap_or("").starts_with("int32"));
     assert_eq!(
         EncodeError::Value(e).to_string(),
-        "values /xs/1/v: `x` is not a decimal integer: a plain JSON number or a string of digits is needed"
+        "values /xs/1/v: `x` is not a decimal integer: a string of digits with an optional sign \
+         is needed"
     );
 }
 
