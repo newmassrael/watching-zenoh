@@ -319,6 +319,44 @@ pub fn random_station_address<E: wz_session_core::entropy::EntropySource>(
     Ok(mac)
 }
 
+/// Whether two interfaces of one node, with these addresses and masks, would sit on
+/// the same IPv4 network, readable at compile time.
+///
+/// A node with two interfaces on one network does not know which to send by: the
+/// stack takes the first that matches, so the second would be reachable only by
+/// accident. The test is made under the LESS specific of the two masks, so an
+/// interface whose network CONTAINS the other's (a /16 over a /24) counts as the
+/// same network, which is the case a stack also takes the first match for.
+pub const fn ipv4_networks_overlap(
+    a: [u8; 4],
+    a_mask: [u8; 4],
+    b: [u8; 4],
+    b_mask: [u8; 4],
+) -> bool {
+    let mut at = 0;
+    while at < 4 {
+        let mask = a_mask[at] & b_mask[at];
+        if a[at] & mask != b[at] & mask {
+            return false;
+        }
+        at += 1;
+    }
+    true
+}
+
+/// Whether two station addresses are the same, readable at compile time (array
+/// equality is not a `const` operation).
+pub const fn mac_addresses_equal(a: [u8; 6], b: [u8; 6]) -> bool {
+    let mut at = 0;
+    while at < 6 {
+        if a[at] != b[at] {
+            return false;
+        }
+        at += 1;
+    }
+    true
+}
+
 /// The IPv4 address the board's build named in environment variable `$name`, as
 /// four octets, at compile time. A build that does not set it fails to compile.
 ///
@@ -586,6 +624,55 @@ mod tests {
         ] {
             let refused = std::panic::catch_unwind(|| parse_mac(bad)).is_err();
             assert!(refused, "{bad:?} must not be accepted as a MAC");
+        }
+    }
+
+    /// Two interfaces whose networks differ do not overlap, and two on one
+    /// network, or one inside the other's, do. The comparison is made under the
+    /// less specific mask, and it reaches the last octet.
+    #[test]
+    fn two_interfaces_overlap_when_their_networks_do() {
+        const C: [u8; 4] = [255, 255, 255, 0];
+        const B: [u8; 4] = [255, 255, 0, 0];
+        const HOST: [u8; 4] = [255, 255, 255, 255];
+        // As the firmware uses it: a compile-time refusal.
+        const _: () = assert!(
+            !ipv4_networks_overlap([192, 168, 100, 10], C, [192, 168, 101, 10], C),
+            "192.168.100.0/24 and 192.168.101.0/24"
+        );
+
+        assert!(ipv4_networks_overlap([10, 0, 0, 1], C, [10, 0, 0, 200], C));
+        assert!(!ipv4_networks_overlap([10, 0, 0, 1], C, [11, 0, 0, 1], C));
+        assert!(!ipv4_networks_overlap([10, 0, 0, 1], C, [10, 0, 1, 1], C));
+        assert!(
+            ipv4_networks_overlap([10, 1, 0, 1], B, [10, 1, 2, 3], C),
+            "a /24 inside a /16 is on the /16's network"
+        );
+        assert!(
+            ipv4_networks_overlap([10, 1, 2, 3], C, [10, 1, 0, 1], B),
+            "and the other way round"
+        );
+        assert!(!ipv4_networks_overlap([10, 1, 0, 1], B, [10, 2, 2, 3], C));
+        assert!(
+            !ipv4_networks_overlap([10, 0, 0, 1], HOST, [10, 0, 0, 2], HOST),
+            "two host routes differ in the last octet alone"
+        );
+        assert!(ipv4_networks_overlap(
+            [10, 0, 0, 1],
+            HOST,
+            [10, 0, 0, 1],
+            HOST
+        ));
+    }
+
+    #[test]
+    fn station_addresses_are_equal_only_when_every_byte_is() {
+        const A: [u8; 6] = [0x02, 0, 0x5e, 0x10, 0x20, 0x30];
+        const _: () = assert!(mac_addresses_equal(A, A));
+        for byte in 0..6 {
+            let mut other = A;
+            other[byte] ^= 0x80;
+            assert!(!mac_addresses_equal(A, other), "byte {byte} differs");
         }
     }
 
