@@ -26,6 +26,10 @@ use std::vec::Vec;
 use wz_runtime_core::EthernetMac;
 
 const BUS_BASE: u32 = 0x2000_0000;
+/// Where caller memory the controller can reach (outside the DMA area) appears on
+/// the bus, one `EXT_BUS_STRIDE` range per registered window.
+const EXT_BUS_BASE: u32 = 0x4000_0000;
+const EXT_BUS_STRIDE: u32 = 0x0010_0000;
 const RX: usize = 4;
 const TX: usize = 3;
 type Area = DmaArea<RX, TX>;
@@ -57,6 +61,15 @@ struct Model {
     tx_idx: usize,
     rx_idx: usize,
     tx_halted: bool,
+    /// Caller memory outside the DMA area that the controller can read:
+    /// `(host address, length)`.
+    ext: Vec<(usize, usize)>,
+    /// Each transmit descriptor the driver published, and its second word at that
+    /// moment, in order.
+    desc_cleans: Vec<(usize, u32)>,
+    /// A frame being read across descriptors, and the descriptor it began at.
+    assembling: Vec<u8>,
+    assembling_first: Option<usize>,
     wire: Vec<Vec<u8>>,
     log: Vec<(usize, u32)>,
     /// What the board's own behaviour, or the driver's use of it, got wrong.
@@ -107,6 +120,10 @@ impl Model {
             tx_idx: 0,
             rx_idx: 0,
             tx_halted: false,
+            ext: Vec::new(),
+            desc_cleans: Vec::new(),
+            assembling: Vec::new(),
+            assembling_first: None,
             wire: Vec::new(),
             log: Vec::new(),
             violations: Vec::new(),
@@ -136,11 +153,31 @@ impl Model {
     }
 
     fn bus(&self, ptr: *const u8) -> u32 {
-        BUS_BASE + (ptr as usize - self.start) as u32
+        let at = ptr as usize;
+        // Memory the caller keeps outside the DMA area (a session's frame buffer,
+        // read in place): each registered window has a bus range of its own, so the
+        // model can tell the controller's own buffers from the caller's.
+        for (i, (start, len)) in self.ext.iter().enumerate() {
+            if (*start..*start + *len).contains(&at) {
+                return EXT_BUS_BASE + i as u32 * EXT_BUS_STRIDE + (at - start) as u32;
+            }
+        }
+        BUS_BASE + (at - self.start) as u32
     }
 
     fn ptr(&self, bus: u32) -> *mut u8 {
+        if bus >= EXT_BUS_BASE {
+            let i = ((bus - EXT_BUS_BASE) / EXT_BUS_STRIDE) as usize;
+            let off = ((bus - EXT_BUS_BASE) % EXT_BUS_STRIDE) as usize;
+            return (self.ext[i].0 + off) as *mut u8;
+        }
         (self.start + (bus - BUS_BASE) as usize) as *mut u8
+    }
+
+    /// Make `buf` reachable by the controller, as system SRAM outside the DMA area
+    /// is on the board.
+    fn expose(&mut self, buf: &[u8]) {
+        self.ext.push((buf.as_ptr() as usize, buf.len()));
     }
 
     fn rx_desc(&self, i: usize) -> Slot {
@@ -283,6 +320,9 @@ impl Model {
                 self.regs.insert(off, v);
                 self.tx_idx = self.desc_index(v & !QPTR_DISABLE, self.tx_desc(0));
                 self.tx_halted = false;
+                // A frame the controller was partway through is abandoned.
+                self.assembling.clear();
+                self.assembling_first = None;
             }
             RECEIVE_Q_PTR => {
                 self.regs.insert(off, v);
@@ -344,6 +384,17 @@ impl Model {
             let d = self.tx_desc(self.tx_idx);
             let w1 = d.word1();
             if w1 & TXD_USED != 0 {
+                if self.assembling_first.is_some() {
+                    // The controller read the first descriptors of a frame and
+                    // then a software-owned one: the frame was released before
+                    // its last descriptor was in place.
+                    self.violations.push(format!(
+                        "the transmit DMA stopped inside a frame, at descriptor {}",
+                        self.tx_idx
+                    ));
+                    self.assembling.clear();
+                    self.assembling_first = None;
+                }
                 let st = self.reg(TRANSMIT_STATUS) | TXSR_USED_BIT_READ;
                 self.regs.insert(TRANSMIT_STATUS, st);
                 return;
@@ -369,12 +420,26 @@ impl Model {
             }
             let len = (w1 & TXD_LEN_MASK) as usize;
             let buf = self.ptr(d.word0());
-            // SAFETY: the driver wrote `len <= BUF_LEN` bytes there.
-            let frame = unsafe { std::slice::from_raw_parts(buf, len) }.to_vec();
-            self.wire.push(frame);
-            d.set_word1(w1 | TXD_USED);
-            let st = self.reg(TRANSMIT_STATUS) | TXSR_TRANSMIT_COMPLETE;
-            self.regs.insert(TRANSMIT_STATUS, st);
+            // SAFETY: the driver wrote `len <= BUF_LEN` bytes there, or the caller
+            // keeps them in place for it.
+            let piece = unsafe { std::slice::from_raw_parts(buf, len) }.to_vec();
+            if self.assembling_first.is_none() {
+                self.assembling_first = Some(self.tx_idx);
+            }
+            self.assembling.extend_from_slice(&piece);
+            if w1 & TXD_LAST != 0 {
+                // The frame is on the wire. As the Cadence driver relies on, the
+                // controller writes USED back to the FIRST descriptor of the frame
+                // and leaves the others as it found them (software marks those
+                // itself when it takes the frame back).
+                let frame = std::mem::take(&mut self.assembling);
+                self.wire.push(frame);
+                let first_idx = self.assembling_first.take().unwrap_or(self.tx_idx);
+                let first = self.tx_desc(first_idx);
+                first.set_word1(first.word1() | TXD_USED);
+                let st = self.reg(TRANSMIT_STATUS) | TXSR_TRANSMIT_COMPLETE;
+                self.regs.insert(TRANSMIT_STATUS, st);
+            }
             // The controller follows the wrap flag and nothing else: a last slot
             // that lost it sends the DMA into whatever memory follows the ring.
             self.tx_idx = if w1 & TXD_WRAP != 0 {
@@ -440,6 +505,20 @@ impl Board for Gem {
 
     fn bus_address(&self, ptr: *const u8) -> u32 {
         self.0.borrow().bus(ptr)
+    }
+
+    /// Cache maintenance on a transmit descriptor is the moment the driver
+    /// PUBLISHES it, so the model notes what the descriptor said then: the order
+    /// of a frame's descriptors, and when its first is let go, is read from here.
+    fn clean(&mut self, ptr: *const u8, _len: usize) {
+        let mut m = self.0.borrow_mut();
+        let base = m.tx_desc(0).0 as usize;
+        let at = ptr as usize;
+        if at >= base && at < base + TX * core::mem::size_of::<Descriptor>() {
+            let index = (at - base) / core::mem::size_of::<Descriptor>();
+            let word1 = m.tx_desc(index).word1();
+            m.desc_cleans.push((index, word1));
+        }
     }
 
     fn delay_us(&mut self, us: u32) {
@@ -714,6 +793,316 @@ fn a_frame_with_no_bytes_or_too_many_is_not_queued() {
         "the buffer's own size is the limit"
     );
     assert_eq!(model.borrow().wire.len(), 1);
+}
+
+// ---- gathered transmit: the controller reads the caller's memory in place -------
+
+fn seg(bytes: &[u8]) -> TxSegment {
+    TxSegment {
+        ptr: bytes.as_ptr(),
+        len: bytes.len(),
+    }
+}
+
+/// Everything `reap_tx` reports right now.
+fn reaped(mac: &mut Cyt4bfMac<Gem, RX, TX>) -> Vec<u32> {
+    let mut out = Vec::new();
+    mac.reap_tx(&mut |cookie| out.push(cookie));
+    out
+}
+
+/// The point of the seam: a frame in two pieces leaves as ONE frame, and the
+/// descriptors point at the caller's own buffers, not at a copy in the ring.
+#[test]
+fn a_gathered_frame_leaves_whole_and_is_read_where_the_caller_wrote_it() {
+    let (mut mac, model) = rig();
+    let (header, payload) = (frame(0x10, 14), frame(0x40, 100));
+    model.borrow_mut().expose(&header);
+    model.borrow_mut().expose(&payload);
+
+    // SAFETY: both buffers outlive the test and are not touched until it is over.
+    let outcome = unsafe { mac.transmit_gather(&[seg(&header), seg(&payload)], 7) };
+
+    assert_eq!(outcome, TxGather::Queued);
+    let m = model.borrow();
+    assert_eq!(m.wire, vec![[header.clone(), payload.clone()].concat()]);
+    assert_eq!(m.violations, Vec::<String>::new());
+    assert_eq!(
+        m.tx_desc(0).word0(),
+        m.bus(header.as_ptr()),
+        "the first descriptor points at the caller's header"
+    );
+    assert_eq!(
+        m.tx_desc(1).word0(),
+        m.bus(payload.as_ptr()),
+        "the second at the caller's payload"
+    );
+    assert_eq!(
+        m.tx_desc(0).word1() & TXD_LAST,
+        0,
+        "the header is not the last"
+    );
+    assert_ne!(
+        m.tx_desc(1).word1() & TXD_LAST,
+        0,
+        "the payload carries LAST"
+    );
+}
+
+/// The caller owns the memory until it is told. Reported once, with its cookie,
+/// and only after the controller finished with the frame.
+#[test]
+fn a_gathered_frame_is_reported_done_once_and_only_when_the_controller_has_read_it() {
+    let (mut mac, model) = rig();
+    let (a, b) = (frame(1, 20), frame(2, 30));
+    model.borrow_mut().expose(&a);
+    model.borrow_mut().expose(&b);
+    model.borrow_mut().hold_tx = true;
+
+    // SAFETY: as above.
+    assert_eq!(
+        unsafe { mac.transmit_gather(&[seg(&a), seg(&b)], 41) },
+        TxGather::Queued
+    );
+    assert_eq!(
+        reaped(&mut mac),
+        Vec::<u32>::new(),
+        "the controller has not read it"
+    );
+
+    model.borrow_mut().drain();
+    assert_eq!(reaped(&mut mac), vec![41], "now it has");
+    assert_eq!(reaped(&mut mac), Vec::<u32>::new(), "and it is said once");
+}
+
+/// A frame of several descriptors is released as a whole: its first descriptor is
+/// published HELD, the rest follow, and the first is let go last. Read off the
+/// order the descriptors were published in, since a polled model cannot be
+/// raced.
+#[test]
+fn a_gathered_frame_is_released_by_its_first_descriptor_and_last() {
+    let (mut mac, model) = rig();
+    let parts = [frame(1, 14), frame(2, 40), frame(3, 60)];
+    for p in &parts {
+        model.borrow_mut().expose(p);
+    }
+    model.borrow_mut().desc_cleans.clear();
+
+    // SAFETY: as above.
+    let outcome =
+        unsafe { mac.transmit_gather(&[seg(&parts[0]), seg(&parts[1]), seg(&parts[2])], 1) };
+    assert_eq!(outcome, TxGather::Queued);
+
+    let m = model.borrow();
+    let order: Vec<usize> = m.desc_cleans.iter().map(|(i, _)| *i).collect();
+    assert_eq!(
+        order,
+        vec![0, 1, 2, 0],
+        "the first is published again, last"
+    );
+    assert_ne!(
+        m.desc_cleans[0].1 & TXD_USED,
+        0,
+        "first published held, so the controller cannot start on a partial frame"
+    );
+    assert_eq!(
+        m.desc_cleans[3].1 & TXD_USED,
+        0,
+        "and its release is the last thing written"
+    );
+    assert_eq!(
+        m.violations,
+        Vec::<String>::new(),
+        "the controller never stopped inside the frame"
+    );
+    assert_eq!(m.wire.len(), 1);
+}
+
+/// A frame that wraps past the end of the ring: the wrap flag is on the last
+/// slot only, and the controller follows it.
+#[test]
+fn a_gathered_frame_can_straddle_the_ring_wrap() {
+    let (mut mac, model) = rig();
+    let (f1, f2) = (frame(0x11, 70), frame(0x22, 71));
+    assert!(mac.transmit(&f1));
+    assert!(mac.transmit(&f2));
+    let (a, b) = (frame(0x33, 20), frame(0x44, 25));
+    model.borrow_mut().expose(&a);
+    model.borrow_mut().expose(&b);
+
+    // Slots 0 and 1 are used and done, so the next descriptor is 2 and the frame
+    // takes 2 and then 0.
+    // SAFETY: as above.
+    assert_eq!(
+        unsafe { mac.transmit_gather(&[seg(&a), seg(&b)], 9) },
+        TxGather::Queued
+    );
+
+    let m = model.borrow();
+    assert_eq!(
+        m.wire,
+        vec![f1, f2, [a.clone(), b.clone()].concat()],
+        "the straddling frame is whole and in order"
+    );
+    assert_eq!(m.violations, Vec::<String>::new());
+    assert_ne!(m.tx_desc(TX - 1).word1() & TXD_WRAP, 0);
+    drop(m);
+    assert_eq!(reaped(&mut mac), vec![9]);
+}
+
+/// More pieces than the ring has descriptors can never be queued, so they are
+/// sent from a copy, which the caller can tell: nothing is held and no cookie
+/// comes.
+#[test]
+fn more_pieces_than_descriptors_are_copied_and_nothing_is_held() {
+    let (mut mac, model) = rig();
+    let parts: Vec<Vec<u8>> = (0..=TX as u8).map(|i| frame(i, 10 + i as usize)).collect();
+    let segs: Vec<TxSegment> = parts.iter().map(|p| seg(p)).collect();
+
+    // SAFETY: the pieces outlive the call; being copied, nothing outlives it.
+    assert_eq!(unsafe { mac.transmit_gather(&segs, 3) }, TxGather::Copied);
+
+    assert_eq!(model.borrow().wire, vec![parts.concat()]);
+    assert_eq!(reaped(&mut mac), Vec::<u32>::new());
+}
+
+/// While a gathered frame's cookie has not been taken, the ring is held in order
+/// behind it: the caller who queues in place and never reaps is refused once the
+/// ring is full, which is back-pressure on memory it has not been given back.
+#[test]
+fn an_unreaped_frame_holds_its_descriptors_until_it_is_reaped() {
+    let (mut mac, model) = rig();
+    let (a, b) = (frame(5, 20), frame(6, 20));
+    model.borrow_mut().expose(&a);
+    model.borrow_mut().expose(&b);
+
+    // SAFETY: as above.
+    assert_eq!(
+        unsafe { mac.transmit_gather(&[seg(&a), seg(&b)], 77) },
+        TxGather::Queued
+    );
+    assert!(mac.transmit(&frame(7, 60)), "the third descriptor is free");
+    assert!(
+        !mac.transmit(&frame(8, 60)),
+        "all three are still accounted for, though the controller is done"
+    );
+
+    assert_eq!(reaped(&mut mac), vec![77]);
+    assert!(mac.transmit(&frame(9, 60)), "reaping gave the ring back");
+    assert_eq!(model.borrow().wire.len(), 3);
+}
+
+/// A frame that needs more descriptors than are free is refused, and nothing is
+/// written for it; with room it goes.
+#[test]
+fn a_gathered_frame_without_room_is_refused_and_leaves_the_ring_alone() {
+    let (mut mac, model) = rig();
+    let (a, b) = (frame(1, 20), frame(2, 20));
+    model.borrow_mut().expose(&a);
+    model.borrow_mut().expose(&b);
+    model.borrow_mut().hold_tx = true;
+    assert!(mac.transmit(&frame(0x50, 60)));
+    assert!(mac.transmit(&frame(0x51, 60)));
+    model.borrow_mut().desc_cleans.clear();
+
+    // SAFETY: as above.
+    assert_eq!(
+        unsafe { mac.transmit_gather(&[seg(&a), seg(&b)], 5) },
+        TxGather::Refused,
+        "one descriptor free, two wanted"
+    );
+    assert!(
+        model.borrow().desc_cleans.is_empty(),
+        "a refused frame writes no descriptor"
+    );
+
+    model.borrow_mut().drain();
+    // SAFETY: as above.
+    assert_eq!(
+        unsafe { mac.transmit_gather(&[seg(&a), seg(&b)], 5) },
+        TxGather::Queued
+    );
+    assert_eq!(reaped(&mut mac), vec![5]);
+}
+
+#[test]
+fn a_gather_that_is_not_a_frame_is_refused() {
+    let (mut mac, _model) = rig();
+    let one = frame(1, 10);
+    let empty: [u8; 0] = [];
+    let oversize = vec![0u8; TXD_LEN_MASK as usize + 1];
+    let too_long = vec![0u8; BUF_LEN];
+    // SAFETY: every piece is readable for the call and none is queued.
+    unsafe {
+        assert_eq!(mac.transmit_gather(&[], 1), TxGather::Refused, "no pieces");
+        assert_eq!(
+            mac.transmit_gather(&[seg(&one), seg(&empty)], 1),
+            TxGather::Refused,
+            "a piece of no bytes"
+        );
+        assert_eq!(
+            mac.transmit_gather(&[seg(&oversize)], 1),
+            TxGather::Refused,
+            "a piece the length field cannot hold"
+        );
+        assert_eq!(
+            mac.transmit_gather(&[seg(&too_long), seg(&one)], 1),
+            TxGather::Refused,
+            "more than a buffer's worth in all"
+        );
+    }
+}
+
+/// A transmit error loses the wire's frame but not its owner's memory: the DMA
+/// is stopped, so the frame is complete as far as the memory goes, and its
+/// cookie is reported. The frame behind it, and the ring, work again.
+#[test]
+fn a_gathered_frame_lost_to_a_transmit_error_is_still_reported_and_the_ring_recovers() {
+    let (mut mac, model) = rig();
+    let (a, b) = (frame(1, 20), frame(2, 20));
+    model.borrow_mut().expose(&a);
+    model.borrow_mut().expose(&b);
+    model.borrow_mut().fail_next_tx = true;
+
+    // SAFETY: as above.
+    assert_eq!(
+        unsafe { mac.transmit_gather(&[seg(&a), seg(&b)], 12) },
+        TxGather::Queued
+    );
+    assert!(model.borrow().wire.is_empty(), "the controller stopped");
+
+    let next = frame(3, 64);
+    assert!(
+        mac.transmit(&next),
+        "the stopped queue is re-armed, then used"
+    );
+    assert_eq!(mac.tx_recoveries(), 1);
+    assert_eq!(model.borrow().wire, vec![next], "the failed frame was lost");
+    assert_eq!(model.borrow().violations, Vec::<String>::new());
+    assert_eq!(
+        reaped(&mut mac),
+        vec![12],
+        "but its memory is free, and it is said"
+    );
+}
+
+/// A link known to be down takes no frame, gathered or not.
+#[test]
+fn a_gather_is_refused_while_the_link_is_down() {
+    let (mut mac, model) = rig();
+    model.borrow_mut().phy_link = false;
+    assert_eq!(mac.bring_up_link(50_000), Err(LinkError::NoLink));
+    assert_eq!(mac.link_state(), LinkState::Down);
+    let bytes = frame(1, 30);
+    model.borrow_mut().expose(&bytes);
+
+    // SAFETY: the piece is readable for the call and nothing is queued.
+    assert_eq!(
+        unsafe { mac.transmit_gather(&[seg(&bytes)], 1) },
+        TxGather::Refused,
+        "a link known down is not sent into"
+    );
+    assert!(model.borrow().wire.is_empty());
 }
 
 #[test]

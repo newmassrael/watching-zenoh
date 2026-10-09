@@ -66,7 +66,7 @@ use core::sync::atomic::{fence, Ordering};
 
 pub use dma::{DmaArea, BUF_LEN};
 pub use phy::{LinkError, LinkMode, MdioError};
-use wz_runtime_core::EthernetMac;
+use wz_runtime_core::{join_segments, EthernetMac, TxGather, TxSegment};
 
 use dma::{Buffer, Descriptor, Slot, RX_BUF_UNITS};
 use regs::*;
@@ -290,11 +290,39 @@ pub struct Cyt4bfMac<B: Board, const RX: usize, const TX: usize> {
     /// What `NETWORK_CONTROL` holds, less the command bits.
     network_control: u32,
     rx_head: usize,
+    /// The next transmit descriptor software will fill.
     tx_head: usize,
+    /// The oldest descriptor not yet given back to software: the first
+    /// descriptor of the oldest frame queued and not reclaimed.
+    tx_tail: usize,
+    /// How many descriptors lie from `tx_tail` up to `tx_head`.
+    tx_inflight: usize,
+    /// For each frame queued and not reclaimed, indexed by its FIRST descriptor:
+    /// how many descriptors it took, and the caller's cookie when the controller
+    /// reads it in place.
+    chains: [Chain; TX],
     phy: Option<u8>,
     link: LinkState,
     next_link_poll_ms: u64,
     tx_recoveries: u32,
+}
+
+/// One frame in the transmit ring.
+#[derive(Clone, Copy)]
+struct Chain {
+    /// Descriptors the frame occupies; `0` marks a first-descriptor index no
+    /// frame starts at.
+    ndesc: u16,
+    /// `Some` when the controller reads the frame IN PLACE: the caller is owed a
+    /// report ([`EthernetMac::reap_tx`]) when it no longer does.
+    cookie: Option<u32>,
+}
+
+impl Chain {
+    const EMPTY: Chain = Chain {
+        ndesc: 0,
+        cookie: None,
+    };
 }
 
 // SAFETY: the driver owns its `DmaArea` exclusively (it took the `&'static mut`);
@@ -348,6 +376,9 @@ impl<B: Board, const RX: usize, const TX: usize> Cyt4bfMac<B, RX, TX> {
             network_control: NWCTRL_MAN_PORT_EN,
             rx_head: 0,
             tx_head: 0,
+            tx_tail: 0,
+            tx_inflight: 0,
+            chains: [Chain::EMPTY; TX],
             phy: config.phy_address,
             link: LinkState::Unknown,
             next_link_poll_ms: 0,
@@ -494,8 +525,19 @@ impl<B: Board, const RX: usize, const TX: usize> Cyt4bfMac<B, RX, TX> {
             .clean(slot.0 as *const u8, core::mem::size_of::<Descriptor>());
     }
 
-    /// Every transmit slot software-owned (used set); the last wraps.
+    /// Every transmit slot software-owned (used set); the last wraps. Nothing is
+    /// queued afterwards.
     fn init_tx_ring(&mut self) {
+        self.release_all_tx_slots();
+        self.tx_head = 0;
+        self.tx_tail = 0;
+        self.tx_inflight = 0;
+        self.chains = [Chain::EMPTY; TX];
+    }
+
+    /// Write every transmit descriptor as software-owned (used set, the last
+    /// wrapping), leaving the ring's bookkeeping alone.
+    fn release_all_tx_slots(&mut self) {
         for i in 0..TX {
             let slot = self.tx_slot(i);
             let wrap = if i == TX - 1 { TXD_WRAP } else { 0 };
@@ -504,7 +546,6 @@ impl<B: Board, const RX: usize, const TX: usize> Cyt4bfMac<B, RX, TX> {
             self.board
                 .clean(slot.0 as *const u8, core::mem::size_of::<Descriptor>());
         }
-        self.tx_head = 0;
     }
 
     /// The transmit DMA stopped on an error: it will not move until the queue is
@@ -513,18 +554,79 @@ impl<B: Board, const RX: usize, const TX: usize> Cyt4bfMac<B, RX, TX> {
     /// controller at the start and enable it. This is the Cadence driver's own
     /// reset of a transmit queue (`emacResetTxQ`: disabled, all used, pointer
     /// rewritten) in this driver's terms.
+    ///
+    /// A frame the controller was to read IN PLACE is lost to the wire like any
+    /// other, but its owner is still owed the report that the memory is free, and
+    /// the DMA being stopped is exactly what makes it free. Those frames keep their
+    /// place in the bookkeeping, now complete, for [`EthernetMac::reap_tx`] to
+    /// report; the copied frames, which have no one waiting, are dropped. When none
+    /// is left the ring restarts from its first slot as it always did; when one is,
+    /// the controller is pointed at the head instead, because the descriptors
+    /// between the tail and the head are still accounted for.
     fn recover_tx(&mut self) {
         self.board.write(
             NETWORK_CONTROL,
             self.network_control & !NWCTRL_ENABLE_TRANSMIT,
         );
         self.board.write(TRANSMIT_STATUS, TXSR_ALL);
-        self.init_tx_ring();
-        let tx0 = self.tx_slot(0).0 as *const u8;
-        let bus = self.board.bus_address(tx0);
+        self.release_all_tx_slots();
+        self.reclaim(None);
+        if self.tx_inflight == 0 {
+            self.tx_head = 0;
+            self.tx_tail = 0;
+        }
+        let restart = self.tx_slot(self.tx_head).0 as *const u8;
+        let bus = self.board.bus_address(restart);
         self.board.write(TRANSMIT_Q_PTR, bus & !QPTR_DISABLE);
         self.board.write(NETWORK_CONTROL, self.network_control);
         self.tx_recoveries = self.tx_recoveries.wrapping_add(1);
+    }
+
+    /// Take back the descriptors of every frame the controller has finished, oldest
+    /// first, and stop at the first it has not.
+    ///
+    /// A frame is finished when the USED bit of its FIRST descriptor is set: that
+    /// is the one the controller writes back, and the only one the Cadence driver
+    /// reads (`emacFreeTxDesc`: "only test used bit state for first buffer in
+    /// frame"). It leaves the later descriptors of a frame as it found them, so
+    /// software marks them used itself, as that driver does, before they count as
+    /// free again.
+    ///
+    /// With `done` the cookie of a frame read in place is reported. Without it such
+    /// a frame is left where it is, still owed to [`EthernetMac::reap_tx`], and
+    /// everything behind it waits too: the ring is reclaimed in order, so a caller
+    /// that queues in place and never reaps is refused once the ring is full, which
+    /// is the right back-pressure for memory it has not been given back.
+    fn reclaim(&mut self, mut done: Option<&mut dyn FnMut(u32)>) {
+        while self.tx_inflight > 0 {
+            let chain = self.chains[self.tx_tail];
+            if chain.cookie.is_some() && done.is_none() {
+                return;
+            }
+            let first = self.tx_slot(self.tx_tail);
+            self.board
+                .invalidate(first.0 as *const u8, core::mem::size_of::<Descriptor>());
+            if first.word1() & TXD_USED == 0 {
+                return;
+            }
+            // Every descriptor between tail and head belongs to a recorded frame;
+            // a record of none would leave this loop standing still, so it is
+            // loud in a test and one descriptor in a build.
+            debug_assert!(chain.ndesc > 0, "an in-flight descriptor with no frame");
+            let ndesc = usize::from(chain.ndesc).max(1);
+            for k in 1..ndesc {
+                let later = self.tx_slot((self.tx_tail + k) % TX);
+                later.set_word1(later.word1() | TXD_USED);
+                self.board
+                    .clean(later.0 as *const u8, core::mem::size_of::<Descriptor>());
+            }
+            if let (Some(cookie), Some(report)) = (chain.cookie, done.as_mut()) {
+                report(cookie);
+            }
+            self.chains[self.tx_tail] = Chain::EMPTY;
+            self.tx_tail = (self.tx_tail + ndesc) % TX;
+            self.tx_inflight -= ndesc;
+        }
     }
 
     /// How many times a stopped transmit queue was re-armed.
@@ -693,10 +795,13 @@ impl<B: Board, const RX: usize, const TX: usize> EthernetMac for Cyt4bfMac<B, RX
         if self.board.read(TRANSMIT_STATUS) & TXSR_FATAL != 0 {
             self.recover_tx();
         }
+        // Descriptors the controller has finished with come back first, so a ring
+        // that was full a moment ago is not refused on stale news.
+        self.reclaim(None);
         let slot = self.tx_slot(self.tx_head);
         self.board
             .invalidate(slot.0 as *const u8, core::mem::size_of::<Descriptor>());
-        if slot.word1() & TXD_USED == 0 {
+        if self.tx_inflight == TX || slot.word1() & TXD_USED == 0 {
             // The controller still owns the next slot: the ring is full.
             return false;
         }
@@ -714,12 +819,109 @@ impl<B: Board, const RX: usize, const TX: usize> EthernetMac for Cyt4bfMac<B, RX
         slot.set_word1((frame.len() as u32 & TXD_LEN_MASK) | TXD_LAST | wrap);
         self.board
             .clean(slot.0 as *const u8, core::mem::size_of::<Descriptor>());
+        // A frame of one descriptor, copied: no one is waiting for it.
+        self.chains[self.tx_head] = Chain {
+            ndesc: 1,
+            cookie: None,
+        };
         self.tx_head = (self.tx_head + 1) % TX;
+        self.tx_inflight += 1;
         // The descriptor must be visible before the kick that makes the DMA read it.
         fence(Ordering::Release);
         self.board
             .write(NETWORK_CONTROL, self.network_control | NWCTRL_TX_START);
         true
+    }
+
+    /// ARCHITECTURE section 9.1 — one frame from several pieces, one descriptor
+    /// each, read by the controller where the pieces lie.
+    ///
+    /// The protocol is the Cadence driver's own (`emacQueueTxBuf`): the FIRST
+    /// descriptor of a frame of more than one is written with USED set, so the
+    /// controller, which stops at a used descriptor, cannot start on a frame whose
+    /// tail is not yet in the ring; the others are written normally, the last
+    /// carrying LAST; and the first descriptor's USED is cleared only once the rest
+    /// are in place, which is the release of the whole frame.
+    ///
+    /// Frames that cannot be queued in place are copied instead, through the
+    /// one-buffer path: more pieces than the ring has descriptors (it could never
+    /// fit), which the caller sees as [`TxGather::Copied`].
+    unsafe fn transmit_gather(&mut self, segments: &[TxSegment], cookie: u32) -> TxGather {
+        let n = segments.len();
+        let mut total = 0usize;
+        for s in segments {
+            // A descriptor's length field is 14 bits, and a zero length is not a
+            // buffer.
+            if s.len == 0 || s.len > TXD_LEN_MASK as usize {
+                return TxGather::Refused;
+            }
+            total += s.len;
+        }
+        if n == 0 || total > BUF_LEN {
+            return TxGather::Refused;
+        }
+        if n > TX {
+            let mut frame = [0u8; BUF_LEN];
+            // SAFETY: the caller's contract makes every segment readable, and
+            // `total <= BUF_LEN` keeps the joined frame inside `frame`.
+            let Some(joined) = (unsafe { join_segments(segments, &mut frame) }) else {
+                return TxGather::Refused;
+            };
+            return if self.transmit(&frame[..joined]) {
+                TxGather::Copied
+            } else {
+                TxGather::Refused
+            };
+        }
+        if self.link == LinkState::Down {
+            return TxGather::Refused;
+        }
+        if self.board.read(TRANSMIT_STATUS) & TXSR_FATAL != 0 {
+            self.recover_tx();
+        }
+        self.reclaim(None);
+        if TX - self.tx_inflight < n {
+            return TxGather::Refused;
+        }
+        let first_index = self.tx_head;
+        for (k, segment) in segments.iter().enumerate() {
+            let index = (first_index + k) % TX;
+            let slot = self.tx_slot(index);
+            // The controller reads these bytes by DMA, so any copy the CPU still
+            // holds must reach memory first.
+            self.board.clean(segment.ptr, segment.len);
+            let last = if k == n - 1 { TXD_LAST } else { 0 };
+            let wrap = if index == TX - 1 { TXD_WRAP } else { 0 };
+            let held = if k == 0 && n > 1 { TXD_USED } else { 0 };
+            slot.set_word0(self.board.bus_address(segment.ptr));
+            fence(Ordering::Release);
+            slot.set_word1((segment.len as u32 & TXD_LEN_MASK) | last | wrap | held);
+            self.board
+                .clean(slot.0 as *const u8, core::mem::size_of::<Descriptor>());
+        }
+        if n > 1 {
+            // The release of the frame: every descriptor behind the first is in the
+            // ring and visible before the one the controller is waiting on is let go.
+            fence(Ordering::Release);
+            let first = self.tx_slot(first_index);
+            first.set_word1(first.word1() & !TXD_USED);
+            self.board
+                .clean(first.0 as *const u8, core::mem::size_of::<Descriptor>());
+        }
+        self.chains[first_index] = Chain {
+            ndesc: n as u16,
+            cookie: Some(cookie),
+        };
+        self.tx_head = (first_index + n) % TX;
+        self.tx_inflight += n;
+        fence(Ordering::Release);
+        self.board
+            .write(NETWORK_CONTROL, self.network_control | NWCTRL_TX_START);
+        TxGather::Queued
+    }
+
+    fn reap_tx(&mut self, done: &mut dyn FnMut(u32)) {
+        self.reclaim(Some(done));
     }
 
     fn receive(&mut self, out: &mut [u8]) -> Option<usize> {

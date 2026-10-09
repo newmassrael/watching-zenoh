@@ -121,7 +121,7 @@ pub mod time;
 
 pub use allocator::Allocator;
 pub use error::RuntimeError;
-pub use eth_mac::EthernetMac;
+pub use eth_mac::{join_segments, EthernetMac, TxGather, TxSegment};
 pub use runtime::Runtime;
 pub use rx_slots::RxSlots;
 pub use spi::SpiTransfer;

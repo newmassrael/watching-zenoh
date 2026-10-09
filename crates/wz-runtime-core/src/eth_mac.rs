@@ -49,6 +49,97 @@ pub trait EthernetMac {
     /// length, or `None` when nothing is waiting. A frame longer than `buf`
     /// is dropped whole rather than truncated.
     fn receive(&mut self, buf: &mut [u8]) -> Option<usize>;
+
+    /// Put one frame on the wire from several pieces, WITHOUT first joining them
+    /// into one buffer, when the controller can read them where they are
+    /// (ARCHITECTURE section 9.1: the codec's bytes are written once, and the DMA
+    /// reads them from there).
+    ///
+    /// The answer says which of three things happened:
+    ///
+    /// * [`TxGather::Refused`]: nothing was sent and nothing is held. Same as
+    ///   [`transmit`](Self::transmit) returning `false`.
+    /// * [`TxGather::Copied`]: the frame was sent from a copy. The pieces are the
+    ///   caller's again at once and `cookie` will never be reported. This is what
+    ///   the default does, so a MAC that cannot gather loses nothing.
+    /// * [`TxGather::Queued`]: the controller will read the pieces IN PLACE. They
+    ///   must stay where they are, unchanged, until
+    ///   [`reap_tx`](Self::reap_tx) reports `cookie`, once.
+    ///
+    /// # Safety
+    ///
+    /// Every segment must point at `len` readable bytes, and for a `Queued` answer
+    /// they must stay readable and unchanged until `cookie` is reported. The MAC
+    /// reads them from a different bus master, so the caller must not hand it
+    /// memory that master cannot reach.
+    unsafe fn transmit_gather(&mut self, segments: &[TxSegment], cookie: u32) -> TxGather {
+        let _ = cookie;
+        let mut frame = [0u8; FRAME_MAX];
+        // SAFETY: the caller's contract makes every segment readable.
+        let Some(joined) = (unsafe { join_segments(segments, &mut frame) }) else {
+            return TxGather::Refused;
+        };
+        if joined != 0 && self.transmit(&frame[..joined]) {
+            TxGather::Copied
+        } else {
+            TxGather::Refused
+        }
+    }
+
+    /// Report, through `done`, the `cookie` of every [`TxGather::Queued`] frame
+    /// whose pieces the controller no longer reads, in the order they were
+    /// queued. A MAC that never queues has nothing to report.
+    ///
+    /// A MAC that queues in place HOLDS a finished frame's cookie until this is
+    /// called, and refuses further frames behind it once its ring is full, so a
+    /// caller that queues must call this regularly.
+    fn reap_tx(&mut self, done: &mut dyn FnMut(u32)) {
+        let _ = done;
+    }
+}
+
+/// One piece of an outgoing frame, in memory the caller keeps in place.
+#[derive(Clone, Copy, Debug)]
+pub struct TxSegment {
+    /// The first byte.
+    pub ptr: *const u8,
+    /// How many bytes, at least one.
+    pub len: usize,
+}
+
+/// Copy `segments` one after another into `out` and return how many bytes that
+/// made, or `None` when they do not fit. The join a MAC that cannot send in place
+/// (or cannot send THIS frame in place) does, so it is written once.
+///
+/// # Safety
+///
+/// Every segment must point at `len` readable bytes that do not overlap `out`.
+pub unsafe fn join_segments(segments: &[TxSegment], out: &mut [u8]) -> Option<usize> {
+    let mut at = 0;
+    for segment in segments {
+        if segment.len > out.len() - at {
+            return None;
+        }
+        // SAFETY: the caller promised `len` readable bytes; the bound above keeps
+        // the write inside `out`.
+        unsafe {
+            core::ptr::copy_nonoverlapping(segment.ptr, out.as_mut_ptr().add(at), segment.len)
+        };
+        at += segment.len;
+    }
+    Some(at)
+}
+
+/// What [`EthernetMac::transmit_gather`] did with a frame.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TxGather {
+    /// Not sent, not held.
+    Refused,
+    /// Sent from a copy; the pieces are free now.
+    Copied,
+    /// Queued to be read in place; free once [`EthernetMac::reap_tx`] reports the
+    /// cookie.
+    Queued,
 }
 
 #[cfg(test)]
@@ -100,5 +191,57 @@ mod tests {
         assert_eq!(mac.receive(&mut buf), Some(60));
         assert_eq!(&buf[..60], &[7u8; 60]);
         assert_eq!(mac.receive(&mut buf), None, "nothing is waiting");
+    }
+
+    fn segment(bytes: &[u8]) -> TxSegment {
+        TxSegment {
+            ptr: bytes.as_ptr(),
+            len: bytes.len(),
+        }
+    }
+
+    /// A MAC that does not gather still sends a gathered frame: the default joins
+    /// the pieces in order into one frame, says it COPIED (so the caller's memory
+    /// is free at once and no cookie will ever come), and has nothing to reap.
+    #[test]
+    fn the_default_gather_joins_the_pieces_and_reports_a_copy() {
+        let mut mac = Echo { held: None };
+        let (head, body) = ([1u8, 2, 3], [4u8, 5]);
+        // SAFETY: both arrays outlive the call and are fully readable.
+        let outcome = unsafe { mac.transmit_gather(&[segment(&head), segment(&body)], 99) };
+        assert_eq!(outcome, TxGather::Copied);
+        let mut buf = [0u8; FRAME_MAX];
+        assert_eq!(mac.receive(&mut buf), Some(5));
+        assert_eq!(&buf[..5], &[1, 2, 3, 4, 5], "the pieces, in order");
+        let mut reported = 0;
+        mac.reap_tx(&mut |_| reported += 1);
+        assert_eq!(reported, 0, "a copy never reports a cookie");
+    }
+
+    #[test]
+    fn the_default_gather_refuses_what_a_frame_cannot_be() {
+        let mut mac = Echo { held: None };
+        // SAFETY: the pieces are readable for the call; nothing is queued.
+        unsafe {
+            assert_eq!(mac.transmit_gather(&[], 0), TxGather::Refused, "no frame");
+            let empty: [u8; 0] = [];
+            assert_eq!(
+                mac.transmit_gather(&[segment(&empty)], 0),
+                TxGather::Refused,
+                "no bytes"
+            );
+            let big = [0u8; FRAME_MAX];
+            let one = [0u8; 1];
+            assert_eq!(
+                mac.transmit_gather(&[segment(&big), segment(&one)], 0),
+                TxGather::Refused,
+                "one byte past the longest frame"
+            );
+            assert_eq!(
+                mac.transmit_gather(&[segment(&big)], 0),
+                TxGather::Copied,
+                "the longest frame is fine"
+            );
+        }
     }
 }
