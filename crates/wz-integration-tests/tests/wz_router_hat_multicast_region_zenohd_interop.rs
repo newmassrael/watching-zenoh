@@ -64,10 +64,10 @@ use std::process::{Command, Stdio};
 use std::time::Duration;
 
 use wz_integration_tests::common::{
-    default_route_iface, graceful_terminate, read_captured, spawn_on_ephemeral_port,
-    spawn_publishing_zpub, spawn_subscribed_zsub, wait_for_substring, wait_for_tcp_accept_alive,
-    wait_for_zenohd_handshake_ready, wz_ap_demo_binary, zenoh_pico_cli_binary, zenohd_binary,
-    ChildGuard, PortReservation, ZENOHD_TCP_ACCEPT_BUDGET,
+    assert_demo_binary_newer_than_sources, default_route_iface, graceful_terminate, read_captured,
+    spawn_on_ephemeral_port, spawn_publishing_zpub, spawn_subscribed_zsub, wait_for_substring,
+    wait_for_tcp_accept_alive, wait_for_zenohd_handshake_ready, wz_ap_demo_binary,
+    zenoh_pico_cli_binary, zenohd_binary, ChildGuard, PortReservation, ZENOHD_TCP_ACCEPT_BUDGET,
 };
 
 const GROUP: Ipv4Addr = Ipv4Addr::new(224, 0, 0, 231);
@@ -156,8 +156,10 @@ fn run_topology(router: Router, port: u16) -> Outcome {
                 (guard, None, format!("tcp/127.0.0.1:{tcp_port}"))
             }
             Router::Wz => {
+                let demo = wz_ap_demo_binary();
+                assert_demo_binary_newer_than_sources(&demo);
                 let (mut guard, mut reader, tcp_port) = spawn_on_ephemeral_port(
-                    &wz_ap_demo_binary(),
+                    &demo,
                     &[
                         "--router-hat",
                         "127.0.0.1:0",
@@ -188,8 +190,10 @@ fn run_topology(router: Router, port: u16) -> Outcome {
         spawn_subscribed_zsub(&z_sub, KEY, &endpoint, "the router", tempfile);
 
     // ── P: a unicast PEER subscriber that is not on the group. ──
+    let demo = wz_ap_demo_binary();
+    assert_demo_binary_newer_than_sources(&demo);
     let (mut p_guard, mut p_reader, _p_port) = spawn_on_ephemeral_port(
-        &wz_ap_demo_binary(),
+        &demo,
         &[
             "--peer",
             "127.0.0.1:0",

@@ -1952,6 +1952,8 @@ mod shared_decode_tests {
 #[cfg(all(
     test,
     feature = "transport-stats",
+    feature = "alloc",
+    feature = "attachment-bytes",
     any(
         feature = "codec-push",
         feature = "codec-request",

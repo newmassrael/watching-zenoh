@@ -52,8 +52,8 @@ use std::time::{Duration, Instant};
 
 use tokio::net::TcpStream;
 use wz_integration_tests::common::{
-    read_captured, wait_for_tcp_accept_alive, wz_ap_demo_binary, zenohd_binary, ChildGuard,
-    PortReservation, ZENOHD_TCP_ACCEPT_BUDGET,
+    assert_demo_binary_newer_than_sources, read_captured, wait_for_tcp_accept_alive,
+    wz_ap_demo_binary, zenohd_binary, ChildGuard, PortReservation, ZENOHD_TCP_ACCEPT_BUDGET,
 };
 use wz_runtime_tokio::runtime_impl::TokioTime;
 use wz_runtime_tokio::session_open::{
@@ -222,6 +222,7 @@ fn run(south: &str) -> Vec<(Option<String>, Option<String>)> {
     }
     let dial = format!("127.0.0.1:{tcp}");
     let demo = wz_ap_demo_binary();
+    assert_demo_binary_newer_than_sources(&demo);
 
     let mut results = Vec::new();
     for probe in &PROBES {

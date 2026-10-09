@@ -4967,7 +4967,13 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// Item 751 — put the decided bound on the Open chain `role` sends, or take
     /// a stale one off it: the pin's Open carries the entry exactly when its
     /// callback answered `Some`.
-    #[cfg(feature = "codec-open-body")]
+    ///
+    /// Gated like its two callers (`send_open_syn`, `send_open_ack`): a build
+    /// with the Open body but neither side's session feature has no caller.
+    #[cfg(all(
+        feature = "codec-open-body",
+        any(feature = "session-unicast-open", feature = "session-unicast-accept")
+    ))]
     fn stage_local_remote_bound(&self, role: ExtChainRole) {
         let bound = self.local_remote_bound();
         let want = crate::ext_header::ext_eid(crate::extbound::REMOTE_BOUND_EXT_HEADER);

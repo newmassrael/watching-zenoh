@@ -578,15 +578,19 @@ mod tests {
     /// program that prints a line and then waits, and its line is in the failure because the
     /// runner launches it through `stdbuf`. The control is the same program started
     /// directly, which loses the line, so the assertion cannot pass on a program that
-    /// flushes anyway. Skipped, loudly, where the host has no `cc` or no `stdbuf`.
+    /// flushes anyway.
+    ///
+    /// Linux only, and no skip: `stdbuf` is coreutils and `cc` is the linker every Rust
+    /// build here already needs, so a host this test runs on that lacks either is a broken
+    /// host, and a test that passed by printing "skip" there would be the shape
+    /// `silent_skip_gate.py` exists to refuse.
+    #[cfg(target_os = "linux")]
     #[test]
     fn a_killed_c_program_shows_the_line_it_printed_before_it_stalled() {
-        if find_on_path("stdbuf").is_none() || find_on_path("cc").is_none() {
-            eprintln!(
-                "skip: this host has no stdbuf or no cc, so there is no line-buffering to show"
-            );
-            return;
-        }
+        assert!(
+            find_on_path("stdbuf").is_some() && find_on_path("cc").is_some(),
+            "this host has no stdbuf or no cc, and the runner's line-buffering needs both"
+        );
         let dir = tempfile::tempdir().expect("tempdir");
         let src = dir.path().join("stall.c");
         std::fs::write(

@@ -2226,7 +2226,7 @@ impl RouterForwarder {
     /// (`zenoh/src/net/routing/gateway.rs` @ `GatewaySouthConf::Custom(subregions) => {`).
     /// This builds the same hats and places each face by [`region_of`]. A remote the
     /// rules place in a subregion's ROUTER region is refused, because a router
-    /// hat serving a south region is not built (see
+    /// hat serving a south region is not built (debt-751; see
     /// [`refuses_face`](FaceForwarder::refuses_face)).
     ///
     /// Call it before any face registers: the hats a registered face joined are

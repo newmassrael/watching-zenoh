@@ -8055,12 +8055,14 @@ mod tests {
             path,
             demo,
             &DemoScope::Linked {
-                features: vec!["a".to_owned(), "b".to_owned()],
+                features: vec!["preset-ap-client".to_owned(), "ws".to_owned()],
                 crate_dirs: BTreeSet::new(),
             },
         );
         assert!(
-            linked.contains("cargo build -p wz-ap-demo --no-default-features --features a,b"),
+            linked.contains(
+                "cargo build -p wz-ap-demo --no-default-features --features preset-ap-client,ws"
+            ),
             "a linked crate is cured by building the SAME feature set: {linked}"
         );
         assert!(!linked.contains("cargo clean"), "{linked}");
