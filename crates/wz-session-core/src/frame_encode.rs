@@ -17,10 +17,11 @@
 
 use alloc::vec::Vec;
 
-use sce_forge_runtime::codec::{CodecError, SceSink, VecSink};
+use sce_forge_runtime::codec::{CodecError, SceSink};
 use wz_codecs::wire_const;
 
 use crate::qos::Priority;
+use crate::tx_buf::{TxBuf, TxSink};
 
 #[cfg(feature = "codec-declare")]
 use wz_codecs::declare::{Declare, DeclareOwned};
@@ -95,16 +96,15 @@ const QOS_EXT_WIRE_BYTES: usize = 2;
 /// (`zenoh-codec/src/transport/fragment.rs` `write`). The z64 body reuses the
 /// codec's `write_vle_u64` primitive rather than a hand-rolled VLE.
 #[cfg(feature = "transport-qos")]
-fn write_qos_ext(buf: &mut Vec<u8>, priority: Priority, chained: bool) {
+fn write_qos_ext(buf: &mut dyn TxBuf, priority: Priority, chained: bool) -> Result<(), CodecError> {
     let header = if chained {
         QOS_EXT_HEADER | wire_const::FLAG_T_Z
     } else {
         QOS_EXT_HEADER
     };
-    buf.push(header);
-    let mut sink = VecSink::new(buf);
+    buf.append_byte(header)?;
+    let mut sink = TxSink::new(buf);
     sink.write_vle_u64(priority.wire_byte() as u64)
-        .expect("VecSink is infallible");
 }
 
 /// R311jq — write the FRAME prefix (header byte + `VLE(sn)`) into `buf`.
@@ -126,7 +126,16 @@ fn write_qos_ext(buf: &mut Vec<u8>, priority: Priority, chained: bool) {
 /// (`zenoh-codec/src/transport/frame.rs`). A `None` (DEFAULT / non-QoS) Frame is
 /// byte-identical to a pre-QoS Frame. The Frame carries only the QoS ext (no
 /// First/Drop markers — those are Fragment-only), so the ext is never chained.
-pub(crate) fn begin_frame(buf: &mut Vec<u8>, sn: u64, parent_flags: u8, ext_qos: Option<Priority>) {
+///
+/// The destination is any [`TxBuf`]: a heap `Vec` never refuses, a fixed buffer
+/// (a pool slot's storage) returns [`CodecError::BufferOverflow`] if even the
+/// prefix, at most 13 bytes, does not fit.
+pub(crate) fn begin_frame(
+    buf: &mut dyn TxBuf,
+    sn: u64,
+    parent_flags: u8,
+    ext_qos: Option<Priority>,
+) -> Result<(), CodecError> {
     // The QoS ext (when present) sets the Frame-level ext-chain Z flag.
     #[cfg(feature = "transport-qos")]
     let z = if ext_qos.is_some() {
@@ -139,22 +148,22 @@ pub(crate) fn begin_frame(buf: &mut Vec<u8>, sn: u64, parent_flags: u8, ext_qos:
         let _ = ext_qos;
         0u8
     };
-    buf.push(parent_flags | z | wire_const::T_MID_FRAME);
+    buf.append_byte(parent_flags | z | wire_const::T_MID_FRAME)?;
     {
-        let mut sink = VecSink::new(buf);
+        let mut sink = TxSink::new(buf);
         let mut vle = sn;
         while vle >= 0x80 {
-            sink.write_u8((vle as u8 & 0x7F) | 0x80)
-                .expect("VecSink is infallible");
+            sink.write_u8((vle as u8 & 0x7F) | 0x80)?;
             vle >>= 7;
         }
-        sink.write_u8(vle as u8).expect("VecSink is infallible");
+        sink.write_u8(vle as u8)?;
     }
     #[cfg(feature = "transport-qos")]
     if let Some(priority) = ext_qos {
         // Frame's sole ext → never chained (Z clear on the ext header).
-        write_qos_ext(buf, priority, false);
+        write_qos_ext(buf, priority, false)?;
     }
+    Ok(())
 }
 
 /// R311jq — derive the link-driver [`Reliability`] of an already-encoded
@@ -204,16 +213,35 @@ pub(crate) fn encode_frame_envelope<P>(
     payload_encode: P,
 ) -> Vec<u8>
 where
-    P: FnOnce(&mut VecSink<'_>) -> Result<(), CodecError>,
+    P: FnOnce(&mut TxSink<'_>) -> Result<(), CodecError>,
 {
     // +2 for a possible ext_qos ([0x31][VLE(priority)]); harmless slack when absent.
     let mut wire = Vec::with_capacity(1 + 10 + 2 + worst_case_payload);
-    begin_frame(&mut wire, sn, parent_flags, ext_qos);
-    {
-        let mut sink = VecSink::new(&mut wire);
-        payload_encode(&mut sink).expect("VecSink is infallible");
-    }
+    encode_frame_envelope_into(&mut wire, sn, parent_flags, ext_qos, payload_encode)
+        .expect("a Vec grows, so its sink is infallible");
     wire
+}
+
+/// The same envelope, written into a destination the caller chose: a heap
+/// `Vec` (what [`encode_frame_envelope`] passes), or a fixed buffer such as a
+/// pool slot's storage, which is the ARCHITECTURE section 9.1 form ("the codec
+/// writes directly into a pool slot"). On a fixed buffer the frame that does
+/// not fit is an `Err(CodecError::BufferOverflow)` and not a panic; the bytes
+/// already written stay in the buffer, so the caller rolls back with
+/// [`TxBuf::truncate`] to the length it saw before the call.
+pub(crate) fn encode_frame_envelope_into<P>(
+    buf: &mut dyn TxBuf,
+    sn: u64,
+    parent_flags: u8,
+    ext_qos: Option<Priority>,
+    payload_encode: P,
+) -> Result<(), CodecError>
+where
+    P: FnOnce(&mut TxSink<'_>) -> Result<(), CodecError>,
+{
+    begin_frame(buf, sn, parent_flags, ext_qos)?;
+    let mut sink = TxSink::new(buf);
+    payload_encode(&mut sink)
 }
 
 /// R311jq — per-type network-message body encoder: the single home of
@@ -224,7 +252,7 @@ where
 #[cfg(feature = "codec-push")]
 pub(crate) fn push_body(
     push: &PushOwned,
-) -> impl Fn(&mut VecSink<'_>) -> Result<(), CodecError> + '_ {
+) -> impl Fn(&mut TxSink<'_>) -> Result<(), CodecError> + '_ {
     move |sink| {
         push.try_as_borrowed()
             .expect("wz builders emit <=N exts by construction")
@@ -260,7 +288,7 @@ pub(crate) fn push_body(
     feature = "codec-push",
     feature = "session-unicast"
 ))]
-pub(crate) fn oam_body(oam: &OamOwned) -> impl Fn(&mut VecSink<'_>) -> Result<(), CodecError> + '_ {
+pub(crate) fn oam_body(oam: &OamOwned) -> impl Fn(&mut TxSink<'_>) -> Result<(), CodecError> + '_ {
     move |sink| {
         // R311y880 (R311y879 carry 3) — the EMIT half of the OAM id's two
         // widths. `OamOwned.id` is the WIRE width (a full zint), but upstream's
@@ -294,7 +322,7 @@ pub(crate) fn oam_body(oam: &OamOwned) -> impl Fn(&mut VecSink<'_>) -> Result<()
 #[cfg(feature = "codec-declare")]
 pub(crate) fn declare_body(
     declare: &DeclareOwned,
-) -> impl Fn(&mut VecSink<'_>) -> Result<(), CodecError> + '_ {
+) -> impl Fn(&mut TxSink<'_>) -> Result<(), CodecError> + '_ {
     move |sink| {
         declare
             .try_as_borrowed()
@@ -311,7 +339,7 @@ pub(crate) fn declare_body(
 #[cfg(feature = "codec-request")]
 pub(crate) fn request_body(
     request: &RequestOwned,
-) -> impl Fn(&mut VecSink<'_>) -> Result<(), CodecError> + '_ {
+) -> impl Fn(&mut TxSink<'_>) -> Result<(), CodecError> + '_ {
     move |sink| {
         request
             .try_as_borrowed()
@@ -328,7 +356,7 @@ pub(crate) fn request_body(
 #[cfg(feature = "codec-response")]
 pub(crate) fn response_body(
     response: &ResponseOwned,
-) -> impl Fn(&mut VecSink<'_>) -> Result<(), CodecError> + '_ {
+) -> impl Fn(&mut TxSink<'_>) -> Result<(), CodecError> + '_ {
     move |sink| {
         response
             .try_as_borrowed()
@@ -345,7 +373,7 @@ pub(crate) fn response_body(
 #[cfg(feature = "codec-response-final")]
 pub(crate) fn response_final_body(
     response_final: &ResponseFinalOwned,
-) -> impl Fn(&mut VecSink<'_>) -> Result<(), CodecError> + '_ {
+) -> impl Fn(&mut TxSink<'_>) -> Result<(), CodecError> + '_ {
     move |sink| {
         response_final
             .try_as_borrowed()
@@ -361,7 +389,7 @@ pub(crate) fn response_final_body(
 /// (`Fn`, not `FnOnce` — the batch-overflow retry encodes twice).
 pub(crate) fn interest_body(
     interest: &InterestOwned,
-) -> impl Fn(&mut VecSink<'_>) -> Result<(), CodecError> + '_ {
+) -> impl Fn(&mut TxSink<'_>) -> Result<(), CodecError> + '_ {
     move |sink| {
         interest
             .try_as_borrowed()
@@ -1030,7 +1058,7 @@ pub fn build_fragment_wire(
         // form stays the byte-verified SSOT; the ext chain + the real payload are
         // appended after, in id-ascending order.
         {
-            let mut sink = VecSink::new(&mut wire);
+            let mut sink = sce_forge_runtime::codec::VecSink::new(&mut wire);
             wz_codecs::fragment::Fragment { sn, payload: &[] }
                 .encode(&mut sink)
                 .expect("VecSink is infallible");
@@ -1038,7 +1066,8 @@ pub fn build_fragment_wire(
         #[cfg(feature = "transport-qos")]
         if let Some(priority) = ext_qos {
             // The QoS ext chains to whichever marker follows it, if any.
-            write_qos_ext(&mut wire, priority, first || drop_marker);
+            write_qos_ext(&mut wire, priority, first || drop_marker)
+                .expect("a Vec grows, so its sink is infallible");
         }
         if first {
             // ...and First chains to Drop when both ride the same fragment.
@@ -1051,7 +1080,7 @@ pub fn build_fragment_wire(
         }
         wire.extend_from_slice(payload);
     } else {
-        let mut sink = VecSink::new(&mut wire);
+        let mut sink = sce_forge_runtime::codec::VecSink::new(&mut wire);
         wz_codecs::fragment::Fragment { sn, payload }
             .encode(&mut sink)
             .expect("VecSink is infallible");
@@ -1107,13 +1136,13 @@ pub fn build_frame_wire(
         // the extension has to sit between the two, which is the order the
         // wire has (`commons/zenoh-codec/src/transport/frame.rs` @
         // `// FrameHeader`, the header write).
-        let mut sink = VecSink::new(&mut wire);
+        let mut sink = sce_forge_runtime::codec::VecSink::new(&mut wire);
         wz_codecs::frame::Frame { sn, payload: &[] }
             .encode(&mut sink)
             .expect("VecSink is infallible");
     }
     if let Some(priority) = ext_qos {
-        write_qos_ext(&mut wire, priority, false);
+        write_qos_ext(&mut wire, priority, false).expect("a Vec grows, so its sink is infallible");
     }
     wire.extend_from_slice(payload);
     wire
@@ -1241,6 +1270,103 @@ mod tests {
         }
         push.try_into_owned_in::<crate::wire::WireStorage>()
             .unwrap()
+    }
+
+    /// ARCHITECTURE section 9.1: the codec writes directly into a pool slot. A
+    /// slot's storage is a fixed slice, so the frame that lands there has to be
+    /// the bytes the heap path makes, or a link handed the slot would send a
+    /// different frame than the one every other test in this module pins.
+    #[cfg(feature = "codec-push")]
+    #[test]
+    fn a_frame_encoded_into_a_fixed_buffer_is_the_heap_frames_bytes() {
+        use crate::tx_buf::SliceTxBuf;
+        for reliable in [false, true] {
+            // A VLE sn of one, two and three bytes: the prefix is the part a
+            // different destination could get wrong.
+            for sn in [0x7Fu64, 0x80, 0x4000] {
+                let want = encode_frame_with_push(sn, empty_payload_push(), reliable);
+                let push = empty_payload_push();
+                let mut storage = [0u8; 256];
+                let mut slot = SliceTxBuf::new(&mut storage);
+                encode_frame_envelope_into(
+                    &mut slot,
+                    sn,
+                    frame_flags(reliable),
+                    None,
+                    push_body(&push),
+                )
+                .expect("the frame fits the slot");
+                assert_eq!(
+                    slot.as_slice(),
+                    want.as_slice(),
+                    "sn {sn:#x} reliable {reliable}"
+                );
+            }
+        }
+    }
+
+    /// The boundary is the frame's own length: a slot exactly that long takes
+    /// the frame and one a byte short refuses it. A fixed buffer that panicked
+    /// (or silently truncated) would be a transmit path that corrupts or dies on
+    /// the first oversize message, which is what the heap `Vec` could never do.
+    #[cfg(feature = "codec-push")]
+    #[test]
+    fn a_frame_one_byte_past_the_fixed_buffer_is_refused_and_the_exact_fit_is_not() {
+        use crate::tx_buf::SliceTxBuf;
+        let want = encode_frame_with_push(0x80, empty_payload_push(), true);
+        let push = empty_payload_push();
+
+        let mut exact = alloc::vec![0u8; want.len()];
+        let mut slot = SliceTxBuf::new(&mut exact);
+        encode_frame_envelope_into(&mut slot, 0x80, frame_flags(true), None, push_body(&push))
+            .expect("a slot of exactly the frame's length takes it");
+        assert_eq!(slot.as_slice(), want.as_slice());
+
+        let mut short = alloc::vec![0u8; want.len() - 1];
+        let mut slot = SliceTxBuf::new(&mut short);
+        assert_eq!(
+            encode_frame_envelope_into(&mut slot, 0x80, frame_flags(true), None, push_body(&push)),
+            Err(CodecError::BufferOverflow),
+            "a frame one byte past the slot is an error and not a panic"
+        );
+    }
+
+    /// The batching writer appends a message to an open frame and, when it does
+    /// not fit, rolls the partial write back. Rolling back is `truncate` to the
+    /// length seen before the call, and it has to leave the open frame's own
+    /// bytes exactly as they were.
+    #[cfg(feature = "codec-push")]
+    #[test]
+    fn a_refused_append_rolls_back_to_the_open_frames_prefix() {
+        use crate::tx_buf::SliceTxBuf;
+        let push = empty_payload_push();
+        let mut storage = [0u8; 24];
+        let mut slot = SliceTxBuf::new(&mut storage);
+        begin_frame(&mut slot, 5, frame_flags(true), None).expect("the prefix fits");
+        let open = slot.as_slice().to_vec();
+
+        // Append bodies until one is refused; every refusal must leave the
+        // buffer as the last accepted append left it.
+        let mut accepted = 0usize;
+        loop {
+            let before = slot.len();
+            let mut sink = TxSink::new(&mut slot);
+            match push_body(&push)(&mut sink) {
+                Ok(()) => accepted += 1,
+                Err(CodecError::BufferOverflow) => {
+                    slot.truncate(before);
+                    assert_eq!(slot.len(), before, "the rollback restored the length");
+                    break;
+                }
+                Err(other) => panic!("unexpected refusal: {other:?}"),
+            }
+        }
+        assert!(accepted >= 1, "the first body fits a slot of this size");
+        assert_eq!(
+            &slot.as_slice()[..open.len()],
+            open.as_slice(),
+            "the open frame's prefix is untouched by the refused append"
+        );
     }
 
     #[cfg(feature = "codec-push")]
@@ -1492,8 +1618,8 @@ mod tests {
             extensions: Default::default(),
             body: OamOwnedVariant::CodecZenohExtUnit(ExtUnit {}),
         };
-        let mut buf = alloc::vec![0u8; 64];
-        let mut sink = VecSink::new(&mut buf);
+        let mut buf: Vec<u8> = Vec::new();
+        let mut sink = TxSink::new(&mut buf);
         oam_body(&ok)(&mut sink).expect("an addressable id encodes");
 
         // The CONTROL is the pair: the same message differing ONLY in bits no
@@ -1502,8 +1628,8 @@ mod tests {
             id: 0x1_0001,
             ..ok.clone()
         };
-        let mut buf = alloc::vec![0u8; 64];
-        let mut sink = VecSink::new(&mut buf);
+        let mut buf: Vec<u8> = Vec::new();
+        let mut sink = TxSink::new(&mut buf);
         assert_eq!(
             oam_body(&wide)(&mut sink),
             Err(CodecError::VleWidthOverflow),
@@ -1891,7 +2017,8 @@ mod fragment_tests {
         let mut tx_sn = crate::sn::MulticastTxConduits::new(crate::sn::mask_from_res(0x02));
         let sn = tx_sn.mint(Priority::DEFAULT, true);
         let mut frame = Vec::new();
-        super::begin_frame(&mut frame, sn, super::frame_flags(true), None);
+        super::begin_frame(&mut frame, sn, super::frame_flags(true), None)
+            .expect("a Vec grows, so its sink is infallible");
         frame.extend_from_slice(&[0xCD; 16]);
         let after_mint = tx_sn.clone();
         // DEFAULT / non-qos re-frame: ext_qos = None, byte-identical to pre-qos.
@@ -1916,7 +2043,8 @@ mod fragment_tests {
         let sn = tx_sn.mint(Priority::DEFAULT, true);
         let body: Vec<u8> = (0..200u32).map(|i| (i * 3) as u8).collect();
         let mut frame = Vec::new();
-        super::begin_frame(&mut frame, sn, super::frame_flags(true), None);
+        super::begin_frame(&mut frame, sn, super::frame_flags(true), None)
+            .expect("a Vec grows, so its sink is infallible");
         frame.extend_from_slice(&body);
 
         let mask = tx_sn.mask();
@@ -1988,7 +2116,8 @@ mod qos_wire_tests {
             sn,
             super::frame_flags(true),
             Some(Priority::RealTime),
-        );
+        )
+        .expect("a Vec grows, so its sink is infallible");
         frame.extend_from_slice(&body);
         let mask = tx.mask();
         let frames = super::multicast_frame_or_fragments(
@@ -2169,7 +2298,8 @@ mod qos_wire_tests {
         // Encode the WHOLE QoS Frame exactly as dispatch does:
         // [hdr|Z][VLE(sn)][ext_qos][batch].
         let mut frame = Vec::new();
-        begin_frame(&mut frame, sn, frame_flags(true), Some(priority));
+        begin_frame(&mut frame, sn, frame_flags(true), Some(priority))
+            .expect("a Vec grows, so its sink is infallible");
         frame.extend_from_slice(&batch);
         assert_ne!(frame[0] & wire_const::FLAG_T_Z, 0, "the QoS Frame sets Z");
         assert_eq!(frame[2], 0x31, "ext_qos header rides the frame");

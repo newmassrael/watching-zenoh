@@ -194,7 +194,8 @@ fn build_frame_wire_matches_begin_frame_below_the_widest_ring() {
             for reliable in [false, true] {
                 for priority in [None, Some(Priority::DataHigh)] {
                     let mut want = Vec::new();
-                    begin_frame(&mut want, sn, frame_flags(reliable), priority);
+                    begin_frame(&mut want, sn, frame_flags(reliable), priority)
+                        .expect("a Vec grows, so its sink is infallible");
                     want.extend_from_slice(&payload);
                     assert_eq!(
                         build_frame_wire(sn, &payload, reliable, priority),
@@ -216,7 +217,8 @@ fn build_frame_wire_writes_the_codecs_nine_byte_vle_for_the_top_bucket() {
     let built = build_frame_wire(sn, &[], true, None);
     assert_eq!(built.len(), 1 + 9, "header and a nine-byte VLE");
     let mut tx = Vec::new();
-    begin_frame(&mut tx, sn, wire_const::FLAG_T_FRAME_R, None);
+    begin_frame(&mut tx, sn, wire_const::FLAG_T_FRAME_R, None)
+        .expect("a Vec grows, so its sink is infallible");
     assert_eq!(tx.len(), 1 + 10, "the TX path's loop writes a tenth byte");
     // The reader reads what the codec wrote.
     let mut cursor = sce_forge_runtime::codec::SceCursor::new(&built[1..]);

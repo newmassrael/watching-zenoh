@@ -748,6 +748,13 @@ pub mod multicast_peer_arrived;
 #[cfg(feature = "alloc")]
 pub mod inbound;
 
+/// The outbound frame buffer seam (ARCHITECTURE section 9.1): [`tx_buf::TxBuf`]
+/// is what an outbound encoder writes to, `Vec<u8>` is its heap form, and
+/// [`tx_buf::SliceTxBuf`] is the fixed form a pool slot's storage is. No
+/// allocation and no runtime, so it is unconditional; only the `Vec` impl
+/// needs `alloc`.
+pub mod tx_buf;
+
 /// Outbound `T_MID_FRAME` envelope encoders (`encode_frame_envelope` +
 /// the `encode_frame_with_*` family) hoisted from
 /// `wz-runtime-tokio::session_glue` so the session action layer shares

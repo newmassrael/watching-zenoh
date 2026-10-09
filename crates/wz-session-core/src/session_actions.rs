@@ -2768,9 +2768,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         encode_body: &P,
     ) -> bool
     where
-        P: Fn(
-            &mut sce_forge_runtime::codec::VecSink<'_>,
-        ) -> Result<(), sce_forge_runtime::codec::CodecError>,
+        P: Fn(&mut crate::tx_buf::TxSink<'_>) -> Result<(), sce_forge_runtime::codec::CodecError>,
     {
         // Asked BEFORE the slot is taken, so a session with no hand-off never
         // holds a slot nothing would give back.
@@ -2791,8 +2789,8 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         }
         let mut body = Vec::with_capacity(worst_case_payload);
         {
-            let mut sink = sce_forge_runtime::codec::VecSink::new(&mut body);
-            encode_body(&mut sink).expect("VecSink is infallible");
+            let mut sink = crate::tx_buf::TxSink::new(&mut body);
+            encode_body(&mut sink).expect("a Vec grows, so its sink is infallible");
         }
         let job = BlockFirstJob {
             priority,
@@ -6414,9 +6412,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         encode_body: P,
     ) -> Result<(), SendWireError>
     where
-        P: Fn(
-            &mut sce_forge_runtime::codec::VecSink<'_>,
-        ) -> Result<(), sce_forge_runtime::codec::CodecError>,
+        P: Fn(&mut crate::tx_buf::TxSink<'_>) -> Result<(), sce_forge_runtime::codec::CodecError>,
     {
         self.dispatch_network_message_at(
             DispatchStage::Fresh,
@@ -6489,9 +6485,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         encode_body: P,
     ) -> Result<(), SendWireError>
     where
-        P: Fn(
-            &mut sce_forge_runtime::codec::VecSink<'_>,
-        ) -> Result<(), sce_forge_runtime::codec::CodecError>,
+        P: Fn(&mut crate::tx_buf::TxSink<'_>) -> Result<(), sce_forge_runtime::codec::CodecError>,
     {
         let congestion = qos.congestion();
         // R2371 (`transport-stats`) — the NETWORK-message counters. Charged in
@@ -6609,8 +6603,8 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         if self.is_lowlatency() {
             let mut wire = Vec::with_capacity(worst_case_payload);
             {
-                let mut sink = sce_forge_runtime::codec::VecSink::new(&mut wire);
-                encode_body(&mut sink).expect("VecSink is infallible");
+                let mut sink = crate::tx_buf::TxSink::new(&mut wire);
+                encode_body(&mut sink).expect("a Vec grows, so its sink is infallible");
             }
             // No congestion decision on this path: upstream's lowlatency
             // transport writes to the link under its own lock and has no
@@ -6724,8 +6718,8 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             if self.tx_conduits.is_active() {
                 use crate::frame_encode::{begin_frame, frame_flags, frame_wire_reliability};
                 let encode_into = |buf: &mut Vec<u8>| {
-                    let mut sink = sce_forge_runtime::codec::VecSink::new(buf);
-                    encode_body(&mut sink).expect("VecSink is infallible");
+                    let mut sink = crate::tx_buf::TxSink::new(buf);
+                    encode_body(&mut sink).expect("a Vec grows, so its sink is infallible");
                 };
                 // R311y835 — every arm below works on THIS message's own
                 // priority conduit (R2920: the one locked above); a message
@@ -6746,7 +6740,8 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                         // +2 for a possible ext_qos ([0x31][VLE(priority)]) that
                         // begin_frame may append (symmetric with encode_frame_envelope).
                         stage.buf.reserve(1 + 10 + 2 + worst_case_payload);
-                        begin_frame(&mut stage.buf, sn, frame_flags(reliable), ext_qos);
+                        begin_frame(&mut stage.buf, sn, frame_flags(reliable), ext_qos)
+                            .expect("a Vec grows, so its sink is infallible");
                         encode_into(&mut stage.buf);
                         if stage.buf.len() > mtu {
                             // The message alone exceeds the budget — the
