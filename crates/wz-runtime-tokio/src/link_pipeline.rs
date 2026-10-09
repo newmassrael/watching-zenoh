@@ -27,6 +27,19 @@
 //! - [`TcpReadDriver`] — a type alias for the shared
 //!   [`StreamReadDriver`]`<OwnedReadHalf>` (the framing `LinkDriver` impl lives
 //!   once in [`crate::stream_link`]).
+//!
+//! ## Candidate-walk contract (open-debt 732)
+//!
+//! A locator that names a host resolves to SEVERAL addresses, and every named
+//! dial of every scheme (`tcp` through [`dial_tcp_host`], the rest through
+//! [`resolve_locator_addrs`] and [`first_reachable`]) walks them in resolver
+//! order. The walk is bounded PER CANDIDATE: a candidate that is not the last
+//! and does not answer within [`CANDIDATE_DIAL_TIMEOUT`] is abandoned, named in
+//! a warning, and the next one is tried. Without it, one unreachable address
+//! family costs the whole upper-protocol timeout (thirty seconds for quic,
+//! about two minutes for a dropped TCP SYN) before the listening address is
+//! reached. The last candidate keeps the caller's patience, and a total failure
+//! names every candidate it tried.
 
 use std::io;
 use std::net::SocketAddr;
@@ -101,19 +114,29 @@ pub async fn dial_tcp_host(host: &str, link_socket: &LinkSocket<'_>) -> io::Resu
     // Behaviour is preserved: this is the resolver `TcpStream::connect` calls
     // internally, walked in the same order, which is the equivalence the
     // `Some(iface)` arm has relied on since R311y236.
-    let mut last_err: Option<io::Error> = None;
-    for addr in tokio::net::lookup_host(host).await? {
-        match crate::iface_bind::connect_tcp_bound(addr, link_socket).await {
-            Ok(stream) => return Ok(stream),
-            Err(e) => last_err = Some(e),
-        }
-    }
-    Err(last_err.unwrap_or_else(|| {
-        io::Error::new(
-            io::ErrorKind::AddrNotAvailable,
-            format!("no addresses resolved for {host}"),
-        )
-    }))
+    //
+    // Open-debt 732 — the walk is [`first_reachable`], the same one every
+    // other named scheme takes, and not a loop of its own. This arm was the one
+    // named dial left outside it, and it is the one that matters most: a
+    // candidate whose SYN is dropped (a filtered route, a full accept queue)
+    // does not answer RST the way a dead port does, so `connect` waits out the
+    // kernel's retransmit schedule — about two minutes on Linux — before the
+    // reachable address behind it is tried.
+    let addrs: Vec<SocketAddr> = lookup_host(host).await?.collect();
+    dial_tcp_candidates(addrs, host, link_socket).await
+}
+
+/// The walk half of [`dial_tcp_host`], split from the resolve so a test can
+/// hand it a candidate list the resolver would not produce on demand.
+async fn dial_tcp_candidates(
+    addrs: Vec<SocketAddr>,
+    host: &str,
+    link_socket: &LinkSocket<'_>,
+) -> io::Result<TcpStream> {
+    first_reachable(addrs, &format!("tcp/{host}"), |addr| {
+        crate::iface_bind::connect_tcp_bound(addr, link_socket)
+    })
+    .await
 }
 
 /// Bind a TCP listener on a NUMERIC endpoint — the accept-side "listen half"
@@ -206,17 +229,6 @@ pub async fn resolve_locator_addrs(host: &str, port: u16) -> io::Result<Vec<Sock
     Ok(addrs)
 }
 
-/// Try `dial` against each candidate address in turn and return the first
-/// success — the walk half of [`resolve_locator_addrs`], factored out so every
-/// named non-TCP scheme walks identically instead of hand-rolling the loop.
-///
-/// On total failure the LAST attempt's error is surfaced (not a synthesized
-/// one), because that is the error a caller can act on: a name resolving to a
-/// single unreachable address must report that address's `ConnectionRefused`,
-/// not a generic "all candidates failed". `addrs` is never empty by
-/// [`resolve_locator_addrs`]'s contract; the `AddrNotAvailable` fallback exists
-/// only so a hand-built empty vector cannot silently return a success-shaped
-/// error-free `None`.
 /// R2606 (open-debt 732) — how long a NON-FINAL candidate may take before the
 /// walk moves on.
 ///
@@ -243,8 +255,51 @@ pub async fn resolve_locator_addrs(host: &str, port: u16) -> io::Result<Vec<Sock
 /// needs longer than this is treated as dead and the walk moves on. That is the
 /// trade the walk exists to make — an address that will not answer inside the
 /// bound is indistinguishable from one that never will.
+///
+/// ## Why this is a constant and not a configured value
+///
+/// The only configured timeout upstream applies to link creation is
+/// `transport/unicast/open_timeout` (`DEFAULT_CONFIG.json5` @ `open_timeout: 10000,`),
+/// and it bounds the WHOLE `new_link` walk plus the handshake on one clock
+/// (`io/zenoh-transport/src/unicast/manager.rs` @
+/// `tokio::time::timeout(self.config.unicast.open_timeout, async {`). A
+/// whole-walk clock cannot serve as a per-candidate bound: the first candidate
+/// that never answers would consume the entire budget and the reachable one
+/// behind it would never be tried, which is the outcome this bound exists to
+/// avoid. wz does not read that key (it sits in `UNHONOURED_BEYOND_WZ`), so
+/// there is no configured value to derive from, and a second knob for the same
+/// purpose is not added. What the constant IS tied to is the link-open window
+/// wz does carry, `SessionTimeouts::spec_defaults().link_open_ms`: a single
+/// candidate may not be granted as long as the whole link is, and a unit test
+/// below pins that, so the two cannot drift into a bound that bounds nothing.
 pub const CANDIDATE_DIAL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3);
 
+/// Try `dial` against each candidate address in turn and return the first
+/// success — the walk half of [`resolve_locator_addrs`], factored out so every
+/// named scheme (tcp included, through [`dial_tcp_host`]) walks identically
+/// instead of hand-rolling the loop.
+///
+/// # Contract
+///
+/// - Candidates are tried in the order given, one at a time.
+/// - Every candidate but the last is held to [`CANDIDATE_DIAL_TIMEOUT`]; one
+///   that does not answer inside it is abandoned and the walk MOVES ON, so a
+///   single family or route that never answers cannot hold the walk for the
+///   upper protocol's own timeout. The last candidate is not bounded here (see
+///   the body): the caller's own deadline governs it.
+/// - Every failed or abandoned candidate is NAMED: in a warning when it is
+///   given up, and in the error when the whole walk fails.
+/// - A walk over ONE candidate returns that candidate's error unchanged: a name
+///   resolving to a single unreachable address must report that address's
+///   `ConnectionRefused`. A walk over several returns an error of the LAST
+///   attempt's kind (the one a caller can act on) whose message lists every
+///   candidate and what became of it, as upstream's own walk does
+///   (`io/zenoh-links/zenoh-link-tcp/src/unicast.rs` @
+///   `"Can not create a new TCP link bound to {}: {:?}",`).
+///
+/// `addrs` is never empty by [`resolve_locator_addrs`]'s contract; the
+/// `AddrNotAvailable` fallback exists only so a hand-built empty vector cannot
+/// silently return a success-shaped error-free `None`.
 pub async fn first_reachable<T, F, Fut>(
     addrs: Vec<SocketAddr>,
     what: &str,
@@ -254,7 +309,7 @@ where
     F: FnMut(SocketAddr) -> Fut,
     Fut: std::future::Future<Output = io::Result<T>>,
 {
-    let mut last_err: Option<io::Error> = None;
+    let mut failures: Vec<(SocketAddr, io::Error)> = Vec::new();
     // The LAST candidate is deliberately UNBOUNDED. There is nothing to move on
     // to, so bounding it would only swap one failure for another, and it is the
     // single-candidate case — the overwhelmingly common one, and the only shape
@@ -270,25 +325,43 @@ where
                 Ok(result) => result,
                 Err(_) => Err(io::Error::new(
                     io::ErrorKind::TimedOut,
-                    format!(
-                        "{what}: candidate {addr} did not answer within {}s; \
-                         moving on to the next resolved address",
-                        CANDIDATE_DIAL_TIMEOUT.as_secs()
-                    ),
+                    format!("no answer within {}s", CANDIDATE_DIAL_TIMEOUT.as_secs()),
                 )),
             }
         };
         match outcome {
             Ok(link) => return Ok(link),
-            Err(e) => last_err = Some(e),
+            Err(e) => {
+                if i != last {
+                    log::warn!(
+                        "{what}: candidate {addr} failed ({e}); trying the next resolved address"
+                    );
+                }
+                failures.push((addr, e));
+            }
         }
     }
-    Err(last_err.unwrap_or_else(|| {
-        io::Error::new(
+    match failures.len() {
+        0 => Err(io::Error::new(
             io::ErrorKind::AddrNotAvailable,
             format!("no addresses resolved for {what}"),
-        )
-    }))
+        )),
+        1 => Err(failures.remove(0).1),
+        n => {
+            let kind = failures
+                .last()
+                .map_or(io::ErrorKind::Other, |(_, e)| e.kind());
+            let listed = failures
+                .iter()
+                .map(|(addr, e)| format!("{addr}: {e}"))
+                .collect::<Vec<_>>()
+                .join("; ");
+            Err(io::Error::new(
+                kind,
+                format!("{what}: all {n} candidates failed ({listed})"),
+            ))
+        }
+    }
 }
 
 /// Listen backlog wz applies to every TCP listener — zenoh's `socket.listen(1024)`
@@ -579,11 +652,17 @@ mod tests {
     /// Virtual time (`start_paused`), so the bound is asserted rather than
     /// waited out: tokio advances the clock when every task is idle, which is
     /// exactly the state a candidate that never answers leaves it in.
+    ///
+    /// The walk is raced against an outer clock ten times the bound, so a walk
+    /// that lost its bound FAILS here instead of waiting for a future that
+    /// never resolves, and the virtual time it took is asserted too: reaching
+    /// the second candidate is not enough if it took the long way round.
     #[tokio::test(start_paused = true)]
     async fn an_unreachable_candidate_does_not_hold_the_walk() {
         let first = "127.0.0.1:1".parse().expect("addr");
         let second = "127.0.0.1:2".parse().expect("addr");
-        let reached = first_reachable(vec![first, second], "probe", |addr| async move {
+        let started = tokio::time::Instant::now();
+        let walk = first_reachable(vec![first, second], "probe", |addr| async move {
             if addr == first {
                 // Never answers — a UDP-backed dial to an address nothing is
                 // bound to, which returns no RST and simply waits.
@@ -591,13 +670,146 @@ mod tests {
             } else {
                 Ok(addr)
             }
-        })
-        .await
-        .expect("the walk moves past the candidate that never answers");
+        });
+        let reached = tokio::time::timeout(CANDIDATE_DIAL_TIMEOUT * 10, walk)
+            .await
+            .expect("the walk must not outlast ten bounds")
+            .expect("the walk moves past the candidate that never answers");
         assert_eq!(
             reached, second,
             "the walk must reach the second candidate, not hang on the first"
         );
+        let spent = started.elapsed();
+        assert!(
+            spent >= CANDIDATE_DIAL_TIMEOUT && spent < CANDIDATE_DIAL_TIMEOUT * 2,
+            "the silent candidate costs the per-candidate bound and no more, spent {spent:?}"
+        );
+    }
+
+    /// Open-debt 732 — when the whole walk fails, the error NAMES the candidate
+    /// that never answered and the one that refused, and keeps the kind of the
+    /// LAST attempt so a caller can still act on it.
+    ///
+    /// The timed-out candidate used to be named only in the error built for it,
+    /// and that error was always overwritten by the next candidate's outcome:
+    /// the one place an operator could read which address had gone silent was
+    /// unreachable.
+    #[tokio::test(start_paused = true)]
+    async fn a_failed_walk_names_every_candidate() {
+        let silent: SocketAddr = "192.0.2.1:7447".parse().expect("addr");
+        let refusing: SocketAddr = "127.0.0.1:7447".parse().expect("addr");
+        let walk = first_reachable(
+            vec![silent, refusing],
+            "tcp/probe:7447",
+            |addr| async move {
+                if addr == silent {
+                    std::future::pending::<io::Result<()>>().await
+                } else {
+                    Err(io::Error::from(io::ErrorKind::ConnectionRefused))
+                }
+            },
+        );
+        // Raced against an outer clock so a walk without its bound fails here
+        // and does not wait on a future that never resolves.
+        let err = tokio::time::timeout(CANDIDATE_DIAL_TIMEOUT * 10, walk)
+            .await
+            .expect("the walk must not outlast ten bounds")
+            .expect_err("both candidates fail");
+        assert_eq!(
+            err.kind(),
+            io::ErrorKind::ConnectionRefused,
+            "the kind is the last attempt's, the one a caller can act on"
+        );
+        let text = err.to_string();
+        assert!(
+            text.contains("192.0.2.1:7447") && text.contains("no answer within 3s"),
+            "the silent candidate is named with what became of it: {text}"
+        );
+        assert!(
+            text.contains("127.0.0.1:7447") && text.contains("tcp/probe:7447"),
+            "the refusing candidate and the locator are named: {text}"
+        );
+    }
+
+    /// Open-debt 732 — a walk over ONE candidate hands back that candidate's
+    /// error untouched, which is what lets a name resolving to a single dead
+    /// address report `ConnectionRefused` and not a wrapped restatement.
+    #[tokio::test]
+    async fn a_single_candidates_error_is_not_rewritten() {
+        let only: SocketAddr = "127.0.0.1:7447".parse().expect("addr");
+        let err = first_reachable(vec![only], "tcp/probe:7447", |_| async move {
+            Err::<(), _>(io::Error::new(io::ErrorKind::ConnectionRefused, "refused"))
+        })
+        .await
+        .expect_err("the only candidate fails");
+        assert_eq!(err.kind(), io::ErrorKind::ConnectionRefused);
+        assert_eq!(err.to_string(), "refused");
+    }
+
+    /// Open-debt 732 — the per-candidate bound stays strictly inside the
+    /// link-open window wz carries (`link.open_timeout`, docs/session-fsm.md
+    /// section 2.5). A bound that reached the window would let one silent
+    /// candidate spend the whole of what a link is allowed to take.
+    #[test]
+    fn the_candidate_bound_is_inside_the_link_open_window() {
+        let window = std::time::Duration::from_millis(
+            wz_session_core::session_timeouts::SessionTimeouts::spec_defaults().link_open_ms,
+        );
+        assert!(
+            CANDIDATE_DIAL_TIMEOUT < window,
+            "{CANDIDATE_DIAL_TIMEOUT:?} must stay below the {window:?} link-open window"
+        );
+    }
+
+    /// Open-debt 732 — the TCP half, on a real socket. The first candidate is a
+    /// listener whose accept queue is full, so the kernel DROPS every further
+    /// SYN: nothing answers, not even a reset, and `connect` would wait out the
+    /// retransmit schedule (about two minutes). The walk must give up on it
+    /// after the bound and connect to the listener behind it.
+    ///
+    /// Real time, because the wait is on the kernel and not on a timer the
+    /// runtime can fast-forward; the bound makes it three seconds.
+    #[tokio::test]
+    async fn a_named_tcp_dial_moves_past_a_candidate_that_drops_its_syn() {
+        let socket = TcpSocket::new_v4().expect("socket");
+        socket
+            .bind("127.0.0.1:0".parse().expect("addr"))
+            .expect("bind");
+        // Backlog 0: the queue holds one completed connection and then drops
+        // SYNs. The fill loop does not assume that number; it connects until a
+        // connect stops completing.
+        let silent_listener = socket.listen(0).expect("listen");
+        let silent = silent_listener.local_addr().expect("addr");
+        let mut filler = Vec::new();
+        loop {
+            match tokio::time::timeout(
+                std::time::Duration::from_millis(300),
+                TcpStream::connect(silent),
+            )
+            .await
+            {
+                Ok(Ok(stream)) => filler.push(stream),
+                _ => break,
+            }
+            assert!(filler.len() < 16, "the accept queue never filled");
+        }
+
+        let live_listener = TcpListener::bind("127.0.0.1:0").await.expect("bind live");
+        let live = live_listener.local_addr().expect("addr");
+        let accept = tokio::spawn(async move { live_listener.accept().await });
+
+        let walk = dial_tcp_candidates(vec![silent, live], "probe", &LinkSocket::NONE);
+        let stream = tokio::time::timeout(CANDIDATE_DIAL_TIMEOUT * 4, walk)
+            .await
+            .expect("the walk must not wait out the kernel's SYN retransmits")
+            .expect("the walk reaches the candidate behind the silent one");
+        assert_eq!(
+            stream.peer_addr().expect("peer"),
+            live,
+            "the connection is to the live listener, not the one dropping SYNs"
+        );
+        accept.await.expect("task").expect("live listener accepted");
+        drop(filler);
     }
 
     /// R2606 — the OTHER half of that design, and the arm that makes the first
