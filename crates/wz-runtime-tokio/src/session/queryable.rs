@@ -164,16 +164,17 @@ pub(super) type QueryHandlerCell<R> =
 struct OwnedQueryEvent {
     keyexpr: String,
     parameters: Option<Vec<u8>>,
-    attachment: Option<Vec<u8>>,
+    // The attachment, and R311y248's querier VALUE ext (payload + encoding), kept so
+    // the deferred handler can read them at drain time (the borrowed view is gone by
+    // then). Held as the shareable type: when the view held them so (a range of the
+    // frame the query arrived in, or a chunk of shared memory, R3061) this is a second
+    // reference to that storage and not a copy of the bytes, and `*_lent` says so; a
+    // view that only borrows them is copied here, once, as it always was.
+    attachment: Option<wz_session_core::link::RxBytes>,
+    attachment_lent: bool,
+    payload: Option<wz_session_core::link::RxBytes>,
+    payload_lent: bool,
     source_info: Option<SourceInfo>,
-    // R311y248 — the querier's VALUE ext (payload + encoding), owned so the
-    // deferred handler can read it at drain time (the borrowed view is gone by
-    // then, mirroring the attachment/source_info owned-copy shape).
-    payload: Option<Vec<u8>>,
-    // R3061 -- the same value as the shareable buffer it arrived in, when the view held
-    // it as one (a chunk of shared memory). Kept as a second reference to the storage,
-    // not a copy: `payload` above is the bytes, this is the page they lie on.
-    payload_shared: Option<wz_session_core::link::RxBytes>,
     encoding: Option<EncodingHint>,
     rid: u64,
     is_local: bool,
@@ -181,6 +182,64 @@ struct OwnedQueryEvent {
     // above: the deferred job rebuilds the responder after the borrowed view
     // is gone, and every reply it stages inherits this value.
     qos: wz_session_core::sample::QosLevel,
+}
+
+#[cfg(feature = "query-queryable")]
+impl OwnedQueryEvent {
+    /// Keep what `view` holds past its borrow: the parameters and the key
+    /// expression are copied (selector text, a few dozen bytes), the value and the
+    /// attachment are taken as the shareable bytes the view holds them in, or copied
+    /// when it only borrows them.
+    fn from_view(view: &dyn QueryView) -> Self {
+        use wz_session_core::link::RxBytes;
+        let hold = |shared: Option<&RxBytes>, borrowed: Option<&[u8]>| match shared {
+            Some(shared) => (Some(shared.clone()), true),
+            None => (borrowed.map(|bytes| RxBytes::from(bytes.to_vec())), false),
+        };
+        let (attachment, attachment_lent) = hold(view.attachment_shared(), view.attachment());
+        let (payload, payload_lent) = hold(view.payload_shared(), view.payload());
+        Self {
+            keyexpr: view.keyexpr().to_string(),
+            parameters: view.parameters().map(<[u8]>::to_vec),
+            attachment,
+            attachment_lent,
+            payload,
+            payload_lent,
+            source_info: view.source_info().cloned(),
+            encoding: view.encoding().cloned(),
+            rid: view.rid(),
+            is_local: view.is_local(),
+            qos: view.qos(),
+        }
+    }
+
+    /// The event as a borrowed query, for the handler to read.
+    fn borrowed(&self) -> crate::query_sink::BorrowedQuery<'_> {
+        crate::query_sink::BorrowedQuery {
+            keyexpr: &self.keyexpr,
+            parameters: self.parameters.as_deref(),
+            attachment: self.attachment.as_deref(),
+            source_info: self.source_info.as_ref(),
+            payload: self.payload.as_deref(),
+            encoding: self.encoding.as_ref(),
+            rid: self.rid,
+            is_local: self.is_local,
+            qos: self.qos,
+        }
+    }
+
+    /// The event as a query that LENDS the value and the attachment, when the view
+    /// it was taken from held either shareable (R3061): the handler is then told so
+    /// through [`QueryView::payload_shared`] and [`QueryView::attachment_shared`],
+    /// as it would be had it been called in the dispatcher's own borrow. `None` when
+    /// neither was, and the handler is given [`Self::borrowed`] as it always was.
+    fn lent(&self) -> Option<crate::query_sink::SharedQuery<'_>> {
+        (self.payload_lent || self.attachment_lent).then(|| crate::query_sink::SharedQuery {
+            base: self.borrowed(),
+            value: self.payload.as_ref().filter(|_| self.payload_lent),
+            attachment: self.attachment.as_ref().filter(|_| self.attachment_lent),
+        })
+    }
 }
 
 impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
@@ -233,18 +292,7 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
             // deferred handler's replies are emitted at the drain, and
             // the registry's Final trigger keys on the MATCH count
             // (R311li), not on staged replies.
-            let owned = OwnedQueryEvent {
-                keyexpr: view.keyexpr().to_string(),
-                parameters: view.parameters().map(<[u8]>::to_vec),
-                attachment: view.attachment().map(<[u8]>::to_vec),
-                source_info: view.source_info().cloned(),
-                payload: view.payload().map(<[u8]>::to_vec),
-                payload_shared: view.payload_shared().cloned(),
-                encoding: view.encoding().cloned(),
-                rid: view.rid(),
-                is_local: view.is_local(),
-                qos: view.qos(),
-            };
+            let owned = OwnedQueryEvent::from_view(view);
             let cell = cell_for_sink.clone();
             let observer = observer.clone();
             let actions = actions.clone();
@@ -262,27 +310,9 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
                 // Declared first so it is dropped last: after the replies
                 // below have been delivered to the requester.
                 let _job_hold = job_hold;
-                let borrowed = crate::query_sink::BorrowedQuery {
-                    keyexpr: &owned.keyexpr,
-                    parameters: owned.parameters.as_deref(),
-                    attachment: owned.attachment.as_deref(),
-                    source_info: owned.source_info.as_ref(),
-                    payload: owned.payload.as_deref(),
-                    encoding: owned.encoding.as_ref(),
-                    rid: owned.rid,
-                    is_local: owned.is_local,
-                    qos: owned.qos,
-                };
+                let borrowed = owned.borrowed();
                 // R3061 -- lent as the buffer when the query held it as one.
-                let shared_view =
-                    owned
-                        .payload_shared
-                        .as_ref()
-                        .map(|value| crate::query_sink::SharedQuery {
-                            base: crate::query_sink::BorrowedQuery { ..borrowed },
-                            value: Some(value),
-                            attachment: None,
-                        });
+                let shared_view = owned.lent();
                 let view: &dyn QueryView = match &shared_view {
                     Some(shared) => shared,
                     None => &borrowed,
@@ -689,3 +719,98 @@ impl std::fmt::Display for QueryableError {
 
 #[cfg(feature = "transport-unicast")]
 impl std::error::Error for QueryableError {}
+
+#[cfg(all(test, feature = "query-queryable"))]
+mod tests {
+    use super::*;
+    use crate::query_sink::{BorrowedQuery, SharedQuery};
+    use wz_session_core::link::RxBytes;
+
+    fn borrowed<'a>(value: &'a [u8], attachment: &'a [u8]) -> BorrowedQuery<'a> {
+        BorrowedQuery {
+            keyexpr: "demo/q",
+            parameters: Some(b"a=1"),
+            attachment: Some(attachment),
+            source_info: None,
+            payload: Some(value),
+            encoding: None,
+            rid: 3,
+            is_local: false,
+            qos: wz_session_core::sample::QosLevel::DEFAULT,
+        }
+    }
+
+    /// A staged event keeps what a view holds shareable as a second reference to the
+    /// same storage and lends it again at drain time: the bytes are the view's own,
+    /// at the same address, and the handler is told they are lent. The value and
+    /// the attachment are different buffers, so one answered in place of the other
+    /// cannot pass.
+    #[test]
+    fn a_staged_query_keeps_the_value_and_the_attachment_the_view_lent() {
+        let value = RxBytes::lend(b"the value".to_vec());
+        let attachment = RxBytes::lend(b"the attachment".to_vec());
+        let view = SharedQuery {
+            base: borrowed(value.as_slice(), attachment.as_slice()),
+            value: Some(&value),
+            attachment: Some(&attachment),
+        };
+
+        let event = OwnedQueryEvent::from_view(&view);
+
+        let lent = event.lent().expect("both were lent, so the event lends");
+        let kept_value = lent.payload_shared().expect("the value is lent");
+        let kept_attachment = lent.attachment_shared().expect("the attachment is lent");
+        assert_eq!(
+            kept_value.as_ptr(),
+            value.as_ptr(),
+            "not a copy of the value"
+        );
+        assert_eq!(
+            kept_attachment.as_ptr(),
+            attachment.as_ptr(),
+            "not a copy of the attachment"
+        );
+        assert_eq!(lent.payload(), Some(&b"the value"[..]));
+        assert_eq!(lent.attachment(), Some(&b"the attachment"[..]));
+    }
+
+    /// A view that only borrows is copied once, as it always was, and the event
+    /// then lends nothing: it must not claim storage it does not share.
+    #[test]
+    fn a_staged_query_copies_what_the_view_only_borrows_and_lends_nothing() {
+        let value = b"the value".to_vec();
+        let attachment = b"the attachment".to_vec();
+        let view = borrowed(&value, &attachment);
+
+        let event = OwnedQueryEvent::from_view(&view);
+
+        assert!(event.lent().is_none(), "nothing was shared to lend");
+        let kept = event.borrowed();
+        assert_eq!(kept.payload, Some(&value[..]));
+        assert_eq!(kept.attachment, Some(&attachment[..]));
+        assert_ne!(kept.payload.map(<[u8]>::as_ptr), Some(value.as_ptr()));
+        assert_ne!(
+            kept.attachment.map(<[u8]>::as_ptr),
+            Some(attachment.as_ptr())
+        );
+    }
+
+    /// The two are independent: a view that lends only the attachment yields an
+    /// event that lends only the attachment.
+    #[test]
+    fn a_staged_query_lends_only_what_the_view_lent() {
+        let value = b"the value".to_vec();
+        let attachment = RxBytes::lend(b"the attachment".to_vec());
+        let view = SharedQuery {
+            base: borrowed(&value, attachment.as_slice()),
+            value: None,
+            attachment: Some(&attachment),
+        };
+
+        let event = OwnedQueryEvent::from_view(&view);
+
+        let lent = event.lent().expect("the attachment was lent");
+        assert!(lent.payload_shared().is_none(), "the value was not");
+        assert!(lent.attachment_shared().is_some());
+    }
+}

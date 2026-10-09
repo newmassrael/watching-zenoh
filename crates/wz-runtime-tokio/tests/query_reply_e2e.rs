@@ -67,7 +67,8 @@ use wz_runtime_tokio::runtime_impl::TokioTime;
 use wz_runtime_tokio::session::{QueryOptions, QueryableOptions, TokioSession};
 use wz_runtime_tokio::session_glue::drive_session_until_terminal;
 use wz_runtime_tokio::session_open::{
-    accept_and_open_session, connect_and_open_session, DialConfig, DialedLink, DEFAULT_OPEN_TICK_MS,
+    accept_and_open_session, connect_and_open_session, DialConfig, DialedLink, OpenedSession,
+    DEFAULT_OPEN_TICK_MS,
 };
 use wz_runtime_tokio::sync::Mutex;
 use wz_runtime_tokio_test_support::fixture_session_init_params;
@@ -80,12 +81,9 @@ const ITER_CAP: usize = 64;
 const KEYEXPR: &str = "demo/query-reply";
 const REPLY_PAYLOAD: &[u8] = b"reply-aligner-foundation";
 
-/// An initiator's `Session::query` reaches a remote acceptor's queryable over a
-/// real loopback TCP link, the queryable's reply and the terminal
-/// `ResponseFinal` travel back, and the asker's `on_reply` / `on_final` fire —
-/// the generic query/reply transport the storage-aligner A11 e2e rides on.
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn query_reaches_remote_queryable_and_reply_returns() {
+/// Two sessions over a loopback TCP link, both open: the acceptor first, the
+/// initiator second.
+async fn open_pair() -> (OpenedSession, OpenedSession) {
     let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
     let addr = listener.local_addr().expect("local_addr");
 
@@ -123,7 +121,16 @@ async fn query_reaches_remote_queryable_and_reply_returns() {
         .await
         .expect("initiator reaches Established")
     };
-    let (mut opened_acc, mut opened_init) = tokio::join!(acc_open, init_open);
+    tokio::join!(acc_open, init_open)
+}
+
+/// An initiator's `Session::query` reaches a remote acceptor's queryable over a
+/// real loopback TCP link, the queryable's reply and the terminal
+/// `ResponseFinal` travel back, and the asker's `on_reply` / `on_final` fire —
+/// the generic query/reply transport the storage-aligner A11 e2e rides on.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn query_reaches_remote_queryable_and_reply_returns() {
+    let (mut opened_acc, mut opened_init) = open_pair().await;
 
     let timeouts = SessionTimeouts::spec_defaults();
 
@@ -235,5 +242,138 @@ async fn query_reaches_remote_queryable_and_reply_returns() {
     assert!(
         finals.load(Ordering::SeqCst) >= 1,
         "the terminal ResponseFinal fired on the asker"
+    );
+}
+
+/// What the answering queryable's handler saw of the query it was handed.
+#[cfg(all(feature = "query-value", feature = "query-attachment"))]
+struct Handled {
+    /// The value and the attachment as the borrowed accessors read them.
+    payload: Option<Vec<u8>>,
+    attachment: Option<Vec<u8>>,
+    /// Whether the shareable accessors answered a range of lent storage, which
+    /// is what a link's frame is once the session has read it.
+    payload_lent: Option<bool>,
+    attachment_lent: Option<bool>,
+}
+
+/// The value and the attachment of a query that crossed a real link reach the
+/// queryable's handler, which runs from the session's deferred queue after the
+/// dispatch borrow is gone, as RANGES OF THE FRAME they arrived in and not as
+/// copies: the handler is told through the shareable accessors, and a shareable
+/// answer is a range of lent storage only if nothing between the link's read and
+/// the handler copied it out (the staged event used to copy both into vectors).
+///
+/// This is the end-to-end half of the claim; the dispatcher's half (the view a
+/// queryable is handed inside the dispatch) is read by address in
+/// `wz-session-core`, and an allocation count cannot span the deferred queue,
+/// which is why this witness reads the shareable accessors instead.
+#[cfg(all(feature = "query-value", feature = "query-attachment"))]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_query_value_and_attachment_reach_the_handler_as_ranges_of_the_frame() {
+    const VALUE: &[u8] = &[0x5C; 4096];
+    const ATTACHMENT: &[u8] = &[0xA7; 2048];
+
+    let (mut opened_acc, mut opened_init) = open_pair().await;
+    let timeouts = SessionTimeouts::spec_defaults();
+
+    let handled: Arc<StdMutex<Vec<Handled>>> = Arc::new(StdMutex::new(Vec::new()));
+    let observer_acc = Arc::new(Mutex::new(ApplicationLayerObserver::new()));
+    let session_acc = TokioSession::new(
+        opened_acc.actions.clone(),
+        observer_acc,
+        Arc::new(opened_acc.clock),
+    );
+    let sink = handled.clone();
+    let _queryable = session_acc
+        .declare_queryable(
+            KEYEXPR,
+            QueryableOptions::default(),
+            move |view: &dyn QueryView, out: &mut dyn ReplyOut| {
+                sink.lock().unwrap().push(Handled {
+                    payload: view.payload().map(<[u8]>::to_vec),
+                    attachment: view.attachment().map(<[u8]>::to_vec),
+                    payload_lent: view.payload_shared().map(|s| s.is_shared()),
+                    attachment_lent: view.attachment_shared().map(|s| s.is_shared()),
+                });
+                out.reply(REPLY_PAYLOAD);
+            },
+        )
+        .expect("acceptor declares the answering queryable");
+    let session_acc_drive = session_acc.clone();
+    let drive_acc = drive_session_until_terminal(
+        &mut opened_acc.inbound,
+        &opened_acc.actions,
+        &mut opened_acc.engine,
+        None,
+        &opened_acc.clock,
+        &timeouts,
+        move |event| session_acc_drive.dispatch_iteration_event(event),
+    );
+
+    let observer_init = Arc::new(Mutex::new(ApplicationLayerObserver::new()));
+    let session_init = TokioSession::new(
+        opened_init.actions.clone(),
+        observer_init,
+        Arc::new(opened_init.clock),
+    );
+    let session_init_drive = session_init.clone();
+    let drive_init = drive_session_until_terminal(
+        &mut opened_init.inbound,
+        &opened_init.actions,
+        &mut opened_init.engine,
+        None,
+        &opened_init.clock,
+        &timeouts,
+        move |event| session_init_drive.dispatch_iteration_event(event),
+    );
+
+    let scenario = {
+        let session = session_init.clone();
+        let handled = handled.clone();
+        async move {
+            // Re-issue on a poll cadence until the handler has run (the
+            // declaration has to reach the asker first), as the test above does.
+            let mut handles = Vec::new();
+            for _ in 0..120 {
+                let options = QueryOptions::get()
+                    .with_payload(VALUE.to_vec())
+                    .with_attachment(ATTACHMENT.to_vec());
+                if let Ok(handle) = session.query(KEYEXPR, options, |_: &dyn ReplyView| {}, |_| {})
+                {
+                    handles.push(handle);
+                }
+                for _ in 0..4 {
+                    if !handled.lock().unwrap().is_empty() {
+                        return;
+                    }
+                    tokio::time::sleep(Duration::from_millis(25)).await;
+                }
+            }
+            panic!("the queryable's handler never ran within the ~12s budget");
+        }
+    };
+
+    tokio::select! {
+        _ = drive_acc => panic!("acceptor drive loop ended unexpectedly"),
+        _ = drive_init => panic!("initiator drive loop ended unexpectedly"),
+        _ = scenario => {}
+    }
+
+    let first = handled.lock().unwrap().remove(0);
+    assert!(first.payload.as_deref() == Some(VALUE), "the value arrived");
+    assert!(
+        first.attachment.as_deref() == Some(ATTACHMENT),
+        "the attachment arrived"
+    );
+    assert_eq!(
+        first.payload_lent,
+        Some(true),
+        "the value reached the handler as a range of the frame, not a copy"
+    );
+    assert_eq!(
+        first.attachment_lent,
+        Some(true),
+        "the attachment reached the handler as a range of the frame, not a copy"
     );
 }
