@@ -350,8 +350,11 @@ untracked note.
   `zenoh-protocol`, `zenoh-codec`, `zenoh-buffers`, `zenoh-keyexpr`,
   `zenoh-config`, `zenoh-link-*`). The version this tree compares against and
   enforces is `UPSTREAM_VERSION` in `scripts/lib/upstream_feature_census.py`
-  (1.10.1 as of this writing; the constant is the SSOT, so if the two ever
-  disagree the constant is right and this sentence is stale). This is what
+  (1.10.1). The number written here is HELD by
+  `scripts/lib/claude_md_upstream_pin_gate.py`, which fails on any version
+  token in this bullet that differs from the constant, and on a bullet that no
+  longer names the constant or states a version; move the constant and this
+  number in one commit. This is what
   §5.12-codec / §5.1-transport anchor to, and it is why those domains are
   gradable. Do NOT locate the tree yourself: `upstream_root()` in
   `scripts/lib/upstream_citation_anchor_gate.py` is the one resolver, and it

@@ -1061,6 +1061,11 @@ round_fed_gates=(
     # MEASURED: well under a second, a parse with no build.
     "zephyr_board_table_gate.py --selftest"
     "zephyr_board_table_gate.py"
+    # R3171 (item 747) — the upstream version CLAUDE.md states, against the pin
+    # the tree enforces. Round-fed: it names CLAUDE.md and the census module.
+    # MEASURED: well under a second, a parse with no build.
+    "claude_md_upstream_pin_gate.py --selftest"
+    "claude_md_upstream_pin_gate.py --check"
 )
 # ⚠ The module and its ARGUMENTS are expanded separately, and that too is
 # forced rather than chosen: `scripts/lib/"${cmd[@]}"` attaches the prefix to

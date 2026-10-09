@@ -3261,6 +3261,10 @@ layer_c0_test_discipline() {
     # fixture is UNCHANGED. Mutating either refusal reds it.
     python3 scripts/lib/relicense_spdx.py --selftest || return 1
     python3 scripts/lib/relicense_spdx.py --check || return 1
+    # R3171 (item 747) — the upstream version CLAUDE.md states must be the pin
+    # `UPSTREAM_VERSION` enforces; a bullet that states none FAILS, not passes.
+    python3 scripts/lib/claude_md_upstream_pin_gate.py --selftest || return 1
+    python3 scripts/lib/claude_md_upstream_pin_gate.py --check || return 1
     # R2084 — the ACCEPT-DEADLINE gate. A test that opens a listener and spawns
     # an external process at it has its liveness resting entirely on that
     # process dialling; `TcpListener::accept` has no deadline and
