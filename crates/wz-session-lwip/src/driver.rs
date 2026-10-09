@@ -289,9 +289,17 @@ mod tests {
         let (_serial, link) = wz_link_lwip::lwip_test_link();
         let driver = looped(&link, 7481);
 
+        // The whole slot the socket can carry, whatever its width in this build:
+        // the default pool is 1536 bytes and the slim one 256, so a fixed size
+        // would be capped differently in each leg of the feature matrix.
+        let asked = SESSION_RX_SLOT_SIZE;
         let mut lease =
-            TxLease::acquire(&driver, 600, Priority::DEFAULT).expect("lwIP lends a pbuf");
-        std::assert!(lease.capacity() >= 600, "room for what was asked");
+            TxLease::acquire(&driver, asked, Priority::DEFAULT).expect("lwIP lends a pbuf");
+        std::assert!(lease.capacity() >= asked, "room for what was asked");
+        std::assert!(
+            asked > b"short".len(),
+            "CONTROL: the ask is larger than the write"
+        );
         lease.append(b"short").expect("fits");
         std::assert_eq!(
             lease.send(Reliability::Reliable, Priority::DEFAULT),
