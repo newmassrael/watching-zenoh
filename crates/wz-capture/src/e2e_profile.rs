@@ -42,7 +42,8 @@
 //!           "refin": true, "refout": true, "xorout": "0xFFFFFFFF",
 //!           "cover": ["length", "ident", "@payload", "counter"]},
 //!   "length": {"field": "length", "counts": "frame"},
-//!   "counter": {"field": "counter", "max_gap": 10, "timeout_ms": 1000}
+//!   "counter": {"field": "counter", "max_gap": 10, "timeout_ms": 1000},
+//!   "slot": {"message": ["ident"], "by_zid": true}
 //! }
 //! ```
 //!
@@ -62,6 +63,16 @@
 //!   opening reports the length as INFORMATION beside the CRC verdict.
 //! * `counter` names the field the judge reads, the largest forward step it
 //!   accepts and the silence it tolerates.
+//! * `slot` (optional) says which frames of a CAPTURE share one counter, for
+//!   the pipeline that keeps a judge per slot (`crate::e2e_slots`); the
+//!   stateless doors ignore it. A slot is the key expression the frame was
+//!   published under, the sender, and the logical values of the `message`
+//!   fields (none by default, so one key carries one message). `by_zid`
+//!   (default true) keeps two senders' counters apart; a deployment whose
+//!   receiver keeps one counter per message regardless of sender says `false`.
+//!   A `message` field may not be the crc, length or counter field: each of
+//!   those varies from frame to frame, and a slot that moved with the counter
+//!   would judge nothing.
 //!
 //! Integers are JSON numbers (plain decimal) or strings (decimal, or `0x` and
 //! hex digits), so a 64-bit value survives a reader that holds numbers as
@@ -240,6 +251,29 @@ pub struct CounterSpec {
     pub timeout_ms: u64,
 }
 
+/// Which frames of a capture share one counter: the part of the slot the
+/// profile decides. The rest of a slot (the key expression and, unless
+/// [`Self::by_zid`] is off, the sender) is the capture's.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SlotSpec {
+    /// Indices of the fields whose logical values tell one message from
+    /// another on a shared key. Empty when a key carries one message.
+    pub message: Vec<usize>,
+    /// Whether two senders of one message keep separate counters.
+    pub by_zid: bool,
+}
+
+impl Default for SlotSpec {
+    /// One message per key, one counter per sender: the reading that cannot
+    /// charge one sender with another's counter.
+    fn default() -> Self {
+        Self {
+            message: Vec::new(),
+            by_zid: true,
+        }
+    }
+}
+
 /// A validated profile.
 #[derive(Debug, Clone)]
 pub struct Profile {
@@ -249,6 +283,7 @@ pub struct Profile {
     crc: CrcSpec,
     length: LengthSpec,
     counter: CounterSpec,
+    slot: SlotSpec,
 }
 
 impl Profile {
@@ -256,7 +291,11 @@ impl Profile {
     pub fn parse(text: &str) -> Result<Self, DocError> {
         let root = read_json(text)?;
         let entries = object(&root, "")?;
-        check_keys(entries, &["name", "fields", "crc", "length", "counter"], "")?;
+        check_keys(
+            entries,
+            &["name", "fields", "crc", "length", "counter", "slot"],
+            "",
+        )?;
 
         let name = read_name(required(entries, "name", "")?, "/name")?;
         let fields = read_fields(required(entries, "fields", "")?)?;
@@ -265,6 +304,10 @@ impl Profile {
         let crc = read_crc(required(entries, "crc", "")?, &fields)?;
         let length = read_length(required(entries, "length", "")?, &fields)?;
         let counter = read_counter(required(entries, "counter", "")?, &fields)?;
+        let slot = match optional(entries, "slot") {
+            Some(value) => read_slot(value, &fields, [crc.field, length.field, counter.field])?,
+            None => SlotSpec::default(),
+        };
 
         for (a, b, what) in [
             (crc.field, length.field, "crc and length"),
@@ -290,6 +333,7 @@ impl Profile {
             crc,
             length,
             counter,
+            slot,
         })
     }
 
@@ -326,6 +370,11 @@ impl Profile {
     /// The counter rules.
     pub fn counter(&self) -> &CounterSpec {
         &self.counter
+    }
+
+    /// What the profile says about which frames share a counter.
+    pub fn slot(&self) -> &SlotSpec {
+        &self.slot
     }
 
     /// A judge for one stream of this profile's frames, configured from its
@@ -860,6 +909,45 @@ fn read_length(value: &Json5Value, fields: &[Field]) -> Result<LengthSpec, DocEr
         }
     };
     Ok(LengthSpec { field, counts })
+}
+
+fn read_slot(
+    value: &Json5Value,
+    fields: &[Field],
+    judged: [usize; 3],
+) -> Result<SlotSpec, DocError> {
+    let path = "/slot";
+    let entries = object(value, path)?;
+    check_keys(entries, &["message", "by_zid"], path)?;
+
+    let by_zid = match optional(entries, "by_zid") {
+        Some(v) => read_bool(v, &child(path, "by_zid"))?,
+        None => true,
+    };
+    let mut message: Vec<usize> = Vec::new();
+    if let Some(v) = optional(entries, "message") {
+        let list_path = child(path, "message");
+        for (i, item) in array(v, &list_path)?.iter().enumerate() {
+            let here = at(&list_path, i);
+            let name = read_string(item, &here)?;
+            let index = field_named(fields, name, &here)?;
+            if judged.contains(&index) {
+                return Err(DocError::invalid(
+                    here,
+                    format!(
+                        "`{name}` is the crc, length or counter field: it changes from \
+                         frame to frame, so a slot keyed on it would never see a second \
+                         frame"
+                    ),
+                ));
+            }
+            if message.contains(&index) {
+                return Err(DocError::invalid(here, format!("`{name}` is listed twice")));
+            }
+            message.push(index);
+        }
+    }
+    Ok(SlotSpec { message, by_zid })
 }
 
 fn read_counter(value: &Json5Value, fields: &[Field]) -> Result<CounterSpec, DocError> {

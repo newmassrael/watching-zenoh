@@ -129,8 +129,12 @@ fn refuse_plain(head: &str, reason: &str) -> String {
     out
 }
 
-fn push_fields(profile: &Profile, reports: &[FieldReport], out: &mut String) {
-    out.push_str("\"fields\":[");
+/// The header's fields as a JSON array under `key`, shared by the two verdict
+/// documents here (`"fields"`) and by the capture row's block (`"header"`).
+pub(crate) fn push_fields(profile: &Profile, reports: &[FieldReport], key: &str, out: &mut String) {
+    out.push('"');
+    out.push_str(key);
+    out.push_str("\":[");
     for (i, report) in reports.iter().enumerate() {
         if i > 0 {
             out.push(',');
@@ -219,7 +223,7 @@ pub fn wrap_document(profile_text: &str, values_text: &str, payload: &[u8]) -> S
         "\",\"payload_offset\":{},\"payload_bytes\":{},",
         built.payload_offset, built.payload_bytes
     );
-    push_fields(&profile, &built.fields, &mut out);
+    push_fields(&profile, &built.fields, "fields", &mut out);
     out.push_str(",\"crc_computed\":");
     u64_into(built.crc, &mut out);
     out.push(',');
@@ -251,7 +255,7 @@ pub fn open_document(profile_text: &str, frame: &[u8]) -> String {
         ",\"payload_offset\":{},\"payload_bytes\":{},",
         opened.payload_offset, opened.payload_bytes
     );
-    push_fields(&profile, &opened.fields, &mut out);
+    push_fields(&profile, &opened.fields, "fields", &mut out);
     let _ = write!(out, ",\"crc_ok\":{},\"crc_computed\":", opened.crc_ok);
     u64_into(opened.crc_computed, &mut out);
     out.push(',');

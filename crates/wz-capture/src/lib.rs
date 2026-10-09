@@ -88,6 +88,11 @@ pub mod e2e_frame;
 pub mod e2e_json;
 pub mod e2e_judge;
 pub mod e2e_profile;
+// The judgement state a capture keeps per slot. Documented by its own `//!`
+// text, for the reason given above.
+#[cfg(test)]
+mod e2e_slot_tests;
+pub mod e2e_slots;
 #[cfg(test)]
 mod e2e_tests;
 /// R311y615 (§1.1f) — the second ANALYSIS plane: Query/Reply exchanges and

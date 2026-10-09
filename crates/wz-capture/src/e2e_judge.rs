@@ -108,6 +108,23 @@ pub enum CounterReason {
     OutOfRange,
 }
 
+impl CounterReason {
+    /// Every reason, so the vocabulary a document declares and a test's walk of
+    /// it are one list.
+    pub const ALL: [Self; 3] = [Self::None, Self::Repeat, Self::OutOfRange];
+
+    /// The word a machine reads for this reason: the `counter_reason` of a
+    /// capture row's `e2e` block. Exhaustive, so a reason added to the enum
+    /// cannot reach a consumer without one.
+    pub const fn word(self) -> &'static str {
+        match self {
+            Self::None => "none",
+            Self::Repeat => "repeat",
+            Self::OutOfRange => "out_of_range",
+        }
+    }
+}
+
 /// The verdict on one reception, or on one poll.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Judgment {
@@ -269,19 +286,7 @@ impl Judge {
             });
         }
 
-        let reason = match self.baseline {
-            None => CounterReason::None,
-            Some(baseline) => {
-                let step = counter.wrapping_sub(baseline) & mask;
-                if step == 0 {
-                    CounterReason::Repeat
-                } else if step <= self.config.max_gap {
-                    CounterReason::None
-                } else {
-                    CounterReason::OutOfRange
-                }
-            }
-        };
+        let reason = self.counter_step(counter);
         if reason != CounterReason::Repeat {
             self.baseline = Some(counter);
             self.last_valid_ms = Some(now_ms);
@@ -295,6 +300,69 @@ impl Judge {
             timeout_error: self.timed_out(now_ms),
             counter_reason: reason,
             silence_ms,
+        })
+    }
+
+    /// What the counter alone says about a frame whose CRC matched: the step
+    /// from the baseline, judged. It moves nothing.
+    fn counter_step(&self, counter: u64) -> CounterReason {
+        match self.baseline {
+            None => CounterReason::None,
+            Some(baseline) => {
+                let step = counter.wrapping_sub(baseline) & self.counter_mask();
+                if step == 0 {
+                    CounterReason::Repeat
+                } else if step <= self.config.max_gap {
+                    CounterReason::None
+                } else {
+                    CounterReason::OutOfRange
+                }
+            }
+        }
+    }
+
+    /// [`Judge::receive`] for a frame whose arrival instant is UNKNOWN: a
+    /// capture packet that carried no timestamp.
+    ///
+    /// The CRC and the counter are judged exactly as `receive` judges them,
+    /// and the baseline moves under the same rules. The timeout is NOT judged,
+    /// so [`Judgment::timeout_error`] is false because nothing was measured and
+    /// [`Judgment::silence_ms`] is `None`; a caller that has to tell that from
+    /// a measured "no timeout" knows it passed no clock.
+    ///
+    /// A valid reception at an unknown instant FORGETS the instant of the last
+    /// valid one. Keeping the old instant would make the next timed frame
+    /// report the silence since a frame that is no longer the last, and so
+    /// charge a timeout that the untimed frame in between disproves; with no
+    /// instant, the next timed frame has nothing to measure from and is not
+    /// timed out. A CRC error and a repetition move nothing, as in `receive`.
+    pub fn receive_without_clock(
+        &mut self,
+        crc_ok: bool,
+        counter: u64,
+    ) -> Result<Judgment, CounterWidthError> {
+        if counter & !self.counter_mask() != 0 {
+            return Err(CounterWidthError {
+                counter,
+                counter_bytes: self.config.counter_bytes,
+            });
+        }
+        let reason = if crc_ok {
+            self.counter_step(counter)
+        } else {
+            CounterReason::None
+        };
+        if crc_ok && reason != CounterReason::Repeat {
+            self.baseline = Some(counter);
+            self.last_valid_ms = None;
+            self.armed_ms = None;
+        }
+        Ok(Judgment {
+            crc_error: !crc_ok,
+            counter_error: reason != CounterReason::None,
+            timeout_error: false,
+            counter_reason: reason,
+            silence_ms: None,
         })
     }
 
