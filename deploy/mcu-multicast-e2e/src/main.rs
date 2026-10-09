@@ -51,7 +51,11 @@ use embedded_alloc::LlffHeap as Heap;
 use panic_semihosting as _;
 use wz_mcu_clock::SystickClock;
 
-use wz_mcu_multicast_e2e::{run_multicast_e2e, ClockSource, LwipLink, MulticastOutcome};
+#[cfg(not(feature = "loopback-multicast"))]
+use wz_mcu_multicast_e2e::run_multicast_e2e;
+#[cfg(feature = "loopback-multicast")]
+use wz_mcu_multicast_e2e::run_multicast_e2e_with_progress;
+use wz_mcu_multicast_e2e::{ClockSource, LwipLink, MulticastOutcome};
 
 // The mps2 family (M3/M4/M7) has 4 MB SRAM, so a generous 256 KB heap holds
 // the alloc-backed multicast stack (the dispatcher + the 32 x 1536 multicast
@@ -117,6 +121,17 @@ fn main() -> ! {
     #[cfg(feature = "loopback-multicast")]
     link.route_multicast_over_loopback()
         .expect("loopback-multicast build routes multicast TX over the loop netif");
+    // R3171 (open-debt item 815) — the BOOT build (`loopback-multicast`, Layer
+    // Q.6) prints each stage as the e2e ENTERS it, so a boot that stops making
+    // progress leaves the stage it stalled in as its last console line instead
+    // of only the `starting` line above. The plain build is the footprint
+    // artifact (Layer Q.5): it never boots in CI, and its text size is a
+    // gated measurement, so it keeps the announcement-free entry.
+    #[cfg(feature = "loopback-multicast")]
+    let report = run_multicast_e2e_with_progress(&link, SystickClockRef, |stage| {
+        hprintln!("R311mi: stage {}", stage.name());
+    });
+    #[cfg(not(feature = "loopback-multicast"))]
     let report = run_multicast_e2e(&link, SystickClockRef);
 
     let full_success = report.join_ok

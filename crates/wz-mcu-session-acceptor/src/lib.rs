@@ -84,7 +84,7 @@ use wz_session_core::WhatAmI;
 #[cfg(all(feature = "lwip", lwip_real_build))]
 pub mod lwip;
 #[cfg(all(feature = "lwip", lwip_real_build))]
-pub use lwip::{run_acceptor_e2e, LwipTopology};
+pub use lwip::{run_acceptor_e2e, run_acceptor_e2e_with_progress, LwipTopology};
 
 /// UDP port the acceptor session socket binds to.
 pub const SESSION_PORT: u16 = 7460;
@@ -302,6 +302,43 @@ pub struct AcceptorE2eReport {
     pub open_ack_action_fired: u32,
 }
 
+/// The stage a running acceptor e2e is WAITING in, announced once on entering
+/// it through [`run_acceptor_e2e_on_with_progress`].
+///
+/// R3171 (open-debt item 815). The e2e is one call to a bare-metal image, and a
+/// guest that stops making progress inside it (the SysTick-versus-spinlock
+/// deadlock of item 815 was exactly that) used to leave the harness one line,
+/// `... e2e starting`, and a 30 s timeout: no way to tell a handshake that never
+/// got its `InitAck` from one that stalled after `OpenAck`. The image prints
+/// [`AcceptorStage::name`] on each entry, so the LAST such line a hung boot
+/// printed is the stage it is stalled in.
+///
+/// The stages are the reactive peer's waits, in handshake order. A stage that
+/// is never entered (the run failed earlier) is not announced, which is the
+/// information a reader wants.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum AcceptorStage {
+    /// `InitSyn` sent; waiting for the acceptor's `InitAck` (and its cookie).
+    AwaitInitAck,
+    /// `OpenSyn` sent with the round-tripped cookie; waiting for `OpenAck`.
+    AwaitOpenAck,
+    /// The post-handshake data sent; waiting for the acceptor to dispatch it
+    /// (or for the drive loop's iteration cap to end the run).
+    AwaitDispatch,
+}
+
+impl AcceptorStage {
+    /// A short stable token for the stage, for a console line.
+    pub const fn name(self) -> &'static str {
+        match self {
+            AcceptorStage::AwaitInitAck => "await-initack",
+            AcceptorStage::AwaitOpenAck => "await-openack",
+            AcceptorStage::AwaitDispatch => "await-dispatch",
+        }
+    }
+}
+
 /// The reactive peer's handshake state machine.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum PeerPhase {
@@ -343,17 +380,54 @@ enum PeerPhase {
 /// signing key are drawn from it. A board passes its own; a caller with no
 /// source passes [`FixtureEntropy`] by name.
 pub fn run_acceptor_e2e_on<T, C, E, H>(
-    mut topology: T,
+    topology: T,
     clock_source: C,
     entropy: E,
     data_mode: DataMode,
-    mut on_fragment: H,
+    on_fragment: H,
 ) -> AcceptorE2eReport
 where
     T: AcceptorTopology,
     C: ClockSource,
     E: wz_session_core::entropy::EntropySource + Send + 'static,
     H: FnMut(),
+{
+    run_acceptor_e2e_on_with_progress(
+        topology,
+        clock_source,
+        entropy,
+        data_mode,
+        on_fragment,
+        |_stage| {},
+    )
+}
+
+/// [`run_acceptor_e2e_on`] that also announces each [`AcceptorStage`] through
+/// `on_stage` as the e2e ENTERS it (R3171, open-debt item 815).
+///
+/// `on_stage` runs inside the drive loop, so it must be cheap and must not
+/// block: a bare-metal image prints one console line, a host test pushes into
+/// a vector. A caller that wants no announcements uses
+/// [`run_acceptor_e2e_on`], which passes a no-op that compiles away.
+///
+/// The announcements are ordered and each fires at most once per run:
+/// [`AcceptorStage::AwaitInitAck`] right after the opening `InitSyn`,
+/// [`AcceptorStage::AwaitOpenAck`] when the cookie is read off the `InitAck`,
+/// [`AcceptorStage::AwaitDispatch`] when the data is sent after `OpenAck`.
+pub fn run_acceptor_e2e_on_with_progress<T, C, E, H, S>(
+    mut topology: T,
+    clock_source: C,
+    entropy: E,
+    data_mode: DataMode,
+    mut on_fragment: H,
+    mut on_stage: S,
+) -> AcceptorE2eReport
+where
+    T: AcceptorTopology,
+    C: ClockSource,
+    E: wz_session_core::entropy::EntropySource + Send + 'static,
+    H: FnMut(),
+    S: FnMut(AcceptorStage),
 {
     // The hook only fires under `reassembly` (the Fragment outcome is gated);
     // reference it so the non-reassembly build does not flag an unused param.
@@ -380,6 +454,7 @@ where
     // Open the handshake: the initiator's first move. The reactive peer
     // drives OpenSyn + the application data off the acceptor's real replies.
     topology.peer_send(&craft_initsyn_wire());
+    on_stage(AcceptorStage::AwaitInitAck);
 
     let mut peer_phase = PeerPhase::AwaitInitAck;
     let mut frame_dispatched = false;
@@ -475,6 +550,7 @@ where
                         topology.peer_send(&craft_opensyn_wire(&cookie));
                         peer_opensyn_sent = true;
                         peer_phase = PeerPhase::AwaitOpenAck;
+                        on_stage(AcceptorStage::AwaitOpenAck);
                     }
                 }
                 // OpenAck arrived — the acceptor is Established; send the
@@ -543,6 +619,7 @@ where
                     }
                     peer_frame_sent = true;
                     peer_phase = PeerPhase::Done;
+                    on_stage(AcceptorStage::AwaitDispatch);
                 }
                 _ => {}
             }

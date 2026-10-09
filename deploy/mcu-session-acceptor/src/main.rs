@@ -46,7 +46,7 @@ use panic_semihosting as _;
 use wz_mcu_clock::SystickClock;
 
 use wz_mcu_session_acceptor::{
-    run_acceptor_e2e, AcceptorE2eOutcome, ClockSource, DataMode, FixtureEntropy,
+    run_acceptor_e2e_with_progress, AcceptorE2eOutcome, ClockSource, DataMode, FixtureEntropy,
 };
 
 // Heap sizing fork per target SRAM budget. The mps2 family (M3/M4/M7) has
@@ -137,7 +137,19 @@ fn main() -> ! {
     // R2913 — this bare-metal board (QEMU mps2 / microbit) has no TRNG wired
     // into the image, so it says so by passing the named fixture; a board with
     // one passes its own `EntropySource` here.
-    let report = run_acceptor_e2e(SystickClockRef, FixtureEntropy, DATA_MODE, || {});
+    //
+    // R3171 (open-debt item 815) — each stage is printed as the e2e ENTERS it,
+    // so a boot that stops making progress leaves the stage it stalled in as
+    // its last console line, instead of only the `starting` line above.
+    let report = run_acceptor_e2e_with_progress(
+        SystickClockRef,
+        FixtureEntropy,
+        DATA_MODE,
+        || {},
+        |stage| {
+            hprintln!("Stage5: stage {}", stage.name());
+        },
+    );
     // Read before anything else runs, so printing the verdict is not part of
     // what it measures.
     let verdict = stack.verdict();

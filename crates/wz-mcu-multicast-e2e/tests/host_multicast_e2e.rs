@@ -21,7 +21,9 @@
 //! `lwip_test_link` init-once harness (one `lwip_init` + the multicast-netif
 //! routing per binary).
 
-use wz_mcu_multicast_e2e::{run_multicast_e2e, ClockSource, MulticastOutcome};
+use wz_mcu_multicast_e2e::{
+    run_multicast_e2e_with_progress, ClockSource, MulticastOutcome, MulticastStage,
+};
 
 /// Frozen host clock — `now_us` is constant, so no JOIN-interval / lease
 /// deadline ever elapses. The fragment chain is delivered FIFO over loopback
@@ -45,7 +47,21 @@ fn multicast_profile_admits_peer_and_reassembles_fragmented_put_over_lwip() {
     // group. The MutexGuard serialises lwIP's process-global group membership.
     let (_serial, link) = wz_link_lwip::lwip_test_link();
 
-    let report = run_multicast_e2e(&link, FrozenClock);
+    let mut stages: Vec<MulticastStage> = Vec::new();
+    let report = run_multicast_e2e_with_progress(&link, FrozenClock, |stage| stages.push(stage));
+
+    // R3171 (open-debt item 815) -- the stage marker a hung QEMU boot prints:
+    // each stage once, on ENTERING it, so the last line a stalled image printed
+    // names the stage it is stalled in.
+    assert_eq!(
+        stages,
+        [
+            MulticastStage::JoinGroup,
+            MulticastStage::RoundTrip,
+            MulticastStage::Departure,
+        ],
+        "a clean run enters each stage once, in order"
+    );
 
     assert!(
         report.join_ok,

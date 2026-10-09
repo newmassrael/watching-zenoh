@@ -43,7 +43,7 @@ use freertos_sys::{pdPASS, vTaskStartScheduler, xTaskCreate, xTaskGetTickCount, 
 // `platform-freertos` gate (`wz::runtime_freertos`), not a direct
 // wz-runtime-freertos dep: this demo is the consumer that proves the gate.
 use wz::runtime_freertos::{FreertosAllocator, FreertosClock, FreertosEntropy, FreertosEpoch};
-use wz_mcu_session_acceptor::{run_acceptor_e2e, AcceptorE2eOutcome, DataMode};
+use wz_mcu_session_acceptor::{run_acceptor_e2e_with_progress, AcceptorE2eOutcome, DataMode};
 use wz_session_core::epoch::EpochSource;
 
 /// FreeRTOS heap_4 backs every Rust allocation (the executor, the session
@@ -89,11 +89,17 @@ fn main() -> ! {
 
 /// The wz application task: the acceptor session e2e on this profile's seams.
 extern "C" fn wz_task(_params: *mut c_void) {
-    let report = run_acceptor_e2e(
+    // R3171 (open-debt item 815) — each stage is printed as the e2e ENTERS it,
+    // so a boot that stops making progress leaves the stage it stalled in as
+    // its last console line.
+    let report = run_acceptor_e2e_with_progress(
         FreertosClock::<TICK_HZ>,
         FreertosEntropy,
         DataMode::WholeFrame,
         || {},
+        |stage| {
+            hprintln!("R2913: stage {}", stage.name());
+        },
     );
     match report.outcome {
         AcceptorE2eOutcome::EstablishedAndDispatched => {

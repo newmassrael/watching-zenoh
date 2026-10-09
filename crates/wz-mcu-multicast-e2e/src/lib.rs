@@ -189,7 +189,55 @@ pub struct MulticastE2eReport {
 /// delivered FIFO over loopback and reassembles in order); the deploy bin
 /// passes its SysTick clock.
 pub fn run_multicast_e2e<C: ClockSource>(link: &LwipLink, clock_source: C) -> MulticastE2eReport {
+    run_multicast_e2e_with_progress(link, clock_source, |_stage| {})
+}
+
+/// The stage a running multicast e2e is IN, announced once on entering it
+/// through [`run_multicast_e2e_with_progress`].
+///
+/// R3171 (open-debt item 815). The e2e is one call to a bare-metal image, and a
+/// guest that stops making progress inside it used to leave the harness one
+/// line, `... e2e starting`, and a 30 s timeout. The image prints
+/// [`MulticastStage::name`] on each entry, so the LAST such line a hung boot
+/// printed is the stage it is stalled in. A stage never entered (the run ended
+/// earlier, e.g. a join that failed) is never announced.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum MulticastStage {
+    /// Binding the multicast RX socket and joining the group.
+    JoinGroup,
+    /// The bounded drive: the peer JOIN, the oversize Put's fragments and
+    /// their reassembly into one `Push`.
+    RoundTrip,
+    /// The second drive asking the node to leave: the departing Close and the
+    /// Running -> Stopped transition.
+    Departure,
+}
+
+impl MulticastStage {
+    /// A short stable token for the stage, for a console line.
+    pub const fn name(self) -> &'static str {
+        match self {
+            MulticastStage::JoinGroup => "join-group",
+            MulticastStage::RoundTrip => "round-trip",
+            MulticastStage::Departure => "departure",
+        }
+    }
+}
+
+/// [`run_multicast_e2e`] that also announces each [`MulticastStage`] through
+/// `on_stage` as the e2e ENTERS it (R3171, open-debt item 815).
+///
+/// `on_stage` runs between the e2e's phases, so a bare-metal image prints one
+/// console line and a host test pushes into a vector. A caller that wants no
+/// announcements uses [`run_multicast_e2e`], whose no-op compiles away.
+pub fn run_multicast_e2e_with_progress<C: ClockSource, S: FnMut(MulticastStage)>(
+    link: &LwipLink,
+    clock_source: C,
+    mut on_stage: S,
+) -> MulticastE2eReport {
     let group = SESSION_MULTICAST_GROUP_DEFAULT;
+    on_stage(MulticastStage::JoinGroup);
 
     // ── Bind the multicast RX socket + join the group. On an environment
     //    without an IGMP-capable netif (the deploy bin on QEMU loopback) this
@@ -258,6 +306,7 @@ pub fn run_multicast_e2e<C: ClockSource>(link: &LwipLink, clock_source: C) -> Mu
 
     let mut saw_push = false;
     let mut saw_drop = false;
+    on_stage(MulticastStage::RoundTrip);
     let outcome = run_multicast_session(
         &mut dispatcher,
         MulticastDriveConfig {
@@ -298,6 +347,7 @@ pub fn run_multicast_e2e<C: ClockSource>(link: &LwipLink, clock_source: C) -> Mu
     //    and a stop folded into that drive would clear the peer table before
     //    `active_peers` could witness it. Two phases keep each terminal
     //    measuring one thing — the same reason the unit twin is two-phase.
+    on_stage(MulticastStage::Departure);
     let departure = run_multicast_session_with_shutdown(
         &mut dispatcher,
         MulticastDriveConfig {

@@ -16,7 +16,8 @@
 //! need an init-once harness — deferred until one exists, R71 / YAGNI).
 
 use wz_mcu_session_acceptor::{
-    run_acceptor_e2e, AcceptorE2eOutcome, ClockSource, DataMode, FixtureEntropy,
+    run_acceptor_e2e_with_progress, AcceptorE2eOutcome, AcceptorStage, ClockSource, DataMode,
+    FixtureEntropy,
 };
 
 /// Frozen host clock — `now_us` is constant, so no handshake / lease deadline
@@ -35,12 +36,31 @@ impl ClockSource for FrozenClock {
 #[test]
 fn acceptor_handshake_reaches_established_and_dispatches_frame_over_lwip() {
     // No-op fragment hook: WholeFrame sends no fragments, so it never fires.
-    let report = run_acceptor_e2e(FrozenClock, FixtureEntropy, DataMode::WholeFrame, || {});
+    let mut stages: Vec<AcceptorStage> = Vec::new();
+    let report = run_acceptor_e2e_with_progress(
+        FrozenClock,
+        FixtureEntropy,
+        DataMode::WholeFrame,
+        || {},
+        |stage| stages.push(stage),
+    );
     assert_eq!(
         report.outcome,
         AcceptorE2eOutcome::EstablishedAndDispatched,
         "acceptor must reach Established (InitSyn -> InitAck -> OpenSyn with \
          the real round-tripped cookie -> OpenAck) and dispatch the \
          post-handshake application Frame over lwIP loopback; report = {report:#?}"
+    );
+    // R3171 (open-debt item 815) -- the stage marker a hung QEMU boot prints.
+    // Each stage is announced ONCE, on ENTERING it, in handshake order, so the
+    // last line a stalled image printed names the stage it is stalled in.
+    assert_eq!(
+        stages,
+        [
+            AcceptorStage::AwaitInitAck,
+            AcceptorStage::AwaitOpenAck,
+            AcceptorStage::AwaitDispatch,
+        ],
+        "a clean WholeFrame run enters each peer stage once, in order"
     );
 }

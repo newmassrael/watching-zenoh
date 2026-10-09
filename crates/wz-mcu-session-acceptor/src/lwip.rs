@@ -20,8 +20,8 @@ use wz::session_lwip::{LwipSessionLink, LwipUdpDriver};
 use wz_session_core::link::BoxedLinkDriver;
 
 use crate::{
-    run_acceptor_e2e_on, AcceptorE2eReport, AcceptorTopology, ClockSource, DataMode, PEER_PORT,
-    SESSION_PORT,
+    run_acceptor_e2e_on, run_acceptor_e2e_on_with_progress, AcceptorE2eReport, AcceptorTopology,
+    ClockSource, DataMode, PEER_PORT, SESSION_PORT,
 };
 
 /// Rx queue depth of the reactive peer socket. The peer receives only the
@@ -124,5 +124,32 @@ where
         entropy,
         data_mode,
         on_fragment,
+    )
+}
+
+/// [`run_acceptor_e2e`] that also announces each
+/// [`AcceptorStage`](crate::AcceptorStage) as the e2e enters it (R3171,
+/// open-debt item 815): the bare-metal and FreeRTOS images print one console
+/// line per stage, so a hung boot names the stage it stalled in.
+pub fn run_acceptor_e2e_with_progress<C, E, H, S>(
+    clock_source: C,
+    entropy: E,
+    data_mode: DataMode,
+    on_fragment: H,
+    on_stage: S,
+) -> AcceptorE2eReport
+where
+    C: ClockSource,
+    E: wz_session_core::entropy::EntropySource + Send + 'static,
+    H: FnMut(),
+    S: FnMut(crate::AcceptorStage),
+{
+    run_acceptor_e2e_on_with_progress(
+        LwipTopology::new(),
+        clock_source,
+        entropy,
+        data_mode,
+        on_fragment,
+        on_stage,
     )
 }

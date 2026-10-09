@@ -43,7 +43,8 @@ use wz::runtime_zephyr::glue::{log, log_line};
 use wz::runtime_zephyr::net::{ZephyrUdpDriver, ZephyrUdpSocket};
 use wz::runtime_zephyr::{ZephyrClock, ZephyrEntropy, ZephyrEpoch};
 use wz_mcu_session_acceptor::{
-    run_acceptor_e2e_on, AcceptorE2eOutcome, AcceptorTopology, DataMode, PEER_PORT, SESSION_PORT,
+    run_acceptor_e2e_on_with_progress, AcceptorE2eOutcome, AcceptorTopology, DataMode, PEER_PORT,
+    SESSION_PORT,
 };
 use wz_session_core::epoch::EpochSource;
 use wz_session_core::link::BoxedLinkDriver;
@@ -136,12 +137,17 @@ pub extern "C" fn wz_app_main() -> i32 {
 
     // R2918 — the session's secrets come through the profile's entropy seam,
     // from the board's random hook.
-    let report = run_acceptor_e2e_on(
+    //
+    // R3171 (open-debt item 815) — each stage is logged as the e2e ENTERS it, so
+    // a boot that stops making progress leaves the stage it stalled in as its
+    // last console line instead of only the `starting` line above.
+    let report = run_acceptor_e2e_on_with_progress(
         topology,
         ZephyrClock::<TICK_HZ>,
         ZephyrEntropy,
         DataMode::WholeFrame,
         || {},
+        |stage| log_line(alloc::format!("wz: stage {}", stage.name())),
     );
 
     if driver.rx_error().is_some() {
