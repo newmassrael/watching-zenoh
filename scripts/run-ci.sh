@@ -10948,13 +10948,19 @@ layer_c1r_mcu_multicast_e2e() {
 # brought at R3081, plus the two station-address tests and the four stack
 # measurement tests of the same round, plus the twelve core-clock tests of
 # R3095), and a cfg slip that emptied them would still exit 0.
+#
+# 24 -> 26: the two compile-time interface checks of the 10BASE-T1S firmware
+# (`ipv4_networks_overlap` and `mac_addresses_equal`) joined this lib in R3130 and
+# the guard was not moved with them (hosted C1ns: `expected exactly 24 passed`).
+# Derived by `--list` under this command (the crate has no features): 26, twelve in
+# `core_clock::tests`, four in `stack::tests` and ten in the crate root.
 layer_c1ns_nostd_members_isolated() {
     local nostd
     nostd="$(python3 scripts/lib/nostd_workspace_members.py)" || return 1
     for member in $nostd; do
         (cd crates && cargo test -p "$member" --quiet) || return 1
     done
-    _runci_guarded_test "C1ns zephyr lib" 24 \
+    _runci_guarded_test "C1ns zephyr lib" 26 \
         cargo test -p wz-runtime-zephyr --lib --quiet || return 1
 }
 
