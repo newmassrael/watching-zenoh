@@ -72,10 +72,13 @@ name for real. An EMPTY argument list is refused (exit 2) -- a caller that
 computed no crates must not be handed a clean answer.
 """
 
+import contextlib
+import io
 import pathlib
 import re
 import subprocess
 import sys
+import tempfile
 
 # `[`Foo`]` and `[Foo]` in a doc comment. Anchored at the doc-comment marker so
 # ordinary code and plain `//` comments do not contribute edges.
@@ -243,7 +246,52 @@ def selftest() -> int:
             file=sys.stderr,
         )
         return 1
-    print("doclink_dependents: selftest OK (an indented macro closes at its own brace)")
+    return _selftest_blind_spots()
+
+
+def _blind_spot_rc(sources: dict) -> int:
+    """check_blind_spots over a synthetic workspace: {crate-name: lib.rs text}."""
+    with tempfile.TemporaryDirectory() as tmp:
+        root = pathlib.Path(tmp)
+        for crate, text in sources.items():
+            (root / crate / "src").mkdir(parents=True)
+            (root / crate / "Cargo.toml").write_text('[package]\nname = "x"\n')
+            (root / crate / "src" / "lib.rs").write_text(text)
+        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+            return check_blind_spots(root)
+
+
+def _selftest_blind_spots() -> int:
+    """The check reports a REAL foreign link a macro emits, and only that.
+
+    The pin at zero is green on an empty population, so it is witnessed from
+    both sides here: a foreign crate's link inside a macro must turn it red,
+    while an own-crate name, a link outside any macro, and the docs after an
+    indented macro must leave it green.
+    """
+    macro_emitting = "macro_rules! m {{\n    () => {{\n        /// see [{}]\n        fn f() {{}}\n    }};\n}}\n"
+    cases = [
+        ("a foreign crate's link inside a macro", {"wz-a": macro_emitting.format("wz_b::Thing"), "wz-b": ""}, 1),
+        ("a link to the file's own crate", {"wz-a": macro_emitting.format("wz_a::Thing"), "wz-b": ""}, 0),
+        ("a wz_ name that is no crate (a C-ABI function)", {"wz-a": macro_emitting.format("wz_live_push"), "wz-b": ""}, 0),
+        (
+            "a foreign link after an indented macro, outside it",
+            {"wz-a": "mod t {\n    macro_rules! q {\n        () => { 1 };\n    }\n    /// see [wz_b::Thing]\n    fn g() {}\n}\n", "wz-b": ""},
+            0,
+        ),
+    ]
+    for what, sources, want in cases:
+        got = _blind_spot_rc(sources)
+        if got != want:
+            print(
+                f"doclink_dependents: selftest FAIL: {what}: check returned {got}, wanted {want}",
+                file=sys.stderr,
+            )
+            return 1
+    print(
+        "doclink_dependents: selftest OK (an indented macro closes at its own brace; "
+        "the blind-spot check reports a foreign macro link and nothing else)"
+    )
     return 0
 
 
