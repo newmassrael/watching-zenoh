@@ -103,6 +103,19 @@ EXPECTED_DISCOVERY=(
 FILTER_DISCOVERY="discovery_capture"
 FEATURES_DISCOVERY="dissect"
 
+# Open-debt item 811 — the FIFTH tracked capture: one QoS-negotiated session
+# with a control publish (none of the three publisher-side fields) and a publish
+# that sets the Frame's transport priority, the body's encoding and its
+# timestamp. Its last oracle reads the field document and the census, hence
+# `dissect`.
+EXPECTED_PUBLISHER=(
+    the_tracked_publisher_fields_capture_is_byte_identical_to_what_wz_emits
+    the_tracked_publisher_fields_capture_is_a_qos_session_with_a_control_and_a_full_publish
+    the_tracked_publisher_fields_capture_reaches_the_consumer_surface
+)
+FILTER_PUBLISHER="publisher_fields_capture"
+FEATURES_PUBLISHER="dissect"
+
 # Grade a `cargo test` transcript against the oracle names that follow it.
 # Separated from the run so `--selftest` can drive it over transcripts that never
 # came from cargo, which is the only way to show this gate can still fail.
@@ -185,7 +198,8 @@ selftest() {
     selftest_set compressed_capture_fixture "${EXPECTED_COMPRESSED[@]}" || return 1
     selftest_set midsession_capture_fixture "${EXPECTED_MIDSESSION[@]}" || return 1
     selftest_set discovery_capture_fixture "${EXPECTED_DISCOVERY[@]}" || return 1
-    echo "capture-provenance SELFTEST: 4 arm(s) of 4 over each of 4 set(s) — all-ok passes; FAILED, absent and empty each refused"
+    selftest_set publisher_fields_capture_fixture "${EXPECTED_PUBLISHER[@]}" || return 1
+    echo "capture-provenance SELFTEST: 4 arm(s) of 4 over each of 5 set(s) — all-ok passes; FAILED, absent and empty each refused"
     return 0
 }
 
@@ -242,4 +256,14 @@ if [[ $run_rc -ne 0 ]]; then
     tail -40 "$log" >&2
     exit 1
 fi
-grade_transcript "$log" "${EXPECTED_DISCOVERY[@]}"
+grade_transcript "$log" "${EXPECTED_DISCOVERY[@]}" || exit 1
+
+# The fifth, under `dissect` for its field-document and census oracle.
+(cd "$REPO_ROOT/crates" && cargo test -p "$CRATE" --features "$FEATURES_PUBLISHER" --lib "$FILTER_PUBLISHER") >"$log" 2>&1
+run_rc=$?
+if [[ $run_rc -ne 0 ]]; then
+    echo "  capture-provenance: \`cargo test -p ${CRATE} --features ${FEATURES_PUBLISHER} --lib ${FILTER_PUBLISHER}\` exited ${run_rc}" >&2
+    tail -40 "$log" >&2
+    exit 1
+fi
+grade_transcript "$log" "${EXPECTED_PUBLISHER[@]}"

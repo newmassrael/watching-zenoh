@@ -1600,6 +1600,8 @@ if ! bash scripts/lib/capture_provenance_gate.sh; then
     echo "              --lib refresh_the_tracked_midsession_capture -- --ignored" >&2
     echo "            cargo test -p wz-capture --features dissect \\" >&2
     echo "              --lib refresh_the_tracked_discovery_capture -- --ignored" >&2
+    echo "            cargo test -p wz-capture --features dissect \\" >&2
+    echo "              --lib refresh_the_tracked_publisher_fields_capture -- --ignored" >&2
     echo "          then re-run the suite to grade it. See captures/README.md." >&2
     echo "          Bypass with \`git push --no-verify\` only for genuine hotfixes." >&2
     exit 1
