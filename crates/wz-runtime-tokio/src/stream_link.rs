@@ -763,13 +763,15 @@ impl BoxedLinkDriver for StreamWriteDriver {
     // The byte door above is handed a slice, so it has to build a second `Vec`
     // (the prefix and a copy of the bytes) before it can enqueue. A frame encoded
     // behind its own prefix IS the wire, so the buffer goes to the writer as it
-    // is: one allocation and no copy where there were two and one.
+    // is: one allocation and no copy where there were two and one. And the writer
+    // gives the buffer back once it has written it, so the next frame is built in
+    // the same memory and a link in steady state allocates none.
     fn tx_slot_acquire(&self, want: usize, _priority: Priority) -> Option<TxSlotGrant> {
         let headroom = self.frame_prefix_len();
         // `want` is a hint, the codec's worst case. A frame past the u16 length
         // field is dropped by the byte door whatever its size, so nothing is
         // lent past it.
-        let buf = Vec::with_capacity(headroom + want.min(u16::MAX as usize));
+        let buf = self.tx.take_buffer(headroom + want.min(u16::MAX as usize));
         let mut lent = self.lent.lock().expect("lent frames poisoned");
         let number = match lent.free.pop() {
             Some(number) => number,
@@ -810,6 +812,7 @@ impl BoxedLinkDriver for StreamWriteDriver {
         // REPORTS, so the length field's range is checked here and not assumed.
         if len > u16::MAX as usize {
             log::warn!("wz-runtime-tokio: outbound frame {len} bytes > 65535; dropping");
+            self.tx.return_buffer(wire);
             return LinkSendOutcome::Dropped(LinkDropCause::Oversize);
         }
         let prefix_len = self.frame_prefix_len();
@@ -821,7 +824,10 @@ impl BoxedLinkDriver for StreamWriteDriver {
             // SAFETY: the session wrote `[start, start + len)` of this buffer and
             // says so (`TxLease::send`); the range lies inside its capacity.
             let payload = unsafe { std::slice::from_raw_parts(wire.as_ptr().add(start), len) };
-            return self.send_prioritized(payload, reliability, priority);
+            let outcome = self.send_prioritized(payload, reliability, priority);
+            // The byte door copied the payload into a frame of its own.
+            self.tx.return_buffer(wire);
+            return outcome;
         }
         let prefix_bytes = (len as u32).to_le_bytes();
         let prefix = if prefix_len == 4 {
@@ -845,7 +851,8 @@ impl BoxedLinkDriver for StreamWriteDriver {
     }
 
     fn tx_slot_abort(&self, slot: TxSlot) {
-        drop(self.take_lent(slot));
+        // Never sent, so nothing else holds it: it is lent again, not freed.
+        self.tx.return_buffer(self.take_lent(slot));
     }
 
     fn open_blocking(&self) {
@@ -886,7 +893,11 @@ where
             writer.flush().await
         };
         match queue.guarded(write).await {
-            Some(Ok(())) => {}
+            Some(Ok(())) => {
+                // Written and flushed, so the buffer is free: the next frame a
+                // link lends can be built in it.
+                queue.recycle(wire);
+            }
             Some(Err(e)) => {
                 log::warn!("wz-runtime-tokio: writer_task write failed: {e}; closing");
                 return;
@@ -1123,6 +1134,82 @@ mod tests {
             lent[..4],
             [4, 0, 0, 0],
             "lowlatency's u32 prefix, not u16's"
+        );
+    }
+
+    /// A lend given back unsent is lent again: the next acquire finds the very
+    /// buffer, so an abandoned encode costs the link no allocation.
+    #[tokio::test]
+    async fn an_abandoned_lend_is_lent_again_in_the_same_buffer() {
+        let (driver, _rx, _flag) = write_driver(false);
+        let first = driver
+            .tx_slot_acquire(200, Priority::DEFAULT)
+            .expect("lent");
+        let at = driver.tx_slot_storage(first.slot).0;
+        assert_eq!(
+            driver.tx.spare_count(),
+            0,
+            "CONTROL: nothing kept while lent"
+        );
+        driver.tx_slot_abort(first.slot);
+        // Measured on the pool: an address alone proves nothing, because a freed
+        // buffer's address is exactly what the allocator hands the next request.
+        assert_eq!(driver.tx.spare_count(), 1, "the abandoned buffer is kept");
+        let again = driver
+            .tx_slot_acquire(200, Priority::DEFAULT)
+            .expect("lent again");
+        assert_eq!(driver.tx.spare_count(), 0, "and taken from the pool");
+        assert_eq!(driver.tx_slot_storage(again.slot).0, at);
+        driver.tx_slot_abort(again.slot);
+    }
+
+    /// ARCHITECTURE section 9.1, steady state: once the writer task has written a
+    /// lent frame, its buffer is the next one lent. Through the real writer task
+    /// over a real byte stream, so the return is the writer's and not a test's.
+    #[tokio::test]
+    async fn the_writer_task_gives_a_written_buffer_back_to_be_lent_again() {
+        use tokio::io::AsyncReadExt;
+        use wz_session_core::tx_buf::TxBuf;
+        use wz_session_core::tx_lease::TxLease;
+
+        let (tx, rx) = crate::writer_queue::outbound_channel();
+        let driver = StreamWriteDriver::new(
+            tx.clone(),
+            Arc::new(AtomicBool::new(false)),
+            LinkSubject::UNKNOWN,
+            None,
+        );
+        let (writer_end, mut peer_end) = tokio::io::duplex(4096);
+        let _writer =
+            crate::writer_queue::WriterHandle::spawn(rx, |queue| writer_task(writer_end, queue));
+
+        let mut seen = std::collections::HashSet::new();
+        for round in 0..6u8 {
+            let mut lease = TxLease::acquire(&driver, 64, Priority::DEFAULT).expect("lent");
+            seen.insert(driver.tx_slot_storage(TxSlot(0)).0 as usize);
+            lease.append(&[round; 20]).expect("fits");
+            assert_eq!(
+                lease.send(Reliability::Reliable, Priority::DEFAULT),
+                LinkSendOutcome::Sent
+            );
+            // The frame as the peer reads it: a u16 length and the bytes.
+            let mut got = [0u8; 22];
+            peer_end.read_exact(&mut got).await.expect("the frame");
+            assert_eq!(&got[2..], &[round; 20]);
+            // Written and flushed; wait until the writer has handed the buffer back.
+            for _ in 0..200 {
+                if tx.spare_count() == 1 {
+                    break;
+                }
+                tokio::task::yield_now().await;
+                tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+            }
+            assert_eq!(tx.spare_count(), 1, "round {round}: the writer returned it");
+        }
+        assert_eq!(
+            seen.len(),
+            1,
+            "six frames, one buffer: the steady state allocates none"
         );
     }
 

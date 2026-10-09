@@ -148,6 +148,7 @@ pub fn outbound_channel_with_capacity(
             in_flight: None,
             closed: false,
             senders: 1,
+            spare: Vec::new(),
         }),
         ready: Notify::new(),
         room: Condvar::new(),
@@ -202,9 +203,49 @@ struct LaneState {
     /// Live `OutboundTx` clones; the queue is finished once this reaches 0
     /// and the lanes are empty.
     senders: usize,
+    /// ARCHITECTURE section 9.1 — frame buffers the writer is done with, kept to
+    /// be lent again so a link in steady state allocates none. Bounded in count
+    /// and in size ([`SPARE_MAX`], [`SPARE_CAPACITY_MAX`]) so a burst of large
+    /// frames cannot make a link hoard memory.
+    spare: Vec<Vec<u8>>,
 }
 
+/// How many spare frame buffers a lane set keeps.
+const SPARE_MAX: usize = 4;
+
+/// The largest buffer worth keeping spare. A frame buffer past it is rare (a
+/// frame is bounded by the link's batch size, which an ordinary session sets
+/// well under it) and is freed instead, so the pool's worst case is
+/// `SPARE_MAX * SPARE_CAPACITY_MAX` bytes per link.
+const SPARE_CAPACITY_MAX: usize = 16 * 1024;
+
 impl LaneState {
+    /// A spare buffer with room for `min` bytes, if one is kept: the smallest
+    /// that fits, so a small frame does not take the one a large frame needs.
+    fn take_spare(&mut self, min: usize) -> Option<Vec<u8>> {
+        let best = self
+            .spare
+            .iter()
+            .enumerate()
+            .filter(|(_, buf)| buf.capacity() >= min)
+            .min_by_key(|(_, buf)| buf.capacity())
+            .map(|(i, _)| i)?;
+        Some(self.spare.swap_remove(best))
+    }
+
+    /// Keep `buf` to be lent again, emptied, unless the pool is full or the buffer
+    /// is not worth keeping.
+    fn give_spare(&mut self, mut buf: Vec<u8>) {
+        if buf.capacity() == 0
+            || buf.capacity() > SPARE_CAPACITY_MAX
+            || self.spare.len() >= SPARE_MAX
+        {
+            return;
+        }
+        buf.clear();
+        self.spare.push(buf);
+    }
+
     /// R2924 — the lane a frame of `priority` takes: its own, or the one lane
     /// a non-QoS session has.
     fn lane_of(&self, priority: Priority) -> usize {
@@ -317,6 +358,41 @@ pub struct OutboundTx {
 }
 
 impl OutboundTx {
+    /// An empty buffer with room for at least `min_capacity` bytes, to build a
+    /// frame in: one the writer has finished with when the lane set keeps one that
+    /// fits, a fresh allocation otherwise.
+    pub fn take_buffer(&self, min_capacity: usize) -> Vec<u8> {
+        let spare = self
+            .shared
+            .state
+            .lock()
+            .expect("outbound lanes poisoned")
+            .take_spare(min_capacity);
+        spare.unwrap_or_else(|| Vec::with_capacity(min_capacity))
+    }
+
+    /// Give back a buffer that was taken with [`Self::take_buffer`] and never
+    /// sent (a lend that was abandoned), so it is lent again and not freed.
+    pub fn return_buffer(&self, buf: Vec<u8>) {
+        self.shared
+            .state
+            .lock()
+            .expect("outbound lanes poisoned")
+            .give_spare(buf);
+    }
+
+    /// How many spare buffers are kept. For a test to wait until the writer has
+    /// given one back.
+    #[cfg(test)]
+    pub(crate) fn spare_count(&self) -> usize {
+        self.shared
+            .state
+            .lock()
+            .expect("outbound lanes poisoned")
+            .spare
+            .len()
+    }
+
     /// Enqueue `frame` on `priority`'s lane, whatever the lane holds.
     pub fn send(&self, priority: Priority, frame: Vec<u8>) -> Result<(), OutboundClosed> {
         let mut st = self.shared.state.lock().expect("outbound lanes poisoned");
@@ -531,6 +607,17 @@ pub struct OutboundRx {
 }
 
 impl OutboundRx {
+    /// The writer is done with `frame`: keep its buffer to be lent again. Called
+    /// after the bytes are written, never before — the buffer is overwritten by the
+    /// next frame built in it.
+    pub fn recycle(&self, frame: Vec<u8>) {
+        self.shared
+            .state
+            .lock()
+            .expect("outbound lanes poisoned")
+            .give_spare(frame);
+    }
+
     /// The next frame, highest priority first; `None` once the queue is
     /// finished — closed or sender-less, and empty.
     ///
@@ -632,6 +719,12 @@ pub struct OutboundQueue {
 }
 
 impl OutboundQueue {
+    /// The writer is done with `frame`, which it has written out: keep its buffer
+    /// to be lent again (see [`OutboundRx::recycle`]).
+    pub fn recycle(&self, frame: Vec<u8>) {
+        self.rx.recycle(frame);
+    }
+
     /// Take the next frame, or `None` once the queue is finished.
     ///
     /// Before the seal this is the plain channel receive. After it, the channel
@@ -848,6 +941,86 @@ mod tests {
     use super::*;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
+
+    /// A buffer of exactly `capacity` bytes, its address recorded by the caller.
+    fn buffer_of(capacity: usize) -> Vec<u8> {
+        let mut b = Vec::with_capacity(capacity);
+        b.extend_from_slice(b"stale frame bytes");
+        b
+    }
+
+    /// ARCHITECTURE section 9.1 — a buffer the writer is done with is the next
+    /// one lent, emptied, so a link in steady state builds its frames in memory it
+    /// already has.
+    #[test]
+    fn a_recycled_buffer_is_lent_again_emptied() {
+        let (tx, rx) = outbound_channel();
+        let mut b = tx.take_buffer(100);
+        b.extend_from_slice(b"the previous frame");
+        let at = b.as_ptr();
+        rx.recycle(b);
+        let again = tx.take_buffer(100);
+        assert_eq!(again.as_ptr(), at, "the buffer comes back, not a new one");
+        assert!(
+            again.is_empty(),
+            "and the old bytes are not the next frame's"
+        );
+        assert!(again.capacity() >= 100);
+    }
+
+    /// The pool is bounded in count, so a burst cannot make a link hoard buffers.
+    #[test]
+    fn the_spare_pool_keeps_no_more_than_its_bound() {
+        let (tx, rx) = outbound_channel();
+        // Measured on the pool itself: comparing addresses would be fooled by the
+        // allocator handing a freed buffer's address to the next allocation.
+        let held: Vec<Vec<u8>> = (0..SPARE_MAX + 3).map(|_| tx.take_buffer(64)).collect();
+        assert_eq!(tx.spare_count(), 0, "CONTROL: nothing kept yet");
+        for (i, b) in held.into_iter().enumerate() {
+            rx.recycle(b);
+            assert_eq!(
+                tx.spare_count(),
+                (i + 1).min(SPARE_MAX),
+                "after {} given",
+                i + 1
+            );
+        }
+    }
+
+    /// A buffer past the size bound is freed, not kept: a rare large frame must not
+    /// pin its memory for the life of the link.
+    #[test]
+    fn a_buffer_past_the_size_bound_is_not_kept() {
+        let (tx, rx) = outbound_channel();
+        rx.recycle(buffer_of(SPARE_CAPACITY_MAX + 1));
+        assert_eq!(tx.shared.state.lock().expect("lanes").spare.len(), 0);
+        rx.recycle(buffer_of(SPARE_CAPACITY_MAX));
+        assert_eq!(
+            tx.shared.state.lock().expect("lanes").spare.len(),
+            1,
+            "CONTROL: one at the bound is kept"
+        );
+    }
+
+    /// The smallest buffer that fits is the one lent, so a small frame does not
+    /// take the large buffer a large frame needs.
+    #[test]
+    fn the_smallest_buffer_that_fits_is_lent() {
+        let (tx, rx) = outbound_channel();
+        let (small, large) = (buffer_of(1000), buffer_of(4000));
+        let (small_at, large_at) = (small.as_ptr(), large.as_ptr());
+        rx.recycle(large);
+        rx.recycle(small);
+        // Each taken buffer is HELD, so the next take cannot be handed the same
+        // address back by the allocator and pass for a recycled one.
+        let first = tx.take_buffer(500);
+        assert_eq!(first.as_ptr(), small_at, "the smaller one that fits");
+        let second = tx.take_buffer(500);
+        assert_eq!(second.as_ptr(), large_at, "the other, next");
+        let third = tx.take_buffer(500);
+        assert!(third.capacity() >= 500, "and a fresh one when none is kept");
+        assert!(third.as_ptr() != small_at && third.as_ptr() != large_at);
+    }
 
     /// R2952 (open-debt item 835) — the block-first slot: one per priority;
     /// a second ask at the same priority waits its full `wait_us` and is
