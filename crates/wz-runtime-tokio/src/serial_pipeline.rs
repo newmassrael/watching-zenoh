@@ -593,7 +593,7 @@ impl SerialPort {
 /// `BoundListener::Serial::accept_raw` opens the tty (cheap, local, unblocked) and
 /// flushes it, and DEFERS the peer-controlled handshake to
 /// `AcceptedLink::handshake`, exactly as the tls/quic acceptors defer their crypto
-/// off the accept path. It opens through [`open_tty`] and not through this function,
+/// off the accept path. It opens through `open_tty` and not through this function,
 /// because this one's clear would discard an `INIT` already on the wire (open-debt
 /// 795). A caller that wants both halves in one call uses [`accept_serial`].
 pub fn open_serial_device(endpoint: &SerialEndpoint) -> io::Result<SerialStream> {
@@ -680,7 +680,7 @@ pub(crate) fn open_tty(endpoint: &SerialEndpoint) -> io::Result<SerialStream> {
 /// Open-debt 795 -- this full clear is now the DIAL side's. Upstream's accept clears
 /// as above, but its initiator writes `INIT` once and its responder never sends the
 /// `RESET` that would make it write again, so the same clear at an ACCEPT can end a
-/// link before it starts. wz's accept therefore discards by [`flush_for_accept`]
+/// link before it starts. wz's accept therefore discards by `flush_for_accept`
 /// instead, which differs from upstream in exactly one frame.
 pub fn clear_serial_buffers(stream: &SerialStream) -> io::Result<()> {
     tokio_serial::SerialPort::clear(stream, tokio_serial::ClearBuffer::All)
