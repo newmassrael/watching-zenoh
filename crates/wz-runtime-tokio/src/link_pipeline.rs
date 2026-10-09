@@ -514,13 +514,47 @@ mod tests {
     /// R2778 (open-debt item 806) — the target is HELD refusing. It used to be
     /// a port bound and dropped, and a freed number is one any concurrent test
     /// in this binary can bind next, at which point this dial succeeds.
+    ///
+    /// Linux only, and bounded. A held port refuses by RST on Linux: a socket that is
+    /// bound and not listening is not a destination, and the stack answers a SYN
+    /// to it as it answers a SYN to a closed port. The BSD stack macOS is built on
+    /// drops the SYN of a bound socket in the closed state without answering, so the
+    /// same dial waits out the kernel's connect timeout (75 s on macOS) before it
+    /// errors: the hosted macOS leg of run 37915005371 stood in this test over 60 s and
+    /// then passed. The refusal this arm needs is therefore a Linux property, and the
+    /// error this test is about is held on every host by
+    /// [`dial_tcp_to_an_unusable_port_surfaces_an_error_at_once`]. The dial is bounded
+    /// either way, because `dial_tcp` leaves the bound to its caller by design (its own
+    /// doc), and a test that waits on the kernel's schedule is a test with no bound.
+    #[cfg(target_os = "linux")]
     #[tokio::test]
     async fn dial_tcp_surfaces_connect_error() {
         let dead = wz_runtime_tokio_test_support::refusing_port();
-        assert!(
-            dial_tcp(dead.addr(), &LinkSocket::NONE).await.is_err(),
-            "dial to closed port errors"
-        );
+        let dialled = tokio::time::timeout(
+            std::time::Duration::from_secs(20),
+            dial_tcp(dead.addr(), &LinkSocket::NONE),
+        )
+        .await
+        .expect("a dial to a held, non-listening port is refused within the bound");
+        assert!(dialled.is_err(), "dial to closed port errors");
+    }
+
+    /// `dial_tcp` surfaces a connect error, at once and on every host, for a destination
+    /// the kernel validates before it sends anything: port 0 is not a destination (Linux
+    /// answers `ECONNREFUSED`, the BSDs `EADDRNOTAVAIL`), so no network behaviour, no
+    /// held socket and no timeout enters into it. What it asserts is the half of
+    /// [`dial_tcp_surfaces_connect_error`] that is wz's: a connect failure comes back as
+    /// an `Err` and not a panic or a hang.
+    #[tokio::test]
+    async fn dial_tcp_to_an_unusable_port_surfaces_an_error_at_once() {
+        let unusable: SocketAddr = "127.0.0.1:0".parse().expect("loopback, port 0");
+        let dialled = tokio::time::timeout(
+            std::time::Duration::from_secs(20),
+            dial_tcp(unusable, &LinkSocket::NONE),
+        )
+        .await
+        .expect("the kernel refuses port 0 without sending a SYN");
+        assert!(dialled.is_err(), "a dial to port 0 errors");
     }
 
     /// `bind_tcp` + `accept_tcp` complete a loopback connection race-free: the

@@ -647,6 +647,17 @@ pub fn free_port() -> u16 {
 /// Windows implementation, so none is written: on a non-unix host this is the
 /// R2778 guard exactly -- bound, never listening, refusing -- and `listen`
 /// does not exist, which is a compile error rather than an untested guess.
+///
+/// ⚠ "Refusing" is a LINUX property of this socket. A bound socket that is not
+/// listening is not a destination there, and a SYN to it is answered with a reset, as
+/// to a closed port. The BSD stack under macOS drops the SYN of a bound socket in the
+/// closed state without answering, so a connect to this number does not fail: it waits
+/// out the kernel's connect timeout (75 s on macOS), which is what the hosted macOS
+/// leg of run 37915005371 measured in `link_pipeline::tests::dial_tcp_surfaces_connect_error`
+/// (running over 60 s, then passing). A caller that needs the refusal gates on
+/// `target_os = "linux"` and bounds its connect; a caller that needs an error from the
+/// dial itself on every host dials a destination the kernel validates before it sends
+/// (port 0).
 pub fn refusing_port() -> RefusingPort {
     let socket = socket2::Socket::new(socket2::Domain::IPV4, socket2::Type::STREAM, None)
         .expect("a TCP socket");
@@ -958,6 +969,11 @@ mod port_tests {
     /// that binds and releases reds the first — the number is free to rebind,
     /// which is item 806's defect. A helper that holds a LISTENING socket reds
     /// the second — the connect is accepted into the backlog.
+    ///
+    /// Linux only, and every connect bounded: the refusal is a Linux property of a bound,
+    /// non-listening socket (see [`refusing_port`]), and an unbounded `connect` on a
+    /// stack that drops the SYN waits out the kernel's schedule.
+    #[cfg(target_os = "linux")]
     #[test]
     fn a_refusing_port_is_reserved_and_refuses_connect() {
         use std::net::{TcpListener, TcpStream};
@@ -967,7 +983,7 @@ mod port_tests {
             "the held socket must reserve the port against a concurrent bind"
         );
         assert!(
-            TcpStream::connect(dead.addr()).is_err(),
+            TcpStream::connect_timeout(&dead.addr(), std::time::Duration::from_secs(10)).is_err(),
             "a bound-not-listening port must refuse connects (ECONNREFUSED)"
         );
     }
@@ -982,11 +998,16 @@ mod port_tests {
     /// guard without the shared option cannot be joined at all, and `listen`
     /// panics. A guard that let go of the number while a listener held it
     /// would leave nothing refusing after the drop.
-    #[cfg(unix)]
+    ///
+    /// Linux only, for the reason of the test above: the "refuses again" half is a
+    /// Linux property of a bound, non-listening socket.
+    #[cfg(target_os = "linux")]
     #[test]
     fn a_refusing_port_listens_and_refuses_again_on_the_same_number() {
         use std::net::{TcpListener, TcpStream};
         let port = refusing_port();
+        let connect_within =
+            |addr| TcpStream::connect_timeout(&addr, std::time::Duration::from_secs(10));
         for phase in ["first", "second"] {
             let listener = port.listen();
             assert_eq!(
@@ -995,7 +1016,7 @@ mod port_tests {
                 "the {phase} listener is on the held number"
             );
             assert!(
-                TcpStream::connect(port.addr()).is_ok(),
+                connect_within(port.addr()).is_ok(),
                 "the held number must answer while the {phase} listener is held"
             );
             assert!(
@@ -1004,7 +1025,7 @@ mod port_tests {
             );
             drop(listener);
             assert!(
-                TcpStream::connect(port.addr()).is_err(),
+                connect_within(port.addr()).is_err(),
                 "the number must refuse again once the {phase} listener is dropped"
             );
             assert!(
