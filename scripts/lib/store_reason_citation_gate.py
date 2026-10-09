@@ -58,6 +58,8 @@ file and its fixtures with the source gate's own classifier moves no bucket.
 from __future__ import annotations
 
 import argparse
+import contextlib
+import io
 import json
 import pathlib
 import shutil
@@ -190,6 +192,34 @@ BARE_BUDGET = 6
 #: while this gate sat behind a red leg and could not report it.
 FINDINGS_BUDGET = 8
 
+#: ROOT-LESS AXIS (open debt 754). The classifier this gate borrows sorts every
+#: citation into EIGHT buckets; until debt 754 was paid this gate held three and
+#: computed the other five only to throw them away -- `rootless_line`,
+#: `rootless_bare`, `rootless_stale_line`, the undeclared residue and their sum
+#: were measured by `grade()` and never printed or budgeted, so "the store has
+#: no root-less problem" and "nobody looked" printed the same thing. The source
+#: gate budgets all five; these are the same five over the store's reasons, and
+#: they are the only place a root-less claim in a LIVE atom reason is held.
+#:
+#: SEEDED AT WHAT THE COMMAND PRINTED on the landing commit, not at what anyone
+#: would like them to be: a ratchet that starts where the tree is can only
+#: shrink. Checked in both directions, like the three above -- ABOVE means a
+#: root-less citation was written (give it its root, `path` @ `needle`), BELOW
+#: means one was repaired (lower the budget in the same commit).
+#:
+#: The residue is measured over the store's OWN rooted citations and against the
+#: tracked tree's directory names (the reasons are flat files, so the tree's
+#: names are passed in rather than derived), which keeps this number a property
+#: of the store alone: moving the source tree cannot move it.
+ROOTLESS_LINE_BUDGET = 74
+ROOTLESS_BARE_BUDGET = 10
+ROOTLESS_STALE_LINE_BUDGET = 17
+ROOTLESS_UNDECLARED_BUDGET = 142
+#: The conservation check, as in the source gate: line + bare + residue. A
+#: declaration moves an occurrence between the three and leaves this alone; a
+#: new citation raises it whatever the others were set to.
+ROOTLESS_TOTAL_BUDGET = 226
+
 
 def live_reasons(root: pathlib.Path | None = None) -> dict[str, str]:
     """Every atom's LIVE reason -- not only the PARTIAL ones.
@@ -217,11 +247,17 @@ def live_reasons(root: pathlib.Path | None = None) -> dict[str, str]:
     return out
 
 
-def grade(reasons: dict[str, str], ref: pathlib.Path):
+def grade(reasons: dict[str, str], ref: pathlib.Path, own_dirs: set[str]):
     """Classify with the SOURCE gate's own scanner. Returns (counts, findings).
 
     ⚠ `rootless_locations(ref)` IS PASSED, never `None` -- see the module
     docstring for the measurement that makes this non-negotiable.
+
+    `counts` carries the scanner's eight buckets PLUS `rootless_undeclared`,
+    the residue the source gate sizes beside them (open debt 754). The residue
+    needs `own_dirs` -- the tracked tree's directory names -- because the
+    reasons are materialised as flat files and have no directories of their
+    own; without it `src/` and `tests/` would read as upstream candidates.
     """
     tmp = pathlib.Path(tempfile.mkdtemp(prefix="wz-store-reasons-"))
     try:
@@ -230,7 +266,9 @@ def grade(reasons: dict[str, str], ref: pathlib.Path):
             rel = "%s.txt" % atom.replace("/", "_")
             (tmp / rel).write_text(text, encoding="utf-8")
             rels.append(rel)
-        return g.scan(rels, tmp, ref, g.rootless_locations(ref))
+        counts, findings = g.scan(rels, tmp, ref, g.rootless_locations(ref))
+        counts["rootless_undeclared"] = g.rootless_undeclared(tmp, rels, own_dirs)
+        return counts, findings
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
@@ -270,6 +308,26 @@ def _verdict(reasons, ref, counts, findings) -> int:
             FINDINGS_BUDGET,
         )
     )
+    rl_line = counts.get("rootless_line", 0)
+    rl_bare = counts.get("rootless_bare", 0)
+    rl_stale = counts.get("rootless_stale_line", 0)
+    rl_residue = counts.get("rootless_undeclared", 0)
+    rl_total = rl_line + rl_bare + rl_residue
+    # One line per measurement the classifier produces, so an unseen axis can
+    # never again read as a clean one (open debt 754).
+    print(
+        "store-reason-citations: root-less line %d (budget %d), root-less bare "
+        "%d (budget %d), root-less stale line %d (budget %d)"
+        % (rl_line, ROOTLESS_LINE_BUDGET, rl_bare, ROOTLESS_BARE_BUDGET,
+           rl_stale, ROOTLESS_STALE_LINE_BUDGET)
+    )
+    print(
+        "store-reason-citations: root-less residue %d (budget %d) under "
+        "candidate segments no declaration covers; %d root-less in all "
+        "(budget %d) -- declaring a segment moves an occurrence between "
+        "these, it never changes the total"
+        % (rl_residue, ROOTLESS_UNDECLARED_BUDGET, rl_total, ROOTLESS_TOTAL_BUDGET)
+    )
 
     rc = 0
     for name, got, budget in (
@@ -292,6 +350,50 @@ def _verdict(reasons, ref, counts, findings) -> int:
                 "one, which is the direction we want: lower %s_BUDGET to %d in "
                 "this same commit so the ratchet holds."
                 % (got, name, budget, name.upper(), got)
+            )
+
+    for label, got, budget, const in (
+        ("root-less line-form", rl_line, ROOTLESS_LINE_BUDGET, "ROOTLESS_LINE_BUDGET"),
+        ("root-less bare-form", rl_bare, ROOTLESS_BARE_BUDGET, "ROOTLESS_BARE_BUDGET"),
+        ("root-less stale-line", rl_stale, ROOTLESS_STALE_LINE_BUDGET,
+         "ROOTLESS_STALE_LINE_BUDGET"),
+        ("root-less residue", rl_residue, ROOTLESS_UNDECLARED_BUDGET,
+         "ROOTLESS_UNDECLARED_BUDGET"),
+    ):
+        if got == budget:
+            continue
+        rc = 1
+        if got > budget:
+            print(
+                "FAIL: %d %s citation(s), budget %d. This commit ADDED one (or "
+                "taught a new candidate segment). Write the citation with its "
+                "root, in the `path` @ `needle` form; never raise the budget."
+                % (got, label, budget)
+            )
+        else:
+            print(
+                "FAIL: %d %s citation(s), budget %d. This commit REMOVED one, "
+                "which is the direction we want: lower %s to %d in this same "
+                "commit so the ratchet holds." % (got, label, budget, const, got)
+            )
+    if rl_total != ROOTLESS_TOTAL_BUDGET:
+        rc = 1
+        if rl_total > ROOTLESS_TOTAL_BUDGET:
+            print(
+                "FAIL: %d root-less occurrence(s) in all, budget %d. This "
+                "commit ADDED one. Declaring a segment cannot move this number "
+                "-- an occurrence only leaves the residue for a bucket -- so "
+                "this is a new root-less citation, not a new baseline. Give it "
+                "its root, in the `path` @ `needle` form; never raise this "
+                "budget." % (rl_total, ROOTLESS_TOTAL_BUDGET)
+            )
+        else:
+            print(
+                "FAIL: %d root-less occurrence(s) in all, budget %d. This "
+                "commit REMOVED one: a citation was given its root or marked "
+                "@ REMOVED. Lower ROOTLESS_TOTAL_BUDGET to %d in this same "
+                "commit so the ratchet holds."
+                % (rl_total, ROOTLESS_TOTAL_BUDGET, rl_total)
             )
 
     if len(findings) != FINDINGS_BUDGET:
@@ -329,7 +431,8 @@ def main() -> int:
     ref = g.upstream_root()
     if ref is None:
         return _verdict(reasons, None, {}, [])
-    counts, findings = grade(reasons, ref)
+    own_dirs = g.own_directory_names(g.tracked_files(ROOT))
+    counts, findings = grade(reasons, ref, own_dirs)
     return _verdict(reasons, ref, counts, findings)
 
 
@@ -341,11 +444,24 @@ _GONE = _ROOTDIR + "/" + _CRATE + "/src/" + "vanished.rs"
 _LIVES = _ROOTDIR + "/" + _CRATE + "/src/" + "present.rs"
 
 
+# A DECLARED root-less segment, read from the source gate rather than written,
+# so the fixture follows the declaration if it ever changes. The file lives
+# under a `<segment>/` directory of the fake pin, which is what the per-citation
+# resolution rule needs in order to find it exactly once.
+_SEG = g.ROOTLESS_SEGMENTS[0]
+_RL_LIVES = _SEG + "/" + "rl_present.rs"
+# A token under a segment the fixture teaches through a ROOTED citation of the
+# crate directory and that no declaration covers: the undeclared residue.
+_RESIDUE = _CRATE + "/" + "src/" + "present.rs"
+
+
 def _fake_pin(tmp: pathlib.Path) -> pathlib.Path:
     ref = tmp / "ref"
     p = ref / _ROOTDIR / _CRATE / "src"
     p.mkdir(parents=True)
     (p / "present.rs").write_text("fn needle_here() {}\n" * 20, encoding="utf-8")
+    (p / _SEG).mkdir()
+    (p / _SEG / "rl_present.rs").write_text("fn rl_here() {}\n" * 20, encoding="utf-8")
     return ref
 
 
@@ -387,12 +503,31 @@ def selftest() -> int:
         ("a needle asserted absent that came BACK is a finding",
          "The capability is gone: `%s` @ ABSENT `needle_here`." % _LIVES,
          {"absent": 1, "bare": 0}, 1),
+        # Open debt 754. The five root-less measurements are the ones the
+        # verdict used to drop, so each gets a row pinning that the CLASSIFIER
+        # puts the citation in that bucket and no other.
+        ("a root-less line on a live file counts rootless_line, nothing stale",
+         "See %s:3 for the shape." % _RL_LIVES,
+         {"rootless_line": 1, "rootless_stale_line": 0, "rootless_bare": 0,
+          "line": 0}, 0),
+        ("a root-less line PAST the end is stale, and not a finding",
+         "See %s:9999 for the shape." % _RL_LIVES,
+         {"rootless_line": 1, "rootless_stale_line": 1}, 0),
+        ("a root-less bare path counts rootless_bare, not bare",
+         "The upstream file %s carries it." % _RL_LIVES,
+         {"rootless_bare": 1, "bare": 0}, 0),
+        ("a token under a taught segment no declaration covers is residue",
+         "The surface is `%s` @ `needle_here`; compare %s too." % (_LIVES, _RESIDUE),
+         {"rootless_undeclared": 1}, 0),
+        ("a segment that is the TREE's own directory is not residue",
+         "The surface is `%s` @ `needle_here`; compare %s too." % (_LIVES, _RESIDUE),
+         {"rootless_undeclared": 0}, 0, {_CRATE}),
     ]
     tmp = pathlib.Path(tempfile.mkdtemp(prefix="wz-store-selftest-"))
     try:
         ref = _fake_pin(tmp)
-        for name, reason, want_counts, want_find in cases:
-            counts, findings = grade({"fixture-atom": reason}, ref)
+        for name, reason, want_counts, want_find, *own in cases:
+            counts, findings = grade({"fixture-atom": reason}, ref, own[0] if own else set())
             bad = [k for k, v in want_counts.items() if counts.get(k, 0) != v]
             if bad or len(findings) != want_find:
                 print("  selftest FAIL  %s: counts=%s findings=%d"
@@ -404,7 +539,11 @@ def selftest() -> int:
         shutil.rmtree(tmp, ignore_errors=True)
 
     big = {("atom%03d" % i): "prose" for i in range(MIN_REASONS + 5)}
-    clean = {"anchored": 3, "line": LINE_BUDGET, "bare": BARE_BUDGET, "gone": 1}
+    clean = {"anchored": 3, "line": LINE_BUDGET, "bare": BARE_BUDGET, "gone": 1,
+             "rootless_line": ROOTLESS_LINE_BUDGET,
+             "rootless_bare": ROOTLESS_BARE_BUDGET,
+             "rootless_stale_line": ROOTLESS_STALE_LINE_BUDGET,
+             "rootless_undeclared": ROOTLESS_UNDECLARED_BUDGET}
     findings7 = ["f%d" % i for i in range(FINDINGS_BUDGET)]
     verdicts = [
         ("a collapsed population FAILs", {"only": "one"}, None, {}, [], 1),
@@ -419,6 +558,19 @@ def selftest() -> int:
         ("a REMOVED unresolved claim FAILs (ratchet down)", big, pathlib.Path("/x"),
          clean, findings7[:-1], 1),
     ]
+    # Open debt 754: each root-less measurement is checked in BOTH directions.
+    # Every row moves exactly one measurement, so a verdict that still ignored
+    # that measurement returns 0 and fails the row.
+    for key, budget in (
+        ("rootless_line", ROOTLESS_LINE_BUDGET),
+        ("rootless_bare", ROOTLESS_BARE_BUDGET),
+        ("rootless_stale_line", ROOTLESS_STALE_LINE_BUDGET),
+        ("rootless_undeclared", ROOTLESS_UNDECLARED_BUDGET),
+    ):
+        for word, delta in (("ADDED", 1), ("REMOVED", -1)):
+            verdicts.append((
+                "a %s %s occurrence FAILs" % (word, key), big, pathlib.Path("/x"),
+                dict(clean, **{key: budget + delta}), findings7, 1))
     for name, reasons, ref, counts, findings, want in verdicts:
         rc = _verdict(reasons, ref, counts, findings)
         if rc != want:
@@ -426,6 +578,50 @@ def selftest() -> int:
             failures += 1
         else:
             print("  selftest ok    %s" % name)
+
+    # PRINTED, not only checked: the defect of open debt 754 was that three
+    # buckets were computed and never shown, so a pass and an unseen axis read
+    # the same. The summary line must name every root-less measurement.
+    shown = io.StringIO()
+    with contextlib.redirect_stdout(shown):
+        _verdict(big, pathlib.Path("/x"), clean, findings7)
+    text = shown.getvalue()
+    for needle in ("root-less line", "root-less bare", "root-less stale",
+                   "root-less residue", "root-less in all"):
+        if needle not in text:
+            print("  selftest FAIL  the summary never prints %r" % needle)
+            failures += 1
+        else:
+            print("  selftest ok    the summary prints %r" % needle)
+
+    # CONSERVATION: moving one occurrence from the residue into a declared
+    # bucket is what a DECLARATION does. The three per-bucket ratchets must
+    # fire, and the total must stay silent -- that silence is the proof it is
+    # a declaration and not a new citation.
+    shown = io.StringIO()
+    with contextlib.redirect_stdout(shown):
+        rc = _verdict(big, pathlib.Path("/x"),
+                      dict(clean, rootless_line=ROOTLESS_LINE_BUDGET + 1,
+                           rootless_undeclared=ROOTLESS_UNDECLARED_BUDGET - 1),
+                      findings7)
+    if rc != 1 or "in all, budget" in shown.getvalue():
+        print("  selftest FAIL  a declaration-shaped move fired the total (rc=%d)" % rc)
+        failures += 1
+    else:
+        print("  selftest ok    a declaration-shaped move leaves the total silent")
+
+    # The converse: a NEW citation raises the residue and nothing leaves, so
+    # the total must fire on its own account.
+    shown = io.StringIO()
+    with contextlib.redirect_stdout(shown):
+        rc = _verdict(big, pathlib.Path("/x"),
+                      dict(clean, rootless_undeclared=ROOTLESS_UNDECLARED_BUDGET + 1),
+                      findings7)
+    if rc != 1 or "in all, budget" not in shown.getvalue():
+        print("  selftest FAIL  a new root-less citation did not fire the total")
+        failures += 1
+    else:
+        print("  selftest ok    a new root-less citation fires the total")
 
     if failures:
         print("store-reason-citations selftest: %d failure(s)" % failures)

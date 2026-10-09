@@ -752,7 +752,22 @@ class Finding(typing.NamedTuple):
     detail: str
 
 
-def rootless_candidates(root: pathlib.Path, files: list[str]) -> set[str]:
+def own_directory_names(files: list[str]) -> set[str]:
+    """Every directory-name component of the given tracked paths -- the names
+    that are THIS tree's, so a path beginning with one is not a claim about
+    upstream. Split out so a caller whose scanned population is NOT the tracked
+    tree (the store gate scans materialised reasons, flat files with no
+    directories) can still be judged against the tree's own directory names.
+    """
+    own_dirs: set[str] = set()
+    for f in files:
+        own_dirs.update(pathlib.PurePosixPath(f).parts[:-1])
+    return own_dirs
+
+
+def rootless_candidates(
+    root: pathlib.Path, files: list[str], own_dirs: set[str] | None = None
+) -> set[str]:
     """Which first segments COULD spell an upstream path without its root?
 
     DERIVED, pin-free, from the tree's own root-anchored citations: every
@@ -774,9 +789,10 @@ def rootless_candidates(root: pathlib.Path, files: list[str]) -> set[str]:
     `OUT_DIR/...`). A check that reports those has stopped being about
     citations. The component rule admits none of them.
     """
-    own_dirs: set[str] = set()
-    for f in files:
-        own_dirs.update(pathlib.PurePosixPath(f).parts[:-1])
+    # `own_dirs` is the tree's directory names. Omitted, it is derived from
+    # `files`, which is right exactly when `files` ARE the tracked tree.
+    if own_dirs is None:
+        own_dirs = own_directory_names(files)
     roots = set(UPSTREAM_ROOTS)
     seen: set[str] = set()
     for rel in files:
@@ -820,11 +836,13 @@ def first_segment_occurrences(
     return tally
 
 
-def rootless_undeclared(root: pathlib.Path, files: list[str]) -> int:
+def rootless_undeclared(
+    root: pathlib.Path, files: list[str], own_dirs: set[str] | None = None
+) -> int:
     """How many occurrences sit under a candidate segment this axis does not
     grade? The residue, sized rather than described.
     """
-    cands = rootless_candidates(root, files) - set(ROOTLESS_SEGMENTS)
+    cands = rootless_candidates(root, files, own_dirs) - set(ROOTLESS_SEGMENTS)
     if not cands:
         return 0
     tally = first_segment_occurrences(root, files)
