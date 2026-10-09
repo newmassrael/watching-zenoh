@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: AGPL-3.0-or-later OR LicenseRef-watching-zenoh-Commercial
 # SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
-"""R3171 (no register item) -- A HOME PATH IN A COMMIT IS PUBLISHED EVEN WHEN THE TIP IS CLEAN.
+"""R3190 (no register item) -- A HOME PATH IN A COMMIT IS PUBLISHED EVEN WHEN THE TIP IS CLEAN.
 
 The citation says `no register item` because open-debt item 791 lives in the
 operator's agent-memory register, which has no store `debt-` id for

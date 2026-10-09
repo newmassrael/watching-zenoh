@@ -508,7 +508,7 @@ def main() -> int:
     # stopped recognising `_runci_guarded_test` would still clear a joint floor
     # on the 26 bare guards, which is exactly the silence item 126 is about.
     #
-    # R3171 (open-debt item 858) — THE BARE SPELLING NO LONGER HAS A FLOOR, AND
+    # R3191 (open-debt item 858) — THE BARE SPELLING NO LONGER HAS A FLOOR, AND
     # THAT IS THE POINT. Every bare `| tee | grep -qE` guard moved to
     # `_runci_guarded_test` (the shape races a SIGPIPE under pipefail), and
     # `build_evidence_lint.py` now refuses the shape outright, so the population

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: AGPL-3.0-or-later OR LicenseRef-watching-zenoh-Commercial
 # SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
-r"""R3171 (no register item) -- a test that RUNS BY DEFAULT must not pass by
+r"""R3194 (no register item) -- a test that RUNS BY DEFAULT must not pass by
 skipping a fixture its lane requires.
 
 The citation is `no register item` for the reason `debt_plane_census.py` gives

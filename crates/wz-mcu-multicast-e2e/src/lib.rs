@@ -195,7 +195,7 @@ pub fn run_multicast_e2e<C: ClockSource>(link: &LwipLink, clock_source: C) -> Mu
 /// The stage a running multicast e2e is IN, announced once on entering it
 /// through [`run_multicast_e2e_with_progress`].
 ///
-/// R3171 (open-debt item 815). The e2e is one call to a bare-metal image, and a
+/// R3189 (open-debt item 815). The e2e is one call to a bare-metal image, and a
 /// guest that stops making progress inside it used to leave the harness one
 /// line, `... e2e starting`, and a 30 s timeout. The image prints
 /// [`MulticastStage::name`] on each entry, so the LAST such line a hung boot
@@ -226,7 +226,7 @@ impl MulticastStage {
 }
 
 /// [`run_multicast_e2e`] that also announces each [`MulticastStage`] through
-/// `on_stage` as the e2e ENTERS it (R3171, open-debt item 815).
+/// `on_stage` as the e2e ENTERS it (R3189, open-debt item 815).
 ///
 /// `on_stage` runs between the e2e's phases, so a bare-metal image prints one
 /// console line and a host test pushes into a vector. A caller that wants no

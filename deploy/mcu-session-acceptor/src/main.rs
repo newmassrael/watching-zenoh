@@ -138,7 +138,7 @@ fn main() -> ! {
     // into the image, so it says so by passing the named fixture; a board with
     // one passes its own `EntropySource` here.
     //
-    // R3171 (open-debt item 815) — each stage is printed as the e2e ENTERS it,
+    // R3189 (open-debt item 815) — each stage is printed as the e2e ENTERS it,
     // so a boot that stops making progress leaves the stage it stalled in as
     // its last console line, instead of only the `starting` line above.
     let report = run_acceptor_e2e_with_progress(

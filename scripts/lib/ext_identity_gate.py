@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: AGPL-3.0-or-later OR LicenseRef-watching-zenoh-Commercial
 # SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
-"""R3172 (no register item) -- a reader tells an extension by its IDENTITY, not
+"""R3205 (no register item) -- a reader tells an extension by its IDENTITY, not
 by its 4-bit id. The class of item 860 of the unregistered register, which
 lives outside this repository; that item was the first instance and is closed
 by its own fix, so this gate closes no register item of its own.

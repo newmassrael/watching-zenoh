@@ -48,7 +48,7 @@ one unpiped step and then nothing, so the failing test had to be read out of a
 different lane's log. A population counted by hand and declared complete had
 leaked the class twice; this is the gate.
 
-R3171 (item 858) closed the exemption this gate first carried for a `tee` placed
+R3191 (item 858) closed the exemption this gate first carried for a `tee` placed
 between the build and the reader. The `tee` kept the evidence, which is what the
 exemption rested on, but not the other half of the defect: the reader still
 leaves at its first match, the `tee` takes the SIGPIPE on its next write, and
@@ -124,7 +124,7 @@ def piped_builds(lines: list[str]) -> list[tuple[int, str]]:
     that early exit. A command list is split on `&&`, `||` and `;` first, so
     only a pipe INSIDE one command counts, and a comment is not a command.
 
-    R3171 (open-debt item 858) — A `tee` BETWEEN THE BUILD AND THE READER IS NO
+    R3191 (open-debt item 858) — A `tee` BETWEEN THE BUILD AND THE READER IS NO
     LONGER AN EXEMPTION. It keeps the stream, so that shape does not lose the
     evidence, which is why it was exempt; but the reader is still `grep -q`,
     which leaves at its first match, and the `tee` then takes the SIGPIPE on its
@@ -158,7 +158,7 @@ def selftest() -> None:
         "        && cargo test -p x --quiet 2>&1 | grep -qE '^test result: ok\\. 5 passed' \\",
         "    cargo test -p x --quiet 2>&1 \\\n        | grep -qE '^test result: ok\\. 5 passed'",
         "    cargo test -p x --quiet | grep -q passed",
-        # R3171 — a `tee` in between kept the stream and used to be exempt; the
+        # R3191 — a `tee` in between kept the stream and used to be exempt; the
         # reader's early exit still hands the `tee` a SIGPIPE under pipefail.
         "    cargo test -p x --quiet 2>&1 | tee /dev/stderr | grep -qE 'passed'",
         "    cargo test -p x --quiet 2>&1 \\\n        | tee /dev/stderr | grep -qE 'passed'",

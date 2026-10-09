@@ -943,7 +943,7 @@ round_fed_gates=(
     "ext_identity_gate.py --check"
     "expired_blocker_lint.py"
     "reason_citation_gate.py"
-    # R3171 -- a file a standing atom reason cites moved while its review pin did
+    # R3182 -- a file a standing atom reason cites moved while its review pin did
     # not (open-debt item 756). Round-fed by the store and the tracked tree, a
     # text read and one `git hash-object`, no build.
     "reason_review_pin_gate.py --check"
@@ -1107,18 +1107,18 @@ round_fed_gates=(
     # MEASURED: well under a second, a parse with no build.
     "zephyr_board_table_gate.py --selftest"
     "zephyr_board_table_gate.py"
-    # R3171 (item 747) — the upstream version CLAUDE.md states, against the pin
+    # R3188 (item 747) — the upstream version CLAUDE.md states, against the pin
     # the tree enforces. Round-fed: it names CLAUDE.md and the census module.
     # MEASURED: well under a second, a parse with no build.
     "claude_md_upstream_pin_gate.py --selftest"
     "claude_md_upstream_pin_gate.py --check"
-    # R3171 (item 776) — a test that runs by default must not pass by skipping a
+    # R3194 (item 776) — a test that runs by default must not pass by skipping a
     # fixture its lane owes. It enumerates the tracked Rust corpus and reads
     # `run-ci.sh` and the workflows, so a round that adds a skip, or removes the
     # lane's arming of its door, feeds it. MEASURED: about 8s, a parse with no build.
     "silent_skip_gate.py --selftest"
     "silent_skip_gate.py --check"
-    # R3172 (item 777) — an e2e barrier must not wait on text no producer in the
+    # R3195 (item 777) — an e2e barrier must not wait on text no producer in the
     # tree can print. It reads every Rust source, the C sources, the vendored pico
     # tree and the scripts that patch it, so a round that rewords a line a barrier
     # waits on feeds it. MEASURED: about 14s, a parse with no build.

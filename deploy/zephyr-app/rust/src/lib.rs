@@ -138,7 +138,7 @@ pub extern "C" fn wz_app_main() -> i32 {
     // R2918 — the session's secrets come through the profile's entropy seam,
     // from the board's random hook.
     //
-    // R3171 (open-debt item 815) — each stage is logged as the e2e ENTERS it, so
+    // R3189 (open-debt item 815) — each stage is logged as the e2e ENTERS it, so
     // a boot that stops making progress leaves the stage it stalled in as its
     // last console line instead of only the `starting` line above.
     let report = run_acceptor_e2e_on_with_progress(

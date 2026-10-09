@@ -1562,7 +1562,7 @@ layer_b_verify_codegen() {
             fi
         fi
     done
-    # R3174 (open-debt item 776, second half) -- the SCE B6 link-emitter audit,
+    # R3196 (open-debt item 776, second half) -- the SCE B6 link-emitter audit,
     # `link_emitter_b6.rs`. It drives the sce-codegen this layer just verified
     # the freshness of, and it was in NO lane: the job that runs Layer C1 builds
     # no sce-codegen, so its two tests printed a skip and passed there, and
@@ -2423,7 +2423,7 @@ layer_c0_test_discipline() {
     # The table in this gate is what keeps the cheap ones above it.
     python3 scripts/lib/hook_default_region_gate.py --selftest || return 1
     python3 scripts/lib/hook_default_region_gate.py || return 1
-    # R3171 (open-debt item 791) — pre-push gate 0b2: a commit that adds a
+    # R3190 (open-debt item 791) — pre-push gate 0b2: a commit that adds a
     # home-path line and a later commit that removes it leave the tip clean
     # (gate 0b reads the checkout) while the blob is published. The selftest
     # builds real repositories; the check itself needs a range and a term, so
@@ -3136,7 +3136,7 @@ layer_c0_test_discipline() {
     # never execute.
     python3 scripts/lib/reason_citation_gate.py --selftest || return 1
     python3 scripts/lib/reason_citation_gate.py || return 1
-    # R3171 (open-debt item 756) -- the citation gate above says a cited file
+    # R3182 (open-debt item 756) -- the citation gate above says a cited file
     # still resolves, not that the sentence citing it is still true. This pins
     # each file a remaining atom's reason cites to the blob a round last read the
     # reason against, so a cited file cannot move without that reason being in
@@ -3286,7 +3286,7 @@ layer_c0_test_discipline() {
     # fixture is UNCHANGED. Mutating either refusal reds it.
     python3 scripts/lib/relicense_spdx.py --selftest || return 1
     python3 scripts/lib/relicense_spdx.py --check || return 1
-    # R3171 (item 747) — the upstream version CLAUDE.md states must be the pin
+    # R3188 (item 747) — the upstream version CLAUDE.md states must be the pin
     # `UPSTREAM_VERSION` enforces; a bullet that states none FAILS, not passes.
     python3 scripts/lib/claude_md_upstream_pin_gate.py --selftest || return 1
     python3 scripts/lib/claude_md_upstream_pin_gate.py --check || return 1

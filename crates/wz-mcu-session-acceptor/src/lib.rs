@@ -305,7 +305,7 @@ pub struct AcceptorE2eReport {
 /// The stage a running acceptor e2e is WAITING in, announced once on entering
 /// it through [`run_acceptor_e2e_on_with_progress`].
 ///
-/// R3171 (open-debt item 815). The e2e is one call to a bare-metal image, and a
+/// R3189 (open-debt item 815). The e2e is one call to a bare-metal image, and a
 /// guest that stops making progress inside it (the SysTick-versus-spinlock
 /// deadlock of item 815 was exactly that) used to leave the harness one line,
 /// `... e2e starting`, and a 30 s timeout: no way to tell a handshake that never
@@ -403,7 +403,7 @@ where
 }
 
 /// [`run_acceptor_e2e_on`] that also announces each [`AcceptorStage`] through
-/// `on_stage` as the e2e ENTERS it (R3171, open-debt item 815).
+/// `on_stage` as the e2e ENTERS it (R3189, open-debt item 815).
 ///
 /// `on_stage` runs inside the drive loop, so it must be cheap and must not
 /// block: a bare-metal image prints one console line, a host test pushes into

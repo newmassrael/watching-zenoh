@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: AGPL-3.0-or-later OR LicenseRef-watching-zenoh-Commercial
 # SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
-"""R3171 (no register item) -- a file a standing atom reason cites may not change
+"""R3182 (no register item) -- a file a standing atom reason cites may not change
 without the round that changes it being shown the reason.
 
 The citation is `no register item` for the reason `reason_citation_gate.py` and

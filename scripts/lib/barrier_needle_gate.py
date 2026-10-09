@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: AGPL-3.0-or-later OR LicenseRef-watching-zenoh-Commercial
 # SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
-r"""R3172 (no register item) -- an e2e barrier must not wait on a string that no
+r"""R3195 (no register item) -- an e2e barrier must not wait on a string that no
 producer in the tree can print.
 
 The citation is `no register item` for the reason `debt_plane_census.py` gives

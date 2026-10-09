@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: AGPL-3.0-or-later OR LicenseRef-watching-zenoh-Commercial
 # SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
-"""R3171 (no register item) -- the upstream version CLAUDE.md states is the pin the tree enforces.
+"""R3188 (no register item) -- the upstream version CLAUDE.md states is the pin the tree enforces.
 
 The debt it answers for, open-debt item 747, lives in the operator's agent-memory
 register, which has no store `debt-` id for `gate_provenance_lint.py` to resolve;

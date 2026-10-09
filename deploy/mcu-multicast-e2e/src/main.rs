@@ -121,7 +121,7 @@ fn main() -> ! {
     #[cfg(feature = "loopback-multicast")]
     link.route_multicast_over_loopback()
         .expect("loopback-multicast build routes multicast TX over the loop netif");
-    // R3171 (open-debt item 815) — the BOOT build (`loopback-multicast`, Layer
+    // R3189 (open-debt item 815) — the BOOT build (`loopback-multicast`, Layer
     // Q.6) prints each stage as the e2e ENTERS it, so a boot that stops making
     // progress leaves the stage it stalled in as its last console line instead
     // of only the `starting` line above. The plain build is the footprint

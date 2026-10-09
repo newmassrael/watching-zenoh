@@ -51,7 +51,7 @@ fn acceptor_handshake_reaches_established_and_dispatches_frame_over_lwip() {
          the real round-tripped cookie -> OpenAck) and dispatch the \
          post-handshake application Frame over lwIP loopback; report = {report:#?}"
     );
-    // R3171 (open-debt item 815) -- the stage marker a hung QEMU boot prints.
+    // R3189 (open-debt item 815) -- the stage marker a hung QEMU boot prints.
     // Each stage is announced ONCE, on ENTERING it, in handshake order, so the
     // last line a stalled image printed names the stage it is stalled in.
     assert_eq!(

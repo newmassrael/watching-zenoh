@@ -89,7 +89,7 @@ fn main() -> ! {
 
 /// The wz application task: the acceptor session e2e on this profile's seams.
 extern "C" fn wz_task(_params: *mut c_void) {
-    // R3171 (open-debt item 815) — each stage is printed as the e2e ENTERS it,
+    // R3189 (open-debt item 815) — each stage is printed as the e2e ENTERS it,
     // so a boot that stops making progress leaves the stage it stalled in as
     // its last console line.
     let report = run_acceptor_e2e_with_progress(

@@ -408,7 +408,7 @@ pub mod common {
     /// a naive walk calls it stale on every run; measured, on the first run of
     /// this very function.
     ///
-    /// R3171 (open-debt item 848) — THE WALK IS OVER THE CRATES THE BINARY
+    /// R3192 (open-debt item 848) — THE WALK IS OVER THE CRATES THE BINARY
     /// LINKS, not over every crate. This paragraph used to call the residual
     /// imprecision "the safe direction — it asks for a rebuild that costs
     /// seconds", and that was wrong in a way nobody had measured: for a crate the
@@ -456,7 +456,7 @@ pub mod common {
         }
     }
 
-    /// R3171 (open-debt item 848) — which crates a `wz-ap-demo` binary is built
+    /// R3192 (open-debt item 848) — which crates a `wz-ap-demo` binary is built
     /// from, as far as the harness can establish it.
     #[derive(Debug, Clone, PartialEq, Eq)]
     pub(crate) enum DemoScope {
@@ -7897,7 +7897,7 @@ mod tests {
         assert_eq!(line_with(captured, "no such needle"), None);
     }
 
-    // --- R3171 (open-debt item 848): the demo freshness guard's scope ---------
+    // --- R3192 (open-debt item 848): the demo freshness guard's scope ---------
 
     /// A `.rs` file at `path` whose mtime is `at`, parents created.
     fn source_at(path: &std::path::Path, at: std::time::SystemTime) {

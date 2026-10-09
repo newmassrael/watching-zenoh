@@ -128,7 +128,7 @@ where
 }
 
 /// [`run_acceptor_e2e`] that also announces each
-/// [`AcceptorStage`](crate::AcceptorStage) as the e2e enters it (R3171,
+/// [`AcceptorStage`](crate::AcceptorStage) as the e2e enters it (R3189,
 /// open-debt item 815): the bare-metal and FreeRTOS images print one console
 /// line per stage, so a hung boot names the stage it stalled in.
 pub fn run_acceptor_e2e_with_progress<C, E, H, S>(

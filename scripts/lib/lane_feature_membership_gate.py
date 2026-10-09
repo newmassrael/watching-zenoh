@@ -96,7 +96,7 @@ The feature arm reaches only the tests whose note declares a `<package>
 every run, beside the verdict, because the OK line otherwise reads as a claim
 about the whole corpus.
 
-## The owner arm (R3173, open-debt item 762)
+## The owner arm (R3193, open-debt item 762)
 
 The note and the lane each say which lane runs a test, and they were derived
 separately, so they could disagree without anything measuring it. The earlier
@@ -154,7 +154,7 @@ FN_AFTER = re.compile(
 # graded population and reported as a deferral. A gate that silently narrows its
 # own population is the class this gate exists to catch, so it may not do it.
 NOTE_FEATURES = re.compile(r'--features\s+([A-Za-z0-9_,\-]+)')
-# R3173 (open-debt item 762) — the one phrase a note uses to NAME its owning
+# R3193 (open-debt item 762) — the one phrase a note uses to NAME its owning
 # lane. `crossimpl_corpus.py` and `test_discipline_gate.py` read the same words,
 # so the declaration has one spelling; prose that merely mentions a layer
 # ("Layer C0 scopes the #[ignore] discipline") is not read as a claim.
@@ -221,7 +221,7 @@ def ignored_tests(tests_dir=TESTS_DIR, packages=None):
                 "fn": fm.group(1),
                 "requires": requires,
                 "orphaned": orphaned,
-                # R3173 — the owner a note NAMES, read only from the phrase the
+                # R3193 — the owner a note NAMES, read only from the phrase the
                 # tree already uses to declare one (`Layer <X> runs via`), after
                 # the escapes and line continuations that make 78 notes in this
                 # crate span lines.
@@ -519,7 +519,7 @@ def check(tests_dir=TESTS_DIR, run_ci=RUN_CI, crates=CRATES, resolver=None,
         if not claimed:
             unclaimed.append(row)
             continue
-        # R3173 (item 762) — the lane a note NAMES against the lanes that select
+        # R3193 (item 762) — the lane a note NAMES against the lanes that select
         # the test. Two places state which lane runs a test (the note, and the
         # lane's own filter) and they were derived separately: 29 of the 302 notes
         # that name an owner named one that does not run the test, all of them
@@ -593,7 +593,7 @@ def report(res):
     print("  lane-feature-membership: %d triple(s) UNGRADED — the note names a "
           "binary the lane does not build (it inherits whatever a prior lane "
           "left in target/); not a pass" % res["ungradable"])
-    # R3173 — the owner arm's reach, printed beside its verdict for the same
+    # R3193 — the owner arm's reach, printed beside its verdict for the same
     # reason: it grades only the tests whose note uses the declaring phrase.
     print("  lane-feature-membership: the OWNER arm reaches %d of %d test(s) -- "
           "those whose note says `Layer <X> runs via`; each named layer must exist "
@@ -651,7 +651,7 @@ def selftest():
             'async fn alpha_needs_a_feature() {}\n'
             '#[ignore = "binary-dep e2e (demo --features harmless); Layer A"]\n'
             'fn alpha_is_fine() {}\n'
-            # R3173 — three notes that NAME an owner with the declaring phrase:
+            # R3193 — three notes that NAME an owner with the declaring phrase:
             # one a selecting lane, one a lane that exists and skips it, one that
             # does not exist. Layer A selects every alpha test; Layer C only
             # `alpha_is_fine`.
@@ -721,7 +721,7 @@ def selftest():
 
         shapes.append(("a note in prose is not an attribute",
                        len(res["tests"]) == 6))
-        # R3173 — the owner arm, as a trio so that neither refusal can pass for
+        # R3193 — the owner arm, as a trio so that neither refusal can pass for
         # the other and the accepting case proves the arm reads at all.
         shapes.append(("a named owner that selects the test is accepted",
                        res["owner_rows"] == 4
