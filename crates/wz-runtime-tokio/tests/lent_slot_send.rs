@@ -273,6 +273,127 @@ fn the_fallback_keeps_the_sequence_numbers_gapless() {
     assert_eq!(lent[1][1], 9);
 }
 
+// The reconnect swap seam. A session that reconnects sends through a
+// `SwappableLink`; if the seam did not forward the lend, every reconnecting
+// session would silently take the heap while its link offered a slot.
+
+use wz_runtime_tokio::runtime_impl::TokioRuntime;
+use wz_session_core::reconnect::{LocalSwappableLink, SwappableLink};
+use wz_session_core::tx_buf::TxBuf;
+use wz_session_core::tx_lease::TxLease;
+
+type Sink = Arc<dyn BoxedLinkDriver + Send + Sync>;
+
+#[test]
+fn a_lender_behind_the_swap_seam_still_lends() {
+    let link = LendingLink::new(true, 1, SLOT_LEN, HEADROOM);
+    let seam: Sink = Arc::new(SwappableLink::<TokioRuntime>::new(link.clone()));
+    let actions = new_session_actions(seam, params_with_sn_7(None), TokioTime::new());
+    actions
+        .send_push_literal("home/lent", b"payload", true)
+        .expect("push");
+    assert_eq!(link.lent(), vec![heap_frame(b"payload")]);
+    assert!(link.heap().is_empty(), "no byte copy behind the seam");
+    assert_eq!(link.free(), 1);
+}
+
+#[test]
+fn a_lender_behind_the_single_task_seam_still_lends() {
+    // `!Sync` by design, so it cannot be a session's sink on this profile; the
+    // lease is driven on it directly, which is exactly what the MCU session does.
+    let link = LendingLink::new(true, 1, SLOT_LEN, HEADROOM);
+    let seam = LocalSwappableLink::<TokioRuntime>::new(link.clone());
+    let mut lease = TxLease::acquire(&seam, 64, Priority::DEFAULT).expect("lent through the seam");
+    assert_eq!(
+        lease.capacity(),
+        SLOT_LEN - HEADROOM,
+        "the grant's headroom survives"
+    );
+    lease.append(b"frame").expect("fits");
+    assert_eq!(
+        lease.send(Reliability::Reliable, Priority::DEFAULT),
+        LinkSendOutcome::Sent
+    );
+    assert_eq!(link.lent(), vec![b"frame".to_vec()]);
+    assert!(link.heap().is_empty());
+}
+
+/// A swap while a frame is being encoded: the slot belongs to the link that
+/// lent it, so the frame is sent THERE (and refused by its closed queue in real
+/// life), and the new link is neither handed a number it never gave nor asked to
+/// send a frame it has no buffer for.
+#[test]
+fn a_swap_mid_encode_sends_the_frame_to_the_link_that_lent_the_slot() {
+    let old = LendingLink::new(true, 1, SLOT_LEN, HEADROOM);
+    let new = LendingLink::new(true, 1, SLOT_LEN, HEADROOM);
+    let seam = SwappableLink::<TokioRuntime>::new(old.clone());
+    let mut lease = TxLease::acquire(&seam, 64, Priority::DEFAULT).expect("old link lends");
+    lease.append(b"in flight").expect("fits");
+    seam.swap(new.clone());
+    assert_eq!(
+        lease.send(Reliability::Reliable, Priority::DEFAULT),
+        LinkSendOutcome::Sent
+    );
+    assert_eq!(old.lent(), vec![b"in flight".to_vec()]);
+    assert!(new.lent().is_empty() && new.heap().is_empty());
+    assert_eq!((old.free(), new.free()), (1, 1), "nothing is left lent");
+}
+
+#[test]
+fn a_swap_mid_encode_aborts_on_the_link_that_lent_the_slot() {
+    let old = LendingLink::new(true, 1, SLOT_LEN, HEADROOM);
+    let new = LendingLink::new(true, 1, SLOT_LEN, HEADROOM);
+    let seam = SwappableLink::<TokioRuntime>::new(old.clone());
+    let lease = TxLease::acquire(&seam, 64, Priority::DEFAULT).expect("old link lends");
+    seam.swap(new.clone());
+    drop(lease);
+    assert_eq!((old.aborts(), new.aborts()), (1, 0));
+    assert_eq!((old.free(), new.free()), (1, 1));
+}
+
+/// The same for the single-task seam, and with the old link's number reused by
+/// the new link for another frame in the meantime: the two frames stay apart.
+#[test]
+fn the_single_task_seam_keeps_two_links_slot_numbers_apart() {
+    let old = LendingLink::new(true, 1, SLOT_LEN, HEADROOM);
+    let new = LendingLink::new(true, 1, SLOT_LEN, HEADROOM);
+    let seam = LocalSwappableLink::<TokioRuntime>::new(old.clone());
+    let mut first = TxLease::acquire(&seam, 64, Priority::DEFAULT).expect("old lends");
+    first.append(b"from old").expect("fits");
+    let _ = seam.swap(new.clone());
+    let mut second = TxLease::acquire(&seam, 64, Priority::DEFAULT).expect("new lends");
+    second.append(b"from new").expect("fits");
+    // Both links number their only slot 0; the seam must not confuse them.
+    assert_eq!(
+        second.send(Reliability::Reliable, Priority::DEFAULT),
+        LinkSendOutcome::Sent
+    );
+    assert_eq!(
+        first.send(Reliability::Reliable, Priority::DEFAULT),
+        LinkSendOutcome::Sent
+    );
+    assert_eq!(old.lent(), vec![b"from old".to_vec()]);
+    assert_eq!(new.lent(), vec![b"from new".to_vec()]);
+}
+
+#[test]
+fn a_swap_to_a_link_that_lends_nothing_takes_the_heap_afterwards() {
+    let old = LendingLink::new(true, 1, SLOT_LEN, HEADROOM);
+    let plain = LendingLink::new(false, 0, 0, 0);
+    let seam = Arc::new(SwappableLink::<TokioRuntime>::new(old.clone()));
+    let actions = new_session_actions(seam.clone(), params_with_sn_7(None), TokioTime::new());
+    actions
+        .send_push_literal("home/lent", b"one", true)
+        .expect("first");
+    seam.swap(plain.clone());
+    actions
+        .send_push_literal("home/lent", b"two", true)
+        .expect("second");
+    assert_eq!(old.lent().len(), 1);
+    assert_eq!(plain.heap().len(), 1, "the new link's frame came as bytes");
+    assert!(plain.lent().is_empty());
+}
+
 #[cfg(feature = "transport-fragmentation")]
 #[test]
 fn a_frame_past_the_mtu_is_fragmented_from_the_heap_and_its_slot_comes_back() {

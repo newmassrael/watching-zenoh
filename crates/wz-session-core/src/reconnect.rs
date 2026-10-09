@@ -32,7 +32,7 @@
 
 use alloc::string::String;
 
-use crate::link::{BoxedLinkDriver, LinkSendOutcome, SessionRuntime};
+use crate::link::{BoxedLinkDriver, LinkSendOutcome, SessionRuntime, TxSlot, TxSlotGrant};
 use crate::locator::{AnyLocator, ParsedLocator, Proto};
 use crate::reliability::Reliability;
 use crate::send_declare_error::SendDeclareError;
@@ -352,6 +352,66 @@ impl core::fmt::Display for ReplayDeclarationsError {
 
 impl core::error::Error for ReplayDeclarationsError {}
 
+/// The outbound slots a swap seam has had lent THROUGH it and not yet settled,
+/// by the number the seam gave the session (ARCHITECTURE section 9.1).
+///
+/// A slot number means something only to the link that lent it, and the link
+/// behind a swap seam can change between the grant and the send: the supervisor
+/// swaps while a frame is being encoded. Each entry therefore remembers WHICH
+/// sink lent it and the number that sink gave, and the seam sends, reads and
+/// aborts through that sink, never through whatever is installed now. A frame
+/// whose link died mid-encode reaches the dead link's closed queue and is
+/// refused there, as the byte door's frame in the same race is.
+///
+/// The entry keeps the sink alive, which is also what keeps the storage the
+/// session is writing into valid until the slot is settled.
+struct LentSlots<S> {
+    entries: alloc::vec::Vec<Option<(S, TxSlot)>>,
+    free: alloc::vec::Vec<u32>,
+}
+
+impl<S> Default for LentSlots<S> {
+    fn default() -> Self {
+        Self {
+            entries: alloc::vec::Vec::new(),
+            free: alloc::vec::Vec::new(),
+        }
+    }
+}
+
+impl<S: Clone> LentSlots<S> {
+    /// Remember that `sink` lent `inner`, and name it for the session.
+    fn record(&mut self, sink: S, inner: TxSlot) -> TxSlot {
+        let number = match self.free.pop() {
+            Some(number) => number,
+            None => {
+                self.entries.push(None);
+                (self.entries.len() - 1) as u32
+            }
+        };
+        self.entries[number as usize] = Some((sink, inner));
+        TxSlot(number)
+    }
+
+    /// The sink and its own number for a slot still outstanding. A number this
+    /// seam never gave, or already settled, is a contract violation by the
+    /// caller and fails loudly.
+    fn lookup(&self, outer: TxSlot) -> (S, TxSlot) {
+        self.entries[outer.0 as usize]
+            .clone()
+            .expect("a slot the session names is a slot this seam lent")
+    }
+
+    /// [`Self::lookup`] and release the number: the slot is settled.
+    fn settle(&mut self, outer: TxSlot) -> (S, TxSlot) {
+        let entry = self.entries[outer.0 as usize]
+            .take()
+            .expect("a slot the session names is a slot this seam lent");
+        self.free.push(outer.0);
+        entry
+    }
+}
+
 /// Link-sink indirection for transport replacement — the wz mirror of pico
 /// swapping `_z_session_t._tp` under the session transport mutex while the
 /// session (and every handle into it) survives.
@@ -374,6 +434,8 @@ where
     R::LinkSink: Send + 'static,
 {
     inner: R::Mutex<R::LinkSink>,
+    /// Outbound slots lent through this seam and not yet settled.
+    lent: R::Mutex<LentSlots<R::LinkSink>>,
 }
 
 impl<R: SessionRuntime> SwappableLink<R>
@@ -387,6 +449,7 @@ where
     pub fn new(initial: R::LinkSink) -> Self {
         Self {
             inner: R::new_mutex(initial),
+            lent: R::new_mutex(LentSlots::default()),
         }
     }
 
@@ -456,6 +519,43 @@ where
         R::link_driver(&sink).block_first_release(priority)
     }
 
+    // ARCHITECTURE section 9.1 — the lend is forwarded, and a slot stays with the
+    // link that lent it across a swap (see `LentSlots`). Without these four a
+    // reconnecting session would silently lose the lend its link offers: the
+    // defaults lend nothing, and every frame would take the heap.
+    fn tx_slot_acquire(&self, want: usize, priority: crate::qos::Priority) -> Option<TxSlotGrant> {
+        // On a clone, outside the swap lock, as `wait_for_room` does.
+        let sink = R::with_mutex_mut(&self.inner, |sink| sink.clone());
+        let grant = R::link_driver(&sink).tx_slot_acquire(want, priority)?;
+        let slot = R::with_mutex_mut(&self.lent, |lent| lent.record(sink, grant.slot));
+        Some(TxSlotGrant {
+            slot,
+            headroom: grant.headroom,
+        })
+    }
+
+    fn tx_slot_storage(&self, slot: TxSlot) -> (*mut u8, usize) {
+        let (sink, inner) = R::with_mutex_mut(&self.lent, |lent| lent.lookup(slot));
+        R::link_driver(&sink).tx_slot_storage(inner)
+    }
+
+    fn tx_slot_send(
+        &self,
+        slot: TxSlot,
+        start: usize,
+        len: usize,
+        reliability: Reliability,
+        priority: crate::qos::Priority,
+    ) -> LinkSendOutcome {
+        let (sink, inner) = R::with_mutex_mut(&self.lent, |lent| lent.settle(slot));
+        R::link_driver(&sink).tx_slot_send(inner, start, len, reliability, priority)
+    }
+
+    fn tx_slot_abort(&self, slot: TxSlot) {
+        let (sink, inner) = R::with_mutex_mut(&self.lent, |lent| lent.settle(slot));
+        R::link_driver(&sink).tx_slot_abort(inner)
+    }
+
     fn link_mtu(&self) -> usize {
         R::with_mutex_mut(&self.inner, |sink| R::link_driver(sink).link_mtu())
     }
@@ -504,6 +604,8 @@ where
 /// exposed + tested + cross-compiled awaiting its consumer.
 pub struct LocalSwappableLink<R: SessionRuntime> {
     inner: core::cell::RefCell<R::LinkSink>,
+    /// Outbound slots lent through this seam and not yet settled.
+    lent: core::cell::RefCell<LentSlots<R::LinkSink>>,
 }
 
 impl<R: SessionRuntime> LocalSwappableLink<R> {
@@ -512,6 +614,7 @@ impl<R: SessionRuntime> LocalSwappableLink<R> {
     pub fn new(initial: R::LinkSink) -> Self {
         Self {
             inner: core::cell::RefCell::new(initial),
+            lent: core::cell::RefCell::new(LentSlots::default()),
         }
     }
 
@@ -559,6 +662,40 @@ impl<R: SessionRuntime> BoxedLinkDriver for LocalSwappableLink<R> {
     fn block_first_release(&self, priority: crate::qos::Priority) {
         let sink = self.inner.borrow().clone();
         R::link_driver(&sink).block_first_release(priority)
+    }
+
+    // ARCHITECTURE section 9.1 — the lend, forwarded as in the twin, with a slot
+    // staying with the link that lent it across a swap (see `LentSlots`).
+    fn tx_slot_acquire(&self, want: usize, priority: crate::qos::Priority) -> Option<TxSlotGrant> {
+        let sink = self.inner.borrow().clone();
+        let grant = R::link_driver(&sink).tx_slot_acquire(want, priority)?;
+        let slot = self.lent.borrow_mut().record(sink, grant.slot);
+        Some(TxSlotGrant {
+            slot,
+            headroom: grant.headroom,
+        })
+    }
+
+    fn tx_slot_storage(&self, slot: TxSlot) -> (*mut u8, usize) {
+        let (sink, inner) = self.lent.borrow().lookup(slot);
+        R::link_driver(&sink).tx_slot_storage(inner)
+    }
+
+    fn tx_slot_send(
+        &self,
+        slot: TxSlot,
+        start: usize,
+        len: usize,
+        reliability: Reliability,
+        priority: crate::qos::Priority,
+    ) -> LinkSendOutcome {
+        let (sink, inner) = self.lent.borrow_mut().settle(slot);
+        R::link_driver(&sink).tx_slot_send(inner, start, len, reliability, priority)
+    }
+
+    fn tx_slot_abort(&self, slot: TxSlot) {
+        let (sink, inner) = self.lent.borrow_mut().settle(slot);
+        R::link_driver(&sink).tx_slot_abort(inner)
     }
 
     fn link_mtu(&self) -> usize {
