@@ -405,14 +405,30 @@ pub mod common {
     /// a naive walk calls it stale on every run; measured, on the first run of
     /// this very function.
     ///
-    /// The residual imprecision is stated rather than hidden: a change to a
-    /// non-test crate the demo does not link still false-alarms. That direction
-    /// is the safe one — it asks for a rebuild that costs seconds — whereas the
-    /// direction this exists to prevent (a stale binary read as a working one)
-    /// costs a wrong diagnosis. `out/` and `sources/` are excluded for a
-    /// different reason: codegen output is committed and regenerating it is
-    /// Layer B2's business, so a fresh checkout would otherwise report every
-    /// binary stale.
+    /// R3171 (open-debt item 848) — THE WALK IS OVER THE CRATES THE BINARY
+    /// LINKS, not over every crate. This paragraph used to call the residual
+    /// imprecision "the safe direction — it asks for a rebuild that costs
+    /// seconds", and that was wrong in a way nobody had measured: for a crate the
+    /// demo does not link, the rebuild the message asked for is a NO-OP. Editing
+    /// a comment in `wz-capi-pico` made two differential tests die on "wz-ap-demo
+    /// is STALE", `cargo build -p wz-capi-pico -p wz-ap-demo` succeeded, cargo
+    /// relinked nothing, the binary's mtime stayed where it was, and the same
+    /// failure repeated; only `cargo clean -p wz-ap-demo` (a real rebuild, not a
+    /// touched mtime) cleared it. A false alarm whose advised cure cannot cure it
+    /// is not a safe imprecision, it is a trap.
+    ///
+    /// The binary reports its own feature set (`BUILD FEATURES = [..]`, generated
+    /// from cargo's `CARGO_FEATURE_*`, on every invocation), and `cargo tree` for
+    /// exactly that set names the workspace crates it is built from. So the
+    /// comparison is against the crates in THIS binary's link set, and the "Fix"
+    /// line names the same feature set — a bare `cargo build -p wz-ap-demo`
+    /// would build the default set and replace the artifact with another binary.
+    /// When the link set cannot be read the walk falls back to every non-dev
+    /// crate, and the message says so and names the clean-and-rebuild remedy.
+    ///
+    /// `out/` and `sources/` are excluded for a different reason: codegen output
+    /// is committed and regenerating it is Layer B2's business, so a fresh
+    /// checkout would otherwise report every binary stale.
     pub fn assert_demo_binary_newer_than_sources(demo: &std::path::Path) {
         let built = match demo.metadata().and_then(|m| m.modified()) {
             Ok(t) => t,
@@ -425,42 +441,218 @@ pub mod common {
             }
         };
         let crates_dir = project_root().join("crates");
-        let mut newest: Option<(std::time::SystemTime, PathBuf)> = None;
-        let Ok(entries) = std::fs::read_dir(&crates_dir) else {
+        if !crates_dir.is_dir() {
             eprintln!("wz-ap-demo freshness: crates/ unreadable; check SKIPPED");
             return;
-        };
-        for entry in entries.flatten() {
-            let crate_dir = entry.path();
-            // Dev-only crates cannot be a demo dependency, so a change in one
-            // says nothing about the binary's freshness. See the doc comment:
-            // without this, editing THIS file reports THIS binary stale.
-            let is_dev_only = crate_dir
-                .file_name()
-                .and_then(|n| n.to_str())
-                .is_some_and(|n| n.ends_with("-tests") || n.ends_with("-test-support"));
-            if is_dev_only {
-                continue;
-            }
-            let src = crate_dir.join("src");
-            if !src.is_dir() {
-                continue;
-            }
-            newest_rust_file(&src, &mut newest);
         }
-        if let Some((t, path)) = newest {
+        let scope = demo_link_scope(demo, &crates_dir);
+        if let Some((t, path)) = demo_newest_source(&crates_dir, &scope) {
             if t > built {
-                panic!(
-                    "wz-ap-demo is STALE: {} is newer than the binary at {}.\n\
-                     This fixture spawns that binary, so it would be testing an OLDER \
-                     tree than the one under test -- which reads as \"the feature does \
-                     not work\" and sends the diagnosis somewhere else entirely \
-                     (R311y774 paid exactly that).\n\
-                     Fix: cargo build -p wz-ap-demo",
-                    path.display(),
-                    demo.display(),
-                );
+                panic!("{}", stale_demo_message(&path, demo, &scope));
             }
+        }
+    }
+
+    /// R3171 (open-debt item 848) — which crates a `wz-ap-demo` binary is built
+    /// from, as far as the harness can establish it.
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub(crate) enum DemoScope {
+        /// The binary's own `BUILD FEATURES` and the workspace crate directories
+        /// `cargo tree` names for exactly that feature set (build and normal
+        /// edges; dev-dependencies are not part of a binary).
+        Linked {
+            features: Vec<String>,
+            crate_dirs: BTreeSet<PathBuf>,
+        },
+        /// The link set could not be read, so every non-dev crate is compared.
+        /// `why` is carried into the failure message: this scope can name a
+        /// crate the binary does not contain, and the remedy then differs.
+        EveryCrate { why: String },
+    }
+
+    /// The feature keys a `wz-ap-demo` invocation reports on stderr, from a line
+    /// of the form `wz-ap-demo: BUILD FEATURES = [a b c]` (see `usage.rs`).
+    pub(crate) fn parse_build_features(stderr: &str) -> Option<Vec<String>> {
+        let line = stderr.lines().find(|l| l.contains("BUILD FEATURES = ["))?;
+        let inner = line.split_once("BUILD FEATURES = [")?.1.split_once(']')?.0;
+        Some(inner.split_whitespace().map(str::to_owned).collect())
+    }
+
+    /// The workspace crate directories named by `cargo tree --prefix none`
+    /// output. A workspace package prints as `name vX.Y.Z (/abs/path)`, with
+    /// further parenthesised markers (`(*)`, `(proc-macro)`) around it, and a
+    /// registry or git package carries no filesystem path at all, so a package
+    /// is a workspace crate exactly when one of its parenthesised groups is an
+    /// absolute path inside `crates_dir`.
+    pub(crate) fn workspace_crate_dirs_in(tree: &str, crates_dir: &Path) -> BTreeSet<PathBuf> {
+        let root = std::fs::canonicalize(crates_dir).unwrap_or_else(|_| crates_dir.to_path_buf());
+        let mut dirs = BTreeSet::new();
+        for line in tree.lines() {
+            for group in line.split('(').skip(1) {
+                let Some(inner) = group.split(')').next() else {
+                    continue;
+                };
+                let candidate = Path::new(inner);
+                if !candidate.is_absolute() {
+                    continue;
+                }
+                let canon =
+                    std::fs::canonicalize(candidate).unwrap_or_else(|_| candidate.to_path_buf());
+                if canon != root && canon.starts_with(&root) {
+                    dirs.insert(canon);
+                }
+            }
+        }
+        dirs
+    }
+
+    /// The link set of the demo binary at `demo`: ask it which features it was
+    /// built with, then ask cargo which workspace crates that feature set pulls
+    /// in. Any step that fails yields [`DemoScope::EveryCrate`] with the reason,
+    /// never a guess.
+    pub(crate) fn demo_link_scope(demo: &Path, crates_dir: &Path) -> DemoScope {
+        let fallback = |why: String| DemoScope::EveryCrate { why };
+        let banner = match Command::new(demo)
+            .arg("--help")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .output()
+        {
+            Ok(out) => String::from_utf8_lossy(&out.stderr).into_owned(),
+            Err(e) => return fallback(format!("{} would not run: {e}", demo.display())),
+        };
+        let Some(features) = parse_build_features(&banner) else {
+            return fallback(format!(
+                "{} printed no `BUILD FEATURES = [..]` line",
+                demo.display()
+            ));
+        };
+        // One `cargo tree` per feature set per process: a test binary asks once
+        // per fixture, and the answer cannot change while it runs.
+        static TREES: OnceLock<Mutex<std::collections::HashMap<String, Result<String, String>>>> =
+            OnceLock::new();
+        let key = features.join(",");
+        let tree = {
+            let mut cache = TREES
+                .get_or_init(Default::default)
+                .lock()
+                .unwrap_or_else(|p| p.into_inner());
+            cache
+                .entry(key.clone())
+                .or_insert_with(|| cargo_tree_of_demo(crates_dir, &features))
+                .clone()
+        };
+        match tree {
+            Ok(text) => {
+                let crate_dirs = workspace_crate_dirs_in(&text, crates_dir);
+                if crate_dirs.is_empty() {
+                    fallback("`cargo tree` named no workspace crate".to_owned())
+                } else {
+                    DemoScope::Linked {
+                        features,
+                        crate_dirs,
+                    }
+                }
+            }
+            Err(why) => fallback(why),
+        }
+    }
+
+    /// `cargo tree` for `wz-ap-demo` under exactly `features`. Offline and
+    /// read-only: it resolves from the committed lockfile and takes no build
+    /// lock, which is the reason this is not a `cargo build` (a build inside a
+    /// test would serialise the fixtures and hide compile errors in test output).
+    pub(crate) fn cargo_tree_of_demo(
+        crates_dir: &Path,
+        features: &[String],
+    ) -> Result<String, String> {
+        let cargo = std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
+        let mut cmd = Command::new(&cargo);
+        cmd.current_dir(crates_dir)
+            .args(["tree", "-p", "wz-ap-demo", "--edges", "normal,build"])
+            .args(["--prefix", "none", "--no-default-features", "--offline"]);
+        if !features.is_empty() {
+            cmd.arg("--features").arg(features.join(","));
+        }
+        let out = cmd
+            .stdin(Stdio::null())
+            .output()
+            .map_err(|e| format!("could not run `cargo tree`: {e}"))?;
+        if !out.status.success() {
+            return Err(format!(
+                "`cargo tree` failed ({}): {}",
+                out.status,
+                String::from_utf8_lossy(&out.stderr).trim()
+            ));
+        }
+        Ok(String::from_utf8_lossy(&out.stdout).into_owned())
+    }
+
+    /// The newest `.rs` under `src/` of every crate in `scope`, with its path.
+    pub(crate) fn demo_newest_source(
+        crates_dir: &Path,
+        scope: &DemoScope,
+    ) -> Option<(std::time::SystemTime, PathBuf)> {
+        let mut newest: Option<(std::time::SystemTime, PathBuf)> = None;
+        let crate_dirs: Vec<PathBuf> = match scope {
+            DemoScope::Linked { crate_dirs, .. } => crate_dirs.iter().cloned().collect(),
+            DemoScope::EveryCrate { .. } => std::fs::read_dir(crates_dir)
+                .into_iter()
+                .flatten()
+                .flatten()
+                .map(|e| e.path())
+                // Dev-only crates cannot be a demo dependency, so a change in one
+                // says nothing about the binary's freshness. See the doc comment
+                // of `assert_demo_binary_newer_than_sources`: without this,
+                // editing THAT file reports THIS binary stale.
+                .filter(|p| {
+                    !p.file_name()
+                        .and_then(|n| n.to_str())
+                        .is_some_and(|n| n.ends_with("-tests") || n.ends_with("-test-support"))
+                })
+                .collect(),
+        };
+        for crate_dir in crate_dirs {
+            let src = crate_dir.join("src");
+            if src.is_dir() {
+                newest_rust_file(&src, &mut newest);
+            }
+        }
+        newest
+    }
+
+    /// The failure text for a stale demo. Its "Fix" line has to be a command
+    /// that clears the failure: for a linked crate that is a build of THE SAME
+    /// feature set; when the link set is unknown, a build can be a no-op, so the
+    /// forced relink is named too.
+    pub(crate) fn stale_demo_message(path: &Path, demo: &Path, scope: &DemoScope) -> String {
+        let head = format!(
+            "wz-ap-demo is STALE: {} is newer than the binary at {}.\n\
+             This fixture spawns that binary, so it would be testing an OLDER \
+             tree than the one under test -- which reads as \"the feature does \
+             not work\" and sends the diagnosis somewhere else entirely \
+             (R311y774 paid exactly that).\n",
+            path.display(),
+            demo.display(),
+        );
+        match scope {
+            DemoScope::Linked { features, .. } => format!(
+                "{head}That file belongs to a crate this binary links for the feature set \
+                 it reports, so the binary predates it.\n\
+                 Fix: cargo build -p wz-ap-demo --no-default-features --features {}\n\
+                 (the SAME feature set: a bare `cargo build -p wz-ap-demo` builds the \
+                 default set and replaces this artifact with a different binary)",
+                features.join(","),
+            ),
+            DemoScope::EveryCrate { why } => format!(
+                "{head}The set of crates this binary links could not be read ({why}), so \
+                 every non-dev crate was compared and the file above may belong to one \
+                 it does not contain.\n\
+                 Fix: cargo build -p wz-ap-demo. If that finishes without compiling the \
+                 crate that changed, the crate is not part of this binary, a build will \
+                 not move the binary's mtime, and the failure will repeat; force a real \
+                 relink with `cargo clean -p wz-ap-demo` and build it again.",
+            ),
         }
     }
 
@@ -6739,10 +6931,14 @@ pub mod common {
 #[cfg(test)]
 mod tests {
     use super::common::{
-        configured_zid_value, face_zid_value, has_zid_shape, hello_zid_value, line_with,
-        parse_zenoh_admin_sessions, read_whole, still_running_reason, wait_for_tcp_accept_alive,
-        CaptureTooLarge, ChildGuard, ZenohSession, ZENOHD_TCP_ACCEPT_BUDGET,
+        cargo_tree_of_demo, configured_zid_value, demo_newest_source, face_zid_value,
+        has_zid_shape, hello_zid_value, line_with, parse_build_features,
+        parse_zenoh_admin_sessions, project_root, read_whole, stale_demo_message,
+        still_running_reason, wait_for_tcp_accept_alive, workspace_crate_dirs_in, CaptureTooLarge,
+        ChildGuard, DemoScope, ZenohSession, ZENOHD_TCP_ACCEPT_BUDGET,
     };
+    use std::collections::BTreeSet;
+    use std::path::PathBuf;
 
     /// A capture file holding `bytes`, as the tests make one: an anonymous temporary
     /// file written through a duplicate handle, so the writer and the reader share
@@ -7549,6 +7745,187 @@ mod tests {
             Some("peer: link AGGREGATED to zid abc (live links now 2)")
         );
         assert_eq!(line_with(captured, "no such needle"), None);
+    }
+
+    // --- R3171 (open-debt item 848): the demo freshness guard's scope ---------
+
+    /// A `.rs` file at `path` whose mtime is `at`, parents created.
+    fn source_at(path: &std::path::Path, at: std::time::SystemTime) {
+        std::fs::create_dir_all(path.parent().expect("a parent")).expect("create dirs");
+        std::fs::write(path, "// fixture\n").expect("write the source");
+        std::fs::File::options()
+            .write(true)
+            .open(path)
+            .expect("reopen to set the mtime")
+            .set_modified(at)
+            .expect("set the mtime");
+    }
+
+    /// THE DEFECT, and its control in one test. A crate the binary does not link
+    /// was edited after the binary was built. The walk over every crate (what
+    /// the guard always did) reports it, and `cargo build` cannot clear that
+    /// report because it would compile nothing; the walk over the crates the
+    /// binary LINKS does not report it, still reports a linked crate edited
+    /// after the build, and never looks at a dev-only crate in either mode.
+    #[test]
+    fn an_edit_in_a_crate_the_demo_does_not_link_does_not_stale_it() {
+        let dir = tempfile::tempdir().expect("a temporary tree");
+        let crates = dir.path().join("crates");
+        let built = std::time::SystemTime::now() - Duration::from_secs(10_000);
+        let before = |s: u64| built - Duration::from_secs(s);
+        let after = |s: u64| built + Duration::from_secs(s);
+        source_at(&crates.join("linked/src/lib.rs"), before(100));
+        source_at(&crates.join("unlinked/src/lib.rs"), after(100));
+        source_at(&crates.join("harness-tests/src/lib.rs"), after(200));
+        let linked = std::fs::canonicalize(crates.join("linked")).expect("the linked crate");
+        let scope = DemoScope::Linked {
+            features: vec!["f".to_owned()],
+            crate_dirs: std::iter::once(linked).collect(),
+        };
+
+        let (t, _) = demo_newest_source(&crates, &scope).expect("the linked crate has a source");
+        assert!(
+            t <= built,
+            "an edit in an unlinked crate must not make the demo stale"
+        );
+
+        // The control: the old walk. It names the unlinked crate, and never the
+        // dev-only one, which is why that exclusion stays in this mode.
+        let every = DemoScope::EveryCrate {
+            why: "fixture".to_owned(),
+        };
+        let (t, path) = demo_newest_source(&crates, &every).expect("every crate is walked");
+        assert!(t > built, "the control must flag the unlinked edit");
+        assert!(
+            path.ends_with("unlinked/src/lib.rs"),
+            "the dev-only crate must stay out of the walk: {}",
+            path.display()
+        );
+
+        // A linked crate edited after the build, several directories down, is
+        // still found: narrowing the walk must not blind it.
+        source_at(&crates.join("linked/src/a/b/deep.rs"), after(50));
+        let (t, path) = demo_newest_source(&crates, &scope).expect("a source");
+        assert!(t > built);
+        assert!(path.ends_with("deep.rs"), "{}", path.display());
+    }
+
+    #[test]
+    fn the_demos_feature_banner_is_read_off_its_stderr() {
+        let stderr = "wz-ap-demo 0.1.0 — AP MVP demo binary\n\
+                      wz-ap-demo: BUILD FEATURES = [adminspace-read preset-ap-full]\n\
+                      USAGE:\n";
+        assert_eq!(
+            parse_build_features(stderr),
+            Some(vec![
+                "adminspace-read".to_owned(),
+                "preset-ap-full".to_owned()
+            ])
+        );
+        assert_eq!(
+            parse_build_features("wz-ap-demo: BUILD FEATURES = []\n"),
+            Some(Vec::new())
+        );
+        assert_eq!(
+            parse_build_features("an older demo printed nothing\n"),
+            None
+        );
+    }
+
+    /// The tree reader keeps workspace packages (an absolute path inside
+    /// `crates/`, with or without the `(*)` repeat and `(proc-macro)` markers)
+    /// and drops registry, git and out-of-tree path packages.
+    #[test]
+    fn the_tree_reader_keeps_only_workspace_crates() {
+        let dir = tempfile::tempdir().expect("a temporary tree");
+        let crates = dir.path().join("crates");
+        for name in ["wz-ap-demo", "wz", "wz-macro"] {
+            std::fs::create_dir_all(crates.join(name)).expect("crate dir");
+        }
+        std::fs::create_dir_all(dir.path().join("elsewhere/other")).expect("foreign dir");
+        let root = std::fs::canonicalize(&crates).expect("canonical crates dir");
+        let elsewhere =
+            std::fs::canonicalize(dir.path().join("elsewhere/other")).expect("canonical foreign");
+        let tree = format!(
+            "wz-ap-demo v0.1.0 ({root}/wz-ap-demo)\n\
+             env_logger v0.11.10\n\
+             wz v0.1.0 ({root}/wz)\n\
+             wz-macro v0.1.0 (proc-macro) ({root}/wz-macro)\n\
+             wz v0.1.0 ({root}/wz) (*)\n\
+             some-git v0.2.0 (https://example.invalid/x/y#abc123)\n\
+             other v0.1.0 ({elsewhere})\n",
+            root = root.display(),
+            elsewhere = elsewhere.display(),
+        );
+        let got = workspace_crate_dirs_in(&tree, &crates);
+        let want: BTreeSet<PathBuf> = ["wz-ap-demo", "wz", "wz-macro"]
+            .iter()
+            .map(|n| root.join(n))
+            .collect();
+        assert_eq!(got, want);
+    }
+
+    /// The reader against REAL `cargo tree` output, not a fixture of it: the
+    /// default client preset does not link the pico C ABI crate and the full
+    /// preset does, which is exactly the case the register item was filed from
+    /// (an edit in `wz-capi-pico` against a demo built without it). A dev-only
+    /// crate is in neither, because a binary has no dev-dependencies.
+    #[test]
+    fn real_cargo_tree_separates_the_client_preset_from_the_full_preset() {
+        let crates = project_root().join("crates");
+        let dirs = |features: &[&str]| {
+            let owned: Vec<String> = features.iter().map(|f| (*f).to_owned()).collect();
+            let tree = cargo_tree_of_demo(&crates, &owned).expect("cargo tree of the demo");
+            workspace_crate_dirs_in(&tree, &crates)
+        };
+        let canon = |name: &str| std::fs::canonicalize(crates.join(name)).expect("a crate dir");
+        let client = dirs(&["preset-ap-client"]);
+        let full = dirs(&["preset-ap-full"]);
+        assert!(client.contains(&canon("wz-ap-demo")));
+        assert!(client.contains(&canon("wz")));
+        assert!(
+            !client.contains(&canon("wz-capi-pico")),
+            "the client preset must not link the pico C ABI crate"
+        );
+        assert!(
+            full.contains(&canon("wz-capi-pico")),
+            "the full preset links the pico C ABI crate"
+        );
+        for set in [&client, &full] {
+            assert!(!set.contains(&canon("wz-runtime-tokio-test-support")));
+        }
+    }
+
+    /// The Fix line has to be a command that clears the failure it prints under.
+    #[test]
+    fn the_stale_message_names_a_fix_that_clears_it() {
+        let path = std::path::Path::new("crates/wz-capi-pico/src/write_filter.rs");
+        let demo = std::path::Path::new("crates/target/debug/wz-ap-demo");
+        let linked = stale_demo_message(
+            path,
+            demo,
+            &DemoScope::Linked {
+                features: vec!["a".to_owned(), "b".to_owned()],
+                crate_dirs: BTreeSet::new(),
+            },
+        );
+        assert!(
+            linked.contains("cargo build -p wz-ap-demo --no-default-features --features a,b"),
+            "a linked crate is cured by building the SAME feature set: {linked}"
+        );
+        assert!(!linked.contains("cargo clean"), "{linked}");
+        let unknown = stale_demo_message(
+            path,
+            demo,
+            &DemoScope::EveryCrate {
+                why: "it printed no banner".to_owned(),
+            },
+        );
+        assert!(
+            unknown.contains("cargo clean -p wz-ap-demo")
+                && unknown.contains("it printed no banner"),
+            "an unknown link set must name the forced relink and why: {unknown}"
+        );
     }
 }
 
