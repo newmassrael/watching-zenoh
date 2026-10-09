@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later OR LicenseRef-watching-zenoh-Commercial
 // SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
-#![cfg(all(feature = "transport-link-unixpipe", target_os = "linux"))]
+#![cfg(all(feature = "transport-link-unixpipe", unix))]
 
 //! R2363 — the `#file_mask=<n>` locator config key REACHES `mkfifo`, on every
 //! node the link creates and through the LOCATOR seam, not only the raw
@@ -32,7 +32,7 @@
 //! pair's names carry a random suffix, which is exactly why listing is the only
 //! honest way to reach them.
 
-use std::os::unix::fs::PermissionsExt;
+use std::os::unix::fs::{FileTypeExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 
 use wz_runtime_tokio::session_open::{bind_locator, AcceptConfig, BoundListener};
@@ -63,9 +63,12 @@ fn fifo_modes(dir: &Path) -> Vec<(String, u32)> {
         .map(|e| e.expect("a readable directory entry"))
         .filter_map(|e| {
             let meta = std::fs::metadata(e.path()).ok()?;
-            // `S_IFIFO` — a plain file here would be a different bug and must
-            // not be quietly counted as a FIFO.
-            ((meta.permissions().mode() & libc::S_IFMT) == libc::S_IFIFO).then(|| {
+            // A FIFO by its file type — a plain file here would be a different
+            // bug and must not be quietly counted as a FIFO. Asked through std
+            // and not as `mode & S_IFMT == S_IFIFO`: `mode_t` is `u32` on Linux
+            // and `u16` on macOS, so the bit form does not compile on every
+            // Unix this link is served on (item 851).
+            meta.file_type().is_fifo().then(|| {
                 (
                     e.file_name().to_string_lossy().into_owned(),
                     meta.permissions().mode() & 0o7777,

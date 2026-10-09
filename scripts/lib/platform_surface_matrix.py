@@ -199,7 +199,10 @@ EVIDENCE: dict[str, tuple[str, ...]] = {
     "Quic": ("quic_e2e",),
     "QuicDatagram": ("quic_datagram_e2e",),
     "Serial": ("serial_link_e2e",),
-    "Unixpipe": ("unixpipe_e2e",),
+    # `unixpipe_file_mask` since item 851's witnesses followed the link to every
+    # Unix: the link's one locator config key reaching `mkfifo` is host work
+    # (`mode_t` is not even one width across Unixes), not a Linux property.
+    "Unixpipe": ("unixpipe_e2e", "unixpipe_file_mask"),
     "UnixsockStream": ("unixsock_e2e",),
     "Vsock": ("vsock_e2e",),
     "Ws": ("ws_e2e",),

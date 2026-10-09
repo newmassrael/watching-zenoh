@@ -9509,7 +9509,7 @@ mod router_hat_quic_cert_tests {
     test,
     feature = "router-hat-router",
     feature = "transport-link-unixpipe",
-    target_os = "linux"
+    unix
 ))]
 mod router_hat_failfast_tests {
     use super::run_router_hat_until;
@@ -9691,7 +9691,7 @@ mod peer_quic_cert_tests {
     test,
     feature = "routing-peer",
     feature = "transport-link-unixpipe",
-    target_os = "linux"
+    unix
 ))]
 mod peer_failfast_tests {
     use super::{run_peer_until, PeerOpts};

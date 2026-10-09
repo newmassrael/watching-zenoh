@@ -1730,9 +1730,9 @@ pub fn parse_unixsock_locator(locator: &str) -> Result<UnixsockEndpoint, Unixsoc
 // R311y10 — the `unixpipe/<path>` locator GRAMMAR is universal and pure string
 // work (a same-host named-FIFO-pair base path), so it lives HERE unconditionally
 // alongside the unixsock/serial/vsock leaves; only the unixpipe BACKEND
-// (`wz-runtime-tokio::unixpipe_pipeline`, Linux-only) is feature-gated. The
+// (`wz-runtime-tokio::unixpipe_pipeline`, every Unix) is feature-gated. The
 // `unixpipe/...` string always parses to [`AnyLocator::Unixpipe`] whether or not
-// the backend is compiled (or the target is Linux) — dialing without one fails
+// the backend is compiled (or the target is a Unix) — dialing without one fails
 // at dial time, the serial/unixsock/vsock model.
 
 /// A unix named-pipe (FIFO-pair) endpoint (`unixpipe/...`). Like

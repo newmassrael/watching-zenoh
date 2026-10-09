@@ -18,7 +18,7 @@
 //! accept-backend gate. This is the ONLY lane that opens a real
 //! `BoundListener::Unixpipe` through the pico C ABI.
 
-#[cfg(all(feature = "transport-link-unixpipe", target_os = "linux"))]
+#[cfg(all(feature = "transport-link-unixpipe", unix))]
 mod multiclient {
     use std::ffi::CString;
 

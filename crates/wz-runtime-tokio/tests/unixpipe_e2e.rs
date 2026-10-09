@@ -215,7 +215,7 @@ fn unique_seam_pipe_base() -> String {
 /// `bind_endpoint` (the seam was tcp/ws/tls/unixsock/vsock-only), and after it
 /// reaches Established + delivers a `Put`. Unlike the vsock seam test, NO
 /// `#[ignore]`: a FIFO pair under the temp dir needs no privilege, so this runs
-/// in CI (the whole file is `transport-link-unixpipe` + Linux gated).
+/// in CI (the whole file is `transport-link-unixpipe` + Unix gated).
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn wz_accepts_a_session_over_unixpipe_via_the_bind_endpoint_seam() {
     let payload = b"unixpipe-seam-hello".to_vec();

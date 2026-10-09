@@ -1004,8 +1004,9 @@ transport-link-vsock = ["transport-link-tcp", "dep:tokio-vsock"]
 # `unixpipe/...` locator PARSE is platform-independent + ungated in
 # wz-session-core; only the dial/accept BACKEND is gated here, and the
 # `session_open` DialedLink::Unixpipe arm is `#[cfg(all(transport-link-unixpipe,
-# target_os="linux"))]` (the FIFO `read_write` open-rendezvous is Linux-only in
-# tokio). NOT default — pico has no unixpipe transport (same-host IPC link).
+# unix))]`, the host family upstream serves the link on (item 851 lowered it
+# from Linux by opening the FIFOs through std instead of tokio's Linux-only
+# `read_write`). NOT default — pico has no unixpipe transport (same-host IPC link).
 transport-link-unixpipe = ["transport-link-tcp", "dep:libc", "dep:rand"]
 # R311xk — host QUIC link backend. Like tls (and UNLIKE ws), forwards
 # `transport-link-tcp`: QUIC frames a zenoh batch over ONE bidirectional stream
@@ -2161,8 +2162,8 @@ features = [
 # R311y453 — MOVED from the `target_os = "linux"` table to `cfg(unix)`, and now
 # pulled by `link-interfaces` as well. `getifaddrs`/`freeifaddrs` are POSIX, not
 # Linux-only, so the §5.16 NIC subject axis works on macOS and the BSDs too;
-# Linux is a subset of unix, so the unixpipe consumer is unaffected (its own code
-# keeps its `target_os = "linux"` gate).
+# the unixpipe consumer is gated `unix` too since item 851, so both consumers
+# match this table.
 libc = { version = "0.2", optional = true }
 # Round 1998 (item 470) — the AF_PACKET socket and the capture tap, which this
 # crate re-exports rather than owns. Optional and pulled only by

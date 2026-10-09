@@ -56,15 +56,16 @@
 // warnings keeps a genuinely unused helper visible.
 //
 // R2973 — each arm carries its leg's HOST as well as its feature, for the same
-// reason: the serial leg opens an `openpty` pair (Unix only) and the unixpipe
-// leg's pipeline is Linux only, so on any other host naming either feature
-// armed the file and ran nothing in it.
+// reason: a feature that arms the file on a host where its leg cannot run would
+// arm it and run nothing in it. The serial leg opens an `openpty` pair (Unix
+// only). The unixpipe leg's host is every Unix, the one upstream serves the link
+// on (item 851: it read Linux after the pipeline was lowered to `unix`).
 #![cfg(all(
     feature = "transport-unicast",
     any(
         feature = "transport-link-udp",
         all(feature = "transport-link-serial", unix),
-        all(feature = "transport-link-unixpipe", target_os = "linux"),
+        all(feature = "transport-link-unixpipe", unix),
         feature = "transport-link-quic-datagram",
     )
 ))]
@@ -97,7 +98,10 @@ fn parse_back_both_ends(pair: &LinkEndpoints, what: &str) -> (AnyLocator, AnyLoc
 /// Neither end was told the other's `src`, so this compares two independently
 /// resolved answers. Only udp and unixpipe mirror exactly — see the module header
 /// for why quic-datagram cannot, and the serial leg for why it has no mirror at all.
-#[cfg(any(feature = "transport-link-udp", feature = "transport-link-unixpipe"))]
+#[cfg(any(
+    feature = "transport-link-udp",
+    all(feature = "transport-link-unixpipe", unix)
+))]
 fn assert_mirrored(dialer: &LinkEndpoints, acceptor: &LinkEndpoints, what: &str) {
     assert_eq!(
         dialer.src, acceptor.dst,
@@ -407,7 +411,7 @@ fn client_port_of(locator: &str) -> u16 {
 #[cfg(all(
     feature = "transport-link-unixpipe",
     feature = "transport-unicast",
-    target_os = "linux"
+    unix
 ))]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn unixpipe_link_ends_report_mirrored_dedicated_fifo_endpoints() {

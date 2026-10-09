@@ -7240,7 +7240,7 @@ layer_c1ak_cargo_test_transport_stats() {
 #   1. runs the locator tests (the `unixpipe/<path>` parse is `AnyLocator::Unixpipe`
 #      — ungated + platform-independent, like unixsock/vsock);
 #   2. runs the `unixpipe_e2e` integration test (gated all(transport-link-unixpipe,
-#      target_os="linux", transport-unicast)): two nodes reach Established over a
+#      unix, transport-unicast)): two nodes reach Established over a
 #      loopback FIFO pair — the initiator via a `unixpipe/...` LOCATOR — and a Put
 #      is delivered byte-exact. It ALSO carries the R311y380 accept-seam
 #      discriminator (`bind_endpoint("unixpipe/..")` -> BoundListener::accept_raw
