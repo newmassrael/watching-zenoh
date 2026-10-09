@@ -171,6 +171,21 @@ pub const WZ_DISSECT_LIMITS_NONE: c_int = 0;
 /// grows by gaining VALUES, which no consumer has to be recompiled for.
 pub const WZ_DISSECT_LIMITS_LIVE_TAP: c_int = 1;
 
+/// Item 895 — the unit [`wz_dissect_transport_build`] returns is the transport
+/// message ALONE: one datagram is one unit (UDP, multicast), so there is no
+/// length in front of it.
+///
+/// Zero on purpose, for the reason [`WZ_DISSECT_LIMITS_NONE`] is: the framing a
+/// caller that zero-initialises its argument gets is the one that adds nothing.
+/// A framing is an integer and not a struct, and grows by gaining VALUES.
+pub const WZ_DISSECT_FRAMING_DATAGRAM: c_int = 0;
+/// Item 895 — a 16-bit little-endian length, then the message: a streamed link
+/// in its ordinary mode (TCP, TLS, WebSocket, a QUIC stream).
+pub const WZ_DISSECT_FRAMING_TCP_STREAM: c_int = 1;
+/// Item 895 — a 32-bit little-endian length, then the message: a streamed link
+/// whose session negotiated LowLatency.
+pub const WZ_DISSECT_FRAMING_LOWLATENCY_STREAM: c_int = 2;
+
 /// R2102 (open-debt item 524) — the `ts_ns` a caller passes to
 /// [`wz_dissect_live_push`] when it has no clock reading, and the value a
 /// record carries back when nothing timed it.
@@ -340,6 +355,9 @@ pub extern "C" fn wz_dissect_abi_version() -> c_int {
     // a declaration line.
     // 29, for `wz_dissect_proto_encode`: field values, as JSON, turned into
     // protobuf wire bytes by a `.proto` schema's types.
+    // 30, for `wz_dissect_transport_build`: a transport message built from
+    // fields the caller sets, in the framing the link wants, with the report of
+    // where each field sits.
     WZ_DISSECT_ABI_REVISION
 }
 
@@ -357,7 +375,7 @@ pub extern "C" fn wz_dissect_abi_version() -> c_int {
 /// It lives AFTER the function rather than above it on purpose: an item placed
 /// between a doc comment and the item it documents takes that doc, which is
 /// the doc-ownership defect the C1bz budget records.
-pub const WZ_DISSECT_ABI_REVISION: c_int = 29;
+pub const WZ_DISSECT_ABI_REVISION: c_int = 30;
 
 /// R2108 (open-debt item 525) — THE RECORD'S LAYOUT, reported by the artifact.
 ///
@@ -2045,6 +2063,88 @@ pub unsafe extern "C" fn wz_dissect_e2e_open(
     write_string(wz_capture::e2e_json::open_document(profile, frame), out)
 }
 
+/// The framing an ABI integer names, or nothing if this build does not name it.
+///
+/// Exhaustive over the library's own vocabulary and not over the integers: a
+/// framing added to `Framing` stops this compiling until it has a constant, and
+/// an integer no constant names is the caller's bug.
+fn framing_from_abi(framing: c_int) -> Option<wz_session_core::transport_compose::Framing> {
+    use wz_session_core::transport_compose::Framing;
+    Framing::ALL.into_iter().find(|f| {
+        framing
+            == match f {
+                Framing::Datagram => WZ_DISSECT_FRAMING_DATAGRAM,
+                Framing::TcpStream => WZ_DISSECT_FRAMING_TCP_STREAM,
+                Framing::LowLatencyStream => WZ_DISSECT_FRAMING_LOWLATENCY_STREAM,
+            }
+    })
+}
+
+/// A TRANSPORT MESSAGE BUILT FROM THE FIELDS YOU SET, in the framing the link
+/// wants, with a report of where each field sits in the bytes.
+///
+/// # Why this is a door
+///
+/// [`wz_dissect_transport_message`] reads a transport message and nothing built
+/// one. A program that needs to SEND a message it chose every field of (a
+/// conformance tool aimed at its own nodes) either kept a second, unpinned
+/// understanding of the layout or reached for bytes captured elsewhere. This
+/// door writes the message through the generated codecs the session and the
+/// dissector use, so the layout is read from one place; and it says, field by
+/// field, where the bytes it wrote are, so a caller that wants to change one
+/// field does not copy an offset or a width by hand.
+///
+/// # Arguments
+///
+/// * `description_json` -- the message, NUL-terminated UTF-8 JSON:
+///   `{"message":"frame","reliable":true,"sn":5,"priority":3,"payload":"dead"}`.
+///   The caller sets every field the wire lets a sender choose; the door
+///   computes what the wire derives (the header flags that say a part is
+///   present, the lease unit, every length, the width of every VLE, the stream
+///   prefix). The eight messages, their keys, and what is derived are in
+///   `wz_dissect.h`.
+/// * `framing` -- one of the `WZ_DISSECT_FRAMING_*` constants.
+///
+/// # Result
+///
+/// [`WZ_DISSECT_OK`] with a `transport_build` document for any text this
+/// function was handed: the message as hex (`unit` with the framing's prefix,
+/// `body` without it) and the report (`layout`), or `{"ok":false,...}` naming
+/// the key that was refused. A refused description is a successful DIAGNOSIS,
+/// for the reason [`wz_dissect_declarations_diagnose`] gives: OK means a string,
+/// an error means none.
+///
+/// # Errors
+///
+/// [`WZ_DISSECT_ERR_INVALID_ARG`] for a null `description_json` or `out`, text
+/// that is not UTF-8, or a `framing` no constant names: the caller's own bug
+/// and not text a person typed.
+///
+/// # Safety
+/// `description_json` must be a NUL-terminated C string and `out` a writable
+/// pointer to a `*mut c_char`.
+#[no_mangle]
+pub unsafe extern "C" fn wz_dissect_transport_build(
+    description_json: *const c_char,
+    framing: c_int,
+    out: *mut *mut c_char,
+) -> c_int {
+    if description_json.is_null() || out.is_null() {
+        return WZ_DISSECT_ERR_INVALID_ARG;
+    }
+    let Some(framing) = framing_from_abi(framing) else {
+        return WZ_DISSECT_ERR_INVALID_ARG;
+    };
+    // SAFETY: caller contract above.
+    let Ok(text) = (unsafe { std::ffi::CStr::from_ptr(description_json) }).to_str() else {
+        return WZ_DISSECT_ERR_INVALID_ARG;
+    };
+    write_string(
+        wz_capture::transport_build_json::build_document(text, framing),
+        out,
+    )
+}
+
 /// R311y854 — the census NARROWED by a selector, wz's own filter language.
 ///
 /// `selector` is a NUL-terminated expression in the dialect
@@ -3523,6 +3623,10 @@ mod tests {
     /// `wz_dissect_transport_message_in` against the session document, in its
     /// own file: the door's oracle is a whole built session and not a unit.
     mod message_in;
+
+    /// `wz_dissect_transport_build` across the boundary: the mechanism is held in
+    /// `wz-capture`, and this file holds what the ABI adds to it.
+    mod transport_build;
 
     /// R311y873 — THE HEADER NAMES EVERY `payload_decode` STATE THE LIBRARY
     /// CAN EMIT.
@@ -6938,7 +7042,9 @@ mod tests {
         // protobuf wire bytes by a `.proto` schema's types. One symbol, a
         // `char*` released by `wz_dissect_string_free`; the struct it takes is
         // the one `wz_dissect_declarations_from_proto` already has.
-        assert_eq!(wz_dissect_abi_version(), 29);
+        // 30, for `wz_dissect_transport_build`: one symbol, a `char*` released
+        // by `wz_dissect_string_free`, and no struct.
+        assert_eq!(wz_dissect_abi_version(), 30);
     }
 
     /// R311y913 (unregistered item 435) — THE LINKED SURFACE CAN SAY WHAT IT
@@ -7680,6 +7786,9 @@ mod tests {
             // whichever position key applies, so each branch has keys the
             // others lack.
             (rev::PROTO_ENCODE, proto_encode_documents()),
+            // Every shape the transport build door writes: a built message in
+            // each framing, and the refusals by key, by value and by framing.
+            (rev::TRANSPORT_BUILD, transport_build::documents()),
             // Built by a door that takes a handle, so it comes from one.
             (rev::SELECTION, selection_documents()),
             (rev::RETENTION, retention_documents()),
@@ -7837,6 +7946,15 @@ mod tests {
                     .next()
                     .expect("a document"),
             ),
+            // Declares no plane either: a layout is a list of rows, and the
+            // `null` in a row is a cell of the row.
+            (
+                rev::TRANSPORT_BUILD,
+                transport_build::documents()
+                    .into_iter()
+                    .next()
+                    .expect("a document"),
+            ),
             // Declares no plane, so it contributes no `@planes` marker,
             // and being in this table is what makes that a checked fact.
             (
@@ -7990,6 +8108,10 @@ mod tests {
             // Every refusal shape of the value door, for the same reason: no
             // position key is ever written as `null`.
             (rev::PROTO_ENCODE, proto_encode_documents()),
+            // Every shape the transport build door writes, for the same reason:
+            // a built message, a refusal by key and one that names no key, and
+            // the `null` cells of a layout row are not a top-level plane.
+            (rev::TRANSPORT_BUILD, transport_build::documents()),
             // Both shapes, for the reason `selection_documents` gives.
             (rev::SELECTION, selection_documents()),
             // With a clock and without, for the reason `retention_documents` gives.

@@ -2316,6 +2316,31 @@ pub const DOCUMENT_HISTORY: &[DocumentShape] = &[
         planes: &[],
         carries: &[],
     },
+    // A transport message built from a description in which the caller sets
+    // every semantic field, the unit and the body as hex, and the structural
+    // report of the bytes: or the place the description was refused.
+    //
+    // Its two branches share the envelope and `ok`. The refusal names the text
+    // it is about by the KEY that locates the place (`description_path`,
+    // `description_offset`) and omits a position that does not apply, as the
+    // protected-frame documents do. The success branch is a list of rows that
+    // all have ONE shape: every key is present on every row and `null` marks
+    // the ones that do not apply, so the three vocabularies (`kind`,
+    // `encoding`, `relative_to`) are passengers by construction.
+    //
+    // It takes the integer rule from its first revision, for the cells that can
+    // reach 2^53: a layout row's `value`, `min`, `max`, `stored` and `ring_max`.
+    // A sequence number or a lease of eight bytes, or the top of a nine-byte
+    // VLE, is a number below the line and a string of digits beyond it.
+    DocumentShape {
+        document: TRANSPORT_BUILD,
+        revision: 1,
+        keys: TRANSPORT_BUILD_R1_KEYS,
+        retiring: &[],
+        families: TRANSPORT_BUILD_R1_FAMILIES,
+        planes: &[],
+        carries: TRANSPORT_BUILD_R1_CARRIES,
+    },
     // The selector's verdict over the field document's rows, with none
     // of what the field document renders beside it.
     //
@@ -2635,6 +2660,9 @@ pub const E2E_OPEN: &str = "e2e_open";
 /// The protobuf bytes a set of field values comes to under a `.proto` schema, or
 /// why they could not be built (`wz_dissect_proto_encode`).
 pub const PROTO_ENCODE: &str = "proto_encode";
+/// A transport message built from a description, with the structural report of
+/// its bytes, or why it was refused (`wz_dissect_transport_build`).
+pub const TRANSPORT_BUILD: &str = "transport_build";
 /// A selector's verdict over the field document's rows, and nothing else
 /// (`wz_dissect_live_selection`).
 pub const SELECTION: &str = "selection";
@@ -9200,6 +9228,73 @@ pub const E2E_OPEN_R1_KEYS: &[&str] = &[
     "value",
 ];
 
+/// The `transport_build` document's key set at revision 1, over BOTH branches:
+/// the built unit with its report, and the refusal with whichever position key
+/// applies.
+pub const TRANSPORT_BUILD_R1_KEYS: &[&str] = &[
+    "bit_mask",
+    "body",
+    "carrier",
+    "description_offset",
+    "description_path",
+    "document",
+    "encoding",
+    "kind",
+    "layout",
+    "max",
+    "measures",
+    "message",
+    "min",
+    "name",
+    "offset",
+    "ok",
+    "prefix_bytes",
+    "reason",
+    "relative_to",
+    "revision",
+    "ring_max",
+    "ring_max_width",
+    "stored",
+    "unit",
+    "value",
+    "width",
+];
+
+/// The `transport_build` document's value families at revision 1: what a layout
+/// row's `kind` is, how its integer is laid out, and what its offset counts
+/// from.
+pub const TRANSPORT_BUILD_R1_FAMILIES: &[ValueFamily] = &[
+    ValueFamily {
+        key: "encoding",
+        values: &["fixed", "vle"],
+    },
+    ValueFamily {
+        key: "kind",
+        values: &["flag", "length", "other", "reserved", "sequence_number"],
+    },
+    ValueFamily {
+        key: "relative_to",
+        values: &["body", "unit"],
+    },
+];
+
+/// All three families are PASSENGERS: every layout row carries every key, so no
+/// word brings keys another word lacks.
+pub const TRANSPORT_BUILD_R1_CARRIES: &[KeyCarries] = &[
+    KeyCarries {
+        key: "encoding",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "kind",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "relative_to",
+        shape: CarriesShape::Passenger,
+    },
+];
+
 /// The selection document's key set at revision 1, over EVERY shape a row and
 /// the document take — the coordinates present or absent, `selected` present or
 /// absent.
@@ -13435,6 +13530,9 @@ mod tests {
             (E2E_OPEN, 1),
             // The bytes a set of field values comes to under a `.proto` schema.
             (PROTO_ENCODE, 1),
+            // A transport message built from a description, with the report
+            // of its bytes.
+            (TRANSPORT_BUILD, 1),
             // The selector's verdict over the field document's rows.
             // To 2 on the same move as fields 27: the word on a `Request`, a
             // `ResponseFinal` and a del row stopped being `unjudged`.

@@ -437,7 +437,7 @@ pub(crate) fn child(path: &str, key: &str) -> String {
     out
 }
 
-fn at(path: &str, index: usize) -> String {
+pub(crate) fn at(path: &str, index: usize) -> String {
     format!("{path}/{index}")
 }
 
@@ -464,7 +464,7 @@ pub(crate) fn object<'a>(value: &'a Json5Value, path: &str) -> Result<&'a Entrie
     }
 }
 
-fn array<'a>(value: &'a Json5Value, path: &str) -> Result<&'a [Json5Value], DocError> {
+pub(crate) fn array<'a>(value: &'a Json5Value, path: &str) -> Result<&'a [Json5Value], DocError> {
     match value {
         Json5Value::Array(items) => Ok(items),
         other => Err(DocError::invalid(
@@ -507,7 +507,11 @@ pub(crate) fn optional<'a>(entries: &'a Entries, key: &str) -> Option<&'a Json5V
     entries.iter().find(|(k, _)| k == key).map(|(_, v)| v)
 }
 
-fn required<'a>(entries: &'a Entries, key: &str, path: &str) -> Result<&'a Json5Value, DocError> {
+pub(crate) fn required<'a>(
+    entries: &'a Entries,
+    key: &str,
+    path: &str,
+) -> Result<&'a Json5Value, DocError> {
     optional(entries, key)
         .ok_or_else(|| DocError::invalid(path, format!("the key `{key}` is required")))
 }
@@ -560,7 +564,7 @@ pub(crate) fn read_uint(value: &Json5Value, path: &str) -> Result<u64, DocError>
     result.map_err(|reason| DocError::invalid(path, reason))
 }
 
-fn read_bool(value: &Json5Value, path: &str) -> Result<bool, DocError> {
+pub(crate) fn read_bool(value: &Json5Value, path: &str) -> Result<bool, DocError> {
     match value {
         Json5Value::Bool(b) => Ok(*b),
         other => Err(DocError::invalid(
@@ -570,7 +574,7 @@ fn read_bool(value: &Json5Value, path: &str) -> Result<bool, DocError> {
     }
 }
 
-fn read_string<'a>(value: &'a Json5Value, path: &str) -> Result<&'a str, DocError> {
+pub(crate) fn read_string<'a>(value: &'a Json5Value, path: &str) -> Result<&'a str, DocError> {
     match value {
         Json5Value::String(s) => Ok(s),
         other => Err(DocError::invalid(

@@ -369,6 +369,20 @@ pub mod tcp;
 /// workspace's already-pinned crypto — `wz-capture` keeps its zero third-party
 /// dependencies.
 pub mod tls;
+// Transport messages BUILT from a description, and the structural report of the
+// bytes: the description reader and builder, the report derived from the
+// dissector, and the document that renders them. Gated on `dissect`, which
+// selects the writers (`wz-session-core/transport-compose`) beside the walker the
+// report is read with. Each module is documented by its own `//!` text and
+// carries no outer `///` here, for the reason the protected-frame modules give.
+#[cfg(feature = "dissect")]
+pub mod transport_build;
+#[cfg(feature = "dissect")]
+pub mod transport_build_json;
+#[cfg(all(test, feature = "dissect"))]
+mod transport_build_tests;
+#[cfg(feature = "dissect")]
+pub mod transport_layout;
 /// A fragment chain read by a reader that never saw the session's InitAck, so
 /// does not know the sequence-number ring: the chains whose every step is `+1`
 /// are reassembled, and a step only a ring could judge ends the chain as

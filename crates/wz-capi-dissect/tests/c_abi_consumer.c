@@ -1452,6 +1452,112 @@ static int check_e2e_doors(void) {
     return 0;
 }
 
+/* (ABI 30) -- A TRANSPORT MESSAGE BUILT FROM FIELDS, and a field of it replaced
+ * using only the report.
+ *
+ * What the Rust tests hold is the mechanism (the independent oracle, the round
+ * trip, every row replaced); what this holds is that a LINKING consumer can use
+ * the door as the header says: build, take the unit and the body out of the
+ * document, read the body back through the reading door, find a row in the
+ * report and change that field without computing an offset. */
+static int check_transport_build_door(void) {
+    static const char frame[] =
+        "{\"message\":\"frame\",\"reliable\":true,\"sn\":5,\"payload\":\"dead\"}";
+    static const char opening[] =
+        "{\"document\":{\"name\":\"transport_build\",\"revision\":1},"
+        "\"ok\":true,\"prefix_bytes\":2,\"unit\":\"";
+    unsigned char body[16];
+    unsigned char unit[16];
+    char *doc = NULL;
+    char *json = NULL;
+    const char *at;
+    size_t body_len = 0;
+    size_t unit_len = 0;
+    unsigned offset = 0;
+    unsigned width = 0;
+    int rc;
+
+    rc = wz_dissect_transport_build(frame, WZ_DISSECT_FRAMING_TCP_STREAM, &doc);
+    CHECK(rc == WZ_DISSECT_OK, "transport_build rc=%d", rc);
+    CHECK(doc != NULL, "OK came back with no string");
+    CHECK(strncmp(doc, opening, sizeof opening - 1) == 0,
+          "unexpected opening: %s", doc);
+
+    /* The unit is the 16-bit little-endian length, then the body. */
+    at = strstr(doc, "\"unit\":\"");
+    CHECK(at != NULL, "no unit in the document: %s", doc);
+    at += strlen("\"unit\":\"");
+    while (at[unit_len * 2] != '"' && unit_len < sizeof unit) {
+        unit[unit_len] = hex_pair(at + unit_len * 2);
+        unit_len++;
+    }
+    at = strstr(doc, "\"body\":\"");
+    CHECK(at != NULL, "no body in the document: %s", doc);
+    at += strlen("\"body\":\"");
+    while (at[body_len * 2] != '"' && body_len < sizeof body) {
+        body[body_len] = hex_pair(at + body_len * 2);
+        body_len++;
+    }
+    /* A header, a one-byte sequence number and the two payload bytes. */
+    CHECK(body_len == 4 && unit_len == body_len + 2, "extent: body %zu unit %zu",
+          body_len, unit_len);
+    CHECK(unit[0] == body_len && unit[1] == 0 &&
+              memcmp(unit + 2, body, body_len) == 0,
+          "the unit must be the length prefix then the body");
+
+    /* The reading door reads what was built, to the field that was given. */
+    rc = wz_dissect_transport_message(body, body_len, 0, &json);
+    CHECK(rc == WZ_DISSECT_OK, "reading the built body rc=%d", rc);
+    CHECK(strstr(json, "{\"name\":\"sn\",\"start\":1,\"end\":2,\"kind\":\"uint\","
+                       "\"value\":5}") != NULL,
+          "the built body must read back to sn 5: %s", json);
+    wz_dissect_string_free(json);
+
+    /* Find the sequence number in the REPORT, and replace it with a value of
+     * the width the report gives: no offset is computed here. */
+    at = strstr(doc, "{\"name\":\"sn\",\"kind\":\"sequence_number\",\"offset\":");
+    CHECK(at != NULL, "no sn row in the report: %s", doc);
+    CHECK(sscanf(at, "{\"name\":\"sn\",\"kind\":\"sequence_number\",\"offset\":%u,"
+                     "\"width\":%u",
+                 &offset, &width) == 2,
+          "the sn row must give an offset and a width: %s", at);
+    CHECK(width == 1 && strstr(at, "\"encoding\":\"vle\",\"value\":5,\"min\":0,"
+                                   "\"max\":127") != NULL,
+          "the row must say the sn is a one-byte VLE that 0..127 keeps: %s", at);
+    body[offset] = 9;
+    rc = wz_dissect_transport_message(body, body_len, 0, &json);
+    CHECK(rc == WZ_DISSECT_OK, "reading the replaced body rc=%d", rc);
+    CHECK(strstr(json, "\"name\":\"sn\",\"start\":1,\"end\":2,\"kind\":\"uint\","
+                       "\"value\":9}") != NULL &&
+              strstr(json, "\"name\":\"payload\"") != NULL,
+          "the replacement must change the sn and nothing else: %s", json);
+    wz_dissect_string_free(json);
+    wz_dissect_string_free(doc);
+
+    /* A value that does not fit the ring named for it is refused at its key,
+     * never truncated, and the refusal is a document and not an error. */
+    doc = NULL;
+    rc = wz_dissect_transport_build(
+        "{\"message\":\"frame\",\"reliable\":true,\"sn\":300,"
+        "\"sn_resolution\":\"8bit\"}",
+        WZ_DISSECT_FRAMING_DATAGRAM, &doc);
+    CHECK(rc == WZ_DISSECT_OK, "refused description rc=%d", rc);
+    CHECK(strstr(doc, "\"ok\":false,\"description_path\":\"/sn\"") != NULL,
+          "the refusal must name its key: %s", doc);
+    wz_dissect_string_free(doc);
+
+    /* A caller's bug is a code and no string. */
+    doc = NULL;
+    rc = wz_dissect_transport_build(frame, 3, &doc);
+    CHECK(rc == WZ_DISSECT_ERR_INVALID_ARG && doc == NULL,
+          "an unnamed framing rc=%d", rc);
+    rc = wz_dissect_transport_build(NULL, WZ_DISSECT_FRAMING_DATAGRAM, &doc);
+    CHECK(rc == WZ_DISSECT_ERR_INVALID_ARG && doc == NULL, "null text rc=%d", rc);
+    rc = wz_dissect_transport_build(frame, WZ_DISSECT_FRAMING_DATAGRAM, NULL);
+    CHECK(rc == WZ_DISSECT_ERR_INVALID_ARG, "null out rc=%d", rc);
+    return 0;
+}
+
 /* (ABI 27) -- ONE message, read in the light of its session's context.
  *
  * The messages are the smallest complete ones of two network MIDs, laid out
@@ -2255,7 +2361,7 @@ int main(void) {
         const char *name;
         unsigned revision;
         char *doc;
-    } revisioned[10];
+    } revisioned[11];
     revisioned[0].name = "census";
     /* R2119 (open-debt item 455) -- 2: the census announced `first_packet`'s
      * retirement beside its successor `first_anchor`.
@@ -2631,6 +2737,16 @@ int main(void) {
         rc = wz_dissect_proto_encode("M", &one, 1, 0, "{}", &revisioned[9].doc);
         CHECK(rc == WZ_DISSECT_OK, "proto_encode document rc=%d", rc);
     }
+    /* (ABI 30) -- the transport build document. 1: the first revision a
+     * consumer could read. Built from a KeepAlive, the smallest message there
+     * is. */
+    revisioned[10].name = "transport_build";
+    revisioned[10].revision = 1;
+    revisioned[10].doc = NULL;
+    rc = wz_dissect_transport_build("{\"message\":\"keep_alive\"}",
+                                    WZ_DISSECT_FRAMING_DATAGRAM,
+                                    &revisioned[10].doc);
+    CHECK(rc == WZ_DISSECT_OK, "transport_build document rc=%d", rc);
 
     /* R2182 -- THE ENVELOPE MAY CARRY MORE AFTER THE REVISION, and this loop
      * used to forbid it by ending the expected prefix with `}`.
@@ -2742,6 +2858,12 @@ int main(void) {
     /* (ABI 26) -- and a protected frame built and opened under a profile the
      * consumer passes as text, so it never carries the arithmetic itself. */
     if (check_e2e_doors() != 0) {
+        return 1;
+    }
+
+    /* (ABI 30) -- and a transport message built from the fields the consumer
+     * sets, whose report says where each of them sits. */
+    if (check_transport_build_door() != 0) {
         return 1;
     }
 

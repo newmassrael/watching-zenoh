@@ -52,6 +52,12 @@ wz-session-core = { path = "../wz-session-core", default-features = false, featu
     "codec-open-body",
     "codec-close",
     "codec-keep-alive",
+    # Item 895 — `transport_compose::Framing`, which `wz_dissect_transport_build`
+    # maps its framing argument onto. Named here and not left to unification
+    # through `wz-capture`'s `dissect` feature (which selects it for the writers),
+    # on the rule `wz-capture`'s manifest states at length: a type this file
+    # names has to be a type this file's own manifest provides.
+    "transport-compose",
     # R311y869 — `declare_build`, which the census fixture uses to put a real
     # `DeclareSubscriber` on the wire for the INTEREST plane to read. Named
     # explicitly rather than left to unification, on the rule `wz-capture`'s

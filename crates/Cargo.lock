@@ -2866,6 +2866,7 @@ dependencies = [
  "wz-codecs",
  "wz-packet-fixtures",
  "wz-session-core",
+ "wz-session-wire-fixtures",
 ]
 
 [[package]]

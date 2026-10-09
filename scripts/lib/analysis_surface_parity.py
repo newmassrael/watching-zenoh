@@ -419,6 +419,18 @@ ONLY_CAPI = {
         "answer delivered by running.",
         (15,),
     ),
+    "a transport message built from fields the caller sets": (
+        "wz_dissect_transport_build",
+        "DELIBERATE. The door exists because a consumer that LINKS this library "
+        "and has to send a message it chose every field of (a conformance tool "
+        "aimed at its own nodes) must not keep a second, unpinned understanding "
+        "of the layout: it is the writing half of `wz_dissect_transport_message`, "
+        "and the structural report says where each field of what it wrote sits, "
+        "derived from the bytes by the same walker that reads them. The command "
+        "line analyses captures and sends nothing, and `wz-replay` mutates bytes "
+        "a capture already holds; neither builds a message from fields.",
+        (),
+    ),
     "declarations written from a .proto schema": (
         "wz_dissect_declarations_from_proto",
         "DELIBERATE for now. The door exists because a consumer that LINKS this "

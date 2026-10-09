@@ -71,7 +71,7 @@
  * here would only ever be a copy. (The envelope carries one more key for a
  * document that declares planes -- see R2180 below.) The names are "census",
  * "fields", "summary", "readable_surfaces", "selector_diagnose",
- * "declarations_diagnose", "keyexpr_diagnose", "declarations_from_proto", "e2e_wrap", "e2e_open", "proto_encode", "selection", "retention" and "health" — one per door group, because a consumer calls the
+ * "declarations_diagnose", "keyexpr_diagnose", "declarations_from_proto", "e2e_wrap", "e2e_open", "proto_encode", "transport_build", "selection", "retention" and "health" — one per door group, because a consumer calls the
  * door it wants and a single library-wide number would tell a reader of the
  * census that a document it never calls had moved.
  *
@@ -861,11 +861,15 @@
  * the line); to the `min_ns`, `max_ns`, `mean_ns` and `total_ns` of a census
  * latency object (keys that exist from census revision 17 and take the rule
  * from their first appearance: `total_ns` is a SUM, and 2^53 nanoseconds is 104
- * days of summed latency, which a long capture of many exchanges reaches); and to
+ * days of summed latency, which a long capture of many exchanges reaches); to
+ * the `value`, `min`, `max`, `stored` and `ring_max` of a `transport_build`
+ * layout row (that document takes the rule from its first revision: a sequence
+ * number or a lease can be eight bytes, and the top of a nine-byte VLE is
+ * 2^64 - 1); and to
  * `oldest_ts_ns` in the retention document. It does NOT apply to counts,
  * offsets, sizes and millisecond spans this library measures: those count
  * things the host holds, and stay bare numbers. Revisions: fields 23, census
- * 16, summary 5, retention 2, e2e_wrap 1, e2e_open 1.
+ * 16, summary 5, retention 2, e2e_wrap 1, e2e_open 1, transport_build 1.
  * The gap total saturates at the top of `u64` instead of wrapping.
  *
  * @values fields carried_state
@@ -1517,7 +1521,7 @@ extern "C" {
  * calls the function, and refuses when the two disagree.
  *
  * @unknown ABI not-an-enumeration */
-#define WZ_DISSECT_ABI_REVISION 29
+#define WZ_DISSECT_ABI_REVISION 30
 
 /* Symbol/memory-contract revision. Not a JSON-shape revision. This is the
  * revision the LOADED library reports; the block above says why it exists
@@ -3036,6 +3040,289 @@ int wz_dissect_e2e_wrap(const char *profile_json, const char *values_json,
                         char **out);
 int wz_dissect_e2e_open(const char *profile_json, const unsigned char *frame,
                         size_t frame_len, char **out);
+
+/* (ABI 30) -- A TRANSPORT MESSAGE BUILT FROM THE FIELDS YOU SET, in the framing
+ * the link wants, with a report of where each field sits in the bytes.
+ *
+ * WHY IT IS HERE. wz_dissect_transport_message reads a transport message and
+ * nothing built one. A program that has to SEND a message it chose every field
+ * of (a conformance tool aimed at its own nodes, checking how a peer handles
+ * input that is well formed and unusual) either keeps a second, unpinned
+ * understanding of the layout or takes bytes captured elsewhere. This door
+ * writes the message through the generated codecs the session and the
+ * dissector use, so the layout is read from one place, and it says where each
+ * field of what it wrote is, so a caller that wants to change one field never
+ * copies an offset or a width by hand. It is the writing half of
+ * wz_dissect_transport_message: every unit it builds reads back through that
+ * door, to the fields it was given.
+ *
+ * WHAT IT IS NOT. It builds a message from explicit fields and puts it in a
+ * buffer. It has no destination, opens no socket, scans nothing and sends
+ * nothing; where the unit goes is the caller's. It has no hidden mode either:
+ * a message out of handshake order is a different message you asked for, and
+ * a field set to a value no sender would choose is written the way the format
+ * writes it, or refused by name if it does not fit.
+ *
+ * THE DESCRIPTION is a JSON text (read by the library's one JSON reader, as the
+ * protected-frame doors above do, so what JSON5 admits is admitted and every key
+ * and value is then checked strictly: an unknown key, a key written twice and a
+ * value of the wrong type are refused). `message` names the message, and the
+ * rest are its fields, none of which has a default you do not know about:
+ *
+ *     message     keys (required unless marked optional)
+ *     init_syn    version, whatami, zid; optional resolution + batch_size
+ *                 (together), extensions
+ *     init_ack    the same, and cookie
+ *     open_syn    lease_ms, initial_sn, cookie; optional lease_unit,
+ *                 sn_resolution, extensions
+ *     open_ack    lease_ms, initial_sn; optional lease_unit, sn_resolution,
+ *                 extensions
+ *     frame       reliable, sn; optional priority, sn_resolution, payload
+ *     fragment    reliable, more, sn; optional priority, first, drop,
+ *                 sn_resolution, payload
+ *     keep_alive  (none)
+ *     close       reason, session
+ *
+ * Join and Oam are not built by this door; asking for them is a refusal that
+ * says so. `version` and `reason` are one byte. `whatami` is router, peer or
+ * client, or the two bits (0 to 3; 3 is the value upstream calls reserved, and
+ * is writable). `zid` is 1 to 16 bytes as hex, in WIRE order (the document the
+ * dissector writes prints a zid in zenoh's own, reversed, spelling; this key is
+ * the bytes). `resolution` is {"frame_sn":W,"request_id":W} with W one of
+ * "8bit", "16bit", "32bit", "64bit", and `batch_size` is two bytes; they travel
+ * together behind the S flag, and a message with neither has S clear. `cookie`,
+ * `payload` and an extension's `zbuf` are hex. `lease_ms` is a lease in
+ * milliseconds and `session` is whether a close ends the session (S set) or one
+ * link. `reliable`, `more`, `first` and `drop` are booleans (`first` and `drop`
+ * default to false; they are a Fragment's two markers, extension ids 2 and 3).
+ * `priority` is 0 to 7 and, WHEN GIVEN, is written as the QoS extension even if
+ * it is the default priority a session would leave out; leave the key out for
+ * no extension. Integers are plain decimal numbers, or strings (decimal, or 0x
+ * and hex digits) so a 64-bit value survives a reader that holds numbers as
+ * doubles.
+ *
+ * EXTENSIONS of an INIT or an OPEN are a list, in wire order, of
+ * {"id":N,"mandatory":false,"unit":true} | {"id":N,"z64":V} | {"id":N,"zbuf":HEX}:
+ * the id is 0 to 15, exactly one body is named, and the encoding bits of the
+ * entry's header and the chain bit follow from the body and the entry's place.
+ * The door writes an extension of any id with any body, because what a peer does
+ * with an extension it did not negotiate is a thing to try; it does not know
+ * which are valid for which message. At most 8 extensions (the bound the
+ * reader follows, so that the layout of the bytes can be read back).
+ *
+ * WHAT YOU SET AND WHAT THE DOOR DERIVES. You set every field the wire lets a
+ * sender choose. The door derives only what the wire derives from them: the
+ * header flags that say a part is present or which variant this is (S from
+ * resolution/batch_size, A from init_ack/open_ack, Z from the extension chain
+ * or the QoS and marker extensions, R and M from `reliable` and `more`, T from
+ * the lease unit, the Close S from `session`), every length (the cookie's, an
+ * extension's, the stream prefix), the width of every VLE, and the extension
+ * headers. T is the one derived flag you may override: left alone, a lease that
+ * is a whole number of seconds travels as seconds (T set, the form every sender
+ * in this tree writes), and `lease_unit` "ms" or "s" writes the unit you name
+ * ("s" for a lease that is not a whole number of seconds is refused).
+ *
+ * SEQUENCE NUMBERS AND THE NEGOTIATED RESOLUTION. You always supply sequence
+ * numbers (`sn`, `initial_sn`): the door keeps no ring and derives none. You MAY
+ * name the ring they live on, as `sn_resolution` (the same four words), and then
+ * a sequence number outside it is refused with the largest value the ring
+ * holds, and the report names that value and the widest the VLE can become. The
+ * rings are the library's own (`sn::mask_from_res`, zenoh-pico `_z_sn_max`):
+ * 8bit holds 0 to 127 (a one-byte VLE at most), 16bit 0 to 16383 (two bytes),
+ * 32bit 0 to 268435455 (four) and 64bit 0 to 9223372036854775807 (nine).
+ * Upstream spells the same four masks
+ * (`io/zenoh-transport/src/common/seq_num.rs:17-20`) and casts the last to its
+ * 32-bit sequence number type, so on that ring a peer that is upstream zenoh
+ * holds 0 to 4294967295. Without the key any 64-bit value is written: the
+ * format has no ring of its own, a handshake sizes it.
+ * WHICH FIELDS CHANGE WIDTH WITH THE RESOLUTION: only these, and only as the
+ * VLE of their value does. `sn` of a Frame and of a Fragment and `initial_sn`
+ * of an OPEN are VLEs whose width follows their VALUE, and the resolution bounds
+ * the value, so it bounds the width. No transport message has a fixed-width
+ * field whose width depends on a resolution; an INIT's own `resolution` is two
+ * fields of that message (the bits of `sn_res`) and bounds nothing in it, and
+ * the request id the other resolution sizes lives in network messages, which
+ * this door carries as opaque `payload` bytes. Upstream reads a sequence
+ * number as a 32-bit integer and truncates what is wider
+ * (`commons/zenoh-codec/src/core/zint.rs:175-200`), so a value past 2^32 - 1 is
+ * written as given and read back differently by that peer.
+ *
+ * DOES ANY TRANSPORT MESSAGE CARRY AN INTEGRITY FIELD OF ITS OWN? No. Read at
+ * the pinned upstream (zenoh 1.10.1), no transport message carries a checksum,
+ * CRC, MAC or signature over its own bytes, and none carries a field that a
+ * sender computes from the rest of the message to let a receiver detect
+ * damage. The places a reader might look, and what they are:
+ *   - Frame, Fragment, KeepAlive, Close: header, sequence number, extensions
+ *     and payload only (`commons/zenoh-protocol/src/transport/{frame,fragment,
+ *     keepalive,close}.rs`); their reserved bits are reserved (reported as such
+ *     below), not a check.
+ *   - The cookie (InitAck, echoed in OpenSyn) is opaque bytes the ACCEPTOR makes
+ *     and later checks: it encrypts its own state with a private cipher and
+ *     compares a nonce on the echo (`io/zenoh-transport/src/unicast/
+ *     establishment/accept.rs:370-407` and `:486-512`). Nothing on the wire
+ *     defines it and a caller cannot compute a valid one; to send an accepted
+ *     cookie, echo the one a real InitAck carried.
+ *   - The Auth extension (id 3, `init.rs:154`, `open.rs:115`) is a challenge
+ *     and response. Its usrpwd method carries an HMAC of the password keyed by a
+ *     nonce from the peer (`.../ext/auth/usrpwd.rs:325-331`, checked at
+ *     `:420-423`) and its pubkey method an RSA-encrypted nonce (`.../ext/auth/
+ *     pubkey.rs:260-335`): a proof of identity, not a protection of the
+ *     message that carries it. The Shm (id 2, `init.rs:150`) and MultiLink
+ *     (id 4) extensions carry challenges of the same kind.
+ *   - The Compression extension (id 6) negotiates an lz4 block with no
+ *     checksum (`io/zenoh-transport/src/common/batch.rs:327-340,451-458`), and
+ *     the Patch extension (id 7) is a level.
+ * A link may carry a checksum of its own (TCP and UDP do, and a normal socket
+ * send cannot forge it); that is the link's, outside every unit this door
+ * builds. A consumer that was going to build an integrity case for the
+ * transport messages can drop it.
+ *
+ * FRAMING is the second argument, one of
+ *
+ *   - WZ_DISSECT_FRAMING_DATAGRAM: the message alone. One datagram is one unit
+ *     (UDP, multicast).
+ *   - WZ_DISSECT_FRAMING_TCP_STREAM: a 16-bit little-endian length, then the
+ *     message (`commons/zenoh-protocol/src/transport/mod.rs:36-40`): TCP, TLS,
+ *     WebSocket, a QUIC stream. A body over 65535 bytes is refused.
+ *   - WZ_DISSECT_FRAMING_LOWLATENCY_STREAM: a 32-bit little-endian length, then
+ *     the message, on a streamed link whose session negotiated LowLatency
+ *     (`io/zenoh-transport/src/unicast/lowlatency/link.rs:41-50`).
+ *
+ * The document carries BOTH the unit (what you write to the socket) and the
+ * body (the same message without the prefix), whatever the framing.
+ *
+ * Passing a framing you did not get from these names is WZ_DISSECT_ERR_INVALID_ARG
+ * and never a quiet fall back to datagram: a caller that believes it asked for
+ * a stream prefix must not be given none.
+ *
+ * @unknown FRAMING caller-supplied */
+#define WZ_DISSECT_FRAMING_DATAGRAM 0
+#define WZ_DISSECT_FRAMING_TCP_STREAM 1
+#define WZ_DISSECT_FRAMING_LOWLATENCY_STREAM 2
+
+/* wz_dissect_transport_build -- the document.
+ *
+ *     {"document":{"name":"transport_build","revision":1},"ok":true,
+ *      "prefix_bytes":2,"unit":"0600a5053103dead","body":"a5053103dead",
+ *      "layout":[{"name":"unit_length","kind":"length","offset":0,"width":2,
+ *                 "relative_to":"unit","encoding":"fixed","value":6,"min":0,
+ *                 "max":65535,"bit_mask":null,"carrier":null,"stored":null,
+ *                 "measures":"body","ring_max":null,"ring_max_width":null},
+ *                ...]}
+ *
+ * for {"message":"frame","reliable":true,"sn":5,"priority":3,"payload":"dead"}
+ * as WZ_DISSECT_FRAMING_TCP_STREAM. `unit` and `body` are lowercase hex.
+ *
+ * THE LAYOUT is the structural report: one row for every field of the message
+ * in wire order, derived from the bytes by the same walker that reads them, so
+ * an offset or a width is whatever a reader finds there. EVERY ROW HAS EVERY
+ * KEY, `null` where a key does not apply to that row, so a consumer reads
+ * `bit_mask` of a length or of a flag without asking which it has:
+ *
+ *   name         the field's name as the dissector gives it, with an extension's
+ *                fields qualified by their place (`extensions[1].value`). Unique
+ *                in a document.
+ *   kind         what the field is; see below.
+ *   offset       the byte offset of the field, counted from `relative_to`. For
+ *                a bit-field or flag, the offset of the byte that holds it.
+ *   width        the field's width in bytes now; for a bit-field, that of its
+ *                byte.
+ *   relative_to  what `offset` counts from; see below.
+ *   encoding     how the integer is laid out; see below.
+ *   value        the integer the field holds: a number, or a string past 2^53
+ *                (see the integer paragraph above). `null` for a byte string
+ *                (zid, cookie, payload, an extension's body).
+ *   min, max     the values that keep the field as it is. For a `vle` they are
+ *                the smallest and the largest value that encode in exactly
+ *                `width` bytes (1 byte: 0 to 127; 2: 128 to 16383; and so on up
+ *                to 9 bytes: 2^56 to 2^64 - 1), so a caller replacing the value
+ *                with one in this range changes no other byte. For a `fixed`
+ *                integer, 0 to the largest value `width` bytes hold. For a
+ *                bit-field, the range of `stored`.
+ *   bit_mask     for a bit-field or flag, the bits of the byte it owns; `null`
+ *                for a field that owns whole bytes.
+ *   carrier      for a bit-field or flag, the `name` of the row for the byte
+ *                that holds it.
+ *   stored       for a bit-field or flag, what its bits hold shifted down: the
+ *                number to write back. It differs from `value` where the field
+ *                stores a quantity differently from how it is read: `zid_len`
+ *                stores the length minus one.
+ *   measures     for a length, the `name` of the row whose bytes it counts, or
+ *                `body` for the stream prefix.
+ *   ring_max     for a sequence number, when you named the ring: its largest
+ *                value; otherwise `null`.
+ *   ring_max_width  for a sequence number, when you named the ring: the width
+ *                in bytes of the VLE at `ring_max`, the widest the field can
+ *                become in that session.
+ *
+ * `kind` is one of `length`, `sequence_number`, `reserved`, `flag` and `other`.
+ * A `length` is a count of the bytes that follow (`cookie_len`, an extension's
+ * `value_len`, the stream prefix `unit_length`) or one less than one
+ * (`zid_len`). A `reserved` row is every bit of a byte that no field of that
+ * message owns, which the format writes zero; it is derived as what the other
+ * rows leave, so it cannot be typed wrong. A `flag` is a single bit that says a
+ * part is present or a variant is taken. `other` is every other field. The
+ * words are a closed set the library holds to a walk: a field that does not fit
+ * one of the first four is `other`, a word is not added without moving the
+ * document revision, and a field name the library has not classified is
+ * refused, not defaulted.
+ *
+ * `encoding` is one of `fixed` (a fixed number of bytes, a byte string at the
+ * width it has in this message, or a bit range inside one) and `vle` (a
+ * variable-length integer). `relative_to` is one of `unit` (counted from the
+ * first byte of the unit as written to the link: only the stream length prefix
+ * is placed this way) and `body` (counted from the message's header byte,
+ * behind any prefix). In a unit, a `body` row is at `prefix_bytes + offset`.
+ *
+ * TO REPLACE A FIELD USING ONLY THE REPORT. For a `fixed` row, write the value
+ * little-endian into `width` bytes at the offset. For a `vle` row, write a VLE
+ * of the value into `width` bytes at the offset: seven bits at a time, least
+ * significant first, the high bit of every byte but the last set, and in the
+ * ninth byte of a 9-byte VLE all eight bits raw. For a row with a `bit_mask`,
+ * write `stored` shifted up into the mask, in the byte at the offset, keeping
+ * the other bits. A value in `min`..`max` keeps the field's width. The rows that
+ * decide how the REST of the message is read -- a flag that says a part is
+ * present (A, S, Z), a length, the message id, an extension's encoding bits --
+ * change the reading of what follows when you replace them; that is what they
+ * are for, and the report says which they are by their `kind` and name.
+ *
+ * WHAT THE LAYOUT COVERS. The transport message. A network message carried by a
+ * Frame is one row, `payload`, because the carried bytes are the caller's and
+ * their layout is a different message's (wz_dissect_transport_message reads it);
+ * a Fragment's `payload` is one row likewise. An extension is a header row with
+ * its bit-fields and a body: `value` for a z64, `value_len` and `value` for a
+ * zbuf, nothing for a unit.
+ *
+ * @values transport_build kind
+ * @values transport_build encoding
+ * @values transport_build relative_to
+ * @carries transport_build encoding passenger
+ * @carries transport_build kind passenger
+ * @carries transport_build relative_to passenger
+ *
+ * A REFUSED DESCRIPTION is a successful DIAGNOSIS: the door returns
+ * WZ_DISSECT_OK and writes
+ *
+ *     {"document":{...},"ok":false,"description_path":"/sn",
+ *      "reason":"300 is outside the 8bit ring: a sequence number there is at most 127",
+ *      "message":"description /sn: ..."}
+ *
+ * The place is `description_path` (an RFC 6901 JSON pointer; "" is the document
+ * itself) or `description_offset` (a byte offset, when the text is not JSON at
+ * all). A refusal that is about no text -- a body that does not fit the stream
+ * prefix, or a message built whose report could not be given -- carries neither:
+ * the key is ABSENT where it does not apply and never null, a top-level null being
+ * what this library reserves for a plane it cannot feed. `message` is the
+ * one-line form. A value that does not fit its field is refused at its key and
+ * never truncated.
+ *
+ * Returns WZ_DISSECT_ERR_INVALID_ARG, and no string, for a caller bug: a null
+ * `description_json` or `out`, text that is not UTF-8, or a `framing` no
+ * constant names. The memory rule does not move: the document is a `char*`
+ * released by wz_dissect_string_free, nothing is retained between calls, and no
+ * callback runs. */
+int wz_dissect_transport_build(const char *description_json, int framing,
+                               char **out);
 
 /* R311y913 (ABI 9) — what this build can READ, without a capture.
  *

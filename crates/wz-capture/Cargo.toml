@@ -65,7 +65,15 @@ fixtures = ["network-codecs"]
 # `fields_json`, which is the "a lane nobody runs" hazard this workspace has
 # paid for. Two lanes close it: C1bn runs `--features dissect` by name, and
 # C1bo builds `wz-capi-dissect`, whose dependency line turns it on.
-dissect = ["wz-session-core/dissect"]
+#
+# Item 895 — it also selects `wz-session-core/transport-compose`, the WRITERS the
+# transport build door stands on (`transport_build`, behind
+# `wz_dissect_transport_build`). They are here and not behind a second feature
+# because the door's report is read with the walker this feature selects and
+# its tests run in the same lane: a build that has the walker and not the
+# writers would be a build whose only difference is that one lane does not
+# compile the door.
+dissect = ["wz-session-core/dissect", "wz-session-core/transport-compose"]
 
 # Lz4, so a session that negotiated compression is READ rather than
 # reported undecompressible.
@@ -211,6 +219,16 @@ wz-session-core = { path = "../wz-session-core", default-features = false, featu
 # no dependencies of its own, so it adds nothing to any graph it enters.
 [dev-dependencies.wz-packet-fixtures]
 path = "../wz-packet-fixtures"
+
+# Item 895 — the INDEPENDENT oracle for the transport build door's tests. Its
+# bytes are laid by hand, per the zenoh-pico transport layout, and deliberately
+# not by the encoder the door calls, so a test that builds the same message
+# through both and compares them is checking the door against a second reading
+# of the format. A DEV-dependency and never a real one: the door must not call
+# it (the two readings would stop being two), and this crate's zero-third-party
+# rule is load-bearing for the MCU profiles.
+[dev-dependencies.wz-session-wire-fixtures]
+path = "../wz-session-wire-fixtures"
 
 # R2107 (open-debt item 527) — `wire_const::T_MID_KEEP_ALIVE`, so the decode
 # bench's payload is REAL zenoh session traffic rather than filler. Its first

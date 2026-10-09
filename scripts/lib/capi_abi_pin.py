@@ -50,7 +50,7 @@ import subprocess
 import sys
 
 # The pinned pair. Edit BOTH halves deliberately -- see the module doc.
-EXPECTED_VERSION = 29
+EXPECTED_VERSION = 30
 
 # R2108 (open-debt item 525) -- THE RECORD'S LAYOUT, pinned HERE and read from
 # the artifact through `wz_dissect_record_layout`.
@@ -289,6 +289,14 @@ EXPECTED_SYMBOLS = {
     # released by `wz_dissect_string_free`, the files cross as bytes the CALLER
     # already read, and no callback runs.
     "wz_dissect_proto_encode",
+    # (ABI 30) -- a TRANSPORT MESSAGE BUILT from the fields the caller sets, in
+    # the framing the link wants (datagram, a 16-bit or a 32-bit length prefix),
+    # with a report of where each field sits in the bytes. The writing half of
+    # `wz_dissect_transport_message`, which reads. One symbol and no struct. The
+    # memory rule does not move: the document is a `char*` released by
+    # `wz_dissect_string_free`, the unit and the body cross as hex inside it,
+    # nothing is retained between calls, and no callback runs.
+    "wz_dissect_transport_build",
     # R311y851 — the four analysis planes' door. Both halves moved together,
     # which is the whole of what this gate asks.
     "wz_dissect_pcap_census",

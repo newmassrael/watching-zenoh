@@ -6745,7 +6745,7 @@ mod tests {
         // against a rename and against each other and against NOTHING a
         // consumer could read.
         let mut failures: Vec<String> = Vec::new();
-        let live: [(&str, &str, Vec<&'static str>); 32] = [
+        let live: [(&str, &str, Vec<&'static str>); 35] = [
             // The session's per-frame verdicts, each held to the
             // walk its emitter's exhaustive match is bound to.
             (rev::FIELDS, "verdict", SnVerdictWord::names()),
@@ -6893,6 +6893,25 @@ mod tests {
                     .iter()
                     .map(|f| f.word())
                     .collect(),
+            ),
+            // The transport build document's three: what a layout row IS, how
+            // its integer is laid out, and what its offset counts from. Each
+            // walk is the type the report is built with, so a word a row can
+            // carry that this list lacks cannot be built.
+            (
+                rev::TRANSPORT_BUILD,
+                "kind",
+                crate::transport_layout::Kind::names(),
+            ),
+            (
+                rev::TRANSPORT_BUILD,
+                "encoding",
+                crate::transport_layout::Encoding::names(),
+            ),
+            (
+                rev::TRANSPORT_BUILD,
+                "relative_to",
+                crate::transport_layout::RelativeTo::names(),
             ),
             // The verdict document's two families, each held to the
             // SAME walk the field document's is. Two declarations of one
@@ -7511,7 +7530,12 @@ mod tests {
         #[cfg(feature = "reassembly")]
         fields_docs.push(&midsession_fields);
         fields_docs.extend(arms.iter());
-        let docs: [(&str, Vec<&String>); 6] = [
+        // The transport build document, over every message the door builds in
+        // every framing: the rows carry one shape, so the three families it
+        // declares must measure as passengers, and this is the population that
+        // would show a row that did not.
+        let transport_docs = crate::transport_build_tests::documents_for_the_carries_gate();
+        let docs: [(&str, Vec<&String>); 7] = [
             (rev::FIELDS, fields_docs),
             (
                 rev::CENSUS,
@@ -7524,6 +7548,7 @@ mod tests {
                 declaration_verdicts.iter().collect(),
             ),
             (rev::KEYEXPR_DIAGNOSE, keyexpr_verdicts.iter().collect()),
+            (rev::TRANSPORT_BUILD, transport_docs.iter().collect()),
         ];
 
         // ⚠ R2185 — THE DOCUMENTS THIS GATE RENDERS ARE THE DOCUMENTS THAT
