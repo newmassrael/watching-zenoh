@@ -83,11 +83,26 @@ pub fn encode_document(
 
 fn refusal(head: &str, error: &EncodeError) -> String {
     let mut out = format!("{{{head},\"ok\":false");
+    push_refusal(error, "", &mut out);
+    out.push('}');
+    out
+}
+
+/// Everything of a refusal that follows `"ok":false`, but the closing brace:
+/// the keys that place the problem, then `reason` and `message`.
+///
+/// `values_prefix` is the JSON pointer of the place the values sit at in a
+/// larger text, for a door that carries them as one member of its own
+/// description (the end-to-end wrap door, under `/@body/values`), so that
+/// `values_path` and the pointer in `message` are places in the text the
+/// caller wrote. It is empty for this door, whose values are the text itself.
+pub(crate) fn push_refusal(error: &EncodeError, values_prefix: &str, out: &mut String) {
+    let mut message = error.to_string();
     let reason = match error {
         EncodeError::Schema(d) => {
             if let Some(file) = &d.file {
                 out.push_str(",\"file\":");
-                escape_into(file, &mut out);
+                escape_into(file, out);
             }
             for (key, at) in [("line", d.line), ("column", d.column)] {
                 if let Some(n) = at {
@@ -101,25 +116,27 @@ fn refusal(head: &str, error: &EncodeError) -> String {
             format!("the text is not JSON: expected {expected}")
         }
         EncodeError::Value(v) => {
+            let path = format!("{values_prefix}{}", v.path);
             out.push_str(",\"values_path\":");
-            escape_into(&v.path, &mut out);
+            escape_into(&path, out);
             if let Some(field) = &v.field {
                 out.push_str(",\"field\":");
-                escape_into(field, &mut out);
+                escape_into(field, out);
             }
             if let Some(expected) = &v.expected {
                 out.push_str(",\"expected\":");
-                escape_into(expected, &mut out);
+                escape_into(expected, out);
+            }
+            if !values_prefix.is_empty() {
+                message = format!("values {path}: {}", v.reason);
             }
             v.reason.clone()
         }
     };
     out.push_str(",\"reason\":");
-    escape_into(&reason, &mut out);
+    escape_into(&reason, out);
     out.push_str(",\"message\":");
-    escape_into(&error.to_string(), &mut out);
-    out.push('}');
-    out
+    escape_into(&message, out);
 }
 
 #[cfg(test)]

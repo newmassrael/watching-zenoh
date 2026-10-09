@@ -1958,6 +1958,18 @@ fn proto_verdict(
 /// * `payload`, `payload_len` -- the body, already serialized by the caller.
 ///   `payload` may be null only when `payload_len` is zero.
 ///
+/// # The body, as bytes or as a description
+///
+/// The body is `payload`, or the `@body` member of `values_json`: a `.proto`
+/// schema, a message and the field values, from which the protobuf writer
+/// ([`wz_dissect_proto_encode`]'s, the one writer) builds the bytes this door
+/// puts the header in front of. The two are alternatives, and giving both is a
+/// refusal. This is the values text and not a new symbol because the text
+/// already is the door's description and gains a key without moving the ABI;
+/// `@body` can be no field's name (a name is letters, digits, `_`, `-` and
+/// `.`), so a text that never had it reads as it always did. See
+/// `wz_capture::e2e_body` for the member.
+///
 /// # Result
 ///
 /// [`WZ_DISSECT_OK`] with a verdict, for any arguments that are well formed.
@@ -1965,7 +1977,11 @@ fn proto_verdict(
 /// the way (fields, parts, the CRC and what it was fed, the length), or
 /// `{"ok":false,...}` with the reason and the place in whichever text was
 /// refused (`profile_path`, `profile_offset`, `values_path` or `values_offset`,
-/// absent where they do not apply and never `null`). A text that is refused is
+/// absent where they do not apply and never `null`). A refusal about the body
+/// adds `"stage":"body"`, and the protobuf writer's own refusal keeps its own
+/// keys (`file`, `line`, `column`, `field`, `expected`) with `values_path`
+/// pointing into the text passed (`/@body/values/...`); a frame is never built
+/// around a body that was not. A text that is refused is
 /// a successful DIAGNOSIS, for the reason [`wz_dissect_declarations_diagnose`]
 /// gives: OK means a string, an error means none.
 ///
@@ -9215,12 +9231,38 @@ mod tests {
             .collect()
     }
 
+    /// The schema the described-body tests below build messages from.
+    const E2E_BODY_SCHEMA: &str = "syntax = \"proto3\";\n\
+                                   package demo;\n\
+                                   message Pose { sint32 x = 1; string label = 2; }";
+
+    /// The values text of a wrap whose body is described: the header values of
+    /// [`E2E_VALUES`] and an `@body` member over [`E2E_BODY_SCHEMA`] building
+    /// `message` from `values` (JSON text).
+    fn e2e_described_values(message: &str, values: &str) -> String {
+        e2e_described_over(E2E_BODY_SCHEMA, message, values)
+    }
+
+    /// The same over a schema text of the caller's.
+    fn e2e_described_over(schema_text: &str, message: &str, values: &str) -> String {
+        let mut schema = String::new();
+        wz_session_core::json::escape_into(schema_text, &mut schema);
+        format!(
+            "{{\"kind\": 3, \"counter\": 7, \"ident\": {{\"hi\": 1, \"lo\": 2}}, \
+             \"@body\": {{\"files\": [{{\"name\": \"pose.proto\", \"text\": {schema}}}], \
+             \"message\": \"{message}\", \"values\": {values}}}}}"
+        )
+    }
+
     /// One document of each shape the `e2e_wrap` door writes: the success, a
     /// profile that is not JSON, one that is not a profile, values that are not
-    /// JSON, a value that does not fit, and a body that does not fit. The first
-    /// is the success, for the callers that need only one.
+    /// JSON, a value that does not fit, a body that does not fit, and the
+    /// shapes of a described body: built, the description refused, the body
+    /// given twice, the protobuf writer's refusal of a value and of the schema.
+    /// The first is the success, for the callers that need only one.
     fn e2e_wrap_documents() -> Vec<String> {
         let long = vec![0u8; 70_000];
+        let built = e2e_described_values("demo.Pose", r#"{"x": -3, "label": "hi"}"#);
         vec![
             call_e2e_wrap(E2E_PROFILE, E2E_VALUES, b"\x01\x02\x03").expect("answers"),
             call_e2e_wrap("{\"name\":", E2E_VALUES, b"").expect("answers"),
@@ -9228,7 +9270,109 @@ mod tests {
             call_e2e_wrap(E2E_PROFILE, "{\"kind\":", b"").expect("answers"),
             call_e2e_wrap(E2E_PROFILE, r#"{"kind": 300}"#, b"").expect("answers"),
             call_e2e_wrap(E2E_PROFILE, E2E_VALUES, &long).expect("answers"),
+            call_e2e_wrap(E2E_PROFILE, &built, b"").expect("answers"),
+            call_e2e_wrap(E2E_PROFILE, r#"{"kind": 3, "@body": []}"#, b"").expect("answers"),
+            call_e2e_wrap(E2E_PROFILE, &built, b"\x01").expect("answers"),
+            call_e2e_wrap(
+                E2E_PROFILE,
+                &e2e_described_values("demo.Pose", r#"{"x": "no"}"#),
+                b"",
+            )
+            .expect("answers"),
+            call_e2e_wrap(E2E_PROFILE, &e2e_described_values("demo.Nope", "{}"), b"")
+                .expect("answers"),
+            call_e2e_wrap(
+                E2E_PROFILE,
+                &e2e_described_over("message M { int32 a = 1 }", "M", "{}"),
+                b"",
+            )
+            .expect("answers"),
         ]
+    }
+
+    /// A BODY DESCRIBED IN THE VALUES TEXT COMES OUT AS THE FRAME THE TWO DOORS
+    /// BUILD ONE STEP AT A TIME.
+    ///
+    /// The `proto_encode` door's bytes, handed to the wrap door as the body,
+    /// give the frame the `@body` member gives, with the one extra key naming
+    /// the message. No new symbol: the description is the values text the door
+    /// already took, and a null body pointer of length zero is still how a
+    /// caller says there are no bytes.
+    #[test]
+    fn a_described_body_is_the_frame_the_proto_and_wrap_doors_build_in_two_steps() {
+        let values = r#"{"x": -3, "label": "hi"}"#;
+        let encoded = call_proto_encode(
+            "demo.Pose",
+            &[("pose.proto", E2E_BODY_SCHEMA.as_bytes())],
+            0,
+            values,
+        )
+        .expect("answers");
+        let hex = json_string(&encoded, "payload");
+        let bytes: Vec<u8> = (0..hex.len() / 2)
+            .map(|i| u8::from_str_radix(&hex[2 * i..2 * i + 2], 16).expect("hex"))
+            .collect();
+        assert!(!bytes.is_empty(), "{encoded}");
+
+        let two_step = call_e2e_wrap(E2E_PROFILE, E2E_VALUES, &bytes).expect("answers");
+        let described = call_e2e_wrap(E2E_PROFILE, &e2e_described_values("demo.Pose", values), b"")
+            .expect("answers");
+        assert_eq!(
+            described.replace(",\"body_message\":\"demo.Pose\"", ""),
+            two_step
+        );
+        assert!(
+            described.contains("\"body_message\":\"demo.Pose\""),
+            "{described}"
+        );
+
+        // And it opens back: the CRC verifies and the body is the writer's bytes.
+        let frame = e2e_frame_of(&described);
+        let opened = call_e2e_open(E2E_PROFILE, &frame).expect("answers");
+        assert!(opened.contains("\"crc_ok\":true"), "{opened}");
+        assert_eq!(&frame[frame.len() - bytes.len()..], bytes.as_slice());
+    }
+
+    /// THE WRITER'S REFUSAL IS A VERDICT, NEVER A FRAME AND NEVER AN ERROR CODE.
+    ///
+    /// A value that does not fit and a body given twice are text a person
+    /// wrote, so the door answers OK with `{"ok":false,...}`; the error code is
+    /// kept for a caller's own bug (a null pointer).
+    #[test]
+    fn a_refused_described_body_is_a_diagnosis_and_never_a_frame() {
+        let bad = call_e2e_wrap(
+            E2E_PROFILE,
+            &e2e_described_values("demo.Pose", r#"{"x": "no"}"#),
+            b"",
+        )
+        .expect("a refusal is a verdict");
+        assert!(
+            bad.contains("\"ok\":false,\"stage\":\"body\",\"values_path\":\"/@body/values/x\""),
+            "{bad}"
+        );
+        assert!(!bad.contains("\"frame\""), "{bad}");
+        let twice = call_e2e_wrap(
+            E2E_PROFILE,
+            &e2e_described_values("demo.Pose", "{}"),
+            b"\x01\x02",
+        )
+        .expect("a refusal is a verdict");
+        assert!(twice.contains("the body is given twice"), "{twice}");
+        // A caller's bug is still an error code with no string.
+        let values = CString::new(e2e_described_values("demo.Pose", "{}")).expect("no NUL");
+        let profile = CString::new(E2E_PROFILE).expect("no NUL");
+        let mut out: *mut c_char = core::ptr::null_mut();
+        let rc = unsafe {
+            wz_dissect_e2e_wrap(
+                profile.as_ptr(),
+                values.as_ptr(),
+                core::ptr::null(),
+                1,
+                &mut out,
+            )
+        };
+        assert_eq!(rc, WZ_DISSECT_ERR_INVALID_ARG);
+        assert!(out.is_null());
     }
 
     /// The same for `e2e_open`: the success, a profile that is not JSON, one

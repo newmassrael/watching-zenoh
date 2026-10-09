@@ -200,7 +200,7 @@ CELLS: dict[tuple[str, str], tuple[Cell, ...]] = {
         Cell("e2e_wrap", "a field's value", _E2E_FIELD_HEADER, "a field's `value`"),
         Cell("e2e_wrap", "a part's value", _E2E_FIELD_HEADER, "a part's `value`"),
     ),
-    ("crates/wz-capture/src/e2e_json.rs", "wrap_document"): (
+    ("crates/wz-capture/src/e2e_json.rs", "wrap_frame"): (
         Cell("e2e_wrap", "crc_computed", _E2E_DOCUMENT_HEADER, "`crc_computed`"),
         Cell("e2e_wrap", "length_field", _E2E_DOCUMENT_HEADER, "`length_field`"),
     ),

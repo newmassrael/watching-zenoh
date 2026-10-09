@@ -2028,7 +2028,9 @@ int wz_dissect_pcap_fields(const unsigned char *bytes, size_t len,
  *     demo/pose=demo-a@pkg.Pose  the same, naming the BODY SCHEMA the bytes
  *                                after the header are an instance of. It is
  *                                carried to the row as `body_schema` and
- *                                nothing reads it yet
+ *                                nothing reads it yet; the `message` of
+ *                                wz_dissect_e2e_wrap's `@body` member is the
+ *                                same name
  *
  * A profile rule competes with the other rules like any rule: the first one
  * that covers a key decides, so a `json` rule ahead of it keeps that key out
@@ -2869,7 +2871,10 @@ int wz_dissect_declarations_from_proto(const char *key_pattern,
  * gives: OK means a string, an error means none.
  *
  * This door builds the BODY of a message and nothing around it: a protection
- * header and its CRC are wz_dissect_e2e_wrap's, which takes the body as bytes.
+ * header and its CRC are wz_dissect_e2e_wrap's, which takes the body as the
+ * bytes this door returns or, in place of bytes, as the same schema and values
+ * in its own description (the `@body` member, below), and builds them with
+ * this door's writer.
  *
  * Returns WZ_DISSECT_ERR_INVALID_ARG, and no string, for a null pointer, a
  * file_count of zero, a root_file outside the list, a name or buffer pointer
@@ -2967,9 +2972,55 @@ int wz_dissect_proto_encode(const char *root_message,
  *
  *     {"counter":258,"ident":{"domain":3,"version":7,"msg":4660}}
  *
+ * THE BODY, AS BYTES OR AS A DESCRIPTION (e2e_wrap revision 2). In place of
+ * `payload`, the values text may carry the body as what it is made from: a
+ * `@body` member holding a `.proto` schema, a message and its field values.
+ * The library's protobuf writer (wz_dissect_proto_encode's) builds the bytes
+ * and this door puts the header in front of them, computing the CRC and the
+ * length over them, so a caller that sends protobuf in a protected frame holds
+ * ONE writer for both halves and not one of its own beside this library's.
+ *
+ *     {"counter":258,"ident":{"domain":3,"version":7,"msg":4660},
+ *      "@body":{"files":[{"name":"pose.proto","text":"syntax = \"proto3\"; ..."}],
+ *               "root_file":0,
+ *               "message":"pkg.Pose",
+ *               "values":{"x":1.5,"y":-2}}}
+ *
+ * `files` is the schema as wz_dissect_proto_encode takes it (a name and a text
+ * per file; at least one), `root_file` is the index of the file `message` is
+ * looked up from (absent: the first), `message` is the full name, package
+ * included, of the message to build -- the string a declaration rule carries
+ * after `@` as the body schema (`demo/pose=demo-a@pkg.Pose`) -- and `values`
+ * is the field values in protobuf's JSON mapping, read exactly as
+ * wz_dissect_proto_encode reads them. There is NO new symbol for this: `@body`
+ * is a key of the text the door already takes, no header field can be called
+ * that (a name is letters, digits, `_`, `-` and `.`), and a values text
+ * without it reads as it always did. Pass `payload` NULL with `payload_len` 0
+ * alongside it; giving bytes too is a refusal, because there is no rule for
+ * which would win. An empty message is a body of no bytes and a frame of the
+ * header alone. The document gains `body_message`, the message the body was
+ * built from, and only then.
+ *
+ * The values text may nest 8 levels EXCEPT inside `@body`, whose `values` may
+ * nest the writer's 64 (they sit two levels down in the text). The first
+ * problem found is the one reported, in this order: the profile, the shape of
+ * the values text, the description, the protobuf writer, then the header
+ * values against the profile -- the header cannot be finished before the
+ * body's bytes are known.
+ *
+ * A refusal about the body carries `"stage":"body"` (absent on every other).
+ * A description that is not what it should be, or is given with bytes, is
+ * refused at its place in YOUR text: `values_path` is `/@body/files/0/name`,
+ * `/@body` and the like, or `values_offset` for text that is not JSON. The
+ * protobuf writer's refusal keeps the writer's own keys -- `file`, `line` and
+ * `column` for the schema, `field` and `expected` for a value that does not
+ * fit -- and its `values_path` is moved to where the values sit in your text
+ * (`/@body/values/readings/2/celsius`). Every refusal is a successful
+ * DIAGNOSIS, and no frame is ever built around a body the writer refused.
+ *
  * The verdict, with every step so a caller can check the arithmetic:
  *
- *     {"document":{"name":"e2e_wrap","revision":1},"ok":true,"profile":"demo",
+ *     {"document":{"name":"e2e_wrap","revision":2},"ok":true,"profile":"demo",
  *      "frame":"76a31259001001020c081d3bdeadbeef",
  *      "payload_offset":12,"payload_bytes":4,
  *      "fields":[{"name":"crc","offset":0,"bytes":4,"raw":1990398553,"value":1990398553},

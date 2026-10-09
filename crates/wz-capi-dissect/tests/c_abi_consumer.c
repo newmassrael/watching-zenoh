@@ -1415,6 +1415,76 @@ static int check_e2e_doors(void) {
           "an empty body: rc=%d", rc);
     wz_dissect_string_free(doc);
 
+    /* (e2e_wrap revision 2) -- a body DESCRIBED in the values text instead of
+     * supplied as bytes: no new symbol, an `@body` member. The protobuf the
+     * writer builds for {"a":150} is 08 96 01 (the protobuf guide's own
+     * example), so the frame is the one the bytes-in call builds from those
+     * three bytes, and the document names the message. */
+    {
+        static const unsigned char guide[] = {0x08, 0x96, 0x01};
+        static const char described[] =
+            "{\"counter\":7,\"ident\":{\"hi\":1,\"lo\":2},"
+            "\"@body\":{\"files\":[{\"name\":\"t.proto\","
+            "\"text\":\"syntax = \\\"proto3\\\"; message T { int32 a = 1; }\"}],"
+            "\"message\":\"T\",\"values\":{\"a\":150}}}";
+        char *bytes_doc = NULL;
+        const char *a;
+        const char *b;
+        size_t n = 0;
+
+        rc = wz_dissect_e2e_wrap(
+            e2e_profile, "{\"counter\":7,\"ident\":{\"hi\":1,\"lo\":2}}", guide,
+            sizeof guide, &bytes_doc);
+        CHECK(rc == WZ_DISSECT_OK && bytes_doc != NULL, "bytes-in rc=%d", rc);
+        doc = NULL;
+        rc = wz_dissect_e2e_wrap(e2e_profile, described, NULL, 0, &doc);
+        CHECK(rc == WZ_DISSECT_OK && doc != NULL, "described body rc=%d", rc);
+        CHECK(strstr(doc, "\"ok\":true") != NULL &&
+                  strstr(doc, "\"body_message\":\"T\"") != NULL,
+              "a described body must build and name its message: %s", doc);
+        CHECK(strstr(bytes_doc, "body_message") == NULL,
+              "a frame built from bytes has no body_message: %s", bytes_doc);
+        a = strstr(bytes_doc, "\"frame\":\"");
+        b = strstr(doc, "\"frame\":\"");
+        CHECK(a != NULL && b != NULL, "no frame to compare");
+        while (a[9 + n] != '"') {
+            n++;
+        }
+        CHECK(strncmp(a, b, 9 + n + 1) == 0,
+              "the described body must build the bytes-in frame:\n%s\n%s",
+              bytes_doc, doc);
+        wz_dissect_string_free(bytes_doc);
+        wz_dissect_string_free(doc);
+
+        /* Bytes as well as a description is a refusal, not a choice. */
+        doc = NULL;
+        rc = wz_dissect_e2e_wrap(e2e_profile, described, guide, sizeof guide,
+                                 &doc);
+        CHECK(rc == WZ_DISSECT_OK && doc != NULL &&
+                  strstr(doc, "\"ok\":false,\"stage\":\"body\"") != NULL &&
+                  strstr(doc, "\"frame\"") == NULL,
+              "a body given twice must be refused: rc=%d", rc);
+        wz_dissect_string_free(doc);
+
+        /* The writer's refusal is a verdict with its own pointer, and no frame. */
+        doc = NULL;
+        rc = wz_dissect_e2e_wrap(
+            e2e_profile,
+            "{\"counter\":7,\"ident\":{\"hi\":1,\"lo\":2},"
+            "\"@body\":{\"files\":[{\"name\":\"t.proto\","
+            "\"text\":\"syntax = \\\"proto3\\\"; message T { int32 a = 1; }\"}],"
+            "\"message\":\"T\",\"values\":{\"a\":\"x\"}}}",
+            NULL, 0, &doc);
+        CHECK(rc == WZ_DISSECT_OK && doc != NULL &&
+                  strstr(doc, "\"stage\":\"body\",\"values_path\":"
+                              "\"/@body/values/a\"") != NULL &&
+                  strstr(doc, "\"field\":\"T.a\"") != NULL &&
+                  strstr(doc, "\"frame\"") == NULL,
+              "the writer's refusal must carry its diagnostic: rc=%d", rc);
+        CHECK(strstr(doc, "null") == NULL, "no key is ever null: %s", doc);
+        wz_dissect_string_free(doc);
+    }
+
     /* A frame shorter than the header is a verdict. */
     doc = NULL;
     rc = wz_dissect_e2e_open(e2e_profile, frame, 5, &doc);
@@ -2704,9 +2774,10 @@ int main(void) {
     /* (ABI 26) -- the two protected-frame documents. 1: the first revision a
      * consumer could read. Each is built from the smallest profile there is,
      * which is the cheapest way to hold the document's opening to the revision
-     * this consumer was written against. */
+     * this consumer was written against. e2e_wrap is at 2 since its body could
+     * be described (an `@body` member of the values text); e2e_open is at 1. */
     revisioned[7].name = "e2e_wrap";
-    revisioned[7].revision = 1;
+    revisioned[7].revision = 2;
     revisioned[7].doc = NULL;
     rc = wz_dissect_e2e_wrap(e2e_profile,
                              "{\"counter\":1,\"ident\":{\"hi\":0,\"lo\":0}}",

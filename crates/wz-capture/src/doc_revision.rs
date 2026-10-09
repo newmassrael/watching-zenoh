@@ -2280,6 +2280,26 @@ pub const DOCUMENT_HISTORY: &[DocumentShape] = &[
         planes: &[],
         carries: &[],
     },
+    // THE BODY MAY BE DESCRIBED INSTEAD OF SUPPLIED: the values text of the
+    // door may carry an `@body` member (a `.proto` schema, a message and field
+    // values), and the protobuf writer builds the bytes the header is put in
+    // front of. See [`E2E_WRAP_R2_KEYS`].
+    //
+    // Keys arrive and none retires, and a frame built from bytes is the
+    // document it was but for the revision number. The new refusals name the
+    // place by the keys the writer's own document already uses (`file`, `line`,
+    // `column`, `field`, `expected`), so no value family arrives and no
+    // integer cell does: `line` and `column` count in a schema file this
+    // library holds, far below 2^53.
+    DocumentShape {
+        document: E2E_WRAP,
+        revision: 2,
+        keys: E2E_WRAP_R2_KEYS,
+        retiring: &[],
+        families: &[],
+        planes: &[],
+        carries: &[],
+    },
     // What opening a protected frame under a caller-supplied profile found, or
     // why it refused: the same two-branch shape as `e2e_wrap`, with the CRC
     // verdict and the three length facts in place of the written values.
@@ -9177,6 +9197,51 @@ pub const E2E_WRAP_R1_KEYS: &[&str] = &[
     "values_path",
 ];
 
+/// The `e2e_wrap` document's key set at revision 2: revision 1's, and the keys
+/// a described body adds.
+///
+/// `body_message` is on the success branch of a frame whose body was built from
+/// an `@body` member. `stage` is on the refusals that are about that member
+/// (its shape, a body given twice, the writer's refusal). `file`, `line`,
+/// `column`, `field` and `expected` are the writer's own position keys
+/// (`proto_encode` documents them), written on a refusal of the writer, with
+/// `values_path` starting at `/@body/values`. A key that does not apply is
+/// ABSENT and never `null`.
+pub const E2E_WRAP_R2_KEYS: &[&str] = &[
+    "body_message",
+    "bytes",
+    "column",
+    "crc_computed",
+    "crc_fed",
+    "document",
+    "expected",
+    "field",
+    "fields",
+    "file",
+    "frame",
+    "hex",
+    "item",
+    "length_field",
+    "line",
+    "message",
+    "name",
+    "offset",
+    "ok",
+    "parts",
+    "payload_bytes",
+    "payload_offset",
+    "profile",
+    "profile_offset",
+    "profile_path",
+    "raw",
+    "reason",
+    "revision",
+    "stage",
+    "value",
+    "values_offset",
+    "values_path",
+];
+
 /// The `proto_encode` document's key set at revision 1, over every branch: the
 /// built payload, and the refusal with whichever of the schema's position
 /// (`file`, `line`, `column`) and the values' (`values_offset`, `values_path`,
@@ -13526,7 +13591,9 @@ mod tests {
             (KEYEXPR_DIAGNOSE, 1),
             (DECLARATIONS_FROM_PROTO, 1),
             // A protected frame built and read under a caller's profile.
-            (E2E_WRAP, 1),
+            // To 2 when the body could be described: `body_message`, `stage`
+            // and the writer's position keys.
+            (E2E_WRAP, 2),
             (E2E_OPEN, 1),
             // The bytes a set of field values comes to under a `.proto` schema.
             (PROTO_ENCODE, 1),

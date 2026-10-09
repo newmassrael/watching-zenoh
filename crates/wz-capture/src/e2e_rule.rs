@@ -24,7 +24,10 @@
 //! format. `@pkg.Pose` is the BODY SCHEMA the rule names: the message type the
 //! bytes after the header are an instance of. It is carried and reported, and
 //! nothing reads it yet; the door that turns a schema into field names is a
-//! later step, and the seam it will read is [`E2eFormat::schema`].
+//! later step, and the seam it will read is [`E2eFormat::schema`]. The sending
+//! half uses the same name: the `message` of the wrap door's `@body` member
+//! ([`crate::e2e_body`]) is this string, so a caller that registered the rule
+//! passes its schema to the one door and to the other unchanged.
 //!
 //! # Why a format and not a second kind of rule
 //!

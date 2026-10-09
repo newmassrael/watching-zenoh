@@ -83,6 +83,9 @@ pub mod doc_revision;
 // documented by its own `//!` text and carries no outer `///` here: the two
 // would be merged, and the module's relative links would then be resolved from
 // this scope instead of from the module.
+pub mod e2e_body;
+#[cfg(test)]
+mod e2e_body_tests;
 pub mod e2e_crc;
 pub mod e2e_frame;
 pub mod e2e_json;

@@ -98,11 +98,22 @@ impl Values {
     /// Whether the names exist, and whether each value fits, is judged against
     /// a profile by [`build`].
     pub fn parse(text: &str) -> Result<Self, DocError> {
-        let root = read_json(text)?;
-        let entries = object(&root, "")?;
+        Self::from_tree(&read_json(text)?, &[])
+    }
+
+    /// The values of a tree already read, leaving out the members named in
+    /// `reserved`: those belong to the caller (the wrap door's `@body`), which
+    /// reads them itself. A reserved key still counts in the check that no key
+    /// appears twice, so a repeat of one is refused here and not resolved
+    /// silently.
+    pub(crate) fn from_tree(root: &Json5Value, reserved: &[&str]) -> Result<Self, DocError> {
+        let entries = object(root, "")?;
         check_distinct(entries, "")?;
         let mut out = Vec::with_capacity(entries.len());
-        for (name, value) in entries {
+        for (name, value) in entries
+            .iter()
+            .filter(|(n, _)| !reserved.contains(&n.as_str()))
+        {
             let here = child("", name);
             let supplied = match value {
                 Json5Value::Object(parts) => {

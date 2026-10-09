@@ -166,7 +166,9 @@
 //! the values text, and returns the bytes: everything a door that wraps a body in
 //! a protection header needs from this module, and nothing about a header. That
 //! door passes the same four arguments and reads the bytes it gets back as its
-//! payload.
+//! payload. [`encode_tree`] is the same writer for a door whose values arrive as
+//! one member of a larger JSON text and so are already a tree
+//! ([`crate::e2e_body`] is that door's reader).
 
 use alloc::collections::BTreeMap;
 use alloc::format;
@@ -260,11 +262,52 @@ pub fn encode_message(
         .root_message(root_message, root_file)
         .map_err(EncodeError::Schema)?;
     let tree = read_values(values)?;
+    write_linked(&linker, root, &tree)
+}
+
+/// Build the wire bytes of the message `root_message` from `values`, a tree the
+/// caller already holds: the entry for a caller whose values are one member of
+/// a larger JSON text, such as the end-to-end wrap door, whose description
+/// carries the body beside the header's values.
+///
+/// The arguments and the order problems are found in are [`encode_message`]'s,
+/// less the step that reads the text: the schema, the root message, then the
+/// values from the top down. The place a [`ValueError`] names is a JSON pointer
+/// into `values`, so a caller that found the tree under a key of its own
+/// prefixes the pointer with that key's. The error is never
+/// [`EncodeError::Syntax`], because no text is read here.
+///
+/// The caller bounds the nesting of the text it builds the tree from, as
+/// [`encode_message`] does for its own: the writer recurses once per level of
+/// the tree, and [`MAX_VALUES_DEPTH`] is the bound it was written for.
+///
+/// # Errors
+///
+/// An [`EncodeError`] for the first problem found.
+pub fn encode_tree(
+    root_message: &str,
+    files: &[ProtoFile<'_>],
+    root_file: usize,
+    values: &Json5Value,
+) -> Result<Vec<u8>, EncodeError> {
+    let linker = Linker::read(files, root_file).map_err(EncodeError::Schema)?;
+    let root = linker
+        .root_message(root_message, root_file)
+        .map_err(EncodeError::Schema)?;
+    write_linked(&linker, root, values)
+}
+
+/// The bytes of message `root` of a linked schema, from a tree.
+fn write_linked(
+    linker: &Linker<'_, '_>,
+    root: usize,
+    tree: &Json5Value,
+) -> Result<Vec<u8>, EncodeError> {
     let mut encoder = Encoder {
-        schema: &linker,
+        schema: linker,
         tables: (0..linker.msgs.len()).map(|_| None).collect(),
     };
-    encoder.message(root, &tree, "")
+    encoder.message(root, tree, "")
 }
 
 /// The values text as a tree, or where it stops being JSON.
