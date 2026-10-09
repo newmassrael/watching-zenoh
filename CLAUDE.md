@@ -201,12 +201,19 @@ git config core.hooksPath .githooks
   waiting for a running job). Since open-debt item 897 the default hook also
   runs the cheap, tree-only checks that hosted CI went red on while the hook
   stayed green: the upstream-citation form gates (2f, about 11s), the hosted
-  static lanes C0d/C0e/C0f with the count-guard lint (2c2, about 7s), and a
-  one-line count-guard selection report. `scripts/lib/hook_default_region_gate.py`
-  holds that list, with each check's measured seconds and the checks that stay
-  hosted on purpose (Layer U, which needs the network, and the count-guard
-  verdicts, whose cold build measured 473s for one guard). The default hook
-  exits after these checks.
+  static lanes C0d/C0e/C0f with the count-guard lint (2c2, about 7s), and the
+  count-guard oracle in its build-free mode (2c3, item 898, about 2s):
+  `guarded_count_gate.py --cached-only` selects the guards the push range
+  reaches and judges them against the per-clone measurement cache. A cached
+  count that disagrees with its declared number REFUSES the push (a known wrong
+  number); a reached guard with no measurement for this tree prints one
+  DEFERRED line, naming the count and the command that measures them, and the
+  push proceeds (hosted CI judges it); an oracle that cannot run or read
+  refuses, since that says nothing about any count. `scripts/lib/hook_default_region_gate.py`
+  holds the list of checks above the boundary, with each check's measured
+  seconds, and the checks that stay hosted on purpose (Layer U, which needs the
+  network, and the count-guard builds, whose cold measurement was 473s for one
+  guard). The default hook exits after these checks.
 
   The remaining static gates, feature tests/census, Layer 0, changed-crate
   tests and documentation checks, reduced-feature checks, clippy and workspace
@@ -220,6 +227,18 @@ git config core.hooksPath .githooks
   `WZ_PREPUSH_COUNT_GUARD=1` inside that extended sweep. The scripts and hosted
   lane assertions are unchanged; hosted failures are diagnosed next round.
   Run `bash scripts/run-ci.sh` manually when a full local CI run is wanted.
+
+- **Development speed first** (owner, 2026-10-09). Verification is batched,
+  not repeated per item. A worker on one item verifies only that item: its
+  build, the item's tests, and clippy of the crates it touched (per crate;
+  never two crates with `--all-features` in one command). It does not run the
+  full gate array, the Layer C0 family or the count-guard oracle per item.
+  Finished work is merged into ONE integration branch; the preflight (gate
+  array, C0/C0d/C0e/C0f/U, upstream citation gate, count guards by oracle)
+  runs ONCE there and the branch is pushed ONCE with one acknowledgement row,
+  so a single hosted run is not cancelled by the next push. Do not hold work
+  waiting for a hosted run; read its result when it arrives. Never skip a
+  failing gate and never bypass the hooks.
 
 `pre-commit` and `pre-push` require `mnemosyne-cli` on `PATH`
 (install via
