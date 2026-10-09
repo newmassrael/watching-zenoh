@@ -146,6 +146,12 @@ struct Judge {
     deepest_message: usize,
     /// The deepest `grouped(n)` it compiles, up to [`DEPTH_CAP`].
     deepest_group: usize,
+    /// Whether `--encode` writes a proto3 `float` or `double` set to `-0.0`,
+    /// which is not the default by its BITS. MEASURED, not read from a version:
+    /// protoc 3.21.12 writes it and protoc 3.12.4 (the hosted runner's) omits it,
+    /// as if it compared the value with zero, and no source in this tree says
+    /// which release changed it.
+    writes_negative_zero: bool,
 }
 
 impl Judge {
@@ -241,7 +247,9 @@ fn measure_judge(bin: PathBuf, version: String) -> Result<Judge, String> {
         needs_proto3_optional_flag,
         deepest_message: 0,
         deepest_group: 0,
+        writes_negative_zero: false,
     };
+    let writes_negative_zero = measure_negative_zero(&probe, dir.path())?;
     // The plain schema, which also proves `--decode` can read descriptor.proto.
     std::fs::write(
         dir.path().join("probe.proto"),
@@ -272,8 +280,72 @@ fn measure_judge(bin: PathBuf, version: String) -> Result<Judge, String> {
     Ok(Judge {
         deepest_message: depth_of(nested)?,
         deepest_group: depth_of(grouped)?,
+        writes_negative_zero,
         ..probe
     })
+}
+
+/// Whether `protoc --encode` writes a proto3 float or double that is `-0.0`,
+/// from what it does on a one-field schema of each, and not from its version.
+///
+/// A proto3 field with no presence is written when its value is not the default.
+/// Whether `-0.0` is the default depends on how the release tests for it: by
+/// bits (writes it) or by comparing with zero (omits it, because `-0.0 == 0.0`).
+/// The two kinds must agree; a judge that wrote one and omitted the other is a
+/// judge this file has no rule for, and says so instead of picking one.
+fn measure_negative_zero(judge: &Judge, dir: &Path) -> Result<bool, String> {
+    std::fs::write(
+        dir.join("negzero.proto"),
+        "syntax = \"proto3\";\nmessage F { float a = 1; }\nmessage D { double a = 1; }\n",
+    )
+    .map_err(|e| e.to_string())?;
+    let mut answers = Vec::new();
+    for message in ["F", "D"] {
+        let bytes = protoc_encode(judge, dir, "negzero.proto", message, "a: -0.0")?;
+        answers.push(says_negative_zero(&bytes, message)?);
+    }
+    if answers[0] != answers[1] {
+        return Err("protoc writes -0.0 for one of float and double and not the other".to_string());
+    }
+    Ok(answers[0])
+}
+
+/// What the bytes `protoc --encode` wrote for `a: -0.0` say: nothing (it omits
+/// the field), or the one field whose payload is all zero but the sign. Anything
+/// else is not an answer to the question.
+fn says_negative_zero(bytes: &[u8], message: &str) -> Result<bool, String> {
+    match (message, bytes) {
+        (_, []) => Ok(false),
+        ("F", [0x0d, 0, 0, 0, 0x80]) => Ok(true),
+        ("D", [0x09, 0, 0, 0, 0, 0, 0, 0, 0x80]) => Ok(true),
+        _ => Err(format!(
+            "protoc wrote {} for `a: -0.0` in {message}: neither nothing nor -0.0",
+            hex(bytes)
+        )),
+    }
+}
+
+/// THE `-0.0` PROBE READS WHAT PROTOC WROTE and refuses what it cannot read, with
+/// no protoc: nothing is "omits", the sign bit alone is "writes", and a positive
+/// zero, a wrong width or another field is no answer.
+#[test]
+fn the_negative_zero_probe_reads_what_protoc_wrote() {
+    assert_eq!(says_negative_zero(&[], "F"), Ok(false));
+    assert_eq!(says_negative_zero(&[], "D"), Ok(false));
+    assert_eq!(says_negative_zero(&[0x0d, 0, 0, 0, 0x80], "F"), Ok(true));
+    assert_eq!(
+        says_negative_zero(&[0x09, 0, 0, 0, 0, 0, 0, 0, 0x80], "D"),
+        Ok(true)
+    );
+    for (bytes, message) in [
+        (vec![0x0d, 0, 0, 0, 0], "F"),
+        (vec![0x0d, 0, 0, 0, 0x80], "D"),
+        (vec![0x09, 0, 0, 0, 0, 0, 0, 0, 0], "D"),
+        (vec![0x15, 0, 0, 0, 0x80], "F"),
+        (vec![0x0d, 0, 0, 0x80], "F"),
+    ] {
+        assert!(says_negative_zero(&bytes, message).is_err(), "{bytes:?}");
+    }
 }
 
 /// What `protoc` made of one schema directory.
@@ -2357,6 +2429,7 @@ fn assumed_judge(deepest: usize) -> Judge {
         needs_proto3_optional_flag: false,
         deepest_message: deepest,
         deepest_group: deepest,
+        writes_negative_zero: true,
     }
 }
 
@@ -2573,6 +2646,19 @@ struct ValueCase {
     /// Whether the order of the top-level fields on the wire is the writer's to
     /// choose (several map entries).
     unordered: bool,
+    /// For a case whose bytes depend on how the judge treats `-0.0`: the door's
+    /// documented bytes (hex), and the bytes (hex) a judge that omits `-0.0`
+    /// writes for the same message. The door's bytes are held to the first
+    /// whatever the judge does; the judge is held to the second only when it was
+    /// MEASURED to omit `-0.0` ([`Judge::writes_negative_zero`]).
+    negative_zero: Option<NegativeZero>,
+}
+
+/// The two expectations of a case that depends on the judge's `-0.0`.
+#[derive(Clone, Copy)]
+struct NegativeZero {
+    door_hex: &'static str,
+    judge_omitting_hex: &'static str,
 }
 
 fn value_case(
@@ -2589,6 +2675,7 @@ fn value_case(
         values,
         text,
         unordered: false,
+        negative_zero: None,
     }
 }
 
@@ -2679,13 +2766,22 @@ fn value_corpus() -> Vec<ValueCase> {
             r#"{"a":"NaN","b":"Infinity","c":"-Infinity"}"#,
             "a: nan b: inf c: -inf",
         ),
-        value_case(
-            "negative zero is written and zero is not",
-            "syntax = \"proto3\";\nmessage M { float a = 1; double b = 2; float c = 3; double d = 4; }",
-            "M",
-            r#"{"a":-0.0,"b":-0.0,"c":0.0,"d":0.0}"#,
-            "a: -0.0 b: -0.0 c: 0.0 d: 0.0",
-        ),
+        // The one case whose bytes depend on the judge: `-0.0` is not the default
+        // by its bits, and protoc 3.12.4 tests the value against zero instead. The
+        // door writes it either way (see `the_value_door_writes_negative_zero_by_bits`).
+        ValueCase {
+            negative_zero: Some(NegativeZero {
+                door_hex: NEGATIVE_ZERO_DOOR_HEX,
+                judge_omitting_hex: "",
+            }),
+            ..value_case(
+                "negative zero is written and zero is not",
+                "syntax = \"proto3\";\nmessage M { float a = 1; double b = 2; float c = 3; double d = 4; }",
+                "M",
+                r#"{"a":-0.0,"b":-0.0,"c":0.0,"d":0.0}"#,
+                "a: -0.0 b: -0.0 c: 0.0 d: 0.0",
+            )
+        },
         // Other scalars.
         value_case(
             "bool, string and bytes",
@@ -2822,6 +2918,7 @@ fn value_corpus() -> Vec<ValueCase> {
         values: r#"{"b":{"v":-5},"id":7}"#,
         text: "b { v: -5 } id: 7",
         unordered: false,
+        negative_zero: None,
     });
     v
 }
@@ -2984,8 +3081,33 @@ fn compare_bytes(
     case: &ValueCase,
     door: &[u8],
     protoc: &[u8],
+    judge_writes_negative_zero: bool,
     decode: &dyn Fn(&[u8]) -> Result<String, String>,
 ) -> Option<String> {
+    // A case that depends on the judge's `-0.0` pins the door to its documented
+    // bytes first, whatever the judge does, so a judge that omits `-0.0` can
+    // never excuse a door that does.
+    if let Some(expect) = case.negative_zero {
+        if hex(door) != expect.door_hex {
+            return Some(format!(
+                "the door does not write its documented bytes\n  door:       {}\n  documented: {}",
+                hex(door),
+                expect.door_hex
+            ));
+        }
+        if !judge_writes_negative_zero {
+            // The judge was measured to omit `-0.0`: it is held to exactly the
+            // omission, so the difference stays the one recorded and cannot
+            // hide another.
+            return (hex(protoc) != expect.judge_omitting_hex).then(|| {
+                format!(
+                    "the judge omits -0.0 and was expected to write {:?}\n  protoc: {}",
+                    expect.judge_omitting_hex,
+                    hex(protoc)
+                )
+            });
+        }
+    }
     if door == protoc {
         return None;
     }
@@ -3093,7 +3215,8 @@ fn the_proto_value_door_agrees_with_protoc_encode_over_the_corpus() {
             );
         }
         let decode = |bytes: &[u8]| protoc_decode(&judge, dir.path(), root_file, case.root, bytes);
-        if let Some(diff) = compare_bytes(case, &door, &protoc, &decode) {
+        if let Some(diff) = compare_bytes(case, &door, &protoc, judge.writes_negative_zero, &decode)
+        {
             disagreements.push(say(diff));
         }
         compared += 1;
@@ -3103,8 +3226,13 @@ fn the_proto_value_door_agrees_with_protoc_encode_over_the_corpus() {
 
     eprintln!(
         "value door vs protoc --encode: {compared} message(s) compared, {unordered} of them as \
-         sets of fields, {bytes_total} byte(s) of protoc's output; judge: {}",
-        judge.version
+         sets of fields, {bytes_total} byte(s) of protoc's output; judge: {}, which {} -0.0",
+        judge.version,
+        if judge.writes_negative_zero {
+            "writes"
+        } else {
+            "omits"
+        }
     );
     assert!(
         compared >= 25 && bytes_total >= 300,
@@ -3128,6 +3256,13 @@ fn the_value_comparison_reports_a_door_that_disagrees() {
         ..value_case("c", "", "M", "{}", "")
     };
     let nothing = |_: &[u8]| -> Result<String, String> { Err("no decoder".to_string()) };
+    // A judge that writes -0.0 is the ordinary one: these cases do not depend on it.
+    let compare_bytes = |case: &ValueCase,
+                         door: &[u8],
+                         protoc: &[u8],
+                         decode: &dyn Fn(&[u8]) -> Result<String, String>| {
+        crate::compare_bytes(case, door, protoc, true, decode)
+    };
     let good = [0x08, 0x96, 0x01];
     assert_eq!(compare_bytes(&case(false), &good, &good, &nothing), None);
     // One byte off, one byte short, one byte over: each is a difference.
@@ -3159,6 +3294,76 @@ fn the_value_comparison_reports_a_door_that_disagrees() {
         top_level_fields_sorted("b: 2\na {\n  x: 1\n}\n"),
         vec!["a {\n  x: 1\n}".to_string(), "b: 2".to_string()]
     );
+}
+
+/// THE JUDGE'S `-0.0` DECIDES WHAT THE COMPARISON EXPECTS OF THE JUDGE AND NEVER
+/// WHAT IT EXPECTS OF THE DOOR, with no protoc: the door's documented bytes are
+/// held first, a judge that writes `-0.0` must equal the door, and a judge
+/// measured to omit it must write exactly the recorded omission.
+#[test]
+fn the_negative_zero_case_is_judged_by_what_the_judge_does() {
+    let corpus = value_corpus();
+    let case = corpus
+        .iter()
+        .find(|c| c.negative_zero.is_some())
+        .expect("a case depends on the judge's -0.0");
+    let expect = case.negative_zero.expect("just found");
+    let door = unhex(expect.door_hex);
+    let omitted = unhex(expect.judge_omitting_hex);
+    let nothing = |_: &[u8]| -> Result<String, String> { Err("no decoder".to_string()) };
+    let judged = |door: &[u8], protoc: &[u8], writes: bool| {
+        compare_bytes(case, door, protoc, writes, &nothing)
+    };
+    // A judge that writes -0.0 agrees with the door, and only with it.
+    assert_eq!(judged(&door, &door, true), None);
+    assert!(judged(&door, &omitted, true).is_some());
+    // A judge measured to omit it is held to the omission, and agrees with it.
+    assert_eq!(judged(&door, &omitted, false), None);
+    assert!(
+        judged(&door, &door, false).is_some(),
+        "a judge measured to omit -0.0 that wrote it is not the judge that was measured"
+    );
+    assert!(judged(&door, &[0x08, 0x01], false).is_some());
+    // Whatever the judge does, a door that stopped writing -0.0 is a failure:
+    // the judge's difference cannot excuse the door's.
+    assert!(judged(&omitted, &omitted, false).is_some());
+    assert!(judged(&omitted, &omitted, true).is_some());
+    // The corpus holds exactly one such case, and the others do not depend on it.
+    assert_eq!(
+        corpus.iter().filter(|c| c.negative_zero.is_some()).count(),
+        1
+    );
+}
+
+fn unhex(hex: &str) -> Vec<u8> {
+    (0..hex.len())
+        .step_by(2)
+        .map(|i| u8::from_str_radix(&hex[i..i + 2], 16).expect("hex digits"))
+        .collect()
+}
+
+/// The bytes the door documents for the `-0.0` case: field 1 a float, field 2 a
+/// double, both with only the sign bit set; the two `0.0` fields are absent.
+const NEGATIVE_ZERO_DOOR_HEX: &str = "0d00000080110000000000000080";
+
+/// THE DOOR WRITES `-0.0` BY ITS BITS, whatever any judge does: the contract the
+/// header states, held through the C ABI with no protoc, so a judge that omits
+/// `-0.0` can record a difference but never move this.
+#[test]
+fn the_value_door_writes_negative_zero_by_bits() {
+    let schema =
+        "syntax = \"proto3\";\nmessage M { float a = 1; double b = 2; float c = 3; double d = 4; }";
+    let door = |values: &str| {
+        encode_with_the_door("M", &[("a.proto", schema)], values).expect("the door answers")
+    };
+    assert_eq!(
+        hex(&door(r#"{"a":-0.0,"b":-0.0,"c":0.0,"d":0.0}"#)),
+        NEGATIVE_ZERO_DOOR_HEX
+    );
+    // Zero is the default and is not written; the sign is what makes the
+    // difference, in the number and in the string spelling alike.
+    assert_eq!(hex(&door(r#"{"a":0.0,"b":0,"c":0.0,"d":0.0}"#)), "");
+    assert_eq!(hex(&door(r#"{"a":"-0","b":"-0"}"#)), NEGATIVE_ZERO_DOOR_HEX);
 }
 
 /// THE VALUE CORPUS NAMES EACH CASE ONCE, covers the arms the door has and keeps

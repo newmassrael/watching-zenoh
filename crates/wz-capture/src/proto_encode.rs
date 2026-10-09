@@ -73,8 +73,12 @@
 //! * A proto3 singular field that is not in a oneof, not `optional` and not a
 //!   message is written only when its value is not the default: `0`, `false`, the
 //!   empty string, the empty bytes, the first enum value's number zero, and a
-//!   float or double whose bits are all zero -- so `-0.0` IS written, as
-//!   `protoc` writes it. A field with presence is written whenever the JSON gives
+//!   float or double whose bits are all zero -- so `-0.0` IS written. That is
+//!   how `protoc` 3.21.12 writes it; `protoc` 3.12.4 compares the value with zero
+//!   and omits it, and the door does not follow it, so the sign survives. No
+//!   source in this tree says which release changed it. The oracle in
+//!   `wz-integration-tests` decides by running the judge, not by its version. A
+//!   field with presence is written whenever the JSON gives
 //!   it: a message field (a proto3 message field has presence), a member of a
 //!   oneof, an `optional` field and a `required` one, in either syntax.
 //!   Giving two members of one oneof is refused. A missing `required` field is

@@ -2780,7 +2780,9 @@ int wz_dissect_declarations_from_proto(const char *key_pattern,
  *   - A proto3 singular field that is not in a oneof, not `optional` and not a
  *     message is written only when its value is not the default: 0, false, the
  *     empty string or bytes, the enum value numbered zero, or a float or double
- *     whose bits are all zero (so -0.0 IS written, as protoc writes it). A field
+ *     whose bits are all zero (so -0.0 IS written). protoc 3.21.12 writes it
+ *     too; protoc 3.12.4 compares the value with zero and omits it, and this
+ *     door does not follow it, so the sign survives. A field
  *     with presence is written whenever the JSON gives it: a message field, a
  *     member of a oneof, an `optional` or `required` field, and every singular
  *     field of proto2. Two members of one oneof are refused, and so is a
