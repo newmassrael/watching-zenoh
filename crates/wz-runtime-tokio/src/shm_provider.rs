@@ -431,42 +431,83 @@ impl ProviderCore {
     /// unsafe form also takes one its watchdog invalidated, which is a chunk a holder may
     /// still be reading: the caller is the one who knows there is none.
     fn collect(&self, safe: bool) -> usize {
+        let due = self.claim(safe);
+        self.take_back(&due)
+    }
+
+    /// Take every chunk nobody holds off the busy list, and make each one stale before
+    /// the list is let go of.
+    ///
+    /// A chunk is never off the busy list and not yet stale. Another thread's collection
+    /// may take a chunk in the instant after its last holder let go, and the holder that
+    /// let go last then finds the list empty and returns from its own collection at once.
+    /// Were the generation advanced only after the list was released, that holder could read
+    /// its chunk as "every reference given back, not yet collected" (`Held(0)`) while the
+    /// collection that owns it had not yet taken the store's lock: measured, two in sixty
+    /// thousand owners with four threads sweeping. Done under the list's lock, whoever finds
+    /// the chunk gone finds it reclaimed, and the work left after the lock (the backend's
+    /// `free`, the slot's return to the queue) is the part nothing reads the chunk's state
+    /// through. The lock order is the busy list, then the store; nothing takes the store
+    /// and then a busy list.
+    fn claim(&self, safe: bool) -> Vec<BusyChunk> {
         let Some(metadata) = existing_metadata() else {
-            return 0;
+            return Vec::new();
         };
         let mut due = Vec::new();
-        {
-            let mut busy = self.busy();
-            let mut i = 0;
-            while i < busy.len() {
-                let header = header_of(&metadata, busy[i].slot);
-                if header.refcount.load(Ordering::SeqCst) == 0
-                    || (!safe && header.watchdog_invalidated.load(Ordering::SeqCst))
-                {
-                    due.push(busy.swap_remove(i));
-                } else {
-                    i += 1;
-                }
+        let mut busy = self.busy();
+        let mut i = 0;
+        while i < busy.len() {
+            let header = header_of(&metadata, busy[i].slot);
+            if header.refcount.load(Ordering::SeqCst) == 0
+                || (!safe && header.watchdog_invalidated.load(Ordering::SeqCst))
+            {
+                due.push(busy.swap_remove(i));
+            } else {
+                i += 1;
             }
         }
-        self.take_back(&due)
+        #[cfg(all(test, target_os = "linux"))]
+        tests::paused_between_claim_and_stale();
+        Self::make_stale(&due);
+        due
     }
 
     /// Take back the NEWEST chunk whether or not anybody holds it: upstream's
     /// `Deallocate` policy, which is unsafe by its own account. `false` when there is
     /// none.
     fn reclaim_newest(&self) -> bool {
-        let Some(chunk) = self.busy().pop() else {
-            return false;
+        let chunk = {
+            let mut busy = self.busy();
+            let Some(chunk) = busy.pop() else {
+                return false;
+            };
+            Self::make_stale(&[chunk]);
+            chunk
         };
         self.take_back(&[chunk]);
         true
     }
 
-    /// Give chunks back. In this order, and the order is the safety: their slots go
-    /// stale first, so a descriptor that outlived its chunk is refused on the generation;
-    /// then the memory goes back to the backend, which may hand it to another chunk at
-    /// once; then the slots go back on the queue. Returns the size of the largest chunk.
+    /// Advance the generation of each chunk's slot, so every descriptor naming it is one
+    /// a receiver refuses. Called with the busy list's lock held (see [`Self::claim`]), and
+    /// BEFORE the chunk's memory goes back to the backend, which may hand it to another
+    /// chunk at once.
+    fn make_stale(chunks: &[BusyChunk]) {
+        if chunks.is_empty() {
+            return;
+        }
+        let slots: Vec<u16> = chunks.iter().map(|chunk| chunk.slot).collect();
+        if let Ok(mut guard) = store().lock() {
+            if let Some(store) = guard.as_mut() {
+                store.make_stale(&slots);
+            }
+        }
+    }
+
+    /// Give chunks back, which [`Self::claim`] or [`Self::reclaim_newest`] has already
+    /// made stale. In this order, and the order is the safety: the memory goes back to
+    /// the backend, which may hand it to another chunk at once, and then the slots go back
+    /// on the queue. Returns the size of the largest chunk.
     ///
     /// The backend is called with no lock of this module held, because a backend a host
     /// supplies may allocate a chunk of its own from inside `free`.
@@ -475,11 +516,6 @@ impl ProviderCore {
             return 0;
         }
         let slots: Vec<u16> = chunks.iter().map(|chunk| chunk.slot).collect();
-        if let Ok(mut guard) = store().lock() {
-            if let Some(store) = guard.as_mut() {
-                store.make_stale(&slots);
-            }
-        }
         let mut largest = 0;
         for chunk in chunks {
             self.backend.free(&chunk.descriptor);
@@ -2035,6 +2071,152 @@ mod tests {
             reference_state(&first),
             Some(ReferenceState::Reclaimed),
             "the owner's was the last reference"
+        );
+    }
+
+    thread_local! {
+        /// What a collection on this thread does between taking a chunk off the busy list
+        /// and making it stale: nothing, unless a test holds it there.
+        static PAUSE: std::cell::RefCell<Option<Box<dyn Fn()>>> =
+            const { std::cell::RefCell::new(None) };
+    }
+
+    /// The point [`ProviderCore::claim`] calls out to, so a test can hold one collection
+    /// exactly there while it looks at the list from another thread.
+    pub(super) fn paused_between_claim_and_stale() {
+        PAUSE.with(|pause| {
+            if let Some(hold) = pause.borrow().as_ref() {
+                hold();
+            }
+        });
+    }
+
+    /// A chunk is never off the busy list and not yet stale.
+    ///
+    /// A collection on another thread can take the chunk off the busy list in the instant
+    /// between the owner's release (the count reads zero) and the owner's own collection,
+    /// which then finds the list empty and returns at once. Whoever finds the chunk gone
+    /// must find it reclaimed, so the generation moves before the list's lock is let go.
+    /// This holds a collection at exactly the point after it has taken the chunk and
+    /// before it has made it stale, and looks at the list from this thread: the list must
+    /// not be observable as empty while the chunk is still `Held(0)`, which is the read the
+    /// single failure the register recorded was made by.
+    #[test]
+    fn a_chunk_is_never_off_the_busy_list_and_not_yet_stale() {
+        // A provider a handle still holds, so no sweep of another test's makes this
+        // chunk its own before the collection below does.
+        let provider = ShmProvider::pool(
+            &MemoryLayout::of_size(2 + SINGLE_PAYLOAD_POOL_HEADROOM).expect("pool layout"),
+        )
+        .expect("pool");
+        let mut payload = provider
+            .alloc(
+                MemoryLayout::of_size(2).expect("layout"),
+                &AllocPolicy::JustAlloc,
+            )
+            .expect("alloc");
+        payload.write(b"ok");
+        let descriptor = payload.descriptor();
+        let core = payload.core.clone();
+        // The owner's reference is given back and its own collection has not run: the
+        // state a collection on another thread finds the chunk in.
+        payload.release_if_current();
+        assert_eq!(
+            reference_state(&descriptor),
+            Some(ReferenceState::Held(0)),
+            "every holder let go and nothing has collected yet"
+        );
+
+        let (reached_tx, reached_rx) = std::sync::mpsc::channel::<()>();
+        let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+        let collector = {
+            let core = core.clone();
+            std::thread::spawn(move || {
+                PAUSE.with(|pause| {
+                    *pause.borrow_mut() = Some(Box::new(move || {
+                        reached_tx.send(()).expect("the test is waiting");
+                        release_rx.recv().expect("the test releases the collection");
+                    }));
+                });
+                core.claim(true)
+            })
+        };
+        reached_rx
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .expect("the collection reached the point between taking the chunk and staling it");
+
+        // The collection holds the chunk and has not advanced its generation. A thread
+        // that could now see the list empty would read `Held(0)` and call the chunk
+        // uncollected, so the list must still be locked.
+        let seen_empty = match core.busy.try_lock() {
+            Ok(list) => list.is_empty(),
+            Err(_) => false,
+        };
+        let state_then = reference_state(&descriptor);
+        release_tx.send(()).expect("the collector is waiting");
+        let due = collector.join().expect("the collector thread panicked");
+
+        assert!(
+            !seen_empty,
+            "the list was observable as empty while the chunk read {state_then:?}"
+        );
+        assert_eq!(due.len(), 1, "the collection took the chunk");
+        assert_eq!(
+            reference_state(&descriptor),
+            Some(ReferenceState::Reclaimed),
+            "and when it let go of the list the chunk was stale"
+        );
+        // The rest of the collection, which nothing reads the chunk's state through.
+        core.take_back(&due);
+        // The owner's Drop must not release a second time: the generation moved, so the
+        // slot is no longer its own.
+        drop(payload);
+        assert_eq!(
+            reference_state(&descriptor),
+            Some(ReferenceState::Reclaimed)
+        );
+    }
+
+    /// Whichever thread takes a chunk home, the owner that let go last finds it home: the
+    /// interleaving above, run for real. Sweeps in a tight loop on other threads while one
+    /// owner allocates, lets go and reads its own descriptor. Before the generation moved
+    /// under the list's lock this read `Held(0)` about twice in sixty thousand owners.
+    #[test]
+    fn an_owner_that_lets_go_finds_its_chunk_reclaimed_whoever_collected_it() {
+        const ROUNDS: usize = 20_000;
+        let stop = Arc::new(AtomicBool::new(false));
+        let sweepers: Vec<_> = (0..4)
+            .map(|_| {
+                let stop = stop.clone();
+                std::thread::spawn(move || {
+                    while !stop.load(Ordering::Relaxed) {
+                        sweep_orphans();
+                    }
+                })
+            })
+            .collect();
+
+        let mut not_home = Vec::new();
+        for round in 0..ROUNDS {
+            let mut payload = ShmBackedPayload::alloc(2).expect("alloc");
+            payload.write(b"ok");
+            let descriptor = payload.descriptor();
+            drop(payload);
+            let state = reference_state(&descriptor);
+            if state != Some(ReferenceState::Reclaimed) {
+                not_home.push((round, state));
+            }
+        }
+
+        stop.store(true, Ordering::Relaxed);
+        for sweeper in sweepers {
+            sweeper.join().expect("a sweeper thread panicked");
+        }
+        assert!(
+            not_home.is_empty(),
+            "an owner that let go last read its chunk as not yet reclaimed {} time(s) of {ROUNDS}: {:?}",
+            not_home.len(),
+            &not_home[..not_home.len().min(5)]
         );
     }
 
