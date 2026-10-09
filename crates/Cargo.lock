@@ -3214,6 +3214,7 @@ dependencies = [
  "uhlc",
  "walkdir",
  "webpki-roots",
+ "windows-sys 0.61.2",
  "wz-access-control",
  "wz-capture",
  "wz-codecs",

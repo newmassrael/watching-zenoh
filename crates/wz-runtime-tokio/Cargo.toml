@@ -1222,7 +1222,7 @@ router-multicast-faces = [
 # rule field. `libc` is already in the tree (unixpipe's `mkfifo`), so this adds
 # no third-party surface — unlike zenoh, which reaches the same data through
 # `pnet_datalink`.
-link-interfaces = ["dep:libc"]
+link-interfaces = ["dep:libc", "dep:windows-sys"]
 # R2702 — `routing-peer` DROPPED from this line and the two below it, and the
 # codec knobs the enforcers actually read are named instead. The implication was
 # what made `access-acl`'s residual true: upstream installs its interceptors with
@@ -2128,6 +2128,25 @@ tokio-vsock = { version = "0.5", optional = true }
 # `commons/zenoh-uring` keeps `io-uring` in a `target_os = "linux"` table for
 # the same reason.
 io-uring = { version = "0.7", optional = true }
+
+# R3140 -- the Windows interface table. `getifaddrs` is where the unix hosts read which
+# interfaces the machine has and what addresses each holds; a Windows host reads the same
+# facts from `GetAdaptersAddresses`, which is what upstream's `zenoh-util` calls for every
+# interface question it answers there (`commons/zenoh-util/src/net/mod.rs` @
+# `unsafe fn get_adapters_addresses(af_spec: i32) -> ZResult<Vec<u8>> {`). Optional and
+# pulled only by `link-interfaces`, as `libc` is for the unix reading. Already in this
+# workspace's graph (`wz-capi-pico` names the same version for its Windows host layer, and
+# the async runtime reaches it), so this adds no new third-party crate; each feature below is
+# one namespace the reading calls into, and nothing else is enabled.
+[target.'cfg(windows)'.dependencies.windows-sys]
+version = "0.61"
+optional = true
+features = [
+    "Win32_Foundation",
+    "Win32_NetworkManagement_IpHelper",
+    "Win32_NetworkManagement_Ndis",
+    "Win32_Networking_WinSock",
+]
 
 [target.'cfg(unix)'.dependencies]
 # R311y10 — `libc` for the one `mkfifo` FFI call the unixpipe backend needs to

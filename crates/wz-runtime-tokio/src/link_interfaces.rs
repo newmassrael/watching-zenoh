@@ -230,11 +230,23 @@ fn sockaddr_ip(sa: *const libc::sockaddr) -> Option<IpAddr> {
     }
 }
 
-/// Non-unix: no `getifaddrs`, so the subject is INDETERMINATE rather than empty.
-/// Returning `Some(vec![])` here would claim "this link is on no NIC", which is
-/// a different — and wrong — statement; `None` lets the interceptor apply its
-/// fail-closed policy instead.
-#[cfg(not(unix))]
+/// Windows (R3140): the adapters that carry `addr`, by `AdapterName`, read from the adapter table
+/// the way upstream's `get_interface_names_by_addr` reads it there. `None` when the table could
+/// not be read, which is "indeterminate", not "on no NIC".
+#[cfg(windows)]
+pub fn interface_names_for(addr: IpAddr) -> Option<Vec<String>> {
+    use windows_sys::Win32::Networking::WinSock::AF_UNSPEC;
+    Some(adapter_names_for(
+        &read_adapter_rows(u32::from(AF_UNSPEC))?,
+        addr,
+    ))
+}
+
+/// Neither `getifaddrs` nor the Windows adapter table: the subject is INDETERMINATE rather than
+/// empty. Returning `Some(vec![])` here would claim "this link is on no NIC", which is a
+/// different — and wrong — statement; `None` lets the interceptor apply its fail-closed policy
+/// instead.
+#[cfg(not(any(unix, windows)))]
 pub fn interface_names_for(_addr: IpAddr) -> Option<Vec<String>> {
     None
 }
@@ -430,10 +442,237 @@ pub fn first_ipv4_among(addresses: &[IpAddr]) -> Option<IpAddr> {
     addresses.iter().find(|address| address.is_ipv4()).copied()
 }
 
-/// Non-unix: no `getifaddrs`, so a name finds nothing and is left out, as an unknown one is.
-#[cfg(not(unix))]
+/// Windows: the IPv4 adapter table, as upstream's `get_interface` reads it there. A name matches
+/// an adapter's `AdapterName`, `FriendlyName` or `Description`; see [`adapter_first_ipv4_named`].
+#[cfg(windows)]
+pub fn first_ipv4_of_interface_named(name: &str) -> Option<IpAddr> {
+    use windows_sys::Win32::Networking::WinSock::AF_INET;
+    adapter_first_ipv4_named(&read_adapter_rows(u32::from(AF_INET))?, name)
+}
+
+/// Neither `getifaddrs` nor the Windows adapter table: a name finds nothing and is left out, as an
+/// unknown one is.
+#[cfg(not(any(unix, windows)))]
 pub fn first_ipv4_of_interface_named(_name: &str) -> Option<IpAddr> {
     None
+}
+
+/// R3140 -- one adapter of the Windows adapter table, as `GetAdaptersAddresses` reports it.
+///
+/// Upstream answers every interface question on Windows from this one table, and its answers
+/// differ from the unix ones in what they look at, so the reading is kept as plain data and the
+/// questions as pure functions over it: they are told on tables made for them on any host, and
+/// the one place that touches the system is [`read_adapter_rows`].
+#[cfg(any(windows, test))]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct AdapterRow {
+    /// `AdapterName`, the adapter's identifier (a GUID in braces), which is what upstream's
+    /// `get_local_addresses` and `get_interface_names_by_addr` call an interface's name.
+    pub(crate) adapter_name: String,
+    /// `FriendlyName`, the name a user sees ("Ethernet").
+    pub(crate) friendly_name: String,
+    /// `Description`, the driver's text.
+    pub(crate) description: String,
+    /// `Ipv6IfIndex`, which is the index upstream's `get_index_of_interface` returns for an
+    /// IPv4 address too.
+    pub(crate) ipv6_if_index: u32,
+    /// Every unicast address, in the table's order.
+    pub(crate) unicast: Vec<IpAddr>,
+}
+
+/// Every unicast address of the adapters, restricted to the one whose `AdapterName` is
+/// `interface` when one is named: upstream's `get_local_addresses` on Windows
+/// (`commons/zenoh-util/src/net/mod.rs` @ `pub fn get_local_addresses(interface: Option<&str>) -> ZResult<Vec<IpAddr>> {`).
+///
+/// It does not ask whether an adapter is up or running, which the unix reading does: the Windows
+/// reading never has.
+#[cfg(any(windows, test))]
+pub(crate) fn adapter_local_addresses(rows: &[AdapterRow], interface: Option<&str>) -> Vec<IpAddr> {
+    rows.iter()
+        .filter(|row| interface.map_or(true, |name| row.adapter_name == name))
+        .flat_map(|row| row.unicast.iter().copied())
+        .collect()
+}
+
+/// What a name finds on the adapter table: upstream's `get_interface` on Windows
+/// (`commons/zenoh-util/src/net/mod.rs` @ `pub fn get_interface(name: &str) -> ZResult<Option<IpAddr>> {`).
+///
+/// An adapter whose `AdapterName`, `FriendlyName` or `Description` is `name` answers with its
+/// first IPv4 address. And, adapter by adapter and after that, an address whose text is `name` is
+/// itself the answer; the table is walked once, so an earlier adapter's address text wins over a
+/// later adapter's name.
+#[cfg(any(windows, test))]
+pub(crate) fn adapter_first_ipv4_named(rows: &[AdapterRow], name: &str) -> Option<IpAddr> {
+    for row in rows {
+        if row.adapter_name == name || row.friendly_name == name || row.description == name {
+            if let Some(address) = first_ipv4_among(&row.unicast) {
+                return Some(address);
+            }
+        }
+        if let Some(address) = row.unicast.iter().find(|a| a.to_string() == name) {
+            return Some(*address);
+        }
+    }
+    None
+}
+
+/// The adapters that carry `addr`, by `AdapterName`: upstream's `get_interface_names_by_addr` on
+/// Windows (`commons/zenoh-util/src/net/mod.rs` @ `pub fn get_interface_names_by_addr(addr: IpAddr) -> ZResult<Vec<String>> {`).
+/// An unspecified address names every adapter.
+#[cfg(any(windows, test))]
+pub(crate) fn adapter_names_for(rows: &[AdapterRow], addr: IpAddr) -> Vec<String> {
+    if addr.is_unspecified() {
+        return rows.iter().map(|row| row.adapter_name.clone()).collect();
+    }
+    let addr = addr.to_canonical();
+    rows.iter()
+        .flat_map(|row| {
+            row.unicast
+                .iter()
+                .filter(move |a| **a == addr)
+                .map(move |_| row.adapter_name.clone())
+        })
+        .collect()
+}
+
+/// The index of every adapter that carries `addr`, as `Ipv6IfIndex`: upstream's
+/// `get_index_of_interface` on Windows answers the first carrier's `Ipv6IfIndex` for an IPv4
+/// address too (`commons/zenoh-util/src/net/mod.rs` @ `pub fn get_index_of_interface(addr: IpAddr) -> ZResult<u32> {`).
+/// Every carrier is returned, as the unix reading of this crate does, and the caller takes the
+/// one it needs.
+#[cfg(any(windows, test))]
+pub(crate) fn adapter_indices_of(rows: &[AdapterRow], addr: IpAddr) -> Vec<u32> {
+    rows.iter()
+        .filter(|row| row.unicast.contains(&addr))
+        .map(|row| row.ipv6_if_index)
+        .collect()
+}
+
+/// R3140 -- the adapter table of this Windows host, read with `GetAdaptersAddresses` for one
+/// address family (`AF_UNSPEC` for both, `AF_INET` for IPv4 alone, as upstream asks for each
+/// question). The buffer starts at 8192 bytes and is grown up to three times on
+/// `ERROR_BUFFER_OVERFLOW`, as upstream's `get_adapters_addresses` does; any other failure
+/// answers `None`, "could not be determined", and not an empty table.
+#[cfg(windows)]
+fn read_adapter_rows(family: u32) -> Option<Vec<AdapterRow>> {
+    use windows_sys::Win32::Foundation::ERROR_BUFFER_OVERFLOW;
+    use windows_sys::Win32::NetworkManagement::IpHelper::{
+        GetAdaptersAddresses, IP_ADAPTER_ADDRESSES_LH,
+    };
+
+    const START_BYTES: u32 = 8192;
+    const MAX_RETRIES: u32 = 3;
+
+    let mut size = START_BYTES;
+    let mut retries = 0;
+    // Eight-byte units, so the buffer is aligned for the structs the call writes into it.
+    let mut buffer: Vec<u64>;
+    loop {
+        buffer = vec![0u64; (size as usize).div_ceil(8)];
+        // SAFETY: `buffer` is at least `size` bytes and 8-aligned, `size` is the in/out length
+        // the call expects, and the flags and reserved pointer are the documented defaults.
+        let ret = unsafe {
+            GetAdaptersAddresses(
+                family,
+                0,
+                std::ptr::null_mut(),
+                buffer.as_mut_ptr().cast::<IP_ADAPTER_ADDRESSES_LH>(),
+                &mut size,
+            )
+        };
+        if ret == 0 {
+            break;
+        }
+        if ret != ERROR_BUFFER_OVERFLOW || retries >= MAX_RETRIES {
+            return None;
+        }
+        retries += 1;
+    }
+
+    let mut rows = Vec::new();
+    let mut cursor = buffer.as_ptr().cast::<IP_ADAPTER_ADDRESSES_LH>();
+    while !cursor.is_null() {
+        // SAFETY: `cursor` is the head of the list the successful call wrote into `buffer`, or
+        // a `Next` it linked; every pointer in that list points into `buffer`, which outlives
+        // this loop.
+        let adapter = unsafe { &*cursor };
+        let mut unicast = Vec::new();
+        let mut address = adapter.FirstUnicastAddress;
+        while !address.is_null() {
+            // SAFETY: a `Next` of the list described above.
+            let entry = unsafe { &*address };
+            if let Some(ip) = sockaddr_ip_windows(entry.Address.lpSockaddr) {
+                unicast.push(ip);
+            }
+            address = entry.Next;
+        }
+        rows.push(AdapterRow {
+            adapter_name: c_string(adapter.AdapterName),
+            friendly_name: wide_string(adapter.FriendlyName),
+            description: wide_string(adapter.Description),
+            ipv6_if_index: adapter.Ipv6IfIndex,
+            unicast,
+        });
+        cursor = adapter.Next;
+    }
+    Some(rows)
+}
+
+/// The IP address a Windows `SOCKADDR` holds, or `None` for a family that is neither.
+#[cfg(windows)]
+fn sockaddr_ip_windows(
+    sa: *const windows_sys::Win32::Networking::WinSock::SOCKADDR,
+) -> Option<IpAddr> {
+    use windows_sys::Win32::Networking::WinSock::{AF_INET, AF_INET6, SOCKADDR_IN, SOCKADDR_IN6};
+
+    if sa.is_null() {
+        return None;
+    }
+    // SAFETY: a non-null `lpSockaddr` of a unicast entry points at a `SOCKADDR` of the size its
+    // family says; the family is read first and the wider struct only when it is the one
+    // named.
+    unsafe {
+        match (*sa).sa_family {
+            AF_INET => {
+                let v4 = &*(sa.cast::<SOCKADDR_IN>());
+                Some(IpAddr::from(v4.sin_addr.S_un.S_addr.to_ne_bytes()))
+            }
+            AF_INET6 => {
+                let v6 = &*(sa.cast::<SOCKADDR_IN6>());
+                Some(IpAddr::from(v6.sin6_addr.u.Byte))
+            }
+            _ => None,
+        }
+    }
+}
+
+/// A NUL-terminated ANSI string of the adapter list, or empty for a null pointer.
+#[cfg(windows)]
+fn c_string(p: *const u8) -> String {
+    if p.is_null() {
+        return String::new();
+    }
+    // SAFETY: a non-null `AdapterName` is NUL-terminated and lives in the caller's buffer.
+    unsafe { std::ffi::CStr::from_ptr(p.cast()) }
+        .to_string_lossy()
+        .into_owned()
+}
+
+/// A NUL-terminated UTF-16 string of the adapter list, or empty for a null pointer.
+#[cfg(windows)]
+fn wide_string(p: *const u16) -> String {
+    if p.is_null() {
+        return String::new();
+    }
+    let mut len = 0;
+    // SAFETY: a non-null `FriendlyName` or `Description` is NUL-terminated and lives in the
+    // caller's buffer; the walk stops at the terminator.
+    unsafe {
+        while *p.add(len) != 0 {
+            len += 1;
+        }
+        String::from_utf16_lossy(std::slice::from_raw_parts(p, len))
+    }
 }
 
 /// R3138 -- what `scouting/multicast/interface` names, as upstream reads it
@@ -659,9 +898,23 @@ pub fn local_addresses() -> Option<Vec<IpAddr>> {
     Some(addrs)
 }
 
-/// Non-unix: no `getifaddrs`, so this cannot answer. `None`, which a caller reads as "could not
-/// determine" and not as a host with no address.
-#[cfg(not(unix))]
+/// Windows (R3140): every unicast address of every adapter, of either family, in the adapter
+/// table's order -- upstream's `get_local_addresses(None)` there. Unlike the unix reading it does not
+/// ask whether an adapter is up or running, because the Windows reading never has. `None` when the
+/// table could not be read, which a caller reads as "could not determine" and not as a host with
+/// no address.
+#[cfg(windows)]
+pub fn local_addresses() -> Option<Vec<IpAddr>> {
+    use windows_sys::Win32::Networking::WinSock::AF_UNSPEC;
+    Some(adapter_local_addresses(
+        &read_adapter_rows(u32::from(AF_UNSPEC))?,
+        None,
+    ))
+}
+
+/// Neither `getifaddrs` nor the Windows adapter table, so this cannot answer. `None`, which a
+/// caller reads as "could not determine" and not as a host with no address.
+#[cfg(not(any(unix, windows)))]
 pub fn local_addresses() -> Option<Vec<IpAddr>> {
     None
 }
@@ -809,8 +1062,18 @@ pub fn interface_indices_of_address(addr: IpAddr) -> Result<Vec<u32>, IfaceResol
     Ok(indices)
 }
 
-/// Non-unix: no `getifaddrs`, so no carrier can be named.
-#[cfg(not(unix))]
+/// Windows (R3140): the `Ipv6IfIndex` of every adapter that carries `addr`, read from the IPv4
+/// adapter table as upstream's `get_index_of_interface` reads it there. A table that cannot be read
+/// is undetermined, not "no carrier".
+#[cfg(windows)]
+pub fn interface_indices_of_address(addr: IpAddr) -> Result<Vec<u32>, IfaceResolveError> {
+    use windows_sys::Win32::Networking::WinSock::AF_INET;
+    let rows = read_adapter_rows(u32::from(AF_INET)).ok_or(IfaceResolveError::Undetermined)?;
+    Ok(adapter_indices_of(&rows, addr))
+}
+
+/// Neither `getifaddrs` nor the Windows adapter table, so no carrier can be named.
+#[cfg(not(any(unix, windows)))]
 pub fn interface_indices_of_address(_addr: IpAddr) -> Result<Vec<u32>, IfaceResolveError> {
     Err(IfaceResolveError::Undetermined)
 }
@@ -1539,6 +1802,140 @@ mod expansion {
         assert_eq!(
             texts(expand_unspecified(bound, &local, true)),
             ["10.1.2.3:5"]
+        );
+    }
+}
+
+/// R3140 -- the Windows adapter table's questions, told on tables made for them. A Windows host is
+/// not needed for the reading, only for the table: the questions are plain data in, answer out, and
+/// what differs from the unix reading (no up/running filter, three names for one adapter, the
+/// index of the IPv6 side) is exactly what these tables hold.
+#[cfg(test)]
+mod adapter_table_reading {
+    use super::{
+        adapter_first_ipv4_named, adapter_indices_of, adapter_local_addresses, adapter_names_for,
+        AdapterRow,
+    };
+    use std::net::IpAddr;
+
+    fn ip(text: &str) -> IpAddr {
+        text.parse().expect("an address")
+    }
+
+    fn row(
+        guid: &str,
+        friendly: &str,
+        description: &str,
+        index: u32,
+        addrs: &[&str],
+    ) -> AdapterRow {
+        AdapterRow {
+            adapter_name: guid.to_owned(),
+            friendly_name: friendly.to_owned(),
+            description: description.to_owned(),
+            ipv6_if_index: index,
+            unicast: addrs.iter().map(|a| ip(a)).collect(),
+        }
+    }
+
+    /// A loopback adapter, an Ethernet one with an IPv6 address ahead of two IPv4 ones, and one
+    /// with no address at all.
+    fn table() -> Vec<AdapterRow> {
+        vec![
+            row(
+                "{LO}",
+                "Loopback Pseudo-Interface 1",
+                "Software Loopback Interface 1",
+                1,
+                &["::1", "127.0.0.1"],
+            ),
+            row(
+                "{ETH}",
+                "Ethernet",
+                "Intel(R) Ethernet",
+                12,
+                &["fe80::5", "10.0.0.5", "10.0.0.6"],
+            ),
+            row("{DOWN}", "Wi-Fi", "Intel(R) Wi-Fi", 14, &[]),
+        ]
+    }
+
+    /// Every adapter's every address, whether or not the adapter is up: the Windows reading never
+    /// asks, and the adapter with no address contributes none. A name restricts it to the one
+    /// adapter whose `AdapterName` is that text, and only that field is compared.
+    #[test]
+    fn the_local_addresses_are_every_adapters_unfiltered() {
+        assert_eq!(
+            adapter_local_addresses(&table(), None),
+            vec![
+                ip("::1"),
+                ip("127.0.0.1"),
+                ip("fe80::5"),
+                ip("10.0.0.5"),
+                ip("10.0.0.6")
+            ]
+        );
+        assert_eq!(
+            adapter_local_addresses(&table(), Some("{ETH}")),
+            vec![ip("fe80::5"), ip("10.0.0.5"), ip("10.0.0.6")]
+        );
+        assert!(adapter_local_addresses(&table(), Some("Ethernet")).is_empty());
+    }
+
+    /// A name finds an adapter by any of its three names, and the adapter answers with its FIRST
+    /// IPv4 address, past an IPv6 one ahead of it and short of the IPv4 one after it.
+    #[test]
+    fn a_name_finds_the_first_ipv4_of_the_adapter_by_any_of_its_three_names() {
+        for name in ["{ETH}", "Ethernet", "Intel(R) Ethernet"] {
+            assert_eq!(
+                adapter_first_ipv4_named(&table(), name),
+                Some(ip("10.0.0.5")),
+                "`{name}` names the Ethernet adapter"
+            );
+        }
+        assert_eq!(
+            adapter_first_ipv4_named(&table(), "{LO}"),
+            Some(ip("127.0.0.1"))
+        );
+    }
+
+    /// An adapter that holds no IPv4 address, and a name nothing holds, find nothing; and an
+    /// address spelled as a name is that address, which is the second rule of upstream's loop.
+    #[test]
+    fn a_name_with_nothing_to_answer_finds_nothing_and_an_address_text_is_itself() {
+        assert_eq!(adapter_first_ipv4_named(&table(), "Wi-Fi"), None);
+        assert_eq!(adapter_first_ipv4_named(&table(), "nope"), None);
+        assert_eq!(
+            adapter_first_ipv4_named(&table(), "10.0.0.6"),
+            Some(ip("10.0.0.6"))
+        );
+    }
+
+    /// The index an address selects is its adapter's `Ipv6IfIndex`, for an IPv4 address as for an
+    /// IPv6 one, and an address no adapter holds selects none.
+    #[test]
+    fn an_address_selects_the_ipv6_index_of_its_adapter() {
+        assert_eq!(adapter_indices_of(&table(), ip("10.0.0.5")), vec![12]);
+        assert_eq!(adapter_indices_of(&table(), ip("::1")), vec![1]);
+        assert!(adapter_indices_of(&table(), ip("192.0.2.1")).is_empty());
+    }
+
+    /// An address names the adapters that carry it, by `AdapterName`; the unspecified address names
+    /// every adapter, one with no address included.
+    #[test]
+    fn an_address_names_the_adapters_that_carry_it() {
+        assert_eq!(
+            adapter_names_for(&table(), ip("10.0.0.6")),
+            vec!["{ETH}".to_owned()]
+        );
+        assert_eq!(
+            adapter_names_for(&table(), ip("::1")),
+            vec!["{LO}".to_owned()]
+        );
+        assert!(adapter_names_for(&table(), ip("192.0.2.1")).is_empty());
+        assert_eq!(
+            adapter_names_for(&table(), ip("0.0.0.0")),
+            vec!["{LO}".to_owned(), "{ETH}".to_owned(), "{DOWN}".to_owned()]
         );
     }
 }
