@@ -223,6 +223,14 @@ pub use wz_session_core::passive_messages as messages;
 /// and one that read them would say `undecompressible` for both.
 #[cfg(all(test, feature = "compression", feature = "network-codecs"))]
 mod compressed_capture_fixture;
+/// Open-debt item 808 — the tracked discovery capture: a Scout to the scouting
+/// group and the Hello that answers its sender, over IPv4 and over IPv6, and its
+/// oracle. Ungated beyond `test`: the Scout and Hello codecs and the responder
+/// that builds the Hello are unconditional dependencies of this crate (the
+/// scouting namespace is read in every build), and only the last test, which
+/// reads the field document, is behind `dissect`.
+#[cfg(test)]
+mod discovery_capture_fixture;
 /// R3012 (open-debt item 809) — the tracked capture of one fragmented message in
 /// two flows, one with the handshake the reader needs to resolve the sequence
 /// numbers and one without, and its oracle. Gated on `reassembly` because a

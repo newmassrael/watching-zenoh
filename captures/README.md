@@ -256,3 +256,109 @@ cargo test -p wz-capture --features dissect --lib \
   refresh_the_tracked_midsession_capture -- --ignored
 cargo test -p wz-capture --features dissect --lib midsession_capture
 ```
+
+## `scout-and-hello-ipv4-ipv6.pcap`
+
+Discovery: a **Scout** sent to the scouting group and the **Hello** that answers
+its sender, once over IPv4 and once over IPv6. It is the specimen of the two
+transport message words `Scout` and `Hello`, of the namespace decision that
+makes them readable, and of the census document's `ends` rows (new at census
+revision 20) for a node that only ever sent a discovery message.
+
+| | |
+|---|---|
+| link type | 1 (`LINKTYPE_ETHERNET`) |
+| packets | **4**, 60 / 96 / 73 / 97 bytes on the wire (the short Scout is padded to the 60-byte minimum a NIC emits) |
+| size | 414 bytes |
+| timestamps | 0.000000 onward, 1 ms apart |
+
+| packet | flow | what it is | read as |
+|---|---|---|---|
+| 0 | `192.168.1.5:43210` → `224.0.0.224:7446` | Scout, asking for routers and peers (`what` 3), naming its zid | `Scout`; sender is the **low** end |
+| 1 | `192.168.1.9:38117` → `192.168.1.5:43210` | Hello answering packet 0: a peer, its zid, two locators | `Hello`; sender is the **high** end |
+| 2 | `[fe80::5]:43210` → `[ff02::224]:7446` | the same Scout, another node, over IPv6 | `Scout`; sender is the **low** end |
+| 3 | `[fe80::9]:38117` → `[fe80::5]:43210` | Hello answering packet 2, one locator | `Hello`; sender is the **high** end |
+
+### Why one file holds both a multicast and a unicast packet
+
+`0x01` is a Scout in the scouting namespace and an Init in the transport one;
+`0x02` is a Hello and an Open, and a Hello that carries locators has the flag
+bit that is an Open's ack bit, so its first byte is `0x22`. The bytes cannot say
+which namespace they are in. The capture settles it from where the datagram went:
+
+* a multicast destination carries no handshake, so a `0x01` there is a Scout
+  (packets 0 and 2: the namespace decision in `wz_capture`'s `lib.rs` is walked
+  on both families);
+* a Hello travels back unicast, so the destination says nothing; what says it is
+  a Hello is that its destination was seen sending a Scout (packets 1 and 3).
+
+The consumer-surface test below reads the two Hellos **without** their Scouts and
+requires them to come back as transport messages. A file whose Hellos read as
+Hellos on their own would not exercise that memory at all.
+
+### What a reader reports on it
+
+* the field document has four rows, named `Scout`, `Hello`, `Scout`, `Hello`,
+  each in the scouting MID space and none named `Init` or `Open`; each walks its
+  zid as a `zid` field, and the Hellos walk their locators as `text`;
+* the census document has four nodes. The Hello senders carry `whatami` **1**,
+  which is a peer in the handshake's own two-bit packing (a Scout states no role
+  of its own, so the two asking nodes read `null`), and their locators;
+* its `ends` array has **four** rows, in packet order: the Scout's sender at
+  `low`, the Hello's sender at `high`, twice. The receiving end of each flow (the
+  group, and the asker) has no row, because no message names it;
+* the checksum tallies are all clean: the two IPv4 header checksums verify, IPv6
+  has none to judge, and all four UDP checksums verify. The IPv6 ones are
+  mandatory (RFC 8200 section 8.1) and are computed, not left zero.
+
+### Where the bytes came from
+
+* the **Scout** is the SCOUT codec's `encode_to_vec` behind the header byte, in
+  the order `scouting_glue`'s `scout_emit` does it (version, `what`, then the
+  `I` flag, the length nibble and the zid). That action lives in
+  `wz-runtime-tokio`, which depends on `wz-capture`, so it cannot be called from
+  here: the recipe is **repeated**, and the layout test in that module
+  (`scout_emit_stages_framed_datagram`) is the layout the oracle pins the bytes
+  against;
+* the **Hello** is not laid out in the fixture at all. It is
+  `wz_session_core::scout_responder::answer_scout_from` run over the Scout, with
+  the asker's address, which is how the responder loop answers;
+* the **frames** are an Ethernet header, an IP header and a UDP header with
+  computed checksums. The multicast MACs are derived (RFC 1112 section 6.4 for
+  IPv4, RFC 2464 section 7 for IPv6) and the unicast ones are locally
+  administered placeholders;
+* the **container** is `wz_capture::pcap::write`.
+
+Three tests in `crates/wz-capture/src/discovery_capture_fixture.rs` grade it:
+
+| test | what it settles |
+|---|---|
+| `the_tracked_discovery_capture_is_byte_identical_to_what_wz_emits` | the whole file equals what the encoders emit, byte for byte |
+| `the_tracked_discovery_capture_holds_the_exchanges_it_claims` | read off the bytes with no help from the dissection: each Scout goes to the group, each Hello goes back to its Scout's sender from a non-group source, the Scout is `[mid, version, flags, zid]`, and the Hello equals the responder's answer **recomputed from the Scout the file holds** |
+| `the_tracked_discovery_capture_reaches_the_consumer_surface` | the four rows are scouting messages named in order, the zids, locators, `ends` rows and checksum tallies above, and the control: the Hellos alone are not Hellos |
+
+`scripts/lib/capture_provenance_gate.sh` runs them (under `--features dissect`)
+on every push, beside the other sets.
+
+### What it does not prove
+
+* **That a stock zenoh or zenoh-pico node emits these bytes.** The Scout and the
+  Hello are wz's own encoders'. zenoh 1.10.1's scouting initiator builds its
+  Scout with `zid: None` (`net/runtime/orchestrator.rs:1010-1014`); this file's
+  Scouts do carry one, because wz's scouting window sets it, and a Scout without
+  a zid seats nobody in `ends`. A capture of the other shape is not here. The
+  version byte `0x09` is zenoh's (`zenoh-protocol` 1.10.1, `src/lib.rs:31`).
+* **An IPv6 scouting address zenoh uses.** zenoh ships no IPv6 default (searched
+  in `zenoh-config` and `zenoh` 1.10.1); `ff02::224` is the link-local group the
+  crate's IPv6 fixtures already use.
+* **Extensions, or a Hello from a router or a client.** Neither is in the file.
+* **A reply socket's real port.** `38117` is a choice that is neither the
+  group's nor the asker's, which is what the two ends of a host-to-host flow need.
+
+### Regenerating
+
+```sh
+cargo test -p wz-capture --features dissect --lib \
+  refresh_the_tracked_discovery_capture -- --ignored
+cargo test -p wz-capture --features dissect --lib discovery_capture
+```

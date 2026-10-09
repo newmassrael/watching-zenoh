@@ -91,6 +91,18 @@ EXPECTED_MIDSESSION=(
 FILTER_MIDSESSION="midsession_capture"
 FEATURES_MIDSESSION="dissect"
 
+# Open-debt item 808 -- the FOURTH tracked capture: a Scout and the Hello that
+# answers it, over IPv4 and over IPv6. The Hello is the responder's own decision
+# over the Scout the file holds, and the last oracle reads the field and census
+# documents, hence `dissect`.
+EXPECTED_DISCOVERY=(
+    the_tracked_discovery_capture_is_byte_identical_to_what_wz_emits
+    the_tracked_discovery_capture_holds_the_exchanges_it_claims
+    the_tracked_discovery_capture_reaches_the_consumer_surface
+)
+FILTER_DISCOVERY="discovery_capture"
+FEATURES_DISCOVERY="dissect"
+
 # Grade a `cargo test` transcript against the oracle names that follow it.
 # Separated from the run so `--selftest` can drive it over transcripts that never
 # came from cargo, which is the only way to show this gate can still fail.
@@ -172,7 +184,8 @@ selftest() {
     selftest_set raweth_capture_fixture "${EXPECTED[@]}" || return 1
     selftest_set compressed_capture_fixture "${EXPECTED_COMPRESSED[@]}" || return 1
     selftest_set midsession_capture_fixture "${EXPECTED_MIDSESSION[@]}" || return 1
-    echo "capture-provenance SELFTEST: 4 arm(s) of 4 over each of 3 set(s) — all-ok passes; FAILED, absent and empty each refused"
+    selftest_set discovery_capture_fixture "${EXPECTED_DISCOVERY[@]}" || return 1
+    echo "capture-provenance SELFTEST: 4 arm(s) of 4 over each of 4 set(s) — all-ok passes; FAILED, absent and empty each refused"
     return 0
 }
 
@@ -219,4 +232,14 @@ if [[ $run_rc -ne 0 ]]; then
     tail -40 "$log" >&2
     exit 1
 fi
-grade_transcript "$log" "${EXPECTED_MIDSESSION[@]}"
+grade_transcript "$log" "${EXPECTED_MIDSESSION[@]}" || exit 1
+
+# The fourth, under `dissect` for the same reason.
+(cd "$REPO_ROOT/crates" && cargo test -p "$CRATE" --features "$FEATURES_DISCOVERY" --lib "$FILTER_DISCOVERY") >"$log" 2>&1
+run_rc=$?
+if [[ $run_rc -ne 0 ]]; then
+    echo "  capture-provenance: \`cargo test -p ${CRATE} --features ${FEATURES_DISCOVERY} --lib ${FILTER_DISCOVERY}\` exited ${run_rc}" >&2
+    tail -40 "$log" >&2
+    exit 1
+fi
+grade_transcript "$log" "${EXPECTED_DISCOVERY[@]}"
