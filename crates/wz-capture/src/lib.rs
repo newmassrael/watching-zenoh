@@ -291,14 +291,10 @@ pub mod payload_decode;
 mod payload_described;
 pub mod pcap;
 pub mod pcapng;
-/// Field VALUES, as JSON, turned into protobuf wire bytes by the types a
-/// `.proto` schema gives them: the sending half of what [`proto_schema`] reads.
-///
-/// Ungated and dependency-free like [`proto_schema`], over the workspace's one
-/// JSON reader.
+// No outer docs on these two, for the reason the `e2e_*` modules give: an outer
+// doc is merged with the module's own `//!` docs and their links would then be
+// resolved from this scope instead of from the module.
 pub mod proto_encode;
-/// The verdict document of [`proto_encode`]: the bytes as hex, or the place the
-/// values or the schema were refused.
 pub mod proto_encode_json;
 #[cfg(test)]
 mod proto_encode_tests;

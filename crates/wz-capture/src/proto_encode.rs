@@ -831,9 +831,13 @@ impl Encoder<'_, '_, '_> {
                 reason,
             ));
         };
-        let mut members = self.resolve(msg, entries, path)?;
-        // A null leaves the field out, as if it were not written.
-        members.retain(|m| !matches!(m.value, Json5Value::Null));
+        // A null leaves the field out, as if it were not written. (The key was
+        // resolved first, so a null under a key that is no field is still refused.)
+        let mut members: Vec<Member<'_>> = self
+            .resolve(msg, entries, path)?
+            .into_iter()
+            .filter(|m| !matches!(m.value, Json5Value::Null))
+            .collect();
 
         // At most one member of a oneof.
         let mut taken: BTreeMap<usize, usize> = BTreeMap::new();

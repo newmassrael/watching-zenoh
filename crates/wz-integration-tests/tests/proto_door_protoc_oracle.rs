@@ -2665,8 +2665,12 @@ fn value_corpus() -> Vec<ValueCase> {
             "the largest float and a double beyond it",
             "syntax = \"proto3\";\nmessage M { float a = 1; double b = 2; }",
             "M",
-            r#"{"a":3.4028235e38,"b":1e300}"#,
-            "a: 3.4028235e38 b: 1e300",
+            // The largest float written out in full: protoc's text parser reads a
+            // float through a double and a release may turn a double above the
+            // largest float into infinity, so the shortest spelling that rounds
+            // to it (3.4028235e38) is not a safe input for every judge.
+            r#"{"a":3.4028234663852886e38,"b":1e300}"#,
+            "a: 3.4028234663852886e38 b: 1e300",
         ),
         value_case(
             "not-a-number and the infinities",
