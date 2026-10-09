@@ -20463,6 +20463,21 @@ layer_c1cc_api_compat_c() {
         --test-threads=1 \
         --exact a_node_scouting_on_an_ipv6_group_by_an_ipv6_interface_behaves_identically_on_wz_and_libzenohc \
         || return 1
+    # R3138 -- the interface key as TEXT: a name, a padded name, a comma list, a name nothing
+    # holds, an interface that is down, one that holds no IPv4 address. The real library splits on
+    # commas, trims, takes a literal as it is and a name as the first IPv4 of that interface,
+    # up or not, and leaves out what it does not find, so a node left with nothing to scout by
+    # still opens and ends alone. The two such cases are asserted from that source; every other
+    # text takes the real library's row and asks wz to end it the same way. Before the change wz
+    # failed the open (-4) on eighteen of the twenty texts of the host this was written on. The
+    # texts come from the host's own tables, so a host with no multicast interface grades none.
+    _runci_guarded_test \
+        "C1cc a_node_scouting_by_an_interface_list_or_name_behaves_identically_on_wz_and_libzenohc" 1 \
+        cargo test -p wz-integration-tests \
+        --test zenoh_c_scouting_twice_and_diff -- --ignored --quiet \
+        --test-threads=1 \
+        --exact a_node_scouting_by_an_interface_list_or_name_behaves_identically_on_wz_and_libzenohc \
+        || return 1
     _runci_guarded_test \
         "C1cc an_advanced_subscriber_of_the_publishers_own_session_hears_it_on_wz_and_libzenohc" 1 \
         cargo test -p wz-integration-tests \

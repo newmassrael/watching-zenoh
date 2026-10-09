@@ -1094,7 +1094,13 @@ HOST_GATED_CI_TARGETS: dict[str, str] = {
 # and asks it three thousand times from the same session, counting the replies of each ask
 # (`api-compat-c zenoh-c->wz`). The real library's count is asserted first. Measured by
 # `scripts/audit-crossimpl-proof.sh`.
-FOREIGN_ADJUDICATOR_LINKS = 1051
+# R3138 -- 1051 -> 1052, RISING by one: a new test in `zenoh_c_scouting_twice_and_diff.rs` that
+# runs one C program linked at the real `libzenohc` and at wz's C ABI, gives `scouting/multicast/
+# interface` a name, a padded name, a comma list, a name nothing holds and an interface that has
+# no IPv4 address or is down, and compares how two peers end (`api-compat-c zenoh-c->wz`). The
+# real library's rows are asserted first where its source decides them. Measured by
+# `scripts/audit-crossimpl-proof.sh`.
+FOREIGN_ADJUDICATOR_LINKS = 1052
 
 # ── Execution disclosure ────────────────────────────────────────────────────────
 #

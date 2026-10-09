@@ -2811,3 +2811,134 @@ fn a_node_scouting_on_an_ipv6_group_by_an_ipv6_interface_behaves_identically_on_
         addresses.len()
     );
 }
+
+/// The interfaces of this host a Scout can leave by, read from the kernel's own tables: up,
+/// multicast-capable, not loopback, each with its FIRST IPv4 address in the kernel's order (or
+/// none). The names are the host's, never typed by the row.
+fn host_multicast_interfaces() -> Vec<(String, Option<String>)> {
+    const IFF_UP: u32 = 0x1;
+    const IFF_LOOPBACK: u32 = 0x8;
+    const IFF_MULTICAST: u32 = 0x1000;
+    let Ok(dir) = std::fs::read_dir("/sys/class/net") else {
+        return Vec::new();
+    };
+    let mut names: Vec<String> = dir
+        .filter_map(Result::ok)
+        .filter_map(|entry| entry.file_name().into_string().ok())
+        .collect();
+    names.sort();
+    let mut found = Vec::new();
+    for name in names {
+        let flags = std::fs::read_to_string(format!("/sys/class/net/{name}/flags"))
+            .ok()
+            .and_then(|t| u32::from_str_radix(t.trim().trim_start_matches("0x"), 16).ok())
+            .unwrap_or(0);
+        if flags & IFF_UP == 0 || flags & IFF_MULTICAST == 0 || flags & IFF_LOOPBACK != 0 {
+            continue;
+        }
+        let first_v4 = std::process::Command::new("ip")
+            .args(["-o", "-4", "addr", "show", "dev", &name])
+            .output()
+            .ok()
+            .and_then(|out| String::from_utf8(out.stdout).ok())
+            .and_then(|text| {
+                text.split_whitespace()
+                    .skip_while(|word| *word != "inet")
+                    .nth(1)
+                    .and_then(|cidr| cidr.split('/').next().map(str::to_owned))
+            });
+        found.push((name, first_v4));
+    }
+    found
+}
+
+/// The interface key as a list and as a name. Upstream's `get_interfaces` splits the text on commas,
+/// trims each part, takes an address literal as it is and otherwise asks `get_interface` for the
+/// FIRST IPv4 address of the interface of that name; a part that finds nothing is logged and
+/// dropped (`zenoh/src/net/runtime/orchestrator.rs` @ `pub fn get_interfaces`). So a name that
+/// matches nothing, and an interface that holds no IPv4 address, leave the node with no interface
+/// to scout by: the open succeeds, nothing is sent, and the node ends alone. Those two are asserted
+/// from the source, as the real library's rows; every other string reaches a host's interface, and
+/// whether two peers then meet is the host's (as it is in the IPv6 row), so the real library's row
+/// for it is taken as it is and the wz arm must end the same way.
+///
+/// A host with no such interface grades NOTHING and says so.
+// wz-proves: api-compat-c zenoh-c->wz partial
+#[test]
+#[ignore = "reads a zenoh-c oracle; run by run-ci Layer C1cc (which builds the matching \
+            ABI arm this needs)"]
+fn a_node_scouting_by_an_interface_list_or_name_behaves_identically_on_wz_and_libzenohc() {
+    let Some(programs) = programs() else {
+        return;
+    };
+    let interfaces = host_multicast_interfaces();
+    let mut cases: Vec<(String, bool)> = Vec::new();
+    for (name, first_v4) in &interfaces {
+        match first_v4 {
+            Some(address) => {
+                for text in [
+                    name.clone(),
+                    format!("  {name}  "),
+                    format!("{name},{address}"),
+                    format!("{address},{name}"),
+                    format!("no-such-nic0,{address}"),
+                    format!("{address},no-such-nic0"),
+                ] {
+                    cases.push((text, false));
+                }
+            }
+            // Up and multicast-capable, and no IPv4 address to scout by.
+            None => cases.push((name.clone(), true)),
+        }
+    }
+    cases.push(("no-such-nic0".to_owned(), true));
+    let mut mismatches: Vec<String> = Vec::new();
+    for (n, (text, alone_by_source)) in cases.iter().enumerate() {
+        let key = format!("wz/scouting/ifacelist/{n}");
+        let group = next_group();
+        let (oracle_y, oracle_x) =
+            two_peers_on_iface(&programs.reference, &programs.reference, &key, &group, text);
+        let met = "open=0 | declare=0 senders=X,Y dups=0";
+        for (row, tag) in [(&oracle_y.row, "Y"), (&oracle_x.row, "X")] {
+            let alone = format!("open=0 | declare=0 senders={tag} dups=0");
+            if *alone_by_source {
+                assert_eq!(
+                    *row, alone,
+                    "the REAL library, given {text:?}, has no interface to scout by, so its node \
+                     ends alone (orchestrator.rs @ get_interfaces)"
+                );
+            } else {
+                assert!(
+                    row == met || *row == alone,
+                    "the REAL library's row for a peer on {group} by {text:?} is neither met nor \
+                     alone: {row}"
+                );
+            }
+        }
+        let (wz_y, wz_x) =
+            two_peers_on_iface(&programs.wz, &programs.reference, &key, &group, text);
+        // Every text is graded before the row decides: which texts differ, and how, is the
+        // finding, and the first one alone hides the rest.
+        if (wz_y.row.as_str(), wz_x.row.as_str()) != (oracle_y.row.as_str(), oracle_x.row.as_str())
+        {
+            mismatches.push(format!(
+                "{text:?}: wz {} / {}, real {} / {}",
+                wz_y.row, wz_x.row, oracle_y.row, oracle_x.row
+            ));
+        }
+        eprintln!("graded {text:?}: {} / {}", oracle_y.row, oracle_x.row);
+    }
+    eprintln!(
+        "graded {} interface text(s) over {} multicast interface(s) of this host: {interfaces:?}",
+        cases.len(),
+        interfaces.len()
+    );
+    assert!(
+        mismatches.is_empty(),
+        "§5.27 api-compat-c: a wz peer (first) and a real peer do not end as two real peers do \
+         by {} of {} interface text(s):\n{}",
+        mismatches.len(),
+        cases.len(),
+        mismatches.join("\n")
+    );
+}
