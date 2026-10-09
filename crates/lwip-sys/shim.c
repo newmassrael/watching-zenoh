@@ -108,6 +108,31 @@ u32_t wz_lwip_route_src(u32_t dst) {
     return ip4_addr_get_u32(netif_ip4_addr(n));
 }
 
+/* ARCHITECTURE section 9.1 -- the payload pbufs lent to a sender to write a
+ * datagram into. Allocated here, and freed here, so a count of the ones still out
+ * is exact: a pbuf a sender forgot to give back is a leak on a fixed MCU heap, and
+ * on the host port (libc malloc, no lwIP statistics) nothing else would show it. */
+static u32_t wz_tx_pbufs_out;
+
+struct pbuf *wz_lwip_tx_pbuf_alloc(u16_t len) {
+    struct pbuf *p = pbuf_alloc(PBUF_TRANSPORT, len, PBUF_RAM);
+    if (p != NULL) {
+        wz_tx_pbufs_out++;
+    }
+    return p;
+}
+
+void wz_lwip_tx_pbuf_free(struct pbuf *p) {
+    if (p != NULL) {
+        wz_tx_pbufs_out--;
+        pbuf_free(p);
+    }
+}
+
+u32_t wz_lwip_tx_pbufs_out(void) {
+    return wz_tx_pbufs_out;
+}
+
 /* The local port `pcb` is bound to (host order), 0 for no pcb. */
 u16_t wz_lwip_udp_local_port(const struct udp_pcb *pcb) {
     return pcb == NULL ? 0 : pcb->local_port;

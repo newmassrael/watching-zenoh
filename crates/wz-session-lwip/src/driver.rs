@@ -10,9 +10,19 @@ use alloc::string::String;
 use core::cell::{Cell, OnceCell, RefCell};
 
 use wz_link_lwip::rx_sockets::{SessionRxSocket, SESSION_RX_SLOT_SIZE};
-use wz_link_lwip::Datagram;
-use wz_session_core::link::{BoxedLinkDriver, LinkDropCause, LinkEndpoints, LinkSendOutcome};
+use wz_link_lwip::{Datagram, TxPayload};
+use wz_session_core::link::{
+    BoxedLinkDriver, LinkDropCause, LinkEndpoints, LinkSendOutcome, TxSlot, TxSlotGrant,
+};
+use wz_session_core::qos::Priority;
 use wz_session_core::reliability::Reliability;
+
+/// How many outbound payloads this driver may have lent at once. The session
+/// encodes and sends one frame under its conduit lock, so one is in flight at a
+/// time; the second is for a lend that is open while another path reaches the
+/// driver, and a lend beyond them is simply not granted (the session encodes on
+/// the heap).
+const LENT_MAX: usize = 2;
 
 /// The session socket shared by the drive loop (inbound `try_recv`) and
 /// the FSM action layer (outbound `send_blocking`). A single-task
@@ -51,6 +61,9 @@ pub struct LwipUdpDriver {
     /// Once written it is the link; a later datagram from elsewhere does not
     /// rename it.
     endpoints: OnceCell<LinkEndpoints>,
+    /// ARCHITECTURE section 9.1 — the payload buffers lent to the session and not
+    /// yet sent or given back, by slot number. Single-task, so a `RefCell`.
+    lent: RefCell<[Option<TxPayload>; LENT_MAX]>,
 }
 
 /// `udp/a.b.c.d:port`, zenoh's rendering of a UDP locator.
@@ -68,6 +81,7 @@ impl LwipUdpDriver {
             socket,
             peer: Cell::new((peer_addr, peer_port)),
             endpoints: OnceCell::new(),
+            lent: RefCell::new([const { None }; LENT_MAX]),
         };
         driver.note_endpoints(peer_addr, peer_port);
         driver
@@ -132,6 +146,64 @@ impl BoxedLinkDriver for LwipUdpDriver {
         }
     }
 
+    // ARCHITECTURE section 9.1 — lend the session the memory of the pbuf lwIP will
+    // send, so the frame is encoded once, into the datagram itself.
+    //
+    // `send_blocking` is handed bytes already written somewhere else, so it
+    // allocates a pbuf and copies them in. A pbuf allocated at the transport layer
+    // has the room for the UDP, IP and Ethernet headers in front of its payload,
+    // so lwIP writes those in place and the frame that reaches a MAC is one
+    // contiguous piece. The headers are lwIP's, not the session's, so the
+    // headroom the session must leave is none.
+    fn tx_slot_acquire(&self, want: usize, _priority: Priority) -> Option<TxSlotGrant> {
+        let mut lent = self.lent.borrow_mut();
+        let index = lent.iter().position(Option::is_none)?;
+        // `want` is a hint (the codec's worst case); the socket caps it at the
+        // width it could receive, and an encode that outgrows what was lent falls
+        // back to the heap.
+        lent[index] = Some(self.socket.borrow().alloc_tx_payload(want)?);
+        Some(TxSlotGrant {
+            slot: TxSlot(index as u32),
+            headroom: 0,
+        })
+    }
+
+    fn tx_slot_storage(&self, slot: TxSlot) -> (*mut u8, usize) {
+        self.lent.borrow()[slot.0 as usize]
+            .as_ref()
+            .expect("a slot the session names is a slot this driver lent")
+            .storage()
+    }
+
+    fn tx_slot_send(
+        &self,
+        slot: TxSlot,
+        start: usize,
+        len: usize,
+        _reliability: Reliability,
+        _priority: Priority,
+    ) -> LinkSendOutcome {
+        let payload = self.lent.borrow_mut()[slot.0 as usize]
+            .take()
+            .expect("a slot the session names is a slot this driver lent");
+        // No headroom was asked for, so the frame starts at the payload.
+        debug_assert_eq!(start, 0, "this driver lends with no headroom");
+        let (addr, port) = self.peer.get();
+        match self
+            .socket
+            .borrow_mut()
+            .send_tx_payload(payload, start + len, addr, port)
+        {
+            Ok(()) => LinkSendOutcome::Sent,
+            Err(_) => LinkSendOutcome::Dropped(LinkDropCause::WriterGone),
+        }
+    }
+
+    fn tx_slot_abort(&self, slot: TxSlot) {
+        // Dropping the payload gives the pbuf back to lwIP.
+        drop(self.lent.borrow_mut()[slot.0 as usize].take());
+    }
+
     fn open_blocking(&self) {
         // UDP is connectionless: the session "open" is the zenoh-layer
         // InitSyn / OpenSyn handshake, not a transport connect.
@@ -144,5 +216,152 @@ impl BoxedLinkDriver for LwipUdpDriver {
 
     fn link_endpoints(&self) -> Option<&LinkEndpoints> {
         self.endpoints.get()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use alloc::vec::Vec;
+
+    use wz_link_lwip::ipv4_addr_loopback;
+    use wz_link_lwip::rx_sockets::bind_session_rx;
+    use wz_session_core::tx_buf::TxBuf;
+    use wz_session_core::tx_lease::TxLease;
+
+    /// A driver whose peer is its own socket, so what it sends loops back.
+    fn looped(link: &wz_link_lwip::LwipLink, port: u16) -> LwipUdpDriver {
+        let socket: SharedSessionSocket = Rc::new(RefCell::new(
+            bind_session_rx(link, port).expect("bind session rx"),
+        ));
+        LwipUdpDriver::new(socket, ipv4_addr_loopback(), port)
+    }
+
+    /// Everything the loopback netif delivered, as payloads.
+    fn delivered(link: &wz_link_lwip::LwipLink, driver: &LwipUdpDriver) -> Vec<Vec<u8>> {
+        link.poll_loopback();
+        link.check_timeouts();
+        let mut out = Vec::new();
+        while let Some(dg) = driver.try_recv() {
+            out.push(dg.data[..].to_vec());
+        }
+        out
+    }
+
+    /// The datagram a frame written into the lent pbuf becomes is the datagram the
+    /// copying send makes of the same bytes: the lend changes where the bytes are
+    /// written and nothing on the wire.
+    #[test]
+    fn a_frame_written_into_the_lent_pbuf_is_the_datagram_the_copying_send_makes() {
+        let (_serial, link) = wz_link_lwip::lwip_test_link();
+        let driver = looped(&link, 7480);
+        let frame: &[u8] = b"a frame encoded straight into the pbuf lwIP sends";
+
+        let mut lease =
+            TxLease::acquire(&driver, frame.len(), Priority::DEFAULT).expect("lwIP lends a pbuf");
+        std::assert!(lease.capacity() >= frame.len());
+        lease.append(frame).expect("fits the lent pbuf");
+        std::assert_eq!(
+            lease.send(Reliability::Reliable, Priority::DEFAULT),
+            LinkSendOutcome::Sent
+        );
+        let lent = delivered(&link, &driver);
+
+        std::assert_eq!(
+            driver.send_blocking(frame, Reliability::Reliable),
+            LinkSendOutcome::Sent
+        );
+        let copied = delivered(&link, &driver);
+
+        std::assert_eq!(lent, copied, "same bytes on the wire either way");
+        std::assert_eq!(lent, std::vec![frame.to_vec()]);
+        std::assert_eq!(
+            wz_link_lwip::tx_payloads_out(),
+            0,
+            "a sent lend is settled: lwIP holds the pbuf, the driver does not"
+        );
+    }
+
+    /// The datagram is the bytes written and not the size asked for: the pbuf is
+    /// shrunk to what the session wrote before it is sent.
+    #[test]
+    fn the_datagram_is_the_bytes_written_not_the_size_asked_for() {
+        let (_serial, link) = wz_link_lwip::lwip_test_link();
+        let driver = looped(&link, 7481);
+
+        let mut lease =
+            TxLease::acquire(&driver, 600, Priority::DEFAULT).expect("lwIP lends a pbuf");
+        std::assert!(lease.capacity() >= 600, "room for what was asked");
+        lease.append(b"short").expect("fits");
+        std::assert_eq!(
+            lease.send(Reliability::Reliable, Priority::DEFAULT),
+            LinkSendOutcome::Sent
+        );
+
+        std::assert_eq!(delivered(&link, &driver), std::vec![b"short".to_vec()]);
+    }
+
+    /// A lend given back unsent sends nothing and gives lwIP its pbuf back.
+    #[test]
+    fn an_abandoned_lend_sends_nothing_and_frees_its_place() {
+        let (_serial, link) = wz_link_lwip::lwip_test_link();
+        let driver = looped(&link, 7482);
+
+        for _ in 0..(LENT_MAX * 3) {
+            let mut lease = TxLease::acquire(&driver, 64, Priority::DEFAULT)
+                .expect("the place came back after each abandoned lend");
+            lease.append(b"never sent").expect("fits");
+            std::assert_eq!(wz_link_lwip::tx_payloads_out(), 1, "out while held");
+            drop(lease);
+            std::assert_eq!(
+                wz_link_lwip::tx_payloads_out(),
+                0,
+                "and given back to lwIP when abandoned"
+            );
+        }
+        std::assert!(delivered(&link, &driver).is_empty());
+    }
+
+    /// Only so many payloads are lent at once, and a refused lend is not an error:
+    /// it is the session's cue to encode on the heap.
+    #[test]
+    fn no_more_than_the_table_holds_is_lent_at_once() {
+        let (_serial, link) = wz_link_lwip::lwip_test_link();
+        let driver = looped(&link, 7483);
+
+        let first = driver
+            .tx_slot_acquire(32, Priority::DEFAULT)
+            .expect("first lend");
+        let second = driver
+            .tx_slot_acquire(32, Priority::DEFAULT)
+            .expect("second lend");
+        std::assert_ne!(first.slot, second.slot);
+        std::assert_eq!(first.headroom, 0, "lwIP puts its own headers in front");
+        std::assert!(
+            driver.tx_slot_acquire(32, Priority::DEFAULT).is_none(),
+            "a third is not lent"
+        );
+        driver.tx_slot_abort(first.slot);
+        let again = driver
+            .tx_slot_acquire(32, Priority::DEFAULT)
+            .expect("a returned place is lent again");
+        std::assert_eq!(again.slot, first.slot);
+        driver.tx_slot_abort(again.slot);
+        driver.tx_slot_abort(second.slot);
+    }
+
+    /// The lent size is capped at the width the socket could receive, as the
+    /// copying send truncates to it: a socket does not send what it cannot take.
+    #[test]
+    fn the_lent_size_is_capped_at_the_width_the_socket_can_receive() {
+        let (_serial, link) = wz_link_lwip::lwip_test_link();
+        let driver = looped(&link, 7484);
+
+        let grant = driver
+            .tx_slot_acquire(1_000_000, Priority::DEFAULT)
+            .expect("a capped lend");
+        let (_, capacity) = driver.tx_slot_storage(grant.slot);
+        std::assert_eq!(capacity, SESSION_RX_SLOT_SIZE);
+        driver.tx_slot_abort(grant.slot);
     }
 }

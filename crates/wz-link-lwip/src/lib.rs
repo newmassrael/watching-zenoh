@@ -68,8 +68,8 @@ use heapless::Vec;
 use lwip_sys::{
     err_enum_t_ERR_OK, igmp_joingroup, igmp_leavegroup, ip4_addr_t, ip_addr_t, lwip_init,
     netif_poll_all, pbuf, pbuf_alloc, pbuf_copy_partial, pbuf_free, pbuf_layer_PBUF_TRANSPORT,
-    pbuf_take, pbuf_type_PBUF_RAM, sys_check_timeouts, u16_t, udp_bind, udp_new, udp_pcb, udp_recv,
-    udp_remove, udp_sendto,
+    pbuf_realloc, pbuf_take, pbuf_type_PBUF_RAM, sys_check_timeouts, u16_t, udp_bind, udp_new,
+    udp_pcb, udp_recv, udp_remove, udp_sendto,
 };
 
 // ── R311ip — MCU rx buffer-pool SSOT consumers ──────────────────────
@@ -677,6 +677,59 @@ impl<const N: usize, const Q: usize> LwipUdpSocket<N, Q> {
         unsafe { send_datagram(self.inner.pcb.as_ptr(), dst_addr, dst_port, &payload[..len]) }
     }
 
+    /// ARCHITECTURE section 9.1 — a payload buffer for a sender to write the
+    /// datagram into, instead of a slice it has already written elsewhere.
+    ///
+    /// [`send_to`](Self::send_to) takes bytes and copies them into a pbuf lwIP
+    /// allocates; this hands over that pbuf's memory first, so the bytes are
+    /// written once, where lwIP will send them from (and from where a MAC that
+    /// reads in place will, in turn, read them).
+    ///
+    /// At most `N` bytes, the same cap `send_to` truncates to: a socket does not
+    /// send what it could not receive. `None` when lwIP has no pbuf of that size,
+    /// which a sender answers by encoding on the heap.
+    pub fn alloc_tx_payload(&self, want: usize) -> Option<TxPayload> {
+        let len = u16::try_from(want.min(N)).ok()?;
+        // SAFETY: returns an owned pbuf, counted until `TxPayload` gives it back,
+        // or null.
+        let p = unsafe { lwip_sys::wz_lwip_tx_pbuf_alloc(len) };
+        Some(TxPayload {
+            p: NonNull::new(p)?,
+            capacity: usize::from(len),
+        })
+    }
+
+    /// Send the first `len` bytes of `payload` to `dst_addr:dst_port` and give
+    /// the buffer back to lwIP. The datagram is exactly what the sender wrote:
+    /// no copy is made here.
+    pub fn send_tx_payload(
+        &mut self,
+        payload: TxPayload,
+        len: usize,
+        dst_addr: u32,
+        dst_port: u16,
+    ) -> Result<(), LinkError> {
+        if len > payload.capacity {
+            return Err(LinkError::PbufAlloc);
+        }
+        // SAFETY: `payload` owns a live single pbuf of `capacity >= len` bytes;
+        // shrinking a pbuf to a length no greater than its own is the documented
+        // use of `pbuf_realloc`, and it releases the unused tail.
+        unsafe { pbuf_realloc(payload.p.as_ptr(), len as u16) };
+        let dst: ip_addr_t = ip_addr_t { addr: dst_addr };
+        // SAFETY: the pcb is valid for the socket's life; the pbuf is ours and
+        // `udp_sendto` never takes it (`send_datagram`); it is released when
+        // `payload` drops, after any chain lwIP or a MAC still reads in place has
+        // taken its own reference.
+        let sent =
+            unsafe { udp_sendto(self.inner.pcb.as_ptr(), payload.p.as_ptr(), &dst, dst_port) };
+        if sent as core::ffi::c_int != err_enum_t_ERR_OK {
+            Err(LinkError::SendFailed(sent))
+        } else {
+            Ok(())
+        }
+    }
+
     /// Non-blocking dequeue from the per-socket receive queue. Returns
     /// `None` if no datagram has arrived since the last call (callers
     /// must drive the lwIP input path via `LwipLink::poll_loopback`
@@ -736,6 +789,48 @@ pub(crate) unsafe fn send_datagram(
     // SAFETY: p is ours on every path above; the stack holds no reference.
     unsafe { pbuf_free(p) };
     result
+}
+
+/// A UDP payload buffer lwIP allocated for a sender to write a datagram into
+/// (ARCHITECTURE section 9.1): the memory of a single pbuf, with room in front of
+/// it for the headers lwIP puts there, so the headers and the payload end up
+/// contiguous and reach a MAC as one piece.
+///
+/// It owns the pbuf. Dropped unsent it frees it; sent through
+/// [`LwipUdpSocket::send_tx_payload`] it is freed after the send, by which time a
+/// MAC that reads in place has taken the reference of its own that keeps the
+/// frame alive.
+pub struct TxPayload {
+    p: NonNull<pbuf>,
+    capacity: usize,
+}
+
+impl TxPayload {
+    /// The first byte of the payload area and how many bytes it holds. Valid until
+    /// this value is sent or dropped; the caller writes into it and nothing else
+    /// touches it meanwhile.
+    pub fn storage(&self) -> (*mut u8, usize) {
+        // SAFETY: `p` is a live pbuf this value owns.
+        let payload = unsafe { (*self.p.as_ptr()).payload } as *mut u8;
+        (payload, self.capacity)
+    }
+}
+
+impl Drop for TxPayload {
+    fn drop(&mut self) {
+        // SAFETY: `p` is ours; a payload that was sent has had its own reference
+        // taken by whoever still reads it, so this drops only ours.
+        unsafe { lwip_sys::wz_lwip_tx_pbuf_free(self.p.as_ptr()) };
+    }
+}
+
+/// How many payload buffers lent through [`LwipUdpSocket::alloc_tx_payload`] are
+/// still out, neither sent nor given back. Zero when every lend has been settled;
+/// a count that climbs is a sender leaking pbufs, which a fixed MCU heap cannot
+/// afford.
+pub fn tx_payloads_out() -> u32 {
+    // SAFETY: reads a counter the shim owns.
+    unsafe { lwip_sys::wz_lwip_tx_pbufs_out() }
 }
 
 impl<const N: usize, const Q: usize> Drop for LwipUdpSocket<N, Q> {

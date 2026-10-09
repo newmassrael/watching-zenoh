@@ -464,4 +464,135 @@ mod tests {
         // is why assertion 2 counts executor passes rather than events.
         std::assert_eq!(iterations.get(), 0);
     }
+
+    /// ARCHITECTURE section 9.1 on the MCU profile, the two ends joined: the real
+    /// session encodes a push straight into the pbuf the real lwIP driver lends,
+    /// and the datagram that comes out is the one the same session makes through a
+    /// driver that lends nothing. Each end is pinned alone (the session against a
+    /// fake lender, the driver against hand-made frames); this is the join, where
+    /// the headroom the driver grants must be the room the session's encode starts
+    /// after.
+    #[cfg(feature = "codec-push")]
+    #[test]
+    fn a_push_encoded_into_the_lent_pbuf_is_the_datagram_a_copying_driver_sends() {
+        /// The same driver with the lend taken away: every default method.
+        struct NoLend(Rc<LwipUdpDriver>);
+        impl BoxedLinkDriver for NoLend {
+            fn send_blocking(&self, bytes: &[u8], reliability: Reliability) -> LinkSendOutcome {
+                self.0.send_blocking(bytes, reliability)
+            }
+            fn open_blocking(&self) {}
+            fn close_blocking(&self) {}
+        }
+
+        let (_serial, link) = wz_link_lwip::lwip_test_link();
+        let payload: &[u8] = b"joined at both ends";
+
+        let push_through = |driver_sink: Rc<dyn BoxedLinkDriver>| {
+            let runtime = CoopRuntime::new(FrozenClock);
+            let clock = CoopTime::new(&runtime);
+            let actions =
+                SessionLinkActions::<CoopRuntime<FrozenClock>, CoopTime<FrozenClock>>::new_generic(
+                    driver_sink,
+                    test_params(),
+                    clock,
+                );
+            actions
+                .send_push_literal("home/lent", payload, true)
+                .expect("push");
+        };
+        let delivered = |driver: &LwipUdpDriver| {
+            link.poll_loopback();
+            link.check_timeouts();
+            let mut out = vec![];
+            while let Some(dg) = driver.try_recv() {
+                out.push(dg.data[..].to_vec());
+            }
+            out
+        };
+
+        /// The real driver behind a count of which door each frame used: the
+        /// datagram is the same either way, so without it a lend that quietly fell
+        /// back to the copying send would pass and prove nothing about the join.
+        struct Doors {
+            inner: Rc<LwipUdpDriver>,
+            by_slot: core::cell::Cell<usize>,
+            by_bytes: core::cell::Cell<usize>,
+        }
+        impl BoxedLinkDriver for Doors {
+            fn send_blocking(&self, bytes: &[u8], reliability: Reliability) -> LinkSendOutcome {
+                self.by_bytes.set(self.by_bytes.get() + 1);
+                self.inner.send_blocking(bytes, reliability)
+            }
+            fn open_blocking(&self) {}
+            fn close_blocking(&self) {}
+            fn tx_slot_acquire(
+                &self,
+                want: usize,
+                priority: wz_session_core::qos::Priority,
+            ) -> Option<wz_session_core::link::TxSlotGrant> {
+                self.inner.tx_slot_acquire(want, priority)
+            }
+            fn tx_slot_storage(&self, slot: wz_session_core::link::TxSlot) -> (*mut u8, usize) {
+                self.inner.tx_slot_storage(slot)
+            }
+            fn tx_slot_send(
+                &self,
+                slot: wz_session_core::link::TxSlot,
+                start: usize,
+                len: usize,
+                reliability: Reliability,
+                priority: wz_session_core::qos::Priority,
+            ) -> LinkSendOutcome {
+                self.by_slot.set(self.by_slot.get() + 1);
+                self.inner
+                    .tx_slot_send(slot, start, len, reliability, priority)
+            }
+            fn tx_slot_abort(&self, slot: wz_session_core::link::TxSlot) {
+                self.inner.tx_slot_abort(slot)
+            }
+        }
+
+        let lending = Rc::new(LwipUdpDriver::new(
+            Rc::new(RefCell::new(
+                bind_session_rx(&link, 7490).expect("bind lending"),
+            )),
+            ipv4_addr_loopback(),
+            7490,
+        ));
+        let doors = Rc::new(Doors {
+            inner: lending.clone(),
+            by_slot: Default::default(),
+            by_bytes: Default::default(),
+        });
+        push_through(doors.clone());
+        std::assert_eq!(
+            (doors.by_slot.get(), doors.by_bytes.get()),
+            (1, 0),
+            "the push went through the lent pbuf and not the copying send"
+        );
+        let lent = delivered(&lending);
+
+        let copying = Rc::new(LwipUdpDriver::new(
+            Rc::new(RefCell::new(
+                bind_session_rx(&link, 7491).expect("bind copying"),
+            )),
+            ipv4_addr_loopback(),
+            7491,
+        ));
+        push_through(Rc::new(NoLend(copying.clone())));
+        let copied = delivered(&copying);
+
+        std::assert_eq!(lent.len(), 1, "one push is one datagram");
+        std::assert_eq!(lent, copied, "the same datagram either way");
+        std::assert!(
+            lent[0].windows(payload.len()).any(|w| w == payload),
+            "and it carries the payload"
+        );
+        std::assert_eq!(
+            wz_link_lwip::tx_payloads_out(),
+            0,
+            "nothing is left out of lwIP's hands"
+        );
+    }
 }

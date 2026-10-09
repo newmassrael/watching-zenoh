@@ -57,3 +57,9 @@ void wz_ethif_remove_all(void);
 /* R2841 — a link's two ends: the routed source address, the bound port. */
 u32_t wz_lwip_route_src(u32_t dst);
 u16_t wz_lwip_udp_local_port(const struct udp_pcb *pcb);
+
+/* ARCHITECTURE section 9.1 — a payload pbuf lent to a sender to write a datagram
+ * into, counted so a leak shows. */
+struct pbuf *wz_lwip_tx_pbuf_alloc(u16_t len);
+void wz_lwip_tx_pbuf_free(struct pbuf *p);
+u32_t wz_lwip_tx_pbufs_out(void);

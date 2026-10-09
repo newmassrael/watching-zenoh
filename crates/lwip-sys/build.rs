@@ -284,6 +284,9 @@ fn main() {
         .allowlist_function("pbuf_free")
         .allowlist_function("pbuf_take")
         .allowlist_function("pbuf_copy_partial")
+        // Shrink a pbuf a sender wrote into to the bytes it wrote
+        // (`LwipUdpSocket::send_tx_payload`).
+        .allowlist_function("pbuf_realloc")
         // netif lifecycle (deploy-managed at runtime; R311az-2 uses
         // netif_default ptr for loopback/test).
         .allowlist_function("netif_add_noaddr")
@@ -318,6 +321,10 @@ fn main() {
         // R2841 — a link's routed source address and bound port (`shim.c`).
         .allowlist_function("wz_lwip_route_src")
         .allowlist_function("wz_lwip_udp_local_port")
+        // ARCHITECTURE section 9.1 -- counted payload pbufs lent to a sender.
+        .allowlist_function("wz_lwip_tx_pbuf_alloc")
+        .allowlist_function("wz_lwip_tx_pbuf_free")
+        .allowlist_function("wz_lwip_tx_pbufs_out")
         // Loopback poll (NO_SYS + LWIP_NETIF_LOOPBACK_MULTITHREADING=0
         // requires explicit poll to drain the loop_netif output queue
         // into ip_input).
