@@ -20,13 +20,14 @@
 //! link's timer pump, which is also what drives ARP's timers.
 
 use alloc::boxed::Box;
-use core::cell::RefCell;
+use core::cell::{Cell, RefCell};
 use core::ffi::c_void;
 use core::ptr::NonNull;
 
 use lwip_sys::{
-    netif, wz_ethif_add, wz_ethif_held_count, wz_ethif_input, wz_ethif_is_default, wz_ethif_seg,
-    wz_ethif_set_gather, wz_ethif_tx_done,
+    netif, wz_ethif_add, wz_ethif_held_count, wz_ethif_input, wz_ethif_input_loan,
+    wz_ethif_is_default, wz_ethif_rx_held_count, wz_ethif_seg, wz_ethif_set_gather,
+    wz_ethif_set_rx_release, wz_ethif_tx_done,
 };
 use wz_runtime_core::{TxGather, TxSegment};
 
@@ -38,6 +39,9 @@ const SEG_MAX: usize = 8;
 /// The most frames the MAC may hold in place at once, the shim's
 /// `WZ_ETHIF_HELD_MAX`.
 const HELD_MAX: usize = 8;
+/// The most received frames lwIP may hold lent at once, the shim's
+/// `WZ_ETHIF_RX_HELD_MAX`.
+const RX_HELD_MAX: usize = 8;
 
 /// The MAC seam and the frame bound, which moved to the dependency-free trait
 /// tier so that a chip's driver can implement the seam without depending on
@@ -78,6 +82,11 @@ pub struct Ipv4Config {
 /// finds it free.
 struct Shared<M> {
     mac: RefCell<M>,
+    /// Lent receive buffers lwIP finished with at a moment the MAC was borrowed
+    /// (a pbuf freed from inside a MAC call), to be given back by the next
+    /// [`EthernetIf::poll`]. At most [`RX_HELD_MAX`] are ever lent.
+    deferred_rx: [Cell<u32>; RX_HELD_MAX],
+    deferred_rx_len: Cell<usize>,
 }
 
 /// An Ethernet interface added to lwIP. Lives as long as the firmware:
@@ -145,6 +154,28 @@ unsafe extern "C" fn gather_trampoline<M: EthernetMac>(
     }
 }
 
+/// ARCHITECTURE section 9.2 -- lwIP no longer reads a received frame the MAC
+/// lent, so the buffer is the MAC's again. Called from inside lwIP, possibly while
+/// the MAC is borrowed (a pbuf freed from within a MAC call), in which case the
+/// return is parked for the next poll rather than aliased.
+unsafe extern "C" fn rx_release_trampoline<M: EthernetMac>(ctx: *mut c_void, cookie: u32) {
+    // SAFETY: `ctx` is the `&'static Shared<M>` `EthernetIf::add` registered.
+    let shared = unsafe { &*(ctx as *const Shared<M>) };
+    match shared.mac.try_borrow_mut() {
+        Ok(mut mac) => mac.return_rx(cookie),
+        Err(_) => {
+            let at = shared.deferred_rx_len.get();
+            // The shim lends at most `RX_HELD_MAX`, so the parking place cannot
+            // overflow; a cookie past it would be a shim defect, kept loud.
+            debug_assert!(at < RX_HELD_MAX, "more parked returns than frames lent");
+            if at < RX_HELD_MAX {
+                shared.deferred_rx[at].set(cookie);
+                shared.deferred_rx_len.set(at + 1);
+            }
+        }
+    }
+}
+
 impl<M: EthernetMac + 'static> EthernetIf<M> {
     /// Add `mac` to lwIP as an Ethernet interface with `ip`, and bring it and
     /// its carrier up. It becomes the default route only if it has a gateway
@@ -163,6 +194,8 @@ impl<M: EthernetMac + 'static> EthernetIf<M> {
         let hwaddr = mac.mac_address();
         let shared: &'static Shared<M> = Box::leak(Box::new(Shared {
             mac: RefCell::new(mac),
+            deferred_rx: [const { Cell::new(0) }; RX_HELD_MAX],
+            deferred_rx_len: Cell::new(0),
         }));
         // SAFETY: `hwaddr` outlives the call (the netif copies it); the
         // callback and its context are valid for the program's lifetime.
@@ -181,6 +214,10 @@ impl<M: EthernetMac + 'static> EthernetIf<M> {
             // SAFETY: the netif is lwIP's for the program's lifetime, and the
             // callback is the monomorphisation matching the registered context.
             unsafe { wz_ethif_set_gather(netif.as_ptr(), Some(gather_trampoline::<M>)) };
+        }
+        if shared.mac.borrow().loans_rx() {
+            // SAFETY: as above, for the release callback.
+            unsafe { wz_ethif_set_rx_release(netif.as_ptr(), Some(rx_release_trampoline::<M>)) };
         }
         Ok(Self {
             netif,
@@ -222,12 +259,70 @@ impl<M: EthernetMac + 'static> EthernetIf<M> {
         unsafe { wz_ethif_held_count() as usize }
     }
 
+    /// Give the MAC back the received buffers lwIP finished with while the MAC
+    /// was borrowed, which the release callback could not hand back at once.
+    fn return_deferred_rx(&self) {
+        while self.shared.deferred_rx_len.get() > 0 {
+            let at = self.shared.deferred_rx_len.get() - 1;
+            self.shared.deferred_rx_len.set(at);
+            let cookie = self.shared.deferred_rx[at].get();
+            self.shared.mac.borrow_mut().return_rx(cookie);
+        }
+    }
+
+    /// How many received frames lwIP is reading in place right now, lent by a MAC
+    /// and not yet released. Zero when nothing is lent.
+    pub fn held_rx(&self) -> usize {
+        // SAFETY: reads a counter the shim owns.
+        unsafe { wz_ethif_rx_held_count() as usize }
+    }
+
     /// Move every frame the MAC holds into lwIP. Returns how many were
     /// taken; a frame lwIP could not buffer is dropped, as a NIC would.
+    ///
+    /// A MAC that lends its received frames ([`EthernetMac::loans_rx`]) has them
+    /// read in place: lwIP is handed a pbuf that points into the MAC's own buffer,
+    /// and the buffer goes back to the MAC when lwIP frees the pbuf. Otherwise,
+    /// and for the one frame in a burst that finds the shim's table of lent frames
+    /// full, the frame is copied in.
     pub fn poll(&mut self) -> usize {
         self.reap_tx();
+        self.return_deferred_rx();
+        let lends = self.shared.mac.borrow().loans_rx();
         let mut taken = 0;
         loop {
+            if lends {
+                let loan = self.shared.mac.borrow_mut().receive_loan();
+                let Some(loan) = loan else {
+                    return taken;
+                };
+                // The MAC borrow has ended: lwIP may transmit while it handles
+                // this frame, and may free the pbuf (which returns the buffer).
+                // SAFETY: the netif is lwIP's for the program's lifetime, and the
+                // loan stays readable until `return_rx`, which the shim causes
+                // only once lwIP no longer reads it.
+                let outcome = unsafe {
+                    wz_ethif_input_loan(self.netif.as_ptr(), loan.ptr, loan.len as u16, loan.cookie)
+                };
+                match outcome {
+                    1 => taken += 1,
+                    // lwIP refused it and the shim freed the pbuf, which gave the
+                    // buffer back: a drop, as on a NIC.
+                    0 => {}
+                    // The shim could not wrap it: copy it in, then give it back.
+                    _ => {
+                        // SAFETY: as above; `wz_ethif_input` copies before it returns.
+                        let accepted = unsafe {
+                            wz_ethif_input(self.netif.as_ptr(), loan.ptr, loan.len as u16)
+                        };
+                        self.shared.mac.borrow_mut().return_rx(loan.cookie);
+                        if accepted != 0 {
+                            taken += 1;
+                        }
+                    }
+                }
+                continue;
+            }
             let len = match self.shared.mac.borrow_mut().receive(&mut self.rx[..]) {
                 Some(len) => len,
                 None => return taken,
@@ -265,6 +360,11 @@ mod tests {
     use alloc::vec::Vec;
 
     use crate::rx_sockets::bind_session_rx;
+    use wz_runtime_core::RxLoan;
+
+    /// The buffers a loaning MAC double has lent and not yet had returned, by
+    /// cookie.
+    type LentBuffers = Rc<RefCell<Vec<(u32, Vec<u8>)>>>;
 
     /// The node's end of a cable; the test holds the other end and plays
     /// the far host at the frame level.
@@ -868,5 +968,217 @@ mod tests {
         );
         std::assert_eq!(udp_of(&frame.joined), Some((7601, &PAYLOAD[..])));
         std::assert!(rig.node.held_tx() >= 1, "held while the MAC reads it");
+    }
+
+    // ---- ARCHITECTURE section 9.2: lwIP reads a received frame in place ----------
+
+    /// A MAC that lends the frames it receives out of storage of its own, and
+    /// records which buffers came back.
+    struct LoanEnd {
+        address: [u8; 6],
+        /// Frames the far side has sent, waiting to be lent.
+        inbox: Rc<RefCell<VecDeque<Vec<u8>>>>,
+        /// The lent buffers, by cookie, until they are returned.
+        lent: LentBuffers,
+        returned: Rc<RefCell<Vec<u32>>>,
+        out: Cable,
+        next: u32,
+    }
+
+    impl EthernetMac for LoanEnd {
+        fn mac_address(&self) -> [u8; 6] {
+            self.address
+        }
+        fn transmit(&mut self, frame: &[u8]) -> bool {
+            self.out.borrow_mut().push_back(frame.to_vec());
+            true
+        }
+        /// The copying door finds nothing: a frame reaching lwIP in these tests
+        /// came through the loan or did not come.
+        fn receive(&mut self, _buf: &mut [u8]) -> Option<usize> {
+            None
+        }
+        fn loans_rx(&self) -> bool {
+            true
+        }
+        fn receive_loan(&mut self) -> Option<RxLoan> {
+            let frame = self.inbox.borrow_mut().pop_front()?;
+            let cookie = self.next;
+            self.next += 1;
+            let (ptr, len) = (frame.as_ptr(), frame.len());
+            self.lent.borrow_mut().push((cookie, frame));
+            Some(RxLoan { ptr, len, cookie })
+        }
+        fn return_rx(&mut self, cookie: u32) {
+            self.lent.borrow_mut().retain(|(c, _)| *c != cookie);
+            self.returned.borrow_mut().push(cookie);
+        }
+    }
+
+    struct LoanRig {
+        node: EthernetIf<LoanEnd>,
+        inbox: Rc<RefCell<VecDeque<Vec<u8>>>>,
+        lent: LentBuffers,
+        returned: Rc<RefCell<Vec<u32>>>,
+        out: Cable,
+    }
+
+    fn loan_node(link: &LwipLink) -> LoanRig {
+        let inbox = Rc::new(RefCell::new(VecDeque::new()));
+        let lent = Rc::new(RefCell::new(Vec::new()));
+        let returned = Rc::new(RefCell::new(Vec::new()));
+        let out: Cable = Rc::new(RefCell::new(VecDeque::new()));
+        let node = EthernetIf::add(
+            link,
+            LoanEnd {
+                address: NODE_MAC,
+                inbox: inbox.clone(),
+                lent: lent.clone(),
+                returned: returned.clone(),
+                out: out.clone(),
+                next: 0,
+            },
+            Ipv4Config {
+                address: NODE_IP,
+                netmask: [255, 255, 255, 0],
+                gateway: [0, 0, 0, 0],
+            },
+        )
+        .expect("interface");
+        LoanRig {
+            node,
+            inbox,
+            lent,
+            returned,
+            out,
+        }
+    }
+
+    /// How many frames the shim has wrapped in a custom pbuf so far, process-wide:
+    /// the witness that a frame went in place and was not copied in.
+    fn loaned_total() -> u32 {
+        // SAFETY: reads a counter the shim owns.
+        unsafe { lwip_sys::wz_ethif_rx_loaned_total() }
+    }
+
+    /// The point of the seam: a datagram that arrives as a lent frame reaches the
+    /// bound socket intact, was wrapped in place and not copied in, and the buffer
+    /// goes back to the MAC exactly once, when lwIP is done with it.
+    #[test]
+    fn a_received_datagram_is_read_in_place_and_its_buffer_goes_back_once() {
+        let (_serial, link) = crate::lwip_test_link();
+        let mut rig = loan_node(&link);
+        let mut socket = bind_session_rx(&link, 7602).expect("bind");
+        let before = loaned_total();
+
+        rig.inbox
+            .borrow_mut()
+            .push_back(udp_frame(7601, 7602, b"read in place"));
+        std::assert_eq!(rig.node.poll(), 1, "lwIP took the frame");
+
+        let got = socket.try_recv().expect("the datagram came in");
+        std::assert_eq!(got.data.as_slice(), b"read in place");
+        std::assert_eq!(loaned_total(), before + 1, "it went in place, not by copy");
+        std::assert_eq!(
+            *rig.returned.borrow(),
+            std::vec![0u32],
+            "the buffer went back, once"
+        );
+        std::assert!(rig.lent.borrow().is_empty());
+        std::assert_eq!(rig.node.held_rx(), 0, "and lwIP holds nothing");
+    }
+
+    /// ARP is read in place too: the far host's reply, lent, resolves the address,
+    /// and the queued datagram leaves.
+    #[test]
+    fn an_arp_reply_read_in_place_resolves_the_address() {
+        let (_serial, link) = crate::lwip_test_link();
+        let mut rig = loan_node(&link);
+        let mut socket = bind_session_rx(&link, 7602).expect("bind");
+        rig.out.borrow_mut().clear();
+        socket
+            .send_to(crate::ipv4_addr_from_octets(FAR_IP), 7601, b"after arp")
+            .expect("send");
+
+        rig.inbox.borrow_mut().push_back(arp_reply());
+        std::assert_eq!(rig.node.poll(), 1);
+
+        let sent = rig
+            .out
+            .borrow_mut()
+            .iter()
+            .find_map(|f| udp_of(f).map(|(port, body)| (port, body.to_vec())))
+            .expect("the datagram left once ARP resolved");
+        std::assert_eq!(sent, (7601, b"after arp".to_vec()));
+        std::assert_eq!(rig.returned.borrow().len(), 1, "the reply's buffer is back");
+    }
+
+    /// A buffer is lent for as long as lwIP reads it, which may be long after the
+    /// input call returned: the first fragment of a datagram is parked in lwIP's
+    /// reassembly queue, and its buffer stays out of the MAC's hands until the rest
+    /// arrives and the datagram is delivered.
+    #[test]
+    fn a_fragment_lwip_parks_keeps_its_buffer_lent_until_reassembly_is_done() {
+        let (_serial, link) = crate::lwip_test_link();
+        let mut rig = loan_node(&link);
+        let mut socket = bind_session_rx(&link, 7602).expect("bind");
+
+        // One UDP datagram, cut in two on an 8-byte boundary: the UDP header and
+        // eight payload bytes in the first fragment, the rest in the second.
+        let payload = b"0123456789abcdefghij";
+        let mut udp = std::vec::Vec::new();
+        udp.extend_from_slice(&7601u16.to_be_bytes());
+        udp.extend_from_slice(&7602u16.to_be_bytes());
+        udp.extend_from_slice(&(8 + payload.len() as u16).to_be_bytes());
+        udp.extend_from_slice(&[0, 0]);
+        udp.extend_from_slice(payload);
+        let (first, rest) = udp.split_at(16);
+
+        let fragment = |offset8: u16, more: bool, body: &[u8]| {
+            let mut ip = std::vec::Vec::new();
+            ip.extend_from_slice(&[0x45, 0x00]);
+            ip.extend_from_slice(&(20 + body.len() as u16).to_be_bytes());
+            ip.extend_from_slice(&0x4242u16.to_be_bytes());
+            let flags = (if more { 0x2000u16 } else { 0 }) | offset8;
+            ip.extend_from_slice(&flags.to_be_bytes());
+            ip.extend_from_slice(&[64, 17, 0, 0]);
+            ip.extend_from_slice(&FAR_IP);
+            ip.extend_from_slice(&NODE_IP);
+            let sum = ipv4_checksum(&ip);
+            ip[10..12].copy_from_slice(&sum.to_be_bytes());
+            let mut f = std::vec::Vec::new();
+            f.extend_from_slice(&NODE_MAC);
+            f.extend_from_slice(&FAR_MAC);
+            f.extend_from_slice(&[0x08, 0x00]);
+            f.extend_from_slice(&ip);
+            f.extend_from_slice(body);
+            f
+        };
+
+        rig.inbox.borrow_mut().push_back(fragment(0, true, first));
+        rig.node.poll();
+        std::assert!(
+            socket.try_recv().is_none(),
+            "CONTROL: half a datagram is none"
+        );
+        std::assert!(
+            rig.returned.borrow().is_empty(),
+            "lwIP is still holding the first fragment, so its buffer is still lent"
+        );
+        std::assert_eq!(rig.node.held_rx(), 1);
+        std::assert_eq!(rig.lent.borrow().len(), 1);
+
+        rig.inbox.borrow_mut().push_back(fragment(2, false, rest));
+        rig.node.poll();
+        let got = socket.try_recv().expect("the datagram reassembled");
+        std::assert_eq!(got.data.as_slice(), payload);
+        std::assert_eq!(rig.node.held_rx(), 0);
+        let mut back = rig.returned.borrow().clone();
+        back.sort_unstable();
+        std::assert_eq!(
+            back,
+            std::vec![0u32, 1],
+            "both buffers went back, once each"
+        );
     }
 }

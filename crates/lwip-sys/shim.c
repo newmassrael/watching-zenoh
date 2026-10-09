@@ -178,12 +178,26 @@ typedef int (*wz_ethif_tx_gather_fn)(void *ctx, const wz_ethif_seg *segs, u16_t 
 #define WZ_ETHIF_HELD_MAX 8
 #endif
 
+/* ARCHITECTURE section 9.2 -- a received frame lent by the MAC in place, wrapped
+ * in a custom pbuf that points at it. lwIP reads the frame where the controller
+ * wrote it; when the last reference to the pbuf is dropped (which may be long
+ * after the input call returns, if lwIP parks it in a queue), `release(ctx,
+ * cookie)` tells the MAC the buffer is its own again. */
+typedef void (*wz_ethif_rx_release_fn)(void *ctx, u32_t cookie);
+
+/* The most lent frames lwIP may hold at once. A frame arriving when they are all
+ * out is taken through the copying input instead, which is always correct. */
+#ifndef WZ_ETHIF_RX_HELD_MAX
+#define WZ_ETHIF_RX_HELD_MAX 8
+#endif
+
 #if LWIP_ARP && LWIP_ETHERNET
 
 struct wz_ethif {
     struct netif netif;
     wz_ethif_tx_fn tx;
     wz_ethif_tx_gather_fn tx_gather; /* NULL: every frame goes through `tx` */
+    wz_ethif_rx_release_fn rx_release; /* NULL: received frames are copied in */
     void *ctx;
     u8_t mac[ETH_HWADDR_LEN];
 };
@@ -320,6 +334,7 @@ struct netif *wz_ethif_add(const u8_t *mac, u32_t ip, u32_t mask, u32_t gw,
     struct wz_ethif *e = &wz_ethifs[wz_ethif_count];
     e->tx = tx;
     e->tx_gather = NULL;
+    e->rx_release = NULL;
     e->ctx = ctx;
     MEMCPY(e->mac, mac, ETH_HWADDR_LEN);
     ip4_addr_t a, m, g;
@@ -379,6 +394,107 @@ int wz_ethif_input(struct netif *n, const u8_t *frame, u16_t len) {
     return 1;
 }
 
+/* Let `n` take received frames lent in place: `release(ctx, cookie)` is called
+ * when lwIP no longer reads a lent frame. One that cannot lend is not given this. */
+void wz_ethif_set_rx_release(struct netif *n, wz_ethif_rx_release_fn release) {
+    if (n != NULL) {
+        ((struct wz_ethif *)n->state)->rx_release = release;
+    }
+}
+
+#if LWIP_SUPPORT_CUSTOM_PBUF
+
+/* One lent frame lwIP holds. `pc` is first so the pbuf lwIP frees is this
+ * record's address, and the record is found from it with a cast. */
+struct wz_rx_held {
+    struct pbuf_custom pc;
+    struct wz_ethif *e;
+    u32_t cookie;
+    u8_t used;
+};
+
+static struct wz_rx_held wz_rx_held[WZ_ETHIF_RX_HELD_MAX];
+static u32_t wz_rx_loaned_total;
+
+static void wz_rx_custom_free(struct pbuf *p) {
+    struct wz_rx_held *h = (struct wz_rx_held *)p;
+    struct wz_ethif *e = h->e;
+    u32_t cookie = h->cookie;
+    h->used = 0;
+    if (e->rx_release != NULL) {
+        e->rx_release(e->ctx, cookie);
+    }
+}
+
+/* Hand one received frame, lent in place at `frame`, to `n` WITHOUT copying it.
+ * 1: lwIP took it, and `release` follows when lwIP is done. 0: lwIP refused it
+ * (and `release` has already been called: the pbuf was freed). -1: it could not
+ * be wrapped (no release callback, no free record, or no custom pbuf support), so
+ * nothing was done and the caller takes the copying input. */
+int wz_ethif_input_loan(struct netif *n, const u8_t *frame, u16_t len, u32_t cookie) {
+    if (n == NULL || len == 0) {
+        return -1;
+    }
+    struct wz_ethif *e = (struct wz_ethif *)n->state;
+    if (e->rx_release == NULL) {
+        return -1;
+    }
+    struct wz_rx_held *h = NULL;
+    for (int i = 0; i < WZ_ETHIF_RX_HELD_MAX; i++) {
+        if (!wz_rx_held[i].used) {
+            h = &wz_rx_held[i];
+            break;
+        }
+    }
+    if (h == NULL) {
+        return -1;
+    }
+    h->used = 1;
+    h->e = e;
+    h->cookie = cookie;
+    h->pc.custom_free_function = wz_rx_custom_free;
+    struct pbuf *p = pbuf_alloced_custom(PBUF_RAW, len, PBUF_REF, &h->pc, (void *)frame, len);
+    if (p == NULL) {
+        h->used = 0;
+        return -1;
+    }
+    wz_rx_loaned_total++;
+    if (n->input(p, n) != ERR_OK) {
+        pbuf_free(p);
+        return 0;
+    }
+    return 1;
+}
+
+int wz_ethif_rx_held_count(void) {
+    int held = 0;
+    for (int i = 0; i < WZ_ETHIF_RX_HELD_MAX; i++) {
+        held += wz_rx_held[i].used != 0;
+    }
+    return held;
+}
+
+u32_t wz_ethif_rx_loaned_total(void) {
+    return wz_rx_loaned_total;
+}
+
+#else /* !LWIP_SUPPORT_CUSTOM_PBUF */
+
+int wz_ethif_input_loan(struct netif *n, const u8_t *frame, u16_t len, u32_t cookie) {
+    (void)n; (void)frame; (void)len; (void)cookie;
+    return -1;
+}
+
+int wz_ethif_rx_held_count(void) {
+    return 0;
+}
+
+u32_t wz_ethif_rx_loaned_total(void) {
+    return 0;
+}
+
+#endif /* LWIP_SUPPORT_CUSTOM_PBUF */
+
 #else /* !(LWIP_ARP && LWIP_ETHERNET) */
 
 struct netif *wz_ethif_add(const u8_t *mac, u32_t ip, u32_t mask, u32_t gw,
@@ -413,6 +529,23 @@ int wz_ethif_held_count(void) {
 
 int wz_ethif_held_refs(u32_t cookie) {
     (void)cookie;
+    return 0;
+}
+
+void wz_ethif_set_rx_release(struct netif *n, wz_ethif_rx_release_fn release) {
+    (void)n; (void)release;
+}
+
+int wz_ethif_input_loan(struct netif *n, const u8_t *frame, u16_t len, u32_t cookie) {
+    (void)n; (void)frame; (void)len; (void)cookie;
+    return -1;
+}
+
+int wz_ethif_rx_held_count(void) {
+    return 0;
+}
+
+u32_t wz_ethif_rx_loaned_total(void) {
     return 0;
 }
 

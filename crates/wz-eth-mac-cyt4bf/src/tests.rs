@@ -1182,6 +1182,175 @@ fn several_frames_waiting_are_returned_one_per_call_in_arrival_order() {
     assert_eq!(mac.receive(&mut buf), None);
 }
 
+// ---- received frames lent in place ------------------------------------------
+
+/// The bytes of a loan, read where the MAC says they are.
+fn loan_bytes(loan: &RxLoan) -> Vec<u8> {
+    // SAFETY: the loan is live; the test returns it only afterwards.
+    unsafe { std::slice::from_raw_parts(loan.ptr, loan.len) }.to_vec()
+}
+
+/// The point of the seam: the frame is lent in the controller's own buffer, not
+/// copied out of it, and the MAC says it can lend.
+#[test]
+fn a_received_frame_is_lent_in_the_buffer_the_controller_wrote() {
+    let (mut mac, model) = rig();
+    assert!(mac.loans_rx(), "this MAC says it lends received frames");
+    assert!(mac.receive_loan().is_none(), "CONTROL: nothing arrived");
+
+    let f = frame(0x31, 200);
+    assert!(model.borrow_mut().inject_rx(&f));
+    let loan = mac.receive_loan().expect("the frame is waiting");
+
+    assert_eq!(loan_bytes(&loan), f);
+    let m = model.borrow();
+    let slot_buffer = m.ptr(m.rx_desc(0).word0() & RXD_ADDR_MASK) as *const u8;
+    assert_eq!(
+        loan.ptr, slot_buffer,
+        "the loan IS the slot's buffer, so nothing was copied"
+    );
+    assert_eq!(loan.cookie, 0);
+}
+
+/// A lent buffer is the stack's to read, so the controller must not get it back
+/// until it is returned: with every other buffer in use the ring is full, which
+/// the controller reports as no buffer available, and it receives again as soon
+/// as the loan comes back.
+#[test]
+fn a_lent_buffer_stays_out_of_the_controllers_reach_until_it_is_returned() {
+    let (mut mac, model) = rig();
+    let first = frame(0x01, 90);
+    assert!(model.borrow_mut().inject_rx(&first));
+    let loan = mac.receive_loan().expect("lent");
+
+    // The other buffers are used and given back as usual.
+    let mut buf = [0u8; 256];
+    for i in 1..RX {
+        assert!(model.borrow_mut().inject_rx(&frame(0x10 + i as u8, 70)));
+        mac.receive(&mut buf).expect("a copied frame");
+    }
+    // The ring has come round to the lent buffer: no room for one more.
+    assert!(
+        !model.borrow_mut().inject_rx(&frame(0x77, 60)),
+        "the controller has no buffer: the lent one is not its to fill"
+    );
+    assert_ne!(
+        model.borrow().reg(RECEIVE_STATUS) & RXSR_BUFFER_NOT_AVAILABLE,
+        0
+    );
+    assert_eq!(loan_bytes(&loan), first, "and the lent frame is untouched");
+
+    mac.return_rx(loan.cookie);
+    let again = frame(0x78, 66);
+    assert!(
+        model.borrow_mut().inject_rx(&again),
+        "the returned buffer is the controller's again"
+    );
+    assert_eq!(
+        mac.receive_loan().map(|l| loan_bytes(&l)),
+        Some(again),
+        "and the next frame arrives in it"
+    );
+}
+
+/// The ring coming all the way round to a buffer that is still lent must not hand
+/// the old frame up a second time: the descriptor still says "finished", but the
+/// stack already holds that frame.
+#[test]
+fn a_lap_of_the_ring_does_not_deliver_a_lent_frame_twice() {
+    let (mut mac, model) = rig();
+    assert!(model.borrow_mut().inject_rx(&frame(0x05, 80)));
+    let loan = mac.receive_loan().expect("lent");
+    let mut buf = [0u8; 256];
+    for i in 1..RX {
+        assert!(model.borrow_mut().inject_rx(&frame(0x20 + i as u8, 80)));
+        mac.receive(&mut buf).expect("copied");
+    }
+    assert!(
+        mac.receive_loan().is_none(),
+        "the head is back on the lent slot: nothing new is waiting"
+    );
+    assert!(mac.receive(&mut buf).is_none(), "nor by the copying door");
+    mac.return_rx(loan.cookie);
+}
+
+/// A cookie that names no lent buffer is ignored: returning one twice, or one that
+/// was never lent, must not arm a buffer the controller is filling.
+#[test]
+fn a_stale_or_foreign_cookie_arms_nothing() {
+    let (mut mac, model) = rig();
+    assert!(model.borrow_mut().inject_rx(&frame(0x09, 70)));
+    let loan = mac.receive_loan().expect("lent");
+    mac.return_rx(loan.cookie);
+
+    // The slot is now the controller's; a frame arrives in it.
+    let f = frame(0x0a, 71);
+    for i in 1..RX {
+        assert!(model.borrow_mut().inject_rx(&frame(0x30 + i as u8, 60)));
+    }
+    let mut buf = [0u8; 256];
+    for _ in 1..RX {
+        mac.receive(&mut buf).expect("drain the others");
+    }
+    assert!(model.borrow_mut().inject_rx(&f), "slot 0 again");
+    mac.return_rx(loan.cookie); // a second return of the same loan
+    mac.return_rx(3); // never lent
+    mac.return_rx(99); // not a slot at all
+    assert_eq!(
+        mac.receive(&mut buf).map(|n| buf[..n].to_vec()),
+        Some(f),
+        "the frame the controller wrote survived"
+    );
+}
+
+/// A frame that spans buffers is no frame this driver can hand up, lent or not:
+/// it is dropped and its buffer goes straight back.
+#[test]
+fn a_frame_that_is_not_whole_is_not_lent_and_its_buffer_is_returned() {
+    let (mut mac, model) = rig();
+    {
+        let m = model.borrow();
+        let d = m.rx_desc(0);
+        d.set_word1(1000 | RXD_SOF);
+        d.set_word0(d.word0() | RXD_USED);
+    }
+    let whole = frame(0x44, 100);
+    // The model's own cursor has to move past slot 0 for the next frame.
+    model.borrow_mut().rx_idx = 1;
+    assert!(model.borrow_mut().inject_rx(&whole));
+    let loan = mac
+        .receive_loan()
+        .expect("the whole frame after the bad one");
+    assert_eq!(loan_bytes(&loan), whole);
+    assert_eq!(loan.cookie, 1, "slot 0 was dropped, not lent");
+    mac.return_rx(loan.cookie);
+}
+
+/// Re-arming the whole ring (a link change does it) must leave a lent buffer
+/// alone: the stack is still reading it.
+#[test]
+fn re_arming_the_ring_leaves_a_lent_buffer_alone() {
+    let (mut mac, model) = rig();
+    let f = frame(0x61, 120);
+    assert!(model.borrow_mut().inject_rx(&f));
+    let loan = mac.receive_loan().expect("lent");
+
+    mac.init_rx_ring();
+
+    assert_ne!(
+        model.borrow().rx_desc(0).word0() & RXD_USED,
+        0,
+        "the lent slot is still software-owned, so the controller cannot fill it"
+    );
+    assert_eq!(loan_bytes(&loan), f);
+    mac.return_rx(loan.cookie);
+    assert_eq!(
+        model.borrow().rx_desc(0).word0() & RXD_USED,
+        0,
+        "and it is the controller's once returned"
+    );
+}
+
 #[test]
 fn a_frame_longer_than_the_callers_buffer_is_dropped_whole_not_truncated() {
     let (mut mac, model) = rig();

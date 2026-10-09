@@ -50,6 +50,35 @@ pub trait EthernetMac {
     /// is dropped whole rather than truncated.
     fn receive(&mut self, buf: &mut [u8]) -> Option<usize>;
 
+    /// Whether [`receive_loan`](Self::receive_loan) can hand a received frame up
+    /// where the controller wrote it. A stack asks before it uses the loan: a MAC
+    /// that cannot gets the copying [`receive`](Self::receive), as before. `false`
+    /// unless the MAC says otherwise.
+    fn loans_rx(&self) -> bool {
+        false
+    }
+
+    /// ARCHITECTURE section 9.2 -- take the next received frame WITHOUT copying
+    /// it: the frame is lent in place, in the buffer the controller wrote it to,
+    /// and the buffer is the stack's to read until it is given back with
+    /// [`return_rx`](Self::return_rx). `None` when nothing is waiting, or when the
+    /// MAC cannot lend (the default), in which case [`receive`](Self::receive) is
+    /// the way to take a frame.
+    ///
+    /// A frame that is lent holds its buffer out of the controller's reach, so a
+    /// stack that lends and never returns starves the receive ring; the
+    /// controller then drops frames, which is what a full ring does.
+    fn receive_loan(&mut self) -> Option<RxLoan> {
+        None
+    }
+
+    /// Give back the buffer of a frame lent by [`receive_loan`](Self::receive_loan),
+    /// named by the loan's `cookie`. The bytes of the loan are not readable after
+    /// this. A cookie that names no lent buffer is ignored.
+    fn return_rx(&mut self, cookie: u32) {
+        let _ = cookie;
+    }
+
     /// Whether [`transmit_gather`](Self::transmit_gather) can QUEUE a frame to be
     /// read in place. A stack asks before it offers pieces: for a MAC that cannot,
     /// the default joins them into a buffer on the stack, which a stack that
@@ -105,6 +134,18 @@ pub trait EthernetMac {
     fn reap_tx(&mut self, done: &mut dyn FnMut(u32)) {
         let _ = done;
     }
+}
+
+/// A received frame lent in place by [`EthernetMac::receive_loan`].
+#[derive(Clone, Copy, Debug)]
+pub struct RxLoan {
+    /// The first byte of the frame (no FCS), in the controller's own buffer. Valid
+    /// until [`EthernetMac::return_rx`] is called with `cookie`.
+    pub ptr: *const u8,
+    /// The frame's length in bytes.
+    pub len: usize,
+    /// What to give back to [`EthernetMac::return_rx`].
+    pub cookie: u32,
 }
 
 /// One piece of an outgoing frame, in memory the caller keeps in place.
@@ -200,6 +241,26 @@ mod tests {
         assert_eq!(mac.receive(&mut buf), Some(60));
         assert_eq!(&buf[..60], &[7u8; 60]);
         assert_eq!(mac.receive(&mut buf), None, "nothing is waiting");
+    }
+
+    /// A MAC that says nothing about lending lends nothing: a stack is told so,
+    /// takes frames through `receive`, and a stray return is harmless.
+    #[test]
+    fn a_mac_that_does_not_lend_says_so_and_lends_nothing() {
+        let mut mac = Echo { held: None };
+        assert!(mac.transmit(&[9u8; 40]));
+        assert!(!mac.loans_rx());
+        assert!(
+            mac.receive_loan().is_none(),
+            "even with a frame waiting, the default lends none"
+        );
+        mac.return_rx(0);
+        let mut buf = [0u8; FRAME_MAX];
+        assert_eq!(
+            mac.receive(&mut buf),
+            Some(40),
+            "the frame is still there for the copying door"
+        );
     }
 
     fn segment(bytes: &[u8]) -> TxSegment {

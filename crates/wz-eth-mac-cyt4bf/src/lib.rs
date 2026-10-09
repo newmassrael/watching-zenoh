@@ -66,7 +66,7 @@ use core::sync::atomic::{fence, Ordering};
 
 pub use dma::{DmaArea, BUF_LEN};
 pub use phy::{LinkError, LinkMode, MdioError};
-use wz_runtime_core::{join_segments, EthernetMac, TxGather, TxSegment};
+use wz_runtime_core::{join_segments, EthernetMac, RxLoan, TxGather, TxSegment};
 
 use dma::{Buffer, Descriptor, Slot, RX_BUF_UNITS};
 use regs::*;
@@ -301,6 +301,10 @@ pub struct Cyt4bfMac<B: Board, const RX: usize, const TX: usize> {
     /// how many descriptors it took, and the caller's cookie when the controller
     /// reads it in place.
     chains: [Chain; TX],
+    /// Which receive slots hold a frame lent out in place
+    /// ([`EthernetMac::receive_loan`]): their buffers are the stack's to read and
+    /// stay out of the controller's reach until [`EthernetMac::return_rx`].
+    rx_loaned: [bool; RX],
     phy: Option<u8>,
     link: LinkState,
     next_link_poll_ms: u64,
@@ -379,6 +383,7 @@ impl<B: Board, const RX: usize, const TX: usize> Cyt4bfMac<B, RX, TX> {
             tx_tail: 0,
             tx_inflight: 0,
             chains: [Chain::EMPTY; TX],
+            rx_loaned: [false; RX],
             phy: config.phy_address,
             link: LinkState::Unknown,
             next_link_poll_ms: 0,
@@ -557,11 +562,49 @@ impl<B: Board, const RX: usize, const TX: usize> Cyt4bfMac<B, RX, TX> {
     }
 
     /// Hand every receive buffer to the controller; the last slot wraps.
+    ///
+    /// A buffer lent to the stack is NOT handed back here, because the stack is
+    /// still reading it: the controller would write over it. It goes back when
+    /// the stack returns it, and the ring walks past it until then.
     fn init_rx_ring(&mut self) {
         for i in 0..RX {
-            self.give_rx(i);
+            if !self.rx_loaned[i] {
+                self.give_rx(i);
+            }
         }
         self.rx_head = 0;
+    }
+
+    /// The descriptor word of the finished frame at `rx_head`, or `None` when no
+    /// finished frame is waiting there.
+    ///
+    /// A slot whose buffer is lent out is not finished news but an old frame the
+    /// stack still holds, so it reads as nothing waiting (the ring has come all
+    /// the way round to a buffer not yet returned). Otherwise, when nothing is
+    /// waiting and the controller ran out of buffers, it has stopped and says so;
+    /// the buffers are free again now, so the condition is cleared and it carries
+    /// on with the next frame.
+    fn rx_ready(&mut self) -> Option<u32> {
+        let slot = self.rx_slot(self.rx_head);
+        self.board
+            .invalidate(slot.0 as *const u8, core::mem::size_of::<Descriptor>());
+        if self.rx_loaned[self.rx_head] {
+            return None;
+        }
+        if slot.word0() & RXD_USED == 0 {
+            let status = self.board.read(RECEIVE_STATUS);
+            if status & (RXSR_BUFFER_NOT_AVAILABLE | RXSR_OVERRUN) != 0 {
+                self.board.write(
+                    RECEIVE_STATUS,
+                    status & (RXSR_BUFFER_NOT_AVAILABLE | RXSR_OVERRUN),
+                );
+            }
+            return None;
+        }
+        // The used bit says the controller finished the frame; the length and the
+        // bytes are read only after it was seen.
+        fence(Ordering::Acquire);
+        Some(slot.word1())
     }
 
     /// Give receive slot `i` back to the controller: its buffer address, the wrap
@@ -947,26 +990,7 @@ impl<B: Board, const RX: usize, const TX: usize> EthernetMac for Cyt4bfMac<B, RX
         // At most one pass over the ring per call: a ring full of frames the
         // caller cannot hold is drained, not spun on.
         for _ in 0..RX {
-            let slot = self.rx_slot(self.rx_head);
-            self.board
-                .invalidate(slot.0 as *const u8, core::mem::size_of::<Descriptor>());
-            if slot.word0() & RXD_USED == 0 {
-                // Nothing waiting. If the controller ran out of buffers it has
-                // stopped and says so; the buffers are free again now, so the
-                // condition is cleared and it carries on with the next frame.
-                let status = self.board.read(RECEIVE_STATUS);
-                if status & (RXSR_BUFFER_NOT_AVAILABLE | RXSR_OVERRUN) != 0 {
-                    self.board.write(
-                        RECEIVE_STATUS,
-                        status & (RXSR_BUFFER_NOT_AVAILABLE | RXSR_OVERRUN),
-                    );
-                }
-                return None;
-            }
-            // The used bit says the controller finished the frame; the length and
-            // the bytes are read only after it was seen.
-            fence(Ordering::Acquire);
-            let word1 = slot.word1();
+            let word1 = self.rx_ready()?;
             let len = (word1 & RXD_LEN_MASK) as usize;
             let buf = self.rx_buf(self.rx_head);
             // One frame is one buffer here (1536 bytes against a 1518-byte
@@ -990,6 +1014,47 @@ impl<B: Board, const RX: usize, const TX: usize> EthernetMac for Cyt4bfMac<B, RX
             }
         }
         None
+    }
+
+    fn loans_rx(&self) -> bool {
+        true
+    }
+
+    /// ARCHITECTURE section 9.2 — the received frame is lent where the controller
+    /// wrote it: no copy, and the slot is withheld from the controller until
+    /// [`return_rx`](Self::return_rx). A frame that is not whole (it spans buffers
+    /// or has no length) is dropped, and its buffer returned to the controller, as
+    /// [`receive`](Self::receive) does.
+    fn receive_loan(&mut self) -> Option<RxLoan> {
+        for _ in 0..RX {
+            let word1 = self.rx_ready()?;
+            let len = (word1 & RXD_LEN_MASK) as usize;
+            let index = self.rx_head;
+            let buf = self.rx_buf(index);
+            let whole = word1 & RXD_SOF != 0 && word1 & RXD_EOF != 0 && len > 0 && len <= BUF_LEN;
+            self.rx_head = (index + 1) % RX;
+            if whole {
+                self.board.invalidate(buf, len);
+                self.rx_loaned[index] = true;
+                return Some(RxLoan {
+                    ptr: buf,
+                    len,
+                    cookie: index as u32,
+                });
+            }
+            self.give_rx(index);
+        }
+        None
+    }
+
+    fn return_rx(&mut self, cookie: u32) {
+        let index = cookie as usize;
+        // Only a slot that is lent goes back: a stale or foreign cookie must not
+        // arm a buffer the controller is already filling.
+        if index < RX && self.rx_loaned[index] {
+            self.rx_loaned[index] = false;
+            self.give_rx(index);
+        }
     }
 }
 

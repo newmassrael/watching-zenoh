@@ -50,6 +50,13 @@ void wz_ethif_set_gather(struct netif *n, wz_ethif_tx_gather_fn gather);
 void wz_ethif_tx_done(u32_t cookie);
 int wz_ethif_held_count(void);
 int wz_ethif_held_refs(u32_t cookie);
+/* ARCHITECTURE section 9.2 -- take a received frame lent in place by the MAC, and
+ * tell the MAC when lwIP no longer reads it. */
+typedef void (*wz_ethif_rx_release_fn)(void *ctx, u32_t cookie);
+void wz_ethif_set_rx_release(struct netif *n, wz_ethif_rx_release_fn release);
+int wz_ethif_input_loan(struct netif *n, const u8_t *frame, u16_t len, u32_t cookie);
+int wz_ethif_rx_held_count(void);
+u32_t wz_ethif_rx_loaned_total(void);
 /* Whether `n` is the default route, and the test harness's reset of the table. */
 int wz_ethif_is_default(const struct netif *n);
 void wz_ethif_remove_all(void);
