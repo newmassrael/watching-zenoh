@@ -373,6 +373,90 @@ pub fn unicast_addresses_of_interface(_name: &str) -> Result<Vec<IpAddr>, IfaceR
     Err(IfaceResolveError::Undetermined)
 }
 
+/// R3138 -- the FIRST IPv4 address of the interface named `name`, the way
+/// `zenoh_util::net::get_interface` answers a name
+/// (`commons/zenoh-util/src/net/mod.rs` @ `pub fn get_interface`).
+///
+/// Unlike [`unicast_addresses_of_interface`], which resolves a LOCATOR's `#iface=` and so
+/// refuses an interface that is down, not running, or unknown, this reads the interface table and
+/// nothing else: an interface with no link still answers with its address, and one with no IPv4
+/// address, or none of that name, answers `None`. That is the difference the scouting key needs.
+/// Upstream scouts by whatever address the table holds, up or not, and a name that finds nothing
+/// is only logged and left out.
+///
+/// Same divergence as the neighbours: resolved live per call, where upstream answers from a
+/// snapshot taken at first use.
+#[cfg(unix)]
+pub fn first_ipv4_of_interface_named(name: &str) -> Option<IpAddr> {
+    use std::ffi::CStr;
+
+    let mut head: *mut libc::ifaddrs = std::ptr::null_mut();
+    // SAFETY: as in `unicast_addresses_of_interface` -- `getifaddrs` allocates the list and
+    // writes its head through the out-pointer, returning 0 on success; on failure `head` is
+    // untouched and the early return never reads it.
+    if unsafe { libc::getifaddrs(&mut head) } != 0 {
+        return None;
+    }
+    // Every address of the interface, in the table's order: `getifaddrs` emits one node per
+    // address, and which of them is FIRST is the table's, not a choice made here.
+    let mut addresses: Vec<IpAddr> = Vec::new();
+    let mut cur = head;
+    while !cur.is_null() {
+        // SAFETY: `cur` is non-null and points at a node the successful `getifaddrs` above
+        // allocated; the list is not mutated while walked.
+        let ifa = unsafe { &*cur };
+        cur = ifa.ifa_next;
+        if ifa.ifa_name.is_null() {
+            continue;
+        }
+        // SAFETY: `ifa_name` is a NUL-terminated C string owned by the list.
+        if unsafe { CStr::from_ptr(ifa.ifa_name) }.to_bytes() != name.as_bytes() {
+            continue;
+        }
+        if let Some(ip) = sockaddr_ip(ifa.ifa_addr) {
+            addresses.push(ip);
+        }
+    }
+    // SAFETY: `head` came from the successful `getifaddrs` above and is freed exactly once.
+    unsafe { libc::freeifaddrs(head) };
+    first_ipv4_among(&addresses)
+}
+
+/// The first IPv4 address of `addresses`, in the order given: upstream's per-interface loop
+/// returns the first address that `is_ipv4` and never looks at the rest, so an interface that
+/// holds a second IPv4 address, or an IPv6 one ahead of its IPv4, is answered by that first IPv4
+/// all the same. Split out of the table walk so that it can be told on a table made for it.
+pub fn first_ipv4_among(addresses: &[IpAddr]) -> Option<IpAddr> {
+    addresses.iter().find(|address| address.is_ipv4()).copied()
+}
+
+/// Non-unix: no `getifaddrs`, so a name finds nothing and is left out, as an unknown one is.
+#[cfg(not(unix))]
+pub fn first_ipv4_of_interface_named(_name: &str) -> Option<IpAddr> {
+    None
+}
+
+/// R3138 -- what `scouting/multicast/interface` names, as upstream reads it
+/// (`zenoh/src/net/runtime/orchestrator.rs` @ `pub fn get_interfaces`): the text is split on
+/// commas, each part is trimmed, a part that parses as an address IS that address (of either
+/// family, held by this host or not), and any other part is a NAME that `lookup` turns into an
+/// address or, finding nothing, leaves out. The result can be empty, and then the node has no
+/// interface to scout by: it opens, sends nothing, and ends alone.
+///
+/// The lookup is a parameter so that what this decides can be told without a host that holds the
+/// interfaces: an interface with several IPv4 addresses, or one that is down, is a table here.
+pub fn scouting_interface_addresses(
+    text: &str,
+    lookup: impl Fn(&str) -> Option<IpAddr>,
+) -> Vec<IpAddr> {
+    text.split(',')
+        .filter_map(|part| {
+            let part = part.trim();
+            part.parse::<IpAddr>().ok().or_else(|| lookup(part))
+        })
+        .collect()
+}
+
 /// R2219 — one IPv4 address per interface that can carry multicast: the wz
 /// counterpart of zenoh's `get_multicast_interfaces`
 /// (`commons/zenoh-util/src/net/mod.rs:131-153`).
@@ -1456,5 +1540,79 @@ mod expansion {
             texts(expand_unspecified(bound, &local, true)),
             ["10.1.2.3:5"]
         );
+    }
+}
+
+/// R3138 -- how `scouting/multicast/interface` is read, told on tables made for it. What a host
+/// holds is not needed: an interface with several IPv4 addresses, or none, or one that is down,
+/// cannot be made on an ordinary user's host, and the reading does not depend on any of them.
+#[cfg(test)]
+mod scouting_interface_reading {
+    use super::{first_ipv4_among, scouting_interface_addresses};
+    use std::net::IpAddr;
+
+    fn ip(text: &str) -> IpAddr {
+        text.parse().expect("an address")
+    }
+
+    /// The lookup a host would give: names to the first IPv4 of the interface of that name.
+    fn host(name: &str) -> Option<IpAddr> {
+        match name {
+            "eth0" => Some(ip("10.0.0.5")),
+            "wlan0" => Some(ip("192.168.1.9")),
+            _ => None,
+        }
+    }
+
+    /// An interface that holds several addresses is answered by its first IPv4, whatever comes
+    /// before it and whatever follows.
+    #[test]
+    fn the_first_ipv4_of_an_interface_answers_for_all_of_it() {
+        let table = [ip("fe80::1"), ip("10.0.0.5"), ip("10.0.0.6"), ip("fd00::2")];
+        assert_eq!(first_ipv4_among(&table), Some(ip("10.0.0.5")));
+        assert_eq!(first_ipv4_among(&[ip("fe80::1"), ip("fd00::2")]), None);
+        assert_eq!(first_ipv4_among(&[]), None);
+    }
+
+    /// Commas split the text, each part is trimmed, and a literal is itself in either family.
+    #[test]
+    fn a_list_is_split_on_commas_and_trimmed() {
+        assert_eq!(
+            scouting_interface_addresses(" eth0 , 192.0.2.7 ,fd7a::1", host),
+            vec![ip("10.0.0.5"), ip("192.0.2.7"), ip("fd7a::1")]
+        );
+        assert_eq!(
+            scouting_interface_addresses("wlan0,eth0", host),
+            vec![ip("192.168.1.9"), ip("10.0.0.5")],
+            "the order of the text is the order of the addresses"
+        );
+    }
+
+    /// A part that finds nothing is left out and the others stand: a name that matches no
+    /// interface, an interface that holds no IPv4 address, an empty part.
+    #[test]
+    fn a_part_that_finds_nothing_is_left_out() {
+        assert_eq!(
+            scouting_interface_addresses("nope,eth0,,v6only", host),
+            vec![ip("10.0.0.5")]
+        );
+        assert!(scouting_interface_addresses("nope", host).is_empty());
+        assert!(scouting_interface_addresses("", host).is_empty());
+    }
+
+    /// A literal is taken before any name is looked up: a lookup that would answer for it is
+    /// never asked, so an address a host does not hold is still what the text says.
+    #[test]
+    fn a_literal_is_taken_before_a_name_is_looked_up() {
+        let asked = std::cell::RefCell::new(Vec::new());
+        let lookup = |name: &str| {
+            asked.borrow_mut().push(name.to_owned());
+            None
+        };
+        assert_eq!(
+            scouting_interface_addresses("192.0.2.7,wlan0", lookup),
+            vec![ip("192.0.2.7")]
+        );
+        assert_eq!(*asked.borrow(), vec!["wlan0".to_owned()]);
     }
 }
