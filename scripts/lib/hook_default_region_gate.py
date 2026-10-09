@@ -106,6 +106,15 @@ class Deferred(NamedTuple):
 #: are a record of why each sits here, not a budget this gate enforces.
 REQUIRED: tuple[Required, ...] = (
     Required(
+        ("wz_home_path_range",),
+        "0.8 (a 3-commit range over the 46 MB ledger; each blob version read once)",
+        "item 791: gate 0b reads the checkout, so a commit that added a "
+        "home-path line and a later one that removed it left the tip clean and "
+        "the gate green while the blob was published; this reads each pushed "
+        "commit's own blobs against its parents'",
+        judges=True,
+    ),
+    Required(
         ("scripts/lib/upstream_citation_anchor_gate.py",),
         "10.7 (form arm 9.9)",
         "root-less citation ratchet: a README paragraph naming two upstream "
@@ -359,6 +368,9 @@ def _every_required() -> list[str]:
             cmds.append(f"bash scripts/run-ci.sh {r.needles[1]}")
         elif r.needles[0].endswith(".py") and len(r.needles) == 2:
             cmds.append(f"python3 {r.needles[0]} --range x {r.needles[1]}")
+        elif "/" not in r.needles[0]:
+            # a sourced shell function, called the way the hook calls it
+            cmds.append(f"if ! {r.needles[0]} 'pre-push' \"$range\"; then")
         else:
             cmds.append(f"python3 {r.needles[0]}")
     return cmds

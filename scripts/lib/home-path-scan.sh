@@ -249,6 +249,42 @@ wz_home_path_pending() {
     return 0
 }
 
+# Item 791 — refuse a PUSH whose commits ADD a line naming this home directory,
+# whatever the tip looks like.
+#
+# `wz_home_path_scan` below reads `git ls-files`, the CHECKOUT, so it answers for
+# the tip alone. A push sends every commit in the range with its own blobs: a
+# commit that adds the line and a later one that removes it leave the tip clean
+# and the gate green while the leaking blob is published (R2729 met the
+# ledger-shaped form of it, with 17 commits about to go). `$1` is the label, `$2`
+# the `<base>..<tip>` range, from the same push tuple the hook already holds.
+#
+# The measure and its reasons (a per-commit INCREASE over the parents, so the
+# 137 ledger lines already published are the floor and not a permanent red; a
+# merge charged only for what it adds itself) live in `home_path_range_gate.py`.
+# This wrapper only keeps the TERM definition in one place: the same
+# `wz_home_path_term_state` the other three entry points use.
+wz_home_path_range() {
+    local label="${1:-pre-push}"
+    local range="${2:-}"
+    local state=0
+    wz_home_path_term_state || state=$?
+    if (( state == 1 )); then
+        echo "  $label FAIL: \$HOME is unset or /, so there is no term to scan for" >&2
+        return 1
+    fi
+    if (( state == 2 )); then
+        echo "  $label home-paths: skipped -- \$HOME is $HOME, a shared CI home"
+        return 0
+    fi
+    if [[ -z "$range" ]]; then
+        echo "  $label FAIL: no commit range was given, so the per-commit home-path" >&2
+        echo "    check scanned NOTHING and must not report green." >&2
+        return 1
+    fi
+    python3 scripts/lib/home_path_range_gate.py --term "$HOME" --range "$range"
+}
+
 # Refuse any home-directory path in a tracked file.
 #
 # `$1` is the repository root. Returns non-zero on a finding, having said which

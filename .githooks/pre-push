@@ -6,7 +6,7 @@
 # changed-crate builds. The previous push spent over 16 minutes in static
 # checks alone; a prior push took about 90 minutes across the whole hook.
 #
-# Default: gates 0/0b/0c (publication), 1 (schema and tool pin), 2 (SSOT),
+# Default: gates 0/0b/0b2/0c (publication), 1 (schema and tool pin), 2 (SSOT),
 # 2b (claim-scoped proof audit), 2c (previous hosted verdict, no waiting), and
 # since item 897 the cheap tree-only checks hosted CI reds on: 2f (upstream
 # citation form, about 11s) and 2c2 (doc-link, inventory-tag and demo-restore
@@ -113,6 +113,40 @@ if ! wz_home_path_scan "$(git rev-parse --show-toplevel)"; then
     echo "          Bypass with \`git push --no-verify\` only for genuine hotfixes." >&2
     exit 1
 fi
+
+# ─── gate 0b2 — home-directory paths in each pushed commit (item 791) ─
+# grades: pushed-range
+# Gate 0b above grades the checkout, which is the tip. A push sends every commit
+# in the range with its own blobs, so a commit that adds a home-path line and a
+# later one that removes it leave the tip clean and gate 0b green while the blob
+# is published. This reads the commits themselves: for each one, the lines naming
+# $HOME in every changed file against its parent's. An INCREASE is refused; the
+# lines already published (the ledger's) are the floor, not a permanent red.
+# `home_path_range_gate.py` holds the measure; the range is the one gate 0c uses.
+# With no base (a new ref and no origin/main) the range is the whole history,
+# which legitimately contains the commits that brought those lines in, so the
+# gate says it did not run rather than printing a green.
+for sha in "${push_shas[@]}"; do
+    hp_base=""
+    if [[ -n "$remote_sha" && "$remote_sha" != "$zero_sha" ]]; then
+        hp_base="$remote_sha"
+    elif git rev-parse --verify --quiet origin/main >/dev/null; then
+        hp_base="origin/main"
+    fi
+    if [[ -z "$hp_base" ]]; then
+        echo "pre-push: [gate 0b2] no diff base (new ref, no origin/main);" >&2
+        echo "          the per-commit home-path check did NOT run." >&2
+        continue
+    fi
+    if ! wz_home_path_range 'pre-push' "${hp_base}..${sha}"; then
+        echo "" >&2
+        echo "pre-push: [gate 0b2] a pushed commit adds a line naming this home directory." >&2
+        echo "          Origin is public and a push does not un-publish; removing the" >&2
+        echo "          line in a later commit does not remove it from the earlier one." >&2
+        echo "          Bypass with \`git push --no-verify\` only for genuine hotfixes." >&2
+        exit 1
+    fi
+done
 
 # ─── gate 0c — the identities being published (2026-08-25) ──────────
 # grades: pushed-range

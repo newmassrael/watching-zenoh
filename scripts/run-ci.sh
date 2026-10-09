@@ -2404,6 +2404,12 @@ layer_c0_test_discipline() {
     # The table in this gate is what keeps the cheap ones above it.
     python3 scripts/lib/hook_default_region_gate.py --selftest || return 1
     python3 scripts/lib/hook_default_region_gate.py || return 1
+    # R3171 (open-debt item 791) — pre-push gate 0b2: a commit that adds a
+    # home-path line and a later commit that removes it leave the tip clean
+    # (gate 0b reads the checkout) while the blob is published. The selftest
+    # builds real repositories; the check itself needs a range and a term, so
+    # only the selftest can run here.
+    python3 scripts/lib/home_path_range_gate.py --selftest || return 1
     # R2463 (open-debt item 695) — pre-push gate 2r's own arms, beside its
     # siblings and for their reason: the gate runs on every push, so the one
     # place it is never exercised is the case it exists to refuse. Its selftest
