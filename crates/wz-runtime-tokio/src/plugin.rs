@@ -670,39 +670,19 @@ impl PluginRegistry {
 mod tests {
     use super::*;
 
-    /// The example plugin's `.so`, built by the same cargo invocation that runs
-    /// these tests (it is a workspace member and a `dev-dependency` of nothing —
-    /// so the lane builds it explicitly; see Layer C1bp).
-    fn example_so() -> PathBuf {
-        let mut p = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-        p.pop();
-        p.push("target");
-        p.push("debug");
-        p.push(if cfg!(target_os = "macos") {
-            "libwz_plugin_example.dylib"
-        } else {
-            "libwz_plugin_example.so"
-        });
-        p
-    }
-
-    /// The example `.so`, or `None` with a LOUD note.
+    /// The example plugin's `.so`, built by the lane that runs these tests (it
+    /// is a workspace member and a `dev-dependency` of nothing, so Layer C1bp
+    /// builds it explicitly), or `None` with a LOUD note.
     ///
-    /// The note is not decoration: three of the legs below return early on
-    /// `None`, and a silent early return is a green test that proved nothing —
-    /// this project's own anti-masked-skip rule. Layer C1bp builds the `.so`
-    /// first and is where its absence is a hard failure; here the worst case is
-    /// visible rather than invisible.
+    /// A silent early return is a green test that proved nothing, so the absence
+    /// goes through [`crate::built_fixture::built_or_skip`]: a skip where nobody
+    /// owes the library, a FAILURE where Layer C1bp does (it sets
+    /// `WZ_EXAMPLE_CDYLIB_REQUIRE` beside the build). Open-debt item 776.
     fn require_example() -> Option<PathBuf> {
-        let p = example_so();
-        if p.exists() {
-            return Some(p);
-        }
-        eprintln!(
-            "skip: {} not built — run `cargo build -p wz-plugin-example` (Layer C1bp does)",
-            p.display()
-        );
-        None
+        crate::built_fixture::built_or_skip(
+            crate::built_fixture::cdylib("wz_plugin_example"),
+            "run `cargo build -p wz-plugin-example` (Layer C1bp does)",
+        )
     }
 
     #[test]

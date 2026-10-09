@@ -44,7 +44,12 @@
 // pass-with-warning. R63 keeps the test in the always-run set
 // because `scripts/build-sce.sh` is the documented bootstrap;
 // the local-only skip is for first-clone ergonomics, not for
-// CI (CI runs the bootstrap before `cargo test`).
+// CI. Item 776: "CI runs the bootstrap before `cargo test`" was a
+// sentence, not a mechanism -- the job that runs Layer C1 builds no
+// sce-codegen, so there the skip is the ordinary outcome. The skip now
+// goes through `skip_or_fail`, which turns it into a failure wherever
+// `WZ_SCE_ORACLE_REQUIRE` is set; no lane sets it around THIS test yet
+// (see the item's carry), which is why that is stated here.
 
 use std::path::PathBuf;
 use std::process::Command;
@@ -64,14 +69,28 @@ fn link_scxml(name: &str) -> PathBuf {
     PathBuf::from(manifest).join(format!("../../sources/links/{name}.scxml"))
 }
 
+/// The skip, or a FAILURE when the job that provisions sce-codegen declared it
+/// required. `WZ_SCE_ORACLE_REQUIRE` is the variable `verify-codegen.sh` already
+/// reads for the same oracle, so one switch means one thing across both consumers.
+/// Open-debt item 776: this test sits in the always-run set, so without a door
+/// its skip and its pass are the same line of output.
+fn skip_or_fail(why: &str) -> Option<String> {
+    if std::env::var("WZ_SCE_ORACLE_REQUIRE").is_ok_and(|v| !v.is_empty()) {
+        panic!(
+            "{why}; WZ_SCE_ORACLE_REQUIRE is set, so the job that provisions the oracle did not"
+        );
+    }
+    eprintln!("skip: {why}; set WZ_SCE_ORACLE_REQUIRE=1 to make this a failure");
+    None
+}
+
 fn emit_link_c11(scxml_name: &str) -> Option<String> {
     let bin = sce_codegen_bin();
     if !bin.exists() {
-        eprintln!(
-            "skip: sce-codegen binary missing at {}; run scripts/build-sce.sh from the workspace root.",
+        return skip_or_fail(&format!(
+            "sce-codegen binary missing at {}; run scripts/build-sce.sh from the workspace root",
             bin.display()
-        );
-        return None;
+        ));
     }
 
     // ABSENT may skip; FOREIGN may not. The two are not the same answer, and
@@ -86,10 +105,7 @@ fn emit_link_c11(scxml_name: &str) -> Option<String> {
         wz_codegen_build::Provenance::Matches => {}
         // Unverifiable is the first-clone / tarball case the skip above serves;
         // it is not evidence of a foreign binary, so it stays a skip.
-        v @ wz_codegen_build::Provenance::Unverifiable => {
-            eprintln!("skip: {}", v.explain());
-            return None;
-        }
+        v @ wz_codegen_build::Provenance::Unverifiable => return skip_or_fail(&v.explain()),
         v => panic!("{}", v.explain()),
     }
 

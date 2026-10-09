@@ -344,25 +344,14 @@ mod tests {
     use super::*;
     use wz_session_core::json5::parse;
 
-    /// The example plugin's library, built by Layer C1bp before these run.
+    /// The example plugin's library, built by Layer C1bp before these run. Its
+    /// absence is a skip where nobody owes it and a failure under that lane's
+    /// `WZ_EXAMPLE_CDYLIB_REQUIRE` (open-debt item 776).
     fn example_so() -> Option<PathBuf> {
-        let mut p = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-        p.pop();
-        p.push("target");
-        p.push("debug");
-        p.push(if cfg!(target_os = "macos") {
-            "libwz_plugin_example.dylib"
-        } else {
-            "libwz_plugin_example.so"
-        });
-        if p.exists() {
-            return Some(p);
-        }
-        eprintln!(
-            "skip: {} not built — run `cargo build -p wz-plugin-example` (Layer C1bp does)",
-            p.display()
-        );
-        None
+        crate::built_fixture::built_or_skip(
+            crate::built_fixture::cdylib("wz_plugin_example"),
+            "run `cargo build -p wz-plugin-example` (Layer C1bp does)",
+        )
     }
 
     fn section(text: &str) -> PluginsConfig {

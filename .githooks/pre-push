@@ -1109,6 +1109,12 @@ round_fed_gates=(
     # MEASURED: well under a second, a parse with no build.
     "claude_md_upstream_pin_gate.py --selftest"
     "claude_md_upstream_pin_gate.py --check"
+    # R3171 (item 776) — a test that runs by default must not pass by skipping a
+    # fixture its lane owes. It enumerates the tracked Rust corpus and reads
+    # `run-ci.sh` and the workflows, so a round that adds a skip, or removes the
+    # lane's arming of its door, feeds it. MEASURED: about 8s, a parse with no build.
+    "silent_skip_gate.py --selftest"
+    "silent_skip_gate.py --check"
 )
 # ⚠ The module and its ARGUMENTS are expanded separately, and that too is
 # forced rather than chosen: `scripts/lib/"${cmd[@]}"` attaches the prefix to

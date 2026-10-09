@@ -203,6 +203,19 @@ pub mod uring_reactor;
 #[cfg(test)]
 mod test_fixtures;
 
+// Open-debt item 776 — the door for a unit test whose fixture is ANOTHER workspace
+// member's cdylib (the example plugin and volume). Its absence is a skip unless the
+// lane that builds it declares the fixture required; see the module docs.
+#[cfg(all(
+    test,
+    unix,
+    any(
+        feature = "plugin-dynamic-loading",
+        feature = "storage-mgr-dynamic-volume-loading"
+    )
+))]
+mod built_fixture;
+
 // R311il — the `script_bind` module (the generic Lua `bind_unit` /
 // `bind_guard` binders) was retired with the engine-free session FSM
 // migration: scouting dropped it at R311ik and the session FSM was its

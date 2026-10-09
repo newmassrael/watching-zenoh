@@ -1813,6 +1813,15 @@ layer_c0_test_discipline() {
     # `--test` names on run-ci.sh's non-comment lines.
     python3 scripts/lib/lane_reach_gate.py --selftest || return 1
     python3 scripts/lib/lane_reach_gate.py --check || return 1
+    # R3171 (open-debt item 776) — a test that runs by default must not PASS by
+    # skipping a fixture its lane owes. `plugin.rs`, `plugin_plane.rs` and
+    # `dynamic_volume.rs` stepped over their subject when the example cdylib was
+    # not built and printed only `skip:`; a plain `cargo test` reported them green
+    # in 0.00s, and R2675 read such a pass as "repaired". Every default-run skip
+    # must reach a `<NAME>_REQUIRE` door and some lane or job must arm it. Reads
+    # the tracked Rust corpus and `run-ci.sh`, so the push hook runs it too.
+    python3 scripts/lib/silent_skip_gate.py --selftest || return 1
+    python3 scripts/lib/silent_skip_gate.py --check || return 1
     # R311y606 — the PYTHON-FLOOR lint, FIRST because every check below it is
     # a python script and their answers are only as portable as the interpreter
     # that runs them. R311y605 landed `import tomllib` (stdlib from 3.11) in
@@ -13975,6 +13984,14 @@ layer_d_validate_deploy() {
 # fails on a missing file. A lane whose subject is dynamic loading must provide
 # the thing to load.
 layer_c1bp_plugin_dynamic_loading() {
+    # Open-debt item 776 — this lane OWNS the example cdylib it builds on the next
+    # line, so for the length of this lane its absence is a failure, not a skip.
+    # `plugin.rs` and `plugin_plane.rs` tests step over their subject when the
+    # library is missing, and a skip there reads as a pass (`finished in 0.00s`);
+    # `silent_skip_gate.py` requires the door and that some lane arms it. `local -x`
+    # scopes the variable to this function and its children, so no later layer
+    # inherits a requirement it did not build for.
+    local -x WZ_EXAMPLE_CDYLIB_REQUIRE=1
     (cd crates && cargo build -p wz-plugin-example --quiet) || return 1
     # The ABI contract's own gate: the compatibility check is a pure function, so
     # it is unit-testable exhaustively in a way the e2e cannot be — a mismatched
@@ -21023,6 +21040,10 @@ layer_c1cd_api_compat_c_attachment() {
 }
 
 layer_c1bv_dynamic_volume_loading() {
+    # Open-debt item 776 — this lane builds both cdylibs below and then runs the
+    # `dynamic_volume::` tests against them, so their absence is its failure and
+    # not a skip. Same door, same scoping, as Layer C1bp's; see the note there.
+    local -x WZ_EXAMPLE_CDYLIB_REQUIRE=1
     # The two cdylibs. wz-volume-example is what the host loads; wz-plugin-example
     # is the honest NEGATIVE — a real loadable shared object that exports
     # `wz_plugin_entry` and no `wz_volume_entry`, which is the leg that justifies
