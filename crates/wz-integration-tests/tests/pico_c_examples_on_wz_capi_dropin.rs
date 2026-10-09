@@ -91,17 +91,18 @@
 //! plane including the DEPARTURE half — compiled and linked the way a pico user
 //! would.
 
+use std::collections::BTreeSet;
 use std::process::{Command, Stdio};
 use std::time::Duration;
 
 use wz_integration_tests::bounded::BoundedOutput as _;
 use wz_integration_tests::common::{
     compile_pico_example_against_wz_capi, compile_pico_example_against_wz_capi_with_includes,
-    graceful_terminate, project_root, read_captured, run_query_until_answered,
-    spawn_zenohd_multicast_scouting_on_any_interface, wait_for_capture_alive, wait_for_exit,
-    wait_for_substring, wait_for_tcp_accept_alive, zenoh_pico_cli_binary, zenoh_pico_include_dirs,
-    zenoh_pico_include_dirs_single_threaded, zenoh_pico_library_dir, zenohd_binary, ChildGuard,
-    PortReservation, QueryAttempts,
+    devices_holding_group, graceful_terminate, project_root, read_captured,
+    run_query_until_answered, spawn_zenohd_multicast_scouting_on_any_interface,
+    wait_for_capture_alive, wait_for_exit, wait_for_substring, wait_for_tcp_accept_alive,
+    zenoh_pico_cli_binary, zenoh_pico_include_dirs, zenoh_pico_include_dirs_single_threaded,
+    zenoh_pico_library_dir, zenohd_binary, ChildGuard, PortReservation, QueryAttempts,
 };
 
 /// How many one-shot queries the declaration-propagation window may eat.
@@ -2329,6 +2330,88 @@ fn hello_lines_for_port(printed: &str, port: u16) -> impl Iterator<Item = &str> 
         .filter(move |l| l.starts_with("Hello {") && l.contains("tcp/") && l.contains(&needle))
 }
 
+/// The devices on which the kernel would deliver a Scout, sent to the scouting
+/// group, to a router on this host, or `None` where the host has no such table.
+///
+/// Open-debt item 873. The number of Hellos a router sends one scout is the number
+/// of that scout's asks that reach it, and an ask reaches it only over a device the
+/// kernel holds the group on. Two scouts run one after the other (the oracle's, then
+/// wz's) are therefore comparable by count only while that set stays what it was; it
+/// does not on a host where other processes start routers on another interface or
+/// where a container's virtual interface comes and goes. The leg used to assert the
+/// equality without ever measuring the premise, and a lab run read 5 against the
+/// oracle's 6 once.
+fn scouting_devices() -> Option<BTreeSet<String>> {
+    devices_holding_group(wz_integration_tests::common::ZENOH_MULTICAST_GROUP)
+}
+
+/// The set a window can be compared under: the same at both of its ends.
+fn steady(
+    start: &Option<BTreeSet<String>>,
+    end: &Option<BTreeSet<String>>,
+) -> Option<BTreeSet<String>> {
+    match (start, end) {
+        (Some(a), Some(b)) if a == b => Some(a.clone()),
+        _ => None,
+    }
+}
+
+/// Compare the Hellos the oracle's scout and wz's scout got from the router on
+/// `port`, under what the host did while they ran.
+///
+/// `oracle` and `wz` are the device sets read at each window's two ends:
+/// before the oracle, between the two scouts, after wz's. When the set was one and
+/// the same at all three, both scouts asked into the same world and the counts are
+/// EQUAL: that is the claim of this leg, and a failure here is a Hello lost or an ask
+/// not made, with the set printed beside it. When it moved, the counts answer
+/// different questions and what holds is the bound: each scout was answered, and
+/// never more often than the widest set carried asks.
+fn assert_hello_counts_agree(
+    port: u16,
+    oracle_hits: usize,
+    wz_hits: usize,
+    oracle: (&Option<BTreeSet<String>>, &Option<BTreeSet<String>>),
+    wz: (&Option<BTreeSet<String>>, &Option<BTreeSet<String>>),
+    evidence: &str,
+) {
+    let oracle_world = steady(oracle.0, oracle.1);
+    let wz_world = steady(wz.0, wz.1);
+    if let (Some(a), Some(b)) = (&oracle_world, &wz_world) {
+        if a == b {
+            assert_eq!(
+                wz_hits, oracle_hits,
+                "wz reported the router on port {port} {wz_hits} time(s) and the REAL zenoh-pico \
+                 {oracle_hits} time(s), and the devices that deliver a Scout were the same \
+                 throughout ({a:?}), so the two scouts asked into one world and one of them lost \
+                 an answer or an ask.\n{evidence}"
+            );
+            return;
+        }
+    }
+    let widest = [oracle.0, oracle.1, wz.0, wz.1]
+        .into_iter()
+        .filter_map(|set| set.as_ref().map(BTreeSet::len))
+        .max();
+    eprintln!(
+        "the devices that deliver a Scout moved while the two scouts ran ({:?} -> {:?} -> {:?}), \
+         so their Hello counts ({oracle_hits} and {wz_hits}) are bounded, not compared",
+        oracle.0, oracle.1, wz.1
+    );
+    for (who, hits) in [("the REAL zenoh-pico", oracle_hits), ("wz", wz_hits)] {
+        assert!(
+            hits >= 1,
+            "{who} was not answered by the router on port {port}.\n{evidence}"
+        );
+        if let Some(widest) = widest {
+            assert!(
+                hits <= widest,
+                "{who} was answered {hits} time(s) by the router on port {port}, more than the {widest} \
+                 device(s) that delivered a Scout.\n{evidence}"
+            );
+        }
+    }
+}
+
 /// LEG 15 (`wz vs pico`, ORACLE) — upstream's `z_scout.c`, compiled twice
 /// against the SAME headers and linked once to wz's cdylib and once to the REAL
 /// `libzenohpico.so`, discovers the SAME zenohd and prints the SAME line.
@@ -2413,6 +2496,10 @@ fn pico_zscout_source_on_wz_capi_matches_the_real_pico_against_a_zenohd() {
     let (mut zenohd, port) =
         spawn_zenohd_multicast_scouting_on_any_interface("zenohd (multicast-scouting router)");
 
+    // The devices that deliver a Scout, read at the three moments that bound the two
+    // scouts (see `assert_hello_counts_agree`): the router has joined the group.
+    let devices_before = scouting_devices();
+
     // The ORACLE first, so a failure to provision multicast at all reads as the
     // REAL library finding nothing — never as a wz defect.
     let oracle_out = Command::new("stdbuf")
@@ -2421,6 +2508,7 @@ fn pico_zscout_source_on_wz_capi_matches_the_real_pico_against_a_zenohd() {
         .output_bounded()
         .expect("run upstream z_scout linked to the REAL zenoh-pico");
     let oracle_printed = String::from_utf8_lossy(&oracle_out.stdout).into_owned();
+    let devices_between = scouting_devices();
 
     let wz_out = Command::new("stdbuf")
         .args(["-oL", "-eL"])
@@ -2428,6 +2516,7 @@ fn pico_zscout_source_on_wz_capi_matches_the_real_pico_against_a_zenohd() {
         .output_bounded()
         .expect("run upstream z_scout linked to wz's C-ABI cdylib");
     let wz_printed = String::from_utf8_lossy(&wz_out.stdout).into_owned();
+    let devices_after = scouting_devices();
 
     let _ = zenohd.child_mut().kill();
     let _ = zenohd.child_mut().wait();
@@ -2486,12 +2575,19 @@ fn pico_zscout_source_on_wz_capi_matches_the_real_pico_against_a_zenohd() {
         "the REAL zenoh-pico reported the peer {oracle_hits} time(s), so the \
          comparison below would be vacuous.\n--- oracle stdout ---\n{oracle_printed}"
     );
-    assert_eq!(
-        wz_hits, oracle_hits,
-        "wz reported the peer {wz_hits} time(s) and the REAL zenoh-pico reported it \
-         {oracle_hits} time(s) — same zenohd, same window, same interfaces.\n\
-         --- z_scout.c on wz stdout ---\n{wz_printed}\n\
-         --- oracle stdout ---\n{oracle_printed}"
+    // Item 873 — "same zenohd, same window, same interfaces" was a premise nothing
+    // measured: the two scouts run one after the other and the interfaces a Scout
+    // is delivered over are the host's to change. The comparison is made under the
+    // host's own record of them, and printed beside any disagreement.
+    assert_hello_counts_agree(
+        port,
+        oracle_hits,
+        wz_hits,
+        (&devices_before, &devices_between),
+        (&devices_between, &devices_after),
+        &format!(
+            "--- z_scout.c on wz stdout ---\n{wz_printed}\n--- oracle stdout ---\n{oracle_printed}"
+        ),
     );
     // The closure's `drop` is the program's own completion signal, and it must
     // run AFTER the callbacks — a scout that emitted it early would reorder
@@ -2544,12 +2640,17 @@ fn pico_zscout_source_on_wz_capi_reports_every_zenohd_on_the_group() {
         spawn_zenohd_multicast_scouting_on_any_interface("zenohd B (multicast-scouting router)");
     assert_ne!(port_a, port_b, "the two routers must be distinguishable");
 
+    // The devices that deliver a Scout, at the three moments that bound the two
+    // scouts: see `assert_hello_counts_agree`, and item 873.
+    let devices_before = scouting_devices();
+
     let oracle_out = Command::new("stdbuf")
         .args(["-oL", "-eL"])
         .arg(&oracle)
         .output_bounded()
         .expect("run upstream z_scout linked to the REAL zenoh-pico");
     let oracle_printed = String::from_utf8_lossy(&oracle_out.stdout).into_owned();
+    let devices_between = scouting_devices();
 
     let wz_out = Command::new("stdbuf")
         .args(["-oL", "-eL"])
@@ -2557,6 +2658,7 @@ fn pico_zscout_source_on_wz_capi_reports_every_zenohd_on_the_group() {
         .output_bounded()
         .expect("run upstream z_scout linked to wz's C-ABI cdylib");
     let wz_printed = String::from_utf8_lossy(&wz_out.stdout).into_owned();
+    let devices_after = scouting_devices();
 
     let _ = router_a.child_mut().kill();
     let _ = router_a.child_mut().wait();
@@ -2611,13 +2713,17 @@ fn pico_zscout_source_on_wz_capi_reports_every_zenohd_on_the_group() {
              {oracle_hits} time(s), so the comparison below would be \
              vacuous.\n--- oracle stdout ---\n{oracle_printed}"
         );
-        assert_eq!(
-            hits, oracle_hits,
-            "wz reported the router on port {port} {hits} time(s) and the REAL \
-             zenoh-pico reported it {oracle_hits} time(s) — same group, same \
-             window, same interfaces.\n\
-             --- z_scout.c on wz stdout ---\n{wz_printed}\n\
-             --- oracle stdout ---\n{oracle_printed}"
+        // Item 873 — compared under the host's own record of the devices that deliver
+        // a Scout, not under the premise "same interfaces" that nothing measured.
+        assert_hello_counts_agree(
+            port,
+            oracle_hits,
+            hits,
+            (&devices_before, &devices_between),
+            (&devices_between, &devices_after),
+            &format!(
+                "--- z_scout.c on wz stdout ---\n{wz_printed}\n--- oracle stdout ---\n{oracle_printed}"
+            ),
         );
     }
 }

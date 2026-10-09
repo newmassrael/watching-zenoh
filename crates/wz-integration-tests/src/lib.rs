@@ -6899,6 +6899,47 @@ pub mod common {
         out
     }
 
+    /// The devices that hold a membership of the IPv4 `group` right now, from the
+    /// kernel's own table (`/proc/net/igmp`), or `None` where that table does not
+    /// exist.
+    ///
+    /// A multicast datagram that loops back on a device is delivered to a socket only
+    /// if the kernel holds the group on THAT device, so this set is exactly where a
+    /// Scout sent to the scouting group can reach a router on this host. It is a host
+    /// fact that other processes change (a router starting or stopping on one more
+    /// interface, a container's virtual interface appearing or vanishing), which is
+    /// why a count of the answers two sequential scouts get is only comparable when
+    /// the set did not move between them. Open-debt item 873.
+    pub fn devices_holding_group(group: Ipv4Addr) -> Option<BTreeSet<String>> {
+        let table = std::fs::read_to_string("/proc/net/igmp").ok()?;
+        Some(parse_igmp_devices(&table, group))
+    }
+
+    /// [`devices_holding_group`] over the text of the table. Each device block starts
+    /// with `<idx>\t<device> : <count> <querier>` and its groups follow, one per
+    /// indented line, the first field being the group as the `__be32` it is stored as,
+    /// printed host-endian.
+    pub(crate) fn parse_igmp_devices(table: &str, group: Ipv4Addr) -> BTreeSet<String> {
+        let mut devices = BTreeSet::new();
+        let mut device: Option<&str> = None;
+        for line in table.lines().skip(1) {
+            if !line.starts_with(char::is_whitespace) {
+                device = line.split_whitespace().nth(1);
+                continue;
+            }
+            let Some(name) = device else { continue };
+            let Some(hex) = line.split_whitespace().next() else {
+                continue;
+            };
+            if u32::from_str_radix(hex, 16)
+                .is_ok_and(|raw| Ipv4Addr::from(u32::from_be(raw)) == group)
+            {
+                devices.insert(name.to_owned());
+            }
+        }
+        devices
+    }
+
     impl Drop for NetnsPair {
         fn drop(&mut self) {
             // A process spawned through `sudo` is not reachable by killing the
@@ -6936,13 +6977,37 @@ pub mod common {
 mod tests {
     use super::common::{
         cargo_tree_of_demo, configured_zid_value, demo_newest_source, face_zid_value,
-        has_zid_shape, hello_zid_value, line_with, parse_build_features,
+        has_zid_shape, hello_zid_value, line_with, parse_build_features, parse_igmp_devices,
         parse_zenoh_admin_sessions, project_root, read_whole, stale_demo_message,
         still_running_reason, wait_for_tcp_accept_alive, workspace_crate_dirs_in, CaptureTooLarge,
         ChildGuard, DemoScope, ZenohSession, ZENOHD_TCP_ACCEPT_BUDGET,
     };
     use std::collections::BTreeSet;
     use std::path::PathBuf;
+
+    /// The devices holding a group are read off the kernel's table: a device is named
+    /// when one of ITS groups is the one asked for, a group another device holds does
+    /// not name this one, and the group is compared as the address it is (the table
+    /// prints the `__be32` as a host-endian integer, so 224.0.0.1 reads `010000E0`).
+    #[test]
+    fn the_devices_holding_a_group_are_read_from_the_igmp_table() {
+        let table = "Idx\tDevice    : Count Querier\tGroup    Users Timer\tReporter\n\
+                     1\tlo        :     1      V3\n\
+                     \t\t\t\t010000E0     1 0:00000000\t\t0\n\
+                     3\twlp0s20f3 :     2      V3\n\
+                     \t\t\t\tE00000E0     1 0:00000000\t\t0\n\
+                     \t\t\t\t010000E0     1 0:00000000\t\t0\n\
+                     4\tdocker0   :     1      V3\n\
+                     \t\t\t\t010000E0     1 0:00000000\t\t0\n";
+        let devices = |group: [u8; 4]| -> Vec<String> {
+            parse_igmp_devices(table, std::net::Ipv4Addr::from(group))
+                .into_iter()
+                .collect()
+        };
+        assert_eq!(devices([224, 0, 0, 224]), ["wlp0s20f3"]);
+        assert_eq!(devices([224, 0, 0, 1]), ["docker0", "lo", "wlp0s20f3"]);
+        assert!(devices([239, 1, 1, 1]).is_empty());
+    }
 
     /// A capture file holding `bytes`, as the tests make one: an anonymous temporary
     /// file written through a duplicate handle, so the writer and the reader share
