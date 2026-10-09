@@ -146,6 +146,18 @@ mod tests {
     }
 
     #[test]
+    fn the_hex_is_lowercase_and_two_digits_a_byte() {
+        // -1 as an int32 is ten bytes, nine of them 0xff, and a byte below 0x10
+        // keeps its leading zero (the float 1.0 is 00 00 80 3f).
+        let doc = document(SCHEMA, r#"{"a":-1,"f":[1]}"#);
+        assert!(
+            doc.contains("\"payload\":\"08ffffffffffffffffff0112040000803f\""),
+            "{doc}"
+        );
+        assert!(doc.ends_with("\"payload_bytes\":17}"), "{doc}");
+    }
+
+    #[test]
     fn an_empty_message_is_an_empty_payload_and_not_an_absent_one() {
         let doc = document(SCHEMA, "{}");
         assert!(

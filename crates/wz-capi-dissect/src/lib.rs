@@ -8877,6 +8877,32 @@ mod tests {
             doc.contains("\"file\":\"m/root.proto\",\"line\":3,\"column\":1"),
             "{doc}"
         );
+
+        // The root message is looked up from the root file the caller names,
+        // among the files it reads: two files that do not import each other
+        // show which one was the root.
+        let unrelated: [(&str, &[u8]); 2] = [
+            (
+                "a.proto",
+                b"syntax = \"proto3\";\nmessage A { int32 x = 1; }\n",
+            ),
+            (
+                "b.proto",
+                b"syntax = \"proto3\";\nmessage B { int32 y = 1; }\n",
+            ),
+        ];
+        let doc = call_proto_encode("B", &unrelated, 1, r#"{"y":5}"#).expect("the door answers");
+        assert_eq!(json_string(&doc, "payload"), "0805");
+        let doc = call_proto_encode("B", &unrelated, 0, "{}").expect("the door answers");
+        assert!(
+            doc.contains("\"ok\":false,\"file\":\"a.proto\",\"reason\":"),
+            "{doc}"
+        );
+        let doc = call_proto_encode("A", &unrelated, 1, "{}").expect("the door answers");
+        assert!(
+            doc.contains("\"ok\":false,\"file\":\"b.proto\",\"reason\":"),
+            "{doc}"
+        );
     }
 
     /// EVERY CALLER BUG IS `INVALID_ARG` AND HANDS BACK NO STRING, for the value
