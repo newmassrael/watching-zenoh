@@ -2370,7 +2370,9 @@ fn recovered_sample_from_reply(reply: &dyn ReplyView) -> Option<Sample> {
     };
     sample.source_info = reply.source_info().cloned();
     sample.timestamp = reply.timestamp().cloned();
-    sample.attachment = reply.attachment().map(<[u8]>::to_vec);
+    sample.attachment = reply
+        .attachment()
+        .map(|bytes| wz_session_core::link::RxBytes::from(bytes.to_vec()));
     if let Some((packed_id, schema)) = reply.put_encoding() {
         sample.encoding = Some(EncodingHint {
             packed_id,

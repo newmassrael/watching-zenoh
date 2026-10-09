@@ -464,6 +464,21 @@ fn large_allocations_to_a_kept_sample(wire: Vec<u8>) -> (Vec<usize>, Vec<usize>)
     (drive, delivery)
 }
 
+/// Nothing as large as a kilobyte is allocated from the buffer the link read to
+/// a sample the application keeps, for a Put with or without an attachment.
+#[cfg(feature = "pubsub-put")]
+fn assert_nothing_large_is_allocated(attached: bool) {
+    let (drive, delivery) = large_allocations_to_a_kept_sample(census_wire(attached));
+    assert!(
+        drive.is_empty(),
+        "driving the frame allocated {drive:?}; its bytes must stay in the buffer the link read"
+    );
+    assert!(
+        delivery.is_empty(),
+        "delivering the sample allocated {delivery:?}; the sample must hold ranges of that buffer"
+    );
+}
+
 /// The whole way, counted in allocations: from the buffer the link read to a
 /// sample the application keeps, nothing as large as a kilobyte is allocated.
 /// The payload is thirty-two of them, so a copy of it anywhere on the path, in
@@ -472,15 +487,7 @@ fn large_allocations_to_a_kept_sample(wire: Vec<u8>) -> (Vec<usize>, Vec<usize>)
 #[cfg(feature = "pubsub-put")]
 #[test]
 fn no_allocation_of_the_payloads_size_stands_between_the_frame_and_a_kept_sample() {
-    let (drive, delivery) = large_allocations_to_a_kept_sample(census_wire(false));
-    assert!(
-        drive.is_empty(),
-        "driving the frame allocated {drive:?}; the payload must stay in the buffer the link read"
-    );
-    assert!(
-        delivery.is_empty(),
-        "delivering the sample allocated {delivery:?}; the sample must hold a range of that buffer"
-    );
+    assert_nothing_large_is_allocated(false);
 }
 
 /// The control for the census. The copying decode of the same frame (no origin
@@ -506,31 +513,70 @@ fn the_census_sees_the_copying_decode_allocate_the_payload() {
     );
 }
 
-/// A RESIDUAL, counted so it cannot grow and cannot be fixed unnoticed: an
-/// attachment is not shared. The Put's attachment bytes are a range of the frame
-/// in the decoded message (the extension chain is projected through the same
-/// origin), and the sample then holds them as a `Vec<u8>`: one copy where the
-/// registry builds the sample (`dispatch_push`) and a second where the retention
-/// sample is built from its view (`Sample::from_view`). The payload still
-/// allocates nothing.
-///
-/// Sharing them means `Sample::attachment` stops being `Option<Vec<u8>>`, a
-/// change to a public type, which is why it is not made here. When it is made,
-/// this list becomes empty and this test is folded into the one above.
+/// The same count with an attachment on the Put. The attachment's bytes are a
+/// range of the frame in the decoded message (the extension chain is projected
+/// through the same origin), and the sample holds them as it holds the payload:
+/// a second reference to the storage, taken where the registry builds the sample
+/// (`dispatch_push`) and again where the retention sample is built from its view
+/// (`Sample::from_view`). Both used to copy them, once each, as a `Vec<u8>`.
 ///
 /// Without `pubsub-attachment` the sample never reads the extension, so there is
-/// no copy to count and the premise is absent.
+/// nothing to count and the premise is absent.
 #[cfg(all(feature = "pubsub-put", feature = "pubsub-attachment"))]
 #[test]
-fn an_attachment_is_still_copied_into_the_sample_and_again_into_the_kept_one() {
-    let (drive, delivery) = large_allocations_to_a_kept_sample(census_wire(true));
+fn no_allocation_of_an_attachments_size_stands_between_the_frame_and_a_kept_sample() {
+    assert_nothing_large_is_allocated(true);
+}
+
+/// The attachment of a sample the application KEEPS, read the way the payload's
+/// is above: by address and by the count of holders of the lent storage. The
+/// attachment is a range of the frame, and a kept sample holds the frame's
+/// storage through it as well as through the payload.
+#[cfg(all(feature = "pubsub-put", feature = "pubsub-attachment"))]
+#[test]
+fn a_sample_the_application_keeps_holds_the_lent_storage_through_its_attachment() {
+    established!(actions, engine);
+    let storage = Arc::new(census_wire(true));
+    let span = storage.as_slice().as_ptr_range();
+    let lent: Arc<dyn RxStorage> = storage.clone();
+    let unit = RxBytes::shared(lent, 0..storage.len()).expect("the whole storage is a range of it");
+
+    let outcome = dispatch_link_event(LinkEvent::Rx(RxFrame::new(unit)), &actions, &mut engine);
+    let DriverLoopOutcome::FramePayload { messages, .. } = &outcome else {
+        panic!("a data frame in an established session is delivered, got {outcome:?}");
+    };
+    let kept = Arc::new(Mutex::new(None::<wz_session_core::sample::Sample>));
+    let sink = Arc::clone(&kept);
+    let mut registry = SubscriberRegistry::new();
+    registry.register("demo/census", move |view| {
+        *sink.lock().unwrap() = Some(wz_session_core::sample::Sample::from_view(view));
+    });
+    registry.dispatch(&messages[0], Reliability::Reliable);
+    let mut sample = kept.lock().unwrap().take().expect("the subscriber fired");
+
+    let attachment = sample
+        .attachment
+        .take()
+        .expect("the Put carried an attachment");
+    assert_eq!(attachment.as_slice(), vec![0xA7; CENSUS_ATTACHMENT]);
     assert!(
-        drive.is_empty(),
-        "driving the frame allocated {drive:?}; attachment or not, the drive shares the buffer"
+        span.contains(&attachment.as_ptr()),
+        "the kept attachment must be a range of the lent storage, not a copy of it"
     );
+    // The payload's reference is let go with the sample, the attachment's is the
+    // one still held: the storage stays out of its pool for as long as it lives.
+    drop(sample);
+    drop(outcome);
+    drop(registry);
     assert_eq!(
-        delivery,
-        [CENSUS_ATTACHMENT, CENSUS_ATTACHMENT],
-        "only the attachment is copied on delivery, once per sample built, and never the payload"
+        Arc::strong_count(&storage),
+        2,
+        "with the frame and the messages gone, the kept attachment holds the storage"
+    );
+    drop(attachment);
+    assert_eq!(
+        Arc::strong_count(&storage),
+        1,
+        "and when the attachment is dropped the storage goes home"
     );
 }

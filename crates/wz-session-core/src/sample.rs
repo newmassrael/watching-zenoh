@@ -588,7 +588,13 @@ pub struct Sample {
     /// Body-level attachment blob (zenoh-pico
     /// `_Z_MSG_EXT_ENC_ZBUF | 0x03` extension). `None` when no matching
     /// extension was present.
-    pub attachment: Option<Vec<u8>>,
+    ///
+    /// Held as [`payload`](Self::payload) is: a sample off the wire holds a range
+    /// of the received frame, so cloning the sample shares that storage and the
+    /// storage goes home when the last holder drops. Reads go through `Deref` to
+    /// `[u8]`; a caller that keeps the attachment for long and wants the frame's
+    /// storage back copies it out ([`RxBytes::into_vec`]).
+    pub attachment: Option<RxBytes>,
     /// Body-level source identification (zenoh-pico
     /// `_Z_MSG_EXT_ENC_ZBUF | 0x01` extension). `None` when no matching
     /// extension was present or the ZBuf payload failed source-info
@@ -627,6 +633,9 @@ impl crate::sink::SampleView for Sample {
     }
     fn attachment(&self) -> Option<&[u8]> {
         self.attachment.as_deref()
+    }
+    fn attachment_shared(&self) -> Option<&RxBytes> {
+        self.attachment.as_ref()
     }
     fn timestamp(&self) -> Option<&TimestampHint> {
         self.timestamp.as_ref()
@@ -671,7 +680,10 @@ impl Sample {
         sample.timestamp = view.timestamp().cloned();
         sample.encoding = view.encoding().cloned();
         sample.qos = view.qos();
-        sample.attachment = view.attachment().map(<[u8]>::to_vec);
+        sample.attachment = view
+            .attachment_shared()
+            .cloned()
+            .or_else(|| view.attachment().map(|bytes| RxBytes::from(bytes.to_vec())));
         sample.source_info = view.source_info().cloned();
         sample
     }
@@ -740,8 +752,15 @@ impl Sample {
     }
 
     /// Attach a body-level attachment blob.
-    pub fn with_attachment(mut self, attachment: impl Into<Vec<u8>>) -> Self {
-        self.attachment = Some(attachment.into());
+    pub fn with_attachment(self, attachment: impl Into<Vec<u8>>) -> Self {
+        self.with_attachment_shared(RxBytes::from(attachment.into()))
+    }
+
+    /// [`Self::with_attachment`] over bytes that are already a frame's range:
+    /// the sample holds them as they are, with no copy. What the receive path
+    /// calls, as [`Self::new_put_shared`] is for the payload.
+    pub fn with_attachment_shared(mut self, attachment: RxBytes) -> Self {
+        self.attachment = Some(attachment);
         self
     }
 
@@ -1367,5 +1386,64 @@ mod tests {
         assert_eq!(si.zid, expected_zid);
         assert_eq!(si.eid, 200);
         assert_eq!(si.sn, 16384);
+    }
+
+    /// A view that borrows its attachment and holds nothing shareable, as a view
+    /// over loose bytes does.
+    struct LooseAttachment<'a>(&'a [u8]);
+
+    impl crate::sink::SampleView for LooseAttachment<'_> {
+        fn keyexpr(&self) -> &str {
+            "k"
+        }
+        fn payload(&self) -> &[u8] {
+            b"p"
+        }
+        fn kind(&self) -> SampleKind {
+            SampleKind::Put
+        }
+        fn reliability(&self) -> Reliability {
+            Reliability::Reliable
+        }
+        fn attachment(&self) -> Option<&[u8]> {
+            Some(self.0)
+        }
+    }
+
+    /// Retaining a sample whose attachment is a range of a frame takes a second
+    /// reference to that frame; it does not copy the bytes out.
+    #[cfg(feature = "rx-shared-bytes")]
+    #[test]
+    fn a_kept_sample_shares_the_attachment_its_view_holds_shared() {
+        let frame = RxBytes::lend(b"xxATTACHyy".to_vec());
+        let attachment = frame.subslice(2..8).expect("a range of the frame");
+        let live = Sample::new_put("k", b"p".to_vec()).with_attachment_shared(attachment.clone());
+
+        let kept = Sample::from_view(&live);
+
+        let got = kept.attachment.as_ref().expect("the attachment is kept");
+        assert_eq!(got.as_slice(), b"ATTACH");
+        assert!(got.is_shared(), "the kept attachment is lent storage");
+        assert_eq!(
+            got.as_ptr(),
+            attachment.as_ptr(),
+            "and it is the very bytes the live sample holds, not a copy of them"
+        );
+    }
+
+    /// A view that only borrows its attachment has nothing to share, so retaining
+    /// it copies, as every retention did before the attachment could be shared.
+    #[test]
+    fn a_kept_sample_copies_the_attachment_a_loose_view_borrows() {
+        let bytes = b"loose".to_vec();
+        let kept = Sample::from_view(&LooseAttachment(&bytes));
+
+        let got = kept.attachment.as_ref().expect("the attachment is kept");
+        assert_eq!(got.as_slice(), b"loose");
+        assert_ne!(
+            got.as_ptr(),
+            bytes.as_ptr(),
+            "borrowed bytes do not outlive the call, so the sample owns a copy"
+        );
     }
 }

@@ -162,7 +162,7 @@ use crate::wire::{PushOwned, PushOwnedVariant};
     any(feature = "pubsub-put", feature = "pubsub-delete"),
     feature = "pubsub-attachment"
 ))]
-use crate::attachment::{decode_attachment_ext, ATTACHMENT_EXT_ID_PUSH};
+use crate::attachment::{decode_attachment_ext_shared, ATTACHMENT_EXT_ID_PUSH};
 #[cfg(feature = "alloc")]
 use crate::driver_loop::{DriverLoopOutcome, IterationEvent};
 #[cfg(feature = "alloc")]
@@ -1424,10 +1424,10 @@ impl<C: SampleSink> SubscriberRegistry<C> {
                     #[cfg(not(feature = "pubsub-timestamp"))]
                     let body_timestamp: Option<TimestampHint> = None;
                     #[cfg(feature = "pubsub-attachment")]
-                    let body_attachment = decode_attachment_ext(body_exts, ATTACHMENT_EXT_ID_PUSH)
-                        .map(<[u8]>::to_vec);
+                    let body_attachment =
+                        decode_attachment_ext_shared(body_exts, ATTACHMENT_EXT_ID_PUSH);
                     #[cfg(not(feature = "pubsub-attachment"))]
-                    let body_attachment: Option<alloc::vec::Vec<u8>> = {
+                    let body_attachment: Option<crate::link::RxBytes> = {
                         let _ = body_exts;
                         None
                     };
@@ -1503,11 +1503,12 @@ impl<C: SampleSink> SubscriberRegistry<C> {
                     // byte: the two ids encode identically, so only a test that
                     // NAMES the id can tell them apart, and none did.
                     #[cfg(feature = "pubsub-attachment")]
-                    let body_attachment =
-                        decode_attachment_ext(body_exts, crate::attachment::ATTACHMENT_EXT_ID_DEL)
-                            .map(<[u8]>::to_vec);
+                    let body_attachment = decode_attachment_ext_shared(
+                        body_exts,
+                        crate::attachment::ATTACHMENT_EXT_ID_DEL,
+                    );
                     #[cfg(not(feature = "pubsub-attachment"))]
-                    let body_attachment: Option<alloc::vec::Vec<u8>> = {
+                    let body_attachment: Option<crate::link::RxBytes> = {
                         let _ = body_exts;
                         None
                     };
@@ -1571,7 +1572,7 @@ impl<C: SampleSink> SubscriberRegistry<C> {
             sample = sample.with_qos(q);
         }
         if let Some(att) = body_attachment {
-            sample = sample.with_attachment(att);
+            sample = sample.with_attachment_shared(att);
         }
         if let Some(si) = body_source_info {
             sample = sample.with_source_info(si);

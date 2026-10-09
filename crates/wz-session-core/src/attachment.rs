@@ -130,6 +130,40 @@ pub fn decode_attachment_ext<E: ExtEntryView>(extensions: &[E], ext_id: u8) -> O
     None
 }
 
+/// [`decode_attachment_ext`] over a chain on the wire profile, answering the
+/// attachment as the shareable value it is held in: on a received message the
+/// bytes are a range of the frame they arrived in, and the answer is a second
+/// reference to that storage, not a copy. This is what makes an attachment as
+/// shareable as the payload beside it; the borrowed form above stays for the
+/// readers that only look.
+///
+/// Without `rx-shared-bytes` there is no storage to share (the wire profile is
+/// the owned default) and the answer is a copy of the same bytes, which is what
+/// every reader of the borrowed form made before there was a choice.
+pub fn decode_attachment_ext_shared(
+    extensions: &[ExtEntryOwned<crate::wire::WireStorage>],
+    ext_id: u8,
+) -> Option<crate::link::RxBytes> {
+    #[cfg(feature = "rx-shared-bytes")]
+    {
+        for ext in extensions {
+            if ext.ext_id() != ext_id {
+                continue;
+            }
+            // The same entry `decode_attachment_ext` reads: a plain ZBuf body.
+            if let ExtEntryOwnedVariant::CodecZenohExtZbuf(z) = &ext.body {
+                return Some(z.value.as_rx_bytes().clone());
+            }
+        }
+        None
+    }
+    #[cfg(not(feature = "rx-shared-bytes"))]
+    {
+        decode_attachment_ext(extensions, ext_id)
+            .map(|bytes| crate::link::RxBytes::from(bytes.to_vec()))
+    }
+}
+
 /// Serialize an ordered list of `(key, value)` byte-string pairs into the
 /// zenoh `ze_serializer` attachment kv-sequence wire form — the payload a
 /// zenoh / zenoh-pico consumer's attachment loop decodes with

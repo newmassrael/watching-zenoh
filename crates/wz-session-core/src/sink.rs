@@ -88,6 +88,17 @@ pub trait SampleView {
     fn attachment(&self) -> Option<&[u8]> {
         None
     }
+    /// The attachment as the shareable value the view holds it in, when it holds
+    /// one: the twin of [`payload_shared`](Self::payload_shared). The view of a
+    /// received [`Sample`](crate::sample::Sample) answers with the range of the
+    /// frame the attachment arrived in, so a subscriber that keeps the sample
+    /// takes a second reference to that storage instead of copying the bytes out.
+    /// Defaults to `None`, and a view that answers `None` here while
+    /// [`attachment`](Self::attachment) answers `Some` is retained by copying.
+    #[cfg(feature = "alloc")]
+    fn attachment_shared(&self) -> Option<&crate::link::RxBytes> {
+        None
+    }
     /// Body-level timestamp hint, if present. Defaults to `None`.
     #[cfg(feature = "alloc")]
     fn timestamp(&self) -> Option<&crate::sample::TimestampHint> {
