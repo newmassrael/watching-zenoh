@@ -346,14 +346,26 @@ Resolve the paths per machine and keep them in agent memory or a local
 untracked note.
 
 - **SCE** — the codegen engine; pinned, and read-only from wz sessions.
-- **Zenoh 1.5.0 (Rust)** — the CORE crates (`zenoh`, `zenoh-protocol`,
-  `zenoh-codec`, `zenoh-buffers`, `zenoh-keyexpr`, `zenoh-config`,
-  `zenoh-link-*`) land in the local cargo **registry cache** as a side effect
-  of building; `cargo fetch` if absent. This is what §5.12-codec / §5.1-transport
-  anchor to, and it is why those domains are gradable.
+- **Zenoh (Rust), at the PINNED version** — the CORE crates (`zenoh`,
+  `zenoh-protocol`, `zenoh-codec`, `zenoh-buffers`, `zenoh-keyexpr`,
+  `zenoh-config`, `zenoh-link-*`). The version this tree compares against and
+  enforces is `UPSTREAM_VERSION` in `scripts/lib/upstream_feature_census.py`
+  (1.10.1 as of this writing; the constant is the SSOT, so if the two ever
+  disagree the constant is right and this sentence is stale). This is what
+  §5.12-codec / §5.1-transport anchor to, and it is why those domains are
+  gradable. Do NOT locate the tree yourself: `upstream_root()` in
+  `scripts/lib/upstream_citation_anchor_gate.py` is the one resolver, and it
+  accepts only a checkout whose manifest declares exactly that version (no
+  fallback; none found is a FAIL). The tree is a cargo git checkout, the
+  `build-zenohd.sh` shallow clone, or an explicit `ZENOHD_SRC`; the registry
+  cache copy of the crates is last in the census chain and lacks the workspace
+  layout `upstream_root()` needs. A checkout of ANY OTHER version left on the
+  machine (the previous pin's, for one) is a different upstream: a person who
+  finds it reads it coherently and cites it, and the citations are wrong at
+  the pin. Never cite from it.
 - **Zenoh STORAGE upstream — needs a DELIBERATE checkout; no build provisions
   it.** `zenoh-plugin-storage-manager` and `zenoh-backend-traits` are nobody's
-  cargo dependency, so the registry-cache route above never yields them. The
+  cargo dependency, so the cargo-cache route above never yields them. The
   §5.11-storage / §5.24-storage-backend atoms and `adminspace.rs` anchor to
   them, so grading their A3 impl axis needs a checkout of the `zenoh` repo's
   `plugins/` tree at the pinned version. **Whether that checkout exists on THIS
