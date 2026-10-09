@@ -7835,7 +7835,14 @@ layer_c1aq_cargo_test_ext_pubsub_advanced() {
     # sequencing following the plane's answer, and a cached sample keeping what
     # it retains until the ring lets it go (that last one lives in
     # `advanced_cache`, which this filter also reaches).
-    _runci_guarded_test "C1aq advanced_" 25 \
+    # 25 -> 23: the publication cache's `_time` filter replaced the three
+    # time-range parsing tests (`parse_duration_units_match_zenoh`,
+    # `parse_time_range_resolves_now_relative_bounds`,
+    # `parse_time_range_survives_post_2038_now_word`) with one test of the whole
+    # grammar, `the_cache_filter_resolves_every_form_the_grammar_accepts`, and the
+    # guard was not moved with them. Derived by `--list` under this feature set:
+    # 23, twelve in `advanced_cache` and eleven in `advanced_publisher`.
+    _runci_guarded_test "C1aq advanced_" 23 \
         cargo test -p wz-runtime-tokio --features ext-pubsub-advanced-publisher,query-get,pubsub-allow-loop \
         --lib advanced_ --quiet || return 1
     (cd crates \
