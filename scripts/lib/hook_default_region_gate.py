@@ -40,9 +40,14 @@ comment does not run), with a backslash-continued command read as one line:
     appears only AFTER the boundary is named as the shape this gate exists for;
   * a default-region run of a DEFERRED check is a finding too -- a deferral the
     hook has quietly stopped honouring is a stale claim about cost;
-  * a default-region run of `guarded_count_gate.py` without `--count-only` is a
-    finding: its full run builds one cargo target per guard it reaches, and a
-    single cold guard measured 473s;
+  * a default-region run of `guarded_count_gate.py` without `--count-only` or
+    `--cached-only` is a finding: its full run builds one cargo target per guard
+    it reaches, and a single cold guard measured 473s. The ordinary push runs it
+    with `--cached-only` (item 898), and that row must keep its exit status: a
+    line ending `|| true` is a report, not a check, and is a finding too;
+  * an `echo`/`printf` line that merely NAMES a command does not run it (it
+    neither satisfies a required row nor trips a forbidden one), the same way a
+    comment does not; one that chains another command is read as code;
   * a hook with no boundary, or two, is a finding: the split is the subject, so
     a scanner that found none has agreed with nothing.
 
@@ -74,6 +79,9 @@ HOOK_REL = ".githooks/pre-push"
 #: boundary" mean two things.
 BOUNDARY = re.compile(r'^\s*if \[\[ "\$\{WZ_PREPUSH_EXTENDED:-0\}" != "1" \]\]; then\s*$')
 
+#: A command whose exit status is thrown away.
+DISCARDS_RC = re.compile(r"\|\|\s*(true|:)(\s|;|$)")
+
 
 class Required(NamedTuple):
     """A check an ordinary push must run."""
@@ -81,6 +89,9 @@ class Required(NamedTuple):
     needles: tuple[str, ...]  # all on ONE logical line of the default region
     seconds: str  # measured wall clock, quoted as the measurement was taken
     why: str
+    #: True when the row's exit status is a verdict the hook must act on, so the
+    #: line must not end `|| true`.
+    judges: bool = False
 
 
 class Deferred(NamedTuple):
@@ -135,11 +146,16 @@ REQUIRED: tuple[Required, ...] = (
         "need a build and are the next row's subject",
     ),
     Required(
-        ("scripts/lib/guarded_count_gate.py", "--count-only"),
-        "0.1 to 0.3",
-        "SELECTION only: names how many count guards this push reaches, so a "
-        "round that added tests is told its count is unchecked here. The "
-        "verdict needs a build per guard and stays hosted (see DEFERRED)",
+        ("scripts/lib/guarded_count_gate.py", "--cached-only"),
+        "2.0 (the selection-only report it replaced: 2.0; parsing 491 guards dominates)",
+        "the count guards this push reaches, judged from the per-clone cache "
+        "and NEVER built: a cached number that disagrees with the declared one "
+        "refuses the push (a known wrong number, free to detect); a guard with "
+        "no measurement for this tree is printed as DEFERRED and passes, "
+        "because measuring it builds one cargo target per guard (473s cold) and "
+        "hosted CI judges it. A count moved without its number reddened hosted "
+        "runs repeatedly",
+        judges=True,
     ),
     Required(
         ("scripts/lib/hook_default_region_gate.py",),
@@ -160,11 +176,12 @@ DEFERRED: tuple[Deferred, ...] = (
     ),
 )
 
-#: A default-region use of this module is allowed ONLY with its companion.
-FORBIDDEN_UNLESS: tuple[tuple[str, str, str], ...] = (
+#: A default-region use of this module is allowed ONLY with one of its
+#: companions (the two modes that never build).
+FORBIDDEN_UNLESS: tuple[tuple[str, tuple[str, ...], str], ...] = (
     (
         "scripts/lib/guarded_count_gate.py",
-        "--count-only",
+        ("--count-only", "--cached-only"),
         "the full run builds one cargo target per count guard the push reaches; "
         "one cold guard (wz-runtime-zephyr, 1 of 435) measured 473s through the "
         "build machine, against the hook's whole ordinary cost of about two "
@@ -198,7 +215,24 @@ def code_lines(src: str) -> list[tuple[int, str]]:
         pending = []
     if pending:
         out.append((start, " ".join(p.strip() for p in pending)))
-    return out
+    return [(no, text) for no, text in out if not _is_inert_message(text)]
+
+
+#: A message line: `echo`/`printf` and nothing that chains another command.
+_MESSAGE = re.compile(r"^(echo|printf)\s")
+_CHAINS = re.compile(r"\||&&|;|\$\(|`")
+
+
+def _is_inert_message(text: str) -> bool:
+    """True for an `echo`/`printf` line that cannot run anything else.
+
+    A hint that NAMES a command ("measure now: python3 .../gate.py --range x")
+    does not run it, exactly as a comment does not, and must neither satisfy a
+    REQUIRED row nor trip a FORBIDDEN one. A line that chains a command after
+    the message (a pipe, `;`, `&&`, a substitution, a backtick) is not inert and
+    is read as code, which is the conservative direction.
+    """
+    return bool(_MESSAGE.match(text.strip())) and not _CHAINS.search(text)
 
 
 def split_regions(
@@ -255,12 +289,24 @@ def grade(src: str) -> list[str]:
                 "call does not belong here."
             )
 
-    for needle, companion, why in FORBIDDEN_UNLESS:
+    for needle, companions, why in FORBIDDEN_UNLESS:
         for no, text in default:
-            if needle in text and companion not in text:
+            if needle in text and not any(c in text for c in companions):
                 findings.append(
                     f"line {no}: `{needle}` runs on an ordinary push without "
-                    f"`{companion}`: {why}"
+                    f"{' or '.join(f'`{c}`' for c in companions)}: {why}"
+                )
+    # A verdict-bearing row whose exit code is thrown away is a report, not a
+    # check: the pre-item-898 spelling of the count-guard row ended `|| true`.
+    for req in REQUIRED:
+        if not req.judges:
+            continue
+        for no, text in default:
+            if all(n in text for n in req.needles) and DISCARDS_RC.search(text):
+                findings.append(
+                    f"line {no}: `{' '.join(req.needles)}` has its exit status "
+                    "discarded (`|| true`): the row exists to refuse a push on a "
+                    "known wrong number, and a discarded status is a report"
                 )
     return findings
 
@@ -366,6 +412,78 @@ def selftest() -> int:
             "without `--count-only`",
         ),
         (
+            "the selection-only spelling no longer stands in for the cached verdict",
+            _fixture_hook(
+                [
+                    *[c for c in every if "--cached-only" not in c],
+                    "python3 scripts/lib/guarded_count_gate.py --range a..b --count-only",
+                ],
+                [],
+            ),
+            1,
+            "not in the hook at all",
+        ),
+        (
+            "the cached verdict spelled without the build-free flag but with --range only",
+            _fixture_hook(
+                [
+                    *[c for c in every if "--cached-only" not in c],
+                    "python3 scripts/lib/guarded_count_gate.py --range a..b",
+                ],
+                [],
+            ),
+            1,
+            "without `--count-only` or `--cached-only`",
+        ),
+        (
+            "a hint that only NAMES the count gate without a flag is not a run of it",
+            _fixture_hook(
+                [
+                    *every,
+                    'echo "measure now: python3 scripts/lib/guarded_count_gate.py '
+                    '--range a..b"',
+                ],
+                [],
+            ),
+            0,
+            "",
+        ),
+        (
+            "an echo naming a required check does not stand in for running it",
+            _fixture_hook(
+                [
+                    *every[:moved],
+                    f'echo "run {every[moved]} some time"',
+                    *every[moved + 1 :],
+                ],
+                [],
+            ),
+            1,
+            "not in the hook at all",
+        ),
+        (
+            "an echo piped into the count gate is code, and is read as code",
+            _fixture_hook(
+                [*every, 'echo x | python3 scripts/lib/guarded_count_gate.py --range a..b'],
+                [],
+            ),
+            1,
+            "without `--count-only` or `--cached-only`",
+        ),
+        (
+            "the cached verdict with its exit status discarded, the old report shape",
+            _fixture_hook(
+                [
+                    *[c for c in every if "--cached-only" not in c],
+                    "python3 scripts/lib/guarded_count_gate.py --range a..b "
+                    "--cached-only || true",
+                ],
+                [],
+            ),
+            1,
+            "exit status discarded",
+        ),
+        (
             "a deferred check that has crept into the ordinary push",
             _fixture_hook([*every, "bash scripts/run-ci.sh --layer U"], []),
             1,
@@ -396,8 +514,10 @@ def selftest() -> int:
         "(also with a command wrapped by a backslash); a row only below the "
         "boundary, absent, or only in a comment is red and the first is named "
         "as the extended-only shape; no boundary and two boundaries are red; "
-        "the count gate without --count-only and a deferred check in the "
-        "ordinary region are red"
+        "the count gate without --count-only/--cached-only, the cached verdict "
+        "with its exit status discarded, the selection-only spelling standing in "
+        "for the verdict, and a deferred check in the ordinary region are red; "
+        "an echo naming a command neither satisfies nor trips a row"
     )
     return 0
 

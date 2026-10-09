@@ -138,6 +138,24 @@ ENVIRONMENT error naming the files, not as "measured nothing". 752: a second
 measurement in the same worktree is refused at once, naming the first, instead of
 queueing behind a cargo lock the first holds.
 
+Exit codes, one meaning each (a caller that has to act on the difference, the
+pre-push hook, must be able to tell them apart):
+
+    0  every reached guard was judged and equals its declared number (or none
+       is reached)
+    1  a measured or cached count DISAGREES with the declared number: a known
+       wrong number
+    2  nothing could be judged: run-ci.sh parsed to no guards, the range could
+       not be read, bx declined the tree, a run printed no summary, or the
+       tool itself failed. This says nothing about any count
+    3  `--cached-only` only: no reached guard disagrees, but at least one has no
+       measurement for this tree, so it was not judged
+    4  another measurement already holds this worktree's lock
+
+`--cached-only` prints one line starting `guarded-count gate: cached-only:` with
+the reached / equal / disagree / not-measured counts, so a caller need not parse
+the per-guard lines.
+
 Usage:
     python3 scripts/lib/guarded_count_gate.py --range <base>..<head> [--verbose]
     python3 scripts/lib/guarded_count_gate.py --range <base>..<head> --count-only
@@ -1933,6 +1951,39 @@ def lock_path():
     return p / "wz-guarded-count.lock"
 
 
+EXIT_OK = 0
+EXIT_DISAGREE = 1
+EXIT_CANNOT_JUDGE = 2
+EXIT_UNMEASURED = 3
+EXIT_BUSY = 4
+
+CACHED_ONLY_PREFIX = "guarded-count gate: cached-only:"
+
+
+def cached_only_line(reached, equal, disagree, unmeasured):
+    """The one line `--cached-only` ends on, for a caller that must not parse
+    the per-guard lines."""
+    return (
+        f"{CACHED_ONLY_PREFIX} {reached} reached, {equal} equal to the declared "
+        f"number, {disagree} disagree, {unmeasured} not measured for this tree"
+    )
+
+
+def final_exit_code(moved, broken, environment, unmeasured):
+    """The exit code of a run that judged what it could. Precedence is the
+    point: "could not judge" outranks everything (a number read from a broken
+    run proves nothing), a count known to be wrong is reported as wrong even
+    when other guards were not measured, and only then does "unmeasured"
+    outrank "judged equal"."""
+    if environment or broken:
+        return EXIT_CANNOT_JUDGE
+    if moved:
+        return EXIT_DISAGREE
+    if unmeasured:
+        return EXIT_UNMEASURED
+    return EXIT_OK
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--range", dest="rng")
@@ -1984,7 +2035,7 @@ def main():
             "meaningless.",
             file=sys.stderr,
         )
-        return 1
+        return EXIT_CANNOT_JUDGE
 
     changes = changes_from_git(args.rng)
     manifest_names = package_manifest_names()
@@ -2068,7 +2119,9 @@ def main():
             print(f"  unrunnable {g.where}: {why}")
     if not selected:
         print("  no guard's test set is moved by this push; nothing to run.")
-        return 0
+        if args.cached_only:
+            print(cached_only_line(0, 0, 0, 0))
+        return EXIT_OK
     if args.verbose:
         for g in selected:
             print(f"  reached  {g.where}: {g.reason}")
@@ -2101,7 +2154,7 @@ def main():
                 "the other has ended.",
                 file=sys.stderr,
             )
-            return 4
+            return EXIT_BUSY
         for g in todo:
             status, counts, _note, _from_cache = results[id(g)]
             if status in ("OK", "MOVED") and id(g) in keys:
@@ -2109,6 +2162,8 @@ def main():
         cache.save()
 
     moved, broken, environment = [], [], []
+    # Only a --cached-only run leaves guards unjudged: a full run measured them.
+    unmeasured = todo if args.cached_only else []
     for g in selected:
         if id(g) not in results:
             continue
@@ -2147,6 +2202,15 @@ def main():
         f"judged ({n_cached} from the cache, {len(results) - n_cached} measured) "
         f"in {time.time() - started:.0f}s"
     )
+    if args.cached_only:
+        print(
+            cached_only_line(
+                len(selected),
+                sum(1 for r in results.values() if r[0] == "OK"),
+                len(moved),
+                len(todo),
+            )
+        )
     if environment:
         # Item 759 -- the tree bx was handed is not one it can ship. That is a
         # fact about the WORKSPACE (a file somebody left in it), so it is named
@@ -2171,7 +2235,7 @@ def main():
             "No count was read.",
             file=sys.stderr,
         )
-        return 2
+        return final_exit_code(moved, broken, environment, unmeasured)
     if broken:
         print("", file=sys.stderr)
         print("guarded-count gate INPUT ERROR:", file=sys.stderr)
@@ -2181,7 +2245,7 @@ def main():
             "\n  Fix the run before reading anything into the numbers above.",
             file=sys.stderr,
         )
-        return 2
+        return final_exit_code(moved, broken, environment, unmeasured)
     if moved:
         print("", file=sys.stderr)
         print("guarded-count gate FAIL:", file=sys.stderr)
@@ -2197,12 +2261,12 @@ def main():
             "number before (run-ci.sh's own comment records it).",
             file=sys.stderr,
         )
-        return 1
-    if args.cached_only and todo:
-        # Nothing cached moved, but part of the push was not read at all. 3 is
-        # its own code: it is neither "green" nor "the count moved".
-        return 3
-    return 0
+        return final_exit_code(moved, broken, environment, unmeasured)
+    # Under --cached-only `todo` is what the cache could not answer: nothing
+    # cached moved, but part of the push was not read at all. EXIT_UNMEASURED is
+    # its own code: it is neither "green" nor "the count moved". A full run
+    # measures everything in `todo`, so there it is always empty here.
+    return final_exit_code(moved, broken, environment, unmeasured)
 
 
 def measure(guards, verbose):
@@ -2597,8 +2661,9 @@ def selftest():
     )
 
     selftest_787(arm)
+    selftest_exit_codes(arm)
 
-    bad = [(n, w) for n, ok, w in arms if not ok]
+    bad =[(n, w) for n, ok, w in arms if not ok]
     print(f"guarded-count gate selftest: {len(arms) - len(bad)}/{len(arms)} arm(s) OK")
     for name, ok, _ in arms:
         print(f"  {'ok  ' if ok else 'FAIL'} {name}")
@@ -2642,6 +2707,70 @@ lane_loop() {
         cargo test -p demo-crate --features "x,zenoh-config" --lib --quiet || return 1
 }
 """
+
+
+def selftest_exit_codes(arm):
+    """The five outcomes a caller must tell apart, and the line it reads."""
+    arm(
+        "exit code: judged equal and fully measured is 0",
+        final_exit_code([], [], [], []) == EXIT_OK,
+        "the pass case",
+    )
+    arm(
+        "exit code: a count that disagrees is 1, with or without unmeasured guards",
+        final_exit_code(["m"], [], [], []) == EXIT_DISAGREE
+        and final_exit_code(["m"], [], [], ["u"]) == EXIT_DISAGREE,
+        "a known wrong number must not be downgraded to 'not measured' by "
+        "another guard's absence from the cache",
+    )
+    arm(
+        "exit code: only unmeasured guards is 3, distinct from a disagreement",
+        final_exit_code([], [], [], ["u"]) == EXIT_UNMEASURED
+        and EXIT_UNMEASURED not in (EXIT_OK, EXIT_DISAGREE, EXIT_CANNOT_JUDGE),
+        "the hook passes on this and refuses on 1",
+    )
+    arm(
+        "exit code: a run that could not be read is 2, never 1",
+        final_exit_code([], ["b"], [], []) == EXIT_CANNOT_JUDGE
+        and final_exit_code([], [], ["e"], []) == EXIT_CANNOT_JUDGE
+        and final_exit_code(["m"], ["b"], [], []) == EXIT_CANNOT_JUDGE,
+        "a number read from a broken run proves nothing, so it outranks a "
+        "disagreement beside it",
+    )
+    arm(
+        "exit code: the exit codes are five distinct values",
+        len({EXIT_OK, EXIT_DISAGREE, EXIT_CANNOT_JUDGE, EXIT_UNMEASURED, EXIT_BUSY}) == 5,
+        "two outcomes sharing a code is the defect this block exists to prevent",
+    )
+    line = cached_only_line(10, 9, 0, 1)
+    arm(
+        "cached-only: the summary line carries every count and the prefix a caller greps",
+        line.startswith(CACHED_ONLY_PREFIX)
+        and "10 reached" in line
+        and "9 equal" in line
+        and "0 disagree" in line
+        and "1 not measured" in line
+        and "\n" not in line,
+        "the hook prints this line instead of parsing per-guard output",
+    )
+    import io
+    import contextlib
+
+    def crash():
+        raise OSError("range unreadable")
+
+    saved = globals()["main"]
+    globals()["main"] = crash
+    try:
+        with contextlib.redirect_stderr(io.StringIO()):
+            rc = run()
+    finally:
+        globals()["main"] = saved
+    arm(
+        "exit code: a crash inside the tool exits 2, not Python's default 1",
+        rc == EXIT_CANNOT_JUDGE,
+        "an uncaught exception would read as 'a count disagrees'",
+    )
 
 
 def selftest_787(arm):
@@ -3139,5 +3268,26 @@ def selftest_787(arm):
     )
 
 
+def run():
+    """`main()` with the exit-code contract kept under a crash.
+
+    An uncaught exception exits 1 in Python, which is this gate's "a count
+    disagrees". A tool that fell over (an unreadable range, an unreadable
+    run-ci.sh) said nothing about any count, so it exits EXIT_CANNOT_JUDGE.
+    """
+    try:
+        return main()
+    except Exception:
+        import traceback
+
+        traceback.print_exc()
+        print(
+            "guarded-count gate: the tool itself failed (traceback above); no "
+            "count was judged",
+            file=sys.stderr,
+        )
+        return EXIT_CANNOT_JUDGE
+
+
 if __name__ == "__main__":
-    sys.exit(main())
+    sys.exit(run())

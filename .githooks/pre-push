@@ -10,16 +10,19 @@
 # 2b (claim-scoped proof audit), 2c (previous hosted verdict, no waiting), and
 # since item 897 the cheap tree-only checks hosted CI reds on: 2f (upstream
 # citation form, about 11s) and 2c2 (doc-link, inventory-tag and demo-restore
-# lanes, count-guard lint; about 7s), then a one-line count-guard selection
-# report. Everything after the policy boundary is an OPTIONAL extended local
-# sweep. Hosted run-ci lanes continue to own static analysis, tests, docs,
+# lanes, count-guard lint; about 7s), then 2c3 (item 898: the count guards the
+# push reaches, judged from the measurement cache and never built, about 2s: a
+# cached count that disagrees with its declared number REFUSES the push, a guard
+# with no measurement here is printed as DEFERRED and passes). Everything after
+# the policy boundary is an OPTIONAL extended local sweep. Hosted run-ci lanes continue to own static analysis, tests, docs,
 # formatting and build matrices; `hook_default_region_gate.py` holds which
 # checks sit above the boundary and which are deferred, with the reason.
 # A deferred check is not a local pass. Run the change's focused verification
 # during development; do not automatically repeat the broad sweep at push.
 #
 # To request the previous local sweep: WZ_PREPUSH_EXTENDED=1 git push origin main
-# The separately expensive count-guard check still needs its own opt-in.
+# Measuring the count guards (a cargo build per guard) still needs its own
+# opt-in: WZ_PREPUSH_COUNT_GUARD=1 inside the sweep, or run the oracle by hand.
 # Neither option bypasses the mandatory gates above. Hosted failures are read
 # on the next round, not waited for here.
 #
@@ -428,7 +431,7 @@ fi
 # WHAT IS NOT HERE, and why, is held by `hook_default_region_gate.py` so that a
 # deferral is a written decision. Layer U needs the network and reds whenever
 # upstream publishes, which no push causes. The count guards' VERDICT needs a
-# cargo target per guard: one cold guard measured 473s. See the report below.
+# cargo target per guard: one cold guard measured 473s. Gate 2c3 below judges them from the cache only.
 #
 # `hook_default_region_gate.py` is first because it is the one that notices the
 # others leaving: it fails when any row of its table sits only below the policy
@@ -468,31 +471,73 @@ if ! python3 scripts/lib/count_guard_lint.py; then
     exit 1
 fi
 
-# ─── count-guard selection report (NOT a gate, item 897) ────────────
-# It never fails a push: it says how many of run-ci.sh's count guards this push
-# REACHES, because the other half of the class is not decidable in a hook.
+# ─── gate 2c3 — the count guards this push reaches, from the cache (item 898) ─
+# grades: worktree
+# `guarded_count_gate.py --cached-only` selects the run-ci.sh count guards the
+# push range REACHES (a test added to a module a guard's filter names, a feature
+# table edit, the guard's own line) and judges each against the measurement the
+# per-clone cache holds for this exact package shape. It NEVER builds: the
+# verdict of an unmeasured guard costs one cargo target each (473s for one cold
+# guard) and the owner's 2026-09-23 policy keeps that on hosted CI. Cost here is
+# parsing the 491 guards, about two seconds.
 #
-# WHAT THE ORACLE CAN SEE, measured 2026-10-09. `guarded_count_gate.py` parses 435
-# guards and resolves 384; the other 51 assemble part of their command in the
-# shell and are DEFERRED to the hosted lane that owns them, which it prints
-# whenever it runs a guard. The three guards that went red that day -- C1l, C1aq,
-# C1ns -- are all among the 384, so the cause was not the oracle's blindness; it
-# was that nothing ran it. Running it is the cost: the verdict builds one cargo
-# target per guard reached, and a single cold guard measured 473s, against a hook
-# whose ordinary cost is about two minutes. `count_guard_lint.py` (gate 2c2) is
-# the static half, and 187 of the 435 are decidable that way; the rest cannot be
-# decided without a build.
-#
-# So the ordinary push gets the SELECTION (0.1s to 0.3s): a round that added
-# tests is told that its count is unchecked here and can run the one command the
-# line names. `hook_default_region_gate.py` refuses a full run of this gate in
-# the ordinary region. To run the verdict on demand, before the push, while the
-# work is warm:
+# Outcomes, kept apart by the oracle's exit codes (see its docstring):
+#   0  every reached guard is cached and equal       -> pass, one summary line
+#   1  a cached count DISAGREES with the declared one -> REFUSE. This is a known
+#      wrong number and detecting it was free; pushing it only moves the red to
+#      the hosted lane that owns the guard. Move the constant IN THIS COMMIT.
+#   3  some reached guard has no measurement here     -> pass, with one loud
+#      DEFERRED line naming how many and the command that measures them. An
+#      unmeasured guard is not a wrong one, and the owner does not want the hook
+#      to build or to block on it; hosted CI is the judge.
+#   2 (or any other) the oracle could not run or read -> REFUSE. It says nothing
+#      about any count, and a check that cannot read its input must not report
+#      green; the output below names why.
+# A measurement made while the work is warm lands in the cache and makes the next
+# push's line a pass instead of a deferral:
 #     python3 scripts/lib/guarded_count_gate.py --range origin/main..HEAD
+#
+# The oracle reads the WORKTREE for the package digests and the range for what
+# changed; pushing a sha other than HEAD therefore judges the worktree's shape.
+# That is the same trade the extended gate 4b makes.
+# `hook_default_region_gate.py` holds that this row sits above the boundary, that
+# it never builds, and that its exit status is not discarded.
 if [[ -n "$diff_base" ]]; then
-    BX="" python3 scripts/lib/guarded_count_gate.py --range "$diff_base..$local_sha" --count-only || true
+    cg_range="$diff_base..$local_sha"
+    cg_rc=0
+    cg_out="$(BX="" python3 scripts/lib/guarded_count_gate.py --range "$cg_range" --cached-only 2>&1)" || cg_rc=$?
+    cg_line="$(printf '%s\n' "$cg_out" | grep -m1 '^guarded-count gate: cached-only:' || true)"
+    cg_line="${cg_line#guarded-count gate: }"
+    case "$cg_rc" in
+    0)
+        echo "pre-push: [gate 2c3] count guards: ${cg_line:-all reached guards equal}"
+        ;;
+    3)
+        echo "pre-push: [gate 2c3] DEFERRED to hosted CI -- ${cg_line:-some reached count guards are not measured for this tree}." \
+            "Measure now: python3 scripts/lib/guarded_count_gate.py --range $cg_range"
+        ;;
+    1)
+        printf '%s\n' "$cg_out" >&2
+        echo "" >&2
+        echo "pre-push: [gate 2c3] a run-ci count guard disagrees with the measurement" >&2
+        echo "          cached for this tree. The number is known to be wrong; hosted" >&2
+        echo "          CI would red the lane that owns it. Move the constant IN THIS" >&2
+        echo "          COMMIT, to what the command above printed." >&2
+        echo "          Bypass with \`git push --no-verify\` only for genuine hotfixes." >&2
+        exit 1
+        ;;
+    *)
+        printf '%s\n' "$cg_out" >&2
+        echo "" >&2
+        echo "pre-push: [gate 2c3] the count-guard oracle could not judge this push" >&2
+        echo "          (exit $cg_rc). That is not a disagreement and not a deferral:" >&2
+        echo "          nothing was read. The output above says why." >&2
+        echo "          Bypass with \`git push --no-verify\` only for genuine hotfixes." >&2
+        exit 1
+        ;;
+    esac
 else
-    echo "pre-push: count-guard selection skipped: no diff base (no origin/main)"
+    echo "pre-push: [gate 2c3] count guards NOT checked: no diff base (no origin/main)"
 fi
 
 # ─── local sweep policy — owner decision, 2026-09-23 ──────────────
