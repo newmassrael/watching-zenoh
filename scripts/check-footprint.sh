@@ -789,8 +789,32 @@ declare -A BASELINE_MC_TEXT=(
     # the frame it arrived in, builds at 64180 here, 12 B under the pushed tree,
     # so it is not part of this figure and the headroom is the pin's alone.
     # Old: 63932/63924 (R3009).
-    ["thumbv7m-none-eabi"]=64196
-    ["thumbv7em-none-eabihf"]=64024
+    # R3170 -- GREW +1456 / +1420 B (thumbv7m 65652, thumbv7em 65444), read first on
+    # the hosted run for `bc74c777` (thumbv7m 65656, 4 B above this host's figure, the
+    # known residual). The bytes are the transmit buffer SEAM's, and this image does
+    # not use the seam. Built apart on this host (gcc 13.2, the normalised flags),
+    # thumbv7m text: the last green tree (`cb9b4bb8`) 64172, and the tree that
+    # carries the seam and everything after it 65652; the receive-in-place, writer
+    # pool and lowlatency work that follow it in the same push add 0 B here, because
+    # this bin links none of them.
+    # A per-symbol diff of the two thumbv7m ELFs (`arm-none-eabi-nm -S`, hashes
+    # stripped, text symbols; added 1544, gone 616, resized +496) names it:
+    #   +388  MsgPut::encode  442 -> 830 over the new `TxSink` instead of `VecSink`
+    #   +128  ExtEntry::encode 112 -> 240, +140 Timestamp::encode 62 -> 202, likewise
+    #   +114  `TxSink::write_vle_inner` 148, against 34 for the `VecSink` one it replaced
+    #   +540  wz_session_core::multicast_tx::multicast_tx_emit, which inlines the
+    #         heavier calls
+    # The cause is that the payload encoders are written once against an object-safe
+    # `TxBuf` (so a heap vector and a link's lent slot are the same to the codec), and
+    # every write is now a call through `dyn TxBuf` with its refusal path where a
+    # `Vec` push used to inline. No lend code is in this image: its multicast driver
+    # never lends, so it pays for a seam it does not use.
+    # NOT A LEAK: `data` is 4 and `bss` moves by 8, so the delta is ROM. It is not
+    # free either, and the carry is named in the ledger: a sink generic over the
+    # buffer, so a profile that only ever writes a `Vec` inlines it as `VecSink` did.
+    # Old: 64196/64024 (R3034).
+    ["thumbv7m-none-eabi"]=65652
+    ["thumbv7em-none-eabihf"]=65444
 )
 # shellcheck disable=SC2034  # resolved through the `declare -n _bt/_bd/_bb`
                             # namerefs in the `case "$artifact"` dispatch below; shellcheck
