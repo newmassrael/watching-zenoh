@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: AGPL-3.0-or-later OR LicenseRef-watching-zenoh-Commercial
 # SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
-"""R3149 (no register item) -- the CLOSE REASON gate: wz's `CloseReason`
+"""R3152 (no register item) -- the CLOSE REASON gate: wz's `CloseReason`
 numbers against upstream's. (It answers the unregistered open-debt entry 896;
 that register lives outside the store, so there is no id to cite.)
 
