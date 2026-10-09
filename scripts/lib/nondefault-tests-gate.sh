@@ -403,6 +403,7 @@ router-connect-reconcile,transport-link-tcp,transport-unicast|session_lifecycle_
         storage-replication,\
         switchboard,\
         transport-batching,\
+        transport-compose,\
         transport-compression,\
         transport-fragmentation,\
         transport-keepalive,\
