@@ -1870,10 +1870,24 @@ pub mod common {
     /// sixteen. The VALUE of a rendering is exact and its width is not — that
     /// is [`zid_value_after`]'s rule — and a caller that does not compare the
     /// value asks only whether the text could be a zid. Empty, longer than a
-    /// 16-byte id can render, or not hex: it could not.
+    /// 16-byte id can render, or not LOWERCASE hex (both libraries print
+    /// lowercase, and upstream's own `FromStr` refuses an uppercase id): it
+    /// could not.
+    ///
+    /// The bounds are upstream's, read from the pinned source rather than
+    /// chosen: `uhlc::ID` is sixteen bytes (`MAX_SIZE`), `ZenohIdProto`'s
+    /// `Display` is that type's `{:x}`, and an id is never zero, so one digit is
+    /// the narrowest rendering and 2 x 16 the widest.
     pub fn has_zid_shape(segment: &str) -> bool {
-        (1..=32).contains(&segment.len()) && segment.chars().all(|c| c.is_ascii_hexdigit())
+        (1..=2 * ZID_MAX_BYTES).contains(&segment.len())
+            && segment
+                .chars()
+                .all(|c| c.is_ascii_digit() || ('a'..='f').contains(&c))
     }
+
+    /// The most bytes a zid carries: `uhlc::ID::MAX_SIZE`, which
+    /// `zenoh_protocol::core::ZenohIdProto` wraps.
+    pub const ZID_MAX_BYTES: usize = 16;
 
     /// The zid of a peer wz DISCOVERED, out of the `hellos=[..]` rendering.
     ///
@@ -7004,6 +7018,13 @@ mod tests {
         assert!(
             !has_zid_shape("cac487b7b6a26afe883042d630a71g"),
             "a non-hex digit"
+        );
+        // Both libraries print lowercase (`{:x}` in uhlc, `%02x` in pico), and
+        // upstream's own `FromStr` refuses an uppercase id, so an uppercase
+        // run is a segment somebody spelt, not a rendered zid.
+        assert!(
+            !has_zid_shape("CAC487B7B6A26AFE883042D630A712"),
+            "uppercase hex is not how either library renders a zid"
         );
     }
 
