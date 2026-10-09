@@ -377,6 +377,22 @@ pub enum IterationEvent<'a> {
     /// consumer's match — stays feature-independent; only the producer (the
     /// shared RX dispatch SSOT) is `session-multicast`-gated. `Copy`.
     MulticastPeerArrived(MulticastPeerArrived),
+    /// Item 751 — the group member whose data the NEXT [`IterationEvent::Poll`]
+    /// carries. Fired by the multicast RX dispatch immediately before each
+    /// `Poll` it fans, for a whole Frame and for a reassembled chain alike.
+    ///
+    /// A multicast Frame carries no zid (the dispatcher keys members by datagram
+    /// source), so the `Poll` alone is anonymous data. Upstream's routing never
+    /// sees anonymous data: each member has a face stamped with its zid
+    /// (`zenoh/src/net/routing/gateway.rs` @ `pub fn new_peer_multicast`), and
+    /// the inter-region filter is handed it as the forwarder
+    /// (`zenoh/src/net/routing/dispatcher/pubsub.rs` @ `fwd_zid: Some(&src_face.zid),`).
+    /// The pairing is by order, not by a field of `Poll`, because `Poll` is the
+    /// one event the unicast loops and every application observer already
+    /// consume and a field there would change all of them. An observer that does
+    /// not care ignores this event, as it ignores the other multicast ones.
+    /// Carries the same ungated [`MulticastPeerId`] the departure does. `Copy`.
+    MulticastSource(MulticastPeerId),
 }
 
 /// Build the [`DriverLoopOutcome`] a completed reassembly chain re-enters

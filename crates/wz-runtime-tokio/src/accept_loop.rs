@@ -567,8 +567,19 @@ pub trait FaceForwarder {
     /// forwarder. A routing forwarder routes it as a mcast-sourced Push (delivered
     /// to unicast subscribers, echo-guarded off the groups). Default no-op: only a
     /// forwarder with a multicast ingress plane (the router) implements it.
+    ///
+    /// `from` is the group member that sent it (item 751): the pin's per-member
+    /// face carries the member's zid, and its routing asks that zid of every
+    /// message. `None` when the member is not known.
     #[cfg(feature = "codec-push")]
-    fn route_mcast_ingress(&self, _priority: Priority, _reliable: bool, _push: &PushOwned) {}
+    fn route_mcast_ingress(
+        &self,
+        _priority: Priority,
+        _reliable: bool,
+        _push: &PushOwned,
+        _from: Option<&wz_session_core::driver_loop::MulticastPeerId>,
+    ) {
+    }
 
     /// R2734 — a QUERY received on the multicast INGRESS group, the admitting
     /// twin of [`route_mcast_ingress`](Self::route_mcast_ingress).
@@ -587,8 +598,16 @@ pub trait FaceForwarder {
     /// `RouterForwarder::route_request`'s own query-route computation, which
     /// takes no band. Passing one would be a parameter no arm reads.
     /// Default no-op: only a forwarder with a multicast ingress plane implements it.
+    ///
+    /// `from` as for [`route_mcast_ingress`](Self::route_mcast_ingress).
     #[cfg(feature = "codec-push")]
-    fn route_mcast_ingress_request(&self, _reliable: bool, _request: &RequestOwned) {}
+    fn route_mcast_ingress_request(
+        &self,
+        _reliable: bool,
+        _request: &RequestOwned,
+        _from: Option<&wz_session_core::driver_loop::MulticastPeerId>,
+    ) {
+    }
 
     /// The on-group ROUTER member set changed (a JOIN admit / lease evict on the
     /// router's multicast group) — the I3b Designated-Router election candidate
@@ -1758,6 +1777,11 @@ pub struct McastIngressItem {
     /// arrived (DEFAULT on a non-qos group). Paired with `push` (`codec-push`).
     #[cfg(feature = "codec-push")]
     pub priority: Priority,
+    /// Item 751 — the group member that sent it, as the multicast RX dispatch
+    /// named it just before the frame (`IterationEvent::MulticastSource`).
+    /// `None` only if no member is held at the datagram's source, which cannot
+    /// be a datagram the dispatch admitted.
+    pub from: Option<wz_session_core::driver_loop::MulticastPeerId>,
 }
 
 /// R2734 — what arrived on a multicast INGRESS group, in the kinds the router
@@ -2860,10 +2884,19 @@ where
                 #[cfg(feature = "codec-push")]
                 match &_item.body {
                     McastIngressBody::Push(push) => {
-                        forwarder.route_mcast_ingress(_item.priority, _item.reliable, push);
+                        forwarder.route_mcast_ingress(
+                            _item.priority,
+                            _item.reliable,
+                            push,
+                            _item.from.as_ref(),
+                        );
                     }
                     McastIngressBody::Request(request) => {
-                        forwarder.route_mcast_ingress_request(_item.reliable, request);
+                        forwarder.route_mcast_ingress_request(
+                            _item.reliable,
+                            request,
+                            _item.from.as_ref(),
+                        );
                     }
                 }
             }

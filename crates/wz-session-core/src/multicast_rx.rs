@@ -480,6 +480,13 @@ where
                             );
                             #[cfg(feature = "routing-namespace")]
                             dispatcher.apply_namespace_ingress(src, &mut outcome);
+                            // Item 751 — name the member the data is from, so the
+                            // observer's `Poll` is not anonymous.
+                            if let Some(zid) = dispatcher.peer_zid_by_src(src) {
+                                on_event(IterationEvent::MulticastSource(
+                                    MulticastPeerId::from_wire(zid),
+                                ));
+                            }
                             on_event(IterationEvent::Poll(&outcome));
                         }
                         MulticastRxNext::Done
@@ -907,6 +914,50 @@ mod batch_walk_tests {
         assert_eq!(delivered(0x13), 0, "the mandatory one drops the batch");
     }
 
+    /// Item 751 — a data frame from a group member is announced WITH the member
+    /// who sent it, immediately before the `Poll` that carries it.
+    ///
+    /// Upstream gives each group member its own face and stamps the member's zid
+    /// on it (`zenoh/src/net/routing/gateway.rs` @ `pub fn new_peer_multicast`),
+    /// and the routing layer asks that zid of every message it routes
+    /// (`zenoh/src/net/routing/dispatcher/pubsub.rs` @ `fwd_zid: Some(&src_face.zid),`).
+    /// A Frame carries no zid on the wire, so the identity is the dispatcher's
+    /// (it keys peers by datagram source); without this event the observer saw
+    /// anonymous data. The member is the one whose JOIN opened the datagram, not
+    /// a sender the test names separately.
+    #[test]
+    fn a_group_frame_is_preceded_by_the_member_that_sent_it() {
+        let mut d = running::<4>();
+        let local = params(&[0x11; 4]);
+        let mut unit = peer_join(&[0x22; 4]);
+        unit.extend_from_slice(&frame_sn0());
+
+        let mut order: Vec<(&'static str, [u8; 4])> = Vec::new();
+        dispatch_multicast_inbound(
+            &mut d,
+            &local,
+            &unit,
+            PEER,
+            1_000,
+            &mut |event| match event {
+                IterationEvent::MulticastSource(from) => {
+                    let mut zid = [0u8; 4];
+                    zid.copy_from_slice(from.as_slice());
+                    order.push(("source", zid));
+                }
+                IterationEvent::Poll(_) => order.push(("poll", [0; 4])),
+                _ => {}
+            },
+            &(),
+        );
+
+        assert_eq!(
+            order,
+            [("source", [0x22; 4]), ("poll", [0; 4])],
+            "the member is named once, right before its data"
+        );
+    }
+
     /// The multicast twin of the unicast sharing witness: the payload of a data
     /// frame a group member sent is a range of the DATAGRAM it arrived in, and
     /// not a copy of it.
@@ -1128,6 +1179,8 @@ mod batch_walk_tests {
         );
 
         let mut payloads = 0usize;
+        // Item 751 — the reassembled batch is attributed to its member, too.
+        let mut sources = 0usize;
         let mut chain_drops: Vec<ReassemblyDropReason> = Vec::new();
         for (i, dgram) in chain.iter().enumerate() {
             dispatch_multicast_inbound_reassembling(
@@ -1141,12 +1194,20 @@ mod batch_walk_tests {
                     IterationEvent::Poll(crate::driver_loop::DriverLoopOutcome::FramePayload {
                         ..
                     }) => payloads += 1,
+                    IterationEvent::MulticastSource(from) => {
+                        assert_eq!(from.as_slice(), [0x22; 4]);
+                        sources += 1;
+                    }
                     IterationEvent::ReassemblyDropped(reason) => chain_drops.push(reason),
                     _ => {}
                 },
                 &(),
             );
         }
+        assert_eq!(
+            sources, payloads,
+            "the reassembled batch names the member that sent it, once"
+        );
         assert!(
             chain_drops.is_empty(),
             "wz's own marked chain must not be refused by the contract wz \

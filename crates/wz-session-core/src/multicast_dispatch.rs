@@ -1751,6 +1751,13 @@ pub(crate) fn ingest_multicast_fragment_counted<
             dispatcher.apply_namespace_ingress(src, &mut o);
             o
         };
+        // Item 751 — name the member the reassembled data is from, as the
+        // whole-Frame seam in `multicast_rx` does, so the `Poll` is not anonymous.
+        if let Some(zid) = dispatcher.peer_zid_by_src(src) {
+            on_event(IterationEvent::MulticastSource(MulticastPeerId::from_wire(
+                zid,
+            )));
+        }
         on_event(IterationEvent::Poll(&o));
     }
     if let Some(reason) = ReassemblyDropReason::from_ingest(ingest_outcome) {

@@ -1905,6 +1905,8 @@ pub fn spawn_router_mcast_group(
     let membership = McastGroupMembership::new();
     let outbound = MulticastTxProducer::new();
     let (ingress_tx, ingress) = tokio::sync::mpsc::unbounded_channel::<McastIngressItem>();
+    // Item 751 — see the fold below: the member the next `Poll` is from.
+    let mut source: Option<wz_session_core::driver_loop::MulticastPeerId> = None;
     let (members_tx, members) = tokio::sync::mpsc::unbounded_channel::<Vec<Vec<u8>>>();
     let (group_subs_tx, group_subs) = tokio::sync::mpsc::unbounded_channel::<Vec<String>>();
     let stop = spawn_group_face(
@@ -1943,6 +1945,13 @@ pub fn spawn_router_mcast_group(
         // Declarations are still not folded: they are handled per peer
         // upstream of here, in the dispatcher.
         move |event: IterationEvent<'_>| {
+            // Item 751 — the member the next `Poll` is from, named by the RX
+            // dispatch just before it. Taken (and so cleared) at the `Poll`, so a
+            // frame can never be attributed to the member before it.
+            if let IterationEvent::MulticastSource(member) = event {
+                source = Some(member);
+                return;
+            }
             if let IterationEvent::Poll(DriverLoopOutcome::FramePayload {
                 messages,
                 reliable,
@@ -1950,6 +1959,7 @@ pub fn spawn_router_mcast_group(
                 ..
             }) = event
             {
+                let from = source.take();
                 for msg in messages {
                     let body = match msg {
                         NetworkMessage::Push(push) => {
@@ -1972,6 +1982,7 @@ pub fn spawn_router_mcast_group(
                             body,
                             reliable: *reliable,
                             priority: *priority,
+                            from,
                         });
                     }
                 }

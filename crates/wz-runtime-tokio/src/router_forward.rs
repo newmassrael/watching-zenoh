@@ -380,6 +380,8 @@ use wz_session_core::declare_ext_keyexpr::resolve_ext_keyexpr;
 use wz_session_core::declare_routing_context::{read_declare_source, set_declare_source};
 use wz_session_core::driver_loop::DriverLoopOutcome;
 #[cfg(feature = "router-multicast-faces")]
+use wz_session_core::driver_loop::MulticastPeerId;
+#[cfg(feature = "router-multicast-faces")]
 use wz_session_core::extbound::multicast_region_and_bound_of;
 use wz_session_core::extbound::{region_and_bound_of, Bound, Region};
 use wz_session_core::keyexpr_match::keyexpr_intersects_target;
@@ -1265,19 +1267,31 @@ struct QueryCrossing {
     src: Region,
     src_zid: Option<Zid>,
     fwd_zid: Option<Zid>,
-    /// The Query came from a multicast group member, which is no node of any net
-    /// and so is admitted by the filter (see [`RouterForwarder::crosses_origin`]).
-    group_member: bool,
 }
 
-/// Where a routed Push came from, as the inter-region filter reads it: the node
-/// that originated it, the neighbour it came through, and whether that
-/// neighbour is a multicast group member rather than a face of the mesh.
+/// The multicast group member a routed Push or Query came from, which the pin
+/// models as a face stamped with the member's zid
+/// (`zenoh/src/net/routing/gateway.rs` @ `pub fn new_peer_multicast`). Its zid is
+/// both the message's source and the neighbour it came through: the peer hat
+/// answers `remote_node_id_to_zid` with the face's own zid
+/// (`zenoh/src/net/routing/hat/peer/mod.rs` @ `Some(src.zid)`). `None` when the
+/// member is not known, which is the filter's own "unknown source" case.
+// Built only by the multicast ingress entry points, which `router-multicast-faces`
+// gates; the routing code below takes it as an `Option` in every build.
+#[cfg_attr(not(feature = "router-multicast-faces"), allow(dead_code))]
 #[derive(Clone, Copy)]
-struct PushOrigin<'a> {
-    src_zid: Option<&'a Zid>,
-    fwd_zid: Option<&'a Zid>,
-    group_member: bool,
+struct GroupMember {
+    zid: Option<Zid>,
+}
+
+impl GroupMember {
+    /// Name the member the multicast RX dispatch reported, if it is a valid zid.
+    #[cfg(feature = "router-multicast-faces")]
+    fn from_wire(from: Option<&MulticastPeerId>) -> Self {
+        Self {
+            zid: from.and_then(|id| Zid::try_from(id.as_slice()).ok()),
+        }
+    }
 }
 
 /// The GLOBAL-BestMatching winner — the single globally-nearest COMPLETE queryable
@@ -4648,8 +4662,9 @@ impl RouterForwarder {
         reliable: bool,
         priority: Priority,
         push: &PushOwned,
-        inbound_is_mcast: bool,
+        group: Option<GroupMember>,
     ) {
+        let inbound_is_mcast = group.is_some();
         // transport-shm -- hold the chunk of every shared-memory slice the Push carries for as
         // long as it is routed, FIRST: a Push routing then drops (an alias that does not resolve,
         // no interested subscriber) still arrived with a reference that is owed back, and the
@@ -4694,10 +4709,14 @@ impl RouterForwarder {
         // decides every crossing below on, in place of the per-keyexpr master
         // election. A leaf region has no net and needs neither: its broker hat
         // has no gateway view, so the filter passes whatever leaves it.
-        let (src_zid, fwd_zid) = if is_leaf(tier) {
-            (None, None)
-        } else {
-            self.push_origin(inbound, tier, push)
+        //
+        // Item 751 — a group member is a face of the pin, stamped with its zid, which
+        // is both the source and the forwarder of what it sends; wz holds it as no
+        // face, so the member's zid comes from the multicast RX dispatch instead.
+        let (src_zid, fwd_zid) = match group {
+            _ if is_leaf(tier) => (None, None),
+            Some(member) => (member.zid, member.zid),
+            None => self.push_origin(inbound, tier, push),
         };
         // Blocks 1 & 2 — within-tier transit (ungated, the resolved-source route).
         // R311y224/y225 — the received band is threaded through EVERY unicast pubsub
@@ -4709,11 +4728,7 @@ impl RouterForwarder {
         self.forward_push_tier(inbound, tier, reliable, priority, push);
         // Blocks 1 & 2 — the filtered cross-mesh bridge (a received-frame transit
         // re-injected into the other mesh; preserves the band).
-        let origin = PushOrigin {
-            src_zid: src_zid.as_ref(),
-            fwd_zid: fwd_zid.as_ref(),
-            group_member: inbound_is_mcast,
-        };
+        let origin = (src_zid.as_ref(), fwd_zid.as_ref());
         // A multicast INGRESS Push (I3b) is carried into the router mesh ONLY when this
         // router is the Designated Router (DR) for its keyexpr: `is_group_dr` elects
         // exactly one on-group router (seedless HRW over the group's ROUTER members U
@@ -4740,7 +4755,7 @@ impl RouterForwarder {
         // a QoS-negotiated client observes the mesh legs' band.
         let defer = tier != ROUTERS_REGION
             && !is_leaf(tier)
-            && !self.crosses_origin(origin, tier, ROUTERS_REGION, None);
+            && !self.crosses(tier, ROUTERS_REGION, origin.0, origin.1, None);
         self.deliver_to_client_subscribers(
             inbound, tier, reliable, priority, push, &keyexpr, defer,
         );
@@ -5089,7 +5104,7 @@ impl RouterForwarder {
         priority: Priority,
         push: &PushOwned,
         keyexpr: &str,
-        origin: PushOrigin<'_>,
+        (src_zid, fwd_zid): (Option<&Zid>, Option<&Zid>),
     ) {
         let target_tier = match inbound_tier {
             PEERS_REGION => ROUTERS_REGION,
@@ -5101,30 +5116,8 @@ impl RouterForwarder {
         // the received band (R311y224) — a mesh source can be QoS-negotiated, so the
         // bridged copy must carry the same priority the within-tier copy does.
         self.self_publish_into_tier(target_tier, reliable, priority, push, keyexpr, |dst| {
-            self.crosses_origin(origin, inbound_tier, target_tier, Some(dst))
+            self.crosses(inbound_tier, target_tier, src_zid, fwd_zid, Some(dst))
         });
-    }
-
-    /// [`crosses`](Self::crosses) for a routed Push's [`PushOrigin`].
-    ///
-    /// A multicast group member is admitted without asking. The pin hands its
-    /// filter the member's own zid as the forwarder, and the hat answers
-    /// `gateways_of` with `None` for a zid that is not a node of its net
-    /// (`zenoh/src/net/routing/hat/peer/mod.rs` @ `.map(|n| &n.links)?;`), which the
-    /// filter reads as "no gateway view, pass"
-    /// (`zenoh/src/net/routing/dispatcher/tables.rs` @ `let Some(gwys) = gwys.filter(|g| !g.is_empty()) else {`).
-    /// A member joins a group and links to nobody, so it is never such a node. wz
-    /// does not yet learn the member's zid (the drive loop's event carries none),
-    /// and asking with no forwarder would take the filter's fallback to the
-    /// region's whole gateway set, which is a different question.
-    fn crosses_origin(
-        &self,
-        origin: PushOrigin<'_>,
-        src: Region,
-        dst: Region,
-        dst_zid: Option<&Zid>,
-    ) -> bool {
-        origin.group_member || self.crosses(src, dst, origin.src_zid, origin.fwd_zid, dst_zid)
     }
 
     /// Route a data `Push` WITHIN its inbound tier's mesh (C1) — the router twin
@@ -6683,7 +6676,14 @@ impl RouterForwarder {
     /// the querier so its `get()` terminates at once (a pure router hosts no local
     /// self-queryable to dispatch — a deferred combined-node seam). In a
     /// single-router topology self is the only gateway, so every crossing is its own.
-    fn route_request(&self, inbound: FaceId, tier: Region, reliable: bool, request: &RequestOwned) {
+    fn route_request(
+        &self,
+        inbound: FaceId,
+        tier: Region,
+        reliable: bool,
+        request: &RequestOwned,
+        group: Option<GroupMember>,
+    ) {
         // transport-shm -- hold the chunk of every shared-memory slice the query's value carries
         // for as long as the Query is routed, FIRST and for the reason `route_push` gives. A
         // Query from a link that never negotiated shared memory is not routed at all.
@@ -6763,8 +6763,9 @@ impl RouterForwarder {
             None => None,
         };
         let self_zid = *self.routers_net().borrow().self_zid();
-        // A Query from the multicast group has no zid here and is no node of any net.
-        let group_member = inbound == MCAST_INGRESS_FACE;
+        // Item 751 — a Query from a group member is that member's: its zid is both
+        // the source and the forwarder the filter is handed, as for a Push.
+        let member = group.and_then(|g| g.zid);
         // The two mesh blocks, source-selected per compute_query_route. R2880
         // (open-debt item 751, step 6): a cross block's egresses are admitted by
         // the inter-region filter, and the master election gates nothing here any
@@ -6774,18 +6775,15 @@ impl RouterForwarder {
         // carried copy back as a ROUTER source and serves it then.
         let blocks: Vec<MeshQueryBlock> = [ROUTERS_REGION, PEERS_REGION]
             .into_iter()
-            .filter_map(|bt| {
-                self.mesh_query_block(bt, tier, within, inbound_zid, self_zid, group_member)
-            })
+            .filter_map(|bt| self.mesh_query_block(bt, tier, within, inbound_zid, self_zid, member))
             .collect();
         let client_gate = tier == ROUTERS_REGION
             || is_leaf(tier)
-            || group_member
             || self.crosses(
                 tier,
                 ROUTERS_REGION,
-                within.map(|(zid, _psid)| zid).as_ref(),
-                inbound_zid.as_ref(),
+                within.map(|(zid, _psid)| zid).or(member).as_ref(),
+                inbound_zid.or(member).as_ref(),
                 None,
             );
         // ONE shared fan target for this logical Query — every branch's pending
@@ -6918,7 +6916,7 @@ impl RouterForwarder {
         within: Option<(Zid, u16)>,
         inbound_zid: Option<Zid>,
         self_zid: Zid,
-        group_member: bool,
+        member: Option<Zid>,
     ) -> Option<MeshQueryBlock> {
         if block_tier != ROUTERS_REGION && block_tier != PEERS_REGION {
             return None;
@@ -6958,9 +6956,11 @@ impl RouterForwarder {
                 inbound_for_net: None,
                 crossing: Some(QueryCrossing {
                     src: src_tier,
-                    src_zid: within.map(|(zid, _psid)| zid),
-                    fwd_zid: inbound_zid,
-                    group_member,
+                    // A group member is both the source and the forwarder (see
+                    // [`GroupMember`]); a mesh Query's are its resolved querier and
+                    // the neighbour it came through.
+                    src_zid: within.map(|(zid, _psid)| zid).or(member),
+                    fwd_zid: inbound_zid.or(member),
                 }),
             })
         }
@@ -6999,14 +6999,11 @@ impl RouterForwarder {
     fn query_block_admits(&self, block: &MeshQueryBlock, dst: &Zid) -> bool {
         // `map_or(true, ..)`: `is_none_or` postdates the workspace MSRV.
         block.crossing.map_or(true, |c| {
-            self.crosses_origin(
-                PushOrigin {
-                    src_zid: c.src_zid.as_ref(),
-                    fwd_zid: c.fwd_zid.as_ref(),
-                    group_member: c.group_member,
-                },
+            self.crosses(
                 c.src,
                 block.tier,
+                c.src_zid.as_ref(),
+                c.fwd_zid.as_ref(),
                 Some(dst),
             )
         })
@@ -7954,7 +7951,13 @@ impl FaceForwarder for RouterForwarder {
     /// [`MCAST_INGRESS_FACE`] id is disjoint from the dense unicast range, so the
     /// fan-out's source self-skip (`id == inbound`) excludes no real subscriber.
     #[cfg(feature = "router-multicast-faces")]
-    fn route_mcast_ingress(&self, priority: Priority, reliable: bool, push: &PushOwned) {
+    fn route_mcast_ingress(
+        &self,
+        priority: Priority,
+        reliable: bool,
+        push: &PushOwned,
+        from: Option<&MulticastPeerId>,
+    ) {
         // R311y227 — a multicast-received Push re-injects at the priority its frame
         // carried (the decoded ext_qos band surfaced by `multicast_rx`; DEFAULT on
         // a non-qos group). The mesh federation + local-client delivery then ride
@@ -7973,7 +7976,7 @@ impl FaceForwarder for RouterForwarder {
             reliable,
             priority,
             push,
-            true,
+            Some(GroupMember::from_wire(from)),
         );
     }
 
@@ -7998,13 +8001,19 @@ impl FaceForwarder for RouterForwarder {
     /// So the querier is unreachable in both implementations, and the difference
     /// this closes is the one an integrator can see: the local queryable RUNS.
     #[cfg(feature = "router-multicast-faces")]
-    fn route_mcast_ingress_request(&self, reliable: bool, request: &RequestOwned) {
+    fn route_mcast_ingress_request(
+        &self,
+        reliable: bool,
+        request: &RequestOwned,
+        from: Option<&MulticastPeerId>,
+    ) {
         self.queries_seen.set(self.queries_seen.get() + 1);
         self.route_request(
             MCAST_INGRESS_FACE,
             mcast_ingress_region(),
             reliable,
             request,
+            Some(GroupMember::from_wire(from)),
         );
     }
 
@@ -8171,7 +8180,7 @@ impl FaceForwarder for RouterForwarder {
                 // a no-op and the behavior is the pre-C4 route.
                 NetworkMessage::Push(push) => {
                     self.data_seen.set(self.data_seen.get() + 1);
-                    self.route_push(id, tier, *reliable, *priority, push, false);
+                    self.route_push(id, tier, *reliable, *priority, push, None);
                 }
                 // A declaration: one owner call per plane, whichever hat owns the
                 // face (R2876, step 3e) — the pin's dispatcher registers in
@@ -8223,7 +8232,7 @@ impl FaceForwarder for RouterForwarder {
                 // GLOBAL BestMatching over both meshes + clients, C5b).
                 NetworkMessage::Request(request) => {
                     self.queries_seen.set(self.queries_seen.get() + 1);
-                    self.route_request(id, tier, *reliable, request);
+                    self.route_request(id, tier, *reliable, request, None);
                 }
                 // A queryable's reply: route it BACK toward the querier via the
                 // pending table (C5c) — peek on a Response (more replies may
@@ -11066,7 +11075,7 @@ mod tests {
 
         let push =
             wz_session_core::push_build::build_push_literal("demo/data", b"z").expect("push");
-        fwd.route_mcast_ingress(Priority::DEFAULT, true, &push);
+        fwd.route_mcast_ingress(Priority::DEFAULT, true, &push, None);
 
         assert_eq!(
             sink_r.frame_count(),
@@ -11102,7 +11111,7 @@ mod tests {
 
         let push =
             wz_session_core::push_build::build_push_literal("demo/data", b"z").expect("push");
-        fwd.route_mcast_ingress(Priority::DEFAULT, true, &push);
+        fwd.route_mcast_ingress(Priority::DEFAULT, true, &push, None);
 
         assert_eq!(
             sink_r.frame_count(),
@@ -11110,6 +11119,75 @@ mod tests {
             "a non-DR router does NOT federate mcast ingress into the mesh (loop-safety)"
         );
         assert_eq!(sink_p.frame_count(), 0, "nor into its peer region");
+    }
+
+    /// Item 751, clause 2 — the router's peer region where the member is a NODE
+    /// linked to a larger gateway: a router that is not the largest gateway of
+    /// the member does not carry the member's group Put north.
+    ///
+    /// The pin hands its filter the member's own zid as both the source and the
+    /// forwarder, because each group member has a face stamped with it
+    /// (`zenoh/src/net/routing/dispatcher/pubsub.rs` @ `fwd_zid: Some(&src_face.zid),`,
+    /// `zenoh/src/net/routing/hat/peer/mod.rs` @ `Some(src.zid)`), and from the south
+    /// only the largest gateway of that forwarder carries it. A member that is also
+    /// a unicast peer of two routers is exactly where this matters; a member that
+    /// is no node of the net (the next test) has no gateways and passes.
+    #[cfg(feature = "router-multicast-faces")]
+    #[test]
+    fn a_group_member_that_is_a_node_is_carried_north_only_by_its_largest_gateway() {
+        let (fwd, _sink_p, sink_r) = mcast_ingress_mesh_with_larger_gateway(zid(0x01));
+        let member = MulticastPeerId::from_wire(zid(0xAA).as_slice());
+        let push =
+            wz_session_core::push_build::build_push_literal("demo/data", b"z").expect("push");
+        fwd.route_mcast_ingress(Priority::DEFAULT, true, &push, Some(&member));
+        assert_eq!(
+            sink_r.frame_count(),
+            0,
+            "router 0x02 is the larger gateway of the member, so self does not carry it"
+        );
+    }
+
+    /// The other side of the test above, and its control: the same mesh and the
+    /// same larger gateway, with a member that links to nobody, passes the filter
+    /// (the hat answers `gateways_of` None for a zid that is not one of its nodes)
+    /// and self carries the Put north.
+    #[cfg(feature = "router-multicast-faces")]
+    #[test]
+    fn a_group_member_that_is_no_node_is_carried_north() {
+        let (fwd, _sink_p, sink_r) = mcast_ingress_mesh_with_larger_gateway(zid(0x01));
+        let member = MulticastPeerId::from_wire(zid(0xEE).as_slice());
+        let push =
+            wz_session_core::push_build::build_push_literal("demo/data", b"z").expect("push");
+        fwd.route_mcast_ingress(Priority::DEFAULT, true, &push, Some(&member));
+        assert_eq!(sink_r.frame_count(), 1, "a non-node member has no gateways");
+    }
+
+    /// [`mcast_ingress_mesh`] plus a larger gateway: router 0x02 is a router-net
+    /// node and also advertises itself a gateway of the peer region, linked from
+    /// peer 0xAA, so `gateways_of(0xAA)` is `{0x02}` and self (0x01) is not its
+    /// largest.
+    #[cfg(feature = "router-multicast-faces")]
+    fn mcast_ingress_mesh_with_larger_gateway(
+        self_z: Zid,
+    ) -> (
+        RouterForwarder,
+        Arc<RecordingLinkDriver>,
+        Arc<RecordingLinkDriver>,
+    ) {
+        let fwd = RouterForwarder::new(self_z);
+        let (p, sink_p) = face(zid(0xAA), WIRE_PEER);
+        let (r, sink_r) = face(zid(0x02), WIRE_ROUTER);
+        fwd.register(FaceId(0), &p);
+        fwd.register(FaceId(1), &r);
+        advertise_link_back(&fwd, FaceId(1), 0x01, 0x02, 5);
+        discover_gateway_via(&fwd, FaceId(0), 0x01, 0xAA, 0x02, 7, 5);
+        fwd.tick();
+        forward_one(&fwd, FaceId(0), declare_sub("demo/data"));
+        forward_one(&fwd, FaceId(1), declare_sub("demo/data"));
+        fwd.set_mcast_group_members(&[]);
+        sink_p.reset();
+        sink_r.reset();
+        (fwd, sink_p, sink_r)
     }
 
     /// Item 751 — the group a router holds is in the region the pin's
@@ -16597,7 +16675,7 @@ mod tests {
         let NetworkMessage::Request(request) = request_best(9, "demo/q") else {
             unreachable!("request_best builds a Request")
         };
-        fwd.route_mcast_ingress_request(true, &request);
+        fwd.route_mcast_ingress_request(true, &request, None);
 
         assert_eq!(
             sink_client.frame_count(),
@@ -16640,7 +16718,7 @@ mod tests {
         else {
             unreachable!("request_with_target builds a Request")
         };
-        fwd.route_mcast_ingress_request(true, &request);
+        fwd.route_mcast_ingress_request(true, &request, None);
 
         assert_eq!(
             sink_r.frame_count(),
@@ -18475,7 +18553,7 @@ mod tests {
 
         let push = wz_session_core::push_build::build_push_literal("demo/data", b"payload")
             .expect("build push");
-        fwd.route_mcast_ingress(Priority::DEFAULT, true, &push);
+        fwd.route_mcast_ingress(Priority::DEFAULT, true, &push, None);
 
         assert_eq!(
             sink_cb.frame_count(),
@@ -18498,7 +18576,7 @@ mod tests {
 
         let push = wz_session_core::push_build::build_push_literal("demo/data", b"payload")
             .expect("build push");
-        fwd.route_mcast_ingress(Priority::DEFAULT, true, &push);
+        fwd.route_mcast_ingress(Priority::DEFAULT, true, &push, None);
 
         assert!(
             group_push(&mut rx).is_none(),
@@ -18526,7 +18604,7 @@ mod tests {
         // table, so it resolves to None and is dropped (no delivery).
         let aliased =
             wz_session_core::push_build::build_push_aliased(7, None, b"payload").expect("aliased");
-        fwd.route_mcast_ingress(Priority::DEFAULT, true, &aliased);
+        fwd.route_mcast_ingress(Priority::DEFAULT, true, &aliased, None);
 
         assert_eq!(
             sink_cb.frame_count(),
