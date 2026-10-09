@@ -138,6 +138,8 @@ from __future__ import annotations
 
 import argparse
 import collections
+import contextlib
+import io
 import pathlib
 import re
 import subprocess
@@ -302,7 +304,7 @@ ABSENT_CITE = re.compile(
 #: First segments that spell an upstream path WITHOUT its root. DECLARED, and
 #: judged for completeness by `rootless_candidates()` -- see the module doc.
 #: `hat` is the segment R2317 made visible and repaired; the rest of the
-#: derived candidate set is held down by `ROOTLESS_UNDECLARED_BUDGET` below.
+#: derived candidate set is held down by `ROOTLESS_RESIDUE_BY_SEGMENT` below.
 #:
 #: ⚠ WHAT A DECLARATION MEANS CHANGED IN R2322 (open debt 649), and the reason
 #: is a measurement rather than a preference. Until then a segment could only
@@ -625,7 +627,67 @@ ROOTLESS_STALE_LINE_BUDGET = 1
 # bare budgets above lost in the same move: the moved comment's two root-less
 # citations of the transport's receive callback and its shared-memory predicate,
 # rewritten with a root and a needle. (Written without their spellings on purpose.)
-ROOTLESS_UNDECLARED_BUDGET = 621
+#
+# THE RESIDUE BUDGET IS A TABLE, ONE ROW PER SEGMENT (open debt 799). Everything
+# above tracks ONE figure -- the sum of the rows below, 621 when the table was
+# cut -- and the notes keep that figure's name for history. The sum could not
+# say who moved it: a rooted citation in a directory nothing had cited with its
+# root teaches this axis a NEW segment and pulls the root-less tokens already
+# under it into the count, in files the commit never opened (R2755: +14 from one
+# correct line, then +5 more when the repair exposed the next segment). The
+# refusal said "this commit ADDED one", true of neither the commit nor its text.
+# Per-segment rows make the same movement legible: a missing row is an EXPOSED
+# segment and the refusal names the rooted citation that taught it, a rising row
+# is a token written under a known segment, a falling row is a repair. The sum
+# is `rootless_undeclared_budget()`, derived so the two cannot disagree.
+#
+# A row is a MEASUREMENT seeded where the tree stood, never a target. Rows only
+# fall; a row that reaches zero is deleted; a segment that gets DECLARED loses
+# its row (its tokens are graded by the line and bare budgets instead).
+ROOTLESS_RESIDUE_BY_SEGMENT: dict[str, int] = {
+    "auth": 5,
+    "builders": 2,
+    "codec": 4,
+    "common": 21,
+    "core": 17,
+    "dispatcher": 59,
+    "establishment": 34,
+    "ext": 15,
+    "key_expr": 2,
+    "lowlatency": 4,
+    "memory_backend": 11,
+    "multicast": 29,
+    "net": 123,
+    "protocol": 8,
+    "replication": 4,
+    "routing": 2,
+    "runtime": 1,
+    "storages_mgt": 25,
+    "transport": 32,
+    "unicast": 77,
+    "universal": 7,
+    "zenoh-backend-traits": 8,
+    "zenoh-codec": 40,
+    "zenoh-config": 12,
+    "zenoh-link": 1,
+    "zenoh-link-commons": 4,
+    "zenoh-link-tcp": 2,
+    "zenoh-link-tls": 6,
+    "zenoh-link-udp": 11,
+    "zenoh-link-ws": 2,
+    "zenoh-plugin-rest": 2,
+    "zenoh-plugin-storage-manager": 4,
+    "zenoh-protocol": 42,
+    "zenoh-runtime": 2,
+    "zenoh-util": 3,
+}
+
+
+def rootless_undeclared_budget() -> int:
+    """The residue budget as one figure: the sum of the per-segment rows."""
+    return sum(ROOTLESS_RESIDUE_BY_SEGMENT.values())
+
+
 #: EVERY root-less occurrence, graded or not: `rootless_line + rootless_bare +
 #: residue`. One ratchet over the union of the three above, and it exists
 #: because those three CANNOT express the invariant that matters.
@@ -789,33 +851,49 @@ def rootless_candidates(
     `OUT_DIR/...`). A check that reports those has stopped being about
     citations. The component rule admits none of them.
     """
+    return set(rootless_candidate_teachers(root, files, own_dirs))
+
+
+def rootless_candidate_teachers(
+    root: pathlib.Path, files: list[str], own_dirs: set[str] | None = None
+) -> dict[str, list[str]]:
+    """Each candidate segment, with the files whose ROOTED citations teach it.
+
+    This is `rootless_candidates` with its provenance kept. The derivation is
+    what makes the residue ratchet unattributable: one correctly rooted
+    citation in a directory nothing had cited with its root before turns that
+    directory name into a candidate, and every root-less token already under it
+    becomes visible at once (open debt 799). The set alone cannot say WHICH
+    file did that, so a refusal built from the set can only blame the commit's
+    own text. The teachers are what let the refusal name the file that exposed
+    the segment, which is a different file from the ones that hold the tokens.
+    """
     # `own_dirs` is the tree's directory names. Omitted, it is derived from
     # `files`, which is right exactly when `files` ARE the tracked tree.
     if own_dirs is None:
         own_dirs = own_directory_names(files)
     roots = set(UPSTREAM_ROOTS)
-    seen: set[str] = set()
+    teachers: dict[str, set[str]] = {}
     for rel in files:
         try:
             text = (root / rel).read_text(errors="replace")
         except (OSError, UnicodeError):
             continue
-        for m in BARE_CITE.finditer(text):
-            seen.update(pathlib.PurePosixPath(m.group(1)).parts[:-1])
-        for m in LINE_CITE.finditer(text):
-            seen.update(pathlib.PurePosixPath(m.group(1)).parts[:-1])
-        for m in ANCHOR_CITE.finditer(text):
-            seen.update(pathlib.PurePosixPath(m.group(1)).parts[:-1])
-    return {s for s in seen if s not in own_dirs and s not in roots}
+        for pat in (BARE_CITE, LINE_CITE, ANCHOR_CITE):
+            for m in pat.finditer(text):
+                for seg in pathlib.PurePosixPath(m.group(1)).parts[:-1]:
+                    if seg not in own_dirs and seg not in roots:
+                        teachers.setdefault(seg, set()).add(rel)
+    return {seg: sorted(rels) for seg, rels in teachers.items()}
 
 
-def first_segment_occurrences(
+def segment_occurrences_by_file(
     root: pathlib.Path, files: list[str]
-) -> collections.Counter[str]:
-    """How often does each FIRST SEGMENT begin a path-like token? One pass,
-    because two callers want slices of the same tally: the residue wants the
-    segments this axis does not grade, and `run` wants the ones it does, to
-    check that each declaration has a subject in this tree.
+) -> dict[str, collections.Counter[str]]:
+    """For each FIRST SEGMENT that begins a path-like token, how many times it
+    does so in each file. One pass, because three callers want slices of the
+    same tally: the residue wants the segments this axis does not grade, `run`
+    wants the ones it does, and the refusal wants WHERE a segment's tokens are.
 
     ⚠ A path marked `@ REMOVED` is EXCLUDED, because it is graded -- by the
     absence arm, which reds if upstream brings it back. Leaving it in would make
@@ -824,7 +902,7 @@ def first_segment_occurrences(
     Measured when this was missed: marking the five live sites left the residue
     unchanged at 736 instead of dropping it to 731.
     """
-    tally: collections.Counter[str] = collections.Counter()
+    by_seg: dict[str, collections.Counter[str]] = {}
     for rel in files:
         try:
             text = (root / rel).read_text(errors="replace")
@@ -832,8 +910,35 @@ def first_segment_occurrences(
             continue
         text = GONE_CITE.sub(lambda m: " " * len(m.group(0)), text)
         for m in _ANY_TOKEN.finditer(text):
-            tally[m.group(1)] += 1
-    return tally
+            by_seg.setdefault(m.group(1), collections.Counter())[rel] += 1
+    return by_seg
+
+
+def first_segment_occurrences(
+    root: pathlib.Path, files: list[str]
+) -> collections.Counter[str]:
+    """How often does each FIRST SEGMENT begin a path-like token, summed over
+    the files. See `segment_occurrences_by_file` for what is excluded.
+    """
+    return collections.Counter(
+        {seg: sum(per.values())
+         for seg, per in segment_occurrences_by_file(root, files).items()}
+    )
+
+
+def rootless_residue_by_segment(
+    root: pathlib.Path, files: list[str], own_dirs: set[str] | None = None
+) -> dict[str, int]:
+    """The residue, segment by segment: every candidate segment this axis does
+    not grade that has at least one root-less token under it. A segment with
+    none is absent rather than zero, so the mapping is exactly the rows a
+    per-segment budget has to carry.
+    """
+    cands = set(rootless_candidates(root, files, own_dirs)) - set(ROOTLESS_SEGMENTS)
+    if not cands:
+        return {}
+    tally = first_segment_occurrences(root, files)
+    return {seg: tally[seg] for seg in sorted(cands) if tally[seg]}
 
 
 def rootless_undeclared(
@@ -842,11 +947,110 @@ def rootless_undeclared(
     """How many occurrences sit under a candidate segment this axis does not
     grade? The residue, sized rather than described.
     """
-    cands = rootless_candidates(root, files, own_dirs) - set(ROOTLESS_SEGMENTS)
-    if not cands:
-        return 0
-    tally = first_segment_occurrences(root, files)
-    return sum(tally[seg] for seg in cands)
+    return sum(rootless_residue_by_segment(root, files, own_dirs).values())
+
+
+def residue_ratchet_report(
+    budget: dict[str, int],
+    measured: dict[str, int],
+    teachers: dict[str, list[str]],
+    by_file: dict[str, collections.Counter[str]],
+    declared: tuple[str, ...] | set[str],
+    *,
+    budget_name: str,
+) -> list[str]:
+    """One refusal paragraph per segment whose residue differs from its row.
+
+    THE RESIDUE IS RATCHETED PER SEGMENT, NOT AS ONE SUM (open debt 799). The
+    sum cannot say who made it move: a commit that writes ONE rooted citation
+    in a directory nothing had cited with its root teaches this axis a new
+    segment and pulls every pre-existing root-less token under it into the
+    count, in files that commit never opened. The old refusal said "This commit
+    ADDED one", which was true of neither the commit nor its text, and a
+    session that believed it split the tree three ways, measured eight commits,
+    found a delta of zero and gave up on attribution. A row per segment turns
+    the same number into three distinguishable events:
+
+      * a segment with NO row -- newly a candidate. The cause is a rooted
+        citation, and the refusal names its file and the files holding the
+        tokens it exposed.
+      * a segment whose count ROSE -- a root-less citation was written (or
+        moved) under a segment already known.
+      * a segment whose count FELL, or whose row has no subject any more.
+
+    Repairing an exposure is not a one-step edit and the text says so: rooting
+    the exposed tokens can expose the next segment, because the tokens are
+    rooted with paths that teach their own directories. R2755 met it twice in
+    one round (the QUIC link, then its datagram sibling). The repair is a fixed
+    point, and a refusal that stops at the first step invites a round per step.
+    """
+    declared = set(declared)
+
+    def where(seg: str, limit: int = 4) -> str:
+        per = by_file.get(seg)
+        if not per:
+            return "(no file holds one any more)"
+        top = sorted(per.items(), key=lambda kv: (-kv[1], kv[0]))
+        shown = ", ".join(f"{f} x{n}" for f, n in top[:limit])
+        more = len(top) - limit
+        return shown + (f" and {more} more file(s)" if more > 0 else "")
+
+    def taught_by(seg: str, limit: int = 3) -> str:
+        files = teachers.get(seg, [])
+        if not files:
+            return "no rooted citation"
+        shown = ", ".join(files[:limit])
+        more = len(files) - limit
+        return shown + (f" and {more} more" if more > 0 else "")
+
+    out: list[str] = []
+    for seg in sorted(set(budget) | set(measured)):
+        want, got = budget.get(seg, 0), measured.get(seg, 0)
+        if want == got:
+            continue
+        if seg in declared:
+            out.append(
+                f"segment `{seg}` is DECLARED in ROOTLESS_SEGMENTS, so its "
+                f"occurrences are graded by the line and bare budgets and "
+                f"have no residue row: delete its row from {budget_name}."
+            )
+        elif seg not in budget:
+            out.append(
+                f"NEW candidate segment `{seg}`: {got} root-less occurrence(s) "
+                f"now count and the budget has no row for it. A segment becomes "
+                f"a candidate when a ROOTED citation names a directory of that "
+                f"name -- here {taught_by(seg)} -- so these tokens may have "
+                f"been in the tree all along and merely become VISIBLE; they "
+                f"sit in {where(seg)}. The exposing citation and the tokens "
+                f"are usually in different files, so the commit's own text is "
+                f"not the place to look. Give each token its root in the "
+                f"`path` @ `needle` form, and repeat until no new segment "
+                f"appears (rooting them can expose the next segment -- the "
+                f"repair is a fixed point). Adding the row is not the repair."
+            )
+        elif got == 0 and seg not in measured:
+            out.append(
+                f"segment `{seg}` has a budget of {want} but no root-less "
+                f"occurrence under it counts any more -- it is no longer a "
+                f"candidate (the last rooted citation that taught it is gone) "
+                f"or every token was given its root: delete its row from "
+                f"{budget_name}."
+            )
+        elif got > want:
+            out.append(
+                f"segment `{seg}` grew from {want} to {got} root-less "
+                f"occurrence(s): one was written under a segment this axis "
+                f"already knows. They sit in {where(seg)}. Give the new one "
+                f"its root, in the `path` @ `needle` form; never raise the row."
+            )
+        else:
+            out.append(
+                f"segment `{seg}` fell from {want} to {got} root-less "
+                f"occurrence(s), which is the direction we want: set its row "
+                f"in {budget_name} to {got} in this same commit so the ratchet "
+                f"holds."
+            )
+    return out
 
 
 def upstream_roots_missing(
@@ -1298,12 +1502,20 @@ def run(root: pathlib.Path, ref: pathlib.Path | None, resolve: bool) -> int:
     total = (counts["anchored"] + counts["line"] + counts["bare"]
              + counts["rootless_line"] + counts["rootless_bare"]
              + counts["gone"] + counts["absent"])
-    candidates = rootless_candidates(root, files)
-    # ONE pass over the tree for both slices of the same tally -- the residue
-    # (candidate segments this axis does not grade) and the declared segments,
-    # which have to have a subject here to be worth declaring.
-    tally = first_segment_occurrences(root, files)
-    undeclared = sum(tally[seg] for seg in candidates - set(ROOTLESS_SEGMENTS))
+    # The candidate set keeps its PROVENANCE (which file's rooted citation
+    # taught each segment) and the tally keeps its LOCATIONS (which file holds
+    # each segment's root-less tokens), because the residue is ratcheted per
+    # segment and a refusal has to say where each moved segment came from.
+    teachers = rootless_candidate_teachers(root, files)
+    candidates = set(teachers)
+    by_file = segment_occurrences_by_file(root, files)
+    residue = {
+        seg: sum(by_file[seg].values())
+        for seg in sorted(candidates - set(ROOTLESS_SEGMENTS))
+        if seg in by_file
+    }
+    undeclared = sum(residue.values())
+    undeclared_budget = rootless_undeclared_budget()
 
     where = f"pin at {ref}" if resolve else "FORM arm only"
     print(
@@ -1321,7 +1533,8 @@ def run(root: pathlib.Path, ref: pathlib.Path | None, resolve: bool) -> int:
         f"  upstream-citation-anchor: root-less residue -- {undeclared} "
         f"occurrence(s) under {len(candidates - set(ROOTLESS_SEGMENTS))} derived "
         f"candidate segment(s) this axis does not yet grade "
-        f"(budget {ROOTLESS_UNDECLARED_BUDGET}); open debt 647. "
+        f"(budget {undeclared_budget} over {len(ROOTLESS_RESIDUE_BY_SEGMENT)} "
+        f"per-segment row(s)); open debt 647. "
         f"{counts['rootless_line'] + counts['rootless_bare'] + undeclared} "
         f"root-less occurrence(s) in all (budget {ROOTLESS_TOTAL_BUDGET}) -- "
         "declaring a segment moves an occurrence between these, it never "
@@ -1468,18 +1681,24 @@ def run(root: pathlib.Path, ref: pathlib.Path | None, resolve: bool) -> int:
             file=sys.stderr,
         )
         rc = 1
-    if undeclared != ROOTLESS_UNDECLARED_BUDGET:
-        moved = "ADDED" if undeclared > ROOTLESS_UNDECLARED_BUDGET else "REMOVED"
+    # THE RESIDUE, ONE SEGMENT AT A TIME (open debt 799). The sum used to be
+    # the only thing checked, and a sum cannot say whether a commit WROTE a
+    # root-less token or merely made existing ones visible by rooting a citation
+    # of a directory nobody had cited with its root. Each row that disagrees
+    # gets its own paragraph naming the segment and where it came from.
+    row_reports = residue_ratchet_report(
+        ROOTLESS_RESIDUE_BY_SEGMENT, residue, teachers, by_file,
+        ROOTLESS_SEGMENTS, budget_name="ROOTLESS_RESIDUE_BY_SEGMENT",
+    )
+    if row_reports:
         print(
-            f"  upstream-citation-anchor: FAIL -- {undeclared} root-less "
-            f"occurrence(s) under an UNGRADED candidate segment, budget "
-            f"{ROOTLESS_UNDECLARED_BUDGET}. This commit {moved} one. "
-            "Up means a new root-less citation was written: give it its root, "
-            "in the `path` @ `needle` form. Down means one was repaired or its "
-            "segment declared: lower ROOTLESS_UNDECLARED_BUDGET to "
-            f"{undeclared} in this same commit so the ratchet holds.",
+            f"  upstream-citation-anchor: FAIL -- the root-less residue is "
+            f"{undeclared} against a budget of {undeclared_budget}, and "
+            f"{len(row_reports)} segment(s) moved:",
             file=sys.stderr,
         )
+        for report in row_reports:
+            print(f"      - {report}", file=sys.stderr)
         rc = 1
     # THE CONSERVATION CHECK. The three numbers above partition every root-less
     # occurrence in the tree, so their sum is what a DECLARATION cannot change
@@ -1490,12 +1709,15 @@ def run(root: pathlib.Path, ref: pathlib.Path | None, resolve: bool) -> int:
             print(
                 f"  upstream-citation-anchor: FAIL -- {rootless_total} "
                 f"root-less occurrence(s) in all, budget "
-                f"{ROOTLESS_TOTAL_BUDGET}. This commit ADDED one. Declaring a "
-                "segment CANNOT move this number -- an occurrence only leaves "
-                "the residue for a bucket -- so the two root-less budgets "
-                "rising while this one rises too is a new citation, not a new "
-                "baseline. Give it its root, in the `path` @ `needle` form; "
-                "never raise this budget.",
+                f"{ROOTLESS_TOTAL_BUDGET}. Declaring a segment CANNOT move "
+                "this number -- an occurrence only leaves the residue for a "
+                "bucket -- so a rise is a root-less token that was either "
+                "WRITTEN or EXPOSED: a rooted citation of a directory nothing "
+                "had cited with its root makes that directory a candidate and "
+                "brings every token already under it into the count, in files "
+                "this commit may never have touched. The per-segment lines "
+                "above say which. Give each token its root, in the `path` @ "
+                "`needle` form; never raise this budget.",
                 file=sys.stderr,
             )
         else:
@@ -2094,6 +2316,7 @@ def selftest() -> int:
             body: str | None,
             runci: str | None = None,
             fname: str = "f.rs",
+            more: dict[str, str] | None = None,
         ) -> pathlib.Path:
             d = base / name
             d.mkdir()
@@ -2104,6 +2327,12 @@ def selftest() -> int:
             if body is not None:
                 (d / fname).write_text(body)
                 subprocess.run(["git", "-C", str(d), "add", fname], check=True)
+            # `more` is further files, for the rows whose subject is the
+            # RELATION between two files (a teaching citation in one, the
+            # root-less tokens it exposes in another).
+            for extra, text in (more or {}).items():
+                (d / extra).write_text(text)
+                subprocess.run(["git", "-C", str(d), "add", extra], check=True)
             return d
 
         # The fixture REF, not the machine's checkout: this selftest has to be
@@ -2180,20 +2409,32 @@ def selftest() -> int:
             "ROOTLESS_LINE_BUDGET",
             "ROOTLESS_BARE_BUDGET",
             "ROOTLESS_STALE_LINE_BUDGET",
-            "ROOTLESS_UNDECLARED_BUDGET",
+            "ROOTLESS_RESIDUE_BY_SEGMENT",
             "ROOTLESS_TOTAL_BUDGET",
         )
         keep = {name: globals()[name] for name in _BUDGETS}
 
         def verdict(root: pathlib.Path, r, resolve: bool, line_b: int, bare_b: int,
-                    **over: int):
+                    **over):
+            """`run()` with every budget replaced. The residue budget is the
+            per-segment TABLE (open debt 799), so its default is an empty
+            mapping rather than 0 and an override is a mapping."""
             globals()["LINE_BUDGET"], globals()["BARE_BUDGET"] = line_b, bare_b
             for name in _BUDGETS[2:]:
-                globals()[name] = over.get(name, 0)
+                empty = {} if name == "ROOTLESS_RESIDUE_BY_SEGMENT" else 0
+                globals()[name] = over.get(name, empty)
             try:
                 return run(root, r, resolve=resolve)
             finally:
                 globals().update(keep)
+
+        def refusal(root: pathlib.Path, r, resolve: bool, **over) -> str:
+            """The stderr a `verdict()` run prints, for the rows that grade
+            WHAT THE REFUSAL SAYS and not only that it refuses."""
+            err, out = io.StringIO(), io.StringIO()
+            with contextlib.redirect_stderr(err), contextlib.redirect_stdout(out):
+                verdict(root, r, resolve, 0, 0, **over)
+            return err.getvalue()
 
         # ⚠ MEASURED OVERLAP, recorded rather than hidden: disabling the
         # zero-population guard does NOT make the first row fail, because an
@@ -2231,7 +2472,8 @@ def selftest() -> int:
              verdict(rootless_repo, ref, True, 0, 0, ROOTLESS_LINE_BUDGET=1,
                      ROOTLESS_STALE_LINE_BUDGET=1, ROOTLESS_TOTAL_BUDGET=1), 1),
             ("the residue ratchet on budget",
-             verdict(residue_repo, ref, True, 0, 0, ROOTLESS_UNDECLARED_BUDGET=1,
+             verdict(residue_repo, ref, True, 0, 0,
+                     ROOTLESS_RESIDUE_BY_SEGMENT={OTHER: 1},
                      ROOTLESS_TOTAL_BUDGET=1), 0),
             ("the residue ratchet off budget",
              verdict(residue_repo, ref, True, 0, 0), 1),
@@ -2246,7 +2488,8 @@ def selftest() -> int:
              verdict(rootless_repo, ref, True, 0, 0, ROOTLESS_LINE_BUDGET=1,
                      ROOTLESS_TOTAL_BUDGET=0), 1),
             ("the conservation ratchet, total too high",
-             verdict(residue_repo, ref, True, 0, 0, ROOTLESS_UNDECLARED_BUDGET=1,
+             verdict(residue_repo, ref, True, 0, 0,
+                     ROOTLESS_RESIDUE_BY_SEGMENT={OTHER: 1},
                      ROOTLESS_TOTAL_BUDGET=2), 1),
             # R2318 -- the absence arm's two population guards. Both were DEAD
             # when first written and a control run said so; these are the rows
@@ -2372,7 +2615,8 @@ def selftest() -> int:
             ("README prose with two root-less lines, resolution arm (hosted's)",
              verdict(readme_bad, ref4, True, 0, 0), 1),
             ("the same two lines once the budgets sit on their count",
-             verdict(readme_bad, ref4, True, 0, 0, ROOTLESS_UNDECLARED_BUDGET=2,
+             verdict(readme_bad, ref4, True, 0, 0,
+                     ROOTLESS_RESIDUE_BY_SEGMENT={"net": 1, "src": 1},
                      ROOTLESS_TOTAL_BUDGET=2), 0),
             ("the repaired paragraph, form arm",
              verdict(readme_fixed, None, False, 0, 0), 0),
@@ -2381,6 +2625,105 @@ def selftest() -> int:
         ):
             if got != want:
                 failures.append(f"run() on {label}: expected rc={want}, got {got}")
+
+        # 12. THE EXPOSURE (open debt 799), driven end to end. The shape is the
+        #     one R2755 met: the root-less tokens sit in a file nobody touched,
+        #     and ONE correctly rooted citation in a different file turns their
+        #     segment into a candidate. The fixtures are a before and an after:
+        #     `expose_before` carries the tokens and no teacher, `expose_after`
+        #     is the same tree plus the single teaching line. The ONLY change
+        #     between them is that line, so the refusal on `after` must name it.
+        EXPOSE_TOKENS = f"// {RL_OTHER}:1\n// {RL_OTHER}:2\n"
+        TEACHER = f"// `{ROOTED_OTHER}` @ `fn other_keeper()`\n"
+        ANCHOR_ONLY = f"// `{UNICAST}` @ `fn keeper()`\n" + MARK
+        expose_before = git_fixture(
+            "repo_expose_before", ANCHOR_ONLY, more={"tokens.rs": EXPOSE_TOKENS}
+        )
+        expose_after = git_fixture(
+            "repo_expose_after", ANCHOR_ONLY,
+            more={"tokens.rs": EXPOSE_TOKENS, "teacher.rs": TEACHER},
+        )
+        # A teacher alone, no tokens: a rooted citation that exposes nothing
+        # must cost nothing, or every first citation of a directory reds.
+        teacher_only = git_fixture(
+            "repo_teacher_only", ANCHOR_ONLY, more={"teacher.rs": TEACHER}
+        )
+        exposed = refusal(expose_after, ref, True)
+        for label, got, want in (
+            ("before the teaching citation: tokens alone are not a candidate",
+             verdict(expose_before, ref, True, 0, 0), 0),
+            ("a teaching citation that exposes no token costs nothing",
+             verdict(teacher_only, ref, True, 0, 0), 0),
+            ("after it, with no row: refused",
+             verdict(expose_after, ref, True, 0, 0), 1),
+            ("after it, once the row exists",
+             verdict(expose_after, ref, True, 0, 0,
+                     ROOTLESS_RESIDUE_BY_SEGMENT={OTHER: 2},
+                     ROOTLESS_TOTAL_BUDGET=2), 0),
+        ):
+            if got != want:
+                failures.append(f"run() on {label}: expected rc={want}, got {got}")
+        # WHAT THE REFUSAL SAYS is the item's subject. Every needle below is a
+        # sentence the old refusal could not have written.
+        for what, needle in (
+            ("names the exposed segment", f"NEW candidate segment `{OTHER}`"),
+            ("names the file holding the rooted citation that taught it",
+             "teacher.rs"),
+            ("names the file holding the exposed tokens, with the count",
+             "tokens.rs x2"),
+            ("says the repair is a fixed point", "fixed point"),
+            ("does not blame the commit's own text",
+             "usually in different files"),
+        ):
+            if needle not in exposed:
+                failures.append(f"the exposure refusal never {what} ({needle!r})")
+        if "This commit ADDED one" in exposed:
+            failures.append(
+                "the exposure refusal still says `This commit ADDED one`, the "
+                "sentence R2755 proved can be false of both commit and text"
+            )
+        # The remaining per-segment events, each against a tree it is TRUE of.
+        grown = refusal(expose_after, ref, True,
+                        ROOTLESS_RESIDUE_BY_SEGMENT={OTHER: 1},
+                        ROOTLESS_TOTAL_BUDGET=1)
+        fell = refusal(expose_after, ref, True,
+                       ROOTLESS_RESIDUE_BY_SEGMENT={OTHER: 3},
+                       ROOTLESS_TOTAL_BUDGET=3)
+        gone_seg = refusal(expose_before, ref, True,
+                           ROOTLESS_RESIDUE_BY_SEGMENT={OTHER: 2},
+                           ROOTLESS_TOTAL_BUDGET=2)
+        declared = refusal(expose_before, ref, True,
+                           ROOTLESS_RESIDUE_BY_SEGMENT={SEG: 1},
+                           ROOTLESS_TOTAL_BUDGET=1)
+        for what, text, needle in (
+            ("a rising row says it grew", grown, f"segment `{OTHER}` grew from 1 to 2"),
+            ("a falling row says to lower it", fell,
+             f"segment `{OTHER}` fell from 3 to 2"),
+            ("a row with no candidate behind it says to delete it", gone_seg,
+             "no longer a candidate"),
+            ("a row for a DECLARED segment says to delete it", declared,
+             "is DECLARED in ROOTLESS_SEGMENTS"),
+        ):
+            if needle not in text:
+                failures.append(f"{what}: refusal lacks {needle!r}")
+        # The sum's own message must stop claiming a commit wrote the tokens.
+        total_msg = refusal(expose_after, ref, True,
+                            ROOTLESS_RESIDUE_BY_SEGMENT={OTHER: 2})
+        if "EXPOSED" not in total_msg:
+            failures.append(
+                "the conservation refusal does not mention exposure, so a "
+                "commit that only taught a segment is told it wrote a token"
+            )
+        # THE TABLE ITSELF. A zero row is a segment with no subject, a row for a
+        # declared segment is a count that is graded elsewhere; both would be
+        # silently dead weight, and `run()` only sees them on the real tree.
+        dead = [s for s, n in keep["ROOTLESS_RESIDUE_BY_SEGMENT"].items() if n <= 0]
+        double = sorted(set(keep["ROOTLESS_RESIDUE_BY_SEGMENT"]) & set(ROOTLESS_SEGMENTS))
+        if dead or double:
+            failures.append(
+                f"ROOTLESS_RESIDUE_BY_SEGMENT carries dead rows: zero {dead}, "
+                f"declared {double}"
+            )
 
     # R2615 — `resolve_mode`, the hook's opportunistic decision, graded on all
     # SIX combinations rather than the two the hook happens to take. The mode

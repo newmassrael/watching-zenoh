@@ -58,6 +58,7 @@ file and its fixtures with the source gate's own classifier moves no bucket.
 from __future__ import annotations
 
 import argparse
+import collections
 import contextlib
 import io
 import json
@@ -65,6 +66,7 @@ import pathlib
 import shutil
 import sys
 import tempfile
+import typing
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 import depth_axis_census as dc  # noqa: E402
@@ -214,7 +216,45 @@ FINDINGS_BUDGET = 8
 ROOTLESS_LINE_BUDGET = 74
 ROOTLESS_BARE_BUDGET = 10
 ROOTLESS_STALE_LINE_BUDGET = 17
-ROOTLESS_UNDECLARED_BUDGET = 142
+#: THE RESIDUE IS A TABLE, ONE ROW PER SEGMENT (open debt 799, the source gate's
+#: item, which this store axis shares). A single sum cannot say whether a
+#: change WROTE a root-less token or merely EXPOSED existing ones: a rooted
+#: citation naming a directory nothing had cited with its root makes that name a
+#: candidate and pulls every token already under it into the count. The rows
+#: make the movement attributable and the refusal comes from the source gate's
+#: `residue_ratchet_report`, so both gates describe an exposure the same way.
+#: Seeded at what the command printed; rows only fall, a row at zero is deleted.
+ROOTLESS_RESIDUE_BY_SEGMENT: dict[str, int] = {
+    "auth": 1,
+    "client": 1,
+    "common": 3,
+    "dispatcher": 10,
+    "establishment": 20,
+    "ext": 4,
+    "multicast": 12,
+    "net": 29,
+    "router": 1,
+    "storages_mgt": 7,
+    "transport": 4,
+    "unicast": 11,
+    "universal": 3,
+    "zenoh-backend-traits": 3,
+    "zenoh-codec": 13,
+    "zenoh-config": 8,
+    "zenoh-link-commons": 1,
+    "zenoh-link-serial": 1,
+    "zenoh-link-udp": 1,
+    "zenoh-link-ws": 4,
+    "zenoh-protocol": 4,
+    "zenoh-util": 1,
+}
+
+
+def rootless_undeclared_budget() -> int:
+    """The residue budget as one figure: the sum of the per-segment rows."""
+    return sum(ROOTLESS_RESIDUE_BY_SEGMENT.values())
+
+
 #: The conservation check, as in the source gate: line + bare + residue. A
 #: declaration moves an occurrence between the three and leaves this alone; a
 #: new citation raises it whatever the others were set to.
@@ -247,14 +287,30 @@ def live_reasons(root: pathlib.Path | None = None) -> dict[str, str]:
     return out
 
 
+class Residue(typing.NamedTuple):
+    """The root-less residue with its provenance: per-segment counts, which
+    reason files' rooted citations taught each candidate segment, and which
+    reason files hold each segment's tokens. The last two exist only so a
+    refusal can say WHERE an exposure came from."""
+
+    by_segment: dict[str, int]
+    teachers: dict[str, list[str]]
+    by_file: dict[str, collections.Counter]
+
+
+NO_RESIDUE = Residue({}, {}, {})
+
+
 def grade(reasons: dict[str, str], ref: pathlib.Path, own_dirs: set[str]):
-    """Classify with the SOURCE gate's own scanner. Returns (counts, findings).
+    """Classify with the SOURCE gate's own scanner. Returns
+    (counts, findings, residue).
 
     ⚠ `rootless_locations(ref)` IS PASSED, never `None` -- see the module
     docstring for the measurement that makes this non-negotiable.
 
-    `counts` carries the scanner's eight buckets PLUS `rootless_undeclared`,
-    the residue the source gate sizes beside them (open debt 754). The residue
+    `counts` is the scanner's eight buckets. `residue` is the ninth
+    measurement the source gate sizes beside them (open debt 754), by segment
+    and with its provenance (open debt 799); its sum is the residue figure. It
     needs `own_dirs` -- the tracked tree's directory names -- because the
     reasons are materialised as flat files and have no directories of their
     own; without it `src/` and `tests/` would read as upstream candidates.
@@ -267,13 +323,17 @@ def grade(reasons: dict[str, str], ref: pathlib.Path, own_dirs: set[str]):
             (tmp / rel).write_text(text, encoding="utf-8")
             rels.append(rel)
         counts, findings = g.scan(rels, tmp, ref, g.rootless_locations(ref))
-        counts["rootless_undeclared"] = g.rootless_undeclared(tmp, rels, own_dirs)
-        return counts, findings
+        residue = Residue(
+            g.rootless_residue_by_segment(tmp, rels, own_dirs),
+            g.rootless_candidate_teachers(tmp, rels, own_dirs),
+            g.segment_occurrences_by_file(tmp, rels),
+        )
+        return counts, findings, residue
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
 
-def _verdict(reasons, ref, counts, findings) -> int:
+def _verdict(reasons, ref, counts, findings, residue: Residue = NO_RESIDUE) -> int:
     """The verdict layer, separated so the selftest can drive it directly."""
     if len(reasons) < MIN_REASONS:
         print(
@@ -311,7 +371,8 @@ def _verdict(reasons, ref, counts, findings) -> int:
     rl_line = counts.get("rootless_line", 0)
     rl_bare = counts.get("rootless_bare", 0)
     rl_stale = counts.get("rootless_stale_line", 0)
-    rl_residue = counts.get("rootless_undeclared", 0)
+    rl_residue = sum(residue.by_segment.values())
+    residue_budget = rootless_undeclared_budget()
     rl_total = rl_line + rl_bare + rl_residue
     # One line per measurement the classifier produces, so an unseen axis can
     # never again read as a clean one (open debt 754).
@@ -326,7 +387,7 @@ def _verdict(reasons, ref, counts, findings) -> int:
         "candidate segments no declaration covers; %d root-less in all "
         "(budget %d) -- declaring a segment moves an occurrence between "
         "these, it never changes the total"
-        % (rl_residue, ROOTLESS_UNDECLARED_BUDGET, rl_total, ROOTLESS_TOTAL_BUDGET)
+        % (rl_residue, residue_budget, rl_total, ROOTLESS_TOTAL_BUDGET)
     )
 
     rc = 0
@@ -357,8 +418,6 @@ def _verdict(reasons, ref, counts, findings) -> int:
         ("root-less bare-form", rl_bare, ROOTLESS_BARE_BUDGET, "ROOTLESS_BARE_BUDGET"),
         ("root-less stale-line", rl_stale, ROOTLESS_STALE_LINE_BUDGET,
          "ROOTLESS_STALE_LINE_BUDGET"),
-        ("root-less residue", rl_residue, ROOTLESS_UNDECLARED_BUDGET,
-         "ROOTLESS_UNDECLARED_BUDGET"),
     ):
         if got == budget:
             continue
@@ -376,16 +435,35 @@ def _verdict(reasons, ref, counts, findings) -> int:
                 "which is the direction we want: lower %s to %d in this same "
                 "commit so the ratchet holds." % (got, label, budget, const, got)
             )
+    # The residue, one segment at a time (open debt 799): which segment moved
+    # and which file's rooted citation taught it is what separates a token that
+    # was WRITTEN from one that was merely EXPOSED.
+    row_reports = g.residue_ratchet_report(
+        ROOTLESS_RESIDUE_BY_SEGMENT, residue.by_segment, residue.teachers,
+        residue.by_file, g.ROOTLESS_SEGMENTS,
+        budget_name="ROOTLESS_RESIDUE_BY_SEGMENT",
+    )
+    if row_reports:
+        rc = 1
+        print(
+            "FAIL: the root-less residue is %d against a budget of %d, and %d "
+            "segment(s) moved:" % (rl_residue, residue_budget, len(row_reports))
+        )
+        for report in row_reports:
+            print("    - %s" % report)
     if rl_total != ROOTLESS_TOTAL_BUDGET:
         rc = 1
         if rl_total > ROOTLESS_TOTAL_BUDGET:
             print(
-                "FAIL: %d root-less occurrence(s) in all, budget %d. This "
-                "commit ADDED one. Declaring a segment cannot move this number "
-                "-- an occurrence only leaves the residue for a bucket -- so "
-                "this is a new root-less citation, not a new baseline. Give it "
-                "its root, in the `path` @ `needle` form; never raise this "
-                "budget." % (rl_total, ROOTLESS_TOTAL_BUDGET)
+                "FAIL: %d root-less occurrence(s) in all, budget %d. Declaring "
+                "a segment cannot move this number -- an occurrence only "
+                "leaves the residue for a bucket -- so a rise is a token that "
+                "was WRITTEN or EXPOSED (a rooted citation of a directory "
+                "nothing had cited with its root makes it a candidate and "
+                "brings the tokens already under it into the count). The "
+                "per-segment lines above say which. Give each token its root, "
+                "in the `path` @ `needle` form; never raise this budget."
+                % (rl_total, ROOTLESS_TOTAL_BUDGET)
             )
         else:
             print(
@@ -432,8 +510,8 @@ def main() -> int:
     if ref is None:
         return _verdict(reasons, None, {}, [])
     own_dirs = g.own_directory_names(g.tracked_files(ROOT))
-    counts, findings = grade(reasons, ref, own_dirs)
-    return _verdict(reasons, ref, counts, findings)
+    counts, findings, residue = grade(reasons, ref, own_dirs)
+    return _verdict(reasons, ref, counts, findings, residue)
 
 
 # ── selftest ────────────────────────────────────────────────────────────────
@@ -527,7 +605,10 @@ def selftest() -> int:
     try:
         ref = _fake_pin(tmp)
         for name, reason, want_counts, want_find, *own in cases:
-            counts, findings = grade({"fixture-atom": reason}, ref, own[0] if own else set())
+            counts, findings, residue = grade(
+                {"fixture-atom": reason}, ref, own[0] if own else set()
+            )
+            counts["rootless_undeclared"] = sum(residue.by_segment.values())
             bad = [k for k, v in want_counts.items() if counts.get(k, 0) != v]
             if bad or len(findings) != want_find:
                 print("  selftest FAIL  %s: counts=%s findings=%d"
@@ -535,6 +616,30 @@ def selftest() -> int:
                 failures += 1
             else:
                 print("  selftest ok    %s" % name)
+
+        # Open debt 799: the residue keeps its PROVENANCE. The same two tokens
+        # in one atom, with and without a rooted citation of their directory in
+        # another atom -- the only difference between the two runs is the
+        # teaching line, and the second must say which file it is in.
+        tokens = {"atom-tokens": "Compare %s, and %s again." % (_RESIDUE, _RESIDUE)}
+        teach = {"atom-teacher": "The surface is `%s` @ `needle_here`." % _LIVES}
+        _c, _f, before = grade(tokens, ref, set())
+        _c, _f, after = grade({**tokens, **teach}, ref, set())
+        for name, ok in (
+            ("tokens with no rooted citation of their directory are not residue",
+             before.by_segment == {}),
+            ("one teaching citation in ANOTHER atom exposes both tokens",
+             after.by_segment == {_CRATE: 2}),
+            ("the residue names the atom whose citation taught the segment",
+             after.teachers.get(_CRATE) == ["atom-teacher.txt"]),
+            ("the residue names the atom holding the exposed tokens",
+             dict(after.by_file.get(_CRATE, {})) == {"atom-tokens.txt": 2}),
+        ):
+            if ok:
+                print("  selftest ok    %s" % name)
+            else:
+                print("  selftest FAIL  %s" % name)
+                failures += 1
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
@@ -542,21 +647,32 @@ def selftest() -> int:
     clean = {"anchored": 3, "line": LINE_BUDGET, "bare": BARE_BUDGET, "gone": 1,
              "rootless_line": ROOTLESS_LINE_BUDGET,
              "rootless_bare": ROOTLESS_BARE_BUDGET,
-             "rootless_stale_line": ROOTLESS_STALE_LINE_BUDGET,
-             "rootless_undeclared": ROOTLESS_UNDECLARED_BUDGET}
+             "rootless_stale_line": ROOTLESS_STALE_LINE_BUDGET}
+    # The residue ON its per-segment budget, and the segment the moves below
+    # are made on: the largest row, so a REMOVED move can never reach zero.
+    clean_res = Residue(dict(ROOTLESS_RESIDUE_BY_SEGMENT), {}, {})
+    big_seg = max(ROOTLESS_RESIDUE_BY_SEGMENT, key=ROOTLESS_RESIDUE_BY_SEGMENT.get)
+
+    def moved(delta: int, seg: str = big_seg) -> Residue:
+        rows = dict(ROOTLESS_RESIDUE_BY_SEGMENT)
+        rows[seg] = rows.get(seg, 0) + delta
+        return Residue(rows, {}, {})
+
     findings7 = ["f%d" % i for i in range(FINDINGS_BUDGET)]
+    x = pathlib.Path("/x")
     verdicts = [
-        ("a collapsed population FAILs", {"only": "one"}, None, {}, [], 1),
-        ("no checkout declaring the pin FAILs (not a skip)", big, None, {}, [], 1),
-        ("on-budget returns 0", big, pathlib.Path("/x"), clean, findings7, 0),
-        ("a line-form citation ADDED FAILs", big, pathlib.Path("/x"),
-         dict(clean, line=LINE_BUDGET + 1), findings7, 1),
-        ("a line-form citation REMOVED FAILs (ratchet down)", big, pathlib.Path("/x"),
-         dict(clean, line=LINE_BUDGET - 1), findings7, 1),
-        ("an ADDED unresolved claim FAILs", big, pathlib.Path("/x"), clean,
-         findings7 + ["extra"], 1),
-        ("a REMOVED unresolved claim FAILs (ratchet down)", big, pathlib.Path("/x"),
-         clean, findings7[:-1], 1),
+        ("a collapsed population FAILs", {"only": "one"}, None, {}, [], clean_res, 1),
+        ("no checkout declaring the pin FAILs (not a skip)", big, None, {}, [],
+         clean_res, 1),
+        ("on-budget returns 0", big, x, clean, findings7, clean_res, 0),
+        ("a line-form citation ADDED FAILs", big, x,
+         dict(clean, line=LINE_BUDGET + 1), findings7, clean_res, 1),
+        ("a line-form citation REMOVED FAILs (ratchet down)", big, x,
+         dict(clean, line=LINE_BUDGET - 1), findings7, clean_res, 1),
+        ("an ADDED unresolved claim FAILs", big, x, clean,
+         findings7 + ["extra"], clean_res, 1),
+        ("a REMOVED unresolved claim FAILs (ratchet down)", big, x,
+         clean, findings7[:-1], clean_res, 1),
     ]
     # Open debt 754: each root-less measurement is checked in BOTH directions.
     # Every row moves exactly one measurement, so a verdict that still ignored
@@ -565,14 +681,17 @@ def selftest() -> int:
         ("rootless_line", ROOTLESS_LINE_BUDGET),
         ("rootless_bare", ROOTLESS_BARE_BUDGET),
         ("rootless_stale_line", ROOTLESS_STALE_LINE_BUDGET),
-        ("rootless_undeclared", ROOTLESS_UNDECLARED_BUDGET),
     ):
         for word, delta in (("ADDED", 1), ("REMOVED", -1)):
             verdicts.append((
-                "a %s %s occurrence FAILs" % (word, key), big, pathlib.Path("/x"),
-                dict(clean, **{key: budget + delta}), findings7, 1))
-    for name, reasons, ref, counts, findings, want in verdicts:
-        rc = _verdict(reasons, ref, counts, findings)
+                "a %s %s occurrence FAILs" % (word, key), big, x,
+                dict(clean, **{key: budget + delta}), findings7, clean_res, 1))
+    for word, delta in (("ADDED", 1), ("REMOVED", -1)):
+        verdicts.append((
+            "a %s residue occurrence FAILs" % word, big, x, clean, findings7,
+            moved(delta), 1))
+    for name, reasons, ref, counts, findings, residue, want in verdicts:
+        rc = _verdict(reasons, ref, counts, findings, residue)
         if rc != want:
             print("  selftest FAIL  %s: rc=%d want %d" % (name, rc, want))
             failures += 1
@@ -584,7 +703,7 @@ def selftest() -> int:
     # the same. The summary line must name every root-less measurement.
     shown = io.StringIO()
     with contextlib.redirect_stdout(shown):
-        _verdict(big, pathlib.Path("/x"), clean, findings7)
+        _verdict(big, x, clean, findings7, clean_res)
     text = shown.getvalue()
     for needle in ("root-less line", "root-less bare", "root-less stale",
                    "root-less residue", "root-less in all"):
@@ -600,10 +719,9 @@ def selftest() -> int:
     # a declaration and not a new citation.
     shown = io.StringIO()
     with contextlib.redirect_stdout(shown):
-        rc = _verdict(big, pathlib.Path("/x"),
-                      dict(clean, rootless_line=ROOTLESS_LINE_BUDGET + 1,
-                           rootless_undeclared=ROOTLESS_UNDECLARED_BUDGET - 1),
-                      findings7)
+        rc = _verdict(big, x,
+                      dict(clean, rootless_line=ROOTLESS_LINE_BUDGET + 1),
+                      findings7, moved(-1))
     if rc != 1 or "in all, budget" in shown.getvalue():
         print("  selftest FAIL  a declaration-shaped move fired the total (rc=%d)" % rc)
         failures += 1
@@ -614,14 +732,45 @@ def selftest() -> int:
     # the total must fire on its own account.
     shown = io.StringIO()
     with contextlib.redirect_stdout(shown):
-        rc = _verdict(big, pathlib.Path("/x"),
-                      dict(clean, rootless_undeclared=ROOTLESS_UNDECLARED_BUDGET + 1),
-                      findings7)
+        rc = _verdict(big, x, clean, findings7, moved(1))
     if rc != 1 or "in all, budget" not in shown.getvalue():
         print("  selftest FAIL  a new root-less citation did not fire the total")
         failures += 1
     else:
         print("  selftest ok    a new root-less citation fires the total")
+
+    # Open debt 799: WHAT THE REFUSAL SAYS about an exposure. A segment with no
+    # row, taught by one atom and held by another, must be named with both.
+    exposed = Residue(
+        dict(ROOTLESS_RESIDUE_BY_SEGMENT, **{_CRATE: 2}),
+        {_CRATE: ["atom-teacher.txt"]},
+        {_CRATE: collections.Counter({"atom-tokens.txt": 2})},
+    )
+    shown = io.StringIO()
+    with contextlib.redirect_stdout(shown):
+        rc = _verdict(big, x, clean, findings7, exposed)
+    text = shown.getvalue()
+    for what, needle in (
+        ("names the exposed segment", "NEW candidate segment `%s`" % _CRATE),
+        ("names the atom whose citation taught it", "atom-teacher.txt"),
+        ("names the atom holding the tokens, with the count", "atom-tokens.txt x2"),
+        ("says the repair is a fixed point", "fixed point"),
+        ("says the total can be moved by exposure", "EXPOSED"),
+    ):
+        if rc != 1 or needle not in text:
+            print("  selftest FAIL  the exposure refusal never %s (rc=%d)" % (what, rc))
+            failures += 1
+        else:
+            print("  selftest ok    the exposure refusal %s" % what)
+
+    dead = [s for s, n in ROOTLESS_RESIDUE_BY_SEGMENT.items() if n <= 0]
+    double = sorted(set(ROOTLESS_RESIDUE_BY_SEGMENT) & set(g.ROOTLESS_SEGMENTS))
+    if dead or double:
+        print("  selftest FAIL  residue table carries dead rows: zero %s, declared %s"
+              % (dead, double))
+        failures += 1
+    else:
+        print("  selftest ok    the residue table carries no dead row")
 
     if failures:
         print("store-reason-citations selftest: %d failure(s)" % failures)
