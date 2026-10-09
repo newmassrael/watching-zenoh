@@ -2364,15 +2364,26 @@ fn recovered_sample_from_reply(reply: &dyn ReplyView) -> Option<Sample> {
     if kind == ReplyKind::Err {
         return None;
     }
+    // A recovered reply's bytes are held, not copied, when the reply holds them
+    // shareable (a reply off the wire is a range of the frame it arrived in), so
+    // the recovered sample is a second reference to that storage as a live one is.
     let mut sample = match kind {
         ReplyKind::Del => Sample::new_del(reply.keyexpr()),
-        _ => Sample::new_put(reply.keyexpr(), reply.payload().to_vec()),
+        _ => Sample::new_put_shared(
+            reply.keyexpr(),
+            reply
+                .payload_shared()
+                .cloned()
+                .unwrap_or_else(|| wz_session_core::link::RxBytes::from(reply.payload().to_vec())),
+        ),
     };
     sample.source_info = reply.source_info().cloned();
     sample.timestamp = reply.timestamp().cloned();
-    sample.attachment = reply
-        .attachment()
-        .map(|bytes| wz_session_core::link::RxBytes::from(bytes.to_vec()));
+    sample.attachment = reply.attachment_shared().cloned().or_else(|| {
+        reply
+            .attachment()
+            .map(|bytes| wz_session_core::link::RxBytes::from(bytes.to_vec()))
+    });
     if let Some((packed_id, schema)) = reply.put_encoding() {
         sample.encoding = Some(EncodingHint {
             packed_id,
@@ -8407,6 +8418,49 @@ mod tests {
             released,
             vec!["subscriber", "late_publishers", "heartbeat", "token"],
             "the host lets them go when it chooses"
+        );
+    }
+
+    /// A sample recovered from a reply is built from the reply's bytes as they
+    /// are held: a reply off the wire holds ranges of the frame it arrived in, so
+    /// the recovered sample holds the very same bytes (payload and attachment),
+    /// not copies, as a live sample does. The reply here is a Put over one lent
+    /// buffer, and the pointers say whether the sample took ranges of it.
+    #[cfg(feature = "ext-pubsub-advanced-recovery")]
+    #[test]
+    fn a_recovered_sample_holds_the_storage_its_reply_holds() {
+        use wz_session_core::link::RxBytes;
+        use wz_session_core::reply::{InboundReply, InboundReplyBody};
+
+        let frame = RxBytes::lend(b"PAYLOADATTACH".to_vec());
+        let payload = frame.subslice(0..7).expect("a range of the frame");
+        let attachment = frame.subslice(7..13).expect("a range of the frame");
+        let reply = InboundReply {
+            rid: 1,
+            keyexpr_literal: "demo/recovered".into(),
+            body: InboundReplyBody::Put {
+                payload: payload.clone(),
+                attachment: Some(attachment.clone()),
+                encoding: None,
+                source_info: None,
+                timestamp: None,
+            },
+        };
+
+        let sample = recovered_sample_from_reply(&reply).expect("a Put reply recovers");
+
+        assert_eq!(sample.payload.as_slice(), b"PAYLOAD");
+        assert_eq!(
+            sample.payload.as_ptr(),
+            payload.as_ptr(),
+            "the recovered payload is the reply's own bytes, not a copy of them"
+        );
+        let kept = sample.attachment.as_ref().expect("the attachment recovers");
+        assert_eq!(kept.as_slice(), b"ATTACH");
+        assert_eq!(
+            kept.as_ptr(),
+            attachment.as_ptr(),
+            "and so is the attachment"
         );
     }
 }

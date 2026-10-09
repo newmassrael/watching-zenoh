@@ -212,7 +212,9 @@ pub enum InboundReplyBody {
         /// its `AlignmentReply` off. `None` when the reply had no
         /// attachment or `pubsub-attachment` is off (the decode is gated,
         /// mirroring the wire policy so a loopback reply matches a wire one).
-        attachment: Option<Vec<u8>>,
+        /// Held as [`payload`](Self::Put::payload) is: a reply off the wire holds
+        /// a range of the frame it arrived in.
+        attachment: Option<crate::link::RxBytes>,
         /// The inner-`MsgPut` value encoding (E-flag), mirroring the Err
         /// encoding shape (`packed_id`, `schema`). `None` when the reply
         /// carried no encoding or `pubsub-encoding` is off. What a querier
@@ -248,7 +250,7 @@ pub enum InboundReplyBody {
         /// Before this the arm had no slot at all, so `attachment()` answered
         /// `None` for every Del reply whatever the wire carried — the receive
         /// half of the same gap the emit side had.
-        attachment: Option<Vec<u8>>,
+        attachment: Option<crate::link::RxBytes>,
         /// The source identity `(zid, eid, sn)` the Del reply carried on its
         /// inner-body source_info ext (id 0x01), or `None` when the reply had
         /// no source_info or `reply-source-info` is off.
@@ -373,6 +375,14 @@ impl ReplyView for InboundReply {
             InboundReplyBody::Del { .. } | InboundReplyBody::Err { .. } => None,
         }
     }
+    fn attachment_shared(&self) -> Option<&crate::link::RxBytes> {
+        match &self.body {
+            InboundReplyBody::Put { attachment, .. } | InboundReplyBody::Del { attachment, .. } => {
+                attachment.as_ref()
+            }
+            InboundReplyBody::Err { .. } => None,
+        }
+    }
 }
 
 #[cfg(feature = "alloc")]
@@ -396,7 +406,7 @@ impl InboundReply {
                     .payload_shared()
                     .cloned()
                     .unwrap_or_else(|| crate::link::RxBytes::from(view.payload().to_vec())),
-                attachment: view.attachment().map(<[u8]>::to_vec),
+                attachment: retained_attachment(view),
                 encoding: view
                     .put_encoding()
                     .map(|(id, schema)| (id, schema.map(String::from))),
@@ -404,7 +414,7 @@ impl InboundReply {
                 timestamp: view.timestamp().cloned(),
             },
             ReplyKind::Del => InboundReplyBody::Del {
-                attachment: view.attachment().map(<[u8]>::to_vec),
+                attachment: retained_attachment(view),
                 source_info: view.source_info().cloned(),
                 timestamp: view.timestamp().cloned(),
             },
@@ -423,6 +433,17 @@ impl InboundReply {
     }
 }
 
+/// The attachment a retained reply keeps: a second reference to the storage the
+/// view holds it in when the view holds it shareable
+/// ([`ReplyView::attachment_shared`]), a copy of the borrowed bytes otherwise.
+#[cfg(feature = "alloc")]
+fn retained_attachment(view: &dyn ReplyView) -> Option<crate::link::RxBytes> {
+    view.attachment_shared().cloned().or_else(|| {
+        view.attachment()
+            .map(|bytes| crate::link::RxBytes::from(bytes.to_vec()))
+    })
+}
+
 /// A8b — gate a loopback Put reply's staged attachment on the SAME inner
 /// `pubsub-attachment` feature the wire decode uses, so when both reply paths
 /// are present a SessionLocal reply surfaces the same attachment a wire
@@ -432,10 +453,12 @@ impl InboundReply {
 /// (the pre-existing R311fm gating); the parity claim is about the side-band
 /// CONTENT when both arms exist, not about which arms a subset compiles.
 #[cfg(all(feature = "query-queryable", feature = "alloc"))]
-fn loopback_put_attachment(attachment: Option<Vec<u8>>) -> Option<Vec<u8>> {
+fn loopback_put_attachment(attachment: Option<Vec<u8>>) -> Option<crate::link::RxBytes> {
     #[cfg(feature = "pubsub-attachment")]
     {
-        attachment
+        // The responder's own vector moves in as it is: a loopback reply has no
+        // frame to share, as its payload has none.
+        attachment.map(crate::link::RxBytes::from)
     }
     #[cfg(not(feature = "pubsub-attachment"))]
     {
@@ -515,15 +538,14 @@ fn loopback_reply_timestamp(
     feature = "alloc",
     any(feature = "pubsub-put", feature = "query-reply")
 ))]
-fn put_reply_attachment(put: &crate::wire::parts::MsgPutOwned) -> Option<Vec<u8>> {
+fn put_reply_attachment(put: &crate::wire::parts::MsgPutOwned) -> Option<crate::link::RxBytes> {
     #[cfg(feature = "pubsub-attachment")]
     {
         put.extensions.as_ref().and_then(|exts| {
-            crate::attachment::decode_attachment_ext(
+            crate::attachment::decode_attachment_ext_shared(
                 exts,
                 crate::attachment::ATTACHMENT_EXT_ID_PUSH,
             )
-            .map(<[u8]>::to_vec)
         })
     }
     #[cfg(not(feature = "pubsub-attachment"))]
@@ -547,12 +569,14 @@ fn put_reply_attachment(put: &crate::wire::parts::MsgPutOwned) -> Option<Vec<u8>
     feature = "alloc",
     any(feature = "pubsub-delete", feature = "query-reply")
 ))]
-fn del_reply_attachment(del: &crate::wire::parts::MsgDelOwned) -> Option<Vec<u8>> {
+fn del_reply_attachment(del: &crate::wire::parts::MsgDelOwned) -> Option<crate::link::RxBytes> {
     #[cfg(feature = "pubsub-attachment")]
     {
         del.extensions.as_ref().and_then(|exts| {
-            crate::attachment::decode_attachment_ext(exts, crate::attachment::ATTACHMENT_EXT_ID_DEL)
-                .map(<[u8]>::to_vec)
+            crate::attachment::decode_attachment_ext_shared(
+                exts,
+                crate::attachment::ATTACHMENT_EXT_ID_DEL,
+            )
         })
     }
     #[cfg(not(feature = "pubsub-attachment"))]
@@ -2836,6 +2860,56 @@ mod tests {
                 assert_eq!(encoding, Some((9, Some("text/plain".to_string()))));
             }
             other => panic!("expected Put, got {other:?}"),
+        }
+    }
+
+    /// Retaining a reply whose attachment is a range of a frame takes a second
+    /// reference to that frame, for the Put arm and for the Del arm alike; it
+    /// does not copy the bytes out.
+    #[cfg(all(feature = "alloc", feature = "rx-shared-bytes"))]
+    #[test]
+    fn a_kept_reply_shares_the_attachment_its_view_holds_shared() {
+        use crate::link::RxBytes;
+        let frame = RxBytes::lend(b"xxALIGNyy".to_vec());
+        let attachment = frame.subslice(2..7).expect("a range of the frame");
+        for body in [
+            InboundReplyBody::Put {
+                payload: RxBytes::from(b"v".to_vec()),
+                attachment: Some(attachment.clone()),
+                encoding: None,
+                source_info: None,
+                timestamp: None,
+            },
+            InboundReplyBody::Del {
+                attachment: Some(attachment.clone()),
+                source_info: None,
+                timestamp: None,
+            },
+        ] {
+            let live = InboundReply {
+                rid: 5,
+                keyexpr_literal: "a/b".into(),
+                body,
+            };
+
+            let kept = InboundReply::from_view(&live);
+
+            let (InboundReplyBody::Put {
+                attachment: got, ..
+            }
+            | InboundReplyBody::Del {
+                attachment: got, ..
+            }) = &kept.body
+            else {
+                panic!("expected a data reply, got {:?}", kept.body);
+            };
+            let got = got.as_ref().expect("the attachment is kept");
+            assert_eq!(got.as_slice(), b"ALIGN");
+            assert_eq!(
+                got.as_ptr(),
+                attachment.as_ptr(),
+                "the kept reply holds the very bytes the live one does, not a copy"
+            );
         }
     }
 

@@ -8006,7 +8006,10 @@ layer_c1at_cargo_test_ext_pubsub_advanced_recovery() {
     # R2817 — 26 -> 27, the ungated background witness (see C1ar).
     # R2819 — 27 -> 29, the two ungated witnesses (see C1ar); the detection
     # witnesses were already counted here.
-    _runci_guarded_test "C1at advanced_subscriber" 29 \
+    # Item 850 — 29 -> 30: a_recovered_sample_holds_the_storage_its_reply_holds,
+    # gated on recovery, which this command compiles. Measured: this command
+    # printed 30.
+    _runci_guarded_test "C1at advanced_subscriber" 30 \
         cargo test -p wz-runtime-tokio --features ext-pubsub-advanced-recovery,ext-pubsub-advanced-publisher,pubsub-allow-loop \
         --lib advanced_subscriber --quiet || return 1
     # R311y836 — the SAME 22 cases again, with `query-consolidation` composed on
@@ -8033,7 +8036,8 @@ layer_c1at_cargo_test_ext_pubsub_advanced_recovery() {
     # R2816 — 25 -> 26, the detect_publishers witness, as above.
     # R2817 — 26 -> 27, the background witness, as above.
     # R2819 — 27 -> 29, the two ungated witnesses, as above.
-    _runci_guarded_test "C1at advanced_subscriber (query-consolidation)" 29 \
+    # Item 850 — 29 -> 30, the recovery-gated witness, as above.
+    _runci_guarded_test "C1at advanced_subscriber (query-consolidation)" 30 \
         cargo test -p wz-runtime-tokio --features ext-pubsub-advanced-recovery,ext-pubsub-advanced-publisher,pubsub-allow-loop,query-consolidation \
         --lib advanced_subscriber --quiet || return 1
     (cd crates \
@@ -8188,7 +8192,9 @@ layer_c1av_cargo_test_ext_pubsub_advanced_history() {
     # the late-publisher subscription, so they are history-gated and only this
     # lane moves: C1ar, C1at and C1au do not compile them. Measured: this
     # command printed 58.
-    _runci_guarded_test "C1av advanced_subscriber" 58 \
+    # Item 850 — 58 -> 59, the recovery-gated witness (history implies recovery).
+    # Measured: this command printed 59.
+    _runci_guarded_test "C1av advanced_subscriber" 59 \
         cargo test -p wz-runtime-tokio --features ext-pubsub-advanced-history,ext-pubsub-advanced-publisher,pubsub-allow-loop \
         --lib advanced_subscriber --quiet || return 1
     (cd crates \

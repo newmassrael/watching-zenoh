@@ -141,6 +141,15 @@ pub trait ReplyView {
     fn payload_shared(&self) -> Option<&crate::link::RxBytes> {
         None
     }
+    /// The reply's attachment as the shareable value the view holds it in, the
+    /// twin of [`payload_shared`](Self::payload_shared) for the side-band: a
+    /// received reply answers with the range of the frame the attachment arrived
+    /// in. Default `None`, and a view that answers `None` here while
+    /// [`attachment`](Self::attachment) answers `Some` is retained by copying.
+    #[cfg(feature = "alloc")]
+    fn attachment_shared(&self) -> Option<&crate::link::RxBytes> {
+        None
+    }
 }
 
 /// A [`ReplyView`] over loose borrowed fields — the canonical impl for a

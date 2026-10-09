@@ -580,3 +580,134 @@ fn a_sample_the_application_keeps_holds_the_lent_storage_through_its_attachment(
         "and when the attachment is dropped the storage goes home"
     );
 }
+
+/// A reliable Frame at `FIRST_SN` carrying one reply to request `CENSUS_RID`:
+/// a Put with the census payload, or a Del when `del`, and the census
+/// attachment when `attached`.
+#[cfg(all(feature = "query-reply", feature = "pubsub-put"))]
+fn census_reply_wire(attached: bool, del: bool) -> Vec<u8> {
+    use wz_session_core::frame_encode::encode_frame_with_response;
+    use wz_session_core::response_build::ResponseReplyBuilder;
+
+    let mut builder = ResponseReplyBuilder::new(
+        CENSUS_RID,
+        0,
+        Some("demo/census"),
+        &vec![0x5C; CENSUS_PAYLOAD],
+    );
+    if attached {
+        builder = builder.attachment(&vec![0xA7; CENSUS_ATTACHMENT]);
+    }
+    if del {
+        builder = builder.reply_del();
+    }
+    let response = builder.build().expect("build a literal reply");
+    encode_frame_with_response(FIRST_SN, response, true)
+}
+
+#[cfg(all(feature = "query-reply", feature = "pubsub-put"))]
+const CENSUS_RID: u64 = 42;
+
+/// [`large_allocations_to_a_kept_sample`] for a reply: drive `wire` and hand the
+/// Response to a registry whose callback RETAINS the reply it is handed, as a
+/// querier that keeps replies does.
+#[cfg(all(feature = "query-reply", feature = "pubsub-put"))]
+fn large_allocations_to_a_kept_reply(wire: Vec<u8>) -> (Vec<usize>, Vec<usize>) {
+    use hashbrown::HashMap;
+    use wz_session_core::reply::{InboundReply, InboundReplyBody, ReplyRegistry};
+    use wz_session_core::reply_acceptance::ReplyAcceptance;
+
+    established!(actions, engine);
+    let unit = RxBytes::from(wire);
+    let (outcome, drive) = census::large_allocations(|| {
+        dispatch_link_event(LinkEvent::Rx(RxFrame::new(unit)), &actions, &mut engine)
+    });
+    let DriverLoopOutcome::FramePayload { messages, .. } = &outcome else {
+        panic!("a data frame in an established session is delivered, got {outcome:?}");
+    };
+    let NetworkMessage::Response(response) = &messages[0] else {
+        panic!("the batch is one Response, got {:?}", messages[0]);
+    };
+    let kept = Arc::new(Mutex::new(None::<InboundReply>));
+    let sink = Arc::clone(&kept);
+    let mut registry = ReplyRegistry::new();
+    registry.register(
+        CENSUS_RID,
+        1,
+        None,
+        ReplyAcceptance::Any,
+        move |view| *sink.lock().unwrap() = Some(InboundReply::from_view(view)),
+        |_| {},
+    );
+    let ((), delivery) =
+        census::large_allocations(|| registry.dispatch_response(response, &HashMap::new()));
+    let reply = kept.lock().unwrap().take().expect("the reply fired");
+    match &reply.body {
+        InboundReplyBody::Put { payload, .. } => assert_eq!(
+            payload.len(),
+            CENSUS_PAYLOAD,
+            "the premise: the reply the querier kept carries the whole payload"
+        ),
+        InboundReplyBody::Del { .. } => {}
+        other => panic!("expected a data reply, got {other:?}"),
+    }
+    (drive, delivery)
+}
+
+/// The reply plane counted as the push plane is: from the buffer the link read
+/// to a reply the querier keeps, nothing as large as a kilobyte is allocated,
+/// with the payload alone and with an attachment beside it.
+#[cfg(all(feature = "query-reply", feature = "pubsub-put"))]
+#[test]
+fn no_allocation_of_a_replys_payload_stands_between_the_frame_and_a_kept_reply() {
+    let (drive, delivery) = large_allocations_to_a_kept_reply(census_reply_wire(false, false));
+    assert!(
+        drive.is_empty(),
+        "driving the frame allocated {drive:?}; its bytes must stay in the buffer the link read"
+    );
+    assert!(
+        delivery.is_empty(),
+        "delivering the reply allocated {delivery:?}; the reply must hold ranges of that buffer"
+    );
+}
+
+/// See the test above; the attachment of a reply is the side-band the storage
+/// aligner reads its `AlignmentReply` off, and it used to be copied out of the
+/// frame twice, as a sample's was.
+#[cfg(all(
+    feature = "query-reply",
+    feature = "pubsub-put",
+    feature = "pubsub-attachment"
+))]
+#[test]
+fn no_allocation_of_a_replys_attachment_stands_between_the_frame_and_a_kept_reply() {
+    let (drive, delivery) = large_allocations_to_a_kept_reply(census_reply_wire(true, false));
+    assert!(
+        drive.is_empty(),
+        "driving the frame allocated {drive:?}; its bytes must stay in the buffer the link read"
+    );
+    assert!(
+        delivery.is_empty(),
+        "delivering the reply allocated {delivery:?}; the reply must hold ranges of that buffer"
+    );
+}
+
+/// The Del arm reads its attachment at its own extension id and through its own
+/// extractor (`del_reply_attachment`), so the Put arm's count cannot speak for it.
+#[cfg(all(
+    feature = "query-reply",
+    feature = "pubsub-put",
+    feature = "pubsub-attachment"
+))]
+#[test]
+fn no_allocation_of_a_del_replys_attachment_stands_between_the_frame_and_a_kept_reply() {
+    let (drive, delivery) = large_allocations_to_a_kept_reply(census_reply_wire(true, true));
+    assert!(
+        drive.is_empty(),
+        "driving the frame allocated {drive:?}; its bytes must stay in the buffer the link read"
+    );
+    assert!(
+        delivery.is_empty(),
+        "delivering the reply allocated {delivery:?}; the reply must hold ranges of that buffer"
+    );
+}
