@@ -1562,6 +1562,16 @@ layer_b_verify_codegen() {
             fi
         fi
     done
+    # R3174 (open-debt item 776, second half) -- the SCE B6 link-emitter audit,
+    # `link_emitter_b6.rs`. It drives the sce-codegen this layer just verified
+    # the freshness of, and it was in NO lane: the job that runs Layer C1 builds
+    # no sce-codegen, so its two tests printed a skip and passed there, and
+    # nothing else named the file. Run here, in the job that builds the binary and
+    # arms WZ_SCE_ORACLE_REQUIRE on this step, an absent or foreign oracle FAILS.
+    # The count is the two tests' own listing (`-- --list --ignored`).
+    _runci_guarded_test "B link_emitter_b6" 2 \
+        cargo test -p wz-integration-tests --test link_emitter_b6 --quiet \
+        -- --ignored || fail=1
     return "$fail"
 }
 
@@ -14752,11 +14762,13 @@ layer_e_ap_demo_round_trip() {
     # E8t's `future-stamp` legs were kept out by their `wz_router` token alone --
     # by name, not by the gate. The helper joined the list in the same round, and
     # every fn in the new file carries this token; Layer E16 owns them.
+    # `sce_b6` -- the two link-emitter tests (`link_emitter_b6.rs`) drive the
+    # vendored sce-codegen, which this job never builds; Layer B owns them.
     (cd crates && cargo test -p wz-integration-tests --quiet -- --ignored \
         --skip wz_e2e_ --skip multicast --skip zenohd --skip wz_router --skip wz_peer \
         --skip wz_storage_host --skip zenoh_ext --skip inert --skip apfull \
         --skip wz_plugin --skip capi_c --skip analyzer --skip zenoh_zget \
-        --skip fs_shared_dir)
+        --skip fs_shared_dir --skip sce_b6)
 }
 
 # ─── Layer E2 — facade-subset behavioural e2e vs zenoh-pico ──────────

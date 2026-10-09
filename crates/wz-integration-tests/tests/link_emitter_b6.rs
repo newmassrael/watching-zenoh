@@ -38,18 +38,21 @@
 //     driver code, and this Layer 3 test stays as the
 //     codegen-side gate next to it.
 //
-// Skip behaviour: if `vendor/sce/target/release/sce-codegen` is
-// not built (developer ran `cargo test` on a fresh clone), the
-// test prints a remediation hint and short-circuits with a
-// pass-with-warning. R63 keeps the test in the always-run set
-// because `scripts/build-sce.sh` is the documented bootstrap;
-// the local-only skip is for first-clone ergonomics, not for
-// CI. Item 776: "CI runs the bootstrap before `cargo test`" was a
-// sentence, not a mechanism -- the job that runs Layer C1 builds no
-// sce-codegen, so there the skip is the ordinary outcome. The skip now
-// goes through `skip_or_fail`, which turns it into a failure wherever
-// `WZ_SCE_ORACLE_REQUIRE` is set; no lane sets it around THIS test yet
-// (see the item's carry), which is why that is stated here.
+// Where it runs. R63 kept these two tests in the always-run set on the
+// sentence "CI runs the bootstrap before `cargo test`". That was a
+// sentence, not a mechanism: the job that runs Layer C1 (`cargo test
+// --workspace`) builds no sce-codegen, so there they printed a skip and
+// passed, and no lane named them -- they have not run in any hosted job
+// since the jobs were split. They are `#[ignore]`d now and owned by Layer
+// B, which runs in the job that builds `vendor/sce/target/release/sce-codegen`
+// and arms `WZ_SCE_ORACLE_REQUIRE` on its step. `scripts/run-ci.sh` selects
+// them with `--ignored` and a count guard, and Layer E's sweep skips them by
+// the `sce_b6` token in their names (they need no pico CLI and no demo).
+//
+// Skip behaviour is kept as the second line behind that lane's own
+// `sce_codegen_ensure`: with the oracle absent a local `--ignored` run prints
+// a remediation hint and passes, and `skip_or_fail` turns the same absence into
+// a failure wherever `WZ_SCE_ORACLE_REQUIRE` is set.
 
 use std::path::PathBuf;
 use std::process::Command;
@@ -72,8 +75,8 @@ fn link_scxml(name: &str) -> PathBuf {
 /// The skip, or a FAILURE when the job that provisions sce-codegen declared it
 /// required. `WZ_SCE_ORACLE_REQUIRE` is the variable `verify-codegen.sh` already
 /// reads for the same oracle, so one switch means one thing across both consumers.
-/// Open-debt item 776: this test sits in the always-run set, so without a door
-/// its skip and its pass are the same line of output.
+/// Open-debt item 776: without a door a skip and a pass are the same line of
+/// output.
 fn skip_or_fail(why: &str) -> Option<String> {
     if std::env::var("WZ_SCE_ORACLE_REQUIRE").is_ok_and(|v| !v.is_empty()) {
         panic!(
@@ -175,6 +178,7 @@ fn assert_b6_tokens(emit: &str, tokens: &[&str]) {
 }
 
 #[test]
+#[ignore = "binary-dep e2e (vendor/sce sce-codegen built by scripts/build-sce.sh); Layer B runs via --ignored"]
 fn r63_sce_b6_link_emitter_emits_expected_c11_shape() {
     let Some(emit) = emit_link_c11("lwip_udp_scout") else {
         return;
@@ -207,6 +211,7 @@ fn r63_sce_b6_link_emitter_emits_expected_c11_shape() {
 // transport frame codec wrapping session-fsm sec 6 outbound 3:
 // init / open / close bodies) where scout uses `scout`.
 #[test]
+#[ignore = "binary-dep e2e (vendor/sce sce-codegen built by scripts/build-sce.sh); Layer B runs via --ignored"]
 fn r311ah_sce_b6_link_emitter_emits_expected_session_c11_shape() {
     let Some(emit) = emit_link_c11("lwip_udp_session") else {
         return;
