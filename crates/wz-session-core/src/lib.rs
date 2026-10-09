@@ -778,6 +778,15 @@ pub mod frame_encode;
 ))]
 pub mod handshake_encode;
 
+/// Item 895 — transport messages written from EXPLICIT fields (every semantic
+/// field set by the caller, every derived byte computed here) and the stream
+/// prefix a link puts in front of them. The session TX path's
+/// `handshake_encode` / `frame_encode` decide things a session decides; this is
+/// the same wire for a caller that decides everything itself. Behind its own
+/// feature because it selects the writers' codecs as a set.
+#[cfg(feature = "transport-compose")]
+pub mod transport_compose;
+
 /// R311y816 — the Open-body `initial_sn` derivation (zenoh `compute_sn`),
 /// the ring origin an OpenSyn / OpenAck announces and the TX counter is
 /// seeded from. Gated on `codec-open-body` alone: it is the Open body's own

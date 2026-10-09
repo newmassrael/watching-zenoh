@@ -1059,6 +1059,64 @@ pub fn build_fragment_wire(
     wire
 }
 
+/// Encode one `T_MID_FRAME` wire frame from its explicit fields: the header
+/// byte (`R` from `reliable`, `Z` iff `ext_qos` is present), `VLE(sn)` written
+/// by the `wz_codecs::frame` codec, the optional `ext_qos`, then `payload`
+/// verbatim.
+///
+/// The Frame twin of `build_fragment_wire`, with the same shape and for the
+/// same reason: a caller that has to SAY every field (the transport build door
+/// in `wz-capture`) must not go through the TX path's `begin_frame`, which is
+/// written for a session that already owns its sequence numbers. This function
+/// takes `sn` and `ext_qos` as given and decides only what is derived from
+/// them: `Z`, and the width of the VLE.
+///
+/// ⚠ It parts from `begin_frame` for `sn >= 2^63`, and says so rather than
+/// matching it. `begin_frame` writes the VLE with a hand-rolled loop that emits
+/// a TENTH byte for such a value; the codec this function calls ends a VLE at
+/// nine bytes, the last carrying eight bits (`SceSink::write_vle_u64`, "1-9
+/// wire bytes. Canonical Zenoh ZInt", and upstream's `vle_len` returns 9 for the
+/// top bucket, `commons/zenoh-codec/src/core/zint.rs:23-52`). Every value the
+/// session TX path can mint is below `2^63` (`sn::mask_from_res(3)`), where the
+/// two agree byte for byte; the test
+/// `build_frame_wire_matches_begin_frame_below_the_widest_ring` holds that,
+/// and `build_frame_wire_writes_the_codecs_nine_byte_vle_for_the_top_bucket`
+/// holds the divergence this paragraph describes.
+///
+/// `ext_qos` is written as `begin_frame` writes it (`write_qos_ext`, never
+/// chained: a Frame carries no other extension), so its presence is the
+/// caller's decision and a DEFAULT priority is written when it is asked for.
+#[cfg(all(feature = "codec-frame", feature = "transport-qos"))]
+pub fn build_frame_wire(
+    sn: u64,
+    payload: &[u8],
+    reliable: bool,
+    ext_qos: Option<Priority>,
+) -> Vec<u8> {
+    let mut flags = frame_flags(reliable);
+    if ext_qos.is_some() {
+        flags |= wire_const::FLAG_T_Z;
+    }
+    // header + the widest VLE + a possible `[0x31][VLE(priority)]`, as
+    // `encode_frame_envelope` reserves.
+    let mut wire = Vec::with_capacity(1 + 10 + 2 + payload.len());
+    wire.push(flags | wire_const::T_MID_FRAME);
+    {
+        // The codec writes `VLE(sn)` and, with an empty payload, nothing else:
+        // the extension has to sit between the two, which is the order the
+        // wire has (`zenoh-codec/src/transport/frame.rs` `FrameHeader` write).
+        let mut sink = VecSink::new(&mut wire);
+        wz_codecs::frame::Frame { sn, payload: &[] }
+            .encode(&mut sink)
+            .expect("VecSink is infallible");
+    }
+    if let Some(priority) = ext_qos {
+        write_qos_ext(&mut wire, priority, false);
+    }
+    wire.extend_from_slice(payload);
+    wire
+}
+
 /// R311ko — terminal framing for one multicast outbound emission: the
 /// already-encoded `T_MID_FRAME` passes through when it fits `mtu`
 /// (the group batch budget, `MulticastParams::batch_size`), else its

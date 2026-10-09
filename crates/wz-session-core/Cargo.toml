@@ -1070,6 +1070,28 @@ dissect = [
 # it does not drag `std` into a no_std profile.
 dissect-serde = ["dissect", "dep:serde"]
 
+# Item 895 — `transport_compose`: transport messages WRITTEN from explicit
+# fields, for a caller that says every field itself (the transport build door
+# of `wz-capture`, behind `wz_dissect_transport_build`).
+#
+# A feature of its own, and not folded into `dissect`, because it is the one
+# thing here that WRITES: `dissect` is the reading side. It selects exactly the
+# codecs and gates the module's writers stand on, and nothing a node's TX path
+# does not already carry: `codec-fragment` + `reassembly` for
+# `build_fragment_wire`, `transport-qos` for the `ext_qos` both `build_*_wire`
+# write, and the four handshake/close/keep-alive/frame codecs.
+transport-compose = [
+    "alloc",
+    "codec-init-body",
+    "codec-open-body",
+    "codec-close",
+    "codec-keep-alive",
+    "codec-frame",
+    "codec-fragment",
+    "reassembly",
+    "transport-qos",
+]
+
 # R311y22b — no [build-dependencies]: the statechart codegen moved to the
 # committed out/wz-session-core/*_sm.rs via the `xtask` codegen SSOT, so this
 # crate has no build script and pulls no sce-codegen toolchain.
