@@ -2396,6 +2396,14 @@ layer_c0_test_discipline() {
     # cannot cover gate 2c, which reads the previous hosted run and no file.
     python3 scripts/lib/hook_gate_boundary_gate.py --selftest || return 1
     python3 scripts/lib/hook_gate_boundary_gate.py --check || return 1
+    # R3149 (open-debt item 897) — the split the two lines above do not look at:
+    # which gates an ORDINARY push runs and which only `WZ_PREPUSH_EXTENDED=1`
+    # does. The hook names ~90 gates and, since 2026-09-23, runs a handful of
+    # them on a plain push; seven hosted runs went red on 2026-10-09 for
+    # tree-only checks the hook named below its policy boundary or not at all.
+    # The table in this gate is what keeps the cheap ones above it.
+    python3 scripts/lib/hook_default_region_gate.py --selftest || return 1
+    python3 scripts/lib/hook_default_region_gate.py || return 1
     # R2463 (open-debt item 695) — pre-push gate 2r's own arms, beside its
     # siblings and for their reason: the gate runs on every push, so the one
     # place it is never exercised is the case it exists to refuse. Its selftest

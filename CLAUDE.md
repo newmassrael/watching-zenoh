@@ -198,7 +198,15 @@ git config core.hooksPath .githooks
   Mandatory gates remain: confidential vocabulary, home paths and identities
   (0/0b/0c), schema and tool pins (1), workspace SSOT validation (2), the
   claim-scoped proof audit (2b), and the previous hosted verdict (2c, without
-  waiting for a running job). The default hook exits after these checks.
+  waiting for a running job). Since open-debt item 897 the default hook also
+  runs the cheap, tree-only checks that hosted CI went red on while the hook
+  stayed green: the upstream-citation form gates (2f, about 11s), the hosted
+  static lanes C0d/C0e/C0f with the count-guard lint (2c2, about 7s), and a
+  one-line count-guard selection report. `scripts/lib/hook_default_region_gate.py`
+  holds that list, with each check's measured seconds and the checks that stay
+  hosted on purpose (Layer U, which needs the network, and the count-guard
+  verdicts, whose cold build measured 473s for one guard). The default hook
+  exits after these checks.
 
   The remaining static gates, feature tests/census, Layer 0, changed-crate
   tests and documentation checks, reduced-feature checks, clippy and workspace

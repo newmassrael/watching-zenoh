@@ -7,9 +7,14 @@
 # checks alone; a prior push took about 90 minutes across the whole hook.
 #
 # Default: gates 0/0b/0c (publication), 1 (schema and tool pin), 2 (SSOT),
-# 2b (claim-scoped proof audit), and 2c (previous hosted verdict, no waiting).
-# Everything after 2c is an OPTIONAL extended local sweep. Hosted run-ci lanes
-# continue to own static analysis, tests, docs, formatting and build matrices.
+# 2b (claim-scoped proof audit), 2c (previous hosted verdict, no waiting), and
+# since item 897 the cheap tree-only checks hosted CI reds on: 2f (upstream
+# citation form, about 11s) and 2c2 (doc-link, inventory-tag and demo-restore
+# lanes, count-guard lint; about 7s), then a one-line count-guard selection
+# report. Everything after the policy boundary is an OPTIONAL extended local
+# sweep. Hosted run-ci lanes continue to own static analysis, tests, docs,
+# formatting and build matrices; `hook_default_region_gate.py` holds which
+# checks sit above the boundary and which are deferred, with the reason.
 # A deferred check is not a local pass. Run the change's focused verification
 # during development; do not automatically repeat the broad sweep at push.
 #
@@ -312,13 +317,193 @@ if ! wz_previous_run_gate "$prev_sha" 'pre-push'; then
     exit 1
 fi
 
+# ─── gate 2f — an upstream citation's FORM, before it is published ──
+# grades: worktree
+#
+# R2549. These two gates already existed and already caught this; what they did
+# NOT do is run anywhere a developer would see them before pushing. Both live on
+# hosted Layer Z, so a malformed citation is discovered a full round late — and
+# that is not a hypothesis: R2546 wrote a bare upstream path, hosted redded, and
+# R2547 and R2548 each shipped more of the same class before the first verdict
+# came back. One defect, three rounds, purely from the length of the loop.
+#
+# Layer C0 is not the answer either: it stops early on this host's `zenohd`
+# oracles, which answer 1.10.0 against a 1.10.1 pin, so these gates sit behind a
+# red that has nothing to do with them.
+#
+# CHEAP, which is what makes them hook material: the anchor gate's FORM arm
+# reads tracked files only (~8s) and the store-reason gate reads the store
+# (~0.5s).
+#
+# R2615 — THE RESOLUTION ARM NOW RUNS HERE TOO, when this machine has the pin.
+# It used to be deferred to Layer Z outright, on a rationale of "cheap and
+# CHECKOUT-FREE", and half of that rationale was never measured: resolving costs
+# 8.82s against the form arm's 8.32s on this tree, so it adds about half a
+# second to a scan the hook already pays for. What is real is availability — a
+# clone need not have a zenoh checkout — and that is a runtime fact, not a
+# reason to never look. `--resolve-if-pinned` resolves when `upstream_root()`
+# answers and PRINTS a form-only notice when it does not, so a machine without
+# the pin still pushes and nobody reads its pass as "every citation resolves".
+#
+# The cost of the old deferral was paid in full: a citation in `session_open.rs`
+# named the link-COMMONS tls module for a host helper that lives in the tls
+# LINK's own utils module, with the signature mis-quoted too — both halves
+# rotted, and the only thing that could see it was Layer Z, which sat behind a
+# seven-deep queue, so the red arrived rounds later attached to a commit that
+# did not cause it. (The two paths are DESCRIBED and not written out: this hook
+# is a tracked file, so spelling them here would add two bare citations to the
+# very count the gate below enforces — measured, at +2 over budget.)
+# Layer Z keeps `--resolve` (there, an absent checkout IS the failure).
+#
+# ITEM 897 — THIS BLOCK NOW SITS ABOVE THE POLICY BOUNDARY, so an ordinary push
+# runs it. It used to sit below: the 2026-09-23 boundary put it behind
+# WZ_PREPUSH_EXTENDED=1, and a capture README that named two upstream source
+# lines without a root then raised the root-less ratchet and reached hosted
+# Layer C0 through a push the hook had gated in every sense except running.
+# Measured on this tree: 10.7s with the pin and 9.9s form-only for the anchor
+# gate, the two siblings under a second together. `hook_default_region_gate.py`
+# (gate 2c2 below) fails when this block drifts back under the boundary.
+if ! python3 scripts/lib/upstream_citation_anchor_gate.py --resolve-if-pinned; then
+    echo "" >&2
+    echo "pre-push: [gate 2f] upstream citation FORM gate FAILED — a citation is" >&2
+    echo "          bare, line-numbered, or missing its root. Write it as" >&2
+    echo "          \`<root-included path>\` @ \`<needle>\`. The halves MAY sit" >&2
+    echo "          on separate comment lines, breaking on either side of the" >&2
+    echo "          \`@\` (R2613); what still reads as bare is a needle with no" >&2
+    echo "          backticks, or a path with no \`@ <needle>\` after it." >&2
+    echo "          Bypass with \`git push --no-verify\` only for genuine hotfixes." >&2
+    exit 1
+fi
+if ! python3 scripts/lib/store_reason_citation_gate.py; then
+    echo "" >&2
+    echo "pre-push: [gate 2f] store-reason citation gate FAILED — an atom reason's" >&2
+    echo "          upstream claim is bare or line-numbered. Same form rule." >&2
+    echo "          Bypass with \`git push --no-verify\` only for genuine hotfixes." >&2
+    exit 1
+fi
+# R2551 — the THIRD gate of the same family, added for a measured reason rather
+# than by analogy. It grades cargo commands WRITTEN DOWN in prose: every feature
+# named in one must exist, and every site declared unresolvable must still be
+# there. R2547 rewrote a lane comment, deleting the quote an exemption existed
+# for, and hosted C0 redded on the orphan.
+#
+# ⚠ AND THE HONEST REASON IT REACHED HOSTED, because the obvious one is wrong:
+# this gate is NOT among the legs Layer C0 loses when it stops early. It sits at
+# run-ci.sh's prose block, ~1000 lines BEFORE `oracle_pin_gate`, and it PASSED in
+# the last local C0 run (which died later, at leg 148 of 166). It reached hosted
+# because C0 is a 166-leg lane nobody runs per change — the same argument that
+# put the two citation gates above into this hook, and the same 0.3s cost.
+if ! python3 scripts/lib/prose_feature_gate.py --check; then
+    echo "" >&2
+    echo "pre-push: [gate 2f] prose-feature gate FAILED — a cargo command written" >&2
+    echo "          down in prose names a feature that does not exist, or a site" >&2
+    echo "          declared unresolvable is gone. Deleting a quoted command means" >&2
+    echo "          deleting the declaration that excused it." >&2
+    echo "          Bypass with \`git push --no-verify\` only for genuine hotfixes." >&2
+    exit 1
+fi
+
+# ─── gate 2c2 — the hosted static checks that read only this tree (item 897) ──
+# grades: worktree
+#
+# Seven hosted runs went red on 2026-10-09 for checks that need nothing except
+# the files the push has already written. Some the hook did not name at all (the
+# doc-link lane C0d, the C0e and C0f lanes, the static half of the count
+# guards); the citation gates it named only below the boundary above, where an
+# ordinary push never reaches (gate 2f now carries them). A push that passes
+# every mandatory gate and then reds on a lane that answers in four seconds
+# locally is not a fast push; it is a slow one whose delay is a hosted round.
+#
+# Each is the hosted LANE itself, not a re-derivation of it, for the reason
+# gate 4 gives: a second copy of a check drifts from the first on the day either
+# moves, and "my flag" has been more lenient than the lane before.
+#
+# MEASURED, one clean-tree run each, load average about 4: Layer C0d 4.8s (its
+# blind-spot arm alone is 0.5s; the rest drives the expander), C0e 1.1s, C0f
+# 0.8s, `count_guard_lint.py` 0.3s, `hook_default_region_gate.py` 0.1s -- about
+# seven seconds beside gate 2f's eleven. UNCONDITIONAL, for gate 2d's reason: a
+# scope predicate is one more thing that can be silently wrong, and these cost
+# less than the predicate would save.
+#
+# WHAT IS NOT HERE, and why, is held by `hook_default_region_gate.py` so that a
+# deferral is a written decision. Layer U needs the network and reds whenever
+# upstream publishes, which no push causes. The count guards' VERDICT needs a
+# cargo target per guard: one cold guard measured 473s. See the report below.
+#
+# `hook_default_region_gate.py` is first because it is the one that notices the
+# others leaving: it fails when any row of its table sits only below the policy
+# boundary, which is where all of them were on the day this gate was written.
+if ! python3 scripts/lib/hook_default_region_gate.py; then
+    echo "" >&2
+    echo "pre-push: [gate 2c2] a check an ordinary push must run is not above the" >&2
+    echo "          policy boundary of this hook (the line above says which)." >&2
+    echo "          Bypass with \`git push --no-verify\` only for genuine hotfixes." >&2
+    exit 1
+fi
+if ! bash scripts/run-ci.sh --layer C0d; then
+    echo "" >&2
+    echo "pre-push: [gate 2c2] hosted Layer C0d failed -- the doc-link dependent" >&2
+    echo "          expansion, or a macro-emitted doc link into another crate." >&2
+    echo "          Bypass with \`git push --no-verify\` only for genuine hotfixes." >&2
+    exit 1
+fi
+if ! bash scripts/run-ci.sh --layer C0e; then
+    echo "" >&2
+    echo "pre-push: [gate 2c2] hosted Layer C0e failed -- the inventory tag reader." >&2
+    echo "          Bypass with \`git push --no-verify\` only for genuine hotfixes." >&2
+    exit 1
+fi
+if ! bash scripts/run-ci.sh --layer C0f; then
+    echo "" >&2
+    echo "pre-push: [gate 2c2] hosted Layer C0f failed -- layer Z restores a demo" >&2
+    echo "          feature set other than the one it opened with." >&2
+    echo "          Bypass with \`git push --no-verify\` only for genuine hotfixes." >&2
+    exit 1
+fi
+if ! python3 scripts/lib/count_guard_lint.py; then
+    echo "" >&2
+    echo "pre-push: [gate 2c2] a run-ci count guard disagrees with the tests on disk." >&2
+    echo "          Move the constant in this commit; the line above names the guard." >&2
+    echo "          Bypass with \`git push --no-verify\` only for genuine hotfixes." >&2
+    exit 1
+fi
+
+# ─── count-guard selection report (NOT a gate, item 897) ────────────
+# It never fails a push: it says how many of run-ci.sh's count guards this push
+# REACHES, because the other half of the class is not decidable in a hook.
+#
+# WHAT THE ORACLE CAN SEE, measured 2026-10-09. `guarded_count_gate.py` parses 435
+# guards and resolves 384; the other 51 assemble part of their command in the
+# shell and are DEFERRED to the hosted lane that owns them, which it prints
+# whenever it runs a guard. The three guards that went red that day -- C1l, C1aq,
+# C1ns -- are all among the 384, so the cause was not the oracle's blindness; it
+# was that nothing ran it. Running it is the cost: the verdict builds one cargo
+# target per guard reached, and a single cold guard measured 473s, against a hook
+# whose ordinary cost is about two minutes. `count_guard_lint.py` (gate 2c2) is
+# the static half, and 187 of the 435 are decidable that way; the rest cannot be
+# decided without a build.
+#
+# So the ordinary push gets the SELECTION (0.1s to 0.3s): a round that added
+# tests is told that its count is unchecked here and can run the one command the
+# line names. `hook_default_region_gate.py` refuses a full run of this gate in
+# the ordinary region. To run the verdict on demand, before the push, while the
+# work is warm:
+#     python3 scripts/lib/guarded_count_gate.py --range origin/main..HEAD
+if [[ -n "$diff_base" ]]; then
+    BX="" python3 scripts/lib/guarded_count_gate.py --range "$diff_base..$local_sha" --count-only || true
+else
+    echo "pre-push: count-guard selection skipped: no diff base (no origin/main)"
+fi
+
 # ─── local sweep policy — owner decision, 2026-09-23 ──────────────
-# This boundary is AFTER every mandatory integrity/publication check and
-# BEFORE any corpus-wide static sweep or cargo build. Exact opt-in only.
+# This boundary is AFTER every mandatory integrity/publication check, the cheap
+# tree-only checks of gates 2f and 2c2, and the count-guard report, and BEFORE
+# any corpus-wide static sweep or cargo build. Exact opt-in only.
 if [[ "${WZ_PREPUSH_EXTENDED:-0}" != "1" ]]; then
     echo "pre-push: mandatory publication, pin and SSOT checks passed."
     echo "pre-push: DEFERRED to hosted CI: corpus static gates, feature tests,"
-    echo "          formatting, changed-crate tests/docs and workspace builds."
+    echo "          formatting, changed-crate tests/docs, count-guard verdicts,"
+    echo "          Layer U and workspace builds."
     echo "pre-push: optional local sweep: WZ_PREPUSH_EXTENDED=1 git push origin main"
     exit 0
 fi
@@ -416,83 +601,6 @@ if ! python3 scripts/lib/attachment_capacity_witness_gate.py; then
     echo "          mirror of the codegen capacity has drifted from it. The" >&2
     echo "          lines above name WHICH; a carrier without a witness is not" >&2
     echo "          a missing test so much as an unproven parity claim." >&2
-    echo "          Bypass with \`git push --no-verify\` only for genuine hotfixes." >&2
-    exit 1
-fi
-
-# ─── gate 2f — an upstream citation's FORM, before it is published ──
-# grades: worktree
-#
-# R2549. These two gates already existed and already caught this; what they did
-# NOT do is run anywhere a developer would see them before pushing. Both live on
-# hosted Layer Z, so a malformed citation is discovered a full round late — and
-# that is not a hypothesis: R2546 wrote a bare upstream path, hosted redded, and
-# R2547 and R2548 each shipped more of the same class before the first verdict
-# came back. One defect, three rounds, purely from the length of the loop.
-#
-# Layer C0 is not the answer either: it stops early on this host's `zenohd`
-# oracles, which answer 1.10.0 against a 1.10.1 pin, so these gates sit behind a
-# red that has nothing to do with them.
-#
-# CHEAP, which is what makes them hook material: the anchor gate's FORM arm
-# reads tracked files only (~8s) and the store-reason gate reads the store
-# (~0.5s).
-#
-# R2615 — THE RESOLUTION ARM NOW RUNS HERE TOO, when this machine has the pin.
-# It used to be deferred to Layer Z outright, on a rationale of "cheap and
-# CHECKOUT-FREE", and half of that rationale was never measured: resolving costs
-# 8.82s against the form arm's 8.32s on this tree, so it adds about half a
-# second to a scan the hook already pays for. What is real is availability — a
-# clone need not have a zenoh checkout — and that is a runtime fact, not a
-# reason to never look. `--resolve-if-pinned` resolves when `upstream_root()`
-# answers and PRINTS a form-only notice when it does not, so a machine without
-# the pin still pushes and nobody reads its pass as "every citation resolves".
-#
-# The cost of the old deferral was paid in full: a citation in `session_open.rs`
-# named the link-COMMONS tls module for a host helper that lives in the tls
-# LINK's own utils module, with the signature mis-quoted too — both halves
-# rotted, and the only thing that could see it was Layer Z, which sat behind a
-# seven-deep queue, so the red arrived rounds later attached to a commit that
-# did not cause it. (The two paths are DESCRIBED and not written out: this hook
-# is a tracked file, so spelling them here would add two bare citations to the
-# very count the gate below enforces — measured, at +2 over budget.)
-# Layer Z keeps `--resolve` (there, an absent checkout IS the failure).
-if ! python3 scripts/lib/upstream_citation_anchor_gate.py --resolve-if-pinned; then
-    echo "" >&2
-    echo "pre-push: [gate 2f] upstream citation FORM gate FAILED — a citation is" >&2
-    echo "          bare, line-numbered, or missing its root. Write it as" >&2
-    echo "          \`<root-included path>\` @ \`<needle>\`. The halves MAY sit" >&2
-    echo "          on separate comment lines, breaking on either side of the" >&2
-    echo "          \`@\` (R2613); what still reads as bare is a needle with no" >&2
-    echo "          backticks, or a path with no \`@ <needle>\` after it." >&2
-    echo "          Bypass with \`git push --no-verify\` only for genuine hotfixes." >&2
-    exit 1
-fi
-if ! python3 scripts/lib/store_reason_citation_gate.py; then
-    echo "" >&2
-    echo "pre-push: [gate 2f] store-reason citation gate FAILED — an atom reason's" >&2
-    echo "          upstream claim is bare or line-numbered. Same form rule." >&2
-    echo "          Bypass with \`git push --no-verify\` only for genuine hotfixes." >&2
-    exit 1
-fi
-# R2551 — the THIRD gate of the same family, added for a measured reason rather
-# than by analogy. It grades cargo commands WRITTEN DOWN in prose: every feature
-# named in one must exist, and every site declared unresolvable must still be
-# there. R2547 rewrote a lane comment, deleting the quote an exemption existed
-# for, and hosted C0 redded on the orphan.
-#
-# ⚠ AND THE HONEST REASON IT REACHED HOSTED, because the obvious one is wrong:
-# this gate is NOT among the legs Layer C0 loses when it stops early. It sits at
-# run-ci.sh's prose block, ~1000 lines BEFORE `oracle_pin_gate`, and it PASSED in
-# the last local C0 run (which died later, at leg 148 of 166). It reached hosted
-# because C0 is a 166-leg lane nobody runs per change — the same argument that
-# put the two citation gates above into this hook, and the same 0.3s cost.
-if ! python3 scripts/lib/prose_feature_gate.py --check; then
-    echo "" >&2
-    echo "pre-push: [gate 2f] prose-feature gate FAILED — a cargo command written" >&2
-    echo "          down in prose names a feature that does not exist, or a site" >&2
-    echo "          declared unresolvable is gone. Deleting a quoted command means" >&2
-    echo "          deleting the declaration that excused it." >&2
     echo "          Bypass with \`git push --no-verify\` only for genuine hotfixes." >&2
     exit 1
 fi
