@@ -352,8 +352,21 @@ jobs:
         run: rustup show
 
       - name: Cache Cargo registry + build artifacts
+        # THE workspace dependency cache for the Linux feature-set jobs (class
+        # `rust-ci` in .github/cache-classes.json). This job is its only SAVER;
+        # nondefault, defaults-off, dissect, interop, feature-gates, the peel,
+        # routing-adminspace, transport-modes and isolated-crates restore it
+        # with `save-if: false`. The old arrangement gave every job its own key
+        # because several parallel SAVERS thrash one shared key; one saver and
+        # many readers does not. Measured 2026-10-09: 21 private entries of
+        # 60-830 MB held the repository at 10.8 GB against a 10 GB cap, and
+        # eviction took the RocksDB engine with it. `shared-key: ci` spells the
+        # key this job already used, so the move costs no cold run.
         uses: Swatinem/rust-cache@v2
         with:
+          shared-key: ci
+          add-job-id-key: "false"
+          save-if: ${{ github.ref == 'refs/heads/main' }}
           workspaces: |
             crates -> target
             vendor/sce -> target
@@ -698,7 +711,7 @@ jobs:
         # AFTER the second apt step, not the first: this job installs twice and
         # a save placed between them would carry only half the archive, then sit
         # on a key nothing updates. See the `feature-gates` copy for the rest.
-        if: always() && env.WZ_APT_CACHE_DIRTY == 'true'
+        if: always() && github.ref == 'refs/heads/main' && env.WZ_APT_CACHE_DIRTY == 'true'
         uses: actions/cache/save@v4
         with:
           path: ~/.cache/wz-apt
@@ -877,15 +890,18 @@ jobs:
         run: rustup show
 
       - name: Cache Cargo registry + build artifacts
-        # Distinct key from `ci` — this job's build set (sce-codegen +
-        # xtask) differs, and a shared key across differing sets thrashes
-        # (same reason footprint / interop carry their own keys).
+        # A READER of `codegen-verify`'s entry (class `rust-codegen-verify`):
+        # this job builds the same sce-codegen + xtask set, so it restores that
+        # entry and never saves. Its own 95 MB entry saved a few minutes and was
+        # one more key to rewrite on every manifest change.
         uses: Swatinem/rust-cache@v2
         with:
+          shared-key: codegen-verify
+          add-job-id-key: "false"
+          save-if: "false"
           workspaces: |
             crates -> target
             vendor/sce -> target
-          key: validate-codegen
 
       - name: Install protoc (mnemosyne-server build-script dep)
         run: bash scripts/lib/apt-install.sh protobuf-compiler
@@ -893,7 +909,7 @@ jobs:
       - name: Save apt archives
         # AFTER the second apt step, for the reason the first one records.
         # See the `feature-gates` copy for why `always()` and why the dirty gate.
-        if: always() && env.WZ_APT_CACHE_DIRTY == 'true'
+        if: always() && github.ref == 'refs/heads/main' && env.WZ_APT_CACHE_DIRTY == 'true'
         uses: actions/cache/save@v4
         with:
           path: ~/.cache/wz-apt
@@ -1145,7 +1161,7 @@ jobs:
       - name: Save apt archives
         # One install in this job, so the save sits right after it. `always()` and
         # the dirty gate are explained on the `feature-gates` copy.
-        if: always() && env.WZ_APT_CACHE_DIRTY == 'true'
+        if: always() && github.ref == 'refs/heads/main' && env.WZ_APT_CACHE_DIRTY == 'true'
         uses: actions/cache/save@v4
         with:
           path: ~/.cache/wz-apt
@@ -1155,15 +1171,18 @@ jobs:
         run: rustup show
 
       - name: Cache Cargo registry + build artifacts
-        # Distinct key, as `validate-codegen` had: this job's build set is
-        # sce-codegen + xtask + what Layer B compiles, and a shared key across
-        # differing sets thrashes.
+        # The SAVER of class `rust-codegen-verify`: this job's build set is
+        # sce-codegen + xtask + what Layer B compiles, a set `ci` does not
+        # build, so it keeps its own entry (warm saves about 6 of 17 minutes).
+        # validate-codegen and cross-mcu build the same set and only READ it.
         uses: Swatinem/rust-cache@v2
         with:
+          shared-key: codegen-verify
+          add-job-id-key: "false"
+          save-if: ${{ github.ref == 'refs/heads/main' }}
           workspaces: |
             crates -> target
             vendor/sce -> target
-          key: codegen-verify
 
       - name: Build sce-codegen (vendor/sce)
         run: bash scripts/build-sce.sh
@@ -1287,7 +1306,7 @@ jobs:
 
       - name: Save apt archives
         # See the `feature-gates` copy for why `always()` and why the dirty gate.
-        if: always() && env.WZ_APT_CACHE_DIRTY == 'true'
+        if: always() && github.ref == 'refs/heads/main' && env.WZ_APT_CACHE_DIRTY == 'true'
         uses: actions/cache/save@v4
         with:
           path: ~/.cache/wz-apt
@@ -1297,14 +1316,17 @@ jobs:
         run: rustup show
 
       - name: Cache Cargo registry + build artifacts
-        # Its OWN key, for the reason footprint and interop carry one: parallel
-        # jobs must not race a single cache save. This lane's tree is the
+        # Its OWN key: this lane's build set differs from every other job's, so
+        # nothing can read its entry and it reads nobody's. Its tree is the
         # ordinary `crates/target`, so the build half is a real saving here
         # (unlike footprint's, which builds into per-lane target dirs).
+        # Class `rust-verdict-legs`: a cold run takes 23 of its 30 minutes and
+        # the entry is 121 MB, so it stays a private saver.
         uses: Swatinem/rust-cache@v2
         with:
           workspaces: crates -> target
           key: verdict-legs
+          save-if: ${{ github.ref == 'refs/heads/main' }}
 
       - name: Layer C0mut — every verdict leg is load-bearing
         # R311y726 (N14) — severs each `VerdictReason` leg in turn and requires
@@ -1395,7 +1417,7 @@ jobs:
             cmake libclang-dev clang perl pkg-config
 
       - name: Save apt archives
-        if: always() && env.WZ_APT_CACHE_DIRTY == 'true'
+        if: always() && github.ref == 'refs/heads/main' && env.WZ_APT_CACHE_DIRTY == 'true'
         uses: actions/cache/save@v4
         with:
           path: ~/.cache/wz-apt
@@ -1405,12 +1427,15 @@ jobs:
         run: rustup show
 
       - name: Cache Cargo registry + build artifacts
-        # Its OWN key, for the reason footprint, interop and verdict-legs carry
-        # one: parallel jobs must not race a single cache save.
+        # A READER of the `ci` job's entry (class `rust-ci`): it restores and
+        # never saves. A private entry saved about 1.5 of 18 minutes for 400+ MB
+        # and was rewritten on every manifest change.
         uses: Swatinem/rust-cache@v2
         with:
+          shared-key: ci
+          add-job-id-key: "false"
+          save-if: "false"
           workspaces: crates -> target
-          key: nondefault
 
       - name: Reuse the RocksDB native engine across feature sets
         uses: ./.github/actions/rocksdb-engine
@@ -1553,7 +1578,7 @@ jobs:
           bash scripts/lib/apt-install.sh cmake libclang-dev clang perl pkg-config
 
       - name: Save apt archives
-        if: always() && env.WZ_APT_CACHE_DIRTY == 'true'
+        if: always() && github.ref == 'refs/heads/main' && env.WZ_APT_CACHE_DIRTY == 'true'
         uses: actions/cache/save@v4
         with:
           path: ~/.cache/wz-apt
@@ -1563,13 +1588,13 @@ jobs:
         run: rustup show
 
       - name: Cache Cargo registry + build artifacts
-        # Its OWN key, for the reason footprint, interop, verdict-legs and
-        # nondefault each carry one: parallel jobs must not race a single
-        # cache save.
+        # A READER of the `ci` job's entry (class `rust-ci`); see there.
         uses: Swatinem/rust-cache@v2
         with:
+          shared-key: ci
+          add-job-id-key: "false"
+          save-if: "false"
           workspaces: crates -> target
-          key: defaults-off
 
       - name: Layer C0 — binary-dep test #[ignore] discipline
         # R235-hotfix — pre-flight scan: any wz-integration-tests
@@ -1710,7 +1735,7 @@ jobs:
             libpcap-dev netbase protobuf-compiler libprotobuf-dev
 
       - name: Save apt archives
-        if: always() && env.WZ_APT_CACHE_DIRTY == 'true'
+        if: always() && github.ref == 'refs/heads/main' && env.WZ_APT_CACHE_DIRTY == 'true'
         uses: actions/cache/save@v4
         with:
           path: ~/.cache/wz-apt
@@ -1720,12 +1745,15 @@ jobs:
         run: rustup show
 
       - name: Cache Cargo registry + build artifacts
-        # Its OWN key, for the reason footprint, interop, verdict-legs and
-        # nondefault carry one: parallel jobs must not race a single cache save.
+        # A READER of the `ci` job's entry (class `rust-ci`); see there. Warm
+        # saved about 5 of 18 minutes for a 700 MB private entry; cold plus a
+        # cold engine is about 23 of 30 minutes, inside the 90 percent alarm.
         uses: Swatinem/rust-cache@v2
         with:
+          shared-key: ci
+          add-job-id-key: "false"
+          save-if: "false"
           workspaces: crates -> target
-          key: dissect
 
       - name: Reuse the RocksDB native engine across feature sets
         uses: ./.github/actions/rocksdb-engine
@@ -1879,7 +1907,7 @@ jobs:
 
       - name: Save apt archives
         # See the `feature-gates` copy for why `always()` and why the dirty gate.
-        if: always() && env.WZ_APT_CACHE_DIRTY == 'true'
+        if: always() && github.ref == 'refs/heads/main' && env.WZ_APT_CACHE_DIRTY == 'true'
         uses: actions/cache/save@v4
         with:
           path: ~/.cache/wz-apt
@@ -1901,12 +1929,15 @@ jobs:
         # a COLD number and stays one; the R311y388 shard split, not a cache, is
         # what bought the headroom. Caching that tree is a separate question with
         # its own risk (this is the gate that measures bytes) and is not bundled
-        # in here. Per-shard `key` so the parallel matrix jobs don't race one
-        # cache save (same reason `interop` carries a distinct key).
+        # in here. The registry is the same for every shard, so ONE key
+        # (class `rust-footprint`) is saved by shard 0 only and read by all four;
+        # four private entries held the same bytes four times.
         uses: Swatinem/rust-cache@v2
         with:
+          shared-key: footprint
+          add-job-id-key: "false"
+          save-if: ${{ github.ref == 'refs/heads/main' && matrix.shard == 0 }}
           workspaces: crates -> target
-          key: footprint-shard-${{ matrix.shard }}
 
       - name: Layer F — codec-footprint catalog truthfulness gate
         # R311pt — F is host-only (python3 + cargo; no cross-toolchain).
@@ -2005,7 +2036,7 @@ jobs:
 
       - name: Save apt archives
         # See the `feature-gates` copy for why `always()` and why the dirty gate.
-        if: always() && env.WZ_APT_CACHE_DIRTY == 'true'
+        if: always() && github.ref == 'refs/heads/main' && env.WZ_APT_CACHE_DIRTY == 'true'
         uses: actions/cache/save@v4
         with:
           path: ~/.cache/wz-apt
@@ -2049,12 +2080,18 @@ jobs:
         # ONE entry covers every future oracle because `oracles/` is a workspace
         # with a shared target dir. A per-project line would have needed editing
         # for each new oracle, which is the kind of rule that rots silently.
+        #
+        # Class `rust-interop`: a private SAVER, and the reason is on the page
+        # above. The measured entry is 968 MB under its own environment hash (this
+        # job installs a second toolchain), so the `ci` entry cannot stand in for
+        # it and the oracle tree is exactly what a cold run rebuilds.
         uses: Swatinem/rust-cache@v2
         with:
           workspaces: |
             crates -> target
             oracles -> target
           key: interop
+          save-if: ${{ github.ref == 'refs/heads/main' }}
 
       - name: Reuse the RocksDB native engine across feature sets
         uses: ./.github/actions/rocksdb-engine
@@ -2212,7 +2249,7 @@ jobs:
         # green": a build that is not at the pin, or is missing the plugin or
         # the source tree, must never become the entry every later run
         # restores. Same paths and the same key as the restore.
-        if: always() && steps.zenohd-cache.outputs.cache-hit != 'true' && steps.zenohd-assert.outcome == 'success'
+        if: always() && github.ref == 'refs/heads/main' && steps.zenohd-cache.outputs.cache-hit != 'true' && steps.zenohd-assert.outcome == 'success'
         uses: actions/cache/save@v4
         with:
           path: |
@@ -2274,7 +2311,7 @@ jobs:
         run: bash scripts/install-zenoh-c.sh
 
       - name: Save the zenoh-c oracle (cache miss only)
-        if: always() && steps.zenoh-c-cache.outputs.cache-hit != 'true' && steps.zenoh-c-provision.outcome == 'success'
+        if: always() && github.ref == 'refs/heads/main' && steps.zenoh-c-cache.outputs.cache-hit != 'true' && steps.zenoh-c-provision.outcome == 'success'
         uses: actions/cache/save@v4
         with:
           path: |
@@ -2675,7 +2712,7 @@ jobs:
         # Gated on the ANSWERS-at-the-pin check, not on the build: that check
         # rebuilds a poisoned restore, and only its success says the binary is
         # the one this key names.
-        if: always() && steps.zenohd-unixpipe-cache.outputs.cache-hit != 'true' && steps.zenohd-unixpipe-ensure.outcome == 'success'
+        if: always() && github.ref == 'refs/heads/main' && steps.zenohd-unixpipe-cache.outputs.cache-hit != 'true' && steps.zenohd-unixpipe-ensure.outcome == 'success'
         uses: actions/cache/save@v4
         with:
           path: target/zenohd-unixpipe
@@ -2740,7 +2777,7 @@ jobs:
 
       - name: Save the vsock-enabled zenohd (cache miss only)
         # The unixpipe save's twin, gated on this variant's own pin check.
-        if: always() && steps.zenohd-vsock-cache.outputs.cache-hit != 'true' && steps.zenohd-vsock-ensure.outcome == 'success'
+        if: always() && github.ref == 'refs/heads/main' && steps.zenohd-vsock-cache.outputs.cache-hit != 'true' && steps.zenohd-vsock-ensure.outcome == 'success'
         uses: actions/cache/save@v4
         with:
           path: target/zenohd-vsock
@@ -2940,7 +2977,7 @@ jobs:
         # See the `feature-gates` copy. This is the job the gate matters MOST
         # for: ~135 MB, which at the measured 27 kB/s is past its own
         # `timeout-minutes`, so it can only ever arrive across several runs.
-        if: always() && env.WZ_APT_CACHE_DIRTY == 'true'
+        if: always() && github.ref == 'refs/heads/main' && env.WZ_APT_CACHE_DIRTY == 'true'
         uses: actions/cache/save@v4
         with:
           path: ~/.cache/wz-apt
@@ -2955,13 +2992,10 @@ jobs:
         # would report green having measured nothing. See the `ci` job's step.
         run: rustup show
 
-      - name: Cache Cargo registry + build artifacts
-        uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: |
-            crates -> target
-            vendor/sce -> target
-
+      # No rust-cache in this job (it had a private 303 MB entry). Measured over
+      # 18 runs a warm entry saved about one minute of a 13 minute job whose
+      # budget is 45; the bytes are better spent on the entries that save
+      # five to nine (.github/cache-classes.json).
       - name: Build sce-codegen (vendor/sce)
         run: bash scripts/build-sce.sh
 
@@ -3094,7 +3128,7 @@ jobs:
 
       - name: Save apt archives
         # See the `feature-gates` copy for why `always()` and why the dirty gate.
-        if: always() && env.WZ_APT_CACHE_DIRTY == 'true'
+        if: always() && github.ref == 'refs/heads/main' && env.WZ_APT_CACHE_DIRTY == 'true'
         uses: actions/cache/save@v4
         with:
           path: ~/.cache/wz-apt
@@ -3246,7 +3280,7 @@ jobs:
       - name: Save Zephyr workspace + SDK cache
         # Save ONLY on a cache miss AND only after provision+verify succeeded
         # (success()) — a failed/partial provision never writes the cache key.
-        if: success() && steps.zephyr-cache.outputs.cache-hit != 'true'
+        if: success() && github.ref == 'refs/heads/main' && steps.zephyr-cache.outputs.cache-hit != 'true'
         uses: actions/cache/save@v4
         with:
           path: |
@@ -3264,8 +3298,10 @@ jobs:
           key: zephyr-${{ env.ZEPHYR_REF }}-sdk-${{ env.ZEPHYR_SDK_VERSION }}-py${{ steps.setuppy.outputs.python-version }}-v4
 
       - name: Cache Cargo registry + build artifacts
+        # Class `rust-zephyr` (two private entries, 109 and 60 MB).
         uses: Swatinem/rust-cache@v2
         with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
           workspaces: |
             deploy/zephyr-app/rust -> target
             deploy/zephyr-admin-node/rust -> target
@@ -3352,7 +3388,7 @@ jobs:
             qemu-system-arm xz-utils
 
       - name: Save apt archives
-        if: always() && env.WZ_APT_CACHE_DIRTY == 'true'
+        if: always() && github.ref == 'refs/heads/main' && env.WZ_APT_CACHE_DIRTY == 'true'
         uses: actions/cache/save@v4
         with:
           path: ~/.cache/wz-apt
@@ -3416,7 +3452,7 @@ jobs:
           echo "Zephyr provisioning verified (venv RUNS + zephyr tree + SDK arm toolchain)."
 
       - name: Save Zephyr workspace + SDK cache
-        if: success() && steps.zephyr-cache.outputs.cache-hit != 'true'
+        if: success() && github.ref == 'refs/heads/main' && steps.zephyr-cache.outputs.cache-hit != 'true'
         uses: actions/cache/save@v4
         with:
           path: |
@@ -3426,8 +3462,10 @@ jobs:
           key: zephyr-${{ env.ZEPHYR_REF }}-sdk-${{ env.ZEPHYR_SDK_VERSION }}-py${{ steps.setuppy.outputs.python-version }}-v4
 
       - name: Cache Cargo registry + build artifacts
+        # Class `rust-zephyr`, as in the `zephyr-mcu` job.
         uses: Swatinem/rust-cache@v2
         with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
           workspaces: |
             deploy/zephyr-admin-node/rust -> target
 
@@ -3643,7 +3681,7 @@ jobs:
         # per job per run into a 10 GB repo-wide cap and evict the Rust caches.
         # The run_id suffix makes each save a NEW entry: saving under a key that
         # already exists is a no-op, which would freeze a partial archive forever.
-        if: always() && env.WZ_APT_CACHE_DIRTY == 'true'
+        if: always() && github.ref == 'refs/heads/main' && env.WZ_APT_CACHE_DIRTY == 'true'
         uses: actions/cache/save@v4
         with:
           path: ~/.cache/wz-apt
@@ -3655,8 +3693,12 @@ jobs:
         run: rustup show
 
       - name: Cache Cargo registry + build artifacts
+        # A READER of the `ci` job's entry (class `rust-ci`); see there.
         uses: Swatinem/rust-cache@v2
         with:
+          shared-key: ci
+          add-job-id-key: "false"
+          save-if: "false"
           workspaces: |
             crates -> target
             vendor/sce -> target
@@ -4101,7 +4143,7 @@ jobs:
 
       - name: Save apt archives
         # See the `feature-gates` copy for why `always()` and why the dirty gate.
-        if: always() && env.WZ_APT_CACHE_DIRTY == 'true'
+        if: always() && github.ref == 'refs/heads/main' && env.WZ_APT_CACHE_DIRTY == 'true'
         uses: actions/cache/save@v4
         with:
           path: ~/.cache/wz-apt
@@ -4111,15 +4153,16 @@ jobs:
         run: rustup show
 
       - name: Cache Cargo registry + build artifacts
-        # Its OWN key: parallel jobs must not race one cache save, the same
-        # reason footprint, interop, verdict-legs and routing-adminspace each
-        # carry one.
+        # A READER of the `ci` job's entry (class `rust-ci`); see there. A
+        # private 418 MB entry saved under a minute of a 13 minute job.
         uses: Swatinem/rust-cache@v2
         with:
+          shared-key: ci
+          add-job-id-key: "false"
+          save-if: "false"
           workspaces: |
             crates -> target
             vendor/sce -> target
-          key: feature-gates-peel
 
       # Hosted R311y332, and it is the parent job's doctrine applied to the
       # lane that needed it most. C1j is the BEHAVIOURAL half of the
@@ -4274,7 +4317,7 @@ jobs:
 
       - name: Save apt archives
         # See the `feature-gates` copy for why `always()` and why the dirty gate.
-        if: always() && env.WZ_APT_CACHE_DIRTY == 'true'
+        if: always() && github.ref == 'refs/heads/main' && env.WZ_APT_CACHE_DIRTY == 'true'
         uses: actions/cache/save@v4
         with:
           path: ~/.cache/wz-apt
@@ -4284,12 +4327,13 @@ jobs:
         run: rustup show
 
       - name: Cache Cargo registry + build artifacts
-        # Its OWN key: parallel jobs must not race one cache save, the same
-        # reason footprint, interop and verdict-legs each carry one.
+        # A READER of the `ci` job's entry (class `rust-ci`); see there.
         uses: Swatinem/rust-cache@v2
         with:
+          shared-key: ci
+          add-job-id-key: "false"
+          save-if: "false"
           workspaces: crates -> target
-          key: routing-adminspace
 
       - name: Layer C1w — routing-accept multi-peer accept + quic/datagram mesh pins
         run: bash scripts/run-ci.sh --layer C1w
@@ -4524,7 +4568,7 @@ jobs:
         # per job per run into a 10 GB repo-wide cap and evict the Rust caches.
         # The run_id suffix makes each save a NEW entry: saving under a key that
         # already exists is a no-op, which would freeze a partial archive forever.
-        if: always() && env.WZ_APT_CACHE_DIRTY == 'true'
+        if: always() && github.ref == 'refs/heads/main' && env.WZ_APT_CACHE_DIRTY == 'true'
         uses: actions/cache/save@v4
         with:
           path: ~/.cache/wz-apt
@@ -4534,8 +4578,12 @@ jobs:
         run: rustup show
 
       - name: Cache Cargo registry + build artifacts
+        # A READER of the `ci` job's entry (class `rust-ci`); see there.
         uses: Swatinem/rust-cache@v2
         with:
+          shared-key: ci
+          add-job-id-key: "false"
+          save-if: "false"
           workspaces: |
             crates -> target
             vendor/sce -> target
@@ -4739,7 +4787,7 @@ jobs:
         # per job per run into a 10 GB repo-wide cap and evict the Rust caches.
         # The run_id suffix makes each save a NEW entry: saving under a key that
         # already exists is a no-op, which would freeze a partial archive forever.
-        if: always() && env.WZ_APT_CACHE_DIRTY == 'true'
+        if: always() && github.ref == 'refs/heads/main' && env.WZ_APT_CACHE_DIRTY == 'true'
         uses: actions/cache/save@v4
         with:
           path: ~/.cache/wz-apt
@@ -4749,8 +4797,12 @@ jobs:
         run: rustup show
 
       - name: Cache Cargo registry + build artifacts
+        # Class `rust-isolated-crates`: a private SAVER. Of every job it has the
+        # largest measured payback (about 9 of 23 minutes cold, against a 30
+        # minute ceiling), which is what earns a 776 MB entry its place.
         uses: Swatinem/rust-cache@v2
         with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
           workspaces: |
             crates -> target
             vendor/sce -> target
@@ -4913,7 +4965,7 @@ jobs:
 
       - name: Save apt archives
         # See the `feature-gates` copy for why `always()` and why the dirty gate.
-        if: always() && env.WZ_APT_CACHE_DIRTY == 'true'
+        if: always() && github.ref == 'refs/heads/main' && env.WZ_APT_CACHE_DIRTY == 'true'
         uses: actions/cache/save@v4
         with:
           path: ~/.cache/wz-apt
@@ -4953,7 +5005,7 @@ jobs:
         run: bash scripts/install-zenoh-c.sh
 
       - name: Save the zenoh-c oracle (cache miss only)
-        if: always() && steps.zenoh-c-cache.outputs.cache-hit != 'true' && steps.zenoh-c-provision.outcome == 'success'
+        if: always() && github.ref == 'refs/heads/main' && steps.zenoh-c-cache.outputs.cache-hit != 'true' && steps.zenoh-c-provision.outcome == 'success'
         uses: actions/cache/save@v4
         with:
           path: |
@@ -5002,7 +5054,7 @@ jobs:
         run: bash scripts/install-zenoh-c-arm.sh unstable
 
       - name: Save the unstable-arm zenoh-c oracle (cache miss only)
-        if: always() && steps.zenoh-c-unstable-cache.outputs.cache-hit != 'true' && steps.zenoh-c-unstable-provision.outcome == 'success'
+        if: always() && github.ref == 'refs/heads/main' && steps.zenoh-c-unstable-cache.outputs.cache-hit != 'true' && steps.zenoh-c-unstable-provision.outcome == 'success'
         uses: actions/cache/save@v4
         with:
           path: target/zenoh-c-unstable
@@ -5025,8 +5077,14 @@ jobs:
           key: capi-c-opaque-1.10.1-ubuntu-22.04-${{ hashFiles('scripts/check-capi-c-opaque-arms.sh') }}
 
       - name: Cache Cargo registry + build artifacts
+        # Class `rust-capi-c-arms`: a private SAVER (about 8 of 32 minutes cold
+        # for 314 MB, the best ratio of any entry). It carries its own
+        # rust-cache environment hash, so no other job could read it anyway.
         uses: Swatinem/rust-cache@v2
         with:
+          shared-key: capi-c-arms
+          add-job-id-key: "false"
+          save-if: ${{ github.ref == 'refs/heads/main' }}
           workspaces: |
             crates -> target
 
@@ -5059,7 +5117,7 @@ jobs:
         # genuine ABI mismatch also withholds the save, and the next run pays the
         # four arm builds again. That is the conservative side of the choice; the
         # other side is restoring a table no run has shown to be complete.
-        if: always() && steps.capi-c-arms-cache.outputs.cache-hit != 'true' && steps.capi-c-arms.outcome == 'success'
+        if: always() && github.ref == 'refs/heads/main' && steps.capi-c-arms-cache.outputs.cache-hit != 'true' && steps.capi-c-arms.outcome == 'success'
         uses: actions/cache/save@v4
         with:
           path: target/zenoh-c-opaque/*.stderr
@@ -5273,7 +5331,7 @@ jobs:
 
       - name: Save apt archives
         # See the `feature-gates` copy for why `always()` and why the dirty gate.
-        if: always() && env.WZ_APT_CACHE_DIRTY == 'true'
+        if: always() && github.ref == 'refs/heads/main' && env.WZ_APT_CACHE_DIRTY == 'true'
         uses: actions/cache/save@v4
         with:
           path: ~/.cache/wz-apt
@@ -5282,17 +5340,11 @@ jobs:
       - name: Install Rust toolchain (pinned by rust-toolchain.toml)
         run: rustup show
 
-      - name: Cache Cargo registry + build artifacts
-        # Its OWN key, on the same reasoning validate-codegen and interop carry
-        # theirs: this job's build set is the demo binary under four different
-        # feature combinations, which is not the `ci` job's set, and a shared key
-        # across differing sets thrashes.
-        uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: |
-            crates -> target
-          key: e2e-demo
-
+      # No rust-cache in this job, deliberately. Over 18 runs it was 9.0 minutes
+      # with a warm private entry and 9.5 without, against an 11 minute budget
+      # whose margin alarm sits at 9.9: a 628 MB restore costs 15-25 s of that
+      # and buys less than it costs, and the 700 MB entry was one of the six the
+      # cap had already evicted. The RocksDB engine below is the large term.
       - name: Reuse the RocksDB native engine across feature sets
         uses: ./.github/actions/rocksdb-engine
 
@@ -5442,7 +5494,7 @@ jobs:
 
       - name: Save apt archives
         # See the `feature-gates` copy for why `always()` and why the dirty gate.
-        if: always() && env.WZ_APT_CACHE_DIRTY == 'true'
+        if: always() && github.ref == 'refs/heads/main' && env.WZ_APT_CACHE_DIRTY == 'true'
         uses: actions/cache/save@v4
         with:
           path: ~/.cache/wz-apt
@@ -5451,15 +5503,7 @@ jobs:
       - name: Install Rust toolchain (pinned by rust-toolchain.toml)
         run: rustup show
 
-      - name: Cache Cargo registry + build artifacts
-        # Its OWN key: parallel jobs must not race one cache save, the same
-        # reason `e2e-demo` and its siblings each carry one.
-        uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: |
-            crates -> target
-          key: e2e-demo-pico
-
+      # No rust-cache in this job, for the reason `e2e-demo` records.
       - name: Reuse the RocksDB native engine across feature sets
         uses: ./.github/actions/rocksdb-engine
 
@@ -5506,8 +5550,17 @@ jobs:
         run: rustup show
 
       - name: Cache Cargo registry + build artifacts
+        # A READER of class `rust-host-workspace` (one entry per host: the host
+        # is part of the rust-cache key). The Platform workflow's `leg` job is
+        # its only saver, with `cache-on-failure`, so a red lane still leaves a
+        # warm entry for the next diagnostic run. This job, `leg` and `capi`
+        # build the same workspace on the same two hosts and used to keep three
+        # copies of it.
         uses: Swatinem/rust-cache@v2
         with:
+          shared-key: host-workspace
+          add-job-id-key: "false"
+          save-if: "false"
           workspaces: |
             crates -> target
             vendor/sce -> target

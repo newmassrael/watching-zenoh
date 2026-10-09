@@ -115,6 +115,13 @@ jobs:
         if: ${{ env.WZ_HOST_SELECTED == 'true' }}
         uses: Swatinem/rust-cache@v2
         with:
+          # The SAVER of class `rust-host-workspace` in .github/cache-classes.json.
+          # `portability` (ci.yml) and `capi` (below) build the same workspace on
+          # the same hosts and only READ this key; the three used to keep three
+          # copies of it.
+          shared-key: host-workspace
+          add-job-id-key: "false"
+          save-if: ${{ github.ref == 'refs/heads/main' }}
           # This lane is read while it is red; a cache saved only on success
           # would make every diagnostic run pay the cold build again.
           cache-on-failure: true
@@ -335,6 +342,13 @@ jobs:
         if: ${{ env.WZ_HOST_SELECTED == 'true' }}
         uses: Swatinem/rust-cache@v2
         with:
+          # Class `rust-host-interop`: its own entry on purpose. This job
+          # installs the router's toolchain, which changes the rust-cache
+          # environment hash on both hosts, so the `host-workspace` entry cannot
+          # serve it.
+          shared-key: platform-interop
+          add-job-id-key: "false"
+          save-if: ${{ github.ref == 'refs/heads/main' }}
           cache-on-failure: true
           workspaces: |
             crates -> target
@@ -511,7 +525,10 @@ jobs:
         if: ${{ env.WZ_HOST_SELECTED == 'true' }}
         uses: Swatinem/rust-cache@v2
         with:
-          cache-on-failure: true
+          # A READER of the `leg` job's entry (class `rust-host-workspace`).
+          shared-key: host-workspace
+          add-job-id-key: "false"
+          save-if: "false"
           workspaces: |
             crates -> target
             vendor/sce -> target

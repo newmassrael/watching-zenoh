@@ -1,0 +1,78 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later OR LicenseRef-watching-zenoh-Commercial
+# SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
+#
+# Cache prune -- this repository, not LRU, decides which hosted caches go.
+#
+# GitHub caps the Actions cache at 10 GB and past it evicts the least recently
+# used entry. It cannot tell a 5 MB RocksDB engine that takes about 290 s to
+# rebuild from a 600 MB target directory, and on 2026-10-09 the repository held
+# 10.8 GB and lost the engine (the step took 3 s, 7 s, then 293 s across three
+# runs). `.github/cache-classes.json` declares every cache this repository
+# writes, who writes it, how large it may grow and whether it is protected;
+# `scripts/lib/cache_prune.py` removes orphans, dead refs, superseded
+# generations and, last, the least dear unprotected entries until the total is
+# under the registry's target. A protected class is never removed by size.
+#
+# WHEN IT RUNS. After every CI and Platform run on the default branch, because a
+# manifest change makes every rust-cache job write a new generation and the old
+# one is dead weight from that moment; on a six-hourly schedule as a backstop
+# for runs that never finish; and by hand. A manual run is a DRY RUN unless
+# `apply` is ticked, so the first read of a policy change costs nothing.
+#
+# WHAT IT HOLDS. The job's token is `actions: write` (the only scope that can
+# delete a cache) plus `contents: read` (the checkout), and the workflow-level
+# token is empty. It is never triggered by `push` or `pull_request`: a token that
+# can delete caches does not run on code from a branch.
+# `scripts/lib/workflow_cache_budget_gate.py` holds all of this.
+name: Cache prune
+
+on:
+  schedule:
+    - cron: "23 */6 * * *"
+  workflow_dispatch:
+    inputs:
+      apply:
+        description: "Delete what the plan names (unticked is a dry run that only prints it)"
+        type: boolean
+        default: false
+  workflow_run:
+    workflows: [CI, Platform]
+    types: [completed]
+    branches: [main]
+
+permissions: {}
+
+concurrency:
+  group: cache-prune
+  cancel-in-progress: false
+
+jobs:
+  prune:
+    name: prune hosted caches against the registry
+    runs-on: ubuntu-22.04
+    timeout-minutes: 10
+    permissions:
+      actions: write
+      contents: read
+    steps:
+      - name: Checkout the registry and the pruner
+        # The default branch's tree, never the head of the run that triggered
+        # this: the pruner and the registry are what this token executes.
+        uses: actions/checkout@v4
+        with:
+          sparse-checkout: |
+            .github/cache-classes.json
+            scripts/lib/cache_prune.py
+          sparse-checkout-cone-mode: false
+
+      - name: Prune
+        env:
+          GH_TOKEN: ${{ github.token }}
+          # A schedule or a finished run applies; a dispatch applies only when asked.
+          APPLY: ${{ github.event_name != 'workflow_dispatch' || inputs.apply }}
+        run: |
+          args=(--repo "$GITHUB_REPOSITORY")
+          if [ "$APPLY" = "true" ]; then
+            args+=(--apply)
+          fi
+          python3 scripts/lib/cache_prune.py "${args[@]}"

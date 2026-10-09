@@ -19,8 +19,12 @@ runs:
       shell: bash
       run: bash scripts/build-rocksdb-engine.sh
     # Save before the test lanes: a later timeout must not discard the engine.
+    # Default branch only: an entry written on any other ref is unreadable from
+    # main, so a branch run would pay for the bytes and nobody could use them.
+    # The class is `rocksdb-engine` in .github/cache-classes.json; it is
+    # protected there, so neither the pruner nor a size pass removes it.
     - name: Save the native engine
-      if: steps.restore.outputs.cache-hit != 'true'
+      if: github.ref == 'refs/heads/main' && steps.restore.outputs.cache-hit != 'true'
       uses: actions/cache/save@v4
       with:
         path: target/rocksdb-engine

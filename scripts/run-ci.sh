@@ -3379,6 +3379,16 @@ layer_c0_test_discipline() {
     # every Layer E/Z leg. The gate derives the members from the workflows.
     python3 scripts/lib/workflow_cache_save_gate.py --selftest || return 1
     python3 scripts/lib/workflow_cache_save_gate.py || return 1
+    # R3158 (open-debt item 899) — the hosted cache is capped at 10 GB and
+    # evicts LRU, which lost the 5 MB RocksDB engine (293 s to rebuild) to 600 MB
+    # target directories. Every cache key class is declared in
+    # `.github/cache-classes.json` with its owners and size budget, no
+    # commit-scoped key stands outside its allow-list, every save is limited to
+    # the default branch, the budgets fit under the target, and the pruner's
+    # token is scoped. The pruner's selftest drives its four passes on fixtures.
+    python3 scripts/lib/workflow_cache_budget_gate.py --selftest || return 1
+    python3 scripts/lib/workflow_cache_budget_gate.py || return 1
+    python3 scripts/lib/cache_prune.py --selftest || return 1
     # R3082 — the Zephyr board table and what its grades may claim. The refusal
     # arms run first on fixtures; the real table is then read against the
     # per-board settings, this file's lanes and the hosted jobs. Layer Qzb builds

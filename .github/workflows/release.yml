@@ -128,7 +128,10 @@ jobs:
         # `WZ_APT_CACHE_DIRTY` is set by `apt-install.sh` when it actually
         # downloaded something, so a warm run does not re-save an unchanged
         # directory under a new key.
-        if: always() && env.WZ_APT_CACHE_DIRTY == 'true'
+        # Default branch only (a tag run would write an entry no other ref
+        # reads); this workflow runs on tags, so it saves only when dispatched
+        # from main.
+        if: always() && github.ref == 'refs/heads/main' && env.WZ_APT_CACHE_DIRTY == 'true'
         uses: actions/cache/save@v4
         with:
           path: ~/.cache/wz-apt
@@ -139,12 +142,12 @@ jobs:
         with:
           components: rustfmt, clippy
 
-      - name: Cache Cargo registry + build artifacts
-        uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: |
-            crates -> target
-            vendor/sce -> target
+      # No rust-cache in this workflow. It runs on a tag ref, and a cache written
+      # on one tag is unreadable from the next (a cache is visible to its own
+      # ref, its base and the default branch), so every release paid to write a
+      # ~600 MB entry that no later run could use. It also builds with the
+      # floating `stable` toolchain, whose environment hash matches no entry
+      # `ci.yml` writes, so reading main's would miss as well.
 
       - name: Install mnemosyne-cli (pinned)
         # Delegated to the shared scripts/install-mnemosyne-cli.sh (pinned

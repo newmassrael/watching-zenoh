@@ -1029,6 +1029,19 @@ round_fed_gates=(
     # no combined `actions/cache`, and every restore has its save.
     "workflow_cache_save_gate.py --selftest"
     "workflow_cache_save_gate.py"
+    # R3158 (open-debt item 899) — the hosted cache is capped at 10 GB and evicts
+    # LRU, which lost the 5 MB RocksDB engine (293 s to rebuild) to 600 MB target
+    # directories. Reads the tracked workflows, the local composite actions and
+    # `.github/cache-classes.json`: every cache key class declared with its
+    # owners and size budget, no commit-scoped key outside its allow-list, every
+    # save limited to the default branch, budgets under the target, and the
+    # pruner's token scoped. The pruner's own selftest rides beside it.
+    # Round-fed: the population is every cache step in `.github/workflows` and
+    # `.github/actions`, so a job added tomorrow is inside it already.
+    # MEASURED: well under a second each, a parse with no build.
+    "workflow_cache_budget_gate.py --selftest"
+    "workflow_cache_budget_gate.py"
+    "cache_prune.py --selftest"
     # R3013 — reads the writers (every call of the JSON integer door in
     # `crates/*/src`), the header's integer paragraph and the revision rows, so a
     # round that adds a cell to any of them feeds it. The fields row once named
