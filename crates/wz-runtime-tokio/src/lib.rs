@@ -2857,6 +2857,10 @@ impl UdpDriver {
     /// this dials a single already-discovered unicast peer. The local
     /// bind address family mirrors `peer` so an IPv6 locator binds an
     /// IPv6 socket (a v4-bound socket cannot reach a v6 peer).
+    // LINK-SOCKET-SEAM-NOT-APPLICABLE: a scouting datagram socket, not a link.
+    // Upstream's scouting orchestrator binds its sockets without reading any
+    // link locator option (it carries no `dscp` or `bind` read at all), so the
+    // options seam has nothing to apply here.
     pub async fn connect(peer: SocketAddr) -> io::Result<Self> {
         let bind_addr: SocketAddr = match peer {
             SocketAddr::V4(_) => (std::net::Ipv4Addr::UNSPECIFIED, 0).into(),
@@ -3126,6 +3130,9 @@ impl UdpDriver {
     /// keeps the two apart — the asking half sends from
     /// [`Self::bind_multicast_tx`], which does set the TTL. A hop limit on a
     /// socket that only ever unicasts is a setting with no reader.
+    // LINK-SOCKET-SEAM-NOT-APPLICABLE: a scouting reply socket with no link
+    // partner. Upstream's scouting orchestrator reads no link locator option
+    // when it binds this socket, so the options seam has nothing to apply here.
     #[cfg(feature = "scouting-responder")]
     pub async fn bind_reply_unicast(local: std::net::IpAddr) -> io::Result<Self> {
         let socket = UdpSocket::bind(SocketAddr::from((local, 0))).await?;

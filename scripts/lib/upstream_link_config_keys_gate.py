@@ -96,11 +96,37 @@ cycle, and the same tree graded rc=1, 0, 1 on consecutive runs because set order
 is randomised per process. `Commons.file_keys` is now a fixpoint over the whole
 graph, and every measurement above was taken under explicit
 `PYTHONHASHSEED` values.
+
+## Open debt 813 -- the wz side was answered per SCHEME, and a scheme has paths
+
+READ is a global `const` grep, so a key bound once anywhere credits every scheme
+that consumes it, and a second path of the same scheme that applies the key
+nowhere stays green. UDP multicast was exactly that: the unicast path's single
+binding kept the scheme "reading" `bind` and `dscp` while the multicast
+constructors applied neither, and the gate said nothing then or after the
+product was repaired.
+
+The PATH half asks the question per socket-creating function instead, and
+derives everything it asks about from the code. The seam is the module that
+declares `trait SocketOptionTarget` and the closure of functions that reach one
+of its methods; the targets are the types that `impl` it; a path is a production
+function that constructs one of them (or a stream wrapper or raw `Socket`, which
+the seam cannot configure before they bind); and a path passes when it reaches
+the seam, directly or through an unambiguously named helper. It needs no
+upstream checkout, so it runs on every machine, and a path that carries no
+locator option claims `LINK-SOCKET-SEAM-NOT-APPLICABLE` in a comment above the
+function. MEASURED against the commit before UDP multicast honoured `bind` and
+`dscp`, it names both multicast constructors; against this tree it names none.
+
+It is a NECESSARY condition on a key being applied -- a path can reach the seam
+and ignore `bind` -- and not a statement that the VALUE reaches its consumer,
+which is open debt 726 and still open.
 """
 
 from __future__ import annotations
 
 import argparse
+import collections
 import json
 import pathlib
 import re
@@ -598,8 +624,402 @@ def shared_declaration_credits(
     return len(shared), sum(shared.values())
 
 
+# ---------------------------------------------------------------------------
+# Open debt 813 -- THE PATH HALF: every socket wz creates reaches the options seam
+# ---------------------------------------------------------------------------
+#
+# `wz_declared_keys` answers per SCHEME: a key bound to a name anywhere in the
+# tree makes the whole scheme READ it, so a second path of the same scheme that
+# applies the key nowhere stays green. That is how the UDP multicast path went
+# without `bind` and `dscp` while the unicast path's single binding kept the
+# scheme "reading" both, and R2791's repair of the product left the instrument
+# exactly as blind to the next bypass.
+#
+# The unit that was missing is the PATH: a place where wz makes a socket that a
+# locator's options are meant to reach. The seam those options go through is
+# derived from the code, not named here:
+#
+#   seam      = the module that declares `trait SocketOptionTarget`. Its sinks are
+#               the functions that call a method of that trait; its seam is the
+#               closure of functions that reach one of them. (Today:
+#               `configure`, `configure_stream`, `apply_dscp`.)
+#   targets   = the types that `impl SocketOptionTarget for` -- the sockets the
+#               seam can configure.
+#   path      = a production function that CONSTRUCTS one of those types (or a
+#               stream wrapper / raw `Socket`, which the seam cannot configure
+#               before they bind, so using one is a bypass unless the function
+#               also reaches the seam). Derived from the call `Type::ctor(`.
+#   verdict   = the path's function reaches the seam: it calls a seam function
+#               directly, or calls an unambiguously named function that does.
+#
+# This is a NECESSARY condition on a key being applied, not a sufficient one: a
+# path can reach `configure` and still ignore `bind`. What it closes is the
+# class 813 names -- a path that applies NOTHING -- which is the one a scheme
+# level answer cannot see. Whether the VALUE a key carries reaches its consumer
+# is open debt 726's separate round and this does not claim it.
+#
+# Resolution is by NAME, with the same two rules `tcp_tuning_seam_gate` found it
+# needs: call sites rather than substrings, and an ambiguous name (`configure`
+# is defined by a volume type as well) does not propagate. For the one seam name
+# that IS ambiguous the direct call is accepted only in a function that also
+# names `LinkSocket`, which is the type the method belongs to.
+
+SEAM_TRAIT = "SocketOptionTarget"
+
+#: Constructors of sockets the seam cannot configure, or cannot configure before
+#: they bind. A function that uses one has to reach the seam through another
+#: route (the multicast constructors build a raw socket and adopt it), or it is a
+#: bypass. This is a vocabulary of the OS-socket API, not of this tree, and
+#: `seam_population` cross-checks the targets against it.
+WRAPPER_TYPES = ("TcpStream", "TcpListener", "Socket")
+
+#: A path that genuinely carries no locator option: a probe, a receive-only
+#: group socket whose upstream twin applies none. Claimed in a comment line that
+#: OPENS with the marker, scoped to the one item, exactly as
+#: `tcp_tuning_seam_gate.EXEMPT_CLAIM` is -- naming the marker in prose is not
+#: claiming it.
+SEAM_EXEMPT = "LINK-SOCKET-SEAM-NOT-APPLICABLE"
+SEAM_EXEMPT_CLAIM = re.compile(
+    r"^\s*(?://[/!]?|\*)\s*" + re.escape(SEAM_EXEMPT) + r"\b", re.M
+)
+
+#: Below this the reader stopped matching the tree. A population of zero must
+#: not report green.
+MIN_SEAM_PATHS = 4
+
+#: `fn name<..>(`, generics tolerated: the seam's own `configure` is generic.
+SEAM_FN = re.compile(r"\bfn\s+(?P<name>\w+)\s*(?:<[^{;]*?>)?\s*\(")
+SEAM_CALL = re.compile(r"\b(\w+)\s*\(")
+
+
+def _rust_code(raw: str) -> str:
+    """`raw` with comments and literal bodies blanked and every line kept, so a
+    brace or a type name inside either cannot move a scope."""
+    sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
+    import rust_comments
+
+    return rust_comments.strip_comments(raw, blank_literals=True)
+
+
+def _brace_end(text: str, open_idx: int) -> int:
+    """Index just past the `}` matching the `{` at `open_idx`, or -1."""
+    depth = 0
+    for i in range(open_idx, len(text)):
+        if text[i] == "{":
+            depth += 1
+        elif text[i] == "}":
+            depth -= 1
+            if depth == 0:
+                return i + 1
+    return -1
+
+
+def _paren_end(text: str, open_idx: int) -> int:
+    depth = 0
+    for i in range(open_idx, len(text)):
+        if text[i] == "(":
+            depth += 1
+        elif text[i] == ")":
+            depth -= 1
+            if depth == 0:
+                return i + 1
+    return -1
+
+
+_ATTR_OPEN = re.compile(r"#\[\s*(?:cfg\s*\(|test\s*\]|tokio::test\b)")
+
+
+def _split_args(inner: str) -> list[str]:
+    """Top-level comma split of a cfg predicate's argument list."""
+    out, depth, cur = [], 0, ""
+    for ch in inner:
+        depth += ch == "("
+        depth -= ch == ")"
+        if ch == "," and depth == 0:
+            out.append(cur)
+            cur = ""
+        else:
+            cur += ch
+    out.append(cur)
+    return [a.strip() for a in out if a.strip()]
+
+
+def _requires_test(expr: str) -> bool:
+    """Is `expr` TRUE only when compiling for test? `test` is, `all(..)` is when
+    any member is, `any(..)` only when every member is, and `not(..)` never is --
+    it is the production arm, and treating it as test code would hide exactly
+    the code this scan is about."""
+    expr = expr.strip()
+    if expr == "test":
+        return True
+    m = re.fullmatch(r"(all|any|not)\s*\((.*)\)", expr, re.S)
+    if not m:
+        return False
+    members = _split_args(m.group(2))
+    if m.group(1) == "all":
+        return any(_requires_test(a) for a in members)
+    if m.group(1) == "any":
+        return bool(members) and all(_requires_test(a) for a in members)
+    return False
+
+
+def _test_item_spans(text: str) -> list[tuple[int, int]]:
+    """Spans of every item a test-only attribute is on: `#[cfg(test)]` and
+    `#[cfg(all(test, ..))]` on a `mod`, a lone `fn` or a `use`, and `#[test]` /
+    `#[tokio::test]` functions. `tcp_tuning_seam_gate` skips only the `mod` form
+    of a bare `cfg(test)`, and the runtime crate carries both a test-only item
+    long before its test module and `all(test, feature = ..)` modules, so a
+    tail cut or a mod-only skip reads test sockets as production paths.
+    """
+    spans = []
+    for m in _ATTR_OPEN.finditer(text):
+        if m.group(0).lstrip("#[ \t").startswith("cfg"):
+            close = _paren_end(text, m.end() - 1)
+            if close < 0 or not _requires_test(text[m.end() : close - 1]):
+                continue
+            end_attr = text.find("]", close)
+            if end_attr < 0:
+                continue
+            i = end_attr + 1
+        else:
+            end_attr = text.find("]", m.start())
+            if end_attr < 0:
+                continue
+            i = end_attr + 1
+        # Further attributes between this one and the item.
+        while True:
+            nxt = re.compile(r"\s*#\[[^\]]*\]").match(text, i)
+            if not nxt:
+                break
+            i = nxt.end()
+        if re.compile(r"\s*(?:pub(?:\([^)]*\))?\s+)?use\b").match(text, i):
+            end = text.find(";", i)
+            spans.append((m.start(), len(text) if end < 0 else end + 1))
+            continue
+        brace, semi = text.find("{", i), text.find(";", i)
+        if brace >= 0 and (semi < 0 or brace < semi):
+            end = _brace_end(text, brace)
+            spans.append((m.start(), len(text) if end < 0 else end))
+        elif semi >= 0:
+            spans.append((m.start(), semi + 1))
+    return spans
+
+
+def _functions_of(crate_src: pathlib.Path, root: pathlib.Path) -> list[dict]:
+    """Every production function of one crate, with signature, body and the
+    raw comment block that is attached to it."""
+    fns: list[dict] = []
+    for path in sorted(crate_src.rglob("*.rs")):
+        if "target" in path.relative_to(root).parts:
+            continue
+        raw = path.read_text(encoding="utf-8", errors="replace")
+        text = _rust_code(raw)
+        rawlines = raw.splitlines()
+        skip = _test_item_spans(text)
+        for m in SEAM_FN.finditer(text):
+            if any(lo <= m.start() < hi for lo, hi in skip):
+                continue
+            args_end = _paren_end(text, m.end() - 1)
+            if args_end < 0:
+                continue
+            brace, semi = text.find("{", args_end), text.find(";", args_end)
+            if brace < 0 or (0 <= semi < brace):
+                continue  # a declaration without a body
+            end = _brace_end(text, brace)
+            if end < 0:
+                continue
+            first = text.count("\n", 0, m.start())
+            last = text.count("\n", 0, end)
+            top = first
+            while top > 0:
+                above = rawlines[top - 1].strip() if top - 1 < len(rawlines) else ""
+                if above.startswith("//") or above.startswith("#["):
+                    top -= 1
+                    continue
+                break
+            fns.append(
+                {
+                    "file": str(path.relative_to(root)),
+                    "fn": m.group("name"),
+                    "line": first + 1,
+                    "start": m.start(),
+                    "end": end,
+                    "args": text[m.end() - 1 : args_end],
+                    "body": text[brace:end],
+                    "text": text,
+                    "scope": "\n".join(rawlines[top : last + 1]),
+                }
+            )
+    return fns
+
+
+def seam_population(root: pathlib.Path) -> dict:
+    """The seam, its targets and the paths that must reach it -- all derived.
+
+    Returns `{crate_src, seam_fns, targets, paths}`, where `paths` is a list of
+    `{file, fn, line, ctors, covered, exempt}`. `crate_src` is `None` when no
+    file declares the seam trait, which the caller treats as a FAIL.
+    """
+    base = root / "crates"
+    seam_file = None
+    for path in sorted(base.glob("*/src/**/*.rs")):
+        if "target" in path.relative_to(root).parts:
+            continue
+        code = _rust_code(path.read_text(encoding="utf-8", errors="replace"))
+        if re.search(rf"\btrait\s+{SEAM_TRAIT}\b", code):
+            seam_file = path
+            break
+    out = {"crate_src": None, "seam_fns": set(), "targets": set(), "paths": []}
+    if seam_file is None:
+        return out
+    # The crate's `src` is the nearest ancestor of the seam file named `src`.
+    crate_src = next(anc for anc in seam_file.parents if anc.name == "src")
+    out["crate_src"] = crate_src
+
+    seam_code = _rust_code(seam_file.read_text(encoding="utf-8", errors="replace"))
+    trait = re.search(rf"\btrait\s+{SEAM_TRAIT}\b[^{{]*\{{", seam_code)
+    trait_end = _brace_end(seam_code, trait.end() - 1)
+    trait_methods = {
+        m.group("name") for m in SEAM_FN.finditer(seam_code[trait.end() : trait_end])
+    }
+    targets, impl_spans = set(), [(trait.start(), trait_end)]
+    for m in re.finditer(rf"\bimpl\s+{SEAM_TRAIT}\s+for\s+([\w:]+)[^{{]*\{{", seam_code):
+        targets.add(m.group(1).split("::")[-1])
+        impl_spans.append((m.start(), _brace_end(seam_code, m.end() - 1)))
+    out["targets"] = targets
+
+    fns = _functions_of(crate_src, root)
+    seam_fns = [
+        f for f in fns
+        if f["file"] == str(seam_file.relative_to(root))
+        and not any(lo <= f["start"] < hi for lo, hi in impl_spans)
+    ]
+    names = {f["fn"] for f in seam_fns if any(
+        re.search(rf"\b{re.escape(t)}\s*\(", f["body"]) for t in trait_methods
+    )}
+    changed = True
+    while changed:
+        changed = False
+        for f in seam_fns:
+            if f["fn"] not in names and any(
+                re.search(rf"\b{re.escape(n)}\s*\(", f["body"]) for n in names
+            ):
+                names.add(f["fn"])
+                changed = True
+    out["seam_fns"] = names
+
+    defs = collections.Counter(f["fn"] for f in fns)
+    unambiguous = {n for n, c in defs.items() if c == 1}
+
+    def direct(f: dict) -> bool:
+        for n in names:
+            if re.search(rf"\b{re.escape(n)}\s*\(", f["body"]):
+                if n in unambiguous or "LinkSocket" in f["args"] + f["body"]:
+                    return True
+        return False
+
+    covering = {f["fn"] for f in fns if direct(f)}
+    changed = True
+    while changed:
+        changed = False
+        for f in fns:
+            if f["fn"] in covering or f["fn"] not in unambiguous:
+                continue
+            called = {m.group(1) for m in SEAM_CALL.finditer(f["body"])}
+            if called & unambiguous & (covering | names):
+                covering.add(f["fn"])
+                changed = True
+
+    ctor = re.compile(
+        r"\b(" + "|".join(sorted(targets | set(WRAPPER_TYPES))) + r")\s*::\s*(\w+)\s*(?:::\s*<[^>]*>)?\s*\("
+    )
+    seen: dict[tuple[str, int], dict] = {}
+    for f in fns:
+        if f["file"] == str(seam_file.relative_to(root)):
+            continue
+        text = f["text"]
+        # Sites belong to the INNERMOST function: an inner `fn` in a body is
+        # its own path, and a closure or async block belongs to its function.
+        hits = [
+            m for m in ctor.finditer(text, f["start"], f["end"])
+            if not any(
+                g["file"] == f["file"] and f["start"] < g["start"] < m.start() < g["end"]
+                and g is not f
+                for g in fns
+            )
+        ]
+        if not hits:
+            continue
+        key = (f["file"], f["line"])
+        seen[key] = {
+            "file": f["file"],
+            "fn": f["fn"],
+            "line": f["line"],
+            "ctors": sorted({f"{m.group(1)}::{m.group(2)}" for m in hits}),
+            "covered": f["fn"] in covering or direct(f),
+            "exempt": bool(SEAM_EXEMPT_CLAIM.search(f["scope"])),
+        }
+    out["paths"] = sorted(seen.values(), key=lambda p: (p["file"], p["line"]))
+    return out
+
+
+def seam_path_findings(root: pathlib.Path) -> tuple[list[str], dict]:
+    """`(findings, population)` for the path half. Findings are strings."""
+    pop = seam_population(root)
+    findings: list[str] = []
+    if pop["crate_src"] is None:
+        return [
+            f"no file under crates declares `trait {SEAM_TRAIT}`, so the seam "
+            "the locator options go through could not be derived and no socket "
+            "path was graded"
+        ], pop
+    if not pop["seam_fns"]:
+        findings.append(
+            f"`trait {SEAM_TRAIT}` has no function that calls one of its methods "
+            "-- the seam is empty, so every path would read as bypassing it"
+        )
+    if not pop["targets"]:
+        findings.append(f"nothing `impl {SEAM_TRAIT} for` a socket type")
+    if len(pop["paths"]) < MIN_SEAM_PATHS:
+        findings.append(
+            f"only {len(pop['paths'])} socket-creating function(s) found, "
+            f"expected at least {MIN_SEAM_PATHS}: a population that collapsed "
+            "means the reader stopped matching the tree, not that the tree "
+            "stopped making sockets"
+        )
+    for p in pop["paths"]:
+        if not p["covered"] and not p["exempt"]:
+            findings.append(
+                f"`{p['fn']}` ({p['file']}:{p['line']}) creates "
+                f"{', '.join(p['ctors'])} and reaches no function of the options "
+                f"seam ({', '.join(sorted(pop['seam_fns']))}), so no locator "
+                "option (`iface`, `bind`, `dscp`, the buffers) is applied on "
+                "that path. A key bound anywhere in the tree credits the whole "
+                "scheme READ, which is why this has to be asked per path. Route "
+                f"the socket through the seam, or claim `{SEAM_EXEMPT}: <why>` "
+                "in a comment above the function if it carries no locator option"
+            )
+    return findings, pop
+
+
 def check(require: bool) -> int:
     root = upstream_root()
+    # THE PATH HALF needs no upstream: it reads wz's own socket constructors, so
+    # it runs on every machine and is not a casualty of a missing checkout.
+    path_findings, pop = seam_path_findings(ROOT)
+    if path_findings:
+        print(f"upstream-link-config-keys: FAIL -- {len(path_findings)} socket-path finding(s)")
+        for f in path_findings:
+            print(f"  {f}")
+        return 1
+    covered = sum(1 for p in pop["paths"] if p["covered"])
+    exempt = sum(1 for p in pop["paths"] if not p["covered"] and p["exempt"])
+    print(
+        f"  upstream-link-config-keys: {len(pop['paths'])} socket-creating "
+        f"function(s) in {pop['crate_src'].relative_to(ROOT).parent.name} -- "
+        f"{covered} reach the options seam ({', '.join(sorted(pop['seam_fns']))}), "
+        f"{exempt} claim `{SEAM_EXEMPT}`, 0 bypass it"
+    )
     if root is None:
         if require:
             print(
@@ -610,9 +1030,10 @@ def check(require: bool) -> int:
             )
             return 1
         print(
-            "  upstream-link-config-keys: SKIPPED -- the population is derived "
-            "from a checkout of the pinned zenoh and there is none on this "
-            "machine. Nothing was graded; do not read this as agreement."
+            "  upstream-link-config-keys: SKIPPED -- the key population is "
+            "derived from a checkout of the pinned zenoh and there is none on "
+            "this machine. No KEY was graded; do not read this as agreement. "
+            "(The socket-path line above was graded: it needs no checkout.)"
         )
         return 0
 
@@ -861,7 +1282,186 @@ def _selftest_consumed() -> int:
     return 0
 
 
+_SEAM_FILE = """\
+use std::io;
+use std::net::SocketAddr;
+pub(crate) trait SocketOptionTarget {
+    fn bind_device(&self, iface: &str) -> io::Result<()>;
+    fn set_dscp_v4(&self, dscp: u32) -> io::Result<()>;
+}
+impl SocketOptionTarget for tokio::net::UdpSocket {
+    fn bind_device(&self, iface: &str) -> io::Result<()> { self.bind_device(Some(iface.as_bytes())) }
+    fn set_dscp_v4(&self, dscp: u32) -> io::Result<()> { self.set_tos_v4(dscp) }
+}
+impl SocketOptionTarget for tokio::net::TcpSocket {
+    fn bind_device(&self, iface: &str) -> io::Result<()> { self.bind_device(Some(iface.as_bytes())) }
+    fn set_dscp_v4(&self, dscp: u32) -> io::Result<()> { self.set_tos_v4(dscp) }
+}
+pub struct LinkSocket;
+impl LinkSocket {
+    pub(crate) fn configure<S: SocketOptionTarget>(&self, s: &S, f: SocketAddr) -> io::Result<()> {
+        s.bind_device("eth0")?;
+        apply_dscp(s, f, 1)
+    }
+    pub(crate) fn configure_stream(&self, s: &TcpSocket, f: SocketAddr) -> io::Result<()> {
+        self.configure(s, f)
+    }
+}
+pub(crate) fn apply_dscp<S: SocketOptionTarget>(s: &S, f: SocketAddr, d: u32) -> io::Result<()> {
+    s.set_dscp_v4(d)
+}
+"""
+
+#: Each pipeline function below is ONE row; the comment on it says what it pins.
+_SEAM_PIPE = """\
+use crate::link_socket::LinkSocket;
+pub async fn dial_ok(link_socket: &LinkSocket) -> io::Result<UdpSocket> {
+    let s = UdpSocket::bind(a).await?;
+    link_socket.configure(&s, a)?;
+    Ok(s)
+}
+pub async fn dial_delegates(link_socket: &LinkSocket) -> io::Result<UdpSocket> {
+    dial_ok(link_socket).await
+}
+pub async fn bypass_udp() -> io::Result<UdpSocket> {
+    UdpSocket::bind(a).await
+}
+pub async fn bypass_stream() -> io::Result<TcpStream> {
+    TcpStream::connect(a).await
+}
+pub fn multicast_ok(a: SocketAddr) -> io::Result<UdpSocket> {
+    let raw = socket2::Socket::new(d, t, p)?;
+    let s = UdpSocket::from_std(raw.into())?;
+    crate::link_socket::apply_dscp(&s, a, 1)?;
+    Ok(s)
+}
+fn tune_helper(link_socket: &LinkSocket, s: &UdpSocket) -> io::Result<()> {
+    link_socket.configure(s, a)
+}
+pub async fn via_helper(link_socket: &LinkSocket) -> io::Result<UdpSocket> {
+    let s = UdpSocket::bind(a).await?;
+    tune_helper(link_socket, &s)?;
+    Ok(s)
+}
+pub async fn collides_with_a_volume(vol: &Volume) -> io::Result<UdpSocket> {
+    let s = UdpSocket::bind(a).await?;
+    vol.configure(Some("refuse"))?;
+    Ok(s)
+}
+// LINK-SOCKET-SEAM-NOT-APPLICABLE: a scouting socket, not a link.
+pub async fn claimed_exempt() -> io::Result<UdpSocket> {
+    UdpSocket::bind(a).await
+}
+/// The marker LINK-SOCKET-SEAM-NOT-APPLICABLE is named here, not claimed.
+pub async fn names_the_marker_only() -> io::Result<UdpSocket> {
+    UdpSocket::bind(a).await
+}
+pub async fn closure_belongs_to_its_fn(link_socket: &LinkSocket) -> io::Result<()> {
+    let make = || async { UdpSocket::bind(a).await };
+    let s = make().await?;
+    link_socket.configure(&s, a)
+}
+pub fn only_text() {
+    let _ = "UdpSocket::bind(a)";
+    // TcpStream::connect(a)
+}
+#[cfg(not(test))]
+pub async fn production_arm_of_not_test() -> io::Result<UdpSocket> {
+    UdpSocket::bind(a).await
+}
+#[cfg(test)]
+fn test_only_fn() { let _ = UdpSocket::bind(a); }
+#[cfg(all(test, feature = "x"))]
+mod tests {
+    fn inside_a_gated_test_module() { let _ = TcpStream::connect(a); }
+}
+#[tokio::test]
+async fn a_test_fn() { let _ = UdpSocket::bind(a).await; }
+"""
+
+_SEAM_VOLUME = """\
+pub struct Volume;
+impl Volume {
+    pub fn configure(&self, c: Option<&str>) -> Result<(), ()> { Ok(()) }
+}
+"""
+
+
+def _selftest_seam_paths() -> int:
+    """Open debt 813 -- the path half, driven from a fixture crate.
+
+    Every row below is one function in `_SEAM_PIPE`, so a verdict flips for a
+    reason that is written next to the function. The rows that matter most are
+    the three CONTROLS: the trait's own `bind_device` must not become a seam
+    function (it calls a method of the same name), an ambiguous `configure` must
+    not credit a function that merely calls some other type's, and the marker
+    must be CLAIMED rather than mentioned.
+    """
+
+    def fail(msg: str) -> int:
+        print(f"upstream-link-config-keys: SELFTEST FAIL -- {msg}")
+        return 1
+
+    with tempfile.TemporaryDirectory() as tmp:
+        base = pathlib.Path(tmp)
+        src = "crates/c/src"
+        _write(base, f"{src}/link_socket.rs", _SEAM_FILE)
+        _write(base, f"{src}/pipe.rs", _SEAM_PIPE)
+        _write(base, f"{src}/volume.rs", _SEAM_VOLUME)
+        # A bypass in ANOTHER crate cannot apply a crate-private seam at all, so
+        # it is not this gate's population and must not be reported.
+        _write(base, "crates/other/src/x.rs",
+               "pub async fn elsewhere() { let _ = UdpSocket::bind(a).await; }\n")
+        findings, pop = seam_path_findings(base)
+        flagged = {
+            re.match(r"`(\w+)`", f).group(1) for f in findings if re.match(r"`(\w+)`", f)
+        }
+        paths = {p["fn"]: p for p in pop["paths"]}
+
+        if pop["seam_fns"] != {"configure", "configure_stream", "apply_dscp"}:
+            return fail("the seam must be derived as the functions that reach a method of "
+                        f"the trait, and not the trait's own impl methods; got {pop['seam_fns']}")
+        if pop["targets"] != {"UdpSocket", "TcpSocket"}:
+            return fail(f"the targets are the types that impl the trait; got {pop['targets']}")
+        want_flagged = {
+            "bypass_udp", "bypass_stream", "collides_with_a_volume",
+            "names_the_marker_only", "production_arm_of_not_test",
+        }
+        if flagged != want_flagged:
+            return fail(f"flagged {sorted(flagged)}, want {sorted(want_flagged)}")
+        for name in ("dial_ok", "multicast_ok", "via_helper", "closure_belongs_to_its_fn"):
+            if not paths.get(name, {}).get("covered"):
+                return fail(f"`{name}` reaches the seam and must be covered; got {paths.get(name)}")
+        if not paths["claimed_exempt"]["exempt"] or paths["claimed_exempt"]["covered"]:
+            return fail("a claimed marker exempts one function and does not make it covered")
+        for name in ("only_text", "dial_delegates", "test_only_fn", "inside_a_gated_test_module",
+                     "a_test_fn", "elsewhere", "tune_helper"):
+            if name in paths:
+                return fail(f"`{name}` is not a production socket-creating function: {paths[name]}")
+
+        # POPULATION GUARDS: a reader that finds nothing must not read as green.
+        for label, files in (
+            ("a seam with fewer than the minimum of paths",
+             {f"{src}/link_socket.rs": _SEAM_FILE, f"{src}/p.rs": _SEAM_PIPE.split("pub async fn dial_delegates")[0]}),
+            ("no file declaring the seam trait", {f"{src}/p.rs": _SEAM_PIPE}),
+            ("a trait nothing calls", {f"{src}/link_socket.rs":
+                "pub trait SocketOptionTarget { fn a(&self); }\n"
+                "impl SocketOptionTarget for UdpSocket { fn a(&self) {} }\n",
+                f"{src}/p.rs": _SEAM_PIPE}),
+        ):
+            with tempfile.TemporaryDirectory() as t2:
+                for rel, text in files.items():
+                    _write(pathlib.Path(t2), rel, text)
+                got, _ = seam_path_findings(pathlib.Path(t2))
+            if not got:
+                return fail(f"{label} must be a finding, not a pass")
+    return 0
+
+
 def selftest() -> int:
+    rc = _selftest_seam_paths()
+    if rc:
+        return rc
     with tempfile.TemporaryDirectory() as tmp:
         root = _upstream_tree(pathlib.Path(tmp))
         keys, findings = upstream_keys(root)
