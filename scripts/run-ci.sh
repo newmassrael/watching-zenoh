@@ -13982,9 +13982,9 @@ layer_c1bp_plugin_dynamic_loading() {
     (cd crates && cargo test -p wz-plugin-abi --quiet) || return 1
     # The host: dlopen, the gate, the lifecycle FSM, the registry. Drives the
     # REAL `.so` built above.
-    (cd crates && cargo test -p wz-runtime-tokio --features plugin-dynamic-loading \
-        --lib --quiet plugin:: 2>&1 | tee /dev/stderr \
-        | grep -qE '^test result: ok\. [0-9]+ passed') || return 1
+    _runci_guarded_test "C1bp host" + \
+        cargo test -p wz-runtime-tokio --features plugin-dynamic-loading \
+        --lib --quiet plugin:: || return 1
     (cd crates && cargo clippy -p wz-runtime-tokio --features plugin-dynamic-loading \
         --all-targets -- -D warnings) || return 1
     # R2820 — the plane's own witnesses. `plugin_plane` compiles only beside
@@ -14013,10 +14013,10 @@ layer_c1bp_plugin_dynamic_loading() {
     for leg in \
         wz_plugin_dlopened_is_read_by_a_real_pico_beside_the_static_one \
         wz_plugin_non_plugin_shared_object_is_refused_and_the_node_survives; do
-        (cd crates && cargo test -p wz-integration-tests \
+        _runci_guarded_test "C1bp pico $leg" 1 \
+            cargo test -p wz-integration-tests \
             --test wz_plugin_dynamic_loading_pico -- --ignored --quiet --test-threads=1 \
-            --exact "$leg" 2>&1 \
-            | tee /dev/stderr | grep -qE '^test result: ok\. 1 passed') || return 1
+            --exact "$leg" || return 1
     done
     # R2820 — the library plugin NOTIFICATION PLANE (§5.23
     # `adminspace-config-hotreload`). The binary above cannot drive it: the
@@ -14027,10 +14027,10 @@ layer_c1bp_plugin_dynamic_loading() {
     # GET (storage_manager present, the library absent).
     (cd crates && cargo build -p wz-ap-demo --no-default-features \
         --features preset-ap-full,zenoh-config --quiet) || return 1
-    (cd crates && cargo test -p wz-integration-tests \
+    _runci_guarded_test "C1bp config write" 1 \
+        cargo test -p wz-integration-tests \
         --test wz_plugin_dynamic_loading_pico -- --ignored --quiet --test-threads=1 \
-        --exact wz_plugin_config_write_starts_and_stops_a_library_plugin_via_pico 2>&1 \
-        | tee /dev/stderr | grep -qE '^test result: ok\. 1 passed') || return 1
+        --exact wz_plugin_config_write_starts_and_stops_a_library_plugin_via_pico || return 1
 }
 
 # ─── Layer L — every committed Cargo.lock agrees with its manifests ────
@@ -16025,9 +16025,9 @@ PY
     # `net/runtime/orchestrator.rs:1113-1134`). It binds `127.0.0.2` and joins no
     # group, so it is `#[ignore]`d for a DIFFERENT environmental reason than its
     # two siblings and runs in the same lane.
-    (cd crates && cargo test -p wz-runtime-tokio --features scouting-responder \
-        --test scouting_responder_multicast -- --ignored --quiet 2>&1 \
-        | tee /dev/stderr | grep -qE '^test result: ok\. 3 passed') || return 1
+    _runci_guarded_test "M responder multicast" 3 \
+        cargo test -p wz-runtime-tokio --features scouting-responder \
+        --test scouting_responder_multicast -- --ignored --quiet || return 1
     # And clippy over that feature, which no other lane builds — the same
     # gate-skew argument as the scouting-active clippy above.
     (cd crates && cargo clippy -p wz-runtime-tokio --all-targets \
@@ -16173,11 +16173,11 @@ PY
     # Count-guarded (`1 passed`): this leg carries a NAME FILTER, so a renamed test
     # selects 0, `cargo test` exits 0, and a bare invocation would report green having
     # run nothing. The sibling legs above select whole binaries and do not need it.
-    (cd crates && cargo test -p wz-runtime-tokio \
+    _runci_guarded_test "M multicast iface" 1 \
+        cargo test -p wz-runtime-tokio \
         --features transport-multicast,locator-iface \
         --test multicast_pubsub_loopback a_multicast_iface \
-        -- --ignored --quiet 2>&1 \
-        | tee /dev/stderr | grep -qE '^test result: ok\. 1 passed') || return 1
+        -- --ignored --quiet || return 1
     # R2584 — the IPv6 multicast group, on real sockets: a datagram arrives through
     # the group's membership and through a `#join=` membership, and a group nobody
     # joined does not arrive. Same build as the leg above, because every arm pins
@@ -16912,9 +16912,9 @@ layer_z_zenohd_interop() {
     # Count-guarded (`1 passed`): the leg is `#[ignore]`d, so a renamed file or a
     # dropped attribute selects 0 tests and exits 0, which would report that a
     # real zenohd agrees with wz by never having asked it.
-    (cd crates && WZ_ZENOHD_BIN="$zenohd" cargo test -p wz-integration-tests \
-        --test close_scope_zenohd_witness -- --ignored --quiet --test-threads=1 2>&1 \
-        | tee /dev/stderr | grep -qE '^test result: ok\. 1 passed') || return 1
+    _runci_guarded_test "Z close scope" 1 \
+        env WZ_ZENOHD_BIN="$zenohd" cargo test -p wz-integration-tests \
+        --test close_scope_zenohd_witness -- --ignored --quiet --test-threads=1 || return 1
     if [[ ! -x target/zenoh-pico-cli/z_sub ]]; then
         _z_unavailable "zenoh-pico z_sub not built (run: bash scripts/build-zenoh-pico-cli.sh)" || return 1
         return 0
@@ -17990,9 +17990,9 @@ layer_z_zenohd_interop() {
     # module, unlike vsock). Same --test-threads=1 per-zenohd isolation. Count-guarded
     # (`1 passed`, the y400 vsock-leg precedent) so a dropped `#[ignore]` (0 selected
     # -> exit 0) reddens instead of silently passing.
-    (cd crates && WZ_ZENOHD_BIN="$zenohd" cargo test -p wz-integration-tests \
-        --test wz_quic_acceptor_zenohd_interop -- --ignored --quiet --test-threads=1 2>&1 \
-        | tee /dev/stderr | grep -qE '^test result: ok\. 1 passed') || return 1
+    _runci_guarded_test "Z quic acceptor" 1 \
+        env WZ_ZENOHD_BIN="$zenohd" cargo test -p wz-integration-tests \
+        --test wz_quic_acceptor_zenohd_interop -- --ignored --quiet --test-threads=1 || return 1
     # R311y454 — the `locator-iface` LISTEN-side HONOR, cross-impl (§5.2 x the quic
     # accept seam x zenohd->wz). A real zenohd dials the SAME wz quic acceptor twice,
     # differing only in the device the listen locator names: `#iface=lo` establishes,
@@ -18004,9 +18004,9 @@ layer_z_zenohd_interop() {
     # Established/not-Established pair IS the discriminator, and a routed Put would
     # add a second foreign binary without adding discrimination. The demo build above
     # gained `locator-iface`, which is also what puts the atom in the A4 closure.
-    (cd crates && WZ_ZENOHD_BIN="$zenohd" cargo test -p wz-integration-tests \
-        --test wz_quic_acceptor_iface_zenohd_interop -- --ignored --quiet --test-threads=1 2>&1 \
-        | tee /dev/stderr | grep -qE '^test result: ok\. 1 passed') || return 1
+    _runci_guarded_test "Z quic acceptor iface" 1 \
+        env WZ_ZENOHD_BIN="$zenohd" cargo test -p wz-integration-tests \
+        --test wz_quic_acceptor_iface_zenohd_interop -- --ignored --quiet --test-threads=1 || return 1
     # R2590 — the `bind` and `dscp` link keys on the WIRE, tcp/tls/udp/quic, with
     # zenohd as the adjudicator of every row. Both implementations dial a libc
     # observer this test owns (`IP_RECVTOS`, `IP_PKTOPTIONS`), which reads the
@@ -18016,9 +18016,9 @@ layer_z_zenohd_interop() {
     # R2591 — 1 -> 2 passed: the second leg reads the TCP socket buffer keys
     # from the accepted end's `TCP_INFO` window scale and from `ss`'s `rb`/`tb`
     # of the dialer's own socket, since neither key is in a header.
-    (cd crates && WZ_ZENOHD_BIN="$zenohd" cargo test -p wz-integration-tests \
-        --test wz_link_socket_options_zenohd_interop -- --ignored --quiet --test-threads=1 2>&1 \
-        | tee /dev/stderr | grep -qE '^test result: ok\. 2 passed') || return 1
+    _runci_guarded_test "Z link socket options" 2 \
+        env WZ_ZENOHD_BIN="$zenohd" cargo test -p wz-integration-tests \
+        --test wz_link_socket_options_zenohd_interop -- --ignored --quiet --test-threads=1 || return 1
     # R2594 — the QoS a queryable's REPLY carries, adjudicated by a stock zenoh
     # queryable answering the same stock `z_get` through the same zenohd. The
     # expected byte is not written in the test: each run records the stock
@@ -18078,9 +18078,9 @@ layer_z_zenohd_interop() {
     # change. Count-guarded (`5 passed`, the y401 precedent) so a dropped `#[ignore]`
     # on any leg (fewer selected -> exit 0) reddens instead of silently passing. Same
     # --test-threads=1 per-zenohd isolation.
-    (cd crates && WZ_ZENOHD_BIN="$zenohd" cargo test -p wz-integration-tests \
-        --test wz_mesh_quic_acceptor_zenohd_interop -- --ignored --quiet --test-threads=1 2>&1 \
-        | tee /dev/stderr | grep -qE '^test result: ok\. 6 passed') || return 1
+    _runci_guarded_test "Z mesh quic acceptor" 6 \
+        env WZ_ZENOHD_BIN="$zenohd" cargo test -p wz-integration-tests \
+        --test wz_mesh_quic_acceptor_zenohd_interop -- --ignored --quiet --test-threads=1 || return 1
     # R311y408 — wz QUIC-DATAGRAM ACCEPTOR cross-impl (transport-link-quic-datagram
     # zenohd->wz): the RFC9221 unreliable-datagram twin of the y401 one-shot quic
     # acceptor leg above. A real zenohd DIALS the wz `--listen quic-datagram/...`
@@ -18100,9 +18100,9 @@ layer_z_zenohd_interop() {
     # hosted CI (UDP loopback needs no kernel module). Same --test-threads=1 per-zenohd
     # isolation. Count-guarded (`1 passed`, the y401 precedent) so a dropped `#[ignore]`
     # (0 selected -> exit 0) reddens instead of silently passing.
-    (cd crates && WZ_ZENOHD_BIN="$zenohd" cargo test -p wz-integration-tests \
-        --test wz_quic_datagram_acceptor_zenohd_interop -- --ignored --quiet --test-threads=1 2>&1 \
-        | tee /dev/stderr | grep -qE '^test result: ok\. 1 passed') || return 1
+    _runci_guarded_test "Z quic datagram acceptor" 1 \
+        env WZ_ZENOHD_BIN="$zenohd" cargo test -p wz-integration-tests \
+        --test wz_quic_datagram_acceptor_zenohd_interop -- --ignored --quiet --test-threads=1 || return 1
     # R311y411 — wz MESH QUIC-DATAGRAM ACCEPTOR cross-impl: the y407 mesh-quic leg's
     # UNRELIABLE twin. A real zenohd JOINS wz's MESH (`--peer` / `--router-hat
     # quic-datagram/...`, the accept LOOP -- not the y408 one-shot `--listen` above)
@@ -18127,9 +18127,9 @@ layer_z_zenohd_interop() {
     # `#[ignore]` (fewer selected) AND a FAILED result line both redden -- the
     # unanchored sibling form matches `FAILED. N passed; 1 failed`. Same
     # --test-threads=1 per-zenohd isolation.
-    (cd crates && WZ_ZENOHD_BIN="$zenohd" cargo test -p wz-integration-tests \
-        --test wz_mesh_quic_datagram_acceptor_zenohd_interop -- --ignored --quiet --test-threads=1 2>&1 \
-        | tee /dev/stderr | grep -qE '^test result: ok\. 7 passed') || return 1
+    _runci_guarded_test "Z mesh quic datagram acceptor" 7 \
+        env WZ_ZENOHD_BIN="$zenohd" cargo test -p wz-integration-tests \
+        --test wz_mesh_quic_datagram_acceptor_zenohd_interop -- --ignored --quiet --test-threads=1 || return 1
     # R311y376 — wz ROUTER ws ACCEPTOR cross-impl (accept-symmetry Stage 3): the
     # MULTI-PEER accept loop (`--router` / peer_loop, not just one-shot `--listen`)
     # now accepts a foreign non-tcp face. A real zenohd DIALS the wz `--router
@@ -18278,11 +18278,11 @@ layer_z_zenohd_interop() {
     if [[ -x "$zenohd_uxp" ]]; then
         # Count-guard (`2 passed`) so a future edit that drops `#[ignore]` from the
         # two legs — making `-- --ignored` select 0 tests and exit 0 — reddens the
-        # lane instead of silently passing; `tee /dev/stderr` keeps the output
-        # visible on failure. Extends the C1al/C1bl/C1bm count-guard discipline.
-        (cd crates && WZ_ZENOHD_UNIXPIPE_BIN="$zenohd_uxp" cargo test -p wz-integration-tests \
-            --test wz_unixpipe_zenohd_interop -- --ignored --quiet --test-threads=1 2>&1 \
-            | tee /dev/stderr | grep -qE '^test result: ok\. 2 passed') || return 1
+        # lane instead of silently passing; the helper streams the output so it
+        # is visible on failure. Extends the C1al/C1bl/C1bm count-guard discipline.
+        _runci_guarded_test "Z unixpipe interop" 2 \
+            env WZ_ZENOHD_UNIXPIPE_BIN="$zenohd_uxp" cargo test -p wz-integration-tests \
+            --test wz_unixpipe_zenohd_interop -- --ignored --quiet --test-threads=1 || return 1
         # R311y393/y394 — the wz<->zenohd unixpipe DATA-PLANE cross-impl (4 legs:
         # forward wz-pub->pico-sub over the DIALED link, reverse pico-pub->wz-sub over
         # the dialed link, the ACCEPTOR-direction pico-pub->wz-sub across the link
@@ -18295,9 +18295,9 @@ layer_z_zenohd_interop() {
         # z_sub/z_pub checked at the lane top; same `--test-threads=1` isolation.
         # Count-guarded (`4 passed`) so a dropped `#[ignore]` (0 selected -> exit 0)
         # reddens instead of silently passing.
-        (cd crates && WZ_ZENOHD_UNIXPIPE_BIN="$zenohd_uxp" cargo test -p wz-integration-tests \
-            --test wz_unixpipe_zenohd_dataplane -- --ignored --quiet --test-threads=1 2>&1 \
-            | tee /dev/stderr | grep -qE '^test result: ok\. 4 passed') || return 1
+        _runci_guarded_test "Z unixpipe dataplane" 4 \
+            env WZ_ZENOHD_UNIXPIPE_BIN="$zenohd_uxp" cargo test -p wz-integration-tests \
+            --test wz_unixpipe_zenohd_dataplane -- --ignored --quiet --test-threads=1 || return 1
     elif [[ -n "${WZ_Z_REQUIRE:-}" ]]; then
         echo "  Layer Z FAIL — required (WZ_Z_REQUIRE set) but unixpipe zenohd absent" >&2
         echo "  ($zenohd_uxp; run: ZENOHD_UNIXPIPE=1 ZENOHD_ALLOW_CLONE=1 scripts/build-zenohd.sh)" >&2
@@ -18327,9 +18327,9 @@ layer_z_zenohd_interop() {
     # from the lane early).
     local zenohd_vsock="${WZ_ZENOHD_VSOCK_BIN:-$PWD/target/zenohd-vsock/zenohd}"
     if [[ -x "$zenohd_vsock" ]]; then
-        (cd crates && WZ_ZENOHD_VSOCK_BIN="$zenohd_vsock" cargo test -p wz-integration-tests \
-            --test wz_vsock_acceptor_zenohd_interop -- --ignored --quiet --test-threads=1 2>&1 \
-            | tee /dev/stderr | grep -qE '^test result: ok\. 1 passed') || return 1
+        _runci_guarded_test "Z vsock acceptor" 1 \
+            env WZ_ZENOHD_VSOCK_BIN="$zenohd_vsock" cargo test -p wz-integration-tests \
+            --test wz_vsock_acceptor_zenohd_interop -- --ignored --quiet --test-threads=1 || return 1
     else
         # R311y422 — NO LONGER WZ_Z_REQUIRE-EXEMPT. The exemption existed because the
         # hosted runner was believed to have neither the vsock_loopback module nor a
@@ -18356,10 +18356,10 @@ ZENOHD_VSOCK=1 ZENOHD_ALLOW_CLONE=1 scripts/build-zenohd.sh)" || return 1
     # as every other leg in this lane.
     local rest_plugin="${WZ_REST_PLUGIN_SO:-$PWD/target/zenohd/libzenoh_plugin_rest.so}"
     if [[ -f "$rest_plugin" ]]; then
-        (cd crates && WZ_ZENOHD_BIN="$zenohd" WZ_REST_PLUGIN_SO="$rest_plugin" \
+        _runci_guarded_test "Z rest interop" 2 \
+            env WZ_ZENOHD_BIN="$zenohd" WZ_REST_PLUGIN_SO="$rest_plugin" \
             cargo test -p wz-integration-tests \
-            --test wz_rest_zenohd_interop -- --ignored --quiet --test-threads=1 2>&1 \
-            | tee /dev/stderr | grep -qE '^test result: ok\. 2 passed') || return 1
+            --test wz_rest_zenohd_interop -- --ignored --quiet --test-threads=1 || return 1
         # R311y837 (debt 161 + 162) — the Query consolidation wire byte, witnessed
         # on BOTH reference planes and then pinned against wz's own. It rides
         # INSIDE this block because one of its three legs drives zenohd's REST
@@ -18378,11 +18378,11 @@ ZENOHD_VSOCK=1 ZENOHD_ALLOW_CLONE=1 scripts/build-zenohd.sh)" || return 1
         # standing rule: a lane that skips green on a wz artifact it could
         # produce proves nothing.
         (cd crates && cargo build -p wz-ap-demo -p wz-e2e-queryable --quiet) || return 1
-        (cd crates && WZ_ZENOHD_BIN="$zenohd" WZ_REST_PLUGIN_SO="$rest_plugin" \
+        _runci_guarded_test "Z consolidation wire byte" 3 \
+            env WZ_ZENOHD_BIN="$zenohd" WZ_REST_PLUGIN_SO="$rest_plugin" \
             cargo test -p wz-integration-tests \
             --test query_consolidation_wire_byte_divergence \
-            -- --ignored --quiet --test-threads=1 2>&1 \
-            | tee /dev/stderr | grep -qE '^test result: ok\. 3 passed') || return 1
+            -- --ignored --quiet --test-threads=1 || return 1
     else
         _z_unavailable "REST plugin not built ($rest_plugin; build it with \
 scripts/build-zenohd.sh from a source checkout)" || return 1
@@ -18652,9 +18652,9 @@ layer_e5u_router_unixpipe_forward() {
     fi
     (cd crates && cargo build -p wz-ap-demo \
         --features routing-routes,transport-link-unixpipe --quiet) || return 1
-    (cd crates && cargo test -p wz-integration-tests \
-        --test wz_router_unixpipe_forward -- --ignored --test-threads=1 --quiet 2>&1 \
-        | tee /dev/stderr | grep -qE '^test result: ok\. 1 passed') || return 1
+    _runci_guarded_test "E5u router unixpipe forward" 1 \
+        cargo test -p wz-integration-tests \
+        --test wz_router_unixpipe_forward -- --ignored --test-threads=1 --quiet || return 1
 }
 
 # ─── Layer E6 — peer-MESH e2e (R311qg) ─────────────────────────────
@@ -19540,9 +19540,9 @@ layer_e7u_router_hat_unixpipe_forward() {
     #     distinct-zid --connect unixpipe clients through the true-Router.
     (cd crates && cargo build -p wz-ap-demo \
         --features router-hat-router,transport-link-unixpipe --quiet) || return 1
-    (cd crates && cargo test -p wz-integration-tests \
-        --test wz_router_hat_unixpipe_forward -- --ignored --test-threads=1 --quiet 2>&1 \
-        | tee /dev/stderr | grep -qE '^test result: ok\. 1 passed') || return 1
+    _runci_guarded_test "E7u router hat unixpipe forward" 1 \
+        cargo test -p wz-integration-tests \
+        --test wz_router_hat_unixpipe_forward -- --ignored --test-threads=1 --quiet || return 1
 }
 
 # ─── Layer E6u — peer (WhatAmI::Peer) forwarding OVER UNIXPIPE (R311y397) ──
@@ -19582,9 +19582,9 @@ layer_e6u_peer_unixpipe_forward() {
     #     distinct-zid --connect unixpipe clients through the peer.
     (cd crates && cargo build -p wz-ap-demo \
         --features routing-peer,transport-link-unixpipe --quiet) || return 1
-    (cd crates && cargo test -p wz-integration-tests \
-        --test wz_peer_unixpipe_forward -- --ignored --test-threads=1 --quiet 2>&1 \
-        | tee /dev/stderr | grep -qE '^test result: ok\. 1 passed') || return 1
+    _runci_guarded_test "E6u peer unixpipe forward" 1 \
+        cargo test -p wz-integration-tests \
+        --test wz_peer_unixpipe_forward -- --ignored --test-threads=1 --quiet || return 1
 }
 
 # ─── Layer E8 — router-hat CROSS-IMPL vs zenoh-pico (P4 §5.21) ───
@@ -19644,10 +19644,10 @@ layer_e8t_router_hat_hlc_stamp_pico() {
         return 0
     fi
     (cd crates && cargo build -p wz-ap-demo --features router-hat-router,time-hlc --quiet) || return 1
-    (cd crates && cargo test -p wz-integration-tests \
+    _runci_guarded_test "E8t stamps a bare put" 1 \
+        cargo test -p wz-integration-tests \
         --test wz_router_hlc_stamp_to_pico_zsub -- --ignored --quiet --test-threads=1 \
-        --exact wz_router_hat_hlc_stamps_a_bare_put_for_pico_zsub_attachment 2>&1 \
-        | tee /dev/stderr | grep -qE '^test result: ok\. 1 passed') || return 1
+        --exact wz_router_hat_hlc_stamps_a_bare_put_for_pico_zsub_attachment || return 1
     # R2623 — the FULLY FOREIGN leg, on the SAME build as leg 1: a real pico
     # `z_put` publishes the bare Put instead of wz-ap-demo, so the only non-pico
     # hop in the path is the router doing the stamping. Legs 1-3 all put wz on
@@ -19655,10 +19655,10 @@ layer_e8t_router_hat_hlc_stamp_pico() {
     # encoding sits on both ends of their claim; here the Put is encoded and
     # decoded by zenoh-pico. The attribution twins below cover it too, because
     # they vary the ROUTER and the router is shared.
-    (cd crates && cargo test -p wz-integration-tests \
+    _runci_guarded_test "E8t stamps a bare pico put" 1 \
+        cargo test -p wz-integration-tests \
         --test wz_router_hlc_stamp_to_pico_zsub -- --ignored --quiet --test-threads=1 \
-        --exact wz_router_hat_hlc_stamps_a_bare_pico_put_for_pico_zsub_attachment 2>&1 \
-        | tee /dev/stderr | grep -qE '^test result: ok\. 1 passed') || return 1
+        --exact wz_router_hat_hlc_stamps_a_bare_pico_put_for_pico_zsub_attachment || return 1
     # R2624 — the two INBOUND-timestamp arms, on leg 1's build. These need a
     # publisher that chooses its timestamp, which no upstream example is, so they
     # run against `oracles/future-stamp` — a wz-AUTHORED oracle linked to the
@@ -19677,10 +19677,10 @@ layer_e8t_router_hat_hlc_stamp_pico() {
         wz_router_hat_absorbs_an_upstream_timestamp_inside_the_drift_bound \
         wz_router_hat_replaces_an_upstream_timestamp_beyond_the_drift_bound \
         wz_router_hat_told_to_drop_future_timestamps_delivers_nothing; do
-        (cd crates && cargo test -p wz-integration-tests \
+        _runci_guarded_test "E8t arm $_e8t_arm" 1 \
+            cargo test -p wz-integration-tests \
             --test wz_router_hlc_stamp_to_pico_zsub -- --ignored --quiet --test-threads=1 \
-            --exact "$_e8t_arm" 2>&1 \
-            | tee /dev/stderr | grep -qE '^test result: ok\. 1 passed') || return 1
+            --exact "$_e8t_arm" || return 1
     done
     # R2112 (open-debt items 102 + 210) — the CONFIG twin, on the SAME build as
     # leg 1 and deliberately so: it varies an ARGV WORD, not a cargo feature, so
@@ -19688,16 +19688,16 @@ layer_e8t_router_hat_hlc_stamp_pico() {
     # is the only leg that covers the demo's own wiring from `--timestamping` to
     # the forwarder's map; the library unit tests construct the forwarder
     # directly and stay green if the runner drops the value in between.
-    (cd crates && cargo test -p wz-integration-tests \
+    _runci_guarded_test "E8t told not to timestamp" 1 \
+        cargo test -p wz-integration-tests \
         --test wz_router_hlc_stamp_to_pico_zsub -- --ignored --quiet --test-threads=1 \
-        --exact wz_router_hat_told_not_to_timestamp_relays_a_bare_put_unstamped 2>&1 \
-        | tee /dev/stderr | grep -qE '^test result: ok\. 1 passed') || return 1
+        --exact wz_router_hat_told_not_to_timestamp_relays_a_bare_put_unstamped || return 1
     # The negative twin, on its OWN build (no time-hlc).
     (cd crates && cargo build -p wz-ap-demo --features router-hat-router --quiet) || return 1
-    (cd crates && cargo test -p wz-integration-tests \
+    _runci_guarded_test "E8t without time-hlc" 1 \
+        cargo test -p wz-integration-tests \
         --test wz_router_hlc_stamp_to_pico_zsub -- --ignored --quiet --test-threads=1 \
-        --exact wz_router_hat_without_time_hlc_relays_a_bare_put_unstamped 2>&1 \
-        | tee /dev/stderr | grep -qE '^test result: ok\. 1 passed') || return 1
+        --exact wz_router_hat_without_time_hlc_relays_a_bare_put_unstamped || return 1
 }
 
 # ─── Layer E9 — the preset-ap-full COMPOSITION, driven against pico ──
@@ -19746,10 +19746,10 @@ layer_e10_close_frame_on_teardown() {
         _pico_cli_unavailable "Layer E10" || return 1
         return 0
     fi
-    (cd crates && cargo test -p wz-integration-tests \
+    _runci_guarded_test "E10 close frame on teardown" 1 \
+        cargo test -p wz-integration-tests \
         --test close_frame_on_teardown -- --ignored --nocapture --test-threads=1 \
-        --exact who_sends_a_session_close_at_teardown 2>&1 \
-        | tee /dev/stderr | grep -qE '^test result: ok\. 1 passed') || return 1
+        --exact who_sends_a_session_close_at_teardown || return 1
 }
 
 layer_e9_apfull_preset_pico() {
@@ -19769,14 +19769,14 @@ layer_e9_apfull_preset_pico() {
         _pico_cli_unavailable "Layer E9" || return 1
         return 0
     fi
-    (cd crates && cargo test -p wz-integration-tests \
+    _runci_guarded_test "E9 preset acceptor round trip" 1 \
+        cargo test -p wz-integration-tests \
         --test apfull_preset_pico_interop -- --ignored --quiet --test-threads=1 \
-        --exact apfull_preset_acceptor_round_trips_with_a_real_pico_z_put 2>&1 \
-        | tee /dev/stderr | grep -qE '^test result: ok\. 1 passed') || return 1
-    (cd crates && cargo test -p wz-integration-tests \
+        --exact apfull_preset_acceptor_round_trips_with_a_real_pico_z_put || return 1
+    _runci_guarded_test "E9 preset peer forwards" 1 \
+        cargo test -p wz-integration-tests \
         --test apfull_preset_pico_interop -- --ignored --quiet --test-threads=1 \
-        --exact apfull_preset_peer_forwards_between_two_real_pico_clients 2>&1 \
-        | tee /dev/stderr | grep -qE '^test result: ok\. 1 passed') || return 1
+        --exact apfull_preset_peer_forwards_between_two_real_pico_clients || return 1
     # R311y481 — the QUERY PLANE legs, on the SAME preset build above. Each is the
     # first live-foreign witness for an atom whose only prior claim was
     # `codec-parity` (query-selector-parameters / query-attachment /
@@ -19792,18 +19792,18 @@ layer_e9_apfull_preset_pico() {
     # later `cargo build -p wz-ap-demo` had written over the same target path, and
     # the missing Err frame read exactly like a wz defect (see the test file's
     # module doc). The legs each assert a build-discriminating marker for it.
-    (cd crates && cargo test -p wz-integration-tests \
+    _runci_guarded_test "E9 query selector parameters" 1 \
+        cargo test -p wz-integration-tests \
         --test apfull_query_plane_pico_interop -- --ignored --quiet --test-threads=1 \
-        --exact apfull_query_selector_parameters_decoded_by_a_real_pico_queryable 2>&1 \
-        | tee /dev/stderr | grep -qE '^test result: ok\. 1 passed') || return 1
-    (cd crates && cargo test -p wz-integration-tests \
+        --exact apfull_query_selector_parameters_decoded_by_a_real_pico_queryable || return 1
+    _runci_guarded_test "E9 query attachment" 1 \
+        cargo test -p wz-integration-tests \
         --test apfull_query_plane_pico_interop -- --ignored --quiet --test-threads=1 \
-        --exact apfull_query_attachment_decoded_by_a_real_pico_queryable 2>&1 \
-        | tee /dev/stderr | grep -qE '^test result: ok\. 1 passed') || return 1
-    (cd crates && cargo test -p wz-integration-tests \
+        --exact apfull_query_attachment_decoded_by_a_real_pico_queryable || return 1
+    _runci_guarded_test "E9 query reply err" 1 \
+        cargo test -p wz-integration-tests \
         --test apfull_query_plane_pico_interop -- --ignored --quiet --test-threads=1 \
-        --exact apfull_query_reply_err_decoded_by_a_real_pico_z_get 2>&1 \
-        | tee /dev/stderr | grep -qE '^test result: ok\. 1 passed') || return 1
+        --exact apfull_query_reply_err_decoded_by_a_real_pico_z_get || return 1
 }
 
 # ─── Layer E11 — AP-full ADVANCED-PUBSUB against a real zenoh-pico ─────
@@ -19834,24 +19834,24 @@ layer_e11_apfull_advanced_pubsub_pico() {
         _pico_cli_unavailable "Layer E11" || return 1
         return 0
     fi
-    (cd crates && cargo test -p wz-integration-tests \
+    _runci_guarded_test "E11 cache history recovered" 1 \
+        cargo test -p wz-integration-tests \
         --test apfull_advanced_pubsub_pico_interop -- --ignored --quiet --test-threads=1 \
-        --exact apfull_cache_history_recovered_by_a_real_pico_advanced_subscriber 2>&1 \
-        | tee /dev/stderr | grep -qE '^test result: ok\. 1 passed') || return 1
-    (cd crates && cargo test -p wz-integration-tests \
+        --exact apfull_cache_history_recovered_by_a_real_pico_advanced_subscriber || return 1
+    _runci_guarded_test "E11 subscriber recovers history" 1 \
+        cargo test -p wz-integration-tests \
         --test apfull_advanced_pubsub_pico_interop -- --ignored --quiet --test-threads=1 \
-        --exact apfull_advanced_subscriber_recovers_history_from_a_real_pico_cache 2>&1 \
-        | tee /dev/stderr | grep -qE '^test result: ok\. 1 passed') || return 1
+        --exact apfull_advanced_subscriber_recovers_history_from_a_real_pico_cache || return 1
     # R2659 — the THIRD leg, which this lane owned by its `#[ignore]` note and
     # never named. `lane_feature_membership_gate.py` found it: the note says
     # "Layer E11 runs via --ignored" and the two invocations above name the
     # file's OTHER two tests, so it was selected by no lane and had never run on
     # CI since `8bffc0fc` added it. It carries `wz-proves: keyexpr-canon`, so a
     # proof claim rested on a test that never executed.
-    (cd crates && cargo test -p wz-integration-tests \
+    _runci_guarded_test "E11 double star keyexpr" 1 \
+        cargo test -p wz-integration-tests \
         --test apfull_advanced_pubsub_pico_interop -- --ignored --quiet --test-threads=1 \
-        --exact apfull_double_star_adv_keyexpr_does_not_crash_a_real_pico_peer 2>&1 \
-        | tee /dev/stderr | grep -qE '^test result: ok\. 1 passed') || return 1
+        --exact apfull_double_star_adv_keyexpr_does_not_crash_a_real_pico_peer || return 1
 }
 
 # ─── Layer E12 — AP-full ADMINSPACE plane against a real zenoh-pico ────
@@ -19899,10 +19899,10 @@ layer_e12_apfull_adminspace_pico() {
         apfull_adminspace_write_gate_refuses_an_unpermitted_pico_put \
         apfull_router_hat_linkstate_decoded_by_a_real_pico_z_get \
         apfull_storage_host_hotreload_state_flip_seen_by_a_real_pico; do
-        (cd crates && cargo test -p wz-integration-tests \
+        _runci_guarded_test "E12 adminspace $leg" 1 \
+            cargo test -p wz-integration-tests \
             --test apfull_adminspace_pico_interop -- --ignored --quiet --test-threads=1 \
-            --exact "$leg" 2>&1 \
-            | tee /dev/stderr | grep -qE '^test result: ok\. 1 passed') || return 1
+            --exact "$leg" || return 1
     done
 }
 
@@ -21037,14 +21037,14 @@ layer_c1bv_dynamic_volume_loading() {
     # The host: dlopen, the gate, the mirror rebuild, put/delete/entries across the
     # boundary, and the out-of-band counters that establish the host really called
     # THROUGH the vtable. Drives the REAL `.so` built above.
-    (cd crates && cargo test -p wz-runtime-tokio --no-default-features \
-        --features storage-mgr-dynamic-volume-loading --lib --quiet dynamic_volume:: 2>&1 \
-        | tee /dev/stderr | grep -qE '^test result: ok\. [0-9]+ passed') || return 1
+    _runci_guarded_test "C1bv host" + \
+        cargo test -p wz-runtime-tokio --no-default-features \
+        --features storage-mgr-dynamic-volume-loading --lib --quiet dynamic_volume:: || return 1
     # The WIRE half: the storage-add payload's volume selection, which is what
     # makes a loaded volume reachable from a foreign client at all.
-    (cd crates && cargo test -p wz-session-core --features adminspace-config-hotreload \
-        --lib --quiet adminspace::tests::config_hotreload:: 2>&1 \
-        | tee /dev/stderr | grep -qE '^test result: ok\. [0-9]+ passed') || return 1
+    _runci_guarded_test "C1bv wire" + \
+        cargo test -p wz-session-core --features adminspace-config-hotreload \
+        --lib --quiet adminspace::tests::config_hotreload:: || return 1
     (cd crates && cargo clippy -p wz-runtime-tokio --no-default-features \
         --features storage-mgr-dynamic-volume-loading --all-targets -- -D warnings) || return 1
     (cd crates && cargo clippy -p wz-volume-abi -p wz-volume-example --all-targets \
@@ -21074,10 +21074,10 @@ layer_e14_apfull_dynamic_volume_pico() {
         apfull_dynamic_volume_survives_a_host_restart_through_the_loaded_so \
         apfull_without_the_loaded_volume_the_same_payload_mounts_nothing \
         apfull_a_non_volume_shared_object_is_refused_and_the_node_survives; do
-        (cd crates && cargo test -p wz-integration-tests \
+        _runci_guarded_test "E14 dynamic volume $leg" 1 \
+            cargo test -p wz-integration-tests \
             --test apfull_dynamic_volume_pico_interop -- --ignored --quiet --test-threads=1 \
-            --exact "$leg" 2>&1 \
-            | tee /dev/stderr | grep -qE '^test result: ok\. 1 passed') || return 1
+            --exact "$leg" || return 1
     done
 }
 
@@ -21096,10 +21096,10 @@ layer_e13_apfull_storage_plane_pico() {
         apfull_storage_plane_is_volatile_across_a_restart_without_the_durable_volume \
         apfull_storage_del_stops_serving_a_real_pico_get \
         apfull_storage_gc_sweeps_a_wildcard_update_a_real_pico_registered; do
-        (cd crates && cargo test -p wz-integration-tests \
+        _runci_guarded_test "E13 storage plane $leg" 1 \
+            cargo test -p wz-integration-tests \
             --test apfull_storage_plane_pico_interop -- --ignored --quiet --test-threads=1 \
-            --exact "$leg" 2>&1 \
-            | tee /dev/stderr | grep -qE '^test result: ok\. 1 passed') || return 1
+            --exact "$leg" || return 1
     done
 }
 

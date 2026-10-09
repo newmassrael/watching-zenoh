@@ -504,6 +504,15 @@ if ! python3 scripts/lib/count_guard_lint.py; then
     echo "          Bypass with \`git push --no-verify\` only for genuine hotfixes." >&2
     exit 1
 fi
+# Item 858 — a cargo test piped into `grep -q`, with or without a `tee`, races a
+# SIGPIPE under pipefail; the lint derives the shape from run-ci.sh (0.1s).
+if ! python3 scripts/lib/build_evidence_lint.py; then
+    echo "" >&2
+    echo "pre-push: [gate 2c2] run-ci.sh pipes a build into grep -q or discards its output." >&2
+    echo "          Use _runci_guarded_test <label> <N> cargo test ...; the line above names it." >&2
+    echo "          Bypass with \`git push --no-verify\` only for genuine hotfixes." >&2
+    exit 1
+fi
 
 # ─── gate 2c3 — the count guards this push reaches, from the cache (item 898) ─
 # grades: worktree

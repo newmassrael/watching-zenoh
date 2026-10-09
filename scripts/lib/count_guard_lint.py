@@ -277,6 +277,26 @@ def test_fn_census(path: Path) -> tuple[int, int, bool]:
     return plain, ignored, not conditional
 
 
+_BARE_FIXTURE = (
+    "    (cd crates && cargo test -p p --test t -- --ignored --quiet 2>&1 \\\n"
+    "        | tee /dev/stderr | grep -qE '^test result: ok\\. 3 passed') || return 1\n"
+)
+
+
+def _bare_parser_selftest() -> None:
+    """The bare spelling's parser must still find a bare guard in a fixture.
+
+    The real file holds none since item 858 (see the floor comment in `main`), so
+    a parser that quietly stopped recognising the shape would otherwise be
+    unobservable until the shape came back.
+    """
+    found = guard_segments(_BARE_FIXTURE)
+    assert len(found) == 1 and GUARD_RE.search(found[0][1]).group(1) == "3", (
+        "count-guard lint: the bare-spelling parser no longer recognises a bare "
+        f"`| grep -qE '^test result: ok. N passed'` guard in its own fixture: {found}"
+    )
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--verbose", action="store_true")
@@ -487,7 +507,17 @@ def main() -> int:
     # The floor is PER SPELLING for the same reason the report is: a parser that
     # stopped recognising `_runci_guarded_test` would still clear a joint floor
     # on the 26 bare guards, which is exactly the silence item 126 is about.
-    for name in ("bare", "helper"):
+    #
+    # R3171 (open-debt item 858) — THE BARE SPELLING NO LONGER HAS A FLOOR, AND
+    # THAT IS THE POINT. Every bare `| tee | grep -qE` guard moved to
+    # `_runci_guarded_test` (the shape races a SIGPIPE under pipefail), and
+    # `build_evidence_lint.py` now refuses the shape outright, so the population
+    # is legitimately ZERO. A floor on it would redden the repair. What the
+    # floor guarded was the PARSER, not the population, so the parser is held
+    # directly: `_bare_parser_selftest` reads a fixture and must find its guard,
+    # which stays true whatever `run-ci.sh` holds.
+    _bare_parser_selftest()
+    for name in ("helper",):
         if per_spelling[name][0]:
             continue
         print(

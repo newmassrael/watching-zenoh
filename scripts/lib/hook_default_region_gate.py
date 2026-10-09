@@ -167,6 +167,14 @@ REQUIRED: tuple[Required, ...] = (
         judges=True,
     ),
     Required(
+        ("scripts/lib/build_evidence_lint.py",),
+        "0.1",
+        "item 858: a cargo test piped into `grep -q`, with or without a `tee`, "
+        "races a SIGPIPE under pipefail and reds a run whose tests passed; the "
+        "lint derives the shape from run-ci.sh and holds it at zero",
+        judges=True,
+    ),
+    Required(
         ("scripts/lib/hook_default_region_gate.py",),
         "0.1",
         "this table: without it the rows above can be moved below the "

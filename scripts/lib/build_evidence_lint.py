@@ -48,6 +48,15 @@ one unpiped step and then nothing, so the failing test had to be read out of a
 different lane's log. A population counted by hand and declared complete had
 leaked the class twice; this is the gate.
 
+R3171 (item 858) closed the exemption this gate first carried for a `tee` placed
+between the build and the reader. The `tee` kept the evidence, which is what the
+exemption rested on, but not the other half of the defect: the reader still
+leaves at its first match, the `tee` takes the SIGPIPE on its next write, and
+`pipefail` reports it. A shell miniature of it exits 141 on a run whose summary
+matched. 39 call sites in 14 layers carried the shape and were moved to
+`_runci_guarded_test`, which captures instead of racing; the gate now holds the
+population at zero without an exemption.
+
 It reads LOGICAL lines (a trailing backslash joins the next one, so a pipe on the
 line after the build still counts), splits each on `&&`, `||` and `;`, and flags a
 segment that holds a build AND a lone `|` into `grep -q`. A comment is not a
@@ -115,9 +124,19 @@ def piped_builds(lines: list[str]) -> list[tuple[int, str]]:
     that early exit. A command list is split on `&&`, `||` and `;` first, so
     only a pipe INSIDE one command counts, and a comment is not a command.
 
-    A `tee` between the build and the reader keeps the stream, so that shape
-    does not lose the evidence and is NOT this gate's subject: what it still
-    risks is the SIGPIPE race alone, a different defect with its own count.
+    R3171 (open-debt item 858) — A `tee` BETWEEN THE BUILD AND THE READER IS NO
+    LONGER AN EXEMPTION. It keeps the stream, so that shape does not lose the
+    evidence, which is why it was exempt; but the reader is still `grep -q`,
+    which leaves at its first match, and the `tee` then takes the SIGPIPE on its
+    next write. Under `set -o pipefail` that is the pipeline's status, so a run
+    whose tests all PASSED goes red whenever the build prints anything after the
+    summary line it matched (a lib crate's `Doc-tests` section, a second test
+    binary, a trailing warning). Reproduced in miniature: a producer printing
+    the matching line, then 0.3s later two more lines, through `tee | grep -q`
+    under pipefail, exits 141. The race is the same defect as the evidence-less
+    shape and shares its remedy, so it shares its gate: the exemption was a
+    claim that the risk was "a different defect with its own count", and the
+    count was 39 call sites in 14 layers.
     """
     found: list[tuple[int, str]] = []
     for at, text in logical_lines(lines):
@@ -127,8 +146,6 @@ def piped_builds(lines: list[str]) -> list[tuple[int, str]]:
             build = BUILD.search(segment)
             reader = PIPED_GREP_Q.search(segment)
             if not build or not reader or reader.start() < build.start():
-                continue
-            if re.search(r"\btee\b", segment[build.start() : reader.start()]):
                 continue
             found.append((at, segment.strip()))
     return found
@@ -141,6 +158,11 @@ def selftest() -> None:
         "        && cargo test -p x --quiet 2>&1 | grep -qE '^test result: ok\\. 5 passed' \\",
         "    cargo test -p x --quiet 2>&1 \\\n        | grep -qE '^test result: ok\\. 5 passed'",
         "    cargo test -p x --quiet | grep -q passed",
+        # R3171 — a `tee` in between kept the stream and used to be exempt; the
+        # reader's early exit still hands the `tee` a SIGPIPE under pipefail.
+        "    cargo test -p x --quiet 2>&1 | tee /dev/stderr | grep -qE 'passed'",
+        "    cargo test -p x --quiet 2>&1 \\\n        | tee /dev/stderr | grep -qE 'passed'",
+        "    WZ_X=\"$y\" cargo test -p x --quiet 2>&1 | tee /dev/stderr | grep -Eq 'passed'",
     ]
     clean = [
         "    _runci_guarded_test C1x 5 cargo test -p x --quiet \\\n        || return 1",
@@ -148,7 +170,6 @@ def selftest() -> None:
         "    grep -qE '^test result: ok\\. 5 passed' <<<\"$out\" || return 1",
         "    # cargo test -p x 2>&1 | grep -qE 'passed' is the shape this forbids",
         "    cargo test -p x --quiet 2>&1 | tee /dev/stderr",
-        "    cargo test -p x --quiet 2>&1 | tee /dev/stderr | grep -qE 'passed'",
         "    cargo test -p x --quiet || echo x | grep -q x",
     ]
     for text in flagged:
@@ -184,9 +205,10 @@ def main() -> int:
         for at, segment in piped_builds(lines):
             findings.append(
                 f"{path.relative_to(ROOT)}:{at + 1}: a BUILD is piped into "
-                f"`grep -q`, which keeps nothing, so a red carries no evidence "
-                f"and, under `set -o pipefail`, its upstream races a SIGPIPE "
-                f"against the reader's early exit. Run it through "
+                f"`grep -q`, which leaves at its first match: without a `tee` a "
+                f"red carries no evidence, and with one the `tee` takes the "
+                f"SIGPIPE on its next write, which `set -o pipefail` turns into "
+                f"a red for a run whose tests all passed (item 858). Run it through "
                 f"`_runci_guarded_test <label> <N> cargo test ...`, which streams "
                 f"the output and asserts the captured copy.\n      "
                 f"{segment[:120]}"
