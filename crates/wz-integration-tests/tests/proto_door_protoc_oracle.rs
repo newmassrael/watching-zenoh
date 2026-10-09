@@ -89,6 +89,18 @@
 //! `libprotoc` and `libprotobuf-dev` `.deb` files into a directory, then run
 //! this test with `WZ_PROTOC_BIN=<dir>/usr/bin/protoc` and
 //! `LD_LIBRARY_PATH=<dir>/usr/lib/x86_64-linux-gnu`.
+//!
+//! ## The value door is judged here too
+//!
+//! `wz_dissect_proto_encode` writes the wire bytes of a message from JSON field
+//! values, and the last section of this file holds it to `protoc --encode`, which
+//! writes the bytes of the same message given as text format: the corpus is one
+//! message in both notations per case, and the two byte strings must be equal
+//! (see the section's own comment for the one place, map entries, where the
+//! format leaves the order to the writer). It shares the judge, the arming flag
+//! and the skip rule of the declaration door, so the lane that arms one arms the
+//! other. `WZ_PROTO_VALUES_DUMP=1` prints every case with the door's bytes, for
+//! pointing a second judge of the JSON notation at the same corpus.
 // NO CROSS-IMPL PROOF DECLARATION HERE, for the reason the tcpdump adjudicator
 // next to it gives: `protoc` is a foreign TOOL and not a zenoh implementation,
 // so this file contributes nothing to the cross-implementation accounting.
@@ -99,8 +111,8 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use wz_capi_dissect::{
-    wz_dissect_declarations_diagnose, wz_dissect_declarations_from_proto, wz_dissect_string_free,
-    WzDissectProtoFile, WZ_DISSECT_OK,
+    wz_dissect_declarations_diagnose, wz_dissect_declarations_from_proto, wz_dissect_proto_encode,
+    wz_dissect_string_free, WzDissectProtoFile, WZ_DISSECT_OK,
 };
 
 /// The key pattern every case declares under.
@@ -2526,4 +2538,672 @@ fn the_door_reads_the_nesting_this_file_says_it_does() {
         !door.ok && door.reason.contains("nested more than"),
         "{door:?}"
     );
+}
+
+// ---- the value door: `wz_dissect_proto_encode`, judged by `protoc --encode` ----
+//
+// The value door writes the wire bytes of a message from JSON field values. Its
+// unit tests were written by the person who wrote the writer, from the encoding
+// guide, so they agree with that person's idea of the format. `protoc --encode`
+// is the format's own writer: it reads the same message as TEXT FORMAT and
+// writes the bytes, and the door's bytes for the same message must be the same
+// bytes. The two inputs are different notations of one message, written side by
+// side in each case (`values` for the door, `text` for protoc), so a case that
+// is wrong in one notation shows as a difference rather than as agreement.
+//
+// What is compared is the bytes and nothing else. Map entries are the one place
+// the format leaves the order to the writer, so a case that holds several marks
+// itself `unordered` and is compared as the set of top-level fields `protoc
+// --decode` prints for each side; every other case must match byte for byte.
+//
+// The door refuses what protoc has no counterpart for (a JSON value of the wrong
+// type, a key that is no field), and a refusal is not a thing a text format can
+// be compared on, so those are the unit tests' and not this corpus's.
+
+/// A message in two notations.
+struct ValueCase {
+    name: &'static str,
+    /// `(file name, text)`; the first is the root file.
+    files: Vec<(&'static str, &'static str)>,
+    root: &'static str,
+    /// What the door reads.
+    values: &'static str,
+    /// What `protoc --encode` reads: the same message in text format.
+    text: &'static str,
+    /// Whether the order of the top-level fields on the wire is the writer's to
+    /// choose (several map entries).
+    unordered: bool,
+}
+
+fn value_case(
+    name: &'static str,
+    schema: &'static str,
+    root: &'static str,
+    values: &'static str,
+    text: &'static str,
+) -> ValueCase {
+    ValueCase {
+        name,
+        files: vec![("a.proto", schema)],
+        root,
+        values,
+        text,
+        unordered: false,
+    }
+}
+
+/// The corpus of messages, each in the door's notation and in text format.
+fn value_corpus() -> Vec<ValueCase> {
+    let mut v = vec![
+        // The protobuf encoding guide's examples.
+        value_case(
+            "the guide's varint 150",
+            "syntax = \"proto3\";\nmessage M { int32 a = 1; }",
+            "M",
+            r#"{"a":150}"#,
+            "a: 150",
+        ),
+        value_case(
+            "the guide's string testing",
+            "syntax = \"proto3\";\nmessage M { string b = 2; }",
+            "M",
+            r#"{"b":"testing"}"#,
+            "b: \"testing\"",
+        ),
+        value_case(
+            "the guide's nested message",
+            "syntax = \"proto3\";\nmessage T1 { int32 a = 1; } message M { T1 c = 3; }",
+            "M",
+            r#"{"c":{"a":150}}"#,
+            "c { a: 150 }",
+        ),
+        value_case(
+            "the guide's packed run",
+            "syntax = \"proto2\";\nmessage M { repeated int32 d = 4 [packed=true]; }",
+            "M",
+            r#"{"d":[3,270,86942]}"#,
+            "d: 3 d: 270 d: 86942",
+        ),
+        // Integers.
+        value_case(
+            "negative int32 and int64 are ten bytes",
+            "syntax = \"proto3\";\nmessage M { int32 a = 1; int64 b = 2; }",
+            "M",
+            r#"{"a":-1,"b":"-9223372036854775808"}"#,
+            "a: -1 b: -9223372036854775808",
+        ),
+        value_case(
+            "sint32 and sint64 are zigzag",
+            "syntax = \"proto3\";\nmessage M { sint32 a = 1; sint64 b = 2; sint32 c = 3; sint32 d = 4; }",
+            "M",
+            r#"{"a":-1,"b":"-2","c":2147483647,"d":-2147483648}"#,
+            "a: -1 b: -2 c: 2147483647 d: -2147483648",
+        ),
+        value_case(
+            "unsigned and large 64-bit values keep every bit",
+            "syntax = \"proto3\";\nmessage M { uint32 a = 1; uint64 b = 2; int64 c = 3; }",
+            "M",
+            r#"{"a":4294967295,"b":"18446744073709551615","c":9007199254740993}"#,
+            "a: 4294967295 b: 18446744073709551615 c: 9007199254740993",
+        ),
+        value_case(
+            "fixed width integers are little endian",
+            "syntax = \"proto3\";\nmessage M { fixed32 a = 1; sfixed32 b = 2; fixed64 c = 3; sfixed64 d = 4; }",
+            "M",
+            r#"{"a":1,"b":-1,"c":"18446744073709551615","d":"-2"}"#,
+            "a: 1 b: -1 c: 18446744073709551615 d: -2",
+        ),
+        // Floats.
+        value_case(
+            "float and double values",
+            "syntax = \"proto3\";\nmessage M { float a = 1; double b = 2; float c = 3; double d = 4; }",
+            "M",
+            r#"{"a":1.5,"b":-2.25,"c":0.1,"d":0.1}"#,
+            "a: 1.5 b: -2.25 c: 0.1 d: 0.1",
+        ),
+        value_case(
+            "the largest float and a double beyond it",
+            "syntax = \"proto3\";\nmessage M { float a = 1; double b = 2; }",
+            "M",
+            r#"{"a":3.4028235e38,"b":1e300}"#,
+            "a: 3.4028235e38 b: 1e300",
+        ),
+        value_case(
+            "not-a-number and the infinities",
+            "syntax = \"proto3\";\nmessage M { float a = 1; double b = 2; double c = 3; }",
+            "M",
+            r#"{"a":"NaN","b":"Infinity","c":"-Infinity"}"#,
+            "a: nan b: inf c: -inf",
+        ),
+        value_case(
+            "negative zero is written and zero is not",
+            "syntax = \"proto3\";\nmessage M { float a = 1; double b = 2; float c = 3; double d = 4; }",
+            "M",
+            r#"{"a":-0.0,"b":-0.0,"c":0.0,"d":0.0}"#,
+            "a: -0.0 b: -0.0 c: 0.0 d: 0.0",
+        ),
+        // Other scalars.
+        value_case(
+            "bool, string and bytes",
+            "syntax = \"proto3\";\nmessage M { bool a = 1; string b = 2; bytes c = 3; }",
+            "M",
+            r#"{"a":true,"b":"h\u00e9 \ud83d\ude00","c":"AQL/"}"#,
+            "a: true b: \"h\\303\\251 \\360\\237\\230\\200\" c: \"\\001\\002\\377\"",
+        ),
+        value_case(
+            "proto3 fields at their defaults are not written",
+            "syntax = \"proto3\";\nmessage M { int32 a = 1; string b = 2; bytes c = 3; bool d = 4; double e = 5; float f = 6; }",
+            "M",
+            r#"{"a":0,"b":"","c":"","d":false,"e":0,"f":0}"#,
+            "a: 0 b: \"\" c: \"\" d: false e: 0 f: 0",
+        ),
+        // Enums.
+        value_case(
+            "an enum by name, by number and a negative one",
+            "syntax = \"proto3\";\nenum E { Z = 0; ONE = 1; NEG = -1; }\nmessage M { E a = 1; E b = 2; E c = 3; E d = 4; }",
+            "M",
+            r#"{"a":"ONE","b":1,"c":"NEG","d":"Z"}"#,
+            "a: ONE b: 1 c: NEG d: Z",
+        ),
+        // Presence.
+        value_case(
+            "a oneof member at its default is written",
+            "syntax = \"proto3\";\nmessage M { oneof pick { int32 a = 1; string b = 2; } }",
+            "M",
+            r#"{"a":0}"#,
+            "a: 0",
+        ),
+        value_case(
+            "a proto3 optional at its default is written",
+            "syntax = \"proto3\";\nmessage M { optional int32 a = 1; optional string b = 2; int32 c = 3; }",
+            "M",
+            r#"{"a":0,"b":""}"#,
+            "a: 0 b: \"\"",
+        ),
+        value_case(
+            "an empty nested message is written, a default one is not",
+            "syntax = \"proto3\";\nmessage N { int32 x = 1; } message M { N n = 1; N m = 2; }",
+            "M",
+            r#"{"n":{},"m":{"x":0}}"#,
+            "n {} m { x: 0 }",
+        ),
+        value_case(
+            "proto2 fields are written at their defaults",
+            "syntax = \"proto2\";\nmessage M { optional int32 a = 1 [default = 7]; required int32 r = 2; optional string s = 3; }",
+            "M",
+            r#"{"a":0,"r":0}"#,
+            "a: 0 r: 0",
+        ),
+        // Order.
+        value_case(
+            "fields are written by number whatever the order given",
+            "syntax = \"proto3\";\nmessage M { int32 high = 9; int32 low = 1; int32 mid = 5; }",
+            "M",
+            r#"{"mid":2,"high":3,"low":1}"#,
+            "mid: 2 high: 3 low: 1",
+        ),
+        // Repeated.
+        value_case(
+            "proto3 packs, and packed = false does not",
+            "syntax = \"proto3\";\nmessage M { repeated int32 a = 1; repeated int32 b = 2 [packed=false]; repeated sint64 c = 3; }",
+            "M",
+            r#"{"a":[1,2,3],"b":[4,5],"c":[-1,1]}"#,
+            "a: 1 a: 2 a: 3 b: 4 b: 5 c: -1 c: 1",
+        ),
+        value_case(
+            "proto2 does not pack and packed = true does",
+            "syntax = \"proto2\";\nmessage M { repeated int32 a = 1; repeated fixed32 b = 2 [packed=true]; repeated bool c = 3; }",
+            "M",
+            r#"{"a":[1,2,3],"b":[1,2],"c":[true,false]}"#,
+            "a: 1 a: 2 a: 3 b: 1 b: 2 c: true c: false",
+        ),
+        value_case(
+            "packed enums, and repeated strings, bytes and messages",
+            "syntax = \"proto3\";\nenum E { Z = 0; ONE = 1; }\nmessage N { int32 x = 1; }\n\
+             message M { repeated E e = 1; repeated string s = 2; repeated bytes b = 3; repeated N n = 4; }",
+            "M",
+            r#"{"e":["ONE","Z"],"s":["a","","b"],"b":["AQ==","Ag"],"n":[{"x":1},{},{"x":2}]}"#,
+            "e: ONE e: Z s: \"a\" s: \"\" s: \"b\" b: \"\\001\" b: \"\\002\" n { x: 1 } n {} n { x: 2 }",
+        ),
+        // Maps.
+        value_case(
+            "a map with a default value writes both key and value",
+            "syntax = \"proto3\";\nmessage M { map<string, int32> m = 1; }",
+            "M",
+            r#"{"m":{"":0}}"#,
+            "m { key: \"\" value: 0 }",
+        ),
+        value_case(
+            "a map of messages",
+            "syntax = \"proto3\";\nmessage N { int32 x = 1; } message M { map<bool, N> m = 1; map<sint32, string> s = 2; }",
+            "M",
+            r#"{"m":{"true":{"x":1}},"s":{"-3":"c"}}"#,
+            "m { key: true value { x: 1 } } s { key: -3 value: \"c\" }",
+        ),
+        // Structure.
+        value_case(
+            "a message nested three deep",
+            "syntax = \"proto3\";\nmessage M { int32 v = 1; M next = 2; }",
+            "M",
+            r#"{"v":1,"next":{"v":2,"next":{"v":3}}}"#,
+            "v: 1 next { v: 2 next { v: 3 } }",
+        ),
+    ];
+    // Several map entries: the order on the wire is the writer's.
+    v.push(ValueCase {
+        unordered: true,
+        ..value_case(
+            "several map entries are the same set of fields",
+            "syntax = \"proto3\";\nmessage M { map<int32, string> m = 1; map<string, int32> n = 2; }",
+            "M",
+            r#"{"m":{"10":"x","2":"y","-3":"z"},"n":{"b":2,"a":1}}"#,
+            "m { key: 10 value: \"x\" } m { key: 2 value: \"y\" } m { key: -3 value: \"z\" } \
+             n { key: \"b\" value: 2 } n { key: \"a\" value: 1 }",
+        )
+    });
+    // Two files: the schema is the list, and the root is in the first.
+    v.push(ValueCase {
+        name: "a message from an imported file",
+        files: vec![
+            (
+                "a.proto",
+                "syntax = \"proto3\";\npackage p;\nimport \"b.proto\";\nmessage M { q.B b = 1; int32 id = 2; }",
+            ),
+            (
+                "b.proto",
+                "syntax = \"proto3\";\npackage q;\nmessage B { sint32 v = 3; }",
+            ),
+        ],
+        root: "p.M",
+        values: r#"{"b":{"v":-5},"id":7}"#,
+        text: "b { v: -5 } id: 7",
+        unordered: false,
+    });
+    v
+}
+
+/// The door's bytes for one message, through the C ABI, or the verdict's reason.
+fn encode_with_the_door(
+    root: &str,
+    files: &[(&str, &str)],
+    values: &str,
+) -> Result<Vec<u8>, String> {
+    let root = CString::new(root).expect("no NUL");
+    let values = CString::new(values).expect("no NUL");
+    let names: Vec<CString> = files
+        .iter()
+        .map(|(n, _)| CString::new(*n).expect("no NUL"))
+        .collect();
+    let entries: Vec<WzDissectProtoFile> = files
+        .iter()
+        .zip(&names)
+        .map(|((_, text), name)| WzDissectProtoFile {
+            name: name.as_ptr(),
+            text: text.as_ptr(),
+            text_len: text.len(),
+        })
+        .collect();
+    let mut out: *mut c_char = std::ptr::null_mut();
+    // SAFETY: every pointer is to a live local; the strings are NUL-terminated
+    // and the buffers are as long as the lengths say.
+    let rc = unsafe {
+        wz_dissect_proto_encode(
+            root.as_ptr(),
+            entries.as_ptr(),
+            entries.len(),
+            0,
+            values.as_ptr(),
+            &mut out,
+        )
+    };
+    assert_eq!(rc, WZ_DISSECT_OK, "the door answers every well-formed call");
+    // SAFETY: OK came with a string this library owns.
+    let doc = unsafe { CStr::from_ptr(out) }
+        .to_str()
+        .expect("utf-8")
+        .to_string();
+    // SAFETY: `out` came from the door and is freed once.
+    unsafe { wz_dissect_string_free(out) };
+    if !doc.contains("\"ok\":true") {
+        return Err(json_string(&doc, "message").unwrap_or(doc));
+    }
+    let hex = json_string(&doc, "payload").ok_or_else(|| format!("no payload in {doc}"))?;
+    let bytes = (0..hex.len())
+        .step_by(2)
+        .map(|i| u8::from_str_radix(&hex[i..i + 2], 16).map_err(|e| e.to_string()))
+        .collect::<Result<Vec<u8>, String>>()?;
+    assert_eq!(
+        json_count(&doc, "payload_bytes"),
+        Some(bytes.len()),
+        "the count is the length of the hex"
+    );
+    Ok(bytes)
+}
+
+/// `protoc --encode` of a text-format message, or what it said.
+fn protoc_encode(
+    judge: &Judge,
+    dir: &Path,
+    root_file: &str,
+    root: &str,
+    text: &str,
+) -> Result<Vec<u8>, String> {
+    use std::io::Write;
+    let mut child = Command::new(&judge.bin)
+        .args(judge.flags())
+        .arg(format!("--proto_path={}", dir.display()))
+        .arg(format!("--encode={root}"))
+        .arg(root_file)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .map_err(|e| format!("protoc did not run: {e}"))?;
+    child
+        .stdin
+        .take()
+        .expect("stdin was piped")
+        .write_all(text.as_bytes())
+        .map_err(|e| format!("write the text format: {e}"))?;
+    let out = child
+        .wait_with_output()
+        .map_err(|e| format!("protoc did not finish: {e}"))?;
+    if out.status.success() {
+        Ok(out.stdout)
+    } else {
+        Err(String::from_utf8_lossy(&out.stderr).into_owned())
+    }
+}
+
+/// `protoc --decode` of wire bytes, as the text format it prints.
+fn protoc_decode(
+    judge: &Judge,
+    dir: &Path,
+    root_file: &str,
+    root: &str,
+    bytes: &[u8],
+) -> Result<String, String> {
+    use std::io::Write;
+    let mut child = Command::new(&judge.bin)
+        .args(judge.flags())
+        .arg(format!("--proto_path={}", dir.display()))
+        .arg(format!("--decode={root}"))
+        .arg(root_file)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .map_err(|e| format!("protoc did not run: {e}"))?;
+    child
+        .stdin
+        .take()
+        .expect("stdin was piped")
+        .write_all(bytes)
+        .map_err(|e| format!("write the bytes: {e}"))?;
+    let out = child
+        .wait_with_output()
+        .map_err(|e| format!("protoc did not finish: {e}"))?;
+    if out.status.success() {
+        Ok(String::from_utf8_lossy(&out.stdout).into_owned())
+    } else {
+        Err(String::from_utf8_lossy(&out.stderr).into_owned())
+    }
+}
+
+/// The top-level fields of a `protoc --decode` print, sorted: a field starts at
+/// a line with no indentation and a nested one is indented under it. Two prints
+/// of the same set of fields in different orders are equal here.
+fn top_level_fields_sorted(decoded: &str) -> Vec<String> {
+    let mut fields: Vec<String> = Vec::new();
+    for line in decoded.lines() {
+        if line.starts_with(char::is_whitespace) || line == "}" {
+            if let Some(last) = fields.last_mut() {
+                last.push('\n');
+                last.push_str(line);
+            }
+        } else {
+            fields.push(line.to_string());
+        }
+    }
+    fields.sort();
+    fields
+}
+
+fn hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+/// The door's bytes against `protoc`'s for one case: `None` when they agree,
+/// else what differs. An `unordered` case is compared as the sorted top-level
+/// fields each side decodes to, with `decode` supplying the decoding.
+fn compare_bytes(
+    case: &ValueCase,
+    door: &[u8],
+    protoc: &[u8],
+    decode: &dyn Fn(&[u8]) -> Result<String, String>,
+) -> Option<String> {
+    if door == protoc {
+        return None;
+    }
+    if case.unordered {
+        return match (decode(door), decode(protoc)) {
+            (Ok(a), Ok(b)) => {
+                (top_level_fields_sorted(&a) != top_level_fields_sorted(&b)).then(|| {
+                    format!(
+                        "the fields differ\n  door:   {}\n  protoc: {}",
+                        hex(door),
+                        hex(protoc)
+                    )
+                })
+            }
+            (a, b) => Some(format!("a side could not be decoded: {a:?} / {b:?}")),
+        };
+    }
+    Some(format!(
+        "the bytes differ\n  door:   {}\n  protoc: {}",
+        hex(door),
+        hex(protoc)
+    ))
+}
+
+/// THE ADJUDICATOR FOR THE VALUE DOOR: the bytes `wz_dissect_proto_encode` writes
+/// for each message of the corpus are the bytes `protoc --encode` writes for the
+/// same message in text format.
+///
+/// The `protoc` in the name is LOAD-BEARING for the reason the adjudicator above
+/// gives: Layer C0's skip-token rule reads the FUNCTION name.
+#[test]
+fn the_proto_value_door_agrees_with_protoc_encode_over_the_corpus() {
+    let required = std::env::var("WZ_PROTOC_REQUIRE").is_ok();
+    let judge = protoc().and_then(|(bin, version)| measure_judge(bin, version));
+    let judge = match judge {
+        Ok(j) => j,
+        Err(why) => {
+            if required {
+                panic!(
+                    "WZ_PROTOC_REQUIRE is set and protoc cannot judge: {why}. The value door has \
+                     no other adjudicator for its bytes, so a lane that armed this flag was \
+                     asking for the measurement, not for a skip"
+                );
+            }
+            eprintln!(
+                "skip: protoc cannot judge here ({why}); set WZ_PROTOC_REQUIRE=1 to make that a failure"
+            );
+            return;
+        }
+    };
+
+    let corpus = value_corpus();
+    let mut names: Vec<&str> = corpus.iter().map(|c| c.name).collect();
+    names.sort_unstable();
+    let before = names.len();
+    names.dedup();
+    assert_eq!(before, names.len(), "two value cases share a name");
+
+    // Every case printed, with the door's bytes, when asked: the corpus is
+    // data, and another judge of the JSON notation can be pointed at it.
+    let dump = std::env::var("WZ_PROTO_VALUES_DUMP").is_ok();
+    let mut disagreements: Vec<String> = Vec::new();
+    let (mut compared, mut unordered, mut bytes_total) = (0, 0, 0);
+    for case in &corpus {
+        let dir = tempfile::tempdir().expect("tempdir for the schemas");
+        for (name, text) in &case.files {
+            std::fs::write(dir.path().join(name), text).expect("write the schema");
+        }
+        let root_file = case.files[0].0;
+        let say = |what: String| format!("[{}] {what}", case.name);
+        let door = match encode_with_the_door(case.root, &case.files, case.values) {
+            Ok(bytes) => bytes,
+            Err(why) => {
+                disagreements.push(say(format!("the door refused it: {why}")));
+                continue;
+            }
+        };
+        let protoc = match protoc_encode(&judge, dir.path(), root_file, case.root, case.text) {
+            Ok(bytes) => bytes,
+            Err(why) => {
+                disagreements.push(say(format!(
+                    "the corpus is wrong: protoc refused the text format: {why}"
+                )));
+                continue;
+            }
+        };
+        if dump {
+            let escaped = |s: &str| {
+                s.replace('\\', "\\\\")
+                    .replace('"', "\\\"")
+                    .replace('\n', "\\n")
+            };
+            let files: Vec<String> = case
+                .files
+                .iter()
+                .map(|(n, t)| format!("[\"{}\",\"{}\"]", escaped(n), escaped(t)))
+                .collect();
+            eprintln!(
+                "VALUES-CASE {{\"name\":\"{}\",\"root\":\"{}\",\"files\":[{}],\"values\":\"{}\",\"door\":\"{}\"}}",
+                escaped(case.name),
+                escaped(case.root),
+                files.join(","),
+                escaped(case.values),
+                hex(&door)
+            );
+        }
+        let decode = |bytes: &[u8]| protoc_decode(&judge, dir.path(), root_file, case.root, bytes);
+        if let Some(diff) = compare_bytes(case, &door, &protoc, &decode) {
+            disagreements.push(say(diff));
+        }
+        compared += 1;
+        unordered += usize::from(case.unordered);
+        bytes_total += protoc.len();
+    }
+
+    eprintln!(
+        "value door vs protoc --encode: {compared} message(s) compared, {unordered} of them as \
+         sets of fields, {bytes_total} byte(s) of protoc's output; judge: {}",
+        judge.version
+    );
+    assert!(
+        compared >= 25 && bytes_total >= 300,
+        "the corpus no longer exercises the writer: {compared} case(s), {bytes_total} byte(s)"
+    );
+    assert!(
+        disagreements.is_empty(),
+        "the value door and protoc disagree on {} point(s):\n\n{}",
+        disagreements.len(),
+        disagreements.join("\n\n")
+    );
+}
+
+/// THE VALUE COMPARISON REPORTS A DOOR THAT DISAGREES, with no protoc: bytes that
+/// differ by one are a disagreement, an unordered case tolerates a reordering of
+/// its top-level fields and nothing else.
+#[test]
+fn the_value_comparison_reports_a_door_that_disagrees() {
+    let case = |unordered| ValueCase {
+        unordered,
+        ..value_case("c", "", "M", "{}", "")
+    };
+    let nothing = |_: &[u8]| -> Result<String, String> { Err("no decoder".to_string()) };
+    let good = [0x08, 0x96, 0x01];
+    assert_eq!(compare_bytes(&case(false), &good, &good, &nothing), None);
+    // One byte off, one byte short, one byte over: each is a difference.
+    for bad in [
+        &[0x08, 0x96, 0x02][..],
+        &[0x08, 0x96][..],
+        &[0x08, 0x96, 0x01, 0x00][..],
+    ] {
+        assert!(compare_bytes(&case(false), bad, &good, &nothing).is_some());
+    }
+    // A reordering is a difference for an ordered case, which is the contract
+    // ("ascending field number").
+    let (ab, ba) = ([0x08, 0x01, 0x10, 0x02], [0x10, 0x02, 0x08, 0x01]);
+    assert!(compare_bytes(&case(false), &ba, &ab, &nothing).is_some());
+    // For an unordered case the decoder says what each side holds.
+    let decode = |bytes: &[u8]| -> Result<String, String> {
+        Ok(match bytes[0] {
+            0x08 => "a: 1\nm {\n  key: 1\n}\nb: 2\n".to_string(),
+            0x10 => "b: 2\na: 1\nm {\n  key: 1\n}\n".to_string(),
+            _ => "a: 9\n".to_string(),
+        })
+    };
+    assert_eq!(compare_bytes(&case(true), &ba, &ab, &decode), None);
+    assert!(compare_bytes(&case(true), &[0x20], &ab, &decode).is_some());
+    // A decoder that fails is not agreement.
+    assert!(compare_bytes(&case(true), &ba, &ab, &nothing).is_some());
+    // The sorting keeps a nested block with its field.
+    assert_eq!(
+        top_level_fields_sorted("b: 2\na {\n  x: 1\n}\n"),
+        vec!["a {\n  x: 1\n}".to_string(), "b: 2".to_string()]
+    );
+}
+
+/// THE VALUE CORPUS NAMES EACH CASE ONCE, covers the arms the door has and keeps
+/// its two notations apart: a case whose text format is empty or equal to its
+/// values would compare a notation with itself.
+#[test]
+fn the_value_corpus_names_each_case_once_and_covers_each_arm() {
+    let corpus = value_corpus();
+    let mut names: Vec<&str> = corpus.iter().map(|c| c.name).collect();
+    names.sort_unstable();
+    let before = names.len();
+    names.dedup();
+    assert_eq!(before, names.len(), "two value cases share a name");
+    assert!(corpus.len() >= 25, "{}", corpus.len());
+    assert!(corpus.iter().any(|c| c.unordered), "no unordered case");
+    assert!(
+        corpus.iter().any(|c| c.files.len() > 1),
+        "no multi-file case"
+    );
+    for c in &corpus {
+        assert!(!c.files.is_empty() && !c.text.is_empty(), "{}", c.name);
+        assert_ne!(c.values, c.text, "{} reads one notation twice", c.name);
+    }
+    // Each notation of the arms the door has is present somewhere in the corpus.
+    let schemas: String = corpus
+        .iter()
+        .flat_map(|c| c.files.iter().map(|(_, t)| *t))
+        .collect::<Vec<_>>()
+        .join("\n");
+    for arm in [
+        "proto2",
+        "proto3",
+        "sint32",
+        "sint64",
+        "fixed32",
+        "sfixed64",
+        "float",
+        "double",
+        "bytes",
+        "enum",
+        "oneof",
+        "optional",
+        "required",
+        "repeated",
+        "map<",
+        "packed=true",
+        "packed=false",
+        "import",
+    ] {
+        assert!(schemas.contains(arm), "no case exercises `{arm}`");
+    }
 }

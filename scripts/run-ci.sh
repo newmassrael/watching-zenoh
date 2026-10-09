@@ -12872,14 +12872,18 @@ layer_c1bn_passive_dissection_features() {
     # machine and wrong for a lane, because a skip prints `ok` and reads as
     # agreement. `WZ_PROTOC_REQUIRE=1` turns absence into a failure, and this
     # job installs both packages so the flag is a statement rather than a gamble.
-    # Ten tests: the adjudicator and the nine controls that keep its comparison
-    # from being one that cannot fail (the corpus's own arms, the two probes of
-    # the protoc that judges, and the door's own bounds). The number was five
-    # until the oracle began measuring its judge, and the hosted run of that
-    # change read `10 passed` and failed on this line: the oracle had run.
+    # Thirteen tests: the two adjudicators (the declaration door's, and the value
+    # door's `wz_dissect_proto_encode`, whose bytes `protoc --encode` writes for
+    # the same message in text format) and the eleven controls that keep their
+    # comparisons from being ones that cannot fail (the corpora's own arms, the
+    # two probes of the protoc that judges, and the door's own bounds). The
+    # number was five until the oracle began measuring its judge, and the hosted
+    # run of that change read `10 passed` and failed on this line: the oracle had
+    # run. It was ten until the value door's adjudicator and its two controls
+    # joined the file.
     out="$(cd crates && WZ_PROTOC_REQUIRE=1 cargo test -p wz-integration-tests \
         --test proto_door_protoc_oracle --quiet 2>&1)" || { echo "$out"; return 1; }
-    grep -qE '^test result: ok\. 10 passed' <<<"$out" || {
+    grep -qE '^test result: ok\. 13 passed' <<<"$out" || {
         echo "  C1bn FAIL: the .proto door oracle did not run"
         echo "$out"; return 1; }
 
