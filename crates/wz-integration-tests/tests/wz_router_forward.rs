@@ -220,7 +220,7 @@ fn run_router_forward_e2e(producer_extra: &[&str]) -> (String, String, String) {
 /// Literal-keyexpr forwarding: the producer publishes a literal Put, the router
 /// forwards it verbatim to the matching subscriber.
 #[test]
-#[ignore = "binary-dep e2e (wz-ap-demo --features routing-routes); Layer E runs via --ignored"]
+#[ignore = "binary-dep e2e (wz-ap-demo --features routing-routes); Layer E5 runs via --ignored"]
 fn wz_router_forwards_put_to_a_matching_subscriber_on_another_face() {
     let _ = run_router_forward_e2e(&[]);
 }
@@ -231,7 +231,7 @@ fn wz_router_forwards_put_to_a_matching_subscriber_on_another_face() {
 /// producer's mapping). The consumer firing is the proof the re-literalization
 /// produced a frame the destination could decode.
 #[test]
-#[ignore = "binary-dep e2e (wz-ap-demo --features routing-routes); Layer E runs via --ignored"]
+#[ignore = "binary-dep e2e (wz-ap-demo --features routing-routes); Layer E5 runs via --ignored"]
 fn wz_router_re_literalizes_an_aliased_put_for_a_literal_subscriber() {
     let (_router, _consumer, producer) = run_router_forward_e2e(&["--declare-id", "9"]);
     // Confirm the producer actually exercised the DeclareKeyexpr-aliased path

@@ -342,7 +342,7 @@ where
 /// foreign client.
 // wz-proves: storage-history wz->zenoh
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[ignore = "binary-dep e2e (zenoh core example z_get); Layer E runs via --ignored"]
+#[ignore = "binary-dep e2e (zenoh core example z_get); Layer Z runs via --ignored"]
 async fn wz_history_storage_replies_every_version_to_a_none_consolidating_zenoh_zget() {
     let leg = zenoh_zget_over_three_versions(HistoryStorage::new(), true).await;
 
@@ -379,7 +379,7 @@ async fn wz_history_storage_replies_every_version_to_a_none_consolidating_zenoh_
 /// the capability rather than about the harness or the selector.
 // wz-proves: storage-history wz->zenoh
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[ignore = "binary-dep e2e (zenoh core example z_get); Layer E runs via --ignored"]
+#[ignore = "binary-dep e2e (zenoh core example z_get); Layer Z runs via --ignored"]
 async fn wz_latest_storage_replies_one_version_to_the_same_zenoh_zget() {
     let leg = zenoh_zget_over_three_versions(MemoryStorage::new(), true).await;
 
@@ -414,7 +414,7 @@ async fn wz_latest_storage_replies_one_version_to_the_same_zenoh_zget() {
 /// sibling can no longer see this capability.
 // wz-proves: storage-history wz->zenoh
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[ignore = "binary-dep e2e (zenoh core example z_get); Layer E runs via --ignored"]
+#[ignore = "binary-dep e2e (zenoh core example z_get); Layer Z runs via --ignored"]
 async fn a_consolidating_zenoh_zget_collapses_the_same_three_versions_to_one() {
     let leg = zenoh_zget_over_three_versions(HistoryStorage::new(), false).await;
 

@@ -266,7 +266,7 @@ fn run_arm(history: bool) -> String {
 // wz-proves: liveliness-historical-samples pico->wz
 // wz-proves: routing-token-tables pico->wz partial
 #[test]
-#[ignore = "binary-dep e2e (wz-ap-demo --features router-hat-router,routing-token-tables + zenoh-pico z_liveliness / z_sub_liveliness); Layer E6i runs via --ignored"]
+#[ignore = "binary-dep e2e (wz-ap-demo --features router-hat-router,routing-token-tables + zenoh-pico z_liveliness / z_sub_liveliness); Layer E7 runs via --ignored"]
 fn wz_router_hat_replays_a_pico_token_to_a_history_subscriber() {
     let captured = run_arm(true);
     let expected = format!("New alive token ('{PICO_TOKEN}')");
@@ -290,7 +290,7 @@ fn wz_router_hat_replays_a_pico_token_to_a_history_subscriber() {
 // wz-proves: none -- anti-vacuity twin for the history arm above; it shows the
 // replay is caused by the CURRENT bit `-h` sets and claims no atom of its own.
 #[test]
-#[ignore = "binary-dep e2e (wz-ap-demo --features router-hat-router,routing-token-tables + zenoh-pico z_liveliness / z_sub_liveliness); Layer E6i runs via --ignored"]
+#[ignore = "binary-dep e2e (wz-ap-demo --features router-hat-router,routing-token-tables + zenoh-pico z_liveliness / z_sub_liveliness); Layer E7 runs via --ignored"]
 fn wz_router_hat_without_history_replays_nothing() {
     let captured = run_arm(false);
     assert!(

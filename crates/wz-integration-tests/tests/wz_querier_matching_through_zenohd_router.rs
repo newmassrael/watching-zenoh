@@ -79,7 +79,7 @@ const MATCHING_TIMEOUT: Duration = Duration::from_secs(25);
 
 // wz-proves: declare-interest zenohd->wz
 #[test]
-#[ignore = "binary-dep e2e (zenohd + wz-ap-demo + zenoh-pico CLI); Layer E runs via --ignored"]
+#[ignore = "binary-dep e2e (zenohd + wz-ap-demo + zenoh-pico CLI); Layer Z runs via --ignored"]
 fn a_wz_querier_matching_listener_behind_zenohd_learns_of_a_pico_queryable() {
     let demo = wz_ap_demo_binary();
     // R311y776 — see the sibling fixture: a stale demo makes a red here point at

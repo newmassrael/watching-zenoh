@@ -150,7 +150,7 @@ fn spawn_session(label: &str, args: &[&str]) -> (ChildGuard, File) {
 }
 
 #[test]
-#[ignore = "binary-dep e2e (wz-ap-demo --features router-hat-router); Layer E runs via --ignored"]
+#[ignore = "binary-dep e2e (wz-ap-demo --features router-hat-router); Layer E7 runs via --ignored"]
 fn wz_router_hat_converges_with_a_peer() {
     // The topology floor: a router-hat R + one peer P dialing it. R binds first so
     // P can dial its ephemeral port.
@@ -216,7 +216,7 @@ fn wz_router_hat_converges_with_a_peer() {
 }
 
 #[test]
-#[ignore = "binary-dep e2e (wz-ap-demo --features router-hat-router); Layer E runs via --ignored"]
+#[ignore = "binary-dep e2e (wz-ap-demo --features router-hat-router); Layer E7 runs via --ignored"]
 fn wz_router_hat_region_peers_exchange_data_directly() {
     // R2889 (open-debt item 751, rule 8b) — the pin's router does not relay data
     // between two peers of its own south peer region: its peer hat routes a Push
@@ -329,7 +329,7 @@ fn wz_router_hat_region_peers_exchange_data_directly() {
 }
 
 #[test]
-#[ignore = "binary-dep e2e (wz-ap-demo --features router-hat-router); Layer E runs via --ignored"]
+#[ignore = "binary-dep e2e (wz-ap-demo --features router-hat-router); Layer E7 runs via --ignored"]
 fn wz_router_hat_two_routers_converge() {
     // The federation topology floor: two router-hat nodes dialing each other. R2
     // binds first; R1 dials it. Both present WhatAmI::Router, so each classifies
@@ -401,7 +401,7 @@ fn wz_router_hat_two_routers_converge() {
 }
 
 #[test]
-#[ignore = "binary-dep e2e (wz-ap-demo --features router-hat-router); Layer E runs via --ignored"]
+#[ignore = "binary-dep e2e (wz-ap-demo --features router-hat-router); Layer E7 runs via --ignored"]
 fn wz_router_hat_federates_data_across_two_routers() {
     // The PEER-NATIVE cross-tier federation E2E over real transport (the
     // load-bearing ACTIVATION obligation): a publisher behind ONE router reaches a
@@ -542,7 +542,7 @@ fn wz_router_hat_federates_data_across_two_routers() {
 }
 
 #[test]
-#[ignore = "binary-dep e2e (wz-ap-demo --features router-hat-router); Layer E runs via --ignored"]
+#[ignore = "binary-dep e2e (wz-ap-demo --features router-hat-router); Layer E7 runs via --ignored"]
 fn wz_router_hat_routes_a_client_query_to_a_client_queryable() {
     // P4 §5.21 QUERY-plane E2E — the router's `route_request` + `forward_response`
     // composed over real transport for the FIRST time (the query twin of the
@@ -671,7 +671,7 @@ fn wz_router_hat_routes_a_client_query_to_a_client_queryable() {
 }
 
 #[test]
-#[ignore = "binary-dep e2e (wz-ap-demo --features router-hat-router); Layer E runs via --ignored"]
+#[ignore = "binary-dep e2e (wz-ap-demo --features router-hat-router); Layer E7 runs via --ignored"]
 fn wz_router_hat_federates_a_query_across_two_routers() {
     // P4 §5.21 QUERY-plane FEDERATION E2E — the query twin of
     // `wz_router_hat_federates_data_across_two_routers`, and the 2-router

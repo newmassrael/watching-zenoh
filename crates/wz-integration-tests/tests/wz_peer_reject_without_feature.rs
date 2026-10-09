@@ -18,7 +18,7 @@ use std::process::Command;
 use wz_integration_tests::common::wz_ap_demo_binary;
 
 #[test]
-#[ignore = "binary-dep e2e (DEFAULT wz-ap-demo build); Layer E runs via --ignored"]
+#[ignore = "binary-dep e2e (DEFAULT wz-ap-demo build); Layer E4 runs via --ignored"]
 fn wz_peer_without_feature_rejects_with_exit_2() {
     let demo = wz_ap_demo_binary();
     // `--peer` carries a value so `parse_pair` matches it (the reject arm runs

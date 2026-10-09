@@ -94,7 +94,7 @@ fn spawn_peer(label: &str, args: &[&str]) -> (ChildGuard, File, u16, String) {
 }
 
 #[test]
-#[ignore = "binary-dep e2e (wz-ap-demo --features routing-peer); Layer E runs via --ignored"]
+#[ignore = "binary-dep e2e (wz-ap-demo --features routing-peer); Layer E6 runs via --ignored"]
 fn wz_peer_config_write_acl_deny_flips_the_live_verdict_over_the_wire() {
     // A (the SUBSCRIBER + config-write host) binds first so B can dial it. A logs
     // `adminspace config WRITE at @/<zid>/peer/config/**` once registered — scrape
@@ -254,7 +254,7 @@ fn wz_peer_config_write_acl_deny_flips_the_live_verdict_over_the_wire() {
 }
 
 #[test]
-#[ignore = "binary-dep e2e (wz-ap-demo --features routing-peer); Layer E runs via --ignored"]
+#[ignore = "binary-dep e2e (wz-ap-demo --features routing-peer); Layer E6 runs via --ignored"]
 fn wz_peer_config_write_acl_deny_is_get_observable_over_the_wire() {
     // R311y50 — the READ-path twin of the test above: a remote PUT reconfigures A's
     // ACL, and a remote GET of A's `@/<A>/peer/config` then OBSERVES the new
@@ -402,7 +402,7 @@ fn wz_peer_config_write_acl_deny_is_get_observable_over_the_wire() {
 }
 
 #[test]
-#[ignore = "binary-dep e2e (wz-ap-demo --features routing-peer,adminspace-write); Layer E runs via --ignored"]
+#[ignore = "binary-dep e2e (wz-ap-demo --features routing-peer,adminspace-write); Layer E6 runs via --ignored"]
 fn wz_peer_config_write_denied_without_permit_holds_the_verdict() {
     // R311y51 — the §5.23 adminspace-write GATE proof, the negative twin of
     // `..flips_the_live_verdict..`. A HOSTS the config-write subscriber

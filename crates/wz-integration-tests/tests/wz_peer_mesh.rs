@@ -37,7 +37,7 @@ use wz_integration_tests::common::{
 };
 
 #[test]
-#[ignore = "binary-dep e2e (wz-ap-demo --features routing-peer); Layer E runs via --ignored"]
+#[ignore = "binary-dep e2e (wz-ap-demo --features routing-peer); Layer E6 runs via --ignored"]
 fn wz_peer_holds_a_dialed_and_an_accepted_face() {
     let demo = wz_ap_demo_binary();
     // TWO ports under ONE lock (pick_pair): the guard carries port_b, plus a

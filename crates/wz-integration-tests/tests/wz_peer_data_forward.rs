@@ -130,7 +130,7 @@ fn spawn_peer(label: &str, args: &[&str]) -> (ChildGuard, File, u16) {
 /// only when BOTH have. Asserted on BOTH logs, because a one-sided assertion
 /// would pass on a self-entry that was never reciprocated.
 #[test]
-#[ignore = "binary-dep e2e (wz-ap-demo --features routing-peer); Layer E runs via --ignored"]
+#[ignore = "binary-dep e2e (wz-ap-demo --features routing-peer); Layer E6 runs via --ignored"]
 fn wz_peer_mesh_confirms_a_reciprocal_edge_between_two_wz_peers() {
     let (mut a_guard, mut a_reader, p_a) = spawn_peer("peer-A", &["--peer", "127.0.0.1:0"]);
     let addr_a = format!("127.0.0.1:{p_a}");
@@ -176,7 +176,7 @@ fn wz_peer_mesh_confirms_a_reciprocal_edge_between_two_wz_peers() {
 }
 
 #[test]
-#[ignore = "binary-dep e2e (wz-ap-demo --features routing-peer); Layer E runs via --ignored"]
+#[ignore = "binary-dep e2e (wz-ap-demo --features routing-peer); Layer E6 runs via --ignored"]
 fn wz_peer_mesh_forwards_subscribed_data_two_hops() {
     // C (far SUBSCRIBER) binds first so B can dial it; then B binds so A can
     // dial it. C declares interest in demo/mesh, which floods C -> B -> A.
@@ -251,7 +251,7 @@ fn wz_peer_mesh_forwards_subscribed_data_two_hops() {
 }
 
 #[test]
-#[ignore = "binary-dep e2e (wz-ap-demo --features routing-peer); Layer E runs via --ignored"]
+#[ignore = "binary-dep e2e (wz-ap-demo --features routing-peer); Layer E6 runs via --ignored"]
 fn wz_peer_mesh_wildcard_subscription_attracts_a_concrete_publish() {
     // c3c-3 B2 — the wildcard-matching counterpart of the two-hop forward test.
     // The far subscriber C declares `demo/**` (a PATTERN), the publisher A
@@ -308,7 +308,7 @@ fn wz_peer_mesh_wildcard_subscription_attracts_a_concrete_publish() {
 }
 
 #[test]
-#[ignore = "binary-dep e2e (wz-ap-demo --features routing-peer); Layer E runs via --ignored"]
+#[ignore = "binary-dep e2e (wz-ap-demo --features routing-peer); Layer E6 runs via --ignored"]
 fn wz_peer_mesh_withdraws_subscription_two_hops() {
     // c3c-3 debt A1 — the RETRACTION counterpart of the forward test. The same
     // line A-B-C, but C RETRACTS its interest once it has confirmed the
@@ -421,7 +421,7 @@ fn wz_peer_mesh_withdraws_subscription_two_hops() {
 }
 
 #[test]
-#[ignore = "binary-dep e2e (wz-ap-demo --features routing-peer); Layer E runs via --ignored"]
+#[ignore = "binary-dep e2e (wz-ap-demo --features routing-peer); Layer E6 runs via --ignored"]
 fn wz_peer_mesh_prunes_the_unsubscribed_branch_four_peers() {
     // c3c-3 debt C1 — the SELECTIVITY proof over a BRANCHING topology. The hub
     // peer B holds three leaves:

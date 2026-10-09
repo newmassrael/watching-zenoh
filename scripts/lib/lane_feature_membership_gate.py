@@ -95,6 +95,25 @@ The feature arm reaches only the tests whose note declares a `<package>
 --features`; the rest are checked for lane membership ALONE. Both numbers print
 every run, beside the verdict, because the OK line otherwise reads as a claim
 about the whole corpus.
+
+## The owner arm (R3173, open-debt item 762)
+
+The note and the lane each say which lane runs a test, and they were derived
+separately, so they could disagree without anything measuring it. The earlier
+refusal above is about comparing the lane against EVERY mention of a layer in a
+note; it does not apply to the one phrase a note uses to DECLARE its owner,
+`Layer <X> runs via`, which is also what `test_discipline_gate.py` reads. Over that
+phrase alone the comparison is sound, and measured: 302 of the 629 ignored tests
+use it, 273 named a lane that selects the test and 29 named one that does not --
+every one of them `Layer E` (or `E6i`) on a test that Layer E skips by token and
+another lane runs. No note named a layer that `run-ci.sh` does not register.
+
+The rule: each owner a note declares must be a layer `run-ci.sh` registers by
+`run_layer <NAME> <fn>`, and that layer's own `--ignored` invocations must select
+the test. A test may be run by MORE lanes than the note names (19 are run by both
+`E` and `Epico`, by design); what is refused is a named owner that does not run it.
+Both ends of the comparison go through `run_layer`, so a note is checked against the
+name a lane answers to on the command line, not against a function name.
 """
 import re
 import sys
@@ -109,6 +128,7 @@ ROOT = Path(__file__).resolve().parents[2]
 # read. This module is its own seed twice over (it names `scripts/run-ci.sh` and
 # globs under `crates/`), but the import should still say what it is.
 sys.path.insert(0, str(ROOT / "scripts/lib"))
+import crossimpl_corpus  # noqa: E402
 import feature_closure  # noqa: E402
 
 TESTS_DIR = ROOT / "crates/wz-integration-tests/tests"
@@ -134,6 +154,12 @@ FN_AFTER = re.compile(
 # graded population and reported as a deferral. A gate that silently narrows its
 # own population is the class this gate exists to catch, so it may not do it.
 NOTE_FEATURES = re.compile(r'--features\s+([A-Za-z0-9_,\-]+)')
+# R3173 (open-debt item 762) — the one phrase a note uses to NAME its owning
+# lane. `crossimpl_corpus.py` and `test_discipline_gate.py` read the same words,
+# so the declaration has one spelling; prose that merely mentions a layer
+# ("Layer C0 scopes the #[ignore] discipline") is not read as a claim.
+OWNER = re.compile(r'Layer\s+([A-Za-z0-9]+)\s+runs\s+via')
+RUN_LAYER = re.compile(r'^run_layer\s+(\S+)\s+(\S+)', re.M)
 NOTE_TOKEN = re.compile(r'[a-z][a-z0-9_-]*')
 
 
@@ -195,8 +221,28 @@ def ignored_tests(tests_dir=TESTS_DIR, packages=None):
                 "fn": fm.group(1),
                 "requires": requires,
                 "orphaned": orphaned,
+                # R3173 — the owner a note NAMES, read only from the phrase the
+                # tree already uses to declare one (`Layer <X> runs via`), after
+                # the escapes and line continuations that make 78 notes in this
+                # crate span lines.
+                "owners": OWNER.findall(_unescape(note)),
+                "line": text.count("\n", 0, m.start()) + 1,
             })
     return rows
+
+
+def _unescape(note):
+    """The note as rustc reads it: `\\` + newline joins lines, escapes resolve."""
+    return crossimpl_corpus.unescape_rust_string(note)
+
+
+def layer_names(run_ci=RUN_CI):
+    """{lane function: layer name} from run-ci.sh's own `run_layer NAME fn` calls.
+
+    The name a lane answers to on the command line (`--layer E7b2`) is not the
+    function's name, and a note names the former."""
+    text = _strip_line_comments(Path(run_ci).read_text(), "#")
+    return {m.group(2): m.group(1) for m in RUN_LAYER.finditer(text)}
 
 
 # ── side B: the lanes ────────────────────────────────────────────────
@@ -436,6 +482,9 @@ def check(tests_dir=TESTS_DIR, run_ci=RUN_CI, crates=CRATES, resolver=None,
 
     unexpressable, violations = [], []
     unclaimed, ungradable, graded = [], 0, 0
+    names = layer_names(run_ci)
+    known = set(names.values())
+    misowned, unknown_owner, owner_rows = [], [], 0
 
     parsed = []
     for lane, (events, loops) in lanes.items():
@@ -470,6 +519,26 @@ def check(tests_dir=TESTS_DIR, run_ci=RUN_CI, crates=CRATES, resolver=None,
         if not claimed:
             unclaimed.append(row)
             continue
+        # R3173 (item 762) — the lane a note NAMES against the lanes that select
+        # the test. Two places state which lane runs a test (the note, and the
+        # lane's own filter) and they were derived separately: 29 of the 302 notes
+        # that name an owner named one that does not run the test, all of them
+        # `Layer E` on tests that Layer E skips by token and another lane runs.
+        # Name against NAME: the layer a note writes is the `run_layer` name, so
+        # both sides go through `layer_names`. Only the declaring phrase is read
+        # (`OWNER`), because prose mentions of a layer are not claims -- measured
+        # when this was first tried over every mention, which disagreed 111 times
+        # and condemned 52 deliberate double claims. A test may be run by MORE
+        # lanes than its note names (19 are run by both E and Epico on purpose);
+        # what is refused is a named owner that does not run it.
+        if row.get("owners"):
+            owner_rows += 1
+            selected = {names.get(lane, lane) for lane, _b in claimed}
+            for owner in row["owners"]:
+                if owner not in known:
+                    unknown_owner.append((row, owner))
+                elif owner not in selected:
+                    misowned.append((row, owner, sorted(selected)))
         for lane, builds in claimed:
             for binary, needed in row["requires"].items():
                 if binary not in builds:
@@ -493,6 +562,8 @@ def check(tests_dir=TESTS_DIR, run_ci=RUN_CI, crates=CRATES, resolver=None,
         }),
         "ungradable": ungradable, "unclaimed": unclaimed,
         "unexpressable": unexpressable, "violations": violations,
+        "owner_rows": owner_rows, "misowned": misowned,
+        "unknown_owner": unknown_owner, "layers": len(known),
     }
 
 
@@ -522,7 +593,29 @@ def report(res):
     print("  lane-feature-membership: %d triple(s) UNGRADED — the note names a "
           "binary the lane does not build (it inherits whatever a prior lane "
           "left in target/); not a pass" % res["ungradable"])
+    # R3173 — the owner arm's reach, printed beside its verdict for the same
+    # reason: it grades only the tests whose note uses the declaring phrase.
+    print("  lane-feature-membership: the OWNER arm reaches %d of %d test(s) -- "
+          "those whose note says `Layer <X> runs via`; each named layer must exist "
+          "(of %d registered) and select the test" % (
+              res["owner_rows"], len(res["tests"]), res["layers"]))
     bad = False
+    if res["owner_rows"] == 0 or res["layers"] == 0:
+        bad = True
+        print("  FAIL the owner arm read no declaring note or no `run_layer` call "
+              "(%d, %d): the reader stopped matching, which a green would hide"
+              % (res["owner_rows"], res["layers"]))
+    for row, owner in res["unknown_owner"]:
+        bad = True
+        print("  FAIL %s::%s (line %d) says `Layer %s runs via`, and run-ci.sh "
+              "registers no layer of that name"
+              % (row["target"], row["fn"], row["line"], owner))
+    for row, owner, selected in res["misowned"]:
+        bad = True
+        print("  FAIL %s::%s (line %d) says `Layer %s runs via`, but Layer %s "
+              "does not select it; the layer(s) that do: %s"
+              % (row["target"], row["fn"], row["line"], owner, owner,
+                 ", ".join(selected)))
     for lane, cmd, why in res["unexpressable"]:
         bad = True
         print("  FAIL %s: %s\n       %s" % (lane, why, cmd[:120]))
@@ -537,7 +630,8 @@ def report(res):
               % (row["target"], row["fn"], lane, binary, f, n))
     if not bad:
         print("  lane-feature-membership: OK — every ignored test runs against "
-              "a binary carrying every feature its own note declares")
+              "a binary carrying every feature its own note declares, and every "
+              "owner a note names is a layer that runs it")
     return 1 if bad else 0
 
 
@@ -556,7 +650,18 @@ def selftest():
             '#[tokio::test]\n'
             'async fn alpha_needs_a_feature() {}\n'
             '#[ignore = "binary-dep e2e (demo --features harmless); Layer A"]\n'
-            'fn alpha_is_fine() {}\n')
+            'fn alpha_is_fine() {}\n'
+            # R3173 — three notes that NAME an owner with the declaring phrase:
+            # one a selecting lane, one a lane that exists and skips it, one that
+            # does not exist. Layer A selects every alpha test; Layer C only
+            # `alpha_is_fine`.
+            '#[ignore = "binary-dep e2e (demo --features harmless); Layer A\n'
+            '            runs via --ignored"]\n'
+            'fn alpha_named_and_selected() {}\n'
+            '#[ignore = "binary-dep e2e (demo --features harmless); Layer C runs via --ignored"]\n'
+            'fn alpha_names_a_lane_that_skips_it() {}\n'
+            '#[ignore = "binary-dep e2e (demo --features harmless); Layer Q runs via --ignored"]\n'
+            'fn alpha_names_no_lane() {}\n')
         (t / "beta.rs").write_text(
             '#[ignore = "binary-dep e2e (demo --features harmless); Layer B"]\n'
             'fn beta_runs_nowhere() {}\n')
@@ -598,7 +703,13 @@ def selftest():
             "        && cargo build -p probe --quiet) || return 1\n"
             "    (cd crates && cargo test -p wz-integration-tests --test alpha "
             "alpha_needs_a_feature -- --ignored --exact)\n"
-            "}\n")
+            "}\n"
+            # The names the layers answer to on the command line.
+            "run_layer A layer_a || overall=1\n"
+            "run_layer C layer_c || overall=1\n"
+            "run_layer D layer_d || overall=1\n"
+            "run_layer E layer_e || overall=1\n"
+            "run_layer F layer_f || overall=1\n")
         crates = d / "crates"
         crates.mkdir()
         (crates / "lib.rs").write_text(
@@ -609,7 +720,19 @@ def selftest():
                     packages={"demo"})
 
         shapes.append(("a note in prose is not an attribute",
-                       len(res["tests"]) == 3))
+                       len(res["tests"]) == 6))
+        # R3173 — the owner arm, as a trio so that neither refusal can pass for
+        # the other and the accepting case proves the arm reads at all.
+        shapes.append(("a named owner that selects the test is accepted",
+                       res["owner_rows"] == 4
+                       and not any(r["fn"] == "alpha_named_and_selected"
+                                   for r, _o, _s in res["misowned"])))
+        shapes.append(("a named owner that exists and does not select it fails",
+                       [(r["fn"], o) for r, o, _s in res["misowned"]]
+                       == [("alpha_names_a_lane_that_skips_it", "C")]))
+        shapes.append(("a named owner no run_layer registers fails",
+                       [(r["fn"], o) for r, o in res["unknown_owner"]]
+                       == [("alpha_names_no_lane", "Q")]))
         shapes.append(("a multi-line note is read",
                        any(r["fn"] == "alpha_needs_a_feature" for r in res["tests"])))
         # ⚠ A PAIR, and the first arm is what stops the second from being a

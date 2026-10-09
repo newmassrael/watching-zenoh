@@ -1834,6 +1834,18 @@ layer_c0_test_discipline() {
     # submodule, which this job checks out.
     python3 scripts/lib/barrier_needle_gate.py --selftest || return 1
     python3 scripts/lib/barrier_needle_gate.py --check || return 1
+    # R3173 (open-debt item 762) — which lane runs an e2e test is stated twice, by
+    # the test's `#[ignore]` note and by the lane's own filter, and the two were
+    # derived separately. `lane_feature_membership_gate.py` has graded the filter
+    # side since R2659 (a test no lane selects, a test run on a binary lacking a
+    # feature its note declares) and was run by the push hook only, so the hosted
+    # run never saw it; it is wired here beside `lane_reach_gate`, whose mirror it
+    # is. It now also checks the owner a note DECLARES (`Layer X runs via`) against
+    # the layers that select the test: 29 notes named `Layer E` for tests another
+    # lane runs. It reads `cargo tree` metadata, which Layer A4 in this job
+    # already needs, and builds nothing.
+    python3 scripts/lib/lane_feature_membership_gate.py --selftest || return 1
+    python3 scripts/lib/lane_feature_membership_gate.py || return 1
     # R311y606 — the PYTHON-FLOOR lint, FIRST because every check below it is
     # a python script and their answers are only as portable as the interpreter
     # that runs them. R311y605 landed `import tomllib` (stdlib from 3.11) in

@@ -93,7 +93,7 @@ const MATCHING_TIMEOUT: Duration = Duration::from_secs(25);
 
 // wz-proves: declare-interest zenohd->wz
 #[test]
-#[ignore = "binary-dep e2e (zenohd + wz-ap-demo + zenoh-pico CLI); Layer E runs via --ignored"]
+#[ignore = "binary-dep e2e (zenohd + wz-ap-demo + zenoh-pico CLI); Layer Z runs via --ignored"]
 fn a_wz_matching_listener_behind_zenohd_learns_of_a_pico_subscriber() {
     let demo = wz_ap_demo_binary();
     // R311y776 — this fixture's FIRST run redded against a demo binary that
@@ -299,7 +299,7 @@ fn a_wz_matching_listener_behind_zenohd_learns_of_a_pico_subscriber() {
 // code inert (measured: declare-time ask removed, no listener declared, poll
 // still rises), so it binds to no atom; it guards end-to-end poll behaviour
 #[test]
-#[ignore = "binary-dep e2e (zenohd + zenoh-pico CLI); Layer E runs via --ignored"]
+#[ignore = "binary-dep e2e (zenohd + zenoh-pico CLI); Layer Z runs via --ignored"]
 fn a_bare_matching_poll_behind_zenohd_sees_the_remote_subscriber() {
     let demo = wz_ap_demo_binary();
     assert_demo_binary_newer_than_sources(&demo);

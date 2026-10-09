@@ -64,7 +64,7 @@ const COMPLETION_BOUND: Duration = Duration::from_secs(5);
 
 // wz-proves: declare-final pico->wz
 #[test]
-#[ignore = "binary-dep e2e (wz-ap-demo + zenoh-pico CLI); Layer E runs via --ignored"]
+#[ignore = "binary-dep e2e (wz-ap-demo + zenoh-pico CLI); Layer E3 runs via --ignored"]
 fn a_wz_router_terminates_a_pico_liveliness_get_instead_of_letting_it_time_out() {
     let demo = wz_ap_demo_binary();
     assert_demo_binary_newer_than_sources(&demo);

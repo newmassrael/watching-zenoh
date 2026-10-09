@@ -38,7 +38,7 @@ use wz_integration_tests::common::{
 };
 
 #[test]
-#[ignore = "binary-dep e2e (wz-ap-demo bin); Layer E runs via --ignored"]
+#[ignore = "binary-dep e2e (wz-ap-demo bin); Layer E6 runs via --ignored"]
 fn wz_peer_admin_config_get_over_the_wire() {
     let demo = wz_ap_demo_binary();
     let port_res = PortReservation::pick();

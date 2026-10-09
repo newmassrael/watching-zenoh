@@ -27,7 +27,7 @@ use wz_integration_tests::common::{
 };
 
 #[test]
-#[ignore = "binary-dep e2e (wz-ap-demo --features routing-router); Layer E runs via --ignored"]
+#[ignore = "binary-dep e2e (wz-ap-demo --features routing-router); Layer E3 runs via --ignored"]
 fn wz_router_holds_two_concurrent_peers() {
     let demo = wz_ap_demo_binary();
     let port_res = PortReservation::pick();
