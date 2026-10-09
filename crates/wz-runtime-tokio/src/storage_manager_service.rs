@@ -24,7 +24,8 @@
 //! `spawn_storage`, `plugins/zenoh-plugin-storage-manager/src/lib.rs:100,263`):
 //! `spawn_storage` resolves the volume then `create_and_start_storage` spawns
 //! the async StorageService task and the runtime holds a stopper handle. wz's
-//! [`RuntimeStorageManager::add_storage`] is the same shape — resolve (via the
+//! [`RuntimeStorageManager::add_storage`](crate::storage_manager_service::RuntimeStorageManager::add_storage)
+//! is the same shape — resolve (via the
 //! shared [`VolumeRegistry`]) then declare a live [`StorageService`] — but the
 //! service is its own RAII lifetime owner (no separate stopper / task handle),
 //! and wz keys storages FLATLY by name (zenoh's outer `volume->name` double-map
@@ -32,16 +33,21 @@
 //!
 //! ## Lifetime contract: a storage belongs to the manager, not to a session
 //!
-//! A hosted storage exists from a successful [`add_storage`](RuntimeStorageManager::add_storage)
-//! until the manager ends it ([`remove_storage`](RuntimeStorageManager::remove_storage),
-//! [`remove_volume`](RuntimeStorageManager::remove_volume)'s cascade,
-//! [`stop_plugin`](RuntimeStorageManager::stop_plugin) for the storages its
+//! A hosted storage exists from a successful
+//! [`add_storage`](crate::storage_manager_service::RuntimeStorageManager::add_storage)
+//! until the manager ends it
+//! ([`remove_storage`](crate::storage_manager_service::RuntimeStorageManager::remove_storage),
+//! [`remove_volume`](crate::storage_manager_service::RuntimeStorageManager::remove_volume)'s
+//! cascade,
+//! [`stop_plugin`](crate::storage_manager_service::RuntimeStorageManager::stop_plugin)
+//! for the storages its
 //! document declared) or the manager is dropped. The end of the session that
 //! carried the request, or the retraction of the declarations made on it, is not
 //! among those. What a session owns is the BINDING, the capture subscriber and
 //! the answering queryable; the entry, its name and its data are the manager's.
 //! A storage whose session is gone is hosted UNBOUND
-//! ([`StorageService::is_bound`]) until [`rebind_all`](RuntimeStorageManager::rebind_all)
+//! ([`is_bound`](crate::storage_service::StorageService::is_bound)) until
+//! [`rebind_all`](crate::storage_manager_service::RuntimeStorageManager::rebind_all)
 //! binds it to a live one, and a refused binding changes nothing else about it.
 //!
 //! Upstream is the same shape for a stronger reason: its storages sit in the

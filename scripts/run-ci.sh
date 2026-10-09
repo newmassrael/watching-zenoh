@@ -12029,6 +12029,16 @@ layer_c1bz_docs_resolve() {
     # `dispatch_network_message` went with the body to the private function behind
     # it. The sorted `error` lines of this lane's command at `af03a4cd` (512) and on
     # the tree (510) differ by exactly those two, and none added.
+    # Round 3166 -- wz-runtime-tokio 485 -> 484, by removal, diffed. The storage
+    # manager's module doc, which lib.rs also documents from outside and which
+    # therefore resolves relative links against the crate root, named six
+    # methods by type (`RuntimeStorageManager::add_storage` and four siblings,
+    # `StorageService::is_bound`); R3154 added six findings to the one that was
+    # already there (a second `add_storage`, the four siblings, `is_bound`) and
+    # the hosted run read 491. Each is now a full path. The sorted `error` lines of this
+    # lane's command at `14150d07` (485) and on the tree (484) differ by exactly
+    # one: the `add_storage` link that opened the module doc, broken since
+    # before R3154 and fixed by the same rewrite.
     budget="
         wz:2
         wz-ap-demo:25
@@ -12039,7 +12049,7 @@ layer_c1bz_docs_resolve() {
         wz-mcu-session-acceptor:3
         wz-routing-graph:5
         wz-runtime-coop:12
-        wz-runtime-tokio:485
+        wz-runtime-tokio:484
         wz-session-core:510
         wz-session-lwip:4
         wz-switchboard-codegen:8
