@@ -43,9 +43,11 @@ before the constructor writes it. Split the constructor onto its own statement.
   indistinguishable without types, so this reports the shape, not the proof.
   The remedy (one statement per constructor) is correct either way and costs
   nothing.
-- Statement boundaries are taken at `;`, so a `for(;;)` header splits into
-  fragments. Fragments cannot match — the pattern needs two references to one
-  identifier in one chunk.
+- Statement boundaries are taken at `;` and at the closing `)` of a `while`, `if`, `for` or
+  `switch` header, so a `for(;;)` header splits into fragments. Fragments cannot match — the
+  pattern needs two references to one identifier in one chunk. The header cut is what keeps a
+  loop condition that constructs from being fused with a body statement that reads (R3126); the
+  controls in `CONTROLS` run before any probe is read and fail the lint if the splitter drifts.
 
 The in-scope probe set must be NON-EMPTY. A version of this that found no
 probes would exit 0 forever and read as coverage; this one fails instead.
@@ -100,13 +102,45 @@ def c_probe_sources() -> list[tuple[Path, int, str]]:
     return found
 
 
+# The keywords whose parenthesised header is a controlling expression.
+CONTROL_RE = re.compile(r"\b(?:while|if|for|switch)\s*\(")
+
+
+def statements(source: str) -> list[tuple[int, str]]:
+    """(offset, text) of each C statement, cut at `;` and at the close of a control header.
+
+    The controlling expression of `while`, `if`, `for` and `switch` is a full expression with a
+    sequence point at its closing `)`, and everything in the body that follows is sequenced after
+    it. Cutting at `;` alone fused `while (next(&it, &slice)) {` with the first statement of its
+    body into one chunk, so a loop that constructs in its condition and reads in its body was
+    reported as an unsequenced pair (R3126: the two-slice iterator probe, red on hosted C0).
+    A header with no brace after it (`while (c) stmt;`) is cut the same way, which is also right.
+    """
+    cuts = {m.end() for m in re.finditer(";", source)}
+    for m in CONTROL_RE.finditer(source):
+        depth = 0
+        i = m.end() - 1  # the `(` that opens the header
+        while i < len(source):
+            if source[i] == "(":
+                depth += 1
+            elif source[i] == ")":
+                depth -= 1
+                if depth == 0:
+                    cuts.add(i + 1)
+                    break
+            i += 1
+    out: list[tuple[int, str]] = []
+    prev = 0
+    for cut in sorted(cuts | {len(source)}):
+        out.append((prev, source[prev:cut]))
+        prev = cut
+    return out
+
+
 def violations_in(source: str) -> list[tuple[int, str, str]]:
     """(line within source, identifier, the offending full expression)."""
     out: list[tuple[int, str, str]] = []
-    offset = 0
-    for chunk in source.split(";"):
-        start = offset
-        offset += len(chunk) + 1
+    for start, chunk in statements(source):
         if "&" not in chunk:
             continue
         loaned = set(LOAN_RE.findall(chunk))
@@ -123,10 +157,61 @@ def violations_in(source: str) -> list[tuple[int, str, str]]:
     return out
 
 
+# (name, C source, whether it must be reported). The lint runs these before it reads any probe, so
+# a statement splitter that stops seeing the real hazard, or starts seeing a loop that is fine, is
+# red here and not only on a probe that happens to exercise it.
+CONTROLS: list[tuple[str, str, bool]] = [
+    (
+        "the R311y568 shape: construct and read in one argument list",
+        'printf("%d %zu", (int)z_bytes_from_static_buf(&b5, B, 1), z_bytes_len(z_bytes_loan(&b5)));',
+        True,
+    ),
+    (
+        "construct and read inside one control header",
+        "if (z_try(&v) == 0 && z_v_len(z_v_loan(&v))) { go(); }",
+        True,
+    ),
+    (
+        "construct in a loop condition, read in its body",
+        "while (z_it_next(&it, &s)) {\n  const z_loaned_slice_t* l = z_view_slice_loan(&s);\n  use(l);\n}",
+        False,
+    ),
+    (
+        "construct in a for step, read in its body",
+        "for (z_a(&a); z_ok(&a); z_step(&a)) {\n  use(z_a_loan(&a));\n}",
+        False,
+    ),
+    (
+        "construct on one statement, read on the next",
+        "z_make(&x);\nz_len(z_x_loan(&x));",
+        False,
+    ),
+]
+
+
+def controls_hold() -> list[str]:
+    """The controls whose verdict is not the one they declare; empty means the splitter is sound."""
+    bad = [
+        name
+        for name, source, expected in CONTROLS
+        if bool(violations_in(source)) != expected
+    ]
+    return bad
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--verbose", action="store_true")
     args = parser.parse_args()
+
+    broken = controls_hold()
+    if broken:
+        print(
+            "Layer C0 FAIL: the unsequenced-probe lint's own controls disagree with it: "
+            + "; ".join(broken),
+            file=sys.stderr,
+        )
+        return 1
 
     probes = c_probe_sources()
     if not probes:

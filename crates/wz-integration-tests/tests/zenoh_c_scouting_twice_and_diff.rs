@@ -1008,7 +1008,27 @@ fn hellos_of(built: &Built, reference: &Built, probe: &Built, shape: Shape) -> V
                 TcpListener::bind(("127.0.0.1", 0)).expect("a port for the silent endpoint");
             let silent_port = silent.local_addr().expect("its address").port();
             let held = std::thread::spawn(move || {
-                let (stream, _) = silent.accept().expect("the peer dials the silent endpoint");
+                // Under a deadline: the peer may have died, read its argv wrong or been built
+                // without the feature under test, and a bare `accept` would then hold the job
+                // until its timeout cancels it and every verdict after this one is lost.
+                silent
+                    .set_nonblocking(true)
+                    .expect("a non-blocking silent endpoint");
+                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+                let stream = loop {
+                    match silent.accept() {
+                        Ok((stream, _)) => break stream,
+                        Err(e)
+                            if e.kind() == std::io::ErrorKind::WouldBlock
+                                && std::time::Instant::now() < deadline =>
+                        {
+                            std::thread::sleep(std::time::Duration::from_millis(20));
+                        }
+                        Err(e) => panic!(
+                            "the peer never dialled the silent endpoint inside its deadline: {e}"
+                        ),
+                    }
+                };
                 std::thread::sleep(std::time::Duration::from_millis(3000));
                 drop(stream);
             });
