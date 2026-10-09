@@ -1823,39 +1823,6 @@ layer_c0_test_discipline() {
     # `--test` names on run-ci.sh's non-comment lines.
     python3 scripts/lib/lane_reach_gate.py --selftest || return 1
     python3 scripts/lib/lane_reach_gate.py --check || return 1
-    # R3171 (open-debt item 776) — a test that runs by default must not PASS by
-    # skipping a fixture its lane owes. `plugin.rs`, `plugin_plane.rs` and
-    # `dynamic_volume.rs` stepped over their subject when the example cdylib was
-    # not built and printed only `skip:`; a plain `cargo test` reported them green
-    # in 0.00s, and R2675 read such a pass as "repaired". Every default-run skip
-    # must reach a `<NAME>_REQUIRE` door and some lane or job must arm it. Reads
-    # the tracked Rust corpus and `run-ci.sh`, so the push hook runs it too.
-    python3 scripts/lib/silent_skip_gate.py --selftest || return 1
-    python3 scripts/lib/silent_skip_gate.py --check || return 1
-    # R3172 (open-debt item 777) — an e2e barrier must not wait on text no producer
-    # in the tree can print. `wz_plugin_dynamic_loading_pico.rs` waited 15s on
-    # `plugin load failed` after a host change reworded the line; the test is
-    # `#[ignore]`d and only a hosted lane runs it, so two hosted runs were the first
-    # evidence. The two crates cannot share the string (`wz-ap-demo` has no lib), so
-    # every needle of `wait_for_substring` and its derived wrappers is graded against
-    # the literals and templates of the non-test sources, the C sources and the
-    # embedded probes; text from a program the tree does not hold is declared where
-    # it is waited for, and a declaration no barrier uses fails. Needs the pico
-    # submodule, which this job checks out.
-    python3 scripts/lib/barrier_needle_gate.py --selftest || return 1
-    python3 scripts/lib/barrier_needle_gate.py --check || return 1
-    # R3173 (open-debt item 762) — which lane runs an e2e test is stated twice, by
-    # the test's `#[ignore]` note and by the lane's own filter, and the two were
-    # derived separately. `lane_feature_membership_gate.py` has graded the filter
-    # side since R2659 (a test no lane selects, a test run on a binary lacking a
-    # feature its note declares) and was run by the push hook only, so the hosted
-    # run never saw it; it is wired here beside `lane_reach_gate`, whose mirror it
-    # is. It now also checks the owner a note DECLARES (`Layer X runs via`) against
-    # the layers that select the test: 29 notes named `Layer E` for tests another
-    # lane runs. It reads `cargo tree` metadata, which Layer A4 in this job
-    # already needs, and builds nothing.
-    python3 scripts/lib/lane_feature_membership_gate.py --selftest || return 1
-    python3 scripts/lib/lane_feature_membership_gate.py || return 1
     # R311y606 — the PYTHON-FLOOR lint, FIRST because every check below it is
     # a python script and their answers are only as portable as the interpreter
     # that runs them. R311y605 landed `import tomllib` (stdlib from 3.11) in
@@ -3783,6 +3750,53 @@ layer_c0_test_discipline() {
     # the grade needs a zenoh source tree and is REQUIRED in Layer Z.
     python3 scripts/lib/token_plane_parity_gate.py --selftest || return 1
     python3 scripts/lib/token_plane_parity_gate.py --check || return 1
+    return 0
+}
+
+# ─── Layer C0s — which lane runs a test, and what a test waits for ──
+#
+# Three gates that read the whole tracked Rust corpus and `run-ci.sh` and ask of
+# the e2e tests what Layer C0 asks of their `#[ignore]` discipline: is it RUN, by
+# the lane it names, and can it fail. 25s locally (the hosted cost is measured by
+# the first run that carries this lane). A lane of its own rather than lines in C0
+# because C0 runs in TWO hosted jobs, `defaults-off` and `validate-codegen`, and
+# the input here is the same tree in both, so a second run can only cost and never
+# disagree. `defaults-off` is also the job without the room: 1504s of 1800s
+# (83.6%, run 37935497378, C0 633s of it) with its margin alarm at 90%, where
+# `validate-codegen` was 597s. This lane runs in that job only.
+#
+#   * silent_skip_gate (open-debt item 776) -- a test that runs by default must
+#     not PASS by skipping a fixture its lane owes. `plugin.rs`, `plugin_plane.rs`
+#     and `dynamic_volume.rs` stepped over their subject when the example cdylib
+#     was not built and printed only `skip:`; a plain `cargo test` reported them
+#     green in 0.00s, and R2675 read such a pass as "repaired". Every default-run
+#     skip must reach a `<NAME>_REQUIRE` door and some lane or job must arm it.
+#   * barrier_needle_gate (777) -- an e2e barrier must not wait on text no producer
+#     in the tree can print. `wz_plugin_dynamic_loading_pico.rs` waited 15s on
+#     `plugin load failed` after a host change reworded the line; the test is
+#     `#[ignore]`d and only a hosted lane runs it, so two hosted runs were the
+#     first evidence. The two crates cannot share the string (`wz-ap-demo` has no
+#     lib), so every needle of `wait_for_substring` and its derived wrappers is
+#     graded against the literals and templates of the non-test sources, the C
+#     sources and the embedded probes; text from a program the tree does not hold
+#     is declared where it is waited for, and a declaration no barrier uses fails.
+#     Needs the pico submodule, which the job checks out.
+#   * lane_feature_membership_gate (762) -- which lane runs an e2e test is stated
+#     twice, by the test's `#[ignore]` note and by the lane's own filter, and the
+#     two were derived separately. It has graded the filter side since R2659 (a
+#     test no lane selects, a test run on a binary lacking a feature its note
+#     declares) and only the push hook ran it, so the hosted run never saw it. It
+#     also checks the owner a note DECLARES (`Layer X runs via`) against the
+#     layers that select the test: 29 notes named `Layer E` for tests another lane
+#     runs. It reads `cargo tree` metadata, which Layer A4 in the same job needs,
+#     and builds nothing.
+layer_c0s_test_lane_discipline() {
+    python3 scripts/lib/silent_skip_gate.py --selftest || return 1
+    python3 scripts/lib/silent_skip_gate.py --check || return 1
+    python3 scripts/lib/barrier_needle_gate.py --selftest || return 1
+    python3 scripts/lib/barrier_needle_gate.py --check || return 1
+    python3 scripts/lib/lane_feature_membership_gate.py --selftest || return 1
+    python3 scripts/lib/lane_feature_membership_gate.py || return 1
     return 0
 }
 
@@ -21871,6 +21885,7 @@ run_layer C0d layer_c0d_doclink_dependents || overall=1
 run_layer C0e layer_c0e_inventory_tag_reader || overall=1
 run_layer C0f layer_c0f_lane_demo_feature_restore || overall=1
 run_layer C0g layer_c0g_apt_ceiling || overall=1
+run_layer C0s layer_c0s_test_lane_discipline || overall=1
 run_layer C1 layer_c1_cargo_test || overall=1
 run_layer C1b layer_c1b_cargo_test_alloc || overall=1
 run_layer C1c layer_c1c_cargo_test_codec_declare || overall=1

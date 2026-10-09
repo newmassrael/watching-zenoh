@@ -1004,6 +1004,16 @@ jobs:
           WZ_C0I_REQUIRE: "1"
         run: bash scripts/run-ci.sh --layer C0i
 
+      - name: Layer C0s — which lane runs an e2e test, and what a barrier waits for
+        # Three gates over the tracked Rust corpus (silent skips, barrier needles,
+        # lane membership of every `#[ignore]` test). A lane of its own and in THIS
+        # job only: Layer C0 runs in two jobs and `defaults-off` is at 83.6% of its
+        # 1800s (run 37935497378, 1504s) with the margin alarm at 90%, where this
+        # job was 597s. It needs the vendored pico tree (submodules: recursive
+        # above) and `cargo tree` metadata, and builds nothing. The header of
+        # `layer_c0s_test_lane_discipline` in run-ci.sh says what each one grades.
+        run: bash scripts/run-ci.sh --layer C0s
+
       # R2526 — Layer U MOVED to the END of this job. It used to sit here, and
       # what it masked is measured rather than supposed: item 711 recorded that
       # when Layer U went green at R2501, SEVEN steps that had been `skipped`
