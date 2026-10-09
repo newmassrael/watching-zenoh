@@ -128,8 +128,8 @@ use tokio::net::UdpSocket;
 // transport-link-serial feature here.
 #[cfg(feature = "transport-link-serial")]
 use crate::serial_pipeline::{
-    dial_serial, drive_serial_handshake, open_serial_device, wire_serial_stream, BoxedSerialStream,
-    SerialLiveness, SerialPort, SerialReadDriver,
+    dial_serial, drive_serial_handshake_from, flush_for_accept, open_tty, wire_serial_stream,
+    BoxedSerialStream, SerialLiveness, SerialPort, SerialReadDriver,
 };
 #[cfg(feature = "transport-link-serial")]
 use wz_session_core::serial_link::SerialRole;
@@ -1652,7 +1652,7 @@ impl BoundListener {
                 )
             }
             // R311y805 — the serial accept: the CHEAP half is a local tty open
-            // (`open_serial_device`), and the peer-controlled serial-LINK handshake
+            // (`open_tty`), and the peer-controlled serial-LINK handshake
             // (await `INIT`, reply `INIT|ACK`) DEFERS to `AcceptedLink::handshake`,
             // the same split tls/quic use for their crypto. A tty open is the one
             // accept in this enum that completes without any peer having arrived,
@@ -1686,26 +1686,36 @@ impl BoundListener {
             // the non-default one (see `SerialRetainSlot`), so the re-open stays
             // the fallback for both rather than being a second policy.
             //
-            // The buffers are cleared on BOTH paths, unconditionally, because
-            // upstream's accept does: `z-serial-0.3.1` @ `pub async fn accept(&mut self)`
+            // The device is flushed on BOTH paths, unconditionally, because
+            // upstream's accept clears: `z-serial-0.3.1` @ `pub async fn accept(&mut self)`
             // clears before it waits for `INIT`. It matters most on the retained
             // path -- a re-used fd still holds whatever the previous peer wrote
             // after its last frame -- and it is cheap and correct on the other.
             // It happens HERE and not in `AcceptedLink::handshake`, which would
             // discard an `INIT` that had legitimately arrived in between.
+            //
+            // Open-debt 795 -- but it is not upstream's `tcflush`: upstream's
+            // initiator writes `INIT` once and its responder never sends the
+            // `RESET` that would make it write again, so a clear that also takes an
+            // `INIT` already on the wire ends the link before it starts. The tty is
+            // therefore opened UNCLEARED (`open_tty`) and flushed by frame
+            // (`flush_for_accept`): stale bytes go, the last `INIT` is kept and
+            // rides on the port for the handshake to answer first. The two-sided
+            // contract is in `serial_pipeline`'s module docs.
             #[cfg(feature = "transport-link-serial")]
             BoundListener::Serial(l) => {
                 if l.liveness.is_live() {
                     std::future::pending::<()>().await;
                 }
-                let stream: BoxedSerialStream = match l.liveness.take_retained() {
+                let mut stream: BoxedSerialStream = match l.liveness.take_retained() {
                     Some(retained) => retained,
-                    None => Box::new(open_serial_device(&l.endpoint)?),
+                    None => Box::new(open_tty(&l.endpoint)?),
                 };
-                stream.clear_buffers()?;
+                let early_init = flush_for_accept(&mut *stream)?;
                 (
                     AcceptedLink::Serial {
-                        stream: SerialPort::accepted_boxed(stream, l.liveness.claim()),
+                        stream: SerialPort::accepted_boxed(stream, l.liveness.claim())
+                            .with_early_init(early_init),
                         endpoint: l.endpoint.clone(),
                     },
                     AcceptedPeer::NonIp("serial"),
@@ -1955,7 +1965,10 @@ impl AcceptedLink {
                 mut stream,
                 endpoint,
             } => {
-                drive_serial_handshake(stream.stream_mut(), SerialRole::Responder).await?;
+                // An `INIT` the accept's flush kept is answered first (open-debt 795).
+                let early_init = stream.take_early_init();
+                drive_serial_handshake_from(stream.stream_mut(), SerialRole::Responder, early_init)
+                    .await?;
                 DialedLink::Serial { stream, endpoint }
             }
         })

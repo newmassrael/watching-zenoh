@@ -259,6 +259,15 @@ async fn serial_interop_over_metadata_span(metadata: &str) {
     //    The parse assertions above stay: the bind re-does the split
     //    internally from the same string, so a mis-split still opens the wrong
     //    device here.
+    //
+    //    Open-debt 795 removed the mechanism this ordering was written
+    //    around, and the ordering stays for the reason above (it is upstream's
+    //    deployment order): the accept no longer `tcflush`es the device, it
+    //    reads what the device holds and keeps an `INIT` that is already on
+    //    the wire, so the early-spawn interleaving no longer deadlocks.
+    //    `serial_link_e2e` holds that with a pty master that writes the `INIT`
+    //    before the accept. The ordering is therefore no longer what keeps this
+    //    link up, and this test does not rely on it for that.
     let mut listener = bind_endpoint(&wz_locator)
         .await
         .expect("wz binds its serial listen string");

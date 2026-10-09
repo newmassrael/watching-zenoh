@@ -86,6 +86,8 @@ use wz_session_core::locator::{
     parse_any_locator, AnyLocator, SerialEndpoint, SerialOptions, SerialTarget,
 };
 use wz_session_core::serial_link::SerialRole;
+#[cfg(all(unix, not(target_os = "macos")))]
+use wz_session_core::serial_link::{encode_frame, SERIAL_FLAG_ACK, SERIAL_FLAG_INIT};
 use wz_session_core::session_timeouts::SessionTimeouts;
 
 /// The endpoint a wired test link stands in for — neither a pty pair nor a memory
@@ -189,8 +191,12 @@ impl<S: tokio::io::AsyncWrite + Unpin> tokio::io::AsyncWrite for Undrained<S> {
 
 #[cfg(unix)]
 impl<S: SerialByteStream> SerialByteStream for Undrained<S> {
-    fn clear_buffers(&self) -> io::Result<()> {
-        self.0.clear_buffers()
+    fn take_received(&mut self) -> io::Result<Vec<u8>> {
+        self.0.take_received()
+    }
+
+    fn clear_unsent(&self) -> io::Result<()> {
+        self.0.clear_unsent()
     }
 }
 
@@ -1002,6 +1008,10 @@ async fn serial_listen_releases_the_device_on_close_by_default() {
 /// wz needed no clear before this round and needs one now. Upstream clears at the
 /// same seam and unconditionally (`z-serial-0.3.1` @ `pub async fn accept(&mut self)`,
 /// whose first act past the status check is `// Clear all buffers` / `self.clear()?`).
+///
+/// Open-debt 795 -- the clear is no longer a `tcflush` and keeps one frame, an `INIT`
+/// (see the two arms after this one). Nothing on the wire here is an `INIT`, so this
+/// arm still asserts that the whole stale tail is gone.
 #[cfg(all(unix, not(target_os = "macos")))]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_serial_re_accept_clears_what_the_previous_peer_left_on_the_wire() {
@@ -1047,6 +1057,117 @@ async fn a_serial_re_accept_clears_what_the_previous_peer_left_on_the_wire() {
         ),
         Ok(Err(e)) => panic!("reading the re-accepted device failed: {e}"),
     }
+}
+
+/// Write one frame on the peer's end of the wire and let it reach the device.
+#[cfg(all(unix, not(target_os = "macos")))]
+async fn peer_writes_frame(master: &mut SerialStream, header: u8) {
+    let frame = encode_frame(header, b"").expect("an empty-payload frame encodes");
+    master
+        .write_all(&frame)
+        .await
+        .expect("the peer writes a frame");
+    master.flush().await.expect("the frame reaches the wire");
+}
+
+/// Complete the responder handshake on an accepted link and check what the peer
+/// hears back: exactly the INIT|ACK frame, which is also the proof that the INIT it
+/// answered was the peer's and not something the accept made up.
+#[cfg(all(unix, not(target_os = "macos")))]
+async fn responder_answers_init_ack(accepted: AcceptedLink, master: &mut SerialStream) {
+    let dialed = tokio::time::timeout(Duration::from_secs(5), accepted.handshake())
+        .await
+        .expect(
+            "the responder must answer an INIT that was on the wire before the accept: \
+             the peer writes it once and never again, so a lost INIT is a dead link",
+        )
+        .expect("the deferred Responder handshake completes");
+    assert!(
+        matches!(dialed, DialedLink::Serial { .. }),
+        "the accepted serial link completes into DialedLink::Serial"
+    );
+    let want = encode_frame(SERIAL_FLAG_INIT | SERIAL_FLAG_ACK, b"").expect("INIT|ACK encodes");
+    let mut got = vec![0u8; want.len()];
+    tokio::time::timeout(Duration::from_secs(5), master.read_exact(&mut got))
+        .await
+        .expect("the peer hears the reply within 5s")
+        .expect("the peer reads the reply");
+    assert_eq!(got, want, "the reply is the INIT|ACK frame");
+}
+
+/// An INIT the peer wrote BEFORE the accept survives the accept's flush (item 795).
+///
+/// The peer is a serial-link Initiator, which writes its INIT once and then waits:
+/// it re-sends only after a RESET, and a responder never sends one. So an INIT the
+/// accept discards is not delayed, it is gone, and both ends then wait for ever.
+/// That was measured on a hosted run, where the accept costs a millisecond against a
+/// 20 s ceiling and the link still stood.
+///
+/// THE DISCRIMINATOR is the order: the INIT is on the wire first and the accept
+/// second, with nothing between them that waits, so the test is the same on every run.
+/// Both device paths are covered because they reach the flush differently -- a fresh
+/// open, and a device the listener kept past its previous link.
+#[cfg(all(unix, not(target_os = "macos")))]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_serial_accept_keeps_an_init_that_was_on_the_wire_before_it() {
+    for locator_tail in ["", ";release_on_close=false"] {
+        let mut end = pty_end();
+        let mut listener = bind_serial_listen(&format!(
+            "serial/{}#baudrate=115200{locator_tail}",
+            end.path
+        ))
+        .await;
+        if !locator_tail.is_empty() {
+            // The retained arm needs a device to retain: live a link, drop it.
+            let (port, endpoint) = accept_and_handshake(&mut listener, &mut end.master).await;
+            wire_and_tear_down(port, &endpoint).await;
+            assert!(
+                retains_device(&listener),
+                "the retained arm is vacuous unless the device was kept"
+            );
+        }
+
+        peer_writes_frame(&mut end.master, SERIAL_FLAG_INIT).await;
+        let (accepted, _) = tokio::time::timeout(Duration::from_secs(5), listener.accept_raw())
+            .await
+            .expect("the accept completes")
+            .expect("the accept yields a device");
+        responder_answers_init_ack(accepted, &mut end.master).await;
+    }
+}
+
+/// The flush still discards the stale bytes it exists to discard, in the same breath
+/// as it keeps the INIT (item 795).
+///
+/// The wire carries, in this order: a data frame the departed peer sent after its
+/// link died, a corrupt frame (bytes the line mangled, ended by an EOP), and the new
+/// peer's INIT. A responder handed the data frame fails its handshake, because
+/// `on_header` accepts only an INIT, so the handshake below completes only if the
+/// stale frames were discarded and the INIT was not. After it, nothing may be left
+/// to read: that the stale bytes are gone is asserted by value, not by "the
+/// handshake worked".
+#[cfg(all(unix, not(target_os = "macos")))]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_serial_accept_discards_stale_frames_around_the_init_it_keeps() {
+    let mut end = pty_end();
+    let retained = format!("serial/{}#baudrate=115200;release_on_close=false", end.path);
+    let mut listener = bind_serial_listen(&retained).await;
+    let (port, endpoint) = accept_and_handshake(&mut listener, &mut end.master).await;
+    wire_and_tear_down(port, &endpoint).await;
+    assert!(retains_device(&listener), "stale bytes need a kept device");
+
+    peer_writes_frame(&mut end.master, 0x00).await;
+    end.master
+        .write_all(b"\x11\x22\x33-mangled\x00")
+        .await
+        .expect("the line delivers a corrupt frame");
+    peer_writes_frame(&mut end.master, SERIAL_FLAG_INIT).await;
+
+    let (accepted, _) = tokio::time::timeout(Duration::from_secs(5), listener.accept_raw())
+        .await
+        .expect("the re-accept completes")
+        .expect("the re-accept yields the retained device");
+    responder_answers_init_ack(accepted, &mut end.master).await;
 }
 
 /// ⛔ THE LISTENER SURVIVES ITS PEER. Once the accepted link is DROPPED, the same

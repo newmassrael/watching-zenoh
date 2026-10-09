@@ -33,6 +33,34 @@
 //!    `0x00` (the receiver ignores the header on the data path —
 //!    serial_protocol.c:282-285).
 //!
+//! ## The accept's flush (open-debt 795)
+//!
+//! An accepting side discards what the device holds when the accept happens,
+//! because upstream does (`z-serial-0.3.1` @ `pub async fn accept(&mut self)` clears
+//! before it waits for `INIT`) and because a re-used device still carries the previous
+//! peer's tail. That flush is a CONTRACT with two halves, and both are held by tests:
+//!
+//! 1. **An `INIT` that reached the device before the flush survives it.** An
+//!    initiator writes its `INIT` once and re-sends only after a `RESET`, which a
+//!    responder never sends, so an `INIT` discarded here is not late, it is gone,
+//!    and both ends then wait for ever. The accept therefore reads what the device
+//!    holds, keeps the last `INIT` among it, and the deferred handshake answers that
+//!    `INIT` before it reads the device again.
+//! 2. **Every other byte received before the flush is discarded, and none received
+//!    after it is.** Data frames, frames that fail their CRC and an unterminated tail
+//!    are stale and are not handed to the handshake (which would fail on a data
+//!    frame); the flush is the instant the device is first read, so a byte arriving
+//!    later is the new peer's and is read normally. Nothing is cleared on the input
+//!    side with `tcflush`: that call cannot tell an `INIT` from a stale byte, and a
+//!    byte landing between a read and a `tcflush` would be lost with them.
+//!
+//! The limit is stated rather than hidden: with no end marker between them, a stale
+//! fragment and the `INIT` that follows are ONE frame on the wire and it fails its
+//! CRC, so that `INIT` is lost. Only a wire discipline (a `RESET` from the responder
+//! to wake the initiator's re-send) could recover it, which upstream does not do and
+//! this module does not invent. The dial side keeps the full clear: an initiator
+//! wants nothing that was on the wire before it spoke.
+//!
 //! ## Framing vs TCP
 //!
 //! TCP length-prefixes each frame (`StreamEnvelope`, 2-byte LE). SERIAL
@@ -58,13 +86,17 @@
 //! `Arc<dyn BoxedLinkDriver>` write half drained by a [`serial_writer_task`].
 
 use std::collections::VecDeque;
+use std::future::Future;
 use std::io;
+use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
 use std::sync::Arc;
+use std::task::{Context, Poll, Wake, Waker};
 use std::time::Duration;
 
 use tokio::io::{
-    split, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, DuplexStream, ReadHalf, WriteHalf,
+    split, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, DuplexStream, ReadBuf, ReadHalf,
+    WriteHalf,
 };
 use tokio_serial::SerialStream;
 
@@ -77,8 +109,8 @@ use wz_session_core::link::{LinkDropCause, LinkSendOutcome};
 use wz_session_core::link::{LinkEndpoints, LinkKind, LinkSubject};
 use wz_session_core::locator::{SerialEndpoint, SerialTarget};
 use wz_session_core::serial_link::{
-    encode_frame, DecodedFrame, HandshakeStep, SerialFrameReader, SerialHandshake, SerialRole,
-    SERIAL_MAX_COBS_BUF, SERIAL_MTU,
+    encode_frame, pending_init_header, DecodedFrame, HandshakeStep, SerialFrameReader,
+    SerialHandshake, SerialRole, SERIAL_MAX_COBS_BUF, SERIAL_MTU,
 };
 
 /// Steady-state data-frame header — no handshake flag set. The receiver
@@ -105,29 +137,137 @@ const SERIAL_CONNECT_THROTTLE: Duration = Duration::from_millis(250);
 /// machinery an in-memory duplex on EVERY host, and leaves the real-device arms
 /// (open, exclusive, clear) to the tests that need a real device.
 ///
-/// `clear_buffers` is the one thing a duplex cannot answer honestly by doing
-/// nothing -- a tty holds kernel queues, an in-memory pipe does not -- so it is a
-/// method with the no-queue answer as its default, and [`SerialStream`] is the one
-/// implementor that overrides it. Upstream clears at open and at every accept
-/// (see [`clear_serial_buffers`]); this is the accept-side half, reached through
-/// whatever the listener retained.
+/// The two methods are what an accept's flush needs of a device (open-debt 795, see
+/// the module docs): a read that takes what is already there and never waits, and a
+/// way to drop what is queued for sending. They are separate because the input side
+/// must be READ, not flushed -- an `INIT` in it has to survive -- while the output
+/// side has nothing worth keeping. They are required rather than defaulted: a default
+/// that polled would be exact for an in-memory pipe and silently wrong for a tty,
+/// whose readiness is only known after the reactor has turned.
 pub trait SerialByteStream: AsyncRead + AsyncWrite + Send + Unpin + 'static {
-    /// Discard whatever this device holds unread or unsent. A stream with no
-    /// device queues has nothing to discard.
-    fn clear_buffers(&self) -> io::Result<()> {
+    /// Take the bytes this device has already received, without waiting for more.
+    /// An empty vector means the line is quiet, which is the normal answer.
+    fn take_received(&mut self) -> io::Result<Vec<u8>>;
+
+    /// Discard what this device holds queued for SENDING. A stream with no device
+    /// queues has nothing to discard.
+    fn clear_unsent(&self) -> io::Result<()> {
         Ok(())
     }
 }
 
+/// Upper bound on the bytes one accept's flush will take off the device.
+///
+/// A line cannot hold more than a few kernel buffers of stale bytes, so reaching
+/// this means the peer is still writing faster than the flush reads -- a virtual
+/// line with a peer in a tight loop. Failing the accept by name is the honest answer;
+/// reading on would hold the accept for as long as the peer cared to write.
+const SERIAL_FLUSH_LIMIT: usize = 1 << 20;
+
+/// Add one read's bytes to what the flush has taken, refusing past the bound.
+fn append_flushed(taken: &mut Vec<u8>, chunk: &[u8]) -> io::Result<()> {
+    if taken.len() + chunk.len() > SERIAL_FLUSH_LIMIT {
+        return Err(io::Error::other(format!(
+            "serial line did not go quiet: more than {SERIAL_FLUSH_LIMIT} bytes arrived \
+             while the accept was discarding what the device held"
+        )));
+    }
+    taken.extend_from_slice(chunk);
+    Ok(())
+}
+
+/// A waker that does nothing: the flush polls a read once and moves on, so there is
+/// nothing to wake.
+struct NoWake;
+
+impl Wake for NoWake {
+    fn wake(self: Arc<Self>) {}
+}
+
+/// [`SerialByteStream::take_received`] for a stream whose readiness is decided in
+/// memory, by one poll of its read side.
+///
+/// Exact for an in-memory pipe, whose `poll_read` answers from its own buffer with no
+/// reactor in between. NOT usable for a tty, which is why [`SerialStream`] reads the
+/// fd directly instead.
+///
+/// The polling runs under [`tokio::task::unconstrained`]: a tokio read inside a task
+/// spends a cooperative-scheduling budget and answers `Pending` once it is spent
+/// (128 reads), even with bytes queued, and a flush that took that for "the line is
+/// quiet" would keep a stale tail.
+fn take_received_by_polling<S: AsyncRead + Unpin>(stream: &mut S) -> io::Result<Vec<u8>> {
+    let waker = Waker::from(Arc::new(NoWake));
+    let mut cx = Context::from_waker(&waker);
+    let mut chunk = [0u8; 512];
+    let mut taken = Vec::new();
+    let mut take = tokio::task::unconstrained(std::future::poll_fn(|cx| loop {
+        let mut buf = ReadBuf::new(&mut chunk);
+        match Pin::new(&mut *stream).poll_read(cx, &mut buf) {
+            Poll::Ready(Ok(())) if buf.filled().is_empty() => break Poll::Ready(Ok(())), // closed
+            Poll::Ready(Ok(())) => {
+                if let Err(e) = append_flushed(&mut taken, buf.filled()) {
+                    break Poll::Ready(Err(e));
+                }
+            }
+            Poll::Ready(Err(e)) => break Poll::Ready(Err(e)),
+            Poll::Pending => break Poll::Ready(Ok(())),
+        }
+    }));
+    match Pin::new(&mut take).poll(&mut cx) {
+        Poll::Ready(Ok(())) => Ok(taken),
+        Poll::Ready(Err(e)) => Err(e),
+        // The closure above never answers `Pending`; this arm keeps that claim
+        // checked rather than assumed.
+        Poll::Pending => Err(io::Error::other("the serial flush future did not complete")),
+    }
+}
+
 impl SerialByteStream for SerialStream {
-    fn clear_buffers(&self) -> io::Result<()> {
-        clear_serial_buffers(self)
+    /// Reads the fd directly (`SerialStream::try_read`), not through the async read:
+    /// a freshly opened tty has not been polled by the reactor yet, so its readiness
+    /// says "nothing" for bytes that are already queued, and a flush that believed it
+    /// would keep nothing.
+    fn take_received(&mut self) -> io::Result<Vec<u8>> {
+        let mut taken = Vec::new();
+        let mut chunk = [0u8; 512];
+        loop {
+            match self.try_read(&mut chunk) {
+                Ok(0) => return Ok(taken),
+                Ok(n) => append_flushed(&mut taken, &chunk[..n])?,
+                Err(e) if e.kind() == io::ErrorKind::WouldBlock => return Ok(taken),
+                Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
+                Err(e) => return Err(e),
+            }
+        }
+    }
+
+    fn clear_unsent(&self) -> io::Result<()> {
+        tokio_serial::SerialPort::clear(self, tokio_serial::ClearBuffer::Output)
+            .map_err(io::Error::other)
     }
 }
 
 /// The in-memory stream: a serial link with no device under it. It exists so the
 /// link's logic has a witness that runs on a host with no tty pair (open-debt 852).
-impl SerialByteStream for DuplexStream {}
+impl SerialByteStream for DuplexStream {
+    fn take_received(&mut self) -> io::Result<Vec<u8>> {
+        take_received_by_polling(self)
+    }
+}
+
+/// The accept-side flush (open-debt 795): take what the device holds, drop what it
+/// has queued to send, and report the `INIT` that must survive.
+///
+/// The returned header is the one frame the handshake is given back; everything else
+/// taken here is dropped. See the module docs for the two-sided contract.
+pub(crate) fn flush_for_accept<S>(stream: &mut S) -> io::Result<Option<u8>>
+where
+    S: SerialByteStream + ?Sized,
+{
+    let received = stream.take_received()?;
+    stream.clear_unsent()?;
+    Ok(pending_init_header(&received))
+}
 
 /// A serial stream with its concrete type erased -- what a [`SerialPort`] and a
 /// listener's retained device carry, so one `DialedLink::Serial` can hold either a
@@ -376,6 +516,11 @@ impl Drop for SerialLinkGuard {
 pub struct SerialPort {
     stream: BoxedSerialStream,
     guard: Option<SerialLinkGuard>,
+    /// The header of an `INIT` the accept's flush took off the device and kept
+    /// (open-debt 795). The handshake consumes it before it reads the device, so it
+    /// is `None` on a dialled port, on an accept that found the line quiet, and once
+    /// the handshake has run.
+    early_init: Option<u8>,
 }
 
 impl std::fmt::Debug for SerialPort {
@@ -392,6 +537,7 @@ impl SerialPort {
         Self {
             stream: Box::new(stream),
             guard: None,
+            early_init: None,
         }
     }
 
@@ -407,7 +553,19 @@ impl SerialPort {
         Self {
             stream,
             guard: Some(guard),
+            early_init: None,
         }
+    }
+
+    /// Hand this port the `INIT` its accept's flush kept, for the handshake to answer.
+    pub(crate) fn with_early_init(mut self, early_init: Option<u8>) -> Self {
+        self.early_init = early_init;
+        self
+    }
+
+    /// Take the kept `INIT`, leaving none: it is answered once.
+    pub(crate) fn take_early_init(&mut self) -> Option<u8> {
+        self.early_init.take()
     }
 
     /// The stream, mutably — the serial-link handshake runs over the WHOLE
@@ -429,13 +587,32 @@ impl SerialPort {
 /// an MCU UART HAL endpoint with no host device node, so it surfaces a
 /// typed `Unsupported` rather than a misleading "no such file".
 ///
-/// Public since R311y805 because the ACCEPT seam needs the two halves of
-/// [`accept_serial`] separately: `BoundListener::Serial::accept_raw` runs
-/// this (cheap, local, unblocked) and DEFERS the peer-controlled
-/// [`drive_serial_handshake`] to `AcceptedLink::handshake`, exactly as the
-/// tls/quic acceptors defer their crypto off the accept path. A caller that
-/// wants both halves in one call still uses [`accept_serial`].
+/// The dial side's open: it ends in the full buffer clear. The ACCEPT seam needs
+/// the two halves of [`accept_serial`] separately (R311y805):
+/// `BoundListener::Serial::accept_raw` opens the tty (cheap, local, unblocked) and
+/// flushes it, and DEFERS the peer-controlled handshake to
+/// `AcceptedLink::handshake`, exactly as the tls/quic acceptors defer their crypto
+/// off the accept path. It opens through [`open_tty`] and not through this function,
+/// because this one's clear would discard an `INIT` already on the wire (open-debt
+/// 795). A caller that wants both halves in one call uses [`accept_serial`].
 pub fn open_serial_device(endpoint: &SerialEndpoint) -> io::Result<SerialStream> {
+    let stream = open_tty(endpoint)?;
+    // R2727 — a freshly opened tty carries whatever the kernel buffered for the
+    // device before this process reached it, and upstream's open clears it:
+    // `z-serial-0.3.1` @ `pub fn new(port: String, baud_rate: u32, exclusive: bool)`
+    // runs `serial.clear(ClearBuffer::All)?` right after its own `set_exclusive`.
+    // The DIAL side inherits that whole: an initiator wants nothing that was on the
+    // wire before it spoke. The ACCEPT side does not -- it opens through
+    // [`open_tty`] and flushes through [`flush_for_accept`], which keeps an `INIT`
+    // (open-debt 795).
+    clear_serial_buffers(&stream)?;
+    Ok(stream)
+}
+
+/// Open the tty for a [`SerialEndpoint`] and leave its buffers as the kernel has them
+/// -- [`open_serial_device`] without its clear, for the accept side, whose flush must
+/// not discard an `INIT` the peer already wrote (open-debt 795).
+pub(crate) fn open_tty(endpoint: &SerialEndpoint) -> io::Result<SerialStream> {
     let path = match &endpoint.target {
         SerialTarget::Device(path) => path,
         SerialTarget::Pins { .. } => {
@@ -479,12 +656,6 @@ pub fn open_serial_device(endpoint: &SerialEndpoint) -> io::Result<SerialStream>
             .map_err(io::Error::other)?;
         stream
     };
-    // R2727 — a freshly opened tty carries whatever the kernel buffered for the
-    // device before this process reached it, and upstream's open clears it:
-    // `z-serial-0.3.1` @ `pub fn new(port: String, baud_rate: u32, exclusive: bool)`
-    // runs `serial.clear(ClearBuffer::All)?` right after its own `set_exclusive`.
-    // Both ends of wz's tty backend reach this function, so both inherit that.
-    clear_serial_buffers(&stream)?;
     Ok(stream)
 }
 
@@ -504,6 +675,12 @@ pub fn open_serial_device(endpoint: &SerialEndpoint) -> io::Result<SerialStream>
 /// `ClearBuffer::All` rather than `Input` alone, matching upstream's `clear()`:
 /// an outbound tail the previous link never managed to transmit is no more
 /// wanted by the next peer than an inbound one.
+///
+/// Open-debt 795 -- this full clear is now the DIAL side's. Upstream's accept clears
+/// as above, but its initiator writes `INIT` once and its responder never sends the
+/// `RESET` that would make it write again, so the same clear at an ACCEPT can end a
+/// link before it starts. wz's accept therefore discards by [`flush_for_accept`]
+/// instead, which differs from upstream in exactly one frame.
 pub fn clear_serial_buffers(stream: &SerialStream) -> io::Result<()> {
     tokio_serial::SerialPort::clear(stream, tokio_serial::ClearBuffer::All)
         .map_err(io::Error::other)
@@ -617,8 +794,9 @@ where
 /// peer of [`dial_serial`] — pico's listen side has no responder (the
 /// remote zenoh router serves it), so this models the wz<->wz dual.
 pub async fn accept_serial(endpoint: &SerialEndpoint) -> io::Result<SerialStream> {
-    let mut stream = open_serial_device(endpoint)?;
-    drive_serial_handshake(&mut stream, SerialRole::Responder).await?;
+    let mut stream = open_tty(endpoint)?;
+    let early_init = flush_for_accept(&mut stream)?;
+    drive_serial_handshake_from(&mut stream, SerialRole::Responder, early_init).await?;
     Ok(stream)
 }
 
@@ -641,6 +819,21 @@ pub async fn drive_serial_handshake<S>(stream: &mut S, role: SerialRole) -> io::
 where
     S: AsyncReadExt + AsyncWriteExt + Unpin,
 {
+    drive_serial_handshake_from(stream, role, None).await
+}
+
+/// [`drive_serial_handshake`] for a side that has ALREADY read one handshake frame:
+/// `early_header` is fed to the handshake as if it had just arrived, before the
+/// stream is read. It is the accept's kept `INIT` (open-debt 795) -- the peer wrote
+/// it once, before the accept, and will not write it again.
+pub(crate) async fn drive_serial_handshake_from<S>(
+    stream: &mut S,
+    role: SerialRole,
+    early_header: Option<u8>,
+) -> io::Result<()>
+where
+    S: AsyncReadExt + AsyncWriteExt + Unpin,
+{
     let handshake = match role {
         SerialRole::Initiator => SerialHandshake::initiator(),
         SerialRole::Responder => SerialHandshake::responder(),
@@ -654,19 +847,25 @@ where
 
     let mut framer = SerialFrameReader::new();
     let mut byte = [0u8; 1];
+    let mut early_header = early_header;
     loop {
-        if stream.read(&mut byte).await? == 0 {
-            return Err(io::Error::new(
-                io::ErrorKind::UnexpectedEof,
-                "serial peer closed during link handshake",
-            ));
-        }
-        let frame = match framer.push(byte[0]) {
-            Ok(Some(frame)) => frame,
-            Ok(None) => continue, // mid-frame
-            Err(_) => continue,   // framing noise; the reader resynced past it
+        let header = match early_header.take() {
+            Some(header) => header,
+            None => {
+                if stream.read(&mut byte).await? == 0 {
+                    return Err(io::Error::new(
+                        io::ErrorKind::UnexpectedEof,
+                        "serial peer closed during link handshake",
+                    ));
+                }
+                match framer.push(byte[0]) {
+                    Ok(Some(frame)) => frame.header,
+                    Ok(None) => continue, // mid-frame
+                    Err(_) => continue,   // framing noise; the reader resynced past it
+                }
+            }
         };
-        match handshake.on_header(frame.header) {
+        match handshake.on_header(header) {
             HandshakeStep::Connected => return Ok(()),
             HandshakeStep::EmitAndConnect(reply) => {
                 stream.write_all(&reply).await?;
@@ -1432,13 +1631,129 @@ mod tests {
         );
     }
 
-    /// The in-memory stream has no kernel queues, so clearing it is a no-op that
-    /// must SUCCEED: the accept seam clears whatever it retained, and an error here
-    /// would make every memory-backed accept fail.
+    /// The in-memory stream has no kernel queues, so dropping its unsent bytes is a
+    /// no-op that must SUCCEED: the accept seam flushes whatever it retained, and an
+    /// error here would make every memory-backed accept fail.
     #[test]
     fn a_stream_with_no_device_queues_clears_cleanly() {
         let (a, _b) = memory_pair();
-        a.clear_buffers()
+        a.clear_unsent()
             .expect("a duplex has no device buffers to fail to clear");
+    }
+
+    async fn write_all_to(peer: &mut DuplexStream, bytes: &[u8]) {
+        peer.write_all(bytes).await.expect("the peer writes");
+        peer.flush().await.expect("the bytes reach the wire");
+    }
+
+    /// `take_received` takes what is queued, reports a quiet line as empty rather than
+    /// waiting, and leaves later bytes for later: the three properties the accept's
+    /// flush is built on (open-debt 795, rule 2 of the module's flush contract).
+    #[tokio::test]
+    async fn take_received_takes_what_is_queued_and_never_waits() {
+        let (mut a, mut b) = memory_pair();
+        assert!(
+            a.take_received().expect("a quiet line reads").is_empty(),
+            "a quiet line answers empty at once instead of waiting for a byte"
+        );
+        write_all_to(&mut b, b"abc").await;
+        assert_eq!(a.take_received().expect("queued bytes read"), b"abc");
+        assert!(
+            a.take_received().expect("a drained line reads").is_empty(),
+            "what was taken is gone"
+        );
+        write_all_to(&mut b, b"de").await;
+        assert_eq!(
+            a.take_received().expect("later bytes read"),
+            b"de",
+            "bytes that arrive after a take belong to the next take"
+        );
+    }
+
+    /// The flush keeps the INIT and nothing else that came before it, and keeps
+    /// everything that comes after it (open-debt 795, both rules of the contract).
+    #[tokio::test]
+    async fn the_accept_flush_keeps_the_init_and_discards_stale_bytes() {
+        let (mut a, mut b) = memory_pair();
+        let data = encode_frame(SERIAL_DATA_HEADER, b"stale").expect("data frame");
+        let init =
+            encode_frame(wz_session_core::serial_link::SERIAL_FLAG_INIT, b"").expect("INIT frame");
+        write_all_to(&mut b, &data).await;
+        write_all_to(&mut b, b"\x11\x22\x33-mangled\x00").await;
+        write_all_to(&mut b, &init).await;
+        write_all_to(&mut b, &data).await;
+
+        let kept = flush_for_accept(&mut a).expect("the flush reads the line");
+        assert_eq!(
+            kept,
+            Some(wz_session_core::serial_link::SERIAL_FLAG_INIT),
+            "rule 1: the INIT that was on the wire survives the flush"
+        );
+        assert!(
+            a.take_received().expect("the line reads").is_empty(),
+            "rule 2: nothing stale is left for the handshake to read"
+        );
+
+        write_all_to(&mut b, &data).await;
+        assert_eq!(
+            a.take_received().expect("the line reads"),
+            data,
+            "rule 2: a byte received after the flush is not discarded"
+        );
+    }
+
+    /// A flush of a line with no INIT on it keeps nothing, however much stale there is.
+    #[tokio::test]
+    async fn the_accept_flush_of_a_line_with_no_init_keeps_nothing() {
+        let (mut a, mut b) = memory_pair();
+        assert_eq!(flush_for_accept(&mut a).expect("a quiet line"), None);
+        let data = encode_frame(SERIAL_DATA_HEADER, b"stale").expect("data frame");
+        write_all_to(&mut b, &data).await;
+        assert_eq!(flush_for_accept(&mut a).expect("a stale line"), None);
+    }
+
+    /// The kept INIT is answered WITHOUT reading the device: the peer wrote it once,
+    /// so a responder that waited for another would wait for ever. The peer end stays
+    /// silent here, which is what makes the early header the only thing that can
+    /// complete the handshake.
+    #[tokio::test]
+    async fn a_kept_init_is_answered_without_reading_the_device() {
+        let (mut a, mut b) = memory_pair();
+        tokio::time::timeout(
+            Duration::from_secs(5),
+            drive_serial_handshake_from(
+                &mut a,
+                SerialRole::Responder,
+                Some(wz_session_core::serial_link::SERIAL_FLAG_INIT),
+            ),
+        )
+        .await
+        .expect("a responder holding the peer's INIT must not wait for another")
+        .expect("the handshake completes");
+
+        let want = encode_frame(
+            wz_session_core::serial_link::SERIAL_FLAG_INIT
+                | wz_session_core::serial_link::SERIAL_FLAG_ACK,
+            b"",
+        )
+        .expect("INIT|ACK frame");
+        let mut got = vec![0u8; want.len()];
+        b.read_exact(&mut got)
+            .await
+            .expect("the peer hears INIT|ACK");
+        assert_eq!(got, want);
+    }
+
+    /// Past the bound the flush refuses by name instead of reading for as long as the
+    /// peer writes.
+    #[tokio::test]
+    async fn the_accept_flush_refuses_a_line_that_never_goes_quiet() {
+        let (mut a, mut b) = tokio::io::duplex(SERIAL_FLUSH_LIMIT + 1024);
+        write_all_to(&mut b, &vec![0x55u8; SERIAL_FLUSH_LIMIT + 1]).await;
+        let err = flush_for_accept(&mut a).expect_err("more than the bound is refused");
+        assert!(
+            err.to_string().contains("did not go quiet"),
+            "the refusal names the cause: {err}"
+        );
     }
 }

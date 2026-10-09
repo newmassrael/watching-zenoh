@@ -5031,7 +5031,13 @@ layer_c1t_cargo_test_serial() {
     # fragmentation), the same pty tests all kept. READ off what the
     # commands PRINTED, not counted off the diff. link_endpoints_pairing
     # stays 2: its serial test changed stream, not count.
-    _runci_guarded_test C1t 12 cargo test -p wz-runtime-tokio --features transport-link-serial --lib serial_pipeline --quiet \
+    #
+    # Open-debt 795 -- lib 12 -> 17 (the accept flush's five witnesses: the
+    # take, the keep-the-INIT-drop-the-rest flush, the no-INIT flush, the kept
+    # INIT answered unread, the bounded flush) and e2e 10 -> 12 / 12 -> 14 (the
+    # INIT-before-accept arm and the stale-frames-around-the-INIT arm). READ off
+    # what the commands PRINTED (17, 12, 14); the e2e deltas are equal.
+    _runci_guarded_test C1t 17 cargo test -p wz-runtime-tokio --features transport-link-serial --lib serial_pipeline --quiet \
         || return 1
     # R2725 — 5 -> 7 and 6 -> 8. R2722 split
     # serial_listener_yields_one_link_then_parks into a parks-while-live arm
@@ -5057,9 +5063,9 @@ layer_c1t_cargo_test_serial() {
     # buffer-clear witness: +2 in both feature sets. READ off what the two
     # commands PRINTED (9 and 10), and the two deltas are EQUAL, which is
     # R311y805's check that no new case hid behind transport-fragmentation.
-    _runci_guarded_test C1t 10 cargo test -p wz-runtime-tokio --features transport-link-serial --test serial_link_e2e --quiet \
+    _runci_guarded_test C1t 12 cargo test -p wz-runtime-tokio --features transport-link-serial --test serial_link_e2e --quiet \
         || return 1
-    _runci_guarded_test C1t 12 cargo test -p wz-runtime-tokio --features transport-link-serial,transport-fragmentation --test serial_link_e2e --quiet \
+    _runci_guarded_test C1t 14 cargo test -p wz-runtime-tokio --features transport-link-serial,transport-fragmentation --test serial_link_e2e --quiet \
         || return 1
     _runci_guarded_test C1t 2 cargo test -p wz-runtime-tokio --features transport-link-serial --test link_endpoints_pairing --quiet \
         || return 1
