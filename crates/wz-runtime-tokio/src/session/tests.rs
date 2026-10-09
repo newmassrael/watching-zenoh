@@ -3253,6 +3253,100 @@ fn query_session_local_with_session_local_queryable_fires() {
     assert_eq!(reply_count.load(Ordering::SeqCst), 1);
 }
 
+/// R3137 — a GET this session asks of itself hears every reply its handler
+/// sends, whichever thread runs the handler's job.
+///
+/// The local plane has more than one drainer: the thread that asked, and the
+/// host's drive task, which empties the same queue. A job the drive task took
+/// was still running when the asking thread found the queue empty and delivered
+/// the GET's Final, so the replies the job then produced had no pending entry
+/// to land in. Measured through the zenoh-c ABI a handler of four replies was
+/// heard in full by 59 asks and by none of the next 2941.
+///
+/// The second drainer here stands for the drive task: it only ever calls
+/// `drain_deferred_fires`, as the drive arm does. Whichever of them runs a
+/// given job, the Final must follow the job's replies, so the count per ask is
+/// the handler's, every time.
+#[cfg(all(feature = "query-get", feature = "query-queryable"))]
+#[test]
+fn a_local_get_hears_every_reply_while_another_thread_drains_the_plane() {
+    use std::sync::atomic::AtomicBool;
+    use wz_session_core::query_mode::ConsolidationMode;
+
+    const REPLIES: usize = 4;
+    const ASKS: usize = 2000;
+
+    let (session, _driver) = build_session();
+    let _queryable = session
+        .declare_queryable(
+            "home/race",
+            QueryableOptions::default(),
+            move |_query, out| {
+                for _ in 0..REPLIES {
+                    out.reply(b"r");
+                }
+            },
+        )
+        .expect("query-queryable is ON in this test build");
+
+    let stop = Arc::new(AtomicBool::new(false));
+    let drainer = {
+        let session = session.clone();
+        let stop = stop.clone();
+        std::thread::spawn(move || {
+            while !stop.load(std::sync::atomic::Ordering::Relaxed) {
+                session.drain_deferred_fires();
+            }
+        })
+    };
+
+    let mut short: Vec<(usize, usize)> = Vec::new();
+    for ask in 0..ASKS {
+        let replies = Arc::new(AtomicUsize::new(0));
+        let finals = Arc::new(AtomicUsize::new(0));
+        let (r, f) = (replies.clone(), finals.clone());
+        session
+            .query(
+                "home/race",
+                QueryOptions {
+                    consolidation: Some(ConsolidationMode::None),
+                    ..QueryOptions::get().with_allowed_destination(Locality::SessionLocal)
+                },
+                move |_| {
+                    r.fetch_add(1, Ordering::SeqCst);
+                },
+                move |_| {
+                    f.fetch_add(1, Ordering::SeqCst);
+                },
+            )
+            .expect("query-get is ON in this test build");
+        // The Final may be the other thread's to deliver; it is owed either way.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while finals.load(Ordering::SeqCst) == 0 && std::time::Instant::now() < deadline {
+            std::thread::yield_now();
+        }
+        assert_eq!(
+            finals.load(Ordering::SeqCst),
+            1,
+            "ask {ask}: the GET must end exactly once (replies heard: {}, fires still staged: {})",
+            replies.load(Ordering::SeqCst),
+            session.has_pending_fires()
+        );
+        if replies.load(Ordering::SeqCst) != REPLIES {
+            short.push((ask, replies.load(Ordering::SeqCst)));
+        }
+    }
+    stop.store(true, std::sync::atomic::Ordering::Relaxed);
+    drainer.join().expect("the second drainer does not panic");
+
+    assert!(
+        short.is_empty(),
+        "{} of {ASKS} asks heard fewer than {REPLIES} replies; first (ask, replies): {:?}",
+        short.len(),
+        short.first()
+    );
+}
+
 /// R2953 (open-debt item 836) — a query this session asked of ITSELF and a
 /// handler kept is waited for, as upstream's is: the GET's final comes when
 /// the held query is dropped, not when the handler returns, and a reply the

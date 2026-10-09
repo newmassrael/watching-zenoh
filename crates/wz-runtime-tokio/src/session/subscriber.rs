@@ -202,7 +202,7 @@ impl<R: SessionRuntime, T: TimeSource, Tp: TransportState<R, T>> Session<R, T, T
         let sink = move |view: &dyn SampleView| {
             let owned = crate::sample::Sample::from_view(view);
             let cell = cell_for_sink.clone();
-            queue.stage(Box::new(move || cell.invoke(move |cb| cb(&owned))));
+            cell.stage(&queue, move |cb| cb(&owned));
         };
         (cell, sink)
     }

@@ -830,15 +830,13 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
             let keyexpr = sample.keyexpr.to_string();
             let token_id = sample.token_id;
             let cell = cell_for_sink.clone();
-            queue.stage(Box::new(move || {
-                cell.invoke(move |cb| {
-                    cb(LivelinessSample {
-                        kind,
-                        keyexpr: &keyexpr,
-                        token_id,
-                    })
+            cell.stage(&queue, move |cb| {
+                cb(LivelinessSample {
+                    kind,
+                    keyexpr: &keyexpr,
+                    token_id,
                 })
-            }));
+            });
         });
         (cell, sink)
     }

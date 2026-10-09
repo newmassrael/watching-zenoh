@@ -119,6 +119,128 @@ fn kill_suppresses_staged_fire() {
     assert_eq!(*fired.lock().unwrap(), 0, "dead cell must not fire");
 }
 
+type LogCell = Cell<Arc<Mutex<Vec<&'static str>>>>;
+
+/// R3137 -- calls run in the order their places were taken, not the order
+/// their drainers reach the cell.
+///
+/// Two drainers holding consecutive batches reach a cell in either order, and
+/// one of them can find the callback at rest between the other's calls, so
+/// "whoever arrives runs" reorders a stream: a GET's Final ran between its
+/// replies and retired the cell, and the replies after it were dropped. The
+/// places are taken where the calls are staged; here, in a row, with the
+/// calls then made in the reverse order.
+#[test]
+fn calls_run_in_the_order_of_their_tickets_whichever_arrives_first() {
+    let log = Arc::new(Mutex::new(Vec::new()));
+    let cell: LogCell = Cell::new(log.clone());
+    let (first, second, third) = (cell.ticket(), cell.ticket(), cell.ticket());
+
+    third.invoke(|log| log.lock().unwrap().push("third"));
+    second.invoke(|log| log.lock().unwrap().push("second"));
+    assert!(
+        log.lock().unwrap().is_empty(),
+        "a call whose turn has not come is held, not run ahead of the first"
+    );
+    first.invoke(|log| log.lock().unwrap().push("first"));
+    assert_eq!(
+        *log.lock().unwrap(),
+        vec!["first", "second", "third"],
+        "the call that completes the order runs everything that was waiting on it"
+    );
+}
+
+/// R3137 -- the terminal call keeps its place: arriving before the calls
+/// ahead of it, it is held for them, and then retires the cell.
+#[test]
+fn a_last_call_that_arrives_early_waits_for_the_calls_ahead_of_it() {
+    let log = Arc::new(Mutex::new(Vec::new()));
+    let cell: LogCell = Cell::new(log.clone());
+    let (reply, last) = (cell.ticket(), cell.ticket());
+
+    last.invoke_last(|log| log.lock().unwrap().push("final"));
+    assert!(
+        log.lock().unwrap().is_empty(),
+        "the Final waits for the reply"
+    );
+    assert!(
+        !cell.is_dead(),
+        "the cell is not retired before its last call ran"
+    );
+    reply.invoke(|log| log.lock().unwrap().push("reply"));
+    assert_eq!(*log.lock().unwrap(), vec!["reply", "final"]);
+    assert!(cell.is_dead());
+}
+
+/// R3137 -- a place that is given up does not hold the calls behind it.
+#[test]
+fn a_ticket_dropped_unused_does_not_hold_up_the_calls_behind_it() {
+    let log = Arc::new(Mutex::new(Vec::new()));
+    let cell: LogCell = Cell::new(log.clone());
+    let (abandoned, behind) = (cell.ticket(), cell.ticket());
+
+    behind.invoke(|log| log.lock().unwrap().push("behind"));
+    assert!(log.lock().unwrap().is_empty(), "held for the place ahead");
+    drop(abandoned);
+    assert_eq!(
+        *log.lock().unwrap(),
+        vec!["behind"],
+        "giving the place up lets the waiting call run"
+    );
+}
+
+/// R3137 -- a terminal call handed to the active drainer is still run, after
+/// the calls queued ahead of it, and the cell is retired once it has.
+///
+/// The second drainer of a GET's reply cell is modelled by the one deterministic
+/// way a cell is ever "mid-fire": a call made from inside the callback itself,
+/// which the cell backlogs for the running call to carry out before it restores.
+#[test]
+fn a_last_call_handed_to_the_active_drainer_runs_after_the_calls_ahead_of_it() {
+    let log = Arc::new(Mutex::new(Vec::new()));
+    let cell: LogCell = Cell::new(log.clone());
+    let inner = cell.clone();
+    cell.invoke(move |log| {
+        log.lock().unwrap().push("first");
+        // Both arrive while this call is running, so both are only backlogged.
+        inner.invoke(|log| log.lock().unwrap().push("reply"));
+        inner.invoke_last(|log| log.lock().unwrap().push("final"));
+    });
+    assert_eq!(
+        *log.lock().unwrap(),
+        vec!["first", "reply", "final"],
+        "the active drainer carries out the backlog in order, the last call included"
+    );
+    assert!(cell.is_dead(), "the cell is retired by its last call");
+    cell.invoke(|log| log.lock().unwrap().push("late"));
+    assert_eq!(
+        log.lock().unwrap().len(),
+        3,
+        "nothing follows the last call"
+    );
+}
+
+/// R3137 -- the shape `invoke_last` replaces, pinned so the reason stays
+/// visible: `invoke` followed by `kill` loses a call that was only backlogged.
+/// Were this to start delivering, `invoke_last` would have nothing left to fix.
+#[test]
+fn invoke_then_kill_discards_a_call_that_was_only_backlogged() {
+    let log = Arc::new(Mutex::new(Vec::new()));
+    let cell: LogCell = Cell::new(log.clone());
+    let inner = cell.clone();
+    cell.invoke(move |log| {
+        log.lock().unwrap().push("first");
+        inner.invoke(|log| log.lock().unwrap().push("reply"));
+        inner.invoke(|log| log.lock().unwrap().push("final"));
+        inner.kill();
+    });
+    assert_eq!(
+        *log.lock().unwrap(),
+        vec!["first"],
+        "a kill right after an invoke that backlogged discards the backlog"
+    );
+}
+
 /// Self-kill from inside the running callback (the self-undeclare
 /// shape): no deadlock on the cell's own mutex (the callback runs with
 /// the cell unlocked), and the restore drops the callback instead of

@@ -1477,9 +1477,7 @@ impl<R: SessionRuntime, T: TimeSource> Querier<R, T> {
             let cell_for_sink = cell.clone();
             let sink = wz_session_core::declare::matching::BoxedMatchingSink::new(move |m| {
                 let cell = cell_for_sink.clone();
-                queue.stage(Box::new(move || {
-                    cell.invoke(move |cb| cb(MatchingStatus { matching: m }));
-                }));
+                cell.stage(&queue, move |cb| cb(MatchingStatus { matching: m }));
             });
             // R311y797 — seed with the SAME verdict the poll reports, and
             // store the SAME criterion the poll computes, so registration

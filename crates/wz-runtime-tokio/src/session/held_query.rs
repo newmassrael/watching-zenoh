@@ -90,6 +90,23 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
         }
     }
 
+    /// Hold the Final of a LOCAL query for as long as one of its deferred
+    /// handler jobs has not yet delivered its replies; see [`HandlerJobHold`].
+    ///
+    /// Taken by the queryable's staging sink, which runs inside the loopback
+    /// window of the query that matched it, so the hold exists before the
+    /// query's own terminator can be consulted.
+    pub(super) fn hold_for_handler_job(&self, rid: u64) -> HandlerJobHold<R, T> {
+        let key = FinalKey { rid, local: true };
+        if let Ok(mut map) = self.final_holds.lock() {
+            map.entry(key).or_default().holds += 1;
+        }
+        HandlerJobHold {
+            session: self.downgrade(),
+            key,
+        }
+    }
+
     /// Release one hold, and emit the query's `ResponseFinal` if this was the
     /// last one and the dispatch already owed it.
     ///
@@ -192,5 +209,40 @@ impl<R: SessionRuntime, T: TimeSource> HeldQuery<R, T> {
 impl<R: SessionRuntime, T: TimeSource> Drop for HeldQuery<R, T> {
     fn drop(&mut self) {
         self.session.release_query_final(self.key);
+    }
+}
+
+/// The hold a local query's deferred handler job keeps on the query's own
+/// `ResponseFinal`, released when the job has delivered its replies.
+///
+/// A local GET's Final may not leave before the replies of the handlers it
+/// matched, and "after my own drain" does not say that: the local plane has
+/// more than one drainer (the thread that asked, and the drive task, which
+/// also empties it), so a job taken by one of them is still running while the
+/// other finds the queue empty and finalises. Measured on the zenoh-c ABI, a
+/// handler that sent four replies was heard in full by 59 asks and by none of
+/// the next 2941; libzenohc answers all 3000, because its handler runs on the
+/// asking thread and its replies precede its final by construction.
+///
+/// The job holds the Final instead, which is the shape [`HeldQuery`] already
+/// gave a handler that keeps its query: the terminator then finds a hold and
+/// leaves the Final to the last releaser, whichever thread that is, and a
+/// release that beats the terminator leaves nothing for it to defer to. Both
+/// orders end with exactly one Final, after the replies.
+///
+/// The guard is moved INTO the job's closure, so it is released wherever that
+/// closure ends: after the handler's replies are delivered, or unrun when the
+/// listener was undeclared first, or while unwinding from a panicking handler.
+pub(super) struct HandlerJobHold<R: SessionRuntime = TokioRuntime, T: TimeSource = TokioTime> {
+    session: WeakSession<R, T, Unicast>,
+    key: FinalKey,
+}
+
+impl<R: SessionRuntime, T: TimeSource> Drop for HandlerJobHold<R, T> {
+    fn drop(&mut self) {
+        // A session already gone has no GET left to terminate.
+        if let Some(session) = self.session.upgrade() {
+            session.release_query_final(self.key);
+        }
     }
 }

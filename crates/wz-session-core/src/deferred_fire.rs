@@ -101,7 +101,7 @@
 //! the full history.)
 
 use alloc::boxed::Box;
-use alloc::collections::VecDeque;
+use alloc::collections::BTreeMap;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 
@@ -223,20 +223,26 @@ impl<R: Runtime> DeferredFireQueue<R> {
     }
 }
 
-/// R311lg — one deferred call handed to the ACTIVE drainer by an
-/// invoke that found the callback mid-fire (lossless overlap; see
-/// [`DeferredListenerCell::invoke`]).
-type BacklogCall<F> = Box<dyn FnOnce(&mut F) + Send + 'static>;
+/// One call that reached its cell before its turn, or while the callback
+/// was mid-fire on another drainer (R311lg), parked for whichever drainer
+/// is, or becomes, the cell's runner.
+type ParkedCall<F> = Box<dyn FnOnce(&mut F) + Send + 'static>;
 
 /// Slot state behind a [`DeferredListenerCell`]: the callback (absent
-/// while a job is mid-fire — taken out so the user code runs with the
-/// cell unlocked), the dead marker an undeclare sets, and the FIFO
-/// backlog of calls that arrived while the callback was mid-fire
-/// (R311lg — drained by the active drainer before it restores).
+/// while a call is mid-fire — taken out so the user code runs with the
+/// cell unlocked), the dead marker an undeclare sets, and the TURN
+/// bookkeeping that makes the cell's calls run in the order they were
+/// accepted (R3137).
+///
+/// `issued` hands out the next ticket; `next` is the ticket whose turn it
+/// is. A call whose ticket is not `next` waits in `parked` however many
+/// drainers are running and in whatever order they arrive.
 struct CellState<F> {
     callback: Option<F>,
     dead: bool,
-    backlog: VecDeque<BacklogCall<F>>,
+    issued: u64,
+    next: u64,
+    parked: BTreeMap<u64, ParkedCall<F>>,
 }
 
 /// Per-listener callback slot fired through by a deferred [`FireJob`].
@@ -262,7 +268,9 @@ impl<R: Runtime, F: Send + 'static> DeferredListenerCell<R, F> {
             state: Arc::new(R::new_mutex(CellState {
                 callback: Some(callback),
                 dead: false,
-                backlog: VecDeque::new(),
+                issued: 0,
+                next: 0,
+                parked: BTreeMap::new(),
             })),
         }
     }
@@ -278,7 +286,7 @@ impl<R: Runtime, F: Send + 'static> DeferredListenerCell<R, F> {
         R::with_mutex_mut(&self.state, |s| {
             s.dead = true;
             s.callback = None;
-            s.backlog.clear();
+            s.parked.clear();
         });
     }
 
@@ -287,67 +295,202 @@ impl<R: Runtime, F: Send + 'static> DeferredListenerCell<R, F> {
         R::with_mutex_mut(&self.state, |s| s.dead)
     }
 
+    /// Take a place in the cell's order. The call made through the returned
+    /// [`Ticket`] runs after every call that took an earlier ticket and
+    /// before every call that takes a later one, whichever drainers carry
+    /// them and in whatever order those drainers arrive (R3137).
+    ///
+    /// Taken where the call is ACCEPTED, which is where its place in the
+    /// order is decided; [`stage`](Self::stage) does exactly that for a
+    /// deferred fire. A ticket that is never used must be dropped, which
+    /// gives its place up; one that is leaked would hold up every call
+    /// behind it.
+    pub fn ticket(&self) -> Ticket<R, F> {
+        let number = R::with_mutex_mut(&self.state, |s| {
+            let number = s.issued;
+            s.issued += 1;
+            number
+        });
+        Ticket {
+            cell: self.clone(),
+            number,
+            spent: false,
+        }
+    }
+
+    /// Stage a call for this cell on `queue`, in the order staged.
+    ///
+    /// The place in the cell's order is taken HERE, inside the staging
+    /// window, not when the job is eventually run: two drainers can hold
+    /// consecutive batches at the same time and reach the cell in either
+    /// order, and the order the calls were staged in is the one that must
+    /// survive that.
+    pub fn stage(&self, queue: &DeferredFireQueue<R>, f: impl FnOnce(&mut F) + Send + 'static) {
+        let ticket = self.ticket();
+        queue.stage(Box::new(move || ticket.invoke(f)));
+    }
+
+    /// [`stage`](Self::stage) for the cell's LAST call; see
+    /// [`invoke_last`](Self::invoke_last).
+    pub fn stage_last(
+        &self,
+        queue: &DeferredFireQueue<R>,
+        f: impl FnOnce(&mut F) + Send + 'static,
+    ) {
+        let ticket = self.ticket();
+        queue.stage(Box::new(move || ticket.invoke_last(f)));
+    }
+
     /// Take-call-restore: run `f` over the callback with the cell
     /// UNLOCKED (the callback may re-enter any session API, including
     /// [`kill`](Self::kill) on this very cell). Silently drops the call
     /// when the cell is dead.
     ///
+    /// The call takes its place in the order when it is made. A caller that
+    /// must fix its place EARLIER than that, because it will be made later
+    /// from a job some other drainer may reach first, takes a
+    /// [`ticket`](Self::ticket) (or uses [`stage`](Self::stage)).
+    ///
     /// R311lg — lossless overlap: when the callback is mid-fire on
     /// another drainer (drive loop vs a query-tail / sweep-task drain —
-    /// the data-plane multi-drainer shape), the call is BACKLOGGED
-    /// instead of skipped; the active drainer runs the backlog FIFO
-    /// before restoring the callback, so every call accepted by a live
-    /// cell runs exactly once, serialized, still outside every
-    /// framework lock. A re-entrant invoke from INSIDE this cell's own
-    /// callback backlogs the same way and runs before the restore.
+    /// the data-plane multi-drainer shape), the call is PARKED instead of
+    /// skipped; the active drainer runs what is parked, in order, before
+    /// restoring the callback, so every call accepted by a live cell runs
+    /// exactly once, serialized, still outside every framework lock. A
+    /// re-entrant invoke from INSIDE this cell's own callback parks the
+    /// same way and runs before the restore.
     pub fn invoke(&self, f: impl FnOnce(&mut F) + Send + 'static) {
-        let mut pending = Some(f);
+        self.ticket().invoke(f);
+    }
+
+    /// Run the call with ticket `number`, in its turn.
+    ///
+    /// The call is parked under its number. If the callback is at rest and
+    /// it is that number's turn, this drainer becomes the cell's runner: it
+    /// takes the callback and runs the parked calls in order, the one it
+    /// arrived with and every later number that has arrived, until the next
+    /// number is still missing; then it restores the callback. If the
+    /// callback is out, its runner picks the call up. If it is at rest but
+    /// the turn is an earlier number's, whoever holds that number runs this
+    /// call after its own.
+    fn run_ticket(&self, number: u64, call: ParkedCall<F>) {
+        let mut pending = Some(call);
         let taken = R::with_mutex_mut(&self.state, |s| {
             if s.dead {
                 // Drop the call; `pending` falls out of scope at fn
                 // exit, outside the cell lock.
                 return None;
             }
-            match s.callback.take() {
-                Some(callback) => Some(callback),
-                None => {
-                    // Mid-fire on another drainer: hand the call over.
-                    let call = pending.take().expect("pending set just above");
-                    s.backlog.push_back(Box::new(call));
-                    None
-                }
+            let call = pending.take().expect("pending set just above");
+            s.parked.insert(number, call);
+            if s.parked.contains_key(&s.next) {
+                s.callback.take()
+            } else {
+                None
             }
         });
-        let Some(mut callback) = taken else {
+        let Some(callback) = taken else {
             return;
         };
-        let call = pending
-            .take()
-            .expect("the active drainer keeps its own call");
-        call(&mut callback);
-        // Restore-or-drain loop: run backlogged calls (FIFO) until the
-        // backlog is empty, then restore — unless a kill arrived, in
-        // which case the callback (and any remaining backlog) is
+        // Run-or-restore loop: run the parked calls in their order until
+        // the next number is missing, then restore — unless a kill arrived,
+        // in which case the callback (and whatever is still parked) is
         // dropped. `callback_slot` is taken by the restore arm, so a
         // surviving `Some` after the loop drops outside the cell lock.
         let mut callback_slot = Some(callback);
         loop {
             let next = R::with_mutex_mut(&self.state, |s| {
                 if s.dead {
-                    s.backlog.clear();
-                    None
-                } else if let Some(call) = s.backlog.pop_front() {
-                    Some(call)
-                } else {
-                    s.callback = callback_slot.take();
-                    None
+                    s.parked.clear();
+                    return None;
+                }
+                let turn = s.next;
+                match s.parked.remove(&turn) {
+                    Some(call) => {
+                        s.next += 1;
+                        Some(call)
+                    }
+                    None => {
+                        s.callback = callback_slot.take();
+                        None
+                    }
                 }
             });
             let Some(call) = next else { return };
             let callback = callback_slot
                 .as_mut()
-                .expect("backlog calls are handed to the active drainer only");
+                .expect("parked calls are handed to the cell's runner only");
             call(callback);
+        }
+    }
+
+    /// Run `f` as the cell's LAST call, then retire the cell: the terminal
+    /// fire of a stream (a GET's Final), which no later call may follow.
+    ///
+    /// This is NOT [`invoke`](Self::invoke) followed by [`kill`](Self::kill),
+    /// and the difference is the reason it exists. `invoke` returns before
+    /// `f` has run whenever the callback is mid-fire on another drainer: the
+    /// call is only parked, for that drainer to run. A `kill` issued right
+    /// after it clears what is parked, so it discards `f` together with
+    /// every earlier call still waiting behind the active one, and a stream
+    /// whose replies and Final were handed over in that window ends having
+    /// delivered neither the last replies nor its Final. Measured on a local
+    /// GET with a second drainer: three of four replies heard, the Final
+    /// never, nothing staged anywhere.
+    ///
+    /// Here the retirement runs INSIDE the call, after `f`, on whichever
+    /// drainer runs it. Calls run in ticket order, so every call accepted
+    /// before this one has already run by then; the runner's loop sees the
+    /// cell dead, drops what is left and does not restore the callback. A
+    /// call that finds the cell already dead is dropped, as for `invoke`.
+    pub fn invoke_last(&self, f: impl FnOnce(&mut F) + Send + 'static) {
+        self.ticket().invoke_last(f);
+    }
+}
+
+/// A place in a [`DeferredListenerCell`]'s order of calls, taken with
+/// [`DeferredListenerCell::ticket`].
+///
+/// Using it runs the call in its turn; dropping it unused gives the place up
+/// so the calls behind it are not held for a call that will never be made
+/// (a staged job discarded unrun, a panic unwinding past it).
+pub struct Ticket<R: Runtime, F: Send + 'static> {
+    cell: DeferredListenerCell<R, F>,
+    number: u64,
+    spent: bool,
+}
+
+impl<R: Runtime, F: Send + 'static> Ticket<R, F> {
+    /// Run `f` over the cell's callback in this ticket's turn; see
+    /// [`DeferredListenerCell::invoke`].
+    pub fn invoke(mut self, f: impl FnOnce(&mut F) + Send + 'static) {
+        self.spent = true;
+        self.cell.run_ticket(self.number, Box::new(f));
+    }
+
+    /// Run `f` as the cell's last call in this ticket's turn; see
+    /// [`DeferredListenerCell::invoke_last`].
+    pub fn invoke_last(mut self, f: impl FnOnce(&mut F) + Send + 'static) {
+        self.spent = true;
+        let state = Arc::clone(&self.cell.state);
+        self.cell.run_ticket(
+            self.number,
+            Box::new(move |callback| {
+                f(callback);
+                R::with_mutex_mut(&state, |s| {
+                    s.dead = true;
+                    s.parked.clear();
+                });
+            }),
+        );
+    }
+}
+
+impl<R: Runtime, F: Send + 'static> Drop for Ticket<R, F> {
+    fn drop(&mut self) {
+        if !self.spent {
+            // An empty call in this place: the calls behind it can run.
+            self.cell.run_ticket(self.number, Box::new(|_| {}));
         }
     }
 }

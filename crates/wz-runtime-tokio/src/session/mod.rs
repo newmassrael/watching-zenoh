@@ -3517,11 +3517,15 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
     /// reply/final plane), so they may re-enter any observer-locking
     /// session API — including issuing further queries or gets.
     ///
-    /// The staged `on_final` job kills the cell after firing: Final is
+    /// The staged `on_final` job is the cell's LAST call: Final is
     /// terminal (the registry auto-removes the pending entry, so no
-    /// later fire can stage), and the kill drops the user closures
-    /// promptly — outside every framework lock, unlike the pre-R311lg
-    /// inline path which dropped them inside the observer lock window.
+    /// later fire can stage), and retiring the cell drops the user
+    /// closures promptly — outside every framework lock, unlike the
+    /// pre-R311lg inline path which dropped them inside the observer lock
+    /// window. It retires through `invoke_last` and not through a `kill`
+    /// after the `invoke`: with a second drainer the `invoke` may only
+    /// have backlogged the Final, and the `kill` would then discard it
+    /// together with the replies queued ahead of it.
     #[cfg(any(feature = "query-get", feature = "liveliness-get"))]
     fn deferred_reply_sink(
         &self,
@@ -3541,24 +3545,17 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
             // so the attachment / encoding side-bands (A8b) thread through
             // here without this duplicating the per-arm projection.
             let owned = InboundReply::from_view(view);
-            let cell = cell_for_reply.clone();
-            queue.stage(Box::new(move || {
-                cell.invoke(move |sink| {
-                    use crate::reply_sink::ReplySink as _;
-                    sink.on_reply(&owned)
-                })
-            }));
+            cell_for_reply.stage(&queue, move |sink| {
+                use crate::reply_sink::ReplySink as _;
+                sink.on_reply(&owned)
+            });
         };
         let queue = self.fires.clone();
         let staged_final = move |rid: u64| {
-            let cell = cell.clone();
-            queue.stage(Box::new(move || {
-                cell.invoke(move |sink| {
-                    use crate::reply_sink::ReplySink as _;
-                    sink.on_final(rid)
-                });
-                cell.kill();
-            }));
+            cell.stage_last(&queue, move |sink| {
+                use crate::reply_sink::ReplySink as _;
+                sink.on_final(rid)
+            });
         };
         BoxedReplySink::new(staged_reply, staged_final)
     }

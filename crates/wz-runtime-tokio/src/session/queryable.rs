@@ -226,6 +226,7 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
         let queue = self.fires.clone();
         let cell_for_sink = cell.clone();
         let observer = self.observer.clone();
+        let session = self.downgrade();
         let sink = move |view: &dyn QueryView, _out: &mut dyn ReplyOut| {
             // The registry-provided responder (`_out`, bound to the
             // observer's pending_replies) is deliberately unused: the
@@ -247,76 +248,87 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
             let cell = cell_for_sink.clone();
             let observer = observer.clone();
             let actions = actions.clone();
-            queue.stage(Box::new(move || {
-                cell.invoke(move |handler| {
-                    let borrowed = crate::query_sink::BorrowedQuery {
-                        keyexpr: &owned.keyexpr,
-                        parameters: owned.parameters.as_deref(),
-                        attachment: owned.attachment.as_deref(),
-                        source_info: owned.source_info.as_ref(),
-                        payload: owned.payload.as_deref(),
-                        encoding: owned.encoding.as_ref(),
-                        rid: owned.rid,
-                        is_local: owned.is_local,
-                        qos: owned.qos,
-                    };
-                    // R3061 -- lent as the buffer when the query held it as one.
-                    let shared_view = owned.payload_shared.as_ref().map(|value| {
-                        crate::query_sink::SharedValueQuery {
-                            base: crate::query_sink::BorrowedQuery { ..borrowed },
-                            value,
+            // A local GET's Final must follow this job's replies whichever
+            // thread runs the job: taken here, inside the query's own loopback
+            // window, and released when the job ends. See `HandlerJobHold`.
+            let job_hold = if owned.is_local {
+                session
+                    .upgrade()
+                    .map(|session| session.hold_for_handler_job(owned.rid))
+            } else {
+                None
+            };
+            cell.stage(&queue, move |handler| {
+                // Declared first so it is dropped last: after the replies
+                // below have been delivered to the requester.
+                let _job_hold = job_hold;
+                let borrowed = crate::query_sink::BorrowedQuery {
+                    keyexpr: &owned.keyexpr,
+                    parameters: owned.parameters.as_deref(),
+                    attachment: owned.attachment.as_deref(),
+                    source_info: owned.source_info.as_ref(),
+                    payload: owned.payload.as_deref(),
+                    encoding: owned.encoding.as_ref(),
+                    rid: owned.rid,
+                    is_local: owned.is_local,
+                    qos: owned.qos,
+                };
+                // R3061 -- lent as the buffer when the query held it as one.
+                let shared_view = owned.payload_shared.as_ref().map(|value| {
+                    crate::query_sink::SharedValueQuery {
+                        base: crate::query_sink::BorrowedQuery { ..borrowed },
+                        value,
+                    }
+                });
+                let view: &dyn QueryView = match &shared_view {
+                    Some(shared) => shared,
+                    None => &borrowed,
+                };
+                let mut replies: Vec<crate::query::QueryReply> = Vec::new();
+                {
+                    // R311y834 — the DEFERRED job runs the handler outside
+                    // the observer lock, so it rebuilds the responder and
+                    // must rebuild its acceptance policy from the SAME
+                    // query it captured. Reading it off `owned.parameters`
+                    // rather than carrying a flag keeps this path and the
+                    // in-lock dispatcher on one derivation.
+                    let mut responder = wz_session_core::query::QueryResponder::new(
+                        owned.rid,
+                        owned.keyexpr.clone(),
+                        owned
+                            .parameters
+                            .as_deref()
+                            .and_then(|b| core::str::from_utf8(b).ok())
+                            .map_or(
+                                wz_session_core::reply_acceptance::ReplyKeyExpr::MatchingQuery,
+                                wz_session_core::reply_acceptance::ReplyKeyExpr::from_parameters,
+                            ),
+                        owned.qos,
+                        &mut replies,
+                    );
+                    handler(view, &mut responder);
+                }
+                if owned.is_local {
+                    // Loopback origin: deliver into the local reply
+                    // registry (the requester's pending entry). The
+                    // reply plane's own deferred fires staged here
+                    // drain in the same outer pass.
+                    R::with_mutex_mut(&observer, |obs| {
+                        for reply in replies.drain(..) {
+                            let inbound: crate::reply::InboundReply = reply.into();
+                            obs.replies.deliver_local_reply(&inbound);
                         }
                     });
-                    let view: &dyn QueryView = match &shared_view {
-                        Some(shared) => shared,
-                        None => &borrowed,
-                    };
-                    let mut replies: Vec<crate::query::QueryReply> = Vec::new();
-                    {
-                        // R311y834 — the DEFERRED job runs the handler outside
-                        // the observer lock, so it rebuilds the responder and
-                        // must rebuild its acceptance policy from the SAME
-                        // query it captured. Reading it off `owned.parameters`
-                        // rather than carrying a flag keeps this path and the
-                        // in-lock dispatcher on one derivation.
-                        let mut responder = wz_session_core::query::QueryResponder::new(
-                            owned.rid,
-                            owned.keyexpr.clone(),
-                            owned
-                                .parameters
-                                .as_deref()
-                                .and_then(|b| core::str::from_utf8(b).ok())
-                                .map_or(
-                                    wz_session_core::reply_acceptance::ReplyKeyExpr::MatchingQuery,
-                                    wz_session_core::reply_acceptance::ReplyKeyExpr::from_parameters,
-                                ),
-                            owned.qos,
-                            &mut replies,
-                        );
-                        handler(view, &mut responder);
+                } else {
+                    // Wire origin: emit each reply now (lock-free);
+                    // the dispatch SSOT emits the ResponseFinal
+                    // after the drain. Overflow-rejected replies
+                    // are skipped, mirroring flush_pending.
+                    for reply in replies.drain(..) {
+                        send_staged_reply(&actions, reply);
                     }
-                    if owned.is_local {
-                        // Loopback origin: deliver into the local reply
-                        // registry (the requester's pending entry). The
-                        // reply plane's own deferred fires staged here
-                        // drain in the same outer pass.
-                        R::with_mutex_mut(&observer, |obs| {
-                            for reply in replies.drain(..) {
-                                let inbound: crate::reply::InboundReply = reply.into();
-                                obs.replies.deliver_local_reply(&inbound);
-                            }
-                        });
-                    } else {
-                        // Wire origin: emit each reply now (lock-free);
-                        // the dispatch SSOT emits the ResponseFinal
-                        // after the drain. Overflow-rejected replies
-                        // are skipped, mirroring flush_pending.
-                        for reply in replies.drain(..) {
-                            send_staged_reply(&actions, reply);
-                        }
-                    }
-                })
-            }));
+                }
+            });
         };
         (cell, sink)
     }
