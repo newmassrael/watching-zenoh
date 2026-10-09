@@ -197,8 +197,18 @@ DOC_ATTR = re.compile(r'#\[doc\s*=\s*"([^"]*)"')
 def check_blind_spots(crates_dir: pathlib.Path) -> int:
     """0 when this reader's known blind spots hold nothing; 1 when they do."""
     findings = []
+    # The workspace's own crate names in module form. A `wz_`-prefixed head is a
+    # FOREIGN crate only when it names one of these and not the crate the file
+    # belongs to: `wz_dissect_live_push` is a C-ABI function of wz-capi-dissect
+    # itself, and a link to it crosses no crate edge, whatever its prefix says.
+    crate_modules = {
+        p.name.replace("-", "_")
+        for p in crates_dir.iterdir()
+        if (p / "Cargo.toml").is_file()
+    }
     for source, lines in read_files(crates_dir):
         text = "\n".join(lines)
+        own = source.replace("-", "_")
         imported = {}
         for line in lines:
             m = USE.match(line)
@@ -209,7 +219,7 @@ def check_blind_spots(crates_dir: pathlib.Path) -> int:
         def foreign(target: str):
             head = target.split("::")[0]
             if head.startswith("wz_"):
-                return head
+                return head if head in crate_modules and head != own else None
             return imported.get(head)
 
         # A `#[doc = "..."]` body carrying a link.
