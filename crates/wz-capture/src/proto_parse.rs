@@ -4,14 +4,19 @@
 //! The `.proto` parser behind [`crate::proto_schema`].
 //!
 //! Private for the reason [`crate::proto_lex`] is. It turns one file's text into
-//! the part of the syntax tree the declaration door needs: the package, the
-//! imports, and for every message its fields (name, number, type, position),
-//! its nested messages and enums, its oneofs and its reserved ranges and names.
+//! the part of the syntax tree the declaration door ([`crate::proto_schema`]) and
+//! the value door ([`crate::proto_encode`]) need: the package, the imports, and
+//! for every message its fields (name, number, type, label, oneof, the options
+//! that change the wire form, position), its nested messages and enums, its
+//! oneofs and its reserved ranges and names. The declaration door uses the shape
+//! alone; the value door also needs WHICH scalar a field is (an `int32` and a
+//! `sint32` are written differently), the numbers of the enum values, the label,
+//! the oneof a field belongs to, and `packed` and `json_name`.
 //!
 //! ## What is read and what is skipped
 //!
 //! Read: `syntax`, `package`, `import` and `import public`, `message` (with
-//! nesting), `enum` (names only), `oneof`, `map<K, V>`, the three labels,
+//! nesting), `enum` (names and numbers), `oneof`, `map<K, V>`, the three labels,
 //! `reserved` (ranges and names), `extensions` (ranges, ignored), `group` fields
 //! and `extend` blocks.
 //!
@@ -27,8 +32,12 @@
 //!
 //! Skipped, but with the statement's own grammar so a mistake in one lands on
 //! the token that is wrong and does not swallow the statements after it:
-//! `option` statements, field and enum-value `[...]` options, and `service`
-//! blocks (balanced braces).
+//! `option` statements, `[...]` options and `service` blocks (balanced braces).
+//! A field's `[...]` entry whose name is a single plain word keeps its value
+//! when that is a word or a string (see [`FieldOption`]); the parser does not
+//! judge it, so a file whose `packed` has a value that is no boolean still
+//! parses and the declaration door still reads it, and only the value door,
+//! which acts on the option, refuses.
 //!
 //! Refused with a stated reason: `import weak` and editions. Whether a `group`
 //! or an `extend` is refused is not the parser's to say; it depends on which
@@ -73,17 +82,80 @@ pub(crate) const MAX_FIELD_NUMBER: u64 = 536_870_911;
 pub(crate) const MAX_MESSAGE_NESTING: usize = 31;
 
 /// The scalar type keywords. A field of one of these has no structure to name.
-const SCALARS: &[&str] = &[
-    "double", "float", "int32", "int64", "uint32", "uint64", "sint32", "sint64", "fixed32",
-    "fixed64", "sfixed32", "sfixed64", "bool", "string", "bytes",
-];
+///
+/// The declaration door only needs to know that a type IS one; the value door
+/// ([`crate::proto_encode`]) needs which, because the wire form of `int32`,
+/// `sint32` and `fixed32` differ.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ScalarKind {
+    Double,
+    Float,
+    Int32,
+    Int64,
+    Uint32,
+    Uint64,
+    Sint32,
+    Sint64,
+    Fixed32,
+    Fixed64,
+    Sfixed32,
+    Sfixed64,
+    Bool,
+    String,
+    Bytes,
+}
 
-/// The scalar types a map key may be: integral types and `string` (language
-/// guide, "Maps": the key type "can be any integral or string type").
-const MAP_KEYS: &[&str] = &[
-    "int32", "int64", "uint32", "uint64", "sint32", "sint64", "fixed32", "fixed64", "sfixed32",
-    "sfixed64", "bool", "string",
-];
+impl ScalarKind {
+    /// The kind a type keyword names, or `None` for any other word.
+    pub(crate) fn from_keyword(word: &str) -> Option<Self> {
+        Some(match word {
+            "double" => Self::Double,
+            "float" => Self::Float,
+            "int32" => Self::Int32,
+            "int64" => Self::Int64,
+            "uint32" => Self::Uint32,
+            "uint64" => Self::Uint64,
+            "sint32" => Self::Sint32,
+            "sint64" => Self::Sint64,
+            "fixed32" => Self::Fixed32,
+            "fixed64" => Self::Fixed64,
+            "sfixed32" => Self::Sfixed32,
+            "sfixed64" => Self::Sfixed64,
+            "bool" => Self::Bool,
+            "string" => Self::String,
+            "bytes" => Self::Bytes,
+            _ => return None,
+        })
+    }
+
+    /// The keyword, as written in a `.proto` file.
+    pub(crate) fn keyword(self) -> &'static str {
+        match self {
+            Self::Double => "double",
+            Self::Float => "float",
+            Self::Int32 => "int32",
+            Self::Int64 => "int64",
+            Self::Uint32 => "uint32",
+            Self::Uint64 => "uint64",
+            Self::Sint32 => "sint32",
+            Self::Sint64 => "sint64",
+            Self::Fixed32 => "fixed32",
+            Self::Fixed64 => "fixed64",
+            Self::Sfixed32 => "sfixed32",
+            Self::Sfixed64 => "sfixed64",
+            Self::Bool => "bool",
+            Self::String => "string",
+            Self::Bytes => "bytes",
+        }
+    }
+
+    /// Whether a map key may be of this kind: integral types, `bool` and
+    /// `string` (language guide, "Maps": the key type "can be any integral or
+    /// string type"; `float`, `double` and `bytes` are out).
+    pub(crate) fn may_key_a_map(self) -> bool {
+        !matches!(self, Self::Double | Self::Float | Self::Bytes)
+    }
+}
 
 /// Which `syntax` the file declared. Without a statement it is proto2, which is
 /// what `protoc` assumes too.
@@ -116,11 +188,21 @@ pub(crate) struct Named {
     pub pos: Pos,
 }
 
-/// An enum: only its names matter, to the symbol table.
+/// One enum value: its name, and the number the wire carries for it.
+#[derive(Clone, Debug)]
+pub(crate) struct EnumValue {
+    pub name: Named,
+    /// Wider than any legal number so that an illegal one (outside `i32`) is
+    /// kept as written and judged by whoever uses the value, instead of being
+    /// wrapped here.
+    pub number: i128,
+}
+
+/// An enum: its names go to the symbol table, and its numbers to the value door.
 #[derive(Clone, Debug)]
 pub(crate) struct EnumDecl {
     pub name: Named,
-    pub values: Vec<Named>,
+    pub values: Vec<EnumValue>,
 }
 
 /// A type reference as written, `.pkg.Outer.Inner` or `Inner`.
@@ -133,7 +215,7 @@ pub(crate) struct TypeName {
 /// The value type of a map field.
 #[derive(Clone, Debug)]
 pub(crate) enum MapValue {
-    Scalar,
+    Scalar(ScalarKind),
     Named(TypeName),
 }
 
@@ -142,20 +224,56 @@ pub(crate) enum MapValue {
 pub(crate) struct MapType {
     /// Why the key type is not allowed, judged later (see the module doc).
     pub key_error: Option<String>,
+    /// The key's kind when it is a legal one; `None` exactly when `key_error`
+    /// is set.
+    pub key: Option<ScalarKind>,
     pub value: MapValue,
 }
 
-/// What a field's type is, as far as the declaration door cares.
+/// What a field's type is: a scalar, a name still to be resolved, a map, or a
+/// group.
 #[derive(Clone, Debug)]
 pub(crate) enum FieldType {
     /// A scalar keyword: no nested structure.
-    Scalar,
+    Scalar(ScalarKind),
     /// A message or an enum, to be resolved.
     Named(TypeName),
     Map(MapType),
     /// A `group`: the type is the message of this name, written in the same
     /// message as the field (see the module documentation).
     Group(String),
+}
+
+/// The label a field was written with.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Label {
+    /// None: a proto3 singular field, a member of a oneof, or a map.
+    Implicit,
+    Optional,
+    Required,
+    Repeated,
+}
+
+/// What an option's value was written as. Only the shapes the value door reads
+/// are kept apart; every other value is [`OptionValue::Other`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum OptionValue {
+    /// A bare word: `true`, `false`, an enum value's name.
+    Ident(String),
+    Str(String),
+    Other,
+}
+
+/// One entry of a field's `[...]` list whose name is a single plain word
+/// (`packed`, `json_name`, `deprecated`). Options named by a parenthesised
+/// extension (`(my.ext)`) or a dotted path are read for their syntax and not
+/// kept.
+#[derive(Clone, Debug)]
+pub(crate) struct FieldOption {
+    pub name: String,
+    pub value: OptionValue,
+    /// Where the value starts, which is where a wrong value is blamed.
+    pub value_pos: Pos,
 }
 
 /// One field.
@@ -167,6 +285,11 @@ pub(crate) struct FieldDecl {
     pub ty: FieldType,
     /// The first token of the type, where a map key problem is blamed.
     pub ty_pos: Pos,
+    pub label: Label,
+    /// The index in the message's `oneofs` of the oneof this field is a member
+    /// of.
+    pub oneof: Option<usize>,
+    pub options: Vec<FieldOption>,
 }
 
 /// One message.
@@ -518,13 +641,25 @@ impl<'a> Parser<'a> {
     }
 
     /// `name = value`, shared by option statements and `[...]` lists.
-    fn option_assignment(&mut self) -> Result<(), SyntaxError> {
+    ///
+    /// The result keeps the option only when its name is a single plain word
+    /// and its value is a word or a string: those are the options the value
+    /// door reads (`packed`, `json_name`). Everything else is consumed for its
+    /// grammar and dropped.
+    fn option_assignment(&mut self) -> Result<Option<FieldOption>, SyntaxError> {
         // The name: parts joined by dots, a part being an identifier or an
         // extension name in parentheses.
+        let mut plain: Option<String> = None;
+        let mut parts = 0usize;
         loop {
             let t = self.bump()?;
+            parts += 1;
             match t.tok {
-                Tok::Ident(_) => {}
+                Tok::Ident(word) => {
+                    if parts == 1 {
+                        plain = Some(String::from(word));
+                    }
+                }
                 Tok::Sym('(') => loop {
                     let inner = self.bump()?;
                     match inner.tok {
@@ -558,7 +693,7 @@ impl<'a> Parser<'a> {
         self.expect_sym('=', "after the option name")?;
         // The value: a signed identifier or number, strings, or an aggregate.
         let v = self.peek()?.clone();
-        match v.tok {
+        let value = match v.tok {
             Tok::Sym('-') => {
                 self.bump()?;
                 let n = self.bump()?;
@@ -568,33 +703,49 @@ impl<'a> Parser<'a> {
                         format!("expected a number after `-`, found {}", describe(&n.tok)),
                     ));
                 }
+                OptionValue::Other
             }
-            Tok::Ident(_) | Tok::Int(_) | Tok::Float => {
+            Tok::Ident(word) => {
                 self.bump()?;
+                OptionValue::Ident(String::from(word))
             }
-            Tok::Str(_) => {
-                self.string_value()?;
+            Tok::Int(_) | Tok::Float => {
+                self.bump()?;
+                OptionValue::Other
             }
-            Tok::Sym('{') => self.skip_braces("an option value")?,
+            Tok::Str(_) => OptionValue::Str(self.string_value()?.0),
+            Tok::Sym('{') => {
+                self.skip_braces("an option value")?;
+                OptionValue::Other
+            }
             other => {
                 return Err(SyntaxError::new(
                     v.pos,
                     format!("expected an option value, found {}", describe(&other)),
                 ))
             }
-        }
-        Ok(())
+        };
+        Ok(match (plain, parts) {
+            (Some(name), 1) => Some(FieldOption {
+                name,
+                value,
+                value_pos: v.pos,
+            }),
+            _ => None,
+        })
     }
 
-    /// `[name = value, ...]` after a field or an enum value.
-    fn bracketed_options(&mut self) -> Result<(), SyntaxError> {
+    /// `[name = value, ...]` after a field or an enum value, with the entries
+    /// [`Self::option_assignment`] keeps.
+    fn bracketed_options(&mut self) -> Result<Vec<FieldOption>, SyntaxError> {
         self.expect_sym('[', "to open the options")?;
+        let mut kept = Vec::new();
         loop {
-            self.option_assignment()?;
+            kept.extend(self.option_assignment()?);
             let t = self.bump()?;
             match t.tok {
                 Tok::Sym(',') => {}
-                Tok::Sym(']') => return Ok(()),
+                Tok::Sym(']') => return Ok(kept),
                 other => {
                     return Err(SyntaxError::new(
                         t.pos,
@@ -653,11 +804,12 @@ impl<'a> Parser<'a> {
                 Tok::Ident(_) => {
                     let value = self.expect_ident("an enum value name")?;
                     self.expect_sym('=', "after the enum value name")?;
-                    if self.is_sym('-') {
+                    let negative = self.is_sym('-');
+                    if negative {
                         self.bump()?;
                     }
                     let n = self.bump()?;
-                    if !matches!(n.tok, Tok::Int(_)) {
+                    let Tok::Int(magnitude) = n.tok else {
                         return Err(SyntaxError::new(
                             n.pos,
                             format!(
@@ -665,12 +817,16 @@ impl<'a> Parser<'a> {
                                 describe(&n.tok)
                             ),
                         ));
-                    }
+                    };
                     if self.is_sym('[') {
                         self.bracketed_options()?;
                     }
                     self.expect_sym(';', "after the enum value")?;
-                    values.push(value);
+                    let number = i128::from(magnitude);
+                    values.push(EnumValue {
+                        name: value,
+                        number: if negative { -number } else { number },
+                    });
                 }
                 other => {
                     return Err(SyntaxError::new(
@@ -757,6 +913,7 @@ impl<'a> Parser<'a> {
         let name = self.expect_ident("a oneof name")?;
         self.expect_sym('{', "to open the oneof")?;
         msg.oneofs.push(name);
+        let index = msg.oneofs.len() - 1;
         loop {
             let t = self.peek()?.clone();
             match t.tok {
@@ -775,7 +932,8 @@ impl<'a> Parser<'a> {
                 }
                 Tok::Ident("option") => self.option_statement()?,
                 _ => {
-                    let f = self.field(Scope::Oneof, depth + 1, &mut msg.nested)?;
+                    let mut f = self.field(Scope::Oneof, depth + 1, &mut msg.nested)?;
+                    f.oneof = Some(index);
                     msg.fields.push(f);
                 }
             }
@@ -898,6 +1056,12 @@ impl<'a> Parser<'a> {
             Tok::Ident(w @ ("optional" | "required" | "repeated")) => Some(w),
             _ => None,
         };
+        let field_label = match label {
+            Some("optional") => Label::Optional,
+            Some("required") => Label::Required,
+            Some("repeated") => Label::Repeated,
+            _ => Label::Implicit,
+        };
         if label.is_some() {
             if scope == Scope::Oneof {
                 return Err(SyntaxError::new(
@@ -954,7 +1118,9 @@ impl<'a> Parser<'a> {
                 }
                 FieldType::Map(self.map_type()?)
             } else if self.is_ident("group") {
-                return self.group_field(body_depth, groups);
+                let mut group = self.group_field(body_depth, groups)?;
+                group.label = field_label;
+                return Ok(group);
             } else {
                 self.type_name("a field type")?
             };
@@ -962,9 +1128,11 @@ impl<'a> Parser<'a> {
         let name = self.expect_ident("a field name")?;
         self.expect_sym('=', "after the field name")?;
         let (number, number_pos) = self.field_number()?;
-        if self.is_sym('[') {
-            self.bracketed_options()?;
-        }
+        let options = if self.is_sym('[') {
+            self.bracketed_options()?
+        } else {
+            Vec::new()
+        };
         self.expect_sym(';', "after the field")?;
         Ok(FieldDecl {
             name,
@@ -972,6 +1140,9 @@ impl<'a> Parser<'a> {
             number_pos,
             ty,
             ty_pos,
+            label: field_label,
+            oneof: None,
+            options,
         })
     }
 
@@ -1017,9 +1188,11 @@ impl<'a> Parser<'a> {
         }
         self.expect_sym('=', "after the group name")?;
         let (number, number_pos) = self.field_number()?;
-        if self.is_sym('[') {
-            self.bracketed_options()?;
-        }
+        let options = if self.is_sym('[') {
+            self.bracketed_options()?
+        } else {
+            Vec::new()
+        };
         let open = self.peek()?.clone();
         if open.tok != Tok::Sym('{') {
             return Err(SyntaxError::new(
@@ -1046,6 +1219,10 @@ impl<'a> Parser<'a> {
             number_pos,
             ty: FieldType::Group(name.name),
             ty_pos: keyword.pos,
+            // The caller knows the label the group was written with.
+            label: Label::Implicit,
+            oneof: None,
+            options,
         })
     }
 
@@ -1064,7 +1241,7 @@ impl<'a> Parser<'a> {
     ) -> Result<ExtendDecl, SyntaxError> {
         let keyword = self.bump()?;
         let extendee = self.raw_type("the name of the message to extend")?;
-        if SCALARS.contains(&extendee.text.as_str()) {
+        if ScalarKind::from_keyword(&extendee.text).is_some() {
             return Err(SyntaxError::new(
                 extendee.pos,
                 format!(
@@ -1125,10 +1302,9 @@ impl<'a> Parser<'a> {
     /// name (a message or an enum, resolved by the linker).
     fn type_name(&mut self, what: &str) -> Result<FieldType, SyntaxError> {
         let raw = self.raw_type(what)?;
-        Ok(if SCALARS.contains(&raw.text.as_str()) {
-            FieldType::Scalar
-        } else {
-            FieldType::Named(raw)
+        Ok(match ScalarKind::from_keyword(&raw.text) {
+            Some(kind) => FieldType::Scalar(kind),
+            None => FieldType::Named(raw),
         })
     }
 
@@ -1136,20 +1312,32 @@ impl<'a> Parser<'a> {
     fn map_type(&mut self) -> Result<MapType, SyntaxError> {
         self.bump()?;
         self.expect_sym('<', "after `map`")?;
-        let key = self.raw_type("the map's key type")?;
-        let key_error = (!MAP_KEYS.contains(&key.text.as_str())).then(|| {
+        let key_text = self.raw_type("the map's key type")?;
+        let key = ScalarKind::from_keyword(&key_text.text).filter(|k| k.may_key_a_map());
+        let key_error = key.is_none().then(|| {
             format!(
                 "`{}` cannot be a map key: a key must be an integral type or `string`",
-                key.text
+                key_text.text
             )
         });
         self.expect_sym(',', "between the map's key and value types")?;
         let value = match self.type_name("the map's value type")? {
+            FieldType::Scalar(kind) => MapValue::Scalar(kind),
             FieldType::Named(t) => MapValue::Named(t),
-            FieldType::Scalar | FieldType::Map(_) | FieldType::Group(_) => MapValue::Scalar,
+            // `type_name` reads a scalar keyword or a name and nothing else.
+            FieldType::Map(_) | FieldType::Group(_) => {
+                return Err(SyntaxError::new(
+                    key_text.pos,
+                    "internal: a map value type was read as a map or a group",
+                ))
+            }
         };
         self.expect_sym('>', "to close the map type")?;
-        Ok(MapType { key_error, value })
+        Ok(MapType {
+            key_error,
+            key,
+            value,
+        })
     }
 }
 

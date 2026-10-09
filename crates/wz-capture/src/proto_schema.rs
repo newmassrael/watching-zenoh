@@ -156,8 +156,8 @@ use core::fmt;
 use crate::payload::formats::{escape_field, FormatMap};
 use crate::proto_lex::{Pos, SyntaxError};
 use crate::proto_parse::{
-    parse_file, EnumDecl, ExtendDecl, FieldType, FileAst, ImportKind, MapValue, MessageDecl,
-    TypeName, MAX_FIELD_NUMBER,
+    parse_file, EnumDecl, ExtendDecl, FieldOption, FieldType, FileAst, ImportKind, Label, MapValue,
+    MessageDecl, ScalarKind, Syntax, TypeName, MAX_FIELD_NUMBER,
 };
 
 /// The most lines a result may hold, the rule line included.
@@ -219,7 +219,7 @@ impl fmt::Display for ProtoDiagnostic {
 }
 
 impl ProtoDiagnostic {
-    fn at(file: &str, pos: Pos, reason: impl Into<String>) -> Self {
+    pub(crate) fn at(file: &str, pos: Pos, reason: impl Into<String>) -> Self {
         Self {
             file: Some(String::from(file)),
             line: Some(pos.line as usize),
@@ -228,7 +228,7 @@ impl ProtoDiagnostic {
         }
     }
 
-    fn in_file(file: &str, reason: impl Into<String>) -> Self {
+    pub(crate) fn in_file(file: &str, reason: impl Into<String>) -> Self {
         Self {
             file: Some(String::from(file)),
             line: None,
@@ -237,7 +237,7 @@ impl ProtoDiagnostic {
         }
     }
 
-    fn argument(reason: impl Into<String>) -> Self {
+    pub(crate) fn argument(reason: impl Into<String>) -> Self {
         Self {
             file: None,
             line: None,
@@ -311,34 +311,7 @@ pub fn declarations_from_proto(
             "the key pattern holds a line break, which would end its declaration",
         ));
     }
-    if root_file >= files.len() {
-        return Err(ProtoDiagnostic::argument(format!(
-            "the root file index {root_file} is outside the {} file(s) given",
-            files.len()
-        )));
-    }
-    let mut by_name = BTreeMap::new();
-    for (i, f) in files.iter().enumerate() {
-        if by_name.insert(f.name, i).is_some() {
-            return Err(ProtoDiagnostic::argument(format!(
-                "two files are named `{}`: imports are resolved by name, so each name can \
-                 stand for one file",
-                f.name
-            )));
-        }
-    }
-
-    let mut linker = Linker {
-        files,
-        by_name,
-        state: alloc::vec![State::Unvisited; files.len()],
-        import_sites: alloc::vec![Vec::new(); files.len()],
-        exports: alloc::vec![BTreeSet::new(); files.len()],
-        visible: alloc::vec![BTreeSet::new(); files.len()],
-        symbols: BTreeMap::new(),
-        msgs: Vec::new(),
-    };
-    linker.load(root_file, &mut Vec::new())?;
+    let linker = Linker::read(files, root_file)?;
 
     let root = linker.root_message(root_message, root_file)?;
     linker.refuse_what_the_root_reaches(root)?;
@@ -378,7 +351,7 @@ enum State {
 enum Kind {
     Package,
     Message(usize),
-    Enum,
+    Enum(usize),
     EnumValue,
     Field,
     Oneof,
@@ -388,7 +361,7 @@ enum Kind {
 impl Kind {
     /// Whether a field may have this as its type.
     fn is_type(self) -> bool {
-        matches!(self, Kind::Message(_) | Kind::Enum)
+        matches!(self, Kind::Message(_) | Kind::Enum(_))
     }
 
     /// Whether a dotted name may descend into this (`protoc`: messages,
@@ -396,7 +369,7 @@ impl Kind {
     fn is_aggregate(self) -> bool {
         matches!(
             self,
-            Kind::Message(_) | Kind::Package | Kind::Enum | Kind::Service
+            Kind::Message(_) | Kind::Package | Kind::Enum(_) | Kind::Service
         )
     }
 }
@@ -418,14 +391,52 @@ struct Symbol {
     file: usize,
 }
 
-/// A message as the expansion sees it.
-struct Msg {
-    full_name: String,
-    file: usize,
-    fields: Vec<Fld>,
+/// A message as the expansion and the value door see it.
+pub(crate) struct Msg {
+    pub(crate) full_name: String,
+    pub(crate) file: usize,
+    /// The syntax of the file the message is written in: it decides whether a
+    /// singular field has presence and whether a repeated one is packed.
+    pub(crate) syntax: Syntax,
+    pub(crate) fields: Vec<Fld>,
+    /// The names of the message's oneofs, in the order written.
+    pub(crate) oneofs: Vec<String>,
     /// What in the text keeps this message from being declared, should the
     /// expansion visit it, in the order the linker met them.
     blockers: Vec<Blocker>,
+}
+
+/// An enum, with the numbers its names stand for.
+pub(crate) struct EnumInfo {
+    pub(crate) full_name: String,
+    /// The enum's syntax decides whether a number that is none of its values is
+    /// a value anyway (proto3, an open enum) or an error (proto2, closed).
+    pub(crate) syntax: Syntax,
+    /// `(name, number)` in the order written.
+    pub(crate) values: Vec<(String, i128)>,
+}
+
+/// What a field holds, resolved.
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum FieldKind {
+    Scalar(ScalarKind),
+    Enum(usize),
+    Message(usize),
+    /// A `group`. Declared here so the value door can say what it refuses; it
+    /// never writes one, so the group's body message is not kept.
+    Group,
+    Map {
+        key: ScalarKind,
+        value: MapValueKind,
+    },
+}
+
+/// What a map's values are.
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum MapValueKind {
+    Scalar(ScalarKind),
+    Enum(usize),
+    Message(usize),
 }
 
 /// A `group` or an `extend` that makes a message undeclarable, and where it is.
@@ -457,18 +468,30 @@ enum Target {
     Map(Option<usize>),
 }
 
-struct Fld {
-    name: String,
-    number: u64,
+pub(crate) struct Fld {
+    pub(crate) name: String,
+    pub(crate) number: u64,
     target: Target,
     /// Where the type was written, for the diagnostics that blame it.
     ty_pos: Pos,
+    /// The same type as `target` reads it, with the scalar kind and the enum
+    /// kept: the declaration door needs only the tree, the value door needs
+    /// what each leaf is.
+    pub(crate) kind: FieldKind,
+    pub(crate) label: Label,
+    /// The index in the owning message's `oneofs`, if the field is a member.
+    pub(crate) oneof: Option<usize>,
+    /// The `[...]` entries with a plain name, for `packed` and `json_name`.
+    pub(crate) options: Vec<FieldOption>,
 }
 
-struct Linker<'f, 'a> {
+pub(crate) struct Linker<'f, 'a> {
     files: &'f [ProtoFile<'a>],
     by_name: BTreeMap<&'a str, usize>,
     state: Vec<State>,
+    /// Per file, the syntax it declared; read when a message or an enum is
+    /// registered.
+    syntaxes: Vec<Syntax>,
     /// Per file, each import's path and position, kept for the error that
     /// names an import after the file's tree is gone.
     import_sites: Vec<Vec<(String, Pos)>>,
@@ -479,11 +502,53 @@ struct Linker<'f, 'a> {
     /// imports, and what they export.
     visible: Vec<BTreeSet<usize>>,
     symbols: BTreeMap<String, Symbol>,
-    msgs: Vec<Msg>,
+    pub(crate) msgs: Vec<Msg>,
+    pub(crate) enums: Vec<EnumInfo>,
+}
+
+impl<'f, 'a> Linker<'f, 'a> {
+    /// Check the arguments both doors share and read the root file and
+    /// everything it imports: the first problem found is the one returned.
+    pub(crate) fn read(
+        files: &'f [ProtoFile<'a>],
+        root_file: usize,
+    ) -> Result<Self, ProtoDiagnostic> {
+        if root_file >= files.len() {
+            return Err(ProtoDiagnostic::argument(format!(
+                "the root file index {root_file} is outside the {} file(s) given",
+                files.len()
+            )));
+        }
+        let mut by_name = BTreeMap::new();
+        for (i, f) in files.iter().enumerate() {
+            if by_name.insert(f.name, i).is_some() {
+                return Err(ProtoDiagnostic::argument(format!(
+                    "two files are named `{}`: imports are resolved by name, so each name can \
+                     stand for one file",
+                    f.name
+                )));
+            }
+        }
+
+        let mut linker = Linker {
+            files,
+            by_name,
+            state: alloc::vec![State::Unvisited; files.len()],
+            syntaxes: alloc::vec![Syntax::Proto2; files.len()],
+            import_sites: alloc::vec![Vec::new(); files.len()],
+            exports: alloc::vec![BTreeSet::new(); files.len()],
+            visible: alloc::vec![BTreeSet::new(); files.len()],
+            symbols: BTreeMap::new(),
+            msgs: Vec::new(),
+            enums: Vec::new(),
+        };
+        linker.load(root_file, &mut Vec::new())?;
+        Ok(linker)
+    }
 }
 
 impl<'a> Linker<'_, 'a> {
-    fn name_of(&self, file: usize) -> &'a str {
+    pub(crate) fn name_of(&self, file: usize) -> &'a str {
         self.files[file].name
     }
 
@@ -607,9 +672,20 @@ impl<'a> Linker<'_, 'a> {
         e: &EnumDecl,
         file: usize,
     ) -> Result<(), ProtoDiagnostic> {
-        self.declare(join(scope, &e.name.name), Kind::Enum, file, e.name.pos)?;
+        let full = join(scope, &e.name.name);
+        let idx = self.enums.len();
+        self.enums.push(EnumInfo {
+            full_name: full.clone(),
+            syntax: self.syntaxes[file],
+            values: e
+                .values
+                .iter()
+                .map(|v| (v.name.name.clone(), v.number))
+                .collect(),
+        });
+        self.declare(full, Kind::Enum(idx), file, e.name.pos)?;
         for v in &e.values {
-            self.declare(join(scope, &v.name), Kind::EnumValue, file, v.pos)?;
+            self.declare(join(scope, &v.name.name), Kind::EnumValue, file, v.name.pos)?;
         }
         Ok(())
     }
@@ -628,7 +704,9 @@ impl<'a> Linker<'_, 'a> {
         self.msgs.push(Msg {
             full_name: full.clone(),
             file,
+            syntax: self.syntaxes[file],
             fields: Vec::new(),
+            oneofs: m.oneofs.iter().map(|o| o.name.clone()).collect(),
             blockers: Vec::new(),
         });
         self.declare(full.clone(), Kind::Message(idx), file, m.name.pos)?;
@@ -655,6 +733,7 @@ impl<'a> Linker<'_, 'a> {
     ) -> Result<(), ProtoDiagnostic> {
         // What this file's importers will be able to see, and what this file
         // itself can: `import public` re-exports, a plain `import` does not.
+        self.syntaxes[file] = ast.syntax;
         let mut exports = BTreeSet::from([file]);
         let mut visible = BTreeSet::from([file]);
         for (dep, kind) in deps {
@@ -910,13 +989,24 @@ impl<'a> Linker<'_, 'a> {
             }
 
             let field_full = join(&full, &f.name.name);
-            let (target, ty_pos) = match &f.ty {
-                FieldType::Scalar => (Target::Leaf, f.ty_pos),
+            let (target, ty_pos, kind) = match &f.ty {
+                FieldType::Scalar(scalar) => (Target::Leaf, f.ty_pos, FieldKind::Scalar(*scalar)),
                 FieldType::Named(t) => {
                     let sym = self.resolve(file, &field_full, &t.text, t.pos)?;
                     match sym.kind {
-                        Kind::Message(target) => (Target::Message(target), t.pos),
-                        _ => (Target::Leaf, t.pos),
+                        Kind::Message(target) => {
+                            (Target::Message(target), t.pos, FieldKind::Message(target))
+                        }
+                        Kind::Enum(e) => (Target::Leaf, t.pos, FieldKind::Enum(e)),
+                        // `resolve` returns a type, and only a message or an
+                        // enum is one.
+                        _ => {
+                            return Err(ProtoDiagnostic::at(
+                                here,
+                                t.pos,
+                                format!("\"{}\" is not a type", t.text),
+                            ))
+                        }
                     }
                 }
                 FieldType::Group(group) => {
@@ -937,19 +1027,51 @@ impl<'a> Linker<'_, 'a> {
                         pos: f.ty_pos,
                         kind: BlockerKind::Group(group.clone()),
                     });
-                    (Target::Message(target), f.ty_pos)
+                    (Target::Message(target), f.ty_pos, FieldKind::Group)
                 }
                 FieldType::Map(map) => {
-                    if let Some(reason) = &map.key_error {
-                        return Err(ProtoDiagnostic::at(here, f.ty_pos, reason.clone()));
-                    }
+                    let Some(key) = map.key else {
+                        let reason = map
+                            .key_error
+                            .clone()
+                            .unwrap_or_else(|| String::from("internal: a map key without a kind"));
+                        return Err(ProtoDiagnostic::at(here, f.ty_pos, reason));
+                    };
                     match &map.value {
-                        MapValue::Scalar => (Target::Map(None), f.ty_pos),
+                        MapValue::Scalar(scalar) => (
+                            Target::Map(None),
+                            f.ty_pos,
+                            FieldKind::Map {
+                                key,
+                                value: MapValueKind::Scalar(*scalar),
+                            },
+                        ),
                         MapValue::Named(t) => {
                             let sym = self.resolve(file, &field_full, &t.text, t.pos)?;
                             match sym.kind {
-                                Kind::Message(target) => (Target::Map(Some(target)), t.pos),
-                                _ => (Target::Map(None), t.pos),
+                                Kind::Message(target) => (
+                                    Target::Map(Some(target)),
+                                    t.pos,
+                                    FieldKind::Map {
+                                        key,
+                                        value: MapValueKind::Message(target),
+                                    },
+                                ),
+                                Kind::Enum(e) => (
+                                    Target::Map(None),
+                                    t.pos,
+                                    FieldKind::Map {
+                                        key,
+                                        value: MapValueKind::Enum(e),
+                                    },
+                                ),
+                                _ => {
+                                    return Err(ProtoDiagnostic::at(
+                                        here,
+                                        t.pos,
+                                        format!("\"{}\" is not a type", t.text),
+                                    ))
+                                }
                             }
                         }
                     }
@@ -960,6 +1082,10 @@ impl<'a> Linker<'_, 'a> {
                 number,
                 target,
                 ty_pos,
+                kind,
+                label: f.label,
+                oneof: f.oneof,
+                options: f.options.clone(),
             });
         }
         self.msgs[idx].fields = fields;
@@ -977,7 +1103,11 @@ impl<'a> Linker<'_, 'a> {
 
     // ---- the root and the expansion --------------------------------------
 
-    fn root_message(&self, name: &str, root_file: usize) -> Result<usize, ProtoDiagnostic> {
+    pub(crate) fn root_message(
+        &self,
+        name: &str,
+        root_file: usize,
+    ) -> Result<usize, ProtoDiagnostic> {
         let here = self.name_of(root_file);
         match self.find(name) {
             Some(Symbol {
@@ -989,7 +1119,7 @@ impl<'a> Linker<'_, 'a> {
                 format!(
                     "`{name}` is {}, not a message",
                     match kind {
-                        Kind::Enum => "an enum",
+                        Kind::Enum(_) => "an enum",
                         Kind::Package => "a package",
                         Kind::Service => "a service",
                         Kind::Field | Kind::Oneof | Kind::EnumValue =>

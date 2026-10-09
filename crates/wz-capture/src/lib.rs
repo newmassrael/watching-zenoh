@@ -291,11 +291,20 @@ pub mod payload_decode;
 mod payload_described;
 pub mod pcap;
 pub mod pcapng;
+/// Field VALUES, as JSON, turned into protobuf wire bytes by the types a
+/// `.proto` schema gives them: the sending half of what [`proto_schema`] reads.
+///
+/// Ungated and dependency-free like [`proto_schema`], over the workspace's one
+/// JSON reader.
+pub mod proto_encode;
+#[cfg(test)]
+mod proto_encode_tests;
 /// The `.proto` tokenizer behind [`proto_schema`], private for the reason
 /// [`payload_builtin`] is.
 mod proto_lex;
-/// The `.proto` parser behind [`proto_schema`]: the part of the syntax tree the
-/// declaration door needs, and the refusals that are syntax.
+/// The `.proto` parser behind [`proto_schema`] and [`proto_encode`]: the part of
+/// the syntax tree the declaration and value doors need, and the refusals that
+/// are syntax.
 mod proto_parse;
 /// `.proto` schema text turned into DECLARATION text: the field names a
 /// protobuf payload's wire format does not carry, in the dialect
