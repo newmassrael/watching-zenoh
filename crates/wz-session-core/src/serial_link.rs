@@ -116,7 +116,8 @@ pub enum SerialFrameError {
     /// The payload exceeds [`SERIAL_MTU`] (encode) or the destuffed
     /// frame exceeds [`SERIAL_MFS`] (decode).
     TooLarge,
-    /// The COBS stuff/destuff step overran its capacity bound.
+    /// The COBS stuff/destuff step overran its capacity bound, or (decode) a
+    /// block promised more bytes than the frame holds.
     Cobs,
     /// The destuffed buffer is too short to hold header + len + crc32,
     /// or the carried length disagrees with the available bytes.
@@ -149,12 +150,42 @@ pub fn encode_frame(header: u8, payload: &[u8]) -> Result<Vec<u8>, SerialFrameEr
     Ok(out)
 }
 
+/// Whether every COBS block in `wire` has all the bytes its code byte promises,
+/// stopping at the first `0x00` code like the decoder does.
+///
+/// ⛔ This is a precondition of the generated `cobs_decode`, not a refinement of it:
+/// that decoder indexes its input by the code byte (`data[i]` for `code - 1` bytes)
+/// with no bound against the input length, so a code that promises more than the
+/// frame holds -- which is what line noise or a half-written frame looks like --
+/// panics with an index out of bounds instead of returning `Err`. The generated file
+/// is not edited here (`out/**` belongs to the code generator), so the malformed
+/// input is refused before it reaches it. A too-short block is a framing error like
+/// a CRC mismatch: [`SerialFrameReader`] drops the frame and resynchronises.
+fn cobs_blocks_fit(wire: &[u8]) -> bool {
+    let mut i = 0;
+    while i < wire.len() {
+        let code = usize::from(wire[i]);
+        if code == 0 {
+            return true;
+        }
+        // The block is the code byte plus `code - 1` data bytes.
+        i += code;
+        if i > wire.len() {
+            return false;
+        }
+    }
+    true
+}
+
 /// Decode one serial on-wire frame (mirror of `_z_serial_msg_deserialize`,
 /// serial.c:70-118). `wire` is the COBS body with an optional trailing
 /// `0x00` EOP (`cobs_decode` stops on the `0x00` code byte, so the EOP is
 /// tolerated). Verifies the carried CRC32 against the payload and rejects
 /// on mismatch.
 pub fn decode_frame(wire: &[u8]) -> Result<DecodedFrame, SerialFrameError> {
+    if !cobs_blocks_fit(wire) {
+        return Err(SerialFrameError::Cobs);
+    }
     let destuffed = cobs_decode(wire).map_err(|_| SerialFrameError::Cobs)?;
     let frame = destuffed.as_slice();
     if frame.len() > SERIAL_MFS {
@@ -236,6 +267,36 @@ impl SerialFrameReader {
 }
 
 // ─── handshake ───
+
+/// The INIT an accepting side must carry across a flush, found in the bytes the
+/// device had received when the flush was taken (open-debt 795).
+///
+/// A flush exists to discard what an EARLIER peer left on the wire, but an
+/// initiator writes its INIT once and re-sends only after a RESET, which a
+/// responder never sends: an INIT discarded with the stale bytes is a link that
+/// never comes up. So the flush is split by frame. The returned header is the last
+/// complete frame the responder handshake would take as its opener
+/// ([`SerialHandshake::on_header`] answering [`HandshakeStep::EmitAndConnect`]);
+/// every other byte in `received` -- data frames, a frame that fails its CRC, the
+/// unterminated tail of a frame cut in half -- is stale and is not reported.
+pub fn pending_init_header(received: &[u8]) -> Option<u8> {
+    let responder = SerialHandshake::responder();
+    let mut framer = SerialFrameReader::new();
+    let mut init = None;
+    for &byte in received {
+        // A framing error means the reader has already resynchronised past the
+        // bad frame; those bytes are discarded either way.
+        if let Ok(Some(frame)) = framer.push(byte) {
+            if matches!(
+                responder.on_header(frame.header),
+                HandshakeStep::EmitAndConnect(_)
+            ) {
+                init = Some(frame.header);
+            }
+        }
+    }
+    init
+}
 
 /// Which side of the point-to-point serial handshake a peer plays.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -526,6 +587,33 @@ mod tests {
         assert_eq!(frames[0].payload, vec![0x11]);
     }
 
+    /// A COBS code byte promises that many bytes follow it; line noise can promise
+    /// more than the frame holds. The generated decoder indexes the input by the
+    /// promise, so it must never be handed such a frame: this is the byte string the
+    /// open-debt 795 accept flush meets on a wire with a stale, mangled frame on it.
+    #[test]
+    fn a_cobs_block_that_overruns_the_frame_is_rejected_and_the_reader_resyncs() {
+        let mut reader = SerialFrameReader::new();
+        assert_eq!(
+            reader.feed(b"\x11\x22\x33-mangled\x00"),
+            Err(SerialFrameError::Cobs)
+        );
+        let good = encode_frame(0x00, &[0x11]).expect("encode");
+        let frames = reader.feed(&good).expect("resync");
+        assert_eq!(frames[0].payload, vec![0x11]);
+    }
+
+    #[test]
+    fn a_cobs_block_that_ends_exactly_at_the_frame_end_is_not_an_overrun() {
+        // Code 0x03 promises two data bytes and there are exactly two.
+        assert_eq!(
+            decode_frame(&[0x03, 0xAA, 0xBB, 0x00]),
+            Err(SerialFrameError::Malformed),
+            "well-formed COBS, too short to be a frame: rejected by the envelope, \
+             not by the COBS check"
+        );
+    }
+
     // ─── handshake ───
 
     #[test]
@@ -596,6 +684,59 @@ mod tests {
         let ack_hdr = decode_frame(&ack_wire).expect("decode ACK").header;
 
         assert_eq!(initiator.on_header(ack_hdr), HandshakeStep::Connected);
+    }
+
+    // ─── pending_init_header (open-debt 795) ───
+
+    fn init_wire() -> Vec<u8> {
+        encode_frame(SERIAL_FLAG_INIT, &[]).unwrap()
+    }
+
+    #[test]
+    fn a_wire_with_no_bytes_holds_no_init() {
+        assert_eq!(pending_init_header(&[]), None);
+    }
+
+    #[test]
+    fn a_lone_init_frame_is_kept() {
+        assert_eq!(pending_init_header(&init_wire()), Some(SERIAL_FLAG_INIT));
+    }
+
+    #[test]
+    fn frames_a_responder_would_not_take_as_its_opener_are_not_kept() {
+        for header in [0x00, SERIAL_FLAG_INIT | SERIAL_FLAG_ACK, SERIAL_FLAG_RESET] {
+            let wire = encode_frame(header, b"x").unwrap();
+            assert_eq!(
+                pending_init_header(&wire),
+                None,
+                "header {header:#04x} is stale to a responder"
+            );
+        }
+    }
+
+    #[test]
+    fn stale_frames_before_and_after_an_init_are_dropped_and_the_init_is_kept() {
+        let mut wire = encode_frame(0x00, b"left behind").unwrap();
+        wire.extend_from_slice(b"\x11\x22\x33-mangled\x00");
+        wire.extend_from_slice(&init_wire());
+        wire.extend_from_slice(&encode_frame(0x00, b"after").unwrap());
+        assert_eq!(pending_init_header(&wire), Some(SERIAL_FLAG_INIT));
+    }
+
+    #[test]
+    fn an_init_cut_off_before_its_end_marker_is_not_a_frame_yet() {
+        let wire = init_wire();
+        assert_eq!(pending_init_header(&wire[..wire.len() - 1]), None);
+    }
+
+    /// The limit of the split, stated so nobody mistakes it for a guarantee: with no
+    /// EOP between them a stale fragment and the INIT that follows are ONE frame on
+    /// the wire, and that frame fails its CRC.
+    #[test]
+    fn an_unterminated_fragment_corrupts_the_init_glued_to_it() {
+        let mut wire = b"\x11\x22\x33".to_vec();
+        wire.extend_from_slice(&init_wire());
+        assert_eq!(pending_init_header(&wire), None);
     }
 
     // R311ny — serial-locator parse tests moved with their leaf to
