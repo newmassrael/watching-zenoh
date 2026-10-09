@@ -28,7 +28,10 @@
 //! - a SUBSCRIBER's callback, and a sample the application KEEPS: these go on to
 //!   project the Put into a sample, which `pubsub-put` gates. Without it a Push is
 //!   delivered to the observer and no subscriber fires, so they carry that gate
-//!   themselves and the legs above, which stop at the message, do not.
+//!   themselves and the legs above, which stop at the message, do not;
+//! - the ALLOCATION CENSUS at the end of the file, which counts what the
+//!   allocator is asked for between the frame and a kept sample, the one thing
+//!   an address cannot show: that no copy was made on the way.
 
 #![cfg(all(
     feature = "session-unicast-open",
@@ -307,5 +310,227 @@ fn the_copying_decode_of_the_same_frame_owns_its_payload() {
     assert!(
         !lies_within(&span, frame.as_slice()),
         "a decode with no origin copies the frame's payload out"
+    );
+}
+
+/// An allocation census, the second instrument beside the address checks above.
+///
+/// An address check says where the payload IS; it cannot say that nothing made
+/// a copy on the way, because a copy that is dropped again, or one the sample
+/// does not end up holding, leaves the address untouched. The census counts what
+/// the allocator was asked for instead: it records the size of every allocation
+/// of a kilobyte or more that the ARMED thread makes. The payload the tests send
+/// is far above that line and a copy of it is an allocation of its own size
+/// (growing a vector to it records each size it grows to), so a copy of the
+/// payload anywhere on the path shows as a size at or above the payload's.
+///
+/// The record is per thread, so the other tests in this file, which run in
+/// parallel, cannot add to it; the path under test runs on the calling thread.
+#[cfg(feature = "pubsub-put")]
+mod census {
+    use std::alloc::{GlobalAlloc, Layout, System};
+    use std::cell::{Cell, RefCell};
+
+    /// Allocations below this are bookkeeping (a key expression, a handle, a
+    /// message struct); the byte fields the census is about are far above it.
+    const LARGE: usize = 1024;
+    /// Room for the sizes of one armed window. A fixed array, because the
+    /// allocator cannot allocate to record an allocation.
+    const SLOTS: usize = 32;
+
+    thread_local! {
+        static ARMED: Cell<bool> = const { Cell::new(false) };
+        static COUNT: Cell<usize> = const { Cell::new(0) };
+        static SEEN: RefCell<[usize; SLOTS]> = const { RefCell::new([0; SLOTS]) };
+    }
+
+    pub struct Counting;
+
+    fn note(size: usize) {
+        if size < LARGE {
+            return;
+        }
+        // `try_with`: a thread that is being torn down has no cell to write to,
+        // and an allocation made then is not one the census is looking for.
+        let _ = ARMED.try_with(|armed| {
+            if !armed.get() {
+                return;
+            }
+            let _ = COUNT.try_with(|count| {
+                let i = count.get();
+                if i < SLOTS {
+                    let _ = SEEN.try_with(|seen| seen.borrow_mut()[i] = size);
+                }
+                count.set(i + 1);
+            });
+        });
+    }
+
+    // SAFETY: every method defers to `System` with the arguments it was given;
+    // the only addition is a write to const-initialised thread-local cells,
+    // which neither allocates nor can fail.
+    unsafe impl GlobalAlloc for Counting {
+        unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+            note(layout.size());
+            System.alloc(layout)
+        }
+        unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
+            note(layout.size());
+            System.alloc_zeroed(layout)
+        }
+        unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
+            note(new_size);
+            System.realloc(ptr, layout, new_size)
+        }
+        unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
+            System.dealloc(ptr, layout)
+        }
+    }
+
+    /// Run `f` and return what it returned with the size of every large
+    /// allocation THIS thread made meanwhile, in order.
+    pub fn large_allocations<R>(f: impl FnOnce() -> R) -> (R, Vec<usize>) {
+        COUNT.with(|count| count.set(0));
+        SEEN.with(|seen| *seen.borrow_mut() = [0; SLOTS]);
+        ARMED.with(|armed| armed.set(true));
+        let out = f();
+        ARMED.with(|armed| armed.set(false));
+        let count = COUNT.with(Cell::get);
+        assert!(
+            count <= SLOTS,
+            "{count} large allocations overflow the {SLOTS} the census keeps"
+        );
+        let sizes = SEEN.with(|seen| seen.borrow()[..count].to_vec());
+        (out, sizes)
+    }
+}
+
+#[cfg(feature = "pubsub-put")]
+#[global_allocator]
+static COUNTING: census::Counting = census::Counting;
+
+/// What the census tests send: a payload and an attachment of sizes that cannot
+/// be mistaken for each other or for any bookkeeping allocation.
+#[cfg(feature = "pubsub-put")]
+const CENSUS_PAYLOAD: usize = 32 * 1024;
+#[cfg(feature = "pubsub-put")]
+const CENSUS_ATTACHMENT: usize = 6 * 1024;
+
+/// A reliable Frame at `FIRST_SN` carrying one Put on `demo/census` with a
+/// payload of [`CENSUS_PAYLOAD`] bytes, and an attachment of
+/// [`CENSUS_ATTACHMENT`] when `attached`.
+#[cfg(feature = "pubsub-put")]
+fn census_wire(attached: bool) -> Vec<u8> {
+    use wz_session_core::metadata::PushMetadata;
+    use wz_session_core::push_build::build_push_literal_with_meta;
+
+    let meta = PushMetadata {
+        attachment: attached.then(|| vec![0xA7; CENSUS_ATTACHMENT]),
+        ..PushMetadata::default()
+    };
+    let push = build_push_literal_with_meta("demo/census", &vec![0x5C; CENSUS_PAYLOAD], &meta)
+        .expect("build a literal put");
+    encode_frame_with_push(FIRST_SN, push, true)
+}
+
+/// Drive `wire`, an owned heap buffer as most links hand it up, to the end of the
+/// receive path: the session decodes it, and a subscriber on the key RETAINS the
+/// sample it is handed, as an application that keeps samples does. Returns the
+/// large allocations of the two steps, the drive and the delivery.
+#[cfg(feature = "pubsub-put")]
+fn large_allocations_to_a_kept_sample(wire: Vec<u8>) -> (Vec<usize>, Vec<usize>) {
+    established!(actions, engine);
+    let unit = RxBytes::from(wire);
+    let (outcome, drive) = census::large_allocations(|| {
+        dispatch_link_event(LinkEvent::Rx(RxFrame::new(unit)), &actions, &mut engine)
+    });
+    let DriverLoopOutcome::FramePayload { messages, .. } = &outcome else {
+        panic!("a data frame in an established session is delivered, got {outcome:?}");
+    };
+    let kept = Arc::new(Mutex::new(None::<wz_session_core::sample::Sample>));
+    let sink = Arc::clone(&kept);
+    let mut registry = SubscriberRegistry::new();
+    registry.register("demo/census", move |view| {
+        *sink.lock().unwrap() = Some(wz_session_core::sample::Sample::from_view(view));
+    });
+    let ((), delivery) =
+        census::large_allocations(|| registry.dispatch(&messages[0], Reliability::Reliable));
+    let sample = kept.lock().unwrap().take().expect("the subscriber fired");
+    assert_eq!(
+        sample.payload.len(),
+        CENSUS_PAYLOAD,
+        "the premise: the sample the application kept carries the whole payload"
+    );
+    (drive, delivery)
+}
+
+/// The whole way, counted in allocations: from the buffer the link read to a
+/// sample the application keeps, nothing as large as a kilobyte is allocated.
+/// The payload is thirty-two of them, so a copy of it anywhere on the path, in
+/// the drive loop, the batch walk, the registry's projection or the sample's
+/// retention, is a size in one of the two lists and fails this.
+#[cfg(feature = "pubsub-put")]
+#[test]
+fn no_allocation_of_the_payloads_size_stands_between_the_frame_and_a_kept_sample() {
+    let (drive, delivery) = large_allocations_to_a_kept_sample(census_wire(false));
+    assert!(
+        drive.is_empty(),
+        "driving the frame allocated {drive:?}; the payload must stay in the buffer the link read"
+    );
+    assert!(
+        delivery.is_empty(),
+        "delivering the sample allocated {delivery:?}; the sample must hold a range of that buffer"
+    );
+}
+
+/// The control for the census. The copying decode of the same frame (no origin
+/// to share) must show the payload's size as an allocation, or the test above
+/// could be empty because the instrument sees nothing.
+#[cfg(feature = "pubsub-put")]
+#[test]
+fn the_census_sees_the_copying_decode_allocate_the_payload() {
+    let wire = census_wire(false);
+    let (_, sizes) = census::large_allocations(|| {
+        let frame = match wz_session_core::inbound::parse_inbound(&wire).expect("the frame parses")
+        {
+            wz_session_core::inbound::InboundFrame::Frame { payload, .. } => payload,
+            other => panic!("expected a Frame, got {other:?}"),
+        };
+        wz_session_core::network_message::parse_frame_payload(&frame)
+            .expect("the batch parses")
+            .len()
+    });
+    assert!(
+        sizes.iter().any(|&size| size >= CENSUS_PAYLOAD),
+        "the copying decode owns its payload, so the census must see {CENSUS_PAYLOAD} bytes allocated, got {sizes:?}"
+    );
+}
+
+/// A RESIDUAL, counted so it cannot grow and cannot be fixed unnoticed: an
+/// attachment is not shared. The Put's attachment bytes are a range of the frame
+/// in the decoded message (the extension chain is projected through the same
+/// origin), and the sample then holds them as a `Vec<u8>`: one copy where the
+/// registry builds the sample (`dispatch_push`) and a second where the retention
+/// sample is built from its view (`Sample::from_view`). The payload still
+/// allocates nothing.
+///
+/// Sharing them means `Sample::attachment` stops being `Option<Vec<u8>>`, a
+/// change to a public type, which is why it is not made here. When it is made,
+/// this list becomes empty and this test is folded into the one above.
+///
+/// Without `pubsub-attachment` the sample never reads the extension, so there is
+/// no copy to count and the premise is absent.
+#[cfg(all(feature = "pubsub-put", feature = "pubsub-attachment"))]
+#[test]
+fn an_attachment_is_still_copied_into_the_sample_and_again_into_the_kept_one() {
+    let (drive, delivery) = large_allocations_to_a_kept_sample(census_wire(true));
+    assert!(
+        drive.is_empty(),
+        "driving the frame allocated {drive:?}; attachment or not, the drive shares the buffer"
+    );
+    assert_eq!(
+        delivery,
+        [CENSUS_ATTACHMENT, CENSUS_ATTACHMENT],
+        "only the attachment is copied on delivery, once per sample built, and never the payload"
     );
 }
