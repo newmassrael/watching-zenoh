@@ -226,7 +226,21 @@ default-features = false
 # gated on `declare-final` rather than compiled by every `codec-declare`
 # build. A dev-dependency because the production dissector never BUILDS a
 # Final — it only reads one off the wire.
-features = ["declare-final"]
+#
+# Open-debt item 811 — plus the four a publish with priority, encoding and
+# timestamp needs to be BUILT: `transport-qos` (the Frame's `ext_qos` and the
+# QoS offer on the Init), `pubsub-qos` (the Push's QoS byte), `pubsub-encoding`
+# and `pubsub-timestamp` (the two body fields). Each gates the send side only,
+# so without them `build_push_literal_with_meta` silently writes a plain Push
+# and the tracked capture's byte-identity oracle is what would say so. A
+# dev-dependency, so no consumer of this crate is charged for them.
+features = [
+    "declare-final",
+    "transport-qos",
+    "pubsub-qos",
+    "pubsub-encoding",
+    "pubsub-timestamp",
+]
 
 # R311y605 — the JOIN test fixture is built by the CODEC's own encode rather
 # than by a hand-laid byte string, so a walker or a decode that disagrees with

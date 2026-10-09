@@ -362,3 +362,94 @@ cargo test -p wz-capture --features dissect --lib \
   refresh_the_tracked_discovery_capture -- --ignored
 cargo test -p wz-capture --features dissect --lib discovery_capture
 ```
+
+## `publisher-priority-encoding-timestamp.pcap`
+
+A publish that sets what the two-node demo never sets, beside a control publish
+that sets none of it. It is the specimen of three things a reader reports about
+a `Push`: the **transport priority** of the Frame that carries it, the **encoding**
+of its body and the **timestamp** of its body.
+
+| | |
+|---|---|
+| link type | 1 (`LINKTYPE_ETHERNET`) |
+| packets | **6**: four handshake datagrams, then two Frames |
+| size | 539 bytes |
+| flow | one UDP flow, `10.0.0.1:43210` → `10.0.0.2:7447` for the initiator's packets |
+| handshake | both Inits carry the QoS offer (establishment extension `0x1`, the presence-only form), so the session is QoS-negotiated |
+| timestamps | 0.000000 onward, 1 ms apart |
+
+| packet | what it is | read as |
+|---|---|---|
+| 0, 1 | Init, InitAck, each offering QoS | handshake rows; the flow's `qos` is `true` |
+| 2, 3 | Open, OpenAck | handshake rows |
+| 4 | the **control**: a reliable `Frame` (sequence number 0) on the default conduit, no extension chain, carrying a plain `Push` | `sn.conduit.priority` `Data`; no `priority`, `timestamp` or `encoding` field; entry `payload.encoding` **`null`** |
+| 5 | a reliable `Frame` (sequence number 0) on the `InteractiveHigh` conduit, carrying a `Push` with the QoS byte, a timestamp and an encoding | `sn.conduit.priority` **`InteractiveHigh`**; see below |
+
+### What a reader reports on packet 5
+
+* the Frame's own `ext_qos` has `priority` `InteractiveHigh` (its `value` is the
+  conduit number, 2), and `sn.conduit.priority` says the same: the priority is
+  that of the Frame, not of the session;
+* the Push's QoS byte is the second `priority` field of the row, again
+  `InteractiveHigh`, with `congestion` `Drop` and `express` `false`;
+* the Put has its `t` and `e` bits set. Its `timestamp` group holds `time`
+  `81985529216486895` (an NTP64 word past 2^53, so a string: `0x0123456789abcdef`),
+  a `zid_len` of 4 and a `zid` of `1142577e`, which is the bytes `7e 57 42 11`
+  the way zenoh prints a zenoh id (reversed, as hex);
+* its `encoding` group holds `packed_id` 10, no schema and an `id` of 5, and the
+  entry's `payload.encoding` is `application/json`;
+* the census's payload plane counts one body declared `application/json` and one
+  `zenoh/bytes (undeclared)`.
+
+### Why the QoS handshake is in the file
+
+Without a negotiated QoS the priority of a message lives in the link layer
+alone, and a Frame has no conduit to name: a peer must not send a non-default
+priority on a session that did not negotiate QoS, and `wz-session-core`'s
+receiver ends such a link (`LostCause::UnknownPriority`, in `drive.rs`). So a
+prioritised Frame means something only beside the offer that licenses it, and
+this file has the offer on both Inits, ahead of the Frame.
+
+### Why there is a control
+
+A reader that drops any of the three branches reads every other capture in this
+directory exactly as before, so none of them could fail it. Packet 4 is the same
+session, the same key and the same body with none of the three set, and it must
+read with no priority beyond the default conduit, no timestamp and an encoding of
+`null` (the wire's way of saying the default, which is a different fact from a
+body that names `zenoh/bytes`). A reader that reports a field where there is none
+fails on it; one that drops the field fails on packet 5.
+
+### Where the bytes came from
+
+Nothing was written by hand. Both `Push`es are
+`wz_session_core::push_build::build_push_literal_with_meta`, the function
+`Session::publish` calls with the metadata its `PublishOptions` projects
+(`with_priority`, `with_encoding`, `with_timestamp`). The oracle fills that
+metadata directly and not through `PublishOptions`, which lives in the runtime
+crate: `wz-capture` is a dependency of that crate, so naming it here would be a
+cycle. Each Frame is `frame_encode::encode_frame_with_push_qos`, the QoS offer is
+`extqos::encode_qos_ext` written by the ext codec, the Init and Open datagrams
+are the codecs' own, and the container is `wz_capture::pcap::write`. The send-side
+gates for the QoS byte, the encoding and the timestamp are features of
+`wz-session-core`; `wz-capture` turns them on for its own tests only, in its
+dev-dependencies. Three tests in
+`crates/wz-capture/src/publisher_fields_capture_fixture.rs` grade it:
+
+| test | what it settles |
+|---|---|
+| `the_tracked_publisher_fields_capture_is_byte_identical_to_what_wz_emits` | the whole file equals what the encoders emit, byte for byte |
+| `the_tracked_publisher_fields_capture_is_a_qos_session_with_a_control_and_a_full_publish` | both Inits carry the offer, the control Frame has no extension chain, the other has exactly the `ext_qos` entry whose body is the conduit, and the two Pushes are the ones their metadata builds |
+| `the_tracked_publisher_fields_capture_reaches_the_consumer_surface` | the rows above, read from the field document, and the same values read from the decoded records without it |
+
+`scripts/lib/capture_provenance_gate.sh` runs them (under `--features dissect`)
+on every push, beside the other sets.
+
+### Regenerating
+
+```sh
+cargo test -p wz-capture --features dissect --lib \
+  refresh_the_tracked_publisher_fields_capture -- --ignored
+cargo test -p wz-capture --features dissect --lib publisher_fields_capture
+```

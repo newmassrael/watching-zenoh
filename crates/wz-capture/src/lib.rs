@@ -293,6 +293,13 @@ mod proto_parse;
 pub mod proto_schema;
 #[cfg(test)]
 mod proto_schema_tests;
+/// Open-debt item 811 — the tracked capture of a publish that sets the three
+/// things the demo never sets (the Frame's transport priority on a session that
+/// negotiated QoS, the body's encoding and its timestamp), beside a control
+/// publish that sets none, and the oracle that keeps it a function of the
+/// encoders. Gated on `network-codecs` because both messages are `Push`es.
+#[cfg(all(test, feature = "network-codecs"))]
+mod publisher_fields_capture_fixture;
 /// R2451 (open-debt item 699) — the oracle over `captures/`, the sample
 /// captures a C-ABI-only consumer reads because it has no way to produce them.
 ///
