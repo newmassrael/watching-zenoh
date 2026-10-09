@@ -10708,9 +10708,15 @@ layer_c1m_session_lwip() {
         cargo test -p wz-session-mcu --features adminspace-core --quiet || return 1
     _runci_guarded_test "C1m mcu adminspace read+write" 20 \
         cargo test -p wz-session-mcu --features adminspace-core,adminspace-write --quiet || return 1
-    _runci_guarded_test "C1m default" 4 \
+    # R3167 moved EVERY wz-session-lwip leg below by FIVE, and the legs that turn
+    # on `codec-push` by SIX: the driver's lend tests (the datagram equals the
+    # copying send's, the size written, an abandoned lend, the table of places,
+    # the cap) carry no feature gate and so run in every leg, and the join test (a
+    # push through the real session into the lent pbuf) needs `codec-push`. Each
+    # number below is the one its own run PRINTED, from the guarded-count oracle.
+    _runci_guarded_test "C1m default" 9 \
         cargo test -p wz-session-lwip --quiet || return 1
-    _runci_guarded_test "C1m reassembly" 4 \
+    _runci_guarded_test "C1m reassembly" 9 \
         cargo test -p wz-session-lwip --features reassembly --quiet || return 1
     # R2827 — the UNICAST application layer: `app_layer::dispatch_to` wires the
     # session drive's events into the observer and drains replies through the
@@ -10721,7 +10727,7 @@ layer_c1m_session_lwip() {
     # the number this command PRINTED.
     # R3080 4 -> 4: the application-layer test moved to the shell crate and the
     # lwIP links' bind test arrived, beside the three session_drive tests.
-    _runci_guarded_test "C1m unicast app layer" 4 \
+    _runci_guarded_test "C1m unicast app layer" 9 \
         cargo test -p wz-session-lwip \
         --features query-queryable,codec-response,codec-response-final,pubsub-put \
         --quiet || return 1
@@ -10737,7 +10743,7 @@ layer_c1m_session_lwip() {
     # R3080 11 -> 5: the admin host, connection manager and dialer tests moved
     # to the shell crate; the three session_drive tests stay and the lwIP links'
     # two tests (the bind, and the handshake) arrived.
-    _runci_guarded_test "C1m adminspace-write" 5 \
+    _runci_guarded_test "C1m adminspace-write" 10 \
         cargo test -p wz-session-lwip --features adminspace-write --quiet || return 1
     # R2829 — the node ANSWERS upstream's admin GET (`admin_status`) through
     # the shared `answer_admin_query`. Alone: 2 + the lwIP GET test = 3. With
@@ -10747,7 +10753,7 @@ layer_c1m_session_lwip() {
     # R2846 3 -> 4: the `status/connect` document test.
     # R3080 5 -> 4: the admin status and host tests moved to the shell crate,
     # leaving the three session_drive tests and the lwIP links' bind test.
-    _runci_guarded_test "C1m adminspace-core" 4 \
+    _runci_guarded_test "C1m adminspace-core" 9 \
         cargo test -p wz-session-lwip --features adminspace-core --quiet || return 1
     # R2830 6 -> 9: the same three `connect_manager` tests.
     # R2831 9 -> 12: the same three R2831 tests.
@@ -10757,7 +10763,7 @@ layer_c1m_session_lwip() {
     # verdict test.
     # R3080 17 -> 5: everything but the three session_drive tests and the lwIP
     # links' two moved to the shell crate.
-    _runci_guarded_test "C1m adminspace read+write" 5 \
+    _runci_guarded_test "C1m adminspace read+write" 10 \
         cargo test -p wz-session-lwip --features adminspace-core,adminspace-write --quiet || return 1
     # R2390 (transport-multicast) — each `transport-multicast` leg moved by TWO:
     # the MCU loop's link-loss arm brought a witness test and an ordering test,
@@ -10780,23 +10786,23 @@ layer_c1m_session_lwip() {
     # feature gate, so it runs in every lwIP leg. All eighteen legs of this lane
     # were RUN and each number here is the one its own run PRINTED
     # (12/13/14/13/16/12/14).
-    _runci_guarded_test "C1m multicast" 12 \
+    _runci_guarded_test "C1m multicast" 17 \
         cargo test -p wz-session-lwip --features transport-multicast --quiet || return 1
-    _runci_guarded_test "C1m multicast+push" 13 \
+    _runci_guarded_test "C1m multicast+push" 19 \
         cargo test -p wz-session-lwip --features transport-multicast,codec-push --quiet || return 1
-    _runci_guarded_test "C1m multicast+liveliness" 14 \
+    _runci_guarded_test "C1m multicast+liveliness" 19 \
         cargo test -p wz-session-lwip --features transport-multicast,liveliness-token --quiet || return 1
-    _runci_guarded_test "C1m multicast+queryable" 13 \
+    _runci_guarded_test "C1m multicast+queryable" 18 \
         cargo test -p wz-session-lwip \
         --features transport-multicast,query-queryable,codec-response,codec-response-final \
         --quiet || return 1
-    _runci_guarded_test "C1m multicast maximal" 16 \
+    _runci_guarded_test "C1m multicast maximal" 22 \
         cargo test -p wz-session-lwip \
         --features transport-multicast,codec-push,codec-response,codec-response-final,liveliness-token,query-queryable \
         --quiet || return 1
-    _runci_guarded_test "C1m multicast+reassembly" 12 \
+    _runci_guarded_test "C1m multicast+reassembly" 17 \
         cargo test -p wz-session-lwip --features transport-multicast,reassembly --quiet || return 1
-    _runci_guarded_test "C1m multicast+fragmentation" 14 \
+    _runci_guarded_test "C1m multicast+fragmentation" 20 \
         cargo test -p wz-session-lwip \
         --features transport-multicast,transport-fragmentation,codec-push --quiet || return 1
     (cd crates \
