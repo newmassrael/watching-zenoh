@@ -27,7 +27,7 @@
 
 use std::io;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
 
@@ -41,7 +41,7 @@ use wz_session_core::link::BoxedLinkDriver;
 use wz_session_core::link::LinkEndpoints;
 use wz_session_core::link::LinkSubject;
 use wz_session_core::link::LostCause;
-use wz_session_core::link::{LinkDropCause, LinkSendOutcome};
+use wz_session_core::link::{LinkDropCause, LinkSendOutcome, TxSlot, TxSlotGrant};
 use wz_session_core::qos::Priority;
 
 /// Inbound read half of a split byte-stream link — owns the read half `R`
@@ -626,6 +626,17 @@ pub struct StreamWriteDriver {
     /// the admin host still emits the link (the COUNT stays truthful), with the
     /// ends left blank rather than guessed.
     endpoints: Option<LinkEndpoints>,
+    /// ARCHITECTURE section 9.1 — the frame buffers this link has LENT the
+    /// session and not yet taken back (`BoxedLinkDriver::tx_slot_acquire`).
+    lent: Mutex<LentFrames>,
+}
+
+/// The buffers lent for outbound frames, by slot number: an occupied entry is a
+/// buffer the session is encoding into, and a free number is reused.
+#[derive(Default)]
+struct LentFrames {
+    slots: Vec<Option<Vec<u8>>>,
+    free: Vec<u32>,
 }
 
 impl StreamWriteDriver {
@@ -640,7 +651,30 @@ impl StreamWriteDriver {
             lowlatency,
             subject,
             endpoints,
+            lent: Mutex::new(LentFrames::default()),
         }
+    }
+
+    /// The length of the prefix this link puts in front of a frame RIGHT NOW: the
+    /// 4-byte LE u32 of zenoh's lowlatency streaming, or the 2-byte LE u16 of the
+    /// batch envelope. Read from the same flag, for the same reason, as
+    /// [`Self::send_prioritized`] reads it.
+    fn frame_prefix_len(&self) -> usize {
+        if self.lowlatency.load(Ordering::Acquire) {
+            4
+        } else {
+            2
+        }
+    }
+
+    /// Take a lent buffer back out of the table, freeing its number.
+    fn take_lent(&self, slot: TxSlot) -> Vec<u8> {
+        let mut lent = self.lent.lock().expect("lent frames poisoned");
+        let buf = lent.slots[slot.0 as usize]
+            .take()
+            .expect("a slot the session names is a slot this link lent");
+        lent.free.push(slot.0);
+        buf
     }
 }
 
@@ -720,6 +754,98 @@ impl BoxedLinkDriver for StreamWriteDriver {
             return LinkSendOutcome::Dropped(LinkDropCause::WriterGone);
         }
         LinkSendOutcome::Sent
+    }
+
+    // ARCHITECTURE section 9.1 — lend the session a buffer to encode a frame into,
+    // with room in front of it for THIS link's framing, and take it back by
+    // OWNERSHIP once the frame is in it.
+    //
+    // The byte door above is handed a slice, so it has to build a second `Vec`
+    // (the prefix and a copy of the bytes) before it can enqueue. A frame encoded
+    // behind its own prefix IS the wire, so the buffer goes to the writer as it
+    // is: one allocation and no copy where there were two and one.
+    fn tx_slot_acquire(&self, want: usize, _priority: Priority) -> Option<TxSlotGrant> {
+        let headroom = self.frame_prefix_len();
+        // `want` is a hint, the codec's worst case. A frame past the u16 length
+        // field is dropped by the byte door whatever its size, so nothing is
+        // lent past it.
+        let buf = Vec::with_capacity(headroom + want.min(u16::MAX as usize));
+        let mut lent = self.lent.lock().expect("lent frames poisoned");
+        let number = match lent.free.pop() {
+            Some(number) => number,
+            None => {
+                lent.slots.push(None);
+                (lent.slots.len() - 1) as u32
+            }
+        };
+        lent.slots[number as usize] = Some(buf);
+        Some(TxSlotGrant {
+            slot: TxSlot(number),
+            headroom,
+        })
+    }
+
+    fn tx_slot_storage(&self, slot: TxSlot) -> (*mut u8, usize) {
+        let mut lent = self.lent.lock().expect("lent frames poisoned");
+        let buf = lent.slots[slot.0 as usize]
+            .as_mut()
+            .expect("a slot the session names is a slot this link lent");
+        // The buffer's heap block does not move while the session writes into it:
+        // nothing here touches the `Vec` between the grant and the send.
+        (buf.as_mut_ptr(), buf.capacity())
+    }
+
+    fn tx_slot_send(
+        &self,
+        slot: TxSlot,
+        start: usize,
+        len: usize,
+        reliability: Reliability,
+        priority: Priority,
+    ) -> LinkSendOutcome {
+        let mut wire = self.take_lent(slot);
+        // Same guard as the byte door. `tx_slot_acquire` asks the allocator for no
+        // more than `headroom + u16::MAX`, but a `Vec` may hand back more than it
+        // was asked for and the lease bounds the session by what the buffer
+        // REPORTS, so the length field's range is checked here and not assumed.
+        if len > u16::MAX as usize {
+            log::warn!("wz-runtime-tokio: outbound frame {len} bytes > 65535; dropping");
+            return LinkSendOutcome::Dropped(LinkDropCause::Oversize);
+        }
+        let prefix_len = self.frame_prefix_len();
+        if start != prefix_len {
+            // The framing flag flipped between the grant and now, so the room in
+            // front is the wrong size for the framing in force. Send the payload
+            // through the byte door, which frames by the flag as it stands.
+            //
+            // SAFETY: the session wrote `[start, start + len)` of this buffer and
+            // says so (`TxLease::send`); the range lies inside its capacity.
+            let payload = unsafe { std::slice::from_raw_parts(wire.as_ptr().add(start), len) };
+            return self.send_prioritized(payload, reliability, priority);
+        }
+        let prefix_bytes = (len as u32).to_le_bytes();
+        let prefix = if prefix_len == 4 {
+            &prefix_bytes[..]
+        } else {
+            &prefix_bytes[..2]
+        };
+        debug_assert!(start + len <= wire.capacity());
+        // SAFETY: bytes `[0, start)` are written here and `[start, start + len)` by
+        // the session, so all `start + len` are initialised; and `start + len` is
+        // within the capacity the lease was bounded by (`tx_slot_storage`).
+        unsafe {
+            std::ptr::copy_nonoverlapping(prefix.as_ptr(), wire.as_mut_ptr(), prefix_len);
+            wire.set_len(start + len);
+        }
+        if let Err(e) = self.tx.send(priority, wire) {
+            log::warn!("wz-runtime-tokio: outbound channel closed; dropping frame ({e})");
+            return LinkSendOutcome::Dropped(LinkDropCause::WriterGone);
+        }
+        LinkSendOutcome::Sent
+    }
+
+    fn tx_slot_abort(&self, slot: TxSlot) {
+        drop(self.take_lent(slot));
     }
 
     fn open_blocking(&self) {
@@ -863,6 +989,268 @@ mod tests {
             rx.recv().await.as_deref(),
             Some([0x02, 0x00, b'o', b'k'].as_slice())
         );
+    }
+
+    /// A driver over a fresh queue, framing u16 (`lowlatency = false`) or with the
+    /// 4-byte lowlatency prefix, and the receiving half to read what it enqueued.
+    fn write_driver(
+        lowlatency: bool,
+    ) -> (
+        StreamWriteDriver,
+        crate::writer_queue::OutboundRx,
+        Arc<AtomicBool>,
+    ) {
+        let (tx, rx) = crate::writer_queue::outbound_channel();
+        let flag = Arc::new(AtomicBool::new(lowlatency));
+        let driver = StreamWriteDriver::new(tx, flag.clone(), LinkSubject::UNKNOWN, None);
+        (driver, rx, flag)
+    }
+
+    /// Encode `payload` into a slot the driver lends, the way the session does,
+    /// and send it. `None` when the driver lent nothing.
+    fn send_lent(driver: &StreamWriteDriver, payload: &[u8]) -> Option<LinkSendOutcome> {
+        use wz_session_core::tx_buf::TxBuf;
+        use wz_session_core::tx_lease::TxLease;
+        let mut lease = TxLease::acquire(driver, payload.len(), Priority::DEFAULT)?;
+        lease
+            .append(payload)
+            .expect("the lent buffer holds the frame");
+        Some(lease.send(Reliability::Reliable, Priority::DEFAULT))
+    }
+
+    /// ARCHITECTURE section 9.1 — a frame encoded into the buffer this link lent is
+    /// the wire the byte door would have built from the same bytes: the same
+    /// prefix, in both framings, and the codec's own envelope for the u16 one.
+    #[tokio::test]
+    async fn a_lent_frame_is_the_wire_the_byte_door_builds() {
+        for lowlatency in [false, true] {
+            for payload in [&b"x"[..], &b"ok"[..], &[0xA5u8; 300][..]] {
+                let (driver, mut rx, _flag) = write_driver(lowlatency);
+                assert_eq!(
+                    driver.send_blocking(payload, Reliability::Reliable),
+                    LinkSendOutcome::Sent
+                );
+                let by_bytes = rx.recv().await.expect("the byte door enqueued a frame");
+                assert_eq!(send_lent(&driver, payload), Some(LinkSendOutcome::Sent));
+                let by_lend = rx.recv().await.expect("the lend enqueued a frame");
+                assert_eq!(
+                    by_lend,
+                    by_bytes,
+                    "lowlatency {lowlatency}, {} bytes",
+                    payload.len()
+                );
+                if !lowlatency {
+                    // The u16 framing is the codec's envelope, not a constant of
+                    // this file's: the lend writes the prefix by hand, so pin it
+                    // to the SSOT the byte door goes through.
+                    let envelope = StreamEnvelope {
+                        payload_len: payload.len() as u16,
+                        payload,
+                    }
+                    .encode_to_vec();
+                    assert_eq!(by_lend, envelope);
+                }
+            }
+        }
+    }
+
+    /// The point of the lend: the buffer the session encoded into IS the buffer
+    /// the writer receives. Same heap block, so no second `Vec` and no copy, which
+    /// is what the byte door cannot avoid.
+    #[tokio::test]
+    async fn a_lent_frame_reaches_the_writer_in_the_buffer_it_was_encoded_into() {
+        use wz_session_core::tx_buf::TxBuf;
+        use wz_session_core::tx_lease::TxLease;
+        let (driver, mut rx, _flag) = write_driver(false);
+        let mut lease = TxLease::acquire(&driver, 64, Priority::DEFAULT).expect("a lent buffer");
+        let encoded_into = driver.tx_slot_storage(TxSlot(0)).0 as usize;
+        lease.append(b"hello").expect("fits");
+        assert_eq!(
+            lease.send(Reliability::Reliable, Priority::DEFAULT),
+            LinkSendOutcome::Sent
+        );
+        let wire = rx.recv().await.expect("the frame");
+        assert_eq!(wire, [0x05, 0x00, b'h', b'e', b'l', b'l', b'o']);
+        assert_eq!(
+            wire.as_ptr() as usize,
+            encoded_into,
+            "the writer got the very buffer the codec wrote into"
+        );
+    }
+
+    /// A lend the session gives back unsent sends nothing and frees its number for
+    /// the next one: an abandoned encode leaks neither a frame nor a slot.
+    #[tokio::test]
+    async fn an_abandoned_lend_sends_nothing_and_frees_its_number() {
+        use wz_session_core::tx_lease::TxLease;
+        let (driver, mut rx, _flag) = write_driver(false);
+        let first = TxLease::acquire(&driver, 64, Priority::DEFAULT).expect("lent");
+        drop(first);
+        assert!(
+            rx.try_recv().is_none(),
+            "an abandoned lend enqueues nothing"
+        );
+        let again = driver
+            .tx_slot_acquire(64, Priority::DEFAULT)
+            .expect("lent again");
+        assert_eq!(again.slot, TxSlot(0), "the freed number is the one reused");
+        driver.tx_slot_abort(again.slot);
+    }
+
+    /// The framing is decided when the frame is enqueued, not when the buffer was
+    /// lent. If the lowlatency flag flips in between, the room reserved in front
+    /// is the wrong size, and the frame must still leave framed as the link is
+    /// NOW, which is the byte door's answer for the same payload.
+    #[tokio::test]
+    async fn a_framing_flip_between_grant_and_send_is_framed_by_the_flag_as_it_stands() {
+        use wz_session_core::tx_buf::TxBuf;
+        use wz_session_core::tx_lease::TxLease;
+        let (driver, mut rx, flag) = write_driver(false);
+        let mut lease = TxLease::acquire(&driver, 64, Priority::DEFAULT).expect("lent");
+        lease.append(b"flip").expect("fits");
+        flag.store(true, Ordering::Release);
+        assert_eq!(
+            lease.send(Reliability::Reliable, Priority::DEFAULT),
+            LinkSendOutcome::Sent
+        );
+        let lent = rx.recv().await.expect("lent frame");
+        assert_eq!(
+            driver.send_blocking(b"flip", Reliability::Reliable),
+            LinkSendOutcome::Sent
+        );
+        assert_eq!(lent, rx.recv().await.expect("byte frame"));
+        assert_eq!(
+            lent[..4],
+            [4, 0, 0, 0],
+            "lowlatency's u32 prefix, not u16's"
+        );
+    }
+
+    /// The two ends joined: the production session over this driver sends a push
+    /// through the lend, and the writer receives the u16 envelope of exactly the
+    /// frame a link that lends nothing is handed for the same push.
+    ///
+    /// Each end is pinned alone above (the session against a fake lender in
+    /// `tests/lent_slot_send.rs`, the driver against hand-made lent frames), and
+    /// a claim true at both ends can still be false in the join: the headroom the
+    /// driver grants is the room the session's encode starts after.
+    #[cfg(feature = "codec-push")]
+    #[tokio::test]
+    async fn a_push_over_the_stream_driver_leaves_as_the_u16_envelope_of_the_heap_frame() {
+        use crate::runtime_impl::TokioTime;
+        use crate::session_glue::new_session_actions;
+
+        struct Collect(Mutex<Vec<Vec<u8>>>);
+        impl BoxedLinkDriver for Collect {
+            fn send_blocking(&self, bytes: &[u8], _r: Reliability) -> LinkSendOutcome {
+                self.0.lock().expect("collect").push(bytes.to_vec());
+                LinkSendOutcome::Sent
+            }
+            fn open_blocking(&self) {}
+            fn close_blocking(&self) {}
+        }
+
+        let params = || {
+            let mut p = wz_runtime_tokio_test_support::fixture_session_init_params();
+            p.initial_sn = 7;
+            p
+        };
+        // The real driver behind a counter of which door each frame came through:
+        // the wire is the same either way, so without it a lend that quietly fell
+        // back to the heap would pass this test and prove nothing about the join.
+        struct Doors {
+            inner: StreamWriteDriver,
+            by_slot: std::sync::atomic::AtomicUsize,
+            by_bytes: std::sync::atomic::AtomicUsize,
+        }
+        impl BoxedLinkDriver for Doors {
+            fn send_blocking(&self, bytes: &[u8], r: Reliability) -> LinkSendOutcome {
+                self.by_bytes.fetch_add(1, Ordering::SeqCst);
+                self.inner.send_blocking(bytes, r)
+            }
+            fn send_prioritized(
+                &self,
+                bytes: &[u8],
+                r: Reliability,
+                p: Priority,
+            ) -> LinkSendOutcome {
+                self.by_bytes.fetch_add(1, Ordering::SeqCst);
+                self.inner.send_prioritized(bytes, r, p)
+            }
+            fn open_blocking(&self) {}
+            fn close_blocking(&self) {}
+            fn tx_slot_acquire(&self, want: usize, p: Priority) -> Option<TxSlotGrant> {
+                self.inner.tx_slot_acquire(want, p)
+            }
+            fn tx_slot_storage(&self, slot: TxSlot) -> (*mut u8, usize) {
+                self.inner.tx_slot_storage(slot)
+            }
+            fn tx_slot_send(
+                &self,
+                slot: TxSlot,
+                start: usize,
+                len: usize,
+                r: Reliability,
+                p: Priority,
+            ) -> LinkSendOutcome {
+                self.by_slot.fetch_add(1, Ordering::SeqCst);
+                self.inner.tx_slot_send(slot, start, len, r, p)
+            }
+            fn tx_slot_abort(&self, slot: TxSlot) {
+                self.inner.tx_slot_abort(slot)
+            }
+        }
+
+        let (inner, mut rx, _flag) = write_driver(false);
+        let doors = Arc::new(Doors {
+            inner,
+            by_slot: Default::default(),
+            by_bytes: Default::default(),
+        });
+        let session = new_session_actions(doors.clone(), params(), TokioTime::new());
+        session
+            .send_push_literal("home/lent", b"payload", true)
+            .expect("push over the stream driver");
+        let wire = rx.recv().await.expect("the frame reached the writer");
+        assert_eq!(
+            (
+                doors.by_slot.load(Ordering::SeqCst),
+                doors.by_bytes.load(Ordering::SeqCst)
+            ),
+            (1, 0),
+            "the frame went through the lend and not the byte door"
+        );
+
+        let control = Arc::new(Collect(Mutex::new(Vec::new())));
+        let control_session = new_session_actions(control.clone(), params(), TokioTime::new());
+        control_session
+            .send_push_literal("home/lent", b"payload", true)
+            .expect("push over the control");
+        let frames = control.0.lock().expect("collect").clone();
+        assert_eq!(frames.len(), 1, "one push is one frame");
+        let envelope = StreamEnvelope {
+            payload_len: frames[0].len() as u16,
+            payload: &frames[0],
+        }
+        .encode_to_vec();
+        assert_eq!(wire, envelope);
+    }
+
+    /// A closed channel refuses a lent frame exactly as it refuses a byte one, and
+    /// the number it held is free.
+    #[tokio::test]
+    async fn a_lent_frame_into_a_closed_channel_is_writer_gone_and_frees_its_number() {
+        let (driver, rx, _flag) = write_driver(false);
+        drop(rx);
+        assert_eq!(
+            send_lent(&driver, b"late"),
+            Some(LinkSendOutcome::Dropped(LinkDropCause::WriterGone))
+        );
+        let next = driver
+            .tx_slot_acquire(8, Priority::DEFAULT)
+            .expect("lent again");
+        assert_eq!(next.slot, TxSlot(0));
+        driver.tx_slot_abort(next.slot);
     }
 
     /// R2608 — an armed read half reports `CertificateExpired` on a signal that
