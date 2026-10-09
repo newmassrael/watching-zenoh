@@ -1029,7 +1029,7 @@ round_fed_gates=(
     # no combined `actions/cache`, and every restore has its save.
     "workflow_cache_save_gate.py --selftest"
     "workflow_cache_save_gate.py"
-    # R3158 (open-debt item 899) — the hosted cache is capped at 10 GB and evicts
+    # R3160 (open-debt item 899) — the hosted cache is capped at 10 GB and evicts
     # LRU, which lost the 5 MB RocksDB engine (293 s to rebuild) to 600 MB target
     # directories. Reads the tracked workflows, the local composite actions and
     # `.github/cache-classes.json`: every cache key class declared with its

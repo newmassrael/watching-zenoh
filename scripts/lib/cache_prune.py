@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: AGPL-3.0-or-later OR LicenseRef-watching-zenoh-Commercial
 # SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
-"""R3158 (no register item) -- decide WHICH hosted caches to drop, instead of letting LRU.
+"""R3160 (no register item) -- decide WHICH hosted caches to drop, instead of letting LRU.
 
 The debt it answers for, open-debt item 899, lives in the operator's agent-memory
 register, which has no store `debt-` id for `gate_provenance_lint.py` to resolve; the

@@ -3379,7 +3379,7 @@ layer_c0_test_discipline() {
     # every Layer E/Z leg. The gate derives the members from the workflows.
     python3 scripts/lib/workflow_cache_save_gate.py --selftest || return 1
     python3 scripts/lib/workflow_cache_save_gate.py || return 1
-    # R3158 (open-debt item 899) — the hosted cache is capped at 10 GB and
+    # R3160 (open-debt item 899) — the hosted cache is capped at 10 GB and
     # evicts LRU, which lost the 5 MB RocksDB engine (293 s to rebuild) to 600 MB
     # target directories. Every cache key class is declared in
     # `.github/cache-classes.json` with its owners and size budget, no
