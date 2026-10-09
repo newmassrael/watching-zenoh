@@ -2396,7 +2396,7 @@ layer_c0_test_discipline() {
     # cannot cover gate 2c, which reads the previous hosted run and no file.
     python3 scripts/lib/hook_gate_boundary_gate.py --selftest || return 1
     python3 scripts/lib/hook_gate_boundary_gate.py --check || return 1
-    # R3149 (open-debt item 897) — the split the two lines above do not look at:
+    # R3150 (open-debt item 897) — the split the two lines above do not look at:
     # which gates an ORDINARY push runs and which only `WZ_PREPUSH_EXTENDED=1`
     # does. The hook names ~90 gates and, since 2026-09-23, runs a handful of
     # them on a plain push; seven hosted runs went red on 2026-10-09 for

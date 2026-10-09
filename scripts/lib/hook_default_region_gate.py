@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: AGPL-3.0-or-later OR LicenseRef-watching-zenoh-Commercial
 # SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
-"""R3149 (no register item) -- WHAT AN ORDINARY PUSH RUNS, AS A LIST THAT CAN FAIL.
+"""R3150 (no register item) -- WHAT AN ORDINARY PUSH RUNS, AS A LIST THAT CAN FAIL.
 
 The citation is `no register item`: open-debt item 897 lives in the operator's
 agent-memory register, which has no store `debt-` id for `gate_provenance_lint`
