@@ -75,6 +75,7 @@ import re
 import shutil
 import subprocess
 import sys
+import time
 import typing
 from pathlib import Path
 
@@ -1384,28 +1385,83 @@ def crate_of(rel_path: str) -> str | None:
     return None
 
 
+# Wall clock spent in cargo, by phase. Round 3140 -- the hosted job ran into
+# its 30-minute timeout with the sweep two thirds of the way through, and the
+# only number anyone had was the per-mutant gap in the log. A mutant is a
+# BUILD (one source edit, recompile, relink) followed by a RUN of the test
+# binaries; they scale with different things (crate size against suite size),
+# so the sweep keeps them apart and prints both rather than leaving the next
+# slowdown to be argued from timestamps.
+SPENT = {"build": 0.0, "run": 0.0, "suites": 0}
+LAST = {"build": 0.0, "run": 0.0}
+
+
+def timing_note() -> str:
+    """` [build 12.3s, run 2.1s]` for the suite that just ran."""
+    return f" [build {LAST['build']:.1f}s, run {LAST['run']:.1f}s]"
+
+
 def run_suite(packages: list[str]) -> tuple[str, str]:
     """`(verdict, output)` where verdict is `green` / `red` / `uncompilable`.
 
     The three are told apart deliberately. `cargo test` exits non-zero for a
     failing test and for a source that does not build, and reading the second as
     the first would let this gate pass a leg on the strength of a syntax error.
+
+    Built first and run second (`--no-run`, then the run), so a source that does
+    not build is told apart from a test that fails by WHICH CALL stopped, not by
+    reading cargo's prose, and so each phase has a clock of its own.
     """
     env = dict(os.environ)
     env["CARGO_TARGET_DIR"] = str(REPO_ROOT / TARGET_DIR)
-    cmd = ["cargo", "test"]
+    # Round 3140 -- INCREMENTAL, on purpose and against the workflow's
+    # `CARGO_INCREMENTAL=0`. That setting is right for a job that compiles each
+    # crate once from a fresh checkout and wrong for this one, which recompiles
+    # the SAME 120k-line crate a hundred times after a one-line edit: the
+    # incremental state is written once by the baseline and reused by every
+    # mutant. The mutated file is restored byte for byte, so the state a
+    # restored tree leaves is the state of the pristine one.
+    env["CARGO_INCREMENTAL"] = "1"
+    # And no debug info: nothing here reads a backtrace, and emitting DWARF for
+    # a 120k-line crate is a large share of every rebuild and relink.
+    env["CARGO_PROFILE_DEV_DEBUG"] = "0"
+    pkgs: list[str] = []
     for p in packages:
-        cmd += ["-p", p]
-    try:
-        done = subprocess.run(
-            cmd,
-            cwd=REPO_ROOT / "crates",
-            env=env,
-            capture_output=True,
-            text=True,
-            timeout=RUN_TIMEOUT_S,
-        )
-    except subprocess.TimeoutExpired:
+        pkgs += ["-p", p]
+    LAST["build"] = LAST["run"] = 0.0
+    SPENT["suites"] += 1
+
+    def cargo(extra: list[str], phase: str) -> subprocess.CompletedProcess | None:
+        started = time.monotonic()
+        try:
+            return subprocess.run(
+                ["cargo", "test", *pkgs, *extra],
+                cwd=REPO_ROOT / "crates",
+                env=env,
+                capture_output=True,
+                text=True,
+                timeout=RUN_TIMEOUT_S,
+            )
+        except subprocess.TimeoutExpired:
+            return None
+        finally:
+            spent = time.monotonic() - started
+            LAST[phase] = spent
+            SPENT[phase] += spent
+
+    built = cargo(["--no-run"], "build")
+    if built is None:
+        return "hung", f"no result within {RUN_TIMEOUT_S}s"
+    built_out = built.stdout + built.stderr
+    if built.returncode != 0:
+        # Nothing ran, so there is no test report to wait for: a build that
+        # failed is a mutant that does not compile, and one that failed without
+        # saying so is a harness that could not start.
+        if "could not compile" in built_out or "error: linking with" in built_out:
+            return "uncompilable", built_out
+        return "unrun", built_out
+    done = cargo([], "run")
+    if done is None:
         return "hung", f"no result within {RUN_TIMEOUT_S}s"
     out = done.stdout + done.stderr
     # THE DISCRIMINATOR, and the first version of it was wrong in a way worth
@@ -1763,7 +1819,8 @@ def main() -> int:
                     print(
                         f"  {variant} [{op_name}]: killed by {len(names)} "
                         f"test(s) in {' '.join(ran)}"
-                        + (f" (e.g. {names[0]})" if names else ""),
+                        + (f" (e.g. {names[0]})" if names else "")
+                        + timing_note(),
                         flush=True,
                     )
 
@@ -1804,7 +1861,21 @@ def main() -> int:
                 )
                 continue
             at.write_text(mutant, encoding="utf-8")
-            verdict, output = run_suite(packages)
+            # The crate that OWNS the mutated file goes first, exactly as the
+            # leg loop above does and for the same reason: a kill found in a
+            # subset is a kill, and the other packages here depend on this one,
+            # so asking them first rebuilds their test binaries (and the
+            # binaries those drive) for a mutant the owner's own unit tests
+            # already catch. Measured on the hosted run that timed out: 21s per
+            # predicate mutant against 15s per leg mutant, the six seconds
+            # being exactly this. A mutant the owner does not kill is escalated
+            # to the full set before it is called a survivor.
+            owner = crate_of(rel)
+            first = [owner] if owner in packages and [owner] != packages else packages
+            verdict, output = run_suite(first)
+            if verdict == "green" and first != packages:
+                verdict, output = run_suite(packages)
+            note = timing_note()
             at.write_text(base, encoding="utf-8")
             if verdict == "uncompilable":
                 broken.append(
@@ -1836,7 +1907,8 @@ def main() -> int:
                 evidence[(label, "predicate")] = names
                 print(
                     f"  {label} [predicate]: killed by {len(names)} test(s)"
-                    + (f" (e.g. {names[0]})" if names else ""),
+                    + (f" (e.g. {names[0]})" if names else "")
+                    + note,
                     flush=True,
                 )
 
@@ -1928,8 +2000,13 @@ def main() -> int:
         )
         return 1
 
+    print(
+        f"  cargo time: {SPENT['build']:.0f}s building and {SPENT['run']:.0f}s "
+        f"running tests over {SPENT['suites']} suite run(s)",
+        flush=True,
+    )
     least = min(len(v) for v in evidence.values()) if evidence else 0
-    ops = ", ".join(name for name, _fn, _why, _reach in OPERATORS)
+    ops =", ".join(name for name, _fn, _why, _reach in OPERATORS)
     print(
         ("verdict-leg mutation PROBE: OK for " if only else "verdict-leg mutation: OK (")
         + f"{len(raised)} leg(s) × {len(OPERATORS)} operator(s) [{ops}] = "
