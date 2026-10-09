@@ -224,9 +224,10 @@ fn take_received_by_polling<S: AsyncRead + Unpin>(stream: &mut S) -> io::Result<
 
 impl SerialByteStream for SerialStream {
     /// Reads the fd directly (`SerialStream::try_read`), not through the async read:
-    /// a freshly opened tty has not been polled by the reactor yet, so its readiness
-    /// says "nothing" for bytes that are already queued, and a flush that believed it
-    /// would keep nothing.
+    /// a freshly opened tty has had no readiness recorded by the reactor yet, so the
+    /// async read answers `Pending` for bytes that are already queued, and a flush
+    /// that took that for "the line is quiet" would leave the stale bytes in the
+    /// queue for the handshake to read.
     fn take_received(&mut self) -> io::Result<Vec<u8>> {
         let mut taken = Vec::new();
         let mut chunk = [0u8; 512];

@@ -1074,7 +1074,10 @@ async fn peer_writes_frame(master: &mut SerialStream, header: u8) {
 /// hears back: exactly the INIT|ACK frame, which is also the proof that the INIT it
 /// answered was the peer's and not something the accept made up.
 #[cfg(all(unix, not(target_os = "macos")))]
-async fn responder_answers_init_ack(accepted: AcceptedLink, master: &mut SerialStream) {
+async fn responder_answers_init_ack(
+    accepted: AcceptedLink,
+    master: &mut SerialStream,
+) -> DialedLink {
     let dialed = tokio::time::timeout(Duration::from_secs(5), accepted.handshake())
         .await
         .expect(
@@ -1093,6 +1096,7 @@ async fn responder_answers_init_ack(accepted: AcceptedLink, master: &mut SerialS
         .expect("the peer hears the reply within 5s")
         .expect("the peer reads the reply");
     assert_eq!(got, want, "the reply is the INIT|ACK frame");
+    dialed
 }
 
 /// An INIT the peer wrote BEFORE the accept survives the accept's flush (item 795).
@@ -1136,16 +1140,42 @@ async fn a_serial_accept_keeps_an_init_that_was_on_the_wire_before_it() {
     }
 }
 
+/// The flush asks the kernel what the device holds; it does not wait for the reactor
+/// to say so (item 795).
+///
+/// THE DISCRIMINATOR is the runtime: one thread, and an accept with no await point
+/// between opening the tty and flushing it. The reactor is only turned when the thread
+/// yields, so at the flush the freshly opened fd has had no readiness recorded for it,
+/// and a flush that went through the async read would take that for "the line is
+/// quiet": it would discard nothing, and the stale frame below would reach the
+/// handshake, which fails on it. (It cannot lose the INIT, which stays in the queue
+/// now that nothing is `tcflush`ed; what a missed read costs is the stale bytes.) The
+/// multi-thread arms above cannot tell: another worker may turn the reactor in time.
+#[cfg(all(unix, not(target_os = "macos")))]
+#[tokio::test(flavor = "current_thread")]
+async fn a_serial_accept_flushes_a_fresh_device_without_the_reactor_having_turned() {
+    let mut end = pty_end();
+    let mut listener = bind_serial_listen(&format!("serial/{}#baudrate=115200", end.path)).await;
+    peer_writes_frame(&mut end.master, 0x00).await;
+    peer_writes_frame(&mut end.master, SERIAL_FLAG_INIT).await;
+    let (accepted, _) = tokio::time::timeout(Duration::from_secs(5), listener.accept_raw())
+        .await
+        .expect("the accept completes")
+        .expect("the accept yields a device");
+    responder_answers_init_ack(accepted, &mut end.master).await;
+}
+
 /// The flush still discards the stale bytes it exists to discard, in the same breath
 /// as it keeps the INIT (item 795).
 ///
 /// The wire carries, in this order: a data frame the departed peer sent after its
-/// link died, a corrupt frame (bytes the line mangled, ended by an EOP), and the new
-/// peer's INIT. A responder handed the data frame fails its handshake, because
-/// `on_header` accepts only an INIT, so the handshake below completes only if the
-/// stale frames were discarded and the INIT was not. After it, nothing may be left
-/// to read: that the stale bytes are gone is asserted by value, not by "the
-/// handshake worked".
+/// link died, a corrupt frame (bytes the line mangled, ended by an EOP), the new
+/// peer's INIT, and one more data frame. A responder handed either data frame fails
+/// its handshake, because `on_header` accepts only an INIT, so the handshake below
+/// completes only if the stale frames were discarded and the INIT was not -- the
+/// frame AFTER the INIT is what separates "keeps the INIT" from "keeps the last
+/// frame". After it, nothing may be left to read: that the stale bytes are gone is
+/// asserted by value, not by "the handshake worked".
 #[cfg(all(unix, not(target_os = "macos")))]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_serial_accept_discards_stale_frames_around_the_init_it_keeps() {
@@ -1162,12 +1192,31 @@ async fn a_serial_accept_discards_stale_frames_around_the_init_it_keeps() {
         .await
         .expect("the line delivers a corrupt frame");
     peer_writes_frame(&mut end.master, SERIAL_FLAG_INIT).await;
+    peer_writes_frame(&mut end.master, 0x00).await;
 
     let (accepted, _) = tokio::time::timeout(Duration::from_secs(5), listener.accept_raw())
         .await
         .expect("the re-accept completes")
         .expect("the re-accept yields the retained device");
-    responder_answers_init_ack(accepted, &mut end.master).await;
+    let DialedLink::Serial { mut stream, .. } =
+        responder_answers_init_ack(accepted, &mut end.master).await
+    else {
+        panic!("a serial accept completes into DialedLink::Serial");
+    };
+    let mut buf = [0u8; 64];
+    match tokio::time::timeout(
+        Duration::from_millis(300),
+        stream.stream_mut().read(&mut buf),
+    )
+    .await
+    {
+        Err(_elapsed) => {} // nothing readable: every stale byte was discarded
+        Ok(Ok(n)) => panic!(
+            "the flush must discard the stale frames, but {n} byte(s) are left: {:?}",
+            &buf[..n]
+        ),
+        Ok(Err(e)) => panic!("reading the accepted device failed: {e}"),
+    }
 }
 
 /// ⛔ THE LISTENER SURVIVES ITS PEER. Once the accepted link is DROPPED, the same
