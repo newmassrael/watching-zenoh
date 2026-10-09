@@ -696,6 +696,96 @@ pub trait BoxedLinkDriver {
     fn link_endpoints(&self) -> Option<&LinkEndpoints> {
         None
     }
+
+    /// ARCHITECTURE section 9.1, the link's half: LEND the session a buffer to
+    /// encode an outbound frame into, so the frame is never built in a place
+    /// the link would then have to copy out of.
+    ///
+    /// The buffer is the LINK's and not the session's because only the link
+    /// knows what it needs of one. A stream link frames what it writes (a
+    /// length prefix in front) and hands the result to a writer task by
+    /// ownership, so its slot carries room for that prefix ([`TxSlotGrant::headroom`])
+    /// and the writer is given the slot itself; a DMA link needs the bytes in
+    /// memory its controller can read. A session-side arena could not give
+    /// either, and a multilink session sends over links with different pools.
+    ///
+    /// `None` (the default) is "this link lends nothing": the session builds
+    /// the frame in a heap `Vec` and calls [`Self::send_prioritized`], which is
+    /// what every driver did before this seam existed. It is also the answer of
+    /// a link whose slots are all in flight, so the pool running dry is a
+    /// fallback to the heap and never an error.
+    ///
+    /// `want` is a HINT, not a requirement: the capacity the heap path would
+    /// reserve, which is the codec's worst case for the message and so far past
+    /// any ordinary frame. A link need not be able to hold it. A frame that
+    /// turns out not to fit the slot is encoded again on the heap and the slot
+    /// is given back, so a link with one slot size lends it whatever `want`
+    /// says, and a link with several size classes may pick by it.
+    ///
+    /// A granted slot is the session's alone until it is passed to exactly one
+    /// of [`Self::tx_slot_send`] or [`Self::tx_slot_abort`]. A driver that
+    /// WRAPS another must forward all four slot methods, as it does
+    /// `send_prioritized`.
+    fn tx_slot_acquire(&self, want: usize, priority: crate::qos::Priority) -> Option<TxSlotGrant> {
+        let _ = (want, priority);
+        None
+    }
+
+    /// The memory of a slot [`Self::tx_slot_acquire`] granted: its first byte and
+    /// its whole length (the headroom is the first part of it). A raw pointer
+    /// and not a slice, because the slot is shared memory a controller or a
+    /// writer task will read once it is sent, and handing out a `&mut [u8]`
+    /// from `&self` is the aliasing a lend must not pretend away; the session
+    /// builds its slice in [`crate::tx_lease::TxLease`], where the exclusivity
+    /// this contract states is the SAFETY argument.
+    ///
+    /// Valid only between the grant and the slot's send or abort. A driver that
+    /// grants nothing is never asked, and answers a null pointer.
+    fn tx_slot_storage(&self, slot: TxSlot) -> (*mut u8, usize) {
+        let _ = slot;
+        (core::ptr::null_mut(), 0)
+    }
+
+    /// Send `len` bytes of a granted slot, starting `start` bytes in (the
+    /// headroom the grant named, where the frame begins), and take the slot: it
+    /// is the link's from this call on, and returns to the pool once the bytes
+    /// are written. The outcome is [`Self::send_prioritized`]'s.
+    ///
+    /// A driver that grants nothing is never asked; its answer is a drop.
+    fn tx_slot_send(
+        &self,
+        slot: TxSlot,
+        start: usize,
+        len: usize,
+        reliability: Reliability,
+        priority: crate::qos::Priority,
+    ) -> LinkSendOutcome {
+        let _ = (slot, start, len, reliability, priority);
+        LinkSendOutcome::Dropped(LinkDropCause::WriterGone)
+    }
+
+    /// Give a granted slot back unsent: the frame did not fit, or the session
+    /// is unwinding. The slot returns to the pool as it is.
+    fn tx_slot_abort(&self, slot: TxSlot) {
+        let _ = slot;
+    }
+}
+
+/// The name of one outbound slot a link lent: the `slot_id` of ARCHITECTURE
+/// section 9.1. An index the link understands and nobody else interprets.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TxSlot(pub u32);
+
+/// What [`BoxedLinkDriver::tx_slot_acquire`] grants: the slot, and how many
+/// bytes at its front belong to the link (its stream framing). The frame the
+/// session encodes starts at `headroom`; the link writes into the front part
+/// itself when it takes the slot.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TxSlotGrant {
+    /// The lent slot.
+    pub slot: TxSlot,
+    /// Bytes reserved at the front of the slot for the link's own framing.
+    pub headroom: usize,
 }
 
 /// R311y473 — one link's locator pair, the wz counterpart of the `{src,dst}`

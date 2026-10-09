@@ -2687,6 +2687,75 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         f(&self.link)
     }
 
+    /// ARCHITECTURE section 9.1 — put ONE frame on its conduit's link through a
+    /// slot that link lends, so the codec's bytes are written once, into the
+    /// buffer the link will send, instead of into a `Vec` it then has to copy.
+    ///
+    /// `true` means the frame left (or was refused by the link and counted, as
+    /// every send is); `false` means NOTHING was sent and the caller encodes the
+    /// frame on the heap as it always did. `false` is every way the lend can
+    /// not happen, and none of them is an error: the link lends nothing (the
+    /// default), its slots are all in flight, the frame does not fit the slot,
+    /// or the frame is past the MTU and must be fragmented, which needs its
+    /// bytes in a place the chain builder can read. The slot is given back in
+    /// each, by the lease's drop, so a refusal costs one heap frame and no slot.
+    ///
+    /// The link the slot comes from is the one [`Self::send_wire`] would route
+    /// the frame to (`with_conduit_link` is that routing), so the slot is lent
+    /// by the link that will write it. Gated as `with_conduit_link` is, the
+    /// data-path union, because it is the data-path send.
+    #[cfg(any(
+        feature = "codec-push",
+        feature = "codec-request",
+        feature = "codec-response",
+        feature = "codec-response-final",
+        feature = "declare-keyexpr",
+        feature = "declare-subscriber",
+        feature = "declare-queryable",
+        feature = "declare-token",
+        feature = "declare-interest",
+        feature = "liveliness-token",
+    ))]
+    fn send_frame_lent<P>(
+        &self,
+        emit: &FrameEmit,
+        worst_case_payload: usize,
+        encode_body: &P,
+    ) -> bool
+    where
+        P: Fn(&mut crate::tx_buf::TxSink<'_>) -> Result<(), sce_forge_runtime::codec::CodecError>,
+    {
+        use crate::tx_buf::TxBuf;
+        // The same keys `emit_frame_or_fragments` hands `send_wire`, so the slot
+        // is lent by the link that heap path would have written to.
+        let reliability = Reliability::from_reliable_bool(emit.reliable);
+        let priority = emit.ext_qos.unwrap_or(Priority::DEFAULT);
+        // Room for the widest prefix and a possible ext_qos, as the heap path
+        // reserves for the same frame.
+        let want = 1 + 10 + 2 + worst_case_payload;
+        self.with_conduit_link(reliability, priority, |link| {
+            let Some(mut slot) =
+                crate::tx_lease::TxLease::acquire(link.link_driver(), want, priority)
+            else {
+                return false;
+            };
+            if crate::frame_encode::encode_frame_envelope_into(
+                &mut slot,
+                emit.sn,
+                crate::frame_encode::frame_flags(emit.reliable),
+                emit.ext_qos,
+                encode_body,
+            )
+            .is_err()
+                || slot.len() > emit.mtu
+            {
+                return false;
+            }
+            self.emit_on_link(link, &[], Some(&mut slot), reliability, priority);
+            true
+        })
+    }
+
     /// R2952 — a congestion drop, counted: upstream's `tx_n_dropped` is the
     /// congestion reason's dropped-payload observations
     /// (`commons/zenoh-stats/src/stats.rs` @ `(Tx, ReasonLabel::Congestion) => {`),
@@ -2955,10 +3024,10 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         // queue by (`BoxedLinkDriver::send_prioritized`).
         #[cfg(feature = "transport-multilink")]
         if let Some(target) = self.select_link(reliability, priority) {
-            self.emit_on_link(&target, bytes, reliability, priority);
+            self.emit_on_link(&target, bytes, None, reliability, priority);
             return;
         }
-        self.emit_on_link(&self.link, bytes, reliability, priority);
+        self.emit_on_link(&self.link, bytes, None, reliability, priority);
     }
 
     /// R311y205 (transport-multilink IMPL-2b-iii) — emit a wire batch on ONE
@@ -2996,9 +3065,22 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         &self,
         link: &LinkState<R>,
         bytes: &[u8],
+        lent: Option<&mut crate::tx_lease::TxLease<'_>>,
         reliability: Reliability,
         priority: Priority,
     ) {
+        // ARCHITECTURE section 9.1 — when the caller encoded the frame into a
+        // slot THIS link lent (`lent`), the frame IS that slot's bytes, `bytes`
+        // is empty, and the slot is handed to the link instead of a copy of it.
+        // Every other step is shared: the stamp, the compression decision that
+        // needs the bytes, the stats and the link-liveness disposition below,
+        // which is why the lent send is a parameter of this seam and not a
+        // second one that would have to repeat them.
+        use crate::tx_buf::TxBuf;
+        let frame: &[u8] = match &lent {
+            Some(slot) => slot.as_slice(),
+            None => bytes,
+        };
         let now = self.clock.now_monotonic_ms();
         R::with_mutex_mut(&link.last_outbound_at, |slot| *slot = Some(now));
 
@@ -3117,7 +3199,10 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         // used to wrap OUTSIDE the lean encode, which no zenoh peer can read.
         #[cfg(feature = "transport-compression")]
         if self.compresses_batches() {
-            let wrapped = crate::compression::compress_batch(bytes);
+            // A lent slot is NOT sent here: the wire bytes are the compressed
+            // copy, so the slot is dropped unsent when this call returns, which
+            // gives it back to its link.
+            let wrapped = crate::compression::compress_batch(frame);
             // transport-stats — count the ACTUAL wire bytes (post-compression).
             let outcome = link
                 .link_driver()
@@ -3126,10 +3211,15 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             dispose(outcome);
             return;
         }
-        let outcome = link
-            .link_driver()
-            .send_prioritized(bytes, reliability, priority);
-        count_tx_wire(bytes.len(), outcome);
+        let wire_len = frame.len();
+        let outcome = match lent {
+            // The slot the frame was encoded into goes to the link as it is.
+            Some(slot) => slot.hand_over(reliability, priority),
+            None => link
+                .link_driver()
+                .send_prioritized(bytes, reliability, priority),
+        };
+        count_tx_wire(wire_len, outcome);
         dispose(outcome);
     }
 
@@ -3151,7 +3241,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// @ `p.push_transport_message(msg, Priority::Background);`).
     #[cfg(any(feature = "codec-close", feature = "transport-keepalive",))]
     fn send_wire_this_link(&self, bytes: &[u8], reliability: Reliability, priority: Priority) {
-        self.emit_on_link(&self.link, bytes, reliability, priority);
+        self.emit_on_link(&self.link, bytes, None, reliability, priority);
     }
 
     /// R121d — derive the SessionInitParams the Accepting side
@@ -6831,6 +6921,24 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                 return Ok(PushOutcome::Congested);
             }
             let sn = self.next_outbound_frame_sn(priority, reliable, sn_mask);
+            let frame_emit = FrameEmit {
+                ext_qos,
+                sn,
+                reliable,
+                mtu,
+                sn_mask,
+                max_reassembly_bytes,
+                deadline: deadline.get(),
+            };
+            // ARCHITECTURE section 9.1 — a link that lends a slot takes the
+            // frame without a copy: the codec writes it into the slot the link
+            // will send. When the link lends nothing (every driver but the ones
+            // that opt in), or the frame needs fragmenting, nothing was sent and
+            // the frame is built on the heap exactly as before, with the SN
+            // already minted above.
+            if self.send_frame_lent(&frame_emit, worst_case_payload, &encode_body) {
+                return Ok(PushOutcome::Pushed);
+            }
             let wire = crate::frame_encode::encode_frame_envelope(
                 sn,
                 crate::frame_encode::frame_flags(reliable),
@@ -6838,18 +6946,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                 ext_qos,
                 &encode_body,
             );
-            self.emit_frame_or_fragments(
-                &wire,
-                FrameEmit {
-                    ext_qos,
-                    sn,
-                    reliable,
-                    mtu,
-                    sn_mask,
-                    max_reassembly_bytes,
-                    deadline: deadline.get(),
-                },
-            )
+            self.emit_frame_or_fragments(&wire, frame_emit)
         });
         match push {
             // R2923 — upstream's `handle_push_result`

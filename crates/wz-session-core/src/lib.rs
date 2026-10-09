@@ -755,6 +755,14 @@ pub mod inbound;
 /// needs `alloc`.
 pub mod tx_buf;
 
+/// A slot a link lent for one outbound frame, as a [`tx_buf::TxBuf`]: the
+/// session half of `BoxedLinkDriver::tx_slot_acquire` (ARCHITECTURE section
+/// 9.1, "the codec writes directly into a pool slot"). It allocates nothing
+/// itself (it is a pointer into memory the link owns) and is gated with
+/// `link`, the module that defines the link driver trait it borrows.
+#[cfg(feature = "alloc")]
+pub mod tx_lease;
+
 /// Outbound `T_MID_FRAME` envelope encoders (`encode_frame_envelope` +
 /// the `encode_frame_with_*` family) hoisted from
 /// `wz-runtime-tokio::session_glue` so the session action layer shares
