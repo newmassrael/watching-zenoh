@@ -57,7 +57,14 @@ than off the row's own say-so.
      OK, the first marker after the step's name being the one that counts, so a
      FAIL in a step cannot be outvoted by an OK later in the entry. An app with
      a HARDWARE row and no grammar file is refused: there is nothing the record
-     could have satisfied.
+     could have satisfied. A row names ALL the grammar's steps unless it carries
+     `verdict_steps` (`"HW.a to HW.b"` or `"HW.a"`), which narrows it to the
+     steps its record was made against: a grammar grows steps for links a row's
+     image does not carry, and a record made before a step existed cannot name
+     it. The narrowing is held to three things so that it cannot become a way
+     round the grammar: every step it names is published by the grammar, the
+     witness's `verdict` text opens with the same step expression, and every
+     step inside it is read exactly as above.
   7. Per-board settings (`deploy/<app>/boards/*.conf`) and the table agree both
      ways: every conf belongs to a row of that app (a board configured but not
      declared is a support claim nobody graded), a row that selects a network
@@ -135,6 +142,9 @@ DATE = re.compile(r"\d{4}-\d{2}-\d{2}")
 STEP_LINE = re.compile(r"^HW\.(\d+) ", re.M)
 STEP_SPLIT = re.compile(r"(?=HW\.\d+ )")
 STEP_MARK = re.compile(r" - OK|FAIL")
+# A row's `verdict_steps`: one step, or an inclusive range, spelt as the grammar
+# and the witness's verdict text spell them.
+STEP_SCOPE = re.compile(r"HW\.(\d+)(?: to HW\.(\d+))?")
 # An overlay that exists so a build can be made, and describes no board.
 BUILD_ONLY_MARKER = "WZ-BUILD-VALUES-ONLY"
 BUILD_ONLY_NAMES = ("build_values", "build-values")
@@ -242,6 +252,46 @@ def grammar_steps(root: Path, app: str) -> list[str] | None:
     if not path.is_file():
         return None
     return sorted(set(STEP_LINE.findall(path.read_text())), key=int)
+
+
+def scoped_steps(
+    label: str, row: dict, published: list[str], witness: dict
+) -> tuple[list[str], list[str]]:
+    """The step numbers a ROW's record must name, and the findings about how the row
+    chose them (module item 6).
+
+    A row without `verdict_steps` must name every step the grammar publishes. One
+    with it must name the steps it spells, which the grammar must publish and which
+    the witness's `verdict` text must spell in the same words."""
+    scope = row.get("verdict_steps")
+    if scope is None:
+        return published, []
+    shape = STEP_SCOPE.fullmatch(scope) if isinstance(scope, str) else None
+    if shape is None:
+        return published, [
+            f"{label}: verdict_steps {scope!r} is not of the form 'HW.<a> to HW.<b>' or 'HW.<a>'"
+        ]
+    first = int(shape.group(1))
+    last = int(shape.group(2)) if shape.group(2) is not None else first
+    if last < first:
+        return published, [f"{label}: verdict_steps {scope!r} ends before it starts"]
+    wanted = [str(n) for n in range(first, last + 1)]
+    out = [
+        f"{label}: verdict_steps names step HW.{n}, which {GRAMMAR_FILE} does not publish"
+        for n in wanted
+        if n not in published
+    ]
+    # The FIRST step expression of the verdict text, not any occurrence of the
+    # words: `HW.0` is a prefix of `HW.0 to HW.7`, and a row narrowed to the one
+    # must not pass against a record that says the other.
+    said = STEP_SCOPE.search(str(witness.get("verdict", "")))
+    if said is None or said.group(0) != scope:
+        out.append(
+            f"{label}: verdict_steps {scope!r} is not the steps the witness's verdict text "
+            f"{witness.get('verdict')!r} opens with -- the row and its record must name "
+            f"the same steps"
+        )
+    return wanted, out
 
 
 def step_verdicts(text: str) -> dict[str, bool]:
@@ -513,6 +563,9 @@ def check(table: dict, root: Path = ROOT) -> list[str]:
                     f"deploy/{row['app']}/{GRAMMAR_FILE}: names no step (a line starting "
                     f"`HW.<n> `), so it grades nothing"
                 )
+            else:
+                steps, scope_findings = scoped_steps(label, row, steps, witness)
+                out.extend(scope_findings)
             out.extend(check_record(label, witness, root, steps))
 
     # The settings files and the table, both ways.
@@ -807,6 +860,42 @@ def selftest() -> int:
 
     expect("a grammar that names no step", hardware_table(), "names no step", empty_grammar,
            entries=whole)
+
+    # VERDICT SCOPE (module item 6). The grammar grew a step after the record was
+    # made; a row names the steps its record was made against, and only those.
+    def grammar_grows(root: Path) -> None:
+        path = root / "deploy/adm" / GRAMMAR_FILE
+        path.write_text(path.read_text() + "HW.3 a link the first image does not carry\n")
+
+    def scoped(steps: str, verdict: str | None = None) -> dict:
+        t = hardware_table()
+        t["rows"][1]["verdict_steps"] = steps
+        t["rows"][1]["witness"]["verdict"] = verdict or f"{steps} OK"
+        return t
+
+    expect("a grammar that grew a step under a row with no scope", hardware_table(),
+           "never names step HW.3", grammar_grows, entries=whole)
+    expect("a row scoped to the steps its record was made against", scoped("HW.0 to HW.2"),
+           None, grammar_grows, entries=whole)
+    expect("a single-step scope", scoped("HW.1"), None, grammar_grows, entries=whole)
+    expect("a scoped row whose record lacks a step inside the scope", scoped("HW.0 to HW.2"),
+           "never names step HW.2", grammar_grows,
+           entries={"Round 9": entry("HW.0 a - OK. HW.1 b - OK.")})
+    expect("a scoped row whose record says a step inside the scope failed",
+           scoped("HW.0 to HW.2"), "does not say HW.1 held", grammar_grows,
+           entries={"Round 9": entry("HW.0 a - OK. HW.1 b FAIL. HW.2 c - OK.")})
+    expect("a scope naming a step the grammar does not publish", scoped("HW.0 to HW.4"),
+           "which HARDWARE_VERDICT.md does not publish", grammar_grows, entries=whole)
+    expect("a scope that is not a step expression", scoped("steps 0 to 2", "HW.0 to HW.2 OK"),
+           "is not of the form", grammar_grows, entries=whole)
+    expect("a scope with more in it than one expression", scoped("HW.0 to HW.2 and HW.3"),
+           "is not of the form", grammar_grows, entries=whole)
+    expect("a scope that ends before it starts", scoped("HW.2 to HW.0"), "ends before it starts",
+           grammar_grows, entries=whole)
+    expect("a scope the record's verdict text does not open with",
+           scoped("HW.0 to HW.1", "HW.0 to HW.2 OK"), "opens with", grammar_grows, entries=whole)
+    expect("a scope that is only a prefix of the verdict text's", scoped("HW.0", "HW.0 to HW.2 OK"),
+           "opens with", grammar_grows, entries=whole)
     t = hardware_table(); t["companions"][0]["grade"] = "BUILT"
     t["companions"][0]["witness"] = {"lane": "Qzb"}
     expect("a HARDWARE row above its BUILT companion", t, "lowest grade of what it runs with",
