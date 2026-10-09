@@ -78,24 +78,94 @@ package would select all 17 `wz-ap-demo` guards on any test edit, which is the
 175s lane, so the narrow rule is a deliberate trade and not an oversight.
 Hosted CI remains the full answer.
 
+## Item 787 (with 759 and 752) — why the oracle was not asked, and what changed
+
+Three pushes of this tree left a count guard behind and each surfaced only on a
+hosted run: C1l (27 -> 37, `6a108810`), C1aq (25 -> 23, `5f9e0417`) and C1ns
+(24 -> 26, `05b66969`). The register's reading was a SELECTION hole: the oracle
+picked a guard only when the guard's own line changed. MEASURED at each of those
+commits, with the gate as the commit carried it, that reading is false: all three
+guards were SELECTED (`wz-session-core ... --lib reassembly`, `wz-runtime-tokio
+... --lib advanced_`, `wz-runtime-zephyr --lib`) without their lines changing.
+
+What the measurement found instead is that the oracle's answer was never asked
+for. Selecting a guard is free; MEASURING it is one cargo build per feature
+set. 4 guards cost 492 s cold and 146 s warm on this tree, 74 guards cost ~25
+minutes on R2708's push, and for that reason the hook prints the count and
+defers the run (`WZ_PREPUSH_COUNT_GUARD`). A gate whose verdict costs more than
+the push is a gate nobody runs, so a moved count reached origin three times
+while the selection was right every time.
+
+So the repair is mostly cost, and the selection changes below are the holes the
+measurement did find:
+
+  * the guard's OWN line changing now selects it. The ledger entry that repaired
+    C1ns records the oracle "reached none of the changed lines" from a range
+    that edited only `run-ci.sh`, i.e. a number edited to the wrong value was
+    unverifiable by the one tool that exists to verify it;
+  * a `Cargo.toml` / `build.rs` change reaches every guard of its package. A
+    feature table moves a count with no `#[cfg]` line in any diff;
+  * the target kind is read: `--lib` reads `src/`, `--test T` reads `tests/T.rs`
+    and the shared helper modules under `tests/`, and a guard that names neither
+    reads both. Before, `tests/` never reached a guard that named no target;
+  * "did the test set change" compares the shape of the file at the range's
+    base with the shape at its head (attributes, `mod`, `fn`, `macro_rules!`
+    and macro invocations, including multi-line attributes) instead of grepping
+    diff lines, so a feature moved on the second line of a `#[cfg(any(...))]`
+    counts;
+  * a libtest filter with `::` is a necessary condition per segment, so
+    `foo::tests::` is no longer unreachable from a file whose text never spells
+    that path, and removed tests count (the filter is looked for in the OLD text
+    too);
+  * the guards the shell assembles are RESOLVED, by running the lane in a bash
+    sandbox (`guarded_count_shell.py`), not deferred. What stays deferred is
+    named with the reason;
+  * a guard that selects `--ignored` tests is measured by LISTING them
+    (`-- --ignored --list`): those tests run against hosted-provisioned inputs
+    (a `zenohd` binary, a pico CLI) a developer machine lacks, and the count of
+    tests `--ignored` selects is the count the lane's run prints when they pass.
+
+Cost: a measurement is cached under the clone's git directory, keyed by the
+command and a digest of the package's shape (its manifest closure plus the
+attribute/`mod`/`fn`/macro lines of every source file). A push that edits bodies
+re-asks nothing; the author who ran the gate while the work was warm pays
+nothing again at push time. The routable guards of one run go through ONE `bx`
+call instead of one each, because the per-call overhead was ~17 of ~36 warm
+seconds. `--cached-only` answers from the cache and never builds.
+
+759: bx's refusal to run on a tree with untracked files is reported as an
+ENVIRONMENT error naming the files, not as "measured nothing". 752: a second
+measurement in the same worktree is refused at once, naming the first, instead of
+queueing behind a cargo lock the first holds.
+
 Usage:
     python3 scripts/lib/guarded_count_gate.py --range <base>..<head> [--verbose]
+    python3 scripts/lib/guarded_count_gate.py --range <base>..<head> --count-only
+    python3 scripts/lib/guarded_count_gate.py --range <base>..<head> --cached-only
     python3 scripts/lib/guarded_count_gate.py --selftest
 """
 
 from __future__ import annotations
 
 import argparse
+import functools
+import hashlib
+import json
 import os
 import re
+import shlex
 import subprocess
 import sys
+import time
+import tomllib
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import count_guard_lint as cgl  # noqa: E402  -- after the path insert
 import feature_closure  # noqa: E402  -- the one reader of run-ci.sh's builds
+import guarded_count_shell as gcs  # noqa: E402  -- what bash makes of a guard
+import rust_comments  # noqa: E402  -- comments are not attributes (R2131)
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 RUNCI = REPO_ROOT / "scripts" / "run-ci.sh"
@@ -104,6 +174,9 @@ CRATES = REPO_ROOT / "crates"
 # A line whose addition or removal can change which tests EXIST. Test BODIES are
 # deliberately absent: editing one cannot move a count, and including them would
 # make every crate push pay for a build.
+#
+# Kept for the callers that hand `select` diff lines and no file shapes (the
+# selftest's older arms); the gate itself decides from `shape_lines` below.
 TRIGGER_RE = re.compile(
     r"#\[(?:tokio::)?test\b"
     r"|#\[ignore\b"
@@ -112,6 +185,205 @@ TRIGGER_RE = re.compile(
     r"|^\s*(?:pub\s+)?mod\s+[A-Za-z0-9_]+\s*[;{]"
 )
 SUMMARY_RE = re.compile(r"^test result: ok\. (\d+) passed", re.M)
+LIST_SUMMARY_RE = re.compile(r"^(\d+) tests?, \d+ benchmarks?$", re.M)
+
+# Item 787 — the shape of a source file: every line that can change WHICH tests
+# exist or what their paths are, and no line that cannot. Two texts with equal
+# shapes have the same test set unless a macro they invoke generates tests, which
+# is why a macro invocation that is not a std one counts as shape.
+STD_MACROS = frozenset(
+    "assert assert_eq assert_ne debug_assert debug_assert_eq debug_assert_ne "
+    "println eprintln print eprint format write writeln vec panic unreachable "
+    "todo unimplemented matches dbg env option_env concat stringify include "
+    "include_str include_bytes cfg line file column module_path compile_error "
+    "thread_local lazy_static format_args".split()
+)
+ATTR_START_RE = re.compile(r"^\s*#!?\[")
+FN_RE = re.compile(r"\bfn\s+[A-Za-z_]")
+MOD_RE = re.compile(r"^\s*(?:pub(?:\([^)]*\))?\s+)?mod\s+[A-Za-z_]")
+MACRO_DEF_RE = re.compile(r"\bmacro_rules!")
+MACRO_CALL_RE = re.compile(r"^\s*([A-Za-z_][A-Za-z0-9_]*(?:::[A-Za-z_][A-Za-z0-9_]*)*)!\s*[({\[]")
+MANIFEST_FILES = frozenset({"Cargo.toml", "build.rs"})
+
+
+DOC_FENCE_RE = re.compile(r"^\s*//[/!][ \t]*```")
+
+
+def doc_fences(text):
+    """The fence lines of doc-comment code blocks: each block is a doc-test, and
+    a guard that runs doc-tests counts it. The rest of a doc comment is not
+    shape (R2131), and a fence is the one part of it that is."""
+    return [f"doc-test {ln.strip()}" for ln in text.split("\n") if DOC_FENCE_RE.match(ln)]
+
+
+@functools.lru_cache(maxsize=8192)
+def shape_lines(text):
+    """The lines of Rust source `text` that decide which tests exist, as a tuple
+    (cached: comment stripping is the slow part and one run reads a text from
+    several places).
+
+    Comments are stripped first (R2131: a doc comment that SHOWS `#[test]` is
+    not one). An attribute is kept whole across its lines, because the feature
+    that gates a test sits on the second line of `#[cfg(any(...))]` as often as
+    on the first.
+    """
+    out = doc_fences(text)
+    depth = 0
+    for raw in rust_comments.strip_comments(text).split("\n"):
+        line = raw.strip()
+        if not line:
+            continue
+        if depth > 0 or ATTR_START_RE.match(line):
+            out.append(line)
+            depth += line.count("[") - line.count("]")
+            if depth < 0:
+                depth = 0
+            continue
+        if FN_RE.search(line) or MOD_RE.match(line) or MACRO_DEF_RE.search(line):
+            out.append(line)
+            continue
+        m = MACRO_CALL_RE.match(line)
+        if m and m.group(1).split("::")[-1] not in STD_MACROS:
+            out.append(line)
+    return tuple(out)
+
+
+# An attribute that can change which tests exist or where they are. Others
+# (`derive`, `allow`, `inline`, ...) are noise on a line that is not a shape line
+# itself.
+TEST_ATTR_WORD_RE = re.compile(r"\b(?:cfg|cfg_attr|test|ignore|path)\b|test\b")
+OUTLINE_MOD_RE = re.compile(r"^(?:pub(?:\([^)]*\))?\s+)?mod\s+([A-Za-z_][A-Za-z0-9_]*)\s*;")
+INLINE_MOD_RE = re.compile(r"^(?:pub(?:\([^)]*\))?\s+)?mod\s+[A-Za-z_][A-Za-z0-9_]*\s*\{?\s*$")
+FN_NAME_RE = re.compile(r"\bfn\s+([A-Za-z_][A-Za-z0-9_]*)")
+
+
+@functools.lru_cache(maxsize=8192)
+def shape_items(text):
+    """`((attrs, head), ...)`: each shape line with the attributes written directly
+    above it, so a change can be told apart by WHAT it governs.
+
+    `fn` heads govern one test; `mod name;` governs the file that name resolves
+    to; everything else (an inline `mod name {`, a macro, an inner `#![...]`) is
+    structure whose reach a diff line cannot say.
+    """
+    items = [((), f) for f in doc_fences(text)]
+    attrs = []
+    cur = []
+    depth = 0
+    for raw in rust_comments.strip_comments(text).split("\n"):
+        line = raw.strip()
+        if not line:
+            continue
+        if depth > 0 or ATTR_START_RE.match(line):
+            cur.append(line)
+            depth += line.count("[") - line.count("]")
+            if depth <= 0:
+                depth = 0
+                joined = " ".join(cur)
+                cur = []
+                if joined.startswith("#!"):
+                    items.append(((), joined))
+                else:
+                    attrs.append(joined)
+            continue
+        is_shape = bool(
+            FN_RE.search(line)
+            or MOD_RE.match(line)
+            or MACRO_DEF_RE.search(line)
+            or (
+                (m := MACRO_CALL_RE.match(line))
+                and m.group(1).split("::")[-1] not in STD_MACROS
+            )
+        )
+        if is_shape:
+            items.append((tuple(attrs), line))
+        elif any(TEST_ATTR_WORD_RE.search(a) for a in attrs):
+            items.append((tuple(attrs), line))
+        attrs = []
+    return tuple(items)
+
+
+def _counter_diff(a, b):
+    """Items of `a` not matched by an item of `b`, as a list (multiset)."""
+    left = list(b)
+    out = []
+    for it in a:
+        if it in left:
+            left.remove(it)
+        else:
+            out.append(it)
+    return out
+
+
+def outline_mod_file(rel, attrs, name, exists):
+    """Crate-relative path of the file `mod name;` written in `rel` resolves to,
+    or None when no candidate `exists`. A `#[path = "..."]` attribute wins."""
+    parent, _, stem_ext = rel.rpartition("/")
+    stem = stem_ext[: -len(".rs")] if stem_ext.endswith(".rs") else stem_ext
+    for a in attrs:
+        m = re.search(r'path\s*=\s*"([^"]+)"', a)
+        if m:
+            cand = f"{parent}/{m.group(1)}" if parent else m.group(1)
+            return cand if exists(cand) else None
+    # A crate root (`lib.rs`, `main.rs`, and each top-level file of `tests/`,
+    # `examples/`, `benches/`, which cargo builds as a crate of its own) keeps
+    # its child modules beside it; any other file keeps them in a directory named
+    # for itself.
+    root_like = stem in ("lib", "main", "mod") or (
+        rel.count("/") == 1 and rel.split("/", 1)[0] in ("tests", "examples", "benches")
+    )
+    base = parent if root_like else f"{parent}/{stem}"
+    for cand in (f"{base}/{name}.rs", f"{base}/{name}/mod.rs"):
+        if exists(cand):
+            return cand
+    return None
+
+
+def filter_haystack(d, rel, read_text, old_text):
+    """What a libtest filter must be found in for the change to `rel` to reach
+    it: the module path of the file, plus the names the DIFFERENCE between the
+    old and new shape governs.
+
+    * a changed `fn` contributes its name and every enclosing-capable inline
+      `mod` of the file (a test's path runs through them);
+    * a changed `mod name;` contributes the file it resolves to, whole: its
+      tests appear or vanish with the declaration (R2158's `#[cfg]` removed
+      above a `mod`), though that file's own text did not move;
+    * anything else is structure a diff line cannot bound, and contributes the
+      file's whole shape.
+    """
+    new_items = shape_items(read_text(d, rel))
+    old_items = shape_items(old_text(d, rel))
+    delta = _counter_diff(new_items, old_items) + _counter_diff(old_items, new_items)
+    parts = [module_path_prefix(rel)]
+    structural = False
+    need_inline = False
+
+    def exists(p):
+        return bool(read_text(d, p) or old_text(d, p))
+
+    for attrs, head in delta:
+        mo = OUTLINE_MOD_RE.match(head)
+        if FN_RE.search(head):
+            parts.append(head)
+            need_inline = True
+        elif mo:
+            parts.append(head)
+            target = outline_mod_file(rel, attrs, mo.group(1), exists)
+            if target is None:
+                structural = True
+            else:
+                parts.append(module_path_prefix(target))
+                parts.extend(
+                    h for _a, h in shape_items(read_text(d, target)) + shape_items(old_text(d, target))
+                )
+        else:
+            structural = True
+    if need_inline or structural:
+        parts.extend(h for _a, h in new_items + old_items if INLINE_MOD_RE.match(h))
+    if structural:
+        parts.extend(h for _a, h in new_items + old_items)
+    return "\n".join(parts)
 
 # R2650 — a shell variable this file assigns ONE whitespace-free literal, and the
 # uses of it that can therefore be resolved.
@@ -190,6 +462,36 @@ class Guard:
         self.test_target = m.group(1) if m else None
         start = cmd.index("test") + 1 if "test" in cmd else len(cmd)
         _exact, self.filters, _skip = cgl.libtest_selection(cmd, start)
+        # Item 787 -- which targets of the package the command compiles tests
+        # for. Empty means cargo's default: the lib, the bins, every integration
+        # test and the doc tests.
+        self.target_kinds = frozenset(
+            kind
+            for flag, kind in (
+                ("--lib", "lib"), ("--bin", "bin"), ("--bins", "bin"),
+                ("--test", "test"), ("--tests", "test"), ("--doc", "doc"),
+                ("--example", "example"), ("--examples", "example"),
+                ("--bench", "bench"), ("--benches", "bench"),
+            )
+            if flag in cmd
+        )
+        # The run-ci.sh lines the guard's logical line spans; set by
+        # `parse_guards`, a single line for a guard built from a fixture.
+        self.span = (lineno, lineno)
+        # Why the shell's assembly of this command could not be resolved, or
+        # None. A guard with a reason stays DEFERRED and the reason is printed.
+        self.unresolved_reason = None
+        # True when `guarded_count_shell` produced this command by running the
+        # lane, so `select` does not defer it for its `$`.
+        self.resolved_by_shell = False
+        # Item 787 -- the command asks libtest for `#[ignore]`d tests, which are
+        # the ones that need inputs a developer machine does not have.
+        self.lists_ignored = "--ignored" in cmd
+        # Set by `select`: why this guard was picked.
+        self.reason = ""
+        # The words the line spells for the command; `_guard_from` sets the
+        # real thing, a fixture-built guard falls back to its command.
+        self.words = list(cmd)
 
     @property
     def where(self):
@@ -197,6 +499,18 @@ class Guard:
 
     def label(self):
         return f"{self.where} [{self.spelling}] {' '.join(self.cmd)}"
+
+    @property
+    def needs_inputs(self):
+        """The line hands the command machine-provisioned inputs (`env X=...`)."""
+        return any(gcs.ENV_ASSIGN_RE.match(t) for t in self.prelude)
+
+    @property
+    def list_measurable(self):
+        """True when the count can be read by LISTING the tests rather than
+        running them: `--ignored` with an explicit target, so the listing is
+        the set the run would execute and no doc-test harness is involved."""
+        return self.lists_ignored and bool(self.target_kinds - {"doc"})
 
     @property
     def whole_command(self):
@@ -238,8 +552,107 @@ def parse_guards(text):
             g = _guard_from(lineno, "bare", want, seg)
             if g:
                 guards.append(g)
+    guards = resolve_shell_assembled(text, guards)
+    attach_spans(text, guards)
     attach_demo_builds(text, guards)
     return guards
+
+
+def attach_spans(text, guards):
+    """Record the physical lines each guard's logical line covers, so a range
+    that edits ANY of them (the number, a comment folded into the command, the
+    label) selects the guard."""
+    ends = {}
+    lines = text.split("\n")
+    for start, _logical in cgl.logical_lines(text):
+        end = start
+        while end <= len(lines) and lines[end - 1].rstrip().endswith("\\"):
+            end += 1
+        ends[start] = end
+    for g in guards:
+        g.span = (g.lineno, ends.get(g.lineno, g.lineno))
+    return guards
+
+
+def _is_assembled(guard):
+    return any(cgl.SHELL_EXPANSION_RE.search(t) for t in guard.whole_command)
+
+
+def resolve_shell_assembled(text, guards):
+    """Replace each guard whose command the shell assembles with the commands
+    the shell assembles for it, one guard per distinct command.
+
+    A guard the sandbox cannot reproduce faithfully is returned UNCHANGED with
+    `unresolved_reason` set; `select` defers it and the gate prints the reason.
+    See `guarded_count_shell` for what "faithfully" means.
+    """
+    assembled = [g for g in guards if _is_assembled(g)]
+    if not assembled:
+        return guards
+    lanes = gcs.lane_calls(text, [g.lineno for g in assembled])
+    fns = gcs.functions(text)
+    out = []
+    for g in guards:
+        if g not in assembled:
+            out.append(g)
+            continue
+        lane = gcs.enclosing(fns, g.lineno)
+        calls = lanes.get(lane) if lane else None
+        if lane is None:
+            g.unresolved_reason = "the line sits outside every function, so no lane runs it"
+            out.append(g)
+            continue
+        if calls is None:
+            g.unresolved_reason = f"the sandbox could not run `{lane}`"
+            out.append(g)
+            continue
+        kind = "helper" if g.spelling == "helper" else "cargo"
+        mine = [c for c in calls if c.line == g.lineno and c.kind == kind]
+        if kind == "cargo":
+            mine = [c for c in mine if c.args[:1] == ["test"]]
+        if not mine:
+            g.unresolved_reason = (
+                f"`{lane}` never reached this line in the sandbox (a loop over "
+                "command output, or a branch on a file or tool a developer "
+                "machine lacks)"
+            )
+            out.append(g)
+            continue
+        made, why = [], ""
+        seen = set()
+        for c in mine:
+            argv = c.args[2:] if kind == "helper" else ["cargo"] + c.args
+            ok, why = gcs.match_call(g.words, argv)
+            if not ok:
+                continue
+            key = tuple(argv)
+            if key in seen:
+                continue
+            seen.add(key)
+            want = g.want
+            if kind == "helper":
+                try:
+                    want = int(c.args[1])
+                except ValueError:
+                    pass
+            at = argv.index("cargo")
+            # The VALUE of an `env NAME=value` assignment is whatever the sandbox
+            # had to put there (a hosted-only binary's path). It is never used,
+            # and keeping it would leak the sandbox's temp directory into the
+            # report, so only the NAME is carried.
+            prelude = tuple(
+                w.split("=", 1)[0] + "=<provisioned>" if gcs.ENV_ASSIGN_RE.match(w) else w
+                for w in argv[:at]
+            )
+            inst = Guard(g.lineno, g.spelling, want, argv[at:], prelude)
+            inst.resolved_by_shell = True
+            made.append(inst)
+        if made:
+            out.extend(made)
+        else:
+            g.unresolved_reason = why or "the shell's result did not match the line"
+            out.append(g)
+    return out
 
 
 # R2236 — the `wz-ap-demo` build a guard's own lane runs before it.
@@ -333,7 +746,14 @@ def _guard_from(lineno, spelling, want, seg):
     # the helper's own argument and its quoting says nothing about whether the
     # command can be reproduced.
     prelude = toks[toks.index("env", 0, at):at] if "env" in toks[:at] else ()
-    return Guard(lineno, spelling, want, cmd, prelude)
+    g = Guard(lineno, spelling, want, cmd, prelude)
+    # Every word the line spells for the command the helper RUNS, wrapper and
+    # all (`timeout "$BUDGET" env X=... cargo ...`): what the sandbox's recorded
+    # argv is compared with. `prelude` keeps only the `env` run, which is all the
+    # rest of this file needs of the words before `cargo`.
+    m = cgl.HELPER_RE.match(seg) if spelling == "helper" else None
+    g.words = cgl.command_tokens(seg[m.end():]) if m else list(cmd)
+    return g
 
 
 def dir_for_package(pkg, manifest_names):
@@ -384,13 +804,239 @@ def module_path_prefix(rel):
     return "::".join(parts) + "::"
 
 
-def select(guards, changed_files, changed_lines, manifest_names, read_text):
+# What a manifest edit can move. A guard's test set depends on the features its
+# build turns on, so a `Cargo.toml` edit reaches a guard when it changes a feature
+# the guard's build activates (directly, through `default`, or through another
+# feature's list), and not otherwise. Anything this reader cannot bound -- a
+# `[[test]]` / `[lib]` / `[workspace]` table, `autotests`, a dependency that is a
+# workspace crate (cargo UNIFIES its feature requests into the package's own
+# build: wz-runtime-tokio's test-support dev-dependency turns `transport-unicast`
+# on for its tests) -- reaches every guard of the package. A registry
+# dependency's own `features` cannot, so they do not.
+IRRELEVANT_PACKAGE_KEYS = frozenset(
+    "version description license license-file repository homepage documentation "
+    "readme authors keywords categories rust-version exclude include publish "
+    "metadata".split()
+)
+OPAQUE_TABLES = ("test", "bin", "lib", "example", "bench", "workspace", "patch")
+
+
+def _dep_tables(doc):
+    for t in DEP_TABLES:
+        if isinstance(doc.get(t), dict):
+            yield doc[t]
+    for tgt in (doc.get("target") or {}).values():
+        for t in DEP_TABLES:
+            if isinstance(tgt.get(t), dict):
+                yield tgt[t]
+
+
+def manifest_effect(old_text, new_text):
+    """The feature names a manifest edit changes the meaning of, or `None` when
+    the edit cannot be bounded to features."""
+    try:
+        old = tomllib.loads(old_text)
+        new = tomllib.loads(new_text)
+    except tomllib.TOMLDecodeError:
+        return None
+    if old == new:
+        return set()
+    for t in OPAQUE_TABLES:
+        if old.get(t) != new.get(t):
+            return None
+    po, pn = old.get("package") or {}, new.get("package") or {}
+    for k in set(po) | set(pn):
+        if k not in IRRELEVANT_PACKAGE_KEYS and po.get(k) != pn.get(k):
+            return None
+    fo, fn = old.get("features") or {}, new.get("features") or {}
+
+    def feature_value(v):
+        # `dep:name` turns an optional dependency on and nothing else: it never
+        # sets a `cfg(feature = ...)`, so a list that differs only in `dep:`
+        # entries has the same meaning to every test.
+        return [x for x in v if not x.startswith("dep:")] if isinstance(v, list) else v
+
+    changed = {
+        k for k in set(fo) | set(fn)
+        if feature_value(fo.get(k)) != feature_value(fn.get(k))
+    }
+    hidden = {
+        x[4:]
+        for table in (fo, fn)
+        for v in table.values()
+        if isinstance(v, list)
+        for x in v
+        if x.startswith("dep:")
+    }
+
+    def deps(doc):
+        merged = {}
+        for table in _dep_tables(doc):
+            merged.update(table)
+        return merged
+
+    do, dn = deps(old), deps(new)
+    for name in set(do) | set(dn):
+        a, b = do.get(name), dn.get(name)
+        if a == b:
+            continue
+        for v in (a, b):
+            if isinstance(v, dict) and (v.get("path") or v.get("workspace")):
+                return None
+        # An optional dependency is an implicit feature of its own name, unless
+        # some feature list says `dep:name`, which hides it.
+        if name not in hidden and any(
+            isinstance(v, dict) and v.get("optional") for v in (a, b)
+        ):
+            changed.add(name)
+    # Everything else that moved (`[profile]`, `[lints]`, versions of plain
+    # registry dependencies) cannot change which tests exist.
+    return changed
+
+
+def build_features(g, doc_tables):
+    """The feature names `g`'s build turns on, closed over the feature tables in
+    `doc_tables` (a list of `[features]` dicts, old and new together), or None
+    for `--all-features`."""
+    cmd = list(g.cmd)
+    if "--all-features" in cmd:
+        return None
+    seen, todo = set(), []
+    for i, t in enumerate(cmd):
+        vals = []
+        if t in ("--features", "-F") and i + 1 < len(cmd):
+            vals = [cmd[i + 1]]
+        elif t.startswith("--features="):
+            vals = [t.split("=", 1)[1]]
+        for v in vals:
+            for name in re.split(r"[,\s]+", v.strip('"')):
+                if not name:
+                    continue
+                if "/" in name:
+                    pkg, _, feat = name.partition("/")
+                    if pkg.rstrip("?") != g.pkg:
+                        continue
+                    name = feat
+                todo.append(name)
+    if "--no-default-features" not in cmd:
+        todo.append("default")
+    while todo:
+        f = todo.pop()
+        if f in seen:
+            continue
+        seen.add(f)
+        for table in doc_tables:
+            for implied in table.get(f, []) if isinstance(table.get(f), list) else []:
+                if implied.startswith("dep:"):
+                    continue
+                if "/" in implied:
+                    pkg, _, feat = implied.partition("/")
+                    if pkg.rstrip("?") == g.pkg:
+                        todo.append(feat)
+                else:
+                    todo.append(implied)
+    return seen
+
+
+def manifest_reaches(g, effect, old_text, new_text):
+    """Does the manifest edit with `effect` change anything `g`'s build sees?"""
+    if effect is None:
+        return True
+    if not effect:
+        return False
+    tables = []
+    for text in (old_text, new_text):
+        try:
+            tables.append(tomllib.loads(text).get("features") or {})
+        except tomllib.TOMLDecodeError:
+            return True
+    active = build_features(g, tables)
+    return True if active is None else bool(active & effect)
+
+
+def reach_files(g, rels):
+    """The changed `.rs` files of `g`'s package that its command compiles tests
+    from, by the targets it names.
+
+    A top-level `tests/X.rs` is its own binary and belongs to `--test X` alone;
+    a file in a subdirectory of `tests/` is a helper module any binary may
+    declare, so it belongs to every integration-test guard of the package.
+    """
+    out = []
+    kinds = g.target_kinds
+    for r in rels:
+        if not r.endswith(".rs") or r in MANIFEST_FILES:
+            continue
+        in_src = r.startswith("src/")
+        in_tests = r.startswith("tests/")
+        if g.test_target is not None:
+            hit = r == f"tests/{g.test_target}.rs" or (in_tests and r.count("/") >= 2)
+        elif kinds:
+            hit = (
+                (in_src and bool(kinds & {"lib", "bin", "doc"}))
+                or (in_tests and "test" in kinds)
+                or (r.startswith("examples/") and "example" in kinds)
+                or (r.startswith("benches/") and "bench" in kinds)
+            )
+        else:
+            hit = in_src or in_tests or r.startswith(("examples/", "benches/"))
+        if hit:
+            out.append(r)
+    return out
+
+
+IDENT_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+
+
+def filter_may_match(flt, haystack):
+    """Necessary condition for a libtest substring filter to select a test whose
+    path is built from the identifiers in `haystack`.
+
+    A test's path is `module::path::name` and libtest matches the filter as a
+    SUBSTRING of it. A filter such as `reassembly::tests::` therefore spans
+    several identifiers that no file spells in one run of text, so it is cut at
+    `::` and each piece is held to what a substring can do at that position: the
+    first piece ends an identifier, the middle ones ARE identifiers, the last
+    begins one, and a filter with no `::` sits inside one. The `::` boundary is
+    what keeps `extauth_pubkey::` from being reached by `extauth_pubkey_store`
+    (R2627's substring lesson). Adjacency is not required, so this can select a
+    guard whose filter does not in the end match and never the reverse, which
+    is the direction a cost-driven gate may err in.
+    """
+    idents = set(IDENT_RE.findall(haystack))
+    pieces = flt.split("::")
+    if len(pieces) == 1:
+        return any(flt in i for i in idents)
+    first, last = pieces[0], pieces[-1]
+    if first and not any(i.endswith(first) for i in idents):
+        return False
+    if any(p and p not in idents for p in pieces[1:-1]):
+        return False
+    return not last or any(i.startswith(last) for i in idents)
+
+
+def select(
+    guards,
+    changed_files,
+    changed_lines,
+    manifest_names,
+    read_text,
+    old_text=None,
+    shape_changed=None,
+    run_ci_lines=frozenset(),
+):
     """`(selected, skipped)` — which guards this push must RUN, and why not.
 
     `changed_files`  repo-relative paths the push touched.
     `changed_lines`  {crate dir: [added/removed line bodies]} from `-U0`.
     `read_text`      crate-dir-relative path -> current text (injectable so the
                      selftest never needs a tree on disk).
+    `old_text`       the same at the range's base; `None` reads as "".
+    `shape_changed`  {crate dir: {rel}} -- the changed files whose `shape_lines`
+                     differ between base and head. `None` (the selftest's older
+                     arms) falls back to grepping the diff lines.
+    `run_ci_lines`   the lines of `run-ci.sh` the range edited; a guard whose own
+                     logical line is among them is selected whatever else moved.
     """
     by_dir = {}
     for f in changed_files:
@@ -401,42 +1047,78 @@ def select(guards, changed_files, changed_lines, manifest_names, read_text):
     triggered = {
         d for d, lines in changed_lines.items() if any(TRIGGER_RE.search(l) for l in lines)
     }
+    old_text = old_text or (lambda d, rel: "")
+    manifest_memo = {}
 
     selected, skipped = [], []
     for g in guards:
         if g.pkg is None:
             skipped.append((g, "names no package"))
             continue
-        if any(cgl.SHELL_EXPANSION_RE.search(t) for t in g.whole_command):
+        if g.unresolved_reason is not None:
+            skipped.append(
+                (g, f"the shell assembles part of this command: {g.unresolved_reason}")
+            )
+            continue
+        if not g.resolved_by_shell and _is_assembled(g):
             skipped.append((g, "the shell assembles part of this command"))
+            continue
+        if run_ci_lines and any(g.span[0] <= n <= g.span[1] for n in run_ci_lines):
+            g.reason = "its own line in run-ci.sh changed"
+            selected.append(g)
             continue
         d = dir_for_package(g.pkg, manifest_names)
         if d is None or d not in by_dir:
             continue
-        if d not in triggered:
-            continue
         rels = by_dir[d]
-        if g.test_target is not None:
-            if f"tests/{g.test_target}.rs" not in rels:
-                continue
-            reachable = [f"tests/{g.test_target}.rs"]
+        manifest = "build.rs" in rels
+        if "Cargo.toml" in rels:
+            if d not in manifest_memo:
+                o, n = old_text(d, "Cargo.toml"), read_text(d, "Cargo.toml")
+                manifest_memo[d] = (manifest_effect(o, n), o, n)
+            effect, o, n = manifest_memo[d]
+            manifest = manifest or manifest_reaches(g, effect, o, n)
+        reachable = reach_files(g, rels)
+        if shape_changed is None:
+            reachable = reachable if d in triggered else []
         else:
-            reachable = [r for r in rels if r.startswith("src/") and r.endswith(".rs")]
-            if not reachable:
-                continue
-        if g.filters:
-            haystack = "\n".join(read_text(d, r) for r in reachable)
+            reachable = [r for r in reachable if r in shape_changed.get(d, ())]
+        if not reachable and not manifest:
+            continue
+        # A manifest edit can move a count with no source line anywhere (a
+        # feature table, a default feature, an optional dependency), and nothing
+        # in a file's text says which guard of the package it reaches, so no
+        # filter narrows it.
+        if g.filters and not manifest:
+            # A test's path is its file's module path, the `mod` names inside
+            # it and its `fn` name, and every one of those is a SHAPE line. The
+            # filter is therefore looked for in the shape of the file (new and
+            # old) and not in its whole text: a 4000-line `lib.rs` spells
+            # nearly every word, and searching it selected the guard for any
+            # filter at all.
+            if shape_changed is None:
+                haystack = "\n".join(
+                    "\n".join(shape_lines(read_text(d, r)) + shape_lines(old_text(d, r)))
+                    for r in reachable
+                )
+            else:
+                haystack = "\n".join(
+                    filter_haystack(d, r, read_text, old_text) for r in reachable
+                )
             haystack += "\n" + "\n".join(changed_lines.get(d, []))
             # R2631 — and the module path each reachable file GIVES its tests,
             # which no file text contains. See `module_path_prefix`.
             haystack += "\n" + "\n".join(module_path_prefix(r) for r in reachable)
-            if not any(f in haystack for f in g.filters):
+            if not any(filter_may_match(f, haystack) for f in g.filters):
                 continue
+        g.reason = "its package's manifest changed" if manifest else (
+            "the test set of " + ", ".join(sorted(reachable)[:3]) + " changed"
+        )
         selected.append(g)
     return selected, skipped
 
 
-def verdict(want, rc, output):
+def verdict(want, rc, output, listing=False):
     """`(status, counts_seen)` — and THREE statuses, not two.
 
     `_runci_guarded_test` greps the whole captured output, so ANY summary line
@@ -468,12 +1150,70 @@ def verdict(want, rc, output):
     same class the paragraph above is proud of having closed once: two kinds of
     failure under one verdict.
     """
-    counts = [int(m.group(1)) for m in SUMMARY_RE.finditer(output)]
+    counts = [
+        int(m.group(1))
+        for m in (LIST_SUMMARY_RE if listing else SUMMARY_RE).finditer(output)
+    ]
     if rc != 0:
         return "FAILED", counts
     if not counts:
         return "UNMEASURED", counts
     return ("OK" if want in counts else "MOVED"), counts
+
+
+def list_argv(cmd):
+    """The command that LISTS the tests `cmd` would run, for a `--ignored` guard.
+
+    The ignored tests of this tree exist to run against inputs a developer
+    machine lacks (a `zenohd` binary, a pico CLI, a vendored example build), so
+    running them here answers about the machine and not about the count. What
+    the guard asserts, though, is how many tests `--ignored` SELECTS, and libtest
+    prints exactly that with `--list --ignored`: one `N tests, M benchmarks`
+    line per test binary, the same granularity the lane's own grep reads.
+
+    Arguments that only shape a RUN are dropped (`--quiet`, `--nocapture`,
+    `--test-threads`); the selection ones (`--ignored`, `--exact`, filters, `--`)
+    stay, in order.
+    """
+    head, tail = list(cmd), []
+    if "--" in cmd:
+        at = cmd.index("--")
+        head, tail = list(cmd[:at]), list(cmd[at + 1 :])
+    head = [t for t in head if t not in ("--quiet", "-q")]
+    kept, skip_next = [], False
+    for t in tail:
+        if skip_next:
+            skip_next = False
+            continue
+        if t in ("--quiet", "-q", "--nocapture", "--show-output"):
+            continue
+        if t == "--test-threads":
+            skip_next = True
+            continue
+        if t.startswith("--test-threads="):
+            continue
+        kept.append(t)
+    return head + ["--"] + kept + ["--list"]
+
+
+# Item 759 -- the two ways `bx` declines to run a tree it cannot ship faithfully.
+# Both are statements about the WORKSPACE (someone left a file in it), not about
+# the count a guard declares, and reading either as "measured nothing" sent the
+# author after their own build.
+BX_ENVIRONMENT_RE = re.compile(
+    r"(neither tracked nor ignored|the remote working tree differs from this one)"
+)
+
+
+def bx_environment_problem(output):
+    """The lines of a `bx` log that name a polluted tree, or "" when there are none."""
+    if not BX_ENVIRONMENT_RE.search(output):
+        return ""
+    keep = []
+    for ln in output.split("\n"):
+        if BX_ENVIRONMENT_RE.search(ln) or ln.startswith("bx:   ") or ln.startswith("  "):
+            keep.append(ln.strip())
+    return "\n".join(k for k in keep if k)[:1500]
 
 
 def run_guard(g, verbose):
@@ -486,14 +1226,18 @@ def run_guard(g, verbose):
     none, that is an INPUT error and the caller is told so, rather than a
     number being invented for it.
     """
-    cmd = list(g.cmd)
+    listing = g.list_measurable
+    cmd = list_argv(g.cmd) if listing else list(g.cmd)
     bx = os.environ.get("BX", "")
     routed = bool(bx) and os.access(bx, os.X_OK)
     # R2236 — provision the demo the guard's own lane provisions, FIRST. See
     # `attach_demo_builds`: without this the command runs against whatever the
     # previous pre-push step left at the one uplifted bin path, and a Layer Z
     # guard then fails its preconditions instead of reporting a count.
-    features = getattr(g, "demo_features", None)
+    #
+    # Item 787: a guard measured by LISTING its tests never starts the demo, so
+    # it needs no demo build and has nothing machine-local to depend on.
+    features = None if listing else getattr(g, "demo_features", None)
     if features is not None:
         # ...and run it HERE, never through `$BX`. A lane that builds a demo is
         # a lane whose guards depend on machine-local provisioning -- the demo
@@ -519,7 +1263,7 @@ def run_guard(g, verbose):
             # and folding it into the run's verdict would blame the guard.
             if verbose:
                 print(f"  demo build failed for {g.where}:\n{pre.stdout}{pre.stderr}")
-            return "UNMEASURED", []
+            return "UNMEASURED", [], ""
     if routed:
         cmd = [bx, "--label", f"guard-count-{g.lineno}", "--"] + cmd
     if verbose:
@@ -531,28 +1275,103 @@ def run_guard(g, verbose):
     if routed:
         m = re.search(r"full log: (\S+)", output)
         if not m:
-            return "UNMEASURED", []
+            return "UNMEASURED", [], ""
         try:
             output += "\n" + Path(m.group(1)).read_text()
         except OSError:
-            return "UNMEASURED", []
-    return verdict(g.want, proc.returncode, output)
+            return "UNMEASURED", [], ""
+        problem = bx_environment_problem(output)
+        if problem and proc.returncode != 0:
+            return "ENVIRONMENT", [], problem
+    status, counts = verdict(g.want, proc.returncode, output, listing)
+    return status, counts, ""
+
+
+def run_batch(guards, verbose):
+    """Measure routable guards through ONE `bx` call. `{id(guard): (status,
+    counts, note)}`.
+
+    MEASURED on this tree, warm: 4 guards cost 146 s as four `bx` calls, ~36 s
+    each, of which ~19 s was the remote build-and-run and the rest the per-call
+    overhead (the ssh round trips, the tree-equality proof, the log). The calls
+    are independent commands in the same working directory, so they go through
+    one shell on the builder, each between a BEGIN and an RC marker that the
+    log carries back, and each is judged by the same `verdict` a lone run is.
+    """
+    bx = os.environ.get("BX", "")
+    cwd = str(REPO_ROOT / "crates")
+    script = []
+    cmds = []
+    # The log also carries the command line bx was given, so a marker that
+    # could be read out of THAT would be read as output. A per-run tag makes the
+    # markers this run's own.
+    tag = f"{os.getpid()}-{time.time_ns()}"
+    for i, g in enumerate(guards):
+        argv = list_argv(g.cmd) if g.list_measurable else list(g.cmd)
+        cmds.append(argv)
+        script.append(f'echo "@@GUARD-{tag}-BEGIN {i}"')
+        script.append(" ".join(shlex.quote(t) for t in argv))
+        script.append(f'echo "@@GUARD-{tag}-RC {i} $?"')
+    if verbose:
+        for argv in cmds:
+            print(f"  batching {' '.join(argv)}")
+    proc = subprocess.run(
+        [bx, "--label", "guard-count-batch", "--", "bash", "-c", "\n".join(script)],
+        cwd=cwd, capture_output=True, text=True,
+    )
+    output = proc.stdout + proc.stderr
+    m = re.search(r"full log: (\S+)", output)
+    if m:
+        try:
+            output += "\n" + Path(m.group(1)).read_text()
+        except OSError:
+            m = None
+    return read_batch(tag, guards, output, logged=bool(m))
+
+
+def read_batch(tag, guards, output, logged=True):
+    """Judge each guard of a batch from the text `bx` produced."""
+    unmeasured = {id(g): ("UNMEASURED", [], "") for g in guards}
+    problem = bx_environment_problem(output)
+    if problem and f"@@GUARD-{tag}-BEGIN 0\n" not in output:
+        return {id(g): ("ENVIRONMENT", [], problem) for g in guards}
+    if not logged:
+        return unmeasured
+    results = {}
+    for i, g in enumerate(guards):
+        seg = re.search(
+            rf"@@GUARD-{tag}-BEGIN {i}\n(.*?)@@GUARD-{tag}-RC {i} (\d+)", output, re.S
+        )
+        if not seg:
+            results[id(g)] = ("UNMEASURED", [], "")
+            continue
+        status, counts = verdict(
+            g.want, int(seg.group(2)), seg.group(1), g.list_measurable
+        )
+        results[id(g)] = (status, counts, "")
+    return results
 
 
 def changed_from_git(rng):
     files = subprocess.run(
-        ["git", "diff", "--name-only", rng, "--", "crates/"],
+        # --no-renames: a moved test file is a deletion AND an addition. With
+        # rename detection only the new path is named, and the tests that left
+        # the old one are never looked at.
+        ["git", "diff", "--no-renames", "--name-only", rng, "--", "crates/"],
         cwd=str(REPO_ROOT), capture_output=True, text=True, check=True,
     ).stdout.split("\n")
     files = [f for f in files if f]
     raw = subprocess.run(
-        ["git", "diff", "-U0", rng, "--", "crates/"],
+        ["git", "diff", "--no-renames", "-U0", rng, "--", "crates/"],
         cwd=str(REPO_ROOT), capture_output=True, text=True, check=True,
     ).stdout
     lines = {}
     cur = None
     for ln in raw.split("\n"):
-        m = re.match(r"^\+\+\+ b/crates/([^/]+)/", ln)
+        # The `---` side names the crate of a deleted file, whose `+++` side is
+        # /dev/null; reading only `+++` attributed its removed lines to the
+        # crate of the file before it.
+        m = re.match(r"^(?:\+\+\+ b|--- a)/crates/([^/]+)/", ln)
         if m:
             cur = m.group(1)
             continue
@@ -567,8 +1386,358 @@ def _read_worktree(d, rel):
     p = CRATES / d / rel
     try:
         return p.read_text()
-    except OSError:
+    except (OSError, UnicodeDecodeError):
         return ""
+
+
+def range_base(rng):
+    """The revision the range's left side names, as the tree `git diff` compares
+    against (`A..B` -> A; `A...B` -> the merge base; an empty side is HEAD)."""
+    if "..." in rng:
+        a, b = rng.split("...", 1)
+        out = subprocess.run(
+            ["git", "merge-base", a or "HEAD", b or "HEAD"],
+            cwd=str(REPO_ROOT), capture_output=True, text=True, check=True,
+        )
+        return out.stdout.strip()
+    if ".." in rng:
+        return rng.split("..", 1)[0] or "HEAD"
+    raise SystemExit(f"guarded-count gate: `{rng}` is not a base..head range")
+
+
+def blobs_at(rev, paths):
+    """`{path: text}` for the paths that exist at `rev`, in ONE git process."""
+    if not paths:
+        return {}
+    spec = "".join(f"{rev}:{p}\n" for p in paths).encode()
+    raw = subprocess.run(
+        ["git", "cat-file", "--batch"], input=spec, cwd=str(REPO_ROOT),
+        capture_output=True, check=True,
+    ).stdout
+    out, at = {}, 0
+    for p in paths:
+        nl = raw.index(b"\n", at)
+        header = raw[at:nl].decode("utf-8", "replace")
+        at = nl + 1
+        if header.endswith(" missing"):
+            continue
+        size = int(header.split()[2])
+        out[p] = raw[at : at + size].decode("utf-8", "replace")
+        at += size + 1
+    return out
+
+
+def run_ci_changed_lines(rng):
+    """The lines of `scripts/run-ci.sh` the range adds or rewrites, new side."""
+    raw = subprocess.run(
+        ["git", "diff", "-U0", rng, "--", "scripts/run-ci.sh"],
+        cwd=str(REPO_ROOT), capture_output=True, text=True, check=True,
+    ).stdout
+    lines = set()
+    for m in re.finditer(r"^@@ -\S+ \+(\d+)(?:,(\d+))? @@", raw, re.M):
+        start = int(m.group(1))
+        count = int(m.group(2)) if m.group(2) is not None else 1
+        lines.update(range(start, start + count))
+    return lines
+
+
+class Changes:
+    """What a range did, in the terms `select` asks."""
+
+    def __init__(self, files, lines, shape_changed, old, run_ci_lines):
+        self.files = files
+        self.lines = lines
+        self.shape_changed = shape_changed
+        self.old = old
+        self.run_ci_lines = run_ci_lines
+
+    def old_text(self, d, rel):
+        return self.old.get(f"crates/{d}/{rel}", "")
+
+
+def changes_from_git(rng):
+    files, lines = changed_from_git(rng)
+    base = range_base(rng)
+    sources = []
+    for f in files:
+        m = re.match(r"crates/([^/]+)/(.*)$", f)
+        if m and (m.group(2).endswith(".rs") or m.group(2) in MANIFEST_FILES):
+            sources.append((f, m.group(1), m.group(2)))
+    old = blobs_at(base, [f for f, _d, _r in sources])
+    shape_changed = {}
+    for f, d, rel in sources:
+        if rel in MANIFEST_FILES:
+            hit = True
+        else:
+            hit = shape_lines(old.get(f, "")) != shape_lines(_read_worktree(d, rel))
+        if hit:
+            shape_changed.setdefault(d, set()).add(rel)
+    return Changes(files, lines, shape_changed, old, run_ci_changed_lines(rng))
+
+
+# ── the measurement cache ────────────────────────────────────────────────
+#
+# A guard's count is a function of its command and of the package's test set. The
+# first is the key; the second is summarised by a DIGEST of the package's shape:
+# its manifest and `build.rs`, and the `shape_lines` of every source file, for
+# the package and for every workspace crate it depends on (a dependency's
+# manifest can switch a feature of the package on, and a macro it exports can
+# generate tests). Body edits change none of that, so they re-ask nothing.
+#
+# The digest is deliberately a function of the WORKTREE and not of the range: it
+# is the tree a measurement is taken on, and two worktrees of one clone that hold
+# the same text share their answers.
+
+DIGEST_VERSION = "1"
+CACHE_LIMIT = 4000
+DEP_TABLES = ("dependencies", "dev-dependencies", "build-dependencies")
+
+
+def _manifest_deps(manifest_path):
+    """Names a Cargo manifest depends on, across every dependency table and the
+    target-specific ones. A rename (`package = "..."`) contributes both names."""
+    try:
+        doc = tomllib.loads(manifest_path.read_text())
+    except (OSError, tomllib.TOMLDecodeError, UnicodeDecodeError):
+        return set()
+    names = set()
+
+    def take(table):
+        for key, val in (table or {}).items():
+            names.add(key)
+            if isinstance(val, dict) and "package" in val:
+                names.add(val["package"])
+
+    for t in DEP_TABLES:
+        take(doc.get(t))
+    for tgt in (doc.get("target") or {}).values():
+        for t in DEP_TABLES:
+            take(tgt.get(t))
+    return names
+
+
+def crate_closure(d, manifest_names, root=None):
+    """`d` and the crate dirs of every workspace crate it depends on, sorted."""
+    root = root or CRATES
+    by_name = {name: dd for dd, name in manifest_names.items()}
+    seen, todo = set(), [d]
+    while todo:
+        cur = todo.pop()
+        if cur in seen:
+            continue
+        seen.add(cur)
+        for name in _manifest_deps(root / cur / "Cargo.toml"):
+            dep = by_name.get(name)
+            if dep and dep not in seen:
+                todo.append(dep)
+    return sorted(seen)
+
+
+_SHAPE_MEMO = {}
+
+
+def crate_shape_digest(d, root=None):
+    """sha256 over one crate's manifest, `build.rs` and source shapes."""
+    root = root or CRATES
+    key = (str(root), d)
+    if key in _SHAPE_MEMO:
+        return _SHAPE_MEMO[key]
+    h = hashlib.sha256()
+    base = root / d
+    for name in sorted(MANIFEST_FILES):
+        try:
+            h.update(f"{name}\0".encode() + (base / name).read_bytes() + b"\0")
+        except OSError:
+            h.update(f"{name}\0-\0".encode())
+    for sub in ("src", "tests", "benches", "examples"):
+        for p in sorted((base / sub).rglob("*.rs")) if (base / sub).is_dir() else []:
+            h.update(f"{p.relative_to(base)}\0".encode())
+            h.update(file_shape_hash(p).encode())
+            h.update(b"\0")
+    _SHAPE_MEMO[key] = h.hexdigest()
+    return _SHAPE_MEMO[key]
+
+
+# Reading ~700 sources and stripping their comments costs seconds; a file whose
+# size and mtime are what they were when its shape was last hashed has the same
+# shape. The table lives in the measurement cache file and is only ever a
+# shortcut: a miss recomputes, and a wrong entry needs a file edited without its
+# size or nanosecond mtime moving.
+FILE_SHAPES = {}
+FILE_SHAPES_DIRTY = [False]
+FILE_SHAPES_LIMIT = 60000
+
+
+def file_shape_hash(p):
+    try:
+        st = p.stat()
+    except OSError:
+        return "-"
+    key = str(p)
+    hit = FILE_SHAPES.get(key)
+    if hit and hit[0] == st.st_mtime_ns and hit[1] == st.st_size:
+        return hit[2]
+    try:
+        text = p.read_text()
+    except (OSError, UnicodeDecodeError):
+        text = ""
+    digest = hashlib.sha256("\n".join(shape_lines(text)).encode()).hexdigest()
+    FILE_SHAPES[key] = [st.st_mtime_ns, st.st_size, digest]
+    FILE_SHAPES_DIRTY[0] = True
+    return digest
+
+
+def package_digest(g, manifest_names, root=None):
+    """The digest a measurement of `g` is cached under, or None when its package
+    is not a workspace crate this tree can read."""
+    d = dir_for_package(g.pkg, manifest_names) if g.pkg else None
+    if d is None:
+        return None
+    root = root or CRATES
+    h = hashlib.sha256(DIGEST_VERSION.encode())
+    try:
+        h.update((root / "Cargo.toml").read_bytes())
+    except OSError:
+        pass
+    for dep in crate_closure(d, manifest_names, root):
+        h.update(dep.encode() + b"\0" + crate_shape_digest(dep, root).encode())
+    return h.hexdigest()
+
+
+def cache_key(g, digest):
+    """Names the command (and the NAMES of its env inputs, never their values),
+    the way it is measured, and the package shape."""
+    env_names = sorted(t.split("=", 1)[0] for t in g.prelude if gcs.ENV_ASSIGN_RE.match(t))
+    mode = "list" if g.list_measurable else "run"
+    return hashlib.sha256(
+        json.dumps([mode, env_names, list(g.cmd), digest]).encode()
+    ).hexdigest()
+
+
+def default_cache_path():
+    env = os.environ.get("WZ_GUARDED_COUNT_CACHE")
+    if env:
+        return Path(env)
+    try:
+        common = subprocess.run(
+            ["git", "rev-parse", "--git-common-dir"],
+            cwd=str(REPO_ROOT), capture_output=True, text=True, check=True,
+        ).stdout.strip()
+    except (OSError, subprocess.CalledProcessError):
+        return None
+    p = Path(common)
+    if not p.is_absolute():
+        p = REPO_ROOT / p
+    return p / "wz-guarded-count-cache.json"
+
+
+class Cache:
+    """`key -> counts` for measurements that ran to a summary. A failed or
+    unmeasured run is never stored: absence is the only honest record of one."""
+
+    def __init__(self, path):
+        self.path = path
+        self.entries = {}
+        self.dirty = False
+        if path is not None:
+            try:
+                data = json.loads(path.read_text())
+                if isinstance(data, dict) and data.get("version") == DIGEST_VERSION:
+                    self.entries = dict(data.get("entries", {}))
+                    FILE_SHAPES.update(data.get("files", {}))
+            except (OSError, ValueError):
+                pass
+
+    def get(self, key):
+        return self.entries.get(key)
+
+    def put(self, key, counts):
+        self.entries.pop(key, None)
+        self.entries[key] = counts
+        self.dirty = True
+
+    def save(self):
+        if self.path is None or not (self.dirty or FILE_SHAPES_DIRTY[0]):
+            return
+        while len(self.entries) > CACHE_LIMIT:
+            self.entries.pop(next(iter(self.entries)))
+        while len(FILE_SHAPES) > FILE_SHAPES_LIMIT:
+            FILE_SHAPES.pop(next(iter(FILE_SHAPES)))
+        tmp = self.path.with_name(self.path.name + f".{os.getpid()}.tmp")
+        try:
+            tmp.write_text(
+                json.dumps(
+                    {
+                        "version": DIGEST_VERSION,
+                        "entries": self.entries,
+                        "files": FILE_SHAPES,
+                    }
+                )
+            )
+            os.replace(tmp, self.path)
+        except OSError:
+            try:
+                tmp.unlink()
+            except OSError:
+                pass
+
+
+def cached_verdict(want, counts):
+    return ("OK" if want in counts else "MOVED"), counts
+
+
+# ── one measurement at a time per worktree (item 752) ────────────────────────
+#
+# Two measurements in one worktree contend for cargo's build-directory lock, and
+# the register records the outcome: both wait, nobody computes, and the pusher
+# reads it as a slow push. A refusal is cheaper than a wait that can become a
+# deadlock, so the second caller is turned away at once and told who has it.
+
+
+class Busy(Exception):
+    pass
+
+
+class MeasurementLock:
+    def __init__(self, path):
+        self.path = path
+        self.fh = None
+
+    def __enter__(self):
+        import fcntl
+
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        self.fh = open(self.path, "a+")
+        try:
+            fcntl.flock(self.fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            self.fh.seek(0)
+            holder = self.fh.read().strip() or "an unnamed run"
+            self.fh.close()
+            raise Busy(holder)
+        self.fh.seek(0)
+        self.fh.truncate()
+        self.fh.write(f"pid {os.getpid()}, started {time.strftime('%H:%M:%S')}")
+        self.fh.flush()
+        return self
+
+    def __exit__(self, *exc):
+        if self.fh is not None:
+            self.fh.close()
+
+
+def lock_path():
+    try:
+        gd = subprocess.run(
+            ["git", "rev-parse", "--git-dir"],
+            cwd=str(REPO_ROOT), capture_output=True, text=True, check=True,
+        ).stdout.strip()
+    except (OSError, subprocess.CalledProcessError):
+        return Path(os.environ.get("TMPDIR", "/tmp")) / "wz-guarded-count.lock"
+    p = Path(gd)
+    if not p.is_absolute():
+        p = REPO_ROOT / p
+    return p / "wz-guarded-count.lock"
 
 
 def main():
@@ -597,6 +1766,13 @@ def main():
     # -- a second copy of that rule in the hook would drift from this one the
     # day either moved, which is this gate's own subject one level up.
     ap.add_argument("--count-only", action="store_true")
+    # Item 787 -- answer from the measurement cache and NEVER build. A guard the
+    # push reaches whose package shape the cache has seen is judged against the
+    # count it recorded; one it has not seen is reported as not measured, exit 3.
+    # This is the mode a hook can afford: it costs a digest, not a build.
+    ap.add_argument("--cached-only", action="store_true")
+    ap.add_argument("--no-cache", action="store_true")
+    ap.add_argument("--cache-file", default=None)
     args = ap.parse_args()
 
     if args.selftest:
@@ -617,9 +1793,32 @@ def main():
         )
         return 1
 
-    files, lines = changed_from_git(args.rng)
+    changes = changes_from_git(args.rng)
     manifest_names = package_manifest_names()
-    selected, skipped = select(guards, files, lines, manifest_names, _read_worktree)
+    selected, skipped = select(
+        guards,
+        changes.files,
+        changes.lines,
+        manifest_names,
+        _read_worktree,
+        old_text=changes.old_text,
+        shape_changed=changes.shape_changed,
+        run_ci_lines=changes.run_ci_lines,
+    )
+
+    # Which of the reached guards the cache already answers. A digest per
+    # package, computed once.
+    cache = Cache(None if args.no_cache else (Path(args.cache_file) if args.cache_file else default_cache_path()))
+    digests = {}
+    keys = {}
+    for g in selected:
+        if g.pkg not in digests:
+            digests[g.pkg] = package_digest(g, manifest_names)
+        if digests[g.pkg] is not None:
+            keys[id(g)] = cache_key(g, digests[g.pkg])
+    hits = {id(g): cache.get(keys[id(g)]) for g in selected if id(g) in keys}
+    hits = {k: v for k, v in hits.items() if v is not None}
+    cache.save()  # the file-shape table, if this run had to rebuild part of it
 
     if args.count_only:
         # ONE LINE, and it says which of the two things happened rather than
@@ -627,9 +1826,11 @@ def main():
         # mode reports, it does not judge -- the judging is the full run's, and
         # hosted CI's.
         if selected:
+            cold = len(selected) - len(hits)
             print(
                 f"guarded-count gate: this push reaches {len(selected)} count "
-                f"guard(s) of {len(guards)} and they were NOT run here. A count "
+                f"guard(s) of {len(guards)}; {len(hits)} already measured on this "
+                f"exact package shape (cache), {cold} NOT measured here. A count "
                 "this push moved will red the hosted lane that owns it; run "
                 "`python3 scripts/lib/guarded_count_gate.py --range "
                 f"{args.rng}` to see it now instead."
@@ -651,29 +1852,79 @@ def main():
     # features the shell assembles has never been checked here, and its move
     # reached origin twice before a hosted lane said so. Printing them is what
     # turns "89 reached" from a result into a result WITH a boundary.
+    #
+    # Item 787: what stays deferred now is the residue after the lane has been
+    # RUN in a sandbox (`guarded_count_shell`), and each line says why that run
+    # could not stand in for the hosted one.
     shell_deferred = [g for g, why in skipped if "shell assembles" in why]
     if shell_deferred:
         print(
             f"guarded-count gate: {len(shell_deferred)} guard(s) DEFERRED — the "
-            "shell assembles part of their command and this runner could not "
-            "resolve it, so ONLY the hosted lane that owns them measures these. "
-            "A green above does not cover them:"
+            "shell assembles part of their command and the sandbox could not "
+            "reproduce it, so ONLY the hosted lane that owns them measures "
+            "these. A green above does not cover them:"
         )
-        for g in shell_deferred:
-            print(f"  DEFERRED  {g.where}: {' '.join(g.whole_command)}")
+        for g, why in skipped:
+            if "shell assembles" in why:
+                print(
+                    f"  DEFERRED  {g.where}: {' '.join(g.whole_command)}\n"
+                    f"            why: {g.unresolved_reason or why}"
+                )
     if args.verbose and skipped:
         for g, why in skipped:
             print(f"  unrunnable {g.where}: {why}")
     if not selected:
         print("  no guard's test set is moved by this push; nothing to run.")
         return 0
+    if args.verbose:
+        for g in selected:
+            print(f"  reached  {g.where}: {g.reason}")
 
-    moved, broken = [], []
+    started = time.time()
+    results = {}
     for g in selected:
-        status, counts = run_guard(g, args.verbose)
+        if id(g) in hits:
+            status, counts = cached_verdict(g.want, hits[id(g)])
+            results[id(g)] = (status, counts, "", True)
+    todo = [g for g in selected if id(g) not in results]
+    if args.cached_only:
+        if todo:
+            print(
+                f"guarded-count gate: {len(todo)} reached guard(s) have no "
+                "measurement for this package shape in the cache and were NOT "
+                "run (--cached-only):"
+            )
+            for g in todo:
+                print(f"  UNMEASURED  {g.where}: {' '.join(g.cmd)}")
+    elif todo:
+        try:
+            with MeasurementLock(lock_path()):
+                results.update(measure(todo, args.verbose))
+        except Busy as who:
+            print(
+                "guarded-count gate: another measurement is already running in "
+                f"this worktree ({who}). Two of them contend for cargo's build "
+                "lock and neither finishes, so this one stops; run it again when "
+                "the other has ended.",
+                file=sys.stderr,
+            )
+            return 4
+        for g in todo:
+            status, counts, _note, _from_cache = results[id(g)]
+            if status in ("OK", "MOVED") and id(g) in keys:
+                cache.put(keys[id(g)], counts)
+        cache.save()
+
+    moved, broken, environment = [], [], []
+    for g in selected:
+        if id(g) not in results:
+            continue
+        status, counts, note, from_cache = results[id(g)]
         seen = ", ".join(str(c) for c in counts)
         if status == "OK":
-            print(f"  OK  {g.where}: {g.want} passed")
+            print(f"  OK  {g.where}: {g.want} passed" + ("  (cached)" if from_cache else ""))
+        elif status == "ENVIRONMENT":
+            environment.append((g.where, note))
         elif status == "MOVED":
             moved.append(
                 f"{g.where}: declares {g.want} passed, the run printed {seen}\n"
@@ -697,6 +1948,37 @@ def main():
                 f"      {' '.join(g.cmd)}"
             )
 
+    n_cached = sum(1 for r in results.values() if r[3])
+    print(
+        f"guarded-count gate: {len(results)} of {len(selected)} reached guard(s) "
+        f"judged ({n_cached} from the cache, {len(results) - n_cached} measured) "
+        f"in {time.time() - started:.0f}s"
+    )
+    if environment:
+        # Item 759 -- the tree bx was handed is not one it can ship. That is a
+        # fact about the WORKSPACE (a file somebody left in it), so it is named
+        # as such, apart from "your build is broken", and it comes first: until
+        # it is cleared nothing below it was measured.
+        print("", file=sys.stderr)
+        print("guarded-count gate ENVIRONMENT ERROR:", file=sys.stderr)
+        by_note = {}
+        for where, note in environment:
+            by_note.setdefault(note, []).append(where)
+        for note, wheres in by_note.items():
+            print(
+                f"  - bx declined to run this tree for {len(wheres)} guard(s) "
+                f"({', '.join(wheres[:4])}{', ...' if len(wheres) > 4 else ''}), "
+                f"which says nothing about their counts:\n      "
+                + note.replace("\n", "\n      "),
+                file=sys.stderr,
+            )
+        print(
+            "\n  Commit, `git add`, or delete the files bx names (they may be "
+            "another session's:\n  look before removing), then run this again. "
+            "No count was read.",
+            file=sys.stderr,
+        )
+        return 2
     if broken:
         print("", file=sys.stderr)
         print("guarded-count gate INPUT ERROR:", file=sys.stderr)
@@ -723,7 +2005,56 @@ def main():
             file=sys.stderr,
         )
         return 1
+    if args.cached_only and todo:
+        # Nothing cached moved, but part of the push was not read at all. 3 is
+        # its own code: it is neither "green" nor "the count moved".
+        return 3
     return 0
+
+
+def measure(guards, verbose):
+    """`{id(guard): (status, counts, note, False)}` for guards the cache could
+    not answer.
+
+    Guards that need the machine (a demo build the lane provisions first) run
+    one by one HERE. The rest go to the builder in one batch when `$BX` names
+    one, else one by one locally; the batch is only worth its shell when there
+    is more than one of them.
+    """
+    bx = os.environ.get("BX", "")
+    routed = bool(bx) and os.access(bx, os.X_OK)
+    # One command measured once: several guards in a lane repeat a command with
+    # a different label or a different line, and a repeat is the same count.
+    groups = {}
+    for g in guards:
+        groups.setdefault(
+            (g.list_measurable, tuple(g.prelude), tuple(g.cmd), getattr(g, "demo_features", None)),
+            [],
+        ).append(g)
+    reps = [members[0] for members in groups.values()]
+    local = [
+        g for g in reps
+        if getattr(g, "demo_features", None) is not None and not g.list_measurable
+    ]
+    rest = [g for g in reps if g not in local]
+    out = {}
+    if routed and len(rest) > 1:
+        for gid, (status, counts, note) in run_batch(rest, verbose).items():
+            out[gid] = (status, counts, note, False)
+        rest = []
+    for g in local + rest:
+        status, counts, note = run_guard(g, verbose)
+        out[id(g)] = (status, counts, note, False)
+    for members in groups.values():
+        status, counts, note, fc = out[id(members[0])]
+        for g in members[1:]:
+            # The count is shared; each member's own declared number is judged.
+            same = status in ("OK", "MOVED")
+            out[id(g)] = (
+                cached_verdict(g.want, counts)[0] if same else status,
+                counts, note, fc,
+            )
+    return out
 
 
 # ── selftest ────────────────────────────────────────────────────────────
@@ -1072,6 +2403,8 @@ def selftest():
         "supposed to leave visible",
     )
 
+    selftest_787(arm)
+
     bad = [(n, w) for n, ok, w in arms if not ok]
     print(f"guarded-count gate selftest: {len(arms) - len(bad)}/{len(arms)} arm(s) OK")
     for name, ok, _ in arms:
@@ -1082,6 +2415,514 @@ def selftest():
             print(f"selftest FAIL: {name} — {why}", file=sys.stderr)
         return 1
     return 0
+
+
+# ── selftest, item 787 ───────────────────────────────────────────────────
+# The three pushes that left a guard behind (C1l, C1aq, C1ns), as fixtures, and
+# each rule this item added with the control that keeps it from becoming "select
+# everything". The mutant the register named -- select a guard only when its own
+# line changed -- turns every arm of the first three groups red.
+
+SHELL_FIXTURE = r"""
+BUDGET=180
+
+lane_loop() {
+    local F="x"
+    local G="$F,zenoh-config"
+    for leg in alpha beta; do
+        _runci_guarded_test "L $leg" 1 \
+            cargo test -p demo-crate --features "$G" --test t -- --ignored --quiet \
+            --exact "$leg" || return 1
+    done
+    if [[ -x "$tools/no-such-tool" ]]; then
+        _runci_guarded_test "behind a file test" 5 \
+            cargo test -p demo-crate --features "$G" --lib --quiet || return 1
+    fi
+    local empty
+    empty="$(python3 nothing.py)"
+    _runci_guarded_test "from a command" 2 \
+        cargo test -p demo-crate --features "$empty" --quiet || return 1
+    _runci_guarded_test "wrapped" 4 \
+        timeout "$BUDGET" env DEMO_BIN="$tools/bin" \
+        cargo test -p demo-crate --lib --quiet || return 1
+    _runci_guarded_test "quoted literal" 6 \
+        cargo test -p demo-crate --features "x,zenoh-config" --lib --quiet || return 1
+}
+"""
+
+
+def selftest_787(arm):
+    def guard(cmd, want=1, lineno=10):
+        return Guard(lineno, "helper", want, cmd.split())
+
+    def pick(guards, files_new, files_old, run_ci_lines=frozenset(), unchanged=None):
+        unchanged = unchanged or {}
+        keys = sorted(set(files_new) | set(files_old))
+        shape = {}
+        for d, rel in keys:
+            if rel in MANIFEST_FILES or shape_lines(files_old.get((d, rel), "")) != shape_lines(
+                files_new.get((d, rel), "")
+            ):
+                shape.setdefault(d, set()).add(rel)
+
+        def new_text(d, rel):
+            return files_new.get((d, rel), unchanged.get((d, rel), ""))
+
+        def old_text(d, rel):
+            return files_old.get((d, rel), unchanged.get((d, rel), ""))
+
+        sel, _ = select(
+            guards,
+            [f"crates/{d}/{rel}" for d, rel in keys],
+            {},
+            MANIFESTS,
+            new_text,
+            old_text=old_text,
+            shape_changed=shape,
+            run_ci_lines=run_ci_lines,
+        )
+        return sel
+
+    # ---- the three pushes that left a guard behind ------------------------
+    # C1l (`6a108810`): ten tests joined `reassembly_dispatch`; the guard's own
+    # line did not change.
+    g_l = guard("cargo test -p demo-crate --features x --lib reassembly --quiet", 27)
+    g_group = guard("cargo test -p demo-crate --features x --lib group --quiet", 9)
+    old_l = "#[cfg(test)]\nmod tests {\n    #[test]\n    fn a() {}\n}\n"
+    new_l = old_l + (
+        "#[cfg(test)]\nmod unknown_ring_tests {\n    #[test]\n    fn ring() {}\n}\n"
+    )
+    sel = pick(
+        [g_l, g_group],
+        {("demo", "src/reassembly_dispatch.rs"): new_l},
+        {("demo", "src/reassembly_dispatch.rs"): old_l},
+    )
+    arm(
+        "C1l: tests added to a module the filter names select the guard, its line unchanged",
+        sel == [g_l],
+        "selecting only on the guard's own line misses all three leaks",
+    )
+
+    # C1aq (`5f9e0417`): three tests replaced by one, a new module declared in
+    # lib.rs, a new file. The unrelated `group` guard must not ride along.
+    g_adv = guard("cargo test -p demo-crate --features x --lib advanced_ --quiet", 25)
+    sel = pick(
+        [g_adv, g_group],
+        {
+            ("demo", "src/advanced_cache.rs"): "mod t {\n    #[test]\n    fn one() {}\n}\n",
+            ("demo", "src/time_range.rs"): "mod t {\n    #[test]\n    fn two() {}\n}\n",
+            ("demo", "src/lib.rs"): "mod advanced_cache;\nmod time_range;\n",
+        },
+        {
+            ("demo", "src/advanced_cache.rs"): (
+                "mod t {\n    #[test]\n    fn one() {}\n    #[test]\n    fn two() {}\n"
+                "    #[test]\n    fn three() {}\n}\n"
+            ),
+            ("demo", "src/lib.rs"): "mod advanced_cache;\n",
+        },
+    )
+    arm(
+        "C1aq: removed tests in a module the filter names select the guard",
+        sel == [g_adv],
+        "tests that LEFT a file are as much a move as tests that joined it",
+    )
+
+    # C1ns (`05b66969`): two tests added to the lib of a package whose guard has
+    # no filter.
+    g_ns = guard("cargo test -p demo-crate --lib --quiet", 24)
+    sel = pick(
+        [g_ns],
+        {("demo", "src/lib.rs"): "#[test]\nfn a() {}\n#[test]\nfn b() {}\n#[test]\nfn c() {}\n"},
+        {("demo", "src/lib.rs"): "#[test]\nfn a() {}\n"},
+    )
+    arm(
+        "C1ns: tests added to the lib select an unfiltered --lib guard",
+        sel == [g_ns],
+        "a guard with no filter has nothing to narrow it and must follow its target",
+    )
+    sel = pick(
+        [g_ns],
+        {("demo", "src/lib.rs"): "#[test]\nfn a() {\n    assert_eq!(1, 2);\n}\n"},
+        {("demo", "src/lib.rs"): "#[test]\nfn a() {\n    assert_eq!(1, 1);\n}\n"},
+    )
+    arm(
+        "CONTROL: a body-only edit reaches nothing",
+        sel == [],
+        "selecting on any change in the package is the 175s lane for every push",
+    )
+    g_line = guard("cargo test -p demo-crate --lib --quiet", 24, lineno=10)
+    g_line.span = (10, 12)
+    arm(
+        "the fix range: only run-ci.sh changed, and the edited guard is selected",
+        pick([g_line], {}, {}, run_ci_lines=frozenset({11})) == [g_line],
+        "the ledger records the oracle reaching nothing from a range that only edited the number",
+    )
+    arm(
+        "CONTROL: an edit to another line of run-ci.sh selects nothing",
+        pick([g_line], {}, {}, run_ci_lines=frozenset({13})) == [],
+        "selecting every guard on any run-ci.sh edit would make a comment edit a build",
+    )
+
+    # ---- reach by target kind ---------------------------------------------
+    g_lib = guard("cargo test -p demo-crate --lib --quiet", 3)
+    g_t = guard("cargo test -p demo-crate --test foo --quiet", 3)
+    g_all = guard("cargo test -p demo-crate --quiet", 3)
+    one_test = "#[test]\nfn a() {}\n"
+    sel = pick([g_lib, g_t, g_all], {("demo", "tests/foo.rs"): one_test}, {})
+    arm(
+        "tests/foo.rs reaches --test foo and the default target, not --lib",
+        sel == [g_t, g_all],
+        "before this item a guard naming no target was never reached from tests/",
+    )
+    sel = pick([g_lib, g_t, g_all], {("demo", "tests/bar.rs"): one_test}, {})
+    arm(
+        "CONTROL: tests/bar.rs does not reach --test foo",
+        sel == [g_all],
+        "a top-level tests/ file is a binary of its own",
+    )
+    sel = pick([g_lib, g_t, g_all], {("demo", "tests/common/mod.rs"): one_test}, {})
+    arm(
+        "a helper module under tests/ reaches every integration-test guard",
+        sel == [g_t, g_all],
+        "any binary may declare it",
+    )
+
+    # ---- filters ----------------------------------------------------------
+    g_path = guard("cargo test -p demo-crate --lib foo::tests:: --quiet", 4)
+    g_path_other = guard("cargo test -p demo-crate --lib bar::tests:: --quiet", 4)
+    sel = pick(
+        [g_path, g_path_other],
+        {("demo", "src/foo.rs"): "mod tests {\n    #[test]\n    fn t() {}\n}\n"},
+        {},
+    )
+    arm(
+        "a filter that spans module and submodule is reached by the file that spells them",
+        sel == [g_path],
+        "no file spells foo::tests:: in one run of text",
+    )
+    g_removed = guard("cargo test -p demo-crate --lib removed_suite --quiet", 2)
+    sel = pick(
+        [g_removed],
+        {},
+        {("demo", "src/gone.rs"): "mod removed_suite {\n    #[test]\n    fn t() {}\n}\n"},
+    )
+    arm(
+        "a deleted file's tests are found in its OLD shape",
+        sel == [g_removed],
+        "the current tree no longer spells the name the count lost",
+    )
+    g_gated = guard("cargo test -p demo-crate --lib gated_case --quiet", 1)
+    g_unrelated = guard("cargo test -p demo-crate --lib unrelated_name --quiet", 1)
+    g_sibling = guard("cargo test -p demo-crate --lib router_forward --quiet", 1)
+    sel = pick(
+        [g_gated, g_unrelated, g_sibling],
+        {("demo", "src/lib.rs"): "mod gated;\nmod router_forward;\n"},
+        {("demo", "src/lib.rs"): "#[cfg(any())]\nmod gated;\nmod router_forward;\n"},
+        unchanged={
+            ("demo", "src/gated.rs"): "#[test]\nfn gated_case_runs() {}\n",
+            ("demo", "src/router_forward.rs"): "#[test]\nfn forwards() {}\n",
+        },
+    )
+    arm(
+        "R2158: removing the #[cfg] above `mod gated;` reaches the tests of gated.rs",
+        sel == [g_gated],
+        "that file did not change; its tests appeared with the declaration",
+    )
+    arm(
+        "CONTROL: the same edit does not reach guards whose filters name other modules",
+        g_unrelated not in sel and g_sibling not in sel,
+        "lib.rs declares every module, so matching a filter against its whole shape "
+        "is how a one-line `mod` edit selected 74 guards",
+    )
+    arm(
+        "filter_may_match: first piece ends an identifier, middle ones are identifiers",
+        filter_may_match("xtra::mid::tail", "alpha_xtra mid tail_end")
+        and not filter_may_match("xtra::mid::tail", "alpha_xtra mid_x tail_end")
+        and not filter_may_match("pubkey::", "pubkey_store")
+        and filter_may_match("pubkey::", "my_pubkey"),
+        "libtest matches a SUBSTRING of the whole path, so each piece is held to its position",
+    )
+
+    # ---- manifests --------------------------------------------------------
+    toml_old = (
+        '[package]\nname = "demo-crate"\nversion = "0.1.0"\n'
+        '[features]\ndefault = []\nx = []\nzenoh-config = ["x"]\nother = []\n'
+    )
+
+    def reached(toml_new, guards):
+        return pick(
+            guards,
+            {("demo", "Cargo.toml"): toml_new},
+            {("demo", "Cargo.toml"): toml_old},
+        )
+
+    g_fx = guard("cargo test -p demo-crate --features x --lib --quiet", 1)
+    g_fz = guard("cargo test -p demo-crate --features zenoh-config --lib --quiet", 1)
+    g_f0 = guard("cargo test -p demo-crate --lib --quiet", 1)
+    arm(
+        "a feature the build activates, edited in Cargo.toml, reaches the guard",
+        reached(toml_old.replace("x = []", 'x = ["other"]'), [g_fx, g_fz, g_f0]) == [g_fx, g_fz],
+        "a feature table moves a count with no #[cfg] line in any diff; zenoh-config implies x",
+    )
+    arm(
+        "CONTROL: a feature no guard activates reaches nothing",
+        reached(toml_old.replace("other = []", 'other = ["x"]'), [g_fx, g_fz, g_f0]) == [],
+        "every manifest edit selecting the package's 160 guards is not a narrowing",
+    )
+    arm(
+        "CONTROL: a `dep:` entry added to a feature list reaches nothing",
+        reached(
+            toml_old.replace('zenoh-config = ["x"]', 'zenoh-config = ["x", "dep:serde"]'),
+            [g_fx, g_fz, g_f0],
+        )
+        == [],
+        "dep: never sets a cfg(feature), so no test can see it",
+    )
+    arm(
+        "CONTROL: a registry dependency with features reaches nothing",
+        reached(
+            toml_old + '[dependencies]\nserde = { version = "1", features = ["derive"] }\n',
+            [g_fx, g_fz, g_f0],
+        )
+        == [],
+        "only a workspace crate's feature requests unify into the package's build",
+    )
+    arm(
+        "a workspace dependency edit reaches every guard of the package",
+        reached(toml_old + '[dev-dependencies]\nsupport = { path = "../support" }\n', [g_fx, g_f0])
+        == [g_fx, g_f0],
+        "wz-runtime-tokio's test-support dev-dependency turns a feature ON for its tests",
+    )
+    arm(
+        "a [[test]] table edit reaches every guard of the package",
+        reached(toml_old + '[[test]]\nname = "t"\nrequired-features = ["x"]\n', [g_fx, g_f0])
+        == [g_fx, g_f0],
+        "a target table is not bounded to features",
+    )
+
+    # ---- the shell, asked --------------------------------------------------
+    gs = parse_guards(SHELL_FIXTURE)
+    legs = [x for x in gs if x.words and "--exact" in x.words and x.resolved_by_shell]
+    arm(
+        "shell: a for-loop yields one guard per leg, features joined by bash",
+        [x.cmd[-1] for x in legs] == ["alpha", "beta"]
+        and all("x,zenoh-config" in x.cmd for x in legs),
+        "a reader of the text sees `$leg` and one line; bash runs the loop",
+    )
+    arm(
+        "shell: a guard behind a file test is reached (the inputs are assumed present)",
+        any(x.want == 5 and x.resolved_by_shell for x in gs),
+        "otherwise every guard behind `[[ -x tool ]]` stays unobservable here",
+    )
+    arm(
+        "shell: a quoted literal needs no lane to resolve and still resolves",
+        any(x.want == 6 and x.resolved_by_shell and "x,zenoh-config" in x.cmd for x in gs),
+        "the quotes were why it was deferred",
+    )
+    wrapped = [x for x in gs if x.want == 4]
+    arm(
+        "shell: a `timeout N env X=...` wrapper resolves; only the env NAME is kept",
+        len(wrapped) == 1
+        and wrapped[0].resolved_by_shell
+        and wrapped[0].needs_inputs
+        and all("tools" not in t for t in wrapped[0].prelude),
+        "the sandbox's own paths must not leak into a report",
+    )
+    refused = [x for x in gs if x.want == 2]
+    arm(
+        "CONTROL: a word built from a command that produced nothing is refused with its reason",
+        len(refused) == 1
+        and not refused[0].resolved_by_shell
+        and refused[0].unresolved_reason is not None
+        and "came out as" in refused[0].unresolved_reason,
+        "a measurable-and-WRONG command is worse than the deferral it replaces",
+    )
+    sel_shell, skip_shell = select(
+        [refused[0]], ["crates/demo/src/lib.rs"], {}, MANIFESTS, lambda d, r: "", shape_changed={"demo": {"src/lib.rs"}}
+    )
+    arm(
+        "CONTROL: a refused guard is reported deferred, with the reason, not dropped",
+        sel_shell == [] and any("shell assembles" in w and "came out as" in w for _g, w in skip_shell),
+        "a silent drop reads as coverage",
+    )
+    arm(
+        "match_call: variables stand for text, env VALUES may be empty, lengths must agree",
+        gcs.match_call(["cargo", '"$A,x"'], ["cargo", "q,x"])[0]
+        and not gcs.match_call(["cargo", '"$A,x"'], ["cargo", ",x"])[0]
+        and gcs.match_call(['DEMO="$p"', "cargo"], ["DEMO=", "cargo"])[0]
+        and not gcs.match_call(["cargo", "test"], ["cargo"])[0]
+        and not gcs.match_call(['"$(f)"'], ["x"])[0]
+        and not gcs.match_call(["cargo", "test"], ["cargo", "build"])[0],
+        "each refusal here is a way a recorded call would be believed wrongly",
+    )
+
+    # ---- measuring ---------------------------------------------------------
+    full = [
+        "cargo", "test", "-p", "demo-crate", "--test", "t", "--", "--ignored",
+        "--quiet", "--test-threads=1", "--exact", "n",
+    ]
+    arm(
+        "list_argv: selection arguments stay, run-shaping ones go, --list is last",
+        list_argv(full)
+        == ["cargo", "test", "-p", "demo-crate", "--test", "t", "--", "--ignored", "--exact", "n", "--list"]
+        and list_argv(["cargo", "test", "-p", "p", "--quiet"]) == ["cargo", "test", "-p", "p", "--", "--list"]
+        and list_argv(["cargo", "test", "--", "--test-threads", "1", "--ignored"])
+        == ["cargo", "test", "--", "--ignored", "--list"],
+        "listing a different set than the run selects would measure another count",
+    )
+    arm(
+        "an --ignored guard with a target is measured by listing; without one, it is not",
+        Guard(1, "helper", 1, full).list_measurable
+        and not Guard(1, "helper", 1, ["cargo", "test", "-p", "p", "--", "--ignored"]).list_measurable
+        and not Guard(1, "helper", 1, ["cargo", "test", "-p", "p", "--lib"]).list_measurable,
+        "a run without a target includes the doc-test harness, which has no --list",
+    )
+    arm(
+        "verdict: a listing reads `N tests`, a run reads `ok. N passed`, neither reads the other",
+        verdict(3, 0, "3 tests, 0 benchmarks\n0 tests, 0 benchmarks", True) == ("OK", [3, 0])
+        and verdict(4, 0, "3 tests, 0 benchmarks", True) == ("MOVED", [3])
+        and verdict(3, 0, "3 tests, 0 benchmarks")[0] == "UNMEASURED"
+        and verdict(3, 0, "test result: ok. 3 passed", True)[0] == "UNMEASURED",
+        "one regex for both would call a listing's summary a run's",
+    )
+    polluted = (
+        "bx: these files are neither tracked nor ignored, so `git ls-files` never\n"
+        "bx: send them\nbx:   .push-r1.log\nbx: exit=1 in 0s\n"
+    )
+    arm(
+        "759: bx refusing a tree with untracked files is an ENVIRONMENT error naming the file",
+        ".push-r1.log" in bx_environment_problem(polluted)
+        and bx_environment_problem("test result: ok. 1 passed") == "",
+        "read as 'measured nothing' it sent the author after their own build",
+    )
+    gb = [Guard(1, "helper", 5, ["cargo", "test"]), Guard(2, "helper", 7, ["cargo", "test"])]
+    tag = "T"
+    ok_log = (
+        '# cmd: echo "@@GUARD-T-BEGIN 0"\n'
+        "@@GUARD-T-BEGIN 0\ntest result: ok. 5 passed; 0 failed\n@@GUARD-T-RC 0 0\n"
+        "@@GUARD-T-BEGIN 1\ntest result: ok. 6 passed; 0 failed\n@@GUARD-T-RC 1 0\n"
+    )
+    got = read_batch(tag, gb, ok_log)
+    arm(
+        "batch: each guard is judged from its own segment, the command echo is not one",
+        got[id(gb[0])][0] == "OK" and got[id(gb[1])] == ("MOVED", [6], ""),
+        "a marker read out of bx's own header would hand a guard another's output",
+    )
+    got = read_batch(tag, gb, "bx: " + polluted, logged=False)
+    arm(
+        "batch: a polluted tree is ENVIRONMENT for every guard, once",
+        all(got[id(x)][0] == "ENVIRONMENT" for x in gb),
+        "nothing ran, so no guard may be called UNMEASURED or MOVED",
+    )
+
+    calls = []
+    real_run_guard = globals()["run_guard"]
+    saved_bx = os.environ.pop("BX", None)
+    try:
+        globals()["run_guard"] = lambda g, v: (calls.append(g) or ("OK", [5], ""))
+        twin_a, twin_b = Guard(1, "helper", 5, ["cargo", "test", "-p", "p"]), Guard(
+            2, "helper", 6, ["cargo", "test", "-p", "p"]
+        )
+        out = measure([twin_a, twin_b], False)
+    finally:
+        globals()["run_guard"] = real_run_guard
+        if saved_bx is not None:
+            os.environ["BX"] = saved_bx
+    arm(
+        "one command is measured once and each guard keeps its own verdict",
+        len(calls) == 1 and out[id(twin_a)][0] == "OK" and out[id(twin_b)][0] == "MOVED",
+        "a repeated command is a repeated count; paying for it twice is the cost problem",
+    )
+
+    # ---- the cache and its digest -----------------------------------------
+    import tempfile
+
+    with tempfile.TemporaryDirectory(prefix="wz-gcg-") as tmp:
+        root = Path(tmp)
+        for name, dep in (("a", None), ("b", "a")):
+            (root / name / "src").mkdir(parents=True)
+            deps = f'\n[dependencies]\n{dep} = {{ path = "../{dep}" }}\n' if dep else ""
+            (root / name / "Cargo.toml").write_text(
+                f'[package]\nname = "{name}"\nversion = "0.1.0"\n{deps}'
+            )
+            (root / name / "src" / "lib.rs").write_text("#[test]\nfn t() {\n    assert!(true);\n}\n")
+        (root / "Cargo.toml").write_text("[workspace]\n")
+        names = package_manifest_names(root)
+        gb_ = Guard(1, "helper", 1, ["cargo", "test", "-p", "b", "--lib"])
+
+        def digest():
+            _SHAPE_MEMO.clear()
+            return package_digest(gb_, names, root)
+
+        base = digest()
+        (root / "a" / "src" / "lib.rs").write_text(
+            "#[test]\nfn t() {\n    assert!(1 + 1 == 2, \"a longer body\");\n}\n"
+        )
+        body_only = digest()
+        (root / "a" / "src" / "lib.rs").write_text(
+            "#[test]\nfn t() {}\n#[test]\nfn added() {}\n"
+        )
+        added_test = digest()
+        arm(
+            "digest: a body edit in a DEPENDENCY keeps it, an added test there moves it",
+            body_only == base and added_test != base,
+            "the cache would otherwise re-ask on every edit, or never re-ask at all",
+        )
+        key_a = cache_key(gb_, base)
+        arm(
+            "cache key: the command, the mode and the digest all move it; env values do not",
+            key_a != cache_key(gb_, added_test)
+            and key_a != cache_key(Guard(1, "helper", 1, ["cargo", "test", "-p", "b"]), base)
+            and cache_key(
+                Guard(1, "helper", 1, ["cargo", "test"], ("env", "K=one")), base
+            )
+            == cache_key(Guard(1, "helper", 1, ["cargo", "test"], ("env", "K=two")), base),
+            "a key that ignores the digest serves a count measured on a different test set",
+        )
+        cache_file = root / "cache.json"
+        c = Cache(cache_file)
+        c.put(key_a, [7, 0])
+        c.save()
+        c2 = Cache(cache_file)
+        arm(
+            "cache: a recorded count is read back; a missing key is None",
+            c2.get(key_a) == [7, 0] and c2.get("absent") is None,
+            "a cache that cannot answer 'no' answers 'yes' for everything",
+        )
+        cache_file.write_text('{"version": "0", "entries": {"%s": [9]}}' % key_a)
+        arm(
+            "cache: a file from another digest version is ignored",
+            Cache(cache_file).get(key_a) is None,
+            "the digest definition changed, so every key it produced is wrong",
+        )
+        lock = root / "lock"
+        try:
+            with MeasurementLock(lock):
+                try:
+                    with MeasurementLock(lock):
+                        second = "entered"
+                except Busy as who:
+                    second = f"busy: {who}"
+        finally:
+            pass
+        arm(
+            "752: a second measurement in the worktree is turned away, naming the first",
+            second.startswith("busy: pid "),
+            "queued behind cargo's lock it becomes a deadlock the pusher reads as a slow push",
+        )
+
+    arm(
+        "shape_lines: a doc comment SHOWING an attribute is not one; a doc-test fence is",
+        shape_lines("/// #[test]\nfn f() {}\n") == ("fn f() {}",)
+        and any("doc-test" in x for x in shape_lines("/// ```\n/// x\n/// ```\nfn f() {}\n")),
+        "R2131's lesson, and a doc-test is a test a guard without --lib counts",
+    )
+    arm(
+        "shape_lines: a feature on the SECOND line of a cfg attribute is shape",
+        shape_lines('#[cfg(any(\n    feature = "x",\n))]\nfn f() {}\n')
+        != shape_lines('#[cfg(any(\n    feature = "y",\n))]\nfn f() {}\n'),
+        "a diff-line grep sees `feature = \"x\",` and no attribute",
+    )
 
 
 if __name__ == "__main__":
