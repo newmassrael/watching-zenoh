@@ -338,6 +338,7 @@ fn assert_wz_equals_pico_cobs_decode(input: &[u8]) {
 /// bytes and on every input of three to six bytes over an alphabet holding each
 /// boundary code, truncated groups included; the only differences are the
 /// documented 0x00-code ones.
+// wz-proves: transport-link-serial codec-parity partial
 #[test]
 fn wz_cobs_decode_equals_pico_on_truncated_and_malformed_input() {
     let mut checked = 0usize;
@@ -411,6 +412,7 @@ fn pico_deserialize_checked(wire: &[u8]) -> Option<(u8, Vec<u8>)> {
 /// never panics. This is what makes a call-site guard against truncated COBS
 /// groups redundant: the decoder is total and the length/CRC checks that
 /// follow it reject the damaged frame the same way pico does.
+// wz-proves: transport-link-serial codec-parity partial
 #[test]
 fn wz_decode_frame_verdict_equals_pico_on_damaged_frames() {
     let mut rejected = 0usize;

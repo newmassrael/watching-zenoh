@@ -1100,7 +1100,12 @@ HOST_GATED_CI_TARGETS: dict[str, str] = {
 # no IPv4 address or is down, and compares how two peers end (`api-compat-c zenoh-c->wz`). The
 # real library's rows are asserted first where its source decides them. Measured by
 # `scripts/audit-crossimpl-proof.sh`.
-FOREIGN_ADJUDICATOR_LINKS = 1052
+# R3168 -- 1052 -> 1054, RISING by two: the two tests Round 3162 added to `layer3_serial_framing.rs`
+# (wz's COBS decoder and wz's serial frame verdict against the compiled pico decoder, on truncated
+# and damaged input) carried no `wz-proves` tag, so A4-4 read them as declaring nothing and the
+# census did not count them. Tagged `transport-link-serial codec-parity partial`, each is a link
+# to the real pico code. Measured by `scripts/audit-crossimpl-proof.sh`.
+FOREIGN_ADJUDICATOR_LINKS = 1054
 
 # ── Execution disclosure ────────────────────────────────────────────────────────
 #
