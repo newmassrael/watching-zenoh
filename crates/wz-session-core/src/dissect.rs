@@ -2052,10 +2052,15 @@ fn walk_ext_chain_z(
 /// ([`walk_query_sliced_value`]).
 ///
 /// The generated chain tells each entry whether the one before it was the
-/// marker by that entry's identifier alone, whatever its encoding
-/// (`out/wz-codecs/query.rs`, `_prev_extensions_after_shm`), and this does the
-/// same, so a unit entry at identifier 4 is the marker and a ZBuf entry at
-/// identifier 4 is too. The two failure rows are those of [`walk_ext_chain_z`].
+/// marker by that entry's whole identity, the header without its continuation
+/// flag (`out/wz-codecs/query.rs`, `_prev_extensions_after_shm`), and this does
+/// the same: the marker is the one value `body_ext_id::QUERY_SHM` (`0x04`, a
+/// unit extension that is not mandatory), as upstream reads it
+/// (`commons/zenoh-codec/src/zenoh/mod.rs` @
+/// `let ext_shm = if iext::eid(self.header) == SID {`). An entry that shares
+/// only the 4-bit id, a mandatory unit or a zint or a ZBuf at identifier 4, is
+/// an unknown extension there and here. The two failure rows are those of
+/// [`walk_ext_chain_z`].
 fn walk_query_ext_chain(c: &mut SpanCursor<'_>, max: usize) -> Result<Vec<Field>, CodecError> {
     let mut out = Vec::new();
     let mut more = false;
@@ -2076,7 +2081,7 @@ fn walk_query_ext_chain(c: &mut SpanCursor<'_>, max: usize) -> Result<Vec<Field>
         };
         out.push(field);
         more = z;
-        after_shm = id == crate::ext_header::body_ext_id::QUERY_SHM;
+        after_shm = crate::ext_header::ext_eid(header) == crate::ext_header::body_ext_id::QUERY_SHM;
         if !z {
             break;
         }
@@ -7744,6 +7749,46 @@ mod tests {
             f.find("value").is_none(),
             "a list of slices is not a run of bytes called `value`"
         );
+    }
+
+    /// An extension that shares only the shared-memory marker's 4-bit id does not
+    /// put the value after it in the sliced shape, for the walker and for the
+    /// codec alike. Upstream tells the marker by the header without its
+    /// continuation flag, which is the one byte `0x04`
+    /// (`commons/zenoh-codec/src/zenoh/mod.rs` @
+    /// `let ext_shm = if iext::eid(self.header) == SID {`); an id-4 extension of
+    /// any other shape is an unknown extension it skips. Both used to take the
+    /// id alone, so each of these read the plain value that follows as slices.
+    #[test]
+    fn a_query_value_after_an_extension_of_the_markers_id_is_a_plain_value() {
+        let mut body = encoding(0, None);
+        body.extend_from_slice(b"v");
+        let value = ext_zbuf(0x03, false, &body);
+        for (name, lookalike) in [
+            ("mandatory unit 0x14", ext_unit(0x14, true)),
+            ("optional zint 0x24", ext_zint(0x04, true, 0)),
+            ("mandatory zint 0x34", ext_zint(0x14, true, 0)),
+            ("optional zbuf 0x44", ext_zbuf(0x04, true, &[])),
+            ("mandatory zbuf 0x54", ext_zbuf(0x14, true, &[])),
+        ] {
+            let bytes = concat(&[alloc::vec![0x03u8 | 0x80], lookalike, value.clone()]);
+            let f = agree(
+                "Query",
+                &bytes,
+                |b| {
+                    let mut c = SceCursor::new(b);
+                    wz_codecs::query::Query::decode(&mut c)
+                        .unwrap_or_else(|e| panic!("{name}: the codec rejected it: {e:?}"));
+                    b.len() - c.remaining()
+                },
+                walk_query,
+            );
+            let qb = f.find("query_body").unwrap_or_else(|| {
+                panic!("{name}: the value is read as a plain value and named `query_body`")
+            });
+            assert_eq!(raw(qb, "payload"), b"v".to_vec(), "{name}");
+            assert!(f.find("slice_count").is_none(), "{name}: no slices");
+        }
     }
 
     /// `query_body` — the ext a reader that looks only at the message body

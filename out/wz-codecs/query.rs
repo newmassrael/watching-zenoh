@@ -1,4 +1,4 @@
-// SCE-MAP: query:93 :: _forge_body
+// SCE-MAP: query:114 :: _forge_body
 
 // SCE Forge: Auto-generated from Extended SCXML (sce:kind="codec")
 // Runtime: none
@@ -124,7 +124,7 @@ impl<'a> Query<'a> {
                 if cursor.remaining() == 0 { break; }
                 let _entry = QueryExtEntry::decode(cursor, _prev_extensions_after_shm)?;
                 _more = _entry.z();
-                _prev_extensions_after_shm = u8::from(u64::from(_entry.ext_id()) == 4u64);
+                _prev_extensions_after_shm = u8::from((u64::from(_entry.header) & 127u64) == 4u64);
                 // Bounded by max-depth on both sides — loop count and `_vec`
                 // capacity are the same literal — so this push cannot fail. An
                 // over-long chain is refused by the guard after the loop.
@@ -234,7 +234,7 @@ impl<'a> Query<'a> {
             let mut _prev_extensions_after_shm: u8 = 0;
             for _e in _list {
                 _e.encode(w, _prev_extensions_after_shm)?;
-                _prev_extensions_after_shm = u8::from(u64::from(_e.ext_id()) == 4u64);
+                _prev_extensions_after_shm = u8::from((u64::from(_e.header) & 127u64) == 4u64);
             }
         }
         Ok(())

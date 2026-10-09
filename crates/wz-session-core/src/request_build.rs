@@ -485,7 +485,9 @@ pub fn relay_query_value_shm(
     for (position, ext) in entries.iter().enumerate() {
         if position == index {
             kept.push(plain.clone());
-        } else if ext.ext_id() != body_ext_id::QUERY_SHM {
+        } else if crate::ext_header::ext_eid(ext.header) != body_ext_id::QUERY_SHM {
+            // The marker is dropped by its identity, as the chain read it: an
+            // extension that shares only its 4-bit id is another extension.
             kept.push(ext.clone());
         }
     }

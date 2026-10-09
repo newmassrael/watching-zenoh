@@ -38,10 +38,31 @@
          chain  : codec_zenoh_query_ext_entry tlv-chain (entry-flag
                   termination on Z; max-depth=8 covers query's 3 ext
                   slots with safety margin). The chain tells each entry whether the entry
-                  BEFORE it was the shared-memory marker (ext_id 4),
+                  BEFORE it was the shared-memory marker,
                   because upstream reads the value extension (ext_id 3)
                   as an encoding and a list of slices when it was and as
                   plain bytes when it was not (query_value_zbuf.scxml).
+
+                  The marker is told by its whole identity, the entry
+                  header without its continuation flag
+                  (`entry-id="header"`, `entry-id-except="header.Z"`), and
+                  that identity is the one value 0x04: a unit extension,
+                  id 4, not mandatory (0x84 in front of the value). That is
+                  upstream's rule
+                  (`commons/zenoh-codec/src/zenoh/mod.rs` @
+                  `let ext_shm = if iext::eid(self.header) == SID {`, with
+                  `commons/zenoh-protocol/src/zenoh/query.rs` @
+                  `ValueType<{ ZExtZBuf::<0x03>::id(false) }, 0x04>`, whose
+                  second parameter is the raw header 0x04). An extension
+                  that shares only the 4-bit id (mandatory bit set, or
+                  another encoding) is an unknown extension to upstream,
+                  which skips it (`commons/zenoh-codec/src/zenoh/query.rs` @
+                  `let (u, ext) = extension::read(reader, "Query", ext)?;`),
+                  and the entry after it is a plain value here too. Until
+                  the chain named the whole header it named the 4-bit id
+                  (`entry-id="header.ext_id"`) and every id-4 entry was
+                  taken for the marker, the failure open-debt item 860
+                  closed for the Put (msg_put.scxml).
 
      R3044 — the chain was `codec_zenoh_ext_entry`. Upstream declares a
      length for a value that arrives after a shared-memory marker that
@@ -112,7 +133,7 @@
                    max-depth="8" on-overflow="reject"
                    sce:present-if="header.Z"
                    terminate-on="entry-flag" entry-flag-name="Z"
-                   entry-id="header.ext_id">
+                   entry-id="header" entry-id-except="header.Z">
       <sce:entry-flag-bind input="after_shm" previous-entry-id="0x4"/>
     </sce:tlv-chain>
   </datamodel>
