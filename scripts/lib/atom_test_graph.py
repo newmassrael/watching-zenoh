@@ -92,6 +92,10 @@ import json
 import os
 import re
 import subprocess
+import sys
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import rust_comments  # noqa: E402  -- after the path insert that finds it
 
 _CFG_START = re.compile(r"#\[cfg(?:_attr)?\(")
 _FEAT = re.compile(r'feature\s*=\s*"([A-Za-z0-9_-]+)"')
@@ -390,20 +394,170 @@ def _dep_forwards(manifest_dir="crates"):
     return pulls, paths
 
 
+# Open-debt item 831 -- what ARM 3 may call an owned symbol. A `pub mod` is a
+# NAMESPACE: it holds no behaviour a test could exercise, its items are owned one
+# by one, and its name (`net`, `util`) is exactly the kind of bare word other
+# crates' tests also write. `union` is an item kind `_ITEM` never listed.
+_PUB_ITEM = re.compile(
+    r"^\s*pub(?:\([^)]*\))?\s+(?:default\s+)?" + _MODS +
+    r"(fn|struct|enum|union|trait|const|static|type)\s+([A-Za-z_][A-Za-z0-9_]*)"
+)
+# The kind of scope a `{` opens, read off the header that precedes it.
+_SCOPE_HEAD = re.compile(
+    r"^\s*(?:pub(?:\([^)]*\))?\s+)?(?:default\s+)?(?:unsafe\s+|async\s+|const\s+)*"
+    r"(impl|mod|trait|fn|struct|enum|union)\b"
+)
+_PATH = re.compile(r"[A-Za-z_][A-Za-z0-9_]*(?:\s*::\s*[A-Za-z_][A-Za-z0-9_]*)*")
+_NON_TYPE_LEAD = frozenset(["dyn", "mut", "const", "impl", "unsafe", "for"])
+
+
+def _drop_attrs(header):
+    """`header` without its leading `#[..]` / `#![..]` attributes, brackets balanced."""
+    s = header.lstrip()
+    while s.startswith("#"):
+        i = s.find("[")
+        if i < 0:
+            break
+        depth = 0
+        for j in range(i, len(s)):
+            if s[j] == "[":
+                depth += 1
+            elif s[j] == "]":
+                depth -= 1
+                if depth == 0:
+                    break
+        else:
+            return ""
+        s = s[j + 1 :].lstrip()
+    return s
+
+
+def _skip_angle(s):
+    """`s` after a leading balanced `<..>` -- an `->` inside it is not a closer."""
+    if not s.startswith("<"):
+        return s
+    depth, j = 0, 0
+    while j < len(s):
+        if s.startswith("->", j):
+            j += 2
+            continue
+        if s[j] == "<":
+            depth += 1
+        elif s[j] == ">":
+            depth -= 1
+            if depth == 0:
+                return s[j + 1 :]
+        j += 1
+    return ""
+
+
+def _impl_owner(header):
+    """The self type's name of an `impl` header that may span several lines and
+    carry generics, a `where` clause, a path or a reference, or None.
+
+    `_impl_self_type` reads ONE line and is enough for the cfg arm, whose header
+    is the line after the attribute. A method's owner must survive the formats
+    rustfmt actually produces: `impl<T> Wrapper<T>` / `where` / `T: Clone,` / `{`.
+    """
+    h = " ".join(_drop_attrs(header).split())
+    m = re.match(r"(?:unsafe\s+)?impl\b\s*", h)
+    if not m:
+        return None
+    rest = _skip_angle(h[m.end() :]).strip()
+    rest = rest.split(" where ", 1)[0]
+    if " for " in rest:
+        rest = rest.split(" for ", 1)[1]
+    for tok in re.finditer(r"'?[A-Za-z_][A-Za-z0-9_]*(?:\s*::\s*[A-Za-z_][A-Za-z0-9_]*)*", rest):
+        word = tok.group(0)
+        if word.startswith("'") or word in _NON_TYPE_LEAD:
+            continue  # a lifetime or a type-position keyword, not the type
+        return word.replace(" ", "").split("::")[-1]
+    return None
+
+
+def _public_symbols(text):
+    """The symbols ONE source text declares `pub`. The seam the tree walk and the
+    self-check share.
+
+    Open-debt item 831 -- this used to be a line regex, which owned every INDENTED
+    `pub fn` by its bare name. Indentation is not a fact about the item: a
+    `pub fn bind` inside `impl Sock` and one inside `impl Listener` are different
+    things that one word named, so any test writing `bind` anywhere "reached"
+    every atom whose exclusive crate had a `bind` (measured: Zephyr's socket API
+    carried `platform-zephyr` from unreached to reached with no test naming a
+    Zephyr symbol). The scope each item sits in is now read from the braces, and:
+
+      * a free item at the root or inside `mod { .. }` keeps its bare name;
+      * a method or associated item of `impl Type` is `Type::name` -- see
+        `_reached`, which credits it only to a region naming BOTH halves;
+      * an item inside a fn body, a trait, a type body or an expression is not
+        the crate's API and is not owned;
+      * a `pub mod` is a namespace and is not owned (see `_PUB_ITEM`).
+
+    The text is comment-and-literal-blanked first (`rust_comments`, the scanner
+    the other braces-counting gates share), so a `{` inside a string, a char or
+    a doc comment cannot move a scope boundary.
+    """
+    src = rust_comments.strip_comments(text, blank_literals=True)
+    syms = set()
+    stack = []  # [kind, owner, saved_paren] per open `{`
+    paren = 0   # ( and [ nesting; a `;` or `{` inside one ends nothing
+    start = 0
+
+    def record(header):
+        m = _PUB_ITEM.match(_drop_attrs(header))
+        if not m or m.group(2) in _NOISE:
+            return
+        name = m.group(2)
+        if any(s[0] != "mod" for s in stack[:-1]):
+            return  # nested in a body / trait / type: not the crate's own API
+        if stack and stack[-1][0] not in ("mod", "impl"):
+            return
+        if stack and stack[-1][0] == "impl":
+            if stack[-1][1]:
+                syms.add(stack[-1][1] + "::" + name)
+            return
+        syms.add(name)
+
+    for i, ch in enumerate(src):
+        if ch in "([":
+            paren += 1
+        elif ch in ")]":
+            paren = max(0, paren - 1)
+        elif ch == ";" and paren == 0:
+            record(src[start:i])
+            start = i + 1
+        elif ch == "{":
+            header = _drop_attrs(src[start:i])
+            if paren == 0:
+                record(header)
+                m = _SCOPE_HEAD.match(header)
+                kind = m.group(1) if m else "other"
+                owner = _impl_owner(header) if kind == "impl" else None
+                stack.append([kind if kind in ("impl", "mod") else "other", owner, 0])
+                start = i + 1
+            else:
+                stack.append(["expr", None, paren])
+                paren = 0
+        elif ch == "}":
+            if stack:
+                top = stack.pop()
+                if top[0] == "expr":
+                    paren = top[2]
+                    continue  # still inside the statement that held the braces
+            start = i + 1
+    return syms
+
+
 def _crate_public_symbols(crate_dir):
     """The names a crate's own source declares `pub`. Its API surface, derived."""
     syms = set()
     for path in _rs_files(crate_dir):
         try:
-            lines = open(path, encoding="utf-8").read().splitlines()
+            text = open(path, encoding="utf-8").read()
         except OSError:
             continue
-        for line in lines:
-            if not line.lstrip().startswith("pub"):
-                continue
-            m = _ITEM.match(line)
-            if m and m.group(2) not in _NOISE:
-                syms.add(m.group(2))
+        syms |= _public_symbols(text)
     return syms
 
 
@@ -451,6 +605,11 @@ def dep_ownership():
 
     IN-TREE, for the second half of the same reason: an external crate is not
     this atom's implementation however exclusively the feature pulls it.
+
+    What the crate's API IS is read from its scopes, not its indentation (item
+    831, `_public_symbols`): a method is the symbol `Type::name` and is reached
+    only by a region naming both halves, so a common method word (`bind`, `peer`,
+    `local`) written in another crate's test is not a reference to this one.
 
     The residue, stated rather than hidden: exclusivity is a property of the
     manifests TODAY. A crate that gains a second puller stops being owned, and
@@ -629,11 +788,40 @@ def referenced_symbols():
     return out
 
 
+def _reached(owned, regions):
+    """The subset of `owned` that the identifier sets in `regions` name. The
+    seam graph() and the self-check share.
+
+    A bare symbol is reached by any region naming it. A qualified `Type::name`
+    (open-debt item 831: a method owned by the type it is declared on) is reached
+    only by ONE region that names both `Type` and `name` -- the union of every
+    region's identifiers would join a `bind` written in one test file to a `Sock`
+    written in another, which is the bare-name collision again one level up. Both
+    halves in one region is the shape of any call that names the receiver's type
+    (`Sock::bind`, `let s: Sock = ..; s.bind()`); a call through an inferred
+    receiver whose type is never written in that region is not credited, and that
+    is the named cost of not letting a common word stand for a type.
+    """
+    bare = {s for s in owned if "::" not in s}
+    methods = {}
+    for s in owned - bare:
+        owner, name = s.split("::", 1)
+        methods.setdefault(owner, {})[name] = s
+    hit = set()
+    for idents in regions:
+        hit |= bare & idents
+        for owner in methods.keys() & idents:
+            for name, full in methods[owner].items():
+                if name in idents:
+                    hit.add(full)
+    return hit
+
+
 def graph():
     """atom -> (owned_symbols, symbols_a_test_names). Derived, nothing authored."""
     owned = ownership()
-    seen = referenced_symbols()
-    return {a: (syms, syms & seen) for a, syms in owned.items()}
+    regions = [idents for _p, idents in _test_regions()]
+    return {a: (syms, _reached(syms, regions)) for a, syms in owned.items()}
 
 
 # ── Self-check ─────────────────────────────────────────────────────────────────
@@ -694,6 +882,44 @@ pub const fn encode_keep_alive() -> [u8; 1] {
 
 #[cfg(feature = "feat-limits")]
 pub const MAX_CHUNKS: usize = 32;
+'''
+
+_SELFTEST_METHOD_NAMES = frozenset(["LIMIT", "bind", "peer_id", "rendezvous", "private_helper"])
+
+# ARM 3 fixture (item 831): the three places a `pub fn` can sit and the one that
+# is not API. `bind` / `rendezvous` are the shape that collided in the tree.
+_SELFTEST_PUBLIC = '''\
+pub struct Sock;
+
+impl Sock {
+    pub const LIMIT: usize = 1;
+    pub fn bind(&self) -> &'static str {
+        "{ not a scope"
+    }
+    fn private_helper(&self) {}
+}
+
+impl<T> Wrapper<T>
+where
+    T: Clone,
+{
+    pub fn peer_id(&self) {}
+}
+
+pub mod net {
+    pub fn dial() {}
+    pub struct Peer;
+    impl Peer {
+        pub fn rendezvous(&self) {}
+    }
+}
+
+pub fn free_fn() {
+    pub fn local_item() {}
+    let v = match 1 { _ => { 2 } };
+}
+
+pub fn after_body() {}
 '''
 
 _SELFTEST_ALL_IGNORED = '''\
@@ -835,6 +1061,44 @@ def _selftest():
     if "CoopLocalSet" not in dep_ownership().get("runtime-coop", set()):
         bad.append("ARM3 twin: the live tree stopped crediting runtime-coop with "
                    "its own crate's API")
+
+    # ARM 3, the DEFECT (open-debt item 831): a crate's `pub fn` METHODS were owned
+    # by their BARE name, and `bind` is not an identity -- any test naming a `bind`
+    # anywhere reached every atom whose exclusive crate has one. A method is
+    # `Type::name`, and it is reached only when one region names BOTH halves.
+    pub_syms = _public_symbols(_SELFTEST_PUBLIC)
+    eq("ARM3 methods: a method is owned as Type::name, never by its bare name",
+       sorted(s for s in pub_syms if "::" in s or s in _SELFTEST_METHOD_NAMES),
+       ["Peer::rendezvous", "Sock::LIMIT", "Sock::bind", "Wrapper::peer_id"])
+    eq("ARM3 methods: the receiver of a multi-line, generic `impl .. where` header "
+       "is the type, not the generic parameter or a bound",
+       "Wrapper::peer_id" in pub_syms, True)
+    for _hdr, _want in (
+        ("impl<T: Fn(u8) -> u8> Foo<T>", "Foo"),
+        ("impl<'a> Tr for &'a Bar", "Bar"),
+        ("impl super::util::Baz", "Baz"),
+        ("unsafe impl Send for Qux", "Qux"),
+        ("impl Tr for dyn Quux where X: for<'a> Y", "Quux"),
+    ):
+        eq("ARM3 impl owner: `%s`" % _hdr, _impl_owner(_hdr), _want)
+    eq("ARM3 methods: a `pub mod` is a namespace and owns nothing by its name",
+       "net" in pub_syms, False)
+    eq("ARM3 methods: a `pub fn` inside a fn body is a local item, not the crate's API",
+       "local_item" in pub_syms, False)
+    eq("ARM3 methods: a private method is not API",
+       "Sock::private_helper" in pub_syms, False)
+    eq("ARM3 twin: free items, in a module or at the root, stay bare -- including the "
+       "one declared AFTER a body holding a brace inside a string and a match",
+       sorted(s for s in pub_syms if "::" not in s and s not in _SELFTEST_METHOD_NAMES),
+       ["Peer", "Sock", "after_body", "dial", "free_fn"])
+    eq("ARM3 reach: a region naming only the method's bare name reaches nothing",
+       _reached(pub_syms, [{"bind", "peer_id", "rendezvous"}]), set())
+    eq("ARM3 reach: the type and the method in ONE region reach Type::name",
+       sorted(_reached(pub_syms, [{"Sock", "bind"}])), ["Sock", "Sock::bind"])
+    eq("ARM3 reach: the two halves in two DIFFERENT regions do not join",
+       sorted(_reached(pub_syms, [{"bind"}, {"Sock"}])), ["Sock"])
+    eq("ARM3 reach twin: a bare free fn is reached by its bare name, as before",
+       sorted(_reached(pub_syms, [{"dial"}])), ["dial"])
 
     # ARM 2, the DEFECT (R311y344): a test that never runs is not a test. This
     # module harvested every identifier in a test file without ever looking at
