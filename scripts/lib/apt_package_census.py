@@ -172,7 +172,7 @@ def _add(pkg: str, why: str, jobs: list[str]) -> None:
 for _codec_package in ("libsnappy-dev", "liblz4-dev", "libzstd-dev", "zlib1g-dev", "libbz2-dev"):
     _add(_codec_package, "The cached RocksDB engine's five compression codecs.",
          ["ci", "nondefault", "dissect", "interop", "feature-gates",
-          "transport-modes", "capi-c-arms", "e2e-demo"])
+          "transport-modes", "capi-c-arms", "e2e-demo", "e2e-demo-pico"])
 _add("cmake", "Builds the cached native RocksDB engine via the local composite action.",
      ["nondefault"])
 
@@ -239,6 +239,7 @@ _add(
         "isolated-crates",
         "capi-c-arms",
         "e2e-demo",
+        "e2e-demo-pico",
         "dissect",
     ],
 )
@@ -278,6 +279,7 @@ _add(
         "isolated-crates",
         "capi-c-arms",
         "e2e-demo",
+        "e2e-demo-pico",
         "dissect",
     ],
 )
@@ -316,6 +318,7 @@ _add(
         "isolated-crates",
         "capi-c-arms",
         "e2e-demo",
+        "e2e-demo-pico",
         "dissect",
     ],
 )
@@ -402,8 +405,8 @@ _add(
     # consumer by naming it. That is the same test the row already applies, and
     # nondefault gets a separate native-engine row above (R2805).
     ["ci", "validate-codegen", "codegen-verify", "interop", "feature-gates",
-     "transport-modes", "isolated-crates", "capi-c-arms", "e2e-demo", "dissect",
-     "defaults-off"],
+     "transport-modes", "isolated-crates", "capi-c-arms", "e2e-demo",
+     "e2e-demo-pico", "dissect", "defaults-off"],
 )
 _add(
     "cmake",
@@ -482,6 +485,7 @@ _add(
         "isolated-crates",
         "capi-c-arms",
         "e2e-demo",
+        "e2e-demo-pico",
         "dissect",
     ],
 )

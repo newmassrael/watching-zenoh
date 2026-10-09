@@ -20590,7 +20590,8 @@ layer_c1cc_api_compat_c() {
     done
     # R3100 — a zenoh peer that dials a pico LISTENER, the listener compiled once
     # against the real zenoh-pico and once against `wz-capi-pico`. It stood in
-    # Layer E first, and Layer E runs in the `e2e-demo` job, which provisions no
+    # Layer E first, and Layer E runs in the `e2e-demo-pico` job (it ran in
+    # `e2e-demo` until item 898), which provisions no
     # zenoh-c: the dialler is a real zenoh-c peer, so the row failed there for an
     # oracle its job never had (run 37737894987, job 113186640039). This job
     # provisions the oracle and the precheck above turns an absent one into a

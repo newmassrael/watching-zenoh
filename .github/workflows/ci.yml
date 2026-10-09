@@ -5175,10 +5175,52 @@ jobs:
   # fastest of those at 39% and the slowest at 46%, clear of both edges, and
   # re-states the claim at a number this job could actually reach: under 4.5
   # minutes, give the budget back again.
+  #
+  # OPEN-DEBT ITEM 898 — LAYER E LEFT THIS JOB for `e2e-demo-pico` (below), and
+  # this job keeps E3..E6u. Run 37898062064 put the job at 848s of 900s (94%),
+  # every lane green. The wall time of each step in that run and in two earlier
+  # ones (37889386618, 37883681192) says what moved, and it is NOT the lanes:
+  #
+  #                       37883681192  37889386618  37898062064
+  #     Layer E               284s         295s         304s
+  #     Layers E3..E6u        139s         151s         138s
+  #     RocksDB engine step     3s           7s         293s   <- cache MISS
+  #
+  # The lanes were flat to within 10%. The 293s is the native engine compiled
+  # from source because its cache entry had been evicted (the repository's
+  # caches sum to 10.9 GB against GitHub's 10 GB cap); every other job restores
+  # that same engine in seconds. A budget gate has to survive that event, and a
+  # job that held the 300s Layer E beside everything else could not: 406s of
+  # setup plus 442s of lanes.
+  #
+  # WHY LAYER E. It is one `cargo test --ignored` sweep of every binary-dep
+  # fixture (about 146s of it is the compile), so it cannot be cut finer, and it
+  # is two thirds of the lane time. It also needs three artifacts the router
+  # lanes never build (the silent-peer double, a TLS-enabled pico cdylib, the
+  # default demo), while E3..E6u each build the demo variant they assert before
+  # they run. The cut follows what a lane needs, as the y865 cut did.
+  #
+  # WHICH JOB KEEPS THIS ID. This one: its Swatinem entry (key `e2e-demo`) is
+  # the warm one and this job has the tighter budget, so the job that is new
+  # takes the cold first run and the larger budget that absorbs it. The
+  # explicit default-demo build step went with Layer E: Layer E3's first
+  # statement is `cargo build -p wz-ap-demo --features routing-router` and the
+  # lanes after it build their own variant too, so the step fed nothing here.
+  #
+  # BUDGET, derived from those three runs. This job costs 94-140s of setup
+  # (checkout through the pico CLI build) plus 138-151s of lanes: 233s to 291s
+  # warm and 535s on the slow run's cold engine. The floor at 30% needs a budget
+  # no larger than 777s (233 / 0.30); the alarm at 90% needs one no smaller than
+  # 594s (535 / 0.90) for the cold-engine run to stay silent. 11 minutes (660s)
+  # sits inside both: 35% to 44% warm, 81% on the cold engine. Before the split
+  # that same slow run was 848s of 900s (94%); after it, 535s of 660s (81%).
+  # 60% of the slow run is not reachable here without putting the warm runs
+  # under the floor, and the floor is the y794 rule: a budget this job cannot
+  # approach is a gate that cannot fire.
   e2e-demo:
-    name: demo-spawning e2e lanes (Layers E + E3..E6u)
+    name: demo-spawning router e2e lanes (Layers E3..E6u)
     runs-on: ubuntu-22.04
-    timeout-minutes: 15
+    timeout-minutes: 11
     steps:
       - name: Budget stamp — start this job's own clock
         # Same reason the `ci` job stamps: `timeout-minutes` measures from when
@@ -5254,17 +5296,14 @@ jobs:
       - name: Reuse the RocksDB native engine across feature sets
         uses: ./.github/actions/rocksdb-engine
 
-      - name: Build zenoh-pico CLI binaries (Layer E dep)
-        # Layer E spawns target/zenoh-pico-cli/z_put against the wz-ap-demo
-        # binary's TCP --listen endpoint. Built from the vendored submodule;
-        # the Swatinem cache covers `crates -> target` only, so this is every run.
+      - name: Build zenoh-pico CLI binaries (Layer E3 + E5 dep)
+        # Layer E3 drives a pico z_get_liveliness at the router and Layer E5
+        # spawns z_pub / z_put / z_sub and a libzenohpico peer against it; both
+        # SKIP green when the build is absent, so this step is what makes them
+        # run. Built from the vendored submodule; the Swatinem cache covers
+        # `crates -> target` only, so this is every run. Layer E has its own
+        # copy of the step in `e2e-demo-pico`.
         run: bash scripts/build-zenoh-pico-cli.sh
-
-      - name: Build wz-ap-demo binary (Layer E dep)
-        run: (cd crates && cargo build -p wz-ap-demo)
-
-      - name: Layer E — wz-ap-demo round-trip vs zenoh-pico z_put
-        run: bash scripts/run-ci.sh --layer E
 
       - name: Layer E3 — multi-peer router e2e (routing-router foundation)
         # R311qa — builds wz-ap-demo with --features routing-router (additive)
@@ -5324,14 +5363,124 @@ jobs:
 
       - name: Budget margin — this job may not approach its timeout in silence
         # Instrumented from birth rather than after its first cancel, which is
-        # the whole lesson of the two rounds that produced this job. 900s to
-        # match `timeout-minutes: 15`; the two numbers are one fact, so move that
+        # the whole lesson of the two rounds that produced this job. 660s to
+        # match `timeout-minutes: 11`; the two numbers are one fact, so move that
         # and move this. The floor is 30%: a job that peels down below its own
         # budget should be told to give the budget back (R311y794) — which is
-        # exactly what it did at R311y892, and the number above records what it
-        # was measured to cost.
+        # exactly what it did at R311y892, and the numbers above record what it
+        # was measured to cost after item 898 took Layer E out.
         if: always()
-        run: bash scripts/lib/job-budget-margin.sh "$RUNNER_TEMP/wz_job_start" 900 90 30 '${{ job.status }}'
+        run: bash scripts/lib/job-budget-margin.sh "$RUNNER_TEMP/wz_job_start" 660 90 30 '${{ job.status }}'
+
+  # ─────────────────────────────────────────────────────────────────
+  # OPEN-DEBT ITEM 898 — Layer E, taken out of `e2e-demo` so that job's budget
+  # margin holds. The measurement, the reason for the cut and the figures for
+  # the other half are in the comment above `e2e-demo`; this is this half.
+  #
+  # WHAT IT IS. The wz-ap-demo round-trip against the zenoh-pico CLI, plus every
+  # other binary-dep fixture in `wz-integration-tests` that Layer E's
+  # `--ignored` sweep picks up. It provisions exactly what the job it left
+  # provisioned for it: the pico CLI, the default demo, and the RocksDB engine
+  # the integration tests link. It provisions no zenoh-c and no zenohd, as
+  # before (the R3100 pico-listener row moved to `capi-c-arms` for that reason).
+  #
+  # BUDGET, derived from the same three runs as the other half. Layer E alone is
+  # 284s, 295s and 304s of wall time; with 103s, 161s and 406s of setup before it
+  # (checkout, apt, toolchain, caches, the engine, the pico CLI and the demo
+  # build) the job costs 387s and 456s warm, and 710s on the run whose RocksDB
+  # engine was rebuilt. The floor at 30% needs a budget no larger than 1290s
+  # (387 / 0.30); the alarm at 90% needs one no smaller than 789s (710 / 0.90).
+  # 18 minutes (1080s) puts the three runs at 36%, 42% and 66%, with the floor
+  # at 324s and the alarm at 972s. 20 minutes would have put the cold-engine run
+  # at 59% and the fastest warm run at 32%, 27 seconds above the floor, which is
+  # how this workflow's jobs have been made to red on noise before (R311y892).
+  # Before the split that cold-engine run was 848s of 900s (94%); it is now 710s
+  # of 1080s here (66%) and 535s of 660s in `e2e-demo` (81%), the two halves
+  # having paid the setup once each.
+  #
+  # WHAT THE FIRST RUN COSTS, and it is not measured. The Swatinem key below is
+  # new, so the first hosted run compiles the third-party dependencies cold,
+  # which `e2e-demo` (the keeper of the warm entry) does not. There is no
+  # number for that here; 1080s leaves 585s between the warm run and the alarm
+  # for it, and the margin step reports where it lands. If it lands past the
+  # alarm once, that is the cold cache and not this budget, and the second run
+  # is the one to read.
+  e2e-demo-pico:
+    name: demo-spawning pico e2e lane (Layer E)
+    runs-on: ubuntu-22.04
+    timeout-minutes: 18
+    steps:
+      - name: Budget stamp — start this job's own clock
+        # Same reason the `ci` job stamps: `timeout-minutes` measures from when
+        # the job starts, and the margin gate has to measure the same interval
+        # or it is grading something else.
+        run: date +%s > "$RUNNER_TEMP/wz_job_start"
+
+      - name: Checkout (with submodules)
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Restore apt archives (R311y882 — keep the mirror off the path)
+        # See the `e2e-demo` copy for why this cache exists and why its RESTORE
+        # and SAVE are split. Keyed per JOB, so this job's first run is cold.
+        id: apt-archives
+        uses: actions/cache/restore@v4
+        with:
+          path: ~/.cache/wz-apt
+          key: apt-${{ runner.os }}-${{ github.job }}-${{ hashFiles('.github/workflows/ci.yml') }}
+          restore-keys: |
+            apt-${{ runner.os }}-${{ github.job }}-
+
+      - name: Install system dependencies
+        # The package list `e2e-demo` carries: the integration tests link the
+        # RocksDB engine, the pico CLI build needs cmake, and bindgen needs
+        # clang. No `libxml2-dev` (R3009): only the jobs that run `xtask` do.
+        run: |
+          bash scripts/lib/apt-install.sh libsnappy-dev liblz4-dev libzstd-dev zlib1g-dev libbz2-dev \
+            cmake libclang-dev clang perl pkg-config
+
+      - name: Save apt archives
+        # See the `feature-gates` copy for why `always()` and why the dirty gate.
+        if: always() && env.WZ_APT_CACHE_DIRTY == 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: ~/.cache/wz-apt
+          key: ${{ steps.apt-archives.outputs.cache-primary-key }}-${{ github.run_id }}
+
+      - name: Install Rust toolchain (pinned by rust-toolchain.toml)
+        run: rustup show
+
+      - name: Cache Cargo registry + build artifacts
+        # Its OWN key: parallel jobs must not race one cache save, the same
+        # reason `e2e-demo` and its siblings each carry one.
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            crates -> target
+          key: e2e-demo-pico
+
+      - name: Reuse the RocksDB native engine across feature sets
+        uses: ./.github/actions/rocksdb-engine
+
+      - name: Build zenoh-pico CLI binaries (Layer E dep)
+        # Layer E spawns target/zenoh-pico-cli/z_put against the wz-ap-demo
+        # binary's TCP --listen endpoint. Built from the vendored submodule;
+        # the Swatinem cache covers `crates -> target` only, so this is every run.
+        run: bash scripts/build-zenoh-pico-cli.sh
+
+      - name: Build wz-ap-demo binary (Layer E dep)
+        run: (cd crates && cargo build -p wz-ap-demo)
+
+      - name: Layer E — wz-ap-demo round-trip vs zenoh-pico z_put
+        run: bash scripts/run-ci.sh --layer E
+
+      - name: Budget margin — this job may not approach its timeout in silence
+        # 1080s to match `timeout-minutes: 18`; the two numbers are one fact, so
+        # move that and move this. The floor is 30% on the same rule as the
+        # other half: the numbers above are what this job was measured to cost.
+        if: always()
+        run: bash scripts/lib/job-budget-margin.sh "$RUNNER_TEMP/wz_job_start" 1080 90 30 '${{ job.status }}'
 
   portability:
     name: portability (${{ matrix.os }})
