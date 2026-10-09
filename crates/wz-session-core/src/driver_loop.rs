@@ -187,6 +187,16 @@ pub enum DriverLoopOutcome {
     /// ([`crate::extbound`]).
     #[cfg(feature = "codec-open-body")]
     OpenRemoteBoundRejected,
+    /// Item 751 — THIS node's south partition cannot place the peer, so there is
+    /// no bound to announce on the Open and the handshake fails before it is
+    /// sent, with GENERIC through `establishment.ext_rejected`: upstream's bound
+    /// callback `?`s the same error out of building its Open
+    /// (`io/zenoh-transport/src/unicast/establishment/open.rs`
+    /// @ `.map_err(|e| (e, Some(close::reason::GENERIC)))?`). The one error the
+    /// partition raises here is a router remote matching a subregion of a node
+    /// that is not a router.
+    #[cfg(feature = "codec-open-body")]
+    OpenLocalBoundUnplaceable(crate::region_partition::RegionError),
     /// session-extqos (R311y506) — the peer's `init::ext::QoSLink` body could
     /// not be reconciled with ours: its priority band is not on the required
     /// side of the containment, its reliability contradicts ours, it carried

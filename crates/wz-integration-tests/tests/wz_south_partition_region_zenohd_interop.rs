@@ -24,14 +24,20 @@
 //! each one started under zenohd, must be accepted by wz exactly where zenohd
 //! starts and refused exactly where zenohd refuses to load the file.
 //!
+//! The last two legs turn it around: an in-process wz ROUTER session whose own
+//! south is partitioned announces the bound its rule gives zenohd on its
+//! OpenSyn, and zenohd's logged decision for wz is the arm of its match that
+//! reads an announced bound, against a control that announces nothing.
+//!
 //! ## What it reaches, and what it cannot
 //!
-//! A wz node announces no `RemoteBound` on its Open, so every probe takes the
-//! arms of the pin's match where the remote announced nothing: the auto table,
-//! "our rule puts it south", and "our rule puts it north, which the auto table
-//! must agree with", the last of which zenohd REFUSES for a client below a router.
-//! The arms that need the remote to announce a bound are covered by unit tests
-//! only; they are reachable against zenohd once wz sends the extension. The
+//! The demo probes are nodes on the `auto` preset (no wz node reads the key
+//! yet), so they announce no `RemoteBound` and every probe takes the arms of the
+//! pin's match where the remote announced nothing: the auto table, "our rule
+//! puts it south", and "our rule puts it north, which the auto table must agree
+//! with", the last of which zenohd REFUSES for a client below a router. Of the
+//! arms that need the remote to announce a bound, the in-process legs reach
+//! "the remote calls us south"; the others are covered by unit tests only. The
 //! `interfaces` and `region_names` filter fields are unit tests only as well: a
 //! loopback probe has one interface and a wz node announces no region name.
 //!
@@ -44,15 +50,22 @@ use std::io::Write as _;
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
+use tokio::net::TcpStream;
 use wz_integration_tests::common::{
     read_captured, wait_for_tcp_accept_alive, wz_ap_demo_binary, zenohd_binary, ChildGuard,
     PortReservation, ZENOHD_TCP_ACCEPT_BUDGET,
 };
+use wz_runtime_tokio::runtime_impl::TokioTime;
+use wz_runtime_tokio::session_open::{
+    initiate_and_open_session_with_staging, DialedLink, DEFAULT_OPEN_TICK_MS,
+};
 use wz_runtime_tokio::zenoh_config::gateway_south_of;
+use wz_runtime_tokio_test_support::zenoh_interop_session_init_params;
 use wz_session_core::extbound::{Bound, Region};
 use wz_session_core::region_partition::{
     region_of, transient_bound_of, RemoteFacts, SouthPartition,
 };
+use wz_session_core::transport_mode::SessionOffer;
 use wz_session_core::zid_hex::zenoh_hex_to_zid;
 use wz_session_core::WhatAmI;
 
@@ -529,4 +542,130 @@ fn wz_reads_the_gateway_south_values_zenohd_starts_on() {
         "wz's reader and zenohd disagree:\n{}",
         disagreements.join("\n")
     );
+}
+
+// ── the bound wz announces on its Open, as zenohd reads it ──
+
+/// The zid of the in-process wz router, as zenoh spells it.
+const WZ_ROUTER_ZID: &str = "e1b2c3d4";
+
+/// The step a session's open loop may take before it gives up.
+const OPEN_ITER_CAP: usize = 4096;
+
+/// Start a zenohd router on the `auto` preset, open an in-process wz ROUTER
+/// session to it with its south partitioned as `south`, and return what zenohd
+/// decided for wz (`compute_region_of`'s return text) and the bound wz
+/// announced on its OpenSyn.
+async fn zenohd_places_a_wz_router(south: &str) -> (String, Option<Bound>) {
+    let port = PortReservation::pick();
+    let tcp = port.port();
+    let config = zenohd_config(tcp, r#""auto""#);
+    let log = tempfile::tempfile().expect("zenohd log");
+    let mut log_reader: File = log.try_clone().expect("dup log handle");
+    let mut zenohd = ChildGuard::wrap(
+        "zenohd (reference router)",
+        Command::new(zenohd_binary())
+            .arg("-c")
+            .arg(config.path())
+            .args(["--rest-http-port", "none"])
+            .env("RUST_LOG", "zenoh=debug")
+            .stdout(Stdio::from(log.try_clone().expect("dup log handle")))
+            .stderr(Stdio::from(log))
+            .spawn()
+            .expect("spawn zenohd"),
+    );
+    if let Err(e) = wait_for_tcp_accept_alive(zenohd.child_mut(), tcp, ZENOHD_TCP_ACCEPT_BUDGET) {
+        panic!("zenohd (reference router): {e}");
+    }
+
+    let partition = partition_of(south);
+    let params = zenoh_interop_session_init_params(
+        WhatAmI::Router,
+        zenoh_hex_to_zid(WZ_ROUTER_ZID).expect("a valid zid"),
+    );
+    let stream = TcpStream::connect(("127.0.0.1", tcp))
+        .await
+        .expect("wz dials zenohd");
+    let opened = initiate_and_open_session_with_staging(
+        DialedLink::Tcp(stream),
+        params,
+        SessionOffer::universal(),
+        // Before the first wire byte, as a node sets it on every session it opens.
+        move |actions| {
+            actions.set_south_partition(partition);
+            Ok(())
+        },
+        TokioTime::new(),
+        Some(OPEN_ITER_CAP),
+        DEFAULT_OPEN_TICK_MS,
+    )
+    .await
+    .unwrap_or_else(|e| panic!("wz did not open a session to zenohd: {e:?}"));
+    let announced = opened.actions.local_remote_bound();
+
+    let deadline = Instant::now() + Duration::from_secs(15);
+    let region = loop {
+        let text = read_captured(&mut log_reader);
+        if let (_, Some(region)) = decisions_in(&text, WZ_ROUTER_ZID) {
+            break region;
+        }
+        if Instant::now() >= deadline {
+            panic!(
+                "zenohd never logged a region for wz\n--- zenohd log ---\n{}",
+                strip_ansi(&text)
+            );
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    };
+    drop(opened);
+    let _ = zenohd.child_mut().kill();
+    let _ = zenohd.child_mut().wait();
+    (region, announced)
+}
+
+/// What zenohd's own rule makes of a remote router that announced `bound`, as
+/// wz's region function words it: zenohd is a router on the `auto` preset.
+fn zenohd_should_decide(bound: Option<Bound>) -> String {
+    let wire = zenoh_hex_to_zid(WZ_ROUTER_ZID).expect("a valid zid");
+    let facts = RemoteFacts {
+        zid: &wire,
+        whatami: WhatAmI::Router,
+        region_name: None,
+        interfaces: &["lo"],
+    };
+    match region_of(WhatAmI::Router, &SouthPartition::Auto, &facts, bound) {
+        Ok((r, b)) => format!("Ok(({}, {}))", render_region(r), render_bound(b)),
+        Err(e) => format!("Err({e}"),
+    }
+}
+
+/// THE CLAIM: a wz router whose rule puts zenohd in its south announces SOUTH on
+/// its OpenSyn, and zenohd, reading it, places wz in its NORTH with wz as its
+/// gateway (`compute_region_of` @ `(None, Some(Bound::South)) => Ok((Region::North, Bound::South)),`).
+/// Without the announcement two routers on the `auto` preset are peers of one
+/// north region, which the control below shows.
+// wz-proves: none -- the Open's bound announcement read by zenohd; no wz node is
+// configured with a partition yet, so this is no atom's claim.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "binary-dep e2e (zenohd); Layer Z runs via --ignored"]
+async fn zenohd_places_a_wz_router_that_calls_it_south_below_wz() {
+    let (region, announced) = zenohd_places_a_wz_router(ONE_OPEN_SUBREGION).await;
+    assert_eq!(announced, Some(Bound::South), "wz announced south");
+    assert_eq!(region, "Ok((North, South))", "zenohd read the announcement");
+    assert_eq!(region, zenohd_should_decide(announced));
+}
+
+/// THE CONTROL: the same wz router on the `auto` preset announces nothing, and
+/// zenohd places it as one router of its north region.
+// wz-proves: none -- harness control for the leg above.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "binary-dep e2e (zenohd); Layer Z runs via --ignored"]
+async fn zenohd_places_a_wz_router_that_announces_nothing_beside_it() {
+    let (region, announced) = zenohd_places_a_wz_router(r#""auto""#).await;
+    assert_eq!(
+        announced, None,
+        "a node on the auto preset announces nothing"
+    );
+    assert_eq!(region, "Ok((North, North))");
+    assert_eq!(region, zenohd_should_decide(announced));
 }

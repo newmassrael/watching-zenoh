@@ -1148,6 +1148,16 @@ pub struct SessionCore<R: SessionRuntime, T: TimeSource> {
     /// is what every peer on the default gateway preset does. Written by every
     /// admitted Open, so a reconnect cannot inherit the last session's value.
     pub peer_remote_bound: R::Mutex<Option<crate::extbound::Bound>>,
+    /// Item 751 — how THIS node's south is partitioned, which decides the bound
+    /// this session announces for its peer on its own Open (zenoh's transport
+    /// manager `bound_callback`, which the runtime builds from `gateway/south`).
+    /// `Auto`, the pin's preset, announces nothing.
+    pub south_partition: R::Mutex<crate::region_partition::SouthPartition>,
+    /// Item 751 — the bound this session announces for its peer, decided by
+    /// [`SessionLinkActions::decide_local_remote_bound`](crate::session_actions::SessionLinkActions::decide_local_remote_bound)
+    /// once the peer's facts are known and
+    /// staged onto the Open it sends. `None` announces nothing.
+    pub local_remote_bound: R::Mutex<Option<crate::extbound::Bound>>,
     /// transport-qos (R311y215) — the negotiated QoS-transport capability for
     /// THIS session (zenoh `TransportConfigUnicast::is_qos`). Seeded with the
     /// local offer ([`Self::set_qos_offer`]) at bring-up, then ANDed with the
@@ -2284,6 +2294,8 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                 local_region: R::new_mutex(None::<crate::extregion::RegionName>),
                 peer_region: R::new_mutex(None::<crate::extregion::RegionName>),
                 peer_remote_bound: R::new_mutex(None::<crate::extbound::Bound>),
+                south_partition: R::new_mutex(crate::region_partition::SouthPartition::Auto),
+                local_remote_bound: R::new_mutex(None::<crate::extbound::Bound>),
                 // transport-qos — false until the AP layer offers it
                 // (`set_qos_offer`) and the peer's Init ext_qos offer is ANDed in.
                 #[cfg(feature = "transport-qos")]
@@ -4880,6 +4892,91 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// R2858 — the bound the peer announced on its Open, `None` for none.
     pub fn peer_remote_bound(&self) -> Option<crate::extbound::Bound> {
         R::with_mutex_mut(&self.peer_remote_bound, |s| *s)
+    }
+
+    /// Item 751 — set how this node's south is partitioned. Every handshake this
+    /// session runs after it announces, on its Open, the bound the partition
+    /// gives the peer ([`Self::decide_local_remote_bound`]). The default is the
+    /// `Auto` preset, which announces nothing.
+    ///
+    /// The node sets this on each session from the same partition its routing
+    /// places faces by, so the two cannot place one remote differently.
+    pub fn set_south_partition(&self, partition: crate::region_partition::SouthPartition) {
+        R::with_mutex_mut(&self.south_partition, |slot| *slot = partition);
+    }
+
+    /// Item 751 — decide the bound this session announces for its peer: the
+    /// pin's `compute_transient_bound_of` over what the handshake has told it of
+    /// the peer, its zid, role and region name, and the interfaces of this link
+    /// (`zenoh/src/net/runtime/region.rs` @ `pub(crate) fn compute_transient_bound_of(`).
+    ///
+    /// The pin runs it as the bound callback while it builds each Open
+    /// (`io/zenoh-transport/src/unicast/establishment/open.rs`
+    /// @ `let ext_remote_bound = if let Some(callback) = self.ext_remote_bound.as_ref() {`,
+    /// and the acceptor's twin in `accept.rs`), and an error out of it fails the
+    /// handshake there. The drive loop calls this on the event that sends the
+    /// Open, before the send: the InitAck for the initiator and the OpenSyn for
+    /// the acceptor, by which point each fact it reads is known.
+    ///
+    /// The decision is stored, `None` included, and the Open stages whatever was
+    /// stored last, so a session that reopens decides again rather than
+    /// announcing the previous peer's bound.
+    pub fn decide_local_remote_bound(
+        &self,
+    ) -> Result<Option<crate::extbound::Bound>, crate::region_partition::RegionError> {
+        let zid = self.peer_zid().unwrap_or_default();
+        let whatami = self.peer_whatami_wire().and_then(crate::WhatAmI::from_wire);
+        let region = self.peer_region();
+        let interfaces: Vec<&str> = self
+            .link_subject()
+            .and_then(|subject| subject.interfaces.as_deref())
+            .map(|names| names.iter().map(String::as_str).collect())
+            .unwrap_or_default();
+        let decided = match whatami {
+            Some(whatami) => {
+                let facts = crate::region_partition::RemoteFacts {
+                    zid: &zid,
+                    whatami,
+                    region_name: region.as_ref().map(|name| name.as_str()),
+                    interfaces: &interfaces,
+                };
+                R::with_mutex_mut(&self.south_partition, |partition| {
+                    crate::region_partition::transient_bound_of(
+                        self.params.whatami,
+                        partition,
+                        &facts,
+                    )
+                })
+            }
+            // Both events that decide follow the Init that told us the peer's
+            // role, so this is a session driven without one, which a test can
+            // do. With no role there is no rule to apply and nothing to say.
+            None => Ok(None),
+        };
+        R::with_mutex_mut(&self.local_remote_bound, |slot| {
+            *slot = decided.ok().flatten();
+        });
+        decided
+    }
+
+    /// Item 751 — the bound this session announces for its peer, as last decided.
+    pub fn local_remote_bound(&self) -> Option<crate::extbound::Bound> {
+        R::with_mutex_mut(&self.local_remote_bound, |s| *s)
+    }
+
+    /// Item 751 — put the decided bound on the Open chain `role` sends, or take
+    /// a stale one off it: the pin's Open carries the entry exactly when its
+    /// callback answered `Some`.
+    #[cfg(feature = "codec-open-body")]
+    fn stage_local_remote_bound(&self, role: ExtChainRole) {
+        let bound = self.local_remote_bound();
+        let want = crate::ext_header::ext_eid(crate::extbound::REMOTE_BOUND_EXT_HEADER);
+        R::with_mutex_mut(self.ext_chain_slot(role), |chain| {
+            chain.retain(|e| crate::ext_header::ext_eid(e.header) != want);
+            if let Some(bound) = bound {
+                chain.push(crate::extbound::encode_remote_bound_ext(bound));
+            }
+        });
     }
 
     /// R2858 — this session's `sessions[].region`, as upstream's `local_data`
@@ -10669,6 +10766,10 @@ impl<R: SessionRuntime, T: TimeSource> SessionFsmUnicastActionsTrait
             // the acceptor's own check below fail closed.
             #[cfg(feature = "session-extshm")]
             a.stage_shm_challenge(ExtChainRole::OpenSyn, |a| a.shm_send_open_syn());
+            // Item 751 — the `0x7` REMOTE-BOUND this node announces for the
+            // peer, decided when the InitAck was admitted
+            // (`decide_local_remote_bound`); absent when it announces none.
+            a.stage_local_remote_bound(ExtChainRole::OpenSyn);
             // RFC §5.M echo contract: prefer the cookie captured from a
             // peer InitAck via handle_inbound; fall back to params.cookie
             // for tests that drive OpenSyn without an inbound parse cycle.
@@ -10890,6 +10991,10 @@ impl<R: SessionRuntime, T: TimeSource> SessionFsmUnicastActionsTrait
             // demux ran before this send).
             #[cfg(feature = "session-extshm")]
             a.stage_shm_challenge(ExtChainRole::OpenAck, |a| a.shm_send_open_ack());
+            // Item 751 — the acceptor's `0x7` REMOTE-BOUND, decided when the
+            // OpenSyn was admitted and the peer's facts came back from the
+            // cookie (`decide_local_remote_bound`).
+            a.stage_local_remote_bound(ExtChainRole::OpenAck);
             // Accepting side OpenAck: cookie is consumed by the time we
             // get here (it travelled inbound on OpenSyn and was already
             // MAC-verified); the OpenAck shape omits it (parent.A=1

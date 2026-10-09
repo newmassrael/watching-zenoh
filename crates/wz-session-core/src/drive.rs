@@ -723,6 +723,30 @@ fn dispatch_unit<R: SessionRuntime, T: TimeSource>(
                     // when no dispatch / no key captured yet).
                     actions.capture_multilink_pubkey();
                 }
+                // Item 751 — decide the bound this node announces for the peer
+                // on the Open the event below sends: the initiator's OpenSyn on
+                // the InitAck it is waiting for, the acceptor's OpenAck on the
+                // OpenSyn it just rebuilt from the cookie. Last, so every fact the
+                // decision reads (the peer's zid, role and region name) is the
+                // admitted one, and before the event, because upstream fails the
+                // handshake on an error here instead of sending its Open.
+                #[cfg(all(feature = "codec-init-body", feature = "codec-open-body"))]
+                {
+                    use crate::session_fsm_unicast::SessionFsmUnicastState as S;
+                    let sends_an_open = match &frame {
+                        InboundFrame::Init { is_ack: true, .. } => {
+                            engine.get_current_state() == S::SentInitSyn
+                        }
+                        InboundFrame::Open { is_ack: false, .. } => true,
+                        _ => false,
+                    };
+                    if sends_an_open {
+                        if let Err(why) = actions.decide_local_remote_bound() {
+                            engine.process_event(E::EstablishmentExtRejected);
+                            return DriverLoopOutcome::OpenLocalBoundUnplaceable(why);
+                        }
+                    }
+                }
                 engine.process_event(event);
                 DriverLoopOutcome::AdvancedFsm
             }

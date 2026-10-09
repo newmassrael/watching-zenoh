@@ -28,9 +28,13 @@
 //! @ `GatewaySouthConf::Preset(GatewayPresetConf::Auto) => Ok(None),`). So a
 //! stock peer sends nothing, and a peer configured with south gateways may.
 //!
-//! wz sends nothing, and that is upstream's answer for wz's configuration:
-//! `gateway/south` is not a key wz honours, so a wz node is always on the
-//! `Auto` preset, where the callback answers `None`.
+//! A wz session sends it on the same rule
+//! ([`encode_remote_bound_ext`](crate::extbound::encode_remote_bound_ext)): the
+//! bound its node's south partition gives the peer, decided once the peer's
+//! facts are known and staged on the Open. No wz node sends one yet, and that
+//! is upstream's answer for wz's configuration: `gateway/south` is not a key wz
+//! honours, so a wz node is always on the `Auto` preset, where the callback
+//! answers `None`.
 //!
 //! NOT-THIS-KEY: gateway/south
 //!
@@ -114,6 +118,20 @@ pub fn peer_remote_bound(extensions: &[ExtEntryOwned]) -> Result<Option<Bound>, 
         return Bound::from_wire(z.value).map(Some);
     }
     Ok(None)
+}
+
+/// Item 751 — the entry a node puts on its Open when it announces a bound for
+/// the peer: upstream's `RemoteBound::new(b as u8 as u64)`
+/// (`io/zenoh-transport/src/unicast/establishment/open.rs`
+/// @ `.map(|b| RemoteBound::new(b as u8 as u64))`), the bound's discriminant
+/// as a Z64. [`peer_remote_bound`] reads it back.
+pub fn encode_remote_bound_ext(bound: Bound) -> ExtEntryOwned {
+    ExtEntryOwned {
+        header: REMOTE_BOUND_EXT_HEADER,
+        body: ExtEntryOwnedVariant::CodecZenohExtZint(wz_codecs::ext_zint::ExtZint {
+            value: u64::from(bound as u8),
+        }),
+    }
 }
 
 /// The region a remote lands in, as the pin's `zenoh_protocol::core::Region`
