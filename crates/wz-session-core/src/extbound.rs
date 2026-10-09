@@ -170,7 +170,7 @@ impl core::fmt::Display for Region {
 /// @ `fn compute_auto_region(mode: WhatAmI, remote_mode: WhatAmI) -> ZResult<(Region, Bound)> {`):
 /// the region of the remote and the remote's bound, from the two modes alone.
 /// `None` is upstream's `bail!` for client-client.
-fn auto_region(mode: WhatAmI, remote: WhatAmI) -> Option<(Region, Bound)> {
+pub(crate) fn auto_region(mode: WhatAmI, remote: WhatAmI) -> Option<(Region, Bound)> {
     use WhatAmI::{Client, Peer, Router};
     match (mode, remote) {
         (Router, Peer | Client) | (Peer, Client) => {

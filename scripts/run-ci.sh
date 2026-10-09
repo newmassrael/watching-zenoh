@@ -18319,6 +18319,12 @@ layer_z_zenohd_interop() {
     # GUARDED (`_runci_guarded_test`, 2 = one leg per direction).
     _runci_guarded_test Z 2 env WZ_ZENOHD_BIN="$zenohd" cargo test -p wz-integration-tests \
         --test wz_peer_gossip_query_zenohd_interop -- --ignored --quiet --test-threads=1 || return 1
+    # Open-debt item 751 -- the region a router puts a remote in when it PARTITIONS
+    # its south (`gateway/south` as a list of subregions): wz's pure region function
+    # against zenohd's own logged decisions, three partitions by four roles.
+    # GUARDED at 3, one per partition (the legs are `#[ignore]`d).
+    _runci_guarded_test Z 3 env WZ_ZENOHD_BIN="$zenohd" cargo test -p wz-integration-tests \
+        --test wz_south_partition_region_zenohd_interop -- --ignored --quiet --test-threads=1 || return 1
     # R311y430 — `scouting-autoconnect`, the last unproven scouting atom, on a
     # THREE-node topology the peer-tier leg above cannot host: a zenohd ROUTER, a
     # THIRD-PARTY zenohd PEER listening beside it, and a wz `--peer --autoconnect`

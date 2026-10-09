@@ -1136,6 +1136,13 @@ pub mod extregion;
 /// the pin with its gateway plane; zenoh is its only reference.
 pub mod extbound;
 
+/// Which region a remote lands in when a node partitions its south into
+/// subregions by rule: the pin's `compute_region_of` with its filters, whole.
+/// [`extbound::region_and_bound_of`] is the same question for a node on the
+/// `auto` preset. Pure and not yet called on a live session.
+#[cfg(feature = "alloc")]
+pub mod region_partition;
+
 #[cfg(feature = "transport-lowlatency")]
 pub mod extlowlatency;
 
