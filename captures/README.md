@@ -315,9 +315,9 @@ Hellos on their own would not exercise that memory at all.
 
 * the **Scout** is the SCOUT codec's `encode_to_vec` behind the header byte, in
   the order `scouting_glue`'s `scout_emit` does it (version, `what`, then the
-  `I` flag, the length nibble and the zid). That action lives in
-  `wz-runtime-tokio`, which depends on `wz-capture`, so it cannot be called from
-  here: the recipe is **repeated**, and the layout test in that module
+  `I` flag, the length nibble and the zid). `wz-runtime-tokio` depends on
+  `wz-capture`, and that action lives in `wz-runtime-tokio`, so it cannot be
+  called from here: the recipe is **repeated**, and the layout test in that module
   (`scout_emit_stages_framed_datagram`) is the layout the oracle pins the bytes
   against;
 * the **Hello** is not laid out in the fixture at all. It is
