@@ -137,45 +137,15 @@ pub mod establishment_ext_id {
     /// how a grade taken at 1.5.0 goes stale by upstream GROWING rather than by
     /// upstream moving.
     ///
-    /// wz RECOGNISES it and does not IMPLEMENT it: it is listed here so
-    /// `ext_chain::reject_unknown_mandatory_ext` does not read a stock
-    /// 1.10.0 peer's announcement as an unknown extension, and so the id cannot
-    /// be handed to a future wz extension. Recognising is what upstream does at
-    /// the codec layer too — it has a real handler, so this id never reaches its
-    /// unknown-extension path. Being non-mandatory, the two treatments cannot
-    /// diverge for any peer that follows the spec; the listing is what keeps
-    /// that true for one that does not.
+    /// wz RECOGNISES it and does not IMPLEMENT it: the id cannot be handed to a
+    /// future wz extension. Recognising is what upstream does at the codec layer
+    /// too -- it has a real handler, so this id never reaches its
+    /// unknown-extension path. Being non-mandatory, it is no part of the
+    /// mandatory space the admission rule judges a chain against
+    /// ([`crate::ext_admit::declared_extensions`]), so no peer's announcement of
+    /// it can be refused.
     pub const REGION_NAME: u8 = 0x08;
 }
-
-/// R2437 — the establishment ext ids wz RECOGNISES, as a derived set rather
-/// than a typed list.
-///
-/// Built from the constants above so a new id cannot be added to the table and
-/// forgotten here — the failure that would make
-/// `ext_chain::reject_unknown_mandatory_ext` refuse an extension wz
-/// itself speaks.
-///
-/// Recognised may be WIDER than implemented, because the question this set
-/// answers is "does wz know what this id means" and not "does wz act on it" —
-/// which is what the unknown-extension rule turns on.
-///
-/// ⚠ R2539 — `REGION_NAME` used to be this note's standing EXAMPLE of the gap
-/// ("in this set and wz implements nothing for it"). It is not one any more:
-/// [`crate::extregion`] emits it, reads the peer's, and refuses a malformed
-/// value. Every id in this set is now implemented; the widening is a property
-/// the set is ALLOWED, not one it currently exercises, and a future id may use
-/// it again.
-pub const ESTABLISHMENT_EXT_IDS: [u8; 8] = [
-    establishment_ext_id::QOS,
-    establishment_ext_id::SHM,
-    establishment_ext_id::AUTH,
-    establishment_ext_id::MULTILINK,
-    establishment_ext_id::LOWLATENCY,
-    establishment_ext_id::COMPRESSION,
-    establishment_ext_id::PATCH,
-    establishment_ext_id::REGION_NAME,
-];
 
 /// Ext ids in the ZENOH-BODY space — the chain that rides a `Put` / `Del` /
 /// `Query` / `Reply` / `Err` body, which is a DIFFERENT carrier from
@@ -271,7 +241,7 @@ pub const fn ext_identity(id: u8, mandatory: bool, encoding: u8) -> u8 {
 /// The IDENTITIES of the extensions on the data bodies (`Put`, `Del`, `Query`),
 /// as [`ext_eid`] of their header reads them.
 ///
-/// R3171 — [`body_ext_id`] holds the 4-bit id FIELD, which is what an extension
+/// Open-debt item 860's class — [`body_ext_id`] holds the 4-bit id FIELD, which is what an extension
 /// is BUILT from and not what it is TOLD APART by. Upstream tells a received
 /// extension apart by [`ext_eid`] (`commons/zenoh-codec/src/zenoh/put.rs` @
 /// `Ok(match iext::eid(ext) {`, and the same match in `del.rs` and `query.rs`),
@@ -299,6 +269,10 @@ pub mod body_eid {
     /// as the second parameter of its `ValueType`: a unit extension, not
     /// mandatory.
     pub const QUERY_SHM: u8 = ext_identity(super::body_ext_id::QUERY_SHM, false, EXT_ENC_UNIT);
+    /// The shared-memory marker of a `Put` and an `Err`, `zextunit!(0x2, true)`:
+    /// `0x12`, a unit that IS mandatory (`commons/zenoh-protocol/src/zenoh/put.rs`
+    /// @ `pub type Shm = zextunit!(0x2, true);`).
+    pub const SHM: u8 = ext_identity(super::body_ext_id::SHM, true, EXT_ENC_UNIT);
 }
 
 /// The IDENTITIES of the extensions on the NETWORK messages and the transport
@@ -344,11 +318,13 @@ mod identity_tests {
 
     /// The identities are the bytes upstream's declarations compose, written here
     /// as literals on purpose: a constant built from `ext_identity` and compared
-    /// with the same call would only prove the call agrees with itself.
-    /// `scripts/lib/ext_identity_gate.py` binds the same constants to the pinned
-    /// source, so the literals and the declarations cannot drift apart unseen.
+    /// with the same call would only prove the call agrees with itself. Each byte
+    /// is the one the declaration cited on its constant composes; the readers
+    /// that compare against them are held to identity matching by
+    /// `scripts/lib/ext_identity_gate.py`.
     #[test]
     fn the_identities_are_the_bytes_upstream_declares() {
+        assert_eq!(body_eid::SHM, 0x12);
         assert_eq!(body_eid::SOURCE_INFO, 0x41);
         assert_eq!(body_eid::PUT_ATTACHMENT, 0x43);
         assert_eq!(body_eid::DEL_ATTACHMENT, 0x42);

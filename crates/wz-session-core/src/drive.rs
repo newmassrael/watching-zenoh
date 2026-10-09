@@ -59,15 +59,25 @@ use crate::network_message::parse_frame_payload_in;
 /// image: +592 and +668 bytes of text, past the footprint ledger's band, for a
 /// stack saving that image does not need. This keeps the out-of-line copy where
 /// the deep frame is.
+///
+/// It is also the participant seam of the mandatory-extension rule for the NETWORK
+/// messages and the zenoh bodies they carry. A batch with a message whose chain
+/// holds an extension the message does not define, with the M bit set, is refused
+/// whole, as a batch that does not decode is; upstream's reader refuses that
+/// message (`commons/zenoh-codec/src/common/extension.rs` @
+/// `if u.is_mandatory() {`). The decode reads it, so a capture still sees it, and
+/// the refusal is made here, in the one function both unicast paths of a whole
+/// batch go through; a batch put back together from fragments and a multicast
+/// batch are judged by the same
+/// [`refuse_unknown_mandatory_ext`](crate::network_message::refuse_unknown_mandatory_ext)
+/// at their own seams.
 #[cfg(feature = "codec-frame")]
 #[inline(never)]
 fn parse_frame_payload_out_of_line(
     batch: &crate::link::RxBytes,
-) -> Result<
-    alloc::vec::Vec<crate::network_message::NetworkMessage>,
-    sce_forge_runtime::codec::CodecError,
-> {
-    parse_frame_payload_in(batch)
+) -> Result<alloc::vec::Vec<crate::network_message::NetworkMessage>, InboundParseError> {
+    let messages = parse_frame_payload_in(batch).map_err(InboundParseError::Codec)?;
+    crate::network_message::refuse_unknown_mandatory_ext(messages)
 }
 // transport-lowlatency — the lean rx branch reads the leading message id
 // (wire_const) and synthesizes an empty ext list (Vec); transport-compression's
@@ -287,9 +297,9 @@ fn dispatch_unit<R: SessionRuntime, T: TimeSource>(
                         priority: crate::qos::Priority::DEFAULT,
                     }
                 }
-                Err(codec_err) => {
+                Err(parse_err) => {
                     engine.process_event(E::FramingError);
-                    DriverLoopOutcome::ParseError(InboundParseError::Codec(codec_err))
+                    DriverLoopOutcome::ParseError(parse_err)
                 }
             };
         }
@@ -773,9 +783,9 @@ fn dispatch_unit<R: SessionRuntime, T: TimeSource>(
                             // `admit_rx_frame_sn`). DEFAULT under non-QoS.
                             priority,
                         },
-                        Err(codec_err) => {
+                        Err(parse_err) => {
                             engine.process_event(E::FramingError);
-                            DriverLoopOutcome::ParseError(InboundParseError::Codec(codec_err))
+                            DriverLoopOutcome::ParseError(parse_err)
                         }
                     }
                 }
@@ -1659,5 +1669,45 @@ mod lifecycle_key_tests {
         assert_eq!(close.verb, "close");
         assert_eq!(open.verb, "open");
         assert_eq!(close.peer_zid, open.peer_zid);
+    }
+}
+
+// The participant seam of the mandatory-extension rule for the network messages:
+// the one function every receive path of a framed batch goes through refuses a
+// batch whose message holds an extension it does not define, with the M bit set,
+// and passes the same batch with the bit clear
+// (`commons/zenoh-codec/src/common/extension.rs` @ `if u.is_mandatory() {`).
+#[cfg(all(test, feature = "codec-frame", feature = "codec-push"))]
+mod mandatory_extension_seam_tests {
+    use super::*;
+    use wz_codecs::ext_entry::{ExtEntryOwned, ExtEntryOwnedVariant};
+    use wz_codecs::ext_unit::ExtUnit;
+    use wz_codecs_test_support::TestWire as _;
+
+    /// A Push whose Put carries one UNIT extension with `header`.
+    fn push_with_put_ext(header: u8) -> alloc::vec::Vec<u8> {
+        let mut push = crate::push_build::build_push_literal("k", b"v").unwrap();
+        match &mut push.body {
+            crate::wire::PushOwnedVariant::CodecZenohMsgPut(put) => {
+                put.extensions = Some(alloc::vec![ExtEntryOwned {
+                    header,
+                    body: ExtEntryOwnedVariant::CodecZenohExtUnit(ExtUnit::default()),
+                }]);
+                put.header |= 0x80;
+            }
+            other => panic!("a literal push carries a Put, got {other:?}"),
+        }
+        push.wire()
+    }
+
+    #[test]
+    fn a_mandatory_extension_the_message_does_not_define_refuses_the_batch() {
+        let optional = crate::link::RxBytes::from(push_with_put_ext(0x03));
+        assert!(parse_frame_payload_out_of_line(&optional).is_ok());
+        let mandatory = crate::link::RxBytes::from(push_with_put_ext(0x13));
+        assert_eq!(
+            parse_frame_payload_out_of_line(&mandatory).unwrap_err(),
+            InboundParseError::UnknownMandatoryExt { eid: 0x13 }
+        );
     }
 }

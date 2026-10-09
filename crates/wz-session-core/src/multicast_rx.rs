@@ -412,7 +412,14 @@ where
                 // single DEFAULT conduit — byte-identical to the pre-R311y227 gate.
                 match dispatcher.ingest_frame_by_src_qos(src, priority, reliable, sn, now_ms) {
                     FrameIngest::Admitted => {
-                        if let Ok(messages) = parse_frame_payload_in(&payload) {
+                        // A batch whose chains hold an extension its
+                        // message does not define, with the M bit set, is dropped
+                        // whole, as one that does not decode is.
+                        if let Some(messages) =
+                            parse_frame_payload_in(&payload).ok().and_then(|messages| {
+                                crate::network_message::refuse_unknown_mandatory_ext(messages).ok()
+                            })
+                        {
                             // The `ingest_frame_by_src` `&mut dispatcher` borrow
                             // ended at the match scrutinee (`FrameIngest` is a
                             // fieldless enum), so the dispatcher is free to
@@ -854,6 +861,50 @@ mod batch_walk_tests {
             "the frame BEHIND the beacon must be fanned: a walk that stopped \
              at the JOIN reports zero"
         );
+    }
+
+    /// A group member's data frame whose message holds an extension the message
+    /// does not define, with the M bit set, is dropped whole, and the same frame
+    /// with the bit clear is delivered: the multicast seam of the
+    /// mandatory-extension rule (`commons/zenoh-codec/src/common/extension.rs` @
+    /// `if u.is_mandatory() {`). The extension is a unit with id 3 on the Put,
+    /// which no Put declares in either shape.
+    #[cfg(feature = "codec-push")]
+    #[test]
+    fn a_frame_whose_message_holds_an_unknown_mandatory_extension_is_dropped() {
+        use wz_codecs::ext_entry::{ExtEntryOwned, ExtEntryOwnedVariant};
+        use wz_codecs::ext_unit::ExtUnit;
+
+        let delivered = |header: u8| {
+            let mut push = crate::push_build::build_push_literal("demo/mc", b"v").unwrap();
+            let crate::wire::PushOwnedVariant::CodecZenohMsgPut(put) = &mut push.body else {
+                panic!("a literal put carries a Put body");
+            };
+            put.extensions = Some(alloc::vec![ExtEntryOwned {
+                header,
+                body: ExtEntryOwnedVariant::CodecZenohExtUnit(ExtUnit::default()),
+            }]);
+            put.header |= 0x80;
+            let mut datagram = peer_join(&[0x22; 4]);
+            datagram.extend_from_slice(&crate::frame_encode::encode_frame_with_push(0, push, true));
+            let mut payloads = 0usize;
+            let _ = dispatch_multicast_inbound(
+                &mut running::<4>(),
+                &params(&[0x11; 4]),
+                &datagram,
+                PEER,
+                1_000,
+                &mut |event| {
+                    if let IterationEvent::Poll(DriverLoopOutcome::FramePayload { .. }) = event {
+                        payloads += 1;
+                    }
+                },
+                &(),
+            );
+            payloads
+        };
+        assert_eq!(delivered(0x03), 1, "the optional unit is skipped");
+        assert_eq!(delivered(0x13), 0, "the mandatory one drops the batch");
     }
 
     /// The multicast twin of the unicast sharing witness: the payload of a data

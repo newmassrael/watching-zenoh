@@ -404,7 +404,16 @@ pub fn reassembled_frame_outcome(
     priority: crate::qos::Priority,
     msg: &[u8],
 ) -> DriverLoopOutcome {
-    match crate::network_message::parse_frame_payload_lending(msg) {
+    // The participant refuses a batch whose chains hold an extension the message
+    // does not define, with the M bit set, as the unfragmented path does. The
+    // refusal is reported and the batch dropped, as upstream drops a reassembled
+    // message it cannot read without closing the link
+    // (`io/zenoh-transport/src/common/defragmentation.rs` @
+    // `let res: Option<NetworkMessage> = rcodec.read(&mut reader).ok();`).
+    let parsed = crate::network_message::parse_frame_payload_lending(msg)
+        .map_err(InboundParseError::Codec)
+        .and_then(crate::network_message::refuse_unknown_mandatory_ext);
+    match parsed {
         Ok(messages) => DriverLoopOutcome::FramePayload {
             reliable,
             sn,
@@ -413,7 +422,7 @@ pub fn reassembled_frame_outcome(
             extensions: Vec::new(),
             priority,
         },
-        Err(codec_err) => DriverLoopOutcome::ParseError(InboundParseError::Codec(codec_err)),
+        Err(parse_err) => DriverLoopOutcome::ParseError(parse_err),
     }
 }
 
@@ -541,4 +550,44 @@ pub enum DriverOutcome {
     /// bound runaway loops; production callers pass `None` for
     /// unlimited iteration.
     IterationLimit,
+}
+
+// A batch put back together from fragments is judged like one that arrived whole:
+// a message in it that holds an extension it does not define, with the M bit set,
+// refuses the batch (`commons/zenoh-codec/src/common/extension.rs` @
+// `if u.is_mandatory() {`).
+#[cfg(all(test, feature = "reassembly", feature = "codec-push"))]
+mod reassembled_batch_tests {
+    use super::*;
+    use wz_codecs::ext_entry::{ExtEntryOwned, ExtEntryOwnedVariant};
+    use wz_codecs::ext_unit::ExtUnit;
+    use wz_codecs_test_support::TestWire as _;
+
+    fn push_with_put_ext(header: u8) -> Vec<u8> {
+        let mut push = crate::push_build::build_push_literal("k", b"v").unwrap();
+        match &mut push.body {
+            crate::wire::PushOwnedVariant::CodecZenohMsgPut(put) => {
+                put.extensions = Some(alloc::vec![ExtEntryOwned {
+                    header,
+                    body: ExtEntryOwnedVariant::CodecZenohExtUnit(ExtUnit::default()),
+                }]);
+                put.header |= 0x80;
+            }
+            other => panic!("a literal push carries a Put, got {other:?}"),
+        }
+        push.wire()
+    }
+
+    #[test]
+    fn a_reassembled_batch_with_a_mandatory_look_alike_is_refused() {
+        let priority = crate::qos::Priority::DEFAULT;
+        assert!(matches!(
+            reassembled_frame_outcome(true, 1, priority, &push_with_put_ext(0x03)),
+            DriverLoopOutcome::FramePayload { .. }
+        ));
+        assert!(matches!(
+            reassembled_frame_outcome(true, 1, priority, &push_with_put_ext(0x13)),
+            DriverLoopOutcome::ParseError(InboundParseError::UnknownMandatoryExt { eid: 0x13 })
+        ));
+    }
 }

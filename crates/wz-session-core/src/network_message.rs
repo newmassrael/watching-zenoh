@@ -222,6 +222,184 @@ pub enum NetworkMessage {
     Unknown { mid: u8, body: Vec<u8> },
 }
 
+/// The verdict on one chain, or
+/// [`ExtAdmission::Admissible`](crate::ext_admit::ExtAdmission::Admissible) for a
+/// message that has none.
+fn judge_chain<E: crate::ext_view::ExtEntryView>(
+    carrier: crate::ext_admit::ExtCarrier,
+    extensions: Option<&[E]>,
+) -> crate::ext_admit::ExtAdmission {
+    extensions.map_or(crate::ext_admit::ExtAdmission::Admissible, |chain| {
+        crate::ext_admit::judge_ext_chain(carrier, chain.iter().map(|e| e.header()))
+    })
+}
+
+/// `first` unless it is admissible, and then `next()`: the
+/// chains of a message are read in the order upstream reads them, the envelope's
+/// before the body's, and the first offender is the one reported.
+// Only the messages that carry a body have a second chain to read.
+#[allow(dead_code)]
+fn then_judge(
+    first: crate::ext_admit::ExtAdmission,
+    next: impl FnOnce() -> crate::ext_admit::ExtAdmission,
+) -> crate::ext_admit::ExtAdmission {
+    match first {
+        crate::ext_admit::ExtAdmission::Admissible => next(),
+        other => other,
+    }
+}
+
+impl NetworkMessage {
+    /// What a conforming PARTICIPANT must do with this message's extension
+    /// chains:
+    /// [`ExtAdmission::UnknownMandatory`](crate::ext_admit::ExtAdmission::UnknownMandatory)
+    /// means the message, or the body
+    /// it carries, has an extension with the M bit set that the message does not
+    /// define, and upstream refuses the whole message for it
+    /// (`commons/zenoh-codec/src/common/extension.rs` @ `if u.is_mandatory() {`).
+    ///
+    /// The network and zenoh-body counterpart of
+    /// [`crate::inbound::InboundFrame::ext_admission`], and for the same reason a
+    /// predicate beside the decode and not a refusal inside it: a capture must
+    /// still SEE a message that carries an extension nobody here implements. The
+    /// participant seam is `drive`'s dispatch, which turns it into a framing
+    /// error. `Unknown` answers
+    /// [`ExtAdmission::Unjudged`](crate::ext_admit::ExtAdmission::Unjudged): this
+    /// build cannot
+    /// name the message, so it has no space to judge it against.
+    pub fn ext_admission(&self) -> crate::ext_admit::ExtAdmission {
+        // Which of these a build uses depends on the codecs it selects.
+        #[allow(unused_imports)]
+        use crate::ext_admit::{
+            ExtAdmission, ExtCarrier as C, NetworkEnvelope as N, ZenohBody as Z,
+        };
+        match self {
+            #[cfg(feature = "codec-request")]
+            Self::Request(request) => {
+                use wz_codecs::request::RequestOwnedVariant as B;
+                then_judge(
+                    judge_chain(C::Network(N::Request), request.extensions.as_deref()),
+                    || match &request.body {
+                        B::CodecZenohMsgPut(put) => {
+                            judge_chain(C::Zenoh(Z::Put), put.extensions.as_deref())
+                        }
+                        B::CodecZenohMsgDel(del) => {
+                            judge_chain(C::Zenoh(Z::Del), del.extensions.as_deref())
+                        }
+                        B::CodecZenohQuery(query) | B::Default { body: query, .. } => {
+                            judge_chain(C::Zenoh(Z::Query), query.extensions.as_deref())
+                        }
+                    },
+                )
+            }
+            #[cfg(feature = "codec-push")]
+            Self::Push(push) => {
+                use wz_codecs::push::PushOwnedVariant as B;
+                then_judge(
+                    judge_chain(C::Network(N::Push), push.extensions.as_deref()),
+                    || match &push.body {
+                        B::CodecZenohMsgPut(put) | B::Default { body: put, .. } => {
+                            judge_chain(C::Zenoh(Z::Put), put.extensions.as_deref())
+                        }
+                        B::CodecZenohMsgDel(del) => {
+                            judge_chain(C::Zenoh(Z::Del), del.extensions.as_deref())
+                        }
+                    },
+                )
+            }
+            #[cfg(feature = "codec-response")]
+            Self::Response(response) => {
+                use wz_codecs::reply::ReplyOwnedVariant as R;
+                use wz_codecs::response::ResponseOwnedVariant as B;
+                then_judge(
+                    judge_chain(C::Network(N::Response), response.extensions.as_deref()),
+                    || match &response.body {
+                        B::CodecZenohReply(reply) | B::Default { body: reply, .. } => then_judge(
+                            judge_chain(C::Zenoh(Z::Reply), reply.extensions.as_deref()),
+                            || match &reply.body {
+                                R::CodecZenohMsgPut(put) | R::Default { body: put, .. } => {
+                                    judge_chain(C::Zenoh(Z::Put), put.extensions.as_deref())
+                                }
+                                R::CodecZenohMsgDel(del) => {
+                                    judge_chain(C::Zenoh(Z::Del), del.extensions.as_deref())
+                                }
+                            },
+                        ),
+                        B::CodecZenohErr(err) => {
+                            judge_chain(C::Zenoh(Z::Err), err.extensions.as_deref())
+                        }
+                    },
+                )
+            }
+            #[cfg(feature = "codec-response-final")]
+            Self::ResponseFinal(done) => {
+                judge_chain(C::Network(N::ResponseFinal), done.extensions.as_deref())
+            }
+            Self::Oam(oam) => judge_chain(C::Network(N::Oam), oam.extensions.as_deref()),
+            Self::Interest(interest) => {
+                judge_chain(C::Network(N::Interest), interest.extensions.as_deref())
+            }
+            #[cfg(feature = "codec-declare")]
+            Self::Declare(declare) => {
+                use crate::ext_admit::DeclarationKind as K;
+                use wz_codecs::declare::DeclareOwnedVariant as B;
+                then_judge(
+                    judge_chain(C::Network(N::Declare), declare.extensions.as_deref()),
+                    || {
+                        let (kind, chain) = match &declare.body {
+                            B::CodecZenohDeclKexpr(d) => (K::KeyExpr, d.extensions.as_deref()),
+                            B::CodecZenohUndeclKexpr(d) => {
+                                (K::UndeclKeyExpr, d.extensions.as_deref())
+                            }
+                            B::CodecZenohDeclSubscriber(d) => {
+                                (K::Subscriber, d.extensions.as_deref())
+                            }
+                            B::CodecZenohUndeclSubscriber(d) => {
+                                (K::UndeclSubscriber, d.extensions.as_deref())
+                            }
+                            B::CodecZenohDeclQueryable(d) => {
+                                (K::Queryable, d.extensions.as_deref())
+                            }
+                            B::CodecZenohUndeclQueryable(d) => {
+                                (K::UndeclQueryable, d.extensions.as_deref())
+                            }
+                            B::CodecZenohDeclToken(d) => (K::Token, d.extensions.as_deref()),
+                            B::CodecZenohUndeclToken(d) => {
+                                (K::UndeclToken, d.extensions.as_deref())
+                            }
+                            B::CodecZenohDeclFinal(d) | B::Default { body: d, .. } => {
+                                (K::Final, d.extensions.as_deref())
+                            }
+                        };
+                        judge_chain(C::Declaration(kind), chain)
+                    },
+                )
+            }
+            Self::Unknown { .. } => ExtAdmission::Unjudged,
+        }
+    }
+}
+
+/// The batch a participant may act on: `messages` itself, or the refusal of the
+/// first message whose chains a conforming participant must refuse the whole batch
+/// for ([`NetworkMessage::ext_admission`]). Out of line: it is called from each
+/// receive path of a decoded batch, none of which holds anything to judge one
+/// with.
+///
+/// The decode itself reads such a batch, so a capture sees it; this is the one
+/// place a participant stops it.
+#[inline(never)]
+pub fn refuse_unknown_mandatory_ext(
+    messages: Vec<NetworkMessage>,
+) -> Result<Vec<NetworkMessage>, crate::parse_error::InboundParseError> {
+    for message in &messages {
+        if let crate::ext_admit::ExtAdmission::UnknownMandatory { eid } = message.ext_admission() {
+            return Err(crate::parse_error::InboundParseError::UnknownMandatoryExt { eid });
+        }
+    }
+    Ok(messages)
+}
+
 /// R74 — decode a `Frame.payload` byte slice into the in-order batch
 /// of network messages it carries.
 ///
@@ -1809,5 +1987,287 @@ mod attachment_identity_tests {
                 "{header:#04x} shares only the id with the attachment"
             );
         }
+    }
+}
+
+// The mandatory-extension rule for the network messages and the zenoh bodies:
+// every header a chain entry can have, on every chain, against the extensions
+// upstream's reader of that message defines. A message whose chain holds an
+// extension its reader does not define, with the M bit set, is refused whole
+// (`commons/zenoh-codec/src/common/extension.rs` @ `if u.is_mandatory() {`), and
+// one with the M bit clear is skipped. The extension is told by its identity,
+// the header without the chain flag, so a defined id in another shape is another
+// extension.
+#[cfg(all(
+    test,
+    feature = "codec-push",
+    feature = "codec-request",
+    feature = "codec-response",
+    feature = "codec-response-final",
+    feature = "codec-declare",
+    feature = "declare-final"
+))]
+mod mandatory_extension_rule_tests {
+    use super::*;
+    use crate::ext_admit::ExtAdmission;
+    use crate::wire::WireStorage;
+    use sce_forge_runtime::codec::{CodecStorage, SceByteBuf};
+    use wz_codecs::ext_entry::{ExtEntryOwned, ExtEntryOwnedVariant};
+    use wz_codecs::ext_unit::ExtUnit;
+    use wz_codecs::ext_zbuf::ExtZbufOwned;
+    use wz_codecs::ext_zint::ExtZint;
+
+    /// Every header a chain entry can have without the chain flag, with the
+    /// reserved encoding left out: it has no body shape to build.
+    fn headers() -> impl Iterator<Item = u8> {
+        (0u8..0x80).filter(|h| (h >> 5) & 3 != 3)
+    }
+
+    /// One generic entry with `header` and the body its encoding needs.
+    fn entry<S: CodecStorage>(header: u8) -> ExtEntryOwned<S> {
+        let body = match (header >> 5) & 3 {
+            0 => ExtEntryOwnedVariant::CodecZenohExtUnit(ExtUnit::default()),
+            1 => ExtEntryOwnedVariant::CodecZenohExtZint(ExtZint { value: 0 }),
+            _ => ExtEntryOwnedVariant::CodecZenohExtZbuf(ExtZbufOwned {
+                value_len: 0,
+                value: <S::Bytes<32> as SceByteBuf>::from_slice(&[]).expect("an empty body"),
+            }),
+        };
+        ExtEntryOwned { header, body }
+    }
+
+    /// One Query-chain entry: the generic one moved into the Query's own kind.
+    fn query_entry(header: u8) -> crate::wire::parts::QueryExtEntryOwned {
+        crate::ext_view::query_ext_from_generic(entry::<WireStorage>(header))
+    }
+
+    /// The verdict upstream's reader gives a chain of this one entry: refused when
+    /// it is mandatory and the message does not define it.
+    fn expected(defined_mandatory: &[u8], header: u8) -> ExtAdmission {
+        if header & crate::ext_header::EXT_FLAG_M != 0 && !defined_mandatory.contains(&header) {
+            ExtAdmission::UnknownMandatory { eid: header }
+        } else {
+            ExtAdmission::Admissible
+        }
+    }
+
+    /// Runs every header through `place`, which puts it on one chain of one
+    /// message, and checks the verdict against `defined_mandatory`.
+    fn every_header(name: &str, defined_mandatory: &[u8], place: impl Fn(u8) -> NetworkMessage) {
+        for header in headers() {
+            assert_eq!(
+                place(header).ext_admission(),
+                expected(defined_mandatory, header),
+                "{name}: {header:#04x}"
+            );
+        }
+    }
+
+    /// The node id (`zextz64!(0x3, true)`) and the target (`zextz64!(0x4, true)`).
+    const NODE_ID: u8 = 0x33;
+    const TARGET: u8 = 0x34;
+    /// The wire expression (`zextzbuf!(0x0f, true)`).
+    const WIRE_EXPR: u8 = 0x5F;
+    /// The shared-memory marker of a `Put` and an `Err` (`zextunit!(0x2, true)`),
+    /// defined for a build that reads it: upstream compiles its reader arm only
+    /// with `shared-memory`, and wz reads it only with `transport-shm`.
+    const SHM: &[u8] = if cfg!(feature = "transport-shm") {
+        &[0x12]
+    } else {
+        &[]
+    };
+
+    fn push(place: impl Fn(&mut crate::wire::PushOwned, u8)) -> impl Fn(u8) -> NetworkMessage {
+        move |header| {
+            let mut push = crate::push_build::build_push_literal("k", b"v").unwrap();
+            place(&mut push, header);
+            NetworkMessage::Push(Box::new(push))
+        }
+    }
+
+    #[test]
+    fn a_push_defines_the_node_id_and_its_put_the_shm_marker() {
+        every_header(
+            "push envelope",
+            &[NODE_ID],
+            push(|p, h| p.extensions = Some(alloc::vec![entry(h)])),
+        );
+        every_header(
+            "push put body",
+            SHM,
+            push(|p, h| match &mut p.body {
+                crate::wire::PushOwnedVariant::CodecZenohMsgPut(put) => {
+                    put.extensions = Some(alloc::vec![entry(h)]);
+                }
+                other => panic!("a literal push carries a Put, got {other:?}"),
+            }),
+        );
+    }
+
+    #[test]
+    fn a_push_del_defines_no_mandatory_extension() {
+        every_header("push del body", &[], |header| {
+            let mut push = crate::push_build::build_push_del_literal("k").unwrap();
+            match &mut push.body {
+                crate::wire::PushOwnedVariant::CodecZenohMsgDel(del) => {
+                    del.extensions = Some(alloc::vec![entry(header)]);
+                }
+                other => panic!("a literal del carries a Del, got {other:?}"),
+            }
+            NetworkMessage::Push(Box::new(push))
+        });
+    }
+
+    #[test]
+    fn a_request_defines_the_node_id_and_the_target_and_its_query_nothing() {
+        let request = || crate::request_build::build_request_query(1, 0, Some("k")).unwrap();
+        every_header("request envelope", &[NODE_ID, TARGET], |header| {
+            let mut request = request();
+            request.extensions = Some(alloc::vec![entry(header)]);
+            NetworkMessage::Request(Box::new(request))
+        });
+        every_header("request query body", &[], |header| {
+            let mut request = request();
+            match &mut request.body {
+                crate::wire::RequestOwnedVariant::CodecZenohQuery(query) => {
+                    query.extensions = Some(alloc::vec![query_entry(header)]);
+                }
+                other => panic!("a query request carries a Query, got {other:?}"),
+            }
+            NetworkMessage::Request(Box::new(request))
+        });
+    }
+
+    #[test]
+    fn a_response_defines_nothing_mandatory_and_its_reply_put_and_err_the_shm_marker() {
+        let reply = || crate::response_build::build_response_reply_literal(1, "k", b"v").unwrap();
+        every_header("response envelope", &[], |header| {
+            let mut response = reply();
+            response.extensions = Some(alloc::vec![entry(header)]);
+            NetworkMessage::Response(Box::new(response))
+        });
+        every_header("reply envelope", &[], |header| {
+            let mut response = reply();
+            match &mut response.body {
+                crate::wire::ResponseOwnedVariant::CodecZenohReply(reply) => {
+                    reply.extensions = Some(alloc::vec![entry(header)]);
+                }
+                other => panic!("a reply carries a Reply, got {other:?}"),
+            }
+            NetworkMessage::Response(Box::new(response))
+        });
+        every_header("reply put body", SHM, |header| {
+            let mut response = reply();
+            match &mut response.body {
+                crate::wire::ResponseOwnedVariant::CodecZenohReply(reply) => {
+                    match &mut reply.body {
+                        crate::wire::parts::ReplyOwnedVariant::CodecZenohMsgPut(put) => {
+                            put.extensions = Some(alloc::vec![entry(header)]);
+                        }
+                        other => panic!("a literal reply carries a Put, got {other:?}"),
+                    }
+                }
+                other => panic!("a reply carries a Reply, got {other:?}"),
+            }
+            NetworkMessage::Response(Box::new(response))
+        });
+        every_header("err body", SHM, |header| {
+            let mut response =
+                crate::response_build::build_response_err_literal(1, "k", b"e").unwrap();
+            match &mut response.body {
+                crate::wire::ResponseOwnedVariant::CodecZenohErr(err) => {
+                    err.extensions = Some(alloc::vec![entry(header)]);
+                }
+                other => panic!("an err response carries an Err, got {other:?}"),
+            }
+            NetworkMessage::Response(Box::new(response))
+        });
+    }
+
+    #[test]
+    fn the_small_envelopes_define_what_upstream_declares() {
+        every_header("response final", &[], |header| {
+            let mut done = crate::response_final_build::build_response_final(
+                1,
+                crate::sample::QosLevel::DEFAULT,
+            );
+            done.extensions = Some(alloc::vec![entry(header)]);
+            NetworkMessage::ResponseFinal(done)
+        });
+        every_header("oam", &[], |header| {
+            let mut oam = wz_codecs::oam::Oam::default().try_into_owned().unwrap();
+            oam.extensions = Some(alloc::vec![entry(header)]);
+            NetworkMessage::Oam(oam)
+        });
+        every_header("interest", &[NODE_ID], |header| {
+            let mut interest = crate::interest_build::build_interest_final(1);
+            interest.extensions = Some(alloc::vec![entry(header)]);
+            NetworkMessage::Interest(interest)
+        });
+    }
+
+    #[test]
+    fn a_declare_defines_the_node_id_and_only_an_undeclare_the_wire_expression() {
+        every_header("declare envelope", &[NODE_ID], |header| {
+            let mut declare = crate::declare_build::build_declare_final();
+            declare.extensions = Some(alloc::vec![entry(header)]);
+            NetworkMessage::Declare(Box::new(declare))
+        });
+        every_header("undeclare subscriber", &[WIRE_EXPR], |header| {
+            let mut declare = crate::declare_build::build_undeclare_subscriber(1);
+            match &mut declare.body {
+                wz_codecs::declare::DeclareOwnedVariant::CodecZenohUndeclSubscriber(d) => {
+                    d.extensions = Some(alloc::vec![entry(header)]);
+                }
+                other => panic!("an undeclare carries its body, got {other:?}"),
+            }
+            NetworkMessage::Declare(Box::new(declare))
+        });
+        every_header("declare subscriber", &[], |header| {
+            let mut declare =
+                crate::declare_build::build_declare_subscriber(1, 0, Some("k")).unwrap();
+            match &mut declare.body {
+                wz_codecs::declare::DeclareOwnedVariant::CodecZenohDeclSubscriber(d) => {
+                    d.extensions = Some(alloc::vec![entry(header)]);
+                }
+                other => panic!("a declare carries its body, got {other:?}"),
+            }
+            NetworkMessage::Declare(Box::new(declare))
+        });
+    }
+
+    /// The decode reads such a batch, so a capture sees it, and the participant
+    /// seam refuses it whole, as it refuses a batch that does not decode. That is
+    /// wz's rule for every batch it cannot act on, and it is narrower than
+    /// upstream's by the messages BEFORE the offender: upstream's frame reader
+    /// hands those on one at a time (`io/zenoh-transport/src/unicast/universal/rx.rs`
+    /// @ `for mut msg in frame {`) and then fails the rest of the batch
+    /// (`.map_err(|_| zerror!("{}: decoding error", link.link))?;` in the same
+    /// file). The difference is the same for both causes and is not this rule's.
+    #[test]
+    fn a_batch_with_a_mandatory_look_alike_decodes_and_is_refused_by_the_participant() {
+        // A Push whose Put carries the node-id look-alike `0x23` (optional) and
+        // one carrying `0x13` (a mandatory unit, defined by no one).
+        let wire_of = |header: u8| {
+            let mut push = crate::push_build::build_push_literal("k", b"v").unwrap();
+            match &mut push.body {
+                crate::wire::PushOwnedVariant::CodecZenohMsgPut(put) => {
+                    put.extensions = Some(alloc::vec![entry(header)]);
+                    put.header |= 0x80;
+                }
+                _ => unreachable!(),
+            }
+            use wz_codecs_test_support::TestWire as _;
+            push.wire()
+        };
+        let optional = wire_of(0x03);
+        let parsed = parse_frame_payload(&optional).expect("the optional one decodes");
+        assert!(refuse_unknown_mandatory_ext(parsed).is_ok());
+        let mandatory = wire_of(0x13);
+        let parsed = parse_frame_payload(&mandatory).expect("the decode reads the mandatory one");
+        assert_eq!(
+            refuse_unknown_mandatory_ext(parsed).unwrap_err(),
+            crate::parse_error::InboundParseError::UnknownMandatoryExt { eid: 0x13 }
+        );
     }
 }

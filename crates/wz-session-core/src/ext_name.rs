@@ -286,7 +286,11 @@ type Row = (u8, bool, u8, &'static str);
 
 /// A row's matching key — zenoh's `iext::id()` composition, run through
 /// [`ext_eid`] so it is the same value a header byte reduces to.
-const fn row_eid((id, mandatory, enc, _): &Row) -> u8 {
+///
+/// Crate-visible because the mandatory-extension rule
+/// ([`crate::ext_admit::judge_ext_chain`]) matches a received identity against
+/// these same rows: one key for naming an extension and for admitting it.
+pub(crate) const fn row_eid((id, mandatory, enc, _): &Row) -> u8 {
     let m = if *mandatory { EXT_FLAG_M } else { 0 };
     ext_eid(*id | m | *enc)
 }

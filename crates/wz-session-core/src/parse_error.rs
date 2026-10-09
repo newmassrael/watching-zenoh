@@ -49,8 +49,8 @@ pub enum InboundParseError {
     // Ungated: the passive observer reports an lz4 batch it could
     // not open in EVERY build, including one with no lz4 at all.
     CompressionFailed,
-    /// R2437 — an establishment ext chain carried an extension wz does not
-    /// recognise with the M (mandatory) bit SET.
+    /// R2437 — an ext chain carried an extension wz does not recognise on that
+    /// message with the M (mandatory) bit SET.
     ///
     /// The wire spec's whole point in giving each extension an M bit is that
     /// the sender declares whether a receiver may proceed without understanding
@@ -66,8 +66,10 @@ pub enum InboundParseError {
     /// is: nothing here is truncated or malformed. The bytes parse, and the
     /// SENDER has said they may not be ignored.
     UnknownMandatoryExt {
-        /// The unrecognised extension's id, so a refusal names what it refused.
-        ext_id: u8,
+        /// The unrecognised extension's IDENTITY (its header without the chain
+        /// flag), so a refusal names what it refused: the id alone could not tell
+        /// the unknown mandatory `0x58` from the region name `0x48`.
+        eid: u8,
     },
 }
 
@@ -87,10 +89,10 @@ impl fmt::Display for InboundParseError {
             Self::CompressionFailed => {
                 write!(f, "inbound compressed batch failed lz4 decompression")
             }
-            Self::UnknownMandatoryExt { ext_id } => write!(
+            Self::UnknownMandatoryExt { eid } => write!(
                 f,
-                "inbound establishment ext {:#04x} is unknown and MANDATORY (M bit set)",
-                ext_id
+                "inbound ext {:#04x} is unknown and MANDATORY (M bit set)",
+                eid
             ),
         }
     }

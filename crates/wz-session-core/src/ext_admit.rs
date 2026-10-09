@@ -90,24 +90,93 @@ pub enum ExtCarrier {
     Transport(u8),
     /// A scouting message (SCOUT / HELLO), keyed by its `S_MID_*`.
     Scouting(u8),
+    /// A network message's own chain: the envelope of a `Push`, a `Request`...
+    Network(NetworkEnvelope),
+    /// The chain of one declaration inside a `Declare`.
+    Declaration(DeclarationKind),
+    /// The chain of a zenoh body: a `Put`, a `Del`, a `Query`, a `Reply`, an `Err`.
+    Zenoh(ZenohBody),
 }
 
-/// The MANDATORY extensions each transport message's space defines, as
-/// extension IDENTITIES (`id | M | enc` — zenoh `iext::eid`, matched with
-/// [`ext_eid`]).
+/// The network messages whose OWN extension chain is judged. Named, and not keyed
+/// by `N_MID_*`, because those constants are gated on the codec that decodes the
+/// message and an observer judges a chain whatever it was built with.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NetworkEnvelope {
+    /// `Push`.
+    Push,
+    /// `Request`.
+    Request,
+    /// `Response`.
+    Response,
+    /// `ResponseFinal`.
+    ResponseFinal,
+    /// `Interest`.
+    Interest,
+    /// `Declare`.
+    Declare,
+    /// The network `OAM`.
+    Oam,
+}
+
+/// The declarations a `Declare` carries, each with a chain of its own.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DeclarationKind {
+    /// `DeclareKeyExpr`.
+    KeyExpr,
+    /// `UndeclareKeyExpr`.
+    UndeclKeyExpr,
+    /// `DeclareSubscriber`.
+    Subscriber,
+    /// `UndeclareSubscriber`.
+    UndeclSubscriber,
+    /// `DeclareQueryable`.
+    Queryable,
+    /// `UndeclareQueryable`.
+    UndeclQueryable,
+    /// `DeclareToken`.
+    Token,
+    /// `UndeclareToken`.
+    UndeclToken,
+    /// `DeclareFinal`.
+    Final,
+}
+
+/// The zenoh bodies that carry a chain.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ZenohBody {
+    /// `Put`.
+    Put,
+    /// `Del`.
+    Del,
+    /// `Query`.
+    Query,
+    /// `Reply`, whose own chain is the one beside its Put or Del.
+    Reply,
+    /// `Err`.
+    Err,
+}
+
+/// The extensions the reader of the message named by `carrier` declares, as
+/// [`crate::ext_name`]'s rows for that message: the one table of what each
+/// carrier declares, which names an extension for a reader and, here, decides
+/// whether a MANDATORY one is understood.
 ///
-/// Only the mandatory ones are listed, and that is a deliberate narrowing
-/// rather than an omission: a non-mandatory extension a receiver does not
-/// recognise is SKIPPED by both upstreams and by wz, so listing it here would
-/// add a line the rule below can never read. Every entry in these tables is
-/// load-bearing — it is the difference between a message being admitted and
-/// refused.
+/// DERIVED rather than kept beside that table. This module used to hold
+/// its own list of the mandatory identities per transport message, a second
+/// copy of rows [`crate::ext_name`] already spells one `zext*!` declaration at
+/// a time; extending the rule to the network messages and the zenoh bodies
+/// would have made it a second copy of most of that table. A row is matched by
+/// its whole identity (`id | M | enc`, zenoh `iext::eid`), so a mandatory
+/// extension is understood exactly when the carrier declares that identity,
+/// and a declared id in another shape is not.
 ///
-/// `None` means this build cannot name the message, so it has no space to
-/// judge against ([`ExtAdmission::Unjudged`]).
+/// `Some(&[])` is a message whose reader declares no extension at all, so any
+/// mandatory one on it is unknown. `None` means this build cannot name the
+/// message, so it has no space to judge against ([`ExtAdmission::Unjudged`]).
 ///
-/// Values are zenoh 1.5.0's own declarations, and the encoding bits are part
-/// of the identity (R311y505):
+/// The declarations it comes to, with the encoding bits part of the identity
+/// (R311y505):
 ///
 /// - INIT (`zenoh-protocol-1.5.0/src/transport/init.rs`, `mod ext`) declares
 ///   QoS / QoSLink / Shm / Auth / MultiLink / LowLatency / Compression / Patch
@@ -124,38 +193,99 @@ pub enum ExtCarrier {
 ///   `First` / `Drop` which are `zextunit!(_, false)`.
 /// - JOIN (`transport/join.rs`) — `QoS = zextzbuf!(0x1, true)` and
 ///   `Shm = zextzbuf!(0x2, true)`, both mandatory.
+/// - The NETWORK messages: `Push` and `Declare` and `Interest` define
+///   the node id (`zextz64!(0x3, true)`, `0x33`) and `Request` that and the target
+///   (`zextz64!(0x4, true)`, `0x34`); `Response`, `ResponseFinal` and the network
+///   `OAM` define no mandatory extension. A DECLARATION defines none either,
+///   except the three `Undeclare*` that carry the wire expression
+///   (`zextzbuf!(0x0f, true)`, `0x5F`). The ZENOH bodies define the shared-memory
+///   marker (`zextunit!(0x2, true)`, `0x12`) on `Put` and `Err` and nothing
+///   mandatory on `Del`, `Query` (whose marker `0x04` is not mandatory) or
+///   `Reply`. Each of these is one of the `::ID =>` arms of the message's
+///   reader in `commons/zenoh-codec`, kept because it is declared mandatory;
+///   the `Put` and `Err` marker is read only in a build with shared memory,
+///   which `reads_mandatory` below says.
 /// - SCOUT (`zenoh-protocol-1.5.0/src/scouting/scout.rs`) and HELLO
 ///   (`scouting/hello.rs`) declare no `mod ext` AT ALL, so the scouting
 ///   namespace's space is empty and any mandatory extension on one is unknown.
 ///   pico agrees by construction: `_z_scouting_message_decode_na`
 ///   (`src/protocol/codec/message.c:756`) ends in
 ///   `_z_msg_ext_skip_non_mandatories`, which refuses every mandatory entry.
-pub fn mandatory_ext_space(carrier: ExtCarrier) -> Option<&'static [u8]> {
-    /// `zextz64!(0x1, true)` = id 1 | `FLAG_M` | `ENC_Z64`. Transport OAM
-    /// declares the identical identity (`transport/oam.rs`), so the two
-    /// carriers below share this constant rather than each getting a name.
-    const FRAME_QOS: u8 = 0x01 | EXT_FLAG_M | crate::ext_header::EXT_ENC_Z64;
-    /// `zextzbuf!(0x1, true)` = id 1 | `FLAG_M` | `ENC_ZBUF`. Also
-    /// zenoh-pico's `_Z_MSG_EXT_ID_JOIN_QOS`
-    /// (`include/zenoh-pico/protocol/ext.h:46`), which is the same byte.
-    const JOIN_QOS: u8 = 0x01 | EXT_FLAG_M | crate::ext_header::EXT_ENC_ZBUF;
-    /// `zextzbuf!(0x2, true)`.
-    const JOIN_SHM: u8 = 0x02 | EXT_FLAG_M | crate::ext_header::EXT_ENC_ZBUF;
+pub fn declared_extensions(carrier: ExtCarrier) -> Option<&'static [(u8, bool, u8, &'static str)]> {
+    use crate::ext_name::{rows, ExtCarrier as Named};
+    let named = match carrier {
+        ExtCarrier::Transport(wire_const::T_MID_INIT) => Named::Init,
+        ExtCarrier::Transport(wire_const::T_MID_OPEN) => Named::Open,
+        ExtCarrier::Transport(wire_const::T_MID_CLOSE | wire_const::T_MID_KEEP_ALIVE) => {
+            Named::TransportPlain
+        }
+        ExtCarrier::Transport(wire_const::T_MID_OAM) => Named::TransportOam,
+        ExtCarrier::Transport(wire_const::T_MID_FRAME) => Named::Frame,
+        ExtCarrier::Transport(wire_const::T_MID_FRAGMENT) => Named::Fragment,
+        ExtCarrier::Transport(wire_const::T_MID_JOIN) => Named::Join,
+        // The scouting messages and four of the declarations read no extension
+        // (`extension::skip_all`, or `extension::skip` with no arm before it), so
+        // no row of the naming table stands for them.
+        ExtCarrier::Scouting(wire_const::S_MID_SCOUT | wire_const::S_MID_HELLO)
+        | ExtCarrier::Declaration(
+            DeclarationKind::KeyExpr
+            | DeclarationKind::UndeclKeyExpr
+            | DeclarationKind::Subscriber
+            | DeclarationKind::Token
+            | DeclarationKind::Final,
+        ) => return Some(&[]),
+        ExtCarrier::Network(NetworkEnvelope::Push) => Named::Push,
+        ExtCarrier::Network(NetworkEnvelope::Request) => Named::Request,
+        ExtCarrier::Network(NetworkEnvelope::Response) => Named::Response,
+        ExtCarrier::Network(NetworkEnvelope::ResponseFinal) => Named::ResponseFinal,
+        ExtCarrier::Network(NetworkEnvelope::Interest) => Named::Interest,
+        ExtCarrier::Network(NetworkEnvelope::Declare) => Named::Declare,
+        ExtCarrier::Network(NetworkEnvelope::Oam) => Named::NetworkOam,
+        ExtCarrier::Declaration(
+            DeclarationKind::UndeclSubscriber
+            | DeclarationKind::UndeclQueryable
+            | DeclarationKind::UndeclToken,
+        ) => Named::DeclareCommon,
+        ExtCarrier::Declaration(DeclarationKind::Queryable) => Named::DeclareQueryable,
+        ExtCarrier::Zenoh(ZenohBody::Put) => Named::Put,
+        ExtCarrier::Zenoh(ZenohBody::Del) => Named::Del,
+        ExtCarrier::Zenoh(ZenohBody::Query) => Named::Query,
+        ExtCarrier::Zenoh(ZenohBody::Reply) => Named::Reply,
+        ExtCarrier::Zenoh(ZenohBody::Err) => Named::Err,
+        ExtCarrier::Transport(_) | ExtCarrier::Scouting(_) => return None,
+    };
+    Some(rows(named))
+}
 
-    match carrier {
-        ExtCarrier::Transport(
-            wire_const::T_MID_INIT
-            | wire_const::T_MID_OPEN
-            | wire_const::T_MID_CLOSE
-            | wire_const::T_MID_KEEP_ALIVE,
-        ) => Some(&[]),
-        ExtCarrier::Transport(
-            wire_const::T_MID_OAM | wire_const::T_MID_FRAME | wire_const::T_MID_FRAGMENT,
-        ) => Some(&[FRAME_QOS]),
-        ExtCarrier::Transport(wire_const::T_MID_JOIN) => Some(&[JOIN_QOS, JOIN_SHM]),
-        ExtCarrier::Scouting(wire_const::S_MID_SCOUT | wire_const::S_MID_HELLO) => Some(&[]),
-        _ => None,
-    }
+/// Whether THIS build's participant reads the mandatory extension `eid` on the
+/// message `carrier` names, whose reader declares `declared`.
+///
+/// Declared is not always enough, and the one exception is upstream's own: the
+/// reader arm for the shared-memory marker of a `Put` and an `Err` is compiled
+/// only with the `shared-memory` feature (`commons/zenoh-codec/src/zenoh/put.rs`
+/// @ `ext::Shm::ID => {`, behind `#[cfg(feature = "shared-memory")]`, and the
+/// same in `commons/zenoh-codec/src/zenoh/err.rs` @ `ext::Shm::ID => {`), and a
+/// default build leaves that feature out. Such a reader
+/// refuses the marked message as carrying an unknown mandatory extension, which
+/// is the marker's whole purpose: a receiver that cannot map the segment must
+/// not read the descriptor in the payload slot as data. wz reads the marker in
+/// a build with `transport-shm`, and refuses it in one without, as upstream's
+/// default build does.
+fn reads_mandatory(
+    carrier: ExtCarrier,
+    declared: &[(u8, bool, u8, &'static str)],
+    eid: u8,
+) -> bool {
+    let is_declared = declared
+        .iter()
+        .any(|row| crate::ext_name::row_eid(row) == eid);
+    let compiled_in = match carrier {
+        ExtCarrier::Zenoh(ZenohBody::Put | ZenohBody::Err) => {
+            eid != crate::ext_header::body_eid::SHM || cfg!(feature = "transport-shm")
+        }
+        _ => true,
+    };
+    is_declared && compiled_in
 }
 
 /// Judge a decoded extension chain for the message named by `carrier`.
@@ -169,12 +299,12 @@ pub fn mandatory_ext_space(carrier: ExtCarrier) -> Option<&'static [u8]> {
 /// `skip_all` loop and pico's `_z_msg_ext_decode_iter` both abort at the first
 /// unknown mandatory extension rather than surveying the rest.
 pub fn judge_ext_chain(carrier: ExtCarrier, headers: impl IntoIterator<Item = u8>) -> ExtAdmission {
-    let Some(space) = mandatory_ext_space(carrier) else {
+    let Some(declared) = declared_extensions(carrier) else {
         return ExtAdmission::Unjudged;
     };
     for header in headers {
         let eid = ext_eid(header);
-        if (eid & EXT_FLAG_M) != 0 && !space.contains(&eid) {
+        if (eid & EXT_FLAG_M) != 0 && !reads_mandatory(carrier, declared, eid) {
             return ExtAdmission::UnknownMandatory { eid };
         }
     }
@@ -298,6 +428,76 @@ mod tests {
             ExtCarrier::Scouting(wire_const::S_MID_SCOUT),
         ] {
             assert_eq!(judge_ext_chain(mid, []), ExtAdmission::Admissible);
+        }
+    }
+
+    /// Every carrier admits EXACTLY the mandatory identities its reader
+    /// declares, and refuses every other header with the M bit set, the reserved
+    /// encoding included. The admitted bytes are literals read from the
+    /// declarations, on purpose: the rule derives them from the naming table, and
+    /// a test that derived them the same way would only prove the derivation
+    /// agrees with itself.
+    ///
+    /// The shared-memory marker of a `Put` and an `Err` (`0x12`) is admitted only
+    /// in a build that reads it, as upstream's reader arm for it is compiled only
+    /// with its `shared-memory` feature (`commons/zenoh-codec/src/zenoh/put.rs` @
+    /// `ext::Shm::ID => {`).
+    #[test]
+    fn every_carrier_admits_exactly_the_mandatory_identities_its_reader_declares() {
+        use DeclarationKind as K;
+        use NetworkEnvelope as N;
+        use ZenohBody as Z;
+        let shm: &[u8] = if cfg!(feature = "transport-shm") {
+            &[0x12]
+        } else {
+            &[]
+        };
+        let cases: [(ExtCarrier, &[u8]); 31] = [
+            (ExtCarrier::Transport(wire_const::T_MID_INIT), &[]),
+            (ExtCarrier::Transport(wire_const::T_MID_OPEN), &[]),
+            (ExtCarrier::Transport(wire_const::T_MID_CLOSE), &[]),
+            (ExtCarrier::Transport(wire_const::T_MID_KEEP_ALIVE), &[]),
+            (ExtCarrier::Transport(wire_const::T_MID_OAM), &[0x31]),
+            (ExtCarrier::Transport(wire_const::T_MID_FRAME), &[0x31]),
+            (ExtCarrier::Transport(wire_const::T_MID_FRAGMENT), &[0x31]),
+            (ExtCarrier::Transport(wire_const::T_MID_JOIN), &[0x51, 0x52]),
+            (ExtCarrier::Scouting(wire_const::S_MID_SCOUT), &[]),
+            (ExtCarrier::Scouting(wire_const::S_MID_HELLO), &[]),
+            (ExtCarrier::Network(N::Push), &[0x33]),
+            (ExtCarrier::Network(N::Request), &[0x33, 0x34]),
+            (ExtCarrier::Network(N::Response), &[]),
+            (ExtCarrier::Network(N::ResponseFinal), &[]),
+            (ExtCarrier::Network(N::Interest), &[0x33]),
+            (ExtCarrier::Network(N::Declare), &[0x33]),
+            (ExtCarrier::Network(N::Oam), &[]),
+            (ExtCarrier::Declaration(K::KeyExpr), &[]),
+            (ExtCarrier::Declaration(K::UndeclKeyExpr), &[]),
+            (ExtCarrier::Declaration(K::Subscriber), &[]),
+            (ExtCarrier::Declaration(K::UndeclSubscriber), &[0x5F]),
+            (ExtCarrier::Declaration(K::Queryable), &[]),
+            (ExtCarrier::Declaration(K::UndeclQueryable), &[0x5F]),
+            (ExtCarrier::Declaration(K::Token), &[]),
+            (ExtCarrier::Declaration(K::UndeclToken), &[0x5F]),
+            (ExtCarrier::Declaration(K::Final), &[]),
+            (ExtCarrier::Zenoh(Z::Put), shm),
+            (ExtCarrier::Zenoh(Z::Del), &[]),
+            (ExtCarrier::Zenoh(Z::Query), &[]),
+            (ExtCarrier::Zenoh(Z::Reply), &[]),
+            (ExtCarrier::Zenoh(Z::Err), shm),
+        ];
+        for (carrier, admitted) in cases {
+            for eid in (0u8..0x80).filter(|h| h & EXT_FLAG_M != 0) {
+                let want = if admitted.contains(&eid) {
+                    ExtAdmission::Admissible
+                } else {
+                    ExtAdmission::UnknownMandatory { eid }
+                };
+                assert_eq!(
+                    judge_ext_chain(carrier, [eid]),
+                    want,
+                    "{carrier:?}: {eid:#04x}"
+                );
+            }
         }
     }
 }

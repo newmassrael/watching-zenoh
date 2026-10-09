@@ -603,18 +603,15 @@ fn parse_unit(
         wire_const::T_MID_INIT => {
             let body = InitBody::decode(&mut cursor, (flags >> 6) & 1, (flags >> 5) & 1)?
                 .try_into_owned()?;
+            // The M (mandatory) bit is judged at the participant seam like every
+            // other transport message's ([`InboundFrame::ext_admission`]), by the
+            // extension's identity: the decode reads the chain, so a capture
+            // sees an extension nobody here implements. R2437 refused it HERE
+            // instead, by the 4-bit id against a list of ids, which let a known
+            // id with the mandatory bit set (`0x58`, the region name as a
+            // mandatory ZBuf) through and refused an unknown one at the decode.
             let extensions = if has_ext {
-                let entries = decode_ext_chain(&mut cursor)?;
-                // R2437 — the M (mandatory) bit, enforced for the first time on
-                // a wz production path. Applied HERE because this arm is the
-                // single site both InitSyn and InitAck reach, so the rule cannot
-                // hold on one role and not the other; upstream likewise enforces
-                // it in the codec, beneath either FSM.
-                crate::ext_chain::reject_unknown_mandatory_ext(
-                    &entries,
-                    &crate::ext_header::ESTABLISHMENT_EXT_IDS,
-                )?;
-                entries
+                decode_ext_chain(&mut cursor)?
             } else {
                 Vec::new()
             };
@@ -1625,6 +1622,69 @@ mod frame_qos_identity_tests {
                 crate::qos::Priority::DEFAULT,
                 "{header:#04x} shares only the id with the transport QoS"
             );
+        }
+    }
+}
+
+// An Init declares no MANDATORY extension, so one with the M bit set is refused
+// whatever its id: upstream's reader matches `iext::eid(ext)` against the nine
+// it knows, every one of them `zextX!(_, false)`
+// (`commons/zenoh-codec/src/transport/init.rs` @ `match iext::eid(ext) {`), and
+// `extension::skip` refuses what is left when it is mandatory. The decode arm
+// used to refuse by the 4-bit id against a list of ids, which let `0x58`, the
+// region name as a mandatory ZBuf, through as a KNOWN extension; the decode now
+// reads every chain and the participant seam judges it, as for every other
+// transport message.
+#[cfg(all(test, feature = "codec-init-body", feature = "session-unicast"))]
+mod init_mandatory_identity_tests {
+    use super::*;
+
+    /// An InitSyn with one extension chain entry: header, then the body the
+    /// header's encoding needs (nothing, a zint 0, a ZBuf of length 0).
+    fn init_with(header: u8) -> Vec<u8> {
+        // version, cbyte (zid_len-1 = 0, whatami peer), the 1-byte zid.
+        let mut wire = alloc::vec![
+            wire_const::T_MID_INIT | wire_const::FLAG_T_Z,
+            0x09,
+            0x01,
+            0xAA
+        ];
+        wire.push(header);
+        if (header >> 5) & 3 != 0 {
+            wire.push(0x00);
+        }
+        wire
+    }
+
+    #[test]
+    fn a_mandatory_extension_is_refused_on_an_init_whatever_its_id() {
+        use crate::ext_admit::ExtAdmission;
+        use crate::session_fsm_unicast::SessionFsmUnicastEvent as E;
+        for id in 0u8..16 {
+            for enc in 0u8..3 {
+                let optional = id | (enc << 5);
+                let mandatory = optional | crate::ext_header::EXT_FLAG_M;
+                let frame = parse_inbound(&init_with(optional)).expect("the optional one decodes");
+                assert_eq!(
+                    frame.ext_admission(),
+                    ExtAdmission::Admissible,
+                    "{optional:#04x} is not mandatory and is skipped"
+                );
+                assert!(matches!(
+                    inbound_to_fsm_event(&frame),
+                    Some(E::InitSynReceived)
+                ));
+                let frame = parse_inbound(&init_with(mandatory)).expect("the decode reads it");
+                assert_eq!(
+                    frame.ext_admission(),
+                    ExtAdmission::UnknownMandatory { eid: mandatory },
+                    "{mandatory:#04x} is mandatory and unknown"
+                );
+                assert!(matches!(
+                    inbound_to_fsm_event(&frame),
+                    Some(E::FramingError)
+                ));
+            }
         }
     }
 }
