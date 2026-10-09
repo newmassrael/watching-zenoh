@@ -1105,7 +1105,12 @@ HOST_GATED_CI_TARGETS: dict[str, str] = {
 # and damaged input) carried no `wz-proves` tag, so A4-4 read them as declaring nothing and the
 # census did not count them. Tagged `transport-link-serial codec-parity partial`, each is a link
 # to the real pico code. Measured by `scripts/audit-crossimpl-proof.sh`.
-FOREIGN_ADJUDICATOR_LINKS = 1054
+# Debt 873 side finding -- 1054 -> 1057, RISING by three: the two scouting legs re-run in a
+# network namespace with NO default route, one in `pico_c_examples_on_wz_capi_dropin.rs` (tagged
+# `api-compat-pico` and `scouting-active`, each adjudicated by the real pico `z_scout`) and one in
+# `zenoh_c_scouting_twice_and_diff.rs` (`api-compat-c`, adjudicated by the real `libzenohc`).
+# Measured by `scripts/audit-crossimpl-proof.sh`.
+FOREIGN_ADJUDICATOR_LINKS = 1057
 
 # ── Execution disclosure ────────────────────────────────────────────────────────
 #

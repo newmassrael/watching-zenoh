@@ -48,7 +48,7 @@ use std::sync::atomic::{AtomicU16, Ordering};
 use wz_integration_tests::bounded::{BoundedChild as _, BoundedOutput as _};
 use wz_integration_tests::common::{
     assert_zenoh_c_arm_pairing, compile_zenoh_c_example, wz_capi_c_cdylib, zenoh_c_oracle,
-    zenoh_c_shared_library, PortReservation,
+    zenoh_c_shared_library, NetnsPair, PortReservation,
 };
 
 /// A node: it opens a session of the given mode on the endpoints stated (a port of 0 states none)
@@ -1181,6 +1181,48 @@ fn a_node_answers_a_scout_with_the_hello_the_real_library_sends_on_wz_and_libzen
              Hello the real library's does"
         );
     }
+}
+
+/// The two directions of scouting, scouting and being found, in a network namespace with NO
+/// DEFAULT ROUTE.
+///
+/// A host without one is an isolated lab, a container with no gateway or a board with only a
+/// link-local address. Upstream joins the scouting group on each interface address in turn and
+/// goes on past a join that fails (`zenoh/src/net/runtime/orchestrator.rs` @
+/// `Unable to join multicast group {} on interface {}: {}`), and its client scout needs no group
+/// socket at all. wz joined on the interface the kernel's default route names, and without a
+/// route that join was refused: a node that scouted ended its open, and a node that listened did
+/// not answer (`left: []` against `["hello whatami=peer locators=[tcp/127.0.0.1:PORT]"]` in the
+/// answering leg, measured before the change). The pico drop-in has its own copy of this witness
+/// (`pico_zscout_legs_hold_in_a_namespace_with_no_default_route`).
+///
+/// The legs are the ones above, re-run as they are inside the namespace through this test binary
+/// ([`NetnsPair::rerun_tests_inside`], which passes this process's environment on, so the legs
+/// find the oracle where this one did), and what is compared there is what is compared on the
+/// host. The namespace is `NetnsPair`'s: `lo` and one veth end, and no route out.
+// wz-proves: api-compat-c zenoh-c->wz partial
+#[test]
+#[ignore = "reads a zenoh-c oracle and needs a network namespace; run by run-ci Layer C1cc after \
+            probing for a namespace"]
+fn the_scouting_legs_hold_in_a_namespace_with_no_default_route() {
+    if oracle_or_note().is_none() {
+        return;
+    }
+    let netns = NetnsPair::up("zcnoroute", "10.251.13.1/30", "10.251.13.2/30");
+    let routes = netns.default_routes();
+    assert!(
+        routes.is_empty(),
+        "the namespace must have no default route for this leg to say what it says: {routes}"
+    );
+    // The answering leg walks ten node shapes on two libraries, 132 s measured in the
+    // namespace; each leg's bound is a stall bound several times that.
+    netns.rerun_tests_inside(
+        &[
+            "a_node_with_no_endpoint_finds_a_router_by_scouting_identically_on_wz_and_libzenohc",
+            "a_node_answers_a_scout_with_the_hello_the_real_library_sends_on_wz_and_libzenohc",
+        ],
+        std::time::Duration::from_secs(600),
+    );
 }
 
 /// A real node with no endpoint at all finds a node of `built`, which listens on loopback, and the

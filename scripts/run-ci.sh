@@ -10697,6 +10697,12 @@ layer_c1q_multicast_glue() {
     # Linux and `locator-iface` too. PRINTED.
     _runci_guarded_test C1q 10 cargo test -p wz-runtime-tokio --features transport-multicast,transport-link-udp,locator-iface --lib udp_multicast_config --quiet \
         || return 1
+    # Debt 873 side finding -- a scouting socket goes on past a refused IPv4 membership and
+    # a multicast link does not. Its own leg because the one above builds no scouting
+    # feature, and the test is gated on one: without this it would run in nobody's lane.
+    # Linux only (it crowds a socket past `igmp_max_memberships`). PRINTED: 1.
+    _runci_guarded_test C1q 1 cargo test -p wz-runtime-tokio --features transport-multicast,scouting-active,scouting-responder --lib a_scouting_socket_goes_on_past_a_membership_the_kernel_refuses --quiet \
+        || return 1
 }
 
 # ─── Layer C1m — wz-session-lwip isolated host test + clippy ─────────
@@ -17819,6 +17825,25 @@ layer_z_zenohd_interop() {
         --test pico_c_examples_on_wz_capi_dropin \
         pico_zscout_source_on_wz_capi_reports_every_zenohd_on_the_group \
         -- --ignored --quiet --test-threads=1 || return 1
+    # Debt 873 side finding -- the two scouting legs above, re-run in a namespace with NO
+    # default route (wz found nothing there while the real pico found both routers). Behind
+    # the same namespace probe Layer M uses: 2 = this host cannot build one (a skip unless the
+    # lane is armed), 4 = the tools are here and the build broke (never a skip).
+    local z_netns_rc=0
+    # shellcheck source=scripts/lib/netns-topology.sh
+    (source scripts/lib/netns-topology.sh && netns_topology_probe) || z_netns_rc=$?
+    if (( z_netns_rc == 2 )); then
+        _z_unavailable "no network namespace on this host (no ip, or no non-interactive sudo)" \
+            || return 1
+    elif (( z_netns_rc != 0 )); then
+        echo "  Layer Z FAIL: netns-topology probe rc=$z_netns_rc (4 = the build broke)" >&2
+        return 1
+    else
+        _runci_guarded_test Z 1 env WZ_ZENOHD_BIN="$zenohd" cargo test -p wz-integration-tests \
+            --test pico_c_examples_on_wz_capi_dropin \
+            pico_zscout_legs_hold_in_a_namespace_with_no_default_route \
+            -- --ignored --quiet --test-threads=1 || return 1
+    fi
     # R311y533 -- the LIVELINESS SNAPSHOT leg, moved here from Layer E because
     # its old topology was one the REFERENCE cannot serve. Measured: the real
     # zenoh-pico z_get_liveliness against the real zenoh-pico z_liveliness, wired
@@ -20486,6 +20511,28 @@ layer_c1cc_api_compat_c() {
         --test-threads=1 \
         --exact a_real_node_that_scouts_finds_a_listening_node_identically_on_wz_and_libzenohc \
         || return 1
+    # Debt 873 side finding -- the scouting legs (a node that scouts, a node that is found)
+    # re-run in a namespace with NO default route, where wz's group join was refused and the
+    # node neither scouted nor answered. Behind the namespace probe (2 = this host cannot
+    # build one, a skip unless the lane is armed; 4 = the build broke, never a skip).
+    local c1cc_netns_rc=0
+    # shellcheck source=scripts/lib/netns-topology.sh
+    (source scripts/lib/netns-topology.sh && netns_topology_probe) || c1cc_netns_rc=$?
+    if (( c1cc_netns_rc == 2 )) && [[ -z "${WZ_C1CC_REQUIRE:-}" ]]; then
+        echo "  Layer C1cc SKIP scouting without a default route (no network namespace here)"
+    elif (( c1cc_netns_rc != 0 )); then
+        echo "  Layer C1cc FAIL: netns-topology probe rc=$c1cc_netns_rc (4 = the build broke;" \
+             "2 under WZ_C1CC_REQUIRE = this job was meant to provision it)" >&2
+        return 1
+    else
+        _runci_guarded_test \
+            "C1cc the_scouting_legs_hold_in_a_namespace_with_no_default_route" 1 \
+            cargo test -p wz-integration-tests \
+            --test zenoh_c_scouting_twice_and_diff -- --ignored --quiet \
+            --test-threads=1 \
+            --exact the_scouting_legs_hold_in_a_namespace_with_no_default_route \
+            || return 1
+    fi
     # R3073 -- a real peer that DIALS a node at an endpoint opens at once, whichever library the
     # node is. The row that isolates the initial interest's Final: nothing was scouted, so what
     # ends the open is what the other end sends on connecting. 10 ms against a real peer and,

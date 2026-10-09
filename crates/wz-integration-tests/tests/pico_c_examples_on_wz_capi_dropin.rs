@@ -102,7 +102,7 @@ use wz_integration_tests::common::{
     run_query_until_answered, spawn_zenohd_multicast_scouting_on_any_interface,
     wait_for_capture_alive, wait_for_exit, wait_for_substring, wait_for_tcp_accept_alive,
     zenoh_pico_cli_binary, zenoh_pico_include_dirs, zenoh_pico_include_dirs_single_threaded,
-    zenoh_pico_library_dir, zenohd_binary, ChildGuard, PortReservation, QueryAttempts,
+    zenoh_pico_library_dir, zenohd_binary, ChildGuard, NetnsPair, PortReservation, QueryAttempts,
 };
 
 /// How many one-shot queries the declaration-propagation window may eat.
@@ -2726,6 +2726,46 @@ fn pico_zscout_source_on_wz_capi_reports_every_zenohd_on_the_group() {
             ),
         );
     }
+}
+
+/// The two scouting legs, run in a network namespace that has NO DEFAULT ROUTE.
+///
+/// A host without a default route is an isolated lab, a container with no gateway,
+/// a link-local-only board. Upstream's scout, and zenoh-pico's, ask over one socket
+/// per interface and never need a route: neither binds a socket for the group, and
+/// zenoh's responder joins the group on each interface address and carries on past
+/// a join that fails (`zenoh/src/net/runtime/orchestrator.rs` @
+/// `Unable to join multicast group {} on interface {}: {}`). wz bound its group
+/// socket with a join on the interface the kernel's default route names, and a
+/// bind that could not do that ended the whole scout with nothing found. Measured:
+/// in such a namespace the real pico `z_scout` reported both routers and wz's
+/// printed `Did not find any zenoh process`, five runs in five. Open-debt item 873's
+/// side finding.
+///
+/// The legs are the ones above, re-run as they are inside the namespace through this
+/// test binary ([`NetnsPair::rerun_tests_inside`]), so what is compared there is exactly
+/// what is compared on the host. The namespace is `NetnsPair`'s: `lo` and one veth end,
+/// and no route out.
+// wz-proves: api-compat-pico wz->zenohd partial
+// wz-proves: scouting-active wz->zenohd partial
+#[test]
+#[ignore = "needs a network namespace and zenohd; run by run-ci Layer Z after probing for a namespace"]
+fn pico_zscout_legs_hold_in_a_namespace_with_no_default_route() {
+    let netns = NetnsPair::up("scoutnoroute", "10.251.12.1/30", "10.251.12.2/30");
+    let routes = netns.default_routes();
+    assert!(
+        routes.is_empty(),
+        "the namespace must have no default route for this leg to say what it says: {routes}"
+    );
+    // Each leg starts routers and runs two scouts against them, each child bounded on its
+    // own; the leg's bound is a stall bound over the whole of that.
+    netns.rerun_tests_inside(
+        &[
+            "pico_zscout_source_on_wz_capi_matches_the_real_pico_against_a_zenohd",
+            "pico_zscout_source_on_wz_capi_reports_every_zenohd_on_the_group",
+        ],
+        Duration::from_secs(600),
+    );
 }
 
 /// LEG 16 (`pico->wz`) — upstream's `z_sub_channel.c`, running on wz, receives

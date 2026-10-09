@@ -3032,7 +3032,7 @@ impl UdpDriver {
         // Steps 3-4, still on the socket2 handle: tokio wraps neither the v6
         // hop limit nor the v6 egress interface, so doing every step here keeps
         // the two families on one code path.
-        plan.join_groups(&raw)?;
+        plan.join_groups(&raw, rx_bind.skips_a_refused_v4_join())?;
         plan.loop_back(&raw)?;
         // R311y832 — the hop limit. Set on THIS socket because this
         // constructor's socket is the one that sends as well as receives (see
@@ -3811,6 +3811,36 @@ enum McastRxBind {
     Group,
 }
 
+#[cfg(all(
+    feature = "transport-link-udp",
+    any(
+        feature = "scouting-active",
+        feature = "scouting-responder",
+        feature = "transport-multicast"
+    )
+))]
+impl McastRxBind {
+    /// Whether an IPv4 membership the kernel refuses is skipped (and logged) rather
+    /// than failing the bind.
+    ///
+    /// A scouting socket skips it, as upstream's does: `bind_mcast_port` joins the group
+    /// on each interface address in turn and, when one join fails, warns and goes on
+    /// (`zenoh/src/net/runtime/orchestrator.rs` @
+    /// `Unable to join multicast group {} on interface {}: {}`); only a failure to
+    /// create or bind the socket (and, for an IPv6 group, its one join on interface 0)
+    /// ends the open. The join this crate makes here is on the interface the kernel
+    /// chooses, which is the one a host with no default route cannot name, and a scout or a
+    /// responder on such a host must still work over the interfaces it joins one by one.
+    /// A multicast LINK keeps the strict reading: its membership is the link.
+    fn skips_a_refused_v4_join(self) -> bool {
+        match self {
+            Self::Wildcard => false,
+            #[cfg(any(feature = "scouting-active", feature = "scouting-responder"))]
+            Self::Group => true,
+        }
+    }
+}
+
 /// R2584 — a multicast group and its locator config, resolved for the group's
 /// address FAMILY before any socket exists.
 ///
@@ -4093,7 +4123,11 @@ impl McastPlan {
     /// serving several groups is the point of `join` (zenoh `multicast.rs:316-347`),
     /// and zenoh passes one source interface to every join in that loop. Unpinned,
     /// the interface is the kernel's choice: `INADDR_ANY` for v4 and index 0 for v6.
-    fn join_groups(&self, raw: &socket2::Socket) -> io::Result<()> {
+    ///
+    /// `skip_refused_v4` turns a refused IPv4 membership into a warning and a move on to
+    /// the next group, which is what a scouting socket does (see
+    /// [`McastRxBind::skips_a_refused_v4_join`]); an IPv6 join is always strict.
+    fn join_groups(&self, raw: &socket2::Socket, skip_refused_v4: bool) -> io::Result<()> {
         match self {
             Self::V4 {
                 group,
@@ -4102,7 +4136,15 @@ impl McastPlan {
             } => {
                 let on = iface.unwrap_or(std::net::Ipv4Addr::UNSPECIFIED);
                 for g in core::iter::once(group).chain(joins) {
-                    raw.join_multicast_v4(g, &on)?;
+                    match raw.join_multicast_v4(g, &on) {
+                        Ok(()) => {}
+                        Err(e) if skip_refused_v4 => {
+                            log::warn!(
+                                "wz: unable to join multicast group {g} on interface {on}: {e}"
+                            );
+                        }
+                        Err(e) => return Err(e),
+                    }
                 }
             }
             Self::V6 {
@@ -4223,6 +4265,52 @@ mod udp_multicast_config_tests {
             8,
             "a requested ttl must reach the socket, or the config key is decoration"
         );
+    }
+
+    /// A scouting socket goes on past an IPv4 membership the kernel refuses, as
+    /// upstream's does, and a multicast link does not.
+    ///
+    /// The refusal is made by asking for more memberships than one socket may hold: Linux
+    /// refuses the ones past `net.ipv4.igmp_max_memberships` (20 by default) with `ENOBUFS`.
+    /// It is a refusal of the same call a host with no default route meets with `ENODEV`
+    /// when the join is made on `INADDR_ANY`, which is what the namespace leg
+    /// (`pico_zscout_legs_hold_in_a_namespace_with_no_default_route`) holds end to end.
+    /// Before the skip a scout and a responder on such a host failed their whole bind, and
+    /// the real pico and zenoh found routers where wz found none.
+    ///
+    /// Linux only, because the limit is: macOS grows a socket's membership table to 4095,
+    /// so the premise would not be made there. The count is read from the host's own
+    /// sysctl, so a tuned host is crowded past its limit too.
+    #[tokio::test]
+    #[cfg(all(
+        target_os = "linux",
+        any(feature = "scouting-active", feature = "scouting-responder")
+    ))]
+    async fn a_scouting_socket_goes_on_past_a_membership_the_kernel_refuses() {
+        let limit: usize = std::fs::read_to_string("/proc/sys/net/ipv4/igmp_max_memberships")
+            .expect("the host's IPv4 membership limit")
+            .trim()
+            .parse()
+            .expect("the limit is a number");
+        // The group itself and one more than the limit: past it by two.
+        let first = u32::from(std::net::Ipv4Addr::new(239, 1, 0, 1));
+        let extra: Vec<String> = (0..=limit)
+            .map(|n| std::net::Ipv4Addr::from(first + n as u32).to_string())
+            .collect();
+        let crowded = || McastSocketConfig {
+            extra_joins: &extra,
+            ..Default::default()
+        };
+        assert!(
+            UdpDriver::bind_multicast(GROUP, 0, crowded())
+                .await
+                .is_err(),
+            "the premise: the kernel refuses a membership past its limit, and a multicast \
+             LINK keeps that refusal"
+        );
+        UdpDriver::bind_scouting_group(GROUP, 0, crowded())
+            .await
+            .expect("a scouting socket binds and joins what it can, as upstream's does");
     }
 
     #[tokio::test]

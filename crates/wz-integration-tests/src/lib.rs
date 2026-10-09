@@ -6472,6 +6472,80 @@ pub mod common {
                 .arg(program);
             cmd
         }
+
+        /// The namespace's default routes as `ip route show default` prints them: empty
+        /// when it has none, which is what the script builds (`lo` and one veth end).
+        ///
+        /// A witness whose claim is about a host WITHOUT a route reads this first, so the
+        /// premise is measured rather than assumed: a namespace that grew a route would
+        /// make the witness the host's twin and prove nothing.
+        pub fn default_routes(&self) -> String {
+            let out = self
+                .command(Path::new("ip"))
+                .args(["route", "show", "default"])
+                .output_bounded()
+                .expect("run ip in the namespace");
+            assert!(
+                out.status.success(),
+                "ip route show default failed in {}: {}",
+                self.ns,
+                String::from_utf8_lossy(&out.stderr)
+            );
+            String::from_utf8_lossy(&out.stdout).trim().to_owned()
+        }
+
+        /// Run each of `tests`, tests of the CURRENT test binary, inside the namespace, one
+        /// at a time, and fail by name unless each ran and passed.
+        ///
+        /// What runs there is what runs on the host: the same binary, as the user that
+        /// owns the build tree (the namespace is entered as root through `sudo`), with this
+        /// process's whole environment. The environment is passed on purpose: `sudo` resets
+        /// it, and a leg that reads its oracle's location from a variable it no longer sees
+        /// does not fail, it SKIPS and reports `1 passed`. A leg that skipped anyway (a line
+        /// that begins `skip:`, this crate's form for one) is refused for the same reason:
+        /// the witness would be green over a leg that never ran.
+        ///
+        /// `bound` is each leg's, and is the caller's to state: a leg here is a whole test
+        /// with its own bounded children inside, longer than one child run.
+        pub fn rerun_tests_inside(&self, tests: &[&str], bound: Duration) {
+            let user = std::env::var("USER")
+                .or_else(|_| std::env::var("LOGNAME"))
+                .expect("the user name, to run the legs as the tree's owner");
+            let exe = std::env::current_exe().expect("this test binary's path");
+            for test in tests {
+                let mut run = self.command(Path::new("runuser"));
+                run.args(["-u", &user, "--", "env"]);
+                for (key, value) in std::env::vars_os() {
+                    let mut pair = key;
+                    pair.push("=");
+                    pair.push(value);
+                    run.arg(pair);
+                }
+                run.arg(&exe).args([
+                    "--exact",
+                    test,
+                    "--ignored",
+                    "--nocapture",
+                    "--test-threads=1",
+                ]);
+                let out = run
+                    .output_within(bound)
+                    .unwrap_or_else(|e| panic!("run {test} in {}: {e}", self.ns));
+                let stdout = String::from_utf8_lossy(&out.stdout);
+                let stderr = String::from_utf8_lossy(&out.stderr);
+                let skipped = stdout
+                    .lines()
+                    .chain(stderr.lines())
+                    .any(|line| line.trim_start().starts_with("skip:"));
+                assert!(
+                    out.status.success() && stdout.contains("1 passed") && !skipped,
+                    "{test} did not run and pass in {} ({:?}; skipped: {skipped}).\n\
+                     --- stdout ---\n{stdout}\n--- stderr ---\n{stderr}",
+                    self.ns,
+                    out.status
+                );
+            }
+        }
     }
 
     /// R2587 — the IP TTL field of the next datagram to arrive for `group:port` on

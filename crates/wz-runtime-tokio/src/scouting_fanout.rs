@@ -198,12 +198,36 @@ impl ScoutFanOut {
         ask: Vec<UdpDriver>,
         refused: Vec<(IpAddr, io::Error)>,
     ) -> (Self, FanOutShape) {
+        Self::over_optional(Some(group), ask, refused)
+            .expect("a set that holds the group socket has a member")
+    }
+
+    /// [`Self::over`] for a window that may have no group socket.
+    ///
+    /// Neither reference needs one to scout. Upstream's `scout` receives on the
+    /// per-interface sockets alone (`zenoh/src/api/scouting.rs` @
+    /// `Runtime::bind_ucast_port(iface, multicast_ttl).ok()`) and zenoh-pico opens a
+    /// link per interface (`vendor/zenoh-pico/src/session/scout.c` @
+    /// `_z_udp_unicast_interface_iterator_next(&iter)`): every Hello comes back to the
+    /// socket the Scout left from. The group socket here is an extra RECEIVE member, and a
+    /// window whose group socket could not be bound is still a window when an ask socket
+    /// did. `None` is the set with nothing to ask or to listen with.
+    pub fn over_optional(
+        group: Option<UdpDriver>,
+        ask: Vec<UdpDriver>,
+        refused: Vec<(IpAddr, io::Error)>,
+    ) -> Option<(Self, FanOutShape)> {
+        if group.is_none() && ask.is_empty() {
+            return None;
+        }
         let fell_back_to_group = ask.is_empty();
         let mut members = Vec::with_capacity(ask.len() + 1);
-        members.push(Member {
-            driver: group,
-            asks: fell_back_to_group,
-        });
+        if let Some(driver) = group {
+            members.push(Member {
+                driver,
+                asks: fell_back_to_group,
+            });
+        }
         for driver in ask {
             members.push(Member { driver, asks: true });
         }
@@ -218,14 +242,14 @@ impl ScoutFanOut {
              socket: {fell_back_to_group}; {} address(es) refused",
             refused.len()
         );
-        (
+        Some((
             Self { members, cursor: 0 },
             FanOutShape {
                 asked_on,
                 refused,
                 fell_back_to_group,
             },
-        )
+        ))
     }
 
     /// How many members the set holds, ask and receive alike.
@@ -374,6 +398,37 @@ mod tests {
         UdpDriver::bind_multicast_tx(GROUP, 7446, McastSocketConfig::default())
             .await
             .expect("stand-in group socket")
+    }
+
+    /// A window needs a socket to ask with or one to listen with, and not the group socket
+    /// in particular: neither reference binds one to scout.
+    ///
+    /// The three shapes of the set: ask sockets alone (the group socket could not be
+    /// bound, and the window is still a window), the group socket alone (nothing could be
+    /// enumerated, the pre-R2611 floor, and it asks), and neither, which is no window.
+    #[tokio::test]
+    async fn a_window_without_a_group_socket_is_a_window_when_something_can_ask() {
+        let (ask, refused) =
+            bind_scout_sockets(GROUP, 7446, &[IpAddr::V4(Ipv4Addr::LOCALHOST)], None).await;
+        let (fan, shape) =
+            ScoutFanOut::over_optional(None, ask, refused).expect("an ask socket alone is a set");
+        assert_eq!(fan.members(), 1);
+        assert_eq!(shape.asked_on, 1, "the one ask socket asks");
+        assert!(
+            !shape.fell_back_to_group,
+            "there is no group socket to fall back to"
+        );
+
+        let (fan, shape) =
+            ScoutFanOut::over_optional(Some(stand_in_group_socket().await), Vec::new(), Vec::new())
+                .expect("the group socket alone is a set");
+        assert_eq!(fan.members(), 1);
+        assert!(shape.fell_back_to_group, "alone, it is what asks");
+
+        assert!(
+            ScoutFanOut::over_optional(None, Vec::new(), Vec::new()).is_none(),
+            "nothing to ask with and nothing to listen with is no window"
+        );
     }
 
     /// R2611 — the ask set is one socket per address, and the shape SAYS so.

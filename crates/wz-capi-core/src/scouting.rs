@@ -145,11 +145,17 @@ pub fn run_scout(
     let hellos = runtime.block_on(async move {
         // `None`: the scouting group is deliberately NOT interface-narrowed — a
         // discovery beacon must reach every interface a peer could answer on.
-        let Ok(group_socket) =
-            UdpDriver::bind_scouting_group(group, port, McastSocketConfig::default()).await
-        else {
-            return Vec::new();
-        };
+        //
+        // The group socket is an EXTRA receive member and not a condition of the
+        // window: neither reference binds one to scout (upstream's `scout` receives on
+        // its per-interface sockets alone, `zenoh/src/api/scouting.rs` @
+        // `Runtime::bind_ucast_port(iface, multicast_ttl).ok()`), so a window
+        // whose group socket cannot be bound goes on with the ask sockets, and is empty
+        // only when there is nothing to ask or listen with.
+        let group_socket =
+            UdpDriver::bind_scouting_group(group, port, McastSocketConfig::default())
+                .await
+                .ok();
         // R2611 — and that sentence is only true if the Scout LEAVES by every
         // one of them, which one socket on the default route does not do. pico's
         // `z_scout` opens a link per interface when the config names none
@@ -165,7 +171,10 @@ pub fn run_scout(
         // dropped here would make "the survey found nothing" and "the Scout
         // left by one interface of four" the same observation to everyone
         // downstream.
-        let (mut driver, _shape) = ScoutFanOut::over(group_socket, ask, refused);
+        let Some((mut driver, _shape)) = ScoutFanOut::over_optional(group_socket, ask, refused)
+        else {
+            return Vec::new();
+        };
         let actions = ScoutingActions::new(ScoutParams {
             version: SCOUT_PROTO_VERSION,
             what,
