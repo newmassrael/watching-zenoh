@@ -20797,6 +20797,15 @@ layer_c1ce_api_compat_c_unstable_oracle() {
         cargo test -p wz-integration-tests \
         --test zenoh_c_ext_families_twice_and_diff -- --ignored --quiet --test-threads=1 \
         --exact gossip_multihop_links_the_chain_identically_on_wz_and_libzenohc || rc=1
+    # R3137 -- a queryable that answers a get of its OWN session. One session, a handler that
+    # sends four replies, and a getter asking it three thousand times. The real library delivers
+    # all four every time; wz's C ABI lost them from the sixtieth ask on, because the local plane
+    # has two drainers and the Final of the get could run beside, and ahead of, the handler's
+    # replies. Red-first: 2941 of 3000 asks incomplete before the change, none after.
+    WZ_ZENOH_C_PREFIX="$shm" _runci_guarded_test "C1ce same-session queryable" 1 \
+        cargo test -p wz-integration-tests \
+        --test zenoh_c_ext_families_twice_and_diff -- --ignored --quiet --test-threads=1 \
+        --exact a_same_session_queryable_is_heard_in_full_on_every_ask_on_wz_and_libzenohc || rc=1
     # REPORTED, never enforced, exactly as C1cc's is.
     WZ_ZENOH_C_PREFIX="$shm" python3 scripts/lib/capi_c_coverage.py || rc=1
 

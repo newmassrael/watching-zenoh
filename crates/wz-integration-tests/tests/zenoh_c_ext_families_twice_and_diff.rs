@@ -298,7 +298,7 @@ fn run_both_arms_with(
     let on_ref = compile(&src, &ref_dir, include, ref_libdir, "zenohc")
         .unwrap_or_else(|d| panic!("the probe does not link against the REAL libzenohc\n{d}"));
 
-    let run = |exe: &Path, libdir: &Path| -> (bool, String) {
+    let run = |arm: &str, exe: &Path, libdir: &Path| -> (bool, String) {
         // ONE reservation for all of them: picking `ports` times on a thread deadlocks.
         let (_reservation, reserved) = PortReservation::pick_many(ports);
         let out = Command::new(exe)
@@ -307,13 +307,22 @@ fn run_both_arms_with(
             .env("LD_LIBRARY_PATH", libdir)
             .output()
             .unwrap_or_else(|e| panic!("spawn {}: {e}", exe.display()));
+        // The probe's stderr is where a panic inside the library under test is printed, and
+        // a failing row is the one time anyone needs it. libtest keeps this for a failing test
+        // and drops it for a passing one.
+        if !out.stderr.is_empty() {
+            eprintln!(
+                "--- {arm} stderr ---\n{}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+        }
         (
             out.status.success(),
             String::from_utf8_lossy(&out.stdout).into_owned(),
         )
     };
-    let (wz_ok, wz_out) = run(&on_wz, &wz_libdir);
-    let (ref_ok, ref_out) = run(&on_ref, ref_libdir);
+    let (wz_ok, wz_out) = run("wz", &on_wz, &wz_libdir);
+    let (ref_ok, ref_out) = run("REFERENCE", &on_ref, ref_libdir);
     assert!(
         ref_ok,
         "the REFERENCE arm failed, so the comparison below would be meaningless.\n{ref_out}"
@@ -1452,5 +1461,118 @@ fn gossip_multihop_links_the_chain_identically_on_wz_and_libzenohc() {
         "the key changes the links of the real library's chain.\n--- off ---\n{}\n--- on \
          ---\n{}",
         by_setting[0].1, by_setting[1].1
+    );
+}
+
+/// One session, a queryable that answers every query with four replies from inside its
+/// handler, and a getter in the same session that asks it three thousand times and counts the
+/// replies each ask brings back.
+///
+/// A same-session queryable is the shape the publication cache is, stripped of the cache: if
+/// an ask ever comes back with fewer than four replies, the replies were lost between the
+/// handler and the getter, whatever the handler holds. The real library answers in full every
+/// time because the handler's thread delivers its replies and then its final, in that order.
+const LOCAL_ANSWER_PROBE: &str = r#"#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include "zenoh.h"
+
+#define KE "wz/local/answer"
+#define REPLIES 4
+#define ASKS 3000
+
+static void on_query(z_loaned_query_t *query, void *ctx) {
+    (void)ctx;
+    z_view_keyexpr_t ke;
+    z_view_keyexpr_from_str(&ke, KE);
+    for (int i = 0; i < REPLIES; i++) {
+        z_owned_bytes_t payload;
+        z_bytes_copy_from_str(&payload, "r");
+        z_query_reply_options_t ro;
+        z_query_reply_options_default(&ro);
+        z_query_reply(query, z_loan(ke), z_move(payload), &ro);
+    }
+}
+
+static int ask_once(const z_loaned_session_t *s) {
+    z_view_keyexpr_t ke;
+    z_view_keyexpr_from_str(&ke, KE);
+    z_owned_closure_reply_t closure;
+    z_owned_fifo_handler_reply_t handler;
+    z_fifo_channel_reply_new(&closure, &handler, 16);
+    z_get_options_t gopts;
+    z_get_options_default(&gopts);
+    gopts.consolidation = z_query_consolidation_none();
+    if (z_get(s, z_loan(ke), "", z_move(closure), &gopts) < 0) {
+        z_drop(z_move(handler));
+        return -1;
+    }
+    int n = 0;
+    for (;;) {
+        z_owned_reply_t reply;
+        if (z_recv(z_loan(handler), &reply) != Z_OK) break;
+        if (z_reply_is_ok(z_loan(reply))) n++;
+        z_drop(z_move(reply));
+    }
+    z_drop(z_move(handler));
+    return n;
+}
+
+int main(void) {
+    z_owned_config_t config;
+    z_config_default(&config);
+    zc_config_insert_json5(z_loan_mut(config), Z_CONFIG_MULTICAST_SCOUTING_KEY, "false");
+    zc_config_insert_json5(z_loan_mut(config), Z_CONFIG_MODE_KEY, "\"peer\"");
+    z_owned_session_t s;
+    z_result_t open_rc = z_open(&s, z_move(config), NULL);
+    printf("open.rc=%d\n", (int)open_rc);
+    if (open_rc < 0) { return 1; }
+
+    z_view_keyexpr_t ke;
+    z_view_keyexpr_from_str(&ke, KE);
+    z_owned_closure_query_t qclosure;
+    z_closure(&qclosure, on_query, NULL, NULL);
+    z_owned_queryable_t qbl;
+    z_result_t brc = z_declare_queryable(z_loan(s), &qbl, z_loan(ke), z_move(qclosure), NULL);
+    printf("queryable.rc=%d\n", (int)brc);
+    if (brc < 0) { return 1; }
+
+    int incomplete = 0, first = -1, first_n = 0;
+    for (int k = 0; k < ASKS; k++) {
+        int n = ask_once(z_loan(s));
+        if (n != REPLIES) {
+            if (first < 0) { first = k; first_n = n; }
+            incomplete++;
+        }
+    }
+    printf("asks=%d\nincomplete=%d\nfirst=%d first_replies=%d\n", ASKS, incomplete, first, first_n);
+
+    z_drop(z_move(qbl));
+    z_drop(z_move(s));
+    printf("done\n");
+    return 0;
+}
+"#;
+
+/// THE ADJUDICATOR for a same-session queryable's answers: every ask brings back every reply
+/// the handler sent, on wz's cdylib as on the real `libzenohc.so`.
+// wz-proves: api-compat-c wz->zenoh-c partial
+#[test]
+#[ignore = "links the shared-memory zenoh-c oracle; run by run-ci Layer C1ce"]
+fn a_same_session_queryable_is_heard_in_full_on_every_ask_on_wz_and_libzenohc() {
+    let Some((include, ref_libdir)) = oracle_prefix() else {
+        return;
+    };
+    let (wz_out, ref_out) = run_both_arms(LOCAL_ANSWER_PROBE, &include, &ref_libdir);
+    assert!(
+        ref_out.lines().any(|line| line == "incomplete=0"),
+        "the REAL library lost replies of a same-session queryable, which is not the \
+         behaviour this row compares against.\n{ref_out}"
+    );
+    assert!(
+        wz_out.lines().any(|line| line == "incomplete=0"),
+        "wz lost replies between a same-session queryable's handler and its getter: some ask \
+         came back with fewer than four of the four replies the handler sent.\n--- wz \
+         ---\n{wz_out}\n--- reference ---\n{ref_out}"
     );
 }
