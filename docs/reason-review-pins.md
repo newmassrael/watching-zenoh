@@ -1,0 +1,54 @@
+# Reason review pins
+
+An atom whose reason says work REMAINS (PARTIAL, UNBUILT or UNVERIFIED) makes
+claims about this tree's code, and nothing re-reads a clause when the code it
+describes moves. `scripts/lib/reason_review_pin_gate.py` closes that gap without
+judging any prose: every tracked file such a reason cites is pinned below to the
+git blob it had when a round last read the reason against it, and a push that
+changes a pinned file fails until the row is rewritten.
+
+## Why this file exists
+
+Five stale reasons were found by hand in one session (open-debt item 756). In each
+the code moved and the reason kept asserting the old state, and a stale assertion
+reads as a fact. The citation gates answer whether a cited path or line still
+resolves; they cannot say whether the sentence is still true. This table is the
+place the question is put in front of the round that changed the evidence.
+
+A pin is NOT evidence that the reason is true. A round can rewrite a row without
+reading anything, and nothing here can stop that. What it removes is the silent
+case: editing a cited file while the reason that describes it is never on screen.
+
+## How to move a row
+
+1. The gate names the atom, the file and the new blob. Open the atom's reason
+   (`mnemosyne-cli query` on the inventory entry) and read each clause that cites
+   the file against the file as it is now. A clause that no longer holds is a
+   correction to the reason, made through the store's own primitive, in the same
+   round.
+2. Rewrite the row in place: the new blob, and this round's id. One row per
+   (atom, file); a second row for the same pair is refused.
+3. `python3 scripts/lib/reason_review_pin_gate.py --emit --round <id>` prints the
+   whole table for the tree as it stands. A row whose round is `seed` was TAKEN,
+   not read: it records a baseline, and the first real edit to its file replaces
+   it with a round id.
+
+A row whose atom stops saying work remains (the atom is built), or stops citing
+that file, is dropped in the commit that changes the reason. An empty table is the
+normal state once nothing remains.
+
+| atom | file | blob | round |
+|---|---|---|---|
+| runtime-zero-copy | crates/wz-link-lwip/src/lib.rs | 822a0eb965c423576fc1275c3b8c722ac6b67d92 | seed |
+| runtime-zero-copy | crates/wz-link-lwip/src/rx_ring.rs | 7837f3664ca67b01b10786ad397ed192cd480240 | seed |
+| runtime-zero-copy | crates/wz-runtime-tokio/src/lib.rs | 773d9bc9501bb413040ea36889353444f85e3456 | seed |
+| runtime-zero-copy | crates/wz-runtime-tokio/src/link_rx_arena.rs | b55db327c31bf8efa58020441a09ec572d5f7efa | seed |
+| runtime-zero-copy | crates/wz-runtime-tokio/src/uring_reactor.rs | 17a3e106991e8e08899800efe2128f91a7975728 | seed |
+| runtime-zero-copy | crates/wz-runtime-tokio/src/zero_copy.rs | 8e135a6dffe4c7f7490faaa2d9642feaf3ea5726 | seed |
+| runtime-zero-copy | crates/wz-runtime-tokio/tests/shared_unit_dispatch.rs | ca746b43e02569d96631b8fde9a23d8b9273b052 | seed |
+| runtime-zero-copy | crates/wz-session-core/src/inbound.rs | 91956f6b55a92016207177c71b8076e2a2807c29 | seed |
+| runtime-zero-copy | crates/wz-session-core/src/link.rs | 6efa1966a4048ef2a8d0e3d8394edf473c07a5ae | seed |
+| runtime-zero-copy | crates/wz-session-core/src/multicast_rx.rs | e64ba7c8825aa9c12bf9f1d0e702bad6b7186ad5 | seed |
+| runtime-zero-copy | crates/wz-session-core/src/reply.rs | ffff2c1c89cec43453a4597380f251f1bb28e562 | seed |
+| runtime-zero-copy | crates/wz-session-core/src/sample.rs | 16db088768c13d7d12afacae8f7b6392e99c7df9 | seed |
+| runtime-zero-copy | out/wz-runtime-tokio/session_rx_pool_ap.rs | a15e7022416d1cb3a6721407c1be6b129947ebd7 | seed |

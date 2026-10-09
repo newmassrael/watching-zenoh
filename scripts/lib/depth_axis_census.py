@@ -2878,6 +2878,20 @@ def reach_partition(reasons: dict[str, str]) -> dict[str, list[str]]:
     return out
 
 
+def resolve_citation(cited: str, paths: list[str]) -> list[str]:
+    """The tracked paths a cited path can mean: the exact path when it is
+    tracked, else every tracked path ending with it under a `/`.
+
+    One answer is a wz file, none is upstream (this tree holds no oracle for it),
+    several is ambiguity. `citation_audit` and `reason_review_pin_gate` both
+    read a citation through this, so the two cannot disagree about what a reason
+    cites.
+    """
+    if cited in paths:
+        return [cited]
+    return [p for p in paths if p.endswith("/" + cited)]
+
+
 def citation_audit(
     reasons: dict[str, str], paths: list[str]
 ) -> tuple[int, int, int, list[str]]:
@@ -2893,10 +2907,7 @@ def citation_audit(
     for atom in sorted(reasons):
         for match in CITATION.finditer(reasons[atom]):
             cited, line = match.group(1), match.group(2)
-            if cited in paths:
-                candidates = [cited]
-            else:
-                candidates = [p for p in paths if p.endswith("/" + cited)]
+            candidates = resolve_citation(cited, paths)
             if not candidates:
                 upstream += 1
                 continue

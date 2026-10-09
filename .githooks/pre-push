@@ -897,6 +897,10 @@ round_fed_gates=(
     "literal_wire_flag_lint.py"
     "expired_blocker_lint.py"
     "reason_citation_gate.py"
+    # R3171 -- a file a standing atom reason cites moved while its review pin did
+    # not (open-debt item 756). Round-fed by the store and the tracked tree, a
+    # text read and one `git hash-object`, no build.
+    "reason_review_pin_gate.py --check"
     "payload_measurement_lint.py"
     "feature_public_surface_census.py --check"
     "self_counted_table_gate.py --check"

@@ -3111,6 +3111,13 @@ layer_c0_test_discipline() {
     # never execute.
     python3 scripts/lib/reason_citation_gate.py --selftest || return 1
     python3 scripts/lib/reason_citation_gate.py || return 1
+    # R3171 (open-debt item 756) -- the citation gate above says a cited file
+    # still resolves, not that the sentence citing it is still true. This pins
+    # each file a remaining atom's reason cites to the blob a round last read the
+    # reason against, so a cited file cannot move without that reason being in
+    # front of the round that moved it. Both sides are on disk (store and tree).
+    python3 scripts/lib/reason_review_pin_gate.py --selftest || return 1
+    python3 scripts/lib/reason_review_pin_gate.py --check || return 1
     # R2335 (unregistered open-debt item 15) — a lane may not claim of itself a
     # term the test it runs has DENIED of itself. Layer C1aq's comment and the
     # `ext-pubsub-advanced-publisher` atom's reason both described that lane's
