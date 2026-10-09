@@ -57,6 +57,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::Duration;
 
+use wz_integration_tests::bounded::BoundedOutput as _;
 use wz_integration_tests::common::{
     compile_zenoh_c_example, graceful_terminate, read_captured, run_query_until_answered,
     spawn_zenohd, wait_for_substring, wait_for_tcp_accept_alive, wz_capi_c_cdylib, zenoh_c_oracle,
@@ -296,7 +297,7 @@ fn upstream_z_put_on_wz_capi_c_reaches_a_real_pico_zsub() {
         .arg(&dropin)
         .args(["-e", &endpoint, "-m", "client", "-k", key, "-p", payload])
         .env("LD_LIBRARY_PATH", &libdir)
-        .output()
+        .output_bounded()
         .expect("run upstream z_put.c on wz's C ABI");
     assert!(
         put.status.success(),
@@ -412,7 +413,7 @@ fn upstream_z_delete_on_wz_capi_c_is_decoded_by_a_real_pico_zsub() {
         .arg(&put_dropin)
         .args(["-e", &endpoint, "-m", "client", "-k", key, "-p", payload])
         .env("LD_LIBRARY_PATH", &libdir)
-        .output()
+        .output_bounded()
         .expect("run upstream z_put.c on wz's C ABI");
     assert!(
         put.status.success(),
@@ -444,7 +445,7 @@ fn upstream_z_delete_on_wz_capi_c_is_decoded_by_a_real_pico_zsub() {
         .arg(&del_dropin)
         .args(["-e", &endpoint, "-m", "client", "-k", key])
         .env("LD_LIBRARY_PATH", &libdir)
-        .output()
+        .output_bounded()
         .expect("run upstream z_delete.c on wz's C ABI");
     assert!(
         del.status.success(),
@@ -1441,7 +1442,7 @@ fn upstream_z_bytes_on_wz_capi_c_prints_identically_to_real_libzenohc() {
     let run = |exe: &Path, libdir: &Path| -> (bool, String) {
         let out = Command::new(exe)
             .env("LD_LIBRARY_PATH", libdir)
-            .output()
+            .output_bounded()
             .unwrap_or_else(|why| panic!("spawn {}: {why}", exe.display()));
         (
             out.status.success(),

@@ -45,6 +45,7 @@ use std::time::Duration;
 use wz_capture::Dissection;
 use wz_codecs::declare::DeclareOwnedVariant;
 use wz_codecs::wireexpr::{WireexprOwned, WireexprOwnedVariant};
+use wz_integration_tests::bounded::BoundedOutput as _;
 use wz_integration_tests::common::{
     assert_demo_binary_newer_than_sources, graceful_terminate, read_captured,
     spawn_on_ephemeral_port, wz_ap_demo_binary, wz_capi_pico_cdylib, zenoh_pico_include_dirs,
@@ -938,7 +939,7 @@ fn compile_driver(
         .arg(format!("-l{libname}"))
         .arg(format!("-Wl,-rpath,{}", libdir.display()));
 
-    let out = cmd.output().expect("spawn C compiler");
+    let out = cmd.output_bounded().expect("spawn C compiler");
     assert!(
         out.status.success(),
         "{arm} arm failed to build against {libname}:\n--- stderr ---\n{}",

@@ -13,6 +13,8 @@
 //! bind → child-spawn → bind-confirmed window so concurrent tests in
 //! the same `cargo test` invocation cannot pick the same port.
 
+pub mod bounded;
+
 pub mod common {
     //! Test harness primitives shared by the `wz_*_round_trip` /
     //! `ap_demo_*` integration tests. See module-level rationale for
@@ -35,6 +37,7 @@ pub mod common {
     /// a second answer to "which end wrote this segment", and every leg that
     /// rebuilds a wire would then have to pick one. The two harness halves stay
     /// one vocabulary.
+    use crate::bounded::BoundedOutput;
     use crate::wire_tap::{Recording, Side};
 
     fn port_lock() -> &'static Mutex<()> {
@@ -936,7 +939,7 @@ pub mod common {
             .arg("-D")
             .arg("--defined-only")
             .arg(wz_capi_c_cdylib())
-            .output()
+            .output_bounded()
             .expect("nm reads the cdylib's dynamic symbols");
         let wz_is_unstable = String::from_utf8_lossy(&out.stdout).contains("z_source_info_new");
         assert_eq!(
@@ -1090,7 +1093,7 @@ pub mod common {
             .arg(format!("-L{}", libdir.display()))
             .arg(format!("-l{link}"))
             .arg(format!("-Wl,-rpath,{}", libdir.display()))
-            .output()
+            .output_bounded()
             .unwrap_or_else(|e| panic!("failed to spawn C compiler {cc:?}: {e}"));
         if !out.status.success() {
             return Err(format!(
@@ -1416,7 +1419,7 @@ pub mod common {
             .arg(format!("-Wl,-rpath,{}", libdir.display()));
 
         let out = cmd
-            .output()
+            .output_bounded()
             .unwrap_or_else(|e| panic!("failed to spawn C compiler {cc:?}: {e}"));
         if !out.status.success() {
             return Err(format!(
@@ -1500,7 +1503,7 @@ pub mod common {
             .arg(format!("-l{link}"))
             .arg(format!("-Wl,-rpath,{}", libdir.display()));
         let out = cmd
-            .output()
+            .output_bounded()
             .unwrap_or_else(|e| panic!("failed to spawn C compiler {cc:?}: {e}"));
         if !out.status.success() {
             return Err(format!(
@@ -6364,7 +6367,7 @@ pub mod common {
     pub fn default_route_iface() -> String {
         let out = std::process::Command::new("ip")
             .args(["route", "show", "default"])
-            .output()
+            .output_bounded()
             .expect("run `ip route show default`");
         let text = String::from_utf8_lossy(&out.stdout);
         for line in text.lines() {
@@ -6436,7 +6439,7 @@ pub mod common {
                 .arg("netns-topology")
                 .arg(&script)
                 .args([tag, host_cidr, peer_cidr])
-                .output()
+                .output_bounded()
                 .expect("run bash for netns-topology.sh");
             let why = String::from_utf8_lossy(&out.stderr).into_owned();
             match out.status.code() {
@@ -6831,7 +6834,7 @@ pub mod common {
     pub fn tcp_socket_buffers(local: SocketAddr) -> Option<(u32, u32)> {
         let out = Command::new("ss")
             .args(["-t", "-m", "-n", "-H", "src", &local.to_string()])
-            .output()
+            .output_bounded()
             .expect("run `ss` (iproute2), the socket-table reader this observer uses");
         assert!(out.status.success(), "ss failed: {out:?}");
         let text = String::from_utf8_lossy(&out.stdout);
@@ -6904,7 +6907,7 @@ pub mod common {
             // deleting the name would leave such a process running, unreachable.
             if let Ok(out) = Command::new("sudo")
                 .args(["-n", "ip", "netns", "pids", &self.ns])
-                .output()
+                .output_bounded()
             {
                 let pids: Vec<String> = String::from_utf8_lossy(&out.stdout)
                     .split_whitespace()

@@ -43,6 +43,7 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+use wz_integration_tests::bounded::BoundedOutput as _;
 use wz_integration_tests::common::{
     wz_capi_c_cdylib, zenoh_c_oracle, zenoh_c_shared_library, PortReservation,
 };
@@ -256,7 +257,7 @@ fn compile(
         .arg(format!("-L{}", libdir.display()))
         .arg(format!("-l{link}"))
         .arg(format!("-Wl,-rpath,{}", libdir.display()))
-        .output()
+        .output_bounded()
         .unwrap_or_else(|e| panic!("spawn {cc}: {e}"));
     if !output.status.success() {
         return Err(String::from_utf8_lossy(&output.stderr).into_owned());
@@ -305,7 +306,7 @@ fn run_both_arms_with(
             .args(leading)
             .args(reserved.iter().map(|port| format!("tcp/127.0.0.1:{port}")))
             .env("LD_LIBRARY_PATH", libdir)
-            .output()
+            .output_bounded()
             .unwrap_or_else(|e| panic!("spawn {}: {e}", exe.display()));
         // The probe's stderr is where a panic inside the library under test is printed, and
         // a failing row is the one time anyone needs it. libtest keeps this for a failing test

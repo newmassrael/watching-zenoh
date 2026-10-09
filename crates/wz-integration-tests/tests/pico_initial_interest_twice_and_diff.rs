@@ -37,6 +37,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
+use wz_integration_tests::bounded::BoundedOutput as _;
 use wz_integration_tests::common::{
     compile_zenoh_c_example, read_captured, wz_capi_pico_cdylib, zenoh_c_oracle,
     zenoh_c_shared_library, zenoh_pico_include_dirs, zenoh_pico_library_dir, ChildGuard,
@@ -121,7 +122,7 @@ fn compile_listener(out_dir: &Path, libdir: &Path, libname: &str, arm: &str) -> 
         .arg(format!("-L{}", libdir.display()))
         .arg(format!("-l{libname}"))
         .arg(format!("-Wl,-rpath,{}", libdir.display()));
-    let out = cmd.output().expect("spawn C compiler");
+    let out = cmd.output_bounded().expect("spawn C compiler");
     assert!(
         out.status.success(),
         "{arm} listener failed to build against {libname}:\n--- stderr ---\n{}",
@@ -175,7 +176,7 @@ fn run_arm(listener: &Path, dialler: &Path, dialler_libdir: &Path, arm: &str) ->
         .arg(format!("tcp/127.0.0.1:{port}"))
         .env("LD_LIBRARY_PATH", dialler_libdir)
         .env("RUST_LOG", "warn")
-        .output()
+        .output_bounded()
         .unwrap_or_else(|e| panic!("{arm}: failed to run the dialler: {e}"));
     drop(listener_child);
     let stdout = String::from_utf8_lossy(&out.stdout);

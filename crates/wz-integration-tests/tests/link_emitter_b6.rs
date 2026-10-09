@@ -57,6 +57,8 @@
 use std::path::PathBuf;
 use std::process::Command;
 
+use wz_integration_tests::bounded::BoundedOutput as _;
+
 fn sce_codegen_bin() -> PathBuf {
     let manifest = std::env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR");
     PathBuf::from(manifest).join("../../vendor/sce/target/release/sce-codegen")
@@ -144,7 +146,7 @@ fn emit_link_c11(scxml_name: &str) -> Option<String> {
         .arg("--output-dir")
         .arg(out_dir.path())
         .arg(link_scxml(scxml_name))
-        .output()
+        .output_bounded()
         .expect("invoke sce-codegen");
 
     assert!(

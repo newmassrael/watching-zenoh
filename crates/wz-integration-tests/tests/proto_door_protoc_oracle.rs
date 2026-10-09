@@ -110,6 +110,8 @@ use std::ffi::{c_char, CStr, CString};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+use wz_integration_tests::bounded::{BoundedOutput as _, CHILD_RUN_BOUND};
+
 use wz_capi_dissect::{
     wz_dissect_declarations_diagnose, wz_dissect_declarations_from_proto, wz_dissect_proto_encode,
     wz_dissect_string_free, WzDissectProtoFile, WZ_DISSECT_OK,
@@ -174,7 +176,7 @@ fn protoc() -> Result<(PathBuf, String), String> {
     let bin = std::env::var("WZ_PROTOC_BIN").unwrap_or_else(|_| "protoc".to_string());
     let probe = Command::new(&bin)
         .arg("--version")
-        .output()
+        .output_bounded()
         .map_err(|e| format!("`{bin}` did not run ({e})"))?;
     if !probe.status.success() {
         return Err(format!("`{bin} --version` failed"));
@@ -370,7 +372,7 @@ fn run_compiler(protoc: &Path, flags: &[&str], dir: &Path, root: &str) -> Result
         .arg(format!("--descriptor_set_out={}", out.display()))
         .arg("--include_imports")
         .arg(root)
-        .output()
+        .output_bounded()
         .map_err(|e| format!("protoc did not run: {e}"))?;
     Ok(Compiled {
         ok: run.status.success(),
@@ -391,8 +393,12 @@ fn compile(protoc: &Path, flags: &[&str], dir: &Path, root: &str) -> Result<Comp
     let decode = Command::new(protoc)
         .arg("--decode=google.protobuf.FileDescriptorSet")
         .arg("google/protobuf/descriptor.proto")
-        .stdin(std::fs::File::open(&out).map_err(|e| format!("open the descriptor set: {e}"))?)
-        .output()
+        .output_within_stdin(
+            CHILD_RUN_BOUND,
+            std::fs::File::open(&out)
+                .map_err(|e| format!("open the descriptor set: {e}"))?
+                .into(),
+        )
         .map_err(|e| format!("protoc --decode did not run: {e}"))?;
     if !decode.status.success() {
         return Err(format!(

@@ -56,6 +56,7 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+use wz_integration_tests::bounded::BoundedOutput as _;
 use wz_integration_tests::common::{
     compile_zenoh_c_example, wz_capi_c_cdylib, zenoh_c_oracle, zenoh_c_shared_library,
 };
@@ -290,7 +291,7 @@ impl Arm {
         let out = Command::new(&self.exe)
             .args(args)
             .env("LD_LIBRARY_PATH", &self.libdir)
-            .output()
+            .output_bounded()
             .unwrap_or_else(|why| panic!("spawn {}: {why}", self.exe.display()));
         assert!(
             out.status.success(),

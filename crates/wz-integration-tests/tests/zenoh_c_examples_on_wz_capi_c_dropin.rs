@@ -48,6 +48,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::Duration;
 
+use wz_integration_tests::bounded::BoundedOutput as _;
 use wz_integration_tests::common::{
     compile_zenoh_c_example, wait_for_substring, wz_ap_demo_binary, wz_capi_c_cdylib,
     zenoh_c_oracle, ChildGuard, PortReservation,
@@ -114,7 +115,7 @@ fn run_arm(program: &Path, libdir: &Path, keyexpr: &str, payload: &str, arm: &st
             "--no-multicast-scouting",
         ])
         .env("LD_LIBRARY_PATH", libdir)
-        .output()
+        .output_bounded()
         .unwrap_or_else(|e| panic!("failed to run the {arm} program: {e}"));
     assert!(
         out.status.success(),
@@ -558,14 +559,16 @@ fn the_wz_capi_c_type_footprints_equal_upstreams_on_this_installation() {
         .arg(format!("-I{}", include.display()))
         .arg("-o")
         .arg(&exe)
-        .output()
+        .output_bounded()
         .expect("spawn the C compiler");
     assert!(
         build.status.success(),
         "the layout probe did not compile against upstream's headers\n{}",
         String::from_utf8_lossy(&build.stderr)
     );
-    let out = Command::new(&exe).output().expect("run the layout probe");
+    let out = Command::new(&exe)
+        .output_bounded()
+        .expect("run the layout probe");
     let text = String::from_utf8_lossy(&out.stdout);
     let upstream: Vec<usize> = text
         .split_whitespace()
@@ -950,7 +953,7 @@ int main(void) {
     let run = |exe: &Path, libdir: &Path| -> (bool, String) {
         let out = Command::new(exe)
             .env("LD_LIBRARY_PATH", libdir)
-            .output()
+            .output_bounded()
             .unwrap_or_else(|why| panic!("spawn {}: {why}", exe.display()));
         (
             out.status.success(),

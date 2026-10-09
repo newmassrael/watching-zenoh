@@ -45,6 +45,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdout, Command, Stdio};
 use std::sync::atomic::{AtomicU16, Ordering};
 
+use wz_integration_tests::bounded::BoundedOutput as _;
 use wz_integration_tests::common::{
     assert_zenoh_c_arm_pairing, compile_zenoh_c_example, wz_capi_c_cdylib, zenoh_c_oracle,
     zenoh_c_shared_library, PortReservation,
@@ -814,7 +815,7 @@ fn hellos_within(
         .args([group, &what.to_string(), window_ms])
         .env("LD_LIBRARY_PATH", &probe.libdir)
         .stderr(Stdio::null())
-        .output()
+        .output_bounded()
         .expect("run the scouting probe");
     let mut lines: Vec<String> = String::from_utf8_lossy(&output.stdout)
         .lines()
@@ -2838,7 +2839,7 @@ fn host_multicast_interfaces() -> Vec<(String, Option<String>)> {
         }
         let first_v4 = std::process::Command::new("ip")
             .args(["-o", "-4", "addr", "show", "dev", &name])
-            .output()
+            .output_bounded()
             .ok()
             .and_then(|out| String::from_utf8(out.stdout).ok())
             .and_then(|text| {

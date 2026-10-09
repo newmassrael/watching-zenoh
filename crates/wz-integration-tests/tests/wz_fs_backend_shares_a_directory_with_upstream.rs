@@ -43,6 +43,7 @@
 use std::path::Path;
 use std::process::Command;
 
+use wz_integration_tests::bounded::BoundedOutput as _;
 use wz_integration_tests::common::wz_zenoh_oracle_binary;
 use wz_runtime_tokio::filesystem_storage::FilesystemVolume;
 use wz_session_core::json5::Json5Value;
@@ -72,7 +73,7 @@ fn oracle(root: &Path, args: &[&str]) -> String {
         .env("ZENOH_BACKEND_FS_ROOT", root)
         .arg(DIR)
         .args(args)
-        .output()
+        .output_bounded()
         .expect("spawn wz-oracle-fs-backend");
     assert!(
         out.status.success(),

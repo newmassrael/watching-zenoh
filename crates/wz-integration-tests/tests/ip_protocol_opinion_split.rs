@@ -62,6 +62,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+use wz_integration_tests::bounded::BoundedOutput as _;
+
 use wz_capture::link::LINKTYPE_RAW;
 
 /// Where `netbase` puts its protocol table. Overridable so the arming
@@ -178,7 +180,7 @@ fn tcpdump_decodes(dir: &Path, proto: u8) -> Option<bool> {
     let out = Command::new("tcpdump")
         .arg("-nr")
         .arg(&path)
-        .output()
+        .output_bounded()
         .ok()?;
     let text = String::from_utf8_lossy(&out.stdout);
     Some(!text.contains(&format!("ip-proto-{proto}")))

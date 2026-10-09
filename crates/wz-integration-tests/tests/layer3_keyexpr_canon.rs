@@ -256,6 +256,7 @@ fn pico_canon_probe_child(input: &str) -> ! {
 /// runs there and the process is free to abort.
 fn probe_pico_canon(input: &str) -> PicoCanonOutcome {
     use std::os::unix::process::ExitStatusExt as _;
+    use wz_integration_tests::bounded::BoundedOutput as _;
 
     let exe = std::env::current_exe().expect("test binary path");
     let out = std::process::Command::new(exe)
@@ -267,7 +268,7 @@ fn probe_pico_canon(input: &str) -> PicoCanonOutcome {
             "--nocapture",
         ])
         .env(PICO_CANON_PROBE_ENV, input)
-        .output()
+        .output_bounded()
         .expect("re-exec the test binary as a canon probe");
 
     let raw = String::from_utf8_lossy(&out.stdout).to_string();

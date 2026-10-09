@@ -33,6 +33,7 @@ use std::os::unix::io::AsRawFd;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+use wz_integration_tests::bounded::BoundedOutput as _;
 use wz_integration_tests::common::{
     assert_zenoh_c_arm_pairing, compile_zenoh_c_example, wz_capi_c_cdylib, zenoh_c_oracle,
     zenoh_c_shared_library,
@@ -128,7 +129,7 @@ fn run_arm(include: &Path, dir: &Path, libdir: &Path, lib: &str, salt: u64) -> S
     let planted = Planted::new(salt);
     let out = Command::new(&exe)
         .env("LD_LIBRARY_PATH", libdir)
-        .output()
+        .output_bounded()
         .unwrap_or_else(|why| panic!("spawn {}: {why}", exe.display()));
     let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
     assert!(

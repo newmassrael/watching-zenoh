@@ -13073,6 +13073,17 @@ layer_c1bn_passive_dissection_features() {
         echo "  C1bn FAIL: the stalled-message witness did not run"
         echo "$out"; return 1; }
 
+    # Debt 846 -- the bounded child run and the census that keeps its population closed:
+    # no test of this crate runs a child with a bare `.output()`. Pinned in the library
+    # target by module name for the reason above: a census in no lane counts nothing. Six:
+    # four of the run itself (ends, large output, killed at the bound, grandchild) and two
+    # of the census (the sources, and the lines it must and must not count).
+    out="$(cd crates && cargo test -p wz-integration-tests --lib bounded:: \
+        --quiet 2>&1)" || { echo "$out"; return 1; }
+    grep -qE '^test result: ok\. 6 passed' <<<"$out" || {
+        echo "  C1bn FAIL: the bounded child run's tests did not run"
+        echo "$out"; return 1; }
+
     # R311y645 — the tests that need BOTH `reassembly` and `network-codecs`, so
     # C1bt's arms cannot see them: its network arm has no reassembly and its
     # default-off arm has neither. This is the only lane that builds the pair,

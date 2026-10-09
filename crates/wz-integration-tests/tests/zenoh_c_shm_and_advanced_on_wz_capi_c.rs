@@ -83,6 +83,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, ExitStatus, Stdio};
 use std::time::Duration;
 
+use wz_integration_tests::bounded::BoundedOutput as _;
 use wz_integration_tests::common::{
     compile_zenoh_c_example, graceful_terminate, read_captured, wait_for_substring,
     wait_for_tcp_accept_alive, wz_ap_demo_binary, wz_capi_c_cdylib, zenoh_c_oracle,
@@ -1230,7 +1231,7 @@ fn run_get_shm_against_pico(
             GET_SHM_SENT,
         ])
         .env("LD_LIBRARY_PATH", libdir)
-        .output()
+        .output_bounded()
         .unwrap_or_else(|e| panic!("failed to run the {label} z_get_shm: {e}"));
     let queryable_saw = read_captured(&mut qbl_out);
     graceful_terminate(queryable.child_mut(), TERMINATE_TIMEOUT);
@@ -1577,7 +1578,7 @@ fn observe_query_with_z_queryable_shm(
     let out = Command::new(program)
         .args(program_args(&endpoint))
         .env("LD_LIBRARY_PATH", libdir)
-        .output()
+        .output_bounded()
         .unwrap_or_else(|e| panic!("failed to run the {label} getter: {e}"));
     // The queryable prints before it replies, so what it printed is complete once the
     // getter has its reply; a short settle covers the flush of its line buffer.
@@ -1978,7 +1979,7 @@ fn observe_c_queryable_with_z_get_shm(
         getter.arg(value);
     }
     let asked = getter
-        .output()
+        .output_bounded()
         .unwrap_or_else(|e| panic!("failed to run upstream's z_get_shm against {label}: {e}"));
 
     let finished = wait_for_substring(&mut q_out, "done queries=", EXCHANGE_TIMEOUT);

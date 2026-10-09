@@ -51,6 +51,7 @@
 use std::process::{Command, Stdio};
 use std::time::Duration;
 
+use wz_integration_tests::bounded::BoundedOutput as _;
 use wz_integration_tests::common::{
     graceful_terminate, read_captured, spawn_listen_acceptor, wait_for_substring,
     wz_ap_demo_binary, ChildGuard, PortReservation,
@@ -341,7 +342,7 @@ fn wz_reconnect_with_listen_is_rejected() {
         .arg("--key")
         .arg("demo/**")
         .env("RUST_LOG", "info")
-        .output()
+        .output_bounded()
         .expect("spawn wz-ap-demo --listen --reconnect");
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert_eq!(
@@ -377,7 +378,7 @@ fn wz_reconnect_serial_connect_is_not_reconnectable() {
         .arg("--value")
         .arg("y")
         .env("RUST_LOG", "info")
-        .output()
+        .output_bounded()
         .expect("spawn wz-ap-demo --connect serial --reconnect");
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert_eq!(

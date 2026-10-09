@@ -63,6 +63,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
+use wz_integration_tests::bounded::BoundedOutput as _;
 use wz_integration_tests::common::{
     assert_demo_binary_newer_than_sources, demo_log_filter, graceful_terminate, read_captured,
     wait_for_substring, wz_ap_demo_binary, wz_capi_pico_cdylib, zenoh_pico_include_dirs,
@@ -359,7 +360,7 @@ fn compile_driver(
         .arg(format!("-L{}", libdir.display()))
         .arg(format!("-l{libname}"))
         .arg(format!("-Wl,-rpath,{}", libdir.display()));
-    let out = cmd.output().expect("spawn C compiler");
+    let out = cmd.output_bounded().expect("spawn C compiler");
     assert!(
         out.status.success(),
         "{arm} arm failed to build against {libname}:\n--- stderr ---\n{}",

@@ -48,6 +48,8 @@
 
 use std::process::Command;
 
+use wz_integration_tests::bounded::BoundedOutput as _;
+
 use wz_capture::link::{decapsulate, LINKTYPE_NULL};
 
 /// The families this test asks about. Wide enough to bracket every BSD
@@ -155,7 +157,7 @@ fn ask_tcpdump(pcap: &[u8], dir: &std::path::Path, name: &str) -> Option<Judged>
     let out = Command::new("tcpdump")
         .args(["-t", "-n", "-q", "-r"])
         .arg(&path)
-        .output()
+        .output_bounded()
         .ok()?;
     let stdout = String::from_utf8_lossy(&out.stdout);
     let line = stdout.lines().find(|l| !l.trim().is_empty())?.trim();

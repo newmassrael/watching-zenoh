@@ -46,6 +46,7 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+use wz_integration_tests::bounded::BoundedOutput as _;
 use wz_integration_tests::common::{
     compile_pico_source, wz_capi_pico_cdylib, zenoh_pico_include_dirs, zenoh_pico_library_dir,
     zenoh_pico_shared_library,
@@ -329,7 +330,7 @@ fn run_both_arms() -> (String, String) {
     let run = |exe: &Path, libdir: &Path| -> (bool, String) {
         let out = Command::new(exe)
             .env("LD_LIBRARY_PATH", libdir)
-            .output()
+            .output_bounded()
             .unwrap_or_else(|why| panic!("spawn {}: {why}", exe.display()));
         (
             out.status.success(),

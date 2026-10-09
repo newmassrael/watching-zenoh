@@ -35,6 +35,7 @@
 use std::collections::HashMap;
 use std::process::Command;
 
+use wz_integration_tests::bounded::BoundedOutput as _;
 use wz_integration_tests::common::{project_root, zenoh_pico_include_dirs};
 use wz_session_core::raweth_link::{
     frame, RawEthHeader, ETH_HEADER_LEN, ETH_TYPE_VLAN, ETH_VLAN_HEADER_LEN, MAX_ETH_FRAME_SIZE,
@@ -121,7 +122,7 @@ fn run_probe() -> HashMap<String, String> {
         .arg(&bin)
         .arg(&src)
         .current_dir(project_root())
-        .output()
+        .output_bounded()
         .unwrap_or_else(|e| panic!("could not run {cc}: {e}"));
     assert!(
         output.status.success(),
@@ -129,7 +130,7 @@ fn run_probe() -> HashMap<String, String> {
         String::from_utf8_lossy(&output.stderr)
     );
 
-    let run = Command::new(&bin).output().expect("run the probe");
+    let run = Command::new(&bin).output_bounded().expect("run the probe");
     assert!(run.status.success(), "the probe exited {:?}", run.status);
     String::from_utf8_lossy(&run.stdout)
         .lines()

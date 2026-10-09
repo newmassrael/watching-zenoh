@@ -94,6 +94,7 @@
 use std::process::{Command, Stdio};
 use std::time::Duration;
 
+use wz_integration_tests::bounded::BoundedOutput as _;
 use wz_integration_tests::common::{
     compile_pico_example_against_wz_capi, compile_pico_example_against_wz_capi_with_includes,
     graceful_terminate, project_root, read_captured, run_query_until_answered,
@@ -2285,7 +2286,9 @@ fn oracle_binary(example: &str, dir: &std::path::Path) -> std::path::PathBuf {
         .arg(format!("-L{}", libdir.display()))
         .arg("-lzenohpico")
         .arg(format!("-Wl,-rpath,{}", libdir.display()));
-    let out = cmd.output().expect("spawn the C compiler for the oracle");
+    let out = cmd
+        .output_bounded()
+        .expect("spawn the C compiler for the oracle");
     assert!(
         out.status.success(),
         "the ORACLE build failed for {example}.c against the real zenoh-pico:\n{}",
@@ -2415,14 +2418,14 @@ fn pico_zscout_source_on_wz_capi_matches_the_real_pico_against_a_zenohd() {
     let oracle_out = Command::new("stdbuf")
         .args(["-oL", "-eL"])
         .arg(&oracle)
-        .output()
+        .output_bounded()
         .expect("run upstream z_scout linked to the REAL zenoh-pico");
     let oracle_printed = String::from_utf8_lossy(&oracle_out.stdout).into_owned();
 
     let wz_out = Command::new("stdbuf")
         .args(["-oL", "-eL"])
         .arg(&dropin)
-        .output()
+        .output_bounded()
         .expect("run upstream z_scout linked to wz's C-ABI cdylib");
     let wz_printed = String::from_utf8_lossy(&wz_out.stdout).into_owned();
 
@@ -2544,14 +2547,14 @@ fn pico_zscout_source_on_wz_capi_reports_every_zenohd_on_the_group() {
     let oracle_out = Command::new("stdbuf")
         .args(["-oL", "-eL"])
         .arg(&oracle)
-        .output()
+        .output_bounded()
         .expect("run upstream z_scout linked to the REAL zenoh-pico");
     let oracle_printed = String::from_utf8_lossy(&oracle_out.stdout).into_owned();
 
     let wz_out = Command::new("stdbuf")
         .args(["-oL", "-eL"])
         .arg(&dropin)
-        .output()
+        .output_bounded()
         .expect("run upstream z_scout linked to wz's C-ABI cdylib");
     let wz_printed = String::from_utf8_lossy(&wz_out.stdout).into_owned();
 
@@ -2874,7 +2877,7 @@ fn pico_zbytes_source_on_wz_capi_prints_what_the_real_pico_prints() {
     let oracle_out = Command::new("stdbuf")
         .args(["-oL", "-eL"])
         .arg(&oracle)
-        .output()
+        .output_bounded()
         .expect("run upstream z_bytes linked to the REAL zenoh-pico");
     assert!(
         oracle_out.status.success(),
@@ -2894,7 +2897,7 @@ fn pico_zbytes_source_on_wz_capi_prints_what_the_real_pico_prints() {
     let wz_out = Command::new("stdbuf")
         .args(["-oL", "-eL"])
         .arg(&dropin)
-        .output()
+        .output_bounded()
         .expect("run upstream z_bytes linked to wz's C-ABI cdylib");
     let wz_printed = String::from_utf8_lossy(&wz_out.stdout).into_owned();
     assert!(
@@ -4754,7 +4757,7 @@ fn assert_not_a_stub_main(example: &str, exe: &std::path::Path) {
     let out = Command::new("stdbuf")
         .args(["-oL", "-eL"])
         .arg(exe)
-        .output()
+        .output_bounded()
         .unwrap_or_else(|e| panic!("run {example} on wz: {e}"));
     let printed = String::from_utf8_lossy(&out.stdout);
     assert!(

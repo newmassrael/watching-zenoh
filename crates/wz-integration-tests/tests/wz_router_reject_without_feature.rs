@@ -16,6 +16,7 @@
 
 use std::process::Command;
 
+use wz_integration_tests::bounded::BoundedOutput as _;
 use wz_integration_tests::common::wz_ap_demo_binary;
 
 #[test]
@@ -27,7 +28,7 @@ fn wz_router_without_feature_rejects_with_exit_2() {
     let output = Command::new(&demo)
         .arg("--router")
         .arg("127.0.0.1:0")
-        .output()
+        .output_bounded()
         .expect("spawn wz-ap-demo --router");
 
     let stderr = String::from_utf8_lossy(&output.stderr);

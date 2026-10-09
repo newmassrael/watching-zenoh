@@ -51,6 +51,7 @@ use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
+use wz_integration_tests::bounded::BoundedOutput as _;
 use wz_integration_tests::common::{
     assert_zenoh_c_arm_pairing, compile_zenoh_c_example, wz_capi_c_cdylib, zenoh_c_oracle,
     zenoh_c_shared_library, PortReservation,
@@ -474,7 +475,7 @@ fn exchange(sender: &Built, receiver: &Built, mode: &str, kind: &str, n: usize) 
         .args([endpoint.as_str(), KEY, object.as_str(), kind])
         .env("LD_LIBRARY_PATH", &sender.libdir)
         .stderr(Stdio::null())
-        .output()
+        .output_bounded()
         .expect("run the sender");
     assert!(
         sent.status.success(),

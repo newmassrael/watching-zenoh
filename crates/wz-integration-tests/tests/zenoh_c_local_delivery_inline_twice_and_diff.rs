@@ -24,6 +24,7 @@
 use std::path::PathBuf;
 use std::process::Command;
 
+use wz_integration_tests::bounded::BoundedOutput as _;
 use wz_integration_tests::common::{
     assert_zenoh_c_arm_pairing, compile_zenoh_c_example, wz_capi_c_cdylib, zenoh_c_oracle,
     zenoh_c_shared_library,
@@ -233,7 +234,7 @@ fn oracle_or_note() -> Option<PathBuf> {
 fn run(exe: &std::path::Path, libdir: &std::path::Path) -> String {
     let out = Command::new(exe)
         .env("LD_LIBRARY_PATH", libdir)
-        .output()
+        .output_bounded()
         .expect("run the probe");
     assert!(
         out.status.success(),

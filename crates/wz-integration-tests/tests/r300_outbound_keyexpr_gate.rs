@@ -39,6 +39,7 @@
 
 use std::process::{Command, Stdio};
 
+use wz_integration_tests::bounded::BoundedOutput as _;
 use wz_integration_tests::common::wz_ap_demo_binary;
 
 /// Run wz-ap-demo with a deliberately unreachable `--connect`
@@ -52,7 +53,7 @@ fn run_demo_with_declare_flag(flag: &str, keyexpr: &str) -> (Option<i32>, String
         .args(["--connect", "127.0.0.1:1", flag, keyexpr])
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
-        .output()
+        .output_bounded()
         .expect("spawn wz-ap-demo");
     (
         output.status.code(),
@@ -78,7 +79,7 @@ fn run_demo_queryable_gate(keyexpr: &str) -> (Option<i32>, String) {
         ])
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
-        .output()
+        .output_bounded()
         .expect("spawn wz-ap-demo");
     (
         output.status.code(),

@@ -60,6 +60,7 @@ use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+use wz_integration_tests::bounded::BoundedOutput as _;
 use wz_integration_tests::common::{
     wz_capi_pico_cdylib, zenoh_pico_include_dirs, zenoh_pico_library_dir,
 };
@@ -119,7 +120,7 @@ fn exported_defaults(lib: &Path) -> BTreeSet<String> {
     let out = Command::new("nm")
         .args(["-D", "--defined-only"])
         .arg(lib)
-        .output()
+        .output_bounded()
         .expect("spawn nm");
     assert!(out.status.success(), "nm failed on {}", lib.display());
     String::from_utf8_lossy(&out.stdout)
@@ -195,14 +196,14 @@ fn run_arm(dir: &Path, libdir: &Path, libname: &str, arm: &str, source: &str) ->
         .arg(format!("-L{}", libdir.display()))
         .arg(format!("-l{libname}"))
         .arg(format!("-Wl,-rpath,{}", libdir.display()));
-    let built = cmd.output().expect("spawn C compiler");
+    let built = cmd.output_bounded().expect("spawn C compiler");
     assert!(
         built.status.success(),
         "{arm} arm failed to build against {libname}:\n--- stderr ---\n{}",
         String::from_utf8_lossy(&built.stderr)
     );
     let ran = Command::new(&exe)
-        .output()
+        .output_bounded()
         .unwrap_or_else(|e| panic!("{arm}: run the driver: {e}"));
     assert!(
         ran.status.success(),

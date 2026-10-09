@@ -44,6 +44,7 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+use wz_integration_tests::bounded::BoundedOutput as _;
 use wz_integration_tests::common::{mbedtls_prefix, project_root, zenoh_pico_build_root};
 
 /// One struct's measured layout: `(size, [(field, offset)])`.
@@ -220,7 +221,7 @@ fn measure_reference(work: &Path) -> Vec<(String, Layout)> {
         .arg("-o")
         .arg(&bin_path)
         .arg(&c_path)
-        .output()
+        .output_bounded()
         .unwrap_or_else(|e| panic!("running {cc}: {e}"));
     assert!(
         out.status.success(),
@@ -229,7 +230,7 @@ fn measure_reference(work: &Path) -> Vec<(String, Layout)> {
     );
 
     let run = Command::new(&bin_path)
-        .output()
+        .output_bounded()
         .expect("running the layout probe");
     assert!(run.status.success(), "the layout probe exited non-zero");
     let text = String::from_utf8(run.stdout).expect("probe output is UTF-8");
