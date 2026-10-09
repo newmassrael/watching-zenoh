@@ -734,4 +734,50 @@ mod tests {
             );
         }
     }
+
+    /// A listener bound to the unspecified address is advertised at the addresses of THIS host,
+    /// read from its own interface table: the loopback address for a scouter on the host, and
+    /// no unspecified address for anyone. The table is the host's (`getifaddrs` on a unix host,
+    /// `GetAdaptersAddresses` on Windows), so this is the end-to-end answer of the reading
+    /// that the unit tests of `link_interfaces` tell only on tables made for them. A host whose
+    /// table could not be read advertises nothing, and that is what this refuses.
+    #[test]
+    fn a_wildcard_listener_is_advertised_at_the_hosts_own_addresses() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("a runtime");
+        let bound = runtime
+            .block_on(wz_runtime_tokio::session_open::bind_endpoint(
+                "tcp/0.0.0.0:0",
+            ))
+            .expect("a wildcard tcp listener binds");
+        let port = bound.local_addr().expect("a bound address").port();
+
+        let advertised = Advertised::of(&bound);
+
+        let loopback = format!("127.0.0.1:{port}");
+        assert!(
+            advertised
+                .local
+                .iter()
+                .any(|locator| locator.contains(&loopback)),
+            "a scouter on the host is told no loopback locator: {:?}",
+            advertised.local
+        );
+        assert!(
+            advertised
+                .remote
+                .iter()
+                .all(|locator| !locator.contains("127.0.0.1")),
+            "a node beside is told a loopback locator: {:?}",
+            advertised.remote
+        );
+        for locator in advertised.local.iter().chain(advertised.remote.iter()) {
+            assert!(
+                !locator.contains("0.0.0.0"),
+                "the unspecified address was advertised: {locator}"
+            );
+        }
+    }
 }
