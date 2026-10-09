@@ -2917,6 +2917,8 @@ layer_c0_test_discipline() {
     # 142 MB job needs ~88 minutes — past its own `timeout-minutes`. No ceiling
     # number is right for both, so the lever is BYTES, and nothing was looking
     # at them because the package lists were copy-pasted and unowned.
+    # Item 861 -- its BINDGEN_FREE arm drives the same code over fixtures first.
+    python3 scripts/lib/apt_package_census.py --selftest || return 1
     python3 scripts/lib/apt_package_census.py || return 1
     # R311y569 — the COUNT-GUARD-to-binary gate. `run-ci.sh` carries a bare
     # `| grep -qE '^test result: ok\. N passed'` shape, and NOTHING tied N to

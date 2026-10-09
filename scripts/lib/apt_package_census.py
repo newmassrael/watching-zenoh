@@ -143,7 +143,9 @@ import re
 import shutil
 import subprocess
 import sys
+from collections.abc import Callable
 from pathlib import Path
+from typing import NamedTuple
 
 import cargo_activation
 import cargo_workspaces
@@ -194,20 +196,23 @@ _add("cmake", "Builds the cached native RocksDB engine via the local composite a
 # `cargo tree -e normal,build -i bindgen@<version> --workspace --all-features`
 # on each of the two `crates` versions and on `xtask`.
 #
-# THE ROW BELOW STILL LISTS EVERY JOB IT DID BEFORE, and that is deliberate
-# rather than an oversight: libclang is `dlopen`ed or invoked, not probed, so
-# this file cannot derive which jobs reach a consumer the way it derives
-# `libxml2-dev`, and a job dropping a 25 MB package on the strength of a prose
-# reading is a change only a hosted run can verify. It is registered as
-# open-debt item 861 to be done from a measurement, not from this comment.
+# Item 861 -- WHO NEEDS IT, measured. The consumers are four crates in the
+# `crates` workspace (`librocksdb-sys`, `lwip-sys`, `zenoh-pico-sys`,
+# `io-uring`), which put 29 of its 66 members above one, plus `libxml` in the
+# `xtask` workspace and in SCE's own, so every job below builds something that
+# reaches a consumer EXCEPT the ones in BINDGEN_FREE (see that arm: one job
+# today, `validate-codegen`, shown by a recording run to compile nothing). The
+# rows are still adjudicated, not derived, because a job's compile set is
+# decided by its lanes at run time and the text this file reads cannot say it
+# soundly either way (the BINDGEN_FREE comment has both failures).
 _add(
     "libclang-dev",
     "bindgen, reached through librocksdb-sys (wz-runtime-tokio's storage "
-    "engine), lwip-sys, and the `libxml` crate in the xtask workspace. Not "
-    "derived: jobs that reach none of those may no longer need it (item 861).",
+    "engine), lwip-sys, zenoh-pico-sys, io-uring, and the `libxml` crate in "
+    "the xtask workspace and in SCE's. Every job here builds a member above "
+    "one of them; the exception is BINDGEN_FREE (item 861).",
     [
         "ci",
-        "validate-codegen",
         # R3016 -- Layers B and B2 and the sce-codegen build left
         # `validate-codegen` for this job and took the install line with them.
         "codegen-verify",
@@ -249,7 +254,6 @@ _add(
     "libclang-dev above and carried on the same jobs.",
     [
         "ci",
-        "validate-codegen",
         "codegen-verify",
         "verdict-legs",
         # R2163 — Layer C1cn's own job, peeled off `ci` for its budget. It
@@ -640,6 +644,102 @@ def listed_members(rel: str) -> tuple[str, ...]:
     return tuple(r[0] for r in rows if len(r) < 2 or r[1] != "excluded")
 
 
+@functools.lru_cache(maxsize=None)
+def _runci_functions() -> tuple[tuple[str, ...], dict[str, int]]:
+    """`run-ci.sh` as (its lines, function name -> the line it starts on)."""
+    body_lines = tuple(RUN_CI.read_text().splitlines())
+    starts: dict[str, int] = {}
+    for i, line in enumerate(body_lines):
+        m = re.match(r"^([a-z0-9_]+)\(\)\s*\{", line)
+        if m:
+            starts[m.group(1)] = i
+    return body_lines, starts
+
+
+@functools.lru_cache(maxsize=None)
+def layer_dispatch() -> dict[str, str]:
+    """`--layer <name>` -> the `run-ci.sh` function that runs it."""
+    return dict(re.findall(r"run_layer ([A-Za-z0-9]+) ([a-z0-9_]+)", RUN_CI.read_text()))
+
+
+def layer_body(fn: str) -> str:
+    """One `run-ci.sh` function, bounded by the top-level closing brace.
+
+    Brace COUNTING was the first attempt and it silently over-ran: shell
+    carries `{` inside `${...}`, inside comments and inside strings, so the
+    depth never returned to zero and the "body" ran to the end of a
+    14000-line file. Every job then appeared to reach every crate, the
+    derived arm accepted all of them, and the gate printed a green line
+    about a check that had not discriminated anything. `run-ci.sh` closes
+    its functions with a brace in column 0, which is a fact about the file
+    rather than about shell, so this reads that instead.
+    """
+    body_lines, starts = _runci_functions()
+    start = starts.get(fn)
+    if start is None:
+        return ""
+    out = [body_lines[start]]
+    for line in body_lines[start + 1:]:
+        out.append(line)
+        if line == "}":
+            break
+    return "\n".join(out)
+
+
+def code_only(text: str) -> str:
+    """Drop whole-line comments.
+
+    The derivation must read what a job RUNS, not what anyone wrote about
+    it. Without this the check answered yes to four jobs on the strength of
+    the comments R311y881 had just added to say cmake was NOT needed there:
+    a sentence explaining an absence was counted as evidence of a presence.
+    Trailing comments are left alone — a `#` mid-line is only reliably a
+    comment after a shell parse, and getting that wrong would drop code.
+    """
+    return "\n".join(
+        line for line in text.splitlines() if not line.lstrip().startswith("#")
+    )
+
+
+def with_helpers(fn: str) -> str:
+    """A layer's body plus every `run-ci.sh` helper it calls, transitively.
+
+    R2585 — C1bz lists every member through `_c1bz_crate_list` ->
+    `_c1bz_members`, and a reader that stops at the layer function sees
+    neither. Following calls is over-inclusive, which is the direction this
+    census may err in: it can only keep a package, never drop one.
+    """
+    _, starts = _runci_functions()
+    seen: set[str] = set()
+    pending = [fn]
+    bodies = []
+    while pending:
+        name = pending.pop()
+        if not name or name in seen:
+            continue
+        seen.add(name)
+        body = code_only(layer_body(name))
+        bodies.append(body)
+        pending.extend(
+            called for called in re.findall(r"\b(_[a-z0-9_]+)\b", body)
+            if called in starts
+        )
+    return "\n".join(bodies)
+
+
+def job_yml_lines(path: Path = CI_YML) -> dict[str, list[str]]:
+    """job id -> the lines of its block in `path`, from its `  <id>:` line on."""
+    job = None
+    raw: dict[str, list[str]] = {}
+    for line in path.read_text().splitlines():
+        m = re.match(r"^  ([A-Za-z0-9_-]+):\s*$", line)
+        if m:
+            job = m.group(1)
+        if job:
+            raw.setdefault(job, []).append(line)
+    return raw
+
+
 def job_reachable_text(path: Path = CI_YML) -> dict[str, str]:
     """job id -> everything that job runs, followed one level deep.
 
@@ -656,84 +756,8 @@ def job_reachable_text(path: Path = CI_YML) -> dict[str, str]:
     reading. A gate's first finding is a claim to adjudicate, not a verdict to
     obey (open-debt item 271's shape), and this comment is what that cost.
     """
-    yml = path.read_text().splitlines()
-    job = None
-    raw: dict[str, list[str]] = {}
-    for line in yml:
-        m = re.match(r"^  ([A-Za-z0-9_-]+):\s*$", line)
-        if m:
-            job = m.group(1)
-        if job:
-            raw.setdefault(job, []).append(line)
-
-    src = RUN_CI.read_text()
-    dispatch = dict(re.findall(r"run_layer ([A-Za-z0-9]+) ([a-z0-9_]+)", src))
-    body_lines = src.splitlines()
-    starts = {}
-    for i, line in enumerate(body_lines):
-        m = re.match(r"^([a-z0-9_]+)\(\)\s*\{", line)
-        if m:
-            starts[m.group(1)] = i
-
-    def layer_body(fn: str) -> str:
-        """One `run-ci.sh` function, bounded by the top-level closing brace.
-
-        Brace COUNTING was the first attempt and it silently over-ran: shell
-        carries `{` inside `${...}`, inside comments and inside strings, so the
-        depth never returned to zero and the "body" ran to the end of a
-        14000-line file. Every job then appeared to reach every crate, the
-        derived arm accepted all of them, and the gate printed a green line
-        about a check that had not discriminated anything. `run-ci.sh` closes
-        its functions with a brace in column 0, which is a fact about the file
-        rather than about shell, so this reads that instead.
-        """
-        start = starts.get(fn)
-        if start is None:
-            return ""
-        out = [body_lines[start]]
-        for line in body_lines[start + 1:]:
-            out.append(line)
-            if line == "}":
-                break
-        return "\n".join(out)
-
-    def code_only(text: str) -> str:
-        """Drop whole-line comments.
-
-        The derivation must read what a job RUNS, not what anyone wrote about
-        it. Without this the check answered yes to four jobs on the strength of
-        the comments R311y881 had just added to say cmake was NOT needed there:
-        a sentence explaining an absence was counted as evidence of a presence.
-        Trailing comments are left alone — a `#` mid-line is only reliably a
-        comment after a shell parse, and getting that wrong would drop code.
-        """
-        return "\n".join(
-            line for line in text.splitlines() if not line.lstrip().startswith("#")
-        )
-
-    def with_helpers(fn: str) -> str:
-        """A layer's body plus every `run-ci.sh` helper it calls, transitively.
-
-        R2585 — C1bz lists every member through `_c1bz_crate_list` ->
-        `_c1bz_members`, and a reader that stops at the layer function sees
-        neither. Following calls is over-inclusive, which is the direction this
-        census may err in: it can only keep a package, never drop one.
-        """
-        seen: set[str] = set()
-        pending = [fn]
-        bodies = []
-        while pending:
-            name = pending.pop()
-            if not name or name in seen:
-                continue
-            seen.add(name)
-            body = code_only(layer_body(name))
-            bodies.append(body)
-            pending.extend(
-                called for called in re.findall(r"\b(_[a-z0-9_]+)\b", body)
-                if called in starts
-            )
-        return "\n".join(bodies)
+    raw = job_yml_lines(path)
+    dispatch = layer_dispatch()
 
     def resolved_members(segment: str, rel: str | None) -> str:
         """The member names a segment reaches at run time, as text."""
@@ -1102,10 +1126,18 @@ def documented_prereqs() -> dict[str, set[str]]:
 
 
 def universal_packages(sites: dict[str, set[str]]) -> set[str]:
-    """Packages every job installs -- what a build of any part of this needs."""
-    if not sites:
+    """Packages every job installs -- what a build of any part of this needs.
+
+    A BINDGEN_FREE job is left out of the intersection (open-debt item 861): it
+    was measured to compile nothing that reaches bindgen, so what it does not
+    install says nothing about what a build of this workspace needs, and counting
+    it would have told the README to stop naming `libclang-dev` and `clang`,
+    which a hand build of any wz crate above a consumer does need.
+    """
+    builders = [pkgs for job, pkgs in sites.items() if job not in BINDGEN_FREE]
+    if not builders:
         return set()
-    return set.intersection(*sites.values())
+    return set.intersection(*builders)
 
 
 def undocumented(sites: dict[str, set[str]]) -> list[str]:
@@ -1301,7 +1333,350 @@ def excess() -> list[str]:
     return findings
 
 
+# ─── The BINDGEN-FREE arm (open-debt item 861) ──────────────────────────────
+#
+# `libclang-dev` and `clang` serve bindgen, and four crates in the `crates`
+# workspace run it (`librocksdb-sys`, `lwip-sys`, `zenoh-pico-sys`, `io-uring`),
+# which puts 29 of its 66 members -- the `wz` facade, `wz-runtime-tokio` and
+# `wz-integration-tests` among them -- above a consumer, besides `libxml` in the
+# `xtask` workspace and in SCE's own. So the item's premise, "only two jobs
+# consume bindgen", did not survive measuring: nearly every job builds a member
+# that reaches one, and the packages stayed on 19 of 20 jobs because they are
+# needed there.
+#
+# WHY THIS ARM DOES NOT DERIVE THE OTHER DIRECTION. A job's need for bindgen is a
+# question about what its lanes COMPILE, and the text this census reads cannot
+# answer it soundly in either direction. Over-reading: the gates that
+# `validate-codegen` runs quote `cargo test -p <member>` and every member name in
+# their own selftest strings, so a substring test credits that job with a build it
+# never does. Under-reading: `verdict-legs` names no crate at all -- its
+# `cargo test -p` set is decided at run time from the verdict bindings
+# (`wz-analyze`, `wz-capture`, `wz-replay`), and `wz-replay` reaches a consumer, so
+# a text derivation would have dropped a package that job needs. The `xtask` arm
+# above avoids the first by matching an INVOCATION; there is no single invocation
+# shape for the `crates` workspace.
+#
+# WHAT IT DOES INSTEAD. One job is shown to compile nothing by a MEASUREMENT --
+# its layers run under a `cargo` that records every call and refuses the
+# compiling verbs (`--measure-bindgen-free`) -- and the measurement is pinned by
+# what can be checked statically: the SET of layers it runs (a lane added to the
+# job re-opens the question by name, not by count), no compiling `cargo` line in
+# the job's own steps, in those layers' shell bodies or in the shell scripts they
+# call, and no `build-sce.sh` / `xtask` reach. What the static half cannot see is
+# a PYTHON gate that spawns a compile; that is the limit, and the measure mode is
+# what a reader re-runs when a layer's gates change.
+#
+# THE RUNNER IMAGE CARRIES libclang ALREADY (`/usr/lib/llvm-{13,14,15}/lib`,
+# measured by the `routing-adminspace` probe step), so a wrong row here would not
+# turn a job red; it would only leave an undeclared inheritance. That is why the
+# row has to be MEASURED and cannot be left to the first red to correct it.
+BINDGEN_PACKAGES = frozenset({"libclang-dev", "clang"})
+
+# A `cargo` command that COMPILES, as opposed to one that reads (`metadata`,
+# `tree`, `fmt`, `fetch`). `b`/`t`/`r`/`c` are cargo's own short aliases.
+COMPILE_VERB = re.compile(
+    r"(?:^|[\s;&|(`$])cargo\s+(?:\+\S+\s+)?"
+    r"(?:build|test|run|check|clippy|doc|bench|rustc|install|b|t|r|c)\b"
+)
+
+# What reaches a bindgen consumer without naming a crate.
+SCE_OR_XTASK_REACH = re.compile(
+    r"build-sce\.sh|sce_codegen_ensure|--manifest-path\s+xtask/Cargo\.toml"
+)
+
+
+class BindgenFree(NamedTuple):
+    """A job shown to compile nothing that reaches bindgen."""
+
+    layers: frozenset[str]          # every `--layer` the job runs, pinned as a SET
+    exempt: dict[str, str]          # script -> why compiling there reaches no consumer
+    measured: str                   # what the recording run saw
+
+
+BINDGEN_FREE: dict[str, BindgenFree] = {
+    "validate-codegen": BindgenFree(
+        layers=frozenset({
+            "A", "A2", "A3", "A4", "A5",
+            "C0", "C0i", "C0b", "C0g", "C0d", "C0e", "C0f", "U",
+        }),
+        exempt={
+            "install-mnemosyne-cli.sh": (
+                "`cargo install` of the pinned mnemosyne CLI. Its dependency "
+                "tree is the 56 crates the hosted job log lists (tree-sitter, "
+                "serde, regex, the mnemosyne crates and their build helpers): "
+                "no `bindgen` and no `clang-sys`, and nothing of this workspace."
+            ),
+        },
+        measured=(
+            "2026-10-09, thirteen layers under the recording cargo with the "
+            "job's own REQUIRE variables: every layer passed and the only cargo "
+            "calls were `metadata` (A3, A5, C0) and `tree` (A4)."
+        ),
+    ),
+}
+
+
+def _shell_scripts_from(text: str) -> list[str]:
+    """`scripts/<x>.sh` paths named in `text`, relative to `scripts/`."""
+    return re.findall(r"scripts/([A-Za-z0-9_./-]+\.sh)", text)
+
+
+def bindgen_free_findings(
+    rows: dict[str, BindgenFree],
+    ci_lines: dict[str, list[str]],
+    installed: dict[str, set[str]],
+    layer_shell: Callable[[str], str],
+    script_text: Callable[[str], str | None],
+) -> list[str]:
+    """Findings against the BINDGEN_FREE rows.
+
+    Every input is passed in, so the selftest drives the same code over fixtures
+    that the live run drives over the tree.
+    """
+    findings: list[str] = []
+    for job, row in sorted(rows.items()):
+        if job not in ci_lines:
+            findings.append(
+                f"BINDGEN_FREE names job `{job}`, which ci.yml does not have. "
+                f"A measurement that outlives its job is open-debt item 47's shape "
+                f"-- delete the row."
+            )
+            continue
+        for pkg in sorted(installed.get(job, set()) & BINDGEN_PACKAGES):
+            findings.append(
+                f"job `{job}` is declared BINDGEN_FREE but installs `{pkg}`. "
+                f"Drop the package, or delete the row if the job now compiles "
+                f"something that reaches bindgen."
+            )
+        job_text = code_only("\n".join(ci_lines[job]))
+        ran = set(re.findall(r"--layer ([A-Za-z0-9]+)", job_text))
+        for layer in sorted(ran - row.layers):
+            findings.append(
+                f"job `{job}` runs layer `{layer}`, which the BINDGEN_FREE "
+                f"measurement does not cover. Re-measure with `python3 "
+                f"scripts/lib/apt_package_census.py --measure-bindgen-free {job}` "
+                f"and add the layer to the row, or restore `libclang-dev clang`."
+            )
+        for layer in sorted(row.layers - ran):
+            findings.append(
+                f"BINDGEN_FREE pins layer `{layer}` for job `{job}`, which no "
+                f"longer runs it. Remove it from the row so the pin is the set "
+                f"the job really runs."
+            )
+        surfaces: list[tuple[str, str]] = [(f"job `{job}` steps", job_text)]
+        for layer in sorted(ran & row.layers):
+            surfaces.append((f"layer `{layer}`", layer_shell(layer)))
+        # `run-ci.sh` is read per LAYER above, never whole: it holds every layer's
+        # body, so reading it as a script would charge this job with all of them.
+        seen: set[str] = {"run-ci.sh"}
+        pending = [
+            (origin, s) for origin, text in surfaces for s in _shell_scripts_from(text)
+        ]
+        while pending:
+            origin, rel = pending.pop()
+            if rel in seen or rel in row.exempt:
+                continue
+            seen.add(rel)
+            body = script_text(rel)
+            if body is None:
+                continue
+            body = code_only(body)
+            surfaces.append((f"script `{rel}` (from {origin})", body))
+            pending.extend((f"script `{rel}`", s) for s in _shell_scripts_from(body))
+        for origin, text in surfaces:
+            for line in text.splitlines():
+                if COMPILE_VERB.search(line):
+                    findings.append(
+                        f"{origin} of BINDGEN_FREE job `{job}` runs a compiling "
+                        f"cargo command: `{line.strip()[:110]}`. The job was "
+                        f"measured to compile nothing; re-measure, then drop the "
+                        f"row or exempt the script with a reason."
+                    )
+                if SCE_OR_XTASK_REACH.search(line):
+                    findings.append(
+                        f"{origin} of BINDGEN_FREE job `{job}` reaches the SCE "
+                        f"codegen build or `xtask`, whose `libxml` is a bindgen "
+                        f"consumer: `{line.strip()[:110]}`."
+                    )
+    return findings
+
+
+def _read_script(rel: str) -> str | None:
+    path = ROOT / "scripts" / rel
+    return path.read_text() if path.is_file() else None
+
+
+def bindgen_free() -> list[str]:
+    """The BINDGEN_FREE arm over the live tree."""
+    return bindgen_free_findings(
+        BINDGEN_FREE,
+        job_yml_lines(),
+        ci_sites(),
+        lambda layer: with_helpers(layer_dispatch().get(layer, "")),
+        _read_script,
+    )
+
+
+_RECORDER = """#!/usr/bin/env bash
+# Records every cargo call; refuses the ones that compile.
+verb=""
+for a in "$@"; do
+    case "$a" in +*|-*) ;; *) verb="$a"; break ;; esac
+done
+printf '%s\\t%s\\t%s\\n' "${WZ_RECORD_TAG:-?}" "$verb" "$*" >> "$WZ_RECORD_LOG"
+case "$verb" in
+    build|test|run|check|clippy|doc|bench|rustc|install|b|t|r|c)
+        echo "cargo recorder: refused $verb" >&2
+        exit 97 ;;
+esac
+exec "$WZ_REAL_CARGO" "$@"
+"""
+
+
+def measure_bindgen_free(job: str) -> int:
+    """Run `job`'s pinned layers under a recording cargo; exit 0 only when every
+    layer passed and none of them asked cargo to compile.
+
+    Slow (the C0 family is minutes) and needs the tools the job installs, which
+    is why it is a mode a reader runs, not part of the census.
+    """
+    import os
+    import tempfile
+
+    row = BINDGEN_FREE.get(job)
+    if row is None:
+        print(f"  measure: `{job}` is not a BINDGEN_FREE job", file=sys.stderr)
+        return 2
+    real = shutil.which("cargo")
+    if real is None:
+        print("  measure: cargo is not on PATH", file=sys.stderr)
+        return 2
+    # The job's own REQUIRE-style variables, read from its steps, so an armed
+    # lane is measured armed.
+    env_pairs = dict(re.findall(
+        r"^\s+(WZ_[A-Z0-9_]+):\s*\"?([^\"\s]+)\"?\s*$",
+        "\n".join(job_yml_lines()[job]), re.M,
+    ))
+    verbs: dict[str, dict[str, int]] = {}
+    refused: list[str] = []
+    failed_layers: list[str] = []
+    with tempfile.TemporaryDirectory() as tmp:
+        shim = Path(tmp) / "cargo"
+        shim.write_text(_RECORDER)
+        shim.chmod(0o755)
+        log = Path(tmp) / "calls.tsv"
+        for layer in sorted(row.layers):
+            env = dict(os.environ)
+            env.update(env_pairs)
+            env.update({
+                # ci.yml's workflow-level assertion that no lane runs nothing,
+                # armed here too so the measured run is the hosted one.
+                "WZ_DECLINED_EXPECT": "",
+                "PATH": f"{tmp}{os.pathsep}{env['PATH']}",
+                "WZ_REAL_CARGO": real,
+                "WZ_RECORD_LOG": str(log),
+                "WZ_RECORD_TAG": layer,
+            })
+            proc = subprocess.run(
+                ["bash", str(RUN_CI), "--layer", layer],
+                cwd=ROOT, env=env, capture_output=True, text=True, check=False,
+            )
+            if proc.returncode != 0:
+                failed_layers.append(layer)
+                tail = (proc.stdout + proc.stderr).strip().splitlines()[-6:]
+                print(f"  measure: layer {layer} rc={proc.returncode}, last lines:\n"
+                      + "\n".join(f"    {t[:200]}" for t in tail), file=sys.stderr)
+        if log.is_file():
+            for line in log.read_text().splitlines():
+                tag, verb, args = (line.split("\t") + ["", ""])[:3]
+                verbs.setdefault(tag, {}).setdefault(verb, 0)
+                verbs[tag][verb] += 1
+                if COMPILE_VERB.search(f"cargo {verb} {args}"):
+                    refused.append(f"{tag}: cargo {verb} {args}"[:160])
+    for layer in sorted(row.layers):
+        calls = verbs.get(layer, {})
+        shown = ", ".join(f"{v or '?'} x{n}" for v, n in sorted(calls.items()))
+        print(f"  measure[{job}] layer {layer}: {shown or 'no cargo call'}")
+    for line in refused:
+        print(f"  measure FAIL: asked cargo to compile -- {line}", file=sys.stderr)
+    for layer in failed_layers:
+        print(f"  measure FAIL: layer {layer} did not pass, so it was not "
+              f"measured to completion", file=sys.stderr)
+    return 1 if refused or failed_layers else 0
+
+
+def selftest() -> int:
+    """Drive `bindgen_free_findings` and `COMPILE_VERB` over fixtures, both ways."""
+    failures: list[str] = []
+
+    def expect(label: str, got: list[str], needle: str | None) -> None:
+        if needle is None:
+            if got:
+                failures.append(f"{label}: wanted no finding, got {got}")
+        elif not any(needle in g for g in got):
+            failures.append(f"{label}: wanted a finding containing {needle!r}, got {got}")
+
+    for line in ("cargo test -p x", "  (cd crates && cargo build -p d)",
+                 "x=$(cargo run --bin y)", "cargo +nightly clippy --all", "cargo t"):
+        if not COMPILE_VERB.search(line):
+            failures.append(f"COMPILE_VERB missed {line!r}")
+    for line in ("cargo metadata --no-deps", "cargo tree -e normal", "cargo fmt --check",
+                 "cargo fetch", "mycargo test"):
+        if COMPILE_VERB.search(line):
+            failures.append(f"COMPILE_VERB took {line!r} for a compile")
+
+    row = {"j": BindgenFree(frozenset({"A"}), {"ok.sh": "no consumer"}, "fixture")}
+    steps = {"j": ["  j:", "    steps:", "      - run: bash scripts/run-ci.sh --layer A"]}
+    scripts = {"s.sh": "cargo test -p wz\n", "ok.sh": "cargo install foo\n",
+               "clean.sh": "cargo metadata\n"}
+
+    def run(ci=steps, installed=None, layer_text="", rows=row) -> list[str]:
+        return bindgen_free_findings(
+            rows, ci, installed if installed is not None else {"j": {"pkg-config"}},
+            lambda _l: layer_text, scripts.get,
+        )
+
+    expect("clean job", run(), None)
+    expect("installs the package", run(installed={"j": {"clang"}}), "installs `clang`")
+    expect("a layer the measurement does not cover",
+           run(ci={"j": steps["j"] + ["      - run: bash scripts/run-ci.sh --layer B"]}),
+           "does not cover")
+    expect("a pinned layer the job dropped",
+           run(ci={"j": ["  j:", "    steps: []"]}), "no longer runs it")
+    expect("a compiling cargo line in a layer body",
+           run(layer_text="    cargo test -p wz --quiet\n"), "compiling cargo command")
+    expect("a read-only cargo line in a layer body",
+           run(layer_text="    cargo metadata --no-deps\n"), None)
+    expect("a compiling script reached from a layer",
+           run(layer_text="    bash scripts/s.sh\n"), "script `s.sh`")
+    expect("an exempt script is not read",
+           run(layer_text="    bash scripts/ok.sh\n"), None)
+    expect("a clean script is fine",
+           run(layer_text="    bash scripts/clean.sh\n"), None)
+    expect("the SCE build is a reach",
+           run(layer_text="    bash scripts/build-sce.sh\n"), "SCE")
+    expect("a comment is not a call",
+           run(ci={"j": steps["j"] + ["        # cargo test -p wz"]}), None)
+    expect("a row whose job is gone", run(ci={}), "does not have")
+    if failures:
+        for f in failures:
+            print(f"  apt-packages selftest FAIL: {f}", file=sys.stderr)
+        return 1
+    print("  apt-packages selftest: the bindgen-free arm refuses a covered-layer "
+          "gap, an installed package, a compiling line in a layer or script and an "
+          "SCE reach, and accepts a clean job, an exempt script and a read-only call")
+    return 0
+
+
 def main() -> int:
+    if len(sys.argv) > 1:
+        if sys.argv[1] == "--selftest":
+            return selftest()
+        if sys.argv[1] == "--measure-bindgen-free":
+            return measure_bindgen_free(sys.argv[2] if len(sys.argv) > 2 else "validate-codegen")
+        print(f"apt_package_census: unknown argument {sys.argv[1]!r} "
+              f"(--selftest | --measure-bindgen-free [job])", file=sys.stderr)
+        return 2
     try:
         sites = ci_sites()
     except (OSError, RuntimeError) as e:
@@ -1383,6 +1758,18 @@ def main() -> int:
         failed = True
         print(f"  apt-packages FAIL: {finding}", file=sys.stderr)
 
+    # The BINDGEN-FREE arm (item 861): the jobs shown to compile nothing that
+    # reaches bindgen, and the pins that keep that measurement true.
+    try:
+        bindgen_findings = bindgen_free()
+    except (OSError, RuntimeError) as e:
+        print(f"  apt-packages FAIL: the bindgen-free arm could not read its input: {e}",
+              file=sys.stderr)
+        return 1
+    for finding in bindgen_findings:
+        failed = True
+        print(f"  apt-packages FAIL: {finding}", file=sys.stderr)
+
     # The DOCUMENTED-PREREQ arm. Runs even when the arms above have failed, so
     # one round sees the whole picture instead of two.
     for finding in undocumented(sites):
@@ -1401,9 +1788,14 @@ def main() -> int:
         f"derived against {'/'.join(CMAKE_CRATES)} rather than believed; "
         f"{len(modules)} pkg-config module(s) the build demands "
         f"({', '.join(sorted(modules))}) installed everywhere they are reached; "
-        f"{len(baseline)} package(s) on EVERY job ({' '.join(sorted(baseline))}) "
+        f"{len(baseline)} package(s) on EVERY job that builds "
+        f"({' '.join(sorted(baseline))}) "
         f"documented in {len(documented_prereqs())} README(s)"
     )
+    for job, row in sorted(BINDGEN_FREE.items()):
+        print(f"    bindgen-free `{job}`: {len(row.layers)} layer(s) pinned as a "
+              f"set, installs neither {' nor '.join(sorted(BINDGEN_PACKAGES))}; "
+              f"{row.measured}")
     # R2585 — what each cmake site was derived FROM, so a job satisfied by the
     # wrong text reads differently from one satisfied by the right text.
     for job in sorted(j for j, pkgs in sites.items() if "cmake" in pkgs):

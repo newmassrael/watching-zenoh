@@ -876,15 +876,21 @@ jobs:
         # toolchain), and they now run in `codegen-verify`. `libxml2-dev` went
         # with them, because `apt_package_census.py` derives it in both
         # directions and nothing left here builds a crate that probes for it.
-        # The rest stay: the census cannot derive whether the mnemosyne-cli
-        # build or the Layer A lanes reach them, and dropping a package on a
-        # prose reading is a change only a hosted run can verify (item 861).
+        # Item 861 -- `libclang-dev` and `clang` left too. They serve bindgen,
+        # and this job compiles nothing that reaches it: the mnemosyne-cli build
+        # has no bindgen in its tree, and the thirteen layers below, run under a
+        # cargo that refuses every compiling verb, made only `metadata` and
+        # `tree` calls. `apt_package_census.py` (BINDGEN_FREE) pins that as the
+        # SET of layers this job runs, so a lane added here re-opens the
+        # question by name; `--measure-bindgen-free validate-codegen` repeats
+        # the measurement. `cmake`, `perl` and `pkg-config` stay: the census
+        # derives or adjudicates them on other grounds.
         #
         # This job's `Save apt archives` step is NOT here: it installs twice
         # (protoc below), and a save between the two would carry half the
         # archive and then sit on a key nothing updates.
         run: |
-          bash scripts/lib/apt-install.sh cmake libclang-dev clang perl pkg-config
+          bash scripts/lib/apt-install.sh cmake perl pkg-config
 
       - name: Install Rust toolchain (pinned by rust-toolchain.toml)
         run: rustup show
