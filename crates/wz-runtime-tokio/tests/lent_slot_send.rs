@@ -273,6 +273,92 @@ fn the_fallback_keeps_the_sequence_numbers_gapless() {
     assert_eq!(lent[1][1], 9);
 }
 
+// transport-lowlatency: the bare network message with no Frame wrapper, no SN and
+// no fragmentation. The lend is the same one with nothing in front of the payload
+// but the link's own framing.
+
+/// A session that has negotiated lowlatency with its peer, over `link`.
+#[cfg(feature = "transport-lowlatency")]
+fn lowlatency_session(
+    link: Arc<LendingLink>,
+) -> Arc<
+    wz_session_core::session_actions::SessionLinkActions<
+        wz_runtime_tokio::runtime_impl::TokioRuntime,
+        TokioTime,
+    >,
+> {
+    let actions = new_session_actions(link, params_with_sn_7(None), TokioTime::new());
+    assert!(
+        actions.set_lowlatency_offer(true),
+        "lowlatency offer applies"
+    );
+    actions.negotiate_lowlatency_against_peer(true);
+    assert!(actions.is_lowlatency(), "both sides offered it");
+    actions
+}
+
+/// The bare message the heap path writes for `payload` under lowlatency.
+#[cfg(feature = "transport-lowlatency")]
+fn heap_bare_message(payload: &[u8]) -> Vec<u8> {
+    let link = LendingLink::new(false, 0, 0, 0);
+    let actions = lowlatency_session(link.clone());
+    actions
+        .send_push_literal("home/lent", payload, true)
+        .expect("push");
+    let mut frames = link.heap();
+    assert_eq!(frames.len(), 1, "one push is one message");
+    frames.remove(0)
+}
+
+#[cfg(feature = "transport-lowlatency")]
+#[test]
+fn a_lowlatency_push_is_written_into_the_lent_slot_as_the_bare_message() {
+    for payload in [&b"x"[..], &b"payload"[..], &[0xA5u8; 100][..]] {
+        let link = LendingLink::new(true, 1, SLOT_LEN, HEADROOM);
+        let actions = lowlatency_session(link.clone());
+        actions
+            .send_push_literal("home/lent", payload, true)
+            .expect("push");
+        assert_eq!(
+            link.lent(),
+            vec![heap_bare_message(payload)],
+            "payload of {} bytes",
+            payload.len()
+        );
+        assert!(link.heap().is_empty(), "no byte copy of it");
+        assert_eq!(link.aborts(), 0);
+        assert_eq!(link.free(), 1);
+    }
+}
+
+#[cfg(feature = "transport-lowlatency")]
+#[test]
+fn a_lowlatency_message_that_overflows_its_slot_goes_on_the_heap_and_the_slot_returns() {
+    let link = LendingLink::new(true, 1, 12, HEADROOM);
+    let actions = lowlatency_session(link.clone());
+    let payload = [0x3Cu8; 80];
+    actions
+        .send_push_literal("home/lent", &payload, true)
+        .expect("push");
+    assert!(link.lent().is_empty());
+    assert_eq!(link.heap(), vec![heap_bare_message(&payload)]);
+    assert_eq!(link.aborts(), 1);
+    assert_eq!(link.free(), 1);
+}
+
+#[cfg(feature = "transport-lowlatency")]
+#[test]
+fn a_lowlatency_link_that_lends_nothing_gets_the_heap_message() {
+    let link = LendingLink::new(false, 1, SLOT_LEN, HEADROOM);
+    let actions = lowlatency_session(link.clone());
+    actions
+        .send_push_literal("home/lent", b"payload", true)
+        .expect("push");
+    assert!(link.lent().is_empty());
+    assert_eq!(link.heap(), vec![heap_bare_message(b"payload")]);
+    assert_eq!(link.aborts(), 0);
+}
+
 // The reconnect swap seam. A session that reconnects sends through a
 // `SwappableLink`; if the seam did not forward the lend, every reconnecting
 // session would silently take the heap while its link offered a slot.

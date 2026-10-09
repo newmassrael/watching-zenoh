@@ -2733,22 +2733,57 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         // Room for the widest prefix and a possible ext_qos, as the heap path
         // reserves for the same frame.
         let want = 1 + 10 + 2 + worst_case_payload;
+        self.send_lent(reliability, priority, want, |slot| {
+            crate::frame_encode::encode_frame_envelope_into(
+                slot,
+                emit.sn,
+                crate::frame_encode::frame_flags(emit.reliable),
+                emit.ext_qos,
+                encode_body,
+            )
+            .is_ok()
+                && slot.len() <= emit.mtu
+        })
+    }
+
+    /// The lend, once, for every path that has a frame to put on a conduit's
+    /// link: ask the link `send_wire` would route to for a slot, let `fill`
+    /// write the frame into it, and send the slot through [`Self::emit_on_link`].
+    ///
+    /// `fill` answers whether the slot now holds a frame to send. `false`
+    /// abandons the slot (the lease's drop gives it back) and the caller encodes
+    /// on the heap, so the answer is also how a path says "this frame does not
+    /// fit, or must be cut up". The decision belongs to the path, and the slot,
+    /// the routing and the single send funnel do not.
+    #[cfg(any(
+        feature = "codec-push",
+        feature = "codec-request",
+        feature = "codec-response",
+        feature = "codec-response-final",
+        feature = "declare-keyexpr",
+        feature = "declare-subscriber",
+        feature = "declare-queryable",
+        feature = "declare-token",
+        feature = "declare-interest",
+        feature = "liveliness-token",
+    ))]
+    fn send_lent<F>(
+        &self,
+        reliability: Reliability,
+        priority: Priority,
+        want: usize,
+        fill: F,
+    ) -> bool
+    where
+        F: FnOnce(&mut crate::tx_lease::TxLease<'_>) -> bool,
+    {
         self.with_conduit_link(reliability, priority, |link| {
             let Some(mut slot) =
                 crate::tx_lease::TxLease::acquire(link.link_driver(), want, priority)
             else {
                 return false;
             };
-            if crate::frame_encode::encode_frame_envelope_into(
-                &mut slot,
-                emit.sn,
-                crate::frame_encode::frame_flags(emit.reliable),
-                emit.ext_qos,
-                encode_body,
-            )
-            .is_err()
-                || slot.len() > emit.mtu
-            {
+            if !fill(&mut slot) {
                 return false;
             }
             self.emit_on_link(link, &[], Some(&mut slot), reliability, priority);
@@ -6691,6 +6726,17 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         // `is_lowlatency()` here needs no establishment guard.
         #[cfg(feature = "transport-lowlatency")]
         if self.is_lowlatency() {
+            // ARCHITECTURE section 9.1 — the bare message straight into a slot the
+            // link lends, when it lends one; the heap encode below is the answer
+            // for every link that does not, and for a message the slot cannot
+            // hold. Nothing is sent when `fill` says no.
+            if self.send_lent(wire_reliability, priority, worst_case_payload, |slot| {
+                let mut sink = crate::tx_buf::TxSink::new(slot);
+                encode_body(&mut sink).is_ok()
+            }) {
+                count_pushed();
+                return Ok(());
+            }
             let mut wire = Vec::with_capacity(worst_case_payload);
             {
                 let mut sink = crate::tx_buf::TxSink::new(&mut wire);
