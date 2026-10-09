@@ -442,8 +442,9 @@ LINE_BUDGET = 284
 #: 57 -> 56 (R3042). The same moved comment named the transport's own `is_shm`
 #: predicate with no anchor; the new one names the guard it stands for as a needle.
 #: 56 -> 55. The fragment-extension test harness named upstream's extension module
-#: as its `EID_MASK` source with no anchor, and no such constant exists there; the
-#: rewrite cites the `eid` function it really follows as a needle.
+#: as the source of an identity mask constant, with no anchor, and upstream declares
+#: no such constant there; the rewrite cites the `eid` function it really follows as
+#: a needle.
 BARE_BUDGET = 55
 #: The root-less axis, after R2317 repaired the 49 citations that named a file
 #: gone at the pin. Same two-directional ratchet as LINE and BARE.
