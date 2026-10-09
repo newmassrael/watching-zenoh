@@ -130,11 +130,35 @@ typedef int (*wz_ethif_tx_fn)(void *ctx, const u8_t *frame, u16_t len);
 #define WZ_ETHIF_MAX 2
 #endif
 
+/* ARCHITECTURE section 9.1 -- a sender that can read a frame IN PLACE, from the
+ * pieces of a pbuf chain, instead of from one flat copy. `segs` are the chain's
+ * payloads in order; they stay valid until the sender reports `cookie` done, if
+ * it queued them. Returns 0 when it refused the frame, 1 when it SENT it from a
+ * copy (the pieces are free again at once), 2 when it QUEUED it to be read in
+ * place (the pieces are free only when `wz_ethif_tx_done(cookie)` is called). */
+typedef struct {
+    const u8_t *ptr;
+    u16_t len;
+} wz_ethif_seg;
+typedef int (*wz_ethif_tx_gather_fn)(void *ctx, const wz_ethif_seg *segs, u16_t n,
+                                     u32_t cookie);
+
+/* The most pieces one frame is handed over in, and the most frames held at once. A
+ * chain with more pieces, or a table with no free place, is sent through the flat
+ * copy below instead, which is always correct. */
+#ifndef WZ_ETHIF_SEG_MAX
+#define WZ_ETHIF_SEG_MAX 8
+#endif
+#ifndef WZ_ETHIF_HELD_MAX
+#define WZ_ETHIF_HELD_MAX 8
+#endif
+
 #if LWIP_ARP && LWIP_ETHERNET
 
 struct wz_ethif {
     struct netif netif;
     wz_ethif_tx_fn tx;
+    wz_ethif_tx_gather_fn tx_gather; /* NULL: every frame goes through `tx` */
     void *ctx;
     u8_t mac[ETH_HWADDR_LEN];
 };
@@ -144,13 +168,95 @@ static int wz_ethif_count;
 /* lwIP hands `linkoutput` a pbuf CHAIN; the sender takes one flat frame. */
 static u8_t wz_ethif_tx_buf[WZ_ETHIF_FRAME_MAX];
 
+/* The chains a sender is reading in place, each held by one reference so lwIP
+ * cannot free them until the sender says it is done. The slot number is the
+ * cookie the sender reports back. */
+static struct pbuf *wz_ethif_held[WZ_ETHIF_HELD_MAX];
+
 static err_t wz_ethif_linkoutput(struct netif *n, struct pbuf *p) {
     struct wz_ethif *e = (struct wz_ethif *)n->state;
     if (p->tot_len > WZ_ETHIF_FRAME_MAX) {
         return ERR_BUF;
     }
+    if (e->tx_gather != NULL) {
+        wz_ethif_seg segs[WZ_ETHIF_SEG_MAX];
+        u16_t count = 0;
+        int fits = 1;
+        for (struct pbuf *q = p; q != NULL; q = q->next) {
+            if (q->len == 0) {
+                continue;
+            }
+            if (count == WZ_ETHIF_SEG_MAX) {
+                fits = 0;
+                break;
+            }
+            segs[count].ptr = (const u8_t *)q->payload;
+            segs[count].len = q->len;
+            count++;
+        }
+        int slot = -1;
+        for (int i = 0; fits && i < WZ_ETHIF_HELD_MAX; i++) {
+            if (wz_ethif_held[i] == NULL) {
+                slot = i;
+                break;
+            }
+        }
+        if (fits && count != 0 && slot >= 0) {
+            /* Held BEFORE the sender sees it: it may report the frame done from
+             * inside this very call. */
+            pbuf_ref(p);
+            wz_ethif_held[slot] = p;
+            int outcome = e->tx_gather(e->ctx, segs, count, (u32_t)slot);
+            if (outcome == 2) {
+                return ERR_OK;
+            }
+            wz_ethif_held[slot] = NULL;
+            pbuf_free(p);
+            if (outcome == 1) {
+                return ERR_OK;
+            }
+            return ERR_IF;
+        }
+    }
     u16_t len = pbuf_copy_partial(p, wz_ethif_tx_buf, p->tot_len, 0);
     return e->tx(e->ctx, wz_ethif_tx_buf, len) ? ERR_OK : ERR_IF;
+}
+
+/* Let `n` hand frames to its sender in place. For an interface whose sender can
+ * (`EthernetMac::transmit_gather`); one that cannot is simply not given this. */
+void wz_ethif_set_gather(struct netif *n, wz_ethif_tx_gather_fn gather) {
+    if (n != NULL) {
+        ((struct wz_ethif *)n->state)->tx_gather = gather;
+    }
+}
+
+/* The sender no longer reads the chain it queued under `cookie`: give lwIP its
+ * reference back. A cookie that names no held chain is ignored. */
+void wz_ethif_tx_done(u32_t cookie) {
+    if (cookie < WZ_ETHIF_HELD_MAX && wz_ethif_held[cookie] != NULL) {
+        struct pbuf *p = wz_ethif_held[cookie];
+        wz_ethif_held[cookie] = NULL;
+        pbuf_free(p);
+    }
+}
+
+/* The reference count of the chain held under `cookie`, 0 when none is. For a test
+ * to see that the shim's reference is the only thing keeping a chain alive once
+ * its sender has let go of it. */
+int wz_ethif_held_refs(u32_t cookie) {
+    if (cookie < WZ_ETHIF_HELD_MAX && wz_ethif_held[cookie] != NULL) {
+        return (int)wz_ethif_held[cookie]->ref;
+    }
+    return 0;
+}
+
+/* How many chains are held right now, for a test to see that nothing leaks. */
+int wz_ethif_held_count(void) {
+    int held = 0;
+    for (int i = 0; i < WZ_ETHIF_HELD_MAX; i++) {
+        held += wz_ethif_held[i] != NULL;
+    }
+    return held;
 }
 
 static err_t wz_ethif_init(struct netif *n) {
@@ -188,6 +294,7 @@ struct netif *wz_ethif_add(const u8_t *mac, u32_t ip, u32_t mask, u32_t gw,
     }
     struct wz_ethif *e = &wz_ethifs[wz_ethif_count];
     e->tx = tx;
+    e->tx_gather = NULL;
     e->ctx = ctx;
     MEMCPY(e->mac, mac, ETH_HWADDR_LEN);
     ip4_addr_t a, m, g;
@@ -224,6 +331,10 @@ void wz_ethif_remove_all(void) {
         netif_remove(&wz_ethifs[i].netif);
     }
     wz_ethif_count = 0;
+    /* A chain a removed sender never reported done would be held for ever. */
+    for (u32_t i = 0; i < WZ_ETHIF_HELD_MAX; i++) {
+        wz_ethif_tx_done(i);
+    }
 }
 
 /* Hand one received frame (no FCS) to `n`. Non-zero when lwIP took it; zero
@@ -262,5 +373,22 @@ int wz_ethif_is_default(const struct netif *n) {
 }
 
 void wz_ethif_remove_all(void) {}
+
+void wz_ethif_set_gather(struct netif *n, wz_ethif_tx_gather_fn gather) {
+    (void)n; (void)gather;
+}
+
+void wz_ethif_tx_done(u32_t cookie) {
+    (void)cookie;
+}
+
+int wz_ethif_held_count(void) {
+    return 0;
+}
+
+int wz_ethif_held_refs(u32_t cookie) {
+    (void)cookie;
+    return 0;
+}
 
 #endif

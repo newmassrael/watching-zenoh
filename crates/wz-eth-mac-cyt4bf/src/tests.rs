@@ -817,6 +817,10 @@ fn reaped(mac: &mut Cyt4bfMac<Gem, RX, TX>) -> Vec<u32> {
 fn a_gathered_frame_leaves_whole_and_is_read_where_the_caller_wrote_it() {
     let (mut mac, model) = rig();
     let (header, payload) = (frame(0x10, 14), frame(0x40, 100));
+    assert!(
+        mac.gathers_in_place(),
+        "this MAC says it can read in place, so a stack offers it pieces"
+    );
     model.borrow_mut().expose(&header);
     model.borrow_mut().expose(&payload);
 

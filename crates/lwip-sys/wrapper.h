@@ -38,6 +38,18 @@ typedef int (*wz_ethif_tx_fn)(void *ctx, const u8_t *frame, u16_t len);
 struct netif *wz_ethif_add(const u8_t *mac, u32_t ip, u32_t mask, u32_t gw,
                            wz_ethif_tx_fn tx, void *ctx);
 int wz_ethif_input(struct netif *n, const u8_t *frame, u16_t len);
+/* ARCHITECTURE section 9.1 -- hand a frame to the sender in place, from the pieces
+ * of its pbuf chain, and take the chain back when the sender reports it done. */
+typedef struct {
+    const u8_t *ptr;
+    u16_t len;
+} wz_ethif_seg;
+typedef int (*wz_ethif_tx_gather_fn)(void *ctx, const wz_ethif_seg *segs, u16_t n,
+                                     u32_t cookie);
+void wz_ethif_set_gather(struct netif *n, wz_ethif_tx_gather_fn gather);
+void wz_ethif_tx_done(u32_t cookie);
+int wz_ethif_held_count(void);
+int wz_ethif_held_refs(u32_t cookie);
 /* Whether `n` is the default route, and the test harness's reset of the table. */
 int wz_ethif_is_default(const struct netif *n);
 void wz_ethif_remove_all(void);

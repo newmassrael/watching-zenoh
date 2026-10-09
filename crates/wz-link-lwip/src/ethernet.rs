@@ -24,9 +24,20 @@ use core::cell::RefCell;
 use core::ffi::c_void;
 use core::ptr::NonNull;
 
-use lwip_sys::{netif, wz_ethif_add, wz_ethif_input, wz_ethif_is_default};
+use lwip_sys::{
+    netif, wz_ethif_add, wz_ethif_held_count, wz_ethif_input, wz_ethif_is_default, wz_ethif_seg,
+    wz_ethif_set_gather, wz_ethif_tx_done,
+};
+use wz_runtime_core::{TxGather, TxSegment};
 
 use crate::LwipLink;
+
+/// The most pieces one frame is handed to the MAC in, which is the shim's
+/// `WZ_ETHIF_SEG_MAX`: a chain with more is sent through the flat copy.
+const SEG_MAX: usize = 8;
+/// The most frames the MAC may hold in place at once, the shim's
+/// `WZ_ETHIF_HELD_MAX`.
+const HELD_MAX: usize = 8;
 
 /// The MAC seam and the frame bound, which moved to the dependency-free trait
 /// tier so that a chip's driver can implement the seam without depending on
@@ -94,6 +105,46 @@ unsafe extern "C" fn transmit_trampoline<M: EthernetMac>(
     }
 }
 
+/// ARCHITECTURE section 9.1 -- lwIP's pbuf chain, handed to the MAC piece by
+/// piece instead of joined into one buffer first. The answer tells lwIP's shim
+/// whether the pieces are free again (`1`, sent from a copy), still being read
+/// (`2`, the shim keeps the chain until [`EthernetIf::reap_tx`] reports
+/// `cookie`), or refused (`0`).
+unsafe extern "C" fn gather_trampoline<M: EthernetMac>(
+    ctx: *mut c_void,
+    segs: *const wz_ethif_seg,
+    n: u16,
+    cookie: u32,
+) -> i32 {
+    // SAFETY: as `transmit_trampoline`; `segs` is `n <= SEG_MAX` pieces lwIP owns
+    // for the duration of the call, and until the MAC reports `cookie` if it
+    // queues them (the shim holds a reference on the chain).
+    let shared = unsafe { &*(ctx as *const Shared<M>) };
+    let n = usize::from(n).min(SEG_MAX);
+    let mut pieces = [TxSegment {
+        ptr: core::ptr::null(),
+        len: 0,
+    }; SEG_MAX];
+    for (piece, seg) in pieces
+        .iter_mut()
+        .zip(unsafe { core::slice::from_raw_parts(segs, n) })
+    {
+        *piece = TxSegment {
+            ptr: seg.ptr,
+            len: usize::from(seg.len),
+        };
+    }
+    match shared.mac.try_borrow_mut() {
+        // SAFETY: lwIP's chain stays readable and unchanged until `tx_done`.
+        Ok(mut mac) => match unsafe { mac.transmit_gather(&pieces[..n], cookie) } {
+            TxGather::Refused => 0,
+            TxGather::Copied => 1,
+            TxGather::Queued => 2,
+        },
+        Err(_) => 0,
+    }
+}
+
 impl<M: EthernetMac + 'static> EthernetIf<M> {
     /// Add `mac` to lwIP as an Ethernet interface with `ip`, and bring it and
     /// its carrier up. It becomes the default route only if it has a gateway
@@ -126,6 +177,11 @@ impl<M: EthernetMac + 'static> EthernetIf<M> {
             )
         };
         let netif = NonNull::new(raw).ok_or(EthernetIfError::Refused)?;
+        if shared.mac.borrow().gathers_in_place() {
+            // SAFETY: the netif is lwIP's for the program's lifetime, and the
+            // callback is the monomorphisation matching the registered context.
+            unsafe { wz_ethif_set_gather(netif.as_ptr(), Some(gather_trampoline::<M>)) };
+        }
         Ok(Self {
             netif,
             shared,
@@ -133,9 +189,43 @@ impl<M: EthernetMac + 'static> EthernetIf<M> {
         })
     }
 
+    /// Give lwIP back every chain the MAC has finished reading in place, and
+    /// return how many. [`poll`](Self::poll) does this first, so a firmware that
+    /// polls each time round its loop never needs to call it; it is public for one
+    /// that drains transmit completions on their own schedule.
+    ///
+    /// A MAC that reads a frame in place keeps the pbuf chain alive, through the
+    /// reference the shim took, until this reports it, so a firmware that never
+    /// polls runs out of held chains and falls back to the copying path.
+    pub fn reap_tx(&self) -> usize {
+        let mut cookies = [0u32; HELD_MAX];
+        let mut count = 0;
+        // The MAC borrow ends before lwIP is touched.
+        self.shared.mac.borrow_mut().reap_tx(&mut |cookie| {
+            if count < HELD_MAX {
+                cookies[count] = cookie;
+                count += 1;
+            }
+        });
+        for &cookie in &cookies[..count] {
+            // SAFETY: a cookie the MAC reports is one the shim handed it; a stale
+            // or foreign one names no held chain and is ignored there.
+            unsafe { wz_ethif_tx_done(cookie) };
+        }
+        count
+    }
+
+    /// How many pbuf chains lwIP is holding for a MAC to finish reading, across
+    /// every interface. Zero when nothing is in flight.
+    pub fn held_tx(&self) -> usize {
+        // SAFETY: reads a counter the shim owns.
+        unsafe { wz_ethif_held_count() as usize }
+    }
+
     /// Move every frame the MAC holds into lwIP. Returns how many were
     /// taken; a frame lwIP could not buffer is dropped, as a NIC would.
     pub fn poll(&mut self) -> usize {
+        self.reap_tx();
         let mut taken = 0;
         loop {
             let len = match self.shared.mac.borrow_mut().receive(&mut self.rx[..]) {
@@ -492,5 +582,291 @@ mod tests {
             .push_back(udp_frame_on(NET_B, 7611, 7612, b"via-b"));
         b.poll();
         std::assert_eq!(socket.try_recv().expect("via B").data.as_slice(), b"via-b");
+    }
+
+    // ---- ARCHITECTURE section 9.1: the MAC reads lwIP's pbuf chain in place -----
+
+    /// One frame the MAC was handed in pieces.
+    struct Gathered {
+        cookie: u32,
+        /// `(address, length)` of each piece, as lwIP presented them.
+        pieces: Vec<(usize, usize)>,
+        /// The pieces joined, read at the moment they were handed over.
+        joined: Vec<u8>,
+    }
+
+    /// A MAC that reads frames in place and answers a fixed outcome: it records
+    /// which door each frame came through, and reports a cookie done only when the
+    /// test releases it.
+    struct GatherEnd {
+        address: [u8; 6],
+        inbox: Cable,
+        /// Frames that came through the copying door.
+        flat: Cable,
+        gathered: Rc<RefCell<Vec<Gathered>>>,
+        outcome: TxGather,
+        released: Rc<RefCell<Vec<u32>>>,
+    }
+
+    impl EthernetMac for GatherEnd {
+        fn mac_address(&self) -> [u8; 6] {
+            self.address
+        }
+        fn transmit(&mut self, frame: &[u8]) -> bool {
+            self.flat.borrow_mut().push_back(frame.to_vec());
+            true
+        }
+        fn receive(&mut self, buf: &mut [u8]) -> Option<usize> {
+            let frame = self.inbox.borrow_mut().pop_front()?;
+            buf[..frame.len()].copy_from_slice(&frame);
+            Some(frame.len())
+        }
+        fn gathers_in_place(&self) -> bool {
+            true
+        }
+        unsafe fn transmit_gather(&mut self, segments: &[TxSegment], cookie: u32) -> TxGather {
+            let mut joined = Vec::new();
+            for s in segments {
+                // SAFETY: lwIP hands pieces it keeps readable for this call.
+                joined.extend_from_slice(unsafe { core::slice::from_raw_parts(s.ptr, s.len) });
+            }
+            self.gathered.borrow_mut().push(Gathered {
+                cookie,
+                pieces: segments.iter().map(|s| (s.ptr as usize, s.len)).collect(),
+                joined,
+            });
+            self.outcome
+        }
+        fn reap_tx(&mut self, done: &mut dyn FnMut(u32)) {
+            for cookie in self.released.borrow_mut().drain(..) {
+                done(cookie);
+            }
+        }
+    }
+
+    struct GatherRig {
+        node: EthernetIf<GatherEnd>,
+        inbox: Cable,
+        flat: Cable,
+        gathered: Rc<RefCell<Vec<Gathered>>>,
+        released: Rc<RefCell<Vec<u32>>>,
+    }
+
+    fn gather_node(link: &LwipLink, outcome: TxGather) -> GatherRig {
+        let inbox: Cable = Rc::new(RefCell::new(VecDeque::new()));
+        let flat: Cable = Rc::new(RefCell::new(VecDeque::new()));
+        let gathered = Rc::new(RefCell::new(Vec::new()));
+        let released = Rc::new(RefCell::new(Vec::new()));
+        let node = EthernetIf::add(
+            link,
+            GatherEnd {
+                address: NODE_MAC,
+                inbox: inbox.clone(),
+                flat: flat.clone(),
+                gathered: gathered.clone(),
+                outcome,
+                released: released.clone(),
+            },
+            Ipv4Config {
+                address: NODE_IP,
+                netmask: [255, 255, 255, 0],
+                gateway: [0, 0, 0, 0],
+            },
+        )
+        .expect("interface");
+        // lwIP announces a new interface (a gratuitous ARP) from inside the call
+        // that adds it, before the gathering door is installed, so that one frame
+        // went through the copying door. What the tests look at is what follows.
+        flat.borrow_mut().clear();
+        GatherRig {
+            node,
+            inbox,
+            flat,
+            gathered,
+            released,
+        }
+    }
+
+    /// Resolve the far host's address, so a datagram sent afterwards leaves at
+    /// once: an ARP request goes out for the first send, and the reply answers it.
+    fn resolve_far_host<S: FnMut(&mut GatherRig)>(rig: &mut GatherRig, mut after_reply: S) {
+        rig.inbox.borrow_mut().push_back(arp_reply());
+        rig.node.poll();
+        after_reply(rig);
+    }
+
+    /// A frame lwIP sends is handed to the MAC in place, through the gathering
+    /// door and not the copying one, and lwIP keeps the chain alive until the MAC
+    /// reports it: held while in flight, given back when reaped.
+    #[test]
+    fn a_frame_is_handed_over_in_place_and_held_until_the_mac_reports_it() {
+        let (_serial, link) = crate::lwip_test_link();
+        let mut rig = gather_node(&link, TxGather::Queued);
+        let mut socket = bind_session_rx(&link, 7602).expect("bind");
+        socket
+            .send_to(crate::ipv4_addr_from_octets(FAR_IP), 7601, b"first")
+            .expect("send");
+        resolve_far_host(&mut rig, |_| {});
+
+        std::assert!(
+            rig.flat.borrow().is_empty(),
+            "nothing took the copying door"
+        );
+        let gathered = rig.gathered.borrow();
+        let datagram = gathered
+            .iter()
+            .find(|g| udp_of(&g.joined).is_some())
+            .expect("the datagram reached the gathering door");
+        std::assert_eq!(udp_of(&datagram.joined), Some((7601, &b"first"[..])));
+        // The caller has long since freed its own pbuf, so the memory is readable
+        // now only because the shim holds a reference, and it is unchanged: the
+        // MAC would read the same bytes it was handed.
+        let mut reread = Vec::new();
+        for (ptr, len) in &datagram.pieces {
+            // SAFETY: the shim holds the chain, so the bytes are readable.
+            reread
+                .extend_from_slice(unsafe { core::slice::from_raw_parts(*ptr as *const u8, *len) });
+        }
+        std::assert_eq!(reread, datagram.joined, "unchanged since the handover");
+        for g in gathered.iter() {
+            // SAFETY: reads a counter the shim owns.
+            std::assert_eq!(
+                unsafe { lwip_sys::wz_ethif_held_refs(g.cookie) },
+                1,
+                "the shim's reference is the only one keeping the chain alive"
+            );
+        }
+        std::assert_eq!(
+            rig.node.held_tx(),
+            gathered.len(),
+            "every queued frame is held, the ARP request and the datagram"
+        );
+        let cookies: Vec<u32> = gathered.iter().map(|g| g.cookie).collect();
+        drop(gathered);
+
+        rig.released.borrow_mut().extend(cookies.iter().copied());
+        std::assert_eq!(rig.node.reap_tx(), cookies.len());
+        std::assert_eq!(rig.node.held_tx(), 0, "lwIP has its chains back");
+        let _ = socket;
+    }
+
+    /// A MAC that answers COPIED has finished with the pieces on the spot, so
+    /// nothing is held.
+    #[test]
+    fn a_frame_the_mac_copied_is_not_held() {
+        let (_serial, link) = crate::lwip_test_link();
+        let mut rig = gather_node(&link, TxGather::Copied);
+        let mut socket = bind_session_rx(&link, 7602).expect("bind");
+        socket
+            .send_to(crate::ipv4_addr_from_octets(FAR_IP), 7601, b"copied")
+            .expect("send");
+        resolve_far_host(&mut rig, |_| {});
+        std::assert!(!rig.gathered.borrow().is_empty());
+        std::assert_eq!(rig.node.held_tx(), 0);
+    }
+
+    /// A refused frame is an error to lwIP and holds nothing.
+    #[test]
+    fn a_frame_the_mac_refused_is_not_held() {
+        let (_serial, link) = crate::lwip_test_link();
+        let mut rig = gather_node(&link, TxGather::Refused);
+        let mut socket = bind_session_rx(&link, 7602).expect("bind");
+        let _ = socket.send_to(crate::ipv4_addr_from_octets(FAR_IP), 7601, b"refused");
+        resolve_far_host(&mut rig, |_| {});
+        let again = socket.send_to(crate::ipv4_addr_from_octets(FAR_IP), 7601, b"refused");
+        std::assert!(again.is_err(), "lwIP reports the refusal");
+        std::assert_eq!(rig.node.held_tx(), 0);
+    }
+
+    /// When the table of held chains is full the frame goes through the copying
+    /// door, which is always correct: a MAC that is slow to report loses speed
+    /// and never a frame.
+    #[test]
+    fn a_full_table_of_held_chains_falls_back_to_the_copying_door() {
+        let (_serial, link) = crate::lwip_test_link();
+        let mut rig = gather_node(&link, TxGather::Queued);
+        let mut socket = bind_session_rx(&link, 7602).expect("bind");
+        socket
+            .send_to(crate::ipv4_addr_from_octets(FAR_IP), 7601, b"prime")
+            .expect("send");
+        resolve_far_host(&mut rig, |_| {});
+        let mut sent = 0;
+        while rig.node.held_tx() < HELD_MAX {
+            socket
+                .send_to(crate::ipv4_addr_from_octets(FAR_IP), 7601, b"fill")
+                .expect("send");
+            sent += 1;
+            std::assert!(sent < 4 * HELD_MAX, "the table never filled");
+        }
+        std::assert!(rig.flat.borrow().is_empty(), "nothing copied yet");
+
+        socket
+            .send_to(crate::ipv4_addr_from_octets(FAR_IP), 7601, b"overflow")
+            .expect("send");
+        let flat = rig.flat.borrow();
+        std::assert_eq!(flat.len(), 1, "the ninth frame took the copying door");
+        std::assert_eq!(udp_of(&flat[0]), Some((7601, &b"overflow"[..])));
+        std::assert_eq!(rig.node.held_tx(), HELD_MAX, "and holds nothing more");
+    }
+
+    /// A payload lwIP does not own (a ROM pbuf) reaches the MAC as its OWN piece,
+    /// at its own address: the chain is [headers][payload], and the payload is read
+    /// where the caller left it, never copied.
+    #[test]
+    fn a_payload_pbuf_the_caller_owns_is_handed_over_at_its_own_address() {
+        use lwip_sys::{
+            pbuf_alloc, pbuf_free, pbuf_layer_PBUF_TRANSPORT, pbuf_type_PBUF_ROM, udp_new,
+            udp_remove, udp_sendto,
+        };
+
+        let (_serial, link) = crate::lwip_test_link();
+        let mut rig = gather_node(&link, TxGather::Queued);
+        let mut socket = bind_session_rx(&link, 7602).expect("bind");
+        // Resolve the far host first, so the ROM datagram is not parked in ARP's
+        // queue (which would copy it).
+        socket
+            .send_to(crate::ipv4_addr_from_octets(FAR_IP), 7601, b"prime")
+            .expect("send");
+        resolve_far_host(&mut rig, |_| {});
+        let before = rig.gathered.borrow().len();
+
+        static PAYLOAD: [u8; 24] = *b"rom-payload-in-place-ok!";
+        // SAFETY: a fresh pcb and ROM pbuf, both released below; PAYLOAD is
+        // 'static, so the pointer lwIP holds stays valid.
+        unsafe {
+            let pcb = udp_new();
+            std::assert!(!pcb.is_null());
+            let p = pbuf_alloc(
+                pbuf_layer_PBUF_TRANSPORT,
+                PAYLOAD.len() as u16,
+                pbuf_type_PBUF_ROM,
+            );
+            std::assert!(!p.is_null());
+            (*p).payload = PAYLOAD.as_ptr() as *mut c_void;
+            let dst = lwip_sys::ip_addr_t {
+                addr: crate::ipv4_addr_from_octets(FAR_IP),
+            };
+            let err = udp_sendto(pcb, p, &dst, 7601);
+            std::assert_eq!(err as core::ffi::c_int, lwip_sys::err_enum_t_ERR_OK);
+            pbuf_free(p);
+            udp_remove(pcb);
+        }
+
+        let gathered = rig.gathered.borrow();
+        let frame = gathered
+            .get(before)
+            .expect("the ROM datagram was handed over");
+        std::assert_eq!(
+            frame.pieces.len(),
+            2,
+            "headers in one piece, the payload in another"
+        );
+        std::assert_eq!(
+            frame.pieces[1],
+            (PAYLOAD.as_ptr() as usize, PAYLOAD.len()),
+            "the payload piece IS the caller's memory"
+        );
+        std::assert_eq!(udp_of(&frame.joined), Some((7601, &PAYLOAD[..])));
+        std::assert!(rig.node.held_tx() >= 1, "held while the MAC reads it");
     }
 }

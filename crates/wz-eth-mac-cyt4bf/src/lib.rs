@@ -502,6 +502,60 @@ impl<B: Board, const RX: usize, const TX: usize> Cyt4bfMac<B, RX, TX> {
         }
     }
 
+    /// Send one frame of `len` bytes from a copy: `fill` writes it into the next
+    /// ring slot's own buffer, and one descriptor sends it. Nothing is waiting for
+    /// a copied frame, so it has no cookie and the ring takes it back on its own.
+    ///
+    /// `fill` is given the buffer's address and writes exactly `len <= BUF_LEN`
+    /// bytes. It is called once, and only when the frame will be sent.
+    fn send_copied(&mut self, len: usize, fill: impl FnOnce(*mut u8)) -> bool {
+        if len == 0 || len > BUF_LEN {
+            return false;
+        }
+        // A link known to be down would only fill the ring with frames the wire
+        // then takes in a burst when it returns.
+        if self.link == LinkState::Down {
+            return false;
+        }
+        if self.board.read(TRANSMIT_STATUS) & TXSR_FATAL != 0 {
+            self.recover_tx();
+        }
+        // Descriptors the controller has finished with come back first, so a ring
+        // that was full a moment ago is not refused on stale news.
+        self.reclaim(None);
+        let slot = self.tx_slot(self.tx_head);
+        self.board
+            .invalidate(slot.0 as *const u8, core::mem::size_of::<Descriptor>());
+        if self.tx_inflight == TX || slot.word1() & TXD_USED == 0 {
+            // The controller still owns the next slot: the ring is full.
+            return false;
+        }
+        let buf = self.tx_buf(self.tx_head);
+        fill(buf);
+        self.board.clean(buf, len);
+        let wrap = if self.tx_head == TX - 1 { TXD_WRAP } else { 0 };
+        slot.set_word0(self.board.bus_address(buf));
+        // Clearing used (it is absent from this word) is the release to the
+        // controller, so it is written last and the frame's bytes and the address
+        // are made visible before it.
+        fence(Ordering::Release);
+        slot.set_word1((len as u32 & TXD_LEN_MASK) | TXD_LAST | wrap);
+        self.board
+            .clean(slot.0 as *const u8, core::mem::size_of::<Descriptor>());
+        // A frame of one descriptor, copied: no one is waiting for it.
+        self.chains[self.tx_head] = Chain {
+            ndesc: 1,
+            cookie: None,
+        };
+        self.tx_head = (self.tx_head + 1) % TX;
+        self.tx_inflight += 1;
+        // The descriptor must be visible before the kick that makes the DMA read it.
+        fence(Ordering::Release);
+        self.board
+            .write(NETWORK_CONTROL, self.network_control | NWCTRL_TX_START);
+        true
+    }
+
     /// Hand every receive buffer to the controller; the last slot wraps.
     fn init_rx_ring(&mut self) {
         for i in 0..RX {
@@ -784,52 +838,14 @@ impl<B: Board, const RX: usize, const TX: usize> EthernetMac for Cyt4bfMac<B, RX
     }
 
     fn transmit(&mut self, frame: &[u8]) -> bool {
-        if frame.is_empty() || frame.len() > BUF_LEN {
-            return false;
-        }
-        // A link known to be down would only fill the ring with frames the wire
-        // then takes in a burst when it returns.
-        if self.link == LinkState::Down {
-            return false;
-        }
-        if self.board.read(TRANSMIT_STATUS) & TXSR_FATAL != 0 {
-            self.recover_tx();
-        }
-        // Descriptors the controller has finished with come back first, so a ring
-        // that was full a moment ago is not refused on stale news.
-        self.reclaim(None);
-        let slot = self.tx_slot(self.tx_head);
-        self.board
-            .invalidate(slot.0 as *const u8, core::mem::size_of::<Descriptor>());
-        if self.tx_inflight == TX || slot.word1() & TXD_USED == 0 {
-            // The controller still owns the next slot: the ring is full.
-            return false;
-        }
-        let buf = self.tx_buf(self.tx_head);
-        // SAFETY: `buf` is this slot's `BUF_LEN` bytes, software-owned (used set),
-        // and `frame.len() <= BUF_LEN`.
-        unsafe { core::ptr::copy_nonoverlapping(frame.as_ptr(), buf, frame.len()) };
-        self.board.clean(buf, frame.len());
-        let wrap = if self.tx_head == TX - 1 { TXD_WRAP } else { 0 };
-        slot.set_word0(self.board.bus_address(buf));
-        // Clearing used (it is absent from this word) is the release to the
-        // controller, so it is written last and the frame's bytes and the address
-        // are made visible before it.
-        fence(Ordering::Release);
-        slot.set_word1((frame.len() as u32 & TXD_LEN_MASK) | TXD_LAST | wrap);
-        self.board
-            .clean(slot.0 as *const u8, core::mem::size_of::<Descriptor>());
-        // A frame of one descriptor, copied: no one is waiting for it.
-        self.chains[self.tx_head] = Chain {
-            ndesc: 1,
-            cookie: None,
-        };
-        self.tx_head = (self.tx_head + 1) % TX;
-        self.tx_inflight += 1;
-        // The descriptor must be visible before the kick that makes the DMA read it.
-        fence(Ordering::Release);
-        self.board
-            .write(NETWORK_CONTROL, self.network_control | NWCTRL_TX_START);
+        self.send_copied(frame.len(), |buf| {
+            // SAFETY: `buf` is the ring slot's `BUF_LEN` bytes, software-owned, and
+            // `send_copied` calls this only for `frame.len() <= BUF_LEN`.
+            unsafe { core::ptr::copy_nonoverlapping(frame.as_ptr(), buf, frame.len()) };
+        })
+    }
+
+    fn gathers_in_place(&self) -> bool {
         true
     }
 
@@ -861,13 +877,16 @@ impl<B: Board, const RX: usize, const TX: usize> EthernetMac for Cyt4bfMac<B, RX
             return TxGather::Refused;
         }
         if n > TX {
-            let mut frame = [0u8; BUF_LEN];
-            // SAFETY: the caller's contract makes every segment readable, and
-            // `total <= BUF_LEN` keeps the joined frame inside `frame`.
-            let Some(joined) = (unsafe { join_segments(segments, &mut frame) }) else {
-                return TxGather::Refused;
-            };
-            return if self.transmit(&frame[..joined]) {
+            // Joined straight into the ring slot's own buffer, so a frame this
+            // long costs no stack.
+            let sent = self.send_copied(total, |buf| {
+                // SAFETY: `buf` is `BUF_LEN` bytes and `total <= BUF_LEN`; the
+                // caller's contract makes every segment readable, and none lies in
+                // the ring's own buffers.
+                let out = unsafe { core::slice::from_raw_parts_mut(buf, total) };
+                let _ = unsafe { join_segments(segments, out) };
+            });
+            return if sent {
                 TxGather::Copied
             } else {
                 TxGather::Refused

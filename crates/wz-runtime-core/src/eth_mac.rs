@@ -50,6 +50,15 @@ pub trait EthernetMac {
     /// is dropped whole rather than truncated.
     fn receive(&mut self, buf: &mut [u8]) -> Option<usize>;
 
+    /// Whether [`transmit_gather`](Self::transmit_gather) can QUEUE a frame to be
+    /// read in place. A stack asks before it offers pieces: for a MAC that cannot,
+    /// the default joins them into a buffer on the stack, which a stack that
+    /// already holds a flat transmit buffer has no need to pay for. `false` unless
+    /// the MAC says otherwise.
+    fn gathers_in_place(&self) -> bool {
+        false
+    }
+
     /// Put one frame on the wire from several pieces, WITHOUT first joining them
     /// into one buffer, when the controller can read them where they are
     /// (ARCHITECTURE section 9.1: the codec's bytes are written once, and the DMA
@@ -206,6 +215,10 @@ mod tests {
     #[test]
     fn the_default_gather_joins_the_pieces_and_reports_a_copy() {
         let mut mac = Echo { held: None };
+        assert!(
+            !mac.gathers_in_place(),
+            "a MAC says nothing and is not offered pieces by a stack"
+        );
         let (head, body) = ([1u8, 2, 3], [4u8, 5]);
         // SAFETY: both arrays outlive the call and are fully readable.
         let outcome = unsafe { mac.transmit_gather(&[segment(&head), segment(&body)], 99) };
