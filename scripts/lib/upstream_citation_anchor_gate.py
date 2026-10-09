@@ -2072,7 +2072,10 @@ def selftest() -> int:
         # too (the wiring line carries no upstream path) but it would couple two
         # unrelated numbers.
         def git_fixture(
-            name: str, body: str | None, runci: str | None = None
+            name: str,
+            body: str | None,
+            runci: str | None = None,
+            fname: str = "f.rs",
         ) -> pathlib.Path:
             d = base / name
             d.mkdir()
@@ -2081,8 +2084,8 @@ def selftest() -> int:
                 (d / "scripts").mkdir()
                 (d / "scripts" / "run-ci.sh").write_text(runci)
             if body is not None:
-                (d / "f.rs").write_text(body)
-                subprocess.run(["git", "-C", str(d), "add", "f.rs"], check=True)
+                (d / fname).write_text(body)
+                subprocess.run(["git", "-C", str(d), "add", fname], check=True)
             return d
 
         # The fixture REF, not the machine's checkout: this selftest has to be
@@ -2284,6 +2287,83 @@ def selftest() -> int:
             if got != want:
                 failures.append(f"run() on {label}: expected rc={want}, got {got}")
 
+        # 11. THE PROSE SHAPE THAT REACHED HOSTED LAYER C0 (open-debt item 897).
+        #
+        # A capture README named two upstream source lines the way a sentence
+        # does -- a parenthesised root-less path with a line RANGE after it, and
+        # the same with a single line -- and the push went out because the
+        # pre-push hook did not run this gate. Hosted C0 then read the residue
+        # at one above its budget and the total at one above its own. Every
+        # fixture above is a source-file comment; none was prose in a markdown
+        # file, and none used a range, so the gate's grip on THIS shape was
+        # assumed rather than driven. The two bodies below are that paragraph
+        # before and after its repair, and the rows are the three verdicts the
+        # push met: the form arm the hook runs, the resolution arm hosted runs,
+        # and a control that sits the budgets on the bad count so the rows
+        # above it are known to fail on the budgets and on nothing else.
+        #
+        # ASSEMBLED from segments, like every path in this function: this file
+        # is tracked and a literal here would be a citation of its own.
+        RL_NET = _p("net", "runtime", "orchestrator.rs")
+        RL_SRC = _p("src", "lib.rs")
+        ROOTED_NET = _p("zenoh", "src", "net", "runtime", "orchestrator.rs")
+        ROOTED_SRC = _p("commons", "zenoh-protocol", "src", "lib.rs")
+        NEEDLE_NET = "let scout: ScoutingMessage = Scout {"
+        NEEDLE_SRC = "pub const VERSION: u8 = 0x09;"
+        ref4 = base / "ref4"
+        for rel, text in (
+            (ROOTED_NET, f"fn a() {{}}\n    {NEEDLE_NET}\n"),
+            (ROOTED_SRC, f"{NEEDLE_SRC}\n"),
+        ):
+            (ref4 / rel).parent.mkdir(parents=True)
+            (ref4 / rel).write_text(text)
+        README_BAD = (
+            "* **That a stock node emits these bytes.** The Scout is wz's own.\n"
+            "  The scouting initiator builds its Scout with `zid: None`\n"
+            f"  (`{RL_NET}:1010-1014`); this file's Scouts do carry one.\n"
+            "  The version byte `0x09` is zenoh's\n"
+            f"  (`zenoh-protocol` 1.10.1, `{RL_SRC}:31`).\n"
+        )
+        README_FIXED = (
+            "* **That a stock node emits these bytes.** The Scout is wz's own.\n"
+            "  The scouting initiator builds its Scout with `zid: None`\n"
+            f"  (`{ROOTED_NET}` @ `{NEEDLE_NET}`);\n"
+            "  this file's Scouts do carry one.\n"
+            "  The version byte `0x09` is zenoh's\n"
+            f"  (`{ROOTED_SRC}` @ `{NEEDLE_SRC}`).\n"
+        )
+        # The anchored citations in the BAD body are what make `net` and `src`
+        # candidate segments at all (the derivation reads the tree's own
+        # root-anchored paths), so the bad body carries one of each, apart from
+        # the two root-less spellings it is about.
+        ANCHORS = (
+            f"// `{ROOTED_NET}` @ `{NEEDLE_NET}`\n"
+            f"// `{ROOTED_SRC}` @ `{NEEDLE_SRC}`\n"
+        )
+        readme_bad = git_fixture(
+            "repo_readme_bad", README_BAD + ANCHORS + MARK,
+            runci=WIRED, fname="README.md",
+        )
+        readme_fixed = git_fixture(
+            "repo_readme_fixed", README_FIXED + ANCHORS + MARK,
+            runci=WIRED, fname="README.md",
+        )
+        for label, got, want in (
+            ("README prose with two root-less lines, form arm (the hook's)",
+             verdict(readme_bad, None, False, 0, 0), 1),
+            ("README prose with two root-less lines, resolution arm (hosted's)",
+             verdict(readme_bad, ref4, True, 0, 0), 1),
+            ("the same two lines once the budgets sit on their count",
+             verdict(readme_bad, ref4, True, 0, 0, ROOTLESS_UNDECLARED_BUDGET=2,
+                     ROOTLESS_TOTAL_BUDGET=2), 0),
+            ("the repaired paragraph, form arm",
+             verdict(readme_fixed, None, False, 0, 0), 0),
+            ("the repaired paragraph, resolution arm",
+             verdict(readme_fixed, ref4, True, 0, 0), 0),
+        ):
+            if got != want:
+                failures.append(f"run() on {label}: expected rc={want}, got {got}")
+
     # R2615 — `resolve_mode`, the hook's opportunistic decision, graded on all
     # SIX combinations rather than the two the hook happens to take. The mode
     # lived in `main()` for exactly as long as it took to notice that nothing
@@ -2359,7 +2439,15 @@ def selftest() -> int:
         "five guards and TWO came back green: nothing asserted that an UNMARKED "
         "tree reds, and every marked fixture used a ROOTED path the residue "
         "never counted, so un-masking it changed nothing. Both have rows now, "
-        "and all five red"
+        "and all five red. Item 897 added FIVE rows on the shape that reached "
+        "hosted C0 through a push the hook did not grade: README prose naming "
+        "two root-less source lines, one with a line RANGE, read by the form "
+        "arm and by the resolution arm (both red), the same text with the "
+        "budgets on its count (green, so the red rows fail on the budgets and "
+        "on nothing else), and the paragraph repaired to the anchored form in "
+        "both arms (green). Mutation-checked: skipping markdown in the residue "
+        "tally reds three of them, and disabling the residue and conservation "
+        "ratchets reds both red rows"
     )
     return 0
 
