@@ -1990,7 +1990,10 @@ wz-runtime-core = { path = "../wz-runtime-core", features = ["alloc"] }
 # own (a recycled one, a slot of the node's receive pool) and hands that buffer
 # up as the frame instead of copying out of it. Unconditional, as
 # `deferred-fire` is: both arenas lend, and this crate is AP-only.
-wz-session-core = { path = "../wz-session-core", features = ["alloc", "deferred-fire", "rx-shared-bytes"] }
+# Round 3170 follow-up — `transport-tx-lend`, unconditional for the same
+# reason: the stream writer lends the outbound vector (section 9.1), and the
+# AP has no image-size budget the dyn-buffer encoders could break.
+wz-session-core = { path = "../wz-session-core", features = ["alloc", "deferred-fire", "rx-shared-bytes", "transport-tx-lend"] }
 sce-forge-runtime = { path = "../../vendor/sce/backends/rust/forge-runtime" }
 sce-rust-runtime = { path = "../../vendor/sce/backends/rust/runtime" }
 # R311il — sce-rust-lua dropped: the session FSM (the last Lua-bound

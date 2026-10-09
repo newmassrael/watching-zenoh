@@ -3286,6 +3286,7 @@ dependencies = [
  "wz-codecs",
  "wz-codecs-test-support",
  "wz-runtime-core",
+ "wz-session-core",
  "wz-session-core-test-support",
  "wz-switchboard-schema",
  "xxhash-rust",

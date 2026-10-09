@@ -1070,6 +1070,22 @@ dissect = [
 # it does not drag `std` into a no_std profile.
 dissect-serde = ["dissect", "dep:serde"]
 
+# transport-tx-lend — ARCHITECTURE section 9.1: the link LENDS the outbound
+# buffer and the session encodes into it. Gates the session's lend attempts
+# (`send_lent`, `send_frame_lent`) and switches the body encoders' buffer
+# type from the heap vector to `dyn TxBuf` (`tx_buf::EncodeBuf`), because one
+# encoder must then serve a vector and a link's slot alike.
+#
+# A feature, and not on by default, because the abstraction is paid for by
+# every image that carries it: a write through `dyn TxBuf` can fail, so the
+# codec's `?` after each write stays, where a vector's cannot fail and folds
+# away. The multicast MCU image measured +1456 bytes of ROM for a seam it
+# never uses (Round 3158). The link a session writes to is a trait object,
+# so no type reachable from the session proves that a slot is never lent;
+# the composition says so. A profile whose link lends (the AP stream writer,
+# the lwIP unicast driver) turns it on; one whose links never lend leaves it.
+transport-tx-lend = ["alloc"]
+
 # Item 895 — `transport_compose`: transport messages WRITTEN from explicit
 # fields, for a caller that says every field itself (the transport build door
 # of `wz-capture`, behind `wz_dissect_transport_build`).
@@ -1201,6 +1217,11 @@ heapless = { version = "0.8", default-features = false }
 serde = { version = "1", default-features = false, features = ["derive", "alloc"], optional = true }
 
 [dev-dependencies]
+# Round 3170 follow-up — this crate's own unit tests drive the lending form of
+# the encoders (a fixed `SliceTxBuf` slot, `dyn TxBuf`), which exists only
+# with `transport-tx-lend`. A dev-dependency on itself turns the feature on
+# for the test build alone; the library an image links is unchanged.
+wz-session-core = { path = ".", default-features = false, features = ["transport-tx-lend"] }
 # R311ds — the four declare/* registries' wider behavioural tests
 # (callback fan-out value capture, mixed-message dispatch) migrated
 # here from the wz-runtime-tokio shells, joining the existing R311dm

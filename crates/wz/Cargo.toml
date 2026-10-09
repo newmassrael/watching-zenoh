@@ -612,6 +612,11 @@ loopif-multicast = [
     "wz-link-lwip?/loopif-multicast",
     "wz-session-lwip?/loopif-multicast",
 ]
+# Round 3170 follow-up — the session encodes into a slot its link lends
+# (ARCHITECTURE section 9.1). Weak-forwards to the lwIP session shell; the AP
+# runtime lends unconditionally and needs no forward. Off by default: an image
+# that never lends (the MCU multicast one) must not carry the lend attempt.
+transport-tx-lend = ["wz-session-lwip?/transport-tx-lend"]
 runtime-no-std = []
 # R302b — runtime-tokio pulls the wz-runtime-tokio crate into the
 # build via `dep:` syntax. Bare `runtime-tokio` with no sub-feature

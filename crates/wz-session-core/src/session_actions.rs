@@ -2704,17 +2704,20 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// the frame to (`with_conduit_link` is that routing), so the slot is lent
     /// by the link that will write it. Gated as `with_conduit_link` is, the
     /// data-path union, because it is the data-path send.
-    #[cfg(any(
-        feature = "codec-push",
-        feature = "codec-request",
-        feature = "codec-response",
-        feature = "codec-response-final",
-        feature = "declare-keyexpr",
-        feature = "declare-subscriber",
-        feature = "declare-queryable",
-        feature = "declare-token",
-        feature = "declare-interest",
-        feature = "liveliness-token",
+    #[cfg(all(
+        feature = "transport-tx-lend",
+        any(
+            feature = "codec-push",
+            feature = "codec-request",
+            feature = "codec-response",
+            feature = "codec-response-final",
+            feature = "declare-keyexpr",
+            feature = "declare-subscriber",
+            feature = "declare-queryable",
+            feature = "declare-token",
+            feature = "declare-interest",
+            feature = "liveliness-token",
+        )
     ))]
     fn send_frame_lent<P>(
         &self,
@@ -2755,17 +2758,20 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// on the heap, so the answer is also how a path says "this frame does not
     /// fit, or must be cut up". The decision belongs to the path, and the slot,
     /// the routing and the single send funnel do not.
-    #[cfg(any(
-        feature = "codec-push",
-        feature = "codec-request",
-        feature = "codec-response",
-        feature = "codec-response-final",
-        feature = "declare-keyexpr",
-        feature = "declare-subscriber",
-        feature = "declare-queryable",
-        feature = "declare-token",
-        feature = "declare-interest",
-        feature = "liveliness-token",
+    #[cfg(all(
+        feature = "transport-tx-lend",
+        any(
+            feature = "codec-push",
+            feature = "codec-request",
+            feature = "codec-response",
+            feature = "codec-response-final",
+            feature = "declare-keyexpr",
+            feature = "declare-subscriber",
+            feature = "declare-queryable",
+            feature = "declare-token",
+            feature = "declare-interest",
+            feature = "liveliness-token",
+        )
     ))]
     fn send_lent<F>(
         &self,
@@ -6730,12 +6736,15 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             // link lends, when it lends one; the heap encode below is the answer
             // for every link that does not, and for a message the slot cannot
             // hold. Nothing is sent when `fill` says no.
-            if self.send_lent(wire_reliability, priority, worst_case_payload, |slot| {
-                let mut sink = crate::tx_buf::TxSink::new(slot);
-                encode_body(&mut sink).is_ok()
-            }) {
-                count_pushed();
-                return Ok(());
+            #[cfg(feature = "transport-tx-lend")]
+            {
+                if self.send_lent(wire_reliability, priority, worst_case_payload, |slot| {
+                    let mut sink = crate::tx_buf::TxSink::new(slot);
+                    encode_body(&mut sink).is_ok()
+                }) {
+                    count_pushed();
+                    return Ok(());
+                }
             }
             let mut wire = Vec::with_capacity(worst_case_payload);
             {
@@ -6982,8 +6991,11 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             // that opt in), or the frame needs fragmenting, nothing was sent and
             // the frame is built on the heap exactly as before, with the SN
             // already minted above.
-            if self.send_frame_lent(&frame_emit, worst_case_payload, &encode_body) {
-                return Ok(PushOutcome::Pushed);
+            #[cfg(feature = "transport-tx-lend")]
+            {
+                if self.send_frame_lent(&frame_emit, worst_case_payload, &encode_body) {
+                    return Ok(PushOutcome::Pushed);
+                }
             }
             let wire = crate::frame_encode::encode_frame_envelope(
                 sn,

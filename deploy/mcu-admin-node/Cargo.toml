@@ -49,6 +49,8 @@ wz-eth-mac-lan9118 = { path = "../../crates/wz-eth-mac-lan9118" }
 # keepalive and close keep the zenoh host's lease and teardown honest.
 wz = { path = "../../crates/wz", default-features = false, features = [
     "session-lwip",
+    # Its link is the lwIP UDP driver, which lends the datagram payload.
+    "transport-tx-lend",
     "adminspace-core",
     "adminspace-write",
     "codec-frame",

@@ -813,8 +813,23 @@ declare -A BASELINE_MC_TEXT=(
     # free either, and the carry is named in the ledger: a sink generic over the
     # buffer, so a profile that only ever writes a `Vec` inlines it as `VecSink` did.
     # Old: 64196/64024 (R3034).
-    ["thumbv7m-none-eabi"]=65652
-    ["thumbv7em-none-eabihf"]=65444
+    # RECOVERED, the R3170 carry: DOWN -1308 / -1312 B (thumbv7m 64344, thumbv7em
+    # 64132). The seam is now a FEATURE of `wz-session-core`, `transport-tx-lend`,
+    # off by default and on for the AP runtime and the unicast MCU acceptor, so
+    # this image builds its encoders over `Vec<u8>` again: a push cannot fail, the
+    # codec's `?` after each write folds away, and no lend attempt is compiled.
+    # (A sink merely generic over the buffer would not have recovered it: the link
+    # a session writes to is a trait object, so the lend attempt stays reachable
+    # and both instantiations stay linked. The composition has to say it.)
+    # Read with the lane's own build (`run-ci.sh --layer Q`, 52 s) on the tree that
+    # carries the feature: thumbv7m 64344 against the 65652 it replaces and the
+    # 64172 of the last tree before the seam, so this image is now 172 B above that
+    # tree and not 1480. The 172 is NOT attributed: it spans every change between
+    # the two trees, and no per-symbol diff of them was taken for this figure.
+    # The unicast acceptor image keeps lending (`cargo tree -e features` shows the
+    # feature on it and off here) and its three QEMU boots pass.
+    ["thumbv7m-none-eabi"]=64344
+    ["thumbv7em-none-eabihf"]=64132
 )
 # shellcheck disable=SC2034  # resolved through the `declare -n _bt/_bd/_bb`
                             # namerefs in the `case "$artifact"` dispatch below; shellcheck

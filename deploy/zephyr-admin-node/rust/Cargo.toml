@@ -40,7 +40,11 @@ net-zephyr-sockets = []
 # lwIP polled from the node's loop, over a wz Ethernet MAC crate. The facade's
 # `session-lwip` brings lwIP's links and the real lwIP build, which needs
 # WZ_LWIP_PORT in the build's environment (the CMake sets it).
-net-lwip-mac = ["wz/session-lwip"]
+#
+# It also lends: the lwIP UDP driver hands the session the datagram payload and
+# the MAC sends the pbuf chain in place (ARCHITECTURE section 9.1), so the
+# session is built to try a lend (`wz/transport-tx-lend`).
+net-lwip-mac = ["wz/session-lwip", "wz/transport-tx-lend"]
 # The MAC (`CONFIG_WZ_MAC_*`): the Infineon CYT4BF family's ETH0.
 mac-cyt4bf = ["dep:wz-eth-mac-cyt4bf"]
 # Read the TC6 identity registers over the SCB master on the kit's MikroBUS socket

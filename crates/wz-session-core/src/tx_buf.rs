@@ -22,9 +22,12 @@
 //!   encoders (`push_body` and its siblings) are written once against one
 //!   concrete sink type instead of one per destination.
 //!
-//! The trait is object safe on purpose: the encoders take `&mut dyn TxBuf`, so
+//! The trait is object safe on purpose: in a build that lends a slot
+//! (`transport-tx-lend`) the encoders take `&mut dyn TxBuf` ([`EncodeBuf`]), so
 //! the choice of destination does not multiply their instantiations, and the
-//! MCU profile does not carry a copy of the framing code per buffer type.
+//! MCU profile does not carry a copy of the framing code per buffer type. A
+//! build that never lends names the vector itself instead: the sink then cannot
+//! refuse a write and the encoders are as small as they were over `VecSink`.
 //!
 //! The targets are spelled out in full: this page's text is merged with the
 //! outer doc on `pub mod tx_buf;` and the merged text resolves its relative
@@ -33,6 +36,7 @@
 //! [`TxBuf`]: crate::tx_buf::TxBuf
 //! [`SliceTxBuf`]: crate::tx_buf::SliceTxBuf
 //! [`TxSink`]: crate::tx_buf::TxSink
+//! [`EncodeBuf`]: crate::tx_buf::EncodeBuf
 //! [`CodecError::BufferOverflow`]: sce_forge_runtime::codec::CodecError::BufferOverflow
 //! [`SceSink`]: sce_forge_runtime::codec::SceSink
 
@@ -150,20 +154,36 @@ impl TxBuf for SliceTxBuf<'_> {
 /// the buffer, not the buffer's absolute length, so codec emit stays
 /// positionally consistent when the destination already holds a frame prefix
 /// (the batching writer appends a message to an open frame).
-pub struct TxSink<'a> {
-    buf: &'a mut dyn TxBuf,
+pub struct TxSink<'a, B: TxBuf + ?Sized = EncodeBuf<'a>> {
+    buf: &'a mut B,
     start: usize,
 }
 
-impl<'a> TxSink<'a> {
+/// The buffer type every body encoder is written against.
+///
+/// A build that lends outbound slots (`transport-tx-lend`) writes through
+/// `dyn TxBuf`, so one encoder serves a heap vector and a link's slot alike.
+/// A build that never lends names the vector itself: its sink then cannot
+/// refuse a write, the codec's `?` after each write folds away, and the
+/// encoders are the size they were when they wrote a `VecSink`. The choice is
+/// a feature and not a generic parameter because the link a session writes to
+/// is a trait object, so no type reachable from the session can prove that a
+/// slot is never lent.
+#[cfg(any(feature = "transport-tx-lend", not(feature = "alloc")))]
+pub type EncodeBuf<'a> = dyn TxBuf + 'a;
+/// See the lending form above.
+#[cfg(all(not(feature = "transport-tx-lend"), feature = "alloc"))]
+pub type EncodeBuf<'a> = alloc::vec::Vec<u8>;
+
+impl<'a> TxSink<'a, EncodeBuf<'a>> {
     /// Wrap `buf`; the position starts at the buffer's current length.
-    pub fn new(buf: &'a mut dyn TxBuf) -> Self {
+    pub fn new(buf: &'a mut EncodeBuf<'a>) -> Self {
         let start = buf.len();
         Self { buf, start }
     }
 }
 
-impl SceSink for TxSink<'_> {
+impl<B: TxBuf + ?Sized> SceSink for TxSink<'_, B> {
     fn write_bytes(&mut self, bytes: &[u8]) -> Result<(), CodecError> {
         self.buf.append(bytes)
     }

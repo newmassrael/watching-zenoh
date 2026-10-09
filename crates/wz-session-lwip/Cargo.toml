@@ -48,6 +48,13 @@ path = "src/lib.rs"
 
 [features]
 default = []
+# ARCHITECTURE section 9.1 — the session encodes straight into the datagram
+# this crate's UDP driver lends. Forwards wz-session-core's
+# `transport-tx-lend`; off by default because the lend attempt and the
+# `dyn`-buffer encoders it needs cost an image that never lends ~1.3 KB of
+# ROM (the MCU multicast image does not lend, Round 3170). A unicast image
+# whose link is this crate's lwIP driver turns it on.
+transport-tx-lend = ["wz-session-core/transport-tx-lend"]
 # Transport reassembly (Tier B) on the MCU session loop. Forwards to the
 # wz-runtime-coop reassembly seam (the CoopReassembly dispatcher +
 # mcu_reassembly() over the SCE buffer-pool SSOT) AND the wz-session-core
@@ -240,6 +247,11 @@ wz-codecs = { path = "../wz-codecs", default-features = false }
 # setup. Dev-only: the production lib build (which already deps wz-link-lwip
 # above without this feature) never pulls the harness.
 wz-link-lwip = { path = "../wz-link-lwip", features = ["test-support"] }
+# Round 3170 follow-up — this crate's lend tests (driver.rs, session_drive.rs)
+# drive a session that must TRY a lend, which wz-session-core compiles only
+# with `transport-tx-lend`. A dev-dependency turns it on for the test build
+# alone: the library a multicast image links carries no lend attempt.
+wz-session-core = { path = "../wz-session-core", default-features = false, features = ["transport-tx-lend"] }
 
 [lints]
 workspace = true

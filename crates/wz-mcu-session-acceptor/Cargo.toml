@@ -137,7 +137,10 @@ default = ["lwip"]
 # MCU session shell over lwIP loopback. On by default, so every existing
 # caller builds unchanged; a profile on another network stack (Zephyr's
 # sockets) turns it off and supplies its own `AcceptorTopology`.
-lwip = ["wz/session-lwip", "dep:lwip-sys"]
+#
+# Round 3170 follow-up — this topology's link is the lwIP UDP driver, which
+# lends the datagram payload, so the session shell is built to try a lend.
+lwip = ["wz/session-lwip", "wz/transport-tx-lend", "dep:lwip-sys"]
 
 # Tier B transport reassembly. Threads `wz/reassembly` (the facade atomic
 # feature -> wz-session-lwip/reassembly -> wz-runtime-coop + wz-session-core)

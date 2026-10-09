@@ -21,7 +21,10 @@ use sce_forge_runtime::codec::{CodecError, SceSink};
 use wz_codecs::wire_const;
 
 use crate::qos::Priority;
-use crate::tx_buf::{TxBuf, TxSink};
+// `TxBuf` is needed for the method calls only when `EncodeBuf` is a concrete
+// type (no lending); on a `dyn TxBuf` the methods resolve without the import.
+#[allow(unused_imports)]
+use crate::tx_buf::{EncodeBuf, TxBuf, TxSink};
 
 #[cfg(feature = "codec-declare")]
 use wz_codecs::declare::{Declare, DeclareOwned};
@@ -96,7 +99,11 @@ const QOS_EXT_WIRE_BYTES: usize = 2;
 /// (`zenoh-codec/src/transport/fragment.rs` `write`). The z64 body reuses the
 /// codec's `write_vle_u64` primitive rather than a hand-rolled VLE.
 #[cfg(feature = "transport-qos")]
-fn write_qos_ext(buf: &mut dyn TxBuf, priority: Priority, chained: bool) -> Result<(), CodecError> {
+fn write_qos_ext(
+    buf: &mut EncodeBuf<'_>,
+    priority: Priority,
+    chained: bool,
+) -> Result<(), CodecError> {
     let header = if chained {
         QOS_EXT_HEADER | wire_const::FLAG_T_Z
     } else {
@@ -131,7 +138,7 @@ fn write_qos_ext(buf: &mut dyn TxBuf, priority: Priority, chained: bool) -> Resu
 /// (a pool slot's storage) returns [`CodecError::BufferOverflow`] if even the
 /// prefix, at most 13 bytes, does not fit.
 pub(crate) fn begin_frame(
-    buf: &mut dyn TxBuf,
+    buf: &mut EncodeBuf<'_>,
     sn: u64,
     parent_flags: u8,
     ext_qos: Option<Priority>,
@@ -230,7 +237,7 @@ where
 /// already written stay in the buffer, so the caller rolls back with
 /// [`TxBuf::truncate`] to the length it saw before the call.
 pub(crate) fn encode_frame_envelope_into<P>(
-    buf: &mut dyn TxBuf,
+    buf: &mut EncodeBuf<'_>,
     sn: u64,
     parent_flags: u8,
     ext_qos: Option<Priority>,
