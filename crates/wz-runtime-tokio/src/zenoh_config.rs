@@ -3328,6 +3328,15 @@ pub const UNHONOURED_CITATION_LEDGER: &[(&str, &str, &str)] = &[
         "not-this-key",
         "HANDSHAKE_TIMEOUT",
     ),
+    // Open-debt 732 — `link_pipeline` cites this key to explain why the
+    // per-candidate dial bound is NOT derived from it: upstream clocks the whole
+    // walk plus the handshake with it, which cannot bound one candidate. The
+    // anchor is the bound's own constant; the disclaimer sits beside it.
+    (
+        "transport/unicast/open_timeout",
+        "not-this-key",
+        "CANDIDATE_DIAL_TIMEOUT",
+    ),
 ];
 
 /// Is `path` a key stock zenoh knows — itself, or under a subtree it knows?

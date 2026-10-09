@@ -272,6 +272,12 @@ pub async fn resolve_locator_addrs(host: &str, port: u16) -> io::Result<Vec<Sock
 /// wz does carry, `SessionTimeouts::spec_defaults().link_open_ms`: a single
 /// candidate may not be granted as long as the whole link is, and a unit test
 /// below pins that, so the two cannot drift into a bound that bounds nothing.
+///
+/// NOT-THIS-KEY: transport/unicast/open_timeout
+///
+/// The key is cited above to say why it is NOT the source of this value; this
+/// constant honours nothing of it, and the marker sits beside the mechanism so
+/// the citation cannot be read as "wz honours it".
 pub const CANDIDATE_DIAL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3);
 
 /// Try `dial` against each candidate address in turn and return the first
