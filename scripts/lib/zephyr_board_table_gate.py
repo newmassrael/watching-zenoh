@@ -83,6 +83,16 @@ than off the row's own say-so.
      its own). A HARDWARE row that requires companions is HARDWARE only together
      with them, and each cites the SAME ledger entry as the row: what ran was
      the images together, and one image's record says nothing about the pair.
+ 10. BUILD-ONLY OVERLAYS. Layer Qzb has no lab to state the values a build needs,
+     so a row may list an overlay of numbers made up so that the image is whole (a
+     PLCA id, an address). Such an overlay describes no board, and an image built
+     with it that reached a bench would configure a segment by accident. An overlay
+     says it is one with the marker `WZ-BUILD-VALUES-ONLY` in the comment block that
+     opens the file (the class is read from the FILE, so a rename cannot take it
+     out of the class), and a file whose name says `build_values` is read as one
+     too, so that dropping the marker does not either. A row or companion that is
+     HARDWARE, or that cites a hardware record, may list none: what a lab ran must
+     not be an image configured with invented values.
 
 ## Why it reads run-ci.sh and ci.yml as text
 
@@ -125,6 +135,55 @@ DATE = re.compile(r"\d{4}-\d{2}-\d{2}")
 STEP_LINE = re.compile(r"^HW\.(\d+) ", re.M)
 STEP_SPLIT = re.compile(r"(?=HW\.\d+ )")
 STEP_MARK = re.compile(r" - OK|FAIL")
+# An overlay that exists so a build can be made, and describes no board.
+BUILD_ONLY_MARKER = "WZ-BUILD-VALUES-ONLY"
+BUILD_ONLY_NAMES = ("build_values", "build-values")
+
+
+def build_only_overlay(path: Path) -> bool:
+    """Whether the overlay at `path` is one of made-up build values.
+
+    The marker is read from the comment block that opens the file (a line starting
+    `#` before the first line that is not a comment or blank), so a marker buried
+    among settings, where it would not be a statement about the file, does not count.
+    The name is read too: an overlay called `*build_values*` is of the class
+    whether or not it carries the marker.
+    """
+    if any(token in path.name for token in BUILD_ONLY_NAMES):
+        return True
+    for line in path.read_text().splitlines():
+        stripped = line.strip()
+        if not stripped:
+            continue
+        if not stripped.startswith("#"):
+            return False
+        if BUILD_ONLY_MARKER in stripped:
+            return True
+    return False
+
+
+def claims_hardware(item: dict) -> bool:
+    """Whether a row or companion is HARDWARE or cites a hardware record."""
+    witness = item.get("witness")
+    return item.get("grade") == "HARDWARE" or (
+        isinstance(witness, dict) and "record" in witness
+    )
+
+
+def build_only_findings(label: str, item: dict, app_dir: Path) -> list[str]:
+    """The finding for each build-only overlay a hardware-claiming `item` lists."""
+    if not claims_hardware(item):
+        return []
+    out: list[str] = []
+    for extra in item.get("conf_overlay", []):
+        path = app_dir / extra
+        if path.is_file() and build_only_overlay(path):
+            out.append(
+                f"{label}: claims hardware but lists conf_overlay {extra!r}, which is of made-up "
+                f"build values ({BUILD_ONLY_MARKER}): an image configured with values nobody "
+                f"chose is not what a lab ran"
+            )
+    return out
 
 
 def conf_name(board: str) -> str:
@@ -287,6 +346,7 @@ def check_companions(
             out.append(f"{label}: grade {grade!r} is not one of {COMPANION_GRADES}")
             continue
         listed.append(c)
+        out.extend(build_only_findings(label, c, root / "deploy" / c["app"]))
         if grade == "DECLARED":
             if witness:
                 out.append(f"{label}: DECLARED carries a witness, which the grade does not make")
@@ -386,6 +446,7 @@ def check(table: dict, root: Path = ROOT) -> list[str]:
                     f"{label}: conf_overlay {extra!r} is not a file under deploy/{row['app']}/"
                     f" -- Layer {BUILD_LANE} would build the row without it"
                 )
+        out.extend(build_only_findings(label, row, app_dir))
         rows_by_conf.setdefault((row["app"], conf_name(row["board"])), []).append(row)
 
         # The network the row names must be one the app offers.
@@ -752,6 +813,40 @@ def selftest() -> int:
            entries=whole)
     t = hardware_table(); t["rows"][1]["grade"] = "BUILT"; t["rows"][1]["witness"] = {"lane": "Qzb"}
     expect("a BUILT row over a HARDWARE companion", t, None, entries=whole)
+
+    # BUILD-ONLY OVERLAYS (module item 10). A BUILT row may list one; a row or
+    # companion that claims hardware may not, whatever the file is called.
+    def build_values_overlays(root: Path) -> None:
+        (root / "deploy/adm/values.conf").write_text(
+            f"# Values for a build.\n# {BUILD_ONLY_MARKER}\n\nCONFIG_X=y\n"
+        )
+        (root / "deploy/adm/lab_build_values.conf").write_text("CONFIG_X=y\n")
+        (root / "deploy/adm/buried.conf").write_text(
+            f"CONFIG_X=y\n# {BUILD_ONLY_MARKER}\n"
+        )
+        (root / "deploy/launch/values.conf").write_text(f"# {BUILD_ONLY_MARKER}\n")
+
+    t = _good_table(); t["rows"][1]["conf_overlay"] = ["values.conf"]
+    expect("a BUILT row may list a build-only overlay", t, None, build_values_overlays)
+    t = hardware_table(); t["rows"][1]["conf_overlay"] = ["values.conf"]
+    expect("a HARDWARE row listing a build-only overlay", t, "made-up build values",
+           build_values_overlays, entries=whole)
+    t = hardware_table(); t["rows"][1]["conf_overlay"] = ["extra.conf", "values.conf"]
+    expect("a build-only overlay among others on a HARDWARE row", t, "'values.conf'",
+           build_values_overlays, entries=whole)
+    t = hardware_table(); t["rows"][1]["conf_overlay"] = ["lab_build_values.conf"]
+    expect("a build-only overlay known by its name alone", t, "made-up build values",
+           build_values_overlays, entries=whole)
+    t = hardware_table(); t["rows"][1]["conf_overlay"] = ["buried.conf"]
+    expect("a marker below the settings is not the file's statement", t, None,
+           build_values_overlays, entries=whole)
+    t = _good_table(); t["rows"][1]["conf_overlay"] = ["values.conf"]
+    t["rows"][1]["witness"] = {"lane": "Qzb", "record": "Round 9"}
+    expect("a row that cites a record is a hardware claim", t, "made-up build values",
+           build_values_overlays, entries=whole)
+    t = hardware_table(); t["companions"][0]["conf_overlay"] = ["values.conf"]
+    expect("a HARDWARE companion listing a build-only overlay", t, "made-up build values",
+           build_values_overlays, entries=whole)
 
     if failures:
         print("zephyr-board-table: SELFTEST FAIL")
