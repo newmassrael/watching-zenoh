@@ -38,7 +38,7 @@
 //! An accepting side discards what the device holds when the accept happens,
 //! because upstream does (`z-serial-0.3.1` @ `pub async fn accept(&mut self)` clears
 //! before it waits for `INIT`) and because a re-used device still carries the previous
-//! peer's tail. That flush is a CONTRACT with two halves, and both are held by tests:
+//! peer's tail. That flush is a CONTRACT with three parts, and each is held by tests:
 //!
 //! 1. **An `INIT` that reached the device before the flush survives it.** An
 //!    initiator writes its `INIT` once and re-sends only after a `RESET`, which a
@@ -54,12 +54,24 @@
 //!    side with `tcflush`: that call cannot tell an `INIT` from a stale byte, and a
 //!    byte landing between a read and a `tcflush` would be lost with them.
 //!
-//! The limit is stated rather than hidden: with no end marker between them, a stale
-//! fragment and the `INIT` that follows are ONE frame on the wire and it fails its
-//! CRC, so that `INIT` is lost. Only a wire discipline (a `RESET` from the responder
-//! to wake the initiator's re-send) could recover it, which upstream does not do and
-//! this module does not invent. The dial side keeps the full clear: an initiator
-//! wants nothing that was on the wire before it spoke.
+//! 3. **A stale fragment no `0x00` closed does not hide the `INIT` behind it.** A
+//!    frame on the wire is `COBS(body) 0x00`: only its END is marked, and pico and
+//!    upstream read up to the `0x00` and drop the whole span when its CRC fails. So
+//!    an unterminated fragment and the `INIT` after it are one span that neither
+//!    peer recovers. The flush looks for the `INIT` inside such a span from every
+//!    start offset ([`wz_session_core::serial_link::pending_init_header`] states what
+//!    an offset must pass and the false-accept bound, below 2^-32 per offset).
+//!    Nothing is sent for this: the wire is unchanged, with no `RESET` from the
+//!    responder, which upstream does not send either. The steady-state reader is
+//!    untouched and still drops such a span. The search is `O(n * frame limit)` at
+//!    worst in the `n` bytes held, which `SERIAL_FLUSH_LIMIT` caps at 1 MiB.
+//!
+//! What is still not recovered is stated rather than hidden, and each case is held
+//! by a test: an `INIT` whose body reached the device but whose `0x00` has not (the
+//! unterminated tail is never searched: its end is unknown, and what arrives after
+//! the flush completes it); an `INIT` the line corrupted, which fails its CRC at every
+//! offset. The dial side keeps the full clear: an initiator wants nothing that was
+//! on the wire before it spoke.
 //!
 //! ## Framing vs TCP
 //!
@@ -1711,6 +1723,133 @@ mod tests {
         let data = encode_frame(SERIAL_DATA_HEADER, b"stale").expect("data frame");
         write_all_to(&mut b, &data).await;
         assert_eq!(flush_for_accept(&mut a).expect("a stale line"), None);
+    }
+
+    /// An INIT written right behind a stale fragment no `0x00` closed is kept, and
+    /// the link comes up on it: the two are one span on the wire, which pico and
+    /// upstream would drop on its CRC, and which an initiator that writes `INIT`
+    /// once never repeats. The handshake below runs on a silent peer, so the kept
+    /// header is the only thing that can complete it (open-debt 795, part 3).
+    #[tokio::test]
+    async fn the_accept_flush_keeps_an_init_glued_to_an_unterminated_fragment() {
+        let (mut a, mut b) = memory_pair();
+        let init =
+            encode_frame(wz_session_core::serial_link::SERIAL_FLAG_INIT, b"").expect("INIT frame");
+        write_all_to(&mut b, b"\x09\x22\x33\x44").await;
+        write_all_to(&mut b, &init).await;
+
+        let kept = flush_for_accept(&mut a).expect("the flush reads the line");
+        assert_eq!(
+            kept,
+            Some(wz_session_core::serial_link::SERIAL_FLAG_INIT),
+            "the INIT behind the fragment survives the flush"
+        );
+        assert!(
+            a.take_received().expect("the line reads").is_empty(),
+            "the fragment is discarded with the rest of the stale bytes"
+        );
+
+        tokio::time::timeout(
+            Duration::from_secs(5),
+            drive_serial_handshake_from(&mut a, SerialRole::Responder, kept),
+        )
+        .await
+        .expect("a responder holding the kept INIT must not wait for another")
+        .expect("the handshake completes");
+        let want = encode_frame(
+            wz_session_core::serial_link::SERIAL_FLAG_INIT
+                | wz_session_core::serial_link::SERIAL_FLAG_ACK,
+            b"",
+        )
+        .expect("INIT|ACK frame");
+        let mut got = vec![0u8; want.len()];
+        b.read_exact(&mut got)
+            .await
+            .expect("the peer hears INIT|ACK");
+        assert_eq!(got, want);
+    }
+
+    /// Fragment, data frame, fragment, INIT: the last INIT wins as before, and the
+    /// stale data frame and fragments are discarded (open-debt 795, parts 2 and 3).
+    #[tokio::test]
+    async fn the_accept_flush_keeps_the_last_init_behind_fragments_and_data_frames() {
+        let (mut a, mut b) = memory_pair();
+        let data = encode_frame(SERIAL_DATA_HEADER, b"stale").expect("data frame");
+        let first =
+            encode_frame(wz_session_core::serial_link::SERIAL_FLAG_INIT, b"").expect("INIT frame");
+        let second = encode_frame(
+            wz_session_core::serial_link::SERIAL_FLAG_INIT
+                | wz_session_core::serial_link::SERIAL_FLAG_RESET,
+            b"",
+        )
+        .expect("second INIT frame");
+        for chunk in [
+            &b"\x07\x11"[..],
+            &data,
+            &b"\x07\x11"[..],
+            &first,
+            &b"\x05\x22"[..],
+            &second,
+            &b"\x07\x11"[..],
+            &data,
+        ] {
+            write_all_to(&mut b, chunk).await;
+        }
+
+        assert_eq!(
+            flush_for_accept(&mut a).expect("the flush reads the line"),
+            Some(
+                wz_session_core::serial_link::SERIAL_FLAG_INIT
+                    | wz_session_core::serial_link::SERIAL_FLAG_RESET
+            ),
+            "the last INIT on the wire is the one kept"
+        );
+        assert!(
+            a.take_received().expect("the line reads").is_empty(),
+            "nothing stale is left for the handshake to read"
+        );
+    }
+
+    /// Bytes with no INIT in them keep nothing however they are cut, and the search
+    /// does not invent one: a fragment with no `0x00`, a fragment glued to a data
+    /// frame, and runs of valid-looking codes.
+    #[tokio::test]
+    async fn the_accept_flush_of_unterminated_garbage_keeps_nothing() {
+        let (mut a, mut b) = memory_pair();
+        let data = encode_frame(SERIAL_DATA_HEADER, b"stale").expect("data frame");
+        write_all_to(&mut b, b"\x09\x22\x33\x44").await;
+        assert_eq!(flush_for_accept(&mut a).expect("a fragment"), None);
+        write_all_to(&mut b, b"\x09\x22\x33\x44").await;
+        write_all_to(&mut b, &data).await;
+        assert_eq!(
+            flush_for_accept(&mut a).expect("a fragment and a frame"),
+            None
+        );
+        write_all_to(&mut b, &[0x01; 300]).await;
+        write_all_to(&mut b, &[0x00]).await;
+        assert_eq!(flush_for_accept(&mut a).expect("valid-looking codes"), None);
+        assert!(a.take_received().expect("the line reads").is_empty());
+    }
+
+    /// The case the search cannot recover, pinned so it is not mistaken for one it
+    /// can: an INIT whose body reached the device but whose `0x00` has not. The
+    /// flush cannot know that tail is not stale, so it keeps nothing, and the `0x00`
+    /// that arrives afterwards is the new line's and is read normally.
+    #[tokio::test]
+    async fn an_init_whose_end_marker_has_not_arrived_is_not_kept() {
+        let (mut a, mut b) = memory_pair();
+        let init =
+            encode_frame(wz_session_core::serial_link::SERIAL_FLAG_INIT, b"").expect("INIT frame");
+        write_all_to(&mut b, b"\x09\x22\x33\x44").await;
+        write_all_to(&mut b, &init[..init.len() - 1]).await;
+        assert_eq!(flush_for_accept(&mut a).expect("an unfinished INIT"), None);
+
+        write_all_to(&mut b, &init[init.len() - 1..]).await;
+        assert_eq!(
+            a.take_received().expect("the line reads"),
+            [0x00],
+            "the end marker arrives after the flush and is not discarded"
+        );
     }
 
     /// The kept INIT is answered WITHOUT reading the device: the peer wrote it once,

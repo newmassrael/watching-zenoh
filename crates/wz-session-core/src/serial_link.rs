@@ -259,23 +259,89 @@ impl SerialFrameReader {
 /// ([`SerialHandshake::on_header`] answering [`HandshakeStep::EmitAndConnect`]);
 /// every other byte in `received` -- data frames, a frame that fails its CRC, the
 /// unterminated tail of a frame cut in half -- is stale and is not reported.
+///
+/// ## Frames have no leading delimiter
+///
+/// A frame on the wire is `COBS(body) 0x00`: only its END is marked. pico reads up
+/// to and including the first `0x00` and deserialises that whole span as one frame
+/// (`_z_read_serial_internal`, serial_protocol.c:145-177), and z-serial 0.3.1, the
+/// crate upstream zenoh links, does the same (`internal_read` reads to the sentinel
+/// and then `deserialize_into`s the span). Neither resynchronises inside a span:
+/// stale bytes that no `0x00` closed, followed by a frame, are ONE span whose CRC
+/// fails, so the frame is dropped. [`SerialFrameReader`] keeps exactly that
+/// behaviour for the steady state. It is the wrong answer only for an `INIT`,
+/// which the peer writes once.
+///
+/// ## What this adds
+///
+/// For this flush alone, each span (the bytes between two `0x00`, or from the start
+/// of `received`) is searched for the frame that ENDS at its `0x00` from every start
+/// offset instead of only the first. An offset is accepted only when
+///
+/// 1. the bytes from it are a well-formed COBS block sequence that lands exactly on
+///    the span end (one backward pass; the span's first offset is tried without
+///    this filter, as the reader would have), and
+/// 2. [`decode_frame`] accepts them (the decoder is total; the declared length and
+///    the CRC32 must agree), and
+/// 3. the header is one the responder handshake takes as an opener.
+///
+/// So stale bytes are mistaken for an `INIT` only by passing the length check, an
+/// INIT-without-ACK header and a 32-bit CRC together: below 2^-32 per candidate
+/// offset, and a span offers at most [`SERIAL_MAX_COBS_BUF`] candidates (a frame
+/// cannot be longer). The wire is not changed and nothing is sent: this only finds
+/// the `INIT` the peer already wrote.
+///
+/// Not recovered, by design: the unterminated tail of `received` (no `0x00` yet, so
+/// its end is unknown and what arrives after the flush completes it), so an `INIT`
+/// whose body reached the device but whose `0x00` has not is not kept; and an `INIT`
+/// that the line corrupted (its CRC fails at every offset).
+///
+/// Work is `O(n * SERIAL_MAX_COBS_BUF)` at the very worst (every offset of every
+/// span lands and every decode runs to the span end) and `O(n)` for ordinary stale
+/// bytes, `n` being `received.len()`. The caller bounds `n`: the accept's flush
+/// reads at most `SERIAL_FLUSH_LIMIT` (1 MiB) and fails by name past it.
 pub fn pending_init_header(received: &[u8]) -> Option<u8> {
     let responder = SerialHandshake::responder();
-    let mut framer = SerialFrameReader::new();
     let mut init = None;
-    for &byte in received {
-        // A framing error means the reader has already resynchronised past the
-        // bad frame; those bytes are discarded either way.
-        if let Ok(Some(frame)) = framer.push(byte) {
-            if matches!(
-                responder.on_header(frame.header),
-                HandshakeStep::EmitAndConnect(_)
-            ) {
-                init = Some(frame.header);
-            }
+    let mut span_start = 0;
+    for (eop_at, _) in received
+        .iter()
+        .enumerate()
+        .filter(|&(_, &byte)| byte == SERIAL_EOP)
+    {
+        if let Some(header) = init_header_ending_at(&received[span_start..eop_at], &responder) {
+            init = Some(header);
         }
+        span_start = eop_at + 1;
     }
     init
+}
+
+/// The header of the first responder `INIT` whose frame ENDS at the end of `span`
+/// (the bytes before one `0x00` EOP), trying every start offset a frame could have.
+/// See [`pending_init_header`] for what is accepted and why.
+fn init_header_ending_at(span: &[u8], responder: &SerialHandshake) -> Option<u8> {
+    // No frame is longer than SERIAL_MAX_COBS_BUF, so earlier offsets cannot start one.
+    let window_start = span.len().saturating_sub(SERIAL_MAX_COBS_BUF);
+    let window = &span[window_start..];
+    // `lands[i]`: the COBS blocks from `window[i]` end exactly at the window end.
+    // A span holds no 0x00, so every code byte steps forward by at least one.
+    let mut lands = alloc::vec![false; window.len() + 1];
+    lands[window.len()] = true;
+    for at in (0..window.len()).rev() {
+        let next = at + usize::from(window[at]);
+        lands[at] = next <= window.len() && lands[next];
+    }
+    (0..window.len())
+        .filter(|&at| window_start + at == 0 || lands[at])
+        .find_map(|at| {
+            let frame = decode_frame(&window[at..]).ok()?;
+            matches!(
+                responder.on_header(frame.header),
+                HandshakeStep::EmitAndConnect(_)
+            )
+            .then_some(frame.header)
+        })
 }
 
 /// Which side of the point-to-point serial handshake a peer plays.
@@ -727,14 +793,148 @@ mod tests {
         assert_eq!(pending_init_header(&wire[..wire.len() - 1]), None);
     }
 
-    /// The limit of the split, stated so nobody mistakes it for a guarantee: with no
-    /// EOP between them a stale fragment and the INIT that follows are ONE frame on
-    /// the wire, and that frame fails its CRC.
+    /// Stale bytes that no EOP closed: truncated frame bodies of every length, runs
+    /// that look like COBS codes, and one longer than any frame.
+    fn stale_fragments() -> Vec<Vec<u8>> {
+        let mut fragments = Vec::new();
+        let body = encode_frame(0x00, b"a frame the dead peer was sending").unwrap();
+        for cut in 1..body.len() - 1 {
+            fragments.push(body[..cut].to_vec());
+        }
+        for len in 1..=64usize {
+            fragments.push(alloc::vec![0x01; len]);
+            fragments.push(alloc::vec![0xFF; len]);
+            fragments.push((0..len).map(|i| (i % 254) as u8 + 1).collect());
+        }
+        fragments.push(alloc::vec![0x55; 3 * SERIAL_MAX_COBS_BUF + 7]);
+        fragments
+    }
+
+    /// With no EOP between them a stale fragment and the INIT that follows are one
+    /// span on the wire, and pico (and upstream) drop that span on its CRC. The
+    /// accept's flush searches the span for the frame that ends at its EOP, so the
+    /// INIT, which its peer wrote once, is not lost behind the fragment.
     #[test]
-    fn an_unterminated_fragment_corrupts_the_init_glued_to_it() {
-        let mut wire = b"\x11\x22\x33".to_vec();
+    fn an_unterminated_fragment_glued_to_an_init_does_not_hide_it() {
+        for fragment in stale_fragments() {
+            let mut wire = fragment.clone();
+            wire.extend_from_slice(&init_wire());
+            assert_eq!(
+                pending_init_header(&wire),
+                Some(SERIAL_FLAG_INIT),
+                "fragment of {} byte(s) {:02X?}",
+                fragment.len(),
+                &fragment[..fragment.len().min(8)]
+            );
+        }
+    }
+
+    /// Fragment, data frame, fragment, INIT, fragment, INIT: the LAST INIT wins, as
+    /// it did when only whole frames were looked at, and the stale data frame and
+    /// the fragments around it are not reported.
+    #[test]
+    fn the_last_init_wins_among_fragments_and_data_frames() {
+        let first = encode_frame(SERIAL_FLAG_INIT, &[]).unwrap();
+        let second = encode_frame(SERIAL_FLAG_INIT | SERIAL_FLAG_RESET, &[]).unwrap();
+        let data = encode_frame(0x00, b"stale data").unwrap();
+        let fragment = b"\x07\x22\x33".to_vec();
+
+        let mut wire = fragment.clone();
+        wire.extend_from_slice(&data);
+        wire.extend_from_slice(&fragment);
+        wire.extend_from_slice(&first);
+        wire.extend_from_slice(&fragment);
+        wire.extend_from_slice(&second);
+        assert_eq!(
+            pending_init_header(&wire),
+            Some(SERIAL_FLAG_INIT | SERIAL_FLAG_RESET)
+        );
+
+        // The same bytes with the two INITs swapped: the answer follows the order
+        // on the wire, not the header value.
+        let mut swapped = fragment.clone();
+        swapped.extend_from_slice(&data);
+        swapped.extend_from_slice(&fragment);
+        swapped.extend_from_slice(&second);
+        swapped.extend_from_slice(&fragment);
+        swapped.extend_from_slice(&first);
+        assert_eq!(pending_init_header(&swapped), Some(SERIAL_FLAG_INIT));
+
+        // A fragment glued to a data frame, with nothing after it, holds no INIT.
+        let mut stale = fragment;
+        stale.extend_from_slice(&data);
+        assert_eq!(pending_init_header(&stale), None);
+    }
+
+    /// Bytes that are no INIT keep nothing, however the search is aimed at them:
+    /// every nonzero byte pair and triple-with-codes, runs of valid-looking codes,
+    /// and frames a responder does not take as its opener, all closed by an EOP.
+    #[test]
+    fn garbage_holds_no_init() {
+        for first in 1..=255u8 {
+            for second in 1..=255u8 {
+                assert_eq!(
+                    pending_init_header(&[first, second, SERIAL_EOP]),
+                    None,
+                    "{first:02X} {second:02X}"
+                );
+            }
+        }
+        for fragment in stale_fragments() {
+            let mut closed = fragment.clone();
+            closed.push(SERIAL_EOP);
+            assert_eq!(pending_init_header(&closed), None);
+            let mut with_data = fragment;
+            with_data.extend_from_slice(&encode_frame(0x00, b"x").unwrap());
+            assert_eq!(pending_init_header(&with_data), None);
+        }
+        for header in [0x00, SERIAL_FLAG_INIT | SERIAL_FLAG_ACK, SERIAL_FLAG_RESET] {
+            let mut wire = b"\x05\x11".to_vec();
+            wire.extend_from_slice(&encode_frame(header, &[]).unwrap());
+            assert_eq!(pending_init_header(&wire), None, "header {header:#04x}");
+        }
+    }
+
+    /// The limits of the search, stated and held so nobody mistakes the recovery
+    /// for a guarantee. An INIT whose body reached the device but whose EOP has not
+    /// is the unterminated tail: its end is unknown, so it is not kept (what arrives
+    /// after the flush completes it). An INIT the line corrupted fails its CRC at
+    /// every offset, however it is placed.
+    #[test]
+    fn what_the_search_does_not_recover() {
+        let init = init_wire();
+        let mut cut = b"\x11\x22\x33".to_vec();
+        cut.extend_from_slice(&init[..init.len() - 1]);
+        assert_eq!(pending_init_header(&cut), None, "no EOP yet");
+
+        // The control: the same frame, intact, is found behind the same fragment.
+        let intact = encode_frame(SERIAL_FLAG_INIT, b"abc").unwrap();
+        let mut found = b"\x11\x22\x33".to_vec();
+        found.extend_from_slice(&intact);
+        assert_eq!(pending_init_header(&found), Some(SERIAL_FLAG_INIT));
+
+        let mut corrupt = intact.clone();
+        let payload_at = corrupt.iter().position(|&b| b == b'a').expect("payload");
+        corrupt[payload_at] ^= 0x01;
+        let mut glued = b"\x11\x22\x33".to_vec();
+        glued.extend_from_slice(&corrupt);
+        assert_eq!(pending_init_header(&glued), None, "corrupted INIT");
+        assert_eq!(pending_init_header(&corrupt), None, "corrupted INIT alone");
+    }
+
+    /// The search is bounded by the frame limit per span, not by the span: an INIT
+    /// behind more stale bytes than a frame can hold is found, and many long spans
+    /// of the most search-friendly bytes (every offset lands) stay cheap.
+    #[test]
+    fn the_search_is_bounded_by_the_frame_limit() {
+        let mut wire = Vec::new();
+        for _ in 0..8 {
+            wire.extend_from_slice(&alloc::vec![0x01; SERIAL_MAX_COBS_BUF + 400]);
+            wire.push(SERIAL_EOP);
+        }
+        wire.extend_from_slice(&alloc::vec![0x01; 10 * SERIAL_MAX_COBS_BUF]);
         wire.extend_from_slice(&init_wire());
-        assert_eq!(pending_init_header(&wire), None);
+        assert_eq!(pending_init_header(&wire), Some(SERIAL_FLAG_INIT));
     }
 
     // R311ny — serial-locator parse tests moved with their leaf to

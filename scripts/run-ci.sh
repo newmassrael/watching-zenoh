@@ -5048,7 +5048,14 @@ layer_c1t_cargo_test_serial() {
     # INIT-before-accept arm, the stale-frames-around-the-INIT arm and the
     # fresh-device-without-a-turned-reactor arm). READ off what the commands
     # PRINTED (17, 13, 15); the e2e deltas are equal.
-    _runci_guarded_test C1t 17 cargo test -p wz-runtime-tokio --features transport-link-serial --lib serial_pipeline --quiet \
+    #
+    # Open-debt 795, part 3 -- lib 17 -> 21 (an INIT glued to an unterminated
+    # stale fragment is kept and answered, the last INIT wins behind fragments
+    # and data frames, unterminated garbage keeps nothing, an INIT whose end
+    # marker has not arrived is not kept) and e2e 13 -> 14 / 15 -> 16 (the same
+    # glued INIT over a pty, on a fresh and on a retained device). READ off what
+    # the commands PRINTED (21, 14, 16); the e2e deltas are equal.
+    _runci_guarded_test C1t 21 cargo test -p wz-runtime-tokio --features transport-link-serial --lib serial_pipeline --quiet \
         || return 1
     # R2725 — 5 -> 7 and 6 -> 8. R2722 split
     # serial_listener_yields_one_link_then_parks into a parks-while-live arm
@@ -5074,9 +5081,9 @@ layer_c1t_cargo_test_serial() {
     # buffer-clear witness: +2 in both feature sets. READ off what the two
     # commands PRINTED (9 and 10), and the two deltas are EQUAL, which is
     # R311y805's check that no new case hid behind transport-fragmentation.
-    _runci_guarded_test C1t 13 cargo test -p wz-runtime-tokio --features transport-link-serial --test serial_link_e2e --quiet \
+    _runci_guarded_test C1t 14 cargo test -p wz-runtime-tokio --features transport-link-serial --test serial_link_e2e --quiet \
         || return 1
-    _runci_guarded_test C1t 15 cargo test -p wz-runtime-tokio --features transport-link-serial,transport-fragmentation --test serial_link_e2e --quiet \
+    _runci_guarded_test C1t 16 cargo test -p wz-runtime-tokio --features transport-link-serial,transport-fragmentation --test serial_link_e2e --quiet \
         || return 1
     _runci_guarded_test C1t 2 cargo test -p wz-runtime-tokio --features transport-link-serial --test link_endpoints_pairing --quiet \
         || return 1

@@ -1140,6 +1140,49 @@ async fn a_serial_accept_keeps_an_init_that_was_on_the_wire_before_it() {
     }
 }
 
+/// An INIT written right behind stale bytes that no EOP closed is kept too (item 795).
+///
+/// A frame on the wire is `COBS(body) 0x00`: only its end is marked, so a fragment of
+/// a frame the departed peer was sending and the INIT after it are ONE span, which
+/// pico and upstream read to the EOP and drop on its CRC. The initiator writes its
+/// INIT once and a responder never sends a RESET, so that INIT would be gone. The
+/// accept's flush finds it inside the span; the steady-state reader is not involved.
+///
+/// THE DISCRIMINATOR is the fragment: with it removed the test is the sibling above,
+/// and with the search removed the handshake times out waiting for an INIT that was
+/// read and thrown away. Both device paths, as in the sibling.
+#[cfg(all(unix, not(target_os = "macos")))]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_serial_accept_keeps_an_init_glued_to_an_unterminated_stale_fragment() {
+    for locator_tail in ["", ";release_on_close=false"] {
+        let mut end = pty_end();
+        let mut listener = bind_serial_listen(&format!(
+            "serial/{}#baudrate=115200{locator_tail}",
+            end.path
+        ))
+        .await;
+        if !locator_tail.is_empty() {
+            let (port, endpoint) = accept_and_handshake(&mut listener, &mut end.master).await;
+            wire_and_tear_down(port, &endpoint).await;
+            assert!(
+                retains_device(&listener),
+                "the retained arm is vacuous unless the device was kept"
+            );
+        }
+
+        end.master
+            .write_all(b"\x09\x22\x33\x44")
+            .await
+            .expect("the line delivers a fragment no EOP closed");
+        peer_writes_frame(&mut end.master, SERIAL_FLAG_INIT).await;
+        let (accepted, _) = tokio::time::timeout(Duration::from_secs(5), listener.accept_raw())
+            .await
+            .expect("the accept completes")
+            .expect("the accept yields a device");
+        responder_answers_init_ack(accepted, &mut end.master).await;
+    }
+}
+
 /// The flush asks the kernel what the device holds; it does not wait for the reactor
 /// to say so (item 795).
 ///
