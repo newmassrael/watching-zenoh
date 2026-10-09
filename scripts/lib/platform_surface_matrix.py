@@ -220,10 +220,18 @@ EVIDENCE: dict[str, tuple[str, ...]] = {
 #: the measurements). It passed on both hosts. Multicast over a REAL interface is not
 #: provable on a hosted macOS runner at all, so this row does not claim it.
 #:
+#: The interface table is the other. A unix host fetches it with `getifaddrs` and a
+#: Windows host with `GetAdaptersAddresses`, and the unit tests of the reading tell
+#: it on tables made for them, which cannot witness the call that fetches one.
+#: `link_interfaces_host` asks the host about loopback, the one address every host
+#: carries, and requires the table to list it, name its adapter, index it, and find it
+#: again by that name. It does not claim any other adapter of a runner.
+#:
 #: Declared knowledge and not derived: no manifest says which surface a test target
 #: witnesses, and the upstream arm reads link crates, not planes.
 PLANES: dict[str, tuple[frozenset[str], tuple[str, ...]]] = {
     "UdpMulticast": (ALL_HOSTS, ("multicast_host_roundtrip",)),
+    "InterfaceTable": (ALL_HOSTS, ("link_interfaces_host",)),
 }
 
 #: (kind, host) that wz serves and BUILDS in the leg but no target can run
