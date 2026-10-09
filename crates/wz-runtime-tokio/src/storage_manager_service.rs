@@ -30,6 +30,41 @@
 //! and wz keys storages FLATLY by name (zenoh's outer `volume->name` double-map
 //! is for plugin grouping; storage names are unique per manager).
 //!
+//! ## Lifetime contract: a storage belongs to the manager, not to a session
+//!
+//! A hosted storage exists from a successful [`add_storage`](RuntimeStorageManager::add_storage)
+//! until the manager ends it ([`remove_storage`](RuntimeStorageManager::remove_storage),
+//! [`remove_volume`](RuntimeStorageManager::remove_volume)'s cascade,
+//! [`stop_plugin`](RuntimeStorageManager::stop_plugin) for the storages its
+//! document declared) or the manager is dropped. The end of the session that
+//! carried the request, or the retraction of the declarations made on it, is not
+//! among those. What a session owns is the BINDING, the capture subscriber and
+//! the answering queryable; the entry, its name and its data are the manager's.
+//! A storage whose session is gone is hosted UNBOUND
+//! ([`StorageService::is_bound`]) until [`rebind_all`](RuntimeStorageManager::rebind_all)
+//! binds it to a live one, and a refused binding changes nothing else about it.
+//!
+//! Upstream is the same shape for a stronger reason: its storages sit in the
+//! plugin's own `storages` map (`plugins/zenoh-plugin-storage-manager/src/lib.rs`
+//! @ `.insert(storage_name, stopper);`), are ended only by `kill_storage` /
+//! `kill_volume` (`plugins/zenoh-plugin-storage-manager/src/lib.rs` @
+//! `fn kill_storage(&mut self, config: &StorageConfig) {`), and declare their
+//! subscriber and queryable on the plugin's OWN session
+//! (`plugins/zenoh-plugin-storage-manager/src/lib.rs` @
+//! `let session = Arc::new(zenoh::session::init(runtime.clone()).wait()?);`), so
+//! no client's session can end one. Even a declaration that fails there leaves
+//! the storage in the map: the spawned task that declares it logs
+//! (`plugins/zenoh-plugin-storage-manager/src/storages_mgt/service.rs` @
+//! `tracing::error!("Error starting storage '{}': {}", self.name, e);`) and
+//! returns, while `spawn_storage` has already recorded the storage.
+//!
+//! wz is narrower on one point on purpose. Only the one rejection that says "the
+//! wire was not reachable" (`TransportUnavailable`) leaves a storage hosted
+//! unbound; a rejection that is a fact about the storage's own config (a
+//! keyexpr the gate refuses, a capacity overflow) is still returned and hosts
+//! nothing, because upstream's would be an inert storage no later session could
+//! make live, and here the caller can be told at once.
+//!
 //! ## Why a shared volume registry
 //!
 //! [`RuntimeStorageManager`] holds a [`VolumeRegistry`] directly — the SAME
@@ -653,7 +688,11 @@ where
     /// ([`DuplicateStorage`](RuntimeStorageManagerError::DuplicateStorage)), the
     /// volume is unresolved / fails
     /// ([`Volume`](RuntimeStorageManagerError::Volume)), or the service
-    /// declaration is rejected ([`Service`](RuntimeStorageManagerError::Service)).
+    /// declaration is rejected for a reason about the storage's own config
+    /// ([`Service`](RuntimeStorageManagerError::Service)). A declaration the
+    /// `session` could not carry because its transport is gone is NOT an error:
+    /// the storage is hosted unbound, per the module's lifetime contract, and
+    /// [`rebind_all`](Self::rebind_all) binds it to the next live session.
     /// `local_zid` is the storage's fallback-stamp identity (must be non-empty).
     /// R311y503 — the extra bounds sit on the METHOD, not on the impl block, so
     /// only the path that now spawns a task carries them: the collector is a
@@ -1205,6 +1244,274 @@ mod tests {
             "and nothing is hosted: {err:?} is permanent, so an unbound entry \
              would never become bound"
         );
+    }
+
+    /// A session over a link the test keeps a hold of, so it can end the link
+    /// underneath the session: the returned closure does to the session what a
+    /// released link does (it closes the transport-availability gate every
+    /// declaration is checked against).
+    #[cfg(feature = "session-reconnect")]
+    fn make_session_over_a_link_it_can_end() -> (TokioSession, impl Fn()) {
+        let (actions, _driver) = crate::test_fixtures::recording_actions();
+        let link = Arc::clone(&actions);
+        let observer = Arc::new(Mutex::new(ApplicationLayerObserver::new()));
+        let clock = Arc::new(TokioTime::new());
+        (TokioSession::new(actions, observer, clock), move || {
+            link.reset_for_reopen()
+        })
+    }
+
+    /// A session whose link has already gone: every declaration on it is
+    /// refused with `TransportUnavailable`.
+    #[cfg(feature = "session-reconnect")]
+    fn make_ended_session() -> TokioSession {
+        let (session, end_link) = make_session_over_a_link_it_can_end();
+        end_link();
+        session
+    }
+
+    /// The storage's existence belongs to the MANAGER, not to the session that
+    /// carried the request which created it (open-debt item 786).
+    ///
+    /// Upstream's storage-manager makes the same split: a storage lives in the
+    /// plugin's own `storages` map from `spawn_storage` until `kill_storage`,
+    /// `kill_volume` or the plugin's drop, and its subscriber and queryable ride
+    /// the plugin's OWN session (`zenoh::session::init(runtime.clone())`), never
+    /// a client's. So no client session's end can reach the storage. wz hosts a
+    /// storage on whichever client session carried the request, which makes the
+    /// split something this manager has to hold on purpose: the session is gone
+    /// (link released, handle dropped) and the entry, its name and its data stay.
+    ///
+    /// WHAT IT PINS, for the direction `a_storage_survives_a_declaration_that_
+    /// cannot_reach_the_wire` does not cover: that test ends the session BEFORE
+    /// the declaration; this one ends it AFTER the storage was bound and holding
+    /// data.
+    #[cfg(feature = "session-reconnect")]
+    #[tokio::test]
+    async fn a_storage_outlives_the_session_that_carried_its_request() {
+        use crate::session::PublishOptions;
+        use wz_session_core::locality::Locality;
+
+        let (carrier, end_link) = make_session_over_a_link_it_can_end();
+        let mut mgr = RuntimeStorageManager::new();
+        mgr.register_volume("mem", Box::new(MemoryVolume));
+        mgr.add_storage(
+            &carrier,
+            &StorageConfig::new("demo", "demo/**", "mem"),
+            vec![0x01],
+        )
+        .expect("the carrying session was alive when the request arrived");
+        let fired = carrier
+            .publish(
+                "demo/a",
+                b"v1",
+                PublishOptions::put().with_locality(Locality::SessionLocal),
+            )
+            .expect("loopback publish");
+        assert_eq!(fired, 1, "while its session lives the storage captures");
+
+        // The carrying session ends: its link is released and the handle goes.
+        end_link();
+        drop(carrier);
+
+        assert_eq!(
+            mgr.storage_names().collect::<Vec<_>>(),
+            vec!["demo"],
+            "the session's end is not the manager's say-so, so the storage stays"
+        );
+        mgr.storage("demo").unwrap().with_state(|st| {
+            assert_eq!(
+                st.get_newest(Some("demo/a")).unwrap().map(|d| d.payload),
+                Some(b"v1".to_vec()),
+                "and so does what it stored"
+            );
+        });
+        assert!(
+            matches!(
+                mgr.add_storage(
+                    &make_session(),
+                    &StorageConfig::new("demo", "other/**", "mem"),
+                    vec![0x01],
+                ),
+                Err(RuntimeStorageManagerError::DuplicateStorage(_))
+            ),
+            "the name is still taken: a retry of the request is a duplicate, not a re-create"
+        );
+
+        // The next session picks the same storage up, data intact.
+        let next = make_session();
+        mgr.rebind_all(&next, vec![0x01])
+            .expect("a live session binds what the ended one left");
+        let fired = next
+            .publish(
+                "demo/b",
+                b"v2",
+                PublishOptions::put().with_locality(Locality::SessionLocal),
+            )
+            .expect("loopback publish");
+        assert_eq!(fired, 1, "the storage captures on the new session");
+        mgr.storage("demo").unwrap().with_state(|st| {
+            assert_eq!(
+                st.get_newest(Some("demo/a")).unwrap().map(|d| d.payload),
+                Some(b"v1".to_vec()),
+                "the value stored under the first session is still there"
+            );
+            assert_eq!(
+                st.get_newest(Some("demo/b")).unwrap().map(|d| d.payload),
+                Some(b"v2".to_vec()),
+                "and the new session's value joined it"
+            );
+        });
+    }
+
+    /// A rebind onto a session that is already gone is a refused BINDING, and a
+    /// refused binding changes nothing about the storage: it stays hosted, keeps
+    /// its data and keeps the binding it had (`rebind` assigns the new handles
+    /// only after both declarations succeed).
+    #[cfg(feature = "session-reconnect")]
+    #[tokio::test]
+    async fn a_refused_rebind_leaves_the_storage_hosted_with_its_data_and_binding() {
+        use crate::session::{PublishOptions, SubscribeError};
+        use wz_session_core::locality::Locality;
+
+        let held = make_session();
+        let mut mgr = RuntimeStorageManager::new();
+        mgr.register_volume("mem", Box::new(MemoryVolume));
+        mgr.add_storage(
+            &held,
+            &StorageConfig::new("demo", "demo/**", "mem"),
+            vec![0x01],
+        )
+        .expect("hosted on a live session");
+        held.publish(
+            "demo/a",
+            b"v1",
+            PublishOptions::put().with_locality(Locality::SessionLocal),
+        )
+        .expect("loopback publish");
+
+        let err = mgr
+            .rebind_all(&make_ended_session(), vec![0x01])
+            .expect_err("a session whose link is gone cannot carry the declaration");
+        assert!(
+            matches!(
+                err,
+                RuntimeStorageManagerError::Service(StorageServiceError::Subscribe(
+                    SubscribeError::TransportUnavailable
+                ))
+            ),
+            "refused for the transport, not for the storage: {err:?}"
+        );
+
+        assert_eq!(mgr.len(), 1, "the refusal is about the binding only");
+        assert!(mgr.storage("demo").unwrap().is_bound());
+        let fired = held
+            .publish(
+                "demo/b",
+                b"v2",
+                PublishOptions::put().with_locality(Locality::SessionLocal),
+            )
+            .expect("loopback publish");
+        assert_eq!(fired, 1, "the previous binding is the one still in force");
+        mgr.storage("demo").unwrap().with_state(|st| {
+            assert_eq!(
+                st.get_newest(Some("demo/a")).unwrap().map(|d| d.payload),
+                Some(b"v1".to_vec())
+            );
+            assert_eq!(
+                st.get_newest(Some("demo/b")).unwrap().map(|d| d.payload),
+                Some(b"v2".to_vec())
+            );
+        });
+    }
+
+    /// THE OTHER SIDE of the lifetime contract: a storage whose session is gone
+    /// does not linger forever, because the manager can still end it. A storage
+    /// hosted UNBOUND is removed by `remove_storage` (which frees its name) and
+    /// by `remove_volume`'s cascade exactly as a bound one is, and a removal
+    /// that finds nothing says so rather than reporting an empty success.
+    #[cfg(feature = "session-reconnect")]
+    #[tokio::test]
+    async fn the_manager_ends_a_storage_whose_session_is_gone() {
+        let gone = make_ended_session();
+        let mut mgr = RuntimeStorageManager::new();
+        mgr.register_volume("mem", Box::new(MemoryVolume));
+        mgr.register_volume("other", Box::new(MemoryVolume));
+        for (name, key, volume) in [
+            ("a", "a/**", "mem"),
+            ("b", "b/**", "mem"),
+            ("c", "c/**", "other"),
+        ] {
+            mgr.add_storage(&gone, &StorageConfig::new(name, key, volume), vec![0x01])
+                .expect("hosted although its session is gone");
+            assert!(
+                !mgr.storage(name).unwrap().is_bound(),
+                "{name} is hosted unbound"
+            );
+        }
+
+        assert!(mgr.remove_storage("a"), "an unbound storage is removed");
+        assert!(!mgr.remove_storage("a"), "and removing it twice says so");
+        mgr.add_storage(&gone, &StorageConfig::new("a", "a/**", "mem"), vec![0x01])
+            .expect("its name was freed by the removal");
+
+        assert_eq!(
+            mgr.remove_volume("mem"),
+            Some(vec![String::from("a"), String::from("b")]),
+            "the volume's cascade takes the unbound storages on it"
+        );
+        assert_eq!(
+            mgr.storage_names().collect::<Vec<_>>(),
+            vec!["c"],
+            "and only those"
+        );
+    }
+
+    /// The same contract through the CONFIG path, which is how the request
+    /// reaches the manager in production: the `plugins` document arrives on a
+    /// client session that has already gone, the storages it declares are
+    /// hosted anyway, they outlast the session's handle, and the DOCUMENT going
+    /// is what ends them, on whichever session happens to carry that write.
+    #[cfg(all(feature = "session-reconnect", feature = "adminspace-config-hotreload"))]
+    #[tokio::test]
+    async fn a_plugin_document_hosts_its_storages_past_the_session_that_carried_it() {
+        use crate::plugins_config::{PluginsConfig, PluginsSink};
+        let section = |text: &str| {
+            PluginsConfig::from_section(&wz_session_core::json5::parse(text).expect("json5"))
+                .expect("a plugins section")
+        };
+
+        let carrier = make_ended_session();
+        let mut mgr = RuntimeStorageManager::new();
+        {
+            let sink = StorageManagerSink::new(&mut mgr, &carrier, &[0x01]);
+            sink.plugins_changed(&section(
+                r#"{ storage_manager: { storages: {
+                     s: { key_expr: "s/**", volume: "memory" },
+                     t: { key_expr: "t/**", volume: "memory" } } } }"#,
+            ));
+            assert!(
+                sink.take_reports().is_empty(),
+                "nothing failed: a declaration the transport cannot carry is not a failed step"
+            );
+        }
+        drop(carrier);
+        assert!(mgr.plugin_running());
+        assert_eq!(mgr.storage_names().collect::<Vec<_>>(), vec!["s", "t"]);
+        assert!(
+            mgr.storage_names()
+                .all(|name| !mgr.storage(name).unwrap().is_bound()),
+            "hosted unbound, waiting for a session to bind them"
+        );
+
+        // The document going is the manager's say-so, and any session can carry it.
+        let later = make_session();
+        {
+            let sink = StorageManagerSink::new(&mut mgr, &later, &[0x01]);
+            sink.plugins_changed(&PluginsConfig::new());
+        }
+        assert!(!mgr.plugin_running());
+        assert!(mgr.is_empty(), "the plugin's storages went with it");
     }
 
     // R2696 — the CASCADE, which is the whole of upstream's `kill_volume`

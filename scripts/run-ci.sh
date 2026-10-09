@@ -7571,7 +7571,13 @@ layer_c1am_cargo_test_adminspace() {
     # the manager as a `plugins` sink (validator + notification plane). All five
     # are `adminspace-config-hotreload`-gated, which this leg names. PRINTED by
     # the command.
-    _runci_guarded_test "C1AM storage_manager_service 16" 16 \
+    # 16 -> 20: the storage's lifetime belongs to the manager, not to the session
+    # that carried the request. A storage outliving that session's end, a refused
+    # rebind that changes nothing, the manager ending a storage whose session is
+    # gone, and the same through a `plugins` document. The last is
+    # `adminspace-config-hotreload`-gated, which this leg names; the other three
+    # need only the `session-reconnect` default. PRINTED by the command.
+    _runci_guarded_test "C1AM storage_manager_service 20" 20 \
         cargo test -p wz-runtime-tokio --features adminspace-config-hotreload --lib storage_manager_service --quiet || return 1
     # R2786 — the `plugins` section: upstream's merging insert and walking
     # remove, the validator asked before a change lands and the notification
@@ -9065,7 +9071,11 @@ layer_c1z_cargo_test_storage_driver() {
     # R2743 — 8 -> 10: the same witness pair as the C1AM sibling above, moving
     # by the same two from a different base for the same reason — neither test
     # names a feature this leg lacks. PRINTED by the command.
-    _runci_guarded_test "C1z storage_manager_service" 10 \
+    # 10 -> 13: the first three of the four lifetime-contract witnesses the C1AM
+    # sibling counts; the fourth goes through a `plugins` document and is gated
+    # on `adminspace-config-hotreload`, which this leg does not name. PRINTED by
+    # the command.
+    _runci_guarded_test "C1z storage_manager_service" 13 \
         cargo test -p wz-runtime-tokio --features storage-mgr-multi-storage-host,declare-subscriber,pubsub-allow-loop,storage-mgr-strip-prefix --lib storage_manager_service --quiet || return 1
     _runci_guarded_test "C1z storage_strip_prefix" 6 \
         cargo test -p wz-session-core --features storage-mgr-strip-prefix --lib storage_strip_prefix --quiet || return 1
