@@ -1037,3 +1037,236 @@ fn a_reset_that_leaves_a_different_part_is_refused_not_driven() {
     );
     assert!(!mac.chip().synced());
 }
+
+// ---- the paced MAC ------------------------------------------------------------
+
+type Delay<'a> = std::boxed::Box<dyn FnMut(u32) + 'a>;
+type Clock<'a> = std::boxed::Box<dyn FnMut() -> u64 + 'a>;
+type Paced<'a> = PacedMac<Chip, Delay<'a>, Clock<'a>>;
+
+/// A paced MAC over a fresh part, on a clock the test moves: `clock` is in
+/// microseconds, and a wait the MAC makes advances it, as a real one would.
+fn paced<'a>(clock: &'a Cell<u64>, config: &Config, interval_ms: u32) -> Paced<'a> {
+    let delay: Delay<'a> = std::boxed::Box::new(move |us| clock.set(clock.get() + u64::from(us)));
+    let now: Clock<'a> = std::boxed::Box::new(move || clock.get());
+    PacedMac::open(chip(), config, delay, now, interval_ms).unwrap()
+}
+
+fn at_ms(clock: &Cell<u64>, ms: u64) {
+    clock.set(ms * 1000);
+}
+
+fn transfers(mac: &mut Paced<'_>) -> usize {
+    mac.mac_mut().chip().transfers
+}
+
+#[test]
+fn the_housekeeping_runs_on_the_first_call_and_then_once_per_interval() {
+    let clock = Cell::new(0);
+    let mut mac = paced(&clock, &config(), 100);
+
+    at_ms(&clock, 1000);
+    let opened_at = transfers(&mut mac);
+    assert_eq!(mac.service(), ServiceEvent::Quiet);
+    let first = transfers(&mut mac);
+    assert!(first > opened_at, "the first call ran");
+
+    at_ms(&clock, 1099);
+    assert_eq!(mac.service(), ServiceEvent::Quiet);
+    assert_eq!(transfers(&mut mac), first, "99 ms later it is not yet due");
+
+    at_ms(&clock, 1100);
+    assert_eq!(mac.service(), ServiceEvent::Quiet);
+    let second = transfers(&mut mac);
+    assert!(second > first, "100 ms later it ran");
+
+    // The interval counts from the call that ran, not from the schedule: a loop
+    // that was late once does not then run twice to catch up.
+    at_ms(&clock, 1350);
+    mac.service();
+    let third = transfers(&mut mac);
+    assert!(third > second);
+    at_ms(&clock, 1400);
+    mac.service();
+    assert_eq!(
+        transfers(&mut mac),
+        third,
+        "a late run moves the next one a whole interval on"
+    );
+}
+
+#[test]
+fn an_interval_of_zero_runs_the_housekeeping_on_every_call() {
+    let clock = Cell::new(0);
+    let mut mac = paced(&clock, &config(), 0);
+    let mut last = transfers(&mut mac);
+    for _ in 0..3 {
+        mac.service();
+        let now = transfers(&mut mac);
+        assert!(now > last);
+        last = now;
+    }
+}
+
+#[test]
+fn a_part_found_as_it_was_is_quiet() {
+    let clock = Cell::new(0);
+    let mut mac = paced(&clock, &follower(), 100);
+    for ms in [1000, 1100, 1200] {
+        at_ms(&clock, ms);
+        assert_eq!(mac.service(), ServiceEvent::Quiet, "at {ms} ms");
+    }
+    assert_eq!(mac.failures(), 0);
+}
+
+#[test]
+fn a_reset_is_reported_once_and_the_bring_up_uses_the_delay_and_clock_given_at_open() {
+    let clock = Cell::new(0);
+    let mut mac = paced(&clock, &follower(), 100);
+    at_ms(&clock, 1000);
+    mac.service();
+
+    mac.mac_mut().chip().reset();
+    at_ms(&clock, 1100);
+    match mac.service() {
+        ServiceEvent::Report(report) => assert!(report.reconfigured),
+        other => panic!("expected a report of the reset, got {other:?}"),
+    }
+    assert_eq!(mac.mac_mut().chip().resets, 2, "the bring-up ran again");
+    assert!(mac.mac_mut().chip().synced());
+    assert_eq!(
+        mac.mac_mut().chip().get(Reg::new(4, 0xCA02)),
+        0x0005,
+        "PLCA is back"
+    );
+
+    at_ms(&clock, 1200);
+    assert_eq!(mac.service(), ServiceEvent::Quiet, "told once");
+}
+
+#[test]
+fn a_phy_status_flag_alone_is_news() {
+    let clock = Cell::new(0);
+    let mut mac = paced(&clock, &follower(), 100);
+    at_ms(&clock, 1000);
+    mac.service();
+
+    // Status 1 bit 5 is UNEXPB, as in the test of the flags above.
+    mac.mac_mut().chip().raise_sts1(1 << 5);
+    at_ms(&clock, 1100);
+    match mac.service() {
+        ServiceEvent::Report(report) => {
+            assert_eq!(report.phy_status, 0x0020);
+            assert!(!report.reconfigured);
+        }
+        other => panic!("expected the flag, got {other:?}"),
+    }
+}
+
+#[test]
+fn an_error_in_status_0_alone_is_news() {
+    let clock = Cell::new(0);
+    let mut mac = paced(&clock, &config(), 100);
+    at_ms(&clock, 1000);
+    mac.service();
+
+    // OA_STATUS0 bit 3 is RXBOE, the receive buffer overflow (DS60001734F, Status
+    // 0 register), unmasked so that the footer announces it.
+    const RXBOE: u32 = 1 << 3;
+    mac.mac_mut().chip().unmasked_status0 |= RXBOE;
+    mac.mac_mut()
+        .chip()
+        .set(wz_oa_tc6::proto::std_reg::STATUS0, RXBOE);
+    at_ms(&clock, 1100);
+    match mac.service() {
+        ServiceEvent::Report(report) => {
+            assert_eq!(report.status0, RXBOE);
+            assert!(!report.reconfigured);
+        }
+        other => panic!("expected the overflow, got {other:?}"),
+    }
+}
+
+#[test]
+fn a_bus_that_stays_broken_is_reported_once_and_its_recovery_once() {
+    let clock = Cell::new(0);
+    let mut mac = paced(&clock, &config(), 100);
+    at_ms(&clock, 1000);
+    mac.service();
+
+    // The next run's first exchange, the footer, fails.
+    let fail = transfers(&mut mac);
+    mac.mac_mut().chip().fail_at = Some(fail);
+    at_ms(&clock, 1100);
+    assert_eq!(
+        mac.service(),
+        ServiceEvent::Failed(OpenError::Bus(BusError::Spi(())))
+    );
+    assert_eq!(mac.failures(), 1);
+
+    // A failure schedules the next run like any other: a part that does not
+    // answer is asked at the same cadence, not harder.
+    let after = transfers(&mut mac);
+    at_ms(&clock, 1101);
+    assert_eq!(mac.service(), ServiceEvent::Quiet);
+    assert_eq!(transfers(&mut mac), after, "not asked again at once");
+
+    // Still broken at the next run: counted, not reported again.
+    mac.mac_mut().chip().fail_at = Some(after);
+    at_ms(&clock, 1200);
+    assert_eq!(mac.service(), ServiceEvent::Quiet);
+    assert_eq!(mac.failures(), 2);
+
+    // It answers again: reported once, and then quiet.
+    at_ms(&clock, 1300);
+    assert!(matches!(mac.service(), ServiceEvent::Recovered(_)));
+    at_ms(&clock, 1400);
+    assert_eq!(mac.service(), ServiceEvent::Quiet);
+
+    // A new failure after the recovery is reported again.
+    let fail = transfers(&mut mac);
+    mac.mac_mut().chip().fail_at = Some(fail);
+    at_ms(&clock, 1500);
+    assert!(matches!(mac.service(), ServiceEvent::Failed(_)));
+    assert_eq!(mac.failures(), 3);
+}
+
+#[test]
+fn the_paced_mac_is_the_ethernet_mac_of_the_part() {
+    let clock = Cell::new(0);
+    let mut mac = paced(&clock, &config(), 100);
+    assert_eq!(mac.mac_address(), MAC);
+    assert_eq!(mac.identity().product, Product::Lan8650);
+
+    let frame = vec![0xAB; 60];
+    assert!(mac.transmit(&frame));
+    assert_eq!(mac.mac_mut().chip().wire, vec![frame]);
+
+    let incoming = frame_to(MAC);
+    assert!(mac.mac_mut().chip().network_frame(&incoming));
+    let mut out = [0u8; 256];
+    let got = mac.receive(&mut out).expect("a frame");
+    assert_eq!(&out[..got], &incoming[..]);
+}
+
+#[test]
+fn a_part_that_is_not_ours_is_refused_by_the_paced_open_with_nothing_written() {
+    let clock = Cell::new(0);
+    let mut chip = Chip::new(devid(0x8652, 1));
+    let opened = PacedMac::open(
+        ByRef(&mut chip),
+        &config(),
+        |us| clock.set(clock.get() + u64::from(us)),
+        || clock.get(),
+        100,
+    );
+    assert!(matches!(
+        opened,
+        Err(OpenError::Identity(IdentityError::UnknownModel(0x8652)))
+    ));
+    assert!(
+        chip.accesses.iter().all(|a| matches!(a, Access::Read(_))),
+        "only reads: {:?}",
+        chip.accesses
+    );
+}

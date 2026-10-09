@@ -17,7 +17,10 @@
 //!   done;
 //! * [`Lan865xMac::service`]: the housekeeping after that, which keeps collision
 //!   detection in step with PLCA and notices that the part was reset, in which
-//!   case it runs the whole sequence again.
+//!   case it runs the whole sequence again;
+//! * [`PacedMac`]: the same MAC with that housekeeping on a cadence, the delay and
+//!   clock kept for it, and its results reduced to the changes worth telling a
+//!   board, for a firmware loop that cannot afford to log every pass.
 //!
 //! ## The bring-up, in order
 //!
@@ -136,6 +139,7 @@
 mod an1760;
 mod config;
 mod identity;
+mod paced;
 pub mod regs;
 
 #[cfg(test)]
@@ -147,6 +151,7 @@ mod tests;
 
 pub use config::{Config, ConfigError, Plca};
 pub use identity::{identify, Identity, IdentityError, Product, Revision};
+pub use paced::{PacedMac, ServiceEvent};
 
 use regs::{
     CDCTL0, CDCTL0_CDEN, DEVID, MAC_HRB, MAC_HRT, MAC_NCFGR, MAC_NCR, MAC_SAB1, MAC_SAT1,
