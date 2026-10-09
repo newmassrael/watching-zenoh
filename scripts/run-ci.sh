@@ -4650,6 +4650,14 @@ layer_c0d_doclink_dependents() {
     # macros do emit linked docs and none of those links names a foreign wz
     # crate -- and the machinery is live, so emptiness is a fact about today
     # that has to be re-checked rather than a property to assert once.
+    # The reader of macro bodies is itself witnessed: it once ended a macro at
+    # the first column-0 `}`, so an INDENTED macro swallowed the doc comments
+    # after it and the pin above reported links no macro emits.
+    if ! python3 "$script" --selftest; then
+        echo "  Layer C0d FAIL: the macro-body reader mis-closes an indented macro" >&2
+        return 1
+    fi
+
     if ! python3 "$script" --check-blind-spots; then
         echo "  Layer C0d FAIL: the expander's blind spot is no longer empty (above)" >&2
         return 1

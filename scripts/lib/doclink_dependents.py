@@ -189,7 +189,64 @@ def edges(crates_dir: pathlib.Path) -> dict:
 # linked docs, 0 of the links name a foreign wz crate), and empty is what this
 # pins -- the machinery is live, so the emptiness is a fact about today rather
 # than a property of the language.
-MACRO_BODY = re.compile(r"macro_rules!\s+(\w+)\s*\{(.*?)\n\}", re.S)
+MACRO_HEAD = re.compile(r"macro_rules!\s+(\w+)\s*\{")
+# What a brace must NOT be counted inside: a string literal, a char literal or
+# a line comment. Alternatives are ordered so the longest token at a position
+# wins, and a bare brace is the last resort.
+_BRACE_SCAN = re.compile(r'"(?:\\.|[^"\\])*"' r"|'(?:\\.|[^'\\])'" r"|//[^\n]*" r"|[{}]", re.S)
+
+
+def macro_bodies(text: str):
+    """(name, body) for every `macro_rules!`, the body closed by its OWN brace.
+
+    This used to end a macro at the first `}` in column 0. A macro declared
+    INDENTED (inside a `mod tests`) has no column-0 close, so the match ran on
+    to the next column-0 `}` and swallowed every doc comment after it: the
+    first indented macro in the tree reported four links no macro emits. The
+    close is found by counting braces, with strings, chars and `//` comments
+    skipped so a `{` inside a JSON literal does not move the depth.
+    """
+    for head in MACRO_HEAD.finditer(text):
+        depth = 1
+        for tok in _BRACE_SCAN.finditer(text, head.end()):
+            if tok.group() == "{":
+                depth += 1
+            elif tok.group() == "}":
+                depth -= 1
+                if depth == 0:
+                    yield head.group(1), text[head.end() : tok.start()]
+                    break
+
+
+def selftest() -> int:
+    """An indented macro closes at its own brace; a column-0 one keeps its body."""
+    indented = (
+        "mod t {\n"
+        "    macro_rules! quiet {\n"
+        '        () => { "{\\"k\\": 1}" };\n'
+        "    }\n"
+        "    /// links [wz_x_thing] which no macro emitted\n"
+        "    fn after() {}\n"
+        "}\n"
+    )
+    found = dict(macro_bodies(indented))
+    if list(found) != ["quiet"] or "wz_x_thing" in found["quiet"]:
+        print(
+            "doclink_dependents: selftest FAIL: an indented macro swallowed the file tail",
+            file=sys.stderr,
+        )
+        return 1
+    loud = "macro_rules! loud {\n    () => {\n        /// see [wz_y_item]\n        fn f() {}\n    };\n}\n"
+    if "wz_y_item" not in dict(macro_bodies(loud)).get("loud", ""):
+        print(
+            "doclink_dependents: selftest FAIL: a column-0 macro lost its own body",
+            file=sys.stderr,
+        )
+        return 1
+    print("doclink_dependents: selftest OK (an indented macro closes at its own brace)")
+    return 0
+
+
 ANY_LINK = re.compile(r"\[`?([A-Za-z_][A-Za-z0-9_:]*)`?\]")
 DOC_ATTR = re.compile(r'#\[doc\s*=\s*"([^"]*)"')
 
@@ -232,16 +289,14 @@ def check_blind_spots(crates_dir: pathlib.Path) -> int:
 
         # A macro body emitting a doc comment that carries a link.
         if "macro_rules!" in text:
-            for m in MACRO_BODY.finditer(text):
-                for line in m.group(2).splitlines():
+            for name, body in macro_bodies(text):
+                for line in body.splitlines():
                     if "#[doc" not in line and "///" not in line:
                         continue
                     for target in ANY_LINK.findall(line):
                         owner = foreign(target)
                         if owner:
-                            findings.append(
-                                f"{source}: macro {m.group(1)}! emits [{target}] -> {owner}"
-                            )
+                            findings.append(f"{source}: macro {name}! emits [{target}] -> {owner}")
 
     if findings:
         print(
@@ -270,10 +325,16 @@ def main(argv) -> int:
     if not argv:
         print(
             "doclink_dependents: usage: doclink_dependents.py <crate-name>... |"
-            " --check-blind-spots",
+            " --check-blind-spots | --selftest",
             file=sys.stderr,
         )
         return 2
+
+    if argv[0] == "--selftest":
+        if len(argv) != 1:
+            print("doclink_dependents: --selftest takes no other argument", file=sys.stderr)
+            return 2
+        return selftest()
 
     if argv[0] == "--check-blind-spots":
         if len(argv) != 1:
