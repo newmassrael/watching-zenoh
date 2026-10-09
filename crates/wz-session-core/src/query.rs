@@ -314,16 +314,16 @@ fn extract_query_attachment_shared(query: &QueryOwned) -> Option<crate::link::Rx
     #[cfg(all(feature = "query-attachment", feature = "rx-shared-bytes"))]
     {
         use crate::wire::parts::QueryExtEntryOwnedVariant;
-        for ext in query.extensions.as_deref()? {
-            if ext.ext_id() != crate::attachment::ATTACHMENT_EXT_ID_QUERY {
-                continue;
-            }
-            // The entry `decode_attachment_ext` reads: a plain ZBuf body.
-            if let QueryExtEntryOwnedVariant::CodecZenohQueryValueZbuf(z) = &ext.body {
-                if let Some(value) = &z.value {
-                    let bytes = value.as_rx_bytes();
-                    return bytes.is_shared().then(|| bytes.clone());
-                }
+        // The entry `decode_attachment_ext` reads: the one of the attachment's
+        // identity, with a plain ZBuf body.
+        let ext = crate::ext_view::find_by_eid(
+            query.extensions.as_deref()?,
+            crate::ext_header::body_eid::QUERY_ATTACHMENT,
+        )?;
+        if let QueryExtEntryOwnedVariant::CodecZenohQueryValueZbuf(z) = &ext.body {
+            if let Some(value) = &z.value {
+                let bytes = value.as_rx_bytes();
+                return bytes.is_shared().then(|| bytes.clone());
             }
         }
         None
@@ -349,22 +349,22 @@ fn extract_query_value_shared(
     #[cfg(all(feature = "query-value", feature = "rx-shared-bytes"))]
     {
         use crate::wire::parts::QueryExtEntryOwnedVariant;
-        for ext in query.extensions.as_deref()? {
-            if ext.ext_id() != crate::query_value_ext::QUERY_VALUE_EXT_ID {
-                continue;
-            }
-            if let QueryExtEntryOwnedVariant::CodecZenohQueryValueZbuf(z) = &ext.body {
-                if let Some(value) = &z.value {
-                    let whole = value.as_rx_bytes();
-                    if !whole.is_shared() {
-                        return None;
-                    }
-                    // The same split `decode_query_value_ext` makes, so the bytes
-                    // lent and the bytes borrowed are one run.
-                    let (encoding, payload) = crate::encoding::split_value_body(whole.as_slice())?;
-                    let range = sce_forge_runtime::codec::subrange_of(whole.as_slice(), payload)?;
-                    return Some((encoding, whole.subslice(range)?));
+        // The entry `decode_query_value_ext` reads: the one of the value's identity.
+        let ext = crate::ext_view::find_by_eid(
+            query.extensions.as_deref()?,
+            crate::ext_header::body_eid::QUERY_VALUE,
+        )?;
+        if let QueryExtEntryOwnedVariant::CodecZenohQueryValueZbuf(z) = &ext.body {
+            if let Some(value) = &z.value {
+                let whole = value.as_rx_bytes();
+                if !whole.is_shared() {
+                    return None;
                 }
+                // The same split `decode_query_value_ext` makes, so the bytes
+                // lent and the bytes borrowed are one run.
+                let (encoding, payload) = crate::encoding::split_value_body(whole.as_slice())?;
+                let range = sce_forge_runtime::codec::subrange_of(whole.as_slice(), payload)?;
+                return Some((encoding, whole.subslice(range)?));
             }
         }
         None
@@ -2099,7 +2099,7 @@ impl<C: QuerySink> QueryableRegistry<C> {
             return Ok(None);
         };
         for ext in exts {
-            if ExtEntryView::ext_id(ext) != crate::ext_header::body_ext_id::QUERY_BODY {
+            if ExtEntryView::eid(ext) != crate::ext_header::body_eid::QUERY_VALUE {
                 continue;
             }
             let QueryExtEntryOwnedVariant::CodecZenohQueryValueZbuf(value) = &ext.body else {

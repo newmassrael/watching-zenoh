@@ -82,7 +82,7 @@ pub const HOPLIMIT_EXT_HEADER: u8 = HOPLIMIT_EXT_ID | EXT_ENC_Z64;
 /// the mesh through a hop-stamping peer), which a forwarder treats as a fresh
 /// budget. Delegates to the shared [`ext_nodeid::read_z64_ext`].
 pub fn read_push_hoplimit(push: &PushOwned) -> Option<u16> {
-    ext_nodeid::read_z64_ext(push.extensions.as_ref(), HOPLIMIT_EXT_ID).map(|v| v as u16)
+    ext_nodeid::read_z64_ext(push.extensions.as_ref(), HOPLIMIT_EXT_HEADER).map(|v| v as u16)
 }
 
 /// Set / replace the hop-limit (remaining forward budget) on a Push's hop-limit
@@ -93,12 +93,8 @@ pub fn read_push_hoplimit(push: &PushOwned) -> Option<u16> {
 /// `ext_nodeid` source on the same chain — the two ride distinct ids — and the
 /// resulting chain is id-ascending `[nodeid, hoplimit]` when both are present.
 pub fn set_push_hoplimit(push: &mut PushOwned, hop: u16) {
-    let present = ext_nodeid::set_z64_ext(
-        &mut push.extensions,
-        HOPLIMIT_EXT_ID,
-        HOPLIMIT_EXT_HEADER,
-        Some(hop as u64),
-    );
+    let present =
+        ext_nodeid::set_z64_ext(&mut push.extensions, HOPLIMIT_EXT_HEADER, Some(hop as u64));
     ext_nodeid::sync_header_z(&mut push.header, present);
 }
 

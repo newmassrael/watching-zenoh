@@ -102,18 +102,15 @@ pub fn encode_query_value_ext<S: CodecStorage>(
 /// slices' descriptor as though it were a value would deliver a few bytes of a
 /// buffer's address as the application's data.
 pub fn decode_query_value_ext<E: ExtEntryView>(extensions: &[E]) -> Option<(EncodingHint, &[u8])> {
-    for ext in extensions {
-        if ext.ext_id() == QUERY_VALUE_EXT_ID {
-            if let Some(bytes) = ext.plain_zbuf() {
-                // The remainder after the encoding is the payload (pico takes
-                // `_z_zbuf_len(zbf)` after `_z_encoding_decode`); the split is
-                // `crate::encoding::split_value_body`'s, shared with the stats
-                // classifier that sizes the same payload.
-                return crate::encoding::split_value_body(bytes);
-            }
-        }
-    }
-    None
+    // The value is told by its identity (`body_eid::QUERY_VALUE`), as upstream tells
+    // it, and not by the id field its look-alikes share.
+    let bytes = crate::ext_view::find_by_eid(extensions, crate::ext_header::body_eid::QUERY_VALUE)?
+        .plain_zbuf()?;
+    // The remainder after the encoding is the payload (pico takes
+    // `_z_zbuf_len(zbf)` after `_z_encoding_decode`); the split is
+    // `crate::encoding::split_value_body`'s, shared with the stats
+    // classifier that sizes the same payload.
+    crate::encoding::split_value_body(bytes)
 }
 
 #[cfg(test)]
@@ -209,6 +206,36 @@ mod tests {
         let chain = [entry];
         let (_enc, payload) = decode_query_value_ext(&chain).expect("empty-payload value decodes");
         assert_eq!(payload, b"");
+    }
+
+    /// The value is told by its identity, `0x43`, and not by the id field:
+    /// upstream matches `iext::eid(ext)` against `ZExtZBuf::<0x03>::id(false)`
+    /// (`commons/zenoh-codec/src/zenoh/query.rs` @
+    /// `ext::QueryBodyType::SID | ext::QueryBodyType::VID => {`), so a ZBuf of id 3
+    /// with the mandatory bit set is an unknown extension there. The chain flag
+    /// is no part of the identity.
+    #[test]
+    fn decode_tells_the_value_by_its_identity_not_its_id() {
+        use crate::ext_header::{body_eid, lookalike_headers, EXT_FLAG_Z};
+        let entry = |header: u8| {
+            let mut e = encode_query_value_ext::<Wire>(&default_encoding(), b"hi").unwrap();
+            e.header = header;
+            e
+        };
+        for header in [body_eid::QUERY_VALUE, body_eid::QUERY_VALUE | EXT_FLAG_Z] {
+            assert!(
+                decode_query_value_ext(&[entry(header)]).is_some(),
+                "{header:#04x} is the value"
+            );
+        }
+        for header in lookalike_headers(body_eid::QUERY_VALUE).filter(|h| (h >> 5) & 3 == 2) {
+            for h in [header, header | EXT_FLAG_Z] {
+                assert!(
+                    decode_query_value_ext(&[entry(h)]).is_none(),
+                    "{h:#04x} shares only the id with the value"
+                );
+            }
+        }
     }
 
     /// Decode is ext-id-scoped: a sibling Query body ext (here source_info

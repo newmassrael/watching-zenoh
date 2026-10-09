@@ -53,7 +53,7 @@ use wz_integration_tests::common::{
     zenoh_core_example_binary, zenohd_binary, ChildGuard, QueryAttempts,
 };
 use wz_integration_tests::wire_tap::{synthesise_pcap, tap_proxy, Recording, Side};
-use wz_session_core::declare_ext_qos::QOS_EXT_ID;
+use wz_session_core::declare_ext_qos::QOS_EXT_HEADER;
 use wz_session_core::ext_nodeid::read_z64_ext;
 use wz_session_core::inbound::InboundFrame;
 use wz_session_core::network_message::{parse_frame_payload, NetworkMessage};
@@ -102,7 +102,7 @@ struct Answers {
 fn effective_qos<S: wz_codecs::CodecStorage>(
     exts: Option<&Vec<wz_codecs::ext_entry::ExtEntryOwned<S>>>,
 ) -> QosLevel {
-    read_z64_ext(exts, QOS_EXT_ID)
+    read_z64_ext(exts, QOS_EXT_HEADER)
         .map(|v| QosLevel::from_raw(v as u8))
         .unwrap_or(QosLevel::DEFAULT)
 }

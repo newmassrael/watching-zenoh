@@ -37,6 +37,10 @@ use wz_codecs::ext_zbuf::ExtZbufOwned;
 /// 0x3 Auth, 0x4 MultiLink, 0x5 LowLatency, 0x6 Compression, 0x7 Patch).
 pub const AUTH_EXT_ID: u8 = crate::ext_header::establishment_ext_id::AUTH;
 
+/// The auth extension's identity, `zextzbuf!(0x3, false)`: `0x43`. A reader tells
+/// the extension by this and not by [`AUTH_EXT_ID`] alone.
+pub const AUTH_EXT_EID: u8 = crate::ext_header::ext_identity(AUTH_EXT_ID, false, EXT_ENC_ZBUF);
+
 /// Build the Z_EXT_AUTH `ExtEntry` carrying `payload` (the negotiated method's
 /// challenge / response bytes). The header is the auth id with the ENC_ZBUF
 /// marker ([`EXT_ENC_ZBUF`](crate::ext_header::EXT_ENC_ZBUF), the iext SSOT) and
@@ -62,14 +66,14 @@ pub fn encode_auth_ext(payload: &[u8]) -> Result<ExtEntryOwned, CodecError> {
 /// needing ownership maps with `<[u8]>::to_vec`. `None` when no auth ext is
 /// present (the peer did not negotiate auth) — the admit-by-default path.
 pub fn decode_auth_ext(extensions: &[ExtEntryOwned]) -> Option<&[u8]> {
-    for ext in extensions {
-        if ext.ext_id() == AUTH_EXT_ID {
-            if let ExtEntryOwnedVariant::CodecZenohExtZbuf(z) = &ext.body {
-                return Some(z.value.as_slice());
-            }
-        }
+    // Told by its identity, the header without the chain flag, as upstream tells it
+    // (`ext::Auth::ID`, the ZBuf that is not mandatory): a ZBuf of the same id that
+    // is mandatory is another extension.
+    let ext = crate::ext_view::find_by_eid(extensions, AUTH_EXT_EID)?;
+    match &ext.body {
+        ExtEntryOwnedVariant::CodecZenohExtZbuf(z) => Some(z.value.as_slice()),
+        _ => None,
     }
-    None
 }
 
 #[cfg(test)]
@@ -93,6 +97,37 @@ mod tests {
     fn auth_ext_empty_payload_round_trips() {
         let ext = encode_auth_ext(&[]).unwrap();
         assert_eq!(decode_auth_ext(&[ext]), Some([].as_slice()));
+    }
+
+    /// The auth extension is told by its identity, `0x43`, and not by the id
+    /// field: upstream matches `iext::eid(ext)` against `ext::Auth::ID`
+    /// (`commons/zenoh-codec/src/transport/init.rs` @ `ext::Auth::ID => {`), so a
+    /// ZBuf of id 3 with the mandatory bit set is an unknown extension there.
+    /// The chain flag is no part of the identity.
+    #[test]
+    fn decode_tells_the_auth_ext_by_its_identity_not_its_id() {
+        use crate::ext_header::{lookalike_headers, EXT_FLAG_Z};
+        let payload = [0xAB];
+        let entry = |header: u8| {
+            let mut e = encode_auth_ext(&payload).unwrap();
+            e.header = header;
+            e
+        };
+        let eid = EXT_ENC_ZBUF | AUTH_EXT_ID;
+        for header in [eid, eid | EXT_FLAG_Z] {
+            assert_eq!(
+                decode_auth_ext(&[entry(header)]),
+                Some(payload.as_slice()),
+                "{header:#04x} is the auth ext"
+            );
+        }
+        for header in lookalike_headers(eid).filter(|h| (h >> 5) & 3 == 2) {
+            assert_eq!(
+                decode_auth_ext(&[entry(header)]),
+                None,
+                "{header:#04x} shares only the id with the auth ext"
+            );
+        }
     }
 
     /// A chain with no auth ext (or only a foreign ext id) decodes to `None` —

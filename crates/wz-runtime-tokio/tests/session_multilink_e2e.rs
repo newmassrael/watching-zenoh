@@ -779,7 +779,7 @@ async fn the_multilink_state_rides_the_cookie_between_init_ack_and_open_syn() {
         fixture_session_init_params, LifecycleRecordingDriver, QueueDriver,
     };
     use wz_session_core::auth_dispatch::AuthSubExt;
-    use wz_session_core::extmultilink::decode_multilink_ext;
+    use wz_session_core::extmultilink::{decode_multilink_ext, MULTILINK_EXT_EID};
 
     let bundle = |zid: u8, driver: &Arc<LifecycleRecordingDriver>| {
         let outbound: Arc<dyn BoxedLinkDriver + Send + Sync> = driver.clone();
@@ -807,7 +807,7 @@ async fn the_multilink_state_rides_the_cookie_between_init_ack_and_open_syn() {
             is_ack: false,
             extensions,
             ..
-        } => match decode_multilink_ext(&extensions) {
+        } => match decode_multilink_ext(&extensions, MULTILINK_EXT_EID) {
             Some(AuthSubExt::Zbuf(key)) => key,
             other => panic!("the initiator's InitSyn offers its key on 0x4, got {other:?}"),
         },

@@ -45,7 +45,8 @@ use sce_forge_runtime::codec::CodecError;
 use wz_codecs::ext_entry::{ExtEntryOwned, ExtEntryOwnedVariant};
 use wz_codecs::ext_zbuf::ExtZbufOwned;
 
-use crate::ext_nodeid::{ext_id, EXT_ENC_ZBUF, EXT_FLAG_M};
+use crate::ext_header::ext_eid;
+use crate::ext_nodeid::{EXT_ENC_ZBUF, EXT_FLAG_M};
 use crate::vle::read_vle_u64;
 
 /// The `ext_keyexpr` extension id — zenoh `_z_decl_ext_keyexpr`, ext id `0x0f`.
@@ -116,7 +117,10 @@ pub fn build_ext_wireexpr(mapping_id: u64, suffix: &str) -> Result<ExtEntryOwned
 /// truncated.
 fn parse_ext_keyexpr_entry(exts: Option<&Vec<ExtEntryOwned>>) -> Option<(u8, u64, &[u8])> {
     for ext in exts? {
-        if ext_id(ext.header) != KEYEXPR_EXT_ID {
+        // Told by its identity, the header without the chain flag, as upstream tells
+        // it (`ext::WireExprExt::ID`): a ZBuf of the same id that is not mandatory
+        // is another extension.
+        if ext_eid(ext.header) != KEYEXPR_EXT_HEADER {
             continue;
         }
         let ExtEntryOwnedVariant::CodecZenohExtZbuf(z) = &ext.body else {
@@ -169,7 +173,7 @@ pub fn set_ext_keyexpr_literal(
     literal: &str,
 ) -> Result<bool, CodecError> {
     let Some(index) = exts.iter().position(|ext| {
-        ext_id(ext.header) == KEYEXPR_EXT_ID
+        ext_eid(ext.header) == KEYEXPR_EXT_HEADER
             && matches!(ext.body, ExtEntryOwnedVariant::CodecZenohExtZbuf(_))
     }) else {
         return Ok(false);
@@ -233,6 +237,37 @@ mod tests {
         expected.extend_from_slice(b"demo/sub");
         assert_eq!(z.value.as_slice(), expected.as_slice());
         assert_eq!(z.value_len, expected.len() as u64);
+    }
+
+    /// The keyexpr extension is told by its identity, `0x5F`
+    /// (`zextzbuf!(0x0f, true)`), and not by the id field: upstream matches
+    /// `iext::eid(ext)` against `WireExprExt::ID`
+    /// (`commons/zenoh-codec/src/network/declare.rs` @ `ext::WireExprExt::ID => {`),
+    /// so a ZBuf of id 15 with the mandatory bit clear is an unknown extension
+    /// there. It is neither read nor rewritten, and the chain flag is no part of
+    /// the identity.
+    #[test]
+    fn the_keyexpr_ext_is_told_by_its_identity_not_its_id() {
+        use crate::ext_header::{lookalike_headers, EXT_FLAG_Z};
+        let built = build_ext_keyexpr("demo/sub").unwrap();
+        let mut chained = built.clone();
+        chained.header |= EXT_FLAG_Z;
+        assert_eq!(read_ext_keyexpr(Some(&vec![chained])), Some("demo/sub"));
+        for header in lookalike_headers(KEYEXPR_EXT_HEADER).filter(|h| (h >> 5) & 3 == 2) {
+            let mut look = built.clone();
+            look.header = header;
+            assert_eq!(
+                read_ext_keyexpr(Some(&vec![look.clone()])),
+                None,
+                "{header:#04x} shares only the id with the keyexpr ext"
+            );
+            let mut exts = vec![look];
+            assert_eq!(
+                set_ext_keyexpr_literal(&mut exts, "other/key"),
+                Ok(false),
+                "{header:#04x} is not rewritten"
+            );
+        }
     }
 
     #[test]

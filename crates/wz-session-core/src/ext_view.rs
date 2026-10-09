@@ -29,7 +29,19 @@ pub trait ExtEntryView {
     fn header(&self) -> u8;
 
     /// The extension's identifier: the low four bits of its header.
+    ///
+    /// This is the id COLUMN, not what tells one extension from another: two
+    /// extensions may share it and differ in the mandatory bit or the encoding.
+    /// A reader that picks an extension out of a chain asks [`Self::eid`].
     fn ext_id(&self) -> u8;
+
+    /// The extension's identity: its header without the chain flag, which is
+    /// upstream's `iext::eid` and is what upstream matches a received extension
+    /// by ([`crate::ext_header::ext_eid`]). Compare it against an identity
+    /// constant ([`crate::ext_header::body_eid`]), never against a bare id.
+    fn eid(&self) -> u8 {
+        crate::ext_header::ext_eid(self.header())
+    }
 
     /// The encoding of the extension's body: bits 5 and 6 of its header (0 unit,
     /// 1 z64, 2 ZBuf).
@@ -38,6 +50,17 @@ pub trait ExtEntryView {
     /// The bytes of a ZBuf-encoded entry whose body is a plain run of bytes.
     /// `None` for any other entry, and for a ZBuf body that is a list of slices.
     fn plain_zbuf(&self) -> Option<&[u8]>;
+}
+
+/// The first entry of `extensions` whose identity is `eid`.
+///
+/// The one place a reader picks an extension out of a received chain. Upstream
+/// tells a received extension apart by its identity (`commons/zenoh-codec/src/zenoh/put.rs`
+/// @ `Ok(match iext::eid(ext) {`), so a reader that wants the extension named by
+/// `eid` finds it here and never by the id field, which an extension that
+/// differs in the mandatory bit or the encoding shares with it.
+pub fn find_by_eid<E: ExtEntryView>(extensions: &[E], eid: u8) -> Option<&E> {
+    extensions.iter().find(|ext| ext.eid() == eid)
 }
 
 impl<S: CodecStorage> ExtEntryView for ExtEntryOwned<S> {
@@ -104,12 +127,8 @@ mod query {
     #[cfg(feature = "alloc")]
     pub fn query_value_payload_len<S: CodecStorage>(extensions: &[QueryExtEntryOwned<S>]) -> usize {
         use sce_forge_runtime::codec::SceList;
-        extensions
-            .iter()
-            .find(|ext| {
-                QueryExtEntryOwned::ext_id(ext) == crate::ext_header::body_ext_id::QUERY_BODY
-            })
-            .map_or(0, |ext| match &ext.body {
+        super::find_by_eid(extensions, crate::ext_header::body_eid::QUERY_VALUE).map_or(0, |ext| {
+            match &ext.body {
                 QueryExtEntryOwnedVariant::CodecZenohQueryValueZbuf(z) => {
                     match (&z.value, &z.slices) {
                         (Some(bytes), _) => {
@@ -123,7 +142,8 @@ mod query {
                     }
                 }
                 _ => 0,
-            })
+            }
+        })
     }
 
     /// A generic extension entry as the entry of a Query's chain. The three

@@ -58,6 +58,17 @@ use crate::auth_dispatch::{AuthError, AuthMethod, AuthSubExt};
 /// Auth, 0x4 MultiLink, 0x5 LowLatency, 0x6 Compression, 0x7 Patch).
 pub const MULTILINK_EXT_ID: u8 = crate::ext_header::establishment_ext_id::MULTILINK;
 
+/// The multilink extension's identity on `InitSyn`, `InitAck` and `OpenSyn`,
+/// `zextzbuf!(0x4, false)`: `0x44`. A reader tells the extension by this and not
+/// by [`MULTILINK_EXT_ID`] alone.
+pub const MULTILINK_EXT_EID: u8 =
+    crate::ext_header::ext_identity(MULTILINK_EXT_ID, false, crate::ext_header::EXT_ENC_ZBUF);
+
+/// The multilink extension's identity on `OpenAck`, `zextunit!(0x4, false)`:
+/// `0x04`, a unit where the others are a ZBuf.
+pub const MULTILINK_ACK_EXT_EID: u8 =
+    crate::ext_header::ext_identity(MULTILINK_EXT_ID, false, crate::ext_header::EXT_ENC_UNIT);
+
 /// zenoh's `close::reason::INVALID` (0x02) — the wire close-reason code for a
 /// link rejected because its captured ephemeral multilink pubkey did NOT match
 /// the logical session's bound identity (config-equality failure). It is the
@@ -208,13 +219,14 @@ impl MultiLinkDispatch {
     fn recv_stage(
         &mut self,
         peer_exts: &[ExtEntryOwned],
+        eid: u8,
         f: impl FnOnce(&mut dyn AuthMethod, Option<AuthSubExt>) -> Result<(), AuthError>,
     ) -> Result<(), AuthError> {
         // MF-A: a gracefully-disabled dispatch ignores any inbound 0x4 ext.
         if self.disabled {
             return Ok(());
         }
-        let sub = decode_multilink_ext(peer_exts);
+        let sub = decode_multilink_ext(peer_exts, eid);
         f(self.method.as_mut(), sub)
     }
 
@@ -235,7 +247,7 @@ impl MultiLinkDispatch {
         if self.disabled {
             return Ok(());
         }
-        match decode_multilink_ext(peer_exts) {
+        match decode_multilink_ext(peer_exts, MULTILINK_EXT_EID) {
             None => {
                 self.disabled = true;
                 Ok(())
@@ -260,7 +272,9 @@ impl MultiLinkDispatch {
     }
     /// Open side: consume the peer OpenAck's 0x4 ext.
     pub fn open_recv_open_ack(&mut self, peer_exts: &[ExtEntryOwned]) -> Result<(), AuthError> {
-        self.recv_stage(peer_exts, |m, s| m.open_recv_open_ack(s))
+        self.recv_stage(peer_exts, MULTILINK_ACK_EXT_EID, |m, s| {
+            m.open_recv_open_ack(s)
+        })
     }
 
     // ── Accept (responder) side ──────────────────────────────────────────
@@ -287,7 +301,9 @@ impl MultiLinkDispatch {
     /// a second source for it is exactly the "two methods claiming an identity"
     /// ambiguity `AuthDispatch::accept_recv_open_syn` refuses.
     pub fn accept_recv_open_syn(&mut self, peer_exts: &[ExtEntryOwned]) -> Result<(), AuthError> {
-        self.recv_stage(peer_exts, |m, s| m.accept_recv_open_syn(s).map(|_| ()))
+        self.recv_stage(peer_exts, MULTILINK_EXT_EID, |m, s| {
+            m.accept_recv_open_syn(s).map(|_| ())
+        })
     }
     /// Accept side: produce the OpenAck 0x4 ext (the Unit confirmation).
     pub fn accept_open_ack(&mut self) -> Result<Option<ExtEntryOwned>, AuthError> {
@@ -313,11 +329,16 @@ impl MultiLinkDispatch {
 /// the UN-wrapped 0x4 ext: the body maps straight to an [`AuthSubExt`] (via the
 /// shared [`AuthSubExt::from_body`] projection), NO inner method chain to demux.
 /// `None` when the peer carried no 0x4 ext (it did not negotiate multilink).
-pub fn decode_multilink_ext(extensions: &[ExtEntryOwned]) -> Option<AuthSubExt> {
-    extensions
-        .iter()
-        .find(|e| e.ext_id() == MULTILINK_EXT_ID)
-        .and_then(|e| AuthSubExt::from_body(&e.body))
+///
+/// `eid` is the identity of the extension the STAGE reads, because upstream
+/// declares two: [`MULTILINK_EXT_EID`] on `InitSyn`, `InitAck` and `OpenSyn`, and
+/// [`MULTILINK_ACK_EXT_EID`] on `OpenAck`
+/// (`commons/zenoh-protocol/src/transport/open.rs` @
+/// `pub type MultiLinkAck = zextunit!(0x4, false);`). An extension of the same id
+/// in any other shape is another extension and is not read.
+pub fn decode_multilink_ext(extensions: &[ExtEntryOwned], eid: u8) -> Option<AuthSubExt> {
+    let ext = crate::ext_view::find_by_eid(extensions, eid)?;
+    AuthSubExt::from_body(&ext.body)
 }
 
 #[cfg(test)]
@@ -376,6 +397,60 @@ mod tests {
         }))
     }
 
+    /// The multilink extension is told by its identity and not by the id field:
+    /// upstream matches `iext::eid(ext)` against `init::ext::MultiLink::ID`
+    /// (`commons/zenoh-codec/src/transport/init.rs` @ `ext::MultiLink::ID => {`),
+    /// the ZBuf `0x44`, so a ZBuf of id 4 with the mandatory bit set (`0x54`) is
+    /// an unknown extension there, and the peer that sent it negotiated no
+    /// multilink. The chain flag is no part of the identity.
+    #[test]
+    fn decode_tells_the_multilink_ext_by_its_identity_not_its_id() {
+        use crate::ext_header::{lookalike_headers, EXT_FLAG_Z};
+        use wz_codecs::ext_zbuf::ExtZbufOwned;
+        let entry = |header: u8| ExtEntryOwned {
+            header,
+            body: ExtEntryOwnedVariant::CodecZenohExtZbuf(ExtZbufOwned {
+                value_len: 1,
+                value: crate::codec_owned::owned_bytes(&[0xAB]).unwrap(),
+            }),
+        };
+        let eid = MULTILINK_EXT_EID;
+        for header in [eid, eid | EXT_FLAG_Z] {
+            assert!(
+                decode_multilink_ext(&[entry(header)], eid).is_some(),
+                "{header:#04x} is the multilink ext"
+            );
+        }
+        for header in lookalike_headers(eid).filter(|h| (h >> 5) & 3 == 2) {
+            assert!(
+                decode_multilink_ext(&[entry(header)], eid).is_none(),
+                "{header:#04x} shares only the id with the multilink ext"
+            );
+        }
+    }
+
+    /// The `OpenAck` extension is the UNIT `0x04`, the other three stages' is
+    /// the ZBuf `0x44`: each stage reads its own, and neither reads the other's,
+    /// because they are different extensions upstream.
+    #[test]
+    fn each_stage_reads_the_multilink_ext_of_its_own_identity() {
+        use wz_codecs::ext_entry::ExtEntryOwnedVariant;
+        use wz_codecs::ext_unit::ExtUnit;
+        let unit = ExtEntryOwned {
+            header: MULTILINK_ACK_EXT_EID,
+            body: ExtEntryOwnedVariant::CodecZenohExtUnit(ExtUnit::default()),
+        };
+        assert_eq!(
+            decode_multilink_ext(core::slice::from_ref(&unit), MULTILINK_ACK_EXT_EID),
+            Some(AuthSubExt::Unit)
+        );
+        assert_eq!(
+            decode_multilink_ext(core::slice::from_ref(&unit), MULTILINK_EXT_EID),
+            None,
+            "a unit at id 4 is not the ZBuf the first three stages read"
+        );
+    }
+
     /// The InitSyn 0x4 ext carries the method's `Zbuf` payload UN-WRAPPED: header
     /// byte `0x44` (`EXT_ENC_ZBUF | 0x04`) and the body value byte-identical to
     /// the raw bytes the method returned — NO inner method-id header (the
@@ -408,7 +483,10 @@ mod tests {
         let bytes = encode_ext_chain(&[ext]);
         let mut cursor = SceCursor::new(&bytes);
         let peer = decode_ext_chain(&mut cursor).unwrap();
-        assert_eq!(decode_multilink_ext(&peer), Some(AuthSubExt::Zbuf(body)));
+        assert_eq!(
+            decode_multilink_ext(&peer, MULTILINK_EXT_EID),
+            Some(AuthSubExt::Zbuf(body))
+        );
     }
 
     /// The OpenAck 0x4 ext carries a `Unit`: header byte `0x04` (id, no encoding

@@ -469,9 +469,10 @@ impl InboundFrame {
 fn ext_qos_priority(extensions: &[ExtEntryOwned]) -> crate::qos::Priority {
     use wz_codecs::ext_entry::ExtEntryOwnedVariant;
     for ext in extensions {
-        // id 0x1 in the Frame/Fragment ext space is QoS (0x2 First / 0x3 Drop
-        // are Fragment-only unit exts); the z64 body carries the priority.
-        if ext.ext_id() == 0x01 {
+        // The QoS of a Frame/Fragment is `zextz64!(0x1, true)`, header `0x31`
+        // (0x2 First / 0x3 Drop are Fragment-only unit exts), told by its
+        // identity as upstream tells it; the z64 body carries the priority.
+        if crate::ext_header::ext_eid(ext.header) == crate::ext_header::network_eid::TRANSPORT_QOS {
             if let ExtEntryOwnedVariant::CodecZenohExtZint(z) = &ext.body {
                 return crate::qos::Priority::from_wire((z.value & 0x07) as u8);
             }
@@ -1582,5 +1583,48 @@ mod kind_name_tests {
         codes.sort_unstable();
         codes.dedup();
         assert_eq!(codes.len(), before, "two variants share a code: {codes:?}");
+    }
+}
+
+// The priority of a Frame / Fragment is read from the transport QoS, which is
+// told by its identity: `frame::ext::QoS = zextz64!(0x1, true)`, header `0x31`
+// (`commons/zenoh-protocol/src/transport/frame.rs` @
+// `pub type QoS = zextz64!(0x1, true);`), matched by `iext::eid`
+// (`commons/zenoh-codec/src/transport/frame.rs` @ `ext::QoS::ID => {`). The
+// same id with the mandatory bit clear is an unknown extension there.
+#[cfg(all(test, feature = "codec-frame"))]
+mod frame_qos_identity_tests {
+    use super::*;
+    use crate::ext_header::{lookalike_headers, network_eid, EXT_FLAG_Z};
+    use wz_codecs::ext_entry::ExtEntryOwnedVariant;
+    use wz_codecs::ext_zint::ExtZint;
+
+    fn zint(header: u8, value: u64) -> ExtEntryOwned {
+        ExtEntryOwned {
+            header,
+            body: ExtEntryOwnedVariant::CodecZenohExtZint(ExtZint { value }),
+        }
+    }
+
+    #[test]
+    fn the_transport_qos_is_told_by_its_identity_not_its_id() {
+        let want = crate::qos::Priority::from_wire(3);
+        for header in [
+            network_eid::TRANSPORT_QOS,
+            network_eid::TRANSPORT_QOS | EXT_FLAG_Z,
+        ] {
+            assert_eq!(
+                ext_qos_priority(&[zint(header, 3)]),
+                want,
+                "{header:#04x} is the transport QoS"
+            );
+        }
+        for header in lookalike_headers(network_eid::TRANSPORT_QOS).filter(|h| (h >> 5) & 3 == 1) {
+            assert_eq!(
+                ext_qos_priority(&[zint(header, 3)]),
+                crate::qos::Priority::DEFAULT,
+                "{header:#04x} shares only the id with the transport QoS"
+            );
+        }
     }
 }

@@ -314,9 +314,11 @@ pub fn attach_query_value_shm(
     use wz_codecs::query_value_zbuf::QueryValueZbufOwned;
 
     let existing = query.extensions.take().unwrap_or_default();
-    if existing
-        .iter()
-        .any(|ext| ext.ext_id() == body_ext_id::QUERY_BODY)
+    if crate::ext_view::find_by_eid(
+        sce_forge_runtime::codec::SceList::as_slice(&existing),
+        crate::ext_header::body_eid::QUERY_VALUE,
+    )
+    .is_some()
     {
         query.extensions = Some(existing);
         // The chain already describes a value, and so does the one asked for: two
@@ -369,7 +371,7 @@ fn sliced_query_value(
     usize,
     &[wz_codecs::zbuf_slice::ZbufSliceOwned<crate::wire::WireStorage>],
 )> {
-    use crate::ext_header::body_ext_id;
+    use crate::ext_header::body_eid;
     use crate::wire::parts::QueryExtEntryOwnedVariant;
     use sce_forge_runtime::codec::SceList;
 
@@ -379,7 +381,7 @@ fn sliced_query_value(
         .enumerate()
         .find_map(|(index, ext)| match &ext.body {
             QueryExtEntryOwnedVariant::CodecZenohQueryValueZbuf(value)
-                if ext.ext_id() == body_ext_id::QUERY_BODY =>
+                if crate::ext_view::ExtEntryView::eid(ext) == body_eid::QUERY_VALUE =>
             {
                 value
                     .slices
@@ -3069,5 +3071,35 @@ mod shm_value_build_tests {
             attach_query_value_shm(query_of(&mut request), &default_encoding(), &DESCRIPTOR);
         assert!(refused.is_err(), "two values in one chain are refused");
         assert_eq!(request.wire(), before, "and the Query is as it was");
+    }
+
+    /// The value is told by its identity, `0x43`, and not by the id field
+    /// (`commons/zenoh-codec/src/zenoh/query.rs` @
+    /// `ext::QueryBodyType::SID | ext::QueryBodyType::VID => {`): a ZBuf of id 3
+    /// with the mandatory bit set is another extension, so it is no value for
+    /// the shared-memory one to contradict, and it is not the value that
+    /// `query_value_shm_descriptors` looks for either.
+    #[test]
+    fn an_extension_of_the_values_id_is_not_a_value() {
+        use crate::wire::parts::{QueryExtEntryOwned, QueryExtEntryOwnedVariant};
+        use wz_codecs::query_value_zbuf::QueryValueZbufOwned;
+        let mut request = build_request_query(1, 0, Some("k")).unwrap();
+        let query = query_of(&mut request);
+        let lookalike = QueryExtEntryOwned {
+            header: 0x53,
+            body: QueryExtEntryOwnedVariant::CodecZenohQueryValueZbuf(QueryValueZbufOwned {
+                value_len: 1,
+                value: Some(crate::wire::wire_bytes(&[0xAB]).unwrap()),
+                encoding: None,
+                slice_count: None,
+                slices: None,
+            }),
+        };
+        query.extensions = Some(
+            query_chain(alloc::vec![lookalike]).unwrap_or_else(|_| panic!("the chain builds")),
+        );
+        attach_query_value_shm(query, &default_encoding(), &DESCRIPTOR)
+            .expect("an extension that only shares the id is not a value to refuse");
+        assert_eq!(query_value_shm_descriptors(query).len(), 1);
     }
 }

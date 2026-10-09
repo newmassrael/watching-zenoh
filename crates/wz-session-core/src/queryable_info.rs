@@ -121,7 +121,7 @@ fn unpack(value: u64) -> QueryableInfo {
 /// inverse). A thin projection of the shared [`read_z64_ext`] over the
 /// QueryableInfo id.
 pub fn read_queryable_info(exts: Option<&Vec<ExtEntryOwned>>) -> QueryableInfo {
-    read_z64_ext(exts, QUERYABLE_INFO_EXT_ID).map_or(QueryableInfo::DEFAULT, unpack)
+    read_z64_ext(exts, QUERYABLE_INFO_EXT_HEADER).map_or(QueryableInfo::DEFAULT, unpack)
 }
 
 /// Set / omit the QueryableInfo on a body's ext chain, mirroring zenoh's
@@ -133,7 +133,6 @@ pub fn set_queryable_info(exts: &mut Option<Vec<ExtEntryOwned>>, info: Queryable
     let value = pack(info);
     set_z64_ext(
         exts,
-        QUERYABLE_INFO_EXT_ID,
         QUERYABLE_INFO_EXT_HEADER,
         (value != 0).then_some(value),
     )

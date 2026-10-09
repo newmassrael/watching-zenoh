@@ -111,23 +111,26 @@ pub fn encode_attachment_ext<S: CodecStorage>(
 }
 
 /// Project the first attachment payload from an ext chain for the given
-/// carrier `ext_id`. Matches on `(ext_id, plain ZBuf body)`; a ZBuf body is
-/// exactly the decode-time witness that the header carried the ENC_ZBUF
-/// encoding, so no separate `enc()` test is needed. Returns the borrowed body
-/// slice; callers needing ownership map with `<[u8]>::to_vec`.
+/// carrier `ext_id`. Matches on the extension's IDENTITY (the header without
+/// the chain flag) and a plain ZBuf body; an extension of
+/// the same id that is mandatory is another extension and is not read. Returns
+/// the borrowed body slice; callers needing ownership map with `<[u8]>::to_vec`.
 ///
 /// R3044 -- generic over the entry, because a Query's chain holds its own kind
 /// of entry and the other messages' chains hold the generic one
 /// ([`crate::ext_view`]).
 pub fn decode_attachment_ext<E: ExtEntryView>(extensions: &[E], ext_id: u8) -> Option<&[u8]> {
-    for ext in extensions {
-        if ext.ext_id() == ext_id {
-            if let Some(bytes) = ext.plain_zbuf() {
-                return Some(bytes);
-            }
-        }
-    }
-    None
+    crate::ext_view::find_by_eid(extensions, attachment_eid(ext_id))?.plain_zbuf()
+}
+
+/// The identity of the attachment extension of the carrier whose id is `ext_id`:
+/// upstream declares every attachment as `zextzbuf!(id, false)`, a ZBuf that is
+/// not mandatory (`commons/zenoh-protocol/src/zenoh/put.rs` @
+/// `pub type Attachment = zextzbuf!(0x3, false);`), and tells a received
+/// extension apart by its identity, so an extension of the same id that is
+/// mandatory is not the attachment.
+const fn attachment_eid(ext_id: u8) -> u8 {
+    crate::ext_header::ext_identity(ext_id, false, crate::ext_header::EXT_ENC_ZBUF)
 }
 
 /// [`decode_attachment_ext`] over a chain on the wire profile, answering the
@@ -147,7 +150,7 @@ pub fn decode_attachment_ext_shared(
     #[cfg(feature = "rx-shared-bytes")]
     {
         for ext in extensions {
-            if ext.ext_id() != ext_id {
+            if crate::ext_header::ext_eid(ext.header) != attachment_eid(ext_id) {
                 continue;
             }
             // The same entry `decode_attachment_ext` reads: a plain ZBuf body.
@@ -273,6 +276,46 @@ mod tests {
     fn decode_discriminates_carrier_ext_id() {
         let chain = [encode_attachment_ext::<Wire>(ATTACHMENT_EXT_ID_PUSH, &[0xAA]).unwrap()];
         assert_eq!(decode_attachment_ext(&chain, ATTACHMENT_EXT_ID_QUERY), None);
+    }
+
+    /// An attachment is told by its identity, the header without the chain flag,
+    /// and not by the 4-bit id: upstream matches `iext::eid(ext)` against the
+    /// declared extension (`commons/zenoh-codec/src/zenoh/put.rs` @
+    /// `Ok(match iext::eid(ext) {`), so a ZBuf extension of the same id with the
+    /// mandatory bit set is an unknown extension there and is not the
+    /// attachment. Each carrier is checked against its own identity, with the
+    /// chain flag set and clear on the real one.
+    #[test]
+    fn decode_tells_the_attachment_by_its_identity_not_its_id() {
+        use crate::ext_header::{body_eid, lookalike_headers, EXT_FLAG_Z};
+        for (carrier_id, eid) in [
+            (ATTACHMENT_EXT_ID_PUSH, body_eid::PUT_ATTACHMENT),
+            (ATTACHMENT_EXT_ID_DEL, body_eid::DEL_ATTACHMENT),
+            (ATTACHMENT_EXT_ID_QUERY, body_eid::QUERY_ATTACHMENT),
+        ] {
+            let entry = |header: u8| {
+                let mut e = encode_attachment_ext::<Wire>(carrier_id, &[0xAA]).unwrap();
+                e.header = header;
+                e
+            };
+            for header in [eid, eid | EXT_FLAG_Z] {
+                assert_eq!(
+                    decode_attachment_ext(&[entry(header)], carrier_id),
+                    Some(&[0xAA][..]),
+                    "{header:#04x} is the attachment"
+                );
+            }
+            // Only a ZBuf-encoded look-alike can hold a ZBuf body.
+            for header in lookalike_headers(eid).filter(|h| (h >> 5) & 3 == 2) {
+                for h in [header, header | EXT_FLAG_Z] {
+                    assert_eq!(
+                        decode_attachment_ext(&[entry(h)], carrier_id),
+                        None,
+                        "{h:#04x} shares only the id with {eid:#04x}"
+                    );
+                }
+            }
+        }
     }
 
     /// An empty chain (and a chain with no matching ext) yields `None`.

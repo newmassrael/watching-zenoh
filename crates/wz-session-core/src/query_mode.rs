@@ -186,6 +186,13 @@ pub enum QueryTarget {
 /// reader, so the magic id lives in ONE place.
 pub const TARGET_EXT_ID: u8 = 0x04;
 
+/// The `ext_target` extension's header, which is its identity: `zextz64!(0x4,
+/// true)` (`commons/zenoh-protocol/src/network/request.rs` @
+/// `pub type Target = zextz64!(0x4, true);`), a z64 that is MANDATORY. A reader
+/// tells the extension by this and not by [`TARGET_EXT_ID`] alone.
+pub const TARGET_EXT_HEADER: u8 =
+    crate::ext_header::ext_identity(TARGET_EXT_ID, true, crate::ext_header::EXT_ENC_Z64);
+
 impl QueryTarget {
     /// Wire byte value as written by zenoh-pico's `_z_zsize_encode`
     /// invocation in the `_z_request_encode` target-ext branch

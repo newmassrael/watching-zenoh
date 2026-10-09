@@ -82,7 +82,7 @@
 //!
 //! MEASURED, and it corrected the guess that prompted it: the reader defect
 //! that survives every pre-existing assertion is a narrowed ID MASK, not a
-//! reordered chain walk. Under `EXT_MID_MASK = 0x1E` both arms keep
+//! reordered chain walk. Under `EXT_EID_MASK = 0x7E` both arms keep
 //! `first_marked` (1 and 7) and keep `drop_marked == 0`, every assertion this
 //! leg was filed with passes, and only the new precondition reds.
 //!

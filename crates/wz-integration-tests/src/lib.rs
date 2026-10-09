@@ -3166,8 +3166,14 @@ pub mod common {
     const FLAG_FRAGMENT_MORE: u8 = 0x40;
     const FLAG_FRAGMENT_RELIABLE: u8 = 0x20;
     const FLAG_EXT_CHAIN: u8 = 0x80;
-    const EXT_ID_MASK: u8 = 0x0F;
-    const EXT_ID_QOS: u8 = 0x01;
+    /// Upstream's `iext::eid`: the extension header without the chain flag, which
+    /// is what an extension is told by (`commons/zenoh-protocol/src/common/extension.rs`
+    /// @ `pub const fn eid(header: u8) -> u8 {`).
+    const EXT_EID_MASK: u8 = 0x7F;
+    /// The transport QoS of a Fragment, `zextz64!(0x1, true)`: mandatory, so `0x31`
+    /// and not the network QoS's `0x21` (`commons/zenoh-protocol/src/transport/fragment.rs`
+    /// @ `pub type QoS = zextz64!(0x1, true);`).
+    const EXT_EID_QOS: u8 = 0x31;
     const DEFAULT_PRIORITY: u8 = 5;
 
     /// Which conduit a fragment rides, as the PAIR wz keys a reassembly chain
@@ -3241,7 +3247,7 @@ pub mod common {
         }
         let (_sn, at) = read_vle(batch, 1)?;
         let ext_header = *batch.get(at)?;
-        if ext_header & EXT_ID_MASK != EXT_ID_QOS {
+        if ext_header & EXT_EID_MASK != EXT_EID_QOS {
             return Some(at_default);
         }
         let (priority, _) = read_vle(batch, at + 1)?;
@@ -9174,16 +9180,20 @@ pub mod ext_bodies {
 /// MASK, not a reordered chain walk. Reordering takes `first_marked` down too —
 /// upstream never writes First and Drop on one batch, so both are last on
 /// theirs — and the leg's own `first_marked >= 1` precondition reds on it. With
-/// `EXT_MID_MASK` narrowed to `0x1E` instead, `0x2` still matches itself while
+/// `EXT_EID_MASK` narrowed to `0x7E` instead, `0x2` still matches itself while
 /// `0x3` folds onto it and can never match: both arms keep `first_marked` (1
 /// and 7), both keep `drop_marked == 0`, every pre-existing assertion passes,
 /// and only `drop_reader_alive_on` reds.
 pub mod fragment_ext {
     use super::wire_tap::Side;
 
-    /// `[Z|ENC(2)|ID(5)]` — the ext envelope's id field, upstream's
-    /// `iext::EID_MASK` (`commons/zenoh-protocol/src/common/extension.rs`).
+    /// The message id field of a batch header, `[flags(3)|MID(5)]`.
     pub const EXT_MID_MASK: u8 = 0x1F;
+    /// `[Z|ENC(2)|M|ID(4)]` without `Z` — an ext envelope's IDENTITY, upstream's
+    /// `iext::eid` (`commons/zenoh-protocol/src/common/extension.rs` @
+    /// `pub const fn eid(header: u8) -> u8 {`): the id, the mandatory bit and the
+    /// encoding, so an ext of the same id in another shape is another ext.
+    pub const EXT_EID_MASK: u8 = 0x7F;
     /// The "another ext follows" bit, upstream's `iext::FLAG_Z`. The LAST ext in
     /// a chain has it CLEAR, which is why [`fragment_ext_offset`] tests `wanted`
     /// BEFORE it tests this.
@@ -9224,7 +9234,7 @@ pub mod fragment_ext {
             let &ext = batch.get(at)?;
             let envelope = at;
             at += 1;
-            if ext & EXT_MID_MASK == wanted {
+            if ext & EXT_EID_MASK == wanted {
                 return Some(envelope);
             }
             at = match (ext & EXT_ENC_MASK) >> 5 {
@@ -9333,10 +9343,10 @@ pub mod fragment_ext {
         let batch = &segment[2..];
         let at = fragment_ext_offset(batch, fragment_mid, EXT_ID_FIRST)?;
         let mut relabelled = batch.to_vec();
-        // Only the id field moves; `Z` and the encoding bits stay as the writer
-        // wrote them, which is what makes this the batch upstream WOULD have
-        // sent.
-        relabelled[at] = (relabelled[at] & !EXT_MID_MASK) | EXT_ID_DROP;
+        // Only the identity moves; `Z` stays as the writer wrote it, and First
+        // and Drop are both unit extensions, so what is written here is the
+        // batch upstream WOULD have sent.
+        relabelled[at] = (relabelled[at] & EXT_Z_FLAG) | EXT_ID_DROP;
         Some(fragment_ext_present(&relabelled, fragment_mid, EXT_ID_DROP))
     }
 
@@ -9350,7 +9360,7 @@ pub mod fragment_ext {
         const FRAGMENT_MID: u8 = 0x06;
 
         /// ⚠ THE BYTES BELOW ARE WRITTEN AS LITERALS ON PURPOSE. Assembling
-        /// them from `EXT_Z_FLAG` / `EXT_ENC_MASK` / `EXT_MID_MASK` would build
+        /// them from `EXT_Z_FLAG` / `EXT_ENC_MASK` / `EXT_EID_MASK` would build
         /// the fixture out of the very constants under test, and a walk that
         /// mis-defines one would then be checked against a fixture that
         /// mis-defines it the same way — the "a table compared against its own

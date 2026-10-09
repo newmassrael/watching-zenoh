@@ -800,17 +800,19 @@ impl Sample {
 /// [`QosLevel`]. The matching predicate mirrors zenoh-pico's
 /// `_Z_EXT_FULL_ID(extension->_header)` switch in
 /// `_z_push_decode_ext_cb` (`vendor/zenoh-pico/src/protocol/codec/
-/// network.c` 70-93): `ext_id == 0x01` AND `enc == ENC_ZINT (0b01)`.
+/// network.c` 70-93): the QoS is the extension `zextz64!(0x1, false)`, header
+/// `0x21` ([`crate::ext_header::network_eid::QOS`]), told by its IDENTITY (the
+/// header without the chain flag), as upstream tells it
+/// (`commons/zenoh-codec/src/network/push.rs` @ `ext::QoS::ID => {`). The same id
+/// with the mandatory bit set (`0x31`) is the transport QoS of a Frame and is an
+/// unknown extension here.
 ///
-/// Returns `None` when no extension in the chain has the matching
-/// `(ext_id, enc)` combination, or when the matching extension's body
-/// variant is unexpectedly not `ExtZint` (which the wire decoder
-/// would only produce if the upstream catalog drifted).
+/// Returns `None` when no extension in the chain has that identity, or when the
+/// matching extension's body variant is unexpectedly not `ExtZint` (which the
+/// wire decoder would only produce if the upstream catalog drifted).
 pub fn extract_qos<S: CodecStorage>(extensions: &[ExtEntryOwned<S>]) -> Option<QosLevel> {
-    const QOS_EXT_ID: u8 = 0x01;
-    const ENC_ZINT: u8 = 0x01;
     for ext in extensions {
-        if ext.ext_id() == QOS_EXT_ID && ext.enc() == ENC_ZINT {
+        if crate::ext_header::ext_eid(ext.header) == crate::ext_header::network_eid::QOS {
             if let ExtEntryOwnedVariant::CodecZenohExtZint(z) = &ext.body {
                 return Some(QosLevel::from_raw(z.value as u8));
             }
@@ -825,9 +827,12 @@ pub fn extract_qos<S: CodecStorage>(extensions: &[ExtEntryOwned<S>]) -> Option<Q
 // dispatch in `crate::pubsub` calls `decode_attachment_ext(.., PUSH)`.
 
 /// Walk an ExtEntry chain and project the first source-info ext into a
-/// [`SourceInfo`]. Predicate mirrors zenoh-pico's
-/// `_z_push_body_decode_extensions` case at line 309-313: `ext_id ==
-/// 0x01` AND `enc == ENC_ZBUF (0b10)`. The ZBuf payload is then parsed
+/// [`SourceInfo`]. The extension is `zextzbuf!(0x1, false)`, header `0x41`
+/// ([`crate::ext_header::body_eid::SOURCE_INFO`]), told by its IDENTITY as
+/// upstream tells it (`commons/zenoh-codec/src/zenoh/put.rs` @
+/// `ext::SourceInfo::ID => {`); zenoh-pico's
+/// `_z_push_body_decode_extensions` case at line 309-313 reads the same
+/// extension. The ZBuf payload is then parsed
 /// per `_z_source_info_decode` (`vendor/zenoh-pico/src/protocol/codec/
 /// message.c` 196-231):
 ///
@@ -847,16 +852,8 @@ pub fn extract_qos<S: CodecStorage>(extensions: &[ExtEntryOwned<S>]) -> Option<Q
 pub fn extract_source_info<E: crate::ext_view::ExtEntryView>(
     extensions: &[E],
 ) -> Option<SourceInfo> {
-    const SOURCE_INFO_EXT_ID: u8 = 0x01;
-    const ENC_ZBUF: u8 = 0x02;
-    for ext in extensions {
-        if ext.ext_id() == SOURCE_INFO_EXT_ID && ext.enc() == ENC_ZBUF {
-            if let Some(bytes) = ext.plain_zbuf() {
-                return decode_source_info_payload(bytes);
-            }
-        }
-    }
-    None
+    let ext = crate::ext_view::find_by_eid(extensions, crate::ext_header::body_eid::SOURCE_INFO)?;
+    decode_source_info_payload(ext.plain_zbuf()?)
 }
 
 /// Decode the ZBuf payload of a source-info extension into a typed
@@ -1304,6 +1301,73 @@ mod tests {
         ext.body = ExtEntryVariant::CodecZenohExtZint(wz_codecs::ext_zint::ExtZint { value: 0xBE });
         let qos = extract_qos(&[ext.try_into_owned().unwrap()]).unwrap();
         assert_eq!(qos.raw, 0xBE);
+    }
+
+    /// The network QoS is told by its identity, `0x21`, and not by the id field:
+    /// upstream matches `iext::eid(ext)` against `QoS = zextz64!(0x1, false)`
+    /// (`commons/zenoh-codec/src/network/push.rs` @ `ext::QoS::ID => {`), so the
+    /// same id with the mandatory bit set (`0x31`, the TRANSPORT QoS of a Frame)
+    /// is an unknown extension on a network message. The chain flag is no part of
+    /// the identity, so `0xA1` is the QoS.
+    #[test]
+    fn extract_qos_tells_the_extension_by_its_identity() {
+        use crate::ext_header::{lookalike_headers, network_eid, EXT_FLAG_Z};
+        let entry = |header: u8| {
+            let mut ext = ExtEntry::new();
+            ext.header = header;
+            ext.body =
+                ExtEntryVariant::CodecZenohExtZint(wz_codecs::ext_zint::ExtZint { value: 0xBE });
+            ext.try_into_owned().unwrap()
+        };
+        for header in [network_eid::QOS, network_eid::QOS | EXT_FLAG_Z] {
+            assert_eq!(
+                extract_qos(&[entry(header)]).map(|q| q.raw),
+                Some(0xBE),
+                "{header:#04x} is the network QoS"
+            );
+        }
+        for header in lookalike_headers(network_eid::QOS).filter(|h| (h >> 5) & 3 == 1) {
+            for h in [header, header | EXT_FLAG_Z] {
+                assert!(
+                    extract_qos(&[entry(h)]).is_none(),
+                    "{h:#04x} shares only the id with the network QoS"
+                );
+            }
+        }
+    }
+
+    /// The source info is told by its identity, `0x41`, for the same reason: the
+    /// same id as a mandatory ZBuf (`0x51`) is an unknown extension upstream
+    /// (`commons/zenoh-codec/src/zenoh/put.rs` @ `ext::SourceInfo::ID => {`).
+    #[test]
+    fn extract_source_info_tells_the_extension_by_its_identity() {
+        use crate::ext_header::{body_eid, lookalike_headers, EXT_FLAG_Z};
+        // zidlen 1 + 1 zid byte + VLE eid 7 + VLE sn 42.
+        let payload: Vec<u8> = vec![0x00, 0x99, 7, 42];
+        let entry = |header: u8| {
+            let mut ext = ExtEntry::new();
+            ext.header = header;
+            ext.body = ExtEntryVariant::CodecZenohExtZbuf(wz_codecs::ext_zbuf::ExtZbuf {
+                value_len: payload.len() as u64,
+                value: &payload,
+            });
+            ext.try_into_owned().unwrap()
+        };
+        for header in [body_eid::SOURCE_INFO, body_eid::SOURCE_INFO | EXT_FLAG_Z] {
+            assert_eq!(
+                extract_source_info(&[entry(header)]).map(|s| s.sn),
+                Some(42),
+                "{header:#04x} is the source info"
+            );
+        }
+        for header in lookalike_headers(body_eid::SOURCE_INFO).filter(|h| (h >> 5) & 3 == 2) {
+            for h in [header, header | EXT_FLAG_Z] {
+                assert!(
+                    extract_source_info(&[entry(h)]).is_none(),
+                    "{h:#04x} shares only the id with the source info"
+                );
+            }
+        }
     }
 
     // attachment decode predicate tests moved with the helper to

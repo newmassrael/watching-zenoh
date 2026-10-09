@@ -938,7 +938,10 @@ fn stats_class_marked<E: crate::ext_view::ExtEntryView>(
     class
 }
 
-/// The value length of the first ZBUF extension `id` in `extensions`, or `0`.
+/// The value length of the first ZBUF extension of identity `eid` in
+/// `extensions`, or `0`. The extension is told by its identity
+/// ([`crate::ext_header::body_eid`]), as upstream tells it, so an extension of
+/// the same id that is mandatory is another extension and is not sized.
 #[cfg(all(
     feature = "transport-stats",
     any(
@@ -947,11 +950,8 @@ fn stats_class_marked<E: crate::ext_view::ExtEntryView>(
         feature = "codec-response"
     )
 ))]
-fn zbuf_ext_len<E: crate::ext_view::ExtEntryView>(extensions: Option<&[E]>, id: u8) -> usize {
-    extensions
-        .unwrap_or_default()
-        .iter()
-        .find(|ext| ext.ext_id() == id)
+fn zbuf_ext_len<E: crate::ext_view::ExtEntryView>(extensions: Option<&[E]>, eid: u8) -> usize {
+    crate::ext_view::find_by_eid(extensions.unwrap_or_default(), eid)
         .and_then(|ext| ext.plain_zbuf())
         .map_or(0, <[u8]>::len)
 }
@@ -973,7 +973,7 @@ fn put_payload_size(put: &crate::wire::parts::MsgPutOwned) -> usize {
     crate::put_payload::payload_len(put)
         + zbuf_ext_len(
             put.extensions.as_deref(),
-            crate::ext_header::body_ext_id::PUT_ATTACHMENT,
+            crate::ext_header::body_eid::PUT_ATTACHMENT,
         )
 }
 
@@ -987,7 +987,7 @@ fn put_payload_size(put: &crate::wire::parts::MsgPutOwned) -> usize {
     )
 ))]
 fn del_payload_size(extensions: Option<&[crate::wire::parts::ExtEntryOwned]>) -> usize {
-    zbuf_ext_len(extensions, crate::ext_header::body_ext_id::DEL_ATTACHMENT)
+    zbuf_ext_len(extensions, crate::ext_header::body_eid::DEL_ATTACHMENT)
 }
 
 /// [`stats_class`] for a `Push` body — the pub-sub data plane. Shared by the TX
@@ -1075,7 +1075,7 @@ where
 #[cfg(all(feature = "transport-stats", feature = "codec-request"))]
 fn query_payload_size(extensions: Option<&[crate::wire::parts::QueryExtEntryOwned]>) -> usize {
     crate::ext_view::query_value_payload_len(extensions.unwrap_or_default())
-        + zbuf_ext_len(extensions, crate::ext_header::body_ext_id::QUERY_ATTACHMENT)
+        + zbuf_ext_len(extensions, crate::ext_header::body_eid::QUERY_ATTACHMENT)
 }
 
 /// [`stats_class`] for a `Response` body. Reply and Err BOTH fold onto
@@ -1765,5 +1765,49 @@ mod shared_decode_tests {
         let payload = crate::put_payload::inline_bytes(put).expect("an inline Put");
         assert_eq!(payload, PAYLOAD);
         assert!(lies_within(frame.as_slice(), payload));
+    }
+}
+
+// The statistics classifier sizes an attachment by the extension upstream counts
+// as the attachment, which is told by its identity and not by the id field
+// (`commons/zenoh-codec/src/zenoh/put.rs` @ `Ok(match iext::eid(ext) {`).
+#[cfg(all(
+    test,
+    feature = "transport-stats",
+    any(
+        feature = "codec-push",
+        feature = "codec-request",
+        feature = "codec-response"
+    )
+))]
+mod attachment_identity_tests {
+    use super::*;
+    use crate::ext_header::{body_eid, lookalike_headers};
+
+    #[test]
+    fn an_extension_of_the_attachments_id_is_not_sized_as_the_attachment() {
+        let entry = |header: u8| {
+            let mut e = crate::attachment::encode_attachment_ext::<crate::wire::WireStorage>(
+                crate::attachment::ATTACHMENT_EXT_ID_QUERY,
+                &[0xAB; 3],
+            )
+            .unwrap();
+            e.header = header;
+            e
+        };
+        assert_eq!(
+            zbuf_ext_len(
+                Some(&[entry(body_eid::QUERY_ATTACHMENT)][..]),
+                body_eid::QUERY_ATTACHMENT
+            ),
+            3
+        );
+        for header in lookalike_headers(body_eid::QUERY_ATTACHMENT).filter(|h| (h >> 5) & 3 == 2) {
+            assert_eq!(
+                zbuf_ext_len(Some(&[entry(header)][..]), body_eid::QUERY_ATTACHMENT),
+                0,
+                "{header:#04x} shares only the id with the attachment"
+            );
+        }
     }
 }

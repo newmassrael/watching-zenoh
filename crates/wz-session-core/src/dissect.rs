@@ -2070,9 +2070,9 @@ fn walk_query_ext_chain(c: &mut SpanCursor<'_>, max: usize) -> Result<Vec<Field>
             break;
         }
         let header = c.peek_u8()?;
-        let id = crate::ext_header::ext_id(header);
+        // The codec's own rule (`query_ext_entry.scxml`): the ZBuf entry right
+        // after the marker is read in its sliced shape, whatever its identity.
         let sliced = after_shm
-            && id == crate::ext_header::body_ext_id::QUERY_BODY
             && (header & crate::ext_header::EXT_ENC_MASK) == crate::ext_header::EXT_ENC_ZBUF;
         let (z, field) = if sliced {
             walk_query_sliced_value(c)?

@@ -166,7 +166,7 @@ pub fn declare_envelope_extensions() -> Vec<ExtEntryOwned> {
 /// Carrier-agnostic because the chain is: the two public readers below differ
 /// only in which struct's field they hand over.
 fn read_qos_chain<S: CodecStorage>(exts: Option<&Vec<ExtEntryOwned<S>>>) -> QosLevel {
-    ext_nodeid::read_z64_ext(exts, QOS_EXT_ID)
+    ext_nodeid::read_z64_ext(exts, QOS_EXT_HEADER)
         .map(|v| QosLevel::from_raw(v as u8))
         .unwrap_or(QosLevel::DEFAULT)
 }
@@ -189,7 +189,7 @@ fn set_qos_chain<S: CodecStorage>(
     } else {
         Some(qos.raw as u64)
     };
-    let present = ext_nodeid::set_z64_ext(exts, QOS_EXT_ID, QOS_EXT_HEADER, value);
+    let present = ext_nodeid::set_z64_ext(exts, QOS_EXT_HEADER, value);
     ext_nodeid::sync_header_z(header, present);
 }
 
@@ -286,7 +286,7 @@ pub fn read_response_qos(response: &crate::wire::ResponseOwned) -> QosLevel {
 pub fn set_response_qos(response: &mut crate::wire::ResponseOwned, qos: QosLevel) {
     let exts = &mut response.extensions;
     if let Some(list) = exts.as_mut() {
-        list.retain(|e| ext_nodeid::ext_id(e.header) != QOS_EXT_ID);
+        list.retain(|e| crate::ext_header::ext_eid(e.header) != QOS_EXT_HEADER);
     }
     if qos != QosLevel::DEFAULT {
         exts.get_or_insert_with(Vec::new).insert(0, qos_ext(qos));

@@ -2255,13 +2255,13 @@ fn query_body_bytes<E: wz_session_core::ext_view::ExtEntryView>(
     // marker has no plain bytes to measure, and answers `None` here as a record
     // that carries no value does: what a capture can say about it is that it is
     // not plain bytes, and the descriptor it holds is not its size.
-    extensions?.iter().find_map(|ext| {
-        if ext.ext_id() == wz_session_core::ext_header::body_ext_id::QUERY_BODY {
-            ext.plain_zbuf()
-        } else {
-            None
-        }
-    })
+    // The value is told by its identity, as upstream tells it, and not by the id
+    // field an extension that is mandatory shares with it.
+    wz_session_core::ext_view::find_by_eid(
+        extensions?,
+        wz_session_core::ext_header::body_eid::QUERY_VALUE,
+    )?
+    .plain_zbuf()
 }
 
 /// R311y644 (§1.1p) — the SOURCE timestamp a record carries, if it carries one.
@@ -5977,5 +5977,44 @@ pub(crate) mod tests {
             "it is refused, and refused as a KNOWN session that never declared \
              it rather than as an unknown flow"
         );
+    }
+}
+
+// The capture plane sizes a Query's value by the extension upstream reads as the
+// value, which is told by its identity and not by the id field
+// (`commons/zenoh-codec/src/zenoh/query.rs` @
+// `ext::QueryBodyType::SID | ext::QueryBodyType::VID => {`).
+#[cfg(all(test, feature = "network-codecs"))]
+mod query_body_identity_tests {
+    use super::*;
+    use wz_codecs::ext_entry::{ExtEntryOwned, ExtEntryOwnedVariant};
+    use wz_session_core::ext_header::{body_eid, lookalike_headers, EXT_FLAG_Z};
+
+    #[test]
+    fn an_extension_of_the_values_id_is_not_the_value() {
+        let entry = |header: u8| -> wz_codecs::query_ext_entry::QueryExtEntryOwned {
+            wz_session_core::ext_view::query_ext_from_generic(ExtEntryOwned {
+                header,
+                body: ExtEntryOwnedVariant::CodecZenohExtZbuf(wz_codecs::ext_zbuf::ExtZbufOwned {
+                    value_len: 2,
+                    value: wz_session_core::codec_owned::owned_bytes(&[0x00u8, 0xAB])
+                        .expect("the fixture value is within the owned bound"),
+                }),
+            })
+        };
+        for header in [body_eid::QUERY_VALUE, body_eid::QUERY_VALUE | EXT_FLAG_Z] {
+            assert_eq!(
+                query_body_bytes(Some(&[entry(header)][..])),
+                Some(&[0x00u8, 0xAB][..]),
+                "{header:#04x} is the value"
+            );
+        }
+        for header in lookalike_headers(body_eid::QUERY_VALUE).filter(|h| (h >> 5) & 3 == 2) {
+            assert_eq!(
+                query_body_bytes(Some(&[entry(header)][..])),
+                None,
+                "{header:#04x} shares only the id with the value"
+            );
+        }
     }
 }

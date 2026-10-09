@@ -35,7 +35,7 @@
 use crate::wire::RequestOwned;
 
 use crate::ext_nodeid;
-use crate::query_mode::{QueryTarget, TARGET_EXT_ID};
+use crate::query_mode::{QueryTarget, TARGET_EXT_HEADER};
 
 /// Read the routing-context source `node_id` from a Request's `ext_nodeid`
 /// extension. Returns `0` when absent — zenoh's self-originated DEFAULT, so a
@@ -63,10 +63,10 @@ pub fn set_request_source(request: &mut RequestOwned, node_id: u16) {
 /// single nearest complete queryable, else All). The target ext is a zint over
 /// the SAME `Z64` body the `ext_nodeid` reader decodes, so this is a thin
 /// projection of the shared [`read_z64_ext`](crate::ext_nodeid::read_z64_ext)
-/// over [`TARGET_EXT_ID`], mapped through [`QueryTarget::from_wire_byte`] — no
+/// over [`TARGET_EXT_HEADER`], mapped through [`QueryTarget::from_wire_byte`] — no
 /// target-specific decoder.
 pub fn read_request_target(request: &RequestOwned) -> Option<QueryTarget> {
-    ext_nodeid::read_z64_ext(request.extensions.as_ref(), TARGET_EXT_ID)
+    ext_nodeid::read_z64_ext(request.extensions.as_ref(), TARGET_EXT_HEADER)
         .and_then(QueryTarget::from_wire_byte)
 }
 
@@ -76,6 +76,13 @@ pub fn read_request_target(request: &RequestOwned) -> Option<QueryTarget> {
 /// writer and [`read_request_timeout_ms`] reader both key on.
 pub const TIMEOUT_EXT_ID: u8 = 0x06;
 
+/// The `ext_timeout` extension's header, which is its identity: `zextz64!(0x6,
+/// false)` (`commons/zenoh-protocol/src/network/request.rs` @
+/// `pub type Timeout = zextz64!(0x6, false);`), a z64 that is not mandatory. A
+/// reader tells the extension by this and not by [`TIMEOUT_EXT_ID`] alone.
+pub const TIMEOUT_EXT_HEADER: u8 =
+    crate::ext_header::ext_identity(TIMEOUT_EXT_ID, false, crate::ext_header::EXT_ENC_Z64);
+
 /// Read the per-query timeout (milliseconds) a routed Query carries in its
 /// `ext_timeout` extension — zenoh's `msg.ext_timeout`, which EVERY relay hop
 /// honors when arming its pending-entry deadline (`route_query`,
@@ -83,9 +90,9 @@ pub const TIMEOUT_EXT_ID: u8 = 0x06;
 /// `None` when absent — the relay falls back to its configured default. A zint
 /// over the same `Z64` body the target ext uses, so this is a thin projection of
 /// the shared [`read_z64_ext`](crate::ext_nodeid::read_z64_ext) over
-/// [`TIMEOUT_EXT_ID`].
+/// [`TIMEOUT_EXT_HEADER`].
 pub fn read_request_timeout_ms(request: &RequestOwned) -> Option<u64> {
-    ext_nodeid::read_z64_ext(request.extensions.as_ref(), TIMEOUT_EXT_ID)
+    ext_nodeid::read_z64_ext(request.extensions.as_ref(), TIMEOUT_EXT_HEADER)
 }
 
 #[cfg(test)]

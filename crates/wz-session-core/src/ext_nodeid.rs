@@ -56,6 +56,7 @@ pub const NODEID_EXT_HEADER: u8 = NODEID_EXT_ID | EXT_FLAG_M | EXT_ENC_Z64;
 
 // `ext_id` (the iext id-field accessor) is the SSOT in `crate::ext_header`;
 // re-exported for the existing `ext_nodeid::ext_id` callers' paths.
+use crate::ext_header::ext_eid;
 pub use crate::ext_header::ext_id;
 
 /// Sync a message header's `Z` bit to whether its extension chain is now
@@ -91,16 +92,21 @@ pub fn apply_chain_z_bits<S: CodecStorage>(entries: &mut [ExtEntryOwned<S>]) {
     }
 }
 
-/// Read a `Z64`-bodied extension's value by `id` from a chain — the generic
-/// chain read the per-id routing-context readers share ([`read_source`] for the
-/// `ext_nodeid`, `push_routing_context`'s
-/// hop-limit). `None` when no entry with `id` is present (or its body is not a
-/// `Z64` zint). The id-keyed scan + body-variant match lives here ONCE so each
-/// per-id reader is a one-line projection.
-pub fn read_z64_ext<S: CodecStorage>(exts: Option<&Vec<ExtEntryOwned<S>>>, id: u8) -> Option<u64> {
-    let exts = exts?;
-    for ext in exts {
-        if ext_id(ext.header) == id {
+/// Read a `Z64`-bodied extension's value from a chain, by the extension's
+/// IDENTITY — `header` is the extension's header (the chain flag is ignored), so
+/// an extension that shares only the id with it, a different mandatory bit or
+/// another encoding, is a different extension and is not read. The generic chain
+/// read the per-extension routing-context readers share ([`read_source`] for the
+/// `ext_nodeid`, `push_routing_context`'s hop-limit). `None` when no entry of that
+/// identity is present (or its body is not a `Z64` zint). The scan + body-variant
+/// match lives here ONCE so each reader is a one-line projection.
+pub fn read_z64_ext<S: CodecStorage>(
+    exts: Option<&Vec<ExtEntryOwned<S>>>,
+    header: u8,
+) -> Option<u64> {
+    let want = ext_eid(header);
+    for ext in exts? {
+        if ext_eid(ext.header) == want {
             if let ExtEntryOwnedVariant::CodecZenohExtZint(z) = &ext.body {
                 return Some(z.value);
             }
@@ -109,25 +115,27 @@ pub fn read_z64_ext<S: CodecStorage>(exts: Option<&Vec<ExtEntryOwned<S>>>, id: u
     None
 }
 
-/// Insert / replace / remove a `Z64`-bodied extension by `id` in a chain — the
-/// generic chain EDIT the per-id routing-context setters share ([`set_source`],
-/// the Push hop-limit). `value == None` REMOVES any existing entry with `id`;
-/// `Some(v)` inserts or replaces it with header `header` and a `Z64` body of
-/// `v`. The per-entry chain-continuation `Z` bits are renormalised and an
-/// emptied chain collapses to `None`. Returns whether the chain is now
-/// NON-EMPTY, so the caller can sync its message-level header `Z` flag (the one
-/// field that differs per message type — Push header vs Declare header). The
-/// retain-drop / push / `Z`-normalise mechanics live here ONCE; a per-id setter
-/// supplies only its id, header, and value.
+/// Insert / replace / remove a `Z64`-bodied extension in a chain, by the
+/// extension's IDENTITY — the generic chain EDIT the per-extension routing-context
+/// setters share ([`set_source`], the Push hop-limit). `value == None` REMOVES any
+/// existing entry of `header`'s identity; `Some(v)` inserts or replaces it with
+/// header `header` and a `Z64` body of `v`. An entry that shares only the id with
+/// it is another extension and is left where it is. The per-entry
+/// chain-continuation `Z` bits are renormalised and an emptied chain collapses to
+/// `None`. Returns whether the chain is now NON-EMPTY, so the caller can sync its
+/// message-level header `Z` flag (the one field that differs per message type —
+/// Push header vs Declare header). The retain-drop / push / `Z`-normalise
+/// mechanics live here ONCE; a per-extension setter supplies only its header and
+/// value.
 pub fn set_z64_ext<S: CodecStorage>(
     exts: &mut Option<Vec<ExtEntryOwned<S>>>,
-    id: u8,
     header: u8,
     value: Option<u64>,
 ) -> bool {
-    // Replace semantics: drop any existing entry with this id before re-adding.
+    // Replace semantics: drop any existing entry of this identity before re-adding.
+    let want = ext_eid(header);
     if let Some(list) = exts.as_mut() {
-        list.retain(|e| ext_id(e.header) != id);
+        list.retain(|e| ext_eid(e.header) != want);
     }
     if let Some(v) = value {
         let entry = ExtEntryOwned {
@@ -178,7 +186,7 @@ pub const NODE_ID_BITS: u32 = NodeId::BITS;
 /// so the constant is held against this function's BEHAVIOUR and not only
 /// against its signature.
 pub fn read_source<S: CodecStorage>(exts: Option<&Vec<ExtEntryOwned<S>>>) -> NodeId {
-    read_z64_ext(exts, NODEID_EXT_ID).map_or(0, |v| v as NodeId)
+    read_z64_ext(exts, NODEID_EXT_HEADER).map_or(0, |v| v as NodeId)
 }
 
 /// Set / replace / remove the `ext_nodeid` in an extension chain, mirroring
@@ -190,7 +198,6 @@ pub fn read_source<S: CodecStorage>(exts: Option<&Vec<ExtEntryOwned<S>>>) -> Nod
 pub fn set_source<S: CodecStorage>(exts: &mut Option<Vec<ExtEntryOwned<S>>>, node_id: u16) -> bool {
     set_z64_ext(
         exts,
-        NODEID_EXT_ID,
         NODEID_EXT_HEADER,
         (node_id != 0).then_some(node_id as u64),
     )
@@ -212,6 +219,41 @@ mod tests {
         ExtEntryOwned {
             header: 0x01 | EXT_ENC_Z64,
             body: ExtEntryOwnedVariant::CodecZenohExtZint(ExtZint { value: 5 }),
+        }
+    }
+
+    /// The node id is told by its identity, `0x33` (`zextz64!(0x3, true)`), and
+    /// not by the id field: upstream matches `iext::eid(ext)` against it
+    /// (`commons/zenoh-codec/src/network/push.rs` @ `ext::NodeId::ID => {`), so a
+    /// z64 of id 3 with the mandatory bit CLEAR is an unknown extension there,
+    /// and an edit of the node id must neither read it nor replace it. The
+    /// chain flag is no part of the identity, so `0xB3` is the node id.
+    #[test]
+    fn the_node_id_is_told_by_its_identity_not_its_id() {
+        use crate::ext_header::lookalike_headers;
+        let entry = |header: u8, value: u64| -> ExtEntryOwned {
+            ExtEntryOwned {
+                header,
+                body: ExtEntryOwnedVariant::CodecZenohExtZint(ExtZint { value }),
+            }
+        };
+        assert_eq!(
+            read_source(Some(&vec![entry(NODEID_EXT_HEADER | EXT_FLAG_Z, 7)])),
+            7
+        );
+        for header in lookalike_headers(NODEID_EXT_HEADER).filter(|h| (h >> 5) & 3 == 1) {
+            assert_eq!(
+                read_source(Some(&vec![entry(header, 7)])),
+                0,
+                "{header:#04x} shares only the id with the node id"
+            );
+            // An edit of the node id keeps the look-alike where it was.
+            let mut exts = Some(vec![entry(header, 7)]);
+            assert!(set_source(&mut exts, 9));
+            let list = exts.as_ref().expect("present");
+            assert_eq!(list.len(), 2, "{header:#04x} kept, node id appended");
+            assert_eq!(list[0].header, header | EXT_FLAG_Z);
+            assert_eq!(read_source(exts.as_ref()), 9);
         }
     }
 

@@ -245,4 +245,132 @@ pub mod body_ext_id {
     pub const DEL_ATTACHMENT: u8 = 0x02;
     /// A `Query` body's attachment: `0x5`.
     pub const QUERY_ATTACHMENT: u8 = 0x05;
+
+    /// The source-info extension every data body carries under the same id:
+    /// `zextzbuf!(0x1, false)` on `Put`, `Del`, `Query` and `Err`.
+    pub const SOURCE_INFO: u8 = 0x01;
+}
+
+/// An extension's IDENTITY as upstream composes it: `iext::id(id, mandatory,
+/// encoding)` (`commons/zenoh-protocol/src/common/extension.rs` @
+/// `pub(super) const fn id(id: u8, mandatory: bool, encoding: u8) -> u8 {`).
+///
+/// This is the value a reader compares [`ext_eid`] of a received header against,
+/// and the header (without the chain flag) a writer emits. Every
+/// `zextunit!` / `zextz64!` / `zextzbuf!` declaration upstream is one call of it,
+/// so the identity constants below are derived with it rather than typed as a
+/// byte, which keeps the three facts (id, mandatory bit, encoding) legible.
+pub const fn ext_identity(id: u8, mandatory: bool, encoding: u8) -> u8 {
+    let mut identity = (id & 0x0F) | encoding;
+    if mandatory {
+        identity |= EXT_FLAG_M;
+    }
+    identity
+}
+
+/// The IDENTITIES of the extensions on the data bodies (`Put`, `Del`, `Query`),
+/// as [`ext_eid`] of their header reads them.
+///
+/// R3171 — [`body_ext_id`] holds the 4-bit id FIELD, which is what an extension
+/// is BUILT from and not what it is TOLD APART by. Upstream tells a received
+/// extension apart by [`ext_eid`] (`commons/zenoh-codec/src/zenoh/put.rs` @
+/// `Ok(match iext::eid(ext) {`, and the same match in `del.rs` and `query.rs`),
+/// so two extensions that share an id and differ in the mandatory bit or the
+/// encoding are DIFFERENT extensions there, and the one that is not declared is
+/// an unknown extension. A reader here that compared the id field alone took
+/// the look-alike for the declared extension. Compare against these.
+pub mod body_eid {
+    use super::{ext_identity, EXT_ENC_UNIT, EXT_ENC_ZBUF};
+
+    /// `zextzbuf!(0x1, false)`: `0x41`, on `Put`, `Del`, `Query` and `Err`.
+    pub const SOURCE_INFO: u8 = ext_identity(super::body_ext_id::SOURCE_INFO, false, EXT_ENC_ZBUF);
+    /// A `Put`'s attachment, `zextzbuf!(0x3, false)`: `0x43`.
+    pub const PUT_ATTACHMENT: u8 =
+        ext_identity(super::body_ext_id::PUT_ATTACHMENT, false, EXT_ENC_ZBUF);
+    /// A `Del`'s attachment, `zextzbuf!(0x2, false)`: `0x42`.
+    pub const DEL_ATTACHMENT: u8 =
+        ext_identity(super::body_ext_id::DEL_ATTACHMENT, false, EXT_ENC_ZBUF);
+    /// A `Query`'s attachment, `zextzbuf!(0x5, false)`: `0x45`.
+    pub const QUERY_ATTACHMENT: u8 =
+        ext_identity(super::body_ext_id::QUERY_ATTACHMENT, false, EXT_ENC_ZBUF);
+    /// A `Query`'s value, `ZExtZBuf::<0x03>::id(false)`: `0x43`.
+    pub const QUERY_VALUE: u8 = ext_identity(super::body_ext_id::QUERY_BODY, false, EXT_ENC_ZBUF);
+    /// The marker before a `Query`'s sliced value, the raw `0x04` upstream names
+    /// as the second parameter of its `ValueType`: a unit extension, not
+    /// mandatory.
+    pub const QUERY_SHM: u8 = ext_identity(super::body_ext_id::QUERY_SHM, false, EXT_ENC_UNIT);
+}
+
+/// The IDENTITIES of the extensions on the NETWORK messages and the transport
+/// messages that carry a ZInt priority, for the readers that pick one out of a
+/// received chain. See [`body_eid`] for why an identity and not an id.
+pub mod network_eid {
+    use super::{ext_identity, EXT_ENC_Z64};
+
+    /// The network QoS, `zextz64!(0x1, false)`: `0x21`, on `Push`, `Request`,
+    /// `Response`, `Declare`, `Interest` and the network `OAM`
+    /// (`commons/zenoh-protocol/src/network/push.rs` @
+    /// `pub type QoS = zextz64!(0x1, false);`).
+    pub const QOS: u8 = ext_identity(0x1, false, EXT_ENC_Z64);
+
+    /// The transport QoS on `Frame` and `Fragment`, `zextz64!(0x1, true)`:
+    /// `0x31`, MANDATORY where the network one is not
+    /// (`commons/zenoh-protocol/src/transport/frame.rs` @
+    /// `pub type QoS = zextz64!(0x1, true);`).
+    pub const TRANSPORT_QOS: u8 = ext_identity(0x1, true, EXT_ENC_Z64);
+}
+
+/// Every header that has the 4-bit id of `identity` and is not `identity`: the
+/// extensions a reader that compares the id field alone would take for it.
+///
+/// It is the population of the look-alike rows of the identity tests, so a test
+/// names the extension it reads and gets the whole family it must refuse, instead
+/// of a hand-picked few, and it is public because those tests live in the crates
+/// that read chains (`wz-capture` among them) as well as in this one.
+///
+/// Encodings 0..=3 (the fourth is reserved but still a header a peer can send)
+/// and both values of the mandatory bit, without the chain flag: 7 headers.
+pub fn lookalike_headers(identity: u8) -> impl Iterator<Item = u8> {
+    let id = ext_id(identity);
+    let own = ext_eid(identity);
+    (0u8..4)
+        .flat_map(move |enc| [0u8, EXT_FLAG_M].map(move |m| id | (enc << 5) | m))
+        .filter(move |header| *header != own)
+}
+
+#[cfg(test)]
+mod identity_tests {
+    use super::*;
+
+    /// The identities are the bytes upstream's declarations compose, written here
+    /// as literals on purpose: a constant built from `ext_identity` and compared
+    /// with the same call would only prove the call agrees with itself.
+    /// `scripts/lib/ext_identity_gate.py` binds the same constants to the pinned
+    /// source, so the literals and the declarations cannot drift apart unseen.
+    #[test]
+    fn the_identities_are_the_bytes_upstream_declares() {
+        assert_eq!(body_eid::SOURCE_INFO, 0x41);
+        assert_eq!(body_eid::PUT_ATTACHMENT, 0x43);
+        assert_eq!(body_eid::DEL_ATTACHMENT, 0x42);
+        assert_eq!(body_eid::QUERY_ATTACHMENT, 0x45);
+        assert_eq!(body_eid::QUERY_VALUE, 0x43);
+        assert_eq!(body_eid::QUERY_SHM, 0x04);
+        assert_eq!(network_eid::QOS, 0x21);
+        assert_eq!(network_eid::TRANSPORT_QOS, 0x31);
+    }
+
+    /// The look-alike family of an identity is the other seven headers of its
+    /// id, and never the identity itself or anything with another id.
+    #[test]
+    fn the_lookalike_family_is_the_seven_other_headers_of_the_id() {
+        let family: alloc::vec::Vec<u8> = lookalike_headers(0x43).collect();
+        assert_eq!(family.len(), 7);
+        assert!(!family.contains(&0x43));
+        assert!(family.contains(&0x53), "the mandatory ZBuf");
+        assert!(family.contains(&0x03), "the unit");
+        assert!(family.iter().all(|h| ext_id(*h) == 0x3));
+        // The chain flag is no part of an identity: `0xC3` is the identity `0x43`.
+        let chained: alloc::vec::Vec<u8> = lookalike_headers(0xC3).collect();
+        assert_eq!(family, chained);
+    }
 }
