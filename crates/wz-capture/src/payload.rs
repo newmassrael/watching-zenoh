@@ -2175,6 +2175,20 @@ pub mod formats {
         /// R2114 (open-debt item 237) — a definition whose LAYOUT could not be
         /// read, with the reason from the layout grammar.
         BadLayout(String, crate::payload_described::LayoutError),
+        /// A definition whose value is an end-to-end profile description
+        /// (`#name={...}`) that could not be read, with the place in it.
+        BadE2eProfile(String, crate::e2e_profile::DocError),
+        /// A profile declared under one name whose description names itself
+        /// another.
+        E2eProfileNamedElsewhere {
+            /// The name the `#name=` line gave.
+            declared: String,
+            /// The name the description gave itself.
+            described: String,
+        },
+        /// A rule whose format token names a body schema that is not a message
+        /// name (`profile@pkg.Message`).
+        BadBodySchema(String, crate::e2e_rule::SchemaRefusal),
     }
 
     impl core::fmt::Display for FormatMapError {
@@ -2224,6 +2238,23 @@ pub mod formats {
                         "the layout described for `{name}` is not readable: {why}"
                     )
                 }
+                Self::BadE2eProfile(name, why) => {
+                    write!(
+                        f,
+                        "the end-to-end profile described for `{name}` is not readable: {why}"
+                    )
+                }
+                Self::E2eProfileNamedElsewhere {
+                    declared,
+                    described,
+                } => write!(
+                    f,
+                    "the profile is declared as `{declared}` and its description names \
+                     itself `{described}`: one profile has one name, so make them the same"
+                ),
+                Self::BadBodySchema(token, why) => {
+                    write!(f, "the body schema in `{token}` is refused: {why}")
+                }
             }
         }
     }
@@ -2260,6 +2291,20 @@ pub mod formats {
     enum RuleTarget<'a> {
         Builtin(&'a dyn PayloadFormat),
         Described(usize),
+        /// An end-to-end protection profile bound to the rule, with the body
+        /// schema the rule names. Owned by the map like a described format, for
+        /// the same reason, and an index for the same one.
+        E2e(usize),
+    }
+
+    /// One end-to-end profile a deployment registered with `#name={...}`.
+    struct E2eProfileDef {
+        /// The name rules refer to it by.
+        name: String,
+        /// The description as the line wrote it, so the declaration reads back
+        /// byte for byte as it was typed.
+        text: String,
+        profile: alloc::rc::Rc<crate::e2e_profile::Profile>,
     }
 
     #[derive(Default)]
@@ -2272,6 +2317,13 @@ pub mod formats {
         /// R2114 (open-debt item 237) — the formats this run DESCRIBED, owned
         /// here because nothing else outlives them.
         described: Vec<crate::payload_described::DescribedFormat>,
+        /// The end-to-end profiles this run registered, owned here for the
+        /// reason `described` is.
+        e2e_profiles: Vec<E2eProfileDef>,
+        /// The rules whose target is a profile: (index into `e2e_profiles`, the
+        /// bound format). One entry per RULE, because two rules may name one
+        /// profile with different body schemas.
+        e2e_rules: Vec<(usize, crate::e2e_rule::E2eFormat)>,
     }
 
     /// R311y726 — a handle to ONE declaration installed in a [`FormatMap`].
@@ -2438,6 +2490,17 @@ pub mod formats {
         pub format: &'m dyn PayloadFormat,
     }
 
+    /// What [`FormatMap::e2e_for_keyexpr`] found: the profile rule that won, the
+    /// handle the run's ledger records, and the bound format.
+    pub struct E2eRuleMatch<'m> {
+        /// The handle, for a ledger of what was used.
+        pub id: DeclarationId,
+        /// Which rule it was.
+        pub rule: MatchedRule,
+        /// The profile, and the body schema the rule names.
+        pub format: &'m crate::e2e_rule::E2eFormat,
+    }
+
     /// The checks a key expression meets on its way into a rule or a name, in
     /// ONE place so the two doors that take one cannot drift.
     ///
@@ -2460,6 +2523,8 @@ pub mod formats {
                 rules: Vec::new(),
                 names: Vec::new(),
                 described: Vec::new(),
+                e2e_profiles: Vec::new(),
+                e2e_rules: Vec::new(),
             }
         }
 
@@ -2486,7 +2551,7 @@ pub mod formats {
             for (at, (pattern, target)) in self.rules.iter().enumerate() {
                 let (pattern, format) = (
                     escape_field(pattern),
-                    escape_field(self.target_format(target).name()),
+                    escape_field(&self.target_token(target)),
                 );
                 out.push(Declaration {
                     id: DeclarationId(at),
@@ -2529,15 +2594,50 @@ pub mod formats {
                     }),
                 });
             }
+            // The end-to-end profiles, after the described formats for the same
+            // reason the definitions come after the rules: the ranges above do
+            // not move.
+            for (at, profile) in self.e2e_profiles.iter().enumerate() {
+                let name = escape_field(&profile.name);
+                out.push(Declaration {
+                    id: DeclarationId(
+                        self.rules.len() + self.names.len() + self.described.len() + at,
+                    ),
+                    kind: DeclarationKind::FormatDefinition,
+                    text: declaration_text(&DeclarationText::Definition {
+                        name: &name,
+                        layout: &profile.text,
+                    }),
+                });
+            }
             out
         }
 
-        /// The format one rule points at, whether shipped or described.
+        /// The format one rule points at, whether shipped, described or an
+        /// end-to-end profile.
         fn target_format<'s>(&'s self, target: &'s RuleTarget<'a>) -> &'s dyn PayloadFormat {
             match target {
                 RuleTarget::Builtin(f) => *f,
                 RuleTarget::Described(at) => &self.described[*at],
+                RuleTarget::E2e(at) => &self.e2e_rules[*at].1,
             }
+        }
+
+        /// The format token one rule is written with: the format's name, and for
+        /// a profile rule also the body schema it names.
+        fn target_token(&self, target: &RuleTarget<'a>) -> String {
+            match target {
+                RuleTarget::E2e(at) => self.e2e_rules[*at].1.token(),
+                other => self.target_format(other).name().to_owned(),
+            }
+        }
+
+        /// Whether `name` is already a format name: shipped, described, or a
+        /// profile. One namespace, because a rule names a format by it.
+        fn format_name_taken(&self, name: &str) -> bool {
+            builtin(name).is_some()
+                || self.described.iter().any(|d| d.name() == name)
+                || self.e2e_profiles.iter().any(|p| p.name == name)
         }
 
         /// R2114 (open-debt item 237) — DEFINE a format from a layout the
@@ -2548,19 +2648,56 @@ pub mod formats {
         /// other config file mean something else on this run only, and the
         /// reader of a report would have no way to tell which `json` decoded
         /// their bytes.
+        ///
+        /// A value that begins with `{` is not a record layout but an
+        /// end-to-end protection PROFILE ([`crate::e2e_profile`]), and defines
+        /// one: the profile description must be one line and name itself as
+        /// `name` does. The record-layout grammar has no `{`, so the first
+        /// character tells the two apart.
         pub fn define(&mut self, name: &str, layout: &str) -> Result<(), FormatMapError> {
             if name.is_empty() {
                 return Err(FormatMapError::NotADeclaration(name.to_owned()));
             }
-            if builtin(name).is_some() {
+            if self.format_name_taken(name) {
                 return Err(FormatMapError::FormatNameTaken(name.to_owned()));
             }
-            if self.described.iter().any(|d| d.name() == name) {
-                return Err(FormatMapError::FormatNameTaken(name.to_owned()));
+            if layout.starts_with(E2E_PROFILE_OPEN) {
+                return self.define_e2e_profile(name, layout);
             }
             let described = crate::payload_described::DescribedFormat::parse(name, layout)
                 .map_err(|why| FormatMapError::BadLayout(name.to_owned(), why))?;
             self.described.push(described);
+            Ok(())
+        }
+
+        /// Register an end-to-end protection profile under `name`.
+        ///
+        /// `text` is the profile description of [`crate::e2e_profile`], and it
+        /// must be ONE line: a declaration is a line, and a multi-line text
+        /// would be reported back (`declarations`) as something that does not
+        /// read as the declaration it came from. Its own `name` must equal
+        /// `name`, so the description and the registration cannot disagree about
+        /// what the profile is called.
+        fn define_e2e_profile(&mut self, name: &str, text: &str) -> Result<(), FormatMapError> {
+            let bad = |why| FormatMapError::BadE2eProfile(name.to_owned(), why);
+            if text.contains(['\n', '\r']) {
+                return Err(bad(crate::e2e_profile::DocError::invalid(
+                    "",
+                    "a profile description in a declaration is one line",
+                )));
+            }
+            let profile = crate::e2e_profile::Profile::parse(text).map_err(bad)?;
+            if profile.name() != name {
+                return Err(FormatMapError::E2eProfileNamedElsewhere {
+                    declared: name.to_owned(),
+                    described: profile.name().to_owned(),
+                });
+            }
+            self.e2e_profiles.push(E2eProfileDef {
+                name: name.to_owned(),
+                text: text.to_owned(),
+                profile: alloc::rc::Rc::new(profile),
+            });
             Ok(())
         }
 
@@ -2572,6 +2709,7 @@ pub mod formats {
         pub fn format_names(&self) -> Vec<String> {
             let mut out: Vec<String> = BUILTIN_NAMES.iter().map(|n| (*n).into()).collect();
             out.extend(self.described.iter().map(|d| d.name().into()));
+            out.extend(self.e2e_profiles.iter().map(|p| p.name.clone()));
             out
         }
 
@@ -2580,20 +2718,48 @@ pub mod formats {
         ///
         /// The one entry point that can reach a described format, because a
         /// caller cannot hold a reference to one -- the map owns it.
+        ///
+        /// A token `profile` or `profile@schema` whose profile part names a
+        /// registered end-to-end profile binds the rule to it, carrying the
+        /// body schema when one is written. The whole token is tried against the
+        /// shipped and described names first, so a described format whose name
+        /// happens to hold an `@` still means what it always did.
         pub fn insert_named(&mut self, pattern: &str, format: &str) -> Result<(), FormatMapError> {
             let target = match self.described.iter().position(|d| d.name() == format) {
                 Some(at) => RuleTarget::Described(at),
                 None => match builtin(format) {
                     Some(f) => RuleTarget::Builtin(f),
-                    None => {
-                        return Err(FormatMapError::NoSuchFormat(
-                            format.to_owned(),
-                            self.format_names(),
-                        ))
-                    }
+                    None => return self.insert_e2e(pattern, format),
                 },
             };
             self.push_rule(pattern, target)
+        }
+
+        /// [`Self::insert_named`] for a token that names no shipped or described
+        /// format: a registered profile, with or without a body schema, or an
+        /// unknown name.
+        fn insert_e2e(&mut self, pattern: &str, token: &str) -> Result<(), FormatMapError> {
+            let (name, schema) = match token.split_once(crate::e2e_rule::SCHEMA_MARK) {
+                Some((name, schema)) => (name, Some(schema)),
+                None => (token, None),
+            };
+            let Some(profile_at) = self.e2e_profiles.iter().position(|p| p.name == name) else {
+                return Err(FormatMapError::NoSuchFormat(
+                    token.to_owned(),
+                    self.format_names(),
+                ));
+            };
+            let bound = crate::e2e_rule::E2eFormat::new(
+                self.e2e_profiles[profile_at].profile.clone(),
+                schema.map(str::to_owned),
+            )
+            .map_err(|why| FormatMapError::BadBodySchema(token.to_owned(), why))?;
+            // The rule first and the bound format after, so a pattern that is
+            // refused leaves no orphan format behind for a later rule's index to
+            // collide with.
+            self.push_rule(pattern, RuleTarget::E2e(self.e2e_rules.len()))?;
+            self.e2e_rules.push((profile_at, bound));
+            Ok(())
         }
 
         /// Map every keyexpr matching `pattern` to `format`.
@@ -2689,8 +2855,43 @@ pub mod formats {
                 RuleTarget::Described(at) => {
                     Some(DeclarationId(self.rules.len() + self.names.len() + at))
                 }
+                RuleTarget::E2e(at) => Some(DeclarationId(
+                    self.rules.len()
+                        + self.names.len()
+                        + self.described.len()
+                        + self.e2e_rules[at].0,
+                )),
                 RuleTarget::Builtin(_) => None,
             }
+        }
+
+        /// The end-to-end profile rule that governs `keyexpr`, if the rule that
+        /// WINS for it is one.
+        ///
+        /// The winning rule is the same one [`Self::matching_rule`] picks, from
+        /// the same comparison, so a key covered by an earlier `json` rule is not
+        /// a profile key even when a later profile rule also covers it. A caller
+        /// that judges frames asks this and not a second pattern match of its own.
+        pub fn e2e_for_keyexpr(&self, keyexpr: &str) -> Option<E2eRuleMatch<'_>> {
+            let at = self.first_rule_covering(keyexpr)?;
+            let (pattern, target) = &self.rules[at];
+            let RuleTarget::E2e(rule_at) = target else {
+                return None;
+            };
+            Some(E2eRuleMatch {
+                id: DeclarationId(at),
+                rule: MatchedRule {
+                    index: at,
+                    pattern: pattern.clone(),
+                },
+                format: &self.e2e_rules[*rule_at].1,
+            })
+        }
+
+        /// Whether any rule binds a key to an end-to-end profile. A caller that
+        /// judges frames skips the work of finding them when none does.
+        pub fn has_e2e_rules(&self) -> bool {
+            !self.e2e_rules.is_empty()
         }
 
         /// Whether anything was DECLARED. A caller renders nothing for an
@@ -2703,7 +2904,7 @@ pub mod formats {
         /// "declared and never used" ledger exists to report, and skipping the
         /// render would take that finding away at the one moment it is true.
         pub fn is_empty(&self) -> bool {
-            self.rules.is_empty() && self.described.is_empty()
+            self.rules.is_empty() && self.described.is_empty() && self.e2e_profiles.is_empty()
         }
 
         /// The patterns, in the order they are tried.
@@ -2783,6 +2984,9 @@ pub mod formats {
     // them so a caller reads one module. See `crate::payload_builtin` for why
     // they moved out of `wz-analyze`.
     pub use crate::payload_builtin::{builtin, Cbor, Json, Protobuf, BUILTIN_NAMES};
+    // The end-to-end profile format a rule can bind a key to, re-exported for
+    // the reason the others are: one module a caller reads.
+    pub use crate::e2e_rule::E2eFormat;
     // R2114 (open-debt item 237) — the DESCRIBED format, re-exported the same
     // way and for the same reason: one module a caller reads. `TYPES` is public
     // because the usage text and the header both list the spellings, and a
@@ -2920,6 +3124,11 @@ pub mod formats {
     /// needs no quoting to be itself.
     const DEFINE: char = '#';
 
+    /// The character an end-to-end profile description begins with, and so the
+    /// one that tells `#name={...}` from `#name=<record layout>`: the layout
+    /// grammar has no `{`.
+    const E2E_PROFILE_OPEN: char = '{';
+
     /// Write `s` so [`unescape_field`] reads it back, whatever it contains.
     ///
     /// All four of [`ESCAPE`], `:`, `=` and [`DEFINE`] are quoted, not just the
@@ -2982,6 +3191,22 @@ pub mod formats {
         at.map(|i| (&s[..i], &s[i + sep.len_utf8()..]))
     }
 
+    /// [`str::split_once`] that ignores a separator the writer quoted: the FIRST
+    /// unquoted `sep`, where [`rsplit_once_unescaped`] answers the last.
+    fn split_once_unescaped(s: &str, sep: char) -> Option<(&str, &str)> {
+        let mut quoted = false;
+        for (i, c) in s.char_indices() {
+            if quoted {
+                quoted = false;
+            } else if c == ESCAPE {
+                quoted = true;
+            } else if c == sep {
+                return Some((&s[..i], &s[i + sep.len_utf8()..]));
+            }
+        }
+        None
+    }
+
     /// Read one declaration line.
     ///
     /// The line is taken WHOLE and never trimmed: a pattern with a trailing
@@ -2996,6 +3221,23 @@ pub mod formats {
         // `FormatMap::declare` to strip -- which is why this looks at the raw
         // line rather than at an unquoted one.
         if let Some(rest) = line.strip_prefix(DEFINE) {
+            // An end-to-end profile description is JSON, and JSON may hold an
+            // `=` inside a string, which the LAST-separator rule below would cut
+            // at. So the name is what precedes the FIRST unquoted `=`, and the
+            // line is a profile definition when what follows opens with `{`.
+            // The record-layout grammar has no `{`, so no layout line changes
+            // meaning.
+            if let Some((name, value)) = split_once_unescaped(rest, '=') {
+                if value.starts_with(E2E_PROFILE_OPEN) {
+                    if name.is_empty() {
+                        return Err(bad());
+                    }
+                    return Ok(DeclarationText::Definition {
+                        name,
+                        layout: value,
+                    });
+                }
+            }
             let (name, layout) = rsplit_once_unescaped(rest, '=').ok_or_else(bad)?;
             if name.is_empty() || layout.is_empty() {
                 return Err(bad());

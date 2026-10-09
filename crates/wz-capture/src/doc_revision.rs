@@ -1891,6 +1891,66 @@ pub const DOCUMENT_HISTORY: &[DocumentShape] = &[
         planes: &[],
         carries: FIELDS_R33_CARRIES,
     },
+    // THE END-TO-END VERDICT OF A FRAME, ON THE ENTRY OF THE `Push` THAT CARRIED
+    // IT.
+    //
+    // Revision 34 ADDS `e2e` and the keys under it, and retires nothing. The block
+    // is ABSENT from every entry no profile rule covers, so a document asked for
+    // with no profile declared is byte-identical to revision 33's, and a reader
+    // that never registers a profile never meets the key. It hangs on the `carried`
+    // entry of a `Push` and on the entries of `above_transport.carried` for a
+    // message that arrived as fragments (a frame a profile protects is the kind
+    // large enough to be cut), because a counter is a fact about ONE message and a
+    // `Frame` batches several.
+    //
+    // WHAT IS IN IT: the profile and the rule that bound the key, the header's
+    // fields (`header`, with their parts), the CRC verdict (`crc_computed`,
+    // `crc_error`), three facts about the length field that are INFORMATION and not
+    // part of that verdict (`length_field`, `length_expected`,
+    // `length_matches_frame`), the counter (`counter`) and the three booleans of
+    // the protocol's receiver (`crc_error`, `counter_error`, `timeout_error`) with
+    // the reason a counter was an error (`counter_reason`) and the silence a timeout
+    // was judged against (`silence_ms`), and the SLOT the frame was judged in
+    // (`slot`: the key, the sender, and the logical values of the profile's message
+    // fields as `identity`).
+    //
+    // INTEGERS take the rule revision 23 set, because a frame's fields are as wide
+    // as the profile says: the `crc_computed`, `length_field` and `length_expected`
+    // of the block, a frame's `counter`, `silence_ms` and the `value` of each
+    // `identity` entry are written through the integer door (a number up to
+    // 2^53 - 1, a decimal string past it), as are the `raw` and `value` of each
+    // `header` field and of its parts, which the stateless documents' helper
+    // writes. Offsets and byte counts stay numbers.
+    //
+    // `null` MEANS "NOT JUDGED". `counter_error`, `counter_reason` and `timeout_error`
+    // are `null` when the profile separates senders and the capture never saw this
+    // one announce its zid (`slot.zid` is `null` too): the CRC is stateless and is
+    // judged, the counter is not, rather than being charged to a counter shared with
+    // every other unnamed sender. `timeout_error` and `silence_ms` are also `null`
+    // for a frame whose packet carried no timestamp. `silence_ms` is `null` for the
+    // first frame a slot ever received as well, when there is no earlier frame to be
+    // silent since. A reader must not read an unjudged frame as a good one.
+    //
+    // THE ONE NEW FAMILY is `counter_reason`, a PASSENGER: `none`, `out_of_range`,
+    // `repeat`. It is the judge's own enum, held to its walk by the vocabulary gate.
+    //
+    // A STATE-DEPENDENT BLOCK: whether a counter was a repetition depends on the
+    // frames of the slot BEFORE it in the document, so the block is among the cells
+    // a live handle may write differently from the document that first wrote the
+    // row (`REVISABLE_ROW_CELLS`): a front trim makes a slot's oldest retained frame
+    // its first reception, and a zid learned late turns a `null` verdict into one.
+    //
+    // A consumer pinned to 33 loses nothing: this is an addition under a key that
+    // exists only for a declaration the consumer would have had to write.
+    DocumentShape {
+        document: FIELDS,
+        revision: 34,
+        keys: FIELDS_R34_KEYS,
+        retiring: &[],
+        families: FIELDS_R34_FAMILIES,
+        planes: &[],
+        carries: FIELDS_R34_CARRIES,
+    },
     DocumentShape {
         document: SUMMARY,
         revision: 1,
@@ -10288,6 +10348,329 @@ pub const FIELDS_R33_CARRIES: &[KeyCarries] = &[
     },
 ];
 
+/// The words of `counter_reason` at revision 34: why the counter of a frame was
+/// judged as it was. Sorted. The words are the judge's own
+/// (`crate::e2e_judge::CounterReason`), and
+/// `the_declared_value_families_match_the_librarys_own_vocabularies` holds this
+/// list to that type's walk.
+pub const COUNTER_REASON_R34: &[&str] = &["none", "out_of_range", "repeat"];
+
+/// The field document's key set at revision 34: revision 33's PLUS the keys of
+/// the `e2e` block (see `crate::e2e_row`): `e2e` itself and what is under it.
+///
+/// Written out rather than aliased, on the rule revision 7 set for a key that
+/// arrives.
+///
+/// MEASURED: `the_field_documents_key_set_is_pinned` prints what the document
+/// emits and this is that printout.
+pub const FIELDS_R34_KEYS: &[&str] = &[
+    "abandoned_at_end",
+    "abandoned_on_eviction",
+    "above_transport",
+    "addr",
+    "after_seq",
+    "anchor",
+    "batch_index",
+    "batch_size",
+    "body",
+    "body_schema",
+    "bytes",
+    "caps",
+    "capture_reread",
+    "carried",
+    "carried_state",
+    "chain",
+    "chain_id",
+    "close_seen",
+    "compression",
+    "conduit",
+    "context",
+    "counter",
+    "counter_error",
+    "counter_reason",
+    "crc_computed",
+    "crc_error",
+    "datagram_flows",
+    "declaration_checked",
+    "declared",
+    "depth",
+    "descriptor_bytes",
+    "despite_encoding",
+    "direction",
+    "document",
+    "dropped_by_limits",
+    "dst",
+    "e2e",
+    "encoding",
+    "end",
+    "example",
+    "expired_chains",
+    "family",
+    "fields",
+    "fin_seen",
+    "first_byte",
+    "flow",
+    "flows",
+    "format",
+    "frame_offset",
+    "frames",
+    "frames_per_flow",
+    "halves",
+    "header",
+    "high",
+    "identity",
+    "index",
+    "keyexpr",
+    "keyexpr_cause",
+    "keyexpr_id",
+    "kind",
+    "l2",
+    "last_seen_ts_ns",
+    "lease_ms",
+    "length",
+    "length_expected",
+    "length_field",
+    "length_matches_frame",
+    "link",
+    "list_id",
+    "low",
+    "lowlatency",
+    "matched_rule",
+    "max_flows_per_table",
+    "max_scout_askers",
+    "message",
+    "message_at",
+    "messages",
+    "missing",
+    "name",
+    "negotiated",
+    "note",
+    "offset",
+    "offset_space",
+    "omitted",
+    "opened",
+    "outcome",
+    "packet",
+    "parent",
+    "parts",
+    "patch",
+    "path",
+    "pattern",
+    "payload",
+    "payload_bytes",
+    "payload_decode",
+    "payload_mapping",
+    "payload_mapping_counts_exact",
+    "payload_offset",
+    "payload_refusals",
+    "phase",
+    "port",
+    "priority",
+    "profile",
+    "qos",
+    "raw",
+    "reason",
+    "reassembly",
+    "reliable",
+    "revision",
+    "rst_seen",
+    "samples",
+    "scout_askers",
+    "scouting",
+    "selected",
+    "seq",
+    "shm_descriptor",
+    "shown",
+    "silence_ms",
+    "skipped",
+    "skipped_packets",
+    "slot",
+    "sn",
+    "sn_mask",
+    "src",
+    "start",
+    "state",
+    "stream_bytes",
+    "stream_bytes_per_direction",
+    "stream_flows",
+    "through_seq",
+    "timeout_error",
+    "under",
+    "value",
+    "verdict",
+    "version",
+    "why",
+    "window",
+    "wrong",
+    "zid",
+];
+
+/// The value families the field document declares at revision 34 — revision 33's
+/// PLUS `counter_reason`, read from [`COUNTER_REASON_R34`]. Written out in full,
+/// for the reason [`ValueFamily::values`] gives.
+pub const FIELDS_R34_FAMILIES: &[ValueFamily] = &[
+    ValueFamily {
+        key: "body",
+        values: BODY_R33,
+    },
+    ValueFamily {
+        key: "carried_state",
+        values: CARRIED_STATE_R12,
+    },
+    ValueFamily {
+        key: "counter_reason",
+        values: COUNTER_REASON_R34,
+    },
+    ValueFamily {
+        key: "direction",
+        values: DIRECTION_FIELDS_R2,
+    },
+    ValueFamily {
+        key: "family",
+        values: ADDR_FAMILY_R15,
+    },
+    ValueFamily {
+        key: "keyexpr_cause",
+        values: UNRESOLVED_CAUSE_R11,
+    },
+    ValueFamily {
+        key: "kind",
+        values: FIELD_VALUE_KIND_R17,
+    },
+    ValueFamily {
+        key: "link",
+        values: LINK_KIND_R7,
+    },
+    ValueFamily {
+        key: "message",
+        values: MESSAGE_R10,
+    },
+    ValueFamily {
+        key: "offset_space",
+        values: ANCHOR_SPACE_FIELDS_R2,
+    },
+    ValueFamily {
+        key: "outcome",
+        values: CHAIN_OUTCOME_R14,
+    },
+    ValueFamily {
+        key: "phase",
+        values: SESSION_PHASE_R14,
+    },
+    ValueFamily {
+        key: "priority",
+        values: PRIORITY_R14,
+    },
+    ValueFamily {
+        key: "reason",
+        values: CHAIN_REASON_R32,
+    },
+    ValueFamily {
+        key: "selected",
+        values: SELECTED_R13,
+    },
+    ValueFamily {
+        key: "state",
+        values: PAYLOAD_STATE_R2,
+    },
+    ValueFamily {
+        key: "under",
+        values: REFUSED_UNDER_R2,
+    },
+    ValueFamily {
+        key: "verdict",
+        values: SN_VERDICT_R14,
+    },
+    ValueFamily {
+        key: "wrong",
+        values: MISBOUND_R2,
+    },
+];
+
+/// What each field-document family's WORD decides at revision 34 — revision 33's
+/// PLUS `counter_reason`, a PASSENGER: no word of it brings or withholds another
+/// key, because every judged block has the same keys whatever its reason.
+/// Written out in full, because a slice cannot be spliced in a `const` and an
+/// alias would make the revision follow its predecessor.
+pub const FIELDS_R34_CARRIES: &[KeyCarries] = &[
+    KeyCarries {
+        key: "body",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "carried_state",
+        shape: CarriesShape::Discriminant(CARRIED_STATE_CARRIES_R12),
+    },
+    KeyCarries {
+        key: "counter_reason",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "direction",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "family",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "keyexpr_cause",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "kind",
+        shape: CarriesShape::Discriminant(FIELD_VALUE_KIND_CARRIES_R17),
+    },
+    KeyCarries {
+        key: "link",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "message",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "offset_space",
+        shape: CarriesShape::Discriminant(FIELD_OFFSET_SPACE_CARRIES_R19),
+    },
+    KeyCarries {
+        key: "outcome",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "phase",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "priority",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "reason",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "selected",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "state",
+        shape: CarriesShape::Discriminant(PAYLOAD_STATE_CARRIES_R28),
+    },
+    KeyCarries {
+        key: "under",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "verdict",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "wrong",
+        shape: CarriesShape::Passenger,
+    },
+];
+
 /// What each field-document family's WORD decides at revision 28 — revision 20's,
 /// with `state` changed: see [`PAYLOAD_STATE_CARRIES_R28`]. Written out in full,
 /// because a slice cannot be spliced in a `const` and an alias would make the
@@ -12967,7 +13350,9 @@ mod tests {
             // gained the word `unresolvable`.
             // To 33 when every `carried` entry gained `body`, the name of the
             // body its message carries: a key and a `body` family.
-            (FIELDS, 33),
+            // To 34 when a `Push` whose key a profile rule covers gained the
+            // `e2e` block: keys, and a `counter_reason` family.
+            (FIELDS, 34),
             // R2121 (open-debt item 460) — the summary moved to 2 when it
             // gained `inert_counters`; R2122 (item 238) to 3 when its
             // `framing` group stopped disagreeing with the capture report's.

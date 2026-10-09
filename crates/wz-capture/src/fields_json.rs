@@ -298,8 +298,9 @@ pub struct Since {
 /// from what a row's writer reads, not collected from runs: a row is written from
 /// the frame it stands for (fixed once it is decoded), the message bytes and the
 /// packet map behind them (see [`RETIRABLE_ROW_CELLS`]), the keyexpr table, the
-/// chain fold and the caller's declarations. Only the last three can differ
-/// between two renderings of a row that is still held, and each names its cells:
+/// end-to-end judge's counters, the chain fold and the caller's declarations.
+/// Only those last four can differ between two renderings of a row that is
+/// still held, and each names its cells:
 ///
 /// * **The keyexpr table** is folded over every list in capture order, and a
 ///   declaration is stamped with the packet it went past at. A declaration that
@@ -312,6 +313,13 @@ pub struct Since {
 ///   chain, read from the joined buffer), and everything under `payload_decode` — the row's
 ///   own and each `above_transport.carried` entry's — whose verdict starts from
 ///   the resolved key.
+/// * **The end-to-end judge** keeps a counter per slot, and a frame's verdict
+///   depends on the frames of its slot BEFORE it in the document. A front trim
+///   makes a slot's oldest retained frame its first reception, a zid learned
+///   late turns an unjudged verdict into a judged one, and a key that resolves
+///   late brings the block itself into being. The cells are everything under
+///   the `e2e` key of each `carried` entry and of each `above_transport.carried`
+///   entry, the key included.
 /// * **The chain fold** numbers chains from the first message the list still
 ///   holds. A front trim that takes the first message of a chain renumbers every
 ///   chain after it, so `chain.chain_id` names a chain WITHIN one document and is
@@ -330,10 +338,12 @@ pub struct Since {
 /// The flow object around the rows — `context`, `shown`, `omitted`,
 /// `disagreements` — is not a row and is not covered.
 pub const REVISABLE_ROW_CELLS: &[&str] = &[
+    "/above_transport/carried[]/e2e/**",
     "/above_transport/carried[]/keyexpr",
     "/above_transport/carried[]/keyexpr_cause",
     "/above_transport/carried[]/keyexpr_id",
     "/above_transport/carried[]/payload_decode/**",
+    "/carried[]/e2e/**",
     "/carried[]/keyexpr",
     "/carried[]/keyexpr_cause",
     "/carried[]/keyexpr_id",
@@ -544,6 +554,7 @@ fn fields_json_selected(
                     list: lists.stream.get(i).copied(),
                 }),
                 after_seq: since.map(|s| s.after_seq),
+                zids: lists.stream.get(i).and_then(|&list| grouping.zids(list)),
             },
             &mut out,
         );
@@ -579,6 +590,7 @@ fn fields_json_selected(
                     list: lists.datagram.get(i).copied(),
                 }),
                 after_seq: since.map(|s| s.after_seq),
+                zids: lists.datagram.get(i).and_then(|&list| grouping.zids(list)),
             },
             &mut out,
         );
@@ -825,9 +837,24 @@ fn push_stream_flow(
         } = &folded[position];
         let seq = *seq;
         spaces.at_packet(*packet);
+        let e2e = tags.e2e_source(frame.direction, frame.observed_at_ns);
         if tags.passed_by_cursor(seq) {
             if let Some(d) = declarations {
                 d.note_unwalked();
+            }
+            // A counter is a fact about the frames before this one, so a row
+            // the cursor passes over still moves the slots it belongs to.
+            if let Ok(bytes) = flow.message_bytes(frame) {
+                judge_unwritten_row(RowWalk {
+                    bytes,
+                    space: MidSpace::of_frame(frame),
+                    direction: frame.direction,
+                    framed: &message_name(frame),
+                    spaces,
+                    declarations,
+                    carried: Some(&frame.carried),
+                    e2e,
+                });
             }
             continue;
         }
@@ -881,6 +908,7 @@ fn push_stream_flow(
                     spaces,
                     declarations,
                     carried: Some(&frame.carried),
+                    e2e,
                 },
                 out,
             ),
@@ -941,9 +969,31 @@ fn push_datagram_flow(
         // cursor passes over is not re-read from the container, which is most of
         // what a datagram row costs.
         let seq = tags.frame_seq(first_produced + position as u64);
+        let e2e = tags.e2e_source(frame.direction, frame.observed_at_ns);
         if tags.passed_by_cursor(seq) {
             if let Some(d) = declarations {
                 d.note_unwalked();
+            }
+            // The counter of a row the cursor passes over still has to move its
+            // slot, so a profile rule makes the row worth re-reading. Without
+            // one, the row stays as cheap as it was.
+            if declarations.is_some_and(|d| d.has_e2e_rules()) {
+                if let Some(file) = reread {
+                    if let Ok(datagram) = reread_datagram(file, flow, frame.direction, index) {
+                        if let Some(message) = datagram_message(frame, &datagram) {
+                            judge_unwritten_row(RowWalk {
+                                bytes: message,
+                                space: MidSpace::Transport,
+                                direction: frame.direction,
+                                framed: &message_name(frame),
+                                spaces,
+                                declarations,
+                                carried: Some(&frame.carried),
+                                e2e,
+                            });
+                        }
+                    }
+                }
             }
             continue;
         }
@@ -957,12 +1007,7 @@ fn push_datagram_flow(
                 continue;
             }
         };
-        // A message decompressed out of an lz4 batch is not in the
-        // packet; its own bytes travel with it.
-        let message = match &frame.decompressed {
-            Some(own) => Some(own.as_slice()),
-            None => datagram.payload.get(frame.unit_offset..),
-        };
+        let message = datagram_message(frame, &datagram);
         let Some(message) = message else {
             note(&mut named, &mut disagreed, cap, index, "short_payload");
             continue;
@@ -1007,6 +1052,7 @@ fn push_datagram_flow(
                 spaces,
                 declarations,
                 carried: Some(&frame.carried),
+                e2e,
             },
             out,
         );
@@ -1098,6 +1144,8 @@ fn push_datagram_flow(
                 // `Carried` to report, and `null` says so rather than leaving
                 // the key absent.
                 carried: None,
+                // Nor does it carry a sample, so there is no frame to judge.
+                e2e: E2eSource::default(),
             },
             out,
         );
@@ -1133,6 +1181,20 @@ fn push_datagram_flow(
         let _ = write!(out, "{{\"at\":{at},\"why\":\"{why}\"}}");
     }
     out.push_str("]}}");
+}
+
+/// The bytes of one datagram frame's message: the lz4 batch's own copy when the
+/// message was decompressed out of one (it is not in the packet), otherwise the
+/// packet's payload from the message's offset in its unit. `None` when the
+/// payload is shorter than that offset.
+fn datagram_message<'d>(
+    frame: &'d PassiveFrame,
+    datagram: &'d crate::link::Datagram,
+) -> Option<&'d [u8]> {
+    match &frame.decompressed {
+        Some(own) => Some(own.as_slice()),
+        None => datagram.payload.get(frame.unit_offset..),
+    }
 }
 
 /// R2629 (open-debt item 744) — the SECOND read of one datagram, judged against
@@ -1252,6 +1314,8 @@ struct RowWalk<'a> {
     /// over these bytes structurally cannot reach. `None` for a scouting row,
     /// which has no session frame. See [`push_above_transport`].
     carried: Option<&'a wz_session_core::passive::Carried>,
+    /// Who sent the row and when, for the end-to-end judge.
+    e2e: E2eSource<'a>,
 }
 
 fn push_walk(row: RowWalk<'_>, out: &mut String) {
@@ -1263,7 +1327,12 @@ fn push_walk(row: RowWalk<'_>, out: &mut String) {
         spaces,
         declarations,
         carried,
+        e2e,
     } = row;
+    let judging = E2eRow {
+        declarations,
+        source: e2e,
+    };
     match space.walk(bytes) {
         Err(err) => {
             let mut why = String::from("the field walker refused these bytes: ");
@@ -1287,7 +1356,7 @@ fn push_walk(row: RowWalk<'_>, out: &mut String) {
                 escape_into(&field.name, out);
                 out.push_str(",\"fields\":");
                 out.push_str(&to_json(&field));
-                push_carried(bytes, &field, space, at, out);
+                push_carried(bytes, &field, space, at, judging, out);
                 push_payload_block(&field, declarations, at, out);
             } else {
                 let mut why = String::from("the session read these bytes as ");
@@ -1307,12 +1376,126 @@ fn push_walk(row: RowWalk<'_>, out: &mut String) {
     // matters most: the reader is being told these bytes could not be walked
     // here, and `above_transport` is the only thing on the row that can say
     // whether the session nonetheless read what they carried.
-    push_above_transport(
-        carried,
-        KeyexprAt::new(direction, spaces),
+    push_above_transport(carried, KeyexprAt::new(direction, spaces), judging, out);
+}
+
+/// The records a walked row's `carried` array has an entry for, in order: the
+/// batched records of a `Frame`, or the row's own message when it is already a
+/// network message (a lowlatency row).
+fn row_records(
+    field: &wz_session_core::dissect::Field,
+    space: MidSpace,
+) -> Vec<&wz_session_core::dissect::Field> {
+    if matches!(space, MidSpace::Network) {
+        alloc::vec![field]
+    } else {
+        batched_records(field)
+    }
+}
+
+/// The word a record's `carried` entry names it by, read off its first byte
+/// through the message vocabulary and falling back to the walker's own name.
+fn record_word<'f>(bytes: &[u8], record: &'f wz_session_core::dissect::Field) -> &'f str {
+    use wz_session_core::dissect::MessageName;
+    bytes
+        .get(record.span.start)
+        .and_then(|b| MessageName::of_network(b & 0x1F))
+        .map_or(record.name.as_ref(), |m| m.name())
+}
+
+/// Judge ONE carried record under the end-to-end rule that governs its key, or
+/// answer `None` when none does.
+///
+/// Only a `Push` carrying a `put` is a frame: a `del` has no payload, and a
+/// query or a reply is not what a rule about published samples was written for.
+/// A record whose key did not resolve has no key to match a rule against, and
+/// is not judged; its `keyexpr_cause` already says why.
+///
+/// The one place a record is handed to the judge, so the entry that prints its
+/// verdict and the pass that judges a row without printing it ask the same
+/// question of the same bytes.
+fn judge_record<'d>(
+    record: &wz_session_core::dissect::Field,
+    word: &str,
+    keyexpr: Option<&Result<String, crate::payload_decode::UnresolvedRef>>,
+    declarations: &Declarations<'d>,
+    source: E2eSource<'_>,
+) -> Option<crate::payload_decode::E2eJudged<'d>> {
+    use wz_session_core::dissect::{BodyName, FieldValue, MessageName};
+    // A run whose rules name no profile judges nothing, and does not pay for
+    // looking at a payload to find that out.
+    if !declarations.has_e2e_rules() {
+        return None;
+    }
+    if word != MessageName::Push.name() || record.body() != Some(BodyName::Put) {
+        return None;
+    }
+    let Some(Ok(keyexpr)) = keyexpr else {
+        return None;
+    };
+    let payload =
+        crate::payload_decode::subtree_payload_bytes(record).and_then(|f| match &f.value {
+            FieldValue::Bytes(bytes) => Some(bytes.as_slice()),
+            _ => None,
+        });
+    declarations.judge_e2e(keyexpr, payload, source.sender, source.observed_at_ns)
+}
+
+/// Judge the frames of a row that is NOT written: one a cursor passes over.
+///
+/// A counter is a fact about the frames BEFORE this one, so a row the since-door
+/// does not write still has to move the slots it belongs to, or the first row
+/// after the cursor would be judged as the first frame its slot ever sent. The
+/// verdicts are discarded and nothing else is touched: no tally of the payload
+/// plane moves, because that plane's rule is that a row it did not write was
+/// not walked.
+///
+/// Costs a walk of the row, and so is done only when a rule binds a key to a
+/// profile.
+fn judge_unwritten_row(row: RowWalk<'_>) {
+    let RowWalk {
+        bytes,
+        space,
+        direction,
+        framed,
+        spaces,
         declarations,
-        out,
-    );
+        carried,
+        e2e,
+    } = row;
+    let Some(declarations) = declarations.filter(|d| d.has_e2e_rules()) else {
+        return;
+    };
+    let at = KeyexprAt::new(direction, spaces);
+    if let Ok(Some(field)) = space.walk(bytes) {
+        if walk_agrees(&field.name, framed) {
+            for record in row_records(&field, space) {
+                let keyexpr = crate::payload_decode::subtree_keyexpr_outcome(record, at);
+                let _ = judge_record(
+                    record,
+                    record_word(bytes, record),
+                    keyexpr.as_ref(),
+                    declarations,
+                    e2e,
+                );
+            }
+        }
+    }
+    #[cfg(feature = "reassembly")]
+    if let Some(wz_session_core::passive::Carried::Reassembled { joined, .. }) = carried {
+        for record in &wz_session_core::dissect::dissect_batch(joined, 0).records {
+            let keyexpr = crate::payload_decode::subtree_keyexpr_outcome(record, at);
+            let _ = judge_record(
+                record,
+                record_word(joined, record),
+                keyexpr.as_ref(),
+                declarations,
+                e2e,
+            );
+        }
+    }
+    #[cfg(not(feature = "reassembly"))]
+    let _ = carried;
 }
 
 fn push_declined(why: &str, out: &mut String) {
@@ -1531,15 +1714,16 @@ fn push_carried(
     field: &wz_session_core::dissect::Field,
     space: MidSpace,
     at: KeyexprAt<'_>,
+    judging: E2eRow<'_>,
     out: &mut String,
 ) {
-    use wz_session_core::dissect::MessageName;
     out.push_str(",\"carried\":[");
     let mut first = true;
     let mut entry = |word: &str,
                      node: &wz_session_core::dissect::Field,
                      keyexpr: Option<Result<String, crate::payload_decode::UnresolvedRef>>,
                      payload: Option<crate::payload_decode::PayloadSlot>,
+                     e2e: Option<crate::payload_decode::E2eJudged<'_>>,
                      out: &mut String| {
         if !first {
             out.push(',');
@@ -1559,37 +1743,52 @@ fn push_carried(
         }
         push_keyexpr_miss(keyexpr.as_ref().and_then(|k| k.as_ref().err()), out);
         push_payload_slot(payload.as_ref(), out);
+        push_e2e(e2e.as_ref(), out);
         out.push('}');
     };
     // The first listing entry is the row itself; subsequent entries are its
     // network records. A lean row and its sole record share the same span.
-    let records = if matches!(space, MidSpace::Network) {
-        alloc::vec![field]
-    } else {
-        batched_records(field)
-    };
+    let records = row_records(field, space);
     if let Some(message) = bytes.first().and_then(|b| space.head(b & 0x1F)) {
         let keyexpr = if records.is_empty() {
             crate::payload_decode::subtree_keyexpr_outcome(field, at)
         } else {
             None
         };
-        entry(message.name(), field, keyexpr, None, out);
+        entry(message.name(), field, keyexpr, None, None, out);
     }
     for record in records {
-        let word = bytes
-            .get(record.span.start)
-            .and_then(|b| MessageName::of_network(b & 0x1F))
-            .map_or(record.name.as_ref(), |m| m.name());
+        let word = record_word(bytes, record);
+        let keyexpr = crate::payload_decode::subtree_keyexpr_outcome(record, at);
+        // Judged HERE, in the order the entries are written, which is the order
+        // the frames were batched in: a slot's counter is walked in the order
+        // its frames were sent.
+        let e2e = judging.declarations.and_then(|declarations| {
+            judge_record(record, word, keyexpr.as_ref(), declarations, judging.source)
+        });
         entry(
             word,
             record,
-            crate::payload_decode::subtree_keyexpr_outcome(record, at),
+            keyexpr,
             crate::payload_decode::payload_slot(record),
+            e2e,
             out,
         );
     }
     out.push(']');
+}
+
+/// The `e2e` key of one `carried` entry: the end-to-end verdict, or nothing.
+///
+/// ABSENT for an entry no profile rule covers, and not `null`: the block exists
+/// for the reader who registered a profile, and an entry it has nothing to say
+/// about is not made to carry a key that answers a question nobody asked. See
+/// `crate::e2e_row` for the block.
+fn push_e2e(judged: Option<&crate::payload_decode::E2eJudged<'_>>, out: &mut String) {
+    if let Some(judged) = judged {
+        out.push_str(",\"e2e\":");
+        crate::e2e_row::push_block(judged, out);
+    }
 }
 
 /// The `payload` key of one `carried` entry: `null`, or the slot's range, its
@@ -1839,9 +2038,10 @@ impl CarriedState {
 fn push_above_transport(
     carried: Option<&wz_session_core::passive::Carried>,
     at: KeyexprAt<'_>,
-    declarations: Option<&Declarations<'_>>,
+    judging: E2eRow<'_>,
     out: &mut String,
 ) {
+    let declarations = judging.declarations;
     out.push_str(",\"above_transport\":");
     let Some(carried) = carried else {
         out.push_str("null");
@@ -1864,10 +2064,7 @@ fn push_above_transport(
             if i > 0 {
                 out.push(',');
             }
-            let word = joined
-                .get(record.span.start)
-                .and_then(|b| wz_session_core::dissect::MessageName::of_network(b & 0x1F))
-                .map_or(record.name.as_ref(), |m| m.name());
+            let word = record_word(joined, record);
             out.push_str("{\"message\":");
             escape_into(word, out);
             push_body(record, out);
@@ -1886,6 +2083,14 @@ fn push_above_transport(
             // the same finder, in the JOINED buffer's coordinates like the
             // entry's `start` and `end`.
             push_payload_slot(crate::payload_decode::payload_slot(record).as_ref(), out);
+            // The end-to-end verdict of a message that arrived in pieces: the
+            // frames a profile protects are the ones large enough to be
+            // fragmented, so a chain's records are judged like a batch's, at
+            // the instant of the fragment that completed them.
+            let e2e = judging.declarations.and_then(|declarations| {
+                judge_record(record, word, outcome.as_ref(), declarations, judging.source)
+            });
+            push_e2e(e2e.as_ref(), out);
             push_payload_block(record, declarations, at, out);
             out.push('}');
         }
@@ -2736,6 +2941,34 @@ struct RowTags<'a> {
     /// The cursor: a row whose sequence number is at or below it is
     /// passed over, and every other row is written. `None` writes them all.
     after_seq: Option<u64>,
+    /// The zid each direction of THIS flow's list announced, `[A, B]`, or
+    /// `None` for a list whose handshake the capture never saw. What the
+    /// end-to-end judge keys a sender by; see [`E2eSource`].
+    zids: Option<&'a [alloc::vec::Vec<u8>; 2]>,
+}
+
+/// What a row producer hands the entries it writes so they can judge their
+/// frames: the declarations that hold the rules and the slot state, and who sent
+/// the row and when.
+#[derive(Clone, Copy)]
+struct E2eRow<'a> {
+    declarations: Option<&'a Declarations<'a>>,
+    source: E2eSource<'a>,
+}
+
+/// Who sent a row and when the capture took it: the two facts the end-to-end
+/// judge needs about a frame that its bytes cannot give.
+///
+/// Both are `None` when unknown, and unknown stays unknown all the way to the
+/// document: a frame from a sender nobody named is not judged against a
+/// counter shared with every other such sender, and a frame whose packet
+/// carried no timestamp is not judged for a timeout.
+#[derive(Clone, Copy, Default)]
+struct E2eSource<'a> {
+    /// The zid of the direction the row travelled, when the capture named it.
+    sender: Option<&'a [u8]>,
+    /// The capture's own instant for the row, in nanoseconds.
+    observed_at_ns: Option<u64>,
 }
 
 /// How a row producer asks for a row's sequence number.
@@ -2769,6 +3002,17 @@ impl RowTags<'_> {
     /// dropping one is not.
     fn passed_by_cursor(&self, seq: Option<u64>) -> bool {
         matches!((self.after_seq, seq), (Some(after), Some(s)) if s <= after)
+    }
+
+    /// Who sent a frame that travelled `direction`, and when its packet was
+    /// taken.
+    fn e2e_source(&self, direction: Direction, observed_at_ns: Option<u64>) -> E2eSource<'_> {
+        E2eSource {
+            sender: self
+                .zids
+                .map(|zids| zids[crate::agg::dir_index(direction)].as_slice()),
+            observed_at_ns,
+        }
     }
 }
 
@@ -6414,6 +6658,10 @@ mod tests {
         assert_eq!(Misbound::names().len(), 2, "a Misbound arm was added");
         // The row and flow objects revision 14 added.
         rendered.extend(session_arms());
+        // Revision 34 — the end-to-end block, which only a declared profile
+        // brings. Documents that reach each of its arms, for the reason the arms
+        // above are rendered from their types: this fixture declares no profile.
+        rendered.extend(crate::e2e_row_tests::pin_documents());
 
         let mut seen: Vec<&str> = Vec::new();
         for doc in &rendered {
@@ -6497,7 +6745,7 @@ mod tests {
         // against a rename and against each other and against NOTHING a
         // consumer could read.
         let mut failures: Vec<String> = Vec::new();
-        let live: [(&str, &str, Vec<&'static str>); 31] = [
+        let live: [(&str, &str, Vec<&'static str>); 32] = [
             // The session's per-frame verdicts, each held to the
             // walk its emitter's exhaustive match is bound to.
             (rev::FIELDS, "verdict", SnVerdictWord::names()),
@@ -6573,6 +6821,16 @@ mod tests {
                 wz_session_core::dissect::BodyName::names(),
             ),
             (rev::FIELDS, "state", PayloadDecoding::STATES.to_vec()),
+            // Revision 34 — why a frame's counter was judged as it was. The walk
+            // is the judge's own enum, whose word is an exhaustive match.
+            (
+                rev::FIELDS,
+                "counter_reason",
+                crate::e2e_judge::CounterReason::ALL
+                    .iter()
+                    .map(|r| r.word())
+                    .collect(),
+            ),
             // R2706 — the session's verdict words. The walk is the successor
             // chain on `CarriedState`; what holds it to `Carried` itself is
             // `carried_state`'s exhaustive match, which a new variant breaks.
@@ -7130,6 +7388,9 @@ mod tests {
         // from its own type; see `session_arms`.
         arms.extend(session_arms());
 
+        // Revision 34 — the documents that carry the end-to-end block, which only
+        // a declared profile brings and no capture above declares.
+        let e2e_docs = crate::e2e_row_tests::pin_documents();
         let mut fields_docs: Vec<&String> = alloc::vec![
             &with,
             &without,
@@ -7141,6 +7402,7 @@ mod tests {
             &where_hit,
             &where_miss
         ];
+        fields_docs.extend(e2e_docs.iter());
         // EVERY capture above through the two other doors as well:
         // the selector's (rows gain `selected`) and the live door's (rows gain
         // `selected` and the record coordinates). The optional keys compose

@@ -112,6 +112,13 @@ _LATENCY_HEADER = "the `min_ns`, `max_ns`, `mean_ns` and `total_ns` of a census 
 #: declared once, under `e2e_wrap`, and the `e2e_open` row names them as well.
 _E2E_FIELD_HEADER = "the `raw` and `value` of an `e2e_wrap` or `e2e_open` field and the `value` of each of its `parts`"
 _E2E_DOCUMENT_HEADER = "the `crc_computed` and `length_field` of an `e2e_wrap` or `e2e_open` document"
+#: The `e2e` block of a field-document entry (revision 34) writes its own
+#: numbers through the door; the block's `header` fields come out of the same
+#: helper the two stateless documents use, so those cells are declared above.
+_E2E_BLOCK_HEADER = (
+    "the `crc_computed`, `length_field`, `length_expected`, `counter` and `silence_ms` "
+    "of an `e2e` block and the `value` of each entry of its `slot.identity`"
+)
 
 #: (file, enclosing fn) -> the cells that function writes through a door, one per call.
 CELLS: dict[tuple[str, str], tuple[Cell, ...]] = {
@@ -170,6 +177,22 @@ CELLS: dict[tuple[str, str], tuple[Cell, ...]] = {
     ),
     ("crates/wz-capture/src/retention_json.rs", "retention_json"): (
         Cell("retention", "oldest_ts_ns", "`oldest_ts_ns` in the retention document", "`oldest_ts_ns`"),
+    ),
+    ("crates/wz-capture/src/e2e_row.rs", "push_opened"): (
+        Cell("fields", "an e2e block's crc_computed", _E2E_BLOCK_HEADER, "`crc_computed`", born=34),
+        Cell("fields", "an e2e block's length_field", _E2E_BLOCK_HEADER, "`length_field`", born=34),
+        Cell("fields", "an e2e block's length_expected", _E2E_BLOCK_HEADER, "`length_expected`", born=34),
+        Cell("fields", "an e2e block's counter", _E2E_BLOCK_HEADER, "a frame's `counter`", born=34),
+        Cell(
+            "fields",
+            "an identity entry's value",
+            _E2E_BLOCK_HEADER,
+            "the `value` of each `identity` entry",
+            born=34,
+        ),
+    ),
+    ("crates/wz-capture/src/e2e_row.rs", "push_optional"): (
+        Cell("fields", "an e2e block's silence_ms", _E2E_BLOCK_HEADER, "`silence_ms`", born=34),
     ),
     ("crates/wz-capture/src/e2e_json.rs", "push_fields"): (
         Cell("e2e_wrap", "a field's raw", _E2E_FIELD_HEADER, "a field's `raw`"),

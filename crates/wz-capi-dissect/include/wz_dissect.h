@@ -468,6 +468,76 @@
  *
  * @values fields body
  *
+ * AND WHAT THE END-TO-END JUDGE MADE OF A FRAME, at field-document revision 34.
+ *
+ * A payload that carries an end-to-end protection header -- a length, an
+ * identifier, a CRC, a counter, in a layout YOU describe -- is read and judged
+ * when a rule binds its key to a profile you registered (the declaration
+ * spelling is under wz_dissect_pcap_fields_with_payloads below). The verdict
+ * is one more key on the entry of the `Push` that carried it:
+ *
+ *     `e2e`  an object, ABSENT on every entry no profile rule covers
+ *
+ *     "e2e":{"profile":"demo-a","matched_rule":{"index":0,"pattern":"..."},
+ *            "body_schema":"pkg.Pose",
+ *            "opened":true,"payload_offset":16,"payload_bytes":4,
+ *            "header":[{"name":"crc","offset":0,"bytes":4,"raw":N,"value":N},
+ *                      {"name":"ident","offset":8,"bytes":4,"raw":N,"value":N,
+ *                       "parts":[{"name":"domain","value":3}, ...]}, ...],
+ *            "crc_computed":N,"crc_error":false,
+ *            "length_field":20,"length_expected":20,
+ *            "length_matches_frame":true,
+ *            "counter":7,
+ *            "counter_error":false,"timeout_error":false,
+ *            "counter_reason":"none","silence_ms":12,
+ *            "slot":{"keyexpr":"demo/a","zid":"...",
+ *                    "identity":[{"name":"ident","value":N}]}}
+ *
+ * It is on the ENTRY, for the reason `payload` is: a `Frame` batches several
+ * messages and a counter is a fact about one. A message that arrived as
+ * fragments is judged where its chain completed, and its block is on the
+ * entry under `above_transport.carried`. Only a `Push` carrying a `put` is a
+ * frame; a key a rule covers whose payload is not a frame says why:
+ * `"opened":false` and a `why`, and the keys that need a frame are absent.
+ *
+ * `crc_error`, `counter_error` and `timeout_error` are the three booleans of
+ * the protocol's receiver. A frame whose CRC does not match is NOT judged for
+ * its counter and moves no state. `counter_reason` is `none`, `repeat` (the
+ * counter did not move) or `out_of_range` (it moved past the profile's
+ * allowed gap), for analysis; `silence_ms` is the silence the timeout was
+ * judged against. THE THREE LENGTH KEYS ARE INFORMATION AND NOT PART OF THE
+ * CRC VERDICT: the CRC is taken over the length field as it stands on the
+ * wire, so a sender that counts the length by another rule than the profile's
+ * shows as `length_matches_frame: false` beside a clean CRC, and damage shows
+ * as `crc_error: true`.
+ *
+ * THE COUNTER IS JUDGED PER SLOT. A slot is the key expression the frame was
+ * published under, the sender, and the values of the profile's `slot.message`
+ * fields (none by default); `slot` names it. The sender is the zid the
+ * capture saw announced on the link, never a field of the header. Two senders
+ * of one key do not share a counter unless the profile says `by_zid: false`.
+ *
+ * `null` MEANS NOT JUDGED, and `false` means judged and fine. When the
+ * profile separates senders and the capture never saw this sender's
+ * handshake, `slot.zid` is `null` and `counter_error`, `counter_reason` and
+ * `timeout_error` are `null`: the CRC needs no state and is judged, the
+ * counter would have to share a slot with every other unnamed sender and is
+ * not. `timeout_error` and `silence_ms` are also `null` for a frame whose
+ * packet carried no timestamp; `silence_ms` is `null` for the first frame a
+ * slot received. `zid` is absent when the profile does not separate senders,
+ * and `identity` when it names no message field. Frames are judged in the
+ * order the document walks them, flow by flow and in capture order within a
+ * flow, at the capture's own instants -- never the host's clock.
+ *
+ * STATE-DEPENDENT, so every cell under `e2e` is among the cells an issued row
+ * may read differently later (see the list below): a front trim makes a slot's
+ * oldest retained frame its first reception, and a zid learned late turns a
+ * `null` verdict into one. A since-door (wz_dissect_live_fields_since) still
+ * judges the rows its cursor passes over, so the first row it writes is judged
+ * against the frames before it and not as a first reception.
+ *
+ * @values fields counter_reason
+ *
  * AND WHEN A RECORD WAS CAPTURED, AND IN WHAT ORDER ROWS COME, at
  * field-document revision 31, selection-document revision 3, census revision 17
  * and retention revision 3.
@@ -783,7 +853,12 @@
  * documents take the rule from their first revision: a field of seven or eight
  * bytes can pass the line and one of six or fewer cannot, and the width is the
  * profile's, so a consumer knows from its own profile which cells to ask
- * about); to the `min_ns`, `max_ns`, `mean_ns` and `total_ns` of a census
+ * about); to the `crc_computed`, `length_field`, `length_expected`, `counter`
+ * and `silence_ms` of an `e2e` block and the `value` of each entry of its
+ * `slot.identity` (keys that exist from field document 34 and take the rule
+ * from their first appearance: the block's `header` fields are the cells the
+ * stateless doors' fields are, and a CRC or a counter of eight bytes can pass
+ * the line); to the `min_ns`, `max_ns`, `mean_ns` and `total_ns` of a census
  * latency object (keys that exist from census revision 17 and take the rule
  * from their first appearance: `total_ns` is a SUM, and 2^53 nanoseconds is 104
  * days of summed latency, which a long capture of many exchanges reaches); and to
@@ -1085,7 +1160,7 @@
  *
  * Every family in `value_families` now carries a `carries` axis:
  *
- *     {"name":"fields","revision":33,"key":"kind","values":[...],
+ *     {"name":"fields","revision":34,"key":"kind","values":[...],
  *      "carries":[{"word":"bits","shapes":[["end","name","start","value"]]},
  *                 {"word":"opaque","shapes":[["end","name","start"]]}, ...]}
  *
@@ -1117,6 +1192,7 @@
  * @carries census sender_end passenger
  * @carries fields body passenger
  * @carries fields carried_state discriminant
+ * @carries fields counter_reason passenger
  * @carries fields direction passenger
  * @carries fields family passenger
  * @carries fields keyexpr_cause passenger
@@ -1936,6 +2012,27 @@ int wz_dissect_pcap_fields(const unsigned char *bytes, size_t len,
  *     #profile=c:u16be,f:u8      R2114 -- a format DEFINITION: a record this
  *                                library does not ship, described so a rule
  *                                can name it like any other format
+ *     #demo-a={...}              field-document revision 34 -- an end-to-end
+ *                                protection PROFILE: the JSON description
+ *                                wz_dissect_e2e_open takes, on ONE line,
+ *                                registered under a name that must be its
+ *                                own `name`. A value that opens with a brace
+ *                                is a profile; a record layout never does.
+ *     demo/pose=demo-a           a rule that names a profile: the frames
+ *                                published under this key are read and judged
+ *                                under it (the `e2e` block described above)
+ *     demo/pose=demo-a@pkg.Pose  the same, naming the BODY SCHEMA the bytes
+ *                                after the header are an instance of. It is
+ *                                carried to the row as `body_schema` and
+ *                                nothing reads it yet
+ *
+ * A profile rule competes with the other rules like any rule: the first one
+ * that covers a key decides, so a `json` rule ahead of it keeps that key out
+ * of the block. The body after the header is also walked as protobuf, so
+ * `payload_decode` shows its fields (spans in payload coordinates). A profile
+ * is registered ONCE per call, with the declarations text every door below
+ * takes, and its judgement state lives for that call: pass the same text to
+ * every call of a live handle.
  *
  * THE DEFINITION IS WHY THIS DOOR TAKES TEXT AND NOT A FUNCTION POINTER.
  * A deployment with its own profile table used to have to build this
@@ -2788,7 +2885,7 @@ int wz_dissect_e2e_open(const char *profile_json, const unsigned char *frame,
  *
  * R2175 -- the document is at REVISION 3, and the fourth key is `value_families`:
  *
- *     "value_families":[{"name":"fields","revision":33,"key":"state",
+ *     "value_families":[{"name":"fields","revision":34,"key":"state",
  *                        "values":["decoded","encoding_mismatch",…]}, …]
  *
  * every key in every document whose VALUE this build draws from a closed set,
@@ -3605,6 +3702,12 @@ int wz_dissect_live_fields_where(wz_dissect_live *h,
  * /above_transport/carried[]/payload_decode, its whole subtree, which starts
  * from the same resolved key as the entry's /keyexpr beside it and so moves in
  * the same states.
+ *
+ * Since field-document revision 34 it names /carried[]/e2e and
+ * /above_transport/carried[]/e2e, each its whole subtree, the key included: the
+ * block exists only for a key a rule covers (so it arrives with the key's
+ * resolution), and a counter's verdict depends on the frames of its slot before
+ * it in the document (so a front trim, or a zid learned late, moves it).
  *
  * A row whose message bytes the per-direction byte ceiling has since discarded
  * reads, if it is asked for again, as `declined` in place of its walk: /name,

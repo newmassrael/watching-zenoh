@@ -58,6 +58,12 @@ use crate::payload::Encoding;
 pub struct Declarations<'a> {
     map: &'a FormatMap<'a>,
     used: RefCell<BTreeSet<DeclarationId>>,
+    /// The judgement state of the end-to-end profile rules: one judge per slot.
+    ///
+    /// On the run and not on the map, for the reason `used` is: what a counter
+    /// last was is a fact about the frames THIS walk has met, and a map is
+    /// configuration that two analyses may share. See [`crate::e2e_slots`].
+    e2e: RefCell<crate::e2e_slots::SlotLedger>,
     /// R311y875 — the rules that bound the WRONG thing, tallied by the triple
     /// that identifies one misbinding. See [`Self::misbindings`].
     misbound: RefCell<alloc::collections::BTreeMap<MisbindingKey, (usize, MatchedRule)>>,
@@ -102,6 +108,18 @@ pub struct Declarations<'a> {
     unwalked: RefCell<usize>,
 }
 
+/// What [`Declarations::judge_e2e`] found for one sample: the profile rule that
+/// governs its key, the profile and body schema it names, and the outcome of
+/// judging the payload under it.
+pub struct E2eJudged<'a> {
+    /// Which rule won for the key.
+    pub rule: MatchedRule,
+    /// The profile, and the body schema the rule names.
+    pub format: &'a crate::e2e_rule::E2eFormat,
+    /// What the payload turned out to be.
+    pub outcome: crate::e2e_slots::Outcome,
+}
+
 /// R311y875 — what one misbinding IS, as a key: the topic, the rule's decoder,
 /// the publisher's label, and which of the two is wrong.
 ///
@@ -125,6 +143,7 @@ impl<'a> Declarations<'a> {
         Self {
             map,
             used: RefCell::new(BTreeSet::new()),
+            e2e: RefCell::new(crate::e2e_slots::SlotLedger::new()),
             misbound: RefCell::new(alloc::collections::BTreeMap::new()),
             refused: RefCell::new(alloc::collections::BTreeMap::new()),
             rescans: RefCell::new((0, 0)),
@@ -210,6 +229,69 @@ impl<'a> Declarations<'a> {
         let matched = map.matching_rule(keyexpr)?;
         self.record_applied(matched.id);
         Some((matched.rule, matched.format))
+    }
+
+    /// Whether any rule binds a key to an end-to-end profile.
+    ///
+    /// The question a walker asks before it does the work of finding the frames:
+    /// a run with no profile rule judges nothing and must cost nothing.
+    pub fn has_e2e_rules(&self) -> bool {
+        self.map.has_e2e_rules()
+    }
+
+    /// Judge ONE sample under the profile rule that governs its key, or say
+    /// that none does.
+    ///
+    /// `None` is "the rule that wins for this key is not a profile rule, or no
+    /// rule covers it", and the caller emits no end-to-end block for it.
+    /// `payload` is the sample's payload when it is one run of bytes, and `None`
+    /// when it is not (a shared-memory descriptor, several slices): the rule
+    /// matched, there is no frame to read, and the outcome says so.
+    ///
+    /// The rule is marked used exactly as [`Self::rule_for_keyexpr`] marks it, so
+    /// a profile rule that judged a hundred frames is not reported as "bound
+    /// nothing". The frame is judged IN THE ORDER the caller hands them in; a
+    /// caller that wants a slot's counter walked in capture order must call in
+    /// capture order, including for the samples it does not print.
+    pub fn judge_e2e(
+        &self,
+        keyexpr: &str,
+        payload: Option<&[u8]>,
+        sender: Option<&[u8]>,
+        observed_at_ns: Option<u64>,
+    ) -> Option<E2eJudged<'a>> {
+        // Copied out of `self` so the format keeps the map's lifetime, as
+        // `rule_for_keyexpr` does.
+        let map: &'a FormatMap<'a> = self.map;
+        // Asked first, so a run whose rules name no profile pays nothing here
+        // for the question of which rule covers a key.
+        if !map.has_e2e_rules() {
+            return None;
+        }
+        let matched = map.e2e_for_keyexpr(keyexpr)?;
+        self.record_applied(matched.id);
+        let outcome = match payload {
+            Some(payload) => self.e2e.borrow_mut().receive(&crate::e2e_slots::Reception {
+                profile: matched.format.profile(),
+                keyexpr,
+                payload,
+                sender,
+                observed_at_ns,
+            }),
+            None => crate::e2e_slots::Outcome::Unreadable {
+                why: crate::e2e_slots::UNREADABLE_PAYLOAD,
+            },
+        };
+        Some(E2eJudged {
+            rule: matched.rule,
+            format: matched.format,
+            outcome,
+        })
+    }
+
+    /// How many slots the end-to-end judge holds a counter for.
+    pub fn e2e_slots(&self) -> usize {
+        self.e2e.borrow().slots()
     }
 
     /// Mark a rule used.
@@ -2130,7 +2212,7 @@ pub fn push_decoding(decoding: &PayloadDecoding, out: &mut String) {
 ///
 /// Written once, so a row's `matched_rule` and the same rule inside a
 /// `payload_mapping` or `payload_refusals` entry cannot be two spellings.
-fn push_matched_rule(rule: &MatchedRule, out: &mut String) {
+pub(crate) fn push_matched_rule(rule: &MatchedRule, out: &mut String) {
     use wz_session_core::json::escape_into;
     out.push_str("{\"index\":");
     out.push_str(&rule.index.to_string());

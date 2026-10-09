@@ -88,8 +88,16 @@ pub mod e2e_frame;
 pub mod e2e_json;
 pub mod e2e_judge;
 pub mod e2e_profile;
-// The judgement state a capture keeps per slot. Documented by its own `//!`
+// The declaration that binds a key expression pattern to a profile, and the
+// judgement state a capture keeps per slot. Each is documented by its own `//!`
 // text, for the reason given above.
+#[cfg(feature = "dissect")]
+mod e2e_row;
+#[cfg(all(test, feature = "dissect", feature = "network-codecs"))]
+mod e2e_row_tests;
+pub mod e2e_rule;
+#[cfg(test)]
+mod e2e_rule_tests;
 #[cfg(test)]
 mod e2e_slot_tests;
 pub mod e2e_slots;

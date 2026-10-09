@@ -1184,7 +1184,16 @@ pub unsafe extern "C" fn wz_dissect_pcap_fields(
 /// demo/**=protobuf            a format rule: which decoder reads this topic
 /// demo/**:1=temperature       a field name: protobuf carries none, so a
 ///                             deployment that has a schema declares it
+/// #demo-a={...}               an end-to-end protection PROFILE, on one line
+/// demo/pose=demo-a@pkg.Pose   a rule that names it, and the body schema
 /// ```
+///
+/// A value that opens with a brace is a profile ([`wz_dissect_e2e_open`]'s
+/// description, registered under the name it gives itself), never a record
+/// layout. A key a profile rule covers has its frames read and judged: each
+/// `Push` entry gains an `e2e` block (field-document revision 34), with the
+/// CRC, the length facts, the counter and timeout verdicts and the slot the
+/// counter was judged in. See the header for the block.
 ///
 /// ONE dialect for both surfaces, deliberately: a rule that a person tried in a
 /// terminal and then moved into a config file must not have to be re-spelled,
@@ -7025,6 +7034,123 @@ mod tests {
         );
     }
 
+    /// A synthetic end-to-end profile on one line, as a declaration carries it:
+    /// a 4-byte CRC (CRC-32/AUTOSAR), a 2-byte length and a 2-byte counter, and
+    /// nothing a real protocol would put there. A macro, so the one text can be a
+    /// `const` and also the tail of a `concat!`.
+    macro_rules! e2e_row_profile {
+        () => {
+            "{\"name\": \"prof\", \"fields\": [{\"name\": \"crc\", \"bytes\": 4}, {\"name\": \"length\", \"bytes\": 2}, {\"name\": \"counter\", \"bytes\": 2}], \"crc\": {\"field\": \"crc\", \"width\": 32, \"poly\": \"0xF4ACFB13\", \"init\": \"0xFFFFFFFF\", \"refin\": true, \"refout\": true, \"xorout\": \"0xFFFFFFFF\", \"cover\": [\"length\", \"@payload\", \"counter\"]}, \"length\": {\"field\": \"length\", \"counts\": \"frame\"}, \"counter\": {\"field\": \"counter\", \"max_gap\": 3, \"timeout_ms\": 100}}"
+        };
+    }
+
+    /// The profile, to wrap frames with through the stateless door.
+    const E2E_ROW_PROFILE: &str = e2e_row_profile!();
+
+    /// The declarations that register the profile and bind every key under
+    /// `demo` to it.
+    const E2E_RULES: &str = concat!("#prof=", e2e_row_profile!(), "\ndemo/**=prof\n");
+
+    /// A capture whose two ends have named themselves and whose low end then
+    /// publishes one `Put` per entry of `counters` on `demo/sensor`, each payload
+    /// a frame the STATELESS wrap door built under [`E2E_ROW_PROFILE`] (so the two
+    /// doors are graded against each other: what one writes the other's judge
+    /// must read as sound).
+    fn e2e_capture(counters: &[u64]) -> Vec<u8> {
+        let mut low_to_high = framed_init(&ZID_A);
+        for (sn, counter) in counters.iter().enumerate() {
+            let wrapped = call_e2e_wrap(
+                E2E_ROW_PROFILE,
+                &format!("{{\"counter\": {counter}}}"),
+                b"\x08\x96\x01",
+            )
+            .expect("wraps");
+            let frame = e2e_frame_of(&wrapped);
+            low_to_high.extend_from_slice(&framed_frame(
+                sn as u8,
+                &wz_codecs::push::Push {
+                    header: wz_codecs::push::Push::default().header
+                        | wz_codecs::wire_const::FLAG_N_N,
+                    keyexpr: literal("demo/sensor"),
+                    body: wz_codecs::push::PushVariant::CodecZenohMsgPut(
+                        wz_codecs::msg_put::MsgPut {
+                            payload_len: Some(frame.len() as u64),
+                            payload: Some(&frame),
+                            ..Default::default()
+                        },
+                    ),
+                    ..Default::default()
+                }
+                .encode_to_vec(),
+            ));
+        }
+        let low = tcp_packet(1000, &low_to_high);
+        let high = tcp_packet_reverse(5000, &framed_init(&ZID_B));
+        wz_capture::pcap::write(1, &[(0, 0, low.as_slice()), (0, 1, high.as_slice())])
+    }
+
+    /// A PROFILE DECLARED THROUGH THE PAYLOAD DOOR JUDGES THE FRAMES THE
+    /// STATELESS DOORS WRITE.
+    ///
+    /// Three frames built by `wz_dissect_e2e_wrap`, counters 5, 5 and 6, published
+    /// by a sender the capture named: the second repeats the first. The block is
+    /// there, the CRC the wrap door wrote verifies in the field document, the
+    /// repetition is named, and the sender is the zid of the handshake and not
+    /// anything in the header.
+    #[test]
+    fn a_profile_declared_through_the_payload_door_judges_the_frames_the_wrap_door_writes() {
+        let doc = call_fields_with_payloads(&e2e_capture(&[5, 5, 6]), 0, E2E_RULES)
+            .expect("the capture reads");
+        assert_eq!(doc.matches("\"e2e\":{").count(), 3, "{doc}");
+        assert_eq!(doc.matches("\"crc_error\":false").count(), 3, "{doc}");
+        assert_eq!(
+            doc.matches(
+                "\"counter_error\":true,\"timeout_error\":false,\"counter_reason\":\"repeat\""
+            )
+            .count(),
+            1,
+            "{doc}"
+        );
+        assert_eq!(
+            doc.matches("\"counter_reason\":\"none\"").count(),
+            2,
+            "{doc}"
+        );
+        assert!(doc.contains("\"zid\":\"a1a1a1a1\""), "{doc}");
+        // No declarations, no block: a reader who registered nothing is told
+        // nothing.
+        let plain = call_fields_with_payloads(&e2e_capture(&[5]), 0, "").expect("reads");
+        assert!(!plain.contains("\"e2e\""), "{plain}");
+    }
+
+    /// A PROFILE THAT DOES NOT READ IS REFUSED BY LINE, BY THE DOOR THAT TAKES
+    /// IT AND BY THE ONE THAT DIAGNOSES IT.
+    #[test]
+    fn a_profile_that_does_not_read_is_refused_like_any_other_declaration() {
+        for bad in [
+            "#prof={\"name\": \"prof\"}\n",
+            "#prof={oops\n",
+            "#other={\"name\": \"prof\"}\n",
+        ] {
+            assert_eq!(
+                call_fields_with_payloads(&e2e_capture(&[1]), 0, bad),
+                Err(WZ_DISSECT_ERR_DECLARATION),
+                "{bad}"
+            );
+            let verdict = call_declarations_diagnose(bad);
+            assert!(verdict.contains("\"ok\":false,\"line\":0"), "{verdict}");
+        }
+        let good = call_declarations_diagnose(E2E_RULES);
+        assert!(good.contains("\"ok\":true,\"installed\":2"), "{good}");
+        assert!(
+            good.contains("{\"line\":0,\"kind\":\"format_definition\"}"),
+            "{good}"
+        );
+        // A rule for a profile nobody registered names what it could have been.
+        let unknown = call_declarations_diagnose("demo/x=nope\n");
+        assert!(unknown.contains("\"ok\":false"), "{unknown}");
+    }
+
     /// R311y856 — a capture carrying ONE `Put` on `demo/sensor` whose payload
     /// is the protobuf message `{ 1: 150 }`.
     ///
@@ -11843,6 +11969,48 @@ mod tests {
                     "/above_transport/carried[]/keyexpr",
                     "/above_transport/carried[]/keyexpr_cause",
                     "/above_transport/carried[]/keyexpr_id",
+                    "/above_transport/carried[]/payload_decode/format",
+                    "/above_transport/carried[]/payload_decode/keyexpr",
+                    "/above_transport/carried[]/payload_decode/matched_rule",
+                    "/above_transport/carried[]/payload_decode/state",
+                    "/above_transport/carried[]/payload_decode/why",
+                ]),
+            ),
+            (
+                "the same under an end-to-end profile rule",
+                wz_capture::fixtures::multilink_declaration_behind_a_gap(
+                    wz_capture::fixtures::GapFill::AfterTheReference,
+                    false,
+                ),
+                Default::default(),
+                E2E_RULES,
+                cells(&[
+                    "/carried[]/keyexpr",
+                    "/carried[]/keyexpr_cause",
+                    "/carried[]/keyexpr_id",
+                    // The block exists only for a key a rule covers, so it
+                    // arrives with the key's resolution.
+                    "/carried[]/e2e",
+                    "/payload_decode/format",
+                    "/payload_decode/keyexpr",
+                    "/payload_decode/matched_rule",
+                    "/payload_decode/state",
+                    "/payload_decode/why",
+                ]),
+            ),
+            (
+                "the same inside a completed chain, under an end-to-end profile rule",
+                wz_capture::fixtures::multilink_declaration_behind_a_gap(
+                    wz_capture::fixtures::GapFill::AfterTheReference,
+                    true,
+                ),
+                Default::default(),
+                E2E_RULES,
+                cells(&[
+                    "/above_transport/carried[]/keyexpr",
+                    "/above_transport/carried[]/keyexpr_cause",
+                    "/above_transport/carried[]/keyexpr_id",
+                    "/above_transport/carried[]/e2e",
                     "/above_transport/carried[]/payload_decode/format",
                     "/above_transport/carried[]/payload_decode/keyexpr",
                     "/above_transport/carried[]/payload_decode/matched_rule",

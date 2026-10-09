@@ -1992,6 +1992,43 @@ int main(void) {
           "an unknown format must be its own refusal, got rc=%d", rc);
     CHECK(decoded == NULL, "a refused declaration handed back a string");
 
+    /* An end-to-end PROFILE is a declaration too (field-document revision 34):
+     * a line that opens with a brace registers one, a rule names it, and the
+     * entries of the keys that rule covers gain an `e2e` block. This capture
+     * holds no traffic, so no block can appear in it; the Rust side owns what
+     * the block says, over captures that do. This owns that the dialect crosses
+     * the boundary: a profile and a rule that names it install, the diagnostic
+     * reads the profile as a format definition, and a profile which does not
+     * read is refused like any other line. */
+    char profile_decl[1024];
+    snprintf(profile_decl, sizeof profile_decl,
+             "#c-demo=%s\ndemo/temp=c-demo@pkg.Msg\n", e2e_profile);
+    decoded = NULL;
+    rc = wz_dissect_pcap_fields_with_payloads(pcap, sizeof pcap, 0,
+                                              profile_decl, &decoded);
+    CHECK(rc == WZ_DISSECT_OK, "a profile declaration rc=%d", rc);
+    CHECK(decoded != NULL, "OK came back with no string");
+    CHECK(strstr(decoded, "\"stream_flows\"") != NULL,
+          "a profile declaration must still be the field layer: %s", decoded);
+    wz_dissect_string_free(decoded);
+
+    char *profile_verdict = NULL;
+    rc = wz_dissect_declarations_diagnose(profile_decl, &profile_verdict);
+    CHECK(rc == WZ_DISSECT_OK, "profile diagnose rc=%d", rc);
+    CHECK(strstr(profile_verdict, "\"ok\":true,\"installed\":2") != NULL,
+          "a profile and its rule must verify: %s", profile_verdict);
+    CHECK(strstr(profile_verdict,
+                 "{\"line\":0,\"kind\":\"format_definition\"}") != NULL,
+          "a profile reads as a format definition: %s", profile_verdict);
+    wz_dissect_string_free(profile_verdict);
+
+    decoded = NULL;
+    rc = wz_dissect_pcap_fields_with_payloads(
+        pcap, sizeof pcap, 0, "#c-demo={\"name\":\"other\"}\n", &decoded);
+    CHECK(rc == WZ_DISSECT_ERR_DECLARATION,
+          "a profile that does not read must be refused, got rc=%d", rc);
+    CHECK(decoded == NULL, "a refused profile handed back a string");
+
     /* And the diagnostic answers with no capture at all, which is the whole
      * point of it: a UI asks while the text is being typed. */
     char *declared = NULL;
@@ -2384,8 +2421,13 @@ int main(void) {
      * the branch of the message's tree that carries its own `mid` (`put`,
      * `del`, `query`, `reply`, `err` or one of the nine declarations), `null`
      * for a message with none. A key arrives and a `body` family is declared;
+     * nothing retires.
+     * 34: an entry of a key a profile rule covers gains `e2e`, the end-to-end
+     * verdict of the `Push` frame (CRC, length facts, counter and timeout,
+     * the slot it was judged in), and a `counter_reason` family is declared.
+     * The block is ABSENT from every entry no profile rule covers. Keys arrive;
      * nothing retires. */
-    revisioned[2].revision = 33;
+    revisioned[2].revision = 34;
     revisioned[2].doc = NULL;
     rc = wz_dissect_pcap_fields(pcap, sizeof pcap, 0, &revisioned[2].doc);
     CHECK(rc == WZ_DISSECT_OK, "fields rc=%d", rc);
