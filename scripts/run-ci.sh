@@ -20787,6 +20787,16 @@ layer_c1ce_api_compat_c_unstable_oracle() {
         cargo test -p wz-integration-tests \
         --test zenoh_c_ext_families_twice_and_diff -- --ignored --quiet --test-threads=1 \
         --exact a_history_subscriber_hears_each_cached_sample_once_with_a_link_up_on_wz_and_libzenohc || rc=1
+    # R3136 -- `scouting/gossip/multihop`. Five peers in a chain, only the first dialling what
+    # gossip names, once with the key off and once on, linked at the real `libzenohc` and at wz's
+    # C ABI. MEASURED, against the default config's sentence that it spreads gossip "to all
+    # nodes" when on: the real library ends with the SAME links either way (the first node
+    # dials every other), because dialling converges a chain whatever the reach of the gossip.
+    # So the key is not observable through a C session's links, and wz agrees on both settings.
+    WZ_ZENOH_C_PREFIX="$shm" _runci_guarded_test "C1ce gossip multihop chain" 1 \
+        cargo test -p wz-integration-tests \
+        --test zenoh_c_ext_families_twice_and_diff -- --ignored --quiet --test-threads=1 \
+        --exact gossip_multihop_links_the_chain_identically_on_wz_and_libzenohc || rc=1
     # REPORTED, never enforced, exactly as C1cc's is.
     WZ_ZENOH_C_PREFIX="$shm" python3 scripts/lib/capi_c_coverage.py || rc=1
 

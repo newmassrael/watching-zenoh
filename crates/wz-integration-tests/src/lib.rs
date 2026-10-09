@@ -286,6 +286,41 @@ pub mod common {
             )
         }
 
+        /// Reserve `count` distinct ephemeral ports under a SINGLE lock acquisition,
+        /// for a program that listens on several at once (a chain of sessions, one
+        /// endpoint each). The guard carries the first port and the returned vector
+        /// holds all of them, the first included, in the order they were bound.
+        ///
+        /// [`pick_pair`](Self::pick_pair) is the two-port case and calling
+        /// [`pick`](Self::pick) `count` times on one thread deadlocks on the same
+        /// non-reentrant mutex, so this is the only way to hold more than two. Every
+        /// listener is bound before any is dropped, which is what keeps the ports
+        /// distinct: the OS cannot hand a bound port out twice.
+        ///
+        /// # Panics
+        /// If `count` is zero: a reservation with no port is not a reservation.
+        pub fn pick_many(count: usize) -> (Self, Vec<u16>) {
+            assert!(count > 0, "pick_many needs at least one port");
+            let reentry = ReentryGuard::arm("pick_many");
+            let guard = port_lock()
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            let cross_process = CrossProcessPortLock::acquire();
+            let bound: Vec<(TcpListener, u16)> =
+                (0..count).map(|_| Self::bind_ephemeral()).collect();
+            let ports: Vec<u16> = bound.iter().map(|(_, port)| *port).collect();
+            drop(bound);
+            (
+                Self {
+                    port: ports[0],
+                    _guard: guard,
+                    _cross_process: cross_process,
+                    _reentry: reentry,
+                },
+                ports,
+            )
+        }
+
         /// Bind a fresh ephemeral loopback listener and return it WITH its
         /// port — the bind/extract the single and dual reservations share
         /// (R311pp). The caller owns the drop: [`pick`](Self::pick) drops at

@@ -267,6 +267,18 @@ fn compile(
 /// Compile `probe` once and run it against wz's cdylib and against the real
 /// libzenohc, returning `(wz stdout, reference stdout)`.
 fn run_both_arms(probe: &str, include: &Path, ref_libdir: &Path) -> (String, String) {
+    run_both_arms_with(probe, include, ref_libdir, &[], 1)
+}
+
+/// [`run_both_arms`] for a probe that takes `leading` arguments and then `ports` loopback
+/// endpoints, each a port reserved for the run.
+fn run_both_arms_with(
+    probe: &str,
+    include: &Path,
+    ref_libdir: &Path,
+    leading: &[&str],
+    ports: usize,
+) -> (String, String) {
     let dir = tempfile::tempdir().expect("tempdir");
     let src = dir.path().join("wz_ext_families.c");
     std::fs::write(&src, probe).expect("write probe");
@@ -287,9 +299,11 @@ fn run_both_arms(probe: &str, include: &Path, ref_libdir: &Path) -> (String, Str
         .unwrap_or_else(|d| panic!("the probe does not link against the REAL libzenohc\n{d}"));
 
     let run = |exe: &Path, libdir: &Path| -> (bool, String) {
-        let port = PortReservation::pick();
+        // ONE reservation for all of them: picking `ports` times on a thread deadlocks.
+        let (_reservation, reserved) = PortReservation::pick_many(ports);
         let out = Command::new(exe)
-            .arg(format!("tcp/127.0.0.1:{}", port.port()))
+            .args(leading)
+            .args(reserved.iter().map(|port| format!("tcp/127.0.0.1:{port}")))
             .env("LD_LIBRARY_PATH", libdir)
             .output()
             .unwrap_or_else(|e| panic!("spawn {}: {e}", exe.display()));
@@ -1280,5 +1294,163 @@ fn a_history_subscriber_hears_each_cached_sample_once_with_a_link_up_on_wz_and_l
         wz, reference,
         "wz's history subscribers and the real libzenohc's hear the cache a different \
          number of times"
+    );
+}
+
+/// Five sessions in a chain A - B - C - D - E, one program, the nodes' gossip configured by
+/// the first argument. Only A dials what gossip names; the rest hold the links they were
+/// given. It prints which nodes each one is linked to once the links have stopped changing.
+///
+/// `scouting/gossip/multihop` is the variable: the default config says gossip information
+/// "are propagated multiple hops to all nodes in the local network" when it is on and "only
+/// propagated to the next hop" when it is off. So A, the only node that dials, should come to
+/// hold a link to the far end of the chain only with the key on. Which nodes A links to with
+/// the key off is the real library's to say.
+const GOSSIP_PROBE: &str = r#"#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <stdint.h>
+#include <time.h>
+#include "zenoh.h"
+
+#define N 5
+
+static const char NAME[N] = {'A', 'B', 'C', 'D', 'E'};
+static z_id_t ZIDS[N];
+
+static void nap_ms(long ms) {
+    struct timespec ts;
+    ts.tv_sec = ms / 1000;
+    ts.tv_nsec = (ms % 1000) * 1000000L;
+    nanosleep(&ts, NULL);
+}
+
+static void on_peer(const z_id_t *id, void *ctx) {
+    unsigned *mask = (unsigned *)ctx;
+    for (int i = 0; i < N; i++) {
+        if (memcmp(id->id, ZIDS[i].id, sizeof id->id) == 0) *mask |= 1u << i;
+    }
+}
+
+static unsigned links_of(const z_loaned_session_t *s) {
+    unsigned mask = 0;
+    z_owned_closure_zid_t closure;
+    z_closure(&closure, on_peer, NULL, &mask);
+    z_info_peers_zid(s, z_move(closure));
+    return mask;
+}
+
+static z_result_t open_node(z_owned_session_t *s, const char *multihop, int dials,
+                            const char *listen, const char *connect) {
+    z_owned_config_t config;
+    z_config_default(&config);
+    zc_config_insert_json5(z_loan_mut(config), Z_CONFIG_MULTICAST_SCOUTING_KEY, "false");
+    zc_config_insert_json5(z_loan_mut(config), Z_CONFIG_MODE_KEY, "\"peer\"");
+    zc_config_insert_json5(z_loan_mut(config), "scouting/gossip/multihop", multihop);
+    if (!dials) {
+        zc_config_insert_json5(z_loan_mut(config), "scouting/gossip/autoconnect",
+                               "{\"router\":[],\"peer\":[]}");
+    }
+    char json[256];
+    snprintf(json, sizeof json, "[\"%s\"]", listen);
+    zc_config_insert_json5(z_loan_mut(config), Z_CONFIG_LISTEN_KEY, json);
+    if (connect) {
+        snprintf(json, sizeof json, "[\"%s\"]", connect);
+        zc_config_insert_json5(z_loan_mut(config), Z_CONFIG_CONNECT_KEY, json);
+    }
+    return z_open(s, z_move(config), NULL);
+}
+
+static void print_links(unsigned masks[N]) {
+    for (int i = 0; i < N; i++) {
+        printf("%c.links=", NAME[i]);
+        int n = 0;
+        for (int j = 0; j < N; j++) {
+            if (masks[i] & (1u << j)) {
+                printf("%s%c", n ? "," : "", NAME[j]);
+                n++;
+            }
+        }
+        if (!n) printf("none");
+        printf("\n");
+    }
+}
+
+int main(int argc, char **argv) {
+    if (argc < 1 + 1 + N) { fprintf(stderr, "usage: probe <multihop> <5 endpoints>\n"); return 2; }
+    const char *multihop = argv[1];
+    const char *ep[N];
+    for (int i = 0; i < N; i++) ep[i] = argv[2 + i];
+
+    /* The chain, each node opened once the node it dials is listening: A dials B, C dials B,
+       D dials C, E dials D. B holds A and C; C holds B and D; D holds C and E. */
+    z_owned_session_t s[N];
+    int order[N] = {1, 0, 2, 3, 4};
+    int dial[N] = {1, -1, 1, 2, 3};
+    for (int k = 0; k < N; k++) {
+        int i = order[k];
+        z_result_t rc = open_node(&s[i], multihop, i == 0, ep[i], dial[i] >= 0 ? ep[dial[i]] : NULL);
+        printf("open[%c].rc=%d\n", NAME[i], (int)rc);
+        if (rc < 0) return 1;
+        ZIDS[i] = z_info_zid(z_loan(s[i]));
+        nap_ms(150);
+    }
+
+    /* Wait for the links to stop changing: a gossip dial is a link opening on its own time. */
+    unsigned last[N] = {0};
+    int quiet = 0;
+    for (int waited = 0; waited < 12000 && quiet < 3000; waited += 100) {
+        unsigned now[N];
+        int same = 1;
+        for (int i = 0; i < N; i++) {
+            now[i] = links_of(z_loan(s[i]));
+            if (now[i] != last[i]) same = 0;
+        }
+        quiet = same ? quiet + 100 : 0;
+        memcpy(last, now, sizeof last);
+        nap_ms(100);
+    }
+    print_links(last);
+
+    for (int i = N - 1; i >= 0; i--) z_drop(z_move(s[i]));
+    printf("done\n");
+    return 0;
+}
+"#;
+
+/// THE ADJUDICATOR for `scouting/gossip/multihop`: a chain of five peers, only the first
+/// dialling what gossip names, ends up with the same links on wz's cdylib as on the real
+/// `libzenohc.so`, with the key off and with it on.
+// wz-proves: api-compat-c wz->zenoh-c partial
+#[test]
+#[ignore = "links the shared-memory zenoh-c oracle; run by run-ci Layer C1ce"]
+fn gossip_multihop_links_the_chain_identically_on_wz_and_libzenohc() {
+    let Some((include, ref_libdir)) = oracle_prefix() else {
+        return;
+    };
+    let mut by_setting: Vec<(&str, String)> = Vec::new();
+    for multihop in ["false", "true"] {
+        let (wz_out, ref_out) =
+            run_both_arms_with(GOSSIP_PROBE, &include, &ref_libdir, &[multihop], 5);
+        assert!(
+            ref_out.lines().any(|line| line == "done"),
+            "the reference arm never finished.\n{ref_out}"
+        );
+        assert_eq!(
+            wz_out, ref_out,
+            "with scouting/gossip/multihop = {multihop}, wz's chain of five peers holds \
+             different links from the real libzenohc's.\n--- wz ---\n{wz_out}\n--- reference \
+             ---\n{ref_out}"
+        );
+        by_setting.push((multihop, ref_out));
+    }
+    // What the real library does with the key in a chain, stated once both settings are in
+    // hand. Printed whole when it is not what is asserted, because the assertion is a claim
+    // about the library and the library has the last word.
+    assert_eq!(
+        by_setting[0].1, by_setting[1].1,
+        "the key changes the links of the real library's chain.\n--- off ---\n{}\n--- on \
+         ---\n{}",
+        by_setting[0].1, by_setting[1].1
     );
 }
