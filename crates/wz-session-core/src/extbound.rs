@@ -216,6 +216,43 @@ pub fn region_and_bound_of(
     }
 }
 
+/// The region a node of `mode` puts its multicast transport in:
+/// `compute_multicast_region` (`zenoh/src/net/runtime/region.rs`
+/// @ `pub(crate) fn compute_multicast_region(`). A peer's group is in its own
+/// north region and a router's is in the default south PEER region, where the
+/// router's unicast peers are too. `None` is the pin's `bail!` for a client,
+/// which has no multicast transport.
+pub fn multicast_region(mode: WhatAmI) -> Option<Region> {
+    match mode {
+        WhatAmI::Peer => Some(Region::North),
+        WhatAmI::Router => Some(Region::default_south(WhatAmI::Peer)),
+        WhatAmI::Client => None,
+    }
+}
+
+/// The region a node of `mode` places a MEMBER of its multicast group in, and
+/// that member's bound: `compute_multicast_region_of`
+/// (`zenoh/src/net/runtime/region.rs` @ `pub(crate) fn compute_multicast_region_of(`).
+/// Only the three pairs the pin names are placed; every other pair is its
+/// `bail!`, which is `None` here, so a router does not take a router on its
+/// group as a member at all.
+///
+/// A router places a peer member in the same region as [`multicast_region`],
+/// and a unicast peer lands there too ([`region_of`]). The routing hat of that
+/// region relays to its own faces only what came from another region, so a
+/// Put that arrives from a group member is not relayed to the router's
+/// unicast peers.
+pub fn multicast_region_and_bound_of(mode: WhatAmI, remote: WhatAmI) -> Option<(Region, Bound)> {
+    match (mode, remote) {
+        (WhatAmI::Peer, WhatAmI::Peer) => Some((Region::North, Bound::North)),
+        (WhatAmI::Router, WhatAmI::Peer) => {
+            Some((Region::default_south(WhatAmI::Peer), Bound::North))
+        }
+        (WhatAmI::Peer, WhatAmI::Router) => Some((Region::North, Bound::South)),
+        _ => None,
+    }
+}
+
 /// The interest id a node's peer hat acts as if a new face had sent it
 /// (`zenoh/src/net/routing/hat/peer/mod.rs` @ `pub(crate) const INITIAL_INTEREST_ID: u32 = 0;`).
 ///
@@ -338,6 +375,59 @@ mod tests {
         );
         assert_eq!(region_of(Client, Router, Some(Bound::North)), None);
         assert_eq!(region_of(Client, Client, Some(Bound::North)), None);
+    }
+
+    /// `compute_multicast_region`, one line per mode: a peer's group is north,
+    /// a router's is the default south peer region, a client has none.
+    #[test]
+    fn a_nodes_multicast_group_is_in_the_pins_region() {
+        assert_eq!(multicast_region(Peer), Some(Region::North));
+        assert_eq!(multicast_region(Router), Some(Region::default_south(Peer)));
+        assert_eq!(multicast_region(Client), None);
+    }
+
+    /// `compute_multicast_region_of`, every pair: three are placed, the other
+    /// six are the pin's `bail!`.
+    #[test]
+    fn a_multicast_member_is_placed_by_the_pins_three_pairs() {
+        let placed = multicast_region_and_bound_of;
+        assert_eq!(
+            placed(Peer, Peer),
+            Some((Region::North, Bound::North)),
+            "peer-peer"
+        );
+        assert_eq!(
+            placed(Router, Peer),
+            Some((Region::default_south(Peer), Bound::North)),
+            "a router's group member is a peer in its south peer region"
+        );
+        assert_eq!(
+            placed(Peer, Router),
+            Some((Region::North, Bound::South)),
+            "peer-router"
+        );
+        for (mode, remote) in [
+            (Router, Router),
+            (Router, Client),
+            (Peer, Client),
+            (Client, Router),
+            (Client, Peer),
+            (Client, Client),
+        ] {
+            assert_eq!(placed(mode, remote), None, "{mode:?} <- {remote:?}");
+        }
+    }
+
+    /// The group's own region and the region of the member a router places in
+    /// it are one region, which is why a member's Put is a Put from the region
+    /// the router's unicast peers are in.
+    #[test]
+    fn a_routers_group_member_shares_the_region_of_its_unicast_peers() {
+        let group = multicast_region(Router).expect("a router has a group");
+        let (member, _) = multicast_region_and_bound_of(Router, Peer).expect("a peer member");
+        let unicast_peer = region_of(Router, Peer, None).expect("a unicast peer");
+        assert_eq!(group, member);
+        assert_eq!(member, unicast_peer);
     }
 
     #[cfg(feature = "alloc")]

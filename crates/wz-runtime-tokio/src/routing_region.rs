@@ -9,13 +9,17 @@
 //! region it serves, and a face is owned by the hat of the region it landed in
 //! (`zenoh/src/net/routing/dispatcher/tables.rs`
 //! @ `pub hats: RegionMap<Box<dyn HatTrait + Send + Sync>>,`). wz's routers
-//! still carry the 1.5.0 shape — two link-state nets classified by the
-//! remote's whatami, with per-keyexpr master election bridging them — and the
-//! owner's 2026-09-21 decision is to follow the pin. The ORDER is part of that
-//! decision: election holds up cross-mesh loop-freedom today, so the region
-//! model is built first and routing moves onto it before election is removed.
+//! carried the 1.5.0 shape — two link-state nets classified by the remote's
+//! whatami, with per-keyexpr master election bridging them — until the owner's
+//! 2026-09-21 decision to follow the pin was built, in an order that was part
+//! of the decision: election held up cross-mesh loop-freedom, so the region
+//! model came first, routing moved onto it, and election was removed after.
+//! That has landed (the router's face classification, per-region hats, the
+//! inter-region filter below, the peer region on the pin's gossip `Network`);
+//! what remains of the election is the multicast Designated Router, which is
+//! wz's own.
 //!
-//! This module is that first step and changes no wire behaviour: the map, the
+//! This module was that first step and changed no wire behaviour: the map, the
 //! set of regions a node on the `Auto` gateway preset builds, and which kind of
 //! hat serves each one.
 

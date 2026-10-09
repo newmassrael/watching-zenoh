@@ -4,6 +4,20 @@
 //! Router-hat forwarder (P4 §5.21 — DUAL-mesh STATE + declare INGEST (1a-1c) +
 //! within-tier data route + tick re-advertise (C1)).
 //!
+//! ⚠ Item 751 — READ THE SLICE NOTES BELOW AS THE BUILD HISTORY, NOT AS THE
+//! CURRENT SHAPE. They were written against zenoh 1.5.0's `hat/router`, which
+//! held `routers_net` and `linkstatepeers_net` side by side and classified a
+//! face by the remote's whatami. The pin (1.10.x) keys every hat by REGION: the
+//! router hat serves `North` over one `Network`, the peer hat serves the south
+//! peer region over a single-hop gossip `Network`, and broker hats serve the
+//! client regions. This forwarder follows that: a `tier` is a
+//! [`Region`](wz_session_core::extbound::Region), a face's region is computed
+//! from the two roles and the bound the remote announced, a Put crosses a region
+//! boundary only through the pin's inter-region filter, and the per-keyexpr
+//! master election is gone (the multicast Designated Router, wz's own, is its
+//! one remaining use). Where a note below says "the pin" with a 1.5.0 line
+//! number, the code and the cited pin source are authoritative.
+//!
 //! [`RouterForwarder`] is the 4th [`FaceForwarder`](crate::accept_loop::FaceForwarder),
 //! the wz port of zenoh's `hat/router` routing strategy. Where the
 //! single-net [`LinkstateForwarder`](crate::linkstate_forward) ports
@@ -365,6 +379,8 @@ use wz_session_core::declare_build::{
 use wz_session_core::declare_ext_keyexpr::resolve_ext_keyexpr;
 use wz_session_core::declare_routing_context::{read_declare_source, set_declare_source};
 use wz_session_core::driver_loop::DriverLoopOutcome;
+#[cfg(feature = "router-multicast-faces")]
+use wz_session_core::extbound::multicast_region_and_bound_of;
 use wz_session_core::extbound::{region_and_bound_of, Bound, Region};
 use wz_session_core::keyexpr_match::keyexpr_intersects_target;
 use wz_session_core::linkstate_oam::{
@@ -441,12 +457,23 @@ const PEERS_REGION: Region = Region::default_south(WhatAmI::Peer);
 ///
 /// R2873 (step 3d) — no production path names this region any more: the
 /// broker hats are built from every derived leaf region and a client
-/// declaration registers in the hat of its face's region. The one remaining
-/// consumer is the multicast ingress, which still routes as the clients region
-/// (a recorded divergence from the pin, see `route_mcast_ingress`), so the
-/// constant exists only where that path or the tests do.
-#[cfg(any(test, feature = "router-multicast-faces"))]
+/// declaration registers in the hat of its face's region. The multicast
+/// ingress was the last consumer, and it routed as the clients region against
+/// the pin; item 751 moved it to the south peer region
+/// ([`mcast_ingress_region`]), so the constant exists only for the tests.
+#[cfg(test)]
 const CLIENTS_REGION: Region = Region::default_south(WhatAmI::Client);
+
+/// The region a multicast group member's traffic comes from on a router node:
+/// the pin's `compute_multicast_region_of` for a peer member, which is the
+/// south peer region ([`PEERS_REGION`]) the unicast peers are in too
+/// (`zenoh/src/net/runtime/region.rs` @ `pub(crate) fn compute_multicast_region_of(`).
+#[cfg(feature = "router-multicast-faces")]
+fn mcast_ingress_region() -> Region {
+    multicast_region_and_bound_of(WhatAmI::Router, WhatAmI::Peer)
+        .map(|(region, _)| region)
+        .unwrap_or_else(|| unreachable!("the pin places a peer on a router's group"))
+}
 
 /// Whether a face in `region` is a leaf, meaning its hat keeps no link-state
 /// net. That is the pin's client and broker hats. Read off the ported hat
@@ -1238,6 +1265,19 @@ struct QueryCrossing {
     src: Region,
     src_zid: Option<Zid>,
     fwd_zid: Option<Zid>,
+    /// The Query came from a multicast group member, which is no node of any net
+    /// and so is admitted by the filter (see [`RouterForwarder::crosses_origin`]).
+    group_member: bool,
+}
+
+/// Where a routed Push came from, as the inter-region filter reads it: the node
+/// that originated it, the neighbour it came through, and whether that
+/// neighbour is a multicast group member rather than a face of the mesh.
+#[derive(Clone, Copy)]
+struct PushOrigin<'a> {
+    src_zid: Option<&'a Zid>,
+    fwd_zid: Option<&'a Zid>,
+    group_member: bool,
 }
 
 /// The GLOBAL-BestMatching winner — the single globally-nearest COMPLETE queryable
@@ -4669,8 +4709,30 @@ impl RouterForwarder {
         self.forward_push_tier(inbound, tier, reliable, priority, push);
         // Blocks 1 & 2 — the filtered cross-mesh bridge (a received-frame transit
         // re-injected into the other mesh; preserves the band).
-        let origin = (src_zid.as_ref(), fwd_zid.as_ref());
-        self.bridge_push_cross_mesh(tier, reliable, priority, push, &keyexpr, origin);
+        let origin = PushOrigin {
+            src_zid: src_zid.as_ref(),
+            fwd_zid: fwd_zid.as_ref(),
+            group_member: inbound_is_mcast,
+        };
+        // A multicast INGRESS Push (I3b) is carried into the router mesh ONLY when this
+        // router is the Designated Router (DR) for its keyexpr: `is_group_dr` elects
+        // exactly one on-group router (seedless HRW over the group's ROUTER members U
+        // self), so a group-ingress Put crosses north through a SINGLE bridge. That is
+        // what makes the two-wz-routers-sharing-a-group case loop-free: the non-DR
+        // routers deliver the Put to their LOCAL subs only (the I1 behavior) and never
+        // bridge, and the DR's group-egress gate (`broadcast_to_mcast_groups`) runs the
+        // SAME election, so no mesh-received copy is re-egressed to the group. A source
+        // that is not the group always bridges, unchanged. Zenoh leaves this topology
+        // undefended: its `egress_filter` both-multicast deny keys on the IMMEDIATE
+        // face, so a mesh-hop copy re-egresses and loops, and it refuses a router on
+        // another router's group outright (`compute_multicast_region_of`, see
+        // `wz_session_core::extbound::multicast_region_and_bound_of`), so the DR
+        // election is wz's own superset. Bounded transient: during JOIN/lease
+        // convergence two routers can briefly both bridge (self-healing; the
+        // two-router cross-impl e2e proof is I3c).
+        if !inbound_is_mcast || self.mcast_ingress_federates(&keyexpr) {
+            self.bridge_push_cross_mesh(tier, reliable, priority, push, &keyexpr, origin);
+        }
         // Block 3 — local client delivery. A peer-sourced copy is delivered
         // here only by the router that carries it north; every other router
         // gets that carried copy back from the router mesh and delivers it
@@ -4678,7 +4740,7 @@ impl RouterForwarder {
         // a QoS-negotiated client observes the mesh legs' band.
         let defer = tier != ROUTERS_REGION
             && !is_leaf(tier)
-            && !self.crosses(tier, ROUTERS_REGION, origin.0, origin.1, None);
+            && !self.crosses_origin(origin, tier, ROUTERS_REGION, None);
         self.deliver_to_client_subscribers(
             inbound, tier, reliable, priority, push, &keyexpr, defer,
         );
@@ -4695,41 +4757,12 @@ impl RouterForwarder {
         // keyexpr silently ignores what it was told over its own admin space.
         self.dispatch_local_subscribers(reliable, push, &keyexpr);
         // Client-sourced mesh re-injection, into both meshes (R2879: the router leg
-        // is no longer master-gated; a broker hat has no gateway view).
-        // A multicast INGRESS Push (I3b) federates into the mesh ONLY when this
-        // router is the Designated Router (DR) for its keyexpr: `is_group_dr`
-        // elects exactly one on-group router (seedless HRW over the group's ROUTER
-        // members U self), so a group-ingress Put crosses into the mesh via a
-        // SINGLE bridge. That is what makes the two-wz-routers-sharing-a-group case
-        // loop-free — the non-DR routers deliver the Put to their LOCAL subs only
-        // (the I1 behavior) and never re-inject, and the DR's group-egress gate
-        // (`broadcast_to_mcast_groups`) runs the SAME election, so no mesh-received
-        // copy is re-egressed to the group. A non-mcast (unicast client) source
-        // always federates, unchanged. Zenoh leaves this topology undefended — its
-        // `egress_filter` both-multicast deny keys on the IMMEDIATE face, so a
-        // mesh-hop copy re-egresses and loops; the DR election is the wz superset.
-        // Bounded transient: during JOIN/lease convergence two routers can briefly
-        // both bridge (self-healing; the two-router cross-impl e2e proof is I3c).
+        // is no longer master-gated; a broker hat has no gateway view). A multicast
+        // ingress is not a client's Put and never takes this path: it is a Put from
+        // the south peer region ([`mcast_ingress_region`]), carried north by the
+        // bridge above and nowhere into its own region.
         if is_leaf(tier) {
-            // `federate` is the pre-I3c condition, computed ONCE (behavior-identical:
-            // `!inbound_is_mcast || DR`; `mcast_ingress_may_federate` is `false`
-            // without `router-multicast-faces`, so a mcast-ingress never federates —
-            // the I1 behavior). The I3c witnesses only COUNT the two mcast-ingress
-            // arms; they change no routing.
-            let federate = !inbound_is_mcast || self.mcast_ingress_may_federate(&keyexpr);
-            #[cfg(feature = "router-multicast-faces")]
-            if inbound_is_mcast {
-                if federate {
-                    self.mcast_ingress_federated
-                        .set(self.mcast_ingress_federated.get() + 1);
-                } else {
-                    self.mcast_ingress_suppressed
-                        .set(self.mcast_ingress_suppressed.get() + 1);
-                }
-            }
-            if federate {
-                self.publish_client_push_into_meshes(tier, reliable, priority, push, &keyexpr);
-            }
+            self.publish_client_push_into_meshes(tier, reliable, priority, push, &keyexpr);
         }
         // EGRESS to any attached multicast group — UNCONDITIONAL, OUTSIDE the
         // sub-gated fan-out above (zenoh's flat `mcast_groups` append,
@@ -4909,21 +4942,36 @@ impl RouterForwarder {
         ) == self_zid
     }
 
+    /// Decide, and COUNT, whether this router carries a multicast-INGRESS Push into
+    /// the router mesh: the I3b Designated-Router gate plus the two I3c witnesses
+    /// (`federated` / `suppressed`) that make exactly-one-bridge observable. The
+    /// count follows the decision and changes no routing.
+    #[cfg(feature = "router-multicast-faces")]
+    fn mcast_ingress_federates(&self, keyexpr: &str) -> bool {
+        let federate = self.mcast_ingress_may_federate(keyexpr);
+        let counter = if federate {
+            &self.mcast_ingress_federated
+        } else {
+            &self.mcast_ingress_suppressed
+        };
+        counter.set(counter.get() + 1);
+        federate
+    }
+    /// Without `router-multicast-faces` there is no ingress plane, so nothing
+    /// arrives as a multicast ingress and nothing is carried.
+    #[cfg(not(feature = "router-multicast-faces"))]
+    fn mcast_ingress_federates(&self, _keyexpr: &str) -> bool {
+        false
+    }
+
     /// Whether a multicast-INGRESS Push may be federated into the unicast mesh —
     /// the I3b Designated-Router gate on the mcast-ingress -> mesh leg. Only the
     /// elected DR for `keyexpr` federates a group-ingress Push, so exactly one
     /// on-group router bridges the group into the mesh (loop-free even when two wz
-    /// routers share the group and are mesh-peered). Without `router-multicast-faces`
-    /// there is no ingress plane / DR election, so this is always `false` and the
-    /// `!inbound_is_mcast` gate alone stands (a mcast-ingress Push reaches LOCAL
-    /// subscribers only, the I1 behavior).
+    /// routers share the group and are mesh-peered).
     #[cfg(feature = "router-multicast-faces")]
     fn mcast_ingress_may_federate(&self, keyexpr: &str) -> bool {
         self.is_group_dr(keyexpr)
-    }
-    #[cfg(not(feature = "router-multicast-faces"))]
-    fn mcast_ingress_may_federate(&self, _keyexpr: &str) -> bool {
-        false
     }
 
     /// Resolve a `Push`'s wire keyexpr against the inbound face's alias table —
@@ -5041,7 +5089,7 @@ impl RouterForwarder {
         priority: Priority,
         push: &PushOwned,
         keyexpr: &str,
-        (src_zid, fwd_zid): (Option<&Zid>, Option<&Zid>),
+        origin: PushOrigin<'_>,
     ) {
         let target_tier = match inbound_tier {
             PEERS_REGION => ROUTERS_REGION,
@@ -5053,8 +5101,30 @@ impl RouterForwarder {
         // the received band (R311y224) — a mesh source can be QoS-negotiated, so the
         // bridged copy must carry the same priority the within-tier copy does.
         self.self_publish_into_tier(target_tier, reliable, priority, push, keyexpr, |dst| {
-            self.crosses(inbound_tier, target_tier, src_zid, fwd_zid, Some(dst))
+            self.crosses_origin(origin, inbound_tier, target_tier, Some(dst))
         });
+    }
+
+    /// [`crosses`](Self::crosses) for a routed Push's [`PushOrigin`].
+    ///
+    /// A multicast group member is admitted without asking. The pin hands its
+    /// filter the member's own zid as the forwarder, and the hat answers
+    /// `gateways_of` with `None` for a zid that is not a node of its net
+    /// (`zenoh/src/net/routing/hat/peer/mod.rs` @ `.map(|n| &n.links)?;`), which the
+    /// filter reads as "no gateway view, pass"
+    /// (`zenoh/src/net/routing/dispatcher/tables.rs` @ `let Some(gwys) = gwys.filter(|g| !g.is_empty()) else {`).
+    /// A member joins a group and links to nobody, so it is never such a node. wz
+    /// does not yet learn the member's zid (the drive loop's event carries none),
+    /// and asking with no forwarder would take the filter's fallback to the
+    /// region's whole gateway set, which is a different question.
+    fn crosses_origin(
+        &self,
+        origin: PushOrigin<'_>,
+        src: Region,
+        dst: Region,
+        dst_zid: Option<&Zid>,
+    ) -> bool {
+        origin.group_member || self.crosses(src, dst, origin.src_zid, origin.fwd_zid, dst_zid)
     }
 
     /// Route a data `Push` WITHIN its inbound tier's mesh (C1) — the router twin
@@ -6693,6 +6763,8 @@ impl RouterForwarder {
             None => None,
         };
         let self_zid = *self.routers_net().borrow().self_zid();
+        // A Query from the multicast group has no zid here and is no node of any net.
+        let group_member = inbound == MCAST_INGRESS_FACE;
         // The two mesh blocks, source-selected per compute_query_route. R2880
         // (open-debt item 751, step 6): a cross block's egresses are admitted by
         // the inter-region filter, and the master election gates nothing here any
@@ -6702,10 +6774,13 @@ impl RouterForwarder {
         // carried copy back as a ROUTER source and serves it then.
         let blocks: Vec<MeshQueryBlock> = [ROUTERS_REGION, PEERS_REGION]
             .into_iter()
-            .filter_map(|bt| self.mesh_query_block(bt, tier, within, inbound_zid, self_zid))
+            .filter_map(|bt| {
+                self.mesh_query_block(bt, tier, within, inbound_zid, self_zid, group_member)
+            })
             .collect();
         let client_gate = tier == ROUTERS_REGION
             || is_leaf(tier)
+            || group_member
             || self.crosses(
                 tier,
                 ROUTERS_REGION,
@@ -6843,6 +6918,7 @@ impl RouterForwarder {
         within: Option<(Zid, u16)>,
         inbound_zid: Option<Zid>,
         self_zid: Zid,
+        group_member: bool,
     ) -> Option<MeshQueryBlock> {
         if block_tier != ROUTERS_REGION && block_tier != PEERS_REGION {
             return None;
@@ -6884,6 +6960,7 @@ impl RouterForwarder {
                     src: src_tier,
                     src_zid: within.map(|(zid, _psid)| zid),
                     fwd_zid: inbound_zid,
+                    group_member,
                 }),
             })
         }
@@ -6922,11 +6999,14 @@ impl RouterForwarder {
     fn query_block_admits(&self, block: &MeshQueryBlock, dst: &Zid) -> bool {
         // `map_or(true, ..)`: `is_none_or` postdates the workspace MSRV.
         block.crossing.map_or(true, |c| {
-            self.crosses(
+            self.crosses_origin(
+                PushOrigin {
+                    src_zid: c.src_zid.as_ref(),
+                    fwd_zid: c.fwd_zid.as_ref(),
+                    group_member: c.group_member,
+                },
                 c.src,
                 block.tier,
-                c.src_zid.as_ref(),
-                c.fwd_zid.as_ref(),
                 Some(dst),
             )
         })
@@ -7853,8 +7933,11 @@ impl FaceForwarder for RouterForwarder {
     /// Route a Push RECEIVED on the multicast INGRESS face (the single
     /// group-ingress face) to the router's LOCAL unicast (client) subscribers AND
     /// — iff self is the group Designated Router for the Push's keyexpr (I3b) —
-    /// federate it into the unicast linkstate mesh. Classified Client-tier like
-    /// zenoh's mcast peer (`WhatAmI::Client`, `new_peer_multicast` router.rs:226).
+    /// carry it NORTH into the router mesh. The Put is a source in the south PEER
+    /// region (`mcast_ingress_region`), as the pin places a router's group and its
+    /// members; it is not relayed to the router's unicast peers, which are in that
+    /// region too. (Until item 751 it was classified as a CLIENT's, the 1.5.0
+    /// `WhatAmI::Client` mcast peer, and re-injected into the peer mesh as well.)
     /// The echo guard keeps it OFF every multicast group (`inbound_is_mcast = true`
     /// — zenoh both-multicast deny,
     /// `zenoh/src/net/routing/dispatcher/tables.rs` @ `fn egress_filter`). Mesh
@@ -7869,8 +7952,7 @@ impl FaceForwarder for RouterForwarder {
     /// (the single ingress face carries no per-peer alias table) is dropped by
     /// [`resolve_inbound_keyexpr`](Self::resolve_inbound_keyexpr). The synthetic
     /// [`MCAST_INGRESS_FACE`] id is disjoint from the dense unicast range, so the
-    /// Client-tier fan-out's source self-skip (`id == inbound`) excludes no real
-    /// subscriber.
+    /// fan-out's source self-skip (`id == inbound`) excludes no real subscriber.
     #[cfg(feature = "router-multicast-faces")]
     fn route_mcast_ingress(&self, priority: Priority, reliable: bool, push: &PushOwned) {
         // R311y227 — a multicast-received Push re-injects at the priority its frame
@@ -7878,14 +7960,16 @@ impl FaceForwarder for RouterForwarder {
         // a non-qos group). The mesh federation + local-client delivery then ride
         // that band via `route_push`, closing the ingress half of the
         // "mcast-egress band" residual (the egress half is `broadcast_to_mcast_groups`).
-        // R2866 — still the clients region, as the pre-region code routed it. ⚠ The
-        // pin places a ROUTER's multicast transport in `South { 0, Peer }`
-        // (`zenoh/src/net/runtime/region.rs`
-        // @ `WhatAmI::Router => Ok(Region::default_south(WhatAmI::Peer)),`), so
-        // this is a divergence that item 751's later steps move, not an equivalence.
+        // Item 751 — the south PEER region, where the pin places a ROUTER's multicast
+        // transport (`zenoh/src/net/runtime/region.rs`
+        // @ `WhatAmI::Router => Ok(Region::default_south(WhatAmI::Peer)),`) and the
+        // peers that join it. Until this round the Put was routed as a CLIENT's
+        // (R2866 recorded that as a divergence the later steps would move), which
+        // re-injected it into the peer region too; the hat serving that region relays
+        // only what came from another region, so it must not.
         self.route_push(
             MCAST_INGRESS_FACE,
-            CLIENTS_REGION,
+            mcast_ingress_region(),
             reliable,
             priority,
             push,
@@ -7898,8 +7982,10 @@ impl FaceForwarder for RouterForwarder {
     /// The same `MCAST_INGRESS_FACE` the Push twin above uses, through the
     /// same `route_request` the unicast dispatch calls,
     /// so a group peer's Query reaches the router's full query-route computation
-    /// instead of being dropped at the fold. Client-tier for the same reason the
-    /// Push twin is: a group ingress carries no graph and routes no topology.
+    /// instead of being dropped at the fold. From the south peer region, as the
+    /// Push twin is, and a group ingress carries no graph and routes no topology:
+    /// the Query reaches the router mesh's and the clients' queryables, and not
+    /// those of the unicast peers of its own region.
     ///
     /// THE REPLY IS DISCARDED AND NOTHING HERE HAS TO ARRANGE THAT.
     /// `send_to_face` returns `false` for a face it cannot
@@ -7914,7 +8000,12 @@ impl FaceForwarder for RouterForwarder {
     #[cfg(feature = "router-multicast-faces")]
     fn route_mcast_ingress_request(&self, reliable: bool, request: &RequestOwned) {
         self.queries_seen.set(self.queries_seen.get() + 1);
-        self.route_request(MCAST_INGRESS_FACE, CLIENTS_REGION, reliable, request);
+        self.route_request(
+            MCAST_INGRESS_FACE,
+            mcast_ingress_region(),
+            reliable,
+            request,
+        );
     }
 
     /// Replace the on-group ROUTER member set (the I3b Designated-Router election
@@ -10924,28 +11015,52 @@ mod tests {
         );
     }
 
-    /// R311y197 (I3b slice 3) — the Designated Router FEDERATES a multicast-ingress
-    /// Push into the unicast mesh. With an empty member set self is the DR for
-    /// every keyexpr, so `route_mcast_ingress` now re-injects the group-ingress
-    /// Push into the peer mesh (the ungated peer leg) and the peer-mesh subscriber
-    /// receives it. Before I3b `route_push` skipped the client->mesh re-injection
-    /// for a mcast-ingress source (the bare `!inbound_is_mcast` gate) and the peer
-    /// sub got nothing. (Local client delivery is the separate I1 path,
+    /// The mesh a multicast-ingress test stands up: a unicast PEER P that holds a
+    /// subscription (its face is in the router's south peer region, the region
+    /// the router's multicast group is in) and a ROUTER R that holds one too (a
+    /// node of the north region). Both sinks are reset, so what they count is
+    /// what one group Put does.
+    #[cfg(feature = "router-multicast-faces")]
+    fn mcast_ingress_mesh(
+        self_z: Zid,
+    ) -> (
+        RouterForwarder,
+        Arc<RecordingLinkDriver>,
+        Arc<RecordingLinkDriver>,
+    ) {
+        let fwd = RouterForwarder::new(self_z);
+        let (p, sink_p) = face(zid(0xAA), WIRE_PEER);
+        let (r, sink_r) = face(zid(0x02), WIRE_ROUTER);
+        fwd.register(FaceId(0), &p);
+        fwd.register(FaceId(1), &r);
+        advertise_link_back(&fwd, FaceId(0), 0x01, 0xAA, 5);
+        advertise_link_back(&fwd, FaceId(1), 0x01, 0x02, 5);
+        fwd.tick();
+        forward_one(&fwd, FaceId(0), declare_sub("demo/data")); // P subscribes
+        forward_one(&fwd, FaceId(1), declare_sub("demo/data")); // R subscribes
+        sink_p.reset();
+        sink_r.reset();
+        (fwd, sink_p, sink_r)
+    }
+
+    /// R311y197 (I3b slice 3), re-founded by item 751 — the Designated Router
+    /// carries a multicast-ingress Push NORTH. With an empty member set self is
+    /// the DR for every keyexpr, so `route_mcast_ingress` bridges the group Put
+    /// into the router mesh and the router that subscribed receives it.
+    ///
+    /// The unicast PEER does not. The group is in the south peer region, as the
+    /// peer is, and the hat serving that region relays to its own faces only a
+    /// Put from another region
+    /// (`zenoh/src/net/routing/hat/peer/pubsub.rs` @ `if ctx.subs.is_some() && self.region() != *src_region {`).
+    /// Until item 751 moved the group's region here this test asserted the
+    /// opposite, because the Put was routed as a CLIENT's and re-injected into
+    /// the peer mesh, which the reference router does not do. (Local client
+    /// delivery is the separate I1 path,
     /// `mcast_ingress_literal_push_delivers_to_a_client_subscriber`.)
     #[cfg(feature = "router-multicast-faces")]
     #[test]
-    fn mcast_ingress_federates_into_mesh_when_dr() {
-        let self_z = zid(0x01);
-        let fwd = RouterForwarder::new(self_z);
-        let (p, sink_p) = face(zid(0xAA), WIRE_PEER); // peer-mesh subscriber + neighbour
-        let (r, _sink_r) = face(zid(0x02), WIRE_ROUTER); // router-net node (topology)
-        fwd.register(FaceId(0), &p);
-        fwd.register(FaceId(1), &r);
-        advertise_link_back(&fwd, FaceId(1), 0x01, 0x02, 5);
-        discover_via(&fwd, FaceId(0), 0x01, 0xAA, 0x02, 7, 5);
-        fwd.tick();
-        forward_one(&fwd, FaceId(0), declare_sub("demo/data")); // P subscribes
-        sink_p.reset();
+    fn mcast_ingress_is_carried_north_by_the_dr_and_not_into_its_own_region() {
+        let (fwd, sink_p, sink_r) = mcast_ingress_mesh(zid(0x01));
         // Empty member set => self is the DR for every keyexpr => federation ON.
         fwd.set_mcast_group_members(&[]);
 
@@ -10954,9 +11069,14 @@ mod tests {
         fwd.route_mcast_ingress(Priority::DEFAULT, true, &push);
 
         assert_eq!(
-            sink_p.frame_count(),
+            sink_r.frame_count(),
             1,
-            "the DR federates a mcast-ingress Push into the peer mesh (I3b flip)"
+            "the DR carries a mcast-ingress Push into the router mesh"
+        );
+        assert_eq!(
+            sink_p.frame_count(),
+            0,
+            "a peer of the group's own region is not relayed the group's Put"
         );
     }
 
@@ -10965,25 +11085,16 @@ mod tests {
     /// I1 behavior). With a group member that out-hashes self for the keyexpr, the
     /// OTHER router is the DR; self must not re-inject, or two routers both bridge
     /// the group into the mesh and echo-loop. Same mesh setup as the DR test — the
-    /// ONLY difference is the group member set — so the peer sub receiving nothing
-    /// isolates the DR gate.
+    /// ONLY difference is the group member set — so the router that subscribed
+    /// receiving nothing isolates the DR gate.
     #[cfg(feature = "router-multicast-faces")]
     #[test]
     fn mcast_ingress_not_federated_when_not_dr() {
         let self_z = zid(0x01);
-        let fwd = RouterForwarder::new(self_z);
-        let (p, sink_p) = face(zid(0xAA), WIRE_PEER);
-        let (r, _sink_r) = face(zid(0x02), WIRE_ROUTER);
-        fwd.register(FaceId(0), &p);
-        fwd.register(FaceId(1), &r);
-        advertise_link_back(&fwd, FaceId(1), 0x01, 0x02, 5);
-        discover_via(&fwd, FaceId(0), 0x01, 0xAA, 0x02, 7, 5);
-        fwd.tick();
-        forward_one(&fwd, FaceId(0), declare_sub("demo/data"));
-        sink_p.reset();
+        let (fwd, sink_p, sink_r) = mcast_ingress_mesh(self_z);
         // A group member (NOT necessarily a mesh node) that beats self in the HRW
         // for this keyexpr => self is NOT the DR => federation SUPPRESSED.
-        let winner = (2u8..=255)
+        let winner = (3u8..=255)
             .map(zid)
             .find(|c| elect_router(&self_z, "demo/data", [self_z, *c].iter()) == *c)
             .expect("some zid out-hashes self for the keyexpr");
@@ -10994,10 +11105,23 @@ mod tests {
         fwd.route_mcast_ingress(Priority::DEFAULT, true, &push);
 
         assert_eq!(
-            sink_p.frame_count(),
+            sink_r.frame_count(),
             0,
             "a non-DR router does NOT federate mcast ingress into the mesh (loop-safety)"
         );
+        assert_eq!(sink_p.frame_count(), 0, "nor into its peer region");
+    }
+
+    /// Item 751 — the group a router holds is in the region the pin's
+    /// `compute_multicast_region_of` gives a peer member, and that is the south
+    /// peer region the unicast peers land in, so the routing code that treats
+    /// `PEERS_REGION` as a peer hat's region sees the ingress as one of its own.
+    #[cfg(feature = "router-multicast-faces")]
+    #[test]
+    fn mcast_ingress_is_a_source_in_the_south_peer_region() {
+        assert_eq!(mcast_ingress_region(), PEERS_REGION);
+        assert_eq!(face_region(WhatAmI::Peer, None), mcast_ingress_region());
+        assert!(is_peer_hat(mcast_ingress_region()));
     }
 
     #[test]
@@ -16484,6 +16608,49 @@ mod tests {
             fwd.queries_seen.get(),
             seen_before + 1,
             "the group Query is counted on the query-plane witness, as a unicast one is"
+        );
+    }
+
+    /// Item 751 — the query twin of
+    /// `mcast_ingress_is_carried_north_by_the_dr_and_not_into_its_own_region`.
+    /// A Query from a group member is a Query from the south peer region, so it
+    /// reaches a queryable of the router mesh and not one of a unicast peer of
+    /// that same region: the hat serving the region offers its faces'
+    /// queryables only to a query from another region
+    /// (`zenoh/src/net/routing/hat/peer/queries.rs` @ `if self.region() != *src_region {`).
+    /// `All` is the target, so a queryable the route reached is not hidden
+    /// behind a BestMatching winner.
+    #[cfg(feature = "router-multicast-faces")]
+    #[test]
+    fn a_group_query_reaches_a_router_mesh_queryable_and_not_one_of_its_own_region() {
+        let fwd = RouterForwarder::new(zid(0x01));
+        let (p, sink_p) = face(zid(0xAA), WIRE_PEER);
+        let (r, sink_r) = face(zid(0x02), WIRE_ROUTER);
+        fwd.register(FaceId(0), &p);
+        fwd.register(FaceId(1), &r);
+        advertise_link_back(&fwd, FaceId(0), 0x01, 0xAA, 5);
+        advertise_link_back(&fwd, FaceId(1), 0x01, 0x02, 5);
+        fwd.tick();
+        forward_one(&fwd, FaceId(0), declare_qabl("demo/q", false));
+        forward_one(&fwd, FaceId(1), declare_qabl("demo/q", false));
+        sink_p.reset();
+        sink_r.reset();
+
+        let NetworkMessage::Request(request) = request_with_target(9, "demo/q", QueryTarget::All)
+        else {
+            unreachable!("request_with_target builds a Request")
+        };
+        fwd.route_mcast_ingress_request(true, &request);
+
+        assert_eq!(
+            sink_r.frame_count(),
+            1,
+            "the group Query reached the router mesh's queryable"
+        );
+        assert_eq!(
+            sink_p.frame_count(),
+            0,
+            "and not the unicast peer's, which is in the group's own region"
         );
     }
 

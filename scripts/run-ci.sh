@@ -16493,6 +16493,25 @@ run: bash scripts/build-zenoh-pico-cli.sh)"
     # only past the pico-CLI presence guard.
     (cd crates && cargo test -p wz-integration-tests \
         --test wz_router_hat_multicast_ingress_federation_interop -- --ignored --quiet) || return 1
+    # Open-debt item 751 — a router's multicast group is in its south PEER region, so a
+    # Put that arrives on the group is not relayed to the router's unicast peers (they
+    # are one region), while a client of the router receives it. The calibration leg
+    # drives zenohd, and the claim leg drives the wz router with the same topology, so
+    # both need zenohd (`m_zenohd`, set above) as well as the pico CLI and the demo built
+    # above. Count-guarded at 2 (the calibration and the claim): the legs are
+    # `#[ignore]`, so a dropped attribute or a rename selects zero and would pass.
+    if [[ -x "$m_zenohd" ]]; then
+        _runci_guarded_test "M router group put stays out of its peer region" 2 \
+            cargo test -p wz-integration-tests \
+            --test wz_router_hat_multicast_region_zenohd_interop -- --ignored --test-threads=1 || return 1
+    elif (( m_required )); then
+        echo "  Layer M FAIL: zenohd absent ($m_zenohd) but WZ_M_REQUIRE=1 — the router" >&2
+        echo "    group region witness adjudicates against it, so its absence is a" >&2
+        echo "    provisioning regression, not a reason to skip." >&2
+        return 1
+    else
+        echo "Layer M SKIP router group region witness (zenohd not built; run: bash scripts/build-zenohd.sh)"
+    fi
 
     # R311y200 sub plane (S3) — cross-impl REACHABILITY: a stock pico `z_sub -m peer`
     # subscribes on the group; the wz `--router-hat` ingests its DeclareSubscriber and

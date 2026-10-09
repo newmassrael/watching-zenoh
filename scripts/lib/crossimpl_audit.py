@@ -1110,7 +1110,12 @@ HOST_GATED_CI_TARGETS: dict[str, str] = {
 # `api-compat-pico` and `scouting-active`, each adjudicated by the real pico `z_scout`) and one in
 # `zenoh_c_scouting_twice_and_diff.rs` (`api-compat-c`, adjudicated by the real `libzenohc`).
 # Measured by `scripts/audit-crossimpl-proof.sh`.
-FOREIGN_ADJUDICATOR_LINKS = 1057
+# Item 751 -- 1057 -> 1058, RISING by one: `wz_router_hat_multicast_region_zenohd_interop.rs`
+# runs the same group, unicast peer and client topology against zenohd and against a wz router,
+# and the wz leg is tagged `router-multicast-faces zenohd->wz partial`; zenohd is the adjudicator
+# of whether a router relays a group's Put to a unicast peer of its own region. The zenohd leg is
+# a calibration and claims nothing. Measured by `scripts/audit-crossimpl-proof.sh`.
+FOREIGN_ADJUDICATOR_LINKS = 1058
 
 # ── Execution disclosure ────────────────────────────────────────────────────────
 #

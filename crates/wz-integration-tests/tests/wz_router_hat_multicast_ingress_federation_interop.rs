@@ -31,12 +31,15 @@
 //! self-zid gate drops the other's JOIN and the DR election has a real 2-member
 //! candidate set. R2 `--connect`s R1, so they mesh-peer (both `WhatAmI::Router` ->
 //! each in the other's `routers_net`). P is a `--peer` subscriber `--connect`ing
-//! BOTH routers; it never joins the multicast group. A `--peer` sub receives a
-//! mcast-ingress Put ONLY via the DR-gated federation path
-//! (`publish_client_push_into_meshes` into the peer tier) — NOT via a router's local
-//! client delivery (that reaches only `--key` CLIENT faces) — so
-//! P firing proves FEDERATION, not the I1/I2 local-delivery path. pico `z_pub -m
-//! peer` is a FOREIGN injector.
+//! BOTH routers; it never joins the multicast group. The group is in each router's
+//! south peer region, as its unicast peers are, so neither router relays the Put to
+//! P directly (`wz_router_hat_multicast_region_zenohd_interop` pins that against
+//! zenohd). P receives it ONLY through the OTHER router: the DR carries the Put
+//! north into the router mesh, and the router that receives it there relays it down
+//! into its own peer region, where P is. That is not a router's local client
+//! delivery (that reaches only `--key` CLIENT faces), so P firing proves
+//! FEDERATION, not the I1/I2 local-delivery path. pico `z_pub -m peer` is a
+//! FOREIGN injector.
 //!
 //! ## What this proves — and what it does NOT (honest scope)
 //!
@@ -45,8 +48,8 @@
 //!   (b) it is LOOP-SAFE: EXACTLY ONE of the two routers federates the group-ingress
 //!   Put into the mesh (the deterministic single-bridge witness — assertion C), so
 //!   the two-router-shared-group echo zenoh's `WhatAmI::Client` "Quick hack" leaves
-//!   undefended cannot occur; and (c) the federated copy reaches an OFF-group mesh
-//!   subscriber (delivery — assertion D).
+//!   undefended cannot occur; and (c) the federated copy crosses the router mesh to
+//!   the other router (delivery — assertion D).
 //! - The loop-safety is a wz-vs-wz property (two wz ROUTERS electing one DR). The
 //!   pico is a `whatami=Peer` INJECTOR — it is filtered OUT of the DR candidate set
 //!   (`router_member_zids` keeps only `whatami=Router`), so it does NOT participate
@@ -130,9 +133,9 @@ fn spawn_peer(label: &str, args: &[&str]) -> (ChildGuard, std::fs::File, u16) {
     )
 }
 
-/// I3c — two wz router-hats sharing one multicast group + mesh-peered federate a
-/// foreign pico's group-injected Put into the mesh to an off-group subscriber,
-/// loop-free: EXACTLY ONE router (the elected DR) bridges the group into the mesh.
+/// I3c — two wz router-hats sharing one multicast group + mesh-peered carry a
+/// foreign pico's group-injected Put into the router mesh, loop-free: EXACTLY ONE
+/// router (the elected DR) bridges the group into the mesh.
 // wz-proves: router-multicast-faces pico->wz
 // wz-proves: transport-multicast pico->wz
 // wz-proves: session-multicast pico->wz partial
@@ -230,8 +233,9 @@ fn wz_router_hat_multicast_ingress_federates_loop_safe_from_pico_zpub() {
         }
     }
 
-    // ── P: an off-group `--peer` subscriber, meshed to BOTH routers so it receives
-    //    the federated Put regardless of which router is elected DR. ──
+    // ── P: an off-group `--peer` subscriber, meshed to BOTH routers. It makes the
+    //    routers' peer region hold a peer linked to both, which is the topology the
+    //    inter-region filter has gateways to decide in. It is not the delivery witness. ──
     let (mut p_guard, mut p_reader, _p_p) = spawn_peer(
         "peer-sub",
         &[
@@ -287,9 +291,24 @@ fn wz_router_hat_multicast_ingress_federates_loop_safe_from_pico_zpub() {
             .expect("spawn z_pub via stdbuf"),
     );
 
-    // Success gate: P received the federated Put over the mesh (delivery). pico
-    // publishes ~1/s; the 25 s budget is generous margin.
-    let received = wait_for_substring(&mut p_reader, "received mesh data", Duration::from_secs(25));
+    // Success gate: a router carried the group Put north (the DR's witness). pico
+    // publishes ~1/s; the 25 s budget is generous margin. Both routers' captures
+    // are polled, since which of them is the DR is the election's to decide.
+    let dr_marker = "router-hat: federated a mcast-ingress push into the mesh (DR)";
+    let gate_deadline = std::time::Instant::now() + Duration::from_secs(25);
+    let received = loop {
+        if read_captured(&mut r1_reader).contains(dr_marker)
+            || read_captured(&mut r2_reader).contains(dr_marker)
+        {
+            break Ok(());
+        }
+        if std::time::Instant::now() >= gate_deadline {
+            break Err(());
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    };
+    // Let the carried copy cross the router mesh before the routers are stopped.
+    std::thread::sleep(Duration::from_secs(3));
 
     // Teardown: kill the injector + subscriber, then graceful_terminate the routers
     // so they flush their LATCHED shutdown witnesses (peak member count + the
@@ -310,15 +329,28 @@ fn wz_router_hat_multicast_ingress_federates_loop_safe_from_pico_zpub() {
     eprintln!("--- peer-sub stderr ---\n{p_cap}");
     eprintln!("--- pico z_pub stdout ---\n{z_pub_cap}");
 
-    // Assertion D — delivery: the federated copy reached the OFF-group subscriber.
-    received.unwrap_or_else(|c| {
+    // Assertion D — delivery: a router carried the group Put north. The Put's only
+    // route to the OTHER router is the router mesh (nobody else publishes), so the
+    // router that did not federate counting a received mesh push is the carried copy
+    // arriving. P, in the routers' peer region with the group, is not relayed it (see
+    // the header), so it is not the witness any more.
+    received.unwrap_or_else(|()| {
         panic!(
-            "peer-sub never received the federated Put within 25s — the pico group \
-             Put did not federate through the DR into the mesh to the off-group \
-             subscriber\n--- peer-sub stderr ---\n{c}\n--- router-hat-1 ---\n{r1_cap}\n\
-             --- router-hat-2 ---\n{r2_cap}\n--- pico ---\n{z_pub_cap}"
+            "no router carried the pico group Put into the mesh within 25s\n--- peer-sub \
+             stderr ---\n{p_cap}\n--- router-hat-1 ---\n{r1_cap}\n--- router-hat-2 ---\n\
+             {r2_cap}\n--- pico ---\n{z_pub_cap}"
         )
     });
+    let (dr_cap, other_cap) = if r1_cap.contains(dr_marker) {
+        (&r1_cap, &r2_cap)
+    } else {
+        (&r2_cap, &r1_cap)
+    };
+    assert!(
+        other_cap.contains("router-hat: forwarded mesh data"),
+        "the router that did not federate never received the DR's carried copy over the \
+         router mesh\n--- DR ---\n{dr_cap}\n--- other ---\n{other_cap}"
+    );
 
     // Assertion A — the two-router mesh federated (loop-safety only matters given a
     // shared group AND a mesh between the routers).
