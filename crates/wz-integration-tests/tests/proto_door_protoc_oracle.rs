@@ -101,6 +101,17 @@
 //! and the skip rule of the declaration door, so the lane that arms one arms the
 //! other. `WZ_PROTO_VALUES_DUMP=1` prints every case with the door's bytes, for
 //! pointing a second judge of the JSON notation at the same corpus.
+//!
+//! ## And the reading door
+//!
+//! `wz_dissect_e2e_open_body` reads a protected frame's body by its schema. The
+//! value corpus is reused the other way round: `protoc --encode` writes each
+//! message from its text format, the wrap door puts a header around those bytes,
+//! and the reading door's listing of the body is written back out as text
+//! format and handed to `protoc --encode` again. The judge must write the same
+//! bytes from what the door read as from what the case said, and the field
+//! numbers the door lists at the top level must be the ones `protoc
+//! --decode_raw` finds, in wire order.
 // NO CROSS-IMPL PROOF DECLARATION HERE, for the reason the tcpdump adjudicator
 // next to it gives: `protoc` is a foreign TOOL and not a zenoh implementation,
 // so this file contributes nothing to the cross-implementation accounting.
@@ -113,9 +124,11 @@ use std::process::Command;
 use wz_integration_tests::bounded::{BoundedChild as _, BoundedOutput as _, CHILD_RUN_BOUND};
 
 use wz_capi_dissect::{
-    wz_dissect_declarations_diagnose, wz_dissect_declarations_from_proto, wz_dissect_proto_encode,
-    wz_dissect_string_free, WzDissectProtoFile, WZ_DISSECT_OK,
+    wz_dissect_declarations_diagnose, wz_dissect_declarations_from_proto, wz_dissect_e2e_open_body,
+    wz_dissect_e2e_wrap, wz_dissect_proto_encode, wz_dissect_string_free, WzDissectProtoFile,
+    WZ_DISSECT_OK,
 };
+use wz_session_core::json5::{self, Json5Value};
 
 /// The key pattern every case declares under.
 const KEY: &str = "demo/sensor";
@@ -3421,4 +3434,428 @@ fn the_value_corpus_names_each_case_once_and_covers_each_arm() {
     ] {
         assert!(schemas.contains(arm), "no case exercises `{arm}`");
     }
+}
+
+// ---- the reading door: `wz_dissect_e2e_open_body`, judged by `protoc` ---------
+//
+// The reading door reads a protected frame's body by its schema and lists the
+// fields with their values typed. Its unit tests hold it to the writer of this
+// library; here it is held to `protoc`. For each message of the value corpus,
+// `protoc --encode` writes the bytes from the case's text format, the wrap door
+// puts a header in front of them, and the reading door opens the frame. What it
+// lists is written back out as text format ([`listing_as_text_format`]) and
+// handed to `protoc --encode` again: the judge must write the bytes it wrote
+// from the case, so every name, every nesting and every value the door read is
+// a value the judge agrees the bytes held. The top-level field numbers are held
+// to `protoc --decode_raw` beside it, which reads the wire with no schema at all.
+//
+// The bytes are the judge's own both times, so a judge that omits `-0.0` (3.12.4)
+// omits it from both and the comparison stays one of like with like.
+
+/// A profile whose CRC covers the body alone, in an eight-byte header.
+const READ_PROFILE: &str = r#"{"name":"oracle","fields":[{"name":"crc","bytes":4},
+  {"name":"length","bytes":2},{"name":"counter","bytes":2}],
+  "crc":{"field":"crc","width":32,"poly":"0xF4ACFB13","init":"0xFFFFFFFF",
+         "refin":true,"refout":true,"xorout":"0xFFFFFFFF","cover":["@payload"]},
+  "length":{"field":"length","counts":"frame"},
+  "counter":{"field":"counter","max_gap":3,"timeout_ms":100}}"#;
+
+/// The bytes of the header [`READ_PROFILE`] puts in front of a body.
+const READ_HEADER_BYTES: usize = 8;
+
+fn take_doc(rc: i32, out: *mut c_char) -> String {
+    assert_eq!(rc, WZ_DISSECT_OK, "the door answers every well-formed call");
+    // SAFETY: OK came with a string this library owns.
+    let doc = unsafe { CStr::from_ptr(out) }
+        .to_str()
+        .expect("utf-8")
+        .to_string();
+    // SAFETY: `out` came from the door and is freed once.
+    unsafe { wz_dissect_string_free(out) };
+    doc
+}
+
+/// The frame the wrap door builds around `body`.
+fn wrap_with_the_door(body: &[u8]) -> Vec<u8> {
+    let profile = CString::new(READ_PROFILE).expect("no NUL");
+    let values = CString::new(r#"{"counter":1}"#).expect("no NUL");
+    let mut out: *mut c_char = std::ptr::null_mut();
+    // SAFETY: every pointer is to a live local; the body pointer is null only
+    // with a length of zero, which the door admits.
+    let rc = unsafe {
+        wz_dissect_e2e_wrap(
+            profile.as_ptr(),
+            values.as_ptr(),
+            if body.is_empty() {
+                std::ptr::null()
+            } else {
+                body.as_ptr()
+            },
+            body.len(),
+            &mut out,
+        )
+    };
+    let doc = take_doc(rc, out);
+    let hex = json_string(&doc, "frame").unwrap_or_else(|| panic!("no frame in {doc}"));
+    unhex(&hex)
+}
+
+/// The reading door's document for `frame`, parsed.
+fn read_with_the_door(root: &str, files: &[(&str, &str)], frame: &[u8]) -> Json5Value {
+    let mut listed = Vec::new();
+    for (name, text) in files {
+        let mut name_json = String::new();
+        let mut text_json = String::new();
+        wz_session_core::json::escape_into(name, &mut name_json);
+        wz_session_core::json::escape_into(text, &mut text_json);
+        listed.push(format!("{{\"name\":{name_json},\"text\":{text_json}}}"));
+    }
+    let description = format!(
+        "{{\"files\":[{}],\"root_file\":0,\"message\":\"{root}\"}}",
+        listed.join(",")
+    );
+    let profile = CString::new(READ_PROFILE).expect("no NUL");
+    let body = CString::new(description).expect("no NUL");
+    let mut out: *mut c_char = std::ptr::null_mut();
+    // SAFETY: every pointer is to a live local and the frame is as long as said.
+    let rc = unsafe {
+        wz_dissect_e2e_open_body(
+            profile.as_ptr(),
+            body.as_ptr(),
+            frame.as_ptr(),
+            frame.len(),
+            &mut out,
+        )
+    };
+    let doc = take_doc(rc, out);
+    json5::parse(&doc).unwrap_or_else(|e| panic!("the door wrote no JSON ({e:?}): {doc}"))
+}
+
+fn member<'t>(node: &'t Json5Value, key: &str) -> Option<&'t Json5Value> {
+    match node {
+        Json5Value::Object(entries) => entries.iter().find(|(k, _)| k == key).map(|(_, v)| v),
+        _ => None,
+    }
+}
+
+/// Standard base64 with padding, as the door writes `bytes`.
+fn from_base64(text: &str) -> Result<Vec<u8>, String> {
+    let digit = |c: u8| -> Result<u32, String> {
+        Ok(match c {
+            b'A'..=b'Z' => c - b'A',
+            b'a'..=b'z' => c - b'a' + 26,
+            b'0'..=b'9' => c - b'0' + 52,
+            b'+' => 62,
+            b'/' => 63,
+            _ => return Err(format!("`{}` is not base64", c as char)),
+        } as u32)
+    };
+    let text = text.trim_end_matches('=').as_bytes();
+    let mut out = Vec::new();
+    for chunk in text.chunks(4) {
+        let mut n = 0u32;
+        for (i, &c) in chunk.iter().enumerate() {
+            n |= digit(c)? << (18 - 6 * i);
+        }
+        for i in 0..chunk.len().saturating_sub(1) {
+            out.push((n >> (16 - 8 * i)) as u8);
+        }
+    }
+    Ok(out)
+}
+
+/// A text-format string literal of `bytes`: printable ASCII as itself, every
+/// other byte as a three-digit octal escape, which every `protoc` reads.
+fn text_format_string(bytes: &[u8]) -> String {
+    let mut out = String::from("\"");
+    for &b in bytes {
+        if (0x20..0x7f).contains(&b) && b != b'"' && b != b'\\' {
+            out.push(b as char);
+        } else {
+            out.push_str(&format!("\\{b:03o}"));
+        }
+    }
+    out.push('"');
+    out
+}
+
+/// The reading door's listing as protobuf text format: a field by its NAME, a
+/// message (a map entry included) as a block, a value by its type. A field the
+/// schema does not know cannot be written by name, and is an error here.
+fn listing_as_text_format(listing: &[Json5Value]) -> Result<String, String> {
+    let mut out = String::new();
+    for node in listing {
+        let Some(Json5Value::String(name)) = member(node, "name") else {
+            return Err(format!(
+                "a field the schema does not know: {}",
+                node.to_json_text()
+            ));
+        };
+        if let Some(Json5Value::Array(fields)) = member(node, "fields") {
+            out.push_str(&format!("{name} {{ {}}} ", listing_as_text_format(fields)?));
+            continue;
+        }
+        let ty = match member(node, "type") {
+            Some(Json5Value::String(t)) => t.as_str(),
+            _ => return Err(format!("no type: {}", node.to_json_text())),
+        };
+        let value =
+            member(node, "value").ok_or_else(|| format!("no value: {}", node.to_json_text()))?;
+        let text = match (ty, value) {
+            ("string", Json5Value::String(s)) => text_format_string(s.as_bytes()),
+            ("bytes", Json5Value::String(b)) => text_format_string(&from_base64(b)?),
+            ("float" | "double", Json5Value::String(s)) => match s.as_str() {
+                "NaN" => "nan".to_string(),
+                "Infinity" => "inf".to_string(),
+                "-Infinity" => "-inf".to_string(),
+                other => return Err(format!("`{other}` is no float")),
+            },
+            // A float's shortest spelling is shortest for a FLOAT; the text
+            // parser reads a float through a double, so it is written as the
+            // double the float is, which every release reads back exactly.
+            ("float", Json5Value::Number(n)) => {
+                let v: f32 = n.parse().map_err(|e| format!("`{n}`: {e}"))?;
+                format!("{:e}", f64::from(v))
+            }
+            (_, Json5Value::Number(n)) => n.clone(),
+            // A 64-bit integer past the exact range, or an enum value's name.
+            (_, Json5Value::String(s)) => s.clone(),
+            (_, Json5Value::Bool(b)) => b.to_string(),
+            (_, other) => return Err(format!("a value of no kind: {}", other.to_json_text())),
+        };
+        out.push_str(&format!("{name}: {text} "));
+    }
+    Ok(out)
+}
+
+/// `protoc --decode_raw` of wire bytes.
+fn protoc_decode_raw(judge: &Judge, bytes: &[u8]) -> Result<String, String> {
+    use std::io::Write;
+    let mut child = Command::new(&judge.bin)
+        .arg("--decode_raw")
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .map_err(|e| format!("protoc did not run: {e}"))?;
+    child
+        .stdin
+        .take()
+        .expect("stdin was piped")
+        .write_all(bytes)
+        .map_err(|e| format!("write the bytes: {e}"))?;
+    let out = child
+        .wait_with_output_bounded()
+        .map_err(|e| format!("protoc did not finish: {e}"))?;
+    if out.status.success() {
+        Ok(String::from_utf8_lossy(&out.stdout).into_owned())
+    } else {
+        Err(String::from_utf8_lossy(&out.stderr).into_owned())
+    }
+}
+
+/// The top-level field numbers of a `--decode_raw` print, in order, with a run
+/// of one number counted once: a packed run is one record to it and one entry
+/// per element to the door, and a repeated field written element by element is
+/// several of both.
+fn raw_numbers(decoded: &str) -> Vec<u64> {
+    let mut numbers: Vec<u64> = decoded
+        .lines()
+        .filter(|l| !l.starts_with(char::is_whitespace) && *l != "}")
+        .filter_map(|l| l.split([':', ' ']).next().and_then(|n| n.parse().ok()))
+        .collect();
+    numbers.dedup();
+    numbers
+}
+
+/// The door's top-level field numbers, a run of one number counted once.
+fn listed_numbers(listing: &[Json5Value]) -> Vec<u64> {
+    let mut numbers: Vec<u64> = listing
+        .iter()
+        .filter_map(|n| match member(n, "number") {
+            Some(Json5Value::Number(n)) => n.parse().ok(),
+            _ => None,
+        })
+        .collect();
+    numbers.dedup();
+    numbers
+}
+
+/// THE ADJUDICATOR FOR THE READING DOOR: what `wz_dissect_e2e_open_body` reads
+/// out of the bytes `protoc --encode` wrote for each message of the value
+/// corpus is, written back as text format, a message `protoc --encode` writes
+/// the same bytes for.
+///
+/// The `protoc` in the name is LOAD-BEARING for the reason the adjudicators
+/// above give: Layer C0's skip-token rule reads the FUNCTION name.
+#[test]
+fn the_proto_read_door_agrees_with_protoc_over_the_corpus() {
+    let required = std::env::var("WZ_PROTOC_REQUIRE").is_ok();
+    let judge = match protoc().and_then(|(bin, version)| measure_judge(bin, version)) {
+        Ok(j) => j,
+        Err(why) => {
+            if required {
+                panic!(
+                    "WZ_PROTOC_REQUIRE is set and protoc cannot judge: {why}. The reading \
+                     door has no other adjudicator for what it reads, so a lane that armed \
+                     this flag was asking for the measurement, not for a skip"
+                );
+            }
+            eprintln!(
+                "skip: protoc cannot judge here ({why}); set WZ_PROTOC_REQUIRE=1 to make that a failure"
+            );
+            return;
+        }
+    };
+
+    let mut disagreements: Vec<String> = Vec::new();
+    let (mut compared, mut fields_read) = (0usize, 0usize);
+    for case in &value_corpus() {
+        let dir = tempfile::tempdir().expect("tempdir for the schemas");
+        for (name, text) in &case.files {
+            std::fs::write(dir.path().join(name), text).expect("write the schema");
+        }
+        let root_file = case.files[0].0;
+        let say = |what: String| format!("[{}] {what}", case.name);
+        let written = match protoc_encode(&judge, dir.path(), root_file, case.root, case.text) {
+            Ok(bytes) => bytes,
+            Err(why) => {
+                disagreements.push(say(format!("protoc refused the text format: {why}")));
+                continue;
+            }
+        };
+        let frame = wrap_with_the_door(&written);
+        let doc = read_with_the_door(case.root, &case.files, &frame);
+        let body = member(&doc, "body");
+        let listing = match body.and_then(|b| member(b, "fields")) {
+            Some(Json5Value::Array(listing)) => listing,
+            _ => {
+                disagreements.push(say(format!(
+                    "the door did not read the body: {}",
+                    doc.to_json_text()
+                )));
+                continue;
+            }
+        };
+        // Every field lies in the body, in the frame's own offsets. (The first
+        // need not start at the body's first byte: an element of a packed run
+        // starts after the run's tag and length.)
+        let count = |n: &Json5Value, key: &str| match member(n, key) {
+            Some(Json5Value::Number(v)) => v.parse::<usize>().ok(),
+            _ => None,
+        };
+        for node in listing {
+            match (count(node, "offset"), count(node, "bytes")) {
+                (Some(at), Some(n)) if at >= READ_HEADER_BYTES && at + n <= frame.len() => {}
+                place => disagreements.push(say(format!(
+                    "a field outside the body ({place:?}, frame of {}): {}",
+                    frame.len(),
+                    node.to_json_text()
+                ))),
+            }
+        }
+        let text = match listing_as_text_format(listing) {
+            Ok(text) => text,
+            Err(why) => {
+                disagreements.push(say(why));
+                continue;
+            }
+        };
+        let again = match protoc_encode(&judge, dir.path(), root_file, case.root, &text) {
+            Ok(bytes) => bytes,
+            Err(why) => {
+                disagreements.push(say(format!(
+                    "protoc refused what the door read ({text}): {why}"
+                )));
+                continue;
+            }
+        };
+        if again != written {
+            let decode =
+                |bytes: &[u8]| protoc_decode(&judge, dir.path(), root_file, case.root, bytes);
+            let same_set = case.unordered
+                && matches!(
+                    (decode(&again), decode(&written)),
+                    (Ok(a), Ok(b)) if top_level_fields_sorted(&a) == top_level_fields_sorted(&b)
+                );
+            if !same_set {
+                disagreements.push(say(format!(
+                    "the door read another message\n  read as: {text}\n  protoc wrote: {}\n  from what was read: {}",
+                    hex(&written),
+                    hex(&again)
+                )));
+            }
+        }
+        match protoc_decode_raw(&judge, &written) {
+            Ok(raw) if raw_numbers(&raw) == listed_numbers(listing) => {}
+            Ok(raw) => disagreements.push(say(format!(
+                "the field numbers differ\n  door:   {:?}\n  protoc: {:?}",
+                listed_numbers(listing),
+                raw_numbers(&raw)
+            ))),
+            Err(why) => disagreements.push(say(format!("protoc --decode_raw: {why}"))),
+        }
+        compared += 1;
+        fields_read += listing.len();
+    }
+
+    eprintln!(
+        "reading door vs protoc: {compared} message(s) read, {fields_read} top-level field(s); \
+         judge: {}",
+        judge.version
+    );
+    assert!(
+        compared >= 25 && fields_read >= 50,
+        "the corpus no longer exercises the reader: {compared} case(s), {fields_read} field(s)"
+    );
+    assert!(
+        disagreements.is_empty(),
+        "the reading door and protoc disagree on {} point(s):\n\n{}",
+        disagreements.len(),
+        disagreements.join("\n\n")
+    );
+}
+
+/// THE TEXT FORMAT THE READING DOOR'S LISTING IS JUDGED IN IS THE ONE WRITTEN
+/// HERE, with no protoc: a listing of every kind of value renders to the text a
+/// person would write, a field the schema does not know is refused rather than
+/// dropped, and the field numbers are read off both sides the same way.
+#[test]
+fn the_reading_comparison_writes_the_text_format_it_means() {
+    let schema = "syntax = \"proto3\";\nenum E { Z = 0; ONE = 1; }\n\
+                  message N { int32 x = 1; }\n\
+                  message M { sint32 a = 1; string s = 2; bytes b = 3; float f = 4; double d = 5;\n\
+                  E e = 6; repeated int32 r = 7; N n = 8; map<string, int32> m = 9; uint64 u = 10; }";
+    let values = r#"{"a":-3,"s":"hé","b":"AQL/","f":0.1,"d":"-Infinity","e":"ONE",
+                    "r":[1,2],"n":{"x":5},"m":{"k":7},"u":"18446744073709551615"}"#;
+    let body =
+        encode_with_the_door("M", &[("a.proto", schema)], values).expect("the writer builds it");
+    let doc = read_with_the_door("M", &[("a.proto", schema)], &wrap_with_the_door(&body));
+    let listing = match member(member(&doc, "body").expect("a body"), "fields") {
+        Some(Json5Value::Array(listing)) => listing.clone(),
+        other => panic!("no listing: {other:?}"),
+    };
+    assert_eq!(
+        listing_as_text_format(&listing).expect("renders"),
+        "a: -3 s: \"h\\303\\251\" b: \"\\001\\002\\377\" f: 1.0000000149011612e-1 d: -inf \
+         e: ONE r: 1 r: 2 n { x: 5 } m { key: \"k\" value: 7 } u: 18446744073709551615 "
+    );
+    assert_eq!(listed_numbers(&listing), [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
+    // A field the schema does not know has no name to be written under.
+    let unknown =
+        json5::parse(r#"[{"number":9,"offset":8,"bytes":2,"wire_type":"varint","value":7}]"#)
+            .expect("JSON");
+    let Json5Value::Array(unknown) = unknown else {
+        unreachable!("an array was parsed")
+    };
+    assert!(listing_as_text_format(&unknown).is_err());
+    // The raw print's numbers: nested lines are not top level, a run counts once.
+    assert_eq!(
+        raw_numbers(
+            "1: 5\n7: \"\\001\\002\"\n8 {\n  1: 5\n}\n9 {\n  1: \"k\"\n}\n9 {\n  1: \"j\"\n}\n"
+        ),
+        [1, 7, 8, 9]
+    );
+    assert_eq!(from_base64("AQL/").expect("base64"), [1, 2, 0xff]);
+    assert_eq!(from_base64("Zm8=").expect("base64"), b"fo");
 }
