@@ -16757,6 +16757,24 @@ run: bash scripts/build-zenoh-pico-cli.sh)"
             --test wz_client_and_multicast_peer_sessions_in_one_process_zenohd \
             -- --ignored || return 1
     fi
+    # Open-debt item 900 — the same two sessions from the INPUT a lab authors:
+    # one `wz-ap-demo --sessions` process, a client session to zenohd and a
+    # group session, each READY on its own line, nothing crossing between them,
+    # zenohd's death ending the client alone, a per-session close on SIGTERM.
+    # Needs zenohd and the demo built above (`router-multicast-faces` pulls the
+    # demo's `transport-multicast`). 1 = what `<this command> --list` printed.
+    if [[ ! -x "$m_zenohd" ]]; then
+        if (( m_required )); then
+            echo "  Layer M FAIL: zenohd absent ($m_zenohd) under WZ_M_REQUIRE=1; the" >&2
+            echo "    sessions-file leg has no router to dial." >&2
+            return 1
+        fi
+        echo "Layer M SKIP sessions file: zenohd client + group peer (zenohd not built)"
+    else
+        _runci_guarded_test "M sessions file: zenohd client + group peer" 1 \
+            env WZ_ZENOHD_BIN="$m_zenohd" cargo test -p wz-integration-tests \
+            --test wz_ap_demo_sessions_client_and_group_zenohd -- --ignored || return 1
+    fi
 
     # R2854 (`adminspace-metrics`, `transport-stats`) — a router PROCESS serves
     # its multicast group on its admin metrics leg: the group face records into
