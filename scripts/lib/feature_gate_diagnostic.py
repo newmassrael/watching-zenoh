@@ -247,7 +247,14 @@ NO_PUBLIC_PATH: dict[str, dict[str, str]] = {
             "session-unicast-accept",
             "session-unicast-open",
             "storage-mgr-wildcard-updates",
-            "transport-batching",
+            # R3243 — `transport-batching` LEFT this list, by the R2386 route:
+            # the claim was true until the round that staged a batch window in
+            # a lent slot made it false. `session_actions` (a `pub mod`) now
+            # carries `pub struct BatchLendCounts` and the method
+            # `batch_lend_counts` on the session, both behind
+            # `all(feature = "transport-batching", feature = "transport-tx-lend")`.
+            # Both sites are compound, so it is DEFERRED below as
+            # `compound-cfg` beside `transport-tx-lend`, not probed.
         )
     },
     "wz-runtime-tokio": {
@@ -532,6 +539,11 @@ DEFERRED: dict[str, dict[str, str]] = {
                 "declare-keyexpr",
                 "declare-undeclare",
                 "session-matching",
+                # R3243 — moved here from `NO_PUBLIC_PATH` (see the note
+                # there). Its two public sites, the per-reason staging count
+                # `BatchLendCounts` and the session's `batch_lend_counts`, are
+                # both behind `all(transport-batching, transport-tx-lend)`.
+                "transport-batching",
                 # Round 3171's `transport-tx-lend` gates the buffer seam of
                 # `tx_buf.rs`: both public items it gates are behind an
                 # `all(feature, ..)` attribute, so rustc's note names no
