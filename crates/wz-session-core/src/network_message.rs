@@ -392,12 +392,25 @@ impl NetworkMessage {
 pub fn refuse_unknown_mandatory_ext(
     messages: Vec<NetworkMessage>,
 ) -> Result<Vec<NetworkMessage>, crate::parse_error::InboundParseError> {
-    for message in &messages {
-        if let crate::ext_admit::ExtAdmission::UnknownMandatory { eid } = message.ext_admission() {
-            return Err(crate::parse_error::InboundParseError::UnknownMandatoryExt { eid });
-        }
+    match first_unknown_mandatory_ext(&messages) {
+        Some(refusal) => Err(refusal),
+        None => Ok(messages),
     }
-    Ok(messages)
+}
+
+/// The refusal [`refuse_unknown_mandatory_ext`] makes of `messages`, or `None`
+/// when a participant may act on every one of them.
+fn first_unknown_mandatory_ext(
+    messages: &[NetworkMessage],
+) -> Option<crate::parse_error::InboundParseError> {
+    messages
+        .iter()
+        .find_map(|message| match message.ext_admission() {
+            crate::ext_admit::ExtAdmission::UnknownMandatory { eid } => {
+                Some(crate::parse_error::InboundParseError::UnknownMandatoryExt { eid })
+            }
+            _ => None,
+        })
 }
 
 /// R74 — decode a `Frame.payload` byte slice into the in-order batch
@@ -494,17 +507,79 @@ fn parse_batch(bytes: &[u8], origin: Origin<'_>) -> Result<Vec<NetworkMessage>, 
         // absorbs the tail as `Unknown` and terminates, a codec error
         // propagates and fails the whole batch.
         if !decode_one_record(&mut cursor, &mut messages, origin)? {
-            {
-                let mid = cursor.peek_slice(1)?[0] & 0x1F;
-                let rem = cursor.remaining();
-                let body = cursor.peek_slice(rem)?.to_vec();
-                cursor.advance(rem)?;
-                messages.push(NetworkMessage::Unknown { mid, body });
-                break;
-            }
+            absorb_unknown(&mut cursor, &mut messages)?;
+            break;
         }
     }
     Ok(messages)
+}
+
+/// The record at the cursor has a MID this build has no envelope decoder for,
+/// so its length is unknowable: take the rest of the payload, header byte
+/// included, as one [`NetworkMessage::Unknown`]. The caller stops walking.
+#[cfg(feature = "codec-frame")]
+fn absorb_unknown(
+    cursor: &mut SceCursor<'_>,
+    out: &mut Vec<NetworkMessage>,
+) -> Result<(), CodecError> {
+    let mid = cursor.peek_slice(1)?[0] & 0x1F;
+    let rem = cursor.remaining();
+    let body = cursor.peek_slice(rem)?.to_vec();
+    cursor.advance(rem)?;
+    out.push(NetworkMessage::Unknown { mid, body });
+    Ok(())
+}
+
+/// Walk a `Frame.payload` one record at a time: decode the next record into
+/// `record` (emptied first), judge it as [`refuse_unknown_mandatory_ext`]
+/// judges a batch, and hand it to `each` before the following one is decoded.
+///
+/// The participant walk of a receive path that dispatches each record as it is
+/// decoded (`drive::dispatch_datagram`): what it holds at any moment is one
+/// record, however many the peer put in the frame, where [`parse_frame_payload`]
+/// holds all of them at once in a list whose length the peer chose. zenoh-pico
+/// receives a frame the same way, decoding and handling one network message at
+/// a time (`src/transport/unicast/rx.c` @
+/// `// Handle all the zenoh message, one by one`).
+///
+/// The records it hands over are the ones [`parse_frame_payload`] decodes, in
+/// the same order, by the same per-MID decoder. What differs is the failure: a
+/// record that does not decode, or that carries an extension a participant
+/// must refuse, ends the walk with that error AFTER the records before it were
+/// handed over, as pico's loop returns from the middle of a frame; the batch
+/// decode refuses the whole frame before any record is acted on. An unknown
+/// MID is absorbed with the rest of the payload into one
+/// [`NetworkMessage::Unknown`], handed over, and ends the walk, as in the batch
+/// decode.
+///
+/// The records are copies of the payload's bytes (the build's
+/// [`WireStorage`]): the payload need only outlive the walk.
+#[cfg(all(feature = "codec-frame", any(test, feature = "session-unicast")))]
+pub(crate) fn for_each_record(
+    payload: &[u8],
+    record: &mut Vec<NetworkMessage>,
+    mut each: impl FnMut(&mut Vec<NetworkMessage>),
+) -> Result<(), crate::parse_error::InboundParseError> {
+    use crate::parse_error::InboundParseError;
+    let mut cursor = SceCursor::new(payload);
+    while cursor.remaining() > 0 {
+        record.clear();
+        let known =
+            decode_one_record(&mut cursor, record, NO_ORIGIN).map_err(InboundParseError::Codec)?;
+        if !known {
+            absorb_unknown(&mut cursor, record).map_err(InboundParseError::Codec)?;
+        }
+        if let Some(refusal) = first_unknown_mandatory_ext(record) {
+            record.clear();
+            return Err(refusal);
+        }
+        each(record);
+        if !known {
+            break;
+        }
+    }
+    record.clear();
+    Ok(())
 }
 
 /// R311y578 — why a batch parse stopped short of the payload's end.
@@ -1308,6 +1383,97 @@ where
 //    (`N_MID_OAM = 0x1F`), whose codec is ungated in wz-codecs, so the
 //    contract is pinned in every build that has `codec-frame` at all
 //    rather than only in the lanes that select a body codec. ──
+// The record-at-a-time walk against the batch decode it must agree with, and
+// the one place it is meant to differ: a failure ends it AFTER the records
+// before it were handed over.
+#[cfg(all(test, feature = "codec-frame"))]
+mod record_walk_tests {
+    use super::*;
+    use alloc::vec;
+
+    fn oam_record(id: u64) -> Vec<u8> {
+        wz_codecs::oam::Oam {
+            id,
+            ..Default::default()
+        }
+        .encode_to_vec()
+    }
+
+    /// What `for_each_record` hands over, one entry per call: the OAM id, or
+    /// the MID of an absorbed unknown record. Also checks every call carries
+    /// exactly one record.
+    fn walk(
+        payload: &[u8],
+    ) -> (
+        Vec<(char, u64)>,
+        Result<(), crate::parse_error::InboundParseError>,
+    ) {
+        let mut record = Vec::new();
+        let mut seen = Vec::new();
+        let result = for_each_record(payload, &mut record, |one| {
+            assert_eq!(one.len(), 1, "one record per call");
+            seen.push(match &one[0] {
+                NetworkMessage::Oam(o) => ('o', o.id),
+                NetworkMessage::Unknown { mid, .. } => ('u', u64::from(*mid)),
+                other => panic!("unexpected record {other:?}"),
+            });
+        });
+        assert!(record.is_empty(), "the buffer is handed back empty");
+        (seen, result)
+    }
+
+    #[test]
+    fn the_walk_hands_over_what_the_batch_decode_reads_in_order() {
+        let payload = [oam_record(1), oam_record(2), oam_record(3)].concat();
+        let batch: Vec<u64> = parse_frame_payload(&payload)
+            .expect("the batch decodes")
+            .iter()
+            .map(|m| match m {
+                NetworkMessage::Oam(o) => o.id,
+                other => panic!("unexpected record {other:?}"),
+            })
+            .collect();
+        let (seen, result) = walk(&payload);
+        assert!(result.is_ok());
+        assert_eq!(batch, vec![1, 2, 3]);
+        assert_eq!(seen, vec![('o', 1), ('o', 2), ('o', 3)]);
+        // An empty payload is a frame of no records: nothing handed over.
+        assert_eq!(walk(&[]), (vec![], Ok(())));
+    }
+
+    #[test]
+    fn a_record_that_does_not_decode_ends_the_walk_after_the_ones_before_it() {
+        // The second record is an OAM header with its id cut off.
+        let mut payload = oam_record(7);
+        payload.push(wire_const::N_MID_OAM);
+        assert!(
+            parse_frame_payload(&payload).is_err(),
+            "the batch decode refuses the whole frame"
+        );
+        let (seen, result) = walk(&payload);
+        assert_eq!(seen, vec![('o', 7)], "the record before it was handed over");
+        assert!(
+            matches!(result, Err(crate::parse_error::InboundParseError::Codec(_))),
+            "then the walk ends with the decode error: {result:?}"
+        );
+    }
+
+    #[test]
+    fn an_unknown_mid_is_handed_over_with_the_rest_and_ends_the_walk() {
+        // MID 0x01 has no envelope decoder: its length is unknowable, so it
+        // and the OAM after it are one absorbed record, as in the batch decode.
+        let payload = [oam_record(4), vec![0x01, 0xAB], oam_record(5)].concat();
+        let (seen, result) = walk(&payload);
+        assert!(result.is_ok());
+        assert_eq!(seen, vec![('o', 4), ('u', 1)]);
+        let batch = parse_frame_payload(&payload).expect("the batch decodes");
+        assert!(
+            matches!(&batch[1], NetworkMessage::Unknown { mid: 1, body } if body.len() == payload.len() - oam_record(4).len()),
+            "the batch decode absorbs the same tail: {batch:?}"
+        );
+    }
+}
+
 #[cfg(all(test, feature = "codec-frame"))]
 mod best_effort_batch_tests {
     use super::*;

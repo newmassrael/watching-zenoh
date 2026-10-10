@@ -808,7 +808,7 @@ mod tests {
     fn a_frame_is_handed_over_in_place_and_held_until_the_mac_reports_it() {
         let (_serial, link) = crate::lwip_test_link();
         let mut rig = gather_node(&link, TxGather::Queued);
-        let mut socket = bind_session_rx(&link, 7602).expect("bind");
+        let socket = bind_session_rx(&link, 7602).expect("bind");
         socket
             .send_to(crate::ipv4_addr_from_octets(FAR_IP), 7601, b"first")
             .expect("send");
@@ -862,7 +862,7 @@ mod tests {
     fn a_frame_the_mac_copied_is_not_held() {
         let (_serial, link) = crate::lwip_test_link();
         let mut rig = gather_node(&link, TxGather::Copied);
-        let mut socket = bind_session_rx(&link, 7602).expect("bind");
+        let socket = bind_session_rx(&link, 7602).expect("bind");
         socket
             .send_to(crate::ipv4_addr_from_octets(FAR_IP), 7601, b"copied")
             .expect("send");
@@ -876,7 +876,7 @@ mod tests {
     fn a_frame_the_mac_refused_is_not_held() {
         let (_serial, link) = crate::lwip_test_link();
         let mut rig = gather_node(&link, TxGather::Refused);
-        let mut socket = bind_session_rx(&link, 7602).expect("bind");
+        let socket = bind_session_rx(&link, 7602).expect("bind");
         let _ = socket.send_to(crate::ipv4_addr_from_octets(FAR_IP), 7601, b"refused");
         resolve_far_host(&mut rig, |_| {});
         let again = socket.send_to(crate::ipv4_addr_from_octets(FAR_IP), 7601, b"refused");
@@ -891,7 +891,7 @@ mod tests {
     fn a_full_table_of_held_chains_falls_back_to_the_copying_door() {
         let (_serial, link) = crate::lwip_test_link();
         let mut rig = gather_node(&link, TxGather::Queued);
-        let mut socket = bind_session_rx(&link, 7602).expect("bind");
+        let socket = bind_session_rx(&link, 7602).expect("bind");
         socket
             .send_to(crate::ipv4_addr_from_octets(FAR_IP), 7601, b"prime")
             .expect("send");
@@ -927,7 +927,7 @@ mod tests {
 
         let (_serial, link) = crate::lwip_test_link();
         let mut rig = gather_node(&link, TxGather::Queued);
-        let mut socket = bind_session_rx(&link, 7602).expect("bind");
+        let socket = bind_session_rx(&link, 7602).expect("bind");
         // Resolve the far host first, so the ROM datagram is not parked in ARP's
         // queue (which would copy it).
         socket
@@ -1251,7 +1251,7 @@ mod tests {
     fn an_arp_reply_read_in_place_resolves_the_address() {
         let (_serial, link) = crate::lwip_test_link();
         let mut rig = loan_node(&link);
-        let mut socket = bind_session_rx(&link, 7602).expect("bind");
+        let socket = bind_session_rx(&link, 7602).expect("bind");
         rig.out.borrow_mut().clear();
         socket
             .send_to(crate::ipv4_addr_from_octets(FAR_IP), 7601, b"after arp")

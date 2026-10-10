@@ -55,6 +55,10 @@ default = []
 # ROM (the MCU multicast image does not lend, Round 3170). A unicast image
 # whose link is this crate's lwIP driver turns it on.
 transport-tx-lend = ["wz-session-core/transport-tx-lend"]
+# The drive loop dispatches each inbound datagram where the session socket
+# holds it, record by record (`wz-runtime-coop`'s `rx-in-place`), with this
+# crate's link lending the socket's queued datagram instead of copying it out.
+rx-in-place = ["wz-runtime-coop/rx-in-place"]
 # Transport reassembly (Tier B) on the MCU session loop. Forwards to the
 # wz-runtime-coop reassembly seam (the CoopReassembly dispatcher +
 # mcu_reassembly() over the SCE buffer-pool SSOT) AND the wz-session-core
@@ -269,6 +273,13 @@ wz-link-lwip = { path = "../wz-link-lwip", features = ["test-support"] }
 # with `transport-tx-lend`. A dev-dependency turns it on for the test build
 # alone: the library a multicast image links carries no lend attempt.
 wz-session-core = { path = "../wz-session-core", default-features = false, features = ["transport-tx-lend"] }
+
+# The inbound frame path counted with a counting allocator: a real lwIP session
+# pair, a frame of N Puts to a subscriber. It needs both handshake halves and
+# the Put arm; without them there is no session to drive, so cargo skips it.
+[[test]]
+name = "rx_frame_allocations"
+required-features = ["session-unicast-open", "session-unicast-accept", "pubsub-put"]
 
 [lints]
 workspace = true

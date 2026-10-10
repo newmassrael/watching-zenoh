@@ -414,4 +414,24 @@ impl SessionDatagramLink for ZephyrUdpDriver {
             }
         }
     }
+
+    // The datagram is lent out of the link's own receive buffer, which the
+    // stack has just written: no heap copy of it. The buffer stays borrowed
+    // while `f` runs; the session's sends go through the socket, not through
+    // it, and a receive from inside `f` would be refused by the `RefCell`.
+    fn recv_with(&self, f: &mut dyn FnMut(&[u8])) -> bool {
+        let mut buf = self.rx_buf.borrow_mut();
+        match self.socket.try_recv(&mut buf) {
+            Ok(Some((len, addr, port))) => {
+                self.set_peer((addr, port));
+                f(&buf[..len]);
+                true
+            }
+            Ok(None) => false,
+            Err(e) => {
+                self.rx_error.set(Some(e));
+                false
+            }
+        }
+    }
 }

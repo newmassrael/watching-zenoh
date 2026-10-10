@@ -1143,7 +1143,7 @@ mod tests {
         let (_serial, link) = lwip_test_link();
         let group = SESSION_MULTICAST_GROUP_DEFAULT;
         let port: u16 = 7449;
-        let mut socket = bind_session_multicast_rx(&link, group, port).expect("bind + join group");
+        let socket = bind_session_multicast_rx(&link, group, port).expect("bind + join group");
 
         // Inject a PEER's JOIN (distinct zid) onto the group BEFORE wrapping
         // the socket in the driver — it queues in lwIP, and the loop's first
@@ -1210,7 +1210,7 @@ mod tests {
         let link = Rc::new(link);
         let group = SESSION_MULTICAST_GROUP_DEFAULT;
         let port: u16 = 7470;
-        let mut socket = bind_session_multicast_rx(&link, group, port).expect("bind + join group");
+        let socket = bind_session_multicast_rx(&link, group, port).expect("bind + join group");
         let peer = params(&[0x01, 0x02, 0x03, 0x04]);
         let peer_join = encode_join(
             &peer,
@@ -1294,7 +1294,7 @@ mod tests {
         let (_serial, link) = lwip_test_link();
         let group = SESSION_MULTICAST_GROUP_DEFAULT;
         let port: u16 = 7452;
-        let mut socket = bind_session_multicast_rx(&link, group, port).expect("bind + join group");
+        let socket = bind_session_multicast_rx(&link, group, port).expect("bind + join group");
 
         // Pre-admit a peer at OUR loopback source: a JOIN with a zid distinct
         // from ours (so it is admitted, not own-zid-filtered) advertising
@@ -1379,7 +1379,7 @@ mod tests {
         let (_serial, link) = lwip_test_link();
         let group = SESSION_MULTICAST_GROUP_DEFAULT;
         let port: u16 = 7453;
-        let mut socket = bind_session_multicast_rx(&link, group, port).expect("bind + join group");
+        let socket = bind_session_multicast_rx(&link, group, port).expect("bind + join group");
 
         // Pre-admit a peer at OUR loopback source (distinct zid -> not
         // own-filtered), advertising next_sn 0 on a fresh ring; injected before
@@ -1482,7 +1482,7 @@ mod tests {
         let (_serial, link) = lwip_test_link();
         let group = SESSION_MULTICAST_GROUP_DEFAULT;
         let port: u16 = 7454;
-        let mut socket = bind_session_multicast_rx(&link, group, port).expect("bind + join group");
+        let socket = bind_session_multicast_rx(&link, group, port).expect("bind + join group");
 
         // A peer JOIN (distinct zid, advertising next_sn 0) admits the peer at
         // our loopback source; the liveliness Interest then rides that peer's
@@ -1599,7 +1599,7 @@ mod tests {
         let (_serial, link) = lwip_test_link();
         let group = SESSION_MULTICAST_GROUP_DEFAULT;
         let port: u16 = 7455;
-        let mut socket = bind_session_multicast_rx(&link, group, port).expect("bind + join group");
+        let socket = bind_session_multicast_rx(&link, group, port).expect("bind + join group");
 
         // A peer JOIN (distinct zid, next_sn 0) admits the querier at our
         // loopback source; the Query then rides that peer's reliable channel at
@@ -1719,7 +1719,7 @@ mod tests {
         let (_serial, link) = lwip_test_link();
         let group = SESSION_MULTICAST_GROUP_DEFAULT;
         let port: u16 = 7456;
-        let mut socket = bind_session_multicast_rx(&link, group, port).expect("bind + join group");
+        let socket = bind_session_multicast_rx(&link, group, port).expect("bind + join group");
 
         // Pre-admit a peer at OUR loopback source (distinct zid -> not
         // own-filtered) advertising next_sn 0 on a fresh ring; injected before
@@ -1860,7 +1860,7 @@ mod tests {
         let (_serial, link) = lwip_test_link();
         let group = SESSION_MULTICAST_GROUP_DEFAULT;
         let port: u16 = 7457;
-        let mut socket = bind_session_multicast_rx(&link, group, port).expect("bind + join group");
+        let socket = bind_session_multicast_rx(&link, group, port).expect("bind + join group");
 
         // The peer the stop must clear: a distinct zid (so it is not
         // own-zid-filtered), injected before the socket is wrapped so the loop's
@@ -1959,7 +1959,7 @@ mod tests {
         let (_serial, link) = lwip_test_link();
         let group = SESSION_MULTICAST_GROUP_DEFAULT;
         let port: u16 = 7458;
-        let mut socket = bind_session_multicast_rx(&link, group, port).expect("bind + join group");
+        let socket = bind_session_multicast_rx(&link, group, port).expect("bind + join group");
 
         let peer = params(&[0x01, 0x02, 0x03, 0x04]);
         let peer_join = encode_join(
@@ -2175,7 +2175,7 @@ mod tests {
         let (_serial, link) = lwip_test_link();
         let group = SESSION_MULTICAST_GROUP_DEFAULT;
         let port: u16 = 7460;
-        let mut socket = bind_session_multicast_rx(&link, group, port).expect("bind + join group");
+        let socket = bind_session_multicast_rx(&link, group, port).expect("bind + join group");
 
         let peer = params(&[0x01, 0x02, 0x03, 0x04]);
         let peer_join = encode_join(

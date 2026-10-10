@@ -9,9 +9,13 @@
 //! only the loop STRUCTURE that sequences them:
 //!
 //! - inbound: [`SessionDatagramLink::try_recv`] ->
-//!   [`wz_session_core::link::LinkEvent::Rx`] -> [`dispatch_link_event`] (the
+//!   [`wz_session_core::link::LinkEvent::Rx`] ->
+//!   [`dispatch_link_event`](wz_session_core::drive::dispatch_link_event) (the
 //!   shared dispatch core) -> `report_outcome_reassembling` (reassembly-gated)
-//!   or the bare `on_event(Poll)` otherwise.
+//!   or the bare `on_event(Poll)` otherwise. Under `rx-in-place` the receive
+//!   is [`SessionDatagramLink::recv_with`] instead, and each datagram is
+//!   dispatched where the link holds it, record by record
+//!   (`wz_session_core::drive::dispatch_datagram`).
 //! - deadlines: [`HandshakeDeadlineTracker`] yields the handshake deadline;
 //!   in Established the keepalive-resetting lease deadline applies and
 //!   [`check_lease_deadline`] (the shared comparator) runs when it elapses.
@@ -29,17 +33,26 @@
 //! seam (`wz_session_lwip::LwipSessionLink` over lwIP).
 
 use alloc::rc::Rc;
+#[cfg(feature = "rx-in-place")]
+use alloc::vec::Vec;
 
 use wz_runtime_core::TimeSource;
+#[cfg(feature = "rx-in-place")]
+use wz_session_core::drive::dispatch_datagram;
+#[cfg(not(feature = "rx-in-place"))]
+use wz_session_core::drive::dispatch_link_event;
 use wz_session_core::drive::SessionEngine;
 #[cfg(feature = "transport-keepalive")]
 use wz_session_core::drive::{check_keepalive_deadline, keepalive_wake_deadline};
 use wz_session_core::drive::{
-    check_lease_deadline, dispatch_link_event, dispatch_pending, lease_wake_deadline,
-    new_session_engine,
+    check_lease_deadline, dispatch_pending, lease_wake_deadline, new_session_engine,
 };
 use wz_session_core::driver_loop::{DriverOutcome, IterationEvent};
-use wz_session_core::link::{BoxedLinkDriver, LinkEvent, RxFrame};
+#[cfg(not(feature = "rx-in-place"))]
+use wz_session_core::link::LinkEvent;
+use wz_session_core::link::{BoxedLinkDriver, RxFrame};
+#[cfg(feature = "rx-in-place")]
+use wz_session_core::network_message::NetworkMessage;
 use wz_session_core::session_actions::SessionLinkActions;
 use wz_session_core::session_fsm_unicast::SessionFsmUnicastEvent;
 use wz_session_core::session_timeouts::{HandshakeDeadlineTracker, SessionTimeouts};
@@ -73,6 +86,30 @@ pub trait SessionDatagramLink {
     /// datagram's source — the acceptor learns its peer from the InitSyn,
     /// and every reply after it goes back to whoever just spoke.
     fn try_recv(&self) -> Option<RxFrame>;
+
+    /// Lend the next inbound datagram's bytes to `f` WHERE THE LINK HOLDS
+    /// THEM, and let it go once `f` returns; `false` when nothing is queued.
+    /// Retargets replies to the datagram's source before `f` runs, as
+    /// [`Self::try_recv`] does, so what `f` sends goes back to whoever spoke.
+    ///
+    /// The receive the `rx-in-place` loop makes. The bytes are valid for the
+    /// call only, which is what lets a link hand over its own buffer instead
+    /// of a copy of it. `f` may send on the session (the link's outbound half
+    /// must stay usable while it runs) but must not receive.
+    ///
+    /// The provided form takes the datagram through [`Self::try_recv`], so it
+    /// costs that frame's copy: right for a link with no buffer of its own to
+    /// lend, and what every link answered before this existed. A link that
+    /// holds its datagrams overrides it.
+    fn recv_with(&self, f: &mut dyn FnMut(&[u8])) -> bool {
+        match self.try_recv() {
+            Some(frame) => {
+                f(&frame.bytes);
+                true
+            }
+            None => false,
+        }
+    }
 }
 
 /// A shared link is a link: the same object is usually the session's
@@ -84,6 +121,10 @@ impl<T: SessionDatagramLink + ?Sized> SessionDatagramLink for Rc<T> {
 
     fn try_recv(&self) -> Option<RxFrame> {
         (**self).try_recv()
+    }
+
+    fn recv_with(&self, f: &mut dyn FnMut(&[u8])) -> bool {
+        (**self).recv_with(f)
     }
 }
 
@@ -261,6 +302,11 @@ pub struct SessionPump<C: ClockSource, L: SessionDatagramLink> {
     deadline_tracker: HandshakeDeadlineTracker,
     #[cfg(feature = "reassembly")]
     reasm: CoopReassembly,
+    /// `rx-in-place` — the one-record buffer each inbound record is decoded
+    /// into and dispatched from. Allocated once, with the pump, for one
+    /// record; a datagram costs it nothing however many records it carries.
+    #[cfg(feature = "rx-in-place")]
+    record: Vec<NetworkMessage>,
     iter: usize,
     max_iters: Option<usize>,
 }
@@ -316,6 +362,8 @@ impl<C: ClockSource, L: SessionDatagramLink> SessionPump<C, L> {
             deadline_tracker: HandshakeDeadlineTracker::new(timeouts),
             #[cfg(feature = "reassembly")]
             reasm: mcu_reassembly(),
+            #[cfg(feature = "rx-in-place")]
+            record: Vec::with_capacity(1),
             iter: 0,
             max_iters,
         }
@@ -386,10 +434,36 @@ impl<C: ClockSource, L: SessionDatagramLink> SessionPump<C, L> {
             return None;
         }
 
+        // `rx-in-place` — the datagram is read where the link holds it and
+        // its records are dispatched one at a time, each outcome reported as
+        // it happens (`dispatch_datagram`). Inside the lend: what the
+        // observer does runs on the stack above the receive.
+        #[cfg(feature = "rx-in-place")]
+        {
+            let link = &self.link;
+            let actions = &self.actions;
+            let engine = &mut self.engine;
+            let record = &mut self.record;
+            #[cfg(feature = "reassembly")]
+            let reasm = &mut self.reasm;
+            let received = link.recv_with(&mut |unit| {
+                dispatch_datagram(unit, actions, engine, record, &mut |outcome| {
+                    #[cfg(feature = "reassembly")]
+                    report_outcome_reassembling(outcome, reasm, actions, now_ms, &mut *on_event);
+                    #[cfg(not(feature = "reassembly"))]
+                    on_event(IterationEvent::Poll(outcome));
+                });
+            });
+            if received {
+                return None;
+            }
+        }
+
         // Inbound datagram? Dispatch it and loop promptly for the next. The
         // link has already retargeted its replies to the datagram's source.
         // Unicast MCU session shell — one peer per link, so no source
         // attribution is needed.
+        #[cfg(not(feature = "rx-in-place"))]
         if let Some(frame) = self.link.try_recv() {
             let outcome =
                 dispatch_link_event(LinkEvent::Rx(frame), &self.actions, &mut self.engine);

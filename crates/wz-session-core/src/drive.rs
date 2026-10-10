@@ -771,12 +771,7 @@ fn dispatch_unit<R: SessionRuntime, T: TimeSource>(
                     // [`crate::link::LostCause::UnknownPriority`]. Every
                     // build checks, since the priority is decoded in every
                     // build; a build without `transport-qos` negotiates none.
-                    if !actions.negotiated_qos() && priority != crate::qos::Priority::DEFAULT {
-                        engine.process_event(E::LinkLost);
-                        return DriverLoopOutcome::LinkLost(
-                            crate::link::LostCause::UnknownPriority,
-                        );
-                    }
+                    //
                     // R311ke — per-channel RX SN gate (pico
                     // `_z_sn_precedes`, unicast/rx.c:108-131): a stale
                     // / duplicate / reordered frame drops before its
@@ -785,12 +780,11 @@ fn dispatch_unit<R: SessionRuntime, T: TimeSource>(
                     // typed outcome lets `report_outcome_reassembling`
                     // clear the channel's in-progress chain (dbuf-clear
                     // parity) and observers count the drop.
-                    if !actions.admit_rx_frame_sn(priority, reliable, sn) {
-                        return DriverLoopOutcome::RxSnRejected {
-                            priority,
-                            reliable,
-                            sn,
-                        };
+                    //
+                    // Both gates are [`refuse_frame`], which the in-place
+                    // receive path ([`dispatch_datagram`]) runs too.
+                    if let Some(refused) = refuse_frame(actions, engine, priority, reliable, sn) {
+                        return refused;
                     }
                     match parse_frame_payload_out_of_line(&payload) {
                         // `payload` is a range of the unit when the unit was
@@ -928,6 +922,174 @@ pub fn dispatch_pending<R: SessionRuntime, T: TimeSource>(
 ) -> Option<DriverLoopOutcome> {
     let residue = actions.take_pending_batch()?;
     Some(dispatch_unit(&residue, actions, engine))
+}
+
+/// The two gates a decoded `Frame` passes before its payload is read, in the
+/// order the copying path has always run them: `Some` is the outcome of a frame
+/// that did not pass.
+///
+/// - R311y215 / R2927 — a non-DEFAULT priority on a session that negotiated no
+///   QoS is link-fatal (see [`crate::link::LostCause::UnknownPriority`]).
+/// - R311ke / R311y215 — the per-(priority, reliable) conduit SN gate (pico
+///   `_z_sn_precedes`): a stale, duplicate or reordered frame is dropped.
+#[cfg(feature = "codec-frame")]
+fn refuse_frame<R: SessionRuntime, T: TimeSource>(
+    actions: &SessionLinkActions<R, T>,
+    engine: &mut Engine<SessionFsmUnicastPolicy<SessionActionsBinding<R, T>>>,
+    priority: crate::qos::Priority,
+    reliable: bool,
+    sn: u64,
+) -> Option<DriverLoopOutcome> {
+    use crate::session_fsm_unicast::SessionFsmUnicastEvent as E;
+    if !actions.negotiated_qos() && priority != crate::qos::Priority::DEFAULT {
+        engine.process_event(E::LinkLost);
+        return Some(DriverLoopOutcome::LinkLost(
+            crate::link::LostCause::UnknownPriority,
+        ));
+    }
+    if !actions.admit_rx_frame_sn(priority, reliable, sn) {
+        return Some(DriverLoopOutcome::RxSnRejected {
+            priority,
+            reliable,
+            sn,
+        });
+    }
+    None
+}
+
+/// Dispatch one inbound datagram that the link LENDS, where it lies, and hand
+/// every outcome to `on_outcome` as it happens.
+///
+/// The receive path of the fixed-memory MCU profile. [`dispatch_link_event`]
+/// takes the datagram as an owned [`RxFrame`](crate::link::RxFrame), so a link
+/// that holds it in its own buffer copies it onto the heap first; the `Frame`
+/// arm then copies the payload out of that copy (an owned unit's sub-range is
+/// a copy) and decodes every record of it into a list whose length the peer
+/// chose, before the application sees the first one. Here the unit is borrowed
+/// for the length of the call, the payload is read where it lies, and the
+/// records are decoded and dispatched one at a time
+/// (`network_message::for_each_record`) through `record`, a one-record
+/// buffer the caller keeps across datagrams. A frame of N records is reported
+/// as N [`DriverLoopOutcome::FramePayload`]s, each carrying one record and the
+/// frame's own SN, reliability, priority and extensions; a frame that carries
+/// none is reported as one with none, as the copying path reports it.
+///
+/// Only a unit that BEGINS with an admissible `Frame` takes that path, and only
+/// on a session that reads its units as they arrive. Everything else is the
+/// copying path, unchanged and owned: a handshake, KeepAlive, Close or Fragment
+/// at the front (whose state changes, residue parking and reassembly hand-off
+/// are [`dispatch_link_event`]'s), a `Frame` whose own extension chain must be
+/// refused (the FSM's `framing.error` arm is there), a compressed batch, and a
+/// lean lowlatency unit. A `Frame` consumes the rest of its unit, so the path
+/// leaves nothing to park.
+///
+/// One difference from the copying path is deliberate: when a record does not
+/// decode, or carries an extension a participant must refuse, the records
+/// before it have already been dispatched, and then the FSM takes
+/// `framing.error` and the error is reported, where the copying path refuses
+/// the whole frame first. That is zenoh-pico's receive loop
+/// (`src/transport/unicast/rx.c` @ `// Handle all the zenoh message, one by one`);
+/// the copying path is upstream zenoh's, which decodes a frame's messages into
+/// one list before it handles any.
+///
+/// Whatever the path, `on_outcome` runs inside the link's lend, so what it
+/// does is on the stack above the receive; a profile measures that before it
+/// selects this path.
+#[cfg(feature = "codec-frame")]
+pub fn dispatch_datagram<R: SessionRuntime, T: TimeSource>(
+    unit: &[u8],
+    actions: &SessionLinkActions<R, T>,
+    engine: &mut Engine<SessionFsmUnicastPolicy<SessionActionsBinding<R, T>>>,
+    record: &mut alloc::vec::Vec<crate::network_message::NetworkMessage>,
+    on_outcome: &mut dyn FnMut(&DriverLoopOutcome),
+) {
+    use crate::session_fsm_unicast::SessionFsmUnicastEvent as E;
+    let in_place = in_place_frame(unit, actions);
+    let Some((head, payload_at)) = in_place else {
+        let frame = crate::link::RxFrame::new(alloc::vec::Vec::from(unit));
+        on_outcome(&dispatch_link_event(LinkEvent::Rx(frame), actions, engine));
+        return;
+    };
+    // The accounting `dispatch_link_event` and `dispatch_unit` do for a unit
+    // and the one transport message decoded off its front.
+    #[cfg(feature = "transport-stats")]
+    {
+        actions.stats.inc_rx(unit.len());
+        let bytes = unit.len() as u64;
+        actions.record_on_link(&actions.link, |metrics, slot| {
+            metrics.inc_bytes(crate::stats_registry::StatsDirection::Rx, slot, bytes)
+        });
+        count_rx_transport_message(actions);
+    }
+    actions.stamp_rx_activity();
+    let crate::inbound::FrameHead {
+        reliable,
+        sn,
+        has_ext,
+        extensions,
+        priority,
+    } = head;
+    if let Some(refused) = refuse_frame(actions, engine, priority, reliable, sn) {
+        on_outcome(&refused);
+        return;
+    }
+    let mut outcome = DriverLoopOutcome::FramePayload {
+        reliable,
+        sn,
+        messages: alloc::vec::Vec::new(),
+        has_ext,
+        extensions,
+        priority,
+    };
+    let mut dispatched = false;
+    let walked = crate::network_message::for_each_record(&unit[payload_at..], record, |one| {
+        if let DriverLoopOutcome::FramePayload { messages, .. } = &mut outcome {
+            core::mem::swap(messages, one);
+            *messages = count_rx_network_messages(actions, core::mem::take(messages));
+        }
+        on_outcome(&outcome);
+        if let DriverLoopOutcome::FramePayload { messages, .. } = &mut outcome {
+            core::mem::swap(messages, one);
+        }
+        dispatched = true;
+    });
+    match walked {
+        Ok(()) if !dispatched => on_outcome(&outcome),
+        Ok(()) => {}
+        Err(parse_err) => {
+            engine.process_event(E::FramingError);
+            on_outcome(&DriverLoopOutcome::ParseError(parse_err));
+        }
+    }
+}
+
+/// The admissible `Frame` at the front of `unit`, decoded up to its payload,
+/// when [`dispatch_datagram`] may read it where it lies; `None` sends the unit
+/// down the copying path. A head that does not decode is also `None`: the
+/// copying path decodes it again and reports the error the way it always has.
+#[cfg(feature = "codec-frame")]
+fn in_place_frame<R: SessionRuntime, T: TimeSource>(
+    unit: &[u8],
+    actions: &SessionLinkActions<R, T>,
+) -> Option<(crate::inbound::FrameHead, usize)> {
+    // The compressed batch is un-wrapped into a buffer of its own, and a lean
+    // lowlatency unit carries no Frame envelope: both are the copying path's.
+    #[cfg(feature = "transport-compression")]
+    if actions.compresses_batches() {
+        return None;
+    }
+    #[cfg(feature = "transport-lowlatency")]
+    if actions.is_lowlatency() && actions.is_established() {
+        return None;
+    }
+    #[cfg(not(any(feature = "transport-compression", feature = "transport-lowlatency")))]
+    let _ = actions;
+    let (head, payload_at) = crate::inbound::parse_frame_in_place(unit)?.ok()?;
+    matches!(
+        head.ext_admission(),
+        crate::ext_admit::ExtAdmission::Admissible
+    )
+    .then_some((head, payload_at))
 }
 /// R77/R84 — compare the session's lease baseline against `params.lease` and
 /// inject `SessionFsmUnicastEvent::LeaseExpired` when the window has elapsed,

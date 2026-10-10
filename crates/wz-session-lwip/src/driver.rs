@@ -24,11 +24,12 @@ use wz_session_core::reliability::Reliability;
 /// the heap).
 const LENT_MAX: usize = 2;
 
-/// The session socket shared by the drive loop (inbound `try_recv`) and
-/// the FSM action layer (outbound `send_blocking`). A single-task
-/// synchronous loop owns both seams, so the two `RefCell` borrows never
-/// overlap — `try_recv` returns an owned [`Datagram`] (its borrow released
-/// at the call site) before dispatch re-borrows for a send. `Rc` (not
+/// The session socket shared by the drive loop (inbound `try_recv` /
+/// `recv_with`) and the FSM action layer (outbound `send_blocking` and the
+/// lent sends). A single-task synchronous loop owns both seams. Every send
+/// takes a SHARED borrow, because `recv_with` holds one across the dispatch
+/// of the datagram it lends and the dispatch sends replies; only the dequeue
+/// takes the exclusive one, and never while a datagram is lent. `Rc` (not
 /// `Arc`) because the profile is `!Send`: this matches
 /// [`wz_session_core::link::SessionRuntime::LinkSink`] = `Rc<dyn
 /// BoxedLinkDriver>` on the lwIP MCU profile, so no atomic refcount traffic
@@ -124,6 +125,29 @@ impl LwipUdpDriver {
     pub fn try_recv(&self) -> Option<SessionDatagram> {
         self.socket.borrow_mut().try_recv()
     }
+
+    /// Lend the oldest queued datagram to `f` where the socket's receive
+    /// queue holds it, retarget replies to its source first, and remove it
+    /// once `f` returns. `false` when nothing is queued.
+    ///
+    /// [`Self::try_recv`] moves the datagram out of the queue, a
+    /// `SESSION_RX_SLOT_SIZE` value that a caller then copies onto the heap
+    /// or holds on its stack while it dispatches. This hands `f` the bytes in
+    /// place instead. The socket is borrowed SHARED while `f` runs, so the
+    /// dispatch inside it can send (every send takes a shared borrow); a
+    /// receive from inside `f` would need the exclusive borrow and panics,
+    /// which is the loud answer to a re-entrant receive.
+    pub fn recv_with(&self, f: &mut dyn FnMut(&[u8])) -> bool {
+        {
+            let socket = self.socket.borrow();
+            let Some(datagram) = socket.peek_recv() else {
+                return false;
+            };
+            self.set_peer(datagram.src_addr, datagram.src_port);
+            f(datagram.data.as_slice());
+        }
+        self.socket.borrow_mut().consume_recv()
+    }
 }
 
 impl BoxedLinkDriver for LwipUdpDriver {
@@ -140,7 +164,9 @@ impl BoxedLinkDriver for LwipUdpDriver {
         // the MCU profile has no `transport-stats` build, but the seam must
         // still tell the truth for the lanes that assert on it.
         let (addr, port) = self.peer.get();
-        match self.socket.borrow_mut().send_to(addr, port, bytes) {
+        // A shared borrow: a send happens while `recv_with` lends a received
+        // datagram out of the same socket.
+        match self.socket.borrow().send_to(addr, port, bytes) {
             Ok(_) => LinkSendOutcome::Sent,
             Err(_) => LinkSendOutcome::Dropped(LinkDropCause::WriterGone),
         }
@@ -191,7 +217,7 @@ impl BoxedLinkDriver for LwipUdpDriver {
         let (addr, port) = self.peer.get();
         match self
             .socket
-            .borrow_mut()
+            .borrow()
             .send_tx_payload(payload, start + len, addr, port)
         {
             Ok(()) => LinkSendOutcome::Sent,

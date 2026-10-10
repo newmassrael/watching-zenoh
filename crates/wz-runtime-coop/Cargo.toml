@@ -142,6 +142,16 @@ session-unicast = [
     "wz-session-core/no_std",
 ]
 
+# The unicast drive loop reads each inbound datagram WHERE THE LINK HOLDS IT
+# and hands the session its records one at a time, instead of copying the
+# datagram onto the heap, copying the frame's payload out of that copy and
+# collecting the payload's records into a list whose length the peer chooses
+# (`wz_session_core::drive::dispatch_datagram`). A selector for the fixed-memory
+# MCU profile, off by default: the records are dispatched from inside the link's
+# lend, one call deeper than the copying loop dispatches, so a shipped image
+# switches only after its own stack measurement says the margin holds.
+rx-in-place = ["session-unicast", "codec-frame"]
+
 # Stage 5 — the session handshake codec + role gates on the MCU profile.
 # These are the MCU mirror of wz-runtime-tokio's same-named forwarders: the
 # AP facade routes `codec-init-body` etc. through `wz-runtime-tokio?/<f>` to

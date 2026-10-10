@@ -6428,12 +6428,20 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         // the FramingError projection anyway. R294 — the stamp shares
         // the monotonic epoch with the drive loop's clock.
         if !matches!(frame, InboundFrame::Unknown { .. }) {
-            let now = self.clock.now_monotonic_ms();
-            R::with_mutex_mut(&self.link.last_inbound_at, |slot| {
-                *slot = Some(now);
-            });
+            self.stamp_rx_activity();
         }
         (frame, consumed)
+    }
+
+    /// The RX-activity stamp [`Self::observe_inbound`] takes for every decoded
+    /// transport message but an unknown one. A `Frame` read where its unit lies
+    /// (`drive::dispatch_datagram`, under `codec-frame`) takes nothing else from
+    /// it here: a Frame carries no handshake fact.
+    pub(crate) fn stamp_rx_activity(&self) {
+        let now = self.clock.now_monotonic_ms();
+        R::with_mutex_mut(&self.link.last_inbound_at, |slot| {
+            *slot = Some(now);
+        });
     }
 
     /// R311y632 (§17) — park the undispatched remainder of a framing unit.

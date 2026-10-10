@@ -682,10 +682,6 @@ impl<const N: usize, const Q: usize> LwipUdpSocket<N, Q> {
         Ok(Self { inner })
     }
 
-    /// Send a datagram to `dst_addr:dst_port`. `dst_addr` is treated
-    /// as already in network byte order (matching lwIP's
-    /// `ip4_addr_t::addr` shape). For convenience constructors see
-    /// [`ipv4_addr_loopback`] and [`ipv4_addr_from_octets`].
     /// R2841 — the port this socket is bound to. For a socket bound to port
     /// 0 this is the port lwIP chose, which is what a peer sees it send from.
     pub fn local_port(&self) -> u16 {
@@ -693,12 +689,15 @@ impl<const N: usize, const Q: usize> LwipUdpSocket<N, Q> {
         unsafe { lwip_sys::wz_lwip_udp_local_port(self.inner.pcb.as_ptr()) }
     }
 
-    pub fn send_to(
-        &mut self,
-        dst_addr: u32,
-        dst_port: u16,
-        payload: &[u8],
-    ) -> Result<(), LinkError> {
+    /// Send a datagram to `dst_addr:dst_port`. `dst_addr` is treated
+    /// as already in network byte order (matching lwIP's
+    /// `ip4_addr_t::addr` shape). For convenience constructors see
+    /// [`ipv4_addr_loopback`] and [`ipv4_addr_from_octets`].
+    ///
+    /// Takes `&self`: a send reads the pcb and touches nothing the socket
+    /// owns, so it can run while a received datagram is lent out of the
+    /// queue ([`peek_recv`](Self::peek_recv)).
+    pub fn send_to(&self, dst_addr: u32, dst_port: u16, payload: &[u8]) -> Result<(), LinkError> {
         let len = payload.len().min(N);
         // SAFETY: the pcb is valid for the socket's life (removed in Drop).
         unsafe { send_datagram(self.inner.pcb.as_ptr(), dst_addr, dst_port, &payload[..len]) }
@@ -745,9 +744,10 @@ impl<const N: usize, const Q: usize> LwipUdpSocket<N, Q> {
 
     /// Send the first `len` bytes of `payload` to `dst_addr:dst_port` and give
     /// the buffer back to lwIP. The datagram is exactly what the sender wrote:
-    /// no copy is made here.
+    /// no copy is made here. `&self` for the reason [`send_to`](Self::send_to)
+    /// gives.
     pub fn send_tx_payload(
-        &mut self,
+        &self,
         #[allow(unused_mut)] mut payload: TxPayload,
         len: usize,
         dst_addr: u32,
@@ -792,6 +792,28 @@ impl<const N: usize, const Q: usize> LwipUdpSocket<N, Q> {
         // here.
         let inner = unsafe { Pin::get_unchecked_mut(self.inner.as_mut()) };
         inner.rx_queue.dequeue()
+    }
+
+    /// The oldest received datagram, borrowed where the receive queue holds
+    /// it and left queued: [`try_recv`](Self::try_recv) without the move out
+    /// of the queue. `None` when nothing has arrived.
+    ///
+    /// The receive a reader makes that only needs the bytes for as long as it
+    /// is reading them, and then gives the entry back with
+    /// [`consume_recv`](Self::consume_recv). The entry stays in place while it
+    /// is borrowed: the queue's producer, this socket's lwIP receive callback,
+    /// fills only free entries, and it runs only inside lwIP's input
+    /// processing (`NO_SYS=1`), which the reader drives itself and does not
+    /// drive while it holds the borrow. A send is fine meanwhile: it takes
+    /// `&self` and touches nothing the queue owns.
+    pub fn peek_recv(&self) -> Option<&Datagram<N>> {
+        self.inner.rx_queue.peek()
+    }
+
+    /// Remove the datagram [`peek_recv`](Self::peek_recv) lent. `false` when
+    /// the queue was empty.
+    pub fn consume_recv(&mut self) -> bool {
+        self.try_recv().is_some()
     }
 
     /// Number of datagrams dropped because the receive queue was full

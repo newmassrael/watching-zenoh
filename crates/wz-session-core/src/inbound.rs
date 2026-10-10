@@ -549,6 +549,95 @@ pub fn parse_inbound_consuming_in(
     parse_unit(unit.as_slice(), Some(unit))
 }
 
+/// What a `Frame` says about itself before its payload: the fields of
+/// [`InboundFrame::Frame`] that are not the payload.
+#[cfg(feature = "codec-frame")]
+#[derive(Debug)]
+pub(crate) struct FrameHead {
+    pub(crate) reliable: bool,
+    pub(crate) sn: u64,
+    pub(crate) has_ext: bool,
+    pub(crate) extensions: Vec<ExtEntryOwned>,
+    pub(crate) priority: crate::qos::Priority,
+}
+
+// The in-place receive path's helpers live where its one caller does: the
+// unicast drive (`drive`, gated on `alloc` and `session-unicast`).
+#[cfg(all(
+    feature = "codec-frame",
+    feature = "alloc",
+    feature = "session-unicast"
+))]
+impl FrameHead {
+    /// Whether a participant may act on this frame's own extension chain: the
+    /// rule [`InboundFrame::ext_admission`] applies to a decoded `Frame`.
+    pub(crate) fn ext_admission(&self) -> crate::ext_admit::ExtAdmission {
+        crate::ext_admit::judge_ext_chain(
+            crate::ext_admit::ExtCarrier::Transport(wire_const::T_MID_FRAME),
+            self.extensions.iter().map(|e| e.header),
+        )
+    }
+}
+
+/// Decode a `Frame` from just after its header byte up to its payload: the SN
+/// (VLE), then the extension chain when the header's Z flag says there is one.
+/// The cursor is left at the first byte of the payload, which runs to the end
+/// of the unit.
+///
+/// The one decode of a frame's head, shared by [`parse_inbound_consuming_in`]'s
+/// `Frame` arm (which then takes the payload as a range or a copy) and
+/// `parse_frame_in_place` (which leaves the payload where it is).
+#[cfg(feature = "codec-frame")]
+fn decode_frame_head(
+    flags: u8,
+    has_ext: bool,
+    cursor: &mut SceCursor<'_>,
+) -> Result<FrameHead, InboundParseError> {
+    let sn = cursor.read_vle_u64().map_err(InboundParseError::Codec)?;
+    let extensions = if has_ext {
+        decode_ext_chain(cursor)?
+    } else {
+        Vec::new()
+    };
+    let priority = ext_qos_priority(&extensions);
+    Ok(FrameHead {
+        reliable: (flags & wire_const::FLAG_T_FRAME_R) != 0,
+        sn,
+        has_ext,
+        extensions,
+        priority,
+    })
+}
+
+/// The `Frame` at the front of `unit`, decoded up to its payload, and the
+/// offset in `unit` at which the payload starts. `None` when the unit does
+/// not begin with a `Frame`.
+///
+/// For a receive path that reads the payload where the unit lies, record by
+/// record, instead of taking it as an [`RxBytes`]: nothing is copied and
+/// nothing is shared. A `Frame` consumes the rest of its unit, so the payload
+/// is `unit[offset..]`.
+#[cfg(all(
+    feature = "codec-frame",
+    feature = "alloc",
+    feature = "session-unicast"
+))]
+pub(crate) fn parse_frame_in_place(
+    unit: &[u8],
+) -> Option<Result<(FrameHead, usize), InboundParseError>> {
+    let header = *unit.first()?;
+    if header & 0x1F != wire_const::T_MID_FRAME {
+        return None;
+    }
+    let flags = header & 0xE0;
+    let has_ext = (flags & wire_const::FLAG_T_Z) != 0;
+    let mut cursor = SceCursor::new(&unit[1..]);
+    Some(
+        decode_frame_head(flags, has_ext, &mut cursor)
+            .map(|head| (head, unit.len() - cursor.remaining())),
+    )
+}
+
 /// The one decode behind [`parse_inbound_consuming`] and
 /// [`parse_inbound_consuming_in`]. `origin`, when there is one, is the
 /// [`RxBytes`] that `bytes` was taken from, and is only consulted by the arm
@@ -673,14 +762,7 @@ fn parse_unit(
         }
         #[cfg(feature = "codec-frame")]
         wire_const::T_MID_FRAME => {
-            // sn first (VLE), then optional ext chain (Z-gated),
-            // then tail payload to end of cursor.
-            let sn = cursor.read_vle_u64().map_err(InboundParseError::Codec)?;
-            let extensions = if has_ext {
-                decode_ext_chain(&mut cursor)?
-            } else {
-                Vec::new()
-            };
+            let head = decode_frame_head(flags, has_ext, &mut cursor)?;
             let remaining = cursor.remaining();
             // The payload is the tail of the unit, so it is `remaining` bytes
             // ending where the unit does. With an origin it is a range of it
@@ -698,10 +780,16 @@ fn parse_unit(
             cursor
                 .advance(remaining)
                 .map_err(InboundParseError::Codec)?;
-            let priority = ext_qos_priority(&extensions);
+            let FrameHead {
+                reliable,
+                sn,
+                has_ext,
+                extensions,
+                priority,
+            } = head;
             Ok((
                 InboundFrame::Frame {
-                    reliable: (flags & wire_const::FLAG_T_FRAME_R) != 0,
+                    reliable,
                     sn,
                     payload,
                     has_ext,

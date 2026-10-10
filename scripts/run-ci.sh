@@ -10951,6 +10951,29 @@ layer_c1m_session_lwip() {
         cargo test -p wz-session-lwip \
         --features transport-multicast,session-unicast-open,session-unicast-accept,codec-push \
         --quiet || return 1
+    # Fixed-memory step S2 — the inbound frame path under a counting allocator
+    # (`tests/rx_frame_allocations.rs`, which cargo builds only with both
+    # handshake halves and the Put arm, so no leg above runs it). Once on the
+    # copying loop, where the count must SEE the per-frame copies (the
+    # instrument's control), once on `rx-in-place`, where the per-frame part
+    # must be zero. 2 = the file's two tests, the number each command PRINTED.
+    _runci_guarded_test "C1m rx frame copying" 2 \
+        cargo test -p wz-session-lwip \
+        --features session-unicast-open,session-unicast-accept,pubsub-put \
+        --test rx_frame_allocations --quiet || return 1
+    _runci_guarded_test "C1m rx frame in place" 2 \
+        cargo test -p wz-session-lwip \
+        --features session-unicast-open,session-unicast-accept,pubsub-put,rx-in-place \
+        --test rx_frame_allocations --quiet || return 1
+    (cd crates \
+        && cargo clippy -p wz-runtime-coop --all-targets --features rx-in-place,reassembly \
+            --quiet -- -D warnings \
+        && cargo clippy -p wz-session-lwip --all-targets \
+            --features session-unicast-open,session-unicast-accept,pubsub-put \
+            --quiet -- -D warnings \
+        && cargo clippy -p wz-session-lwip --all-targets \
+            --features session-unicast-open,session-unicast-accept,pubsub-put,rx-in-place \
+            --quiet -- -D warnings) || return 1
     (cd crates \
         && cargo clippy -p wz-session-mcu --all-targets --quiet -- -D warnings \
         && cargo clippy -p wz-session-mcu --all-targets \

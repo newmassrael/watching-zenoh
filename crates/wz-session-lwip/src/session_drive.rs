@@ -64,6 +64,12 @@ impl<L: Deref<Target = LwipLink>> SessionDatagramLink for LwipSessionLink<L> {
         self.driver.set_peer(dg.src_addr, dg.src_port);
         Some(RxFrame::new(dg.data.as_slice().to_vec()))
     }
+
+    // The datagram is lent where the session socket's receive queue holds it:
+    // no heap copy, and no slot-sized value on the stack under the dispatch.
+    fn recv_with(&self, f: &mut dyn FnMut(&[u8])) -> bool {
+        self.driver.recv_with(f)
+    }
 }
 
 /// The shared pump, over an lwIP link held as `L`.
