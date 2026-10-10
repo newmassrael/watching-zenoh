@@ -162,18 +162,18 @@ node's datagrams in the capture for the record. HW.30 checks checksums and
 nothing of zenoh: the stock router's decoding is HW.2 and HW.5. HW.31 rests on
 the board run's output the same way HW.26 does.
 
-HW.35 is judged as its sentence says: each of the three counts 0. What the
-sentence claims is a property of the traffic the node received as much as of
-the slot path, and the firmware does not promise it: the node negotiates a
-batch of 1500 bytes (`BATCH_SIZE` in deploy/zephyr-admin-node/rust/src/lib.rs),
-so a router that fills a batch past 1472 bytes sends a datagram that crosses a
-1500-byte Ethernet link in fragments, which lwIP reassembles and the session
-socket copies (`recv_thunk` in crates/wz-link-lwip/src/lib.rs); and a burst of
-more than eight frames held at once (the session socket queues 16, lwIP lends
-at most 8, and its reassembly holds fragments, lent, for up to 15 s) is
-copied in and leaves a descriptor refused. Neither is a fault of the slot
-path, and both fail this step. When only the session's copies are not 0, the
-reason on standard error says they are reassembled datagrams.
+HW.35 is judged as its sentence says: each of the three counts 0. No datagram
+of the node's sessions needs fragmentation: the node negotiates a batch of 1472
+bytes (`BATCH_SIZE` in deploy/zephyr-admin-node/rust/src/lib.rs, one Ethernet
+frame's UDP payload), where its earlier 1500 let a full batch cross the link in
+fragments, which lwIP reassembles and the session socket copies (`recv_thunk`
+in crates/wz-link-lwip/src/lib.rs). What the firmware still does not promise,
+and the step does not settle: a burst of more than eight frames held at once
+(the session socket queues 16, lwIP lends at most 8, and its reassembly holds
+fragments addressed to the node, lent, for up to 15 s) is copied in and leaves
+a descriptor refused. That is no fault of the slot path, and it fails this
+step. When only the session's copies are not 0, the reason on standard error
+says they are reassembled datagrams.
 
 ## Its own test
 

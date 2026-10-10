@@ -86,10 +86,25 @@ fn uptime_ms() -> u64 {
 /// The port the node listens on: zenoh's default.
 const LISTEN_PORT: u16 = 7447;
 
-/// The largest batch the node's sessions negotiate. Its receive buffers are this
-/// big plus the slack a link adds, so a board with a small heap pays for what a
-/// session can carry, not for the largest datagram UDP allows.
-const BATCH_SIZE: u16 = 1500;
+/// The largest IP packet one Ethernet frame carries: the MTU of every interface
+/// this node runs on (Zephyr's Ethernet interfaces, and the lwIP netif, whose
+/// shim sets `mtu = 1500`).
+const ETHERNET_MTU: usize = 1500;
+/// The IPv4 header with no options, which is what lwIP and a host's stack send.
+const IPV4_HEADER: usize = 20;
+/// The UDP header.
+const UDP_HEADER: usize = 8;
+
+/// The largest batch the node's sessions negotiate: 1500 - 20 - 8 = 1472, the
+/// largest UDP payload one Ethernet frame carries whole. A router takes the
+/// smaller of its batch and the node's, so no datagram of the node's sessions
+/// needs IP fragmentation, in either direction: lwIP copies a datagram it
+/// reassembles (the receive pool's HW.35), and a fragment is not a frame whose
+/// UDP checksum the transmit pool's HW.30 can check. A batch of 1500, as this
+/// was, let a full batch cross the link in two fragments. Its receive buffers
+/// are this big plus the slack a link adds, so a board with a small heap pays for
+/// what a session can carry, not for the largest datagram UDP allows.
+const BATCH_SIZE: u16 = (ETHERNET_MTU - IPV4_HEADER - UDP_HEADER) as u16;
 
 /// Writes are PERMITTED on this node: upstream's default is to refuse, and the
 /// node opts in, because being reconfigured is what it is for.

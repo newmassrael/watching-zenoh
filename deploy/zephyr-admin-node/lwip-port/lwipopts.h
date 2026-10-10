@@ -53,7 +53,8 @@
 #define MEMP_MEM_MALLOC                 0
 #define MEM_ALIGNMENT                   4
 /* The heap pbufs for a transmitted datagram come from, and the stack's own
- * bookkeeping. A session's batch is at most 1500 bytes. */
+ * bookkeeping. A session's batch is at most 1472 bytes (`BATCH_SIZE`: one
+ * Ethernet frame's UDP payload, so no session datagram is fragmented). */
 #define MEM_SIZE                        (24 * 1024)
 
 /* --- Pools --- */
