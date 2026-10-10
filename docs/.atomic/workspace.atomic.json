@@ -269884,6 +269884,60 @@
         "3. The table lists one launcher image per board. If the launcher is rebuilt, rows recorded with the old one stop passing. If both must be kept, a companion needs one entry per image, which is a schema change."
       ]
     },
+    "Round 3257": {
+      "decision_summary": "The verdict program now judges the receive pool image's HW.31 to HW.35 from files. Both pool images are described the same way: one description per image, holding its console regexes, prefixes and steps. --pool-image takes tx or rx and can be given twice, so an image built with both pools is judged in one call. The steps a call owes are the sets it names, so a named set whose lines are missing fails. A call that names one set notes when the console also holds the other set's lines. HW.31 reuses HW.26's four checks. HW.35 is judged exactly as its sentence says. The firmware's print format matches the grammar's regexes. One premise was false: the node negotiates a 1500-byte batch, and a datagram past 1472 bytes crosses Ethernet in fragments. lwIP reassembles it and the session copies it, by design, so HW.35 fails. The prose of both pool images was corrected; no step sentence changed. Whether to lower BATCH_SIZE or weaken HW.35 is the owner's call.",
+      "changes_bullets": [
+        "scripts/lib/admin_node_verdict.py: the pool steps are now organised around a PoolImage record per image (TX_IMAGE, RX_IMAGE, IMAGES), holding its prefixes, its two grammar regexes, the type its counts lines read into (TxCounts or RxCounts), its steps and its capture step. read_pool_console(raw, image) reads one image's lines; the other image's lines are not counted as unread. POOL_CLAUSES gains HW.31 (HW.26's four onboard clauses, a separate list), HW.32 (one line, size 16x1536, start a multiple of 32, inside the section), HW.33 (lent, lwIP took lent, read in place each above zero, each its own clause), HW.34 (every line read and at least one; free + in the ring + lent - returned == 16 on every line; in the ring <= 8) and HW.35 (refused, lwIP took copied, read copied each 0). When lwIP copied nothing, the reason printed for a nonzero read-copied names those copies as reassembled datagrams. run_pool takes the list of images and an optional capture. The console summary is one line covering every image judged, and a call notes the lines of any image it did not judge. The CLI is --pool-image {tx,rx}, which may be given twice. A repeated set is refused. --pcap is required for tx and refused without tx. Both the qemu and board modes use one locator pattern, NODE_LOCATOR. The header now has the lab's commands for the RX image and for the image built with both pools, what HW.35 rests on, and a description of the selftest. The selftest gains fixtures for the RX image and for both pools in one console, RX_FAULTS (22 faults), POOL_CALLS (tx, rx, both), and new checks: values and sentences, a section-aware regex check per image, clause drops, JUDGES 0 and 7 weakened for HW.31, three arithmetic mutants, the table gate's reading, and RX and combined CLI cases plus six new refusals.",
+        "deploy/zephyr-admin-node/HARDWARE_VERDICT.md: the TX command is now --pool-image tx. The RX section says the program prints its five steps from files, including a combined call. HW.31's prose now says the output is held to the console capture, as HW.26's does (commit 26035406). In a second commit (90f229d2): the HW.35 prose and the TX ledger-entry parenthetical no longer claim that no datagram needs fragmentation at the 1500-byte batch."
+      ],
+      "verification_bullets": [
+        "Ran on the worktree after each commit:",
+        "admin_node_verdict.py --selftest: rc 0.",
+        "zephyr_board_table_gate.py: rc 0, 7 rows (0 DECLARED, 4 BUILT, 2 QEMU, 1 HARDWARE).",
+        "zephyr_board_table_gate.py --selftest: rc 0.",
+        "python_floor_lint.py: rc 0.",
+        "gate_provenance_lint.py: rc 0.",
+        "round_fed_gate_reach.py --selftest and plain: rc 0 both.",
+        "prose_named_identifier_gate.py --selftest and --check: rc 0 both.",
+        "Red-first, by hand: with RX_SLOT_ALIGN forced to 16, the selftest failed on rx_pool_misaligned (rc 1). With RX_RING_SLOTS forced to 9, it failed on rx_ring_9 (rc 1).",
+        "Inside the selftest, every RX clause dropped in turn turned its own fault green. Every fault reds exactly its steps in each of the three calls: tx, rx, and both from one console.",
+        "Not run: any hardware (none in this task); A4 (no crates test touched); the hook's gate array; the C0 family; the count-guard oracle; hosted CI.",
+        "The firmware facts in the finding were read from source, not observed on a board. They are BATCH_SIZE 1500, netif mtu 1500, recv_thunk copying non-lent-piece datagrams, the RX_HELD_MAX 8 shim cap, a session socket queue of 16, and lwIP IP_REASS_MAX_PBUFS 10 with IP_REASS_MAXAGE 15. The upstream batch minimum was read at the pinned checkout found by upstream_root(), and confirmed."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-14-platform",
+        "watching-zenoh/local-ci-gates"
+      ],
+      "carry_forward_bullets": [
+        "The fragmentation finding is settled. The coordinator chose the root fix, and BATCH_SIZE is now 1472 (commit 76849c51; ledger set 2). What remains open is the unmeasured burst and reassembly limit of HW.35, which carry2.txt describes, and a lab run of board --pool-image rx on the T2G kit. The board table has no row for an image built with both pools. Add one only if a lab will record it; the program already judges both sets of steps in one call (--pool-image tx --pool-image rx)."
+      ],
+      "publishable_decision_summary": "The verdict program now judges the receive pool image's HW.31 to HW.35 from files. Both pool images are described the same way: one description per image, holding its console regexes, prefixes and steps. --pool-image takes tx or rx and can be given twice, so an image built with both pools is judged in one call. The steps a call owes are the sets it names, so a named set whose lines are missing fails. A call that names one set notes when the console also holds the other set's lines. HW.31 reuses HW.26's four checks. HW.35 is judged exactly as its sentence says. The firmware's print format matches the grammar's regexes. One premise was false: the node negotiates a 1500-byte batch, and a datagram past 1472 bytes crosses Ethernet in fragments. lwIP reassembles it and the session copies it, by design, so HW.35 fails. The prose of both pool images was corrected; no step sentence changed. Whether to lower BATCH_SIZE or weaken HW.35 is the owner's call.",
+      "publishable_changes_bullets": [
+        "scripts/lib/admin_node_verdict.py: the pool steps are now organised around a PoolImage record per image (TX_IMAGE, RX_IMAGE, IMAGES), holding its prefixes, its two grammar regexes, the type its counts lines read into (TxCounts or RxCounts), its steps and its capture step. read_pool_console(raw, image) reads one image's lines; the other image's lines are not counted as unread. POOL_CLAUSES gains HW.31 (HW.26's four onboard clauses, a separate list), HW.32 (one line, size 16x1536, start a multiple of 32, inside the section), HW.33 (lent, lwIP took lent, read in place each above zero, each its own clause), HW.34 (every line read and at least one; free + in the ring + lent - returned == 16 on every line; in the ring <= 8) and HW.35 (refused, lwIP took copied, read copied each 0). When lwIP copied nothing, the reason printed for a nonzero read-copied names those copies as reassembled datagrams. run_pool takes the list of images and an optional capture. The console summary is one line covering every image judged, and a call notes the lines of any image it did not judge. The CLI is --pool-image {tx,rx}, which may be given twice. A repeated set is refused. --pcap is required for tx and refused without tx. Both the qemu and board modes use one locator pattern, NODE_LOCATOR. The header now has the lab's commands for the RX image and for the image built with both pools, what HW.35 rests on, and a description of the selftest. The selftest gains fixtures for the RX image and for both pools in one console, RX_FAULTS (22 faults), POOL_CALLS (tx, rx, both), and new checks: values and sentences, a section-aware regex check per image, clause drops, JUDGES 0 and 7 weakened for HW.31, three arithmetic mutants, the table gate's reading, and RX and combined CLI cases plus six new refusals.",
+        "deploy/zephyr-admin-node/HARDWARE_VERDICT.md: the TX command is now --pool-image tx. The RX section says the program prints its five steps from files, including a combined call. HW.31's prose now says the output is held to the console capture, as HW.26's does (commit 26035406). In a second commit (90f229d2): the HW.35 prose and the TX ledger-entry parenthetical no longer claim that no datagram needs fragmentation at the 1500-byte batch."
+      ],
+      "publishable_verification_bullets": [
+        "Ran on the worktree after each commit:",
+        "admin_node_verdict.py --selftest: rc 0.",
+        "zephyr_board_table_gate.py: rc 0, 7 rows (0 DECLARED, 4 BUILT, 2 QEMU, 1 HARDWARE).",
+        "zephyr_board_table_gate.py --selftest: rc 0.",
+        "python_floor_lint.py: rc 0.",
+        "gate_provenance_lint.py: rc 0.",
+        "round_fed_gate_reach.py --selftest and plain: rc 0 both.",
+        "prose_named_identifier_gate.py --selftest and --check: rc 0 both.",
+        "Red-first, by hand: with RX_SLOT_ALIGN forced to 16, the selftest failed on rx_pool_misaligned (rc 1). With RX_RING_SLOTS forced to 9, it failed on rx_ring_9 (rc 1).",
+        "Inside the selftest, every RX clause dropped in turn turned its own fault green. Every fault reds exactly its steps in each of the three calls: tx, rx, and both from one console.",
+        "Not run: any hardware (none in this task); A4 (no crates test touched); the hook's gate array; the C0 family; the count-guard oracle; hosted CI.",
+        "The firmware facts in the finding were read from source, not observed on a board. They are BATCH_SIZE 1500, netif mtu 1500, recv_thunk copying non-lent-piece datagrams, the RX_HELD_MAX 8 shim cap, a session socket queue of 16, and lwIP IP_REASS_MAX_PBUFS 10 with IP_REASS_MAXAGE 15. The upstream batch minimum was read at the pinned checkout found by upstream_root(), and confirmed."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-14-platform",
+        "watching-zenoh/local-ci-gates"
+      ],
+      "publishable_carry_forward_bullets": [
+        "The fragmentation finding is settled. The coordinator chose the root fix, and BATCH_SIZE is now 1472 (commit 76849c51; ledger set 2). What remains open is the unmeasured burst and reassembly limit of HW.35, which carry2.txt describes, and a lab run of board --pool-image rx on the T2G kit. The board table has no row for an image built with both pools. Add one only if a lab will record it; the program already judges both sets of steps in one call (--pool-image tx --pool-image rx)."
+      ]
+    },
     "Round 33": {
       "decision_summary": "§3 scouting + locator codec triad lands: sources/codecs/{locator,scout,hello}.scxml. Introduces 7 new B5 primitives across 3 files (string type, multi-bit flag pack, length-ref dotted-path, length-arith +1, present-if local, parent-flag carrier, import cross-codec, repeat-element); all 6 backends emit clean at vendor pin 11f1032d.",
       "changes_bullets": [
