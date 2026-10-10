@@ -358,6 +358,8 @@ pub extern "C" fn wz_dissect_abi_version() -> c_int {
     // 30, for `wz_dissect_transport_build`: a transport message built from
     // fields the caller sets, in the framing the link wants, with the report of
     // where each field sits.
+    // 31, for `wz_dissect_e2e_open_body`: a protected frame opened with its
+    // body read by the types of a `.proto` schema.
     WZ_DISSECT_ABI_REVISION
 }
 
@@ -375,7 +377,7 @@ pub extern "C" fn wz_dissect_abi_version() -> c_int {
 /// It lives AFTER the function rather than above it on purpose: an item placed
 /// between a doc comment and the item it documents takes that doc, which is
 /// the doc-ownership defect the C1bz budget records.
-pub const WZ_DISSECT_ABI_REVISION: c_int = 30;
+pub const WZ_DISSECT_ABI_REVISION: c_int = 31;
 
 /// R2108 (open-debt item 525) — THE RECORD'S LAYOUT, reported by the artifact.
 ///
@@ -2079,6 +2081,89 @@ pub unsafe extern "C" fn wz_dissect_e2e_open(
     write_string(wz_capture::e2e_json::open_document(profile, frame), out)
 }
 
+/// A PROTECTED FRAME READ UNDER A PROFILE, WITH ITS BODY READ BY ITS SCHEMA: the
+/// [`wz_dissect_e2e_open`] document, and the body's fields as the `.proto`
+/// schema's types read them.
+///
+/// # Why this is a door
+///
+/// A consumer that opens a frame whose body is protobuf and holds the schema
+/// had two ways to read the body, and both were wrong. It could walk the bytes
+/// without the schema, which shows a `sint32` of `-3` as a varint of `5`, a
+/// `double` as hex and a packed run as a blob; or it could read the bytes with a
+/// protobuf reader of its own, a second reader of the wire format beside this
+/// library's one writer ([`wz_dissect_proto_encode`]), and the two disagree
+/// exactly where the format is unusual. This is the one typed reader, reading
+/// with the same schema reader as the writer, in the same call as the header.
+///
+/// It is a new symbol and not a key of [`wz_dissect_e2e_open`]'s input, because
+/// that door takes a profile and a frame and nothing else: the profile is one
+/// description per protocol, the schema is one per message, and a schema folded
+/// into the profile would make the profile a second thing.
+///
+/// # The body description
+///
+/// `body_json` names the schema the body is an instance of, with the keys the
+/// wrap door's `@body` member uses for it ([`wz_dissect_e2e_wrap`]):
+/// `{"files":[{"name":"pose.proto","text":"..."}],"root_file":0,
+/// "message":"pkg.Pose"}`. `root_file` may be left out (the first file), and
+/// `message` is the string a profile rule carries after `@` as its body schema.
+///
+/// # Result
+///
+/// [`WZ_DISSECT_OK`] with an `e2e_open` document (revision 2): every key the
+/// first door writes, `body_message`, and `body`, which is
+/// `{"decoded":true,"fields":[...]}` with the typed listing or
+/// `{"decoded":false,"offset":N,"field":"...","reason":"..."}` when the body is
+/// not a message of the schema. The body is read whatever the header says, over
+/// the frame less the header and never over what the length field claims. A
+/// description or a schema that is refused is a refusal of the call with
+/// `"stage":"body"`; see `wz_capture::e2e_json::open_body_document` for the
+/// order problems are found in.
+///
+/// # Errors
+///
+/// [`WZ_DISSECT_ERR_INVALID_ARG`] for a null `profile_json`, `body_json` or
+/// `out`, a null `frame` with a non-zero length, or text that is not UTF-8.
+///
+/// # Safety
+/// `profile_json` and `body_json` must be NUL-terminated C strings; `frame`
+/// must be readable for `frame_len` bytes; `out` must be a writable pointer to a
+/// `*mut c_char`.
+#[no_mangle]
+pub unsafe extern "C" fn wz_dissect_e2e_open_body(
+    profile_json: *const c_char,
+    body_json: *const c_char,
+    frame: *const u8,
+    frame_len: usize,
+    out: *mut *mut c_char,
+) -> c_int {
+    if profile_json.is_null()
+        || body_json.is_null()
+        || out.is_null()
+        || (frame.is_null() && frame_len != 0)
+    {
+        return WZ_DISSECT_ERR_INVALID_ARG;
+    }
+    // SAFETY: caller contract above.
+    let (Ok(profile), Ok(body)) = (
+        unsafe { std::ffi::CStr::from_ptr(profile_json) }.to_str(),
+        unsafe { std::ffi::CStr::from_ptr(body_json) }.to_str(),
+    ) else {
+        return WZ_DISSECT_ERR_INVALID_ARG;
+    };
+    let frame: &[u8] = if frame_len == 0 {
+        &[]
+    } else {
+        // SAFETY: caller contract above; non-null was checked just now.
+        unsafe { core::slice::from_raw_parts(frame, frame_len) }
+    };
+    write_string(
+        wz_capture::e2e_json::open_body_document(profile, body, frame),
+        out,
+    )
+}
+
 /// The framing an ABI integer names, or nothing if this build does not name it.
 ///
 /// Exhaustive over the library's own vocabulary and not over the integers: a
@@ -3743,9 +3828,15 @@ mod tests {
         // keeps the paragraph that DOCUMENTS the marker from being read as one:
         // `<document>` is not an identifier. Measured on this gate's first run,
         // where the syntax line came back as a fourth family — which is the
-        // gate doing its job to its own author.
-        let ident =
-            |s: &str| !s.is_empty() && s.bytes().all(|b| b.is_ascii_lowercase() || b == b'_');
+        // gate doing its job to its own author. A DIGIT is part of the rule
+        // (`[a-z0-9_]+`), and a document is named with one (`e2e_open`): until
+        // the first family on such a document, the closure here admitted letters
+        // and `_` only, and that document's marker read as no marker at all.
+        let ident = |s: &str| {
+            !s.is_empty()
+                && s.bytes()
+                    .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_')
+        };
         let mut marked: Vec<(String, String)> = HEADER
             .lines()
             .filter_map(|l| l.split("@values ").nth(1))
@@ -3883,9 +3974,13 @@ mod tests {
         // be lowercase identifiers, which is the `@values` marker's rule and
         // keeps the paragraph DOCUMENTING the marker from being read as one --
         // `<document>` is not an identifier. The verdict must be one of the two
-        // words, so a typo is an unmarked family rather than a third state.
-        let ident =
-            |s: &str| !s.is_empty() && s.bytes().all(|b| b.is_ascii_lowercase() || b == b'_');
+        // words, so a typo is an unmarked family rather than a third state. A
+        // digit is part of an identifier, as the `@values` gate says.
+        let ident = |s: &str| {
+            !s.is_empty()
+                && s.bytes()
+                    .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_')
+        };
         let mut marked: Vec<(String, String, String)> = HEADER
             .lines()
             .filter_map(|l| l.split("@carries ").nth(1))
@@ -7060,7 +7155,10 @@ mod tests {
         // the one `wz_dissect_declarations_from_proto` already has.
         // 30, for `wz_dissect_transport_build`: one symbol, a `char*` released
         // by `wz_dissect_string_free`, and no struct.
-        assert_eq!(wz_dissect_abi_version(), 30);
+        // 31, for `wz_dissect_e2e_open_body`: one symbol, a `char*` released by
+        // `wz_dissect_string_free`, and no struct; the schema crosses as JSON
+        // text the caller already holds.
+        assert_eq!(wz_dissect_abi_version(), 31);
     }
 
     /// R311y913 (unregistered item 435) — THE LINKED SURFACE CAN SAY WHAT IT
@@ -7909,8 +8007,12 @@ mod tests {
         use wz_capture::doc_revision as rev;
         const HEADER: &str = include_str!("../include/wz_dissect.h");
 
-        let ident =
-            |s: &str| !s.is_empty() && s.bytes().all(|b| b.is_ascii_lowercase() || b == b'_');
+        // A digit is part of an identifier, as the `@values` gate says.
+        let ident = |s: &str| {
+            !s.is_empty()
+                && s.bytes()
+                    .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_')
+        };
         let mut marked: Vec<(String, String)> = HEADER
             .lines()
             .filter_map(|l| l.split("@planes ").nth(1))
@@ -9375,16 +9477,186 @@ mod tests {
         assert!(out.is_null());
     }
 
+    /// Drive `wz_dissect_e2e_open_body` the way C does.
+    fn call_e2e_open_body(profile: &str, body: &str, frame: &[u8]) -> Result<String, c_int> {
+        let profile = CString::new(profile).expect("no interior NUL");
+        let body = CString::new(body).expect("no interior NUL");
+        let mut out: *mut c_char = core::ptr::null_mut();
+        let rc = unsafe {
+            wz_dissect_e2e_open_body(
+                profile.as_ptr(),
+                body.as_ptr(),
+                if frame.is_empty() {
+                    core::ptr::null()
+                } else {
+                    frame.as_ptr()
+                },
+                frame.len(),
+                &mut out,
+            )
+        };
+        take_document(rc, out)
+    }
+
+    /// The open door's body description over a schema text of the caller's.
+    fn e2e_body_description(schema_text: &str, message: &str) -> String {
+        let mut schema = String::new();
+        wz_session_core::json::escape_into(schema_text, &mut schema);
+        format!(
+            "{{\"files\": [{{\"name\": \"pose.proto\", \"text\": {schema}}}], \
+             \"message\": \"{message}\"}}"
+        )
+    }
+
     /// The same for `e2e_open`: the success, a profile that is not JSON, one
-    /// that is not a profile, and a frame shorter than the header.
+    /// that is not a profile, and a frame shorter than the header; and, from the
+    /// door that reads the body by its schema, a body read, a body with a field
+    /// the schema does not know, a body that is not a message of the schema,
+    /// and the description and the schema refused.
     fn e2e_open_documents() -> Vec<String> {
         let wrapped = call_e2e_wrap(E2E_PROFILE, E2E_VALUES, b"\x01\x02\x03").expect("answers");
+        let described = call_e2e_wrap(
+            E2E_PROFILE,
+            &e2e_described_values("demo.Pose", r#"{"x": -3, "label": "hi"}"#),
+            b"",
+        )
+        .expect("answers");
+        let pose = e2e_body_description(E2E_BODY_SCHEMA, "demo.Pose");
+        // The header of `E2E_PROFILE` is eight bytes; what follows is the body.
+        let mut unknown = vec![0u8; 8];
+        unknown.extend_from_slice(&[0x48, 0x07]);
+        let mut torn = vec![0u8; 8];
+        torn.extend_from_slice(&[0x12, 0x02, 0xc3, 0x28]);
         vec![
             call_e2e_open(E2E_PROFILE, &e2e_frame_of(&wrapped)).expect("answers"),
             call_e2e_open("{\"name\":", b"").expect("answers"),
             call_e2e_open("{}", b"").expect("answers"),
             call_e2e_open(E2E_PROFILE, b"\x01\x02").expect("answers"),
+            call_e2e_open_body(E2E_PROFILE, &pose, &e2e_frame_of(&described)).expect("answers"),
+            call_e2e_open_body(E2E_PROFILE, &pose, &unknown).expect("answers"),
+            call_e2e_open_body(E2E_PROFILE, &pose, &torn).expect("answers"),
+            call_e2e_open_body(E2E_PROFILE, "{\"files\":", &unknown).expect("answers"),
+            call_e2e_open_body(E2E_PROFILE, "{\"values\": {}}", &unknown).expect("answers"),
+            call_e2e_open_body(
+                E2E_PROFILE,
+                &e2e_body_description("message M { int32 a = 1 }", "M"),
+                &unknown,
+            )
+            .expect("answers"),
+            call_e2e_open_body(
+                E2E_PROFILE,
+                &e2e_body_description(E2E_BODY_SCHEMA, "demo.Nope"),
+                &unknown,
+            )
+            .expect("answers"),
         ]
+    }
+
+    /// A BODY BUILT BY THE WRITER'S DOOR IS READ BACK BY THE OPEN DOOR AS THE
+    /// VALUES IT WAS BUILT FROM, through the ABI.
+    ///
+    /// `wz_dissect_proto_encode` writes the bytes, `wz_dissect_e2e_wrap` puts the
+    /// header around them, and `wz_dissect_e2e_open_body` reads the header and
+    /// the body in one call: the `sint32` reads as `-3` and not as the varint
+    /// `5` the schema-less walk shows, at the frame offset the header ends at.
+    #[test]
+    fn a_body_the_writer_built_is_read_back_by_its_schema_through_the_abi() {
+        let values = r#"{"x": -3, "label": "hi"}"#;
+        let encoded = call_proto_encode(
+            "demo.Pose",
+            &[("pose.proto", E2E_BODY_SCHEMA.as_bytes())],
+            0,
+            values,
+        )
+        .expect("answers");
+        let hex = json_string(&encoded, "payload");
+        let bytes: Vec<u8> = (0..hex.len() / 2)
+            .map(|i| u8::from_str_radix(&hex[2 * i..2 * i + 2], 16).expect("hex"))
+            .collect();
+        let wrapped = call_e2e_wrap(E2E_PROFILE, E2E_VALUES, &bytes).expect("answers");
+        let frame = e2e_frame_of(&wrapped);
+
+        let pose = e2e_body_description(E2E_BODY_SCHEMA, "demo.Pose");
+        let read = call_e2e_open_body(E2E_PROFILE, &pose, &frame).expect("answers");
+        assert!(read.contains("\"crc_ok\":true"), "{read}");
+        assert!(read.contains("\"body_message\":\"demo.Pose\""), "{read}");
+        assert!(
+            read.ends_with(
+                ",\"body\":{\"decoded\":true,\"fields\":[\
+                 {\"number\":1,\"name\":\"x\",\"type\":\"sint32\",\"offset\":8,\"bytes\":2,\"value\":-3},\
+                 {\"number\":2,\"name\":\"label\",\"type\":\"string\",\"offset\":10,\"bytes\":4,\"value\":\"hi\"}]}}"
+            ),
+            "{read}"
+        );
+        // The first door's document is the same but for the body.
+        let plain = call_e2e_open(E2E_PROFILE, &frame).expect("answers");
+        let (head, _) = read
+            .replacen(",\"body_message\":\"demo.Pose\"", "", 1)
+            .split_once(",\"body\":")
+            .map(|(h, b)| (format!("{h}}}"), b.to_string()))
+            .expect("a body");
+        assert_eq!(head, plain);
+    }
+
+    /// EVERY CALLER BUG OF THE BODY DOOR IS `INVALID_ARG` AND HANDS BACK NO
+    /// STRING, and a refused description is a verdict, not an error.
+    #[test]
+    fn e2e_open_body_caller_bugs_are_invalid_arg() {
+        let profile = CString::new(E2E_PROFILE).expect("no NUL");
+        let body =
+            CString::new(e2e_body_description(E2E_BODY_SCHEMA, "demo.Pose")).expect("no NUL");
+        let bad_utf8 = CString::new(vec![b'{', 0xff]).expect("no NUL");
+        let null = core::ptr::null::<c_char>();
+        let frame = [0u8; 12];
+        let open = |profile: *const c_char,
+                    body: *const c_char,
+                    frame: *const u8,
+                    len: usize,
+                    with_out: bool| {
+            let mut out: *mut c_char = core::ptr::null_mut();
+            let rc = unsafe {
+                wz_dissect_e2e_open_body(
+                    profile,
+                    body,
+                    frame,
+                    len,
+                    if with_out {
+                        &mut out
+                    } else {
+                        core::ptr::null_mut()
+                    },
+                )
+            };
+            assert!(out.is_null(), "an error must not hand back a string");
+            rc
+        };
+        let (p, b, f) = (profile.as_ptr(), body.as_ptr(), frame.as_ptr());
+        for (what, rc) in [
+            ("null profile", open(null, b, f, 12, true)),
+            ("null body", open(p, null, f, 12, true)),
+            (
+                "null frame with a length",
+                open(p, b, core::ptr::null(), 12, true),
+            ),
+            ("null out", open(p, b, f, 12, false)),
+            ("profile not UTF-8", open(bad_utf8.as_ptr(), b, f, 12, true)),
+            ("body not UTF-8", open(p, bad_utf8.as_ptr(), f, 12, true)),
+        ] {
+            assert_eq!(rc, WZ_DISSECT_ERR_INVALID_ARG, "{what}");
+        }
+        // The control: the same arguments, well formed, are a verdict.
+        let doc = call_e2e_open_body(
+            E2E_PROFILE,
+            &e2e_body_description(E2E_BODY_SCHEMA, "demo.Pose"),
+            &frame,
+        )
+        .expect("answers");
+        assert!(doc.contains("\"ok\":true"), "{doc}");
+        let doc = call_e2e_open_body(E2E_PROFILE, "[]", b"").expect("a refusal is a verdict");
+        assert!(
+            doc.contains("\"ok\":false,\"stage\":\"body\",\"body_path\":\"\""),
+            "{doc}"
+        );
     }
 
     /// A FRAME WRAPPED THROUGH THE ABI OPENS BACK THROUGH IT, with every step

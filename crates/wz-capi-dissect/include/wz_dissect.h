@@ -853,7 +853,10 @@
  * documents take the rule from their first revision: a field of seven or eight
  * bytes can pass the line and one of six or fewer cannot, and the width is the
  * profile's, so a consumer knows from its own profile which cells to ask
- * about); to the `crc_computed`, `length_field`, `length_expected`, `counter`
+ * about); to the integer `value` of a field in the `body` listing of an
+ * `e2e_open` document (a key that exists from e2e_open 2 and takes the rule from
+ * its first appearance: an int64, a uint64 or a fixed64 passes the line, and a
+ * negative value is a string past -(2^53 - 1)); to the `crc_computed`, `length_field`, `length_expected`, `counter`
  * and `silence_ms` of an `e2e` block and the `value` of each entry of its
  * `slot.identity` (keys that exist from field document 34 and take the rule
  * from their first appearance: the block's `header` fields are the cells the
@@ -1521,7 +1524,7 @@ extern "C" {
  * calls the function, and refuses when the two disagree.
  *
  * @unknown ABI not-an-enumeration */
-#define WZ_DISSECT_ABI_REVISION 30
+#define WZ_DISSECT_ABI_REVISION 31
 
 /* Symbol/memory-contract revision. Not a JSON-shape revision. This is the
  * revision the LOADED library reports; the block above says why it exists
@@ -2027,9 +2030,12 @@ int wz_dissect_pcap_fields(const unsigned char *bytes, size_t len,
  *                                under it (the `e2e` block described above)
  *     demo/pose=demo-a@pkg.Pose  the same, naming the BODY SCHEMA the bytes
  *                                after the header are an instance of. It is
- *                                carried to the row as `body_schema` and
- *                                nothing reads it yet; the `message` of
- *                                wz_dissect_e2e_wrap's `@body` member is the
+ *                                carried to the row as `body_schema`, and the
+ *                                capture's walk does not read it yet (a
+ *                                declaration names the schema and does not
+ *                                carry its files); the `message` of
+ *                                wz_dissect_e2e_wrap's `@body` member and of
+ *                                wz_dissect_e2e_open_body's description is the
  *                                same name
  *
  * A profile rule competes with the other rules like any rule: the first one
@@ -3043,7 +3049,7 @@ int wz_dissect_proto_encode(const char *root_message,
  *
  * wz_dissect_e2e_open -- what a received frame says.
  *
- *     {"document":{"name":"e2e_open","revision":1},"ok":true,"profile":"demo",
+ *     {"document":{"name":"e2e_open","revision":2},"ok":true,"profile":"demo",
  *      "payload_offset":12,"payload_bytes":4,
  *      "fields":[ ...as above... ],
  *      "crc_ok":true,"crc_computed":1990398553,"crc_fed":[ ...as above... ],
@@ -3066,7 +3072,8 @@ int wz_dissect_proto_encode(const char *root_message,
  * stream, and which streams a deployment has is yours to decide. The counter is
  * in `fields`, with `crc_ok` beside it, which is what a judge reads. It does
  * not serialize the body, and it does not know which profile a given topic
- * uses: you pass the profile.
+ * uses: you pass the profile. To have the BODY read by its .proto schema in the
+ * same call, use wz_dissect_e2e_open_body, below.
  *
  * THE FAILURE MODES are the ones every document door here keeps. A text this
  * library was handed and refused is a successful DIAGNOSIS: both doors return
@@ -3093,6 +3100,128 @@ int wz_dissect_e2e_wrap(const char *profile_json, const char *values_json,
                         char **out);
 int wz_dissect_e2e_open(const char *profile_json, const unsigned char *frame,
                         size_t frame_len, char **out);
+
+/* (ABI 31) -- A PROTECTED FRAME OPENED WITH ITS BODY READ BY ITS SCHEMA: the
+ * wz_dissect_e2e_open document, and the body's fields as the types of a .proto
+ * schema read them, in one call.
+ *
+ * WHY IT IS HERE AND NOT IN YOUR PROGRAM. A body behind a protection header is
+ * often protobuf, and the wire format carries a field's number and one of four
+ * wire types and nothing else. Read without the schema, a sint32 of -3 is a
+ * varint of 5, a double is eight bytes of hex, a packed run of integers is a
+ * blob, and a string and a nested message are told apart by guessing. A
+ * program that holds the schema and reads the bytes itself holds a second
+ * READER of the wire format beside this library's one writer
+ * (wz_dissect_proto_encode), and the two disagree exactly where the format is
+ * unusual. This is the one typed reader: the schema is read by the reader the
+ * writer uses, from the same file list, under the same rules.
+ *
+ * It is its own symbol and not a key of wz_dissect_e2e_open's input: that door
+ * takes a profile and a frame, the profile is one description per PROTOCOL,
+ * and the schema is one per MESSAGE.
+ *
+ * THE BODY DESCRIPTION. `body_json` names the schema the body is an instance
+ * of, with the keys the wrap door's `@body` member uses for it, and only those:
+ *
+ *     {"files":[{"name":"pose.proto","text":"syntax = \"proto3\"; ..."}],
+ *      "root_file":0,"message":"demo.Pose"}
+ *
+ * `files` is the schema (a name and a text per file, at least one; an import
+ * is resolved by name against the list), `root_file` the index of the file
+ * `message` is looked up from (absent: the first), and `message` the full
+ * name, package included -- the string a declaration rule carries after `@` as
+ * its body schema (demo/pose=demo-a@demo.Pose). The text nests at most 8
+ * levels, like a profile.
+ *
+ * THE VERDICT is an e2e_open document (revision 2): every key
+ * wz_dissect_e2e_open writes, `body_message` after `profile`, and `body` last.
+ *
+ *     {"document":{"name":"e2e_open","revision":2},"ok":true,"profile":"demo",
+ *      "body_message":"demo.Pose","payload_offset":12,"payload_bytes":6,
+ *      "fields":[ ... ],"crc_ok":true, ... ,"length_matches_frame":true,
+ *      "body":{"decoded":true,"fields":[
+ *        {"number":1,"name":"x","type":"sint32","offset":12,"bytes":2,"value":-3},
+ *        {"number":2,"name":"label","type":"string","offset":14,"bytes":4,
+ *         "value":"hi"}]}}
+ *
+ * THE LISTING. One entry per field AS IT OCCURS ON THE WIRE, in wire order:
+ * `number`, `name` and `type` as the schema writes them (a scalar keyword, a
+ * message's or an enum's full name, or map<K, V>), `offset` and `bytes` placing
+ * the field in the FRAME (its tag and value), and the value.
+ *
+ *   - A message has `fields`, its own listing, in place of `value`. A map field
+ *     is listed as what it is on the wire: one entry per map entry, whose
+ *     `fields` are `key` (number 1) and `value` (number 2), the names protoc
+ *     gives them and the paths wz_dissect_declarations_from_proto declares.
+ *   - A packed run is one entry PER ELEMENT, each with the place of its own
+ *     bytes inside the run. Packed and unpacked are both read for every
+ *     repeated numeric, bool and enum field, whatever the schema says, as every
+ *     protobuf parser reads them.
+ *   - A field written twice is two entries, and so are two members of one
+ *     oneof. A parser keeps the last (and merges a message); this listing shows
+ *     what the sender wrote and resolves nothing.
+ *   - A field the schema does not know -- a number no field has, or a known
+ *     number under a wire type its type is never written with, which protobuf
+ *     parsers treat as unknown too -- has `wire_type` (`varint`, `i64`, `len`
+ *     or `i32`) and NO `name` and NO `type`; its `value` is the raw value of
+ *     the wire type, an unsigned integer, or the bytes for `len`.
+ *   - A value is written as protobuf's JSON mapping writes it, which is the
+ *     form wz_dissect_proto_encode reads, so a value can be handed back to the
+ *     writer as it stands: an integer is a number, and a string of digits past
+ *     2^53 - 1 (the integer rule above); float and double are a number, or
+ *     "NaN", "Infinity" or "-Infinity", and -0.0 keeps its sign; bool is true or
+ *     false; string is a string; bytes is standard base64 with padding; an enum
+ *     value is its name, or its number when the enum has none for it.
+ *
+ * A BODY THAT IS NOT A MESSAGE OF THE SCHEMA is a fact about the frame, not a
+ * refusal of the call:
+ *
+ *     "body":{"decoded":false,"offset":16,"field":"demo.Pose.label",
+ *             "reason":"a `string` field holds bytes that are not UTF-8"}
+ *
+ * `offset` is the byte of the FRAME the reader stopped at, and `field` the full
+ * name of the field it was reading, present only when the problem is inside a
+ * field the schema knows. The reasons: the bytes end inside a tag, a value or a
+ * length; a varint longer than ten bytes or past 64 bits; field number 0 or one
+ * above 2^29 - 1; the wire types 3 and 4 (group markers, which the writer never
+ * writes and this reader does not walk) and 6 and 7 (none); a packed run that
+ * does not end on an element; a string that is not UTF-8; messages nested more
+ * than 64 deep. Nothing decoded before the problem is returned with it.
+ *
+ * THE HEADER DOES NOT GATE THE BODY. The body is the frame less the header,
+ * never what the length field claims, and it is read whatever the header says:
+ * a frame whose CRC fails or whose length field disagrees with the frame has
+ * its body read like any other, with `crc_ok` and `length_matches_frame`
+ * beside it. The reader looking at a failed CRC is the one who most wants to
+ * see what the bytes say.
+ *
+ * REFUSALS, the first problem found, in this order: the profile (as
+ * wz_dissect_e2e_open refuses it); the body description, at its place in YOUR
+ * text, `body_path` (a JSON pointer) or `body_offset` (a byte, when the text is
+ * not JSON); the schema, with the writer's own diagnostic keys -- `file`, `line`
+ * and `column` for a place in a file, `file` alone for the file as a whole (the
+ * message is not defined), none for an argument (a root_file outside the list);
+ * then a frame shorter than the header. A refusal about the description or the
+ * schema carries `"stage":"body"`. Every key that does not apply is ABSENT and
+ * never null.
+ *
+ * WHAT THIS DOES NOT DO. It judges no sequence of frames (see
+ * wz_dissect_e2e_open), and it does not choose a schema for a topic: you pass
+ * it, as you pass the profile. The schema is read on every call.
+ *
+ * Returns WZ_DISSECT_ERR_INVALID_ARG, and no string, for a null
+ * `profile_json`, `body_json` or `out`, a null `frame` with a non-zero length,
+ * or text that is not UTF-8. The memory rule does not move: the verdict is a
+ * `char*` released by wz_dissect_string_free.
+ *
+ * `wire_type` is a PASSENGER: a field the schema does not know carries the same
+ * keys whatever its wire type.
+ *
+ * @values e2e_open wire_type
+ * @carries e2e_open wire_type passenger */
+int wz_dissect_e2e_open_body(const char *profile_json, const char *body_json,
+                             const unsigned char *frame, size_t frame_len,
+                             char **out);
 
 /* (ABI 30) -- A TRANSPORT MESSAGE BUILT FROM THE FIELDS YOU SET, in the framing
  * the link wants, with a report of where each field sits in the bytes.

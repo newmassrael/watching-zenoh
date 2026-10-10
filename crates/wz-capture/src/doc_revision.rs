@@ -2316,6 +2316,37 @@ pub const DOCUMENT_HISTORY: &[DocumentShape] = &[
         planes: &[],
         carries: &[],
     },
+    // THE BODY MAY BE READ BY ITS SCHEMA: a second door
+    // (`wz_dissect_e2e_open_body`) takes a description of the schema the body is
+    // an instance of, and the document gains `body_message` and a `body` block
+    // with the typed listing of the body's fields, or why the body is not a
+    // message of that schema. See [`E2E_OPEN_R2_KEYS`].
+    //
+    // Keys arrive and none retires; a frame opened by the first door reads as it
+    // did but for the revision number. The refusals of the description name the
+    // place by `body_path` or `body_offset`, those of the schema by the writer's
+    // own keys (`file`, `line`, `column`), both with `stage`. One family arrives,
+    // `wire_type`, the four wire types a field the schema does not know arrives
+    // under. One integer cell arrives under the rule: the integer `value` of a
+    // field of the body (a `uint64` or an `int64` passes the line).
+    DocumentShape {
+        document: E2E_OPEN,
+        revision: 2,
+        keys: E2E_OPEN_R2_KEYS,
+        retiring: &[],
+        families: &[ValueFamily {
+            key: "wire_type",
+            values: &["i32", "i64", "len", "varint"],
+        }],
+        planes: &[],
+        // A PASSENGER: a field the schema does not know carries the same keys
+        // whichever wire type it arrived under, its `value` being that wire
+        // type's raw value.
+        carries: &[KeyCarries {
+            key: "wire_type",
+            shape: CarriesShape::Passenger,
+        }],
+    },
     // The protobuf bytes a set of field values comes to under a `.proto`
     // schema, or why they could not be built.
     //
@@ -9293,6 +9324,58 @@ pub const E2E_OPEN_R1_KEYS: &[&str] = &[
     "value",
 ];
 
+/// The `e2e_open` document's key set at revision 2: revision 1's, and the keys
+/// a body read by its schema adds.
+///
+/// `body_message` and `body` are on the success branch of the door that reads
+/// the body; `body` holds `decoded` and either `fields` (each field a `number`,
+/// `name`, `type`, `offset`, `bytes` and a `value` or `fields`; a field the
+/// schema does not know has `wire_type` in place of `name` and `type`) or
+/// `offset`, `field` and `reason`. `stage` is on the refusals that are about
+/// the body: of its description (`body_path`, `body_offset`) or of its schema
+/// (`file`, `line`, `column`). A key that does not apply is ABSENT and never
+/// `null`.
+pub const E2E_OPEN_R2_KEYS: &[&str] = &[
+    "body",
+    "body_message",
+    "body_offset",
+    "body_path",
+    "bytes",
+    "column",
+    "crc_computed",
+    "crc_fed",
+    "crc_ok",
+    "decoded",
+    "document",
+    "field",
+    "fields",
+    "file",
+    "hex",
+    "item",
+    "length_expected",
+    "length_field",
+    "length_matches_frame",
+    "line",
+    "message",
+    "name",
+    "number",
+    "offset",
+    "ok",
+    "parts",
+    "payload_bytes",
+    "payload_offset",
+    "profile",
+    "profile_offset",
+    "profile_path",
+    "raw",
+    "reason",
+    "revision",
+    "stage",
+    "type",
+    "value",
+    "wire_type",
+];
+
 /// The `transport_build` document's key set at revision 1, over BOTH branches:
 /// the built unit with its report, and the refusal with whichever position key
 /// applies.
@@ -13594,7 +13677,9 @@ mod tests {
             // To 2 when the body could be described: `body_message`, `stage`
             // and the writer's position keys.
             (E2E_WRAP, 2),
-            (E2E_OPEN, 1),
+            // To 2 when the body could be read by its schema: `body_message`,
+            // `body` and its listing, `stage` and the position keys.
+            (E2E_OPEN, 2),
             // The bytes a set of field values comes to under a `.proto` schema.
             (PROTO_ENCODE, 1),
             // A transport message built from a description, with the report

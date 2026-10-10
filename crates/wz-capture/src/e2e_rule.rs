@@ -22,12 +22,15 @@
 //! under a second name that nothing else knows it by. The other lines are
 //! RULES: the first whose pattern covers a key wins, exactly as for any other
 //! format. `@pkg.Pose` is the BODY SCHEMA the rule names: the message type the
-//! bytes after the header are an instance of. It is carried and reported, and
-//! nothing reads it yet; the door that turns a schema into field names is a
-//! later step, and the seam it will read is [`E2eFormat::schema`]. The sending
-//! half uses the same name: the `message` of the wrap door's `@body` member
-//! ([`crate::e2e_body`]) is this string, so a caller that registered the rule
-//! passes its schema to the one door and to the other unchanged.
+//! bytes after the header are an instance of. In a capture it is carried and
+//! reported, and the capture's walk does not read it yet: a declaration carries
+//! the schema's NAME and not its files, and the seam a walk that read it would
+//! use is [`E2eFormat::schema`]. The two stateless doors use the same name: the
+//! `message` of the wrap door's `@body` member ([`crate::e2e_body`]) and of the
+//! open door's body description
+//! ([`crate::e2e_json::open_body_document`], which reads the body with
+//! [`crate::proto_decode`]) is this string, so a caller that registered the
+//! rule passes its schema to each door unchanged.
 //!
 //! # Why a format and not a second kind of rule
 //!

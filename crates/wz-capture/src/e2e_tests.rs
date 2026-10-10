@@ -1359,7 +1359,7 @@ const WRAP_E: &str = concat!(
 );
 
 const OPEN_E: &str = concat!(
-    r#"{"document":{"name":"e2e_open","revision":1},"ok":true,"profile":"demo-e","#,
+    r#"{"document":{"name":"e2e_open","revision":2},"ok":true,"profile":"demo-e","#,
     r#""payload_offset":8,"payload_bytes":3,"#,
     r#""fields":[{"name":"hdr","offset":0,"bytes":1,"raw":1,"value":1},"#,
     r#"{"name":"crc","offset":1,"bytes":3,"raw":63501,"value":63501},"#,
@@ -1466,7 +1466,7 @@ fn a_profile_refusal_names_the_place_and_the_input_by_the_key_it_carries() {
     let doc = open_document(&bad, &[0u8; 16]);
     assert!(
         doc.starts_with(
-            r#"{"document":{"name":"e2e_open","revision":1},"ok":false,"profile_path":"/crc/field""#
+            r#"{"document":{"name":"e2e_open","revision":2},"ok":false,"profile_path":"/crc/field""#
         ),
         "{doc}"
     );
@@ -1511,15 +1511,17 @@ fn no_document_ever_writes_a_null_and_every_one_opens_with_its_own_revision() {
         assert!(!doc.contains("null"), "{doc}");
         assert!(
             doc.starts_with(r#"{"document":{"name":"e2e_wrap","revision":2}"#)
-                || doc.starts_with(r#"{"document":{"name":"e2e_open","revision":1}"#),
+                || doc.starts_with(r#"{"document":{"name":"e2e_open","revision":2}"#),
             "{doc}"
         );
     }
 }
 
-// The documents of a frame built from bytes use the keys of revision 1 and no
-// more: the keys revision 2 adds belong to a described body, and the test that
-// reaches every one of them is in `e2e_body_tests`.
+// The documents of a frame built from bytes, and of one opened without a body
+// schema, use the keys of revision 1 and no more: the keys revision 2 adds
+// belong to a described body (`e2e_wrap`) and to a body read by its schema
+// (`e2e_open`), and the tests that reach every one of them are in
+// `e2e_body_tests` and `proto_decode_tests`.
 #[test]
 fn the_documents_use_exactly_the_keys_the_registry_pins() {
     use crate::doc_revision::{key_set, E2E_OPEN, E2E_OPEN_R1_KEYS, E2E_WRAP, E2E_WRAP_R1_KEYS};

@@ -479,6 +479,17 @@ ONLY_CAPI = {
         "linking consumer reads one frame it holds.",
         (),
     ),
+    "a protected frame opened with its body read by a .proto schema": (
+        "wz_dissect_e2e_open_body",
+        "DELIBERATE for now, on the argument the two rows above make. The door "
+        "exists because a consumer that LINKS this library and holds the schema "
+        "of a protected body must not read the protobuf wire format itself: a "
+        "second reader beside the one writer is a second opinion about what a "
+        "sint32 or a packed run is. The command line has no flag that takes a "
+        ".proto file, and the reader behind the door (`wz_capture::proto_decode`) "
+        "is ungated, so a flag would add no code that reads the format.",
+        (),
+    ),
     "the ABI revision": (
         "wz_dissect_abi_version",
         "Not an analysis capability -- it is how a consumer refuses a library whose "

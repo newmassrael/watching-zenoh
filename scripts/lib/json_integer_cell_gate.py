@@ -204,7 +204,9 @@ CELLS: dict[tuple[str, str], tuple[Cell, ...]] = {
         Cell("e2e_wrap", "crc_computed", _E2E_DOCUMENT_HEADER, "`crc_computed`"),
         Cell("e2e_wrap", "length_field", _E2E_DOCUMENT_HEADER, "`length_field`"),
     ),
-    ("crates/wz-capture/src/e2e_json.rs", "open_document"): (
+    # Both open doors write these through the one function that renders an
+    # opened frame.
+    ("crates/wz-capture/src/e2e_json.rs", "opened_head"): (
         Cell("e2e_open", "crc_computed", _E2E_DOCUMENT_HEADER, "`crc_computed`"),
         Cell("e2e_open", "length_field", _E2E_DOCUMENT_HEADER, "`length_field`"),
         Cell(
@@ -212,6 +214,18 @@ CELLS: dict[tuple[str, str], tuple[Cell, ...]] = {
             "length_expected",
             "the `length_expected` of an `e2e_open` document",
             "`length_expected`",
+        ),
+    ),
+    # ONE call writes every integer a field of a typed body listing holds (a
+    # signed one mirrors the door at the same line on the negative side), so the
+    # value is declared as the one cell the call is.
+    ("crates/wz-capture/src/proto_decode_json.rs", "push_integer"): (
+        Cell(
+            "e2e_open",
+            "a body field's integer value",
+            "the integer `value` of a field in the `body` listing of an `e2e_open` document",
+            "the integer `value` of a field of the body",
+            born=2,
         ),
     ),
     # ONE call writes every integer cell of a layout row, through the helper

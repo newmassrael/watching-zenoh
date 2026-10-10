@@ -294,9 +294,13 @@ pub mod payload_decode;
 mod payload_described;
 pub mod pcap;
 pub mod pcapng;
-// No outer docs on these two, for the reason the `e2e_*` modules give: an outer
+// No outer docs on these, for the reason the `e2e_*` modules give: an outer
 // doc is merged with the module's own `//!` docs and their links would then be
 // resolved from this scope instead of from the module.
+pub mod proto_decode;
+pub mod proto_decode_json;
+#[cfg(test)]
+mod proto_decode_tests;
 pub mod proto_encode;
 pub mod proto_encode_json;
 #[cfg(test)]

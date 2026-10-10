@@ -50,7 +50,7 @@ import subprocess
 import sys
 
 # The pinned pair. Edit BOTH halves deliberately -- see the module doc.
-EXPECTED_VERSION = 30
+EXPECTED_VERSION = 31
 
 # R2108 (open-debt item 525) -- THE RECORD'S LAYOUT, pinned HERE and read from
 # the artifact through `wz_dissect_record_layout`.
@@ -272,6 +272,14 @@ EXPECTED_SYMBOLS = {
     # holds, nothing is retained between calls, and no callback runs.
     "wz_dissect_e2e_wrap",
     "wz_dissect_e2e_open",
+    # (ABI 31) -- a protected frame OPENED with its body READ by the types of a
+    # `.proto` schema, so a consumer that holds the schema never holds a second
+    # READER of the wire format beside the one writer. The schema crosses as
+    # JSON text (the keys the wrap door's `@body` member names it by), so no
+    # struct. The memory rule does not move: the verdict is a `char*` released by
+    # `wz_dissect_string_free`, the frame crosses as bytes the CALLER holds,
+    # nothing is retained between calls, and no callback runs.
+    "wz_dissect_e2e_open_body",
     # (ABI 28) -- ONE key expression, judged. A consumer asking about a single
     # pattern had to build a declaration line (`pattern=format`) to reach the
     # diagnostic door above, which reads a `:` in the pattern as a field-name

@@ -168,27 +168,27 @@ pub(crate) fn scan(text: &str) -> Scan {
     }
 }
 
-/// A body description read out of the tree.
-pub(crate) struct Description<'t> {
-    files: Vec<ProtoFile<'t>>,
-    root_file: usize,
-    message: &'t str,
-    values: &'t Json5Value,
+/// The keys a body's SCHEMA is given by, wherever it is given: the wrap door's
+/// `@body` member (beside `values`) and the open door's body description
+/// ([`crate::e2e_json::open_body_document`]), which is these keys alone.
+pub const SCHEMA_KEYS: [&str; 3] = ["files", "root_file", "message"];
+
+/// The schema a body is an instance of: the files, the root file and the
+/// message, as the `@body` member and the open door's body description both
+/// give it.
+pub(crate) struct SchemaRef<'t> {
+    pub(crate) files: Vec<ProtoFile<'t>>,
+    pub(crate) root_file: usize,
+    pub(crate) message: &'t str,
 }
 
-impl<'t> Description<'t> {
-    /// Read the `@body` member of `root`, the values text's tree.
-    pub(crate) fn read(root: &'t Json5Value) -> Result<Self, DocError> {
-        let body = required(object(root, "")?, BODY_KEY, "")?;
-        let members = object(body, BODY_PATH)?;
-        check_keys(
-            members,
-            &["files", "root_file", "message", "values"],
-            BODY_PATH,
-        )?;
-
-        let files_path = child(BODY_PATH, "files");
-        let listed = array(required(members, "files", BODY_PATH)?, &files_path)?;
+impl<'t> SchemaRef<'t> {
+    /// Read the schema keys of the object `members`, which stands at `path` in
+    /// the text the caller passed. The caller has checked which keys the object
+    /// may hold.
+    fn read(members: &'t [(String, Json5Value)], path: &str) -> Result<Self, DocError> {
+        let files_path = child(path, "files");
+        let listed = array(required(members, "files", path)?, &files_path)?;
         if listed.is_empty() {
             return Err(DocError::invalid(
                 files_path,
@@ -217,35 +217,62 @@ impl<'t> Description<'t> {
         let root_file = match optional(members, "root_file") {
             None => 0,
             Some(value) => {
-                let path = child(BODY_PATH, "root_file");
+                let path = child(path, "root_file");
                 let index = read_uint(value, &path)?;
                 usize::try_from(index).map_err(|_| {
                     DocError::invalid(path, alloc::format!("`{index}` does not fit an index"))
                 })?
             }
         };
-        let message = read_string(
-            required(members, "message", BODY_PATH)?,
-            &child(BODY_PATH, "message"),
-        )?;
-        let values = required(members, "values", BODY_PATH)?;
+        let message = read_string(required(members, "message", path)?, &child(path, "message"))?;
         Ok(Self {
             files,
             root_file,
             message,
-            values,
         })
+    }
+
+    /// Read the open door's body description: an object holding the schema
+    /// keys and nothing else, at the root of its own text.
+    pub(crate) fn read_description(root: &'t Json5Value) -> Result<Self, DocError> {
+        let members = object(root, "")?;
+        check_keys(members, &SCHEMA_KEYS, "")?;
+        Self::read(members, "")
+    }
+}
+
+/// A body description read out of the tree.
+pub(crate) struct Description<'t> {
+    schema: SchemaRef<'t>,
+    values: &'t Json5Value,
+}
+
+impl<'t> Description<'t> {
+    /// Read the `@body` member of `root`, the values text's tree.
+    pub(crate) fn read(root: &'t Json5Value) -> Result<Self, DocError> {
+        let body = required(object(root, "")?, BODY_KEY, "")?;
+        let members = object(body, BODY_PATH)?;
+        let [files, root_file, message] = SCHEMA_KEYS;
+        check_keys(members, &[files, root_file, message, "values"], BODY_PATH)?;
+        let schema = SchemaRef::read(members, BODY_PATH)?;
+        let values = required(members, "values", BODY_PATH)?;
+        Ok(Self { schema, values })
     }
 
     /// The full name of the message the body is an instance of.
     pub(crate) fn message(&self) -> &str {
-        self.message
+        self.schema.message
     }
 
     /// The body's wire bytes, built by the protobuf writer, or the writer's own
     /// refusal. Never a truncated body: there is no other result.
     pub(crate) fn encode(&self) -> Result<Vec<u8>, EncodeError> {
-        encode_tree(self.message, &self.files, self.root_file, self.values)
+        encode_tree(
+            self.schema.message,
+            &self.schema.files,
+            self.schema.root_file,
+            self.values,
+        )
     }
 }
 

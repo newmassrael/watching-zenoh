@@ -43,6 +43,13 @@
 //! field holds), `length_expected` (what the profile's rule gives for this
 //! frame) and `length_matches_frame`.
 //!
+//! From revision 2 the body may also be READ by its schema
+//! ([`open_body_document`]): the document then has `body_message` after
+//! `profile`, and `body` last, holding `decoded` and the typed listing of the
+//! body's fields ([`crate::proto_decode_json`]) or the place and the reason the
+//! body is not a message of that schema. A frame opened without a schema reads
+//! exactly as it did at revision 1 but for the revision number.
+//!
 //! # A refusal
 //!
 //! `{"document":{...},"ok":false,"profile_path":"/fields/0/bytes","reason":"...",
@@ -66,6 +73,10 @@
 //! it starts with `/@body/values`; no frame is built around a body that was
 //! not.
 //!
+//! The open door that reads the body carries `"stage":"body"` the same way, on
+//! a refusal of its body description (`body_path` or `body_offset`) or of the
+//! schema it names (the writer's `file`, `line` and `column`).
+//!
 //! # Integers
 //!
 //! A value that can reach 2^53 is a decimal string beyond it and a number
@@ -81,9 +92,11 @@ use wz_session_core::json::{escape_into, u64_into};
 use wz_session_core::json5::Json5Value;
 
 use crate::doc_revision::{envelope, E2E_OPEN, E2E_WRAP};
-use crate::e2e_body::{self, Description, Scan, BODY_KEY, BODY_VALUES_PATH};
+use crate::e2e_body::{self, Description, Scan, SchemaRef, BODY_KEY, BODY_VALUES_PATH};
 use crate::e2e_frame::{self, BuildError, FieldReport, OpenError, Values};
-use crate::e2e_profile::{Cover, DocError, Profile, PAYLOAD};
+use crate::e2e_profile::{read_json, Cover, DocError, Profile, PAYLOAD};
+use crate::proto_decode::LinkedSchema;
+use crate::proto_decode_json;
 use crate::proto_encode::EncodeError;
 use crate::proto_encode_json::push_refusal;
 
@@ -92,6 +105,8 @@ use crate::proto_encode_json::push_refusal;
 enum Source {
     Profile,
     Values,
+    /// The open door's body description.
+    Body,
 }
 
 impl Source {
@@ -99,6 +114,7 @@ impl Source {
         match self {
             Self::Profile => "profile",
             Self::Values => "values",
+            Self::Body => "body",
         }
     }
 }
@@ -342,26 +358,112 @@ pub fn open_document(profile_text: &str, frame: &[u8]) -> String {
             return refuse_plain(&head, &alloc::format!("{e}"))
         }
     };
+    let mut out = opened_head(&head, &profile, frame, &opened, None);
+    out.push('}');
+    out
+}
 
+/// The `e2e_open` document for reading `frame` under `profile_text`, with its
+/// BODY read by the schema `body_text` describes ([`crate::e2e_body`]'s schema
+/// keys: `files`, `root_file`, `message`).
+///
+/// The document is [`open_document`]'s, and adds `body_message`, the message
+/// the body was read as, and `body`: `{"decoded":true,"fields":[...]}` with the
+/// typed listing ([`crate::proto_decode_json`]), or `{"decoded":false,
+/// "offset":N,"field":"pkg.M.f","reason":"..."}` when the body is not a
+/// message of the schema (`field` only when the problem is inside a field the
+/// schema knows). Every offset is a place in the FRAME.
+///
+/// The body is read whatever the header says. Its extent is the frame less the
+/// header, never the length field, which is information here as it is in
+/// [`open_document`]: a frame whose CRC fails or whose length field disagrees
+/// with the frame still has its bytes read, and the reader holding a failed
+/// CRC is the one who most wants to see what the body says. A body that does
+/// not decode is a fact about the frame and not a refusal of the call.
+///
+/// The first problem refused is the one reported, in this order: the profile,
+/// the body description (`body_path` or `body_offset`, with `"stage":"body"`),
+/// the schema (the writer's `file`, `line` and `column`, with
+/// `"stage":"body"`), then a frame shorter than the header.
+pub fn open_body_document(profile_text: &str, body_text: &str, frame: &[u8]) -> String {
+    let head = envelope(E2E_OPEN);
+    let profile = match Profile::parse(profile_text) {
+        Ok(p) => p,
+        Err(e) => return refuse_text(&head, Source::Profile, &e),
+    };
+    let tree = match read_json(body_text) {
+        Ok(tree) => tree,
+        Err(e) => return refuse_text_at(&head, BODY_STAGE, Source::Body, &e),
+    };
+    let described = match SchemaRef::read_description(&tree) {
+        Ok(d) => d,
+        Err(e) => return refuse_text_at(&head, BODY_STAGE, Source::Body, &e),
+    };
+    let schema = match LinkedSchema::link(&described.files, described.root_file, described.message)
+    {
+        Ok(s) => s,
+        Err(d) => return refuse_writer(&head, &EncodeError::Schema(d)),
+    };
+    let opened = match e2e_frame::open(&profile, frame) {
+        Ok(o) => o,
+        Err(e @ OpenError::ShortFrame { .. }) => {
+            return refuse_plain(&head, &alloc::format!("{e}"))
+        }
+    };
+    let mut out = opened_head(&head, &profile, frame, &opened, Some(schema.message()));
+    out.push_str(",\"body\":");
+    let base = opened.payload_offset;
+    match schema.decode(&frame[base..]) {
+        Ok(fields) => {
+            out.push_str("{\"decoded\":true,\"fields\":");
+            proto_decode_json::push_fields(&fields, base, &mut out);
+        }
+        Err(e) => {
+            let _ = write!(out, "{{\"decoded\":false,\"offset\":{}", base + e.offset);
+            if let Some(field) = &e.field {
+                out.push_str(",\"field\":");
+                escape_into(field, &mut out);
+            }
+            out.push_str(",\"reason\":");
+            escape_into(&e.reason, &mut out);
+        }
+    }
+    out.push_str("}}");
+    out
+}
+
+/// An opened frame's document, without its closing brace: the facts both open
+/// doors report, and `body_message` when the body is read by a schema.
+fn opened_head(
+    head: &str,
+    profile: &Profile,
+    frame: &[u8],
+    opened: &e2e_frame::OpenedFrame,
+    body_message: Option<&str>,
+) -> String {
     let mut out = alloc::format!("{{{head},\"ok\":true,\"profile\":");
     escape_into(profile.name(), &mut out);
+    if let Some(message) = body_message {
+        out.push_str(",\"body_message\":");
+        escape_into(message, &mut out);
+    }
     let _ = write!(
         out,
         ",\"payload_offset\":{},\"payload_bytes\":{},",
         opened.payload_offset, opened.payload_bytes
     );
-    push_fields(&profile, &opened.fields, "fields", &mut out);
+    push_fields(profile, &opened.fields, "fields", &mut out);
     let _ = write!(out, ",\"crc_ok\":{},\"crc_computed\":", opened.crc_ok);
     u64_into(opened.crc_computed, &mut out);
     out.push(',');
-    push_fed(&profile, frame, opened.payload_bytes, &mut out);
+    push_fed(profile, frame, opened.payload_bytes, &mut out);
     out.push_str(",\"length_field\":");
     u64_into(opened.length_found, &mut out);
     out.push_str(",\"length_expected\":");
     u64_into(opened.length_expected, &mut out);
     let _ = write!(
         out,
-        ",\"length_matches_frame\":{}}}",
+        ",\"length_matches_frame\":{}",
         opened.length_matches_frame
     );
     out

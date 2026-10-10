@@ -6745,7 +6745,7 @@ mod tests {
         // against a rename and against each other and against NOTHING a
         // consumer could read.
         let mut failures: Vec<String> = Vec::new();
-        let live: [(&str, &str, Vec<&'static str>); 35] = [
+        let live: [(&str, &str, Vec<&'static str>); 36] = [
             // The session's per-frame verdicts, each held to the
             // walk its emitter's exhaustive match is bound to.
             (rev::FIELDS, "verdict", SnVerdictWord::names()),
@@ -6927,6 +6927,14 @@ mod tests {
                 rev::SELECTION,
                 "direction",
                 crate::census_json::direction_names(),
+            ),
+            // The wire type of a body field the schema does not know, on the
+            // open door's document from revision 2. The walk is the reader's
+            // own type, whose word is an exhaustive match.
+            (
+                rev::E2E_OPEN,
+                "wire_type",
+                crate::proto_decode::Unknown::wire_type_names(),
             ),
         ];
         // R2185 — what this table ACTUALLY held, collected as it is walked
@@ -7535,7 +7543,12 @@ mod tests {
         // declares must measure as passengers, and this is the population that
         // would show a row that did not.
         let transport_docs = crate::transport_build_tests::documents_for_the_carries_gate();
-        let docs: [(&str, Vec<&String>); 7] = [
+        // The open door's document with a body read by its schema, over fields
+        // the schema does not know in each of the four wire types: the field
+        // carries the same keys whatever its wire type, so the family must
+        // measure as a passenger, over all four words.
+        let open_docs = crate::proto_decode_tests::documents_for_the_carries_gate();
+        let docs: [(&str, Vec<&String>); 8] = [
             (rev::FIELDS, fields_docs),
             (
                 rev::CENSUS,
@@ -7549,6 +7562,7 @@ mod tests {
             ),
             (rev::KEYEXPR_DIAGNOSE, keyexpr_verdicts.iter().collect()),
             (rev::TRANSPORT_BUILD, transport_docs.iter().collect()),
+            (rev::E2E_OPEN, open_docs.iter().collect()),
         ];
 
         // ⚠ R2185 — THE DOCUMENTS THIS GATE RENDERS ARE THE DOCUMENTS THAT

@@ -1453,6 +1453,59 @@ static int check_e2e_doors(void) {
         CHECK(strncmp(a, b, 9 + n + 1) == 0,
               "the described body must build the bytes-in frame:\n%s\n%s",
               bytes_doc, doc);
+
+        /* (ABI 31) -- the frame opened with its body read by the schema, in one
+         * call: the header's verdict and the body's field, typed, at its place
+         * in the frame (the six header bytes, then 08 96 01). */
+        {
+            static const char schema[] =
+                "{\"files\":[{\"name\":\"t.proto\","
+                "\"text\":\"syntax = \\\"proto3\\\"; message T { int32 a = 1; }\"}],"
+                "\"message\":\"T\"}";
+            unsigned char built[16];
+            size_t built_len = 0;
+            char *read = NULL;
+
+            b += strlen("\"frame\":\"");
+            while (b[built_len * 2] != '"' && built_len < sizeof built) {
+                built[built_len] = hex_pair(b + built_len * 2);
+                built_len++;
+            }
+            CHECK(built_len == 9, "the described frame is %zu bytes", built_len);
+            rc = wz_dissect_e2e_open_body(e2e_profile, schema, built, built_len,
+                                          &read);
+            CHECK(rc == WZ_DISSECT_OK && read != NULL, "open_body rc=%d", rc);
+            CHECK(strstr(read, "\"crc_ok\":true") != NULL &&
+                      strstr(read, "\"body_message\":\"T\"") != NULL &&
+                      strstr(read,
+                             "\"body\":{\"decoded\":true,\"fields\":["
+                             "{\"number\":1,\"name\":\"a\",\"type\":\"int32\","
+                             "\"offset\":6,\"bytes\":3,\"value\":150}]}}") != NULL,
+                  "the body must read back as the value it was built from: %s",
+                  read);
+            CHECK(strstr(read, "null") == NULL, "no key is ever null: %s", read);
+            wz_dissect_string_free(read);
+
+            /* A description that is not one is a verdict about YOUR text. */
+            read = NULL;
+            rc = wz_dissect_e2e_open_body(e2e_profile, "[]", built, built_len,
+                                          &read);
+            CHECK(rc == WZ_DISSECT_OK && read != NULL &&
+                      strstr(read, "\"ok\":false,\"stage\":\"body\","
+                                   "\"body_path\":\"\"") != NULL,
+                  "a refused description must be placed: rc=%d", rc);
+            wz_dissect_string_free(read);
+
+            /* Caller bugs are the argument error, with no string. */
+            read = NULL;
+            rc = wz_dissect_e2e_open_body(e2e_profile, NULL, built, built_len,
+                                          &read);
+            CHECK(rc == WZ_DISSECT_ERR_INVALID_ARG && read == NULL,
+                  "open_body: a null description rc=%d", rc);
+            rc = wz_dissect_e2e_open_body(e2e_profile, schema, NULL, 3, &read);
+            CHECK(rc == WZ_DISSECT_ERR_INVALID_ARG && read == NULL,
+                  "open_body: a null frame with a length rc=%d", rc);
+        }
         wz_dissect_string_free(bytes_doc);
         wz_dissect_string_free(doc);
 
@@ -2775,7 +2828,9 @@ int main(void) {
      * consumer could read. Each is built from the smallest profile there is,
      * which is the cheapest way to hold the document's opening to the revision
      * this consumer was written against. e2e_wrap is at 2 since its body could
-     * be described (an `@body` member of the values text); e2e_open is at 1. */
+     * be described (an `@body` member of the values text); e2e_open is at 2
+     * since its body could be read by its schema (wz_dissect_e2e_open_body),
+     * and the first open door writes that revision too. */
     revisioned[7].name = "e2e_wrap";
     revisioned[7].revision = 2;
     revisioned[7].doc = NULL;
@@ -2784,7 +2839,7 @@ int main(void) {
                              NULL, 0, &revisioned[7].doc);
     CHECK(rc == WZ_DISSECT_OK, "e2e_wrap document rc=%d", rc);
     revisioned[8].name = "e2e_open";
-    revisioned[8].revision = 1;
+    revisioned[8].revision = 2;
     revisioned[8].doc = NULL;
     {
         static const unsigned char header_only[6] = {0, 0, 6, 1, 0, 255};
