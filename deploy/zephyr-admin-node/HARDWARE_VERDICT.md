@@ -460,13 +460,20 @@ HW.26 the onboard verdict held on the transmit pool image: its eight onboard sen
 HW.27 the pool sits where the MAC reads it uncached: slots <start> to <end> inside the non-cacheable section <section start> to <section end>
 HW.28 a frame left from a pool slot read in place: in place <I> and started <S> above zero, last descriptor <address> inside the pool
 HW.29 every slot came home: on every counts line lent minus abandoned, completed and unarmed is 8 minus free, and started minus completed is at most 4
-HW.30 the frames read out of slots were right on the wire: <N> of <N> datagrams from the node in the capture had valid IPv4 and UDP checksums and decoded as zenoh
+HW.30 the frames read out of slots were right on the wire: <N> of <N> datagrams from the node in the capture had valid IPv4 and UDP checksums
 ```
+
+The program prints these five from files, after the run: `admin_node_verdict.py
+board --pool-image` reads the console capture of the boot, the board run's own
+standard output on this image (its eight onboard lines) and the packet capture of
+HW.30. Its header has the lab's command line.
 
 ### How each step is read
 
 HW.26. The record holds the sentences of HW.0 to HW.7 printed on this image, each
-ending ` - OK`, outside this step's sentence.
+ending ` - OK`, outside this step's sentence. The program holds that output to the
+console capture: its READY line is the capture's only one, its stack line is one
+the capture holds, and the capture's last stack line still leaves a quarter free.
 
 HW.27. From the pool line: the slots' end minus start is 12288 (8 times 1536), and
 start and end lie inside the section's bounds. The section bounds are Zephyr's own
@@ -483,14 +490,21 @@ A run in which `in place` stays zero has not exercised the pool, whatever else h
 
 HW.29. Each counts line is consistent with itself: `lent` minus `abandoned`,
 `completed` and `unarmed` equals 8 minus `free` (the slots out at that moment), and
-`started` minus `completed` is at most 4 (the frames the MAC's transmit ring can hold).
-A line that breaks either is a slot the lifecycle lost.
+`started` minus `completed` is at most 4 (the frames the MAC's transmit ring can hold),
+and not below zero. A line that breaks either is a slot the lifecycle lost. A line that
+holds the counts line's prefix and does not read as it is a failure, and so is a
+console with no counts line: a step on every line of none is no verdict.
 
 HW.30. A capture on the host's adapter over the same session: every datagram from the
-node's address has a valid IPv4 header checksum and a valid UDP checksum, and the
-stock router decoded the session (it is established in HW.5). A frame whose bytes came
-from a cache line the controller could not see would fail here and not in HW.28,
-which is why both are steps.
+node's address has a valid IPv4 header checksum and a valid UDP checksum over the
+pseudo header. A zero UDP checksum is a failure (IPv4 lets a sender omit it; this
+node's lwIP computes one in software), and so are a fragment, a frame captured short
+and a capture with no datagram from the node, none of which can be checked. A frame
+whose bytes came from a cache line the controller could not see would fail here and
+not in HW.28, which is why both are steps. The step checks checksums and nothing of
+zenoh: that a stock router decoded the node's datagrams as zenoh is witnessed by the
+onboard steps HW.26 carries for this image (the node dialled B in HW.2, and the
+session is established in HW.5).
 
 ### What the ledger entry holds for these steps
 
