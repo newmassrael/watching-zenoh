@@ -867,8 +867,43 @@ declare -A BASELINE_MC_TEXT=(
     # (65160 - 524, 64980 - 524), the method Round 1955 set out. data is 4 and
     # bss 270120 here on every row (hosted 270112, the toolchain term), so the
     # whole delta is ROM. Old: 64344/64132 (the R3170 recovery).
-    ["thumbv7m-none-eabi"]=64636
-    ["thumbv7em-none-eabihf"]=64456
+    # GREW +420 / +524 B, and all of it is ONE commit: 838dab8e, which made the
+    # synchronous multicast loop's body `MulticastPump::step` so that the same
+    # iteration can also run as a task beside a client session (open-debt item
+    # 900). Measured on this host (rustc 1.97.0, gcc 13.2.1, the lane's remap
+    # flags), one worktree path and one target dir at every row:
+    #
+    #   | commit                                         | M3    | M4F   |
+    #   |------------------------------------------------|-------|-------|
+    #   | 619568f5 at this baseline                      | 64632 | 64420 |
+    #   | 74354abd (e8b9076a 824a392e) lend, stats guard | 64632 | 64420 |
+    #   | 6b6f1474 transmit pool slot (wz-link-lwip)     | 64632 | 64420 |
+    #   | d6ac744a (635d030e c3204879 e3a0f870 too)      | 64632 | 64420 |
+    #   | 838dab8e the multicast session as a task       | 65052 | 64944 |
+    #   | 09cd2967 (5ccec5f4 21bd369d too)               | 65052 | 64944 |
+    #
+    # Every +0 row is a byte-identical ELF (`cmp`), not only an equal `text`.
+    # A per-symbol diff of d6ac744a vs 838dab8e (`arm-none-eabi-nm -S`, hashes
+    # stripped) names it: `MulticastPump::with_pass` +666 (NEW; it absorbs
+    # `mcu_reassembly` -370 and the bring-up the loop did inline),
+    # `__cortex_m_rt_main` +112 / +214 (the absorber: the step over the pump's
+    # fields), the pump's drop glue +82 (NEW) against -42 / -38 / -46 for the
+    # dispatcher drop glue, `abort_peer_chains` and `PeerSlot::evict` it took in,
+    # and `ReassemblyDropReason::from_ingest` +46 moving out of line.
+    # NOTHING OF IT IS THE TASK FORM: `multicast_session_task` and
+    # `spawn_multicast_session` are generic and this image instantiates neither,
+    # and the `ExecutorPass` test costs +0 (with the pass forced to a constant
+    # the image reads 65052 again). Two restructurings were measured and refused:
+    # forcing `with_pass` inline duplicates the bring-up into both call sites
+    # (65320), and one shared step instantiation over `dyn` closures reads 65080.
+    # So the bytes are the price of an iteration that can give the thread back,
+    # paid by the synchronous loop because it runs the same step: one body for
+    # both drivers is what keeps them from drifting, so the baseline moves.
+    # DERIVED figures, not a hosted reading: the hosted baseline above plus this
+    # host's same-tree delta (64636 + 420, 64456 + 524). data is 4 and bss 270120
+    # here on every row, so the whole delta is ROM. Old: 64636/64456.
+    ["thumbv7m-none-eabi"]=65056
+    ["thumbv7em-none-eabihf"]=64980
 )
 # shellcheck disable=SC2034  # resolved through the `declare -n _bt/_bd/_bb`
                             # namerefs in the `case "$artifact"` dispatch below; shellcheck
