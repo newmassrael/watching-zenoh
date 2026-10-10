@@ -1089,7 +1089,7 @@ mod tests {
 
         let (_serial, link) = crate::lwip_test_link();
         let mut rig = gather_node(&link, TxGather::Queued);
-        let mut socket = bind_session_rx(&link, 7602).expect("bind");
+        let socket = bind_session_rx(&link, 7602).expect("bind");
         socket
             .send_to(crate::ipv4_addr_from_octets(FAR_IP), 7601, b"prime")
             .expect("send");
@@ -1141,7 +1141,7 @@ mod tests {
         let mut rig = gather_node(&link, TxGather::Queued);
         // A socket wider than a slot whatever the session socket's build-time
         // width is (the slim profile's is narrower than a slot).
-        let mut socket = crate::LwipUdpSocket::<2048, 4>::bind(&link, 7602).expect("bind");
+        let socket = crate::LwipUdpSocket::<2048, 4>::bind(&link, 7602).expect("bind");
         socket
             .send_to(crate::ipv4_addr_from_octets(FAR_IP), 7601, b"prime")
             .expect("send");

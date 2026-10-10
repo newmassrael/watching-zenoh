@@ -244,7 +244,7 @@ pub fn run_multicast_e2e_with_progress<C: ClockSource, S: FnMut(MulticastStage)>
     //    fails; report join_ok=false and return — the loop has nothing to
     //    drive. On the host (routed loop netif) and on real IGMP hardware it
     //    succeeds.
-    let mut socket = match bind_session_multicast_rx(link, group, PORT) {
+    let socket = match bind_session_multicast_rx(link, group, PORT) {
         Ok(sock) => sock,
         Err(_) => {
             return MulticastE2eReport {
