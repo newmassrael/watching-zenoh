@@ -445,8 +445,12 @@ fn main() -> ! {
         );
         let mut pending: BoundedVec<DeclResponseItem, { caps::MAX_PENDING_DECLARES }> =
             BoundedVec::new();
-        let staged = lt.respond_to_interest_borrowed(Some("group1/**"), 42, &mut pending);
-        require("local-token stage", staged == 1);
+        // `Ok(n)` is the whole chain staged; `Err` would be the chain refused
+        // whole for want of room, which an empty buffer cannot be.
+        let staged = lt
+            .respond_to_interest_borrowed(Some("group1/**"), 42, &mut pending)
+            .ok();
+        require("local-token stage", staged == Some(1));
         let mut emitted: u32 = 0;
         for item in pending {
             // Build the full borrowed `Declare` envelope through the

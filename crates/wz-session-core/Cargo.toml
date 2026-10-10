@@ -68,6 +68,20 @@ default = [
 # allocator-free and keeps the alloc profile unchanged.
 alloc = ["wz-codecs/alloc"]
 
+# `bounded-heapless` selects the FIXED-CAPACITY backing for
+# `bounded::BoundedVec` / `bounded::BoundedString` while `alloc` stays on: every
+# `caps` limit becomes the hard bound a push enforces, so `TableFull` /
+# `CapacityFull` are reachable on a profile that still links an allocator for
+# everything else. Without it, `alloc` selects the growable `Vec` / `String`
+# backing (the AP profile) and `alloc`-off selects the fixed one (the no-heap
+# probe), exactly as before. It is a SELECTOR, not a new meaning for `alloc`:
+# the AP shares this crate and keeps growable collections, so this feature is
+# turned on only by an MCU build's final binary, never by a library crate's
+# dependency line, where workspace feature unification would hand the AP the
+# capped backing. It implies nothing: without `alloc` the backing is already
+# fixed.
+bounded-heapless = []
+
 # adminspace-core (§5.23) — the built-in `@/<zid>/<whatami>/**` admin queryable
 # keyexpr helpers + the `local_data` JSON body (the wz mirror of zenoh
 # `net/runtime/adminspace.rs` `local_data` + `AdminSpace::start`). Pure

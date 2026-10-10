@@ -511,6 +511,12 @@ DEFERRED: dict[str, dict[str, str]] = {
             )
             for f in (
                 "attachment-bytes",
+                # The fixed bounded backing. It gates public items the other
+                # way round: turning it ON removes the closure-taking registry
+                # wrappers whose `.expect` holds only on the growable backing.
+                # Every such site is `any(test, doc, not(feature = ..))`, so
+                # every one is compound.
+                "bounded-heapless",
                 "codec-fragment",
                 "codec-hello",
                 "codec-linkstate",

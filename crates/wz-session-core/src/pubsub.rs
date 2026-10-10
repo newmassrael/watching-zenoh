@@ -354,6 +354,38 @@ pub struct SubscriberRegistry<C: SampleSink> {
     /// [`crate::response_sink::DeclareReplySink`].
     #[cfg(feature = "declare-subscriber")]
     pending_sub_interest_replies: BoundedVec<SubInterestReply, { caps::MAX_PENDING_DECLARES }>,
+    /// What the two tables above could not take, counted rather than dropped
+    /// in silence. Every field stays zero on the growable backing, where no
+    /// push fails; see [`SubInterestRefusals`].
+    #[cfg(feature = "declare-subscriber")]
+    interest_refusals: SubInterestRefusals,
+}
+
+/// The counted refusals of the session-local subscriber-interest staging, by
+/// what was refused.
+///
+/// Reachable only on the fixed backing ([`crate::bounded::ENFORCES_CAPACITY`]),
+/// where `inbound_sub_interests` holds at most
+/// [`caps::MAX_INBOUND_SUB_INTERESTS`] rows and the staging buffer at most
+/// [`caps::MAX_PENDING_DECLARES`] items between two drains, and where one frame
+/// of Interests is staged before the drain runs. A refusal is the peer's to
+/// see as an unanswered or un-pushed interest; this is where the session
+/// says how many there were.
+#[cfg(feature = "declare-subscriber")]
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct SubInterestRefusals {
+    /// CURRENT reply chains staged NOT AT ALL, because the staging buffer could
+    /// not take the whole chain with its terminating `Final`. A chain is staged
+    /// whole or not at all: a truncated chain under a `Final` would tell the
+    /// peer that the subscriptions it lacks do not exist.
+    pub chains: u32,
+    /// FUTURE interests not remembered, because the interest table was full. A
+    /// subscription declared later is not pushed to that publisher.
+    pub future_interests: u32,
+    /// Unsolicited announcements (a FUTURE push for a new subscription, or the
+    /// retraction of an aggregate declaration) not staged, because the staging
+    /// buffer was full.
+    pub announcements: u32,
 }
 
 /// R3040 (transport-shm) -- the priority band a received Push was sent at: the
@@ -525,6 +557,8 @@ impl<C: SampleSink> SubscriberRegistry<C> {
             inbound_sub_interests: BoundedVec::new(),
             #[cfg(feature = "declare-subscriber")]
             pending_sub_interest_replies: BoundedVec::new(),
+            #[cfg(feature = "declare-subscriber")]
+            interest_refusals: SubInterestRefusals::default(),
         }
     }
 
@@ -802,10 +836,32 @@ impl<C: SampleSink> SubscriberRegistry<C> {
             }
         }
         for interest_id in hits.iter().copied() {
-            let _ = self
+            if self
                 .pending_sub_interest_replies
-                .push(SubInterestReply::AggregateRetract { interest_id });
+                .push(SubInterestReply::AggregateRetract { interest_id })
+                .is_err()
+            {
+                // The row keeps `announced`, so the retraction is still owed;
+                // what is lost is THIS staging of it, and that is counted.
+                self.count_refused_announcement();
+            }
         }
+    }
+
+    /// Count one unsolicited announcement the staging buffer refused. Shared by
+    /// the FUTURE push and the aggregate retraction, the two stagers with no
+    /// chain to keep whole.
+    #[cfg(feature = "declare-subscriber")]
+    fn count_refused_announcement(&mut self) {
+        self.interest_refusals.announcements =
+            self.interest_refusals.announcements.saturating_add(1);
+    }
+
+    /// The counted refusals of this registry's interest staging. All zero on
+    /// the growable backing; see [`SubInterestRefusals`].
+    #[cfg(feature = "declare-subscriber")]
+    pub fn interest_staging_refusals(&self) -> SubInterestRefusals {
+        self.interest_refusals
     }
 
     /// R2292 (open-debt item 627) — record that the drain actually put a
@@ -1108,89 +1164,129 @@ impl<C: SampleSink> SubscriberRegistry<C> {
         // reply resolves its keyexpr and its decl id THROUGH this row at drain,
         // so a CURRENT-only interest needs it too. Refreshing rather than
         // stacking keeps pico's `(peer, decl_id)` target dedup meaningful.
-        let decl_id = match self
+        let row_held = if self
             .inbound_sub_interests
             .iter()
-            .position(|row| row.interest_id == interest_id)
+            .any(|row| row.interest_id == interest_id)
         {
-            Some(idx) => self.inbound_sub_interests[idx].aggregate_decl_id,
-            None => {
-                let mut keyexpr = BoundedString::new();
-                if keyexpr.push_str(pattern.unwrap_or("**")).is_err() {
-                    // A keyexpr past the bounded field cannot be replied with
-                    // anyway; terminate the chain honestly instead of half-
-                    // answering it.
-                    let _ = self
-                        .pending_sub_interest_replies
-                        .push(SubInterestReply::Final { interest_id });
-                    return 0;
+            true
+        } else {
+            let mut keyexpr = BoundedString::new();
+            if keyexpr.push_str(pattern.unwrap_or("**")).is_err() {
+                // A keyexpr past the bounded field cannot be replied with
+                // anyway; terminate the chain honestly instead of half-
+                // answering it. The terminator is a chain of one, staged
+                // whole or counted.
+                if self.pending_sub_interest_replies.free_slots() == 0 {
+                    self.count_refused_chain();
+                } else {
+                    self.pending_sub_interest_replies
+                        .push(SubInterestReply::Final { interest_id })
+                        .expect("one free slot was checked above");
                 }
-                // R2292 (open-debt item 627) — ONE id space per session, drawn
-                // from the SAME counter `register_sink` uses for a
-                // `SubscriptionId`. It used to be a second counter that also
-                // started at 1, so a session announced an aggregate reply and
-                // a routed subscriber under the SAME `DeclSubscriber.id`; the
-                // peer's registry is keyed by that id with same-id-replaces,
-                // so it saw one declaration where two were sent. Harmless
-                // while nothing retracted an aggregate id and NOT harmless
-                // once something does — an `UndeclSubscriber(1)` would be
-                // ambiguous. Upstream has no such second counter: zenoh draws
-                // the simple AND the aggregated resource id from one
-                // per-face `next_id`
-                // (`zenoh/src/net/routing/hat/broker/interests.rs`
-                // @ `local_subs.insert_aggregated_resource`, 1.10.0).
-                let decl_id = self.next_id;
-                self.next_id = self.next_id.saturating_add(1);
-                // A full table loses only the FUTURE half for this publisher —
-                // the CURRENT dump below still answers, because it reads the
-                // row we would have pushed only for the aggregate keyexpr, and
-                // the push failure hands that keyexpr straight back.
-                let _ = self.inbound_sub_interests.push(InboundSubInterest {
+                return 0;
+            }
+            // R2292 (open-debt item 627) — ONE id space per session, drawn
+            // from the SAME counter `register_sink` uses for a
+            // `SubscriptionId`. It used to be a second counter that also
+            // started at 1, so a session announced an aggregate reply and
+            // a routed subscriber under the SAME `DeclSubscriber.id`; the
+            // peer's registry is keyed by that id with same-id-replaces,
+            // so it saw one declaration where two were sent. Harmless
+            // while nothing retracted an aggregate id and NOT harmless
+            // once something does — an `UndeclSubscriber(1)` would be
+            // ambiguous. Upstream has no such second counter: zenoh draws
+            // the simple AND the aggregated resource id from one
+            // per-face `next_id`
+            // (`zenoh/src/net/routing/hat/broker/interests.rs`
+            // @ `local_subs.insert_aggregated_resource`, 1.10.0).
+            //
+            // The id is consumed only when the row is stored, the same rule
+            // `register_sink` keeps, so a refused row leaves no gap.
+            let decl_id = self.next_id;
+            let stored = self
+                .inbound_sub_interests
+                .push(InboundSubInterest {
                     interest_id,
                     keyexpr,
                     aggregate,
                     aggregate_decl_id: decl_id,
                     #[cfg(feature = "declare-undeclare")]
                     announced: false,
-                });
-                decl_id
+                })
+                .is_ok();
+            if stored {
+                self.next_id = self.next_id.saturating_add(1);
+            } else if future {
+                // A full table loses the FUTURE half for this publisher: a
+                // subscription declared later is not pushed to it.
+                self.interest_refusals.future_interests =
+                    self.interest_refusals.future_interests.saturating_add(1);
             }
+            stored
         };
-        let _ = decl_id;
-        let mut staged = 0usize;
-        if current {
-            if aggregate {
-                if self.any_subscription_matches(pattern)
-                    && self
-                        .pending_sub_interest_replies
-                        .push(SubInterestReply::Aggregate { interest_id })
-                        .is_ok()
-                {
-                    staged += 1;
-                }
+        if !current {
+            return 0;
+        }
+        // The CURRENT dump is one chain -- its replies, then its `Final` -- and
+        // it is staged WHOLE or not at all. Truncating it under a `Final` would
+        // tell the peer that the subscriptions it lacks do not exist, which for
+        // a pico publisher keeps its write filter shut on a subscriber that is
+        // there. So the chain is sized first and refused, counted, if the
+        // staging buffer cannot take all of it. On the growable backing the
+        // room is unbounded and nothing below refuses.
+        let replies = if aggregate {
+            if !self.any_subscription_matches(pattern) {
+                0
+            } else if !row_held {
+                // The aggregate reply resolves its keyexpr and decl id THROUGH
+                // the row at drain. With no row it would resolve to nothing and
+                // the chain would leave as a bare `Final`, the false "nothing
+                // matches" the paragraph above refuses to send.
+                self.count_refused_chain();
+                return 0;
             } else {
-                for sub in self.subscribers.iter() {
-                    if !subscription_matches_interest(sub.pattern.as_str(), pattern) {
-                        continue;
-                    }
-                    if self
-                        .pending_sub_interest_replies
+                1
+            }
+        } else {
+            self.subscribers
+                .iter()
+                .filter(|sub| subscription_matches_interest(sub.pattern.as_str(), pattern))
+                .count()
+        };
+        if self.pending_sub_interest_replies.free_slots() < replies.saturating_add(1) {
+            self.count_refused_chain();
+            return 0;
+        }
+        const RESERVED: &str = "room for the whole chain was checked above";
+        if aggregate {
+            if replies == 1 {
+                self.pending_sub_interest_replies
+                    .push(SubInterestReply::Aggregate { interest_id })
+                    .expect(RESERVED);
+            }
+        } else {
+            for sub in self.subscribers.iter() {
+                if subscription_matches_interest(sub.pattern.as_str(), pattern) {
+                    self.pending_sub_interest_replies
                         .push(SubInterestReply::Concrete {
                             interest_id,
                             subscription_id: sub.id.0,
                         })
-                        .is_err()
-                    {
-                        break;
-                    }
-                    staged += 1;
+                        .expect(RESERVED);
                 }
             }
-            let _ = self
-                .pending_sub_interest_replies
-                .push(SubInterestReply::Final { interest_id });
         }
-        staged
+        self.pending_sub_interest_replies
+            .push(SubInterestReply::Final { interest_id })
+            .expect(RESERVED);
+        replies
+    }
+
+    /// Count one CURRENT reply chain the staging buffer could not take whole.
+    #[cfg(feature = "declare-subscriber")]
+    fn count_refused_chain(&mut self) {
+        self.interest_refusals.chains = self.interest_refusals.chains.saturating_add(1);
     }
 
     /// R311y530 — whether ANY session-local subscription intersects the
@@ -1245,7 +1341,9 @@ impl<C: SampleSink> SubscriberRegistry<C> {
             // not a CURRENT dump, and the peer's CURRENT solicitation was
             // already resolved when the interest arrived. A second `Final`
             // would close an interest that is still live.
-            let _ = self.pending_sub_interest_replies.push(item);
+            if self.pending_sub_interest_replies.push(item).is_err() {
+                self.count_refused_announcement();
+            }
         }
     }
 
@@ -1935,6 +2033,16 @@ impl SubscriberRegistry<BoxedSink> {
     /// so both session-local and remote-origin samples fire the
     /// closure. Use [`register_with_locality`](Self::register_with_locality)
     /// to restrict to one origin class.
+    ///
+    /// GROWABLE BACKING ONLY. This wrapper's infallible signature is true
+    /// only where the table grows; under `bounded-heapless` the table is
+    /// fixed and the `.expect` inside would be a panic at the first full
+    /// table, so the wrapper is not compiled there (except for this crate's
+    /// own tests and docs). A fixed-backing build registers through
+    /// [`register_sink`](SubscriberRegistry::register_sink) with
+    /// `BoxedSink::new(callback)` and handles
+    /// [`RegisterError::TableFull`].
+    #[cfg(any(test, doc, not(feature = "bounded-heapless")))]
     pub fn register(
         &mut self,
         keyexpr_pattern: impl Into<String>,
@@ -1954,6 +2062,10 @@ impl SubscriberRegistry<BoxedSink> {
     /// subscription registered now will not fire until a future
     /// round wires up loopback; this is the correct
     /// surface-mirrors-zenoh-pico shape, not a bug.
+    ///
+    /// GROWABLE BACKING ONLY, for the reason [`register`](Self::register)
+    /// gives.
+    #[cfg(any(test, doc, not(feature = "bounded-heapless")))]
     pub fn register_with_locality(
         &mut self,
         keyexpr_pattern: impl Into<String>,
@@ -5629,6 +5741,109 @@ mod metadata_decode_isolation_tests {
             present.load(Ordering::SeqCst),
             0,
             "wire attachment must NOT project to Sample.attachment when pubsub-attachment is off"
+        );
+    }
+}
+
+/// The subscriber-interest staging on the FIXED backing, where its buffer and
+/// its interest table refuse. On the growable backing none of these refusals
+/// is reachable, so the module is gated to the fixed one. Interests use the
+/// keyexpr-less match-all form so no wildcard feature decides the outcome.
+#[cfg(all(
+    test,
+    feature = "declare-subscriber",
+    any(not(feature = "alloc"), feature = "bounded-heapless")
+))]
+mod fixed_backing_interest_staging_tests {
+    use super::*;
+
+    struct Noop;
+    impl SampleSink for Noop {
+        fn deliver(&mut self, _sample: &dyn SampleView) {}
+    }
+
+    const PATTERNS: [&str; 16] = [
+        "t/0", "t/1", "t/2", "t/3", "t/4", "t/5", "t/6", "t/7", "t/8", "t/9", "t/10", "t/11",
+        "t/12", "t/13", "t/14", "t/15",
+    ];
+
+    fn registry_with(subscriptions: usize) -> SubscriberRegistry<Noop> {
+        let mut reg = SubscriberRegistry::with_sink_backing();
+        for pattern in PATTERNS.iter().take(subscriptions) {
+            reg.register_sink(pattern, crate::locality::Locality::Any, Noop)
+                .expect("below MAX_SUBSCRIPTIONS");
+        }
+        reg
+    }
+
+    /// Two CURRENT dumps of 16 replies each need 2 x 17 slots against 32. The
+    /// code this replaced pushed the second best-effort: 15 of its replies and
+    /// no `Final`, so that peer was answered half and never terminated. Now the
+    /// second is refused whole and counted, and the first is intact.
+    #[test]
+    fn a_current_chain_that_does_not_fit_whole_is_refused_and_counted() {
+        assert_eq!(PATTERNS.len(), caps::MAX_SUBSCRIPTIONS);
+        let mut reg = registry_with(caps::MAX_SUBSCRIPTIONS);
+        assert_eq!(
+            reg.respond_to_subscriber_interest_borrowed(1, None, false, true, false),
+            caps::MAX_SUBSCRIPTIONS
+        );
+        assert_eq!(
+            reg.respond_to_subscriber_interest_borrowed(2, None, false, true, false),
+            0
+        );
+        assert_eq!(
+            reg.interest_staging_refusals(),
+            SubInterestRefusals {
+                chains: 1,
+                ..SubInterestRefusals::default()
+            }
+        );
+        let staged = reg.take_staged_sub_interest_replies();
+        assert_eq!(staged.len(), caps::MAX_SUBSCRIPTIONS + 1);
+        assert!(staged.iter().all(|item| matches!(
+            item,
+            SubInterestReply::Concrete { interest_id: 1, .. }
+                | SubInterestReply::Final { interest_id: 1 }
+        )));
+        assert!(matches!(
+            staged.last(),
+            Some(SubInterestReply::Final { interest_id: 1 })
+        ));
+    }
+
+    /// A FUTURE interest the full table cannot remember loses the push of a
+    /// later subscription to that publisher. That loss is counted.
+    #[test]
+    fn a_future_interest_the_full_table_cannot_hold_is_counted() {
+        let mut reg = registry_with(0);
+        for id in 0..caps::MAX_INBOUND_SUB_INTERESTS as u64 {
+            reg.respond_to_subscriber_interest_borrowed(id, None, false, false, true);
+        }
+        assert_eq!(reg.interest_staging_refusals().future_interests, 0);
+        reg.respond_to_subscriber_interest_borrowed(99, None, false, false, true);
+        assert_eq!(reg.interest_staging_refusals().future_interests, 1);
+    }
+
+    /// An AGGREGATE CURRENT interest answers through its own row at drain. With
+    /// the table full there is no row, and the code this replaced staged the
+    /// `Final` alone: "no subscription matches" to a peer whose interest one
+    /// subscription does match. Now the chain is refused and nothing is staged.
+    #[test]
+    fn an_aggregate_current_interest_without_its_row_is_refused_not_answered_empty() {
+        let mut reg = registry_with(1);
+        for id in 0..caps::MAX_INBOUND_SUB_INTERESTS as u64 {
+            reg.respond_to_subscriber_interest_borrowed(id, None, false, false, true);
+        }
+        assert!(reg.take_staged_sub_interest_replies().is_empty());
+        assert_eq!(
+            reg.respond_to_subscriber_interest_borrowed(99, None, true, true, false),
+            0
+        );
+        assert_eq!(reg.interest_staging_refusals().chains, 1);
+        assert!(
+            reg.take_staged_sub_interest_replies().is_empty(),
+            "no bare Final for a chain that could not be answered"
         );
     }
 }

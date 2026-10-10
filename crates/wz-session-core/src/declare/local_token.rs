@@ -70,7 +70,7 @@
 //! emits them through the sink. Wire ordering is preserved — every
 //! `DeclToken` precedes the terminating `DeclFinal`.
 
-use crate::bounded::{BoundedString, BoundedVec};
+use crate::bounded::{BoundedString, BoundedVec, CapacityFull};
 use crate::caps;
 use crate::keyexpr_match::{keyexpr_intersect_patterns, MAX_KEYEXPR_CHUNKS};
 use crate::registry_error::RegisterError;
@@ -240,55 +240,55 @@ impl LocalTokenRegistry {
     /// resolved pattern), so it is the MCU no-heap path; the `alloc`
     /// inbound-parse path ([`Self::respond_to_interest`]) resolves the
     /// pattern through the peer table and funnels through here. Returns
-    /// the number of `Token` items staged (the `Final` is not counted).
+    /// `Ok` with the number of `Token` items staged (the `Final` is not
+    /// counted).
     ///
-    /// Staging is best-effort under the buffer bound
-    /// ([`caps::MAX_PENDING_DECLARES`]): if `pending` fills mid-chain the
-    /// remaining items are dropped — INCLUDING the terminating `Final`,
-    /// whose `let _ = pending.push(..)` below swallows the same
-    /// `CapacityFull` the token loop just broke on. A caller that loses a
-    /// chain's `Final` leaves that peer's CURRENT Interest unterminated.
+    /// The chain is staged WHOLE or not at all. `Err(CapacityFull(()))` means
+    /// `pending` could not take every matching `Token` plus the terminating
+    /// `Final`, and NOTHING was staged: a chain truncated under its `Final`
+    /// would tell the peer that the tokens it lacks do not exist, and a chain
+    /// without its `Final` would leave the peer's CURRENT Interest open. The
+    /// caller counts the refusal.
     ///
-    /// R311y341 — that is unreachable as shipped, and the reason is a cfg
-    /// accident worth stating rather than trusting. `push` can only fail on
-    /// the no-alloc backing (on `alloc` it is a `Vec` and `N` is advisory),
-    /// and the only thing that threads ONE buffer across several Interests
-    /// — [`Self::dispatch_messages`] — is itself `alloc`-gated. So the
-    /// profile that can overflow does not batch, and the profile that
-    /// batches cannot overflow. **The contract this method actually needs
-    /// from a no-alloc caller: ONE Interest per buffer, drained between.**
-    /// One chain is `MAX_LOCAL_TOKENS + 1` = 9 against 32. A future no-heap
-    /// consumer that fans a frame's Interests through one buffer breaks the
-    /// invariant silently — reserve the `Final` slot before adding tokens if
-    /// that day comes.
+    /// R311y341 recorded that the refusal used to be unreachable "by a cfg
+    /// accident": `push` could fail only on the no-alloc backing, and the only
+    /// thing that threads ONE buffer across several Interests --
+    /// [`Self::dispatch_messages`] -- is `alloc`-gated. `bounded-heapless`
+    /// ends that accident (a fixed backing WITH `alloc`, so the batching path
+    /// meets the hard bound), which is why the chain is now sized before it is
+    /// staged rather than pushed best-effort. On the growable backing the room
+    /// is unbounded and this never refuses.
     pub fn respond_to_interest_borrowed(
         &self,
         pattern: Option<&str>,
         interest_id: u64,
         pending: &mut BoundedVec<DeclResponseItem, { caps::MAX_PENDING_DECLARES }>,
-    ) -> usize {
-        let mut staged: usize = 0;
-        for token in self.tokens.iter() {
-            if !token_matches(token.keyexpr.as_str(), pattern) {
-                continue;
-            }
-            // Stage the token by id only — the keyexpr stays in the table
-            // (SSOT) and is resolved at drain via `keyexpr_for`.
-            if pending
-                .push(DeclResponseItem::Token {
-                    token_id: token.token_id,
-                    interest_id,
-                })
-                .is_err()
-            {
-                // Staging buffer full — stop adding tokens (best-effort).
-                break;
-            }
-            staged = staged.saturating_add(1);
+    ) -> Result<usize, CapacityFull<()>> {
+        let matching = self
+            .tokens
+            .iter()
+            .filter(|token| token_matches(token.keyexpr.as_str(), pattern))
+            .count();
+        if pending.free_slots() < matching.saturating_add(1) {
+            return Err(CapacityFull(()));
         }
-        // Terminate the chain (best-effort under the buffer bound).
-        let _ = pending.push(DeclResponseItem::Final { interest_id });
-        staged
+        const RESERVED: &str = "room for the whole chain was checked above";
+        for token in self.tokens.iter() {
+            if token_matches(token.keyexpr.as_str(), pattern) {
+                // Stage the token by id only — the keyexpr stays in the table
+                // (SSOT) and is resolved at drain via `keyexpr_for`.
+                pending
+                    .push(DeclResponseItem::Token {
+                        token_id: token.token_id,
+                        interest_id,
+                    })
+                    .expect(RESERVED);
+            }
+        }
+        pending
+            .push(DeclResponseItem::Final { interest_id })
+            .expect(RESERVED);
+        Ok(matching)
     }
 
     /// Resolve a staged [`DeclResponseItem::Token`]'s `token_id` back to
@@ -313,13 +313,16 @@ impl LocalTokenRegistry {
     /// that carries no keyexpr (ke bit clear) is treated as match-all; an
     /// Interest whose keyexpr references an undeclared peer mapping drops
     /// silently (same policy as the peer-side registries).
+    ///
+    /// `Err` only when the staging refused the whole chain; see
+    /// [`Self::respond_to_interest_borrowed`]. Every no-op above is `Ok`.
     #[cfg(feature = "alloc")]
     pub fn respond_to_interest<'a>(
         &self,
         interest: &InterestOwned,
         peer_keyexpr_table: impl Into<MappingSpaces<'a>>,
         pending: &mut BoundedVec<DeclResponseItem, { caps::MAX_PENDING_DECLARES }>,
-    ) {
+    ) -> Result<(), CapacityFull<()>> {
         let peer_keyexpr_table = peer_keyexpr_table.into();
         if !interest.c() {
             // No CURRENT bit (read via the generated `<sce:flags>` `c()`
@@ -328,62 +331,78 @@ impl LocalTokenRegistry {
             // proactive Declare(DeclToken)) or a FINAL terminator. Neither
             // solicits a current-token replay -- zenoh gates the enumeration
             // on `mode.current()` (hat/client/token.rs).
-            return;
+            return Ok(());
         }
         let body = match &interest.body {
             Some(b) => b,
             // A non-final Interest with no body targets nothing
             // resolvable; the declarer has nothing to reply with.
-            None => return,
+            None => return Ok(()),
         };
         if !body.to() {
             // Not a tokens Interest (subscriber / queryable interest) —
             // out of scope for the liveliness-token declarer.
-            return;
+            return Ok(());
         }
         let pattern: Option<String> = match &body.keyexpr {
             Some(w) => match resolve_wireexpr_in(&w.body, peer_keyexpr_table) {
                 Some(p) => Some(p),
                 // Unresolvable mapping id — drop silently.
-                None => return,
+                None => return Ok(()),
             },
             None => None,
         };
-        self.respond_to_interest_borrowed(pattern.as_deref(), interest.interest_id, pending);
+        self.respond_to_interest_borrowed(pattern.as_deref(), interest.interest_id, pending)
+            .map(|_staged| ())
     }
 
     /// Drain a `&[NetworkMessage]`, staging an interest-response for each
     /// inbound `Interest`. Mirror of the sibling registries'
     /// `dispatch_messages`. `alloc`-gated (consumes owned messages +
     /// resolves keyexprs).
+    ///
+    /// Returns how many Interests' chains the staging refused. This is the
+    /// path that threads ONE buffer across a frame's Interests, so it is where
+    /// the fixed backing's bound meets the batching; a refused chain does not
+    /// stop the frame, because the next Interest may need fewer slots.
     #[cfg(feature = "alloc")]
     pub fn dispatch_messages<'a>(
         &self,
         messages: &[NetworkMessage],
         peer_keyexpr_table: impl Into<MappingSpaces<'a>>,
         pending: &mut BoundedVec<DeclResponseItem, { caps::MAX_PENDING_DECLARES }>,
-    ) {
+    ) -> usize {
         let peer_keyexpr_table = peer_keyexpr_table.into();
+        let mut refused = 0usize;
         for message in messages {
             if let NetworkMessage::Interest(interest) = message {
-                self.respond_to_interest(interest, peer_keyexpr_table, pending);
+                if self
+                    .respond_to_interest(interest, peer_keyexpr_table, pending)
+                    .is_err()
+                {
+                    refused = refused.saturating_add(1);
+                }
             }
         }
+        refused
     }
 
     /// `IterationEvent` adapter; mirror of the sibling registries.
     /// Non-`FramePayload` events (Lease branch, non-poll outcomes) are
-    /// no-ops. `alloc`-gated (consumes owned messages).
+    /// no-ops. `alloc`-gated (consumes owned messages). Returns the refused
+    /// chain count of [`Self::dispatch_messages`].
     #[cfg(feature = "alloc")]
     pub fn dispatch_iteration_event<'a>(
         &self,
         event: IterationEvent<'_>,
         peer_keyexpr_table: impl Into<MappingSpaces<'a>>,
         pending: &mut BoundedVec<DeclResponseItem, { caps::MAX_PENDING_DECLARES }>,
-    ) {
+    ) -> usize {
         let peer_keyexpr_table = peer_keyexpr_table.into();
         if let IterationEvent::Poll(DriverLoopOutcome::FramePayload { messages, .. }) = event {
-            self.dispatch_messages(messages, peer_keyexpr_table, pending);
+            self.dispatch_messages(messages, peer_keyexpr_table, pending)
+        } else {
+            0
         }
     }
 }
@@ -498,7 +517,9 @@ mod tests {
     fn empty_registry_stages_only_a_final() {
         let reg = LocalTokenRegistry::new();
         let mut pending = new_pending();
-        let staged = reg.respond_to_interest_borrowed(Some("group1/**"), 7, &mut pending);
+        let staged = reg
+            .respond_to_interest_borrowed(Some("group1/**"), 7, &mut pending)
+            .expect("an empty buffer takes the chain");
         assert_eq!(staged, 0);
         assert_eq!(count(&pending), (0, 1));
         assert!(matches!(
@@ -512,7 +533,9 @@ mod tests {
         let mut reg = LocalTokenRegistry::new();
         assert!(reg.register(1, "group1/zenoh-pico").unwrap());
         let mut pending = new_pending();
-        let staged = reg.respond_to_interest_borrowed(Some("group1/**"), 42, &mut pending);
+        let staged = reg
+            .respond_to_interest_borrowed(Some("group1/**"), 42, &mut pending)
+            .expect("an empty buffer takes the chain");
         assert_eq!(staged, 1);
         assert_eq!(count(&pending), (1, 1));
         // Wire ordering: the Token precedes the terminating Final.
@@ -549,8 +572,9 @@ mod tests {
         assert!(reg.register(1, "group1/zenoh-pico").unwrap());
         let mut pending = new_pending();
         assert_eq!(
-            reg.respond_to_interest_borrowed(Some("group1/**"), 42, &mut pending),
-            1,
+            reg.respond_to_interest_borrowed(Some("group1/**"), 42, &mut pending)
+                .ok(),
+            Some(1),
             "a matching token must stage exactly one reply — a fixture that \
              stages none would make the assertion below vacuous"
         );
@@ -585,7 +609,9 @@ mod tests {
         reg.register(2, "c/d").unwrap();
         let mut pending = new_pending();
         // `None` pattern = the ke-bit-clear tokens Interest (match-all).
-        let staged = reg.respond_to_interest_borrowed(None, 5, &mut pending);
+        let staged = reg
+            .respond_to_interest_borrowed(None, 5, &mut pending)
+            .expect("an empty buffer takes the chain");
         assert_eq!(staged, 2);
         assert_eq!(count(&pending), (2, 1));
     }
@@ -595,7 +621,9 @@ mod tests {
         let mut reg = LocalTokenRegistry::new();
         reg.register(1, "home/temp").unwrap();
         let mut pending = new_pending();
-        let staged = reg.respond_to_interest_borrowed(Some("group1/**"), 9, &mut pending);
+        let staged = reg
+            .respond_to_interest_borrowed(Some("group1/**"), 9, &mut pending)
+            .expect("an empty buffer takes the chain");
         assert_eq!(staged, 0);
         assert_eq!(count(&pending), (0, 1));
     }
@@ -609,7 +637,8 @@ mod tests {
         assert!(reg.is_empty());
         assert!(!reg.unregister(1), "double-unregister is idempotent");
         let mut pending = new_pending();
-        reg.respond_to_interest_borrowed(Some("group1/**"), 5, &mut pending);
+        reg.respond_to_interest_borrowed(Some("group1/**"), 5, &mut pending)
+            .expect("an empty buffer takes the chain");
         assert_eq!(count(&pending), (0, 1));
     }
 
@@ -620,13 +649,59 @@ mod tests {
         reg.register(2, "group1/b").unwrap();
         reg.register(3, "other/c").unwrap();
         let mut pending = new_pending();
-        let staged = reg.respond_to_interest_borrowed(Some("group1/**"), 11, &mut pending);
+        let staged = reg
+            .respond_to_interest_borrowed(Some("group1/**"), 11, &mut pending)
+            .expect("an empty buffer takes the chain");
         assert_eq!(staged, 2);
         assert_eq!(count(&pending), (2, 1));
         // The Final is last (terminates the batch).
         assert!(matches!(
             pending.iter().last(),
             Some(DeclResponseItem::Final { .. })
+        ));
+    }
+
+    /// A chain is staged whole or not at all. Before `bounded-heapless` this
+    /// was unreachable "by a cfg accident" (see `respond_to_interest_borrowed`),
+    /// and the code it replaced pushed tokens until the buffer filled and then
+    /// swallowed the `Final`: here that would have staged both tokens and no
+    /// terminator, leaving the peer's CURRENT Interest open on a dump it was
+    /// told nothing about. Fixed backing only: the growable one never refuses.
+    #[cfg(any(not(feature = "alloc"), feature = "bounded-heapless"))]
+    #[test]
+    fn a_chain_that_does_not_fit_whole_is_refused_and_stages_nothing() {
+        let mut reg = LocalTokenRegistry::new();
+        reg.register(1, "group1/a").unwrap();
+        reg.register(2, "group1/b").unwrap();
+        let mut pending = new_pending();
+        // Leave exactly two free slots; the chain needs three (two tokens and
+        // the terminating Final).
+        while pending.free_slots() > 2 {
+            pending
+                .push(DeclResponseItem::Final { interest_id: 0 })
+                .expect("below capacity");
+        }
+        let before = pending.len();
+        assert!(
+            reg.respond_to_interest_borrowed(Some("group1/**"), 9, &mut pending)
+                .is_err(),
+            "a chain that does not fit whole is refused"
+        );
+        assert_eq!(
+            pending.len(),
+            before,
+            "nothing of the refused chain is staged"
+        );
+        // A chain that fits the same room is still staged whole.
+        assert_eq!(
+            reg.respond_to_interest_borrowed(Some("group1/a"), 10, &mut pending)
+                .ok(),
+            Some(1)
+        );
+        assert_eq!(pending.free_slots(), 0);
+        assert!(matches!(
+            pending.iter().last(),
+            Some(DeclResponseItem::Final { interest_id: 10 })
         ));
     }
 
@@ -669,7 +744,8 @@ mod tests {
             extensions: None,
         };
         let mut pending = new_pending();
-        reg.respond_to_interest(&interest, &HashMap::new(), &mut pending);
+        reg.respond_to_interest(&interest, &HashMap::new(), &mut pending)
+            .expect("an empty buffer takes the chain");
         assert!(pending.is_empty());
     }
 
@@ -693,7 +769,8 @@ mod tests {
             extensions: None,
         };
         let mut pending = new_pending();
-        reg.respond_to_interest(&interest, &HashMap::new(), &mut pending);
+        reg.respond_to_interest(&interest, &HashMap::new(), &mut pending)
+            .expect("an empty buffer takes the chain");
         assert!(pending.is_empty());
     }
 
@@ -732,7 +809,8 @@ mod tests {
             extensions: None,
         };
         let mut pending = new_pending();
-        reg.respond_to_interest(&interest, &HashMap::new(), &mut pending);
+        reg.respond_to_interest(&interest, &HashMap::new(), &mut pending)
+            .expect("an empty buffer takes the chain");
         assert!(
             pending.is_empty(),
             "FUTURE-only interest must not stage a current-token replay",
@@ -766,8 +844,55 @@ mod tests {
             extensions: None,
         };
         let mut pending = new_pending();
-        reg.respond_to_interest(&interest, &HashMap::new(), &mut pending);
+        reg.respond_to_interest(&interest, &HashMap::new(), &mut pending)
+            .expect("an empty buffer takes the chain");
         assert_eq!(count(&pending), (1, 1));
+    }
+
+    /// The BATCHING path on the fixed backing: the combination `caps.rs`'s
+    /// `MAX_PENDING_DECLARES` note said would lose a chain's `Final`, and the
+    /// one `bounded-heapless` creates. A full token table makes each chain
+    /// `MAX_LOCAL_TOKENS + 1` = 9 items; four in one frame need 36 against 32.
+    /// Three are staged whole, the fourth is refused whole and reported, and
+    /// every staged chain still ends in its own `Final`.
+    #[cfg(all(feature = "alloc", feature = "bounded-heapless"))]
+    #[test]
+    fn a_frame_of_interests_past_the_buffer_refuses_the_chain_that_does_not_fit() {
+        use wz_codecs::interest_body::InterestBodyOwned;
+
+        let mut reg = LocalTokenRegistry::new();
+        for id in 0..caps::MAX_LOCAL_TOKENS as u64 {
+            let mut keyexpr: BoundedString<16> = BoundedString::new();
+            core::fmt::Write::write_fmt(&mut keyexpr, format_args!("t/{id}")).unwrap();
+            assert_eq!(reg.register(id, keyexpr.as_str()), Ok(true));
+        }
+        let interest = |interest_id: u64| {
+            NetworkMessage::Interest(InterestOwned {
+                header: 0x19 | 0x20, // CURRENT
+                interest_id,
+                body: Some(InterestBodyOwned {
+                    header: 0x08, // tokens bit; no keyexpr = match-all
+                    keyexpr: None,
+                }),
+                extensions: None,
+            })
+        };
+        let frame = [interest(1), interest(2), interest(3), interest(4)];
+        let mut pending = new_pending();
+        let refused = reg.dispatch_messages(&frame, &HashMap::new(), &mut pending);
+        let chain = caps::MAX_LOCAL_TOKENS + 1;
+        assert_eq!(
+            (refused, count(&pending)),
+            (1, (3 * caps::MAX_LOCAL_TOKENS, 3)),
+            "(chains refused, (tokens staged, finals staged))"
+        );
+        for (n, staged) in pending.chunks(chain).enumerate() {
+            let id = n as u64 + 1;
+            assert!(
+                matches!(staged.last(), Some(DeclResponseItem::Final { interest_id }) if *interest_id == id),
+                "chain {id} ends in its own Final"
+            );
+        }
     }
 
     /// R311y740 (N37) — the own-space WITNESS for the local-token INTEREST
@@ -818,7 +943,8 @@ mod tests {
             &interest,
             crate::wireexpr_resolve::MappingSpaces::with_own(&peer, &own),
             &mut pending,
-        );
+        )
+        .expect("an empty buffer takes the chain");
 
         assert_eq!(
             count(&pending),
@@ -870,7 +996,8 @@ mod tests {
         };
 
         let mut pending = new_pending();
-        reg.respond_to_interest(&interest, &peer, &mut pending);
+        reg.respond_to_interest(&interest, &peer, &mut pending)
+            .expect("an empty buffer takes the chain");
 
         assert_eq!(
             count(&pending),

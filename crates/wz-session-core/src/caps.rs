@@ -33,10 +33,15 @@
 //!
 //! # Backing-profile interaction
 //!
-//! Per [`crate::bounded`], `N` is the hard limit only on the no-alloc
-//! (MCU) backing; on the `alloc` (AP) backing it is advisory and
-//! `push` never fails. So these values bound the MCU footprint and
-//! serve as documentation on AP.
+//! Per [`crate::bounded`], `N` is the hard limit only on the FIXED
+//! backing (`alloc` off, or `bounded-heapless` on: the MCU profiles); on
+//! the growable backing (the AP profile) it is advisory and `push` never
+//! fails. So these values bound the MCU footprint and serve as
+//! documentation on AP. Before `bounded-heapless`, every MCU deploy linked
+//! an allocator and therefore compiled the growable backing, which made
+//! every limit here advisory on the MCU too; that feature is what turns
+//! them into refusals ([`crate::bounded::ENFORCES_CAPACITY`] says which a
+//! build has).
 //!
 //! # Provenance
 //!
@@ -137,14 +142,20 @@ pub const MAX_PENDING_LIVELINESS_GETS: usize = 8;
 ///   `respond_to_interest_borrowed` per Interest, so one 9-item chain meets
 ///   32 with room to spare.
 ///
-/// The batching and the hard bound therefore sit on OPPOSITE sides of the
+/// The batching and the hard bound therefore sat on OPPOSITE sides of the
 /// `alloc` cfg, which is why the swallowed `let _ = push(Final)` in
-/// `respond_to_interest_borrowed` is unreachable as shipped. That is a
-/// property of the cfg split, NOT a guarantee this constant provides: a
-/// future no-alloc consumer that threads ONE buffer across several
-/// Interests would overflow it and lose a chain's terminating `Final`.
-/// Size this against that consumer if one is ever written; do not read
-/// "generously" off the number.
+/// `respond_to_interest_borrowed` was unreachable as shipped. That was a
+/// property of the cfg split, NOT a guarantee this constant provides.
+///
+/// `bounded-heapless` (a fixed backing WITH `alloc`) is exactly the
+/// consumer that sentence warned about: the batching path and the hard
+/// bound meet. So the stagers no longer push best-effort. Each reply chain
+/// is sized first and staged WHOLE -- its items and its terminating `Final`
+/// -- or refused and counted
+/// ([`crate::pubsub::SubInterestRefusals`], the observer's
+/// `token_interest_chains_refused`); a chain is never truncated and never
+/// loses its `Final`. What this number still decides is how many chains
+/// one frame can be answered with before the next drain.
 pub const MAX_PENDING_DECLARES: usize = 32;
 
 /// Maximum number of inbound SUBSCRIBER `Interest`s one

@@ -2531,6 +2531,14 @@ impl QueryableRegistry<BoxedQuerySink> {
     /// R223 — defaults [`Locality::Any`](crate::locality::Locality);
     /// use [`register_with_locality`](Self::register_with_locality)
     /// to restrict to one origin class.
+    ///
+    /// GROWABLE BACKING ONLY, for the reason
+    /// [`crate::pubsub::SubscriberRegistry::register`] gives: a fixed-backing
+    /// build registers through
+    /// [`register_sink`](QueryableRegistry::register_sink) with
+    /// `BoxedQuerySink::new(handler)` and handles
+    /// [`RegisterError::TableFull`].
+    #[cfg(any(test, doc, not(feature = "bounded-heapless")))]
     pub fn register(
         &mut self,
         keyexpr_pattern: impl Into<String>,
@@ -2546,6 +2554,10 @@ impl QueryableRegistry<BoxedQuerySink> {
     /// [`crate::pubsub::SubscriberRegistry::register_with_locality`]
     /// for the dispatch-invariant rationale (every inbound Request
     /// is remote until self-publish loopback lands).
+    ///
+    /// GROWABLE BACKING ONLY, for the reason [`register`](Self::register)
+    /// gives.
+    #[cfg(any(test, doc, not(feature = "bounded-heapless")))]
     pub fn register_with_locality(
         &mut self,
         keyexpr_pattern: impl Into<String>,

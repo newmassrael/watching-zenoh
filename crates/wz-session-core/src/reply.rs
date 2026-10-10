@@ -1608,6 +1608,14 @@ impl ReplyRegistry<ConsolidatingSink<BoxedReplySink>> {
     /// produce: `BoundedString::push_str` is infallible there (the bound is
     /// advisory), so on this instantiation the only reachable error was, and
     /// remains, none.
+    ///
+    /// GROWABLE BACKING ONLY: that "none" holds only where the table grows.
+    /// Under `bounded-heapless` the `.expect()` would be a panic at the first
+    /// full table, so this wrapper is not compiled there (except for this
+    /// crate's own tests and docs); a fixed-backing build calls
+    /// [`register_sink`](Self::register_sink) with a `BoxedReplySink` and
+    /// handles the `Err`.
+    #[cfg(any(test, doc, not(feature = "bounded-heapless")))]
     pub fn register(
         &mut self,
         rid: u64,

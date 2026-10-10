@@ -253,6 +253,13 @@ impl LivelinessRegistry<BoxedDeclSink, BoxedUndeclSink> {
     /// ([`feedback_signature_stability`] wire-data exemption). Heap-boxed
     /// via [`BoxedDeclSink`]. R311lb — returns the registry-local
     /// observer id (see [`Self::remove_token_declared_sink`]).
+    ///
+    /// GROWABLE BACKING ONLY: under `bounded-heapless` the observer list is
+    /// fixed and the `.expect` inside would be a panic at the first full
+    /// list, so this wrapper is not compiled there (except for this crate's
+    /// own tests and docs). A fixed-backing build installs through
+    /// [`Self::on_token_declared_sink`] and handles the `Err`.
+    #[cfg(any(test, doc, not(feature = "bounded-heapless")))]
     pub fn on_token_declared(
         &mut self,
         callback: impl FnMut(&dyn crate::decl_sink::DeclView) + Send + 'static,
@@ -265,6 +272,10 @@ impl LivelinessRegistry<BoxedDeclSink, BoxedUndeclSink> {
     /// The closure receives the bare `id` (`u64`). Heap-boxed via
     /// [`BoxedUndeclSink`]. R311lb — returns the registry-local observer
     /// id (see [`Self::remove_token_undeclared_sink`]).
+    ///
+    /// GROWABLE BACKING ONLY, for the reason
+    /// [`Self::on_token_declared`] gives.
+    #[cfg(any(test, doc, not(feature = "bounded-heapless")))]
     pub fn on_token_undeclared(&mut self, callback: impl FnMut(u64) + Send + 'static) -> u64 {
         self.on_token_undeclared_sink(BoxedUndeclSink::new(callback))
             .expect("observer install on the alloc backing never exceeds declared capacity")

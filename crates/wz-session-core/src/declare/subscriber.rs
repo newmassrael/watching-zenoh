@@ -604,6 +604,13 @@ impl RemoteSubscriberRegistry<BoxedDeclSink, BoxedUndeclSink> {
     /// R311lb — returns the registry-local observer id (see
     /// [`Self::remove_subscriber_declared_sink`]); existing callers that
     /// never remove may ignore it.
+    ///
+    /// GROWABLE BACKING ONLY: under `bounded-heapless` the observer list is
+    /// fixed and the `.expect` inside would be a panic at the first full
+    /// list, so this wrapper is not compiled there (except for this crate's
+    /// own tests and docs). A fixed-backing build installs through
+    /// [`Self::on_subscriber_declared_sink`] and handles the `Err`.
+    #[cfg(any(test, doc, not(feature = "bounded-heapless")))]
     pub fn on_subscriber_declared(
         &mut self,
         callback: impl FnMut(&dyn crate::decl_sink::DeclView) + Send + 'static,
@@ -621,6 +628,10 @@ impl RemoteSubscriberRegistry<BoxedDeclSink, BoxedUndeclSink> {
     /// [`Self::on_subscriber_declared`]. The closure is heap-boxed via
     /// [`BoxedUndeclSink`]. R311lb — returns the registry-local observer
     /// id (see [`Self::remove_subscriber_undeclared_sink`]).
+    ///
+    /// GROWABLE BACKING ONLY, for the reason
+    /// [`Self::on_subscriber_declared`] gives.
+    #[cfg(any(test, doc, not(feature = "bounded-heapless")))]
     pub fn on_subscriber_undeclared(&mut self, callback: impl FnMut(u64) + Send + 'static) -> u64 {
         self.on_subscriber_undeclared_sink(BoxedUndeclSink::new(callback))
             .expect("observer install on the alloc backing never exceeds declared capacity")

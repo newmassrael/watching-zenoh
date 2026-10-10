@@ -6,7 +6,7 @@
 //!
 //! R311gb (Track 2) — every bounded registry's `register*` /
 //! `on_*_declared_sink` entry point can fail in exactly the same two ways
-//! on the no-alloc (MCU) backing: the backing table is at its declared
+//! on the fixed (MCU) backing: the backing table is at its declared
 //! [`crate::caps`] capacity, or a stored keyexpr exceeds
 //! [`crate::caps::MAX_KEYEXPR_BYTES`]. Rather than each registry minting a
 //! byte-identical private error enum (the R311hd..hg state had five),
@@ -17,11 +17,14 @@
 //! declaration-observer registries store no keyexpr, so they only ever
 //! return [`RegisterError::TableFull`]. This is the idiomatic shared-error
 //! shape (cf. `std::io::Error`'s kinds) — a single operation produces a
-//! subset of the type's variants. On the `alloc` (AP) backing no variant
+//! subset of the type's variants. On the growable (AP) backing no variant
 //! is ever returned: the table and keyexpr buffer grow past the advisory
-//! capacity, so the convenience wrappers `.expect()` the result.
+//! capacity, so the closure-taking convenience wrappers `.expect()` the
+//! result -- which is why those wrappers are not compiled with
+//! `bounded-heapless`, the fixed backing an MCU build selects while still
+//! linking an allocator ([`crate::bounded::ENFORCES_CAPACITY`]).
 
-/// Failure modes of a bounded registry registration on the no-alloc
+/// Failure modes of a bounded registry registration on the fixed
 /// backing. Shared across [`crate::pubsub`], [`crate::query`],
 /// [`crate::reply`], and the [`crate::declare`] registries.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

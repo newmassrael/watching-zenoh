@@ -182,8 +182,19 @@ impl<C: ReplySink> LivelinessGetRegistry<C> {
     /// (no-op). `deadline_ms` is the absolute monotonic-ms timeout
     /// snapshot (`None` = never expires). Returns `Ok(true)` on a fresh
     /// registration, `Err(TableFull)` when the pending table is at
-    /// [`caps::MAX_PENDING_LIVELINESS_GETS`] (fail-fast on the no-alloc
-    /// backing; never returned on the `alloc` backing).
+    /// [`caps::MAX_PENDING_LIVELINESS_GETS`] (fail-fast on the fixed
+    /// backing; never returned on the growable backing).
+    ///
+    /// On the fixed backing a terminated get's `finalized` marker still
+    /// occupies its slot until [`take_finalized`](Self::take_finalized)
+    /// drains it, so the table is full when `pending + finalized` reaches
+    /// the capacity. That keeps `pending.len() <= finalized.free_slots()`
+    /// as an invariant of the TYPE rather than of every caller's draining
+    /// discipline: each termination moves one entry from `pending` to
+    /// `finalized`, so the marker push in `fire_final_for` /
+    /// `sweep_timed_out` can never be the one refused (a refused marker
+    /// would be a permanent replay leak). On the growable backing
+    /// `free_slots` is unbounded and this check never refuses.
     pub fn register(
         &mut self,
         interest_id: u64,
@@ -192,6 +203,9 @@ impl<C: ReplySink> LivelinessGetRegistry<C> {
     ) -> Result<bool, RegisterError> {
         if self.pending.iter().any(|p| p.interest_id == interest_id) {
             return Ok(false);
+        }
+        if self.pending.len() >= self.finalized.free_slots() {
+            return Err(RegisterError::TableFull);
         }
         self.pending
             .push(PendingGet {
@@ -501,10 +515,11 @@ impl LivelinessGetRegistry<BoxedReplySink> {
     /// Register a pending get from the `on_reply` + `on_final` capturing
     /// closures (the dynamic-opt-in AP surface). Wraps them in a
     /// [`BoxedReplySink`] and funnels through
-    /// [`register`](LivelinessGetRegistry::register); on the `alloc`
+    /// [`register`](LivelinessGetRegistry::register); on the growable
     /// backing the table never overflows, so the `TableFull` arm is
     /// unreachable and the result is `Ok(true)` for a fresh id /
-    /// `Ok(false)` for a duplicate.
+    /// `Ok(false)` for a duplicate. On the fixed backing (`bounded-heapless`)
+    /// `TableFull` is a real answer the caller handles.
     pub fn register_get(
         &mut self,
         interest_id: u64,
@@ -886,5 +901,40 @@ mod tests {
         assert_eq!(reg.sweep_timed_out(1000), 1);
         let staged: Vec<u64> = reg.take_finalized().into_iter().collect();
         assert_eq!(staged, vec![8]);
+    }
+
+    /// On the fixed backing a terminated get's `finalized` marker holds its
+    /// slot until the prune drain takes it. Without that, a registration made
+    /// before the drain could fill `pending` back to the capacity `finalized`
+    /// shares, and the next termination's marker push would be the refused one
+    /// — a permanent replay leak that only a `debug_assert` stood between.
+    #[cfg(feature = "bounded-heapless")]
+    #[test]
+    fn an_undrained_final_marker_holds_its_slot_on_the_fixed_backing() {
+        let mut reg = LivelinessGetRegistry::new();
+        let r: Captured = Arc::new(Mutex::new(Vec::new()));
+        let f: Arc<Mutex<Vec<u64>>> = Arc::new(Mutex::new(Vec::new()));
+        for id in 0..caps::MAX_PENDING_LIVELINESS_GETS as u64 {
+            assert_eq!(
+                reg.register(id, None, make_get(r.clone(), f.clone())),
+                Ok(true)
+            );
+        }
+        assert!(
+            reg.dispatch_final(0),
+            "get 0 terminates; its marker is staged"
+        );
+        assert_eq!(
+            reg.register(100, None, make_get(r.clone(), f.clone())),
+            Err(RegisterError::TableFull),
+            "the undrained marker still occupies its slot"
+        );
+        let staged: Vec<u64> = reg.take_finalized().into_iter().collect();
+        assert_eq!(staged, vec![0]);
+        assert_eq!(
+            reg.register(100, None, make_get(r.clone(), f.clone())),
+            Ok(true),
+            "the drain frees the slot"
+        );
     }
 }

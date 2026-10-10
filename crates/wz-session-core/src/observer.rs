@@ -327,6 +327,13 @@ pub struct ApplicationLayerObserver {
     /// (was `Vec<DeclareOwned>`), so the drain composes without `alloc`.
     #[cfg(feature = "liveliness-token")]
     pending_declares: BoundedVec<DeclResponseItem, { caps::MAX_PENDING_DECLARES }>,
+    /// Inbound liveliness-token Interests whose reply chain `pending_declares`
+    /// could not take WHOLE, and which were therefore staged not at all
+    /// (`LocalTokenRegistry::respond_to_interest_borrowed` refuses rather than
+    /// truncate). Reachable only on the fixed backing, where one frame's
+    /// Interests share the buffer up to [`caps::MAX_PENDING_DECLARES`] items.
+    #[cfg(feature = "liveliness-token")]
+    token_interest_chains_refused: u32,
 }
 
 impl Default for ApplicationLayerObserver {
@@ -394,7 +401,17 @@ impl ApplicationLayerObserver {
             // no-heap `BoundedVec`.
             #[cfg(feature = "liveliness-token")]
             pending_declares: BoundedVec::new(),
+            #[cfg(feature = "liveliness-token")]
+            token_interest_chains_refused: 0,
         }
+    }
+
+    /// How many inbound liveliness-token Interests had their reply chain
+    /// refused whole by the staging buffer since this observer was built.
+    /// Always zero on the growable backing, where staging never refuses.
+    #[cfg(feature = "liveliness-token")]
+    pub fn token_interest_chains_refused(&self) -> u32 {
+        self.token_interest_chains_refused
     }
 
     /// Phase 1 — fan an [`IterationEvent`] into every contained
@@ -530,8 +547,16 @@ impl ApplicationLayerObserver {
         // `respond_to_interest_borrowed` is driven directly, not through
         // this aggregate fan.
         #[cfg(all(feature = "liveliness-token", feature = "alloc"))]
-        self.local_tokens
-            .dispatch_iteration_event(event, peer_table, &mut self.pending_declares);
+        {
+            let refused = self.local_tokens.dispatch_iteration_event(
+                event,
+                peer_table,
+                &mut self.pending_declares,
+            );
+            self.token_interest_chains_refused = self
+                .token_interest_chains_refused
+                .saturating_add(u32::try_from(refused).unwrap_or(u32::MAX));
+        }
         // Same claim, the other observer plane. This is the half with STATE:
         // the registry's peer token table is wz's `remote_tokens`, so an
         // unfiltered fan would also record a GET's answer as if the peer had

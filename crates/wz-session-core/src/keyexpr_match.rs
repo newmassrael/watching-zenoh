@@ -64,13 +64,14 @@
 use crate::bounded::BoundedVec;
 
 /// Maximum number of `/`-separated chunks a target keyexpr is split
-/// into for the backtracking matcher. On the MCU no-heap profile this
-/// is the hard declared bound (`BoundedVec`'s no-alloc backing); a
-/// target deeper than this is conservatively treated as no-match (the
-/// §2.1 bounded-declared-table philosophy — MCU keyexprs are
-/// deploy-bounded). On the AP profile the `BoundedVec` `alloc` backing
-/// grows past it, so AP behaviour is unbounded and identical to the
-/// prior `Vec` form. Mirrors the `parse_error::MAX_EXT_CHAIN_DEPTH`
+/// into for the backtracking matcher. On the MCU profiles this is the
+/// hard declared bound (`BoundedVec`'s fixed backing: `alloc` off, or
+/// `bounded-heapless` on); a target deeper than this is conservatively
+/// treated as no-match (the §2.1 bounded-declared-table philosophy — MCU
+/// keyexprs are deploy-bounded), so a peer's 33-chunk keyexpr is
+/// delivered to no subscriber there. On the AP profile the growable
+/// backing grows past it, so AP behaviour is unbounded and identical to
+/// the prior `Vec` form. Mirrors the `parse_error::MAX_EXT_CHAIN_DEPTH`
 /// declared-bound precedent.
 pub const MAX_KEYEXPR_CHUNKS: usize = 32;
 
@@ -1005,11 +1006,15 @@ mod tests {
         ));
     }
 
-    // No-alloc backing only: a target deeper than MAX_KEYEXPR_CHUNKS is
-    // conservatively no-match. On the alloc backing the BoundedVec grows
-    // past the declared bound, so this assertion is gated off it. Uses
-    // `**` so it requires the double-wildcard toggle.
-    #[cfg(all(not(feature = "alloc"), feature = "keyexpr-wildcard-double"))]
+    // Fixed backing only (`alloc` off, or `bounded-heapless`): a target
+    // deeper than MAX_KEYEXPR_CHUNKS is conservatively no-match. On the
+    // growable backing the BoundedVec grows past the declared bound, so
+    // this assertion is gated off it. Uses `**` so it requires the
+    // double-wildcard toggle.
+    #[cfg(all(
+        any(not(feature = "alloc"), feature = "bounded-heapless"),
+        feature = "keyexpr-wildcard-double"
+    ))]
     #[test]
     fn over_depth_target_is_conservative_no_match_no_alloc() {
         // MAX_KEYEXPR_CHUNKS + 1 chunks, all matched by `**`.
@@ -1025,7 +1030,11 @@ mod tests {
         assert!(!keyexpr_pattern_matches(&["**"], deep));
     }
 
-    #[cfg(all(feature = "alloc", feature = "keyexpr-wildcard-double"))]
+    #[cfg(all(
+        feature = "alloc",
+        not(feature = "bounded-heapless"),
+        feature = "keyexpr-wildcard-double"
+    ))]
     #[test]
     fn over_depth_target_matches_on_alloc() {
         let deep = "a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a";
@@ -1039,7 +1048,7 @@ mod tests {
     // conservatively no-match past the bound while the alloc backing grows. Mirrors
     // the over_depth_target_* pair above. Literal 33-vs-33 so no wildcard toggle is
     // needed (an equal candidate isolates the bound, not the content, as the cause).
-    #[cfg(not(feature = "alloc"))]
+    #[cfg(any(not(feature = "alloc"), feature = "bounded-heapless"))]
     #[test]
     fn intersects_target_candidate_over_depth_no_match_no_alloc() {
         let deep = "a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a";
@@ -1051,7 +1060,7 @@ mod tests {
         assert!(keyexpr_intersects_target("a/a/a", &["a", "a", "a"]));
     }
 
-    #[cfg(feature = "alloc")]
+    #[cfg(all(feature = "alloc", not(feature = "bounded-heapless")))]
     #[test]
     fn intersects_target_candidate_over_depth_matches_on_alloc() {
         let deep = "a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a";

@@ -2215,7 +2215,9 @@ mod tests {
         };
         let mut pending: BoundedVec<DeclResponseItem, { caps::MAX_PENDING_DECLARES }> =
             BoundedVec::new();
-        responder.respond_to_interest(&interest, &HashMap::new(), &mut pending);
+        responder
+            .respond_to_interest(&interest, &HashMap::new(), &mut pending)
+            .expect("an empty buffer takes the chain");
 
         // Reify the staged replay into the wire Declares the sink emits:
         // one Declare(DeclToken{interest_id}) per match + the terminating

@@ -11,34 +11,56 @@
 //! §2.3) and onto an unbounded `alloc::Vec` on AP (a general-purpose
 //! machine with none of those constraints, §2.3 note). This type is
 //! that seam — registry logic is written once against `BoundedVec`,
-//! and only the storage backing swaps with the `alloc` feature:
+//! and only the storage backing swaps. Two backings, selected by two
+//! features, because "an allocator is linked" and "the declared
+//! capacities are hard" are different facts about a build:
 //!
-//! - **`alloc` on (AP profile)** — backed by `alloc::vec::Vec<T>`.
-//!   [`push`](BoundedVec::push) never fails; the declared capacity `N`
-//!   is advisory (AP is the dynamic-opt-in side and may exceed it).
-//! - **`alloc` off (MCU profile)** — backed by `heapless::Vec<T, N>`.
+//! - **growable** (`alloc` on, `bounded-heapless` off — the AP profile)
+//!   — backed by `alloc::vec::Vec<T>`. [`push`](BoundedVec::push) never
+//!   fails; the declared capacity `N` is advisory (AP is the
+//!   dynamic-opt-in side and may exceed it).
+//! - **fixed** (`alloc` off, OR `bounded-heapless` on — the MCU
+//!   profiles) — backed by `heapless::Vec<T, N>`.
 //!   [`push`](BoundedVec::push) returns [`CapacityFull`] when the
 //!   declared capacity `N` is full. There is no silent drop — the
 //!   caller decides what to do with the rejected value, mirroring
 //!   zenoh-pico's table-full reject (and the §2.1 build-time-enforced
 //!   bounded declared-subscription table).
 //!
+//! `bounded-heapless` is what lets an MCU build keep `alloc` for the
+//! rest of the session machinery and still get every
+//! [`crate::caps`] limit as a hard bound; before it, `alloc` alone chose
+//! the growable backing, so on every MCU deploy (all of which link an
+//! allocator) the caps were advisory and `TableFull` was unreachable.
+//! [`crate::bounded::ENFORCES_CAPACITY`] states which backing a build compiled, for a
+//! consumer that must refuse to build on the wrong one.
+//!
 //! The fallible-push signature is identical on both backings, so the
-//! caller writes one capacity-aware code path; the `alloc` build's
+//! caller writes one capacity-aware code path; the growable build's
 //! `Ok(())` arm is simply never taken on the failure side. `N` is the
 //! deploy-declared capacity (the wiring of `N` from `deploy.yaml`
 //! lands with the first registry migration; this module only fixes the
 //! container contract).
 
-#[cfg(feature = "alloc")]
+#[cfg(all(feature = "alloc", not(feature = "bounded-heapless")))]
 use alloc::string::String;
-#[cfg(feature = "alloc")]
+#[cfg(all(feature = "alloc", not(feature = "bounded-heapless")))]
 use alloc::vec::Vec;
 
 use core::fmt;
 use core::ops::{Deref, DerefMut};
 
-/// Error returned by [`BoundedVec::push`] when a no-alloc backing has
+/// Whether this build compiled the FIXED backing, on which every push past
+/// the declared capacity `N` is refused. `false` means the growable backing,
+/// on which `N` is advisory and no push fails.
+///
+/// For a consumer whose code relies on one of the two: an AP crate that
+/// treats a registration as infallible asserts `!ENFORCES_CAPACITY` at
+/// compile time, so a build graph that unifies `bounded-heapless` into it
+/// fails to build instead of panicking at the first table that fills.
+pub const ENFORCES_CAPACITY: bool = cfg!(any(not(feature = "alloc"), feature = "bounded-heapless"));
+
+/// Error returned by [`BoundedVec::push`] when the fixed backing has
 /// reached its declared capacity `N`. Carries the rejected value back
 /// to the caller so it can be recovered, retried, or logged — never
 /// silently dropped.
@@ -61,15 +83,15 @@ impl<T> fmt::Display for CapacityFull<T> {
 impl<T> core::error::Error for CapacityFull<T> {}
 
 /// Capacity-generic owned sequence. See the [module docs](self) for the
-/// AP (`alloc`) vs MCU (no-alloc) backing contract.
-#[cfg(feature = "alloc")]
+/// growable (AP) vs fixed (MCU) backing contract.
+#[cfg(all(feature = "alloc", not(feature = "bounded-heapless")))]
 pub struct BoundedVec<T, const N: usize> {
     inner: Vec<T>,
 }
 
 /// Capacity-generic owned sequence. See the [module docs](self) for the
-/// AP (`alloc`) vs MCU (no-alloc) backing contract.
-#[cfg(not(feature = "alloc"))]
+/// growable (AP) vs fixed (MCU) backing contract.
+#[cfg(any(not(feature = "alloc"), feature = "bounded-heapless"))]
 pub struct BoundedVec<T, const N: usize> {
     inner: heapless::Vec<T, N>,
 }
@@ -77,40 +99,60 @@ pub struct BoundedVec<T, const N: usize> {
 impl<T, const N: usize> BoundedVec<T, N> {
     /// Construct an empty backing store. `const` on both backings so a
     /// registry may hold a `BoundedVec` in a `const`/`static` slot.
-    #[cfg(feature = "alloc")]
+    #[cfg(all(feature = "alloc", not(feature = "bounded-heapless")))]
     pub const fn new() -> Self {
         Self { inner: Vec::new() }
     }
 
     /// Construct an empty backing store. `const` on both backings so a
     /// registry may hold a `BoundedVec` in a `const`/`static` slot.
-    #[cfg(not(feature = "alloc"))]
+    #[cfg(any(not(feature = "alloc"), feature = "bounded-heapless"))]
     pub const fn new() -> Self {
         Self {
             inner: heapless::Vec::new(),
         }
     }
 
-    /// The declared logical capacity `N`. Advisory on the `alloc`
+    /// The declared logical capacity `N`. Advisory on the growable
     /// backing (AP may exceed it); the hard limit `push` enforces on
-    /// the no-alloc backing.
+    /// the fixed backing.
     pub const fn capacity(&self) -> usize {
         N
     }
 
-    /// Append `value`. On the `alloc` backing this always returns
-    /// `Ok(())`. On the no-alloc backing it returns
+    /// How many more pushes are guaranteed to succeed: `N - len` on the
+    /// fixed backing, and `usize::MAX` on the growable one, where no push
+    /// fails.
+    ///
+    /// For a caller that stages a group of entries which is only correct
+    /// WHOLE (a reply chain and its terminating `Final`): checking room for
+    /// the whole group first is what lets it refuse the group instead of
+    /// staging half of it.
+    #[cfg(all(feature = "alloc", not(feature = "bounded-heapless")))]
+    pub fn free_slots(&self) -> usize {
+        usize::MAX
+    }
+
+    /// How many more pushes are guaranteed to succeed. See the growable
+    /// arm for the contract; this one answers `N - len`.
+    #[cfg(any(not(feature = "alloc"), feature = "bounded-heapless"))]
+    pub fn free_slots(&self) -> usize {
+        N - self.inner.len()
+    }
+
+    /// Append `value`. On the growable backing this always returns
+    /// `Ok(())`. On the fixed backing it returns
     /// `Err(CapacityFull(value))` once `N` entries are present.
-    #[cfg(feature = "alloc")]
+    #[cfg(all(feature = "alloc", not(feature = "bounded-heapless")))]
     pub fn push(&mut self, value: T) -> Result<(), CapacityFull<T>> {
         self.inner.push(value);
         Ok(())
     }
 
-    /// Append `value`. On the `alloc` backing this always returns
-    /// `Ok(())`. On the no-alloc backing it returns
+    /// Append `value`. On the growable backing this always returns
+    /// `Ok(())`. On the fixed backing it returns
     /// `Err(CapacityFull(value))` once `N` entries are present.
-    #[cfg(not(feature = "alloc"))]
+    #[cfg(any(not(feature = "alloc"), feature = "bounded-heapless"))]
     pub fn push(&mut self, value: T) -> Result<(), CapacityFull<T>> {
         self.inner.push(value).map_err(CapacityFull)
     }
@@ -201,10 +243,10 @@ impl<const N: usize> BoundedVec<u8, N> {
     /// that makes the heap backing cheap. The cost here is `want`.
     ///
     /// The two backings differ the same way [`Self::push`] documents: `N` is
-    /// advisory on the `alloc` backing (AP may exceed it) and a hard limit on
-    /// the no-alloc one, where passing it returns `CapacityFull` rather than
+    /// advisory on the growable backing (AP may exceed it) and a hard limit on
+    /// the fixed one, where passing it returns `CapacityFull` rather than
     /// growing.
-    #[cfg(feature = "alloc")]
+    #[cfg(all(feature = "alloc", not(feature = "bounded-heapless")))]
     pub fn grow_for_fill(&mut self, want: usize) -> Result<&mut [u8], CapacityFull<()>> {
         let start = self.inner.len();
         let end = start.checked_add(want).ok_or(CapacityFull(()))?;
@@ -213,8 +255,8 @@ impl<const N: usize> BoundedVec<u8, N> {
     }
 
     /// Materialise `want` more bytes at the end and hand back exactly those.
-    /// See the `alloc` arm for the contract; this one enforces `N`.
-    #[cfg(not(feature = "alloc"))]
+    /// See the growable arm for the contract; this one enforces `N`.
+    #[cfg(any(not(feature = "alloc"), feature = "bounded-heapless"))]
     pub fn grow_for_fill(&mut self, want: usize) -> Result<&mut [u8], CapacityFull<()>> {
         let start = self.inner.len();
         let end = start.checked_add(want).ok_or(CapacityFull(()))?;
@@ -236,12 +278,12 @@ impl<T, const N: usize> Default for BoundedVec<T, N> {
 }
 
 // By-value `IntoIterator` consumes the backing into an owning iterator on
-// both profiles. Registries that must remove-then-fire under a no-alloc
+// both profiles. Registries that must remove-then-fire under the fixed
 // backing (the reply registry's `fire_final_for` / `sweep_timed_out`
 // drain-partition-fire pattern) take the table with `core::mem::take` and
 // iterate it by value into bounded `keep` / `fired` partitions — no heap
 // temporary on the MCU profile.
-#[cfg(feature = "alloc")]
+#[cfg(all(feature = "alloc", not(feature = "bounded-heapless")))]
 impl<T, const N: usize> IntoIterator for BoundedVec<T, N> {
     type Item = T;
     type IntoIter = alloc::vec::IntoIter<T>;
@@ -251,7 +293,7 @@ impl<T, const N: usize> IntoIterator for BoundedVec<T, N> {
     }
 }
 
-#[cfg(not(feature = "alloc"))]
+#[cfg(any(not(feature = "alloc"), feature = "bounded-heapless"))]
 impl<T, const N: usize> IntoIterator for BoundedVec<T, N> {
     type Item = T;
     type IntoIter = <heapless::Vec<T, N> as IntoIterator>::IntoIter;
@@ -284,10 +326,10 @@ impl<T, const N: usize> DerefMut for BoundedVec<T, N> {
 /// keyexprs, locator addresses, diagnostic chunks). Same backing
 /// contract as [`BoundedVec`]:
 ///
-/// - **`alloc` on (AP)** — backed by `alloc::string::String`;
+/// - **growable (AP)** — backed by `alloc::string::String`;
 ///   [`push_str`](BoundedString::push_str) never fails, `N` is
 ///   advisory.
-/// - **`alloc` off (MCU)** — backed by `heapless::String<N>`;
+/// - **fixed (MCU)** — backed by `heapless::String<N>`;
 ///   [`push_str`](BoundedString::push_str) returns [`CapacityFull`]
 ///   when the append would exceed the declared `N` *bytes*, leaving
 ///   the buffer unchanged (heapless append is atomic — no partial
@@ -296,21 +338,21 @@ impl<T, const N: usize> DerefMut for BoundedVec<T, N> {
 /// Implements [`core::fmt::Write`] on both backings, so the value
 /// modules can build output with `write!` / `core::fmt` machinery and
 /// get the same capacity-failure surface (`fmt::Error` on overflow).
-#[cfg(feature = "alloc")]
+#[cfg(all(feature = "alloc", not(feature = "bounded-heapless")))]
 pub struct BoundedString<const N: usize> {
     inner: String,
 }
 
-/// Capacity-generic owned UTF-8 string. See the type docs for the AP
-/// (`alloc`) vs MCU (no-alloc) backing contract.
-#[cfg(not(feature = "alloc"))]
+/// Capacity-generic owned UTF-8 string. See the type docs for the
+/// growable (AP) vs fixed (MCU) backing contract.
+#[cfg(any(not(feature = "alloc"), feature = "bounded-heapless"))]
 pub struct BoundedString<const N: usize> {
     inner: heapless::String<N>,
 }
 
 impl<const N: usize> BoundedString<N> {
     /// Construct an empty string. `const` on both backings.
-    #[cfg(feature = "alloc")]
+    #[cfg(all(feature = "alloc", not(feature = "bounded-heapless")))]
     pub const fn new() -> Self {
         Self {
             inner: String::new(),
@@ -318,46 +360,46 @@ impl<const N: usize> BoundedString<N> {
     }
 
     /// Construct an empty string. `const` on both backings.
-    #[cfg(not(feature = "alloc"))]
+    #[cfg(any(not(feature = "alloc"), feature = "bounded-heapless"))]
     pub const fn new() -> Self {
         Self {
             inner: heapless::String::new(),
         }
     }
 
-    /// The declared logical byte capacity `N`. Advisory on the `alloc`
+    /// The declared logical byte capacity `N`. Advisory on the growable
     /// backing; the hard byte limit `push_str` / `push` enforce on the
-    /// no-alloc backing.
+    /// fixed backing.
     pub const fn capacity(&self) -> usize {
         N
     }
 
-    /// Append a string slice. `Ok(())` always on the `alloc` backing;
-    /// `Err(CapacityFull(()))` on the no-alloc backing when the append
+    /// Append a string slice. `Ok(())` always on the growable backing;
+    /// `Err(CapacityFull(()))` on the fixed backing when the append
     /// would exceed `N` bytes (buffer left unchanged).
-    #[cfg(feature = "alloc")]
+    #[cfg(all(feature = "alloc", not(feature = "bounded-heapless")))]
     pub fn push_str(&mut self, s: &str) -> Result<(), CapacityFull<()>> {
         self.inner.push_str(s);
         Ok(())
     }
 
-    /// Append a string slice. `Ok(())` always on the `alloc` backing;
-    /// `Err(CapacityFull(()))` on the no-alloc backing when the append
+    /// Append a string slice. `Ok(())` always on the growable backing;
+    /// `Err(CapacityFull(()))` on the fixed backing when the append
     /// would exceed `N` bytes (buffer left unchanged).
-    #[cfg(not(feature = "alloc"))]
+    #[cfg(any(not(feature = "alloc"), feature = "bounded-heapless"))]
     pub fn push_str(&mut self, s: &str) -> Result<(), CapacityFull<()>> {
         self.inner.push_str(s).map_err(|_| CapacityFull(()))
     }
 
     /// Append one `char`. Capacity semantics mirror [`push_str`].
-    #[cfg(feature = "alloc")]
+    #[cfg(all(feature = "alloc", not(feature = "bounded-heapless")))]
     pub fn push(&mut self, c: char) -> Result<(), CapacityFull<char>> {
         self.inner.push(c);
         Ok(())
     }
 
     /// Append one `char`. Capacity semantics mirror [`push_str`].
-    #[cfg(not(feature = "alloc"))]
+    #[cfg(any(not(feature = "alloc"), feature = "bounded-heapless"))]
     pub fn push(&mut self, c: char) -> Result<(), CapacityFull<char>> {
         self.inner.push(c).map_err(|_| CapacityFull(c))
     }
@@ -427,7 +469,7 @@ impl<const N: usize, const M: usize> PartialEq<BoundedString<M>> for BoundedStri
 impl<const N: usize> Eq for BoundedString<N> {}
 
 // `fmt::Write` lets the owned-output modules build a BoundedString with
-// `write!` / `core::fmt`; the no-alloc backing surfaces a full buffer
+// `write!` / `core::fmt`; the fixed backing surfaces a full buffer
 // as `fmt::Error`, the standard `core::fmt` capacity-failure channel.
 impl<const N: usize> fmt::Write for BoundedString<N> {
     fn write_str(&mut self, s: &str) -> fmt::Result {
@@ -503,10 +545,10 @@ mod tests {
         assert!(all.is_empty());
     }
 
-    // Capacity overflow is backing-specific: only the no-alloc backing
-    // enforces `N`. On the `alloc` backing push is infinite (AP is the
+    // Capacity overflow is backing-specific: only the fixed backing
+    // enforces `N`. On the growable backing push is infinite (AP is the
     // dynamic-opt-in side), so the overflow assertion is gated off it.
-    #[cfg(not(feature = "alloc"))]
+    #[cfg(any(not(feature = "alloc"), feature = "bounded-heapless"))]
     #[test]
     fn push_past_capacity_returns_rejected_value_no_alloc() {
         let mut v: BoundedVec<u32, 2> = BoundedVec::new();
@@ -518,7 +560,7 @@ mod tests {
         assert_eq!(v.len(), 2);
     }
 
-    #[cfg(feature = "alloc")]
+    #[cfg(all(feature = "alloc", not(feature = "bounded-heapless")))]
     #[test]
     fn push_past_declared_capacity_grows_on_alloc() {
         let mut v: BoundedVec<u32, 2> = BoundedVec::new();
@@ -527,6 +569,25 @@ mod tests {
         }
         assert_eq!(v.len(), 8);
         assert_eq!(v.capacity(), 2);
+    }
+
+    // `free_slots` is what a whole-group stager reserves against, so it has
+    // to agree with `push` on each backing: exactly the pushes that succeed.
+    #[test]
+    fn free_slots_counts_the_pushes_that_still_succeed() {
+        let mut v: BoundedVec<u32, 2> = BoundedVec::new();
+        v.push(1).unwrap();
+        if ENFORCES_CAPACITY {
+            assert_eq!(v.free_slots(), 1);
+            v.push(2).unwrap();
+            assert_eq!(v.free_slots(), 0);
+            assert!(v.push(3).is_err());
+        } else {
+            assert_eq!(v.free_slots(), usize::MAX);
+            v.push(2).unwrap();
+            assert!(v.push(3).is_ok(), "the growable backing refuses nothing");
+            assert_eq!(v.free_slots(), usize::MAX);
+        }
     }
 
     #[test]
@@ -541,9 +602,9 @@ mod tests {
         assert_eq!(&*s, "home/temp");
     }
 
-    // No-alloc backing enforces the byte cap atomically (no partial
-    // write). Gated off the alloc backing, which grows past `N`.
-    #[cfg(not(feature = "alloc"))]
+    // The fixed backing enforces the byte cap atomically (no partial
+    // write). Gated off the growable backing, which grows past `N`.
+    #[cfg(any(not(feature = "alloc"), feature = "bounded-heapless"))]
     #[test]
     fn string_push_past_capacity_rejects_atomically_no_alloc() {
         let mut s: BoundedString<4> = BoundedString::new();
@@ -554,7 +615,7 @@ mod tests {
         assert_eq!(s.as_str(), "abcd");
     }
 
-    #[cfg(feature = "alloc")]
+    #[cfg(all(feature = "alloc", not(feature = "bounded-heapless")))]
     #[test]
     fn string_grows_past_declared_capacity_on_alloc() {
         let mut s: BoundedString<4> = BoundedString::new();

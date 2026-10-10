@@ -9776,6 +9776,16 @@ layer_c1f_cargo_test_reply() {
 layer_c1g_cargo_test_observer() {
     _runci_guarded_test C1g + \
         cargo test -p wz-session-core --features codec-push,codec-declare,codec-request,codec-response,codec-response-final,query-queryable,liveliness-token,liveliness-subscriber,liveliness-get,declare-subscriber,declare-queryable,pubsub-put,pubsub-delete --quiet || return 1
+    # The same union on the FIXED bounded backing: `bounded-heapless`, the MCU
+    # selector that keeps `alloc` and makes every `caps` limit a hard bound. The
+    # crate suite must hold with `TableFull` reachable and the interest stagers
+    # refusing a chain whole (`+`, for the reason above). The proof file is
+    # pinned EXACTLY, being the one file this leg exists to run: six N+1 refusals
+    # measured under a counting allocator (the sixth needs `liveliness-token`).
+    _runci_guarded_test C1g + \
+        cargo test -p wz-session-core --lib --features codec-push,codec-declare,codec-request,codec-response,codec-response-final,query-queryable,liveliness-token,liveliness-subscriber,liveliness-get,declare-subscriber,declare-queryable,declare-undeclare,pubsub-put,pubsub-delete,bounded-heapless --quiet || return 1
+    _runci_guarded_test C1g 6 \
+        cargo test -p wz-session-core --test bounded_heapless_backing --features codec-push,codec-declare,codec-request,codec-response,codec-response-final,query-queryable,liveliness-token,liveliness-subscriber,liveliness-get,declare-subscriber,declare-queryable,declare-undeclare,pubsub-put,pubsub-delete,bounded-heapless --quiet || return 1
     (cd crates \
         && cargo build -p wz-session-core --no-default-features --features alloc,codec-push,codec-declare,codec-response,codec-response-final,liveliness-token,liveliness-subscriber,declare-subscriber,declare-queryable,pubsub-put,pubsub-delete --quiet)
 }
