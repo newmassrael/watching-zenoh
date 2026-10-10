@@ -99,6 +99,10 @@ impl_rx_slots!(crate::session_rx_pool_mcu, SessionRxPoolMcu);
 #[cfg(feature = "buffer-pool-session-rx-slim")]
 impl_rx_slots!(crate::session_rx_pool_mcu_minimal, SessionRxPoolMcuMinimal);
 
+// The Ethernet receive pool (`mac-rx-pool`), the same gate as its module.
+#[cfg(feature = "mac-rx-pool")]
+impl_rx_slots!(crate::eth_rx_pool_mcu, EthRxPoolMcu);
+
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 // The CPU-fill adapter: an lwIP UDP socket whose received bytes land in
 // pool slots instead of an inline `heapless::Vec` per queue entry.

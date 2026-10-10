@@ -1,5 +1,5 @@
 // SCE-GENERATED — DO NOT EDIT
-// source-hash: c642481258b4bd80549c725f2446fb4551bd9c85f289f1c6b24091fa386caa5e
+// source-hash: d18e898efc9fb9bd32424f28983542a460928160b6cbd2e331bf4bfcbcd423ae
 // SCE-MAP: session_rx_pool_mcu_minimal.scxml:67 :: _forge_body
 
 // SCE Forge: Auto-generated from Extended SCXML (sce:kind="buffer-pool")

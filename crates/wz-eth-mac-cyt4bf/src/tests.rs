@@ -520,6 +520,12 @@ impl Board for Gem {
         self.0.borrow().exposed(ptr, len)
     }
 
+    /// The controller writes received frames only into memory it reaches, which in
+    /// the model is what the test exposed.
+    fn receives_in_place(&self, ptr: *const u8, len: usize) -> bool {
+        self.0.borrow().exposed(ptr, len)
+    }
+
     /// Cache maintenance on a transmit descriptor is the moment the driver
     /// PUBLISHES it, so the model notes what the descriptor said then: the order
     /// of a frame's descriptors, and when its first is let go, is read from here.
@@ -1522,6 +1528,448 @@ fn a_receive_ring_that_ran_dry_recovers_once_the_buffers_are_taken() {
     assert!(
         model.borrow_mut().inject_rx(&frame(0x55, 64)),
         "reception carries on"
+    );
+}
+
+// ---- a pooled receive ring (ARCHITECTURE section 9.2) ----------------------------
+//
+// The ring's receive buffers are the slots of the GENERATED Ethernet receive pool
+// (`sources/network/eth_rx_pool_mcu.scxml`, 16 slots of 1536 bytes), bound through
+// the lwIP link crate's binding, which an image installs the same way.
+
+type PooledArea = DmaArea<RX, TX, 0>;
+type PooledMac = Cyt4bfMac<Gem, RX, TX, 0>;
+
+/// The generated pool's slot count, the pool every pooled test binds.
+const POOL_SLOTS: usize = wz_link_lwip::eth_rx_pool_mcu::SLOT_COUNT;
+
+/// A freshly installed generated pool, and where its slots are.
+fn generated_pool() -> (&'static mut (dyn MacRxPool + Send), (usize, usize)) {
+    let storage: &'static mut wz_link_lwip::mac_rx_pool::RxPoolStorage =
+        Box::leak(Box::new(wz_link_lwip::mac_rx_pool::RxPoolStorage::uninit()));
+    let ring = wz_link_lwip::mac_rx_pool::install(storage);
+    let (start, len) = ring.span();
+    (ring, (start as usize, len))
+}
+
+/// What a pooled rig is: the MAC (or why it refused), the model, and where the
+/// pool's slots are.
+type PooledRig = (
+    Result<PooledMac, InitError>,
+    Rc<RefCell<Model>>,
+    (usize, usize),
+);
+
+/// A pooled MAC over the model, with the pool exposed to the controller (`expose`)
+/// or not.
+fn pooled_rig_on(expose: bool) -> PooledRig {
+    let area: &'static mut PooledArea = Box::leak(Box::new(DmaArea::new()));
+    let start = &mut *area as *mut PooledArea as usize;
+    let mut model = Model::new(start);
+    let (pool, span) = generated_pool();
+    if expose {
+        // SAFETY: the pool's slots, leaked for the test's life.
+        model.expose(unsafe { std::slice::from_raw_parts(span.0 as *const u8, span.1) });
+    }
+    let model = Rc::new(RefCell::new(model));
+    let mac = Cyt4bfMac::new_pooled(Gem(model.clone()), area, pool, &Config::new(MAC));
+    (mac, model, span)
+}
+
+fn pooled_rig() -> (PooledMac, Rc<RefCell<Model>>, (usize, usize)) {
+    let (mac, model, span) = pooled_rig_on(true);
+    let mac = mac.expect("a valid configuration and pool");
+    assert_eq!(model.borrow().violations, Vec::<String>::new());
+    (mac, model, span)
+}
+
+/// The slot of the generated pool `ptr` is the first byte of, if it is one.
+fn slot_at(span: (usize, usize), ptr: *const u8) -> Option<usize> {
+    let offset = (ptr as usize).checked_sub(span.0)?;
+    (offset < span.1 && offset % BUF_LEN == 0).then_some(offset / BUF_LEN)
+}
+
+/// Every slot of the pool is free, held by a receive descriptor, or lent to the
+/// stack, and the MAC's and the pool's own counts say which: free plus held plus
+/// lent and not returned is the pool's size.
+fn assert_every_slot_is_accounted_for(mac: &PooledMac, what: &str) {
+    let (free, size) = mac.rx_pool_free().expect("a pooled ring");
+    let in_ring = mac.rx_slots_in_ring().expect("a pooled ring");
+    let c = mac.rx_counts();
+    let out = c.lent.wrapping_sub(c.returned) as usize;
+    assert_eq!(
+        free + in_ring + out,
+        size,
+        "{what}: free {free} + in the ring {in_ring} + lent {out} is not {size}"
+    );
+}
+
+/// The point: the frame is lent IN A SLOT OF THE GENERATED POOL, at the slot's
+/// first byte, which is where the controller wrote it, and the descriptor it came
+/// from is armed again at once with another slot.
+#[test]
+fn a_pooled_ring_lends_a_frame_in_the_pool_slot_the_controller_wrote() {
+    let (mut mac, model, span) = pooled_rig();
+    assert_every_slot_is_accounted_for(&mac, "at bring-up");
+    assert_eq!(mac.rx_slots_in_ring(), Some(RX), "every descriptor armed");
+    let written_into = {
+        let m = model.borrow();
+        m.ptr(m.rx_desc(0).word0() & RXD_ADDR_MASK) as *const u8
+    };
+    assert!(
+        slot_at(span, written_into).is_some(),
+        "the descriptor points into the pool, not the area"
+    );
+
+    let f = frame(0x31, 200);
+    assert!(model.borrow_mut().inject_rx(&f));
+    let loan = mac.receive_loan().expect("the frame is waiting");
+
+    assert_eq!(loan_bytes(&loan), f);
+    assert_eq!(loan.ptr, written_into, "lent where the controller wrote it");
+    assert_eq!(
+        slot_at(span, loan.ptr),
+        Some(loan.cookie as usize),
+        "the cookie is the slot's index"
+    );
+    let rearmed = {
+        let m = model.borrow();
+        let d = m.rx_desc(0);
+        (
+            d.word0() & RXD_USED,
+            m.ptr(d.word0() & RXD_ADDR_MASK) as *const u8,
+        )
+    };
+    assert_eq!(rearmed.0, 0, "the descriptor is the controller's again");
+    assert_ne!(rearmed.1, loan.ptr, "with another slot");
+    assert!(slot_at(span, rearmed.1).is_some());
+    assert_every_slot_is_accounted_for(&mac, "with one frame lent");
+
+    mac.return_rx(loan.cookie);
+    assert_eq!(mac.rx_counts().returned, 1);
+    assert_every_slot_is_accounted_for(&mac, "after the return");
+    assert_eq!(mac.rx_pool_free(), Some((POOL_SLOTS - RX, POOL_SLOTS)));
+}
+
+/// A lent frame holds its slot and not the ring: a ring that owns its buffers
+/// stops at a lent one, and a pooled ring takes a full lap of frames behind it,
+/// the lent frame untouched.
+#[test]
+fn a_frame_the_stack_holds_does_not_hold_the_pooled_ring() {
+    let (mut mac, model, _) = pooled_rig();
+    let first = frame(0x01, 90);
+    assert!(model.borrow_mut().inject_rx(&first));
+    let held = mac.receive_loan().expect("lent");
+
+    for lap in 0..2 {
+        for i in 0..RX {
+            assert!(
+                model.borrow_mut().inject_rx(&frame(0x10 + i as u8, 70)),
+                "lap {lap} frame {i}: a buffer, though the first frame is still held"
+            );
+        }
+        let mut buf = [0u8; 256];
+        for _ in 0..RX {
+            mac.receive(&mut buf).expect("a copied frame");
+        }
+    }
+    assert_eq!(loan_bytes(&held), first, "and the held frame is untouched");
+    mac.return_rx(held.cookie);
+    assert_every_slot_is_accounted_for(&mac, "after the laps");
+
+    // CONTROL: the ring that owns its buffers does stop at the lent one.
+    let (mut owned, owned_model) = rig();
+    assert!(owned_model.borrow_mut().inject_rx(&first));
+    let _lent = owned.receive_loan().expect("lent");
+    let mut buf = [0u8; 256];
+    for i in 1..RX {
+        assert!(owned_model.borrow_mut().inject_rx(&frame(i as u8, 70)));
+        owned.receive(&mut buf).expect("copied");
+    }
+    assert!(
+        !owned_model.borrow_mut().inject_rx(&frame(0x77, 60)),
+        "CONTROL: the owned ring is full at its lent buffer"
+    );
+}
+
+/// A BURST LARGER THAN THE POOL NEVER LOSES A SLOT. The stack holds every frame
+/// it is lent: the ring re-arms from the pool until the pool is dry, then each
+/// descriptor taken is left unarmed and counted, the controller reports no buffer
+/// rather than writing anywhere, and every frame lent is a distinct slot with its
+/// own bytes. When the stack gives them all back, every descriptor is armed again
+/// and reception carries on; at every step free, held and lent add up to the pool.
+#[test]
+fn a_burst_larger_than_the_pool_never_loses_a_slot_and_counts_its_refusals() {
+    let (mut mac, model, span) = pooled_rig();
+    let mut loans = Vec::new();
+    let mut injected = 0usize;
+    let mut refused_by_controller = 0usize;
+    for n in 0..POOL_SLOTS + RX + 3 {
+        let f = frame(n as u8, 60 + n);
+        if model.borrow_mut().inject_rx(&f) {
+            injected += 1;
+            let loan = mac.receive_loan().expect("the frame just written");
+            assert_eq!(loan_bytes(&loan), f, "frame {n}");
+            loans.push((loan, f));
+        } else {
+            refused_by_controller += 1;
+        }
+        assert_every_slot_is_accounted_for(&mac, &format!("after frame {n}"));
+    }
+    assert_eq!(
+        injected, POOL_SLOTS,
+        "every slot carried one frame, no more"
+    );
+    assert_eq!(refused_by_controller, RX + 3);
+    assert_eq!(mac.rx_pool_free(), Some((0, POOL_SLOTS)));
+    assert_eq!(mac.rx_slots_in_ring(), Some(0), "the ring is unarmed");
+    assert_eq!(
+        mac.rx_counts().refused as usize,
+        RX,
+        "each descriptor that could not be re-armed is counted once"
+    );
+    assert_ne!(
+        model.borrow().reg(RECEIVE_STATUS) & RXSR_BUFFER_NOT_AVAILABLE,
+        0,
+        "the controller says no buffer, it does not write"
+    );
+    let mut slots: Vec<usize> = loans
+        .iter()
+        .map(|(l, _)| slot_at(span, l.ptr).expect("a slot"))
+        .collect();
+    slots.sort_unstable();
+    slots.dedup();
+    assert_eq!(slots.len(), POOL_SLOTS, "every loan is its own slot");
+    for (loan, f) in &loans {
+        assert_eq!(&loan_bytes(loan), f, "no frame was written over");
+    }
+
+    for (loan, _) in &loans {
+        mac.return_rx(loan.cookie);
+        assert_every_slot_is_accounted_for(&mac, "while returning");
+    }
+    assert_eq!(mac.rx_counts().returned as usize, POOL_SLOTS);
+    assert_eq!(
+        mac.rx_slots_in_ring(),
+        Some(RX),
+        "every descriptor armed again"
+    );
+    assert_eq!(mac.rx_pool_free(), Some((POOL_SLOTS - RX, POOL_SLOTS)));
+    let after = frame(0xEE, 99);
+    assert!(model.borrow_mut().inject_rx(&after), "reception carries on");
+    assert_eq!(mac.receive_loan().map(|l| loan_bytes(&l)), Some(after));
+}
+
+/// The bytes a pooled ring lends are the bytes the copying ring hands up, frame
+/// for frame, across more than a lap of the ring.
+#[test]
+fn a_pooled_ring_hands_up_the_bytes_the_copying_ring_does() {
+    let frames: Vec<Vec<u8>> = (0..RX * 3)
+        .map(|i| frame(i as u8 * 7, 64 + i * 13))
+        .collect();
+    let (mut copying, copying_model) = rig();
+    let mut buf = [0u8; 1600];
+    let copied: Vec<Vec<u8>> = frames
+        .iter()
+        .map(|f| {
+            assert!(copying_model.borrow_mut().inject_rx(f));
+            let n = copying.receive(&mut buf).expect("waiting");
+            buf[..n].to_vec()
+        })
+        .collect();
+    let (mut pooled, pooled_model, _) = pooled_rig();
+    let lent: Vec<Vec<u8>> = frames
+        .iter()
+        .map(|f| {
+            assert!(pooled_model.borrow_mut().inject_rx(f));
+            let loan = pooled.receive_loan().expect("waiting");
+            let bytes = loan_bytes(&loan);
+            pooled.return_rx(loan.cookie);
+            bytes
+        })
+        .collect();
+    assert_eq!(lent, copied);
+    assert_eq!(lent, frames);
+}
+
+/// The copying door works on a pooled ring too, and its slot goes straight home.
+#[test]
+fn a_pooled_ring_copies_out_through_the_copying_door_and_keeps_no_slot() {
+    let (mut mac, model, _) = pooled_rig();
+    let f = frame(0x42, 300);
+    assert!(model.borrow_mut().inject_rx(&f));
+    let mut buf = [0u8; 1600];
+    let n = mac.receive(&mut buf).expect("waiting");
+    assert_eq!(&buf[..n], &f[..]);
+    assert_eq!(mac.rx_counts().copied, 1);
+    assert_eq!(mac.rx_pool_free(), Some((POOL_SLOTS - RX, POOL_SLOTS)));
+    assert_every_slot_is_accounted_for(&mac, "after a copy");
+}
+
+/// A cookie that names no lent slot frees nothing: a second return, a slot the
+/// ring holds, and an index past the pool.
+#[test]
+fn a_pooled_ring_frees_nothing_for_a_stale_or_foreign_cookie() {
+    let (mut mac, model, span) = pooled_rig();
+    assert!(model.borrow_mut().inject_rx(&frame(0x09, 70)));
+    let loan = mac.receive_loan().expect("lent");
+    mac.return_rx(loan.cookie);
+    let in_ring = {
+        let m = model.borrow();
+        slot_at(span, m.ptr(m.rx_desc(1).word0() & RXD_ADDR_MASK)).expect("a slot")
+    };
+    let before = (mac.rx_counts(), mac.rx_pool_free());
+    mac.return_rx(loan.cookie);
+    mac.return_rx(in_ring as u32);
+    mac.return_rx(POOL_SLOTS as u32 + 7);
+    assert_eq!((mac.rx_counts(), mac.rx_pool_free()), before);
+    let f = frame(0x0a, 71);
+    assert!(model.borrow_mut().inject_rx(&f));
+    assert_eq!(mac.receive_loan().map(|l| loan_bytes(&l)), Some(f));
+}
+
+/// A frame that is not one buffer long is dropped on a pooled ring as on the
+/// other, its slot goes home, the descriptor is armed again, and it is counted.
+#[test]
+fn a_frame_that_is_not_whole_on_a_pooled_ring_returns_its_slot() {
+    let (mut mac, model, _) = pooled_rig();
+    {
+        let m = model.borrow();
+        let d = m.rx_desc(0);
+        d.set_word1(1000 | RXD_SOF);
+        d.set_word0(d.word0() | RXD_USED);
+    }
+    model.borrow_mut().rx_idx = 1;
+    let whole = frame(0x44, 100);
+    assert!(model.borrow_mut().inject_rx(&whole));
+    let loan = mac
+        .receive_loan()
+        .expect("the whole frame after the bad one");
+    assert_eq!(loan_bytes(&loan), whole);
+    assert_eq!(mac.rx_counts().dropped, 1);
+    assert_eq!(model.borrow().rx_desc(0).word0() & RXD_USED, 0, "re-armed");
+    assert_every_slot_is_accounted_for(&mac, "after the drop");
+    mac.return_rx(loan.cookie);
+}
+
+/// A pool is refused before any register is written when the controller may not
+/// write it for the CPU to read in place, when its slots are smaller than the
+/// receive buffer, when it has fewer slots than the ring has descriptors, and when
+/// its slots are not 32-byte aligned.
+#[test]
+fn a_pool_the_ring_cannot_use_is_refused_before_the_block_is_touched() {
+    let (mac, model, _) = pooled_rig_on(false);
+    assert_eq!(mac.err(), Some(InitError::RxPoolOutsideWindow));
+    assert!(model.borrow().log.is_empty(), "no register written");
+
+    /// A pool that only answers questions about its shape.
+    struct Shape {
+        size: usize,
+        count: usize,
+        start: usize,
+    }
+    impl MacRxPool for Shape {
+        fn slot_size(&self) -> usize {
+            self.size
+        }
+        fn slot_count(&self) -> usize {
+            self.count
+        }
+        fn span(&self) -> (*const u8, usize) {
+            (self.start as *const u8, self.size * self.count)
+        }
+        fn arm_rx(&mut self) -> Option<(usize, *mut u8)> {
+            None
+        }
+        unsafe fn start_rx(&mut self, _: usize) -> bool {
+            false
+        }
+        unsafe fn complete_rx(&mut self, _: usize) -> Option<*const u8> {
+            None
+        }
+        fn release_rx(&mut self, _: usize) -> bool {
+            false
+        }
+        fn free_count(&self) -> usize {
+            0
+        }
+    }
+    for (shape, refusal) in [
+        (
+            Shape {
+                size: 1024,
+                count: 16,
+                start: 0x1000,
+            },
+            InitError::RxPoolSlotTooSmall,
+        ),
+        (
+            Shape {
+                size: 1536,
+                count: RX - 1,
+                start: 0x1000,
+            },
+            InitError::RxPoolTooFewSlots,
+        ),
+        (
+            Shape {
+                size: 1536,
+                count: 16,
+                start: 0x1010,
+            },
+            InitError::RxPoolMisaligned,
+        ),
+        (
+            Shape {
+                size: 1544,
+                count: 16,
+                start: 0x1000,
+            },
+            InitError::RxPoolMisaligned,
+        ),
+    ] {
+        let area: &'static mut PooledArea = Box::leak(Box::new(DmaArea::new()));
+        let model = Rc::new(RefCell::new(Model::new(
+            &mut *area as *mut PooledArea as usize,
+        )));
+        let pool: &'static mut (dyn MacRxPool + Send) = Box::leak(Box::new(shape));
+        let mac = Cyt4bfMac::new_pooled(Gem(model.clone()), area, pool, &Config::new(MAC));
+        assert_eq!(mac.err(), Some(refusal));
+        assert!(
+            model.borrow().log.is_empty(),
+            "{refusal:?}: no register written"
+        );
+    }
+}
+
+/// The chip's board lets the controller write received frames only inside the
+/// window the firmware names for that, and a board given none refuses every pool.
+#[test]
+fn the_chip_board_receives_in_place_only_inside_its_receive_window() {
+    fn delay(_: u32) {}
+    fn now() -> u64 {
+        0
+    }
+    let window = [0u8; 256];
+    // SAFETY: a base no register is read through in this test.
+    let bare = unsafe { Cyt4bfBoard::new(0, delay, now) };
+    assert!(
+        !bare.receives_in_place(window.as_ptr(), 1),
+        "no window, nothing"
+    );
+    // SAFETY: as above; the window is only compared against.
+    let board = unsafe { bare.with_receive_window(window.as_ptr(), window.len()) };
+    assert!(board.receives_in_place(window.as_ptr(), window.len()));
+    // SAFETY: pointer arithmetic for comparison only.
+    let inside = unsafe { window.as_ptr().add(100) };
+    assert!(board.receives_in_place(inside, 156));
+    assert!(
+        !board.receives_in_place(inside, 157),
+        "one byte past the end"
+    );
+    assert!(
+        !board.reads_in_place(window.as_ptr(), 1),
+        "the receive window is not the transmit window"
     );
 }
 

@@ -21,12 +21,13 @@
 //! what lets lwIP's `ethernetif` template, a future Rust stack and a loopback
 //! test double all drive the same driver.
 //!
-//! It is a COPYING interface: [`EthernetMac::receive`] fills a buffer the caller
-//! owns. A peripheral that writes received frames into descriptor-ring buffers
-//! can implement it by copying out, which is correct and is the first
-//! implementation a chip gets; handing the ring's buffer up without the copy is
-//! the [`RxSlots`](crate::RxSlots) seam's job and needs the buffer-pool
-//! generator to expose the address of an armed slot, which it does not yet.
+//! Its first door is a COPYING one: [`EthernetMac::receive`] fills a buffer the
+//! caller owns. A peripheral that writes received frames into descriptor-ring
+//! buffers can implement it by copying out, which is correct and is the first
+//! implementation a chip gets. Handing the ring's buffer up without the copy is
+//! [`EthernetMac::receive_loan`]; and a ring whose buffers are the slots of a
+//! generated buffer pool, so the pool's lifecycle governs each received frame, is
+//! drawn from a [`MacRxPool`].
 
 /// The longest frame a MAC sends or accepts, without the FCS: a 14-byte
 /// Ethernet header and a 1500-byte MTU.
@@ -146,6 +147,74 @@ pub struct RxLoan {
     pub len: usize,
     /// What to give back to [`EthernetMac::return_rx`].
     pub cookie: u32,
+}
+
+/// ARCHITECTURE section 9.2 -- receive buffers a descriptor-ring MAC draws from a
+/// BUFFER POOL instead of owning them: the pool's receive edges, each slot named by
+/// its index, which is what a descriptor's record and a loan's cookie carry.
+///
+/// A MAC that owns its ring's buffers has a buffer per descriptor, and a frame it
+/// lends keeps that descriptor out of the ring until the stack gives it back. Over a
+/// pool, the descriptor is re-armed with another free slot at once, so a frame the
+/// stack holds is held in its slot and not in the ring; and the slot's state is the
+/// generated lifecycle's, so where a received frame is at any moment (in the
+/// controller's hands, being read, free) is the pool's own answer.
+///
+/// | what the ring does | edge of the generated pool |
+/// |---|---|
+/// | a descriptor is given a buffer | [`arm_rx`](Self::arm_rx) (free to dma-armed-rx) |
+/// | the descriptor is released to the controller | [`start_rx`](Self::start_rx) (to dma-busy-rx) |
+/// | the controller reports the frame written | [`complete_rx`](Self::complete_rx) (to cpu-ref) |
+/// | the frame's readers are done with it | [`release_rx`](Self::release_rx) (cpu-ref to free) |
+///
+/// A slot is only ever armed for one descriptor, so its index is the token: the
+/// MAC records which slot each descriptor holds, and lends a frame with the slot's
+/// index as the cookie it is returned by.
+///
+/// The memory is the bus master's to write, so the pool must lie where the MAC's
+/// DMA reaches and where what the controller wrote is what the CPU reads. Only the
+/// board knows where that is; a MAC checks the pool's [`span`](Self::span) against
+/// its board before it arms a slot.
+pub trait MacRxPool {
+    /// Bytes in each slot.
+    fn slot_size(&self) -> usize;
+
+    /// How many slots the pool has.
+    fn slot_count(&self) -> usize;
+
+    /// The first byte of the first slot and the length of all of them: every
+    /// address the pool publishes lies inside.
+    fn span(&self) -> (*const u8, usize);
+
+    /// Take a free slot and arm it for receive: its index and the address the bus
+    /// master is to write the frame to. `None` when every slot is out, which a ring
+    /// answers by leaving the descriptor unarmed.
+    fn arm_rx(&mut self) -> Option<(usize, *mut u8)>;
+
+    /// The armed slot `idx` has been handed to the bus master: its descriptor is
+    /// released. `false` when `idx` is not an armed slot.
+    ///
+    /// # Safety
+    /// The caller must have released a descriptor with this slot's address to the
+    /// controller. The pool then records the slot as the bus master's.
+    unsafe fn start_rx(&mut self, idx: usize) -> bool;
+
+    /// The bus master has finished writing slot `idx`: the slot is the CPU's to
+    /// READ, shared, and its first byte is returned. `None` when `idx` is not a slot
+    /// in the bus master's hands, so a stale or replayed completion advances nothing.
+    ///
+    /// # Safety
+    /// The caller must have seen the controller report this slot's frame written.
+    /// Calling early hands out memory the controller is still writing.
+    unsafe fn complete_rx(&mut self, idx: usize) -> Option<*const u8>;
+
+    /// Every reader of the completed slot `idx` is done with it: it goes back on the
+    /// freelist. `false` when `idx` is not a completed slot, so a stale or foreign
+    /// cookie frees nothing.
+    fn release_rx(&mut self, idx: usize) -> bool;
+
+    /// Slots on the freelist now.
+    fn free_count(&self) -> usize;
 }
 
 /// One piece of an outgoing frame, in memory the caller keeps in place.

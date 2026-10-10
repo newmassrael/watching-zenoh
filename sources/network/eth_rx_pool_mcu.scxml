@@ -1,0 +1,59 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  SPDX-License-Identifier: AGPL-3.0-or-later OR LicenseRef-watching-zenoh-Commercial
+  SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
+-->
+<!--
+  MCU Ethernet receive buffer-pool config: the SSOT for the slots an
+  Ethernet MAC's receive DMA writes frames into (ARCHITECTURE section 9.2:
+  "the bus master writes the slot and the handler borrows it"), which lwIP
+  then reads in place and, for a session datagram, the session dispatches
+  from where it lies.
+
+  Born with its consumer (the reassembly_pool pattern): `wz-link-lwip`'s
+  `mac_rx_pool` module, behind that crate's `mac-rx-pool` feature, binds the
+  generated receive lifecycle to a descriptor-ring MAC
+  (`wz_runtime_core::MacRxPool`). Each receive descriptor of the MAC's ring
+  holds one slot: the slot is armed for receive when its address is written
+  into the descriptor, started when the descriptor is released to the
+  controller, complete when the controller reports the frame written, shared
+  read-only while lwIP (and a session socket that holds the frame) reads it,
+  and returned when the last reader lets go. The descriptor is re-armed with
+  another free slot at once, so a frame the stack holds does not hold the
+  ring.
+
+  Values (and their derivations):
+    - slot_size 1536: the CYT4BF MAC's receive buffer length
+      (DMA_CONFIG.RX_BUF_SIZE 24 units of 64 bytes), which holds a whole
+      frame (1514 bytes without the FCS, 1518 with a VLAN tag) in one
+      buffer, so a frame is never split across slots. A multiple of the
+      alignment below.
+    - slot_count 16: the ring's 8 descriptors (the T2G image's RX_SLOTS)
+      each hold a slot, and the lwIP shim lets the stack hold at most 8
+      received frames lent at once (WZ_ETHIF_RX_HELD_MAX in
+      lwip-sys/shim.c); with 8 more slots the ring stays armed while the
+      stack holds as many frames as the shim allows. A pool that runs dry
+      anyway leaves a consumed descriptor unarmed, which the controller
+      reads as no buffer available (a counted refusal, never a silent
+      drop or a heap fallback), and the descriptor is re-armed when a slot
+      comes back. 16 x 1536 = 24 KiB.
+
+  cache-policy is `non-cacheable`, a statement about where the firmware puts
+  the pool: the controller writes a slot behind the CPU's back, so the pool
+  is placed in memory the MPU marks non-cacheable (on the Zephyr T2G image,
+  Zephyr's `.nocache` section, beside the MAC's descriptor rings), and no
+  cache maintenance is emitted or needed. The MAC refuses a pool that does
+  not lie inside the receive window its board names. That section is NOLOAD
+  and the generated Rust pool owns its storage inline, so
+  `mac_rx_pool::install` writes the whole pool before it is used (a pool of
+  zeroes is a pool of free slots).
+-->
+<scxml xmlns="http://www.w3.org/2005/07/scxml"
+       xmlns:sce="http://sce.dev/ext"
+       sce:kind="buffer-pool" name="eth_rx_pool_mcu" version="1.0">
+  <sce:slot-count>16</sce:slot-count>
+  <sce:slot-size>1536</sce:slot-size>
+  <sce:section>sram1</sce:section>
+  <sce:alignment>32</sce:alignment>
+  <sce:cache-policy>non-cacheable</sce:cache-policy>
+</scxml>

@@ -77,7 +77,12 @@ impl LwipUdpDriver {
     /// Wrap `socket` with an initial send target. An acceptor passes a
     /// placeholder that the first inbound datagram overwrites (via
     /// [`Self::set_peer`]); an initiator passes its configured peer.
+    ///
+    /// Under `rx-in-place` the socket is asked to hold the frames its MAC lends
+    /// in place ([`recv_with`](Self::recv_with) reads them where they lie).
     pub fn new(socket: SharedSessionSocket, peer_addr: u32, peer_port: u16) -> Self {
+        #[cfg(feature = "rx-in-place")]
+        socket.borrow_mut().hold_lent_rx(true);
         let driver = Self {
             socket,
             peer: Cell::new((peer_addr, peer_port)),
@@ -137,6 +142,11 @@ impl LwipUdpDriver {
     /// dispatch inside it can send (every send takes a shared borrow); a
     /// receive from inside `f` would need the exclusive borrow and panics,
     /// which is the loud answer to a re-entrant receive.
+    ///
+    /// Under `rx-in-place` the socket also holds a frame its MAC lent in place
+    /// (`wz_link_lwip`'s `rx-hold`, turned on by [`Self::new`]), so for such a
+    /// frame the bytes `f` reads are the frame's own, where the controller wrote
+    /// them, and removing it gives the MAC its buffer back.
     pub fn recv_with(&self, f: &mut dyn FnMut(&[u8])) -> bool {
         {
             let socket = self.socket.borrow();
@@ -144,7 +154,7 @@ impl LwipUdpDriver {
                 return false;
             };
             self.set_peer(datagram.src_addr, datagram.src_port);
-            f(datagram.data.as_slice());
+            f(datagram.data);
         }
         self.socket.borrow_mut().consume_recv()
     }
@@ -397,5 +407,135 @@ mod tests {
         let (_, capacity) = driver.tx_slot_storage(grant.slot);
         std::assert_eq!(capacity, SESSION_RX_SLOT_SIZE);
         driver.tx_slot_abort(grant.slot);
+    }
+
+    // ---- `rx-in-place`: the datagram the loop dispatches is the lent frame ----
+
+    /// The buffers a lending MAC double has lent and not had back, by cookie.
+    #[cfg(feature = "rx-in-place")]
+    type LentBuffers = Rc<RefCell<Vec<(u32, Vec<u8>)>>>;
+
+    /// A MAC that lends each received frame out of a buffer of its own and records
+    /// which come back.
+    #[cfg(feature = "rx-in-place")]
+    struct Lending {
+        inbox: Rc<RefCell<alloc::collections::VecDeque<Vec<u8>>>>,
+        lent: LentBuffers,
+        returned: Rc<RefCell<Vec<u32>>>,
+    }
+
+    #[cfg(feature = "rx-in-place")]
+    impl wz_link_lwip::ethernet::EthernetMac for Lending {
+        fn mac_address(&self) -> [u8; 6] {
+            [0x02, 0, 0, 0, 0, 0x2a]
+        }
+        fn transmit(&mut self, _frame: &[u8]) -> bool {
+            true
+        }
+        fn receive(&mut self, _buf: &mut [u8]) -> Option<usize> {
+            None
+        }
+        fn loans_rx(&self) -> bool {
+            true
+        }
+        fn receive_loan(&mut self) -> Option<wz_runtime_core::RxLoan> {
+            let frame = self.inbox.borrow_mut().pop_front()?;
+            let cookie = self.lent.borrow().len() as u32 + self.returned.borrow().len() as u32;
+            let (ptr, len) = (frame.as_ptr(), frame.len());
+            self.lent.borrow_mut().push((cookie, frame));
+            Some(wz_runtime_core::RxLoan { ptr, len, cookie })
+        }
+        fn return_rx(&mut self, cookie: u32) {
+            self.lent.borrow_mut().retain(|(c, _)| *c != cookie);
+            self.returned.borrow_mut().push(cookie);
+        }
+    }
+
+    /// A UDP datagram on the wire to `10.9.2.1:dst` from `10.9.2.2:7601`, with no
+    /// UDP checksum (zero, which IPv4 allows).
+    #[cfg(feature = "rx-in-place")]
+    fn udp_frame(dst: u16, payload: &[u8]) -> Vec<u8> {
+        let mut ip = Vec::new();
+        ip.extend_from_slice(&[0x45, 0x00]);
+        ip.extend_from_slice(&(28 + payload.len() as u16).to_be_bytes());
+        ip.extend_from_slice(&[0, 0, 0, 0, 64, 17, 0, 0, 10, 9, 2, 2, 10, 9, 2, 1]);
+        let mut sum: u32 = ip
+            .chunks(2)
+            .map(|w| u32::from(u16::from_be_bytes([w[0], w[1]])))
+            .sum();
+        while sum > 0xffff {
+            sum = (sum & 0xffff) + (sum >> 16);
+        }
+        ip[10..12].copy_from_slice(&(!(sum as u16)).to_be_bytes());
+        let mut f = Vec::new();
+        f.extend_from_slice(&[0x02, 0, 0, 0, 0, 0x2a, 0x02, 0, 0, 0, 0, 0x2b, 0x08, 0x00]);
+        f.extend_from_slice(&ip);
+        f.extend_from_slice(&7601u16.to_be_bytes());
+        f.extend_from_slice(&dst.to_be_bytes());
+        f.extend_from_slice(&(8 + payload.len() as u16).to_be_bytes());
+        f.extend_from_slice(&[0, 0]);
+        f.extend_from_slice(payload);
+        f
+    }
+
+    /// The receive the `rx-in-place` loop makes reads a datagram a MAC lent WHERE
+    /// THE MAC WROTE IT: the driver's socket holds the lent frame, the bytes handed
+    /// to the dispatch lie inside the MAC's own buffer, and the buffer goes back to
+    /// the MAC when the datagram is removed, not before.
+    #[cfg(feature = "rx-in-place")]
+    #[test]
+    fn the_in_place_receive_reads_a_lent_frame_in_the_macs_buffer() {
+        use wz_link_lwip::ethernet::{EthernetIf, Ipv4Config};
+
+        let (_serial, link) = wz_link_lwip::lwip_test_link();
+        let inbox = Rc::new(RefCell::new(alloc::collections::VecDeque::new()));
+        let lent = Rc::new(RefCell::new(Vec::new()));
+        let returned = Rc::new(RefCell::new(Vec::new()));
+        let mut node = EthernetIf::add(
+            &link,
+            Lending {
+                inbox: inbox.clone(),
+                lent: lent.clone(),
+                returned: returned.clone(),
+            },
+            Ipv4Config {
+                address: [10, 9, 2, 1],
+                netmask: [255, 255, 255, 0],
+                gateway: [0, 0, 0, 0],
+            },
+        )
+        .expect("interface");
+        let socket: SharedSessionSocket = Rc::new(RefCell::new(
+            bind_session_rx(&link, 7485).expect("bind session rx"),
+        ));
+        let driver = LwipUdpDriver::new(socket, 0, 0);
+
+        let payload = b"dispatched where the MAC wrote it";
+        inbox.borrow_mut().push_back(udp_frame(7485, payload));
+        std::assert_eq!(node.poll(), 1);
+        let buffer = {
+            let lent = lent.borrow();
+            let (_, frame) = lent.first().expect("the frame is still lent");
+            (frame.as_ptr() as usize, frame.len())
+        };
+
+        let mut seen: Option<(usize, Vec<u8>)> = None;
+        std::assert!(driver.recv_with(&mut |bytes| {
+            seen = Some((bytes.as_ptr() as usize, bytes.to_vec()));
+        }));
+        let (at, bytes) = seen.expect("the dispatch ran");
+        std::assert_eq!(bytes, payload);
+        std::assert_eq!(
+            at,
+            buffer.0 + 14 + 20 + 8,
+            "the bytes are the MAC's buffer, behind the headers"
+        );
+        std::assert!(at + bytes.len() <= buffer.0 + buffer.1);
+        std::assert_eq!(*returned.borrow(), std::vec![0u32], "given back once read");
+        std::assert!(lent.borrow().is_empty());
+        std::assert_eq!(
+            driver.peer(),
+            (wz_link_lwip::ipv4_addr_from_octets([10, 9, 2, 2]), 7601)
+        );
     }
 }

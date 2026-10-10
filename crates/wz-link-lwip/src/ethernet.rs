@@ -51,6 +51,21 @@ const RX_HELD_MAX: usize = 8;
 /// `FRAME_MAX` is the bound `shim.c` holds its transmit buffer to.
 pub use wz_runtime_core::eth_mac::{EthernetMac, FRAME_MAX};
 
+/// How many received frames lwIP has taken since boot, across every interface:
+/// `(lent in place, copied in)`. A frame is lent when its MAC lends it and the
+/// shim can wrap it ([`EthernetIf::poll`]); it is copied when its MAC does not
+/// lend, or the shim's table of lent frames was full, which is the explicit
+/// fallback a bench sets beside the frames read in place.
+pub fn rx_frames_taken() -> (u32, u32) {
+    // SAFETY: reads two counters the shim owns.
+    unsafe {
+        (
+            lwip_sys::wz_ethif_rx_loaned_total(),
+            lwip_sys::wz_ethif_rx_copied_total(),
+        )
+    }
+}
+
 /// Why an interface could not be added.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EthernetIfError {
@@ -1337,5 +1352,307 @@ mod tests {
             std::vec![0u32, 1],
             "both buffers went back, once each"
         );
+    }
+
+    // ---- ARCHITECTURE section 9.2: wire to slot to pbuf to socket, no copy ------
+
+    use crate::mac_rx_pool::{EthRxRing, SlotState};
+    use wz_runtime_core::MacRxPool;
+
+    /// The installed generated receive pool, shared by the MAC double and the test,
+    /// which reads the pool's own slot states.
+    type SharedRing = Rc<RefCell<&'static mut EthRxRing>>;
+
+    /// A MAC whose received frames are slots of the GENERATED receive pool, walked
+    /// the way a descriptor-ring MAC walks them: a slot is armed and started, the
+    /// "controller" writes the frame through the address the pool published and
+    /// nothing else, the completion hands the slot to the CPU, and the frame is lent
+    /// with the slot's index as its cookie; a return releases the slot.
+    struct PoolEnd {
+        address: [u8; 6],
+        inbox: Cable,
+        ring: SharedRing,
+        returned: Rc<RefCell<Vec<u32>>>,
+    }
+
+    impl EthernetMac for PoolEnd {
+        fn mac_address(&self) -> [u8; 6] {
+            self.address
+        }
+        fn transmit(&mut self, _frame: &[u8]) -> bool {
+            true
+        }
+        fn receive(&mut self, _buf: &mut [u8]) -> Option<usize> {
+            None
+        }
+        fn loans_rx(&self) -> bool {
+            true
+        }
+        fn receive_loan(&mut self) -> Option<RxLoan> {
+            let frame = self.inbox.borrow_mut().pop_front()?;
+            let mut ring = self.ring.borrow_mut();
+            let (idx, addr) = ring.arm_rx().expect("a free slot");
+            // SAFETY: the test is the bus master; the slot is armed for it.
+            std::assert!(unsafe { ring.start_rx(idx) });
+            // SAFETY: `addr` is the slot's first byte, in the bus master's hands,
+            // and a frame is shorter than a slot.
+            unsafe { core::ptr::copy_nonoverlapping(frame.as_ptr(), addr, frame.len()) };
+            // SAFETY: the write above is the completion.
+            let ptr = unsafe { ring.complete_rx(idx) }.expect("in flight");
+            Some(RxLoan {
+                ptr,
+                len: frame.len(),
+                cookie: idx as u32,
+            })
+        }
+        fn return_rx(&mut self, cookie: u32) {
+            std::assert!(
+                self.ring.borrow_mut().release_rx(cookie as usize),
+                "a lent slot"
+            );
+            self.returned.borrow_mut().push(cookie);
+        }
+    }
+
+    struct PoolRig {
+        node: EthernetIf<PoolEnd>,
+        inbox: Cable,
+        ring: SharedRing,
+        returned: Rc<RefCell<Vec<u32>>>,
+    }
+
+    fn pool_node(link: &LwipLink) -> PoolRig {
+        let storage: &'static mut crate::mac_rx_pool::RxPoolStorage =
+            Box::leak(Box::new(crate::mac_rx_pool::RxPoolStorage::uninit()));
+        let ring: SharedRing = Rc::new(RefCell::new(crate::mac_rx_pool::install(storage)));
+        let inbox: Cable = Rc::new(RefCell::new(VecDeque::new()));
+        let returned = Rc::new(RefCell::new(Vec::new()));
+        let node = EthernetIf::add(
+            link,
+            PoolEnd {
+                address: NODE_MAC,
+                inbox: inbox.clone(),
+                ring: ring.clone(),
+                returned: returned.clone(),
+            },
+            Ipv4Config {
+                address: NODE_IP,
+                netmask: [255, 255, 255, 0],
+                gateway: [0, 0, 0, 0],
+            },
+        )
+        .expect("interface");
+        PoolRig {
+            node,
+            inbox,
+            ring,
+            returned,
+        }
+    }
+
+    impl PoolRig {
+        /// The pool slot `ptr` lies in and its state, by the pool's own answer.
+        fn slot_of(&self, ptr: *const u8) -> Option<(usize, SlotState)> {
+            let ring = self.ring.borrow();
+            let (start, len) = ring.span();
+            let offset = (ptr as usize).checked_sub(start as usize)?;
+            if offset >= len {
+                return None;
+            }
+            let idx = offset / ring.slot_size();
+            Some((idx, ring.pool().slot_state(idx)?))
+        }
+
+        fn free(&self) -> usize {
+            self.ring.borrow().free_count()
+        }
+    }
+
+    /// THE POINT: a datagram that arrives in a pool slot reaches a socket that holds
+    /// lent frames WITHOUT A COPY. The bytes a reader is lent are inside the slot the
+    /// controller wrote, 42 bytes in (Ethernet, IPv4 and UDP headers), the slot is the
+    /// CPU's to read for as long as the socket holds it, and it is free once the
+    /// reader gives the datagram back. Judged by address and by the pool's own state,
+    /// which a copy cannot fake.
+    #[test]
+    fn a_datagram_a_socket_holds_is_read_in_the_pool_slot_the_controller_wrote() {
+        let (_serial, link) = crate::lwip_test_link();
+        let mut rig = pool_node(&link);
+        let mut socket = bind_session_rx(&link, 7602).expect("bind");
+        socket.hold_lent_rx(true);
+        let (in_place, copied) = crate::rx_hold::counts();
+        let taken = rx_frames_taken();
+
+        rig.inbox
+            .borrow_mut()
+            .push_back(udp_frame(7601, 7602, b"read where it was written"));
+        std::assert_eq!(rig.node.poll(), 1, "lwIP took the frame");
+
+        let view = socket.peek_recv().expect("the datagram came in");
+        std::assert_eq!(view.data, b"read where it was written");
+        let (idx, state) = rig
+            .slot_of(view.data.as_ptr())
+            .expect("the bytes are a slot's");
+        std::assert_eq!(state, SlotState::CpuRef, "the CPU's to read, while held");
+        let slot_start = rig.ring.borrow().span().0 as usize + idx * 1536;
+        std::assert_eq!(
+            view.data.as_ptr() as usize - slot_start,
+            14 + 20 + 8,
+            "the payload, behind the headers, where the controller wrote the frame"
+        );
+        std::assert!(rig.returned.borrow().is_empty(), "the slot is still lent");
+        std::assert_eq!(rig.node.held_rx(), 1);
+        std::assert_eq!(
+            rx_frames_taken(),
+            (taken.0 + 1, taken.1),
+            "lent, not copied in"
+        );
+
+        std::assert!(socket.consume_recv());
+        std::assert_eq!(*rig.returned.borrow(), std::vec![idx as u32], "back once");
+        std::assert_eq!(
+            rig.slot_of(slot_start as *const u8),
+            Some((idx, SlotState::Free))
+        );
+        std::assert_eq!(rig.free(), crate::eth_rx_pool_mcu::SLOT_COUNT);
+        std::assert_eq!(rig.node.held_rx(), 0);
+        std::assert_eq!(crate::rx_hold::counts(), (in_place + 1, copied));
+    }
+
+    /// CONTROL: a socket that does not hold copies the datagram in its callback, and
+    /// the slot is free before a reader ever looks. The bytes the reader sees are
+    /// not in the pool.
+    #[test]
+    fn a_socket_that_does_not_hold_copies_and_frees_the_slot_at_once() {
+        let (_serial, link) = crate::lwip_test_link();
+        let mut rig = pool_node(&link);
+        let mut socket = bind_session_rx(&link, 7602).expect("bind");
+        rig.inbox
+            .borrow_mut()
+            .push_back(udp_frame(7601, 7602, b"copied by the callback"));
+        rig.node.poll();
+        std::assert_eq!(rig.returned.borrow().len(), 1, "returned inside the poll");
+        std::assert_eq!(rig.free(), crate::eth_rx_pool_mcu::SLOT_COUNT);
+        let view = socket.peek_recv().expect("came in");
+        std::assert_eq!(view.data, b"copied by the callback");
+        std::assert!(rig.slot_of(view.data.as_ptr()).is_none(), "a copy");
+        std::assert!(socket.consume_recv());
+    }
+
+    /// A datagram lwIP reassembles from two fragments arrives as a chain of two
+    /// pbufs, which is no one piece to read in place: it takes the explicit copy,
+    /// is counted as copied, and both slots go home when lwIP lets go of the chain.
+    #[test]
+    fn a_reassembled_datagram_is_copied_and_both_slots_go_home() {
+        let (_serial, link) = crate::lwip_test_link();
+        let mut rig = pool_node(&link);
+        let mut socket = bind_session_rx(&link, 7602).expect("bind");
+        socket.hold_lent_rx(true);
+        let (in_place, copied) = crate::rx_hold::counts();
+
+        let payload = b"0123456789abcdefghij";
+        let mut udp = std::vec::Vec::new();
+        udp.extend_from_slice(&7601u16.to_be_bytes());
+        udp.extend_from_slice(&7602u16.to_be_bytes());
+        udp.extend_from_slice(&(8 + payload.len() as u16).to_be_bytes());
+        udp.extend_from_slice(&[0, 0]);
+        udp.extend_from_slice(payload);
+        let (first, rest) = udp.split_at(16);
+        let fragment = |offset8: u16, more: bool, body: &[u8]| {
+            let mut ip = std::vec::Vec::new();
+            ip.extend_from_slice(&[0x45, 0x00]);
+            ip.extend_from_slice(&(20 + body.len() as u16).to_be_bytes());
+            ip.extend_from_slice(&0x4343u16.to_be_bytes());
+            let flags = (if more { 0x2000u16 } else { 0 }) | offset8;
+            ip.extend_from_slice(&flags.to_be_bytes());
+            ip.extend_from_slice(&[64, 17, 0, 0]);
+            ip.extend_from_slice(&FAR_IP);
+            ip.extend_from_slice(&NODE_IP);
+            let sum = ipv4_checksum(&ip);
+            ip[10..12].copy_from_slice(&sum.to_be_bytes());
+            let mut f = std::vec::Vec::new();
+            f.extend_from_slice(&NODE_MAC);
+            f.extend_from_slice(&FAR_MAC);
+            f.extend_from_slice(&[0x08, 0x00]);
+            f.extend_from_slice(&ip);
+            f.extend_from_slice(body);
+            f
+        };
+        rig.inbox.borrow_mut().push_back(fragment(0, true, first));
+        rig.node.poll();
+        rig.inbox.borrow_mut().push_back(fragment(2, false, rest));
+        rig.node.poll();
+
+        let view = socket.peek_recv().expect("reassembled");
+        std::assert_eq!(view.data, payload);
+        std::assert!(rig.slot_of(view.data.as_ptr()).is_none(), "a copy");
+        std::assert_eq!(rig.returned.borrow().len(), 2, "both slots home");
+        std::assert_eq!(rig.free(), crate::eth_rx_pool_mcu::SLOT_COUNT);
+        std::assert!(socket.consume_recv());
+        std::assert_eq!(crate::rx_hold::counts(), (in_place, copied + 1));
+    }
+
+    /// The shim lends at most `RX_HELD_MAX` frames at once, so a socket that holds
+    /// that many leaves the next frame to the copying input: it is copied in, the
+    /// MAC's slot goes home at once, and the frame reaches the socket all the same.
+    /// Nothing is dropped, and nothing reaches for memory but the pool and lwIP's.
+    #[test]
+    fn past_the_shims_bound_a_held_socket_falls_back_to_the_copy() {
+        let (_serial, link) = crate::lwip_test_link();
+        let mut rig = pool_node(&link);
+        let mut socket = bind_session_rx(&link, 7602).expect("bind");
+        socket.hold_lent_rx(true);
+        let taken = rx_frames_taken();
+        for i in 0..RX_HELD_MAX as u8 {
+            rig.inbox
+                .borrow_mut()
+                .push_back(udp_frame(7601, 7602, &[i; 4]));
+            rig.node.poll();
+        }
+        std::assert_eq!(rig.node.held_rx(), RX_HELD_MAX);
+        std::assert!(rig.returned.borrow().is_empty());
+        rig.inbox
+            .borrow_mut()
+            .push_back(udp_frame(7601, 7602, b"ninth"));
+        rig.node.poll();
+        std::assert_eq!(
+            rx_frames_taken(),
+            (taken.0 + RX_HELD_MAX as u32, taken.1 + 1),
+            "eight lent, the ninth copied in"
+        );
+        std::assert_eq!(rig.returned.borrow().len(), 1, "the ninth's slot went home");
+        for i in 0..RX_HELD_MAX as u8 {
+            let view = socket.peek_recv().expect("held");
+            std::assert_eq!(view.data, &[i; 4]);
+            std::assert!(rig.slot_of(view.data.as_ptr()).is_some(), "in its slot");
+            std::assert!(socket.consume_recv());
+        }
+        let ninth = socket.try_recv().expect("the ninth");
+        std::assert_eq!(ninth.data.as_slice(), b"ninth");
+        std::assert_eq!(rig.free(), crate::eth_rx_pool_mcu::SLOT_COUNT);
+    }
+
+    /// An owned receive of a held frame copies it then and gives the slot back, and
+    /// a socket dropped with frames still held gives theirs back too.
+    #[test]
+    fn an_owned_receive_or_a_dropped_socket_gives_held_slots_back() {
+        let (_serial, link) = crate::lwip_test_link();
+        let mut rig = pool_node(&link);
+        let mut socket = bind_session_rx(&link, 7602).expect("bind");
+        socket.hold_lent_rx(true);
+        for payload in [&b"owned"[..], b"dropped-1", b"dropped-2"] {
+            rig.inbox
+                .borrow_mut()
+                .push_back(udp_frame(7601, 7602, payload));
+            rig.node.poll();
+        }
+        std::assert_eq!(rig.free(), crate::eth_rx_pool_mcu::SLOT_COUNT - 3);
+        let owned = socket.try_recv().expect("held");
+        std::assert_eq!(owned.data.as_slice(), b"owned");
+        std::assert_eq!(rig.returned.borrow().len(), 1);
+        drop(socket);
+        std::assert_eq!(rig.returned.borrow().len(), 3, "the drop gave two back");
+        std::assert_eq!(rig.free(), crate::eth_rx_pool_mcu::SLOT_COUNT);
+        std::assert_eq!(rig.node.held_rx(), 0);
     }
 }

@@ -57,6 +57,10 @@ void wz_ethif_set_rx_release(struct netif *n, wz_ethif_rx_release_fn release);
 int wz_ethif_input_loan(struct netif *n, const u8_t *frame, u16_t len, u32_t cookie);
 int wz_ethif_rx_held_count(void);
 u32_t wz_ethif_rx_loaned_total(void);
+/* How many received frames the copying input took, and whether a pbuf is a frame
+ * lent in place (which a socket may hold instead of copying). */
+u32_t wz_ethif_rx_copied_total(void);
+int wz_ethif_rx_is_lent(const struct pbuf *p);
 /* Whether `n` is the default route, and the test harness's reset of the table. */
 int wz_ethif_is_default(const struct netif *n);
 void wz_ethif_remove_all(void);

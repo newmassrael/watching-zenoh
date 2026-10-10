@@ -45,27 +45,33 @@ pub struct Descriptor {
 pub struct Buffer(pub [u8; BUF_LEN]);
 
 /// The rings and buffers of one MAC, `RX` receive and `TX` transmit slots.
+///
+/// `RXB` is how many receive buffers the area holds: one per receive descriptor
+/// (the default) for a MAC that owns its ring's buffers, and none for a MAC whose
+/// receive buffers are the slots of a pool
+/// ([`Cyt4bfMac::new_pooled`](crate::Cyt4bfMac::new_pooled)), which would
+/// otherwise carry `RX` buffers it never uses.
 #[repr(C, align(32))]
-pub struct DmaArea<const RX: usize, const TX: usize> {
+pub struct DmaArea<const RX: usize, const TX: usize, const RXB: usize = RX> {
     pub(crate) rx_desc: [Descriptor; RX],
     pub(crate) tx_desc: [Descriptor; TX],
-    pub(crate) rx_buf: [Buffer; RX],
+    pub(crate) rx_buf: [Buffer; RXB],
     pub(crate) tx_buf: [Buffer; TX],
 }
 
-impl<const RX: usize, const TX: usize> DmaArea<RX, TX> {
+impl<const RX: usize, const TX: usize, const RXB: usize> DmaArea<RX, TX, RXB> {
     /// An all-zero area, for a `static`. The driver initialises the rings.
     pub const fn new() -> Self {
         Self {
             rx_desc: [Descriptor { word0: 0, word1: 0 }; RX],
             tx_desc: [Descriptor { word0: 0, word1: 0 }; TX],
-            rx_buf: [const { Buffer([0; BUF_LEN]) }; RX],
+            rx_buf: [const { Buffer([0; BUF_LEN]) }; RXB],
             tx_buf: [const { Buffer([0; BUF_LEN]) }; TX],
         }
     }
 }
 
-impl<const RX: usize, const TX: usize> DmaArea<RX, TX> {
+impl<const RX: usize, const TX: usize, const RXB: usize> DmaArea<RX, TX, RXB> {
     /// Write the whole area to zero, a 32-bit word at a time.
     ///
     /// The zeroes [`new`](Self::new) builds are what the program image says the
@@ -89,7 +95,7 @@ impl<const RX: usize, const TX: usize> DmaArea<RX, TX> {
     }
 }
 
-impl<const RX: usize, const TX: usize> Default for DmaArea<RX, TX> {
+impl<const RX: usize, const TX: usize, const RXB: usize> Default for DmaArea<RX, TX, RXB> {
     fn default() -> Self {
         Self::new()
     }

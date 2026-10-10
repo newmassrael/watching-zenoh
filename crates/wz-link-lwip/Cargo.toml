@@ -72,11 +72,13 @@ wz-runtime-core = { path = "../wz-runtime-core" }
 # invokes sce-codegen, so this crate pulls no codegen toolchain).
 
 [dev-dependencies]
-# This crate's own unit tests drive the transmit pool (`tx_pool`), which exists
-# only with `tx-pool`. A dev-dependency on itself turns the feature on for the
-# test build alone; the library an image links is unchanged, and a test that
-# does not install a pool lends exactly as before.
-wz-link-lwip = { path = ".", features = ["tx-pool"] }
+# This crate's own unit tests drive the transmit pool (`tx_pool`), the receive
+# pool (`mac_rx_pool`) and the sockets that hold lent frames (`rx-hold`), which
+# exist only with their features. A dev-dependency on itself turns them on for
+# the test build alone; the library an image links is unchanged, a test that
+# does not install a pool lends exactly as before, and a socket holds nothing
+# unless it is asked to.
+wz-link-lwip = { path = ".", features = ["tx-pool", "mac-rx-pool", "rx-hold"] }
 
 [features]
 # Selects the SLIM / constrained session-rx buffer-pool profile
@@ -120,6 +122,24 @@ test-support = []
 # pool where that MAC's DMA reaches uncached, has a use for. With it on and no
 # pool installed, nothing changes.
 tx-pool = []
+
+# ARCHITECTURE section 9.2 -- the receive pool (`mac_rx_pool`, over the generated
+# `eth_rx_pool_mcu` emit): a firmware installs it over storage it places where a
+# descriptor-ring MAC's DMA writes uncached, and hands it to the MAC as the
+# buffers its receive ring draws from (`wz_runtime_core::MacRxPool`), so each
+# received frame is a pool slot walking the generated receive lifecycle (armed,
+# started, complete, read in place, free). Off by default: the pool is 24 KiB that
+# only an image whose MAC lends received frames, and which places the pool where
+# that MAC's DMA reaches uncached, has a use for.
+mac-rx-pool = []
+
+# ARCHITECTURE section 9.2 -- a socket may hold a received frame a MAC lent in
+# place as the pbuf it arrived in, instead of copying the datagram out of it
+# (`LwipUdpSocket::hold_lent_rx`), so a reader that reads in place
+# (`peek_recv` / `consume_recv`) reads the datagram where the controller wrote it.
+# Off by default, and a socket holds nothing unless it is asked to; without it
+# the receive queue and its callback are as they were.
+rx-hold = []
 
 [lints]
 workspace = true

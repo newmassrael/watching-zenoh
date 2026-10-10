@@ -312,8 +312,12 @@ OFF_AXIS: dict[str, tuple[str, frozenset[str]]] = {
         "an MCU link crate whose consumers are the deploy probes, not an "
         "external caller reaching for a path",
         # `tx-pool` gates the transmit pool (`pub mod tx_pool` and its generated
-        # emit) at the crate root, a firmware's to install.
-        frozenset({"buffer-pool-session-rx-slim", "test-support", "tx-pool"}),
+        # emit) at the crate root, a firmware's to install; `mac-rx-pool` the
+        # receive pool (`pub mod mac_rx_pool` and its emit) the same way, and
+        # `rx-hold` the sockets that hold lent frames (`pub mod rx_hold`).
+        frozenset(
+            {"buffer-pool-session-rx-slim", "mac-rx-pool", "rx-hold", "test-support", "tx-pool"}
+        ),
     ),
     "wz-packet-socket": (
         "one feature, gating a Linux-only capture path",
@@ -738,8 +742,11 @@ AXIS_REACHABLE: dict[str, frozenset[str]] = {
     # lwip_real_build)` whose second conjunct is a BUILD cfg and not a feature
     # at all. None is a simple crate-root item, so none is a shape the
     # derivation could have named. `tx-pool` gates two crate-root `pub mod`s,
-    # the simple shape the derivation names.
-    "wz-link-lwip": frozenset({"buffer-pool-session-rx-slim", "test-support", "tx-pool"}),
+    # the simple shape the derivation names, and so do `mac-rx-pool` (the
+    # receive pool's emit and `mac_rx_pool`) and `rx-hold` (`rx_hold`).
+    "wz-link-lwip": frozenset(
+        {"buffer-pool-session-rx-slim", "mac-rx-pool", "rx-hold", "test-support", "tx-pool"}
+    ),
     # R3080 — the MCU session shell. Its row is the same three features the
     # derivation either names (a crate-root `pub mod`) or reads as compound
     # (`any(test, feature = ..)`, `all(core, write)`), which is the second

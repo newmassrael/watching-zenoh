@@ -321,6 +321,8 @@ fn main() {
         .allowlist_function("wz_ethif_input_loan")
         .allowlist_function("wz_ethif_rx_held_count")
         .allowlist_function("wz_ethif_rx_loaned_total")
+        .allowlist_function("wz_ethif_rx_copied_total")
+        .allowlist_function("wz_ethif_rx_is_lent")
         .allowlist_function("wz_ethif_is_default")
         .allowlist_function("wz_ethif_remove_all")
         // R2841 — a link's routed source address and bound port (`shim.c`).

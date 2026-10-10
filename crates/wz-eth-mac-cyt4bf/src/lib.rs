@@ -9,9 +9,13 @@
 //! The `MXETH` block is a Cadence GEM_GXL behind a small wrapper. This driver
 //! runs it POLLED, with one descriptor ring each way over a [`DmaArea`] the board
 //! places in non-cacheable memory, and presents it as the frame-at-a-time seam a
-//! network stack (lwIP's `ethernetif` through `wz-link-lwip`) drives. Receive
-//! copies out of the ring; handing the ring's buffer up without the copy is the
-//! `RxSlots` seam's job.
+//! network stack (lwIP's `ethernetif` through `wz-link-lwip`) drives. A received
+//! frame is copied out of the ring ([`EthernetMac::receive`]) or lent where the
+//! controller wrote it ([`EthernetMac::receive_loan`]); and the ring's receive
+//! buffers are either the area's own, one per descriptor, or the slots of a
+//! generated buffer pool ([`Cyt4bfMac::new_pooled`], ARCHITECTURE section 9.2), in
+//! which case a lent frame is held in its slot and its descriptor is re-armed with
+//! another at once.
 //!
 //! ## What is the driver's and what is the board's
 //!
@@ -66,7 +70,7 @@ use core::sync::atomic::{fence, Ordering};
 
 pub use dma::{DmaArea, BUF_LEN};
 pub use phy::{LinkError, LinkMode, MdioError};
-use wz_runtime_core::{join_segments, EthernetMac, RxLoan, TxGather, TxSegment};
+use wz_runtime_core::{join_segments, EthernetMac, MacRxPool, RxLoan, TxGather, TxSegment};
 
 use dma::{Buffer, Descriptor, Slot, RX_BUF_UNITS};
 use regs::*;
@@ -96,6 +100,16 @@ pub trait Board {
     /// No default, because the answer is the board's alone and a wrong `true` is
     /// a frame sent with stale bytes from a cache the controller cannot see.
     fn reads_in_place(&self, ptr: *const u8, len: usize) -> bool;
+    /// Whether the controller may be handed `[ptr, ptr + len)` to WRITE a received
+    /// frame into, for the CPU to read where it lies afterwards: memory the DMA
+    /// master reaches, and where [`invalidate`](Self::invalidate) makes what the
+    /// controller wrote what the CPU reads. A MAC whose receive buffers are the
+    /// slots of a pool ([`Cyt4bfMac::new_pooled`]) refuses a pool outside it; the
+    /// area's own buffers are placed by the [`DmaArea`]'s contract instead.
+    ///
+    /// No default, for the reason [`reads_in_place`](Self::reads_in_place) has
+    /// none: a wrong `true` is a frame read from a stale cache line.
+    fn receives_in_place(&self, ptr: *const u8, len: usize) -> bool;
     /// Wait AT LEAST `us` microseconds. A wait promises no upper bound, and on a
     /// board whose time base runs slow it lasts many times what was asked, so the
     /// driver never adds up the waits it asked for to measure how long it has
@@ -119,13 +133,28 @@ pub trait Board {
 /// ([`with_in_place_window`](Self::with_in_place_window)): memory the firmware has
 /// placed, like the [`DmaArea`], where the DMA master reaches and the CPU does not
 /// cache. A board given no window reads nothing in place, and every gathered frame
-/// is copied into the ring.
+/// is copied into the ring. Receive is the same, the other way round: the controller
+/// writes received frames into a pool's slots only inside the window the firmware
+/// names for that ([`with_receive_window`](Self::with_receive_window)), and a board
+/// given none refuses every pool.
 pub struct Cyt4bfBoard {
     base: usize,
     delay: fn(u32),
     now: fn() -> u64,
     /// `[start, end)` of the memory the controller may read in place.
     in_place: Option<(usize, usize)>,
+    /// `[start, end)` of the memory the controller may write received frames into
+    /// for the CPU to read in place.
+    receive: Option<(usize, usize)>,
+}
+
+/// Whether `[ptr, ptr + len)` lies inside the window `[start, end)`.
+fn inside(window: Option<(usize, usize)>, ptr: *const u8, len: usize) -> bool {
+    let Some((start, end)) = window else {
+        return false;
+    };
+    let at = ptr as usize;
+    at >= start && at.checked_add(len).is_some_and(|last| last <= end)
 }
 
 impl Cyt4bfBoard {
@@ -140,6 +169,7 @@ impl Cyt4bfBoard {
             delay,
             now,
             in_place: None,
+            receive: None,
         }
     }
 
@@ -155,6 +185,22 @@ impl Cyt4bfBoard {
     pub unsafe fn with_in_place_window(mut self, start: *const u8, len: usize) -> Self {
         let start = start as usize;
         self.in_place = start.checked_add(len).map(|end| (start, end));
+        self
+    }
+
+    /// Let the controller write received frames, for the CPU to read where they
+    /// lie, inside `[start, start + len)` and nowhere else: where a pool the MAC
+    /// draws its receive buffers from ([`Cyt4bfMac::new_pooled`]) must lie.
+    ///
+    /// # Safety
+    /// The window must be memory the Ethernet DMA master reaches (system SRAM, not
+    /// a tightly coupled memory) and that the CPU does not cache, such as Zephyr's
+    /// `.nocache` section with `CONFIG_NOCACHE_MEMORY`: this board invalidates no
+    /// cache, so a line the CPU cached before the controller wrote would be read in
+    /// place of the frame.
+    pub unsafe fn with_receive_window(mut self, start: *const u8, len: usize) -> Self {
+        let start = start as usize;
+        self.receive = start.checked_add(len).map(|end| (start, end));
         self
     }
 }
@@ -175,11 +221,11 @@ impl Board for Cyt4bfBoard {
     }
 
     fn reads_in_place(&self, ptr: *const u8, len: usize) -> bool {
-        let Some((start, end)) = self.in_place else {
-            return false;
-        };
-        let at = ptr as usize;
-        at >= start && at.checked_add(len).is_some_and(|last| last <= end)
+        inside(self.in_place, ptr, len)
+    }
+
+    fn receives_in_place(&self, ptr: *const u8, len: usize) -> bool {
+        inside(self.receive, ptr, len)
     }
 
     fn delay_us(&mut self, us: u32) {
@@ -274,6 +320,19 @@ pub enum InitError {
     /// design, and a value that names no width cannot be turned into one: a
     /// block that does not answer (all ones) reads this way too.
     UnknownDmaBusWidth(u32),
+    /// A pool's slots are smaller than the receive buffer the controller is told
+    /// it has ([`BUF_LEN`]), so a frame could run past the end of one.
+    RxPoolSlotTooSmall,
+    /// A pool has fewer slots than the ring has receive descriptors, so the ring
+    /// could never be armed whole.
+    RxPoolTooFewSlots,
+    /// A pool's slots do not start on 32-byte boundaries: a cache line, and more
+    /// than the controller's bus width asks of a buffer address.
+    RxPoolMisaligned,
+    /// A pool does not lie inside the memory the board lets the controller write
+    /// received frames into for the CPU to read in place
+    /// ([`Board::receives_in_place`]).
+    RxPoolOutsideWindow,
 }
 
 /// The `NETWORK_CONFIG.DATA_BUS_WIDTH` value that agrees with the DMA bus width a
@@ -328,10 +387,18 @@ const MDIO_WRITE_SETTLE_US: u32 = 200;
 /// How often [`Cyt4bfMac::service_link`] touches the PHY.
 const LINK_POLL_MS: u64 = 250;
 
+/// The slot record of a pooled receive descriptor that holds no slot.
+const NO_SLOT: usize = usize::MAX;
+
 /// The CYT4BF Ethernet MAC, as an [`EthernetMac`].
-pub struct Cyt4bfMac<B: Board, const RX: usize, const TX: usize> {
+///
+/// `RXB` is the number of receive buffers its [`DmaArea`] holds: `RX` (the
+/// default) for a MAC made by [`new`](Self::new), which owns its ring's buffers,
+/// and `0` for one made by [`new_pooled`](Self::new_pooled), whose receive buffers
+/// are a pool's slots.
+pub struct Cyt4bfMac<B: Board, const RX: usize, const TX: usize, const RXB: usize = RX> {
     board: B,
-    area: NonNull<DmaArea<RX, TX>>,
+    area: NonNull<DmaArea<RX, TX, RXB>>,
     mac: [u8; 6],
     /// What `NETWORK_CONTROL` holds, less the command bits.
     network_control: u32,
@@ -351,11 +418,42 @@ pub struct Cyt4bfMac<B: Board, const RX: usize, const TX: usize> {
     /// ([`EthernetMac::receive_loan`]): their buffers are the stack's to read and
     /// stay out of the controller's reach until [`EthernetMac::return_rx`].
     rx_loaned: [bool; RX],
+    /// ARCHITECTURE section 9.2 -- the pool the receive buffers are slots of, for
+    /// a MAC made by [`new_pooled`](Self::new_pooled); `None` for one that owns its
+    /// ring's buffers.
+    rx_pool: Option<&'static mut (dyn MacRxPool + Send)>,
+    /// For a pooled ring: the slot each receive descriptor holds (armed for the
+    /// controller, or holding a finished frame not yet taken), or [`NO_SLOT`] for
+    /// a descriptor left unarmed because the pool had no free slot. Such a
+    /// descriptor is software-owned, so the controller stops at it.
+    rx_desc_slot: [usize; RX],
+    rx_counts: RxCounts,
     phy: Option<u8>,
     link: LinkState,
     next_link_poll_ms: u64,
     tx_recoveries: u32,
     tx_counts: TxCounts,
+}
+
+/// How the frames this MAC received were taken ([`Cyt4bfMac::rx_counts`]).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct RxCounts {
+    /// Frames lent IN PLACE, in the buffer the controller wrote them to
+    /// ([`EthernetMac::receive_loan`]).
+    pub lent: u32,
+    /// Lent frames given back ([`EthernetMac::return_rx`] naming a lent buffer).
+    pub returned: u32,
+    /// Frames copied out into the caller's buffer ([`EthernetMac::receive`]).
+    pub copied: u32,
+    /// Times a pooled ring took a frame out of a descriptor and could not re-arm
+    /// it, because every slot of the pool was out: the descriptor stays
+    /// software-owned and the controller reports no buffer available when it comes
+    /// round to it, until a slot comes back. Never a frame lost silently, and never
+    /// a buffer from anywhere but the pool.
+    pub refused: u32,
+    /// Frames dropped whole: not one buffer long (it spans buffers, or has no
+    /// length), or longer than the caller's buffer.
+    pub dropped: u32,
 }
 
 /// How the frames this MAC queued were sent ([`Cyt4bfMac::tx_counts`]).
@@ -394,15 +492,73 @@ impl Chain {
 
 // SAFETY: the driver owns its `DmaArea` exclusively (it took the `&'static mut`);
 // moving it between threads moves that ownership with it.
-unsafe impl<B: Board + Send, const RX: usize, const TX: usize> Send for Cyt4bfMac<B, RX, TX> {}
+unsafe impl<B: Board + Send, const RX: usize, const TX: usize, const RXB: usize> Send
+    for Cyt4bfMac<B, RX, TX, RXB>
+{
+}
 
-impl<B: Board, const RX: usize, const TX: usize> Cyt4bfMac<B, RX, TX> {
+impl<B: Board, const RX: usize, const TX: usize> Cyt4bfMac<B, RX, TX, RX> {
     /// Program the wrapper, the MAC, the DMA and both rings, and enable receive,
     /// transmit and the management port. The link is NOT brought up: call
     /// [`bring_up_link`](Self::bring_up_link).
+    ///
+    /// The receive ring's buffers are the area's own, one per descriptor.
     pub fn new(
-        mut board: B,
+        board: B,
         area: &'static mut DmaArea<RX, TX>,
+        config: &Config,
+    ) -> Result<Self, InitError> {
+        Self::bring_up(board, area, None, config)
+    }
+}
+
+impl<B: Board, const RX: usize, const TX: usize> Cyt4bfMac<B, RX, TX, 0> {
+    /// ARCHITECTURE section 9.2 -- [`new`](Cyt4bfMac::new), with the receive
+    /// ring's buffers drawn from `pool` instead of the area, which then holds none.
+    ///
+    /// Each receive descriptor is armed with a slot of the pool, and the slot walks
+    /// the pool's receive lifecycle with the frame the controller writes into it
+    /// ([`MacRxPool`]): armed, started when the descriptor is released, complete
+    /// when the controller reports the frame, read in place while the stack holds
+    /// it ([`EthernetMac::receive_loan`]), and free when the stack gives it back. A
+    /// descriptor whose frame is taken is re-armed at once with another free slot,
+    /// so a frame the stack holds is held in its slot and not in the ring; when the
+    /// pool has none the descriptor stays unarmed, counted
+    /// ([`RxCounts::refused`]), until a slot comes back.
+    ///
+    /// The pool is refused, before any register is written, when its slots could
+    /// not hold the controller's receive buffer, when it has fewer slots than the
+    /// ring has descriptors, when its slots are not 32-byte aligned, and when it
+    /// does not lie inside the memory the board lets the controller write for the
+    /// CPU to read in place ([`Board::receives_in_place`]).
+    pub fn new_pooled(
+        board: B,
+        area: &'static mut DmaArea<RX, TX, 0>,
+        pool: &'static mut (dyn MacRxPool + Send),
+        config: &Config,
+    ) -> Result<Self, InitError> {
+        if pool.slot_size() < BUF_LEN {
+            return Err(InitError::RxPoolSlotTooSmall);
+        }
+        if pool.slot_count() < RX {
+            return Err(InitError::RxPoolTooFewSlots);
+        }
+        let (start, len) = pool.span();
+        if start as usize % 32 != 0 || pool.slot_size() % 32 != 0 {
+            return Err(InitError::RxPoolMisaligned);
+        }
+        if !board.receives_in_place(start, len) {
+            return Err(InitError::RxPoolOutsideWindow);
+        }
+        Self::bring_up(board, area, Some(pool), config)
+    }
+}
+
+impl<B: Board, const RX: usize, const TX: usize, const RXB: usize> Cyt4bfMac<B, RX, TX, RXB> {
+    fn bring_up(
+        mut board: B,
+        area: &'static mut DmaArea<RX, TX, RXB>,
+        rx_pool: Option<&'static mut (dyn MacRxPool + Send)>,
         config: &Config,
     ) -> Result<Self, InitError> {
         if RX < 2 || TX < 2 {
@@ -447,6 +603,9 @@ impl<B: Board, const RX: usize, const TX: usize> Cyt4bfMac<B, RX, TX> {
             tx_inflight: 0,
             chains: [Chain::EMPTY; TX],
             rx_loaned: [false; RX],
+            rx_pool,
+            rx_desc_slot: [NO_SLOT; RX],
+            rx_counts: RxCounts::default(),
             phy: config.phy_address,
             link: LinkState::Unknown,
             next_link_poll_ms: 0,
@@ -556,7 +715,10 @@ impl<B: Board, const RX: usize, const TX: usize> Cyt4bfMac<B, RX, TX> {
     }
 
     fn rx_buf(&self, i: usize) -> *mut u8 {
-        // SAFETY: as `rx_slot`.
+        // A pooled ring's area holds no receive buffer: its buffers are the
+        // pool's slots, and nothing on that path names one of these.
+        debug_assert!(i < RXB, "a receive buffer of an area that holds {RXB}");
+        // SAFETY: as `rx_slot`, for `i < RXB`.
         unsafe {
             let base = addr_of_mut!((*self.area.as_ptr()).rx_buf) as *mut Buffer;
             base.add(i) as *mut u8
@@ -631,13 +793,33 @@ impl<B: Board, const RX: usize, const TX: usize> Cyt4bfMac<B, RX, TX> {
     /// A buffer lent to the stack is NOT handed back here, because the stack is
     /// still reading it: the controller would write over it. It goes back when
     /// the stack returns it, and the ring walks past it until then.
+    ///
+    /// A pooled ring arms every descriptor that holds no slot with a free one, and
+    /// leaves a descriptor that holds one as it is: that slot is the controller's
+    /// already.
     fn init_rx_ring(&mut self) {
         for i in 0..RX {
-            if !self.rx_loaned[i] {
+            if self.rx_pool.is_some() {
+                if self.rx_desc_slot[i] == NO_SLOT && !self.arm_rx_desc(i) {
+                    self.rx_counts.refused = self.rx_counts.refused.wrapping_add(1);
+                }
+            } else if !self.rx_loaned[i] {
                 self.give_rx(i);
             }
         }
         self.rx_head = 0;
+    }
+
+    /// Whether receive descriptor `i` is held back from the controller: its
+    /// buffer is lent out (a ring that owns its buffers), or it holds no slot (a
+    /// pooled ring whose pool ran dry). Either way it is software-owned and holds
+    /// no news.
+    fn rx_held_back(&self, i: usize) -> bool {
+        if self.rx_pool.is_some() {
+            self.rx_desc_slot[i] == NO_SLOT
+        } else {
+            self.rx_loaned[i]
+        }
     }
 
     /// The descriptor word of the finished frame at `rx_head`, or `None` when no
@@ -645,7 +827,9 @@ impl<B: Board, const RX: usize, const TX: usize> Cyt4bfMac<B, RX, TX> {
     ///
     /// A slot whose buffer is lent out is not finished news but an old frame the
     /// stack still holds, so it reads as nothing waiting (the ring has come all
-    /// the way round to a buffer not yet returned). Otherwise, when nothing is
+    /// the way round to a buffer not yet returned); so does a pooled descriptor
+    /// left without a slot, which the controller cannot have written. Otherwise,
+    /// when nothing is
     /// waiting and the controller ran out of buffers, it has stopped and says so;
     /// the buffers are free again now, so the condition is cleared and it carries
     /// on with the next frame.
@@ -653,7 +837,7 @@ impl<B: Board, const RX: usize, const TX: usize> Cyt4bfMac<B, RX, TX> {
         let slot = self.rx_slot(self.rx_head);
         self.board
             .invalidate(slot.0 as *const u8, core::mem::size_of::<Descriptor>());
-        if self.rx_loaned[self.rx_head] {
+        if self.rx_held_back(self.rx_head) {
             return None;
         }
         if slot.word0() & RXD_USED == 0 {
@@ -675,8 +859,15 @@ impl<B: Board, const RX: usize, const TX: usize> Cyt4bfMac<B, RX, TX> {
     /// Give receive slot `i` back to the controller: its buffer address, the wrap
     /// flag on the last slot, and the used bit CLEAR, which is the release.
     fn give_rx(&mut self, i: usize) {
+        self.release_rx_desc(i, self.rx_buf(i));
+    }
+
+    /// Release receive descriptor `i` to the controller with the buffer at `buf`:
+    /// its address, the wrap flag on the last slot, and the used bit CLEAR, which
+    /// is the release.
+    fn release_rx_desc(&mut self, i: usize, buf: *const u8) {
         let slot = self.rx_slot(i);
-        let addr = self.board.bus_address(self.rx_buf(i)) & RXD_ADDR_MASK;
+        let addr = self.board.bus_address(buf) & RXD_ADDR_MASK;
         let wrap = if i == RX - 1 { RXD_WRAP } else { 0 };
         slot.set_word1(0);
         // The address word carries the release, so every earlier store must be
@@ -685,6 +876,118 @@ impl<B: Board, const RX: usize, const TX: usize> Cyt4bfMac<B, RX, TX> {
         slot.set_word0(addr | wrap);
         self.board
             .clean(slot.0 as *const u8, core::mem::size_of::<Descriptor>());
+    }
+
+    // ---- a pooled receive ring (ARCHITECTURE section 9.2) ---------------------
+
+    /// Arm receive descriptor `i` with a free slot of the pool and release it to
+    /// the controller, walking the slot's arm and start edges around the release.
+    /// `false` when the pool has no free slot: the descriptor is then written
+    /// software-owned (used set, no address), so the controller stops at it and
+    /// reports no buffer available rather than write anywhere.
+    fn arm_rx_desc(&mut self, i: usize) -> bool {
+        let armed = self.rx_pool.as_deref_mut().and_then(|pool| pool.arm_rx());
+        let Some((idx, buf)) = armed else {
+            self.rx_desc_slot[i] = NO_SLOT;
+            let slot = self.rx_slot(i);
+            let wrap = if i == RX - 1 { RXD_WRAP } else { 0 };
+            slot.set_word1(0);
+            slot.set_word0(RXD_USED | wrap);
+            self.board
+                .clean(slot.0 as *const u8, core::mem::size_of::<Descriptor>());
+            return false;
+        };
+        self.rx_desc_slot[i] = idx;
+        self.release_rx_desc(i, buf);
+        if let Some(pool) = self.rx_pool.as_deref_mut() {
+            // SAFETY: the descriptor was released just above with this slot's
+            // address: the slot is the controller's to write from here.
+            let started = unsafe { pool.start_rx(idx) };
+            debug_assert!(started, "slot {idx} was armed and could not be started");
+        }
+        true
+    }
+
+    /// Arm the descriptors a dry pool left unarmed, oldest first, while the pool
+    /// has slots. The oldest is the first found going round the ring from
+    /// `rx_head`: past the frames waiting to be taken and the descriptors armed
+    /// behind them, which is the order the controller reaches them in. It waits at
+    /// the oldest, so arming in any other order would arm one it cannot reach.
+    fn rearm_rx_descs(&mut self) {
+        for k in 0..RX {
+            let i = (self.rx_head + k) % RX;
+            if self.rx_desc_slot[i] == NO_SLOT && !self.arm_rx_desc(i) {
+                return;
+            }
+        }
+    }
+
+    /// The next whole frame of a pooled ring, in place: its slot (now the CPU's to
+    /// read, by the pool's completion edge), the frame's first byte and its length.
+    /// The descriptor it came from is re-armed with a free slot before this
+    /// returns, or left unarmed and counted when there is none.
+    ///
+    /// A frame that is not whole is dropped: its slot goes home first, so the
+    /// re-arm that follows finds it.
+    fn take_pooled(&mut self) -> Option<(usize, *const u8, usize)> {
+        for _ in 0..RX {
+            let word1 = self.rx_ready()?;
+            let len = (word1 & RXD_LEN_MASK) as usize;
+            let index = self.rx_head;
+            let idx = self.rx_desc_slot[index];
+            self.rx_head = (index + 1) % RX;
+            self.rx_desc_slot[index] = NO_SLOT;
+            let pool = self.rx_pool.as_deref_mut()?;
+            // SAFETY: the controller set this descriptor's used bit, which it does
+            // once it has written the frame into the slot the descriptor held.
+            let frame = unsafe { pool.complete_rx(idx) };
+            let whole = word1 & RXD_SOF != 0 && word1 & RXD_EOF != 0 && len > 0 && len <= BUF_LEN;
+            match frame {
+                Some(ptr) if whole => {
+                    if !self.arm_rx_desc(index) {
+                        self.rx_counts.refused = self.rx_counts.refused.wrapping_add(1);
+                    }
+                    self.board.invalidate(ptr, len);
+                    return Some((idx, ptr, len));
+                }
+                Some(_) => {
+                    pool.release_rx(idx);
+                    self.rx_counts.dropped = self.rx_counts.dropped.wrapping_add(1);
+                }
+                // A descriptor whose slot the pool did not have in the controller's
+                // hands: the ring's record and the pool disagree, which is this
+                // driver's defect, loud in a test. The descriptor is re-armed so the
+                // ring goes on.
+                None => debug_assert!(false, "descriptor {index} held slot {idx}, not in flight"),
+            }
+            if !self.arm_rx_desc(index) {
+                self.rx_counts.refused = self.rx_counts.refused.wrapping_add(1);
+            }
+        }
+        None
+    }
+
+    /// What the receive side has done since the MAC was made.
+    pub fn rx_counts(&self) -> RxCounts {
+        self.rx_counts
+    }
+
+    /// For a pooled ring, the pool's free slots and its size; `None` for a ring
+    /// that owns its buffers.
+    pub fn rx_pool_free(&self) -> Option<(usize, usize)> {
+        self.rx_pool
+            .as_deref()
+            .map(|pool| (pool.free_count(), pool.slot_count()))
+    }
+
+    /// For a pooled ring, how many receive descriptors hold a slot: armed for the
+    /// controller, or holding a frame not yet taken. Every slot of the pool is at
+    /// any moment free, held by a descriptor, or lent to the stack, so free plus
+    /// this plus `lent - returned` is the pool's size. `None` for a ring that owns
+    /// its buffers.
+    pub fn rx_slots_in_ring(&self) -> Option<usize> {
+        self.rx_pool.as_ref()?;
+        Some(self.rx_desc_slot.iter().filter(|s| **s != NO_SLOT).count())
     }
 
     /// Every transmit slot software-owned (used set); the last wraps. Nothing is
@@ -916,7 +1219,9 @@ impl<B: Board, const RX: usize, const TX: usize> Cyt4bfMac<B, RX, TX> {
     }
 }
 
-impl<B: Board, const RX: usize, const TX: usize> phy::Mdio for Cyt4bfMac<B, RX, TX> {
+impl<B: Board, const RX: usize, const TX: usize, const RXB: usize> phy::Mdio
+    for Cyt4bfMac<B, RX, TX, RXB>
+{
     fn mdio_read(&mut self, phy: u8, reg_no: u8) -> Result<u16, MdioError> {
         self.board.write(
             PHY_MANAGEMENT,
@@ -946,7 +1251,9 @@ impl<B: Board, const RX: usize, const TX: usize> phy::Mdio for Cyt4bfMac<B, RX, 
     }
 }
 
-impl<B: Board, const RX: usize, const TX: usize> EthernetMac for Cyt4bfMac<B, RX, TX> {
+impl<B: Board, const RX: usize, const TX: usize, const RXB: usize> EthernetMac
+    for Cyt4bfMac<B, RX, TX, RXB>
+{
     fn mac_address(&self) -> [u8; 6] {
         self.mac
     }
@@ -1066,6 +1373,32 @@ impl<B: Board, const RX: usize, const TX: usize> EthernetMac for Cyt4bfMac<B, RX
     }
 
     fn receive(&mut self, out: &mut [u8]) -> Option<usize> {
+        if self.rx_pool.is_some() {
+            // A pooled ring: the frame is copied out of its slot, which then goes
+            // straight home, and any descriptor the pool had left unarmed is
+            // armed with it.
+            for _ in 0..RX {
+                let (idx, ptr, len) = self.take_pooled()?;
+                let kept = len <= out.len();
+                if kept {
+                    // SAFETY: the slot holds `len` bytes the controller wrote and
+                    // is the CPU's to read until it is released below; `out`
+                    // holds at least `len`.
+                    unsafe { core::ptr::copy_nonoverlapping(ptr, out.as_mut_ptr(), len) };
+                    self.rx_counts.copied = self.rx_counts.copied.wrapping_add(1);
+                } else {
+                    self.rx_counts.dropped = self.rx_counts.dropped.wrapping_add(1);
+                }
+                if let Some(pool) = self.rx_pool.as_deref_mut() {
+                    pool.release_rx(idx);
+                }
+                self.rearm_rx_descs();
+                if kept {
+                    return Some(len);
+                }
+            }
+            return None;
+        }
         // At most one pass over the ring per call: a ring full of frames the
         // caller cannot hold is drained, not spun on.
         for _ in 0..RX {
@@ -1081,8 +1414,10 @@ impl<B: Board, const RX: usize, const TX: usize> EthernetMac for Cyt4bfMac<B, RX
                 // SAFETY: `buf` holds `len <= BUF_LEN` bytes the controller wrote,
                 // and `out` holds at least `len` (checked above).
                 unsafe { core::ptr::copy_nonoverlapping(buf, out.as_mut_ptr(), len) };
+                self.rx_counts.copied = self.rx_counts.copied.wrapping_add(1);
                 Some(len)
             } else {
+                self.rx_counts.dropped = self.rx_counts.dropped.wrapping_add(1);
                 None
             };
             let released = self.rx_head;
@@ -1104,7 +1439,21 @@ impl<B: Board, const RX: usize, const TX: usize> EthernetMac for Cyt4bfMac<B, RX
     /// [`return_rx`](Self::return_rx). A frame that is not whole (it spans buffers
     /// or has no length) is dropped, and its buffer returned to the controller, as
     /// [`receive`](Self::receive) does.
+    ///
+    /// On a pooled ring ([`new_pooled`](Cyt4bfMac::new_pooled)) the buffer is a
+    /// slot of the pool, the cookie is the slot's index, and the descriptor is
+    /// re-armed with another slot before this returns, so the frame is withheld
+    /// from the controller in its slot and the ring stays whole.
     fn receive_loan(&mut self) -> Option<RxLoan> {
+        if self.rx_pool.is_some() {
+            let (idx, ptr, len) = self.take_pooled()?;
+            self.rx_counts.lent = self.rx_counts.lent.wrapping_add(1);
+            return Some(RxLoan {
+                ptr,
+                len,
+                cookie: idx as u32,
+            });
+        }
         for _ in 0..RX {
             let word1 = self.rx_ready()?;
             let len = (word1 & RXD_LEN_MASK) as usize;
@@ -1115,12 +1464,14 @@ impl<B: Board, const RX: usize, const TX: usize> EthernetMac for Cyt4bfMac<B, RX
             if whole {
                 self.board.invalidate(buf, len);
                 self.rx_loaned[index] = true;
+                self.rx_counts.lent = self.rx_counts.lent.wrapping_add(1);
                 return Some(RxLoan {
                     ptr: buf,
                     len,
                     cookie: index as u32,
                 });
             }
+            self.rx_counts.dropped = self.rx_counts.dropped.wrapping_add(1);
             self.give_rx(index);
         }
         None
@@ -1128,10 +1479,20 @@ impl<B: Board, const RX: usize, const TX: usize> EthernetMac for Cyt4bfMac<B, RX
 
     fn return_rx(&mut self, cookie: u32) {
         let index = cookie as usize;
+        if let Some(pool) = self.rx_pool.as_deref_mut() {
+            // The pool frees only a slot it has as lent (completed and not yet
+            // released): a stale or foreign cookie frees nothing.
+            if pool.release_rx(index) {
+                self.rx_counts.returned = self.rx_counts.returned.wrapping_add(1);
+                self.rearm_rx_descs();
+            }
+            return;
+        }
         // Only a slot that is lent goes back: a stale or foreign cookie must not
         // arm a buffer the controller is already filling.
         if index < RX && self.rx_loaned[index] {
             self.rx_loaned[index] = false;
+            self.rx_counts.returned = self.rx_counts.returned.wrapping_add(1);
             self.give_rx(index);
         }
     }

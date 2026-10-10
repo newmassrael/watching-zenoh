@@ -67,6 +67,7 @@
 //! UNWITNESSED here and is named so rather than implied by the rest passing.
 
 use crate::rx_pool::RxSlots;
+use wz_runtime_core::MacRxPool;
 
 /// The arming half of the receive seam: a slot handed to a bus master.
 ///
@@ -201,6 +202,10 @@ impl_armed_rx_slots!(session_rx_pool_mcu, SessionRxPoolMcu);
 #[cfg(feature = "buffer-pool-session-rx-slim")]
 impl_armed_rx_slots!(session_rx_pool_mcu_minimal, SessionRxPoolMcuMinimal);
 
+// The Ethernet receive pool (`mac-rx-pool`), the same gate as its module.
+#[cfg(feature = "mac-rx-pool")]
+impl_armed_rx_slots!(eth_rx_pool_mcu, EthRxPoolMcu);
+
 /// What a completion signal named.
 ///
 /// Three outcomes rather than an `Option` so the ways a completion can be
@@ -334,6 +339,122 @@ impl<P: ArmedRxSlots> DescriptorRingRx<P> {
     /// Slots on the freelist. The accounting gate — a ring that leaks slots
     /// shows up here and nowhere else.
     pub fn free_count(&self) -> usize {
+        self.pool.free_count()
+    }
+}
+
+/// ARCHITECTURE section 9.2 -- an [`ArmedRxSlots`] pool bound to a
+/// descriptor-ring MAC as the buffers its receive ring draws from
+/// ([`MacRxPool`]).
+///
+/// [`DescriptorRingRx`] serves a MAC that asks for a buffer and hands it back in
+/// one completion call, the frame consumed inside it. A MAC that LENDS a frame to
+/// the stack (`EthernetMac::receive_loan`) cannot: the frame outlives the call,
+/// and the slot has to be held, read-only, until the stack gives it back. So this
+/// binding keeps the two handles the generated lifecycle hands out on the way: the
+/// armed handle between arming a descriptor and releasing it to the controller,
+/// and the completed (shared-read) handle between the controller's report and the
+/// last reader's return. Each is held by slot index, which is the token a
+/// descriptor's record and a loan's cookie carry; the pool is asked, and not a
+/// table here, whether a slot is in the state an edge needs.
+///
+/// The pool is a `&'static mut`, because the firmware places its storage where
+/// the MAC's DMA reaches uncached (the `mac_rx_pool` module installs one); the
+/// binding's own records are ordinary memory.
+pub struct PoolRxRing<P: ArmedRxSlots + 'static, const N: usize> {
+    pool: &'static mut P,
+    armed: [Option<P::Armed>; N],
+    filled: [Option<P::Filled>; N],
+    /// First byte of the slot table, as an address, and the table's length.
+    span: (usize, usize),
+}
+
+impl<P: ArmedRxSlots + 'static, const N: usize> PoolRxRing<P, N> {
+    /// Bind `pool`, every slot of which must be free.
+    ///
+    /// Where the slots are is read from the pool itself: a slot is taken for the
+    /// CPU and given straight back, and the slot table starts its index times
+    /// the slot size below it (the emit's stride is the slot size, which it
+    /// asserts).
+    ///
+    /// # Panics
+    /// When a slot is out: a binding that did not arm a slot cannot take it back.
+    pub fn new(pool: &'static mut P) -> Self {
+        const { assert!(N == P::SLOT_COUNT, "a record for every slot of the pool") };
+        assert_eq!(pool.free_count(), N, "a pool is bound with every slot free");
+        let mut slot = pool
+            .reserve()
+            .expect("a pool of free slots has a free slot");
+        let at = pool.buf(&mut slot).as_ptr() as usize;
+        let start = at - P::slot_idx(&slot) * P::SLOT_SIZE;
+        pool.release(slot);
+        Self {
+            pool,
+            armed: core::array::from_fn(|_| None),
+            filled: core::array::from_fn(|_| None),
+            span: (start, N * P::SLOT_SIZE),
+        }
+    }
+
+    /// The bound pool, to read its own state (`slot_state` on the emit).
+    pub fn pool(&self) -> &P {
+        self.pool
+    }
+}
+
+impl<P: ArmedRxSlots + 'static, const N: usize> MacRxPool for PoolRxRing<P, N> {
+    fn slot_size(&self) -> usize {
+        P::SLOT_SIZE
+    }
+
+    fn slot_count(&self) -> usize {
+        N
+    }
+
+    fn span(&self) -> (*const u8, usize) {
+        (self.span.0 as *const u8, self.span.1)
+    }
+
+    fn arm_rx(&mut self) -> Option<(usize, *mut u8)> {
+        let armed = self.pool.arm()?;
+        let idx = P::armed_idx(&armed);
+        let ptr = self.pool.armed_ptr(&armed);
+        // A slot just taken off the freelist has no record of either kind.
+        debug_assert!(self.armed[idx].is_none() && self.filled[idx].is_none());
+        self.armed[idx] = Some(armed);
+        Some((idx, ptr))
+    }
+
+    unsafe fn start_rx(&mut self, idx: usize) -> bool {
+        let Some(armed) = self.armed.get_mut(idx).and_then(Option::take) else {
+            return false;
+        };
+        // SAFETY: the caller released a descriptor with this slot's address.
+        unsafe { self.pool.start(armed) };
+        true
+    }
+
+    unsafe fn complete_rx(&mut self, idx: usize) -> Option<*const u8> {
+        if idx >= N {
+            return None;
+        }
+        // SAFETY: the caller saw the controller report this slot's frame written;
+        // the pool refuses a slot that is not in the bus master's hands.
+        let filled = unsafe { self.pool.complete(idx) }?;
+        let first = self.pool.filled_bytes(&filled).as_ptr();
+        self.filled[idx] = Some(filled);
+        Some(first)
+    }
+
+    fn release_rx(&mut self, idx: usize) -> bool {
+        let Some(filled) = self.filled.get_mut(idx).and_then(Option::take) else {
+            return false;
+        };
+        self.pool.release_filled(filled);
+        true
+    }
+
+    fn free_count(&self) -> usize {
         self.pool.free_count()
     }
 }

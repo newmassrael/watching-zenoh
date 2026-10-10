@@ -436,6 +436,10 @@ void wz_ethif_remove_all(void) {
 
 /* Hand one received frame (no FCS) to `n`. Non-zero when lwIP took it; zero
  * when it could not be buffered, which is a drop, as on a real NIC. */
+/* How many received frames were copied into a pbuf of lwIP's own (the copying
+ * input above all interfaces), for a bench to set beside the frames read in place. */
+static u32_t wz_rx_copied_total;
+
 int wz_ethif_input(struct netif *n, const u8_t *frame, u16_t len) {
     if (n == NULL || len == 0) {
         return 0;
@@ -448,7 +452,12 @@ int wz_ethif_input(struct netif *n, const u8_t *frame, u16_t len) {
         pbuf_free(p);
         return 0;
     }
+    wz_rx_copied_total++;
     return 1;
+}
+
+u32_t wz_ethif_rx_copied_total(void) {
+    return wz_rx_copied_total;
 }
 
 /* Let `n` take received frames lent in place: `release(ctx, cookie)` is called
@@ -535,6 +544,14 @@ u32_t wz_ethif_rx_loaned_total(void) {
     return wz_rx_loaned_total;
 }
 
+/* Whether `p` is a received frame a MAC lent in place (a pbuf this shim wrapped in
+ * `wz_ethif_input_loan`), which a socket may hold instead of copying. lwIP hands
+ * a socket the same pbuf it was input as, its headers stepped over. */
+int wz_ethif_rx_is_lent(const struct pbuf *p) {
+    return p != NULL && (p->flags & PBUF_FLAG_IS_CUSTOM) != 0 &&
+           ((const struct pbuf_custom *)p)->custom_free_function == wz_rx_custom_free;
+}
+
 #else /* !LWIP_SUPPORT_CUSTOM_PBUF */
 
 int wz_ethif_input_loan(struct netif *n, const u8_t *frame, u16_t len, u32_t cookie) {
@@ -547,6 +564,11 @@ int wz_ethif_rx_held_count(void) {
 }
 
 u32_t wz_ethif_rx_loaned_total(void) {
+    return 0;
+}
+
+int wz_ethif_rx_is_lent(const struct pbuf *p) {
+    (void)p;
     return 0;
 }
 
@@ -603,6 +625,15 @@ int wz_ethif_rx_held_count(void) {
 }
 
 u32_t wz_ethif_rx_loaned_total(void) {
+    return 0;
+}
+
+u32_t wz_ethif_rx_copied_total(void) {
+    return 0;
+}
+
+int wz_ethif_rx_is_lent(const struct pbuf *p) {
+    (void)p;
     return 0;
 }
 

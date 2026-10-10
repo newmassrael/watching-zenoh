@@ -192,6 +192,33 @@ pub mod session_tx_pool_mcu {
     ));
 }
 
+/// SCE-codegen'd MCU Ethernet RECEIVE buffer-pool SSOT
+/// (`sources/network/eth_rx_pool_mcu.scxml`, 16 x 1536 = 24 KiB): the slots a
+/// descriptor-ring MAC's receive DMA writes frames into. Its consumer is
+/// [`mac_rx_pool`], and both exist only under the `mac-rx-pool` feature, so an
+/// image whose MAC owns its ring's buffers carries neither.
+#[cfg(feature = "mac-rx-pool")]
+#[allow(non_snake_case)]
+#[allow(unused_imports)]
+#[allow(dead_code)]
+#[allow(unused_variables)]
+#[allow(unused_mut)]
+#[allow(clippy::all)]
+pub mod eth_rx_pool_mcu {
+    include!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../out/wz-link-lwip",
+        "/eth_rx_pool_mcu.rs"
+    ));
+}
+
+/// ARCHITECTURE section 9.2 -- the receive pool: the generated
+/// [`eth_rx_pool_mcu`], installed over storage the firmware places, as the
+/// buffers a descriptor-ring MAC's receive ring draws from
+/// ([`wz_runtime_core::MacRxPool`]).
+#[cfg(feature = "mac-rx-pool")]
+pub mod mac_rx_pool;
+
 /// ARCHITECTURE section 9.1 -- the transmit pool: with one installed, the payload
 /// the driver lends ([`LwipUdpSocket::alloc_tx_payload`]) is a slot of
 /// [`session_tx_pool_mcu`], and the slot's generated lifecycle follows the frame
@@ -549,9 +576,100 @@ impl LwipLink {
 // versus the default `<1500, 8>` ~= 12 KB).
 struct Inner<const N: usize, const Q: usize> {
     pcb: NonNull<udp_pcb>,
-    rx_queue: Queue<Datagram<N>, Q>,
+    rx_queue: Queue<Queued<N>, Q>,
     rx_drops: u32,
+    /// `rx-hold`: whether a frame a MAC lent in place is held in the queue as
+    /// the pbuf it arrived in ([`LwipUdpSocket::hold_lent_rx`]).
+    #[cfg(feature = "rx-hold")]
+    hold_lent: bool,
     _pin: PhantomPinned,
+}
+
+/// One received datagram in a socket's receive queue.
+///
+/// Without `rx-hold` this has one variant and is laid out as the [`Datagram`] it
+/// carries.
+enum Queued<const N: usize> {
+    /// Copied out of the pbuf lwIP delivered it in.
+    Copied(Datagram<N>),
+    /// ARCHITECTURE section 9.2 (`rx-hold`) -- the pbuf itself, kept: a frame a
+    /// MAC lent in place, in one piece, whose payload is the datagram where the
+    /// controller wrote it. Freeing the pbuf is what gives the MAC its buffer back.
+    #[cfg(feature = "rx-hold")]
+    Held(HeldDatagram),
+}
+
+/// A datagram held as the lent pbuf it arrived in (`rx-hold`).
+#[cfg(feature = "rx-hold")]
+struct HeldDatagram {
+    p: NonNull<pbuf>,
+    src_addr: u32,
+    src_port: u16,
+}
+
+#[cfg(feature = "rx-hold")]
+impl HeldDatagram {
+    /// The datagram's bytes, in the pbuf's one piece.
+    fn bytes(&self) -> &[u8] {
+        // SAFETY: the queue holds the pbuf's only reference until it frees it, and
+        // a held pbuf is one piece (`len == tot_len`) of `len` payload bytes.
+        unsafe {
+            let p = self.p.as_ptr();
+            core::slice::from_raw_parts((*p).payload as *const u8, usize::from((*p).len))
+        }
+    }
+}
+
+/// A received datagram borrowed where a socket's receive queue holds it
+/// ([`LwipUdpSocket::peek_recv`]): in the queue's own copy, or, for a frame a MAC
+/// lent and the socket holds (`rx-hold`), in the buffer the controller wrote it to.
+#[derive(Debug, Clone, Copy)]
+pub struct DatagramView<'a> {
+    /// The payload bytes.
+    pub data: &'a [u8],
+    /// Source IPv4 address as lwIP stores it, as [`Datagram::src_addr`].
+    pub src_addr: u32,
+    /// Source UDP port in host byte order.
+    pub src_port: u16,
+}
+
+/// What the sockets that hold lent frames ([`LwipUdpSocket::hold_lent_rx`]) have
+/// done with the datagrams they received, process-wide: how many a reader took
+/// where they lay, and how many were copied (by the receive callback, for a
+/// datagram that was not a lent frame of one piece, or out of a held frame by an
+/// owned receive). A socket that does not hold counts nothing here.
+#[cfg(feature = "rx-hold")]
+pub mod rx_hold {
+    use core::sync::atomic::{AtomicU32, Ordering};
+
+    static IN_PLACE: AtomicU32 = AtomicU32::new(0);
+    static COPIED: AtomicU32 = AtomicU32::new(0);
+
+    /// Count one more. lwIP runs `NO_SYS`, on one thread, and so does every
+    /// caller, so a load and a store make the increment: a read-modify-write
+    /// instruction does not exist on every target this crate builds for.
+    fn bump(counter: &AtomicU32) {
+        counter.store(
+            counter.load(Ordering::Relaxed).wrapping_add(1),
+            Ordering::Relaxed,
+        );
+    }
+
+    pub(crate) fn in_place() {
+        bump(&IN_PLACE);
+    }
+
+    pub(crate) fn copied() {
+        bump(&COPIED);
+    }
+
+    /// `(read in place, copied)` since boot.
+    pub fn counts() -> (u32, u32) {
+        (
+            IN_PLACE.load(Ordering::Relaxed),
+            COPIED.load(Ordering::Relaxed),
+        )
+    }
 }
 
 // Inner is referenced only by the lwIP single-thread cooperative
@@ -609,6 +727,37 @@ unsafe extern "C" fn recv_thunk<const N: usize, const Q: usize>(
     // SAFETY: pbuf 'p' is owned by the callback per lwIP contract;
     // tot_len is the total chained payload length in bytes.
     let len = unsafe { (*p).tot_len as usize };
+
+    // ARCHITECTURE section 9.2 (`rx-hold`) -- a frame a MAC lent in place, whose
+    // datagram lies in one piece of it, is kept as it is: the queue takes the
+    // callback's reference to the pbuf, and the bytes stay where the controller
+    // wrote them until a reader has read them there. Everything else (a datagram
+    // lwIP reassembled from fragments into a chain, a frame lwIP copied in, one
+    // longer than this socket takes) is copied below, as without it.
+    #[cfg(feature = "rx-hold")]
+    if inner.hold_lent {
+        // SAFETY: `p` is live and the callback's; the shim only compares its
+        // custom free function with its own.
+        let one_lent_piece =
+            unsafe { usize::from((*p).len) == len && lwip_sys::wz_ethif_rx_is_lent(p) != 0 };
+        if one_lent_piece && len <= N {
+            let held = Queued::Held(HeldDatagram {
+                // SAFETY: checked non-null at the top.
+                p: unsafe { NonNull::new_unchecked(p) },
+                src_addr,
+                src_port: port,
+            });
+            if inner.rx_queue.enqueue(held).is_err() {
+                inner.rx_drops = inner.rx_drops.saturating_add(1);
+                // SAFETY: the queue refused the reference, so it is freed here,
+                // once, which gives the MAC its buffer back.
+                unsafe { pbuf_free(p) };
+            }
+            return;
+        }
+        rx_hold::copied();
+    }
+
     let copy_len = core::cmp::min(len, N);
     let mut data: Vec<u8, N> = Vec::new();
     if data.resize_default(copy_len).is_ok() {
@@ -628,7 +777,7 @@ unsafe extern "C" fn recv_thunk<const N: usize, const Q: usize>(
         src_addr,
         src_port: port,
     };
-    if inner.rx_queue.enqueue(datagram).is_err() {
+    if inner.rx_queue.enqueue(Queued::Copied(datagram)).is_err() {
         inner.rx_drops = inner.rx_drops.saturating_add(1);
     }
 }
@@ -649,6 +798,8 @@ impl<const N: usize, const Q: usize> LwipUdpSocket<N, Q> {
             pcb: NonNull::dangling(),
             rx_queue: Queue::new(),
             rx_drops: 0,
+            #[cfg(feature = "rx-hold")]
+            hold_lent: false,
             _pin: PhantomPinned,
         });
 
@@ -680,6 +831,30 @@ impl<const N: usize, const Q: usize> LwipUdpSocket<N, Q> {
         unsafe { udp_recv(pcb.as_ptr(), Some(recv_thunk::<N, Q>), arg) };
 
         Ok(Self { inner })
+    }
+
+    /// ARCHITECTURE section 9.2 (`rx-hold`) -- keep a received frame a MAC lent
+    /// in place in this socket's queue as the pbuf it arrived in, instead of
+    /// copying the datagram out of it, when the datagram lies in one piece of it
+    /// and fits. A reader then reads it where the controller wrote it
+    /// ([`peek_recv`](Self::peek_recv)), and giving it back
+    /// ([`consume_recv`](Self::consume_recv)) frees the pbuf, which returns the
+    /// buffer to the MAC.
+    ///
+    /// For a reader that reads in place: an owned receive
+    /// ([`try_recv`](Self::try_recv)) of a held frame copies it then, so holding
+    /// buys such a reader nothing and keeps the MAC's buffer out longer. How many
+    /// frames may be held at once is bounded by the lwIP shim, which lends at most
+    /// `WZ_ETHIF_RX_HELD_MAX` and copies the rest in; a MAC whose ring owns its
+    /// buffers keeps a descriptor out of its ring for each one held, which is why
+    /// the frames a socket holds should be a pool's slots (the `mac_rx_pool`
+    /// module, under `mac-rx-pool`). The counts are
+    /// [`rx_hold::counts`].
+    #[cfg(feature = "rx-hold")]
+    pub fn hold_lent_rx(&mut self, hold: bool) {
+        // SAFETY: Pin<Box<Inner>> stable; only a plain field is written.
+        let inner = unsafe { Pin::get_unchecked_mut(self.inner.as_mut()) };
+        inner.hold_lent = hold;
     }
 
     /// R2841 — the port this socket is bound to. For a socket bound to port
@@ -791,7 +966,25 @@ impl<const N: usize, const Q: usize> LwipUdpSocket<N, Q> {
         // SAFETY: Pin<Box<Inner<N, Q>>> stable; mutable borrow scoped
         // here.
         let inner = unsafe { Pin::get_unchecked_mut(self.inner.as_mut()) };
-        inner.rx_queue.dequeue()
+        match inner.rx_queue.dequeue()? {
+            Queued::Copied(datagram) => Some(datagram),
+            // An owned receive of a held frame copies it out now, and frees the
+            // pbuf, which gives the MAC its buffer back.
+            #[cfg(feature = "rx-hold")]
+            Queued::Held(held) => {
+                let mut data: Vec<u8, N> = Vec::new();
+                // A held datagram was checked to fit `N` when it was queued.
+                let _ = data.extend_from_slice(held.bytes());
+                // SAFETY: the queue held the pbuf's only reference to it.
+                unsafe { pbuf_free(held.p.as_ptr()) };
+                rx_hold::copied();
+                Some(Datagram {
+                    data,
+                    src_addr: held.src_addr,
+                    src_port: held.src_port,
+                })
+            }
+        }
     }
 
     /// The oldest received datagram, borrowed where the receive queue holds
@@ -806,14 +999,44 @@ impl<const N: usize, const Q: usize> LwipUdpSocket<N, Q> {
     /// processing (`NO_SYS=1`), which the reader drives itself and does not
     /// drive while it holds the borrow. A send is fine meanwhile: it takes
     /// `&self` and touches nothing the queue owns.
-    pub fn peek_recv(&self) -> Option<&Datagram<N>> {
-        self.inner.rx_queue.peek()
+    ///
+    /// For a frame the socket holds as a MAC lent it (`hold_lent_rx`, under
+    /// `rx-hold`) the bytes are the frame's own, in
+    /// the buffer the controller wrote them to.
+    pub fn peek_recv(&self) -> Option<DatagramView<'_>> {
+        Some(match self.inner.rx_queue.peek()? {
+            Queued::Copied(datagram) => DatagramView {
+                data: datagram.data.as_slice(),
+                src_addr: datagram.src_addr,
+                src_port: datagram.src_port,
+            },
+            #[cfg(feature = "rx-hold")]
+            Queued::Held(held) => DatagramView {
+                data: held.bytes(),
+                src_addr: held.src_addr,
+                src_port: held.src_port,
+            },
+        })
     }
 
     /// Remove the datagram [`peek_recv`](Self::peek_recv) lent. `false` when
-    /// the queue was empty.
+    /// the queue was empty. A held frame's pbuf is freed, which gives the MAC its
+    /// buffer back, and the frame counts as read in place (`rx_hold::counts`,
+    /// under `rx-hold`).
     pub fn consume_recv(&mut self) -> bool {
-        self.try_recv().is_some()
+        // SAFETY: Pin<Box<Inner<N, Q>>> stable; mutable borrow scoped here.
+        let inner = unsafe { Pin::get_unchecked_mut(self.inner.as_mut()) };
+        match inner.rx_queue.dequeue() {
+            None => false,
+            Some(Queued::Copied(_)) => true,
+            #[cfg(feature = "rx-hold")]
+            Some(Queued::Held(held)) => {
+                // SAFETY: the queue held the pbuf's only reference to it.
+                unsafe { pbuf_free(held.p.as_ptr()) };
+                rx_hold::in_place();
+                true
+            }
+        }
     }
 
     /// Number of datagrams dropped because the receive queue was full
@@ -942,6 +1165,19 @@ impl<const N: usize, const Q: usize> Drop for LwipUdpSocket<N, Q> {
         unsafe {
             udp_recv(self.inner.pcb.as_ptr(), None, core::ptr::null_mut());
             udp_remove(self.inner.pcb.as_ptr());
+        }
+        // A frame still held goes back to its MAC: its pbuf is freed, once.
+        #[cfg(feature = "rx-hold")]
+        {
+            // SAFETY: Pin<Box<Inner>> stable; nothing else reaches the queue now
+            // that the callback is gone.
+            let inner = unsafe { Pin::get_unchecked_mut(self.inner.as_mut()) };
+            while let Some(entry) = inner.rx_queue.dequeue() {
+                if let Queued::Held(held) = entry {
+                    // SAFETY: the queue held the pbuf's only reference to it.
+                    unsafe { pbuf_free(held.p.as_ptr()) };
+                }
+            }
         }
     }
 }

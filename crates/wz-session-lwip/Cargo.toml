@@ -58,7 +58,10 @@ transport-tx-lend = ["wz-session-core/transport-tx-lend"]
 # The drive loop dispatches each inbound datagram where the session socket
 # holds it, record by record (`wz-runtime-coop`'s `rx-in-place`), with this
 # crate's link lending the socket's queued datagram instead of copying it out.
-rx-in-place = ["wz-runtime-coop/rx-in-place"]
+# The session socket also holds a frame its MAC lent in place as the pbuf it
+# arrived in (`wz-link-lwip`'s `rx-hold`), so on a MAC that lends, the datagram
+# the loop dispatches is the received frame where the controller wrote it.
+rx-in-place = ["wz-runtime-coop/rx-in-place", "wz-link-lwip/rx-hold"]
 # Transport reassembly (Tier B) on the MCU session loop. Forwards to the
 # wz-runtime-coop reassembly seam (the CoopReassembly dispatcher +
 # mcu_reassembly() over the SCE buffer-pool SSOT) AND the wz-session-core

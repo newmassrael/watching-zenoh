@@ -41,5 +41,12 @@ path = "src/lib.rs"
 # The `EthernetMac` seam. No other wz crate: see the header.
 wz-runtime-core = { path = "../wz-runtime-core" }
 
+[dev-dependencies]
+# The pooled receive ring's tests bind the GENERATED Ethernet receive pool through
+# the lwIP link crate's binding (`wz_link_lwip::mac_rx_pool`), so the ring is
+# judged against the lifecycle an image runs and not against a stand-in. Test
+# only: the library still depends on the trait tier alone, as the header says.
+wz-link-lwip = { path = "../wz-link-lwip", features = ["mac-rx-pool"] }
+
 [lints]
 workspace = true

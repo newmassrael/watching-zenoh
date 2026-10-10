@@ -2993,6 +2993,7 @@ dependencies = [
 name = "wz-eth-mac-cyt4bf"
 version = "0.1.0"
 dependencies = [
+ "wz-link-lwip",
  "wz-runtime-core",
 ]
 
