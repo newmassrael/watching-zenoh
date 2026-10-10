@@ -16,6 +16,14 @@
   scxml SSOT and no emit, so nothing consumed it and nothing graded its
   values; the deploy entry is now `{ ref: session_tx_pool_ap }`.
 
+  R3250 — this is also the LARGE class of a DATAGRAM link's pool: a UDP,
+  QUIC-datagram, websocket or multicast link owns one instance of this and one
+  of `session_tx_pool_ap_small.scxml`, a frame takes the smallest class it
+  fits, and there a slot carries one datagram. The per-link budget of the class
+  there is derived from the queue shape as that document describes; with the
+  defaults it asks for 8 * (ceil(131070 / 65600) + 1) = 24, clamped to the 16
+  here, which is the count the stream derivation below arrives at.
+
   ## One pool per LINK, not per node
 
   The receive pool is the node's because a link's read half holds at most one

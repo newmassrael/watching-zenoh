@@ -104,7 +104,7 @@ pub fn wire_ws_stream(
     );
     let (sink, stream) = ws.split();
     let inbound = WsReadDriver::new(stream);
-    let (tx, rx) = crate::writer_queue::outbound_channel();
+    let (tx, rx) = crate::writer_queue::datagram_outbound_channel();
     let writer_handle = WriterHandle::spawn(rx, |queue| ws_writer_task(sink, queue));
     let outbound = Arc::new(WsWriteDriver::new(tx, subject, endpoints));
     (inbound, outbound, writer_handle)
@@ -186,10 +186,19 @@ pub struct WsWriteDriver {
     subject: LinkSubject,
     /// R311y473 — this link's `{src,dst}` locator pair for the adminspace.
     endpoints: Option<wz_session_core::link::LinkEndpoints>,
+    /// R3250 — the slots of the link's transmit pool lent to the session, under
+    /// `runtime-zero-copy`.
+    #[cfg(feature = "runtime-zero-copy")]
+    lent: crate::writer_queue::LendTable,
 }
 
+/// The largest websocket message a write half sends: zenoh's batch ceiling.
+const WS_MAX_FRAME: usize = u16::MAX as usize;
+
 impl WsWriteDriver {
-    fn new(
+    /// A write half over `tx` (built by
+    /// [`crate::writer_queue::datagram_outbound_channel`]).
+    pub fn new(
         tx: crate::writer_queue::OutboundTx,
         subject: LinkSubject,
         endpoints: Option<wz_session_core::link::LinkEndpoints>,
@@ -198,6 +207,8 @@ impl WsWriteDriver {
             tx,
             subject,
             endpoints,
+            #[cfg(feature = "runtime-zero-copy")]
+            lent: Default::default(),
         }
     }
 }
@@ -244,7 +255,7 @@ impl BoxedLinkDriver for WsWriteDriver {
         _reliability: Reliability,
         priority: wz_session_core::qos::Priority,
     ) -> LinkSendOutcome {
-        if bytes.len() > u16::MAX as usize {
+        if bytes.len() > WS_MAX_FRAME {
             // Oversize: drop with a warn. zenoh's batch ceiling is 65535
             // (u16), so a larger frame is a wz-side encoder bug — loud.
             log::warn!(
@@ -253,11 +264,50 @@ impl BoxedLinkDriver for WsWriteDriver {
             );
             return LinkSendOutcome::Dropped(LinkDropCause::Oversize);
         }
+        // R3250 — the byte door keeps its vector even on a pooled queue, on
+        // purpose: tungstenite 0.24's `Message::Binary` takes an owned
+        // `Vec<u8>`, so a frame reaches the library as a vector whatever the
+        // queue holds, and copying it into a slot first would add a copy and
+        // save nothing. The one allocation and copy here IS that seam's.
         if let Err(e) = self.tx.send(priority, bytes.to_vec()) {
             log::warn!("wz-runtime-tokio: outbound ws channel closed; dropping frame ({e})");
             return LinkSendOutcome::Dropped(LinkDropCause::WriterGone);
         }
         LinkSendOutcome::Sent
+    }
+
+    // R3250 — lend the session a slot of the link's transmit pool to encode one
+    // message into. The session's own heap encode is saved; the library seam
+    // still takes a vector (`ws_writer_task`).
+    #[cfg(feature = "runtime-zero-copy")]
+    fn tx_slot_acquire(
+        &self,
+        want: usize,
+        priority: wz_session_core::qos::Priority,
+    ) -> Option<wz_session_core::link::TxSlotGrant> {
+        self.lent.acquire(&self.tx, want, WS_MAX_FRAME, priority)
+    }
+
+    #[cfg(feature = "runtime-zero-copy")]
+    fn tx_slot_storage(&self, slot: wz_session_core::link::TxSlot) -> (*mut u8, usize) {
+        self.lent.storage(slot)
+    }
+
+    #[cfg(feature = "runtime-zero-copy")]
+    fn tx_slot_send(
+        &self,
+        slot: wz_session_core::link::TxSlot,
+        start: usize,
+        len: usize,
+        _reliability: Reliability,
+        _priority: wz_session_core::qos::Priority,
+    ) -> LinkSendOutcome {
+        self.lent.send(&self.tx, slot, start, len, WS_MAX_FRAME)
+    }
+
+    #[cfg(feature = "runtime-zero-copy")]
+    fn tx_slot_abort(&self, slot: wz_session_core::link::TxSlot) {
+        self.lent.abort(&self.tx, slot)
     }
 
     fn open_blocking(&self) {
@@ -285,8 +335,16 @@ pub async fn ws_writer_task(
     mut sink: SplitSink<WebSocketStream<TcpStream>, Message>,
     mut queue: OutboundQueue,
 ) {
-    while let Some(payload) = queue.next().await {
-        match queue.guarded(sink.send(Message::Binary(payload))).await {
+    // R3250 — THE ONE COPY AT THIS SEAM, explicit: tungstenite 0.24's
+    // `Message::Binary` owns a `Vec<u8>`, so a frame in a slot of the link's
+    // transmit pool is copied into one here (one allocation and one copy per
+    // lent message, `WireFrame::into_vec`), and the slot goes home un-armed once
+    // its bytes are copied out. A byte-door frame is already a vector and moves in
+    // without a copy. Removing it needs a library that takes a borrowed or
+    // refcounted buffer (tungstenite's later `Bytes` payloads).
+    while let Some(payload) = queue.next_wire().await {
+        let message = Message::Binary(payload.into_vec());
+        match queue.guarded(sink.send(message)).await {
             Some(Ok(())) => {}
             Some(Err(e)) => {
                 log::warn!("wz-runtime-tokio: ws_writer_task send failed: {e}; closing");

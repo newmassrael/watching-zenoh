@@ -72,16 +72,11 @@ use wz_session_core::qos::Priority;
 use crate::runtime_impl::TokioJoinHandle;
 use crate::runtime_pool::WzRuntime;
 
-#[cfg(all(
-    feature = "runtime-zero-copy",
-    any(feature = "transport-link-tcp", feature = "transport-link-serial")
-))]
-use crate::link_tx_pool::{TxPool, TxPoolStats};
-#[cfg(all(
-    feature = "runtime-zero-copy",
-    any(feature = "transport-link-tcp", feature = "transport-link-serial")
-))]
-use crate::session_tx_pool_ap::{CpuMut, Slot, SlotState, SLOT_SIZE};
+// R3250 — every pooled item below is gated on `runtime-zero-copy` alone: this
+// module exists only where some link has a writer queue, and every such link
+// owns a pool under the feature (a stream, the serial link, or a datagram link).
+#[cfg(feature = "runtime-zero-copy")]
+use crate::link_tx_pool::{TxPoolStats, TxPools, TxSlotState};
 
 /// R2919 — the outbound channel between a session's emit and its link's
 /// writer: one FIFO LANE per `Priority`, drained in strict ascending priority.
@@ -160,20 +155,11 @@ pub fn outbound_channel_with_capacity(
             closed: false,
             senders: 1,
             spare: Vec::new(),
-            #[cfg(all(
-                feature = "runtime-zero-copy",
-                any(feature = "transport-link-tcp", feature = "transport-link-serial")
-            ))]
+            #[cfg(feature = "runtime-zero-copy")]
             pool: None,
-            #[cfg(all(
-                feature = "runtime-zero-copy",
-                any(feature = "transport-link-tcp", feature = "transport-link-serial")
-            ))]
+            #[cfg(feature = "runtime-zero-copy")]
             next_batch: 0,
-            #[cfg(all(
-                feature = "runtime-zero-copy",
-                any(feature = "transport-link-tcp", feature = "transport-link-serial")
-            ))]
+            #[cfg(feature = "runtime-zero-copy")]
             receiver_gone: false,
         }),
         ready: Notify::new(),
@@ -188,40 +174,88 @@ pub fn outbound_channel_with_capacity(
 }
 
 /// R3250 — [`outbound_channel`] over the link's own TRANSMIT POOL
-/// (`sources/network/session_tx_pool_ap.scxml`), ARCHITECTURE section 9.1:
-/// every frame a sender hands this queue, lent or copied, lies in a slot of the
-/// pool until the writer has written it, so the transmit path allocates nothing
-/// per frame, in a burst, or for a frame of any size a stream link can carry.
+/// (`sources/network/session_tx_pool_ap.scxml`), ARCHITECTURE section 9.1, for a
+/// BYTE-STREAM link (and the serial link): every frame a sender hands this
+/// queue, lent or copied, lies in a slot of the pool until the writer has
+/// written it, packed behind the frames before it, so the transmit path
+/// allocates nothing per frame, in a burst, or for a frame of any size a stream
+/// link can carry.
 ///
 /// The lanes, their byte bounds, their priority order and their congestion
 /// marks are [`outbound_channel`]'s, unchanged; the pool adds one condition to
 /// "room" (a free slot) and is back-pressure when it is dry. The pool is
 /// allocated once here, zeroed, about 1 MiB of address space per link.
-#[cfg(all(
-    feature = "runtime-zero-copy",
-    any(feature = "transport-link-tcp", feature = "transport-link-serial")
-))]
+#[cfg(feature = "runtime-zero-copy")]
 pub fn outbound_channel_pooled() -> (OutboundTx, OutboundRx) {
     outbound_channel_pooled_with_capacity([DEFAULT_QUEUE_SIZE; Priority::NUM], BATCH_BYTES)
 }
 
 /// R3250 — [`outbound_channel_pooled`] with each lane's bound, as
 /// [`outbound_channel_with_capacity`].
-#[cfg(all(
-    feature = "runtime-zero-copy",
-    any(feature = "transport-link-tcp", feature = "transport-link-serial")
-))]
+#[cfg(feature = "runtime-zero-copy")]
 pub fn outbound_channel_pooled_with_capacity(
     queue_size: [usize; Priority::NUM],
     batch_bytes: usize,
 ) -> (OutboundTx, OutboundRx) {
-    let (tx, rx) = outbound_channel_with_capacity(queue_size, batch_bytes);
-    tx.shared
-        .state
-        .lock()
-        .expect("outbound lanes poisoned")
-        .pool = Some(TxPool::new());
-    (tx, rx)
+    with_pools(
+        outbound_channel_with_capacity(queue_size, batch_bytes),
+        TxPools::stream(),
+    )
+}
+
+/// R3250 — [`outbound_channel_pooled`] for a DATAGRAM link (UDP, QUIC
+/// datagram, websocket, multicast): a datagram is its own boundary, so a slot
+/// carries ONE frame and nothing is packed, and the pool has two size classes
+/// (`session_tx_pool_ap_small` for the datagrams the sessions send,
+/// `session_tx_pool_ap` for the rest). Each class's per-link slot BUDGET follows
+/// the queue's shape, which follows the configuration
+/// (`link_tx_pool::TxPools::size_budgets`), so it is re-derived whenever the
+/// session shapes the queue ([`OutboundTx::reshape`]).
+#[cfg(feature = "runtime-zero-copy")]
+pub fn outbound_channel_datagram() -> (OutboundTx, OutboundRx) {
+    outbound_channel_datagram_with_capacity([DEFAULT_QUEUE_SIZE; Priority::NUM], BATCH_BYTES)
+}
+
+/// R3250 — the queue every DATAGRAM write half builds: [`outbound_channel_datagram`]
+/// under `runtime-zero-copy`, the heap [`outbound_channel`] otherwise. One
+/// constructor, so a datagram pipeline cannot pick the wrong one.
+pub fn datagram_outbound_channel() -> (OutboundTx, OutboundRx) {
+    #[cfg(feature = "runtime-zero-copy")]
+    {
+        outbound_channel_datagram()
+    }
+    #[cfg(not(feature = "runtime-zero-copy"))]
+    {
+        outbound_channel()
+    }
+}
+
+/// R3250 — [`outbound_channel_datagram`] with each lane's bound.
+#[cfg(feature = "runtime-zero-copy")]
+pub fn outbound_channel_datagram_with_capacity(
+    queue_size: [usize; Priority::NUM],
+    batch_bytes: usize,
+) -> (OutboundTx, OutboundRx) {
+    with_pools(
+        outbound_channel_with_capacity(queue_size, batch_bytes),
+        TxPools::datagram(),
+    )
+}
+
+/// Give a fresh queue its pool, budgets sized from its lanes.
+#[cfg(feature = "runtime-zero-copy")]
+fn with_pools(channel: (OutboundTx, OutboundRx), pools: TxPools) -> (OutboundTx, OutboundRx) {
+    {
+        let mut st = channel
+            .0
+            .shared
+            .state
+            .lock()
+            .expect("outbound lanes poisoned");
+        st.pool = Some(pools);
+        st.size_budgets();
+    }
+    channel
 }
 
 struct Lanes {
@@ -272,27 +306,19 @@ struct LaneState {
     /// frames cannot make a link hoard memory.
     spare: Vec<Vec<u8>>,
     /// R3250 — ARCHITECTURE section 9.1 under `runtime-zero-copy`: the link's
-    /// transmit pool, on a queue built by [`outbound_channel_pooled`]. While it
-    /// is here every frame a sender hands this queue lies in one of its slots
-    /// ([`Entry::Batch`]), and a dry pool is back-pressure.
-    #[cfg(all(
-        feature = "runtime-zero-copy",
-        any(feature = "transport-link-tcp", feature = "transport-link-serial")
-    ))]
-    pool: Option<TxPool>,
+    /// transmit pool, on a queue built by [`outbound_channel_pooled`] or
+    /// [`outbound_channel_datagram`]. While it is here every frame a sender
+    /// hands this queue lies in one of its slots ([`Entry::Batch`]), and a dry
+    /// pool is back-pressure.
+    #[cfg(feature = "runtime-zero-copy")]
+    pool: Option<TxPools>,
     /// The id the next batch is given, so a lend can find its batch again.
-    #[cfg(all(
-        feature = "runtime-zero-copy",
-        any(feature = "transport-link-tcp", feature = "transport-link-serial")
-    ))]
+    #[cfg(feature = "runtime-zero-copy")]
     next_batch: u64,
     /// The receiving half has been DROPPED (not merely sealed): nothing will
     /// ever write what is queued, so a batch a lend gives back goes home
     /// whatever it holds.
-    #[cfg(all(
-        feature = "runtime-zero-copy",
-        any(feature = "transport-link-tcp", feature = "transport-link-serial")
-    ))]
+    #[cfg(feature = "runtime-zero-copy")]
     receiver_gone: bool,
 }
 
@@ -300,32 +326,32 @@ struct LaneState {
 enum Entry {
     /// A frame in a vector of its own, with the priority it was sent at.
     Heap(Priority, Vec<u8>),
-    /// R3250 — a slot of the link's transmit pool holding frames back to back.
-    #[cfg(all(
-        feature = "runtime-zero-copy",
-        any(feature = "transport-link-tcp", feature = "transport-link-serial")
-    ))]
+    /// R3250 — a slot of the link's transmit pool: frames back to back on a
+    /// stream link, one datagram on a datagram link.
+    #[cfg(feature = "runtime-zero-copy")]
     Batch(Batch),
 }
 
 /// R3250 — a slot of a pooled queue while it is on its lane: the frames
 /// written into it so far, and whether a lend is writing the next one.
 ///
-/// A sender appends to its lane's NEWEST batch while it has room and no lend is
-/// in it, so frames pack into few slots and a slot is written by one write; on
-/// a byte stream the concatenation is the wire. The slot is cpu-mut for as long
-/// as it is here, which is the state the generated lifecycle gives a slot the
-/// CPU is still writing.
-#[cfg(all(
-    feature = "runtime-zero-copy",
-    any(feature = "transport-link-tcp", feature = "transport-link-serial")
-))]
+/// On a stream link a sender appends to its lane's NEWEST batch while it has
+/// room and no lend is in it, so frames pack into few slots and a slot is written
+/// by one write; on a byte stream the concatenation is the wire. On a datagram
+/// link a batch is one datagram. The slot is cpu-mut for as long as it is here,
+/// which is the state the generated lifecycle gives a slot the CPU is still
+/// writing.
+#[cfg(feature = "runtime-zero-copy")]
 struct Batch {
     /// The priority of the first frame in it (all of them, on a QoS lane).
     priority: Priority,
     id: u64,
-    slot: Slot<CpuMut>,
-    /// First byte of the slot, from the pool (`TxPool::base_of`).
+    /// The size class and the slot's index in it.
+    class: usize,
+    idx: usize,
+    /// The slot's bytes.
+    cap: usize,
+    /// First byte of the slot, from the pool.
     base: usize,
     /// Bytes of whole frames written into it.
     fill: usize,
@@ -339,10 +365,7 @@ enum Taken {
     /// A frame (or a batch of frames) for the writer, with its priority.
     Frame(Priority, Out),
     /// The highest lane with anything in it is waiting on a lend in progress.
-    #[cfg(all(
-        feature = "runtime-zero-copy",
-        any(feature = "transport-link-tcp", feature = "transport-link-serial")
-    ))]
+    #[cfg(feature = "runtime-zero-copy")]
     Blocked,
     /// Nothing is queued.
     Empty,
@@ -351,11 +374,9 @@ enum Taken {
 /// The parts of a taken item; [`OutboundRx`] makes the [`WireFrame`].
 enum Out {
     Heap(Vec<u8>),
-    #[cfg(all(
-        feature = "runtime-zero-copy",
-        any(feature = "transport-link-tcp", feature = "transport-link-serial")
-    ))]
+    #[cfg(feature = "runtime-zero-copy")]
     Slot {
+        class: usize,
         idx: usize,
         base: usize,
         len: usize,
@@ -421,6 +442,28 @@ impl LaneState {
             let default = Priority::DEFAULT.wire_byte() as usize;
             self.capacity = [self.capacity[default]; Priority::NUM];
         }
+        #[cfg(feature = "runtime-zero-copy")]
+        self.size_budgets();
+    }
+
+    /// R3250 — size the pool's per-link slot budgets from the lanes this queue
+    /// has now: one lane's bound when the session runs no QoS, every lane's
+    /// otherwise (`link_tx_pool::TxPools::size_budgets` has the rule).
+    #[cfg(feature = "runtime-zero-copy")]
+    fn size_budgets(&mut self) {
+        let lanes = if self.single_lane { 1 } else { Priority::NUM };
+        let default = Priority::DEFAULT.wire_byte() as usize;
+        let mut bounds = [0usize; Priority::NUM];
+        for (i, bound) in bounds.iter_mut().take(lanes).enumerate() {
+            *bound = if self.single_lane {
+                self.capacity[default]
+            } else {
+                self.capacity[i]
+            };
+        }
+        if let Some(pool) = self.pool.as_mut() {
+            pool.size_budgets(&bounds[..lanes]);
+        }
     }
 
     /// Take the next frame, highest priority first, after releasing the one
@@ -449,10 +492,7 @@ impl LaneState {
     /// already holds frames is waited for, because a later item of the lane may
     /// be a later frame of a conduit whose earlier one is in it.
     fn take_from(&mut self, lane: usize) -> Taken {
-        #[cfg(all(
-            feature = "runtime-zero-copy",
-            any(feature = "transport-link-tcp", feature = "transport-link-serial")
-        ))]
+        #[cfg(feature = "runtime-zero-copy")]
         let at = {
             let mut at = None;
             for (i, entry) in self.lanes[lane].iter().enumerate() {
@@ -470,10 +510,7 @@ impl LaneState {
                 None => return Taken::Empty,
             }
         };
-        #[cfg(not(all(
-            feature = "runtime-zero-copy",
-            any(feature = "transport-link-tcp", feature = "transport-link-serial")
-        )))]
+        #[cfg(not(feature = "runtime-zero-copy"))]
         let at = 0;
         let Some(entry) = self.lanes[lane].remove(at) else {
             return Taken::Empty;
@@ -483,10 +520,7 @@ impl LaneState {
                 self.in_flight = Some((lane, frame.len()));
                 Taken::Frame(priority, Out::Heap(frame))
             }
-            #[cfg(all(
-                feature = "runtime-zero-copy",
-                any(feature = "transport-link-tcp", feature = "transport-link-serial")
-            ))]
+            #[cfg(feature = "runtime-zero-copy")]
             Entry::Batch(batch) => {
                 let pool = self
                     .pool
@@ -495,12 +529,16 @@ impl LaneState {
                 // Off its lane: no sender may write it again. Cpu-mut to
                 // dma-armed-tx, and its address is the pool's own answer for an
                 // armed slot.
-                let (idx, base) = pool.arm(batch.slot);
+                let base = pool
+                    .class(batch.class)
+                    .arm(batch.idx)
+                    .expect("a queued batch is the CPU's, so it arms");
                 self.in_flight = Some((lane, batch.fill));
                 Taken::Frame(
                     batch.priority,
                     Out::Slot {
-                        idx,
+                        class: batch.class,
+                        idx: batch.idx,
                         base: base as usize,
                         len: batch.fill,
                     },
@@ -510,17 +548,14 @@ impl LaneState {
     }
 
     /// R3250 — whether a frame could be given a slot: always on a heap queue;
-    /// on a pooled one, while the pool has a free slot. Conservative by
-    /// design: a frame that would have fit behind the newest batch is told
-    /// "no room" too when the pool is dry, because the answer is given before
-    /// the frame's size is known.
+    /// on a pooled one, while some class of the pool has a slot this link may
+    /// take (free, and under its budget). Conservative by design: a frame that
+    /// would have fit behind the newest batch is told "no room" too when the
+    /// pool is out, because the answer is given before the frame's size is known.
     fn slot_room(&self) -> bool {
-        #[cfg(all(
-            feature = "runtime-zero-copy",
-            any(feature = "transport-link-tcp", feature = "transport-link-serial")
-        ))]
+        #[cfg(feature = "runtime-zero-copy")]
         if let Some(pool) = self.pool.as_ref() {
-            return pool.free_count() > 0;
+            return pool.has_room();
         }
         true
     }
@@ -808,28 +843,23 @@ impl OutboundTx {
 }
 
 /// R3250 — why a pooled queue refused a frame.
-#[cfg(all(
-    feature = "runtime-zero-copy",
-    any(feature = "transport-link-tcp", feature = "transport-link-serial")
-))]
+#[cfg(feature = "runtime-zero-copy")]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PooledSendError {
     /// The queue is closed (sealed or its receiver gone): nothing more is
     /// written.
     Closed,
-    /// The frame is larger than a slot. A stream frame never is (the slot holds
-    /// the largest one, `link_tx_pool::MAX_STREAM_FRAME`), so this is a caller
-    /// that bypassed the write half's own length guard.
+    /// The frame is larger than the pool's largest slot. A stream frame never
+    /// is (that slot holds the largest one, `link_tx_pool::MAX_STREAM_FRAME`),
+    /// nor is a datagram, so this is a caller that bypassed the write half's own
+    /// length guard.
     TooLarge,
     /// The link's encoder could not write the frame (`OutboundTx::send_encoded`);
     /// nothing was queued.
     Unencodable,
 }
 
-#[cfg(all(
-    feature = "runtime-zero-copy",
-    any(feature = "transport-link-tcp", feature = "transport-link-serial")
-))]
+#[cfg(feature = "runtime-zero-copy")]
 impl std::fmt::Display for PooledSendError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -844,10 +874,7 @@ impl std::fmt::Display for PooledSendError {
 /// one frame into. Consumed by [`OutboundTx::commit`] or
 /// [`OutboundTx::abort_lend`]; until one of them runs, nothing else writes those
 /// bytes and the writer does not take the slot.
-#[cfg(all(
-    feature = "runtime-zero-copy",
-    any(feature = "transport-link-tcp", feature = "transport-link-serial")
-))]
+#[cfg(feature = "runtime-zero-copy")]
 #[derive(Debug)]
 pub struct TxLend {
     lane: usize,
@@ -856,10 +883,7 @@ pub struct TxLend {
     cap: usize,
 }
 
-#[cfg(all(
-    feature = "runtime-zero-copy",
-    any(feature = "transport-link-tcp", feature = "transport-link-serial")
-))]
+#[cfg(feature = "runtime-zero-copy")]
 impl TxLend {
     /// The first byte the frame may be written at.
     pub fn base(&self) -> *mut u8 {
@@ -875,10 +899,7 @@ impl TxLend {
 /// R3250 — the pooled queue's sender side. Every method here is for a queue
 /// built by [`outbound_channel_pooled`]; on a heap queue they answer as a link
 /// that lends nothing.
-#[cfg(all(
-    feature = "runtime-zero-copy",
-    any(feature = "transport-link-tcp", feature = "transport-link-serial")
-))]
+#[cfg(feature = "runtime-zero-copy")]
 impl OutboundTx {
     /// Whether this queue keeps its frames in a transmit pool.
     pub fn is_pooled(&self) -> bool {
@@ -891,7 +912,7 @@ impl OutboundTx {
     }
 
     /// What the pool has done, and how many of its slots are free now, by the
-    /// pool's own count. `None` on a heap queue.
+    /// pool's own count, over every class. `None` on a heap queue.
     pub fn tx_pool_stats(&self) -> Option<(TxPoolStats, usize)> {
         let st = self.shared.state.lock().expect("outbound lanes poisoned");
         st.pool
@@ -899,15 +920,37 @@ impl OutboundTx {
             .map(|pool| (pool.stats(), pool.free_count()))
     }
 
-    /// The lifecycle state the pool's emit records for slot `idx`.
-    pub fn tx_slot_state(&self, idx: usize) -> Option<SlotState> {
+    /// Slots in the pool, over every class. `None` on a heap queue.
+    pub fn tx_pool_capacity(&self) -> Option<usize> {
         let st = self.shared.state.lock().expect("outbound lanes poisoned");
-        st.pool.as_ref().and_then(|pool| pool.slot_state(idx))
+        st.pool.as_ref().map(TxPools::capacity)
+    }
+
+    /// Class `class`'s counters, free slots and budget. `None` on a heap queue
+    /// or past the classes.
+    pub fn tx_class_stats(&self, class: usize) -> Option<(TxPoolStats, usize, usize)> {
+        let st = self.shared.state.lock().expect("outbound lanes poisoned");
+        let pool = st.pool.as_ref()?;
+        (class < pool.classes()).then(|| {
+            let c = pool.class_ref(class);
+            (c.stats(), c.free_count(), c.budget())
+        })
+    }
+
+    /// The lifecycle state the pool's emit records for slot `idx` of class
+    /// `class`.
+    pub fn tx_slot_state(&self, class: usize, idx: usize) -> Option<TxSlotState> {
+        let st = self.shared.state.lock().expect("outbound lanes poisoned");
+        let pool = st.pool.as_ref()?;
+        (class < pool.classes())
+            .then(|| pool.class_ref(class).slot_state(idx))
+            .flatten()
     }
 
     /// Enqueue the frame `prefix` + `payload` on `priority`'s lane by COPYING it
-    /// into a slot: behind the frames of the lane's newest batch when it has
-    /// room and no lend is in it, else into a fresh slot. This is the byte door
+    /// into a slot: on a stream pool behind the frames of the lane's newest batch
+    /// when it has room and no lend is in it, else (and always on a datagram
+    /// pool) into a fresh slot of the smallest class that holds it. This is the byte door
     /// of a pooled queue, and like [`Self::send`] it does not ask for room: a
     /// frame that must not wait for room (a keep-alive, a close) is taken as it
     /// is. When the pool is dry it waits for the writer to free a slot, as
@@ -941,7 +984,7 @@ impl OutboundTx {
         room: usize,
         encode: impl FnOnce(&mut [u8]) -> Option<usize>,
     ) -> Result<(), PooledSendError> {
-        if room > SLOT_SIZE {
+        if self.max_frame().is_some_and(|max| room > max) {
             return Err(PooledSendError::TooLarge);
         }
         let mut encode = Some(encode);
@@ -963,10 +1006,11 @@ impl OutboundTx {
                         .send(priority, frame)
                         .map_err(|_| PooledSendError::Closed);
                 };
-                let behind = matches!(
-                    st.lanes[lane].back(),
-                    Some(Entry::Batch(batch)) if !batch.lent && SLOT_SIZE - batch.fill >= room
-                );
+                let behind = pool.packs()
+                    && matches!(
+                        st.lanes[lane].back(),
+                        Some(Entry::Batch(batch)) if !batch.lent && batch.cap - batch.fill >= room
+                    );
                 let written = if behind {
                     let Some(Entry::Batch(batch)) = st.lanes[lane].back_mut() else {
                         unreachable!("checked directly above");
@@ -981,42 +1025,45 @@ impl OutboundTx {
                     let encode = encode.take().expect("encoded once");
                     let written = encode(dst).ok_or(PooledSendError::Unencodable)?.min(room);
                     batch.fill += written;
+                    pool.class(batch.class).note_copied();
                     written
                 } else {
-                    let Some(mut slot) = pool.acquire() else {
+                    let Some((class, idx, base)) = pool.acquire(room) else {
                         drop(guard);
                         if !self.wait_for_slot() {
                             return Err(PooledSendError::Closed);
                         }
                         continue;
                     };
-                    let base = pool.base_of(&mut slot) as usize;
-                    // SAFETY: a fresh slot of SLOT_SIZE >= room bytes, held by this
-                    // call alone until it is on the lane.
+                    let cap = pool.slot_size(class);
+                    let base = base as usize;
+                    // SAFETY: a fresh slot of `cap >= room` bytes (the class was
+                    // chosen to hold it), held by this call alone until it is on
+                    // the lane.
                     let dst = unsafe { std::slice::from_raw_parts_mut(base as *mut u8, room) };
                     let encode = encode.take().expect("encoded once");
                     let Some(written) = encode(dst) else {
-                        pool.give_back(slot);
+                        pool.class(class).give_back(idx);
                         drop(guard);
                         self.shared.room.notify_all();
                         return Err(PooledSendError::Unencodable);
                     };
                     let written = written.min(room);
+                    pool.class(class).note_copied();
                     let id = st.next_batch;
                     st.next_batch += 1;
                     st.lanes[lane].push_back(Entry::Batch(Batch {
                         priority,
                         id,
-                        slot,
+                        class,
+                        idx,
+                        cap,
                         base,
                         fill: written,
                         lent: false,
                     }));
                     written
                 };
-                if let Some(pool) = st.pool.as_mut() {
-                    pool.note_copied();
-                }
                 st.occupied[lane] += written;
             }
             self.shared.ready.notify_one();
@@ -1033,7 +1080,7 @@ impl OutboundTx {
     /// includes a free slot, so the wait is the window between that answer and
     /// this call, and it ends when the writer frees one or the queue closes.
     pub fn lend(&self, priority: Priority, need: usize) -> Option<TxLend> {
-        if need > SLOT_SIZE {
+        if need > self.max_frame()? {
             return None;
         }
         loop {
@@ -1045,19 +1092,22 @@ impl OutboundTx {
                 let lane = guard.lane_of(priority);
                 let st = &mut *guard;
                 let pool = st.pool.as_mut()?;
-                if let Some(Entry::Batch(batch)) = st.lanes[lane].back_mut() {
-                    if !batch.lent && SLOT_SIZE - batch.fill >= need {
-                        batch.lent = true;
-                        return Some(TxLend {
-                            lane,
-                            batch: batch.id,
-                            base: batch.base + batch.fill,
-                            cap: SLOT_SIZE - batch.fill,
-                        });
+                if pool.packs() {
+                    if let Some(Entry::Batch(batch)) = st.lanes[lane].back_mut() {
+                        if !batch.lent && batch.cap - batch.fill >= need {
+                            batch.lent = true;
+                            return Some(TxLend {
+                                lane,
+                                batch: batch.id,
+                                base: batch.base + batch.fill,
+                                cap: batch.cap - batch.fill,
+                            });
+                        }
                     }
                 }
-                if let Some(mut slot) = pool.acquire() {
-                    let base = pool.base_of(&mut slot) as usize;
+                if let Some((class, idx, base)) = pool.acquire(need) {
+                    let cap = pool.slot_size(class);
+                    let base = base as usize;
                     let id = st.next_batch;
                     st.next_batch += 1;
                     // On the lane at once, so its place in the lane's order is
@@ -1065,7 +1115,9 @@ impl OutboundTx {
                     st.lanes[lane].push_back(Entry::Batch(Batch {
                         priority,
                         id,
-                        slot,
+                        class,
+                        idx,
+                        cap,
                         base,
                         fill: 0,
                         lent: true,
@@ -1074,7 +1126,7 @@ impl OutboundTx {
                         lane,
                         batch: id,
                         base,
-                        cap: SLOT_SIZE,
+                        cap,
                     });
                 }
             }
@@ -1113,9 +1165,10 @@ impl OutboundTx {
                 (Err(PooledSendError::Closed), goes_home)
             } else {
                 batch.fill += len;
+                let class = batch.class;
                 st.occupied[lend.lane] += len;
                 if let Some(pool) = st.pool.as_mut() {
-                    pool.note_lent();
+                    pool.class(class).note_lent();
                 }
                 (Ok(()), false)
             }
@@ -1181,12 +1234,106 @@ impl OutboundTx {
             _ => wait(),
         }
     }
+
+    /// The largest frame a slot of this queue's pool holds; `None` on a heap
+    /// queue.
+    pub fn max_frame(&self) -> Option<usize> {
+        let st = self.shared.state.lock().expect("outbound lanes poisoned");
+        st.pool.as_ref().map(TxPools::max_frame)
+    }
 }
 
-#[cfg(all(
-    feature = "runtime-zero-copy",
-    any(feature = "transport-link-tcp", feature = "transport-link-serial")
-))]
+/// R3250 — the slots a write half has LENT the session and not yet taken back
+/// (`BoxedLinkDriver::tx_slot_acquire`), by slot number: an occupied entry is a
+/// lend the session is encoding into, and a free number is reused. Shared by the
+/// datagram write halves, which lend with no headroom (a datagram has no
+/// framing prefix), so each is the same four lines over this.
+#[cfg(feature = "runtime-zero-copy")]
+#[derive(Default)]
+pub struct LendTable {
+    lent: Mutex<(Vec<Option<TxLend>>, Vec<u32>)>,
+}
+
+#[cfg(feature = "runtime-zero-copy")]
+impl LendTable {
+    /// Lend the session a slot of `tx`'s pool for a frame of up to `want`
+    /// bytes, capped at `max` (the link's own limit on a frame). `None` on a
+    /// heap queue, a closed one, or a frame no class holds.
+    pub fn acquire(
+        &self,
+        tx: &OutboundTx,
+        want: usize,
+        max: usize,
+        priority: Priority,
+    ) -> Option<wz_session_core::link::TxSlotGrant> {
+        let lend = tx.lend(priority, want.min(max))?;
+        let mut table = self.lent.lock().expect("lent slots poisoned");
+        let (slots, free) = &mut *table;
+        let number = match free.pop() {
+            Some(number) => number,
+            None => {
+                slots.push(None);
+                (slots.len() - 1) as u32
+            }
+        };
+        slots[number as usize] = Some(lend);
+        Some(wz_session_core::link::TxSlotGrant {
+            slot: wz_session_core::link::TxSlot(number),
+            headroom: 0,
+        })
+    }
+
+    /// Where lent slot `slot` is, and how many bytes it holds.
+    pub fn storage(&self, slot: wz_session_core::link::TxSlot) -> (*mut u8, usize) {
+        let table = self.lent.lock().expect("lent slots poisoned");
+        let lend = table.0[slot.0 as usize]
+            .as_ref()
+            .expect("a slot the session names is a slot this link lent");
+        (lend.base(), lend.capacity())
+    }
+
+    /// Take lent slot `slot` back out of the table.
+    fn take(&self, slot: wz_session_core::link::TxSlot) -> TxLend {
+        let mut table = self.lent.lock().expect("lent slots poisoned");
+        let (slots, free) = &mut *table;
+        let lend = slots[slot.0 as usize]
+            .take()
+            .expect("a slot the session names is a slot this link lent");
+        free.push(slot.0);
+        lend
+    }
+
+    /// The session wrote a datagram of `len` bytes at the start of lent slot
+    /// `slot`: queue it. `len` past `max` is refused as oversize and the slot
+    /// goes home.
+    pub fn send(
+        &self,
+        tx: &OutboundTx,
+        slot: wz_session_core::link::TxSlot,
+        start: usize,
+        len: usize,
+        max: usize,
+    ) -> wz_session_core::link::LinkSendOutcome {
+        use wz_session_core::link::{LinkDropCause, LinkSendOutcome};
+        let lend = self.take(slot);
+        debug_assert_eq!(start, 0, "a datagram lend has no headroom");
+        if len > max || start != 0 {
+            tx.abort_lend(lend);
+            return LinkSendOutcome::Dropped(LinkDropCause::Oversize);
+        }
+        match tx.commit(lend, len) {
+            Ok(()) => LinkSendOutcome::Sent,
+            Err(_) => LinkSendOutcome::Dropped(LinkDropCause::WriterGone),
+        }
+    }
+
+    /// The session is not sending what it was lent.
+    pub fn abort(&self, tx: &OutboundTx, slot: wz_session_core::link::TxSlot) {
+        tx.abort_lend(self.take(slot));
+    }
+}
+
+#[cfg(feature = "runtime-zero-copy")]
 impl LaneState {
     /// Where batch `id` is on `lane`.
     fn find_batch(&self, lane: usize, id: u64) -> Option<usize> {
@@ -1200,7 +1347,7 @@ impl LaneState {
     fn unqueue_batch(&mut self, lane: usize, at: usize) {
         if let Some(Entry::Batch(batch)) = self.lanes[lane].remove(at) {
             if let Some(pool) = self.pool.as_mut() {
-                pool.give_back(batch.slot);
+                pool.class(batch.class).give_back(batch.idx);
             }
         }
     }
@@ -1218,7 +1365,9 @@ impl LaneState {
             for entry in lane.drain(..) {
                 match entry {
                     Entry::Batch(batch) if batch.lent => kept.push_back(Entry::Batch(batch)),
-                    Entry::Batch(batch) => pool.give_back(batch.slot),
+                    Entry::Batch(batch) => {
+                        pool.class(batch.class).give_back(batch.idx);
+                    }
                     Entry::Heap(..) => {}
                 }
             }
@@ -1355,12 +1504,15 @@ impl OutboundRx {
     fn wire(&self, out: Out) -> WireFrame {
         match out {
             Out::Heap(bytes) => WireFrame(Wire::Heap(bytes)),
-            #[cfg(all(
-                feature = "runtime-zero-copy",
-                any(feature = "transport-link-tcp", feature = "transport-link-serial")
-            ))]
-            Out::Slot { idx, base, len } => WireFrame(Wire::Slot(SlotWire {
+            #[cfg(feature = "runtime-zero-copy")]
+            Out::Slot {
+                class,
+                idx,
+                base,
+                len,
+            } => WireFrame(Wire::Slot(SlotWire {
                 home: Arc::clone(&self.shared),
+                class,
                 idx,
                 base,
                 len,
@@ -1393,10 +1545,7 @@ impl Drop for OutboundRx {
         // R3250 — nothing will write what is still queued, so a pooled queue's
         // slots go home now rather than when the last sender lets go: a closing
         // connection returns its slots.
-        #[cfg(all(
-            feature = "runtime-zero-copy",
-            any(feature = "transport-link-tcp", feature = "transport-link-serial")
-        ))]
+        #[cfg(feature = "runtime-zero-copy")]
         {
             if let Ok(mut st) = self.shared.state.lock() {
                 st.release_unwritten();
@@ -1419,10 +1568,7 @@ pub struct WireFrame(Wire);
 
 enum Wire {
     Heap(Vec<u8>),
-    #[cfg(all(
-        feature = "runtime-zero-copy",
-        any(feature = "transport-link-tcp", feature = "transport-link-serial")
-    ))]
+    #[cfg(feature = "runtime-zero-copy")]
     Slot(SlotWire),
 }
 
@@ -1434,10 +1580,7 @@ impl WireFrame {
     pub fn into_vec(self) -> Vec<u8> {
         match self.0 {
             Wire::Heap(bytes) => bytes,
-            #[cfg(all(
-                feature = "runtime-zero-copy",
-                any(feature = "transport-link-tcp", feature = "transport-link-serial")
-            ))]
+            #[cfg(feature = "runtime-zero-copy")]
             Wire::Slot(slot) => slot.as_bytes().to_vec(),
         }
     }
@@ -1451,21 +1594,68 @@ impl WireFrame {
     pub fn slot_index(&self) -> Option<usize> {
         match &self.0 {
             Wire::Heap(_) => None,
-            #[cfg(all(
-                feature = "runtime-zero-copy",
-                any(feature = "transport-link-tcp", feature = "transport-link-serial")
-            ))]
+            #[cfg(feature = "runtime-zero-copy")]
             Wire::Slot(slot) => Some(slot.idx),
         }
     }
 
+    /// The size class of that slot (0 the smallest), if the bytes lie in one.
+    pub fn slot_class(&self) -> Option<usize> {
+        match &self.0 {
+            Wire::Heap(_) => None,
+            #[cfg(feature = "runtime-zero-copy")]
+            Wire::Slot(slot) => Some(slot.class),
+        }
+    }
+
+    /// R3250 — the frame as `bytes::Bytes` for a library that takes ownership
+    /// of the buffer it sends (quinn's `send_datagram`). A heap frame's vector
+    /// moves in; a pooled frame's SLOT moves in as the `Bytes`' owner
+    /// (`Bytes::from_owner`), so the library reads the slot in place and the
+    /// slot goes home through the completion edge when the library drops the
+    /// last clone: the write ended when the library has done with the bytes,
+    /// which for quinn is after it has packetised them. The write is started
+    /// here and counted as written, since the library has accepted the bytes.
+    ///
+    /// The one allocation this costs is the library's, not a copy: `from_owner`
+    /// boxes its owner (bytes 1.11 `Bytes::from_owner`), one small allocation
+    /// per frame and no copy of the frame's bytes.
+    #[cfg(feature = "transport-link-quic-datagram")]
+    pub fn into_bytes(mut self) -> bytes::Bytes {
+        self.begin_write();
+        match self.0 {
+            Wire::Heap(bytes) => bytes::Bytes::from(bytes),
+            #[cfg(feature = "runtime-zero-copy")]
+            Wire::Slot(mut slot) => {
+                slot.written = true;
+                bytes::Bytes::from_owner(SlotBytes(slot))
+            }
+        }
+    }
+}
+
+/// R3250 — a writer's slot as the owner of a `bytes::Bytes`.
+#[cfg(all(
+    feature = "runtime-zero-copy",
+    feature = "transport-link-quic-datagram"
+))]
+struct SlotBytes(SlotWire);
+
+#[cfg(all(
+    feature = "runtime-zero-copy",
+    feature = "transport-link-quic-datagram"
+))]
+impl AsRef<[u8]> for SlotBytes {
+    fn as_ref(&self) -> &[u8] {
+        self.0.as_bytes()
+    }
+}
+
+impl WireFrame {
     /// The writer is about to write this frame: a pooled slot moves from armed
     /// to busy. Idempotent, and a no-op for a heap frame.
     pub fn begin_write(&mut self) {
-        #[cfg(all(
-            feature = "runtime-zero-copy",
-            any(feature = "transport-link-tcp", feature = "transport-link-serial")
-        ))]
+        #[cfg(feature = "runtime-zero-copy")]
         if let Wire::Slot(slot) = &mut self.0 {
             slot.begin();
         }
@@ -1477,10 +1667,7 @@ impl std::ops::Deref for WireFrame {
     fn deref(&self) -> &[u8] {
         match &self.0 {
             Wire::Heap(bytes) => bytes,
-            #[cfg(all(
-                feature = "runtime-zero-copy",
-                any(feature = "transport-link-tcp", feature = "transport-link-serial")
-            ))]
+            #[cfg(feature = "runtime-zero-copy")]
             Wire::Slot(slot) => slot.as_bytes(),
         }
     }
@@ -1539,12 +1726,11 @@ impl<const N: usize> PartialEq<[u8; N]> for WireFrame {
 /// it), so it takes the completion edge; an armed one was never started, so it
 /// is un-armed and returned. Holding the queue's shared state is what keeps the
 /// pool, and so the slot's bytes, alive while the writer reads them.
-#[cfg(all(
-    feature = "runtime-zero-copy",
-    any(feature = "transport-link-tcp", feature = "transport-link-serial")
-))]
+#[cfg(feature = "runtime-zero-copy")]
 struct SlotWire {
     home: Arc<Lanes>,
+    /// The size class and the slot's index in it.
+    class: usize,
     idx: usize,
     /// First byte of the slot, by the pool's own answer for an armed slot.
     base: usize,
@@ -1555,10 +1741,7 @@ struct SlotWire {
     written: bool,
 }
 
-#[cfg(all(
-    feature = "runtime-zero-copy",
-    any(feature = "transport-link-tcp", feature = "transport-link-serial")
-))]
+#[cfg(feature = "runtime-zero-copy")]
 impl SlotWire {
     fn as_bytes(&self) -> &[u8] {
         // SAFETY: `base` is the first byte of a slot of the pool `home` owns,
@@ -1575,7 +1758,9 @@ impl SlotWire {
         }
         let started = {
             let mut st = self.home.state.lock().expect("outbound lanes poisoned");
-            st.pool.as_mut().map(|pool| pool.start(self.idx))
+            st.pool
+                .as_mut()
+                .map(|pool| pool.class(self.class).start(self.idx))
         };
         self.started = started == Some(true);
         // With the lock released, for the reason `Drop` gives.
@@ -1583,10 +1768,7 @@ impl SlotWire {
     }
 }
 
-#[cfg(all(
-    feature = "runtime-zero-copy",
-    any(feature = "transport-link-tcp", feature = "transport-link-serial")
-))]
+#[cfg(feature = "runtime-zero-copy")]
 impl Drop for SlotWire {
     fn drop(&mut self) {
         // A poisoned lock forfeits the slot, as `LinkRxFrame` forfeits one: the
@@ -1597,8 +1779,10 @@ impl Drop for SlotWire {
                 return;
             };
             match st.pool.as_mut() {
-                Some(pool) if self.started => pool.complete(self.idx, self.written),
-                Some(pool) => pool.unarm(self.idx),
+                Some(pool) if self.started => {
+                    pool.class(self.class).complete(self.idx, self.written)
+                }
+                Some(pool) => pool.class(self.class).unarm(self.idx),
                 None => true,
             }
         };
@@ -1657,10 +1841,7 @@ impl OutboundQueue {
     pub fn recycle_wire(&self, wire: WireFrame) {
         match wire.0 {
             Wire::Heap(bytes) => self.rx.recycle(bytes),
-            #[cfg(all(
-                feature = "runtime-zero-copy",
-                any(feature = "transport-link-tcp", feature = "transport-link-serial")
-            ))]
+            #[cfg(feature = "runtime-zero-copy")]
             Wire::Slot(mut slot) => slot.written = true,
         }
     }

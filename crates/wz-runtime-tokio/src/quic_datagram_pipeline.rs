@@ -176,6 +176,31 @@ pub struct QuicDatagramWriteDriver {
     subject: LinkSubject,
     /// R311y474 — the adminspace `{src,dst}` locator pair, resolved once at open.
     endpoints: Option<LinkEndpoints>,
+    /// R3250 — the slots of the link's transmit pool lent to the session, under
+    /// `runtime-zero-copy`.
+    #[cfg(feature = "runtime-zero-copy")]
+    lent: crate::writer_queue::LendTable,
+}
+
+impl QuicDatagramWriteDriver {
+    /// A write half over `tx` (built by
+    /// [`crate::writer_queue::datagram_outbound_channel`]) whose datagrams are at
+    /// most `mtu` bytes.
+    pub fn new(
+        tx: crate::writer_queue::OutboundTx,
+        mtu: usize,
+        subject: LinkSubject,
+        endpoints: Option<LinkEndpoints>,
+    ) -> Self {
+        Self {
+            tx,
+            mtu,
+            subject,
+            endpoints,
+            #[cfg(feature = "runtime-zero-copy")]
+            lent: Default::default(),
+        }
+    }
 }
 
 impl BoxedLinkDriver for QuicDatagramWriteDriver {
@@ -236,11 +261,62 @@ impl BoxedLinkDriver for QuicDatagramWriteDriver {
             );
             return LinkSendOutcome::Dropped(LinkDropCause::Oversize);
         }
+        // R3250 — a pooled queue takes the datagram by COPYING it into a slot of
+        // its own (one copy, which a byte door cannot avoid, and no allocation).
+        #[cfg(feature = "runtime-zero-copy")]
+        if self.tx.is_pooled() {
+            return match self.tx.send_framed(priority, &[], bytes) {
+                Ok(()) => LinkSendOutcome::Sent,
+                Err(crate::writer_queue::PooledSendError::TooLarge) => {
+                    LinkSendOutcome::Dropped(LinkDropCause::Oversize)
+                }
+                Err(e) => {
+                    log::warn!(
+                        "wz-runtime-tokio: outbound channel closed; dropping quic datagram ({e})"
+                    );
+                    LinkSendOutcome::Dropped(LinkDropCause::WriterGone)
+                }
+            };
+        }
         if let Err(e) = self.tx.send(priority, bytes.to_vec()) {
             log::warn!("wz-runtime-tokio: outbound channel closed; dropping quic datagram ({e})");
             return LinkSendOutcome::Dropped(LinkDropCause::WriterGone);
         }
         LinkSendOutcome::Sent
+    }
+
+    // R3250 — lend the session a slot of the link's transmit pool for one
+    // datagram of at most this link's mtu; the writer hands that very slot to
+    // quinn as the datagram's buffer (`WireFrame::into_bytes`).
+    #[cfg(feature = "runtime-zero-copy")]
+    fn tx_slot_acquire(
+        &self,
+        want: usize,
+        priority: wz_session_core::qos::Priority,
+    ) -> Option<wz_session_core::link::TxSlotGrant> {
+        self.lent.acquire(&self.tx, want, self.mtu, priority)
+    }
+
+    #[cfg(feature = "runtime-zero-copy")]
+    fn tx_slot_storage(&self, slot: wz_session_core::link::TxSlot) -> (*mut u8, usize) {
+        self.lent.storage(slot)
+    }
+
+    #[cfg(feature = "runtime-zero-copy")]
+    fn tx_slot_send(
+        &self,
+        slot: wz_session_core::link::TxSlot,
+        start: usize,
+        len: usize,
+        _reliability: Reliability,
+        _priority: wz_session_core::qos::Priority,
+    ) -> LinkSendOutcome {
+        self.lent.send(&self.tx, slot, start, len, self.mtu)
+    }
+
+    #[cfg(feature = "runtime-zero-copy")]
+    fn tx_slot_abort(&self, slot: wz_session_core::link::TxSlot) {
+        self.lent.abort(&self.tx, slot)
     }
 
     fn open_blocking(&self) {
@@ -275,9 +351,15 @@ impl BoxedLinkDriver for QuicDatagramWriteDriver {
 /// the seal, and not sender liveness alone, is the teardown signal. This is the
 /// one writer with no per-write bound to arm, because `send_datagram` queues
 /// synchronously and cannot block on the peer.
+///
+/// R3250 — the frame is handed to quinn AS ITS BUFFER: a pooled frame's slot
+/// becomes the `Bytes`' owner (`WireFrame::into_bytes`), so quinn reads the slot
+/// in place and the slot goes home when quinn drops the datagram. quinn's API
+/// takes `Bytes`, and `Bytes::from_owner` boxes its owner, so each datagram
+/// costs that one small allocation at this seam and no copy of its bytes.
 pub async fn quic_datagram_writer_task(connection: Connection, mut queue: OutboundQueue) {
-    while let Some(payload) = queue.next().await {
-        if let Err(e) = connection.send_datagram(Bytes::from(payload)) {
+    while let Some(payload) = queue.next_wire().await {
+        if let Err(e) = connection.send_datagram(payload.into_bytes()) {
             log::warn!(
                 "wz-runtime-tokio: quic_datagram_writer_task send_datagram failed: {e}; closing"
             );
@@ -402,7 +484,7 @@ pub fn wire_quic_datagram(
     let mtu = connection
         .max_datagram_size()
         .unwrap_or(QUIC_DATAGRAM_LINK_MTU);
-    let (tx, rx) = crate::writer_queue::outbound_channel();
+    let (tx, rx) = crate::writer_queue::datagram_outbound_channel();
     let writer_handle = WriterHandle::spawn(rx, |queue| {
         quic_datagram_writer_task(connection.clone(), queue)
     });
@@ -455,12 +537,7 @@ pub fn wire_quic_datagram(
         local,
         Some(connection.remote_address()),
     );
-    let outbound = Arc::new(QuicDatagramWriteDriver {
-        tx,
-        mtu,
-        subject,
-        endpoints,
-    });
+    let outbound = Arc::new(QuicDatagramWriteDriver::new(tx, mtu, subject, endpoints));
     let inbound = QuicDatagramReadDriver {
         connection,
         _endpoint: endpoint,
@@ -509,12 +586,8 @@ mod tests {
     #[tokio::test]
     async fn write_driver_drops_oversize_datagram() {
         let (tx, mut rx) = crate::writer_queue::outbound_channel();
-        let driver = QuicDatagramWriteDriver {
-            subject: LinkSubject::UNKNOWN,
-            endpoints: None,
-            tx,
-            mtu: QUIC_DATAGRAM_LINK_MTU,
-        };
+        let driver =
+            QuicDatagramWriteDriver::new(tx, QUIC_DATAGRAM_LINK_MTU, LinkSubject::UNKNOWN, None);
         // R2371 — the drop is stated by the return value as well as inferred
         // from the channel; see the stream-link twin for why both are kept.
         assert_eq!(

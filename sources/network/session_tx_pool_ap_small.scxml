@@ -1,0 +1,68 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  SPDX-License-Identifier: AGPL-3.0-or-later OR LicenseRef-watching-zenoh-Commercial
+  SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
+-->
+<!--
+  AP session-tx buffer-pool config, SMALL class: the slots a tokio (AP / Linux)
+  DATAGRAM link's outbound frames live in when they are no larger than the
+  datagram the sessions actually send (ARCHITECTURE section 9.1). The LARGE
+  class beside it is `session_tx_pool_ap.scxml`, the stream links' pool, whose
+  slot holds the largest frame any AP link can be handed; a datagram link owns
+  one instance of each, and a frame takes the smallest class it fits.
+
+  Born with its consumers: `wz-runtime-tokio`'s datagram writer queue
+  (`writer_queue::outbound_channel_datagram`), behind `runtime-zero-copy`, for
+  the UDP, QUIC-datagram, websocket and multicast links. A datagram is its own
+  boundary, so a slot carries ONE frame and frames are never packed.
+
+  ## slot-size 1472 is DERIVED from what a datagram link sends
+
+  The session sizes a datagram to `min(link mtu, negotiated batch)`
+  (`SessionLinkActions::negotiated_batch_mtu`), and the link mtus are:
+    - UDP unicast: `UDP_LINK_MTU` = 1450, zenoh-pico's own figure
+      (`_z_get_link_mtu_udp_unicast`), so that a datagram fits one Ethernet
+      frame without IP fragmentation;
+    - QUIC datagram: the connection's `max_datagram_size`, floored at
+      `QUIC_DATAGRAM_LINK_MTU` = 1200; quinn's path-MTU discovery stops at an
+      upper bound of 1452 bytes of UDP payload, of which the QUIC packet header
+      and the DATAGRAM frame header take their share, so the datagram is
+      below 1452;
+    - multicast and websocket: the negotiated batch, up to 65535, which is the
+      LARGE class's case when a frame is that big.
+  So the frames a datagram link sends in steady state are at most 1450 bytes,
+  and 1450 rounded up to the 64-byte alignment below is 1472.
+
+  ## slot-count 728 is DERIVED from the queue's own byte bound
+
+  The writer queue bounds each lane by `queue_size * batch_bytes` bytes, and a
+  datagram link's per-link slot budget for a class is, per lane,
+  `ceil(queue_size * batch_bytes / slot_size) + 1` (the lane's bound filled
+  with frames of the slot's size, plus the one frame that may take the lane
+  past its bound), summed over the lanes. That budget is a CONFIGURATION input:
+  it follows `transport/link/tx/queue/size/*` and the link's batch size through
+  the shape the established session gives its queue. This count is the largest
+  budget the defaults can ask for, the queue before its session is
+  established: 8 lanes, queue size 2, batch 65535, so
+  8 * (ceil(131070 / 1472) + 1) = 8 * (90 + 1) = 728.
+  An established UDP session without QoS asks for 1 * (ceil(2 * 1450 / 1472)
+  + 1) = 3, and with QoS 8 * 3 = 24: the bound in bytes zenoh's two batches
+  per priority hold, counted in datagrams. A shape whose budget is past this
+  count is clamped to it (raising the count is a change here, not a knob).
+
+  At 728 x 1472 the class is about 1 MiB of address space per datagram link,
+  allocated zeroed once and resident only where frames were written.
+
+  ## section / alignment / cache-policy
+
+  `heap` / 64 / `none`, as the other AP pools.
+-->
+<scxml xmlns="http://www.w3.org/2005/07/scxml"
+       xmlns:sce="http://sce.dev/ext"
+       sce:kind="buffer-pool" name="session_tx_pool_ap_small" version="1.0">
+  <sce:slot-count>728</sce:slot-count>
+  <sce:slot-size>1472</sce:slot-size>
+  <sce:section>heap</sce:section>
+  <sce:alignment>64</sce:alignment>
+  <sce:cache-policy>none</sce:cache-policy>
+</scxml>

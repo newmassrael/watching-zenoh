@@ -1725,8 +1725,8 @@ mod tests {
         assert_eq!(wire.as_ptr() as usize, encoded_into, "the very slot bytes");
         let idx = wire.slot_index().expect("a slot");
         assert_eq!(
-            driver.tx.tx_slot_state(idx),
-            Some(crate::session_tx_pool_ap::SlotState::DmaArmedTx),
+            driver.tx.tx_slot_state(0, idx),
+            Some(crate::link_tx_pool::TxSlotState::DmaArmedTx),
             "handed to the writer: armed"
         );
     }

@@ -243,18 +243,19 @@ machines:
         dma_channel: ~                 # not applicable on AP.
         cache_policy: none
 
-      session_rx_pool:
-        slot_count: 64
-        slot_size: 4096
-        section: heap
-        alignment: 64
-        dma_channel: ~
-        cache_policy: none
+      # R3250 — the receive pool's dims live ONLY in its SSOT,
+      # `sources/network/session_rx_pool_ap.scxml`, the move R2739 made in
+      # `deploy/ap_mcu_pair.yaml` and did not make here: the inline 64 x 4096
+      # said a slot one sixteenth of the 65539-byte frame the receive path can
+      # be handed (the SSOT derives 65600).
+      session_rx_pool: { ref: session_rx_pool_ap }
 
-      # R3250 — the transmit pool's dims live ONLY in its SSOT,
-      # `sources/network/session_tx_pool_ap.scxml` (one pool per stream link,
-      # 16 x 65600, both derived there); the inline 64 x 4096 had no consumer
-      # and a slot too small for one stream frame.
+      # R3250 — the transmit pool's dims live ONLY in its SSOTs,
+      # `sources/network/session_tx_pool_ap.scxml` (one pool per link, 16 x 65600:
+      # a stream link's one class and a datagram link's large one) and
+      # `sources/network/session_tx_pool_ap_small.scxml` (a datagram link's small
+      # class, 728 x 1472), every number derived there; the inline 64 x 4096 had
+      # no consumer and a slot too small for one stream frame.
       session_tx_pool: { ref: session_tx_pool_ap }
 
       # R311in — reassembly_pool's def lives ONLY in

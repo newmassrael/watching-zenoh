@@ -166,13 +166,26 @@ pub mod link_rx_pool;
 pub mod link_rx_arena;
 
 /// R3250 — `sources/network/session_tx_pool_ap.scxml`, the AP link's TRANSMIT
-/// slot table: one instance per link, owned by that link's writer queue, so an
-/// outbound frame lives in a slot from the lend to the end of the write. Gated
-/// like its consumers, the pooled queue of the stream links and of the serial
-/// link.
+/// slot table (the stream links' one class, and a datagram link's large one):
+/// one instance per link, owned by that link's writer queue, so an outbound
+/// frame lives in a slot from the lend to the end of the write. Gated like its
+/// consumer, the writer queue (every link that has one owns a pool under the
+/// feature).
 #[cfg(all(
     feature = "runtime-zero-copy",
-    any(feature = "transport-link-tcp", feature = "transport-link-serial")
+    any(
+        feature = "transport-multicast",
+        feature = "transport-link-tcp",
+        feature = "transport-link-tls",
+        feature = "transport-link-udp",
+        feature = "transport-link-serial",
+        feature = "transport-link-ws",
+        all(feature = "transport-link-unixsock", unix),
+        feature = "transport-link-vsock",
+        feature = "transport-link-unixpipe",
+        feature = "transport-link-quic",
+        feature = "transport-link-quic-datagram",
+    )
 ))]
 #[allow(dead_code)]
 #[allow(unused_variables)]
@@ -186,12 +199,55 @@ pub mod session_tx_pool_ap {
     ));
 }
 
-// R3250 — the transmit table above with its lifecycle walked by edge and
+/// R3250 — `sources/network/session_tx_pool_ap_small.scxml`, a DATAGRAM link's
+/// small transmit class, sized for the datagrams the sessions send. Gated like
+/// the table above.
+#[cfg(all(
+    feature = "runtime-zero-copy",
+    any(
+        feature = "transport-multicast",
+        feature = "transport-link-tcp",
+        feature = "transport-link-tls",
+        feature = "transport-link-udp",
+        feature = "transport-link-serial",
+        feature = "transport-link-ws",
+        all(feature = "transport-link-unixsock", unix),
+        feature = "transport-link-vsock",
+        feature = "transport-link-unixpipe",
+        feature = "transport-link-quic",
+        feature = "transport-link-quic-datagram",
+    )
+))]
+#[allow(dead_code)]
+#[allow(unused_variables)]
+#[allow(unused_mut)]
+#[allow(clippy::all)]
+pub mod session_tx_pool_ap_small {
+    include!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../out/wz-runtime-tokio",
+        "/session_tx_pool_ap_small.rs"
+    ));
+}
+
+// R3250 — the transmit tables above with their lifecycle walked by edge and
 // counted. No `///` here: rustdoc would merge it with the module's `//!` block
 // and resolve the result in this outer scope (see `link_rx_window`).
 #[cfg(all(
     feature = "runtime-zero-copy",
-    any(feature = "transport-link-tcp", feature = "transport-link-serial")
+    any(
+        feature = "transport-multicast",
+        feature = "transport-link-tcp",
+        feature = "transport-link-tls",
+        feature = "transport-link-udp",
+        feature = "transport-link-serial",
+        feature = "transport-link-ws",
+        all(feature = "transport-link-unixsock", unix),
+        feature = "transport-link-vsock",
+        feature = "transport-link-unixpipe",
+        feature = "transport-link-quic",
+        feature = "transport-link-quic-datagram",
+    )
 ))]
 pub mod link_tx_pool;
 

@@ -219,7 +219,8 @@ fn regen_codecs(root: &Path) {
 ///   wz-session-core  : reassembly_slot, scouting, session_fsm_unicast,
 ///                      session_fsm_multicast, multicast_peer (statecharts)
 ///   wz-runtime-tokio : reassembly_pool_ap, session_rx_pool_ap,
-///                      session_tx_pool_ap (buffer-pools)
+///                      session_tx_pool_ap, session_tx_pool_ap_small
+///                      (buffer-pools)
 ///   wz-runtime-coop  : reassembly_pool_mcu (buffer-pool)
 ///   wz-link-lwip     : scout_rx_pool_mcu, session_rx_pool_mcu,
 ///                      session_rx_pool_mcu_minimal,
@@ -253,6 +254,7 @@ fn regen_statecharts_and_pools(root: &Path) {
         ("reassembly_pool_ap", "wz-runtime-tokio"),
         ("session_rx_pool_ap", "wz-runtime-tokio"),
         ("session_tx_pool_ap", "wz-runtime-tokio"),
+        ("session_tx_pool_ap_small", "wz-runtime-tokio"),
         ("reassembly_pool_mcu", "wz-runtime-coop"),
         ("scout_rx_pool_mcu", "wz-link-lwip"),
         ("session_rx_pool_mcu", "wz-link-lwip"),

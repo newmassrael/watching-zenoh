@@ -12573,6 +12573,15 @@ layer_c1bq_zero_copy_arena() {
     (( n > 0 )) || {
         echo "  C1bq FAIL: the serial transmit allocation suite ran no test"; echo "$out"; return 1; }
     tests=$((tests + n))
+    # The datagram links' write halves over their two-class pools (UDP end to
+    # end, and the quinn and tungstenite seams), each its own feature.
+    out="$(cd crates && cargo test -p wz-runtime-tokio \
+        --features runtime-zero-copy,transport-link-udp,transport-link-ws,transport-link-quic-datagram \
+        --test datagram_tx_pool_allocations --quiet 2>&1)" || { echo "$out"; return 1; }
+    n="$(_runci_passed_count <<<"$out")"
+    (( n > 0 )) || {
+        echo "  C1bq FAIL: the datagram transmit allocation suite ran no test"; echo "$out"; return 1; }
+    tests=$((tests + n))
 
     # The DEFAULT arena, which every other Router in the tree runs. The seam
     # moved `reassembly_dispatch`'s staging out from under all of them.
@@ -12592,7 +12601,7 @@ layer_c1bq_zero_copy_arena() {
 
     # The facade arm the preset actually ships.
     (cd crates && cargo build -p wz --features preset-ap-full --quiet) || return 1
-    _runci_lane_did C1bq "$tests" "arena test(s) over 7 suite(s), plus 2 clippy + 1 preset build"
+    _runci_lane_did C1bq "$tests" "arena test(s) over 8 suite(s), plus 2 clippy + 1 preset build"
 }
 
 layer_c1cj_replay_c_abi() {

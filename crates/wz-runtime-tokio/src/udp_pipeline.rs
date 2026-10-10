@@ -465,7 +465,7 @@ pub fn wire_udp_socket(
     // beyond a failed `local_addr` syscall.
     let endpoints = ip_link_endpoints(LinkKind::Udp, socket.local_addr().ok(), Some(peer));
     let inbound = UdpReadDriver::from_socket(socket.clone());
-    let (tx, rx) = crate::writer_queue::outbound_channel();
+    let (tx, rx) = crate::writer_queue::datagram_outbound_channel();
     let writer_handle = WriterHandle::spawn(rx, |queue| udp_writer_task(socket, peer, queue));
     let outbound = Arc::new(UdpWriteDriver::new(tx, subject, endpoints));
     (inbound, outbound, writer_handle)
@@ -497,7 +497,7 @@ pub fn wire_udp_demuxed(
     // they are one socket), and the DST is this face's own demultiplexed peer.
     let endpoints = ip_link_endpoints(LinkKind::Udp, send_socket.local_addr().ok(), Some(peer));
     let inbound = UdpReadDriver::from_demux(inbound_rx, peer, pump);
-    let (tx, rx) = crate::writer_queue::outbound_channel();
+    let (tx, rx) = crate::writer_queue::datagram_outbound_channel();
     let writer_handle = WriterHandle::spawn(rx, |queue| udp_writer_task(send_socket, peer, queue));
     let outbound = Arc::new(UdpWriteDriver::new(tx, subject, endpoints));
     (inbound, outbound, writer_handle)
@@ -626,10 +626,18 @@ pub struct UdpWriteDriver {
     subject: LinkSubject,
     /// R311y474 — the adminspace `{src,dst}` locator pair, resolved once at open.
     endpoints: Option<LinkEndpoints>,
+    /// R3250 — the slots of the link's transmit pool lent to the session, under
+    /// `runtime-zero-copy` (ARCHITECTURE section 9.1: the session encodes a
+    /// datagram straight into the slot the writer sends).
+    #[cfg(feature = "runtime-zero-copy")]
+    lent: crate::writer_queue::LendTable,
 }
 
 impl UdpWriteDriver {
-    fn new(
+    /// A write half over `tx`, the sending side of the queue its
+    /// [`udp_writer_task`] drains (built by
+    /// [`crate::writer_queue::datagram_outbound_channel`]).
+    pub fn new(
         tx: crate::writer_queue::OutboundTx,
         subject: LinkSubject,
         endpoints: Option<LinkEndpoints>,
@@ -638,6 +646,8 @@ impl UdpWriteDriver {
             tx,
             subject,
             endpoints,
+            #[cfg(feature = "runtime-zero-copy")]
+            lent: Default::default(),
         }
     }
 }
@@ -700,11 +710,62 @@ impl BoxedLinkDriver for UdpWriteDriver {
             );
             return LinkSendOutcome::Dropped(LinkDropCause::Oversize);
         }
+        // R3250 — a pooled queue takes the datagram by COPYING it into a slot of
+        // its own (one copy, which a byte door cannot avoid, and no allocation).
+        #[cfg(feature = "runtime-zero-copy")]
+        if self.tx.is_pooled() {
+            return match self.tx.send_framed(priority, &[], bytes) {
+                Ok(()) => LinkSendOutcome::Sent,
+                Err(crate::writer_queue::PooledSendError::TooLarge) => {
+                    LinkSendOutcome::Dropped(LinkDropCause::Oversize)
+                }
+                Err(e) => {
+                    log::warn!(
+                        "wz-runtime-tokio: outbound channel closed; dropping datagram ({e})"
+                    );
+                    LinkSendOutcome::Dropped(LinkDropCause::WriterGone)
+                }
+            };
+        }
         if let Err(e) = self.tx.send(priority, bytes.to_vec()) {
             log::warn!("wz-runtime-tokio: outbound channel closed; dropping datagram ({e})");
             return LinkSendOutcome::Dropped(LinkDropCause::WriterGone);
         }
         LinkSendOutcome::Sent
+    }
+
+    // R3250 — ARCHITECTURE section 9.1: lend the session a slot of the link's
+    // transmit pool to encode one datagram into, with no headroom (a datagram's
+    // boundary is its framing), and queue that very slot.
+    #[cfg(feature = "runtime-zero-copy")]
+    fn tx_slot_acquire(
+        &self,
+        want: usize,
+        priority: wz_session_core::qos::Priority,
+    ) -> Option<wz_session_core::link::TxSlotGrant> {
+        self.lent.acquire(&self.tx, want, MAX_UDP_PAYLOAD, priority)
+    }
+
+    #[cfg(feature = "runtime-zero-copy")]
+    fn tx_slot_storage(&self, slot: wz_session_core::link::TxSlot) -> (*mut u8, usize) {
+        self.lent.storage(slot)
+    }
+
+    #[cfg(feature = "runtime-zero-copy")]
+    fn tx_slot_send(
+        &self,
+        slot: wz_session_core::link::TxSlot,
+        start: usize,
+        len: usize,
+        _reliability: Reliability,
+        _priority: wz_session_core::qos::Priority,
+    ) -> LinkSendOutcome {
+        self.lent.send(&self.tx, slot, start, len, MAX_UDP_PAYLOAD)
+    }
+
+    #[cfg(feature = "runtime-zero-copy")]
+    fn tx_slot_abort(&self, slot: wz_session_core::link::TxSlot) {
+        self.lent.abort(&self.tx, slot)
     }
 
     fn open_blocking(&self) {
@@ -753,7 +814,11 @@ pub async fn udp_writer_task(socket: Arc<UdpSocket>, peer: SocketAddr, mut queue
     // but returns EISCONN on macOS/BSD, so an unconditional `send_to` would make
     // every udp dial fail on a platform §5.20 carries as an atom.
     let connected = socket.peer_addr().is_ok();
-    while let Some(payload) = queue.next().await {
+    // R3250 — on a pooled queue each datagram is a slot of the link's transmit
+    // pool: started as the send begins, home through the completion edge when
+    // the send has returned (`recycle_wire`, or the drop on every other way out).
+    while let Some(mut payload) = queue.next_wire().await {
+        payload.begin_write();
         let send = async {
             if connected {
                 socket.send(&payload).await
@@ -762,7 +827,7 @@ pub async fn udp_writer_task(socket: Arc<UdpSocket>, peer: SocketAddr, mut queue
             }
         };
         match queue.guarded(send).await {
-            Some(Ok(_)) => {}
+            Some(Ok(_)) => queue.recycle_wire(payload),
             Some(Err(e)) => {
                 log::warn!("wz-runtime-tokio: udp_writer_task send failed: {e}; closing");
                 return;
