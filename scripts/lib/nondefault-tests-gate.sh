@@ -415,6 +415,44 @@ router-connect-reconcile,transport-link-tcp,transport-unicast|session_lifecycle_
         transport-shm,\
         transport-stats\
         |"
+    # The FIXED bounded backing, a SEPARATE row on purpose. `bounded-heapless`
+    # (44d76830) is a selector, not an addition: it switches the whole crate
+    # build to hard `caps` bounds, compiles the growable-only tests out and the
+    # fixed-backing refusals in. Added to the row above it would change what
+    # every other test of that row means, so it gets its own build here. The
+    # census lists each row at its OWN features, so a row is credited only with
+    # what its build holds; no union of rows is formed. Hosted C1cn said:
+    #
+    #   nondefault-tests: FAIL -- wz-session-core has 1762 test(s) only a
+    #     feature build reaches; legs run 1746 and SKIPS excuses 0, leaving 16
+    #     claimed by NOTHING (every one gated on the fixed backing).
+    #
+    # The features are Layer C1g's observer union on that backing, VERBATIM:
+    # that union is where the backing is proven, and it is green there. The
+    # filter is EMPTY: at these features the crate is the lib suite, the
+    # `bounded_heapless_backing` proof file and the doctests and nothing else,
+    # so a fixed-backing test added later is claimed without touching this row.
+    # MEASURED before adding: the census arithmetic replayed for this crate went
+    # remainder 16 -> 0 (1762 of 1762). The leg ran 927 + 6 + 3 passed (1
+    # ignored doctest); `hook`, because it is one crate at 15 features: 12s
+    # once built, and 166s end to end for the listing run that compiled it.
+    "wz-session-core|hook|\
+        codec-push,\
+        codec-declare,\
+        codec-request,\
+        codec-response,\
+        codec-response-final,\
+        query-queryable,\
+        liveliness-token,\
+        liveliness-subscriber,\
+        liveliness-get,\
+        declare-subscriber,\
+        declare-queryable,\
+        declare-undeclare,\
+        pubsub-put,\
+        pubsub-delete,\
+        bounded-heapless\
+        |"
     # Open-debt item 900 — `session-unicast-open` and `session-unicast-accept`
     # join. 88fe33b9 added both features and the four `two_session_tests::`
     # (gated on them with `transport-multicast` and `codec-push`) and widened
