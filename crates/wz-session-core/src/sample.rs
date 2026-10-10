@@ -72,9 +72,9 @@ use crate::link::RxBytes;
 use crate::vle::read_vle_u64;
 use sce_forge_runtime::codec::{CodecStorage, SceByteBuf, SceStr};
 
+use wz_codecs::ext_entry::ExtEntryOwned;
 #[cfg(test)]
 use wz_codecs::ext_entry::{ExtEntry, ExtEntryVariant};
-use wz_codecs::ext_entry::{ExtEntryOwned, ExtEntryOwnedVariant};
 
 /// Application-level mirror of [`wz_codecs::timestamp::Timestamp`].
 ///
@@ -110,6 +110,16 @@ impl TimestampHint {
             // (Generic over the storage profile since R3011: both a received
             // message's timestamp and a transport one's are projected here.)
             zid: SceByteBuf::as_slice(&ts.zid).to_vec(),
+        }
+    }
+
+    /// [`Self::from_codec`] over the timestamp as it is decoded, where its
+    /// frame lies: the same two fields, so a Put delivered in place reports
+    /// the timestamp its owned projection would.
+    pub fn from_view(ts: &wz_codecs::timestamp::Timestamp<'_>) -> Self {
+        Self {
+            time: ts.time,
+            zid: ts.zid.to_vec(),
         }
     }
 
@@ -195,6 +205,16 @@ impl EncodingHint {
                 .schema
                 .as_ref()
                 .map(|s| String::from(SceStr::as_str(s))),
+        }
+    }
+
+    /// [`Self::from_codec`] over the encoding as it is decoded, where its frame
+    /// lies: a Put delivered in place reports the encoding its owned projection
+    /// would. Only a schema is copied; an encoding that names none costs nothing.
+    pub fn from_view(encoding: &wz_codecs::encoding::Encoding<'_>) -> Self {
+        Self {
+            packed_id: encoding.packed_id,
+            schema: encoding.schema.map(String::from),
         }
     }
 
@@ -811,10 +831,19 @@ impl Sample {
 /// matching extension's body variant is unexpectedly not `ExtZint` (which the
 /// wire decoder would only produce if the upstream catalog drifted).
 pub fn extract_qos<S: CodecStorage>(extensions: &[ExtEntryOwned<S>]) -> Option<QosLevel> {
+    extract_qos_in(extensions)
+}
+
+/// [`extract_qos`] over any chain a reader can ask
+/// ([`ExtEntryView`](crate::ext_view::ExtEntryView)): the owned chain, and the
+/// chain of a record read where its frame lies, which is what the in-place
+/// receive path delivers a Put from. One predicate for both, so the two paths
+/// cannot disagree about which extension is the QoS.
+pub fn extract_qos_in<E: crate::ext_view::ExtEntryView>(extensions: &[E]) -> Option<QosLevel> {
     for ext in extensions {
-        if crate::ext_header::ext_eid(ext.header) == crate::ext_header::network_eid::QOS {
-            if let ExtEntryOwnedVariant::CodecZenohExtZint(z) = &ext.body {
-                return Some(QosLevel::from_raw(z.value as u8));
+        if ext.eid() == crate::ext_header::network_eid::QOS {
+            if let Some(value) = ext.zint() {
+                return Some(QosLevel::from_raw(value as u8));
             }
         }
     }

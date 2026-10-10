@@ -295,17 +295,13 @@ impl NetworkMessage {
             #[cfg(feature = "codec-push")]
             Self::Push(push) => {
                 use wz_codecs::push::PushOwnedVariant as B;
-                then_judge(
-                    judge_chain(C::Network(N::Push), push.extensions.as_deref()),
-                    || match &push.body {
-                        B::CodecZenohMsgPut(put) | B::Default { body: put, .. } => {
-                            judge_chain(C::Zenoh(Z::Put), put.extensions.as_deref())
-                        }
-                        B::CodecZenohMsgDel(del) => {
-                            judge_chain(C::Zenoh(Z::Del), del.extensions.as_deref())
-                        }
-                    },
-                )
+                let (body, chain) = match &push.body {
+                    B::CodecZenohMsgPut(put) | B::Default { body: put, .. } => {
+                        (Z::Put, put.extensions.as_deref())
+                    }
+                    B::CodecZenohMsgDel(del) => (Z::Del, del.extensions.as_deref()),
+                };
+                judge_push_chains(push.extensions.as_deref(), body, chain)
             }
             #[cfg(feature = "codec-response")]
             Self::Response(response) => {
@@ -378,6 +374,41 @@ impl NetworkMessage {
             Self::Unknown { .. } => ExtAdmission::Unjudged,
         }
     }
+}
+
+/// The verdict on a Push: its own chain, then the chain of the body it carries
+/// (`body`). One rule for the owned message ([`NetworkMessage::ext_admission`])
+/// and the Push read where its frame lies (`push_view_admission`), so the
+/// receive path that delivers a Push without copying it refuses exactly what the
+/// one that copies it does.
+#[cfg(feature = "codec-push")]
+fn judge_push_chains<E: crate::ext_view::ExtEntryView>(
+    outer: Option<&[E]>,
+    body: crate::ext_admit::ZenohBody,
+    body_chain: Option<&[E]>,
+) -> crate::ext_admit::ExtAdmission {
+    use crate::ext_admit::{ExtCarrier as C, NetworkEnvelope as N};
+    then_judge(judge_chain(C::Network(N::Push), outer), || {
+        judge_chain(C::Zenoh(body), body_chain)
+    })
+}
+
+/// [`NetworkMessage::ext_admission`] for a Push read where its frame lies.
+#[cfg(all(
+    feature = "codec-frame",
+    feature = "codec-push",
+    any(test, feature = "session-unicast")
+))]
+fn push_view_admission(push: &wz_codecs::push::Push<'_>) -> crate::ext_admit::ExtAdmission {
+    use crate::ext_admit::ZenohBody as Z;
+    use wz_codecs::push::PushVariant as B;
+    let (body, chain) = match &push.body {
+        B::CodecZenohMsgPut(put) | B::Default { body: put, .. } => {
+            (Z::Put, put.extensions.as_deref())
+        }
+        B::CodecZenohMsgDel(del) => (Z::Del, del.extensions.as_deref()),
+    };
+    judge_push_chains(push.extensions.as_deref(), body, chain)
 }
 
 /// The batch a participant may act on: `messages` itself, or the refusal of the
@@ -552,18 +583,69 @@ fn absorb_unknown(
 /// [`NetworkMessage::Unknown`], handed over, and ends the walk, as in the batch
 /// decode.
 ///
-/// The records are copies of the payload's bytes (the build's
-/// [`WireStorage`]): the payload need only outlive the walk.
+/// How the walk hands a record over ([`WalkedRecord`]). With
+/// [`PushForm::Lent`], a Push is not projected into its owned message at all: it
+/// is decoded where the payload lies and lent for the call, so nothing of it is
+/// copied (ARCHITECTURE section 9.2). Every other record is the build's
+/// [`WireStorage`] copy of the payload's bytes either way, and so is a Push with
+/// [`PushForm::Owned`]: the payload need only outlive the walk.
+#[cfg(all(feature = "codec-frame", any(test, feature = "session-unicast")))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum PushForm {
+    /// Every record is decoded into its owned message.
+    Owned,
+    /// A Push is decoded where the payload lies and lent.
+    #[cfg(feature = "codec-push")]
+    Lent,
+}
+
+/// One record the walk hands over: the one owned message in the caller's
+/// buffer, or a Push read where the payload lies ([`PushForm::Lent`]).
+#[cfg(all(feature = "codec-frame", any(test, feature = "session-unicast")))]
+pub(crate) enum WalkedRecord<'r> {
+    /// The record's owned message, the one entry of the buffer.
+    Owned(&'r mut Vec<NetworkMessage>),
+    /// A Push decoded where the payload lies, valid for the call.
+    #[cfg(feature = "codec-push")]
+    Push(&'r wz_codecs::push::Push<'r>),
+}
+
+/// The records are copies of the payload's bytes (the build's [`WireStorage`])
+/// except a Push lent under [`PushForm::Lent`], which is the payload's own
+/// bytes. Either way the payload need only outlive the walk.
+///
+/// A lent Push is judged by the same rule as an owned one
+/// (`judge_push_chains`), so an extension a participant must refuse ends the
+/// walk at the same record on both forms.
 #[cfg(all(feature = "codec-frame", any(test, feature = "session-unicast")))]
 pub(crate) fn for_each_record(
     payload: &[u8],
     record: &mut Vec<NetworkMessage>,
-    mut each: impl FnMut(&mut Vec<NetworkMessage>),
+    form: PushForm,
+    mut each: impl FnMut(WalkedRecord<'_>),
 ) -> Result<(), crate::parse_error::InboundParseError> {
     use crate::parse_error::InboundParseError;
+    // Without a Push codec there is nothing to lend, and every form is owned.
+    #[cfg(not(feature = "codec-push"))]
+    let _ = form;
     let mut cursor = SceCursor::new(payload);
     while cursor.remaining() > 0 {
         record.clear();
+        #[cfg(feature = "codec-push")]
+        if form == PushForm::Lent
+            && cursor.peek_slice(1).map_err(InboundParseError::Codec)?[0] & 0x1F
+                == wire_const::N_MID_PUSH
+        {
+            let push =
+                wz_codecs::push::Push::decode(&mut cursor).map_err(InboundParseError::Codec)?;
+            if let crate::ext_admit::ExtAdmission::UnknownMandatory { eid } =
+                push_view_admission(&push)
+            {
+                return Err(InboundParseError::UnknownMandatoryExt { eid });
+            }
+            each(WalkedRecord::Push(&push));
+            continue;
+        }
         let known =
             decode_one_record(&mut cursor, record, NO_ORIGIN).map_err(InboundParseError::Codec)?;
         if !known {
@@ -573,7 +655,7 @@ pub(crate) fn for_each_record(
             record.clear();
             return Err(refusal);
         }
-        each(record);
+        each(WalkedRecord::Owned(record));
         if !known {
             break;
         }
@@ -1410,7 +1492,15 @@ mod record_walk_tests {
     ) {
         let mut record = Vec::new();
         let mut seen = Vec::new();
-        let result = for_each_record(payload, &mut record, |one| {
+        let result = for_each_record(payload, &mut record, PushForm::Owned, |one| {
+            // Without a Push codec the owned form is the only one there is.
+            #[cfg(feature = "codec-push")]
+            let WalkedRecord::Owned(one) = one
+            else {
+                panic!("an owned walk lends nothing");
+            };
+            #[cfg(not(feature = "codec-push"))]
+            let WalkedRecord::Owned(one) = one;
             assert_eq!(one.len(), 1, "one record per call");
             seen.push(match &one[0] {
                 NetworkMessage::Oam(o) => ('o', o.id),
@@ -1456,6 +1546,79 @@ mod record_walk_tests {
             matches!(result, Err(crate::parse_error::InboundParseError::Codec(_))),
             "then the walk ends with the decode error: {result:?}"
         );
+    }
+
+    /// A Push record as a peer sends it, on `key`.
+    #[cfg(feature = "codec-push")]
+    fn push_record(key: &str) -> Vec<u8> {
+        crate::push_build::build_push_literal(key, b"v")
+            .expect("build")
+            .try_as_borrowed()
+            .expect("a view")
+            .encode_to_vec()
+    }
+
+    /// The lent walk hands a Push over where the payload lies and every other
+    /// record owned, in wire order; the owned walk hands the same records owned.
+    #[cfg(feature = "codec-push")]
+    #[test]
+    fn the_lent_walk_lends_each_push_and_owns_the_rest_in_order() {
+        let payload = [push_record("a/1"), oam_record(2), push_record("a/3")].concat();
+        let mut record = Vec::new();
+        let mut seen: Vec<(char, alloc::string::String)> = Vec::new();
+        let result = for_each_record(&payload, &mut record, PushForm::Lent, |one| match one {
+            WalkedRecord::Push(push) => {
+                let (_, suffix) = crate::wireexpr_resolve::id_and_suffix_view(&push.keyexpr.body);
+                seen.push(('p', suffix.expect("a key").into()));
+            }
+            WalkedRecord::Owned(one) => match &one[0] {
+                NetworkMessage::Oam(o) => seen.push(('o', alloc::format!("{}", o.id))),
+                other => panic!("only the OAM is owned: {other:?}"),
+            },
+        });
+        assert!(result.is_ok());
+        assert_eq!(
+            seen,
+            vec![('p', "a/1".into()), ('o', "2".into()), ('p', "a/3".into())]
+        );
+        // The owned walk owns all three, the Pushes included.
+        let mut owned = 0;
+        let result = for_each_record(&payload, &mut record, PushForm::Owned, |one| match one {
+            WalkedRecord::Owned(_) => owned += 1,
+            WalkedRecord::Push(_) => panic!("an owned walk lends nothing"),
+        });
+        assert!(result.is_ok());
+        assert_eq!(owned, 3);
+    }
+
+    /// A Push whose own chain carries an unknown MANDATORY extension ends the
+    /// walk at that record with the same refusal on both forms, after the
+    /// records before it.
+    #[cfg(feature = "codec-push")]
+    #[test]
+    fn a_push_a_participant_must_refuse_ends_both_walks_at_the_same_record() {
+        let plain = push_record("a/1");
+        let built = crate::push_build::build_push_literal("a/2", b"v").expect("build");
+        let mut refused = built.try_as_borrowed().expect("a view");
+        // Id 0xF, mandatory (0x10), unit encoding: defined by no network message.
+        let mut chain = sce_forge_runtime::heapless::Vec::new();
+        let _ = chain.push(wz_codecs::ext_entry::ExtEntry {
+            header: 0x10 | 0x0F,
+            body: wz_codecs::ext_entry::ExtEntryVariant::CodecZenohExtUnit(Default::default()),
+        });
+        refused.extensions = Some(chain);
+        refused.header |= 0x80;
+        let payload = [plain, refused.encode_to_vec(), push_record("a/3")].concat();
+        let walk = |form| {
+            let mut record = Vec::new();
+            let mut handed = 0;
+            let result = for_each_record(&payload, &mut record, form, |_| handed += 1);
+            (handed, alloc::format!("{result:?}"))
+        };
+        let lent = walk(PushForm::Lent);
+        assert_eq!(lent.0, 1, "the record before it was handed over");
+        assert!(lent.1.contains("UnknownMandatoryExt"), "{}", lent.1);
+        assert_eq!(lent, walk(PushForm::Owned), "the owned walk stops alike");
     }
 
     #[test]

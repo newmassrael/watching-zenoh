@@ -10981,9 +10981,19 @@ layer_c1m_session_lwip() {
         cargo test -p wz-session-lwip \
         --features session-unicast-open,session-unicast-accept,pubsub-put \
         --test rx_frame_allocations --quiet || return 1
-    _runci_guarded_test "C1m rx frame in place" 2 \
+    # Fixed-memory step S3 moved the in-place leg 2 -> 3: a Fragment taking the
+    # copying path, counted (`a_fragment_takes_the_copying_path_and_is_counted`,
+    # gated on `rx-in-place`). The same file runs again on the FIXED bounded
+    # backing (`bounded-heapless`, the MCU profile's), the one leg where a Put
+    # delivered in place must cost the heap NOTHING; on the growable backing
+    # above it costs the matcher's two scratch lists. 3 = what each PRINTED.
+    _runci_guarded_test "C1m rx frame in place" 3 \
         cargo test -p wz-session-lwip \
         --features session-unicast-open,session-unicast-accept,pubsub-put,rx-in-place \
+        --test rx_frame_allocations --quiet || return 1
+    _runci_guarded_test "C1m rx frame in place fixed" 3 \
+        cargo test -p wz-session-lwip \
+        --features session-unicast-open,session-unicast-accept,pubsub-put,rx-in-place,wz-session-core/bounded-heapless \
         --test rx_frame_allocations --quiet || return 1
     # Clause (4) of runtime-zero-copy -- the library's own tests on `rx-in-place`,
     # which hold a lent frame in the session socket: one of them reads the

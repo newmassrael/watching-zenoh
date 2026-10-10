@@ -2255,6 +2255,19 @@ impl<R: SessionRuntime, T: TimeSource> OwnMappingSpace for SessionLinkActions<R,
     fn resolve_own_mapping(&self, id: u64) -> Option<String> {
         self.resolve_outbound_mapping(id)
     }
+
+    // The literal is copied out of the table under the lock, straight into the
+    // caller's buffer: the in-place receive path resolves an `M=0` alias with
+    // no `String` in between.
+    fn append_own_mapping(
+        &self,
+        id: u64,
+        out: &mut crate::wireexpr_resolve::KeyexprBuf,
+    ) -> Option<Result<(), crate::bounded::CapacityFull<()>>> {
+        R::with_mutex_mut(&self.outbound_mappings, |table| {
+            table.get(&id).map(|literal| out.push_str(literal))
+        })
+    }
 }
 
 impl<R: SessionRuntime, T: TimeSource> ResponseSink for SessionLinkActions<R, T> {
