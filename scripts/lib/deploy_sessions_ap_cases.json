@@ -1,0 +1,171 @@
+{
+  "about": "Open-debt item 900. The AP column of deploy_sessions.py, as cases both readers are judged on: deploy_sessions.py --selftest (each document as a machine with platform class ap) and wz-ap-demo's --sessions reader (sessions::parity_tests). `refuses` is the SET of key paths refused, relative to the document; [] means accepted.",
+  "cases": [
+    {
+      "label": "a client session and a group session",
+      "document": {"zid": "a1b2c3d4", "sessions": [
+        {"name": "to_router", "mode": "client", "transport": "unicast", "connect": {"endpoints": ["tcp/127.0.0.1:7447"]}},
+        {"name": "group", "mode": "peer", "transport": "multicast", "group": {"endpoint": "udp/224.0.0.224:7446", "join_interval_ms": 2500, "lease_ms": 10000}}]},
+      "refuses": []
+    },
+    {
+      "label": "a unicast and a multicast session may carry one own zid",
+      "document": {"sessions": [
+        {"name": "to_router", "mode": "client", "transport": "unicast", "zid": "c0ffee", "connect": {"endpoints": ["tcp/127.0.0.1:7447"]}},
+        {"name": "group", "mode": "peer", "transport": "multicast", "zid": "c0ffee", "group": {"endpoint": "udp/224.0.0.224:7446"}}]},
+      "refuses": []
+    },
+    {
+      "label": "two unicast sessions inheriting one zid are refused, naming both",
+      "document": {"zid": "a1b2c3d4", "sessions": [
+        {"name": "to_router", "mode": "client", "transport": "unicast", "connect": {"endpoints": ["tcp/127.0.0.1:7447"]}},
+        {"name": "listener", "mode": "peer", "transport": "unicast", "listen": {"endpoints": ["tcp/127.0.0.1:7448"]}}]},
+      "refuses": ["sessions[1].zid"]
+    },
+    {
+      "label": "an own zid makes two unicast sessions distinct",
+      "document": {"zid": "a1b2c3d4", "sessions": [
+        {"name": "to_router", "mode": "client", "transport": "unicast", "connect": {"endpoints": ["tcp/127.0.0.1:7447"]}},
+        {"name": "listener", "mode": "peer", "transport": "unicast", "zid": "b1", "listen": {"endpoints": ["tcp/127.0.0.1:7448"]}, "accept": {"max_sessions": 2}}]},
+      "refuses": []
+    },
+    {
+      "label": "an uppercase document zid is refused",
+      "document": {"zid": "A1", "sessions": [
+        {"name": "to_router", "mode": "client", "transport": "unicast", "connect": {"endpoints": ["tcp/127.0.0.1:7447"]}}]},
+      "refuses": ["zid"]
+    },
+    {
+      "label": "a leading zero and an over-long zid are refused",
+      "document": {"sessions": [
+        {"name": "to_router", "mode": "client", "transport": "unicast", "zid": "0a", "connect": {"endpoints": ["tcp/127.0.0.1:7447"]}},
+        {"name": "group", "mode": "peer", "transport": "multicast", "zid": "111111111111111111111111111111111", "group": {"endpoint": "udp/224.0.0.224:7446"}}]},
+      "refuses": ["sessions[0].zid", "sessions[1].zid"]
+    },
+    {
+      "label": "heap_budget_bytes is reserved",
+      "document": {"sessions": [
+        {"name": "to_router", "mode": "client", "transport": "unicast", "heap_budget_bytes": 4096, "connect": {"endpoints": ["tcp/127.0.0.1:7447"]}}]},
+      "refuses": ["sessions[0].heap_budget_bytes"]
+    },
+    {
+      "label": "an unknown session key is refused by name",
+      "document": {"sessions": [
+        {"name": "to_router", "mode": "client", "transport": "unicast", "iface": "eth0", "connect": {"endpoints": ["tcp/127.0.0.1:7447"]}}]},
+      "refuses": ["sessions[0].iface"]
+    },
+    {
+      "label": "a duplicate or malformed name is refused",
+      "document": {"sessions": [
+        {"name": "to_router", "mode": "client", "transport": "unicast", "connect": {"endpoints": ["tcp/127.0.0.1:7447"]}},
+        {"name": "to_router", "mode": "peer", "transport": "multicast", "group": {"endpoint": "udp/224.0.0.224:7446"}},
+        {"name": "Group", "mode": "peer", "transport": "multicast", "zid": "b2", "group": {"endpoint": "udp/224.0.0.225:7446"}}]},
+      "refuses": ["sessions[1].name", "sessions[2].name"]
+    },
+    {
+      "label": "a link with no links table is refused",
+      "document": {"sessions": [
+        {"name": "to_router", "mode": "client", "transport": "unicast", "link": "eth", "connect": {"endpoints": ["tcp/127.0.0.1:7447"]}}]},
+      "refuses": ["sessions[0].link"]
+    },
+    {
+      "label": "mode and transport are required and closed",
+      "document": {"sessions": [
+        {"name": "a", "mode": "router", "transport": "unicast", "connect": {"endpoints": ["tcp/127.0.0.1:7447"]}},
+        {"name": "b", "mode": "peer"}]},
+      "refuses": ["sessions[0].mode", "sessions[1].transport"]
+    },
+    {
+      "label": "a multicast session is a peer and has no unicast keys",
+      "document": {"sessions": [
+        {"name": "group", "mode": "client", "transport": "multicast", "connect": {"endpoints": ["udp/192.0.2.1:1"]}, "group": {"endpoint": "udp/224.0.0.224:7446"}}]},
+      "refuses": ["sessions[0].mode", "sessions[0].connect"]
+    },
+    {
+      "label": "a unicast session has no group and needs an endpoint",
+      "document": {"sessions": [
+        {"name": "a", "mode": "client", "transport": "unicast", "group": {"endpoint": "udp/224.0.0.224:7446"}}]},
+      "refuses": ["sessions[0].group", "sessions[0].connect"]
+    },
+    {
+      "label": "endpoint lists are non-empty lists of locators",
+      "document": {"sessions": [
+        {"name": "a", "mode": "client", "transport": "unicast", "connect": {"endpoints": ["127.0.0.1:7447"]}},
+        {"name": "b", "mode": "client", "transport": "unicast", "zid": "b2", "connect": {"endpoints": []}},
+        {"name": "c", "mode": "client", "transport": "unicast", "zid": "c3", "connect": {"endpoints": ["tcp/127.0.0.1:7447"], "timeout_ms": 5}}]},
+      "refuses": ["sessions[0].connect.endpoints[0]", "sessions[1].connect.endpoints", "sessions[2].connect.timeout_ms"]
+    },
+    {
+      "label": "accept needs listen and a positive max_sessions; an AP may hold more than one",
+      "document": {"sessions": [
+        {"name": "a", "mode": "client", "transport": "unicast", "connect": {"endpoints": ["tcp/127.0.0.1:7447"]}, "accept": {"max_sessions": 1}},
+        {"name": "b", "mode": "peer", "transport": "unicast", "zid": "b2", "listen": {"endpoints": ["tcp/127.0.0.1:7448"]}, "accept": {"max_sessions": 0}},
+        {"name": "c", "mode": "peer", "transport": "unicast", "zid": "c3", "listen": {"endpoints": ["tcp/127.0.0.1:7449"]}, "accept": {"max_sessions": 4, "pending": 2}}]},
+      "refuses": ["sessions[0].accept", "sessions[1].accept.max_sessions", "sessions[2].accept.pending"]
+    },
+    {
+      "label": "an AP session dials or listens, not both",
+      "document": {"sessions": [
+        {"name": "a", "mode": "peer", "transport": "unicast", "connect": {"endpoints": ["tcp/127.0.0.1:7447"]}, "listen": {"endpoints": ["tcp/127.0.0.1:7448"]}}]},
+      "refuses": ["sessions[0].listen"]
+    },
+    {
+      "label": "an AP session listens on one endpoint",
+      "document": {"sessions": [
+        {"name": "a", "mode": "peer", "transport": "unicast", "listen": {"endpoints": ["tcp/127.0.0.1:7448", "tcp/127.0.0.1:7449"]}}]},
+      "refuses": ["sessions[0].listen.endpoints"]
+    },
+    {
+      "label": "two sessions may not hold one listen or group endpoint",
+      "document": {"sessions": [
+        {"name": "a", "mode": "peer", "transport": "unicast", "zid": "a1", "listen": {"endpoints": ["tcp/127.0.0.1:7448"]}},
+        {"name": "b", "mode": "peer", "transport": "unicast", "zid": "b2", "listen": {"endpoints": ["tcp/127.0.0.1:7448"]}},
+        {"name": "g", "mode": "peer", "transport": "multicast", "zid": "a1", "group": {"endpoint": "udp/224.0.0.224:7446"}},
+        {"name": "h", "mode": "peer", "transport": "multicast", "zid": "b2", "group": {"endpoint": "udp/224.0.0.224:7446#iface=lo"}}]},
+      "refuses": ["sessions[1].listen.endpoints[0]", "sessions[3].group.endpoint"]
+    },
+    {
+      "label": "the group endpoint takes only an iface tail with a value, never auto",
+      "document": {"sessions": [
+        {"name": "a", "mode": "peer", "transport": "multicast", "zid": "a1", "group": {"endpoint": "udp/224.0.0.224:7446#iface=auto"}},
+        {"name": "b", "mode": "peer", "transport": "multicast", "zid": "b2", "group": {"endpoint": "udp/224.0.0.225:7446#iface="}},
+        {"name": "c", "mode": "peer", "transport": "multicast", "zid": "c3", "group": {"endpoint": "udp/224.0.0.226:7446#ttl=4"}},
+        {"name": "d", "mode": "peer", "transport": "multicast", "zid": "d4", "group": {"endpoint": "udp/192.0.2.1:7446"}},
+        {"name": "e", "mode": "peer", "transport": "multicast", "zid": "e5", "group": {"endpoint": "tcp/224.0.0.227:7446"}},
+        {"name": "f", "mode": "peer", "transport": "multicast", "zid": "f6", "group": {"endpoint": "udp/224.0.0.228:0"}}]},
+      "refuses": ["sessions[0].group.endpoint", "sessions[1].group.endpoint", "sessions[2].group.endpoint", "sessions[3].group.endpoint", "sessions[4].group.endpoint", "sessions[5].group.endpoint"]
+    },
+    {
+      "label": "an AP takes an iface by name or by address, and an IPv6 group",
+      "document": {"sessions": [
+        {"name": "a", "mode": "peer", "transport": "multicast", "zid": "a1", "group": {"endpoint": "udp/224.0.0.224:7446#iface=lo"}},
+        {"name": "b", "mode": "peer", "transport": "multicast", "zid": "b2", "group": {"endpoint": "udp/224.0.0.225:7446#iface=192.0.2.4"}},
+        {"name": "c", "mode": "peer", "transport": "multicast", "zid": "c3", "group": {"endpoint": "udp/[ff02::1]:7446"}}]},
+      "refuses": []
+    },
+    {
+      "label": "group keys are closed and its intervals positive",
+      "document": {"sessions": [
+        {"name": "a", "mode": "peer", "transport": "multicast", "group": {"endpoint": "udp/224.0.0.224:7446", "join_interval_ms": 0, "lease_ms": "10s", "ttl": 2}},
+        {"name": "b", "mode": "peer", "transport": "multicast", "zid": "b2"}]},
+      "refuses": ["sessions[0].group.join_interval_ms", "sessions[0].group.lease_ms", "sessions[0].group.ttl", "sessions[1].group"]
+    },
+    {
+      "label": "an AP refuses per-session limits and pools",
+      "document": {"sessions": [
+        {"name": "a", "mode": "client", "transport": "unicast", "connect": {"endpoints": ["tcp/127.0.0.1:7447"]}, "limits": {"pending_queries": 4}},
+        {"name": "b", "mode": "peer", "transport": "multicast", "group": {"endpoint": "udp/224.0.0.224:7446"}, "buffer_pools": {"session_rx_pool": {"ref": "session_rx_pool_mcu"}}}]},
+      "refuses": ["sessions[0].limits", "sessions[1].buffer_pools"]
+    },
+    {
+      "label": "a session that is not a mapping is refused",
+      "document": {"sessions": ["to_router"]},
+      "refuses": ["sessions[0]"]
+    },
+    {
+      "label": "an empty sessions list is refused",
+      "document": {"sessions": []},
+      "refuses": ["sessions"]
+    }
+  ]
+}

@@ -70,6 +70,26 @@ machines.<m>.sessions[i]
                 keep; the allocator is not split.
 
 Any other key in a session is refused by name.
+
+## The AP column (`platform.class: ap`)
+
+Open-debt item 900 again: `wz-ap-demo --sessions <file>` starts every session
+of such a list in one process, and its reader is judged against this module on
+the shared cases in `deploy_sessions_ap_cases.json` (each side checks the same
+documents against the same refused key paths). Where an AP runs a session
+differently, the rule is stated here, once:
+
+    link        optional. An AP session's link is the socket its own endpoint
+                opens, so a machine needs no `links` table; a `link` that is
+                given must still name a key of it.
+    one link    a unicast session dials OR listens, not both, and listens on
+                ONE endpoint; two sessions may not name the same listen or
+                group endpoint (the `#` tail aside). Each of those would be a
+                second link under one session.
+    limits      refused. The AP runtime has no per-session table bound to
+                apply one to, so an override would be read and do nothing.
+    buffer_pools  refused. An AP session has no pools of its own: link buffers
+                are the process's shared link-RX arena.
 """
 
 from __future__ import annotations
@@ -220,6 +240,7 @@ def validate_machine(
 
     platform = machine.get("platform") or {}
     is_mcu = platform.get("class") == "mcu"
+    is_ap = platform.get("class") == "ap"
     single_accept = is_mcu or platform.get("os") == "zephyr"
     links = machine.get("links") or {}
     machine_limits = machine.get("limits") or {}
@@ -228,6 +249,21 @@ def validate_machine(
     names: dict[str, int] = {}
     link_owner: dict[str, str] = {}
     zid_owner: dict[tuple[str, str], str] = {}
+    # AP only: the session that already holds a listen or group endpoint,
+    # keyed by the locator without its `#` tail.
+    endpoint_owner: dict[str, str] = {}
+
+    def claim_endpoint(at: str, endpoint: object, label: str) -> None:
+        if not isinstance(endpoint, str):
+            return
+        locator = endpoint.partition("#")[0]
+        if locator in endpoint_owner:
+            errors.append(
+                f"{at}: `{locator}` is already the link of {endpoint_owner[locator]}; "
+                "one session per link"
+            )
+        else:
+            endpoint_owner[locator] = label
 
     for i, s in enumerate(sessions):
         path = f"{base}.sessions[{i}]"
@@ -263,7 +299,9 @@ def validate_machine(
             errors.append(f"{path}.transport: required, one of {', '.join(TRANSPORTS)}")
 
         link = s.get("link")
-        if not isinstance(link, str) or link not in links:
+        if is_ap and "link" not in s:
+            pass
+        elif not isinstance(link, str) or link not in links:
             errors.append(f"{path}.link: required, a key of {base}.links")
         elif link in link_owner:
             errors.append(
@@ -303,6 +341,20 @@ def validate_machine(
                     f"{path}.connect: a unicast session needs `connect.endpoints` "
                     "or `listen.endpoints`"
                 )
+            if is_ap and "connect" in s and "listen" in s:
+                errors.append(
+                    f"{path}.listen: an AP session holds one link, so it dials or "
+                    "it listens; declare a second session for the other"
+                )
+            elif is_ap and isinstance(s.get("listen"), dict):
+                eps = s["listen"].get("endpoints")
+                if isinstance(eps, list) and len(eps) > 1:
+                    errors.append(
+                        f"{path}.listen.endpoints: an AP session listens on one "
+                        "endpoint (one link per session)"
+                    )
+                elif isinstance(eps, list) and eps:
+                    claim_endpoint(f"{path}.listen.endpoints[0]", eps[0], label)
             if "accept" in s:
                 acc = s["accept"]
                 if "listen" not in s:
@@ -339,11 +391,18 @@ def validate_machine(
                 why = group_endpoint_problem(group.get("endpoint"), netif, is_mcu)
                 if why:
                     errors.append(f"{path}.group.endpoint: {why}")
+                elif is_ap:
+                    claim_endpoint(f"{path}.group.endpoint", group.get("endpoint"), label)
                 for key in ("join_interval_ms", "lease_ms"):
                     if key in group and not _positive_int(group[key]):
                         errors.append(f"{path}.group.{key}: a positive integer")
 
-        if "limits" in s:
+        if is_ap and "limits" in s:
+            errors.append(
+                f"{path}.limits: the AP runtime has no per-session table bound to "
+                "apply a limit to"
+            )
+        elif "limits" in s:
             lim = s["limits"]
             if not isinstance(lim, dict):
                 errors.append(f"{path}.limits: must be a mapping")
@@ -357,7 +416,12 @@ def validate_machine(
                     elif not _positive_int(value):
                         errors.append(f"{path}.limits.{key}: a positive integer")
 
-        if "buffer_pools" in s:
+        if is_ap and "buffer_pools" in s:
+            errors.append(
+                f"{path}.buffer_pools: an AP session has no pools of its own; its "
+                "link buffers are the process's shared link-RX arena"
+            )
+        elif "buffer_pools" in s:
             pools = s["buffer_pools"]
             if not isinstance(pools, dict):
                 errors.append(f"{path}.buffer_pools: must be a mapping")
@@ -532,8 +596,16 @@ def _selftest(repo_root: Path) -> int:
 
     check("an MCU honours an iface its link's netif matches", mutate(netif), None)
 
-    def ap_iface(m):
+    def on_ap(m):
+        # The AP refuses per-session limits and pools (the module doc's AP
+        # column), so an AP variant of the MCU fixture drops them.
         m["platform"] = {"class": "ap", "os": "linux"}
+        for s in m["sessions"]:
+            s.pop("limits", None)
+            s.pop("buffer_pools", None)
+
+    def ap_iface(m):
+        on_ap(m)
         m["sessions"][1]["group"]["endpoint"] = "udp/224.0.0.224:7446#iface=192.0.2.4"
 
     check("an AP takes an iface by address", mutate(ap_iface), None)
@@ -571,7 +643,7 @@ def _selftest(repo_root: Path) -> int:
 
     def accept_two_ap(m):
         accept_two(m)
-        m["platform"] = {"class": "ap", "os": "linux"}
+        on_ap(m)
 
     check("an AP acceptor may hold more", mutate(accept_two_ap), None)
 
@@ -609,8 +681,54 @@ def _selftest(repo_root: Path) -> int:
         mutate(lambda m: m["sessions"][0]["buffer_pools"].update(session_tx_pool={"slot_count": 8})),
         "needs a positive `slot_size`",
     )
+    failures += _ap_cases(repo_root)
     print(f"deploy_sessions selftest: {'FAIL' if failures else 'OK'} ({failures} failing)")
     return 1 if failures else 0
+
+
+AP_CASES = Path(__file__).resolve().parent / "deploy_sessions_ap_cases.json"
+AP_MACHINE = "m"
+
+
+def refused_paths(refusals: list[str]) -> set[str]:
+    """The key paths `validate_machine` refused, relative to the machine.
+
+    A refusal is `machines.<m>.<path>: <why>`; the AP document a demo reads IS
+    the machine, so the paths it reports carry no `machines.<m>.` prefix.
+    """
+    prefix = f"machines.{AP_MACHINE}."
+    out = set()
+    for refusal in refusals:
+        path = refusal.split(": ", 1)[0]
+        out.add(path[len(prefix) :] if path.startswith(prefix) else path)
+    return out
+
+
+def _ap_cases(repo_root: Path) -> int:
+    """Run the AP cases `wz-ap-demo`'s `--sessions` reader is judged on too.
+
+    Each document is read as a machine whose platform is an AP, and the SET of
+    refused key paths must be the case's `refuses` exactly: a missing path is a
+    rule this module lost, an extra one a rule the demo does not share.
+    """
+    import json
+
+    cases = json.loads(AP_CASES.read_text(encoding="utf-8"))["cases"]
+    failures = 0
+    for case in cases:
+        machine = dict(case["document"], platform={"class": "ap", "os": "linux"})
+        got = refused_paths(validate_machine(AP_MACHINE, machine, repo_root))
+        want = set(case["refuses"])
+        ok = got == want
+        print(f"  {'ok  ' if ok else 'FAIL'} ap: {case['label']}: {sorted(got) or 'accepted'}")
+        if not ok:
+            print(f"       want {sorted(want) or 'accepted'}")
+        failures += 0 if ok else 1
+    # Anti-vacuity: a file that lost its cases would agree with everything.
+    if len(cases) < 20:
+        print(f"  FAIL ap: only {len(cases)} case(s) in {AP_CASES.name}")
+        failures += 1
+    return failures
 
 
 def main(argv: list[str]) -> int:
