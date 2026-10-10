@@ -69,6 +69,17 @@ pub mod links;
 #[cfg(feature = "transport-multicast")]
 pub mod multicast_drive;
 pub mod session_drive;
+// Open-debt item 900 — one program, two sessions: the fault-isolation baseline
+// (a client session to a router and a group session on one local set). It needs
+// both handshake halves, the multicast loop and a payload to carry.
+#[cfg(all(
+    test,
+    feature = "transport-multicast",
+    feature = "session-unicast-open",
+    feature = "session-unicast-accept",
+    feature = "codec-push"
+))]
+mod two_session_tests;
 
 pub use driver::LwipUdpDriver;
 pub use links::LwipLinks;

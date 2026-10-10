@@ -106,6 +106,23 @@ transport-keepalive = [
     "wz-session-mcu/transport-keepalive",
 ]
 
+# Open-debt item 900 — the two halves of the unicast handshake, for a node that
+# runs a client session (the initiator, towards a router) beside a group
+# session and does not carry the admin node's write surface. Each forwards the
+# wz-session-core emitter gate plus the Init and Open body codecs the emitters
+# need; without them an initiator opens its link and then says nothing. The
+# admin write surface below still names the same four gates itself.
+session-unicast-open = [
+    "wz-session-core/session-unicast-open",
+    "wz-session-core/codec-init-body",
+    "wz-session-core/codec-open-body",
+]
+session-unicast-accept = [
+    "wz-session-core/session-unicast-accept",
+    "wz-session-core/codec-init-body",
+    "wz-session-core/codec-open-body",
+]
+
 # R311lt — MCU multicast transport drive loop (`run_multicast_session`): the
 # no_std mirror of the AP `wz-runtime-tokio::multicast_glue` loop. Forwards to
 # the wz-session-core `session-multicast` capability (the MulticastDispatcher

@@ -123,18 +123,23 @@
 //! bothered to say so, and every shipped MCU host in this tree would have
 //! passed `|| false` — an arm with a witness and no user.
 
+use alloc::rc::Rc;
 use core::net::{IpAddr, Ipv4Addr, SocketAddr};
 
 use wz_link_lwip::rx_sockets::{SessionMulticastRxSocket, SESSION_MULTICAST_RX_SLOT_SIZE};
 use wz_link_lwip::{Datagram, LwipLink};
-use wz_runtime_coop::{ClockSource, CoopRuntime, CoopTime};
+#[cfg(feature = "reassembly")]
+use wz_runtime_coop::reassembly_rx::CoopReassembly;
+use wz_runtime_coop::{
+    yield_now, ClockSource, CoopLocalJoinHandle, CoopLocalSet, CoopRuntime, CoopTime,
+};
 use wz_runtime_core::TimeSource;
 use wz_session_core::driver_loop::IterationEvent;
 use wz_session_core::handshake_encode::encode_multicast_close;
 use wz_session_core::link::LostCause;
 use wz_session_core::multicast_dispatch::MulticastDispatcher;
 use wz_session_core::multicast_join::encode_join;
-use wz_session_core::multicast_params::{MulticastDriveConfig, MulticastOutcome};
+use wz_session_core::multicast_params::{MulticastDriveConfig, MulticastOutcome, MulticastParams};
 // R311mf/R311mh — multicast Fragment RX reassembly. The reassembly-divergent
 // tail (FrameOutOfOrder chain abort / Fragment reassembly / pre-Close peer-chain
 // abort) + the sweep tail are the shared wz_session_core multicast_rx SSOTs
@@ -183,12 +188,6 @@ use wz_session_core::sn::{self, MulticastTxConduits};
     feature = "liveliness-token"
 ))]
 use alloc::collections::VecDeque;
-#[cfg(any(
-    feature = "codec-response",
-    feature = "codec-response-final",
-    feature = "liveliness-token"
-))]
-use alloc::rc::Rc;
 #[cfg(any(
     feature = "codec-response",
     feature = "codec-response-final",
@@ -584,6 +583,12 @@ where
 /// per iteration against a loop whose cost is dominated by the lwIP pump, and a
 /// second monomorphisation of this body is ROM the MCU profile would pay for
 /// nothing.
+///
+/// Open-debt item 900 — the body became [`MulticastPump::step`], so that the
+/// same sequence can also run as a task on a [`CoopLocalSet`] beside other
+/// sessions ([`multicast_session_task`]). This loop drives that step with the
+/// executor pass taken INLINE, at the two points this body always took it, so
+/// its behaviour is unchanged.
 #[allow(clippy::too_many_arguments)]
 fn run_multicast_session_inner<C, F, G, const MAX_PEERS: usize>(
     dispatcher: &mut MulticastDispatcher<MAX_PEERS>,
@@ -600,57 +605,175 @@ where
     F: FnMut(IterationEvent<'_>),
     G: FnMut() -> Option<MulticastTxItem>,
 {
-    // Destructure into the same local names the body uses (the shared
-    // parameter-object SSOT; R311ls/R311lt).
-    let MulticastDriveConfig {
-        params,
-        tick_ms,
-        max_iters,
-    } = cfg;
+    let mut pump =
+        MulticastPump::with_pass(dispatcher, cfg, runtime, link, driver, ExecutorPass::Inline);
+    loop {
+        if let Some(outcome) = pump.step(&mut on_event, &mut next_tx, should_stop.as_deref_mut()) {
+            return outcome;
+        }
+    }
+}
 
-    // The loop's monotonic clock, derived from the runtime it pumps (R311ly):
-    // the dispatcher's stamps all come from this one source, so there is no
-    // external epoch to match (contrast the unicast run_session's R263 clock).
-    let clock = CoopTime::new(runtime);
+/// Who takes the cooperative executor's pass while a [`MulticastPump`] runs.
+///
+/// The unicast twin ([`wz_runtime_coop::session_drive::SessionPump`]) answers
+/// this by never pumping in its step and letting each driver pump once per
+/// iteration. This loop cannot simply copy that, because its synchronous form
+/// has always taken the pass in the MIDDLE of an iteration (after the TX drain,
+/// before the RX read) and after the departing Close; moving it would reorder
+/// what the frozen-clock lanes pin. So the position stays where it was and only
+/// WHETHER it is taken depends on the driver.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ExecutorPass {
+    /// The loop owns the thread ([`run_multicast_session`] and its siblings):
+    /// nothing else drives the runtime, so the step takes the pass itself.
+    Inline,
+    /// The session is a task inside a [`CoopLocalSet`], which drives the
+    /// runtime before it polls its tasks. Pumping from inside the task would
+    /// have the session drive the pool that is polling it.
+    Hosted,
+}
 
-    // Idle -> LinkOpening -> Running.
-    dispatcher.create();
-    dispatcher.notify_link_ready();
-
+/// One MCU multicast session, ready to be advanced one iteration at a time.
+///
+/// Open-debt item 900 — one program holding SEVERAL sessions (a client session
+/// towards a router plus this group session) needs every session to give the
+/// thread back between iterations. [`run_multicast_session`] never did: it is a
+/// loop that returns only when the session ends, and while it ran, a unicast
+/// session spawned on a [`CoopLocalSet`] was never polled, because the loop
+/// pumped the runtime's shared pool and not the local set. The step below is
+/// that loop's body, unchanged, and the two drivers share it: the synchronous
+/// loop, and [`multicast_session_task`], the `!Send` future a local set hosts.
+///
+/// [`Self::new`] builds the HOSTED form: its step does not pump the executor,
+/// so a caller that drives it by hand owns that pass, as with the unicast
+/// `SessionPump`.
+pub struct MulticastPump<'a, C: ClockSource, const MAX_PEERS: usize> {
+    dispatcher: &'a mut MulticastDispatcher<MAX_PEERS>,
+    params: &'a MulticastParams,
+    tick_ms: u64,
+    max_iters: Option<usize>,
+    runtime: &'a CoopRuntime<C>,
+    clock: CoopTime<C>,
+    link: &'a LwipLink,
+    driver: &'a mut LwipMulticastDriver,
+    pass: ExecutorPass,
     // The TX mint state (per-channel next SN). The JOIN beacon advertises the
-    // live values (an immutable borrow); the TX-codec drain mints from here per
-    // data frame, so the binding is `mut` only when a TX body codec inhabits the
-    // item (the same union gating `multicast_tx_emit`).
-    #[cfg(any(
-        feature = "codec-push",
-        feature = "codec-response",
-        feature = "codec-response-final",
-        feature = "liveliness-token"
-    ))]
-    let mut tx_sn = MulticastTxConduits::new(sn::mask_from_res(params.seq_num_res));
-    #[cfg(not(any(
-        feature = "codec-push",
-        feature = "codec-response",
-        feature = "codec-response-final",
-        feature = "liveliness-token"
-    )))]
-    let tx_sn = MulticastTxConduits::new(sn::mask_from_res(params.seq_num_res));
-    // Emit the first JOIN beacon immediately, then every join_interval_ms; the
-    // sweep runs on its own tick_ms cadence (the busy-poll equivalents of the
-    // AP loop's JOIN-due check + select! sweep tick).
-    let mut next_join_ms = clock.now_monotonic_ms();
-    let mut next_sweep_ms = clock.now_monotonic_ms();
-    let mut iter: usize = 0;
+    // live values; the TX-codec drain mints from here per data frame.
+    tx_sn: MulticastTxConduits,
+    next_join_ms: u64,
+    next_sweep_ms: u64,
+    iter: usize,
     // R311mf — the per-(slot, channel) reassembly Router for inbound multicast
     // Fragment chains, dimensioned to the MCU pool (mcu_reassembly =
     // ReassemblyDispatcher<4, 4096>, the same Router run_session owns). Only
     // built when `reassembly` is on; otherwise the Fragment arm is a drop.
     #[cfg(feature = "reassembly")]
-    let mut reasm = mcu_reassembly();
+    reasm: CoopReassembly,
+}
 
-    loop {
+impl<'a, C: ClockSource, const MAX_PEERS: usize> MulticastPump<'a, C, MAX_PEERS> {
+    /// Bring the dispatcher up (Idle -> Running) and arm the JOIN and sweep
+    /// cadences — everything the synchronous loop does before its first
+    /// iteration. The step of the pump this returns does NOT take the executor
+    /// pass (see [`MulticastPump`]).
+    pub fn new(
+        dispatcher: &'a mut MulticastDispatcher<MAX_PEERS>,
+        cfg: MulticastDriveConfig<'a>,
+        runtime: &'a CoopRuntime<C>,
+        link: &'a LwipLink,
+        driver: &'a mut LwipMulticastDriver,
+    ) -> Self {
+        Self::with_pass(dispatcher, cfg, runtime, link, driver, ExecutorPass::Hosted)
+    }
+
+    fn with_pass(
+        dispatcher: &'a mut MulticastDispatcher<MAX_PEERS>,
+        cfg: MulticastDriveConfig<'a>,
+        runtime: &'a CoopRuntime<C>,
+        link: &'a LwipLink,
+        driver: &'a mut LwipMulticastDriver,
+        pass: ExecutorPass,
+    ) -> Self {
+        // The shared parameter-object SSOT (R311ls/R311lt).
+        let MulticastDriveConfig {
+            params,
+            tick_ms,
+            max_iters,
+        } = cfg;
+
+        // The loop's monotonic clock, derived from the runtime it pumps (R311ly):
+        // the dispatcher's stamps all come from this one source, so there is no
+        // external epoch to match (contrast the unicast run_session's R263 clock).
+        let clock = CoopTime::new(runtime);
+
+        // Idle -> LinkOpening -> Running.
+        dispatcher.create();
+        dispatcher.notify_link_ready();
+
+        let tx_sn = MulticastTxConduits::new(sn::mask_from_res(params.seq_num_res));
+        // Emit the first JOIN beacon immediately, then every join_interval_ms;
+        // the sweep runs on its own tick_ms cadence (the busy-poll equivalents
+        // of the AP loop's JOIN-due check + select! sweep tick).
+        let next_join_ms = clock.now_monotonic_ms();
+        let next_sweep_ms = clock.now_monotonic_ms();
+        Self {
+            dispatcher,
+            params,
+            tick_ms,
+            max_iters,
+            runtime,
+            clock,
+            link,
+            driver,
+            pass,
+            tx_sn,
+            next_join_ms,
+            next_sweep_ms,
+            iter: 0,
+            #[cfg(feature = "reassembly")]
+            reasm: mcu_reassembly(),
+        }
+    }
+
+    /// Advance the session by one iteration. `Some(outcome)` means the session
+    /// is finished (left Running, stopped, lost its carrier, or hit the test
+    /// budget); `None` means call again.
+    ///
+    /// At most ONE inbound datagram is handled per step, as the synchronous
+    /// loop handled one per iteration. That is what bounds how long a group
+    /// under a flood can keep the thread from a sibling session: one datagram,
+    /// then the step returns and the task yields.
+    pub fn step<'s, F, G>(
+        &mut self,
+        on_event: &mut F,
+        next_tx: &mut G,
+        should_stop: Option<&mut (dyn FnMut() -> bool + 's)>,
+    ) -> Option<MulticastOutcome>
+    where
+        F: FnMut(IterationEvent<'_>),
+        G: FnMut() -> Option<MulticastTxItem>,
+    {
+        // The body below is the synchronous loop's, verbatim but for these
+        // names: each is a disjoint borrow of one field.
+        let pass = self.pass;
+        let runtime = self.runtime;
+        let link = self.link;
+        let params = self.params;
+        let tick_ms = self.tick_ms;
+        let max_iters = self.max_iters;
+        let dispatcher = &mut *self.dispatcher;
+        let driver = &mut *self.driver;
+        let clock = &self.clock;
+        let tx_sn = &mut self.tx_sn;
+        let next_join_ms = &mut self.next_join_ms;
+        let next_sweep_ms = &mut self.next_sweep_ms;
+        let iter = &mut self.iter;
+        #[cfg(feature = "reassembly")]
+        let reasm = &mut self.reasm;
+
         if dispatcher.session_state() != SessionFsmMulticastState::Running {
-            return MulticastOutcome::Stopped;
+            return Some(MulticastOutcome::Stopped);
         }
         // R2375 — GRACEFUL STOP: the §3.1 Running -> Stopped event, the MCU twin
         // of the AP loop's `select!` shutdown arm. POLLED at the top of the
@@ -664,7 +787,7 @@ where
         // visible, not `IterationLimit` because the budget happened to run out
         // on the same one. The budget stays the terminal for a caller that never
         // asks.
-        let stop_requested = match should_stop.as_mut() {
+        let stop_requested = match should_stop {
             Some(ask) => ask(),
             None => false,
         };
@@ -691,13 +814,15 @@ where
             // tell them apart).
             link.poll_loopback();
             link.check_timeouts();
-            runtime.run_until_idle();
+            if pass == ExecutorPass::Inline {
+                runtime.run_until_idle();
+            }
             // Drive the transition rather than just returning: `stop()` releases
             // the multicast link and clears the peer table, exactly as the
             // link-loss path does through the dispatcher. Returning the outcome
             // without it would leave a Stopped session still holding peers.
             dispatcher.stop();
-            return MulticastOutcome::Stopped;
+            return Some(MulticastOutcome::Stopped);
         }
         // R2390 — LINK LOSS: the third way out, and the one this loop did not
         // have. The AP twin gets `LinkEvent::Lost` from a socket recv error
@@ -728,23 +853,23 @@ where
             // (`udp_pipeline.rs:596`), which is what a dropped carrier is here:
             // not a peer's announced departure (`PeerClosed`) and not a lease
             // that ran out (`Timeout`).
-            return MulticastOutcome::LinkLost(LostCause::OsError);
+            return Some(MulticastOutcome::LinkLost(LostCause::OsError));
         }
         if let Some(limit) = max_iters {
-            if iter >= limit {
-                return MulticastOutcome::IterationLimit;
+            if *iter >= limit {
+                return Some(MulticastOutcome::IterationLimit);
             }
-            iter += 1;
+            *iter += 1;
         }
 
         let now = clock.now_monotonic_ms();
         // JoinEmit: multicast the self-advertising JOIN beacon when due.
-        if now >= next_join_ms {
+        if now >= *next_join_ms {
             // R311y227 — the DEFAULT conduit's live SNs (the single-conduit
             // beacon); a qos group additionally advertises per-priority ext_qos (C2).
-            let dgram = encode_join(params, &tx_sn);
+            let dgram = encode_join(params, tx_sn);
             driver.send_to_group(&dgram);
-            next_join_ms = now.saturating_add(params.join_interval_ms);
+            *next_join_ms = now.saturating_add(params.join_interval_ms);
         }
 
         // TxData: drain the application's pending outbound items, framing each
@@ -763,7 +888,7 @@ where
             feature = "liveliness-token"
         ))]
         while let Some(item) = next_tx() {
-            for dgram in multicast_tx_emit(item, &mut tx_sn, params).datagrams {
+            for dgram in multicast_tx_emit(item, tx_sn, params).datagrams {
                 driver.send_to_group(&dgram);
             }
         }
@@ -785,7 +910,9 @@ where
         // the RX ISR instead of poll_loopback.
         link.poll_loopback();
         link.check_timeouts();
-        runtime.run_until_idle();
+        if pass == ExecutorPass::Inline {
+            runtime.run_until_idle();
+        }
 
         // Inbound datagram? Classify + dispatch, then loop promptly for the
         // next (the busy-poll equivalent of the AP loop's RX select arm).
@@ -804,19 +931,19 @@ where
             #[cfg(feature = "reassembly")]
             dispatch_multicast_inbound_reassembling(
                 dispatcher,
-                &mut reasm,
+                reasm,
                 params,
                 bytes,
                 src,
                 now,
-                &mut on_event,
+                on_event,
                 // R2848 — `transport-stats` is never on an MCU lane, so this
                 // loop keeps no counts to record into.
                 &(),
             );
             #[cfg(not(feature = "reassembly"))]
             if let MulticastRxNext::Close =
-                dispatch_multicast_inbound(dispatcher, params, bytes, src, now, &mut on_event, &())
+                dispatch_multicast_inbound(dispatcher, params, bytes, src, now, on_event, &())
             {
                 // R311y784 — the MCU twin of the AP loop's announced departure.
                 // Both loops fire the identical event so an application's
@@ -826,7 +953,7 @@ where
                     on_event(IterationEvent::MulticastPeerLost(lost));
                 });
             }
-            continue;
+            return None;
         }
 
         // PeerSweep: evict peers past their advertised lease on the tick_ms
@@ -834,16 +961,121 @@ where
         // R311mh — under `reassembly` the deadline-reclaim + evict-with-chain-
         // abort tail is the shared multicast_rx sweep SSOT (the AP loop calls
         // the same); a non-reassembly loop calls the bare sweep.
-        if now >= next_sweep_ms {
+        if now >= *next_sweep_ms {
             #[cfg(feature = "reassembly")]
-            sweep_multicast_reassembling(dispatcher, &mut reasm, now, &mut on_event);
+            sweep_multicast_reassembling(dispatcher, reasm, now, on_event);
             #[cfg(not(feature = "reassembly"))]
             dispatcher.sweep_with(now, |_, lost| {
                 on_event(IterationEvent::MulticastPeerLost(lost));
             });
-            next_sweep_ms = now.saturating_add(tick_ms);
+            *next_sweep_ms = now.saturating_add(tick_ms);
         }
+        None
     }
+}
+
+/// What a multicast session OWNS when it runs as a task: everything
+/// [`run_multicast_session_with_shutdown`] borrows from its caller's stack,
+/// which a detached task cannot do.
+///
+/// Open-debt item 900. The heap profiles hold this in the task's future, so its
+/// memory comes from the image heap and is NOT a per-session budget: the
+/// per-session shape that later fixed-memory work keeps is the session's own
+/// static pools (the group socket's RX ring is one), not an allocator split.
+pub struct MulticastSession<const MAX_PEERS: usize> {
+    /// The §3.1 session FSM and the §3.2 peer table.
+    pub dispatcher: MulticastDispatcher<MAX_PEERS>,
+    /// The group socket, joined at bind.
+    pub driver: LwipMulticastDriver,
+    /// The protocol parameters this session advertises, its own zid among them.
+    pub params: MulticastParams,
+    /// The sweep cadence (see [`MulticastDriveConfig::tick_ms`]).
+    pub tick_ms: u64,
+    /// The test budget (see [`MulticastDriveConfig::max_iters`]); `None` in
+    /// production.
+    pub max_iters: Option<usize>,
+}
+
+/// The MCU multicast session AS A TASK — the `!Send` future a
+/// [`CoopLocalSet`] hosts beside other sessions.
+///
+/// Open-debt item 900. The multicast twin of
+/// [`wz_runtime_coop::session_drive::session_task`]: it runs
+/// [`MulticastPump::step`] once per executor pass and awaits [`yield_now`]
+/// between steps, so every other task in the set (a unicast client session,
+/// for one) gets a turn each time round. The synchronous
+/// [`run_multicast_session_with_shutdown`] runs the same step and keeps the
+/// thread until the session ends, which is why it cannot share a program with
+/// a second session.
+///
+/// `should_stop` is the same graceful-stop predicate the synchronous entry
+/// takes; pass `|| false` for a session that runs until its link is lost.
+pub async fn multicast_session_task<C, F, G, H, const MAX_PEERS: usize>(
+    runtime: CoopRuntime<C>,
+    link: Rc<LwipLink>,
+    session: MulticastSession<MAX_PEERS>,
+    mut on_event: F,
+    mut next_tx: G,
+    mut should_stop: H,
+) -> MulticastOutcome
+where
+    C: ClockSource,
+    F: FnMut(IterationEvent<'_>),
+    G: FnMut() -> Option<MulticastTxItem>,
+    H: FnMut() -> bool,
+{
+    let MulticastSession {
+        mut dispatcher,
+        mut driver,
+        params,
+        tick_ms,
+        max_iters,
+    } = session;
+    let mut pump = MulticastPump::new(
+        &mut dispatcher,
+        MulticastDriveConfig {
+            params: &params,
+            tick_ms,
+            max_iters,
+        },
+        &runtime,
+        &link,
+        &mut driver,
+    );
+    loop {
+        if let Some(outcome) = pump.step(&mut on_event, &mut next_tx, Some(&mut should_stop)) {
+            return outcome;
+        }
+        yield_now().await;
+    }
+}
+
+/// Spawn one MCU multicast session onto `local` and return its join handle —
+/// [`multicast_session_task`] on the local set's own runtime, so the session
+/// cannot ride a different runtime from the one the set pumps. The multicast
+/// twin of [`crate::session_drive::spawn_session`].
+pub fn spawn_multicast_session<C, F, G, H, const MAX_PEERS: usize>(
+    local: &CoopLocalSet<C>,
+    link: Rc<LwipLink>,
+    session: MulticastSession<MAX_PEERS>,
+    on_event: F,
+    next_tx: G,
+    should_stop: H,
+) -> CoopLocalJoinHandle<MulticastOutcome>
+where
+    C: ClockSource + 'static,
+    F: FnMut(IterationEvent<'_>) + 'static,
+    G: FnMut() -> Option<MulticastTxItem> + 'static,
+    H: FnMut() -> bool + 'static,
+{
+    local.spawn_local(multicast_session_task(
+        local.runtime().clone(),
+        link,
+        session,
+        on_event,
+        next_tx,
+        should_stop,
+    ))
 }
 
 #[cfg(test)]
@@ -951,6 +1183,91 @@ mod tests {
             dispatcher.active_peers(),
             1,
             "the inbound JOIN admitted the peer (our own beacon is zid-filtered)"
+        );
+
+        link.leave_multicast_group(group).expect("leave group");
+    }
+
+    /// Open-debt item 900 — the multicast session runs AS A TASK and gives the
+    /// thread back after every iteration, so a sibling task on the same local
+    /// set is polled once per pass for as long as the session runs.
+    ///
+    /// The synchronous loop could not share a program with a second session:
+    /// it keeps the thread until the session ends. The counts below are what
+    /// tell the two apart. With `max_iters = 12` the task needs THIRTEEN passes
+    /// (twelve iterations, then the one that meets the budget), and the sibling
+    /// must have taken a turn in each of them. A task that ran its loop inside
+    /// one poll finishes in the first pass with the sibling at one turn.
+    ///
+    /// The outcome is the synchronous loop's for the same fixture and budget
+    /// (`run_multicast_session_admits_a_peer_over_loopback`), because the two
+    /// drivers run one step. A distinct port (7470).
+    #[test]
+    fn the_multicast_session_runs_as_a_task_and_yields_after_every_iteration() {
+        use core::cell::Cell;
+
+        let (_serial, link) = lwip_test_link();
+        let link = Rc::new(link);
+        let group = SESSION_MULTICAST_GROUP_DEFAULT;
+        let port: u16 = 7470;
+        let mut socket = bind_session_multicast_rx(&link, group, port).expect("bind + join group");
+        let peer = params(&[0x01, 0x02, 0x03, 0x04]);
+        let peer_join = encode_join(
+            &peer,
+            &MulticastTxConduits::new(sn::mask_from_res(peer.seq_num_res)),
+        );
+        socket
+            .send_to(group, port, &peer_join)
+            .expect("inject peer JOIN");
+
+        let runtime = CoopRuntime::new(FrozenClock);
+        let local = CoopLocalSet::new(&runtime);
+
+        // The sibling: a task that counts the passes it was polled in.
+        let sibling_turns = Rc::new(Cell::new(0usize));
+        let turns = sibling_turns.clone();
+        let _sibling = local.spawn_local(async move {
+            loop {
+                turns.set(turns.get() + 1);
+                yield_now().await;
+            }
+        });
+
+        let handle = spawn_multicast_session(
+            &local,
+            link.clone(),
+            MulticastSession {
+                dispatcher: MulticastDispatcher::<4>::new(MulticastConfig::new(5_000)),
+                driver: LwipMulticastDriver::new(socket, group, port),
+                params: params(&[0xAA, 0xBB, 0xCC, 0xDD]),
+                tick_ms: 5,
+                max_iters: Some(12),
+            },
+            |_event| {},
+            || None,
+            || false,
+        );
+        std::assert!(!handle.is_finished(), "spawning queues the task");
+
+        let mut passes = 0usize;
+        while !handle.is_finished() && passes < 64 {
+            local.run_until_idle();
+            passes += 1;
+        }
+        std::assert_eq!(
+            passes,
+            13,
+            "twelve iterations and the budget check, one per pass -- a task \
+             that keeps the thread finishes in the first pass"
+        );
+        std::assert_eq!(
+            sibling_turns.get(),
+            passes,
+            "the sibling must be polled in every pass the session was"
+        );
+        std::assert_eq!(
+            local.block_on_local(handle).expect("not aborted"),
+            MulticastOutcome::IterationLimit
         );
 
         link.leave_multicast_group(group).expect("leave group");

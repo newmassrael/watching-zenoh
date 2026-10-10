@@ -10907,25 +10907,40 @@ layer_c1m_session_lwip() {
     # feature gate, so it runs in every lwIP leg. All eighteen legs of this lane
     # were RUN and each number here is the one its own run PRINTED
     # (12/13/14/13/16/12/14).
-    _runci_guarded_test "C1m multicast" 17 \
+    #
+    # Open-debt item 900 moved the same seven by ONE: the multicast session as a
+    # task (`the_multicast_session_runs_as_a_task_and_yields_after_every_iteration`)
+    # carries no `#[cfg]` of its own inside the module `transport-multicast`
+    # gates. Each number is the one its own run PRINTED (18/20/20/19/23/18/21).
+    _runci_guarded_test "C1m multicast" 18 \
         cargo test -p wz-session-lwip --features transport-multicast --quiet || return 1
-    _runci_guarded_test "C1m multicast+push" 19 \
+    _runci_guarded_test "C1m multicast+push" 20 \
         cargo test -p wz-session-lwip --features transport-multicast,codec-push --quiet || return 1
-    _runci_guarded_test "C1m multicast+liveliness" 19 \
+    _runci_guarded_test "C1m multicast+liveliness" 20 \
         cargo test -p wz-session-lwip --features transport-multicast,liveliness-token --quiet || return 1
-    _runci_guarded_test "C1m multicast+queryable" 18 \
+    _runci_guarded_test "C1m multicast+queryable" 19 \
         cargo test -p wz-session-lwip \
         --features transport-multicast,query-queryable,codec-response,codec-response-final \
         --quiet || return 1
-    _runci_guarded_test "C1m multicast maximal" 22 \
+    _runci_guarded_test "C1m multicast maximal" 23 \
         cargo test -p wz-session-lwip \
         --features transport-multicast,codec-push,codec-response,codec-response-final,liveliness-token,query-queryable \
         --quiet || return 1
-    _runci_guarded_test "C1m multicast+reassembly" 17 \
+    _runci_guarded_test "C1m multicast+reassembly" 18 \
         cargo test -p wz-session-lwip --features transport-multicast,reassembly --quiet || return 1
-    _runci_guarded_test "C1m multicast+fragmentation" 20 \
+    _runci_guarded_test "C1m multicast+fragmentation" 21 \
         cargo test -p wz-session-lwip \
         --features transport-multicast,transport-fragmentation,codec-push --quiet || return 1
+    # Open-debt item 900 — ONE program, TWO sessions: a client session to a
+    # router and a group session on one local set, with the four
+    # fault-isolation tests (`two_session_tests`). It is its own leg because
+    # it is the only combination that compiles both handshake halves beside
+    # the multicast loop. 24 = the multicast+push leg's 20 + those four, the
+    # number this command PRINTED.
+    _runci_guarded_test "C1m two sessions" 24 \
+        cargo test -p wz-session-lwip \
+        --features transport-multicast,session-unicast-open,session-unicast-accept,codec-push \
+        --quiet || return 1
     (cd crates \
         && cargo clippy -p wz-session-mcu --all-targets --quiet -- -D warnings \
         && cargo clippy -p wz-session-mcu --all-targets \
@@ -10955,7 +10970,10 @@ layer_c1m_session_lwip() {
             --quiet -- -D warnings \
         && cargo clippy -p wz-session-lwip --all-targets --features transport-multicast,reassembly --quiet -- -D warnings \
         && cargo clippy -p wz-session-lwip --all-targets \
-            --features transport-multicast,transport-fragmentation,codec-push --quiet -- -D warnings)
+            --features transport-multicast,transport-fragmentation,codec-push --quiet -- -D warnings \
+        && cargo clippy -p wz-session-lwip --all-targets \
+            --features transport-multicast,session-unicast-open,session-unicast-accept,codec-push \
+            --quiet -- -D warnings)
 }
 
 # ─── Layer C1n — wz-mcu-session-acceptor isolated host e2e + clippy ──
@@ -12166,6 +12184,10 @@ layer_c1bz_docs_resolve() {
     # lane's command at `14150d07` (485) and on the tree (484) differ by exactly
     # one: the `add_storage` link that opened the module doc, broken since
     # before R3154 and fixed by the same rewrite.
+    # Open-debt item 900 -- wz-session-lwip 4 -> 3, by removal, diffed: the
+    # multicast drive loop now imports `MulticastParams` (the task form owns
+    # one), so the module doc's `MulticastParams::join_interval_ms` resolves.
+    # The other three error lines are unchanged.
     budget="
         wz:2
         wz-ap-demo:25
@@ -12178,7 +12200,7 @@ layer_c1bz_docs_resolve() {
         wz-runtime-coop:12
         wz-runtime-tokio:484
         wz-session-core:510
-        wz-session-lwip:4
+        wz-session-lwip:3
         wz-switchboard-codegen:8
         zenoh-pico-sys:3
     "
