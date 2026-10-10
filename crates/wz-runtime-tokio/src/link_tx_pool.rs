@@ -474,6 +474,13 @@ impl TxPools {
         self.classes.iter().map(|c| c.capacity()).sum()
     }
 
+    /// R3250 — how many slots this link may hold at once, over every class: the
+    /// sum of the class budgets, so the most batches its queue can have on its
+    /// lanes (each batch holds one slot).
+    pub fn budget(&self) -> usize {
+        self.classes.iter().map(|c| c.budget()).sum()
+    }
+
     /// Counters over every class.
     pub fn stats(&self) -> TxPoolStats {
         self.classes
@@ -975,6 +982,28 @@ mod queue {
         assert_eq!(free(&tx), SLOT_COUNT);
     }
 
+    /// R3250 — every lane already has room for as many entries as the pool has
+    /// slots, so a lane holding the whole pool (a burst the writer has not
+    /// caught up with) never grew to hold it: its capacity is the one it had
+    /// before the first frame.
+    #[test]
+    fn a_lane_holds_the_whole_pool_without_growing() {
+        let (tx, _rx) = outbound_channel_pooled();
+        let reserved = tx.lane_capacities();
+        assert!(
+            reserved.iter().all(|&room| room >= SLOT_COUNT),
+            "every lane can hold every slot: {reserved:?}"
+        );
+        let lends: Vec<_> = (0..SLOT_COUNT)
+            .map(|_| tx.lend(P, SLOT_SIZE).expect("a whole slot each"))
+            .collect();
+        assert_eq!(free(&tx), 0, "one lane holds the whole pool");
+        assert_eq!(tx.lane_capacities(), reserved, "and it did not grow");
+        for lend in lends {
+            tx.abort_lend(lend);
+        }
+    }
+
     /// Past the pool a frame does not allocate and is not lost: the byte door
     /// WAITS for the writer to free a slot, and is released by it; and a sender
     /// waiting when the queue closes is told so.
@@ -1164,6 +1193,50 @@ mod datagram {
             drop(wire);
         }
         assert_eq!(free(&tx), tx.tx_pool_capacity().expect("pooled"));
+    }
+
+    /// R3250 — the lanes' room follows the slot budget the shape sets: a session
+    /// without QoS has one lane, with room for its whole budget (3 small + 2
+    /// large), which it fills without growing; the lanes it no longer uses keep
+    /// nothing. With QoS every lane has room for the whole budget again.
+    #[test]
+    fn the_lane_room_follows_the_slot_budget() {
+        let (tx, mut rx) = outbound_channel_datagram();
+        tx.reshape(udp_shape());
+        let lane = P.wire_byte() as usize;
+        let reserved = tx.lane_capacities();
+        assert!(
+            reserved[lane] >= 5,
+            "the one lane holds the budget: {reserved:?}"
+        );
+        for (i, &room) in reserved.iter().enumerate() {
+            if i != lane {
+                assert_eq!(room, 0, "lane {i} is unreachable without QoS");
+            }
+        }
+        let lends: Vec<_> = (0..5)
+            .map(|_| tx.lend(P, 64).expect("within the budget"))
+            .collect();
+        assert_eq!(
+            tx.lane_capacities(),
+            reserved,
+            "the full budget did not grow it"
+        );
+        for lend in lends {
+            tx.abort_lend(lend);
+        }
+        while let Some((_, wire)) = rx.try_recv_wire_tagged() {
+            drop(wire);
+        }
+        tx.reshape(TxQueueShape {
+            qos: true,
+            ..udp_shape()
+        });
+        let budget = 8 * (3 + 2);
+        assert!(
+            tx.lane_capacities().iter().all(|&room| room >= budget),
+            "with QoS every lane can hold the whole budget"
+        );
     }
 
     /// A lent datagram is a slot of its own, written in place and handed to the

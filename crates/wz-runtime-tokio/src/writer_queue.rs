@@ -464,6 +464,49 @@ impl LaneState {
         if let Some(pool) = self.pool.as_mut() {
             pool.size_budgets(&bounds[..lanes]);
         }
+        self.reserve_lanes_for_the_pool();
+    }
+
+    /// R3250 — give every lane a frame can be queued on room for as many
+    /// entries as the pool lets this link hold slots (`TxPools::budget`), so
+    /// queueing a slot never grows a lane. A pooled lane's entries are its
+    /// slots, one each, and any one lane may hold every slot the link may take,
+    /// so that budget is the most entries a lane can have: reserved here, the
+    /// lend and the byte door push onto a lane that never reallocates. Left to
+    /// grow, a lane reallocated the first time a slower writer let it reach a
+    /// depth it had not reached before, which is an allocation on the transmit
+    /// path at the moment of a burst (measured: one in a burst past the slot
+    /// budget, at the lane's first push past four entries).
+    ///
+    /// Run whenever the budgets are sized (at the pool's arrival and at every
+    /// reshape), so the room follows the budget. A lane no frame can reach any
+    /// more (the others, once the session runs one lane) keeps only what it
+    /// still holds. A heap frame on a pooled queue (`send`, the websocket byte
+    /// door) is outside this bound: it is an allocation of its own already.
+    #[cfg(feature = "runtime-zero-copy")]
+    fn reserve_lanes_for_the_pool(&mut self) {
+        let Some(budget) = self.pool.as_ref().map(TxPools::budget) else {
+            return;
+        };
+        let single_lane = self.single_lane;
+        let default = Priority::DEFAULT.wire_byte() as usize;
+        for (i, lane) in self.lanes.iter_mut().enumerate() {
+            let reachable = !single_lane || i == default;
+            let room = if reachable { budget } else { 0 };
+            let want = room.max(lane.len());
+            if lane.capacity() < want {
+                lane.reserve_exact(want - lane.len());
+            } else {
+                lane.shrink_to(want);
+            }
+        }
+    }
+
+    /// Each lane's room for entries, for a test to see that queueing up to the
+    /// pool's budget does not grow it.
+    #[cfg(all(test, feature = "runtime-zero-copy"))]
+    fn lane_capacities(&self) -> [usize; Priority::NUM] {
+        std::array::from_fn(|i| self.lanes[i].capacity())
     }
 
     /// Take the next frame, highest priority first, after releasing the one
@@ -918,6 +961,17 @@ impl OutboundTx {
         st.pool
             .as_ref()
             .map(|pool| (pool.stats(), pool.free_count()))
+    }
+
+    /// Each lane's room for entries, read under the lock (a test's view of
+    /// `LaneState::reserve_lanes_for_the_pool`).
+    #[cfg(test)]
+    pub(crate) fn lane_capacities(&self) -> [usize; Priority::NUM] {
+        self.shared
+            .state
+            .lock()
+            .expect("outbound lanes poisoned")
+            .lane_capacities()
     }
 
     /// Slots in the pool, over every class. `None` on a heap queue.
