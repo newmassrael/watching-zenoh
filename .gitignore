@@ -57,6 +57,9 @@ deploy/mcu-multicast-e2e/target-loopback/
 # R311y27 — deploy/mcu-freertos-demo is the standalone FreeRTOS-profile
 # workspace (boot e2e; Layer Q.frt). Same target/ policy.
 deploy/mcu-freertos-demo/target/
+# Open-debt item 900 — Layer Q.frt2 builds the same package's two-session bin
+# against another lwIP port, in its own CARGO_TARGET_DIR (Q.6's reason).
+deploy/mcu-freertos-demo/target-two-session/
 # R2838 — deploy/mcu-admin-node is the standalone mps2 Ethernet firmware a
 # zenoh host reconfigures. Same target/ policy.
 deploy/mcu-admin-node/target/

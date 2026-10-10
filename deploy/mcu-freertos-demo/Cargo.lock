@@ -402,7 +402,9 @@ dependencies = [
  "panic-semihosting",
  "portable-atomic",
  "wz",
+ "wz-codecs",
  "wz-mcu-session-acceptor",
+ "wz-mcu-stack",
  "wz-session-core",
 ]
 
@@ -932,6 +934,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "wz-mcu-stack"
+version = "0.1.0"
+
+[[package]]
 name = "wz-runtime-coop"
 version = "0.1.0"
 dependencies = [
@@ -961,11 +967,14 @@ version = "0.1.0"
 dependencies = [
  "getrandom",
  "hashbrown",
+ "libc",
  "log",
  "portable-atomic",
  "sce-forge-runtime",
  "sce-rust-runtime",
+ "socket2",
  "tokio",
+ "windows-sys",
  "wz-codecs",
  "wz-runtime-core",
  "wz-session-core",

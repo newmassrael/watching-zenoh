@@ -78,6 +78,18 @@ extern "C" {
     pub fn pvPortMalloc(x_wanted_size: usize) -> *mut c_void;
     /// Free a block from [`pvPortMalloc`].
     pub fn vPortFree(pv: *mut c_void);
+    /// heap_4's bytes free now. Zero until the first [`pvPortMalloc`]
+    /// initialises the heap, so a board reads it after one allocation.
+    pub fn xPortGetFreeHeapSize() -> usize;
+    /// heap_4's low-water mark: the fewest bytes that were ever free since
+    /// the heap was initialised (the heap's peak use, measured by the kernel).
+    pub fn xPortGetMinimumEverFreeHeapSize() -> usize;
+
+    /// The fewest WORDS of `x_task`'s stack that were ever unused (`NULL` =
+    /// the calling task), read from the fill the kernel paints new stacks
+    /// with. Needs `INCLUDE_uxTaskGetStackHighWaterMark = 1` in the deploy's
+    /// `FreeRTOSConfig.h`, or the kernel does not compile it.
+    pub fn uxTaskGetStackHighWaterMark(x_task: TaskHandle_t) -> UBaseType_t;
 
     /// ARMv7-M port exception handlers — the deploy crate's cortex-m-rt vector
     /// table routes `SVCall` / `PendSV` / `SysTick` to these (indirect routing;

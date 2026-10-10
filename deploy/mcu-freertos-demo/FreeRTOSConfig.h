@@ -93,6 +93,9 @@
 #define INCLUDE_xTaskGetCurrentTaskHandle        1
 #define INCLUDE_uxTaskPriorityGet                0
 #define INCLUDE_vTaskPrioritySet                 0
+/* The two-session image reads its task's stack peak through this (open-debt
+ * item 900); the image that does not call it links none of it. */
+#define INCLUDE_uxTaskGetStackHighWaterMark      1
 
 #define configASSERT( x )            \
     if( ( x ) == 0 )                 \

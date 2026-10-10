@@ -881,6 +881,11 @@ _runci_guarded_test() {
 # shows the margin rather than only a failing one, and for a case passed
 # `stack` it turns a PASS WITHOUT the line into a FAIL: a binary that stopped
 # measuring would otherwise read exactly like one that measured and fit.
+#
+# Open-debt item 900 — a binary that witnesses several scenarios prints one
+# `witness: ` line per scenario and may print `heap: peak N of M bytes`; those
+# lines are kept on PASS too (indented under it), so the lane log says what
+# was witnessed and not only that the exit code was 0.
 run_qemu_case() {
     local label="$1" cpu="$2" machine="$3" kernel="$4" expect="${5:-}"
     local icount_args=()
@@ -918,6 +923,7 @@ run_qemu_case() {
             return 1
         fi
         echo "  ${label} PASS${stack_line:+ (${stack_line})}"
+        grep -E '^(witness|heap): ' "$qlog" | sed 's/^/    | /' || true
         rm -f "$qlog"
         return 0
     else
@@ -15976,6 +15982,42 @@ install qemu-system-arm" || fail=1
             fi
         else
             echo "  Q.frt build mcu-freertos-demo thumbv7m-none-eabi FAIL" >&2
+            fail=1
+        fi
+
+        # ── Q.frt2 — two sessions in ONE FreeRTOS task (open-debt item 900) ──
+        #
+        # The same board and FreeRTOSConfig.h, the image's second bin
+        # (`--features two-session`): a unicast client session dialling a
+        # router fixture and a multicast group session admitting a member, on
+        # one CoopLocalSet inside the one task, over lwIP loopback with
+        # multicast routed over the loop netif (the cross-test-mcast port Q.6
+        # boots). It runs the four fault-isolation scenarios of the host
+        # baseline (crates/wz-session-lwip/src/two_session_tests.rs) on target,
+        # one `witness:` line each, and exits 0 only when all four held, no
+        # scenario left heap allocated, and the task's stack peak left
+        # wz_mcu_stack::MARGIN_BYTES (the `stack` verdict). Its own target dir,
+        # for the reason Q.6 has one: the two lanes' lwIP ports differ.
+        if WZ_FREERTOS_CONFIG="$frt_cfg" WZ_LWIP_PORT="$(realpath crates/lwip-sys/port/cross-test-mcast)" \
+            CARGO_TARGET_DIR="$repo_root/deploy/mcu-freertos-demo/target-two-session" \
+            cargo build --release \
+            --manifest-path deploy/mcu-freertos-demo/Cargo.toml \
+            --target thumbv7m-none-eabi --features two-session \
+            --bin mcu-freertos-two-session --quiet; then
+            echo "  Q.frt2 build mcu-freertos-two-session thumbv7m-none-eabi OK"
+            any_built=1
+            if [[ "$has_qemu" -ne 1 ]]; then
+                _q_unavailable "Q.frt2 run" "qemu-system-arm not on PATH" \
+                    || fail=1
+            elif ! run_qemu_case \
+                "Q.frt2 run mcu-freertos-two-session via qemu-system-arm mps2-an385" \
+                cortex-m3 mps2-an385 \
+                "deploy/mcu-freertos-demo/target-two-session/thumbv7m-none-eabi/release/mcu-freertos-two-session" \
+                stack; then
+                fail=1
+            fi
+        else
+            echo "  Q.frt2 build mcu-freertos-two-session thumbv7m-none-eabi FAIL" >&2
             fail=1
         fi
     fi

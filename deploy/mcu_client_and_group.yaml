@@ -6,7 +6,9 @@
 # NO_SYS lwIP). Both sessions run as tasks on one local set
 # (`wz_session_lwip::spawn_session` + `spawn_multicast_session`), so neither
 # holds the thread from the other; the four fault-isolation tests in
-# `crates/wz-session-lwip/src/two_session_tests.rs` are the baseline.
+# `crates/wz-session-lwip/src/two_session_tests.rs` are the baseline, and
+# Layer Q.frt2 runs the same four in one FreeRTOS task on QEMU
+# (deploy/mcu-freertos-demo, bin mcu-freertos-two-session).
 #
 # This is a FOCUSED profile like mcu_minimal.yaml: it declares what a
 # two-session machine adds (the `zid`, the `sessions:` list, one link per
@@ -21,7 +23,10 @@
 # session allocates from the one FreeRTOS heap_4 image heap, so a session that
 # exhausts it exhausts it for both. `heap_budget_bytes` is reserved and
 # refused; a session's budget is the shape of its static pools, which is what
-# the fixed-memory (no-heap) profiles will keep.
+# the fixed-memory (no-heap) profiles will keep. Q.frt2 prints what heap_4
+# gave each link open (the unicast and the multicast receive pools) and the
+# image's heap and task-stack peaks; a two-session task needs more than the
+# one-session image's 16 KiB stack.
 
 machines:
   mcu_node:
