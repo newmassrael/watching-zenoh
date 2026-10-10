@@ -13,7 +13,7 @@
 //!   byte door; each datagram the peer reads is the payload, byte for byte, as
 //!   the heap path sends it. NOTHING is allocated.
 //! - The queue alone, filled to the link's whole slot budget: a lane holding
-//!   every slot the link may take allocates nothing either (R3250). The UDP
+//!   every slot the link may take allocates nothing either (R3247). The UDP
 //!   burst reaches that depth only when the writer happens to lag; this reaches
 //!   it every time.
 //! - QUIC datagram, at the library seam: quinn's `send_datagram` takes
@@ -25,7 +25,7 @@
 //!   one copy), and the byte door hands its vector straight in (one
 //!   allocation); exactly one per message either way, counted here.
 //!
-//! R3250 — the count is ATTRIBUTED to the measurement's own threads, not
+//! R3247 — the count is ATTRIBUTED to the measurement's own threads, not
 //! process-wide: a [`Measurement`] counts what its test thread allocates and
 //! what the threads of the runtime its writer task runs on allocate (a runtime
 //! built for it, each of whose threads takes the measurement's tally as it
@@ -184,8 +184,8 @@ fn take(rx: &mut OutboundRx) -> WireFrame {
     rx.try_recv_wire_tagged().expect("queued").1
 }
 
-/// R3250 — a lane holding the link's whole slot budget allocates nothing. The
-/// lane is an entry per slot, and before R3250 it grew the first time it held
+/// R3247 — a lane holding the link's whole slot budget allocates nothing. The
+/// lane is an entry per slot, and before R3247 it grew the first time it held
 /// more entries than it ever had, which on a UDP link is whenever a burst
 /// meets a writer lagging further than it had before: measured as one
 /// allocation in the UDP burst below, about one run in three on two loaded

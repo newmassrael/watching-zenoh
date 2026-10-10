@@ -474,7 +474,7 @@ impl TxPools {
         self.classes.iter().map(|c| c.capacity()).sum()
     }
 
-    /// R3250 — how many slots this link may hold at once, over every class: the
+    /// R3247 — how many slots this link may hold at once, over every class: the
     /// sum of the class budgets, so the most batches its queue can have on its
     /// lanes (each batch holds one slot).
     pub fn budget(&self) -> usize {
@@ -982,7 +982,7 @@ mod queue {
         assert_eq!(free(&tx), SLOT_COUNT);
     }
 
-    /// R3250 — every lane already has room for as many entries as the pool has
+    /// R3247 — every lane already has room for as many entries as the pool has
     /// slots, so a lane holding the whole pool (a burst the writer has not
     /// caught up with) never grew to hold it: its capacity is the one it had
     /// before the first frame.
@@ -1195,7 +1195,7 @@ mod datagram {
         assert_eq!(free(&tx), tx.tx_pool_capacity().expect("pooled"));
     }
 
-    /// R3250 — the lanes' room follows the slot budget the shape sets: a session
+    /// R3247 — the lanes' room follows the slot budget the shape sets: a session
     /// without QoS has one lane, with room for its whole budget (3 small + 2
     /// large), which it fills without growing; the lanes it no longer uses keep
     /// nothing. With QoS every lane has room for the whole budget again.

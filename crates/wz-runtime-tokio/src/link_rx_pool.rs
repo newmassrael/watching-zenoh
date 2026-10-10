@@ -112,7 +112,7 @@ pub fn heap_pool() -> Box<crate::session_rx_pool_ap::SessionRxPoolAp> {
 
 /// One link-RX slot table, plus the lock that serialises its edges.
 ///
-/// R3250 -- moved here from `link_rx_arena`, because the node's table stopped
+/// R3255 -- moved here from `link_rx_arena`, because the node's table stopped
 /// having one reader: the stream read halves fill it through that module's
 /// arena, and a UDP link's datagrams too large for the small receive class
 /// (`link_rx_datagram`) are received into it. Both reach the ONE table through

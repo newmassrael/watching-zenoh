@@ -165,7 +165,7 @@ pub mod link_rx_pool;
 #[cfg(all(feature = "runtime-zero-copy", feature = "transport-link-tcp"))]
 pub mod link_rx_arena;
 
-/// R3250 — `sources/network/session_rx_pool_ap_small.scxml`, the small class a
+/// R3255 — `sources/network/session_rx_pool_ap_small.scxml`, the small class a
 /// UDP link's datagrams are received into (the large class is the node's
 /// link-RX table, [`session_rx_pool_ap`]). Gated like its one consumer.
 #[cfg(all(feature = "runtime-zero-copy", feature = "transport-link-udp"))]
@@ -181,7 +181,7 @@ pub mod session_rx_pool_ap_small {
     ));
 }
 
-// R3250 — a UDP link's datagrams received INTO a slot of the node's receive
+// R3255 — a UDP link's datagrams received INTO a slot of the node's receive
 // pool and handed to the session as that slot. No `///` here: rustdoc would
 // merge it with the module's `//!` block and resolve the result in this outer
 // scope (see `link_rx_window`).
@@ -3423,7 +3423,7 @@ impl LinkDriver for UdpDriver {
                 }
             }
         };
-        // R3250 — under `runtime-zero-copy` the datagram is received INTO a slot
+        // R3255 — under `runtime-zero-copy` the datagram is received INTO a slot
         // of the node's receive pool (the RFC 5.E lifecycle this read used to
         // defer to "production tuning") and the session is handed that slot,
         // with the datagram's source, as below.

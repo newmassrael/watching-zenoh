@@ -270,7 +270,7 @@ pub struct NewUdpFace {
     /// The datagram source — a REAL IP peer (contrast the unix/vsock/unixpipe
     /// families' anonymous accept), so a udp accept is `AcceptedPeer::Ip`.
     pub peer: SocketAddr,
-    /// This src's demultiplexed inbound datagrams (first one pre-queued). R3250
+    /// This src's demultiplexed inbound datagrams (first one pre-queued). R3255
     /// — each is the frame's bytes as the pump read them: under
     /// `runtime-zero-copy` a range of the receive-pool slot the datagram landed
     /// in, otherwise an owned copy (`RxBytes` moves either across the channel).
@@ -393,7 +393,7 @@ async fn udp_demux_task(socket: Arc<UdpSocket>, new_face_tx: mpsc::UnboundedSend
     #[cfg(not(feature = "runtime-zero-copy"))]
     let mut buf = vec![0u8; MAX_UDP_PAYLOAD];
     loop {
-        // R3250 — under `runtime-zero-copy` the datagram is received INTO a slot
+        // R3255 — under `runtime-zero-copy` the datagram is received INTO a slot
         // of the node's receive pool and the face is handed that slot; a datagram
         // no slot was free for was consumed and counted by the pool (`Ok(None)`).
         // Otherwise the pump reads into its own buffer and copies the datagram
@@ -622,7 +622,7 @@ impl LinkDriver for UdpReadDriver {
                     },
                 }
             }
-            // R3250 — under `runtime-zero-copy` the datagram is received INTO a
+            // R3255 — under `runtime-zero-copy` the datagram is received INTO a
             // slot of the node's receive pool and the session is handed that slot.
             #[cfg(feature = "runtime-zero-copy")]
             UdpRxSource::Socket(socket) => {

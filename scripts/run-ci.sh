@@ -12667,7 +12667,7 @@ layer_c1bq_zero_copy_arena() {
     (( n > 0 )) || {
         echo "  C1bq FAIL: the fragment / reassembly allocation suites ran no test"; echo "$out"; return 1; }
     tests=$((tests + n))
-    # R3250 -- the datagram RECEIVE over the node's pool (the dial, accept and
+    # R3255 -- the datagram RECEIVE over the node's pool (the dial, accept and
     # group reads over real loopback sockets). Its unit tests are in the
     # `link_rx_` filter above; this is the counting-allocator proof.
     out="$(cd crates && cargo test -p wz-runtime-tokio \

@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later OR LicenseRef-watching-zenoh-Commercial
 // SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
 
-//! R3250 — ARCHITECTURE section 9.2 on the AP DATAGRAM receive: a UDP datagram
+//! R3255 — ARCHITECTURE section 9.2 on the AP DATAGRAM receive: a UDP datagram
 //! is received INTO a slot of the node's receive pool and handed to the session
 //! as that slot.
 //!

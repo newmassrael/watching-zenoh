@@ -1228,7 +1228,7 @@ impl RxStorage for Vec<u8> {
     }
 }
 
-/// R3250 -- a pool that lends its slots to inbound frames and COUNTS the
+/// R3255 -- a pool that lends its slots to inbound frames and COUNTS the
 /// references to each slot itself, so a frame handed up costs no allocation.
 ///
 /// [`RxStorage`] shares a storage through an `Arc` of its own, which is one
@@ -1313,7 +1313,7 @@ enum RxRepr {
         start: usize,
         end: usize,
     },
-    /// R3250 -- a range of a pool slot whose references the pool counts.
+    /// R3255 -- a range of a pool slot whose references the pool counts.
     #[cfg(feature = "rx-shared-bytes")]
     Leased {
         lease: SlotLease,
@@ -1323,7 +1323,7 @@ enum RxRepr {
 }
 
 impl RxBytes {
-    /// R3250 -- the `range` of slot `slot` of `home`, ADOPTING one reference the
+    /// R3255 -- the `range` of slot `slot` of `home`, ADOPTING one reference the
     /// home has already counted for the caller: the count the pool set when it
     /// handed the slot over is this value's, and dropping it is what releases it.
     /// `None` when the slot does not hold that range, and the adopted reference
@@ -1385,7 +1385,7 @@ impl RxBytes {
         matches!(self.0, RxRepr::Shared { .. } | RxRepr::Leased { .. })
     }
 
-    /// R3250 -- whether the bytes are a range of a pool slot whose references the
+    /// R3255 -- whether the bytes are a range of a pool slot whose references the
     /// pool counts ([`Self::leased`]).
     #[cfg(feature = "rx-shared-bytes")]
     pub fn is_leased(&self) -> bool {
@@ -2156,7 +2156,7 @@ mod tests {
         }
     }
 
-    /// R3250 -- A LEASED RANGE IS COUNTED BY ITS HOME: the adopted reference,
+    /// R3255 -- A LEASED RANGE IS COUNTED BY ITS HOME: the adopted reference,
     /// each clone and each sub-range is one, the bytes are read where the slot
     /// is, and the slot goes home once, when the last of them drops.
     #[cfg(feature = "rx-shared-bytes")]
@@ -2196,7 +2196,7 @@ mod tests {
         );
     }
 
-    /// R3250 -- a range the slot does not hold is refused, and the reference it
+    /// R3255 -- a range the slot does not hold is refused, and the reference it
     /// adopted is released then rather than stranded.
     #[cfg(feature = "rx-shared-bytes")]
     #[test]

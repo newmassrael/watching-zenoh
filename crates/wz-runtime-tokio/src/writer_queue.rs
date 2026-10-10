@@ -467,7 +467,7 @@ impl LaneState {
         self.reserve_lanes_for_the_pool();
     }
 
-    /// R3250 — give every lane a frame can be queued on room for as many
+    /// R3247 — give every lane a frame can be queued on room for as many
     /// entries as the pool lets this link hold slots (`TxPools::budget`), so
     /// queueing a slot never grows a lane. A pooled lane's entries are its
     /// slots, one each, and any one lane may hold every slot the link may take,
