@@ -1,0 +1,80 @@
+# deploy/mcu_client_and_group.yaml — one MCU program, two local sessions.
+#
+# Open-debt item 900. A client session dials a router, and a peer session
+# joins a multicast group, in ONE program on the FreeRTOS heap profile
+# (wz-runtime-freertos: the cooperative executor inside one FreeRTOS task,
+# NO_SYS lwIP). Both sessions run as tasks on one local set
+# (`wz_session_lwip::spawn_session` + `spawn_multicast_session`), so neither
+# holds the thread from the other; the four fault-isolation tests in
+# `crates/wz-session-lwip/src/two_session_tests.rs` are the baseline.
+#
+# This is a FOCUSED profile like mcu_minimal.yaml: it declares what a
+# two-session machine adds (the `zid`, the `sessions:` list, one link per
+# session) and inherits everything else from mcu_target.yaml's mcu_node.
+# `scripts/lib/deploy_sessions.py` documents and validates every key below;
+# nothing generates code from it yet (the R50 deploy-topology carry).
+#
+# MEMORY. With `buffer_pools` omitted a session gets the profile's default
+# pools, ONE INSTANCE PER SESSION, so two sessions double that SRAM. The
+# multicast receive pool alone is 32 x 1536 bytes (~49 KB; its queue holds 31
+# datagrams). The heap profiles have NO per-session heap budget: every
+# session allocates from the one FreeRTOS heap_4 image heap, so a session that
+# exhausts it exhausts it for both. `heap_budget_bytes` is reserved and
+# refused; a session's budget is the shape of its static pools, which is what
+# the fixed-memory (no-heap) profiles will keep.
+
+machines:
+  mcu_node:
+    platform:
+      class: mcu
+      os: freertos
+      soc: mps2_an385                  # the QEMU board Layer Q.frt boots.
+      core: cortex_m3
+
+    # The machine's default zenoh id. A unicast session and a multicast
+    # session may share it (they are different transports); two sessions of
+    # one transport may not, and the validator names both.
+    zid: a1b2c3d4
+
+    links:
+      udp_router:
+        bind: "0.0.0.0:0"              # ephemeral; the client dials out.
+        driver: lwip_udp
+        mtu_bytes: 1472
+      udp_group:
+        bind: "224.0.0.224:7446"
+        driver: lwip_udp
+        mtu_bytes: 1472
+
+    limits:
+      multicast_peer_table: 8
+      local_subscriptions: 16
+      local_queryables: 8
+      pending_queries: 8
+      tx_queue: 16
+
+    sessions:                          # one entry per session, in start order
+      - name: to_router
+        mode: client
+        transport: unicast
+        link: udp_router
+        connect:
+          endpoints: ["udp/192.0.2.10:7447"]
+        limits: { pending_queries: 4 }
+        buffer_pools:
+          session_rx_pool: { ref: session_rx_pool_mcu }       # 16 x 1536
+          reassembly_pool: { ref: reassembly_pool_mcu }
+      - name: group
+        mode: peer
+        transport: multicast
+        link: udp_group
+        group:
+          # No `#iface=` tail: upstream's default, the first non-loopback
+          # multicast interface. On this MCU a tail is honoured only when the
+          # link declares the same `netif:`.
+          endpoint: "udp/224.0.0.224:7446"
+          join_interval_ms: 2500
+          lease_ms: 10000
+        limits: { multicast_peer_table: 8, local_subscriptions: 8 }
+        buffer_pools:
+          session_rx_pool: { ref: session_rx_pool_mcu_multicast }   # 32 x 1536

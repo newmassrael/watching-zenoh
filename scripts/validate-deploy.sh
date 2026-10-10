@@ -44,11 +44,17 @@ fi
 fail=0
 for yaml_file in "$DEPLOY_DIR"/*.yaml; do
     name="$(basename "$yaml_file")"
-    if python3 - "$yaml_file" <<'PYTHON'
+    if python3 - "$yaml_file" "$ROOT" <<'PYTHON'
 import sys
+from pathlib import Path
+
 import yaml
 
 path = sys.argv[1]
+# Open-debt item 900 — a machine's `zid` and `sessions:` list are judged by
+# the one module that documents them; a refusal names the key it refuses.
+sys.path.insert(0, str(Path(sys.argv[2]) / "scripts" / "lib"))
+import deploy_sessions  # noqa: E402
 with open(path, "r", encoding="utf-8") as f:
     try:
         doc = yaml.safe_load(f)
@@ -85,6 +91,11 @@ for machine_name, machine in doc["machines"].items():
                 f"  machine {machine_name!r}: platform.{required} missing"
             )
             sys.exit(1)
+    refusals = deploy_sessions.validate_machine(machine_name, machine, Path(sys.argv[2]))
+    if refusals:
+        for refusal in refusals:
+            print(f"  {refusal}")
+        sys.exit(1)
 print("  OK")
 sys.exit(0)
 PYTHON

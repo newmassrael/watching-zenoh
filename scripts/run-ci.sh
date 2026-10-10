@@ -14096,6 +14096,9 @@ layer_d_validate_deploy() {
         echo "Layer D SKIP (python3-yaml not installed)"
         return 0
     fi
+    # Open-debt item 900 — the `sessions:` rules' own control group first: a
+    # validator that stopped refusing would pass every manifest in deploy/.
+    python3 scripts/lib/deploy_sessions.py --selftest >/dev/null || return 1
     bash scripts/validate-deploy.sh
 }
 
