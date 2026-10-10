@@ -269682,6 +269682,92 @@
         "7. Hosted only: new C1m legs (rx fragment in place x2, rx query x3), moved counts (C1m rx frame copying 3, in place 4 and fixed 4, C1ad 3), the widened wz-runtime-coop census leg; the Zephyr image build with rx-in-place was not built here."
       ]
     },
+    "Round 3254": {
+      "decision_summary": "B3, its third part: Request and Response records on the MCU in-place path were still decoded owned (a Box each, keyexpr and payload copies, a resolved String). Re-measured on the lwIP harness, fixed backing, in place: 4 allocations per query, 5 per reply. Built: the record walk also lends a Request and a Response (judged by the owned admission rule, now shared generic helpers); the queryable registry dispatches a lent Request through the SAME fan-out as the owned one (fire_projection over a QueryProjection), owing its Final on the same rule; the reply registry delivers a lent Response as a ReplyView through the same matcher. A Query with a sliced value, a sliced Put reply, or a keyexpr past the bounded buffer takes the owned projection. The responder now borrows the query keyexpr until a reply is staged (QueryResponder::new keeps its owned signature). After: 0 per query and per reply on the fixed backing; the matcher's 2 scratch lists per query on the growable one.",
+      "changes_bullets": [
+        "Commit 18154ad1 feat(session-core): a Request and a Response are read where they lie",
+        "network_message.rs: PushForm renamed RecordForm; WalkedRecord::Request/Response; lend_record with one out-of-line decoder per kind (lend_push/lend_request/lend_response, so a wide decoded record occupies the stack only while it is handed over); RequestBodyChain/ResponseBodyChain + judge_request_chains/judge_response_chains shared by NetworkMessage::ext_admission and request_view_admission/response_view_admission; walk test for both kinds and their refusals.",
+        "driver_loop.rs: InPlaceRecord carries a LentRecord (Push/Request/Response); push() now returns Option; request()/response(); request_of_frame/response_of_frame.",
+        "drive.rs: RECORD_FORM / REASSEMBLED_RECORD_FORM over the three kinds; walk arms for the lent Request/Response; docs.",
+        "query.rs: QueryProjection; fire_matching_queryables split into the owned projection + fire_projection; QueryResponder.keyexpr_literal is a Cow (borrowed in the fan-out, owned via new); dispatch_iteration_event handles InPlace. query/in_place.rs (new): dispatch_request_in_place (lent dispatch, Final on the owned rule, owned fallback for a sliced value or a keyexpr past the bound) + test against the owned path (8 cases).",
+        "reply.rs: dispatch_iteration_event handles InPlace. reply/in_place.rs (new): LentReply view, lent body projection under the owned gates, owned fallback (sliced Put, keyexpr past bound) + test against the owned path (8 cases).",
+        "ext_view.rs: ExtEntryView for the borrowed QueryExtEntry. ext_nodeid.rs: read_z64_in over any view (read_z64_ext delegates). declare_ext_qos.rs: read_qos_in. request_routing_context.rs: read_target_in.",
+        "pubsub/in_place.rs, switchboard.rs: use the Option push(). pubsub/in_place.rs: the sliced-Put test's owned-delivery assertions gated on not(transport-shm) (with it both paths drop an unnegotiated list of slices; the test was red in the wz-session-core census union on the fb3 base).",
+        "wz-session-lwip src/two_session_tests.rs, wz-runtime-tokio tests/lowlatency_e2e.rs: the Option push().",
+        "wz-session-lwip tests/rx_frame_allocations.rs: mod query_and_reply (a reply costs nothing in place; a query only the matcher's scratch; copying control), Pair keeps the observer.",
+        "scripts/run-ci.sh: legs C1m rx query in place (6), fixed (6), copying (5); clippy leg with query-queryable.",
+        "docs/reason-review-pins.md: reply.rs re-pinned (R3250 placeholder).",
+        "Commit f4e29aae fix(session-core): lent-record kinds unread off the unicast path pass",
+        "driver_loop.rs (LentRecord and the InPlaceRecord constructors) and network_message.rs (WalkedRecord): dead_code allowed when session-unicast is off, where only tests reach them; four count-guard legs did not build without it."
+      ],
+      "verification_bullets": [
+        "All host-level; no board was run. Builds and tests through bx.",
+        "RED before (base 3c9da915, the new query_and_reply tests copied in, fixed backing, rx-in-place): queries 4, 8, 32 allocations for frames of 1, 2, 8; replies 5, 10, 40. Both tests failed.",
+        "GREEN after:",
+        "rx_frame_allocations query_and_reply: in place fixed queries 0/0/0, replies 0/0/0; in place growable queries 2/4/16 (the queryable matcher's two chunk lists per query), replies 0/0/0; copying control queries 8/13/44, replies 8/13/44. Every reply's payload, keyexpr and rid, and every query's keyexpr and rid, as the batch decoder reads them. Legs: query in place 6, fixed 6, copying 5.",
+        "wz-session-core: query::in_place (8 cases: plain, every field, matches nobody, AllComplete target, alias with and without suffix, unroutable id, past the bound) and reply::in_place (8 cases: Put plain and full, Del, Err with encoding, alias x2, unroutable id, past the bound) lent == owned field for field, replies and Finals included, on the growable and the fixed backing; record walk test lends both kinds and refuses an unknown mandatory extension at the same record on both walks.",
+        "Mutations, red then reverted: Final pushed only on a match (query test red); a lent Put reply's encoding schema dropped (reply test red).",
+        "wz-session-core: lib 777 passed (query/reply/pubsub feature set); census union full suite 2291 + integration passed (after gating the fs3 sliced-Put test assertions on not(transport-shm): that test failed on the fb3 base too, measured); default lib 526.",
+        "wz-session-lwip union (census row features) 31 lib + 8 rx tests passed; wz-session-mcu with query-queryable,codec-response,pubsub-put passed; wz-runtime-tokio lib 529 and the full default suite (94 test binaries) passed.",
+        "clippy -D warnings: wz-session-core --all-features --all-targets; core sets (default; no-default alloc+unicast+frame+response; +request+query-queryable+bounded-heapless; +request only; the query/reply set); wz-session-lwip (in-place+query; copying+query; union); wz-runtime-tokio lowlatency set; wz-session-mcu default: all rc 0.",
+        "C1bz (core, coop, tokio, lwip) pass; A4 pass; reason_review_pin_gate OK after re-pinning reply.rs; store_reason_citation_gate OK; feature_public_surface_census --check OK.",
+        "Count guards by oracle, guarded_count_gate.py --range origin/main..HEAD: the first run (after 18154ad1) refused with 4 legs that did not build (wz-session-core test builds without session-unicast: lent-record variants and constructors never used, dead_code); fixed in f4e29aae (allowed off the unicast path, where the types exist only for the accessor API), the 4 legs re-run green, then the oracle: 66 of 66 reached guards measured, rc 0.",
+        "Not run: the hook gate array, Layer C0, hosted CI, stack depth, any image build, hardware."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-4-session",
+        "watching-zenoh/local-ci-gates"
+      ],
+      "carry_forward_bullets": [
+        "Still open after B3 part 3 (Request/Response in place; host-level only):",
+        "1. The fallbacks of the lent query and reply paths (a Query with a sliced value, a sliced Put reply, a keyexpr past the bounded buffer) are not COUNTED, unlike the subscriber's InPlaceFallbacks. Next step: an in-place fallback counter on QueryableRegistry and ReplyRegistry with a getter, as pubsub has (a pub item: compound-cfg like InPlaceFallbacks).",
+        "2. The sliced-value fallback of a lent Query is not driven by a test (it needs a shared-memory value on a session that negotiated shared memory); the keyexpr-past-bound fallback is, on both registries, under bounded-heapless.",
+        "3. A staged reply is an owned record (QueryReply owns its keyexpr and payload) on both paths: that is the reply staging contract, outbound, and was not changed.",
+        "4. Consumers that read Requests or Responses out of Poll(FramePayload) on the MCU path must read IterationEvent::InPlace too. Measured population in this tree: the queryable and reply registries (through the observer fan) now do; the switchboard reads Pushes only. A new consumer of Request/Response on the MCU loop must read both (the two_session_tests log shows what missing it looks like)."
+      ],
+      "publishable_decision_summary": "B3, its third part: Request and Response records on the MCU in-place path were still decoded owned (a Box each, keyexpr and payload copies, a resolved String). Re-measured on the lwIP harness, fixed backing, in place: 4 allocations per query, 5 per reply. Built: the record walk also lends a Request and a Response (judged by the owned admission rule, now shared generic helpers); the queryable registry dispatches a lent Request through the SAME fan-out as the owned one (fire_projection over a QueryProjection), owing its Final on the same rule; the reply registry delivers a lent Response as a ReplyView through the same matcher. A Query with a sliced value, a sliced Put reply, or a keyexpr past the bounded buffer takes the owned projection. The responder now borrows the query keyexpr until a reply is staged (QueryResponder::new keeps its owned signature). After: 0 per query and per reply on the fixed backing; the matcher's 2 scratch lists per query on the growable one.",
+      "publishable_changes_bullets": [
+        "Commit 18154ad1 feat(session-core): a Request and a Response are read where they lie",
+        "network_message.rs: PushForm renamed RecordForm; WalkedRecord::Request/Response; lend_record with one out-of-line decoder per kind (lend_push/lend_request/lend_response, so a wide decoded record occupies the stack only while it is handed over); RequestBodyChain/ResponseBodyChain + judge_request_chains/judge_response_chains shared by NetworkMessage::ext_admission and request_view_admission/response_view_admission; walk test for both kinds and their refusals.",
+        "driver_loop.rs: InPlaceRecord carries a LentRecord (Push/Request/Response); push() now returns Option; request()/response(); request_of_frame/response_of_frame.",
+        "drive.rs: RECORD_FORM / REASSEMBLED_RECORD_FORM over the three kinds; walk arms for the lent Request/Response; docs.",
+        "query.rs: QueryProjection; fire_matching_queryables split into the owned projection + fire_projection; QueryResponder.keyexpr_literal is a Cow (borrowed in the fan-out, owned via new); dispatch_iteration_event handles InPlace. query/in_place.rs (new): dispatch_request_in_place (lent dispatch, Final on the owned rule, owned fallback for a sliced value or a keyexpr past the bound) + test against the owned path (8 cases).",
+        "reply.rs: dispatch_iteration_event handles InPlace. reply/in_place.rs (new): LentReply view, lent body projection under the owned gates, owned fallback (sliced Put, keyexpr past bound) + test against the owned path (8 cases).",
+        "ext_view.rs: ExtEntryView for the borrowed QueryExtEntry. ext_nodeid.rs: read_z64_in over any view (read_z64_ext delegates). declare_ext_qos.rs: read_qos_in. request_routing_context.rs: read_target_in.",
+        "pubsub/in_place.rs, switchboard.rs: use the Option push(). pubsub/in_place.rs: the sliced-Put test's owned-delivery assertions gated on not(transport-shm) (with it both paths drop an unnegotiated list of slices; the test was red in the wz-session-core census union on the fb3 base).",
+        "wz-session-lwip src/two_session_tests.rs, wz-runtime-tokio tests/lowlatency_e2e.rs: the Option push().",
+        "wz-session-lwip tests/rx_frame_allocations.rs: mod query_and_reply (a reply costs nothing in place; a query only the matcher's scratch; copying control), Pair keeps the observer.",
+        "scripts/run-ci.sh: legs C1m rx query in place (6), fixed (6), copying (5); clippy leg with query-queryable.",
+        "docs/reason-review-pins.md: reply.rs re-pinned (R3250 placeholder).",
+        "Commit f4e29aae fix(session-core): lent-record kinds unread off the unicast path pass",
+        "driver_loop.rs (LentRecord and the InPlaceRecord constructors) and network_message.rs (WalkedRecord): dead_code allowed when session-unicast is off, where only tests reach them; four count-guard legs did not build without it."
+      ],
+      "publishable_verification_bullets": [
+        "All host-level; no board was run. Builds and tests through bx.",
+        "RED before (base 3c9da915, the new query_and_reply tests copied in, fixed backing, rx-in-place): queries 4, 8, 32 allocations for frames of 1, 2, 8; replies 5, 10, 40. Both tests failed.",
+        "GREEN after:",
+        "rx_frame_allocations query_and_reply: in place fixed queries 0/0/0, replies 0/0/0; in place growable queries 2/4/16 (the queryable matcher's two chunk lists per query), replies 0/0/0; copying control queries 8/13/44, replies 8/13/44. Every reply's payload, keyexpr and rid, and every query's keyexpr and rid, as the batch decoder reads them. Legs: query in place 6, fixed 6, copying 5.",
+        "wz-session-core: query::in_place (8 cases: plain, every field, matches nobody, AllComplete target, alias with and without suffix, unroutable id, past the bound) and reply::in_place (8 cases: Put plain and full, Del, Err with encoding, alias x2, unroutable id, past the bound) lent == owned field for field, replies and Finals included, on the growable and the fixed backing; record walk test lends both kinds and refuses an unknown mandatory extension at the same record on both walks.",
+        "Mutations, red then reverted: Final pushed only on a match (query test red); a lent Put reply's encoding schema dropped (reply test red).",
+        "wz-session-core: lib 777 passed (query/reply/pubsub feature set); census union full suite 2291 + integration passed (after gating the fs3 sliced-Put test assertions on not(transport-shm): that test failed on the fb3 base too, measured); default lib 526.",
+        "wz-session-lwip union (census row features) 31 lib + 8 rx tests passed; wz-session-mcu with query-queryable,codec-response,pubsub-put passed; wz-runtime-tokio lib 529 and the full default suite (94 test binaries) passed.",
+        "clippy -D warnings: wz-session-core --all-features --all-targets; core sets (default; no-default alloc+unicast+frame+response; +request+query-queryable+bounded-heapless; +request only; the query/reply set); wz-session-lwip (in-place+query; copying+query; union); wz-runtime-tokio lowlatency set; wz-session-mcu default: all rc 0.",
+        "C1bz (core, coop, tokio, lwip) pass; A4 pass; reason_review_pin_gate OK after re-pinning reply.rs; store_reason_citation_gate OK; feature_public_surface_census --check OK.",
+        "Count guards by oracle, guarded_count_gate.py --range origin/main..HEAD: the first run (after 18154ad1) refused with 4 legs that did not build (wz-session-core test builds without session-unicast: lent-record variants and constructors never used, dead_code); fixed in f4e29aae (allowed off the unicast path, where the types exist only for the accessor API), the 4 legs re-run green, then the oracle: 66 of 66 reached guards measured, rc 0.",
+        "Not run: the hook gate array, Layer C0, hosted CI, stack depth, any image build, hardware."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-4-session",
+        "watching-zenoh/local-ci-gates"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Still open after B3 part 3 (Request/Response in place; host-level only):",
+        "1. The fallbacks of the lent query and reply paths (a Query with a sliced value, a sliced Put reply, a keyexpr past the bounded buffer) are not COUNTED, unlike the subscriber's InPlaceFallbacks. Next step: an in-place fallback counter on QueryableRegistry and ReplyRegistry with a getter, as pubsub has (a pub item: compound-cfg like InPlaceFallbacks).",
+        "2. The sliced-value fallback of a lent Query is not driven by a test (it needs a shared-memory value on a session that negotiated shared memory); the keyexpr-past-bound fallback is, on both registries, under bounded-heapless.",
+        "3. A staged reply is an owned record (QueryReply owns its keyexpr and payload) on both paths: that is the reply staging contract, outbound, and was not changed.",
+        "4. Consumers that read Requests or Responses out of Poll(FramePayload) on the MCU path must read IterationEvent::InPlace too. Measured population in this tree: the queryable and reply registries (through the observer fan) now do; the switchboard reads Pushes only. A new consumer of Request/Response on the MCU loop must read both (the two_session_tests log shows what missing it looks like)."
+      ]
+    },
     "Round 33": {
       "decision_summary": "§3 scouting + locator codec triad lands: sources/codecs/{locator,scout,hello}.scxml. Introduces 7 new B5 primitives across 3 files (string type, multi-bit flag pack, length-ref dotted-path, length-arith +1, present-if local, parent-flag carrier, import cross-codec, repeat-element); all 6 backends emit clean at vendor pin 11f1032d.",
       "changes_bullets": [
