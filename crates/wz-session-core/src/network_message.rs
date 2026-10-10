@@ -706,7 +706,11 @@ pub(crate) enum RecordForm {
 
 /// One record the walk hands over: the one owned message in the caller's
 /// buffer, or a record read where the payload lies ([`RecordForm::Lent`]).
+///
+/// Read by the unicast receive path; a test build without it reads only the
+/// kinds its own tests walk.
 #[cfg(all(feature = "codec-frame", any(test, feature = "session-unicast")))]
+#[cfg_attr(not(feature = "session-unicast"), allow(dead_code))]
 pub(crate) enum WalkedRecord<'r> {
     /// The record's owned message, the one entry of the buffer.
     Owned(&'r mut Vec<NetworkMessage>),

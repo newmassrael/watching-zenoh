@@ -564,11 +564,17 @@ pub struct InPlaceRecord<'a> {
 }
 
 /// The record an [`InPlaceRecord`] lends, by kind.
+///
+/// Only the unicast receive path builds one (and the tests that stand in for
+/// it, each under its own registry's features); a build without it still has
+/// the type, so that the record's accessors are the same API in every build,
+/// and may construct no variant.
 #[cfg(any(
     feature = "codec-push",
     feature = "codec-request",
     feature = "codec-response"
 ))]
+#[cfg_attr(not(feature = "session-unicast"), allow(dead_code))]
 #[derive(Clone, Copy, Debug)]
 enum LentRecord<'a> {
     #[cfg(feature = "codec-push")]
@@ -591,6 +597,7 @@ impl<'a> InPlaceRecord<'a> {
             feature = "codec-response"
         )
     ))]
+    #[cfg_attr(not(feature = "session-unicast"), allow(dead_code))]
     fn of_frame(
         record: LentRecord<'a>,
         reliable: bool,
@@ -608,6 +615,7 @@ impl<'a> InPlaceRecord<'a> {
 
     /// A Push record of a frame (see [`Self::reliable`] and its siblings).
     #[cfg(all(feature = "codec-push", any(test, feature = "session-unicast")))]
+    #[cfg_attr(not(feature = "session-unicast"), allow(dead_code))]
     pub(crate) fn push_of_frame(
         push: &'a wz_codecs::push::Push<'a>,
         reliable: bool,
@@ -619,6 +627,7 @@ impl<'a> InPlaceRecord<'a> {
 
     /// A Request record of a frame.
     #[cfg(all(feature = "codec-request", any(test, feature = "session-unicast")))]
+    #[cfg_attr(not(feature = "session-unicast"), allow(dead_code))]
     pub(crate) fn request_of_frame(
         request: &'a wz_codecs::request::Request<'a>,
         reliable: bool,
@@ -630,6 +639,7 @@ impl<'a> InPlaceRecord<'a> {
 
     /// A Response record of a frame.
     #[cfg(all(feature = "codec-response", any(test, feature = "session-unicast")))]
+    #[cfg_attr(not(feature = "session-unicast"), allow(dead_code))]
     pub(crate) fn response_of_frame(
         response: &'a wz_codecs::response::Response<'a>,
         reliable: bool,
