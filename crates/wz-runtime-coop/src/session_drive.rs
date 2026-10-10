@@ -340,10 +340,10 @@ pub struct RxPathCounts {
     /// Admissible `Fragment`s, staged into their reassembly slots from where
     /// the link held them (`reassembly`).
     pub fragment_in_place: u32,
+    /// Lean lowlatency units (a bare network message batch), read in place.
+    pub low_latency_in_place: u32,
     /// Compressed batches.
     pub compressed: u32,
-    /// Lean lowlatency units.
-    pub low_latency: u32,
     /// `Fragment`s on a session that does not reassemble.
     pub fragment: u32,
     /// `Fragment`s whose own extension chain a participant must refuse.
@@ -364,8 +364,8 @@ impl RxPathCounts {
         let slot = match path {
             DatagramPath::InPlace => &mut self.in_place,
             DatagramPath::FragmentInPlace => &mut self.fragment_in_place,
+            DatagramPath::LowLatencyInPlace => &mut self.low_latency_in_place,
             DatagramPath::Copied(CopyReason::Compressed) => &mut self.compressed,
-            DatagramPath::Copied(CopyReason::LowLatency) => &mut self.low_latency,
             DatagramPath::Copied(CopyReason::Fragment) => &mut self.fragment,
             DatagramPath::Copied(CopyReason::FragmentExtRefused) => &mut self.fragment_ext_refused,
             DatagramPath::Copied(CopyReason::FragmentHeadUndecodable) => {
@@ -384,7 +384,6 @@ impl RxPathCounts {
     pub fn copied(&self) -> u32 {
         [
             self.compressed,
-            self.low_latency,
             self.fragment,
             self.fragment_ext_refused,
             self.fragment_head_undecodable,

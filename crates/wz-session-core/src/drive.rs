@@ -223,6 +223,30 @@ pub fn dispatch_link_event<R: SessionRuntime, T: TimeSource>(
     }
 }
 
+/// transport-lowlatency — whether a unit of an established lean session is a
+/// bare network message batch, by its leading message id (zenoh lean rx,
+/// codec/transport/mod.rs:60-73): KeepAlive and Close are not (their wire form
+/// is identical in both modes, top-level transport messages, never
+/// Frame-wrapped, and they take the universal decode), nor is an empty unit;
+/// any OTHER leading id is a bare NetworkMessage (mids 0x19..=0x1F) with no
+/// Frame(sn) wrapper.
+///
+/// The one rule both lean receive paths classify by: the copying
+/// [`dispatch_unit`] and the in-place [`dispatch_datagram`]. Using the
+/// message-id constants (not the network-mid range) keeps it feature-robust:
+/// `T_MID_KEEP_ALIVE` is ungated, and the `T_MID_CLOSE` arm rides `codec-close`
+/// exactly like the `handle_inbound` decode arm it defers to.
+#[cfg(feature = "transport-lowlatency")]
+fn is_lean_network_unit(bytes: &[u8]) -> bool {
+    match bytes.first().map(|h| h & 0x1F) {
+        None => false,
+        Some(wire_const::T_MID_KEEP_ALIVE) => false,
+        #[cfg(feature = "codec-close")]
+        Some(wire_const::T_MID_CLOSE) => false,
+        Some(_) => true,
+    }
+}
+
 /// R311y632 (§17) — dispatch ONE framing unit that [`dispatch_link_event`]
 /// has already un-wrapped.
 ///
@@ -260,24 +284,8 @@ fn dispatch_unit<R: SessionRuntime, T: TimeSource>(
     // manager.rs:611) off this branch.
     #[cfg(feature = "transport-lowlatency")]
     if actions.is_lowlatency() && actions.is_established() {
-        // Dispatch the leading message id (zenoh lean rx,
-        // codec/transport/mod.rs:60-73): KeepAlive / Close fall through
-        // to the universal `handle_inbound` (their wire form is identical
-        // in both modes — top-level transport messages, never
-        // Frame-wrapped); any OTHER leading id is a bare NetworkMessage
-        // (mids 0x19..=0x1F) decoded directly with no Frame(sn) wrapper.
-        // Using the message-id constants (not the network-mid range)
-        // keeps the test feature-robust: `T_MID_KEEP_ALIVE` is ungated,
-        // and the `T_MID_CLOSE` arm rides `codec-close` exactly like the
-        // `handle_inbound` decode arm it defers to.
-        let lean_network = match bytes.first().map(|h| h & 0x1F) {
-            None => false,
-            Some(wire_const::T_MID_KEEP_ALIVE) => false,
-            #[cfg(feature = "codec-close")]
-            Some(wire_const::T_MID_CLOSE) => false,
-            Some(_) => true,
-        };
-        if lean_network {
+        // Dispatch the leading message id ([`is_lean_network_unit`]).
+        if is_lean_network_unit(bytes) {
             return match parse_frame_payload_out_of_line(unit) {
                 Ok(messages) => {
                     // R2825 — a lean datagram is ONE transport message whatever
@@ -969,6 +977,10 @@ pub enum DatagramPath {
     /// ([`dispatch_datagram_reassembling`]); a chain it completed was read in
     /// that slot.
     FragmentInPlace,
+    /// The unit was a lean lowlatency unit (`transport-lowlatency`): a bare
+    /// network message batch with no `Frame` envelope, read where it lies as a
+    /// `Frame`'s payload is.
+    LowLatencyInPlace,
     /// The unit was copied onto the heap and dispatched by
     /// [`dispatch_link_event`], for the reason given.
     Copied(CopyReason),
@@ -984,8 +996,6 @@ pub enum CopyReason {
     /// The session compresses its batches: the inflated batch is a buffer of
     /// its own, written by the decompressor.
     Compressed,
-    /// A lean lowlatency unit, which carries no `Frame` envelope.
-    LowLatency,
     /// A `Fragment` on a path that holds no reassembly Router
     /// ([`dispatch_datagram`]); [`dispatch_datagram_reassembling`] stages one
     /// in place.
@@ -997,8 +1007,8 @@ pub enum CopyReason {
     /// again and reports the error the way it always has.
     FragmentHeadUndecodable,
     /// A handshake, KeepAlive or Close, or any other unit that does not begin
-    /// with a `Frame`: its state changes and residue parking are the copying
-    /// path's.
+    /// with a `Frame` (nor, on a lean lowlatency session, with a network
+    /// message): its state changes and residue parking are the copying path's.
     NotAFrame,
     /// A `Frame` whose own extension chain a participant must refuse: the FSM's
     /// `framing.error` arm is the copying path's.
@@ -1066,14 +1076,17 @@ const REASSEMBLED_PUSH_FORM: crate::network_message::PushForm =
 /// copying path reports it.
 ///
 /// Only a unit that BEGINS with an admissible `Frame` takes that path, and only
-/// on a session that reads its units as they arrive. Everything else is the
-/// copying path, unchanged and owned, and is answered as
+/// on a session that reads its units as they arrive; on an established lean
+/// lowlatency session, a unit that is a bare network message batch is read the
+/// same way, the whole unit being the batch ([`DatagramPath::LowLatencyInPlace`]).
+/// Everything else is the copying path, unchanged and owned, and is answered as
 /// [`DatagramPath::Copied`] with its [`CopyReason`]: a handshake, KeepAlive,
 /// Close or Fragment at the front (whose state changes, residue parking and
-/// reassembly hand-off are [`dispatch_link_event`]'s), a `Frame` whose own
-/// extension chain must be refused (the FSM's `framing.error` arm is there), a
-/// compressed batch, and a lean lowlatency unit. A `Frame` consumes the rest of
-/// its unit, so the path leaves nothing to park.
+/// reassembly hand-off are [`dispatch_link_event`]'s;
+/// [`dispatch_datagram_reassembling`] reads a Fragment in place), a `Frame`
+/// whose own extension chain must be refused (the FSM's `framing.error` arm is
+/// there), and a compressed batch. A `Frame` consumes the rest of its unit, so
+/// the path leaves nothing to park.
 ///
 /// One difference from the copying path is deliberate: when a record does not
 /// decode, or carries an extension a participant must refuse, the records
@@ -1105,6 +1118,8 @@ pub fn dispatch_datagram<R: SessionRuntime, T: TimeSource>(
         Ok(InPlaceUnit::Fragment(..)) => {
             dispatch_copied(unit, CopyReason::Fragment, actions, engine, on_event)
         }
+        #[cfg(feature = "transport-lowlatency")]
+        Ok(InPlaceUnit::Lean) => lean_in_place(unit, actions, engine, record, on_event),
         Err(reason) => dispatch_copied(unit, reason, actions, engine, on_event),
     }
 }
@@ -1121,8 +1136,8 @@ pub fn dispatch_datagram<R: SessionRuntime, T: TimeSource>(
 ///   its order: a prioritized fragment on a session that negotiated no QoS is
 ///   link-fatal, and a stale, duplicate or reordered SN is dropped and clears
 ///   its channel's chain (the dbuf-clear [`report_outcome_reassembling`] makes);
-/// - it is reported to `on_event` as
-///   [`IterationEvent::InPlaceFragment`], a borrowed descriptor of the unit and where its payload starts, in place of
+/// - it is reported to `on_event` as [`IterationEvent::InPlaceFragment`], a
+///   borrowed descriptor of the unit and where its payload starts, in place of
 ///   the copying path's `Poll(Fragment)`, whose payload is an owned copy;
 /// - its payload goes to the Router, which copies it into the chain's slot;
 /// - a chain it completes is read IN ITS SLOT, borrowed for the delivery call,
@@ -1165,6 +1180,14 @@ where
             unit,
             head,
             payload_at,
+            actions,
+            engine,
+            record,
+            &mut through_hand_off(reasm, actions, now_ms, on_event),
+        ),
+        #[cfg(feature = "transport-lowlatency")]
+        Ok(InPlaceUnit::Lean) => lean_in_place(
+            unit,
             actions,
             engine,
             record,
@@ -1226,6 +1249,18 @@ fn account_unit_in_place<R: SessionRuntime, T: TimeSource>(
     unit: &[u8],
     actions: &SessionLinkActions<R, T>,
 ) {
+    account_bytes_in_place(unit, actions);
+    #[cfg(feature = "transport-stats")]
+    count_rx_transport_message(actions);
+}
+
+/// The accounting `dispatch_link_event` does for a unit's bytes, the on-the-wire
+/// total, before anything is decoded out of it.
+#[cfg(feature = "codec-frame")]
+fn account_bytes_in_place<R: SessionRuntime, T: TimeSource>(
+    unit: &[u8],
+    actions: &SessionLinkActions<R, T>,
+) {
     #[cfg(feature = "transport-stats")]
     {
         actions.stats.inc_rx(unit.len());
@@ -1233,10 +1268,63 @@ fn account_unit_in_place<R: SessionRuntime, T: TimeSource>(
         actions.record_on_link(&actions.link, |metrics, slot| {
             metrics.inc_bytes(crate::stats_registry::StatsDirection::Rx, slot, bytes)
         });
-        count_rx_transport_message(actions);
     }
     #[cfg(not(feature = "transport-stats"))]
     let _ = (unit, actions);
+}
+
+/// transport-lowlatency — a lean unit read where it lies: the whole unit is a
+/// bare network message batch, walked record by record as a `Frame`'s payload
+/// is ([`walk_records_in_place`]), every event carrying what the copying lean
+/// path's `FramePayload` carries (reliable, SN 0, the DEFAULT band, no chain:
+/// the lean wire has no envelope, no SN and no per-priority conduit).
+///
+/// What the copying lean path does, kept: no SN gate (lowlatency tracks no
+/// SN), the unit's bytes counted first and the one transport message counted
+/// once the batch has been read, and a batch that does not decode raised as
+/// `framing.error`. What differs is the frame path's difference: records before
+/// a bad one have been dispatched when it is reported.
+#[cfg(feature = "transport-lowlatency")]
+fn lean_in_place<R: SessionRuntime, T: TimeSource>(
+    unit: &[u8],
+    actions: &SessionLinkActions<R, T>,
+    engine: &mut Engine<SessionFsmUnicastPolicy<SessionActionsBinding<R, T>>>,
+    record: &mut alloc::vec::Vec<crate::network_message::NetworkMessage>,
+    on_event: &mut dyn FnMut(crate::driver_loop::IterationEvent<'_>),
+) -> DatagramPath {
+    use crate::session_fsm_unicast::SessionFsmUnicastEvent as E;
+    account_bytes_in_place(unit, actions);
+    let carrier = RecordCarrier {
+        reliable: true,
+        sn: 0,
+        priority: crate::qos::Priority::DEFAULT,
+        has_ext: false,
+    };
+    let walked = walk_records_in_place(
+        unit,
+        carrier,
+        &mut || Ok(alloc::vec::Vec::new()),
+        PUSH_FORM,
+        RecordSource::Frame,
+        actions,
+        record,
+        on_event,
+    );
+    match walked {
+        // R2825 — a lean datagram is ONE transport message whatever it
+        // carries, which is how upstream's lowlatency rx counts it.
+        #[cfg(feature = "transport-stats")]
+        Ok(()) => count_rx_transport_message(actions),
+        #[cfg(not(feature = "transport-stats"))]
+        Ok(()) => {}
+        Err(parse_err) => {
+            engine.process_event(E::FramingError);
+            on_event(crate::driver_loop::IterationEvent::Poll(
+                &DriverLoopOutcome::ParseError(parse_err),
+            ));
+        }
+    }
+    DatagramPath::LowLatencyInPlace
 }
 
 /// The admissible `Frame` at the front of a unit, read where it lies.
@@ -1503,7 +1591,8 @@ where
 
 /// What the in-place receive path reads at the front of a unit: an admissible
 /// `Frame`, or (on a path that reassembles) an admissible `Fragment`, each
-/// decoded up to its payload, with the offset at which the payload starts.
+/// decoded up to its payload, with the offset at which the payload starts; or,
+/// on a lean lowlatency session, a unit that is a batch from its first byte.
 #[cfg(feature = "codec-frame")]
 enum InPlaceUnit {
     Frame(
@@ -1515,6 +1604,9 @@ enum InPlaceUnit {
         crate::inbound::FragmentHead<crate::inbound::InPlaceExtChain>,
         usize,
     ),
+    /// A lean lowlatency unit: the whole unit is the batch.
+    #[cfg(feature = "transport-lowlatency")]
+    Lean,
 }
 
 /// The unit at `unit`'s front when [`dispatch_datagram`] may read it where it
@@ -1529,15 +1621,22 @@ fn in_place_unit<R: SessionRuntime, T: TimeSource>(
     fragments: bool,
 ) -> Result<InPlaceUnit, CopyReason> {
     use crate::ext_admit::ExtAdmission;
-    // The compressed batch is un-wrapped into a buffer of its own, and a lean
-    // lowlatency unit carries no Frame envelope: both are the copying path's.
+    // The compressed batch is un-wrapped into a buffer of its own: the copying
+    // path's.
     #[cfg(feature = "transport-compression")]
     if actions.compresses_batches() {
         return Err(CopyReason::Compressed);
     }
     #[cfg(feature = "transport-lowlatency")]
     if actions.is_lowlatency() && actions.is_established() {
-        return Err(CopyReason::LowLatency);
+        // The lean transport frames nothing: a unit is a bare network message
+        // batch, read in place, or a KeepAlive / Close, which the copying path
+        // decodes as it does on any session.
+        return if is_lean_network_unit(unit) {
+            Ok(InPlaceUnit::Lean)
+        } else {
+            Err(CopyReason::NotAFrame)
+        };
     }
     #[cfg(not(any(feature = "transport-compression", feature = "transport-lowlatency")))]
     let _ = actions;

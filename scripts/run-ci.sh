@@ -5572,10 +5572,13 @@ layer_c1ac_cargo_test_quic() {
 # R311y414 — the two test steps were BARE, so an `extlowlatency` rename or a
 # cfg-out of the e2e cases would have gone green by silence. Both now carry
 # anchored count guards with the MEASURED counts (4 unit / 2 e2e).
+# B3 (runtime-zero-copy) moved the e2e count 2 -> 3: a lean unit read in place
+# by the in-place receive path, against the copying path's dispatch of the same
+# bytes. 3 = what the command PRINTED.
 layer_c1ad_cargo_test_lowlatency() {
     _runci_guarded_test C1ad 4 cargo test -p wz-session-core --features transport-lowlatency --lib extlowlatency --quiet \
         || return 1
-    _runci_guarded_test C1ad 2 cargo test -p wz-runtime-tokio --features transport-lowlatency,transport-unicast,transport-link-tcp --test lowlatency_e2e --quiet \
+    _runci_guarded_test C1ad 3 cargo test -p wz-runtime-tokio --features transport-lowlatency,transport-unicast,transport-link-tcp --test lowlatency_e2e --quiet \
         || return 1
     (cd crates \
         && cargo clippy -p wz-runtime-tokio --all-targets --features transport-lowlatency,transport-unicast,transport-link-tcp --quiet -- -D warnings \
