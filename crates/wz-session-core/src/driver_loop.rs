@@ -403,6 +403,88 @@ pub enum IterationEvent<'a> {
     /// not care ignores this event, as it ignores the other multicast ones.
     /// Carries the same ungated [`MulticastPeerId`] the departure does. `Copy`.
     MulticastSource(MulticastPeerId),
+    /// ARCHITECTURE section 9.2 ("Codec::decode parses in place from slot",
+    /// "Event emitted with `&slot` borrow") — ONE record of an inbound `Frame`,
+    /// decoded where the frame lies and handed over borrowed: the receive path
+    /// of the fixed-memory MCU profile (`drive::dispatch_datagram`, reached
+    /// under `wz-runtime-coop`'s `rx-in-place`) emits it for every Push record,
+    /// in place of a `Poll(FramePayload)` carrying the owned message, so a
+    /// subscriber is handed the frame's own bytes and nothing is built on the
+    /// heap for the record.
+    ///
+    /// The record is valid for the call only; its bytes go when the link takes
+    /// its buffer back. A consumer that keeps something copies it, which is what
+    /// [`Sample::from_view`](crate::sample::Sample::from_view) does for a
+    /// subscriber. Every other record of the same frame still arrives as a
+    /// `Poll(FramePayload)` of one owned message, in wire order with these.
+    ///
+    /// A consumer that reads Push data out of `Poll(FramePayload)` must read
+    /// this variant too, or it misses every Put on that path: the subscriber
+    /// registry and the switchboard do, through the observer fan. Ungated like
+    /// the other variants, so every consumer's match stays feature-independent;
+    /// only the producer is gated. `Copy`.
+    InPlace(InPlaceRecord<'a>),
+}
+
+/// One record of an inbound `Frame` decoded where the frame lies, with the
+/// frame's own reliability, SN and priority: what [`IterationEvent::InPlace`]
+/// carries.
+///
+/// Only a Push travels this way today ([`Self::push`]); a record of any other
+/// kind is decoded into its owned message and reported as
+/// `Poll(FramePayload)`. A further kind joins as a further accessor beside
+/// [`Self::push`], read by the registry that consumes it.
+#[derive(Clone, Copy, Debug)]
+pub struct InPlaceRecord<'a> {
+    reliable: bool,
+    sn: u64,
+    priority: crate::qos::Priority,
+    #[cfg(feature = "codec-push")]
+    push: &'a wz_codecs::push::Push<'a>,
+    #[cfg(not(feature = "codec-push"))]
+    _frame: core::marker::PhantomData<&'a [u8]>,
+}
+
+impl<'a> InPlaceRecord<'a> {
+    /// A Push record of a frame at `sn` on the `reliable` channel and
+    /// `priority` band. Built by the unicast receive path alone (and the tests
+    /// that stand in for it).
+    #[cfg(all(feature = "codec-push", any(test, feature = "session-unicast")))]
+    pub(crate) fn push_of_frame(
+        push: &'a wz_codecs::push::Push<'a>,
+        reliable: bool,
+        sn: u64,
+        priority: crate::qos::Priority,
+    ) -> Self {
+        Self {
+            reliable,
+            sn,
+            priority,
+            push,
+        }
+    }
+
+    /// Whether the carrying frame rode the reliable channel.
+    pub fn reliable(&self) -> bool {
+        self.reliable
+    }
+
+    /// The carrying frame's sequence number.
+    pub fn sn(&self) -> u64 {
+        self.sn
+    }
+
+    /// The carrying frame's priority band.
+    pub fn priority(&self) -> crate::qos::Priority {
+        self.priority
+    }
+
+    /// The Push, as it is decoded: its keyexpr, extensions and payload are
+    /// ranges of the frame.
+    #[cfg(feature = "codec-push")]
+    pub fn push(&self) -> &'a wz_codecs::push::Push<'a> {
+        self.push
+    }
 }
 
 /// Build the [`DriverLoopOutcome`] a completed reassembly chain re-enters

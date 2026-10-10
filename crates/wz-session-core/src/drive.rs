@@ -957,8 +957,64 @@ fn refuse_frame<R: SessionRuntime, T: TimeSource>(
     None
 }
 
+/// Which path [`dispatch_datagram`] took one unit down: the count a profile
+/// keeps of how much of its traffic is read in place and why the rest is not.
+#[cfg(feature = "codec-frame")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DatagramPath {
+    /// The unit began with an admissible `Frame` and was read where it lies.
+    InPlace,
+    /// The unit was copied onto the heap and dispatched by
+    /// [`dispatch_link_event`], for the reason given.
+    Copied(CopyReason),
+}
+
+/// Why [`dispatch_datagram`] copied a unit instead of reading it where it lies.
+/// Each is a unit the in-place path does not take by design, documented on
+/// [`dispatch_datagram`]; counting them is what keeps a profile honest about
+/// what its receive path costs.
+#[cfg(feature = "codec-frame")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CopyReason {
+    /// The session compresses its batches: the inflated batch is a buffer of
+    /// its own, written by the decompressor.
+    Compressed,
+    /// A lean lowlatency unit, which carries no `Frame` envelope.
+    LowLatency,
+    /// A `Fragment`, whose payload goes to the reassembly staging.
+    Fragment,
+    /// A handshake, KeepAlive or Close, or any other unit that does not begin
+    /// with a `Frame`: its state changes and residue parking are the copying
+    /// path's.
+    NotAFrame,
+    /// A `Frame` whose own extension chain a participant must refuse: the FSM's
+    /// `framing.error` arm is the copying path's.
+    FrameExtRefused,
+    /// A `Frame` whose head does not decode: the copying path decodes it again
+    /// and reports the error the way it always has.
+    FrameHeadUndecodable,
+}
+
+/// How [`dispatch_datagram`] hands over a Push record: lent where the frame
+/// lies when this build can deliver it so, owned otherwise.
+///
+/// `transport-stats` keeps the owned form: its counters classify a received
+/// message by reading the owned message (`network_message::stats_class`), and
+/// that profile is the AP's, which never takes this path. A counter that
+/// silently skipped the Puts of an in-place frame would be a wrong number, so
+/// the build that has the counters does not lend.
+#[cfg(all(feature = "codec-frame", feature = "codec-push"))]
+const PUSH_FORM: crate::network_message::PushForm = if cfg!(feature = "transport-stats") {
+    crate::network_message::PushForm::Owned
+} else {
+    crate::network_message::PushForm::Lent
+};
+/// Without a Push codec there is no Push to lend.
+#[cfg(all(feature = "codec-frame", not(feature = "codec-push")))]
+const PUSH_FORM: crate::network_message::PushForm = crate::network_message::PushForm::Owned;
+
 /// Dispatch one inbound datagram that the link LENDS, where it lies, and hand
-/// every outcome to `on_outcome` as it happens.
+/// every event to `on_event` as it happens.
 ///
 /// The receive path of the fixed-memory MCU profile. [`dispatch_link_event`]
 /// takes the datagram as an owned [`RxFrame`](crate::link::RxFrame), so a link
@@ -968,20 +1024,30 @@ fn refuse_frame<R: SessionRuntime, T: TimeSource>(
 /// chose, before the application sees the first one. Here the unit is borrowed
 /// for the length of the call, the payload is read where it lies, and the
 /// records are decoded and dispatched one at a time
-/// (`network_message::for_each_record`) through `record`, a one-record
-/// buffer the caller keeps across datagrams. A frame of N records is reported
-/// as N [`DriverLoopOutcome::FramePayload`]s, each carrying one record and the
-/// frame's own SN, reliability, priority and extensions; a frame that carries
-/// none is reported as one with none, as the copying path reports it.
+/// (`network_message::for_each_record`), in wire order:
+///
+/// - a Push is decoded where the payload lies and lent as
+///   the [`InPlace` event](crate::driver_loop::IterationEvent::InPlace):
+///   its keyexpr, extensions and payload are ranges of the datagram, and
+///   nothing is built on the heap for it (ARCHITECTURE section 9.2). The
+///   subscriber registry delivers it as a borrowed sample;
+/// - any other record is decoded into its owned message in `record`, a
+///   one-record buffer the caller keeps across datagrams, and reported as a
+///   [`DriverLoopOutcome::FramePayload`] of that one message.
+///
+/// Every event carries the frame's own SN, reliability and priority; a frame
+/// that carries no record is reported as one `FramePayload` with none, as the
+/// copying path reports it.
 ///
 /// Only a unit that BEGINS with an admissible `Frame` takes that path, and only
 /// on a session that reads its units as they arrive. Everything else is the
-/// copying path, unchanged and owned: a handshake, KeepAlive, Close or Fragment
-/// at the front (whose state changes, residue parking and reassembly hand-off
-/// are [`dispatch_link_event`]'s), a `Frame` whose own extension chain must be
-/// refused (the FSM's `framing.error` arm is there), a compressed batch, and a
-/// lean lowlatency unit. A `Frame` consumes the rest of its unit, so the path
-/// leaves nothing to park.
+/// copying path, unchanged and owned, and is answered as
+/// [`DatagramPath::Copied`] with its [`CopyReason`]: a handshake, KeepAlive,
+/// Close or Fragment at the front (whose state changes, residue parking and
+/// reassembly hand-off are [`dispatch_link_event`]'s), a `Frame` whose own
+/// extension chain must be refused (the FSM's `framing.error` arm is there), a
+/// compressed batch, and a lean lowlatency unit. A `Frame` consumes the rest of
+/// its unit, so the path leaves nothing to park.
 ///
 /// One difference from the copying path is deliberate: when a record does not
 /// decode, or carries an extension a participant must refuse, the records
@@ -992,8 +1058,8 @@ fn refuse_frame<R: SessionRuntime, T: TimeSource>(
 /// the copying path is upstream zenoh's, which decodes a frame's messages into
 /// one list before it handles any.
 ///
-/// Whatever the path, `on_outcome` runs inside the link's lend, so what it
-/// does is on the stack above the receive; a profile measures that before it
+/// Whatever the path, `on_event` runs inside the link's lend, so what it does
+/// is on the stack above the receive; a profile measures that before it
 /// selects this path.
 #[cfg(feature = "codec-frame")]
 pub fn dispatch_datagram<R: SessionRuntime, T: TimeSource>(
@@ -1001,14 +1067,22 @@ pub fn dispatch_datagram<R: SessionRuntime, T: TimeSource>(
     actions: &SessionLinkActions<R, T>,
     engine: &mut Engine<SessionFsmUnicastPolicy<SessionActionsBinding<R, T>>>,
     record: &mut alloc::vec::Vec<crate::network_message::NetworkMessage>,
-    on_outcome: &mut dyn FnMut(&DriverLoopOutcome),
-) {
+    on_event: &mut dyn FnMut(crate::driver_loop::IterationEvent<'_>),
+) -> DatagramPath {
+    use crate::driver_loop::IterationEvent;
+    use crate::network_message::WalkedRecord;
     use crate::session_fsm_unicast::SessionFsmUnicastEvent as E;
-    let in_place = in_place_frame(unit, actions);
-    let Some((head, payload_at)) = in_place else {
-        let frame = crate::link::RxFrame::new(alloc::vec::Vec::from(unit));
-        on_outcome(&dispatch_link_event(LinkEvent::Rx(frame), actions, engine));
-        return;
+    let (head, payload_at) = match in_place_frame(unit, actions) {
+        Ok(found) => found,
+        Err(reason) => {
+            let frame = crate::link::RxFrame::new(alloc::vec::Vec::from(unit));
+            on_event(IterationEvent::Poll(&dispatch_link_event(
+                LinkEvent::Rx(frame),
+                actions,
+                engine,
+            )));
+            return DatagramPath::Copied(reason);
+        }
     };
     // The accounting `dispatch_link_event` and `dispatch_unit` do for a unit
     // and the one transport message decoded off its front.
@@ -1030,8 +1104,8 @@ pub fn dispatch_datagram<R: SessionRuntime, T: TimeSource>(
         priority,
     } = head;
     if let Some(refused) = refuse_frame(actions, engine, priority, reliable, sn) {
-        on_outcome(&refused);
-        return;
+        on_event(IterationEvent::Poll(&refused));
+        return DatagramPath::InPlace;
     }
     let mut outcome = DriverLoopOutcome::FramePayload {
         reliable,
@@ -1042,54 +1116,78 @@ pub fn dispatch_datagram<R: SessionRuntime, T: TimeSource>(
         priority,
     };
     let mut dispatched = false;
-    let walked = crate::network_message::for_each_record(&unit[payload_at..], record, |one| {
-        if let DriverLoopOutcome::FramePayload { messages, .. } = &mut outcome {
-            core::mem::swap(messages, one);
-            *messages = count_rx_network_messages(actions, core::mem::take(messages));
-        }
-        on_outcome(&outcome);
-        if let DriverLoopOutcome::FramePayload { messages, .. } = &mut outcome {
-            core::mem::swap(messages, one);
-        }
-        dispatched = true;
-    });
+    let walked =
+        crate::network_message::for_each_record(&unit[payload_at..], record, PUSH_FORM, |one| {
+            match one {
+                WalkedRecord::Owned(one) => {
+                    if let DriverLoopOutcome::FramePayload { messages, .. } = &mut outcome {
+                        core::mem::swap(messages, one);
+                        *messages = count_rx_network_messages(actions, core::mem::take(messages));
+                    }
+                    on_event(IterationEvent::Poll(&outcome));
+                    if let DriverLoopOutcome::FramePayload { messages, .. } = &mut outcome {
+                        core::mem::swap(messages, one);
+                    }
+                }
+                #[cfg(feature = "codec-push")]
+                WalkedRecord::Push(push) => on_event(IterationEvent::InPlace(
+                    crate::driver_loop::InPlaceRecord::push_of_frame(push, reliable, sn, priority),
+                )),
+            }
+            dispatched = true;
+        });
     match walked {
-        Ok(()) if !dispatched => on_outcome(&outcome),
+        Ok(()) if !dispatched => on_event(IterationEvent::Poll(&outcome)),
         Ok(()) => {}
         Err(parse_err) => {
             engine.process_event(E::FramingError);
-            on_outcome(&DriverLoopOutcome::ParseError(parse_err));
+            on_event(IterationEvent::Poll(&DriverLoopOutcome::ParseError(
+                parse_err,
+            )));
         }
     }
+    DatagramPath::InPlace
 }
 
 /// The admissible `Frame` at the front of `unit`, decoded up to its payload,
-/// when [`dispatch_datagram`] may read it where it lies; `None` sends the unit
-/// down the copying path. A head that does not decode is also `None`: the
-/// copying path decodes it again and reports the error the way it always has.
+/// when [`dispatch_datagram`] may read it where it lies; otherwise why the unit
+/// goes down the copying path. A head that does not decode is also the copying
+/// path's: it decodes it again and reports the error the way it always has.
 #[cfg(feature = "codec-frame")]
 fn in_place_frame<R: SessionRuntime, T: TimeSource>(
     unit: &[u8],
     actions: &SessionLinkActions<R, T>,
-) -> Option<(crate::inbound::FrameHead, usize)> {
+) -> Result<(crate::inbound::FrameHead, usize), CopyReason> {
     // The compressed batch is un-wrapped into a buffer of its own, and a lean
     // lowlatency unit carries no Frame envelope: both are the copying path's.
     #[cfg(feature = "transport-compression")]
     if actions.compresses_batches() {
-        return None;
+        return Err(CopyReason::Compressed);
     }
     #[cfg(feature = "transport-lowlatency")]
     if actions.is_lowlatency() && actions.is_established() {
-        return None;
+        return Err(CopyReason::LowLatency);
     }
     #[cfg(not(any(feature = "transport-compression", feature = "transport-lowlatency")))]
     let _ = actions;
-    let (head, payload_at) = crate::inbound::parse_frame_in_place(unit)?.ok()?;
-    matches!(
+    let Some(head) = crate::inbound::parse_frame_in_place(unit) else {
+        let fragment =
+            unit.first().map(|h| h & 0x1F) == Some(wz_codecs::wire_const::T_MID_FRAGMENT);
+        return Err(if fragment {
+            CopyReason::Fragment
+        } else {
+            CopyReason::NotAFrame
+        });
+    };
+    let (head, payload_at) = head.map_err(|_| CopyReason::FrameHeadUndecodable)?;
+    if matches!(
         head.ext_admission(),
         crate::ext_admit::ExtAdmission::Admissible
-    )
-    .then_some((head, payload_at))
+    ) {
+        Ok((head, payload_at))
+    } else {
+        Err(CopyReason::FrameExtRefused)
+    }
 }
 /// R77/R84 — compare the session's lease baseline against `params.lease` and
 /// inject `SessionFsmUnicastEvent::LeaseExpired` when the window has elapsed,

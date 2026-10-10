@@ -37,8 +37,6 @@ use alloc::rc::Rc;
 use alloc::vec::Vec;
 
 use wz_runtime_core::TimeSource;
-#[cfg(feature = "rx-in-place")]
-use wz_session_core::drive::dispatch_datagram;
 #[cfg(not(feature = "rx-in-place"))]
 use wz_session_core::drive::dispatch_link_event;
 use wz_session_core::drive::SessionEngine;
@@ -47,6 +45,8 @@ use wz_session_core::drive::{check_keepalive_deadline, keepalive_wake_deadline};
 use wz_session_core::drive::{
     check_lease_deadline, dispatch_pending, lease_wake_deadline, new_session_engine,
 };
+#[cfg(feature = "rx-in-place")]
+use wz_session_core::drive::{dispatch_datagram, CopyReason, DatagramPath};
 use wz_session_core::driver_loop::{DriverOutcome, IterationEvent};
 #[cfg(not(feature = "rx-in-place"))]
 use wz_session_core::link::LinkEvent;
@@ -307,8 +307,68 @@ pub struct SessionPump<C: ClockSource, L: SessionDatagramLink> {
     /// record; a datagram costs it nothing however many records it carries.
     #[cfg(feature = "rx-in-place")]
     record: Vec<NetworkMessage>,
+    /// `rx-in-place` — how many units were read where the link held them, and
+    /// how many went down the copying path and why.
+    #[cfg(feature = "rx-in-place")]
+    rx_paths: RxPathCounts,
     iter: usize,
     max_iters: Option<usize>,
+}
+
+/// `rx-in-place` — the units a [`SessionPump`] dispatched, by the path they
+/// took (`wz_session_core::drive::dispatch_datagram`): read where the link held
+/// them, or copied onto the heap for one of the documented reasons. A unit the
+/// in-place path does not take is not lost: it is dispatched by the copying
+/// path, and this is where a profile sees how often that happens.
+#[cfg(feature = "rx-in-place")]
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct RxPathCounts {
+    /// Units that began with an admissible `Frame`, read in place.
+    pub in_place: u32,
+    /// Compressed batches.
+    pub compressed: u32,
+    /// Lean lowlatency units.
+    pub low_latency: u32,
+    /// `Fragment`s, which go to the reassembly staging.
+    pub fragment: u32,
+    /// Handshake, KeepAlive, Close and every other non-`Frame` unit.
+    pub not_a_frame: u32,
+    /// `Frame`s whose own extension chain a participant must refuse.
+    pub frame_ext_refused: u32,
+    /// `Frame`s whose head does not decode.
+    pub frame_head_undecodable: u32,
+}
+
+#[cfg(feature = "rx-in-place")]
+impl RxPathCounts {
+    fn count(&mut self, path: DatagramPath) {
+        let slot = match path {
+            DatagramPath::InPlace => &mut self.in_place,
+            DatagramPath::Copied(CopyReason::Compressed) => &mut self.compressed,
+            DatagramPath::Copied(CopyReason::LowLatency) => &mut self.low_latency,
+            DatagramPath::Copied(CopyReason::Fragment) => &mut self.fragment,
+            DatagramPath::Copied(CopyReason::NotAFrame) => &mut self.not_a_frame,
+            DatagramPath::Copied(CopyReason::FrameExtRefused) => &mut self.frame_ext_refused,
+            DatagramPath::Copied(CopyReason::FrameHeadUndecodable) => {
+                &mut self.frame_head_undecodable
+            }
+        };
+        *slot = slot.saturating_add(1);
+    }
+
+    /// Every unit that went down the copying path, whatever the reason.
+    pub fn copied(&self) -> u32 {
+        [
+            self.compressed,
+            self.low_latency,
+            self.fragment,
+            self.not_a_frame,
+            self.frame_ext_refused,
+            self.frame_head_undecodable,
+        ]
+        .into_iter()
+        .fold(0u32, u32::saturating_add)
+    }
 }
 
 impl<C: ClockSource, L: SessionDatagramLink> SessionPump<C, L> {
@@ -364,6 +424,8 @@ impl<C: ClockSource, L: SessionDatagramLink> SessionPump<C, L> {
             reasm: mcu_reassembly(),
             #[cfg(feature = "rx-in-place")]
             record: Vec::with_capacity(1),
+            #[cfg(feature = "rx-in-place")]
+            rx_paths: RxPathCounts::default(),
             iter: 0,
             max_iters,
         }
@@ -374,6 +436,13 @@ impl<C: ClockSource, L: SessionDatagramLink> SessionPump<C, L> {
     /// not.
     pub fn runtime(&self) -> &CoopRuntime<C> {
         &self.runtime
+    }
+
+    /// `rx-in-place` — the units this session dispatched so far, by the path
+    /// they took ([`RxPathCounts`]).
+    #[cfg(feature = "rx-in-place")]
+    pub fn rx_path_counts(&self) -> RxPathCounts {
+        self.rx_paths
     }
 
     /// Advance the session by one iteration. `Some(outcome)` means the
@@ -438,21 +507,32 @@ impl<C: ClockSource, L: SessionDatagramLink> SessionPump<C, L> {
         // its records are dispatched one at a time, each outcome reported as
         // it happens (`dispatch_datagram`). Inside the lend: what the
         // observer does runs on the stack above the receive.
+        // A Push record arrives as `IterationEvent::InPlace`, lent where the
+        // datagram lies; every outcome goes through the reassembly hand-off as
+        // the copying loop's does. Which path the unit took is counted.
         #[cfg(feature = "rx-in-place")]
         {
             let link = &self.link;
             let actions = &self.actions;
             let engine = &mut self.engine;
             let record = &mut self.record;
+            let paths = &mut self.rx_paths;
             #[cfg(feature = "reassembly")]
             let reasm = &mut self.reasm;
             let received = link.recv_with(&mut |unit| {
-                dispatch_datagram(unit, actions, engine, record, &mut |outcome| {
-                    #[cfg(feature = "reassembly")]
-                    report_outcome_reassembling(outcome, reasm, actions, now_ms, &mut *on_event);
-                    #[cfg(not(feature = "reassembly"))]
-                    on_event(IterationEvent::Poll(outcome));
-                });
+                let path =
+                    dispatch_datagram(unit, actions, engine, record, &mut |event| match event {
+                        #[cfg(feature = "reassembly")]
+                        IterationEvent::Poll(outcome) => report_outcome_reassembling(
+                            outcome,
+                            reasm,
+                            actions,
+                            now_ms,
+                            &mut *on_event,
+                        ),
+                        other => on_event(other),
+                    });
+                paths.count(path);
             });
             if received {
                 return None;

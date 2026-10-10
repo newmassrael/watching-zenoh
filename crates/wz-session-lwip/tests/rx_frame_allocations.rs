@@ -11,26 +11,35 @@
 //! iteration that receives it, decodes it and delivers every Put to a
 //! subscriber is run under a counting `#[global_allocator]`.
 //!
-//! The quantity asserted is the FRAME PATH's share of that count. A frame's
-//! cost is `frame + N * record`: the per-record part (the owned message the
-//! decode builds and the keyexpr the subscriber match resolves) is a later
-//! step's, and the frame part is everything that is paid once per datagram
-//! whatever it carries — the datagram copied out of the socket, the frame's
-//! payload copied out of that copy, and the list the records are collected
-//! into, whose length the peer chooses. Measuring frames of 1, 2 and 8 records
-//! separates the two without naming either: `frame = 2 * cost(1) - cost(2)`,
-//! and a frame part of zero makes the cost exactly linear in `N`.
+//! A frame's cost is `frame + N * record`. The frame part is everything that is
+//! paid once per datagram whatever it carries — the datagram copied out of the
+//! socket, the frame's payload copied out of that copy, and the list the
+//! records are collected into, whose length the peer chooses. The per-record
+//! part is what one Put costs from its decode to its subscriber. Measuring
+//! frames of 1, 2 and 8 records separates the two without naming either:
+//! `frame = 2 * cost(1) - cost(2)`, `record = cost(2) - cost(1)`, and a frame
+//! part of zero makes the cost exactly linear in `N`.
 //!
 //! - With `rx-in-place` the loop dispatches the datagram where the socket holds
-//!   it, record by record: the frame part must be ZERO.
+//!   it, record by record (fixed-memory step S2): the frame part must be ZERO.
+//!   And each Put is decoded where the datagram lies and delivered to its
+//!   subscriber as a view over those bytes (step S3, ARCHITECTURE section 9.2):
+//!   the per-record part must be ZERO on the fixed bounded backing
+//!   (`bounded-heapless`, the MCU profile's), and exactly the TWO allocations
+//!   the subscriber matcher's chunk splits make on the growable one (the AP's
+//!   backing, whose scratch lists grow; `pubsub::fire_into` and
+//!   `keyexpr_match::keyexpr_intersects_target`). Before S3 it was 7 and 5:
+//!   the boxed owned Push, its keyexpr and payload copies, the resolved keyexpr
+//!   `String` and the subscriber's payload copy, plus those two.
 //! - Without it (the copying loop every shipped image runs today) the frame
 //!   part must be POSITIVE. That half is the instrument's own control: a count
 //!   that read zero on the loop that is known to copy would prove nothing about
 //!   the loop that is meant not to.
 //!
-//! Either way every Put must reach the subscriber with exactly the bytes the
+//! Either way every Put must reach the subscriber with exactly the payload the
 //! shared batch decoder reads out of the same payload (the decoder the AP and
-//! the copying loop dispatch from), in order.
+//! the copying loop dispatch from), on exactly the keyexpr it carries, in
+//! order.
 //!
 //! A second test pins the one behaviour the two loops are meant to differ in:
 //! a frame whose last record does not decode.
@@ -188,8 +197,10 @@ fn frame_of(sn: u64, n: usize) -> (Vec<u8>, Vec<u8>) {
     (wire, payload)
 }
 
-/// The Put payloads the shared batch decoder reads out of `payload`, in order.
-fn decoded_puts(payload: &[u8]) -> Vec<Vec<u8>> {
+/// The Puts the shared batch decoder reads out of `payload`, in order: each
+/// one's payload and the keyexpr the copying path resolves for it (every Put
+/// here names its keyexpr literally, so that is its suffix).
+fn decoded_puts(payload: &[u8]) -> Vec<(Vec<u8>, String)> {
     let messages = parse_frame_payload(payload).expect("the frame decodes");
     let mut out = Vec::new();
     for message in &messages {
@@ -199,11 +210,14 @@ fn decoded_puts(payload: &[u8]) -> Vec<Vec<u8>> {
         let PushOwnedVariant::CodecZenohMsgPut(put) = &push.body else {
             panic!("only Puts were encoded");
         };
-        out.push(
+        let (id, suffix) = wz_session_core::wireexpr_resolve::id_and_suffix(&push.keyexpr.body);
+        assert_eq!(id, 0, "a literal keyexpr");
+        out.push((
             wz_session_core::put_payload::inline_bytes(put)
                 .expect("an inline payload")
                 .to_vec(),
-        );
+            String::from(suffix.expect("a keyexpr")),
+        ));
     }
     out
 }
@@ -216,9 +230,24 @@ type Pump = SessionPump<Frozen, LwipSessionLink<Rc<LwipLink>>>;
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 struct PollTally {
     frame_payload: usize,
+    /// Push records lent where the datagram lies (`IterationEvent::InPlace`).
+    in_place: usize,
     sn_rejected: usize,
     parse_error: usize,
     other: usize,
+}
+
+/// What the subscriber was handed for one Put, recorded into fixed storage so
+/// that recording it allocates nothing inside the measured window: the payload,
+/// and the keyexpr's bytes with their length.
+type Delivery = ([u8; 8], [u8; 16], usize);
+
+/// A delivery as comparable values: the payload and the keyexpr.
+fn delivery_of((payload, key, len): &Delivery) -> (Vec<u8>, String) {
+    (
+        payload.to_vec(),
+        String::from_utf8(key[..*len].to_vec()).expect("a UTF-8 keyexpr"),
+    )
 }
 
 /// The two sessions, established, and what the acceptor's subscriber saw.
@@ -232,10 +261,10 @@ struct Pair {
     initiator: Rc<SessionLinkActions<CoopRuntime<Frozen>, CoopTime<Frozen>>>,
     /// The initiator's socket: what the measured frames are sent from.
     initiator_sink: Rc<dyn BoxedLinkDriver>,
-    /// Every Put payload the subscriber was handed, in order. Its capacity is
-    /// reserved before anything is measured, so recording a delivery does not
-    /// itself allocate.
-    delivered: Arc<Mutex<Vec<[u8; 8]>>>,
+    /// Every Put the subscriber was handed, in order. Its capacity is reserved
+    /// before anything is measured, so recording a delivery does not itself
+    /// allocate.
+    delivered: Arc<Mutex<Vec<Delivery>>>,
 }
 
 impl Pair {
@@ -284,7 +313,7 @@ impl Pair {
             config(SessionRole::Initiator),
         );
 
-        let delivered: Arc<Mutex<Vec<[u8; 8]>>> = Arc::new(Mutex::new(Vec::with_capacity(64)));
+        let delivered: Arc<Mutex<Vec<Delivery>>> = Arc::new(Mutex::new(Vec::with_capacity(64)));
         let observer = Rc::new(RefCell::new(ApplicationLayerObserver::new()));
         let seen = delivered.clone();
         observer
@@ -296,7 +325,12 @@ impl Pair {
                 BoxedSink::new(move |sample| {
                     let mut bytes = [0u8; 8];
                     bytes.copy_from_slice(sample.payload());
-                    seen.lock().expect("not poisoned").push(bytes);
+                    let key = sample.keyexpr().as_bytes();
+                    let mut key_bytes = [0u8; 16];
+                    key_bytes[..key.len()].copy_from_slice(key);
+                    seen.lock()
+                        .expect("not poisoned")
+                        .push((bytes, key_bytes, key.len()));
                 }),
             )
             .expect("register the subscriber");
@@ -304,16 +338,18 @@ impl Pair {
         let polls = Rc::new(Cell::new(PollTally::default()));
         let tally = polls.clone();
         let mut on_event: Box<dyn FnMut(IterationEvent<'_>)> = Box::new(move |event| {
-            if let IterationEvent::Poll(outcome) = &event {
-                let mut t = tally.get();
-                match outcome {
+            let mut t = tally.get();
+            match &event {
+                IterationEvent::Poll(outcome) => match outcome {
                     DriverLoopOutcome::FramePayload { .. } => t.frame_payload += 1,
                     DriverLoopOutcome::RxSnRejected { .. } => t.sn_rejected += 1,
                     DriverLoopOutcome::ParseError(_) => t.parse_error += 1,
                     _ => t.other += 1,
-                }
-                tally.set(t);
+                },
+                IterationEvent::InPlace(_) => t.in_place += 1,
+                _ => {}
             }
+            tally.set(t);
             dispatch(event)
         });
 
@@ -358,14 +394,15 @@ impl Pair {
     /// Send a frame of `n` Puts and run the ONE acceptor iteration that
     /// receives it. Returns the allocations that iteration made and the Puts
     /// the shared decoder reads out of the frame's payload.
-    fn frame_turn(&mut self, n: usize) -> (usize, Vec<Vec<u8>>) {
+    fn frame_turn(&mut self, n: usize) -> (usize, Vec<(Vec<u8>, String)>) {
         let (wire, payload) = frame_of(self.next_sn(), n);
         let expected = decoded_puts(&payload);
         let (allocations, polls, delivered) = self.turn(&wire);
         assert_eq!(
             delivered, expected,
-            "every Put reached the subscriber, in order, with the bytes the \
-             shared batch decoder reads out of the same payload (the turn reported {polls:?})"
+            "every Put reached the subscriber, in order, with the payload and the \
+             keyexpr the shared batch decoder reads out of the same payload (the \
+             turn reported {polls:?})"
         );
         assert_eq!(
             (polls.sn_rejected, polls.parse_error, polls.other),
@@ -387,7 +424,7 @@ impl Pair {
     /// Send `wire` from the initiator's socket and run the ONE acceptor
     /// iteration that receives it: its allocations, what it reported, and the
     /// Put payloads the subscriber was handed.
-    fn turn(&mut self, wire: &[u8]) -> (usize, PollTally, Vec<Vec<u8>>) {
+    fn turn(&mut self, wire: &[u8]) -> (usize, PollTally, Vec<(Vec<u8>, String)>) {
         self.delivered.lock().expect("not poisoned").clear();
         self.polls.set(PollTally::default());
         let sent = self
@@ -409,7 +446,7 @@ impl Pair {
             .lock()
             .expect("not poisoned")
             .iter()
-            .map(|p| p.to_vec())
+            .map(delivery_of)
             .collect();
         (allocations, self.polls.get(), delivered)
     }
@@ -449,18 +486,19 @@ fn a_frame_that_breaks_after_two_records_is_reported_after_what_was_dispatched()
     );
     let (_, polls, delivered) = pair.turn(&wire);
 
+    // In place, each Put is lent as it is decoded (`IterationEvent::InPlace`).
     #[cfg(feature = "rx-in-place")]
     let expected = (
         whole,
         PollTally {
-            frame_payload: 2,
+            in_place: 2,
             parse_error: 1,
             ..PollTally::default()
         },
     );
     #[cfg(not(feature = "rx-in-place"))]
     let expected = (
-        Vec::<Vec<u8>>::new(),
+        Vec::<(Vec<u8>, String)>::new(),
         PollTally {
             parse_error: 1,
             ..PollTally::default()
@@ -473,20 +511,54 @@ fn a_frame_that_breaks_after_two_records_is_reported_after_what_was_dispatched()
     );
 }
 
+/// A unit the in-place path does not read in place goes down the copying path
+/// and is COUNTED, by why: here a `Fragment`, whose payload belongs to the
+/// reassembly staging. The pump's counts say so; the unit is not read in place.
+#[cfg(feature = "rx-in-place")]
+#[test]
+fn a_fragment_takes_the_copying_path_and_is_counted() {
+    let (_serial, link) = wz_link_lwip::lwip_test_link();
+    let link = Rc::new(link);
+    let mut pair = Pair::establish(&link, 7495);
+
+    let (frame, _) = frame_of(pair.next_sn(), 1);
+    // The same SN and payload as a final reliable fragment (no M flag).
+    let mut fragment = frame;
+    fragment[0] = wire_const::T_MID_FRAGMENT | wire_const::FLAG_T_FRAGMENT_R;
+    let before = pair.acceptor.rx_path_counts();
+    let _ = pair.turn(&fragment);
+    let after = pair.acceptor.rx_path_counts();
+    assert_eq!(
+        (
+            after.in_place - before.in_place,
+            after.fragment - before.fragment,
+            after.copied() - before.copied(),
+        ),
+        (0, 1, 1),
+        "(read in place, fragments copied, units copied)"
+    );
+}
+
 #[test]
 fn the_frame_path_of_an_inbound_frame_is_counted_per_frame_and_per_record() {
     let (_serial, link) = wz_link_lwip::lwip_test_link();
     let link = Rc::new(link);
     let mut pair = Pair::establish(&link, 7491);
 
+    #[cfg(feature = "rx-in-place")]
+    let paths_before = pair.acceptor.rx_path_counts();
     let idle = pair.idle_turn();
     let (one, puts) = pair.frame_turn(1);
     assert_eq!(puts.len(), 1);
     let (two, _) = pair.frame_turn(2);
     let (eight, puts) = pair.frame_turn(8);
     assert_eq!(puts.len(), 8);
+    let fixed = wz_session_core::bounded::ENFORCES_CAPACITY;
     // Printed so a run reports its numbers, red or green.
-    std::println!("allocations: idle {idle}, frame of 1 {one}, of 2 {two}, of 8 {eight}");
+    std::println!(
+        "allocations: idle {idle}, frame of 1 {one}, of 2 {two}, of 8 {eight} \
+         (fixed bounded backing: {fixed})"
+    );
 
     // The turn with nothing to receive allocates nothing, so what the frame
     // turns count is the frame's.
@@ -494,13 +566,31 @@ fn the_frame_path_of_an_inbound_frame_is_counted_per_frame_and_per_record() {
     let per_record = two - one;
     let frame_part = (2 * one).checked_sub(two).expect("cost(2) <= 2 * cost(1)");
 
+    // S3: a Put whose keyexpr fits costs nothing on the fixed backing; on the
+    // growable one, exactly the two chunk lists the subscriber matcher grows.
+    #[cfg(feature = "rx-in-place")]
+    let matcher_scratch = if fixed { 0 } else { 2 };
     #[cfg(feature = "rx-in-place")]
     assert_eq!(
-        (frame_part, eight),
-        (0, 8 * per_record),
-        "(allocations paid once per frame, cost of a frame of 8): with the datagram \
-         dispatched where the socket holds it, a frame costs only its records"
+        (frame_part, per_record, eight),
+        (0, matcher_scratch, 8 * matcher_scratch),
+        "(allocations paid once per frame, per Put, cost of a frame of 8): with the \
+         datagram dispatched where the socket holds it and each Put delivered where \
+         it lies, a Put costs the heap only the matcher's growable scratch"
     );
+    // Every frame was read where the socket held it; none was copied.
+    #[cfg(feature = "rx-in-place")]
+    {
+        let after = pair.acceptor.rx_path_counts();
+        assert_eq!(
+            (
+                after.in_place - paths_before.in_place,
+                after.copied() - paths_before.copied()
+            ),
+            (3, 0),
+            "(frames read in place, units copied) over the three frame turns"
+        );
+    }
     #[cfg(not(feature = "rx-in-place"))]
     assert!(
         frame_part > 0 && eight > 8 * per_record,
