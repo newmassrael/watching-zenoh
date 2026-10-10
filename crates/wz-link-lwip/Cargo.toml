@@ -72,7 +72,11 @@ wz-runtime-core = { path = "../wz-runtime-core" }
 # invokes sce-codegen, so this crate pulls no codegen toolchain).
 
 [dev-dependencies]
-# (none yet — host smoke uses only the library + lwip-sys FFI.)
+# This crate's own unit tests drive the transmit pool (`tx_pool`), which exists
+# only with `tx-pool`. A dev-dependency on itself turns the feature on for the
+# test build alone; the library an image links is unchanged, and a test that
+# does not install a pool lends exactly as before.
+wz-link-lwip = { path = ".", features = ["tx-pool"] }
 
 [features]
 # Selects the SLIM / constrained session-rx buffer-pool profile
@@ -106,6 +110,16 @@ loopif-multicast = []
 # `Once`, which would not guard the first). Test-only: enable via a
 # dev-dependency feature, never in a production build.
 test-support = []
+
+# ARCHITECTURE section 9.1 -- the transmit pool (`tx_pool`, over the generated
+# `session_tx_pool_mcu` emit): a firmware that installs one has the session
+# encode each outbound datagram into a pool slot, and a MAC that gathers in
+# place reads the frame out of that slot, with the slot's generated transmit
+# lifecycle (armed, started, complete) following it. Off by default: the pool
+# is 12 KiB that only an image whose MAC reads in place, and which places the
+# pool where that MAC's DMA reaches uncached, has a use for. With it on and no
+# pool installed, nothing changes.
+tx-pool = []
 
 [lints]
 workspace = true

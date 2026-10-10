@@ -1,6 +1,6 @@
 // SCE-GENERATED — DO NOT EDIT
 // source-hash: c642481258b4bd80549c725f2446fb4551bd9c85f289f1c6b24091fa386caa5e
-// SCE-MAP: reassembly_pool_ap.scxml:59 :: _forge_body
+// SCE-MAP: session_tx_pool_mcu.scxml:53 :: _forge_body
 
 // SCE Forge: Auto-generated from Extended SCXML (sce:kind="buffer-pool")
 // Runtime: self-contained on (rust, std) — no SCE-side helper crate.
@@ -25,17 +25,17 @@
 // sidecar via the parser's auto-inject hook so deploy reviewers
 // see the dependency surface in one place.
 //
-// Generated from document `reassembly_pool_ap` with section `heap`,
-// alignment `64`, cache-policy `none`.
+// Generated from document `session_tx_pool_mcu` with section `sram1`,
+// alignment `32`, cache-policy `non-cacheable`.
 
 
 use core::marker::PhantomData;
 
 /// Number of slots in the pool (`<sce:slot-count>`).
-pub const SLOT_COUNT: usize = 32;
+pub const SLOT_COUNT: usize = 8;
 
 /// Bytes per slot (`<sce:slot-size>`).
-pub const SLOT_SIZE: usize = 1048576;
+pub const SLOT_SIZE: usize = 1536;
 
 /// SRAM region name (`<sce:section>`), round-tripped so downstream
 /// tooling can read it without re-parsing the SCXML.
@@ -55,14 +55,14 @@ pub const SLOT_SIZE: usize = 1048576;
 /// names (§synth-5-E codegen contract), and it is a different author
 /// API from this one — not something a consumer can bolt on with
 /// `#[link_section]`.
-pub const SECTION: &'static str = "heap";
+pub const SECTION: &'static str = "sram1";
 
 /// DMA alignment in bytes (`<sce:alignment>`). Carried into the slot
 /// type's `#[repr(align)]` below, so it is the alignment of every
 /// slot rather than a number the pool merely reports. Non-powers of
 /// two and a `slot-size` that is not a multiple of this are rejected
 /// at parse time.
-pub const ALIGNMENT: u32 = 64;
+pub const ALIGNMENT: u32 = 32;
 
 /// DMA channel binding (`<sce:dma-channel>`). Empty when the pool is
 /// purely CPU-managed.
@@ -71,7 +71,7 @@ pub const DMA_CHANNEL: &'static str = "";
 /// Cache policy (`<sce:cache-policy>`) — `maintain` / `non-cacheable`
 /// / `none`. C5 wires the maintenance calls below when this is
 /// `maintain`; the other two policies emit no maintenance calls.
-pub const CACHE_POLICY: &'static str = "none";
+pub const CACHE_POLICY: &'static str = "non-cacheable";
 /// Number of declared lifecycle states. Mirrors
 /// `forge::buffer_pool_fsm::STATE_COUNT` — the seven states from
 /// spec §synth-5-E lines 1129-1135.
@@ -81,104 +81,6 @@ pub const STATE_COUNT: usize = 7;
 /// `forge::buffer_pool_fsm::TRANSITION_COUNT` — the eleven legal
 /// edges from spec §synth-5-E lines 1141-1156.
 pub const TRANSITION_COUNT: usize = 11;
-// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-// Reassembly variant per-slot state (RFC §synth-5-M lines 2680-2698
-// + 2864-2876). The reassembly variant of §synth-5-E (`<sce:variant>reassembly`)
-// extends the slot table with three additional per-slot fields the
-// author-level Fragment FSM (RFC §synth-5-M lines 2864-2876, lives in
-// downstream SCXML statechart) consumes:
-//   - `bitmap: [u32; FRAGMENT_BITMAP_WORDS]` — fragment-index bitmap
-//     marking each received fragment; bitmap width derived from
-//     `<sce:max-fragments-per-message>` (RFC §synth-5-M line 2688 +
-//     2694-2698).
-//   - `deadline: u64` — per-slot reassembly deadline in raw ticks /
-//     ms; `<sce:reassembly-timeout-ms>` (RFC §synth-5-M line 2689) drives
-//     the timer the FSM's `Receiving → TimedOut` edge consumes
-//     (`docs/reassembly-fsm.md` §2.4.5).
-//   - `peer_id: PeerId` — handshake-derived ZID (RFC §synth-5-M lines
-//     2700-2738). Reassembly is forbidden on non-`established_session`
-//     links by the cross-doc validator
-//     `reassembly/untrusted-link-binding`, so the peer-id is always
-//     the 16-byte ZID — never the spoofable wire source address.
-//     The `reassembly/peer-id-not-zid-on-established-session`
-//     codegen self-check enforces this template invariant per RFC
-//     §synth-5-M lines 2976-2981.
-//
-// Quota enforcement (RFC §synth-5-M lines 2848-2856) lives in the author
-// SCXML algorithm (`<scxml sce:kind="algorithm">`) that walks the
-// slot table at `Fragment.First` arrival — it is intentionally NOT
-// emitted from the pool template (O(slot_count) bounded loop fits
-// `mode="static"` WCET; no runtime infrastructure needed in the
-// codegen output). Same for fragment-index marking and
-// completion-detection: those live in the author FSM body.
-// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-/// Bitmap word count per reassembly slot — `ceil(max-fragments-per-message / 32)`.
-/// Width pinned to `u32` (4 bytes) at the size assertion below; using
-/// platform-natural `usize` would break the wire-shape invariant the
-/// runtime metadata layer relies on.
-pub const FRAGMENT_BITMAP_WORDS: usize = (44 + 31) / 32;
-
-/// `<sce:max-fragments-per-message>` (RFC §synth-5-M line 2688) — the
-/// closed cap a reassembled message's fragment count cannot exceed
-/// (worst-case message must complete within the bitmap width).
-pub const MAX_FRAGMENTS_PER_MESSAGE: u32 = 44;
-
-/// `<sce:reassembly-timeout-ms>` (RFC §synth-5-M line 2689) — per-slot
-/// deadline value in milliseconds, written into `ReassemblySlot.deadline`
-/// at `Fragment.First` arrival.
-pub const REASSEMBLY_TIMEOUT_MS: u32 = 500;
-
-/// `<sce:per-peer-quota>` (RFC §synth-5-M lines 2690, 2841-2861) — caps
-/// the in-flight reassembly slots a single peer (keyed by ZID) may
-/// hold. Consumed by the SCXML-side per-peer quota algorithm; this
-/// constant exposes the configured cap so the algorithm doesn't have
-/// to round-trip through the deploy.yaml.
-pub const PER_PEER_QUOTA: u32 = 8;
-
-/// Handshake-derived peer identifier — 16-byte Zenoh ZID (RFC §synth-5-M
-/// lines 2708-2714). The `reassembly/peer-id-not-zid-on-established-
-/// session` codegen self-check (RFC §synth-5-M lines 2976-2981) enforces
-/// that this declaration emits the `[u8; 16]` byte-array shape on
-/// every reassembly-variant pool — wire-source typedefs would silently
-/// inherit UDP source-IP spoofing exposure. Reverse-linkage:
-/// the validator reads the marker below instead of scanning for the
-/// literal `pub type PeerId = [u8; 16]` declaration.
-// SCE-EMIT: kind=reassembly.peer-id-zid
-pub type PeerId = [u8; 16];
-
-/// Per-slot reassembly state — RFC §synth-5-M lines 2680-2698. Author SCXML
-/// FSM bodies (`docs/reassembly-fsm.md`) reach into `bitmap` and
-/// `deadline` directly; `peer_id` is matched on `Fragment.Continue`
-/// / `Final` to bind continuation fragments to the originating ZID.
-#[repr(C)]
-pub struct ReassemblySlot {
-    /// Fragment-index bitmap. Bit `i` (LSB-first across words) marks
-    /// fragment index `i` as received. RFC §synth-5-M line 2696.
-    pub bitmap: [u32; FRAGMENT_BITMAP_WORDS],
-    /// Per-slot reassembly deadline (raw ms ticks). RFC §synth-5-M line
-    /// 2689 + 2697.
-    pub deadline: u64,
-    /// Originating peer ZID. RFC §synth-5-M lines 2697-2714.
-    pub peer_id: PeerId,
-}
-
-// Drift guards — pin the FRAGMENT_BITMAP_WORDS+deadline wire shape
-// so a future port to 16-bit / 64-bit `usize` cores or a "smarter"
-// bitmap type does not silently re-define the per-slot layout the
-// author FSM and the cross-language tracing path observe.
-const _: () = assert!(
-    core::mem::size_of::<u32>() == 4,
-    "fragment-index bitmap word is fixed to u32 (4 bytes) per RFC §synth-5-M line 2696",
-);
-const _: () = assert!(
-    core::mem::size_of::<u64>() == 8,
-    "reassembly slot deadline is fixed to u64 (8 bytes) per RFC §synth-5-M line 2697",
-);
-const _: () = assert!(
-    core::mem::size_of::<PeerId>() == 16,
-    "reassembly slot peer-id is fixed to 16-byte ZID per RFC §synth-5-M lines 2708-2714",
-);
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 // Slot lifecycle state — runtime tag value (mirrors C11 enum)
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -274,7 +176,7 @@ impl<S> Slot<S> {
 /// below say so where the compiler can check it rather than leaving
 /// the reader to trust it.
 #[derive(Clone, Copy)]
-#[repr(C, align(64))]
+#[repr(C, align(32))]
 struct SlotBytes([u8; SLOT_SIZE]);
 
 const _: () = assert!(
@@ -294,7 +196,7 @@ const _: () = assert!(
 /// `pool_return` on a `Slot<DmaArmedRx>` is a type error caught by
 /// rustc rather than a runtime check.
 #[repr(C)]
-pub struct ReassemblyPoolAp {
+pub struct SessionTxPoolMcu {
     /// Slot storage. Each slot is `SLOT_SIZE` bytes on the declared
     /// DMA boundary.
     storage: [SlotBytes; SLOT_COUNT],
@@ -303,13 +205,13 @@ pub struct ReassemblyPoolAp {
     slot_states: [SlotState; SLOT_COUNT],
 }
 
-impl Default for ReassemblyPoolAp {
+impl Default for SessionTxPoolMcu {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl ReassemblyPoolAp {
+impl SessionTxPoolMcu {
     /// Construct an empty pool — every slot starts on the freelist.
     pub fn new() -> Self {
         Self {
@@ -433,7 +335,7 @@ impl Slot<CpuMut> {
     /// emits `sce_dcache_clean_by_addr` before the state transition
     /// (spec lines 1186-1188) so the DMA controller reads the
     /// latest CPU writes from main memory.
-    pub fn link_arm_tx(self, pool: &mut ReassemblyPoolAp) {
+    pub fn link_arm_tx(self, pool: &mut SessionTxPoolMcu) {
         pool.slot_states[self.idx] = SlotState::DmaArmedTx;
     }
 
@@ -441,17 +343,17 @@ impl Slot<CpuMut> {
     /// `cpu-mut → free` ("abort encode" error path) and the
     /// `cpu-mut|cpu-ref → free` author-visible API on lines
     /// 1232-1237. Consumes the handle.
-    pub fn pool_return(self, pool: &mut ReassemblyPoolAp) {
+    pub fn pool_return(self, pool: &mut SessionTxPoolMcu) {
         pool.slot_states[self.idx] = SlotState::Free;
     }
 
     /// Read-only borrow of the slot's bytes.
-    pub fn read<'a>(&'a self, pool: &'a ReassemblyPoolAp) -> &'a [u8; SLOT_SIZE] {
+    pub fn read<'a>(&'a self, pool: &'a SessionTxPoolMcu) -> &'a [u8; SLOT_SIZE] {
         &pool.storage[self.idx].0
     }
 
     /// Mutable borrow of the slot's bytes.
-    pub fn write<'a>(&'a mut self, pool: &'a mut ReassemblyPoolAp) -> &'a mut [u8; SLOT_SIZE] {
+    pub fn write<'a>(&'a mut self, pool: &'a mut SessionTxPoolMcu) -> &'a mut [u8; SLOT_SIZE] {
         &mut pool.storage[self.idx].0
     }
 }
@@ -468,13 +370,13 @@ impl Slot<CpuRef> {
     /// Return the slot to the freelist. Spec §synth-5-E line 1152:
     /// `cpu-ref → free` ("handler complete; pool_return(slot)").
     /// Consumes the handle.
-    pub fn pool_return(self, pool: &mut ReassemblyPoolAp) {
+    pub fn pool_return(self, pool: &mut SessionTxPoolMcu) {
         pool.slot_states[self.idx] = SlotState::Free;
     }
 
     /// Read-only borrow of the slot's bytes — `cpu-ref` is a shared
     /// CPU-read state per spec line 1135.
-    pub fn read<'a>(&'a self, pool: &'a ReassemblyPoolAp) -> &'a [u8; SLOT_SIZE] {
+    pub fn read<'a>(&'a self, pool: &'a SessionTxPoolMcu) -> &'a [u8; SLOT_SIZE] {
         &pool.storage[self.idx].0
     }
 }
@@ -511,9 +413,9 @@ impl Slot<DmaArmedRx> {
     /// and the CPU must not read through it before the completion
     /// edge.
     ///
-    /// Takes `&mut ReassemblyPoolAp` because a pointer valid for writes
+    /// Takes `&mut SessionTxPoolMcu` because a pointer valid for writes
     /// has to be derived from a mutable borrow.
-    pub fn dma_armed_rx_ptr(&self, pool: &mut ReassemblyPoolAp) -> *mut u8 {
+    pub fn dma_armed_rx_ptr(&self, pool: &mut SessionTxPoolMcu) -> *mut u8 {
         pool.storage[self.idx].0.as_mut_ptr()
     }
 }
@@ -547,7 +449,7 @@ impl Slot<DmaArmedRx> {
 // hands out a view of memory the peripheral is still writing.
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-impl ReassemblyPoolAp {
+impl SessionTxPoolMcu {
     /// `dma-armed-tx → dma-busy-tx` — DMA controller signal.
     /// Spec §synth-5-E line 1144.
     ///
@@ -644,7 +546,7 @@ impl Slot<DmaArmedRx> {
     /// # Safety
     /// The caller must have observed peripheral start for this slot.
     /// Calling it early publishes memory the peripheral still owns.
-    pub unsafe fn dma_start_rx(self, pool: &mut ReassemblyPoolAp) {
+    pub unsafe fn dma_start_rx(self, pool: &mut SessionTxPoolMcu) {
         pool.slot_states[self.idx] = SlotState::DmaBusyRx;
     }
 }
@@ -659,7 +561,7 @@ impl Slot<CpuRef> {
     /// # Safety
     /// The caller must have observed in-place mutate for this slot.
     /// Calling it early publishes memory the peripheral still owns.
-    pub unsafe fn mutate_in_place(self, pool: &mut ReassemblyPoolAp) -> Slot<CpuMut> {
+    pub unsafe fn mutate_in_place(self, pool: &mut SessionTxPoolMcu) -> Slot<CpuMut> {
         pool.slot_states[self.idx] = SlotState::CpuMut;
         Slot { idx: self.idx, _state: PhantomData }
     }

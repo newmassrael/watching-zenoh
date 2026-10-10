@@ -1,0 +1,61 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  SPDX-License-Identifier: AGPL-3.0-or-later OR LicenseRef-watching-zenoh-Commercial
+  SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
+-->
+<!--
+  MCU session-tx buffer-pool config: the SSOT for the slots an lwIP (MCU)
+  node encodes outbound session frames into, and that an Ethernet MAC's
+  transmit DMA then reads in place (ARCHITECTURE section 9.1: "Codec::encode
+  writes directly into a pool slot ... DMA controller reads slot via
+  pre-built descriptor"; section 9.4 places TX pools beside the RX pools).
+
+  Born with its consumer (the reassembly_pool pattern): `wz-link-lwip`'s
+  `tx_pool` module, behind that crate's `tx-pool` feature. A slot is lent to
+  the session as the memory of one lwIP pbuf, the session writes the frame
+  into it, lwIP writes the UDP, IPv4 and Ethernet headers in front of it IN
+  the slot, and a MAC that gathers in place is handed the frame at the
+  slot's own address. The generated lifecycle is what governs the slot:
+  acquired for encode when it is lent, armed for transmit when it is sent,
+  started when a MAC queues it to be read in place, complete when the MAC
+  reports it done, and un-armed and returned when the frame left by a copy
+  or never reached a MAC.
+
+  Values (and their derivations):
+    - slot_size 1536: the slot holds the pbuf, not only the bytes. lwIP's
+      custom pbuf record (struct pbuf_custom: the 16-byte struct pbuf and
+      one function pointer, 20 bytes on a 32-bit target) sits at the start
+      of the slot, then the room lwIP keeps in front of a transport-layer
+      payload (PBUF_TRANSPORT, 14 + 20 + 8 = 42 bytes, 44 at MEM_ALIGNMENT
+      4), then the payload. 1536 - 20 - 44 = 1472, which is the largest UDP
+      payload a 1500-byte Ethernet MTU carries unfragmented. 1536 is also a
+      multiple of the alignment below, and the CYT4BF MAC's own buffer
+      length. On a 64-bit host the record is larger and a slot carries
+      less; a frame that does not fit a slot is encoded on the heap, as
+      with any lend.
+    - slot_count 8: a slot is out from the lend until the MAC reports its
+      frame done, and the lwIP shim lets a MAC read at most 8 frames in
+      place at once (WZ_ETHIF_HELD_MAX in lwip-sys/shim.c). A dry pool is
+      not an error: the lend falls back to a pbuf from lwIP's own heap,
+      which is the path before this pool existed. 8 x 1536 = 12 KiB.
+
+  cache-policy is `non-cacheable`, which is a statement about where the
+  firmware puts the pool: the DMA master reads a slot behind the CPU's
+  back, so the pool is placed in memory the MPU marks non-cacheable (on the
+  Zephyr T2G image, Zephyr's `.nocache` section, where the MAC's own
+  descriptor rings already live), and no cache maintenance is emitted or
+  needed. That section is NOLOAD and the generated Rust pool owns its
+  storage inline, so `tx_pool::install` writes the whole pool before it is
+  used (a pool of zeroes is a pool of free slots). A board that cannot
+  place it so must not read the slots in place: the CYT4BF MAC reads in
+  place only inside the window its board names.
+-->
+<scxml xmlns="http://www.w3.org/2005/07/scxml"
+       xmlns:sce="http://sce.dev/ext"
+       sce:kind="buffer-pool" name="session_tx_pool_mcu" version="1.0">
+  <sce:slot-count>8</sce:slot-count>
+  <sce:slot-size>1536</sce:slot-size>
+  <sce:section>sram1</sce:section>
+  <sce:alignment>32</sce:alignment>
+  <sce:cache-policy>non-cacheable</sce:cache-policy>
+</scxml>

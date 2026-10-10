@@ -222,7 +222,8 @@ fn regen_codecs(root: &Path) {
 ///   wz-runtime-coop  : reassembly_pool_mcu (buffer-pool)
 ///   wz-link-lwip     : scout_rx_pool_mcu, session_rx_pool_mcu,
 ///                      session_rx_pool_mcu_minimal,
-///                      session_rx_pool_mcu_multicast (buffer-pools)
+///                      session_rx_pool_mcu_multicast,
+///                      session_tx_pool_mcu (buffer-pools)
 fn regen_statecharts_and_pools(root: &Path) {
     // `Codegen::from_manifest` derives the SCE workspace as
     // <manifest>/../../vendor/sce; any crates/* dir resolves to repo/vendor/sce.
@@ -255,6 +256,7 @@ fn regen_statecharts_and_pools(root: &Path) {
         ("session_rx_pool_mcu", "wz-link-lwip"),
         ("session_rx_pool_mcu_minimal", "wz-link-lwip"),
         ("session_rx_pool_mcu_multicast", "wz-link-lwip"),
+        ("session_tx_pool_mcu", "wz-link-lwip"),
     ];
     for (stem, krate) in pools {
         let out = root.join("out").join(krate);

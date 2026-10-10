@@ -311,7 +311,9 @@ OFF_AXIS: dict[str, tuple[str, frozenset[str]]] = {
     "wz-link-lwip": (
         "an MCU link crate whose consumers are the deploy probes, not an "
         "external caller reaching for a path",
-        frozenset({"buffer-pool-session-rx-slim", "test-support"}),
+        # `tx-pool` gates the transmit pool (`pub mod tx_pool` and its generated
+        # emit) at the crate root, a firmware's to install.
+        frozenset({"buffer-pool-session-rx-slim", "test-support", "tx-pool"}),
     ),
     "wz-packet-socket": (
         "one feature, gating a Linux-only capture path",
@@ -735,8 +737,9 @@ AXIS_REACHABLE: dict[str, frozenset[str]] = {
     # `any(test, feature = ..)`, `wz/session-lwip` an `all(feature = ..,
     # lwip_real_build)` whose second conjunct is a BUILD cfg and not a feature
     # at all. None is a simple crate-root item, so none is a shape the
-    # derivation could have named.
-    "wz-link-lwip": frozenset({"buffer-pool-session-rx-slim", "test-support"}),
+    # derivation could have named. `tx-pool` gates two crate-root `pub mod`s,
+    # the simple shape the derivation names.
+    "wz-link-lwip": frozenset({"buffer-pool-session-rx-slim", "test-support", "tx-pool"}),
     # R3080 — the MCU session shell. Its row is the same three features the
     # derivation either names (a crate-root `pub mod`) or reads as compound
     # (`any(test, feature = ..)`, `all(core, write)`), which is the second

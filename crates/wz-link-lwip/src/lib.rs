@@ -172,6 +172,33 @@ pub mod session_rx_pool_mcu_multicast {
     ));
 }
 
+/// SCE-codegen'd MCU session-TX buffer-pool SSOT
+/// (`sources/network/session_tx_pool_mcu.scxml`, 8 x 1536 = 12 KiB): the slots
+/// an outbound frame is encoded into and a MAC's DMA reads in place. Its
+/// consumer is [`tx_pool`], and both exist only under the `tx-pool` feature, so
+/// an image that does not install a pool carries neither.
+#[cfg(feature = "tx-pool")]
+#[allow(non_snake_case)]
+#[allow(unused_imports)]
+#[allow(dead_code)]
+#[allow(unused_variables)]
+#[allow(unused_mut)]
+#[allow(clippy::all)]
+pub mod session_tx_pool_mcu {
+    include!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../out/wz-link-lwip",
+        "/session_tx_pool_mcu.rs"
+    ));
+}
+
+/// ARCHITECTURE section 9.1 -- the transmit pool: with one installed, the payload
+/// the driver lends ([`LwipUdpSocket::alloc_tx_payload`]) is a slot of
+/// [`session_tx_pool_mcu`], and the slot's generated lifecycle follows the frame
+/// to the MAC and back.
+#[cfg(feature = "tx-pool")]
+pub mod tx_pool;
+
 pub mod rx_sockets;
 
 /// R311y599 — the receive SEAM over the buffer-pool emits: slots a reader
@@ -688,7 +715,22 @@ impl<const N: usize, const Q: usize> LwipUdpSocket<N, Q> {
     /// At most `N` bytes, the same cap `send_to` truncates to: a socket does not
     /// send what it could not receive. `None` when lwIP has no pbuf of that size,
     /// which a sender answers by encoding on the heap.
+    ///
+    /// With a transmit pool installed ([`tx_pool`], the `tx-pool` feature) the
+    /// buffer is a slot of that pool, capped at what a slot carries, so a MAC that
+    /// reads in place reads the frame out of the pool; a dry pool, or none, lends
+    /// the pbuf of lwIP's heap as before.
     pub fn alloc_tx_payload(&self, want: usize) -> Option<TxPayload> {
+        #[cfg(feature = "tx-pool")]
+        if let Ok(len @ 1..) = u16::try_from(want.min(N).min(tx_pool::capacity())) {
+            if let Some((p, lent)) = tx_pool::lend(len) {
+                return Some(TxPayload {
+                    p,
+                    capacity: usize::from(len),
+                    origin: Origin::Slot(Some(lent)),
+                });
+            }
+        }
         let len = u16::try_from(want.min(N)).ok()?;
         // SAFETY: returns an owned pbuf, counted until `TxPayload` gives it back,
         // or null.
@@ -696,6 +738,8 @@ impl<const N: usize, const Q: usize> LwipUdpSocket<N, Q> {
         Some(TxPayload {
             p: NonNull::new(p)?,
             capacity: usize::from(len),
+            #[cfg(feature = "tx-pool")]
+            origin: Origin::Heap,
         })
     }
 
@@ -704,13 +748,22 @@ impl<const N: usize, const Q: usize> LwipUdpSocket<N, Q> {
     /// no copy is made here.
     pub fn send_tx_payload(
         &mut self,
-        payload: TxPayload,
+        #[allow(unused_mut)] mut payload: TxPayload,
         len: usize,
         dst_addr: u32,
         dst_port: u16,
     ) -> Result<(), LinkError> {
         if len > payload.capacity {
             return Err(LinkError::PbufAlloc);
+        }
+        // A pool slot is the link's from here: the CPU has written the frame, and
+        // what follows is the send. However it ends (read in place by a MAC,
+        // copied, refused), the slot goes home when lwIP lets go of the pbuf.
+        #[cfg(feature = "tx-pool")]
+        if let Origin::Slot(lent) = &mut payload.origin {
+            if let Some(lent) = lent.take() {
+                tx_pool::arm(lent);
+            }
         }
         // SAFETY: `payload` owns a live single pbuf of `capacity >= len` bytes;
         // shrinking a pbuf to a length no greater than its own is the documented
@@ -803,6 +856,18 @@ pub(crate) unsafe fn send_datagram(
 pub struct TxPayload {
     p: NonNull<pbuf>,
     capacity: usize,
+    #[cfg(feature = "tx-pool")]
+    origin: Origin,
+}
+
+/// Where a lent payload's memory came from, which decides how it goes back.
+#[cfg(feature = "tx-pool")]
+enum Origin {
+    /// A pbuf of lwIP's heap, counted by the shim.
+    Heap,
+    /// A slot of the transmit pool: the handle while it is unsent, `None` once it
+    /// was armed for the send (the free callback then takes it home).
+    Slot(Option<tx_pool::Lent>),
 }
 
 impl TxPayload {
@@ -818,6 +883,19 @@ impl TxPayload {
 
 impl Drop for TxPayload {
     fn drop(&mut self) {
+        #[cfg(feature = "tx-pool")]
+        if let Origin::Slot(lent) = &mut self.origin {
+            let unsent = lent.take();
+            // SAFETY: `p` is ours. For a sent slot whoever still reads it holds a
+            // reference of its own; the last one to go runs the free callback,
+            // which takes the slot home. For an unsent one the callback leaves the
+            // slot to the handle, given back just below.
+            unsafe { pbuf_free(self.p.as_ptr()) };
+            if let Some(lent) = unsent {
+                tx_pool::abandon(lent);
+            }
+            return;
+        }
         // SAFETY: `p` is ours; a payload that was sent has had its own reference
         // taken by whoever still reads it, so this drops only ours.
         unsafe { lwip_sys::wz_lwip_tx_pbuf_free(self.p.as_ptr()) };

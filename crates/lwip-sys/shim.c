@@ -133,6 +133,63 @@ u32_t wz_lwip_tx_pbufs_out(void) {
     return wz_tx_pbufs_out;
 }
 
+/* ARCHITECTURE section 9.1 -- a pbuf whose memory IS one slot of a transmit pool
+ * (`sources/network/session_tx_pool_mcu.scxml`, `wz-link-lwip`'s `tx_pool`).
+ *
+ * The slot is laid out the way lwIP lays out a pbuf of its own heap: the record
+ * first, then the room lwIP keeps in front of a transport-layer payload, then the
+ * payload. So when lwIP adds the UDP, IPv4 and Ethernet headers it writes them
+ * INTO the slot, in front of the payload, and the frame a MAC is handed is one
+ * piece inside the slot. The record being at the start of the slot is also what
+ * `pbuf_add_header` needs of a pbuf whose data follows its struct (it refuses to
+ * move the payload below the end of the struct), and it is how the free callback
+ * finds the slot: the pbuf lwIP frees IS the slot's first byte.
+ *
+ * `free_fn` is called, as for any custom pbuf, when lwIP drops the last reference,
+ * which is after a MAC that read the frame in place has said it is done. */
+#if LWIP_SUPPORT_CUSTOM_PBUF
+
+#define WZ_TX_SLOT_HEAD LWIP_MEM_ALIGN_SIZE(sizeof(struct pbuf_custom))
+#define WZ_TX_SLOT_ROOM (WZ_TX_SLOT_HEAD + LWIP_MEM_ALIGN_SIZE(PBUF_TRANSPORT))
+
+/* How many payload bytes a slot of `slot_len` bytes carries: 0 when it cannot
+ * hold the record and the header room. */
+u16_t wz_lwip_tx_slot_capacity(u16_t slot_len) {
+    return slot_len > WZ_TX_SLOT_ROOM ? (u16_t)(slot_len - WZ_TX_SLOT_ROOM) : 0;
+}
+
+/* A pbuf of `len` payload bytes over the slot at `slot`, or NULL when `len` does
+ * not fit. `slot` must be aligned for the record (a pool slot is 32-byte aligned)
+ * and stay valid, and unchanged except through the pbuf, until `free_fn` runs. */
+struct pbuf *wz_lwip_tx_slot_pbuf(void *slot, u16_t slot_len, u16_t len,
+                                  void (*free_fn)(struct pbuf *p)) {
+    if (slot == NULL || free_fn == NULL || len > wz_lwip_tx_slot_capacity(slot_len)) {
+        return NULL;
+    }
+    struct pbuf_custom *pc = (struct pbuf_custom *)slot;
+    pc->custom_free_function = free_fn;
+    return pbuf_alloced_custom(PBUF_TRANSPORT, len, PBUF_RAM, pc,
+                               (u8_t *)slot + WZ_TX_SLOT_HEAD,
+                               (u16_t)(slot_len - WZ_TX_SLOT_HEAD));
+}
+
+#else /* !LWIP_SUPPORT_CUSTOM_PBUF */
+
+/* A port without custom pbufs cannot wrap a slot: nothing fits, and a sender
+ * falls back to a pbuf of lwIP's own heap. */
+u16_t wz_lwip_tx_slot_capacity(u16_t slot_len) {
+    (void)slot_len;
+    return 0;
+}
+
+struct pbuf *wz_lwip_tx_slot_pbuf(void *slot, u16_t slot_len, u16_t len,
+                                  void (*free_fn)(struct pbuf *p)) {
+    (void)slot; (void)slot_len; (void)len; (void)free_fn;
+    return NULL;
+}
+
+#endif /* LWIP_SUPPORT_CUSTOM_PBUF */
+
 /* The local port `pcb` is bound to (host order), 0 for no pcb. */
 u16_t wz_lwip_udp_local_port(const struct udp_pcb *pcb) {
     return pcb == NULL ? 0 : pcb->local_port;

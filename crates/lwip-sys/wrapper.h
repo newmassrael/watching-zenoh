@@ -70,3 +70,9 @@ u16_t wz_lwip_udp_local_port(const struct udp_pcb *pcb);
 struct pbuf *wz_lwip_tx_pbuf_alloc(u16_t len);
 void wz_lwip_tx_pbuf_free(struct pbuf *p);
 u32_t wz_lwip_tx_pbufs_out(void);
+/* ARCHITECTURE section 9.1 -- a pbuf whose memory is one transmit pool slot. The
+ * free callback is spelt out rather than named by lwIP's typedef, which a port
+ * without custom pbufs does not declare. */
+u16_t wz_lwip_tx_slot_capacity(u16_t slot_len);
+struct pbuf *wz_lwip_tx_slot_pbuf(void *slot, u16_t slot_len, u16_t len,
+                                  void (*free_fn)(struct pbuf *p));

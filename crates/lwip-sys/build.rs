@@ -330,6 +330,9 @@ fn main() {
         .allowlist_function("wz_lwip_tx_pbuf_alloc")
         .allowlist_function("wz_lwip_tx_pbuf_free")
         .allowlist_function("wz_lwip_tx_pbufs_out")
+        // ARCHITECTURE section 9.1 -- a pbuf over one transmit pool slot.
+        .allowlist_function("wz_lwip_tx_slot_capacity")
+        .allowlist_function("wz_lwip_tx_slot_pbuf")
         // Loopback poll (NO_SYS + LWIP_NETIF_LOOPBACK_MULTITHREADING=0
         // requires explicit poll to drain the loop_netif output queue
         // into ip_input).

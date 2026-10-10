@@ -148,7 +148,13 @@ unsafe extern "C" fn gather_trampoline<M: EthernetMac>(
         Ok(mut mac) => match unsafe { mac.transmit_gather(&pieces[..n], cookie) } {
             TxGather::Refused => 0,
             TxGather::Copied => 1,
-            TxGather::Queued => 2,
+            TxGather::Queued => {
+                // A frame read in place out of a transmit pool slot: the slot is
+                // the bus master's now.
+                #[cfg(feature = "tx-pool")]
+                crate::tx_pool::on_queued(&pieces[..n]);
+                2
+            }
         },
         Err(_) => 0,
     }
@@ -968,6 +974,157 @@ mod tests {
         );
         std::assert_eq!(udp_of(&frame.joined), Some((7601, &PAYLOAD[..])));
         std::assert!(rig.node.held_tx() >= 1, "held while the MAC reads it");
+    }
+
+    // ---- ARCHITECTURE section 9.1: a frame sent from a transmit pool slot --------
+
+    /// Lend a pool slot through the socket, write `bytes` into it, and send it to
+    /// the far host. Returns the address the bytes were written at.
+    #[cfg(feature = "tx-pool")]
+    fn send_from_slot(socket: &mut crate::rx_sockets::SessionRxSocket, bytes: &[u8]) -> usize {
+        let payload = socket.alloc_tx_payload(bytes.len()).expect("a lend");
+        let (at, capacity) = payload.storage();
+        std::assert!(capacity >= bytes.len());
+        std::assert_eq!(
+            crate::tx_pool::slot_of(at).map(|(_, state)| state),
+            Some(crate::tx_pool::SlotState::CpuMut),
+            "the lend is a slot of the pool, the CPU's while it is written"
+        );
+        // SAFETY: the lent payload has `capacity >= bytes.len()` writable bytes.
+        unsafe { core::ptr::copy_nonoverlapping(bytes.as_ptr(), at, bytes.len()) };
+        socket
+            .send_tx_payload(
+                payload,
+                bytes.len(),
+                crate::ipv4_addr_from_octets(FAR_IP),
+                7601,
+            )
+            .expect("send");
+        at as usize
+    }
+
+    /// THE POINT OF THE POOL: the frame a MAC is handed to read in place lies
+    /// inside the slot the session wrote it into, headers and all, and the slot's
+    /// generated lifecycle follows it. The pool records it as the bus master's
+    /// while the MAC holds it, and free only once the MAC has reported it done.
+    /// Judged by address and by the pool's own state, which a copy cannot fake.
+    #[cfg(feature = "tx-pool")]
+    #[test]
+    fn a_frame_from_a_pool_slot_is_read_by_the_mac_inside_that_slot() {
+        use crate::tx_pool::{slot_of, stats, SlotState, TestPool};
+
+        let (_serial, link) = crate::lwip_test_link();
+        let mut rig = gather_node(&link, TxGather::Queued);
+        let mut socket = bind_session_rx(&link, 7602).expect("bind");
+        // Resolve the far host first, from lwIP's heap, so the slot's frame leaves at
+        // once rather than waiting in ARP's queue.
+        socket
+            .send_to(crate::ipv4_addr_from_octets(FAR_IP), 7601, b"prime")
+            .expect("send");
+        resolve_far_host(&mut rig, |_| {});
+        let pool = TestPool::install();
+        let before = rig.gathered.borrow().len();
+
+        let written = send_from_slot(&mut socket, b"encoded once, into the slot");
+
+        let gathered = rig.gathered.borrow();
+        let frame = gathered.get(before).expect("the datagram reached the MAC");
+        std::assert_eq!(
+            udp_of(&frame.joined),
+            Some((7601, &b"encoded once, into the slot"[..]))
+        );
+        std::assert_eq!(frame.pieces.len(), 1, "headers and payload are one piece");
+        let (start, len) = frame.pieces[0];
+        let (idx, state) = slot_of(start as *const u8).expect("the piece lies in a slot");
+        std::assert_eq!(
+            slot_of((start + len - 1) as *const u8).map(|(i, _)| i),
+            Some(idx),
+            "the whole frame lies in that one slot"
+        );
+        std::assert_eq!(
+            slot_of(written as *const u8).map(|(i, _)| i),
+            Some(idx),
+            "the slot the session wrote into"
+        );
+        std::assert_eq!(state, SlotState::DmaBusyTx, "the bus master's while queued");
+        let cookie = frame.cookie;
+        drop(gathered);
+        let s = stats().expect("installed");
+        std::assert_eq!((s.lent, s.started, s.completed, s.unarmed), (1, 1, 0, 0));
+
+        rig.released.borrow_mut().push(cookie);
+        rig.node.reap_tx();
+        std::assert_eq!(slot_of(start as *const u8), Some((idx, SlotState::Free)));
+        let s = stats().expect("installed");
+        std::assert_eq!((s.completed, s.unarmed), (1, 0));
+        std::assert_eq!(s.free as usize, crate::session_tx_pool_mcu::SLOT_COUNT);
+        drop(pool);
+    }
+
+    /// A frame the MAC sent from a COPY never had its slot read by the bus master:
+    /// the slot is un-armed and back on the freelist as soon as lwIP lets go, and
+    /// the pool counts it as such and not as a transfer.
+    #[cfg(feature = "tx-pool")]
+    #[test]
+    fn a_frame_the_mac_copied_returns_its_slot_without_a_transfer() {
+        use crate::tx_pool::{slot_of, stats, SlotState, TestPool};
+
+        let (_serial, link) = crate::lwip_test_link();
+        let mut rig = gather_node(&link, TxGather::Copied);
+        let mut socket = bind_session_rx(&link, 7602).expect("bind");
+        socket
+            .send_to(crate::ipv4_addr_from_octets(FAR_IP), 7601, b"prime")
+            .expect("send");
+        resolve_far_host(&mut rig, |_| {});
+        let pool = TestPool::install();
+
+        let written = send_from_slot(&mut socket, b"copied by the mac");
+
+        std::assert_eq!(
+            slot_of(written as *const u8).map(|(_, state)| state),
+            Some(SlotState::Free)
+        );
+        let s = stats().expect("installed");
+        std::assert_eq!((s.lent, s.started, s.completed, s.unarmed), (1, 0, 0, 1));
+        std::assert_eq!(s.free as usize, crate::session_tx_pool_mcu::SLOT_COUNT);
+        drop(pool);
+    }
+
+    /// A frame sent before the far host's address is known waits in ARP's queue,
+    /// which keeps the slot's pbuf: the slot stays armed and is not the bus
+    /// master's until the reply lets the frame reach the MAC, and goes home when
+    /// the MAC reports it.
+    #[cfg(feature = "tx-pool")]
+    #[test]
+    fn a_frame_parked_for_an_address_keeps_its_slot_armed_until_it_reaches_the_mac() {
+        use crate::tx_pool::{slot_of, stats, SlotState, TestPool};
+
+        let (_serial, link) = crate::lwip_test_link();
+        let mut rig = gather_node(&link, TxGather::Queued);
+        let mut socket = bind_session_rx(&link, 7602).expect("bind");
+        let pool = TestPool::install();
+
+        let written = send_from_slot(&mut socket, b"waits for the address") as *const u8;
+        std::assert_eq!(
+            slot_of(written).map(|(_, state)| state),
+            Some(SlotState::DmaArmedTx),
+            "parked: sent by the session, not yet read by a bus master"
+        );
+        resolve_far_host(&mut rig, |_| {});
+        std::assert_eq!(
+            slot_of(written).map(|(_, state)| state),
+            Some(SlotState::DmaBusyTx)
+        );
+        let cookies: Vec<u32> = rig.gathered.borrow().iter().map(|g| g.cookie).collect();
+        rig.released.borrow_mut().extend(cookies);
+        rig.node.reap_tx();
+        std::assert_eq!(
+            slot_of(written).map(|(_, state)| state),
+            Some(SlotState::Free)
+        );
+        let s = stats().expect("installed");
+        std::assert_eq!((s.lent, s.started, s.completed, s.unarmed), (1, 1, 1, 0));
+        drop(pool);
     }
 
     // ---- ARCHITECTURE section 9.2: lwIP reads a received frame in place ----------
