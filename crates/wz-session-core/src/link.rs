@@ -1228,6 +1228,68 @@ impl RxStorage for Vec<u8> {
     }
 }
 
+/// R3250 -- a pool that lends its slots to inbound frames and COUNTS the
+/// references to each slot itself, so a frame handed up costs no allocation.
+///
+/// [`RxStorage`] shares a storage through an `Arc` of its own, which is one
+/// allocation per frame: the price upstream's `ZSlice` pays too, and the right
+/// one for a buffer that was allocated for the frame anyway. A slot of a fixed
+/// pool was not: it exists before the frame and outlives it, and what the frame
+/// needs is a count of the ranges that still read it, so that the last one
+/// sends the slot home. That count lives in the pool, beside the slot, and the
+/// pool's handle is an `Arc` that already exists, so cloning a range is two
+/// atomic increments and dropping one is two decrements.
+///
+/// The contract an implementer keeps:
+/// - [`Self::slot_bytes`] answers the same bytes for a slot for as long as its
+///   count is above zero, and nothing writes them in that time;
+/// - [`Self::retain`] adds one to a slot's count, [`Self::release`] takes one
+///   away, and the release that brings it to zero gives the slot back to the
+///   pool. A release of a slot whose count is already zero is a defect of the
+///   caller, which the implementer refuses rather than wraps.
+#[cfg(feature = "rx-shared-bytes")]
+pub trait RxSlotHome: Send + Sync {
+    /// The whole of slot `slot`'s storage. A frame is a range of it.
+    fn slot_bytes(&self, slot: usize) -> &[u8];
+    /// One more range of `slot` exists.
+    fn retain(&self, slot: usize);
+    /// One range of `slot` is gone.
+    fn release(&self, slot: usize);
+}
+
+/// One counted reference to a slot of an [`RxSlotHome`]: cloning it counts one
+/// more, dropping it counts one less.
+#[cfg(feature = "rx-shared-bytes")]
+struct SlotLease {
+    home: alloc::sync::Arc<dyn RxSlotHome>,
+    slot: usize,
+}
+
+#[cfg(feature = "rx-shared-bytes")]
+impl SlotLease {
+    fn bytes(&self) -> &[u8] {
+        self.home.slot_bytes(self.slot)
+    }
+}
+
+#[cfg(feature = "rx-shared-bytes")]
+impl Clone for SlotLease {
+    fn clone(&self) -> Self {
+        self.home.retain(self.slot);
+        Self {
+            home: self.home.clone(),
+            slot: self.slot,
+        }
+    }
+}
+
+#[cfg(feature = "rx-shared-bytes")]
+impl Drop for SlotLease {
+    fn drop(&mut self) {
+        self.home.release(self.slot);
+    }
+}
+
 /// An inbound frame's bytes: owned, or a range of storage the link lent.
 ///
 /// R2971 — the lent arm is upstream's `ZSlice`
@@ -1251,9 +1313,40 @@ enum RxRepr {
         start: usize,
         end: usize,
     },
+    /// R3250 -- a range of a pool slot whose references the pool counts.
+    #[cfg(feature = "rx-shared-bytes")]
+    Leased {
+        lease: SlotLease,
+        start: usize,
+        end: usize,
+    },
 }
 
 impl RxBytes {
+    /// R3250 -- the `range` of slot `slot` of `home`, ADOPTING one reference the
+    /// home has already counted for the caller: the count the pool set when it
+    /// handed the slot over is this value's, and dropping it is what releases it.
+    /// `None` when the slot does not hold that range, and the adopted reference
+    /// is released then, so a refused range never strands its slot.
+    ///
+    /// The no-allocation counterpart of [`Self::shared`] (see [`RxSlotHome`]).
+    #[cfg(feature = "rx-shared-bytes")]
+    pub fn leased(
+        home: alloc::sync::Arc<dyn RxSlotHome>,
+        slot: usize,
+        range: core::ops::Range<usize>,
+    ) -> Option<Self> {
+        let lease = SlotLease { home, slot };
+        let fits = range.start <= range.end && range.end <= lease.bytes().len();
+        fits.then(|| {
+            Self(RxRepr::Leased {
+                lease,
+                start: range.start,
+                end: range.end,
+            })
+        })
+    }
+
     /// The `range` of `storage`, sharing it. `None` when the storage does not
     /// hold that range — upstream's `ZSlice::subslice` answers the same.
     #[cfg(feature = "rx-shared-bytes")]
@@ -1281,13 +1374,22 @@ impl RxBytes {
                 start,
                 end,
             } => &storage.as_slice()[*start..*end],
+            #[cfg(feature = "rx-shared-bytes")]
+            RxRepr::Leased { lease, start, end } => &lease.bytes()[*start..*end],
         }
     }
 
     /// Whether the bytes are a range of lent storage rather than owned.
     #[cfg(feature = "rx-shared-bytes")]
     pub fn is_shared(&self) -> bool {
-        matches!(self.0, RxRepr::Shared { .. })
+        matches!(self.0, RxRepr::Shared { .. } | RxRepr::Leased { .. })
+    }
+
+    /// R3250 -- whether the bytes are a range of a pool slot whose references the
+    /// pool counts ([`Self::leased`]).
+    #[cfg(feature = "rx-shared-bytes")]
+    pub fn is_leased(&self) -> bool {
+        matches!(self.0, RxRepr::Leased { .. })
     }
 
     /// Whether the bytes are a range of a chunk of SHARED MEMORY a peer sent
@@ -1301,7 +1403,7 @@ impl RxBytes {
     #[cfg(feature = "rx-shared-bytes")]
     pub fn shm_chunk(&self) -> Option<&dyn ShmChunkView> {
         match &self.0 {
-            RxRepr::Owned(_) => None,
+            RxRepr::Owned(_) | RxRepr::Leased { .. } => None,
             RxRepr::Shared { storage, .. } => storage.shm_chunk(),
         }
     }
@@ -1359,7 +1461,7 @@ impl RxBytes {
         match self.0 {
             RxRepr::Owned(bytes) => Self::lend(bytes),
             #[cfg(feature = "rx-shared-bytes")]
-            RxRepr::Shared { .. } => self,
+            RxRepr::Shared { .. } | RxRepr::Leased { .. } => self,
         }
     }
 
@@ -1383,6 +1485,12 @@ impl RxBytes {
             #[cfg(feature = "rx-shared-bytes")]
             RxRepr::Shared { storage, start, .. } => Self(RxRepr::Shared {
                 storage: storage.clone(),
+                start: start + range.start,
+                end: start + range.end,
+            }),
+            #[cfg(feature = "rx-shared-bytes")]
+            RxRepr::Leased { lease, start, .. } => Self(RxRepr::Leased {
+                lease: lease.clone(),
                 start: start + range.start,
                 end: start + range.end,
             }),
@@ -1477,7 +1585,7 @@ impl RxBytes {
         match self.0 {
             RxRepr::Owned(bytes) => bytes,
             #[cfg(feature = "rx-shared-bytes")]
-            RxRepr::Shared { .. } => self.as_slice().to_vec(),
+            RxRepr::Shared { .. } | RxRepr::Leased { .. } => self.as_slice().to_vec(),
         }
     }
 }
@@ -1538,6 +1646,12 @@ impl Clone for RxBytes {
                 end,
             } => Self(RxRepr::Shared {
                 storage: storage.clone(),
+                start: *start,
+                end: *end,
+            }),
+            #[cfg(feature = "rx-shared-bytes")]
+            RxRepr::Leased { lease, start, end } => Self(RxRepr::Leased {
+                lease: lease.clone(),
                 start: *start,
                 end: *end,
             }),
@@ -2015,5 +2129,88 @@ mod tests {
         assert_eq!(subject.protocol(), Some(InterceptorLink::Quic));
         assert!(subject.matches_protocols(&[InterceptorLink::Quic]));
         assert!(!subject.matches_protocols(&[InterceptorLink::Udp]));
+    }
+
+    /// A home of two slots that counts their references and records which slot
+    /// went home, standing for a receive pool.
+    #[cfg(feature = "rx-shared-bytes")]
+    struct CountingHome {
+        slots: [[u8; 8]; 2],
+        refs: [core::sync::atomic::AtomicUsize; 2],
+        homes: core::sync::atomic::AtomicUsize,
+    }
+
+    #[cfg(feature = "rx-shared-bytes")]
+    impl RxSlotHome for CountingHome {
+        fn slot_bytes(&self, slot: usize) -> &[u8] {
+            &self.slots[slot]
+        }
+        fn retain(&self, slot: usize) {
+            self.refs[slot].fetch_add(1, core::sync::atomic::Ordering::SeqCst);
+        }
+        fn release(&self, slot: usize) {
+            if self.refs[slot].fetch_sub(1, core::sync::atomic::Ordering::SeqCst) == 1 {
+                self.homes
+                    .fetch_add(1, core::sync::atomic::Ordering::SeqCst);
+            }
+        }
+    }
+
+    /// R3250 -- A LEASED RANGE IS COUNTED BY ITS HOME: the adopted reference,
+    /// each clone and each sub-range is one, the bytes are read where the slot
+    /// is, and the slot goes home once, when the last of them drops.
+    #[cfg(feature = "rx-shared-bytes")]
+    #[test]
+    fn a_leased_range_reads_its_slot_and_the_last_range_sends_it_home() {
+        use alloc::sync::Arc;
+        use core::sync::atomic::{AtomicUsize, Ordering};
+        let home = Arc::new(CountingHome {
+            slots: [[0; 8], [1, 2, 3, 4, 5, 6, 7, 8]],
+            refs: [AtomicUsize::new(0), AtomicUsize::new(1)],
+            homes: AtomicUsize::new(0),
+        });
+        let dyn_home: Arc<dyn RxSlotHome> = home.clone();
+        let frame = RxBytes::leased(dyn_home, 1, 2..6).expect("the slot holds the range");
+        assert!(frame.is_shared() && frame.is_leased());
+        assert_eq!(frame, [3u8, 4, 5, 6]);
+        assert_eq!(frame.as_ptr(), home.slots[1][2..].as_ptr(), "read in place");
+        let clone = frame.clone();
+        let sub = frame.subslice(1..3).expect("inside");
+        assert_eq!(sub, [4u8, 5]);
+        assert_eq!(home.refs[1].load(Ordering::SeqCst), 3);
+        drop(frame);
+        drop(clone);
+        assert_eq!(
+            home.homes.load(Ordering::SeqCst),
+            0,
+            "a range still reads it"
+        );
+        assert!(sub.shm_chunk().is_none());
+        assert_eq!(sub.clone().into_vec(), alloc::vec![4u8, 5]);
+        drop(sub);
+        assert_eq!(home.refs[1].load(Ordering::SeqCst), 0);
+        assert_eq!(
+            home.homes.load(Ordering::SeqCst),
+            1,
+            "home once, at the last drop"
+        );
+    }
+
+    /// R3250 -- a range the slot does not hold is refused, and the reference it
+    /// adopted is released then rather than stranded.
+    #[cfg(feature = "rx-shared-bytes")]
+    #[test]
+    fn a_leased_range_past_its_slot_is_refused_and_released() {
+        use alloc::sync::Arc;
+        use core::sync::atomic::{AtomicUsize, Ordering};
+        let home = Arc::new(CountingHome {
+            slots: [[0; 8]; 2],
+            refs: [AtomicUsize::new(1), AtomicUsize::new(0)],
+            homes: AtomicUsize::new(0),
+        });
+        let dyn_home: Arc<dyn RxSlotHome> = home.clone();
+        assert!(RxBytes::leased(dyn_home, 0, 4..9).is_none());
+        assert_eq!(home.refs[0].load(Ordering::SeqCst), 0);
+        assert_eq!(home.homes.load(Ordering::SeqCst), 1);
     }
 }
