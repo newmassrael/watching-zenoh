@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: AGPL-3.0-or-later OR LicenseRef-watching-zenoh-Commercial
 # SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
-"""R3213 (no register item) -- the admin node's verdict, run by ONE program
+"""R3215 (no register item) -- the admin node's verdict, run by ONE program
 against an emulated node and against a board.
 
 The debt this answers for, open-debt item 876, lives in the operator's
