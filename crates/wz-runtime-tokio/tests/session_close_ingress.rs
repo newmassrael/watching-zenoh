@@ -315,6 +315,7 @@ fn session_close_ingress_closes_from_a_switchboard_document() {
             keyexpr: DECLARED.to_string(),
             event: CLOSE_EVENT.to_string(),
         }],
+        session: None,
     };
 
     let mut observer = ApplicationLayerObserver::new();
@@ -359,6 +360,7 @@ fn a_documented_row_is_still_refused_by_the_authority() {
             keyexpr: DECLARED.to_string(),
             event: CLOSE_EVENT.to_string(),
         }],
+        session: None,
     };
 
     let mut observer = ApplicationLayerObserver::new();

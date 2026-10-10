@@ -935,6 +935,7 @@ mod tests {
                 keyexpr: "@/wz/session/close/*".into(),
                 event: "session.close".into(),
             }],
+            session: None,
         };
 
         let mut board = SwitchboardRegistry::new();
@@ -986,6 +987,7 @@ mod tests {
                 codec: None,
             }],
             lifecycle: Vec::new(),
+            session: None,
         };
 
         let mut board = SwitchboardRegistry::new();

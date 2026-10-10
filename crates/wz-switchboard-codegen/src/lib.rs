@@ -1092,6 +1092,7 @@ mod tests {
             machine: machine.to_string(),
             bindings,
             lifecycle: Vec::new(),
+            session: None,
         }
     }
 

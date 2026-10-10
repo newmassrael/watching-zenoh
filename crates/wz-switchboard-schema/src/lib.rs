@@ -79,6 +79,81 @@ pub struct SwitchboardSpec {
     /// parses unchanged — and `deny_unknown_fields` still rejects a typo.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub lifecycle: Vec<LifecycleBinding>,
+    /// Open-debt item 900 — the local SESSION these rows bind to, by its
+    /// `sessions[].name` in the deploy machine. A program may hold several
+    /// sessions (a client session towards a router beside a peer session in a
+    /// multicast group), and every declare runs on one session's handle, so a
+    /// sidecar for such a program has to say whose traffic it is.
+    ///
+    /// Optional ONLY when the machine has exactly one session;
+    /// [`SwitchboardSpec::bound_session`] is the rule. Defaulted and skipped
+    /// when absent, so every sidecar written before this key parses and
+    /// re-serializes byte for byte.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session: Option<String>,
+}
+
+/// Why a sidecar's [`SwitchboardSpec::session`] does not pick one of the
+/// machine's sessions. Each names the `session` key it is about.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SessionBindError {
+    /// `session` names a session the machine does not have.
+    NoSuchSession {
+        /// The name the sidecar gave.
+        named: String,
+    },
+    /// `session` is omitted while the machine has several sessions (or none),
+    /// so the rows have no one session to belong to.
+    Unnamed {
+        /// How many sessions the machine has.
+        sessions: usize,
+    },
+}
+
+impl core::fmt::Display for SessionBindError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            SessionBindError::NoSuchSession { named } => write!(
+                f,
+                "session: `{named}` is not the name of one of the machine's sessions"
+            ),
+            SessionBindError::Unnamed { sessions } => write!(
+                f,
+                "session: required, because the machine has {sessions} sessions \
+                 (it may be omitted only when there is exactly one)"
+            ),
+        }
+    }
+}
+
+impl SwitchboardSpec {
+    /// The session these rows bind to, among `session_names` (the deploy
+    /// machine's `sessions[].name`, in any order).
+    ///
+    /// A named session must be one of them. An omitted `session` binds the
+    /// machine's only session, and is refused when there is not exactly one:
+    /// guessing among several would route a row's traffic through whichever
+    /// session happened to come first.
+    pub fn bound_session<'a>(
+        &'a self,
+        session_names: &[&'a str],
+    ) -> Result<&'a str, SessionBindError> {
+        match &self.session {
+            Some(named) => session_names
+                .iter()
+                .copied()
+                .find(|n| *n == named.as_str())
+                .ok_or_else(|| SessionBindError::NoSuchSession {
+                    named: named.clone(),
+                }),
+            None => match session_names {
+                [only] => Ok(only),
+                _ => Err(SessionBindError::Unnamed {
+                    sessions: session_names.len(),
+                }),
+            },
+        }
+    }
 }
 
 /// One keyexpr-pattern -> session-lifecycle-verb row.
@@ -181,6 +256,7 @@ mod tests {
                 },
             ],
             lifecycle: Vec::new(),
+            session: None,
         };
 
         let json = serde_json::to_string(&spec).expect("serialize");
@@ -216,6 +292,7 @@ mod tests {
                 keyexpr: "@/wz/session/close/*".to_string(),
                 event: "session.close".to_string(),
             }],
+            session: None,
         };
 
         let json = serde_json::to_string(&spec).expect("serialize");
@@ -246,6 +323,7 @@ mod tests {
                 },
             ],
             lifecycle: Vec::new(),
+            session: None,
         };
 
         let json = serde_json::to_string(&spec).expect("serialize");
@@ -257,6 +335,50 @@ mod tests {
         assert_eq!(spec, back);
         assert_eq!(back.bindings[0].codec.as_deref(), Some("temp_payload"));
         assert_eq!(back.bindings[1].codec, None);
+    }
+
+    // Open-debt item 900 — the `session` key: it parses, round-trips, and stays
+    // out of a document that does not set it (the byte-stability test above
+    // covers that half for every old sidecar).
+    #[test]
+    fn a_session_key_round_trips() {
+        let json = r#"{"machine":"m","bindings":[],"session":"to_router"}"#;
+        let spec: SwitchboardSpec = serde_json::from_str(json).expect("deserialize");
+        assert_eq!(spec.session.as_deref(), Some("to_router"));
+        assert_eq!(serde_json::to_string(&spec).expect("serialize"), json);
+    }
+
+    // The binding rule, each arm against the machine's session list: a named
+    // session must exist; an omitted one binds the only session and is refused
+    // among several (or none), and every refusal names the `session` key.
+    #[test]
+    fn the_session_binds_to_one_of_the_machines_sessions() {
+        let named: SwitchboardSpec =
+            serde_json::from_str(r#"{"machine":"m","bindings":[],"session":"group"}"#)
+                .expect("deserialize");
+        let unnamed: SwitchboardSpec =
+            serde_json::from_str(r#"{"machine":"m","bindings":[]}"#).expect("deserialize");
+        let two = ["to_router", "group"];
+
+        assert_eq!(named.bound_session(&two), Ok("group"));
+        assert_eq!(unnamed.bound_session(&["only"]), Ok("only"));
+
+        let missing = named.bound_session(&["to_router"]).unwrap_err();
+        assert_eq!(
+            missing,
+            SessionBindError::NoSuchSession {
+                named: "group".to_string()
+            }
+        );
+        let ambiguous = unnamed.bound_session(&two).unwrap_err();
+        assert_eq!(ambiguous, SessionBindError::Unnamed { sessions: 2 });
+        assert_eq!(
+            unnamed.bound_session(&[]).unwrap_err(),
+            SessionBindError::Unnamed { sessions: 0 }
+        );
+        for refusal in [missing, ambiguous] {
+            assert!(refusal.to_string().starts_with("session: "), "{refusal}");
+        }
     }
 
     #[test]
