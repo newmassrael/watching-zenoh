@@ -440,33 +440,86 @@ const AUTH_SUB: &[Row] = &[
     (0x2, OPT, EXT_ENC_ZBUF, AUTH_USRPWD),
 ];
 
-/// The rows a carrier declares upstream, in id order.
+/// A row table's identities, [`row_eid`] of each row in row order, computed
+/// when the crate is compiled.
 ///
-/// Public so a consumer can ENUMERATE a carrier's vocabulary rather than only
-/// probe it — the census gate does exactly that, and so does a reader asking
-/// "what could appear here".
-pub fn rows(carrier: ExtCarrier) -> &'static [(u8, bool, u8, &'static str)] {
-    match carrier {
-        ExtCarrier::Init => INIT,
-        ExtCarrier::Open => OPEN,
-        ExtCarrier::Join => JOIN,
-        ExtCarrier::Frame => FRAME,
-        ExtCarrier::Fragment => FRAGMENT,
-        ExtCarrier::TransportOam => TRANSPORT_OAM,
-        ExtCarrier::TransportPlain => &[],
-        ExtCarrier::Push | ExtCarrier::Interest | ExtCarrier::Declare => NETWORK_COMMON,
-        ExtCarrier::Request => REQUEST,
-        ExtCarrier::Response | ExtCarrier::ResponseFinal => RESPONSE,
-        ExtCarrier::NetworkOam => NETWORK_OAM,
-        ExtCarrier::DeclareCommon => DECLARE_COMMON,
-        ExtCarrier::DeclareQueryable => DECLARE_QUERYABLE,
-        ExtCarrier::Put => PUT,
-        ExtCarrier::Del => DEL,
-        ExtCarrier::Query => QUERY,
-        ExtCarrier::Err => ERR,
-        ExtCarrier::Reply => &[],
-        ExtCarrier::Auth => AUTH_SUB,
+/// `N` is the table's own length, inferred at the one call site from
+/// `[u8; TABLE.len()]`, so the assertion cannot fire on a table that compiles.
+const fn identities_of<const N: usize>(table: &[Row]) -> [u8; N] {
+    assert!(table.len() == N, "an identity table is as long as its rows");
+    let mut out = [0u8; N];
+    let mut i = 0;
+    while i < N {
+        out[i] = row_eid(&table[i]);
+        i += 1;
     }
+    out
+}
+
+/// THE CARRIER-TO-TABLE MAPPING, WRITTEN ONCE FOR TWO READERS.
+///
+/// A reader that NAMES an extension needs a row's name; the participant's
+/// admission rule ([`crate::ext_admit::judge_ext_chain`]) needs only its
+/// identity. Serving the rule from [`rows`] linked every row it could reach, and
+/// every name those rows point at, into images that never name anything:
+/// `deploy/mcu-multicast-e2e` grew by 768 B of text on thumbv7m when the rule
+/// moved onto these rows, and reading identities instead returns 524 B of it
+/// (476 B of .rodata, the row tables and their names, and 48 B of .text).
+///
+/// So [`identities`] answers from a `[u8; N]` projected out of the SAME table
+/// at compile time, and this macro emits both functions from one list of arms:
+/// a carrier cannot map to one table for naming and to another for admission.
+macro_rules! carrier_tables {
+    ($( $carrier:pat => $table:expr ),* $(,)?) => {
+        /// The rows a carrier declares upstream, in id order.
+        ///
+        /// Public so a consumer can ENUMERATE a carrier's vocabulary rather than
+        /// only probe it — the census gate does exactly that, and so does a
+        /// reader asking "what could appear here".
+        pub fn rows(carrier: ExtCarrier) -> &'static [(u8, bool, u8, &'static str)] {
+            match carrier {
+                $( $carrier => $table, )*
+            }
+        }
+
+        /// The identities (`id | M | enc`, zenoh `iext::eid`) of
+        /// [`rows`]`(carrier)`, in the same order, without the names.
+        ///
+        /// What a participant matches a received extension against: it reads
+        /// one byte per declared extension, so an image that admits but never
+        /// names links no name string.
+        pub fn identities(carrier: ExtCarrier) -> &'static [u8] {
+            match carrier {
+                $( $carrier => {
+                    const TABLE: &[Row] = $table;
+                    const IDS: [u8; TABLE.len()] = identities_of(TABLE);
+                    &IDS
+                } )*
+            }
+        }
+    };
+}
+
+carrier_tables! {
+    ExtCarrier::Init => INIT,
+    ExtCarrier::Open => OPEN,
+    ExtCarrier::Join => JOIN,
+    ExtCarrier::Frame => FRAME,
+    ExtCarrier::Fragment => FRAGMENT,
+    ExtCarrier::TransportOam => TRANSPORT_OAM,
+    ExtCarrier::TransportPlain => &[],
+    ExtCarrier::Push | ExtCarrier::Interest | ExtCarrier::Declare => NETWORK_COMMON,
+    ExtCarrier::Request => REQUEST,
+    ExtCarrier::Response | ExtCarrier::ResponseFinal => RESPONSE,
+    ExtCarrier::NetworkOam => NETWORK_OAM,
+    ExtCarrier::DeclareCommon => DECLARE_COMMON,
+    ExtCarrier::DeclareQueryable => DECLARE_QUERYABLE,
+    ExtCarrier::Put => PUT,
+    ExtCarrier::Del => DEL,
+    ExtCarrier::Query => QUERY,
+    ExtCarrier::Err => ERR,
+    ExtCarrier::Reply => &[],
+    ExtCarrier::Auth => AUTH_SUB,
 }
 
 // R2186 — `ALL_CARRIERS` used to be spelled out here, a second copy of the
@@ -563,6 +616,26 @@ mod tests {
                     );
                 }
             }
+        }
+    }
+
+    /// [`identities`] is [`rows`] without the names, carrier by carrier and row
+    /// by row. The two share their arms by construction (`carrier_tables!`);
+    /// this pins the compile-time projection, which is the half a macro cannot
+    /// make right by being written once.
+    #[test]
+    fn each_carrier_answers_the_identities_of_its_own_rows() {
+        assert!(!ALL_CARRIERS.is_empty(), "a sweep over nothing is green");
+        for carrier in ALL_CARRIERS {
+            assert!(
+                identities(*carrier)
+                    .iter()
+                    .copied()
+                    .eq(rows(*carrier).iter().map(row_eid)),
+                "{carrier:?}: {:02x?} is not the identities of {:?}",
+                identities(*carrier),
+                rows(*carrier),
+            );
         }
     }
 

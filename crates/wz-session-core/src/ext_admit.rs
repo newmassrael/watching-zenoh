@@ -212,7 +212,41 @@ pub enum ZenohBody {
 ///   (`src/protocol/codec/message.c:756`) ends in
 ///   `_z_msg_ext_skip_non_mandatories`, which refuses every mandatory entry.
 pub fn declared_extensions(carrier: ExtCarrier) -> Option<&'static [(u8, bool, u8, &'static str)]> {
-    use crate::ext_name::{rows, ExtCarrier as Named};
+    Some(match space(carrier)? {
+        Space::ReadsNone => &[],
+        Space::Named(named) => crate::ext_name::rows(named),
+    })
+}
+
+/// [`declared_extensions`] as identities only (`id | M | enc`, zenoh
+/// `iext::eid`), which is all the admission rule compares.
+///
+/// The rule reads these rather than the rows so that an image which admits but
+/// never names an extension does not link the naming table's strings
+/// ([`crate::ext_name::identities`] says what that cost). The two answer from
+/// one private `space` lookup and one table, so they cannot disagree about a
+/// carrier.
+pub fn declared_identities(carrier: ExtCarrier) -> Option<&'static [u8]> {
+    Some(match space(carrier)? {
+        Space::ReadsNone => &[],
+        Space::Named(named) => crate::ext_name::identities(named),
+    })
+}
+
+/// Where the declarations of the message `carrier` names are written down.
+enum Space {
+    /// Its reader reads no extension, so no row of the naming table stands
+    /// for it.
+    ReadsNone,
+    /// Its reader's declarations are the naming table's rows for this carrier.
+    Named(crate::ext_name::ExtCarrier),
+}
+
+/// The one mapping from a message to its declarations, which
+/// [`declared_extensions`] and [`declared_identities`] both read. `None` is a
+/// message this build cannot name.
+fn space(carrier: ExtCarrier) -> Option<Space> {
+    use crate::ext_name::ExtCarrier as Named;
     let named = match carrier {
         ExtCarrier::Transport(wire_const::T_MID_INIT) => Named::Init,
         ExtCarrier::Transport(wire_const::T_MID_OPEN) => Named::Open,
@@ -233,7 +267,7 @@ pub fn declared_extensions(carrier: ExtCarrier) -> Option<&'static [(u8, bool, u
             | DeclarationKind::Subscriber
             | DeclarationKind::Token
             | DeclarationKind::Final,
-        ) => return Some(&[]),
+        ) => return Some(Space::ReadsNone),
         ExtCarrier::Network(NetworkEnvelope::Push) => Named::Push,
         ExtCarrier::Network(NetworkEnvelope::Request) => Named::Request,
         ExtCarrier::Network(NetworkEnvelope::Response) => Named::Response,
@@ -254,7 +288,7 @@ pub fn declared_extensions(carrier: ExtCarrier) -> Option<&'static [(u8, bool, u
         ExtCarrier::Zenoh(ZenohBody::Err) => Named::Err,
         ExtCarrier::Transport(_) | ExtCarrier::Scouting(_) => return None,
     };
-    Some(rows(named))
+    Some(Space::Named(named))
 }
 
 /// Whether THIS build's participant reads the mandatory extension `eid` on the
@@ -271,14 +305,8 @@ pub fn declared_extensions(carrier: ExtCarrier) -> Option<&'static [(u8, bool, u
 /// not read the descriptor in the payload slot as data. wz reads the marker in
 /// a build with `transport-shm`, and refuses it in one without, as upstream's
 /// default build does.
-fn reads_mandatory(
-    carrier: ExtCarrier,
-    declared: &[(u8, bool, u8, &'static str)],
-    eid: u8,
-) -> bool {
-    let is_declared = declared
-        .iter()
-        .any(|row| crate::ext_name::row_eid(row) == eid);
+fn reads_mandatory(carrier: ExtCarrier, declared: &[u8], eid: u8) -> bool {
+    let is_declared = declared.contains(&eid);
     let compiled_in = match carrier {
         ExtCarrier::Zenoh(ZenohBody::Put | ZenohBody::Err) => {
             eid != crate::ext_header::body_eid::SHM || cfg!(feature = "transport-shm")
@@ -299,7 +327,7 @@ fn reads_mandatory(
 /// `skip_all` loop and pico's `_z_msg_ext_decode_iter` both abort at the first
 /// unknown mandatory extension rather than surveying the rest.
 pub fn judge_ext_chain(carrier: ExtCarrier, headers: impl IntoIterator<Item = u8>) -> ExtAdmission {
-    let Some(declared) = declared_extensions(carrier) else {
+    let Some(declared) = declared_identities(carrier) else {
         return ExtAdmission::Unjudged;
     };
     for header in headers {
