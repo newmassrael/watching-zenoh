@@ -601,4 +601,166 @@ mod tests {
             "nothing is left out of lwIP's hands"
         );
     }
+
+    /// ARCHITECTURE section 9.1 on the MCU profile, the batching window: the
+    /// window's frame is opened in ONE slot of the transmit pool, lent through
+    /// the real lwIP driver, every message of the window is encoded into it, and
+    /// the flush sends that slot. Nothing crosses the copying send (which, with a
+    /// pool installed, would copy the flushed batch into a second slot), and the
+    /// datagram is the one the heap stage makes through a driver that lends
+    /// nothing. The pool's own lifecycle balances at the end.
+    ///
+    /// Not in the slim profile: its socket carries 256 bytes, short of this
+    /// session's 1024-byte batch, so the window is staged on the heap there by
+    /// rule (a slot short of the budget is refused).
+    #[cfg(all(feature = "codec-push", not(feature = "buffer-pool-session-rx-slim")))]
+    #[test]
+    fn a_batch_window_leaves_from_one_pool_slot_with_nothing_copied_at_flush() {
+        use wz_link_lwip::tx_pool::{self, TxPoolStorage};
+
+        /// The same driver with the lend taken away: every default method.
+        struct NoLend(Rc<LwipUdpDriver>);
+        impl BoxedLinkDriver for NoLend {
+            fn send_blocking(&self, bytes: &[u8], reliability: Reliability) -> LinkSendOutcome {
+                self.0.send_blocking(bytes, reliability)
+            }
+            fn open_blocking(&self) {}
+            fn close_blocking(&self) {}
+        }
+        /// The real driver behind a count of which door each frame used.
+        struct Doors {
+            inner: Rc<LwipUdpDriver>,
+            by_slot: core::cell::Cell<usize>,
+            by_bytes: core::cell::Cell<usize>,
+        }
+        impl BoxedLinkDriver for Doors {
+            fn send_blocking(&self, bytes: &[u8], reliability: Reliability) -> LinkSendOutcome {
+                self.by_bytes.set(self.by_bytes.get() + 1);
+                self.inner.send_blocking(bytes, reliability)
+            }
+            fn open_blocking(&self) {}
+            fn close_blocking(&self) {}
+            fn tx_slot_acquire(
+                &self,
+                want: usize,
+                priority: wz_session_core::qos::Priority,
+            ) -> Option<wz_session_core::link::TxSlotGrant> {
+                self.inner.tx_slot_acquire(want, priority)
+            }
+            fn tx_slot_storage(&self, slot: wz_session_core::link::TxSlot) -> (*mut u8, usize) {
+                self.inner.tx_slot_storage(slot)
+            }
+            fn tx_slot_send(
+                &self,
+                slot: wz_session_core::link::TxSlot,
+                start: usize,
+                len: usize,
+                reliability: Reliability,
+                priority: wz_session_core::qos::Priority,
+            ) -> LinkSendOutcome {
+                self.by_slot.set(self.by_slot.get() + 1);
+                self.inner
+                    .tx_slot_send(slot, start, len, reliability, priority)
+            }
+            fn tx_slot_abort(&self, slot: wz_session_core::link::TxSlot) {
+                self.inner.tx_slot_abort(slot)
+            }
+        }
+        /// The pool for the length of the test, taken away even if it fails.
+        struct InstalledPool;
+        impl Drop for InstalledPool {
+            fn drop(&mut self) {
+                tx_pool::uninstall();
+            }
+        }
+
+        let (_serial, link) = wz_link_lwip::lwip_test_link();
+        let storage: &'static mut TxPoolStorage =
+            alloc::boxed::Box::leak(alloc::boxed::Box::new(TxPoolStorage::uninit()));
+        tx_pool::install(storage);
+        let _pool = InstalledPool;
+        let payloads: [&[u8]; 4] = [b"one", b"two", b"three", b"four"];
+
+        let window = |driver_sink: Rc<dyn BoxedLinkDriver>| {
+            let runtime = CoopRuntime::new(FrozenClock);
+            let clock = CoopTime::new(&runtime);
+            let actions =
+                SessionLinkActions::<CoopRuntime<FrozenClock>, CoopTime<FrozenClock>>::new_generic(
+                    driver_sink,
+                    test_params(),
+                    clock,
+                );
+            actions.batch_start().expect("batch_start");
+            for payload in payloads {
+                actions
+                    .send_push_literal("home/batch", payload, true)
+                    .expect("push");
+            }
+            actions.batch_stop().expect("batch_stop");
+            actions.batch_lend_counts()
+        };
+        let delivered = |driver: &LwipUdpDriver| {
+            link.poll_loopback();
+            link.check_timeouts();
+            let mut out = vec![];
+            while let Some(dg) = driver.try_recv() {
+                out.push(dg.data[..].to_vec());
+            }
+            out
+        };
+
+        let lending = Rc::new(LwipUdpDriver::new(
+            Rc::new(RefCell::new(
+                bind_session_rx(&link, 7492).expect("bind lending"),
+            )),
+            ipv4_addr_loopback(),
+            7492,
+        ));
+        let doors = Rc::new(Doors {
+            inner: lending.clone(),
+            by_slot: Default::default(),
+            by_bytes: Default::default(),
+        });
+        let before = tx_pool::stats().expect("installed");
+        let counts = window(doors.clone());
+        let after = tx_pool::stats().expect("installed");
+        std::assert_eq!(
+            (doors.by_slot.get(), doors.by_bytes.get()),
+            (1, 0),
+            "the window left as its slot, nothing through the copying send"
+        );
+        std::assert_eq!(counts.slot_frames, 1);
+        std::assert_eq!(
+            after.lent - before.lent,
+            1,
+            "one pool slot for the whole window: {after:?}"
+        );
+        let lent = delivered(&lending);
+
+        let copying = Rc::new(LwipUdpDriver::new(
+            Rc::new(RefCell::new(
+                bind_session_rx(&link, 7493).expect("bind copying"),
+            )),
+            ipv4_addr_loopback(),
+            7493,
+        ));
+        let control = window(Rc::new(NoLend(copying.clone())));
+        std::assert_eq!(control.heap_no_slot, 1, "CONTROL: the heap stage, counted");
+        let copied = delivered(&copying);
+
+        std::assert_eq!(lent.len(), 1, "the whole window is one datagram");
+        std::assert_eq!(lent, copied, "the same datagram either way");
+        let s = tx_pool::stats().expect("installed");
+        std::assert_eq!(
+            s.lent - s.abandoned - s.completed - s.unarmed,
+            wz_link_lwip::session_tx_pool_mcu::SLOT_COUNT as u32 - s.free,
+            "the pool's lifecycle balances: {s:?}"
+        );
+        std::assert_eq!(
+            s.free as usize,
+            wz_link_lwip::session_tx_pool_mcu::SLOT_COUNT,
+            "and no slot is still out"
+        );
+        std::assert_eq!(wz_link_lwip::tx_payloads_out(), 0);
+    }
 }

@@ -161,20 +161,38 @@ impl BoxedLinkDriver for RecordingLinkDriver {
 pub(crate) fn recording_actions_over(
     kind: wz_session_core::link::LinkKind,
 ) -> (Arc<SessionLinkActions>, Arc<RecordingLinkDriver>) {
-    let driver = Arc::new(RecordingLinkDriver {
-        frames: Mutex::new(Vec::new()),
-        priorities: Mutex::new(Vec::new()),
-        subject: Some(wz_session_core::link::LinkSubject {
-            kind: Some(kind),
-            ..wz_session_core::link::LinkSubject::UNKNOWN
-        }),
-    });
+    let driver = recording_driver_over(kind);
     let actions = new_session_actions(
         driver.clone(),
         fixture_session_init_params(),
         TokioTime::new(),
     );
     (actions, driver)
+}
+
+/// The recorder [`recording_actions_over`] builds its session on, alone, for a
+/// test that puts another driver layer in front of it (a lending one, in
+/// `multilink`'s batch tests). Gated as that function is, its first caller.
+#[cfg(any(
+    all(
+        feature = "transport-multilink",
+        feature = "transport-qos",
+        feature = "codec-push",
+        feature = "codec-close"
+    ),
+    feature = "session-extshm"
+))]
+pub(crate) fn recording_driver_over(
+    kind: wz_session_core::link::LinkKind,
+) -> Arc<RecordingLinkDriver> {
+    Arc::new(RecordingLinkDriver {
+        frames: Mutex::new(Vec::new()),
+        priorities: Mutex::new(Vec::new()),
+        subject: Some(wz_session_core::link::LinkSubject {
+            kind: Some(kind),
+            ..wz_session_core::link::LinkSubject::UNKNOWN
+        }),
+    })
 }
 
 /// Build a [`SessionLinkActions`] backed by a fresh [`RecordingLinkDriver`]

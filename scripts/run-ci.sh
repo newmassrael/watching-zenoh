@@ -5703,7 +5703,10 @@ layer_c1bb_cargo_test_qos() {
     # R2943 — 12 -> 13: `an_undeclared_link_is_in_its_protocols_class`, a
     # UDP and a TCP link split by their protocols' classes with nothing
     # declared. MEASURED: 13 passed on this command.
-    _runci_guarded_test C1bb 13 cargo test -p wz-runtime-tokio --features transport-qos,session-extqos,transport-multilink,transport-batching,codec-push,codec-close,transport-unicast --lib multilink:: --quiet \
+    # ARCHITECTURE section 9.1 — 13 -> 16: a batch frame of an aggregate opened
+    # in its routed link's lent slot, the same frame when its conduit moves to
+    # the other link, and when its lender leaves the set. MEASURED: 16 passed.
+    _runci_guarded_test C1bb 16 cargo test -p wz-runtime-tokio --features transport-qos,session-extqos,transport-multilink,transport-batching,codec-push,codec-close,transport-unicast --lib multilink:: --quiet \
         || return 1
     # R311y835 — the per-priority TX staging + strict-priority drain. `batch_tx_tests`
     # otherwise rides the DEFAULT Layer C1 workspace run, and `transport-qos` is not a
@@ -10922,9 +10925,15 @@ layer_c1m_session_lwip() {
     # task (`the_multicast_session_runs_as_a_task_and_yields_after_every_iteration`)
     # carries no `#[cfg]` of its own inside the module `transport-multicast`
     # gates. Each number is the one its own run PRINTED (18/20/20/19/23/18/21).
+    #
+    # ARCHITECTURE section 9.1 moved the three legs that turn on `codec-push` by
+    # ONE (and the two-session leg below with them): the batching window over
+    # the real lwIP driver and a transmit pool (`session_drive`'s window test)
+    # needs only `codec-push`. Each number is the one its own run PRINTED
+    # (21/24/22, and 25 below).
     _runci_guarded_test "C1m multicast" 18 \
         cargo test -p wz-session-lwip --features transport-multicast --quiet || return 1
-    _runci_guarded_test "C1m multicast+push" 20 \
+    _runci_guarded_test "C1m multicast+push" 21 \
         cargo test -p wz-session-lwip --features transport-multicast,codec-push --quiet || return 1
     _runci_guarded_test "C1m multicast+liveliness" 20 \
         cargo test -p wz-session-lwip --features transport-multicast,liveliness-token --quiet || return 1
@@ -10932,22 +10941,22 @@ layer_c1m_session_lwip() {
         cargo test -p wz-session-lwip \
         --features transport-multicast,query-queryable,codec-response,codec-response-final \
         --quiet || return 1
-    _runci_guarded_test "C1m multicast maximal" 23 \
+    _runci_guarded_test "C1m multicast maximal" 24 \
         cargo test -p wz-session-lwip \
         --features transport-multicast,codec-push,codec-response,codec-response-final,liveliness-token,query-queryable \
         --quiet || return 1
     _runci_guarded_test "C1m multicast+reassembly" 18 \
         cargo test -p wz-session-lwip --features transport-multicast,reassembly --quiet || return 1
-    _runci_guarded_test "C1m multicast+fragmentation" 21 \
+    _runci_guarded_test "C1m multicast+fragmentation" 22 \
         cargo test -p wz-session-lwip \
         --features transport-multicast,transport-fragmentation,codec-push --quiet || return 1
     # Open-debt item 900 — ONE program, TWO sessions: a client session to a
     # router and a group session on one local set, with the four
     # fault-isolation tests (`two_session_tests`). It is its own leg because
     # it is the only combination that compiles both handshake halves beside
-    # the multicast loop. 24 = the multicast+push leg's 20 + those four, the
+    # the multicast loop. 25 = the multicast+push leg's 21 + those four, the
     # number this command PRINTED.
-    _runci_guarded_test "C1m two sessions" 24 \
+    _runci_guarded_test "C1m two sessions" 25 \
         cargo test -p wz-session-lwip \
         --features transport-multicast,session-unicast-open,session-unicast-accept,codec-push \
         --quiet || return 1

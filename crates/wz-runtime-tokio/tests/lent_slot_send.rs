@@ -53,6 +53,10 @@ struct LendingLink {
     heap: Mutex<Vec<Vec<u8>>>,
     /// Frames that arrived as a lent slot: the bytes after the headroom.
     lent: Mutex<Vec<Vec<u8>>>,
+    /// Every frame in arrival order, whichever door it came through (`true`
+    /// for the slot door), so an order across the two doors can be read.
+    doors: Mutex<Vec<(bool, Vec<u8>)>>,
+    grants: AtomicUsize,
     aborts: AtomicUsize,
 }
 
@@ -67,6 +71,8 @@ impl LendingLink {
             taken: Mutex::new(vec![false; n_slots]),
             heap: Mutex::new(Vec::new()),
             lent: Mutex::new(Vec::new()),
+            doors: Mutex::new(Vec::new()),
+            grants: AtomicUsize::new(0),
             aborts: AtomicUsize::new(0),
         })
     }
@@ -88,11 +94,33 @@ impl LendingLink {
     fn aborts(&self) -> usize {
         self.aborts.load(Ordering::SeqCst)
     }
+    #[cfg(feature = "transport-batching")]
+    fn doors(&self) -> Vec<(bool, Vec<u8>)> {
+        self.doors.lock().expect("doors").clone()
+    }
+    /// The slot lifecycle balances and every slot is back: each slot granted
+    /// was sent or aborted exactly once (`granted - aborted - sent` is what is
+    /// still out, and that is what the pool misses), and nothing is still out.
+    #[track_caller]
+    fn assert_every_slot_home(&self) {
+        let granted = self.grants.load(Ordering::SeqCst);
+        let out = granted - self.aborts() - self.lent().len();
+        assert_eq!(
+            out,
+            self.slots.len() - self.free(),
+            "the lifecycle balances"
+        );
+        assert_eq!(out, 0, "and no slot is still lent");
+    }
 }
 
 impl BoxedLinkDriver for LendingLink {
     fn send_blocking(&self, bytes: &[u8], _reliability: Reliability) -> LinkSendOutcome {
         self.heap.lock().expect("heap").push(bytes.to_vec());
+        self.doors
+            .lock()
+            .expect("doors")
+            .push((false, bytes.to_vec()));
         LinkSendOutcome::Sent
     }
     fn open_blocking(&self) {}
@@ -108,6 +136,7 @@ impl BoxedLinkDriver for LendingLink {
         let mut taken = self.taken.lock().expect("taken");
         let idx = taken.iter().position(|t| !*t)?;
         taken[idx] = true;
+        self.grants.fetch_add(1, Ordering::SeqCst);
         Some(TxSlotGrant {
             slot: TxSlot(idx as u32),
             headroom: self.headroom,
@@ -135,6 +164,10 @@ impl BoxedLinkDriver for LendingLink {
         let idx = slot.0 as usize;
         // SAFETY: the session handed the slot over, so this is its only reader.
         let frame = unsafe { (&*self.slots[idx].0.get())[start..start + len].to_vec() };
+        self.doors
+            .lock()
+            .expect("doors")
+            .push((true, frame.clone()));
         self.lent.lock().expect("lent").push(frame);
         // The link has "written" the slot and returns it to its pool.
         self.taken.lock().expect("taken")[idx] = false;
@@ -242,6 +275,7 @@ fn a_frame_that_overflows_its_slot_goes_on_the_heap_and_the_slot_comes_back() {
     assert_eq!(link.heap(), vec![heap_frame(&payload)]);
     assert_eq!(link.aborts(), 1, "the lent slot was given back unsent");
     assert_eq!(link.free(), 1, "and it is free to be lent again");
+    link.assert_every_slot_home();
 }
 
 /// The SAME session sends a small frame through the slot and, when the link has
@@ -504,4 +538,300 @@ fn a_frame_past_the_mtu_is_fragmented_from_the_heap_and_its_slot_comes_back() {
         "the slot lent for the whole frame came back"
     );
     assert_eq!(link.free(), 1);
+}
+
+// The batching window. Its frame stays open across the calls that fill it, so
+// the stage buffer IS a slot the link lends, held from the frame's first message
+// to its flush: each message is encoded straight into it and the flush hands the
+// slot over. Every test runs the same window over a link that lends nothing (the
+// heap stage, the control) and compares the wire, frame by frame.
+
+/// The batch budget the windows below negotiate (the session's own batch size;
+/// no peer has answered, so it is the whole budget).
+#[cfg(feature = "transport-batching")]
+const BUDGET: u16 = 200;
+/// A slot that holds a whole batch after the headroom.
+#[cfg(feature = "transport-batching")]
+const BATCH_SLOT: usize = BUDGET as usize + HEADROOM;
+
+#[cfg(feature = "transport-batching")]
+type Actions = Arc<wz_session_core::session_actions::SessionLinkActions<TokioRuntime, TokioTime>>;
+
+#[cfg(feature = "transport-batching")]
+fn batching_session(link: Sink) -> Actions {
+    new_session_actions(link, params_with_sn_7(Some(BUDGET)), TokioTime::new())
+}
+
+/// Open a window, push each payload, and close it.
+#[cfg(feature = "transport-batching")]
+fn run_window(actions: &Actions, payloads: &[&[u8]]) {
+    actions.batch_start().expect("batch_start");
+    for payload in payloads {
+        actions
+            .send_push_literal("home/batch", payload, true)
+            .expect("push");
+    }
+    actions.batch_stop().expect("batch_stop");
+}
+
+/// The frames the heap stage puts on the wire for the same window.
+#[cfg(feature = "transport-batching")]
+fn heap_window(payloads: &[&[u8]]) -> Vec<Vec<u8>> {
+    let link = LendingLink::new(false, 0, 0, 0);
+    run_window(&batching_session(link.clone()), payloads);
+    link.heap()
+}
+
+/// THE CLAIM: a window of messages leaves as ONE lent slot, the frame the heap
+/// stage builds byte for byte, and the flush copies nothing. The bytes copied at
+/// flush are what crosses the byte door, `send_prioritized`, which copies a
+/// frame out of the session's buffer into the link's: the batch size for the
+/// heap stage, zero here.
+#[cfg(feature = "transport-batching")]
+#[test]
+fn a_window_leaves_as_one_lent_slot_and_its_flush_copies_nothing() {
+    let payloads: [&[u8]; 5] = [b"one", b"two", b"three", b"four", b"five"];
+    let control = heap_window(&payloads);
+    assert_eq!(
+        control.len(),
+        1,
+        "CONTROL: the heap stage coalesced the window"
+    );
+    let copied_by_heap_stage: usize = control.iter().map(Vec::len).sum();
+    assert!(copied_by_heap_stage > 0);
+
+    let link = LendingLink::new(true, 2, BATCH_SLOT, HEADROOM);
+    let actions = batching_session(link.clone());
+    run_window(&actions, &payloads);
+    assert_eq!(link.lent(), control, "the slot is the heap stage's frame");
+    let copied_at_flush: usize = link.heap().iter().map(Vec::len).sum();
+    assert_eq!(copied_at_flush, 0, "nothing crossed the byte door");
+    assert_eq!(
+        link.grants.load(Ordering::SeqCst),
+        1,
+        "one slot for the whole window, not one per message"
+    );
+    assert_eq!(
+        actions.batch_lend_counts(),
+        wz_session_core::session_actions::BatchLendCounts {
+            slot_frames: 1,
+            ..Default::default()
+        }
+    );
+    link.assert_every_slot_home();
+}
+
+/// A message that does not fit what the slot has left closes the batch: the
+/// slot leaves as the frame and the message opens the next one. Nothing is lost
+/// or reordered, and the boundaries are the heap stage's, because a slot is
+/// only used when it holds the whole budget.
+#[cfg(feature = "transport-batching")]
+#[test]
+fn a_message_past_the_slot_closes_the_batch_and_opens_the_next() {
+    let payloads: Vec<Vec<u8>> = (0..12u8).map(|i| vec![i; 30]).collect();
+    let payloads: Vec<&[u8]> = payloads.iter().map(Vec::as_slice).collect();
+    let control = heap_window(&payloads);
+    assert!(
+        control.len() >= 3,
+        "CONTROL: the window spans frames: {}",
+        control.len()
+    );
+
+    let link = LendingLink::new(true, 1, BATCH_SLOT, HEADROOM);
+    let actions = batching_session(link.clone());
+    run_window(&actions, &payloads);
+    assert_eq!(link.lent(), control, "same frames, same order, same bytes");
+    assert!(link.heap().is_empty());
+    assert_eq!(
+        actions.batch_lend_counts().slot_frames as usize,
+        control.len(),
+        "each frame in a slot of its own, one at a time"
+    );
+    link.assert_every_slot_home();
+}
+
+/// Messages appended to a frame keep their sequence: the frame is a slot, the
+/// next frame is the next SN, with the window's messages in between.
+#[cfg(feature = "transport-batching")]
+#[test]
+fn consecutive_windows_number_their_frames_without_a_gap() {
+    let link = LendingLink::new(true, 1, BATCH_SLOT, HEADROOM);
+    let actions = batching_session(link.clone());
+    run_window(&actions, &[b"a", b"b"]);
+    run_window(&actions, &[b"c"]);
+    let lent = link.lent();
+    assert_eq!(lent.len(), 2);
+    // Frame byte 1 is `VLE(sn)`: one SN per frame, not per message.
+    assert_eq!((lent[0][1], lent[1][1]), (7, 8));
+    link.assert_every_slot_home();
+}
+
+/// A message past the batch budget in the middle of a window: the open frame
+/// leaves as its slot WITHOUT the message (its partial encode rolled back), the
+/// slot lent for the message alone goes back, and the message takes the
+/// oversize path from bytes. The wire, across both doors, is the heap stage's.
+#[cfg(feature = "transport-batching")]
+#[test]
+fn a_message_past_the_budget_mid_window_leaves_no_frame_half_built() {
+    let big = [0x77u8; 300];
+    let payloads: [&[u8]; 3] = [b"before", &big, b"after"];
+    let control = heap_window(&payloads);
+
+    let link = LendingLink::new(true, 1, BATCH_SLOT, HEADROOM);
+    let actions = batching_session(link.clone());
+    run_window(&actions, &payloads);
+    let wire: Vec<Vec<u8>> = link.doors().into_iter().map(|(_, bytes)| bytes).collect();
+    assert_eq!(wire, control, "the same frames in the same order");
+    let lent_doors: Vec<bool> = link.doors().into_iter().map(|(lent, _)| lent).collect();
+    assert_eq!(
+        (lent_doors.first(), lent_doors.last()),
+        (Some(&true), Some(&true)),
+        "the two small frames left as slots"
+    );
+    assert!(
+        link.aborts() >= 1,
+        "the slot lent for the oversize message came back"
+    );
+    link.assert_every_slot_home();
+}
+
+/// A link with no slot free: the window is staged on the heap as it always was,
+/// with the same bytes, and the fallback is counted, not silent.
+#[cfg(feature = "transport-batching")]
+#[test]
+fn a_dry_pool_stages_the_window_on_the_heap_and_counts_it() {
+    let payloads: [&[u8]; 3] = [b"x", b"y", b"z"];
+    let control = heap_window(&payloads);
+
+    let link = LendingLink::new(true, 0, BATCH_SLOT, HEADROOM);
+    let actions = batching_session(link.clone());
+    run_window(&actions, &payloads);
+    assert_eq!(link.heap(), control);
+    assert!(link.lent().is_empty());
+    assert_eq!(
+        actions.batch_lend_counts(),
+        wz_session_core::session_actions::BatchLendCounts {
+            heap_no_slot: 1,
+            ..Default::default()
+        }
+    );
+
+    // A link that lends nothing at all is the same fallback, counted the same.
+    let plain = LendingLink::new(false, 0, 0, 0);
+    let actions = batching_session(plain.clone());
+    run_window(&actions, &payloads);
+    assert_eq!(actions.batch_lend_counts().heap_no_slot, 1);
+}
+
+/// A slot that cannot hold the whole budget is refused: a frame built in it
+/// would close earlier than the heap frame and change the wire. Counted.
+#[cfg(feature = "transport-batching")]
+#[test]
+fn a_slot_short_of_the_budget_is_given_back_and_the_window_staged_on_the_heap() {
+    let payloads: [&[u8]; 2] = [b"short", b"slot"];
+    let control = heap_window(&payloads);
+
+    let link = LendingLink::new(true, 1, BATCH_SLOT - 1, HEADROOM);
+    let actions = batching_session(link.clone());
+    run_window(&actions, &payloads);
+    assert_eq!(link.heap(), control);
+    assert!(link.lent().is_empty());
+    assert_eq!(link.aborts(), 1, "the short slot went back unused");
+    assert_eq!(actions.batch_lend_counts().heap_short_slot, 1);
+    link.assert_every_slot_home();
+}
+
+/// A swap of the session's link in the middle of a window: the open frame is in
+/// the OLD link's slot, so it leaves there, and the new link is asked for
+/// nothing it did not lend.
+#[cfg(feature = "transport-batching")]
+#[test]
+fn a_swap_mid_window_sends_the_open_frame_on_the_link_that_lent_its_slot() {
+    let payloads: [&[u8]; 2] = [b"in", b"flight"];
+    let control = heap_window(&payloads);
+
+    let old = LendingLink::new(true, 1, BATCH_SLOT, HEADROOM);
+    let new = LendingLink::new(true, 1, BATCH_SLOT, HEADROOM);
+    let seam = Arc::new(SwappableLink::<TokioRuntime>::new(old.clone()));
+    let actions = batching_session(seam.clone());
+    actions.batch_start().expect("batch_start");
+    for payload in payloads {
+        actions
+            .send_push_literal("home/batch", payload, true)
+            .expect("push");
+    }
+    seam.swap(new.clone());
+    actions.batch_stop().expect("batch_stop");
+    assert_eq!(old.lent(), control);
+    assert!(new.lent().is_empty() && new.heap().is_empty());
+    old.assert_every_slot_home();
+    new.assert_every_slot_home();
+}
+
+/// A reopen in the middle of a window discards the open frame, as it discards a
+/// heap frame (the sequence numbers start over): the slot goes back to the link
+/// that lent it, and nothing half built reaches the wire.
+#[cfg(all(feature = "transport-batching", feature = "session-reconnect"))]
+#[test]
+fn a_reopen_mid_window_gives_the_open_frames_slot_back() {
+    let old = LendingLink::new(true, 1, BATCH_SLOT, HEADROOM);
+    let new = LendingLink::new(true, 1, BATCH_SLOT, HEADROOM);
+    let seam = Arc::new(SwappableLink::<TokioRuntime>::new(old.clone()));
+    let actions = batching_session(seam.clone());
+    actions.batch_start().expect("batch_start");
+    actions
+        .send_push_literal("home/batch", b"discarded", true)
+        .expect("push");
+    assert_eq!(old.free(), 0, "CONTROL: the open frame holds the slot");
+    // The supervisor's order: reset first, then swap in the re-dialled link.
+    actions.reset_for_reopen();
+    seam.swap(new.clone());
+    actions.batch_stop().expect("batch_stop");
+    assert_eq!(old.aborts(), 1, "the slot went back to its lender");
+    assert!(
+        old.doors().is_empty() && new.doors().is_empty(),
+        "nothing was sent"
+    );
+    old.assert_every_slot_home();
+    new.assert_every_slot_home();
+}
+
+/// A close in the middle of a window drains the open frame first, as its slot,
+/// and only then sends the close: data batched before the close is not lost
+/// behind it.
+#[cfg(all(feature = "transport-batching", feature = "codec-close"))]
+#[test]
+fn a_close_mid_window_sends_the_open_slot_before_the_close() {
+    let link = LendingLink::new(true, 1, BATCH_SLOT, HEADROOM);
+    let actions = batching_session(link.clone());
+    actions.batch_start().expect("batch_start");
+    actions
+        .send_push_literal("home/batch", b"last words", true)
+        .expect("push");
+    actions.send_close_with_reason(wz_session_core::close_reason::CloseReason::Generic);
+    let doors: Vec<bool> = link.doors().into_iter().map(|(lent, _)| lent).collect();
+    assert_eq!(
+        doors,
+        vec![true, false],
+        "the slot, then the close as bytes"
+    );
+    link.assert_every_slot_home();
+}
+
+/// A session dropped with a window open gives the slot back: the link holding
+/// the record returns it as it goes, and nothing is sent.
+#[cfg(feature = "transport-batching")]
+#[test]
+fn a_session_dropped_mid_window_gives_the_slot_back() {
+    let link = LendingLink::new(true, 1, BATCH_SLOT, HEADROOM);
+    let actions = batching_session(link.clone());
+    actions.batch_start().expect("batch_start");
+    actions
+        .send_push_literal("home/batch", b"never flushed", true)
+        .expect("push");
+    assert_eq!(link.free(), 0, "CONTROL: the open frame holds the slot");
+    drop(actions);
+    assert_eq!(link.aborts(), 1);
+    assert!(link.doors().is_empty(), "nothing half built was sent");
+    link.assert_every_slot_home();
 }

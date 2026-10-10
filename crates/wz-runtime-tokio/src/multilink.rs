@@ -638,6 +638,309 @@ mod tests {
         );
     }
 
+    /// ARCHITECTURE section 9.1 -- a link of an aggregate that LENDS its outbound
+    /// slots, in front of a recorder: what reaches the recorder is what the link
+    /// would write, and the counters say through which door it came.
+    #[cfg(all(
+        feature = "transport-qos",
+        feature = "codec-push",
+        feature = "codec-close",
+        feature = "transport-batching"
+    ))]
+    struct LendingRecorder {
+        inner: Arc<crate::test_fixtures::RecordingLinkDriver>,
+        /// Slot memory by slot number; `Some` while lent.
+        slots: std::sync::Mutex<Vec<Option<Box<[u8]>>>>,
+        by_slot: std::sync::atomic::AtomicUsize,
+        aborts: std::sync::atomic::AtomicUsize,
+    }
+
+    #[cfg(all(
+        feature = "transport-qos",
+        feature = "codec-push",
+        feature = "codec-close",
+        feature = "transport-batching"
+    ))]
+    impl LendingRecorder {
+        fn over(kind: wz_session_core::link::LinkKind) -> Arc<Self> {
+            Arc::new(Self {
+                inner: crate::test_fixtures::recording_driver_over(kind),
+                slots: std::sync::Mutex::new(Vec::new()),
+                by_slot: Default::default(),
+                aborts: Default::default(),
+            })
+        }
+        fn outstanding(&self) -> usize {
+            self.slots
+                .lock()
+                .expect("slots")
+                .iter()
+                .filter(|s| s.is_some())
+                .count()
+        }
+        fn count(counter: &std::sync::atomic::AtomicUsize) -> usize {
+            counter.load(std::sync::atomic::Ordering::SeqCst)
+        }
+    }
+
+    #[cfg(all(
+        feature = "transport-qos",
+        feature = "codec-push",
+        feature = "codec-close",
+        feature = "transport-batching"
+    ))]
+    impl wz_session_core::link::BoxedLinkDriver for LendingRecorder {
+        fn send_blocking(
+            &self,
+            bytes: &[u8],
+            r: wz_session_core::reliability::Reliability,
+        ) -> wz_session_core::link::LinkSendOutcome {
+            self.inner.send_blocking(bytes, r)
+        }
+        fn send_prioritized(
+            &self,
+            bytes: &[u8],
+            r: wz_session_core::reliability::Reliability,
+            p: wz_session_core::qos::Priority,
+        ) -> wz_session_core::link::LinkSendOutcome {
+            self.inner.send_prioritized(bytes, r, p)
+        }
+        fn open_blocking(&self) {}
+        fn close_blocking(&self) {}
+        fn link_subject(&self) -> Option<&wz_session_core::link::LinkSubject> {
+            self.inner.link_subject()
+        }
+        fn tx_slot_acquire(
+            &self,
+            want: usize,
+            _p: wz_session_core::qos::Priority,
+        ) -> Option<wz_session_core::link::TxSlotGrant> {
+            let mut slots = self.slots.lock().expect("slots");
+            slots.push(Some(vec![0u8; want].into_boxed_slice()));
+            Some(wz_session_core::link::TxSlotGrant {
+                slot: wz_session_core::link::TxSlot((slots.len() - 1) as u32),
+                headroom: 0,
+            })
+        }
+        fn tx_slot_storage(&self, slot: wz_session_core::link::TxSlot) -> (*mut u8, usize) {
+            let mut slots = self.slots.lock().expect("slots");
+            let mem = slots[slot.0 as usize].as_mut().expect("a lent slot");
+            // The boxed slice does not move while it is lent.
+            (mem.as_mut_ptr(), mem.len())
+        }
+        fn tx_slot_send(
+            &self,
+            slot: wz_session_core::link::TxSlot,
+            start: usize,
+            len: usize,
+            r: wz_session_core::reliability::Reliability,
+            p: wz_session_core::qos::Priority,
+        ) -> wz_session_core::link::LinkSendOutcome {
+            let mem = self.slots.lock().expect("slots")[slot.0 as usize]
+                .take()
+                .expect("a lent slot");
+            self.by_slot
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            self.inner.send_prioritized(&mem[start..start + len], r, p)
+        }
+        fn tx_slot_abort(&self, slot: wz_session_core::link::TxSlot) {
+            self.slots.lock().expect("slots")[slot.0 as usize]
+                .take()
+                .expect("a lent slot");
+            self.aborts
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
+
+    /// [`joined_qos_pair`] over two lending TCP links, with the primary on the
+    /// HIGH band and the secondary on the LOW band.
+    #[cfg(all(
+        feature = "transport-qos",
+        feature = "codec-push",
+        feature = "codec-close",
+        feature = "transport-batching"
+    ))]
+    fn joined_lending_pair() -> (
+        Arc<SessionLinkActions>,
+        Arc<SessionLinkActions>,
+        Arc<LendingRecorder>,
+        Arc<LendingRecorder>,
+    ) {
+        use crate::runtime_impl::{TokioRuntime, TokioTime};
+        use wz_runtime_core::Runtime;
+        use wz_session_core::link::LinkKind;
+        use wz_session_core::qos::Priority;
+        use wz_session_core::session_actions::LinkPriorityRange;
+
+        let primary_link = LendingRecorder::over(LinkKind::Tcp);
+        let secondary_link = LendingRecorder::over(LinkKind::Tcp);
+        let params = wz_runtime_tokio_test_support::fixture_session_init_params;
+        let primary = crate::session_glue::new_session_actions(
+            primary_link.clone(),
+            params(),
+            TokioTime::new(),
+        );
+        let secondary = crate::session_glue::new_session_actions(
+            secondary_link.clone(),
+            params(),
+            TokioTime::new(),
+        );
+        let key = vec![0x0Au8, 0x0B, 0x0C, 0x0D];
+        TokioRuntime::with_mutex_mut(&primary.core.multilink_pubkey, |s| *s = Some(key.clone()));
+        TokioRuntime::with_mutex_mut(&secondary.core.multilink_pubkey, |s| *s = Some(key));
+        assert!(matches!(
+            join_link(&primary, &secondary, 2),
+            JoinOutcome::Joined(_)
+        ));
+        TokioRuntime::with_mutex_mut(&primary.link.transport_available, |g| *g = true);
+        TokioRuntime::with_mutex_mut(&secondary.link.transport_available, |g| *g = true);
+        assert!(primary.set_qos_offer(true));
+        primary.negotiate_qos_against_peer(true);
+        primary.set_link_priority_range(Some(LinkPriorityRange::new(
+            Priority::Control,
+            Priority::InteractiveLow,
+        )));
+        secondary.set_link_priority_range(Some(LinkPriorityRange::new(
+            Priority::DataHigh,
+            Priority::Background,
+        )));
+        (primary, secondary, primary_link, secondary_link)
+    }
+
+    /// ARCHITECTURE section 9.1 -- the CONTROL for the two tests below: over
+    /// lending links a batch frame opens in the slot of the link its conduit
+    /// routes to and leaves there as that slot.
+    #[cfg(all(
+        feature = "transport-qos",
+        feature = "codec-push",
+        feature = "codec-close",
+        feature = "transport-batching"
+    ))]
+    #[test]
+    fn a_batch_frame_of_an_aggregate_leaves_as_its_routed_links_slot() {
+        use wz_session_core::qos::Priority;
+        let (primary, _secondary, high, low) = joined_lending_pair();
+        primary.batch_start().expect("batch_start");
+        primary
+            .send_push_literal_qos("b/high", b"H", true, Priority::RealTime)
+            .expect("batched send");
+        assert_eq!(
+            high.outstanding(),
+            1,
+            "the open frame holds a slot of its link"
+        );
+        primary.batch_stop().expect("batch_stop");
+        assert_eq!(
+            (
+                high.inner.frame_count(),
+                LendingRecorder::count(&high.by_slot)
+            ),
+            (1, 1),
+            "the frame left the high link as its slot"
+        );
+        assert_eq!(low.inner.frame_count(), 0);
+        assert_eq!((high.outstanding(), low.outstanding()), (0, 0));
+        assert_eq!(primary.batch_lend_counts().slot_frames, 1);
+    }
+
+    /// ARCHITECTURE section 9.1 -- the conduit moves to the other link while its
+    /// frame is open in the first link's slot: the frame is copied out, the slot
+    /// goes back to the link that lent it, and the bytes take the route the heap
+    /// stage's frame would take, counted `moved_to_heap`.
+    #[cfg(all(
+        feature = "transport-qos",
+        feature = "codec-push",
+        feature = "codec-close",
+        feature = "transport-batching"
+    ))]
+    #[test]
+    fn a_batch_frame_whose_conduit_moves_leaves_on_the_new_route_and_its_slot_returns() {
+        use wz_session_core::qos::Priority;
+        use wz_session_core::session_actions::LinkPriorityRange;
+        let (primary, secondary, high, low) = joined_lending_pair();
+        primary.batch_start().expect("batch_start");
+        primary
+            .send_push_literal_qos("b/move", b"M", true, Priority::RealTime)
+            .expect("batched send");
+        assert_eq!(
+            high.outstanding(),
+            1,
+            "CONTROL: opened in the high link's slot"
+        );
+        // Swap the bands: RealTime now routes to the other link.
+        primary.set_link_priority_range(Some(LinkPriorityRange::new(
+            Priority::DataHigh,
+            Priority::Background,
+        )));
+        secondary.set_link_priority_range(Some(LinkPriorityRange::new(
+            Priority::Control,
+            Priority::InteractiveLow,
+        )));
+        primary.batch_stop().expect("batch_stop");
+        assert_eq!(
+            high.inner.frame_count(),
+            0,
+            "not on the link that lent the slot"
+        );
+        assert_eq!(
+            LendingRecorder::count(&high.aborts),
+            1,
+            "whose slot came back"
+        );
+        assert_eq!(
+            (
+                low.inner.frame_count(),
+                LendingRecorder::count(&low.by_slot)
+            ),
+            (1, 0),
+            "the frame took the new route, as bytes"
+        );
+        assert_eq!((high.outstanding(), low.outstanding()), (0, 0));
+        assert_eq!(primary.batch_lend_counts().moved_to_heap, 1);
+    }
+
+    /// ARCHITECTURE section 9.1 -- the link that lent an open frame's slot leaves
+    /// the aggregate: the frame moves to the heap stage first, the slot goes back
+    /// with the link, and the surviving link carries the frame at the flush.
+    #[cfg(all(
+        feature = "transport-qos",
+        feature = "codec-push",
+        feature = "codec-close",
+        feature = "transport-batching"
+    ))]
+    #[test]
+    fn a_link_leaving_mid_window_hands_its_open_frame_to_the_heap_stage() {
+        use wz_session_core::qos::Priority;
+        let (primary, _secondary, high, low) = joined_lending_pair();
+        primary.batch_start().expect("batch_start");
+        primary
+            .send_push_literal_qos("b/leave", b"L", true, Priority::RealTime)
+            .expect("batched send");
+        assert_eq!(
+            high.outstanding(),
+            1,
+            "CONTROL: opened in the high link's slot"
+        );
+        assert_eq!(primary.del_link(&primary.link), 1, "one link survives");
+        assert_eq!(
+            high.outstanding(),
+            0,
+            "the leaving link's slot came back at once"
+        );
+        assert_eq!(LendingRecorder::count(&high.aborts), 1);
+        primary.batch_stop().expect("batch_stop");
+        assert_eq!(high.inner.frame_count(), 0);
+        assert_eq!(
+            (
+                low.inner.frame_count(),
+                LendingRecorder::count(&low.by_slot)
+            ),
+            (1, 0),
+            "the survivor carried the frame, from the heap stage"
+        );
+        assert_eq!(primary.batch_lend_counts().moved_to_heap, 1);
+    }
+
     /// R311y217 — the full-tier tie-break: among links whose bands BOTH cover the
     /// priority, the SMALLEST (most specific) band wins (zenoh tx.rs:56, strict
     /// `>` -> stable first-seen on equal width, no flap). primary = wide band

@@ -274,6 +274,65 @@ pub struct BatchTx {
     /// and the field is gone, leaving `BatchTx` its TX-ORDER lock role alone.
     #[cfg(feature = "transport-batching")]
     stage: BatchStage,
+    /// Where this conduit's batch frames were staged, counted. Cumulative: a
+    /// reopen resets the stage and keeps these, as it keeps the action trace.
+    #[cfg(all(feature = "transport-batching", feature = "transport-tx-lend"))]
+    lend: BatchLendCounts,
+}
+
+impl BatchTx {
+    /// The stage back to its initial state, the counts kept. The reopen
+    /// path's, and gated as it is.
+    #[cfg(feature = "session-reconnect")]
+    fn reset(&mut self) {
+        #[cfg(feature = "transport-batching")]
+        {
+            self.stage = BatchStage::default();
+        }
+    }
+}
+
+/// ARCHITECTURE section 9.1 -- where a session's batch frames were staged, by
+/// count of frames opened (the answer of
+/// [`SessionLinkActions::batch_lend_counts`]).
+///
+/// With `transport-tx-lend` a batch frame is opened in a slot its conduit's link
+/// lends, held across the calls of the window and sent as that slot, so a flush
+/// copies nothing. When the link lends no slot that can hold a whole batch, the
+/// frame is staged on the heap exactly as without the feature, and the reason is
+/// counted here, so a link that never lends, a pool that has run dry and a slot
+/// too small for the negotiated batch are each visible and none is silent.
+#[cfg(all(feature = "transport-batching", feature = "transport-tx-lend"))]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct BatchLendCounts {
+    /// Batch frames opened in a lent slot and sent as that slot.
+    pub slot_frames: u32,
+    /// Batch frames staged on the heap because the link lent no slot: it lends
+    /// none (every driver that has not opted in), or every slot is out.
+    pub heap_no_slot: u32,
+    /// Batch frames staged on the heap because the slot lent could not hold the
+    /// negotiated batch budget, so a frame built in it would close earlier than
+    /// the heap frame and put different bytes on the wire.
+    pub heap_short_slot: u32,
+    /// Open frames copied out of their slot onto the heap because the conduit
+    /// stopped routing to the link that lent it (an aggregated session moved the
+    /// conduit to another link, or the lender left the link set).
+    pub moved_to_heap: u32,
+    /// Open frames lost because the slot holding them could no longer be found
+    /// or read on the link that lent it. Zero unless a driver breaks the slot
+    /// contract.
+    pub lost: u32,
+}
+
+#[cfg(all(feature = "transport-batching", feature = "transport-tx-lend"))]
+impl BatchLendCounts {
+    fn add(&mut self, other: &Self) {
+        self.slot_frames = self.slot_frames.wrapping_add(other.slot_frames);
+        self.heap_no_slot = self.heap_no_slot.wrapping_add(other.heap_no_slot);
+        self.heap_short_slot = self.heap_short_slot.wrapping_add(other.heap_short_slot);
+        self.moved_to_heap = self.moved_to_heap.wrapping_add(other.moved_to_heap);
+        self.lost = self.lost.wrapping_add(other.lost);
+    }
 }
 
 /// R2922 — what a session's drive loop is asked from OUTSIDE it, and the wake
@@ -544,7 +603,7 @@ impl<R: SessionRuntime> TxConduits<R> {
         #[cfg(feature = "transport-batching")]
         self.set_active(false);
         for conduit in &self.conduits {
-            R::with_mutex_mut(conduit, |c| *c = BatchTx::default());
+            R::with_mutex_mut(conduit, BatchTx::reset);
         }
     }
 }
@@ -565,11 +624,106 @@ impl<R: SessionRuntime> core::fmt::Debug for TxConduits<R> {
 #[cfg(feature = "transport-batching")]
 #[derive(Debug, Default)]
 struct BatchStage {
-    /// The open outbound frame bytes (empty = none open).
+    /// The open outbound frame bytes when the frame is staged on the heap
+    /// (empty = no heap frame open).
     buf: Vec<u8>,
     /// Network messages absorbed into the open frame. The flush trigger is
     /// the byte budget (`params.batch_size`), never this count.
     count: usize,
+    /// ARCHITECTURE section 9.1 -- the open frame lives in a slot a link lent
+    /// rather than in `buf` (which is then empty). The slot itself is recorded
+    /// on the link that lent it (`LinkState::batch_slots`, at this conduit's
+    /// index), because only that link can send or abort it and because a
+    /// record kept there is found by where it is and not by a name that could
+    /// come to mean another link. The two are set and cleared together, under
+    /// this conduit's lock.
+    #[cfg(feature = "transport-tx-lend")]
+    lent: bool,
+}
+
+/// Why a batch frame was opened on the heap and not in a lent slot (the
+/// heap-stage reasons of [`BatchLendCounts`]), or that the message was never a
+/// batch frame at all. Gated, as the two items below are, on the data path that
+/// opens a batch frame.
+#[cfg(all(
+    feature = "transport-batching",
+    feature = "transport-tx-lend",
+    any(
+        feature = "codec-push",
+        feature = "codec-request",
+        feature = "codec-response",
+        feature = "codec-response-final",
+        feature = "declare-keyexpr",
+        feature = "declare-subscriber",
+        feature = "declare-queryable",
+        feature = "declare-token",
+        feature = "declare-interest",
+        feature = "liveliness-token",
+    )
+))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum HeapStage {
+    /// The link lent no slot.
+    NoSlot,
+    /// The slot lent was smaller than the batch budget.
+    ShortSlot,
+    /// The message alone is past the batch budget: it leaves through the
+    /// oversize path (a fragment chain), which builds from bytes, and opens no
+    /// batch frame to count.
+    PastBudget,
+}
+
+/// What opening a batch frame in a lent slot came to.
+#[cfg(all(
+    feature = "transport-batching",
+    feature = "transport-tx-lend",
+    any(
+        feature = "codec-push",
+        feature = "codec-request",
+        feature = "codec-response",
+        feature = "codec-response-final",
+        feature = "declare-keyexpr",
+        feature = "declare-subscriber",
+        feature = "declare-queryable",
+        feature = "declare-token",
+        feature = "declare-interest",
+        feature = "liveliness-token",
+    )
+))]
+enum LentBatchOpen {
+    /// The frame is open in the slot, with the message in it.
+    Opened,
+    /// Nothing was kept: open it on the heap, for this reason.
+    Heap(HeapStage),
+}
+
+#[cfg(all(
+    feature = "transport-batching",
+    feature = "transport-tx-lend",
+    any(
+        feature = "codec-push",
+        feature = "codec-request",
+        feature = "codec-response",
+        feature = "codec-response-final",
+        feature = "declare-keyexpr",
+        feature = "declare-subscriber",
+        feature = "declare-queryable",
+        feature = "declare-token",
+        feature = "declare-interest",
+        feature = "liveliness-token",
+    )
+))]
+impl BatchLendCounts {
+    /// Count a batch frame staged on the heap.
+    fn count_heap(&mut self, why: HeapStage) {
+        match why {
+            HeapStage::NoSlot => self.heap_no_slot = self.heap_no_slot.wrapping_add(1),
+            HeapStage::ShortSlot => self.heap_short_slot = self.heap_short_slot.wrapping_add(1),
+            // Not a batch frame: such a message leaves through the oversize
+            // path before the heap arm would count a frame.
+            HeapStage::PastBudget => {}
+        }
+    }
 }
 
 /// R311y214 — the unicast outbound Frame SN generator, SPLIT per
@@ -1620,6 +1774,35 @@ pub struct LinkState<R: SessionRuntime> {
     /// joined link is owed to that peer, not to the peer of the session's first link.
     #[cfg(feature = "session-extshm")]
     pub shm_rx: R::Mutex<crate::extshm::ShmRxSlot>,
+    /// ARCHITECTURE section 9.1 -- the batch frames open in slots THIS link
+    /// lent, one place per TX conduit (the conduit's index). A batching window
+    /// opens a conduit's frame in a slot of the link that conduit routes to and
+    /// keeps it here between the calls that fill it; the conduit's stage only
+    /// says that its frame is lent (`BatchStage::lent`).
+    ///
+    /// On the LINK and not in the stage, for three reasons that are one: only the
+    /// lending driver can send or abort the slot; a record kept where the slot
+    /// came from cannot be mistaken for another link's, whatever the link set of
+    /// an aggregated session does meanwhile; and when the link itself goes, its
+    /// drop gives back whatever it still holds, so no path leaks a slot.
+    #[cfg(all(feature = "transport-batching", feature = "transport-tx-lend"))]
+    pub(crate) batch_slots: R::Mutex<[Option<crate::tx_lease::HeldSlot>; TX_CONDUITS]>,
+}
+
+/// ARCHITECTURE section 9.1 -- a link that goes away gives back the batch slots
+/// it still holds. A session that is dropped with a batching window open, or a
+/// link dropped by its last holder, would otherwise keep those slots out of the
+/// driver's pool for good: a held slot has no driver of its own to return to.
+#[cfg(all(feature = "transport-batching", feature = "transport-tx-lend"))]
+impl<R: SessionRuntime> Drop for LinkState<R> {
+    fn drop(&mut self) {
+        let held = R::with_mutex_mut(&self.batch_slots, |slots| {
+            core::mem::replace(slots, [const { None }; TX_CONDUITS])
+        });
+        for slot in held.into_iter().flatten() {
+            slot.abort(self.link_driver());
+        }
+    }
 }
 
 /// R311y217 (transport-multilink + transport-qos) — the inclusive QoS-priority
@@ -2223,6 +2406,10 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                 shm_tx: R::new_mutex(None),
                 #[cfg(feature = "session-extshm")]
                 shm_rx: R::new_mutex(crate::extshm::ShmRxSlot::default()),
+                #[cfg(all(feature = "transport-batching", feature = "transport-tx-lend"))]
+                batch_slots: R::new_mutex(
+                    [const { None::<crate::tx_lease::HeldSlot> }; TX_CONDUITS],
+                ),
             }),
             core: R::share(SessionCore {
                 #[cfg(feature = "transport-stats")]
@@ -2807,6 +2994,351 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             self.emit_on_link(link, &[], Some(&mut slot), reliability, priority);
             true
         })
+    }
+
+    /// ARCHITECTURE section 9.1 -- open a conduit's batch frame in a slot the
+    /// conduit's link lends, with the window's first message in it, and keep the
+    /// slot on that link ([`LinkState::batch_slots`]) for the calls that follow.
+    ///
+    /// The slot is asked for at the frame's OPEN and not at `batch_start`: a
+    /// window spans every conduit and most of them may stay empty, so a slot taken
+    /// at the start would sit out of the pool for a frame that never opens, and a
+    /// flush ends the frame its slot was lent for anyway. Asked here, a conduit
+    /// occupies at most one slot, for exactly the span its heap stage would hold
+    /// a vector, and the occupancy is bounded by the conduit count.
+    ///
+    /// It never waits for a slot. A link that lends none, or has none free, or
+    /// lends one that cannot hold the whole batch budget answers
+    /// [`LentBatchOpen::Heap`] and the frame is staged on the heap with the reason
+    /// counted, so a consumer slow to return slots costs copies and never stalls
+    /// another sender. A slot short of the budget is refused rather than used
+    /// because a frame built in it would close earlier than the heap frame does,
+    /// and the wire would no longer be the heap stage's byte for byte. A message
+    /// that does not fit an empty slot is past the budget itself
+    /// ([`HeapStage::PastBudget`]): the slot goes back and the message takes the
+    /// oversize path, with the SN already minted.
+    #[cfg(all(
+        feature = "transport-batching",
+        feature = "transport-tx-lend",
+        any(
+            feature = "codec-push",
+            feature = "codec-request",
+            feature = "codec-response",
+            feature = "codec-response-final",
+            feature = "declare-keyexpr",
+            feature = "declare-subscriber",
+            feature = "declare-queryable",
+            feature = "declare-token",
+            feature = "declare-interest",
+            feature = "liveliness-token",
+        )
+    ))]
+    #[allow(clippy::too_many_arguments)]
+    fn open_lent_batch<P>(
+        &self,
+        batch: &mut BatchTx,
+        idx: usize,
+        sn: u64,
+        priority: Priority,
+        reliable: bool,
+        ext_qos: Option<Priority>,
+        mtu: usize,
+        encode_body: &P,
+    ) -> LentBatchOpen
+    where
+        P: Fn(&mut crate::tx_buf::TxSink<'_>) -> Result<(), sce_forge_runtime::codec::CodecError>,
+    {
+        use crate::tx_buf::TxBuf;
+        let reliability = Reliability::from_reliable_bool(reliable);
+        self.with_conduit_link(reliability, priority, |link| {
+            let Some(mut slot) =
+                crate::tx_lease::TxLease::acquire(link.link_driver(), mtu, priority)
+            else {
+                return LentBatchOpen::Heap(HeapStage::NoSlot);
+            };
+            // Dropping the lease on any refusal below gives the slot back.
+            if slot.capacity() < mtu {
+                return LentBatchOpen::Heap(HeapStage::ShortSlot);
+            }
+            let fits = crate::frame_encode::encode_frame_envelope_into(
+                &mut slot,
+                sn,
+                crate::frame_encode::frame_flags(reliable),
+                ext_qos,
+                encode_body,
+            )
+            .is_ok()
+                && slot.len() <= mtu;
+            if !fits {
+                return LentBatchOpen::Heap(HeapStage::PastBudget);
+            }
+            let displaced =
+                R::with_mutex_mut(&link.batch_slots, |slots| slots[idx].replace(slot.hold()));
+            if let Some(stale) = displaced {
+                // A record with no open frame naming it: the stage and the
+                // link disagree, which the shared conduit lock rules out. Give
+                // the slot back rather than lose it, and say so.
+                stale.abort(link.link_driver());
+                batch.lend.lost = batch.lend.lost.wrapping_add(1);
+            }
+            batch.stage.lent = true;
+            batch.stage.count = 1;
+            batch.lend.slot_frames = batch.lend.slot_frames.wrapping_add(1);
+            LentBatchOpen::Opened
+        })
+    }
+
+    /// ARCHITECTURE section 9.1 -- append one message to the frame open in a
+    /// lent slot. `true` when it is in; `false` when the frame is CLOSED
+    /// instead (sent as its slot, or lost and counted) and the caller opens a
+    /// fresh one: the message would pass the batch budget or the slot (its
+    /// partial encode is rolled back first, so no frame leaves half built), or
+    /// it is of the other reliability, which a frame never mixes (R311y222).
+    #[cfg(all(
+        feature = "transport-batching",
+        feature = "transport-tx-lend",
+        any(
+            feature = "codec-push",
+            feature = "codec-request",
+            feature = "codec-response",
+            feature = "codec-response-final",
+            feature = "declare-keyexpr",
+            feature = "declare-subscriber",
+            feature = "declare-queryable",
+            feature = "declare-token",
+            feature = "declare-interest",
+            feature = "liveliness-token",
+        )
+    ))]
+    fn append_lent_batch<P>(
+        &self,
+        batch: &mut BatchTx,
+        idx: usize,
+        priority: Priority,
+        reliable: bool,
+        mtu: usize,
+        encode_body: &P,
+    ) -> bool
+    where
+        P: Fn(&mut crate::tx_buf::TxSink<'_>) -> Result<(), sce_forge_runtime::codec::CodecError>,
+    {
+        use crate::tx_buf::TxBuf;
+        self.with_batch_holder(idx, |found| {
+            let Some((link, mut slot)) = Self::resume_batch_slot(found, &mut batch.lend) else {
+                batch.stage.lent = false;
+                batch.stage.count = 0;
+                return false;
+            };
+            let open_channel = crate::frame_encode::frame_wire_reliability(slot.as_slice());
+            if open_channel == Reliability::from_reliable_bool(reliable) {
+                let wpos = slot.len();
+                let appended = {
+                    let mut sink = crate::tx_buf::TxSink::new(&mut slot);
+                    encode_body(&mut sink).is_ok()
+                } && slot.len() <= mtu;
+                if appended {
+                    batch.stage.count += 1;
+                    R::with_mutex_mut(&link.batch_slots, |slots| slots[idx] = Some(slot.hold()));
+                    return true;
+                }
+                // Overflow: roll the partial encode back before the frame
+                // leaves, exactly as the heap stage truncates its vector.
+                slot.truncate(wpos);
+            }
+            batch.stage.lent = false;
+            batch.stage.count = 0;
+            self.send_lent_batch(link, slot, open_channel, priority, &mut batch.lend);
+            false
+        })
+    }
+
+    /// ARCHITECTURE section 9.1 -- close the frame open in a lent slot: send the
+    /// slot as the frame, on its own conduit (the frame's R flag and the
+    /// conduit's band). The flush paths' half of [`Self::append_lent_batch`].
+    #[cfg(all(feature = "transport-batching", feature = "transport-tx-lend"))]
+    fn close_lent_batch(&self, batch: &mut BatchTx, idx: usize, priority: Priority) {
+        use crate::tx_buf::TxBuf;
+        batch.stage.lent = false;
+        batch.stage.count = 0;
+        let lend = &mut batch.lend;
+        self.with_batch_holder(idx, |found| {
+            if let Some((link, slot)) = Self::resume_batch_slot(found, lend) {
+                let channel = crate::frame_encode::frame_wire_reliability(slot.as_slice());
+                self.send_lent_batch(link, slot, channel, priority, lend);
+            }
+        });
+    }
+
+    /// ARCHITECTURE section 9.1 -- run `f` on the link holding conduit `idx`'s
+    /// lent batch slot, with the slot taken out of its record (`f` puts it back
+    /// or settles it), or on `None` when no link holds one.
+    ///
+    /// The holder is found by WHERE the record is, never by a remembered name: this
+    /// binding's own link first, then (an aggregated session) every link of the
+    /// set, the binding that opened the frame being free to be another one.
+    #[cfg(all(feature = "transport-batching", feature = "transport-tx-lend"))]
+    fn with_batch_holder<O>(
+        &self,
+        idx: usize,
+        f: impl FnOnce(Option<(&LinkState<R>, crate::tx_lease::HeldSlot)>) -> O,
+    ) -> O {
+        if let Some(held) = R::with_mutex_mut(&self.link.batch_slots, |slots| slots[idx].take()) {
+            return f(Some((&*self.link, held)));
+        }
+        #[cfg(feature = "transport-multilink")]
+        {
+            let found = self
+                .links
+                .lock()
+                .expect("multilink set mutex")
+                .iter()
+                .find_map(|l| {
+                    R::with_mutex_mut(&l.batch_slots, |slots| slots[idx].take())
+                        .map(|held| (l.clone(), held))
+                });
+            if let Some((link, held)) = found {
+                return f(Some((&*link, held)));
+            }
+        }
+        f(None)
+    }
+
+    /// ARCHITECTURE section 9.1 -- a found batch slot as a lease again, on the
+    /// link that lent it. `None` (counted `lost`) when no link held the slot or
+    /// its driver no longer describes it; the open frame cannot be sent then,
+    /// and [`crate::tx_lease::TxLease::resume`] has already given the slot back.
+    #[cfg(all(feature = "transport-batching", feature = "transport-tx-lend"))]
+    fn resume_batch_slot<'l>(
+        found: Option<(&'l LinkState<R>, crate::tx_lease::HeldSlot)>,
+        lend: &mut BatchLendCounts,
+    ) -> Option<(&'l LinkState<R>, crate::tx_lease::TxLease<'l>)> {
+        let resumed = found.and_then(|(link, held)| {
+            crate::tx_lease::TxLease::resume(link.link_driver(), held).map(|slot| (link, slot))
+        });
+        if resumed.is_none() {
+            lend.lost = lend.lost.wrapping_add(1);
+        }
+        resumed
+    }
+
+    /// ARCHITECTURE section 9.1 -- send a closed batch frame that lives in a
+    /// slot `link` lent. When the conduit still routes to that link the slot is
+    /// handed over as it is ([`Self::emit_on_link`], the one emit seam): the flush
+    /// copies nothing. When it does not (an aggregated session moved the conduit
+    /// to another link meanwhile), the frame is copied out, the slot goes back
+    /// to its lender, and the bytes take the route the heap stage's frame would
+    /// take ([`Self::send_wire`]), counted `moved_to_heap`.
+    #[cfg(all(feature = "transport-batching", feature = "transport-tx-lend"))]
+    fn send_lent_batch(
+        &self,
+        link: &LinkState<R>,
+        mut slot: crate::tx_lease::TxLease<'_>,
+        channel: Reliability,
+        priority: Priority,
+        lend: &mut BatchLendCounts,
+    ) {
+        use crate::tx_buf::TxBuf;
+        if self.conduit_routes_to(link, channel, priority) {
+            self.emit_on_link(link, &[], Some(&mut slot), channel, priority);
+            return;
+        }
+        let bytes = slot.as_slice().to_vec();
+        drop(slot);
+        lend.moved_to_heap = lend.moved_to_heap.wrapping_add(1);
+        self.send_wire(&bytes, channel, priority);
+    }
+
+    /// Whether [`Self::send_wire`] would put a `(reliability, priority)` frame
+    /// on `link`: the same routing, asked as a question.
+    #[cfg(all(feature = "transport-batching", feature = "transport-tx-lend"))]
+    fn conduit_routes_to(
+        &self,
+        link: &LinkState<R>,
+        reliability: Reliability,
+        priority: Priority,
+    ) -> bool {
+        #[cfg(feature = "transport-multilink")]
+        if let Some(target) = self.select_link(reliability, priority) {
+            return core::ptr::eq(&*target, link);
+        }
+        #[cfg(not(feature = "transport-multilink"))]
+        let _ = (reliability, priority);
+        core::ptr::eq(&*self.link, link)
+    }
+
+    /// ARCHITECTURE section 9.1 -- the batch slots a reopen discards. A reopen
+    /// drops every staged frame (`TxConduits::reset`, the SN rings start over),
+    /// and a frame in a lent slot is given back to its lender here, under its
+    /// conduit's lock, so the reset never forgets a slot it cannot reach.
+    #[cfg(all(
+        feature = "session-reconnect",
+        feature = "transport-batching",
+        feature = "transport-tx-lend"
+    ))]
+    fn abort_lent_batches(&self) {
+        for idx in 0..TX_CONDUITS {
+            let priority = TxConduits::<R>::conduit_priority(idx);
+            R::with_mutex_mut(self.tx_conduits.conduit(priority), |batch| {
+                if !batch.stage.lent {
+                    return;
+                }
+                batch.stage.lent = false;
+                batch.stage.count = 0;
+                self.with_batch_holder(idx, |found| {
+                    if let Some((link, held)) = found {
+                        held.abort(link.link_driver());
+                    }
+                });
+            });
+        }
+    }
+
+    /// ARCHITECTURE section 9.1 -- a link leaving an aggregated session takes
+    /// its batch slots with it, so a frame open in one moves to the heap stage
+    /// first, as it would have been staged had the link never lent it, and the
+    /// surviving links carry it. Counted `moved_to_heap`.
+    #[cfg(all(
+        feature = "transport-multilink",
+        feature = "transport-batching",
+        feature = "transport-tx-lend"
+    ))]
+    fn move_lent_batches_off(&self, link: &LinkState<R>) {
+        use crate::tx_buf::TxBuf;
+        for idx in 0..TX_CONDUITS {
+            let priority = TxConduits::<R>::conduit_priority(idx);
+            R::with_mutex_mut(self.tx_conduits.conduit(priority), |batch| {
+                if !batch.stage.lent {
+                    return;
+                }
+                let Some(held) = R::with_mutex_mut(&link.batch_slots, |slots| slots[idx].take())
+                else {
+                    // The frame is in another link's slot.
+                    return;
+                };
+                batch.stage.lent = false;
+                match crate::tx_lease::TxLease::resume(link.link_driver(), held) {
+                    Some(slot) => {
+                        batch.stage.buf = slot.as_slice().to_vec();
+                        batch.lend.moved_to_heap = batch.lend.moved_to_heap.wrapping_add(1);
+                    }
+                    None => {
+                        batch.stage.count = 0;
+                        batch.lend.lost = batch.lend.lost.wrapping_add(1);
+                    }
+                }
+            });
+        }
+    }
+
+    /// ARCHITECTURE section 9.1 -- where this session's batch frames were
+    /// staged, summed over its conduits: in a lent slot, or on the heap and why.
+    #[cfg(all(feature = "transport-batching", feature = "transport-tx-lend"))]
+    pub fn batch_lend_counts(&self) -> BatchLendCounts {
+        let mut sum = BatchLendCounts::default();
+        for conduit in &self.tx_conduits.conduits {
+            R::with_mutex_mut(conduit, |batch| sum.add(&batch.lend));
+        }
+        sum
     }
 
     /// R2952 — a congestion drop, counted: upstream's `tx_n_dropped` is the
@@ -4522,6 +5054,10 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         if let Some(slot) = R::with_mutex_mut(&link.stats_slot, |own| own.take()) {
             R::with_mutex_mut(&self.metrics, |metrics| metrics.close_link(slot));
         }
+        // ARCHITECTURE section 9.1 -- the batch frames open in this link's
+        // slots move to the heap stage before the link leaves the set.
+        #[cfg(all(feature = "transport-batching", feature = "transport-tx-lend"))]
+        self.move_lent_batches_off(link);
         let target: *const LinkState<R> = &**link;
         let mut links = self.links.lock().expect("multilink set mutex");
         links.retain(|l| {
@@ -6986,12 +7522,48 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                 // conduit's open frame and falls through to the
                 // open-fresh-frame arm, which is always terminal (it empties
                 // the stage and returns).
+                // ARCHITECTURE section 9.1 -- the conduit index the frame's slot
+                // is recorded under on the link that lent it.
+                #[cfg(feature = "transport-tx-lend")]
+                let idx = TxConduits::<R>::conduit_index(priority);
                 loop {
+                    // ARCHITECTURE section 9.1 -- the open frame is in a slot a
+                    // link lent: append the message there, or, when it does not
+                    // fit (or changes the reliability), send that slot as the
+                    // frame and open a fresh one below.
+                    #[cfg(feature = "transport-tx-lend")]
+                    if batch.stage.lent {
+                        if self.append_lent_batch(batch, idx, priority, reliable, mtu, &encode_body)
+                        {
+                            return Ok(PushOutcome::Pushed);
+                        }
+                        continue;
+                    }
                     if batch.stage.buf.is_empty() {
                         if congested() {
                             return Ok(PushOutcome::Congested);
                         }
                         let sn = self.next_outbound_frame_sn(priority, reliable, sn_mask);
+                        // ARCHITECTURE section 9.1 -- the frame opens in a slot
+                        // the conduit's link lends, held across the window's
+                        // calls, so its flush is the slot itself and copies
+                        // nothing. Only when no slot that holds a whole batch is
+                        // lent is it staged on the heap below, as it always was,
+                        // with the SN already minted and the reason counted.
+                        #[cfg(feature = "transport-tx-lend")]
+                        let heap_stage = match self.open_lent_batch(
+                            batch,
+                            idx,
+                            sn,
+                            priority,
+                            reliable,
+                            ext_qos,
+                            mtu,
+                            &encode_body,
+                        ) {
+                            LentBatchOpen::Opened => return Ok(PushOutcome::Pushed),
+                            LentBatchOpen::Heap(why) => why,
+                        };
                         let stage = &mut batch.stage;
                         // +2 for a possible ext_qos ([0x31][VLE(priority)]) that
                         // begin_frame may append (symmetric with encode_frame_envelope).
@@ -7024,6 +7596,8 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                             );
                         } else {
                             stage.count = 1;
+                            #[cfg(feature = "transport-tx-lend")]
+                            batch.lend.count_heap(heap_stage);
                         }
                         return Ok(PushOutcome::Pushed);
                     }
@@ -7391,6 +7965,13 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             // seam agree by construction on which conduit is which.
             let priority = TxConduits::<R>::conduit_priority(idx);
             R::with_mutex_mut(self.tx_conduits.conduit(priority), |batch| {
+                // ARCHITECTURE section 9.1 -- a frame open in a lent slot leaves
+                // as that slot, with nothing copied.
+                #[cfg(feature = "transport-tx-lend")]
+                if batch.stage.lent {
+                    self.close_lent_batch(batch, idx, priority);
+                    return;
+                }
                 let stage = &mut batch.stage;
                 if stage.buf.is_empty() {
                     return;
@@ -10347,6 +10928,10 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                     ing.reset();
                 }
             });
+            // ARCHITECTURE section 9.1 -- a frame open in a lent slot is given
+            // back to its lender before the reset forgets it.
+            #[cfg(all(feature = "transport-batching", feature = "transport-tx-lend"))]
+            self.abort_lent_batches();
             self.tx_conduits.reset();
             // SeqCst pairs with `next_outbound_frame_sn`'s fetch_add — the
             // reset must not reorder against a straggling in-flight mint.

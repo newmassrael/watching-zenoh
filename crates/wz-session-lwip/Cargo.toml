@@ -285,7 +285,13 @@ wz-link-lwip = { path = "../wz-link-lwip", features = ["test-support", "tx-pool"
 # sessions through their keep-alive cadence (`tx_pool_session_tests`) decodes the
 # keep-alive the other side sends, as every image that turns `transport-keepalive`
 # on also does. It implies nothing else, and no other test here sends one.
-wz-session-core = { path = "../wz-session-core", default-features = false, features = ["transport-tx-lend", "codec-keep-alive"] }
+#
+# ARCHITECTURE section 9.1 — and `transport-batching`, so the batching window's
+# stage buffer can be witnessed as ONE slot of the transmit pool lent through
+# this crate's driver (`session_drive`'s window test). No MCU image turns the
+# window on today; the feature only compiles it, and a session that never calls
+# `batch_start` sends exactly as before, so no other test here moves.
+wz-session-core = { path = "../wz-session-core", default-features = false, features = ["transport-tx-lend", "codec-keep-alive", "transport-batching"] }
 
 # The inbound frame path counted with a counting allocator: a real lwIP session
 # pair, a frame of N Puts to a subscriber. It needs both handshake halves and

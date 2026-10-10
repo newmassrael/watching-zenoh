@@ -1323,6 +1323,129 @@ mod tests {
         assert_eq!(wire, envelope);
     }
 
+    /// The batching window over the same driver: the window's frame is opened in
+    /// the buffer the driver lends (with its framing room in front), every message
+    /// of the window is encoded into it, and the flush enqueues that buffer. One
+    /// lend, no byte-door copy, and the writer receives the u16 envelope of the
+    /// frame the heap stage builds for the same window.
+    #[cfg(all(feature = "codec-push", feature = "transport-batching"))]
+    #[tokio::test]
+    async fn a_batch_window_over_the_stream_driver_leaves_as_one_lent_buffer() {
+        use crate::runtime_impl::TokioTime;
+        use crate::session_glue::new_session_actions;
+
+        struct Collect(Mutex<Vec<Vec<u8>>>);
+        impl BoxedLinkDriver for Collect {
+            fn send_blocking(&self, bytes: &[u8], _r: Reliability) -> LinkSendOutcome {
+                self.0.lock().expect("collect").push(bytes.to_vec());
+                LinkSendOutcome::Sent
+            }
+            fn open_blocking(&self) {}
+            fn close_blocking(&self) {}
+        }
+        // Which door each frame came through, over the real driver.
+        struct Doors {
+            inner: StreamWriteDriver,
+            lends: std::sync::atomic::AtomicUsize,
+            by_slot: std::sync::atomic::AtomicUsize,
+            by_bytes: std::sync::atomic::AtomicUsize,
+        }
+        impl BoxedLinkDriver for Doors {
+            fn send_blocking(&self, bytes: &[u8], r: Reliability) -> LinkSendOutcome {
+                self.by_bytes.fetch_add(1, Ordering::SeqCst);
+                self.inner.send_blocking(bytes, r)
+            }
+            fn send_prioritized(
+                &self,
+                bytes: &[u8],
+                r: Reliability,
+                p: Priority,
+            ) -> LinkSendOutcome {
+                self.by_bytes.fetch_add(1, Ordering::SeqCst);
+                self.inner.send_prioritized(bytes, r, p)
+            }
+            fn open_blocking(&self) {}
+            fn close_blocking(&self) {}
+            fn tx_slot_acquire(&self, want: usize, p: Priority) -> Option<TxSlotGrant> {
+                self.lends.fetch_add(1, Ordering::SeqCst);
+                self.inner.tx_slot_acquire(want, p)
+            }
+            fn tx_slot_storage(&self, slot: TxSlot) -> (*mut u8, usize) {
+                self.inner.tx_slot_storage(slot)
+            }
+            fn tx_slot_send(
+                &self,
+                slot: TxSlot,
+                start: usize,
+                len: usize,
+                r: Reliability,
+                p: Priority,
+            ) -> LinkSendOutcome {
+                self.by_slot.fetch_add(1, Ordering::SeqCst);
+                self.inner.tx_slot_send(slot, start, len, r, p)
+            }
+            fn tx_slot_abort(&self, slot: TxSlot) {
+                self.inner.tx_slot_abort(slot)
+            }
+        }
+
+        let params = || {
+            let mut p = wz_runtime_tokio_test_support::fixture_session_init_params();
+            p.initial_sn = 7;
+            p.batch_size = 200;
+            p
+        };
+        let window = |session: &Arc<crate::session_glue::SessionLinkActions>| {
+            session.batch_start().expect("batch_start");
+            for payload in [&b"one"[..], b"two", b"three", b"four"] {
+                session
+                    .send_push_literal("home/batch", payload, true)
+                    .expect("push");
+            }
+            session.batch_stop().expect("batch_stop");
+        };
+
+        let (inner, mut rx, _flag) = write_driver(false);
+        let doors = Arc::new(Doors {
+            inner,
+            lends: Default::default(),
+            by_slot: Default::default(),
+            by_bytes: Default::default(),
+        });
+        let session = new_session_actions(doors.clone(), params(), TokioTime::new());
+        window(&session);
+        let wire = rx.recv().await.expect("the batch reached the writer");
+        assert_eq!(
+            (
+                doors.lends.load(Ordering::SeqCst),
+                doors.by_slot.load(Ordering::SeqCst),
+                doors.by_bytes.load(Ordering::SeqCst)
+            ),
+            (1, 1, 0),
+            "one lend for the window, sent as the slot, nothing through the byte door"
+        );
+        assert!(rx.try_recv().is_none(), "the whole window is one frame");
+
+        let control = Arc::new(Collect(Mutex::new(Vec::new())));
+        window(&new_session_actions(
+            control.clone(),
+            params(),
+            TokioTime::new(),
+        ));
+        let frames = control.0.lock().expect("collect").clone();
+        assert_eq!(
+            frames.len(),
+            1,
+            "CONTROL: the heap stage coalesced the window"
+        );
+        let envelope = StreamEnvelope {
+            payload_len: frames[0].len() as u16,
+            payload: &frames[0],
+        }
+        .encode_to_vec();
+        assert_eq!(wire, envelope);
+    }
+
     /// A closed channel refuses a lent frame exactly as it refuses a byte one, and
     /// the number it held is free.
     #[tokio::test]
