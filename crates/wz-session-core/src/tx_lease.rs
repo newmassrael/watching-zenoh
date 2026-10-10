@@ -248,6 +248,7 @@ mod tests {
     use crate::link::TxSlotGrant;
     use alloc::vec::Vec;
     use core::cell::RefCell;
+    use core::sync::atomic::{AtomicUsize, Ordering};
 
     const SLOTS: usize = 2;
     const SLOT_LEN: usize = 16;
@@ -259,6 +260,9 @@ mod tests {
         granted: RefCell<[bool; SLOTS]>,
         sent: RefCell<Vec<(usize, Vec<u8>)>>,
         aborts: RefCell<usize>,
+        // How many times the lease asked where a slot's memory is: the record
+        // that says the `null_storage` answer below was actually given.
+        storage_queries: AtomicUsize,
         // Misbehaviour switches for the grant the lease must refuse.
         null_storage: bool,
         headroom: usize,
@@ -271,6 +275,7 @@ mod tests {
                 granted: RefCell::new([false; SLOTS]),
                 sent: RefCell::new(Vec::new()),
                 aborts: RefCell::new(0),
+                storage_queries: AtomicUsize::new(0),
                 null_storage: false,
                 headroom: HEADROOM,
             }
@@ -305,6 +310,7 @@ mod tests {
         }
 
         fn tx_slot_storage(&self, slot: TxSlot) -> (*mut u8, usize) {
+            self.storage_queries.fetch_add(1, Ordering::Relaxed);
             if self.null_storage {
                 return (ptr::null_mut(), 0);
             }
@@ -473,15 +479,41 @@ mod tests {
 
     /// A driver that no longer describes a held slot costs the open frame and
     /// not the slot.
+    ///
+    /// The double is switched to answer "no memory" only AFTER the lease was
+    /// granted and held, so the one place that answer can be given is the
+    /// question `resume` asks. The test reads that it was asked (one query at
+    /// the grant, one more at the resume) and that the slot came back only
+    /// then: nothing was given back while the slot was held, so the abort is
+    /// the resume's refusal and not an earlier one of the fixture's.
     #[test]
     fn a_held_slot_the_driver_no_longer_describes_is_given_back() {
         let mut link = LendingLink::new();
         let mut lease = TxLease::acquire(&link, 8, Priority::DEFAULT).unwrap();
         lease.append(&[7]).unwrap();
         let held = lease.hold();
+        assert_eq!(
+            (
+                link.storage_queries.load(Ordering::Relaxed),
+                *link.aborts.borrow()
+            ),
+            (1, 0),
+            "the grant asked for the slot's memory once and holding gave nothing back"
+        );
+        assert_eq!(link.free(), SLOTS - 1, "the held slot is still lent");
         link.null_storage = true;
         assert!(TxLease::resume(&link, held).is_none());
-        assert_eq!((link.free(), *link.aborts.borrow()), (SLOTS, 1));
+        assert_eq!(
+            link.storage_queries.load(Ordering::Relaxed),
+            2,
+            "resume asked the driver for the slot's memory again"
+        );
+        assert_eq!(
+            (link.free(), *link.aborts.borrow()),
+            (SLOTS, 1),
+            "the slot the driver no longer describes was given back, once"
+        );
+        assert!(link.sent.borrow().is_empty(), "the open frame was not sent");
     }
 
     /// A driver that does not override the slot methods lends nothing, which is
