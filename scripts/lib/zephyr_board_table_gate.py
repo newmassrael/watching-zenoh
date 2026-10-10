@@ -88,8 +88,23 @@ than off the row's own say-so.
      companion carries the same record keys a row does, read the same way
      (item 6; the grammar steps are the ROW's, since a companion is not run on
      its own). A HARDWARE row that requires companions is HARDWARE only together
-     with them, and each cites the SAME ledger entry as the row: what ran was
-     the images together, and one image's record says nothing about the pair.
+     with them, and the entry the row cites records the PAIR that ran: its text
+     names the row's own image hash (item 6) AND, for every companion the row
+     requires, the hash of the companion image it ran with, which must be the
+     companion's `image_sha256` in this table. An entry that names no image
+     beside the row's, or names another image in the companion's place, is
+     refused, and so is a row whose image hash is its companion's (one image
+     cannot be both halves of the pair). A hash counts as named when it stands
+     as 64 hex digits of its own, not inside a longer hex run. The row's entry
+     need not be the companion's: the companion's HARDWARE claim rests on the
+     record it cites, the first run of the pair, and a row recorded later with
+     the same companion image cites its own entry. An earlier form of this rule
+     made every row cite the companion's entry, which left every later row on a
+     board unrecordable, since that entry is frozen and cannot name a later
+     image or its steps. The table lists one image per companion, so a
+     companion that is rebuilt is another image: its new run is recorded on the
+     companion first, and a row whose record names the old image is then
+     refused.
  10. BUILD-ONLY OVERLAYS. Layer Qzb has no lab to state the values a build needs,
      so a row may list an overlay of numbers made up so that the image is whole (a
      PLCA id, an address). Such an overlay describes no board, and an image built
@@ -136,6 +151,8 @@ COMPANION_KEYS = ("board", "app", "starts", "grade")
 COMPANION_GRADES = ("DECLARED", "BUILT", "HARDWARE")
 GRAMMAR_FILE = "HARDWARE_VERDICT.md"
 SHA256 = re.compile(r"[0-9a-f]{64}")
+# A hash as an entry's text names it: 64 hex digits that are not part of a longer run.
+HASH_IN_TEXT = re.compile(r"(?<![0-9a-f])[0-9a-f]{64}(?![0-9a-f])")
 DATE = re.compile(r"\d{4}-\d{2}-\d{2}")
 # A step is a line of the grammar file that starts `HW.<n> `. In an entry's
 # text the steps run on in one paragraph, so the split is at each `HW.<n> `.
@@ -245,6 +262,13 @@ def store_entries(root: Path) -> dict:
     return json.loads(path.read_text()).get("changelog_entries", {})
 
 
+def record_text(root: Path, record: object) -> str | None:
+    """The text of the changelog entry `record` names, as the gate reads a record
+    (the entry's JSON), or `None` when the store has no such entry."""
+    entry = store_entries(root).get(record) if isinstance(record, str) else None
+    return None if entry is None else json.dumps(entry, ensure_ascii=False)
+
+
 def grammar_steps(root: Path, app: str) -> list[str] | None:
     """The step numbers `deploy/<app>/HARDWARE_VERDICT.md` publishes, or `None`
     when the app publishes no grammar."""
@@ -336,15 +360,14 @@ def check_record(label: str, witness: dict, root: Path, steps: list[str] | None)
         )
     if not DATE.fullmatch(witness["date"]):
         out.append(f"{label}: date {witness['date']!r} is not YYYY-MM-DD")
-    entry = store_entries(root).get(witness["record"])
-    if entry is None:
+    text = record_text(root, witness["record"])
+    if text is None:
         out.append(
             f"{label}: HARDWARE record {witness['record']!r} is not a "
             f"changelog entry in the store -- a record with no entry is a "
             f"claim with no witness"
         )
         return out
-    text = json.dumps(entry, ensure_ascii=False)
     if witness["image_sha256"] not in text:
         out.append(
             f"{label}: image_sha256 does not appear in the text of {witness['record']!r} "
@@ -436,19 +459,47 @@ def check_companions(
                     f"{comp['grade']} -- a row's claim goes no higher than the lowest grade "
                     f"of what it runs with"
                 )
-            elif row.get("grade") == "HARDWARE" and _record_of(comp) != _record_of(row):
-                out.append(
-                    f"{label}: is HARDWARE on {_record_of(row)!r} but requires {app!r}, whose "
-                    f"record is {_record_of(comp)!r} -- what ran was the images together, so "
-                    f"the row and its companions cite the one entry"
-                )
+            elif row.get("grade") == "HARDWARE":
+                out.extend(pair_findings(label, row, app, comp, root))
     return out
 
 
-def _record_of(item: dict) -> object:
-    """The ledger entry id a row or companion's HARDWARE witness cites, or `None`."""
-    witness = item.get("witness")
-    return witness.get("record") if isinstance(witness, dict) else None
+def pair_findings(label: str, row: dict, app: str, comp: dict, root: Path) -> list[str]:
+    """The findings about the PAIR a HARDWARE row's record holds (module item 9).
+
+    The entry the row cites must name the image of companion `comp` it ran with, and
+    that image is the one the table lists as `comp`'s: the companion's `image_sha256`.
+    A witness that is not whole, or an entry that is absent, is reported by
+    `check_record` for the row or the companion and is not reported again here."""
+    row_w, comp_w = row.get("witness"), comp.get("witness")
+    if not isinstance(row_w, dict) or not isinstance(comp_w, dict):
+        return []
+    own, want = row_w.get("image_sha256"), comp_w.get("image_sha256")
+    if not isinstance(want, str) or not SHA256.fullmatch(want):
+        return []
+    if own == want:
+        return [
+            f"{label}: its image_sha256 is the image_sha256 of {app!r} -- one image "
+            f"cannot be both halves of the pair that ran"
+        ]
+    text = record_text(root, row_w.get("record"))
+    if text is None:
+        return []
+    named = set(HASH_IN_TEXT.findall(text))
+    if want in named:
+        return []
+    record = row_w["record"]
+    others = sorted(named - {own})
+    if others:
+        return [
+            f"{label}: {record!r} names image hash(es) {others} besides the row's own, and "
+            f"not the image hash of {app!r} ({want}) -- the pair it records ran with an "
+            f"image the table does not list as {app!r}"
+        ]
+    return [
+        f"{label}: {record!r} never names the image hash of {app!r} ({want}) -- the "
+        f"record says which {app!r} image the row ran with, and the table lists that one"
+    ]
 
 
 def check(table: dict, root: Path = ROOT) -> list[str]:
@@ -794,8 +845,8 @@ def selftest() -> int:
     t = _good_table(); t["companions"].append(dict(t["companions"][0]))
     expect("a duplicate companion", t, "not unique")
 
-    # HARDWARE. A whole record is a row AND the companion it requires, both
-    # citing one entry that holds each image's hash and every step of the
+    # HARDWARE. The first run of a pair: a row AND the companion it requires,
+    # both citing one entry that holds each image's hash and every step of the
     # fixture grammar (HW.0 to HW.2) as OK.
     app_hash, launch_hash = "ab" * 32, "cd" * 32
 
@@ -824,9 +875,55 @@ def selftest() -> int:
     expect("a HARDWARE row with its companion and a whole record", hardware_table(), None,
            entries=whole)
     expect("HARDWARE whose entry is absent", hardware_table(), "not a changelog entry")
+    # THE PAIR (module item 9). The entry a row cites names the companion image it
+    # ran with, as the table lists it; it need not be the companion's own record.
     t = hardware_table(); t["companions"][0]["witness"]["record"] = "Round 8"
-    expect("a companion citing another entry", t, "cite the one entry",
+    expect("a companion whose record is another entry than the row's", t, None,
            entries={"Round 9": entry(), "Round 8": entry()})
+    t = hardware_table(); t["companions"][0]["witness"]["record"] = "Round 8"
+    expect("a first row whose record does not name the launcher it ran with", t,
+           "never names the image hash of 'launch'",
+           entries={"Round 9": {"verification": f"HW.0 a - OK. HW.1 b - OK. HW.2 c - OK. "
+                                                f"Image {app_hash}."},
+                    "Round 8": entry()})
+    pool_hash, other_launch = "12" * 32, "ef" * 32
+
+    def pool_table() -> dict:
+        t = hardware_table()
+        t["rows"].append({
+            "board": "real/board", "link": "rmii-pool", "app": "adm",
+            "network": "lwip-mac", "rust_target": "thumbv7em-none-eabihf",
+            "grade": "HARDWARE", "requires": ["launch"],
+            "witness": {
+                "record": "Round 12", "image_sha256": pool_hash, "verdict": "HW.0 to HW.2 OK",
+                "date": "2026-10-11", "by": "the lab session",
+            },
+        })
+        return t
+
+    def later(*hashes: str, steps: str = "HW.0 a - OK. HW.1 b - OK. HW.2 c - OK.") -> dict:
+        return {"Round 9": entry(),
+                "Round 12": {"verification": f"{steps} Images {' '.join(hashes)}."}}
+
+    expect("a later row whose own record names the launcher it ran with", pool_table(), None,
+           entries=later(pool_hash, launch_hash))
+    expect("a later record naming another launcher image", pool_table(),
+           "besides the row's own", entries=later(pool_hash, other_launch))
+    expect("a later record naming no launcher image", pool_table(),
+           "never names the image hash of 'launch'", entries=later(pool_hash))
+    expect("a launcher hash only inside a longer hex run", pool_table(),
+           "never names the image hash of 'launch'",
+           entries=later(pool_hash, launch_hash + other_launch))
+    expect("a later record that names the launcher and not the row's image", pool_table(),
+           "does not appear", entries=later(launch_hash))
+    expect("a later record whose step failed", pool_table(), "does not say HW.1 held",
+           entries=later(pool_hash, launch_hash,
+                         steps="HW.0 a - OK. HW.1 b FAIL. HW.2 c - OK."))
+    expect("a later record that only cites the first round's pair", pool_table(),
+           "does not appear", entries={"Round 9": entry(), "Round 12": entry()})
+    t = pool_table(); t["rows"][3]["witness"]["image_sha256"] = launch_hash
+    expect("a row whose image hash is its companion's", t, "both halves",
+           entries=later(launch_hash))
     t = hardware_table(); t["companions"][0]["witness"]["image_sha256"] = "ef" * 32
     expect("a companion hash the record never mentions", t, "does not appear", entries=whole)
     t = hardware_table(); t["rows"][1]["witness"]["image_sha256"] = "ab"

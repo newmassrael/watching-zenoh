@@ -64,17 +64,32 @@ The entry a row cites as its record must say, in its text:
 
 - the date, the board and the chip, and the commit the images were built from;
 - who ran it, as a role and not as a name;
-- for EVERY image the board ran (the app's, and each companion the row
-  requires), the sha256 of the image as it was flashed;
+- for EVERY image the board ran, the sha256 of the image file as it was flashed,
+  with the file's name, written as 64 lowercase hex digits standing on their own:
+  - the app's image, on this kit the one the M7_0 core runs, whose hash is the
+    row's `image_sha256`;
+  - the image of each companion the row requires, on this kit the CM0+ launcher
+    (`zephyr-cm0p-launcher`), whose hash is that companion's `image_sha256` in
+    `deploy/zephyr-boards.json`;
 - the sentence of every step the row names (the eight above for the onboard port),
   each ending ` - OK`;
 - what the run did not settle.
 
-The table row carries the same hash, date and who as keys of its `witness`, and
-the gate refuses a hash that does not appear in the entry. A row that requires
-companions is HARDWARE only together with them, and they cite the same entry:
-what ran was the images together, and one image's record says nothing about the
-pair.
+The table row carries its image's hash, the date and who as keys of its `witness`,
+and the gate refuses a row whose hash does not appear in the entry. A row that
+requires companions is HARDWARE only together with them, because what ran was the
+images together, so the entry is the record of the pair: the gate refuses an entry
+that does not name the companion's hash as the table lists it, whether it names no
+other image or another one in its place, and refuses a row whose own hash is the
+companion's.
+
+The entry need not be the companion's record. The companion's grade rests on the
+entry it cites, the first run of the pair (Round 3098, which the onboard row cites
+too). A row recorded later with the same launcher, such as a pool image's, cites its
+own entry, and that entry names the launcher's hash beside the row's. The table lists
+one launcher image per board: a launcher that is rebuilt is another image, its run is
+recorded on the companion first, and a row whose record names the old launcher is
+then refused.
 
 ## The second interface (10BASE-T1S): steps HW.8 to HW.25
 
