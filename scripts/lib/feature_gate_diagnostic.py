@@ -231,11 +231,17 @@ NO_PUBLIC_PATH: dict[str, dict[str, str]] = {
             "no_std",
             "pubsub-attachment",
             "pubsub-congestion-control",
-            "pubsub-delete",
+            # `pubsub-delete` and `pubsub-put` LEFT this list, by the R2386
+            # route: the round that delivered a Push read in place to its
+            # subscriber lent made the claim false. `pubsub` (a `pub mod`) now
+            # carries `pub struct InPlaceFallbacks` and the registry's
+            # `in_place_fallbacks`, both behind
+            # `all(feature = "alloc", any(feature = "pubsub-put", feature =
+            # "pubsub-delete"))`. Both sites are compound, so both features are
+            # DEFERRED below as `compound-cfg`, not probed.
             "pubsub-encoding",
             "pubsub-express",
             "pubsub-priority",
-            "pubsub-put",
             "pubsub-qos",
             "pubsub-source-info",
             "pubsub-timestamp",
@@ -538,6 +544,11 @@ DEFERRED: dict[str, dict[str, str]] = {
                 # (`session_actions.rs`), which is exactly `compound-cfg`.
                 "declare-keyexpr",
                 "declare-undeclare",
+                # Moved here from `NO_PUBLIC_PATH` (see the note there): the
+                # in-place delivery's fallback counts and their getter, both
+                # behind `all(alloc, any(pubsub-put, pubsub-delete))`.
+                "pubsub-delete",
+                "pubsub-put",
                 "session-matching",
                 # R3243 — moved here from `NO_PUBLIC_PATH` (see the note
                 # there). Its two public sites, the per-reason staging count
