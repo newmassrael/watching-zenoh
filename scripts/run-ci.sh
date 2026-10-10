@@ -7280,7 +7280,13 @@ layer_c1ak_cargo_test_transport_stats() {
     # R2372 — 1 -> 3 on the BARE arm. The three that reach it are the ones
     # R311y811's comment above is about: ungated by `alloc` as well as by
     # `transport-stats`.
-    _runci_guarded_test C1ak 12 cargo test -p wz-session-core --no-default-features --lib stats --quiet \
+    # Round 3213 -- 3 -> 12 -> 3. The count read 12 on a tree where
+    # `transport-tx-lend` implied `alloc` and this crate's own test build
+    # enables that feature through a dev-dependency on itself, so the arm whose
+    # whole job is the no-allocation build was allocating. The 12 was the
+    # allocating arm's count, written to match the red tree. The feature
+    # implies nothing now, and this arm reads its three again.
+    _runci_guarded_test C1ak 3 cargo test -p wz-session-core --no-default-features --lib stats --quiet \
         || return 1
     # R311y810 — adminspace-metrics AND transport-stats together: the combination
     # a deployment actually runs, which no lane composed before. The metrics leg's

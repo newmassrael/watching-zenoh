@@ -339,14 +339,16 @@ mod identity_tests {
     /// id, and never the identity itself or anything with another id.
     #[test]
     fn the_lookalike_family_is_the_seven_other_headers_of_the_id() {
-        let family: alloc::vec::Vec<u8> = lookalike_headers(0x43).collect();
+        // `std`, not `alloc`: unit tests link std in every build, while `alloc`
+        // is a feature and the no-default-features test build has none.
+        let family: std::vec::Vec<u8> = lookalike_headers(0x43).collect();
         assert_eq!(family.len(), 7);
         assert!(!family.contains(&0x43));
         assert!(family.contains(&0x53), "the mandatory ZBuf");
         assert!(family.contains(&0x03), "the unit");
         assert!(family.iter().all(|h| ext_id(*h) == 0x3));
         // The chain flag is no part of an identity: `0xC3` is the identity `0x43`.
-        let chained: alloc::vec::Vec<u8> = lookalike_headers(0xC3).collect();
+        let chained: std::vec::Vec<u8> = lookalike_headers(0xC3).collect();
         assert_eq!(family, chained);
     }
 }
