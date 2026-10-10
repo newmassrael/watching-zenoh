@@ -395,6 +395,20 @@ fn demo_main() -> ExitCode {
         return ExitCode::from(2);
     }
 
+    // Item 751 — a south partition is a ROUTER's here: the router hat builds a
+    // hat for every region a partition can place a remote in, and no other run
+    // mode does yet (a peer's partition holds router hats of its own in the pin,
+    // `zenoh/src/net/routing/gateway.rs` @ `GatewaySouthConf::Custom(subregions) => {`).
+    // Refused rather than ignored on every other mode, so a node never runs on
+    // the `auto` preset while its operator asked for a partition.
+    if parse_pair(rest, "--gateway-south").is_some() && parse_pair(rest, "--router-hat").is_none() {
+        eprintln!(
+            "wz-ap-demo: --gateway-south requires --router-hat (only the router \
+             hat serves a partitioned south)"
+        );
+        return ExitCode::from(2);
+    }
+
     // R311qg — `--peer <listen>` selects the peer-MESH mode (dial the configured
     // `--connect` peers AND accept inbound on `<listen>`, holding both — the
     // routing-peer foundation), handled before the single-session role parse.
@@ -1064,6 +1078,17 @@ fn demo_main() -> ExitCode {
                     return ExitCode::from(2);
                 }
             };
+            // Item 751 — `--gateway-south <partition>`, read by the config
+            // reader's own `gateway/south` reader and REFUSED loudly rather than
+            // degraded: a partition the operator asked for and did not get places
+            // remotes in regions nobody chose.
+            let south_partition = match crate::args::parse_gateway_south(rest) {
+                Ok(v) => v,
+                Err(msg) => {
+                    eprintln!("wz-ap-demo: {msg}");
+                    return ExitCode::from(2);
+                }
+            };
             return run_router_hat_mode(
                 // R2099 (open-debt item 512) — an endpoint LIST, exactly as
                 // `--peer` now takes: both are BINDING run-modes reading the same
@@ -1097,6 +1122,7 @@ fn demo_main() -> ExitCode {
                     // parse above).
                     router_link_weights,
                     peer_region_full_linkstate,
+                    south_partition,
                     // R311y454 — `--multicast-locator udp/<group>:<port>[#iface=<name>]`:
                     // the router's data-plane multicast group, spelled as a LOCATOR so
                     // the `#iface=` tail is honoured by the same parser every unicast

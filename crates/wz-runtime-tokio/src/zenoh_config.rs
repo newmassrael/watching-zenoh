@@ -4692,9 +4692,11 @@ const GATEWAY_SOUTH_SHAPE: &str = "\"auto\", or a list of subregions { filters?:
 /// * a zid is [`zenoh_hex_to_zid`]'s alphabet, and a region name is
 ///   [`RegionName::new`](wz_session_core::extregion::RegionName::new)'s.
 ///
-/// Nothing reads the key through this yet: it stays in
-/// [`UNHONOURED_BEYOND_WZ`] until a node acts on every placement the partition
-/// can make, which open-debt item 751 orders after the router's own hats.
+/// The config ingest does not read the key through this yet: it stays in
+/// [`UNHONOURED_BEYOND_WZ`] until a node of every mode acts on every placement
+/// the partition can make. A ROUTER does (open-debt item 751, its subregions'
+/// router regions included), and wz-ap-demo's `--router-hat --gateway-south`
+/// hands its text here; a peer with a partition does not yet.
 pub fn gateway_south_of(value: &Json5Value) -> Result<SouthPartition, ConfigIngestError> {
     let refuse = || ConfigIngestError::WrongType {
         path: GATEWAY_SOUTH_PATH,

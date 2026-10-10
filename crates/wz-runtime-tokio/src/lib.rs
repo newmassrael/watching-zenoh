@@ -269,6 +269,13 @@ pub use wz_session_core::reply_acceptance;
 /// and a second copy in `wz-capi-c` is exactly what the re-export prevents.
 pub use wz_session_core::json5;
 
+/// Open-debt item 751 — the south partition type, on the same precedent: a
+/// router host hands one to
+/// `router_forward::RouterForwarder::with_south_partition`, and wz-ap-demo
+/// reaches that method without depending on `wz-session-core`, so it has to be
+/// able to name the value it passes.
+pub use wz_session_core::region_partition;
+
 // R311y294 — the keyexpr MATCHING SSOT, re-exported on the `keyexpr_canon`
 // precedent above (unconditional: the module is alloc-gated in wz-session-core
 // and this crate is always-alloc). An AP consumer that must answer "does key A

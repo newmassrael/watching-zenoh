@@ -6332,6 +6332,11 @@ layer_c1ay_cargo_test_router_hat() {
     # accept/reject SET is its whole content.
     _runci_guarded_test "C1AY connect_retry_args 5" 5 \
         cargo test -p wz-ap-demo --features router-hat-router,router-connect-reconcile connect_retry_tests --quiet || return 1
+    # Item 751 — `--gateway-south <partition>` hands its text to the config
+    # reader's `gateway/south` reader, so it needs both features; a build
+    # without `zenoh-config` refuses the flag. 3, read off the command's total.
+    _runci_guarded_test "C1AY gateway_south_flag 3" 3 \
+        cargo test -p wz-ap-demo --features router-hat-router,zenoh-config gateway_south_flag_tests --quiet || return 1
     # R311y842 — the stock-zenoh config -> argv expansion, for the same reason
     # the parser above states: it returns Result rather than exiting, precisely
     # so the accept/reject SET can be tested, and an exiting expander could not
@@ -18369,6 +18374,13 @@ layer_z_zenohd_interop() {
     # control (the legs are `#[ignore]`d).
     _runci_guarded_test Z 6 env WZ_ZENOHD_BIN="$zenohd" cargo test -p wz-integration-tests \
         --test wz_south_partition_region_zenohd_interop -- --ignored --quiet --test-threads=1 || return 1
+    # Open-debt item 751 -- a router placed in two routers' south subregion: each
+    # Put crosses the boundary once in each direction, two zenohd gateways as the
+    # calibration and two wz `--router-hat --gateway-south` gateways as the claim.
+    # Needs zenohd, the pico z_pub/z_sub CLIs and the demo built above with
+    # `router-hat-router,zenoh-config`. GUARDED at 2, one per leg.
+    _runci_guarded_test Z 2 env WZ_ZENOHD_BIN="$zenohd" cargo test -p wz-integration-tests \
+        --test wz_router_subregion_two_gateways_zenohd_interop -- --ignored --quiet --test-threads=1 || return 1
     # R311y430 — `scouting-autoconnect`, the last unproven scouting atom, on a
     # THREE-node topology the peer-tier leg above cannot host: a zenohd ROUTER, a
     # THIRD-PARTY zenohd PEER listening beside it, and a wz `--peer --autoconnect`

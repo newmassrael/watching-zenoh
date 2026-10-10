@@ -463,6 +463,38 @@ pub(crate) fn parse_peer_mode(args: &[String]) -> Result<bool, String> {
     }
 }
 
+/// Item 751 — `--gateway-south <partition>`: the router's south partition, as
+/// JSON5 text in the shape upstream's `gateway/south` value takes (`"auto"`, or
+/// a list of subregions with their filters). Read by the config reader's own
+/// reader of that key (`gateway_south_of`), so the flag and a future config
+/// expansion cannot accept different documents. Absent is the `auto` preset.
+///
+/// The reader lives in the config reader, so a build without `zenoh-config`
+/// has none, and the flag is then refused rather than ignored.
+#[cfg(feature = "router-hat-router")]
+pub(crate) fn parse_gateway_south(
+    args: &[String],
+) -> Result<wz::runtime_tokio::region_partition::SouthPartition, String> {
+    let Some(text) = parse_pair(args, "--gateway-south") else {
+        return Ok(wz::runtime_tokio::region_partition::SouthPartition::Auto);
+    };
+    #[cfg(feature = "zenoh-config")]
+    {
+        let value = wz::runtime_tokio::json5::parse(&text)
+            .map_err(|e| format!("--gateway-south {text:?} is not a JSON5 value: {e}"))?;
+        wz::runtime_tokio::zenoh_config::gateway_south_of(&value)
+            .map_err(|e| format!("--gateway-south {text:?}: {e}"))
+    }
+    #[cfg(not(feature = "zenoh-config"))]
+    {
+        Err(format!(
+            "--gateway-south {text:?} requires the `zenoh-config` feature, whose \
+             reader parses it (build: cargo build -p wz-ap-demo --features \
+             router-hat-router,zenoh-config)"
+        ))
+    }
+}
+
 /// R2758 — `--max-sessions <N>`, read the same way by every run-mode.
 ///
 /// A FREE FUNCTION rather than a local in one branch, because two run-modes
@@ -9170,6 +9202,62 @@ mod link_config_flag_tests {
         ] {
             let err = tuning(&["--link-config", value]).expect_err(value);
             assert!(err.contains(needle), "{value} -> {err}");
+        }
+    }
+}
+
+/// Item 751 — `--gateway-south <partition>`: the flag hands its text to the
+/// config reader's `gateway/south` reader, so what it takes and refuses is that
+/// reader's (measured against zenohd's own loading in
+/// `wz_south_partition_region_zenohd_interop`).
+#[cfg(all(test, feature = "router-hat-router", feature = "zenoh-config"))]
+mod gateway_south_flag_tests {
+    use super::*;
+    use wz::runtime_tokio::region_partition::SouthPartition;
+
+    fn argv(value: Option<&str>) -> Vec<String> {
+        let mut out = vec!["--router-hat".to_string(), "tcp/127.0.0.1:0".to_string()];
+        if let Some(v) = value {
+            out.push("--gateway-south".to_string());
+            out.push(v.to_string());
+        }
+        out
+    }
+
+    /// Absent, and spelled `"auto"`, are the preset.
+    #[test]
+    fn absent_or_auto_is_the_preset() {
+        assert_eq!(parse_gateway_south(&argv(None)), Ok(SouthPartition::Auto));
+        assert_eq!(
+            parse_gateway_south(&argv(Some(r#""auto""#))),
+            Ok(SouthPartition::Auto)
+        );
+    }
+
+    /// A list is a custom partition, one subregion per element, in order.
+    #[test]
+    fn a_list_is_a_custom_partition() {
+        let parsed = parse_gateway_south(&argv(Some(
+            r#"[ { filters: [ { zids: ["a1b2c3d4"] } ] }, { filters: [ { modes: ["peer"] } ] } ]"#,
+        )))
+        .expect("a valid partition");
+        let SouthPartition::Custom(subregions) = parsed else {
+            panic!("a list is not the preset: {parsed:?}");
+        };
+        assert_eq!(subregions.len(), 2);
+    }
+
+    /// What is not JSON5, and what the reader refuses, is refused with the flag
+    /// named: a partition asked for and not applied places remotes nobody chose.
+    #[test]
+    fn a_value_the_reader_refuses_is_refused() {
+        for bad in [
+            "[ { filters: ",
+            r#""manual""#,
+            "[ { filters: [ { modes: 3 } ] } ]",
+        ] {
+            let err = parse_gateway_south(&argv(Some(bad))).expect_err(bad);
+            assert!(err.starts_with("--gateway-south "), "{bad} -> {err}");
         }
     }
 }

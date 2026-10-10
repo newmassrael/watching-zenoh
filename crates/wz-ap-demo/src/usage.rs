@@ -242,6 +242,14 @@ pub(crate) fn print_usage() {
     eprintln!("                             links carry zenoh's default 100. Two entries naming");
     eprintln!("                             one destination are REFUSED, as a zenohd refuses");
     eprintln!("                             the same config. Requires --router-hat.");
+    eprintln!("    --gateway-south <json5>  how this ROUTER partitions its south into subregions,");
+    eprintln!("                             in the shape of the upstream gateway south value:");
+    eprintln!("                             \"auto\" (the default), or a list of subregions, each");
+    eprintln!("                             with filters on modes, zids, interfaces and region");
+    eprintln!("                             names. A remote is placed in the first subregion it");
+    eprintln!("                             matches, and every session announces the bound that");
+    eprintln!("                             gives it. Requires --router-hat and the zenoh-config");
+    eprintln!("                             build feature; refused on every other run mode.");
     eprintln!("    --zid <hex>              PIN this node's routing zid (else it is derived from");
     eprintln!("                             the listen port). REQUIRED for a non-IP listen, which");
     eprintln!("                             has no port to derive a distinct mesh id from.");

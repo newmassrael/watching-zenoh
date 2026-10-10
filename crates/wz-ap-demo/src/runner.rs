@@ -6003,6 +6003,12 @@ pub(crate) struct RouterHatOpts {
     /// subsystem of link-state peers keeps meshing through it. Off (gossip) is
     /// the pin's and the default.
     pub peer_region_full_linkstate: bool,
+    /// Open-debt item 751 — `--gateway-south <partition>`: how this router's
+    /// south is partitioned into subregions. The forwarder's hats are built from
+    /// it and every session the face loop opens announces its bound from it, so
+    /// the one value is handed to the forwarder alone. `Auto` (no flag) is the
+    /// pin's preset and every router's default.
+    pub south_partition: wz::runtime_tokio::region_partition::SouthPartition,
 }
 
 #[cfg(feature = "router-hat-router")]
@@ -6213,9 +6219,13 @@ async fn run_router_hat_until(
         .map_for(wz::runtime_tokio::session_glue::WhatAmI::Router);
     // R2626 — the section's second key, applied as a builder for the reason the
     // linkstate host states: it is not role-resolved.
+    // Item 751 — the south partition, before any face registers (the hats a
+    // face joins are the ones it keeps); the face loop reads it back off the
+    // forwarder for every session it opens.
     let forwarder =
         RouterForwarder::with_timestamping(Zid::from_slice(&params.zid), node_timestamping)
-            .with_drop_future_timestamp(opts.timestamping.drop_future_timestamp());
+            .with_drop_future_timestamp(opts.timestamping.drop_future_timestamp())
+            .with_south_partition(opts.south_partition.clone());
 
     // R2634 — the ONE live `WzConfig` this host runs on, built before the first
     // face so the weights it carries are what the first flood advertises. R2633
