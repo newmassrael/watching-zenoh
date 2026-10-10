@@ -269574,6 +269574,114 @@
         "4. AP fragments are still copied out of the unit into an owned vector per fragment before staging (inbound.rs Fragment arm `.to_vec()`, DriverLoopOutcome::Fragment payload: Vec<u8>), so the AP stages with two copies where 9.3 allows one. Same seam as B3 (below)."
       ]
     },
+    "Round 3253": {
+      "decision_summary": "runtime-zero-copy B3, re-measured first: REAL. On the MCU in-place path a Fragment cost 6 allocations per non-final turn and 10 at completion (unit copied, payload copied, heap staging, message copied into owned records); a lean lowlatency unit took the copying path (5 for one Put); a Frame with its own ext chain owned it every frame. Built behind rx-in-place: the session OWNS a reassembly arena over the generated reassembly_pool_mcu table (storage handed in: the image's placed table or one the arena allocates once; not a hidden static, so two sessions bring two tables), walked only by the generated edges. A fragment's head is read in place (chain kept as header bytes), its payload copied once into its slot, and a completed message is read IN the slot, record by record. The observer gets a borrowed range descriptor (InPlaceFragment) instead of Poll(Fragment). Lowlatency units and Frame chains are read in place too; a chain is owned only for an owned record.",
+      "changes_bullets": [
+        "Commit 3fded9cf fix(session-lwip): the two-session log reads a Put that came in lent",
+        "crates/wz-session-lwip/src/two_session_tests.rs: put_payloads reads IterationEvent::InPlace as well as Poll(FramePayload). fs3 fallout: under the lwIP census union (rx-in-place on) three two_session_tests failed on the fb3 base and pass on origin/main (measured both).",
+        "scripts/lib/feature_gate_diagnostic.py: pubsub-put and pubsub-delete move from NO_PUBLIC_PATH to the compound-cfg DEFERRED list (fs3 gated InPlaceFallbacks and its getter behind all(alloc, any(put, delete))); feature_public_surface_census --check was red on the fb3 base.",
+        "Commit 700ccd73 feat(runtime-coop): a fragment is staged in place into its own slot",
+        "wz-session-core chain_staging.rs: BuildsOwnStorage split out of ChainStaging (an arena whose storage is handed in cannot build itself); reassembly_dispatch.rs: ReassemblyDispatcher::with_staging, new() bound on BuildsOwnStorage, PEER_KEY_MAX pub(crate).",
+        "inbound.rs: InPlaceExtChain (a message's own ext chain read in place into fixed storage: headers, QoS priority, wire length; owned() re-decodes on demand), qos_priority_of_entry shared with ext_qos_priority, FrameHead/FragmentHead generic over the chain, decode_fragment_head shared by the owned Fragment arm and parse_fragment_in_place.",
+        "extfragment.rs: FragmentMarkers::from_headers (project_markers delegates).",
+        "drive.rs: in_place_unit classifier; dispatch_datagram_reassembling (fragment arm: gates, InPlaceFragment event, one copy into the slot, completion walked in the slot); walk_records_in_place shared by frames and reassembled messages; a Frame's chain owned only for an owned record; DatagramPath::FragmentInPlace; CopyReason::FragmentExtRefused/FragmentHeadUndecodable; report_outcome_reassembling F: ?Sized.",
+        "driver_loop.rs: IterationEvent::InPlaceFragment(InPlaceFragment) borrowed range descriptor.",
+        "network_message.rs: try_for_each_record (each may end the walk).",
+        "wz-runtime-coop reassembly_rx.rs: ReassemblyArena over reassembly_pool_mcu with PoolStorage::{Static(&'static mut), Owned(Box)} (zeroed in place), InPlaceReassembly, in_place_reassembly, slot_of witness; 6 unit tests. session_drive.rs: the pump owns an InPlaceReassembly (new: owned table; with_reassembly_arena: handed in), reassembly() accessor, RxPathCounts fields.",
+        "wz-runtime-tokio zero_copy.rs: PooledStaging implements BuildsOwnStorage (trait split only).",
+        "wz-mcu-session-acceptor lib.rs: on_fragment also on InPlaceFragment.",
+        "wz-session-lwip tests/rx_frame_allocations.rs: fragment tests (3), frame ext-chain test, address witness, tallies.",
+        "scripts/run-ci.sh: C1m rx frame copying 2->3, in place 3->4 (x2), new legs C1m rx fragment in place (6, x2), clippy leg. nondefault-tests-gate.sh: wz-runtime-coop leg names rx-in-place. feature_public_surface_census.py: coop rx-in-place in OFF_AXIS + AXIS_REACHABLE. docs/reason-review-pins.md: zero_copy.rs, inbound.rs re-pinned (R3250 placeholder).",
+        "Commit 3c9da915 feat(session-core): a lean lowlatency unit is read where it lies",
+        "drive.rs: is_lean_network_unit shared by both paths; InPlaceUnit::Lean, lean_in_place; DatagramPath::LowLatencyInPlace; CopyReason::LowLatency retired. session_drive.rs: RxPathCounts.low_latency_in_place.",
+        "wz-runtime-tokio tests/lowlatency_e2e.rs: a_lean_unit_is_read_in_place... (counting allocator); run-ci C1ad 2->3."
+      ],
+      "verification_bullets": [
+        "All host-level; no board was run. Builds and tests through bx on the build machine.",
+        "RED before (each on the untouched code in a scratch worktree):",
+        "fragments, rx_frame_allocations (rx-in-place, transport-fragmentation), base 4de7a78e: 1 Put in 2 fragments cost [6, 10] allocations per turn.",
+        "frame ext chain, base 4de7a78e: frame of 2 Puts 4 without a chain, 5 with one.",
+        "lowlatency, lowlatency_e2e probe, base 700ccd73: path Copied(LowLatency), 5 allocations for one Put.",
+        "GREEN after:",
+        "rx_frame_allocations: fragments in place growable [0,...,0, 2n] per chain (n Puts), fixed [0,...,0, 0]; every chain of 2..168 fragments (chunk 1..body-1) for 1, 2, 8 Puts; payload addresses inside the arena's slots; 0 units copied; the fullest slot reassembled, one Put more refused at the crossing fragment and counted (dropped 1), a duplicate refused by the SN gate and its chain cleared, a gap aborted and counted; slots home after each (free 4, active 0, available 4). Legs: in place 4, fixed 4, copying 3, fragment in place 6, fixed 6: all passed.",
+        "frame ext chain: in place 4 = 4 (growable), 0 = 0 (fixed); copying 17 < 18 (control).",
+        "wz-runtime-coop in_place_tests (6): the pooled arena reassembles exactly what the heap arena does over lengths 1..8192 x chunks 1..4097 (cap 4096 boundary both sides), duplicate/gap aborts alike, interleaved chains, dry pool refused (PoolExhausted) then sweep returns every slot (pool states Free), two arenas over a placed and an owned table, a non-empty table refused.",
+        "lowlatency_e2e 3 passed: lean unit in place 0 allocations, copying more, records byte-identical, KeepAlive copied as NotAFrame.",
+        "Mutations, each red then reverted: arena release without pool_return (5 coop tests red); append writing wrong bytes (3 red); fragment SN gate skipped (dup test red); completion walked over a copy (allocation test red on the fixed backing).",
+        "Census legs re-run: wz-session-lwip union 31 lib + rx tests passed (after the two_session_tests fix; 3 failed before it, also on the fb3 base, and passed on origin/main); wz-runtime-coop union 29 passed (23 without rx-in-place).",
+        "clippy -D warnings, per crate: wz-session-core (default; session-unicast+reassembly+push+put+stats+lowlatency+compression+qos; routing-namespace lib; no-default alloc+unicast+frame+push+put+bounded-heapless; no-default alloc+unicast+frame+reassembly+no_std+bounded-heapless; reassembly lib; fragmentation+batching+push+qos+multicast+shared-bytes+unicast; lowlatency sets); wz-runtime-coop (rx-in-place,reassembly; rx-in-place; reassembly; census union); wz-session-lwip (in-place+fragmentation; copying; in-place; union; default); wz-runtime-tokio (zero-copy set; lowlatency set); wz-mcu-session-acceptor (reassembly); wz-session-mcu default: all rc 0.",
+        "Tests: wz-session-core lib default 526; full-feature set 670; wz-runtime-tokio zero_copy:: 14; thumbv7m cargo check of wz-runtime-coop rx-in-place,reassembly rc 0.",
+        "C1bz (core, coop, tokio, lwip, acceptor) pass; A4 pass; reason_review_pin_gate OK after re-pin; store_reason_citation_gate OK; feature_public_surface_census --check OK (was red on the fb3 base).",
+        "Not run: the hook gate array, Layer C0, the other C1m legs, hosted CI, any image build (Zephyr rx-pool image), stack depth, hardware."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-14-platform",
+        "watching-zenoh/local-ci-gates"
+      ],
+      "carry_forward_bullets": [
+        "Still open after B3 parts 1-2 (all host-level; no board was run):",
+        "1. No image turns rx-in-place AND reassembly on (the Zephyr rx-pool image has rx-in-place without reassembly), so the in-place fragment path ships nowhere yet. An image that wants its reassembly table placed (PoolStorage::Static, e.g. in sram2) needs a 'static ReassemblyPoolMcu; the emit's new() is not const and the emit's SECTION note says a placed table is a different (singleton) author API: SCE question / owner decision. Next step: SessionPump::with_reassembly_arena from the image's bring-up with its placed table, after an SCE const constructor or placed-storage emit.",
+        "2. Stack: a completed chain's records are dispatched from inside the Router's ingest, inside the link's lend. Not measured on a target (no hardware); measure before an image selects reassembly with rx-in-place.",
+        "3. The AP twin of the fragment fix (carry3 step 5 of the ffr worker: DriverLoopOutcome::Fragment payload as a range of the lent unit) is NOT done, by the owner's instruction not to change the AP.",
+        "4. FINDING, not changed: the lean lowlatency receive does not stamp RX activity on EITHER path (the copying lean arm returns before handle_inbound, which stamps), so a lowlatency peer that sends only data may be lease-expired. The in-place lean path mirrors the copying one byte for byte. Next step: compare upstream lowlatency rx lease handling and file the debt if it diverges.",
+        "5. Still owned on the in-place path, by design or out of B3: Declare, Interest, OAM, ResponseFinal records (control plane); handshake/KeepAlive/Close units (9.4); compressed batches; the MCU multicast loop (copying, HeapStaging).",
+        "6. The runtime-zero-copy reason should name these closures in its next update; pins zero_copy.rs, inbound.rs, reply.rs carry the placeholder round R3250, to be replaced by the real round id when the ledger entry is appended.",
+        "7. Hosted only: new C1m legs (rx fragment in place x2, rx query x3), moved counts (C1m rx frame copying 3, in place 4 and fixed 4, C1ad 3), the widened wz-runtime-coop census leg; the Zephyr image build with rx-in-place was not built here."
+      ],
+      "publishable_decision_summary": "runtime-zero-copy B3, re-measured first: REAL. On the MCU in-place path a Fragment cost 6 allocations per non-final turn and 10 at completion (unit copied, payload copied, heap staging, message copied into owned records); a lean lowlatency unit took the copying path (5 for one Put); a Frame with its own ext chain owned it every frame. Built behind rx-in-place: the session OWNS a reassembly arena over the generated reassembly_pool_mcu table (storage handed in: the image's placed table or one the arena allocates once; not a hidden static, so two sessions bring two tables), walked only by the generated edges. A fragment's head is read in place (chain kept as header bytes), its payload copied once into its slot, and a completed message is read IN the slot, record by record. The observer gets a borrowed range descriptor (InPlaceFragment) instead of Poll(Fragment). Lowlatency units and Frame chains are read in place too; a chain is owned only for an owned record.",
+      "publishable_changes_bullets": [
+        "Commit 3fded9cf fix(session-lwip): the two-session log reads a Put that came in lent",
+        "crates/wz-session-lwip/src/two_session_tests.rs: put_payloads reads IterationEvent::InPlace as well as Poll(FramePayload). fs3 fallout: under the lwIP census union (rx-in-place on) three two_session_tests failed on the fb3 base and pass on origin/main (measured both).",
+        "scripts/lib/feature_gate_diagnostic.py: pubsub-put and pubsub-delete move from NO_PUBLIC_PATH to the compound-cfg DEFERRED list (fs3 gated InPlaceFallbacks and its getter behind all(alloc, any(put, delete))); feature_public_surface_census --check was red on the fb3 base.",
+        "Commit 700ccd73 feat(runtime-coop): a fragment is staged in place into its own slot",
+        "wz-session-core chain_staging.rs: BuildsOwnStorage split out of ChainStaging (an arena whose storage is handed in cannot build itself); reassembly_dispatch.rs: ReassemblyDispatcher::with_staging, new() bound on BuildsOwnStorage, PEER_KEY_MAX pub(crate).",
+        "inbound.rs: InPlaceExtChain (a message's own ext chain read in place into fixed storage: headers, QoS priority, wire length; owned() re-decodes on demand), qos_priority_of_entry shared with ext_qos_priority, FrameHead/FragmentHead generic over the chain, decode_fragment_head shared by the owned Fragment arm and parse_fragment_in_place.",
+        "extfragment.rs: FragmentMarkers::from_headers (project_markers delegates).",
+        "drive.rs: in_place_unit classifier; dispatch_datagram_reassembling (fragment arm: gates, InPlaceFragment event, one copy into the slot, completion walked in the slot); walk_records_in_place shared by frames and reassembled messages; a Frame's chain owned only for an owned record; DatagramPath::FragmentInPlace; CopyReason::FragmentExtRefused/FragmentHeadUndecodable; report_outcome_reassembling F: ?Sized.",
+        "driver_loop.rs: IterationEvent::InPlaceFragment(InPlaceFragment) borrowed range descriptor.",
+        "network_message.rs: try_for_each_record (each may end the walk).",
+        "wz-runtime-coop reassembly_rx.rs: ReassemblyArena over reassembly_pool_mcu with PoolStorage::{Static(&'static mut), Owned(Box)} (zeroed in place), InPlaceReassembly, in_place_reassembly, slot_of witness; 6 unit tests. session_drive.rs: the pump owns an InPlaceReassembly (new: owned table; with_reassembly_arena: handed in), reassembly() accessor, RxPathCounts fields.",
+        "wz-runtime-tokio zero_copy.rs: PooledStaging implements BuildsOwnStorage (trait split only).",
+        "wz-mcu-session-acceptor lib.rs: on_fragment also on InPlaceFragment.",
+        "wz-session-lwip tests/rx_frame_allocations.rs: fragment tests (3), frame ext-chain test, address witness, tallies.",
+        "scripts/run-ci.sh: C1m rx frame copying 2->3, in place 3->4 (x2), new legs C1m rx fragment in place (6, x2), clippy leg. nondefault-tests-gate.sh: wz-runtime-coop leg names rx-in-place. feature_public_surface_census.py: coop rx-in-place in OFF_AXIS + AXIS_REACHABLE. docs/reason-review-pins.md: zero_copy.rs, inbound.rs re-pinned (R3250 placeholder).",
+        "Commit 3c9da915 feat(session-core): a lean lowlatency unit is read where it lies",
+        "drive.rs: is_lean_network_unit shared by both paths; InPlaceUnit::Lean, lean_in_place; DatagramPath::LowLatencyInPlace; CopyReason::LowLatency retired. session_drive.rs: RxPathCounts.low_latency_in_place.",
+        "wz-runtime-tokio tests/lowlatency_e2e.rs: a_lean_unit_is_read_in_place... (counting allocator); run-ci C1ad 2->3."
+      ],
+      "publishable_verification_bullets": [
+        "All host-level; no board was run. Builds and tests through bx on the build machine.",
+        "RED before (each on the untouched code in a scratch worktree):",
+        "fragments, rx_frame_allocations (rx-in-place, transport-fragmentation), base 4de7a78e: 1 Put in 2 fragments cost [6, 10] allocations per turn.",
+        "frame ext chain, base 4de7a78e: frame of 2 Puts 4 without a chain, 5 with one.",
+        "lowlatency, lowlatency_e2e probe, base 700ccd73: path Copied(LowLatency), 5 allocations for one Put.",
+        "GREEN after:",
+        "rx_frame_allocations: fragments in place growable [0,...,0, 2n] per chain (n Puts), fixed [0,...,0, 0]; every chain of 2..168 fragments (chunk 1..body-1) for 1, 2, 8 Puts; payload addresses inside the arena's slots; 0 units copied; the fullest slot reassembled, one Put more refused at the crossing fragment and counted (dropped 1), a duplicate refused by the SN gate and its chain cleared, a gap aborted and counted; slots home after each (free 4, active 0, available 4). Legs: in place 4, fixed 4, copying 3, fragment in place 6, fixed 6: all passed.",
+        "frame ext chain: in place 4 = 4 (growable), 0 = 0 (fixed); copying 17 < 18 (control).",
+        "wz-runtime-coop in_place_tests (6): the pooled arena reassembles exactly what the heap arena does over lengths 1..8192 x chunks 1..4097 (cap 4096 boundary both sides), duplicate/gap aborts alike, interleaved chains, dry pool refused (PoolExhausted) then sweep returns every slot (pool states Free), two arenas over a placed and an owned table, a non-empty table refused.",
+        "lowlatency_e2e 3 passed: lean unit in place 0 allocations, copying more, records byte-identical, KeepAlive copied as NotAFrame.",
+        "Mutations, each red then reverted: arena release without pool_return (5 coop tests red); append writing wrong bytes (3 red); fragment SN gate skipped (dup test red); completion walked over a copy (allocation test red on the fixed backing).",
+        "Census legs re-run: wz-session-lwip union 31 lib + rx tests passed (after the two_session_tests fix; 3 failed before it, also on the fb3 base, and passed on origin/main); wz-runtime-coop union 29 passed (23 without rx-in-place).",
+        "clippy -D warnings, per crate: wz-session-core (default; session-unicast+reassembly+push+put+stats+lowlatency+compression+qos; routing-namespace lib; no-default alloc+unicast+frame+push+put+bounded-heapless; no-default alloc+unicast+frame+reassembly+no_std+bounded-heapless; reassembly lib; fragmentation+batching+push+qos+multicast+shared-bytes+unicast; lowlatency sets); wz-runtime-coop (rx-in-place,reassembly; rx-in-place; reassembly; census union); wz-session-lwip (in-place+fragmentation; copying; in-place; union; default); wz-runtime-tokio (zero-copy set; lowlatency set); wz-mcu-session-acceptor (reassembly); wz-session-mcu default: all rc 0.",
+        "Tests: wz-session-core lib default 526; full-feature set 670; wz-runtime-tokio zero_copy:: 14; thumbv7m cargo check of wz-runtime-coop rx-in-place,reassembly rc 0.",
+        "C1bz (core, coop, tokio, lwip, acceptor) pass; A4 pass; reason_review_pin_gate OK after re-pin; store_reason_citation_gate OK; feature_public_surface_census --check OK (was red on the fb3 base).",
+        "Not run: the hook gate array, Layer C0, the other C1m legs, hosted CI, any image build (Zephyr rx-pool image), stack depth, hardware."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-14-platform",
+        "watching-zenoh/local-ci-gates"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Still open after B3 parts 1-2 (all host-level; no board was run):",
+        "1. No image turns rx-in-place AND reassembly on (the Zephyr rx-pool image has rx-in-place without reassembly), so the in-place fragment path ships nowhere yet. An image that wants its reassembly table placed (PoolStorage::Static, e.g. in sram2) needs a 'static ReassemblyPoolMcu; the emit's new() is not const and the emit's SECTION note says a placed table is a different (singleton) author API: SCE question / owner decision. Next step: SessionPump::with_reassembly_arena from the image's bring-up with its placed table, after an SCE const constructor or placed-storage emit.",
+        "2. Stack: a completed chain's records are dispatched from inside the Router's ingest, inside the link's lend. Not measured on a target (no hardware); measure before an image selects reassembly with rx-in-place.",
+        "3. The AP twin of the fragment fix (carry3 step 5 of the ffr worker: DriverLoopOutcome::Fragment payload as a range of the lent unit) is NOT done, by the owner's instruction not to change the AP.",
+        "4. FINDING, not changed: the lean lowlatency receive does not stamp RX activity on EITHER path (the copying lean arm returns before handle_inbound, which stamps), so a lowlatency peer that sends only data may be lease-expired. The in-place lean path mirrors the copying one byte for byte. Next step: compare upstream lowlatency rx lease handling and file the debt if it diverges.",
+        "5. Still owned on the in-place path, by design or out of B3: Declare, Interest, OAM, ResponseFinal records (control plane); handshake/KeepAlive/Close units (9.4); compressed batches; the MCU multicast loop (copying, HeapStaging).",
+        "6. The runtime-zero-copy reason should name these closures in its next update; pins zero_copy.rs, inbound.rs, reply.rs carry the placeholder round R3250, to be replaced by the real round id when the ledger entry is appended.",
+        "7. Hosted only: new C1m legs (rx fragment in place x2, rx query x3), moved counts (C1m rx frame copying 3, in place 4 and fixed 4, C1ad 3), the widened wz-runtime-coop census leg; the Zephyr image build with rx-in-place was not built here."
+      ]
+    },
     "Round 33": {
       "decision_summary": "§3 scouting + locator codec triad lands: sources/codecs/{locator,scout,hello}.scxml. Introduces 7 new B5 primitives across 3 files (string type, multi-bit flag pack, length-ref dotted-path, length-arith +1, present-if local, parent-flag carrier, import cross-codec, repeat-element); all 6 backends emit clean at vendor pin 11f1032d.",
       "changes_bullets": [
