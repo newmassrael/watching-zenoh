@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: AGPL-3.0-or-later OR LicenseRef-watching-zenoh-Commercial
 # SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
-"""R3213 (no register item) -- the `sessions:` list of a deploy machine.
+"""R3221 (no register item) -- the `sessions:` list of a deploy machine.
 
 The citation names no item because the request this answers, open-debt item
 900, lives in the agent-memory register, which has no store id to resolve.
