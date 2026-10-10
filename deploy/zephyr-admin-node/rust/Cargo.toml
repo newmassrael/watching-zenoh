@@ -47,6 +47,12 @@ net-zephyr-sockets = []
 net-lwip-mac = ["wz/session-lwip", "wz/transport-tx-lend"]
 # The MAC (`CONFIG_WZ_MAC_*`): the Infineon CYT4BF family's ETH0.
 mac-cyt4bf = ["dep:wz-eth-mac-cyt4bf"]
+# The node's datagrams are encoded into slots of a transmit pool placed in the
+# non-cacheable section, and the MAC reads each frame out of its slot in place
+# (`CONFIG_WZ_CYT4BF_TX_POOL`, ARCHITECTURE section 9.1). The lwIP link crate is
+# named directly only to turn its `tx-pool` feature on; the facade's
+# `session-lwip` already links it.
+tx-pool = ["mac-cyt4bf", "dep:wz-link-lwip", "wz-link-lwip/tx-pool"]
 # Read the TC6 identity registers over the SCB master on the kit's MikroBUS socket
 # at boot and log them (`CONFIG_WZ_T2G_SPI_PROBE`): what a lab runs to learn which
 # chip an expansion board carries, and the first evidence an SPI master would give.
@@ -90,6 +96,9 @@ wz-session-mcu = { path = "../../../crates/wz-session-mcu", features = [
 # The chip's MAC driver, a crate of its own that depends on the trait tier alone:
 # only the `mac-*` feature the board selects pulls one in.
 wz-eth-mac-cyt4bf = { path = "../../../crates/wz-eth-mac-cyt4bf", optional = true }
+# The transmit pool (`tx-pool`): the same crate the facade's `session-lwip` links,
+# with the pool turned on.
+wz-link-lwip = { path = "../../../crates/wz-link-lwip", optional = true }
 # The SPI probe's two halves: the TC6 protocol, and the rules of the SCB master it
 # runs over. Only `CONFIG_WZ_T2G_SPI_PROBE` pulls the first in; either it or
 # `CONFIG_WZ_T1S` pulls in the second.

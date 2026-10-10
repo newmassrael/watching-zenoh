@@ -55,6 +55,17 @@ elseif(CONFIG_WZ_NET_BACKEND_LWIP_MAC)
       message(FATAL_ERROR "wz: CONFIG_WZ_MAC_CYT4BF needs a pin routing (CONFIG_WZ_CYT4BF_PINS_*).")
     endif()
     list(APPEND backend_undefined wz_board_eth_pins_init wz_board_entropy_fill)
+    # The transmit pool the MAC reads in place. Its slots are in the non-cacheable
+    # section, which only exists with CONFIG_NOCACHE_MEMORY (the board's conf turns
+    # it on for the rings), so the build refuses the pool without it rather than
+    # place the slots in cached memory.
+    if(CONFIG_WZ_CYT4BF_TX_POOL)
+      if(NOT CONFIG_NOCACHE_MEMORY)
+        message(FATAL_ERROR "wz: CONFIG_WZ_CYT4BF_TX_POOL places its slots in the non-cacheable "
+                            "section, which needs CONFIG_NOCACHE_MEMORY=y.")
+      endif()
+      list(APPEND backend_feature tx-pool)
+    endif()
     # The SPI master on the MikroBUS socket, which the SPI probe and the 10BASE-T1S
     # interface both use, and not together: both open SCB3. The refusal is made here and
     # not as a Kconfig dependency because an unmet dependency only turns the symbol off

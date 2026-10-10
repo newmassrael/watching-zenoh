@@ -62,6 +62,29 @@ static mut DMA: DmaArea<RX_SLOTS, TX_SLOTS> = DmaArea::new();
 /// `DMA` may be handed out once.
 static DMA_TAKEN: AtomicBool = AtomicBool::new(false);
 
+/// ARCHITECTURE section 9.1 -- the transmit pool the node's datagrams are encoded
+/// into and the MAC reads in place (`CONFIG_WZ_CYT4BF_TX_POOL`), in the same
+/// non-cacheable section as the rings, for the same reasons: the controller reads
+/// it behind the CPU's back, and this board cleans no cache. `NOLOAD` too, so it
+/// holds nothing until `tx_pool::install` writes all of it.
+#[cfg(feature = "tx-pool")]
+#[link_section = ".nocache"]
+static mut TX_POOL: wz_link_lwip::tx_pool::TxPoolStorage =
+    wz_link_lwip::tx_pool::TxPoolStorage::uninit();
+
+#[cfg(feature = "tx-pool")]
+extern "C" {
+    /// The bounds of the non-cacheable section, from Zephyr's linker script
+    /// (`include/zephyr/arch/common/nocache.ld`, `CONFIG_NOCACHE_MEMORY`). Read only
+    /// for their addresses, which the console line prints beside the pool's.
+    static _nocache_ram_start: u8;
+    static _nocache_ram_end: u8;
+}
+
+/// How often the transmit counts are printed when they have moved.
+#[cfg(feature = "tx-pool")]
+const TX_REPORT_MS: u64 = 10_000;
+
 extern "C" {
     /// Route and configure ETH0's pins for RMII (boards/<board>/*.c). 0 on
     /// success.
@@ -81,7 +104,20 @@ fn now_us() -> u64 {
 /// The MAC, as the lwIP backend holds it.
 pub struct T2gMac {
     inner: Cyt4bfMac<Cyt4bfBoard, RX_SLOTS, TX_SLOTS>,
+    /// When the transmit counts are next looked at, and what they were when last
+    /// printed.
+    #[cfg(feature = "tx-pool")]
+    next_tx_report_ms: u64,
+    #[cfg(feature = "tx-pool")]
+    tx_reported: Option<TxReport>,
 }
+
+/// What a transmit-pool line says: the MAC's counts and the pool's.
+#[cfg(feature = "tx-pool")]
+type TxReport = (
+    wz_eth_mac_cyt4bf::TxCounts,
+    wz_link_lwip::tx_pool::TxPoolStats,
+);
 
 impl EthernetMac for T2gMac {
     fn mac_address(&self) -> [u8; 6] {
@@ -95,6 +131,30 @@ impl EthernetMac for T2gMac {
     fn receive(&mut self, buf: &mut [u8]) -> Option<usize> {
         self.inner.receive(buf)
     }
+
+    // ARCHITECTURE section 9.1, with the transmit pool: lwIP hands the MAC each
+    // frame in pieces, and the MAC reads in place the ones inside the pool (the
+    // only memory its board lets it read so) and copies the rest into its ring.
+    // Without the pool the MAC is offered whole frames only, as before.
+    #[cfg(feature = "tx-pool")]
+    fn gathers_in_place(&self) -> bool {
+        self.inner.gathers_in_place()
+    }
+
+    #[cfg(feature = "tx-pool")]
+    unsafe fn transmit_gather(
+        &mut self,
+        segments: &[wz::runtime_core::TxSegment],
+        cookie: u32,
+    ) -> wz::runtime_core::TxGather {
+        // SAFETY: the caller's contract, passed on unchanged.
+        unsafe { self.inner.transmit_gather(segments, cookie) }
+    }
+
+    #[cfg(feature = "tx-pool")]
+    fn reap_tx(&mut self, done: &mut dyn FnMut(u32)) {
+        self.inner.reap_tx(done);
+    }
 }
 
 impl BoardMac for T2gMac {
@@ -106,7 +166,76 @@ impl BoardMac for T2gMac {
             }
             LinkEvent::Down => log(c"zephyr-admin-node: link down"),
         }
+        #[cfg(feature = "tx-pool")]
+        self.report_tx(now_ms);
     }
+}
+
+#[cfg(feature = "tx-pool")]
+impl T2gMac {
+    /// One console line, at most every `TX_REPORT_MS` and only when something
+    /// moved, with what a bench needs to tell a frame read out of a pool slot from
+    /// a copy: how many frames the controller read in place and how many it sent
+    /// from its ring, the bus address the last in-place frame's first descriptor
+    /// was written with, and the pool's own account of its slots.
+    fn report_tx(&mut self, now_ms: u64) {
+        if now_ms < self.next_tx_report_ms {
+            return;
+        }
+        self.next_tx_report_ms = now_ms + TX_REPORT_MS;
+        let Some(pool) = wz_link_lwip::tx_pool::stats() else {
+            return;
+        };
+        let now = (self.inner.tx_counts(), pool);
+        if self.tx_reported == Some(now) {
+            return;
+        }
+        self.tx_reported = Some(now);
+        let (mac, pool) = now;
+        let last = match mac.last_in_place_bus {
+            Some(bus) => format!("{bus:#010x}"),
+            None => alloc::string::String::from("none"),
+        };
+        log_line(format!(
+            "wz: tx-pool: in place {}, copied {}, last descriptor {}; pool lent {}, \
+             started {}, completed {}, unarmed {}, abandoned {}, free {} of {}",
+            mac.in_place,
+            mac.copied,
+            last,
+            pool.lent,
+            pool.started,
+            pool.completed,
+            pool.unarmed,
+            pool.abandoned,
+            pool.free,
+            wz_link_lwip::session_tx_pool_mcu::SLOT_COUNT,
+        ));
+    }
+}
+
+/// Install the transmit pool and say where it is, beside the bounds of the section
+/// it is in. Returns the window the MAC may read in place: the pool's slots.
+#[cfg(feature = "tx-pool")]
+fn install_tx_pool() -> wz_link_lwip::tx_pool::TxPoolSpan {
+    // SAFETY: called once, from `open`, after `DMA_TAKEN` made `open` itself run
+    // once; nothing else names the static.
+    let storage = unsafe { &mut *core::ptr::addr_of_mut!(TX_POOL) };
+    let span = wz_link_lwip::tx_pool::install(storage);
+    // Only the addresses of the linker's symbols are taken, never their contents.
+    let (section_start, section_end) = (
+        core::ptr::addr_of!(_nocache_ram_start) as usize,
+        core::ptr::addr_of!(_nocache_ram_end) as usize,
+    );
+    log_line(format!(
+        "wz: eth0: transmit pool of {} slots at {:#010x} to {:#010x}, in the non-cacheable \
+         section {:#010x} to {:#010x}, read in place by the MAC",
+        wz_link_lwip::session_tx_pool_mcu::SLOT_COUNT,
+        span.start as usize,
+        span.start as usize + span.len,
+        section_start,
+        section_end,
+    ));
+    span
 }
 
 fn describe(mode: LinkMode) -> &'static str {
@@ -155,6 +284,17 @@ pub fn open(
     // else in this image, `delay_us` waits at least what it is told, and the
     // kernel's tick count never goes backwards.
     let board = unsafe { Cyt4bfBoard::new(ETH0_BASE, delay_us, now_us) };
+    // With the transmit pool, the controller reads in place what lies in the pool
+    // and nothing else: the pool is in the non-cacheable section, and every other
+    // buffer lwIP sends from (its own heap) is cached memory this board cannot
+    // clean, so those frames are copied into the ring as before.
+    #[cfg(feature = "tx-pool")]
+    let board = {
+        let span = install_tx_pool();
+        // SAFETY: the pool is in `.nocache`, system SRAM the Ethernet DMA reaches
+        // (the rings beside it are read from there) and the MPU marks uncached.
+        unsafe { board.with_in_place_window(span.start, span.len) }
+    };
     let mut config = Config::new(mac_address);
     config.ref_clock = ref_clock;
     let mut inner = Cyt4bfMac::new(board, area, &config).map_err(|e| match e {
@@ -191,5 +331,11 @@ pub fn open(
             return Err(c"wz: FAIL - the link partner advertises nothing this driver can resolve")
         }
     }
-    Ok(T2gMac { inner })
+    Ok(T2gMac {
+        inner,
+        #[cfg(feature = "tx-pool")]
+        next_tx_report_ms: 0,
+        #[cfg(feature = "tx-pool")]
+        tx_reported: None,
+    })
 }

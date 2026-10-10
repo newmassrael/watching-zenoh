@@ -6,7 +6,9 @@ holds a run that printed every step below that the row names, and
 `scripts/lib/zephyr_board_table_gate.py` reads the entry for exactly these step
 names. A row names all of them unless its `verdict_steps` says otherwise, as the
 onboard port's row does for the steps it was recorded against (HW.0 to HW.7); the
-steps for the second interface are at the end of this file.
+steps for the second interface follow them (HW.8 to HW.25, which that row names as
+HW.0 to HW.25), and the steps for the transmit pool image are at the end of this
+file (HW.26 to HW.30, which that row names alone).
 
 The steps are run by one program, `scripts/lib/admin_node_verdict.py`. Layer Qza
 runs it in its `qemu` mode against the emulated node, labelled `Qza`; a lab runs
@@ -415,3 +417,85 @@ Everything the entry holds for HW.0 to HW.7, and in addition:
 The table row for the T1S link carries the hash of image 1, with the date and who as
 keys of its `witness`, as any HARDWARE row does; the other images' hashes appear in
 the entry's text.
+
+## The transmit pool image: steps HW.26 to HW.30
+
+The onboard RMII image built with `overlays/t2g_tx_pool.conf`
+(`CONFIG_WZ_CYT4BF_TX_POOL`, ARCHITECTURE section 9.1). The session encodes each
+outbound datagram into a slot of a transmit pool in Zephyr's non-cacheable section,
+lwIP writes the headers in front of it in the same slot, and the MAC's transmit
+descriptor is written with the slot's address. What these steps have to show is that
+a frame left the board from a pool slot read by the controller, and not from a copy
+in the MAC's ring, and that its bytes were right. Nothing here has run on a board when
+this is written: every line quoted was read out of the firmware source.
+
+The row for this image names HW.26 to HW.30 in its `verdict_steps`. HW.26 stands for
+the onboard verdict on THIS image, which is another image than the onboard row's, and
+it does not name those steps, so that the row's steps are one range.
+
+### Console lines these steps read
+
+Printed by `deploy/zephyr-admin-node/rust/src/mac_cyt4bf.rs`, each on its own line:
+
+```
+pool place   ^wz: eth0: transmit pool of 8 slots at (0x[0-9a-f]{8}) to (0x[0-9a-f]{8}), in the non-cacheable section (0x[0-9a-f]{8}) to (0x[0-9a-f]{8}), read in place by the MAC$
+tx counts    ^wz: tx-pool: in place ([0-9]+), copied ([0-9]+), last descriptor (0x[0-9a-f]{8}|none); pool lent ([0-9]+), started ([0-9]+), completed ([0-9]+), unarmed ([0-9]+), abandoned ([0-9]+), free ([0-9]+) of 8$
+```
+
+The pool line is printed once, before the PHY is looked for. A counts line is printed
+at most every 10 seconds, and only when a count moved. `in place` and `copied` are the
+MAC's own count of frames it handed the controller to read where they lie and of
+frames it sent from a copy in its ring; `last descriptor` is the address the first
+descriptor of the last in-place frame was written with, read back from the
+descriptor. The pool's counts are the generated lifecycle's edges: `lent` slots
+acquired for an encode, `started` frames a MAC queued to read in place out of a slot,
+`completed` of those reported done, `unarmed` frames sent from a slot that no MAC read
+in place, `abandoned` slots lent and given back unsent.
+
+### The steps
+
+```
+HW.26 the onboard verdict held on the transmit pool image: its eight onboard sentences each ended OK on this image
+HW.27 the pool sits where the MAC reads it uncached: slots <start> to <end> inside the non-cacheable section <section start> to <section end>
+HW.28 a frame left from a pool slot read in place: in place <I> and started <S> above zero, last descriptor <address> inside the pool
+HW.29 every slot came home: on every counts line lent minus abandoned, completed and unarmed is 8 minus free, and started minus completed is at most 4
+HW.30 the frames read out of slots were right on the wire: <N> of <N> datagrams from the node in the capture had valid IPv4 and UDP checksums and decoded as zenoh
+```
+
+### How each step is read
+
+HW.26. The record holds the sentences of HW.0 to HW.7 printed on this image, each
+ending ` - OK`, outside this step's sentence.
+
+HW.27. From the pool line: the slots' end minus start is 12288 (8 times 1536), and
+start and end lie inside the section's bounds. The section bounds are Zephyr's own
+linker symbols (`_nocache_ram_start`, `_nocache_ram_end`), the section the MAC's
+descriptor rings are in and that `CONFIG_NOCACHE_MEMORY` has the MPU mark
+non-cacheable.
+
+HW.28. After a host has held a session with the node for at least 30 seconds (HW.1 to
+HW.5 leave one), the last counts line has `in place` and `started` above zero, and its
+`last descriptor` lies at or after the pool's start and before its end. `copied` is
+above zero too, and is not a failure: ARP and the frames lwIP sends from its own heap
+are copied on purpose, because they are in cached memory this board does not clean.
+A run in which `in place` stays zero has not exercised the pool, whatever else held.
+
+HW.29. Each counts line is consistent with itself: `lent` minus `abandoned`,
+`completed` and `unarmed` equals 8 minus `free` (the slots out at that moment), and
+`started` minus `completed` is at most 4 (the frames the MAC's transmit ring can hold).
+A line that breaks either is a slot the lifecycle lost.
+
+HW.30. A capture on the host's adapter over the same session: every datagram from the
+node's address has a valid IPv4 header checksum and a valid UDP checksum, and the
+stock router decoded the session (it is established in HW.5). A frame whose bytes came
+from a cache line the controller could not see would fail here and not in HW.28,
+which is why both are steps.
+
+### What the ledger entry holds for these steps
+
+Everything the entry holds for HW.0 to HW.7, and the pool line and every counts line
+of the boot, verbatim, the capture's file name and its count of datagrams, and what
+the run did not settle: at least a frame that needed IP fragmentation (none does at
+this batch size), the pool running dry under load (the lend then falls back to
+lwIP's heap, and the counts say how often), and a start after the board's power was
+removed.

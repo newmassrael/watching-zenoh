@@ -880,6 +880,7 @@ dependencies = [
  "wz",
  "wz-eth-lan865x",
  "wz-eth-mac-cyt4bf",
+ "wz-link-lwip",
  "wz-oa-tc6",
  "wz-session-core",
  "wz-session-mcu",

@@ -163,6 +163,23 @@ config WZ_CYT4BF_REF_CLOCK_DIVIDER
 	default 1
 	depends on WZ_CYT4BF_REF_CLOCK_INTERNAL
 
+config WZ_CYT4BF_TX_POOL
+	bool "Send the node's datagrams from transmit pool slots the MAC reads in place"
+	help
+	  ARCHITECTURE section 9.1. A transmit pool of 8 slots of 1536 bytes
+	  (sources/network/session_tx_pool_mcu.scxml) is placed in the
+	  non-cacheable section beside the MAC's rings. The session encodes each
+	  outbound datagram into a slot, lwIP writes its headers in front of it in
+	  the same slot, and the MAC's transmit descriptor is written with the
+	  slot's address, so the controller reads the frame where it was encoded.
+	  Every other frame lwIP sends (from its own heap, which is cached memory
+	  this board does not clean) is copied into the ring, as without this.
+
+	  The console prints where the pool is, and every 10 seconds, when they
+	  moved, the counts that tell a frame read out of a slot from a copy
+	  (HARDWARE_VERDICT.md, steps HW.26 to HW.30). Off by default: nothing has
+	  run on silicon with it.
+
 choice WZ_CYT4BF_PINS
 	prompt "ETH0 pin routing"
 
