@@ -56,7 +56,7 @@ use hashbrown::HashMap;
 use sce_forge_runtime::codec::{CodecStorage, SceStr};
 #[cfg(feature = "codec-declare")]
 use wz_codecs::declare::{DeclareOwned, DeclareOwnedVariant};
-use wz_codecs::wireexpr::WireexprOwnedVariant;
+use wz_codecs::wireexpr::{WireexprOwnedVariant, WireexprVariant};
 
 /// The `(id, suffix)` a Wireexpr carries, whichever mapping arm holds them.
 ///
@@ -183,6 +183,23 @@ pub trait OwnMappingSpace {
     /// declared none (or retracted it). `id == 0` is never asked — it names no
     /// mapping on either arm.
     fn resolve_own_mapping(&self, id: u64) -> Option<String>;
+
+    /// [`Self::resolve_own_mapping`] appended to `out` instead of returned, for
+    /// the resolver that composes a keyexpr without a heap
+    /// ([`resolve_wireexpr_view`]): `None` when this node declared nothing for
+    /// `id`, `Some(Err(..))` when the literal does not fit what `out` has left.
+    ///
+    /// The provided form goes through [`Self::resolve_own_mapping`], so it pays
+    /// that answer's `String`; a space that can lend its literal for the length
+    /// of the call overrides it and copies straight into `out`.
+    fn append_own_mapping(
+        &self,
+        id: u64,
+        out: &mut KeyexprBuf,
+    ) -> Option<Result<(), crate::bounded::CapacityFull<()>>> {
+        let literal = self.resolve_own_mapping(id)?;
+        Some(out.push_str(&literal))
+    }
 }
 
 /// A plain table is an own space too — the shape tests and any future per-face
@@ -190,6 +207,14 @@ pub trait OwnMappingSpace {
 impl OwnMappingSpace for HashMap<u64, String> {
     fn resolve_own_mapping(&self, id: u64) -> Option<String> {
         self.get(&id).cloned()
+    }
+
+    fn append_own_mapping(
+        &self,
+        id: u64,
+        out: &mut KeyexprBuf,
+    ) -> Option<Result<(), crate::bounded::CapacityFull<()>>> {
+        self.get(&id).map(|literal| out.push_str(literal))
     }
 }
 
@@ -363,6 +388,88 @@ pub fn resolve_wireexpr_in<S: CodecStorage>(
         }
         None => base,
     })
+}
+
+/// Where a keyexpr is composed when it cannot be lent: a mapping's literal with
+/// the message's suffix after it, or a literal of OUR space, which lives behind
+/// the session's lock and cannot be lent past it.
+///
+/// Its capacity is [`MAX_KEYEXPR_BYTES`](crate::caps::MAX_KEYEXPR_BYTES), and it
+/// is what the build's bounded backing makes it: a fixed buffer on the fixed
+/// backing (`bounded-heapless`, and every build without `alloc`), where a
+/// literal past the bound is refused ([`KeyexprPastBound`]), and a growable
+/// string on the growable one, where nothing is refused and composing one
+/// allocates, as [`resolve_wireexpr_in`] always does.
+pub type KeyexprBuf = crate::bounded::BoundedString<{ crate::caps::MAX_KEYEXPR_BYTES }>;
+
+/// The keyexpr a wireexpr names is longer than [`KeyexprBuf`] holds, on a build
+/// whose bounded backing is fixed. Never answered on the growable backing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct KeyexprPastBound;
+
+/// The `(id, suffix)` a wireexpr carries as it is decoded, where its frame
+/// lies: [`id_and_suffix`] over the borrowed form.
+pub fn id_and_suffix_view<'k>(body: &WireexprVariant<'k>) -> (u64, Option<&'k str>) {
+    match body {
+        WireexprVariant::WireexprLocal(arm) => (arm.id, arm.suffix),
+        WireexprVariant::WireexprNonlocal(arm) => (arm.id, arm.suffix),
+    }
+}
+
+/// [`resolve_wireexpr_in`] over a wireexpr read where its frame lies, answering
+/// without a `String`: the keyexpr is lent when one string IS it (the suffix of
+/// an `id == 0` reference, or the peer's literal for an id with no suffix) and
+/// composed in the caller's `out` otherwise, which is where the answer then
+/// lies. The buffer is the caller's so that it can sit in the caller's frame and
+/// the answer can be a plain `&str` either way.
+///
+/// The same rule as [`resolve_wireexpr_in`], arm for arm: `id == 0` is the
+/// suffix verbatim, `M=1` reads the peer's space, `M=0` reads ours or answers
+/// `None` when no own space was given, and an id the space does not hold is
+/// `None`. What it adds is the one answer a bounded buffer can give:
+/// [`KeyexprPastBound`] when the composed keyexpr does not fit, which only the
+/// fixed backing does. A caller that must still deliver such a message resolves
+/// it through [`resolve_wireexpr_in`]; the receive path that delivers a record
+/// in place does exactly that (`pubsub::SubscriberRegistry`), and counts it.
+pub fn resolve_wireexpr_view<'k>(
+    body: &WireexprVariant<'k>,
+    spaces: MappingSpaces<'k>,
+    out: &'k mut KeyexprBuf,
+) -> Result<Option<&'k str>, KeyexprPastBound> {
+    let (id, suffix_opt) = id_and_suffix_view(body);
+    if id == 0 {
+        return Ok(suffix_opt);
+    }
+    out.clear();
+    match body {
+        // `M=1`: the PEER's space, a table this call can lend from.
+        WireexprVariant::WireexprLocal(_) => {
+            let Some(base) = spaces.peer.get(&id) else {
+                return Ok(None);
+            };
+            let Some(suffix) = suffix_opt else {
+                return Ok(Some(base.as_str()));
+            };
+            out.push_str(base).map_err(|_| KeyexprPastBound)?;
+            out.push_str(suffix).map_err(|_| KeyexprPastBound)?;
+        }
+        // `M=0`: OUR space, which is copied out of its lock into `out`.
+        WireexprVariant::WireexprNonlocal(_) => {
+            let Some(own) = spaces.own else {
+                return Ok(None);
+            };
+            match own.append_own_mapping(id, out) {
+                None => return Ok(None),
+                Some(Err(_)) => return Err(KeyexprPastBound),
+                Some(Ok(())) => {}
+            }
+            if let Some(suffix) = suffix_opt {
+                out.push_str(suffix).map_err(|_| KeyexprPastBound)?;
+            }
+        }
+    }
+    let out: &'k KeyexprBuf = out;
+    Ok(Some(out.as_str()))
 }
 
 /// Resolve the keyexpr a `DeclKexpr` DECLARES — the one wireexpr on the wire
