@@ -269938,6 +269938,56 @@
         "The fragmentation finding is settled. The coordinator chose the root fix, and BATCH_SIZE is now 1472 (commit 76849c51; ledger set 2). What remains open is the unmeasured burst and reassembly limit of HW.35, which carry2.txt describes, and a lab run of board --pool-image rx on the T2G kit. The board table has no row for an image built with both pools. Add one only if a lab will record it; the program already judges both sets of steps in one call (--pool-image tx --pool-image rx)."
       ]
     },
+    "Round 3258": {
+      "decision_summary": "The coordinator chose option A, the root fix. The admin node now negotiates a batch of 1472 bytes, where it used 1500. The code works it out where the constant sits: ETHERNET_MTU 1500 less the 20-byte IPv4 header and the 8-byte UDP header. A router takes the smaller of its batch and the node's (upstream open.rs, batch_size.min). So no datagram of either session, in either direction, needs IP fragmentation, and HW.30 and HW.35 stay as written. The grammar still says that a 1500 batch could need fragments, and it now says the node negotiates 1472 so that none does. HW.35's burst limit stays in the grammar, stated as unmeasured. lwIP holds at most 8 lent frames, and its reassembly holds fragments addressed to the node for up to 15 s, so a burst or such fragments can be copied in and refused with nothing wrong in the slot path. No test pinned 1500, so there was no red-first pair to show; the constant is only an input to the handshake and to a link's receive capacity.",
+      "changes_bullets": [
+        "Commit 76849c51:",
+        "deploy/zephyr-admin-node/rust/src/lib.rs: BATCH_SIZE is now (ETHERNET_MTU - IPV4_HEADER - UDP_HEADER) = 1472, with three named constants above it and the arithmetic and its reason in its doc comment. It was 1500. The value reaches SessionInitParams::batch_size and net_zephyr's ZephyrLinks rx capacity (BATCH_SIZE + RX_SLACK).",
+        "deploy/zephyr-admin-node/lwip-port/lwipopts.h: the MEM_SIZE comment now says the session's batch is at most 1472, where it said 1500.",
+        "deploy/zephyr-admin-node/HARDWARE_VERDICT.md: the HW.35 prose now says the node negotiates 1472 so that no session datagram needs fragmentation; a datagram that arrives fragmented all the same fails the step and is stated in the record. A new paragraph states HW.35's unmeasured burst and reassembly limit. The transmit pool's ledger-entry parenthetical now says no frame needs fragmentation at 1472.",
+        "scripts/lib/admin_node_verdict.py: the header's HW.35 paragraph is reworded the same way.",
+        "No other user of the 1500 figure was found. The search covered BATCH_SIZE and 1500 in deploy/, crates/wz-mcu-*, scripts/lib and run-ci.sh: wz-mcu-multicast-e2e has its own BATCH_SIZE of 64, and wz-session-mcu's fixtures use 1024."
+      ],
+      "verification_bullets": [
+        "Ran on fhw3 with the change:",
+        "Layer Qza, locally, because the constant is shared with the QEMU image (mps2/an385, net_zephyr): rc 0. The build is OK and Qza.0 to Qza.7 all print OK. The stack peak is 20072 of 32768 bytes, and the build used FLASH 227324 B and RAM 325400 B. A stock zenohd of the pinned build was used, confirmed beside its REST plugin.",
+        "Layer Qzb, locally: rc 0. All five T2G admin-node rows built for thumbv7em-none-eabi, and so did the CM0+ companion; the seam agrees on 0x10080000. FLASH and RAM by row: rmii-dp83825i 233372 / 410972 B; mikrobus-spi-probe 238480 / 411036 B; 10base-t1s 246748 / 411036 B; rmii-dp83825i-tx-pool 224168 / 411036 B; rmii-dp83825i-rx-pool 224676 / 411292 B; companion 24716 / 7680 B.",
+        "A west build of the T2G image with both pool overlays, which has no table row: rc 0, FLASH 248244 B, RAM 476828 B.",
+        "admin_node_verdict.py --selftest rc 0; zephyr_board_table_gate.py rc 0; prose_named_identifier_gate.py --check rc 0; rustfmt --check on lib.rs rc 0.",
+        "Not measured: the same images built with 1500, so there is no before-and-after FLASH or RAM delta. The constant only feeds the handshake and the size of a link receive buffer allocated at run time. Also not run: hardware, Layer Qa, the hook gate array, and hosted CI."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-14-platform",
+        "watching-zenoh/local-ci-gates"
+      ],
+      "carry_forward_bullets": [
+        "Open: HW.35's burst limit is unmeasured. refused and lwIP took copied stay 0 only while lwIP never holds eight lent frames at once. A burst of more than eight session datagrams between two passes of the session loop, or fragments on the LAN addressed to the node and held in reassembly for up to 15 s, breaks that without any fault in the slot path. Next step: when a lab records HW.31 to HW.35 with board --pool-image rx, the counts lines in the record show whether that happened; a failed HW.35 states which it was. A lab still has to confirm on hardware that the router negotiates 1472 with the node. The hosted zephyr-admin job (Qza) and the Qzb lane judge this build."
+      ],
+      "publishable_decision_summary": "The coordinator chose option A, the root fix. The admin node now negotiates a batch of 1472 bytes, where it used 1500. The code works it out where the constant sits: ETHERNET_MTU 1500 less the 20-byte IPv4 header and the 8-byte UDP header. A router takes the smaller of its batch and the node's (upstream open.rs, batch_size.min). So no datagram of either session, in either direction, needs IP fragmentation, and HW.30 and HW.35 stay as written. The grammar still says that a 1500 batch could need fragments, and it now says the node negotiates 1472 so that none does. HW.35's burst limit stays in the grammar, stated as unmeasured. lwIP holds at most 8 lent frames, and its reassembly holds fragments addressed to the node for up to 15 s, so a burst or such fragments can be copied in and refused with nothing wrong in the slot path. No test pinned 1500, so there was no red-first pair to show; the constant is only an input to the handshake and to a link's receive capacity.",
+      "publishable_changes_bullets": [
+        "Commit 76849c51:",
+        "deploy/zephyr-admin-node/rust/src/lib.rs: BATCH_SIZE is now (ETHERNET_MTU - IPV4_HEADER - UDP_HEADER) = 1472, with three named constants above it and the arithmetic and its reason in its doc comment. It was 1500. The value reaches SessionInitParams::batch_size and net_zephyr's ZephyrLinks rx capacity (BATCH_SIZE + RX_SLACK).",
+        "deploy/zephyr-admin-node/lwip-port/lwipopts.h: the MEM_SIZE comment now says the session's batch is at most 1472, where it said 1500.",
+        "deploy/zephyr-admin-node/HARDWARE_VERDICT.md: the HW.35 prose now says the node negotiates 1472 so that no session datagram needs fragmentation; a datagram that arrives fragmented all the same fails the step and is stated in the record. A new paragraph states HW.35's unmeasured burst and reassembly limit. The transmit pool's ledger-entry parenthetical now says no frame needs fragmentation at 1472.",
+        "scripts/lib/admin_node_verdict.py: the header's HW.35 paragraph is reworded the same way.",
+        "No other user of the 1500 figure was found. The search covered BATCH_SIZE and 1500 in deploy/, crates/wz-mcu-*, scripts/lib and run-ci.sh: wz-mcu-multicast-e2e has its own BATCH_SIZE of 64, and wz-session-mcu's fixtures use 1024."
+      ],
+      "publishable_verification_bullets": [
+        "Ran on fhw3 with the change:",
+        "Layer Qza, locally, because the constant is shared with the QEMU image (mps2/an385, net_zephyr): rc 0. The build is OK and Qza.0 to Qza.7 all print OK. The stack peak is 20072 of 32768 bytes, and the build used FLASH 227324 B and RAM 325400 B. A stock zenohd of the pinned build was used, confirmed beside its REST plugin.",
+        "Layer Qzb, locally: rc 0. All five T2G admin-node rows built for thumbv7em-none-eabi, and so did the CM0+ companion; the seam agrees on 0x10080000. FLASH and RAM by row: rmii-dp83825i 233372 / 410972 B; mikrobus-spi-probe 238480 / 411036 B; 10base-t1s 246748 / 411036 B; rmii-dp83825i-tx-pool 224168 / 411036 B; rmii-dp83825i-rx-pool 224676 / 411292 B; companion 24716 / 7680 B.",
+        "A west build of the T2G image with both pool overlays, which has no table row: rc 0, FLASH 248244 B, RAM 476828 B.",
+        "admin_node_verdict.py --selftest rc 0; zephyr_board_table_gate.py rc 0; prose_named_identifier_gate.py --check rc 0; rustfmt --check on lib.rs rc 0.",
+        "Not measured: the same images built with 1500, so there is no before-and-after FLASH or RAM delta. The constant only feeds the handshake and the size of a link receive buffer allocated at run time. Also not run: hardware, Layer Qa, the hook gate array, and hosted CI."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-14-platform",
+        "watching-zenoh/local-ci-gates"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Open: HW.35's burst limit is unmeasured. refused and lwIP took copied stay 0 only while lwIP never holds eight lent frames at once. A burst of more than eight session datagrams between two passes of the session loop, or fragments on the LAN addressed to the node and held in reassembly for up to 15 s, breaks that without any fault in the slot path. Next step: when a lab records HW.31 to HW.35 with board --pool-image rx, the counts lines in the record show whether that happened; a failed HW.35 states which it was. A lab still has to confirm on hardware that the router negotiates 1472 with the node. The hosted zephyr-admin job (Qza) and the Qzb lane judge this build."
+      ]
+    },
     "Round 33": {
       "decision_summary": "§3 scouting + locator codec triad lands: sources/codecs/{locator,scout,hello}.scxml. Introduces 7 new B5 primitives across 3 files (string type, multi-bit flag pack, length-ref dotted-path, length-arith +1, present-if local, parent-flag carrier, import cross-codec, repeat-element); all 6 backends emit clean at vendor pin 11f1032d.",
       "changes_bullets": [
