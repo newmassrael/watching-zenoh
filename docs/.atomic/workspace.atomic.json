@@ -269332,6 +269332,112 @@
         "The next round reads the hosted run of this push job by job. Hosted-only things it moves: the wide wz-runtime-tokio leg (C1bn), the allocation suites (C1bq), the shm pin (C1cc legs 5 and 6) and the bounded count 12. Open: the temporary reservation of 744 entries per datagram lane before a session reshapes it (about 325 KiB per link) is an owner choice against a shared slot-indexed list; the ten shared-memory legs that pass without running on hosted need the example binaries built in that job or a debt item; a stalled reference child still costs the full 180 second bound."
       ]
     },
+    "Round 3250": {
+      "decision_summary": "runtime-zero-copy blocker B2 (no-heap step S3): on the MCU in-place receive path a Push record is no longer projected into a boxed owned message. dispatch_datagram decodes it where the datagram lies and lends it as a new ungated IterationEvent::InPlace; the subscriber registry delivers it through the existing SampleSink seam as a borrowed view (the sink contract was already a view borrowed for the call, so no subscriber changes). The keyexpr is lent when one string is it and composed in a KeyexprBuf (BoundedString of MAX_KEYEXPR_BYTES) otherwise. Re-measured before: 7 allocations per Put on the growable backing, 5 on the fixed one, each named by backtrace. After: 0 on the fixed backing, 2 on the growable one (the matcher's chunk lists, which that backing grows by design). A sliced Put and a keyexpr past the bound take the owned projection, delivered as before and counted; units the path does not read in place are counted by reason. transport-stats builds keep the owned form.",
+      "changes_bullets": [
+        "Commit 4e5e9da9 feat(session-core): readers that resolve a keyexpr without a String",
+        "crates/wz-session-core/src/ext_view.rs: ExtEntryView gains zint(); implemented for the borrowed wz_codecs ExtEntry, the owned entry and the Query entry.",
+        "crates/wz-session-core/src/sample.rs: extract_qos_in over any ExtEntryView (extract_qos delegates); TimestampHint::from_view and EncodingHint::from_view over the borrowed codec forms.",
+        "crates/wz-session-core/src/wireexpr_resolve.rs: KeyexprBuf (BoundedString of MAX_KEYEXPR_BYTES), KeyexprPastBound, id_and_suffix_view, resolve_wireexpr_view (same rule as resolve_wireexpr_in, lends or composes into the caller's buffer); OwnMappingSpace::append_own_mapping (provided method; overridden for HashMap).",
+        "crates/wz-session-core/src/session_actions.rs: SessionLinkActions overrides append_own_mapping, copying under the lock straight into the buffer.",
+        "docs/reason-review-pins.md: runtime-zero-copy / sample.rs row re-pinned to the new blob with round label R3250 (placeholder; the cited clause, Sample.payload is RxBytes, was re-read and still holds).",
+        "Commit 9e31124f feat(session-core): a Put read in place reaches its subscriber lent",
+        "crates/wz-session-core/src/driver_loop.rs: IterationEvent::InPlace(InPlaceRecord) (ungated variant) and InPlaceRecord (frame reliable/sn/priority plus the borrowed Push).",
+        "crates/wz-session-core/src/network_message.rs: for_each_record takes a PushForm (Owned or Lent) and hands a WalkedRecord; a lent Push is judged by judge_push_chains, shared with NetworkMessage::ext_admission; new record-walk tests.",
+        "crates/wz-session-core/src/drive.rs: dispatch_datagram reports IterationEvent values and returns DatagramPath (InPlace or Copied(CopyReason)); in_place_frame names why a unit is copied; PUSH_FORM is Owned under transport-stats.",
+        "crates/wz-session-core/src/pubsub.rs: InPlaceFallbacks counter and getter, spaces_of helper, fire_into free function (the one matcher), dispatch_iteration_event handles InPlace.",
+        "crates/wz-session-core/src/pubsub/in_place.rs (new): LentSample view (timestamp and encoding hints built only when asked), lent delivery with the owned path's projection and self-echo rule, owned fallback for sliced Puts and past-bound keyexprs; unit tests comparing lent and owned delivery field for field.",
+        "crates/wz-session-core/src/switchboard.rs: InPlace handled (owned projection) so the AP switchboard does not miss a lent Put; per-Push body factored into dispatch_push.",
+        "crates/wz-runtime-coop/src/session_drive.rs: routes the new events, RxPathCounts on SessionPump (rx_path_counts()).",
+        "crates/wz-session-lwip/tests/rx_frame_allocations.rs: asserts per-Put cost 0 (fixed backing) / 2 (growable), keyexpr bytes equal the copying path's, frames counted in place; new fragment-is-copied-and-counted test.",
+        "scripts/run-ci.sh: C1m rx frame in place 2 -> 3; new leg C1m rx frame in place fixed (3), with wz-session-core/bounded-heapless."
+      ],
+      "verification_bullets": [
+        "All host-level; no board was run. Builds on the build machine through bx.",
+        "Step 0 (red, base a48e1e88): rx_frame_allocations on rx-in-place printed \"frame of 1 7, of 2 14, of 8 56\" (7 per Put, growable backing). A backtrace-capturing allocator (temporary edit of the test, reverted) named the 7: the keyexpr suffix copy (wireexpr_local try_into_owned), the payload copy (msg_put try_into_owned), the Box of the owned Push (network_message decode_one_record), the resolved keyexpr String (wireexpr_resolve resolve_wireexpr_in), the subscriber payload copy (put_payload collect_wire_payload), and the two matcher chunk lists (pubsub fire_to_subscribers target, keyexpr_match keyexpr_intersects_target), the last two growable-backing only.",
+        "Green, after:",
+        "rx_frame_allocations, rx-in-place, growable: 3 passed; \"frame of 1 2, of 2 4, of 8 16\".",
+        "same, rx-in-place + wz-session-core/bounded-heapless: 3 passed; \"frame of 1 0, of 2 0, of 8 0\".",
+        "same, copying control (no rx-in-place): 2 passed; \"frame of 1 10, of 2 17, of 8 60\" (unchanged per-Put 7).",
+        "Mutations, each RED then reverted: lend nothing (PUSH_FORM inverted) -> 5 per Put on the fixed backing and 2 failures; delivery skipped -> 3 failures; path counter not counting -> fragment test red; fallback counters not incremented -> 2 in_place unit tests red.",
+        "wz-session-core lib in_place + record_walk tests: 13 passed on both backings (full pubsub feature set).",
+        "wz-session-core lib: default 942 passed; C1g union fixed-backing lib 526 passed; C1g union full suite ok (3 result lines, no failure); session-unicast+codec-push+pubsub-put+transport-stats 603 passed; switchboard+observer filter 21 passed.",
+        "wz-session-lwip lib, rx-in-place leg (C1m lib in place): 10 passed. lwip adminspace-core,adminspace-write,rx-in-place: 11 passed.",
+        "wz-runtime-coop rx-in-place,reassembly: 21 passed (+2 ignored doc).",
+        "clippy -D warnings --all-targets: wz-session-core x7 feature sets (default; full pubsub+unicast; unicast+codec-frame; unicast+push+put+transport-stats+switchboard; no-default alloc+unicast+push+delete+bounded-heapless; C1g union bounded-heapless; no-default alloc+codec-frame), wz-runtime-coop x3 (rx-in-place; rx-in-place,reassembly; session-unicast), wz-session-lwip x4 (lane copying set; lane in-place set; in-place + bounded-heapless; default), wz-session-mcu x3 (default; queryable+put set; adminspace-core,adminspace-write): all rc 0.",
+        "cargo check --all-targets of wz-runtime-tokio, wz-capi-core, wz-replay, wz-e2e-harness (AP) and wz-mcu-session-acceptor: rc 0.",
+        "run-ci --layer A4: pass. --layer C1bz (wz-session-core, wz-runtime-coop, wz-session-lwip): pass after one redundant-link fix.",
+        "reason_review_pin_gate.py --check: OK after re-pinning sample.rs (R3250 placeholder).",
+        "Not run: the count-guard oracle, the hook gate array, Layer C0, the other C1m legs, the remaining wz-session-core/lwip/mcu clippy sets of the lane (only the sets above), any cross-compile (thumbv6m/thumbv7m, the Zephyr admin node image that turns rx-in-place on), stack depth of the in-place dispatch, and hardware. Commit 4e5e9da9 was not built on its own (its files are the final versions and reference nothing from the second commit)."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-13-runtime",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-14-platform",
+        "watching-zenoh/local-ci-gates"
+      ],
+      "carry_forward_bullets": [
+        "Still open on the MCU in-place receive (runtime-zero-copy B2 and its seam):",
+        "1. Only Push records are lent. Request, Response, ResponseFinal, Declare, Interest and OAM records in an in-place frame are still decoded into owned messages (a Box for Request/Response/Declare). Next step: add the queryable (Request) and reply (Response) bodies to InPlaceRecord as further accessors, and deliver them through the query and reply registries' borrowed paths, as pubsub::in_place does for a Push.",
+        "2. The growable backing still pays 2 allocations per Put (the matcher's chunk lists). That is the backing's design; the zero claim holds on the fixed backing (bounded-heapless). No deploy turns bounded-heapless on yet (step S1 landed only the selector): until an MCU image does, a shipped image pays those 2. Owner decision whether the MCU images take bounded-heapless now.",
+        "3. A frame with its own extension chain (a QoS session's non-default priority) still allocates one Vec per frame (inbound decode_frame_head, decode_ext_chain); per frame, not per record.",
+        "4. B3 (same seam): units that are not an admissible Frame (Fragment, lean lowlatency) are copied to the heap before the copying path, now counted per reason by SessionPump::rx_path_counts. Next step: dispatch_unit's other arms over a borrowed unit.",
+        "5. Timestamp and encoding-schema hints cost one allocation each WHEN a subscriber asks for them (TimestampHint.zid is a Vec, EncodingHint.schema a String); a fixed-size TimestampHint zid would remove it but changes a public AP type.",
+        "6. The reason of runtime-zero-copy should name this as the S3 step (clause (4) / Z4 / Z25 in the reason audit) in the next reason update; sample.rs pin row carries the placeholder round R3250, to be replaced by the real round id when the ledger entry is appended.",
+        "7. Hosted only: the new C1m leg \"rx frame in place fixed\" and the moved count (3) are first judged by hosted CI; the Zephyr rx-pool image build (rx-in-place on) was not built here."
+      ],
+      "publishable_decision_summary": "runtime-zero-copy blocker B2 (no-heap step S3): on the MCU in-place receive path a Push record is no longer projected into a boxed owned message. dispatch_datagram decodes it where the datagram lies and lends it as a new ungated IterationEvent::InPlace; the subscriber registry delivers it through the existing SampleSink seam as a borrowed view (the sink contract was already a view borrowed for the call, so no subscriber changes). The keyexpr is lent when one string is it and composed in a KeyexprBuf (BoundedString of MAX_KEYEXPR_BYTES) otherwise. Re-measured before: 7 allocations per Put on the growable backing, 5 on the fixed one, each named by backtrace. After: 0 on the fixed backing, 2 on the growable one (the matcher's chunk lists, which that backing grows by design). A sliced Put and a keyexpr past the bound take the owned projection, delivered as before and counted; units the path does not read in place are counted by reason. transport-stats builds keep the owned form.",
+      "publishable_changes_bullets": [
+        "Commit 4e5e9da9 feat(session-core): readers that resolve a keyexpr without a String",
+        "crates/wz-session-core/src/ext_view.rs: ExtEntryView gains zint(); implemented for the borrowed wz_codecs ExtEntry, the owned entry and the Query entry.",
+        "crates/wz-session-core/src/sample.rs: extract_qos_in over any ExtEntryView (extract_qos delegates); TimestampHint::from_view and EncodingHint::from_view over the borrowed codec forms.",
+        "crates/wz-session-core/src/wireexpr_resolve.rs: KeyexprBuf (BoundedString of MAX_KEYEXPR_BYTES), KeyexprPastBound, id_and_suffix_view, resolve_wireexpr_view (same rule as resolve_wireexpr_in, lends or composes into the caller's buffer); OwnMappingSpace::append_own_mapping (provided method; overridden for HashMap).",
+        "crates/wz-session-core/src/session_actions.rs: SessionLinkActions overrides append_own_mapping, copying under the lock straight into the buffer.",
+        "docs/reason-review-pins.md: runtime-zero-copy / sample.rs row re-pinned to the new blob with round label R3250 (placeholder; the cited clause, Sample.payload is RxBytes, was re-read and still holds).",
+        "Commit 9e31124f feat(session-core): a Put read in place reaches its subscriber lent",
+        "crates/wz-session-core/src/driver_loop.rs: IterationEvent::InPlace(InPlaceRecord) (ungated variant) and InPlaceRecord (frame reliable/sn/priority plus the borrowed Push).",
+        "crates/wz-session-core/src/network_message.rs: for_each_record takes a PushForm (Owned or Lent) and hands a WalkedRecord; a lent Push is judged by judge_push_chains, shared with NetworkMessage::ext_admission; new record-walk tests.",
+        "crates/wz-session-core/src/drive.rs: dispatch_datagram reports IterationEvent values and returns DatagramPath (InPlace or Copied(CopyReason)); in_place_frame names why a unit is copied; PUSH_FORM is Owned under transport-stats.",
+        "crates/wz-session-core/src/pubsub.rs: InPlaceFallbacks counter and getter, spaces_of helper, fire_into free function (the one matcher), dispatch_iteration_event handles InPlace.",
+        "crates/wz-session-core/src/pubsub/in_place.rs (new): LentSample view (timestamp and encoding hints built only when asked), lent delivery with the owned path's projection and self-echo rule, owned fallback for sliced Puts and past-bound keyexprs; unit tests comparing lent and owned delivery field for field.",
+        "crates/wz-session-core/src/switchboard.rs: InPlace handled (owned projection) so the AP switchboard does not miss a lent Put; per-Push body factored into dispatch_push.",
+        "crates/wz-runtime-coop/src/session_drive.rs: routes the new events, RxPathCounts on SessionPump (rx_path_counts()).",
+        "crates/wz-session-lwip/tests/rx_frame_allocations.rs: asserts per-Put cost 0 (fixed backing) / 2 (growable), keyexpr bytes equal the copying path's, frames counted in place; new fragment-is-copied-and-counted test.",
+        "scripts/run-ci.sh: C1m rx frame in place 2 -> 3; new leg C1m rx frame in place fixed (3), with wz-session-core/bounded-heapless."
+      ],
+      "publishable_verification_bullets": [
+        "All host-level; no board was run. Builds on the build machine through bx.",
+        "Step 0 (red, base a48e1e88): rx_frame_allocations on rx-in-place printed \"frame of 1 7, of 2 14, of 8 56\" (7 per Put, growable backing). A backtrace-capturing allocator (temporary edit of the test, reverted) named the 7: the keyexpr suffix copy (wireexpr_local try_into_owned), the payload copy (msg_put try_into_owned), the Box of the owned Push (network_message decode_one_record), the resolved keyexpr String (wireexpr_resolve resolve_wireexpr_in), the subscriber payload copy (put_payload collect_wire_payload), and the two matcher chunk lists (pubsub fire_to_subscribers target, keyexpr_match keyexpr_intersects_target), the last two growable-backing only.",
+        "Green, after:",
+        "rx_frame_allocations, rx-in-place, growable: 3 passed; \"frame of 1 2, of 2 4, of 8 16\".",
+        "same, rx-in-place + wz-session-core/bounded-heapless: 3 passed; \"frame of 1 0, of 2 0, of 8 0\".",
+        "same, copying control (no rx-in-place): 2 passed; \"frame of 1 10, of 2 17, of 8 60\" (unchanged per-Put 7).",
+        "Mutations, each RED then reverted: lend nothing (PUSH_FORM inverted) -> 5 per Put on the fixed backing and 2 failures; delivery skipped -> 3 failures; path counter not counting -> fragment test red; fallback counters not incremented -> 2 in_place unit tests red.",
+        "wz-session-core lib in_place + record_walk tests: 13 passed on both backings (full pubsub feature set).",
+        "wz-session-core lib: default 942 passed; C1g union fixed-backing lib 526 passed; C1g union full suite ok (3 result lines, no failure); session-unicast+codec-push+pubsub-put+transport-stats 603 passed; switchboard+observer filter 21 passed.",
+        "wz-session-lwip lib, rx-in-place leg (C1m lib in place): 10 passed. lwip adminspace-core,adminspace-write,rx-in-place: 11 passed.",
+        "wz-runtime-coop rx-in-place,reassembly: 21 passed (+2 ignored doc).",
+        "clippy -D warnings --all-targets: wz-session-core x7 feature sets (default; full pubsub+unicast; unicast+codec-frame; unicast+push+put+transport-stats+switchboard; no-default alloc+unicast+push+delete+bounded-heapless; C1g union bounded-heapless; no-default alloc+codec-frame), wz-runtime-coop x3 (rx-in-place; rx-in-place,reassembly; session-unicast), wz-session-lwip x4 (lane copying set; lane in-place set; in-place + bounded-heapless; default), wz-session-mcu x3 (default; queryable+put set; adminspace-core,adminspace-write): all rc 0.",
+        "cargo check --all-targets of wz-runtime-tokio, wz-capi-core, wz-replay, wz-e2e-harness (AP) and wz-mcu-session-acceptor: rc 0.",
+        "run-ci --layer A4: pass. --layer C1bz (wz-session-core, wz-runtime-coop, wz-session-lwip): pass after one redundant-link fix.",
+        "reason_review_pin_gate.py --check: OK after re-pinning sample.rs (R3250 placeholder).",
+        "Not run: the count-guard oracle, the hook gate array, Layer C0, the other C1m legs, the remaining wz-session-core/lwip/mcu clippy sets of the lane (only the sets above), any cross-compile (thumbv6m/thumbv7m, the Zephyr admin node image that turns rx-in-place on), stack depth of the in-place dispatch, and hardware. Commit 4e5e9da9 was not built on its own (its files are the final versions and reference nothing from the second commit)."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-13-runtime",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-14-platform",
+        "watching-zenoh/local-ci-gates"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Still open on the MCU in-place receive (runtime-zero-copy B2 and its seam):",
+        "1. Only Push records are lent. Request, Response, ResponseFinal, Declare, Interest and OAM records in an in-place frame are still decoded into owned messages (a Box for Request/Response/Declare). Next step: add the queryable (Request) and reply (Response) bodies to InPlaceRecord as further accessors, and deliver them through the query and reply registries' borrowed paths, as pubsub::in_place does for a Push.",
+        "2. The growable backing still pays 2 allocations per Put (the matcher's chunk lists). That is the backing's design; the zero claim holds on the fixed backing (bounded-heapless). No deploy turns bounded-heapless on yet (step S1 landed only the selector): until an MCU image does, a shipped image pays those 2. Owner decision whether the MCU images take bounded-heapless now.",
+        "3. A frame with its own extension chain (a QoS session's non-default priority) still allocates one Vec per frame (inbound decode_frame_head, decode_ext_chain); per frame, not per record.",
+        "4. B3 (same seam): units that are not an admissible Frame (Fragment, lean lowlatency) are copied to the heap before the copying path, now counted per reason by SessionPump::rx_path_counts. Next step: dispatch_unit's other arms over a borrowed unit.",
+        "5. Timestamp and encoding-schema hints cost one allocation each WHEN a subscriber asks for them (TimestampHint.zid is a Vec, EncodingHint.schema a String); a fixed-size TimestampHint zid would remove it but changes a public AP type.",
+        "6. The reason of runtime-zero-copy should name this as the S3 step (clause (4) / Z4 / Z25 in the reason audit) in the next reason update; sample.rs pin row carries the placeholder round R3250, to be replaced by the real round id when the ledger entry is appended.",
+        "7. Hosted only: the new C1m leg \"rx frame in place fixed\" and the moved count (3) are first judged by hosted CI; the Zephyr rx-pool image build (rx-in-place on) was not built here."
+      ]
+    },
     "Round 33": {
       "decision_summary": "§3 scouting + locator codec triad lands: sources/codecs/{locator,scout,hello}.scxml. Introduces 7 new B5 primitives across 3 files (string type, multi-bit flag pack, length-ref dotted-path, length-arith +1, present-if local, parent-flag carrier, import cross-codec, repeat-element); all 6 backends emit clean at vendor pin 11f1032d.",
       "changes_bullets": [
