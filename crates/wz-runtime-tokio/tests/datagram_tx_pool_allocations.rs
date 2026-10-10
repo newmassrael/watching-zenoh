@@ -12,6 +12,10 @@
 //!   the small class (they take the large one), through the lend and through the
 //!   byte door; each datagram the peer reads is the payload, byte for byte, as
 //!   the heap path sends it. NOTHING is allocated.
+//! - The queue alone, filled to the link's whole slot budget: a lane holding
+//!   every slot the link may take allocates nothing either (R3250). The UDP
+//!   burst reaches that depth only when the writer happens to lag; this reaches
+//!   it every time.
 //! - QUIC datagram, at the library seam: quinn's `send_datagram` takes
 //!   `bytes::Bytes`, and the slot becomes the `Bytes`' owner with no copy of its
 //!   bytes. `Bytes::from_owner` boxes its owner, so each datagram costs exactly
@@ -21,9 +25,18 @@
 //!   one copy), and the byte door hands its vector straight in (one
 //!   allocation); exactly one per message either way, counted here.
 //!
-//! The counter is process-wide, because the writer task runs on the transmit
-//! runtime's own threads, and the tests of this binary are serialised by a lock
-//! so they cannot move each other's numbers. Host-test level.
+//! R3250 — the count is ATTRIBUTED to the measurement's own threads, not
+//! process-wide: a [`Measurement`] counts what its test thread allocates and
+//! what the threads of the runtime its writer task runs on allocate (a runtime
+//! built for it, each of whose threads takes the measurement's tally as it
+//! starts), and only while its window is open. The tests of this binary run in
+//! parallel threads of one process, and libtest starts, reports and fails them
+//! on threads of its own; none of those is a measurement's, so none can move a
+//! number. Measured before this harness, when the count was process-wide and a
+//! lock serialised only the windows: a sibling test's runtime starting its
+//! workers inside a window read as one allocation, and a failed sibling's
+//! backtrace, printed after it released the lock, as thousands. Host-test
+//! level.
 #![cfg(all(
     feature = "runtime-zero-copy",
     any(
@@ -34,29 +47,58 @@
 ))]
 
 use std::alloc::{GlobalAlloc, Layout, System};
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::cell::Cell;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
+use wz_runtime_tokio::writer_queue::{
+    outbound_channel_datagram, OutboundRx, OutboundTx, WireFrame,
+};
+use wz_session_core::link::TxQueueShape;
+use wz_session_core::qos::Priority;
+
+/// Counts the allocations of the measurement the allocating thread works for.
 struct CountingAllocator;
 
-static ALLOCATIONS: AtomicUsize = AtomicUsize::new(0);
+/// One measurement's count: whether its window is open, and what its threads
+/// allocated while it was.
+struct Tally {
+    open: AtomicBool,
+    allocations: AtomicUsize,
+}
 
-// SAFETY: every call forwards to `System` unchanged; the only addition is an
-// atomic counter bump, which neither allocates nor unwinds.
+thread_local! {
+    /// The measurement this thread works for, if any.
+    static OWNER: Cell<Option<&'static Tally>> = const { Cell::new(None) };
+}
+
+/// One allocation, counted against the allocating thread's measurement when
+/// that measurement's window is open.
+fn count_one() {
+    if let Some(tally) = OWNER.with(Cell::get) {
+        if tally.open.load(Ordering::SeqCst) {
+            tally.allocations.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+}
+
+// SAFETY: every call forwards to `System` unchanged; the only addition is a
+// read of a thread-local without a destructor and an atomic bump, neither of
+// which allocates or unwinds.
 unsafe impl GlobalAlloc for CountingAllocator {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-        ALLOCATIONS.fetch_add(1, Ordering::Relaxed);
+        count_one();
         // SAFETY: same contract as the caller's.
         unsafe { System.alloc(layout) }
     }
 
     unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
-        ALLOCATIONS.fetch_add(1, Ordering::Relaxed);
+        count_one();
         // SAFETY: same contract as the caller's.
         unsafe { System.alloc_zeroed(layout) }
     }
 
     unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
-        ALLOCATIONS.fetch_add(1, Ordering::Relaxed);
+        count_one();
         // SAFETY: same contract as the caller's.
         unsafe { System.realloc(ptr, layout, new_size) }
     }
@@ -70,13 +112,102 @@ unsafe impl GlobalAlloc for CountingAllocator {
 #[global_allocator]
 static GLOBAL: CountingAllocator = CountingAllocator;
 
-/// One measurement at a time in this binary.
-/// An async lock, because the UDP measurements hold it across their setup's
-/// awaits; the synchronous tests take it with `blocking_lock`.
-static SERIAL: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+/// A measurement owned by the test thread that made it, with a tally of its
+/// own.
+struct Measurement {
+    tally: &'static Tally,
+}
 
-fn allocations() -> usize {
-    ALLOCATIONS.load(Ordering::SeqCst)
+impl Measurement {
+    /// The calling thread works for the new measurement until it drops. The
+    /// tally is leaked, a few bytes per test, because a runtime thread of the
+    /// measurement may outlive it and still reads it.
+    fn new() -> Self {
+        let tally: &'static Tally = Box::leak(Box::new(Tally {
+            open: AtomicBool::new(false),
+            allocations: AtomicUsize::new(0),
+        }));
+        OWNER.with(|owner| owner.set(Some(tally)));
+        Self { tally }
+    }
+
+    /// A multi-thread runtime every thread of which (its worker, and any
+    /// blocking thread it starts) works for this measurement.
+    #[cfg(feature = "transport-link-udp")]
+    fn runtime(&self) -> tokio::runtime::Runtime {
+        let tally = self.tally;
+        tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(1)
+            .enable_all()
+            .on_thread_start(move || OWNER.with(|owner| owner.set(Some(tally))))
+            .build()
+            .expect("the measurement's runtime")
+    }
+
+    /// The allocations this measurement's threads make while `f` runs.
+    fn count(&self, f: impl FnOnce()) -> usize {
+        let before = self.tally.allocations.load(Ordering::SeqCst);
+        self.tally.open.store(true, Ordering::SeqCst);
+        f();
+        self.tally.open.store(false, Ordering::SeqCst);
+        self.tally.allocations.load(Ordering::SeqCst) - before
+    }
+}
+
+impl Drop for Measurement {
+    fn drop(&mut self) {
+        OWNER.with(|owner| owner.set(None));
+    }
+}
+
+const P: Priority = Priority::DEFAULT;
+
+/// The shape an established UDP session without QoS gives its queue: one lane
+/// of 2 x 1450 bytes, so a slot budget of 3 small and 2 large.
+fn udp_shape() -> TxQueueShape {
+    TxQueueShape {
+        sizes: [2; Priority::NUM],
+        qos: false,
+        batch_bytes: 1450,
+    }
+}
+
+/// Queue one datagram of `payload` through a lend, as a write half does.
+fn lend_one(tx: &OutboundTx, payload: &[u8]) {
+    let lend = tx.lend(P, payload.len()).expect("lent");
+    // SAFETY: the lend is this test's, and `payload.len()` <= its capacity.
+    unsafe { std::ptr::copy_nonoverlapping(payload.as_ptr(), lend.base(), payload.len()) };
+    tx.commit(lend, payload.len()).expect("queued");
+}
+
+fn take(rx: &mut OutboundRx) -> WireFrame {
+    rx.try_recv_wire_tagged().expect("queued").1
+}
+
+/// R3250 — a lane holding the link's whole slot budget allocates nothing. The
+/// lane is an entry per slot, and before R3250 it grew the first time it held
+/// more entries than it ever had, which on a UDP link is whenever a burst
+/// meets a writer lagging further than it had before: measured as one
+/// allocation in the UDP burst below, about one run in three on two loaded
+/// cores. Here the writer does not take until the lane holds every slot.
+#[test]
+fn a_lane_filled_to_its_slot_budget_allocates_nothing() {
+    let measurement = Measurement::new();
+    let (tx, mut rx) = outbound_channel_datagram();
+    tx.reshape(udp_shape());
+    // One datagram through first, so whatever a first use builds exists.
+    lend_one(&tx, &[0x55; 64]);
+    drop(take(&mut rx));
+    let budget = 5;
+    let count = measurement.count(|| {
+        for _ in 0..budget {
+            lend_one(&tx, &[0x66; 64]);
+        }
+    });
+    assert_eq!(count, 0, "the lane had room for every slot");
+    for _ in 0..budget {
+        assert_eq!(take(&mut rx), [0x66u8; 64]);
+    }
 }
 
 #[cfg(feature = "transport-link-udp")]
@@ -86,40 +217,43 @@ mod udp {
     use std::sync::Arc;
     use std::time::Duration;
 
-    use wz_runtime_tokio::udp_pipeline::{dial_udp, wire_udp_socket, UdpWriteDriver};
-    use wz_runtime_tokio::writer_queue::WriterHandle;
-    use wz_session_core::link::{BoxedLinkDriver, LinkSendOutcome, TxQueueShape};
-    use wz_session_core::qos::Priority;
+    use wz_runtime_tokio::udp_pipeline::{dial_udp, udp_writer_task, UdpWriteDriver};
+    use wz_runtime_tokio::writer_queue::{datagram_outbound_channel, WriterHandle};
+    use wz_session_core::link::{BoxedLinkDriver, LinkSendOutcome, LinkSubject};
     use wz_session_core::reliability::Reliability;
     use wz_session_core::tx_buf::TxBuf;
     use wz_session_core::tx_lease::TxLease;
 
     struct Link {
-        driver: Arc<UdpWriteDriver>,
+        driver: UdpWriteDriver,
         peer: PeerSocket,
         _writer: WriterHandle,
     }
 
-    /// A UDP link over the production wiring, shaped as an established session
-    /// without QoS shapes it (one lane of 2 x 1450 bytes), so its slot budget is
-    /// 3 small and 2 large: a burst of twelve is far past it.
-    async fn link() -> Link {
+    /// A UDP link over the production parts (the datagram queue constructor,
+    /// the write half and the writer task, as `wire_udp_socket` puts them
+    /// together), with the writer on the measurement's runtime rather than the
+    /// process-wide transmit one, so what the writer allocates is counted and
+    /// nothing else is. Shaped as an established session without QoS, its slot
+    /// budget is 3 small and 2 large: a burst of twelve is far past it.
+    fn link(rt: &tokio::runtime::Runtime) -> Link {
         let peer = PeerSocket::bind("127.0.0.1:0").expect("peer");
         peer.set_read_timeout(Some(Duration::from_secs(5)))
             .expect("timeout");
-        let socket = dial_udp(
-            peer.local_addr().expect("addr"),
-            &wz_runtime_tokio::link_socket::LinkSocket::NONE,
-        )
-        .await
-        .expect("dial");
         let addr = peer.local_addr().expect("addr");
-        let (_read, driver, writer) = wire_udp_socket(socket, addr);
-        driver.shape_tx_queue(TxQueueShape {
-            sizes: [2; Priority::NUM],
-            qos: false,
-            batch_bytes: 1450,
+        let socket = rt
+            .block_on(dial_udp(
+                addr,
+                &wz_runtime_tokio::link_socket::LinkSocket::NONE,
+            ))
+            .expect("dial");
+        let socket = Arc::new(socket);
+        let (tx, rx) = datagram_outbound_channel();
+        let writer = WriterHandle::spawn_on(rt.handle().clone(), rx, move |queue| {
+            udp_writer_task(socket, addr, queue)
         });
+        let driver = UdpWriteDriver::new(tx, LinkSubject::UNKNOWN, None);
+        driver.shape_tx_queue(udp_shape());
         Link {
             driver,
             peer,
@@ -175,54 +309,54 @@ mod udp {
         }
     }
 
-    async fn measure(
+    /// The sender is this test's thread, outside any runtime, so a sender past
+    /// the slot budget blocks on the queue until the writer, on the
+    /// measurement's runtime, frees a slot.
+    fn measure(
         send: fn(&UdpWriteDriver, &[u8]),
         payload: &[u8],
         frames: usize,
         burst: bool,
     ) -> usize {
-        // Held across the setup too: another test building its link while this
-        // one measures would be counted here.
-        let _one = SERIAL.lock().await;
-        let link = link().await;
+        let measurement = Measurement::new();
+        let rt = measurement.runtime();
+        let link = link(&rt);
         let mut buf = vec![0u8; 65536];
         round(&link, send, payload, frames, burst, &mut buf);
-        let before = allocations();
-        round(&link, send, payload, frames, burst, &mut buf);
-        allocations() - before
+        measurement.count(|| round(&link, send, payload, frames, burst, &mut buf))
     }
 
     static SMALL: [u8; 64] = [0x5A; 64];
     static LARGE: [u8; 20 * 1024] = [0xC3; 20 * 1024];
 
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn a_steady_state_of_lent_datagrams_allocates_nothing() {
-        assert_eq!(measure(send_lent, &SMALL, 32, false).await, 0);
+    #[test]
+    fn a_steady_state_of_lent_datagrams_allocates_nothing() {
+        assert_eq!(measure(send_lent, &SMALL, 32, false), 0);
     }
 
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn a_burst_of_lent_datagrams_past_the_slot_budget_allocates_nothing() {
-        assert_eq!(measure(send_lent, &SMALL, 12, true).await, 0);
+    #[test]
+    fn a_burst_of_lent_datagrams_past_the_slot_budget_allocates_nothing() {
+        assert_eq!(measure(send_lent, &SMALL, 12, true), 0);
     }
 
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn lent_datagrams_past_the_small_class_allocate_nothing() {
-        assert_eq!(measure(send_lent, &LARGE, 4, false).await, 0);
+    #[test]
+    fn lent_datagrams_past_the_small_class_allocate_nothing() {
+        assert_eq!(measure(send_lent, &LARGE, 4, false), 0);
     }
 
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn a_steady_state_through_the_byte_door_allocates_nothing() {
-        assert_eq!(measure(send_bytes, &SMALL, 32, false).await, 0);
+    #[test]
+    fn a_steady_state_through_the_byte_door_allocates_nothing() {
+        assert_eq!(measure(send_bytes, &SMALL, 32, false), 0);
     }
 
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn a_burst_through_the_byte_door_past_the_budget_allocates_nothing() {
-        assert_eq!(measure(send_bytes, &SMALL, 12, true).await, 0);
+    #[test]
+    fn a_burst_through_the_byte_door_past_the_budget_allocates_nothing() {
+        assert_eq!(measure(send_bytes, &SMALL, 12, true), 0);
     }
 
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn datagrams_past_the_small_class_through_the_byte_door_allocate_nothing() {
-        assert_eq!(measure(send_bytes, &LARGE, 4, false).await, 0);
+    #[test]
+    fn datagrams_past_the_small_class_through_the_byte_door_allocate_nothing() {
+        assert_eq!(measure(send_bytes, &LARGE, 4, false), 0);
     }
 }
 
@@ -233,22 +367,6 @@ mod udp {
 ))]
 mod seam {
     use super::*;
-    use wz_runtime_tokio::writer_queue::{outbound_channel_datagram, OutboundRx, OutboundTx};
-    use wz_session_core::qos::Priority;
-
-    const P: Priority = Priority::DEFAULT;
-
-    /// Queue one datagram of `payload` through a lend, as a write half does.
-    fn lend_one(tx: &OutboundTx, payload: &[u8]) {
-        let lend = tx.lend(P, payload.len()).expect("lent");
-        // SAFETY: the lend is this test's, and `payload.len()` <= its capacity.
-        unsafe { std::ptr::copy_nonoverlapping(payload.as_ptr(), lend.base(), payload.len()) };
-        tx.commit(lend, payload.len()).expect("queued");
-    }
-
-    fn take(rx: &mut OutboundRx) -> wz_runtime_tokio::writer_queue::WireFrame {
-        rx.try_recv_wire_tagged().expect("queued").1
-    }
 
     /// quinn takes `Bytes`: the slot becomes the `Bytes`' owner, the `Bytes`
     /// reads the slot in place (same address, no copy), and the one allocation
@@ -256,7 +374,7 @@ mod seam {
     #[cfg(feature = "transport-link-quic-datagram")]
     #[test]
     fn a_pooled_datagram_becomes_bytes_without_a_copy_and_one_allocation() {
-        let _one = SERIAL.blocking_lock();
+        let measurement = Measurement::new();
         let (tx, mut rx) = outbound_channel_datagram();
         for (frames, payload) in [(1usize, &[0x11u8; 64][..]), (4, &[0x22u8; 9000][..])] {
             let mut addresses = Vec::with_capacity(frames);
@@ -264,15 +382,15 @@ mod seam {
             for _ in 0..frames {
                 lend_one(&tx, payload);
             }
-            let before = allocations();
-            for _ in 0..frames {
-                let wire = take(&mut rx);
-                let at = wire.as_ptr() as usize;
-                let bytes = wire.into_bytes();
-                addresses.push((at, bytes.as_ptr() as usize));
-                held.push(bytes);
-            }
-            let count = allocations() - before;
+            let count = measurement.count(|| {
+                for _ in 0..frames {
+                    let wire = take(&mut rx);
+                    let at = wire.as_ptr() as usize;
+                    let bytes = wire.into_bytes();
+                    addresses.push((at, bytes.as_ptr() as usize));
+                    held.push(bytes);
+                }
+            });
             assert_eq!(
                 count, frames,
                 "one owner box per datagram, and nothing else"
@@ -304,18 +422,18 @@ mod seam {
     #[cfg(feature = "transport-link-ws")]
     #[test]
     fn a_pooled_ws_message_costs_one_allocation_at_the_library_seam() {
-        let _one = SERIAL.blocking_lock();
+        let measurement = Measurement::new();
         let (tx, mut rx) = outbound_channel_datagram();
         let payload = [0x33u8; 300];
         for _ in 0..12 {
             lend_one(&tx, &payload);
         }
         let mut messages = Vec::with_capacity(12);
-        let before = allocations();
-        for _ in 0..12 {
-            messages.push(take(&mut rx).into_vec());
-        }
-        let count = allocations() - before;
+        let count = measurement.count(|| {
+            for _ in 0..12 {
+                messages.push(take(&mut rx).into_vec());
+            }
+        });
         assert_eq!(
             count, 12,
             "the seam's one copy per message, and nothing else"
@@ -339,27 +457,26 @@ mod seam {
         use wz_runtime_tokio::ws_pipeline::WsWriteDriver;
         use wz_session_core::link::{BoxedLinkDriver, LinkSendOutcome, LinkSubject};
         use wz_session_core::reliability::Reliability;
-        let _one = SERIAL.blocking_lock();
+        let measurement = Measurement::new();
         let (tx, mut rx) = outbound_channel_datagram();
         let driver = WsWriteDriver::new(tx, LinkSubject::UNKNOWN, None);
         let payload = [0x44u8; 300];
-        // One unmeasured message first: the lane's own queue grows on its first
-        // entry, once, and that is the queue's and not a message's.
+        // One unmeasured message first, so whatever a first use builds exists.
         assert_eq!(
             driver.send_blocking(&payload, Reliability::Reliable),
             LinkSendOutcome::Sent
         );
         drop(take(&mut rx));
         let mut messages = Vec::with_capacity(12);
-        let before = allocations();
-        for _ in 0..12 {
-            assert_eq!(
-                driver.send_blocking(&payload, Reliability::Reliable),
-                LinkSendOutcome::Sent
-            );
-            messages.push(take(&mut rx).into_vec());
-        }
-        let count = allocations() - before;
+        let count = measurement.count(|| {
+            for _ in 0..12 {
+                assert_eq!(
+                    driver.send_blocking(&payload, Reliability::Reliable),
+                    LinkSendOutcome::Sent
+                );
+                messages.push(take(&mut rx).into_vec());
+            }
+        });
         assert_eq!(
             count, 12,
             "one vector per message, handed to the seam as it is"
