@@ -269988,6 +269988,92 @@
         "Open: HW.35's burst limit is unmeasured. refused and lwIP took copied stay 0 only while lwIP never holds eight lent frames at once. A burst of more than eight session datagrams between two passes of the session loop, or fragments on the LAN addressed to the node and held in reassembly for up to 15 s, breaks that without any fault in the slot path. Next step: when a lab records HW.31 to HW.35 with board --pool-image rx, the counts lines in the record show whether that happened; a failed HW.35 states which it was. A lab still has to confirm on hardware that the router negotiates 1472 with the node. The hosted zephyr-admin job (Qza) and the Qzb lane judge this build."
       ]
     },
+    "Round 3259": {
+      "decision_summary": "Item 900 step d: a second bin of mcu-freertos-demo (feature two-session) runs a client session, a router fixture, a group session and a member on one local set in the one FreeRTOS task over lwIP loopback (cross-test-mcast), the four host scenarios on target; Layer Q.frt2 boots it. Premise corrected: Q.4 and Q.frt peers are in-image fixtures, not host processes; a real zenohd peer is Layer Qa's LAN9118 route, not used here. Step 0 measured: client link 24968 B, group 49560 B of heap_4; image heap peak 194464 of 262136 with fixtures; .bss 287552 in 4 MB, fits. The one-session 16 KiB task stack did NOT fit: peak 16216 of 16384 and every scenario failed with the group reading link lost, consistent with the stack writing below its heap block; the image uses 32 KiB (peak 18644). Spawning copies MulticastSession (6320 B) on the stack. No-heap work untouched.",
+      "changes_bullets": [
+        "191c2e20 test(mcu): witness two sessions in one FreeRTOS task on QEMU",
+        "deploy/mcu-freertos-demo/src/board.rs (new): the board both images share: heap_4 global allocator, scheduler start, the entropy, epoch, sys_now, stack-overflow and malloc-failed hooks (moved out of main.rs; their FAIL texts now read \"board FAIL\"), plus heap_free_bytes / heap_usable_bytes / heap_peak_bytes and task_stack_verdict (the kernel's high-water mark judged by wz_mcu_stack::StackVerdict::fits, the bare-metal rule).",
+        "deploy/mcu-freertos-demo/src/main.rs: uses the board module; behaviour unchanged (Q.frt PASS, .text +8 B).",
+        "deploy/mcu-freertos-demo/src/two_session/main.rs + scenarios.rs (new): bin mcu-freertos-two-session; client + router fixture + group + member on one CoopLocalSet; scenarios group-socket-flood, group-peer-lease-expiry (real-time wait), unicast-close, multicast-stop; one witness line each, a leak check per scenario, heap per link open, heap and stack peak lines; 32 KiB task stack with the measurement written above it.",
+        "deploy/mcu-freertos-demo/Cargo.toml + Cargo.lock: the second bin with required-features two-session; deps wz-mcu-stack, optional wz-codecs.",
+        "deploy/mcu-freertos-demo/FreeRTOSConfig.h: INCLUDE_uxTaskGetStackHighWaterMark 1.",
+        "crates/freertos-sys/src/lib.rs: decls xPortGetFreeHeapSize, xPortGetMinimumEverFreeHeapSize, uxTaskGetStackHighWaterMark.",
+        "scripts/run-ci.sh: Layer Q sub-lane Q.frt2 (own CARGO_TARGET_DIR, cross-test-mcast port, stack verdict, declines via _q_unavailable); run_qemu_case keeps witness: and heap: lines on PASS.",
+        ".gitignore: deploy/mcu-freertos-demo/target-two-session/.",
+        "deploy/mcu_client_and_group.yaml: header names Q.frt2 and the stack finding."
+      ],
+      "verification_bullets": [
+        "Ran locally (QEMU on this machine):",
+        "bash scripts/run-ci.sh --layer Q: pass (100 s), 0 FAIL lines; every sub-lane PASS incl. Q.frt, Q.5 footprint both triples, Q.6 x3, and the new lane:",
+        "Q.frt2 run mcu-freertos-two-session via qemu-system-arm mps2-an385 PASS (stack: peak 18644 of 32768 bytes)",
+        "witness: scenario group-socket-flood PASS (10 of 41 dropped at the socket; client established after 3 passes with 2 of 30 queued puts handled; backlog 30 in order; client answers)",
+        "witness: heap per link open: client 24968 B, group 49560 B; fixtures: router 24888 B, member 24808 B",
+        "witness: scenario group-peer-lease-expiry PASS (member evicted 1000 ms after going silent (lease 1000 ms); ...; a new member is heard)",
+        "witness: scenario unicast-close PASS (client ended 2 passes after the router's Close; group heard 3 of 3 puts in order and is still running)",
+        "witness: scenario multicast-stop PASS (group stopped 1 passes after its flag; client still established and answers)",
+        "heap: peak 194464 of 262136 bytes",
+        "Red on target, each injected, booted, restored (git diff empty after): (1) multicast task without yield_now: boot hangs, timeout 124; (2) sweep ending the session on a lost peer: lease-expiry FAIL (new member not heard), exit 1; (3) CoopLocalSet clearing all tasks when one finishes: unicast-close and multicast-stop FAIL, exit 1.",
+        "At the 16 KiB task stack: stack peak 16216 of 16384, all four scenarios FAIL (group LinkLost(OsError), later joins ERR_VAL), exit 1.",
+        "Size: two-session ELF .text 108492, .rodata 10884, .bss 287552 (ucHeap 262144) of 4 MB RAM.",
+        "clippy -D warnings: deploy crate both bins (two-session feature, cross-test-mcast) and the acceptor bin alone (cross-test); freertos-sys host. cargo fmt --check deploy crate clean. C1bz freertos-sys pass. armed_skip_guard --check OK. validate-deploy.sh OK. pre-commit hook passed.",
+        "Not run: hook gate array, Layer C0, count-guard oracle, hosted CI, hardware, the host two-session tests (unchanged)."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-4-session",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-14-platform",
+        "watching-zenoh/local-ci-gates"
+      ],
+      "carry_forward_bullets": [
+        "Witness levels now: QEMU-witnessed in one FreeRTOS task over lwIP loopback (Q.frt2): all four scenarios (flood, lease expiry, unicast close, multicast stop). Host-level only: nothing extra; the host tests keep the step-clock exactness. Board-only: a real NIC, a real router (zenohd) and a real group peer on a second host; two netifs.",
+        "Spawn stack cost: the frame that spawns the sessions holds about 11 KB (MulticastSession<4> is 6320 B, moved by value into the task future, the local-set wrapper and its Box). A deploy with a 16 KiB task stack overflows silently (the overflow hook did not fire). Next step: let spawn_multicast_session take the session boxed (Box<MulticastSession>) so the state is built once and moved as a pointer, then re-measure Q.frt2's peak and lower WZ_TASK_STACK_WORDS to measured need plus margin.",
+        "The stack overflow went undetected by configCHECK_FOR_STACK_OVERFLOW 2; a stack guard (MPU region or a canary block below the task stack) is not in this board.",
+        "Real router peer: Layer Qa's LAN9118 user-net route with a stock zenohd could replace the router fixture for the client half (unicast close by zenohd is not scriptable; lease expiry would be).",
+        "Fixture-free heap of the deploy shape (client + group only) is estimated, not measured: about 145 KB of the 194464 B peak (peak minus router and member fixture sockets).",
+        "Hosted: Q.frt2 adds one build + one boot to the cross-mcu Layer Q job; the hosted run is still to be read."
+      ],
+      "publishable_decision_summary": "Item 900 step d: a second bin of mcu-freertos-demo (feature two-session) runs a client session, a router fixture, a group session and a member on one local set in the one FreeRTOS task over lwIP loopback (cross-test-mcast), the four host scenarios on target; Layer Q.frt2 boots it. Premise corrected: Q.4 and Q.frt peers are in-image fixtures, not host processes; a real zenohd peer is Layer Qa's LAN9118 route, not used here. Step 0 measured: client link 24968 B, group 49560 B of heap_4; image heap peak 194464 of 262136 with fixtures; .bss 287552 in 4 MB, fits. The one-session 16 KiB task stack did NOT fit: peak 16216 of 16384 and every scenario failed with the group reading link lost, consistent with the stack writing below its heap block; the image uses 32 KiB (peak 18644). Spawning copies MulticastSession (6320 B) on the stack. No-heap work untouched.",
+      "publishable_changes_bullets": [
+        "191c2e20 test(mcu): witness two sessions in one FreeRTOS task on QEMU",
+        "deploy/mcu-freertos-demo/src/board.rs (new): the board both images share: heap_4 global allocator, scheduler start, the entropy, epoch, sys_now, stack-overflow and malloc-failed hooks (moved out of main.rs; their FAIL texts now read \"board FAIL\"), plus heap_free_bytes / heap_usable_bytes / heap_peak_bytes and task_stack_verdict (the kernel's high-water mark judged by wz_mcu_stack::StackVerdict::fits, the bare-metal rule).",
+        "deploy/mcu-freertos-demo/src/main.rs: uses the board module; behaviour unchanged (Q.frt PASS, .text +8 B).",
+        "deploy/mcu-freertos-demo/src/two_session/main.rs + scenarios.rs (new): bin mcu-freertos-two-session; client + router fixture + group + member on one CoopLocalSet; scenarios group-socket-flood, group-peer-lease-expiry (real-time wait), unicast-close, multicast-stop; one witness line each, a leak check per scenario, heap per link open, heap and stack peak lines; 32 KiB task stack with the measurement written above it.",
+        "deploy/mcu-freertos-demo/Cargo.toml + Cargo.lock: the second bin with required-features two-session; deps wz-mcu-stack, optional wz-codecs.",
+        "deploy/mcu-freertos-demo/FreeRTOSConfig.h: INCLUDE_uxTaskGetStackHighWaterMark 1.",
+        "crates/freertos-sys/src/lib.rs: decls xPortGetFreeHeapSize, xPortGetMinimumEverFreeHeapSize, uxTaskGetStackHighWaterMark.",
+        "scripts/run-ci.sh: Layer Q sub-lane Q.frt2 (own CARGO_TARGET_DIR, cross-test-mcast port, stack verdict, declines via _q_unavailable); run_qemu_case keeps witness: and heap: lines on PASS.",
+        ".gitignore: deploy/mcu-freertos-demo/target-two-session/.",
+        "deploy/mcu_client_and_group.yaml: header names Q.frt2 and the stack finding."
+      ],
+      "publishable_verification_bullets": [
+        "Ran locally (QEMU on this machine):",
+        "bash scripts/run-ci.sh --layer Q: pass (100 s), 0 FAIL lines; every sub-lane PASS incl. Q.frt, Q.5 footprint both triples, Q.6 x3, and the new lane:",
+        "Q.frt2 run mcu-freertos-two-session via qemu-system-arm mps2-an385 PASS (stack: peak 18644 of 32768 bytes)",
+        "witness: scenario group-socket-flood PASS (10 of 41 dropped at the socket; client established after 3 passes with 2 of 30 queued puts handled; backlog 30 in order; client answers)",
+        "witness: heap per link open: client 24968 B, group 49560 B; fixtures: router 24888 B, member 24808 B",
+        "witness: scenario group-peer-lease-expiry PASS (member evicted 1000 ms after going silent (lease 1000 ms); ...; a new member is heard)",
+        "witness: scenario unicast-close PASS (client ended 2 passes after the router's Close; group heard 3 of 3 puts in order and is still running)",
+        "witness: scenario multicast-stop PASS (group stopped 1 passes after its flag; client still established and answers)",
+        "heap: peak 194464 of 262136 bytes",
+        "Red on target, each injected, booted, restored (git diff empty after): (1) multicast task without yield_now: boot hangs, timeout 124; (2) sweep ending the session on a lost peer: lease-expiry FAIL (new member not heard), exit 1; (3) CoopLocalSet clearing all tasks when one finishes: unicast-close and multicast-stop FAIL, exit 1.",
+        "At the 16 KiB task stack: stack peak 16216 of 16384, all four scenarios FAIL (group LinkLost(OsError), later joins ERR_VAL), exit 1.",
+        "Size: two-session ELF .text 108492, .rodata 10884, .bss 287552 (ucHeap 262144) of 4 MB RAM.",
+        "clippy -D warnings: deploy crate both bins (two-session feature, cross-test-mcast) and the acceptor bin alone (cross-test); freertos-sys host. cargo fmt --check deploy crate clean. C1bz freertos-sys pass. armed_skip_guard --check OK. validate-deploy.sh OK. pre-commit hook passed.",
+        "Not run: hook gate array, Layer C0, count-guard oracle, hosted CI, hardware, the host two-session tests (unchanged)."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-4-session",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-14-platform",
+        "watching-zenoh/local-ci-gates"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Witness levels now: QEMU-witnessed in one FreeRTOS task over lwIP loopback (Q.frt2): all four scenarios (flood, lease expiry, unicast close, multicast stop). Host-level only: nothing extra; the host tests keep the step-clock exactness. Board-only: a real NIC, a real router (zenohd) and a real group peer on a second host; two netifs.",
+        "Spawn stack cost: the frame that spawns the sessions holds about 11 KB (MulticastSession<4> is 6320 B, moved by value into the task future, the local-set wrapper and its Box). A deploy with a 16 KiB task stack overflows silently (the overflow hook did not fire). Next step: let spawn_multicast_session take the session boxed (Box<MulticastSession>) so the state is built once and moved as a pointer, then re-measure Q.frt2's peak and lower WZ_TASK_STACK_WORDS to measured need plus margin.",
+        "The stack overflow went undetected by configCHECK_FOR_STACK_OVERFLOW 2; a stack guard (MPU region or a canary block below the task stack) is not in this board.",
+        "Real router peer: Layer Qa's LAN9118 user-net route with a stock zenohd could replace the router fixture for the client half (unicast close by zenohd is not scriptable; lease expiry would be).",
+        "Fixture-free heap of the deploy shape (client + group only) is estimated, not measured: about 145 KB of the 194464 B peak (peak minus router and member fixture sockets).",
+        "Hosted: Q.frt2 adds one build + one boot to the cross-mcu Layer Q job; the hosted run is still to be read."
+      ]
+    },
     "Round 33": {
       "decision_summary": "§3 scouting + locator codec triad lands: sources/codecs/{locator,scout,hello}.scxml. Introduces 7 new B5 primitives across 3 files (string type, multi-bit flag pack, length-ref dotted-path, length-arith +1, present-if local, parent-flag carrier, import cross-codec, repeat-element); all 6 backends emit clean at vendor pin 11f1032d.",
       "changes_bullets": [
