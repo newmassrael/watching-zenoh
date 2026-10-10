@@ -4961,6 +4961,38 @@ pub async fn initiate_and_open_session_with_multilink(
     max_iters: Option<usize>,
     tick_interval_ms: u64,
 ) -> Result<OpenedSession, OpenError> {
+    initiate_multilink_with_staging(
+        connected,
+        params,
+        offer,
+        band,
+        |_actions| Ok(()),
+        clock,
+        max_iters,
+        tick_interval_ms,
+    )
+    .await
+}
+
+/// Item 751 — [`initiate_and_open_session_with_multilink`] with the caller's
+/// own staging run after the link's: the mesh loop installs its node's south
+/// partition on every link it dials this way, as it does on a single-link dial
+/// through [`initiate_and_open_session_with_staging`].
+#[cfg(feature = "transport-multilink")]
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn initiate_multilink_with_staging<S>(
+    connected: DialedLink,
+    params: SessionInitParams,
+    offer: SessionOffer,
+    band: (Priority, Priority),
+    stage: S,
+    clock: TokioTime,
+    max_iters: Option<usize>,
+    tick_interval_ms: u64,
+) -> Result<OpenedSession, OpenError>
+where
+    S: FnOnce(&Arc<SessionLinkActions>) -> Result<(), OpenError>,
+{
     initiator_open_offering(
         connected,
         params,
@@ -4968,7 +5000,7 @@ pub async fn initiate_and_open_session_with_multilink(
         |actions| {
             actions.install_multilink_dispatch(crate::multilink::open_multilink_dispatch());
             stage_link_priority_band(actions, &offer, band, LinkEnd::Dialled);
-            Ok(())
+            stage(actions)
         },
         clock,
         max_iters,
@@ -5516,6 +5548,37 @@ pub async fn accept_and_open_session_with_multilink(
     max_iters: Option<usize>,
     tick_interval_ms: u64,
 ) -> Result<OpenedSession, OpenError> {
+    accept_multilink_with_staging(
+        accepted,
+        params,
+        offer,
+        band,
+        |_actions| Ok(()),
+        clock,
+        max_iters,
+        tick_interval_ms,
+    )
+    .await
+}
+
+/// Item 751 — [`accept_and_open_session_with_multilink`] with the caller's own
+/// staging run after the link's, the accept-side twin of
+/// `initiate_multilink_with_staging`.
+#[cfg(feature = "transport-multilink")]
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn accept_multilink_with_staging<S>(
+    accepted: DialedLink,
+    params: SessionInitParams,
+    offer: SessionOffer,
+    band: (Priority, Priority),
+    stage: S,
+    clock: TokioTime,
+    max_iters: Option<usize>,
+    tick_interval_ms: u64,
+) -> Result<OpenedSession, OpenError>
+where
+    S: FnOnce(&Arc<SessionLinkActions>) -> Result<(), OpenError>,
+{
     accept_open_offering(
         accepted,
         params,
@@ -5529,7 +5592,7 @@ pub async fn accept_and_open_session_with_multilink(
             // auth methods' since R2779; a draw made here, once, would leave a
             // second handshake on this bundle with none, now that the release
             // after InitAck drops it.
-            Ok(())
+            stage(actions)
         },
         clock,
         max_iters,
@@ -5588,6 +5651,39 @@ pub async fn accept_and_open_session_with_offer(
         params,
         offer,
         |_actions| Ok(()),
+        clock,
+        max_iters,
+        tick_interval_ms,
+    )
+    .await
+}
+
+/// Item 751 — [`accept_and_open_session_with_offer`] with the staging seam
+/// exposed, the accept-side twin of [`initiate_and_open_session_with_staging`]
+/// and for the same reason: what a node installs on every session it accepts
+/// before the first wire byte (the mesh loop's south partition, which decides
+/// the bound the OpenAck announces) is a use of the existing
+/// `SessionLinkActions` surface, not a capability that deserves its own entrypoint.
+///
+/// `stage` runs after the offer is applied and before the drive, so it is in
+/// place when the acceptor decides its OpenAck.
+pub async fn accept_and_open_session_with_staging<S>(
+    accepted: DialedLink,
+    params: SessionInitParams,
+    offer: SessionOffer,
+    stage: S,
+    clock: TokioTime,
+    max_iters: Option<usize>,
+    tick_interval_ms: u64,
+) -> Result<OpenedSession, OpenError>
+where
+    S: FnOnce(&Arc<SessionLinkActions>) -> Result<(), OpenError>,
+{
+    accept_open_offering(
+        accepted,
+        params,
+        offer,
+        stage,
         clock,
         max_iters,
         tick_interval_ms,

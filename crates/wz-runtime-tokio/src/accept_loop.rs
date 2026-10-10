@@ -137,10 +137,11 @@ use crate::multilink::{join_link, JoinOutcome};
 // open path with NO per-call-site cfg branch (the y218 `qos: bool` discipline); it
 // is only APPLIED under `transport-qos`, where the `_with_multilink` entrypoints
 // map it to the `all(multilink,qos)`-gated `set_link_priority_range`.
+//
+// Item 751 — reached through their staging twins, so the node's south partition
+// is installed on every aggregated link as on every single one.
 #[cfg(feature = "transport-multilink")]
-use crate::session_open::{
-    accept_and_open_session_with_multilink, initiate_and_open_session_with_multilink,
-};
+use crate::session_open::{accept_multilink_with_staging, initiate_multilink_with_staging};
 // R311y506 (session-extqos) / R2095 (open-debt item 513) — the offer-carrying
 // open entrypoints, and they are UNCONDITIONAL as of R2095.
 //
@@ -154,11 +155,15 @@ use crate::session_open::{
 // `StateAccept` at `io/zenoh-transport/src/unicast/establishment/accept.rs:725-755`
 // are built from the same `manager.config.unicast.*` fields), which is the shape
 // [`FaceSources::offer`] restores here.
+//
+// Item 751 — the staging twins of the two offer-carrying entrypoints: the offer
+// and the node's south partition ride every face ([`FaceTemplate`]).
 use crate::session_open::{
-    accept_and_open_session_with_offer, initiate_and_open_session_with_offer,
+    accept_and_open_session_with_staging, initiate_and_open_session_with_staging,
 };
 #[cfg(feature = "transport-multilink")]
 use std::collections::BTreeSet;
+use wz_session_core::region_partition::SouthPartition;
 use wz_session_core::transport_mode::SessionOffer;
 // R311y227 — also the multicast INGRESS band (McastIngressItem.priority +
 // route_mcast_ingress), which is `codec-push`-gated, not multilink.
@@ -730,6 +735,22 @@ pub trait FaceForwarder {
         None
     }
 
+    /// Item 751 -- how the node's south is partitioned into subregions, which
+    /// the loop installs on every session it opens, dialled and accepted alike,
+    /// before the first wire byte. A session announces on its Open the bound the
+    /// partition gives its peer, as the pin's transport manager asks the node's
+    /// one config for it while it builds each Open
+    /// (`zenoh/src/net/runtime/region.rs` @ `pub(crate) fn compute_transient_bound_of(`).
+    ///
+    /// Asked of the forwarder rather than handed to the loop beside it because
+    /// the forwarder places its faces by the same partition: one value, one
+    /// owner, so a session cannot announce a bound its node does not route by.
+    /// Read once, when the loop starts. Default `Auto`: a node on the preset
+    /// announces nothing, which is every session the loop opened before.
+    fn south_partition(&self) -> wz_session_core::region_partition::SouthPartition {
+        wz_session_core::region_partition::SouthPartition::Auto
+    }
+
     /// R3067 -- whether the forwarder ALREADY holds a face to the peer `zid`
     /// that this loop does not hold: a link the node's DIAL role made.
     ///
@@ -866,6 +887,38 @@ type OpenFuture = Pin<Box<dyn Future<Output = OpenResult>>>;
 #[cfg(feature = "transport-multilink")]
 type DriveFuture<'f> = Pin<Box<dyn Future<Output = (Face, DriverOutcome)> + 'f>>;
 
+/// Item 751 — what every face this loop opens is opened from, dialled,
+/// accepted and re-dialled alike: the node's session-init template, and the
+/// south partition its forwarder places faces by
+/// ([`FaceForwarder::south_partition`]), which each session announces from on
+/// its Open.
+///
+/// One value carried to every open site rather than a second parameter beside
+/// `params`, so no open path can be written that takes the template and drops
+/// the partition: the template is the only thing an open site is handed.
+#[derive(Clone)]
+struct FaceTemplate {
+    params: SessionInitParams,
+    partition: Arc<SouthPartition>,
+}
+
+impl FaceTemplate {
+    /// The template and the staging that installs the partition on a session
+    /// before its first wire byte, split for one open call.
+    fn into_parts(
+        self,
+    ) -> (
+        SessionInitParams,
+        impl FnOnce(&Arc<SessionLinkActions>) -> Result<(), OpenError>,
+    ) {
+        let partition = self.partition;
+        (self.params, move |actions: &Arc<SessionLinkActions>| {
+            actions.set_south_partition((*partition).clone());
+            Ok(())
+        })
+    }
+}
+
 /// Run the accepted link's deferred transport handshake, then bring it up to
 /// Established. Tagged with `(id, peer)` so the loop can route the result without
 /// threading state through [`FuturesUnordered`]. The transport (ws/tls) SERVER
@@ -875,16 +928,17 @@ type DriveFuture<'f> = Pin<Box<dyn Future<Output = (Face, DriverOutcome)> + 'f>>
 /// [`OpenError::AcceptHandshake`], an isolated `FaceFailed`). Production
 /// semantics: `max_iters = None` (the accept-side open-deadline —
 /// `accepting.inactivity_timeout`, 1s — bounds a silent peer; see
-/// [`accept_and_open_session_with_offer`]).
+/// [`accept_and_open_session_with_offer`](crate::session_open::accept_and_open_session_with_offer)).
 async fn open_face(
     id: FaceId,
     peer: AcceptedPeer,
     accepted: AcceptedLink,
-    params: SessionInitParams,
+    template: FaceTemplate,
     offer: SessionOffer,
     clock: TokioTime,
     tick_interval_ms: u64,
 ) -> OpenResult {
+    let (params, stage) = template.into_parts();
     let result = match accepted.handshake().await {
         // R2095 — the loop's WHOLE capability offer rides the accept open, the
         // same value its dials carry. A declared QoS band still arms the
@@ -892,8 +946,16 @@ async fn open_face(
         // is new is that the other capabilities travel with it, which is what
         // zenoh's acceptor does off the manager config the opener also reads.
         Ok(link) => {
-            accept_and_open_session_with_offer(link, params, offer, clock, None, tick_interval_ms)
-                .await
+            accept_and_open_session_with_staging(
+                link,
+                params,
+                offer,
+                stage,
+                clock,
+                None,
+                tick_interval_ms,
+            )
+            .await
         }
         Err(e) => Err(OpenError::AcceptHandshake(e)),
     };
@@ -902,9 +964,11 @@ async fn open_face(
 
 /// Dial one configured peer and bring the OUTBOUND link up to Established — the
 /// dial-out twin of [`open_face`]. Where `open_face` opens an *accepted* link via
-/// [`accept_and_open_session_with_offer`], this connects to `peer` then opens the
-/// *initiated* link via [`initiate_and_open_session_with_offer`] (the same SSOT
-/// the single-session initiator drives), tagged `(id, peer)` so its completion
+/// [`accept_and_open_session_with_offer`](crate::session_open::accept_and_open_session_with_offer),
+/// this connects to `peer` then opens the *initiated* link via
+/// [`initiate_and_open_session_with_offer`](crate::session_open::initiate_and_open_session_with_offer)
+/// (the same SSOT the single-session initiator drives; reached through its
+/// staging twin so the template's partition rides it), tagged `(id, peer)` so its completion
 /// routes through the same `opening` arm. A failed TCP connect surfaces as
 /// [`OpenError::Dial`] (a `FaceFailed`, not a panic), so one unreachable peer
 /// never sinks the mesh.
@@ -932,12 +996,13 @@ async fn dial_face(
     id: FaceId,
     target: MeshDialTarget,
     dial_config: Arc<DialConfig>,
-    params: SessionInitParams,
+    template: FaceTemplate,
     offer: SessionOffer,
     clock: TokioTime,
     tick_interval_ms: u64,
 ) -> OpenResult {
     let peer = target.peer_tag();
+    let (params, stage) = template.into_parts();
     // R2944 — the link's QoS metadata is its endpoint's, read before the dial.
     let offer = match crate::session_open::offer_for_endpoint(offer, &target.locator) {
         Ok(offer) => offer,
@@ -952,8 +1017,16 @@ async fn dial_face(
         // acceptor's InitAck — it is one field of the offer now rather than the
         // only thing in it.
         Ok(link) => {
-            initiate_and_open_session_with_offer(link, params, offer, clock, None, tick_interval_ms)
-                .await
+            initiate_and_open_session_with_staging(
+                link,
+                params,
+                offer,
+                stage,
+                clock,
+                None,
+                tick_interval_ms,
+            )
+            .await
         }
         Err(e) => Err(OpenError::Dial(e)),
     };
@@ -998,20 +1071,22 @@ async fn open_face_multilink(
     accepted: AcceptedLink,
     offer: SessionOffer,
     band: (Priority, Priority),
-    params: SessionInitParams,
+    template: FaceTemplate,
     clock: TokioTime,
     tick_interval_ms: u64,
 ) -> OpenResult {
+    let (params, stage) = template.into_parts();
     // The deferred transport handshake runs here in the spawned future (never the
     // loop's `select!` arm), same as the single-link [`open_face`] — a failed
     // ws/tls handshake is an isolated `FaceFailed`, not a loop stall.
     let result = match accepted.handshake().await {
         Ok(link) => {
-            accept_and_open_session_with_multilink(
+            accept_multilink_with_staging(
                 link,
                 params,
                 offer,
                 band,
+                stage,
                 clock,
                 None,
                 tick_interval_ms,
@@ -1038,11 +1113,12 @@ async fn dial_face_multilink(
     dial_config: Arc<DialConfig>,
     offer: SessionOffer,
     band: (Priority, Priority),
-    params: SessionInitParams,
+    template: FaceTemplate,
     clock: TokioTime,
     tick_interval_ms: u64,
 ) -> OpenResult {
     let peer = target.peer_tag();
+    let (params, stage) = template.into_parts();
     // R2944 — the link's QoS metadata is its endpoint's, read before the dial;
     // `band` stands in only where the endpoint declares none.
     let offer = match crate::session_open::offer_for_endpoint(offer, &target.locator) {
@@ -1056,11 +1132,12 @@ async fn dial_face_multilink(
         // capabilities reached no InitSyn at all and the wire form depended on
         // `--max-links`.
         Ok(link) => {
-            initiate_and_open_session_with_multilink(
+            initiate_multilink_with_staging(
                 link,
                 params,
                 offer,
                 band,
+                stage,
                 clock,
                 None,
                 tick_interval_ms,
@@ -1096,7 +1173,7 @@ async fn dial_face_multilink_after(
     backoff_ms: u64,
     offer: SessionOffer,
     band: (Priority, Priority),
-    params: SessionInitParams,
+    params: FaceTemplate,
     clock: TokioTime,
     tick_interval_ms: u64,
 ) -> OpenResult {
@@ -1202,7 +1279,7 @@ async fn dial_face_after(
     target: MeshDialTarget,
     dial_config: Arc<DialConfig>,
     backoff_ms: u64,
-    params: SessionInitParams,
+    params: FaceTemplate,
     offer: SessionOffer,
     clock: TokioTime,
     tick_interval_ms: u64,
@@ -1265,7 +1342,7 @@ fn schedule_redial(
     opening: &mut FuturesUnordered<OpenFuture>,
     next_id: &mut u64,
     announce: bool,
-    params: &SessionInitParams,
+    params: &FaceTemplate,
     // R311y506 (session-extqos) / R2095 — a re-dial must carry the SAME offer as
     // the original. Without it a peer flap would silently re-establish with the
     // capabilities dropped — the containment a declared band configures, and
@@ -1349,7 +1426,7 @@ fn schedule_multilink_redial(
     opening: &mut FuturesUnordered<OpenFuture>,
     next_id: &mut u64,
     announce: bool,
-    params: &SessionInitParams,
+    params: &FaceTemplate,
     clock: TokioTime,
     tick_interval_ms: u64,
 ) {
@@ -2084,6 +2161,12 @@ where
         stats,
     } = sources;
     tokio::pin!(shutdown);
+    // Item 751 — every face below is opened from this one template, so each
+    // session announces from the partition the forwarder places it by.
+    let params = FaceTemplate {
+        params,
+        partition: Arc::new(forwarder.south_partition()),
+    };
 
     // R2233 (open-debt item 585) — fold the configured dial targets into their
     // dial PLANS at the seam, and REFUSE (loudly) any member with no

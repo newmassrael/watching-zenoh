@@ -510,6 +510,14 @@ fn is_peer_hat(region: Region) -> bool {
     matches!(hat_kind(&region, WhatAmI::Router), HatKind::Peer)
 }
 
+/// Item 751 — whether `region` is served by the pin's ROUTER hat on a router
+/// node: `North`, and on a custom partition each subregion's router region as
+/// well. Every router hat builds its net the same way, wherever its region
+/// lies, so the router hat's rules ask this rather than name `North`.
+fn is_router_hat(region: Region) -> bool {
+    matches!(hat_kind(&region, WhatAmI::Router), HatKind::Router)
+}
+
 /// R2867 (open-debt item 751, step 3a) — the state one MESH region's hat owns:
 /// its link-state net and the recompute flag for that net, as each of the
 /// pin's router and peer hats owns its own `Network`
@@ -562,15 +570,21 @@ impl MeshHat {
     /// (`zenoh/src/net/routing/hat/router/mod.rs` @ `self.region().bound(),`).
     fn new(region: Region, self_zid: Zid) -> Self {
         // R2893 (751 rule 8d) — the pin builds the south peer region's net with
-        // `full_linkstate` off (`zenoh/src/net/routing/hat/peer/mod.rs` @ `Bound::South => {`),
-        // and this one stays on until wz's own peers stop defaulting to the
-        // link-state peer mode the pin deleted: a mode must be the same across
-        // a subsystem, and a link-state peer's ingest GCs every link-less gossip
-        // entry it is sent (measured: three router-hat mesh E2Es red). The two
-        // flip together, as item 751 rule 8e.
+        // `full_linkstate` off (`zenoh/src/net/routing/hat/peer/mod.rs` @ `Bound::South => {`);
+        // a host that runs wz's link-state peer mode turns it back on
+        // ([`RouterForwarder::set_peer_region_full_linkstate`]).
+        //
+        // Item 751 — and a ROUTER hat keeps it on wherever its region lies: the
+        // pin's router hat builds its one net with `full_linkstate` true and the
+        // gateway bit from its region's bound
+        // (`zenoh/src/net/routing/hat/router/mod.rs` @ `self.routers_net = Some(Network::new(`),
+        // so a south router subregion's net is a full link-state mesh whose self
+        // node is a gateway. It is how two gateways of one subregion learn of
+        // each other through the routers below them, which the inter-region
+        // filter needs to pick exactly one of them.
         let mut net =
             LinkstateNetwork::new_in_region(self_zid, WhatAmI::Router, region.bound().is_south());
-        net.set_full_linkstate(!region.bound().is_south());
+        net.set_full_linkstate(!is_peer_hat(region));
         Self {
             net: Rc::new(RefCell::new(net)),
             trees_dirty: Cell::new(false),
@@ -1062,13 +1076,16 @@ fn client_keyexprs<S: FaceMap>(
         .collect()
 }
 
-/// A mesh region's table out of a view's region map. Panics on a region the
-/// forwarder builds no hat for, which the view can only be handed by
-/// [`RouterForwarder::declarations_view`], so it never is.
+/// Every table a view holds for a region the pin's ROUTER hat serves, in region
+/// order: `North`, then on a custom partition each subregion's router region.
+/// Each fills the one `routers` bucket, as each of the pin's router hats fills
+/// its own and the dispatcher merges them per resource.
 #[cfg(feature = "adminspace-introspection-handlers")]
-fn region_table<T>(map: &RegionMap<Rc<T>>, region: Region) -> &Rc<T> {
-    map.get(&region)
-        .unwrap_or_else(|| unreachable!("{region} is not a mesh region of a router"))
+fn router_region_tables<T>(map: &RegionMap<Rc<T>>) -> Vec<&Rc<T>> {
+    map.iter()
+        .filter(|(region, _)| is_router_hat(*region))
+        .map(|(_, table)| table)
+        .collect()
 }
 
 /// Every table a view holds for a region the pin's PEER hat serves, in region
@@ -1638,9 +1655,13 @@ impl RouterDeclarationsView {
     /// what it knows about declarations is what its neighbours told it.
     pub fn subscribers(&self) -> Vec<(String, wz_session_core::adminspace::AdminSources)> {
         let clients = client_keyexprs(&self.client_subs, |by_id| by_id.values().cloned().collect());
+        let routers = router_region_tables(&self.subs);
         let peers = peer_region_tables(&self.subs);
         self.bucket_by_tier(
-            &region_table(&self.subs, ROUTERS_REGION).borrow(),
+            &routers
+                .iter()
+                .map(|table| table.borrow())
+                .collect::<Vec<_>>(),
             &peers.iter().map(|table| table.borrow()).collect::<Vec<_>>(),
             &clients,
         )
@@ -1654,9 +1675,13 @@ impl RouterDeclarationsView {
         let clients = client_keyexprs(&self.client_qabls, |by_id| {
             by_id.values().map(|(keyexpr, _)| keyexpr.clone()).collect()
         });
+        let routers = router_region_tables(&self.qabls);
         let peers = peer_region_tables(&self.qabls);
         self.bucket_by_tier(
-            &region_table(&self.qabls, ROUTERS_REGION).borrow(),
+            &routers
+                .iter()
+                .map(|table| table.borrow())
+                .collect::<Vec<_>>(),
             &peers.iter().map(|table| table.borrow()).collect::<Vec<_>>(),
             &clients,
         )
@@ -1692,9 +1717,13 @@ impl RouterDeclarationsView {
         let clients = client_keyexprs(&self.client_tokens, |by_id| {
             by_id.values().cloned().collect()
         });
+        let routers = router_region_tables(&self.tokens);
         let peers = peer_region_tables(&self.tokens);
         self.bucket_by_tier(
-            &region_table(&self.tokens, ROUTERS_REGION).borrow(),
+            &routers
+                .iter()
+                .map(|table| table.borrow())
+                .collect::<Vec<_>>(),
             &peers.iter().map(|table| table.borrow()).collect::<Vec<_>>(),
             &clients,
         )
@@ -1705,7 +1734,7 @@ impl RouterDeclarationsView {
     /// `HashMap` iteration order would not).
     fn bucket_by_tier<A, B>(
         &self,
-        routers: &LinkstatepeerInterest<A>,
+        routers: &[std::cell::Ref<'_, LinkstatepeerInterest<A>>],
         peers: &[std::cell::Ref<'_, LinkstatepeerInterest<B>>],
         clients: &HashMap<FaceId, HashSet<String>>,
     ) -> Vec<(String, wz_session_core::adminspace::AdminSources)>
@@ -1722,12 +1751,16 @@ impl RouterDeclarationsView {
             clients: Vec::new(),
         };
         let mut by_key: HashMap<String, AdminSources> = HashMap::new();
-        for (keyexpr, zid, _) in routers.entries() {
-            by_key
-                .entry(keyexpr)
-                .or_insert_with(empty)
-                .routers
-                .push(zid_to_zenoh_hex(zid.as_slice()));
+        // Every router hat's table fills the one `routers` bucket: `North`, and on
+        // a custom partition each subregion's router region.
+        for table in routers {
+            for (keyexpr, zid, _) in table.entries() {
+                by_key
+                    .entry(keyexpr)
+                    .or_insert_with(empty)
+                    .routers
+                    .push(zid_to_zenoh_hex(zid.as_slice()));
+            }
         }
         // Every peer region's table fills the one `peers` bucket, as the pin's
         // peer hats each fill theirs and the dispatcher merges them per resource.
@@ -2224,10 +2257,13 @@ impl RouterForwarder {
     /// The pin builds one hat per region of the partition, three per subregion
     /// (client, peer, router), and places each remote by the rules
     /// (`zenoh/src/net/routing/gateway.rs` @ `GatewaySouthConf::Custom(subregions) => {`).
-    /// This builds the same hats and places each face by [`region_of`]. A remote the
-    /// rules place in a subregion's ROUTER region is refused, because a router
-    /// hat serving a south region is not built (debt-751; see
-    /// [`refuses_face`](FaceForwarder::refuses_face)).
+    /// This builds the same hats and places each face by [`region_of`], a router
+    /// the rules put in a subregion included: that region is a router hat's, a
+    /// full link-state mesh in which this router is a gateway.
+    ///
+    /// The partition is also what every session this router opens announces on
+    /// its Open ([`FaceForwarder::south_partition`]), so the far end of a face
+    /// placed south learns that this router is its gateway.
     ///
     /// Call it before any face registers: the hats a registered face joined are
     /// the ones it keeps.
@@ -2510,28 +2546,39 @@ impl RouterForwarder {
     /// which is also where the weights enter at `init`
     /// (`zenoh/src/net/routing/hat/router/mod.rs` @
     /// `link_weights_from_config(router_link_weights`).
-    /// Only `routers_net` takes them: upstream reads
-    /// `routing.router.linkstate.transport_weights` into the routers network
-    /// alone, so the peers tier keeps unset weights whatever the map names.
+    /// Only a ROUTER hat's net takes them: upstream reads
+    /// `routing.router.linkstate.transport_weights` into the network each of its
+    /// router hats builds, so the peers tier keeps unset weights whatever the map
+    /// names. Item 751 — on a custom partition that is `North` and every
+    /// subregion's router region, since the pin updates every hat it holds
+    /// (`zenoh/src/net/runtime/orchestrator.rs` @ `hat.update_from_config(&router.tables, self)?;`).
     ///
     /// Weights set before a Router face registers are what its link carries
-    /// from the first flood. When the graph reports that a live link moved
+    /// from the first flood. When a graph reports that a live link moved
     /// ([`LinkstateNetwork::update_link_weights`] returns `true`), self's
-    /// links-only link-state is flooded to every Router face — the
-    /// `send_on_links` zenoh performs inside the graph call — and the tier's
+    /// links-only link-state is flooded to that region's faces — the
+    /// `send_on_links` zenoh performs inside the graph call — and the region's
     /// recompute is coalesced onto the next [`tick`](Self::tick), the
-    /// counterpart of upstream's `compute_trees_async`. Returns that `bool`.
+    /// counterpart of upstream's `compute_trees_async`. Returns whether any
+    /// region's links moved.
     pub fn update_router_link_weights(&self, link_weights: HashMap<Zid, LinkEdgeWeight>) -> bool {
-        if !self
-            .routers_net()
-            .borrow_mut()
-            .update_link_weights(link_weights)
-        {
-            return false;
+        let mut moved = false;
+        for (region, hat) in self.hats.iter() {
+            let Some(hat) = hat.mesh().filter(|_| is_router_hat(region)) else {
+                continue;
+            };
+            if !hat
+                .net
+                .borrow_mut()
+                .update_link_weights(link_weights.clone())
+            {
+                continue;
+            }
+            let _ = self.flood_self_links_changed_tier(region, &hat.net);
+            hat.trees_dirty.set(true);
+            moved = true;
         }
-        let _ = self.flood_self_links_changed_tier(ROUTERS_REGION, self.routers_net());
-        self.mesh(ROUTERS_REGION).trees_dirty.set(true);
-        true
+        moved
     }
 
     /// R2636 (open-debt item 748) — the router's admin `sessions[]` transport
@@ -2566,12 +2613,19 @@ impl RouterForwarder {
     /// `fn links_info`), which likewise answers from `routers_net` and returns an
     /// empty map when there is no such network.
     ///
-    /// The ROUTERS tier alone, for the same reason
+    /// The ROUTER hats alone, for the same reason
     /// [`update_router_link_weights`](Self::update_router_link_weights) writes
     /// only there: the configured weights upstream reads are the routers
-    /// network's, so the peers tier has nothing weighted to report.
+    /// networks', so the peers tier has nothing weighted to report. Item 751 —
+    /// every router hat's links, merged, as the pin merges every hat's
+    /// (`zenoh/src/net/runtime/orchestrator.rs` @ `.flat_map(|hat| hat.links_info().into_iter())`).
     pub fn router_links_info(&self) -> HashMap<Zid, LinkInfo> {
-        self.routers_net().borrow().links_info()
+        self.hats
+            .iter()
+            .filter(|(region, _)| is_router_hat(*region))
+            .filter_map(|(_, hat)| hat.mesh())
+            .flat_map(|hat| hat.net.borrow().links_info())
+            .collect()
     }
 
     /// Number of nodes in the ROUTER-tier graph (self + every learned Router) —
@@ -8057,25 +8111,18 @@ impl FaceForwarder for RouterForwarder {
         true
     }
 
-    /// Item 751 -- the pin refuses a remote its region rules cannot place. This
-    /// router additionally refuses one they place in a subregion's ROUTER
-    /// region, which it does not serve yet: such a region's net needs the router
-    /// hat's own mesh semantics, and a stock node announces the boundary to it
-    /// through the `RemoteBound` extension that wz does not send.
+    /// Item 751 -- the pin refuses a remote its region rules cannot place
+    /// (`zenoh/src/net/runtime/region.rs` @ `pub(crate) fn compute_region_of(`
+    /// answers an error), and so does this router. Every region the rules can
+    /// place a remote in has its hat here, a subregion's router region included.
     fn refuses_face(&self, actions: &Arc<SessionLinkActions>) -> Option<String> {
-        match self.place_face(actions) {
-            Err(why) => Some(why.to_string()),
-            Ok((
-                Region::South {
-                    mode: WhatAmI::Router,
-                    id,
-                },
-                _,
-            )) => Some(format!(
-                "the rules place it in router subregion {id}, which this router does not serve"
-            )),
-            Ok(_) => None,
-        }
+        self.place_face(actions).err().map(|why| why.to_string())
+    }
+
+    /// The partition this router's hats were built from, which every session it
+    /// opens must announce from (see [`with_south_partition`](RouterForwarder::with_south_partition)).
+    fn south_partition(&self) -> SouthPartition {
+        self.partition.clone()
     }
 
     /// Route a Push RECEIVED on the multicast INGRESS face (the single
@@ -11252,17 +11299,16 @@ mod tests {
         // A router no rule matches stays north, where the auto table puts it.
         assert_eq!(refusal(zid(0xEE), WIRE_ROUTER), None);
         // A rule that matches everyone puts a router remote in a ROUTER subregion,
-        // which this router does not serve yet.
+        // which this router serves with a router hat, as the pin does.
         let open =
             RouterForwarder::new(zid(0x01)).with_south_partition(SouthPartition::Custom(vec![
                 wz_session_core::region_partition::SouthSubregion::default(),
             ]));
         let (actions, _sink) = face(zid(0xEE), WIRE_ROUTER);
-        assert!(
-            open.refuses_face(&actions)
-                .expect("a router remote in a router subregion")
-                .contains("router subregion"),
-            "this router does not serve a south router region yet"
+        assert_eq!(
+            open.refuses_face(&actions),
+            None,
+            "a router remote in a router subregion is served"
         );
         let (actions, _sink) = face(zid(0xEE), WIRE_PEER);
         assert_eq!(open.refuses_face(&actions), None, "a peer there is served");
@@ -11375,6 +11421,171 @@ mod tests {
             wz_session_core::push_build::build_push_literal("demo/data", b"z").expect("push");
         forward_one(&fwd, FaceId(0), NetworkMessage::Push(Box::new(push)));
         assert_eq!(sink_b.frame_count(), 0);
+    }
+
+    // ── item 751: a subregion's ROUTER region, served by a router hat ──
+
+    /// The router region of subregion 0.
+    const SUB0_ROUTERS: Region = Region::South {
+        id: 0,
+        mode: WhatAmI::Router,
+    };
+
+    /// A router 0x05 whose one subregion holds exactly the remotes `zids` name. A
+    /// router remote it names lands in `SUB0_ROUTERS`, one it does not in `North`.
+    fn router_subregion_router(zids: &[u8]) -> RouterForwarder {
+        use wz_session_core::region_partition::{RegionFilter, SouthSubregion};
+        RouterForwarder::new(zid(0x05)).with_south_partition(SouthPartition::Custom(vec![
+            SouthSubregion {
+                filters: Some(vec![RegionFilter {
+                    zids: Some(zids.iter().map(|b| zid(*b).as_slice().to_vec()).collect()),
+                    ..RegionFilter::default()
+                }]),
+            },
+        ]))
+    }
+
+    /// A router the rules put south is served, not refused, and its region is the
+    /// pin's router hat on a south region: a full link-state mesh whose self node
+    /// is a gateway (`zenoh/src/net/routing/hat/router/mod.rs` @ `self.routers_net = Some(Network::new(`).
+    /// So, unlike the south PEER region, the remote is sent self's own entry, and
+    /// that entry carries the gateway bit; the north router region is unchanged.
+    #[test]
+    fn a_router_the_rules_put_south_joins_a_link_state_mesh_whose_gateway_is_self() {
+        let fwd = router_subregion_router(&[0xAA]);
+        let (south, sink_south) = face(zid(0xAA), WIRE_ROUTER);
+        let (north, sink_north) = face(zid(0x09), WIRE_ROUTER);
+        assert_eq!(fwd.refuses_face(&south), None, "a south router is served");
+        fwd.register(FaceId(0), &south);
+        fwd.register(FaceId(1), &north);
+        fwd.tick();
+        assert_eq!(fwd.faces.borrow()[&FaceId(0)].tier, SUB0_ROUTERS);
+        assert_eq!(fwd.faces.borrow()[&FaceId(1)].tier, Region::North);
+
+        let hat = fwd.mesh_hat(SUB0_ROUTERS).expect("a router hat serves it");
+        assert!(
+            hat.net.borrow().full_linkstate(),
+            "a router hat's net is full link-state wherever its region lies"
+        );
+        assert_eq!(hat.net.borrow().gateways(), vec![zid(0x05)]);
+        assert!(fwd.routers_net().borrow().gateways().is_empty());
+
+        let own = |sink: &RecordingLinkDriver| -> Vec<LinkstateOwned> {
+            received_link_states(sink)
+                .into_iter()
+                .filter(|e| e.psid == 0)
+                .collect()
+        };
+        let to_south = own(&sink_south);
+        assert!(
+            !to_south.is_empty(),
+            "the south router is sent self's entry"
+        );
+        assert!(
+            to_south.iter().all(LinkstateOwned::g),
+            "self is a gateway of the subregion's router region"
+        );
+        let to_north = own(&sink_north);
+        assert!(!to_north.is_empty() && to_north.iter().all(|e| !e.g()));
+    }
+
+    /// The router hat routes WITHIN its own region, wherever that region lies: two
+    /// routers of one subregion reach each other through this router, which the
+    /// south PEER region does not do (the control,
+    /// `on_the_auto_preset_two_peers_are_one_region_and_a_push_does_not_cross`).
+    #[test]
+    fn a_push_is_routed_between_two_routers_of_one_router_subregion() {
+        let fwd = router_subregion_router(&[0xAA, 0xAB]);
+        let (a, _sink_a) = face(zid(0xAA), WIRE_ROUTER);
+        let (b, sink_b) = face(zid(0xAB), WIRE_ROUTER);
+        fwd.register(FaceId(0), &a);
+        fwd.register(FaceId(1), &b);
+        advertise_link_back(&fwd, FaceId(0), 0x05, 0xAA, 5);
+        advertise_link_back(&fwd, FaceId(1), 0x05, 0xAB, 5);
+        fwd.tick();
+        forward_one(&fwd, FaceId(1), declare_sub("demo/k"));
+        sink_b.reset();
+        let push =
+            wz_session_core::push_build::build_push_literal("demo/k", b"payload").expect("push");
+        forward_one(&fwd, FaceId(0), NetworkMessage::Push(Box::new(push)));
+        assert_eq!(sink_b.frame_count(), 1);
+    }
+
+    /// Up out of a router subregion, a Push crosses north only through the largest
+    /// gateway the forwarder links to, as it does out of the peer region
+    /// (`a_peer_push_crosses_north_only_through_the_largest_gateway_of_its_forwarder`).
+    /// R2 is a second router of the north region that is also a gateway of the
+    /// subregion: the south router AA links to both.
+    #[test]
+    fn a_push_crosses_north_out_of_a_router_subregion_only_through_its_largest_gateway() {
+        let run = |other: u8, other_is_gateway: bool| -> usize {
+            let fwd = router_subregion_router(&[0xAA]);
+            let (a, _sa) = face(zid(0xAA), WIRE_ROUTER); // south publisher
+            let (r, sink_r) = face(zid(other), WIRE_ROUTER); // north subscriber
+            fwd.register(FaceId(0), &a);
+            fwd.register(FaceId(1), &r);
+            advertise_link_back(&fwd, FaceId(1), 0x05, other, 5);
+            if other_is_gateway {
+                discover_gateway_via(&fwd, FaceId(0), 0x05, 0xAA, other, 7, 5);
+            } else {
+                discover_via(&fwd, FaceId(0), 0x05, 0xAA, other, 7, 5);
+            }
+            fwd.tick();
+            forward_one(&fwd, FaceId(1), declare_sub("demo/k"));
+            sink_r.reset();
+            let push = wz_session_core::push_build::build_push_literal("demo/k", b"payload")
+                .expect("push");
+            forward_one(&fwd, FaceId(0), NetworkMessage::Push(Box::new(push)));
+            sink_r.frame_count()
+        };
+        assert_eq!(run(0x09, true), 0, "the larger gateway crosses, not self");
+        assert_eq!(run(0x02, true), 1, "self is the largest gateway");
+        assert_eq!(
+            run(0x09, false),
+            1,
+            "a router that is no gateway is no candidate"
+        );
+    }
+
+    /// The configured router link weights reach every router hat, a subregion's
+    /// router region included, as the pin hands them to each router hat's net
+    /// (`zenoh/src/net/runtime/orchestrator.rs` @ `hat.update_from_config(&router.tables, self)?;`),
+    /// and both regions' links are reported.
+    #[test]
+    fn router_link_weights_reach_a_router_subregion_too() {
+        let fwd = router_subregion_router(&[0xAA]);
+        let (south, _s1) = face(zid(0xAA), WIRE_ROUTER);
+        let (north, _s2) = face(zid(0x09), WIRE_ROUTER);
+        fwd.register(FaceId(0), &south);
+        fwd.register(FaceId(1), &north);
+        assert!(fwd.update_router_link_weights(link_weights(&[(0xAA, 250), (0x09, 300)])));
+        let hat = fwd.mesh_hat(SUB0_ROUTERS).expect("a router hat serves it");
+        assert_eq!(
+            self_link_weight(&hat.net, 0xAA),
+            LinkEdgeWeight::from_raw(250)
+        );
+        assert_eq!(
+            self_link_weight(fwd.routers_net(), 0x09),
+            LinkEdgeWeight::from_raw(300)
+        );
+        // A link is reported once its far end advertises it back.
+        advertise_link_back(&fwd, FaceId(0), 0x05, 0xAA, 5);
+        advertise_link_back(&fwd, FaceId(1), 0x05, 0x09, 5);
+        fwd.tick();
+        let info = fwd.router_links_info();
+        assert!(info.contains_key(&zid(0xAA)) && info.contains_key(&zid(0x09)));
+    }
+
+    /// The partition the router was built with is the one its sessions announce
+    /// from, so the loop can install it on each.
+    #[test]
+    fn a_router_hands_its_sessions_the_partition_it_places_faces_by() {
+        let fwd = router_subregion_router(&[0xAA]);
+        assert_eq!(fwd.south_partition(), fwd.partition);
+        assert_eq!(
+            RouterForwarder::new(zid(0x05)).south_partition(),
+            SouthPartition::Auto
+        );
     }
 
     /// The mesh a multicast-ingress test stands up: a unicast PEER P that holds a
