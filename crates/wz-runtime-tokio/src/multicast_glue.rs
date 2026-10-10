@@ -119,8 +119,15 @@ use wz_session_core::driver_loop::IterationEvent;
 // encoders + the egress splitter likewise live in the shared
 // `wz_session_core::multicast_tx` SSOT (R311lx).
 use wz_session_core::link::LinkEvent;
-use wz_session_core::multicast_dispatch::MulticastDispatcher;
+/// Open-debt item 900 — the group session's own state, re-exported so a host
+/// that reaches wz only through this crate (the demo's `--sessions` group
+/// session is one) can build the dispatcher and the profile that
+/// [`drive_multicast_session_with_shutdown`] takes.
+pub use wz_session_core::multicast_dispatch::{MulticastConfig, MulticastDispatcher};
 use wz_session_core::multicast_join::encode_join;
+/// Open-debt item 900 — the group profile a member advertises; see the
+/// re-export of [`MulticastDispatcher`] above for why it is public here.
+pub use wz_session_core::multicast_params::MulticastParams;
 // R311mh — the RX dispatch SSOTs: a reassembly build drives the reassembly-aware
 // dispatch + sweep (the tail wiring lives in `multicast_rx`, not hand-mirrored
 // here); a non-reassembly build calls the bare classify + acts on Close only.

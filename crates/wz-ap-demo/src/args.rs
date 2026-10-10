@@ -5713,6 +5713,9 @@ mod stock_config_tests {
         const MAIN: &str = include_str!("main.rs");
         const ARGS: &str = include_str!("args.rs");
         const RUNNER: &str = include_str!("runner.rs");
+        // Item 900 — `--sessions` is parsed in its own module, so the sweep
+        // reads that module too: a flag the parser accepts there is a flag.
+        const SESSIONS: &str = include_str!("sessions.rs");
         const USAGE: &str = include_str!("usage.rs");
 
         // Stored WITHOUT the leading dashes on purpose: this list lives inside
@@ -5804,7 +5807,7 @@ mod stock_config_tests {
         }
 
         let mut parser: Vec<&str> = Vec::new();
-        for src in [MAIN, ARGS, RUNNER] {
+        for src in [MAIN, ARGS, RUNNER, SESSIONS] {
             for literal in string_literals(src) {
                 if let Some(name) = literal.strip_prefix("--") {
                     if is_flag_name(name) {
@@ -8506,6 +8509,19 @@ pub(crate) fn demo_session_init_params(
         NodeKind::StorageHost => WhatAmI::Peer,
         NodeKind::Initiator => WhatAmI::Client, // R121f initiator path
     };
+    session_init_params_for(whatami, zid, tuning)
+}
+
+/// Open-debt item 900 — the session bundle for a role named directly rather
+/// than through a run-mode's [`NodeKind`]: a `--sessions` document states each
+/// session's `mode` itself, and a unicast PEER session may dial, which no
+/// single-session kind does. Everything but the role is
+/// [`demo_session_init_params`]'s, because that function is this one.
+pub(crate) fn session_init_params_for(
+    whatami: WhatAmI,
+    zid: Vec<u8>,
+    tuning: &TransportTuning,
+) -> std::io::Result<SessionInitParams> {
     Ok(SessionInitParams {
         version: DEMO_PROTO_VERSION,
         whatami,

@@ -274,6 +274,9 @@ preset-ap-full = [
     # half, so inheriting it would contradict the feature's own contract.
     "scouting-responder",
     "transport-lowlatency",
+    # Item 900 — the `--sessions` group session (already pulled by
+    # `router-multicast-faces`; named for the rule that every demo key is).
+    "transport-multicast",
     "session-extcompression",
     "time-hlc",
     "storage-backend",
@@ -616,6 +619,12 @@ transport-multilink = ["routing-peer", "wz/transport-multilink"]
 # `transport/unicast/lowlatency` is enabled. The atom is active <=> its cfg site
 # in runner.rs (the `--lowlatency` open branch).
 transport-lowlatency = ["wz/transport-lowlatency"]
+# Open-debt item 900 — a `--sessions` document's MULTICAST session: the group
+# session's dispatcher, drive loop and session typestate (`sessions_run.rs`
+# `run_group`). Forwards the facade's `transport-multicast` and the UDP link the
+# group rides. NOT in `default` (preset-ap-client is unicast); a build without
+# it refuses a multicast session by its `transport` key before starting any.
+transport-multicast = ["wz/transport-multicast", "wz/transport-link-udp"]
 # R311y433 (session-extcompression) — opt-in per-batch lz4 COMPRESSION, forwarding
 # the wz facade's `session-extcompression` (which itself pulls
 # `transport-compression`, so ONE demo feature carries both atoms: the
@@ -795,7 +804,10 @@ routing-interest-pending-gc = ["routing-peer", "wz/routing-interest-pending-gc"]
 # INSIDE the #[cfg(feature="router-hat-router")] run_router_hat fn. Pulls
 # router-hat-router (the run-mode) + the facade passthrough; the atom is
 # active <=> its own cfg site in run_router_hat (mirrors routing-token-tables).
-router-multicast-faces = ["router-hat-router", "wz/router-multicast-faces"]
+# Item 900 — and pulls the demo's own `transport-multicast`: a group face IS the
+# multicast transport, so a build that serves one can run a `--sessions` group
+# session too.
+router-multicast-faces = ["router-hat-router", "transport-multicast", "wz/router-multicast-faces"]
 # §5.21 router-connect-reconcile (R311y202) — compiles the `--connect-after`
 # runtime connect-list reconcile affordance INSIDE run_router_hat (the reconcile
 # channel wiring + the app-tick fire). Pulls router-hat-router (the run-mode) + the

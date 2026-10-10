@@ -91,6 +91,8 @@ use wz::runtime_tokio::keyexpr_canon::check_outbound_keyexpr_pico_safe;
 
 mod args;
 mod runner;
+mod sessions;
+mod sessions_run;
 mod shutdown;
 mod tasks;
 mod teardown;
@@ -160,6 +162,19 @@ fn demo_main() -> ExitCode {
     if rest.is_empty() || rest.iter().any(|a| a == "--help" || a == "-h") {
         print_usage();
         return ExitCode::SUCCESS;
+    }
+
+    // Open-debt item 900 — `--sessions <file>`: several local sessions in this
+    // one process, each from its entry in the document. Ahead of every other
+    // reader because it takes no other flag (`sessions::sessions_flag` says
+    // why), so nothing below has a value to read.
+    match crate::sessions::sessions_flag(rest) {
+        None => {}
+        Some(Err(message)) => {
+            eprintln!("wz-ap-demo: {message}");
+            return ExitCode::from(2);
+        }
+        Some(Ok(path)) => return run_sessions_mode(&path),
     }
 
     // R2072 (open-debt item 496) — `--check-topology <file>` once per node: the
@@ -2780,6 +2795,54 @@ fn run_peer_mode(
         &interceptors,
         tuning,
     )))
+}
+
+/// Open-debt item 900 — `--sessions <file>`: read the document, refuse what
+/// the rules or this build refuse (every refusal, each by its key path, exit
+/// 2), then run every session until each has ended or the process is
+/// signalled ([`sessions_run::run_sessions`]). Exit 0, or 1 when a session
+/// failed to serve.
+fn run_sessions_mode(path: &str) -> ExitCode {
+    let text = match std::fs::read_to_string(path) {
+        Ok(t) => t,
+        Err(e) => {
+            eprintln!("wz-ap-demo: --sessions: cannot read {path}: {e}");
+            return ExitCode::from(2);
+        }
+    };
+    let refusals = match crate::sessions::read_sessions_document(&text) {
+        Ok(plan) => {
+            let caps = crate::sessions::BuildCapabilities::of_this_build();
+            let refusals = plan.build_refusals(&caps);
+            if refusals.is_empty() {
+                env_logger::Builder::from_env(
+                    env_logger::Env::default().filter_or("RUST_LOG", "info"),
+                )
+                .init();
+                let runtime = match build_demo_runtime() {
+                    Ok(rt) => rt,
+                    Err(e) => {
+                        eprintln!("wz-ap-demo: tokio runtime build failed: {e}");
+                        return ExitCode::from(1);
+                    }
+                };
+                return match runtime.block_on(crate::sessions_run::run_sessions(plan)) {
+                    Ok(true) => ExitCode::SUCCESS,
+                    Ok(false) => ExitCode::from(1),
+                    Err(e) => {
+                        eprintln!("wz-ap-demo: --sessions {path}: {e}");
+                        ExitCode::from(1)
+                    }
+                };
+            }
+            refusals
+        }
+        Err(refusals) => refusals,
+    };
+    for refusal in &refusals {
+        eprintln!("wz-ap-demo: --sessions {path}: {refusal}");
+    }
+    ExitCode::from(2)
 }
 
 /// R2159 (open-debt item 229) — the exit status a MESH run-mode reports.
