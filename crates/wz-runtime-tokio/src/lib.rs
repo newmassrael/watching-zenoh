@@ -165,6 +165,29 @@ pub mod link_rx_pool;
 #[cfg(all(feature = "runtime-zero-copy", feature = "transport-link-tcp"))]
 pub mod link_rx_arena;
 
+/// R3250 — `sources/network/session_rx_pool_ap_small.scxml`, the small class a
+/// UDP link's datagrams are received into (the large class is the node's
+/// link-RX table, [`session_rx_pool_ap`]). Gated like its one consumer.
+#[cfg(all(feature = "runtime-zero-copy", feature = "transport-link-udp"))]
+#[allow(dead_code)]
+#[allow(unused_variables)]
+#[allow(unused_mut)]
+#[allow(clippy::all)]
+pub mod session_rx_pool_ap_small {
+    include!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../out/wz-runtime-tokio",
+        "/session_rx_pool_ap_small.rs"
+    ));
+}
+
+// R3250 — a UDP link's datagrams received INTO a slot of the node's receive
+// pool and handed to the session as that slot. No `///` here: rustdoc would
+// merge it with the module's `//!` block and resolve the result in this outer
+// scope (see `link_rx_window`).
+#[cfg(all(feature = "runtime-zero-copy", feature = "transport-link-udp"))]
+pub mod link_rx_datagram;
+
 /// R3239 — `sources/network/session_tx_pool_ap.scxml`, the AP link's TRANSMIT
 /// slot table (the stream links' one class, and a datagram link's large one):
 /// one instance per link, owned by that link's writer queue, so an outbound
@@ -3400,18 +3423,27 @@ impl LinkDriver for UdpDriver {
                 }
             }
         };
+        // R3250 — under `runtime-zero-copy` the datagram is received INTO a slot
+        // of the node's receive pool (the RFC 5.E lifecycle this read used to
+        // defer to "production tuning") and the session is handed that slot,
+        // with the datagram's source, as below.
+        #[cfg(feature = "runtime-zero-copy")]
+        let received = crate::link_rx_datagram::recv_frame(socket).await;
         // Single datagram size cap = 65507 bytes (max UDP payload).
-        // R51 baseline allocates per-recv; production tuning will
-        // use a recycled buffer pool (RFC §5.E lifecycle).
-        let mut buf = vec![0u8; 65507];
-        match socket.recv_from(&mut buf).await {
-            Ok((n, src)) => {
+        // R51 baseline allocates per-recv.
+        #[cfg(not(feature = "runtime-zero-copy"))]
+        let received = {
+            let mut buf = vec![0u8; 65507];
+            socket.recv_from(&mut buf).await.map(|(n, src)| {
                 buf.truncate(n);
-                // Carry the datagram source so a multicast consumer can
-                // attribute Frame / KeepAlive / Close to a peer by address
-                // (harmless for unicast, which ignores it).
-                LinkEvent::Rx(RxFrame::with_src(buf, src))
-            }
+                RxFrame::with_src(buf, src)
+            })
+        };
+        match received {
+            // Carry the datagram source so a multicast consumer can
+            // attribute Frame / KeepAlive / Close to a peer by address
+            // (harmless for unicast, which ignores it).
+            Ok(frame) => LinkEvent::Rx(frame),
             Err(_) => LinkEvent::Lost {
                 cause: LostCause::OsError,
             },

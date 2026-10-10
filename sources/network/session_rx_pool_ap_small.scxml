@@ -1,0 +1,69 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  SPDX-License-Identifier: AGPL-3.0-or-later OR LicenseRef-watching-zenoh-Commercial
+  SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
+-->
+<!--
+  AP session-rx buffer-pool config, SMALL class: the slots a tokio (AP / Linux)
+  UDP link's inbound datagrams are received into when they are no larger than
+  the datagram the sessions actually send (ARCHITECTURE section 9.2). The LARGE
+  class beside it is `session_rx_pool_ap.scxml`, the node's link-RX table that
+  the stream read halves fill, whose slot holds the largest frame any AP link
+  can present, and so every UDP datagram (65507 bytes at most over IPv4). A
+  datagram is received into the smallest class it fits, or the larger one when
+  that class has no free slot; a datagram neither class has a slot for is
+  refused and counted, never received into an allocation.
+
+  Born with its consumer: `wz-runtime-tokio`'s datagram receive
+  (`link_rx_datagram`), behind `runtime-zero-copy`, for the UDP dial read half,
+  the accept demux pump and the `UdpDriver` read that multicast group links and
+  the scouting socket use. One instance per NODE, as the large class is: the
+  datagram links of a node share it.
+
+  ## slot-size 1472 is DERIVED from what a peer's UDP session sends
+
+  The datagrams a UDP session sends in steady state are at most its link mtu:
+  `UDP_LINK_MTU` = 1450 on wz, and zenoh-pico's own figure
+  (`_z_get_link_mtu_udp_unicast`, the same 1450, and its multicast sibling),
+  so that a datagram fits one Ethernet frame without IP fragmentation. A peer
+  whose batch is larger sends larger datagrams, and those take the large class.
+
+  The class admits a datagram only when it is STRICTLY shorter than a slot, and
+  that byte is the truncation witness rather than slack: the reader learns a
+  datagram's length from the socket before it picks a class, and a receive that
+  fills the whole slot says the length it was told was short, which a slot of
+  exactly the datagram's size could not tell from a datagram of that size. So
+  the slot must hold 1450 + 1, and 1451 rounded up to the 64-byte alignment
+  below is 1472.
+
+  ## slot-count 258 is DERIVED from the accept demux's own bound
+
+  A UDP listener's pump routes each datagram to its face's channel, whose depth
+  is `UDP_DEMUX_FACE_CHANNEL_CAP` = 256: a datagram that finds the channel full
+  is dropped, exactly as the kernel's receive buffer drops one when its reader
+  falls behind. For that documented drop rule to stay the one that fires for a
+  face, the pool must hold one face's full channel, the frame its read half is
+  handing to the session and the datagram the pump is receiving: 256 + 1 + 1 =
+  258. `link_rx_datagram` asserts this against the constant at compile time.
+
+  Past that the count is not a correctness bound but a throughput figure, as
+  `session_rx_pool_ap.scxml` says of its own: the node's datagram links share
+  the class, frames the application keeps hold their slots, and a datagram that
+  finds both classes out is refused and counted.
+
+  At 258 x 1472 the class is about 380 KiB, allocated zeroed once per node, on
+  the first datagram a UDP link receives.
+
+  ## section / alignment / cache-policy
+
+  `heap` / 64 / `none`, as the other AP pools.
+-->
+<scxml xmlns="http://www.w3.org/2005/07/scxml"
+       xmlns:sce="http://sce.dev/ext"
+       sce:kind="buffer-pool" name="session_rx_pool_ap_small" version="1.0">
+  <sce:slot-count>258</sce:slot-count>
+  <sce:slot-size>1472</sce:slot-size>
+  <sce:section>heap</sce:section>
+  <sce:alignment>64</sce:alignment>
+  <sce:cache-policy>none</sce:cache-policy>
+</scxml>

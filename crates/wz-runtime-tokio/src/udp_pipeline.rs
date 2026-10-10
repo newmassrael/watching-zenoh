@@ -94,7 +94,7 @@ use crate::writer_queue::{OutboundQueue, WriterHandle};
 // `transport-unicast`-gated `session_glue`.
 use crate::link_interfaces::{ip_link_endpoints, ip_link_subject};
 use crate::link_socket::LinkSocket;
-use crate::{LinkDriver, LinkEvent, LostCause, Reliability, RxFrame, TxFrame};
+use crate::{LinkDriver, LinkEvent, LostCause, Reliability, RxBytes, RxFrame, TxFrame};
 use wz_session_core::link::BoxedLinkDriver;
 use wz_session_core::link::{LinkDropCause, LinkSendOutcome};
 use wz_session_core::link::{LinkEndpoints, LinkKind, LinkSubject};
@@ -103,7 +103,7 @@ use wz_session_core::link::{LinkEndpoints, LinkKind, LinkSubject};
 /// A larger frame is a wz-side encoder bug; the driver drops it loud rather
 /// than handing `send_to` a buffer the kernel will reject. This is the OS
 /// datagram ceiling, NOT the fragmentation budget — see [`UDP_LINK_MTU`].
-const MAX_UDP_PAYLOAD: usize = 65507;
+pub(crate) const MAX_UDP_PAYLOAD: usize = 65507;
 
 /// The UDP link MTU — the per-datagram frame budget the transport fragments
 /// to, the wz analogue of zenoh-pico's `zl->_mtu` for a UDP link. pico's
@@ -233,7 +233,7 @@ pub async fn bind_udp(listen: SocketAddr, link_socket: &LinkSocket<'_>) -> io::R
 /// absorb scheduling jitter between the single pump and a face's read driver
 /// (the 4-datagram handshake never fills it; bulk best-effort traffic that would
 /// overrun it is dropped, not queued without bound).
-const UDP_DEMUX_FACE_CHANNEL_CAP: usize = 256;
+pub(crate) const UDP_DEMUX_FACE_CHANNEL_CAP: usize = 256;
 
 /// Backoff after a demux `recv_from` error before re-arming the receive — zenoh's
 /// `UDP_ACCEPT_THROTTLE_TIME` (`io/zenoh-links/zenoh-link-udp/src/unicast.rs`).
@@ -270,8 +270,11 @@ pub struct NewUdpFace {
     /// The datagram source — a REAL IP peer (contrast the unix/vsock/unixpipe
     /// families' anonymous accept), so a udp accept is `AcceptedPeer::Ip`.
     pub peer: SocketAddr,
-    /// This src's demultiplexed inbound datagrams (first one pre-queued).
-    pub inbound_rx: mpsc::Receiver<Vec<u8>>,
+    /// This src's demultiplexed inbound datagrams (first one pre-queued). R3250
+    /// — each is the frame's bytes as the pump read them: under
+    /// `runtime-zero-copy` a range of the receive-pool slot the datagram landed
+    /// in, otherwise an owned copy (`RxBytes` moves either across the channel).
+    pub inbound_rx: mpsc::Receiver<RxBytes>,
 }
 
 /// The multi-peer datagram listener a `udp/..` acceptor binds to — replaces the
@@ -311,7 +314,7 @@ impl UdpDemux {
     /// Assemble the wire inputs for a face accepted from this listener: the src's
     /// inbound channel + a `send_socket` clone (egress `send_to(peer)`) + a pump
     /// keep-alive clone (so the pump outlives the listener while this face reads).
-    pub fn wire_inputs(&self, inbound_rx: mpsc::Receiver<Vec<u8>>) -> UdpAcceptedInputs {
+    pub fn wire_inputs(&self, inbound_rx: mpsc::Receiver<RxBytes>) -> UdpAcceptedInputs {
         UdpAcceptedInputs {
             inbound_rx,
             send_socket: self.send_socket.clone(),
@@ -329,7 +332,7 @@ impl UdpDemux {
 /// crate-private [`UdpDemuxPump`] guard type.
 pub struct UdpAcceptedInputs {
     /// This src's demultiplexed inbound datagrams (from [`NewUdpFace`]).
-    inbound_rx: mpsc::Receiver<Vec<u8>>,
+    inbound_rx: mpsc::Receiver<RxBytes>,
     /// The shared listener socket (egress `send_to(peer)`).
     send_socket: Arc<UdpSocket>,
     /// The shared pump keep-alive — keeps the demux pump alive while this face
@@ -386,11 +389,31 @@ pub async fn bind_udp_demux(
 /// (`io/zenoh-links/zenoh-link-udp/src/unicast.rs:518`) mirror.
 async fn udp_demux_task(socket: Arc<UdpSocket>, new_face_tx: mpsc::UnboundedSender<NewUdpFace>) {
     use tokio::sync::mpsc::error::TrySendError;
-    let mut faces: HashMap<SocketAddr, mpsc::Sender<Vec<u8>>> = HashMap::new();
+    let mut faces: HashMap<SocketAddr, mpsc::Sender<RxBytes>> = HashMap::new();
+    #[cfg(not(feature = "runtime-zero-copy"))]
     let mut buf = vec![0u8; MAX_UDP_PAYLOAD];
     loop {
-        let (n, src) = match socket.recv_from(&mut buf).await {
-            Ok(pair) => pair,
+        // R3250 — under `runtime-zero-copy` the datagram is received INTO a slot
+        // of the node's receive pool and the face is handed that slot; a datagram
+        // no slot was free for was consumed and counted by the pool (`Ok(None)`).
+        // Otherwise the pump reads into its own buffer and copies the datagram
+        // out, as it always has.
+        #[cfg(not(feature = "runtime-zero-copy"))]
+        let read = socket
+            .recv_from(&mut buf)
+            .await
+            .map(|(n, src)| Some((RxBytes::from(buf[..n].to_vec()), src)));
+        #[cfg(feature = "runtime-zero-copy")]
+        let read = crate::link_rx_datagram::DatagramRxPool::node()
+            .recv_from(&socket)
+            .await
+            .map(|read| match read {
+                crate::link_rx_datagram::DatagramRead::Frame { bytes, src } => Some((bytes, src)),
+                crate::link_rx_datagram::DatagramRead::Refused { .. } => None,
+            });
+        let (payload, src) = match read {
+            Ok(Some(pair)) => pair,
+            Ok(None) => continue,
             // Throttle-and-CONTINUE, never return: a transient recv error must not
             // close the live faces' channels (see the fn doc). The sleep bounds a
             // pathological persistent error to a slow loop, not a hot-spin.
@@ -400,7 +423,6 @@ async fn udp_demux_task(socket: Arc<UdpSocket>, new_face_tx: mpsc::UnboundedSend
                 continue;
             }
         };
-        let payload = buf[..n].to_vec();
         if let Some(tx) = faces.get(&src) {
             match tx.try_send(payload) {
                 Ok(()) => {}
@@ -518,7 +540,7 @@ enum UdpRxSource {
     /// keeps the shared demux pump alive as long as this face reads (so the pump
     /// outlives the listener on the one-shot `accept_bound` path).
     Demux {
-        rx: mpsc::Receiver<Vec<u8>>,
+        rx: mpsc::Receiver<RxBytes>,
         peer: SocketAddr,
         _pump: Arc<UdpDemuxPump>,
     },
@@ -547,7 +569,7 @@ impl UdpReadDriver {
     /// The accept-demux read driver: read this src's datagrams from the pump's
     /// bounded channel, tagging each with the fixed `peer`. Holds a pump
     /// keep-alive clone so the demux pump lives as long as this face.
-    fn from_demux(rx: mpsc::Receiver<Vec<u8>>, peer: SocketAddr, pump: Arc<UdpDemuxPump>) -> Self {
+    fn from_demux(rx: mpsc::Receiver<RxBytes>, peer: SocketAddr, pump: Arc<UdpDemuxPump>) -> Self {
         Self {
             source: UdpRxSource::Demux {
                 rx,
@@ -587,6 +609,7 @@ impl LinkDriver for UdpReadDriver {
         match &mut self.source {
             // Dial/scout: read directly off the socket (single datagram cap =
             // MAX_UDP_PAYLOAD). The src is the datagram sender.
+            #[cfg(not(feature = "runtime-zero-copy"))]
             UdpRxSource::Socket(socket) => {
                 let mut buf = vec![0u8; MAX_UDP_PAYLOAD];
                 match socket.recv_from(&mut buf).await {
@@ -594,6 +617,17 @@ impl LinkDriver for UdpReadDriver {
                         buf.truncate(n);
                         LinkEvent::Rx(RxFrame::with_src(buf, src))
                     }
+                    Err(_) => LinkEvent::Lost {
+                        cause: LostCause::OsError,
+                    },
+                }
+            }
+            // R3250 — under `runtime-zero-copy` the datagram is received INTO a
+            // slot of the node's receive pool and the session is handed that slot.
+            #[cfg(feature = "runtime-zero-copy")]
+            UdpRxSource::Socket(socket) => {
+                match crate::link_rx_datagram::recv_frame(socket).await {
+                    Ok(frame) => LinkEvent::Rx(frame),
                     Err(_) => LinkEvent::Lost {
                         cause: LostCause::OsError,
                     },

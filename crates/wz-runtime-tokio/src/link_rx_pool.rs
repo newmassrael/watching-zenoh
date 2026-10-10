@@ -110,6 +110,42 @@ pub fn heap_pool() -> Box<crate::session_rx_pool_ap::SessionRxPoolAp> {
     pool
 }
 
+/// One link-RX slot table, plus the lock that serialises its edges.
+///
+/// R3250 -- moved here from `link_rx_arena`, because the node's table stopped
+/// having one reader: the stream read halves fill it through that module's
+/// arena, and a UDP link's datagrams too large for the small receive class
+/// (`link_rx_datagram`) are received into it. Both reach the ONE table through
+/// `node_table`. Generic over the emit so the datagram side's small class is
+/// the same shape around its own table.
+///
+/// A `Mutex` and not a lock-free freelist: the table's operations are a
+/// freelist scan and a state store, they happen once per FRAME rather than
+/// once per byte, and the population sharing them is a node's links. Upstream
+/// reaches for an atomic queue because its arena serves a submission ring's
+/// completion path; this one serves a handful of `tokio` tasks.
+#[cfg(any(feature = "transport-link-tcp", feature = "transport-link-udp"))]
+pub(crate) struct NodeTable<T = crate::session_rx_pool_ap::SessionRxPoolAp> {
+    pub(crate) slots: std::sync::Mutex<Box<T>>,
+}
+
+/// THE NODE's link-RX table, built on first use and shared by every link that
+/// receives through it.
+///
+/// Lazily, so a process that never receives on a link never pays the 4.2 MiB:
+/// the pool is a receive resource and a node with no links receives nothing.
+#[cfg(any(feature = "transport-link-tcp", feature = "transport-link-udp"))]
+pub(crate) fn node_table() -> std::sync::Arc<NodeTable> {
+    static TABLE: std::sync::OnceLock<std::sync::Arc<NodeTable>> = std::sync::OnceLock::new();
+    TABLE
+        .get_or_init(|| {
+            std::sync::Arc::new(NodeTable {
+                slots: std::sync::Mutex::new(heap_pool()),
+            })
+        })
+        .clone()
+}
+
 #[cfg(test)]
 mod tests {
     use super::heap_pool;

@@ -77,19 +77,8 @@
 use std::sync::{Arc, Mutex};
 
 use crate::frame_arena::FrameArena;
-use crate::link_rx_pool::heap_pool;
+use crate::link_rx_pool::{heap_pool, NodeTable};
 use crate::session_rx_pool_ap::{CpuRef, SessionRxPoolAp, Slot, SLOT_SIZE};
-
-/// One link-RX slot table, plus the lock that serialises reserve and release.
-///
-/// A `Mutex` and not a lock-free freelist: the table's operations are a
-/// freelist scan and a state store, they happen once per FRAME rather than
-/// once per byte, and the population sharing them is a node's links. Upstream
-/// reaches for an atomic queue because its arena serves a submission ring's
-/// completion path; this one serves a handful of `tokio` tasks.
-struct NodeTable {
-    slots: Mutex<Box<SessionRxPoolAp>>,
-}
 
 /// A handle on a link-RX slot table, cheap to clone and shared by every link
 /// that reads through it.
@@ -99,21 +88,11 @@ pub struct LinkRxArena {
 }
 
 impl LinkRxArena {
-    /// A handle on THE NODE's table, built on first use.
-    ///
-    /// Lazily, so a process that never opens a byte-stream link never pays the
-    /// 4.2 MiB: the pool is a receive resource and a node with no links
-    /// receives nothing.
+    /// A handle on THE NODE's table, built on first use
+    /// (`link_rx_pool::node_table`, which the datagram receive shares).
     pub fn node() -> Self {
-        static TABLE: std::sync::OnceLock<Arc<NodeTable>> = std::sync::OnceLock::new();
         Self {
-            table: TABLE
-                .get_or_init(|| {
-                    Arc::new(NodeTable {
-                        slots: Mutex::new(heap_pool()),
-                    })
-                })
-                .clone(),
+            table: crate::link_rx_pool::node_table(),
         }
     }
 

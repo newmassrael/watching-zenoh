@@ -247,7 +247,11 @@ machines:
       # `sources/network/session_rx_pool_ap.scxml`, the move R2739 made in
       # `deploy/ap_mcu_pair.yaml` and did not make here: the inline 64 x 4096
       # said a slot one sixteenth of the 65539-byte frame the receive path can
-      # be handed (the SSOT derives 65600).
+      # be handed (the SSOT derives 65600). R3250 -- a UDP link's datagrams
+      # are received into that table or, when they are no larger than the
+      # datagram the sessions send, into its small class
+      # `sources/network/session_rx_pool_ap_small.scxml` (258 x 1472, every
+      # number derived there).
       session_rx_pool: { ref: session_rx_pool_ap }
 
       # R3239 — the transmit pool's dims live ONLY in its SSOTs,
