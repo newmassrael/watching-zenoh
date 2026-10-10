@@ -131,6 +131,12 @@ env_logger = "0.11"
 wz-runtime-tokio-test-support = { path = "../wz-runtime-tokio-test-support", features = [
     "tls-fixtures",
 ] }
+# The `--sessions` group-session re-join tests (`sessions_run.rs`) run in
+# paused time: the re-join waits are the router face's 1000 / 2000 / 4000 ms,
+# which real time would charge to every run. `test-util` is what provides
+# `start_paused`; dev-only, so no `cargo build` of the demo carries it, and
+# it pulls no crate the lockfile does not already hold.
+tokio = { version = "1", features = ["test-util"] }
 
 [features]
 default = ["preset-ap-client"]

@@ -1352,7 +1352,7 @@ where
         // reported as it always was; every LATER one is a re-join. A face that
         // never came up is a deploy error the operator must see, while a face
         // that came up and lost its link is the transient this loop rides out.
-        let mut rejoin = GroupRejoin::new(label);
+        let mut rejoin = GroupRejoin::new();
         let mut driver = match bind(&opts).await {
             Ok(driver) => driver,
             Err(e) => {
@@ -1407,16 +1407,23 @@ where
             let Some(delay) = rejoin.wait_for(&outcome) else {
                 return Some(outcome);
             };
+            log::warn!("{label}: group face lost ({outcome:?}); re-joining in {delay}ms");
             driver = match rejoin_group_driver(
                 || bind(&opts),
                 &clock,
                 &mut rejoin,
                 &mut shutdown,
                 delay,
+                |err, retry| {
+                    log::warn!("{label}: group re-join failed ({err}); retrying in {retry}ms")
+                },
             )
             .await
             {
-                Some(driver) => driver,
+                Some(driver) => {
+                    log::info!("{label}: group face re-joined");
+                    driver
+                }
                 // The host stopped the face while it was down. Report the loss
                 // that took it down, not a synthetic stop: nothing re-joined, so
                 // no departure was announced on the wire.
@@ -1701,13 +1708,27 @@ impl Drop for McastGroupMembershipJoin {
 /// R2850 made the loop itself one (`spawn_group_face`, which every group face
 /// now runs); the decision stays its own type because the WHICH half is shared
 /// further still, with the MCU profile (see [`Self::wait_for`]).
-#[cfg(all(feature = "transport-multicast", feature = "transport-link-udp"))]
-struct GroupRejoin {
+///
+/// # Why it is public, and why it does not log
+///
+/// A host that drives its OWN group loop rather than a router face — the AP
+/// demo's `--sessions` group session is one — has the same obligation to
+/// re-join, and a private copy of this schedule there would be the second
+/// transcription R311y786 exists to prevent. So the type and its wait
+/// ([`rejoin_group_driver`]) are public, and neither reports anything: a face
+/// writes `log` lines, a demo session writes the lines a harness waits on,
+/// and the schedule must not choose between them.
+#[derive(Debug)]
+pub struct GroupRejoin {
     period: crate::retry_period::RetryPeriod,
-    label: &'static str,
 }
 
-#[cfg(all(feature = "transport-multicast", feature = "transport-link-udp"))]
+impl Default for GroupRejoin {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl GroupRejoin {
     /// The face's retry schedule. zenoh's own shipped default — 1000 / 4000 /
     /// x2 — rather than pico's flat 1s, and the divergence is deliberate: a
@@ -1717,10 +1738,9 @@ impl GroupRejoin {
     /// face on a flapping NIC would spin at 1 Hz for as long as the outage
     /// lasts. Growth bounded by the same 4s ceiling upstream uses keeps the
     /// worst-case rejoin latency inside the 5s group lease.
-    fn new(label: &'static str) -> Self {
+    pub fn new() -> Self {
         Self {
             period: crate::retry_period::RetryPolicy::ZENOH_DEFAULT.period(),
-            label,
         }
     }
 
@@ -1734,29 +1754,19 @@ impl GroupRejoin {
     /// loop's very different answer. Splitting it that way is what makes "the
     /// two loops cannot drift" true of all THREE consumers rather than of the
     /// two that happen to live in this crate.
-    fn wait_for(&mut self, outcome: &MulticastOutcome) -> Option<u64> {
+    pub fn wait_for(&mut self, outcome: &MulticastOutcome) -> Option<u64> {
         if !outcome.warrants_rejoin() {
             return None;
         }
-        let delay = self.period.next_ms();
-        log::warn!(
-            "{}: group face lost ({outcome:?}); re-joining in {delay}ms",
-            self.label
-        );
-        Some(delay)
+        Some(self.period.next_ms())
     }
 
     /// The wait after a failed re-BIND, which is the same schedule: a join that
     /// cannot be installed is the same outage as a link that dropped, and
     /// giving up here would leave the face permanently absent for a transient
     /// `ENETDOWN` — precisely the defect this type removes, one syscall over.
-    fn wait_for_bind_failure(&mut self, err: &std::io::Error) -> u64 {
-        let delay = self.period.next_ms();
-        log::warn!(
-            "{}: group re-join failed ({err}); retrying in {delay}ms",
-            self.label
-        );
-        delay
+    pub fn wait_for_bind_failure(&mut self) -> u64 {
+        self.period.next_ms()
     }
 }
 
@@ -1775,18 +1785,27 @@ impl GroupRejoin {
 /// never made. Sleeping is RACED against the stop signal rather than serialized
 /// after it, so a shutdown during a long outage is observed at the signal
 /// instead of one backoff later — a face that ignores its stop until its next
-/// retry is a host that cannot shut down promptly, and the delay grows.
-#[cfg(all(feature = "transport-multicast", feature = "transport-link-udp"))]
-async fn rejoin_group_driver<F, Fut>(
+/// retry is a host that cannot shut down promptly, and the delay grows. The
+/// re-bind is raced the same way: the wait is the long half, but a stop that a
+/// slow bind could hold off is still a stop the host asked for and did not get.
+///
+/// The link type is the caller's (`D`), so a host whose group runs over
+/// something other than the UDP group link — a test's in-memory link, for one
+/// — re-joins through this same wait. `on_bind_failure` hears each failed
+/// re-bind with the wait before the next try; it is where a caller reports it.
+pub async fn rejoin_group_driver<D, F, Fut, T, R>(
     mut bind: F,
-    clock: &crate::runtime_impl::TokioTime,
+    clock: &T,
     rejoin: &mut GroupRejoin,
     shutdown: &mut tokio::sync::watch::Receiver<bool>,
     first_delay: u64,
-) -> Option<crate::UdpDriver>
+    mut on_bind_failure: R,
+) -> Option<D>
 where
     F: FnMut() -> Fut,
-    Fut: core::future::Future<Output = std::io::Result<crate::UdpDriver>>,
+    Fut: core::future::Future<Output = std::io::Result<D>>,
+    T: TimeSource,
+    R: FnMut(&std::io::Error, u64),
 {
     let mut delay = first_delay;
     loop {
@@ -1797,12 +1816,16 @@ where
             // `McastFaceStop`, and just as much a stop as a signalled one.
             _ = shutdown.changed() => return None,
         }
-        match bind().await {
-            Ok(driver) => {
-                log::info!("{}: group face re-joined", rejoin.label);
-                return Some(driver);
+        let bound = tokio::select! {
+            bound = bind() => bound,
+            _ = shutdown.changed() => return None,
+        };
+        match bound {
+            Ok(driver) => return Some(driver),
+            Err(e) => {
+                delay = rejoin.wait_for_bind_failure();
+                on_bind_failure(&e, delay);
             }
-            Err(e) => delay = rejoin.wait_for_bind_failure(&e),
         }
     }
 }
@@ -2241,7 +2264,7 @@ mod tests {
     #[cfg(all(feature = "transport-multicast", feature = "transport-link-udp"))]
     #[test]
     fn a_lost_group_face_is_rejoined_on_a_growing_schedule() {
-        let mut rejoin = GroupRejoin::new("test face");
+        let mut rejoin = GroupRejoin::new();
         let first = rejoin
             .wait_for(&MulticastOutcome::LinkLost(LostCause::PeerClosed))
             .expect("a lost link is re-joined");
@@ -2266,7 +2289,7 @@ mod tests {
     #[cfg(all(feature = "transport-multicast", feature = "transport-link-udp"))]
     #[test]
     fn a_stopped_or_bounded_face_is_not_rejoined() {
-        let mut rejoin = GroupRejoin::new("test face");
+        let mut rejoin = GroupRejoin::new();
         assert_eq!(
             rejoin.wait_for(&MulticastOutcome::Stopped),
             None,

@@ -6000,6 +6000,14 @@ layer_c1ax_cargo_test_routing_namespace() {
     # (gated on `transport-link-udp`, a default feature). Printed number.
     _runci_guarded_test "C1AX multicast_glue 35" 35 \
         cargo test -p wz-runtime-tokio --features transport-multicast,routing-namespace --lib multicast_glue --quiet || return 1
+    # Item 900 follow-up — the `--sessions` group session's RE-JOIN loop, which
+    # shares the router face's schedule and wait above. The demo compiles it
+    # only under `transport-multicast`, which no other lane tests the demo
+    # with: a group lost three times re-joins on the 1000 / 2000 / 4000 ms
+    # schedule and re-admits its member, a stop while down closes at the
+    # signal, and the endpoint split. 3 = the command's own printed total.
+    _runci_guarded_test "C1AX sessions_run group 3" 3 \
+        cargo test -p wz-ap-demo --features transport-multicast --bin wz-ap-demo sessions_run --quiet || return 1
     (cd crates \
         && cargo clippy -p wz-session-core --features routing-namespace,session-unicast,codec-push,codec-request,codec-response,codec-response-final,codec-declare,reassembly --all-targets --quiet -- -D warnings \
         && cargo clippy -p wz-session-core --no-default-features --features routing-namespace,session-unicast,codec-push --quiet -- -D warnings \
