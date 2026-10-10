@@ -828,8 +828,47 @@ declare -A BASELINE_MC_TEXT=(
     # the two trees, and no per-symbol diff of them was taken for this figure.
     # The unicast acceptor image keeps lending (`cargo tree -e features` shows the
     # feature on it and off here) and its three QEMU boots pass.
-    ["thumbv7m-none-eabi"]=64344
-    ["thumbv7em-none-eabihf"]=64132
+    # GREW +292 / +324 B over the twelve-branch wave (origin `d332c740`), after
+    # the part of it this image does not need was taken back. Hosted run
+    # `37992839539` read 65160 / 64980 (+816 / +848, red on both axes). This host
+    # (rustc 1.97.0, gcc 13.2.1, the lane's remap flags) builds the same tree at
+    # 65156 / 64944, and the bisect is by measurement on it, one target dir:
+    #
+    #   | commit                                         | M3    | M4F   |
+    #   |------------------------------------------------|-------|-------|
+    #   | 774019fa the last green tree                   | 64348 | 64136 |
+    #   | d02854b3 0d3d6d23 3e78a34a (incl. 58f28aa4)    | 64348 | 64136 |
+    #   | c1196386 unknown mandatory ext refuses a batch | 65116 | 64908 |
+    #   | d33d12eb (incl. 7edf0c69) group member's zid   | 65156 |     - |
+    #   | 068dc793 .. d332c740 (the rest of the wave)    | 65156 | 64944 |
+    #   | + identities, not named rows (this change)     | 64632 | 64420 |
+    #
+    # d02854b3 and 0d3d6d23 leave the ELF byte-identical: the stage announcer is
+    # behind `loopback-multicast`, the Q.6 boot build, on purpose. So +768 / +772
+    # of the wave is ONE commit, c1196386, and a per-symbol diff of 3e78a34a vs
+    # c1196386 (`arm-none-eabi-nm -S`, hashes stripped) names it: .text +280
+    # (`refuse_unknown_mandatory_ext` +288, `judge_ext_chain` +270,
+    # `reassembled_frame_outcome` +150, `__cortex_m_rt_main` -426, the absorber)
+    # and .rodata +488, which was the naming table: the admission rule matched
+    # the `(id, M, enc, name)` rows of `ext_name`, so every row it could reach
+    # and the extension NAMES they point at (`node_id`, `query_body`,
+    # `wire_expr`, ...) were linked into an image that never names one.
+    #
+    # TAKEN BACK, -524 / -524 B: the rule now reads `ext_name::identities`, a
+    # `[u8; N]` projected from the same rows at compile time, so .rodata is 12 B
+    # over the last green tree instead of 488, and .text is 48 B smaller still.
+    # KEPT, +244 / +248 B: the refusal itself, a message carrying a mandatory
+    # extension its reader does not declare is dropped with its batch, as zenoh
+    # and zenoh-pico both do; and +40 / +36 B from the rest of the wave, on M3
+    # all of it d33d12eb (`peer_zid_by_src` +8, main +32), a multicast member's
+    # zid handed to the router. Both are behaviour, so the baseline moves rather
+    # than the band.
+    # The figures are the hosted reading plus this host's same-tree delta
+    # (65160 - 524, 64980 - 524), the method Round 1955 set out. data is 4 and
+    # bss 270120 here on every row (hosted 270112, the toolchain term), so the
+    # whole delta is ROM. Old: 64344/64132 (the R3170 recovery).
+    ["thumbv7m-none-eabi"]=64636
+    ["thumbv7em-none-eabihf"]=64456
 )
 # shellcheck disable=SC2034  # resolved through the `declare -n _bt/_bd/_bb`
                             # namerefs in the `case "$artifact"` dispatch below; shellcheck
