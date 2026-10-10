@@ -1627,12 +1627,21 @@ mod tests {
 
         // A registered queryable at the queried keyexpr — its handler stages one
         // reply, which the observer terminates with a ResponseFinal.
+        // Through the fallible `register_sink`, which exists on both bounded
+        // backings: this crate is also built with `bounded-heapless`, which
+        // compiles out the infallible closure wrapper.
         let mut observer = ApplicationLayerObserver::new();
         observer
             .queryables
-            .register("demo/mc", |_query, responder| {
-                responder.reply(b"reply-over-multicast");
-            });
+            .register_sink(
+                "demo/mc",
+                wz_session_core::locality::Locality::Any,
+                false,
+                wz_session_core::query_sink::BoxedQuerySink::new(|_query, responder| {
+                    responder.reply(b"reply-over-multicast");
+                }),
+            )
+            .expect("a fresh observer takes the queryable");
 
         // The reply backing shared between the sink (the observer flushes its
         // staged query replies through it) and next_tx (drains them back out).

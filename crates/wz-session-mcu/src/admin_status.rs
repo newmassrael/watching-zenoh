@@ -35,7 +35,10 @@ use critical_section::Mutex;
 use wz_session_core::adminspace::{
     admin_queryable_key, answer_admin_query, AdminAnswerCtx, AdminSession,
 };
+use wz_session_core::locality::Locality;
 use wz_session_core::observer::ApplicationLayerObserver;
+use wz_session_core::query_sink::BoxedQuerySink;
+use wz_session_core::registry_error::RegisterError;
 
 /// What the `config` leg of the admin GET answers from. The node's
 /// connection control implements it when the write surface is compiled in;
@@ -230,16 +233,22 @@ impl NodeStatus {
 /// ([`connect_status_json`]). It is gated by the READ permit alone, as every
 /// admin leg is, so a node whose write permit is off still says so here —
 /// which is how a host tells "writes are off" from "my write was lost".
+///
+/// `Err` when the observer's queryable table refuses the registration: full
+/// at `caps::MAX_QUERYABLES`, or the key past `caps::MAX_KEYEXPR_BYTES`. Both
+/// are reachable on the fixed backing (`bounded-heapless`), where the node
+/// then answers no admin GET and must say so rather than run as if it did; on
+/// the growable backing neither is ever returned.
 pub fn host_admin_queryable(
     observer: &mut ApplicationLayerObserver,
     identity: NodeIdentity,
     status: &'static NodeStatus,
     config: Option<&'static (dyn ConfigView + Sync)>,
     connect: Option<&'static (dyn ConnectStatusSource + Sync)>,
-) {
+) -> Result<(), RegisterError> {
     let pattern = admin_queryable_key(&identity.zid_hex, identity.whatami);
     let status_key = admin_connect_status_key(&identity.zid_hex, identity.whatami);
-    observer.queryables.register(pattern, move |query, out| {
+    let answer = BoxedQuerySink::new(move |query, out| {
         let (read, sessions) = status.snapshot();
         if read {
             if let Some(source) = connect {
@@ -284,6 +293,12 @@ pub fn host_admin_queryable(
         };
         let _ = answer_admin_query(query, out, &ctx, &sessions, &[], &[], &config_json);
     });
+    // `complete: false` is upstream's `QueryableInfoType::DEFAULT`, the value
+    // the closure-taking `register` this replaced passed.
+    observer
+        .queryables
+        .register_sink(&pattern, Locality::Any, false, answer)
+        .map(|_id| ())
 }
 
 #[cfg(test)]
@@ -472,7 +487,8 @@ mod tests {
             &STATUS,
             Some(&CONFIG),
             Some(&WRITES_OFF),
-        );
+        )
+        .expect("a fresh observer takes the admin queryable");
 
         on_event(IterationEvent::Poll(&get("@/b2a1/peer", 2)));
         std::assert!(wire_has(b"\"sessions\""), "local_data left on the wire");

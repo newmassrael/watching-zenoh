@@ -38,9 +38,11 @@ use wz_session_core::admin_config_space::write_config_space_pattern;
 use wz_session_core::admin_connect::{
     parse_connect_endpoints_write, ConfigWriteBody, ConnectEndpoints, ConnectWriteOutcome,
 };
+use wz_session_core::locality::Locality;
 use wz_session_core::observer::ApplicationLayerObserver;
+use wz_session_core::registry_error::RegisterError;
 use wz_session_core::sample_kind::SampleKind;
-use wz_session_core::sink::SampleView;
+use wz_session_core::sink::{BoxedSink, SampleView};
 
 struct State {
     permit_write: bool,
@@ -262,12 +264,18 @@ fn push_connect_endpoints(list: &[wz_session_core::admin_connect::ConnectEntry],
 ///
 /// A PUT is decided as a replace and a DEL as a remove, the two sample kinds
 /// there are.
+///
+/// `Err` when the observer's subscriber table refuses the registration: full
+/// at `caps::MAX_SUBSCRIPTIONS`, or the pattern past `caps::MAX_KEYEXPR_BYTES`.
+/// Both are reachable on the fixed backing (`bounded-heapless`), where the
+/// node then hosts no config writes and must say so rather than run as if it
+/// did; on the growable backing neither is ever returned.
 pub fn host_connect_writes(
     observer: &mut ApplicationLayerObserver,
     zid_hex: &str,
     whatami: &str,
     control: &'static ConnectControl,
-) {
+) -> Result<(), RegisterError> {
     let mut pattern = String::new();
     // Writing into a `String` cannot fail.
     let _ = write_config_space_pattern(&mut pattern, zid_hex, whatami);
@@ -275,13 +283,18 @@ pub fn host_connect_writes(
     let whatami = String::from(whatami);
     observer
         .subscribers
-        .register(pattern, move |sample: &dyn SampleView| {
-            let body = match sample.kind() {
-                SampleKind::Put => ConfigWriteBody::Put(sample.payload()),
-                SampleKind::Del => ConfigWriteBody::Del,
-            };
-            control.apply(&zid_hex, &whatami, sample.keyexpr(), body);
-        });
+        .register_sink(
+            &pattern,
+            Locality::Any,
+            BoxedSink::new(move |sample: &dyn SampleView| {
+                let body = match sample.kind() {
+                    SampleKind::Put => ConfigWriteBody::Put(sample.payload()),
+                    SampleKind::Del => ConfigWriteBody::Del,
+                };
+                control.apply(&zid_hex, &whatami, sample.keyexpr(), body);
+            }),
+        )
+        .map(|_id| ())
 }
 
 #[cfg(test)]
@@ -345,7 +358,8 @@ mod tests {
     fn a_config_write_reaches_the_control_through_the_nodes_subscriber() {
         static CONTROL: ConnectControl = ConnectControl::new(false);
         let mut observer = ApplicationLayerObserver::new();
-        host_connect_writes(&mut observer, ZID, "peer", &CONTROL);
+        host_connect_writes(&mut observer, ZID, "peer", &CONTROL)
+            .expect("a fresh observer takes the config subscriber");
 
         // Default permit: denied, nothing moves.
         deliver(&mut observer, put(KEY, br#"["tcp/10.0.0.9:7447"]"#));
@@ -387,7 +401,8 @@ mod tests {
 
         static CONTROL: ConnectControl = ConnectControl::new(false);
         let mut observer = ApplicationLayerObserver::new();
-        host_connect_writes(&mut observer, ZID, "peer", &CONTROL);
+        host_connect_writes(&mut observer, ZID, "peer", &CONTROL)
+            .expect("a fresh observer takes the config subscriber");
         let last = || {
             let mut out = String::new();
             CONTROL.write_last_write_json(&mut out);
@@ -431,7 +446,8 @@ mod tests {
 
         static CONTROL: ConnectControl = ConnectControl::new(true);
         let mut observer = ApplicationLayerObserver::new();
-        host_connect_writes(&mut observer, ZID, "peer", &CONTROL);
+        host_connect_writes(&mut observer, ZID, "peer", &CONTROL)
+            .expect("a fresh observer takes the config subscriber");
 
         let read = || {
             let mut out = String::new();

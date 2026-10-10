@@ -188,18 +188,32 @@ mod tests {
         std::assert!(!peer_saw_pong(), "no queryable, no reply payload");
         std::assert_eq!(PUSHES.load(Ordering::SeqCst), 0);
 
+        // Through the fallible `*_sink` registrations, the ones that exist on
+        // both bounded backings: this crate is also built with
+        // `bounded-heapless`, which compiles out the infallible wrappers.
         observer
             .borrow_mut()
             .subscribers
-            .register("home/temp", |_| {
-                PUSHES.fetch_add(1, Ordering::SeqCst);
-            });
+            .register_sink(
+                "home/temp",
+                wz_session_core::locality::Locality::Any,
+                wz_session_core::sink::BoxedSink::new(|_| {
+                    PUSHES.fetch_add(1, Ordering::SeqCst);
+                }),
+            )
+            .expect("a fresh observer takes the subscriber");
         observer
             .borrow_mut()
             .queryables
-            .register("svc/a", |_query, responder| {
-                responder.reply(b"pong");
-            });
+            .register_sink(
+                "svc/a",
+                wz_session_core::locality::Locality::Any,
+                false,
+                wz_session_core::query_sink::BoxedQuerySink::new(|_query, responder| {
+                    responder.reply(b"pong");
+                }),
+            )
+            .expect("a fresh observer takes the queryable");
 
         on_event(IterationEvent::Poll(&frame(vec![push(), query()])));
         std::assert_eq!(

@@ -177,7 +177,7 @@ fn main() -> ! {
     let local = CoopLocalSet::new(&runtime);
     let zid_hex = zid_to_zenoh_hex(&ZID);
     let accept_runtime = runtime.clone();
-    let mut node = AdminNode::new(
+    let node = AdminNode::new(
         &local,
         Rc::new(LwipLinks::new(link.clone())),
         &CONTROL,
@@ -200,6 +200,10 @@ fn main() -> ! {
             )
         },
     );
+    let mut node = match node {
+        Ok(node) => node,
+        Err(_) => fail("the node's observer refused its admin queryable or config subscriber"),
+    };
     hprintln!("admin-node: listening on udp/10.0.2.15:7447 as {}", zid_hex);
 
     let mut reported = 0;

@@ -53,6 +53,7 @@ use wz_session_core::adminspace::admin_queryable_key;
 use wz_session_core::driver_loop::DriverOutcome;
 use wz_session_core::link::BoxedLinkDriver;
 use wz_session_core::observer::ApplicationLayerObserver;
+use wz_session_core::registry_error::RegisterError;
 use wz_session_core::session_init_params::SessionInitParams;
 use wz_session_core::session_timeouts::SessionTimeouts;
 
@@ -124,6 +125,13 @@ where
     /// builds the action bundle of each acceptor session over the sink it
     /// is given; an acceptor mints cookies, so this is where a board installs
     /// its entropy source (`wz_runtime_coop::session_runtime::new_session_actions`).
+    ///
+    /// `Err` when the node's own observer refuses its config subscriber or its
+    /// admin queryable (see [`host_connect_writes`] and
+    /// [`host_admin_queryable`]): a node that cannot host its admin space is
+    /// not started, rather than started deaf. On the growable backing this
+    /// never fails; on the fixed one it fails only for a key past
+    /// `caps::MAX_KEYEXPR_BYTES`, since the observer is fresh.
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         local: &'a CoopLocalSet<C>,
@@ -135,7 +143,7 @@ where
         timeouts: SessionTimeouts,
         dial_params: P,
         accept: A,
-    ) -> Self {
+    ) -> Result<Self, RegisterError> {
         let admin_key = admin_queryable_key(&identity.zid_hex, identity.whatami);
         let mut config_key = String::new();
         // Writing into a `String` cannot fail.
@@ -143,15 +151,15 @@ where
         let observer = Rc::new(RefCell::new(ApplicationLayerObserver::new()));
         {
             let mut o = observer.borrow_mut();
-            host_connect_writes(&mut o, &identity.zid_hex, identity.whatami, control);
-            host_admin_queryable(&mut o, identity, status, Some(control), Some(control));
+            host_connect_writes(&mut o, &identity.zid_hex, identity.whatami, control)?;
+            host_admin_queryable(&mut o, identity, status, Some(control), Some(control))?;
         }
         let dial_observer = observer.clone();
         let on_event: DialSink<C> = Box::new(move |actions| {
             Box::new(dispatch_to(dial_observer.clone(), actions.clone())) as EventSink
         });
         let dialer = UdpDialer::new(local, links.clone(), timeouts, dial_params, on_event);
-        Self {
+        Ok(Self {
             local,
             links,
             observer,
@@ -164,7 +172,7 @@ where
             admin_key,
             config_key,
             declared: Vec::new(),
-        }
+        })
     }
 
     /// The observer every session of this node dispatches to.
@@ -437,7 +445,8 @@ mod tests {
                     Counting(1),
                 )
             },
-        );
+        )
+        .expect("a fresh node takes its admin keys");
 
         // CONTROL: listening, nothing written, nothing reported.
         for _ in 0..16 {
@@ -540,7 +549,8 @@ mod tests {
                     Counting(1),
                 )
             },
-        );
+        )
+        .expect("a fresh node takes its admin keys");
         let listen_at = wz_runtime_coop::session_drive::UdpPeer {
             addr: [10, 0, 0, 2],
             port: 7531,
@@ -624,7 +634,8 @@ mod tests {
                     Counting(1),
                 )
             },
-        );
+        )
+        .expect("a fresh node takes its admin keys");
         node.tick(0);
 
         // A host reaches the node and the handshake completes.

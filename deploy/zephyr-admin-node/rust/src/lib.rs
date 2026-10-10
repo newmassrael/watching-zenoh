@@ -161,7 +161,7 @@ fn run<N: NodeNet>(mut net: N) -> i32 {
     let locators: Vec<String> = net.addresses().into_iter().map(locator).collect();
     let accept_runtime = runtime.clone();
     let (dial_zid, accept_zid) = (zid.clone(), zid.clone());
-    let mut node = AdminNode::new(
+    let node = AdminNode::new(
         &local,
         net.links(),
         &CONTROL,
@@ -184,6 +184,15 @@ fn run<N: NodeNet>(mut net: N) -> i32 {
             )
         },
     );
+    // A node whose observer refused its admin keys would run without its admin
+    // space: stop instead, with the reason.
+    let mut node = match node {
+        Ok(node) => node,
+        Err(_) => {
+            log(c"wz: FAIL - the node's observer refused its admin queryable or config subscriber");
+            return 3;
+        }
+    };
     // The line a lane (or a person at the console) waits for: who the node claims
     // to be and where it is, one locator per link.
     log_line(format!(
