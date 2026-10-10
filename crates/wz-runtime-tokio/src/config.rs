@@ -4389,6 +4389,12 @@ mod tests {
         any(feature = "adminspace-core", feature = "routing-router-hat")
     ))]
     mod interceptor_document_retention {
+        // Gated as the tests that use it are: each test below is behind
+        // `access-downsampling` or `access-quota`, so a build with neither (the
+        // routing feature set alone) compiles this module with no test in it
+        // and an ungated `use super::*` is an unused import that `-D warnings`
+        // refuses.
+        #[cfg(any(feature = "access-downsampling", feature = "access-quota"))]
         use super::*;
 
         /// ⭐ THE FREQUENCY IS THE DISCRIMINATOR. `interval_from_freq` is not
