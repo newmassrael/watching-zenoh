@@ -580,7 +580,7 @@ pub(crate) fn wire_stream_over_quic(
         send,
         recv,
     } = link;
-    let (tx, rx) = crate::writer_queue::outbound_channel();
+    let (tx, rx) = crate::stream_link::stream_outbound_channel();
     let writer_handle = WriterHandle::spawn(rx, |queue| writer_task(send, queue));
     // transport-lowlatency is a TCP-path negotiation; QUIC keeps the universal
     // u16 prefix (an always-false flag on the write driver).

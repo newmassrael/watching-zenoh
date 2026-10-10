@@ -629,29 +629,147 @@ pub struct StreamWriteDriver {
     /// ARCHITECTURE section 9.1 — the frame buffers this link has LENT the
     /// session and not yet taken back (`BoxedLinkDriver::tx_slot_acquire`).
     lent: Mutex<LentFrames>,
+    /// R3250 — the queue keeps its frames in the link's transmit pool, read
+    /// once at construction (a queue does not change kind).
+    #[cfg(feature = "runtime-zero-copy")]
+    pooled: bool,
 }
 
 /// The buffers lent for outbound frames, by slot number: an occupied entry is a
 /// buffer the session is encoding into, and a free number is reused.
 #[derive(Default)]
 struct LentFrames {
-    slots: Vec<Option<Vec<u8>>>,
+    slots: Vec<Option<Lent>>,
     free: Vec<u32>,
 }
 
+/// One lent buffer: a vector of the heap queue's spare list, or (R3250) a part
+/// of a slot of the link's transmit pool.
+enum Lent {
+    Heap(Vec<u8>),
+    #[cfg(feature = "runtime-zero-copy")]
+    Slot(crate::writer_queue::TxLend),
+}
+
+/// The outbound queue a stream link's write half and its [`writer_task`] share,
+/// and the one every stream pipeline builds its write half over.
+///
+/// R3250 — under `runtime-zero-copy` the queue owns the link's transmit pool
+/// (`crate::writer_queue::outbound_channel_pooled`), so every outbound byte of the
+/// link lies in a pool slot from the lend to the end of the write and the
+/// transmit path allocates nothing per frame; without it, the heap queue and its
+/// small spare list, as before.
+pub fn stream_outbound_channel() -> (OutboundTx, crate::writer_queue::OutboundRx) {
+    #[cfg(feature = "runtime-zero-copy")]
+    {
+        crate::writer_queue::outbound_channel_pooled()
+    }
+    #[cfg(not(feature = "runtime-zero-copy"))]
+    {
+        crate::writer_queue::outbound_channel()
+    }
+}
+
 impl StreamWriteDriver {
-    pub(crate) fn new(
+    /// A write half over `tx`, the sending side of the queue its
+    /// [`writer_task`] drains (built by [`stream_outbound_channel`] in every
+    /// pipeline). `lowlatency` is the framing flag the lowlatency open helper
+    /// flips at Established; `subject` and `endpoints` are what only the
+    /// constructing pipeline can resolve.
+    pub fn new(
         tx: OutboundTx,
         lowlatency: Arc<AtomicBool>,
         subject: LinkSubject,
         endpoints: Option<LinkEndpoints>,
     ) -> Self {
         Self {
+            #[cfg(feature = "runtime-zero-copy")]
+            pooled: tx.is_pooled(),
             tx,
             lowlatency,
             subject,
             endpoints,
             lent: Mutex::new(LentFrames::default()),
+        }
+    }
+
+    /// Put a lent buffer in the table under a free number.
+    fn hold_lent(&self, buf: Lent) -> TxSlot {
+        let mut lent = self.lent.lock().expect("lent frames poisoned");
+        let number = match lent.free.pop() {
+            Some(number) => number,
+            None => {
+                lent.slots.push(None);
+                (lent.slots.len() - 1) as u32
+            }
+        };
+        lent.slots[number as usize] = Some(buf);
+        TxSlot(number)
+    }
+
+    /// The prefix in front of a frame of `len` bytes, by the framing flag as it
+    /// stands: the 4-byte LE u32 of lowlatency or the 2-byte LE u16 of the batch
+    /// envelope, which is the codec's `StreamEnvelope` length field (the tests
+    /// pin it to that SSOT).
+    #[cfg(feature = "runtime-zero-copy")]
+    fn prefix_for(&self, len: usize) -> ([u8; 4], usize) {
+        ((len as u32).to_le_bytes(), self.frame_prefix_len())
+    }
+
+    /// R3250 — send a frame the session encoded into a part of a pool slot.
+    #[cfg(feature = "runtime-zero-copy")]
+    fn send_slot_lent(
+        &self,
+        lend: crate::writer_queue::TxLend,
+        start: usize,
+        len: usize,
+        reliability: Reliability,
+        priority: Priority,
+    ) -> LinkSendOutcome {
+        if len > u16::MAX as usize {
+            log::warn!("wz-runtime-tokio: outbound frame {len} bytes > 65535; dropping");
+            self.tx.abort_lend(lend);
+            return LinkSendOutcome::Dropped(LinkDropCause::Oversize);
+        }
+        let (prefix_bytes, prefix_len) = self.prefix_for(len);
+        if start != prefix_len {
+            // The framing flag flipped between the grant and now (it flips once,
+            // from the u16 prefix to the u32 one, at Established), so the room in
+            // front is the wrong size. Move the payload to sit behind the prefix
+            // in force, in place, when the lend has the room.
+            if prefix_len + len <= lend.capacity() {
+                // SAFETY: both `[start, start + len)` and `[prefix_len,
+                // prefix_len + len)` lie inside the lend (`start + len` was
+                // bounded by the lease, the other is checked above), and the lend
+                // is this call's alone; `copy` allows the overlap.
+                unsafe {
+                    std::ptr::copy(lend.base().add(start), lend.base().add(prefix_len), len);
+                }
+            } else {
+                // The one frame the room in front cannot be widened for: it
+                // filled its lend to the last two bytes when the flag flipped.
+                // Copied out, the lend given back, and sent through the byte
+                // door. One allocation, at most once per link, because the flag
+                // flips once; documented rather than silent.
+                //
+                // SAFETY: the session wrote `[start, start + len)` of the lend.
+                let payload =
+                    unsafe { std::slice::from_raw_parts(lend.base().add(start), len) }.to_vec();
+                self.tx.abort_lend(lend);
+                return self.send_prioritized(&payload, reliability, priority);
+            }
+        }
+        // SAFETY: the first `prefix_len` bytes of the lend are this call's to
+        // write; the frame behind them is the session's, now complete.
+        unsafe {
+            std::ptr::copy_nonoverlapping(prefix_bytes.as_ptr(), lend.base(), prefix_len);
+        }
+        match self.tx.commit(lend, prefix_len + len) {
+            Ok(()) => LinkSendOutcome::Sent,
+            Err(e) => {
+                log::warn!("wz-runtime-tokio: outbound queue refused a lent frame ({e})");
+                LinkSendOutcome::Dropped(LinkDropCause::WriterGone)
+            }
         }
     }
 
@@ -668,7 +786,7 @@ impl StreamWriteDriver {
     }
 
     /// Take a lent buffer back out of the table, freeing its number.
-    fn take_lent(&self, slot: TxSlot) -> Vec<u8> {
+    fn take_lent(&self, slot: TxSlot) -> Lent {
         let mut lent = self.lent.lock().expect("lent frames poisoned");
         let buf = lent.slots[slot.0 as usize]
             .take()
@@ -733,6 +851,27 @@ impl BoxedLinkDriver for StreamWriteDriver {
             );
             return LinkSendOutcome::Dropped(LinkDropCause::Oversize);
         }
+        // R3250 — a pooled queue takes the frame by COPYING it into a slot of the
+        // link's transmit pool, behind the frames already in its lane's newest
+        // slot when they leave room: one copy, which a byte door cannot avoid,
+        // and no allocation.
+        #[cfg(feature = "runtime-zero-copy")]
+        if self.pooled {
+            let (prefix_bytes, prefix_len) = self.prefix_for(bytes.len());
+            return match self
+                .tx
+                .send_framed(priority, &prefix_bytes[..prefix_len], bytes)
+            {
+                Ok(()) => LinkSendOutcome::Sent,
+                Err(crate::writer_queue::PooledSendError::TooLarge) => {
+                    LinkSendOutcome::Dropped(LinkDropCause::Oversize)
+                }
+                Err(e) => {
+                    log::warn!("wz-runtime-tokio: outbound channel closed; dropping frame ({e})");
+                    LinkSendOutcome::Dropped(LinkDropCause::WriterGone)
+                }
+            };
+        }
         let wire = if self.lowlatency.load(Ordering::Acquire) {
             // transport-lowlatency — 4-byte LE u32 length prefix + payload (zenoh's
             // lowlatency streamed framing), NOT the u16 batch prefix.
@@ -766,35 +905,47 @@ impl BoxedLinkDriver for StreamWriteDriver {
     // is: one allocation and no copy where there were two and one. And the writer
     // gives the buffer back once it has written it, so the next frame is built in
     // the same memory and a link in steady state allocates none.
-    fn tx_slot_acquire(&self, want: usize, _priority: Priority) -> Option<TxSlotGrant> {
+    //
+    // R3250 — under `runtime-zero-copy` the buffer is a part of a slot of the
+    // link's transmit pool instead, and the frame never leaves the slot: the
+    // writer writes it from there and the slot goes home through the pool's
+    // completion edge. See `crate::link_tx_pool`.
+    fn tx_slot_acquire(&self, want: usize, priority: Priority) -> Option<TxSlotGrant> {
         let headroom = self.frame_prefix_len();
         // `want` is a hint, the codec's worst case. A frame past the u16 length
         // field is dropped by the byte door whatever its size, so nothing is
         // lent past it.
-        let buf = self.tx.take_buffer(headroom + want.min(u16::MAX as usize));
-        let mut lent = self.lent.lock().expect("lent frames poisoned");
-        let number = match lent.free.pop() {
-            Some(number) => number,
-            None => {
-                lent.slots.push(None);
-                (lent.slots.len() - 1) as u32
-            }
-        };
-        lent.slots[number as usize] = Some(buf);
+        let need = headroom + want.min(u16::MAX as usize);
+        #[cfg(feature = "runtime-zero-copy")]
+        if self.pooled {
+            let lend = self.tx.lend(priority, need)?;
+            return Some(TxSlotGrant {
+                slot: self.hold_lent(Lent::Slot(lend)),
+                headroom,
+            });
+        }
+        let _ = priority;
+        let buf = self.tx.take_buffer(need);
         Some(TxSlotGrant {
-            slot: TxSlot(number),
+            slot: self.hold_lent(Lent::Heap(buf)),
             headroom,
         })
     }
 
     fn tx_slot_storage(&self, slot: TxSlot) -> (*mut u8, usize) {
         let mut lent = self.lent.lock().expect("lent frames poisoned");
-        let buf = lent.slots[slot.0 as usize]
+        match lent.slots[slot.0 as usize]
             .as_mut()
-            .expect("a slot the session names is a slot this link lent");
-        // The buffer's heap block does not move while the session writes into it:
-        // nothing here touches the `Vec` between the grant and the send.
-        (buf.as_mut_ptr(), buf.capacity())
+            .expect("a slot the session names is a slot this link lent")
+        {
+            // The buffer's heap block does not move while the session writes into
+            // it: nothing here touches the `Vec` between the grant and the send.
+            Lent::Heap(buf) => (buf.as_mut_ptr(), buf.capacity()),
+            // The pool is boxed inside the queue the driver holds, so the slot
+            // does not move either, and the lend is the session's alone.
+            #[cfg(feature = "runtime-zero-copy")]
+            Lent::Slot(lend) => (lend.base(), lend.capacity()),
+        }
     }
 
     fn tx_slot_send(
@@ -805,7 +956,18 @@ impl BoxedLinkDriver for StreamWriteDriver {
         reliability: Reliability,
         priority: Priority,
     ) -> LinkSendOutcome {
-        let mut wire = self.take_lent(slot);
+        // Infallible only in a build without the pool, where `Lent` has one arm.
+        #[cfg_attr(
+            not(feature = "runtime-zero-copy"),
+            allow(clippy::infallible_destructuring_match)
+        )]
+        let mut wire = match self.take_lent(slot) {
+            Lent::Heap(wire) => wire,
+            #[cfg(feature = "runtime-zero-copy")]
+            Lent::Slot(lend) => {
+                return self.send_slot_lent(lend, start, len, reliability, priority)
+            }
+        };
         // Same guard as the byte door. `tx_slot_acquire` asks the allocator for no
         // more than `headroom + u16::MAX`, but a `Vec` may hand back more than it
         // was asked for and the lease bounds the session by what the buffer
@@ -851,8 +1013,13 @@ impl BoxedLinkDriver for StreamWriteDriver {
     }
 
     fn tx_slot_abort(&self, slot: TxSlot) {
-        // Never sent, so nothing else holds it: it is lent again, not freed.
-        self.tx.return_buffer(self.take_lent(slot));
+        match self.take_lent(slot) {
+            // Never sent, so nothing else holds it: it is lent again, not freed.
+            Lent::Heap(buf) => self.tx.return_buffer(buf),
+            // The bytes are not a frame; a slot holding no frame goes home.
+            #[cfg(feature = "runtime-zero-copy")]
+            Lent::Slot(lend) => self.tx.abort_lend(lend),
+        }
     }
 
     fn open_blocking(&self) {
@@ -887,7 +1054,13 @@ pub async fn writer_task<W>(mut writer: W, mut queue: OutboundQueue)
 where
     W: AsyncWrite + Unpin,
 {
-    while let Some(wire) = queue.next().await {
+    while let Some(mut wire) = queue.next_wire().await {
+        // R3250 — on a pooled queue the frame is a slot of the link's transmit
+        // pool, armed when it was taken off its lane: the write that begins here
+        // is the bus master this row has, so the slot is started now and goes
+        // home through the completion edge when the write has ended, by
+        // `recycle_wire` below or by `wire`'s drop on every other way out.
+        wire.begin_write();
         let write = async {
             writer.write_all(&wire).await?;
             writer.flush().await
@@ -896,7 +1069,7 @@ where
             Some(Ok(())) => {
                 // Written and flushed, so the buffer is free: the next frame a
                 // link lends can be built in it.
-                queue.recycle(wire);
+                queue.recycle_wire(wire);
             }
             Some(Err(e)) => {
                 log::warn!("wz-runtime-tokio: writer_task write failed: {e}; closing");
@@ -1461,6 +1634,196 @@ mod tests {
             .expect("lent again");
         assert_eq!(next.slot, TxSlot(0));
         driver.tx_slot_abort(next.slot);
+    }
+
+    /// R3250 — a driver over a POOLED queue (the one `stream_outbound_channel`
+    /// builds under `runtime-zero-copy`), and the receiving half.
+    #[cfg(feature = "runtime-zero-copy")]
+    fn pooled_driver(
+        lowlatency: bool,
+    ) -> (
+        StreamWriteDriver,
+        crate::writer_queue::OutboundRx,
+        Arc<AtomicBool>,
+    ) {
+        let (tx, rx) = stream_outbound_channel();
+        let flag = Arc::new(AtomicBool::new(lowlatency));
+        let driver = StreamWriteDriver::new(tx, flag.clone(), LinkSubject::UNKNOWN, None);
+        (driver, rx, flag)
+    }
+
+    /// R3250 — on the pooled queue, a frame lent from a pool slot, the same
+    /// frame through the byte door, and the heap queue's frame are one wire, in
+    /// both framings; and the u16 one is the codec's envelope.
+    #[cfg(feature = "runtime-zero-copy")]
+    #[tokio::test]
+    async fn a_pooled_frame_is_the_wire_the_heap_path_builds() {
+        for lowlatency in [false, true] {
+            for payload in [&b"x"[..], &[0xA5u8; 300][..], &[0x3Cu8; 20 * 1024][..]] {
+                let (heap, mut heap_rx, _f) = write_driver(lowlatency);
+                assert_eq!(
+                    heap.send_blocking(payload, Reliability::Reliable),
+                    LinkSendOutcome::Sent
+                );
+                let by_heap = heap_rx.recv_wire().await.expect("heap frame");
+                assert!(!by_heap.is_pooled());
+
+                let (pooled, mut rx, _flag) = pooled_driver(lowlatency);
+                assert!(pooled.tx.is_pooled(), "the stream constructor pools");
+                assert_eq!(send_lent(&pooled, payload), Some(LinkSendOutcome::Sent));
+                let by_lend = rx.recv_wire().await.expect("lent frame");
+                assert!(by_lend.is_pooled(), "the lent frame is a pool slot");
+                assert_eq!(
+                    pooled.send_blocking(payload, Reliability::Reliable),
+                    LinkSendOutcome::Sent
+                );
+                let by_door = rx.recv_wire().await.expect("byte frame");
+                assert!(by_door.is_pooled(), "the byte door copies into a slot");
+
+                assert_eq!(
+                    by_lend,
+                    by_heap,
+                    "lowlatency {lowlatency}, {}",
+                    payload.len()
+                );
+                assert_eq!(
+                    by_door,
+                    by_heap,
+                    "lowlatency {lowlatency}, {}",
+                    payload.len()
+                );
+                if !lowlatency {
+                    let envelope = StreamEnvelope {
+                        payload_len: payload.len() as u16,
+                        payload,
+                    }
+                    .encode_to_vec();
+                    assert_eq!(by_lend, envelope);
+                }
+            }
+        }
+    }
+
+    /// R3250 — the session encodes INTO the pool slot the writer is handed: the
+    /// address the lease wrote is the slot the frame leaves from, and the pool
+    /// records it armed for the write.
+    #[cfg(feature = "runtime-zero-copy")]
+    #[tokio::test]
+    async fn a_lent_frame_is_written_from_the_slot_it_was_encoded_into() {
+        use wz_session_core::tx_buf::TxBuf;
+        use wz_session_core::tx_lease::TxLease;
+        let (driver, mut rx, _flag) = pooled_driver(false);
+        let mut lease = TxLease::acquire(&driver, 64, Priority::DEFAULT).expect("lent");
+        let encoded_into = driver.tx_slot_storage(TxSlot(0)).0 as usize;
+        lease.append(b"hello").expect("fits");
+        assert_eq!(
+            lease.send(Reliability::Reliable, Priority::DEFAULT),
+            LinkSendOutcome::Sent
+        );
+        let wire = rx.recv_wire().await.expect("the frame");
+        assert_eq!(wire, [0x05, 0x00, b'h', b'e', b'l', b'l', b'o']);
+        assert_eq!(wire.as_ptr() as usize, encoded_into, "the very slot bytes");
+        let idx = wire.slot_index().expect("a slot");
+        assert_eq!(
+            driver.tx.tx_slot_state(idx),
+            Some(crate::session_tx_pool_ap::SlotState::DmaArmedTx),
+            "handed to the writer: armed"
+        );
+    }
+
+    /// R3250 — the framing flag flipping between the grant and the send is
+    /// handled IN the slot (the payload moves behind the wider prefix), and the
+    /// frame is the byte door's for the same payload.
+    #[cfg(feature = "runtime-zero-copy")]
+    #[tokio::test]
+    async fn a_pooled_framing_flip_is_framed_in_place_by_the_flag_as_it_stands() {
+        use wz_session_core::tx_buf::TxBuf;
+        use wz_session_core::tx_lease::TxLease;
+        let (driver, mut rx, flag) = pooled_driver(false);
+        let mut lease = TxLease::acquire(&driver, 64, Priority::DEFAULT).expect("lent");
+        lease.append(b"flip").expect("fits");
+        flag.store(true, Ordering::Release);
+        assert_eq!(
+            lease.send(Reliability::Reliable, Priority::DEFAULT),
+            LinkSendOutcome::Sent
+        );
+        let lent = rx.recv_wire().await.expect("lent frame");
+        assert!(lent.is_pooled(), "still the slot, not a heap copy");
+        assert_eq!(
+            driver.send_blocking(b"flip", Reliability::Reliable),
+            LinkSendOutcome::Sent
+        );
+        assert_eq!(lent, rx.recv_wire().await.expect("byte frame"));
+        assert_eq!(lent[..4], [4, 0, 0, 0], "lowlatency's u32 prefix");
+    }
+
+    /// R3250 — a pooled queue whose receiver is gone lends nothing and refuses
+    /// the byte door as the heap one does, and no slot is left out.
+    #[cfg(feature = "runtime-zero-copy")]
+    #[tokio::test]
+    async fn a_pooled_queue_without_a_writer_is_writer_gone_and_holds_no_slot() {
+        let (driver, rx, _flag) = pooled_driver(false);
+        drop(rx);
+        assert_eq!(send_lent(&driver, b"late"), None);
+        assert_eq!(
+            driver.send_blocking(b"late", Reliability::Reliable),
+            LinkSendOutcome::Dropped(LinkDropCause::WriterGone)
+        );
+        let (_, free) = driver.tx.tx_pool_stats().expect("pooled");
+        assert_eq!(free, crate::session_tx_pool_ap::SLOT_COUNT);
+    }
+
+    /// R3250 — the session's push over the POOLED stream driver goes through the
+    /// lend, and leaves as the u16 envelope of the frame a link that lends
+    /// nothing is handed.
+    #[cfg(all(feature = "runtime-zero-copy", feature = "codec-push"))]
+    #[tokio::test]
+    async fn a_push_over_the_pooled_stream_driver_is_the_envelope_of_the_heap_frame() {
+        use crate::runtime_impl::TokioTime;
+        use crate::session_glue::new_session_actions;
+
+        struct Collect(Mutex<Vec<Vec<u8>>>);
+        impl BoxedLinkDriver for Collect {
+            fn send_blocking(&self, bytes: &[u8], _r: Reliability) -> LinkSendOutcome {
+                self.0.lock().expect("collect").push(bytes.to_vec());
+                LinkSendOutcome::Sent
+            }
+            fn open_blocking(&self) {}
+            fn close_blocking(&self) {}
+        }
+        let params = || {
+            let mut p = wz_runtime_tokio_test_support::fixture_session_init_params();
+            p.initial_sn = 7;
+            p
+        };
+        let (driver, mut rx, _flag) = pooled_driver(false);
+        let driver = Arc::new(driver);
+        let session = new_session_actions(driver.clone(), params(), TokioTime::new());
+        session
+            .send_push_literal("home/lent", b"payload", true)
+            .expect("push over the pooled driver");
+        let wire = rx.recv_wire().await.expect("the frame");
+        assert!(wire.is_pooled());
+        let (stats, _) = driver.tx.tx_pool_stats().expect("pooled");
+        assert_eq!(
+            (stats.lent, stats.copied),
+            (1, 0),
+            "the frame went through the lend, not the byte door"
+        );
+
+        let control = Arc::new(Collect(Mutex::new(Vec::new())));
+        let control_session = new_session_actions(control.clone(), params(), TokioTime::new());
+        control_session
+            .send_push_literal("home/lent", b"payload", true)
+            .expect("push over the control");
+        let frames = control.0.lock().expect("collect").clone();
+        assert_eq!(frames.len(), 1, "one push is one frame");
+        let envelope = StreamEnvelope {
+            payload_len: frames[0].len() as u16,
+            payload: &frames[0],
+        }
+        .encode_to_vec();
+        assert_eq!(wire, envelope);
     }
 
     /// R2608 — an armed read half reports `CertificateExpired` on a signal that

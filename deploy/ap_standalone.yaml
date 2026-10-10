@@ -251,13 +251,11 @@ machines:
         dma_channel: ~
         cache_policy: none
 
-      session_tx_pool:
-        slot_count: 64
-        slot_size: 4096
-        section: heap
-        alignment: 64
-        dma_channel: ~
-        cache_policy: none
+      # R3250 — the transmit pool's dims live ONLY in its SSOT,
+      # `sources/network/session_tx_pool_ap.scxml` (one pool per stream link,
+      # 16 x 65600, both derived there); the inline 64 x 4096 had no consumer
+      # and a slot too small for one stream frame.
+      session_tx_pool: { ref: session_tx_pool_ap }
 
       # R311in — reassembly_pool's def lives ONLY in
       # `sources/network/reassembly_pool_ap.scxml` (sce:kind=buffer-pool),

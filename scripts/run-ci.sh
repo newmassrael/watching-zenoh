@@ -12539,6 +12539,30 @@ layer_c1bq_zero_copy_arena() {
         echo "  C1bq FAIL: the link_rx filter matched no test"; echo "$out"; return 1; }
     tests=$((tests + n))
 
+    # R3250 — the TRANSMIT half of the same feature: the stream link's pool
+    # (`link_tx_pool::`, which also holds the pooled queue's lifecycle tests),
+    # the write half over it (`stream_link::`, its pooled byte-identity legs),
+    # and the counting-allocator proof that a frame costs no allocation. Each a
+    # filter of its own for the reason given above, each guarded the same way.
+    out="$(cd crates && cargo test -p wz-runtime-tokio --features runtime-zero-copy \
+        --lib link_tx_ --quiet 2>&1)" || { echo "$out"; return 1; }
+    n="$(_runci_passed_count <<<"$out")"
+    (( n > 0 )) || {
+        echo "  C1bq FAIL: the link_tx filter matched no test"; echo "$out"; return 1; }
+    tests=$((tests + n))
+    out="$(cd crates && cargo test -p wz-runtime-tokio --features runtime-zero-copy \
+        --lib stream_link:: --quiet 2>&1)" || { echo "$out"; return 1; }
+    n="$(_runci_passed_count <<<"$out")"
+    (( n > 0 )) || {
+        echo "  C1bq FAIL: the stream_link filter matched no test"; echo "$out"; return 1; }
+    tests=$((tests + n))
+    out="$(cd crates && cargo test -p wz-runtime-tokio --features runtime-zero-copy \
+        --test stream_tx_pool_allocations --quiet 2>&1)" || { echo "$out"; return 1; }
+    n="$(_runci_passed_count <<<"$out")"
+    (( n > 0 )) || {
+        echo "  C1bq FAIL: the transmit allocation suite ran no test"; echo "$out"; return 1; }
+    tests=$((tests + n))
+
     # The DEFAULT arena, which every other Router in the tree runs. The seam
     # moved `reassembly_dispatch`'s staging out from under all of them.
     out="$(cd crates && cargo test -p wz-session-core --features reassembly \
@@ -12557,7 +12581,7 @@ layer_c1bq_zero_copy_arena() {
 
     # The facade arm the preset actually ships.
     (cd crates && cargo build -p wz --features preset-ap-full --quiet) || return 1
-    _runci_lane_did C1bq "$tests" "arena test(s) over 3 suite(s), plus 2 clippy + 1 preset build"
+    _runci_lane_did C1bq "$tests" "arena test(s) over 6 suite(s), plus 2 clippy + 1 preset build"
 }
 
 layer_c1cj_replay_c_abi() {

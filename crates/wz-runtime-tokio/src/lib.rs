@@ -165,6 +165,29 @@ pub mod link_rx_pool;
 #[cfg(all(feature = "runtime-zero-copy", feature = "transport-link-tcp"))]
 pub mod link_rx_arena;
 
+/// R3250 — `sources/network/session_tx_pool_ap.scxml`, the AP stream link's
+/// TRANSMIT slot table: one instance per link, owned by that link's writer
+/// queue, so an outbound frame lives in a slot from the lend to the end of the
+/// write. Gated like its one consumer, the pooled stream queue.
+#[cfg(all(feature = "runtime-zero-copy", feature = "transport-link-tcp"))]
+#[allow(dead_code)]
+#[allow(unused_variables)]
+#[allow(unused_mut)]
+#[allow(clippy::all)]
+pub mod session_tx_pool_ap {
+    include!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../out/wz-runtime-tokio",
+        "/session_tx_pool_ap.rs"
+    ));
+}
+
+// R3250 — the transmit table above with its lifecycle walked by edge and
+// counted. No `///` here: rustdoc would merge it with the module's `//!` block
+// and resolve the result in this outer scope (see `link_rx_window`).
+#[cfg(all(feature = "runtime-zero-copy", feature = "transport-link-tcp"))]
+pub mod link_tx_pool;
+
 /// R311y589 — `runtime-tokio-uring`: ARCHITECTURE §9.5 row 3. A pool registered
 /// with the kernel as fixed buffers so `IORING_OP_READ_FIXED` writes a link's
 /// bytes straight into a slot.

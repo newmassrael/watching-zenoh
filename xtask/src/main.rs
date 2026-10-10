@@ -218,7 +218,8 @@ fn regen_codecs(root: &Path) {
 /// directory per consuming crate, mirroring each build.rs's emits:
 ///   wz-session-core  : reassembly_slot, scouting, session_fsm_unicast,
 ///                      session_fsm_multicast, multicast_peer (statecharts)
-///   wz-runtime-tokio : reassembly_pool_ap, session_rx_pool_ap (buffer-pools)
+///   wz-runtime-tokio : reassembly_pool_ap, session_rx_pool_ap,
+///                      session_tx_pool_ap (buffer-pools)
 ///   wz-runtime-coop  : reassembly_pool_mcu (buffer-pool)
 ///   wz-link-lwip     : scout_rx_pool_mcu, session_rx_pool_mcu,
 ///                      session_rx_pool_mcu_minimal,
@@ -251,6 +252,7 @@ fn regen_statecharts_and_pools(root: &Path) {
     let pools: &[(&str, &str)] = &[
         ("reassembly_pool_ap", "wz-runtime-tokio"),
         ("session_rx_pool_ap", "wz-runtime-tokio"),
+        ("session_tx_pool_ap", "wz-runtime-tokio"),
         ("reassembly_pool_mcu", "wz-runtime-coop"),
         ("scout_rx_pool_mcu", "wz-link-lwip"),
         ("session_rx_pool_mcu", "wz-link-lwip"),
@@ -279,7 +281,10 @@ fn regen_statecharts_and_pools(root: &Path) {
         let _ = std::fs::remove_file(root.join("out").join(krate).join("sce_sourcemap.json"));
     }
 
-    println!("xtask: regenerated 5 statecharts + 6 buffer-pools into out/{{wz-session-core,wz-runtime-tokio,wz-runtime-coop,wz-link-lwip}}");
+    println!(
+        "xtask: regenerated 5 statecharts + {} buffer-pools into out/{{wz-session-core,wz-runtime-tokio,wz-runtime-coop,wz-link-lwip}}",
+        pools.len()
+    );
 }
 
 fn mkdir(p: &Path) {

@@ -338,7 +338,7 @@ pub fn wire_unixsock_stream(
     let (reader, writer) = stream.into_split();
     let inbound =
         StreamReadDriver::new(reader, Arc::new(std::sync::atomic::AtomicBool::new(false)));
-    let (tx, rx) = crate::writer_queue::outbound_channel();
+    let (tx, rx) = crate::stream_link::stream_outbound_channel();
     let writer_handle = WriterHandle::spawn(rx, |queue| writer_task(writer, queue));
     // transport-lowlatency is a TCP-path negotiation; other stream links keep the
     // universal u16 prefix (an always-false flag on the write driver).

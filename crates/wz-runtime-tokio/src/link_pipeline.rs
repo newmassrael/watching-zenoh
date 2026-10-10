@@ -498,7 +498,7 @@ pub fn wire_tcp_stream_with_lowlatency(
     );
     let (reader, writer) = stream.into_split();
     let inbound = StreamReadDriver::new(reader, lowlatency.clone());
-    let (tx, rx) = crate::writer_queue::outbound_channel();
+    let (tx, rx) = crate::stream_link::stream_outbound_channel();
     let writer_handle = WriterHandle::spawn(rx, |queue| writer_task(writer, queue));
     let outbound = Arc::new(StreamWriteDriver::new(tx, lowlatency, subject, endpoints));
     (inbound, outbound, writer_handle)

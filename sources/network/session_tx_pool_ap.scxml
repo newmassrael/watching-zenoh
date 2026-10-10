@@ -1,0 +1,79 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  SPDX-License-Identifier: AGPL-3.0-or-later OR LicenseRef-watching-zenoh-Commercial
+  SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
+-->
+<!--
+  AP session-tx buffer-pool config: the SSOT for the slots a tokio (AP / Linux)
+  stream link's outbound frames live in, from the moment the session is lent
+  one until the link's writer task has written it (ARCHITECTURE section 9.1:
+  "Codec::encode writes directly into a pool slot").
+
+  This is the migration R2739 made for the receive pool, made for the transmit
+  one, and it is born with its consumer: `wz-runtime-tokio`'s writer queue,
+  behind `runtime-zero-copy`. The AP node declared this pool inline at
+  `deploy/ap_mcu_pair.yaml` `ap_node.buffer_pools.session_tx_pool` with no
+  scxml SSOT and no emit, so nothing consumed it and nothing graded its
+  values; the deploy entry is now `{ ref: session_tx_pool_ap }`.
+
+  ## One pool per LINK, not per node
+
+  The receive pool is the node's because a link's read half holds at most one
+  frame at a time. A writer queue holds as many frames as its lanes admit, and
+  a link whose peer stops reading keeps them; a node-wide table would let one
+  such link take every slot from every other link. Upstream sizes its transmit
+  batches per link for the same reason (each link's transmission pipeline owns
+  `queue_size` batches per priority, of the link's batch size). So each
+  stream link's queue owns one instance of this pool.
+
+  ## slot-size 65600 is DERIVED from the largest frame, not chosen
+
+  A stream frame is the length prefix and the payload: the prefix is 2 bytes
+  on the universal path and 4 under `transport-lowlatency`, and the payload is
+  at most `u16::MAX` because the prefix cannot say more and the write half
+  drops a larger frame. So the largest frame is 4 + 65535 = 65539 bytes, and
+  any frame the session can hand a stream link fits ONE slot: a frame past the
+  old 16 KiB spare bound is not a special case. Rounded up to the 64-byte
+  alignment below, as `session_rx_pool_ap.scxml` derives the same figure on the
+  receive side: 65600.
+
+  A slot holds frames back to back, written by one write: the writer queue
+  appends a frame to its lane's newest slot while that slot has room and the
+  writer has not taken it, which is what upstream's batches do on the same
+  stream. On a byte stream the concatenation is the wire, byte for byte.
+
+  ## slot-count 16 is DERIVED from the queue's own bound
+
+  The writer queue admits frames into a lane while the lane holds less than
+  `queue_size * batch_bytes` bytes (zenoh's default queue size is 2 for every
+  priority, and its batch is at most 65535 bytes). Frames pack into slots, so a
+  slot that is not the lane's newest is more than half full unless a frame of
+  more than half a slot did not fit behind it; a lane at its bound therefore
+  holds at most 2 * queue_size + 2 slots, 6 at the default. A session that
+  negotiated no QoS has ONE lane, so 16 covers it with room to spare; a QoS
+  session's lanes share the 16, which covers up to two lanes held at their
+  bound at once and any number that are not. A dry pool is back-pressure, not
+  an error and not an allocation: a sender asking for room is told the lane is
+  congested, as for a full lane, and a frame that must not wait for room (a
+  keep-alive, a close) waits for the writer to free a slot, as upstream's
+  transport messages wait for a batch.
+
+  At 16 x 65600 a link's pool is about 1 MiB of address space, allocated zeroed
+  once when the link is wired, and resident only where frames were written.
+  Upstream's QoS link holds 16 batches of 65535 bytes for the same purpose.
+
+  ## section / alignment / cache-policy
+
+  `heap` / 64 / `none`, as `session_rx_pool_ap.scxml`: an AP host has no
+  `sram1`, and its bus master is the kernel's socket copy, which needs no cache
+  maintenance (ARCHITECTURE section 9.5, the epoll row).
+-->
+<scxml xmlns="http://www.w3.org/2005/07/scxml"
+       xmlns:sce="http://sce.dev/ext"
+       sce:kind="buffer-pool" name="session_tx_pool_ap" version="1.0">
+  <sce:slot-count>16</sce:slot-count>
+  <sce:slot-size>65600</sce:slot-size>
+  <sce:section>heap</sce:section>
+  <sce:alignment>64</sce:alignment>
+  <sce:cache-policy>none</sce:cache-policy>
+</scxml>

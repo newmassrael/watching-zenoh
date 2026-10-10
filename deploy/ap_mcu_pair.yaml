@@ -228,7 +228,14 @@ machines:
       # path's own bound (prefix width 4 + `u16::MAX` payload = 65539, rounded
       # to this node's 64-byte alignment). slot_count 64 carries over unchanged.
       session_rx_pool:  { ref: session_rx_pool_ap }
-      session_tx_pool:  { slot_count: 64, slot_size: 4096, section: heap, alignment: 64, dma_channel: ~, cache_policy: none }
+      # R3250 — the transmit pool made the same move, born with its consumer
+      # (the pooled stream writer queue under `runtime-zero-copy`). The inline
+      # block said 64 x 4096: a slot too small for one frame (a stream frame is
+      # up to 4 + 65535 bytes) and a count no consumer read. The SSOT derives
+      # 65600 from the largest frame and 16 from the queue's byte bound, and the
+      # pool is one per link, not per node; the derivations are in
+      # `sources/network/session_tx_pool_ap.scxml`.
+      session_tx_pool:  { ref: session_tx_pool_ap }
       # R311in — reassembly_pool's def lives ONLY in
       # `sources/network/reassembly_pool_ap.scxml` (sce:kind=buffer-pool),
       # referenced by name; values NOT duplicated. AP is heap-resident /
