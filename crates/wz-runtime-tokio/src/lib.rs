@@ -4274,7 +4274,7 @@ mod udp_multicast_config_tests {
     /// refuses the ones past `net.ipv4.igmp_max_memberships` (20 by default) with `ENOBUFS`.
     /// It is a refusal of the same call a host with no default route meets with `ENODEV`
     /// when the join is made on `INADDR_ANY`, which is what the namespace leg
-    /// (`pico_zscout_legs_hold_in_a_namespace_with_no_default_route`) holds end to end.
+    /// (`pico_zscout_legs_hold_in_a_namespace_with_no_default_route_against_a_zenohd`) holds end to end.
     /// Before the skip a scout and a responder on such a host failed their whole bind, and
     /// the real pico and zenoh found routers where wz found none.
     ///

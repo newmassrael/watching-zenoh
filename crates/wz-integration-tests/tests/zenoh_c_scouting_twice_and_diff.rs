@@ -1194,7 +1194,7 @@ fn a_node_answers_a_scout_with_the_hello_the_real_library_sends_on_wz_and_libzen
 /// route that join was refused: a node that scouted ended its open, and a node that listened did
 /// not answer (`left: []` against `["hello whatami=peer locators=[tcp/127.0.0.1:PORT]"]` in the
 /// answering leg, measured before the change). The pico drop-in has its own copy of this witness
-/// (`pico_zscout_legs_hold_in_a_namespace_with_no_default_route`).
+/// (`pico_zscout_legs_hold_in_a_namespace_with_no_default_route_against_a_zenohd`).
 ///
 /// The legs are the ones above, re-run as they are inside the namespace through this test binary
 /// ([`NetnsPair::rerun_tests_inside`], which passes this process's environment on, so the legs

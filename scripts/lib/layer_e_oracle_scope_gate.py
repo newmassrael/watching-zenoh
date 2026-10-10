@@ -86,6 +86,14 @@ SWEEP = re.compile(
 )
 TOKEN = re.compile(r"--skip\s+(\S+)")
 FN = re.compile(r"^\s*(?:pub\s+)?(?:async\s+)?fn\s+(\w+)\s*\(", re.M)
+#: A test's own `#[ignore = "reason"]` text. A test that reaches zenohd through a
+#: re-run of other tests (a network-namespace leg) calls no helper from
+#: `UNPROVISIONED_HELPERS` itself, so the file-level scan cannot see it; its reason
+#: is where it says what it needs. Hosted run 37992839539: Layer E selected the
+#: no-default-route scout leg (reason: "needs a network namespace and zenohd"),
+#: whose name carried no `zenohd` token, and its inner leg panicked on the missing
+#: binary.
+IGNORE_REASON = re.compile(r'#\[ignore\s*=\s*"((?:[^"\\]|\\.)*)"', re.S)
 
 #: Below this the scan stopped matching the tree rather than the tree becoming
 #: clean. Layer E selects over a hundred ignored tests.
@@ -126,8 +134,11 @@ def scan(root: pathlib.Path):
             if any(tok in name for tok in tokens):
                 continue
             selected.append((name, path.name))
+            reasons = IGNORE_REASON.findall(head)
             if needs:
                 offenders.append((name, path.name, needs[0]))
+            elif reasons and "zenohd" in reasons[-1].lower():
+                offenders.append((name, path.name, "an ignore reason naming zenohd"))
     return selected, offenders, tokens
 
 
@@ -195,6 +206,9 @@ def selftest() -> int:
          TOK + IGN + "async fn wz_plain_case(x: u8) {\n let y = 1;\n}\n", 0),
         ("a NON-ignored test is outside the sweep entirely",
          TOK + "async fn wz_not_ignored(x: u8) {\n" + CALL + "}\n", 0),
+        ("a selected test whose ignore reason names zenohd is an OFFENDER",
+         TOK + '#[ignore = "needs a network namespace and zenohd"]\n'
+         + "async fn wz_netns_leg(x: u8) {\n let y = 1;\n}\n", 1),
         ("the parameterised tokio attribute is recognised (the first draft's bug)",
          TOK + IGN + "async fn wz_param_attr(x: u8) {\n" + CALL + "}\n", 1),
     ]

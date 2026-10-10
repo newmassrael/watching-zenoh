@@ -2750,7 +2750,7 @@ fn pico_zscout_source_on_wz_capi_reports_every_zenohd_on_the_group() {
 // wz-proves: scouting-active wz->zenohd partial
 #[test]
 #[ignore = "needs a network namespace and zenohd; run by run-ci Layer Z after probing for a namespace"]
-fn pico_zscout_legs_hold_in_a_namespace_with_no_default_route() {
+fn pico_zscout_legs_hold_in_a_namespace_with_no_default_route_against_a_zenohd() {
     let netns = NetnsPair::up("scoutnoroute", "10.251.12.1/30", "10.251.12.2/30");
     let routes = netns.default_routes();
     assert!(

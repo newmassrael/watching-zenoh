@@ -519,7 +519,7 @@ pub mod common {
             .arg("--help")
             .stdin(Stdio::null())
             .stdout(Stdio::null())
-            .output()
+            .output_bounded()
         {
             Ok(out) => String::from_utf8_lossy(&out.stderr).into_owned(),
             Err(e) => return fallback(format!("{} would not run: {e}", demo.display())),
@@ -579,7 +579,7 @@ pub mod common {
         }
         let out = cmd
             .stdin(Stdio::null())
-            .output()
+            .output_bounded()
             .map_err(|e| format!("could not run `cargo tree`: {e}"))?;
         if !out.status.success() {
             return Err(format!(

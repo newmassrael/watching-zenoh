@@ -17889,7 +17889,7 @@ layer_z_zenohd_interop() {
     else
         _runci_guarded_test Z 1 env WZ_ZENOHD_BIN="$zenohd" cargo test -p wz-integration-tests \
             --test pico_c_examples_on_wz_capi_dropin \
-            pico_zscout_legs_hold_in_a_namespace_with_no_default_route \
+            pico_zscout_legs_hold_in_a_namespace_with_no_default_route_against_a_zenohd \
             -- --ignored --quiet --test-threads=1 || return 1
     fi
     # R311y533 -- the LIVELINESS SNAPSHOT leg, moved here from Layer E because
