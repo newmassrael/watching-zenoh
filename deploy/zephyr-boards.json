@@ -82,6 +82,19 @@
       "conf_overlay": ["overlays/t2g_tx_pool.conf"],
       "verdict_steps": "HW.26 to HW.30",
       "note": "The onboard RMII image with the transmit pool (ARCHITECTURE section 9.1, CONFIG_WZ_CYT4BF_TX_POOL): 8 slots of 1536 bytes from sources/network/session_tx_pool_mcu.scxml, placed in Zephyr's non-cacheable section beside the MAC's rings. The session encodes each outbound datagram into a slot, lwIP writes its headers in front of it in the same slot, and the MAC's transmit descriptor is written with the slot's address; frames lwIP sends from its own heap are copied into the ring, because the board reads in place only inside the pool's window and cleans no cache. The generated pool's transmit edges (armed, started, complete, un-armed) follow each frame, and the console prints the pool's place beside the section's bounds and, every 10 seconds when they moved, the MAC's in-place and copied counts, the last in-place descriptor's address and the pool's own counts. Nothing has run on silicon with it: not a frame read out of a slot by the controller, not a frame that starts 2 bytes past a word boundary inside a slot (as lwIP's own heap frames do; the vendor reference driver checks no transmit buffer alignment), not the bytes on the wire. The row stays BUILT until a lab records HW.26 to HW.30 of HARDWARE_VERDICT.md on this image; HW.26 carries the onboard verdict for this image without naming its steps, so that the row's steps are one range."
+    },
+    {
+      "board": "kit_t2g_b_h_lite/cyt4bf8cds/m7_0",
+      "link": "rmii-dp83825i-rx-pool",
+      "app": "zephyr-admin-node",
+      "network": "lwip-mac",
+      "rust_target": "thumbv7em-none-eabi",
+      "grade": "BUILT",
+      "witness": {"lane": "Qzb"},
+      "requires": ["zephyr-cm0p-launcher"],
+      "conf_overlay": ["overlays/t2g_rx_pool.conf"],
+      "verdict_steps": "HW.31 to HW.35",
+      "note": "The onboard RMII image with the receive pool (ARCHITECTURE section 9.2, CONFIG_WZ_CYT4BF_RX_POOL): 16 slots of 1536 bytes from sources/network/eth_rx_pool_mcu.scxml, placed in Zephyr's non-cacheable section beside the MAC's rings, which then hold no receive buffer of their own. Each receive descriptor is armed with a slot; a received frame is lent to lwIP in the slot the controller wrote it into and the descriptor is armed again with another slot; the session socket keeps a lent datagram as the pbuf it arrived in, and the session loop's in-place receive dispatches it from the slot, so a datagram that fits one frame crosses from the wire to the session dispatch with no copy. A datagram lwIP reassembles from fragments, and a frame past the eight lwIP may hold lent, is copied, and counted. The generated pool's receive edges (armed, started, complete, returned) follow each frame, a descriptor left unarmed because every slot is out is counted as a refusal, and the console prints the pool's place beside the section's bounds and, every 10 seconds when they moved, the MAC's, the pool's, lwIP's and the session socket's counts. Nothing has run on silicon with it: not a frame written into a slot by the controller, not a frame read in place from uncached memory, not the session's stack with the in-place receive. The row stays BUILT until a lab records HW.31 to HW.35 of HARDWARE_VERDICT.md on this image; HW.31 carries the onboard verdict for this image without naming its steps, so that the row's steps are one range."
     }
   ],
   "companions": [

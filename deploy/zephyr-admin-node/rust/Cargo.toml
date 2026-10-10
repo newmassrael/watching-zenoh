@@ -53,6 +53,20 @@ mac-cyt4bf = ["dep:wz-eth-mac-cyt4bf"]
 # named directly only to turn its `tx-pool` feature on; the facade's
 # `session-lwip` already links it.
 tx-pool = ["mac-cyt4bf", "dep:wz-link-lwip", "wz-link-lwip/tx-pool"]
+# The MAC's receive descriptors are armed with slots of a receive pool placed in
+# the non-cacheable section, a received frame is lent to lwIP in its slot, and the
+# session loop dispatches a lent datagram where the controller wrote it
+# (`CONFIG_WZ_CYT4BF_RX_POOL`, ARCHITECTURE section 9.2): the pool is the lwIP link
+# crate's `mac-rx-pool`, and the in-place receive is the lwIP session crate's
+# `rx-in-place`, which also has its socket hold lent frames. Both crates are named
+# directly only to turn those features on; the facade's `session-lwip` links them.
+rx-pool = [
+    "mac-cyt4bf",
+    "dep:wz-link-lwip",
+    "wz-link-lwip/mac-rx-pool",
+    "dep:wz-session-lwip",
+    "wz-session-lwip/rx-in-place",
+]
 # Read the TC6 identity registers over the SCB master on the kit's MikroBUS socket
 # at boot and log them (`CONFIG_WZ_T2G_SPI_PROBE`): what a lab runs to learn which
 # chip an expansion board carries, and the first evidence an SPI master would give.
@@ -99,6 +113,9 @@ wz-eth-mac-cyt4bf = { path = "../../../crates/wz-eth-mac-cyt4bf", optional = tru
 # The transmit pool (`tx-pool`): the same crate the facade's `session-lwip` links,
 # with the pool turned on.
 wz-link-lwip = { path = "../../../crates/wz-link-lwip", optional = true }
+# The in-place receive (`rx-pool`): the same crate the facade's `session-lwip`
+# links, with `rx-in-place` turned on, and no default features, as the facade has.
+wz-session-lwip = { path = "../../../crates/wz-session-lwip", optional = true, default-features = false }
 # The SPI probe's two halves: the TC6 protocol, and the rules of the SCB master it
 # runs over. Only `CONFIG_WZ_T2G_SPI_PROBE` pulls the first in; either it or
 # `CONFIG_WZ_T1S` pulls in the second.

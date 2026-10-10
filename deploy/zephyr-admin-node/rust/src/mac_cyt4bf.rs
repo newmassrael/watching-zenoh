@@ -43,6 +43,13 @@ const ETH0_BASE: usize = 0x4048_0000;
 const RX_SLOTS: usize = 8;
 const TX_SLOTS: usize = 4;
 
+/// Receive buffers the DMA area holds: one per descriptor, or none when the
+/// receive ring draws them from the receive pool (`CONFIG_WZ_CYT4BF_RX_POOL`).
+#[cfg(not(feature = "rx-pool"))]
+const RX_BUFS: usize = RX_SLOTS;
+#[cfg(feature = "rx-pool")]
+const RX_BUFS: usize = 0;
+
 /// The DMA memory, in Zephyr's non-cacheable section.
 ///
 /// The controller reads and writes it behind the CPU's back, and on a Cortex-M7
@@ -57,7 +64,7 @@ const TX_SLOTS: usize = 4;
 /// builds here are not applied at boot, and the RAM holds what it held at reset.
 /// The driver therefore writes the whole area itself before it uses it.
 #[link_section = ".nocache"]
-static mut DMA: DmaArea<RX_SLOTS, TX_SLOTS> = DmaArea::new();
+static mut DMA: DmaArea<RX_SLOTS, TX_SLOTS, RX_BUFS> = DmaArea::new();
 
 /// `DMA` may be handed out once.
 static DMA_TAKEN: AtomicBool = AtomicBool::new(false);
@@ -72,7 +79,17 @@ static DMA_TAKEN: AtomicBool = AtomicBool::new(false);
 static mut TX_POOL: wz_link_lwip::tx_pool::TxPoolStorage =
     wz_link_lwip::tx_pool::TxPoolStorage::uninit();
 
-#[cfg(feature = "tx-pool")]
+/// ARCHITECTURE section 9.2 -- the receive pool the MAC's receive descriptors are
+/// armed with (`CONFIG_WZ_CYT4BF_RX_POOL`), in the same non-cacheable section as the
+/// rings, for the same reasons: the controller writes it behind the CPU's back, and
+/// this board invalidates no cache. `NOLOAD` too, so it holds nothing until
+/// `mac_rx_pool::install` writes all of it.
+#[cfg(feature = "rx-pool")]
+#[link_section = ".nocache"]
+static mut RX_POOL: wz_link_lwip::mac_rx_pool::RxPoolStorage =
+    wz_link_lwip::mac_rx_pool::RxPoolStorage::uninit();
+
+#[cfg(any(feature = "tx-pool", feature = "rx-pool"))]
 extern "C" {
     /// The bounds of the non-cacheable section, from Zephyr's linker script
     /// (`include/zephyr/arch/common/nocache.ld`, `CONFIG_NOCACHE_MEMORY`). Read only
@@ -81,9 +98,23 @@ extern "C" {
     static _nocache_ram_end: u8;
 }
 
+/// The bounds of the non-cacheable section, as addresses.
+#[cfg(any(feature = "tx-pool", feature = "rx-pool"))]
+fn nocache_section() -> (usize, usize) {
+    // Only the addresses of the linker's symbols are taken, never their contents.
+    (
+        core::ptr::addr_of!(_nocache_ram_start) as usize,
+        core::ptr::addr_of!(_nocache_ram_end) as usize,
+    )
+}
+
 /// How often the transmit counts are printed when they have moved.
 #[cfg(feature = "tx-pool")]
 const TX_REPORT_MS: u64 = 10_000;
+
+/// How often the receive counts are printed when they have moved.
+#[cfg(feature = "rx-pool")]
+const RX_REPORT_MS: u64 = 10_000;
 
 extern "C" {
     /// Route and configure ETH0's pins for RMII (boards/<board>/*.c). 0 on
@@ -103,14 +134,31 @@ fn now_us() -> u64 {
 
 /// The MAC, as the lwIP backend holds it.
 pub struct T2gMac {
-    inner: Cyt4bfMac<Cyt4bfBoard, RX_SLOTS, TX_SLOTS>,
+    inner: Cyt4bfMac<Cyt4bfBoard, RX_SLOTS, TX_SLOTS, RX_BUFS>,
     /// When the transmit counts are next looked at, and what they were when last
     /// printed.
     #[cfg(feature = "tx-pool")]
     next_tx_report_ms: u64,
     #[cfg(feature = "tx-pool")]
     tx_reported: Option<TxReport>,
+    /// Likewise for the receive counts.
+    #[cfg(feature = "rx-pool")]
+    next_rx_report_ms: u64,
+    #[cfg(feature = "rx-pool")]
+    rx_reported: Option<RxReport>,
 }
+
+/// What a receive-pool line says: the MAC's counts, the pool's free slots and
+/// size, the slots the ring holds, lwIP's frames taken lent and copied, and the
+/// session socket's datagrams read in place and copied.
+#[cfg(feature = "rx-pool")]
+type RxReport = (
+    wz_eth_mac_cyt4bf::RxCounts,
+    (usize, usize),
+    usize,
+    (u32, u32),
+    (u32, u32),
+);
 
 /// What a transmit-pool line says: the MAC's counts and the pool's.
 #[cfg(feature = "tx-pool")]
@@ -155,6 +203,26 @@ impl EthernetMac for T2gMac {
     fn reap_tx(&mut self, done: &mut dyn FnMut(u32)) {
         self.inner.reap_tx(done);
     }
+
+    // ARCHITECTURE section 9.2, with the receive pool: the MAC lends each received
+    // frame in the pool slot the controller wrote it into, lwIP reads it there, and
+    // the slot comes back when lwIP (or the session socket that holds it) lets go.
+    // Without the pool the MAC is asked for copies, as before: its own ring would
+    // keep a descriptor out for every frame the stack held.
+    #[cfg(feature = "rx-pool")]
+    fn loans_rx(&self) -> bool {
+        self.inner.loans_rx()
+    }
+
+    #[cfg(feature = "rx-pool")]
+    fn receive_loan(&mut self) -> Option<wz::runtime_core::RxLoan> {
+        self.inner.receive_loan()
+    }
+
+    #[cfg(feature = "rx-pool")]
+    fn return_rx(&mut self, cookie: u32) {
+        self.inner.return_rx(cookie);
+    }
 }
 
 impl BoardMac for T2gMac {
@@ -168,7 +236,82 @@ impl BoardMac for T2gMac {
         }
         #[cfg(feature = "tx-pool")]
         self.report_tx(now_ms);
+        #[cfg(feature = "rx-pool")]
+        self.report_rx(now_ms);
     }
+}
+
+#[cfg(feature = "rx-pool")]
+impl T2gMac {
+    /// One console line, at most every `RX_REPORT_MS` and only when something
+    /// moved, with what a bench needs to tell a frame read in its slot from a copy:
+    /// the MAC's frames lent from a slot and given back, its descriptors left
+    /// unarmed for want of a slot, its frames dropped and copied; the pool's free
+    /// slots and the slots the ring holds; the frames lwIP took lent and copied in;
+    /// and the session socket's datagrams read in place and copied.
+    fn report_rx(&mut self, now_ms: u64) {
+        if now_ms < self.next_rx_report_ms {
+            return;
+        }
+        self.next_rx_report_ms = now_ms + RX_REPORT_MS;
+        let (Some(pool), Some(in_ring)) =
+            (self.inner.rx_pool_free(), self.inner.rx_slots_in_ring())
+        else {
+            return;
+        };
+        let now = (
+            self.inner.rx_counts(),
+            pool,
+            in_ring,
+            wz_link_lwip::ethernet::rx_frames_taken(),
+            wz_link_lwip::rx_hold::counts(),
+        );
+        if self.rx_reported == Some(now) {
+            return;
+        }
+        self.rx_reported = Some(now);
+        let (mac, (free, size), in_ring, (taken_lent, taken_copied), (read, copied)) = now;
+        log_line(format!(
+            "wz: rx-pool: lent {}, returned {}, refused {}, dropped {}, copied {}; \
+             pool free {}, in the ring {}, of {}; lwIP took {} lent, {} copied; \
+             the session read {} in place, {} copied",
+            mac.lent,
+            mac.returned,
+            mac.refused,
+            mac.dropped,
+            mac.copied,
+            free,
+            in_ring,
+            size,
+            taken_lent,
+            taken_copied,
+            read,
+            copied,
+        ));
+    }
+}
+
+/// Install the receive pool and say where it is, beside the bounds of the section
+/// it is in. Returns the pool, for the MAC to arm its receive ring with.
+#[cfg(feature = "rx-pool")]
+fn install_rx_pool() -> &'static mut wz_link_lwip::mac_rx_pool::EthRxRing {
+    use wz::runtime_core::MacRxPool;
+    // SAFETY: called once, from `open`, after `DMA_TAKEN` made `open` itself run
+    // once; nothing else names the static.
+    let storage = unsafe { &mut *core::ptr::addr_of_mut!(RX_POOL) };
+    let pool = wz_link_lwip::mac_rx_pool::install(storage);
+    let (start, len) = pool.span();
+    let (section_start, section_end) = nocache_section();
+    log_line(format!(
+        "wz: eth0: receive pool of {} slots at {:#010x} to {:#010x}, in the non-cacheable \
+         section {:#010x} to {:#010x}, written in place by the MAC",
+        pool.slot_count(),
+        start as usize,
+        start as usize + len,
+        section_start,
+        section_end,
+    ));
+    pool
 }
 
 #[cfg(feature = "tx-pool")]
@@ -278,7 +421,7 @@ pub fn open(
     }
     // SAFETY: `DMA_TAKEN` made this the only borrow of the static, and nothing
     // else names it.
-    let area: &'static mut DmaArea<RX_SLOTS, TX_SLOTS> =
+    let area: &'static mut DmaArea<RX_SLOTS, TX_SLOTS, RX_BUFS> =
         unsafe { &mut *core::ptr::addr_of_mut!(DMA) };
     // SAFETY: ETH0_BASE is the MXETH block of every CYT4BF part, used by nothing
     // else in this image, `delay_us` waits at least what it is told, and the
@@ -297,7 +440,21 @@ pub fn open(
     };
     let mut config = Config::new(mac_address);
     config.ref_clock = ref_clock;
-    let mut inner = Cyt4bfMac::new(board, area, &config).map_err(|e| match e {
+    // With the receive pool, the controller writes received frames into the pool's
+    // slots and nowhere else, and the MAC refuses a pool outside that window.
+    #[cfg(feature = "rx-pool")]
+    let made = {
+        use wz::runtime_core::MacRxPool;
+        let pool = install_rx_pool();
+        let (start, len) = pool.span();
+        // SAFETY: the pool is in `.nocache`, system SRAM the Ethernet DMA reaches
+        // (the rings beside it are written there) and the MPU marks uncached.
+        let board = unsafe { board.with_receive_window(start, len) };
+        Cyt4bfMac::new_pooled(board, area, pool, &config)
+    };
+    #[cfg(not(feature = "rx-pool"))]
+    let made = Cyt4bfMac::new(board, area, &config);
+    let mut inner = made.map_err(|e| match e {
         wz_eth_mac_cyt4bf::InitError::InvalidMac => {
             c"wz: FAIL - the MAC address is multicast or zero"
         }
@@ -312,6 +469,18 @@ pub fn open(
                 "wz: eth0: DESIGNCFG_DEBUG1 DMA_BUS_WIDTH reads {field}; the driver knows 1, 2 and 4"
             ));
             c"wz: FAIL - the MAC's DMA bus width is not one this driver knows"
+        }
+        wz_eth_mac_cyt4bf::InitError::RxPoolSlotTooSmall => {
+            c"wz: FAIL - the receive pool's slots are smaller than the MAC's receive buffer"
+        }
+        wz_eth_mac_cyt4bf::InitError::RxPoolTooFewSlots => {
+            c"wz: FAIL - the receive pool has fewer slots than the receive ring"
+        }
+        wz_eth_mac_cyt4bf::InitError::RxPoolMisaligned => {
+            c"wz: FAIL - the receive pool's slots are not on 32-byte boundaries"
+        }
+        wz_eth_mac_cyt4bf::InitError::RxPoolOutsideWindow => {
+            c"wz: FAIL - the receive pool is not where the MAC may write it in place"
         }
     })?;
     stage(&format!(
@@ -337,5 +506,9 @@ pub fn open(
         next_tx_report_ms: 0,
         #[cfg(feature = "tx-pool")]
         tx_reported: None,
+        #[cfg(feature = "rx-pool")]
+        next_rx_report_ms: 0,
+        #[cfg(feature = "rx-pool")]
+        rx_reported: None,
     })
 }

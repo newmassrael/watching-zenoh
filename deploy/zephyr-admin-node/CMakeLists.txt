@@ -66,6 +66,16 @@ elseif(CONFIG_WZ_NET_BACKEND_LWIP_MAC)
       endif()
       list(APPEND backend_feature tx-pool)
     endif()
+    # The receive pool the MAC's receive ring draws its buffers from, in the same
+    # section for the same reason: the controller writes its slots and the board
+    # invalidates no cache.
+    if(CONFIG_WZ_CYT4BF_RX_POOL)
+      if(NOT CONFIG_NOCACHE_MEMORY)
+        message(FATAL_ERROR "wz: CONFIG_WZ_CYT4BF_RX_POOL places its slots in the non-cacheable "
+                            "section, which needs CONFIG_NOCACHE_MEMORY=y.")
+      endif()
+      list(APPEND backend_feature rx-pool)
+    endif()
     # The SPI master on the MikroBUS socket, which the SPI probe and the 10BASE-T1S
     # interface both use, and not together: both open SCB3. The refusal is made here and
     # not as a Kconfig dependency because an unmet dependency only turns the symbol off

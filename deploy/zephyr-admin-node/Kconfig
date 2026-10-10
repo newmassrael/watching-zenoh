@@ -180,6 +180,25 @@ config WZ_CYT4BF_TX_POOL
 	  (HARDWARE_VERDICT.md, steps HW.26 to HW.30). Off by default: nothing has
 	  run on silicon with it.
 
+config WZ_CYT4BF_RX_POOL
+	bool "Receive the node's frames into pool slots and read them where they lie"
+	help
+	  ARCHITECTURE section 9.2. A receive pool of 16 slots of 1536 bytes
+	  (sources/network/eth_rx_pool_mcu.scxml) is placed in the
+	  non-cacheable section beside the MAC's rings, and the MAC's receive
+	  descriptors are armed with its slots instead of buffers of the MAC's
+	  own. A received frame is lent to lwIP in the slot the controller wrote
+	  it into, the descriptor is armed again at once with another slot, and
+	  the session socket keeps a lent datagram as it arrived, so the session
+	  dispatches it from the slot (the session loop's in-place receive). A
+	  datagram lwIP reassembles from fragments, and a frame past the eight
+	  lwIP may hold lent, is copied as without this.
+
+	  The console prints where the pool is, and every 10 seconds, when they
+	  moved, the counts that tell a frame read in its slot from a copy
+	  (HARDWARE_VERDICT.md, steps HW.31 to HW.35). Off by default: nothing
+	  has run on silicon with it.
+
 choice WZ_CYT4BF_PINS
 	prompt "ETH0 pin routing"
 

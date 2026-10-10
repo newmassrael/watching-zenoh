@@ -7,8 +7,9 @@ holds a run that printed every step below that the row names, and
 names. A row names all of them unless its `verdict_steps` says otherwise, as the
 onboard port's row does for the steps it was recorded against (HW.0 to HW.7); the
 steps for the second interface follow them (HW.8 to HW.25, which that row names as
-the range HW.0 to HW.25), and the steps for the transmit pool image are at the end
-of this file (HW.26 to HW.30, which that row names alone).
+the range HW.0 to HW.25), and the steps for the transmit pool image and the receive
+pool image are at the end of this file (HW.26 to HW.30 and HW.31 to HW.35, which
+their rows name alone).
 
 The steps are run by one program, `scripts/lib/admin_node_verdict.py`. Layer Qza
 runs it in its `qemu` mode against the emulated node, labelled `Qza`; a lab runs
@@ -499,3 +500,90 @@ the run did not settle: at least a frame that needed IP fragmentation (none does
 this batch size), the pool running dry under load (the lend then falls back to
 lwIP's heap, and the counts say how often), and a start after the board's power was
 removed.
+
+## The receive pool image: steps HW.31 to HW.35
+
+The onboard RMII image built with `overlays/t2g_rx_pool.conf`
+(`CONFIG_WZ_CYT4BF_RX_POOL`, ARCHITECTURE section 9.2). The MAC's receive descriptors
+are armed with slots of a receive pool in Zephyr's non-cacheable section, a received
+frame is lent to lwIP in the slot the controller wrote it into, the descriptor is armed
+again with another slot, and the session socket keeps a lent datagram as it arrived, so
+the session loop dispatches it from the slot. What these steps have to show is that
+frames arrived in pool slots, that the session read its datagrams there and not from a
+copy, and that no slot was lost. Nothing here has run on a board when this is written:
+every line quoted was read out of the firmware source.
+
+The row for this image names HW.31 to HW.35 in its `verdict_steps`. HW.31 stands for
+the onboard verdict on THIS image, which is another image than the onboard row's, and
+it does not name those steps, so that the row's steps are one range. Its HW.7 is the
+stack measurement of the session loop's in-place receive, which dispatches a datagram
+from inside the socket's lend and so runs one call deeper than the copying loop.
+
+### Console lines these steps read
+
+Printed by `deploy/zephyr-admin-node/rust/src/mac_cyt4bf.rs`, each on its own line:
+
+```
+pool place   ^wz: eth0: receive pool of 16 slots at (0x[0-9a-f]{8}) to (0x[0-9a-f]{8}), in the non-cacheable section (0x[0-9a-f]{8}) to (0x[0-9a-f]{8}), written in place by the MAC$
+rx counts    ^wz: rx-pool: lent ([0-9]+), returned ([0-9]+), refused ([0-9]+), dropped ([0-9]+), copied ([0-9]+); pool free ([0-9]+), in the ring ([0-9]+), of 16; lwIP took ([0-9]+) lent, ([0-9]+) copied; the session read ([0-9]+) in place, ([0-9]+) copied$
+```
+
+The pool line is printed once, before the PHY is looked for. A counts line is printed
+at most every 10 seconds, and only when a count moved. The first five counts are the
+MAC's: frames it lent from a slot, lent frames given back, descriptors it took a frame
+out of and could not arm again because every slot was out, frames it dropped whole (not
+one buffer long), frames it copied out (none on this image, whose lwIP takes every frame
+lent). `pool free` is the generated pool's own count of free slots and `in the ring` the
+slots the receive descriptors hold. `lwIP took` is the shim's count of frames it wrapped
+in place and of frames it copied into a pbuf of its own (a frame past the eight it holds
+lent at once). `the session read` is the session socket's count of datagrams the session
+loop read in their slot and of datagrams it copied (a datagram reassembled from
+fragments, or one that did not arrive lent).
+
+### The steps
+
+```
+HW.31 the onboard verdict held on the receive pool image: its eight onboard sentences each ended OK on this image
+HW.32 the pool sits where the MAC writes it uncached: slots <start> to <end> inside the non-cacheable section <section start> to <section end>
+HW.33 frames arrived in pool slots and the session read them there: lent <L>, lwIP took <T> lent and the session read <I> in place, each above zero
+HW.34 every slot came home: on every counts line free, in the ring and lent minus returned add up to 16, and in the ring is at most 8
+HW.35 nothing on the session's path was copied: on the last counts line refused, lwIP took copied and the session read copied are each 0
+```
+
+### How each step is read
+
+HW.31. The record holds the sentences of HW.0 to HW.7 printed on this image, each
+ending ` - OK`, outside this step's sentence.
+
+HW.32. From the pool line: the slots' end minus start is 24576 (16 times 1536), start
+is a multiple of 32, and start and end lie inside the section's bounds. The section
+bounds are Zephyr's own linker symbols (`_nocache_ram_start`, `_nocache_ram_end`), the
+section the MAC's descriptor rings are in and that `CONFIG_NOCACHE_MEMORY` has the MPU
+mark non-cacheable.
+
+HW.33. After a host has held a session with the node for at least 30 seconds (HW.1 to
+HW.5 leave one), the last counts line has `lent`, `lwIP took ... lent` and `the session
+read ... in place` above zero. The sessions of HW.1 to HW.5 are held with the datagrams
+the session read in place, so a frame read from a stale cache line would have failed
+those steps; this step says the datagrams were read there at all.
+
+HW.34. Each counts line is consistent with itself: `pool free` plus `in the ring` plus
+`lent` minus `returned` equals 16 (every slot is free, held by a descriptor, or lent to
+lwIP at that moment), and `in the ring` is at most 8 (the descriptors). A line that
+breaks either is a slot the lifecycle lost.
+
+HW.35. On the last counts line `refused` is 0 (the ring was never left without a slot),
+`lwIP took ... copied` is 0 (every frame was taken in place) and `the session read ...
+copied` is 0 (every datagram the session read, it read in its slot). At the bench's
+batch size no datagram needs IP fragmentation; a run that drove one would see it here,
+counted, and that is the documented copy and not a failure of the slot path, so a record
+that drove fragments states it and quotes the counts.
+
+### What the ledger entry holds for these steps
+
+Everything the entry holds for HW.0 to HW.7 (with the stack line of HW.7 quoted), and the
+pool line and every counts line of the boot, verbatim, and what the run did not settle:
+at least the pool running dry under load (the descriptor is then left unarmed and the
+controller drops the frame, and `refused` says how often), a datagram reassembled from
+fragments, the 10BASE-T1S interface beside it (whose MAC does not lend, so its frames are
+copied in and counted), and a start after the board's power was removed.
