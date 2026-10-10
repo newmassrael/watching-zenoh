@@ -525,8 +525,9 @@ session is established in HW.5).
 
 Everything the entry holds for HW.0 to HW.7, and the pool line and every counts line
 of the boot, verbatim, the capture's file name and its count of datagrams, and what
-the run did not settle: at least a frame that needed IP fragmentation (none does at
-this batch size), the pool running dry under load (the lend then falls back to
+the run did not settle: at least a frame that needed IP fragmentation (the node's
+batch of 1500 bytes lets a datagram past 1472 bytes need it, and HW.30 then fails on
+the fragments), the pool running dry under load (the lend then falls back to
 lwIP's heap, and the counts say how often), and a start after the board's power was
 removed.
 
@@ -613,10 +614,13 @@ breaks either is a slot the lifecycle lost.
 
 HW.35. On the last counts line `refused` is 0 (the ring was never left without a slot),
 `lwIP took ... copied` is 0 (every frame was taken in place) and `the session read ...
-copied` is 0 (every datagram the session read, it read in its slot). At the bench's
-batch size no datagram needs IP fragmentation; a run that drove one would see it here,
-counted, and that is the documented copy and not a failure of the slot path, so a record
-that drove fragments states it and quotes the counts.
+copied` is 0 (every datagram the session read, it read in its slot). The node
+negotiates a batch of 1500 bytes (`BATCH_SIZE`), so a datagram a router fills past
+1472 bytes crosses a 1500-byte Ethernet link in fragments, which lwIP reassembles and
+the session socket copies; a run that drove one sees it here, counted, and this step
+fails on it although the slot path did nothing wrong, so a record that drove fragments
+states it and quotes the counts. When `lwIP took ... copied` is 0, every copy the
+session read is such a datagram, and the program's reason for the failure says so.
 
 ### What the ledger entry holds for these steps
 
