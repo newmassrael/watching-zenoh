@@ -1669,7 +1669,7 @@ pub fn new_session_engine<R: SessionRuntime, T: TimeSource>(
 // ── reassembly-pool drive (reassembly-gated; `reassembly` implies `codec-frame`,
 //    so `parse_frame_payload` above is in scope here too) ──
 #[cfg(feature = "reassembly")]
-use crate::driver_loop::{reassembled_frame_outcome, IterationEvent, ReassemblyDropReason};
+use crate::driver_loop::{reassembled_chain_outcome, IterationEvent, ReassemblyDropReason};
 #[cfg(feature = "reassembly")]
 use crate::reassembly_dispatch::{Fragment as ReassemblyFragment, ReassemblyDispatcher};
 
@@ -1747,7 +1747,10 @@ pub fn report_outcome_reassembling<R, T, const SLOTS: usize, const CAP: usize, S
     let mut completed: Option<DriverLoopOutcome> = None;
     let ingest_outcome = R::with_mutex_mut(&actions.inbound_peer_zid, |zid_slot| {
         let zid: &[u8] = zid_slot.as_deref().unwrap_or(&[]);
-        reasm.ingest(
+        // ARCHITECTURE section 9.3 -- the completed chain is LENT out of the
+        // arena when it can be, so the reassembled message is decoded where its
+        // fragments were staged and nothing copies it a second time.
+        reasm.ingest_lending(
             ReassemblyFragment {
                 peer_key: zid,
                 reliable: *reliable,
@@ -1763,12 +1766,12 @@ pub fn report_outcome_reassembling<R, T, const SLOTS: usize, const CAP: usize, S
             },
             sn_mask,
             now_ms,
-            |msg| {
+            |chain| {
                 // R311y221 — the reassembled whole-frame carries the chain's
                 // band (the `(peer, reliable, priority)` key above), so a
                 // fragmented prioritized Put delivers on the same band a
                 // single-frame Put would.
-                completed = Some(reassembled_frame_outcome(*reliable, *sn, *priority, msg));
+                completed = Some(reassembled_chain_outcome(*reliable, *sn, *priority, chain));
             },
         )
     });

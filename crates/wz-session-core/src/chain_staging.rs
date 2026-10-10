@@ -170,6 +170,26 @@ pub trait ChainStaging<const SLOTS: usize, const CAP: usize> {
     /// the DEFAULT backing that most needs the leak check, because it is the one
     /// every Router in the tree runs.
     fn available(&self) -> usize;
+
+    /// Hand a COMPLETED chain's staging up as shared storage, consuming the
+    /// handle, or give the handle back (`Err`) when this arena cannot.
+    ///
+    /// ARCHITECTURE section 9.3: the event carries the stage buffer. An arena
+    /// that answers `Ok` hands up the bytes where they were staged -- the
+    /// pooled arena its slot, which goes home once the last range of it has
+    /// dropped; the heap arena its buffer, moved -- so the reassembled message
+    /// is not copied a second time. The Router releases its own slot either
+    /// way; on `Ok` the handle is no longer the Router's to release, so the
+    /// arena accounts for it itself: a pooled slot stays out of
+    /// [`Self::available`] for as long as the shared storage lives, a heap
+    /// buffer owes the arena nothing.
+    ///
+    /// The provided answer is `Err`: the chain is then delivered borrowed and
+    /// released, as before this existed.
+    #[cfg(feature = "rx-shared-bytes")]
+    fn lend(&mut self, chain: Self::Chain) -> Result<crate::link::RxBytes, Self::Chain> {
+        Err(chain)
+    }
 }
 
 /// The default arena: one growable heap buffer per chain, allocated on demand.
@@ -283,5 +303,15 @@ impl<const SLOTS: usize, const CAP: usize> ChainStaging<SLOTS, CAP> for HeapStag
 
     fn available(&self) -> usize {
         SLOTS.saturating_sub(self.outstanding)
+    }
+
+    /// The chain's buffer, MOVED into shared storage: the reassembled bytes
+    /// are the buffer the fragments were appended to, with no copy. The handle
+    /// is spent, so it is counted back here; the buffer owes this arena
+    /// nothing once it is the application's.
+    #[cfg(all(feature = "rx-shared-bytes", not(feature = "bounded-heapless")))]
+    fn lend(&mut self, chain: Self::Chain) -> Result<crate::link::RxBytes, Self::Chain> {
+        self.outstanding = self.outstanding.saturating_sub(1);
+        Ok(crate::link::RxBytes::lend(chain.buf.into_vec()))
     }
 }

@@ -430,13 +430,47 @@ pub fn reassembled_frame_outcome(
     priority: crate::qos::Priority,
     msg: &[u8],
 ) -> DriverLoopOutcome {
+    reassembled_chain_outcome(
+        reliable,
+        sn,
+        priority,
+        crate::reassembly_dispatch::ChainBytes::Borrowed(msg),
+    )
+}
+
+/// [`reassembled_frame_outcome`] over the chain as the Router delivers it
+/// ([`ChainBytes`](crate::reassembly_dispatch::ChainBytes)), which is what the
+/// receive loops call.
+///
+/// ARCHITECTURE section 9.3 -- a LENT chain is decoded where it lies: every
+/// message is a range of the reassembly staging itself (the pooled arena's
+/// slot, or the heap arena's buffer moved, not copied), so the payload the
+/// application is handed IS the bytes the fragments were staged into, and the
+/// staging goes home when the last of those ranges drops. A BORROWED chain is
+/// the arena that cannot lend: its bytes are valid for this call only, and they
+/// are copied once into a buffer the messages share
+/// ([`parse_frame_payload_lending`](crate::network_message::parse_frame_payload_lending)),
+/// as before.
+#[cfg(feature = "reassembly")]
+pub fn reassembled_chain_outcome(
+    reliable: bool,
+    sn: u64,
+    priority: crate::qos::Priority,
+    chain: crate::reassembly_dispatch::ChainBytes<'_>,
+) -> DriverLoopOutcome {
+    use crate::reassembly_dispatch::ChainBytes;
     // The participant refuses a batch whose chains hold an extension the message
     // does not define, with the M bit set, as the unfragmented path does. The
     // refusal is reported and the batch dropped, as upstream drops a reassembled
     // message it cannot read without closing the link
     // (`io/zenoh-transport/src/common/defragmentation.rs` @
     // `let res: Option<NetworkMessage> = rcodec.read(&mut reader).ok();`).
-    let parsed = crate::network_message::parse_frame_payload_lending(msg)
+    let decoded = match &chain {
+        ChainBytes::Borrowed(msg) => crate::network_message::parse_frame_payload_lending(msg),
+        #[cfg(feature = "rx-shared-bytes")]
+        ChainBytes::Lent(bytes) => crate::network_message::parse_frame_payload_in(bytes),
+    };
+    let parsed = decoded
         .map_err(InboundParseError::Codec)
         .and_then(crate::network_message::refuse_unknown_mandatory_ext);
     match parsed {
