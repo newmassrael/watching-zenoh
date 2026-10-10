@@ -8,11 +8,15 @@ names. A row names all of them unless its `verdict_steps` says otherwise, as the
 onboard port's row does for the steps it was recorded against (HW.0 to HW.7); the
 steps for the second interface are at the end of this file.
 
-The steps are the ones Layer Qza puts to the emulated node: its body is
-`_qa_scenario` in `scripts/run-ci.sh`, labelled `Qza`. A lab runs the same
-checks against the board with the label `HW`. Two sentences carry an address of
-the lab's network where the emulator lane carries its own (HW.4 and HW.5);
-nothing else differs.
+The steps are run by one program, `scripts/lib/admin_node_verdict.py`. Layer Qza
+runs it in its `qemu` mode against the emulated node, labelled `Qza`; a lab runs
+its `board` mode against the board, and that mode prints each step as the
+sentence below, labelled `HW`, one line per step on standard output and nothing
+else there. The program's header says how a lab runs it. The record quotes those
+lines as the program printed them: a sentence typed from a console is not a
+record of a check. The checks are the same code in both modes; the lines differ
+in the label, in HW.0, which quotes the board's READY line, and in the address
+that HW.4 names.
 
 ## What the host runs
 
@@ -27,7 +31,9 @@ the board:
 Both are bound to the board's adapter and nothing else, with multicast scouting
 off, so that what the node reports is what it reached on the wire and not what a
 scout found. Their ids are fixed (A is sixteen `a`, B sixteen `b`) because the
-sentences compare them.
+sentences compare them. The program's `board` mode starts both: B with a
+listener on the host's address and no other, A with no listener of its own
+(it only dials the node) and the REST plugin on 127.0.0.1.
 
 ## The steps
 
@@ -129,11 +135,12 @@ segment, bound to that segment's adapter and nothing else, multicast scouting of
 - C dials the node's T1S locator (the second one HW.0 printed) and carries the REST
   plugin on the loopback address only, on a port of its own. Its id is sixteen `c`.
 
-HW.16 to HW.20 are `_qa_scenario`'s steps 1 to 5 (`scripts/run-ci.sh`, labelled `Qza`)
-with C in A's place, D in B's, and the node's T1S locator in the place of the one the
-emulator lane names. They are run on a boot at which neither A nor B is running, so
-that "C only" is the whole list, and before anything else writes the node's endpoint
-list, because HW.20 reads the write counter.
+HW.16 to HW.20 are steps 1 to 5 of `scripts/lib/admin_node_verdict.py` (HW.1 to
+HW.5) with C in A's place, D in B's, and the node's T1S locator in the place of the
+one the emulator lane names. They are run on a boot at which neither A nor B is
+running, so that "C only" is the whole list, and before anything else writes the
+node's endpoint list, because HW.20 reads the write counter. The program does not
+run them yet: it knows A and B only, and their sentences are not the T1S ones.
 
 ### The images
 

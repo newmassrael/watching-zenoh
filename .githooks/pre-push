@@ -1107,6 +1107,12 @@ round_fed_gates=(
     # MEASURED: well under a second, a parse with no build.
     "zephyr_board_table_gate.py --selftest"
     "zephyr_board_table_gate.py"
+    # Open-debt item 876 — the admin node's verdict steps (Layers Qa, Qza and a
+    # lab's board). Its selftest reads the published grammar
+    # (`deploy/zephyr-admin-node/HARDWARE_VERDICT.md`) and the board table
+    # gate's record reader, so a round that edits either feeds it.
+    # MEASURED: about 5s, fake routers and a fake QEMU, no build.
+    "admin_node_verdict.py --selftest"
     # R3188 (item 747) — the upstream version CLAUDE.md states, against the pin
     # the tree enforces. Round-fed: it names CLAUDE.md and the census module.
     # MEASURED: well under a second, a parse with no build.

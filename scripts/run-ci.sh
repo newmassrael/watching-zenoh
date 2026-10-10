@@ -3433,6 +3433,14 @@ layer_c0_test_discipline() {
     # exactly the rows this gate says are BUILT or HARDWARE.
     python3 scripts/lib/zephyr_board_table_gate.py --selftest || return 1
     python3 scripts/lib/zephyr_board_table_gate.py || return 1
+    # Open-debt item 876 — the admin node's verdict steps, which Layers Qa and
+    # Qza run under QEMU and a lab runs against a board. The selftest drives
+    # them against a fake node step by step (each step's fault reds it, and
+    # weakening its comparison greens it), holds the lanes' output to the bytes
+    # they printed before the steps moved, and reads the board output through
+    # this gate's record reader. About 5 s: it starts fake routers and a fake
+    # QEMU and waits the lanes' one-second stack settle.
+    python3 scripts/lib/admin_node_verdict.py --selftest || return 1
     # R2162 (unregistered open-debt item 199) — the upstream zenoh CAPABILITY
     # FEATURE surface as a denominator. Item 199 recorded "18 of 19 have a wz
     # atom" as a hand measurement and nothing re-derived it afterwards, so a
@@ -21436,7 +21444,7 @@ _QA_REST_PORT=17800
 # lane SKIPs (green), 1 when it is absent where it is required.
 _qa_zenohd_prereqs() {
     local label="$1" zenohd="${WZ_ZENOHD_BIN:-$PWD/target/zenohd/zenohd}" tool
-    for tool in qemu-system-arm curl python3; do
+    for tool in qemu-system-arm python3; do
         command -v "$tool" >/dev/null 2>&1 \
             || { _qa_unavailable "$label" "$tool not on PATH" && return 10 || return 1; }
     done
@@ -21454,187 +21462,25 @@ _qa_zenohd_prereqs() {
 # the QEMU console must match before the host talks to the node (a firmware that
 # prints its own zid and locator asserts both here); `-` skips the wait for a
 # firmware that prints nothing.
+#
+# Open-debt item 876 — the steps live in `scripts/lib/admin_node_verdict.py`,
+# which runs them in `qemu` mode here and in `board` mode against a board on a
+# lab's host, so the hardware verdict (deploy/zephyr-admin-node/
+# HARDWARE_VERDICT.md) is the program's output and not a transcription. This
+# lane's lines are what this function printed before the move, byte for byte;
+# the program's selftest holds them. R3081's stack rule (a peak must leave a
+# quarter of the stack free, and a console with no `stack: peak` line fails)
+# and R2851's `seq` 1 are stated there now.
 _qa_scenario() {
     local label="$1" node="$2" ready="$3"
     shift 3
-    local zenohd="${WZ_ZENOHD_BIN:-$PWD/target/zenohd/zenohd}"
-    local fwd_port="$_QA_FWD_PORT" b_port="$_QA_B_PORT" rest_port="$_QA_REST_PORT"
-    local dir
-    dir="$(mktemp -d)"
-    local pids=()
-    "$@" >"$dir/qemu.log" 2>&1 &
-    pids+=($!)
-    if [[ "$ready" != "-" ]]; then
-        local seen=0 _
-        for _ in $(seq 1 600); do
-            if grep -qE "$ready" "$dir/qemu.log" 2>/dev/null; then seen=1; break; fi
-            kill -0 "${pids[0]}" 2>/dev/null || break
-            sleep 0.1
-        done
-        if [[ "$seen" -ne 1 ]]; then
-            echo "  ${label}.0 the node never printed its READY line (/$ready/)" >&2
-            echo "  --- qemu" >&2; cat "$dir/qemu.log" >&2
-            kill "${pids[@]}" 2>/dev/null
-            wait "${pids[@]}" 2>/dev/null
-            rm -rf "$dir"
-            return 1
-        fi
-        echo "  ${label}.0 the node's console says who and where it is — OK"
-    fi
-    "$zenohd" --no-multicast-scouting -l "udp/127.0.0.1:$b_port" \
-        --cfg='id:"bbbbbbbbbbbbbbbb"' >"$dir/zenohd-b.log" 2>&1 &
-    pids+=($!)
-    "$zenohd" --no-multicast-scouting -e "udp/127.0.0.1:$fwd_port" \
-        --rest-http-port "127.0.0.1:$rest_port" --plugin-search-dir "$(dirname "$zenohd")" \
-        --cfg='id:"aaaaaaaaaaaaaaaa"' >"$dir/zenohd-a.log" 2>&1 &
-    pids+=($!)
-
-    local rest="http://127.0.0.1:$rest_port/@/$node/peer"
-    # The sessions the node reports, as sorted peer zids, off the GET's JSON.
-    _qa_sessions() {
-        curl -s -m 5 "$rest" | python3 -c '
-import json, sys
-try:
-    replies = json.load(sys.stdin)
-except ValueError:
-    replies = []
-peers = sorted(s["peer"] for r in replies for s in r["value"].get("sessions", []))
-print(" ".join(peers))'
-    }
-    # Poll until `want` is what the node reports, or 60 s pass.
-    _qa_await() {
-        local want="$1" got="" _
-        for _ in $(seq 1 60); do
-            got="$(_qa_sessions)"
-            [[ "$got" == "$want" ]] && { echo "$got"; return 0; }
-            sleep 1
-        done
-        echo "$got"
-        return 1
-    }
-
-    local fail=0 got
-    if got="$(_qa_await "aaaaaaaaaaaaaaaa")"; then
-        echo "  ${label}.1 GET before the write: the node reports A only — OK"
-    else
-        echo "  ${label}.1 GET before the write FAIL: sessions [$got], want [A]" >&2
-        fail=1
-    fi
-    if [[ "$fail" -eq 0 ]]; then
-        curl -s -m 5 -X PUT -H 'content-type: application/json' \
-            -d "[\"udp/10.0.2.2:$b_port\"]" "$rest/config/connect/endpoints" >/dev/null
-        if got="$(_qa_await "aaaaaaaaaaaaaaaa bbbbbbbbbbbbbbbb")"; then
-            echo "  ${label}.2 PUT connect/endpoints: the node dialled B, GET reports A and B — OK"
-        else
-            echo "  ${label}.2 PUT connect/endpoints FAIL: sessions [$got], want [A B]" >&2
-            fail=1
-        fi
-        if curl -s -m 5 "$rest/config" | grep -qF "udp/10.0.2.2:$b_port"; then
-            echo "  ${label}.3 GET config names the written list — OK"
-        else
-            echo "  ${label}.3 GET config FAIL: the written endpoint is not in it" >&2
-            fail=1
-        fi
-        # R2841 — every session names its link's two ends as upstream does,
-        # and the one A reached is the node's listener as the node sees it.
-        local links
-        links="$(curl -s -m 5 "$rest" | python3 -c '
-import json, sys
-bad, accepted = [], None
-for r in json.load(sys.stdin):
-    for s in r["value"].get("sessions", []):
-        for link in s.get("links", []):
-            if not link.get("src", "").startswith("udp/") or not link.get("dst", "").startswith("udp/"):
-                bad.append((s["peer"], link))
-            if s["peer"] == "aaaaaaaaaaaaaaaa":
-                accepted = link.get("src")
-print("ok" if not bad and accepted == "udp/10.0.2.15:7447" else f"bad={bad} accepted_src={accepted}")' 2>&1)"
-        if [[ "$links" == "ok" ]]; then
-            echo "  ${label}.4 every session names its link src/dst; A reached udp/10.0.2.15:7447 — OK"
-        else
-            echo "  ${label}.4 link src/dst FAIL: $links" >&2
-            fail=1
-        fi
-        # R2846 — the node's own account of the write, at the wz key
-        # `status/connect`: the verdict, and each endpoint's dial state.
-        # _qa_status <python expression over `doc`>: prints "ok" or the doc.
-        _qa_status() {
-            curl -s -m 5 "$rest/status/connect" | python3 -c '
-import json, sys
-try:
-    doc = [r["value"] for r in json.load(sys.stdin)][0]
-except (ValueError, IndexError, KeyError):
-    doc = None
-print("ok" if doc is not None and ('"$1"') else doc)' 2>&1
-        }
-        local st
-        # R2851 — `seq` 1: Qa.2's PUT is the first write the node got.
-        st="$(_qa_status 'doc["last_write"] == {"seq": 1, "verdict": "replace"} and doc["endpoints"] == [{"endpoint": "udp/10.0.2.2:'"$b_port"'", "state": "live", "established": True}]')"
-        if [[ "$st" == "ok" ]]; then
-            echo "  ${label}.5 status/connect: the write was replaced, B is live and established — OK"
-        else
-            echo "  ${label}.5 status/connect FAIL: $st" >&2
-            fail=1
-        fi
-        # A group of two locators is one transport over two links, which the
-        # node refuses BY NAME for each locator; the host reads the reason.
-        curl -s -m 5 -X PUT -H 'content-type: application/json' \
-            -d "[{\"strategy\":\"allOf\",\"locators\":[\"udp/10.0.2.2:$b_port\",\"udp/10.0.2.2:9\"]}]" \
-            "$rest/config/connect/endpoints" >/dev/null
-        local _
-        for _ in $(seq 1 30); do
-            st="$(_qa_status 'doc["last_write"] == {"seq": 2, "verdict": "replace"} and len(doc["endpoints"]) == 2 and all(e["state"] == "refused" and e["reason"] == "multi_link_group" for e in doc["endpoints"])')"
-            [[ "$st" == "ok" ]] && break
-            sleep 1
-        done
-        if [[ "$st" == "ok" ]]; then
-            echo "  ${label}.6 a group of two is refused, and status/connect says multi_link_group — OK"
-        else
-            echo "  ${label}.6 status/connect after a group write FAIL: $st" >&2
-            fail=1
-        fi
-    fi
-
-    # R3081 — a firmware that measures its own stack says so on its console
-    # (`stack: peak N of M bytes`, once for each new peak), and this lane refuses a
-    # peak that leaves less than a quarter of the stack free. The reason is the
-    # one every other lane that measures one gives: a stack that runs out does not
-    # fault at its own end, it overwrites the memory below it, and the machine dies
-    # later with a register file that names none of it. The admin node's did, with
-    # a 16 KiB stack it needed 20,012 bytes of, and this lane said only that a GET
-    # came back empty. A quarter, and not the 256 bytes the single-run MCU deploys
-    # allow themselves, because this node's depth follows what its peers send and
-    # this scenario is not every thing they can send. A console with NO such line
-    # is a failure too: a node that stopped measuring reads exactly like one that
-    # measured and fit.
-    if [[ -n "${_QA_STACK_VERDICT:-}" ]]; then
-        sleep 1 # the node samples a few times a second; let it see the last peak
-        local stack_line peak size
-        stack_line="$(awk '/^stack: peak /{l=$0} END{print l}' "$dir/qemu.log")"
-        if [[ "$stack_line" =~ ^stack:\ peak\ ([0-9]+)\ of\ ([0-9]+)\ bytes ]]; then
-            peak="${BASH_REMATCH[1]}"
-            size="${BASH_REMATCH[2]}"
-            if (( peak * 4 <= size * 3 )); then
-                echo "  ${label}.7 the main stack kept a quarter free: ${stack_line} — OK"
-            else
-                echo "  ${label}.7 the main stack FAIL: ${stack_line} leaves under a quarter free" >&2
-                fail=1
-            fi
-        else
-            echo "  ${label}.7 the main stack FAIL: the node printed no \`stack: peak N of M bytes\` line" >&2
-            fail=1
-        fi
-    fi
-
-    kill "${pids[@]}" 2>/dev/null
-    wait "${pids[@]}" 2>/dev/null
-    if [[ "$fail" -ne 0 ]]; then
-        echo "  --- qemu" >&2; cat "$dir/qemu.log" >&2
-        echo "  --- zenohd A (tail)" >&2; tail -20 "$dir/zenohd-a.log" >&2
-        echo "  --- zenohd B (tail)" >&2; tail -10 "$dir/zenohd-b.log" >&2
-    fi
-    rm -rf "$dir"
-    return "$fail"
+    local stack_flag=()
+    [[ -n "${_QA_STACK_VERDICT:-}" ]] && stack_flag=(--stack-verdict)
+    python3 scripts/lib/admin_node_verdict.py qemu --label "$label" --node-id "$node" \
+        --ready "$ready" ${stack_flag[@]+"${stack_flag[@]}"} \
+        --zenohd "${WZ_ZENOHD_BIN:-$PWD/target/zenohd/zenohd}" \
+        --fwd-port "$_QA_FWD_PORT" --b-port "$_QA_B_PORT" --rest-port "$_QA_REST_PORT" \
+        -- "$@"
 }
 
 # Layer Qa itself: the bare-metal lwIP firmware under the scenario.
