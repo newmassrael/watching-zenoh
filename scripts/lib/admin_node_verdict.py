@@ -83,19 +83,61 @@ over, by a second call of the same mode:
      A's settings), so that the counts lines record frames the pool sent.
   4. Stop both captures, then:
 
-       python3 scripts/lib/admin_node_verdict.py board --pool-image \\
+       python3 scripts/lib/admin_node_verdict.py board --pool-image tx \\
            --node udp/<node address>:7447 \\
            --console <the capture file> \\
            --onboard <the file the output of 2 went to> \\
            --pcap <capture.pcap>
 
      It prints HW.26 to HW.30, one line each, on standard output and nothing
-     else there. Standard error carries one line of counts for the console and
-     one for the capture (frames, datagrams from the node and the seconds they
-     span, each kind of failure), then why a step failed and which frames did,
-     on lines that name no step. The exit codes are the board mode's; a file
-     that is not a classic pcap of Ethernet frames is exit 2. The router
-     options (--host, --zenohd, the ports) are refused: no router is started.
+     else there. Standard error carries why a step failed, on lines that name
+     no step, then one line of counts for the console and one for the capture
+     (frames, datagrams from the node and the seconds they span, each kind of
+     failure), then which frames failed. The exit codes are the board mode's;
+     a file that is not a classic pcap of Ethernet frames is exit 2. The
+     router options (--host, --zenohd, the ports) are refused: no router is
+     started.
+
+## The receive pool image: HW.31 to HW.35
+
+The same, without the packet capture: no step of this image reads one.
+
+  1. Start the console capture before the reset, reset the board and run the
+     board mode with its standard output saved, as above.
+  2. Hold a session with the node for at least 30 seconds, so that the counts
+     lines record frames lent from the pool and datagrams the session read in
+     their slots.
+  3. Stop the console capture, then:
+
+       python3 scripts/lib/admin_node_verdict.py board --pool-image rx \\
+           --node udp/<node address>:7447 \\
+           --console <the capture file> \\
+           --onboard <the file the output of 1 went to>
+
+     It prints HW.31 to HW.35 on standard output; standard error carries why a
+     step failed and one line of counts for the console. `--pcap` is refused
+     here: a capture that no step reads would be quoted as if one had.
+
+## An image built with both pools
+
+The two overlays build into one image, which prints both pools' lines on one
+console. Both sets of steps are then judged in one call, from the files of one
+boot, by naming both:
+
+       python3 scripts/lib/admin_node_verdict.py board \\
+           --pool-image tx --pool-image rx \\
+           --node udp/<node address>:7447 \\
+           --console <the capture file> \\
+           --onboard <the board run's output> \\
+           --pcap <capture.pcap>
+
+It prints HW.26 to HW.35 in step order, whichever order the flags come in. The
+sets a call judges are the ones it names, never the ones the console happens
+to hold: a named set whose lines are absent fails its steps (a console of the
+transmit pool alone judged with `--pool-image rx` prints HW.32 to HW.35 FAIL),
+and a call that names one set says on standard error when the console also
+holds the other's lines, which it leaves unjudged. The board table has no row
+for this image; a lab that records it records both sets of steps.
 
 The routers it starts are those of "What the host runs" in the grammar file. B
 listens on `udp/<host>:<b-port>` and nothing else; A dials `--node`, holds no
@@ -117,7 +159,21 @@ it rests on the board run's output, bound to the boot by the READY line the
 capture holds (the node draws its id at each boot). The 30 seconds of the hold
 are the lab's; the program does not time them, and prints the span of the
 node's datagrams in the capture for the record. HW.30 checks checksums and
-nothing of zenoh: the stock router's decoding is HW.2 and HW.5.
+nothing of zenoh: the stock router's decoding is HW.2 and HW.5. HW.31 rests on
+the board run's output the same way HW.26 does.
+
+HW.35 is judged as its sentence says: each of the three counts 0. What the
+sentence claims is a property of the traffic the node received as much as of
+the slot path, and the firmware does not promise it: the node negotiates a
+batch of 1500 bytes (`BATCH_SIZE` in deploy/zephyr-admin-node/rust/src/lib.rs),
+so a router that fills a batch past 1472 bytes sends a datagram that crosses a
+1500-byte Ethernet link in fragments, which lwIP reassembles and the session
+socket copies (`recv_thunk` in crates/wz-link-lwip/src/lib.rs); and a burst of
+more than eight frames held at once (the session socket queues 16, lwIP lends
+at most 8, and its reassembly holds fragments, lent, for up to 15 s) is
+copied in and leaves a descriptor refused. Neither is a fault of the slot
+path, and both fail this step. When only the session's copies are not 0, the
+reason on standard error says they are reassembled datagrams.
 
 ## Its own test
 
@@ -143,6 +199,22 @@ pseudo header, a zero checksum taken as valid, every source counted, one byte
 order only) are each caught by some case. The two console regexes and the five
 sentences are held to the grammar file, the pool output is handed to the
 record's reader as above, and the CLI is run end to end on files.
+
+The receive pool's cases are built the same way, and every case runs in each
+call a lab can make: the image's own, and the call that owes both sets from a
+console that holds both pools' lines (where a fault in the boot or the board
+run's output reds HW.26 and HW.31 together, and any other fault only its own
+image's steps). Its faults: a pool line absent, doubled or garbled, of the
+wrong size, off the 32-byte alignment, outside the section; lent, lwIP took ..
+lent or the session read .. in place 0; no counts line (HW.33 to HW.35 all
+read them) or a garbled one; the sum broken on one line among many; nine
+slots in the ring; refused, lwIP took .. copied or the session read .. copied
+above 0. Its clauses are dropped in turn as above, HW.31 is shown to run the
+step 0 and step 7 comparisons, and the identity and ring bound are mutated in
+their arithmetic (no ring term, a ring of nine, the last line only). Its two
+regexes are held to the grammar under its own heading (both images label
+their pool line `pool place`), its sentences to the grammar's, and its output,
+alone and beside the transmit pool's, to the record's reader.
 """
 
 from __future__ import annotations
@@ -750,14 +822,21 @@ class HostEnv(Env):
         shutil.rmtree(self.dir, ignore_errors=True)
 
 
-# ------------------------------------------------- the transmit pool image --
+# ------------------------------------------------------ the pool images --
 #
-# HW.26 to HW.30, read from three files the lab keeps once the run is over: the
-# console capture of the boot, the board run's own standard output (HW.0 to HW.7
-# printed on this image) and a packet capture of the node's frames. Nothing is
-# reached on the network. Each step is a list of clauses; it holds when every
-# clause does, and the selftest drops each clause in turn to show the fault it
-# exists for goes green without it.
+# The transmit pool image (HW.26 to HW.30) and the receive pool image (HW.31 to
+# HW.35), read from the files the lab keeps once the run is over: the console
+# capture of the boot, the board run's own standard output (HW.0 to HW.7 printed
+# on this image) and, for the transmit pool, a packet capture of the node's
+# frames. Nothing is reached on the network. Each step is a list of clauses; it
+# holds when every clause does, and the selftest drops each clause in turn to
+# show the fault it exists for goes green without it. An image built with both
+# overlays prints both pools' lines, and both sets of steps are judged from the
+# one console in one call; which sets are owed is the caller's to say
+# (`--pool-image`), so a pool line that is absent is a failure and not a set
+# skipped.
+#
+# The transmit pool image:
 #
 #   26  the board run's output is the eight onboard lines in order, each OK
 #       ("lines"); the capture holds one READY line, its first locator the node
@@ -786,28 +865,71 @@ class HostEnv(Env):
 #       disagree, and a frame captured short are failures, because their
 #       checksums cannot be checked from the frame; a capture with no datagram
 #       from the node fails, not passes.
+#
+# The receive pool image (`mac_cyt4bf.rs` prints both of its lines):
+#
+#   31  HW.26's clauses, on this image's run: the same four, run on the same
+#       files (the onboard sentences, the READY line, the binding to this boot,
+#       the stack), because HW.7 on this image is the stack of the session
+#       loop's in-place receive and is read the same way.
+#   32  one pool line; its slots span 16 times 1536 bytes; its start is a
+#       multiple of 32 (the MAC driver refuses a pool off that alignment, so a
+#       line that shows one is not the pool the driver armed); start and end lie
+#       inside the section, as in 27.
+#   33  the last counts line has lent, lwIP took .. lent and the session read
+#       .. in place each above zero: frames were lent from slots, lwIP wrapped
+#       them where they lay, and the session read datagrams there.
+#   34  EVERY counts line is read, there is at least one, and on each pool free
+#       plus in the ring plus lent minus returned is 16 (every slot is free, held
+#       by a descriptor, or lent: `Cyt4bfMac::rx_slots_in_ring` states the same
+#       sum) and in the ring is at most 8 (the receive descriptors).
+#   35  the last counts line has refused, lwIP took .. copied and the session
+#       read .. copied each 0, as the grammar's sentence says. When only the
+#       session's copies are not 0, the reason printed says what the firmware
+#       makes of that: with nothing copied by lwIP, a datagram the session read
+#       copied is one lwIP reassembled from fragments (`recv_thunk` in
+#       wz-link-lwip copies every datagram that is not one lent piece). The
+#       verdict stays the sentence's: a record that drove fragments states it.
 
-POOL_SLOTS = 8
 SLOT_BYTES = 1536
+TX_SLOTS = 8
 # The frames the MAC's transmit ring can hold: the most a pool can have started
 # and not yet seen completed.
-RING_FRAMES = 4
-POOL_PREFIX = "wz: eth0: transmit pool"
-COUNTS_PREFIX = "wz: tx-pool:"
-# The grammar's two console regexes, character for character; the selftest holds
-# them to the file.
-POOL_LINE = re.compile(
+TX_RING_FRAMES = 4
+TX_POOL_PREFIX = "wz: eth0: transmit pool"
+TX_COUNTS_PREFIX = "wz: tx-pool:"
+# The grammar's console regexes, character for character; the selftest holds
+# them to the file, each under its own image's heading.
+TX_POOL_LINE = re.compile(
     r"^wz: eth0: transmit pool of 8 slots at (0x[0-9a-f]{8}) to (0x[0-9a-f]{8}), "
     r"in the non-cacheable section (0x[0-9a-f]{8}) to (0x[0-9a-f]{8}), read in place by the MAC$"
 )
-COUNTS_LINE = re.compile(
+TX_COUNTS_LINE = re.compile(
     r"^wz: tx-pool: in place ([0-9]+), copied ([0-9]+), last descriptor (0x[0-9a-f]{8}|none); "
     r"pool lent ([0-9]+), started ([0-9]+), completed ([0-9]+), unarmed ([0-9]+), "
     r"abandoned ([0-9]+), free ([0-9]+) of 8$"
 )
-POOL_STEPS = (26, 27, 28, 29, 30)
-# Each step's sentence up to its first colon; HW.27, HW.28 and HW.30 add the
-# values they read.
+TX_STEPS = (26, 27, 28, 29, 30)
+RX_SLOTS = 16
+# The receive descriptors: the most slots the ring can hold at once.
+RX_RING_SLOTS = 8
+# The alignment the MAC driver requires of the pool's slots (`new_pooled`).
+RX_SLOT_ALIGN = 32
+RX_POOL_PREFIX = "wz: eth0: receive pool"
+RX_COUNTS_PREFIX = "wz: rx-pool:"
+RX_POOL_LINE = re.compile(
+    r"^wz: eth0: receive pool of 16 slots at (0x[0-9a-f]{8}) to (0x[0-9a-f]{8}), "
+    r"in the non-cacheable section (0x[0-9a-f]{8}) to (0x[0-9a-f]{8}), written in place by the MAC$"
+)
+RX_COUNTS_LINE = re.compile(
+    r"^wz: rx-pool: lent ([0-9]+), returned ([0-9]+), refused ([0-9]+), dropped ([0-9]+), "
+    r"copied ([0-9]+); pool free ([0-9]+), in the ring ([0-9]+), of 16; lwIP took ([0-9]+) lent, "
+    r"([0-9]+) copied; the session read ([0-9]+) in place, ([0-9]+) copied$"
+)
+RX_STEPS = (31, 32, 33, 34, 35)
+POOL_STEPS = TX_STEPS + RX_STEPS
+# Each step's sentence up to its first colon; HW.27, HW.28, HW.30, HW.32 and
+# HW.33 add the values they read.
 POOL_HEADS = {
     26: "the onboard verdict held on the transmit pool image: its eight onboard sentences "
     "each ended OK on this image",
@@ -816,6 +938,14 @@ POOL_HEADS = {
     29: "every slot came home: on every counts line lent minus abandoned, completed and "
     "unarmed is 8 minus free, and started minus completed is at most 4",
     30: "the frames read out of slots were right on the wire",
+    31: "the onboard verdict held on the receive pool image: its eight onboard sentences "
+    "each ended OK on this image",
+    32: "the pool sits where the MAC writes it uncached",
+    33: "frames arrived in pool slots and the session read them there",
+    34: "every slot came home: on every counts line free, in the ring and lent minus returned "
+    "add up to 16, and in the ring is at most 8",
+    35: "nothing on the session's path was copied: on the last counts line refused, lwIP took "
+    "copied and the session read copied are each 0",
 }
 STEP_OUT = re.compile(r"HW\.(\d+) (.*) - (OK|FAIL)")
 IPV4_OCTET = r"(?:25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9]?[0-9])"
@@ -844,10 +974,35 @@ class TxCounts:
     free: int
 
 
+def tx_counts(number: int, g: tuple[str, ...]) -> TxCounts:
+    desc = None if g[2] == "none" else int(g[2], 16)
+    return TxCounts(number, int(g[0]), int(g[1]), desc, *(int(x) for x in g[3:]))
+
+
+@dataclass(frozen=True)
+class RxCounts:
+    line: int  # the console line it is on, counted from 1
+    lent: int  # the MAC's: frames lent from a slot
+    returned: int  # lent frames given back
+    refused: int  # descriptors left unarmed because every slot was out
+    dropped: int  # frames dropped whole
+    copied: int  # frames the MAC copied out
+    free: int  # the pool's free slots
+    in_ring: int  # slots the receive descriptors hold
+    taken_lent: int  # lwIP took .. lent: frames the shim wrapped in place
+    taken_copied: int  # lwIP took .. copied: frames the shim copied into a pbuf
+    read_in_place: int  # the session read .. in place
+    read_copied: int  # the session read .. copied
+
+
+def rx_counts(number: int, g: tuple[str, ...]) -> RxCounts:
+    return RxCounts(number, *(int(x) for x in g))
+
+
 @dataclass(frozen=True)
 class PoolConsole:
     places: tuple[PoolPlace, ...]
-    counts: tuple[TxCounts, ...]
+    counts: tuple  # of the image's counts type, in console order
     # (line number, text) of a line that holds a pool or counts prefix and is
     # not the grammar's line: a garbled line is not one to skip.
     unread: tuple[tuple[int, str], ...]
@@ -855,24 +1010,76 @@ class PoolConsole:
     def unread_with(self, prefix: str) -> list[tuple[int, str]]:
         return [u for u in self.unread if prefix in u[1]]
 
+    def holds_any(self) -> bool:
+        return bool(self.places or self.counts or self.unread)
 
-def read_pool_console(raw: bytes) -> PoolConsole:
+
+@dataclass(frozen=True)
+class PoolImage:
+    """One pool image as the grammar writes it: its console lines and its steps.
+    The steps' clauses are in `POOL_CLAUSES`, keyed by step."""
+
+    key: str  # its `--pool-image` value
+    name: str  # as messages name it
+    heading: str  # the grammar's section its lines and steps are under
+    steps: tuple[int, ...]  # the first is the onboard verdict on this image
+    pool_prefix: str
+    counts_prefix: str
+    pool_line: re.Pattern
+    counts_line: re.Pattern
+    counts: Callable[[int, tuple[str, ...]], object]
+    labels: tuple[str, str]  # the grammar's labels of the two regexes
+    capture_step: int | None  # the step that reads the packet capture, if any
+
+
+TX_IMAGE = PoolImage(
+    key="tx",
+    name="transmit pool",
+    heading="## The transmit pool image: steps HW.26 to HW.30",
+    steps=TX_STEPS,
+    pool_prefix=TX_POOL_PREFIX,
+    counts_prefix=TX_COUNTS_PREFIX,
+    pool_line=TX_POOL_LINE,
+    counts_line=TX_COUNTS_LINE,
+    counts=tx_counts,
+    labels=("pool place", "tx counts"),
+    capture_step=30,
+)
+RX_IMAGE = PoolImage(
+    key="rx",
+    name="receive pool",
+    heading="## The receive pool image: steps HW.31 to HW.35",
+    steps=RX_STEPS,
+    pool_prefix=RX_POOL_PREFIX,
+    counts_prefix=RX_COUNTS_PREFIX,
+    pool_line=RX_POOL_LINE,
+    counts_line=RX_COUNTS_LINE,
+    counts=rx_counts,
+    labels=("pool place", "rx counts"),
+    capture_step=None,
+)
+# In step order, which is the order a call that owes both prints them in.
+IMAGES = {image.key: image for image in (TX_IMAGE, RX_IMAGE)}
+
+
+def read_pool_console(raw: bytes, image: PoolImage) -> PoolConsole:
+    """The lines of `image`'s pool in the console. The other image's lines are
+    not this one's: their prefixes differ, and they are neither read nor
+    counted as unread here."""
     places: list[PoolPlace] = []
-    counts: list[TxCounts] = []
+    counts: list = []
     unread: list[tuple[int, str]] = []
     for number, line in enumerate(console_lines(raw), 1):
         line = line.rstrip("\r")
-        m = POOL_LINE.fullmatch(line)
+        m = image.pool_line.fullmatch(line)
         if m:
             places.append(PoolPlace(*(int(g, 16) for g in m.groups())))
             continue
-        m = COUNTS_LINE.fullmatch(line)
+        m = image.counts_line.fullmatch(line)
         if m:
-            g = m.groups()
-            desc = None if g[2] == "none" else int(g[2], 16)
-            counts.append(TxCounts(number, int(g[0]), int(g[1]), desc, *(int(x) for x in g[3:])))
+            counts.append(image.counts(number, m.groups()))
             continue
-        if POOL_PREFIX in line or COUNTS_PREFIX in line:
+        if image.pool_prefix in line or image.counts_prefix in line:
             unread.append((number, line))
     return PoolConsole(tuple(places), tuple(counts), tuple(unread))
 
@@ -1009,12 +1216,53 @@ def _identity_breaks(console: PoolConsole) -> list[TxCounts]:
     return [
         c
         for c in console.counts
-        if c.lent - c.abandoned - c.completed - c.unarmed != POOL_SLOTS - c.free
+        if c.lent - c.abandoned - c.completed - c.unarmed != TX_SLOTS - c.free
     ]
 
 
 def _in_flight_breaks(console: PoolConsole) -> list[TxCounts]:
-    return [c for c in console.counts if not 0 <= c.started - c.completed <= RING_FRAMES]
+    return [c for c in console.counts if not 0 <= c.started - c.completed <= TX_RING_FRAMES]
+
+
+def _rx_identity_breaks(console: PoolConsole) -> list[RxCounts]:
+    return [c for c in console.counts if c.free + c.in_ring + c.lent - c.returned != RX_SLOTS]
+
+
+def _rx_ring_breaks(console: PoolConsole) -> list[RxCounts]:
+    return [c for c in console.counts if c.in_ring > RX_RING_SLOTS]
+
+
+def _no_counts_or(console: PoolConsole, text: Callable[[object], str]) -> str:
+    """Why a clause on the last counts line failed: no line at all, or `text`
+    of the last one."""
+    if not console.counts:
+        return "the console holds no counts line"
+    return text(_last(console))
+
+
+def _rx_session_copies_why(c: RxCounts) -> str:
+    text = f"the last counts line (console line {c.line}) has the session read {c.read_copied} copied"
+    if c.taken_copied == 0:
+        # lwIP copied nothing in, so every datagram reached the session socket in
+        # a lent frame; the socket copies one that is not ONE lent piece, which
+        # is a datagram lwIP reassembled from fragments.
+        text += (
+            ": lwIP took none copied, so these are datagrams lwIP reassembled from fragments, "
+            "which the session socket copies by design; the step's sentence still does not "
+            "hold, and a record that drove fragments states it"
+        )
+    return text
+
+
+def _onboard_clauses() -> list["Clause"]:
+    """The onboard verdict on a pool image (HW.26, HW.31): a list of its own per
+    step, so that the selftest drops a clause of one step and not the other's."""
+    return [
+        Clause("lines", _onboard_lines_hold, _onboard_lines_why),
+        Clause("ready", lambda rec: judge(0, list(rec.ready), rec.plan), _ready_why),
+        Clause("sentences", _onboard_sentences_hold, _onboard_sentences_why),
+        Clause("stack", _stack_holds, _stack_why),
+    ]
 
 
 @dataclass
@@ -1050,34 +1298,69 @@ class Clause:
     why: Callable[[object], str]
 
 
-POOL_CLAUSES: dict[int, list[Clause]] = {
-    26: [
-        Clause("lines", _onboard_lines_hold, _onboard_lines_why),
-        Clause("ready", lambda rec: judge(0, list(rec.ready), rec.plan), _ready_why),
-        Clause("sentences", _onboard_sentences_hold, _onboard_sentences_why),
-        Clause("stack", _stack_holds, _stack_why),
-    ],
-    27: [
-        Clause(
-            "one line",
-            lambda con: len(con.places) == 1 and not con.unread_with(POOL_PREFIX),
-            lambda con: _unread_text(con.unread_with(POOL_PREFIX))
-            or f"the console holds {len(con.places)} pool lines, where one boot prints one",
+def _one_pool_line(prefix: str) -> "Clause":
+    return Clause(
+        "one line",
+        lambda con: len(con.places) == 1 and not con.unread_with(prefix),
+        lambda con: _unread_text(con.unread_with(prefix))
+        or f"the console holds {len(con.places)} pool lines, where one boot prints one",
+    )
+
+
+def _pool_inside() -> "Clause":
+    return Clause(
+        "inside",
+        lambda con: _place(con).section_start <= _place(con).start < _place(con).end <= _place(con).section_end,
+        lambda con: f"the pool is not inside the section: {_place_text(_place(con))}",
+    )
+
+
+def _every_counts_line_read(prefix: str) -> "Clause":
+    return Clause(
+        "every line read",
+        lambda con: bool(con.counts) and not con.unread_with(prefix),
+        lambda con: _unread_text(con.unread_with(prefix))
+        or "the console holds no counts line, and a step on every line of none is no verdict",
+    )
+
+
+def _rx_last_zero(name: str, field_name: str, label: str) -> "Clause":
+    """A clause of HW.35: one count of the last counts line is 0."""
+    return Clause(
+        name,
+        lambda con: getattr(_last(con), field_name) == 0,
+        lambda con: _no_counts_or(
+            con,
+            lambda c: f"the last counts line (console line {c.line}) has {label} "
+            f"{getattr(c, field_name)}, not 0",
         ),
+    )
+
+
+def _rx_last_above_zero(name: str, field_name: str, label: str) -> "Clause":
+    """A clause of HW.33: one count of the last counts line is above zero."""
+    return Clause(
+        name,
+        lambda con: getattr(_last(con), field_name) > 0,
+        lambda con: _no_counts_or(
+            con,
+            lambda c: f"the last counts line (console line {c.line}) has {label} 0: "
+            f"the receive pool was not exercised",
+        ),
+    )
+
+
+POOL_CLAUSES: dict[int, list[Clause]] = {
+    26: _onboard_clauses(),
+    27: [
+        _one_pool_line(TX_POOL_PREFIX),
         Clause(
             "size",
-            lambda con: _place(con).end - _place(con).start == POOL_SLOTS * SLOT_BYTES,
+            lambda con: _place(con).end - _place(con).start == TX_SLOTS * SLOT_BYTES,
             lambda con: f"the slots span {_place(con).end - _place(con).start} bytes, not "
-            f"{POOL_SLOTS} times {SLOT_BYTES}",
+            f"{TX_SLOTS} times {SLOT_BYTES}",
         ),
-        Clause(
-            "inside",
-            lambda con: _place(con).section_start
-            <= _place(con).start
-            < _place(con).end
-            <= _place(con).section_end,
-            lambda con: f"the pool is not inside the section: {_place_text(_place(con))}",
-        ),
+        _pool_inside(),
     ],
     28: [
         Clause(
@@ -1102,19 +1385,14 @@ POOL_CLAUSES: dict[int, list[Clause]] = {
         ),
     ],
     29: [
-        Clause(
-            "every line read",
-            lambda con: bool(con.counts) and not con.unread_with(COUNTS_PREFIX),
-            lambda con: _unread_text(con.unread_with(COUNTS_PREFIX))
-            or "the console holds no counts line, and a step on every line of none is no verdict",
-        ),
+        _every_counts_line_read(TX_COUNTS_PREFIX),
         Clause(
             "identity",
             lambda con: not _identity_breaks(con),
             lambda con: "; ".join(
                 f"console line {c.line}: lent {c.lent} minus abandoned {c.abandoned}, completed "
                 f"{c.completed} and unarmed {c.unarmed} is "
-                f"{c.lent - c.abandoned - c.completed - c.unarmed}, 8 minus free is {POOL_SLOTS - c.free}"
+                f"{c.lent - c.abandoned - c.completed - c.unarmed}, 8 minus free is {TX_SLOTS - c.free}"
                 for c in _identity_breaks(con)
             ),
         ),
@@ -1123,7 +1401,7 @@ POOL_CLAUSES: dict[int, list[Clause]] = {
             lambda con: not _in_flight_breaks(con),
             lambda con: "; ".join(
                 f"console line {c.line}: started {c.started} minus completed {c.completed} is "
-                f"{c.started - c.completed}, outside 0 to {RING_FRAMES}"
+                f"{c.started - c.completed}, outside 0 to {TX_RING_FRAMES}"
                 for c in _in_flight_breaks(con)
             ),
         ),
@@ -1149,6 +1427,59 @@ POOL_CLAUSES: dict[int, list[Clause]] = {
         Clause("truncated", lambda r: r.truncated == 0,
                lambda r: f"{r.truncated} frame(s) were captured short (capture with a snapshot "
                f"length of 0, and stop the capture before reading it)"),
+    ],
+    31: _onboard_clauses(),
+    32: [
+        _one_pool_line(RX_POOL_PREFIX),
+        Clause(
+            "size",
+            lambda con: _place(con).end - _place(con).start == RX_SLOTS * SLOT_BYTES,
+            lambda con: f"the slots span {_place(con).end - _place(con).start} bytes, not "
+            f"{RX_SLOTS} times {SLOT_BYTES}",
+        ),
+        Clause(
+            "aligned",
+            lambda con: _place(con).start % RX_SLOT_ALIGN == 0,
+            lambda con: f"the pool starts at {_place(con).start:#010x}, not a multiple of "
+            f"{RX_SLOT_ALIGN}: the MAC driver arms no pool off that alignment",
+        ),
+        _pool_inside(),
+    ],
+    33: [
+        _rx_last_above_zero("lent", "lent", "lent"),
+        _rx_last_above_zero("lwIP took lent", "taken_lent", "lwIP took .. lent"),
+        _rx_last_above_zero("read in place", "read_in_place", "the session read .. in place"),
+    ],
+    34: [
+        _every_counts_line_read(RX_COUNTS_PREFIX),
+        Clause(
+            "identity",
+            lambda con: not _rx_identity_breaks(con),
+            lambda con: "; ".join(
+                f"console line {c.line}: pool free {c.free}, in the ring {c.in_ring} and lent "
+                f"{c.lent} minus returned {c.returned} add up to "
+                f"{c.free + c.in_ring + c.lent - c.returned}, not {RX_SLOTS}"
+                for c in _rx_identity_breaks(con)
+            ),
+        ),
+        Clause(
+            "ring",
+            lambda con: not _rx_ring_breaks(con),
+            lambda con: "; ".join(
+                f"console line {c.line}: in the ring {c.in_ring}, above the {RX_RING_SLOTS} "
+                f"receive descriptors"
+                for c in _rx_ring_breaks(con)
+            ),
+        ),
+    ],
+    35: [
+        _rx_last_zero("refused", "refused", "refused"),
+        _rx_last_zero("lwIP took copied", "taken_copied", "lwIP took .. copied"),
+        Clause(
+            "read copied",
+            lambda con: _last(con).read_copied == 0,
+            lambda con: _no_counts_or(con, _rx_session_copies_why),
+        ),
     ],
 }
 
@@ -1184,6 +1515,14 @@ def pool_sentence(step: int, obs: object) -> str:
         return (
             f"{head}: {obs.good} of {obs.node_udp} datagrams from the node in the capture "
             f"had valid IPv4 and UDP checksums"
+        )
+    if step == 32 and obs.places:
+        return f"{head}: {_place_text(obs.places[0])}"
+    if step == 33 and obs.counts:
+        c = obs.counts[-1]
+        return (
+            f"{head}: lent {c.lent}, lwIP took {c.taken_lent} lent and the session read "
+            f"{c.read_in_place} in place, each above zero"
         )
     return head
 
@@ -1327,12 +1666,15 @@ def analyse_capture(raw: bytes, node_address: str) -> CaptureReport:
     return r
 
 
-def console_summary(console: PoolConsole, rec: OnboardRecord) -> str:
-    return (
-        f"  console: {len(rec.ready)} READY line(s), {len(console.places)} pool line(s), "
-        f"{len(console.counts)} counts line(s), {len(console.unread)} unread, "
-        f"{len(rec.stacks)} stack line(s)\n"
-    )
+def console_summary(consoles: dict[str, PoolConsole], rec: OnboardRecord) -> str:
+    """One line: the boot's READY and stack lines, then each judged image's."""
+    parts = [f"  console: {len(rec.ready)} READY line(s), {len(rec.stacks)} stack line(s)"]
+    for key, con in consoles.items():
+        parts.append(
+            f"{IMAGES[key].name}: {len(con.places)} pool line(s), {len(con.counts)} counts "
+            f"line(s), {len(con.unread)} unread"
+        )
+    return "; ".join(parts) + "\n"
 
 
 def capture_summary(r: CaptureReport) -> str:
@@ -1364,26 +1706,48 @@ def pool_plan(node: str) -> Plan:
     )
 
 
-def run_pool(plan: Plan, console_raw: bytes, output_raw: bytes, report: CaptureReport, out: Renderer) -> int:
-    console = read_pool_console(console_raw)
-    obs = {
-        26: onboard_record(console_raw, output_raw, plan),
-        27: console,
-        28: console,
-        29: console,
-        30: report,
-    }
+def run_pool(
+    plan: Plan,
+    images: list[PoolImage],
+    console_raw: bytes,
+    output_raw: bytes,
+    report: CaptureReport | None,
+    out: Renderer,
+) -> int:
+    """Judge the steps of every image in `images`, in step order, from one
+    console and one board-run output. `report` is the packet capture's, owed
+    exactly when an image of `images` has a capture step."""
+    if any(image.capture_step is not None for image in images) != (report is not None):
+        raise ValueError("a capture is read exactly when an image owes a capture step")
+    rec = onboard_record(console_raw, output_raw, plan)
+    consoles = {image.key: read_pool_console(console_raw, image) for image in images}
     fail = False
-    for step in POOL_STEPS:
-        why = clause_failures(step, obs[step])
-        out.step(Verdict(step, not why, pool_sentence(step, obs[step]), "; ".join(why)))
-        fail = fail or bool(why)
-    out.note(console_summary(console, obs[26]))
-    out.note(capture_summary(report))
-    for finding in report.findings[:FINDINGS_SHOWN]:
-        out.note(f"  {finding}\n")
-    if len(report.findings) > FINDINGS_SHOWN:
-        out.note(f"  and {len(report.findings) - FINDINGS_SHOWN} more\n")
+    for image in sorted(images, key=lambda i: i.steps[0]):
+        for step in image.steps:
+            if step == image.steps[0]:
+                obs: object = rec
+            elif step == image.capture_step:
+                obs = report
+            else:
+                obs = consoles[image.key]
+            why = clause_failures(step, obs)
+            out.step(Verdict(step, not why, pool_sentence(step, obs), "; ".join(why)))
+            fail = fail or bool(why)
+    out.note(console_summary(consoles, rec))
+    # The lines of an image the call did not ask for are named, so that a lab
+    # that built both pools and owed one set of steps sees what it left unjudged.
+    for key, image in IMAGES.items():
+        if key not in consoles and read_pool_console(console_raw, image).holds_any():
+            out.note(
+                f"  the console also holds {image.name} lines, which this call does not judge "
+                f"(--pool-image {key} does)\n"
+            )
+    if report is not None:
+        out.note(capture_summary(report))
+        for finding in report.findings[:FINDINGS_SHOWN]:
+            out.note(f"  {finding}\n")
+        if len(report.findings) > FINDINGS_SHOWN:
+            out.note(f"  and {len(report.findings) - FINDINGS_SHOWN} more\n")
     return 1 if fail else 0
 
 
@@ -1447,8 +1811,14 @@ DEFAULT_B_PORT = 17448
 DEFAULT_REST_PORT = 17800
 
 
+# A locator of the form the node prints: udp/<IPv4 address or name>:<port>, or
+# udp/[<IPv6 address>]:<port>.
+NODE_LOCATOR = re.compile(r"udp/(\[[0-9a-fA-F:.]+\]|[^\s:/\[\]]+):[0-9]+")
+
+
 def pool_main(args: argparse.Namespace) -> int:
-    """`board --pool-image`: HW.26 to HW.30 from the files a run left."""
+    """`board --pool-image tx|rx` (either or both): the pool steps from the files
+    a run left. Each `--pool-image` names a set of steps the call owes."""
     if args.host is not None or args.zenohd is not None or args.b_port is not None or (
         args.rest_port is not None
     ):
@@ -1456,23 +1826,39 @@ def pool_main(args: argparse.Namespace) -> int:
             "--pool-image reads files and starts no router: --host, --zenohd, --b-port and "
             "--rest-port belong to the board run that wrote --onboard"
         )
+    repeated = sorted({k for k in args.pool_image if args.pool_image.count(k) > 1})
+    if repeated:
+        return _refuse(f"--pool-image names {', '.join(repeated)} more than once")
+    images = [image for key, image in IMAGES.items() if key in args.pool_image]
+    capture = [image for image in images if image.capture_step is not None]
+    if not NODE_LOCATOR.fullmatch(args.node):
+        return _refuse(f"--node {args.node!r} is not a locator of the form udp/<address>:<port>")
     address = node_ipv4(args.node)
-    if address is None:
+    if capture and address is None:
         return _refuse(
             f"--node {args.node!r} is not udp/<IPv4 address>:<port>; the capture is read as IPv4"
         )
-    for flag, path in (("--console", args.console), ("--onboard", args.onboard), ("--pcap", args.pcap)):
+    if args.pcap is not None and not capture:
+        return _refuse(
+            "--pcap is read only for the transmit pool image's HW.30 (--pool-image tx); "
+            "no step of the images named reads a capture"
+        )
+    files = [("--console", args.console), ("--onboard", args.onboard)]
+    files += [("--pcap", args.pcap)] if capture else []
+    for flag, path in files:
         if path is None:
-            return _refuse(f"--pool-image needs {flag}")
+            return _refuse(f"--pool-image {' '.join(args.pool_image)} needs {flag}")
         if not path.is_file():
             return _refuse(f"{flag}: no file at {path}")
-    try:
-        report = analyse_capture(args.pcap.read_bytes(), address)
-    except CaptureError as e:
-        return _refuse(f"--pcap {args.pcap}: {e}")
+    report = None
+    if capture:
+        try:
+            report = analyse_capture(args.pcap.read_bytes(), address)
+        except CaptureError as e:
+            return _refuse(f"--pcap {args.pcap}: {e}")
     plan = pool_plan(args.node)
     out = Renderer(plan, sys.stdout.buffer, sys.stderr.buffer)
-    return run_pool(plan, args.console.read_bytes(), args.onboard.read_bytes(), report, out)
+    return run_pool(plan, images, args.console.read_bytes(), args.onboard.read_bytes(), report, out)
 
 
 def main(argv: list[str]) -> int:
@@ -1499,8 +1885,11 @@ def main(argv: list[str]) -> int:
     b.add_argument("--rest-port", type=int, default=None, help=f"default {DEFAULT_REST_PORT}")
     b.add_argument(
         "--pool-image",
-        action="store_true",
-        help="judge HW.26 to HW.30 of the transmit pool image from files, after the run",
+        action="append",
+        choices=tuple(IMAGES),
+        default=None,
+        help="judge a pool image's steps from files, after the run: tx is HW.26 to HW.30 "
+        "(reads --pcap), rx is HW.31 to HW.35; give both for an image built with both pools",
     )
     b.add_argument("--onboard", type=Path, default=None, help="the board run's standard output")
     b.add_argument("--pcap", type=Path, default=None, help="a capture of the node's frames")
@@ -1510,7 +1899,7 @@ def main(argv: list[str]) -> int:
         return pool_main(args)
     if args.mode == "board":
         if args.onboard is not None or args.pcap is not None:
-            return _refuse("--onboard and --pcap are read only with --pool-image")
+            return _refuse("--onboard and --pcap are read only with --pool-image tx or rx")
         if args.host is None:
             return _refuse("--host is required: this host's address on the board's subnet")
         args.b_port = DEFAULT_B_PORT if args.b_port is None else args.b_port
@@ -1530,7 +1919,7 @@ def main(argv: list[str]) -> int:
         plan = qemu_plan(args)
         env = HostEnv(zenohd, args.rest_port, timing, qemu=cmd)
     else:
-        if not re.fullmatch(r"udp/(\[[0-9a-fA-F:.]+\]|[^\s:/\[\]]+):[0-9]+", args.node):
+        if not NODE_LOCATOR.fullmatch(args.node):
             return _refuse(f"--node {args.node!r} is not a locator of the form udp/<address>:<port>")
         if not args.console.is_file():
             return _refuse(f"no console capture at {args.console}")
@@ -1853,14 +2242,16 @@ def _cli(argv: list[str]) -> tuple[int, bytes, bytes]:
     return r.returncode, r.stdout, r.stderr
 
 
-# The transmit pool image's fixtures: a console of one boot, the board run's
-# output (the healthy board case's own lines) and a pcap, each fault changing
-# one of them.
+# The pool images' fixtures: a console of one boot, the board run's output (the
+# healthy board case's own lines) and, for the transmit pool, a pcap, each fault
+# changing one of them. Both pools sit in one section, as an image built with
+# both overlays prints them (the section's bounds are the linker's, one pair).
 
 BOARD_ZID = "cfacc5282fa"
 POOL_NODE_IP = "192.0.2.10"  # BOARD_NODE's address
 POOL_START, POOL_END = 0x2800C860, 0x2800F860
-POOL_SECTION = (0x28008000, 0x28010000)
+POOL_SECTION = (0x28008000, 0x28018000)
+RX_START, RX_END = 0x2800F880, 0x28015880
 # in place, copied, last descriptor, lent, started, completed, unarmed,
 # abandoned, free: every row keeps both identities, one has 4 in flight.
 POOL_COUNTS = (
@@ -1874,7 +2265,7 @@ POOL_COUNTS = (
 
 # Each fault, the steps it reds, and the clause whose removal turns it green on
 # its step (`None` where two clauses read it, so that neither alone does).
-POOL_FAULTS: dict[str, tuple[set[int], tuple[int, str] | None]] = {
+TX_FAULTS: dict[str, tuple[set[int], tuple[int, str] | None]] = {
     "onboard_fail_mark": ({26}, (26, "lines")),
     "onboard_missing_line": ({26}, None),
     "two_boots": ({26}, (26, "ready")),
@@ -1902,6 +2293,161 @@ POOL_FAULTS: dict[str, tuple[set[int], tuple[int, str] | None]] = {
     "file_cut_short": ({30}, (30, "truncated")),
 }
 
+# lent, returned, refused, dropped, copied, pool free, in the ring, lwIP took
+# lent, lwIP took copied, the session read in place, the session read copied:
+# every row adds up to 16, one has a slot lent at the moment it was printed.
+RX_COUNTS = (
+    (0, 0, 0, 0, 0, 8, 8, 0, 0, 0, 0),
+    (12, 11, 0, 0, 0, 7, 8, 12, 0, 9, 0),
+    (40, 37, 0, 0, 0, 5, 8, 40, 0, 30, 0),
+    (77, 77, 0, 1, 0, 8, 8, 77, 0, 58, 0),
+    (95, 94, 0, 1, 0, 7, 8, 95, 0, 71, 0),
+)
+
+# As TX_FAULTS, for the receive pool image. The onboard faults are the transmit
+# image's own (the same files, the same clauses); the others name this image.
+RX_FAULTS: dict[str, tuple[set[int], tuple[int, str] | None]] = {
+    "onboard_fail_mark": ({31}, (31, "lines")),
+    "onboard_missing_line": ({31}, None),
+    "two_boots": ({31}, (31, "ready")),
+    "onboard_other_boot": ({31}, (31, "sentences")),
+    "onboard_other_stack": ({31}, (31, "sentences")),
+    "stack_deep_later": ({31}, (31, "stack")),
+    # No step but HW.32 reads the receive pool's place.
+    "rx_two_pool_lines": ({32}, (32, "one line")),
+    "rx_no_pool_line": ({32}, None),
+    "rx_garbled_pool_line": ({32}, (32, "one line")),
+    "rx_pool_size": ({32}, (32, "size")),
+    "rx_pool_misaligned": ({32}, (32, "aligned")),
+    "rx_pool_outside": ({32}, (32, "inside")),
+    "rx_lent_zero": ({33}, (33, "lent")),
+    "rx_taken_lent_zero": ({33}, (33, "lwIP took lent")),
+    "rx_read_in_place_zero": ({33}, (33, "read in place")),
+    # HW.33, HW.34 and HW.35 all read the counts lines.
+    "rx_no_counts": ({33, 34, 35}, (34, "every line read")),
+    "rx_garbled_counts": ({34}, (34, "every line read")),
+    "rx_identity_broken": ({34}, (34, "identity")),
+    "rx_ring_9": ({34}, (34, "ring")),
+    "rx_refused": ({35}, (35, "refused")),
+    "rx_taken_copied": ({35}, (35, "lwIP took copied")),
+    "rx_read_copied": ({35}, (35, "read copied")),
+}
+FAULTS_BY_IMAGE = {"tx": TX_FAULTS, "rx": RX_FAULTS}
+
+
+def _rx_pool_line(start: int = RX_START, end: int = RX_END, section: tuple[int, int] = POOL_SECTION) -> str:
+    return (
+        f"wz: eth0: receive pool of 16 slots at {start:#010x} to {end:#010x}, in the "
+        f"non-cacheable section {section[0]:#010x} to {section[1]:#010x}, written in place by the MAC"
+    )
+
+
+def _rx_counts_line(row: list) -> str:
+    lent, returned, refused, dropped, copied, free, ring, t_lent, t_copied, r_place, r_copied = row
+    return (
+        f"wz: rx-pool: lent {lent}, returned {returned}, refused {refused}, dropped {dropped}, "
+        f"copied {copied}; pool free {free}, in the ring {ring}, of 16; lwIP took {t_lent} lent, "
+        f"{t_copied} copied; the session read {r_place} in place, {r_copied} copied"
+    )
+
+
+def _rx_lines(fault: str | None) -> tuple[list[str], list[str]]:
+    """The receive pool's place line(s) and counts lines, `fault` put in."""
+    rows = [list(r) for r in RX_COUNTS]
+    edits = {
+        # A slot lost on a line among many: it is neither free, held nor lent.
+        "rx_identity_broken": (2, 5, 4),
+        # Nine slots in a ring of eight descriptors, the sum still 16.
+        "rx_ring_9": (2, 6, 9),
+        "rx_lent_zero": (-1, 0, 0),
+        "rx_taken_lent_zero": (-1, 7, 0),
+        "rx_read_in_place_zero": (-1, 9, 0),
+        "rx_refused": (-1, 2, 1),
+        "rx_taken_copied": (-1, 8, 2),
+        "rx_read_copied": (-1, 10, 1),
+    }
+    if fault in edits:
+        row, col, value = edits[fault]
+        rows[row][col] = value
+    if fault == "rx_ring_9":
+        rows[2][5] = 4
+    if fault == "rx_lent_zero":
+        rows[-1][1], rows[-1][5] = 0, 8  # the sum still 16: only lent is wrong
+    place = _rx_pool_line()
+    if fault == "rx_pool_size":
+        place = _rx_pool_line(end=RX_END - SLOT_BYTES)
+    if fault == "rx_pool_misaligned":
+        place = _rx_pool_line(start=RX_START + 16, end=RX_END + 16)
+    if fault == "rx_pool_outside":
+        place = _rx_pool_line(section=(0x28000000, 0x28008000))
+    places = [place, place] if fault == "rx_two_pool_lines" else [place]
+    if fault == "rx_no_pool_line":
+        places = []
+    if fault == "rx_garbled_pool_line":
+        places.append("wz: eth0: receive pool of 16 slots at 0x2800f880")
+    counts = [_rx_counts_line(r) for r in rows]
+    if fault == "rx_garbled_counts":
+        counts.insert(2, "wz: rx-pool: lent 30, returned 28")
+    if fault == "rx_no_counts":
+        counts = []
+    return places, counts
+
+
+def _tx_lines(fault: str | None) -> tuple[list[str], list[str]]:
+    """The transmit pool's place line(s) and counts lines, `fault` put in."""
+    rows = [list(r) for r in POOL_COUNTS]
+    if fault == "identity_broken":
+        rows[2][8] = 6
+    if fault == "in_flight_5":
+        rows[2][4] = 18
+    if fault == "in_place_zero":
+        rows[-1][0] = 0
+    if fault == "descriptor_outside":
+        rows[-1][2] = 0x28010040
+    place = _pool_line()
+    if fault == "pool_outside":
+        place = _pool_line(section=(0x28000000, 0x28008000))
+    if fault == "pool_size":
+        place = _pool_line(end=POOL_END - 1)
+    places = [] if fault == "no_pool_line" else [place]
+    places += [place] if fault == "two_pool_lines" else []
+    counts = [_counts_line(r) for r in rows]
+    if fault == "garbled_counts":
+        counts.insert(3, "wz: tx-pool: in place 20, copied 1")
+    if fault == "no_counts":
+        counts = []
+    return places, counts
+
+
+def _boot_console(fault: str | None, places: list[str], counts: list[str]) -> bytes:
+    """One boot: the pool lines before the PHY, the READY line, the first counts
+    line, two stack lines, then the other counts lines."""
+    ready = f"ZEPHYR-WZ-ADMIN READY {BOARD_ZID} {BOARD_NODE}"
+    lines = ["*** Booting Zephyr OS ***", "wz: core clock 350000000 Hz"]
+    lines += places
+    lines += [ready, ready] if fault == "two_boots" else [ready]
+    lines += counts[:1]
+    lines += ["stack: peak 3524 of 32768 bytes", "stack: peak 20080 of 32768 bytes"]
+    lines += counts[1:]
+    if fault == "stack_deep_later":
+        lines.append("stack: peak 30000 of 32768 bytes")
+    return "".join(f"{ln}\r\n" for ln in lines).encode()
+
+
+def _rx_console(fault: str | None) -> bytes:
+    return _boot_console(fault, *_rx_lines(fault))
+
+
+def _both_console(fault: str | None) -> bytes:
+    """An image built with both overlays: both pool lines, and the two pools'
+    counts lines interleaved as their reports come round."""
+    tx_places, tx_counts_lines = _tx_lines(fault)
+    rx_places, rx_counts_lines = _rx_lines(fault)
+    counts: list[str] = []
+    for i in range(max(len(tx_counts_lines), len(rx_counts_lines))):
+        counts += tx_counts_lines[i : i + 1] + rx_counts_lines[i : i + 1]
+    return _boot_console(fault, tx_places + rx_places, counts)
+
 
 def _pool_line(start: int = POOL_START, end: int = POOL_END, section: tuple[int, int] = POOL_SECTION) -> str:
     return (
@@ -1921,36 +2467,7 @@ def _counts_line(row: list) -> str:
 
 
 def _pool_console(fault: str | None) -> bytes:
-    rows = [list(r) for r in POOL_COUNTS]
-    if fault == "identity_broken":
-        rows[2][8] = 6
-    if fault == "in_flight_5":
-        rows[2][4] = 18
-    if fault == "in_place_zero":
-        rows[-1][0] = 0
-    if fault == "descriptor_outside":
-        rows[-1][2] = 0x28010040
-    place = _pool_line()
-    if fault == "pool_outside":
-        place = _pool_line(section=(0x28000000, 0x28008000))
-    if fault == "pool_size":
-        place = _pool_line(end=POOL_END - 1)
-    ready = f"ZEPHYR-WZ-ADMIN READY {BOARD_ZID} {BOARD_NODE}"
-    counts = [_counts_line(r) for r in rows]
-    if fault == "garbled_counts":
-        counts.insert(3, "wz: tx-pool: in place 20, copied 1")
-    if fault == "no_counts":
-        counts = []
-    lines = ["*** Booting Zephyr OS ***", "wz: core clock 350000000 Hz"]
-    lines += [] if fault == "no_pool_line" else [place]
-    lines += [place] if fault == "two_pool_lines" else []
-    lines += [ready, ready] if fault == "two_boots" else [ready]
-    lines += counts[:1]
-    lines += ["stack: peak 3524 of 32768 bytes", "stack: peak 20080 of 32768 bytes"]
-    lines += counts[1:]
-    if fault == "stack_deep_later":
-        lines.append("stack: peak 30000 of 32768 bytes")
-    return "".join(f"{ln}\r\n" for ln in lines).encode()
+    return _boot_console(fault, *_tx_lines(fault))
 
 
 def _pool_onboard(healthy: bytes, fault: str | None) -> bytes:
@@ -2055,34 +2572,69 @@ def _pool_fixture(fault: str | None, onboard: bytes, order: str = "<") -> tuple[
     return _pool_console(fault), _pool_onboard(onboard, fault), _pool_pcap(fault, order)
 
 
-def _pool_run(console: bytes, onboard: bytes, pcap: bytes) -> tuple[int, bytes, bytes]:
+def _pool_run(
+    console: bytes, onboard: bytes, pcap: bytes | None, keys: tuple[str, ...] = ("tx",)
+) -> tuple[int, bytes, bytes]:
+    """The pool steps of the images `keys` names, judged in process."""
     plan = pool_plan(BOARD_NODE)
     out, err = io.BytesIO(), io.BytesIO()
-    try:
-        report = analyse_capture(pcap, POOL_NODE_IP)
-    except CaptureError as e:
-        return 2, b"", str(e).encode()
-    rc = run_pool(plan, console, onboard, report, Renderer(plan, out, err))
+    report = None
+    if pcap is not None:
+        try:
+            report = analyse_capture(pcap, POOL_NODE_IP)
+        except CaptureError as e:
+            return 2, b"", str(e).encode()
+    rc = run_pool(plan, [IMAGES[k] for k in keys], console, onboard, report, Renderer(plan, out, err))
     return rc, out.getvalue(), err.getvalue()
 
 
+# The calls a lab can make: one image's steps, or both images' from one boot.
+POOL_CALLS: tuple[tuple[str, ...], ...] = (("tx",), ("rx",), ("tx", "rx"))
+
+
+def _call_fixture(keys: tuple[str, ...], fault: str | None, onboard: bytes, order: str = "<") -> tuple:
+    """The files of one call: the console of an image with the pools `keys`
+    names, the board run's output, and the pcap when the call reads one."""
+    console = {("tx",): _pool_console, ("rx",): _rx_console, ("tx", "rx"): _both_console}[keys](fault)
+    pcap = _pool_pcap(fault, order) if "tx" in keys else None
+    return console, _pool_onboard(onboard, fault), pcap, keys
+
+
+def _call_steps(keys: tuple[str, ...]) -> list[int]:
+    return [s for k in keys for s in IMAGES[k].steps]
+
+
+def _call_faults(keys: tuple[str, ...]) -> dict[str, set[int]]:
+    """Each fault an image of the call has, and the steps it reds in the call:
+    a fault in the files both images read (the onboard output, the boot) reds
+    both images' onboard step."""
+    out: dict[str, set[int]] = {}
+    for k in keys:
+        for fault, (want, _) in FAULTS_BY_IMAGE[k].items():
+            out.setdefault(fault, set()).update(want)
+    return out
+
+
 def _pool_case_failures(onboard: bytes) -> list[str]:
-    """Every pool case's expectation that does not hold: the healthy set in
-    both byte orders holds all five, each fault reds exactly its steps."""
+    """Every pool case's expectation that does not hold, for each call: the
+    healthy set (both byte orders where a pcap is read) holds every step owed,
+    and each fault reds exactly its steps and no other."""
     fails = []
-    for order in ("<", ">"):
-        rc, out, err = _pool_run(*_pool_fixture(None, onboard, order))
-        steps = _grammar_steps(out)
-        if rc != 0 or steps != {s: True for s in POOL_STEPS}:
-            fails.append(f"healthy ({order}): rc {rc} {out!r} {err!r}")
-    for fault, (want_red, _) in POOL_FAULTS.items():
-        rc, out, err = _pool_run(*_pool_fixture(fault, onboard))
-        steps = _grammar_steps(out)
-        red = {k for k, v in steps.items() if not v}
-        if rc != 1 or sorted(steps) != list(POOL_STEPS) or red != want_red:
-            fails.append(f"{fault}: rc {rc}, red {sorted(red)}, want {sorted(want_red)}: {err!r}")
-        if re.search(rb"HW\.\d+ ", err):
-            fails.append(f"{fault}: a standard error line names a step: {err!r}")
+    for keys in POOL_CALLS:
+        steps_owed = _call_steps(keys)
+        for order in ("<", ">") if "tx" in keys else ("<",):
+            rc, out, err = _pool_run(*_call_fixture(keys, None, onboard, order))
+            steps = _grammar_steps(out)
+            if rc != 0 or steps != {s: True for s in steps_owed} or list(steps) != steps_owed:
+                fails.append(f"{keys} healthy ({order}): rc {rc} {out!r} {err!r}")
+        for fault, want_red in _call_faults(keys).items():
+            rc, out, err = _pool_run(*_call_fixture(keys, fault, onboard))
+            steps = _grammar_steps(out)
+            red = {k for k, v in steps.items() if not v}
+            if rc != 1 or list(steps) != steps_owed or red != want_red:
+                fails.append(f"{keys} {fault}: rc {rc}, red {sorted(red)}, want {sorted(want_red)}: {err!r}")
+            if re.search(rb"HW\.\d+ ", err):
+                fails.append(f"{keys} {fault}: a standard error line names a step: {err!r}")
     return fails
 
 
@@ -2337,12 +2889,17 @@ def selftest() -> int:
         rc, _, err = _cli(["board", "--node", BOARD_NODE, "--console", str(capture), "--zenohd", str(zenohd)])
         check("a live board run without --host is refused", rc == 2 and b"--host" in err, f"{rc} {err!r}")
 
-        # 8. The transmit pool image. The board run's output is the healthy
-        #    board case's own lines, so HW.26 reads what this program printed.
+        # 8. The pool images. The board run's output is the healthy board
+        #    case's own lines, so HW.26 and HW.31 read what this program printed.
+        #    Each call a lab can make (one image, or both from one boot) holds
+        #    when healthy, and each fault reds exactly its steps in each call
+        #    whose images have it.
         onboard = board_out
-        for fault in POOL_FAULTS:
-            if fault.startswith("onboard_"):
-                check(f"pool {fault}: the fixture changes the output", _pool_onboard(onboard, fault) != onboard)
+        for keys in POOL_CALLS:
+            for fault in _call_faults(keys):
+                console, out_file, pcap, _ = _call_fixture(keys, fault, onboard)
+                healthy = _call_fixture(keys, None, onboard)
+                check(f"pool {keys} {fault}: the fixture changes a file", (console, out_file, pcap) != healthy[:3])
         pool_fails = _pool_case_failures(onboard)
         check("pool cases: healthy holds, each fault reds exactly its steps", not pool_fails, f"{pool_fails}")
         rc, pool_out, pool_err = _pool_run(*_pool_fixture(None, onboard))
@@ -2350,7 +2907,8 @@ def selftest() -> int:
             "pool healthy: standard error is the two count lines",
             pool_err.decode().splitlines()
             == [
-                "  console: 1 READY line(s), 1 pool line(s), 6 counts line(s), 0 unread, 2 stack line(s)",
+                "  console: 1 READY line(s), 2 stack line(s); transmit pool: 1 pool line(s), 6 counts "
+                "line(s), 0 unread",
                 "  capture: 9 frames; 5 UDP datagrams from 192.0.2.10 over 7.0 s, 5 with both checksums "
                 "valid; 0 bad IPv4 header checksums, 0 bad UDP checksums, 0 zero UDP checksums, "
                 "0 fragments, 0 malformed, 0 truncated",
@@ -2360,7 +2918,7 @@ def selftest() -> int:
         check(
             "pool healthy: the values read are the console's",
             b"HW.27 the pool sits where the MAC reads it uncached: slots 0x2800c860 to 0x2800f860 inside "
-            b"the non-cacheable section 0x28008000 to 0x28010000 - OK\n" in pool_out
+            b"the non-cacheable section 0x28008000 to 0x28018000 - OK\n" in pool_out
             and b"HW.28 a frame left from a pool slot read in place: in place 20 and started 20 above zero, "
             b"last descriptor 0x2800ce82 inside the pool - OK\n" in pool_out
             and b": 5 of 5 datagrams from the node in the capture had valid IPv4 and UDP checksums - OK\n"
@@ -2374,26 +2932,113 @@ def selftest() -> int:
                 bool(m) and bool(templates[int(m.group(1))].fullmatch(m.group(2))),
                 ln,
             )
-        grammar_text = GRAMMAR.read_text()
-        for label, pattern in (("pool place", POOL_LINE), ("tx counts", COUNTS_LINE)):
-            m = re.search(rf"^{label} +(\^.*\$)$", grammar_text, re.M)
+        # The receive pool image on its own: its values, its sentences.
+        rc, rx_out, rx_err = _pool_run(*_call_fixture(("rx",), None, onboard))
+        check(
+            "rx pool healthy: standard error is the console's count line",
+            rc == 0
+            and rx_err.decode().splitlines()
+            == [
+                "  console: 1 READY line(s), 2 stack line(s); receive pool: 1 pool line(s), 5 counts "
+                "line(s), 0 unread",
+            ],
+            f"rc {rc} {rx_err!r}",
+        )
+        check(
+            "rx pool healthy: the values read are the console's",
+            b"HW.32 the pool sits where the MAC writes it uncached: slots 0x2800f880 to 0x28015880 inside "
+            b"the non-cacheable section 0x28008000 to 0x28018000 - OK\n" in rx_out
+            and b"HW.33 frames arrived in pool slots and the session read them there: lent 95, lwIP took "
+            b"95 lent and the session read 71 in place, each above zero - OK\n" in rx_out,
+            f"{rx_out!r}",
+        )
+        for ln in rx_out.decode().splitlines():
+            m = re.fullmatch(r"HW\.(\d+) (.*) - OK", ln)
             check(
-                f"the {label} regex is the grammar's",
-                bool(m) and m.group(1) == pattern.pattern,
-                f"{m.group(1) if m else None!r} != {pattern.pattern!r}",
+                f"rx pool HW.{m.group(1) if m else '?'} is the grammar's sentence",
+                bool(m) and bool(templates[int(m.group(1))].fullmatch(m.group(2))),
+                ln,
             )
+        # The copies of reassembled datagrams are named as such, and still FAIL.
+        _, out, err = _pool_run(*_call_fixture(("rx",), "rx_read_copied", onboard))
+        check(
+            "rx pool: session copies with none taken copied are named reassembled, and fail",
+            _grammar_steps(out).get(35) is False and b"reassembled from fragments" in err,
+            f"{out!r} {err!r}",
+        )
+        _, out, err = _pool_run(*_call_fixture(("rx",), "rx_taken_copied", onboard))
+        check("rx pool: lwIP's copies are not named reassembled", b"reassembled" not in err, f"{err!r}")
 
-        # Each clause dropped: the fault it exists for goes green on its step.
-        paired = {pair for _, pair in POOL_FAULTS.values() if pair}
+        # Both pools from one boot, in one call: the transmit steps then the
+        # receive steps, the same lines as each image's own call; a call that
+        # owes one set says the console holds the other's lines; a call that
+        # owes a set whose lines are absent fails it.
+        both = _call_fixture(("tx", "rx"), None, onboard)
+        rc, both_out, both_err = _pool_run(*both)
+        own = _pool_run(_both_console(None), both[1], both[2], ("tx",))[1]
+        own += _pool_run(_both_console(None), both[1], None, ("rx",))[1]
+        check("both pools: rc 0, HW.26 to HW.35, the lines each call prints", rc == 0 and both_out == own,
+              f"rc {rc} {both_out!r} {own!r}")
+        check(
+            "both pools: the receive steps are the receive image's own call's",
+            both_out.endswith(rx_out),
+            f"{both_out!r}",
+        )
+        _, out, err = _pool_run(_both_console(None), both[1], both[2], ("tx",))
+        check("both pools judged as tx: the receive lines are named unjudged",
+              b"the console also holds receive pool lines" in err and b"--pool-image rx" in err, f"{err!r}")
+        _, out, err = _pool_run(_both_console(None), both[1], None, ("rx",))
+        check("both pools judged as rx: the transmit lines are named unjudged",
+              b"the console also holds transmit pool lines" in err, f"{err!r}")
+        rc, out, err = _pool_run(_pool_console(None), both[1], None, ("rx",))
+        steps = _grammar_steps(out)
+        check(
+            "a transmit-only console judged as rx: HW.31 holds, HW.32 to HW.35 FAIL",
+            rc == 1 and steps == {31: True, 32: False, 33: False, 34: False, 35: False},
+            f"{out!r} {err!r}",
+        )
+        rc, out, err = _pool_run(_rx_console(None), both[1], both[2], ("tx",))
+        steps = _grammar_steps(out)
+        check(
+            "a receive-only console judged as tx: HW.26 and HW.30 hold, HW.27 to HW.29 FAIL",
+            rc == 1 and steps == {26: True, 27: False, 28: False, 29: False, 30: True},
+            f"{out!r} {err!r}",
+        )
+
+        grammar_text = GRAMMAR.read_text()
+        for image in IMAGES.values():
+            at = grammar_text.find(f"\n{image.heading}\n")
+            section = grammar_text[at:].split("\n## ", 2)[1] if at >= 0 else ""
+            check(f"the grammar has the {image.name} heading", at >= 0, image.heading)
+            for label, pattern in zip(image.labels, (image.pool_line, image.counts_line)):
+                m = re.search(rf"^{label} +(\^.*\$)$", section, re.M)
+                check(
+                    f"the {image.name} {label} regex is the grammar's",
+                    bool(m) and m.group(1) == pattern.pattern,
+                    f"{m.group(1) if m else None!r} != {pattern.pattern!r}",
+                )
+            blocks = "".join(re.findall(r"^```\n(.*?)^```$", section, re.M | re.S))
+            steps_there = [int(n) for n in re.findall(r"^HW\.(\d+) ", blocks, re.M)]
+            check(f"the {image.name} section publishes its steps", steps_there == list(image.steps),
+                  f"{steps_there}")
+
+        # Each clause dropped: the fault it exists for goes green on its step,
+        # in the call of that step's image alone.
+        step_image = {s: k for k, img in IMAGES.items() for s in img.steps}
+        check("every pool step has clauses and an image", sorted(POOL_CLAUSES) == sorted(step_image),
+              f"{sorted(POOL_CLAUSES)}")
         for step, clauses in POOL_CLAUSES.items():
+            key = step_image[step]
+            faults = FAULTS_BY_IMAGE[key]
+            paired = {pair for _, pair in faults.values() if pair}
             for i, clause in enumerate(clauses):
                 check(f"HW.{step} clause {clause.name!r} has a fault", (step, clause.name) in paired)
                 clauses[i] = Clause(clause.name, lambda obs: True, clause.why)
                 try:
-                    for fault, (_, pair) in POOL_FAULTS.items():
+                    for fault, (_, pair) in faults.items():
                         if pair != (step, clause.name):
                             continue
-                        _, out, err = _pool_run(*_pool_fixture(fault, onboard))
+                        _, out, err = _pool_run(*_call_fixture((key,), fault, onboard))
                         check(
                             f"HW.{step} without {clause.name!r}: {fault} goes green there",
                             _grammar_steps(out).get(step) is True,
@@ -2401,16 +3046,36 @@ def selftest() -> int:
                         )
                 finally:
                     clauses[i] = clause
-        # HW.26 runs the step 0 and step 7 comparisons themselves.
-        for step, fault in ((0, "two_boots"), (LAST_STEP, "stack_deep_later")):
-            saved = JUDGES[step]
-            JUDGES[step] = lambda *a: True
+        # HW.26 and HW.31 run the step 0 and step 7 comparisons themselves.
+        for key, onboard_step in (("tx", 26), ("rx", 31)):
+            for step, fault in ((0, "two_boots"), (LAST_STEP, "stack_deep_later")):
+                saved = JUDGES[step]
+                JUDGES[step] = lambda *a: True
+                try:
+                    _, out, _ = _pool_run(*_call_fixture((key,), fault, onboard))
+                    check(
+                        f"weakened step {step}: pool {fault} goes green on HW.{onboard_step}",
+                        _grammar_steps(out).get(onboard_step) is True,
+                        f"{out!r}",
+                    )
+                finally:
+                    JUDGES[step] = saved
+        # Each comparison of the receive steps weakened in its arithmetic (not
+        # dropped): an off-by-one in a bound or a sum is caught by some case.
+        for name, target, mutant in (
+            ("the identity summed without the ring", "_rx_identity_breaks",
+             lambda con: [c for c in con.counts if c.free + c.lent - c.returned != RX_SLOTS]),
+            ("a ring of nine allowed", "_rx_ring_breaks",
+             lambda con: [c for c in con.counts if c.in_ring > RX_RING_SLOTS + 1]),
+            ("only the last counts line summed", "_rx_identity_breaks",
+             lambda con: [c for c in con.counts[-1:] if c.free + c.in_ring + c.lent - c.returned != RX_SLOTS]),
+        ):
+            saved = globals()[target]
+            globals()[target] = mutant
             try:
-                _, out, _ = _pool_run(*_pool_fixture(fault, onboard))
-                check(f"weakened step {step}: pool {fault} goes green on HW.26", _grammar_steps(out).get(26) is True,
-                      f"{out!r}")
+                check(f"rx mutant caught: {name}", bool(_pool_case_failures(onboard)))
             finally:
-                JUDGES[step] = saved
+                globals()[target] = saved
         # Each mutant of the capture reader is caught by some case.
         for name, (target, mutant) in _parser_mutants().items():
             saved = globals()[target]
@@ -2426,20 +3091,38 @@ def selftest() -> int:
         held = gate.step_verdicts(json.dumps({"verification_bullets": [record]}))
         check(
             "the gate reads the pasted pool output as HW.26 to HW.30 held",
-            held == {str(i): True for i in [*range(8), *POOL_STEPS]},
+            held == {str(i): True for i in [*range(8), *TX_STEPS]},
             f"{held}",
         )
         _, red_out, _ = _pool_run(*_pool_fixture("pool_outside", onboard))
         held = gate.step_verdicts(json.dumps({"v": [" ".join(red_out.decode().splitlines())]}))
         check("the gate reads a pasted pool FAIL as not held", held.get("27") is False and held.get("28") is True,
               f"{held}")
+        for joiner in ("\n", " "):
+            record = "THE VERDICT. " + joiner.join(onboard.decode().splitlines() + rx_out.decode().splitlines())
+            held = gate.step_verdicts(json.dumps({"verification_bullets": [record]}))
+            check(
+                f"the gate reads the pasted receive pool output (joined by {joiner!r}) as HW.31 to HW.35 held",
+                held == {str(i): True for i in [*range(8), *RX_STEPS]},
+                f"{held}",
+            )
+        record = "THE VERDICT. " + " ".join(onboard.decode().splitlines() + both_out.decode().splitlines())
+        held = gate.step_verdicts(json.dumps({"verification_bullets": [record]}))
+        check("the gate reads the pasted output of both pools as HW.26 to HW.35 held",
+              held == {str(i): True for i in [*range(8), *POOL_STEPS]}, f"{held}")
+        _, red_out, _ = _pool_run(*_call_fixture(("rx",), "rx_refused", onboard))
+        held = gate.step_verdicts(json.dumps({"v": [" ".join(red_out.decode().splitlines())]}))
+        check("the gate reads a pasted receive pool FAIL as not held",
+              held.get("35") is False and held.get("34") is True and held.get("33") is True, f"{held}")
 
         # End to end on files, and what it refuses.
         d = case_dir()
         files = dict(zip(("console", "onboard", "pcap"), _pool_fixture(None, onboard)))
+        files["rx-console"] = _rx_console(None)
+        files["both-console"] = _both_console(None)
         for name, data in files.items():
             (d / name).write_bytes(data)
-        pool_argv = ["board", "--pool-image", "--node", BOARD_NODE, "--console", str(d / "console"),
+        pool_argv = ["board", "--pool-image", "tx", "--node", BOARD_NODE, "--console", str(d / "console"),
                      "--onboard", str(d / "onboard")]
         rc, out, err = _cli([*pool_argv, "--pcap", str(d / "pcap")])
         check("cli pool healthy: the five lines", rc == 0 and out == pool_out and err == pool_err,
@@ -2448,6 +3131,23 @@ def selftest() -> int:
         rc, out, _ = _cli([*pool_argv, "--pcap", str(d / "bad")])
         check("cli pool bad UDP checksum: rc 1, HW.30 FAIL", rc == 1 and _grammar_steps(out).get(30) is False,
               f"rc {rc} {out!r}")
+        rx_argv = ["board", "--pool-image", "rx", "--node", BOARD_NODE, "--console", str(d / "rx-console"),
+                   "--onboard", str(d / "onboard")]
+        rc, out, err = _cli(rx_argv)
+        check("cli rx pool healthy: the five lines, no capture read", rc == 0 and out == rx_out and err == rx_err,
+              f"rc {rc} {out!r} {err!r}")
+        (d / "rx-refused").write_bytes(_rx_console("rx_refused"))
+        rc, out, _ = _cli([*rx_argv[:-4], "--console", str(d / "rx-refused"), "--onboard", str(d / "onboard")])
+        check("cli rx pool refused: rc 1, HW.35 FAIL", rc == 1 and _grammar_steps(out).get(35) is False,
+              f"rc {rc} {out!r}")
+        both_argv = ["board", "--pool-image", "tx", "--pool-image", "rx", "--node", BOARD_NODE, "--console",
+                     str(d / "both-console"), "--onboard", str(d / "onboard"), "--pcap", str(d / "pcap")]
+        rc, out, err = _cli(both_argv)
+        check("cli both pools: the ten lines", rc == 0 and out == both_out and err == both_err,
+              f"rc {rc} {out!r} {err!r}")
+        rc, out, err = _cli(["board", "--pool-image", "rx", "--pool-image", "tx", *both_argv[5:]])
+        check("cli both pools named the other way round: the same ten lines, in step order",
+              rc == 0 and out == both_out, f"rc {rc} {out!r} {err!r}")
         (d / "ng").write_bytes(b"\x0a\x0d\x0d\x0a" + bytes(40))
         refusals = [
             ("no --pcap", pool_argv, b"--pcap"),
@@ -2455,8 +3155,8 @@ def selftest() -> int:
             ("a router option", [*pool_argv, "--pcap", str(d / "pcap"), "--host", BOARD_HOST], b"no router"),
             (
                 "an IPv6 node",
-                ["board", "--pool-image", "--node", "udp/[2001:db8::1]:7447", "--console", str(d / "console"),
-                 "--onboard", str(d / "onboard"), "--pcap", str(d / "pcap")],
+                ["board", "--pool-image", "tx", "--node", "udp/[2001:db8::1]:7447", "--console",
+                 str(d / "console"), "--onboard", str(d / "onboard"), "--pcap", str(d / "pcap")],
                 b"IPv4",
             ),
             (
@@ -2465,6 +3165,13 @@ def selftest() -> int:
                  "--pcap", str(d / "pcap")],
                 b"--pool-image",
             ),
+            ("--pcap for the receive pool alone", [*rx_argv, "--pcap", str(d / "pcap")], b"--pool-image tx"),
+            ("no --onboard", rx_argv[:-2], b"--onboard"),
+            ("a set named twice", [*rx_argv, "--pool-image", "rx"], b"more than once"),
+            ("a set no image is", ["board", "--pool-image", "both", *rx_argv[3:]], b"invalid choice"),
+            ("--pool-image with no set", ["board", "--pool-image", *rx_argv[3:]], b"expected one argument"),
+            ("a node that is no locator", ["board", "--pool-image", "rx", "--node", "192.0.2.10",
+                                           *rx_argv[5:]], b"locator"),
         ]
         for name, argv, needle in refusals:
             rc, out, err = _cli(argv)

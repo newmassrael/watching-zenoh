@@ -479,7 +479,7 @@ HW.30 the frames read out of slots were right on the wire: <N> of <N> datagrams 
 ```
 
 The program prints these five from files, after the run: `admin_node_verdict.py
-board --pool-image` reads the console capture of the boot, the board run's own
+board --pool-image tx` reads the console capture of the boot, the board run's own
 standard output on this image (its eight onboard lines) and the packet capture of
 HW.30. Its header has the lab's command line.
 
@@ -579,10 +579,20 @@ HW.34 every slot came home: on every counts line free, in the ring and lent minu
 HW.35 nothing on the session's path was copied: on the last counts line refused, lwIP took copied and the session read copied are each 0
 ```
 
+The program prints these five from files, after the run: `admin_node_verdict.py
+board --pool-image rx` reads the console capture of the boot and the board run's
+own standard output on this image (its eight onboard lines); no step here reads a
+packet capture. An image built with both overlays prints both pools' lines on one
+console, and `--pool-image tx --pool-image rx` judges HW.26 to HW.35 from that
+boot's files in one call. Its header has the lab's command lines.
+
 ### How each step is read
 
 HW.31. The record holds the sentences of HW.0 to HW.7 printed on this image, each
-ending ` - OK`, outside this step's sentence.
+ending ` - OK`, outside this step's sentence. The program holds that output to the
+console capture as it does for HW.26: its READY line is the capture's only one,
+its stack line is one the capture holds, and the capture's last stack line still
+leaves a quarter free.
 
 HW.32. From the pool line: the slots' end minus start is 24576 (16 times 1536), start
 is a multiple of 32, and start and end lie inside the section's bounds. The section
