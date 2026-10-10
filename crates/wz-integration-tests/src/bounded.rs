@@ -19,6 +19,9 @@
 //! a stall reads as a finding about one program and not as a job that ran out of
 //! time. [`BoundedStatus`] does the same for `status`, and [`BoundedChild`] for a
 //! child somebody else started (`wait`, `wait_with_output`).
+//! [`BoundedOutput::output_or_stall_bounded`] is the one form that hands the stall back
+//! instead of failing, for a child whose stall is one of the outcomes of a defect the
+//! caller pins.
 //!
 //! A program that prints into a pipe loses its buffered lines when it is killed, and
 //! the stall that most needs its output read is the one that shows none, so
@@ -68,6 +71,71 @@ pub trait BoundedOutput {
     /// [`Self::output_within`] for a child that reads `stdin`: the child's standard
     /// input, which `output_within` closes.
     fn output_within_stdin(&mut self, bound: Duration, stdin: Stdio) -> io::Result<Output>;
+
+    /// [`Self::output_or_stall_within`] with [`CHILD_RUN_BOUND`].
+    fn output_or_stall_bounded(&mut self) -> io::Result<BoundedRun>;
+
+    /// [`Self::output_within`] that hands a stall back instead of failing on it: the
+    /// child is killed at `bound` all the same, and the caller gets what it had printed
+    /// and where its threads were, to classify.
+    ///
+    /// Only for a child whose run past a point it reports is not defined, such as an
+    /// upstream example that reads memory a failed call left uninitialised: whether it
+    /// then dies on a signal or waits on a lock made of garbage is the same defect, and
+    /// only its printed output can say the run reached that point. Every other caller
+    /// wants [`Self::output_within`], for which a stall is the finding.
+    fn output_or_stall_within(&mut self, bound: Duration) -> io::Result<BoundedRun>;
+}
+
+/// How a bounded run ended: by itself, or at its bound.
+#[derive(Debug)]
+pub enum BoundedRun {
+    /// The child ended by itself, with what `Command::output` would have returned.
+    Ended(Output),
+    /// The child was still running at the bound and has been killed.
+    Stalled(Stall),
+}
+
+impl BoundedRun {
+    /// The output of a run that ended by itself; a stall fails the test by name, as
+    /// [`BoundedOutput::output_within`] does.
+    pub fn ended(self) -> Output {
+        match self {
+            BoundedRun::Ended(output) => output,
+            BoundedRun::Stalled(stall) => stall.fail(),
+        }
+    }
+}
+
+/// A child that did not end within its bound, read before the kill and collected after it.
+#[derive(Debug)]
+pub struct Stall {
+    program: String,
+    pid: u32,
+    bound: Duration,
+    threads: String,
+    /// What the child had written to its standard output when it was killed.
+    pub stdout: Vec<u8>,
+    /// What the child had written to its standard error when it was killed.
+    pub stderr: Vec<u8>,
+}
+
+impl Stall {
+    /// What each of the child's threads was waiting in when the bound ran out.
+    pub fn threads(&self) -> &str {
+        &self.threads
+    }
+
+    /// Fail the test with this stall, in the words [`BoundedOutput::output_within`] uses.
+    pub fn fail(&self) -> ! {
+        stalled(
+            &self.program,
+            self.pid,
+            self.bound,
+            &self.threads,
+            Some((&self.stdout, &self.stderr)),
+        )
+    }
 }
 
 impl BoundedOutput for Command {
@@ -79,49 +147,67 @@ impl BoundedOutput for Command {
         self.output_within_stdin(bound, Stdio::null())
     }
 
-    /// Both streams are captured whatever the command was configured with, and the
-    /// input is the one given: a command configured to discard a stream has it read
-    /// and returned instead, which is more than `Command::output` gives and costs the
-    /// caller nothing.
     fn output_within_stdin(&mut self, bound: Duration, stdin: Stdio) -> io::Result<Output> {
-        let program = self.get_program().to_string_lossy().into_owned();
-        // A program that prints into a pipe keeps its lines in a buffer of its own, and a
-        // program that is killed loses them: the stall that most needs its output read is
-        // the one that shows none. Launched through `stdbuf` where there is one, its lines
-        // leave as they are printed. `stdbuf` replaces itself with the program (same pid,
-        // same process group), so what is killed and what is read are the program's.
-        let mut wrapped = line_buffered(self);
-        let command = wrapped.as_mut().unwrap_or(self);
-        command
-            .stdin(stdin)
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped());
-        // The child leads a process group of its own, so that what it started goes
-        // with it at the deadline and a grandchild cannot keep the pipes open.
-        #[cfg(unix)]
-        {
-            use std::os::unix::process::CommandExt;
-            command.process_group(0);
-        }
-        let mut child = command.spawn()?;
-        let pid = child.id();
-        let stdout = drain(child.stdout.take().expect("stdout was piped"));
-        let stderr = drain(child.stderr.take().expect("stderr was piped"));
-
-        match wait_until(&mut child, bound)? {
-            Some(status) => Ok(Output {
-                status,
-                stdout: stdout.finish(READER_GRACE),
-                stderr: stderr.finish(READER_GRACE),
-            }),
-            None => {
-                let threads = kill_and_read_threads(&mut child);
-                let out = stdout.finish(Duration::from_secs(1));
-                let err = stderr.finish(Duration::from_secs(1));
-                stalled(&program, pid, bound, &threads, Some((&out, &err)))
-            }
-        }
+        Ok(run_within(self, bound, stdin)?.ended())
     }
+
+    fn output_or_stall_bounded(&mut self) -> io::Result<BoundedRun> {
+        self.output_or_stall_within(CHILD_RUN_BOUND)
+    }
+
+    fn output_or_stall_within(&mut self, bound: Duration) -> io::Result<BoundedRun> {
+        run_within(self, bound, Stdio::null())
+    }
+}
+
+/// The one bounded run every [`BoundedOutput`] method is.
+///
+/// Both streams are captured whatever the command was configured with, and the input
+/// is the one given: a command configured to discard a stream has it read and returned
+/// instead, which is more than `Command::output` gives and costs the caller nothing.
+fn run_within(this: &mut Command, bound: Duration, stdin: Stdio) -> io::Result<BoundedRun> {
+    let program = this.get_program().to_string_lossy().into_owned();
+    // A program that prints into a pipe keeps its lines in a buffer of its own, and a
+    // program that is killed loses them: the stall that most needs its output read is
+    // the one that shows none. Launched through `stdbuf` where there is one, its lines
+    // leave as they are printed. `stdbuf` replaces itself with the program (same pid,
+    // same process group), so what is killed and what is read are the program's.
+    let mut wrapped = line_buffered(this);
+    let command = wrapped.as_mut().unwrap_or(this);
+    command
+        .stdin(stdin)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    // The child leads a process group of its own, so that what it started goes
+    // with it at the deadline and a grandchild cannot keep the pipes open.
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        command.process_group(0);
+    }
+    let mut child = command.spawn()?;
+    let pid = child.id();
+    let stdout = drain(child.stdout.take().expect("stdout was piped"));
+    let stderr = drain(child.stderr.take().expect("stderr was piped"));
+
+    Ok(match wait_until(&mut child, bound)? {
+        Some(status) => BoundedRun::Ended(Output {
+            status,
+            stdout: stdout.finish(READER_GRACE),
+            stderr: stderr.finish(READER_GRACE),
+        }),
+        None => {
+            let threads = kill_and_read_threads(&mut child);
+            BoundedRun::Stalled(Stall {
+                program,
+                pid,
+                bound,
+                threads,
+                stdout: stdout.finish(Duration::from_secs(1)),
+                stderr: stderr.finish(Duration::from_secs(1)),
+            })
+        }
+    })
 }
 
 /// `Command::status` with a deadline.
@@ -496,6 +582,35 @@ mod tests {
         assert!(message.contains("started"), "its output so far: {message}");
         assert!(message.contains("sleep"), "its threads: {message}");
         assert!(is_gone(pid_in(&message)), "the child outlived the bound");
+    }
+
+    /// The run that hands a stall back kills the child exactly as the failing one does,
+    /// and the caller gets the same evidence: what it printed and where its threads were.
+    /// A run that ends is the same `Output` the failing form returns.
+    #[test]
+    fn a_stall_handed_back_is_killed_and_carries_its_output_and_threads() {
+        let run = sh("echo started; exec sleep 600")
+            .output_or_stall_within(Duration::from_millis(300))
+            .expect("sh starts");
+        let BoundedRun::Stalled(stall) = run else {
+            panic!("a child that sleeps for ten minutes ended within 300ms: {run:?}");
+        };
+        assert_eq!(stall.stdout, b"started\n");
+        assert!(stall.threads().contains("sleep"), "{}", stall.threads());
+        assert!(
+            is_gone(stall.pid as libc::pid_t),
+            "the child outlived the bound"
+        );
+        let message = panic_message(|| stall.fail());
+        assert!(message.contains("did not finish within 300ms"), "{message}");
+        assert!(message.contains("started"), "its output so far: {message}");
+
+        let run = sh("printf out; exit 5")
+            .output_or_stall_bounded()
+            .expect("sh starts");
+        let out = run.ended();
+        assert_eq!(out.status.code(), Some(5));
+        assert_eq!(out.stdout, b"out");
     }
 
     /// What the child started goes with it. A grandchild that kept the pipes open would

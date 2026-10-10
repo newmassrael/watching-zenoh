@@ -13260,10 +13260,11 @@ layer_c1bn_passive_dissection_features() {
     # MEASURED by this command: eight of the runners (output ends, large output, killed at
     # the bound, grandchild; status ends and is killed; a started child's three endings; a
     # killed C program shows its line) and three of the census (the sources, the lines it
-    # must and must not count, each wait and the one kill it spares).
+    # must and must not count, each wait and the one kill it spares). Twelve, 11 -> 12
+    # MEASURED by this command: the run that hands its stall back to the caller.
     out="$(cd crates && cargo test -p wz-integration-tests --lib bounded:: \
         --quiet 2>&1)" || { echo "$out"; return 1; }
-    grep -qE '^test result: ok\. 11 passed' <<<"$out" || {
+    grep -qE '^test result: ok\. 12 passed' <<<"$out" || {
         echo "  C1bn FAIL: the bounded child run's tests did not run"
         echo "$out"; return 1; }
 

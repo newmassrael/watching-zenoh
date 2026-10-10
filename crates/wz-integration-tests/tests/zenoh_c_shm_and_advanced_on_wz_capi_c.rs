@@ -83,7 +83,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, ExitStatus, Stdio};
 use std::time::Duration;
 
-use wz_integration_tests::bounded::BoundedOutput as _;
+use wz_integration_tests::bounded::{BoundedOutput as _, BoundedRun, Stall};
 use wz_integration_tests::common::{
     compile_zenoh_c_example, graceful_terminate, read_captured, wait_for_substring,
     wait_for_tcp_accept_alive, wz_ap_demo_binary, wz_capi_c_cdylib, zenoh_c_oracle,
@@ -1169,18 +1169,22 @@ const GET_SHM_REPLY: &str = "REPLY-FROM-REAL-PICO";
 const GET_SHM_SENT: &str = "GET-SHM-PAYLOAD";
 
 /// One run of a `z_get_shm`-shaped program against a fresh real zenoh-pico
-/// `z_queryable`, returning the arm's EXIT STATUS, its stdout, stdout and stderr
-/// together, and what the queryable printed.
+/// `z_queryable`, returning how the arm ENDED (its exit status, or the stall it
+/// was killed in at the bound), its stdout, stdout and stderr together, and what
+/// the queryable printed.
 ///
 /// R2245 kept the success assertion out of this function, because the two arms
 /// did not make the same claim: a helper that asserted success for both could
 /// only express the claim that stopped being true. LEG 5 expects a refusal and
-/// LEG 6 expects a reply, from the same code.
+/// LEG 6 expects a reply, from the same code. The stall is handed back for the
+/// same reason: on the reference arm of LEG 5 it is one of the measured outcomes
+/// of the defect that leg pins, and everywhere else it is the finding, so each
+/// caller says which with `Stall::fail`.
 fn run_get_shm_against_pico(
     program: &Path,
     libdir: &Path,
     arm: Arm,
-) -> (ExitStatus, String, String, String) {
+) -> (Result<ExitStatus, Stall>, String, String, String) {
     let label = arm.label();
     let reservation = PortReservation::pick();
     let port = reservation.port();
@@ -1219,7 +1223,7 @@ fn run_get_shm_against_pico(
 
     // `z_get_shm.c` terminates on its own once the reply channel closes, so
     // this arm is a plain wait rather than a capture race.
-    let out = Command::new(program)
+    let run = Command::new(program)
         .args([
             "-e",
             &format!("tcp/127.0.0.1:{port}"),
@@ -1231,17 +1235,24 @@ fn run_get_shm_against_pico(
             GET_SHM_SENT,
         ])
         .env("LD_LIBRARY_PATH", libdir)
-        .output_bounded()
+        .output_or_stall_bounded()
         .unwrap_or_else(|e| panic!("failed to run the {label} z_get_shm: {e}"));
     let queryable_saw = read_captured(&mut qbl_out);
     graceful_terminate(queryable.child_mut(), TERMINATE_TIMEOUT);
+    let (end, out, err) = match run {
+        BoundedRun::Ended(out) => (Ok(out.status), out.stdout, out.stderr),
+        BoundedRun::Stalled(stall) => {
+            let (out, err) = (stall.stdout.clone(), stall.stderr.clone());
+            (Err(stall), out, err)
+        }
+    };
     // BOTH streams, because the two arms fail in different places: the wz arm
     // reports on stdout, and the reference arm's Talc refusal is a tracing line
     // on stdout while the abort's panic lands on stderr.
-    let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
+    let stdout = String::from_utf8_lossy(&out).into_owned();
     let mut both = stdout.clone();
-    both.push_str(&String::from_utf8_lossy(&out.stderr));
-    (out.status, stdout, both, queryable_saw)
+    both.push_str(&String::from_utf8_lossy(&err));
+    (end, stdout, both, queryable_saw)
 }
 
 /// LEG 5 — upstream's `z_get_shm.c` CANNOT RUN on upstream's own library at the
@@ -1268,6 +1279,21 @@ fn run_get_shm_against_pico(
 /// and leaves its out-parameter UNINITIALISED, so the next `z_loan` reads
 /// uninitialised memory and the process dies on a signal rather than at the
 /// `exit(-1)` every other call in that file gets.
+///
+/// Dying is the USUAL outcome, not the only one. What the allocation reads is
+/// whatever the stack held, and the allocation path takes locks inside the
+/// provider (`commons/zenoh-shm/src/api/provider/shm_provider.rs` @
+/// `busy_list: Mutex<Vec<BusyChunk>>`, and the Talc backend's
+/// `commons/zenoh-shm/src/api/protocol_implementations/posix/posix_shm_provider_backend_talc.rs`
+/// @ `talc: Mutex<Talc<ErrOnOom>>`), so a stale pointer in that slot is a lock
+/// made of garbage that a thread can wait on forever. Measured on hosted CI: the
+/// reference arm printed the Talc refusal and then stood with its main thread in
+/// `futex_wait_queue` until the run's bound killed it at 180 s (CI run
+/// 38079069289). The 17 completed runs of this job before it passed this leg in
+/// 2.4 s, the last of them on the parent commit, which changed nothing this leg
+/// runs. So the reference arm is run with the stall HANDED BACK, and a stall that
+/// follows the refusal is the same defect; a stall before it is not, and fails by
+/// name.
 ///
 /// The refusal is `commons/zenoh-shm/src/api/protocol_implementations/posix/posix_shm_provider_backend_talc.rs`
 /// @ `Error initializing Talc backend!` — `talc.claim` over a span too small for
@@ -1317,9 +1343,9 @@ fn upstream_z_get_shm_on_wz_capi_c_runs_on_neither_arm_at_the_pinned_version() {
         &libdir_ref,
     );
 
-    let (ref_status, _ref_stdout, ref_both, ref_queryable) =
+    let (ref_end, _ref_stdout, ref_both, ref_queryable) =
         run_get_shm_against_pico(&on_ref, &libdir_r, Arm::Reference);
-    let (wz_status, _wz_stdout, wz_both, wz_queryable) =
+    let (wz_end, _wz_stdout, wz_both, wz_queryable) =
         run_get_shm_against_pico(&on_wz, &libdir_wz, Arm::Wz);
 
     // ── THE PIN: upstream's own library cannot run its own example ──────
@@ -1329,20 +1355,33 @@ fn upstream_z_get_shm_on_wz_capi_c_runs_on_neither_arm_at_the_pinned_version() {
     // this leg is claiming something much narrower. The marker is what makes it
     // that claim, and `arm_binary` above has already established the binary
     // built and linked, so "it never ran" cannot satisfy either half.
+    //
+    // A stall is the third ending of the same defect (see the doc above): the
+    // refusal printed, and the read of the uninitialised provider that follows
+    // waited on a lock instead of faulting. Only the refusal before it makes it
+    // that; a stall without it has nothing to do with this pin.
+    let refused = ref_both.contains("Error initializing Talc backend");
+    let ref_ending = match ref_end {
+        Ok(status) => {
+            assert!(
+                !status.success(),
+                "the REFERENCE z_get_shm SUCCEEDED. Upstream has repaired \
+                 examples/z_get_shm.c (or the pin moved): run the example itself on \
+                 both arms and diff them as LEG 6 does its derived program, and \
+                 delete this pin."
+            );
+            format!("exit {:?}", status.code())
+        }
+        Err(_) if refused => "killed at the bound after the refusal".to_owned(),
+        Err(stall) => stall.fail(),
+    };
     assert!(
-        !ref_status.success(),
-        "the REFERENCE z_get_shm SUCCEEDED. Upstream has repaired \
-         examples/z_get_shm.c (or the pin moved): run the example itself on both \
-         arms and diff them as LEG 6 does its derived program, and delete this pin."
-    );
-    assert!(
-        ref_both.contains("Error initializing Talc backend"),
+        refused,
         "the REFERENCE z_get_shm failed, but NOT in the way R2245 measured \
-         (exit {:?}). This pin is about one upstream defect — a provider sized \
+         ({ref_ending}). This pin is about one upstream defect — a provider sized \
          at strlen(payload) that Talc will not claim — so a different failure \
          is a different problem and must be attributed, not absorbed here.\n\
          {ref_both}",
-        ref_status.code(),
     );
 
     // ── THE WZ HALF: wz refuses where the library refuses ───────────────
@@ -1353,8 +1392,12 @@ fn upstream_z_get_shm_on_wz_capi_c_runs_on_neither_arm_at_the_pinned_version() {
     // and aborts on zenoh-c is not behaving as a drop-in. The refusal is the
     // same, the MANNER is not and is not meant to be: upstream's out-parameter
     // is left uninitialised, so its next call reads garbage and dies on a
-    // signal, while wz leaves a gravestone, which the example's own allocation
-    // check then reports (named divergence, `z_shm_provider_default_new`).
+    // signal (or waits forever), while wz leaves a gravestone, which the
+    // example's own allocation check then reports (named divergence,
+    // `z_shm_provider_default_new`).
+    // With nothing uninitialised to read, the wz arm has no stalled ending: a
+    // stall there is the finding.
+    let wz_status = wz_end.unwrap_or_else(|stall| stall.fail());
     assert!(
         !wz_status.success(),
         "wz's C ABI RAN upstream's z_get_shm.c to the end, which the real \
@@ -1470,10 +1513,14 @@ fn a_shm_allocated_query_payload_reaches_a_real_pico_queryable_identically_on_wz
     let ((on_wz, libdir_wz), (on_ref, libdir_r)) =
         derived_get_shm_arms(dir.path(), &include, &libdir_ref, &examples);
 
-    let (ref_status, ref_stdout, ref_both, ref_queryable) =
+    let (ref_end, ref_stdout, ref_both, ref_queryable) =
         run_get_shm_against_pico(&on_ref, &libdir_r, Arm::Reference);
-    let (wz_status, wz_stdout, wz_both, wz_queryable) =
+    let (wz_end, wz_stdout, wz_both, wz_queryable) =
         run_get_shm_against_pico(&on_wz, &libdir_wz, Arm::Wz);
+    // The derived program initialises everything it reads, so a stall on either
+    // arm is the finding, not an ending of a pinned defect.
+    let ref_status = ref_end.unwrap_or_else(|stall| stall.fail());
+    let wz_status = wz_end.unwrap_or_else(|stall| stall.fail());
 
     // The ORACLE first: two identical failures diff clean.
     assert!(
